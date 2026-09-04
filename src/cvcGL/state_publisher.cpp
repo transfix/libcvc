@@ -67,6 +67,10 @@ void state_publisher::publish(const std::string &path, std::string value) {
 }
 
 void state_publisher::flush() {
+  // Ordering lock, held across the take AND the writes — see the header for the
+  // inversion this prevents. Taken before m_mutex and never the other way, so
+  // the two cannot deadlock against each other.
+  std::lock_guard<std::recursive_mutex> flushOrder(m_flushMutex);
   std::unordered_map<std::string, std::string> batch;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
