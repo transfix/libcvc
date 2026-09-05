@@ -252,6 +252,26 @@ add_executable(cvcgl_teardown test/cvcgl_teardown.cpp)
 target_link_libraries(cvcgl_teardown PRIVATE cvcGL)
 add_test(NAME cvcgl_teardown COMMAND cvcgl_teardown)
 
+# A LightNode must apply state only on its scene's owner thread -- the handler is
+# reachable from the publisher's flush thread, where it used to race applyLights().
+add_executable(cvcgl_light_state_thread test/cvcgl_light_state_thread.cpp)
+target_link_libraries(cvcgl_light_state_thread PRIVATE cvcGL)
+add_test(NAME cvcgl_light_state_thread COMMAND cvcgl_light_state_thread)
+
+# A node's own pose, published and flushed back from off the owner thread, must
+# not rewind it. Guards the echo check in GraphicsNode::handleStateChanged.
+add_executable(cvcgl_pose_echo test/cvcgl_pose_echo.cpp)
+target_link_libraries(cvcgl_pose_echo PRIVATE cvcGL)
+add_test(NAME cvcgl_pose_echo COMMAND cvcgl_pose_echo)
+
+# A node can outlive the scene that made it (removeGraphics hands it back; a
+# Python proxy or a viewer keeps holding it). Guards the raw back-pointers that
+# used to dangle in that window -- SceneGraph* (a pose write locked the freed
+# publisher's mutex) and the parent GraphicsNode*.
+add_executable(cvcgl_node_outlives_scene test/cvcgl_node_outlives_scene.cpp)
+target_link_libraries(cvcgl_node_outlives_scene PRIVATE cvcGL)
+add_test(NAME cvcgl_node_outlives_scene COMMAND cvcgl_node_outlives_scene)
+
 # Phase-4 texture support: geometry UVs -> SetTCoords + setTexture(cvc::image).
 add_executable(cvcgl_texture test/cvcgl_texture.cpp)
 target_link_libraries(cvcgl_texture PRIVATE cvcGL)
@@ -272,6 +292,10 @@ add_test(NAME cvcgl_renderer COMMAND cvcgl_renderer)
 add_executable(cvcgl_volren_node test/cvcgl_volren_node.cpp)
 target_link_libraries(cvcgl_volren_node PRIVATE cvcGL)
 add_test(NAME cvcgl_volren_node COMMAND cvcgl_volren_node)
+
+add_executable(cvcgl_volslice_node test/cvcgl_volslice_node.cpp)
+target_link_libraries(cvcgl_volslice_node PRIVATE cvcGL)
+add_test(NAME cvcgl_volslice_node COMMAND cvcgl_volslice_node)
 
 # The publisher keeps the state tree correct while keeping writes off the render
 # path: the value arrives (after a flush), the last write wins, and an external

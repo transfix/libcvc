@@ -87,7 +87,21 @@ GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const st
   }
 }
 
-GraphicsNode::~GraphicsNode() {}
+GraphicsNode::~GraphicsNode() {
+  // Orphan the graphics children before they are released. m_parent is a raw
+  // back-pointer used by updateTransform() to compose the world matrix, and a
+  // child can outlive its parent: the scene's own destruction drops the graphics
+  // root while a host still holds one of its nodes. Without this, that node's
+  // next setPosition() multiplies through a freed parent — the same dangling
+  // back-pointer the SceneGraph handle closes, one level down. Children that
+  // nothing else holds die immediately after; the rest carry on as roots, which
+  // is what they now are. No updateTransform() here: the cached world matrix
+  // stays put until the next pose write recomputes it parentless.
+  for (auto &child : m_graphicsChildren) {
+    if (child)
+      child->m_parent = nullptr;
+  }
+}
 
 void GraphicsNode::setTransform(vtkMatrix4x4 *matrix) {
   if (matrix) {
@@ -329,6 +343,28 @@ void GraphicsNode::updateBoundingBoxNode() {
 }
 
 void GraphicsNode::handleStateChanged(const std::string &childState) {
+  // Recognise our own pose coming back BEFORE marshalling anything.
+  //
+  // The echo check further down (posStr == m_echoPosition) cannot do it. That
+  // lambda runs whenever the owner thread next pumps, which may be several
+  // poses later, and it compares the value the tree holds NOW against the
+  // node's LATEST published value. Pose a node twice with a publisher flush
+  // landing in between and those are two different poses: the guard reads a
+  // mismatch, concludes a script moved the node, and rewinds it onto the older
+  // pose — dragging the subtree with it. That is one-run-in-six flakiness in
+  // anything that moves a group twice between pumps.
+  //
+  // Here we are still inside the write, so the question is answerable exactly:
+  // the publisher's queue holds nothing but what nodes published, so a position
+  // write arriving during a flush is this node's own, stale or not. Dropping it
+  // loses nothing — setPosition() already applied the pose to m_transform.
+  //
+  // Everything else keeps going through the check below: only position
+  // publishes (see setPosition), and a node with no scene writes state directly
+  // and echoes back inline on this same thread, where the values do line up.
+  if (childState == "position" && state_publisher::in_flush())
+    return;
+
   // Marshal to main thread via event queue
   runOnMainThread([this, childState]() {
     // Handle state changes for graphics-specific fields
@@ -490,8 +526,8 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
     // once per frame via checkAndResetRenderNeeded(). The synchronous fallback
     // remains only for a node used without a SceneGraph, where nothing drains
     // the flag.
-    if (m_sceneGraph) {
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph()) {
+      sg->requestRender();
     } else if (m_renderer && m_renderer->GetRenderWindow()) {
       m_renderer->GetRenderWindow()->Render();
     }
@@ -509,7 +545,7 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   child->m_parent = this;
 
   // Propagate SceneGraph reference to child
-  child->setSceneGraph(m_sceneGraph);
+  child->setSceneGraph(getSceneGraph());
 
   // Also add as SceneNode child so it gets rendered
   addChild(child);

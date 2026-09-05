@@ -259,8 +259,8 @@ VolRenNode::VolRenNode(cvc::app &ctx, const std::string &statePath, const std::s
     auto shared_s = std::make_shared<snapshot>(std::move(snap));
     runOnMainThread([this, shared_f, shared_s] {
       applyFrame(*shared_f, *shared_s);
-      if (m_sceneGraph)
-        m_sceneGraph->requestRender();
+      if (SceneGraph *sg = getSceneGraph())
+        sg->requestRender();
     });
   };
 
@@ -754,8 +754,8 @@ void VolRenNode::launchOrRun(const snapshot &snap) {
     cvc::volren::frame f = m_worker->run(snap, seconds);
     m_lastRenderSeconds.store(seconds);
     applyFrame(f, snap);
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   } catch (...) {
     // Same contract as the worker thread: drop the frame, keep the last one.
     // Catch-all because cvc::volren_error is not a std::exception.

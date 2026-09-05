@@ -99,6 +99,8 @@ add_executable(volren_kernels_test volren_kernels_test.cpp)
 add_executable(volren_render_test volren_render_test.cpp)
 add_executable(volren_state_test volren_state_test.cpp)
 add_executable(volren_cuda_test volren_cuda_test.cpp)
+add_executable(volslice_test volslice_test.cpp)
+add_executable(volslice_state_test volslice_state_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
 add_executable(volume_io_test volume_io_test.cpp)
@@ -225,6 +227,8 @@ set(TEST_TARGETS
   volren_render_test
   volren_state_test
   volren_cuda_test
+  volslice_test
+  volslice_state_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -354,6 +358,22 @@ target_link_libraries(volren_math_test
     GTest::gtest_main
 )
 target_compile_features(volren_math_test PRIVATE cxx_std_17)
+
+target_link_libraries(volslice_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volslice_test PRIVATE cxx_std_17)
+
+target_link_libraries(volslice_state_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volslice_state_test PRIVATE cxx_std_17)
 
 target_link_libraries(volren_camera_test
   PRIVATE
@@ -1414,6 +1434,8 @@ cvc_discover_tests(volren_kernels_test)
 cvc_discover_tests(volren_render_test)
 cvc_discover_tests(volren_state_test)
 cvc_discover_tests(volren_cuda_test)
+cvc_discover_tests(volslice_test)
+cvc_discover_tests(volslice_state_test)
 if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
 endif()

@@ -1,36 +1,57 @@
 {
-  "_comment": "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here.",
-  "order": ["lsystem_forest", "lsystem_coast", "volren_bunny", "nav_city_swarm", "nav_fog_ghost", "bunny_shadow"],
+  "_comment":
+      "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here.",
+  "order": [
+    "lsystem_forest",
+    "lsystem_coast",
+    "volren_bunny",
+    "volslice_bunny",
+    "nav_city_swarm",
+    "nav_fog_ghost",
+    "bunny_shadow"
+  ],
   "demos": {
     "lsystem_forest": {
       "desc": "a procedural L-system island with wind, sea and ray-cast cloud volumes",
-      "blurb": "Fly over a procedural island: L-system trees swaying in the wind, a travelling-wave sea and a GPU ray-cast cloud volume, with shadow maps and a free orbit/fly camera. 100% procedural — nothing is downloaded.",
+      "blurb":
+          "Fly over a procedural island: L-system trees swaying in the wind, a travelling-wave sea and a GPU ray-cast cloud volume, with shadow maps and a free orbit/fly camera. 100% procedural — nothing is downloaded.",
       "thumb": "img/lsystem_forest.jpg"
     },
     "lsystem_coast": {
       "desc": "a procedural coastline with a GPU FFT ocean and breaking surf",
-      "blurb": "Sail a procedural coastline where a GPU FFT ocean rolls in: an FFT-synthesised wave spectrum evolved live on the GPU, an L-system shore, sky and sun, with a free orbit/fly camera. 100% procedural — nothing is downloaded.",
+      "blurb":
+          "Sail a procedural coastline where a GPU FFT ocean rolls in: an FFT-synthesised wave spectrum evolved live on the GPU, an L-system shore, sky and sun, with a free orbit/fly camera. 100% procedural — nothing is downloaded.",
       "thumb": "img/lsystem_coast.jpg"
     },
     "nav_city_swarm": {
       "desc": "the GRL-SNAM reactive swarm on a procedural city",
-      "blurb": "800 vehicles cross a foggy city with no global plan — the GRL-SNAM reactive swarm on the cvc::nav runtime (no Python, no libtorch). Tune agents, fog and belief live, then Apply / Restart to watch shared belief beat private belief on the same city.",
+      "blurb":
+          "800 vehicles cross a foggy city with no global plan — the GRL-SNAM reactive swarm on the cvc::nav runtime (no Python, no libtorch). Tune agents, fog and belief live, then Apply / Restart to watch shared belief beat private belief on the same city.",
       "thumb": "img/nav_city_swarm.jpg"
     },
     "nav_fog_ghost": {
       "desc": "one agent detours a phantom wall, then senses it clear",
-      "blurb": "Fog of war: a vehicle detours a phantom wall its stale map shows but reality lacks, then erases it cell by cell as its sensor clears the ground. Switch between three limited-belief scenarios — ghost, dynamic and traffic.",
+      "blurb":
+          "Fog of war: a vehicle detours a phantom wall its stale map shows but reality lacks, then erases it cell by cell as its sensor clears the ground. Switch between three limited-belief scenarios — ghost, dynamic and traffic.",
       "thumb": "img/nav_fog_ghost.jpg"
     },
     "volren_bunny": {
       "desc": "the Stanford bunny as a signed-distance volume, CPU-raycast live",
-      "blurb": "Two bunnies, two renderers: the classic mesh beside a signed-distance-field volume of the same bunny, raycast on the CPU by cvc::volren and composited into the scene with a per-pixel depth map — watch it occlude and be occluded as it spins. The SDF is computed live from the mesh at startup; the raycast image, its translucent shell and the raster resolution are all software, no GPU volume tricks.",
+      "blurb":
+          "Two bunnies, two renderers: the classic mesh beside a signed-distance-field volume of the same bunny, raycast on the CPU by cvc::volren and composited into the scene with a per-pixel depth map — watch it occlude and be occluded as it spins. The SDF is computed live from the mesh at startup; the raycast image, its translucent shell and the raster resolution are all software, no GPU volume tricks.",
       "thumb": "img/volren_bunny.jpg"
     },
     "bunny_shadow": {
       "desc": "the Stanford bunny under an aimed spot — shadow mapping, up close",
-      "blurb": "The smallest scene that tests a renderer honestly: one known-good mesh on a ground plane under a StageLighting rig. Shadow-map artefacts have nowhere to hide here — acne, peter-panning and a shadow in the wrong place are all obvious on a single caster. Toggle shadows and the lighting panel to watch a tight spot cone spend its texels where a directional light would waste them.",
+      "blurb":
+          "The smallest scene that tests a renderer honestly: one known-good mesh on a ground plane under a StageLighting rig. Shadow-map artefacts have nowhere to hide here — acne, peter-panning and a shadow in the wrong place are all obvious on a single caster. Toggle shadows and the lighting panel to watch a tight spot cone spend its texels where a directional light would waste them.",
       "thumb": "img/bunny_shadow.jpg"
+    },
+    "volslice_bunny": {
+      "desc": "the Stanford bunny (x9) through VolumeRover2's slice-based volume renderer",
+      "blurb":
+          "The classic view-aligned slice compositor from VolumeRover2, ported to cvc::volslice: the bunny's signed-distance volume windowed into a byte texture and colored by a 256-entry transfer function, hundreds of camera-facing slices blended back to front. Add up to nine bunnies — each is its own scene-graph volume node, depth-sorted per frame — and drive quality, near-plane peel, the value window and spacing-corrected opacity live in the panel.",
+      "thumb": "img/volslice_bunny.jpg"
     }
   }
 }

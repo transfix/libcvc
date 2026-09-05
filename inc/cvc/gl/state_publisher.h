@@ -71,7 +71,36 @@ public:
 
   // Apply everything queued, on the CALLING thread. Used by the worker, and by
   // anyone who needs the tree current right now (tests, teardown).
+  //
+  // Flushers SERIALIZE against each other, because the worker is not the only
+  // one: a host can drain by hand from its frame loop while the worker runs
+  // (examples/bunny_shadow.cpp and volren_bunny.cpp both do). Taking the batch
+  // and writing it are two steps, so without this two flushers can interleave
+  // between them — one takes "5", the other takes "6" and writes it, then the
+  // first writes "5" back over it. Coalescing cannot save that; the two values
+  // were never in the map at the same time. Nothing afterwards disagrees with
+  // the tree, so it stays on the superseded value for good.
   void flush();
+
+  // True while the CALLING thread is inside flush() — i.e. a state change you
+  // are reacting to right now came out of a publisher's queue rather than from
+  // a script, a dashboard or a host.
+  //
+  // Node handlers need this to recognise their own pose coming back. The queue
+  // only ever holds what nodes published, so a position write seen during a
+  // flush is by construction that node's own — however old it is. Comparing the
+  // value instead cannot tell "mine, stale" from "somebody else's": a node that
+  // has been posed again since the flush was queued sees its OWN earlier pose
+  // as a foreign write, and rewinds itself onto it (see
+  // GraphicsNode::handleStateChanged, and test/cvcgl_pose_echo.cpp).
+  //
+  // Thread-local rather than per-instance because flush() runs its writes on
+  // the calling thread, so a handler those writes fire is on that same thread;
+  // and a publisher only ever writes paths its own scene's nodes published, so
+  // there is no cross-scene confusion to disambiguate. Nesting is counted, not
+  // flagged, so a flush reached from inside a flush still reports correctly on
+  // the way back out.
+  static bool in_flush();
 
   // Start/stop the background flusher. `hz` is the flush cadence; matching the
   // world clock's rate keeps state updates in step with simulation ticks rather
@@ -120,6 +149,15 @@ private:
 
   cvc::app &m_ctx;
   mutable std::mutex m_mutex;
+  // Held by flush() across BOTH taking the batch and writing it, so concurrent
+  // flushers cannot invert write order (see flush()). Deliberately not m_mutex:
+  // that one guards the queue and has to stay free while the writes run, or
+  // every publisher blocks for the length of a flush — and a handler that
+  // publishes from inside one would deadlock against itself. Recursive because
+  // a handler fired by a write is allowed to drain again (see in_flush(), which
+  // counts nesting rather than flagging it); on one thread program order
+  // already orders those writes.
+  std::recursive_mutex m_flushMutex;
   std::unordered_map<std::string, std::string> m_pending;
   // Pending keys, kept alongside the map purely so eviction can be O(1) AND
   // uniform. Probing random hash buckets does not work: the map keeps a large
