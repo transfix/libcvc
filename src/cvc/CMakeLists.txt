@@ -857,9 +857,18 @@ if(_cvc_fft_provider STREQUAL "pocketfft")
   if(POCKETFFT_INCLUDE_DIR)
     message(STATUS "FFT provider: PocketFFT (BSD-3) from ${POCKETFFT_INCLUDE_DIR}")
   else()
-    message(STATUS "FFT provider: pocketfft requested but pocketfft_hdronly.h "
-                   "not found - disabling filtered back-projection in volume_ops")
-    set(_cvc_fft_provider "none")
+    # FATAL, not a silent downgrade to "none". Quietly compiling the feature out
+    # is worse than failing: volume_ops_test's apply_filter=true cases still RUN,
+    # they just stop exercising a transform, so the suite goes green while
+    # testing nothing. A missing dependency should stop the build and say so.
+    # Opting out stays available -- it just has to be deliberate.
+    message(FATAL_ERROR
+      "CVC_FFT_PROVIDER=pocketfft but pocketfft_hdronly.h was not found.\n"
+      "  Install the pocketfft package (header-only; it is in the cvcpkg\n"
+      "  catalog), point CMAKE_PREFIX_PATH at a prefix that has it, or set\n"
+      "  POCKETFFT_INCLUDE_DIR explicitly.\n"
+      "  To build deliberately WITHOUT filtered back-projection, configure\n"
+      "  with -DCVC_FFT_PROVIDER=none.")
   endif()
 elseif(_cvc_fft_provider STREQUAL "fftw")
   find_package(PkgConfig QUIET)
@@ -891,9 +900,34 @@ elseif(_cvc_fft_provider STREQUAL "fftw")
       "   Reconfigure with -DCVC_FFT_PROVIDER=pocketfft to stay LGPL.\n"
       "  ============================================================\n")
   else()
-    message(STATUS "FFTW3 not found - disabling filtered back-projection in volume_ops")
-    set(_cvc_fft_provider "none")
+    # Same reasoning as the pocketfft branch: asking for a provider and
+    # silently getting none is how a test suite ends up asserting nothing.
+    message(FATAL_ERROR
+      "CVC_FFT_PROVIDER=fftw but FFTW3 was not found.\n"
+      "  Install FFTW3 (note it is GPL-2.0-or-later; see the warning this\n"
+      "  branch emits when it IS found), or use the default\n"
+      "  -DCVC_FFT_PROVIDER=pocketfft.\n"
+      "  To build deliberately WITHOUT filtered back-projection, configure\n"
+      "  with -DCVC_FFT_PROVIDER=none.")
   endif()
+elseif(NOT _cvc_fft_provider STREQUAL "none")
+  # A typo in CVC_FFT_PROVIDER used to fall through every branch and leave the
+  # variable set to the bogus value: no provider was configured, no definition
+  # was emitted, and the build silently behaved as "none" while claiming
+  # otherwise. set_property(STRINGS) only populates the cmake-gui dropdown; it
+  # validates nothing.
+  message(FATAL_ERROR
+    "CVC_FFT_PROVIDER='${CVC_FFT_PROVIDER}' is not a known provider.\n"
+    "  Valid values: pocketfft (default, BSD-3) | fftw (GPL) | none")
+endif()
+
+# Say what was actually selected, unconditionally. The failure this guards
+# against is not a wrong value, it is an unexamined one -- "none" scrolling
+# past in a 2000-line configure log looks exactly like success.
+message(STATUS "libcvc FFT provider: ${_cvc_fft_provider}")
+if(_cvc_fft_provider STREQUAL "none")
+  message(STATUS
+    "  filtered back-projection (volume_ops apply_filter=true) is COMPILED OUT")
 endif()
 
 # Kept so existing -DCVC_ENABLE_FFTW=ON callers still select FFTW rather than
