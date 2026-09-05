@@ -843,9 +843,36 @@ if(CVC_ENABLE_ASSIMP)
   endif()
 endif()
 
-# FFTW support (for volume_ops filtered back-projection)
-option(CVC_ENABLE_FFTW "Enable FFTW support for filtered back-projection in volume_ops" ON)
-if(CVC_ENABLE_FFTW)
+# ── FFT provider (for volume_ops filtered back-projection) ──────────
+# libcvc is LGPL-2.1. FFTW is GPL-2.0-or-later, so linking it makes libcvc a
+# combined work under the GPL and pushes that onto every consumer -- which is
+# how transfix/F2Dock ended up shipping a GPL binary even after removing its
+# own FFTW dependency. PocketFFT (BSD-3, header-only) is the default; FFTW is
+# opt-in and warns.
+set(CVC_FFT_PROVIDER "pocketfft" CACHE STRING
+    "FFT backend for volume_ops: pocketfft (default, BSD-3) | fftw (GPL) | none")
+set_property(CACHE CVC_FFT_PROVIDER PROPERTY STRINGS pocketfft fftw none)
+string(TOLOWER "${CVC_FFT_PROVIDER}" _cvc_fft_provider)
+
+if(_cvc_fft_provider STREQUAL "pocketfft")
+  find_path(POCKETFFT_INCLUDE_DIR pocketfft_hdronly.h)
+  if(POCKETFFT_INCLUDE_DIR)
+    message(STATUS "FFT provider: PocketFFT (BSD-3) from ${POCKETFFT_INCLUDE_DIR}")
+  else()
+    # FATAL, not a silent downgrade to "none". Quietly compiling the feature out
+    # is worse than failing: volume_ops_test's apply_filter=true cases still RUN,
+    # they just stop exercising a transform, so the suite goes green while
+    # testing nothing. A missing dependency should stop the build and say so.
+    # Opting out stays available -- it just has to be deliberate.
+    message(FATAL_ERROR
+      "CVC_FFT_PROVIDER=pocketfft but pocketfft_hdronly.h was not found.\n"
+      "  Install the pocketfft package (header-only; it is in the cvcpkg\n"
+      "  catalog), point CMAKE_PREFIX_PATH at a prefix that has it, or set\n"
+      "  POCKETFFT_INCLUDE_DIR explicitly.\n"
+      "  To build deliberately WITHOUT filtered back-projection, configure\n"
+      "  with -DCVC_FFT_PROVIDER=none.")
+  endif()
+elseif(_cvc_fft_provider STREQUAL "fftw")
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
     pkg_check_modules(FFTW3 QUIET IMPORTED_TARGET fftw3)
@@ -864,11 +891,53 @@ if(CVC_ENABLE_FFTW)
     endif()
   endif()
   if(FFTW3_FOUND)
-    message(STATUS "FFTW3 found: ${FFTW3_LIBRARIES}")
+    message(WARNING
+      "\n"
+      "  ============================================================\n"
+      "   CVC_FFT_PROVIDER=fftw links FFTW3, which is\n"
+      "   GPL-2.0-or-later. The libcvc built here is a COMBINED WORK\n"
+      "   COVERED BY THE GNU GPL, not by libcvc's own LGPL-2.1 -- and\n"
+      "   that propagates to everything that links it.\n"
+      "\n"
+      "   Reconfigure with -DCVC_FFT_PROVIDER=pocketfft to stay LGPL.\n"
+      "  ============================================================\n")
   else()
-    message(STATUS "FFTW3 not found - disabling filtered back-projection in volume_ops")
-    set(CVC_ENABLE_FFTW OFF)
+    # Same reasoning as the pocketfft branch: asking for a provider and
+    # silently getting none is how a test suite ends up asserting nothing.
+    message(FATAL_ERROR
+      "CVC_FFT_PROVIDER=fftw but FFTW3 was not found.\n"
+      "  Install FFTW3 (note it is GPL-2.0-or-later; see the warning this\n"
+      "  branch emits when it IS found), or use the default\n"
+      "  -DCVC_FFT_PROVIDER=pocketfft.\n"
+      "  To build deliberately WITHOUT filtered back-projection, configure\n"
+      "  with -DCVC_FFT_PROVIDER=none.")
   endif()
+elseif(NOT _cvc_fft_provider STREQUAL "none")
+  # A typo in CVC_FFT_PROVIDER used to fall through every branch and leave the
+  # variable set to the bogus value: no provider was configured, no definition
+  # was emitted, and the build silently behaved as "none" while claiming
+  # otherwise. set_property(STRINGS) only populates the cmake-gui dropdown; it
+  # validates nothing.
+  message(FATAL_ERROR
+    "CVC_FFT_PROVIDER='${CVC_FFT_PROVIDER}' is not a known provider.\n"
+    "  Valid values: pocketfft (default, BSD-3) | fftw (GPL) | none")
+endif()
+
+# Say what was actually selected, unconditionally. The failure this guards
+# against is not a wrong value, it is an unexamined one -- "none" scrolling
+# past in a 2000-line configure log looks exactly like success.
+message(STATUS "libcvc FFT provider: ${_cvc_fft_provider}")
+if(_cvc_fft_provider STREQUAL "none")
+  message(STATUS
+    "  filtered back-projection (volume_ops apply_filter=true) is COMPILED OUT")
+endif()
+
+# Kept so existing -DCVC_ENABLE_FFTW=ON callers still select FFTW rather than
+# silently getting PocketFFT. Deprecated: use CVC_FFT_PROVIDER.
+if(CVC_ENABLE_FFTW AND NOT _cvc_fft_provider STREQUAL "fftw")
+  message(WARNING "CVC_ENABLE_FFTW is deprecated; use "
+                  "-DCVC_FFT_PROVIDER=fftw. Ignoring it in favour of "
+                  "CVC_FFT_PROVIDER=${_cvc_fft_provider}.")
 endif()
 
 # gRPC-backed state transport (Phase 3e). Generates protobuf and
@@ -1180,15 +1249,23 @@ if(CVC_ENABLE_ASSIMP)
   target_link_libraries(cvc PUBLIC assimp::assimp)
 endif()
 
-# FFTW linking
-if(CVC_ENABLE_FFTW)
-  target_compile_definitions(cvc PUBLIC CVC_ENABLE_FFTW)
+# FFT provider linking
+if(_cvc_fft_provider STREQUAL "pocketfft")
+  # Header-only, and PRIVATE: consumers get the filtered-back-projection
+  # feature through libcvc's ABI and never need the header themselves.
+  target_compile_definitions(cvc PRIVATE CVC_FFT_POCKETFFT)
+  target_include_directories(cvc PRIVATE "$<BUILD_INTERFACE:${POCKETFFT_INCLUDE_DIR}>")
+elseif(_cvc_fft_provider STREQUAL "fftw")
+  # PRIVATE, not PUBLIC: CVC_ENABLE_FFTW was PUBLIC, which put a GPL library on
+  # every consumer's link line. Nothing in libcvc's public headers mentions
+  # FFTW, so it has no business in the exported interface.
+  target_compile_definitions(cvc PRIVATE CVC_FFT_FFTW)
   # Same BUILD_INTERFACE wrapping rationale as the ImageMagick block above.
   if(TARGET PkgConfig::FFTW3)
-    target_link_libraries(cvc PUBLIC PkgConfig::FFTW3)
+    target_link_libraries(cvc PRIVATE PkgConfig::FFTW3)
   else()
     foreach(_fftw_inc IN LISTS FFTW3_INCLUDE_DIRS)
-      target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_inc}>")
+      target_include_directories(cvc PRIVATE "$<BUILD_INTERFACE:${_fftw_inc}>")
     endforeach()
     # The LIBRARIES need the same treatment the INCLUDE_DIRS just got, and for
     # the same reason: find_library() yields an ABSOLUTE path, and linking it
@@ -1200,7 +1277,7 @@ if(CVC_ENABLE_FFTW)
     # cvc is shared here, so it already resolves fftw3 itself — consumers do
     # not need it on their link line.
     foreach(_fftw_lib IN LISTS FFTW3_LIBRARIES)
-      target_link_libraries(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_lib}>")
+      target_link_libraries(cvc PRIVATE "$<BUILD_INTERFACE:${_fftw_lib}>")
     endforeach()
   endif()
 endif()

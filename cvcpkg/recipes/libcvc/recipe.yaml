@@ -63,7 +63,13 @@ recipe:
   # why CGAL 6.2 (macOS/Windows) and the VS18 v180 CL.exe crash (Windows) break
   # it. A bundle that actually exports cvc::xmlrpc removes the source build,
   # and those failures with it.
-  cvc_revision: 4
+  # Bumped 4 -> 5: libcvc no longer links FFTW. volume_ops' filtered
+  # back-projection now goes through PocketFFT (BSD-3), so the bundle is
+  # LGPL-2.1 rather than a GPL combined work, and consumers stop inheriting a
+  # GPL library on their link line. Verified on the built artifact: ldd
+  # libcvc.so reports zero fftw references, and volume_ops_test passes 42/42
+  # including the apply_filter=true back-projection cases.
+  cvc_revision: 5
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -95,7 +101,13 @@ depends:
   runtime:
     - name: zlib
     - name: boost
-    - name: fftw3
+    # PocketFFT (BSD-3, header-only) replaces FFTW for volume_ops' filtered
+    # back-projection. libcvc is LGPL-2.1 and FFTW is GPL-2.0-or-later, so
+    # linking FFTW made every libcvc bundle -- and everything downstream of it
+    # -- a combined work under the GPL. It was also exported PUBLIC, so it
+    # landed on consumers' link lines whether they used the feature or not.
+    # Build-only: nothing in libcvc's public headers mentions it.
+    - name: pocketfft
     - name: gsl
     - name: cgal
     # CGAL is header-only and does NOT vendor its math backends: it declares
