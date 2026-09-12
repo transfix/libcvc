@@ -920,6 +920,71 @@ TEST(NavSimWorld, PooledRebuildMatchesSerialBitExact) {
       << "the scenario must actually trigger a rebuild for this test to mean anything";
 }
 
+// cfg.min_gap enforces a HARD post-step floor on inter-agent distance: agents driven together
+// (here, all sharing one goal so the drive actively pulls them onto the same point) must still end
+// up at least min_gap apart. With min_gap == 0 they are free to pile up. This is the guarantee that
+// keeps a convoy from visibly interpenetrating during a turn-around.
+TEST(NavSimWorld, HardDeOverlapEnforcesMinGap) {
+  const int R = 40, C = 40;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1; // bordered room, wide-open interior
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+
+  // Two agents with SWAPPED goals must cross through the centre: a clean, deterministic collision.
+  const int N = 2;
+  const double D = 3.0; // start/goal offset (normalized) — well clear of the walls
+  std::vector<float> o(2 * N), goal(2 * N), color(3 * N, 0.5f);
+  o[0] = (float)-D;
+  o[1] = 0;
+  goal[0] = (float)D;
+  goal[1] = 0; // left -> right
+  o[2] = (float)D;
+  o[3] = 0;
+  goal[2] = (float)-D;
+  goal[3] = 0; // right -> left
+
+  auto min_pair = [&](cvc::nav::sim_world &w) {
+    std::vector<float> pos(2 * N), hd(N), sp(N);
+    std::vector<int> md(N);
+    std::vector<std::uint8_t> rc(N);
+    double lo = 1e30;
+    for (int t = 0; t < 400; ++t) { // long enough for them to cross
+      w.step(0);
+      w.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+      lo = std::min(lo, (double)std::hypot(pos[0] - pos[2], pos[1] - pos[3]));
+    }
+    return lo;
+  };
+
+  cfg.min_gap = 0.4f; // normalized; world floor = min_gap / scale metres
+  cvc::nav::sim_world guarded(cfg, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(),
+                              o.data(), goal.data(), color.data(), N);
+  const double floor_m = cfg.min_gap / cfg.scale;
+  EXPECT_GE(min_pair(guarded), 0.95 * floor_m)
+      << "de-overlap must keep the crossing agents at least min_gap apart";
+
+  cfg.min_gap = 0.0f; // control: OFF -> the crossing agents pass right through each other
+  cvc::nav::sim_world crossed(cfg, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(),
+                              o.data(), goal.data(), color.data(), N);
+  EXPECT_LT(min_pair(crossed), 0.5 * floor_m)
+      << "with min_gap==0 the crossing agents should approach much closer";
+}
+
 namespace {
 // A bordered room with a bar to route around (shared by the belief-mode tests).
 std::vector<std::uint8_t> room_with_bar(int R, int C) {

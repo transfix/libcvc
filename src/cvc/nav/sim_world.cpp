@@ -525,6 +525,78 @@ void sim_world::step(int num_threads) {
 
   lap(accDrive);
 
+  // ── HARD DE-OVERLAP (optional; cfg_.min_gap > 0) ──
+  // The soft sep_radius/sep_gain above only nudge the carrot, so a forced convergence (a
+  // turn-around, or a goal that moves behind the column) can still leave vehicles visibly
+  // interpenetrating. This position-level relaxation runs AFTER the drive and pushes any two
+  // active agents whose centres are within min_gap apart to exactly min_gap. It is pairwise and
+  // self-excluding; a push that would land an agent in a truth-occupied cell is skipped, so a
+  // vehicle is never shoved into a building. A few sweeps converge a short column.
+  if (cfg_.min_gap > 0.0f && n_ > 1) {
+    const double mind = cfg_.min_gap, mind2 = mind * mind;
+    const double invsx = (cfg_.max_x > cfg_.min_x) ? (cols_ - 1) / (cfg_.max_x - cfg_.min_x) : 0.0;
+    const double invsy = (cfg_.max_y > cfg_.min_y) ? (rows_ - 1) / (cfg_.max_y - cfg_.min_y) : 0.0;
+    auto blocked = [&](double onx, double ony) -> bool {
+      const double wx = onx / cfg_.scale + cfg_.cx, wy = ony / cfg_.scale + cfg_.cy;
+      const long c = std::lround((wx - cfg_.min_x) * invsx),
+                 r = std::lround((wy - cfg_.min_y) * invsy);
+      if (r < 0 || c < 0 || r >= rows_ || c >= cols_)
+        return true; // off-grid: treat as blocked so we never push agents out of the world
+      return truth_[r * cols_ + c] != 0;
+    };
+    for (int it = 0; it < cfg_.min_gap_iters; ++it) {
+      bool moved = false;
+      for (int i = 0; i < n_; ++i) {
+        if (!active_[i])
+          continue;
+        for (int j = i + 1; j < n_; ++j) {
+          if (!active_[j])
+            continue;
+          double dx = o_[2 * j] - o_[2 * i], dy = o_[2 * j + 1] - o_[2 * i + 1];
+          double d2 = dx * dx + dy * dy;
+          if (d2 >= mind2)
+            continue;
+          double d = std::sqrt(d2), ux, uy;
+          if (d > 1e-9) {
+            ux = dx / d;
+            uy = dy / d;
+          } else { // exactly coincident: separate along a deterministic, index-derived axis
+            const double a = 0.7853981633974483 * ((i + j) & 3);
+            ux = std::cos(a);
+            uy = std::sin(a);
+          }
+          const double gap = mind - d;
+          const double hix = o_[2 * i] - ux * (0.5 * gap), hiy = o_[2 * i + 1] - uy * (0.5 * gap);
+          const double hjx = o_[2 * j] + ux * (0.5 * gap), hjy = o_[2 * j + 1] + uy * (0.5 * gap);
+          const bool iOk = !blocked(hix, hiy), jOk = !blocked(hjx, hjy);
+          if (iOk && jOk) { // split the correction between the pair
+            o_[2 * i] = hix;
+            o_[2 * i + 1] = hiy;
+            o_[2 * j] = hjx;
+            o_[2 * j + 1] = hjy;
+            moved = true;
+          } else if (jOk) { // i is wall-pinned -> move j the full gap
+            const double njx = o_[2 * i] + ux * mind, njy = o_[2 * i + 1] + uy * mind;
+            if (!blocked(njx, njy)) {
+              o_[2 * j] = njx;
+              o_[2 * j + 1] = njy;
+              moved = true;
+            }
+          } else if (iOk) { // j is wall-pinned -> move i the full gap
+            const double nix = o_[2 * j] - ux * mind, niy = o_[2 * j + 1] - uy * mind;
+            if (!blocked(nix, niy)) {
+              o_[2 * i] = nix;
+              o_[2 * i + 1] = niy;
+              moved = true;
+            }
+          } // else: both pinned by walls -> leave (rare; the drive relaxes it next tick)
+        }
+      }
+      if (!moved)
+        break;
+    }
+  }
+
   // ── METRICS + REACHED/PARK (single-goal) ──
   for (int i = 0; i < n_; ++i) {
     const float dx = goal_[2 * i] - o_[2 * i], dy = goal_[2 * i + 1] - o_[2 * i + 1];

@@ -82,6 +82,17 @@ public:
     float sep_radius = 0.0f;
     float sep_gain = 0.0f;
 
+    // HARD inter-agent de-overlap (default 0 = OFF). sep_radius/sep_gain above only NUDGE the
+    // carrot, so under a forced convergence (a turn-around, a goal that moves behind the column)
+    // agents can still interpenetrate. When min_gap > 0, step() runs a short position-level
+    // relaxation AFTER the drive that pushes any two agents whose centres are closer than min_gap
+    // (normalized units, like o/goal) apart to exactly min_gap, skipping a push that would land an
+    // agent inside a truth-occupied cell (never shove a vehicle into a building). It is pairwise
+    // and self-excluding, and independent of the belief planes, so it composes with shared belief
+    // and GUARANTEES agents never visibly overlap regardless of what the routing asks for.
+    float min_gap = 0.0f;
+    int min_gap_iters = 4; // relaxation sweeps per step (a few converge a short column)
+
     // Where scatter_free() places agent starts and goals. `scattered` (default)
     // picks each uniformly at random from every free cell — the original look.
     // `opposed` clusters every start into a band on one edge of the map and every
