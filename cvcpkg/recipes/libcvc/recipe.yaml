@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "3.3.0"
+  upstream_version: "3.4.0"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -69,7 +69,7 @@ recipe:
   # GPL library on their link line. Verified on the built artifact: ldd
   # libcvc.so reports zero fftw references, and volume_ops_test passes 42/42
   # including the apply_filter=true back-projection cases.
-  cvc_revision: 5
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
