@@ -37,6 +37,17 @@ add_executable(lsystem_coast lsystem_coast.cpp OceanFFT.cpp)
 target_link_libraries(lsystem_coast PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS lsystem_coast MODULES ${VTK_LIBRARIES})
 
+# terrain_lab — the visual QA surface for the cvc::world L-system terrain source
+# (dbg-technical/21 §5). RENDERS the generator's own output: terrain coloured by
+# the raster's per-cell material (or risk/occupancy/height), props grown from the
+# built-in L-system recipes and tessellated in place, volumetric water below the
+# sea level, a drifting cloud slab — all regenerated live from the ImGui panel.
+# cvc::world + cvc::lsys are compiled into cvc::cvc (linked transitively via cvcGL),
+# so no extra find_package/link. Enrolled in _wasm_demos below.
+add_executable(terrain_lab terrain_lab.cpp)
+target_link_libraries(terrain_lab PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS terrain_lab MODULES ${VTK_LIBRARIES})
+
 # cvc::nav demos — the reactive swarm rendered through cvcGL. nav symbols come from
 # cvc::cvc, which cvcGL PUBLIC-links. Shared helpers (occupancy walls, merged agent
 # glyph mesh, capture camera) live in nav_common.
@@ -70,7 +81,7 @@ endif()
 # to _wasm_demos and it builds via the `wasm-demos` target and is auto-discovered
 # into the gallery by wasm/build-pages.py — no host page to hand-write.
 if(EMSCRIPTEN)
-  set(_wasm_demos lsystem_forest lsystem_coast bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_fog_ghost)
+  set(_wasm_demos lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_fog_ghost)
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
   # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
   # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
@@ -124,7 +135,7 @@ endif()
 # deps-prefix link dirs too, which cvcpkg's rewrite-install-paths relocates to
 # $ORIGIN-relative. cvcgl-examples is its own install COMPONENT so the recipe can
 # `cmake --install --component cvcgl-examples` and get only the bins (not the cvcGL SDK).
-set(_cvcgl_example_bins lsystem_forest lsystem_coast bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_fog_ghost nav_finale)
+set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_fog_ghost nav_finale)
 set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"
   INSTALL_RPATH_USE_LINK_PATH ON)
