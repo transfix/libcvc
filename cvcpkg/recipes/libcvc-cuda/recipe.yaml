@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-cuda
-  upstream_version: "3.3.0"
+  upstream_version: "3.4.0"
   # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
   # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
   # Dropping the binary changes bundle contents, and +cvc.1 was already published
@@ -10,7 +10,7 @@ recipe:
   # revisions OF an upstream version, so a version bump restarts it.
   # Bumped 1 -> 2: declare assimp (plus the fontconfig/expat/bzip2 delegate
   # closure) so the published GPU bundle's libcvc.so can actually load.
-  cvc_revision: 2
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
