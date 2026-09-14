@@ -110,6 +110,25 @@ set(INCLUDE_FILES
   ../../inc/cvc/volren/detail/cell_intersect.h
   ../../inc/cvc/volren/detail/shading.h
   ../../inc/cvc/volren/detail/shadow_map.h
+  ../../inc/cvc/lsys/rng.h
+  ../../inc/cvc/lsys/module.h
+  ../../inc/cvc/lsys/symbol.h
+  ../../inc/cvc/lsys/expr.h
+  ../../inc/cvc/lsys/grammar.h
+  ../../inc/cvc/lsys/parse.h
+  ../../inc/cvc/lsys/io.h
+  ../../inc/cvc/lsys/context.h
+  ../../inc/cvc/lsys/derive.h
+  ../../inc/cvc/lsys/interp.h
+  ../../inc/cvc/lsys/emit.h
+  ../../inc/cvc/lsys/recipes.h
+  ../../inc/cvc/world/surface.h
+  ../../inc/cvc/world/grid.h
+  ../../inc/cvc/world/heightfield.h
+  ../../inc/cvc/world/scatter.h
+  ../../inc/cvc/world/raster.h
+  ../../inc/cvc/world/npy.h
+  ../../inc/cvc/world/bundle.h
 )
 
 # Source files
@@ -221,7 +240,57 @@ set(SOURCE_FILES
   volren/state_settings.cpp
   volslice/slicer.cpp
   volslice/state_settings.cpp
+  lsys/expr.cpp
+  lsys/parse.cpp
+  lsys/io.cpp
+  lsys/derive.cpp
+  lsys/interp.cpp
+  lsys/emit.cpp
+  lsys/recipes.cpp
+  world/surface.cpp
+  world/heightfield.cpp
+  world/scatter.cpp
+  world/raster.cpp
+  world/npy.cpp
+  world/bundle.cpp
 )
+
+# Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
+# seam to the material consumer and MUST NOT reference cvc::nav — a change to
+# material_build's blur/EDT/gradients must invalidate no generated bundle.
+# Enforce it at configure time by grepping the world sources for a cvc/nav
+# include; the demo/gym (which links cvc::nav to draw a contract preview) is a
+# separate target and is unaffected.
+file(GLOB _cvc_world_srcs "${CMAKE_CURRENT_SOURCE_DIR}/world/*.cpp"
+                          "${PROJECT_SOURCE_DIR}/inc/cvc/world/*.h")
+foreach(_wsrc ${_cvc_world_srcs})
+  file(READ "${_wsrc}" _wtext)
+  if(_wtext MATCHES "#[ \t]*include[ \t]*[<\"]cvc/nav/")
+    message(FATAL_ERROR "cvc::world must not depend on cvc::nav (found a cvc/nav include in ${_wsrc}); "
+                        "the material seam is a file format, not an ABI (roadmap §14.4).")
+  endif()
+endforeach()
+
+# Determinism guard (roadmap §5.2): every random draw in cvc::lsys / cvc::world
+# must go through the hashed RNG (rng::hash4). Fail the configure if any source
+# reaches for a stateful/stream generator or wall-clock seed, which would make
+# generation order-dependent and non-reproducible.
+file(GLOB _cvc_rng_srcs "${CMAKE_CURRENT_SOURCE_DIR}/lsys/*.cpp"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/world/*.cpp"
+                        "${PROJECT_SOURCE_DIR}/inc/cvc/lsys/*.h"
+                        "${PROJECT_SOURCE_DIR}/inc/cvc/world/*.h")
+foreach(_rsrc ${_cvc_rng_srcs})
+  file(READ "${_rsrc}" _rtext)
+  # Bans stateful/stream RNGs: mt19937 / random_device live in <random>, and a
+  # std::rand() CALL is the other escape hatch. Matching the include + the call
+  # (not the bare token) avoids false-positives on the doc comments in rng.h /
+  # scatter.h that describe the predecessor's std::mt19937. steady_clock is fine
+  # (only the derive_result.ms diagnostic, which never enters a golden).
+  if(_rtext MATCHES "#[ \t]*include[ \t]*<random>" OR _rtext MATCHES "std::rand[ \t]*\\(")
+    message(FATAL_ERROR "cvc::lsys/cvc::world determinism: ${_rsrc} pulls in <random> or calls "
+                        "std::rand(); all randomness must go through cvc::lsys::rng::hash4 (§5.2).")
+  endif()
+endforeach()
 
 # material.cpp is a BIT-identical twin of a Python reference whose gaussian
 # blur accumulates float64 with exp-derived weights: the compiler default
@@ -235,6 +304,28 @@ if(NOT MSVC)
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
+# cvc::lsys / cvc::world are deterministic: same seed -> same output. -ffp-contract
+# =off removes FMA contraction, which is the one source of nondeterminism WITHIN a
+# toolchain (an FMA'd multiply-add flips low bits vs the un-FMA'd form on the same
+# CPU depending on optimizer choices), so same-platform reproducibility is exact
+# and the CROSS-platform goldens the tests actually assert — integer module counts,
+# word content_hash and ontology_hash (all integer / arithmetic-only) — hold on
+# every target. NOTE (do not overclaim): raw .npy BYTES are reproducible on a fixed
+# toolchain but are NOT guaranteed bit-identical across libm implementations,
+# because scatter/interp route footprint yaw through std::sin/std::cos, which are
+# not correctly-rounded and differ in the last ULP between glibc and Apple libm;
+# a 1-ULP shift can flip a cell at a footprint boundary. Cross-platform .npy
+# byte-goldens are therefore intentionally NOT asserted. Same discipline as nav.
+if(NOT MSVC)
+  set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
+                              world/heightfield.cpp world/scatter.cpp world/raster.cpp world/bundle.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
+                              world/heightfield.cpp world/scatter.cpp world/raster.cpp world/bundle.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -1413,6 +1504,19 @@ if(CVC_BUILD_NAV_EXAMPLE)
   if(CVC_ENABLE_CUDA)
     target_compile_definitions(nav_train_demo PRIVATE CVC_ENABLE_CUDA)
   endif()
+endif()
+
+# Headless L-system / world-generation CLIs (GL-free). cvc-lsys derives and
+# renders .lsys recipes to SVG/OFF; cvc-worldgen (added with cvc::world) builds
+# occupancy/material bundles. Both link only cvc::cvc.
+option(CVC_BUILD_LSYS_TOOLS "Build the cvc-lsys / cvc-worldgen headless tools" ON)
+if(CVC_BUILD_LSYS_TOOLS)
+  add_executable(cvc-lsys ${CMAKE_CURRENT_SOURCE_DIR}/tools/cvc_lsys_main.cpp)
+  target_link_libraries(cvc-lsys PRIVATE cvc)
+  target_compile_features(cvc-lsys PRIVATE cxx_std_17)
+  add_executable(cvc-worldgen ${CMAKE_CURRENT_SOURCE_DIR}/tools/cvc_worldgen_main.cpp)
+  target_link_libraries(cvc-worldgen PRIVATE cvc)
+  target_compile_features(cvc-worldgen PRIVATE cxx_std_17)
 endif()
 
 # Windows-specific batch file
