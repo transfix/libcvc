@@ -125,7 +125,7 @@ struct GenParams {
   int rocks = 90;
   int buildings = 110;
   int tree_gen = 5;
-  double amp_m = 36.0;
+  double amp_m = 44.0;
   // Water SURFACE height. The heightfield floor sits at 0, so terrain rises in
   // [0, amp]; anything below this line floods — valleys become streams/ponds and
   // the low rim becomes coast. Default ~a third of the relief, so water reads.
@@ -148,10 +148,15 @@ world::world_params toWorldParams(const GenParams &gp) {
   wp.hf.seed = gp.seed;
   wp.hf.amp_m = gp.amp_m;
   wp.hf.sea_level_m = 0.0; // terrain floor at 0; water floods above it (see water_level_m)
-  wp.hf.base_wavelength_m = std::max(60.0, gHalf * 0.38); // rolling hills with carved valleys
-  wp.hf.octaves = 7;
-  wp.hf.warp_m = 16.0;
-  wp.hf.warp_wavelength_m = gHalf * 0.7;
+  // More variance: a shorter base wavelength + more octaves + higher gain give
+  // steeper, more broken relief, so the generator classifies more gravel / scree /
+  // bare rock (dirt) on the slopes instead of an all-grass plain.
+  wp.hf.base_wavelength_m = std::max(50.0, gHalf * 0.30);
+  wp.hf.octaves = 8;
+  wp.hf.gain = 0.55;
+  wp.hf.lacunarity = 2.1;
+  wp.hf.warp_m = 22.0;
+  wp.hf.warp_wavelength_m = gHalf * 0.6;
   // The "island" preset shapes the relief (a central dome dropping below the water
   // line at the rim); every preset's object mix lives in the count sliders (see
   // presetFill), so counts here always come straight from the panel.
@@ -245,23 +250,19 @@ cvc::geometry::color_t cellColor(const world::raster_out &ro, const world::surfa
 
 // Build the terrain mesh straight from the raster: a vertex per cell, coloured by
 // the current colour mode, real heights. Row 0 == min_y (grid_spec convention).
-cvc::geometry buildTerrain(cvc::app &app, const world::raster_out &ro, const world::grid_spec &g,
-                           const world::surface_registry &reg, int mode) {
-  float hmin = 1e30f, hmax = -1e30f;
-  for (float h : ro.height) {
-    hmin = std::min(hmin, h);
-    hmax = std::max(hmax, h);
-  }
+// The terrain mesh: real heights + UVs (world -> [0,1]) so the surface colour comes
+// from a baked texture (materials + dirt + roads + plazas), not per-vertex colour.
+cvc::geometry buildTerrain(cvc::app &app, const world::raster_out &ro, const world::grid_spec &g) {
   cvc::geometry geo(app);
   auto &pts = geo.points();
-  auto &cols = geo.colors();
+  auto &uvs = geo.uvs();
   pts.reserve(ro.klass.size());
-  cols.reserve(ro.klass.size());
+  uvs.reserve(ro.klass.size());
   for (int r = 0; r < g.rows; ++r)
     for (int c = 0; c < g.cols; ++c) {
       std::size_t i = std::size_t(r) * g.cols + c;
       pts.push_back({g.world_x(c), g.world_y(r), double(ro.height[i])});
-      cols.push_back(cellColor(ro, reg, i, mode, hmin, hmax));
+      uvs.push_back({double(c) / (g.cols - 1), double(r) / (g.rows - 1)});
     }
   auto &tris = geo.tris();
   tris.reserve(std::size_t(g.rows - 1) * (g.cols - 1) * 2);
@@ -575,39 +576,22 @@ void buildBuildings(cvc::app &app, const world::world_model &wm, const world::su
   }
 }
 
-// ── pavement: a concrete plaza that WRAPS AROUND each building — a square apron
-// centred on the building, extending a margin beyond its footprint, draped over
-// the terrain so it follows the ground the building sits on ──────────────────
-cvc::geometry buildPavement(cvc::app &app, const std::vector<Apron> &aprons,
-                            const world::heightfield &hf, double waterLevel) {
-  cvc::geometry g(app);
-  const cvc::geometry::color_t pave = {0.30, 0.31, 0.33}; // dark concrete plaza
-  const cvc::geometry::color_t road = {0.24, 0.24, 0.27}; // darker asphalt street
-  const int G = 5;                                        // draped grid per plaza
-  // Plazas: a paved rectangle hugging each building's footprint, at its yaw.
-  for (const Apron &a : aprons) {
-    double c = std::cos(a.yaw), s = std::sin(a.yaw);
-    idx_t base = idx_t(g.points().size());
-    for (int iy = 0; iy <= G; ++iy)
-      for (int ix = 0; ix <= G; ++ix) {
-        double lx = -a.hx + 2.0 * a.hx * ix / G, ly = -a.hy + 2.0 * a.hy * iy / G;
-        double x = a.x + lx * c - ly * s, y = a.y + lx * s + ly * c; // rotate to yaw
-        double h = hf.sample(x, y) + 0.12;
-        g.points().push_back({x, y, h});
-        g.colors().push_back(pave);
-      }
-    for (int iy = 0; iy < G; ++iy)
-      for (int ix = 0; ix < G; ++ix) {
-        idx_t v = base + idx_t(iy) * (G + 1) + ix;
-        idx_t vr = v + 1, vd = v + (G + 1), vrd = vd + 1;
-        g.tris().push_back({v, vr, vd});
-        g.tris().push_back({vr, vrd, vd});
-      }
-  }
-  // Streets: connect each plaza to its two nearest neighbours (a simple network),
-  // draped over the terrain, skipping any span whose midpoint would dip underwater.
+// ── streets + terrain texture: roads and plazas are BAKED INTO the terrain's
+// texture (not draped quads, which z-fight and shimmer). The mesh carries UVs; the
+// texture holds the final surface colour — per-cell material (+ dirt/grass variance
+// in material mode), a paved plaza hugging each building footprint, and an asphalt
+// street network connecting the plazas. ─────────────────────────────────────────
+struct Street {
+  double x0, y0, x1, y1;
+};
+
+// Connect each building plaza to its two nearest neighbours, skipping any span
+// whose midpoint terrain would sit underwater.
+std::vector<Street> computeStreets(const std::vector<Apron> &aprons, const world::heightfield &hf,
+                                   double waterLevel) {
+  std::vector<Street> out;
   const int n = int(aprons.size());
-  const double maxLen = gHalf * 0.7, w = 8.0;
+  const double maxLen = gHalf * 0.7;
   std::set<std::pair<int, int>> edges;
   for (int i = 0; i < n; ++i) {
     int best[2] = {-1, -1};
@@ -632,34 +616,131 @@ cvc::geometry buildPavement(cvc::app &app, const std::vector<Apron> &aprons,
   }
   for (const auto &e : edges) {
     const Apron &A = aprons[e.first], &B = aprons[e.second];
-    Vec3d d{B.x - A.x, B.y - A.y, 0};
-    double L = vlen(d);
+    double dx = B.x - A.x, dy = B.y - A.y, L = std::sqrt(dx * dx + dy * dy);
     if (L < 1.0 || L > maxLen)
       continue;
     if (hf.sample(0.5 * (A.x + B.x), 0.5 * (A.y + B.y)) < waterLevel)
       continue;
-    d = d * (1.0 / L);
-    Vec3d perp{-d.y, d.x, 0};
-    int steps = std::max(2, int(L / 10.0) + 1);
-    idx_t prevL = 0, prevR = 0;
-    for (int k = 0; k <= steps; ++k) {
-      double t = double(k) / steps, x = A.x + (B.x - A.x) * t, y = A.y + (B.y - A.y) * t;
-      double h = hf.sample(x, y) + 0.14;
-      idx_t li = idx_t(g.points().size());
-      g.points().push_back({x + perp.x * 0.5 * w, y + perp.y * 0.5 * w, h});
-      g.colors().push_back(road);
-      idx_t ri = idx_t(g.points().size());
-      g.points().push_back({x - perp.x * 0.5 * w, y - perp.y * 0.5 * w, h});
-      g.colors().push_back(road);
-      if (k > 0) {
-        g.tris().push_back({prevL, prevR, ri});
-        g.tris().push_back({prevL, ri, li});
+    out.push_back({A.x, A.y, B.x, B.y});
+  }
+  return out;
+}
+
+// A cheap self-contained 2-D value-noise fBm (the cloud fBm is defined later).
+double gnoise2(double x, double y) {
+  auto hsh = [](int a, int b) {
+    unsigned u = unsigned(a * 374761393 + b * 668265263);
+    u = (u ^ (u >> 13)) * 1274126177u;
+    return ((u ^ (u >> 16)) & 0xffffffu) / double(0x1000000);
+  };
+  int xi = int(std::floor(x)), yi = int(std::floor(y));
+  double fx = x - xi, fy = y - yi;
+  fx = fx * fx * (3 - 2 * fx);
+  fy = fy * fy * (3 - 2 * fy);
+  double a = hsh(xi, yi), b = hsh(xi + 1, yi), c = hsh(xi, yi + 1), d = hsh(xi + 1, yi + 1);
+  return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+}
+double gfbm2(double x, double y) {
+  double f = 0, amp = 0.5, tot = 0, fr = 1;
+  for (int i = 0; i < 4; ++i) {
+    f += amp * gnoise2(x * fr, y * fr);
+    tot += amp;
+    amp *= 0.5;
+    fr *= 2.03;
+  }
+  return f / tot;
+}
+
+// Bake the terrain surface into an RGB texture (TEX x TEX). Row 0 == min_y (v=0),
+// matching the mesh UVs. In material mode grass is broken up with dirt / dry-grass
+// patches and the roads + plazas are painted on top; QA colour modes stay raw.
+constexpr int TEX = 1280;
+std::vector<unsigned char> paintTerrain(int mode, const world::raster_out &ro,
+                                        const world::grid_spec &g,
+                                        const world::surface_registry &reg,
+                                        const std::vector<Apron> &aprons,
+                                        const std::vector<Street> &streets) {
+  const int T = TEX;
+  std::vector<unsigned char> img(std::size_t(T) * T * 3, 0);
+  float hmin = 1e30f, hmax = -1e30f;
+  for (float h : ro.height) {
+    hmin = std::min(hmin, h);
+    hmax = std::max(hmax, h);
+  }
+  const double spanx = g.max_x - g.min_x, spany = g.max_y - g.min_y;
+  const cvc::geometry::color_t dirt = {0.42, 0.34, 0.23}, dryGrass = {0.45, 0.47, 0.24};
+  auto put = [&](int tx, int ty, const cvc::geometry::color_t &c) {
+    std::size_t o = (std::size_t(ty) * T + tx) * 3;
+    img[o] = (unsigned char)std::min(255.0, std::max(0.0, c[0] * 255.0));
+    img[o + 1] = (unsigned char)std::min(255.0, std::max(0.0, c[1] * 255.0));
+    img[o + 2] = (unsigned char)std::min(255.0, std::max(0.0, c[2] * 255.0));
+  };
+  for (int ty = 0; ty < T; ++ty) {
+    double v = double(ty) / (T - 1), wy = g.min_y + v * spany;
+    int r = std::min(g.rows - 1, std::max(0, int(std::lround(v * (g.rows - 1)))));
+    for (int tx = 0; tx < T; ++tx) {
+      double u = double(tx) / (T - 1), wx = g.min_x + u * spanx;
+      int c = std::min(g.cols - 1, std::max(0, int(std::lround(u * (g.cols - 1)))));
+      std::size_t i = std::size_t(r) * g.cols + c;
+      cvc::geometry::color_t col = cellColor(ro, reg, i, mode, hmin, hmax);
+      if (mode == 0) {
+        std::uint16_t k = ro.klass[i];
+        if (k == 6 || k == 7 || k == 8) { // grass / tall_grass / bush_cover
+          double n1 = gfbm2(wx * 0.020, wy * 0.020), n2 = gfbm2(wx * 0.006 + 11, wy * 0.006 + 7);
+          double dfac = std::min(1.0, std::max(0.0, (n1 - 0.52) / 0.30));
+          double gfac = std::min(1.0, std::max(0.0, (n2 - 0.55) / 0.30));
+          for (int q = 0; q < 3; ++q)
+            col[q] = col[q] * (1 - dfac) + dirt[q] * dfac;
+          for (int q = 0; q < 3; ++q)
+            col[q] = col[q] * (1 - 0.5 * gfac) + dryGrass[q] * 0.5 * gfac;
+        }
       }
-      prevL = li;
-      prevR = ri;
+      put(tx, ty, col);
     }
   }
-  return g;
+  if (mode != 0)
+    return img; // QA modes: raw raster only
+  const cvc::geometry::color_t road = {0.20, 0.20, 0.23}, curb = {0.31, 0.31, 0.34};
+  const double roadW = 8.0;
+  double sx = (T - 1) / spanx, sy = (T - 1) / spany;
+  auto W2Tx = [&](double x) { return (x - g.min_x) * sx; };
+  auto W2Ty = [&](double y) { return (y - g.min_y) * sy; };
+  double rTexX = 0.5 * roadW * sx;
+  for (const Street &s : streets) {
+    double ax = W2Tx(s.x0), ay = W2Ty(s.y0), bx = W2Tx(s.x1), by = W2Ty(s.y1);
+    double dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+    int x0 = std::max(0, int(std::floor(std::min(ax, bx) - rTexX - 2)));
+    int x1 = std::min(T - 1, int(std::ceil(std::max(ax, bx) + rTexX + 2)));
+    int y0 = std::max(0, int(std::floor(std::min(ay, by) - rTexX - 2)));
+    int y1 = std::min(T - 1, int(std::ceil(std::max(ay, by) + rTexX + 2)));
+    for (int ty = y0; ty <= y1; ++ty)
+      for (int tx = x0; tx <= x1; ++tx) {
+        double t = L2 > 1e-9 ? ((tx - ax) * dx + (ty - ay) * dy) / L2 : 0.0;
+        t = std::min(1.0, std::max(0.0, t));
+        double px = ax + t * dx, py = ay + t * dy;
+        double dd = std::sqrt((tx - px) * (tx - px) + (ty - py) * (ty - py));
+        if (dd <= rTexX)
+          put(tx, ty, road);
+        else if (dd <= rTexX + 1.5)
+          put(tx, ty, curb);
+      }
+  }
+  const cvc::geometry::color_t pave = {0.44, 0.44, 0.46};
+  for (const Apron &a : aprons) {
+    double cx = W2Tx(a.x), cy = W2Ty(a.y);
+    double hxT = a.hx * sx, hyT = a.hy * sy, R = std::sqrt(hxT * hxT + hyT * hyT);
+    double c = std::cos(a.yaw), s = std::sin(a.yaw);
+    int x0 = std::max(0, int(std::floor(cx - R))), x1 = std::min(T - 1, int(std::ceil(cx + R)));
+    int y0 = std::max(0, int(std::floor(cy - R))), y1 = std::min(T - 1, int(std::ceil(cy + R)));
+    for (int ty = y0; ty <= y1; ++ty)
+      for (int tx = x0; tx <= x1; ++tx) {
+        double dx = tx - cx, dy = ty - cy;
+        double lx = dx * c + dy * s, ly = -dx * s + dy * c;
+        if (std::fabs(lx) <= hxT && std::fabs(ly) <= hyT)
+          put(tx, ty, pave);
+      }
+  }
+  return img;
 }
 
 // ── the water: a volume of depth under a gently travelling wave, filling every
@@ -1040,6 +1121,18 @@ int main(int argc, char **argv) {
     world::raster(wm, grid, ro);
   };
 
+  std::vector<Apron> gAprons; // current buildings' plazas (for the baked texture)
+  std::vector<Street> gStreets;
+  // Paint the terrain texture (material + dirt + roads + plazas) for the current
+  // colour mode and hand it to the terrain node — on rebuild and on colour switch.
+  auto applyTexture = [&]() {
+    if (!sg.hasGraphics("terrain"))
+      return;
+    std::vector<unsigned char> rgb = paintTerrain(colorMode, ro, grid, *reg, gAprons, gStreets);
+    cvc::image img(TEX, TEX, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, rgb.data());
+    std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"))->setTexture(img, false);
+  };
+
   auto rebuild = [&](bool reframe) {
     world::world_params wp = toWorldParams(gp);
     reg = &world::surface_registry::variant(wp.ontology);
@@ -1059,22 +1152,24 @@ int main(int argc, char **argv) {
     gSkyTop = gSkyBase + gHalf * 0.30 + 80.0;
 
     lib.build(wp);
-    cvc::geometry terrain = buildTerrain(app, ro, grid, *reg, colorMode);
+    cvc::geometry terrain = buildTerrain(app, ro, grid);
     cvc::geometry solid(app), foliage(app);
-    std::vector<Apron> aprons;
-    buildProps(app, wm, *reg, lib, solid, foliage);        // trees + rocks
-    buildBuildings(app, wm, *reg, gp.seed, solid, aprons); // solid, non-overlapping edifices
-    // Pavement: a concrete plaza wrapping each building, plus streets connecting them.
-    cvc::geometry pavement = buildPavement(app, aprons, wm.hf(), gSeaLevel);
+    gAprons.clear();
+    buildProps(app, wm, *reg, lib, solid, foliage);         // trees + rocks
+    buildBuildings(app, wm, *reg, gp.seed, solid, gAprons); // solid, non-overlapping edifices
+    gStreets = computeStreets(gAprons, wm.hf(), gSeaLevel); // baked into the terrain texture
 
     if (sg.hasGraphics("terrain"))
       std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"))->setGeometry(terrain);
     else {
       auto t = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("terrain", terrain));
-      t->setUseSingleColor(false);
-      t->setAmbient(0.42);
-      t->setDiffuse(0.9);
+      t->setUseSingleColor(true); // surface colour comes from the baked texture
+      t->setColor(1.0, 1.0, 1.0);
+      t->setAmbient(0.5);
+      t->setDiffuse(0.95);
     }
+    applyTexture(); // material + dirt + roads + plazas, per the colour mode
+
     if (sg.hasGraphics("props"))
       std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("props"))->setGeometry(solid);
     else {
@@ -1094,18 +1189,6 @@ int main(int argc, char **argv) {
       }
     } else if (sg.hasGraphics("foliage"))
       sg.removeGraphics("foliage");
-
-    if (pavement.points().size()) {
-      if (sg.hasGraphics("pavement"))
-        std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("pavement"))->setGeometry(pavement);
-      else {
-        auto pv = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("pavement", pavement));
-        pv->setUseSingleColor(false);
-        pv->setAmbient(0.30);
-        pv->setDiffuse(0.7);
-      }
-    } else if (sg.hasGraphics("pavement"))
-      sg.removeGraphics("pavement");
 
     // water volume
     if (sg.hasGraphics("water"))
@@ -1130,23 +1213,8 @@ int main(int argc, char **argv) {
     (void)reframe;
   };
 
-  // Recolour the terrain in place (colour-mode switch) — no regeneration.
-  auto recolor = [&]() {
-    if (!sg.hasGraphics("terrain"))
-      return;
-    float hmin = 1e30f, hmax = -1e30f;
-    for (float h : ro.height) {
-      hmin = std::min(hmin, h);
-      hmax = std::max(hmax, h);
-    }
-    std::vector<unsigned char> rgb(ro.klass.size() * 3);
-    for (std::size_t i = 0; i < ro.klass.size(); ++i) {
-      cvc::geometry::color_t c = cellColor(ro, *reg, i, colorMode, hmin, hmax);
-      for (int k = 0; k < 3; ++k)
-        rgb[i * 3 + k] = (unsigned char)std::min(255.0, std::max(0.0, c[k] * 255.0));
-    }
-    std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"))->updateColors(rgb);
-  };
+  // Recolour the terrain (colour-mode switch) — repaint the texture, no regeneration.
+  auto recolor = [&]() { applyTexture(); };
 
   gHF = &wm.hf();
   gSeaLevel = gp.water_level_m;
