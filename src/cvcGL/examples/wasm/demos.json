@@ -2,6 +2,7 @@
   "_comment":
       "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here.",
   "order": [
+    "terrain_lab",
     "lsystem_forest",
     "lsystem_coast",
     "volren_bunny",
@@ -11,6 +12,12 @@
     "bunny_shadow"
   ],
   "demos": {
+    "terrain_lab": {
+      "desc": "a live view of the cvc::world L-system terrain generator",
+      "blurb":
+          "See what the L-system world generator produces: terrain coloured by its own per-cell MATERIAL (or risk / occupancy / height), trees, rocks and buildings grown from the built-in L-system recipes and placed on the surface, volumetric water filling the valleys and coast, and a drifting cloud slab. Tune the generator live — seed, species counts, tree generations, relief and water level — and watch the world rebuild. 100% procedural, nothing is downloaded.",
+      "thumb": "img/terrain_lab.jpg"
+    },
     "lsystem_forest": {
       "desc": "a procedural L-system island with wind, sea and ray-cast cloud volumes",
       "blurb":
