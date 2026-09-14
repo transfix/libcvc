@@ -469,6 +469,7 @@ jobs:
             "$GITHUB_WORKSPACE/src/xmlrpc/*" \
             '*/geometry/cvc-mesher/contour/*' \
             '*/cvc/image/third_party/*' \
+            "$GITHUB_WORKSPACE/src/cvc/tools/*" \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
           genhtml build/coverage_filtered.info \

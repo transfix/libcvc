@@ -130,6 +130,18 @@ add_executable(vis_frustum_test vis_frustum_test.cpp)
 add_executable(vis_oracle_test vis_oracle_test.cpp)
 add_executable(vis_grid_test vis_grid_test.cpp)
 add_executable(vis_tiler_test vis_tiler_test.cpp)
+add_executable(lsys_rng_test lsys_rng_test.cpp)
+add_executable(lsys_expr_test lsys_expr_test.cpp)
+add_executable(lsys_parse_test lsys_parse_test.cpp)
+add_executable(lsys_derive_test lsys_derive_test.cpp)
+add_executable(lsys_interp_test lsys_interp_test.cpp)
+add_executable(lsys_recipes_test lsys_recipes_test.cpp)
+add_executable(lsys_svg_test lsys_svg_test.cpp)
+add_executable(world_surface_test world_surface_test.cpp)
+add_executable(world_heightfield_test world_heightfield_test.cpp)
+add_executable(world_scatter_test world_scatter_test.cpp)
+add_executable(world_raster_test world_raster_test.cpp)
+add_executable(world_bundle_test world_bundle_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
 # add_executable() calls above so the two blocks can be diffed by eye; the
@@ -220,6 +232,18 @@ set(TEST_TARGETS
   vis_oracle_test
   vis_grid_test
   vis_tiler_test
+  lsys_rng_test
+  lsys_expr_test
+  lsys_parse_test
+  lsys_derive_test
+  lsys_interp_test
+  lsys_recipes_test
+  lsys_svg_test
+  world_surface_test
+  world_heightfield_test
+  world_scatter_test
+  world_raster_test
+  world_bundle_test
   volren_math_test
   volren_camera_test
   volren_tf_test
@@ -681,6 +705,14 @@ target_link_libraries(vis_tiler_test
     GTest::gtest
     GTest::gtest_main
 )
+
+foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
+                   lsys_interp_test lsys_recipes_test lsys_svg_test
+                   world_surface_test world_heightfield_test world_scatter_test
+                   world_raster_test world_bundle_test)
+  target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
+  target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
+endforeach()
 
 target_link_libraries(state_change_journal_test
   PRIVATE
@@ -1469,6 +1501,12 @@ cvc_discover_tests(vis_frustum_test)
 cvc_discover_tests(vis_oracle_test)
 cvc_discover_tests(vis_grid_test)
 cvc_discover_tests(vis_tiler_test)
+foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
+                   lsys_interp_test lsys_recipes_test lsys_svg_test
+                   world_surface_test world_heightfield_test world_scatter_test
+                   world_raster_test world_bundle_test)
+  cvc_discover_tests(${_lsys_test})
+endforeach()
 cvc_discover_tests(volume_io_extra_test)
 if(TARGET lbie_mesher_test)
   cvc_discover_tests(lbie_mesher_test)
