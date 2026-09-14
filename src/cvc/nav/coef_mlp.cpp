@@ -335,6 +335,32 @@ std::string coef_mlp::default_weights_path() {
     }
   }
 #endif
+  // Last-resort fallback: a separately-installed grl-snam-weights cvcpkg package
+  // (share/grl-snam-weights/coef_sdf.cvcnav) in the same prefix. Only reached when
+  // the canonical seed above is absent — the shipped seed wins by default (it
+  // currently out-performs the trained base net; opt in explicitly with
+  // CVC_NAV_WEIGHTS). CVC_NAV_DATADIR is <prefix>/share/cvc/nav, so climb two.
+  {
+    const std::string pkg =
+        std::string(CVC_NAV_DATADIR) + "/../../grl-snam-weights/coef_sdf.cvcnav";
+    if (file_exists(pkg))
+      return pkg;
+  }
+#ifndef _WIN32
+  {
+    Dl_info info;
+    if (dladdr(reinterpret_cast<const void *>(&coef_mlp::default_weights_path), &info) &&
+        info.dli_fname) {
+      const std::string so = info.dli_fname;
+      const std::size_t slash = so.find_last_of('/');
+      if (slash != std::string::npos) {
+        const std::string pkg = so.substr(0, slash) + "/../share/grl-snam-weights/coef_sdf.cvcnav";
+        if (file_exists(pkg))
+          return pkg;
+      }
+    }
+  }
+#endif
   return canonical; // load() will report it if absent
 }
 
