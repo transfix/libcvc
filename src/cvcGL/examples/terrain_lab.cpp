@@ -566,13 +566,20 @@ void buildBuildings(cvc::app &app, const world::world_model &wm, const world::su
     Vec3d org{pp->x, pp->y, pp->z};
     for (const lsys::obox &b : m.boxes)
       appendBox(solid, b, roleColor(reg, b.rl), yc, ys, 1.0, 1.0, 1.0, org);
-    // Plaza hugs the footprint rectangle (+ a sidewalk margin), at the building's yaw.
-    double halfX = 0, halfY = 0;
+    // Plaza hugs the building's actual footprint AABB (+ a sidewalk margin) and is
+    // CENTRED on that footprint — asymmetric shapes (L/T/podium) sit off the massing
+    // origin, so a symmetric plaza would leave the building displaced to one side.
+    double minX = 1e30, maxX = -1e30, minY = 1e30, maxY = -1e30;
     for (const lsys::obox &b : m.boxes) {
-      halfX = std::max(halfX, std::fabs(b.center.x) + b.half.x);
-      halfY = std::max(halfY, std::fabs(b.center.y) + b.half.y);
+      minX = std::min(minX, b.center.x - b.half.x);
+      maxX = std::max(maxX, b.center.x + b.half.x);
+      minY = std::min(minY, b.center.y - b.half.y);
+      maxY = std::max(maxY, b.center.y + b.half.y);
     }
-    aprons.push_back({pp->x, pp->y, pp->z, halfX + 6.0, halfY + 6.0, yaw});
+    double lcx = 0.5 * (minX + maxX), lcy = 0.5 * (minY + maxY);
+    double hx = 0.5 * (maxX - minX) + 6.0, hy = 0.5 * (maxY - minY) + 6.0;
+    aprons.push_back(
+        {pp->x + lcx * yc - lcy * ys, pp->y + lcx * ys + lcy * yc, pp->z, hx, hy, yaw});
   }
 }
 
