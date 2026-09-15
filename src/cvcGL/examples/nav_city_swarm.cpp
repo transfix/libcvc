@@ -1,6 +1,11 @@
-// nav_city_swarm — a cvcGL demo of the cvc::nav reactive swarm: N vehicles cross a
-// procedural "city" (the same city_scene the trainer learns on) toward per-agent goals
-// with NO global plan — pure local reaction, no Python, no libtorch. Each agent, each
+// nav_city_swarm — a cvcGL demo of the cvc::nav reactive swarm: a MASS of vehicles cross
+// a procedural "city" (the same city_scene the trainer learns on) toward SIXTEEN colour-
+// coded targets with NO global plan — pure local reaction, no Python, no libtorch. It
+// proves the point that one machine drives many hundreds of agents at once (runs well at
+// ~800 with threading). Each agent flies a flag coloured by its target, so the swarm reads
+// as 16 converging colour streams. The drive is the PUBLISHED trained CoefMLP (cvcpkg
+// grl-snam-weights) — the same weights the trainer produces — resolved zero-config from the
+// prefix (falls back to the hand-tuned biased net if none is installed). Each agent, each
 // tick: sample the signed-distance clearance field phi -> a tiny CoefMLP (coef_mlp.h,
 // 5->64->64->3 SiLU) emits (alpha,beta,gamma) = wall-barrier / goal-spring / damping ->
 // a kinematic bicycle steers toward a "carrot" on the goal bearing, deflected by the
@@ -486,6 +491,29 @@ int main(int argc, char **argv) {
   // reads as a tangled mess.
   cfg.spawn_layout = cvc::nav::sim_world::config::spawn::opposed;
 
+  // The local-control policy: the PUBLISHED trained CoefMLP (cvcpkg grl-snam-weights,
+  // coef_sdf.cvcnav) — the exact weights the trainer produces and cvcpkg ships. Native
+  // resolves it zero-config from the install prefix (coef_mlp::default_weights_path:
+  // $CVC_NAV_WEIGHTS -> share/cvc/nav -> the grl-snam-weights fallback); the wasm build
+  // preloads the blob into MEMFS. Fall back to the hand-tuned biased net if none is found,
+  // so the demo always runs.
+#ifdef __EMSCRIPTEN__
+  const std::string navWeightsPath = "coef_sdf.cvcnav"; // --preload-file'd by the wasm build
+#else
+  const std::string navWeightsPath = cvc::nav::coef_mlp::default_weights_path();
+#endif
+  cvc::nav::coef_mlp driveModel;
+  bool trainedDrive = false;
+  try {
+    driveModel = cvc::nav::coef_mlp::load(navWeightsPath);
+    trainedDrive = true;
+    std::printf("nav_city_swarm: trained CoefMLP drive from %s\n", navWeightsPath.c_str());
+  } catch (const std::exception &e) {
+    driveModel = cvc::nav::coef_mlp::default_biased();
+    std::fprintf(stderr, "nav_city_swarm: no trained weights (%s: %s) — using default_biased()\n",
+                 navWeightsPath.c_str(), e.what());
+  }
+
   // The sim lives behind a pointer so the UI can REBUILD it: agent count and
   // belief mode are baked into sim_world at construction, so "restart with 2000
   // agents / private belief" means constructing a new world, not mutating one.
@@ -501,21 +529,67 @@ int main(int argc, char **argv) {
     }
     cfg.freeze_sense = !fogOnNow;
     return std::make_unique<cvc::nav::sim_world>(cvc::nav::sim_world::from_occupancy(
-        cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), nAgents, seed, m, k));
+        cfg, occ.data(), driveModel, nAgents, seed, m, k)); // driveModel copied per (re)build
   };
   auto worldPtr = build_world(agents, belief, !no_fog, simSeed);
   cvc::nav::sim_world &world = *worldPtr;
   int N = world.size();
+  int M = world.planes(); // belief-plane count (sensing/fog); reported on the HUD
 
-  // 2. Per-agent glyph colours: by belief group (grouped/private) so the grouping is
-  //    visible; shared -> a rainbow by index.
-  const int *grp = world.agent_planes();
-  int M = world.planes();
+  // 2. SIXTEEN colour-coded TARGETS. The mass of agents fans out across the map to 16
+  //    destinations; each agent (and the flag it flies) is coloured by its target, so the
+  //    swarm reads as 16 converging colour streams — the "many agents, one machine" point,
+  //    driven by the trained CoefMLP. Agents are binned to a target by the LATITUDE of
+  //    their scattered goal, so streams keep their lane instead of crossing into a tangle.
+  //    Re-run on every world rebuild (the UI can restart with a new agent count).
+  constexpr int kTargets = 16;
+  float targetColor[kTargets * 3];
+  for (int t = 0; t < kTargets; ++t)
+    hsv2rgb(static_cast<double>(t) / kTargets, 0.74, 0.98, &targetColor[3 * t]);
+  // World -> sim's normalized (centered) frame, matching sim_world (world = norm/scale + c).
+  auto world_to_norm = [&](double wx, double wy, float &nx, float &ny) {
+    nx = static_cast<float>((wx - cfg.cx) * scale);
+    ny = static_cast<float>((wy - cfg.cy) * scale);
+  };
   std::vector<float> color(3 * N);
-  for (int i = 0; i < N; ++i) {
-    const double hue = (M > 1) ? static_cast<double>(grp[i]) / M : static_cast<double>(i) / N;
-    hsv2rgb(hue, 0.62, 0.96, &color[3 * i]);
-  }
+  std::vector<float> targetPos(kTargets * 2, 0.0f); // WORLD positions, for the 16 beacons
+  auto assign_targets = [&](cvc::nav::sim_world &w) {
+    const int n = w.size();
+    std::vector<float> gw(2 * n);
+    w.goals_world(gw.data()); // the auto-scattered goals — reachable free ground
+    double ymin = 1e300, ymax = -1e300, xsum = 0.0;
+    for (int i = 0; i < n; ++i) {
+      ymin = std::min(ymin, static_cast<double>(gw[2 * i + 1]));
+      ymax = std::max(ymax, static_cast<double>(gw[2 * i + 1]));
+      xsum += gw[2 * i];
+    }
+    const double xmean = n ? xsum / n : cfg.cx;
+    // One target per latitude band, snapped to the nearest scattered goal so it lands on
+    // reachable ground.
+    for (int t = 0; t < kTargets; ++t) {
+      const double ty = ymin + (t + 0.5) / kTargets * std::max(1e-6, ymax - ymin);
+      double best = 1e300;
+      float bx = static_cast<float>(xmean), by = static_cast<float>(ty);
+      for (int i = 0; i < n; ++i) {
+        const double d = std::hypot(gw[2 * i] - xmean, gw[2 * i + 1] - ty);
+        if (d < best) { best = d; bx = gw[2 * i]; by = gw[2 * i + 1]; }
+      }
+      targetPos[2 * t] = bx;
+      targetPos[2 * t + 1] = by;
+    }
+    color.assign(3 * n, 0.0f);
+    for (int i = 0; i < n; ++i) {
+      const double f = (ymax > ymin) ? (static_cast<double>(gw[2 * i + 1]) - ymin) / (ymax - ymin) : 0.0;
+      const int t = std::clamp(static_cast<int>(f * kTargets), 0, kTargets - 1);
+      float nx, ny;
+      world_to_norm(targetPos[2 * t], targetPos[2 * t + 1], nx, ny);
+      w.retarget(i, nx, ny); // send every agent in this band to its shared target
+      color[3 * i] = targetColor[3 * t];
+      color[3 * i + 1] = targetColor[3 * t + 1];
+      color[3 * i + 2] = targetColor[3 * t + 2];
+    }
+  };
+  assign_targets(world);
 
   // 3. Scene.
   cvc::app app;
@@ -1739,13 +1813,8 @@ int main(int argc, char **argv) {
       *worldPtr = std::move(*newWorld);
       world.set_thread_pool(&app.computePool()); // move-assign cleared it; re-inject
       N = world.size();
-      grp = world.agent_planes();
       M = world.planes();
-      color.assign(3 * N, 0.0f);
-      for (int i = 0; i < N; ++i) {
-        const double hue = (M > 1) ? static_cast<double>(grp[i]) / M : static_cast<double>(i) / N;
-        hsv2rgb(hue, 0.62, 0.96, &color[3 * i]);
-      }
+      assign_targets(world); // re-bin agents to the 16 targets + recolour by target
       const bool rebuild_meshes = (N != prevN) || (M != prevM);
       if (rebuild_meshes && agentNode)
         agentNode->setGeometry(build_agents());
