@@ -552,7 +552,9 @@ int main(int argc, char **argv) {
     ny = static_cast<float>((wy - cfg.cy) * scale);
   };
   std::vector<float> color(3 * N);
-  std::vector<float> targetPos(kTargets * 2, 0.0f); // WORLD positions, for the 16 beacons
+  std::vector<int> agentTarget(N, 0);               // agent -> target index (for target drag)
+  std::vector<float> targetPos(kTargets * 2, 0.0f); // WORLD positions of the 16 targets
+  std::vector<float> planeColor;                    // [M*3] per belief-plane colour (wall overlay)
   auto assign_targets = [&](cvc::nav::sim_world &w) {
     const int n = w.size();
     std::vector<float> gw(2 * n);
@@ -582,10 +584,12 @@ int main(int argc, char **argv) {
       targetPos[2 * t + 1] = by;
     }
     color.assign(3 * n, 0.0f);
+    agentTarget.assign(n, 0);
     for (int i = 0; i < n; ++i) {
       const double f =
           (ymax > ymin) ? (static_cast<double>(gw[2 * i + 1]) - ymin) / (ymax - ymin) : 0.0;
       const int t = std::clamp(static_cast<int>(f * kTargets), 0, kTargets - 1);
+      agentTarget[i] = t;
       float nx, ny;
       world_to_norm(targetPos[2 * t], targetPos[2 * t + 1], nx, ny);
       w.retarget(i, nx, ny); // send every agent in this band to its shared target
@@ -593,8 +597,43 @@ int main(int argc, char **argv) {
       color[3 * i + 1] = targetColor[3 * t + 1];
       color[3 * i + 2] = targetColor[3 * t + 2];
     }
+    // Per-belief-plane colour = mean target colour of that plane's agents (for the
+    // belief-wall overlay). Grouped belief clusters by start, which ≈ target latitude, so a
+    // plane reads as roughly one swarm colour; overlaps between planes then cycle.
+    const int Mp = std::max(1, w.planes());
+    const int *pl = w.agent_planes();
+    planeColor.assign(3 * Mp, 0.0f);
+    std::vector<int> cnt(Mp, 0);
+    for (int i = 0; i < n; ++i) {
+      const int m = std::clamp(pl[i], 0, Mp - 1);
+      planeColor[3 * m] += color[3 * i];
+      planeColor[3 * m + 1] += color[3 * i + 1];
+      planeColor[3 * m + 2] += color[3 * i + 2];
+      cnt[m]++;
+    }
+    for (int m = 0; m < Mp; ++m)
+      if (cnt[m]) {
+        planeColor[3 * m] /= cnt[m];
+        planeColor[3 * m + 1] /= cnt[m];
+        planeColor[3 * m + 2] /= cnt[m];
+      }
   };
   assign_targets(world);
+
+  // Move target t to a new WORLD point and retarget every agent assigned to it (keeps the
+  // target colour). Used by the minimap target-drag. Snaps nothing — the drive avoids walls.
+  auto move_target = [&](int t, double wx, double wy) {
+    if (t < 0 || t >= kTargets)
+      return;
+    targetPos[2 * t] = static_cast<float>(wx);
+    targetPos[2 * t + 1] = static_cast<float>(wy);
+    float nx, ny;
+    world_to_norm(wx, wy, nx, ny);
+    const int n = world.size();
+    for (int i = 0; i < n && i < static_cast<int>(agentTarget.size()); ++i)
+      if (agentTarget[i] == t)
+        world.retarget(i, nx, ny);
+  };
 
   // 3. Scene.
   cvc::app app;
@@ -772,6 +811,163 @@ int main(int argc, char **argv) {
       groundNode->setDiffuse(0.50);
     }
   }
+
+  // Belief-WALL reveal (the same translucent discovered-wall highlight the cvcdbg convoy demo
+  // draws in red, but coloured by SWARM here): as the agents sense the city, the discovered wall
+  // cells rise as translucent boxes tinted by the belief plane(s) that have seen them, and where
+  // MULTIPLE planes overlap on one wall the tint CYCLES through each seeing swarm's colour with a
+  // gentle pulse. Uniform tall walls, exactly like cvcdbg (0.05*span). The mesh is rebuilt only
+  // when coverage grows; the colours refresh every few frames via updateColors keyed to a
+  // per-vertex cell index — cheap, and it drives the animation without re-meshing.
+  bool beliefWallsOn = true;
+  double beliefPhase = 0.0; // 0..1, wraps; colour cycle + brightness pulse
+  std::shared_ptr<GeometryNode> beliefNode;
+  std::vector<std::uint8_t> sensedWallOcc(static_cast<std::size_t>(rows) * cols, 0);
+  std::vector<int> bwVertCell;      // per-vertex cell index (exact, set on emit)
+  std::vector<unsigned char> bwRgb; // per-vertex colour scratch
+  std::vector<unsigned char> cellRgb(static_cast<std::size_t>(3) * rows * cols, 0);
+  long bwLastCells = -1;                   // re-mesh trigger
+  const double kBeliefWallH = 0.05 * span; // same tall walls as the cvcdbg demo
+
+  // Per-cell cycling colour into cellRgb (only discovered wall cells; others untouched).
+  auto paint_belief_cells = [&](double phase) {
+    const int Mp = std::max(1, world.planes());
+    const double pulse = 0.6 + 0.4 * (0.5 + 0.5 * std::sin(phase * 6.28318530718));
+    for (long i = 0; i < static_cast<long>(rows) * cols; ++i) {
+      if (!occ[i])
+        continue;
+      int seeing[128], ns = 0;
+      for (int m = 0; m < Mp && ns < 128; ++m)
+        if (world.ever_seen(m)[i])
+          seeing[ns++] = m;
+      if (ns == 0)
+        continue;
+      const double pos = phase * ns; // walk the seeing planes; blend a -> b
+      const int a = static_cast<int>(pos) % ns, bl = (a + 1) % ns;
+      const double f = pos - std::floor(pos);
+      const int pa = seeing[a], pb = seeing[bl];
+      const double r = planeColor[3 * pa] * (1 - f) + planeColor[3 * pb] * f;
+      const double g = planeColor[3 * pa + 1] * (1 - f) + planeColor[3 * pb + 1] * f;
+      const double b = planeColor[3 * pa + 2] * (1 - f) + planeColor[3 * pb + 2] * f;
+      cellRgb[3 * i] = static_cast<unsigned char>(std::clamp(r * 255.0 * pulse, 0.0, 255.0));
+      cellRgb[3 * i + 1] = static_cast<unsigned char>(std::clamp(g * 255.0 * pulse, 0.0, 255.0));
+      cellRgb[3 * i + 2] = static_cast<unsigned char>(std::clamp(b * 255.0 * pulse, 0.0, 255.0));
+    }
+  };
+  // Refresh the discovered-wall colours from the current phase (no re-mesh).
+  auto recolor_belief_walls = [&](double phase) {
+    if (!beliefNode || bwVertCell.empty())
+      return;
+    paint_belief_cells(phase);
+    bwRgb.resize(3 * bwVertCell.size());
+    for (std::size_t v = 0; v < bwVertCell.size(); ++v) {
+      const int cell = bwVertCell[v];
+      bwRgb[3 * v] = cellRgb[3 * cell];
+      bwRgb[3 * v + 1] = cellRgb[3 * cell + 1];
+      bwRgb[3 * v + 2] = cellRgb[3 * cell + 2];
+    }
+    beliefNode->updateColors(bwRgb);
+  };
+  // Re-mesh the discovered-wall boxes when coverage grows. Emits one uniform tall box per
+  // discovered wall cell (rising from the terrain by kBeliefWallH), and records each vertex's
+  // cell directly so the recolour above animates without re-meshing. Only faces exposed to free
+  // space are emitted (interior faces between two discovered walls are culled).
+  auto rebuild_belief_walls = [&]() {
+    const int Mp = std::max(1, world.planes());
+    long cells = 0;
+    for (long i = 0; i < static_cast<long>(rows) * cols; ++i) {
+      std::uint8_t s = 0;
+      if (occ[i])
+        for (int m = 0; m < Mp && !s; ++m)
+          s = world.ever_seen(m)[i];
+      sensedWallOcc[i] = s;
+      cells += s;
+    }
+    if (cells == bwLastCells)
+      return; // nothing newly discovered -> keep the current mesh, just let the colours cycle
+    bwLastCells = cells;
+    if (cells == 0) {
+      if (beliefNode)
+        beliefNode->setVisible(false);
+      return;
+    }
+    const double dx = (bounds.max_x - bounds.min_x) / std::max(1, cols - 1);
+    const double dy = (bounds.max_y - bounds.min_y) / std::max(1, rows - 1);
+    cvc::geometry wg;
+    bwVertCell.clear();
+    paint_belief_cells(beliefPhase); // fill cellRgb so the emitted verts carry the swarm colour
+    auto sAt = [&](int r, int c) {
+      return r >= 0 && c >= 0 && r < rows && c < cols &&
+             sensedWallOcc[static_cast<std::size_t>(r) * cols + c];
+    };
+    auto quad = [&](const double a[3], const double b[3], const double c[3], const double d[3],
+                    int cell) {
+      auto &P = wg.points();
+      auto &C = wg.colors();
+      auto &T = wg.tris();
+      const auto base = static_cast<cvc::geometry::index_t>(P.size());
+      const double cr = cellRgb[3 * cell] / 255.0, cg = cellRgb[3 * cell + 1] / 255.0,
+                   cb = cellRgb[3 * cell + 2] / 255.0;
+      for (const double *q : {a, b, c, d}) {
+        P.push_back({q[0], q[1], q[2]});
+        C.push_back({cr, cg, cb}); // baked swarm colour; recolor_belief_walls animates it
+        bwVertCell.push_back(cell);
+      }
+      T.push_back({base, static_cast<cvc::geometry::index_t>(base + 1),
+                   static_cast<cvc::geometry::index_t>(base + 2)});
+      T.push_back({base, static_cast<cvc::geometry::index_t>(base + 2),
+                   static_cast<cvc::geometry::index_t>(base + 3)});
+    };
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c) {
+        const std::size_t i = static_cast<std::size_t>(r) * cols + c;
+        if (!sensedWallOcc[i])
+          continue;
+        const double xc = bounds.min_x + c * dx, yc = bounds.min_y + r * dy;
+        const double x0 = xc - 0.5 * dx, x1 = xc + 0.5 * dx, y0 = yc - 0.5 * dy, y1 = yc + 0.5 * dy;
+        const double z0 = terrain.empty() ? 0.0 : terrain.sample(xc, yc);
+        const double z1 = z0 + kBeliefWallH; // uniform tall wall, cvcdbg-style
+        const double t0[3] = {x0, y0, z1}, t1[3] = {x1, y0, z1}, t2[3] = {x1, y1, z1},
+                     t3[3] = {x0, y1, z1};
+        quad(t0, t1, t2, t3, static_cast<int>(i)); // top face (always exposed)
+        if (!sAt(r, c - 1)) {
+          const double a[3] = {x0, y0, z0}, b[3] = {x0, y1, z0}, e[3] = {x0, y1, z1},
+                       f[3] = {x0, y0, z1};
+          quad(a, b, e, f, static_cast<int>(i));
+        }
+        if (!sAt(r, c + 1)) {
+          const double a[3] = {x1, y1, z0}, b[3] = {x1, y0, z0}, e[3] = {x1, y0, z1},
+                       f[3] = {x1, y1, z1};
+          quad(a, b, e, f, static_cast<int>(i));
+        }
+        if (!sAt(r - 1, c)) {
+          const double a[3] = {x1, y0, z0}, b[3] = {x0, y0, z0}, e[3] = {x0, y0, z1},
+                       f[3] = {x1, y0, z1};
+          quad(a, b, e, f, static_cast<int>(i));
+        }
+        if (!sAt(r + 1, c)) {
+          const double a[3] = {x0, y1, z0}, b[3] = {x1, y1, z0}, e[3] = {x1, y1, z1},
+                       f[3] = {x0, y1, z1};
+          quad(a, b, e, f, static_cast<int>(i));
+        }
+      }
+    if (!beliefNode) {
+      beliefNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("belief_walls", wg));
+      if (beliefNode) {
+        beliefNode->setUseSingleColor(false); // per-vertex swarm colour, refreshed each cycle
+        beliefNode->setAmbient(0.9);
+        beliefNode->setDiffuse(0.2);
+        beliefNode->setOpacity(0.55); // translucent, like cvcdbg — the grey city shows through
+        beliefNode->setDepthOffset(1.5);
+      }
+    } else {
+      beliefNode->setGeometry(wg);
+    }
+    if (beliefNode)
+      beliefNode->setVisible(beliefWallsOn);
+    recolor_belief_walls(beliefPhase);
+  };
+  rebuild_belief_walls(); // seed it (usually empty at t=0 -> node appears on first sense)
 
   navdemo::AgentGlyphs glyphs;
   // Vehicle size derived from real Humvee dimensions (M1097 length ~ 4.72 m).
@@ -1316,6 +1512,11 @@ int main(int argc, char **argv) {
   // main renderer's actors via AddViewProp (each vtkProp can live in multiple
   // renderers — VTK handles that fine). Layer 1 draws over layer 0. Click a
   // vehicle in the PiP to CHASE it (handled from the ImGui draw callback below).
+  // The minimap viewport [x0,y0,x1,y1] (normalized, VTK y-up) is MUTABLE so the user can
+  // DRAG the minimap: the draggable ImGui overlay window below rewrites it each frame and
+  // the PiP renders wherever the window sits. Default: the bottom-right corner.
+  double pipVp[4] = {0.72, 0.0, 1.0, 0.28};
+  int dragTarget = -1; // minimap: index of the target currently being dragged (-1 = none)
   vtkSmartPointer<vtkRenderer> pipRenderer = vtkSmartPointer<vtkRenderer>::New();
   vtkSmartPointer<vtkCamera> pipCam = vtkSmartPointer<vtkCamera>::New();
   {
@@ -1329,7 +1530,8 @@ int main(int argc, char **argv) {
     pipCam->SetViewUp(0.0, 1.0, 0.0);
     pipCam->SetClippingRange(1.0, wall_h * 10.0 + 5000.0);
     pipRenderer->SetActiveCamera(pipCam);
-    pipRenderer->SetViewport(0.72, 0.0, 1.0, 0.28); // bottom-right corner
+    pipRenderer->SetViewport(pipVp[0], pipVp[1], pipVp[2],
+                             pipVp[3]); // driven by the draggable overlay
     pipRenderer->SetBackground(0.02, 0.03, 0.05);
     pipRenderer->SetLayer(1);
     // Own lighting so the top-down view is evenly lit regardless of the main
@@ -1370,24 +1572,30 @@ int main(int argc, char **argv) {
   // Click-in-PiP → follow. We record the last click and, if it lands over the
   // PiP viewport, ortho-unproject it to a world (x,y), then pick the nearest
   // agent's position and set followAgent.
-  auto pip_click_to_follow = [&](double mouseX, double mouseY) {
-    // Convert normalized display coords -> the PiP viewport local coords -> world.
-    // Viewport is [0.72, 0.0, 1.0, 0.28]; mouseX/mouseY are 0..1 across the window.
-    if (mouseX < 0.72 || mouseX > 1.0 || mouseY < 0.0 || mouseY > 0.28)
+  // Map a display-normalized point (mx,my; 0..1, y DOWN) inside the (draggable) minimap to a
+  // WORLD point. pipVp is [x0,y0,x1,y1] normalized with VTK y-UP. Returns false if outside.
+  // Reused by the follow-click AND by target dragging.
+  auto pip_world_at = [&](double mx, double my, double &wx, double &wy) -> bool {
+    const double vx0 = pipVp[0], vx1 = pipVp[2], vy0 = pipVp[1], vy1 = pipVp[3];
+    const double myVtk = 1.0 - my;
+    if (mx < vx0 || mx > vx1 || myVtk < vy0 || myVtk > vy1)
       return false;
-    const double u = (mouseX - 0.72) / (1.0 - 0.72); // 0..1 within PiP
-    const double v = mouseY / 0.28;                  // 0..1 within PiP (top->bottom)
-    // Ortho unproject: viewport center = (cx,cy), extent = parallelScale * aspect.
-    int *vs = view.renderWindow()->GetSize(); // {width, height} — VTK owns this buffer
-    const int pw = static_cast<int>((1.0 - 0.72) * vs[0]);
-    const int ph = static_cast<int>(0.28 * vs[1]);
+    const double u = (mx - vx0) / std::max(1e-6, vx1 - vx0);    // 0..1 left->right
+    const double v = (vy1 - myVtk) / std::max(1e-6, vy1 - vy0); // 0..1 top->bottom
+    int *vs = view.renderWindow()->GetSize();                   // {width, height}, VTK owns it
+    const int pw = static_cast<int>((vx1 - vx0) * vs[0]);
+    const int ph = static_cast<int>((vy1 - vy0) * vs[1]);
     const double aspect = ph > 0 ? static_cast<double>(pw) / ph : 1.0;
     const double sy = pipCam->GetParallelScale();
     const double sx = sy * aspect;
-    const double wx = bounds.cx() + (u - 0.5) * 2.0 * sx;
-    const double wy = bounds.cy() - (v - 0.5) * 2.0 * sy; // v grows downward in screen coords
-    // Nearest-agent lookup using the current snapshot (emPos is refreshed above).
-    // Cheap linear scan — for a few hundred agents, negligible.
+    wx = bounds.cx() + (u - 0.5) * 2.0 * sx;
+    wy = bounds.cy() - (v - 0.5) * 2.0 * sy;
+    return true;
+  };
+  auto pip_click_to_follow = [&](double mx, double my) {
+    double wx, wy;
+    if (!pip_world_at(mx, my, wx, wy))
+      return false;
     std::vector<float> ep(static_cast<std::size_t>(2) * N);
     world.snapshot(ep.data(), nullptr, nullptr, nullptr, nullptr);
     int best = -1;
@@ -1405,8 +1613,6 @@ int main(int argc, char **argv) {
       configure_track_params();
       cam.setTrackTarget("follow_probe");
       cam.setMode(CameraController::Mode::Track);
-      std::printf("nav_city_swarm: PiP click -> follow agent %d (dist=%.1f)\n", best,
-                  std::sqrt(bestD2));
     }
     return true;
   };
@@ -1554,6 +1760,11 @@ int main(int argc, char **argv) {
     ImGui::Checkbox("Targets", &uiGoals);
     ImGui::SameLine();
     ImGui::Checkbox("Flags", &uiFlags);
+    {
+      ImGui::SameLine();
+      if (ImGui::Checkbox("Belief walls", &beliefWallsOn) && beliefNode)
+        beliefNode->setVisible(beliefWallsOn);
+    }
     // Cinematic chase cam (harvested from grl-snam's ChaseCamera). Explicit
     // Checkbox on/off — no more "-1 == off" magic. When on, an index typable
     // in the InputInt AND draggable on the slider picks the agent to CHASE;
@@ -1609,6 +1820,68 @@ int main(int argc, char **argv) {
       uiRestart = true;
     ImGui::TextDisabled("agents / belief / fog need a restart");
     ImGui::End();
+
+    // ---- Draggable minimap (PiP) + target dragging -------------------------
+    // The VTK PiP renders wherever THIS window's content rect sits, so the user drags the
+    // minimap anywhere by its title bar. Inside it: PRESS near a target flag to DRAG that
+    // target (its agents follow, keeping their colour); a plain click follows the nearest
+    // agent. Default: bottom-right, clamped fully on-screen.
+    if (!noPip) {
+      ImGuiIO &mio = ImGui::GetIO();
+      const float side = std::max(150.0f, std::min(mio.DisplaySize.x, mio.DisplaySize.y) * 0.26f);
+      ImGui::SetNextWindowSize(ImVec2(side + 16.0f, side + 40.0f), ImGuiCond_Always);
+      ImGui::SetNextWindowPos(ImVec2(std::max(8.0f, mio.DisplaySize.x - side - 28.0f),
+                                     std::max(28.0f, mio.DisplaySize.y - side - 64.0f)),
+                              ImGuiCond_FirstUseEver);
+      // Transparent content background: the PiP vtkRenderer draws into this window's
+      // content rect (see the per-frame SetViewport), so an opaque ImGui bg would sit
+      // ON TOP of the live minimap and black it out. Only the title bar (drag handle)
+      // and border stay opaque.
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+      ImGui::Begin("minimap", nullptr,
+                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
+                       ImGuiWindowFlags_NoCollapse);
+      { // keep fully on-screen (drag / stale persisted position can't lose it off an edge)
+        const ImVec2 wp = ImGui::GetWindowPos(), wsz = ImGui::GetWindowSize();
+        const float nx = std::min(std::max(wp.x, 0.0f), std::max(0.0f, mio.DisplaySize.x - wsz.x));
+        const float ny =
+            std::min(std::max(wp.y, 22.0f), std::max(22.0f, mio.DisplaySize.y - wsz.y));
+        if (nx != wp.x || ny != wp.y)
+          ImGui::SetWindowPos(ImVec2(nx, ny));
+      }
+      const ImVec2 cur = ImGui::GetCursorScreenPos(); // content top-left (screen px)
+      ImGui::InvisibleButton("mm_hit", ImVec2(side, side), ImGuiButtonFlags_MouseButtonLeft);
+      // Drive the PiP viewport from this content rect (screen px -> normalized, VTK y-UP).
+      const float dw = std::max(1.0f, mio.DisplaySize.x), dh = std::max(1.0f, mio.DisplaySize.y);
+      pipVp[0] = cur.x / dw;
+      pipVp[2] = (cur.x + side) / dw;
+      pipVp[3] = 1.0 - cur.y / dh;          // top edge (VTK y-up)
+      pipVp[1] = 1.0 - (cur.y + side) / dh; // bottom edge
+      if (!capturing) {
+        const double mx = mio.MousePos.x / dw, my = mio.MousePos.y / dh;
+        double wx, wy;
+        if (ImGui::IsItemActivated() && pip_world_at(mx, my, wx, wy)) {
+          const double grab = pipCam->GetParallelScale() * 0.12; // ~12% of the map extent
+          double bd = grab;
+          dragTarget = -1;
+          for (int t = 0; t < kTargets; ++t) {
+            const double d = std::hypot(targetPos[2 * t] - wx, targetPos[2 * t + 1] - wy);
+            if (d < bd) {
+              bd = d;
+              dragTarget = t;
+            }
+          }
+          if (dragTarget < 0)
+            pip_click_to_follow(mx, my); // plain click -> follow the nearest agent
+        }
+        if (dragTarget >= 0 && ImGui::IsItemActive() && pip_world_at(mx, my, wx, wy))
+          move_target(dragTarget, wx, wy);
+        if (ImGui::IsItemDeactivated())
+          dragTarget = -1;
+      }
+      ImGui::End();
+      ImGui::PopStyleColor();
+    }
 
     // The library lighting panel — the same control surface as lsystem_forest,
     // driving this scene's StageLighting rig (key/fill/back/wash, shadows,
@@ -1737,19 +2010,7 @@ int main(int argc, char **argv) {
     touch.update(); // apply any pinch/two-finger gesture from this frame
 
 #ifdef CVC_ENABLE_IMGUI
-    // Click in the PiP corner -> chase whichever agent is nearest the click.
-    if (!capturing) {
-      ImGuiIO &io = ImGui::GetIO();
-      if (ImGui::IsMouseClicked(0) && !io.WantCaptureMouse) {
-        const double mx = io.MousePos.x / std::max(io.DisplaySize.x, 1.0f);
-        const double my = io.MousePos.y / std::max(io.DisplaySize.y, 1.0f);
-        // PiP viewport spans [0.72,0]..[1.0,0.28] but VTK's y=0 is at the
-        // BOTTOM and ImGui's y=0 is at the TOP — flip.
-        const double myVtk = 1.0 - my;
-        if (mx >= 0.72 && myVtk <= 0.28)
-          pip_click_to_follow(mx, 0.28 - myVtk);
-      }
-    }
+    // PiP follow-click + target dragging are handled inside the draggable minimap window above.
     // ---- apply UI actions ---------------------------------------------------
     if (trailNode) {
       trailNode->setVisible(uiTrails);
@@ -1820,6 +2081,7 @@ int main(int argc, char **argv) {
       N = world.size();
       M = world.planes();
       assign_targets(world); // re-bin agents to the 16 targets + recolour by target
+      bwLastCells = -1;      // fresh (empty) belief -> force the discovered-wall mesh to rebuild
       const bool rebuild_meshes = (N != prevN) || (M != prevM);
       if (rebuild_meshes && agentNode)
         agentNode->setGeometry(build_agents());
@@ -1933,6 +2195,19 @@ int main(int argc, char **argv) {
     if (fogOn && !haveSat && groundNode && frame % 15 == 0) {
       fill_fleet_fog(fogTex.data(), world, rows, cols);
       groundNode->texture_modified();
+    }
+
+    // Belief-wall reveal: grow the mesh as coverage grows (sense cadence), and animate the
+    // swarm-colour cycle every few frames. Phase advances each frame (a full sweep ≈ 5 s at
+    // 60 fps); overlapped walls cycle through each seeing swarm's colour with a pulse.
+    if (beliefWallsOn) {
+      if (frame % 15 == 0)
+        rebuild_belief_walls();
+      beliefPhase += 1.0 / 300.0;
+      if (beliefPhase >= 1.0)
+        beliefPhase -= 1.0;
+      if (beliefNode && frame % 3 == 0)
+        recolor_belief_walls(beliefPhase);
     }
 
     // State restyle (every 2nd frame, one buffer upload): cruising = agent hue,
@@ -2091,6 +2366,13 @@ int main(int argc, char **argv) {
         }
       }
     }
+
+    // Apply the draggable minimap's viewport to the PiP renderer. pipVp is written by
+    // the minimap ImGui window (previous frame's callback); re-applying it here — before
+    // the render — is what makes the PiP actually FOLLOW the window instead of staying
+    // pinned to its initial bottom-right rect. One-frame lag during a drag is invisible.
+    if (!noPip && pipRenderer)
+      pipRenderer->SetViewport(pipVp[0], pipVp[1], pipVp[2], pipVp[3]);
 
     if (capturing) {
       char path[1024];
