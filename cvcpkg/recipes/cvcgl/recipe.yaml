@@ -19,7 +19,12 @@ recipe:
   # an upstream version, so a version bump restarts it. This supersedes the
   # 3.2.4 +cvc.5 family republish — cvcGL source is unchanged; it rebuilds
   # against the new libcvc so the tested-together family stays consistent.
-  cvc_revision: 1
+  # Bumped 1 -> 2: the SDK bundle is now built WITH Dear ImGui (CVC_ENABLE_IMGUI=ON),
+  # so cvc::gl::ImGuiOverlay actually renders for downstream GUI consumers instead of
+  # being an inert stub. imgui is now a runtime dep (the export links the relocatable
+  # $<INSTALL_INTERFACE:imgui>). Prior bundles shipped imgui-less, forcing consumers
+  # (cvcdbg demos) to rebuild cvcGL from source.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -60,10 +65,16 @@ depends:
     # libcvc SDK (find_package(cvc CONFIG)) + VTK (the scene backend).
     - name: libcvc
     - name: vtk
+    # Dear ImGui — cvcGL's overlay (cvc::gl::ImGuiOverlay). find_path/find_library
+    # in src/cvcGL/CMakeLists.txt locate it; with it present CVC_ENABLE_IMGUI=ON.
+    - name: imgui
   runtime:
     # cvcGL's public interface links cvc::cvc and the VTK modules.
     - name: libcvc
     - name: vtk
+    # cvcGL's export links the relocatable $<INSTALL_INTERFACE:imgui> and exposes
+    # include/imgui, so a consumer of cvc::cvcGL must have imgui in its prefix.
+    - name: imgui
   host_tools:
     - cmake
     - ninja
