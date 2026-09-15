@@ -54,7 +54,7 @@ vtk_module_autoinit(TARGETS terrain_lab MODULES ${VTK_LIBRARIES})
 add_library(nav_demo_common STATIC nav_common.cpp)
 target_link_libraries(nav_demo_common PUBLIC cvcGL)
 
-foreach(_demo nav_city_swarm nav_fog_ghost nav_finale)
+foreach(_demo nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
   add_executable(${_demo} ${_demo}.cpp)
   target_link_libraries(${_demo} PRIVATE nav_demo_common cvcGL ${VTK_LIBRARIES}
                         Boost::program_options)
@@ -81,7 +81,7 @@ endif()
 # to _wasm_demos and it builds via the `wasm-demos` target and is auto-discovered
 # into the gallery by wasm/build-pages.py — no host page to hand-write.
 if(EMSCRIPTEN)
-  set(_wasm_demos lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_fog_ghost)
+  set(_wasm_demos lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost)
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
   # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
   # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
@@ -128,7 +128,8 @@ if(EMSCRIPTEN)
       # Pre-spawn workers so std::thread creation doesn't stall on the busy main thread.
       target_link_options(${_wt} PRIVATE -sPTHREAD_POOL_SIZE=4)
     endif()
-    if(_nav_swarm_bundle_flags AND "${_wt}" STREQUAL "nav_city_swarm")
+    # nav_city_swarm and nav_city_drive share the Austin bundle + trained weights.
+    if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
       target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
     endif()
   endforeach()
@@ -143,7 +144,7 @@ endif()
 # deps-prefix link dirs too, which cvcpkg's rewrite-install-paths relocates to
 # $ORIGIN-relative. cvcgl-examples is its own install COMPONENT so the recipe can
 # `cmake --install --component cvcgl-examples` and get only the bins (not the cvcGL SDK).
-set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_fog_ghost nav_finale)
+set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
 set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"
   INSTALL_RPATH_USE_LINK_PATH ON)

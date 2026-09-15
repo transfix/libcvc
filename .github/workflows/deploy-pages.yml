@@ -44,7 +44,7 @@ jobs:
       # grl-snam-weights lands here; --preload-file bakes the trained CoefMLP into
       # nav_city_swarm.data so the browser swarm drives with the published policy.
       CVC_WASM_NAV_WEIGHTS: /opt/cvc-wasm/deps-wasm-mt/share/grl-snam-weights/coef_sdf.cvcnav
-      DEMOS: 'terrain_lab lsystem_forest lsystem_coast volren_bunny volslice_bunny nav_city_swarm nav_fog_ghost'
+      DEMOS: 'terrain_lab lsystem_forest lsystem_coast volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost'
     steps:
       - name: Checkout master
         uses: actions/checkout@v4
