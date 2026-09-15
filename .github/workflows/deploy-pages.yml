@@ -41,6 +41,9 @@ jobs:
       # scene-austin-south-web + vehicle-humvee land here; the wasm build's
       # CMake --preload-file bakes this dir into nav_city_swarm.data.
       CVC_WASM_BUNDLE: /opt/cvc-wasm/deps-wasm-mt/share/cvc-scenes/austin_south
+      # grl-snam-weights lands here; --preload-file bakes the trained CoefMLP into
+      # nav_city_swarm.data so the browser swarm drives with the published policy.
+      CVC_WASM_NAV_WEIGHTS: /opt/cvc-wasm/deps-wasm-mt/share/grl-snam-weights/coef_sdf.cvcnav
       DEMOS: 'terrain_lab lsystem_forest lsystem_coast volren_bunny volslice_bunny nav_city_swarm nav_fog_ghost'
     steps:
       - name: Checkout master
@@ -64,10 +67,10 @@ jobs:
               --platform wasm --arch x86_64 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3 || echo "  (skipped: $p)"
           done
-          cvcpkg install scene-austin-south-web vehicle-humvee \
+          cvcpkg install scene-austin-south-web vehicle-humvee grl-snam-weights \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
-            --no-fallback-to-source || echo "  (scene bundles absent — wasm demo falls back to synthetic)"
+            --no-fallback-to-source || echo "  (scene/weights bundles absent — wasm demo falls back to synthetic + default_biased)"
 
       - name: Build the non-pthread demos
         # Non-pthread: matches the single-threaded wasm dep bundles + does not
