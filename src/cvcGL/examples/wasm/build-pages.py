@@ -102,6 +102,11 @@ def main() -> int:
         ddir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(wasm, ddir / (demo + ".wasm"))
         shutil.copy2(args.bin / (demo + ".js"), ddir / (demo + ".js"))
+        # The emscripten --preload-file package (bundle + weights) lands as <demo>.data
+        # next to the js/wasm; the loader fetches it, so it MUST ship or the demo 404s.
+        data = args.bin / (demo + ".data")
+        if data.is_file():
+            shutil.copy2(data, ddir / (demo + ".data"))
         (ddir / "index.html").write_text(render(
             demo_tpl,
             DEMO=demo,
