@@ -827,7 +827,8 @@ int main(int argc, char **argv) {
   std::vector<unsigned char> bwRgb; // per-vertex colour scratch
   std::vector<unsigned char> cellRgb(static_cast<std::size_t>(3) * rows * cols, 0);
   long bwLastCells = -1;                   // re-mesh trigger
-  const double kBeliefWallH = 0.05 * span; // same tall walls as the cvcdbg demo
+  const double kBeliefWallH =
+      std::min(40.0, 0.013 * span); // EXACTLY cvcdbg demo3s sensed-wall height (~40 m)
 
   // Per-cell cycling colour into cellRgb (only discovered wall cells; others untouched).
   auto paint_belief_cells = [&](double phase) {
@@ -958,7 +959,7 @@ int main(int argc, char **argv) {
         beliefNode->setAmbient(0.9);
         beliefNode->setDiffuse(0.2);
         beliefNode->setOpacity(0.55); // translucent, like cvcdbg — the grey city shows through
-        beliefNode->setDepthOffset(1.5);
+        beliefNode->setDepthOffset(1.0);
       }
     } else {
       beliefNode->setGeometry(wg);
@@ -1857,22 +1858,52 @@ int main(int argc, char **argv) {
       pipVp[2] = (cur.x + side) / dw;
       pipVp[3] = 1.0 - cur.y / dh;          // top edge (VTK y-up)
       pipVp[1] = 1.0 - (cur.y + side) / dh; // bottom edge
+      // WORLD -> minimap screen px (inverse of pip_world_at): the ortho PiP shows a
+      // 2*ParallelScale square centred on the map centre, filling the side x side rect.
+      const double pipSc = pipCam->GetParallelScale();
+      auto tgt_screen = [&](int t, ImVec2 &out) -> bool {
+        const double u = 0.5 + (targetPos[2 * t] - bounds.cx()) / (2.0 * pipSc);
+        const double v =
+            0.5 - (targetPos[2 * t + 1] - bounds.cy()) / (2.0 * pipSc); // world +y = up
+        out = ImVec2(cur.x + static_cast<float>(u) * side, cur.y + static_cast<float>(v) * side);
+        return u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0;
+      };
+      // Draw a grabbable colour-coded dot per rally point ON the minimap (drawn on top of the
+      // PiP, so they're always visible) — this is what makes the destinations show + be
+      // draggable, like the cvcdbg convoy minimap.
+      ImDrawList *dl = ImGui::GetWindowDrawList();
+      for (int t = 0; t < kTargets; ++t) {
+        ImVec2 sp;
+        if (!tgt_screen(t, sp))
+          continue;
+        const ImU32 col = IM_COL32(static_cast<int>(targetColor[3 * t] * 255),
+                                   static_cast<int>(targetColor[3 * t + 1] * 255),
+                                   static_cast<int>(targetColor[3 * t + 2] * 255), 255);
+        const float r = (dragTarget == t) ? 8.0f : 6.0f;
+        dl->AddCircleFilled(sp, r, col);
+        dl->AddCircle(sp, r + 1.5f, IM_COL32(8, 10, 14, 235), 0, 2.0f); // dark ring for contrast
+      }
       if (!capturing) {
-        const double mx = mio.MousePos.x / dw, my = mio.MousePos.y / dh;
+        const ImVec2 mp = mio.MousePos;
+        const double mx = mp.x / dw, my = mp.y / dh;
         double wx, wy;
-        if (ImGui::IsItemActivated() && pip_world_at(mx, my, wx, wy)) {
-          const double grab = pipCam->GetParallelScale() * 0.12; // ~12% of the map extent
-          double bd = grab;
+        if (ImGui::IsItemActivated()) {
+          // Grab the nearest rally point within a screen-pixel radius (robust regardless of
+          // zoom); a press that hits none falls back to follow-nearest-vehicle.
           dragTarget = -1;
+          float best = 15.0f; // px
           for (int t = 0; t < kTargets; ++t) {
-            const double d = std::hypot(targetPos[2 * t] - wx, targetPos[2 * t + 1] - wy);
-            if (d < bd) {
-              bd = d;
+            ImVec2 sp;
+            if (!tgt_screen(t, sp))
+              continue;
+            const float d = std::hypot(sp.x - mp.x, sp.y - mp.y);
+            if (d < best) {
+              best = d;
               dragTarget = t;
             }
           }
           if (dragTarget < 0)
-            pip_click_to_follow(mx, my); // plain click -> follow the nearest agent
+            pip_click_to_follow(mx, my);
         }
         if (dragTarget >= 0 && ImGui::IsItemActive() && pip_world_at(mx, my, wx, wy))
           move_target(dragTarget, wx, wy);
