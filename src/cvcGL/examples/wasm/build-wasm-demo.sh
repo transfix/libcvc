@@ -97,7 +97,10 @@ emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCVC_BUILD_EXAMPLES=ON \
     -DCVC_WASM_PTHREADS=${PTHREAD}
 
-cmake --build "${BUILD_DIR}" --target wasm-demos -j "$(nproc)"
+# Build the whole gallery by default; WASM_DEMO_TARGET=<target> scopes it to one demo
+# (e.g. a downstream repo that stages a single demo into this build and only wants that
+# one compiled, not every cvcGL example).
+cmake --build "${BUILD_DIR}" --target "${WASM_DEMO_TARGET:-wasm-demos}" -j "$(nproc)"
 
 # Turn the built bin/ into a servable gallery: build-pages.py discovers every
 # <demo>.js/.wasm pair, generates each demo's host page from templates/demo.html.in
