@@ -33,10 +33,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Put cvcpkg + the cvcpkg cmake on PATH
-        # Same probe the cyberpcangel-cvcgl nightly uses: the git-installed cvcpkg
-        # is at ~/.local/bin; the cvcpkg-managed cmake 3.31 at /opt/cvc-wasm.
+      - name: Install cvcpkg via install.sh + put its cmake on PATH
+        # Install the latest cvcpkg release standalone binary (>= 2.2.1, which
+        # fixes from-prefix wasm packs to tag wasm32 not the host x86_64) rather
+        # than relying on whatever the runner has pre-installed. install.sh drops
+        # the binary in ~/.local/bin; the cvcpkg-managed cmake 3.31 is at
+        # /opt/cvc-wasm/cmake-cvcpkg (the cyberpcangel-cvcgl nightly's probe).
         run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "/opt/cvc-wasm/cmake-cvcpkg/bin" >> "$GITHUB_PATH"
 
