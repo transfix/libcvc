@@ -99,6 +99,14 @@ if(EMSCRIPTEN)
       list(APPEND _nav_swarm_bundle_flags "--preload-file=${_parent}/shared@/shared")
     endif()
   endif()
+  # Preload the trained CoefMLP weights (cvcpkg grl-snam-weights / coef_sdf.cvcnav) so the
+  # in-browser swarm drives with the PUBLISHED trained policy. nav_city_swarm loads
+  # "coef_sdf.cvcnav" from MEMFS in wasm (dladdr cannot resolve an install prefix in the
+  # browser); with none preloaded it falls back to the hand-tuned biased net.
+  if(CVC_WASM_NAV_WEIGHTS AND EXISTS "${CVC_WASM_NAV_WEIGHTS}")
+    message(STATUS "cvcGL nav_city_swarm wasm: preloading trained weights from ${CVC_WASM_NAV_WEIGHTS}")
+    list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_NAV_WEIGHTS}@/coef_sdf.cvcnav")
+  endif()
   foreach(_wt ${_wasm_demos})
     # Asyncify: each demo keeps its own while-loop and yields via emscripten_sleep.
     # Growable heap: the forest/sea/sky volumes and city scenes exceed the 16 MB default.

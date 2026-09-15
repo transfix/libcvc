@@ -572,14 +572,19 @@ int main(int argc, char **argv) {
       float bx = static_cast<float>(xmean), by = static_cast<float>(ty);
       for (int i = 0; i < n; ++i) {
         const double d = std::hypot(gw[2 * i] - xmean, gw[2 * i + 1] - ty);
-        if (d < best) { best = d; bx = gw[2 * i]; by = gw[2 * i + 1]; }
+        if (d < best) {
+          best = d;
+          bx = gw[2 * i];
+          by = gw[2 * i + 1];
+        }
       }
       targetPos[2 * t] = bx;
       targetPos[2 * t + 1] = by;
     }
     color.assign(3 * n, 0.0f);
     for (int i = 0; i < n; ++i) {
-      const double f = (ymax > ymin) ? (static_cast<double>(gw[2 * i + 1]) - ymin) / (ymax - ymin) : 0.0;
+      const double f =
+          (ymax > ymin) ? (static_cast<double>(gw[2 * i + 1]) - ymin) / (ymax - ymin) : 0.0;
       const int t = std::clamp(static_cast<int>(f * kTargets), 0, kTargets - 1);
       float nx, ny;
       world_to_norm(targetPos[2 * t], targetPos[2 * t + 1], nx, ny);
