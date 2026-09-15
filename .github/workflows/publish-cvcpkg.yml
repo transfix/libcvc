@@ -644,10 +644,19 @@ jobs:
           DEPS="${{ steps.libcvc-deps.outputs.path }}"
           if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
           # cvcgl links the installed libcvc SDK ($STAGE) + VTK (from $PY).
+          # Dear ImGui powers the cvcGL overlay (cvc::gl::ImGuiOverlay). Build the
+          # SDK WITH it so CVC_ENABLE_IMGUI is on and the overlay actually renders
+          # for downstream GUI consumers (dbg_austin_live*, cvcgl-examples). Safe:
+          # cvcGL's imgui export is $<INSTALL_INTERFACE:imgui> / include/imgui
+          # (relocatable link name, not this builder's abs path) + a co-installed
+          # imgui runtime dep, so no path leaks into cvcGLTargets.cmake. Built into
+          # its own prefix and joined only here.
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          cvcpkg install imgui --prefix "$IMGUI"
           cmake -S src/cvcGL -B build-cvcgl -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-cvcgl" \
-            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$DEPS"
           cmake --build build-cvcgl --parallel
           cmake --install build-cvcgl
           if [ "$PACK_CVCGL" != "1" ]; then
@@ -807,6 +816,11 @@ jobs:
           # Scene module only; links the installed cvcgl (stage-cvcgl) + VTK +
           # this column's vtk-python-cp${{ matrix.pyver }} (installed into $PY
           # by the family-deps step).
+          # cvcgl now exports a relocatable -limgui (built with CVC_ENABLE_IMGUI),
+          # so anything linking it needs imgui on the prefix, even though pycvc-gl
+          # doesn't use the overlay itself.
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
+          cvcpkg install imgui --prefix "$IMGUI"
           cmake -S bindings/pycvc -B build-pycvcgl -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCVC_BUILD_PYCVC_CORE=OFF \
@@ -814,7 +828,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvcgl" \
             -DPython3_EXECUTABLE="$PYBIN" \
             -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
-            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS;$GITHUB_WORKSPACE/stage-cvcgl"
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS;$IMGUI;$GITHUB_WORKSPACE/stage-cvcgl"
           cmake --build build-pycvcgl --parallel
           cmake --install build-pycvcgl
           mkdir -p dist
@@ -855,11 +869,15 @@ jobs:
           $py    = "$env:GITHUB_WORKSPACE/py"
           # Only VTK is needed for cvcgl (no Python/numpy on this path).
           cvcpkg install vtk --prefix "$py" --config release --link shared
+          # Dear ImGui powers the cvcGL overlay — build the SDK WITH it (see the
+          # Linux step's note; the imgui export is relocatable, so no path leaks).
+          $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          cvcpkg install imgui --prefix "$imgui" --config release --link shared
           cmake -B build-cvcgl -S src/cvcGL `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_CONFIGURATION_TYPES=Release `
             -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-cvcgl" `
-            -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath"
+            -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$depsPath"
           cmake --build build-cvcgl --config Release
           cmake --install build-cvcgl --config Release
           New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -921,13 +939,15 @@ jobs:
             -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath"
           cmake --build build-pycvc --config Release
           cmake --install build-pycvc --config Release
-          # ── pycvc-gl (scene; links installed cvcgl) ──
+          # ── pycvc-gl (scene; links installed cvcgl, which now exports -limgui) ──
+          $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
+          cvcpkg install imgui --prefix "$imgui" --config release --link shared
           cmake -B build-pycvcgl -S bindings/pycvc `
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CONFIGURATION_TYPES=Release `
             -DCVC_BUILD_PYCVC_CORE=OFF -DCVC_BUILD_PYCVC_GL=ON `
             -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-pycvcgl" `
             -DPython3_EXECUTABLE="$python" -DPython3_NumPy_INCLUDE_DIR="$npyInc" `
-            -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath;$env:GITHUB_WORKSPACE/stage-cvcgl"
+            -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath;$imgui;$env:GITHUB_WORKSPACE/stage-cvcgl"
           cmake --build build-pycvcgl --config Release
           cmake --install build-pycvcgl --config Release
           New-Item -ItemType Directory -Force -Path dist | Out-Null
