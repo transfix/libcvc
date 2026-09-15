@@ -1,0 +1,101 @@
+name: publish-cvcgl-wasm
+
+# Build + publish libcvc and cvcgl for the wasm-mt platform (WebAssembly +
+# pthreads), so downstream wasm consumers (CVC-DBG/cvcdbg's demos) can
+# `cvcpkg install cvc/cvcgl --platform wasm-mt` instead of rebuilding cvcGL from
+# source. The wasm-mt DEPS (vtk/imgui/boost/codecs, all wasm32) are already on
+# the catalog; only libcvc + cvcgl were missing. cvcgl is built WITH imgui, so
+# the browser overlay works.
+#
+# Runs on the cy-pca self-hosted runner (catx-03) — the only one with the emsdk
+# toolchain + a writable wasm build environment. Dry-run by default (builds +
+# packs, no publish); set dry_run=false to publish.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build + pack only (no publish) when true'
+        type: boolean
+        default: true
+
+concurrency:
+  group: publish-cvcgl-wasm
+  cancel-in-progress: false
+
+jobs:
+  build-publish:
+    runs-on: [self-hosted, Linux, X64, cy-pca]
+    env:
+      CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+      INST: ${{ github.workspace }}/wasm-inst
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Put cvcpkg + the cvcpkg cmake on PATH
+        # Same probe the cyberpcangel-cvcgl nightly uses: the git-installed cvcpkg
+        # is at ~/.local/bin; the cvcpkg-managed cmake 3.31 at /opt/cvc-wasm.
+        run: |
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "/opt/cvc-wasm/cmake-cvcpkg/bin" >> "$GITHUB_PATH"
+
+      - name: Prove cvcpkg knows wasm-mt
+        run: cvcpkg install --help 2>&1 | grep -q 'wasm-mt' || { echo "::error::cvcpkg lacks wasm-mt"; exit 1; }
+
+      - name: Install the wasm-mt dep closure
+        # The same list + flags the nightly installs; libcvc/cvcGL link these.
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui vtk; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3 || { echo "::error::failed to install wasm dep $p"; exit 1; }
+          done
+
+      - name: Build + install libcvc + cvcGL (wasm-mt, with imgui)
+        # The proven build from CVC-DBG/cvcdbg wasm/build-standalone.sh step 1:
+        # ONE emscripten configure builds both cvc + cvcGL targets and installs
+        # them into $INST. -DCVC_BUILD_EXAMPLES=OFF: libcvc's own demos never build.
+        run: |
+          # shellcheck disable=SC1091
+          source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          emcmake cmake -G Ninja -S . -B build-wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$INST" \
+            -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_CLI=OFF \
+            -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=ON -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=ON \
+            -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=ON -DCVC_STATE_EXEC=OFF \
+            -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON
+          cmake --build build-wasm --target cvc cvcGL -j"$(nproc)"
+          cmake --install build-wasm
+          test -f "$INST/lib/libcvc.a" && test -f "$INST/lib/libcvcGL.a" \
+            || { echo "::error::wasm build produced no libcvc.a/libcvcGL.a"; exit 1; }
+          grep -q CVC_ENABLE_IMGUI "$INST/lib/cmake/cvcGL/cvcGLTargets.cmake" \
+            || echo "::warning::cvcGL wasm built WITHOUT imgui (overlay will be inert)"
+
+      - name: Pack + publish libcvc + cvcgl wasm-mt
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          mkdir -p dist
+          for r in libcvc cvcgl; do
+            cvcpkg pack "cvcpkg/recipes/$r" --from-prefix "$INST" \
+              --platform wasm-mt --config release --link static \
+              --local --output-dir dist
+          done
+          ls -la dist/
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry-run: built + packed, not publishing"; exit 0
+          fi
+          [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
+          # Publish by archive PATH (the archive's own manifest carries the
+          # wasm-mt platform/arch; publish-by-name would re-derive the host arch).
+          for a in dist/libcvc-*-wasm-mt-*.tar.gz dist/cvcgl-*-wasm-mt-*.tar.gz; do
+            echo "=== publish $a ==="
+            cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
+          done
