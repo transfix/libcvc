@@ -59,38 +59,56 @@ target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 # backend: ImGuiOverlay feeds ImGuiIO from the VTK interactor itself, which is
 # what lets the same code path work in the browser (VTK owns the canvas).
 option(CVC_ENABLE_IMGUI "Build the cvcGL Dear ImGui overlay (ImGuiOverlay)" ON)
+set(CVC_IMGUI_VIA_CONFIG OFF)  # set when linked via the imgui::imgui cmake target
 if(CVC_ENABLE_IMGUI)
-  find_path(CVC_IMGUI_INCLUDE_DIR imgui.h PATH_SUFFIXES imgui)
-  find_library(CVC_IMGUI_LIBRARY NAMES imgui)
-  if(CVC_IMGUI_INCLUDE_DIR AND CVC_IMGUI_LIBRARY
-     AND EXISTS "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
-    target_sources(cvcGL PRIVATE "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
-    # PUBLIC: demos/consumers write ImGui::* in their draw callbacks.
-    #
-    # Split BUILD_/INSTALL_INTERFACE for the SAME reason X11 is linked by name
-    # below: find_library hands back an ABSOLUTE builder path, and cvcGL is a
-    # static archive, so an unguarded entry is baked verbatim into the exported
-    # cvcGLTargets.cmake and breaks any consumer on another machine with
-    # "missing and no known rule to make it". This build keeps the exact library
-    # it found; the export carries a relocatable -limgui that the consumer's own
-    # linker resolves out of its prefix (where imgui is declared a dependency).
-    # The include dir needs the same treatment — a consumer of the INSTALLED
-    # cvcGL is told CVC_ENABLE_IMGUI is on, so it must be able to find imgui.h.
-    target_include_directories(cvcGL PUBLIC
-      "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>"
-      "$<INSTALL_INTERFACE:include/imgui>")
-    target_link_libraries(cvcGL PUBLIC
-      "$<BUILD_INTERFACE:${CVC_IMGUI_LIBRARY}>"
-      "$<INSTALL_INTERFACE:imgui>")
+  # Prefer the imgui cmake package (imgui::imgui imported target — relocatable,
+  # carries its own include + lib). A consumer of the installed cvcGL then
+  # re-finds it via find_dependency(imgui) in cvcGLConfig.cmake, so nothing has
+  # to hand-wire -limgui or an -L path. Falls back to header/lib discovery for
+  # an older imgui bundle that ships no cmake config.
+  find_package(imgui CONFIG QUIET)
+  set(_cvc_imgui_inc "")
+  if(TARGET imgui::imgui)
+    get_target_property(_cvc_imgui_inc imgui::imgui INTERFACE_INCLUDE_DIRECTORIES)
+  endif()
+  if(TARGET imgui::imgui AND _cvc_imgui_inc
+     AND EXISTS "${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp")
+    target_sources(cvcGL PRIVATE "${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp")
+    target_link_libraries(cvcGL PUBLIC imgui::imgui)  # PUBLIC: consumers write ImGui::*
     target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_IMGUI)
     if(EMSCRIPTEN) # WebGL2 loader for the browser build
-      set_source_files_properties("${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp"
+      set_source_files_properties("${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp"
                                   PROPERTIES COMPILE_DEFINITIONS IMGUI_IMPL_OPENGL_ES3)
     endif()
-    message(STATUS "cvcGL: Dear ImGui overlay ENABLED (${CVC_IMGUI_LIBRARY})")
+    set(CVC_IMGUI_VIA_CONFIG ON)
+    message(STATUS "cvcGL: Dear ImGui overlay ENABLED (imgui::imgui target)")
   else()
-    set(CVC_ENABLE_IMGUI OFF)
-    message(STATUS "cvcGL: imgui not found -- ImGuiOverlay compiles to no-ops")
+    # Fallback: a config-less imgui bundle — locate by header/lib. The export
+    # carries a relocatable -limgui the consumer resolves out of its own prefix
+    # (see the X11 comment below for the same BUILD_/INSTALL_INTERFACE split;
+    # find_library returns an absolute builder path a static archive would bake
+    # into cvcGLTargets.cmake verbatim).
+    find_path(CVC_IMGUI_INCLUDE_DIR imgui.h PATH_SUFFIXES imgui)
+    find_library(CVC_IMGUI_LIBRARY NAMES imgui)
+    if(CVC_IMGUI_INCLUDE_DIR AND CVC_IMGUI_LIBRARY
+       AND EXISTS "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
+      target_sources(cvcGL PRIVATE "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
+      target_include_directories(cvcGL PUBLIC
+        "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>"
+        "$<INSTALL_INTERFACE:include/imgui>")
+      target_link_libraries(cvcGL PUBLIC
+        "$<BUILD_INTERFACE:${CVC_IMGUI_LIBRARY}>"
+        "$<INSTALL_INTERFACE:imgui>")
+      target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_IMGUI)
+      if(EMSCRIPTEN) # WebGL2 loader for the browser build
+        set_source_files_properties("${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp"
+                                    PROPERTIES COMPILE_DEFINITIONS IMGUI_IMPL_OPENGL_ES3)
+      endif()
+      message(STATUS "cvcGL: Dear ImGui overlay ENABLED (${CVC_IMGUI_LIBRARY}, no cmake config)")
+    else()
+      set(CVC_ENABLE_IMGUI OFF)
+      message(STATUS "cvcGL: imgui not found -- ImGuiOverlay compiles to no-ops")
+    endif()
   endif()
 endif()
 
@@ -157,6 +175,14 @@ install(EXPORT cvcGLTargets
   FILE cvcGLTargets.cmake
   DESTINATION lib/cmake/cvcGL
 )
+
+# @CVCGL_IMGUI_DEP@ — a find_dependency(imgui) line iff cvcGL linked the
+# imgui::imgui target this build (so consumers re-find it); empty otherwise.
+if(CVC_IMGUI_VIA_CONFIG)
+  set(CVCGL_IMGUI_DEP "find_dependency(imgui CONFIG)")
+else()
+  set(CVCGL_IMGUI_DEP "")
+endif()
 
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so
 # find_dependency(VTK COMPONENTS ...) re-finds the same modules for consumers.
