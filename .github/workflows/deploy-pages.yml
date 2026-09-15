@@ -38,7 +38,7 @@ jobs:
     env:
       CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk
       CVC_WASM_DEPS: /opt/cvc-wasm/deps-wasm-mt
-      # scene-austin-south-web + vehicle-humvee land here; the wasm build's
+      # scene-austin-south-small + vehicle-humvee land here; the wasm build's
       # CMake --preload-file bakes this dir into nav_city_swarm.data.
       CVC_WASM_BUNDLE: /opt/cvc-wasm/deps-wasm-mt/share/cvc-scenes/austin_south
       # grl-snam-weights lands here; --preload-file bakes the trained CoefMLP into
@@ -67,7 +67,7 @@ jobs:
               --platform wasm --arch x86_64 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3 || echo "  (skipped: $p)"
           done
-          cvcpkg install scene-austin-south-web vehicle-humvee grl-snam-weights \
+          cvcpkg install scene-austin-south-small vehicle-humvee grl-snam-weights \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (scene/weights bundles absent — wasm demo falls back to synthetic + default_biased)"
