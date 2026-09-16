@@ -29,6 +29,13 @@ _weights="$CVC_DEPS_PREFIX/share/grl-snam-weights/coef_sdf.cvcnav"
 [ -d "$_austin" ] && BUNDLE_ARGS+=("-DCVC_WASM_BUNDLE=$_austin")
 [ -f "$_weights" ] && BUNDLE_ARGS+=("-DCVC_WASM_NAV_WEIGHTS=$_weights")
 
+# IMAGEMAGICK is OFF here on purpose. cvc's zero-dependency stb image handler
+# (src/cvc/image/stb_io.cpp) is registered AHEAD of Magick for png/jpg/bmp/tga/gif
+# reads, so the demos' textures (the Austin satellite.png, glb base-color maps)
+# load without it; ImageMagick only backs volume_ops image I/O, which the nav
+# gallery never exercises. Linking it in would drag libMagickCore's bz2 / libxml2
+# / lzma delegate symbols into the executable link, and wasm-ld fails on them
+# (they are not propagated to the demo link line). OFF keeps the wasm link clean.
 emcmake cmake -G Ninja \
     -S "$CVC_SOURCE_DIR" \
     -B "$CVC_BUILD_DIR" \
@@ -41,7 +48,7 @@ emcmake cmake -G Ninja \
     -DDISABLE_CGAL=ON \
     -DCVC_USING_HDF5=OFF \
     -DCVC_USING_IMOD_MRC=OFF \
-    -DCVC_ENABLE_IMAGEMAGICK=ON \
+    -DCVC_ENABLE_IMAGEMAGICK=OFF \
     -DCVC_ENABLE_FFTW=OFF \
     -DCVC_FFT_PROVIDER=none \
     -DCVC_ENABLE_ASSIMP=ON \
