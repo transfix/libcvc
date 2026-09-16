@@ -26,24 +26,109 @@ if(@CVC_ENABLE_OPENMP@)
 endif()
 
 if(@CVC_ENABLE_IMAGEMAGICK@)
-  find_package(ImageMagick COMPONENTS Magick++ MagickCore QUIET)
-  # Windows: the stock FindImageMagick module uses NO_DEFAULT_PATH and so
-  # never searches CMAKE_PREFIX_PATH; the cvcpkg imagemagick bundle is
-  # innoextracted into the prefix (no registry entry / .pc). Mirror the
-  # prefix-searching fallback used when libcvc itself was built (see
-  # src/cvc/CMakeLists.txt) so consumers can resolve it too.
-  if(WIN32 AND NOT ImageMagick_FOUND)
-    find_path(ImageMagick_INCLUDE_DIR NAMES Magick++.h
-              PATH_SUFFIXES ImageMagick ImageMagick-7)
-    find_library(ImageMagick_Magickxx_LIBRARY NAMES Magick++ CORE_RL_Magick++_)
-    find_library(ImageMagick_MagickCore_LIBRARY NAMES MagickCore CORE_RL_MagickCore_)
-    if(ImageMagick_INCLUDE_DIR AND ImageMagick_Magickxx_LIBRARY
-       AND ImageMagick_MagickCore_LIBRARY)
-      set(ImageMagick_FOUND TRUE)
-      set(ImageMagick_INCLUDE_DIRS "${ImageMagick_INCLUDE_DIR}")
-      set(ImageMagick_LIBRARIES
-          "${ImageMagick_Magickxx_LIBRARY};${ImageMagick_MagickCore_LIBRARY}")
+  # cvc::cvc's INTERFACE_LINK_LIBRARIES names the ImageMagick::Magick++ and
+  # ImageMagick::MagickCore IMPORTED targets (that is how libcvc linked ImageMagick
+  # at build time), so EVERY consumer must be able to materialise them or the first
+  # add_library()/add_executable() that links cvc::cvc dies with "target ... not
+  # found. Perhaps a find_package() call is missing for an IMPORTED target". Try the
+  # stock module first (system installs / Magick++-config on PATH; also a no-op when
+  # a parent build already created the targets).
+  if(NOT TARGET ImageMagick::Magick++ OR NOT TARGET ImageMagick::MagickCore)
+    find_package(ImageMagick COMPONENTS Magick++ MagickCore QUIET)
+  endif()
+
+  # Hermetic-prefix fallback. The stock FindImageMagick module routinely fails in a
+  # relocated cvcpkg prefix (no Magick++-config on PATH; on Windows NO_DEFAULT_PATH
+  # skips CMAKE_PREFIX_PATH) and, even when it does find the libs, older modules set
+  # only ImageMagick_LIBRARIES and never the ImageMagick::* targets. Rebuild the
+  # targets from the pkg-config files cvcpkg ships. Each .pc's `Requires` +
+  # `Libs.private` carry the FULL static delegate closure (Magick++ -> MagickWand ->
+  # MagickCore -> bz2/jpeg/png/webp/tiff/…), so the STATIC link line below is correct
+  # for a STATIC ImageMagick and a safe superset for a SHARED one (the linker dedups
+  # the delegates a shared libMagick++ already resolves). Supports both.
+  if(NOT TARGET ImageMagick::Magick++ OR NOT TARGET ImageMagick::MagickCore)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_search_module(_CVC_IM_CORE QUIET MagickCore-7.Q16HDRI MagickCore-7.Q16 MagickCore)
+      pkg_search_module(_CVC_IM_XX   QUIET Magick++-7.Q16HDRI  Magick++-7.Q16  Magick++)
+      if(_CVC_IM_CORE_FOUND AND NOT TARGET ImageMagick::MagickCore)
+        add_library(ImageMagick::MagickCore INTERFACE IMPORTED)
+        if(_CVC_IM_CORE_STATIC_LINK_LIBRARIES)
+          set(_cvc_core_libs "${_CVC_IM_CORE_STATIC_LINK_LIBRARIES}")
+        else()
+          set(_cvc_core_libs "${_CVC_IM_CORE_LINK_LIBRARIES}")
+        endif()
+        set_target_properties(ImageMagick::MagickCore PROPERTIES
+          INTERFACE_INCLUDE_DIRECTORIES "${_CVC_IM_CORE_INCLUDE_DIRS}"
+          INTERFACE_LINK_LIBRARIES "${_cvc_core_libs}")
+        set(_cvc_im_synth TRUE)
+      endif()
+      if(_CVC_IM_XX_FOUND AND NOT TARGET ImageMagick::Magick++)
+        add_library(ImageMagick::Magick++ INTERFACE IMPORTED)
+        if(_CVC_IM_XX_STATIC_LINK_LIBRARIES)
+          set(_cvc_xx_libs "${_CVC_IM_XX_STATIC_LINK_LIBRARIES}")
+        else()
+          set(_cvc_xx_libs "${_CVC_IM_XX_LINK_LIBRARIES}")
+        endif()
+        set_target_properties(ImageMagick::Magick++ PROPERTIES
+          INTERFACE_INCLUDE_DIRECTORIES "${_CVC_IM_XX_INCLUDE_DIRS}"
+          INTERFACE_LINK_LIBRARIES "${_cvc_xx_libs}")
+      endif()
     endif()
+  endif()
+
+  # Last resort (no .pc — e.g. the innoextracted Windows bundle — or no pkg-config
+  # in an emcmake toolchain): find the libs directly under the prefix and CREATE the
+  # imported targets (the old fallback set ImageMagick_LIBRARIES but never the
+  # targets cvc::cvc's interface names, so consumers still failed). No delegate
+  # closure here; sufficient for a shared ImageMagick (delegates in the .so) and for
+  # a shared libcvc that already absorbed a static ImageMagick.
+  if(NOT TARGET ImageMagick::Magick++ OR NOT TARGET ImageMagick::MagickCore)
+    find_path(_CVC_IM_INCDIR NAMES Magick++.h
+              PATH_SUFFIXES ImageMagick ImageMagick-7 ImageMagick-6)
+    find_library(_CVC_IM_XX_LIB   NAMES Magick++-7.Q16HDRI Magick++-6.Q16 Magick++ CORE_RL_Magick++_)
+    find_library(_CVC_IM_CORE_LIB NAMES MagickCore-7.Q16HDRI MagickCore-6.Q16 MagickCore CORE_RL_MagickCore_)
+    if(_CVC_IM_XX_LIB AND _CVC_IM_CORE_LIB)
+      if(NOT TARGET ImageMagick::MagickCore)
+        add_library(ImageMagick::MagickCore UNKNOWN IMPORTED)
+        set_target_properties(ImageMagick::MagickCore PROPERTIES
+          IMPORTED_LOCATION "${_CVC_IM_CORE_LIB}")
+        if(_CVC_IM_INCDIR)
+          set_target_properties(ImageMagick::MagickCore PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${_CVC_IM_INCDIR}")
+        endif()
+        set(_cvc_im_synth TRUE)
+      endif()
+      if(NOT TARGET ImageMagick::Magick++)
+        add_library(ImageMagick::Magick++ UNKNOWN IMPORTED)
+        set_target_properties(ImageMagick::Magick++ PROPERTIES
+          IMPORTED_LOCATION "${_CVC_IM_XX_LIB}"
+          INTERFACE_LINK_LIBRARIES ImageMagick::MagickCore)
+        if(_CVC_IM_INCDIR)
+          set_target_properties(ImageMagick::Magick++ PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${_CVC_IM_INCDIR}")
+        endif()
+      endif()
+    endif()
+  endif()
+
+  # Append the ImageMagick codec delegate closure to a SYNTHESISED MagickCore target.
+  # MagickCore.pc does not list the delegates (they are separate cvcpkg bundles), so a
+  # STATIC ImageMagick needs them appended explicitly — the same set
+  # src/cvc/CMakeLists.txt links PRIVATE at build time. Harmless for a SHARED
+  # ImageMagick (its .so already resolves them; the linker dedups). find_library
+  # honours CMAKE_FIND_ROOT_PATH so this works under emcmake, and each missing delegate
+  # is silently skipped. freetype is omitted on purpose (VTK ships vtkfreetype with the
+  # same symbols -> wasm-ld duplicate-symbol).
+  if(_cvc_im_synth AND TARGET ImageMagick::MagickCore)
+    foreach(_cvc_del bz2 jpeg png16 webp webpmux webpdemux webpdecoder sharpyuv
+                     tiff xml2 lzma Lerc brotlidec brotlicommon z)
+      find_library(_CVC_DEL_${_cvc_del} NAMES ${_cvc_del})
+      if(_CVC_DEL_${_cvc_del})
+        set_property(TARGET ImageMagick::MagickCore APPEND PROPERTY
+          INTERFACE_LINK_LIBRARIES "${_CVC_DEL_${_cvc_del}}")
+      endif()
+    endforeach()
   endif()
 endif()
 
