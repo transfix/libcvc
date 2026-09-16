@@ -166,7 +166,7 @@ jobs:
           test -f "$EX_INST/share/cvcgl-examples/web/index.html" \
             || { echo "::error::cvcgl-examples wasm gallery missing web/index.html"; exit 1; }
           echo "=== gallery web/ contents ==="; ls -la "$EX_INST/share/cvcgl-examples/web" | head -20
-          cvcpkg pack cvcgl-examples --from-prefix "$EX_INST" \
+          cvcpkg pack cvcpkg/recipes/cvcgl-examples --from-prefix "$EX_INST" \
             --platform wasm-mt --config release --link static \
             --local --output-dir dist
           ls -la dist/cvcgl-examples-*wasm-mt* || true
