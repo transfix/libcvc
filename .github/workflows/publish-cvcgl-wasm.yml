@@ -7,9 +7,17 @@ name: publish-cvcgl-wasm
 # the catalog; only libcvc + cvcgl were missing. cvcgl is built WITH imgui, so
 # the browser overlay works.
 #
-# Runs on the cy-pca self-hosted runner (catx-03) — the only one with the emsdk
-# toolchain + a writable wasm build environment. Dry-run by default (builds +
-# packs, no publish); set dry_run=false to publish.
+# Also builds + publishes the cvcgl-examples wasm-mt NAV GALLERY (the threaded
+# browser demos cvcgl-examples-web serves: terrain_lab + nav_city_swarm/drive +
+# nav_fog_ghost with the Austin scene + weights preloaded — the same gallery that
+# deploys to gh-pages). It recompiles cvc+cvcGL from source against the same
+# wasm-mt dep closure ($WASM_DEPS), so it reuses the installed deps but does NOT
+# consume the SDK bundle built above.
+#
+# Runner-agnostic: runs on GitHub-hosted ubuntu-latest and provisions the emsdk
+# toolchain + cmake/ninja from the cvcpkg catalog, so it is not tied to any one
+# box (it used to require catx-03's pre-installed /opt/cvc-wasm/emsdk). Dry-run by
+# default (builds + packs, no publish); set dry_run=false to publish.
 
 on:
   workflow_dispatch:
@@ -25,27 +33,44 @@ concurrency:
 
 jobs:
   build-publish:
-    runs-on: [self-hosted, Linux, X64, cy-pca]
+    # Runner-agnostic: GitHub-hosted ubuntu-latest, self-provisioning the emsdk
+    # toolchain + cmake/ninja from the cvcpkg catalog. No dependency on a box with
+    # a pre-installed emsdk (this used to pin to catx-03's /opt/cvc-wasm/emsdk) —
+    # emsdk is just a cvcpkg package, so any linux runner works identically.
+    runs-on: ubuntu-latest
     env:
-      CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk
+      EMSDK_DIR: ${{ github.workspace }}/emsdk
       WASM_DEPS: ${{ github.workspace }}/wasm-deps
       INST: ${{ github.workspace }}/wasm-inst
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cvcpkg via install.sh + put its cmake on PATH
-        # Install the latest cvcpkg release standalone binary (>= 2.2.1, which
-        # fixes from-prefix wasm packs to tag wasm32 not the host x86_64) rather
-        # than relying on whatever the runner has pre-installed. install.sh drops
-        # the binary in ~/.local/bin; the cvcpkg-managed cmake 3.31 is at
-        # /opt/cvc-wasm/cmake-cvcpkg (the cyberpcangel-cvcgl nightly's probe).
+      - name: Install cvcpkg + cmake/ninja from the catalog
+        # cvcpkg standalone binary (>= 2.2.1: from-prefix wasm packs tag wasm32,
+        # not the host arch) into ~/.local/bin, then the cvcpkg-managed cmake 3.31
+        # + ninja so the build tools match the fleet on any runner (ubuntu-latest
+        # ships an older cmake). No pre-installed host paths.
         run: |
           curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "/opt/cvc-wasm/cmake-cvcpkg/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "${{ github.workspace }}/tools" \
+            --config release --link shared
+          echo "${{ github.workspace }}/tools/bin" >> "$GITHUB_PATH"
 
       - name: Prove cvcpkg knows wasm-mt
         run: cvcpkg install --help 2>&1 | grep -q 'wasm-mt' || { echo "::error::cvcpkg lacks wasm-mt"; exit 1; }
+
+      - name: Provision the Emscripten SDK from the catalog
+        # emsdk is a cvcpkg package (linux/macos/windows); self-provisioning it is
+        # what makes this job runner-agnostic — no box needs a pre-installed
+        # toolchain. Sets CVC_EMSDK_DIR for the build steps below.
+        run: |
+          cvcpkg install emsdk --platform linux --prefix "$EMSDK_DIR" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$EMSDK_DIR/emsdk_env.sh" \
+            || { echo "::error::emsdk bundle has no emsdk_env.sh at $EMSDK_DIR"; exit 1; }
+          echo "CVC_EMSDK_DIR=$EMSDK_DIR" >> "$GITHUB_ENV"
 
       - name: Install the wasm-mt dep closure
         # The same list + flags the nightly installs; libcvc/cvcGL link these.
@@ -99,7 +124,76 @@ jobs:
           [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
           # Publish by archive PATH (the archive's own manifest carries the
           # wasm-mt platform/arch; publish-by-name would re-derive the host arch).
+          # Skip any archive whose exact name+version is already on the catalog:
+          # libcvc/cvcgl wasm-mt are typically already published at these versions,
+          # and re-publishing the same +cvc.N would fail. A revision bump republishes.
           for a in dist/libcvc-*-wasm-mt-*.tar.gz dist/cvcgl-*-wasm-mt-*.tar.gz; do
+            base=$(basename "$a" .tar.gz)
+            name=$(echo "$base" | sed -E 's/-[0-9].*$//')
+            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-wasm-mt-.*$//")
+            if cvcpkg search "$name" --platform wasm-mt 2>/dev/null \
+                 | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
+              echo "=== skip $name $ver (already on catalog) ==="; continue
+            fi
+            echo "=== publish $a ==="
+            cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
+          done
+
+      - name: Build + pack + publish cvcgl-examples (wasm-mt nav gallery)
+        # The browser nav gallery cvcgl-examples-web serves: terrain_lab +
+        # nav_city_swarm + nav_city_drive + nav_fog_ghost, threaded, with the real
+        # Austin scene + trained weights preloaded — the same set gh-pages serves.
+        # Drives the recipe's OWN build-wasm.sh against the prebuilt wasm-mt closure
+        # already in $WASM_DEPS (vtk/boost/assimp/imagemagick/imgui/codecs from the
+        # dep-closure step). NOT `cvcpkg build --with-deps`: that rebuilds the whole
+        # closure — incl. the python311 host tool — FROM SOURCE (which then needs
+        # patchelf on PATH and takes ages). Builds into a CLEAN $EX_INST separate
+        # from the deps, so `pack --from-prefix` archives only the gallery.
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          EX_INST="${{ github.workspace }}/wasm-examples-inst"
+          # The nav demos preload these into MEMFS (declared any-platform data deps).
+          for p in scene-austin-south-small grl-snam-weights vehicle-humvee; do
+            echo "=== install data: $p ==="
+            cvcpkg install "$p" --platform wasm-mt --prefix "$WASM_DEPS" \
+              --no-fallback-to-source 2>&1 | tail -2 \
+              || { echo "::error::failed to install data package $p"; exit 1; }
+          done
+          # The trained weights + Austin scene are ESSENTIAL: without them
+          # build-wasm.sh silently falls back to a synthetic city + default net.
+          # Fail loudly on a preload miss rather than shipping a gutted gallery.
+          test -d "$WASM_DEPS/share/cvc-scenes/austin_south" \
+            || { echo "::error::Austin scene not staged for preload"; exit 1; }
+          test -f "$WASM_DEPS/share/grl-snam-weights/coef_sdf.cvcnav" \
+            || { echo "::error::trained weights not staged for preload"; exit 1; }
+          # build-wasm.sh sources emsdk itself (via env-wasm.sh, using CVC_EMSDK_DIR).
+          export CVC_SOURCE_DIR="${{ github.workspace }}"
+          export CVC_BUILD_DIR="${{ github.workspace }}/build-wasm-ex"
+          export CVC_INSTALL_DIR="$EX_INST"
+          export CVC_DEPS_PREFIX="$WASM_DEPS"
+          bash cvcpkg/recipes/cvcgl-examples/build-wasm.sh
+          test -f "$EX_INST/share/cvcgl-examples/web/index.html" \
+            || { echo "::error::cvcgl-examples wasm gallery missing web/index.html"; exit 1; }
+          echo "=== gallery web/ contents ==="; ls -la "$EX_INST/share/cvcgl-examples/web" | head -20
+          cvcpkg pack cvcpkg/recipes/cvcgl-examples --from-prefix "$EX_INST" \
+            --platform wasm-mt --config release --link static \
+            --local --output-dir dist
+          ls -la dist/cvcgl-examples-*wasm-mt* || true
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry-run: built + packed cvcgl-examples gallery, not publishing"; exit 0
+          fi
+          [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
+          # Skip if this exact version is already on the catalog (re-run safety);
+          # a cvc_revision bump in the recipe republishes.
+          for a in dist/cvcgl-examples-*-wasm-mt-*.tar.gz; do
+            base=$(basename "$a" .tar.gz)
+            name=$(echo "$base" | sed -E 's/-[0-9].*$//')
+            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-wasm-mt-.*$//")
+            if cvcpkg search "$name" --platform wasm-mt 2>/dev/null \
+                 | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
+              echo "=== skip $name $ver (already on catalog) ==="; continue
+            fi
             echo "=== publish $a ==="
             cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
           done

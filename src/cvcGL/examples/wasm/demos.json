@@ -8,6 +8,7 @@
     "volren_bunny",
     "volslice_bunny",
     "nav_city_swarm",
+    "nav_city_drive",
     "nav_fog_ghost",
     "bunny_shadow"
   ],
@@ -35,6 +36,12 @@
       "blurb":
           "800 vehicles cross a foggy city with no global plan — the GRL-SNAM reactive swarm on the cvc::nav runtime (no Python, no libtorch). Tune agents, fog and belief live, then Apply / Restart to watch shared belief beat private belief on the same city.",
       "thumb": "img/nav_city_swarm.jpg"
+    },
+    "nav_city_drive": {
+      "desc": "colour-coded convoys thread real downtown Austin to six rally points",
+      "blurb":
+          "The legible cousin of the swarm: a few dozen vehicles in colour-coded convoys thread real downtown Austin to six rally points with no global plan — pure local reaction on the cvc::nav runtime (no Python, no libtorch), driven by the published trained CoefMLP. Chase-cam onto a lead vehicle, drag a rally point to re-route a whole convoy live, and under fog watch each convoy's sensed corridor light up in its own colour. Switch belief between shared, grouped and private.",
+      "thumb": "img/nav_city_drive.jpg"
     },
     "nav_fog_ghost": {
       "desc": "one agent detours a phantom wall, then senses it clear",
