@@ -10,8 +10,9 @@ name: publish-cvcgl-wasm
 # Also builds + publishes the cvcgl-examples wasm-mt NAV GALLERY (the threaded
 # browser demos cvcgl-examples-web serves: terrain_lab + nav_city_swarm/drive +
 # nav_fog_ghost with the Austin scene + weights preloaded — the same gallery that
-# deploys to gh-pages). That step stands alone (cvcgl-examples statically compiles
-# cvc+cvcGL from source, so it does not depend on the SDK bundle built above).
+# deploys to gh-pages). It recompiles cvc+cvcGL from source against the same
+# wasm-mt dep closure ($WASM_DEPS), so it reuses the installed deps but does NOT
+# consume the SDK bundle built above.
 #
 # Runner-agnostic: runs on GitHub-hosted ubuntu-latest and provisions the emsdk
 # toolchain + cmake/ninja from the cvcpkg catalog, so it is not tied to any one
@@ -129,24 +130,42 @@ jobs:
           done
 
       - name: Build + pack + publish cvcgl-examples (wasm-mt nav gallery)
-        # The browser nav gallery for cvcgl-examples-web: terrain_lab +
-        # nav_city_swarm + nav_city_drive + nav_fog_ghost, threaded, with the
+        # The browser nav gallery cvcgl-examples-web serves: terrain_lab +
+        # nav_city_swarm + nav_city_drive + nav_fog_ghost, threaded, with the real
         # Austin scene + trained weights preloaded — the same set gh-pages serves.
-        # cvcgl-examples' build-wasm.sh compiles cvc+cvcGL from source statically
-        # (it does NOT link the SDK bundle above), so this stands alone; --with-deps
-        # resolves its wasm-mt deps + the any-platform scene/weights/humvee data.
+        # Drives the recipe's OWN build-wasm.sh against the prebuilt wasm-mt closure
+        # already in $WASM_DEPS (vtk/boost/assimp/imagemagick/imgui/codecs from the
+        # dep-closure step). NOT `cvcpkg build --with-deps`: that rebuilds the whole
+        # closure — incl. the python311 host tool — FROM SOURCE (which then needs
+        # patchelf on PATH and takes ages). Builds into a CLEAN $EX_INST separate
+        # from the deps, so `pack --from-prefix` archives only the gallery.
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
         run: |
-          # shellcheck disable=SC1091
-          source "$CVC_EMSDK_DIR/emsdk_env.sh"
           EX_INST="${{ github.workspace }}/wasm-examples-inst"
-          cvcpkg build cvcgl-examples \
-            --platform wasm-mt --config release --link static \
-            --with-deps --recipes-dir cvcpkg/recipes \
-            --prefix "$EX_INST"
+          # The nav demos preload these into MEMFS (declared any-platform data deps).
+          for p in scene-austin-south-small grl-snam-weights vehicle-humvee; do
+            echo "=== install data: $p ==="
+            cvcpkg install "$p" --platform wasm-mt --prefix "$WASM_DEPS" \
+              --no-fallback-to-source 2>&1 | tail -2 \
+              || { echo "::error::failed to install data package $p"; exit 1; }
+          done
+          # The trained weights + Austin scene are ESSENTIAL: without them
+          # build-wasm.sh silently falls back to a synthetic city + default net.
+          # Fail loudly on a preload miss rather than shipping a gutted gallery.
+          test -d "$WASM_DEPS/share/cvc-scenes/austin_south" \
+            || { echo "::error::Austin scene not staged for preload"; exit 1; }
+          test -f "$WASM_DEPS/share/grl-snam-weights/coef_sdf.cvcnav" \
+            || { echo "::error::trained weights not staged for preload"; exit 1; }
+          # build-wasm.sh sources emsdk itself (via env-wasm.sh, using CVC_EMSDK_DIR).
+          export CVC_SOURCE_DIR="${{ github.workspace }}"
+          export CVC_BUILD_DIR="${{ github.workspace }}/build-wasm-ex"
+          export CVC_INSTALL_DIR="$EX_INST"
+          export CVC_DEPS_PREFIX="$WASM_DEPS"
+          bash cvcpkg/recipes/cvcgl-examples/build-wasm.sh
           test -f "$EX_INST/share/cvcgl-examples/web/index.html" \
             || { echo "::error::cvcgl-examples wasm gallery missing web/index.html"; exit 1; }
+          echo "=== gallery web/ contents ==="; ls -la "$EX_INST/share/cvcgl-examples/web" | head -20
           cvcpkg pack cvcgl-examples --from-prefix "$EX_INST" \
             --platform wasm-mt --config release --link static \
             --local --output-dir dist
