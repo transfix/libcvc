@@ -8,11 +8,17 @@ recipe:
   # revisions OF an upstream version, so a version bump restarts it.
   # Bumped 1 -> 2: added the imgui dependency, so the published demos ship with
   # their control panels instead of silently compiled-out no-op overlays.
-  cvc_revision: 1
+  # Bumped 1 -> 2 (3.4.0): the wasm build now ships the full nav gallery, not
+  # just lsystem_forest — build-wasm.sh builds terrain_lab + nav_city_swarm +
+  # nav_city_drive + nav_fog_ghost (threaded/wasm-mt) and assembles it with
+  # build-pages.py into share/cvcgl-examples/web/, so cvcgl-examples-web serves
+  # the same gallery that deploys to gh-pages. lsystem_forest dropped from the
+  # wasm gallery (irrelevant to navigation).
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "cvcGL example programs as ready-to-run commands: the lsystem_forest island demo plus the GRL-SNAM navigation demos (nav_city_swarm / nav_fog_ghost / nav_finale — the torch-free cvc::nav reactive swarm rendered natively), as native binaries in bin/, the lsystem_forest WebAssembly browser build (share/cvcgl-examples/web/), and a cvcgl-examples-web launcher that serves the wasm demo cross-origin-isolated and opens a browser."
+  description: "cvcGL example programs as ready-to-run commands: the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost / nav_finale — the torch-free cvc::nav reactive swarm rendered natively) plus terrain_lab, as native binaries in bin/, AND the full navigation gallery as a threaded (wasm-mt) WebAssembly browser build (share/cvcgl-examples/web/) with a cvcgl-examples-web launcher that serves it cross-origin-isolated (COOP/COEP) and opens a browser."
   homepage: https://github.com/transfix/libcvc
   license: LGPL-2.1-only
   tags: [scientific, graphics, examples, vtk, wasm]
@@ -62,15 +68,26 @@ depends:
     # wasm bundle (vtk 9.5.0+cvc.3, libcvc-deps feat/vtk-wasm-rendering) — the
     # older compute-only wasm vtk does not link this demo.
     - name: vtk
-      platforms: [wasm]
+      platforms: [wasm-mt]
     - name: boost
-      platforms: [wasm]
+      platforms: [wasm-mt]
     - name: zstd
-      platforms: [wasm]
+      platforms: [wasm-mt]
     - name: zlib
-      platforms: [wasm]
-    - name: cgal
-      platforms: [wasm]
+      platforms: [wasm-mt]
+    # cgal is intentionally NOT a dependency: build-wasm.sh passes
+    # -DDISABLE_CGAL=ON so it is never linked, and there is no wasm-mt cgal
+    # bundle on the catalog anyway.
+    # Austin scene + trained policy, preloaded into the nav_city demos' MEMFS so
+    # the browser gallery shows real downtown Austin (matches the gh-pages build).
+    # Data-only (platform any); staged only for the wasm-mt build. build-wasm.sh
+    # preloads them when present and falls back to a synthetic city otherwise.
+    - name: scene-austin-south-small
+      platforms: [wasm-mt]
+    - name: grl-snam-weights
+      platforms: [wasm-mt]
+    - name: vehicle-humvee
+      platforms: [wasm-mt]
   runtime:
     # The native binary links the installed libcvc + VTK + Boost shared libs
     # (cvcGL itself is built static into the binary — no soname coupling to the
@@ -89,16 +106,21 @@ depends:
   host_tools:
     - cmake
     - ninja
+    # build-wasm.sh runs build-pages.py to assemble the browser gallery.
+    - python311
 
 build:
   # linux + windows (VTK bundles exist for both); macOS waits on a macOS VTK
-  # bundle (the same constraint that keeps the cvcgl SDK recipe off macOS).
+  # bundle (the same constraint that keeps the cvcgl SDK recipe off macOS). The
+  # wasm column is threaded (wasm-mt) so the in-browser gallery gets
+  # SharedArrayBuffer; the cvcgl-examples-web launcher serves it with the
+  # COOP/COEP headers that requires.
   matrix:
     - platform: linux
       script: build.sh
     - platform: windows
       script: build.ps1
-    - platform: wasm
+    - platform: wasm-mt
       host_platform: linux
       script: build-wasm.sh
 
@@ -106,6 +128,7 @@ package:
   files:
     - bin/lsystem_forest
     - bin/nav_city_swarm
+    - bin/nav_city_drive
     - bin/nav_fog_ghost
     - bin/nav_finale
     - bin/cvcgl-examples-web
