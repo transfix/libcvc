@@ -13,9 +13,10 @@ name: publish-cvcgl-wasm
 # deploys to gh-pages). That step stands alone (cvcgl-examples statically compiles
 # cvc+cvcGL from source, so it does not depend on the SDK bundle built above).
 #
-# Runs on the cy-pca self-hosted runner (catx-03) — the only one with the emsdk
-# toolchain + a writable wasm build environment. Dry-run by default (builds +
-# packs, no publish); set dry_run=false to publish.
+# Runner-agnostic: runs on GitHub-hosted ubuntu-latest and provisions the emsdk
+# toolchain + cmake/ninja from the cvcpkg catalog, so it is not tied to any one
+# box (it used to require catx-03's pre-installed /opt/cvc-wasm/emsdk). Dry-run by
+# default (builds + packs, no publish); set dry_run=false to publish.
 
 on:
   workflow_dispatch:
@@ -31,27 +32,44 @@ concurrency:
 
 jobs:
   build-publish:
-    runs-on: [self-hosted, Linux, X64, cy-pca]
+    # Runner-agnostic: GitHub-hosted ubuntu-latest, self-provisioning the emsdk
+    # toolchain + cmake/ninja from the cvcpkg catalog. No dependency on a box with
+    # a pre-installed emsdk (this used to pin to catx-03's /opt/cvc-wasm/emsdk) —
+    # emsdk is just a cvcpkg package, so any linux runner works identically.
+    runs-on: ubuntu-latest
     env:
-      CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk
+      EMSDK_DIR: ${{ github.workspace }}/emsdk
       WASM_DEPS: ${{ github.workspace }}/wasm-deps
       INST: ${{ github.workspace }}/wasm-inst
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cvcpkg via install.sh + put its cmake on PATH
-        # Install the latest cvcpkg release standalone binary (>= 2.2.1, which
-        # fixes from-prefix wasm packs to tag wasm32 not the host x86_64) rather
-        # than relying on whatever the runner has pre-installed. install.sh drops
-        # the binary in ~/.local/bin; the cvcpkg-managed cmake 3.31 is at
-        # /opt/cvc-wasm/cmake-cvcpkg (the cyberpcangel-cvcgl nightly's probe).
+      - name: Install cvcpkg + cmake/ninja from the catalog
+        # cvcpkg standalone binary (>= 2.2.1: from-prefix wasm packs tag wasm32,
+        # not the host arch) into ~/.local/bin, then the cvcpkg-managed cmake 3.31
+        # + ninja so the build tools match the fleet on any runner (ubuntu-latest
+        # ships an older cmake). No pre-installed host paths.
         run: |
           curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "/opt/cvc-wasm/cmake-cvcpkg/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "${{ github.workspace }}/tools" \
+            --config release --link shared
+          echo "${{ github.workspace }}/tools/bin" >> "$GITHUB_PATH"
 
       - name: Prove cvcpkg knows wasm-mt
         run: cvcpkg install --help 2>&1 | grep -q 'wasm-mt' || { echo "::error::cvcpkg lacks wasm-mt"; exit 1; }
+
+      - name: Provision the Emscripten SDK from the catalog
+        # emsdk is a cvcpkg package (linux/macos/windows); self-provisioning it is
+        # what makes this job runner-agnostic — no box needs a pre-installed
+        # toolchain. Sets CVC_EMSDK_DIR for the build steps below.
+        run: |
+          cvcpkg install emsdk --platform linux --prefix "$EMSDK_DIR" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$EMSDK_DIR/emsdk_env.sh" \
+            || { echo "::error::emsdk bundle has no emsdk_env.sh at $EMSDK_DIR"; exit 1; }
+          echo "CVC_EMSDK_DIR=$EMSDK_DIR" >> "$GITHUB_ENV"
 
       - name: Install the wasm-mt dep closure
         # The same list + flags the nightly installs; libcvc/cvcGL link these.
