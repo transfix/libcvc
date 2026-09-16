@@ -124,7 +124,17 @@ jobs:
           [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
           # Publish by archive PATH (the archive's own manifest carries the
           # wasm-mt platform/arch; publish-by-name would re-derive the host arch).
+          # Skip any archive whose exact name+version is already on the catalog:
+          # libcvc/cvcgl wasm-mt are typically already published at these versions,
+          # and re-publishing the same +cvc.N would fail. A revision bump republishes.
           for a in dist/libcvc-*-wasm-mt-*.tar.gz dist/cvcgl-*-wasm-mt-*.tar.gz; do
+            base=$(basename "$a" .tar.gz)
+            name=$(echo "$base" | sed -E 's/-[0-9].*$//')
+            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-wasm-mt-.*$//")
+            if cvcpkg search "$name" --platform wasm-mt 2>/dev/null \
+                 | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
+              echo "=== skip $name $ver (already on catalog) ==="; continue
+            fi
             echo "=== publish $a ==="
             cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
           done
@@ -174,7 +184,16 @@ jobs:
             echo "dry-run: built + packed cvcgl-examples gallery, not publishing"; exit 0
           fi
           [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
+          # Skip if this exact version is already on the catalog (re-run safety);
+          # a cvc_revision bump in the recipe republishes.
           for a in dist/cvcgl-examples-*-wasm-mt-*.tar.gz; do
+            base=$(basename "$a" .tar.gz)
+            name=$(echo "$base" | sed -E 's/-[0-9].*$//')
+            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-wasm-mt-.*$//")
+            if cvcpkg search "$name" --platform wasm-mt 2>/dev/null \
+                 | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
+              echo "=== skip $name $ver (already on catalog) ==="; continue
+            fi
             echo "=== publish $a ==="
             cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
           done
