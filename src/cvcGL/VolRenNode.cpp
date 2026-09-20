@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <cvc/core/app.h>
+#include <cvc/core/exception.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
@@ -575,6 +576,58 @@ cvc::bounding_box VolRenNode::getBoundingBox() const {
     }
   }
   return out;
+}
+
+cvc::world_units::coordinate VolRenNode::volumePointToReal(std::size_t index, double ox, double oy,
+                                                           double oz,
+                                                           const cvc::world_units &units) const {
+  cvc::volren::mat4 mt; // defaults to identity
+  {
+    std::lock_guard<std::mutex> lock(m_configMutex);
+    if (index >= m_volumes.size())
+      throw cvc::index_out_of_bounds("VolRenNode::volumePointToReal: volume index out of range");
+    if (index < m_snapshotSettings.volumes.size())
+      mt = m_snapshotSettings.volumes[index].model_transform;
+  }
+  // volume-object -> this node's local frame (the per-volume model transform)...
+  const cvc::volren::vec3d pl = mt.transform_point({ox, oy, oz});
+  // ...node-local -> world (the parent chain, inherited)...
+  const double local[3] = {pl.x, pl.y, pl.z};
+  double world[3];
+  localToWorld(local, world);
+  // ...world -> canonical metres -> the active display unit.
+  return units.world_point_to_real(world[0], world[1], world[2]);
+}
+
+cvc::world_units::coordinate VolRenNode::volumeRealDimensions(std::size_t index,
+                                                              const cvc::world_units &units) const {
+  cvc::bounding_box b;
+  cvc::volren::mat4 mt; // defaults to identity
+  {
+    std::lock_guard<std::mutex> lock(m_configMutex);
+    if (index >= m_volumes.size())
+      throw cvc::index_out_of_bounds("VolRenNode::volumeRealDimensions: volume index out of range");
+    b = m_volumes[index].boundingBox();
+    if (index < m_snapshotSettings.volumes.size())
+      mt = m_snapshotSettings.volumes[index].model_transform;
+  }
+  // Fit a world-space AABB around the 8 corners taken through model_transform
+  // (object -> node-local) then localToWorld (node-local -> world).
+  double mn[3] = {0, 0, 0}, mx[3] = {0, 0, 0};
+  for (int c = 0; c < 8; ++c) {
+    const cvc::volren::vec3d p = mt.transform_point(
+        {c & 1 ? b.maxx : b.minx, c & 2 ? b.maxy : b.miny, c & 4 ? b.maxz : b.minz});
+    const double local[3] = {p.x, p.y, p.z};
+    double w[3];
+    localToWorld(local, w);
+    for (int a = 0; a < 3; ++a) {
+      if (c == 0 || w[a] < mn[a])
+        mn[a] = w[a];
+      if (c == 0 || w[a] > mx[a])
+        mx[a] = w[a];
+    }
+  }
+  return units.world_point_to_real(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]);
 }
 
 void VolRenNode::applyTransformToVTK() {

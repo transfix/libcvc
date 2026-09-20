@@ -11,6 +11,8 @@
 */
 
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_units.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
@@ -1789,6 +1791,40 @@ TEST_F(AppTest, ThreadStatusShowsCompleted) {
     if (tptr && tptr->joinable())
       tptr->join();
   }
+}
+
+// ===========================
+// Per-app world bases (world_clock / world_units)
+// ===========================
+// These must be per-app instances reached through the injected app — NOT a
+// process-global singleton — mirroring root()/computePool().
+
+TEST_F(AppTest, WorldClockIsAStablePerAppInstance) {
+  cvc::world_clock &a = ctx.world_clock();
+  cvc::world_clock &b = ctx.world_clock();
+  EXPECT_EQ(&a, &b) << "world_clock() must return the same per-app instance";
+  EXPECT_DOUBLE_EQ(a.fixed_dt(), 1.0 / 120.0) << "default clock is 120 Hz";
+}
+
+TEST_F(AppTest, WorldUnitsIsAStablePerAppInstanceWithSIDefault) {
+  cvc::world_units &a = ctx.world_units();
+  cvc::world_units &b = ctx.world_units();
+  EXPECT_EQ(&a, &b) << "world_units() must return the same per-app instance";
+  EXPECT_EQ(a.regime(), cvc::world_units::system::si);
+  EXPECT_DOUBLE_EQ(a.metres_per_world_unit(), 1.0);
+}
+
+TEST_F(AppTest, WorldBasesAreNotGlobalSingletons) {
+  // Two independent apps must own independent bases: mutating one is invisible to
+  // the other. This is the whole point of the per-app model.
+  app other;
+  ctx.world_units().set_regime(cvc::world_units::system::imperial);
+  ctx.world_clock().set_scale(4.0);
+  EXPECT_EQ(other.world_units().regime(), cvc::world_units::system::si);
+  EXPECT_DOUBLE_EQ(other.world_clock().scale(), 1.0);
+  // ...and the mutation persisted on the app that made it.
+  EXPECT_EQ(ctx.world_units().regime(), cvc::world_units::system::imperial);
+  EXPECT_DOUBLE_EQ(ctx.world_clock().scale(), 4.0);
 }
 
 // Main function is provided by gtest_main library

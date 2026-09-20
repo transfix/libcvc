@@ -26,6 +26,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/world_units.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
@@ -146,7 +148,55 @@ bool pumpUntilStable(SceneRenderer &view, cvc::gl::VolRenNode &node, double time
 
 } // namespace
 
+// Headless (no GL context): the raycaster's world state maps to real-world units
+// through the per-volume model_transform, the node's world transform, and the
+// per-app world_units — VolRenNode::volumePointToReal / volumeRealDimensions.
+static void test_real_world_units() {
+  cvc::app app; // app.world_units() defaults to SI, 1 metre per world unit
+  SceneGraph sg(app, "volren_units");
+  auto node = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::VolRenNode>("u");
+
+  // A volume authored in a [-1,1]^3 object box, scaled x500 into node-local so it
+  // spans 1000 world units (== 1000 m == 1 km) on each axis, then the node is
+  // translated to (1000,0,0) in the world.
+  cvc::volume vol(app, cvc::dimension(2, 2, 2), cvc::Float, cvc::bounding_box(-1, -1, -1, 1, 1, 1));
+  cvc::volren::volume_settings vs;
+  const double M[16] = {500, 0, 0, 0, 0, 500, 0, 0, 0, 0, 500, 0, 0, 0, 0, 1};
+  vs.model_transform = cvc::volren::mat4::from_row_major(M);
+  node->addVolume(vol, vs);
+  node->setPosition(1000.0, 0.0, 0.0);
+
+  // Size: extent is 1000 world units per axis -> 1 km in the SI regime.
+  auto d = node->volumeRealDimensions(0, app.world_units());
+  assert(d.unit == "km");
+  assert(std::fabs(d.x - 1.0) < 1e-9 && std::fabs(d.y - 1.0) < 1e-9 && std::fabs(d.z - 1.0) < 1e-9);
+
+  // A volume-object point (1,0,0) -> local (500,0,0) -> world (1500,0,0) -> km.
+  auto c = node->volumePointToReal(0, 1.0, 0.0, 0.0, app.world_units());
+  assert(c.unit == "km");
+  assert(std::fabs(c.x - 1.5) < 1e-9 && std::fabs(c.y) < 1e-9 && std::fabs(c.z) < 1e-9);
+
+  // Imperial regime reports the same volume in feet (1000 m is below a mile).
+  app.world_units().set_regime(cvc::world_units::system::imperial);
+  auto imp = node->volumePointToReal(0, 0.0, 0.0, 0.0, app.world_units()); // -> world (1000,0,0)
+  assert(imp.unit == "ft");
+  assert(std::fabs(imp.x - 1000.0 / 0.3048) < 1e-6); // 1000 m in feet
+
+  // Out-of-range index throws.
+  bool threw = false;
+  try {
+    node->volumeRealDimensions(99, app.world_units());
+  } catch (const cvc::exception &) {
+    threw = true;
+  }
+  assert(threw && "out-of-range volume index must throw cvc::exception");
+
+  std::printf("  ok: volren maps world state to real-world units (volumePointToReal/Dimensions)\n");
+}
+
 int main() {
+  test_real_world_units();
+
   cvc::app app;
   SceneGraph sg(app, "volren_test");
 

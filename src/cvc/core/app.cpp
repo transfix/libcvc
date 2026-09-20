@@ -26,6 +26,8 @@
 #include <cvc/core/state.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_units.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/bounding_box.h>
@@ -982,6 +984,20 @@ cvc::thread_pool &app::computePool() {
   if (!_computePool)
     _computePool.reset(new cvc::thread_pool()); // hardware_concurrency()-1 workers
   return *_computePool;
+}
+
+cvc::world_clock &app::world_clock() {
+  boost::mutex::scoped_lock lock(_worldBasesMutex);
+  if (!_worldClock)
+    _worldClock.reset(new cvc::world_clock()); // default 120 Hz, live mode
+  return *_worldClock;
+}
+
+cvc::world_units &app::world_units() {
+  boost::mutex::scoped_lock lock(_worldBasesMutex);
+  if (!_worldUnits)
+    _worldUnits.reset(new cvc::world_units()); // default SI, 1 metre per world unit
+  return *_worldUnits;
 }
 
 void app::setThreadPoolSize(unsigned int size) {

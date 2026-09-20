@@ -192,6 +192,9 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_async:test_pycvc_async.py
              pycvc_exec:test_pycvc_exec.py
              pycvc_world_clock:test_pycvc_world_clock.py
+             pycvc_world_units:test_pycvc_world_units.py
+             pycvc_dataprep:test_pycvc_dataprep.py
+             pycvc_volslice:test_pycvc_volslice.py
              pycvc_integration:test_pycvc_integration.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
@@ -307,5 +310,17 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_camera
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_camera.py)
   set_tests_properties(pycvc_gl_camera PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # world_units scene surface: GraphicsNode dimensions through the transform
+  # chain, the built-in grid/axis nodes, lights, VolRenNode + volren value types.
+  add_test(NAME pycvc_gl_world
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_world.py)
+  set_tests_properties(pycvc_gl_world PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # Dear ImGui overlay + state-bound ui panels: binding presence + an offscreen
+  # overlay round-trip (self-skips without offscreen GL).
+  add_test(NAME pycvc_gl_imgui
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_imgui.py)
+  set_tests_properties(pycvc_gl_imgui PROPERTIES ENVIRONMENT
     "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL

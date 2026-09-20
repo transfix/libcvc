@@ -29,6 +29,7 @@
 - [Clicking terrain: world point → real-world coordinate](#clicking-terrain-world-point--real-world-coordinate)
 - [Integration roadmap (follow-ups)](#integration-roadmap-follow-ups)
 - [Worked example](#worked-example)
+- [Python (pycvc)](#python-pycvc)
 
 ## Overview
 
@@ -305,8 +306,9 @@ are therefore reliable to the last bit the doubles can hold.
 
 ## Integration roadmap (remaining follow-ups)
 
-The picking, world↔local mapping and per-model authoring scale above have
-landed. What is left, each a self-contained follow-up:
+The picking, world↔local mapping, per-model authoring scale above, and the
+Python bindings (see [Python (pycvc)](#python-pycvc) below) have landed. What is
+left, each a self-contained follow-up:
 
 1. **importer unit stamping** — teach the assimp importer to set
    `model::metres_per_source_unit` from source-file units (glTF metres, FBX
@@ -317,10 +319,6 @@ landed. What is left, each a self-contained follow-up:
 2. **coordinate/label plumbing** — route `GridNode` tick labels, `BBoxNode`
    coordinate labels and `CameraController` distance/speed readouts through
    `world_units::format`, so every on-screen number carries the regime's unit.
-3. **Python bindings** — expose `world_units` (and the new `GraphicsNode` /
-   `SceneRenderer` entry points) through SWIG next to `world_clock` for the
-   training/twin Python layer (deferred; the pycvc rebuild is currently blocked
-   on the cvcpkg catalog).
 
 ## Worked example
 
@@ -343,3 +341,91 @@ auto f = wu.format(1000.0, dim::force);
 auto c = wu.world_point_to_real(2.0 * 1609.344, 0.0, 0.0);
 // c.x == 2.0, c.unit == "mi"
 ```
+
+## Python (pycvc)
+
+The whole surface above is wrapped for Python through SWIG, next to
+`world_clock`, so the training/twin layer drives the same unit base the C++
+scene does. Because Python has no enums-as-types or out-parameters, the binding
+reshapes a few things (all of it in `bindings/pycvc/pycvc.i`,
+`pycvc_gl.i`, `pycvc_model.i`, `pycvc_volren.i`):
+
+- the `system` / `dimension` enums and the `config` struct become **strings**:
+  a regime is `"si"` | `"imperial"`; a dimension is `"length"` | `"mass"` |
+  `"time"` | `"velocity"` | `"acceleration"` | `"force"` | `"energy"` |
+  `"angle"`;
+- the scalar constructor is `world_units(metres_per_world_unit, regime="si")`;
+- the display/formatting calls take the dimension string and carry a `_d`
+  suffix: `to_display_d`, `from_display_d`, `unit_symbol_d`, `format_d`; the
+  regime accessors are `regime_name()` / `set_regime_name()`;
+- `format_d(...)` returns a `measurement` proxy with `.value` / `.unit`;
+  `world_point_to_real(...)` returns a `coordinate` proxy with `.x/.y/.z/.unit`;
+- the transform-chain and projection helpers on a node return plain Python
+  values: `local_to_world([x,y,z])` / `world_to_local([x,y,z])` give a 3-list,
+  `get_world_bounding_box()` / `get_combined_world_bounding_box()` give a
+  `(minx..maxz)` 6-list, and `local_point_to_real([x,y,z], units)` /
+  `real_dimensions(units)` give an `(x, y, z, unit)` tuple.
+
+### The unit base
+
+```python
+import pycvc
+
+wu = pycvc.world_units()               # SI, 1 m per world unit
+wu = pycvc.world_units(1000.0, "si")   # 1 world unit == 1 km
+
+# canonical SI -> display regime
+wu.set_regime_name("imperial")
+f = wu.format_d(1000.0, "force")       # f.value ~= 224.8, f.unit == "lbf"
+c = wu.world_point_to_real(2 * 1609.344, 0, 0)  # c.x == 2.0, c.unit == "mi"
+```
+
+The base is a stable **per-`app`** instance (never a process global), reached
+the same way as the clock:
+
+```python
+app = pycvc.make_app()
+app.world_units().set_regime_name("imperial")  # app-wide display regime
+app.world_clock()                              # the app's simulation clock
+```
+
+### Model dimensions and the transform chain
+
+```python
+m = pycvc.load_model("part.obj")
+m.metres_per_source_unit = 0.001               # a millimetre-authored file
+em = m.extents_metres()                         # (minx..maxz) in canonical metres
+
+sg = pycvc_gl.SceneGraph(app)
+node = sg.add_child_geometry("root", "wing", geom)
+node.local_to_world([0, 0, 0])                  # origin through the whole chain
+node.local_point_to_real([0, 0, 0], app.world_units())  # -> (x, y, z, "km")
+node.real_dimensions(app.world_units())         # "how big is this, really"
+```
+
+### Scene entry points
+
+- **`SceneRenderer.pick_world(display_x, display_y)`** — a picked terrain/graphic
+  point as a world `(x, y, z)` tuple (or `None` on a miss); feed it to
+  `world_units.world_point_to_real` for a km/mile readout.
+- **`SceneGraph.getGridNode()` / `getAxisNode()`** — the built-in reference grid
+  and world axis (`GridNode` / `AxisNode`): bounds, per-plane colours,
+  divisions, tick labels, axis length.
+- **`SceneGraph.addLight(name)` / `light_node(name)`** — a `LightNode` with its
+  kind as a string (`set_kind`/`kind_str`) and target/colour/world-position as
+  tuples (`get_target` / `get_color` / `world_position`).
+- **`VolRenNode`** (`add_volren` / `volren_node`) — the software raycaster as a
+  scene node; `volume_real_dimensions(i, units)` /
+  `volume_point_to_real(i, x, y, z, units)` report a rendered volume's real size
+  and coordinates in the regime. The headless `raycaster` value types
+  (`camera.eye/focal/up`, `render_settings.background`, …) cross as tuples.
+- **`VolSliceNode`** (`add_volslice` / `volslice_node`) — the view-aligned slice
+  renderer as a scene node (`setVolume` / `config` / `setConfig` / `tick`); its
+  `cvc::volslice` value types are wrapped in `pycvc_volslice.i` (see
+  [`docs/VOLSLICE_API.md`](VOLSLICE_API.md#python-pycvc)).
+
+The Python contract is pinned by `bindings/pycvc/test_pycvc_world_units.py`
+(the unit base + per-app instances), `test_pycvc_gl_world.py` (the transform
+chain, grid/axis/light nodes, `VolRenNode` + raycaster value types, and the
+`VolSliceNode` slice renderer) and the `extents_metres` case in
+`test_pycvc_model.py`.

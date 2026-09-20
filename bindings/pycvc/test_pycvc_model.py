@@ -192,6 +192,28 @@ def test_extents_values():
     assert np.isclose(maxx, 2.0) and np.isclose(maxy, 3.0) and np.isclose(maxz, 4.0)
 
 
+def test_extents_metres_scales_by_source_unit():
+    # extents_metres() is extents() scaled by metres_per_source_unit — the bridge
+    # from a file's authoring units into canonical SI metres, which is what lets a
+    # model's span/picked coordinate feed cvc::world_units (m/km/mi readouts).
+    m = _load_or_skip(_write_tetra_obj_fixture())
+    if m is None:
+        return
+    e = m.extents()  # source-unit bbox: x∈[0,2], y∈[0,3], z∈[0,4]
+    # default: 1 source unit == 1 metre, so the two boxes coincide.
+    assert m.metres_per_source_unit == 1.0
+    em = m.extents_metres()
+    assert len(em) == 6
+    assert all(np.isclose(a, b) for a, b in zip(em, e))
+    # a millimetre-authored part: every extent shrinks 1000x into metres, and the
+    # marshaling order is preserved (far corner 2,3,4 -> 0.002,0.003,0.004 m).
+    m.metres_per_source_unit = 0.001
+    em = m.extents_metres()
+    assert all(np.isclose(a, b * 0.001) for a, b in zip(em, e))
+    assert np.isclose(em[3], 0.002) and np.isclose(em[4], 0.003) and np.isclose(em[5], 0.004)
+    print("  ok: extents_metres scales extents by metres_per_source_unit")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -44,10 +44,18 @@ if _sys.platform == "win32":
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/gl/VolRenNode.h>
+#include <cvc/gl/LightNode.h>  // scene light rig (addLight)
+#include <cvc/gl/GridNode.h>   // the built-in reference grid (getGridNode)
+#include <cvc/gl/AxisNode.h>   // the built-in world axis (getAxisNode)
+#include <cvc/gl/VolSliceNode.h> // cvc::volslice view-aligned slice renderer node
+#include <cvc/volren/volren.h> // volume_settings/render_settings etc. VolRenNode takes
 #include <cvc/gl/NullGraphicNode.h> // the concrete empty node behind add_child_group
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/StageLighting.h>  // cinematic lighting rig (state_object)
+#include <cvc/gl/ScreenTextHud.h>  // screen-space text overlay (state_object)
 #include <cvc/image/image.h> // GeometryNode::setTexture(const cvc::image&) — image %import'd from pycvc.i
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
@@ -205,6 +213,11 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %shared_ptr(cvc::gl::GraphicsNode)
 %shared_ptr(cvc::gl::GeometryNode)
 %shared_ptr(cvc::gl::VolumeNode)
+%shared_ptr(cvc::gl::VolRenNode)
+%shared_ptr(cvc::gl::LightNode)
+%shared_ptr(cvc::gl::GridNode)
+%shared_ptr(cvc::gl::AxisNode)
+%shared_ptr(cvc::gl::VolSliceNode)
 %shared_ptr(cvc::gl::SceneGraph)
 
 // ── directors: Python-defined scene node types ──────────────────────────────
@@ -219,6 +232,8 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %feature("director") cvc::gl::GraphicsNode;
 %feature("director") cvc::gl::GeometryNode;
 %feature("director") cvc::gl::VolumeNode;
+%feature("director") cvc::gl::VolRenNode;
+%feature("director") cvc::gl::VolSliceNode;
 
 // A Python-CONSTRUCTED node (a director subclass built as MyNode(app, path,
 // name)) must keep its app alive too — its ~SceneNode touches the app's state
@@ -231,6 +246,21 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     if args: self._pycvc_app = args[0]
 %}
 %pythonappend cvc::gl::VolumeNode::VolumeNode %{
+    if args: self._pycvc_app = args[0]
+%}
+%pythonappend cvc::gl::VolRenNode::VolRenNode %{
+    if args: self._pycvc_app = args[0]
+%}
+%pythonappend cvc::gl::LightNode::LightNode %{
+    if args: self._pycvc_app = args[0]
+%}
+%pythonappend cvc::gl::GridNode::GridNode %{
+    if args: self._pycvc_app = args[0]
+%}
+%pythonappend cvc::gl::AxisNode::AxisNode %{
+    if args: self._pycvc_app = args[0]
+%}
+%pythonappend cvc::gl::VolSliceNode::VolSliceNode %{
     if args: self._pycvc_app = args[0]
 %}
 
@@ -258,6 +288,12 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // return, so every bounding_box-returning method is ignored (as in pycvc.i).
 %ignore cvc::gl::GraphicsNode::getBoundingBox;
 %ignore cvc::gl::GraphicsNode::getCombinedBoundingBox;
+%ignore cvc::gl::GraphicsNode::getWorldBoundingBox;         // opaque bbox return -> 6-tuple below
+%ignore cvc::gl::GraphicsNode::getCombinedWorldBoundingBox; // opaque bbox return -> 6-tuple below
+%ignore cvc::gl::GraphicsNode::localToWorld;                // double[3] in/out -> vector below
+%ignore cvc::gl::GraphicsNode::worldToLocal;                // double[3] in/out -> vector below
+%ignore cvc::gl::GraphicsNode::localPointToReal;            // double[3] in -> (x,y,z,unit) tuple
+%ignore cvc::gl::GraphicsNode::realDimensions;              // coordinate return -> tuple below
 %ignore cvc::gl::GraphicsNode::getBBoxColor;             // out-ref params
 %ignore cvc::gl::GraphicsNode::getLabelColor;
 %ignore cvc::gl::GraphicsNode::getExtentLabelColor;
@@ -302,6 +338,47 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
   std::vector<double> get_combined_bounding_box() {
     cvc::bounding_box b = $self->getCombinedBoundingBox();
     return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  // Point transforms between this node's LOCAL frame and WORLD space (the
+  // double[3] overloads are ignored). Take/return a [x,y,z] list.
+  std::vector<double> local_to_world(const std::vector<double>& p) {
+    if (p.size() != 3)
+      throw std::invalid_argument("local_to_world: need [x, y, z]");
+    double in[3] = {p[0], p[1], p[2]}, out[3];
+    $self->localToWorld(in, out);
+    return {out[0], out[1], out[2]};
+  }
+  std::vector<double> world_to_local(const std::vector<double>& p) {
+    if (p.size() != 3)
+      throw std::invalid_argument("world_to_local: need [x, y, z]");
+    double in[3] = {p[0], p[1], p[2]}, out[3];
+    $self->worldToLocal(in, out);
+    return {out[0], out[1], out[2]};
+  }
+  // World-space AABB of this node (and node+subtree) as (minx..maxz) 6-tuples,
+  // reliable through the whole chain of local transforms.
+  std::vector<double> get_world_bounding_box() {
+    cvc::bounding_box b = $self->getWorldBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  std::vector<double> get_combined_world_bounding_box() {
+    cvc::bounding_box b = $self->getCombinedWorldBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  // A point in this node's LOCAL frame as a real-world coordinate in the given
+  // world_units regime: an (x, y, z, unit) tuple (e.g. (3.2, 0.5, -1.0, "km")).
+  PyObject* local_point_to_real(const std::vector<double>& p, const cvc::world_units& u) {
+    if (p.size() != 3)
+      throw std::invalid_argument("local_point_to_real: need [x, y, z]");
+    double in[3] = {p[0], p[1], p[2]};
+    cvc::world_units::coordinate c = $self->localPointToReal(in, u);
+    return Py_BuildValue("(ddds)", c.x, c.y, c.z, c.unit.c_str());
+  }
+  // This node's real-world size in the regime: an (x, y, z, unit) tuple, taken
+  // through the whole chain of local transforms (with descendants by default).
+  PyObject* real_dimensions(const cvc::world_units& u, bool include_children = true) {
+    cvc::world_units::coordinate c = $self->realDimensions(u, include_children);
+    return Py_BuildValue("(ddds)", c.x, c.y, c.z, c.unit.c_str());
   }
   // Names of this node's direct children (traverse via SceneGraph.getGraphics).
   std::vector<std::string> child_names() {
@@ -390,6 +467,181 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::VolumeNode::getBoundingBox;
 %include "cvc/gl/VolumeNode.h"
 
+// ── VolRenNode: the cvc::volren software raycaster as a scene node ──────────
+// Derives from GeometryNode (already shared_ptr'd/director'd above); the volren
+// value types it takes (volume_settings/render_settings) come from pycvc_volren.i
+// via the %import of pycvc.i. addVolume/tick/config drive the raycast; the mesh
+// API it inherits from GeometryNode is a documented WART here (corrupts the quad)
+// so it is hidden.
+%ignore cvc::gl::VolRenNode::getBoundingBox;         // opaque bbox -> 6-tuple below
+%ignore cvc::gl::VolRenNode::volumePointToReal;      // world_units::coordinate -> tuple below
+%ignore cvc::gl::VolRenNode::volumeRealDimensions;   // world_units::coordinate -> tuple below
+%ignore cvc::gl::VolRenNode::setGeometry;            // inherited mesh API: meaningless here
+%ignore cvc::gl::VolRenNode::updateVertices;
+%ignore cvc::gl::VolRenNode::updateColors;
+%ignore cvc::gl::VolRenNode::setRenderMode;
+%include "cvc/gl/VolRenNode.h"
+%extend cvc::gl::VolRenNode {
+  // Real-world coordinate/size of a rendered volume (world_units::coordinate ->
+  // (x, y, z, unit) tuple), composing the per-volume model_transform, this node's
+  // world transform, and the regime.
+  PyObject *volume_point_to_real(std::size_t index, double ox, double oy, double oz,
+                                 const cvc::world_units &u) {
+    cvc::world_units::coordinate c = $self->volumePointToReal(index, ox, oy, oz, u);
+    return Py_BuildValue("(ddds)", c.x, c.y, c.z, c.unit.c_str());
+  }
+  PyObject *volume_real_dimensions(std::size_t index, const cvc::world_units &u) {
+    cvc::world_units::coordinate c = $self->volumeRealDimensions(index, u);
+    return Py_BuildValue("(ddds)", c.x, c.y, c.z, c.unit.c_str());
+  }
+  // The node's (all volumes') box in its local frame as a (minx..maxz) 6-tuple.
+  std::vector<double> get_bounding_box() {
+    cvc::bounding_box b = $self->getBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+}
+
+// ── LightNode: a scene light (SceneGraph::addLight returns one) ─────────────
+// A GraphicsNode with no visual prop of its own; it drives the renderer's light
+// set. The Kind enum + the double& out-params (target/color/worldPosition) are
+// re-exposed as a string and (x,y,z) tuples, mirroring the world_units/volren
+// idiom. getProp()/getBoundingBox() are trivial overrides with no Python value.
+%ignore cvc::gl::LightNode::Kind;              // nested enum -> string set_kind/kind_str
+%ignore cvc::gl::LightNode::setKind;           // takes Kind
+%ignore cvc::gl::LightNode::kind;              // returns Kind
+%ignore cvc::gl::LightNode::target;            // double& out-params -> get_target tuple
+%ignore cvc::gl::LightNode::color;             // double& out-params -> get_color tuple
+%ignore cvc::gl::LightNode::worldPosition;     // double& out-params -> world_position tuple
+%ignore cvc::gl::LightNode::getProp;           // vtkProp* (always nullptr here)
+%ignore cvc::gl::LightNode::getBoundingBox;    // opaque bbox (empty here)
+%include "cvc/gl/LightNode.h"
+%extend cvc::gl::LightNode {
+  // Kind as a string: "spot" | "directional" | "fill".
+  void set_kind(const std::string &k) {
+    if (k == "spot")
+      $self->setKind(cvc::gl::LightNode::Kind::Spot);
+    else if (k == "directional")
+      $self->setKind(cvc::gl::LightNode::Kind::Directional);
+    else if (k == "fill")
+      $self->setKind(cvc::gl::LightNode::Kind::Fill);
+    else
+      throw std::invalid_argument("LightNode.set_kind: expected 'spot'|'directional'|'fill'");
+  }
+  std::string kind_str() const {
+    switch ($self->kind()) {
+    case cvc::gl::LightNode::Kind::Spot:
+      return "spot";
+    case cvc::gl::LightNode::Kind::Directional:
+      return "directional";
+    case cvc::gl::LightNode::Kind::Fill:
+      return "fill";
+    }
+    return "spot";
+  }
+  PyObject *get_target() const {
+    double x, y, z;
+    $self->target(x, y, z);
+    return Py_BuildValue("(ddd)", x, y, z);
+  }
+  PyObject *get_color() const {
+    double r, g, b;
+    $self->color(r, g, b);
+    return Py_BuildValue("(ddd)", r, g, b);
+  }
+  // World-space position of the light, resolved through the transform chain.
+  PyObject *world_position() const {
+    double x, y, z;
+    $self->worldPosition(x, y, z);
+    return Py_BuildValue("(ddd)", x, y, z);
+  }
+}
+
+// ── GridNode: the reference grid (SceneGraph::getGridNode) ──────────────────
+// Bounds + per-plane colours/visibility + tick config. bounding_box in/out is
+// opaque, so setBounds/bounds are re-exposed as 6-tuples; the double&/int& colour
+// and division out-params become (r,g,b)/(x,y,z) tuples. VTK renderer hooks hide.
+%ignore cvc::gl::GridNode::setBounds;             // opaque bbox -> set_bounds(6 doubles)
+%ignore cvc::gl::GridNode::bounds;                // opaque bbox -> get_bounds tuple
+%ignore cvc::gl::GridNode::getBoundingBox;        // opaque bbox
+%ignore cvc::gl::GridNode::addToRenderer;         // vtkRenderer*
+%ignore cvc::gl::GridNode::removeFromRenderer;    // vtkRenderer*
+%ignore cvc::gl::GridNode::getYZPlaneColor;       // double& out-params -> tuple
+%ignore cvc::gl::GridNode::getXZPlaneColor;
+%ignore cvc::gl::GridNode::getXYPlaneColor;
+%ignore cvc::gl::GridNode::getGridDivisions;      // int& out-params -> tuple
+%ignore cvc::gl::GridNode::getTickIntervals;      // int& out-params -> tuple
+%ignore cvc::gl::GridNode::getTickLabelColor;     // double& out-params -> tuple
+%include "cvc/gl/GridNode.h"
+%extend cvc::gl::GridNode {
+  void set_bounds(double minx, double miny, double minz, double maxx, double maxy, double maxz) {
+    $self->setBounds(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
+  }
+  PyObject *get_bounds() const {
+    const cvc::bounding_box &b = $self->bounds();
+    return Py_BuildValue("(dddddd)", b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
+  }
+  PyObject *get_yz_plane_color() const {
+    double r, g, b;
+    $self->getYZPlaneColor(r, g, b);
+    return Py_BuildValue("(ddd)", r, g, b);
+  }
+  PyObject *get_xz_plane_color() const {
+    double r, g, b;
+    $self->getXZPlaneColor(r, g, b);
+    return Py_BuildValue("(ddd)", r, g, b);
+  }
+  PyObject *get_xy_plane_color() const {
+    double r, g, b;
+    $self->getXYPlaneColor(r, g, b);
+    return Py_BuildValue("(ddd)", r, g, b);
+  }
+  PyObject *get_grid_divisions() const {
+    int x, y, z;
+    $self->getGridDivisions(x, y, z);
+    return Py_BuildValue("(iii)", x, y, z);
+  }
+  PyObject *get_tick_intervals() const {
+    int x, y, z;
+    $self->getTickIntervals(x, y, z);
+    return Py_BuildValue("(iii)", x, y, z);
+  }
+  PyObject *get_tick_label_color() const {
+    double r, g, b;
+    $self->getTickLabelColor(r, g, b);
+    return Py_BuildValue("(ddd)", r, g, b);
+  }
+}
+
+// ── AxisNode: the world axis gizmo (SceneGraph::getAxisNode) ────────────────
+%ignore cvc::gl::AxisNode::getBoundingBox; // opaque bbox
+%include "cvc/gl/AxisNode.h"
+
+// ── VolSliceNode: the cvc::volslice view-aligned slice renderer as a node ───
+// Derives from GeometryNode (shared_ptr'd/director'd above). Its config type
+// cvc::volslice::render_settings is wrapped (renamed volslice_render_settings)
+// in pycvc_volslice.i and reaches here via the %import of pycvc.i, so
+// config()/setConfig() marshal directly — no %extend, like VolumeNode's props.
+// The inherited GeometryNode mesh API is a WART here (it drives per-frame slice
+// fans itself), so it is hidden, exactly as for VolRenNode. tick()/planesRendered
+// are KEPT but upload GL textures — a live context is needed to call tick(), so
+// the Python tests assert their presence, not a live tick (see test note).
+%ignore cvc::gl::VolSliceNode::getBoundingBox;      // opaque bbox -> 6-tuple below
+%ignore cvc::gl::VolSliceNode::addToRenderer;       // vtkRenderer* (toggles OIT)
+%ignore cvc::gl::VolSliceNode::depthSortSliceProps; // static; vtkRenderer* + vector<VolSliceNode*>
+%ignore cvc::gl::VolSliceNode::setGeometry;         // inherited mesh WART: corrupts slices
+%ignore cvc::gl::VolSliceNode::updateVertices;      // inherited mesh WART
+%ignore cvc::gl::VolSliceNode::updateColors;        // inherited mesh WART
+%ignore cvc::gl::VolSliceNode::setRenderMode;       // inherited mesh WART
+%include "cvc/gl/VolSliceNode.h"
+%extend cvc::gl::VolSliceNode {
+  // The node's box in its local frame as a (minx..maxz) 6-tuple (the
+  // bounding_box return is opaque — the SwigValueWrapper mis-bind).
+  std::vector<double> get_bounding_box() {
+    cvc::bounding_box b = $self->getBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+}
+
 // ── SceneGraph: the top-level graph. App injected explicitly (no singleton). ─
 %ignore cvc::gl::SceneGraph::SceneGraph(const std::string &);           // process-wide singleton ctor
 %ignore cvc::gl::SceneGraph::SceneGraph(cvc::app &, const std::string &); // re-exposed via shared_ptr factory
@@ -397,7 +649,9 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // SceneGraph::postEvent(std::function<void()>) is NOT ignored — the callable
 // typemap above marshals a Python function to the std::function, so Python can
 // post work onto the scene's owner thread.
-%ignore cvc::gl::SceneGraph::getGridNode;
+// getGridNode()/getAxisNode() are re-exposed: GridNode/AxisNode are now wrapped
+// (shared_ptr) above, so the built-in reference grid + world axis are reachable
+// and mutable from Python (set_bounds / colours / divisions / axis length).
 %ignore cvc::gl::SceneGraph::getAllGraphics;
 %ignore cvc::gl::SceneGraph::getAllGraphicsOfType;
 %ignore cvc::gl::SceneGraph::getAllVolumeGraphics;
@@ -440,6 +694,10 @@ def _typed_node(sg, name):
     n = sg.geometry_node(name)
     if n is None:
         n = sg.volume_node(name)
+    if n is None:
+        n = sg.volren_node(name)
+    if n is None:
+        n = sg.light_node(name)
     return n
 %}
 %pythonappend cvc::gl::SceneGraph::getGraphics %{
@@ -475,7 +733,39 @@ def _typed_node(sg, name):
 %pythonappend cvc::gl::SceneGraph::add_child_volume %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
+%pythonappend cvc::gl::SceneGraph::add_child_volren %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::add_volren %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::volren_node %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
 %pythonappend cvc::gl::SceneGraph::volume_node %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+// Light / grid / axis return live node proxies — same app keep-alive.
+%pythonappend cvc::gl::SceneGraph::addLight %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::light_node %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::getGridNode %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::getAxisNode %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+// VolSlice factories return live node proxies — same app keep-alive.
+%pythonappend cvc::gl::SceneGraph::add_child_volslice %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::add_volslice %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::volslice_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %extend cvc::gl::SceneGraph {
@@ -588,6 +878,57 @@ def _typed_node(sg, name):
     $self->registerGraphics(name, child);
     return child;
   }
+  // A cvc::volren software-raycast volume node as a child of `parent` / at the
+  // root. addGraphicsChild<T> is a template (unwrappable), so this clones the
+  // add_child_geometry factory. Fill it in Python: n = sg.add_volren("vol");
+  // n.addVolume(vol, vs); ... n.tick().
+  std::shared_ptr<cvc::gl::VolRenNode> add_child_volren(const std::string& parent,
+                                                        const std::string& name) {
+    auto p = $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_child_volren: no parent node named '" + parent + "'");
+    auto child = p->addGraphicsChild<cvc::gl::VolRenNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  std::shared_ptr<cvc::gl::VolRenNode> add_volren(const std::string& name) {
+    auto child = $self->getGraphicsRoot()->addGraphicsChild<cvc::gl::VolRenNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  // Typed downcast (like geometry_node/volume_node): the concrete VolRenNode so
+  // its addVolume/tick/real-units methods are visible. Null if absent/wrong type.
+  std::shared_ptr<cvc::gl::VolRenNode> volren_node(const std::string& name) {
+    return std::dynamic_pointer_cast<cvc::gl::VolRenNode>($self->getGraphics(name));
+  }
+  // Typed downcast for a light added via addLight(name): the concrete LightNode
+  // so its kind/target/color/intensity setters are visible. Null if absent/wrong.
+  std::shared_ptr<cvc::gl::LightNode> light_node(const std::string& name) {
+    return std::dynamic_pointer_cast<cvc::gl::LightNode>($self->getGraphics(name));
+  }
+  // A cvc::volslice view-aligned slice-renderer node as a child of `parent` / at
+  // the root. addGraphicsChild<T> is a template (unwrappable), so this clones the
+  // add_volren factory. Fill it in Python: n = sg.add_volslice("slice");
+  // n.setVolume(vol); n.setConfig(rs); ... (n.tick() needs a live GL context).
+  std::shared_ptr<cvc::gl::VolSliceNode> add_child_volslice(const std::string& parent,
+                                                            const std::string& name) {
+    auto p = $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_child_volslice: no parent node named '" + parent + "'");
+    auto child = p->addGraphicsChild<cvc::gl::VolSliceNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  std::shared_ptr<cvc::gl::VolSliceNode> add_volslice(const std::string& name) {
+    auto child = $self->getGraphicsRoot()->addGraphicsChild<cvc::gl::VolSliceNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  // Typed downcast (like volren_node): the concrete VolSliceNode so its
+  // setVolume/config/tick methods are visible. Null if absent/wrong type.
+  std::shared_ptr<cvc::gl::VolSliceNode> volslice_node(const std::string& name) {
+    return std::dynamic_pointer_cast<cvc::gl::VolSliceNode>($self->getGraphics(name));
+  }
   // Connect a Python callable to the scene's graphics-changed signal (fires when
   // a node is added or removed) — Python functions as scene callbacks.
   void on_graphics_changed(std::function<void()> cb) { $self->graphicsChanged.connect(cb); }
@@ -613,7 +954,23 @@ def _typed_node(sg, name):
   $result = PyBytes_FromStringAndSize(reinterpret_cast<const char *>($1.data()),
                                       static_cast<Py_ssize_t>($1.size()));
 }
+// pickWorld has a double[3] OUT param SWIG can't express; re-exposed as pick_world
+// below (returns an (x,y,z) tuple or None).
+%ignore cvc::gl::SceneRenderer::pickWorld;
 %include "cvc/gl/SceneRenderer.h"
+
+%extend cvc::gl::SceneRenderer {
+  // Cast a pick ray through a display pixel (VTK display coords: pixels from the
+  // LOWER-left, matching frameRGB()'s row order) and return the first world-space
+  // hit as an (x, y, z) tuple, or None on a miss. Pass the tuple to a node's
+  // world_to_local / a world_units.world_point_to_real for a real-world readout.
+  PyObject* pick_world(double display_x, double display_y) {
+    double w[3];
+    if (!$self->pickWorld(display_x, display_y, w))
+      Py_RETURN_NONE;
+    return Py_BuildValue("(ddd)", w[0], w[1], w[2]);
+  }
+}
 
 // ── CameraController: built-in orbit + Quake-fly navigation, fully cvc::state ──
 // Python constructs it from a wrapped SceneRenderer — CameraController(view) — so
@@ -639,6 +996,76 @@ def _typed_node(sg, name):
     if args: self._pycvc_keepalive = args[0]
 %}
 %include "cvc/gl/CameraController.h"
+
+// ── StageLighting: a cinematic key/fill/back/wash rig, fully cvc::state ──────
+// A state_object like CameraController (NO %shared_ptr, NO director). Python
+// builds it from a wrapped SceneGraph — StageLighting(sg) — which is HEADLESS:
+// the ctor + setStage/apply build LightNodes into the scene graph (no GL
+// context); they render wherever the scene renders. Its base
+// state_object<StageLighting> is invisible to SWIG, so it emits the same benign
+// 401 "nothing known about base class" warnings CameraController/SceneNode do.
+%ignore cvc::gl::StageLighting::StageLighting(cvc::app &, const std::string &,
+                                              cvc::gl::SceneGraph *); // low-level ctor: keepalive-slot ambiguity; the SceneGraph& ctor is already headless
+%ignore cvc::gl::StageLighting::Preset;       // nested enum -> apply_preset(string)
+%ignore cvc::gl::StageLighting::applyPreset;  // takes Preset
+%ignore cvc::gl::StageLighting::presetName;   // takes/returns Preset
+%ignore cvc::gl::StageLighting::stage;        // double& out-params -> get_stage tuple
+%ignore cvc::gl::StageLighting::appContext;   // raw cvc::app&
+// Keep the injected SceneGraph alive: ~StageLighting removes its lights from it.
+%pythonappend cvc::gl::StageLighting::StageLighting %{
+    if args: self._pycvc_keepalive = args[0]
+%}
+%include "cvc/gl/StageLighting.h"
+%extend cvc::gl::StageLighting {
+  // The acting area as (cx, cy, cz, radius) (the double& out-param exemplar).
+  PyObject *get_stage() const {
+    double cx, cy, cz, r;
+    $self->stage(cx, cy, cz, r);
+    return Py_BuildValue("(dddd)", cx, cy, cz, r);
+  }
+  // Preset as a string: "three_point" | "overhead" | "dramatic" | "flat".
+  void apply_preset(const std::string &p) {
+    if (p == "three_point")
+      $self->applyPreset(cvc::gl::StageLighting::Preset::ThreePoint);
+    else if (p == "overhead")
+      $self->applyPreset(cvc::gl::StageLighting::Preset::Overhead);
+    else if (p == "dramatic")
+      $self->applyPreset(cvc::gl::StageLighting::Preset::Dramatic);
+    else if (p == "flat")
+      $self->applyPreset(cvc::gl::StageLighting::Preset::Flat);
+    else
+      throw std::invalid_argument(
+          "StageLighting.apply_preset: expected 'three_point'|'overhead'|'dramatic'|'flat'");
+  }
+}
+
+// ── ScreenTextHud: a screen-space text overlay, fully cvc::state ─────────────
+// A state_object like CameraController. Python builds it from a wrapped
+// SceneRenderer — ScreenTextHud(view, "caption") — for the live overlay, or
+// headless via the low-level ScreenTextHud(app, path, None) ctor (no viewer, no
+// actor): construction + the change-gated setText/setPosition/... write through
+// state and read back, all without a GL context; only DRAWING the vtkTextActor
+// needs a live renderer. position/color are double& out-params -> tuples.
+%ignore cvc::gl::ScreenTextHud::position; // double& out-params -> get_position tuple
+%ignore cvc::gl::ScreenTextHud::color;    // double& out-params -> get_color tuple
+// Keep the injected viewer (or app, for the headless ctor) alive: ~state_object
+// touches that app's state tree.
+%pythonappend cvc::gl::ScreenTextHud::ScreenTextHud %{
+    if args: self._pycvc_keepalive = args[0]
+%}
+%include "cvc/gl/ScreenTextHud.h"
+%extend cvc::gl::ScreenTextHud {
+  PyObject *get_position() const {
+    double nx, ny;
+    $self->position(nx, ny);
+    return Py_BuildValue("(dd)", nx, ny);
+  }
+  PyObject *get_color() const {
+    double r, g, b;
+    $self->color(r, g, b);
+    return Py_BuildValue("(ddd)", r, g, b);
+  }
+}
 
 // ── Live-scene bridge: adopt an embedding host's SceneGraph ─────────────────
 // An embedding host (e.g. volrover3) hands its LIVE scene across as a PyCapsule
@@ -689,3 +1116,8 @@ void poke_update(const std::shared_ptr<cvc::gl::GraphicsNode> &node) {
 }
 } // namespace pycvc
 %}
+
+// ── Dear ImGui overlay + state-bound ui panels (HUDs/UIs from Python) ───────
+// %include'd last: it references CameraController / StageLighting / SceneGraph /
+// SceneRenderer (all wrapped above) and reuses the file-scope callable typemap.
+%include "pycvc_imgui.i"

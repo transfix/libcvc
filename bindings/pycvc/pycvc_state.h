@@ -32,6 +32,17 @@ std::vector<std::string> state_children(const std::shared_ptr<cvc::app> &app,
 // removed.
 void state_remove(const std::shared_ptr<cvc::app> &app, const std::string &path);
 
+// ── Whole-tree persistence ──────────────────────────────────────────────
+// Snapshot / reload the ENTIRE state tree for `app` (config, seeds, params) —
+// what a demo/twin/training harness needs to save and resume a scenario. save/
+// restore use cvc::state's own on-disk format; json()/from_json round-trip the
+// tree as a JSON string, so a harness can diff, log, or transmit state without
+// touching disk. All route through cvc::state::instance(*app) (null app throws).
+void state_save(const std::shared_ptr<cvc::app> &app, const std::string &path);
+void state_restore(const std::shared_ptr<cvc::app> &app, const std::string &path);
+std::string state_json(const std::shared_ptr<cvc::app> &app);
+void state_from_json(const std::shared_ptr<cvc::app> &app, const std::string &json);
+
 // ── Push callbacks (SWIG director) ──────────────────────────────────────
 // Subclass in Python and override on_changed(path); call watch(app) to connect
 // to that app's tree-wide childChanged signal (fires for EVERY mutation

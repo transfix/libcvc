@@ -42,6 +42,7 @@ if _sys.platform == "win32":
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/core/world_units.h>
 #include <cvc/volume/dimension.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/voxels.h>
@@ -300,6 +301,89 @@ namespace cvc {
   }
 }
 
+// ── cvc::world_units — the SI unit base + display regime ────────────
+// The spatial counterpart to world_clock (cvc/core/world_units.h): a canonical
+// SI store with a display regime (SI/imperial) and metres_per_world_unit pinning
+// world-space to metres. Reshaped for Python exactly like world_clock: the two
+// nested value structs (measurement{value,unit}, coordinate{x,y,z,unit}) are
+// flatnested to top-level proxies so their fields marshal (SWIG Warning 325
+// otherwise leaks them opaque); the two enum classes (system, dimension) and the
+// nested config are %ignore'd in favour of a scalar ctor and string-keyed
+// helpers. As with world_clock, a name-wide %ignore also suppresses a same-named
+// %extend, so the dimension-keyed replacements take a `_d` suffix and the regime
+// ones a `_name` suffix rather than shadowing the originals. The plain-double
+// methods (metres_per_world_unit, world_to_metres, metres_to_world) and
+// world_point_to_real (returns the coordinate proxy) wrap as-is.
+%{
+static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
+  if (d == "length") return cvc::world_units::dimension::length;
+  if (d == "mass") return cvc::world_units::dimension::mass;
+  if (d == "time") return cvc::world_units::dimension::time;
+  if (d == "velocity") return cvc::world_units::dimension::velocity;
+  if (d == "acceleration") return cvc::world_units::dimension::acceleration;
+  if (d == "force") return cvc::world_units::dimension::force;
+  if (d == "energy") return cvc::world_units::dimension::energy;
+  if (d == "angle") return cvc::world_units::dimension::angle;
+  throw std::invalid_argument(
+      "world_units: unknown dimension '" + d +
+      "' (length/mass/time/velocity/acceleration/force/energy/angle)");
+}
+%}
+%feature("flatnested") cvc::world_units::measurement;
+%feature("flatnested") cvc::world_units::coordinate;
+%rename(world_units_measurement) cvc::world_units::measurement;
+%rename(world_units_coordinate) cvc::world_units::coordinate;
+%ignore cvc::world_units::system;
+%ignore cvc::world_units::dimension;
+%ignore cvc::world_units::config;
+%ignore cvc::world_units::world_units(cvc::world_units::config);
+%ignore cvc::world_units::regime;
+%ignore cvc::world_units::set_regime;
+%ignore cvc::world_units::to_display;
+%ignore cvc::world_units::from_display;
+%ignore cvc::world_units::unit_symbol;
+%ignore cvc::world_units::format;
+%include "cvc/core/world_units.h"
+%extend cvc::world_units {
+  // Build with an explicit scale + string regime instead of the nested config.
+  world_units(double metres_per_world_unit, const std::string &regime = "si") {
+    cvc::world_units::config c;
+    c.metres_per_world_unit = metres_per_world_unit;
+    c.regime = (regime == "imperial") ? cvc::world_units::system::imperial
+                                       : cvc::world_units::system::si;
+    return new cvc::world_units(c);
+  }
+  std::string regime_name() const {
+    return $self->regime() == cvc::world_units::system::imperial ? "imperial" : "si";
+  }
+  void set_regime_name(const std::string &s) {
+    if (s == "si") $self->set_regime(cvc::world_units::system::si);
+    else if (s == "imperial") $self->set_regime(cvc::world_units::system::imperial);
+    else throw std::invalid_argument("world_units.set_regime_name: expected 'si' or 'imperial'");
+  }
+  double to_display_d(double v, const std::string &dim) const {
+    return $self->to_display(v, pycvc_wu_dim(dim));
+  }
+  double from_display_d(double v, const std::string &dim) const {
+    return $self->from_display(v, pycvc_wu_dim(dim));
+  }
+  std::string unit_symbol_d(const std::string &dim) const {
+    return $self->unit_symbol(pycvc_wu_dim(dim));
+  }
+  cvc::world_units::measurement format_d(double v, const std::string &dim) const {
+    return $self->format(v, pycvc_wu_dim(dim));
+  }
+}
+
+// ── cvc::app: per-app world_clock() / world_units() accessors ────────
+// app is the opaque proxy above; now that both bases are wrapped, expose the
+// per-app handles (owned by the app; SWIG returns non-owning proxies). This is
+// how Python reaches the application-wide clock/units without a singleton.
+%extend cvc::app {
+  cvc::world_clock &world_clock() { return $self->world_clock(); }
+  cvc::world_units &world_units() { return $self->world_units(); }
+}
+
 // ── cvc::voxels — curate the surface ────────────────────────────────
 // Ignore: all app&-taking ctors (Python builds via the volume factory
 // %extend), the app& accessor, boost-typed / raw / templated members
@@ -433,12 +517,13 @@ namespace cvc {
 %ignore cvc::geometry::num_quads;
 %ignore cvc::geometry::num_tets;
 %ignore cvc::geometry::num_hexs;
-%ignore cvc::geometry::merge;
-%ignore cvc::geometry::tri_surface;
+// merge / tri_surface / invert_normals / reorient are now WRAPPED (removed from
+// the ignore list): merge(const geometry&) and invert_normals()/reorient() are
+// self-returning geometry& methods (same shape as the already-bound
+// compute_normals(), so they marshal identically — the return proxy aliases
+// self); tri_surface() returns a new geometry by value.
 %ignore cvc::geometry::calculate_surf_normals;
 %ignore cvc::geometry::generate_wire_interior;
-%ignore cvc::geometry::invert_normals;
-%ignore cvc::geometry::reorient;
 %ignore cvc::geometry::project;
 %ignore cvc::geometry::smoothing;
 %ignore cvc::geometry::quality_improve;
@@ -471,6 +556,37 @@ namespace cvc {
     if (!app)
       throw std::invalid_argument("pycvc.volume: null app handle");
     return new cvc::volume(*app);
+  }
+
+  // ── In-library data-prep (the canonical ML/training ops) ────────────────
+  // The underlying voxels::map/fill/sub/resize are %ignore'd on the base scope;
+  // these re-expose them on the volume proxy under DISTINCT names (so the base
+  // %ignore cannot swallow a same-named %extend), turning "prep a volume before
+  // handing it to a network" into one call each.
+  //
+  // normalize(lo, hi): affine-remap every voxel so the data range maps to
+  // [lo, hi] (e.g. [0,1] or [-1,1] network input).
+  void normalize(double lo, double hi) { $self->map(lo, hi); }
+  // fill_value(val): set every voxel to a constant (clear before stamping
+  // obstacles). Named fill_value, not fill — the base %ignore cvc::voxels::fill
+  // DOES reach this derived %extend scope and would swallow a same-named helper.
+  void fill_value(double val) { $self->fill(val); }
+  // resample(nx, ny, nz): resize this volume IN PLACE to an nx*ny*nz grid (the
+  // uniform network-input grid). Builds the opaque `dimension` from ints, as
+  // set_float_grid does.
+  void resample(unsigned long nx, unsigned long ny, unsigned long nz) {
+    $self->resize(cvc::dimension(nx, ny, nz));
+  }
+  // crop(ox,oy,oz, nx,ny,nz): a NEW volume holding the nx*ny*nz sub-grid at
+  // voxel offset (ox,oy,oz) — copy-then-sub, so the source is left intact
+  // (patch augmentation). sub() extracts a subvolume in place, so it runs on the
+  // copy. The 4-arg overload is called; volume::sub's MSVC-only `brain_damage`
+  // trailing arg keeps its default and is never exposed.
+  cvc::volume crop(unsigned long ox, unsigned long oy, unsigned long oz, unsigned long nx,
+                   unsigned long ny, unsigned long nz) const {
+    cvc::volume out(*$self);
+    out.sub(ox, oy, oz, cvc::dimension(nx, ny, nz));
+    return out;
   }
 
   // Build a Float volume from a flat, row-major (x fastest, then y, then z)
@@ -684,6 +800,46 @@ namespace cvc {
       colors.push_back(c);
     }
   }
+  // Per-vertex normals as a flat [nx,ny,nz,...] list (len == 3*num_vertices()).
+  // Read-out completes the compute_normals()/calculate_surf_normals() story
+  // (there was no way to get the result back to Python); set_normals stamps
+  // authored normals in. Copy-based: geometry exposes no normals_ptr(), so the
+  // zero-copy view that vertices() uses cannot be replicated here.
+  std::vector<double> get_normals() const {
+    const auto& norms = $self->const_normals();
+    std::vector<double> out;
+    out.reserve(norms.size() * 3);
+    for (const auto& n : norms) {
+      out.push_back(n[0]);
+      out.push_back(n[1]);
+      out.push_back(n[2]);
+    }
+    return out;
+  }
+  void set_normals(const std::vector<double>& xyz) {
+    if (xyz.size() != $self->const_points().size() * 3)
+      throw std::invalid_argument("set_normals: length must equal 3 * num_vertices()");
+    auto& norms = $self->normals();
+    norms.clear();
+    norms.reserve(xyz.size() / 3);
+    for (std::size_t i = 0; i + 2 < xyz.size(); i += 3) {
+      cvc::geometry::vector_t n;
+      n[0] = xyz[i];
+      n[1] = xyz[i + 1];
+      n[2] = xyz[i + 2];
+      norms.push_back(n);
+    }
+  }
+  // The mesh AABB as a (minx,miny,minz,maxx,maxy,maxz) 6-tuple (the bounding_box
+  // return is opaque — same treatment as model.extents). Aliased to `extents`
+  // in the %pythoncode below.
+  std::vector<double> extents_bbox() const {
+    cvc::bounding_box b = $self->extents();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  %pythoncode %{
+    extents = extents_bbox  # geom.extents() -> (minx..maxz), like model.extents()
+  %}
 
   // Per-vertex texture coordinates (Phase 2). Flat row-major u,v pairs; one uv
   // per vertex (len == 2 * num_vertices()). Mirrors set_colors. These reach the
@@ -814,6 +970,19 @@ namespace cvc {
 // and cvcGL's node.set_texture(image) can %import it. Uses the ArrayView
 // machinery + capsule dtor defined above.
 %include "pycvc_image.i"
+
+// ── cvc::volren: software raycaster value types + headless raycaster ─────
+// The volren settings structs + raycaster (renders a cvc::volume to a cvc::image,
+// no VTK). Placed here, after volume + image + bounding_box + world_units are all
+// wrapped above, because volume_settings/frame/raycaster reference them.
+%include "pycvc_volren.i"
+
+// ── cvc::volslice: view-aligned slice renderer value types ──────────────
+// Placed AFTER pycvc_volren.i on purpose: volslice reuses volren.i's std::array
+// typemaps and aliases volren::mat4/vec3d/transfer_function (`using volren::...`),
+// all wrapped by pycvc_volren.i; also after volume/image/bounding_box/world_units,
+// which box3d/slice_params/render_settings reference.
+%include "pycvc_volslice.i"
 
 // ── Phase 3 (Phase-6 binding): cvc::model + pycvc.load_model ─────────────
 // The multi-mesh scene value type (meshes + materials + textures) and the native
