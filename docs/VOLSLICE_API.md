@@ -174,8 +174,11 @@ Name reshaping (SWIG flattens namespaces — pycvc has no `nspace`):
   module already has `cvc::volren`'s `render_settings`, and both would otherwise
   collide. You rarely name it: `node.config()` returns one;
 - `box3d` / `slice_params` cross as proxies whose `vec3d` members read `.x/.y/.z`;
-- `slice_geometry`'s raw fan vectors are not exposed — only its scalar accessors
-  (`planes()` / `vertices()` / `empty()` / `plane_spacing`);
+- `slice_geometry` exposes its scalar accessors (`planes()` / `vertices()` /
+  `empty()` / `plane_spacing`) plus copy read-outs of the computed fan geometry —
+  `get_positions()` / `get_texcoords()` (flat xyz, float→double) and
+  `fan_offsets()` / `fan_counts()` (uint32 indices) — so `compute_slices()`'s
+  result is readable offline; a zero-copy numpy view is a deferred follow-up;
 - `state_settings` (CRTP + a `std::function` apply callback) is not wrapped;
   drive the node through `config()` / `setConfig()` or the state keys.
 

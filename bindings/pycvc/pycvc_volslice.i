@@ -48,6 +48,28 @@
 %ignore cvc::volslice::slice_geometry::fan_offset;
 %ignore cvc::volslice::slice_geometry::fan_count;
 %include "cvc/volslice/slicer.h"
+// Read the computed triangle-fan geometry out to flat lists, so an offline /
+// twin / regression path can consume compute_slices()'s vertices (not just count
+// them). The raw std::vector<float>/<uint32_t> members stay %ignore'd (no
+// FloatVector/UInt32Vector %template, and a same-named %extend would be swallowed
+// by the %ignore); these accessors have DISTINCT names. positions/texcoords widen
+// float->double (DoubleVector); the fan offsets/counts are uint32 indices ->
+// unsigned long (IndexVector), lossless. (A zero-copy numpy view is a deferred
+// hot-path follow-up; the copy is fine for the offline analysis path.)
+%extend cvc::volslice::slice_geometry {
+  std::vector<double> get_positions() const {
+    return std::vector<double>($self->positions.begin(), $self->positions.end());
+  }
+  std::vector<double> get_texcoords() const {
+    return std::vector<double>($self->texcoords.begin(), $self->texcoords.end());
+  }
+  std::vector<unsigned long> fan_offsets() const {
+    return std::vector<unsigned long>($self->fan_offset.begin(), $self->fan_offset.end());
+  }
+  std::vector<unsigned long> fan_counts() const {
+    return std::vector<unsigned long>($self->fan_count.begin(), $self->fan_count.end());
+  }
+}
 
 // ── settings.h: render_settings ─────────────────────────────────────────────
 // slices (a by-value slice_params, wrapped above) + filter (interpolation enum
