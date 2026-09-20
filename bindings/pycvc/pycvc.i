@@ -899,6 +899,12 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 // machinery + capsule dtor defined above.
 %include "pycvc_image.i"
 
+// ── cvc::volren: software raycaster value types + headless raycaster ─────
+// The volren settings structs + raycaster (renders a cvc::volume to a cvc::image,
+// no VTK). Placed here, after volume + image + bounding_box + world_units are all
+// wrapped above, because volume_settings/frame/raycaster reference them.
+%include "pycvc_volren.i"
+
 // ── Phase 3 (Phase-6 binding): cvc::model + pycvc.load_model ─────────────
 // The multi-mesh scene value type (meshes + materials + textures) and the native
 // loader pycvc.load_model(path) → pycvc.model. %include'd HERE, after geometry

@@ -44,6 +44,8 @@ if _sys.platform == "win32":
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/gl/VolRenNode.h>
+#include <cvc/volren/volren.h> // volume_settings/render_settings etc. VolRenNode takes
 #include <cvc/gl/NullGraphicNode.h> // the concrete empty node behind add_child_group
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -205,6 +207,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %shared_ptr(cvc::gl::GraphicsNode)
 %shared_ptr(cvc::gl::GeometryNode)
 %shared_ptr(cvc::gl::VolumeNode)
+%shared_ptr(cvc::gl::VolRenNode)
 %shared_ptr(cvc::gl::SceneGraph)
 
 // ── directors: Python-defined scene node types ──────────────────────────────
@@ -219,6 +222,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %feature("director") cvc::gl::GraphicsNode;
 %feature("director") cvc::gl::GeometryNode;
 %feature("director") cvc::gl::VolumeNode;
+%feature("director") cvc::gl::VolRenNode;
 
 // A Python-CONSTRUCTED node (a director subclass built as MyNode(app, path,
 // name)) must keep its app alive too — its ~SceneNode touches the app's state
@@ -231,6 +235,9 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     if args: self._pycvc_app = args[0]
 %}
 %pythonappend cvc::gl::VolumeNode::VolumeNode %{
+    if args: self._pycvc_app = args[0]
+%}
+%pythonappend cvc::gl::VolRenNode::VolRenNode %{
     if args: self._pycvc_app = args[0]
 %}
 
@@ -437,6 +444,40 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::VolumeNode::getBoundingBox;
 %include "cvc/gl/VolumeNode.h"
 
+// ── VolRenNode: the cvc::volren software raycaster as a scene node ──────────
+// Derives from GeometryNode (already shared_ptr'd/director'd above); the volren
+// value types it takes (volume_settings/render_settings) come from pycvc_volren.i
+// via the %import of pycvc.i. addVolume/tick/config drive the raycast; the mesh
+// API it inherits from GeometryNode is a documented WART here (corrupts the quad)
+// so it is hidden.
+%ignore cvc::gl::VolRenNode::getBoundingBox;         // opaque bbox -> 6-tuple below
+%ignore cvc::gl::VolRenNode::volumePointToReal;      // world_units::coordinate -> tuple below
+%ignore cvc::gl::VolRenNode::volumeRealDimensions;   // world_units::coordinate -> tuple below
+%ignore cvc::gl::VolRenNode::setGeometry;            // inherited mesh API: meaningless here
+%ignore cvc::gl::VolRenNode::updateVertices;
+%ignore cvc::gl::VolRenNode::updateColors;
+%ignore cvc::gl::VolRenNode::setRenderMode;
+%include "cvc/gl/VolRenNode.h"
+%extend cvc::gl::VolRenNode {
+  // Real-world coordinate/size of a rendered volume (world_units::coordinate ->
+  // (x, y, z, unit) tuple), composing the per-volume model_transform, this node's
+  // world transform, and the regime.
+  PyObject *volume_point_to_real(std::size_t index, double ox, double oy, double oz,
+                                 const cvc::world_units &u) {
+    cvc::world_units::coordinate c = $self->volumePointToReal(index, ox, oy, oz, u);
+    return Py_BuildValue("(ddds)", c.x, c.y, c.z, c.unit.c_str());
+  }
+  PyObject *volume_real_dimensions(std::size_t index, const cvc::world_units &u) {
+    cvc::world_units::coordinate c = $self->volumeRealDimensions(index, u);
+    return Py_BuildValue("(ddds)", c.x, c.y, c.z, c.unit.c_str());
+  }
+  // The node's (all volumes') box in its local frame as a (minx..maxz) 6-tuple.
+  std::vector<double> get_bounding_box() {
+    cvc::bounding_box b = $self->getBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+}
+
 // ── SceneGraph: the top-level graph. App injected explicitly (no singleton). ─
 %ignore cvc::gl::SceneGraph::SceneGraph(const std::string &);           // process-wide singleton ctor
 %ignore cvc::gl::SceneGraph::SceneGraph(cvc::app &, const std::string &); // re-exposed via shared_ptr factory
@@ -487,6 +528,8 @@ def _typed_node(sg, name):
     n = sg.geometry_node(name)
     if n is None:
         n = sg.volume_node(name)
+    if n is None:
+        n = sg.volren_node(name)
     return n
 %}
 %pythonappend cvc::gl::SceneGraph::getGraphics %{
@@ -520,6 +563,15 @@ def _typed_node(sg, name):
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %pythonappend cvc::gl::SceneGraph::add_child_volume %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::add_child_volren %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::add_volren %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::volren_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %pythonappend cvc::gl::SceneGraph::volume_node %{
@@ -634,6 +686,29 @@ def _typed_node(sg, name):
     child->setData(v);
     $self->registerGraphics(name, child);
     return child;
+  }
+  // A cvc::volren software-raycast volume node as a child of `parent` / at the
+  // root. addGraphicsChild<T> is a template (unwrappable), so this clones the
+  // add_child_geometry factory. Fill it in Python: n = sg.add_volren("vol");
+  // n.addVolume(vol, vs); ... n.tick().
+  std::shared_ptr<cvc::gl::VolRenNode> add_child_volren(const std::string& parent,
+                                                        const std::string& name) {
+    auto p = $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_child_volren: no parent node named '" + parent + "'");
+    auto child = p->addGraphicsChild<cvc::gl::VolRenNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  std::shared_ptr<cvc::gl::VolRenNode> add_volren(const std::string& name) {
+    auto child = $self->getGraphicsRoot()->addGraphicsChild<cvc::gl::VolRenNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  // Typed downcast (like geometry_node/volume_node): the concrete VolRenNode so
+  // its addVolume/tick/real-units methods are visible. Null if absent/wrong type.
+  std::shared_ptr<cvc::gl::VolRenNode> volren_node(const std::string& name) {
+    return std::dynamic_pointer_cast<cvc::gl::VolRenNode>($self->getGraphics(name));
   }
   // Connect a Python callable to the scene's graphics-changed signal (fires when
   // a node is added or removed) — Python functions as scene callbacks.
