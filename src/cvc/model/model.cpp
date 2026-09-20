@@ -87,4 +87,19 @@ bounding_box model::extents() const {
   return bbox;
 }
 
+// ---------------
+// model::extents_metres
+// ---------------
+// Purpose:
+//   extents() scaled into canonical SI metres via metres_per_source_unit. A null
+//   box (empty model) has no corners to scale and is returned as-is, so it stays
+//   the additive identity for callers that union several models' footprints.
+bounding_box model::extents_metres() const {
+  bounding_box b = extents();
+  if (b.isNull())
+    return b;
+  const double s = metres_per_source_unit;
+  return bounding_box(b.minx * s, b.miny * s, b.minz * s, b.maxx * s, b.maxy * s, b.maxz * s);
+}
+
 } // namespace cvc

@@ -71,6 +71,17 @@ struct model {
   std::vector<mesh> meshes;
   std::vector<material> materials;
 
+  // The physical length, in canonical SI metres, of ONE unit of this model's
+  // local coordinate system -- i.e. what the vertex coordinates are authored in.
+  // 1.0 means the mesh is already in metres (the safe default, and what every
+  // importer produces today). An importer that knows better stamps it: glTF is
+  // metres (1.0), FBX is usually centimetres (0.01), and a CAD part authored in
+  // millimetres is 0.001. This is DISTINCT from any render/scene scale; it is a
+  // property of the file, and it is what lets model dimensions be mapped to the
+  // world unit base (see cvc::world_units) so a span or a picked coordinate can
+  // be reported in real metres/kilometres/miles rather than raw file numbers.
+  double metres_per_source_unit = 1.0;
+
   bool empty() const { return meshes.empty(); }
 
   // ---------------
@@ -87,8 +98,20 @@ struct model {
   // model::extents
   // ---------------
   // Purpose:
-  //   Union of every mesh's bounding box (reuses geometry's bbox facility).
+  //   Union of every mesh's bounding box (reuses geometry's bbox facility), in
+  //   the model's own (authoring) coordinate space.
   bounding_box extents() const;
+
+  // ---------------
+  // model::extents_metres
+  // ---------------
+  // Purpose:
+  //   extents() scaled by metres_per_source_unit, i.e. the model's footprint in
+  //   canonical SI metres regardless of what units the file was authored in.
+  //   This is the bridge from a model's declared dimensions to the world unit
+  //   base; feed the corners to cvc::world_units to display them in the active
+  //   regime. A null (empty) box is returned unchanged.
+  bounding_box extents_metres() const;
 
   boost::uint64_t num_meshes() const { return meshes.size(); }
 };

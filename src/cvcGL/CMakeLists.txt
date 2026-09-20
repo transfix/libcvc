@@ -352,6 +352,15 @@ add_executable(cvcgl_camera test/cvcgl_camera.cpp)
 target_link_libraries(cvcgl_camera PRIVATE cvcGL)
 add_test(NAME cvcgl_camera COMMAND cvcgl_camera)
 
+# World-units integration: GraphicsNode::localToWorld/worldToLocal (lazily
+# cached inverse) and localPointToReal mapping a graphic's own-frame point to a
+# real-world km/mile coordinate via cvc::world_units, plus SceneRenderer::
+# pickWorld's miss contract (SKIPs without a GL context). The matrix math runs
+# headless; no renderer needed.
+add_executable(cvcgl_world_units test/cvcgl_world_units.cpp)
+target_link_libraries(cvcgl_world_units PRIVATE cvcGL)
+add_test(NAME cvcgl_world_units COMMAND cvcgl_world_units)
+
 # FpsHud: the on-screen FPS readout's cvc::state surface (enabled/toggle key/
 # update rate, two-way binding, key-sym normalization) — no window needed.
 add_executable(cvcgl_fps_hud test/cvcgl_fps_hud.cpp)

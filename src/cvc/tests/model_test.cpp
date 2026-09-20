@@ -166,6 +166,42 @@ TEST(ModelTest, ExtentsUnion) {
   EXPECT_DOUBLE_EQ(bb.ZMax(), 3.0);
 }
 
+TEST(ModelTest, AuthoringUnitsDefaultToMetres) {
+  model m;
+  EXPECT_DOUBLE_EQ(m.metres_per_source_unit, 1.0);
+  m.meshes.push_back({make_box_corner(0, 0, 0), -1, ""}); // bbox 0..1
+  // With the default 1.0, extents_metres() equals extents() exactly.
+  cvc::bounding_box raw = m.extents();
+  cvc::bounding_box met = m.extents_metres();
+  EXPECT_DOUBLE_EQ(met.XMin(), raw.XMin());
+  EXPECT_DOUBLE_EQ(met.XMax(), raw.XMax());
+}
+
+TEST(ModelTest, ExtentsMetresScalesByAuthoringUnit) {
+  model m;
+  m.metres_per_source_unit = 0.01; // authored in centimetres
+  model::mesh a;
+  a.geom = make_box_corner(0, 0, 0); // 0,0,0 .. 1,1,1 in cm
+  model::mesh b;
+  b.geom = make_box_corner(2, 2, 2); // 2,2,2 .. 3,3,3 in cm
+  m.meshes.push_back(a);
+  m.meshes.push_back(b);
+
+  cvc::bounding_box bb = m.extents_metres(); // 300 cm span -> 0.03 m
+  EXPECT_DOUBLE_EQ(bb.XMin(), 0.0);
+  EXPECT_DOUBLE_EQ(bb.XMax(), 0.03);
+  EXPECT_DOUBLE_EQ(bb.YMax(), 0.03);
+  EXPECT_DOUBLE_EQ(bb.ZMax(), 0.03);
+  // The authoring-space extents are unchanged; only the metres view scales.
+  EXPECT_DOUBLE_EQ(m.extents().XMax(), 3.0);
+}
+
+TEST(ModelTest, ExtentsMetresOfAnEmptyModelIsNull) {
+  model m;
+  m.metres_per_source_unit = 0.001;
+  EXPECT_TRUE(m.extents_metres().isNull()); // no corners to scale
+}
+
 TEST(ModelTest, UnsupportedExtensionThrows) {
   EXPECT_ANY_THROW(cvc::read_model("/no/such/file.qwerty"));
 }
