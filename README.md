@@ -51,6 +51,7 @@ A comprehensive computational visualization library from the Computational Visua
 - 🧭 **Reactive Swarm Navigation** (`cvc::nav`): a torch-free, Python-free real-time reactive swarm runtime ported from GRL-SNAM — bit-identical grid kernels (exact EDT, 8-connected A*, footprint→SDF), a fused per-agent drive (`coef_feats` → `CoefMLP` → kinematic-bicycle rollout), a `sim_world` swarm with shared/grouped/private belief planes plus a device-resident CUDA twin, lock-free off-thread stepping, and a self-supervised policy trainer (CPU + CUDA, portable `.cvcnav` weights). Terrain SEMANTICS ride along: per-cell material risk + hard hazards with a feasibility-witness gate ([`docs/NAV_MATERIAL.md`](docs/NAV_MATERIAL.md)). See [`docs/NAV_TRAINING.md`](docs/NAV_TRAINING.md).
 - 🖼️ **3D Scene Graph & Assets**: a VTK-backed scene graph + persistent renderer (`cvc::gl` / cvcGL — geometry/volume/grid nodes, scene-owned lighting & shadows, offscreen/onscreen capture), a standalone 2D raster + codecs container (`cvc::image` — PNG/JPEG/WebP), and a PBR multi-mesh scene loader (`cvc::model` — OBJ/glTF/GLB/FBX/DAE/PLY via assimp)
 - ⏱️ **Simulation Clock** (`cvc::world_clock`): an authoritative fixed-step clock separating world time from wall time and render cadence — banks `advance(wall_dt)` into whole quanta and returns `{steps, alpha}` for interpolated rendering, with deterministic live/replay/paused modes
+- 📏 **World Unit Base** (`cvc::world_units`): the spatial counterpart to the clock — an application-wide unit regime (SI / imperial) over a single canonical SI store, pinning world-space doubles to metres (`metres_per_world_unit`) and converting length / mass / velocity / acceleration / force / energy / angle at the presentation boundary only. Turns a picked world point into a precise km-or-miles coordinate and gives the physics engine a provable SI contract for digital-twin statistics. See [`docs/WORLD_UNITS_API.md`](docs/WORLD_UNITS_API.md).
 - 🔭 **Level-of-Detail selection** (`cvc::lod`): single-process, allocation-free LOD math shared by the cvcGL nav demos and the L-System Laboratory — hysteretic rung selection by screen-space error, a width-based mesh↔impostor switch, and a greedy triangle/prop/memory budget solver that is a pure (headless-exact) function of its inputs. See [`docs/LOD_API.md`](docs/LOD_API.md).
 - 🧮 **Scientific Computing**: Integration with FFTW, GSL, CGAL, Boost
 
@@ -211,6 +212,7 @@ few POSIX-only distributed-state suites are opt-in. The major families:
 - **Geometry** — `geometry_test` (119), `geometry_attributes_test` (10), `algorithm_test` (10: SDF / isosurface, incl. a 256³ stress test)
 - **Navigation** (`cvc::nav`) — `nav_test` (41: kernels, drive, `sim_world` shared/grouped/private belief, `sim_thread`, CUDA twin) + `nav_coef_train_test` (10: torch-free trainer gradcheck; the two full train-then-drive convergence runs are opt-in, see `NavCoefTrainConvergence`)
 - **Simulation clock** — `world_clock_test` (33)
+- **World units** — `world_units_test` (25: SI↔imperial exact anchors, km/miles promotion, world-point coordinates, non-finite/negative edge cases, fail-loud scale validation, thread safety)
 - **Assets** — `image_test` (19), `model_test` (9)
 - **Mesher / SDF internals** — `lbie_mesher_test` (LBIE octree subdivision, quad/interval/tetra2 mesh types, quality-improve methods incl. `OPTIMIZATION`), `fastcontouring_math_test` (Quaternion/Matrix/Vector/Ray/ContourGeometry), `mtxlib_test` (SDF V2's vector/matrix library, `DistanceTransform` predicates)
 - **Volume I/O depth** — `hdf5_volume_test` (the HDF5 volume backend: multi-variable/timestep, `|object` addressing, subvolume reads), `volume_io_extra_test` (MRC/RAWV/RAWIV/VTK/Spider/cvcraw error paths and format edge cases)
@@ -495,6 +497,7 @@ Measured 3.7–6.0× fewer triangles on the Austin bundle; `solve()` for a
 - **[USAGE.md](USAGE.md)** - Consumer guide for `find_package(cvc)` from a CMake project
 - **[docs/APP_API.md](docs/APP_API.md)** - `cvc::app` runtime context API
 - **[docs/STATE_API.md](docs/STATE_API.md)** - State tree / property bag API
+- **[docs/WORLD_UNITS_API.md](docs/WORLD_UNITS_API.md)** - World unit base & display regime (`cvc::world_units`)
 - **[docs/VOLUME_API.md](docs/VOLUME_API.md)** - Volume data structures
 - **[docs/GEOMETRY_API.md](docs/GEOMETRY_API.md)** - Geometry data structures
 - **[docs/THREAD_POOL.md](docs/THREAD_POOL.md)** - Thread pool overview, examples, and usage guide
@@ -600,7 +603,7 @@ libcvc/
 ├── CMakeLists.txt          # Root build configuration
 ├── CMake/                  # CMake helper modules
 ├── inc/cvc/                # Public headers, one directory per module:
-│   ├── core/              #   cvc::app / cvc::state, state_exec DSL, world_clock, distributed state
+│   ├── core/              #   cvc::app / cvc::state, state_exec DSL, world_clock, world_units, distributed state
 │   ├── volume/            #   VolMagick voxels/volume + I/O + filters
 │   ├── geometry/          #   triangle/volumetric meshes + I/O
 │   ├── utility/           #   algorithm.h (cvc::sdf, isosurface), CUDA utils
