@@ -84,7 +84,9 @@ r.pick_world(x, y)                               # a clicked point in world spac
 ```
 
 The same wrapping covers the built-in reference nodes (`getGridNode()` /
-`getAxisNode()`), lights (`addLight` → `LightNode`) and the software raycaster
-scene node (`VolRenNode`, `add_volren`). Contract tests:
-`test_pycvc_world_units.py`, `test_pycvc_gl_world.py`, and the
+`getAxisNode()`), lights (`addLight` → `LightNode`), the software raycaster
+scene node (`VolRenNode`, `add_volren`; value types in `pycvc_volren.i`) and the
+view-aligned slice renderer (`VolSliceNode`, `add_volslice`; value types in
+`pycvc_volslice.i` — see [`docs/VOLSLICE_API.md`](../../docs/VOLSLICE_API.md#python-pycvc)).
+Contract tests: `test_pycvc_world_units.py`, `test_pycvc_gl_world.py`, and the
 `extents_metres` case in `test_pycvc_model.py`.

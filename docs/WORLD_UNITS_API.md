@@ -419,8 +419,13 @@ node.real_dimensions(app.world_units())         # "how big is this, really"
   `volume_point_to_real(i, x, y, z, units)` report a rendered volume's real size
   and coordinates in the regime. The headless `raycaster` value types
   (`camera.eye/focal/up`, `render_settings.background`, …) cross as tuples.
+- **`VolSliceNode`** (`add_volslice` / `volslice_node`) — the view-aligned slice
+  renderer as a scene node (`setVolume` / `config` / `setConfig` / `tick`); its
+  `cvc::volslice` value types are wrapped in `pycvc_volslice.i` (see
+  [`docs/VOLSLICE_API.md`](VOLSLICE_API.md#python-pycvc)).
 
 The Python contract is pinned by `bindings/pycvc/test_pycvc_world_units.py`
 (the unit base + per-app instances), `test_pycvc_gl_world.py` (the transform
-chain, grid/axis/light nodes, `VolRenNode` + raycaster value types) and the
-`extents_metres` case in `test_pycvc_model.py`.
+chain, grid/axis/light nodes, `VolRenNode` + raycaster value types, and the
+`VolSliceNode` slice renderer) and the `extents_metres` case in
+`test_pycvc_model.py`.

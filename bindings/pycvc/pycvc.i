@@ -905,6 +905,13 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 // wrapped above, because volume_settings/frame/raycaster reference them.
 %include "pycvc_volren.i"
 
+// ── cvc::volslice: view-aligned slice renderer value types ──────────────
+// Placed AFTER pycvc_volren.i on purpose: volslice reuses volren.i's std::array
+// typemaps and aliases volren::mat4/vec3d/transfer_function (`using volren::...`),
+// all wrapped by pycvc_volren.i; also after volume/image/bounding_box/world_units,
+// which box3d/slice_params/render_settings reference.
+%include "pycvc_volslice.i"
+
 // ── Phase 3 (Phase-6 binding): cvc::model + pycvc.load_model ─────────────
 // The multi-mesh scene value type (meshes + materials + textures) and the native
 // loader pycvc.load_model(path) → pycvc.model. %include'd HERE, after geometry

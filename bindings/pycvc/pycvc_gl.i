@@ -48,6 +48,7 @@ if _sys.platform == "win32":
 #include <cvc/gl/LightNode.h>  // scene light rig (addLight)
 #include <cvc/gl/GridNode.h>   // the built-in reference grid (getGridNode)
 #include <cvc/gl/AxisNode.h>   // the built-in world axis (getAxisNode)
+#include <cvc/gl/VolSliceNode.h> // cvc::volslice view-aligned slice renderer node
 #include <cvc/volren/volren.h> // volume_settings/render_settings etc. VolRenNode takes
 #include <cvc/gl/NullGraphicNode.h> // the concrete empty node behind add_child_group
 #include <cvc/gl/SceneGraph.h>
@@ -214,6 +215,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %shared_ptr(cvc::gl::LightNode)
 %shared_ptr(cvc::gl::GridNode)
 %shared_ptr(cvc::gl::AxisNode)
+%shared_ptr(cvc::gl::VolSliceNode)
 %shared_ptr(cvc::gl::SceneGraph)
 
 // ── directors: Python-defined scene node types ──────────────────────────────
@@ -229,6 +231,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %feature("director") cvc::gl::GeometryNode;
 %feature("director") cvc::gl::VolumeNode;
 %feature("director") cvc::gl::VolRenNode;
+%feature("director") cvc::gl::VolSliceNode;
 
 // A Python-CONSTRUCTED node (a director subclass built as MyNode(app, path,
 // name)) must keep its app alive too — its ~SceneNode touches the app's state
@@ -253,6 +256,9 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     if args: self._pycvc_app = args[0]
 %}
 %pythonappend cvc::gl::AxisNode::AxisNode %{
+    if args: self._pycvc_app = args[0]
+%}
+%pythonappend cvc::gl::VolSliceNode::VolSliceNode %{
     if args: self._pycvc_app = args[0]
 %}
 
@@ -608,6 +614,32 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::AxisNode::getBoundingBox; // opaque bbox
 %include "cvc/gl/AxisNode.h"
 
+// ── VolSliceNode: the cvc::volslice view-aligned slice renderer as a node ───
+// Derives from GeometryNode (shared_ptr'd/director'd above). Its config type
+// cvc::volslice::render_settings is wrapped (renamed volslice_render_settings)
+// in pycvc_volslice.i and reaches here via the %import of pycvc.i, so
+// config()/setConfig() marshal directly — no %extend, like VolumeNode's props.
+// The inherited GeometryNode mesh API is a WART here (it drives per-frame slice
+// fans itself), so it is hidden, exactly as for VolRenNode. tick()/planesRendered
+// are KEPT but upload GL textures — a live context is needed to call tick(), so
+// the Python tests assert their presence, not a live tick (see test note).
+%ignore cvc::gl::VolSliceNode::getBoundingBox;      // opaque bbox -> 6-tuple below
+%ignore cvc::gl::VolSliceNode::addToRenderer;       // vtkRenderer* (toggles OIT)
+%ignore cvc::gl::VolSliceNode::depthSortSliceProps; // static; vtkRenderer* + vector<VolSliceNode*>
+%ignore cvc::gl::VolSliceNode::setGeometry;         // inherited mesh WART: corrupts slices
+%ignore cvc::gl::VolSliceNode::updateVertices;      // inherited mesh WART
+%ignore cvc::gl::VolSliceNode::updateColors;        // inherited mesh WART
+%ignore cvc::gl::VolSliceNode::setRenderMode;       // inherited mesh WART
+%include "cvc/gl/VolSliceNode.h"
+%extend cvc::gl::VolSliceNode {
+  // The node's box in its local frame as a (minx..maxz) 6-tuple (the
+  // bounding_box return is opaque — the SwigValueWrapper mis-bind).
+  std::vector<double> get_bounding_box() {
+    cvc::bounding_box b = $self->getBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+}
+
 // ── SceneGraph: the top-level graph. App injected explicitly (no singleton). ─
 %ignore cvc::gl::SceneGraph::SceneGraph(const std::string &);           // process-wide singleton ctor
 %ignore cvc::gl::SceneGraph::SceneGraph(cvc::app &, const std::string &); // re-exposed via shared_ptr factory
@@ -722,6 +754,16 @@ def _typed_node(sg, name):
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %pythonappend cvc::gl::SceneGraph::getAxisNode %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+// VolSlice factories return live node proxies — same app keep-alive.
+%pythonappend cvc::gl::SceneGraph::add_child_volslice %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::add_volslice %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::volslice_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %extend cvc::gl::SceneGraph {
@@ -861,6 +903,29 @@ def _typed_node(sg, name):
   // so its kind/target/color/intensity setters are visible. Null if absent/wrong.
   std::shared_ptr<cvc::gl::LightNode> light_node(const std::string& name) {
     return std::dynamic_pointer_cast<cvc::gl::LightNode>($self->getGraphics(name));
+  }
+  // A cvc::volslice view-aligned slice-renderer node as a child of `parent` / at
+  // the root. addGraphicsChild<T> is a template (unwrappable), so this clones the
+  // add_volren factory. Fill it in Python: n = sg.add_volslice("slice");
+  // n.setVolume(vol); n.setConfig(rs); ... (n.tick() needs a live GL context).
+  std::shared_ptr<cvc::gl::VolSliceNode> add_child_volslice(const std::string& parent,
+                                                            const std::string& name) {
+    auto p = $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_child_volslice: no parent node named '" + parent + "'");
+    auto child = p->addGraphicsChild<cvc::gl::VolSliceNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  std::shared_ptr<cvc::gl::VolSliceNode> add_volslice(const std::string& name) {
+    auto child = $self->getGraphicsRoot()->addGraphicsChild<cvc::gl::VolSliceNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  // Typed downcast (like volren_node): the concrete VolSliceNode so its
+  // setVolume/config/tick methods are visible. Null if absent/wrong type.
+  std::shared_ptr<cvc::gl::VolSliceNode> volslice_node(const std::string& name) {
+    return std::dynamic_pointer_cast<cvc::gl::VolSliceNode>($self->getGraphics(name));
   }
   // Connect a Python callable to the scene's graphics-changed signal (fires when
   // a node is added or removed) — Python functions as scene callbacks.

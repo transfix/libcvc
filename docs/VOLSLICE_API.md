@@ -157,6 +157,57 @@ One volume per node — `VolumeNode`'s model, deliberately not `VolRenNode`'s
 embedded multi-volume list: the slice renderer is a true scene citizen and
 the scene graph composes multiples (VTK depth-sorts the actors).
 
+## Python (pycvc)
+
+The value types and the scene node are wrapped for Python via SWIG — the value
+types in `bindings/pycvc/pycvc_volslice.i`, the node in `bindings/pycvc/pycvc_gl.i`
+(mirroring `cvc::volren` / `VolRenNode`). The bindings share `cvc::volren`'s
+`mat4` / `vec3d` / `transfer_function`, so `pycvc_volslice.i` is `%include`'d
+after `pycvc_volren.i` and defines no new typemaps.
+
+Name reshaping (SWIG flattens namespaces — pycvc has no `nspace`):
+
+- the `interpolation` / `blend_mode` enum-class values are flat int constants:
+  `pycvc.interpolation_linear` / `pycvc.interpolation_nearest`,
+  `pycvc.blend_mode_alpha` / `pycvc.blend_mode_additive`;
+- `render_settings` is **renamed `pycvc.volslice_render_settings`** — the flat
+  module already has `cvc::volren`'s `render_settings`, and both would otherwise
+  collide. You rarely name it: `node.config()` returns one;
+- `box3d` / `slice_params` cross as proxies whose `vec3d` members read `.x/.y/.z`;
+- `slice_geometry`'s raw fan vectors are not exposed — only its scalar accessors
+  (`planes()` / `vertices()` / `empty()` / `plane_spacing`);
+- `state_settings` (CRTP + a `std::function` apply callback) is not wrapped;
+  drive the node through `config()` / `setConfig()` or the state keys.
+
+```python
+import pycvc, pycvc_gl
+
+app = pycvc.make_app()
+sg = pycvc_gl.SceneGraph(app)
+
+node = sg.add_volslice("vol")            # or add_child_volslice(parent, "vol")
+node.setVolume(density_volume)           # one volume per node
+
+rs = node.config()                       # a volslice_render_settings proxy
+rs.filter = pycvc.interpolation_nearest
+rs.opacity_correction = True
+rs.tf_auto_domain = False
+rs.window_min, rs.window_max = -6.0, 6.0
+rs.slices.quality = 0.75                 # the nested slice_params
+rs.slices.max_planes = 500
+rs.tf.add(pycvc.transfer_point())        # the shared volren transfer_function
+node.setConfig(rs)
+
+sg.volslice_node("vol")                  # typed downcast to the concrete node
+node.get_bounding_box()                  # (minx..maxz) 6-tuple
+```
+
+`tick()` and `planesRendered()` are bound but upload GL textures, so they need a
+live render context (exercised by the C++ offscreen test
+`src/cvcGL/test/cvcgl_volslice_node.cpp`); the Python contract test
+(`test_pycvc_gl_world.py`) asserts their binding presence and round-trips
+everything headless.
+
 ## Future work
 
 - **Shaded path**: gradient lighting in the fragment shader (on-the-fly

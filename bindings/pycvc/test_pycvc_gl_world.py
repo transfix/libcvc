@@ -243,6 +243,54 @@ def test_volren_raycaster_value_types():
     print("  ok: raycaster camera/background arrays cross as tuples; scene_bounds 6-tuple")
 
 
+def test_volslice_node_wrapped():
+    # The cvc::volslice view-aligned slice renderer as a scene node. Headless:
+    # setVolume defers the GL texture upload to tick(), and config()/setConfig()
+    # round-trip through the state tree (no GL) — so everything below runs without
+    # a render context. tick()/planesRendered() DO upload textures, so we assert
+    # their binding is present, not a live tick (mirrors SceneRenderer.pick_world).
+    sg = pycvc_gl.SceneGraph(app)
+    if not hasattr(sg, "add_volslice"):
+        print("  skip: volslice node not built")
+        return
+    node = sg.add_volslice("slice")
+    assert node is not None
+    assert not node.hasVolume()
+    node.setVolume(_make_field(8))
+    assert node.hasVolume()
+
+    # config() -> volslice_render_settings proxy; mutate its members + the nested
+    # slice_params, then setConfig() writes them back through cvc::state.
+    rs = node.config()
+    rs.filter = pycvc.interpolation_nearest  # scoped enum -> flat int constant
+    rs.opacity_correction = True
+    rs.tf_auto_domain = False
+    rs.window_min, rs.window_max = 0.0, 1.0
+    rs.slices.quality = 0.75
+    rs.slices.max_planes = 500
+    rs.slices.near_plane = 0.1
+    assert rs.tf.point_count() == 0  # the shared volren TF crosses in (empty default)
+    node.setConfig(rs)
+    got = node.config()
+    assert got.slices.max_planes == 500
+    assert abs(got.slices.quality - 0.75) < 1e-9
+    assert got.opacity_correction is True
+    assert got.filter == pycvc.interpolation_nearest
+    assert got.tf_auto_domain is False
+
+    bb = node.get_bounding_box()  # opaque bbox -> finite 6-list (no GL)
+    assert len(bb) == 6 and all(math.isfinite(v) for v in bb)
+
+    # tick()/planesRendered() need a live GL context — presence only.
+    assert callable(node.tick)
+    assert callable(node.planesRendered)
+
+    # typed downcast surfaces the concrete slice API regardless of getGraphics.
+    same = sg.volslice_node("slice")
+    assert same is not None and same.hasVolume()
+    print("  ok: add_volslice -> setVolume/config round-trip/get_bounding_box + volslice_node")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
