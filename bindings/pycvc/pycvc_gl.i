@@ -996,6 +996,18 @@ def _typed_node(sg, name):
     if args: self._pycvc_keepalive = args[0]
 %}
 %include "cvc/gl/CameraController.h"
+%extend cvc::gl::CameraController {
+  // The live pose as ((eye), (focal), (up)) 3-tuples. getPose takes C-array
+  // out-params SWIG can't express, so it is %ignore'd; this is the Pythonic read
+  // every viewport / the ChaseCamera shim uses (feed_track_target -> update ->
+  // get_pose). Phase A: feed_track_target/set_field_of_view/set_widen_tau/
+  // reset_tracking wrap directly from the header %include above.
+  PyObject *get_pose() const {
+    double e[3], f[3], u[3];
+    $self->getPose(e, f, u);
+    return Py_BuildValue("((ddd)(ddd)(ddd))", e[0], e[1], e[2], f[0], f[1], f[2], u[0], u[1], u[2]);
+  }
+}
 
 // ── StageLighting: a cinematic key/fill/back/wash rig, fully cvc::state ──────
 // A state_object like CameraController (NO %shared_ptr, NO director). Python
