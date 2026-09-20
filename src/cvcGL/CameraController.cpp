@@ -734,9 +734,9 @@ void CameraController::update(double dtSeconds) {
     // Push mode (feedTrackTarget) uses the streamed position; otherwise pull the
     // tracked node's world position.
     double tp3[3];
-    bool haveTarget = s.trackFed ? (tp3[0] = s.fedTarget.x, tp3[1] = s.fedTarget.y,
-                                    tp3[2] = s.fedTarget.z, true)
-                                 : trackedWorldPos(tp3);
+    bool haveTarget =
+        s.trackFed ? (tp3[0] = s.fedTarget.x, tp3[1] = s.fedTarget.y, tp3[2] = s.fedTarget.z, true)
+                   : trackedWorldPos(tp3);
     if (haveTarget) {
       Vec3 tp{tp3[0], tp3[1], tp3[2]};
       Basis b = s.basis();
@@ -764,9 +764,8 @@ void CameraController::update(double dtSeconds) {
       if (s.haveEye) {
         // Asymmetric easing: a slower tau while the eye falls behind (widening),
         // dot(teye - eye, heading) < 0. widen_tau == 0 uses cam_tau both ways.
-        double camTau = (s.trackWidenTau > 0.0 && dot(teye - s.trackEye, h) < 0.0)
-                            ? s.trackWidenTau
-                            : s.trackCamTau;
+        double camTau = (s.trackWidenTau > 0.0 && dot(teye - s.trackEye, h) < 0.0) ? s.trackWidenTau
+                                                                                   : s.trackCamTau;
         s.trackEye = ema(s.trackEye, teye, dtc, camTau);
         s.trackFocal = ema(s.trackFocal, tlook, dtc, camTau);
       } else {
