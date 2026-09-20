@@ -1116,3 +1116,8 @@ void poke_update(const std::shared_ptr<cvc::gl::GraphicsNode> &node) {
 }
 } // namespace pycvc
 %}
+
+// ── Dear ImGui overlay + state-bound ui panels (HUDs/UIs from Python) ───────
+// %include'd last: it references CameraController / StageLighting / SceneGraph /
+// SceneRenderer (all wrapped above) and reuses the file-scope callable typemap.
+%include "pycvc_imgui.i"

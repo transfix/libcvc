@@ -114,3 +114,29 @@ The `cvc::state`-driven viewer/scene controllers are wrapped too, mirroring
 `get_color`; construct headless via `ScreenTextHud(app, path, None)`).
 Contract tests: `test_pycvc_world_units.py`, `test_pycvc_gl_world.py`, and the
 `extents_metres` case in `test_pycvc_model.py`.
+
+## HUDs & UIs (Dear ImGui, no raw ImGui needed)
+
+`ImGuiOverlay(view)` is the per-viewer Dear ImGui integration. Python draws a HUD
+by setting a draw callback and calling the **state-bound `ui_*` widgets/panels**
+(`pycvc_imgui.i`) inside it — their bodies run within cvcGL against the overlay's
+own ImGui context, so a HUD never touches raw `ImGui::` (which would crash: the
+extension has its own `GImGui`):
+
+```python
+ov = pycvc_gl.ImGuiOverlay(view)
+ov.attachCamera(cam)
+
+def draw():
+    pycvc_gl.ui_slider_double(app, "Speed", "scene.viewers.left.camera.settings.move_speed", 1, 200)
+    pycvc_gl.ui_combo(app, "Belief", "demo.swarm.belief", ["shared", "grouped", "private"])
+    pycvc_gl.ui_scene_panel(sg)          # ready-made shadow/chrome panel
+    pycvc_gl.ui_camera_menu_items(cam)
+
+ov.setDrawCallback(draw)                  # re-invoked each frame; keep it cheap, don't raise
+```
+
+Every widget reads/writes `cvc::state`, so the same value is drivable from a
+script, a config file or a replicated peer. Raw custom-widget ImGui (free-form
+windows) is a separate, deferred design (a curated subset compiled inside cvcGL).
+Contract test: `test_pycvc_gl_imgui.py`.
