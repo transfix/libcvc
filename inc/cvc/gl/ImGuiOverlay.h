@@ -54,9 +54,13 @@ class SceneRenderer;
 //     which is what makes the WebAssembly build work: VTK owns the canvas.
 //
 // WASM: the same code path. imgui_impl_opengl3 is compiled with
-// IMGUI_IMPL_OPENGL_ES3 under Emscripten (WebGL2). Mouse and rendering work;
-// KEYBOARD input does not reach the browser build today, so design UI to be
-// mouse-drivable (menus, sliders, buttons — not text entry).
+// IMGUI_IMPL_OPENGL_ES3 under Emscripten (WebGL2). Mouse and rendering work.
+// KEYBOARD events from the VTK interactor are now translated to ImGui (text
+// entry, editing keys, Ctrl-shortcuts — see the intercept() key handling), so
+// text entry works natively. In the BROWSER this additionally needs the VTK
+// wasm interactor (vtkWebAssemblyRenderWindowInteractor) to receive DOM key
+// events, which requires the canvas to hold focus (tabindex) — verify per
+// deploy before relying on in-browser text entry.
 //
 // Requires libcvc built with CVC_ENABLE_IMGUI=ON; without it the class still
 // exists but is inert (enabled() == false), so consuming code needs no #ifdef.
