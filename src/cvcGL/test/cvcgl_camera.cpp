@@ -249,6 +249,59 @@ int main() {
     check("track mode reflected in state", root("scn.viewers.main.camera.mode").value<int>() == 2);
   }
 
+  printf("H. camera Phase A: pushed Track feed + per-viewport lens + widen\n");
+  {
+    SceneGraph sg(ctx, "pa");
+    CameraController tc(ctx, "pa.viewers.main.camera");
+    vtkNew<vtkCamera> tcam;
+    tc.setCamera(tcam);
+    tc.setScene(&sg);
+    for (const char *k : {"pos_tau", "vel_tau", "cam_tau"})
+      root(std::string("pa.viewers.main.camera.track.") + k).value(0.01);
+    root("pa.viewers.main.camera.track.back").value(10.0);
+    root("pa.viewers.main.camera.track.height").value(5.0);
+    root("pa.viewers.main.camera.track.look_up").value(0.0);
+    tc.setMode(CameraController::Mode::Track);
+
+    // Push mode: feed a position stream (no scene node); the pose follows it.
+    check("trackFed false before feeding", !tc.trackFed());
+    double px = 0.0;
+    for (int i = 0; i < 200; ++i) {
+      px += 0.5;
+      tc.feedTrackTarget(px, 0.0, 0.0);
+      tc.update(0.05);
+    }
+    check("feedTrackTarget switches to push mode", tc.trackFed());
+    double e[3], f[3], u[3];
+    tc.getPose(e, f, u);
+    check("pushed Track focal follows the fed target",
+          std::fabs(f[0] - px) < 2.0 && std::fabs(f[1]) < 1.0);
+    check("pushed Track eye trails behind (-X) and above (+Z)", e[0] < f[0] - 5.0 && e[2] > 2.0);
+
+    // Naming a node, or clearTrackFeed(), reverts to node-pull.
+    tc.setTrackTarget("someNode");
+    check("setTrackTarget reverts push mode", !tc.trackFed());
+    tc.feedTrackTarget(1, 2, 3);
+    check("feed re-enables push", tc.trackFed());
+    tc.clearTrackFeed();
+    check("clearTrackFeed reverts push", !tc.trackFed());
+
+    // Per-viewport field of view: applied to the camera (perspective) + state.
+    tc.setFieldOfView(60.0);
+    tc.update(0.05);
+    check("field_of_view applied to camera", std::fabs(tcam->GetViewAngle() - 60.0) < 1e-6);
+    check("field_of_view mirrored to state",
+          std::fabs(root("pa.viewers.main.camera.settings.field_of_view").value<double>() - 60.0) <
+              1e-9);
+    check("fieldOfView() reads back", std::fabs(tc.fieldOfView() - 60.0) < 1e-9);
+
+    // widen_tau: asymmetric-easing knob; state round-trip (0 default = symmetric).
+    tc.setWidenTau(1.5);
+    check("widen_tau mirrored to state",
+          std::fabs(root("pa.viewers.main.camera.track.widen_tau").value<double>() - 1.5) < 1e-9);
+    check("widenTau() reads back", std::fabs(tc.widenTau() - 1.5) < 1e-9);
+  }
+
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
   // cvcGL's state_object / handler-thread teardown races at process exit (a known,
   // harmless issue, independent of the checks above). Hard-exit with the real

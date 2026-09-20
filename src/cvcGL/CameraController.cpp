@@ -246,6 +246,11 @@ struct CameraController::Impl {
   // track smoothing state (harvested from ChaseCamera)
   Vec3 trackP, trackPrev, trackV, trackHead, trackEye, trackFocal;
   bool havP = false, havPrev = false, haveV = false, haveHead = false, haveEye = false;
+  // Phase A: pushed target (sim stream), per-viewport lens, asymmetric widen.
+  Vec3 fedTarget;             // used when trackFed (a pushed position, not a node)
+  bool trackFed = false;      // true => use fedTarget, ignore the scene node
+  double fieldOfView = 0.0;   // 0 = leave VTK default untouched; >0 applied (non-Map)
+  double trackWidenTau = 0.0; // 0 = symmetric follow (bit-identical to before)
 
   vtkCamera *camera = nullptr;
   vtkRenderer *renderer = nullptr;
@@ -359,6 +364,8 @@ void CameraController::seedState() {
   getState("track.vel_tau").value(s.trackVelTau);
   getState("track.cam_tau").value(s.trackCamTau);
   getState("track.min_speed").value(s.trackMinSpeed);
+  getState("settings.field_of_view").value(s.fieldOfView);
+  getState("track.widen_tau").value(s.trackWidenTau);
 }
 
 void CameraController::readAllFromState() {
@@ -417,6 +424,8 @@ void CameraController::readAllFromState() {
   s.trackVelTau = d("track.vel_tau", s.trackVelTau);
   s.trackCamTau = d("track.cam_tau", s.trackCamTau);
   s.trackMinSpeed = d("track.min_speed", s.trackMinSpeed);
+  s.fieldOfView = d("settings.field_of_view", s.fieldOfView);
+  s.trackWidenTau = d("track.widen_tau", s.trackWidenTau);
 }
 
 void CameraController::syncConfigToState() {
@@ -454,6 +463,8 @@ void CameraController::syncConfigToState() {
   getState("track.vel_tau").value(s.trackVelTau);
   getState("track.cam_tau").value(s.trackCamTau);
   getState("track.min_speed").value(s.trackMinSpeed);
+  getState("settings.field_of_view").value(s.fieldOfView);
+  getState("track.widen_tau").value(s.trackWidenTau);
   s.selfWrite = false;
 }
 
@@ -567,11 +578,35 @@ void CameraController::setScene(SceneGraph *scene) { m_impl->scene = scene; }
 
 void CameraController::setTrackTarget(const std::string &nodeName) {
   m_impl->trackTarget = nodeName;
+  if (!nodeName.empty())
+    m_impl->trackFed = false; // naming a node reverts push mode to node-pull
   if (m_impl->mode == Mode::Track)
     resetTrack();
   syncConfigToState();
 }
 std::string CameraController::trackTarget() const { return m_impl->trackTarget; }
+
+// ── Phase A: pushed-stream Track feed, per-viewport lens, asymmetric widen ──
+void CameraController::feedTrackTarget(double x, double y, double z) {
+  Impl &s = *m_impl;
+  s.fedTarget = {x, y, z};
+  s.trackFed = true; // Track now uses the fed position; the scene node is ignored
+}
+void CameraController::clearTrackFeed() { m_impl->trackFed = false; }
+bool CameraController::trackFed() const { return m_impl->trackFed; }
+void CameraController::resetTracking() { resetTrack(); }
+void CameraController::setFieldOfView(double degrees) {
+  Impl &s = *m_impl;
+  s.fieldOfView = degrees > 0.0 ? std::min(179.0, std::max(1.0, degrees)) : 0.0;
+  syncConfigToState();
+  applyToCamera();
+}
+double CameraController::fieldOfView() const { return m_impl->fieldOfView; }
+void CameraController::setWidenTau(double tau) {
+  m_impl->trackWidenTau = std::max(0.0, tau);
+  syncConfigToState();
+}
+double CameraController::widenTau() const { return m_impl->trackWidenTau; }
 
 void CameraController::setUpAxis(double x, double y, double z) {
   m_impl->up = normalize({x, y, z});
@@ -696,8 +731,13 @@ void CameraController::update(double dtSeconds) {
     }
   } else if (s.mode == Mode::Track) {
     // Cinematic follow of the tracked actor (ChaseCamera math, up-axis aware).
+    // Push mode (feedTrackTarget) uses the streamed position; otherwise pull the
+    // tracked node's world position.
     double tp3[3];
-    if (trackedWorldPos(tp3)) {
+    bool haveTarget = s.trackFed ? (tp3[0] = s.fedTarget.x, tp3[1] = s.fedTarget.y,
+                                    tp3[2] = s.fedTarget.z, true)
+                                 : trackedWorldPos(tp3);
+    if (haveTarget) {
       Vec3 tp{tp3[0], tp3[1], tp3[2]};
       Basis b = s.basis();
       double dtc = std::max(dtSeconds, 1e-4);
@@ -722,8 +762,13 @@ void CameraController::update(double dtSeconds) {
       Vec3 teye = s.trackP - h * s.trackBack + b.up * s.trackHeight;
       Vec3 tlook = s.trackP + h * s.trackLookAhead + b.up * s.trackLookUp;
       if (s.haveEye) {
-        s.trackEye = ema(s.trackEye, teye, dtc, s.trackCamTau);
-        s.trackFocal = ema(s.trackFocal, tlook, dtc, s.trackCamTau);
+        // Asymmetric easing: a slower tau while the eye falls behind (widening),
+        // dot(teye - eye, heading) < 0. widen_tau == 0 uses cam_tau both ways.
+        double camTau = (s.trackWidenTau > 0.0 && dot(teye - s.trackEye, h) < 0.0)
+                            ? s.trackWidenTau
+                            : s.trackCamTau;
+        s.trackEye = ema(s.trackEye, teye, dtc, camTau);
+        s.trackFocal = ema(s.trackFocal, tlook, dtc, camTau);
       } else {
         s.trackEye = teye;
         s.trackFocal = tlook;
@@ -991,6 +1036,10 @@ void CameraController::applyToCamera() {
   s.camera->SetPosition(e);
   s.camera->SetFocalPoint(f);
   s.camera->SetViewUp(u);
+  // Per-viewport lens: apply an explicit FoV in perspective modes only (Map is
+  // parallel). 0 leaves whatever VTK/app default the camera already carries.
+  if (s.mode != Mode::Map && s.fieldOfView > 0.0)
+    s.camera->SetViewAngle(s.fieldOfView);
   if (s.renderer)
     s.renderer->ResetCameraClippingRange();
 }

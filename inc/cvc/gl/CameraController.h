@@ -154,6 +154,23 @@ public:
   void setTrackTarget(const std::string &nodeName);
   std::string trackTarget() const;
 
+  // Phase A — feed the tracked target from a SIMULATION STREAM instead of a
+  // scene node: the first feedTrackTarget() switches Track to push mode (the
+  // scene node is ignored; the last fed value persists so a dropped frame does
+  // not teleport). setTrackTarget(non-empty) or clearTrackFeed() reverts to
+  // node-pull. resetTracking() clears the smoothing state (a fresh cut). This is
+  // the seam that lets one Track definition serve grl-snam's pushed ChaseCamera
+  // stream AND a node-follow, identically in C++ and Python.
+  void feedTrackTarget(double x, double y, double z);
+  void clearTrackFeed();
+  bool trackFed() const;
+  void resetTracking();
+  // Asymmetric follow easing: a separate (usually slower) camera time-constant
+  // when the eye is falling behind an accelerating target (the trail "widens").
+  // 0 (default) = symmetric = bit-identical to before. State "track.widen_tau".
+  void setWidenTau(double tau);
+  double widenTau() const;
+
   // Integrate held-key fly motion, push the pose to the camera, and mirror the
   // live pose to state on a throttle. Call once per rendered frame.
   void update(double dtSeconds);
@@ -178,6 +195,11 @@ public:
   void setMouseSensitivity(double degPerPixel);
   void setInvertPitch(bool invert);
   void setPoseMirrorHz(double hz); // rate the live pose is written to state (0=off)
+  // Vertical field of view in degrees for this controller's camera (each viewport
+  // carries its own lens). 0 (default) leaves the VTK default untouched; a value
+  // is applied in perspective modes (not Map). State "settings.field_of_view".
+  void setFieldOfView(double degrees);
+  double fieldOfView() const;
 
   // Quake pointer capture: hide the cursor and recenter it each frame so mouse-
   // look is continuous (no window-edge stop). Auto-enabled in fly mode; Escape
