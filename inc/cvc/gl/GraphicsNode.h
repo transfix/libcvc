@@ -93,6 +93,26 @@ public:
   cvc::world_units::coordinate localPointToReal(const double local[3],
                                                 const cvc::world_units &units) const;
 
+  // The node's bounding box in WORLD space: its untransformed getBoundingBox()
+  // pushed through the full chain of local transforms (getWorldTransform()), then
+  // re-fit to an axis-aligned box. Because the world matrix is kept current
+  // top-down as ancestors are added, moved or removed, this is a RELIABLE world
+  // footprint for a node at any depth -- you never have to walk or compose the
+  // parent chain yourself. getCombinedWorldBoundingBox() does the same for this
+  // node together with all its descendants.
+  cvc::bounding_box getWorldBoundingBox() const;
+  cvc::bounding_box getCombinedWorldBoundingBox() const;
+
+  // The node's real-world size in the given regime: the extents of its
+  // world-space bounding box (this node, or with all descendants when
+  // includeChildren) converted through world_units. The three components share
+  // one unit (m/km or ft/mi), chosen from the largest, so a measured dimension
+  // reads naturally. This is the "how big is this graphic, really" answer, taken
+  // reliably through the whole chain of local transforms. A degenerate/empty box
+  // yields a zero size in the regime's base unit.
+  cvc::world_units::coordinate realDimensions(const cvc::world_units &units,
+                                              bool includeChildren = true) const;
+
   // Fired ONCE when this node's transform changes (setPosition/setRotation/
   // setScale/setTransform/resetTransform, or a state-driven move) — not once per
   // recursively-updated child. The SceneGraph connects to it to recompute the

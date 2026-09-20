@@ -7,6 +7,8 @@
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/state_publisher.h>
+#include <iomanip>
+#include <sstream>
 #include <vtkActor2D.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
@@ -110,7 +112,11 @@ void GraphicsNode::setTransform(vtkMatrix4x4 *matrix) {
     m_transform->DeepCopy(matrix);
 
     // Update state tree (matrix in row-major format)
+    // Full double precision so the transform round-trips exactly through the
+    // string-backed state tree -- world coordinates and dimensions taken through
+    // the chain must not lose precision to a 6-significant-digit default.
     std::ostringstream oss;
+    oss << std::setprecision(17);
     for (int i = 0; i < 4; ++i) {
       for (int j = 0; j < 4; ++j) {
         if (i > 0 || j > 0)
@@ -134,6 +140,7 @@ void GraphicsNode::setTransform(const double matrix[16]) {
 
   // Update state tree (matrix in row-major format)
   std::ostringstream oss;
+  oss << std::setprecision(17); // exact round-trip through the state tree
   for (int i = 0; i < 16; ++i) {
     if (i > 0)
       oss << ",";
@@ -154,6 +161,7 @@ void GraphicsNode::setPosition(double x, double y, double z) {
   // path lookup, a signal, and the echo-driven second cascade.
   if (!m_pathPosition.empty()) {
     std::ostringstream oss;
+    oss << std::setprecision(17); // exact round-trip through the state tree
     oss << x << "," << y << "," << z;
     m_echoPosition = oss.str();
     // Publish through THIS scene's publisher (no process-wide singleton). A node
@@ -188,6 +196,7 @@ void GraphicsNode::setRotation(double x, double y, double z) {
 
   // Update state tree
   std::ostringstream oss;
+  oss << std::setprecision(17); // exact round-trip through the state tree
   oss << x << "," << y << "," << z;
   getState("rotation").value(oss.str());
 
@@ -231,6 +240,7 @@ void GraphicsNode::setScale(double x, double y, double z) {
 
   // Update state tree
   std::ostringstream oss;
+  oss << std::setprecision(17); // exact round-trip through the state tree
   oss << x << "," << y << "," << z;
   getState("scale").value(oss.str());
 
@@ -274,6 +284,29 @@ void transform_point(vtkMatrix4x4 *m, const double in[3], double out[3]) {
   out[1] = r[1] * inv;
   out[2] = r[2] * inv;
 }
+
+// Transform an axis-aligned bbox by a 4x4 and re-fit an AABB around the eight
+// transformed corners. A degenerate/empty input (any min > max) is returned
+// unchanged so it stays recognisably empty. (min/max by ternary to avoid a
+// dependency on <algorithm> here.)
+cvc::bounding_box transform_bbox(vtkMatrix4x4 *m, const cvc::bounding_box &b) {
+  if (b[0] > b[3] || b[1] > b[4] || b[2] > b[5])
+    return b;
+  const double xs[2] = {b[0], b[3]}, ys[2] = {b[1], b[4]}, zs[2] = {b[2], b[5]};
+  double mn[3] = {0, 0, 0}, mx[3] = {0, 0, 0};
+  for (int ci = 0; ci < 8; ++ci) {
+    const double in[3] = {xs[ci & 1], ys[(ci >> 1) & 1], zs[(ci >> 2) & 1]};
+    double out[3];
+    transform_point(m, in, out);
+    for (int a = 0; a < 3; ++a) {
+      if (ci == 0 || out[a] < mn[a])
+        mn[a] = out[a];
+      if (ci == 0 || out[a] > mx[a])
+        mx[a] = out[a];
+    }
+  }
+  return cvc::bounding_box(mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]);
+}
 } // namespace
 
 void GraphicsNode::localToWorld(const double local[3], double world[3]) const {
@@ -294,6 +327,31 @@ cvc::world_units::coordinate GraphicsNode::localPointToReal(const double local[3
   double world[3];
   localToWorld(local, world);
   return units.world_point_to_real(world[0], world[1], world[2]);
+}
+
+cvc::bounding_box GraphicsNode::getWorldBoundingBox() const {
+  // getBoundingBox() is this node's untransformed local box; m_worldMatrix is the
+  // whole chain of local transforms up to the root, kept current top-down.
+  return transform_bbox(m_worldMatrix, getBoundingBox());
+}
+
+cvc::bounding_box GraphicsNode::getCombinedWorldBoundingBox() const {
+  // getCombinedBoundingBox() is already this-node-plus-descendants in THIS node's
+  // local space, so one push through the world matrix puts the whole subtree in
+  // world space.
+  return transform_bbox(m_worldMatrix, getCombinedBoundingBox());
+}
+
+cvc::world_units::coordinate GraphicsNode::realDimensions(const cvc::world_units &units,
+                                                          bool includeChildren) const {
+  const cvc::bounding_box b =
+      includeChildren ? getCombinedWorldBoundingBox() : getWorldBoundingBox();
+  // Degenerate/empty box -> zero size in the regime's base unit.
+  if (b[0] > b[3] || b[1] > b[4] || b[2] > b[5])
+    return units.world_point_to_real(0.0, 0.0, 0.0);
+  // World-space AABB extents (already reflect the full chain's scale), converted
+  // to the regime with one shared unit across the three axes.
+  return units.world_point_to_real(b[3] - b[0], b[4] - b[1], b[5] - b[2]);
 }
 
 void GraphicsNode::updateTransform(bool isRoot) {

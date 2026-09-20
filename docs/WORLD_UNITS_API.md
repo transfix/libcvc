@@ -277,6 +277,32 @@ extents_metres()` returns the model's footprint in canonical metres regardless
 of authoring units; feed its corners to `world_units` to display a size or extent
 in the active regime.
 
+## Reliable dimensions through the transform chain
+
+A graphic deep in the scene graph inherits a chain of local transforms from its
+ancestors. `GraphicsNode` maintains each node's object-to-world matrix
+(`getWorldTransform()`) current top-down as ancestors are added, moved or
+removed, so you never walk or compose that chain yourself:
+
+- **`getWorldBoundingBox()`** — the node's own box in world space (its local box
+  pushed through the whole chain and re-fit to an AABB).
+- **`getCombinedWorldBoundingBox()`** — the same for the node together with all
+  its descendants.
+- **`realDimensions(units, includeChildren = true)`** — the world box's extents
+  converted through `world_units` into the active regime, three components
+  sharing one unit (m/km or ft/mi). This is the "how big is this graphic,
+  really" answer, taken reliably through the chain. (It reports the world
+  **AABB** extents, so a rotation inflates them; the un-rotated authoring size is
+  `getBoundingBox()` scaled.)
+
+For this to be trustworthy the transform itself must not lose precision. Node
+transforms are published to the string-backed state tree and read back, so
+`setTransform`/`setPosition`/`setRotation`/`setScale` serialize with full
+double precision (`max_digits10`), i.e. a real-world coordinate (a UTM easting,
+a kilometre-scale offset) round-trips exactly rather than being truncated to six
+significant figures. Dimensions and clicked coordinates taken through the chain
+are therefore reliable to the last bit the doubles can hold.
+
 ## Integration roadmap (remaining follow-ups)
 
 The picking, world↔local mapping and per-model authoring scale above have
