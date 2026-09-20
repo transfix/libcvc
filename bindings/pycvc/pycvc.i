@@ -517,12 +517,13 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 %ignore cvc::geometry::num_quads;
 %ignore cvc::geometry::num_tets;
 %ignore cvc::geometry::num_hexs;
-%ignore cvc::geometry::merge;
-%ignore cvc::geometry::tri_surface;
+// merge / tri_surface / invert_normals / reorient are now WRAPPED (removed from
+// the ignore list): merge(const geometry&) and invert_normals()/reorient() are
+// self-returning geometry& methods (same shape as the already-bound
+// compute_normals(), so they marshal identically — the return proxy aliases
+// self); tri_surface() returns a new geometry by value.
 %ignore cvc::geometry::calculate_surf_normals;
 %ignore cvc::geometry::generate_wire_interior;
-%ignore cvc::geometry::invert_normals;
-%ignore cvc::geometry::reorient;
 %ignore cvc::geometry::project;
 %ignore cvc::geometry::smoothing;
 %ignore cvc::geometry::quality_improve;
@@ -555,6 +556,37 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
     if (!app)
       throw std::invalid_argument("pycvc.volume: null app handle");
     return new cvc::volume(*app);
+  }
+
+  // ── In-library data-prep (the canonical ML/training ops) ────────────────
+  // The underlying voxels::map/fill/sub/resize are %ignore'd on the base scope;
+  // these re-expose them on the volume proxy under DISTINCT names (so the base
+  // %ignore cannot swallow a same-named %extend), turning "prep a volume before
+  // handing it to a network" into one call each.
+  //
+  // normalize(lo, hi): affine-remap every voxel so the data range maps to
+  // [lo, hi] (e.g. [0,1] or [-1,1] network input).
+  void normalize(double lo, double hi) { $self->map(lo, hi); }
+  // fill_value(val): set every voxel to a constant (clear before stamping
+  // obstacles). Named fill_value, not fill — the base %ignore cvc::voxels::fill
+  // DOES reach this derived %extend scope and would swallow a same-named helper.
+  void fill_value(double val) { $self->fill(val); }
+  // resample(nx, ny, nz): resize this volume IN PLACE to an nx*ny*nz grid (the
+  // uniform network-input grid). Builds the opaque `dimension` from ints, as
+  // set_float_grid does.
+  void resample(unsigned long nx, unsigned long ny, unsigned long nz) {
+    $self->resize(cvc::dimension(nx, ny, nz));
+  }
+  // crop(ox,oy,oz, nx,ny,nz): a NEW volume holding the nx*ny*nz sub-grid at
+  // voxel offset (ox,oy,oz) — copy-then-sub, so the source is left intact
+  // (patch augmentation). sub() extracts a subvolume in place, so it runs on the
+  // copy. The 4-arg overload is called; volume::sub's MSVC-only `brain_damage`
+  // trailing arg keeps its default and is never exposed.
+  cvc::volume crop(unsigned long ox, unsigned long oy, unsigned long oz, unsigned long nx,
+                   unsigned long ny, unsigned long nz) const {
+    cvc::volume out(*$self);
+    out.sub(ox, oy, oz, cvc::dimension(nx, ny, nz));
+    return out;
   }
 
   // Build a Float volume from a flat, row-major (x fastest, then y, then z)
@@ -768,6 +800,46 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
       colors.push_back(c);
     }
   }
+  // Per-vertex normals as a flat [nx,ny,nz,...] list (len == 3*num_vertices()).
+  // Read-out completes the compute_normals()/calculate_surf_normals() story
+  // (there was no way to get the result back to Python); set_normals stamps
+  // authored normals in. Copy-based: geometry exposes no normals_ptr(), so the
+  // zero-copy view that vertices() uses cannot be replicated here.
+  std::vector<double> get_normals() const {
+    const auto& norms = $self->const_normals();
+    std::vector<double> out;
+    out.reserve(norms.size() * 3);
+    for (const auto& n : norms) {
+      out.push_back(n[0]);
+      out.push_back(n[1]);
+      out.push_back(n[2]);
+    }
+    return out;
+  }
+  void set_normals(const std::vector<double>& xyz) {
+    if (xyz.size() != $self->const_points().size() * 3)
+      throw std::invalid_argument("set_normals: length must equal 3 * num_vertices()");
+    auto& norms = $self->normals();
+    norms.clear();
+    norms.reserve(xyz.size() / 3);
+    for (std::size_t i = 0; i + 2 < xyz.size(); i += 3) {
+      cvc::geometry::vector_t n;
+      n[0] = xyz[i];
+      n[1] = xyz[i + 1];
+      n[2] = xyz[i + 2];
+      norms.push_back(n);
+    }
+  }
+  // The mesh AABB as a (minx,miny,minz,maxx,maxy,maxz) 6-tuple (the bounding_box
+  // return is opaque — same treatment as model.extents). Aliased to `extents`
+  // in the %pythoncode below.
+  std::vector<double> extents_bbox() const {
+    cvc::bounding_box b = $self->extents();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  %pythoncode %{
+    extents = extents_bbox  # geom.extents() -> (minx..maxz), like model.extents()
+  %}
 
   // Per-vertex texture coordinates (Phase 2). Flat row-major u,v pairs; one uv
   // per vertex (len == 2 * num_vertices()). Mirrors set_colors. These reach the

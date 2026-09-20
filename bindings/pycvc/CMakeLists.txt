@@ -193,6 +193,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec:test_pycvc_exec.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_world_units:test_pycvc_world_units.py
+             pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_integration:test_pycvc_integration.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)

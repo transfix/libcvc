@@ -58,6 +58,25 @@ g.save("tri.off")
 
 Requires SWIG ≥ 4.0 and Python 3 development headers.
 
+## In-library data prep
+
+The canonical training/twin prep ops are wrapped in-library, so a script never
+round-trips through numpy for the whole grid just to reshape or normalize:
+
+```python
+v.normalize(0.0, 1.0)          # affine-remap the data range to [0,1] / [-1,1]
+v.fill_value(0.0)              # clear before stamping obstacles
+v.resample(64, 64, 64)        # resize in place to the network-input grid
+patch = v.crop(x, y, z, 16, 16, 16)   # a NEW sub-grid; the source is untouched
+
+n = g.get_normals()           # read compute_normals()'s result out (flat xyz)
+g.set_normals([...])          # or stamp authored normals in
+g.invert_normals(); g.reorient()
+g.extents()                   # mesh AABB as (minx..maxz), like model.extents()
+```
+
+(Contract test: `test_pycvc_dataprep.py`.)
+
 ## World units & scene dimensions (digital twin)
 
 Beyond geometry/volume/state, pycvc wraps the **world-unit base** so the
