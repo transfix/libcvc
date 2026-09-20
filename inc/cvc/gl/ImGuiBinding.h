@@ -121,6 +121,61 @@ void SceneMenuItems(SceneGraph &sg, bool *scenePanelOpen = nullptr,
 void CameraMenuItems(CameraController &cam, double moveSpeedMax = 400.0,
                      double moveSpeedDefault = 40.0);
 
+// ---- curated raw immediate-mode subset ------------------------------------
+// A pointer-free slice of Dear ImGui for building CUSTOM windows/widgets (a HUD
+// the state-bound helpers above do not cover) — from C++ OR from Python via
+// pycvc (imgui_* names). The bodies are compiled INSIDE cvcGL, so they bind
+// cvcGL's own ImGui context: a separate module (a demo .exe, the _pycvc_gl
+// extension) must NEVER call raw ImGui:: itself (its own null GImGui crashes) —
+// it calls these instead. They are value-in / value-out (SWIG's flat module and
+// Python cannot pass ImGui's bool*/float* by reference) and take pre-formatted
+// text (no varargs). All are legal ONLY inside an ImGuiOverlay draw callback
+// (only then is cvcGL's frame/context current); elsewhere they are safe but draw
+// nothing. Names collide-safe: those that shadow a state-bound helper above
+// carry a distinct suffix (TextLine, CheckboxValue, SliderIntValue, ...).
+//
+// Built without CVC_ENABLE_IMGUI, every one is an inert stub (value-out forms
+// echo their input, predicates return false), so callers need no #ifdef.
+
+// windows / layout. Begin() must be paired with End() unconditionally.
+bool Begin(const char *name);
+void End();
+void SameLine(double offsetX = 0.0, double spacing = -1.0);
+void Separator();
+void Spacing();
+void PushId(const char *strId);
+void PushIdInt(int id);
+void PopId();
+// text (a raw label to draw, NOT a state path like Text() above).
+void TextLine(const char *text);
+void TextDisabledLine(const char *text);
+// buttons — return "clicked this frame".
+bool Button(const char *label, double width = 0.0, double height = 0.0);
+bool SmallButton(const char *label);
+bool Selectable(const char *label, bool selected = false);
+// value-in / value-out — return the (possibly edited) value.
+bool CheckboxValue(const char *label, bool value);
+float SliderFloatValue(const char *label, float value, float lo, float hi,
+                       const char *fmt = "%.3f");
+int SliderIntValue(const char *label, int value, int lo, int hi);
+float DragFloatValue(const char *label, float value, float speed = 1.0f, float lo = 0.0f,
+                     float hi = 0.0f, const char *fmt = "%.3f");
+// menus. Each Begin*/End* pairs unconditionally per raw ImGui's contract.
+bool BeginMainMenuBar();
+void EndMainMenuBar();
+bool BeginMenuBar();
+void EndMenuBar();
+bool BeginMenu(const char *label);
+void EndMenu();
+bool MenuItemClicked(const char *label);
+bool MenuItemToggle(const char *label, bool selected); // returns the toggled state
+// disclosure / disabling / tooltips.
+bool CollapsingHeaderOpen(const char *label);
+void BeginDisabled(bool disabled);
+void EndDisabled();
+bool IsItemHovered();
+void SetTooltipText(const char *text);
+
 } // namespace ui
 } // namespace gl
 } // namespace cvc

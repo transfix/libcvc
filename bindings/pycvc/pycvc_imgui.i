@@ -58,6 +58,42 @@
 %ignore cvc::gl::ui::StageLightingPanel;
 %ignore cvc::gl::ui::ScenePanel;
 %ignore cvc::gl::ui::SceneMenuItems;
+// Curated raw immediate-mode subset -> imgui_* (disjoint from the ui_* helpers
+// and from ImGuiOverlay's methods; those that shadow a state-bound helper carry a
+// distinct C++ suffix — TextLine/CheckboxValue/SliderIntValue/... — so no clash).
+// Value-in/value-out + no pointers, so they marshal in the flat module directly.
+// Legal only inside an ImGuiOverlay draw callback (see the header). Renames MUST
+// precede the %include.
+%rename(imgui_begin) cvc::gl::ui::Begin;
+%rename(imgui_end) cvc::gl::ui::End;
+%rename(imgui_same_line) cvc::gl::ui::SameLine;
+%rename(imgui_separator) cvc::gl::ui::Separator;
+%rename(imgui_spacing) cvc::gl::ui::Spacing;
+%rename(imgui_push_id) cvc::gl::ui::PushId;
+%rename(imgui_push_id_int) cvc::gl::ui::PushIdInt;
+%rename(imgui_pop_id) cvc::gl::ui::PopId;
+%rename(imgui_text) cvc::gl::ui::TextLine;
+%rename(imgui_text_disabled) cvc::gl::ui::TextDisabledLine;
+%rename(imgui_button) cvc::gl::ui::Button;
+%rename(imgui_small_button) cvc::gl::ui::SmallButton;
+%rename(imgui_selectable) cvc::gl::ui::Selectable;
+%rename(imgui_checkbox) cvc::gl::ui::CheckboxValue;
+%rename(imgui_slider_float) cvc::gl::ui::SliderFloatValue;
+%rename(imgui_slider_int) cvc::gl::ui::SliderIntValue;
+%rename(imgui_drag_float) cvc::gl::ui::DragFloatValue;
+%rename(imgui_begin_main_menu_bar) cvc::gl::ui::BeginMainMenuBar;
+%rename(imgui_end_main_menu_bar) cvc::gl::ui::EndMainMenuBar;
+%rename(imgui_begin_menu_bar) cvc::gl::ui::BeginMenuBar;
+%rename(imgui_end_menu_bar) cvc::gl::ui::EndMenuBar;
+%rename(imgui_begin_menu) cvc::gl::ui::BeginMenu;
+%rename(imgui_end_menu) cvc::gl::ui::EndMenu;
+%rename(imgui_menu_item) cvc::gl::ui::MenuItemClicked;
+%rename(imgui_menu_item_toggle) cvc::gl::ui::MenuItemToggle;
+%rename(imgui_collapsing_header) cvc::gl::ui::CollapsingHeaderOpen;
+%rename(imgui_begin_disabled) cvc::gl::ui::BeginDisabled;
+%rename(imgui_end_disabled) cvc::gl::ui::EndDisabled;
+%rename(imgui_is_item_hovered) cvc::gl::ui::IsItemHovered;
+%rename(imgui_set_tooltip) cvc::gl::ui::SetTooltipText;
 %include "cvc/gl/ImGuiBinding.h"
 
 // Group B wrappers (after the include, so the ignored declarations exist to call).
