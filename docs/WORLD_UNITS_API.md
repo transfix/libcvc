@@ -253,42 +253,48 @@ package). `world_units` is what a future Jolt bridge reads:
 ## Clicking terrain: world point → real-world coordinate
 
 The stated goal — "click on terrain and get a precise coordinate in kilometres
-or miles, in the graphic's own coordinate frame" — is a pipeline:
+or miles, in the graphic's own coordinate frame" — is a three-step pipeline, and
+all three steps now exist in libcvc:
 
-1. **pick** (GL) — resolve a screen click to a world-space `(x,y,z)` against a
-   concrete renderer.
-2. **(optional) node-local** — invert the picked node's world transform to
-   express the point in that graphic's own coordinate frame.
+1. **pick** (GL) — `SceneRenderer::pickWorld(displayX, displayY, out[3])` casts a
+   ray through a display pixel (VTK lower-left origin) and returns the first
+   world-space hit, or false on a miss. A `vtkCellPicker` against the renderer.
+2. **node-local** (optional) — `GraphicsNode::worldToLocal(world, local)` puts
+   the hit into the picked graphic's OWN coordinate frame (and `localToWorld`
+   goes back). The world→object inverse is cached lazily off the pose hot path.
 3. **regime** — `world_units::world_point_to_real(x, y, z)` converts world → SI
    metres → the active regime, returning `{x, y, z, unit}` (e.g. km or mi).
 
-`world_units` owns step 3 today. Steps 1–2 are GL-layer work described below.
+`GraphicsNode::localPointToReal(local, world_units)` fuses steps 2→3, so once a
+pick has resolved a hit to a local point, one call reports it in km/miles in the
+graphic's own frame. See `src/cvcGL/test/cvcgl_world_units.cpp`.
 
-## Integration roadmap (follow-ups)
+## Mapping model dimensions to the regime
 
-These consume `world_units` and are intentionally **not** in this first landing
-(they touch VTK/GL and cannot be exercised by the headless test suite on all
-platforms). Each is a self-contained follow-up:
+`cvc::model` carries `metres_per_source_unit` — the SI length of one unit of the
+file's own coordinate system (1.0 = already metres, the default). `model::
+extents_metres()` returns the model's footprint in canonical metres regardless
+of authoring units; feed its corners to `world_units` to display a size or extent
+in the active regime.
 
-1. **GL picking** — add `SceneRenderer::pickWorld(displayX, displayY, out[3])`
-   using a `vtkCellPicker` against `RenderView::renderer()`. Picking needs a
-   concrete renderer + pixel coordinates, so it belongs at view scope, not on a
-   graph node. `traversal.h` already names picking as the intended second action.
-2. **world → local** — cache an inverse world matrix in
-   `GraphicsNode::updateTransform()` (reuse the `Invert()` idiom already in
-   `updateClipPlanes`, but cache it) and expose `worldToLocal`/`localToWorld`,
-   so a picked point can be reported in the graphic's own coordinate frame.
-3. **per-model authoring units** — add `metres_per_source_unit` to `cvc::model`
-   and teach the assimp importer to read source-file units (glTF metres, FBX
-   `UnitScaleFactor`, OBJ unitless), so a model authored in feet or centimetres
-   lands in world space correctly. Today all formats import at raw scale — a
-   latent digital-twin correctness bug.
-4. **coordinate/label plumbing** — route `GridNode` tick labels, `BBoxNode`
+## Integration roadmap (remaining follow-ups)
+
+The picking, world↔local mapping and per-model authoring scale above have
+landed. What is left, each a self-contained follow-up:
+
+1. **importer unit stamping** — teach the assimp importer to set
+   `model::metres_per_source_unit` from source-file units (glTF metres, FBX
+   `UnitScaleFactor`, OBJ unitless). Today every format imports at raw scale and
+   the field defaults to 1.0, so a metres-authored file is already correct but an
+   FBX in centimetres needs the caller to set the scale — a latent 100× twin bug
+   until the importer stamps it.
+2. **coordinate/label plumbing** — route `GridNode` tick labels, `BBoxNode`
    coordinate labels and `CameraController` distance/speed readouts through
    `world_units::format`, so every on-screen number carries the regime's unit.
-5. **Python bindings** — expose `world_units` through SWIG next to `world_clock`
-   for the training/twin Python layer (deferred; the pycvc rebuild is currently
-   blocked on the cvcpkg catalog).
+3. **Python bindings** — expose `world_units` (and the new `GraphicsNode` /
+   `SceneRenderer` entry points) through SWIG next to `world_clock` for the
+   training/twin Python layer (deferred; the pycvc rebuild is currently blocked
+   on the cvcpkg catalog).
 
 ## Worked example
 
