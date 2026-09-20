@@ -164,6 +164,20 @@ if(@CVC_ENABLE_ASSIMP@)
   endif()
 endif()
 
+# When built with OpenMP, cvcTargets.cmake puts OpenMP::OpenMP_CXX in cvc::cvc's
+# INTERFACE_LINK_LIBRARIES, so — exactly like assimp above — every CONSUMER must
+# be able to resolve that imported target or the first downstream find_package(cvc)
+# dies in cvcTargets.cmake with "The link interface of target cvc::cvc contains:
+# OpenMP::OpenMP_CXX but the target was not found". This broke a standalone cvcGL
+# consume (src/cvcGL/CMakeLists.txt never find_package(OpenMP)s). Resolve it here
+# so cvcGL / pycvc / pycvc-gl / volrover3 all link without each re-finding OpenMP.
+# Gated on OpenMP_CXX_FOUND (the actual build outcome), not the request flag: if
+# OpenMP was requested but not found, cvc::cvc carries no OpenMP::OpenMP_CXX, and
+# a consumer on a no-OpenMP toolchain must NOT be forced to find it.
+if(@OpenMP_CXX_FOUND@)
+  find_dependency(OpenMP)
+endif()
+
 if(@CVC_ENABLE_FFTW@)
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
