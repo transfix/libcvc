@@ -25,6 +25,7 @@ namespace gl {
 GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : SceneNode(ctx, statePath), m_name(name), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_worldMatrix(vtkSmartPointer<vtkMatrix4x4>::New()),
+      m_worldInverse(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_worldXf(vtkSmartPointer<vtkTransform>::New()),
       m_vtkTransform(vtkSmartPointer<vtkTransform>::New()), m_parent(nullptr), m_showBBox(false),
       m_bboxNode(std::make_shared<BBoxNode>()), m_showLabel(false), m_labelText(name),
@@ -33,6 +34,7 @@ GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const st
   // Initialize transform to identity
   m_transform->Identity();
   m_worldMatrix->Identity();
+  m_worldInverse->Identity();
   m_worldXf->SetMatrix(m_worldMatrix);
 
   // Resolve the transform state paths once (getState is ~8 us a call).
@@ -256,6 +258,44 @@ vtkSmartPointer<vtkMatrix4x4> GraphicsNode::getWorldTransform() const {
   return out;
 }
 
+namespace {
+// Apply a 4x4 to a 3-point, normalising the homogeneous w so a projective
+// matrix is handled; for an affine scene transform w stays 1 and this is a plain
+// matrix-times-point. in/out may alias. Takes a non-const matrix because
+// vtkMatrix4x4::MultiplyPoint is a non-const member (it mutates nothing); the
+// smart-pointer members yield a non-const raw pointer even from a const method.
+void transform_point(vtkMatrix4x4 *m, const double in[3], double out[3]) {
+  const double h[4] = {in[0], in[1], in[2], 1.0};
+  double r[4];
+  m->MultiplyPoint(h, r);
+  const double w = r[3];
+  const double inv = (w != 0.0) ? 1.0 / w : 1.0;
+  out[0] = r[0] * inv;
+  out[1] = r[1] * inv;
+  out[2] = r[2] * inv;
+}
+} // namespace
+
+void GraphicsNode::localToWorld(const double local[3], double world[3]) const {
+  transform_point(m_worldMatrix, local, world);
+}
+
+void GraphicsNode::worldToLocal(const double world[3], double local[3]) const {
+  if (m_worldInverseDirty) {
+    m_worldInverse->DeepCopy(m_worldMatrix);
+    m_worldInverse->Invert();
+    m_worldInverseDirty = false;
+  }
+  transform_point(m_worldInverse, world, local);
+}
+
+cvc::world_units::coordinate GraphicsNode::localPointToReal(const double local[3],
+                                                            const cvc::world_units &units) const {
+  double world[3];
+  localToWorld(local, world);
+  return units.world_point_to_real(world[0], world[1], world[2]);
+}
+
 void GraphicsNode::updateTransform(bool isRoot) {
   // Refresh the cached world matrix from the parent's, which is already current
   // because a parent is always updated before its children. One multiply, no
@@ -265,6 +305,9 @@ void GraphicsNode::updateTransform(bool isRoot) {
   else
     m_worldMatrix->DeepCopy(m_transform);
   m_worldXf->SetMatrix(m_worldMatrix); // reused object; SetMatrix marks it Modified
+  // The cached inverse is now stale; recompute it lazily on the next query
+  // rather than paying an Invert() here on every node of every pose cascade.
+  m_worldInverseDirty = true;
 
   // Update VTK transform wrapper
   m_vtkTransform->SetMatrix(m_transform);

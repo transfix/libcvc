@@ -476,20 +476,32 @@ voxels &voxels::sub(uint64 off_x, uint64 off_y, uint64 off_z, const dimension &s
       off_z + subvoldim[2] - 1 >= voxel_dimensions()[2])
     throw index_out_of_bounds("Subvolume offset and/or dimension is out of bounds");
 
-  // Deep copy constructor creates independent backup
+  // Shallow copy constructor creates a backup sharing this object's buffer.
   voxels tmp(*this);
 
   voxel_dimensions(subvoldim); // change this object's dimension to the subvolume dimension
 
+  // Detach ONCE before the parallel region. voxel_dimensions() already
+  // reallocates a unique buffer when the dimension changes, but it returns early
+  // (no detach) when subvoldim equals the current dimension — in which case this
+  // buffer is still shared with tmp, and per-element operator() writes would race
+  // in preWrite() across threads. preWrite() here is a no-op in the common
+  // (already-unique) case and closes that degenerate window otherwise.
+  preWrite();
+
+  const uint64 xdim = XDim(), ydim = YDim(), zdim = ZDim();
+
   // copy the subvolume voxels
-  for (uint64 k = 0; k < voxel_dimensions()[2]; k++) {
+  for (uint64 k = 0; k < zdim; k++) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-    for (uint64 j = 0; j < voxel_dimensions()[1]; j++)
-      for (uint64 i = 0; i < voxel_dimensions()[0]; i++)
-        (*this)(i, j, k, tmp(i + off_x, j + off_y, k + off_z));
-    _ctx.threadProgress(float(k) / float(voxel_dimensions()[2]));
+    for (uint64 j = 0; j < ydim; j++)
+      for (uint64 i = 0; i < xdim; i++) {
+        const uint64 idx = i + j * xdim + k * xdim * ydim;
+        setValueRaw(idx, tmp(i + off_x, j + off_y, k + off_z));
+      }
+    _ctx.threadProgress(float(k) / float(zdim));
   }
 
   _ctx.threadProgress(1.0f);
@@ -507,13 +519,25 @@ voxels &voxels::fillsub(uint64 off_x, uint64 off_y, uint64 off_z, const dimensio
       off_z + subvoldim[2] - 1 >= voxel_dimensions()[2])
     throw index_out_of_bounds("Subvolume offset and/or dimension is out of bounds");
 
+  // Detach the copy-on-write buffer ONCE, before the parallel region. Writing
+  // per element through operator() would call preWrite() on every voxel, and
+  // when this buffer is shared (e.g. a shallow copy of another voxels) every
+  // thread would race to _voxels.reset() the shared_array — corrupting the heap
+  // (the intermittent Debug-build SEGFAULT this fixes). With the buffer made
+  // unique up front, the parallel per-index writes are independent.
+  preWrite();
+
+  const uint64 xdim = XDim(), ydim = YDim();
+
   for (uint64 k = 0; k < subvoldim[2]; k++) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
     for (uint64 j = 0; j < subvoldim[1]; j++)
-      for (uint64 i = 0; i < subvoldim[0]; i++)
-        (*this)(i + off_x, j + off_y, k + off_z, val);
+      for (uint64 i = 0; i < subvoldim[0]; i++) {
+        const uint64 idx = (i + off_x) + (j + off_y) * xdim + (k + off_z) * xdim * ydim;
+        setValueRaw(idx, val);
+      }
     _ctx.threadProgress(float(k) / float(subvoldim[2]));
   }
 

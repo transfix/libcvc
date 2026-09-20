@@ -49,6 +49,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/state_cluster_membership.h
   ../../inc/cvc/core/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/world_units.h
   ../../inc/cvc/core/state_hash_partition.h
   ../../inc/cvc/core/distributed_state_session.h
   ../../inc/cvc/core/state_transport.h
@@ -177,6 +178,7 @@ set(SOURCE_FILES
   core/state_exec/stdlib.cpp
   core/state_exec/exec_coordinator.cpp
   core/world_clock.cpp
+  core/world_units.cpp
   core/state_change_journal.cpp
   core/state_subscription_router.cpp
   core/state_sync_adapter.cpp

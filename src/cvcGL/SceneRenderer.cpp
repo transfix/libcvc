@@ -12,6 +12,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <stdexcept>
 #include <vtkCamera.h>
+#include <vtkCellPicker.h>
 #include <vtkNew.h>
 #include <vtkOutputWindow.h> // route VTK's ERR/WARN to stderr, not a Win32 message box
 #include <vtkPNGWriter.h>
@@ -218,6 +219,25 @@ bool SceneRenderer::windowClosed() const {
   if (!m_impl->interactor)
     return false; // offscreen has no window to close
   return m_impl->interactor->GetDone() != 0;
+}
+
+bool SceneRenderer::pickWorld(double displayX, double displayY, double outWorld[3]) const {
+  m_impl->requireOpen();
+  if (!m_impl->renderer)
+    return false;
+  // vtkCellPicker does a real geometry hit test (unlike vtkWorldPointPicker,
+  // which always returns a focal-plane point), so a miss over empty space is
+  // reported as a miss rather than a bogus coordinate.
+  auto picker = vtkSmartPointer<vtkCellPicker>::New();
+  picker->SetTolerance(0.0005);
+  if (!picker->Pick(displayX, displayY, 0.0, m_impl->renderer))
+    return false;
+  double p[3];
+  picker->GetPickPosition(p);
+  outWorld[0] = p[0];
+  outWorld[1] = p[1];
+  outWorld[2] = p[2];
+  return true;
 }
 
 vtkRenderer *SceneRenderer::renderer() const {

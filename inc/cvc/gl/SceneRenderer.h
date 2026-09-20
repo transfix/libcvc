@@ -112,6 +112,18 @@ public:
   // True once the user has closed an onscreen window; always false offscreen.
   bool windowClosed() const;
 
+  // Cast a pick ray through a display pixel and return the world-space point
+  // where it first hits scene geometry. displayX/displayY are VTK display
+  // coordinates: pixels from the LOWER-left of the framebuffer, matching
+  // frameRGB()'s bottom-up order (a toolkit reporting from the top-left must
+  // pass frameHeight()-1-y). Returns false and leaves outWorld untouched if the
+  // ray hits nothing (empty space) or there is no live context; true with the
+  // hit point otherwise. The raw world point is what feeds
+  // cvc::world_units::world_point_to_real (or a picked node's
+  // GraphicsNode::worldToLocal) to report a real-world km/mile coordinate.
+  // Requires a rendered frame: call after render() so the depth buffer is valid.
+  bool pickWorld(double displayX, double displayY, double outWorld[3]) const;
+
   // The renderer and window this draws through, for callers that need to
   // reach VTK directly: lights, a 2-D HUD overlay, a gradient background, a
   // scalar bar, a second camera pass. In Python these arrive as live

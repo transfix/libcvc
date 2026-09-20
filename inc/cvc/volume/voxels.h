@@ -29,13 +29,13 @@
 #include <boost/tuple/tuple.hpp>
 #include <cstddef>
 #include <cstring>
-#include <memory>
 #include <cvc/core/exception.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/types.h>
 #include <cvc/utility/cuda_utils.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/dimension.h>
+#include <memory>
 
 namespace cvc {
 // Use std::byte for raw memory representation (C++17) or fallback
@@ -218,39 +218,7 @@ public:
     preWrite();
 
     uint64 idx = i + j * XDim() + k * XDim() * YDim();
-    byte *data = get_data_ptr();
-
-    switch (voxelType()) {
-    case UChar:
-      reinterpret_cast<unsigned char *>(data)[idx] = static_cast<unsigned char>(val);
-      break;
-    case UShort:
-      reinterpret_cast<unsigned short *>(data)[idx] = static_cast<unsigned short>(val);
-      break;
-    case UInt:
-      reinterpret_cast<unsigned int *>(data)[idx] = static_cast<unsigned int>(val);
-      break;
-    case Float:
-      reinterpret_cast<float *>(data)[idx] = static_cast<float>(val);
-      break;
-    case Double:
-      reinterpret_cast<double *>(data)[idx] = static_cast<double>(val);
-      break;
-    case UInt64:
-      reinterpret_cast<uint64 *>(data)[idx] = static_cast<uint64>(val);
-      break;
-    case Char:
-      reinterpret_cast<signed char *>(data)[idx] = static_cast<signed char>(val);
-      break;
-    case Int:
-      reinterpret_cast<int *>(data)[idx] = static_cast<int>(val);
-      break;
-    case Int64:
-      reinterpret_cast<int64 *>(data)[idx] = static_cast<int64>(val);
-      break;
-    case Undefined:
-      break;
-    }
+    setValueRaw(idx, val);
 
     // NOTE: we cant modify min/max here because it would mess up a map()
     // operation, and perhaps other things if(_minIsSet && val < min())
@@ -445,6 +413,48 @@ protected:
   // boundaries
   void resizeTrilinearCPU(voxels &newvox, double offset_x, double offset_y, double offset_z,
                           double scale_x, double scale_y, double scale_z, bool clampCoords) const;
+
+  // Encode `val` into linear voxel `idx` using the current voxel type, WITHOUT
+  // the copy-on-write detach or bounds check. The single source of truth for
+  // per-type encoding: the write operators call it after preWrite() + a bounds
+  // check, and the bulk parallel writers (fillsub) call it after detaching the
+  // buffer ONCE up front. That is what makes a parallel fill race-free: with the
+  // buffer already unique, no per-element preWrite() is needed, so no two threads
+  // can race on _voxels.reset(). Callers guarantee idx is in bounds.
+  void setValueRaw(uint64 idx, double val) {
+    byte *data = get_data_ptr();
+    switch (voxelType()) {
+    case UChar:
+      reinterpret_cast<unsigned char *>(data)[idx] = static_cast<unsigned char>(val);
+      break;
+    case UShort:
+      reinterpret_cast<unsigned short *>(data)[idx] = static_cast<unsigned short>(val);
+      break;
+    case UInt:
+      reinterpret_cast<unsigned int *>(data)[idx] = static_cast<unsigned int>(val);
+      break;
+    case Float:
+      reinterpret_cast<float *>(data)[idx] = static_cast<float>(val);
+      break;
+    case Double:
+      reinterpret_cast<double *>(data)[idx] = static_cast<double>(val);
+      break;
+    case UInt64:
+      reinterpret_cast<uint64 *>(data)[idx] = static_cast<uint64>(val);
+      break;
+    case Char:
+      reinterpret_cast<signed char *>(data)[idx] = static_cast<signed char>(val);
+      break;
+    case Int:
+      reinterpret_cast<int *>(data)[idx] = static_cast<int>(val);
+      break;
+    case Int64:
+      reinterpret_cast<int64 *>(data)[idx] = static_cast<int64>(val);
+      break;
+    case Undefined:
+      break;
+    }
+  }
 
   void preWrite() {
     _histogramDirty = true; // invalidate the histogram

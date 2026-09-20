@@ -4,6 +4,7 @@
 #include <any>
 #include <array>
 #include <boost/signals2.hpp>
+#include <cvc/core/world_units.h>
 #include <cvc/gl/SceneNode.h>
 #include <cvc/volume/bounding_box.h>
 #include <map>
@@ -73,6 +74,24 @@ public:
 
   // Get world transform (accumulated from all parents)
   vtkSmartPointer<vtkMatrix4x4> getWorldTransform() const;
+
+  // Point transforms between this node's LOCAL (object) space and WORLD space.
+  // localToWorld composes with getWorldTransform(); worldToLocal applies its
+  // inverse. The inverse is computed lazily and cached (invalidated whenever the
+  // node's world transform changes), so a per-frame pose cascade pays nothing and
+  // only an actual query -- a pick, a coordinate readout -- pays the one Invert().
+  // out and in may alias. Homogeneous w is normalised, so a projective transform
+  // is handled correctly; an affine scene transform leaves w == 1.
+  void localToWorld(const double local[3], double world[3]) const;
+  void worldToLocal(const double world[3], double local[3]) const;
+
+  // A point in this node's LOCAL coordinate frame reported as a real-world
+  // coordinate in the given regime: local -> world (this node's transform) ->
+  // canonical metres -> the active display unit (m/km or ft/mi). This is the
+  // "click a graphic in its own coordinate transform, tell me where that is in
+  // kilometres/miles" path once a pick has resolved a hit to a local point.
+  cvc::world_units::coordinate localPointToReal(const double local[3],
+                                                const cvc::world_units &units) const;
 
   // Fired ONCE when this node's transform changes (setPosition/setRotation/
   // setScale/setTransform/resetTransform, or a state-driven move) — not once per
@@ -208,6 +227,13 @@ protected:
   // the root) and a fresh vtkTransform for every node the cascade touched,
   // every frame. Reusing them is what takes the per-node cost down.
   vtkSmartPointer<vtkMatrix4x4> m_worldMatrix;
+  // Cached world->object inverse, computed lazily on the first worldToLocal /
+  // localPointToReal after a move and reused until the next one. Kept off the
+  // hot pose path (updateTransform only flags it dirty) because picking and
+  // coordinate readouts are rare relative to per-frame poses. mutable so the
+  // const query methods can fill it on demand.
+  mutable vtkSmartPointer<vtkMatrix4x4> m_worldInverse;
+  mutable bool m_worldInverseDirty = true;
   // Full state paths for the transform keys, resolved ONCE. getState(name) costs
   // ~8 us per call, which was a third of the price of moving a node.
   std::string m_pathPosition, m_pathRotation, m_pathScale, m_pathMatrix;
