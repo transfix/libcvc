@@ -49,6 +49,7 @@
 %ignore cvc::model::meshes;
 %ignore cvc::model::materials;
 %ignore cvc::model::extents;
+%ignore cvc::model::extents_metres; // opaque bounding_box return; re-exposed as a 6-tuple below
 %ignore cvc::model::mesh::geom;
 
 // material: boost::array + by-value image members don't marshal cleanly; exposed
@@ -105,10 +106,18 @@
     cvc::bounding_box b = $self->extents();
     return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
   }
+  // extents_metres(): the same box scaled into canonical SI metres by
+  // metres_per_source_unit, as a 6-tuple. The bridge from authoring units to the
+  // world unit base (feed the corners to a world_units for regime display).
+  std::vector<double> extents_metres_bbox() const {
+    cvc::bounding_box b = $self->extents_metres();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
 %pythoncode %{
     meshes = property(lambda self: self.mesh_list())
     materials = property(lambda self: self.material_list())
     extents = extents_bbox
+    extents_metres = extents_metres_bbox
 %}
 }
 

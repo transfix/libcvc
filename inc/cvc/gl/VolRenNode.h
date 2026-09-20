@@ -107,6 +107,29 @@ public:
   cvc::volren::render_settings renderConfig() const;
   void setRenderConfig(const cvc::volren::render_settings &rs);
 
+  // --- real-world units (map the rendered volume's world state to a regime) ---
+  // A VolRenNode is a GraphicsNode, so it already inherits realDimensions() /
+  // localPointToReal() / worldToLocal() for the node as a whole. These two add
+  // the piece those cannot see: the per-volume model_transform between a volume's
+  // OWN object/voxel coordinates and this node's local frame.
+  //
+  // volumePointToReal: a point in volume `index`'s object coordinates reported as
+  // a real-world coordinate in the given regime — composing the volume's
+  // model_transform (object -> node-local), this node's world transform (the
+  // parent chain), and world_units (world -> canonical metres -> the display unit
+  // m/km or ft/mi). So a voxel/feature location in a digital-twin volume reads
+  // out in true metres/kilometres/miles.
+  //
+  // volumeRealDimensions: the real-world size of volume `index` — the extents of
+  // its object bounding box taken through the same chain, three axes sharing one
+  // unit. "How big, in the real world, is the volume the raycaster is drawing."
+  //
+  // Both throw cvc::index_out_of_bounds if `index` is not a registered volume.
+  cvc::world_units::coordinate volumePointToReal(std::size_t index, double ox, double oy, double oz,
+                                                 const cvc::world_units &units) const;
+  cvc::world_units::coordinate volumeRealDimensions(std::size_t index,
+                                                    const cvc::world_units &units) const;
+
   // Raycast raster = viewport * scale, clamped to
   // [MinResolutionScale, MaxResolutionScale]; the quad rescales to fill the
   // viewport either way.  The main performance knob.  State key:

@@ -258,6 +258,12 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // return, so every bounding_box-returning method is ignored (as in pycvc.i).
 %ignore cvc::gl::GraphicsNode::getBoundingBox;
 %ignore cvc::gl::GraphicsNode::getCombinedBoundingBox;
+%ignore cvc::gl::GraphicsNode::getWorldBoundingBox;         // opaque bbox return -> 6-tuple below
+%ignore cvc::gl::GraphicsNode::getCombinedWorldBoundingBox; // opaque bbox return -> 6-tuple below
+%ignore cvc::gl::GraphicsNode::localToWorld;                // double[3] in/out -> vector below
+%ignore cvc::gl::GraphicsNode::worldToLocal;                // double[3] in/out -> vector below
+%ignore cvc::gl::GraphicsNode::localPointToReal;            // double[3] in -> (x,y,z,unit) tuple
+%ignore cvc::gl::GraphicsNode::realDimensions;              // coordinate return -> tuple below
 %ignore cvc::gl::GraphicsNode::getBBoxColor;             // out-ref params
 %ignore cvc::gl::GraphicsNode::getLabelColor;
 %ignore cvc::gl::GraphicsNode::getExtentLabelColor;
@@ -302,6 +308,47 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
   std::vector<double> get_combined_bounding_box() {
     cvc::bounding_box b = $self->getCombinedBoundingBox();
     return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  // Point transforms between this node's LOCAL frame and WORLD space (the
+  // double[3] overloads are ignored). Take/return a [x,y,z] list.
+  std::vector<double> local_to_world(const std::vector<double>& p) {
+    if (p.size() != 3)
+      throw std::invalid_argument("local_to_world: need [x, y, z]");
+    double in[3] = {p[0], p[1], p[2]}, out[3];
+    $self->localToWorld(in, out);
+    return {out[0], out[1], out[2]};
+  }
+  std::vector<double> world_to_local(const std::vector<double>& p) {
+    if (p.size() != 3)
+      throw std::invalid_argument("world_to_local: need [x, y, z]");
+    double in[3] = {p[0], p[1], p[2]}, out[3];
+    $self->worldToLocal(in, out);
+    return {out[0], out[1], out[2]};
+  }
+  // World-space AABB of this node (and node+subtree) as (minx..maxz) 6-tuples,
+  // reliable through the whole chain of local transforms.
+  std::vector<double> get_world_bounding_box() {
+    cvc::bounding_box b = $self->getWorldBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  std::vector<double> get_combined_world_bounding_box() {
+    cvc::bounding_box b = $self->getCombinedWorldBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  // A point in this node's LOCAL frame as a real-world coordinate in the given
+  // world_units regime: an (x, y, z, unit) tuple (e.g. (3.2, 0.5, -1.0, "km")).
+  PyObject* local_point_to_real(const std::vector<double>& p, const cvc::world_units& u) {
+    if (p.size() != 3)
+      throw std::invalid_argument("local_point_to_real: need [x, y, z]");
+    double in[3] = {p[0], p[1], p[2]};
+    cvc::world_units::coordinate c = $self->localPointToReal(in, u);
+    return Py_BuildValue("(ddds)", c.x, c.y, c.z, c.unit.c_str());
+  }
+  // This node's real-world size in the regime: an (x, y, z, unit) tuple, taken
+  // through the whole chain of local transforms (with descendants by default).
+  PyObject* real_dimensions(const cvc::world_units& u, bool include_children = true) {
+    cvc::world_units::coordinate c = $self->realDimensions(u, include_children);
+    return Py_BuildValue("(ddds)", c.x, c.y, c.z, c.unit.c_str());
   }
   // Names of this node's direct children (traverse via SceneGraph.getGraphics).
   std::vector<std::string> child_names() {
@@ -613,7 +660,23 @@ def _typed_node(sg, name):
   $result = PyBytes_FromStringAndSize(reinterpret_cast<const char *>($1.data()),
                                       static_cast<Py_ssize_t>($1.size()));
 }
+// pickWorld has a double[3] OUT param SWIG can't express; re-exposed as pick_world
+// below (returns an (x,y,z) tuple or None).
+%ignore cvc::gl::SceneRenderer::pickWorld;
 %include "cvc/gl/SceneRenderer.h"
+
+%extend cvc::gl::SceneRenderer {
+  // Cast a pick ray through a display pixel (VTK display coords: pixels from the
+  // LOWER-left, matching frameRGB()'s row order) and return the first world-space
+  // hit as an (x, y, z) tuple, or None on a miss. Pass the tuple to a node's
+  // world_to_local / a world_units.world_point_to_real for a real-world readout.
+  PyObject* pick_world(double display_x, double display_y) {
+    double w[3];
+    if (!$self->pickWorld(display_x, display_y, w))
+      Py_RETURN_NONE;
+    return Py_BuildValue("(ddd)", w[0], w[1], w[2]);
+  }
+}
 
 // ── CameraController: built-in orbit + Quake-fly navigation, fully cvc::state ──
 // Python constructs it from a wrapped SceneRenderer — CameraController(view) — so

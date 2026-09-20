@@ -42,6 +42,7 @@ if _sys.platform == "win32":
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/core/world_units.h>
 #include <cvc/volume/dimension.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/voxels.h>
@@ -298,6 +299,89 @@ namespace cvc {
     else throw std::invalid_argument(
         "world_clock.set_mode_name: expected 'live', 'replay', 'paused' or 'stepping'");
   }
+}
+
+// ── cvc::world_units — the SI unit base + display regime ────────────
+// The spatial counterpart to world_clock (cvc/core/world_units.h): a canonical
+// SI store with a display regime (SI/imperial) and metres_per_world_unit pinning
+// world-space to metres. Reshaped for Python exactly like world_clock: the two
+// nested value structs (measurement{value,unit}, coordinate{x,y,z,unit}) are
+// flatnested to top-level proxies so their fields marshal (SWIG Warning 325
+// otherwise leaks them opaque); the two enum classes (system, dimension) and the
+// nested config are %ignore'd in favour of a scalar ctor and string-keyed
+// helpers. As with world_clock, a name-wide %ignore also suppresses a same-named
+// %extend, so the dimension-keyed replacements take a `_d` suffix and the regime
+// ones a `_name` suffix rather than shadowing the originals. The plain-double
+// methods (metres_per_world_unit, world_to_metres, metres_to_world) and
+// world_point_to_real (returns the coordinate proxy) wrap as-is.
+%{
+static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
+  if (d == "length") return cvc::world_units::dimension::length;
+  if (d == "mass") return cvc::world_units::dimension::mass;
+  if (d == "time") return cvc::world_units::dimension::time;
+  if (d == "velocity") return cvc::world_units::dimension::velocity;
+  if (d == "acceleration") return cvc::world_units::dimension::acceleration;
+  if (d == "force") return cvc::world_units::dimension::force;
+  if (d == "energy") return cvc::world_units::dimension::energy;
+  if (d == "angle") return cvc::world_units::dimension::angle;
+  throw std::invalid_argument(
+      "world_units: unknown dimension '" + d +
+      "' (length/mass/time/velocity/acceleration/force/energy/angle)");
+}
+%}
+%feature("flatnested") cvc::world_units::measurement;
+%feature("flatnested") cvc::world_units::coordinate;
+%rename(world_units_measurement) cvc::world_units::measurement;
+%rename(world_units_coordinate) cvc::world_units::coordinate;
+%ignore cvc::world_units::system;
+%ignore cvc::world_units::dimension;
+%ignore cvc::world_units::config;
+%ignore cvc::world_units::world_units(cvc::world_units::config);
+%ignore cvc::world_units::regime;
+%ignore cvc::world_units::set_regime;
+%ignore cvc::world_units::to_display;
+%ignore cvc::world_units::from_display;
+%ignore cvc::world_units::unit_symbol;
+%ignore cvc::world_units::format;
+%include "cvc/core/world_units.h"
+%extend cvc::world_units {
+  // Build with an explicit scale + string regime instead of the nested config.
+  world_units(double metres_per_world_unit, const std::string &regime = "si") {
+    cvc::world_units::config c;
+    c.metres_per_world_unit = metres_per_world_unit;
+    c.regime = (regime == "imperial") ? cvc::world_units::system::imperial
+                                       : cvc::world_units::system::si;
+    return new cvc::world_units(c);
+  }
+  std::string regime_name() const {
+    return $self->regime() == cvc::world_units::system::imperial ? "imperial" : "si";
+  }
+  void set_regime_name(const std::string &s) {
+    if (s == "si") $self->set_regime(cvc::world_units::system::si);
+    else if (s == "imperial") $self->set_regime(cvc::world_units::system::imperial);
+    else throw std::invalid_argument("world_units.set_regime_name: expected 'si' or 'imperial'");
+  }
+  double to_display_d(double v, const std::string &dim) const {
+    return $self->to_display(v, pycvc_wu_dim(dim));
+  }
+  double from_display_d(double v, const std::string &dim) const {
+    return $self->from_display(v, pycvc_wu_dim(dim));
+  }
+  std::string unit_symbol_d(const std::string &dim) const {
+    return $self->unit_symbol(pycvc_wu_dim(dim));
+  }
+  cvc::world_units::measurement format_d(double v, const std::string &dim) const {
+    return $self->format(v, pycvc_wu_dim(dim));
+  }
+}
+
+// ── cvc::app: per-app world_clock() / world_units() accessors ────────
+// app is the opaque proxy above; now that both bases are wrapped, expose the
+// per-app handles (owned by the app; SWIG returns non-owning proxies). This is
+// how Python reaches the application-wide clock/units without a singleton.
+%extend cvc::app {
+  cvc::world_clock &world_clock() { return $self->world_clock(); }
+  cvc::world_units &world_units() { return $self->world_units(); }
 }
 
 // ── cvc::voxels — curate the surface ────────────────────────────────

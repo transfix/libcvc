@@ -61,6 +61,8 @@
 namespace cvc {
 
 class thread_pool; // persistent-worker fork-join pool owned below (thread_pool.h)
+class world_clock; // per-app simulation clock owned below (world_clock.h)
+class world_units; // per-app unit base + display regime owned below (world_units.h)
 
 // --------
 // cvc::app
@@ -393,6 +395,19 @@ public:
   // sized to hardware_concurrency() - 1 background workers.
   cvc::thread_pool &computePool();
 
+  // This application's simulation clock and world-unit base. Both are owned by
+  // the app and lazily constructed on first access — the per-app-instance model
+  // (like root()/computePool()), NOT a process-global singleton: "application-
+  // wide" means "scoped to this cvc::app". world_clock() is the authoritative
+  // simulation time (fixed_dt / tick / t()); world_units() is the length-unit
+  // base and display regime (SI/imperial, metres_per_world_unit). Together they
+  // dimension the world: length from world_units, time from world_clock, so a
+  // velocity is provably metres/second. The classes themselves stay app-
+  // independent (usable from a bare loop/test); this is just the app-scoped
+  // handle to them. Defaults: 120 Hz clock, SI at 1 metre per world unit.
+  cvc::world_clock &world_clock();
+  cvc::world_units &world_units();
+
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
   class thread_info {
@@ -613,6 +628,13 @@ protected:
   // that first construction. unique_ptr so app.h needs only a forward declaration.
   std::unique_ptr<cvc::thread_pool> _computePool;
   boost::mutex _computePoolMutex;
+
+  // Per-app simulation clock and world-unit base (world_clock()/world_units()).
+  // Lazily built; the mutex guards first construction. unique_ptr so app.h needs
+  // only a forward declaration of each.
+  std::unique_ptr<cvc::world_clock> _worldClock;
+  std::unique_ptr<cvc::world_units> _worldUnits;
+  boost::mutex _worldBasesMutex;
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;
