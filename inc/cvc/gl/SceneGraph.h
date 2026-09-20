@@ -232,6 +232,7 @@ public:
   std::shared_ptr<GraphicsNode> getGraphics(const std::string &name);
   std::shared_ptr<GraphicsNode> getGraphicsRoot() { return m_graphicsRoot; }
   std::shared_ptr<GridNode> getGridNode() { return m_gridNode; }
+  std::shared_ptr<AxisNode> getAxisNode() { return m_axisNode; }
   const std::map<std::string, std::shared_ptr<GraphicsNode>> &getAllGraphics() const {
     return m_graphicsNodes;
   }
