@@ -81,6 +81,21 @@ void state_remove(const std::shared_ptr<cvc::app> &app, const std::string &path)
   root.sweepExpired();
 }
 
+// ── Whole-tree persistence (routes through the root; null app throws) ─────
+void state_save(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  root_of(app).save(path);
+}
+
+void state_restore(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  root_of(app).restore(path);
+}
+
+std::string state_json(const std::shared_ptr<cvc::app> &app) { return root_of(app).json(); }
+
+void state_from_json(const std::shared_ptr<cvc::app> &app, const std::string &json) {
+  root_of(app).json(json);
+}
+
 // ── state_observer ──────────────────────────────────────────────────────
 struct state_observer::Impl {
   // Co-own the app while watching so its state tree (and our signal) outlive us.

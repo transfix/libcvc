@@ -140,6 +140,61 @@ def test_multiple_observers_all_fire():
     b.unwatch()
 
 
+# ── whole-tree persistence: save/restore + json round-trip ──────────────
+
+
+def test_state_json_round_trip():
+    src = pycvc.make_app()
+    pycvc.state_set(src, "sim.seed", "42")
+    pycvc.state_set(src, "sim.agent.speed", "3.5")
+    js = pycvc.state_json(src)
+    assert isinstance(js, str) and len(js) > 0
+    # A fresh app reloads the whole tree from the JSON snapshot — no disk.
+    dst = pycvc.make_app()
+    assert not pycvc.state_has(dst, "sim.seed")
+    pycvc.state_from_json(dst, js)
+    assert pycvc.state_get(dst, "sim.seed") == "42"
+    assert pycvc.state_get(dst, "sim.agent.speed") == "3.5"
+    print("  ok: state_json/state_from_json round-trip the whole tree")
+
+
+def test_state_save_restore_file():
+    import os
+    import tempfile
+
+    src = pycvc.make_app()
+    pycvc.state_set(src, "scenario.name", "alpha")
+    fd, path = tempfile.mkstemp(suffix=".cvcstate", prefix="pycvc_state_")
+    os.close(fd)
+    try:
+        pycvc.state_save(src, path)
+        assert os.path.exists(path) and os.path.getsize(path) > 0
+        dst = pycvc.make_app()
+        pycvc.state_restore(dst, path)
+        assert pycvc.state_get(dst, "scenario.name") == "alpha"
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    print("  ok: state_save/state_restore persist and reload the tree")
+
+
+def test_state_persistence_guards_null_app():
+    for fn in (
+        lambda: pycvc.state_json(None),
+        lambda: pycvc.state_save(None, "x"),
+        lambda: pycvc.state_from_json(None, "{}"),
+    ):
+        try:
+            fn()
+        except Exception:
+            pass
+        else:
+            raise AssertionError("persistence op on a null app should raise")
+    print("  ok: persistence ops reject a null app handle")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
