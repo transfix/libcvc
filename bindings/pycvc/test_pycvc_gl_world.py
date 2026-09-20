@@ -291,6 +291,53 @@ def test_volslice_node_wrapped():
     print("  ok: add_volslice -> setVolume/config round-trip/get_bounding_box + volslice_node")
 
 
+# ── 5. On-screen overlays (state_object controllers, not scene nodes) ─────────
+
+
+def test_stage_lighting_wrapped():
+    # StageLighting(sg) is headless: the ctor + setStage/apply build LightNodes
+    # into the scene graph (no GL context); they render wherever the scene does.
+    sg = pycvc_gl.SceneGraph(app)
+    rig = pycvc_gl.StageLighting(sg)
+    rig.setStage(1.0, 2.0, 3.0, 10.0)
+    assert all(math.isclose(a, b) for a, b in zip(rig.get_stage(), (1.0, 2.0, 3.0, 10.0)))
+    # explicit intensities so lights are definitely built, then apply()
+    rig.setKey(1.0, 45.0, 30.0, 35.0)
+    rig.setFill(0.4)
+    rig.setWash(0.5, 4, 1.0)
+    rig.apply_preset("dramatic")  # string route over the Preset enum
+    rig.apply()
+    names = list(rig.lightNames())
+    assert len(names) > 0 and any(n.startswith("stage_") for n in names)
+    try:
+        rig.apply_preset("disco")
+    except Exception:
+        pass
+    else:
+        raise AssertionError("apply_preset('disco') should have raised")
+    print("  ok: StageLighting(sg) -> stage/preset/apply builds named stage_* lights")
+
+
+def test_screen_text_hud_wrapped():
+    # Headless via the low-level (app, statePath, None) ctor — no viewer, no
+    # vtkTextActor; the change-gated setters write through state and read back.
+    # (The live SceneRenderer& ctor + the actual draw need a GL context.)
+    hud = pycvc_gl.ScreenTextHud(app, "scene.viewers.main.hud.caption", None)
+    hud.setText("hello world")
+    assert hud.text() == "hello world"
+    hud.setPosition(0.5, 0.1)
+    assert all(math.isclose(a, b, abs_tol=1e-6) for a, b in zip(hud.get_position(), (0.5, 0.1)))
+    hud.setColor(1.0, 0.8, 0.6)
+    assert all(math.isclose(a, b, abs_tol=1e-6) for a, b in zip(hud.get_color(), (1.0, 0.8, 0.6)))
+    hud.setFontSize(24)
+    assert hud.fontSize() == 24
+    hud.setCentered(False)
+    assert hud.centered() is False
+    hud.setOpacity(0.5)
+    assert math.isclose(hud.opacity(), 0.5, abs_tol=1e-6)
+    print("  ok: ScreenTextHud (headless ctor) -> text/position/color/font round-trip")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -107,5 +107,10 @@ The same wrapping covers the built-in reference nodes (`getGridNode()` /
 scene node (`VolRenNode`, `add_volren`; value types in `pycvc_volren.i`) and the
 view-aligned slice renderer (`VolSliceNode`, `add_volslice`; value types in
 `pycvc_volslice.i` — see [`docs/VOLSLICE_API.md`](../../docs/VOLSLICE_API.md#python-pycvc)).
+The `cvc::state`-driven viewer/scene controllers are wrapped too, mirroring
+`CameraController`: `StageLighting(sg)` (a cinematic key/fill/back/wash rig —
+`apply_preset('three_point'|…)`, `setKey`/`setWash`, `apply()`, headless) and
+`ScreenTextHud` (screen-space captions/status lines — `setText`, `setPosition`,
+`get_color`; construct headless via `ScreenTextHud(app, path, None)`).
 Contract tests: `test_pycvc_world_units.py`, `test_pycvc_gl_world.py`, and the
 `extents_metres` case in `test_pycvc_model.py`.

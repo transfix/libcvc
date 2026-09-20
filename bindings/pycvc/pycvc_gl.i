@@ -54,6 +54,8 @@ if _sys.platform == "win32":
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/StageLighting.h>  // cinematic lighting rig (state_object)
+#include <cvc/gl/ScreenTextHud.h>  // screen-space text overlay (state_object)
 #include <cvc/image/image.h> // GeometryNode::setTexture(const cvc::image&) — image %import'd from pycvc.i
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
@@ -994,6 +996,76 @@ def _typed_node(sg, name):
     if args: self._pycvc_keepalive = args[0]
 %}
 %include "cvc/gl/CameraController.h"
+
+// ── StageLighting: a cinematic key/fill/back/wash rig, fully cvc::state ──────
+// A state_object like CameraController (NO %shared_ptr, NO director). Python
+// builds it from a wrapped SceneGraph — StageLighting(sg) — which is HEADLESS:
+// the ctor + setStage/apply build LightNodes into the scene graph (no GL
+// context); they render wherever the scene renders. Its base
+// state_object<StageLighting> is invisible to SWIG, so it emits the same benign
+// 401 "nothing known about base class" warnings CameraController/SceneNode do.
+%ignore cvc::gl::StageLighting::StageLighting(cvc::app &, const std::string &,
+                                              cvc::gl::SceneGraph *); // low-level ctor: keepalive-slot ambiguity; the SceneGraph& ctor is already headless
+%ignore cvc::gl::StageLighting::Preset;       // nested enum -> apply_preset(string)
+%ignore cvc::gl::StageLighting::applyPreset;  // takes Preset
+%ignore cvc::gl::StageLighting::presetName;   // takes/returns Preset
+%ignore cvc::gl::StageLighting::stage;        // double& out-params -> get_stage tuple
+%ignore cvc::gl::StageLighting::appContext;   // raw cvc::app&
+// Keep the injected SceneGraph alive: ~StageLighting removes its lights from it.
+%pythonappend cvc::gl::StageLighting::StageLighting %{
+    if args: self._pycvc_keepalive = args[0]
+%}
+%include "cvc/gl/StageLighting.h"
+%extend cvc::gl::StageLighting {
+  // The acting area as (cx, cy, cz, radius) (the double& out-param exemplar).
+  PyObject *get_stage() const {
+    double cx, cy, cz, r;
+    $self->stage(cx, cy, cz, r);
+    return Py_BuildValue("(dddd)", cx, cy, cz, r);
+  }
+  // Preset as a string: "three_point" | "overhead" | "dramatic" | "flat".
+  void apply_preset(const std::string &p) {
+    if (p == "three_point")
+      $self->applyPreset(cvc::gl::StageLighting::Preset::ThreePoint);
+    else if (p == "overhead")
+      $self->applyPreset(cvc::gl::StageLighting::Preset::Overhead);
+    else if (p == "dramatic")
+      $self->applyPreset(cvc::gl::StageLighting::Preset::Dramatic);
+    else if (p == "flat")
+      $self->applyPreset(cvc::gl::StageLighting::Preset::Flat);
+    else
+      throw std::invalid_argument(
+          "StageLighting.apply_preset: expected 'three_point'|'overhead'|'dramatic'|'flat'");
+  }
+}
+
+// ── ScreenTextHud: a screen-space text overlay, fully cvc::state ─────────────
+// A state_object like CameraController. Python builds it from a wrapped
+// SceneRenderer — ScreenTextHud(view, "caption") — for the live overlay, or
+// headless via the low-level ScreenTextHud(app, path, None) ctor (no viewer, no
+// actor): construction + the change-gated setText/setPosition/... write through
+// state and read back, all without a GL context; only DRAWING the vtkTextActor
+// needs a live renderer. position/color are double& out-params -> tuples.
+%ignore cvc::gl::ScreenTextHud::position; // double& out-params -> get_position tuple
+%ignore cvc::gl::ScreenTextHud::color;    // double& out-params -> get_color tuple
+// Keep the injected viewer (or app, for the headless ctor) alive: ~state_object
+// touches that app's state tree.
+%pythonappend cvc::gl::ScreenTextHud::ScreenTextHud %{
+    if args: self._pycvc_keepalive = args[0]
+%}
+%include "cvc/gl/ScreenTextHud.h"
+%extend cvc::gl::ScreenTextHud {
+  PyObject *get_position() const {
+    double nx, ny;
+    $self->position(nx, ny);
+    return Py_BuildValue("(dd)", nx, ny);
+  }
+  PyObject *get_color() const {
+    double r, g, b;
+    $self->color(r, g, b);
+    return Py_BuildValue("(ddd)", r, g, b);
+  }
+}
 
 // ── Live-scene bridge: adopt an embedding host's SceneGraph ─────────────────
 // An embedding host (e.g. volrover3) hands its LIVE scene across as a PyCapsule
