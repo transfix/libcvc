@@ -31,8 +31,16 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <vtkActor2D.h>
+#include <vtkCollection.h>
+#include <vtkLight.h>
+#include <vtkLightCollection.h>
+#include <vtkProp.h>
+#include <vtkPropCollection.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
+#include <vtkSmartPointer.h>
+#include <vtkTextActor.h>
 
 using cvc::gl::SceneGraph;
 using cvc::gl::Viewport;
@@ -206,6 +214,53 @@ int main() {
   const double miniDelta = rectDelta(mir0, mir1, W, H, gPx0, gPy0, gPx1, gPy1);
   printf("  mirror rect delta after source node: %.4f\n", miniDelta);
   assert(miniDelta > 0.0 && "mirror did not pick up a node added to the source scene");
+
+  // A 2-D overlay on the SOURCE must NOT be mirrored (a window-space HUD would
+  // double-draw onto the inset), but the source's LIGHTS must be, so the minimap
+  // is lit like the scene rather than flat.
+  {
+    // vtkTextActor is a vtkActor2D subclass that renders cleanly with no separate
+    // mapper (a bare vtkActor2D logs "No mapper set"); the production filter keys
+    // on the vtkActor2D base, so this still exercises it.
+    vtkSmartPointer<vtkTextActor> hud = vtkSmartPointer<vtkTextActor>::New();
+    hud->SetInput("HUD");
+    vm.primary().renderer()->AddActor2D(hud);
+    vtkSmartPointer<vtkLight> lamp = vtkSmartPointer<vtkLight>::New();
+    lamp->SetPosition(10, 20, 30);
+    vm.primary().renderer()->AddLight(lamp);
+    vm.render(); // re-syncs the mirror from the source
+
+    bool srcHas2D = false, mirHas2D = false;
+    {
+      vtkPropCollection *ps = vm.primary().renderer()->GetViewProps();
+      vtkCollectionSimpleIterator it;
+      ps->InitTraversal(it);
+      while (vtkProp *p = ps->GetNextProp(it))
+        if (vtkActor2D::SafeDownCast(p))
+          srcHas2D = true;
+    }
+    {
+      vtkPropCollection *pm = mini.renderer()->GetViewProps();
+      vtkCollectionSimpleIterator it;
+      pm->InitTraversal(it);
+      while (vtkProp *p = pm->GetNextProp(it))
+        if (vtkActor2D::SafeDownCast(p))
+          mirHas2D = true;
+    }
+    assert(srcHas2D && "test setup: the 2-D actor should be on the source renderer");
+    assert(!mirHas2D && "a 2-D overlay leaked into the mirror — it will double-draw the HUD");
+
+    bool mirHasLamp = false;
+    vtkLightCollection *lc = mini.renderer()->GetLights();
+    vtkCollectionSimpleIterator lit;
+    lc->InitTraversal(lit);
+    while (vtkLight *l = lc->GetNextLight(lit))
+      if (l == lamp.Get())
+        mirHasLamp = true;
+    assert(mirHasLamp && "the source's light did not reach the mirror — the minimap renders flat");
+
+    vm.primary().renderer()->RemoveActor2D(hud); // leave the scene as later tests expect
+  }
 
   // Mirroring a source that does not exist is a loud error.
   bool threw = false;

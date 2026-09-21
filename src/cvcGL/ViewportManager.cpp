@@ -18,8 +18,11 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <vtkActor2D.h>    // detect 2-D overlay props to skip in a mirror
 #include <vtkCollection.h> // vtkCollectionSimpleIterator (reentrant prop traversal)
 #include <vtkInteractorStyle.h>
+#include <vtkLight.h>
+#include <vtkLightCollection.h>
 #include <vtkNew.h>
 #include <vtkObjectFactory.h> // vtkStandardNewMacro
 #include <vtkOutputWindow.h>  // route VTK's ERR/WARN to stderr, not a Win32 message box
@@ -114,12 +117,28 @@ void syncMirrorProps(Viewport &mirror) {
   vtkRenderer *src = mirror.mirrorSource();
   if (!dst || !src)
     return;
+  // 3-D props only: skip vtkActor2D (FpsHud, ScreenTextHud, scalar bars). A 2-D
+  // overlay is positioned in the WINDOW, not the scene, so copying it would draw
+  // the source's HUD a second time on top of the inset.
   dst->RemoveAllViewProps();
   vtkPropCollection *props = src->GetViewProps();
   vtkCollectionSimpleIterator it;
   props->InitTraversal(it);
-  while (vtkProp *p = props->GetNextProp(it))
+  while (vtkProp *p = props->GetNextProp(it)) {
+    if (vtkActor2D::SafeDownCast(p))
+      continue;
     dst->AddViewProp(p);
+  }
+  // Copy the source's lights so a mirror of a StageLighting-rigged scene is lit
+  // the same instead of rendering flat. World-space lights are correct from the
+  // mirror's own camera; with none, the mirror falls back to VTK's automatic
+  // headlight following its own camera.
+  dst->RemoveAllLights();
+  vtkLightCollection *lights = src->GetLights();
+  vtkCollectionSimpleIterator lit;
+  lights->InitTraversal(lit);
+  while (vtkLight *l = lights->GetNextLight(lit))
+    dst->AddLight(l);
 }
 } // namespace
 
@@ -425,7 +444,12 @@ Viewport *ViewportManager::viewportAt(int x, int y) const {
 
 void ViewportManager::routeMouseButton(MouseButton button, bool down, int x, int y) {
   m_impl->requireOpen();
-  const int bit = (button == MouseButton::Left) ? 1 : (button == MouseButton::Middle) ? 2 : 4;
+  // Right is reserved: a true no-op. Handling it (even just to latch/focus) would
+  // let a right-click silently steal keyboard focus and release the previous
+  // viewport's held keys — no CameraController gesture maps to it anyway.
+  if (button == MouseButton::Right)
+    return;
+  const int bit = (button == MouseButton::Left) ? 1 : 2;
   const bool wasIdle = (m_impl->buttonsDown == 0);
   if (down)
     m_impl->buttonsDown |= bit;
