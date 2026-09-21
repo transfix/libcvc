@@ -94,5 +94,59 @@ void UiSettings::handleStateChanged(const std::string &) {
     m_apply(m_v);
 }
 
+// ---- ViewportLayout --------------------------------------------------------
+std::string ViewportLayout::viewerStatePath(const std::string &scenePrefix,
+                                            const std::string &viewerName) {
+  // A dedicated ".layout" subtree so it does not observe the sibling ".camera"
+  // state_object's changes (it would otherwise fire on every camera edit).
+  return scenePrefix + ".viewers." + viewerName + ".layout";
+}
+
+ViewportLayout::ViewportLayout(cvc::app &ctx, const std::string &statePath,
+                               std::function<void(Values)> apply)
+    : cvc::state_object<ViewportLayout>(ctx, statePath), m_apply(std::move(apply)) {
+  this->setInstanceThreading(false);
+  seedState();
+}
+
+void ViewportLayout::seedState() {
+  // region is four correlated keys; if each write re-entered handleStateChanged
+  // it would read the not-yet-written ones back and corrupt m_v mid-loop, so
+  // fence the whole publish.
+  m_writing = true;
+  getState("region.x0").value(m_v.region[0]);
+  getState("region.y0").value(m_v.region[1]);
+  getState("region.x1").value(m_v.region[2]);
+  getState("region.y1").value(m_v.region[3]);
+  getState("layer").value(m_v.layer);
+  getState("visible").value(m_v.visible ? 1 : 0);
+  m_writing = false;
+}
+
+void ViewportLayout::set(Values v) {
+  // Object -> state only; see the note on ShadowSettings::set.
+  m_v = v;
+  seedState();
+}
+
+ViewportLayout::Values ViewportLayout::get() const { return m_v; }
+
+void ViewportLayout::handleStateChanged(const std::string &) {
+  if (m_writing)
+    return; // our own publish (seedState) — not an external edit
+  try {
+    m_v.region[0] = getState("region.x0").value<double>();
+    m_v.region[1] = getState("region.y0").value<double>();
+    m_v.region[2] = getState("region.x1").value<double>();
+    m_v.region[3] = getState("region.y1").value<double>();
+    m_v.layer = getState("layer").value<int>();
+    m_v.visible = getState("visible").value<int>() != 0;
+  } catch (const std::exception &) {
+    return; // partially-initialised state: leave the object alone
+  }
+  if (m_apply)
+    m_apply(m_v);
+}
+
 } // namespace gl
 } // namespace cvc

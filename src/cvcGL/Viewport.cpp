@@ -8,8 +8,10 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/Settings.h>
 #include <cvc/gl/Viewport.h>
 #include <vtkCamera.h>
 #include <vtkRenderer.h>
@@ -29,6 +31,21 @@ struct Viewport::Impl {
   bool visible = true;
   bool inputEnabled = true;            // routed input reaches this viewport
   vtkRenderer *mirrorSource = nullptr; // set only for a mirror viewport
+  // region/layer/visible mirrored to cvc::state so a PiP arrangement round-trips.
+  std::unique_ptr<ViewportLayout> layout;
+
+  // object -> state: publish the current placement (set() does not call back into
+  // the apply callback, so this does not loop).
+  void writeLayout() {
+    if (!layout)
+      return;
+    ViewportLayout::Values v;
+    for (int i = 0; i < 4; ++i)
+      v.region[i] = region[i];
+    v.layer = layer;
+    v.visible = visible;
+    layout->set(v);
+  }
 };
 
 Viewport::Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
@@ -49,6 +66,23 @@ Viewport::Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraSt
   m_impl->camera->setCamera(m_impl->renderer->GetActiveCamera());
   m_impl->camera->setRenderer(m_impl->renderer);
   m_impl->camera->setScene(&scene);
+
+  // Placement (region/layer/visible) mirrored to cvc::state. The apply callback
+  // is the STATE -> object direction: a write from a script / config / restored
+  // layout drives the renderer directly, and never writes state back (no loop).
+  // The manager re-syncs its window layer count each render(), so a layer change
+  // arriving this way is composited correctly.
+  Impl *impl = m_impl.get();
+  const std::string layoutPath = ViewportLayout::viewerStatePath(scene.getStatePrefix(), name);
+  impl->layout.reset(new ViewportLayout(app, layoutPath, [impl](ViewportLayout::Values v) {
+    for (int i = 0; i < 4; ++i)
+      impl->region[i] = v.region[i];
+    impl->layer = v.layer;
+    impl->visible = v.visible;
+    impl->renderer->SetViewport(v.region[0], v.region[1], v.region[2], v.region[3]);
+    impl->renderer->SetLayer(v.layer);
+    impl->renderer->SetDraw(v.visible ? 1 : 0);
+  }));
 }
 
 Viewport::~Viewport() = default;
@@ -61,6 +95,7 @@ void Viewport::setRegion(double x0, double y0, double x1, double y1) {
   m_impl->region[2] = x1;
   m_impl->region[3] = y1;
   m_impl->renderer->SetViewport(x0, y0, x1, y1);
+  m_impl->writeLayout();
 }
 
 void Viewport::region(double out[4]) const {
@@ -71,12 +106,14 @@ void Viewport::region(double out[4]) const {
 void Viewport::setLayer(int layer) {
   m_impl->layer = layer;
   m_impl->renderer->SetLayer(layer);
+  m_impl->writeLayout();
 }
 int Viewport::layer() const { return m_impl->layer; }
 
 void Viewport::setVisible(bool on) {
   m_impl->visible = on;
   m_impl->renderer->SetDraw(on ? 1 : 0); // skipped in the composite when off
+  m_impl->writeLayout();
 }
 bool Viewport::visible() const { return m_impl->visible; }
 

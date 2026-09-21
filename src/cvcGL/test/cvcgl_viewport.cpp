@@ -21,9 +21,11 @@
 // Undefine it before <cassert> so the assertions actually run.
 #undef NDEBUG
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/Viewport.h>
@@ -321,6 +323,39 @@ int main() {
     threw = true;
   }
   assert(threw && "a zero-width manager must be rejected");
+
+  // ── viewport layout persists to / restores from cvc::state ─────────────────
+  // Placement round-trips through "<scene prefix>.viewers.<name>.layout.*", so a
+  // PiP arrangement can be saved and restored (or driven from a script / peer).
+  auto &S = cvc::state::instance(app);
+  // object -> state: the setters mirror region/layer/visible.
+  vm.primary().setRegion(0.1, 0.2, 0.6, 0.7);
+  assert(std::abs(std::stod(S("main_scene.viewers.main.layout.region.x0").value()) - 0.1) < 1e-9 &&
+         "setRegion did not write region.x0 to state");
+  assert(std::abs(std::stod(S("main_scene.viewers.main.layout.region.y1").value()) - 0.7) < 1e-9);
+  inset.setLayer(3);
+  assert(S("inset_scene.viewers.inset.layout.layer").value() == std::string("3") &&
+         "setLayer did not write layer to state");
+  inset.setVisible(false);
+  assert(S("inset_scene.viewers.inset.layout.visible").value() == std::string("0") &&
+         "setVisible did not write visible to state");
+
+  // state -> object: writing the layout state drives the viewport (a restored or
+  // scripted arrangement), including a layer change the window re-syncs at render.
+  S("inset_scene.viewers.inset.layout.region.x0").value("0.25");
+  S("inset_scene.viewers.inset.layout.region.y0").value("0.30");
+  S("inset_scene.viewers.inset.layout.region.x1").value("0.80");
+  S("inset_scene.viewers.inset.layout.region.y1").value("0.85");
+  S("inset_scene.viewers.inset.layout.visible").value("1");
+  S("inset_scene.viewers.inset.layout.layer").value("4");
+  double rr[4];
+  inset.region(rr);
+  assert(std::abs(rr[0] - 0.25) < 1e-9 && std::abs(rr[3] - 0.85) < 1e-9 &&
+         "a state write to layout.region did not drive the viewport");
+  assert(inset.visible() && inset.layer() == 4 &&
+         "a state write to layout.visible/layer did not drive the viewport");
+  vm.render(); // must composite cleanly with the state-driven layer
+  assert(vm.frameRGB().size() == static_cast<size_t>(W) * H * 3);
 
   printf("cvcgl_viewport: OK\n");
   return 0;
