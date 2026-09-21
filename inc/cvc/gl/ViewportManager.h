@@ -72,6 +72,13 @@ public:
   Viewport &addMirrorViewport(const std::string &name, const std::string &sourceViewport,
                               const double region[4], int layer = 2);
 
+  // Remove a viewport at runtime (drop a PiP inset). Detaches its scene so that
+  // scene can be added again, drops it from the window, and re-syncs the layer
+  // count. Throws for the primary (which owns the main scene), an unknown name,
+  // or a viewport that a mirror still sources (remove the mirror first). If it
+  // was the active viewport, keyboard focus falls back to the primary.
+  void removeViewport(const std::string &name);
+
   // Composite every visible viewport in one pass (drains each scene's pending
   // graphics events first, like SceneRenderer::render).
   void render();
