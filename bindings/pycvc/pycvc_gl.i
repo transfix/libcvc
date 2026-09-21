@@ -54,6 +54,8 @@ if _sys.platform == "win32":
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/Viewport.h>        // one rect of a ViewportManager window
+#include <cvc/gl/ViewportManager.h> // N cameras/viewports in one window (PiP)
 #include <cvc/gl/StageLighting.h>  // cinematic lighting rig (state_object)
 #include <cvc/gl/ScreenTextHud.h>  // screen-space text overlay (state_object)
 #include <cvc/image/image.h> // GeometryNode::setTexture(const cvc::image&) — image %import'd from pycvc.i
@@ -1008,6 +1010,95 @@ def _typed_node(sg, name):
     return Py_BuildValue("((ddd)(ddd)(ddd))", e[0], e[1], e[2], f[0], f[1], f[2], u[0], u[1], u[2]);
   }
 }
+
+// ── Viewport + ViewportManager: N cameras/viewports in ONE window (PiP) ──────
+// The picture-in-picture surface (cvcGL #384/#386/#387): one vtkRenderWindow /
+// one GL context (the browser's single canvas), N Viewports each with its own
+// camera + scene, composited as SetViewport/SetLayer rects. Python builds a
+// ViewportManager over a wrapped SceneGraph and gets Viewports back from it — it
+// never constructs a Viewport itself (private ctor). Every Viewport hands out its
+// CameraController (viewport.camera()), so all of the camera surface above is
+// reachable per viewport, from Python, identically to C++.
+//
+// KEEPALIVE CHAIN mirrors the C++ ownership so a live child keeps its parent from
+// being collected: the manager holds the main scene, a handed-out Viewport is
+// owned by the manager, and a Viewport's CameraController is owned by the
+// Viewport. Attribute keepalives: manager keeps its scene(s); a Viewport keeps
+// its manager; a camera keeps its Viewport.
+
+// frameRGB() is raw framebuffer pixels -> bytes (like SceneRenderer), not a list
+// of ints. Must precede the %include.
+%typemap(out) std::vector<unsigned char> cvc::gl::ViewportManager::frameRGB {
+  $result = PyBytes_FromStringAndSize(reinterpret_cast<const char *>($1.data()),
+                                      static_cast<Py_ssize_t>($1.size()));
+}
+// addSceneViewport/addMirrorViewport take a normalized region as a C double[4];
+// accept any Python 4-sequence (x0, y0, x1, y1).
+%typemap(in) const double region[4](double region_tmp[4]) {
+  PyObject *seq = PySequence_Fast($input, "region must be a sequence of 4 floats");
+  if (!seq)
+    SWIG_fail;
+  if (PySequence_Fast_GET_SIZE(seq) != 4) {
+    Py_DECREF(seq);
+    SWIG_exception_fail(SWIG_ValueError, "region must have exactly 4 elements (x0, y0, x1, y1)");
+  }
+  for (int i = 0; i < 4; ++i) {
+    region_tmp[i] = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, i));
+    if (PyErr_Occurred()) {
+      Py_DECREF(seq);
+      SWIG_fail;
+    }
+  }
+  Py_DECREF(seq);
+  $1 = region_tmp;
+}
+%typemap(typecheck, precedence = SWIG_TYPECHECK_DOUBLE_ARRAY) const double region[4] {
+  $1 = PySequence_Check($input) ? 1 : 0;
+}
+
+// Viewport: only the manager constructs it; Python only ever receives references.
+%nodefaultctor cvc::gl::Viewport;
+// region(double out[4]) is a C-array OUT param -> Python region() returns a
+// 4-tuple. Scoped to this %include and cleared after so nothing else is affected.
+%typemap(in, numinputs = 0) double out[4](double region_out[4]) { $1 = region_out; }
+%typemap(argout) double out[4] {
+  PyObject *_t = Py_BuildValue("(dddd)", $1[0], $1[1], $1[2], $1[3]);
+  Py_XDECREF($result);
+  $result = _t;
+}
+// A handed-out CameraController keeps its Viewport alive.
+%pythonappend cvc::gl::Viewport::camera %{
+    if val is not None: val._pycvc_keepalive = self
+%}
+%include "cvc/gl/Viewport.h"
+%clear double out[4];
+
+// ViewportManager: constructed from a wrapped SceneGraph; keep it and every added
+// scene alive, and make every handed-out Viewport keep the manager alive.
+%pythonappend cvc::gl::ViewportManager::ViewportManager %{
+    if args: self._pycvc_scene = args[0]
+%}
+%pythonappend cvc::gl::ViewportManager::primary %{
+    if val is not None: val._pycvc_keepalive = self
+%}
+%pythonappend cvc::gl::ViewportManager::viewport %{
+    if val is not None: val._pycvc_keepalive = self
+%}
+%pythonappend cvc::gl::ViewportManager::viewportAt %{
+    if val is not None: val._pycvc_keepalive = self
+%}
+%pythonappend cvc::gl::ViewportManager::activeViewport %{
+    if val is not None: val._pycvc_keepalive = self
+%}
+%pythonappend cvc::gl::ViewportManager::addSceneViewport %{
+    if val is not None:
+        val._pycvc_keepalive = self
+        if len(args) > 1: val._pycvc_scene = args[1]
+%}
+%pythonappend cvc::gl::ViewportManager::addMirrorViewport %{
+    if val is not None: val._pycvc_keepalive = self
+%}
+%include "cvc/gl/ViewportManager.h"
 
 // ── StageLighting: a cinematic key/fill/back/wash rig, fully cvc::state ──────
 // A state_object like CameraController (NO %shared_ptr, NO director). Python
