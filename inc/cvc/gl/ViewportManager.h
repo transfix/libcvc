@@ -80,6 +80,60 @@ public:
   void processUIEvents();
   bool windowClosed() const;
 
+  // Tick EVERY viewport's CameraController once per rendered frame: held-key fly
+  // motion (frame-rate independent via dt), Track smoothing, Map refit, throttled
+  // pose->state mirroring. render() does NOT do this (parity with SceneRenderer's
+  // host-driven loop) — a host that wants live cameras calls this before render().
+  // Ticks all viewports, not just the active one, so a background Track/minimap
+  // camera still follows.
+  void updateCameras(double dtSeconds);
+
+  // ---- input routing --------------------------------------------------------
+  // The picture-in-picture input problem: one window, one interactor, N cameras.
+  // Onscreen, an internal interactor style feeds these route*() methods; they are
+  // also PUBLIC and interactor-free so the routing logic is unit-testable offscreen
+  // (drive them with synthetic display-pixel coordinates). All positions are in
+  // display pixels, VTK's bottom-left origin (what vtkRenderWindowInteractor::
+  // GetEventPosition returns) — do NOT pass top-left/DOM coordinates without
+  // flipping y, or pitch and vertical pan invert.
+  enum class MouseButton { Left, Middle, Right };
+
+  // The routing DECISION: the TOPMOST visible, input-enabled viewport whose
+  // renderer contains display-pixel (x, y), iterating in descending layer (a
+  // later-added viewport wins on a tie); nullptr over the gutter. Layer- and
+  // visibility-aware, and returns null on a miss — unlike VTK's FindPokedRenderer,
+  // which ignores SetLayer/SetDraw and silently falls back to the primary.
+  Viewport *viewportAt(int x, int y) const;
+
+  // A button event. On down: hit-test, latch that viewport for the whole drag,
+  // make it the active (keyboard) viewport (focus-follows-click), and feed
+  // Left->beginDrag / Middle->beginPan (Right reserved, no-op). On up: feed the
+  // matching end on the LATCHED viewport, releasing the latch when no button
+  // remains held — so a drag that wanders out of its viewport keeps steering the
+  // camera it started on.
+  void routeMouseButton(MouseButton button, bool down, int x, int y);
+  // Pointer motion. During a drag: feed mouseLook(dx, dy) (deltas vs the last
+  // position) to the latched viewport. Otherwise route to the viewport under the
+  // cursor (Fly free-look), resetting the delta baseline when the hovered viewport
+  // changes so no cross-boundary jump is fed.
+  void routeMouseMove(int x, int y);
+  // Wheel goes to the viewport under the cursor (not the latched/active one):
+  // mouseWheel(steps), steps = +1 forward / -1 backward. No-op over the gutter.
+  void routeMouseWheel(int x, int y, double steps);
+  // Keyboard has no cursor, so it targets the ACTIVE viewport. "Escape" releases
+  // that viewport's pointer capture and is not forwarded as a key (matching the
+  // single-view style); every other keySym is a VTK key sym passed verbatim.
+  void routeKey(const std::string &keySym, bool down);
+
+  // The viewport keyboard events go to (the last clicked). Resolves the name in
+  // cvc::state at "<main scene prefix>.active_viewport"; falls back to the primary
+  // if unset/unknown, so it is never null after construction.
+  Viewport *activeViewport() const;
+  // Focus a viewport programmatically (no click). Writes the active_viewport state
+  // key and calls releaseHeldKeys() on the outgoing viewport so a key held across
+  // the handoff does not stick. Ignores an unknown name.
+  void setActiveViewport(const std::string &name);
+
   // Whole-window capture (all viewports + layers), rows bottom-up, RGB.
   void writePNG(const std::string &path);
   std::vector<unsigned char> frameRGB();

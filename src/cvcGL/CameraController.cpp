@@ -817,8 +817,13 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
     // 2-D map: drag PANS the view; rotation is deliberately unreachable.
     if (s.dragging && s.camera) {
       // Convert pixel motion to world units through the parallel scale so the
-      // grabbed point stays under the cursor at any zoom.
-      int *sz = s.window ? s.window->GetSize() : nullptr;
+      // grabbed point stays under the cursor at any zoom. Scale by the VIEWPORT's
+      // pixel height (the renderer's), not the whole window's, so a PiP inset
+      // that fills a fraction of the window still pans at the right rate; fall
+      // back to the window, then to 1.0, when no renderer size is available.
+      int *sz = s.renderer ? s.renderer->GetSize() : nullptr;
+      if (!sz || sz[1] <= 0)
+        sz = s.window ? s.window->GetSize() : nullptr;
       const double vh = (sz && sz[1] > 0) ? sz[1] : 1.0;
       const double perPx = 2.0 * s.camera->GetParallelScale() / vh;
       double pos[3], foc[3];
@@ -845,7 +850,11 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       const Vec3 fwd = normalize(orbitOffset(b, s.orbitAzimuth, s.orbitElevation, 1.0) * -1.0);
       const Vec3 right = normalize(cross(fwd, b.up));
       const Vec3 up = normalize(cross(right, fwd));
-      int *sz = s.window ? s.window->GetSize() : nullptr;
+      // Viewport (renderer) pixel height, not the window's, so a PiP inset pans
+      // at the correct rate; fall back to window, then 1.0.
+      int *sz = s.renderer ? s.renderer->GetSize() : nullptr;
+      if (!sz || sz[1] <= 0)
+        sz = s.window ? s.window->GetSize() : nullptr;
       const double vh = (sz && sz[1] > 0) ? sz[1] : 1.0;
       const double perPx =
           2.0 * s.orbitDistance * std::tan(0.5 * s.camera->GetViewAngle() * kDeg2Rad) / vh;

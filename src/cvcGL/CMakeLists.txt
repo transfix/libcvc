@@ -410,6 +410,17 @@ add_executable(cvcgl_viewport test/cvcgl_viewport.cpp)
 target_link_libraries(cvcgl_viewport PRIVATE cvcGL)
 add_test(NAME cvcgl_viewport COMMAND cvcgl_viewport)
 
+# ViewportManager input router: routes one window's interactor events to the
+# right viewport's CameraController (viewport-under-cursor for mouse/wheel, latch
+# a drag to its origin viewport, keyboard to the active viewport). The routing
+# DECISION and DISPATCH are public interactor-free methods, so this drives them
+# with synthetic display coordinates offscreen — no live interactor — and reads
+# each viewport's vtkCamera to confirm the effect. Renders for real, so it needs
+# a working GL driver (CI supplies Mesa llvmpipe).
+add_executable(cvcgl_viewport_input test/cvcgl_viewport_input.cpp)
+target_link_libraries(cvcgl_viewport_input PRIVATE cvcGL)
+add_test(NAME cvcgl_viewport_input COMMAND cvcgl_viewport_input)
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic

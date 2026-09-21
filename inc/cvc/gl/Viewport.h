@@ -81,6 +81,14 @@ public:
   // reads this in render() to keep the mirror in sync with the live scene.
   vtkRenderer *mirrorSource() const;
 
+  // Whether this viewport receives routed input (default true). A minimap / HUD
+  // inset set false is skipped by ViewportManager::viewportAt, so clicks fall
+  // through to the viewport beneath it — the DBG minimap is non-interactive by
+  // design ("a minimap that pans or dollies stops being a map"). Does not affect
+  // compositing.
+  void setInputEnabled(bool on);
+  bool inputEnabled() const;
+
 private:
   friend class ViewportManager; // the manager constructs and owns Viewports
   Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
