@@ -398,6 +398,18 @@ add_executable(cvcgl_stage_caster_truth test/cvcgl_stage_caster_truth.cpp)
 target_link_libraries(cvcgl_stage_caster_truth PRIVATE cvcGL)
 add_test(NAME cvcgl_stage_caster_truth COMMAND cvcgl_stage_caster_truth)
 
+# ViewportManager composites N Viewports (each its own vtkRenderer + camera +
+# scene) as SetViewport/SetLayer regions in ONE vtkRenderWindow (one GL context —
+# mandatory under WASM). Pins the picture-in-picture path the SceneRenderer test
+# documents as unsolvable there: a primary full-screen view + an inset over a
+# SECOND scene both composite in one window (both rects draw non-empty), and a
+# second viewport over an already-attached scene is a LOUD error, not a silently
+# blanked first view. Renders for real, so it needs a working GL driver (CI
+# supplies Mesa llvmpipe).
+add_executable(cvcgl_viewport test/cvcgl_viewport.cpp)
+target_link_libraries(cvcgl_viewport PRIVATE cvcGL)
+add_test(NAME cvcgl_viewport COMMAND cvcgl_viewport)
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
