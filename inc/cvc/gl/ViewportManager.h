@@ -36,7 +36,7 @@ class Viewport;
 // It is constructed like a SceneRenderer (a main scene + size + offscreen flag)
 // and auto-creates a full-screen PRIMARY viewport over that scene, so the common
 // single-view case is unchanged. Extra viewports are added over other scenes
-// (addSceneViewport) or as alternate views (addMirrorViewport, a follow-up).
+// (addSceneViewport) or as alternate views of a drawn scene (addMirrorViewport).
 //
 // The app the viewports' cameras live in is taken from the main scene.
 class ViewportManager {

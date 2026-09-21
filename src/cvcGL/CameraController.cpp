@@ -659,13 +659,15 @@ double CameraController::viewportAspect() const {
   const Impl &s = *m_impl;
   if (!s.renderer)
     return 0.0;
-  // Prefer the window: a renderer only reports a real size once it has rendered,
-  // so before the first frame it answers with a default that would fit wrongly.
-  const int *sz = nullptr;
-  if (vtkRenderWindow *w = s.renderer->GetRenderWindow())
-    sz = w->GetSize();
-  if (!sz || sz[0] <= 0 || sz[1] <= 0)
-    sz = s.renderer->GetSize();
+  // Prefer the RENDERER (viewport) size so a PiP inset fits to its OWN aspect,
+  // not the whole window's. A renderer only reports a real size once it has
+  // rendered, so fall back to the window until then; refitMapIfResized() corrects
+  // the transient first-frame case.
+  const int *sz = s.renderer->GetSize();
+  if (!sz || sz[0] <= 0 || sz[1] <= 0) {
+    if (vtkRenderWindow *w = s.renderer->GetRenderWindow())
+      sz = w->GetSize();
+  }
   if (!sz || sz[0] <= 0 || sz[1] <= 0)
     return 0.0;
   return static_cast<double>(sz[0]) / static_cast<double>(sz[1]);

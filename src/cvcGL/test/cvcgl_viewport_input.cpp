@@ -233,6 +233,23 @@ int main() {
            "a Left tap during a Middle pan froze the pan (shared dragging flag cleared)");
   }
 
+  // ── the Right button is a true no-op: no focus steal, no camera motion ──────
+  {
+    vm.routeMouseButton(MB::Left, true, inInset[0], inInset[1]); // make inset active
+    vm.routeMouseButton(MB::Left, false, inInset[0], inInset[1]);
+    assert(vm.activeViewport() == &inset);
+    inset.camera().setMode(CameraController::Mode::Orbit);
+    vm.primary().camera().setMode(CameraController::Mode::Orbit);
+    vm.updateCameras(0.0);
+    const Pose i0 = pose(inset), m0 = pose(vm.primary());
+    vm.routeMouseButton(MB::Right, true, inPrimary[0], inPrimary[1]); // right-click the primary
+    vm.routeMouseButton(MB::Right, false, inPrimary[0], inPrimary[1]);
+    vm.updateCameras(0.0);
+    assert(vm.activeViewport() == &inset && "a right-click stole keyboard focus");
+    assert(same(i0, pose(inset)) && same(m0, pose(vm.primary())) &&
+           "the Right button moved a camera — it must be a no-op");
+  }
+
   // ── gutter events are safe no-ops ──────────────────────────────────────────
   vm.primary().setVisible(false);
   inset.setVisible(false);
