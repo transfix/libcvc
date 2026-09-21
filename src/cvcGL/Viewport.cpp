@@ -27,6 +27,7 @@ struct Viewport::Impl {
   double region[4] = {0.0, 0.0, 1.0, 1.0}; // normalized, VTK y-up
   int layer = 0;
   bool visible = true;
+  bool inputEnabled = true;            // routed input reaches this viewport
   vtkRenderer *mirrorSource = nullptr; // set only for a mirror viewport
 };
 
@@ -92,6 +93,8 @@ vtkRenderer *Viewport::renderer() const { return m_impl->renderer; }
 bool Viewport::isMirror() const { return m_impl->mirror; }
 vtkRenderer *Viewport::mirrorSource() const { return m_impl->mirrorSource; }
 void Viewport::setMirrorSource(vtkRenderer *src) { m_impl->mirrorSource = src; }
+void Viewport::setInputEnabled(bool on) { m_impl->inputEnabled = on; }
+bool Viewport::inputEnabled() const { return m_impl->inputEnabled; }
 
 } // namespace gl
 } // namespace cvc

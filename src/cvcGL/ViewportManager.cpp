@@ -9,6 +9,7 @@
 */
 
 #include <algorithm>
+#include <cvc/core/state.h> // active_viewport focus, stored in cvc::state
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/Viewport.h>
@@ -16,9 +17,12 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vtkCollection.h> // vtkCollectionSimpleIterator (reentrant prop traversal)
+#include <vtkInteractorStyle.h>
 #include <vtkNew.h>
-#include <vtkOutputWindow.h> // route VTK's ERR/WARN to stderr, not a Win32 message box
+#include <vtkObjectFactory.h> // vtkStandardNewMacro
+#include <vtkOutputWindow.h>  // route VTK's ERR/WARN to stderr, not a Win32 message box
 #include <vtkPNGWriter.h>
 #include <vtkProp.h>
 #include <vtkPropCollection.h>
@@ -28,6 +32,75 @@
 #include <vtkSmartPointer.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkWindowToImageFilter.h>
+
+// File-local interactor style: the ONE interactor-coupled piece of the input
+// router. Onscreen it is installed on the manager's single interactor; each On*
+// override just reads the event off this->Interactor and forwards to the
+// manager's public, interactor-free route*() methods (which do the picking and
+// dispatch, and are unit-tested offscreen without any interactor). Declared at
+// global scope (like CameraController.cpp's CvcCameraInteractorStyle) so the VTK
+// object macros work. It must remain a STYLE (priority 0.0), never an observer:
+// ImGuiOverlay/FpsHud observe the interactor at priority 1.0 above it and abort
+// camera input via a flag, and it must NOT set DefaultRenderer (that would pin
+// routing to one renderer and defeat per-viewport picking).
+class ViewportInputRouterStyle : public vtkInteractorStyle {
+public:
+  static ViewportInputRouterStyle *New();
+  vtkTypeMacro(ViewportInputRouterStyle, vtkInteractorStyle);
+
+  void setManager(cvc::gl::ViewportManager *m) { m_mgr = m; }
+
+  void OnLeftButtonDown() override { button(cvc::gl::ViewportManager::MouseButton::Left, true); }
+  void OnLeftButtonUp() override { button(cvc::gl::ViewportManager::MouseButton::Left, false); }
+  void OnMiddleButtonDown() override {
+    button(cvc::gl::ViewportManager::MouseButton::Middle, true);
+  }
+  void OnMiddleButtonUp() override { button(cvc::gl::ViewportManager::MouseButton::Middle, false); }
+  void OnRightButtonDown() override { button(cvc::gl::ViewportManager::MouseButton::Right, true); }
+  void OnRightButtonUp() override { button(cvc::gl::ViewportManager::MouseButton::Right, false); }
+
+  void OnMouseMove() override {
+    if (!m_mgr || !this->Interactor)
+      return;
+    int x, y;
+    this->Interactor->GetEventPosition(x, y);
+    m_mgr->routeMouseMove(x, y);
+  }
+  void OnMouseWheelForward() override { wheel(1.0); }
+  void OnMouseWheelBackward() override { wheel(-1.0); }
+
+  void OnKeyDown() override {
+    if (!m_mgr || !this->Interactor)
+      return;
+    const char *ks = this->Interactor->GetKeySym();
+    m_mgr->routeKey(ks ? ks : "", true);
+  }
+  void OnKeyUp() override {
+    if (!m_mgr || !this->Interactor)
+      return;
+    const char *ks = this->Interactor->GetKeySym();
+    m_mgr->routeKey(ks ? ks : "", false);
+  }
+  void OnChar() override {} // our navigation owns the keyboard
+
+private:
+  void button(cvc::gl::ViewportManager::MouseButton b, bool down) {
+    if (!m_mgr || !this->Interactor)
+      return;
+    int x, y;
+    this->Interactor->GetEventPosition(x, y);
+    m_mgr->routeMouseButton(b, down, x, y);
+  }
+  void wheel(double steps) {
+    if (!m_mgr || !this->Interactor)
+      return;
+    int x, y;
+    this->Interactor->GetEventPosition(x, y);
+    m_mgr->routeMouseWheel(x, y, steps);
+  }
+  cvc::gl::ViewportManager *m_mgr = nullptr;
+};
+vtkStandardNewMacro(ViewportInputRouterStyle);
 
 namespace cvc {
 namespace gl {
@@ -56,7 +129,27 @@ struct ViewportManager::Impl {
   bool offscreen = true;
   bool closed = false;
   vtkSmartPointer<vtkRenderWindow> window;
-  vtkSmartPointer<vtkRenderWindowInteractor> interactor; // onscreen only
+  vtkSmartPointer<vtkRenderWindowInteractor> interactor;   // onscreen only
+  vtkSmartPointer<::ViewportInputRouterStyle> routerStyle; // onscreen only
+  std::string activeStatePath;                             // "<main scene prefix>.active_viewport"
+
+  // Input-router state (see routeMouse*/routeKey). dragTarget is latched on
+  // button-down and owns the whole drag; buttonsDown is the held-button mask;
+  // lastX/lastY + haveLast give mouseLook its per-move delta; hoverTarget lets a
+  // non-drag (Fly free-look) move reset its delta baseline when the pointer
+  // crosses into a different viewport.
+  Viewport *dragTarget = nullptr;
+  Viewport *hoverTarget = nullptr;
+  int buttonsDown = 0;
+  int lastX = 0, lastY = 0;
+  bool haveLast = false;
+  // CameraController collapses orbit-drag and pan onto ONE internal flag
+  // (beginPan sets it too; endDrag and endPan both clear it), so the router owns
+  // the single gesture the latched viewport is in and re-derives it from the
+  // held-button mask on every transition — otherwise releasing one button of an
+  // overlapping Left+Middle chord clears the flag and freezes the still-held one.
+  enum class Gesture { None, Drag, Pan };
+  Gesture gesture = Gesture::None;
 
   std::vector<std::unique_ptr<Viewport>> viewports; // owns them; [0] is primary
   std::map<std::string, Viewport *> byName;
@@ -106,6 +199,9 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   m_impl->app = &mainScene.appContext();
   m_impl->name = name;
   m_impl->offscreen = offscreen;
+  // Keyboard focus lives at the main scene's prefix (viewport names are unique
+  // across the manager). Matches the existing ".viewers.<name>" scheme.
+  m_impl->activeStatePath = mainScene.getStatePrefix() + ".active_viewport";
   m_impl->window = vtkSmartPointer<vtkRenderWindow>::New();
   m_impl->window->SetOffScreenRendering(offscreen ? 1 : 0);
   m_impl->window->SetSize(width, height);
@@ -119,6 +215,13 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
     m_impl->interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
     m_impl->interactor->SetRenderWindow(m_impl->window);
     m_impl->interactor->Initialize();
+    // The multi-viewport input router: one style on the one interactor, feeding
+    // per-viewport cameras via route*(). Never SetDefaultRenderer on it (that
+    // would pin routing to one renderer) and never attach() the per-viewport
+    // controllers (they stay detached; this is their only input path).
+    m_impl->routerStyle = vtkSmartPointer<::ViewportInputRouterStyle>::New();
+    m_impl->routerStyle->setManager(this);
+    m_impl->interactor->SetInteractorStyle(m_impl->routerStyle);
   }
 
   // Auto-create the full-screen PRIMARY viewport over the main scene at layer 0,
@@ -129,6 +232,10 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   primary->setRegion(0.0, 0.0, 1.0, 1.0);
   primary->setLayer(0);
   m_impl->window->AddRenderer(primary->renderer());
+  // Give the (detached) controller the window so pan scaling reads a valid size
+  // and Fly pointer capture can hide/recenter the cursor onscreen. This is NOT
+  // attach() — it installs no interactor style; the router owns all input.
+  primary->camera().setRenderWindow(m_impl->window);
 
   // Attach the scene to the primary renderer (walks the scene, hands every
   // node's actor to the renderer), then frame it.
@@ -153,11 +260,17 @@ ViewportManager::~ViewportManager() {
       if (!v->isMirror())
         v->scene().setRenderer(nullptr);
     }
+    // Cut the router's back-pointer and detach it before the interactor dies, so
+    // no late event dereferences a half-destroyed manager.
+    if (m_impl->routerStyle)
+      m_impl->routerStyle->setManager(nullptr);
     if (m_impl->interactor) {
+      m_impl->interactor->SetInteractorStyle(nullptr);
       m_impl->interactor->TerminateApp();
       m_impl->interactor->SetRenderWindow(nullptr);
       m_impl->interactor = nullptr;
     }
+    m_impl->routerStyle = nullptr;
     if (m_impl->window)
       m_impl->window->Finalize();
   } catch (...) {
@@ -213,6 +326,7 @@ Viewport &ViewportManager::addSceneViewport(const std::string &name, SceneGraph 
   vp->setRegion(region[0], region[1], region[2], region[3]);
   vp->setLayer(layer);
   m_impl->window->AddRenderer(vp->renderer());
+  vp->camera().setRenderWindow(m_impl->window); // pan scaling + Fly capture (not attach)
 
   scene.setRenderer(vp->renderer());
   scene.processEvents();
@@ -250,6 +364,7 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
   vp->setLayer(layer);
   vp->setMirrorSource(src->renderer());
   m_impl->window->AddRenderer(vp->renderer());
+  vp->camera().setRenderWindow(m_impl->window); // pan scaling + Fly capture (not attach)
 
   // Prime the mirror with the source's current props so ResetCamera has bounds
   // to frame. It does NOT attach the scene (the source owns that), so it is not
@@ -279,6 +394,172 @@ void ViewportManager::render() {
     if (v->isMirror())
       syncMirrorProps(*v);
   m_impl->window->Render();
+}
+
+void ViewportManager::updateCameras(double dtSeconds) {
+  m_impl->requireOpen();
+  for (auto &v : m_impl->viewports)
+    v->camera().update(dtSeconds);
+}
+
+// ---- input routing ---------------------------------------------------------
+
+Viewport *ViewportManager::viewportAt(int x, int y) const {
+  m_impl->requireOpen();
+  Viewport *best = nullptr;
+  int bestLayer = 0;
+  for (const auto &v : m_impl->viewports) {
+    if (!v->visible() || !v->inputEnabled())
+      continue;
+    if (!v->renderer()->IsInViewport(x, y))
+      continue;
+    // Descending layer, later-added wins on a tie: iterate in add order and take
+    // any hit whose layer >= the best so far (so the last max-layer hit wins).
+    if (!best || v->layer() >= bestLayer) {
+      best = v.get();
+      bestLayer = v->layer();
+    }
+  }
+  return best;
+}
+
+void ViewportManager::routeMouseButton(MouseButton button, bool down, int x, int y) {
+  m_impl->requireOpen();
+  const int bit = (button == MouseButton::Left) ? 1 : (button == MouseButton::Middle) ? 2 : 4;
+  const bool wasIdle = (m_impl->buttonsDown == 0);
+  if (down)
+    m_impl->buttonsDown |= bit;
+  else
+    m_impl->buttonsDown &= ~bit;
+
+  if (down && wasIdle) {
+    // First button of a gesture: hit-test, latch it for the whole gesture, and
+    // make it active (focus-follows-click). A gutter miss latches nothing (do
+    // NOT fall back to primary the way FindPokedRenderer would).
+    Viewport *vp = viewportAt(x, y);
+    if (!vp) {
+      m_impl->buttonsDown &= ~bit; // undo: no gesture actually started
+      return;
+    }
+    m_impl->dragTarget = vp;
+    m_impl->lastX = x;
+    m_impl->lastY = y;
+    m_impl->haveLast = true;
+    setActiveViewport(vp->name());
+  }
+  if (!m_impl->dragTarget)
+    return; // a release with no latch (e.g. after a gutter press)
+
+  // Re-derive the ONE gesture the latched controller should be in from the held
+  // buttons (Middle=pan wins over Left=orbit), and transition to it: end the old
+  // gesture, begin the new. This is what keeps an overlapping chord consistent —
+  // releasing Left while Middle is still held re-issues nothing (still Pan), and
+  // releasing Middle while Left is held ends the pan and re-begins the orbit,
+  // rather than a stray endDrag/endPan freezing the survivor.
+  const Impl::Gesture desired = (m_impl->buttonsDown & 2)   ? Impl::Gesture::Pan
+                                : (m_impl->buttonsDown & 1) ? Impl::Gesture::Drag
+                                                            : Impl::Gesture::None;
+  if (desired != m_impl->gesture) {
+    if (m_impl->gesture == Impl::Gesture::Drag)
+      m_impl->dragTarget->camera().endDrag();
+    else if (m_impl->gesture == Impl::Gesture::Pan)
+      m_impl->dragTarget->camera().endPan();
+    if (desired == Impl::Gesture::Drag)
+      m_impl->dragTarget->camera().beginDrag();
+    else if (desired == Impl::Gesture::Pan)
+      m_impl->dragTarget->camera().beginPan();
+    m_impl->gesture = desired;
+  }
+
+  if (m_impl->buttonsDown == 0) {
+    // Whole gesture released: drop the latch and the delta baseline.
+    m_impl->dragTarget = nullptr;
+    m_impl->haveLast = false;
+  }
+}
+
+void ViewportManager::routeMouseMove(int x, int y) {
+  m_impl->requireOpen();
+  if (m_impl->dragTarget) {
+    // Latched drag: deltas go to the origin viewport even past its edge.
+    const int dx = m_impl->haveLast ? (x - m_impl->lastX) : 0;
+    const int dy = m_impl->haveLast ? (y - m_impl->lastY) : 0;
+    m_impl->lastX = x;
+    m_impl->lastY = y;
+    m_impl->haveLast = true;
+    m_impl->dragTarget->camera().mouseLook(dx, dy);
+    return;
+  }
+  // Free (undragged) move: Fly free-look on the hovered viewport. When the
+  // hovered viewport changes, reset the delta baseline and skip a frame so no
+  // giant jump is fed across the boundary.
+  Viewport *vp = viewportAt(x, y);
+  if (vp != m_impl->hoverTarget) {
+    m_impl->hoverTarget = vp;
+    m_impl->lastX = x;
+    m_impl->lastY = y;
+    m_impl->haveLast = (vp != nullptr);
+    return;
+  }
+  if (!vp)
+    return;
+  const int dx = m_impl->haveLast ? (x - m_impl->lastX) : 0;
+  const int dy = m_impl->haveLast ? (y - m_impl->lastY) : 0;
+  m_impl->lastX = x;
+  m_impl->lastY = y;
+  m_impl->haveLast = true;
+  vp->camera().mouseLook(dx, dy);
+}
+
+void ViewportManager::routeMouseWheel(int x, int y, double steps) {
+  m_impl->requireOpen();
+  // The wheel goes to the viewport under the cursor, not the latched/active one.
+  Viewport *vp = viewportAt(x, y);
+  if (!vp)
+    return;
+  vp->camera().mouseWheel(steps);
+}
+
+void ViewportManager::routeKey(const std::string &keySym, bool down) {
+  m_impl->requireOpen();
+  Viewport *vp = activeViewport();
+  if (!vp)
+    return;
+  if (down) {
+    // Escape releases pointer capture (the single-view style intercepts it too),
+    // and is NOT forwarded as a held key — a held "Escape" would drift the camera.
+    if (keySym == "Escape") {
+      vp->camera().setPointerCapture(false);
+      return;
+    }
+    vp->camera().keyDown(keySym);
+  } else {
+    vp->camera().keyUp(keySym);
+  }
+}
+
+Viewport *ViewportManager::activeViewport() const {
+  m_impl->requireOpen();
+  const std::string name = cvc::state::instance(*m_impl->app)(m_impl->activeStatePath).value();
+  if (!name.empty()) {
+    auto it = m_impl->byName.find(name);
+    if (it != m_impl->byName.end())
+      return it->second;
+  }
+  // Unset or names a viewport that no longer exists: fall back to the primary so
+  // this is never null after construction.
+  return m_impl->viewports.empty() ? nullptr : m_impl->viewports.front().get();
+}
+
+void ViewportManager::setActiveViewport(const std::string &name) {
+  m_impl->requireOpen();
+  auto it = m_impl->byName.find(name);
+  if (it == m_impl->byName.end())
+    return; // ignore unknown
+  Viewport *prev = activeViewport();
+  if (prev && prev != it->second)
+    prev->camera().releaseHeldKeys(); // no key stuck-held across the handoff
+  cvc::state::instance (*m_impl->app)(m_impl->activeStatePath).value(name);
 }
 
 void ViewportManager::resize(int width, int height) {
