@@ -16,9 +16,12 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <vtkCollection.h> // vtkCollectionSimpleIterator (reentrant prop traversal)
 #include <vtkNew.h>
 #include <vtkOutputWindow.h> // route VTK's ERR/WARN to stderr, not a Win32 message box
 #include <vtkPNGWriter.h>
+#include <vtkProp.h>
+#include <vtkPropCollection.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
@@ -28,6 +31,24 @@
 
 namespace cvc {
 namespace gl {
+
+namespace {
+// Copy the source renderer's current props into the mirror's renderer, so the
+// mirror shows the live scene (any node added / re-meshed since last frame) from
+// its OWN camera. The props are shared by reference — one geometry, drawn twice.
+void syncMirrorProps(Viewport &mirror) {
+  vtkRenderer *dst = mirror.renderer();
+  vtkRenderer *src = mirror.mirrorSource();
+  if (!dst || !src)
+    return;
+  dst->RemoveAllViewProps();
+  vtkPropCollection *props = src->GetViewProps();
+  vtkCollectionSimpleIterator it;
+  props->InitTraversal(it);
+  while (vtkProp *p = props->GetNextProp(it))
+    dst->AddViewProp(p);
+}
+} // namespace
 
 struct ViewportManager::Impl {
   cvc::app *app = nullptr;
@@ -208,6 +229,41 @@ Viewport &ViewportManager::addSceneViewport(const std::string &name, SceneGraph 
   return ref;
 }
 
+Viewport &ViewportManager::addMirrorViewport(const std::string &name,
+                                             const std::string &sourceViewport,
+                                             const double region[4], int layer) {
+  m_impl->requireOpen();
+  if (m_impl->byName.find(name) != m_impl->byName.end())
+    throw std::invalid_argument("ViewportManager: a viewport named '" + name + "' already exists");
+  auto srcIt = m_impl->byName.find(sourceViewport);
+  if (srcIt == m_impl->byName.end())
+    throw std::invalid_argument("ViewportManager: no source viewport named '" + sourceViewport +
+                                "' to mirror");
+  if (layer < 0)
+    throw std::invalid_argument("ViewportManager: layer must be >= 0");
+
+  Viewport *src = srcIt->second;
+  SceneGraph &scene = src->scene(); // the mirror echoes the source's scene
+  const std::string camPath = CameraController::viewerStatePath(scene.getStatePrefix(), name);
+  std::unique_ptr<Viewport> vp(new Viewport(*m_impl->app, scene, camPath, name, /*mirror=*/true));
+  vp->setRegion(region[0], region[1], region[2], region[3]);
+  vp->setLayer(layer);
+  vp->setMirrorSource(src->renderer());
+  m_impl->window->AddRenderer(vp->renderer());
+
+  // Prime the mirror with the source's current props so ResetCamera has bounds
+  // to frame. It does NOT attach the scene (the source owns that), so it is not
+  // tracked in attachedScenes and never detaches the scene in the destructor.
+  syncMirrorProps(*vp);
+  vp->renderer()->ResetCamera();
+
+  Viewport &ref = *vp;
+  m_impl->byName[name] = vp.get();
+  m_impl->viewports.push_back(std::move(vp));
+  m_impl->syncLayerCount();
+  return ref;
+}
+
 void ViewportManager::render() {
   m_impl->requireOpen();
   // Drain each viewport's scene events (a re-meshed node appears without
@@ -216,6 +272,12 @@ void ViewportManager::render() {
   // the same SceneGraph* so processEvents() is idempotent-cheap when repeated.
   for (auto &v : m_impl->viewports)
     v->scene().processEvents();
+  // Mirrors have no scene attachment of their own: refresh their props from the
+  // source renderer so a node added / re-meshed this frame shows up in the
+  // mirror too, then draw it with the mirror's own camera.
+  for (auto &v : m_impl->viewports)
+    if (v->isMirror())
+      syncMirrorProps(*v);
   m_impl->window->Render();
 }
 

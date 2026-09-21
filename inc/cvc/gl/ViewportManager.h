@@ -62,6 +62,16 @@ public:
   Viewport &addSceneViewport(const std::string &name, SceneGraph &scene, const double region[4],
                              int layer = 1);
 
+  // Add a MIRROR viewport: an alternate view (its own camera) of the scene that
+  // `sourceViewport` already draws — the true minimap. It does NOT attach the
+  // scene a second time (which would blank the source); instead render() copies
+  // the source renderer's props into it each frame, so it always shows the live
+  // scene from its own camera. `region` is normalized [x0,y0,x1,y1]; `layer`
+  // defaults to 2 (above a layer-1 inset). Throws if `name` is taken or
+  // `sourceViewport` does not exist.
+  Viewport &addMirrorViewport(const std::string &name, const std::string &sourceViewport,
+                              const double region[4], int layer = 2);
+
   // Composite every visible viewport in one pass (drains each scene's pending
   // graphics events first, like SceneRenderer::render).
   void render();
