@@ -501,6 +501,60 @@ void ScenePanel(SceneGraph &sg, bool *open, bool ownWindow) {
     ImGui::End();
 }
 
+// ---- curated raw immediate-mode subset (see ImGuiBinding.h) ----------------
+// Bodies compiled inside cvcGL, so ImGui:: binds cvcGL's own context. Legal only
+// inside an ImGuiOverlay draw callback.
+bool Begin(const char *name) { return ImGui::Begin(name); }
+void End() { ImGui::End(); }
+void SameLine(double offsetX, double spacing) {
+  ImGui::SameLine(static_cast<float>(offsetX), static_cast<float>(spacing));
+}
+void Separator() { ImGui::Separator(); }
+void Spacing() { ImGui::Spacing(); }
+void PushId(const char *strId) { ImGui::PushID(strId); }
+void PushIdInt(int id) { ImGui::PushID(id); }
+void PopId() { ImGui::PopID(); }
+void TextLine(const char *text) { ImGui::TextUnformatted(text); }
+void TextDisabledLine(const char *text) { ImGui::TextDisabled("%s", text); }
+bool Button(const char *label, double width, double height) {
+  return ImGui::Button(label, ImVec2(static_cast<float>(width), static_cast<float>(height)));
+}
+bool SmallButton(const char *label) { return ImGui::SmallButton(label); }
+bool Selectable(const char *label, bool selected) { return ImGui::Selectable(label, selected); }
+bool CheckboxValue(const char *label, bool value) {
+  ImGui::Checkbox(label, &value);
+  return value;
+}
+float SliderFloatValue(const char *label, float value, float lo, float hi, const char *fmt) {
+  ImGui::SliderFloat(label, &value, lo, hi, fmt);
+  return value;
+}
+int SliderIntValue(const char *label, int value, int lo, int hi) {
+  ImGui::SliderInt(label, &value, lo, hi);
+  return value;
+}
+float DragFloatValue(const char *label, float value, float speed, float lo, float hi,
+                     const char *fmt) {
+  ImGui::DragFloat(label, &value, speed, lo, hi, fmt);
+  return value;
+}
+bool BeginMainMenuBar() { return ImGui::BeginMainMenuBar(); }
+void EndMainMenuBar() { ImGui::EndMainMenuBar(); }
+bool BeginMenuBar() { return ImGui::BeginMenuBar(); }
+void EndMenuBar() { ImGui::EndMenuBar(); }
+bool BeginMenu(const char *label) { return ImGui::BeginMenu(label); }
+void EndMenu() { ImGui::EndMenu(); }
+bool MenuItemClicked(const char *label) { return ImGui::MenuItem(label); }
+bool MenuItemToggle(const char *label, bool selected) {
+  ImGui::MenuItem(label, nullptr, &selected);
+  return selected;
+}
+bool CollapsingHeaderOpen(const char *label) { return ImGui::CollapsingHeader(label); }
+void BeginDisabled(bool disabled) { ImGui::BeginDisabled(disabled); }
+void EndDisabled() { ImGui::EndDisabled(); }
+bool IsItemHovered() { return ImGui::IsItemHovered(); }
+void SetTooltipText(const char *text) { ImGui::SetTooltip("%s", text); }
+
 } // namespace ui
 } // namespace gl
 } // namespace cvc
@@ -530,6 +584,38 @@ void StageLightingPanel(StageLighting &, bool *, bool) {}
 void ScenePanel(SceneGraph &, bool *, bool) {}
 void SceneMenuItems(SceneGraph &, bool *, bool *) {}
 void CameraMenuItems(CameraController &, double, double) {}
+
+// curated raw subset — inert (value-out echoes input; predicates false).
+bool Begin(const char *) { return false; }
+void End() {}
+void SameLine(double, double) {}
+void Separator() {}
+void Spacing() {}
+void PushId(const char *) {}
+void PushIdInt(int) {}
+void PopId() {}
+void TextLine(const char *) {}
+void TextDisabledLine(const char *) {}
+bool Button(const char *, double, double) { return false; }
+bool SmallButton(const char *) { return false; }
+bool Selectable(const char *, bool) { return false; }
+bool CheckboxValue(const char *, bool value) { return value; }
+float SliderFloatValue(const char *, float value, float, float, const char *) { return value; }
+int SliderIntValue(const char *, int value, int, int) { return value; }
+float DragFloatValue(const char *, float value, float, float, float, const char *) { return value; }
+bool BeginMainMenuBar() { return false; }
+void EndMainMenuBar() {}
+bool BeginMenuBar() { return false; }
+void EndMenuBar() {}
+bool BeginMenu(const char *) { return false; }
+void EndMenu() {}
+bool MenuItemClicked(const char *) { return false; }
+bool MenuItemToggle(const char *, bool selected) { return selected; }
+bool CollapsingHeaderOpen(const char *) { return false; }
+void BeginDisabled(bool) {}
+void EndDisabled() {}
+bool IsItemHovered() { return false; }
+void SetTooltipText(const char *) {}
 
 } // namespace ui
 } // namespace gl
