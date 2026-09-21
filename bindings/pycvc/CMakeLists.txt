@@ -323,4 +323,12 @@ if(CVC_BUILD_PYCVC_GL)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_imgui.py)
   set_tests_properties(pycvc_gl_imgui PROPERTIES ENVIRONMENT
     "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # ViewportManager / Viewport: picture-in-picture from Python — N viewports over
+  # separate scenes + a mirror, the input router (viewportAt, focus-follows-click
+  # into cvc::state, per-viewport camera), region tuples, frameRGB bytes
+  # (self-skips without offscreen GL).
+  add_test(NAME pycvc_gl_viewport
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_viewport.py)
+  set_tests_properties(pycvc_gl_viewport PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL
