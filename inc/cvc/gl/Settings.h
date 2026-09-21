@@ -70,6 +70,39 @@ private:
   std::function<void(Values)> m_apply;
 };
 
+// Layout of a Viewport within its ViewportManager window:
+// "<scene prefix>.viewers.<viewer>.layout". Keys: region.x0/y0/x1/y1 (normalized
+// VTK y-up), layer, visible. Persisting these is what lets a picture-in-picture
+// arrangement be saved and restored (or driven from a script / config / peer),
+// alongside the viewport's camera at ".camera" and its active flag at
+// "<scene prefix>.active_viewport".
+class ViewportLayout : public cvc::state_object<ViewportLayout> {
+public:
+  struct Values {
+    double region[4] = {0.0, 0.0, 1.0, 1.0};
+    int layer = 0;
+    bool visible = true;
+  };
+  ViewportLayout(cvc::app &ctx, const std::string &statePath, std::function<void(Values)> apply);
+
+  static std::string viewerStatePath(const std::string &scenePrefix, const std::string &viewerName);
+
+  void set(Values v);
+  Values get() const;
+
+protected:
+  void handleStateChanged(const std::string &childState) override;
+
+private:
+  void seedState();
+  Values m_v;
+  std::function<void(Values)> m_apply;
+  // Suppress our own object->state writes from re-entering handleStateChanged:
+  // region is four correlated keys, so a partial read mid-write would corrupt
+  // the ones not yet written.
+  bool m_writing = false;
+};
+
 } // namespace gl
 } // namespace cvc
 

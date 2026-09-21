@@ -400,6 +400,10 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
 
 void ViewportManager::render() {
   m_impl->requireOpen();
+  // A viewport's layer can change out from under us (a state write / restored
+  // layout drives Viewport::setLayer via its ViewportLayout), so re-sync the
+  // window's layer count before compositing or VTK drops the new top layer.
+  m_impl->syncLayerCount();
   // Drain each viewport's scene events (a re-meshed node appears without
   // re-attaching), then composite every layer in one pass. A scene shared by a
   // mirror viewport is drained once via its owning scene viewport; mirrors carry
