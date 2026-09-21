@@ -212,6 +212,13 @@ endif() # CVC_BUILD_PYCVC_CORE
 # REAL cvcGL classes (SceneGraph + the node hierarchy) directly — no facade — so
 # it does not need the core module built here.
 option(CVC_BUILD_PYCVC_GL "Build the pycvc.gl scene bindings (needs cvcGL + VTK)" ON)
+# The VTK-Python bridge (live vtkmodules objects <-> C++ vtkProp*/vtkRenderer*)
+# needs the vtk-python package (vtkWrappingPythonCore, a shared cp-ABI lib). Turn
+# OFF to drop the bridge so pycvc_gl links against CORE VTK + libpython only —
+# e.g. a static wasm build, where vtk-python does not exist. The scene surface
+# (nodes, transforms, camera, lights, transfer functions) is unaffected; only
+# Python<->vtkmodules object marshaling is dropped (vtk pointers become opaque).
+option(CVC_PYCVCGL_VTK_BRIDGE "Wrap the VTK-Python bridge in pycvc_gl (needs vtk-python)" ON)
 if(CVC_BUILD_PYCVC_GL)
   # cvcGL (the sibling scene-graph library) is dual-mode like cvc above:
   #   * Standalone — consume the installed cvcGL via find_package(cvcGL CONFIG)
@@ -242,6 +249,12 @@ if(CVC_BUILD_PYCVC_GL)
   cvc_swig_interface_deps(_PYCVC_GL_SWIG_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/pycvc_gl.i"
     SEARCH_DIRS ${_PYCVC_SWIG_SEARCH_DIRS} ${_PYCVC_CVCGL_HEADER_DIRS})
   set_property(SOURCE pycvc_gl.i PROPERTY DEPENDS ${_PYCVC_GL_SWIG_DEPS})
+  # Pass the bridge flag to SWIG's own preprocessor so the #ifdef'd bridge
+  # typemaps in pycvc_gl.i are (or aren't) emitted. The matching C++ define for
+  # the generated wrapper TU is set via target_compile_definitions below.
+  if(CVC_PYCVCGL_VTK_BRIDGE)
+    set_property(SOURCE pycvc_gl.i APPEND PROPERTY COMPILE_OPTIONS -DCVC_PYCVCGL_VTK_BRIDGE)
+  endif()
   # pycvc_scene.cpp holds only the standalone VTK render helpers + the Python
   # vtkProp bridge (free functions); the scene model itself is the directly
   # %include'd cvcGL headers, which cross cvc::geometry/cvc::volume in via %import.
@@ -254,25 +267,34 @@ if(CVC_BUILD_PYCVC_GL)
   find_package(VTK REQUIRED COMPONENTS RenderingCore RenderingOpenGL2 IOImage InteractionStyle)
   target_link_libraries(pycvc_gl PRIVATE ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS pycvc_gl MODULES ${VTK_LIBRARIES})
-  # VTK Python bridge (F3): link the wrapping-core lib that defines
-  # vtkPythonUtil::* (from the vtk-python cvcpkg package — installs side-by-side
-  # with vtk in the same prefix). vtkPythonUtil.h is already on the include path
-  # via VTK::CommonCore. VTK's monolithic CMake config doesn't enumerate the
-  # Python modules, so find the plain shared lib directly rather than as a
-  # find_package COMPONENT.
-  # The wrapping-core lib carries the Python-ABI suffix, e.g.
-  # libvtkWrappingPythonCore3.12-9.5.so — construct that exact name (plus
-  # unsuffixed fallbacks for other VTK packagings).
-  find_library(VTK_WRAPPING_PYTHONCORE
-    NAMES vtkWrappingPythonCore${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}-9.5
-          vtkWrappingPythonCore-9.5 vtkWrappingPythonCore
-    HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
-  if(NOT VTK_WRAPPING_PYTHONCORE)
-    message(FATAL_ERROR
-      "libvtkWrappingPythonCore not found — install the `vtk-python` cvcpkg "
-      "package (VTK built with VTK_WRAP_PYTHON=ON) into the prefix.")
+  if(CVC_PYCVCGL_VTK_BRIDGE)
+    # C++ define for the generated wrapper TU (matches the SWIG -D above) so the
+    # vtkPythonUtil include + bridge typemap code compile in.
+    target_compile_definitions(pycvc_gl PRIVATE CVC_PYCVCGL_VTK_BRIDGE)
+    # VTK Python bridge (F3): link the wrapping-core lib that defines
+    # vtkPythonUtil::* (from the vtk-python cvcpkg package — installs side-by-side
+    # with vtk in the same prefix). vtkPythonUtil.h is already on the include path
+    # via VTK::CommonCore. VTK's monolithic CMake config doesn't enumerate the
+    # Python modules, so find the plain shared lib directly rather than as a
+    # find_package COMPONENT.
+    # The wrapping-core lib carries the Python-ABI suffix, e.g.
+    # libvtkWrappingPythonCore3.12-9.5.so — construct that exact name (plus
+    # unsuffixed fallbacks for other VTK packagings).
+    find_library(VTK_WRAPPING_PYTHONCORE
+      NAMES vtkWrappingPythonCore${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}-9.5
+            vtkWrappingPythonCore-9.5 vtkWrappingPythonCore
+      HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
+    if(NOT VTK_WRAPPING_PYTHONCORE)
+      message(FATAL_ERROR
+        "libvtkWrappingPythonCore not found — install the `vtk-python` cvcpkg "
+        "package (VTK built with VTK_WRAP_PYTHON=ON) into the prefix, or "
+        "configure with -DCVC_PYCVCGL_VTK_BRIDGE=OFF to build without it.")
+    endif()
+    target_link_libraries(pycvc_gl PRIVATE ${VTK_WRAPPING_PYTHONCORE} Python3::Module)
+  else()
+    message(STATUS "pycvc_gl: VTK-Python bridge OFF — core VTK + libpython only "
+                   "(no vtk-python); vtk pointer types marshal as opaque handles.")
   endif()
-  target_link_libraries(pycvc_gl PRIVATE ${VTK_WRAPPING_PYTHONCORE} Python3::Module)
   set_target_properties(pycvc_gl PROPERTIES
     SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"

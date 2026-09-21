@@ -60,8 +60,14 @@ if _sys.platform == "win32":
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
 // vtkmodules objects. From the vtk-python cvcpkg package (vtkPythonUtil.h lands
-// in include/vtk-9.5/, already on VTK::CommonCore's include path).
+// in include/vtk-9.5/, already on VTK::CommonCore's include path). Gated behind
+// CVC_PYCVCGL_VTK_BRIDGE: OFF drops the bridge so pycvc_gl links WITHOUT
+// vtk-python (vtkWrappingPythonCore) — e.g. a static wasm build. The
+// vtkMatrix4x4/Prop/Actor/Renderer headers below are CORE VTK (present without
+// vtk-python), so they stay unconditional.
+#ifdef CVC_PYCVCGL_VTK_BRIDGE
 #include "vtkPythonUtil.h"
+#endif
 #include "vtkMatrix4x4.h"
 #include "vtkProp.h"
 #include "vtkActor.h"
@@ -89,6 +95,12 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     pass
 %}
 
+// The VTK-Python bridge typemaps below (everything through the two
+// %CVC_VTK_BRIDGE invocations) are what call vtkPythonUtil, i.e. what needs the
+// vtk-python package. Gated behind CVC_PYCVCGL_VTK_BRIDGE: with it OFF, vtk
+// pointer types (vtkProp*, vtkRenderer*, …) marshal as opaque SWIG handles and
+// nothing references vtkPythonUtil, so pycvc_gl links without vtk-python.
+#ifdef CVC_PYCVCGL_VTK_BRIDGE
 // ── vtkProp* <-> Python VTK object typemaps (the F3 "full bridge") ──────
 // out: return a live vtkmodules wrapper for a C++ prop (new ref; Py_None if null).
 %typemap(out) vtkProp* {
@@ -159,6 +171,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 
 %CVC_VTK_BRIDGE(vtkRenderer, "vtkRenderer")
 %CVC_VTK_BRIDGE(vtkRenderWindow, "vtkRenderWindow")
+#endif // CVC_PYCVCGL_VTK_BRIDGE
 
 // ── PyCallable -> std::function<void()> ─────────────────────────────────────
 // A Python callable crosses as a C++ std::function so Python functions can be
@@ -191,6 +204,11 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // directorout: when a Python-defined node's getProp() returns a vtkmodules
 // object, unwrap it to the C++ vtkProp* the scene renders (None -> nullptr).
 // This is what makes a Python scene node's Python-built actor flow into C++.
+// Bridge-only (calls vtkPythonUtil); with the bridge OFF, SWIG's default
+// pointer directorout marshals getProp()'s return as an opaque handle, which
+// still compiles and links without vtk-python (Python-built vtkProps are simply
+// not a feature of the no-bridge build).
+#ifdef CVC_PYCVCGL_VTK_BRIDGE
 %typemap(directorout) vtkProp* {
   if ($input == Py_None) {
     $result = nullptr;
@@ -203,6 +221,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     $result = reinterpret_cast<vtkProp*>(_p);
   }
 }
+#endif // CVC_PYCVCGL_VTK_BRIDGE
 
 // ── shared_ptr the whole node hierarchy (base classes FIRST) ────────────────
 // Every cvcGL node is created and passed as std::shared_ptr (see
