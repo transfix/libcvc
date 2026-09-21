@@ -357,6 +357,67 @@ int main() {
   vm.render(); // must composite cleanly with the state-driven layer
   assert(vm.frameRGB().size() == static_cast<size_t>(W) * H * 3);
 
+  // ── removeViewport: drop a PiP inset at runtime ────────────────────────────
+  SceneGraph tmpScene(app, "tmp_scene");
+  const double tmpRegion[4] = {0.0, 0.5, 0.3, 0.9}; // top-left; px x[0,96] y[120,216]
+  vm.addSceneViewport("tmp", tmpScene, tmpRegion, 1);
+  assert(vm.hasViewport("tmp"));
+  const size_t nBefore = vm.viewportNames().size();
+  vm.removeViewport("tmp");
+  assert(!vm.hasViewport("tmp") && "removeViewport did not drop the viewport");
+  assert(vm.viewportNames().size() == nBefore - 1);
+  // Its scene detached on removal, so it can be drawn again by a new viewport
+  // (addSceneViewport would throw the loud double-attach error otherwise).
+  vm.addSceneViewport("tmp2", tmpScene, tmpRegion, 1);
+  assert(vm.hasViewport("tmp2"));
+
+  // Removing the ACTIVE viewport hands keyboard focus back to the primary.
+  vm.routeMouseButton(ViewportManager::MouseButton::Left, true, 48, 168);
+  vm.routeMouseButton(ViewportManager::MouseButton::Left, false, 48, 168);
+  assert(&vm.viewport("tmp2") == vm.activeViewport());
+  vm.removeViewport("tmp2");
+  assert(vm.activeViewport() == &vm.primary() &&
+         "focus did not fall back to the primary after removing the active viewport");
+
+  // Guards: the primary is not removable, an unknown name throws, and a viewport
+  // a mirror still sources is protected until the mirror is removed first.
+  bool rthrew = false;
+  try {
+    vm.removeViewport("main");
+  } catch (const std::invalid_argument &) {
+    rthrew = true;
+  }
+  assert(rthrew && "the primary must not be removable");
+  rthrew = false;
+  try {
+    vm.removeViewport("nope");
+  } catch (const std::out_of_range &) {
+    rthrew = true;
+  }
+  assert(rthrew && "removing an unknown viewport must throw");
+
+  const double mr[4] = {0.02, 0.02, 0.22, 0.22};
+  vm.addMirrorViewport("mini2", "inset", mr, 3);
+  rthrew = false;
+  try {
+    vm.removeViewport("inset");
+  } catch (const std::invalid_argument &) {
+    rthrew = true;
+  }
+  assert(rthrew && "a viewport a mirror sources must not be removable");
+  vm.removeViewport("mini2"); // remove the mirror first...
+  vm.removeViewport("inset"); // ...then the source is removable
+  assert(!vm.hasViewport("inset"));
+
+  // activeViewport() falls back to the primary when the state names a viewport
+  // that no longer exists (an external edit / a removed name lingering).
+  cvc::state::instance(app)("main_scene.active_viewport").value("ghost_gone");
+  assert(vm.activeViewport() == &vm.primary() &&
+         "activeViewport must fall back to the primary for an unknown active name");
+
+  vm.render(); // still composites cleanly after the removals
+  assert(vm.frameRGB().size() == static_cast<size_t>(W) * H * 3);
+
   printf("cvcgl_viewport: OK\n");
   return 0;
 }

@@ -398,6 +398,54 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
   return ref;
 }
 
+void ViewportManager::removeViewport(const std::string &name) {
+  m_impl->requireOpen();
+  if (name == m_impl->name)
+    throw std::invalid_argument("ViewportManager: the primary viewport cannot be removed");
+  auto it = m_impl->byName.find(name);
+  if (it == m_impl->byName.end())
+    throw std::out_of_range("ViewportManager: no viewport named '" + name + "'");
+  Viewport *vp = it->second;
+
+  // A mirror that still echoes this viewport's renderer would dangle; make the
+  // caller remove the mirror first.
+  for (const auto &other : m_impl->viewports)
+    if (other->isMirror() && other->mirrorSource() == vp->renderer())
+      throw std::invalid_argument("ViewportManager: viewport '" + name + "' is mirrored by '" +
+                                  other->name() + "'; remove the mirror first");
+
+  // A scene viewport detaches its scene so it can be drawn again; a mirror never
+  // attached one.
+  if (!vp->isMirror()) {
+    vp->scene().setRenderer(nullptr);
+    m_impl->attachedScenes.erase(&vp->scene());
+  }
+  m_impl->window->RemoveRenderer(vp->renderer());
+
+  // Drop any router state that points at it, so a live drag / hover does not
+  // dereference the removed viewport.
+  if (m_impl->dragTarget == vp) {
+    m_impl->dragTarget = nullptr;
+    m_impl->buttonsDown = 0;
+    m_impl->gesture = Impl::Gesture::None;
+    m_impl->haveLast = false;
+  }
+  if (m_impl->hoverTarget == vp)
+    m_impl->hoverTarget = nullptr;
+
+  // If it held keyboard focus, hand it back to the primary (before it leaves
+  // byName, so the handoff can release its held keys).
+  if (cvc::state::instance(*m_impl->app)(m_impl->activeStatePath).value() == name)
+    setActiveViewport(m_impl->name);
+
+  m_impl->byName.erase(it);
+  m_impl->viewports.erase(
+      std::remove_if(m_impl->viewports.begin(), m_impl->viewports.end(),
+                     [vp](const std::unique_ptr<Viewport> &u) { return u.get() == vp; }),
+      m_impl->viewports.end());
+  m_impl->syncLayerCount();
+}
+
 void ViewportManager::render() {
   m_impl->requireOpen();
   // A viewport's layer can change out from under us (a state write / restored
