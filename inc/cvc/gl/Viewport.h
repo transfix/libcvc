@@ -76,11 +76,16 @@ public:
   vtkRenderer *renderer() const;
 
   bool isMirror() const;
+  // For a mirror viewport, the source viewport's renderer whose props it echoes
+  // each frame (with its own camera); nullptr for a scene viewport. The manager
+  // reads this in render() to keep the mirror in sync with the live scene.
+  vtkRenderer *mirrorSource() const;
 
 private:
   friend class ViewportManager; // the manager constructs and owns Viewports
   Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
            const std::string &name, bool mirror);
+  void setMirrorSource(vtkRenderer *src); // manager-only, at addMirrorViewport
 
   struct Impl;
   std::unique_ptr<Impl> m_impl;
