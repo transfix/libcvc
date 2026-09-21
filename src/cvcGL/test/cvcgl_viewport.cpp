@@ -176,11 +176,53 @@ int main() {
   assert(mDelta > 0.0 && "main scene geometry never reached the primary viewport");
   assert(iDelta > 0.0 && "inset scene geometry never reached the inset viewport");
 
+  // ── a MIRROR viewport: an alternate camera over an already-drawn scene ──────
+  // The minimap case. It draws mainScene (already attached to the primary) from
+  // its OWN camera, WITHOUT re-attaching the scene — so it is allowed exactly
+  // where addSceneViewport would (rightly) throw.
+  const double mirrorRegion[4] = {0.62, 0.58, 0.97, 0.95}; // top-right, above the inset
+  Viewport &mini = vm.addMirrorViewport("mini", "main", mirrorRegion, /*layer=*/2);
+  assert(mini.isMirror());
+  assert(&mini.scene() == &mainScene && "a mirror must echo the source's scene");
+  assert(mini.mirrorSource() == vm.primary().renderer());
+  assert(vm.viewportNames().size() == 3);
+  mini.setBackground(0.05, 0.15, 0.05); // dark green, opaque (luma ~0.12)
+  mini.renderer()->ResetCamera();       // frame the shared props with its own camera
+
+  const int gPx0 = 205, gPy0 = 150, gPx1 = 305, gPy1 = 222; // most of the mirror rect
+  std::vector<unsigned char> mir0 = vm.frameRGB();
+  Rgb miniC = meanRect(mir0, W, H, gPx0, gPy0, gPx1, gPy1);
+  printf("  mirror rect   rgb=(%.3f,%.3f,%.3f) luma=%.3f\n", miniC.r, miniC.g, miniC.b,
+         luma(miniC));
+  assert(luma(miniC) > 0.18 &&
+         "mirror shows only its background — the source scene's props never reached it");
+
+  // Prove it is LIVE: a node added to the SOURCE scene must appear in the mirror
+  // too, with the mirror camera left untouched (props are re-synced each frame,
+  // not reframed). The added quad is larger than the framed ground, so it fills
+  // the mirror rect and the delta is unambiguous.
+  addQuad(mainScene, "marker", -90, -90, 90, 90, 1.0);
+  std::vector<unsigned char> mir1 = vm.frameRGB();
+  const double miniDelta = rectDelta(mir0, mir1, W, H, gPx0, gPy0, gPx1, gPy1);
+  printf("  mirror rect delta after source node: %.4f\n", miniDelta);
+  assert(miniDelta > 0.0 && "mirror did not pick up a node added to the source scene");
+
+  // Mirroring a source that does not exist is a loud error.
+  bool threw = false;
+  try {
+    const double r[4] = {0.0, 0.5, 0.3, 0.8};
+    vm.addMirrorViewport("ghost", "no_such_viewport", r);
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  assert(threw && "mirroring an unknown source viewport must throw");
+  assert(!vm.hasViewport("ghost"));
+
   // ── the double-attach trap is now LOUD ─────────────────────────────────────
   // Re-attaching a scene another viewport already draws is the silent
   // "second setRenderer blanks the first view" bug the SceneRenderer test pins
   // as undiagnosed. Here it must throw rather than blank the primary.
-  bool threw = false;
+  threw = false;
   try {
     const double r[4] = {0.1, 0.1, 0.4, 0.4};
     vm.addSceneViewport("main_again", mainScene, r);
@@ -212,8 +254,9 @@ int main() {
   }
   assert(threw && "viewport() on an unknown name must throw");
 
-  // Still exactly the two real viewports; a failed add left nothing behind.
-  assert(vm.viewportNames().size() == 2);
+  // Still exactly the three real viewports (main + inset + mini); every failed
+  // add left nothing behind.
+  assert(vm.viewportNames().size() == 3);
 
   // ── bad construction arguments are rejected ────────────────────────────────
   threw = false;

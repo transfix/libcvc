@@ -27,6 +27,7 @@ struct Viewport::Impl {
   double region[4] = {0.0, 0.0, 1.0, 1.0}; // normalized, VTK y-up
   int layer = 0;
   bool visible = true;
+  vtkRenderer *mirrorSource = nullptr; // set only for a mirror viewport
 };
 
 Viewport::Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
@@ -89,6 +90,8 @@ CameraController &Viewport::camera() { return *m_impl->camera; }
 SceneGraph &Viewport::scene() const { return *m_impl->scene; }
 vtkRenderer *Viewport::renderer() const { return m_impl->renderer; }
 bool Viewport::isMirror() const { return m_impl->mirror; }
+vtkRenderer *Viewport::mirrorSource() const { return m_impl->mirrorSource; }
+void Viewport::setMirrorSource(vtkRenderer *src) { m_impl->mirrorSource = src; }
 
 } // namespace gl
 } // namespace cvc
