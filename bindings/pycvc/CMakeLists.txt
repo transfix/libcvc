@@ -331,4 +331,11 @@ if(CVC_BUILD_PYCVC_GL)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_viewport.py)
   set_tests_properties(pycvc_gl_viewport PROPERTIES ENVIRONMENT
     "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # ChaseCamera parity: the native (C++ Track) chase camera returns the same pose
+  # as the pure-Python ChaseCamera on one position stream — the Python side of
+  # "the cameras work the same" (its C++ side is cvcgl_track_parity).
+  add_test(NAME pycvc_gl_chase_parity
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_chase_parity.py)
+  set_tests_properties(pycvc_gl_chase_parity PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL
