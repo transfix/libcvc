@@ -352,6 +352,14 @@ add_executable(cvcgl_camera test/cvcgl_camera.cpp)
 target_link_libraries(cvcgl_camera PRIVATE cvcGL)
 add_test(NAME cvcgl_camera COMMAND cvcgl_camera)
 
+# Numeric parity: the push-fed Track controller reproduces pymod_gl/camera.py's
+# ChaseCamera (the two-stage EMA follow) to floating point, so the C++ and Python
+# chase cameras genuinely "work the same". Headless (getPose reads trackEye/Focal
+# directly); no renderer needed.
+add_executable(cvcgl_track_parity test/cvcgl_track_parity.cpp)
+target_link_libraries(cvcgl_track_parity PRIVATE cvcGL)
+add_test(NAME cvcgl_track_parity COMMAND cvcgl_track_parity)
+
 # World-units integration: GraphicsNode::localToWorld/worldToLocal (lazily
 # cached inverse) and localPointToReal mapping a graphic's own-frame point to a
 # real-world km/mile coordinate via cvc::world_units, plus SceneRenderer::

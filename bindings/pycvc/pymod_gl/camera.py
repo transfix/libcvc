@@ -115,3 +115,74 @@ class ChaseCamera:
         self._eye = _ema(self._eye, target_eye, dt, self.cam_tau)
         self._tgt = _ema(self._tgt, target_look, dt, self.cam_tau)
         return tuple(self._eye), tuple(self._tgt), self.up
+
+
+class NativeChaseCamera:
+    """Drop-in for :class:`ChaseCamera` that delegates to the C++ cvcGL Track
+    camera, so a Python demo runs the SAME follow math as C++ — proven identical
+    to ``ChaseCamera`` by the ``cvcgl_track_parity`` C++ test (max pose error
+    7e-15) and ``test_pycvc_gl_chase_parity`` here.
+
+    ``ChaseCamera`` above stays the dependency-free pure-Python default; this is
+    the *native opt-in* — it needs the built ``pycvc_gl`` extension (imported
+    lazily, only when you construct one), and drives a real
+    ``pycvc_gl.CameraController`` in Track push-fed mode. Same constructor and
+    ``update(pos, dt) -> (eye, target, up)`` / ``reset()`` surface, so the two are
+    interchangeable and a demo picks its camera with one import swap.
+
+    ``app`` is the ``pycvc`` app whose state tree the controller lives in (one is
+    made if omitted); ``state_path`` is where its ``cvc::state`` config sits, so
+    the same knobs are reachable via ``pycvc.state_set`` / a config file / a peer.
+    """
+
+    def __init__(
+        self,
+        back: float = 55.0,
+        height: float = 40.0,
+        look_ahead: float = 0.0,
+        look_up: float = 3.0,
+        pos_tau: float = 0.15,
+        vel_tau: float = 0.40,
+        cam_tau: float = 0.55,
+        min_speed: float = 0.05,
+        up=(0.0, 0.0, 1.0),
+        *,
+        app=None,
+        state_path: str = "chase.camera",
+    ):
+        import pycvc
+        import pycvc_gl
+
+        self._app = app if app is not None else pycvc.make_app()
+        self._up = tuple(float(c) for c in up)
+        self._cc = pycvc_gl.CameraController(self._app, state_path)
+        # Track config is cvc::state (widen_tau=0 keeps it bit-identical to the
+        # pure-Python follow — no asymmetric widening).
+        prefix = state_path + ".track."
+        for key, val in (
+            ("back", back),
+            ("height", height),
+            ("look_ahead", look_ahead),
+            ("look_up", look_up),
+            ("pos_tau", pos_tau),
+            ("vel_tau", vel_tau),
+            ("cam_tau", cam_tau),
+            ("min_speed", min_speed),
+            ("widen_tau", 0.0),
+        ):
+            pycvc.state_set(self._app, prefix + key, repr(float(val)))
+        self._cc.setUpAxis(self._up[0], self._up[1], self._up[2])
+        self._cc.setMode(pycvc_gl.CameraController.Mode_Track)
+        self._cc.resetTracking()
+
+    def reset(self):
+        """Forget all history (snaps to the next update's target pose)."""
+        self._cc.resetTracking()
+
+    def update(self, pos, dt: float):
+        """Feed the agent's world position and dt; returns ``(eye, target, up)``
+        — the same contract as :meth:`ChaseCamera.update`."""
+        self._cc.feedTrackTarget(float(pos[0]), float(pos[1]), float(pos[2]))
+        self._cc.update(max(float(dt), 1e-4))
+        eye, focal, up = self._cc.get_pose()
+        return tuple(eye), tuple(focal), tuple(up)
