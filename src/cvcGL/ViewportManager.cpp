@@ -198,8 +198,9 @@ struct ViewportManager::Impl {
 };
 
 ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, bool offscreen,
-                                 const std::string &name)
+                                 const std::string &name, InputMode inputMode)
     : m_impl(new Impl) {
+  const bool managed = (inputMode == InputMode::Router);
   if (width < 1 || height < 1)
     throw std::invalid_argument("ViewportManager: width and height must be >= 1");
 
@@ -238,23 +239,34 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
     // per-viewport cameras via route*(). Never SetDefaultRenderer on it (that
     // would pin routing to one renderer) and never attach() the per-viewport
     // controllers (they stay detached; this is their only input path).
-    m_impl->routerStyle = vtkSmartPointer<::ViewportInputRouterStyle>::New();
-    m_impl->routerStyle->setManager(this);
-    m_impl->interactor->SetInteractorStyle(m_impl->routerStyle);
+    //
+    // In HostStyle we leave the style slot FREE instead, so a consumer's
+    // CameraController(view).attach() installs its classic single-view style
+    // there (the interactor itself still exists for processUIEvents / window
+    // close / HUD-overlay observers) — the SceneRenderer facade path.
+    if (managed) {
+      m_impl->routerStyle = vtkSmartPointer<::ViewportInputRouterStyle>::New();
+      m_impl->routerStyle->setManager(this);
+      m_impl->interactor->SetInteractorStyle(m_impl->routerStyle);
+    }
   }
 
   // Auto-create the full-screen PRIMARY viewport over the main scene at layer 0,
   // so the common single-view case behaves exactly like a SceneRenderer.
   const std::string camPath = CameraController::viewerStatePath(mainScene.getStatePrefix(), name);
   std::unique_ptr<Viewport> primary(
-      new Viewport(*m_impl->app, mainScene, camPath, name, /*mirror=*/false));
+      new Viewport(*m_impl->app, mainScene, camPath, name, /*mirror=*/false, managed));
   primary->setRegion(0.0, 0.0, 1.0, 1.0);
   primary->setLayer(0);
   m_impl->window->AddRenderer(primary->renderer());
   // Give the (detached) controller the window so pan scaling reads a valid size
   // and Fly pointer capture can hide/recenter the cursor onscreen. This is NOT
   // attach() — it installs no interactor style; the router owns all input.
-  primary->camera().setRenderWindow(m_impl->window);
+  // Skipped in HostStyle: the primary is bare (no managed controller), so
+  // building one here would defeat the empty-state guarantee; the host's own
+  // CameraController(view) takes the window when it attaches.
+  if (managed)
+    primary->camera().setRenderWindow(m_impl->window);
 
   // Attach the scene to the primary renderer (walks the scene, hands every
   // node's actor to the renderer), then frame it.

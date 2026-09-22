@@ -26,6 +26,11 @@ struct Viewport::Impl {
   SceneGraph *scene = nullptr; // the scene this viewport draws (owned elsewhere)
   vtkSmartPointer<vtkRenderer> renderer;
   std::unique_ptr<CameraController> camera;
+  // Kept so a BARE (unmanaged) viewport can lazily build its controller if
+  // something asks for camera() after construction.
+  cvc::app *app = nullptr;
+  std::string cameraStatePath;
+  bool managed = true;
   double region[4] = {0.0, 0.0, 1.0, 1.0}; // normalized, VTK y-up
   int layer = 0;
   bool visible = true;
@@ -49,15 +54,25 @@ struct Viewport::Impl {
 };
 
 Viewport::Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
-                   const std::string &name, bool mirror)
+                   const std::string &name, bool mirror, bool managed)
     : m_impl(new Impl) {
   m_impl->name = name;
   m_impl->mirror = mirror;
   m_impl->scene = &scene;
+  m_impl->app = &app;
+  m_impl->cameraStatePath = cameraStatePath;
+  m_impl->managed = managed;
   m_impl->renderer = vtkSmartPointer<vtkRenderer>::New();
   m_impl->renderer->SetViewport(m_impl->region[0], m_impl->region[1], m_impl->region[2],
                                 m_impl->region[3]);
   m_impl->renderer->SetLayer(m_impl->layer);
+
+  // A BARE (unmanaged) viewport stops here: no eager CameraController and no
+  // ViewportLayout, so it writes NO ".viewers.<name>.camera/.layout" state at
+  // construction — matching the classic single-view SceneRenderer. camera()
+  // builds the controller lazily if something ever asks (HostStyle does not).
+  if (!managed)
+    return;
 
   // This viewport's own camera controller, rooted at its own state path. Built
   // with the low-level (app, path) ctor and wired to THIS renderer/camera/scene —
@@ -124,7 +139,18 @@ void Viewport::setBackground(double r, double g, double b, bool opaque) {
   m_impl->renderer->SetPreserveColorBuffer(opaque ? 0 : 1);
 }
 
-CameraController &Viewport::camera() { return *m_impl->camera; }
+CameraController &Viewport::camera() {
+  // A bare (unmanaged) viewport deferred its controller; build it on first use
+  // so a stray caller still gets one wired to this renderer/scene. In the
+  // normal managed path it already exists and this is a straight return.
+  if (!m_impl->camera) {
+    m_impl->camera.reset(new CameraController(*m_impl->app, m_impl->cameraStatePath));
+    m_impl->camera->setCamera(m_impl->renderer->GetActiveCamera());
+    m_impl->camera->setRenderer(m_impl->renderer);
+    m_impl->camera->setScene(m_impl->scene);
+  }
+  return *m_impl->camera;
+}
 SceneGraph &Viewport::scene() const { return *m_impl->scene; }
 vtkRenderer *Viewport::renderer() const { return m_impl->renderer; }
 bool Viewport::isMirror() const { return m_impl->mirror; }

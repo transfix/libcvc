@@ -91,8 +91,14 @@ public:
 
 private:
   friend class ViewportManager; // the manager constructs and owns Viewports
+  // `managed` (default) builds the eager CameraController + ViewportLayout state
+  // this viewport normally owns. `managed == false` builds it BARE — no
+  // controller and no ".viewers.<name>.layout" state at construction; camera()
+  // lazily builds the controller only if something asks for it. HostStyle
+  // (the SceneRenderer facade) uses bare so its state footprint matches the
+  // classic single-view renderer, which writes no such state.
   Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
-           const std::string &name, bool mirror);
+           const std::string &name, bool mirror, bool managed = true);
   void setMirrorSource(vtkRenderer *src); // manager-only, at addMirrorViewport
 
   struct Impl;
