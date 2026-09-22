@@ -41,8 +41,22 @@ class Viewport;
 // The app the viewports' cameras live in is taken from the main scene.
 class ViewportManager {
 public:
+  // Input wiring for the auto-created primary viewport.
+  //   Router (default) — install the internal picture-in-picture input router
+  //     (an interactor style feeding route*()), and build the primary with a
+  //     managed CameraController + ViewportLayout state. This is the full
+  //     multi-viewport path.
+  //   HostStyle — leave the one interactor's style slot FREE and build the
+  //     primary "bare" (no eager CameraController, no ViewportLayout). This
+  //     reproduces a classic single-view SceneRenderer exactly: the host owns
+  //     input (a consumer's CameraController(view).attach() installs its own
+  //     style into the free slot; HUD overlays observe above it), and NO
+  //     ".viewers.<name>.camera/.layout" state is written at construction. Used
+  //     by the SceneRenderer facade.
+  enum class InputMode { Router, HostStyle };
+
   ViewportManager(SceneGraph &mainScene, int width = 1024, int height = 768, bool offscreen = true,
-                  const std::string &name = "main");
+                  const std::string &name = "main", InputMode inputMode = InputMode::Router);
   ~ViewportManager();
 
   ViewportManager(const ViewportManager &) = delete;

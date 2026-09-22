@@ -315,6 +315,12 @@ add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
 target_link_libraries(cvcgl_renderer PRIVATE cvcGL)
 add_test(NAME cvcgl_renderer COMMAND cvcgl_renderer)
 
+# SceneRenderer is now a facade over ViewportManager: pin its state-footprint
+# parity (no viewer camera/layout state) and the HostStyle host-input contract.
+add_executable(cvcgl_scene_renderer_facade test/cvcgl_scene_renderer_facade.cpp)
+target_link_libraries(cvcgl_scene_renderer_facade PRIVATE cvcGL)
+add_test(NAME cvcgl_scene_renderer_facade COMMAND cvcgl_scene_renderer_facade)
+
 add_executable(cvcgl_volren_node test/cvcgl_volren_node.cpp)
 target_link_libraries(cvcgl_volren_node PRIVATE cvcGL)
 add_test(NAME cvcgl_volren_node COMMAND cvcgl_volren_node)

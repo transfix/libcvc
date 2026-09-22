@@ -8,37 +8,43 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/gl/SceneGraph.h>
+// SceneRenderer is now a thin FACADE over ViewportManager: it owns one manager
+// configured for a single, full-screen primary viewport in HostStyle input mode
+// (no internal input router, and a BARE primary that writes no
+// ".viewers.<name>.camera/.layout" state) so a lone SceneRenderer behaves and
+// looks — down to its cvc::state footprint — exactly like the classic
+// single-view renderer it always was, while sharing ONE rendering code path with
+// the multi-viewport / picture-in-picture case. Every call forwards to the
+// manager (render/capture/resize/...) or to its primary viewport's renderer
+// (the four VTK-direct behaviours: setCamera / setBackground / pickWorld /
+// renderer). The manager owns the vtkRenderWindow + interactor and the
+// deterministic teardown; close() is just letting the manager go.
+
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/Viewport.h>
+#include <cvc/gl/ViewportManager.h>
 #include <stdexcept>
 #include <vtkCamera.h>
 #include <vtkCellPicker.h>
-#include <vtkNew.h>
-#include <vtkOutputWindow.h> // route VTK's ERR/WARN to stderr, not a Win32 message box
-#include <vtkPNGWriter.h>
-#include <vtkRenderWindow.h>
-#include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
-#include <vtkUnsignedCharArray.h>
-#include <vtkWindowToImageFilter.h>
 
 namespace cvc {
 namespace gl {
 
 struct SceneRenderer::impl {
-  SceneGraph *scene = nullptr;
+  std::unique_ptr<ViewportManager> vm;
+  SceneGraph *scene = nullptr; // cached so scene()/name() are valid after close()
   std::string name = "main";
-  vtkSmartPointer<vtkRenderer> renderer;
-  vtkSmartPointer<vtkRenderWindow> window;
-  vtkSmartPointer<vtkRenderWindowInteractor> interactor; // onscreen only
-  bool offscreen = true;
   bool closed = false;
 
   void requireOpen() const {
-    if (closed)
+    if (closed || !vm)
       throw std::runtime_error("SceneRenderer: renderer is closed");
   }
+  // The single primary viewport's renderer — the target for the VTK-direct
+  // behaviours SceneRenderer exposes but ViewportManager does not wrap.
+  vtkRenderer *primaryRenderer() const { return vm->primary().renderer(); }
 };
 
 SceneRenderer::SceneRenderer(SceneGraph &scene, int width, int height, bool offscreen,
@@ -46,48 +52,15 @@ SceneRenderer::SceneRenderer(SceneGraph &scene, int width, int height, bool offs
     : m_impl(new impl) {
   if (width < 1 || height < 1)
     throw std::invalid_argument("SceneRenderer: width and height must be >= 1");
-
-  // Route VTK diagnostics through stderr instead of a Win32 message box, and
-  // silence WARN-level output. VTK's shadow-map pass logs "Could not create
-  // shader object" / "Hardware does not support the number of textures defined"
-  // ERR/WARN lines on some driver configs; those are cosmetic (VTK falls back
-  // and keeps rendering) and just spam the console. Done once per process.
-  static bool s_vtkOutputConfigured = false;
-  if (!s_vtkOutputConfigured) {
-    if (auto *ow = vtkOutputWindow::GetInstance()) {
-      ow->SetDisplayModeToAlwaysStdErr();
-      // Keep ERR (people probably want to know) but drop WARN.
-      ow->SetPromptUser(0);
-    }
-    s_vtkOutputConfigured = true;
-  }
-
   m_impl->scene = &scene;
   m_impl->name = name;
-  m_impl->offscreen = offscreen;
-  m_impl->renderer = vtkSmartPointer<vtkRenderer>::New();
-  m_impl->window = vtkSmartPointer<vtkRenderWindow>::New();
-  m_impl->window->SetOffScreenRendering(offscreen ? 1 : 0);
-  m_impl->window->AddRenderer(m_impl->renderer);
-  m_impl->window->SetSize(width, height);
-
-  if (!offscreen) {
-    m_impl->window->SetWindowName("cvcGL");
-    // Initialize(), never Start(): Start() runs VTK's own event loop and blocks
-    // until the window closes, which would take the loop away from the caller.
-    // A simulation has to keep the loop to step its own clock, so the
-    // interactor exists only to deliver resize/close/mouse events, drained on
-    // demand by processUIEvents().
-    m_impl->interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
-    m_impl->interactor->SetRenderWindow(m_impl->window);
-    m_impl->interactor->Initialize();
-  }
-
-  // Attach ONCE. This is the step the one-shot helpers repeat every frame: it
-  // walks the scene and hands every node's actor to the renderer.
-  scene.setRenderer(m_impl->renderer);
-  scene.processEvents();
-  m_impl->renderer->ResetCamera();
+  // ONE full-screen primary over the scene, HostStyle so the interactor's style
+  // slot stays free (a CameraController(*this).attach() installs the classic
+  // single-view style there) and no viewer camera/layout state is written. The
+  // manager ctor does the VTK-diagnostics routing, window/interactor setup, and
+  // the one-time scene attach + ResetCamera that this class used to do inline.
+  m_impl->vm.reset(new ViewportManager(scene, width, height, offscreen, name,
+                                       ViewportManager::InputMode::HostStyle));
 }
 
 SceneRenderer::~SceneRenderer() {
@@ -103,91 +76,50 @@ void SceneRenderer::close() {
   if (!m_impl || m_impl->closed)
     return;
   m_impl->closed = true;
-  // Detach BEFORE the window dies: the scene holds actors that belong to this
-  // renderer, and tearing the window down under them is how offscreen backends
-  // crash at exit.
-  if (m_impl->scene)
-    m_impl->scene->setRenderer(nullptr);
-  // Tear down the interactor FIRST, while its render window is still live.
-  // Order matters on Windows: vtkWin32RenderWindowInteractor's destructor,
-  // fired after Finalize(), tries to touch its render window; that surfaces
-  // as a blank native window briefly popping up at exit (and, on some driver
-  // configs, "Could not create shader object" spam as VTK re-inits GL). Call
-  // TerminateApp() so any pending message loop actually quits, then null the
-  // interactor before finalizing the window.
-  if (m_impl->interactor) {
-    m_impl->interactor->TerminateApp();
-    m_impl->interactor->SetRenderWindow(nullptr);
-    m_impl->interactor = nullptr;
-  }
-  if (m_impl->window)
-    m_impl->window->Finalize();
-  m_impl->window = nullptr;
-  m_impl->renderer = nullptr;
-  m_impl->scene = nullptr;
+  // The ViewportManager destructor performs the same ordered teardown this class
+  // used to do by hand: detach the scene, tear down the interactor while its
+  // window is live, then Finalize() the window. scene/name stay cached so the
+  // accessors remain valid after close.
+  m_impl->vm.reset();
 }
 
 bool SceneRenderer::isClosed() const { return !m_impl || m_impl->closed; }
 
 void SceneRenderer::render() {
   m_impl->requireOpen();
-  // Geometry added or replaced since the last frame arrives as queued scene
-  // events; draining them here is what makes a re-meshed node appear without
-  // re-attaching the whole scene.
-  m_impl->scene->processEvents();
-  m_impl->window->Render();
+  m_impl->vm->render();
 }
 
 void SceneRenderer::writePNG(const std::string &path) {
-  render();
-  vtkNew<vtkWindowToImageFilter> w2i;
-  w2i->SetInput(m_impl->window);
-  w2i->SetInputBufferTypeToRGB();
-  w2i->ReadFrontBufferOff();
-  // Without Modified() the filter caches its first execution and every
-  // subsequent PNG in a sequence is a copy of frame 0.
-  w2i->Modified();
-  w2i->Update();
-  vtkNew<vtkPNGWriter> writer;
-  writer->SetFileName(path.c_str());
-  writer->SetInputConnection(w2i->GetOutputPort());
-  writer->Write();
+  m_impl->requireOpen();
+  m_impl->vm->writePNG(path);
 }
 
 std::vector<unsigned char> SceneRenderer::frameRGB() {
-  render();
-  const int w = m_impl->window->GetSize()[0];
-  const int h = m_impl->window->GetSize()[1];
-  // Straight out of the framebuffer: no PNG encode on this side and no decode
-  // on the other, which is the entire point when piping frames to an encoder.
-  vtkSmartPointer<vtkUnsignedCharArray> buf = vtkSmartPointer<vtkUnsignedCharArray>::New();
-  m_impl->window->GetPixelData(0, 0, w - 1, h - 1, /*front=*/0, buf);
-  const unsigned char *p = buf->GetPointer(0);
-  const size_t n = static_cast<size_t>(buf->GetNumberOfTuples()) * buf->GetNumberOfComponents();
-  return std::vector<unsigned char>(p, p + n);
+  m_impl->requireOpen();
+  return m_impl->vm->frameRGB();
 }
 
 int SceneRenderer::frameWidth() const {
   m_impl->requireOpen();
-  return m_impl->window->GetSize()[0];
+  return m_impl->vm->frameWidth();
 }
 
 int SceneRenderer::frameHeight() const {
   m_impl->requireOpen();
-  return m_impl->window->GetSize()[1];
+  return m_impl->vm->frameHeight();
 }
 
 void SceneRenderer::resetCamera() {
   m_impl->requireOpen();
-  m_impl->scene->processEvents(); // frame what is in the scene NOW
-  m_impl->renderer->ResetCamera();
+  m_impl->vm->resetCamera();
 }
 
 void SceneRenderer::setCamera(double eyeX, double eyeY, double eyeZ, double focalX, double focalY,
                               double focalZ, double upX, double upY, double upZ, double viewAngle,
                               double clipNear, double clipFar) {
   m_impl->requireOpen();
-  vtkCamera *cam = m_impl->renderer->GetActiveCamera();
+  vtkCamera *cam = m_impl->primaryRenderer()->GetActiveCamera();
   cam->SetPosition(eyeX, eyeY, eyeZ);
   cam->SetFocalPoint(focalX, focalY, focalZ);
   cam->SetViewUp(upX, upY, upZ);
@@ -197,40 +129,38 @@ void SceneRenderer::setCamera(double eyeX, double eyeY, double eyeZ, double foca
 
 void SceneRenderer::setBackground(double r, double g, double b) {
   m_impl->requireOpen();
-  m_impl->renderer->SetBackground(r, g, b);
+  m_impl->primaryRenderer()->SetBackground(r, g, b);
 }
 
 void SceneRenderer::resize(int width, int height) {
   m_impl->requireOpen();
   if (width < 1 || height < 1)
     throw std::invalid_argument("SceneRenderer::resize: width and height must be >= 1");
-  m_impl->window->SetSize(width, height);
+  m_impl->vm->resize(width, height);
 }
 
 void SceneRenderer::processUIEvents() {
   m_impl->requireOpen();
-  if (m_impl->interactor)
-    m_impl->interactor->ProcessEvents();
+  m_impl->vm->processUIEvents();
 }
 
 bool SceneRenderer::windowClosed() const {
   if (isClosed())
     return true;
-  if (!m_impl->interactor)
-    return false; // offscreen has no window to close
-  return m_impl->interactor->GetDone() != 0;
+  return m_impl->vm->windowClosed();
 }
 
 bool SceneRenderer::pickWorld(double displayX, double displayY, double outWorld[3]) const {
   m_impl->requireOpen();
-  if (!m_impl->renderer)
+  vtkRenderer *ren = m_impl->primaryRenderer();
+  if (!ren)
     return false;
   // vtkCellPicker does a real geometry hit test (unlike vtkWorldPointPicker,
   // which always returns a focal-plane point), so a miss over empty space is
   // reported as a miss rather than a bogus coordinate.
   auto picker = vtkSmartPointer<vtkCellPicker>::New();
   picker->SetTolerance(0.0005);
-  if (!picker->Pick(displayX, displayY, 0.0, m_impl->renderer))
+  if (!picker->Pick(displayX, displayY, 0.0, ren))
     return false;
   double p[3];
   picker->GetPickPosition(p);
@@ -242,12 +172,12 @@ bool SceneRenderer::pickWorld(double displayX, double displayY, double outWorld[
 
 vtkRenderer *SceneRenderer::renderer() const {
   m_impl->requireOpen();
-  return m_impl->renderer;
+  return m_impl->primaryRenderer();
 }
 
 vtkRenderWindow *SceneRenderer::renderWindow() const {
   m_impl->requireOpen();
-  return m_impl->window;
+  return m_impl->vm->renderWindow();
 }
 
 SceneGraph &SceneRenderer::scene() const { return *m_impl->scene; }
