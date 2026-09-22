@@ -264,6 +264,45 @@ int main() {
     vm.primary().renderer()->RemoveActor2D(hud); // leave the scene as later tests expect
   }
 
+  // A FROZEN mirror (liveSync=false) is primed once at add time and then left
+  // alone: it must NOT gain props added to the source afterwards, and its own
+  // lights survive a render (a live mirror's per-frame RemoveAllLights would wipe
+  // them). This is exactly what lets a minimap keep a fixed snapshot + its own
+  // flat headlight while the default mirror stays a live echo.
+  {
+    const double frR[4] = {0.02, 0.02, 0.30, 0.30};
+    Viewport &frozen = vm.addMirrorViewport("frozen", "main", frR, /*layer=*/2, /*liveSync=*/false);
+    assert(!frozen.mirrorLive() && "liveSync=false must mark the mirror frozen");
+    assert(mini.mirrorLive() && "the default mirror must stay live");
+    const int frozenProps0 = frozen.renderer()->GetViewProps()->GetNumberOfItems();
+    const int miniProps0 = mini.renderer()->GetViewProps()->GetNumberOfItems();
+
+    // Give the frozen mirror its OWN light, which a per-frame re-sync would clobber.
+    vtkSmartPointer<vtkLight> ownLamp = vtkSmartPointer<vtkLight>::New();
+    ownLamp->SetLightTypeToHeadlight();
+    frozen.renderer()->RemoveAllLights();
+    frozen.renderer()->AddLight(ownLamp);
+
+    // Add a node to the SOURCE scene after both mirrors exist, then composite.
+    addQuad(mainScene, "post_freeze", -8, -8, -4, -4, 0.2);
+    vm.render();
+
+    assert(frozen.renderer()->GetViewProps()->GetNumberOfItems() == frozenProps0 &&
+           "a frozen mirror gained a prop added to the source after it was frozen");
+    assert(mini.renderer()->GetViewProps()->GetNumberOfItems() > miniProps0 &&
+           "the live mirror did not pick up the new source node");
+
+    bool keptOwnLamp = false;
+    vtkLightCollection *fl = frozen.renderer()->GetLights();
+    vtkCollectionSimpleIterator flit;
+    fl->InitTraversal(flit);
+    while (vtkLight *l = fl->GetNextLight(flit))
+      if (l == ownLamp.Get())
+        keptOwnLamp = true;
+    assert(keptOwnLamp && "a frozen mirror's own light was wiped — a live re-sync leaked in");
+    vm.removeViewport("frozen"); // leave the manager as later tests expect
+  }
+
   // Mirroring a source that does not exist is a loud error.
   bool threw = false;
   try {
