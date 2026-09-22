@@ -31,8 +31,11 @@
 // band/retunes) is a SEPARATE cvc::dbg record joined by veh_index; it never lives
 // here. The collector consumes only the sim_world::snapshot arrays plus optional
 // position samplers, so it has no libcvc-internal dependency beyond the stdlib.
-// Field names mirror the Python grl_snam.metrics NavStats schema — reuse, not
-// reinvent — and the two are pinned in cross-language parity tests.
+// The scorecard fields mirror the Python grl_snam.scorecard schema (the per-vehicle
+// veh_nav_stats is a superset of grl_snam.metrics.NavStats) — reuse, not reinvent. C++
+// and Python are held in step today by independent hand-computed corpora sharing the
+// same literals (this repo's nav_stats_test, cvcdbg's, grl-snam's test_scorecard); a
+// single shared-fixture parity gate is a tracked follow-up.
 #pragma once
 
 #include <array>
@@ -71,7 +74,10 @@ struct budget_policy {
 struct nav_samplers {
   std::function<int(double, double)> material_id; // -> 0..kNumMaterials-1, or -1 unknown
   std::function<bool(double, double)> occupied;   // truth-occupancy cell blocked?
-  const double *min_clearance_m = nullptr; // per-agent clearance (from sim_world); null = skip
+  // Per-agent clearance in METRES (compared against clear_safety_m); null = skip. Note
+  // sim_world::min_clearance() returns NORMALIZED units, so the caller must convert —
+  // clearance_m = min_clearance() / cfg.scale — before pointing this here.
+  const double *min_clearance_m = nullptr;
 };
 
 // One per vehicle, accumulated over an episode. Mirrors grl_snam NavStats + the

@@ -46,6 +46,17 @@ void num(std::ostringstream &o, double v) {
   else
     o << "null";
 }
+// Like num(), but also nulls the "unmeasured" sentinel (>=1e29). min_clearance_m and
+// min_sep_m sit at 1e30 until a sampler / a second vehicle lowers them; a raw 1e+30 in
+// the record reads as *enormous* clearance/separation — the inverse of "missing" — so a
+// trainer would misread it. aggregate_nav guards min_sep_m the same way; keep the
+// per-episode record honest too (a null means "not measured").
+void num_sentinel(std::ostringstream &o, double v) {
+  if (v >= 1e29)
+    o << "null";
+  else
+    num(o, v);
+}
 } // namespace
 
 // ── base collector ──────────────────────────────────────────────────────────
@@ -270,7 +281,7 @@ std::string episode_nav_stats::to_json() const {
   o << ",\"penetration_pct\":";
   num(o, penetration_pct);
   o << ",\"total_veh_contacts\":" << total_veh_contacts << ",\"min_sep_m\":";
-  num(o, min_sep_m);
+  num_sentinel(o, min_sep_m);
   o << ",\"mean_path_ratio\":";
   num(o, mean_path_ratio);
   o << ",\"mean_turn_total_rad\":";
@@ -308,7 +319,7 @@ std::string episode_nav_stats::to_json() const {
     o << ",\"speed_max\":";
     num(o, v.speed_max);
     o << ",\"min_clearance_m\":";
-    num(o, v.min_clearance_m);
+    num_sentinel(o, v.min_clearance_m);
     o << ",\"time_below_clear_s\":";
     num(o, v.time_below_clear_s);
     o << ",\"penetration_steps\":" << v.penetration_steps << ",\"veh_contacts\":" << v.veh_contacts

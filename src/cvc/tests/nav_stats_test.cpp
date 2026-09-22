@@ -108,6 +108,87 @@ TEST(NavStats, ScriptedTrajectoryAccumulators) {
   EXPECT_NEAR(e.mean_path_ratio, 1.0, 1e-6);
   EXPECT_NEAR(e.mean_turn_total_rad, kPi / 4, 1e-4);
   EXPECT_NEAR(e.total_fuel, 20.0, 1e-6);
+  EXPECT_EQ(v0.goals_reached, 1);
+  EXPECT_EQ(v1.goals_reached, 0);
+
+  // Pin the base RECORD shape (the cross-repo JSON contract), not just the accumulators:
+  // a regression in field names, ordering, or the 13-wide material arrays would slip past
+  // the field-level asserts above. Both vehicles measured clearance here, so it is a real
+  // value (not the sentinel -> null path, which SentinelFieldsSerializeAsNull covers).
+  const std::string ej = e.to_json();
+  EXPECT_NE(ej.find("\"per_vehicle\":["), std::string::npos);
+  EXPECT_NE(ej.find("\"min_clearance_m\":5"), std::string::npos);  // v0 = 5 m, emitted
+  EXPECT_NE(ej.find("\"min_clearance_m\":1,"), std::string::npos); // v1 = 1 m, emitted
+  EXPECT_NE(ej.find("\"time_over_material_s\":["), std::string::npos);
+  EXPECT_NE(ej.find("\"dist_over_material_m\":["), std::string::npos);
+  EXPECT_EQ(ej.find("1e+30"), std::string::npos); // no raw sentinel leaks into the record
+}
+
+// Gap 2: the "unmeasured" sentinel (1e30) must serialize as null, not a huge finite
+// number. A single vehicle with no clearance sampler leaves min_clearance_m and (n==1)
+// min_sep_m at 1e30; the record must read "not measured", not "enormous clearance".
+TEST(NavStats, SentinelFieldsSerializeAsNull) {
+  const float start[2] = {0, 0};
+  const float goal[2] = {10, 0};
+  nav_stats_collector c;
+  c.begin_episode(1, 1.0, start, goal);
+  const float pos[2] = {1, 0};
+  const float head[1] = {0};
+  const float spd[1] = {1};
+  const std::uint8_t rch[1] = {0};
+  const int mode[1] = {0};
+  c.step(pos, head, spd, mode, rch); // no nav_samplers -> min_clearance_m stays 1e30
+  episode_nav_stats e = c.finish();
+
+  EXPECT_GE(e.per_vehicle[0].min_clearance_m, 1e29); // still at the sentinel in-struct
+  EXPECT_GE(e.min_sep_m, 1e29);                      // n==1 -> never lowered
+  const std::string js = e.to_json();
+  EXPECT_EQ(js.find("1e+30"), std::string::npos); // no raw sentinel
+  EXPECT_NE(js.find("\"min_clearance_m\":null"), std::string::npos);
+  EXPECT_NE(js.find("\"min_sep_m\":null"), std::string::npos);
+}
+
+// Gap 8: the eta_multiple and fuel_budget bounds (beyond the fixed time budget) each
+// independently flip over_budget. The ETA path divides by speed_ref_mps, so a regression
+// there or in the fuel bound would otherwise pass CI.
+TEST(NavStats, BudgetEtaAndFuelBounds) {
+  const int N = 1;
+  const float start[2] = {0, 0};
+  const float goal[2] = {100, 0}; // straight_m = 100
+  const float pos[2] = {10, 0};
+  const float head[1] = {0};
+  const float spd[1] = {10};
+  const std::uint8_t rch[1] = {0};
+  const int mode[1] = {0};
+
+  // ETA bound: straight 100 m at speed_ref 10 m/s -> 10 s nominal; eta_multiple 1.0 => a
+  // 10 s budget. Run 12 steps of 1 s (never arriving) => used_t = 12 > 10 => over_budget.
+  {
+    nav_stats_collector c;
+    budget_policy b;
+    b.eta_multiple = 1.0;
+    b.speed_ref_mps = 10.0;
+    c.begin_episode(N, 1.0, start, goal, b);
+    for (int s = 0; s < 12; ++s)
+      c.step(pos, head, spd, mode, rch);
+    episode_nav_stats e = c.finish();
+    EXPECT_TRUE(e.per_vehicle[0].over_budget);
+    EXPECT_FALSE(e.success);
+  }
+  // Fuel bound: fuel_used is Sigma|dspeed|. Accelerate 0->10 once (=10 effort) with a
+  // fuel_budget of 5 => over_budget; the ETA/time bounds are off.
+  {
+    nav_stats_collector c;
+    budget_policy b;
+    b.fuel_budget = 5.0;
+    c.begin_episode(N, 1.0, start, goal, b);
+    const float spd0[1] = {0};
+    c.step(pos, head, spd0, mode, rch); // first step: prev_spd seeded 0, no accel yet
+    c.step(pos, head, spd, mode, rch);  // 0 -> 10 => accel_integral += 10
+    episode_nav_stats e = c.finish();
+    EXPECT_GE(e.per_vehicle[0].fuel_used, 5.0);
+    EXPECT_TRUE(e.per_vehicle[0].over_budget);
+  }
 }
 
 TEST(NavStats, WallDwellAndVehicleContacts) {
