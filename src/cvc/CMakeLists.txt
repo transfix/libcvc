@@ -229,6 +229,7 @@ set(SOURCE_FILES
   nav/belief_occupancy.cpp
   nav/sim_world.cpp
   nav/sim_thread.cpp
+  nav/nav_stats.cpp
   lod/select.cpp
   vis/types.cpp
   vis/reference.cpp
