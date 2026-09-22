@@ -262,6 +262,10 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     float thi = th[i], spi = sp[i];
     const float gx = goal[2 * i], gy = goal[2 * i + 1];
     const float ali = al[i], bei = be[i], gai = ga[i];
+    // Per-agent footprint override (heterogeneous fleet); null column => the scalar,
+    // so the homogeneous path is byte-identical.
+    const float rr_i = v.rr_col ? v.rr_col[i] : rr;
+    const float body_rr_i = v.body_rr_col ? v.body_rr_col[i] : v.body_rr;
     float minclr = 9.9f;
 
     for (int s = 0; s < v.nsub; ++s) {
@@ -273,14 +277,14 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       if (!has_fp) {
         float phi;
         sample_unit(f, plane, ox, oy, phi, nx, ny);
-        d = phi - rr;
+        d = phi - rr_i;
         const float ipc = ipc_dbdd(d, d_hat);
         Fbar_x = -(ali * ipc) * nx;
         Fbar_y = -(ali * ipc) * ny;
         const float ipc_rep = ipc < 0.0f ? ipc : 0.0f; // clamp(max=0)
         Frep_x = -(ali * ipc_rep) * nx;
         Frep_y = -(ali * ipc_rep) * ny;
-        gov_rr = rr;
+        gov_rr = rr_i;
       } else {
         // Multi-disc footprint. Clearance is the MIN over discs (and the
         // governor then steers by THAT disc's normal — "am I driving into the
@@ -296,7 +300,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
           const float off = v.body_offsets[b];
           float bphi, bnx, bny;
           sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
-          const float bd = bphi - v.body_rr;
+          const float bd = bphi - body_rr_i;
           const float bipc = ipc_dbdd(bd, d_hat);
           const float alg = v.body_gain == 1.0f ? ali : ali * v.body_gain;
           Fbar_x += -(alg * bipc) * bnx;
@@ -310,7 +314,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
             ny = bny;
           }
         }
-        gov_rr = v.body_rr;
+        gov_rr = body_rr_i;
       }
       minclr = std::min(minclr, d);
 

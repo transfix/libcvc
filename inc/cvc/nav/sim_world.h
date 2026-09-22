@@ -151,6 +151,18 @@ public:
   void set_ext_force(const ext_force &ext) { ext_ = ext; }
   void clear_ext_force() { ext_ = ext_force{}; }
 
+  // Per-agent footprint radii (heterogeneous fleet): rr[i] / body_rr[i] (normalized,
+  // [n]) override the shared cfg.veh.rr / body_rr for agent i. Pass rr==nullptr (the
+  // default state) to clear back to the homogeneous scalar. Copied in; the columns are
+  // owned by the sim_world. body_rr may be null (keeps the scalar body_rr).
+  void set_vehicle_radii(const float *rr, const float *body_rr, int n);
+  void clear_vehicle_radii() {
+    rr_col_.clear();
+    body_rr_col_.clear();
+    cfg_.veh.rr_col = nullptr;
+    cfg_.veh.body_rr_col = nullptr;
+  }
+
   int size() const { return n_; }
   int planes() const { return M_; } // belief-plane count (M): 1 shared, N private
   int rows() const { return rows_; }
@@ -269,6 +281,7 @@ private:
   std::vector<float> turn_, dhit_, best_, init_;
   std::vector<float>
       minclr_; // [n] min footprint-wall clearance from the last step() (see min_clearance)
+  std::vector<float> rr_col_, body_rr_col_; // [n] per-agent footprint radii (set_vehicle_radii)
   std::vector<std::uint8_t> we_valid_, tracking_, parked_, reached_, active_;
 
   // material state (set_material; inert while mat_on_ == false)

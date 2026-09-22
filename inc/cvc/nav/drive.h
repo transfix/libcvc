@@ -159,6 +159,16 @@ struct veh_params {
   // the extra reach was only ever borrowed from safety.
   float body_gain = 1.0f;
 
+  // PER-AGENT FOOTPRINT (heterogeneous fleet). Null (default) = every agent uses the
+  // scalar `rr` / `body_rr` above — byte-identical to the homogeneous path, so all
+  // existing behaviour and the CPU<->CUDA parity gates are unchanged. When set,
+  // `rr_col[i]` / `body_rr_col[i]` (borrowed [n], normalized) override the scalar for
+  // agent i, so a mixed convoy (a wide truck behind a scout) drives with real per-vehicle
+  // clearance. Only the CPU rollout reads these today; the CUDA twin falls back to the
+  // scalar, so do not mix a set column with the CUDA path until it is wired too.
+  const float *rr_col = nullptr;      // [n], overrides rr for the single-disc footprint
+  const float *body_rr_col = nullptr; // [n], overrides body_rr for the multi-disc footprint
+
   // STEERING LOCK. 0 = none. The bicycle's `delta` is the virtual centre-wheel
   // angle; on a real Ackermann axle the INNER wheel reaches the mechanical lock
   // first, so the achievable virtual angle is atan(L/(L/tan(delta_max)+t/2)).

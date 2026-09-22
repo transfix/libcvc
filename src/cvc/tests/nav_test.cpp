@@ -694,6 +694,70 @@ TEST(NavSimWorld, RunsFromPureCppAndAgentsProgress) {
   EXPECT_GT(measured, N / 2); // the drive measured clearance for most agents
 }
 
+TEST(NavSimWorld, PerAgentRadiiOverrideFootprint) {
+  // set_vehicle_radii lets a heterogeneous fleet drive with real per-vehicle footprints.
+  // A uniform column set to the scalar rr must be byte-identical to the scalar path
+  // (parity); a bigger column must actually change the drive.
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = R / 3; r < 2 * R / 3; ++r)
+    occ[(std::size_t)r * C + C / 2] = 1; // a wall to drive around
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -200;
+  cfg.min_y = -200;
+  cfg.max_x = 200;
+  cfg.max_y = 200;
+  cfg.scale = 0.04;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  const int N = 64;
+
+  auto make = [&]() {
+    return cvc::nav::sim_world::from_occupancy(cfg, occ.data(),
+                                               cvc::nav::coef_mlp::default_biased(), N, 3);
+  };
+  auto run = [&](cvc::nav::sim_world &w) {
+    for (int t = 0; t < 60; ++t)
+      w.step(1);
+    std::vector<float> pos(2 * N), hd(N), sp(N), clr(N);
+    std::vector<int> md(N);
+    std::vector<std::uint8_t> rc(N);
+    w.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+    w.min_clearance(clr.data());
+    return std::make_pair(pos, clr);
+  };
+
+  cvc::nav::sim_world A = make();
+  auto rA = run(A);
+
+  // Uniform column == the scalar rr -> byte-identical positions + clearance (parity).
+  cvc::nav::sim_world B = make();
+  std::vector<float> uni(N, cfg.veh.rr);
+  B.set_vehicle_radii(uni.data(), nullptr, N);
+  auto rB = run(B);
+  for (int i = 0; i < 2 * N; ++i)
+    EXPECT_FLOAT_EQ(rA.first[i], rB.first[i]);
+  for (int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(rA.second[i], rB.second[i]);
+
+  // A bigger footprint changes the drive (at least one agent's trajectory differs).
+  cvc::nav::sim_world Cw = make();
+  std::vector<float> big(N, 0.30f);
+  Cw.set_vehicle_radii(big.data(), nullptr, N);
+  auto rC = run(Cw);
+  bool changed = false;
+  for (int i = 0; i < 2 * N && !changed; ++i)
+    if (std::fabs(rA.first[i] - rC.first[i]) > 1e-4f)
+      changed = true;
+  EXPECT_TRUE(changed);
+}
+
 TEST(NavSimWorld, DefaultBiasedPolicyGivesTheBasisCoefficients) {
   // Zero linear weights => net == 0 => coeffs are the constant bias basin.
   cvc::nav::coef_mlp m = cvc::nav::coef_mlp::default_biased();

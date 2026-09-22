@@ -740,6 +740,25 @@ void sim_world::min_clearance(float *out) const {
     out[i] = (i < static_cast<int>(minclr_.size())) ? minclr_[i] : 1e30f;
 }
 
+void sim_world::set_vehicle_radii(const float *rr, const float *body_rr, int n) {
+  if (!rr || n <= 0) {
+    clear_vehicle_radii();
+    return;
+  }
+  const int m = std::min(n, n_);
+  rr_col_.assign(rr, rr + m);
+  rr_col_.resize(n_, cfg_.veh.rr); // pad any tail with the scalar (never a stale/garbage read)
+  cfg_.veh.rr_col = rr_col_.data();
+  if (body_rr) {
+    body_rr_col_.assign(body_rr, body_rr + m);
+    body_rr_col_.resize(n_, cfg_.veh.body_rr);
+    cfg_.veh.body_rr_col = body_rr_col_.data();
+  } else {
+    body_rr_col_.clear();
+    cfg_.veh.body_rr_col = nullptr;
+  }
+}
+
 void sim_world::retarget(int i, float gx_n, float gy_n) {
   if (i < 0 || i >= n_)
     return;
