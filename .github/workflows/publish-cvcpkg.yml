@@ -155,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          pip install 'git+https://github.com/cy-pca/cvcpkg@master'
       - name: Push libcvc's recipes
         shell: bash
         env:
@@ -195,7 +195,7 @@ jobs:
       pycvc_gl_cuda: ${{ steps.rev.outputs.pycvc_gl_cuda }}
     steps:
       - uses: actions/checkout@v5
-      - name: Install cvcpkg (from libcvc-deps master)
+      - name: Install cvcpkg (from cy-pca/cvcpkg master)
         shell: bash
         run: |
           python -m pip install --upgrade pip
@@ -206,7 +206,7 @@ jobs:
           # highest published revision, so it needs httpx — which only the
           # extra pulls in. PEP 508 direct reference: the bracket goes on
           # the NAME, before the `@ <url>`.
-          pip install 'cvcpkg[publish] @ git+https://github.com/transfix/libcvc-deps@master'
+          pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
       - name: Compute next revision per package
         id: rev
         shell: bash
@@ -387,7 +387,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Pull from libcvc-deps master rather than PyPI so we always
+          # Pull from cy-pca/cvcpkg master (the relocated cvcpkg home; transfix/libcvc-deps
+          # is archived) rather than PyPI so we always
           # pick up server/schema fixes without a release cadence.
           #
           # [publish] is REQUIRED, not decoration: cvcpkg's core install is
@@ -398,7 +399,7 @@ jobs:
           # PEP 508 direct reference: the bracket goes on the NAME, before
           # the `@ <url>`.
           python -m pip install --upgrade pip
-          pip install 'cvcpkg[publish] @ git+https://github.com/transfix/libcvc-deps@master'
+          pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
           cvcpkg --version
 
       - name: Fetch libcvc-deps
@@ -1071,7 +1072,7 @@ jobs:
           # httpx — only the extra pulls it in. PEP 508 direct reference:
           # the bracket goes on the NAME, before the `@ <url>`.
           python -m pip install --upgrade pip
-          pip install 'cvcpkg[publish] @ git+https://github.com/transfix/libcvc-deps@master'
+          pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
           cvcpkg --version
 
       - name: Fetch libcvc-deps
@@ -1658,7 +1659,7 @@ jobs:
           # build requirement (pyproject: requires = ["poetry-core>=1.8.0"]).
           & $env:PYEXE -m pip install 'poetry-core>=1.8.0'
           if ($LASTEXITCODE -ne 0) { throw "poetry-core install failed ($LASTEXITCODE)" }
-          & $env:PYEXE -m pip install --no-build-isolation 'git+https://github.com/transfix/libcvc-deps@master'
+          & $env:PYEXE -m pip install --no-build-isolation 'git+https://github.com/cy-pca/cvcpkg@master'
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install failed ($LASTEXITCODE)" }
           & $env:PYEXE -m cvcpkg --version
 
