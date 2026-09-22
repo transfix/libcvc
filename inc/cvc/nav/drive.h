@@ -164,8 +164,9 @@ struct veh_params {
   // existing behaviour and the CPU<->CUDA parity gates are unchanged. When set,
   // `rr_col[i]` / `body_rr_col[i]` (borrowed [n], normalized) override the scalar for
   // agent i, so a mixed convoy (a wide truck behind a scout) drives with real per-vehicle
-  // clearance. Only the CPU rollout reads these today; the CUDA twin falls back to the
-  // scalar, so do not mix a set column with the CUDA path until it is wired too.
+  // clearance. Both the CPU rollout AND the batch CUDA entry points (bicycle_rollout_cuda /
+  // drive_step_cuda) honor these; only the persistent sim_world_cuda path still falls back
+  // to the scalar (a tracked follow-up).
   const float *rr_col = nullptr;      // [n], overrides rr for the single-disc footprint
   const float *body_rr_col = nullptr; // [n], overrides body_rr for the multi-disc footprint
 
@@ -182,7 +183,8 @@ struct veh_params {
   // drive with different top speed, acceleration and turning. L feeds the steer lock and
   // curvature; the drive recomputes the L-derived thresholds per agent. A null column
   // reproduces the scalar float exactly, so the homogeneous + CPU<->CUDA parity paths are
-  // unchanged; only the CPU rollout reads these (CUDA falls back to the scalar).
+  // unchanged. Both the CPU rollout and the batch CUDA entry points honor these (only the
+  // persistent sim_world_cuda path still falls back to the scalar).
   const float *vmax_col = nullptr;
   const float *a_max_col = nullptr;
   const float *L_col = nullptr;
