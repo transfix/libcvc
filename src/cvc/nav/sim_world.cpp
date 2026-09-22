@@ -610,6 +610,21 @@ void sim_world::step(int num_threads) {
   }
   ++gstep_;
 
+  // ── base nav_stats fold (opt-in internal collector; pure C++, no Python) ──
+  // Everything the collector reads is final here: o_/th_/sp_ are post-drive AND
+  // post hard-de-overlap, mode_ is the FSM output, reached_ was just set, and
+  // minclr_ was filled by the drive. snapshot() gives the world-metre arrays;
+  // clearance must be METRES-double (min_clearance_world / scale), not the raw
+  // normalized minclr_.
+  if (stats_) {
+    snapshot(st_pos_.data(), st_head_.data(), st_spd_.data(), st_mode_.data(), st_reached_.data());
+    min_clearance_world(st_clr_.data()); // world metres, 1e29 sentinel preserved
+    for (int i = 0; i < n_; ++i)
+      st_clr_d_[i] = static_cast<double>(st_clr_[i]);
+    stats_->step(st_pos_.data(), st_head_.data(), st_spd_.data(), st_mode_.data(),
+                 st_reached_.data(), st_smp_);
+  }
+
   if (kProf) {
     accTotal += std::chrono::duration<double, std::milli>(clk::now() - tstart).count();
     if (++profTicks >= 120) {
@@ -749,6 +764,50 @@ void sim_world::min_clearance_world(float *out) const {
     const float c = (i < static_cast<int>(minclr_.size())) ? minclr_[i] : 1e30f;
     out[i] = (c >= 1e29f) ? c : c * inv;
   }
+}
+
+void sim_world::begin_nav_stats(const nav_stats_params &p, const budget_policy &b,
+                                std::string scene_id, unsigned seed, std::string checkpoint) {
+  st_pos_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  st_head_.assign(n_, 0.0f);
+  st_spd_.assign(n_, 0.0f);
+  st_mode_.assign(n_, 0);
+  st_reached_.assign(n_, 0);
+  st_clr_.assign(n_, 1e30f);
+  st_clr_d_.assign(n_, 1e30);
+  // start = CURRENT world pose, goal = goals_world() — the same world-metre frame the
+  // fold feeds step(). begin_episode seeds prev_pos to start_pos (so the first segment
+  // counts) and straight_m from start->goal, so arm BEFORE the first step().
+  snapshot(st_pos_.data(), nullptr, nullptr, nullptr, nullptr);
+  std::vector<float> goalw(static_cast<std::size_t>(2) * n_);
+  goals_world(goalw.data());
+  // penetration = vehicle CENTER in an occupied TRUTH cell (nav_stats.h). World (x,y):
+  // x -> column via min_x/cols, y -> row via min_y/rows — the material-gate / min_gap
+  // point-sample convention. Off-grid is treated as NOT occupied.
+  st_smp_ = nav_samplers{};
+  st_smp_.min_clearance_m = st_clr_d_.data();
+  st_smp_.material_id = nullptr; // deferred: sim_world exposes no per-point palette id
+  st_smp_.occupied = [this](double x, double y) -> bool {
+    if (cfg_.max_x <= cfg_.min_x || cfg_.max_y <= cfg_.min_y || cols_ < 1 || rows_ < 1)
+      return false;
+    const double sx = (cols_ - 1) / (cfg_.max_x - cfg_.min_x);
+    const double sy = (rows_ - 1) / (cfg_.max_y - cfg_.min_y);
+    const long c = std::lround((x - cfg_.min_x) * sx);
+    const long r = std::lround((y - cfg_.min_y) * sy);
+    if (r < 0 || c < 0 || r >= rows_ || c >= cols_)
+      return false;
+    return truth_[static_cast<std::size_t>(r) * cols_ + c] != 0;
+  };
+  stats_ = std::make_unique<nav_stats_collector>(p);
+  stats_->begin_episode(n_, static_cast<double>(cfg_.veh.dt), st_pos_.data(), goalw.data(), b,
+                        std::move(scene_id), seed, std::move(checkpoint));
+}
+
+episode_nav_stats sim_world::nav_stats() const {
+  if (!stats_)
+    throw std::runtime_error(
+        "cvc::nav::sim_world::nav_stats: not armed (call begin_nav_stats first)");
+  return stats_->finish();
 }
 
 void sim_world::set_vehicle_radii(const float *rr, const float *body_rr, int n) {

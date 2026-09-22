@@ -703,6 +703,97 @@ TEST(NavSimWorld, RunsFromPureCppAndAgentsProgress) {
   EXPECT_GT(measured, N / 2); // the drive measured clearance for most agents
 }
 
+TEST(NavSimWorld, BaseNavStatsArmedCollectsSaneFields) {
+  // The native path's base-stats source: an internal nav_stats_collector armed on the
+  // world, folded each step(). Same bordered-room-with-bar, arm BEFORE stepping.
+  const int R = 96, C = 96;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+  for (int r = R / 3; r < 2 * R / 3; ++r)
+    occ[r * C + C / 2] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  const int N = 32;
+
+  cvc::nav::sim_world world = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 7);
+  ASSERT_EQ(world.size(), N);
+
+  // Unarmed: nav_stats() throws and the flag is false.
+  EXPECT_FALSE(world.nav_stats_armed());
+  EXPECT_THROW(world.nav_stats(), std::exception);
+
+  cvc::nav::nav_stats_params p;
+  p.turn_event_rad = 0.2;
+  p.clear_safety_m = 2.0;
+  p.min_gap_m = 20.0; // world-metre pairwise-contact gate
+  world.begin_nav_stats(p, cvc::nav::budget_policy{}, "room", 7, "ckpt-native");
+  EXPECT_TRUE(world.nav_stats_armed());
+
+  const int STEPS = 300;
+  for (int t = 0; t < STEPS; ++t)
+    world.step(1); // thread-count-free for determinism
+
+  cvc::nav::episode_nav_stats e = world.nav_stats();
+  EXPECT_EQ(e.n_vehicles, N);
+  EXPECT_EQ(e.ticks, STEPS);
+  EXPECT_NEAR(e.dt_s, cfg.veh.dt, 1e-6);
+  EXPECT_EQ(e.scene_id, "room");
+  EXPECT_EQ(e.checkpoint, "ckpt-native");
+  ASSERT_EQ((int)e.per_vehicle.size(), N);
+
+  int measured_clr = 0, arrived = 0;
+  for (const auto &v : e.per_vehicle) {
+    EXPECT_GT(v.straight_m, 0.0); // start != goal
+    EXPECT_TRUE(std::isfinite(v.total_path_m) && v.total_path_m >= 0.0);
+    EXPECT_GE(v.turn_total_rad, 0.0);
+    EXPECT_GE(v.speed_max, 0.0);
+    EXPECT_GE(v.penetration_steps, 0);
+    EXPECT_NEAR(v.fuel_used, v.accel_integral, 1e-9);
+    if (v.arrived) {
+      ++arrived;
+      EXPECT_GT(v.time_to_goal_s, 0.0);
+      EXPECT_LE(v.time_to_goal_s, STEPS * cfg.veh.dt + 1e-6);
+    }
+    // clearance is in WORLD metres (min_clearance_world / the collector) — bounded by the
+    // world extent, never the 1e30 sentinel for a measured agent. The exact
+    // normalized->metres conversion is pinned by NavSimWorld's min_clearance_world test.
+    if (v.min_clearance_m < 1e29) {
+      ++measured_clr;
+      EXPECT_TRUE(std::isfinite(v.min_clearance_m));
+      EXPECT_LT(v.min_clearance_m, (cfg.max_x - cfg.min_x)); // < world width
+    }
+  }
+  EXPECT_EQ(e.arrived, arrived);
+  EXPECT_GT(measured_clr, 0); // the drive measured clearance for someone
+  EXPECT_GE(e.penetration_pct, 0.0);
+  EXPECT_LE(e.penetration_pct, 100.0);
+  EXPECT_TRUE(std::isfinite(e.min_sep_m)); // N > 1 -> lowered from the sentinel
+
+  // Determinism: an identically-seeded, identically-stepped world -> identical record.
+  cvc::nav::sim_world w2 = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 7);
+  w2.begin_nav_stats(p, cvc::nav::budget_policy{}, "room", 7, "ckpt-native");
+  for (int t = 0; t < STEPS; ++t)
+    w2.step(1);
+  EXPECT_EQ(e.to_json(), w2.nav_stats().to_json());
+}
+
 TEST(NavSimWorld, PerAgentRadiiOverrideFootprint) {
   // set_vehicle_radii lets a heterogeneous fleet drive with real per-vehicle footprints.
   // A uniform column set to the scalar rr must be byte-identical to the scalar path

@@ -27,6 +27,7 @@
 #include <cvc/nav/geom_rollout.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/material_train.h>
+#include <cvc/nav/nav_stats.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
 #include <memory>
@@ -1036,6 +1037,40 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   PyObject *nav_sim_world_retarget(PyObject *handle, int i, double gx_n, double gy_n) {
     sim_world_from(handle)->retarget(i, static_cast<float>(gx_n), static_cast<float>(gy_n));
     Py_RETURN_NONE;
+  }
+
+  // ── base nav_stats on the sim_world (internal collector) ────────────────────
+  // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as the
+  // episode start, so CALL RIGHT AFTER create (before the first step). contact_r is the
+  // pairwise-contact threshold in WORLD metres (0 = off). No GIL release (cheap: sizes
+  // buffers + one snapshot), so the SWIG->Python throw path is safe.
+  PyObject *nav_sim_world_begin_nav_stats(PyObject *handle, double speed_eps_mps = 0.10,
+                                          double turn_event_rad = 0.20, double clear_safety_m = 2.0,
+                                          double contact_r = 0.0, double time_budget_s = 0.0,
+                                          double eta_multiple = 0.0, double speed_ref_mps = 0.0,
+                                          double fuel_budget = 0.0, const char *scene_id = "",
+                                          unsigned seed = 0, const char *checkpoint = "") {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    cvc::nav::nav_stats_params p;
+    p.speed_eps_mps = speed_eps_mps;
+    p.turn_event_rad = turn_event_rad;
+    p.clear_safety_m = clear_safety_m;
+    p.min_gap_m = contact_r;
+    cvc::nav::budget_policy b;
+    b.time_budget_s = time_budget_s;
+    b.eta_multiple = eta_multiple;
+    b.speed_ref_mps = speed_ref_mps;
+    b.fuel_budget = fuel_budget;
+    sw->begin_nav_stats(p, b, scene_id ? scene_id : "", seed, checkpoint ? checkpoint : "");
+    Py_RETURN_NONE;
+  }
+
+  // Finish the internal collector -> the base episode record as a JSON string
+  // (episode_nav_stats::to_json; Python does json.loads). Throws (SWIG -> Python) if
+  // never armed. Owner-thread only. No GIL release, so the throw is safe.
+  PyObject *nav_sim_world_nav_stats(PyObject *handle) {
+    const std::string j = sim_world_from(handle)->nav_stats().to_json();
+    return PyUnicode_FromStringAndSize(j.data(), static_cast<Py_ssize_t>(j.size()));
   }
 
   // ── material on the sim_world (P2b) ─────────────────────────────────────────

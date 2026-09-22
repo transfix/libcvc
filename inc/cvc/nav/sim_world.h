@@ -42,6 +42,9 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/material.h>
+#include <cvc/nav/nav_stats.h>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -278,6 +281,20 @@ public:
   // while material is set.
   const std::uint8_t *material_gate_active() const { return mat_gate_active_.data(); }
 
+  // ── base nav_stats (opt-in internal collector, cvc/nav/nav_stats.h) ───────
+  // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as
+  // the episode start (so call this BEFORE the first step()) and goals_world() as
+  // the goal; every later step() then folds one collector tick — pure C++, no
+  // Python, so it is safe on the sim thread. Re-arming restarts the episode.
+  // Default off = byte-unchanged runs (the sep_radius / material pattern). This is
+  // the native path's base-stats source, the twin of the Python Swarm collector.
+  void begin_nav_stats(const nav_stats_params &p = {}, const budget_policy &b = {},
+                       std::string scene_id = "", unsigned seed = 0, std::string checkpoint = "");
+  // Finish + return the base episode record (throws if not armed). Owner-thread
+  // only — never call while a sim-thread worker is stepping.
+  episode_nav_stats nav_stats() const;
+  bool nav_stats_armed() const { return static_cast<bool>(stats_); }
+
 private:
   config cfg_;
   int n_ = 0, rows_ = 0, cols_ = 0, M_ = 1;
@@ -309,6 +326,15 @@ private:
   std::vector<float> turn_, dhit_, best_, init_;
   std::vector<float>
       minclr_; // [n] min footprint-wall clearance from the last step() (see min_clearance)
+
+  // Opt-in base nav_stats collector + its per-tick scratch (members = no per-step
+  // allocation). null stats_ = disarmed. See begin_nav_stats / the fold in step().
+  std::unique_ptr<nav_stats_collector> stats_;
+  std::vector<float> st_pos_, st_head_, st_spd_, st_clr_;
+  std::vector<int> st_mode_;
+  std::vector<std::uint8_t> st_reached_;
+  std::vector<double> st_clr_d_; // clearance in METRES (nav_samplers wants const double*)
+  nav_samplers st_smp_;          // occupied lambda + clearance ptr, built once at arm time
   std::vector<float> rr_col_, body_rr_col_; // [n] per-agent footprint radii (set_vehicle_radii)
   std::vector<float> mass_col_;             // [n] per-agent mass kg (set_vehicle_mass)
   std::vector<float> width_m_, length_m_;   // [n] per-agent dimensions metres (set_vehicle_dims_m)
