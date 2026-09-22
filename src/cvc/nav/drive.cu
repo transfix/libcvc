@@ -73,7 +73,33 @@ struct dev_veh {
   dev_grip grip;
   float mu_lookahead = 0.3f;
   int mu_probes = 3;
+  // Per-agent physics (heterogeneous fleet), device [n]; null = the scalar above, so the
+  // homogeneous path is bit-for-bit the legacy kernel. The kernel substitutes these into a
+  // per-thread copy before d_bicycle, so every use site (incl. the L-derived thresholds)
+  // becomes per-agent. Mass is not here — the kinematic drive never reads it.
+  const float *rr_col = nullptr;
+  const float *body_rr_col = nullptr;
+  const float *vmax_col = nullptr;
+  const float *a_max_col = nullptr;
+  const float *L_col = nullptr;
 };
+
+// Substitute the per-agent columns into a per-thread copy of v (null column => scalar),
+// so d_bicycle sees per-agent rr/body_rr/vmax/a_max/L with no change to its body.
+__device__ inline dev_veh d_veh_for(const dev_veh &v, int i) {
+  dev_veh vi = v;
+  if (v.rr_col)
+    vi.rr = v.rr_col[i];
+  if (v.body_rr_col)
+    vi.body_rr = v.body_rr_col[i];
+  if (v.vmax_col)
+    vi.vmax = v.vmax_col[i];
+  if (v.a_max_col)
+    vi.a_max = v.a_max_col[i];
+  if (v.L_col)
+    vi.L = v.L_col[i];
+  return vi;
+}
 
 // Bilinear sample (plane 0) + unit normal — mirrors drive.cpp sample_unit.
 // `plane` selects the belief plane in a [M,3,H,W] block (0 for the shared /
@@ -363,7 +389,7 @@ __global__ void drive_kernel(dev_field f, const int *map_id, float *o, float *th
   float coef[8];
   d_mlp(wdata, rows, cols, act, w_off, b_off, num_layers, out_bias_off, in, out, feat, coef);
   float mc;
-  d_bicycle(f, plane, ox, oy, thi, spi, cx, cy, coef[0], coef[1], coef[2], v, mc);
+  d_bicycle(f, plane, ox, oy, thi, spi, cx, cy, coef[0], coef[1], coef[2], d_veh_for(v, i), mc);
   o[2 * i] = ox;
   o[2 * i + 1] = oy;
   th[i] = thi;
@@ -441,6 +467,23 @@ void upload_refinements(const veh_params &vp, dev_veh &v, float *&d_body, float 
   }
 }
 
+// Per-agent physics columns (heterogeneous fleet). Uploads each set host column [n] to the
+// device and points v at it; a null host column stays null (the scalar path). owned[5] hold
+// the device buffers for the caller to cudaFree (order: rr, body_rr, vmax, a_max, L).
+template <class H2DFn>
+void upload_cols(const veh_params &vp, dev_veh &v, int n, float *owned[5], H2DFn &&H2D) {
+  const float *hosts[5] = {vp.rr_col, vp.body_rr_col, vp.vmax_col, vp.a_max_col, vp.L_col};
+  const float **devs[5] = {&v.rr_col, &v.body_rr_col, &v.vmax_col, &v.a_max_col, &v.L_col};
+  for (int k = 0; k < 5; ++k) {
+    owned[k] = nullptr;
+    if (hosts[k]) {
+      cuda_check(cudaMalloc(&owned[k], (size_t)n * sizeof(float)), "malloc veh col");
+      H2D(owned[k], hosts[k], (size_t)n * sizeof(float), "H2D veh col");
+      *devs[k] = owned[k];
+    }
+  }
+}
+
 // Bicycle rollout with GIVEN coefficients — the device twin of the CPU
 // bicycle_rollout. drive_kernel fuses coef_feats + the MLP + this; keeping an
 // unfused entry point lets the vehicle math be validated against torch without
@@ -455,7 +498,8 @@ __global__ void bicycle_kernel(dev_field f, const int *map_id, float *o, float *
   const int plane = map_id ? map_id[i] : 0;
   float ox = o[2 * i], oy = o[2 * i + 1], thi = th[i], spi = sp[i];
   float mc = 9.9f;
-  d_bicycle(f, plane, ox, oy, thi, spi, goal[2 * i], goal[2 * i + 1], al[i], be[i], ga[i], v, mc);
+  d_bicycle(f, plane, ox, oy, thi, spi, goal[2 * i], goal[2 * i + 1], al[i], be[i], ga[i],
+            d_veh_for(v, i), mc);
   o[2 * i] = ox;
   o[2 * i + 1] = oy;
   th[i] = thi;
@@ -529,6 +573,8 @@ void bicycle_rollout_cuda(const field_stack &f, float *o, float *th, float *sp, 
   dev_veh v;
   fill_dev_veh(vp, v);
   upload_refinements(vp, v, d_body, d_grip, H2D);
+  float *d_veh_cols[5];
+  upload_cols(vp, v, n, d_veh_cols, H2D);
 
   const int threads = 128, blocks = (n + threads - 1) / threads;
   bicycle_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), nullptr, d_o, d_th, d_sp, d_goal,
@@ -552,6 +598,8 @@ void bicycle_rollout_cuda(const field_stack &f, float *o, float *th, float *sp, 
   cudaFree(d_mc);
   cudaFree(d_body); // cudaFree(nullptr) is a documented no-op
   cudaFree(d_grip);
+  for (int k = 0; k < 5; ++k)
+    cudaFree(d_veh_cols[k]);
 }
 
 void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
@@ -613,6 +661,8 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   fill_dev_veh(vp, v);
   float *d_boff_body = nullptr, *d_grip = nullptr;
   upload_refinements(vp, v, d_boff_body, d_grip, H2D);
+  float *d_veh_cols[5];
+  upload_cols(vp, v, n, d_veh_cols, H2D);
 
   const int threads = 128, blocks = (n + threads - 1) / threads;
   drive_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), nullptr, d_o, d_th, d_sp, d_car, d_w,
@@ -641,6 +691,8 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   cudaFree(d_boff);
   cudaFree(d_boff_body); // cudaFree(nullptr) is a documented no-op
   cudaFree(d_grip);
+  for (int k = 0; k < 5; ++k)
+    cudaFree(d_veh_cols[k]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
