@@ -694,6 +694,211 @@ TEST(NavSimWorld, RunsFromPureCppAndAgentsProgress) {
   EXPECT_GT(measured, N / 2); // the drive measured clearance for most agents
 }
 
+TEST(NavSimWorld, PerAgentRadiiOverrideFootprint) {
+  // set_vehicle_radii lets a heterogeneous fleet drive with real per-vehicle footprints.
+  // A uniform column set to the scalar rr must be byte-identical to the scalar path
+  // (parity); a bigger column must actually change the drive.
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = R / 3; r < 2 * R / 3; ++r)
+    occ[(std::size_t)r * C + C / 2] = 1; // a wall to drive around
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -200;
+  cfg.min_y = -200;
+  cfg.max_x = 200;
+  cfg.max_y = 200;
+  cfg.scale = 0.04;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  const int N = 64;
+
+  auto make = [&]() {
+    return cvc::nav::sim_world::from_occupancy(cfg, occ.data(),
+                                               cvc::nav::coef_mlp::default_biased(), N, 3);
+  };
+  auto run = [&](cvc::nav::sim_world &w) {
+    for (int t = 0; t < 60; ++t)
+      w.step(1);
+    std::vector<float> pos(2 * N), hd(N), sp(N), clr(N);
+    std::vector<int> md(N);
+    std::vector<std::uint8_t> rc(N);
+    w.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+    w.min_clearance(clr.data());
+    return std::make_pair(pos, clr);
+  };
+
+  cvc::nav::sim_world A = make();
+  auto rA = run(A);
+
+  // Uniform column == the scalar rr -> byte-identical positions + clearance (parity).
+  cvc::nav::sim_world B = make();
+  std::vector<float> uni(N, cfg.veh.rr);
+  B.set_vehicle_radii(uni.data(), nullptr, N);
+  auto rB = run(B);
+  for (int i = 0; i < 2 * N; ++i)
+    EXPECT_FLOAT_EQ(rA.first[i], rB.first[i]);
+  for (int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(rA.second[i], rB.second[i]);
+
+  // A bigger footprint changes the drive (at least one agent's trajectory differs).
+  cvc::nav::sim_world Cw = make();
+  std::vector<float> big(N, 0.30f);
+  Cw.set_vehicle_radii(big.data(), nullptr, N);
+  auto rC = run(Cw);
+  bool changed = false;
+  for (int i = 0; i < 2 * N && !changed; ++i)
+    if (std::fabs(rA.first[i] - rC.first[i]) > 1e-4f)
+      changed = true;
+  EXPECT_TRUE(changed);
+}
+
+TEST(NavSimWorld, PerAgentMassAndDims) {
+  // Per-agent mass round-trips (metadata for the fuel model; the kinematic drive ignores
+  // it); per-agent width DERIVES the footprint, so a wider fleet drives differently.
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = R / 3; r < 2 * R / 3; ++r)
+    occ[(std::size_t)r * C + C / 2] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -200;
+  cfg.min_y = -200;
+  cfg.max_x = 200;
+  cfg.max_y = 200;
+  cfg.scale = 0.04;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.veh.mass = 1.0f;
+  cfg.freeze_sense = true;
+  const int N = 32;
+  auto make = [&]() {
+    return cvc::nav::sim_world::from_occupancy(cfg, occ.data(),
+                                               cvc::nav::coef_mlp::default_biased(), N, 3);
+  };
+
+  // Mass round-trip.
+  cvc::nav::sim_world w = make();
+  std::vector<float> masses(N);
+  for (int i = 0; i < N; ++i)
+    masses[i] = 1000.0f + 10.0f * i;
+  w.set_vehicle_mass(masses.data(), N);
+  std::vector<float> mout(N, -1.0f);
+  w.vehicle_mass(mout.data());
+  for (int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(mout[i], masses[i]);
+  w.set_vehicle_mass(nullptr, 0); // clear -> scalar
+  w.vehicle_mass(mout.data());
+  for (int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(mout[i], cfg.veh.mass);
+
+  auto run = [&](cvc::nav::sim_world &sw) {
+    for (int t = 0; t < 60; ++t)
+      sw.step(1);
+    std::vector<float> pos(2 * N), hd(N), sp(N);
+    std::vector<int> md(N);
+    std::vector<std::uint8_t> rc(N);
+    sw.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+    return pos;
+  };
+
+  cvc::nav::sim_world base = make();
+  std::vector<float> posBase = run(base);
+
+  // Wide vehicles: width/length round-trip AND the derived footprint changes the drive.
+  cvc::nav::sim_world wide = make();
+  std::vector<float> widths(N, 15.0f), lengths(N, 30.0f); // metres
+  wide.set_vehicle_dims_m(widths.data(), lengths.data(), N);
+  std::vector<float> wout(N, -1.0f), lout(N, -1.0f);
+  wide.vehicle_dims_m(wout.data(), lout.data());
+  for (int i = 0; i < N; ++i) {
+    EXPECT_FLOAT_EQ(wout[i], 15.0f);
+    EXPECT_FLOAT_EQ(lout[i], 30.0f);
+  }
+  std::vector<float> posWide = run(wide);
+  bool changed = false;
+  for (int i = 0; i < 2 * N && !changed; ++i)
+    if (std::fabs(posBase[i] - posWide[i]) > 1e-4f)
+      changed = true;
+  EXPECT_TRUE(changed); // width -> footprint -> drive
+}
+
+TEST(NavSimWorld, PerAgentKinematics) {
+  // Per-agent vmax/a_max/L round-trip, and a lower per-agent vmax actually caps speed.
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -200;
+  cfg.min_y = -200;
+  cfg.max_x = 200;
+  cfg.max_y = 200;
+  cfg.scale = 0.04;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.veh.vmax = 0.9f;
+  cfg.veh.a_max = 1.5f;
+  cfg.veh.L = 0.035f;
+  cfg.freeze_sense = true;
+  const int N = 32;
+  auto make = [&]() {
+    return cvc::nav::sim_world::from_occupancy(cfg, occ.data(),
+                                               cvc::nav::coef_mlp::default_biased(), N, 5);
+  };
+
+  // Round-trip.
+  cvc::nav::sim_world w = make();
+  std::vector<float> vm(N, 0.6f), am(N, 2.0f), ll(N, 0.05f);
+  w.set_vehicle_kinematics(vm.data(), am.data(), ll.data(), N);
+  std::vector<float> vo(N, -1), ao(N, -1), lo(N, -1);
+  w.vehicle_kinematics(vo.data(), ao.data(), lo.data());
+  for (int i = 0; i < N; ++i) {
+    EXPECT_FLOAT_EQ(vo[i], 0.6f);
+    EXPECT_FLOAT_EQ(ao[i], 2.0f);
+    EXPECT_FLOAT_EQ(lo[i], 0.05f);
+  }
+  w.set_vehicle_kinematics(nullptr, nullptr, nullptr, 0); // clear -> scalars
+  w.vehicle_kinematics(vo.data(), ao.data(), lo.data());
+  for (int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(vo[i], cfg.veh.vmax);
+
+  auto peak_speed = [&](cvc::nav::sim_world &sw) {
+    float mx = 0.0f;
+    std::vector<float> pos(2 * N), hd(N), sp(N);
+    std::vector<int> md(N);
+    std::vector<std::uint8_t> rc(N);
+    for (int t = 0; t < 40; ++t) {
+      sw.step(1);
+      sw.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+      for (int i = 0; i < N; ++i)
+        mx = std::max(mx, std::fabs(sp[i]));
+    }
+    return mx;
+  };
+
+  cvc::nav::sim_world fast = make();
+  const float peakFast = peak_speed(fast);
+  cvc::nav::sim_world slow = make();
+  std::vector<float> lowv(N, 0.25f); // well under the 0.9 scalar (world m/s = value / scale)
+  slow.set_vehicle_kinematics(lowv.data(), nullptr, nullptr, N);
+  const float peakSlow = peak_speed(slow);
+  // snapshot speed is world m/s (normalized/scale); the per-agent vmax caps it lower.
+  EXPECT_LT(peakSlow, peakFast);
+  EXPECT_LT(peakSlow, 0.25f / (float)cfg.scale + 1e-3f); // never exceeds the per-agent vmax
+}
+
 TEST(NavSimWorld, DefaultBiasedPolicyGivesTheBasisCoefficients) {
   // Zero linear weights => net == 0 => coeffs are the constant bias basin.
   cvc::nav::coef_mlp m = cvc::nav::coef_mlp::default_biased();

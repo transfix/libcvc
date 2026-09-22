@@ -740,6 +740,106 @@ void sim_world::min_clearance(float *out) const {
     out[i] = (i < static_cast<int>(minclr_.size())) ? minclr_[i] : 1e30f;
 }
 
+void sim_world::set_vehicle_radii(const float *rr, const float *body_rr, int n) {
+  if (!rr || n <= 0) {
+    clear_vehicle_radii();
+    return;
+  }
+  const int m = std::min(n, n_);
+  rr_col_.assign(rr, rr + m);
+  rr_col_.resize(n_, cfg_.veh.rr); // pad any tail with the scalar (never a stale/garbage read)
+  cfg_.veh.rr_col = rr_col_.data();
+  if (body_rr) {
+    body_rr_col_.assign(body_rr, body_rr + m);
+    body_rr_col_.resize(n_, cfg_.veh.body_rr);
+    cfg_.veh.body_rr_col = body_rr_col_.data();
+  } else {
+    body_rr_col_.clear();
+    cfg_.veh.body_rr_col = nullptr;
+  }
+}
+
+void sim_world::set_vehicle_mass(const float *mass, int n) {
+  if (!mass || n <= 0) {
+    mass_col_.clear();
+    cfg_.veh.mass_col = nullptr;
+    return;
+  }
+  const int m = std::min(n, n_);
+  mass_col_.assign(mass, mass + m);
+  mass_col_.resize(n_, cfg_.veh.mass); // pad the tail with the scalar
+  cfg_.veh.mass_col = mass_col_.data();
+}
+
+void sim_world::vehicle_mass(float *out) const {
+  for (int i = 0; i < n_; ++i)
+    out[i] = (i < static_cast<int>(mass_col_.size())) ? mass_col_[i] : cfg_.veh.mass;
+}
+
+void sim_world::set_vehicle_dims_m(const float *width_m, const float *length_m, int n) {
+  if (!width_m || n <= 0) {
+    width_m_.clear();
+    length_m_.clear();
+    clear_vehicle_radii(); // derived footprint back to the scalar
+    return;
+  }
+  const int m = std::min(n, n_);
+  width_m_.assign(width_m, width_m + m);
+  width_m_.resize(n_, 0.0f);
+  if (length_m) {
+    length_m_.assign(length_m, length_m + m);
+    length_m_.resize(n_, 0.0f);
+  } else {
+    length_m_.clear();
+  }
+  // Derive the per-agent footprint radius from half the width, in normalized units
+  // (norm = world * scale), so a wider vehicle drives with a larger clearance disc.
+  rr_col_.assign(n_, cfg_.veh.rr);
+  for (int i = 0; i < n_; ++i)
+    if (width_m_[i] > 0.0f)
+      rr_col_[i] = static_cast<float>(0.5 * width_m_[i] * cfg_.scale);
+  cfg_.veh.rr_col = rr_col_.data();
+}
+
+void sim_world::vehicle_dims_m(float *w_out, float *l_out) const {
+  for (int i = 0; i < n_; ++i) {
+    if (w_out)
+      w_out[i] = (i < static_cast<int>(width_m_.size())) ? width_m_[i] : 0.0f;
+    if (l_out)
+      l_out[i] = (i < static_cast<int>(length_m_.size())) ? length_m_[i] : 0.0f;
+  }
+}
+
+void sim_world::set_vehicle_kinematics(const float *vmax, const float *a_max, const float *L,
+                                       int n) {
+  const int m = (n > 0) ? std::min(n, n_) : 0;
+  auto set_col = [&](const float *src, std::vector<float> &col, const float *&cfg_ptr,
+                     float scalar) {
+    if (!src || m <= 0) {
+      col.clear();
+      cfg_ptr = nullptr;
+      return;
+    }
+    col.assign(src, src + m);
+    col.resize(n_, scalar); // pad the tail with the scalar
+    cfg_ptr = col.data();
+  };
+  set_col(vmax, vmax_col_, cfg_.veh.vmax_col, cfg_.veh.vmax);
+  set_col(a_max, a_max_col_, cfg_.veh.a_max_col, cfg_.veh.a_max);
+  set_col(L, L_col_, cfg_.veh.L_col, cfg_.veh.L);
+}
+
+void sim_world::vehicle_kinematics(float *vmax_out, float *a_max_out, float *L_out) const {
+  for (int i = 0; i < n_; ++i) {
+    if (vmax_out)
+      vmax_out[i] = (i < static_cast<int>(vmax_col_.size())) ? vmax_col_[i] : cfg_.veh.vmax;
+    if (a_max_out)
+      a_max_out[i] = (i < static_cast<int>(a_max_col_.size())) ? a_max_col_[i] : cfg_.veh.a_max;
+    if (L_out)
+      L_out[i] = (i < static_cast<int>(L_col_.size())) ? L_col_[i] : cfg_.veh.L;
+  }
+}
+
 void sim_world::retarget(int i, float gx_n, float gy_n) {
   if (i < 0 || i >= n_)
     return;
