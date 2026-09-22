@@ -1109,10 +1109,13 @@ def _typed_node(sg, name):
 %pythonappend cvc::gl::ViewportManager::activeViewport %{
     if val is not None: val._pycvc_keepalive = self
 %}
+// addSceneViewport is a named-parameter proxy (no *args), so reference the
+// `scene` argument by name — `args` is undefined here (only the *args ctor
+// wrappers get it), which raised NameError the moment a viewport was added.
 %pythonappend cvc::gl::ViewportManager::addSceneViewport %{
     if val is not None:
         val._pycvc_keepalive = self
-        if len(args) > 1: val._pycvc_scene = args[1]
+        val._pycvc_scene = scene
 %}
 %pythonappend cvc::gl::ViewportManager::addMirrorViewport %{
     if val is not None: val._pycvc_keepalive = self
