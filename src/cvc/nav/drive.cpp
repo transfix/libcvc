@@ -245,14 +245,12 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
                   const veh_params &v, const material_drive *mat, const ext_force *ext,
                   float *minclr_out, int num_threads, thread_pool *pool = nullptr) {
   const float hdt = v.dt / static_cast<float>(v.nsub);
-  const float rr = v.rr, d_hat = v.d_hat, vmax = v.vmax, L = v.L;
-  // t == 0 returns delta_max unchanged, so tan_dmax and every threshold built
-  // from it stay bit-identical on the legacy path.
-  const float dmax = locked_delta_max(v.L, v.delta_max, v.track_width);
-  const float tan_dmax = std::tan(dmax);
-  const float a_max = v.a_max, a_lat_max = v.a_lat_max, k_steer = v.k_steer;
-  const float sp_min = v.allow_reverse ? -0.25f * vmax : 0.0f;
-  const float v_creep_cap = 0.5f * std::sqrt(a_lat_max * L / tan_dmax);
+  const float rr = v.rr, d_hat = v.d_hat;
+  // vmax / a_max / L (and the L-derived dmax / tan_dmax / v_creep_cap and the vmax-derived
+  // sp_min) are computed PER AGENT inside the lambda below so a heterogeneous fleet can
+  // carry different kinematics; a null column reproduces v.vmax / v.a_max / v.L, so the
+  // homogeneous path stays bit-identical (t == 0 => delta_max unchanged, same as before).
+  const float a_lat_max = v.a_lat_max, k_steer = v.k_steer;
   const bool has_fp = v.n_body > 0 && v.body_offsets != nullptr;
   const bool has_grip = v.grip != nullptr && v.grip->data != nullptr;
 
@@ -266,6 +264,16 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     // so the homogeneous path is byte-identical.
     const float rr_i = v.rr_col ? v.rr_col[i] : rr;
     const float body_rr_i = v.body_rr_col ? v.body_rr_col[i] : v.body_rr;
+    // Per-agent kinematics: these SHADOW the vmax/a_max/L names the loop body uses, so a
+    // null column gives the scalar with byte-identical float ops (incl. the L-derived
+    // dmax/tan_dmax/v_creep_cap and the vmax-derived sp_min).
+    const float vmax = v.vmax_col ? v.vmax_col[i] : v.vmax;
+    const float a_max = v.a_max_col ? v.a_max_col[i] : v.a_max;
+    const float L = v.L_col ? v.L_col[i] : v.L;
+    const float dmax = locked_delta_max(L, v.delta_max, v.track_width);
+    const float tan_dmax = std::tan(dmax);
+    const float sp_min = v.allow_reverse ? -0.25f * vmax : 0.0f;
+    const float v_creep_cap = 0.5f * std::sqrt(a_lat_max * L / tan_dmax);
     float minclr = 9.9f;
 
     for (int s = 0; s < v.nsub; ++s) {

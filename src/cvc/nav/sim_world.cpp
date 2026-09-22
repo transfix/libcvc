@@ -810,6 +810,36 @@ void sim_world::vehicle_dims_m(float *w_out, float *l_out) const {
   }
 }
 
+void sim_world::set_vehicle_kinematics(const float *vmax, const float *a_max, const float *L,
+                                       int n) {
+  const int m = (n > 0) ? std::min(n, n_) : 0;
+  auto set_col = [&](const float *src, std::vector<float> &col, const float *&cfg_ptr,
+                     float scalar) {
+    if (!src || m <= 0) {
+      col.clear();
+      cfg_ptr = nullptr;
+      return;
+    }
+    col.assign(src, src + m);
+    col.resize(n_, scalar); // pad the tail with the scalar
+    cfg_ptr = col.data();
+  };
+  set_col(vmax, vmax_col_, cfg_.veh.vmax_col, cfg_.veh.vmax);
+  set_col(a_max, a_max_col_, cfg_.veh.a_max_col, cfg_.veh.a_max);
+  set_col(L, L_col_, cfg_.veh.L_col, cfg_.veh.L);
+}
+
+void sim_world::vehicle_kinematics(float *vmax_out, float *a_max_out, float *L_out) const {
+  for (int i = 0; i < n_; ++i) {
+    if (vmax_out)
+      vmax_out[i] = (i < static_cast<int>(vmax_col_.size())) ? vmax_col_[i] : cfg_.veh.vmax;
+    if (a_max_out)
+      a_max_out[i] = (i < static_cast<int>(a_max_col_.size())) ? a_max_col_[i] : cfg_.veh.a_max;
+    if (L_out)
+      L_out[i] = (i < static_cast<int>(L_col_.size())) ? L_col_[i] : cfg_.veh.L;
+  }
+}
+
 void sim_world::retarget(int i, float gx_n, float gy_n) {
   if (i < 0 || i >= n_)
     return;

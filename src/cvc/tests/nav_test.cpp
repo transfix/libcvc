@@ -832,6 +832,73 @@ TEST(NavSimWorld, PerAgentMassAndDims) {
   EXPECT_TRUE(changed); // width -> footprint -> drive
 }
 
+TEST(NavSimWorld, PerAgentKinematics) {
+  // Per-agent vmax/a_max/L round-trip, and a lower per-agent vmax actually caps speed.
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -200;
+  cfg.min_y = -200;
+  cfg.max_x = 200;
+  cfg.max_y = 200;
+  cfg.scale = 0.04;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.veh.vmax = 0.9f;
+  cfg.veh.a_max = 1.5f;
+  cfg.veh.L = 0.035f;
+  cfg.freeze_sense = true;
+  const int N = 32;
+  auto make = [&]() {
+    return cvc::nav::sim_world::from_occupancy(cfg, occ.data(),
+                                               cvc::nav::coef_mlp::default_biased(), N, 5);
+  };
+
+  // Round-trip.
+  cvc::nav::sim_world w = make();
+  std::vector<float> vm(N, 0.6f), am(N, 2.0f), ll(N, 0.05f);
+  w.set_vehicle_kinematics(vm.data(), am.data(), ll.data(), N);
+  std::vector<float> vo(N, -1), ao(N, -1), lo(N, -1);
+  w.vehicle_kinematics(vo.data(), ao.data(), lo.data());
+  for (int i = 0; i < N; ++i) {
+    EXPECT_FLOAT_EQ(vo[i], 0.6f);
+    EXPECT_FLOAT_EQ(ao[i], 2.0f);
+    EXPECT_FLOAT_EQ(lo[i], 0.05f);
+  }
+  w.set_vehicle_kinematics(nullptr, nullptr, nullptr, 0); // clear -> scalars
+  w.vehicle_kinematics(vo.data(), ao.data(), lo.data());
+  for (int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(vo[i], cfg.veh.vmax);
+
+  auto peak_speed = [&](cvc::nav::sim_world &sw) {
+    float mx = 0.0f;
+    std::vector<float> pos(2 * N), hd(N), sp(N);
+    std::vector<int> md(N);
+    std::vector<std::uint8_t> rc(N);
+    for (int t = 0; t < 40; ++t) {
+      sw.step(1);
+      sw.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+      for (int i = 0; i < N; ++i)
+        mx = std::max(mx, std::fabs(sp[i]));
+    }
+    return mx;
+  };
+
+  cvc::nav::sim_world fast = make();
+  const float peakFast = peak_speed(fast);
+  cvc::nav::sim_world slow = make();
+  std::vector<float> lowv(N, 0.25f); // well under the 0.9 scalar (world m/s = value / scale)
+  slow.set_vehicle_kinematics(lowv.data(), nullptr, nullptr, N);
+  const float peakSlow = peak_speed(slow);
+  // snapshot speed is world m/s (normalized/scale); the per-agent vmax caps it lower.
+  EXPECT_LT(peakSlow, peakFast);
+  EXPECT_LT(peakSlow, 0.25f / (float)cfg.scale + 1e-3f); // never exceeds the per-agent vmax
+}
+
 TEST(NavSimWorld, DefaultBiasedPolicyGivesTheBasisCoefficients) {
   // Zero linear weights => net == 0 => coeffs are the constant bias basin.
   cvc::nav::coef_mlp m = cvc::nav::coef_mlp::default_biased();

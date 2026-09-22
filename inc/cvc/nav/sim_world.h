@@ -177,6 +177,14 @@ public:
   // Read back per-agent width/length metres into w_out[n]/l_out[n] (either may be null).
   void vehicle_dims_m(float *w_out, float *l_out) const;
 
+  // Per-agent KINEMATICS ([n]): top speed (normalized m/s), longitudinal accel limit, and
+  // wheelbase L (normalized), overriding the shared cfg.veh.vmax / a_max / L for agent i.
+  // Any of the three pointers may be null to keep that param at the scalar. Copied in;
+  // owned here. Pass all three null to clear back to the homogeneous scalars.
+  void set_vehicle_kinematics(const float *vmax, const float *a_max, const float *L, int n);
+  // Read back per-agent vmax/a_max/L into the given [n] buffers (any may be null).
+  void vehicle_kinematics(float *vmax_out, float *a_max_out, float *L_out) const;
+
   int size() const { return n_; }
   int planes() const { return M_; } // belief-plane count (M): 1 shared, N private
   int rows() const { return rows_; }
@@ -298,6 +306,8 @@ private:
   std::vector<float> rr_col_, body_rr_col_; // [n] per-agent footprint radii (set_vehicle_radii)
   std::vector<float> mass_col_;             // [n] per-agent mass kg (set_vehicle_mass)
   std::vector<float> width_m_, length_m_;   // [n] per-agent dimensions metres (set_vehicle_dims_m)
+  std::vector<float> vmax_col_, a_max_col_,
+      L_col_; // [n] per-agent kinematics (set_vehicle_kinematics)
   std::vector<std::uint8_t> we_valid_, tracking_, parked_, reached_, active_;
 
   // material state (set_material; inert while mat_on_ == false)

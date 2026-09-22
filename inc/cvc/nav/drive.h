@@ -176,6 +176,17 @@ struct veh_params {
   float mass = 1.0f;
   const float *mass_col = nullptr;
 
+  // PER-AGENT KINEMATICS (heterogeneous fleet). Null (default) = every agent uses the
+  // scalar vmax / a_max / L above. When set, vmax_col[i] / a_max_col[i] / L_col[i]
+  // (borrowed [n]) override them for agent i, so a slow heavy truck and a nimble scout
+  // drive with different top speed, acceleration and turning. L feeds the steer lock and
+  // curvature; the drive recomputes the L-derived thresholds per agent. A null column
+  // reproduces the scalar float exactly, so the homogeneous + CPU<->CUDA parity paths are
+  // unchanged; only the CPU rollout reads these (CUDA falls back to the scalar).
+  const float *vmax_col = nullptr;
+  const float *a_max_col = nullptr;
+  const float *L_col = nullptr;
+
   // STEERING LOCK. 0 = none. The bicycle's `delta` is the virtual centre-wheel
   // angle; on a real Ackermann axle the INNER wheel reaches the mechanical lock
   // first, so the achievable virtual angle is atan(L/(L/tan(delta_max)+t/2)).
