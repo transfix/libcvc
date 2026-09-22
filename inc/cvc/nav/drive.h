@@ -169,6 +169,13 @@ struct veh_params {
   const float *rr_col = nullptr;      // [n], overrides rr for the single-disc footprint
   const float *body_rr_col = nullptr; // [n], overrides body_rr for the multi-disc footprint
 
+  // MASS (kg). The kinematic bicycle has no dynamics, so the drive itself does NOT read
+  // mass; it is carried for the downstream fuel model (fuel = f(accel, mass, material))
+  // and per-vehicle telemetry. `mass_col` (borrowed [n]) overrides it per agent for a
+  // mixed fleet; null = the shared scalar. Default 1 keeps any mass-weighted term inert.
+  float mass = 1.0f;
+  const float *mass_col = nullptr;
+
   // STEERING LOCK. 0 = none. The bicycle's `delta` is the virtual centre-wheel
   // angle; on a real Ackermann axle the INNER wheel reaches the mechanical lock
   // first, so the achievable virtual angle is atan(L/(L/tan(delta_max)+t/2)).

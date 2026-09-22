@@ -163,6 +163,20 @@ public:
     cfg_.veh.body_rr_col = nullptr;
   }
 
+  // Per-agent MASS (kg, [n]). The kinematic drive ignores mass; this is carried for the
+  // fuel model + telemetry. Copied in; owned here. Pass mass==nullptr to clear.
+  void set_vehicle_mass(const float *mass, int n);
+  // Read back per-agent mass into out[n] (the scalar cfg.veh.mass where no column is set).
+  void vehicle_mass(float *out) const;
+
+  // Per-agent DIMENSIONS (metres, [n]): width feeds corridor-fit AND derives the drive
+  // footprint (rr[i] = width_m[i]/2 in normalized units, so a wider vehicle keeps more
+  // clearance); length is carried for corridor-fit / telemetry. Pass width_m==nullptr to
+  // clear the derived footprint back to the scalar. length_m may be null.
+  void set_vehicle_dims_m(const float *width_m, const float *length_m, int n);
+  // Read back per-agent width/length metres into w_out[n]/l_out[n] (either may be null).
+  void vehicle_dims_m(float *w_out, float *l_out) const;
+
   int size() const { return n_; }
   int planes() const { return M_; } // belief-plane count (M): 1 shared, N private
   int rows() const { return rows_; }
@@ -282,6 +296,8 @@ private:
   std::vector<float>
       minclr_; // [n] min footprint-wall clearance from the last step() (see min_clearance)
   std::vector<float> rr_col_, body_rr_col_; // [n] per-agent footprint radii (set_vehicle_radii)
+  std::vector<float> mass_col_;             // [n] per-agent mass kg (set_vehicle_mass)
+  std::vector<float> width_m_, length_m_;   // [n] per-agent dimensions metres (set_vehicle_dims_m)
   std::vector<std::uint8_t> we_valid_, tracking_, parked_, reached_, active_;
 
   // material state (set_material; inert while mat_on_ == false)

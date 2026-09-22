@@ -758,6 +758,80 @@ TEST(NavSimWorld, PerAgentRadiiOverrideFootprint) {
   EXPECT_TRUE(changed);
 }
 
+TEST(NavSimWorld, PerAgentMassAndDims) {
+  // Per-agent mass round-trips (metadata for the fuel model; the kinematic drive ignores
+  // it); per-agent width DERIVES the footprint, so a wider fleet drives differently.
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = R / 3; r < 2 * R / 3; ++r)
+    occ[(std::size_t)r * C + C / 2] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -200;
+  cfg.min_y = -200;
+  cfg.max_x = 200;
+  cfg.max_y = 200;
+  cfg.scale = 0.04;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.veh.mass = 1.0f;
+  cfg.freeze_sense = true;
+  const int N = 32;
+  auto make = [&]() {
+    return cvc::nav::sim_world::from_occupancy(cfg, occ.data(),
+                                               cvc::nav::coef_mlp::default_biased(), N, 3);
+  };
+
+  // Mass round-trip.
+  cvc::nav::sim_world w = make();
+  std::vector<float> masses(N);
+  for (int i = 0; i < N; ++i)
+    masses[i] = 1000.0f + 10.0f * i;
+  w.set_vehicle_mass(masses.data(), N);
+  std::vector<float> mout(N, -1.0f);
+  w.vehicle_mass(mout.data());
+  for (int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(mout[i], masses[i]);
+  w.set_vehicle_mass(nullptr, 0); // clear -> scalar
+  w.vehicle_mass(mout.data());
+  for (int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(mout[i], cfg.veh.mass);
+
+  auto run = [&](cvc::nav::sim_world &sw) {
+    for (int t = 0; t < 60; ++t)
+      sw.step(1);
+    std::vector<float> pos(2 * N), hd(N), sp(N);
+    std::vector<int> md(N);
+    std::vector<std::uint8_t> rc(N);
+    sw.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+    return pos;
+  };
+
+  cvc::nav::sim_world base = make();
+  std::vector<float> posBase = run(base);
+
+  // Wide vehicles: width/length round-trip AND the derived footprint changes the drive.
+  cvc::nav::sim_world wide = make();
+  std::vector<float> widths(N, 15.0f), lengths(N, 30.0f); // metres
+  wide.set_vehicle_dims_m(widths.data(), lengths.data(), N);
+  std::vector<float> wout(N, -1.0f), lout(N, -1.0f);
+  wide.vehicle_dims_m(wout.data(), lout.data());
+  for (int i = 0; i < N; ++i) {
+    EXPECT_FLOAT_EQ(wout[i], 15.0f);
+    EXPECT_FLOAT_EQ(lout[i], 30.0f);
+  }
+  std::vector<float> posWide = run(wide);
+  bool changed = false;
+  for (int i = 0; i < 2 * N && !changed; ++i)
+    if (std::fabs(posBase[i] - posWide[i]) > 1e-4f)
+      changed = true;
+  EXPECT_TRUE(changed); // width -> footprint -> drive
+}
+
 TEST(NavSimWorld, DefaultBiasedPolicyGivesTheBasisCoefficients) {
   // Zero linear weights => net == 0 => coeffs are the constant bias basin.
   cvc::nav::coef_mlp m = cvc::nav::coef_mlp::default_biased();

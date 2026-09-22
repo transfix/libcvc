@@ -759,6 +759,57 @@ void sim_world::set_vehicle_radii(const float *rr, const float *body_rr, int n) 
   }
 }
 
+void sim_world::set_vehicle_mass(const float *mass, int n) {
+  if (!mass || n <= 0) {
+    mass_col_.clear();
+    cfg_.veh.mass_col = nullptr;
+    return;
+  }
+  const int m = std::min(n, n_);
+  mass_col_.assign(mass, mass + m);
+  mass_col_.resize(n_, cfg_.veh.mass); // pad the tail with the scalar
+  cfg_.veh.mass_col = mass_col_.data();
+}
+
+void sim_world::vehicle_mass(float *out) const {
+  for (int i = 0; i < n_; ++i)
+    out[i] = (i < static_cast<int>(mass_col_.size())) ? mass_col_[i] : cfg_.veh.mass;
+}
+
+void sim_world::set_vehicle_dims_m(const float *width_m, const float *length_m, int n) {
+  if (!width_m || n <= 0) {
+    width_m_.clear();
+    length_m_.clear();
+    clear_vehicle_radii(); // derived footprint back to the scalar
+    return;
+  }
+  const int m = std::min(n, n_);
+  width_m_.assign(width_m, width_m + m);
+  width_m_.resize(n_, 0.0f);
+  if (length_m) {
+    length_m_.assign(length_m, length_m + m);
+    length_m_.resize(n_, 0.0f);
+  } else {
+    length_m_.clear();
+  }
+  // Derive the per-agent footprint radius from half the width, in normalized units
+  // (norm = world * scale), so a wider vehicle drives with a larger clearance disc.
+  rr_col_.assign(n_, cfg_.veh.rr);
+  for (int i = 0; i < n_; ++i)
+    if (width_m_[i] > 0.0f)
+      rr_col_[i] = static_cast<float>(0.5 * width_m_[i] * cfg_.scale);
+  cfg_.veh.rr_col = rr_col_.data();
+}
+
+void sim_world::vehicle_dims_m(float *w_out, float *l_out) const {
+  for (int i = 0; i < n_; ++i) {
+    if (w_out)
+      w_out[i] = (i < static_cast<int>(width_m_.size())) ? width_m_[i] : 0.0f;
+    if (l_out)
+      l_out[i] = (i < static_cast<int>(length_m_.size())) ? length_m_[i] : 0.0f;
+  }
+}
+
 void sim_world::retarget(int i, float gx_n, float gy_n) {
   if (i < 0 || i >= n_)
     return;
