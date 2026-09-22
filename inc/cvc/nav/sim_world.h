@@ -215,6 +215,12 @@ public:
   // exposes it instead of discarding it. `out` is [n]; before the first step()
   // it is filled with a large sentinel (no clearance measured yet).
   void min_clearance(float *out) const;
+  // Same, but in WORLD metres (min_clearance() / cfg.scale), matching the
+  // goals_world()/carrots_world() convention so a metres-based consumer (nav_stats)
+  // reads clearance directly instead of hand-converting. The unmeasured sentinel is
+  // preserved verbatim (not scaled), so it stays recognizable to a sentinel guard.
+  // `out` is [n].
+  void min_clearance_world(float *out) const;
   const float *field_data() const { return field_.data(); }
 
   // Epistemic read surface ([rows*cols] rasters) — lets a renderer draw honest

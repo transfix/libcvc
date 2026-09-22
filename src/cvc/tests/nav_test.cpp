@@ -685,11 +685,20 @@ TEST(NavSimWorld, RunsFromPureCppAndAgentsProgress) {
   // agent has a finite, below-sentinel measured clearance.
   std::vector<float> clr(N, -1.0f);
   world.min_clearance(clr.data());
+  // min_clearance_world() is the same value in WORLD metres (normalized / cfg.scale),
+  // the accessor a metres-based consumer uses instead of hand-converting; the sentinel
+  // passes through unscaled.
+  std::vector<float> clrW(N, -1.0f);
+  world.min_clearance_world(clrW.data());
   int measured = 0;
   for (int i = 0; i < N; ++i) {
     EXPECT_TRUE(std::isfinite(clr[i]));
-    if (clr[i] < 1e29f)
+    if (clr[i] < 1e29f) {
       ++measured;
+      EXPECT_NEAR(clrW[i], clr[i] / (float)cfg.scale, 1e-3f); // metres = normalized / scale
+    } else {
+      EXPECT_FLOAT_EQ(clrW[i], clr[i]); // sentinel preserved verbatim
+    }
   }
   EXPECT_GT(measured, N / 2); // the drive measured clearance for most agents
 }
