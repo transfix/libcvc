@@ -183,5 +183,10 @@ vtkRenderWindow *SceneRenderer::renderWindow() const {
 SceneGraph &SceneRenderer::scene() const { return *m_impl->scene; }
 const std::string &SceneRenderer::name() const { return m_impl->name; }
 
+ViewportManager &SceneRenderer::viewportManager() const {
+  m_impl->requireOpen();
+  return *m_impl->vm;
+}
+
 } // namespace gl
 } // namespace cvc
