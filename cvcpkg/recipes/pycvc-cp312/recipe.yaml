@@ -14,7 +14,7 @@ recipe:
   # matnet_forward, and the MaterialTrainer handle (nav_material_trainer_{create,
   # step,save}). GRL-SNAM's material_train_native path (and
   # test_material_train_native) stays skipped until this column republishes.
-  cvc_revision: 1
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
