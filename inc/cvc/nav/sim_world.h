@@ -174,6 +174,13 @@ public:
   // ([n*2]); before the first step() it falls back to the goals. Watching the
   // carrot deflect around obstacles IS the reactive drive, made visible.
   void carrots_world(float *out) const;
+  // Per-agent MIN CLEARANCE over the last step(): the smallest footprint-to-wall
+  // signed distance seen across the tick's substeps, in NORMALIZED units (world
+  // metres = value / cfg.scale). <= 0 means the footprint penetrated a wall this
+  // tick. The drive already computes this per tick (min over substeps); this
+  // exposes it instead of discarding it. `out` is [n]; before the first step()
+  // it is filled with a large sentinel (no clearance measured yet).
+  void min_clearance(float *out) const;
   const float *field_data() const { return field_.data(); }
 
   // Epistemic read surface ([rows*cols] rasters) — lets a renderer draw honest
@@ -260,6 +267,8 @@ private:
   std::vector<float> carrot_; // [n*2] last tick's FSM steering target (for renderers)
   std::vector<int> stall_, mode_, hist_count_;
   std::vector<float> turn_, dhit_, best_, init_;
+  std::vector<float>
+      minclr_; // [n] min footprint-wall clearance from the last step() (see min_clearance)
   std::vector<std::uint8_t> we_valid_, tracking_, parked_, reached_, active_;
 
   // material state (set_material; inert while mat_on_ == false)

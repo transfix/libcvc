@@ -104,6 +104,7 @@ sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::ui
   parked_.assign(n, 0);
   reached_.assign(n, 0);
   active_.assign(n, 1);
+  minclr_.assign(n, 1e30f); // no clearance measured until the first step()
   for (int i = 0; i < n; ++i) {
     const float dx = goal[2 * i] - o[2 * i], dy = goal[2 * i + 1] - o[2 * i + 1];
     th_[i] = std::atan2(dy, dx);
@@ -501,7 +502,8 @@ void sim_world::step(int num_threads) {
   lap(accGate);
 
   // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
-  std::vector<float> minclr(n_);
+  // minclr_ is a member (not a discarded local) so min_clearance() can expose it.
+  minclr_.resize(n_);
   if (mat_on_) {
     const material_stack ms = material_view();
     material_drive md;
@@ -511,16 +513,16 @@ void sim_world::step(int num_threads) {
     md.k_sharp = mat_cfg_.k_sharp;
     md.d_hat_m = mat_cfg_.d_hat_m;
     drive_step_material(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                        map_id_.data(), cfg_.veh, md, minclr.data(), num_threads);
+                        map_id_.data(), cfg_.veh, md, minclr_.data(), num_threads);
   } else if (ext_.sample) {
     // External force channel (e.g. cvc::dbg's RF/comms force) summed into the
     // drive via the sanctioned ext_force port. Byte-identical to drive_step when
     // ext_.sample is null (so this branch is only taken when a force is set).
     drive_step_ext(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                   map_id_.data(), cfg_.veh, ext_, minclr.data(), num_threads);
+                   map_id_.data(), cfg_.veh, ext_, minclr_.data(), num_threads);
   } else {
     drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
-               cfg_.veh, minclr.data(), num_threads, pool_);
+               cfg_.veh, minclr_.data(), num_threads, pool_);
   }
 
   lap(accDrive);
@@ -728,6 +730,14 @@ void sim_world::carrots_world(float *out) const {
     out[2 * i] = src[2 * i] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cx);
     out[2 * i + 1] = src[2 * i + 1] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cy);
   }
+}
+
+void sim_world::min_clearance(float *out) const {
+  // Raw NORMALIZED clearance from the last step() (world metres = value / cfg.scale).
+  // minclr_ is sized n_ in the ctor (sentinel until the first step()), so this is
+  // always safe to read; no unit conversion here — the raw drive value is exposed.
+  for (int i = 0; i < n_; ++i)
+    out[i] = (i < static_cast<int>(minclr_.size())) ? minclr_[i] : 1e30f;
 }
 
 void sim_world::retarget(int i, float gx_n, float gy_n) {
