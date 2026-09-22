@@ -679,6 +679,19 @@ TEST(NavSimWorld, RunsFromPureCppAndAgentsProgress) {
   EXPECT_GT(moved, N / 2); // most agents drove somewhere
   EXPECT_GT(reached, 0);   // at least one arrived
   EXPECT_EQ(world.tick(), 300);
+
+  // min_clearance() exposes the per-tick footprint-wall clearance the drive computes
+  // (previously discarded into a local). After stepping through an occupied map, every
+  // agent has a finite, below-sentinel measured clearance.
+  std::vector<float> clr(N, -1.0f);
+  world.min_clearance(clr.data());
+  int measured = 0;
+  for (int i = 0; i < N; ++i) {
+    EXPECT_TRUE(std::isfinite(clr[i]));
+    if (clr[i] < 1e29f)
+      ++measured;
+  }
+  EXPECT_GT(measured, N / 2); // the drive measured clearance for most agents
 }
 
 TEST(NavSimWorld, DefaultBiasedPolicyGivesTheBasisCoefficients) {
