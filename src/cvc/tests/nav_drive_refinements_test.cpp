@@ -403,4 +403,42 @@ TEST(NavDriveRefinements, CudaMatchesCpuWithEveryRefinement) {
     EXPECT_NEAR(mc[i], mc2[i], 1e-5f);
   }
 }
+
+TEST(NavDriveRefinements, CudaMatchesCpuWithPerAgentColumns) {
+  if (!cvc::nav::drive_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  // Heterogeneous fleet: each agent a different footprint radius / top speed / accel /
+  // wheelbase. The CUDA per-agent substitution (d_veh_for) must track the CPU
+  // rollout_impl's per-agent shadowing within the ~1e-5 float-equivalence contract.
+  const world w;
+  veh_params v = base_veh();
+  const int n = 4;
+  std::vector<float> rr = {0.15f, 0.20f, 0.10f, 0.18f};
+  std::vector<float> vmaxc = {0.9f, 0.6f, 0.8f, 0.7f};
+  std::vector<float> amaxc = {1.5f, 1.2f, 1.8f, 1.4f};
+  std::vector<float> Lc = {0.035f, 0.045f, 0.030f, 0.040f};
+  v.rr_col = rr.data();
+  v.vmax_col = vmaxc.data();
+  v.a_max_col = amaxc.data();
+  v.L_col = Lc.data();
+
+  std::vector<float> o = {2.0f, 0.0f, 1.5f, 0.4f, 2.2f, -0.3f, 1.0f, 0.2f};
+  std::vector<float> th = {0.0f, 0.4f, -0.7f, 1.2f};
+  std::vector<float> sp = {0.3f, 0.5f, 0.1f, 0.7f};
+  const std::vector<float> goal = {3.0f, 0.0f, 3.0f, 0.5f, 2.8f, -0.4f, 2.5f, 0.3f};
+  const std::vector<float> al(n, 1.0f), be(n, 3.0f), ga(n, 4.0f);
+  std::vector<float> o2 = o, th2 = th, sp2 = sp, mc(n), mc2(n);
+
+  cvc::nav::bicycle_rollout(w.fs, o.data(), th.data(), sp.data(), goal.data(), al.data(), be.data(),
+                            ga.data(), n, nullptr, v, mc.data(), 1);
+  cvc::nav::bicycle_rollout_cuda(w.fs, o2.data(), th2.data(), sp2.data(), goal.data(), al.data(),
+                                 be.data(), ga.data(), n, v, mc2.data());
+  for (int i = 0; i < n; ++i) {
+    EXPECT_NEAR(o[2 * i], o2[2 * i], 1e-5f);
+    EXPECT_NEAR(o[2 * i + 1], o2[2 * i + 1], 1e-5f);
+    EXPECT_NEAR(th[i], th2[i], 1e-5f);
+    EXPECT_NEAR(sp[i], sp2[i], 1e-5f);
+    EXPECT_NEAR(mc[i], mc2[i], 1e-5f);
+  }
+}
 #endif
