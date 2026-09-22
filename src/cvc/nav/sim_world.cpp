@@ -740,6 +740,17 @@ void sim_world::min_clearance(float *out) const {
     out[i] = (i < static_cast<int>(minclr_.size())) ? minclr_[i] : 1e30f;
 }
 
+void sim_world::min_clearance_world(float *out) const {
+  // World metres = normalized / cfg.scale (the goals_world()/carrots_world() convention).
+  // Scale only real measurements; leave the unmeasured sentinel verbatim so a sentinel
+  // guard (nav_stats' >=1e29 -> null) still recognizes it.
+  const float inv = cfg_.scale > 0.0 ? static_cast<float>(1.0 / cfg_.scale) : 1.0f;
+  for (int i = 0; i < n_; ++i) {
+    const float c = (i < static_cast<int>(minclr_.size())) ? minclr_[i] : 1e30f;
+    out[i] = (c >= 1e29f) ? c : c * inv;
+  }
+}
+
 void sim_world::set_vehicle_radii(const float *rr, const float *body_rr, int n) {
   if (!rr || n <= 0) {
     clear_vehicle_radii();
