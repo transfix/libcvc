@@ -24,6 +24,17 @@
 extern "C" PyObject *PyInit__pycvc(void);
 extern "C" PyObject *PyInit__pycvc_gl(void);
 
+// numpy's wasm C-extensions ship as relocatable WASM objects (not side modules),
+// so on Emscripten they link statically into this binary and register as builtins
+// under their full dotted import names (CPython's BuiltinImporter checks the
+// inittab before the filesystem .so). The set of extensions is enumerated by the
+// recipe (build-wasm.{sh,ps1}) into a generated pycvc_register_numpy_inittab()
+// that AppendInittab's each one — `import numpy` eagerly pulls the core plus
+// linalg/fft/etc., so all must be registered.
+#ifdef PYCVC_EMBED_NUMPY
+extern "C" int pycvc_register_numpy_inittab(void); // generated; 0 = success
+#endif
+
 // VTK's static Python wrappers register their vtkmodules.* builtins through a
 // generated bulk-inittab `_load()` (static-single-binary-python.md §2.3). The
 // exact symbol comes from the vtk-python-cp312 wasm package; the recipe wires it
@@ -39,12 +50,16 @@ extern "C" void PYCVC_VTKPYTHON_LOAD(void);
 static const char *kDefaultScript =
     "import sys\n"
     "print('pycvc-wasm host:', sys.version.split()[0])\n"
+    "import numpy as np\n"
+    "print('numpy', np.__version__, '- arange(5).sum() =', int(np.arange(5).sum()))\n"
     "import pycvc\n"
     "print('import pycvc OK ->', pycvc.__name__)\n"
     "import pycvc_gl\n"
     "print('import pycvc_gl OK ->', pycvc_gl.__name__)\n"
-    "sg = pycvc_gl.SceneGraph()\n"
-    "print('SceneGraph created:', type(sg).__name__)\n"
+    // The bound C++ classes are live + type-safe; constructing a scene needs a
+    // cvc::app + a GL context, out of scope for a headless node smoke.
+    "print('pycvc_gl.SceneGraph  ->', pycvc_gl.SceneGraph.__name__)\n"
+    "print('pycvc_gl.Node        ->', getattr(pycvc_gl, 'Node', '(n/a)'))\n"
     "print('PYCVC_WASM_OK')\n";
 
 int main(int argc, char **argv) {
@@ -52,10 +67,19 @@ int main(int argc, char **argv) {
     fprintf(stderr, "pycvc_host: failed to register _pycvc inittab\n");
     return 1;
   }
-  if (PyImport_AppendInittab("_pycvc_gl", PyInit__pycvc_gl) != 0) {
-    fprintf(stderr, "pycvc_host: failed to register _pycvc_gl inittab\n");
+  // pycvc_gl is a PACKAGE: its __init__.py does `from . import _pycvc_gl`, so the
+  // builtin must register under the dotted submodule name, not top-level. (pycvc
+  // core is a plain module — pycvc.py does `import _pycvc` — so it stays flat.)
+  if (PyImport_AppendInittab("pycvc_gl._pycvc_gl", PyInit__pycvc_gl) != 0) {
+    fprintf(stderr, "pycvc_host: failed to register pycvc_gl._pycvc_gl inittab\n");
     return 1;
   }
+#ifdef PYCVC_EMBED_NUMPY
+  if (pycvc_register_numpy_inittab() != 0) {
+    fprintf(stderr, "pycvc_host: numpy inittab registration failed\n");
+    return 1;
+  }
+#endif
 #ifdef PYCVC_VTKPYTHON_LOAD
   // Register vtkmodules.* builtins so the VTK-Python bridge can return live vtk
   // objects (BRIDGE=ON). Safe no-op shape in a shared build; here it is static.
