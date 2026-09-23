@@ -288,8 +288,15 @@ public:
   // Python, so it is safe on the sim thread. Re-arming restarts the episode.
   // Default off = byte-unchanged runs (the sep_radius / material pattern). This is
   // the native path's base-stats source, the twin of the Python Swarm collector.
+  // ``material_id`` (optional) is the per-position palette classifier the base collector
+  // buckets time/distance by (nav_samplers::material_id, 0..kNumMaterials-1 or -1). sim_world
+  // itself carries only a continuous risk plane, not a discrete palette, so the id source is
+  // supplied by the caller (the Python MaterialIdRaster's twin) — decoupled from the drive's
+  // material force, exactly like the C++ nav_samplers abstraction. Empty (default) leaves the
+  // per-material buckets zero, byte-unchanged from before.
   void begin_nav_stats(const nav_stats_params &p = {}, const budget_policy &b = {},
-                       std::string scene_id = "", unsigned seed = 0, std::string checkpoint = "");
+                       std::string scene_id = "", unsigned seed = 0, std::string checkpoint = "",
+                       std::function<int(double, double)> material_id = {});
   // Finish + return the base episode record (throws if not armed). Owner-thread
   // only — never call while a sim-thread worker is stepping.
   episode_nav_stats nav_stats() const;
