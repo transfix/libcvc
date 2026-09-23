@@ -81,6 +81,15 @@ public:
   // reads this in render() to keep the mirror in sync with the live scene.
   vtkRenderer *mirrorSource() const;
 
+  // Whether the manager re-syncs this mirror from its source EVERY frame (default
+  // true) or only ONCE, at add time (a FROZEN snapshot). A frozen mirror still
+  // reflects geometry/visibility changes to props it already holds (they are the
+  // SAME shared vtkProp pointers), but it does NOT gain props added to the source
+  // afterwards and its lights are not overwritten each frame — so a caller can
+  // give it a fixed look (e.g. a flat overview with its own headlight) that a
+  // live re-sync would otherwise clobber. Set via addMirrorViewport(liveSync).
+  bool mirrorLive() const;
+
   // Whether this viewport receives routed input (default true). A minimap / HUD
   // inset set false is skipped by ViewportManager::viewportAt, so clicks fall
   // through to the viewport beneath it — the DBG minimap is non-interactive by
@@ -100,6 +109,7 @@ private:
   Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
            const std::string &name, bool mirror, bool managed = true);
   void setMirrorSource(vtkRenderer *src); // manager-only, at addMirrorViewport
+  void setMirrorLive(bool on);            // manager-only, at addMirrorViewport
 
   struct Impl;
   std::unique_ptr<Impl> m_impl;

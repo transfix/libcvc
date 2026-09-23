@@ -83,8 +83,16 @@ public:
   // scene from its own camera. `region` is normalized [x0,y0,x1,y1]; `layer`
   // defaults to 2 (above a layer-1 inset). Throws if `name` is taken or
   // `sourceViewport` does not exist.
+  //
+  // `liveSync` (default true) re-copies the source's props + lights EVERY frame.
+  // Pass false for a FROZEN snapshot: the mirror is primed once, here, and then
+  // left alone — it keeps reflecting geometry/visibility changes to the props it
+  // already holds (same shared vtkProp pointers) but does NOT gain props added to
+  // the source later, and its lights are never overwritten. That lets a caller
+  // pin a fixed look (a flat overview with its own headlight) a live re-sync
+  // would clobber, and exclude content added after this call.
   Viewport &addMirrorViewport(const std::string &name, const std::string &sourceViewport,
-                              const double region[4], int layer = 2);
+                              const double region[4], int layer = 2, bool liveSync = true);
 
   // Remove a viewport at runtime (drop a PiP inset). Detaches its scene so that
   // scene can be added again, drops it from the window, and re-syncs the layer

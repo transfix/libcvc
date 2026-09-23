@@ -36,6 +36,7 @@ struct Viewport::Impl {
   bool visible = true;
   bool inputEnabled = true;            // routed input reaches this viewport
   vtkRenderer *mirrorSource = nullptr; // set only for a mirror viewport
+  bool mirrorLive = true;              // re-sync from source every frame vs frozen once
   // region/layer/visible mirrored to cvc::state so a PiP arrangement round-trips.
   std::unique_ptr<ViewportLayout> layout;
 
@@ -156,6 +157,8 @@ vtkRenderer *Viewport::renderer() const { return m_impl->renderer; }
 bool Viewport::isMirror() const { return m_impl->mirror; }
 vtkRenderer *Viewport::mirrorSource() const { return m_impl->mirrorSource; }
 void Viewport::setMirrorSource(vtkRenderer *src) { m_impl->mirrorSource = src; }
+bool Viewport::mirrorLive() const { return m_impl->mirrorLive; }
+void Viewport::setMirrorLive(bool on) { m_impl->mirrorLive = on; }
 void Viewport::setInputEnabled(bool on) { m_impl->inputEnabled = on; }
 bool Viewport::inputEnabled() const { return m_impl->inputEnabled; }
 

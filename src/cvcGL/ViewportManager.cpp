@@ -376,7 +376,7 @@ Viewport &ViewportManager::addSceneViewport(const std::string &name, SceneGraph 
 
 Viewport &ViewportManager::addMirrorViewport(const std::string &name,
                                              const std::string &sourceViewport,
-                                             const double region[4], int layer) {
+                                             const double region[4], int layer, bool liveSync) {
   m_impl->requireOpen();
   if (m_impl->byName.find(name) != m_impl->byName.end())
     throw std::invalid_argument("ViewportManager: a viewport named '" + name + "' already exists");
@@ -394,12 +394,14 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
   vp->setRegion(region[0], region[1], region[2], region[3]);
   vp->setLayer(layer);
   vp->setMirrorSource(src->renderer());
+  vp->setMirrorLive(liveSync); // false => primed once here, never re-synced
   m_impl->window->AddRenderer(vp->renderer());
   vp->camera().setRenderWindow(m_impl->window); // pan scaling + Fly capture (not attach)
 
   // Prime the mirror with the source's current props so ResetCamera has bounds
   // to frame. It does NOT attach the scene (the source owns that), so it is not
   // tracked in attachedScenes and never detaches the scene in the destructor.
+  // A frozen mirror (liveSync == false) keeps exactly this snapshot afterwards.
   syncMirrorProps(*vp);
   vp->renderer()->ResetCamera();
 
@@ -472,9 +474,10 @@ void ViewportManager::render() {
     v->scene().processEvents();
   // Mirrors have no scene attachment of their own: refresh their props from the
   // source renderer so a node added / re-meshed this frame shows up in the
-  // mirror too, then draw it with the mirror's own camera.
+  // mirror too, then draw it with the mirror's own camera. A FROZEN mirror
+  // (mirrorLive() == false) keeps its add-time snapshot and is skipped here.
   for (auto &v : m_impl->viewports)
-    if (v->isMirror())
+    if (v->isMirror() && v->mirrorLive())
       syncMirrorProps(*v);
   m_impl->window->Render();
 }
