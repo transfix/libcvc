@@ -107,9 +107,17 @@ build:
     - platform: wasm
       host_platform: linux
       script: build-wasm.sh
+    - platform: wasm
+      host_platform: windows
+      script: build-wasm.ps1
     - platform: wasm-mt
       host_platform: linux
       script: build-wasm.sh
+      env:
+        CVC_WASM_THREADS: "1"
+    - platform: wasm-mt
+      host_platform: windows
+      script: build-wasm.ps1
       env:
         CVC_WASM_THREADS: "1"
 
