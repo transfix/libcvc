@@ -794,6 +794,75 @@ TEST(NavSimWorld, BaseNavStatsArmedCollectsSaneFields) {
   EXPECT_EQ(e.to_json(), w2.nav_stats().to_json());
 }
 
+TEST(NavSimWorld, MaterialIdFillsPerMaterialBuckets) {
+  // begin_nav_stats can take a per-position palette classifier; the collector then buckets
+  // time/distance by material id (parity with the Python MaterialIdRaster + NavStats). Left
+  // half of the world -> soil(8), right half -> open_air(7). After stepping, each vehicle's
+  // time_over_material sums to its collected time and dist_over_material to its path, only
+  // ids 7/8 are used, and an unarmed-without-classifier run leaves every bucket zero.
+  const int R = 96, C = 96;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  const int N = 24;
+  const int STEPS = 200;
+
+  cvc::nav::sim_world world = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 7);
+  world.begin_nav_stats(cvc::nav::nav_stats_params{}, cvc::nav::budget_policy{}, "room", 7,
+                        "ckpt", [](double x, double) { return x < 0.0 ? 8 : 7; });
+  for (int t = 0; t < STEPS; ++t)
+    world.step(1);
+  cvc::nav::episode_nav_stats e = world.nav_stats();
+
+  bool any_material_time = false;
+  for (const auto &v : e.per_vehicle) {
+    double tsum = 0.0, dsum = 0.0;
+    for (int m = 0; m < cvc::nav::kNumMaterials; ++m) {
+      EXPECT_GE(v.time_over_material_s[m], 0.0);
+      tsum += v.time_over_material_s[m];
+      dsum += v.dist_over_material_m[m];
+      if (m != 7 && m != 8)
+        EXPECT_EQ(v.time_over_material_s[m], 0.0); // only the two classes we painted
+    }
+    // every collected step got bucketed: material time == the vehicle's total tick time,
+    // and material distance == the total path (both summed over the id at each pose).
+    EXPECT_NEAR(tsum, STEPS * cfg.veh.dt, 1e-4);
+    EXPECT_NEAR(dsum, v.total_path_m, 1e-3);
+    if (tsum > 0.0)
+      any_material_time = true;
+  }
+  EXPECT_TRUE(any_material_time);
+
+  // No classifier -> buckets stay identically zero (the byte-unchanged default).
+  cvc::nav::sim_world w0 = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 7);
+  w0.begin_nav_stats(cvc::nav::nav_stats_params{}, cvc::nav::budget_policy{}, "room", 7, "ckpt");
+  for (int t = 0; t < STEPS; ++t)
+    w0.step(1);
+  for (const auto &v : w0.nav_stats().per_vehicle)
+    for (int m = 0; m < cvc::nav::kNumMaterials; ++m) {
+      EXPECT_EQ(v.time_over_material_s[m], 0.0);
+      EXPECT_EQ(v.dist_over_material_m[m], 0.0);
+    }
+}
+
 TEST(NavSimWorld, PerAgentRadiiOverrideFootprint) {
   // set_vehicle_radii lets a heterogeneous fleet drive with real per-vehicle footprints.
   // A uniform column set to the scalar rr must be byte-identical to the scalar path
