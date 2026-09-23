@@ -22,6 +22,7 @@ namespace cvc {
 namespace gl {
 
 class SceneGraph;
+class ViewportManager;
 
 // ---------------
 // SceneRenderer
@@ -134,6 +135,14 @@ public:
   // The scene this draws, and this viewer's name in the state graph.
   SceneGraph &scene() const;
   const std::string &name() const;
+
+  // The ViewportManager this renderer is a single-view facade over. Exposed so a
+  // caller can grow the SAME window into a multi-viewport / picture-in-picture
+  // layout (addSceneViewport / addMirrorViewport) while still driving the main
+  // view through the SceneRenderer-bound HUD, camera and input helpers. The
+  // primary full-screen viewport is this renderer's view; do not detach or
+  // re-point it. Throws if the renderer is closed.
+  ViewportManager &viewportManager() const;
 
   // Detach from the scene and release the GL context. Idempotent; the
   // destructor calls it. Exposed so a caller can decide WHEN the context dies

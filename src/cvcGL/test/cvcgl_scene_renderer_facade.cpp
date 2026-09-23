@@ -28,6 +28,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/Settings.h>
+#include <cvc/gl/Viewport.h>
 #include <cvc/gl/ViewportManager.h>
 #include <stdexcept>
 #include <string>
@@ -165,6 +166,27 @@ int main() {
     std::vector<unsigned char> f = view.frameRGB();
     check(static_cast<int>(f.size()) == 96 * 72 * 3,
           "CameraController + FpsHud + ScreenTextHud render at requested size");
+  }
+
+  std::printf("== E. viewportManager() exposes the owned manager (grow PiP from a facade) ==\n");
+  {
+    SceneGraph sg(app, "grow");
+    SceneGraph inset(app, "grow_inset");
+    addQuad(inset, "inset_floor", 2.0, 0.0);
+    SceneRenderer view(sg, 128, 96, true, "main");
+    ViewportManager &vm = view.viewportManager();
+    // The facade's renderer IS the manager's primary viewport renderer.
+    check(vm.primary().renderer() == view.renderer(),
+          "viewportManager().primary() is the facade's own renderer");
+    check(vm.viewportNames().size() == 1, "just the primary before growing");
+    const double region[4] = {0.6, 0.05, 0.97, 0.42};
+    vm.addSceneViewport("inset", inset, region, 1);
+    vm.addMirrorViewport("mini", "main", region, 2);
+    check(vm.viewportNames().size() == 3, "grew a scene inset + a mirror over the same window");
+    view.render(); // composites all three through the facade's window
+    std::vector<unsigned char> f = view.frameRGB();
+    check(static_cast<int>(f.size()) == 128 * 96 * 3,
+          "facade frame still whole-window after growing PiP");
   }
 
   std::printf("== D. lifecycle: idempotent close, safe accessors, post-close throws ==\n");
