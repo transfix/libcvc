@@ -50,28 +50,42 @@ python:
 
 depends:
   build:
-    # libcvc (find_package(cvc CONFIG)); resolves to libcvc-cuda on a CUDA host.
+    # libcvc + cvcGL: on native, consume the prebuilt SDKs (find_package(cvc/cvcGL
+    # CONFIG); libcvc resolves to libcvc-cuda on a CUDA host). On wasm there is no
+    # shared-lib wasm libcvc — build-wasm.sh compiles the WHOLE cvc + cvcGL closure
+    # from the repo root instead, so they are NOT prebuilt deps there.
     - name: libcvc
-    # cvcGL is now the separate `cvcgl` package (find_package(cvcGL CONFIG) +
-    # link cvc::cvcGL) instead of being compiled inline here.
+      platforms: [linux, windows]
     - name: cvcgl
+      platforms: [linux, windows]
     - name: python312
     - name: numpy-cp312
     - name: vtk
     # vtkPythonUtil.h + libvtkWrappingPythonCore for the vtkProp* bridge (F3):
     # a Python vtkActor crosses into the C++ scene as a real vtkProp*.
     - name: vtk-python-cp312
+    # The from-source cvc/cvcGL closure's C++ deps on wasm (mirrors cvcgl-examples'
+    # trimmed wasm closure). Flavor-matched (wasm vs wasm-mt) via the DAG.
+    - name: boost
+      platforms: [wasm, wasm-mt]
+    - name: zstd
+      platforms: [wasm, wasm-mt]
+    - name: zlib
+      platforms: [wasm, wasm-mt]
   runtime:
-    # pycvc-cp312 supplies the core `import pycvc` module this scene module
-    # bridges to (same interpreter column).
+    # pycvc-cp312 supplies the core `import pycvc` module this scene module bridges
+    # to (same interpreter column). On wasm the core is embedded into the host
+    # binary (static archive + inittab), not a separate side-by-side package.
     - name: pycvc-cp312
+      platforms: [linux, windows]
     - name: libcvc
-    # the installed cvcGL this module links against.
+      platforms: [linux, windows]
     - name: cvcgl
+      platforms: [linux, windows]
     - name: python312
     - name: numpy-cp312
     - name: vtk
-    # vtkmodules import + the wrapping-core .so at load for the vtkProp* bridge.
+    # vtkmodules import + the wrapping-core at load for the vtkProp* bridge.
     - name: vtk-python-cp312
   host_tools:
     - cmake
@@ -86,6 +100,18 @@ build:
       script: build.sh
     - platform: windows
       script: build.ps1
+    # wasm: compile the whole trimmed cvc + cvcGL + pycvc(+gl, BRIDGE=ON) closure
+    # from the repo root as STATIC archives, plus a CPython-wasm host that embeds
+    # them via PyImport_AppendInittab (build-wasm.sh). Both flavors — the closure
+    # must match the flavor of its python312/numpy/vtk/vtk-python deps.
+    - platform: wasm
+      host_platform: linux
+      script: build-wasm.sh
+    - platform: wasm-mt
+      host_platform: linux
+      script: build-wasm.sh
+      env:
+        CVC_WASM_THREADS: "1"
 
 package:
   files:
