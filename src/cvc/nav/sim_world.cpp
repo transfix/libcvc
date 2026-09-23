@@ -767,7 +767,8 @@ void sim_world::min_clearance_world(float *out) const {
 }
 
 void sim_world::begin_nav_stats(const nav_stats_params &p, const budget_policy &b,
-                                std::string scene_id, unsigned seed, std::string checkpoint) {
+                                std::string scene_id, unsigned seed, std::string checkpoint,
+                                std::function<int(double, double)> material_id) {
   st_pos_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
   st_head_.assign(n_, 0.0f);
   st_spd_.assign(n_, 0.0f);
@@ -786,7 +787,9 @@ void sim_world::begin_nav_stats(const nav_stats_params &p, const budget_policy &
   // point-sample convention. Off-grid is treated as NOT occupied.
   st_smp_ = nav_samplers{};
   st_smp_.min_clearance_m = st_clr_d_.data();
-  st_smp_.material_id = nullptr; // deferred: sim_world exposes no per-point palette id
+  // Per-position palette id from the caller (sim_world has only a continuous risk plane, no
+  // discrete palette). Empty => null => the per-material buckets stay zero (byte-unchanged).
+  st_smp_.material_id = std::move(material_id);
   st_smp_.occupied = [this](double x, double y) -> bool {
     if (cfg_.max_x <= cfg_.min_x || cfg_.max_y <= cfg_.min_y || cols_ < 1 || rows_ < 1)
       return false;
