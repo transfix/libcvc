@@ -79,6 +79,14 @@ runs:
       # Includes #462, the sparse-checkout fix for pep517-backend.
       uses: transfix/libcvc-deps/.github/actions/cvcpkg-install@c5091347c596fcf09c697bc74c585370fce08ad9
       with:
+        # The cvcpkg TOOL relocated to cy-pca/cvcpkg; transfix/libcvc-deps is archived
+        # (frozen, and its cvcpkg carried the broken-stdlib bundle-extraction bug). This
+        # composite action's default `repository` is still the archived repo, so it
+        # would reinstall that OLD cvcpkg and clobber the cy-pca one the pip steps
+        # install — feeding the broken tool to the later cvcgl/pycvc-gl pack steps.
+        # Point it at the maintained, fixed cvcpkg instead (@master).
+        repository: cy-pca/cvcpkg
+        libcvc_deps_ref: master
         # "Just recipes": install libcvc's dependency closure straight from its
         # in-tree recipe (single source of truth), instead of a parallel
         # cvc-requirements.yaml. cvcpkg install-deps reads the recipe's
