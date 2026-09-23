@@ -5,21 +5,50 @@
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# ── (1) native host tools: SWIG (not on the box) + a native python3.12 for
-# CMake's FindPython3/NumPy introspection. cmake + ninja come from the host env.
+# ── (1) native host tools ──
+# SWIG (not on the box) + cmake/ninja from the catalog. There is NO windows
+# python312 in the catalog (it is a documented gap), so use a NATIVE host
+# python3.12 for CMake's FindPython3 version probe — the wasm libpython in the
+# deps prefix is the actual link target, not this interpreter. Resolve it from
+# CVC_HOST_PYTHON, then the `py -3.12` launcher, then `python` on PATH (the fleet
+# windows runner's setup-python provides 3.12).
 $hostEnv = Join-Path $env:CVC_BUILD_DIR 'hostenv'
 $cvc = (Get-Command cvcpkg -ErrorAction SilentlyContinue)
 $cvcExe = if ($cvc) { 'cvcpkg' } else { 'python -m cvcpkg' }
-& cmd /c "$cvcExe install python312 swig cmake ninja --platform windows --config release --link shared --prefix `"$hostEnv`" --no-fallback-to-source"
+& cmd /c "$cvcExe install swig cmake ninja --platform windows --config release --link shared --prefix `"$hostEnv`" --no-fallback-to-source"
 if ($LASTEXITCODE -ne 0) { throw "host-tool provisioning failed" }
 $env:PATH = "$hostEnv\bin;$env:PATH"
-$pyNative = Join-Path $hostEnv 'bin\python.exe'
-if (-not (Test-Path $pyNative)) { $pyNative = Join-Path $hostEnv 'python.exe' }
 $swigExe = Join-Path $hostEnv 'bin\swig.exe'
+# The cvcpkg-packaged SWIG reports a stale -swiglib after relocation, so FindSWIG
+# cannot locate SWIG_DIR (the .i library). Point it at the real library dir
+# (share/swig/<ver>) via both the env var swig itself reads and the CMake var.
+$swigLibDir = Get-ChildItem (Join-Path $hostEnv 'share\swig') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($swigLibDir) {
+    $env:SWIG_LIB = $swigLibDir.FullName
+    $swigDir = $swigLibDir.FullName
+} else {
+    $swigDir = ''
+}
+
+$pyNative = $null
+if ($env:CVC_HOST_PYTHON -and (Test-Path $env:CVC_HOST_PYTHON)) {
+    $pyNative = $env:CVC_HOST_PYTHON
+} else {
+    $pyNative = (& py -3.12 -c "import sys;print(sys.executable)" 2>$null)
+    if (-not $pyNative) { $pyNative = (Get-Command python -ErrorAction SilentlyContinue).Source }
+}
+if (-not $pyNative -or -not (Test-Path $pyNative)) {
+    throw "no native python3.12 for FindPython3 (set CVC_HOST_PYTHON)"
+}
 
 # numpy C headers are architecture-independent; take them from the wasm numpy in
 # the deps prefix (the wasm interpreter can't run, so don't introspect it).
 $numpyInc = Join-Path $env:CVC_DEPS_PREFIX 'lib\python3.12\site-packages\numpy\_core\include'
+# FindPython3 in a cross build won't derive the TARGET (wasm) headers/lib from the
+# native executable — pin them explicitly to the wasm libpython in the deps prefix
+# (Development.Module + the include dir); the native exe supplies only the version.
+$pyIncDir = Join-Path $env:CVC_DEPS_PREFIX 'include\python3.12'
+$pyLib    = Join-Path $env:CVC_DEPS_PREFIX 'lib\libpython3.12.a'
 
 # ── (2) emsdk + toolchain + CVC_WASM_THREADS flavor (dot-source the helper) ──
 . "$scriptDir\..\_common\env-wasm.ps1"
@@ -50,8 +79,12 @@ Invoke-CvcWasmCMakeBuild -ExtraArgs @(
     '-DCVC_BUILD_PYCVC_GL=ON',
     '-DCVC_PYCVCGL_VTK_BRIDGE=ON',
     "-DPython3_EXECUTABLE=$pyNative",
+    "-DPython3_INCLUDE_DIR=$pyIncDir",
+    "-DPython3_LIBRARY=$pyLib",
+    "-DPython3_NumPy_INCLUDE_DIR=$numpyInc",
     "-DPython3_NumPy_INCLUDE_DIRS=$numpyInc",
-    "-DSWIG_EXECUTABLE=$swigExe"
+    "-DSWIG_EXECUTABLE=$swigExe",
+    "-DSWIG_DIR=$swigDir"
 )
 
 # ── (4) stage the CPython-wasm host source (the archives + .py proxies are placed
