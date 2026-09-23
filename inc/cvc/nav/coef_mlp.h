@@ -55,6 +55,14 @@ public:
   // CoefMLP bias-toward-a-known-good-basin trick; the raw out_bias is stored and
   // log(expm1(.)) is folded once at load.
   static constexpr std::uint32_t kFlagSoftplusLogExpm1 = 1u << 0;
+  // flags bit 1/2: the INPUT feature layout beyond the base 5. A 6-input net is
+  // ambiguous (grip mu OR terrain-risk) so the semantics live in the flags, not in
+  // in_features(): kFlagFeatMu => the drive appends the grip lookahead column,
+  // kFlagFeatRisk => the terrain-risk lookahead column (both => 7 inputs, mu then risk),
+  // matching grl_snam coef_feats/CoefMLP use_mu/use_risk. A net with neither flag is the
+  // historical base-5 (or a bare 6-input grip net, treated as mu for back-compat).
+  static constexpr std::uint32_t kFlagFeatMu = 1u << 1;
+  static constexpr std::uint32_t kFlagFeatRisk = 1u << 2;
   // Max layer dimension the CPU forward() supports (its stack activation arrays).
   // load()/from_layers reject a wider net at the boundary rather than overflowing.
   // The CUDA drive (drive.cu d_mlp) has a tighter cap (64) it guards separately.
@@ -86,11 +94,14 @@ public:
   // (identity) or 1 (SiLU). `out_bias_raw` is the RAW basin bias (e.g. {1,3,4});
   // softplus(net + log(expm1(out_bias))) is applied at forward, exactly as a
   // loaded .cvcnav. Throws if the shapes do not chain in -> ... -> out.
+  // ``extra_flags`` OR-in the feature/output flags (kFlagFeatMu / kFlagFeatRisk) beyond the
+  // always-on softplus fold — so a C++ trainer (or a test) can stamp a widened net's layout.
   static coef_mlp from_layers(int in, int out, const std::vector<int> &rows,
                               const std::vector<int> &cols, const std::vector<std::uint32_t> &act,
                               const std::vector<std::vector<float>> &w,
                               const std::vector<std::vector<float>> &b,
-                              const std::vector<float> &out_bias_raw);
+                              const std::vector<float> &out_bias_raw,
+                              std::uint32_t extra_flags = 0);
 
   // Serialize to the versioned `.cvcnav` (byte-identical layout to
   // grl_snam.tools.coef_export.write_coef_mlp), so a policy trained in pure C++
@@ -109,6 +120,11 @@ public:
   int out_features() const { return out_; }
   std::uint32_t format_version() const { return fmt_; }
   std::uint32_t flags() const { return flags_; }
+  // Feature-layout queries the drive builds the input vector from. has_mu: a 6-input net
+  // with no risk flag is grip (the historical widen_coef_mlp output), so mu is implied there.
+  bool has_risk() const { return (flags_ & kFlagFeatRisk) != 0; }
+  bool has_mu() const { return (flags_ & kFlagFeatMu) != 0 || (in_ == 6 && !has_risk()); }
+  bool has_lam() const { return out_ >= 4; } // 4th output = learned reroute lam_soft
   std::uint64_t arch_hash() const { return arch_hash_; }
 
   // The architecture hash (FNV-1a over in/out/num_layers and each layer's

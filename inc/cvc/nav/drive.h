@@ -109,9 +109,16 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 //
 // A 6-feature net is not a retrain from scratch: sdf_nav.widen_coef_mlp lifts a
 // trained 5-feature net to one whose mu column is zero, output-identical at init.
+struct material_stack; // defined in material.h; coef_feats takes it by pointer only
+
+// ``risk`` (a material_stack; channel 0 = terrain risk r~) appends the WORST-risk-ahead
+// column — the deployment twin of grl_snam coef_feats(material=). Order matches the net's
+// input layout: base 5, then grip (if ``grip``), then risk (if ``risk``). Null risk => the
+// column is not written and the stride is unchanged.
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
                 float *feat_out, int num_threads = 0, const friction_field *grip = nullptr,
-                float mu_lookahead = 0.3f, int mu_probes = 3, thread_pool *pool = nullptr);
+                float mu_lookahead = 0.3f, int mu_probes = 3, const material_stack *risk = nullptr,
+                float risk_lookahead = 0.3f, int risk_probes = 3, thread_pool *pool = nullptr);
 
 // Fixed vehicle + integration parameters for the bicycle rollout (the SdfNavigator
 // VEHICLE_DEFAULTS + meta): all float32 to match torch. `nsub` substeps per tick.

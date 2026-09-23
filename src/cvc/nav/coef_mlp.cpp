@@ -198,14 +198,14 @@ coef_mlp coef_mlp::from_layers(int in, int out, const std::vector<int> &rows,
                                const std::vector<int> &cols, const std::vector<std::uint32_t> &act,
                                const std::vector<std::vector<float>> &w,
                                const std::vector<std::vector<float>> &b,
-                               const std::vector<float> &out_bias_raw) {
+                               const std::vector<float> &out_bias_raw, std::uint32_t extra_flags) {
   const int num_layers = static_cast<int>(rows.size());
   if (static_cast<int>(cols.size()) != num_layers || static_cast<int>(act.size()) != num_layers ||
       static_cast<int>(w.size()) != num_layers || static_cast<int>(b.size()) != num_layers)
     throw std::runtime_error("cvc::nav::coef_mlp::from_layers: ragged layer arrays");
   coef_mlp m;
   m.fmt_ = kFormatVersion;
-  m.flags_ = kFlagSoftplusLogExpm1;
+  m.flags_ = kFlagSoftplusLogExpm1 | extra_flags;
   m.in_ = in;
   m.out_ = out;
   m.layers_.resize(num_layers);
