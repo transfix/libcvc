@@ -134,6 +134,41 @@ inline float sample_grip(const friction_field &g, int plane, float onx, float on
          pl[static_cast<long>(cy1) * g.W + cx1] * (wx1 * wy1);
 }
 
+// Bilinear sample of a material_stack's terrain-risk plane (channel 0), same
+// align_corners/border chain as sample_grip and the Python MaterialField.sample, so a
+// risk-lookahead feature built here matches grl_snam coef_feats(material=) bit-for-bit.
+inline float sample_risk(const material_stack &ms, int plane, float onx, float ony) {
+  const float S = static_cast<float>(ms.S);
+  const float wx = onx / S + static_cast<float>(ms.cx);
+  const float wy = ony / S + static_cast<float>(ms.cy);
+  const float gx =
+      2.0f * (wx - static_cast<float>(ms.mnx)) / static_cast<float>(ms.mxx - ms.mnx) - 1.0f;
+  const float gy =
+      2.0f * (wy - static_cast<float>(ms.mny)) / static_cast<float>(ms.mxy - ms.mny) - 1.0f;
+  const float Wf1 = static_cast<float>(ms.W - 1);
+  const float Hf1 = static_cast<float>(ms.H - 1);
+  float ix = (gx + 1.0f) * 0.5f * Wf1;
+  float iy = (gy + 1.0f) * 0.5f * Hf1;
+  ix = std::min(std::max(ix, 0.0f), Wf1);
+  iy = std::min(std::max(iy, 0.0f), Hf1);
+  const int ix0 = static_cast<int>(std::floor(ix));
+  const int iy0 = static_cast<int>(std::floor(iy));
+  const float wx1 = ix - static_cast<float>(ix0);
+  const float wx0 = 1.0f - wx1;
+  const float wy1 = iy - static_cast<float>(iy0);
+  const float wy0 = 1.0f - wy1;
+  const int cx0 = std::min(std::max(ix0, 0), ms.W - 1);
+  const int cx1 = std::min(std::max(ix0 + 1, 0), ms.W - 1);
+  const int cy0 = std::min(std::max(iy0, 0), ms.H - 1);
+  const int cy1 = std::min(std::max(iy0 + 1, 0), ms.H - 1);
+  const long HW = static_cast<long>(ms.H) * ms.W;
+  const float *pl = ms.data + static_cast<long>(plane) * 6 * HW; // channel 0 = risk r~
+  return pl[static_cast<long>(cy0) * ms.W + cx0] * (wx0 * wy0) +
+         pl[static_cast<long>(cy0) * ms.W + cx1] * (wx1 * wy0) +
+         pl[static_cast<long>(cy1) * ms.W + cx0] * (wx0 * wy1) +
+         pl[static_cast<long>(cy1) * ms.W + cx1] * (wx1 * wy1);
+}
+
 // The virtual steer limit once the INNER wheel's mechanical lock binds
 // (sdf_nav.ackermann_delta_max). `t <= 0` leaves delta_max exactly as passed.
 inline float locked_delta_max(float L, float delta_max, float t) {
@@ -197,9 +232,11 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
                 float *feat_out, int num_threads, const friction_field *grip, float mu_lookahead,
-                int mu_probes, thread_pool *pool) {
+                int mu_probes, const material_stack *risk, float risk_lookahead, int risk_probes,
+                thread_pool *pool) {
   const bool has_grip = grip != nullptr && grip->data != nullptr;
-  const std::size_t stride = has_grip ? 6 : 5;
+  const bool has_risk = risk != nullptr && risk->data != nullptr;
+  const std::size_t stride = 5u + (has_grip ? 1u : 0u) + (has_risk ? 1u : 0u);
   drive_parallel_for(pool, n, num_threads, [&](int i) {
     const int plane = map_id ? map_id[i] : 0;
     float phi, nx, ny;
@@ -229,6 +266,21 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
         worst = m < worst ? m : worst;
       }
       fo[5] = worst;
+    }
+    if (has_risk) {
+      // WORST terrain risk from here to the carrot — the mirror of the grip probe but MAX
+      // (a risk patch ahead should read as risky, not averaged away); inclusive of `on`,
+      // clamped to the carrot. Appended AFTER grip, so its slot is 5 (+1 when grip present).
+      const int rplane = (map_id && risk->M > 1) ? map_id[i] : 0;
+      const float reach = gd < risk_lookahead ? gd : risk_lookahead;
+      float worst = sample_risk(*risk, rplane, on[2 * i], on[2 * i + 1]);
+      const int P = risk_probes < 1 ? 1 : risk_probes;
+      for (int k = 1; k <= P; ++k) {
+        const float t = (static_cast<float>(k) / static_cast<float>(P)) * reach;
+        const float m = sample_risk(*risk, rplane, on[2 * i] + t * gdx, on[2 * i + 1] + t * gdy);
+        worst = m > worst ? m : worst;
+      }
+      fo[has_grip ? 6 : 5] = worst;
     }
   });
 }
@@ -607,22 +659,26 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
   // grip (sdf_nav.widen_coef_mlp) takes 6. A mismatch is a hard error rather
   // than a short buffer quietly feeding garbage into the first layer.
   const int in_w = model.in_features();
-  if (in_w != 5 && in_w != 6)
-    throw std::runtime_error("cvc::nav::drive_step: coef_mlp input width must be 5 or 6");
-  const bool want_grip = in_w == 6;
+  const bool want_grip = model.has_mu();
+  if (model.has_risk())
+    throw std::runtime_error("cvc::nav::drive_step: a terrain-risk model needs the material drive "
+                             "(drive_step_material)");
+  if (in_w != 5 + (want_grip ? 1 : 0))
+    throw std::runtime_error("cvc::nav::drive_step: coef_mlp in_features does not match its flags");
   if (want_grip && !(v.grip && v.grip->data))
     throw std::runtime_error(
-        "cvc::nav::drive_step: model takes 6 features but veh_params.grip is null");
+        "cvc::nav::drive_step: model takes the grip feature but veh_params.grip is null");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
-             v.mu_lookahead, v.mu_probes, pool);
-  std::vector<float> coef(static_cast<std::size_t>(n) * 3);
+             v.mu_lookahead, v.mu_probes, nullptr, 0.3f, 3, pool);
+  const int out_w = model.out_features();
+  std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads, pool);
   std::vector<float> al(n), be(n), ga(n);
   for (int i = 0; i < n; ++i) {
-    al[i] = coef[3 * i + 0];
-    be[i] = coef[3 * i + 1];
-    ga[i] = coef[3 * i + 2];
+    al[i] = coef[static_cast<std::size_t>(out_w) * i + 0];
+    be[i] = coef[static_cast<std::size_t>(out_w) * i + 1];
+    ga[i] = coef[static_cast<std::size_t>(out_w) * i + 2];
   }
   bicycle_rollout(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, minclr_out,
                   num_threads, pool);
@@ -631,28 +687,49 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
 void drive_step_material(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                          const coef_mlp &model, int n, const int *map_id, const veh_params &v,
                          const material_drive &mat, float *minclr_out, int num_threads) {
-  // The feature stride is the MODEL's, never an assumption: a net widened for
-  // grip (sdf_nav.widen_coef_mlp) takes 6. A mismatch is a hard error rather
-  // than a short buffer quietly feeding garbage into the first layer.
+  // The feature layout is the MODEL's, from its flags (grip and/or terrain-risk), never an
+  // in_features() guess. A mismatch is a hard error rather than a short buffer quietly feeding
+  // garbage into the first layer.
+  const bool want_grip = model.has_mu();
+  const bool want_risk = model.has_risk();
   const int in_w = model.in_features();
-  if (in_w != 5 && in_w != 6)
-    throw std::runtime_error("cvc::nav::drive_step_material: coef_mlp input width must be 5 or 6");
-  const bool want_grip = in_w == 6;
+  const int expect = 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0);
+  if (in_w != expect)
+    throw std::runtime_error(
+        "cvc::nav::drive_step_material: coef_mlp in_features does not match its feature flags");
   if (want_grip && !(v.grip && v.grip->data))
     throw std::runtime_error(
-        "cvc::nav::drive_step_material: model takes 6 features but veh_params.grip is null");
+        "cvc::nav::drive_step_material: model takes the grip feature but veh_params.grip is null");
+  if (want_risk && !(mat.stack && mat.stack->data))
+    throw std::runtime_error("cvc::nav::drive_step_material: model takes the risk feature but the "
+                             "material stack is null");
+  // The risk feature reads the SAME material planes the drive force uses (mat.stack), so the
+  // net sees and reroutes around one terrain. Lookahead/probes match the grl_snam training
+  // default (coef_feats risk_lookahead=0.3, risk_probes=3).
+  const material_stack *risk_src = want_risk ? mat.stack : nullptr;
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
-             v.mu_lookahead, v.mu_probes);
-  std::vector<float> coef(static_cast<std::size_t>(n) * 3);
+             v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3);
+  const int out_w = model.out_features();
+  std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads);
   std::vector<float> al(n), be(n), ga(n);
   for (int i = 0; i < n; ++i) {
-    al[i] = coef[3 * i + 0];
-    be[i] = coef[3 * i + 1];
-    ga[i] = coef[3 * i + 2];
+    al[i] = coef[static_cast<std::size_t>(out_w) * i + 0];
+    be[i] = coef[static_cast<std::size_t>(out_w) * i + 1];
+    ga[i] = coef[static_cast<std::size_t>(out_w) * i + 2];
   }
-  bicycle_rollout_material(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, mat,
+  // Learned reroute: a lam-head net's 4th output is the per-agent lam_soft, overriding the
+  // material_drive's fixed/gated column (the deployable twin of grl_snam coeffs_and_lam).
+  material_drive md = mat;
+  std::vector<float> lam_learned;
+  if (model.has_lam()) {
+    lam_learned.resize(n);
+    for (int i = 0; i < n; ++i)
+      lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3];
+    md.lam_soft = lam_learned.data();
+  }
+  bicycle_rollout_material(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, md,
                            minclr_out, num_threads);
 }
 
@@ -663,22 +740,27 @@ void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const 
   // external force channel applied inside the rollout. A null ext.sample makes
   // this byte-identical to drive_step.
   const int in_w = model.in_features();
-  if (in_w != 5 && in_w != 6)
-    throw std::runtime_error("cvc::nav::drive_step_ext: coef_mlp input width must be 5 or 6");
-  const bool want_grip = in_w == 6;
+  const bool want_grip = model.has_mu();
+  if (model.has_risk())
+    throw std::runtime_error("cvc::nav::drive_step_ext: a terrain-risk model needs the material "
+                             "drive (drive_step_material)");
+  if (in_w != 5 + (want_grip ? 1 : 0))
+    throw std::runtime_error(
+        "cvc::nav::drive_step_ext: coef_mlp in_features does not match its flags");
   if (want_grip && !(v.grip && v.grip->data))
     throw std::runtime_error(
-        "cvc::nav::drive_step_ext: model takes 6 features but veh_params.grip is null");
+        "cvc::nav::drive_step_ext: model takes the grip feature but veh_params.grip is null");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
-             v.mu_lookahead, v.mu_probes);
-  std::vector<float> coef(static_cast<std::size_t>(n) * 3);
+             v.mu_lookahead, v.mu_probes, nullptr, 0.3f, 3);
+  const int out_w = model.out_features();
+  std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads);
   std::vector<float> al(n), be(n), ga(n);
   for (int i = 0; i < n; ++i) {
-    al[i] = coef[3 * i + 0];
-    be[i] = coef[3 * i + 1];
-    ga[i] = coef[3 * i + 2];
+    al[i] = coef[static_cast<std::size_t>(out_w) * i + 0];
+    be[i] = coef[static_cast<std::size_t>(out_w) * i + 1];
+    ga[i] = coef[static_cast<std::size_t>(out_w) * i + 2];
   }
   bicycle_rollout_ext(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, ext,
                       minclr_out, num_threads);

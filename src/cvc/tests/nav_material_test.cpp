@@ -495,6 +495,95 @@ TEST(NavMaterialRollout, MaterialForcesChangeTheTrajectory) {
   EXPECT_EQ(std::memcmp(o1.data(), o3.data(), o1.size() * 4), 0);
 }
 
+// Build a material_stack over the rollout_world frame with a caller-supplied risk plane.
+static material_stack make_risk_stack(const rollout_world &w, std::vector<float> &store,
+                                      const std::function<float(int, int)> &risk_rc) {
+  const int hw = w.H * w.W;
+  store.assign(6 * hw, 0.0f);
+  for (int r = 0; r < w.H; ++r)
+    for (int c = 0; c < w.W; ++c)
+      store[0 * hw + r * w.W + c] = risk_rc(r, c); // channel 0 = risk r~
+  material_stack ms;
+  ms.data = store.data();
+  ms.M = 1;
+  ms.H = w.H;
+  ms.W = w.W;
+  ms.mnx = -10;
+  ms.mny = -10;
+  ms.mxx = 10;
+  ms.mxy = 10;
+  ms.cx = 0;
+  ms.cy = 0;
+  ms.S = 0.1;
+  return ms;
+}
+
+TEST(NavMaterialDrive, RiskFeatureIsWorstAhead) {
+  rollout_world w;
+  std::vector<float> uni, grad;
+  // Uniform risk 0.4: the WORST-ahead probe is 0.4 everywhere, and the base 5 features are
+  // untouched by appending the column.
+  material_stack ms_uni = make_risk_stack(w, uni, [](int, int) { return 0.4f; });
+  const float on[2] = {0.0f, 0.0f};       // world (0,0) — mid grid
+  const float goal_fwd[2] = {2.0f, 0.0f}; // carrot toward +x
+  std::vector<float> base(5), feat(6);
+  coef_feats(w.fs, on, goal_fwd, 1, nullptr, base.data(), 0); // no risk -> stride 5
+  coef_feats(w.fs, on, goal_fwd, 1, nullptr, feat.data(), 0, nullptr, 0.3f, 3, &ms_uni, 0.3f, 3);
+  for (int k = 0; k < 5; ++k)
+    EXPECT_FLOAT_EQ(feat[k], base[k]); // leading columns identical
+  EXPECT_NEAR(feat[5], 0.4f, 1e-4f);   // uniform -> the probe max is the underfoot value
+
+  // Risk increasing toward +x (risk = col/(W-1)): a carrot toward +x reads the HIGHER risk
+  // AHEAD (max), while a carrot toward -x reads ~the underfoot value (max includes o).
+  material_stack ms_g =
+      make_risk_stack(w, grad, [&](int, int c) { return (float)c / (float)(w.W - 1); });
+  std::vector<float> f_fwd(6), f_bwd(6);
+  const float goal_bwd[2] = {-2.0f, 0.0f};
+  coef_feats(w.fs, on, goal_fwd, 1, nullptr, f_fwd.data(), 0, nullptr, 0.3f, 3, &ms_g, 0.3f, 3);
+  coef_feats(w.fs, on, goal_bwd, 1, nullptr, f_bwd.data(), 0, nullptr, 0.3f, 3, &ms_g, 0.3f, 3);
+  const float underfoot = 0.5f;            // world 0 -> mid column -> risk 0.5
+  EXPECT_GT(f_fwd[5], underfoot + 1e-3f);  // ahead is riskier -> the max climbs
+  EXPECT_NEAR(f_bwd[5], underfoot, 1e-2f); // ahead is safer -> max stays ~underfoot
+}
+
+TEST(NavCoefMlp, FeatureAndLamFlags) {
+  // has_mu/has_risk/has_lam drive the feature layout the drive builds. A bare 6-in net is grip
+  // (back-compat); the risk flag flips a 6-in net to risk; a 4th output is the lam head.
+  const std::vector<float> ob3 = {1.0f, 3.0f, 4.0f};
+  auto mk = [&](int in, int out, std::uint32_t flags) {
+    const std::vector<float> ob = out == 4 ? std::vector<float>{1, 3, 4, 0.4f} : ob3;
+    return coef_mlp::from_layers(in, out, {out}, {in}, {0},
+                                 {std::vector<float>((std::size_t)out * in, 0.0f)},
+                                 {std::vector<float>((std::size_t)out, 0.0f)}, ob, flags);
+  };
+  coef_mlp base = mk(5, 3, 0);
+  EXPECT_FALSE(base.has_mu());
+  EXPECT_FALSE(base.has_risk());
+  EXPECT_FALSE(base.has_lam());
+  coef_mlp grip = mk(6, 3, 0); // bare 6-in => grip (implied)
+  EXPECT_TRUE(grip.has_mu());
+  EXPECT_FALSE(grip.has_risk());
+  coef_mlp risk = mk(6, 3, coef_mlp::kFlagFeatRisk);
+  EXPECT_TRUE(risk.has_risk());
+  EXPECT_FALSE(risk.has_mu()); // the risk flag disambiguates the 6-in net away from grip
+  coef_mlp risklam = mk(6, 4, coef_mlp::kFlagFeatRisk);
+  EXPECT_TRUE(risklam.has_risk());
+  EXPECT_TRUE(risklam.has_lam());
+}
+
+TEST(NavMaterialDrive, RiskModelNeedsMaterialPath) {
+  // A terrain-risk net has no risk source without the material drive, so drive_step /
+  // drive_step_ext reject it rather than feeding a short/garbage feature vector.
+  rollout_world w;
+  coef_mlp risk = coef_mlp::from_layers(6, 3, {3}, {6}, {0}, {std::vector<float>(18, 0.0f)},
+                                        {std::vector<float>(3, 0.0f)}, {1.0f, 3.0f, 4.0f},
+                                        coef_mlp::kFlagFeatRisk);
+  std::vector<float> o = w.o, th = w.th, sp = w.sp, mc(w.N);
+  EXPECT_THROW(drive_step(w.fs, o.data(), th.data(), sp.data(), w.goal.data(), risk, w.N, nullptr,
+                          w.v, mc.data(), 1),
+               std::exception);
+}
+
 TEST(NavMaterialRollout, ThreadCountDeterminism) {
   rollout_world w;
   const int hw = w.H * w.W;
