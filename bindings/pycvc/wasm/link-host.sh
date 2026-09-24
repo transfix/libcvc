@@ -55,7 +55,9 @@ with open(gen,"w") as f:
 open(lst,"w").write("\n".join(e[2] for e in E))
 print(f"link-host: registered {len(E)} numpy extensions")
 PY
-mapfile -t NPYOBJS < "$OUT/numpy_so_list.txt"
+# strip CR: on a Windows host the generator's python writes CRLF, which would
+# leave a trailing \r on each path and break emcc ("No such file").
+mapfile -t NPYOBJS < <(tr -d '\r' < "$OUT/numpy_so_list.txt")
 
 printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHONHOME='/py';ENV.PYTHONDONTWRITEBYTECODE='1';});\n" > "$OUT/pre.js"
 
