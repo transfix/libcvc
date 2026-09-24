@@ -519,7 +519,15 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
 
 void coef_trainer::adam_step(const std::vector<float> &grad) {
   ++adam_t_;
-  const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f, lr = cfg_.lr;
+  const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
+  // Cosine anneal lr -> lr_min over the run (torch CosineAnnealingLR): removes the
+  // late-training overshoot that collapses reach at the fixed lr. adam_total_==0 (a
+  // caller driving adam_step directly, not via train()) or cosine_lr off => fixed lr.
+  float lr = cfg_.lr;
+  if (cfg_.cosine_lr && adam_total_ > 0) {
+    const float t = std::min(1.0f, static_cast<float>(adam_t_) / static_cast<float>(adam_total_));
+    lr = cfg_.lr_min + (cfg_.lr - cfg_.lr_min) * 0.5f * (1.0f + std::cos(3.14159265358979f * t));
+  }
   double sq = 0.0;
   for (float g : grad)
     sq += static_cast<double>(g) * g;
@@ -541,6 +549,9 @@ void coef_trainer::adam_step(const std::vector<float> &grad) {
 void coef_trainer::train(const training_scene &scene, bool verbose) {
   const int n = cfg_.n, horizon = cfg_.horizon, window = cfg_.window;
   const bool bike = cfg_.rollout == rollout_kind::bicycle;
+  // Total adam steps = outer steps * windows-per-horizon, so the cosine anneal spans the run.
+  const int nwin = (horizon + window - 1) / window;
+  adam_total_ = static_cast<long>(cfg_.steps) * nwin;
   std::vector<float> o(2 * n), goal(2 * n), aux(2 * n), o2(2 * n), a2(2 * n);
   std::vector<float> grad;
   for (int step = 0; step < cfg_.steps; ++step) {

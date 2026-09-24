@@ -133,6 +133,12 @@ struct train_config {
   // scene's d_hat, matching train_bicycle's default.
   float d_safe = 0.0f;
   float grad_clip = 5.0f; // global-norm gradient clip
+  // Cosine LR anneal over the whole run (lr -> lr_min). ON by default: the fixed-lr
+  // optimizer holds ~the seed for ~100 steps then DIVERGES by 400 (reach 0.62 -> 0.24) —
+  // a late-training overshoot the decay removes, matching torch's CosineAnnealingLR. The
+  // finite-difference gradcheck exercises loss_and_grad only, so this does not touch it.
+  bool cosine_lr = true;
+  float lr_min = 0.0f;
   unsigned seed = 0;
 
   rollout_kind rollout = rollout_kind::surrogate; // which integrator to train on
@@ -188,6 +194,7 @@ private:
   std::vector<float> p_;     // flat params: [L0.w(h*5) L0.b(h) L1.w(h*h) L1.b(h) L2.w(3*h) L2.b(3)]
   std::vector<float> m_, u_; // Adam first/second moments (u_ = "v", renamed to avoid the vel v)
   long adam_t_ = 0;
+  long adam_total_ = 0; // total adam steps this train() run, for the cosine LR anneal (0 = off)
   // Per-layer flat offsets into p_ (w then b), plus (rows, cols).
   int off_w_[3] = {0, 0, 0}, off_b_[3] = {0, 0, 0};
   int lrows_[3] = {0, 0, 0}, lcols_[3] = {0, 0, 0};
