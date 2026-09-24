@@ -87,9 +87,24 @@ Invoke-CvcWasmCMakeBuild -ExtraArgs @(
     "-DSWIG_DIR=$swigDir"
 )
 
-# ── (4) stage the CPython-wasm host source (the archives + .py proxies are placed
-# by the install() rules above; the single-.wasm host link is the next step). ──
+# ── (4) link the CPython-wasm host (embeds pycvc + pycvc_gl + numpy) ──────────
+# Invoke-CvcWasmCMakeBuild already installed the archives + .py proxies. Drive the
+# proven link-host.sh under Git Bash (env-wasm.ps1 provides $script:gitBash +
+# ConvertTo-MsysPath). Non-fatal — the archives are the primary deliverable.
 $share = Join-Path $env:CVC_INSTALL_DIR 'share\pycvc-gl-wasm'
 New-Item -ItemType Directory -Force -Path $share | Out-Null
 Copy-Item (Join-Path $env:CVC_SOURCE_DIR 'bindings\pycvc\wasm\pycvc_host.cpp') $share
-Write-Host "pycvc-gl(wasm) build complete (static archives + proxies installed; host source staged)"
+$nodeExe = (Get-ChildItem (Join-Path $env:CVC_EMSDK_DIR 'node') -Recurse -Filter node.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+$bashEnv = @(
+    "DEPS='$(ConvertTo-MsysPath $env:CVC_DEPS_PREFIX)'",
+    "INST='$(ConvertTo-MsysPath $env:CVC_INSTALL_DIR)'",
+    "SRC='$(ConvertTo-MsysPath $env:CVC_SOURCE_DIR)'",
+    "EMSDK='$(ConvertTo-MsysPath $env:CVC_EMSDK_DIR)'",
+    "OUT='$(ConvertTo-MsysPath $share)'"
+) -join ' '
+if ($nodeExe) { $bashEnv += " NODE='$(ConvertTo-MsysPath $nodeExe)'" }
+$linkScript = ConvertTo-MsysPath (Join-Path $env:CVC_SOURCE_DIR 'bindings\pycvc\wasm\link-host.sh')
+& $script:gitBash -lc "$bashEnv bash '$linkScript'"
+if ($LASTEXITCODE -eq 0) { Write-Host "pycvc-gl(wasm): host binary pycvc_host.wasm linked" }
+else { Write-Host "pycvc-gl(wasm): host link failed — archives installed; link-host.sh is standalone-runnable" }
+Write-Host "pycvc-gl(wasm) build complete"

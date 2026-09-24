@@ -84,28 +84,31 @@ emcmake cmake -G Ninja \
     -DPython3_NumPy_INCLUDE_DIRS="${NUMPY_INC}" \
     -DSWIG_EXECUTABLE="${HOSTENV}/bin/swig"
 
-# ── (4) build the static SWIG archives (+ the cvc/cvcGL closure they need) ──
-cmake --build "${CVC_BUILD_DIR}" --target pycvc pycvc_gl -j "${CVC_JOBS}"
+# ── (4) build + install the static SWIG archives + the cvc/cvcGL closure ──
+# Build the default targets (cvc + cvcGL + pycvc + pycvc_gl; examples/tests/cli are
+# OFF), then install — the install rules place _pycvc.a / pycvc_gl/_pycvc_gl.a + the
+# .py proxies + libcvc.a/libcvcGL.a into CVC_INSTALL_DIR, which the host link reads.
+cmake --build "${CVC_BUILD_DIR}" -j "${CVC_JOBS}"
+cmake --install "${CVC_BUILD_DIR}"
+_PXA="$(find "${CVC_INSTALL_DIR}" -name '_pycvc.a' 2>/dev/null | head -1)"
+_GLA="$(find "${CVC_INSTALL_DIR}" -name '_pycvc_gl.a' 2>/dev/null | head -1)"
+[ -n "${_PXA}" ] && [ -n "${_GLA}" ] || {
+    echo "pycvc-gl(wasm): FATAL — static archives not installed" >&2
+    find "${CVC_INSTALL_DIR}" -name '*pycvc*.a' >&2 2>/dev/null; exit 1; }
+echo "pycvc-gl(wasm): installed ${_PXA} + ${_GLA}"
 
-_LIBPYCVC="$(find "${CVC_BUILD_DIR}" -name 'libpycvc.a' -o -name 'pycvc.a' 2>/dev/null | head -1)"
-_LIBPYCVCGL="$(find "${CVC_BUILD_DIR}" -name 'libpycvc_gl.a' -o -name 'pycvc_gl.a' 2>/dev/null | head -1)"
-[ -n "${_LIBPYCVC}" ] && [ -n "${_LIBPYCVCGL}" ] || {
-    echo "pycvc-gl(wasm): FATAL — static archives not produced" >&2
-    find "${CVC_BUILD_DIR}" -name '*pycvc*.a' >&2 2>/dev/null; exit 1; }
-echo "pycvc-gl(wasm): built ${_LIBPYCVC} + ${_LIBPYCVCGL}"
-
-# ── (5) stage the archives, the .py proxies, and the host source ──────────────
-# The single-.wasm host LINK (force-load the pycvc archives + libvtkWrappingPythonCore
-# + the vtk-python _load()) is the next step; determining the vtk-python static
-# _load() symbol needs this build's vtk-python artifact. Stage everything a host
-# link needs so it can be driven here or by a downstream `bake`.
-DEST="${CVC_INSTALL_DIR}/lib/python3.12/site-packages"
-mkdir -p "${DEST}/pycvc_gl" "${CVC_INSTALL_DIR}/lib" "${CVC_INSTALL_DIR}/share/pycvc-gl-wasm"
-cp "${_LIBPYCVC}" "${_LIBPYCVCGL}" "${CVC_INSTALL_DIR}/lib/"
-cp "${CVC_BUILD_DIR}/bindings/pycvc/pycvc.py" "${DEST}/" 2>/dev/null || \
-  find "${CVC_BUILD_DIR}" -name pycvc.py -path '*bindings*' -exec cp {} "${DEST}/" \;
-cp "${CVC_BUILD_DIR}/bindings/pycvc/pycvc_gl.py" "${DEST}/pycvc_gl/__init__.py" 2>/dev/null || \
-  find "${CVC_BUILD_DIR}" -name pycvc_gl.py -path '*bindings*' -exec cp {} "${DEST}/pycvc_gl/__init__.py" \;
-cp -r "${CVC_SOURCE_DIR}/bindings/pycvc/pymod_gl/." "${DEST}/pycvc_gl/" 2>/dev/null || true
+# ── (5) link the CPython-wasm host (embeds pycvc + pycvc_gl + numpy) ──────────
+# link-host.sh is the PROVEN link (numpy static-embed registrar + the closure
+# group + MEMFS stdlib/proxies → pycvc_host.{wasm,js}). Non-fatal: the archives are
+# the primary deliverable, and link-host.sh can also be run standalone.
+mkdir -p "${CVC_INSTALL_DIR}/share/pycvc-gl-wasm"
 cp "${CVC_SOURCE_DIR}/bindings/pycvc/wasm/pycvc_host.cpp" "${CVC_INSTALL_DIR}/share/pycvc-gl-wasm/"
-echo "pycvc-gl(wasm) build complete (static archives + proxies + host source staged)"
+_NODE="$(command -v node 2>/dev/null || ls "${CVC_EMSDK_DIR}"/node/*/bin/node 2>/dev/null | head -1 || true)"
+if DEPS="${CVC_DEPS_PREFIX}" INST="${CVC_INSTALL_DIR}" SRC="${CVC_SOURCE_DIR}" \
+     EMSDK="${CVC_EMSDK_DIR}" OUT="${CVC_INSTALL_DIR}/share/pycvc-gl-wasm" NODE="${_NODE}" \
+     bash "${CVC_SOURCE_DIR}/bindings/pycvc/wasm/link-host.sh"; then
+    echo "pycvc-gl(wasm): host binary pycvc_host.wasm linked"
+else
+    echo "pycvc-gl(wasm): host link failed — archives installed; link-host.sh is standalone-runnable" >&2
+fi
+echo "pycvc-gl(wasm) build complete"
