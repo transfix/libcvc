@@ -165,10 +165,22 @@ message(STATUS "pycvc: installing python modules to \${CMAKE_INSTALL_PREFIX}/${_
 # output dir works both in-tree (built target) and standalone (imported target).
 set(_PYCVC_TEST_LIBPATH "$<TARGET_FILE_DIR:${_PYCVC_CVC_TARGET}>")
 
+# On Emscripten there are no shared (dlopen'd) Python extension modules: build
+# the SWIG wrappers as STATIC archives whose `PyInit__<mod>` symbols the wasm
+# host launcher registers via PyImport_AppendInittab before Py_Initialize (see
+# wasm/pycvc_host.cpp and §2.1 of docs/roadmap/static-single-binary-python.md).
+# SWIG marks PyInit_ as PyMODINIT_FUNC (visibility default), so it survives in the
+# archive; the launcher references it (and force-loads the archive) to pull it in.
+set(_PYCVC_SWIG_TYPE MODULE)
+if(EMSCRIPTEN)
+  set(_PYCVC_SWIG_TYPE STATIC)
+endif()
+
 # ── Core pycvc — cvc::geometry/volume facades + zero-copy numpy views ──
 option(CVC_BUILD_PYCVC_CORE "Build the core pycvc numpy bindings module" ON)
 if(CVC_BUILD_PYCVC_CORE)
   swig_add_library(pycvc
+    TYPE ${_PYCVC_SWIG_TYPE}
     LANGUAGE python
     SOURCES pycvc.i pycvc_context.cpp pycvc_algorithm.cpp pycvc_state.cpp pycvc_exec.cpp
   )
@@ -178,7 +190,10 @@ if(CVC_BUILD_PYCVC_CORE)
     SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
   )
-  install(TARGETS pycvc LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
+  # LIBRARY covers the shared (native) module; ARCHIVE the static wasm archive.
+  install(TARGETS pycvc
+    LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc
+    ARCHIVE DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc.py"
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
@@ -259,6 +274,7 @@ if(CVC_BUILD_PYCVC_GL)
   # vtkProp bridge (free functions); the scene model itself is the directly
   # %include'd cvcGL headers, which cross cvc::geometry/cvc::volume in via %import.
   swig_add_library(pycvc_gl
+    TYPE ${_PYCVC_SWIG_TYPE}
     LANGUAGE python
     SOURCES pycvc_gl.i pycvc_scene.cpp
   )
@@ -305,7 +321,9 @@ if(CVC_BUILD_PYCVC_GL)
   # consumer gets BOTH the bindings (pycvc_gl.SceneGraph) and the reusable scene
   # utilities (pycvc_gl.camera.ChaseCamera, pycvc_gl.vehicle.VehiclePose,
   # pycvc_gl.lab.Lab, pycvc_gl.scenes.*) from one import, with no external package.
-  install(TARGETS pycvc_gl LIBRARY DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl)
+  install(TARGETS pycvc_gl
+    LIBRARY DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl
+    ARCHIVE DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc_gl.py"
     DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" RENAME __init__.py COMPONENT pycvc_gl)
   install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/"
