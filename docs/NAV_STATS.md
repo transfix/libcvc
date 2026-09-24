@@ -69,6 +69,27 @@ The identity fields (`robot_radius_m`/`mass_kg`/…) and the per-agent `veh_para
 the batch CUDA entry points) let a mixed fleet be scored per vehicle even though today the demos run a
 homogeneous convoy.
 
+## Debugging convoy arrival — `reached` is the honest per-vehicle signal
+
+`veh_nav_stats::arrived` / `time_to_goal_s` latch on the **rising edge of the sim's `reached[i]`**
+flag (`nav_stats_params::reach_eps`), i.e. when a vehicle actually gets within `sim_world`'s
+`reach_tol` of *its own* goal. That is the per-vehicle truth. A **convoy/harness may carry its own
+coarser arrival tolerance** for a whole-column "done" check — e.g. cvcdbg's `ConvoyController::arrive_m()
+= N·standoff + 40 m`, ~172 m for a 6-vehicle column. That column tolerance is fine as a formation
+check but **hides a tail follower that parked short**: the harness can print `atObjective=6/6` while
+two followers never latched `reached`. When you are debugging "did each vehicle arrive?", read the
+per-vehicle `arrived`/`time_to_goal_s` (`time_to_goal_s < 0` = never reached), **not** the aggregate
+column count.
+
+Worked example — the cvcdbg demo3 tail-follower loss was isolated entirely with this schema via
+`cvcdbg-nativedemo/tools/dbg_arrival_check3.cpp` (`--json` per-vehicle records): comm-off arrives 6/6
+in every condition, while the bounded comm-steer force loses the two tail followers under sustained
+jamming (`reached=0`, `turn_total_rad` 12→252 = looping, `wall_entries` 0→19). Two traps that turn
+these stats into noise if ignored: (1) the coarse column tolerance above, and (2) a harness whose jam
+schedule scales with total run length — hold the run length fixed when A/B-ing. See
+`cvcdbg-nativedemo/docs/demo3-follower-loss.md` for the full case and the `turn_total_rad` /
+`wall_entries` / `time_stopped_s` interpretation used to distinguish "looping" from "frozen."
+
 ## Tests
 
 `src/cvc/tests/nav_stats_test.cpp` (the base accumulators/scorecard over a scripted trajectory) and
