@@ -86,6 +86,11 @@ void nav_stats_collector::begin_episode(int n, double dt_s, const float *start_p
   cls_.assign(n_, 0);
   rr_.assign(n_, 0.0);
   mass_.assign(n_, 0.0);
+  parent_.assign(n_, -1);
+  slot_err_sum_.assign(n_, 0.0);
+  slot_err_max_.assign(n_, 0.0);
+  slot_err_last_.assign(n_, 0.0);
+  slot_err_cnt_.assign(n_, 0);
   for (int i = 0; i < n_; ++i) {
     auto &v = ep_.per_vehicle[i];
     v.veh_index = i;
@@ -96,13 +101,15 @@ void nav_stats_collector::begin_episode(int n, double dt_s, const float *start_p
 }
 
 void nav_stats_collector::set_identity(int i, int convoy_id, int vehicle_class,
-                                       double robot_radius_m, double mass_kg) {
+                                       double robot_radius_m, double mass_kg,
+                                       int formation_parent) {
   if (i < 0 || i >= n_)
     return;
   conv_[i] = convoy_id;
   cls_[i] = vehicle_class;
   rr_[i] = robot_radius_m;
   mass_[i] = mass_kg;
+  parent_[i] = formation_parent;
 }
 
 void nav_stats_collector::step(const float *pos, const float *head, const float *spd,
@@ -157,6 +164,17 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
         v.dist_over_material_m[m] += seg;
       }
     }
+    if (smp.formation_slot) { // formation-holding: distance to this vehicle's slot this step
+      double sx = 0, sy = 0;
+      if (smp.formation_slot(i, sx, sy)) {
+        const double e = std::hypot(x - sx, y - sy);
+        slot_err_sum_[i] += e;
+        ++slot_err_cnt_[i];
+        if (e > slot_err_max_[i])
+          slot_err_max_[i] = e;
+        slot_err_last_[i] = e;
+      }
+    }
 
     if (reached[i] && v.time_to_goal_s < 0) {
       v.time_to_goal_s = t_end;
@@ -205,9 +223,16 @@ episode_nav_stats nav_stats_collector::finish() {
     v.vehicle_class = cls_[i];
     v.robot_radius_m = rr_[i];
     v.mass_kg = mass_[i];
+    v.formation_parent = parent_[i];
     v.speed_mean = speed_sum_[i] / steps;
     v.fuel_used = v.accel_integral; // PR 1 proxy
     v.timed_out = !v.arrived;
+    // formation holding — only when a slot sampler fed samples this episode (else all zero, off)
+    if (slot_err_cnt_[i] > 0) {
+      v.slot_error_mean_m = slot_err_sum_[i] / slot_err_cnt_[i];
+      v.slot_error_max_m = slot_err_max_[i];
+      v.formation_arrived = p_.formation_tol_m > 0 && slot_err_last_[i] < p_.formation_tol_m;
+    }
 
     const double used_t = v.arrived ? v.time_to_goal_s : elapsed;
     bool over = false;
@@ -331,6 +356,11 @@ std::string episode_nav_stats::to_json() const {
     write_array(o, v.time_over_material_s.data(), kNumMaterials);
     o << ",\"dist_over_material_m\":";
     write_array(o, v.dist_over_material_m.data(), kNumMaterials);
+    o << ",\"formation_parent\":" << v.formation_parent << ",\"slot_error_mean_m\":";
+    num(o, v.slot_error_mean_m);
+    o << ",\"slot_error_max_m\":";
+    num(o, v.slot_error_max_m);
+    o << ",\"formation_arrived\":" << (v.formation_arrived ? "true" : "false");
     o << '}';
   }
   o << "]}";
@@ -351,9 +381,39 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   double mat_total = 0;
   std::array<double, kNumMaterials> mat_sum{};
   std::vector<double> ttgs;
+  // formation holding (followers = formation_parent >= 0; anchors = -1)
+  int foll_runs = 0, foll_arr = 0, form_episodes = 0, form_mission_ok = 0;
+  double slot_sum = 0;
   for (const auto &e : episodes) {
     if (e.success)
       ++succ;
+    // per-episode formation mission: every convoy (that has followers) has its anchor arrived AND
+    // all its followers in-slot. Keyed by convoy_id via a small vector (ids are small contiguous).
+    int maxConvoy = -1;
+    for (const auto &v : e.per_vehicle)
+      maxConvoy = std::max(maxConvoy, v.convoy_id);
+    std::vector<char> convoyHasFollowers(maxConvoy + 1, 0), convoyOk(maxConvoy + 1, 1);
+    for (const auto &v : e.per_vehicle) {
+      if (v.formation_parent >= 0) { // follower
+        convoyHasFollowers[v.convoy_id] = 1;
+        if (!v.formation_arrived)
+          convoyOk[v.convoy_id] = 0;
+      } else if (!v.arrived) { // anchor/lead must reach the objective
+        convoyOk[v.convoy_id] = 0;
+      }
+    }
+    bool anyFormation = false, allOk = true;
+    for (int c = 0; c <= maxConvoy; ++c)
+      if (convoyHasFollowers[c]) {
+        anyFormation = true;
+        if (!convoyOk[c])
+          allOk = false;
+      }
+    if (anyFormation) {
+      ++form_episodes;
+      if (allOk)
+        ++form_mission_ok;
+    }
     makespan_sum += e.makespan_s;
     pen_sum += e.penetration_pct;
     if (e.min_sep_m < 1e29) {
@@ -378,6 +438,12 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
         mat_sum[m] += v.time_over_material_s[m];
         mat_total += v.time_over_material_s[m];
       }
+      if (v.formation_parent >= 0) { // followers only (the anchor has no slot)
+        ++foll_runs;
+        if (v.formation_arrived)
+          ++foll_arr;
+        slot_sum += v.slot_error_mean_m;
+      }
     }
   }
   s.n_vehicle_runs = runs;
@@ -399,6 +465,9 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   if (mat_total > 0)
     for (int m = 0; m < kNumMaterials; ++m)
       s.material_time_share[m] = mat_sum[m] / mat_total;
+  s.form_arrival_rate = foll_runs > 0 ? (double)foll_arr / foll_runs : 0;
+  s.form_mission_rate = form_episodes > 0 ? (double)form_mission_ok / form_episodes : 0;
+  s.mean_slot_error_m = foll_runs > 0 ? slot_sum / foll_runs : 0;
   return s;
 }
 
@@ -430,6 +499,12 @@ std::string nav_scorecard::to_json() const {
   num(o, mean_min_sep_m);
   o << ",\"material_time_share\":";
   write_array(o, material_time_share.data(), kNumMaterials);
+  o << ",\"form_arrival_rate\":";
+  num(o, form_arrival_rate);
+  o << ",\"form_mission_rate\":";
+  num(o, form_mission_rate);
+  o << ",\"mean_slot_error_m\":";
+  num(o, mean_slot_error_m);
   o << "}";
   return o.str();
 }

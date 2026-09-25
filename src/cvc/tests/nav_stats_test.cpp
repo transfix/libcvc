@@ -265,3 +265,87 @@ TEST(NavStats, ScorecardAggregatesCorpus) {
   EXPECT_NE(js.find("\"success_rate\""), std::string::npos);
   EXPECT_NE(js.find("\"material_time_share\""), std::string::npos);
 }
+
+// Formation-holding path (feature ON): a follower converges on a fixed slot while its
+// anchor drives to the objective. Exercises the formation_slot sampler, slot-error
+// accumulation, the formation_arrived latch, and the scorecard follower/mission rates.
+// Every case above leaves formation OFF (formation_tol_m=0, null sampler), so their
+// pinned numbers are untouched; this is the only case that lights the new path up.
+TEST(NavStats, FormationSlotAndScorecard) {
+  const int N = 2;
+  const float start[4] = {0, 0, 0, 0};
+  const float goal[4] = {100, 0, 100, 0};
+
+  nav_stats_params p;
+  p.formation_tol_m = 1.0; // follower counts as "in slot" when final slot error < 1 m
+  nav_stats_collector c(p);
+  c.begin_episode(N, 1.0, start, goal, {}, "form-scene", 3, "ckpt-F");
+  c.set_identity(0, /*convoy*/ 0, /*class*/ 0, /*radius*/ 2.0, /*mass*/ 4000.0, /*parent*/ -1);
+  c.set_identity(1, /*convoy*/ 0, /*class*/ 0, /*radius*/ 2.0, /*mass*/ 4000.0, /*parent*/ 0);
+
+  // veh0 = anchor driving +x to the objective; veh1 = follower converging on slot (10,0):
+  // slot errors 3, 1, 0.5 -> mean 1.5, max 3, final 0.5 (< tol -> in slot).
+  const float posS[3][4] = {{30, 0, 7, 0}, {60, 0, 9, 0}, {100, 0, 10.5f, 0}};
+  const float headS[3][2] = {{0, 0}, {0, 0}, {0, 0}};
+  const float spdS[3][2] = {{30, 3}, {30, 2}, {40, 1.5}};
+  const std::uint8_t rchS[3][2] = {{0, 0}, {0, 0}, {1, 0}}; // anchor arrives at step 2
+
+  nav_samplers smp;
+  smp.formation_slot = [](int i, double &sx, double &sy) {
+    if (i == 1) { // only the follower holds a slot; the anchor returns none
+      sx = 10.0;
+      sy = 0.0;
+      return true;
+    }
+    return false;
+  };
+
+  const int mode_seek[2] = {0, 0};
+  for (int s = 0; s < 3; ++s)
+    c.step(posS[s], headS[s], spdS[s], mode_seek, rchS[s], smp);
+  episode_nav_stats e0 = c.finish();
+
+  // Anchor: no slot -> fields stay at their off defaults; parent -1.
+  EXPECT_EQ(e0.per_vehicle[0].formation_parent, -1);
+  EXPECT_DOUBLE_EQ(e0.per_vehicle[0].slot_error_mean_m, 0.0);
+  EXPECT_DOUBLE_EQ(e0.per_vehicle[0].slot_error_max_m, 0.0);
+  EXPECT_FALSE(e0.per_vehicle[0].formation_arrived);
+  // Follower: errors 3, 1, 0.5 -> mean 1.5, max 3; final 0.5 < tol 1.0 -> in slot.
+  EXPECT_EQ(e0.per_vehicle[1].formation_parent, 0);
+  EXPECT_NEAR(e0.per_vehicle[1].slot_error_mean_m, 1.5, 1e-9);
+  EXPECT_NEAR(e0.per_vehicle[1].slot_error_max_m, 3.0, 1e-9);
+  EXPECT_TRUE(e0.per_vehicle[1].formation_arrived);
+
+  const std::string ej = e0.to_json();
+  EXPECT_NE(ej.find("\"formation_parent\""), std::string::npos);
+  EXPECT_NE(ej.find("\"slot_error_mean_m\""), std::string::npos);
+  EXPECT_NE(ej.find("\"formation_arrived\":true"), std::string::npos);
+
+  // A second episode where the follower never reaches its slot (out of formation), so the
+  // corpus rates come out fractional rather than trivially 1.0.
+  episode_nav_stats e1;
+  e1.success = false;
+  e1.makespan_s = 40;
+  e1.min_sep_m = 8;
+  veh_nav_stats a = mkv(true, 30, 100, 100, 1, 5, 0); // anchor arrived
+  a.convoy_id = 0;
+  a.formation_parent = -1;
+  veh_nav_stats f = mkv(false, -1, 200, 100, 2, 9, 0); // follower, out of slot
+  f.convoy_id = 0;
+  f.formation_parent = 0;
+  f.slot_error_mean_m = 20.0;
+  f.formation_arrived = false;
+  e1.per_vehicle = {a, f};
+
+  // Follower arrivals: 1 of 2 -> 0.5. Mission: e0 ok (anchor arrived + follower in-slot),
+  // e1 not -> 1 of 2 -> 0.5. Mean follower slot error: (1.5 + 20)/2 = 10.75.
+  nav_scorecard s = aggregate_nav({e0, e1}, "ckpt-F");
+  EXPECT_NEAR(s.form_arrival_rate, 0.5, 1e-9);
+  EXPECT_NEAR(s.form_mission_rate, 0.5, 1e-9);
+  EXPECT_NEAR(s.mean_slot_error_m, 10.75, 1e-9);
+
+  const std::string sj = s.to_json();
+  EXPECT_NE(sj.find("\"form_arrival_rate\""), std::string::npos);
+  EXPECT_NE(sj.find("\"form_mission_rate\""), std::string::npos);
+  EXPECT_NE(sj.find("\"mean_slot_error_m\""), std::string::npos);
+}
