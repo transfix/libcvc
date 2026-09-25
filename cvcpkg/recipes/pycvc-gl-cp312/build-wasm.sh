@@ -39,6 +39,13 @@ ${_cvc} install python312 swig cmake ninja \
     --platform "${_hp}" --config release --link shared \
     --prefix "${HOSTENV}" --no-fallback-to-source >&2
 export PATH="${HOSTENV}/bin:${PATH}"
+# The cvcpkg-packaged SWIG reports a stale -swiglib after relocation, so CMake's
+# FindSWIG cannot locate SWIG_DIR (the .i library) from SWIG_EXECUTABLE alone.
+# Point it at the real library dir (share/swig/<ver>) via both the env var swig
+# itself reads (SWIG_LIB) and the CMake var (-DSWIG_DIR below). Mirrors
+# build-wasm.ps1 — without it the wasm build fails "Could NOT find SWIG".
+_SWIG_DIR="$(find "${HOSTENV}/share/swig" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+[ -n "${_SWIG_DIR}" ] && export SWIG_LIB="${_SWIG_DIR}"
 PY_NATIVE="${HOSTENV}/bin/python3.12"
 NUMPY_INC="$("${PY_NATIVE}" -c 'import numpy; print(numpy.get_include())' 2>/dev/null || \
             echo "${CVC_DEPS_PREFIX}/lib/python3.12/site-packages/numpy/_core/include")"
@@ -94,7 +101,8 @@ emcmake cmake -G Ninja \
     -DCVC_PYCVCGL_VTK_BRIDGE=ON \
     -DPython3_EXECUTABLE="${PY_NATIVE}" \
     -DPython3_NumPy_INCLUDE_DIRS="${NUMPY_INC}" \
-    -DSWIG_EXECUTABLE="${HOSTENV}/bin/swig"
+    -DSWIG_EXECUTABLE="${HOSTENV}/bin/swig" \
+    -DSWIG_DIR="${_SWIG_DIR}"
 
 # ── (4) build + install the static SWIG archives + the cvc/cvcGL closure ──
 # Build the default targets (cvc + cvcGL + pycvc + pycvc_gl; examples/tests/cli are
