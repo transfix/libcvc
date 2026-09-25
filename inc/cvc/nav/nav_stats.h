@@ -95,6 +95,14 @@ struct nav_samplers {
   // when the final slot error is within params.formation_tol_m. Formation is a NAV concept, so it
   // lives in the base — a downstream RF layer references the same (veh_index, convoy_id).
   std::function<bool(int, double &, double &)> formation_slot;
+  // Per-agent belief "sense flips" for THIS step: the number of cells whose occupied/free belief
+  // bit flipped on the agent's most recent sense sweep (0 on ticks where the agent did not sense).
+  // null ⇒ sense_flips stays 0 (feature off). The collector sums it per vehicle into
+  // veh_nav_stats.sense_flips. The underlying count is already bit-identical C++/Python (the
+  // sense_batch flips[] array), so the grl-snam twin reproduces the sum exactly; the caller is
+  // responsible for passing the per-step DELTA (0 on non-sense ticks), never the same sweep's count
+  // twice.
+  const int *sense_flips = nullptr;
 };
 
 // One per vehicle, accumulated over an episode. Mirrors grl_snam NavStats + the
@@ -158,6 +166,26 @@ struct veh_nav_stats {
   double slot_error_mean_m = 0;
   double slot_error_max_m = 0;
   bool formation_arrived = false; // final slot error < params.formation_tol_m
+  // epistemic: total belief "sense flips" over the episode (Σ per-sweep flipped-cell counts). 0
+  // unless a nav_samplers.sense_flips feed is provided. A cheap proxy for how much the agent's
+  // world-model churned (a high-churn agent is re-planning against a shifting belief). int64 (not
+  // long) so the width is identical on LP64 and Windows/LLP32 — a corpus sum can exceed 2^31 and
+  // must match the grl-snam twin's unbounded Python int bit-for-bit.
+  std::int64_t sense_flips = 0;
+};
+
+// Fleet coverage fractions over an episode's belief planes — the epistemic counterpart to the
+// motion stats. Each is a fraction in [0,1] of the (planes × cells) belief-raster entries. explored
+// = ever seen; visible = in view on the final frame; believed_free = derived occupancy reads FREE;
+// phantom = believed OCCUPIED where the truth is FREE (a hallucinated obstacle). Computed by
+// compute_coverage from the same rasters both repos hold, over the binary to_occupancy() output
+// (bit-identical C++/Python given matching p_thresh/band/unknown-policy), so the grl-snam twin
+// reproduces every fraction.
+struct nav_coverage {
+  double explored_frac = 0;
+  double visible_frac = 0;
+  double believed_free_frac = 0;
+  double phantom_frac = 0;
 };
 
 // One per episode; reduces the per-vehicle vector + carries campaign identity.
@@ -178,6 +206,10 @@ struct episode_nav_stats {
   double mean_path_ratio = 0;
   double mean_turn_total_rad = 0;
   double total_fuel = 0;
+  // fleet belief coverage (all zero unless the caller fills it via compute_coverage). Episode-level
+  // because the belief rasters are shared across the fleet; per-plane detail lives in the rasters
+  // themselves (published for visualization), not here.
+  nav_coverage coverage;
   std::vector<veh_nav_stats> per_vehicle;
 
   std::string to_json() const; // the base record (a DBG consumer nests an "rf" member itself)
@@ -263,6 +295,14 @@ struct nav_scorecard {
   double form_arrival_rate = 0;
   double form_mission_rate = 0;
   double mean_slot_error_m = 0;
+  // epistemic. mean_coverage divides by ALL n_episodes and mean_sense_flips by ALL vehicle-runs —
+  // feature-off entries contribute 0 and STILL count in the denominator (a corpus is normally
+  // all-on or all-off, so this dilutes only a pathological mixed corpus). This DELIBERATELY differs
+  // from the finite-only convention used above for mean_min_sep_m / mean_closest_approach_m (which
+  // have a sentinel to exclude "unmeasured"); coverage/sense_flips have no sentinel, so the rule is
+  // divide-by-total. The grl-snam twin must use the same divide-by-total rule.
+  nav_coverage mean_coverage;
+  double mean_sense_flips = 0;
 
   std::string to_json() const;
 };
@@ -271,6 +311,25 @@ struct nav_scorecard {
 // labels the row (the trained weights id under eval).
 nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
                             std::string checkpoint = "");
+
+// Pure reducer: fleet belief coverage over one episode's rasters. `belief`, `everseen`, `lastvis`
+// are [planes*cells] uint8 flattened PLANE-MAJOR (plane m at m*cells, C-order within a plane);
+// `truth` is [cells] uint8 — ONE shared plane, BROADCAST across every belief plane (indexed by the
+// in-plane cell, so a truly-free cell believed occupied on K planes counts K times). A twin MUST
+// flatten idx=m*cells+c and index truth by c to match. Fractions are over (planes*cells): explored
+// = everseen set, visible = lastvis set, believed_free = belief == 0, phantom = belief != 0 AND
+// truth == 0 (a believed obstacle that is not really there). Any null pointer or non-positive size
+// yields all-zero (feature off).
+//
+// SHARED CROSS-REPO CONTRACT: `belief` must be the BINARY to_occupancy() output, and believed_free
+// / phantom are bit-identical to the grl-snam twin ONLY if both repos binarize with the SAME
+// literals — p_thresh = 0.5, band = 0.15, unknown-cell policy = optimistic (unknown -> free). These
+// are the sim_world config defaults (sim_world.h) and grl_snam BeliefGrid.to_occupancy defaults;
+// treat them like stall_progress_eps_m — a shared constant, retuned only in lockstep across libcvc
+// + grl_snam.
+nav_coverage compute_coverage(const std::uint8_t *truth, const std::uint8_t *belief,
+                              const std::uint8_t *everseen, const std::uint8_t *lastvis, int planes,
+                              int cells);
 
 } // namespace nav
 } // namespace cvc

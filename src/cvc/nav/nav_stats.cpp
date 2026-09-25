@@ -191,6 +191,8 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
         slot_err_last_[i] = e;
       }
     }
+    if (smp.sense_flips) // epistemic churn: sum the caller's per-step flipped-cell delta
+      v.sense_flips += smp.sense_flips[i];
 
     if (reached[i] && v.time_to_goal_s < 0) {
       v.time_to_goal_s = t_end;
@@ -329,6 +331,15 @@ std::string episode_nav_stats::to_json() const {
   num(o, mean_turn_total_rad);
   o << ",\"total_fuel\":";
   num(o, total_fuel);
+  o << ",\"coverage\":{\"explored_frac\":";
+  num(o, coverage.explored_frac);
+  o << ",\"visible_frac\":";
+  num(o, coverage.visible_frac);
+  o << ",\"believed_free_frac\":";
+  num(o, coverage.believed_free_frac);
+  o << ",\"phantom_frac\":";
+  num(o, coverage.phantom_frac);
+  o << "}";
   o << ",\"per_vehicle\":[";
   for (std::size_t k = 0; k < per_vehicle.size(); ++k) {
     const auto &v = per_vehicle[k];
@@ -379,10 +390,42 @@ std::string episode_nav_stats::to_json() const {
     o << ",\"slot_error_max_m\":";
     num(o, v.slot_error_max_m);
     o << ",\"formation_arrived\":" << (v.formation_arrived ? "true" : "false");
+    o << ",\"sense_flips\":" << v.sense_flips;
     o << '}';
   }
   o << "]}";
   return o.str();
+}
+
+// ── coverage reducer ─────────────────────────────────────────────────────────
+
+nav_coverage compute_coverage(const std::uint8_t *truth, const std::uint8_t *belief,
+                              const std::uint8_t *everseen, const std::uint8_t *lastvis, int planes,
+                              int cells) {
+  nav_coverage cov;
+  if (!truth || !belief || !everseen || !lastvis || planes <= 0 || cells <= 0)
+    return cov; // feature off / bad args -> all zero
+  std::int64_t explored = 0, visible = 0, free = 0, phantom = 0;
+  for (int m = 0; m < planes; ++m) {
+    const std::size_t base = static_cast<std::size_t>(m) * cells;
+    for (int c = 0; c < cells; ++c) {
+      const std::size_t idx = base + c;
+      if (everseen[idx])
+        ++explored;
+      if (lastvis[idx])
+        ++visible;
+      if (belief[idx] == 0)
+        ++free;
+      else if (truth[c] == 0) // believed occupied where truth is free -> a phantom obstacle
+        ++phantom;
+    }
+  }
+  const double total = static_cast<double>(planes) * cells;
+  cov.explored_frac = explored / total;
+  cov.visible_frac = visible / total;
+  cov.believed_free_frac = free / total;
+  cov.phantom_frac = phantom / total;
+  return cov;
 }
 
 // ── scorecard ───────────────────────────────────────────────────────────────
@@ -406,9 +449,16 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   int approach_n = 0;
   double approach_sum = 0;
   long stall_sum = 0;
+  // epistemic (coverage summed over episodes; sense_flips over vehicle-runs)
+  nav_coverage cov_sum;
+  std::int64_t flips_sum = 0;
   for (const auto &e : episodes) {
     if (e.success)
       ++succ;
+    cov_sum.explored_frac += e.coverage.explored_frac;
+    cov_sum.visible_frac += e.coverage.visible_frac;
+    cov_sum.believed_free_frac += e.coverage.believed_free_frac;
+    cov_sum.phantom_frac += e.coverage.phantom_frac;
     // per-episode formation mission: every convoy (that has followers) has its anchor arrived AND
     // all its followers in-slot. Keyed by convoy_id via a small vector (ids are small contiguous).
     int maxConvoy = -1;
@@ -457,6 +507,7 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
       fuel_sum += v.fuel_used;
       contacts += v.veh_contacts;
       stall_sum += v.stall_steps;
+      flips_sum += v.sense_flips;
       if (v.closest_approach_m < 1e29) {
         approach_sum += v.closest_approach_m;
         ++approach_n;
@@ -497,6 +548,13 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   s.mean_slot_error_m = foll_runs > 0 ? slot_sum / foll_runs : 0;
   s.mean_closest_approach_m = approach_n > 0 ? approach_sum / approach_n : 0;
   s.mean_stall_steps = runs > 0 ? (double)stall_sum / runs : 0;
+  if (s.n_episodes > 0) {
+    s.mean_coverage.explored_frac = cov_sum.explored_frac / s.n_episodes;
+    s.mean_coverage.visible_frac = cov_sum.visible_frac / s.n_episodes;
+    s.mean_coverage.believed_free_frac = cov_sum.believed_free_frac / s.n_episodes;
+    s.mean_coverage.phantom_frac = cov_sum.phantom_frac / s.n_episodes;
+  }
+  s.mean_sense_flips = runs > 0 ? (double)flips_sum / runs : 0;
   return s;
 }
 
@@ -538,6 +596,17 @@ std::string nav_scorecard::to_json() const {
   num(o, form_mission_rate);
   o << ",\"mean_slot_error_m\":";
   num(o, mean_slot_error_m);
+  o << ",\"mean_coverage\":{\"explored_frac\":";
+  num(o, mean_coverage.explored_frac);
+  o << ",\"visible_frac\":";
+  num(o, mean_coverage.visible_frac);
+  o << ",\"believed_free_frac\":";
+  num(o, mean_coverage.believed_free_frac);
+  o << ",\"phantom_frac\":";
+  num(o, mean_coverage.phantom_frac);
+  o << "}";
+  o << ",\"mean_sense_flips\":";
+  num(o, mean_sense_flips);
   o << "}";
   return o.str();
 }
