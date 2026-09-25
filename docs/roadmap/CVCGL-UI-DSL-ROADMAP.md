@@ -1,4 +1,4 @@
-# cvcGL UI DSL — Scoping Spec (v0.5, for iteration)
+# cvcGL UI DSL — Scoping Spec (v0.6, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -19,8 +19,15 @@ existing demo UIs. This document is the thing we iterate on before writing a loa
 >
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
-> `state_exec` expressions, and **dirty-propagated** incremental regen. Only the streamed-source
-> contract stays open.
+> `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.6** closes §7: `on:tick`/`on:key` = **resident awaiting processes** (§7.1), a **typed
+> intent queue** (§7.2), stdlib-by-default with **reduced-env + per-handler `limits:`** sandboxing
+> (§7.3, §7.7), **concrete tunable budgets** (§7.4), **dual error surfacing** (§7.5), and a new
+> **`requires:` load-time capability preflight** (§7.6) so a UI that calls a missing intrinsic
+> fails at load, not mid-handler. §7 also names the `state_exec` gaps the runtime must close
+> (async resident-await port, the frame-aborting missing try/catch, the dead `max_memory` lever)
+> — now sequenced in §8. Only the scene streamed-source contract stays open.
 
 ### Decisions locked (v0.2)
 
@@ -647,31 +654,177 @@ GLSL (`shaders:`). The Python host covers the declarative subset (no C++
 
 ---
 
-## 7. Open questions
+## 7. Open questions — resolved
 
-**Resolved (this round):**
-- **Q1 — typing:** ✅ per-path declared `type:` + coercion at the state boundary;
-  typed/structured tunables route through a state_object's `data()` typed channel
-  (§4.3).
-- **Q2 — action driver:** ✅ build on the **async schedulable executor** and bring it to
-  full parity early (add the missing sleep/messaging/settings/preemption as needed);
-  `await` available from day one. Sync scheduler is a build fallback only (§4.7).
-- **Q4 — sandboxing:** ✅ per-panel `apply_chroot`, **nestable**, with an absolute-path
-  (`/…`) + enumerated-intrinsic escape hatch for cross-panel communication (§4.8).
+Prior rounds resolved Q1 (typing, §4.3), Q2 (async driver, §4.7), Q4 (chroot, §4.8). The
+five state_exec-specific questions are now closed, plus one new requirement (`requires:`, §7.6).
+Each resolution is grounded in the real `state_exec` code — including the **gaps a UI runtime
+must close** (flagged inline; they feed §8 phasing).
 
-**Still open (state_exec-specific):**
-1. **`on:tick`/`on:key` handlers** — re-submit per event (simple) vs one resident
-   process per handler that `await`s the event (lower overhead; now viable since we're
-   investing in async parity — ties to Q2's messaging/watch work).
-2. **Intent transport** — a dedicated typed thread-safe queue vs writing request nodes
-   into the state tree (zero new plumbing, but stringifies structured intents; the typed
-   queue is cleaner for imperative ops that carry handles).
-3. **Predicate env surface** — expose stdlib (string/math/collections) to authors by
-   default, or keep the per-frame surface minimal to bound cost and review.
-4. **Budgets** — concrete `CAP` (per-frame read-only) and `BUDGET` (per-tick action
-   drain), profiled against the heaviest demo (terrain_lab panel).
-5. **Error surfacing** — silent fail-safe + log-once (ship-safe) vs an in-UI error
-   badge on the node (authoring aid).
+### 7.1 `on:tick` / `on:key` handlers — one resident awaiting process per handler ✅
+
+Each `on:tick`/`on:key`/`on_*` handler is compiled once and submitted **once** as a single
+long-lived process that parks on an event and is woken per fire — *not* re-submitted
+(`execute(ast)→pid`) every frame/keystroke. This kills the per-fire allocation/re-parse on the
+hottest paths and matches the "long-lived scheduler across frames" contract (§4.7). The body
+compiles to an await-loop `(while t (let ((event (msg-recv "ui.ev.<node>.<kind>"))) …))`:
+`msg-recv` suspends the process (`scheduler::receive_message` sets `recv_path`, status →
+`waiting`; `select_process` skips it — it does **not** poll); the host wakes it by draining the
+typed queue (§7.2) into `deliver_to_receivers(path, event)`, which patches the parked result and
+marks the process `ready`. The per-fire payload (`event.x`/`event.dt`, §4.6) rides *as the
+message value*, so the per-handler event scope falls out of the same mechanism.
+
+> **Gap (P0/P1, not a nicety).** The resident-await pattern is proven on the **sync scheduler**
+> (tests `ReceiveMessageSuspendsProcess`, `DeliverToReceiversWakesProcess`, `SleepAndWake`).
+> The **async lane §4.7 targets does not have it**: `async_scheduler` lacks
+> `receive_message`/`deliver_to_receivers`/`sleep`, and `intrinsics_context.sched` is hard-typed
+> `scheduler*` with no shared base, so intrinsics can't even bind to the async lane. Bringing
+> residents to the async executor *is* the sleep/messaging/preemption parity work already scoped
+> P0/P1 in §4.7 (port `recv_path`/`inbox`/`deliver_to_receivers`; re-type `sched` to a base).
+> Until then residents run on the sync fallback — result-identical over the same `value_t`.
+
+### 7.2 Intent transport — a dedicated typed thread-safe queue ✅
+
+A dedicated **typed, thread-safe intent queue**, not request-node writes into state. It carries
+`{intent-kind, args (value_t / native handle), origin-pid, origin-path}` records, drained by
+`host.drain()` **before** `tick()` (§4.7). Two reasons over state-node writes: (a) imperative
+ops legitimately carry **live handles** (a `view*`, a picked node id, a GL resource) that a
+`state-set` would have to stringify and reconstitute — lossy/unsafe; the typed queue moves them
+by value/pointer; (b) it preserves the ordering/identity of effects that state coalescing would
+collapse. Simple flag toggles stay plain `state-set` writes (§4.5). The same queue is the
+**wake channel for §7.1** — draining a UI event calls `deliver_to_receivers` for that handler's
+resident process — so one mechanism carries both host→handler events and handler→host effects.
+
+### 7.3 Predicate / action env — stdlib by default, reduced env + limits as the safety valve ✅
+
+Expose the **full stdlib (string/math/collections) by default** in *both* the read-only predicate
+env and the action env; bound cost/abuse with per-program limits (§7.7) and a **reduced env**,
+not a permanently thin surface. `create_state(expr, env)` uses a non-null `execute_options.env`
+**directly** with no fallback to the builtins global, so a hand-built env is a true sandbox; a
+locked handler gets an env cloned to only whitelisted names (`import_module` also takes a
+`specific_fns` subset filter).
+
+> **Caveat that shapes §7.6/§7.7:** special forms (`if`/`let`/`lambda`/`defun`/`eval`/`quote`)
+> are name-dispatched **before** any env lookup, so they **cannot be revoked by env pruning**.
+> Denying dynamic code (`eval`/`lambda`/`defun`) in a locked handler needs an evaluator-level
+> denylist keyed on a "restricted" flag, not a thinner env.
+
+### 7.4 Budgets — concrete but tunable, profiled against the heaviest demos ✅
+
+Two distinct budgets (`scheduler::run(max_steps,max_time)` is the shared per-*tick* advance;
+`process.max_*` are per-*handler* ceilings — see §7.7):
+
+| Budget | Where | Provisional default | Tunable via |
+|---|---|---|---|
+| **CAP** — per-frame read-only walk | `run(state, CAP)` over all predicate/`fmt` slots | **50,000 steps/frame**, ~**2,000/slot**, soft **2 ms** | `state_exec.defaults.frame_cap_steps` |
+| **BUDGET** — per-tick action drain | bounded `run(max_steps=BUDGET)` | **20,000 steps/tick**, soft **4 ms** | `state_exec.defaults.tick_budget_steps` |
+| **Per-handler / activation** | `execute_options.max_*` | **5,000 steps**, **1 ms**, **256 KiB** *per activation* | `state_exec.schedulers.<id>.*` |
+
+All numbers are **provisional pending profiling** against **`terrain_lab`** (predicate-dense),
+**`lsystem_coast`**, **`nav_city_swarm`**. Tunability is already wired: `scheduler::load_settings()`
+resolves `state_exec.schedulers.<id>.<key>` → `state_exec.defaults.<key>` → fallback, so budgets
+are hot-adjustable from the state tree. Note `max_steps` counts evaluator **micro-steps**, so a
+single native `map`/`reduce` over a big list is one un-preemptible step — a wall-time hazard to
+watch in profiling that step-count alone won't bound.
+
+### 7.5 Error surfacing — both silent fail-safe + log AND an in-UI badge ✅
+
+Both, complementary:
+
+- **Silent fail-safe + log (always on).** A limit breach already `kill_process(proc, reason)` →
+  `status=killed`, `exit_error` (`max_steps_exceeded`, `time_limit_exceeded`, …); the tick keeps
+  running for every other handler. **Required fix:** `execute_process_step` calls `evaluator_.step()`
+  with **no try/catch**, so an undefined-symbol / runtime throw from one handler propagates out of
+  `run()` and **aborts the whole frame** — wrap it and convert a throw into
+  `kill_process(proc, "error: "+what)`. Log `exit_error` once per (handler, reason).
+- **In-UI badge (authoring aid, flag-gated).** Behind `ui.debug.badges` / `CVC_UI_DEBUG`, the node
+  owning a killed handler renders a small error badge reporting the reason, node/handler id, and
+  (for `error:`) the thrown `what()` — read from a typed error record pushed onto the intent queue
+  (§7.2, cross-thread-clean) rather than racing `get_process_info` on a just-killed pid. Off by
+  default in shipped demos.
+
+### 7.6 `requires:` — capability declaration (load-time preflight)
+
+**Problem.** Symbols resolve at **eval time**, and an unbound one **throws** (`"undefined symbol:
+…"`) — never nil. So a user-extended demo or custom UI that calls an intrinsic missing in *this*
+build/host (or pruned out of *this* handler's reduced env) fails **mid-handler on first fire**,
+deep in a frame (and, per §7.5, currently aborts the frame). `requires:` moves that to **load**,
+fails fast, and names exactly what is missing.
+
+**Contract.** A program / handler / unit may declare `requires: [name, …]`. At load — after the
+handler's target env is assembled — the loader checks each name against the **exact env that
+handler will run in** (read-only walk env for predicates, action env for `on:`/`on_*`, the
+*reduced* env if sandboxed, §7.3): `ok(n) = target_env.lookup(n) != null || is_special_form(n)`.
+Checking the *target* env (not the global builtins) also catches "exists in the build but pruned
+out of this sandbox." Failures are collected into **one** precise error — name(s), where declared
+(document / unit / node id), which env. Preflight is pure lookup: cheap, deterministic.
+
+- **Auto-derive (default when `requires:` absent):** statically walk the compiled `value_t` tree
+  for applied head symbols, then subtract to get *free* heads — exclude special forms, **stop at
+  `(quote …)`**, subtract `lambda`/`defun`/`let`/`for`/`set` bound names and self-defined
+  functions.
+- **Explicit `requires:` (authoritative):** the scan is a **lower bound** — blind to
+  macro-expanded heads and **indirectly-applied** names (a symbol handed to `apply`/`map`/`send`).
+  An explicit list adds what the scan misses; **strict mode** warns when `scanned ⊄ (declared ∪ env)`.
+- **Scope:** per-program (one slot), per-unit (an `include`/`repeat` unit, checked in its chroot
+  env), and whole-document (a top-level gate: "this custom UI needs intrinsics your build lacks").
+
+```yaml
+ui: 0.2
+requires: [ state-get, state-set, pick.world, scene.set ]   # whole-doc gate: fail load if build lacks any
+windows:
+  - custom: minimap_pip
+    on_drag:
+      requires: [ pick.world ]        # explicit
+      do:
+        - { set: [ sim.target, { pick.world: [ "overview", {$int: event.x}, {$int: event.y} ] } ] }
+    on_hover:                         # no requires: → auto-derived {pick.node}; runs in a reduced read-only env
+      do:
+        - { set: [ ui.hover.node, { pick.node: [ "overview", {$int: event.x}, {$int: event.y} ] } ] }
+```
+
+### 7.7 Per-handler `limits:` & sandboxing
+
+Each handler spawns with an `execute_options` carrying its own ceilings; `check_limits(proc)`
+runs **after every micro-step** and, on first breach, `kill_process(proc, reason)` — leaving the
+tick running for others (this **is** the §7.5 fail-safe).
+
+| Field (0 = unlimited) | Meaning | Enforcement state |
+|---|---|---|
+| `max_steps` | evaluator micro-steps | **live** |
+| `max_time` (sec) | wall-clock over running slices | **live** |
+| `max_memory` (bytes) | per-pid state-write bytes | **DEAD lever — must wire first** |
+| `max_messages` / `max_message_bytes` | `msg-send` accounting | live |
+
+Three gaps a UI runtime must close: **(a)** `max_memory` never fires — `memory_tracker::record_write`
+has zero production callers, so `state-set` intrinsics must call it before the budget means
+anything; **(b)** `check_limits` is **lifetime-cumulative**, so a resident handler (§7.1) would
+self-terminate after a few frames under a raw `max_steps` — capture `{steps0,time0}` at each wake
+and bound the **per-activation** delta (keep the lifetime limit as a coarse backstop); **(c)** a
+bare `scheduler::execute()` bypasses `resource_policy` (defaults/clamps apply only on the
+`exec_coordinator::submit` path), so the runtime must submit through the policy or apply §7.4
+defaults itself.
+
+```yaml
+- custom: expensive_overlay
+  on_tick:
+    limits: { max_steps: 5000, max_time: 0.001, max_memory: 262144 }   # per activation
+    env: read_only               # reduced env: state-get + stdlib; NO state-set/spawn/kill
+    requires: [ state-get ]
+    do:
+      - { set: [ ui.overlay.fps, { fmt: [ "%.1f", {$: sim.fps} ] } ] }
+```
+
+Reduced env + limits + `requires:` compose into a real sandbox for an untrusted/user-added
+handler: the env is a **capability floor** (the handler literally can't name `state-set`/`spawn`);
+a `restricted` flag adds the evaluator-level special-form denylist (§7.3) to deny `eval`/`lambda`/
+`defun`; `max_*` are the **cost ceiling**; the try/catch wrap (§7.5) is **fault containment**; and
+the kill's `exit_error` feeds both the log and the badge.
+
+**Remaining sub-questions** (fine-grained, not blocking): kill-and-respawn vs deactivate-and-reset
+for a resident that overruns its activation; whether `max_memory` wiring is in the first cut or
+ships documented-but-inert; and channel-name uniqueness for `ui.ev.<node>.<kind>` across nested
+chroots.
 
 ---
 
@@ -685,11 +838,20 @@ GLSL (`shaders:`). The Python host covers the declarative subset (no C++
 - **P1 — state_exec read-only lane:** `yaml_to_value()` + `parse()` dual surface with
   the round-trip test; `visible_when`/`disabled_when`/`enabled_when`/`fmt`/`options`/
   `repeat.count` on the sync `stackless_evaluator` with `CAP` + fail-safe; the `{$int:}`
-  sugar and predicate linter.
-- **P2 — state_exec action lane:** the long-lived scheduler + intent queue + UI
+  sugar and predicate linter; the **`requires:` preflight** (§7.6) and per-handler
+  **`limits:`** (§7.7); the **`execute_process_step` try/catch wrap** so one bad handler
+  can't abort the frame (§7.5).
+- **P2 — state_exec action lane:** the **typed thread-safe intent queue** (§7.2) + UI
   intrinsics; `on:` fast path (enumerated) and general path (program); `drain()` before
-  `tick()`; `on_change:` via watches. Standardize the deferred-apply that demos
-  hand-roll.
+  `tick()`; `on_change:` via watches; **resident awaiting processes** for `on:tick`/`on:key`
+  (§7.1) with the **per-activation limit baseline** (§7.7). Standardize the deferred-apply
+  that demos hand-roll.
+- **P2-prereq — `state_exec` parity (the gaps this review surfaced):** port
+  `receive_message`/`deliver_to_receivers`/`sleep` onto `async_scheduler` and re-type
+  `intrinsics_context.sched` to a shared base (unblocks residents on the async lane, §7.1);
+  wire `memory_tracker::record_write` into the `state-set` intrinsics (activates `max_memory`,
+  §7.7); the `restricted`-flag special-form denylist for sandboxed handlers (§7.3). These are
+  libcvc `state_exec` changes the DSL depends on — sequence them with P1/P2.
 - **P3 — composition + escape hatches:** `units`/`include` (args, null-drop, PushID,
   recursion guard), `repeat`; `custom:` host nodes (minimap). Ship swarm/drive-from-
   one-unit.
