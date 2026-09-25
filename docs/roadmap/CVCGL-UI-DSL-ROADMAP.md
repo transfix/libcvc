@@ -1,4 +1,4 @@
-# cvcGL UI DSL — Scoping Spec (v0.7, for iteration)
+# cvcGL UI DSL — Scoping Spec (v0.8, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -20,6 +20,14 @@ existing demo UIs. This document is the thing we iterate on before writing a loa
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.8** adds a **uniform URI resource model** (§13) behind `load:`/`include:`/`source:` — schemes
+> `file`/`http(s)`/`state`/custom via a pluggable registry, with `state://…?value|?data|?children` (live
+> or snapshot) letting any of them point at a state node; a **pycvc API** (§14) to register Python
+> callables as `state_exec` intrinsics (~already shipped as `Exec.register_fn`) and as URI handlers, with
+> the GIL/thread/lifetime contract. It also fleshes out the layout engine (§3.0.3a), the `ui.docs`
+> subtree lifecycle (§11.4), and the per-pid observability node (§7.8.6a). Two concrete blockers flagged:
+> no temp-file helper and no `bytes` marshaling branch (both needed for binary URI handlers).
 >
 > **v0.7** unifies the widget model (§3.0 — *everything is a widget, a window is a widget with
 > `frame:` chrome*, Qt `layout:`/`size:` semantics for a clean cvcQt port), pins down **where a
@@ -239,7 +247,40 @@ express every multi-child layout as `BeginTable`, letting ImGui's table engine d
 two-pass column measure (Qt-like stretch/fixed distribution for free, at the cost of exact
 first-frame pixels); **(B) explicit two-pass** — a measure pass computes each node's
 `sizeHint` bottom-up, then an arrange pass assigns rects — only for a `custom` widget that
-must reproduce a Qt `sizeHint()` exactly.
+must reproduce a Qt `sizeHint()` exactly. §3.0.3a is the concrete rule.
+
+#### 3.0.3a Layout engine — the concrete rule
+
+**(A) Table-backed (default for `horizontal`/`grid`/`form`/`stack` + spacers).** `ImGui::TableUpdateLayout`
+already runs an internal two-pass over columns — pass 1 sums each column's *last-frame* auto-width +
+stretch weight; pass 2 gives `WidthFixed` columns their measured width and splits the rest among
+`WidthStretch` columns by weight. **That is Qt's fixed/stretch distribution for free, with no measure
+code of ours.** Qt maps directly onto column weights:
+
+| Qt | Table |
+|---|---|
+| `QHBox` with an `expanding` child | 1-row table; each child a column, `expanding`→`WidthStretch`, else `WidthFixed` |
+| `QGrid` | `BeginTable(cols)`, `col_stretch:`→ per-column `WidthStretch` weight |
+| `QForm` | 2-col table: col0 `WidthFixed` (labels), col1 `WidthStretch` (fields) |
+| `QSpacerItem policy:expanding` | an empty `WidthStretch` column (pushes the row to the edge) |
+| `stretch: N` on a child | that column's `StretchWeight = N` |
+
+`QVBox` is **not** a table — plain cursor flow inside `BeginChild`; vertical slack is a trailing
+stretch **spacer row** (a `Dummy` spring). The one honest cost of (A): a stretch column's width this
+frame was measured *last* frame, so the **first frame (and the frame after a resize)** can be one
+frame stale — a visible pop only when a layout appears cold; a sub-16ms transient otherwise.
+
+**(B) Explicit two-pass** — measure `sizeHint` bottom-up, arrange top-down — used **only** when a node
+is `custom` with a `measure:`/overridden `sizeHint` (the `ColorTable2` port, which computes its hint
+eagerly and so *can* be arranged eagerly), or when `layout.exact: true` (a screenshot-golden / print /
+one-shot-modal path with no second frame to settle).
+
+**Nesting** is native: a container child emits its own `BeginTable` inside the parent's cell and
+measures against `GetContentRegionAvail` there — the one rule the loader enforces is that a column
+hosting a **stretch** child must be `WidthStretch`/`WidthFixed`, never `WidthAuto` (a stretch child in
+an auto column has no finite region and collapses to content width). A mode-B `custom` widget composes
+fine inside a mode-A table cell (the cell is a hard region boundary). `size.hint` rides the widget's
+state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for (A).
 
 #### 3.0.4 Root children unify — placement, not buckets
 
@@ -990,12 +1031,35 @@ ASTs held only in the scheduler's in-memory `processes_` map — **not in the st
 tree's only `state_exec` footprint is scheduler *config* (`state_exec.defaults.<key>`,
 `state_exec.schedulers.<id>.<key>`). Status is API-only (`get_process_info`/`ps`), and **`exit_error`
 is dropped** (`process_info` has no such field) — a UI sees `status==killed` but not why.
-**Recommendation (badges §7.5):** publish a per-handler node
-`state_exec.schedulers.<id>.processes.<pid>.{status,exit_error,step_count,uid}`, updated on
-step/kill, directly `state-watch`-able so a badge widget binds to it like any widget (it lives
-outside any unit chroot; a panel reaches it via a read-only transparent link). This also closes the
-dropped-`exit_error` gap. *(The `STATE_EXEC_PORTING_PLAN` already stores handler closures as state
-subtrees — `__signals__.handlers`, `__watches__` — so this pattern is the sanctioned direction.)*
+**Recommendation (badges §7.5) — a per-pid observability node.** Publish, **outside any unit chroot**,
+one node per live process (all keys are `value()` strings — the channel `json()`/`save()`/replication
+carry, *not* `data()` which wouldn't survive a viewer hop):
+
+```
+state_exec.schedulers.<id>.processes.<pid>.status           spawning|running|blocked|killed|terminated
+state_exec.schedulers.<id>.processes.<pid>.exit_error       ""|max_steps_exceeded|time_limit_exceeded|error:<what()>
+state_exec.schedulers.<id>.processes.<pid>.step_count       cumulative micro-steps
+state_exec.schedulers.<id>.processes.<pid>.{uid, node, kind, last_activation}
+```
+
+`node` = the owning `ui.docs.<doc>.tree.<id>` (the loader knows it when it wires the handler); `kind` =
+`on_tick|on_key|on_click|action|load-preflight`. **Four write points, nowhere else:** *spawn* (create,
+`status=running`, stamp identity); *step* (bump `step_count`/`last_activation` **once per activation
+slice**, not per micro-step — badge liveness, not instruction granularity); *kill* (the §7.5 wrap sets
+`status=killed` **and** `exit_error=reason` in the same critical section — this is the write that closes
+the dropped-`exit_error` gap, durable the instant the kill happens); *terminate* (`status=terminated`,
+then `state-expire`). Lifecycle bounded by the process: expired at terminate, a killed node lingers a
+few seconds so a once-per-error badge can read it, residents persist for the doc.
+
+**Badge binding.** The node is under `state_exec.*`, not `ui.docs.*`, so a chrooted panel can't name it
+(§7.8.2). The loader places a **read-only transparent link** inside the panel chroot
+(`ui.docs.<doc>.panels.<p>.badge_src → state_exec…processes.<pid>`, `setLinkWritable(false)`); the badge
+then `bind:`/`state-watch`es `badge_src.status`/`.exit_error` **like any widget** (§11.3) — live
+re-resolve, so a kill flips the badge the next frame, and the panel can't scribble back. This is the
+same **live** (link) vs **snapshot** (decode-once) distinction as `state://` sources (§13); a badge
+wants live. *(The `STATE_EXEC_PORTING_PLAN` already stores handler closures as state subtrees —
+`__signals__.handlers`, `__watches__` — so this is the sanctioned direction; it needs no new API beyond
+writes the scheduler is positioned to make.)*
 
 **7.8.7 One env, no runtime re-chroot.** `fork` inherits `root_path`/`uid`/`gid` + the parent's
 `global_env`. There is **no runtime nested-chroot API** — a deeper scope is a fresh `apply_chroot`
@@ -1032,9 +1096,15 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
   libcvc `state_exec` changes the DSL depends on — sequence them with P1/P2.
 - **P3 — composition + modularization + escape hatches:** `units`/`include` (args, null-drop,
   PushID, recursion guard), `repeat`; the per-handler chroot wiring (one `intrinsics_context` +
-  `apply_chroot` + `register_intrinsics` per handler, §7.8) and namespaced `ev.*` channels;
-  **`load:` sub-UI / sub-scene fragments** (§12, mount prefix + own chroot + cycle guard);
-  `custom:` host nodes. Ship swarm/drive-from-one-unit.
+  `apply_chroot` + `register_intrinsics` per handler, §7.8) and namespaced `ev.*` channels; the
+  **`uri_resolver` + scheme-handler registry** (§13: `file://`/`state://`, the `image_file_io`-style
+  registry, the temp-file bridge, the per-pid observability node §7.8.6a); **`load:` URI-based sub-UI /
+  sub-scene fragments** (§12, mount prefix + own chroot + cycle guard + hot-reload); `custom:` host
+  nodes. Ship swarm/drive-from-one-unit.
+- **P3b — pycvc + host handlers (§14):** expose `Exec.register_intrinsic` (already ~present) +
+  `register_uri_handler`; factor the shared PyObject wrapper out; add the `py_to_value` **`bytes`
+  branch** and a **temp-file helper** (both blockers for binary URI handlers); a Python `requests`
+  `https` handler as the reference web-fetcher.
 - **P4 — scene graph (§9):** the `scene:` block — nodes/sources/materials/lights/chrome
   bound to state; the ownership-tree loader. Ship the volume/lsystem/terrain demos'
   *scenes* from YAML, not just their panels.
@@ -1138,17 +1208,21 @@ path or a `state_exec` expression, same binding rules as widgets (§3.5, §4).
 
 The closed set of `source:` kinds a node draws from:
 
+A `source:` is either a **URI** (`file://` / `http(s)://` / `state://` / custom — resolved through §13,
+so a mesh can come from disk, the web, or a live scene node) or one of the structured generators:
+
 | `source:` | Backed by | Params |
 |---|---|---|
-| `{file: path}` | `cvc::read_geometry` / `cvc::volume(app, path)` | path; format inferred |
+| a **URI** (`source: file://…` / `state://…?data` / `pkg://…`) | §13 resolver → the existing reader (path/temp-file) or a bound `data_object` | any registered scheme; `state://…?data` binds **live** to a node |
 | `{procedural: {gen, …}}` | lsys recipe / `world_model::generate` / navdemo helpers | `lsystem`, `terrain` (occupancy/heightmap), `ground`, `disc`, `pyramid`, `sdf`/`field` volume + their params |
-| `{transfer_function: …}` | control-point table over a volume | color + opacity control points |
-| `{texture: {image: path}}` | `setTexture(cvc::image)` | image path, sampled through the node's UVs |
+| `{transfer_function: …}` | control-point table over a volume | color + opacity control points (§10) |
+| `{texture: {image: <uri>}}` | `setTexture(cvc::image)` | image URI, sampled through the node's UVs |
 | `{stream: {handler, …}}` | `updateVertices` per frame (AgentGlyphs) | **imperative** — a fixed-topology shape whose vertex buffer a host handler fills each frame |
 | `{inline: …}` | in-memory `cvc::geometry`/`volume` | rare in YAML; prefer procedural |
 
-Streamed/dynamic geometry (thousands of agents) stays a declared *shape* + a
-host-registered data handler — the one scene piece that isn't purely declarative.
+Streamed/dynamic geometry (thousands of agents) stays a declared *shape* + a host-registered data handler
+(registered through the same §13/§14 seam) — the one scene piece that isn't purely declarative, and the
+subject of the still-open streamed-source contract (§9.8).
 
 ### 9.5 Views render a masked, modified subset of the one authored scene
 
@@ -1609,14 +1683,45 @@ chroot: per_panel          # per_panel (default) | per_doc  (the §4.8/§7.8 gra
 Two UIs over one scene get distinct `ui.docs.<docId>` subtrees and both bind (absolute) to the
 same `cvcgl.*` scene keys, which two-way binding reconciles.
 
+### 11.4 Lifecycle, coexistence, and runtime persistence
+
+The state subtree **is** the document at runtime — there is no separate in-memory document object —
+which is what makes every widget bindable/watchable and lets a second viewer or a `state_observer` see
+the whole UI. `meta` is written once at load (`viewer`/`prefix`/`source` URI/`chroot`/`mounts` — the
+allocated `<as> → resolved-URI + prefix` table for the cycle guard and hot-reload) and is read-only
+after.
+
+**Unload is the mirror of load and must be ordered:** (1) `kill_process` every resident handler in the
+doc (so no tick writes into a subtree mid-teardown); (2) `state-unwatch` every watch rooted in it; (3)
+`state-expire`/`state-delete` the whole `ui.docs.<docId>`. **Kill-then-delete, never delete-then-kill** —
+handler bodies live only in the scheduler's in-memory `processes_` map and still hold `&ctx` into the
+nodes, so deleting the subtree first orphans live processes onto freed state (the `intrinsics_context`
+must outlive its handlers). A `load:`'d mount unloads the same way scoped to `includes.<as>.*` — hot-reload
+(§12) is exactly a scoped unload + reload of one mount.
+
+**Two docs over one scene** share nothing at the UI layer (distinct `ui.docs.<docId>` subtrees); they
+meet only where both bind (absolute) the same `cvcgl.*` scene keys, reconciled by the coalesced
+publisher. This is *why* the UI subtree is a top-level sibling and not nested under
+`cvcgl.viewers.<v>.ui` — a doc routinely spans multiple viewers/scenes.
+
+**Runtime widget geometry/layout/visible/collapsed persist in the tree, not across runs.** A user
+drag/resize/collapse writes back to `ui.docs.<doc>.tree.<id>.{geometry,visible,collapsed}` (the two-way
+edge): the walk reads those to seed `SetNextWindowPos/Size/Collapsed` when present, then writes the
+post-interaction values back at end-of-frame, so the state node is the authority next frame.
+`layout`/`size_policy` are authored keys a handler *may* rewrite to re-flow live. Cross-run persistence
+stays out of scope (decision #4) — and a `save()` of `ui.docs.<doc>` would capture only the `value()`
+channel (geometry/visible/collapsed persist; a widget's `data()`-channel typed model does not — the
+§13 `?data` caveat), so durable layout would need an explicit codec, not a free `json()` dump.
+
 ---
 
 ## 12. Loading sub-UIs and sub-scene-graphs (modularization)
 
 `include`/`repeat` (§3.7) template widgets **in-document**. `load:` is the **cross-file module**
-primitive: it mounts an **external** `.ui.yaml` fragment or a scene fragment **as its own
-namespaced subtree with its own chroot**, so large UIs decompose into files and a sub-scene drops
-in with zero code change.
+primitive: it mounts an **external** fragment (a `.ui.yaml` sub-UI or a `.scene.yaml` sub-scene) **as
+its own namespaced subtree with its own chroot**. As of v0.8 its argument is a **URI** resolved through
+the shared `uri_resolver` (§13), so a fragment can come from a file, a web URL, or a state node — the
+same resolver that backs `include:` and node `source:`.
 
 ### 12.1 `load:` a sub-UI fragment
 
@@ -1626,10 +1731,11 @@ root:
     type: group
     layout: { kind: vertical }
     children:
-      - load: panels/rf_telemetry.ui.yaml     # external fragment
+      - load: file://panels/rf_telemetry.ui.yaml   # or state://…  or https://…  (bare = file:, §13)
         as: rf                                # mount id under this parent
-        args: { unit: alpha, max_range: 4000 }   # substituted like include args
+        args: { unit: alpha, max_range: 4000 }   # substituted before parse, like include args
         prefix: null                          # optional scene prefix for the fragment's scene-binds
+        reload: on_change                     # off (default) | on_change | poll:<sec>   (hot-reload, §12.5)
 ```
 
 - **Namespaced state.** The fragment's tree lands at `ui.docs.<doc>.includes.rf.*`, and its
@@ -1640,7 +1746,8 @@ root:
   (no in-evaluator nesting, §7.8.7).
 - **Binds** resolve against the mount prefix: a bare `bind:` → `ui.docs.<doc>.includes.rf`; `/` →
   app root (loader-realized); scene-qualified → the fragment's `prefix:` arg (default = host's
-  `meta.prefix`).
+  `meta.prefix`). A **relative `load:`/`source:` inside the fragment** resolves against the URI it was
+  loaded from (its `mount_base`, §13).
 
 ### 12.2 `load:` a sub-scene-graph
 
@@ -1661,18 +1768,214 @@ under `cvcgl.block_a.*`. A PiP/minimap over a second scene (§9.6) is exactly a 
 camera is `cvcgl.block_a.viewers.<name>.camera`. Nothing enforces prefix uniqueness, so the loader
 **allocates** the prefix (`<parent>.<as>`) and records it in `meta`.
 
-### 12.3 `load:` vs `include:` vs a scene `node:`
+### 12.3 `include:` vs `load:` vs `source:` — one resolver, different isolation
 
-| | `include:` (§3.7) | `load:` sub-UI | `load:` sub-scene | a scene `node:` |
-|---|---|---|---|---|
-| Source | a `units:` template **in this doc** | an **external** `.ui.yaml` | an external `.scene.yaml` | inline in `scene.nodes` |
-| State | shares the enclosing chroot | **own** `ui.docs.<doc>.includes.<as>` chroot | **own** `<prefix>.*` subtree | `<prefix>.graphics.root.children.<name>` |
-| Handlers | wired in the enclosing chroot | re-chrooted to the mount | scene has no handlers | n/a (props are keys) |
-| Reuse across docs | no (in-document) | **yes** (a file) | **yes** (a file) | no |
+All three route through `uri_resolver` (§13) but differ in **isolation**, not in fetch:
+
+| | routes through §13 | fetches | isolation |
+|---|---|---|---|
+| `include:` (§3.7) | no — an in-doc `units:` template | nothing external | **shares** the enclosing chroot; in-document template |
+| `load:` (sub-UI) | **yes** | file/http/state fragment | **own** `ui.docs.<doc>.includes.<as>` chroot + `ev.*` + PushID |
+| `load:` (sub-scene) | **yes** | a `.scene.yaml` fragment | **own** `<prefix>.*` `SceneGraph` subtree |
+| node `source:` (§9.4) | **yes** | file/http/state/stream payload | **none** — the payload is *data* decoded into the owning node; no handlers |
+
+`include` is a **template** (no fetch, shared scope); `load` is a **module mount** (fetch + isolation);
+`source` is a **data reference** (fetch, no isolation — it yields a geometry/volume/image/value into an
+existing node). `{stream:}` (§9.4) stays a special case but registers through the **same** handler seam.
 
 ### 12.4 Recursion / cycle guard
 
-`load:` carries a **max mount depth** and a **visited-set cycle guard** keyed on the resolved
-absolute file path (`a → b → a` hard-errors at load with the mount chain). Args are substituted
-before parse, so a fragment is `requires:`-preflighted (§7.6) **in its own mount chroot env** — a
-fragment needing an intrinsic this build lacks fails at load, naming the mount.
+`load:` carries a **max mount depth** and a **visited-set cycle guard keyed on the fully-resolved URI**
+(`file://…` canonicalized to an absolute path, `state://a?value` on its resolved node path, `https://…`
+on the normalized URL) — `a → b → a` hard-errors with the mount chain. Keying on the *resolved* URI
+(not the literal string) catches a `state:` indirection that loops back to a `file:` already on the
+stack. Args are substituted before parse, so a fragment is `requires:`-preflighted (§7.6) **in its own
+mount chroot env** — a fragment needing an intrinsic this build lacks fails at load, naming the mount.
+
+### 12.5 Hot-reload
+
+`reload: on_change` watches the source and, on change, does a **scoped unload + reload of that one
+mount** (§11.4 teardown restricted to `includes.<as>`: kill the mount's handlers → unwatch →
+`state-expire includes.<as>.*` → re-resolve the URI → re-mount); the rest of the doc is untouched. The
+watch is scheme-appropriate — `file://` mtime/inotify, `state://` a `state-watch` on the target node
+(`valueChanged`/`dataChanged`/`childChanged`), `https://` an ETag or `poll:<sec>`.
+
+---
+
+## 13. Resource loading — URIs, schemes, and the handler registry
+
+One resolver backs every external reference: `load:`/`include:` fragments **and** node `source:` data.
+Today these are three unrelated filename-only paths (`load()` is SWIG `%extend`s on volume/geometry/image
+calling `read(filename)`; there is **no** URI/scheme layer in `state_exec`). §13 specifies the one layer
+they share.
+
+**Hard constraints (verified in-tree):** every reader is **filename-only** (`read_geometry(path)`,
+`readVolumeFile(app&, vol, path)` — note the required `app&`, `image::load(path)`); **libcvc has no C++
+HTTP client** (only XmlRpc++ and the state-replication transport); **no temp-file helper exists** under
+`inc/cvc`; and a `cvc::state` node has **three channels** — `value()` (string; the only one `json()`/`save()`
+persist), `data()` (a `boost::any`, in-memory only), and the child subtree — with link nodes for live
+indirection.
+
+### 13.1 URI grammar and schemes
+
+```
+<scheme>://<path>[?<query>]
+bare/relative/path.ui.yaml      # no scheme → file:, resolved against the enclosing fragment's mount_base
+```
+
+| Scheme | Resolves to | Backed by |
+|---|---|---|
+| `file://` (+ bare/relative) | a filesystem path | in-process, always available |
+| `state://<node.path>[?value\|?data\|?children][&snapshot]` | a node's value / typed `data()` / child subtree | in-process |
+| `http(s)://` | fetched bytes (or a cached temp path) | **host-supplied** handler (Python `requests`; emscripten `fetch` under wasm) |
+| *custom* (`pkg://`, `s3://`, `mem://`, …) | whatever the handler returns | registered by C++ or pycvc (§14) |
+
+### 13.2 The scheme-handler registry (modeled on `image_file_io`)
+
+A URI is claimed by scheme/pattern — registration-order priority + a `can_open` predicate, like
+`image_file_io::can_read`, **not** the extension-keyed `geometry_file_io` map. A handler returns a
+`resource` = one of `{bytes}`, `{local_path}` (a real file a reader can open), or `{value}` (a string or
+a `value_t` tree), plus a `media_hint`.
+
+```cpp
+namespace cvc::state_exec {
+  struct resource { enum class kind { bytes, local_path, value } k; /* bytes | path | value_t */ std::string media_hint; };
+  struct resolve_context { cvc::app* app; cvc::state* root; std::string mount_base; int depth;
+                           const std::set<std::string>* in_flight; };   // built from the intrinsics_context
+  struct uri_resolver {
+    static void register_handler(uri_handler::ptr);                     // append; first can_open wins
+    static void register_scheme(std::string scheme, std::function<resource(std::string_view, const resolve_context&)>);
+    static resource resolve(std::string_view uri, const resolve_context&);
+    static void register_default_handlers(cvc::app&);                   // lazy, app-driven — dodges static-init deadlocks (cf. io_handlers.h)
+  };
+}
+```
+
+`resolve_context` is populated from the `intrinsics_context` the evaluator already carries (`root`,
+`uid`, `root_path`, …) — no new plumbing — and `mount_base` threads the enclosing fragment's URI so a
+relative `source:`/`load:` inside it joins RFC-3986-style (`pkg://austin/scene.ui.yaml` + `blocks.off` →
+`pkg://austin/blocks.off`).
+
+### 13.3 `state://` — a node's value, data, or subtree
+
+```
+state://scene.ui.panel             # ?value (default): node.value() — a string
+state://scene.ui.panel?value       #   inline YAML/DSL text  OR  another URI to re-dispatch (indirection)
+state://scene.geom.mesh?data       # node.data() — a boost::any; decode by type via state_codec_registry
+state://scene.tf.ramp?children     # the child subtree read back as a value_t tree (decode_value)
+```
+
+- **`?value`** — the durable, human-editable channel: **inline** (parse the string as a fragment) or
+  **indirection** (the string is itself a URI → re-dispatch; this is how `load:` unifies with every scheme).
+- **`?data`** — a serialized geometry/volume/image on `node.data()`, decoded via `state_codec_registry`
+  keyed on `type_name` (`cvc.geometry.v1`, `cvc.volume.v1`, …); large/remote blobs arrive
+  content-addressed (`state_blob_store`) and hydrate lazily (`state_data_hydrator`).
+- **`?children`** — a UI/TF fragment authored *as state* (node-by-node editable) rather than opaque text.
+
+**Live vs snapshot** — the key knob. A `state://` reference is **live** by default: if the target is a
+link node (`state::linkTo`, transparent) the resolver `resolveLink()`s and the consumer re-reads on
+`valueChanged`/`dataChanged` — it *tracks* the object. `&snapshot` instead `decode_value`/codec-decodes
+once and drops the reference (frozen, for reproducibility). **A `source:` at a node is the right choice
+over `file://` precisely when the data changes at runtime** — the per-pid badge node (§7.8.6a) and the
+streamed source are exactly this.
+
+### 13.4 How each consumer uses one `resolve()`
+
+- **`include:`/`load:`** — expect text (`value` string or `bytes` as UTF-8) → parse as a fragment.
+- **node `source:`** — `local_path` → hand to the existing reader (`read_geometry`/`readVolumeFile(cx.app,…)`/
+  `read_image`; `image_file_io` magic-sniff means an extensionless URI still resolves by content); `bytes`
+  → **temp-file bridge** (write → read → delete; needs the missing temp helper — the zero-reader-change
+  path); `value` holding a `data_object` that is an already-decoded `cvc::geometry`/`image` → bind directly,
+  **no reader**. So `source: file://…` and `source: state://…?data` are interchangeable at the node — the
+  node declares `kind`, the resolver yields path/bytes/object, dispatch is by kind.
+
+### 13.5 Caching and honest caveats
+
+`state://` results are **never cached** (live by construction); `file://` may cache the path but honors
+mtime for the dev loop; `http(s)` handlers own their cache (content-addressed temp files). Provide
+`invalidate(uri)`/`clear_cache()`.
+
+- **`state://…?data` does not survive persistence or a process hop by itself** — `boost::any` is in-memory
+  only; a persisted/streamed UI referencing `?data` **must** have a registered codec for its `type_name`,
+  or fall back to `?value`/`?children` (which persist). The resolver surfaces *"no codec for `<type>`"*,
+  never a silent empty `any`.
+- **The temp-file bridge is a real dependency** — `kind::bytes` → reader is dead until a temp helper is
+  added; until then only handlers that name a real cache path (`kind::local_path`) feed the readers.
+- **`http(s)://` is never in-core** — a bare `https://` in a `.ui.yaml` fails "no handler for scheme https"
+  on a host that didn't register one (§14).
+
+---
+
+## 14. pycvc — registering Python intrinsics and Python URI handlers
+
+Two capabilities, **one mechanism**, so a demo or custom UI extends the DSL/resolver in Python exactly as
+C++ does. pycvc is **SWIG** (`%module(directors="1") pycvc`), which decides the mechanism: a **director**
+fits only a C++→Python *virtual override* (used today for exactly one class, `state_observer`); a **Python
+callable stored as a `std::function`** (`native_fn` / a URI handler) needs a **manual PyObject-holding
+wrapper** — which the repo already ships and tests as `make_python_native_fn`. Both features reuse it; do
+not add a director. (The one refactor: lift the wrapper out of its anonymous namespace so `register_fn`
+and `register_uri_handler` share one body.)
+
+### 14.1 Python callable as a state_exec intrinsic — ~90% already shipped
+
+`pycvc.Exec(app).register_fn(name, callable)` already wraps the callable via `make_python_native_fn` and
+installs it with `builtins::register_fn(env, name, fn)`, callable from DSL source `(name arg…)` like any
+builtin (verified in `test_pycvc_exec.py`). Expose it to the UI DSL as **`register_intrinsic(name,
+callable)`** (wrapper identical). Context (pid/scheduler/root) isn't in the `native_fn(span)` signature;
+the tested idiom is a Python fn **closing over the `app`** and calling `pycvc.state_get/set/…` — keep that
+the default, add a `register_ctx_fn` (prepends a lightweight context arg0) only if a concrete intrinsic
+needs scheduler control.
+
+```python
+import pycvc, requests
+ex = pycvc.Exec(app)
+ex.register_intrinsic("kpi", lambda rows, f: sum(r[f] for r in rows))   # DSL: (kpi (state-children "m") "value")
+ex.register_uri_handler("https", lambda url: requests.get(url, timeout=10).content)   # bytes → node source
+```
+
+### 14.2 Python URI-scheme handler — new surface, same wrapper
+
+Because libcvc can't fetch, `http(s)://` and custom remote schemes come from the host, and a Python
+`requests` handler is the easy path. `Exec.register_uri_handler(scheme, callable)` (plus an **app-level**
+variant, since node sources resolve outside any Exec) INCREFs the callable into a `shared_ptr<PyObject>`
+with a GIL-safe DECREF deleter; the lambda does `PyGILState_Ensure` → build the URL `str` → `PyObject_CallObject`
+→ convert the return (`str`→string payload, `bytes`→blob, `dict`/`list`→structured) → `Py_DECREF` →
+`Release`; a null return is `PyErr_Fetch`'d and thrown → surfaces as a **load error**, not a crash.
+
+> **Gap to fix before shipping binary handlers:** `py_to_value` has **no `bytes` branch** today — a
+> Python `bytes` return falls through to `str(o)` (a `b'…'` repr), wrong for a handler returning binary. Add
+> a `bytes` → `data_object`/blob branch.
+
+### 14.3 The GIL / thread-affinity / lifetime contract (document on the API)
+
+- **GIL:** every crossing into Python — the call, arg/return marshaling, and **every** refcount change
+  including the final DECREF — holds the GIL via `PyGILState_Ensure`/`Release` (from-any-thread), never bare
+  `Py_INCREF`/`DECREF`.
+- **Thread affinity:** a handler/intrinsic may run on (1) the `Exec.run()` caller thread (the scheduler is
+  **synchronous** and `pycvc.i` releases no GIL, so today a Python intrinsic runs **inline with the GIL
+  already held** — `PyGILState_Ensure` is a safe recursive acquire, no marshaling needed); (2) a background
+  worker if resolution moves off-thread (`async_scheduler`); (3) the **state-writer thread** when a node
+  source refreshes under a `childChanged` watch (writer threads may hold no GIL — the `state_observer`
+  director proves the pattern). `PyGILState_Ensure` is correct in all three; the callable must be
+  thread-safe and must not assume the main interpreter thread.
+- **Lifetime:** the `shared_ptr<PyObject>` is captured by the `std::function`, so the callable lives as long
+  as the env/registry (Exec/doc/app) that holds it; the deleter re-acquires the GIL because teardown can come
+  from a non-Python thread or interpreter shutdown.
+- **Exception containment:** a Python exception is fetched, stringified, and thrown as `std::runtime_error`
+  so it unwinds through the try/catch-free scheduler; `Exec.run()` reaps the pid on throw.
+- **Re-entrancy:** a Python handler that re-enters `Exec.run()` on the **same** Exec is GIL-safe but the
+  synchronous scheduler is **not** re-entrant — unsupported, or route to a fresh scheduler.
+
+### 14.4 Symmetry
+
+| Capability | C++ | pycvc |
+|---|---|---|
+| DSL intrinsic | `builtins::register_fn(env, name, native_fn)` | `Exec.register_intrinsic(name, callable)` |
+| URI scheme handler | `uri_resolver::register_scheme(scheme, fn)` | `Exec/app.register_uri_handler(scheme, callable)` |
+| C++→Python callback (existing) | virtual interface | `%feature("director")` (`state_observer`) |
+
+Same registries, same marshaling, same GIL discipline — a capability added in either language is
+indistinguishable to the DSL and to node sources. (A host that prefers to *subclass* a C++ reader/URI
+registry in Python — override `can_open`/`read_bytes` on a `uri_io` class — is the director route instead;
+rule of thumb: **`std::function` handlers = wrap-in-`native_fn`, no director; class-based reader Python
+overrides = director-subclass**.)
