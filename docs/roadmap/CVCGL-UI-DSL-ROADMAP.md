@@ -1,4 +1,4 @@
-# cvcGL UI DSL — Scoping Spec (v0.8, for iteration)
+# cvcGL UI DSL — Scoping Spec (v0.9, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -20,6 +20,12 @@ existing demo UIs. This document is the thing we iterate on before writing a loa
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.9** resolves the **last open item** — the **streamed-source contract** (§9.9): build-once +
+> pull-latest-snapshot + `updateVertices` on the render thread, a lock-free atomic-`shared_ptr` handoff
+> that coalesces to latest (never a queue), fixed topology or async rebuild, and unification with
+> `state://…?data` live sources — with the hard rule that a Python producer never runs on the render
+> thread. **Every open question in the spec is now resolved.**
 >
 > **v0.8** adds a **uniform URI resource model** (§13) behind `load:`/`include:`/`source:` — schemes
 > `file`/`http(s)`/`state`/custom via a pluggable registry, with `state://…?value|?data|?children` (live
@@ -1106,8 +1112,10 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
   branch** and a **temp-file helper** (both blockers for binary URI handlers); a Python `requests`
   `https` handler as the reference web-fetcher.
 - **P4 — scene graph (§9):** the `scene:` block — nodes/sources/materials/lights/chrome
-  bound to state; the ownership-tree loader. Ship the volume/lsystem/terrain demos'
-  *scenes* from YAML, not just their panels.
+  bound to state; the ownership-tree loader; the **streamed-source contract** (§9.9: the
+  build-once + atomic-`shared_ptr` latest-snapshot + `updateVertices`-on-render-thread pattern,
+  `{stream:}` and the `state://…?data` live path, degenerate-collapse LOD, the wasm inline
+  fallback). Ship the volume/lsystem/terrain *scenes* — and the nav *agent stream* — from YAML.
 - **P5 — views + RenderView bridge (§9.5):** `views:` over `ViewportManager`, camera
   modes/framing, `tags:`/`show:`/`hide:`. Stage **C first** (overlay-only `RenderView` per
   viewport — proves the wiring with zero ownership-tree change), then stage **B** (the
@@ -1460,9 +1468,137 @@ C++ minimap.
   contract as the pose-publish path); structural changes rebuild only the affected subtree
   (§9.5.4).
 
-**Still open:**
-1. **Streamed-source contract** — buffer ownership, per-frame push vs pull, which thread;
-   ties to the sim tick. *(User revisiting.)*
+- **Streamed-source contract** → ✅ **resolved — see §9.9** (build-once + pull-latest-snapshot +
+  `updateVertices` on the render thread; lock-free atomic-`shared_ptr` handoff, coalesce-to-latest;
+  fixed topology or rebuild; unified with `state://…?data` live sources).
+
+*All scene-graph open questions are now resolved.*
+
+### 9.9 Streamed-source contract
+
+Closes the last open scene item. A node's `source:` may be a URI (§13, incl. `state://<node>?data`
+live), a procedural generator, or `{stream: {...}}`. This section defines `{stream:}` and unifies it
+with the `state://…?data` live path so both share one consumer discipline.
+
+**9.9.1 Model — build-once, stream-latest.** A streamed source drives a node whose **topology is
+fixed for the binding's lifetime**. The mesh is built once (`setGeometry`); thereafter only *attribute*
+arrays are overwritten per frame via the topology-preserving fast paths `GeometryNode::updateVertices`
+(positions, `[x,y,z,…]` float64), `updateColors` (per-vertex `[r,g,b,…]` uint8), `updateNormals`
+(`[nx,ny,nz,…]` float64). Each is a full-array overwrite of the existing `vtkPolyData` buffer +
+`Modified()` + `requestRender()`. Positions are the only required channel; colors/normals are opt-in
+and require the mesh to have been *built with* those arrays (else the call silently no-ops). This is
+the nav demos' `sim_thread → AgentGlyphs → updateVertices` shape, standardized as scene config.
+
+**9.9.2 The `{stream:}` schema.**
+
+```yaml
+source:
+  stream:
+    topology:                                     # fixed-topology declaration (one of)
+      instanced: { template: <mesh-ref>, count: <N> }   # merged N×template
+      # or: vertices: <point-count>                      # explicit flat count
+    channels:
+      positions: required                         # xyz float64, 3*point_count
+      colors:    optional                         # rgb uint8; needs a per-vertex-colored mesh
+      normals:   optional                         # nxyz float64 unit
+    handler: <name>                               # a registered §14 handler (C++/Python)
+    # OR (mutually exclusive):
+    live: state://<node>?data                     # declarative pull-latest source (9.9.6)
+    pacing: { hz: <sim-rate>, cap: <max-catchup-ticks> }
+    observe: <bool|node-ref>
+```
+
+`point_count` is derived once (`count × template.verts`, or `vertices` verbatim) and frozen. Every
+frame the source must produce exactly `3*point_count` position elements (+ matching colors/normals per
+declared channel); **any other length logs at level 1 and no-ops** — it never resizes or corrupts.
+`handler` (imperative host-computed buffer) and `live` (declarative coalesced) are mutually exclusive.
+
+**9.9.3 Buffer ownership & per-frame cost.** GeometryNode owns the `vtkPolyData`; the producer owns a
+reused allocation-free scratch buffer (the `AgentGlyphs::xyz_` model) and never mutates a buffer after
+publishing it; the consumer **copies it in** — there is **no zero-copy vertex path**. Per
+`updateVertices` for `n` points: (1) the input vector is captured by value into the `runOnMainThread`
+lambda (~24n bytes), (2) copied again into the VTK array (double→float cast; `memcpy` for colors;
+per-point `SetTuple3` for normals — no bulk fast path), (3) a **full-array GPU VBO re-upload** next
+frame (MTime-driven; no partial/dirty-range upload). Budget O(n) CPU copy twice + O(n) upload per
+streamed channel per frame. *Zero-copy exists only for textures* (`setTexture(zeroCopy=true)` aliases a
+pinned RGBA8 buffer); there is no aliased/pinned path for points/colors/normals. The Python write path
+(`updateVertices(PyObject*)`, a hand-written `%extend`) takes a C-contiguous float64 buffer-protocol
+object (a numpy `.ravel()`) and **copies** it — the array need not outlive the call and is not pinned.
+
+**9.9.4 Push vs pull + thread model (the load-bearing rule).** *Producer writes snapshots OFF the
+render thread; the consumer PULLS the latest on the render thread and calls `updateVertices` there.*
+
+- **VTK is render-thread-affine.** All three stream calls wrap the mutation in `runOnMainThread` —
+  inline on the SceneGraph owner (render/main) thread, or marshaled onto its event queue (drained by
+  `processEvents()`, weak_ptr-guarded) from any other thread. So a producer *may* call from any thread,
+  but the mutation always lands on the owner thread, deferred to the next `processEvents()` drain.
+- **Consumer (pull-latest):** on the render thread, the binding does one atomic load of the latest
+  snapshot, **holds that one snapshot for the whole frame** (so body/label/minimap-dot/follow-cam all
+  see one consistent frame), packs it into the reused buffer, and calls `updateVertices`.
+- **Handoff = lock-free latest-pointer; coalesce-to-latest, never a queue.** The producer builds the
+  whole frame into a fresh **immutable** snapshot, publishes it by one `std::atomic_store(&latest_, snap)`;
+  the consumer reads by one `std::atomic_load` (the verified `cvc::nav::sim_thread` mechanism). No torn
+  frames, no hot-path lock, and **automatic backpressure** — a slow consumer never observes intermediate
+  snapshots (published-but-never-read, freed on refcount drop). **Latest-wins is the ONLY delivery
+  semantics; never buffer a backlog for a renderer.** (A seqlock is an acceptable POD equivalent.) This
+  is the `state_publisher` model (last-value-per-path, background writer, eventually-consistent reader)
+  applied to geometry.
+
+**9.9.5 Topology-fixed invariant — stream vs rebuild.** A change in instance/vertex **count is a
+REBUILD** (`setGeometry` rebuilds points/cells/colors/tcoords + `ensureNormals`), built **async
+off-thread while the old binding keeps streaming**, then hot-swapped in one frame with a size-match
+guard (skip a stale-sized snapshot during the swap window). **Bounded per-frame-varying selection stays
+a stream** via degenerate-collapse: keep topology fixed and collapse unused slots to a degenerate point
+(zero-area, rasterizer-discarded; the `pack_lod` trick). Rule: structural change (count, cell set,
+first-time color/normal array) ⇒ rebuild; pose/color/normal of fixed topology ⇒ stream; bounded
+selection within capacity ⇒ stream + degenerate-collapse.
+
+**9.9.6 Unification with §13/§14 — one consumer, two producers.**
+
+- **`handler:` (imperative).** The named handler is registered through the §14 seam — a `std::function`
+  wrapped from a C++ `native_fn` or a Python callable via `make_python_native_fn` (not a director). It
+  produces a fresh buffer every frame in lockstep with the tick. Right when the producer already runs
+  per-frame and every frame differs (AgentGlyphs).
+- **`live: state://<node>?data` (declarative, coalesced, no handler code).** The §13 resolver decodes
+  `node.data()` via the codec registry; the consumer re-reads on `dataChanged` and pulls the latest.
+  Some producer writes the node; writes coalesce last-value-per-path on the `state_publisher` cadence,
+  so geometry pulls one refresh per flush regardless of write rate. Right when data changes but not every
+  frame, when multiple views want the same latest snapshot, or when write rate should be decoupled from
+  frame rate. `&snapshot` freezes it to one read.
+
+Both share the pull-latest-on-render-thread consumer (9.9.4). **GIL/thread rule for a Python producer
+(both lanes):** pycvc releases no GIL and the scheduler is synchronous, so a Python producer **must not
+produce on the render thread** (it would run inline with the GIL held and stall the whole frame) — it
+produces a **snapshot on a worker thread** and hands it over (`updateVertices` copies + marshals to the
+render thread, whose raw `vtkFloatArray` write needs no GIL). For the `live:` path the §14.3 rule holds:
+a Python writer under a `dataChanged` watch may run on a state-writer thread, must `PyGILState_Ensure`
+around every crossing, must be thread-safe, and holds its callable as a `shared_ptr<PyObject>` with a
+GIL-safe DECREF deleter.
+
+**9.9.7 Pacing / backpressure.** The producer owns a **fixed-dt clock decoupled from render rate**
+(SimPacer: accumulate `wall_dt*speed`, emit whole ticks, **cap catch-up and zero the carry on a stall**
+— drop time on a hitch, never burst / spiral). Display rate never changes sim speed. Coalesce-to-latest
+(9.9.4) *is* the backpressure — faster sim ⇒ skipped snapshots freed; faster render ⇒ re-reads the same
+snapshot harmlessly.
+
+**9.9.8 Config/state + observability.** The stream config is a scene-node subtree (`source.stream.*`)
+surfaced in `ui.docs` like any node config. With `observe:` set, the binding publishes `fps`,
+`last_update`, packed byte count, and the pacer's `behind`/dropped-tick counters to a child telemetry
+node (the §7.8.6a mechanism), coalesced — one node write per frame.
+
+**9.9.9 wasm single-threaded fallback.** With no worker thread (wasm without SharedArrayBuffer — gate on
+`__EMSCRIPTEN_PTHREADS__`, **never** `__EMSCRIPTEN__` alone), the runtime drops the worker + snapshot +
+atomic handoff and **steps the source inline** each render frame into reused buffers on the render
+thread, running the identical pack/`updateVertices` path (sim advance then couples to frame rate). The
+contract defines the snapshot *shape* and latest-wins semantics abstractly; worker-atomic-handoff vs
+inline-step is a runtime choice gated on real thread availability, transparent to the binding.
+
+**9.9.10 Honest caveats.** Per-frame two-copy + full VBO re-upload is unavoidable on this path (no
+dirty-range/partial upload, no pinned vertex buffer — zero-copy is texture-only); large `n` at high fps
+is copy/upload-bound. Python-on-the-render-thread is **banned** for non-trivial producers. The mapper
+sets no static/dynamic draw hint (a future GL draw-usage optimization is a `vtkPolyDataMapper` change,
+not a DSL change). `updateColors`/`updateNormals` require the mesh to carry those arrays — declaring
+those channels is a promise the initial `setGeometry` set them up, validated at bind time.
 
 ---
 
