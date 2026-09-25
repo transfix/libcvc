@@ -1,4 +1,4 @@
-# cvcGL UI DSL — Scoping Spec (v0.4, for iteration)
+# cvcGL UI DSL — Scoping Spec (v0.5, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -16,6 +16,11 @@ existing demo UIs. This document is the thing we iterate on before writing a loa
 > the nD (2D/3D) shape reserved per the volrover3 roadmap, and a ColorTable2-derived
 > `tf_editor` widget. (v0.3 folded in decisions Q1/Q2/Q4 at §4.3/§4.7/§4.8; the minimap is a
 > `view_embed`, §9.6.)
+>
+> **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
+> no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
+> `state_exec` expressions, and **dirty-propagated** incremental regen. Only the streamed-source
+> contract stays open.
 
 ### Decisions locked (v0.2)
 
@@ -881,29 +886,52 @@ Keep this **distinct from a global hide**: a global hide compiles to `DrawStyleN
 / `Switch(None)` **in the graph** (gone from all views); a per-view hide compiles to the
 **mask** (gone from that view only). Both are independent in the gate above.
 
+**Dynamic masks (decision).** `show:`/`hide:` may also be a **`state_exec` expression** that
+returns a list of tag names (or a mask int), re-evaluated **every frame** in the read-only lane
+(§4.1) — so a view's subset can follow state (a "layers" checkbox, the sim mode, a debug
+toggle) with no rebuild. Tag→bit assignment stays **static at load** (the 32-bit budget is
+fixed); only the view's *active* mask is recomputed and re-OR'd each frame — a couple of ALU
+ops, well within the per-frame cap. Both surfaces work:
+
+```yaml
+  - view: overview
+    show: (if (= (state-get "ui.layer") "debug") (list "sim" "debug") (list "sim"))
+    # nested-YAML form:  show: { if: [ { "=": [ {$: ui.layer}, "debug" ] }, ["sim","debug"], ["sim"] ] }
+```
+
 #### 9.5.3 The *modified* subset — per-view material / drawstyle / transform overrides
 
-Masking hides; overriding **restyles the same geometry per view without duplicating it**. A
-view's `override:` block is keyed by node id or tag; the loader records it in a
-**per-`RenderView` override table** (`{node|tag → {material?, drawstyle?, transform?}}`), and
-`Shape::applyState` **merges the override over the accumulated `StateFrame`** just before
-writing that view's prop — so one node is filled in `main` and wireframe in `overview`, from
-one geometry buffer and one `Shape`.
+Masking hides; overriding **restyles the same geometry per view**. A view's `override:` block
+is keyed by node id or tag:
 
 ```yaml
   - view: overview
     show: [ sim, annotation ]
-    override:                    # the "modified subset" — no geometry duplication
+    override:                    # the "modified subset"
       terrain: { drawstyle: wireframe, material: { opacity: 0.25 } }
-      agents:  { material: { color: [1, 0.9, 0.2] }, transform: { scale: 2 } }  # fat dots in the inset
+      agents:  { mode: merge, material: { color: [1, 0.9, 0.2] }, transform: { scale: 2 } }
       annotation: { material: { color: [0.2, 0.8, 1.0] } }   # override by TAG hits every node carrying it
 ```
 
-**Status:** the per-view override is the *one* piece of the traversal code not yet present
-(`Shape` reads the mask but not a per-view value). Until it lands, an `override:` desugars to
-duplicated masked branches (an extra prop per overridden node per view — works today, costs
-memory); the override table is a small, additive change to `Shape`/`RenderView` that makes it
-one line. Without it, the only per-view difference expressible is *visibility*.
+**Lowering — duplicated masked branches (decision).** Rather than depend on a per-view override
+value in `Shape` (which the traversal code does **not** have today), an `override:` compiles to
+a **duplicated branch**: the loader generates the overridden node into *that view's* traversal
+as `Separator{ Material/DrawStyle/Transform(the override) + a Shape over the node's SHARED
+`cvc::geometry` }`, and the original is omitted/masked from that view. This is the **most robust
+option** — it uses only traversal primitives that already work (`Material`/`DrawStyleNode`/
+`Transform` are implemented; the per-view override table is not), so it needs **no engine
+change**. The geometry buffer stays shared (stage-B unify, §9.5.4), so the cost is one extra
+lightweight prop per overridden node per view. The `override:` DSL surface is stable, so the
+future per-`Shape` override-table can replace this lowering with **zero author-facing change**.
+*Caveat:* prefer a separate `only_in:` node over overriding a **streamed** node — a duplicated
+branch of a streamed node would need its own stream feed.
+
+**Precedence & mode (decision).** When both a **tag** override and a **node-id** override match
+one node, **last declared wins**. Each entry carries a **`mode:`** — default **`replace`** (the
+override's `material`/`drawstyle`/`transform` replaces that whole element of the accumulated
+`StateFrame`) or **`merge`** (only the fields present override; the rest inherit). So
+`mode: merge, material: { opacity: 0.25 }` dims a node while keeping its authored color, whereas
+the default `replace` swaps the entire material.
 
 #### 9.5.4 Author once, render per-view — the bridge
 
@@ -916,13 +944,22 @@ on node identity:
 | **Traversal** (`Separator`/`Shape`/`VisibilityMask`) | rendering | per-view props, order-dependent state, masks + overrides |
 
 The `scene:` block authors into the ownership tree (unchanged — where `state_object`, `data()`,
-and pose publishing live). At view-build time the loader **generates a traversal graph from
-it**: each `GraphicsNode` → `Separator{ Transform(its matrix) + Material/DrawStyle(its state) +
-a Shape sharing the node's `vtkPolyData` }` wrapped in `VisibilityMask(OR of its tag bits)`.
-Each `Viewport` **owns a `RenderView`** over that one generated root and calls
-`renderView.render(root)` per frame instead of `SceneGraph::setRenderer`; `ViewportManager`
-composites the N renderers unchanged. Per-view rules (tags→masks, `override:`→the view's table)
-layer on the generated traversal **without editing the authored graph**.
+and pose publishing live). At view-build time the loader **generates a traversal graph per
+view** from it: each `GraphicsNode` → `Separator{ Transform(its matrix) + Material/DrawStyle
+(its state, with that view's `override:` folded in per §9.5.3) + a Shape over the node's SHARED
+`cvc::geometry` }` wrapped in `VisibilityMask(OR of its tag bits)`. Each `Viewport` **owns a
+`RenderView`** over its generated root and calls `renderView.render(root)` per frame instead of
+`SceneGraph::setRenderer`; `ViewportManager` composites the N renderers unchanged. Per-view
+generation is what lets overrides lower to inline `Material`/`DrawStyle` (no unimplemented
+per-`Shape` override table); the shared `cvc::geometry` keeps geometry single-copy, and dynamic
+`VisibilityMask` + `RenderView.mask` handle the *dynamic* subset (§9.5.2). None of this edits
+the authored ownership graph.
+
+**Incremental regen (decision).** The generator does **not** rebuild on every state change. A
+node's edit (pose / material / geometry) **dirty-propagates** to its generated
+`Transform`/`Material`/`Shape` in each view's traversal — the same targeted-update contract the
+pose-publish path already uses — so a slider drag re-emits one `Transform`, not a graph rebuild.
+A structural change (add/remove node, retag) rebuilds only the affected subtree.
 
 **Staged adoption** (so it ships without the full unify): **(C, minimal now)** keep the main
 scene on `SceneGraph::setRenderer` and give only overlay/annotation layers their own
@@ -994,22 +1031,20 @@ C++ minimap.
   surface throughout.
 - **Transfer functions** → ✅ moved to its own section — see **§10** (control nodes / raw
   table / nD, on the `data()` channel, with a ColorTable2-derived editor widget).
+- **Override lowering** → ✅ **duplicated masked branches** (§9.5.3) — the most robust option,
+  works on existing traversal primitives with no engine change; the per-`Shape` override table
+  is a later drop-in optimization behind the same `override:` surface.
+- **Override precedence & mode** → ✅ **last declared wins**; each entry has `mode: replace`
+  (default) or `mode: merge` (§9.5.3).
+- **Dynamic masks** → ✅ `show:`/`hide:` accept a `state_exec` expression re-evaluated per frame;
+  tag→bit assignment stays static (§9.5.2).
+- **Incremental regen** → ✅ **dirty-propagate** node edits into the generated traversal (same
+  contract as the pose-publish path); structural changes rebuild only the affected subtree
+  (§9.5.4).
 
 **Still open:**
-1. **Per-view override desugaring vs the real override table** — ship the override table
-   (small `Shape`/`RenderView` change) or desugar overrides to duplicated masked branches
-   until it lands? Affects when "modified subset" beyond visibility is available.
-2. **Override precedence** — if a view overrides tag `annotation` **and** node `rally_labels`
-   (which carries it), which wins, and do overrides **merge** or **replace**? (ColorTable2
-   last-wins vs an explicit order.)
-3. **Static vs dynamic masks** — may `show:`/`hide:` be `state_exec` expressions (per-frame
-   subset), or are masks fixed at load? Dynamic is cheap (re-OR bits) but complicates the
-   compiler's static bit assignment (32-bit ceiling).
-4. **Incremental regen** — does the ownership→traversal generator run once at load or
-   dirty-propagate per-node edits (pose/material) into the generated `Separator`/`Material`?
-   Needs a contract mirroring the pose-publish path.
-5. **Streamed-source contract** — buffer ownership, per-frame push vs pull, which thread;
-   ties to the sim tick.
+1. **Streamed-source contract** — buffer ownership, per-frame push vs pull, which thread;
+   ties to the sim tick. *(User revisiting.)*
 
 ---
 
