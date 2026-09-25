@@ -57,6 +57,11 @@ $pthreads = if ($env:CVC_WASM_THREADS -eq '1') { 'ON' } else { 'OFF' }
 # Point config-mode find_package(Boost) (CMP0167=NEW) straight at the cvcpkg boost
 # config dir — avoids the emscripten cross FIND_ROOT_PATH re-rooting trap.
 $boostDir = (Get-ChildItem (Join-Path $env:CVC_DEPS_PREFIX 'lib\cmake') -Directory -Filter 'Boost-*' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+# NOTE: the shared Invoke-CvcWasmCMakeBuild runs `cmake --build` WITHOUT keep-going,
+# so on a Windows host the ungated cvcGL test exes (whose wasm-opt -O3 link crashes
+# with 0xC0000409 here) abort the build. The linux fleet path (build-wasm.sh) adds
+# `-- -k 0` to press past them; on Windows, build via the fleet or pre-gate those
+# test targets. (Not broadening the shared helper to keep-going for all recipes.)
 
 # ── (3) configure + build + install the trimmed closure (static, BRIDGE=ON) ──
 # Same OFF set as build-wasm.sh / cvcgl-examples, plus the pycvc bindings.

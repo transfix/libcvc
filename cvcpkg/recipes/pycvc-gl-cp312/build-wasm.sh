@@ -100,7 +100,14 @@ emcmake cmake -G Ninja \
 # Build the default targets (cvc + cvcGL + pycvc + pycvc_gl; examples/tests/cli are
 # OFF), then install — the install rules place _pycvc.a / pycvc_gl/_pycvc_gl.a + the
 # .py proxies + libcvc.a/libcvcGL.a into CVC_INSTALL_DIR, which the host link reads.
-cmake --build "${CVC_BUILD_DIR}" -j "${CVC_JOBS}"
+# Keep-going (-- -k 0): cvcGL's CMake adds ~20 test/example executables
+# (cvcgl_ocean_fft/renderer/texture/...) UNCONDITIONALLY (not gated by
+# CVC_BUILD_TESTS/EXAMPLES), and wasm-opt -O3 crashes linking some of them on
+# some hosts (Windows: 0xC0000409). They are NOT part of the pycvc-gl package, so
+# tolerate their failure and press on — the libs (libcvc/libcvcGL), the SWIG
+# archives (_pycvc.a/_pycvc_gl.a) and the .py proxies all build fine and have no
+# dependency on those test exes. The archive check below is the real gate.
+cmake --build "${CVC_BUILD_DIR}" -j "${CVC_JOBS}" -- -k 0 || true
 cmake --install "${CVC_BUILD_DIR}"
 _PXA="$(find "${CVC_INSTALL_DIR}" -name '_pycvc.a' 2>/dev/null | head -1)"
 _GLA="$(find "${CVC_INSTALL_DIR}" -name '_pycvc_gl.a' 2>/dev/null | head -1)"
