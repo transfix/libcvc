@@ -50,6 +50,12 @@ source "${SCRIPT_DIR}/../_common/env-wasm.sh"
 _PTHREADS=OFF
 [[ "${CVC_WASM_THREADS:-0}" == "1" ]] && _PTHREADS=ON
 
+# Point config-mode find_package(Boost) (CMP0167=NEW) straight at the cvcpkg boost
+# config dir — avoids the emscripten cross FIND_ROOT_PATH re-rooting trap where a
+# prefix search for BoostConfig.cmake resolves to the wrong path. Empty if absent
+# (harmless — falls back to the normal search).
+_BOOST_DIR="$(find "${CVC_DEPS_PREFIX}/lib/cmake" -maxdepth 1 -type d -name 'Boost-*' 2>/dev/null | head -1)"
+
 # ── (3) configure the trimmed closure from the repo root (static, BRIDGE=ON) ──
 # Same OFF set as cvcgl-examples/build-wasm.sh (the wasm-linkable subset) PLUS the
 # pycvc bindings: CVC_BUILD_PYCVC=ON builds bindings/pycvc (core + gl) in-tree.
@@ -64,6 +70,7 @@ emcmake cmake -G Ninja \
     `# NEW = use boost's own BoostConfig.cmake (config mode), which the wasm boost` \
     `# package ships (lib/cmake/Boost-*). Fixes "Could NOT find Boost" at configure.` \
     -DCMAKE_POLICY_DEFAULT_CMP0167=NEW \
+    -DBoost_DIR="${_BOOST_DIR}" \
     -DCVC_ENABLE_CUDA=OFF \
     -DCVC_BUILD_TESTS=OFF \
     -DCVC_BUILD_CLI=OFF \

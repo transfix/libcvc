@@ -54,6 +54,10 @@ $pyLib    = Join-Path $env:CVC_DEPS_PREFIX 'lib\libpython3.12.a'
 . "$scriptDir\..\_common\env-wasm.ps1"
 $pthreads = if ($env:CVC_WASM_THREADS -eq '1') { 'ON' } else { 'OFF' }
 
+# Point config-mode find_package(Boost) (CMP0167=NEW) straight at the cvcpkg boost
+# config dir — avoids the emscripten cross FIND_ROOT_PATH re-rooting trap.
+$boostDir = (Get-ChildItem (Join-Path $env:CVC_DEPS_PREFIX 'lib\cmake') -Directory -Filter 'Boost-*' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+
 # ── (3) configure + build + install the trimmed closure (static, BRIDGE=ON) ──
 # Same OFF set as build-wasm.sh / cvcgl-examples, plus the pycvc bindings.
 Invoke-CvcWasmCMakeBuild -ExtraArgs @(
@@ -62,6 +66,7 @@ Invoke-CvcWasmCMakeBuild -ExtraArgs @(
     # NEW = use boost's BoostConfig.cmake (config mode), shipped by the wasm boost
     # package. Fixes "Could NOT find Boost" at configure.
     '-DCMAKE_POLICY_DEFAULT_CMP0167=NEW',
+    "-DBoost_DIR=$boostDir",
     '-DCVC_ENABLE_CUDA=OFF',
     '-DCVC_BUILD_TESTS=OFF',
     '-DCVC_BUILD_CLI=OFF',
