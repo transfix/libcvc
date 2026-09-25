@@ -1,0 +1,101 @@
+name: publish-pycvc-gl-wasm
+
+# Build (+ optionally publish) pycvc-gl-cp312 for wasm: the CPython-wasm host that
+# embeds pycvc + pycvc_gl (BRIDGE=ON) + vtk-python cvc.6, so "drop in Python code"
+# gets live pycvc_gl scene bindings AND functional vtkmodules objects in the
+# browser. Runner-agnostic (ubuntu-latest), self-provisioning emsdk + cmake/ninja
+# from the cvcpkg catalog, mirroring publish-cvcgl-wasm.yml. The wasm deps are
+# INSTALLED into the build prefix first (cvcpkg build reads them as CVC_DEPS_PREFIX;
+# without them configure fails at find_package(Boost)). dry_run=false to publish.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build + verify only (no publish) when true'
+        type: boolean
+        default: true
+
+concurrency:
+  group: publish-pycvc-gl-wasm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      EMSDK_DIR: ${{ github.workspace }}/emsdk
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cvcpkg + cmake/ninja from the catalog
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "${{ github.workspace }}/tools" \
+            --config release --link shared
+          echo "${{ github.workspace }}/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Provision the Emscripten SDK from the catalog
+        run: |
+          cvcpkg install emsdk --platform linux --prefix "$EMSDK_DIR" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$EMSDK_DIR/emsdk_env.sh" \
+            || { echo "::error::emsdk bundle missing emsdk_env.sh"; exit 1; }
+          echo "CVC_EMSDK_DIR=$EMSDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Install the pycvc-gl wasm dep closure into the build prefix
+        # cvc + cvcGL compile from source here, so their wasm build deps must be
+        # present, PLUS pycvc-gl's own (python312 / numpy / vtk / vtk-python cvc.6).
+        # cvcpkg build uses this prefix as CVC_DEPS_PREFIX (the hardened flow —
+        # find_package(Boost) needs boost + its cmake config present).
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp \
+                   libxml2 lerc assimp imgui boost vtk python312 numpy-cp312 \
+                   vtk-python-cp312; do
+            echo "=== install $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3 \
+              || { echo "::error::failed to install wasm dep $p"; exit 1; }
+          done
+
+      - name: Build pycvc-gl-cp312 (wasm) — compiles the closure + links the host
+        # Drives the recipe's build-wasm.sh against the pre-installed deps. It
+        # compiles cvc+cvcGL+pycvc+pycvc_gl, then link-host.sh embeds vtk-python
+        # cvc.6 and runs the node smoke (prints PYCVC_VTK_BRIDGE_OK / PYCVC_WASM_OK).
+        run: |
+          cvcpkg build pycvc-gl-cp312 --platform wasm --host-platform linux \
+            --recipes-dir cvcpkg/recipes --prefix "$WASM_DEPS"
+
+      - name: Verify the bridge host + archives
+        run: |
+          echo "=== built artifacts ==="
+          find "$WASM_DEPS" \( -name 'pycvc_host.wasm' -o -name '_pycvc.a' \
+            -o -name '_pycvc_gl.a' \) -print | sed "s|$WASM_DEPS/||"
+          find "$WASM_DEPS" -name '_pycvc_gl.a' | grep -q . \
+            || { echo "::error::_pycvc_gl.a not produced"; exit 1; }
+
+      - name: Upload pycvc_host.wasm
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pycvc-host-wasm
+          path: |
+            ${{ env.WASM_DEPS }}/share/pycvc-gl-wasm/pycvc_host.js
+            ${{ env.WASM_DEPS }}/share/pycvc-gl-wasm/pycvc_host.wasm
+          if-no-files-found: warn
+
+      - name: Publish pycvc-gl-cp312 wasm
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          cvcpkg pack cvcpkg/recipes/pycvc-gl-cp312 --from-prefix "$WASM_DEPS" \
+            --platform wasm --config release --link static --output-dir dist
+          for a in dist/pycvc-gl-cp312-*-wasm-*.tar.gz; do
+            cvcpkg publish "$a" || echo "::warning::publish of $a failed (may already exist)"
+          done
