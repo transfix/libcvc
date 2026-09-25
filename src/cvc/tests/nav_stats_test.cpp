@@ -349,3 +349,52 @@ TEST(NavStats, FormationSlotAndScorecard) {
   EXPECT_NE(sj.find("\"form_mission_rate\""), std::string::npos);
   EXPECT_NE(sj.find("\"mean_slot_error_m\""), std::string::npos);
 }
+
+// Progress toward goal (Track 1b): closest_approach_m + stall_steps are always on, computed from
+// the goal the collector holds — no sampler. A vehicle that alternates real progress with
+// no-progress steps: dg = 7,7,3,3,0 (eps 0.05). Steps 1 and 3 fail to beat the closest-so-far -> 2
+// stalls; the closest ever reached is 0. Then aggregate_nav folds both into the scorecard.
+TEST(NavStats, ProgressStallAndClosestApproach) {
+  const float start[2] = {0, 0};
+  const float goal[2] = {10, 0}; // straight_m = 10 -> closest seeded at 10
+  nav_stats_collector c;         // default params: stall_progress_eps_m = 0.05
+  c.begin_episode(1, 1.0, start, goal);
+
+  const float head[1] = {0};
+  const float spd[1] = {1};
+  const std::uint8_t rch[1] = {0};
+  const int mode[1] = {0};
+  const float xs[5] = {3, 3, 7, 7, 10}; // dg = 7, 7, 3, 3, 0
+  for (int s = 0; s < 5; ++s) {
+    const float pos[2] = {xs[s], 0};
+    c.step(pos, head, spd, mode, rch);
+  }
+  episode_nav_stats e0 = c.finish();
+
+  EXPECT_NEAR(e0.per_vehicle[0].closest_approach_m, 0.0, 1e-9);
+  EXPECT_EQ(e0.per_vehicle[0].stall_steps, 2);
+
+  const std::string ej = e0.to_json();
+  EXPECT_NE(ej.find("\"closest_approach_m\":"), std::string::npos);
+  EXPECT_NE(ej.find("\"stall_steps\":2"), std::string::npos);
+  EXPECT_EQ(ej.find("1e+30"), std::string::npos); // closest_approach is finite here
+
+  // Second episode by hand (closest 4, 6 stalls). Corpus: mean stall (2+6)/2 = 4;
+  // mean closest approach (0 + 4)/2 = 2 (both finite).
+  episode_nav_stats e1;
+  e1.success = false;
+  e1.makespan_s = 25;
+  e1.min_sep_m = 9;
+  veh_nav_stats v = mkv(false, -1, 120, 100, 2, 6, 0);
+  v.closest_approach_m = 4.0;
+  v.stall_steps = 6;
+  e1.per_vehicle = {v};
+
+  nav_scorecard s = aggregate_nav({e0, e1}, "ckpt-P");
+  EXPECT_NEAR(s.mean_stall_steps, 4.0, 1e-9);
+  EXPECT_NEAR(s.mean_closest_approach_m, 2.0, 1e-9);
+
+  const std::string sj = s.to_json();
+  EXPECT_NE(sj.find("\"mean_stall_steps\""), std::string::npos);
+  EXPECT_NE(sj.find("\"mean_closest_approach_m\""), std::string::npos);
+}

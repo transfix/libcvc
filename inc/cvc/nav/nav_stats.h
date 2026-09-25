@@ -59,6 +59,15 @@ struct nav_stats_params {
   double min_gap_m = 0.0;       // pairwise distance below this is a vehicle contact (0 = off)
   double reach_eps = 0.5;       // treat reached[i] as a level flag; latch on its rising edge
   double formation_tol_m = 0.0; // in-slot threshold for formation_arrived; 0 = formation stats OFF
+  // A step counts as a "stall" (no progress) when it fails to beat the closest goal distance seen
+  // so far by MORE than this many metres (a strict improvement of <= this threshold is still a
+  // stall). Must be >= 0. This is the collector's OWN portable progress test — deliberately NOT
+  // sim_world's stall_ counter, which resets on escapes/mode-transitions and lives in normalized
+  // units, so it could not be mirrored field-for-field by the grl-snam Python twin. This default is
+  // part of the shared cross-repo contract: grl_snam.metrics must use the SAME 0.05 to reproduce
+  // stall_steps bit-for-bit; retune it only in lockstep across repos (see
+  // NAV-STATS-INTRINSIC-ROADMAP).
+  double stall_progress_eps_m = 0.05;
 };
 
 // Per-episode budget. A vehicle is over_budget (and the episode fails) when EITHER
@@ -119,6 +128,18 @@ struct veh_nav_stats {
   double time_stopped_s = 0;
   double speed_mean = 0;
   double speed_max = 0;
+  // progress toward goal (always on — computed from the goal the collector already holds).
+  // closest_approach_m = the nearest the vehicle ever got to its objective. begin_episode SEEDS it
+  // to straight_m (the start->goal distance), so it is finite from t=0 for any collected episode
+  // and each step can only lower it (an arriver reaches ~0; a stuck vehicle's floor is how far
+  // short it got). The 1e30 default is only for a hand-built / never-begun record (serialized as
+  // null, aggregated out). A Python twin MUST seed to straight_m identically. stall_steps = steps
+  // that failed to beat that closest distance by more than params.stall_progress_eps_m (the
+  // collector's portable analogue of sim_world's non-mirrorable stall_ counter). NOTE: a step
+  // improving by <= eps counts as a stall yet still lowers closest_approach_m, so stall_steps can
+  // be high on a slow-but-steady closer.
+  double closest_approach_m = 1e30;
+  int stall_steps = 0;
   // clearance / collisions
   double min_clearance_m = 1e30;
   double time_below_clear_s = 0;
@@ -192,7 +213,7 @@ private:
   int n_ = 0;
   double dt_ = 0;
   long step_i_ = 0;
-  std::vector<float> prev_pos_, prev_head_, prev_spd_, start_pos_;
+  std::vector<float> prev_pos_, prev_head_, prev_spd_, start_pos_, goal_pos_;
   std::vector<int> prev_mode_;
   std::vector<double> speed_sum_;
   std::vector<int> conv_, cls_;
@@ -225,6 +246,14 @@ struct nav_scorecard {
   double mean_penetration_pct = 0; // mean over episodes
   double veh_contacts_per_run = 0; // total veh_contacts / vehicle-runs
   double mean_min_sep_m = 0;       // mean over episodes (finite only)
+  // progress (means over vehicle-runs). closest_approach = how near vehicles got to their objective
+  // (small for a corpus that mostly arrives; the telling number when arrival_rate is low);
+  // stall_steps = mean no-progress step count.
+  // over runs with a finite closest_approach_m; 0 when none is finite (matches the mean_min_sep_m
+  // convention). Every collector-produced run is finite, so 0-with-runs only arises for synthetic
+  // corpora.
+  double mean_closest_approach_m = 0;
+  double mean_stall_steps = 0;
   // material dwell share (fraction of moving time per material id, fleet)
   std::array<double, kNumMaterials> material_time_share{};
   // formation holding (0 unless a formation_slot sampler was used). arrival = fraction of FOLLOWER
