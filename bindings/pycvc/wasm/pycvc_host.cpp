@@ -35,14 +35,18 @@ extern "C" PyObject *PyInit__pycvc_gl(void);
 extern "C" int pycvc_register_numpy_inittab(void); // generated; 0 = success
 #endif
 
-// VTK's static Python wrappers register their vtkmodules.* builtins through a
-// generated bulk-inittab `_load()` (static-single-binary-python.md §2.3). The
-// exact symbol comes from the vtk-python-cp312 wasm package; the recipe wires it
-// with -DPYCVC_VTKPYTHON_LOAD=<symbol>. WITHOUT it the cvc-typed scene surface
-// (SceneGraph, nodes, camera, transforms) still works fully; only marshaling live
-// Python vtkmodules objects <-> C++ vtkProp*/vtkRenderer* (the BRIDGE) needs it.
-#ifdef PYCVC_VTKPYTHON_LOAD
-extern "C" void PYCVC_VTKPYTHON_LOAD(void);
+// VTK's static Python build (vtk-python-cp312 wasm) aggregates EVERY wrapped
+// module into ONE builtin: _vtkmodules_static.a exports a single
+// PyInit__vtkmodules_static (verified via llvm-nm — there is no bulk `_load()`
+// void function). Register it like any other builtin below; vtkmodules/__init__.py
+// (shipped in vtk-python's _vtk.zip, which the recipe/link puts on sys.path) does
+// `import _vtkmodules_static`, which in turn registers every vtkmodules_vtkXXX
+// submodule so `import vtkmodules.vtkCommonCore` etc. resolve. WITHOUT this the
+// cvc-typed scene surface still works fully; marshaling live Python vtkmodules
+// objects <-> C++ vtkProp*/vtkRenderer* (the BRIDGE) needs it. The recipe/link
+// defines -DPYCVC_EMBED_VTKPYTHON when vtk-python is in the closure.
+#ifdef PYCVC_EMBED_VTKPYTHON
+extern "C" PyObject *PyInit__vtkmodules_static(void);
 #endif
 
 // Default smoke script when no entry script is passed: prove the modules import
@@ -60,6 +64,19 @@ static const char *kDefaultScript =
     // cvc::app + a GL context, out of scope for a headless node smoke.
     "print('pycvc_gl.SceneGraph  ->', pycvc_gl.SceneGraph.__name__)\n"
     "print('pycvc_gl.Node        ->', getattr(pycvc_gl, 'Node', '(n/a)'))\n"
+    // The VTK-Python bridge: prove live vtkmodules objects coexist in-interpreter
+    // with pycvc_gl (BRIDGE=ON links libvtkWrappingPythonCore for the marshaling).
+    "try:\n"
+    "    import vtkmodules.vtkCommonCore as _vcc\n"
+    "    print('vtkmodules OK      -> vtkObject', _vcc.vtkObject().GetClassName())\n"
+    "    import vtkmodules.vtkFiltersSources as _vfs\n"
+    "    _s = _vfs.vtkSphereSource(); _s.Update()\n"
+    "    print('live VTK pipeline  -> sphere points', _s.GetOutput().GetNumberOfPoints())\n"
+    "    import vtkmodules.vtkIONetCDF as _vnc\n"
+    "    print('IONetCDF (cvc.6)   ->', _vnc.vtkNetCDFReader().GetClassName())\n"
+    "    print('PYCVC_VTK_BRIDGE_OK')\n"
+    "except Exception as _e:\n"
+    "    print('vtk bridge not embedded:', type(_e).__name__, _e)\n"
     "print('PYCVC_WASM_OK')\n";
 
 int main(int argc, char **argv) {
@@ -80,10 +97,14 @@ int main(int argc, char **argv) {
     return 1;
   }
 #endif
-#ifdef PYCVC_VTKPYTHON_LOAD
-  // Register vtkmodules.* builtins so the VTK-Python bridge can return live vtk
-  // objects (BRIDGE=ON). Safe no-op shape in a shared build; here it is static.
-  PYCVC_VTKPYTHON_LOAD();
+#ifdef PYCVC_EMBED_VTKPYTHON
+  // Register the aggregated vtkmodules builtin (before Py_Initialize) so
+  // `import vtkmodules.*` resolves in-interpreter and the bridge can hand back
+  // live vtk objects (BRIDGE=ON).
+  if (PyImport_AppendInittab("_vtkmodules_static", PyInit__vtkmodules_static) != 0) {
+    fprintf(stderr, "pycvc_host: failed to register _vtkmodules_static inittab\n");
+    return 1;
+  }
 #endif
 
   Py_Initialize();

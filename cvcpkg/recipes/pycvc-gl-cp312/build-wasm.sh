@@ -50,6 +50,12 @@ source "${SCRIPT_DIR}/../_common/env-wasm.sh"
 _PTHREADS=OFF
 [[ "${CVC_WASM_THREADS:-0}" == "1" ]] && _PTHREADS=ON
 
+# Point config-mode find_package(Boost) (CMP0167=NEW) straight at the cvcpkg boost
+# config dir — avoids the emscripten cross FIND_ROOT_PATH re-rooting trap where a
+# prefix search for BoostConfig.cmake resolves to the wrong path. Empty if absent
+# (harmless — falls back to the normal search).
+_BOOST_DIR="$(find "${CVC_DEPS_PREFIX}/lib/cmake" -maxdepth 1 -type d -name 'Boost-*' 2>/dev/null | head -1)"
+
 # ── (3) configure the trimmed closure from the repo root (static, BRIDGE=ON) ──
 # Same OFF set as cvcgl-examples/build-wasm.sh (the wasm-linkable subset) PLUS the
 # pycvc bindings: CVC_BUILD_PYCVC=ON builds bindings/pycvc (core + gl) in-tree.
@@ -59,6 +65,12 @@ emcmake cmake -G Ninja \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
     -DCMAKE_FIND_ROOT_PATH="${CVC_DEPS_PREFIX}" \
     -DBUILD_SHARED_LIBS=OFF \
+    `# cmake >=3.30 deprecates the legacy FindBoost module (CMP0167); its module` \
+    `# mode fails to locate the cvcpkg boost layout under the cross FIND_ROOT_PATH.` \
+    `# NEW = use boost's own BoostConfig.cmake (config mode), which the wasm boost` \
+    `# package ships (lib/cmake/Boost-*). Fixes "Could NOT find Boost" at configure.` \
+    -DCMAKE_POLICY_DEFAULT_CMP0167=NEW \
+    -DBoost_DIR="${_BOOST_DIR}" \
     -DCVC_ENABLE_CUDA=OFF \
     -DCVC_BUILD_TESTS=OFF \
     -DCVC_BUILD_CLI=OFF \
@@ -88,7 +100,14 @@ emcmake cmake -G Ninja \
 # Build the default targets (cvc + cvcGL + pycvc + pycvc_gl; examples/tests/cli are
 # OFF), then install — the install rules place _pycvc.a / pycvc_gl/_pycvc_gl.a + the
 # .py proxies + libcvc.a/libcvcGL.a into CVC_INSTALL_DIR, which the host link reads.
-cmake --build "${CVC_BUILD_DIR}" -j "${CVC_JOBS}"
+# Keep-going (-- -k 0): cvcGL's CMake adds ~20 test/example executables
+# (cvcgl_ocean_fft/renderer/texture/...) UNCONDITIONALLY (not gated by
+# CVC_BUILD_TESTS/EXAMPLES), and wasm-opt -O3 crashes linking some of them on
+# some hosts (Windows: 0xC0000409). They are NOT part of the pycvc-gl package, so
+# tolerate their failure and press on — the libs (libcvc/libcvcGL), the SWIG
+# archives (_pycvc.a/_pycvc_gl.a) and the .py proxies all build fine and have no
+# dependency on those test exes. The archive check below is the real gate.
+cmake --build "${CVC_BUILD_DIR}" -j "${CVC_JOBS}" -- -k 0 || true
 cmake --install "${CVC_BUILD_DIR}"
 _PXA="$(find "${CVC_INSTALL_DIR}" -name '_pycvc.a' 2>/dev/null | head -1)"
 _GLA="$(find "${CVC_INSTALL_DIR}" -name '_pycvc_gl.a' 2>/dev/null | head -1)"

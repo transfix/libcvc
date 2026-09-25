@@ -59,18 +59,40 @@ PY
 # leave a trailing \r on each path and break emcc ("No such file").
 mapfile -t NPYOBJS < <(tr -d '\r' < "$OUT/numpy_so_list.txt")
 
-printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHONHOME='/py';ENV.PYTHONDONTWRITEBYTECODE='1';});\n" > "$OUT/pre.js"
+# vtk-python cvc.6: its static build aggregates ALL wrapped modules into ONE
+# builtin archive (_vtkmodules_static.a exporting PyInit__vtkmodules_static) plus
+# pure-python stubs in _vtk.zip. Whole-archive the static lib (so the builtin + all
+# wrapped code survive), embed the zip + put it on PYTHONPATH, and define
+# -DPYCVC_EMBED_VTKPYTHON so the host registers the builtin. The vtk C++ libs +
+# libvtkWrappingPythonCore come in via the $DEPS/lib/*.a group. Absent (a
+# numpy-only build) => cleanly skipped (host still runs; no VTK bridge).
+VTKA="$(find "$DEPS" -name '_vtkmodules_static.a' 2>/dev/null | head -1)"
+VTKZIP="$(find "$DEPS" -name '_vtk.zip' 2>/dev/null | head -1)"
+VTK_DEF=(); VTK_WHOLE=(); VTK_EMBED=(); VTK_PYPATH=""
+if [ -n "$VTKA" ] && [ -n "$VTKZIP" ]; then
+    VTK_DEF=(-DPYCVC_EMBED_VTKPYTHON)
+    VTK_WHOLE=(-Wl,--whole-archive "$VTKA" -Wl,--no-whole-archive)
+    VTK_EMBED=(--embed-file "${VTKZIP}@/py/lib/python3.12/site-packages/_vtk.zip")
+    VTK_PYPATH="ENV.PYTHONPATH='/py/lib/python3.12/site-packages/_vtk.zip';"
+    echo "link-host: vtk-python bridge ON -> ${VTKA}"
+else
+    echo "link-host: vtk-python not in DEPS -> numpy-only host (no VTK bridge)"
+fi
+
+printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHONHOME='/py';%sENV.PYTHONDONTWRITEBYTECODE='1';});\n" "$VTK_PYPATH" > "$OUT/pre.js"
 
 "$EMCC" "$SRC/bindings/pycvc/wasm/pycvc_host.cpp" "$GEN" \
-    -std=c++17 -O1 -DPYCVC_EMBED_NUMPY -I "$PYINC" \
+    -std=c++17 -O1 -DPYCVC_EMBED_NUMPY ${VTK_DEF[@]+"${VTK_DEF[@]}"} -I "$PYINC" \
     -Wl,--allow-multiple-definition \
     -Wl,--whole-archive "$PXA" "$GLA" -Wl,--no-whole-archive \
+    ${VTK_WHOLE[@]+"${VTK_WHOLE[@]}"} \
     "${NPYOBJS[@]}" \
     -Wl,--start-group "$INST"/lib/libcvc.a "$INST"/lib/libcvcGL.a "$DEPS"/lib/*.a -Wl,--end-group \
-    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sSTACK_SIZE=4mb -sERROR_ON_UNDEFINED_SYMBOLS=0 \
+    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sSTACK_SIZE=8mb -sERROR_ON_UNDEFINED_SYMBOLS=0 \
     --embed-file "${PYSTD}@/py/lib/python3.12" \
     --embed-file "$(dirname "$PXA")/pycvc.py@/py/lib/python3.12/site-packages/pycvc.py" \
     --embed-file "$(dirname "$GLA")@/py/lib/python3.12/site-packages/pycvc_gl" \
+    ${VTK_EMBED[@]+"${VTK_EMBED[@]}"} \
     --pre-js "$OUT/pre.js" \
     -o "$OUT/pycvc_host.js"
 echo "link-host: built $OUT/pycvc_host.wasm"
