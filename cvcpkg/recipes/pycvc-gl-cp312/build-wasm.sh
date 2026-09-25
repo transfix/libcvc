@@ -35,10 +35,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOSTENV="${CVC_BUILD_DIR}/hostenv"
 _hp="$(uname -s 2>/dev/null || echo Linux)"; case "${_hp}" in Linux) _hp=linux;; Darwin) _hp=macos;; *) _hp=linux;; esac
 _cvc="cvcpkg"; command -v cvcpkg >/dev/null 2>&1 || _cvc="python3 -m cvcpkg"
-${_cvc} install python312 swig cmake ninja \
+${_cvc} install python312 numpy-cp312 swig cmake ninja \
     --platform "${_hp}" --config release --link shared \
     --prefix "${HOSTENV}" --no-fallback-to-source >&2
 export PATH="${HOSTENV}/bin:${PATH}"
+# The cvcpkg-packaged SWIG reports a stale -swiglib after relocation, so CMake's
+# FindSWIG cannot locate SWIG_DIR (the .i library) from SWIG_EXECUTABLE alone.
+# Point it at the real library dir (share/swig/<ver>) via both the env var swig
+# itself reads (SWIG_LIB) and the CMake var (-DSWIG_DIR below). Mirrors
+# build-wasm.ps1 — without it the wasm build fails "Could NOT find SWIG".
+_SWIG_DIR="$(find "${HOSTENV}/share/swig" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+[ -n "${_SWIG_DIR}" ] && export SWIG_LIB="${_SWIG_DIR}"
 PY_NATIVE="${HOSTENV}/bin/python3.12"
 NUMPY_INC="$("${PY_NATIVE}" -c 'import numpy; print(numpy.get_include())' 2>/dev/null || \
             echo "${CVC_DEPS_PREFIX}/lib/python3.12/site-packages/numpy/_core/include")"
@@ -62,6 +69,7 @@ _BOOST_DIR="$(find "${CVC_DEPS_PREFIX}/lib/cmake" -maxdepth 1 -type d -name 'Boo
 emcmake cmake -G Ninja \
     -S "${CVC_SOURCE_DIR}" \
     -B "${CVC_BUILD_DIR}" \
+    -DCMAKE_INSTALL_PREFIX="${CVC_INSTALL_DIR}" \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
     -DCMAKE_FIND_ROOT_PATH="${CVC_DEPS_PREFIX}" \
     -DBUILD_SHARED_LIBS=OFF \
@@ -93,8 +101,10 @@ emcmake cmake -G Ninja \
     -DCVC_BUILD_PYCVC_GL=ON \
     -DCVC_PYCVCGL_VTK_BRIDGE=ON \
     -DPython3_EXECUTABLE="${PY_NATIVE}" \
+    -DPython3_NumPy_INCLUDE_DIR="${NUMPY_INC}" \
     -DPython3_NumPy_INCLUDE_DIRS="${NUMPY_INC}" \
-    -DSWIG_EXECUTABLE="${HOSTENV}/bin/swig"
+    -DSWIG_EXECUTABLE="${HOSTENV}/bin/swig" \
+    -DSWIG_DIR="${_SWIG_DIR}"
 
 # ── (4) build + install the static SWIG archives + the cvc/cvcGL closure ──
 # Build the default targets (cvc + cvcGL + pycvc + pycvc_gl; examples/tests/cli are
