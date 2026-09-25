@@ -1,4 +1,4 @@
-# cvcGL UI DSL — Scoping Spec (v0.3, for iteration)
+# cvcGL UI DSL — Scoping Spec (v0.4, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -8,11 +8,14 @@ YAML description of the nested ImGui widget tree — composable, reusable-with-a
 with expressions and actions expressed in `state_exec` — that can express the
 existing demo UIs. This document is the thing we iterate on before writing a loader.
 
-> **v0.3:** decisions Q1/Q2/Q4 are folded in (§4.3, §4.7, §4.8, §7), and a new
-> **scene-graph section (§9)** declares the root VTK scene's assets/nodes/views in the
-> *same* DSL as widgets and actions — which makes the **minimap** a first-class
-> `view_embed` widget (a second VTK view) rather than a hand-built C++ escape, and lets
-> the DSL describe all 10 demos (§6).
+> **v0.4:** the scene graph (§9) now makes **`RenderView` + `VisibilityMask` first-class
+> from the start** — each view renders a *masked and restyled subset* of one authored scene
+> (§9.5), the loader compiling one ownership-tree declaration into both the state tree and a
+> generated traversal graph (a bridge, adopted in stages C→B→A). New **§10 Transfer
+> functions**: control nodes *or* a raw table, on the `data()` typed channel, 1D wired with
+> the nD (2D/3D) shape reserved per the volrover3 roadmap, and a ColorTable2-derived
+> `tf_editor` widget. (v0.3 folded in decisions Q1/Q2/Q4 at §4.3/§4.7/§4.8; the minimap is a
+> `view_embed`, §9.6.)
 
 ### Decisions locked (v0.2)
 
@@ -688,12 +691,20 @@ GLSL (`shaders:`). The Python host covers the declarative subset (no C++
 - **P4 — scene graph (§9):** the `scene:` block — nodes/sources/materials/lights/chrome
   bound to state; the ownership-tree loader. Ship the volume/lsystem/terrain demos'
   *scenes* from YAML, not just their panels.
-- **P5 — views + minimap (§9.5–9.7):** `views:` over `ViewportManager`
-  (`addSceneViewport`/`addMirrorViewport`), camera modes/framing, the `minimap`
-  `view_embed` widget with window↔region coupling, and the `pick.world`/`pick.node`
-  intrinsics — retiring the nav demos' `custom` minimap.
-- **P6 — Python/CLI entry** over the C++ loader; a `cvc`/`grl-snam`-style command to
-  launch a `.ui.yaml` against a scene.
+- **P5 — views + RenderView bridge (§9.5):** `views:` over `ViewportManager`, camera
+  modes/framing, `tags:`/`show:`/`hide:`. Stage **C first** (overlay-only `RenderView` per
+  viewport — proves the wiring with zero ownership-tree change), then stage **B** (the
+  ownership→traversal generator; prerequisite: unify `GeometryShape`/`GeometryNode` onto one
+  `vtkPolyData`) and the per-view `override:` table. The `view_embed`/`minimap` widget with
+  window↔region coupling + the `pick.world`/`pick.node` intrinsics — retiring the `custom`
+  minimap.
+- **P6 — transfer functions (§10):** the TF `data()`-channel model (control nodes / raw
+  table), on-the-fly 1D LUT regen, wire `VolumeNode.handleStateChanged` to re-read its TF;
+  reserve the nD `axes`/`primitives` shape. The `tf_editor` widget follows the ColorTable2
+  port.
+- **P7 — Python/CLI entry** over the C++ loader; a `cvc`/`grl-snam`-style command to
+  launch a `.ui.yaml` against a scene. Stage **A** (volumes onto `Shape` subclasses) lands
+  as the traversal path matures.
 
 ---
 
@@ -706,21 +717,29 @@ of a hand-built C++ escape.
 
 ### 9.1 Which scene model
 
-cvcGL has two, and the DSL commits to one:
+cvcGL has two trees, and — the key move — **the DSL author writes only one, and the
+loader compiles it into both.** They are joined on node identity (a stable `id` + `tags`).
 
 - **Ownership tree** — `SceneGraph` + `GraphicsNode` subclasses; the live tree
   VolRover3/pycvc_gl render. **Every node is a `cvc::state_object`**, so a declared node
   *is* a state subtree and every settable prop is already a reactive state key — loading
   a node == writing its subtree; a widget/expression driving a prop == writing one key.
-  **This is the DSL's scene surface.** (`SceneGraph(app, statePrefix="cvcgl")`;
-  `addGraphics(name, geometry|volume|<empty>)`, `addLight(name)`; child path is
-  deterministically `<parent>.children.<name>`.)
-- **Traversal tree** — `nodes.h`/`traversal.h` (Separator/Transform/Material/Shape/
-  `VisibilityMask`), state carried by an Action's `TraversalState`; a `RenderView`
-  carries a 32-bit mask so one graph shows different content per window. Currently only
-  exercised in its own unit tests. We **borrow its `VisibilityMask` idea** for per-view
-  node subsets (§9.5) as the forward path; today's production subset mechanism is
-  prop-level.
+  **This is the only tree the author writes** (`SceneGraph(app, statePrefix="cvcgl")`;
+  `addGraphics(name, geometry|volume|<empty>)`, `addLight(name)`; child path
+  `<parent>.children.<name>`). It keeps state binding, pose publishing, textures/clip/
+  shaders, the Python proxies, and lifetime exactly as they are.
+- **Traversal tree** — the OpenInventor-shaped render path
+  (`Separator`/`Transform`/`Material`/`DrawStyleNode`/`VisibilityMask`/`Shape`, an ordered
+  `TraversalState`, and `RenderView`). This is what makes **per-view masked + restyled
+  subsets** work: one shared graph, N `RenderView`s each with a 32-bit mask, and a `Shape`
+  that keeps **one `vtkProp` per view**. It is **fully implemented and headless
+  unit-tested** — but today it is a *parallel* model wired to nothing (only its own
+  `.cpp`s and one test reference it; `SceneGraph`/`Viewport`/`ViewportManager`/pycvc_gl do
+  not). So making `RenderView`/`VisibilityMask` **first-class from the start is a bridge
+  problem, not a build**: the loader *generates* the traversal graph from the ownership
+  tree at view-build time (§9.5.4), and each `Viewport` — which already owns a
+  `vtkRenderer` — drives a `RenderView` over it. The author never hand-builds a
+  `Separator`/`Shape` graph.
 
 ### 9.2 The `scene:` block
 
@@ -782,42 +801,147 @@ The closed set of `source:` kinds a node draws from:
 Streamed/dynamic geometry (thousands of agents) stays a declared *shape* + a
 host-registered data handler — the one scene piece that isn't purely declarative.
 
-### 9.5 Views and cameras
+### 9.5 Views render a masked, modified subset of the one authored scene
 
 One render window hosts **N layered viewports**, each its own camera — this is
 `ViewportManager` (`SceneRenderer` is its single-viewport facade and exposes
-`viewportManager()`; one GL context, mandatory under wasm). The **root view is
-implicit**; extra views are declared:
+`viewportManager()`; one GL context, mandatory under wasm). But a view is not just a
+camera onto identical content — **each view renders its own masked and restyled subset of
+the single authored scene**, via `RenderView` + `VisibilityMask`, which the DSL treats as
+**core model from the start** (§9.1). The confirmed per-view gate in the traversal code is
+exactly:
+
+```
+visible = drawStyle.style != Invisible && (accumulated_mask & view.visibilityMask()) != 0
+```
+
+The **root view is implicit**; each view sets its camera and its subset/overrides:
 
 ```yaml
 views:
-  - view: main                                   # implicit root; declared only to set its camera
+  - view: main
     camera: { mode: orbit, frame: bounds }       # orbit | fly | track | map
+    show: all
   - view: overview
-    kind: mirror                                 # scene (own render) | mirror (echo another view)
-    source: main
     region: [0.72, 0.0, 1.0, 0.28]               # normalized, VTK y-up; movable every frame
     layer: 1
     background: { color: [0.02,0.03,0.05], opaque: true }   # opaque => clears => solid inset
     input: false                                 # non-interactive inset; clicks fall through
     camera: { mode: map, frame: { top_down: bounds } }      # frameMap(cx,cy,halfH,halfW)
-    show: [ agents, walls, targets ]             # per-view node subset
+    show: [ sim, annotation ]                    # masked subset (§9.5.2)
+    override:                                     # restyled subset (§9.5.3)
+      terrain: { drawstyle: wireframe, material: { opacity: 0.25 } }
 ```
 
-Modes map to `CameraController`: `orbit`/`fly` (3-D), `track` (cinematic follow of a
-named node — `setTrackTarget`), `map` (true top-down parallel projection, drag pans /
-wheel zooms — `frameMap`; the minimap's camera). Framing: `bounds` (`frameBounds`),
-`top_down: bounds` (`frameMap` fit-rect), or explicit `eye`/`focal`/`up`. Each view's
-camera is state-rooted at `<prefix>.viewers.<name>.camera`, so a widget or action drives
-it. `show:` selects a node subset — forward path is the traversal `VisibilityMask`;
-production path today is prop-level (`mirror` echoes the source's 3-D props, view-only
-nodes attach to just that view).
+Camera modes map to `CameraController`: `orbit`/`fly` (3-D), `track` (follow a named node
+— `setTrackTarget`), `map` (top-down parallel projection, drag pans / wheel zooms —
+`frameMap`; the minimap's camera). Framing: `bounds` (`frameBounds`), `top_down: bounds`
+(`frameMap` fit-rect), or explicit `eye`/`focal`/`up`. Each view's camera is state-rooted
+at `<prefix>.viewers.<name>.camera`, so a widget or action drives it.
+
+#### 9.5.1 Tagging nodes → mask bits
+
+An author never writes raw bits. A node (or subtree) declares symbolic **`tags:`**; the
+compiler assigns each distinct tag one bit of the 32-bit mask and wraps the tagged subtree
+in a `VisibilityMask` node (which **AND-narrows** the accumulated mask as traversal
+descends).
+
+```yaml
+scene:
+  nodes:
+    - node: terrain    # untagged → shown in EVERY view (visibility is opt-OUT)
+      type: geometry
+      source: { procedural: { terrain: {...} } }
+    - node: agents
+      type: geometry
+      tags: [ sim ]
+      source: { stream: { handler: agent_glyphs } }
+    - node: rally_labels
+      type: geometry
+      tags: [ annotation ]
+      source: { procedural: { disc: {...} } }
+    - node: nav_field
+      type: geometry
+      tags: [ sim, debug ]   # OR of both bits on ONE VisibilityMask → shown wherever sim OR debug shows
+```
+
+Two compiler rules (the load-bearing footguns): **multiple tags on one subtree OR into a
+single mask** (`bit(sim)|bit(debug)`); a *nested* second `VisibilityMask` is emitted only
+for an explicit intersection ("only where **both** are on"), because nesting two distinct
+bits AND-narrows to `0` and the node draws **nowhere**. And **untagged = shown everywhere**
+— "main-only" content needs its own tag the overview omits. (The mask is 32-bit → ≤32 tag
+channels; the compiler allocates bits and hard-errors on exhaustion, never silently
+reuses.)
+
+#### 9.5.2 A view selects its subset — `show:` / `hide:` / `mask:`
+
+A `RenderView.mask` is the **OR of the bits it shows** (plus the always-on untagged bit):
+`show: [A, B]` → `bit(A)|bit(B)`; `hide: [A]` → `~bit(A)`; `mask: 0x…` → raw escape hatch.
+Keep this **distinct from a global hide**: a global hide compiles to `DrawStyleNode(Invisible)`
+/ `Switch(None)` **in the graph** (gone from all views); a per-view hide compiles to the
+**mask** (gone from that view only). Both are independent in the gate above.
+
+#### 9.5.3 The *modified* subset — per-view material / drawstyle / transform overrides
+
+Masking hides; overriding **restyles the same geometry per view without duplicating it**. A
+view's `override:` block is keyed by node id or tag; the loader records it in a
+**per-`RenderView` override table** (`{node|tag → {material?, drawstyle?, transform?}}`), and
+`Shape::applyState` **merges the override over the accumulated `StateFrame`** just before
+writing that view's prop — so one node is filled in `main` and wireframe in `overview`, from
+one geometry buffer and one `Shape`.
+
+```yaml
+  - view: overview
+    show: [ sim, annotation ]
+    override:                    # the "modified subset" — no geometry duplication
+      terrain: { drawstyle: wireframe, material: { opacity: 0.25 } }
+      agents:  { material: { color: [1, 0.9, 0.2] }, transform: { scale: 2 } }  # fat dots in the inset
+      annotation: { material: { color: [0.2, 0.8, 1.0] } }   # override by TAG hits every node carrying it
+```
+
+**Status:** the per-view override is the *one* piece of the traversal code not yet present
+(`Shape` reads the mask but not a per-view value). Until it lands, an `override:` desugars to
+duplicated masked branches (an extra prop per overridden node per view — works today, costs
+memory); the override table is a small, additive change to `Shape`/`RenderView` that makes it
+one line. Without it, the only per-view difference expressible is *visibility*.
+
+#### 9.5.4 Author once, render per-view — the bridge
+
+The two trees have complementary jobs; the DSL compiles **one declaration into both**, keyed
+on node identity:
+
+| Tree | Role | Owns |
+|---|---|---|
+| **Ownership** (`SceneGraph`/`GraphicsNode`) | authoring, state, lifetime | `state_object` per node, pose publishing, textures/clip/shaders, Python proxies, world-bounds |
+| **Traversal** (`Separator`/`Shape`/`VisibilityMask`) | rendering | per-view props, order-dependent state, masks + overrides |
+
+The `scene:` block authors into the ownership tree (unchanged — where `state_object`, `data()`,
+and pose publishing live). At view-build time the loader **generates a traversal graph from
+it**: each `GraphicsNode` → `Separator{ Transform(its matrix) + Material/DrawStyle(its state) +
+a Shape sharing the node's `vtkPolyData` }` wrapped in `VisibilityMask(OR of its tag bits)`.
+Each `Viewport` **owns a `RenderView`** over that one generated root and calls
+`renderView.render(root)` per frame instead of `SceneGraph::setRenderer`; `ViewportManager`
+composites the N renderers unchanged. Per-view rules (tags→masks, `override:`→the view's table)
+layer on the generated traversal **without editing the authored graph**.
+
+**Staged adoption** (so it ships without the full unify): **(C, minimal now)** keep the main
+scene on `SceneGraph::setRenderer` and give only overlay/annotation layers their own
+`RenderView` per viewport — already delivers "annotations in the overview only" and proves the
+`Viewport`-owns-`RenderView` wiring with zero ownership-tree change; **(B, target)** the
+generate-from-ownership adapter above, whose one prerequisite is unifying
+`GeometryShape.setGeometry` with `GeometryNode.updatePolyData` onto **one** `vtkPolyData` (today
+they build duplicate polydata); **(A, later)** retire the one-renderer binding and port
+`VolumeNode`/`VolRenNode` onto `Shape` subclasses. **The DSL surface — `tags`, `show`/`hide`,
+`override` — is identical across all three stages**, so authors are insulated from which stage
+the runtime is at.
 
 ### 9.6 The `minimap` widget = a view embedded in a window
 
-`ViewportManager::addMirrorViewport(name, source, region, layer, liveSync)` **is** the
-generalized minimap. The widget binds a view to an ImGui window whose **content rect
-drives the view's `region` every frame**:
+The minimap is just a **`view_embed` of a `RenderView`** (§9.5) whose masked/restyled subset
+and top-down camera are declared like any other view. The widget binds that view to an ImGui
+window whose **content rect drives the view's `region` every frame** (`ViewportManager` already
+supports a movable-region viewport; `addMirrorViewport` is the degenerate `show: all` + no
+`override:` case):
 
 ```yaml
 windows:
@@ -852,9 +976,9 @@ those, click-to-follow and target-drag are ordinary `on:` actions that write sta
 
 ### 9.7 What this retires
 
-The nav demos' `custom: minimap` node **collapses to a declarative `minimap` widget + a
-mirror view + two `pick.*` intrinsics**. The only remaining non-declarative scene pieces
-are (a) streamed per-frame geometry (`source: stream`) and (b) fully custom GLSL
+The nav demos' `custom: minimap` node **collapses to a declarative `view_embed` over a
+masked/restyled `RenderView` + two `pick.*` intrinsics**. The only remaining non-declarative
+scene pieces are (a) streamed per-frame geometry (`source: stream`) and (b) fully custom GLSL
 (`shaders:` → `custom`) — both narrow, well-fenced host hooks, not whole hand-built UIs.
 **With §9, all 10 demos are describable**, and the nav trio no longer needs a bespoke
 C++ minimap.
@@ -862,17 +986,165 @@ C++ minimap.
 ### 9.8 Open questions (scene-specific)
 
 **Resolved:**
-- **`pick.world`/`pick.node`** → ✅ **first-class query intrinsics** (§4.4), taking a view
-  name and returning world coords / nearest-node name; this makes the minimap's
-  click-to-follow and target-drag ordinary `on_click`/`on_drag` actions (§9.6), retiring
-  the `custom` minimap. Requires generalizing the nav demo's `pip_world_at` unproject to
-  any view camera.
+- **`pick.world`/`pick.node`** → ✅ **first-class query intrinsics** (§4.4). Requires
+  generalizing the nav demo's `pip_world_at` unproject to any view camera.
+- **Scene model** → ✅ commit to the **ownership tree** as the sole authoring surface and
+  **generate the traversal graph from it**, so `RenderView`/`VisibilityMask` are first-class
+  from the start via the bridge (§9.5.4), adopted in stages C→B→A with an identical DSL
+  surface throughout.
+- **Transfer functions** → ✅ moved to its own section — see **§10** (control nodes / raw
+  table / nD, on the `data()` channel, with a ColorTable2-derived editor widget).
 
-**Still open (deferred — user considering):**
-1. **Scene model** — commit to the ownership tree (state-per-node) as the DSL surface
-   now, and adopt `RenderView`/`VisibilityMask` for per-view subsets when it graduates
-   from unit-tests to production? (Leaning yes.)
-2. **Streamed-source contract** — buffer ownership, per-frame push vs pull, which thread;
+**Still open:**
+1. **Per-view override desugaring vs the real override table** — ship the override table
+   (small `Shape`/`RenderView` change) or desugar overrides to duplicated masked branches
+   until it lands? Affects when "modified subset" beyond visibility is available.
+2. **Override precedence** — if a view overrides tag `annotation` **and** node `rally_labels`
+   (which carries it), which wins, and do overrides **merge** or **replace**? (ColorTable2
+   last-wins vs an explicit order.)
+3. **Static vs dynamic masks** — may `show:`/`hide:` be `state_exec` expressions (per-frame
+   subset), or are masks fixed at load? Dynamic is cheap (re-OR bits) but complicates the
+   compiler's static bit assignment (32-bit ceiling).
+4. **Incremental regen** — does the ownership→traversal generator run once at load or
+   dirty-propagate per-node edits (pose/material) into the generated `Separator`/`Material`?
+   Needs a contract mirroring the pose-publish path.
+5. **Streamed-source contract** — buffer ownership, per-frame push vs pull, which thread;
    ties to the sim tick.
-3. **Transfer functions** — declare the TF as data on the `data()` typed channel (Q1) so
-   a `volren` panel's TF editor binds to it like any other widget.
+
+---
+
+## 10. Transfer functions
+
+A transfer function is **structured, typed data**, not a stringified scalar — so it rides the
+`state_object` **`data()` typed channel** (Q1, §4.3: `state-data-get`/`state-data-set`,
+`data_object` value), the same channel a color or vector tunable uses. That gives the TF one
+place to live that round-trips as a real typed blob, drives the renderer reactively, and is
+what a TF editor widget binds to like any other widget. One TF model already serves every
+volume renderer in libcvc: the canonical `cvc::volren::transfer_function` (a sorted vector of
+`{value, r,g,b,a}` points, `sample()` piecewise-linear) is shared verbatim by `volren` and
+`volslice`, and `VolumeNode` consumes the same two flat arrays into VTK's own
+`vtkColorTransferFunction`/`vtkPiecewiseFunction`. Each renderer **bakes** the TF at its own
+resolution (`volren` 1024, `volslice` 256, VTK interpolates its points).
+
+### 10.1 Two authoring forms: control **nodes** OR a raw **table**
+
+A node's `transfer_function:` is **either** a set of control nodes the loader interpolates into
+a table, **or** a raw baked table supplied directly — both lower to the same per-consumer LUT.
+
+- **Control nodes** (primary, editor-native — the ColorTable2 shape). Two independent,
+  position-sorted lists, because color and opacity control points need not coincide:
+  **color nodes** (`scalar → rgb`) and **alpha nodes** (`scalar → a`), plus optional
+  **isocontour nodes** (`scalar → id`) — which do **not** feed the LUT; they drive live
+  isosurface extraction, so they are a separate attachment kept out of the table path.
+- **Raw table** — an explicit `table:` of N RGBA entries (e.g. 256) + a domain; the baked form.
+
+**Regeneration contract:** the nodes are the source of truth, the table is a derived cache. On
+**any** node change the loader marks the LUT dirty and **regenerates it on the fly** —
+piecewise-linear, clamped to [0,1], exact first/last entries at the ends (ColorTable2's proven
+boundary rule). 1D regenerates the whole LUT cheaply; higher-D rebakes only the dirty
+primitive's bounding box. Reactive edge: `data()` write → dirty → rebake → re-render.
+
+```yaml
+# 1D TF, control-node form (the ColorTable2 lift)
+nodes:
+  - node: skull
+    type: volren
+    transfer_function:
+      dims: 1                              # one axis; see §10.2
+      domain: auto                         # follow the volume's [min,max]; or {min, max}
+      resolution: 256                      # baked LUT size — a DEFAULT, not hardcoded (the legacy 256 was a bug)
+      opacity_cubed: false                 # ColorTable2's v³ low-opacity trick, optional
+      color:                               # scalar → rgb (endpoints auto-inserted at 0 and 1)
+        - { at: 0.0, rgb: [0,0,0] }
+        - { at: 0.5, rgb: [1,0,0] }
+        - { at: 1.0, rgb: [0,1,0] }
+      alpha:                               # scalar → a, independently placed
+        - { at: 0.0, a: 0.0 }
+        - { at: 0.25, a: 0.75 }
+        - { at: 1.0, a: 1.0 }
+      isocontours:                         # optional; drives isosurface extraction, not the LUT
+        - { at: 0.6, id: bone }
+
+# 1D TF, raw-table form — a directly supplied 256-entry LUT
+transfer_function:
+  dims: 1
+  domain: { min: 0, max: 255 }
+  table: { size: 256, rgba: [ 0,0,0,0,  1,0,0,0.2,  … ] }   # N × RGBA, resampled per consumer
+```
+
+Back-compat: the 1D control-node form lowers to the existing split state keys
+(`…transfer_function.color` = CSV `value,r,g,b`; `…transfer_function.opacity` = CSV `value,a`;
+`merge_ramps()` fuses them), so nothing reading those today breaks; the structured/nD payload
+rides `data()` alongside. The legacy `gradient_ramp` (a 1D `|gradient|`→alpha multiplier) and
+the separate `isosurfaces` list are declarable as sibling fields.
+
+> **Caveat (tracked):** `volren`/`volslice` are two-way state-bound (state write → re-read →
+> re-bake → re-render), but **`VolumeNode`'s TF is one-way today** — `handleStateChanged` does
+> not re-read the TF, so a TF editor bound to a VTK `VolumeNode` won't drive it until
+> `VolumeNode.handleStateChanged` is extended to consume the TF.
+
+### 10.2 Dimensionality is a runtime property — `dims:` / `axes:` with room for nD
+
+Dimensionality is **one field on one TF type**, not N types — adopting the unified model from
+the **volrover3 modernization roadmap §11–§12** (`cvc-engagement-docs-status/modernization/
+2026-08-11-volrover3-roadmap.md`; the `CVC-modernization*.md` trio only records the parity gap
+and the `cvcQt` consolidation). A TF is a function of an ordered **tuple of axes**; `dims:` (or
+the length of `axes:`) *is* the dimensionality — 1D today, 2D/3D supported, shape open for
+nD/4D (a `Time` axis + keyframes).
+
+```yaml
+axes:
+  - { kind: value,        field: density, domain: auto }                 # axis 0 = today's only axis
+  - { kind: gradient_mag, field: "",      domain: { min: 0, max: 1 } }   # axis 1
+  # kind ∈ { value, gradient_mag, gradient2, time, custom }; each axis its own domain
+```
+
+For 2D+ the point lists give way to **primitives** (brushes in the axis plane —
+`tent`/`rectangle`/`gaussian`/`bezier`/`freeform`), the generalization of control nodes:
+
+```yaml
+# 2D TF sketch (Kniss value × gradient-magnitude), same node type, +1 axis
+transfer_function:
+  dims: 2
+  axes:
+    - { kind: value,        field: density, domain: auto }
+    - { kind: gradient_mag, field: "",      domain: { min: 0, max: 1 } }
+  resolution: [256, 256]                    # per-axis (128 typical for 3D/4D)
+  primitives:
+    - { kind: gaussian,  coords: [0.40, 0.20, 0.05, 0.08], rgba: [1, 0.8, 0, 0.8] }
+    - { kind: rectangle, coords: [0.70, 0.90, 0.60, 1.00], rgba: [0.2, 0.4, 1, 0.4] }
+```
+
+The baked form generalizes cleanly (`baked_transfer_function` is already "flat array + domain";
+an nD bake is "flat array of ∏(sizes) + per-axis [lo,hi] + lookup"). **Reality check:** the
+*renderers* are 1D today (the only multi-axis precursor is `gradient_ramp`, a separable alpha
+multiplier). So **2D/3D declarations will be authorable before the raycaster can consume them**
+— the DSL intentionally leads the renderer here; 1D is fully wired, nD reserves the shape.
+
+### 10.3 The editor widget is a first-class DSL widget (ColorTable2, coming)
+
+The forthcoming editor (the **ColorTable2** Qt widget from VolumeRover2, not yet ported) is a
+DSL **widget node** that **binds to a TF's `data()` channel** — the widget is a *view*, the TF
+data is the *model*, edits flow model → LUT → renderer as an ordinary reactive edge (ColorTable2's
+`changed()` becomes a DSL edge, like a slider's two-way bind). ColorTable2's model is exactly
+the node model above (`color_node`/`opacity_node`/`isocontour_node` sets, normalized [0,1],
+`getTable(size)` → baked RGBA). One widget family covers all dimensionalities by inspecting
+`axes` (1D = the ColorTable2 port `cvcQt::ColorTable`; 2D/3D/4D = `cvcQt::TransferFunctionEditor`
+— the two existing widgets reconciled as *views over one model*, per the roadmap).
+
+```yaml
+windows:
+  - window: Transfer Function
+    children:
+      - tf_editor: skull_tf
+        bind: cvcgl.nodes.skull.transfer_function   # the node's TF data() channel
+        interactive_updates: true                   # emit-on-drag vs on-release (ColorTable2's flag)
+        layers: [ histogram, contour_spectrum ]     # overlays supplied FROM OUTSIDE as generic
+                                                     # 1D-function / 2D-geometry layers (no VolMagick
+                                                     # knowledge baked in — per ColorTable2's own TODO)
+```
+
+Because the TF lives on `data()`, the same editor drives `volren`, `volslice`, and (once
+`VolumeNode` re-reads its TF) the VTK path, and round-trips into the scene file. Persistence
+targets the roadmap's JSON form (`axes` + `primitives` + optional keyframes + optional baked
+LUT); a **load-only importer** (`load_vinay`) reads legacy ColorTable2 `.vinay` text presets.
