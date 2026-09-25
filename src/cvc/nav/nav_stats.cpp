@@ -77,6 +77,7 @@ void nav_stats_collector::begin_episode(int n, double dt_s, const float *start_p
   ep_.dt_s = dt_s;
   ep_.per_vehicle.assign(n_, veh_nav_stats{});
   start_pos_.assign(start_pos, start_pos + 2 * n_);
+  goal_pos_.assign(goal_pos, goal_pos + 2 * n_);
   prev_pos_.assign(start_pos, start_pos + 2 * n_);
   prev_head_.assign(n_, 0.0f);
   prev_spd_.assign(n_, 0.0f);
@@ -97,6 +98,10 @@ void nav_stats_collector::begin_episode(int n, double dt_s, const float *start_p
     const double dx = goal_pos[2 * i] - start_pos[2 * i];
     const double dy = goal_pos[2 * i + 1] - start_pos[2 * i + 1];
     v.straight_m = std::hypot(dx, dy);
+    // Seed closest-approach at the start distance: the vehicle IS that far at t=0, and each step
+    // only ever lowers it (no resets), so closest_approach_m doubles as the running progress
+    // baseline that stall_steps tests against.
+    v.closest_approach_m = v.straight_m;
   }
 }
 
@@ -163,6 +168,17 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
         v.time_over_material_s[m] += dt_;
         v.dist_over_material_m[m] += seg;
       }
+    }
+    // progress toward goal: closest approach + no-progress (stall) count. Uses the goal captured at
+    // begin_episode, so it is always on and needs no sampler. The stall test compares against the
+    // closest distance seen so far BEFORE this step lowers it, mirroring sim_world's closing test
+    // but in world metres and without its resets.
+    {
+      const double dg = std::hypot(x - goal_pos_[2 * i], y - goal_pos_[2 * i + 1]);
+      if (!(dg < v.closest_approach_m - p_.stall_progress_eps_m))
+        ++v.stall_steps;
+      if (dg < v.closest_approach_m)
+        v.closest_approach_m = dg;
     }
     if (smp.formation_slot) { // formation-holding: distance to this vehicle's slot this step
       double sx = 0, sy = 0;
@@ -343,7 +359,9 @@ std::string episode_nav_stats::to_json() const {
     num(o, v.speed_mean);
     o << ",\"speed_max\":";
     num(o, v.speed_max);
-    o << ",\"min_clearance_m\":";
+    o << ",\"closest_approach_m\":";
+    num_sentinel(o, v.closest_approach_m);
+    o << ",\"stall_steps\":" << v.stall_steps << ",\"min_clearance_m\":";
     num_sentinel(o, v.min_clearance_m);
     o << ",\"time_below_clear_s\":";
     num(o, v.time_below_clear_s);
@@ -384,6 +402,10 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   // formation holding (followers = formation_parent >= 0; anchors = -1)
   int foll_runs = 0, foll_arr = 0, form_episodes = 0, form_mission_ok = 0;
   double slot_sum = 0;
+  // progress (over vehicle-runs; closest-approach over runs with a finite value only)
+  int approach_n = 0;
+  double approach_sum = 0;
+  long stall_sum = 0;
   for (const auto &e : episodes) {
     if (e.success)
       ++succ;
@@ -434,6 +456,11 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
       turn_sum += v.turn_total_rad;
       fuel_sum += v.fuel_used;
       contacts += v.veh_contacts;
+      stall_sum += v.stall_steps;
+      if (v.closest_approach_m < 1e29) {
+        approach_sum += v.closest_approach_m;
+        ++approach_n;
+      }
       for (int m = 0; m < kNumMaterials; ++m) {
         mat_sum[m] += v.time_over_material_s[m];
         mat_total += v.time_over_material_s[m];
@@ -468,6 +495,8 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   s.form_arrival_rate = foll_runs > 0 ? (double)foll_arr / foll_runs : 0;
   s.form_mission_rate = form_episodes > 0 ? (double)form_mission_ok / form_episodes : 0;
   s.mean_slot_error_m = foll_runs > 0 ? slot_sum / foll_runs : 0;
+  s.mean_closest_approach_m = approach_n > 0 ? approach_sum / approach_n : 0;
+  s.mean_stall_steps = runs > 0 ? (double)stall_sum / runs : 0;
   return s;
 }
 
@@ -497,6 +526,10 @@ std::string nav_scorecard::to_json() const {
   num(o, veh_contacts_per_run);
   o << ",\"mean_min_sep_m\":";
   num(o, mean_min_sep_m);
+  o << ",\"mean_closest_approach_m\":";
+  num(o, mean_closest_approach_m);
+  o << ",\"mean_stall_steps\":";
+  num(o, mean_stall_steps);
   o << ",\"material_time_share\":";
   write_array(o, material_time_share.data(), kNumMaterials);
   o << ",\"form_arrival_rate\":";
