@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOSTENV="${CVC_BUILD_DIR}/hostenv"
 _hp="$(uname -s 2>/dev/null || echo Linux)"; case "${_hp}" in Linux) _hp=linux;; Darwin) _hp=macos;; *) _hp=linux;; esac
 _cvc="cvcpkg"; command -v cvcpkg >/dev/null 2>&1 || _cvc="python3 -m cvcpkg"
-${_cvc} install python312 swig cmake ninja \
+${_cvc} install python312 numpy-cp312 swig cmake ninja \
     --platform "${_hp}" --config release --link shared \
     --prefix "${HOSTENV}" --no-fallback-to-source >&2
 export PATH="${HOSTENV}/bin:${PATH}"
@@ -100,6 +100,7 @@ emcmake cmake -G Ninja \
     -DCVC_BUILD_PYCVC_GL=ON \
     -DCVC_PYCVCGL_VTK_BRIDGE=ON \
     -DPython3_EXECUTABLE="${PY_NATIVE}" \
+    -DPython3_NumPy_INCLUDE_DIR="${NUMPY_INC}" \
     -DPython3_NumPy_INCLUDE_DIRS="${NUMPY_INC}" \
     -DSWIG_EXECUTABLE="${HOSTENV}/bin/swig" \
     -DSWIG_DIR="${_SWIG_DIR}"
