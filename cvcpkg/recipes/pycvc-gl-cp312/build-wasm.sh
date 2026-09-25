@@ -69,6 +69,7 @@ _BOOST_DIR="$(find "${CVC_DEPS_PREFIX}/lib/cmake" -maxdepth 1 -type d -name 'Boo
 emcmake cmake -G Ninja \
     -S "${CVC_SOURCE_DIR}" \
     -B "${CVC_BUILD_DIR}" \
+    -DCMAKE_INSTALL_PREFIX="${CVC_INSTALL_DIR}" \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
     -DCMAKE_FIND_ROOT_PATH="${CVC_DEPS_PREFIX}" \
     -DBUILD_SHARED_LIBS=OFF \
