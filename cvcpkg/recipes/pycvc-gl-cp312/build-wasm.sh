@@ -59,6 +59,11 @@ emcmake cmake -G Ninja \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
     -DCMAKE_FIND_ROOT_PATH="${CVC_DEPS_PREFIX}" \
     -DBUILD_SHARED_LIBS=OFF \
+    `# cmake >=3.30 deprecates the legacy FindBoost module (CMP0167); its module` \
+    `# mode fails to locate the cvcpkg boost layout under the cross FIND_ROOT_PATH.` \
+    `# NEW = use boost's own BoostConfig.cmake (config mode), which the wasm boost` \
+    `# package ships (lib/cmake/Boost-*). Fixes "Could NOT find Boost" at configure.` \
+    -DCMAKE_POLICY_DEFAULT_CMP0167=NEW \
     -DCVC_ENABLE_CUDA=OFF \
     -DCVC_BUILD_TESTS=OFF \
     -DCVC_BUILD_CLI=OFF \

@@ -57,6 +57,11 @@ $pthreads = if ($env:CVC_WASM_THREADS -eq '1') { 'ON' } else { 'OFF' }
 # ── (3) configure + build + install the trimmed closure (static, BRIDGE=ON) ──
 # Same OFF set as build-wasm.sh / cvcgl-examples, plus the pycvc bindings.
 Invoke-CvcWasmCMakeBuild -ExtraArgs @(
+    # cmake >=3.30 deprecates the legacy FindBoost module (CMP0167); its module
+    # mode fails to locate the cvcpkg boost layout under the cross FIND_ROOT_PATH.
+    # NEW = use boost's BoostConfig.cmake (config mode), shipped by the wasm boost
+    # package. Fixes "Could NOT find Boost" at configure.
+    '-DCMAKE_POLICY_DEFAULT_CMP0167=NEW',
     '-DCVC_ENABLE_CUDA=OFF',
     '-DCVC_BUILD_TESTS=OFF',
     '-DCVC_BUILD_CLI=OFF',
