@@ -8,7 +8,7 @@ YAML description of the nested ImGui widget tree — composable, reusable-with-a
 with expressions and actions expressed in `state_exec` — that can express the
 existing demo UIs. This document is the thing we iterate on before writing a loader.
 
-> **v0.3:** decisions Q1/Q2/Q4 are folded in (§4.3, §4.6, §4.7, §7), and a new
+> **v0.3:** decisions Q1/Q2/Q4 are folded in (§4.3, §4.7, §4.8, §7), and a new
 > **scene-graph section (§9)** declares the root VTK scene's assets/nodes/views in the
 > *same* DSL as widgets and actions — which makes the **minimap** a first-class
 > `view_embed` widget (a second VTK view) rather than a hand-built C++ escape, and lets
@@ -419,6 +419,22 @@ off-thread mutation would corrupt state).
 | `state-watch/-unwatch` | **existing** — backs `on_change:` |
 | `custom.<name>` | host-registered escape (action or read-only query) |
 
+**Query intrinsics (reads, not effects).** A second, small family that **returns a
+value instead of queuing an intent** — so, unlike the verbs above, they are registered in
+**both** the read-only predicate env and the action env and are safe to call inline:
+
+| Query intrinsic | Returns |
+|---|---|
+| `(pick.world "<view>" px py)` | world `(x y)` under a pixel in that view — the generalized `pip_world_at` unproject through the view's camera (needs a rendered frame) |
+| `(pick.node "<view>" px py [radius])` | the **name** of the nearest scene node to that pixel (nil if none within `radius`) — the nearest-agent hit-test, generalized |
+| `(scene.bounds ["<node>"])` | the `(minx miny minz maxx maxy maxz)` of a node/scene (feeds `camera.fit`/framing) |
+
+`pick.*` take a **view name** (§9.5) so the same pixel resolves differently per viewport —
+which is exactly what the minimap needs (a click in the top-down inset unprojects through
+the inset's ortho camera, not the main perspective one). They are the first-class
+mechanism (decision, §9.8) that makes the minimap's click-to-follow / target-drag ordinary
+`on:` actions instead of a `custom` node.
+
 ### 4.5 Event model — `on:` is polymorphic; the scheduler replaces `want*`-flags
 
 `on:` dispatches by the **shape** of its value (decided at load):
@@ -459,7 +475,31 @@ macOS-safe), same intent discipline.
 model: a handler program enqueues intents the tick drains. wasm is single-threaded, so
 the handler runs inline in the input pump and the queue discipline keeps it safe.
 
-### 4.6 Executor selection + per-frame lifecycle + degradation
+### 4.6 Pointer & input events (widget-level `on_*` handlers)
+
+Beyond `on:` (fire on activate), a node may carry pointer/input handlers:
+`on_click`, `on_drag` (+ `on_drag_start`/`on_drag_end`), `on_hover`, `on_key`, `on_tick`.
+These are the general mechanism the minimap (§9.6) uses; they exist for any node.
+
+Each fires the same two-shape `on:` value (enumerated name or program). The trigger's
+**payload is written into a per-handler event scope** the program reads by relative path,
+rather than a global — so it composes with the chroot (§4.8):
+
+- `event.x` / `event.y` — pointer position, in the node's own coordinate space (for a
+  `view_embed`, that is the embedded **view's** pixel space, which is what `pick.*`
+  wants; for a plain widget, its content-rect-local pixels).
+- `event.dx` / `event.dy` — drag delta since the last frame (drag handlers only).
+- `event.button` / `event.key` / `event.mods` — which button/key/modifiers.
+- `event.dt` — seconds since last frame (`on_tick` only).
+
+So the minimap's click-to-follow reads `(pick.node "overview" {$int: event.x} {$int:
+event.y})` and target-drag reads `(pick.world "overview" …)` — no globals, no `custom`.
+Handlers that only write state (`set`) run inline (callback-safe); handlers that call
+effectful intrinsics enqueue as usual. **Open (ties to §7.1):** whether a hot `on_tick`
+is re-submitted each frame or runs as one resident `await`-ing process — deferred with the
+other `on:tick`/`on:key` cadence questions.
+
+### 4.7 Executor selection + per-frame lifecycle + degradation
 
 - **Compile (load, once):** parse the document; compile each expression slot to
   `value_t` (s-expr via `parse()`, YAML via `yaml_to_value()`); classify the slot and
@@ -494,7 +534,7 @@ the handler runs inline in the input pump and the queue discipline keeps it safe
   model (both hosts run the *same* libcvc `state_exec`), covers the declarative subset,
   delegates `custom` draw leaves to C++ — no semantic drift.
 
-### 4.7 Sandboxing — per-panel chroot (Q4)
+### 4.8 Sandboxing — per-panel chroot (Q4)
 
 Each panel / included unit runs its programs under an **`apply_chroot` to its own state
 prefix**: a unit's expressions and actions see `some.tunable` resolved *relative to that
@@ -607,9 +647,9 @@ GLSL (`shaders:`). The Python host covers the declarative subset (no C++
   (§4.3).
 - **Q2 — action driver:** ✅ build on the **async schedulable executor** and bring it to
   full parity early (add the missing sleep/messaging/settings/preemption as needed);
-  `await` available from day one. Sync scheduler is a build fallback only (§4.6).
+  `await` available from day one. Sync scheduler is a build fallback only (§4.7).
 - **Q4 — sandboxing:** ✅ per-panel `apply_chroot`, **nestable**, with an absolute-path
-  (`/…`) + enumerated-intrinsic escape hatch for cross-panel communication (§4.7).
+  (`/…`) + enumerated-intrinsic escape hatch for cross-panel communication (§4.8).
 
 **Still open (state_exec-specific):**
 1. **`on:tick`/`on:key` handlers** — re-submit per event (simple) vs one resident
@@ -797,10 +837,10 @@ windows:
             only_in: overview
         on_click:                    # click-to-follow, as an action — not custom
           do:
-            - { camera.chase: [ { pick.node: [ overview, {$: ui.click.x}, {$: ui.click.y} ] } ] }
-        on_drag_target:              # drag a target dot -> retarget
+            - { camera.chase: [ { pick.node: [ overview, {$int: event.x}, {$int: event.y} ] } ] }
+        on_drag:                     # drag a target dot -> retarget (event.* payload, §4.6)
           do:
-            - { set: [ sim.target, { pick.world: [ overview, {$: ui.drag.x}, {$: ui.drag.y} ] } ] }
+            - { set: [ sim.target, { pick.world: [ overview, {$int: event.x}, {$int: event.y} ] } ] }
 ```
 
 The **window↔region coupling, layering, opaque-clear inset, and non-interactive
@@ -821,13 +861,18 @@ C++ minimap.
 
 ### 9.8 Open questions (scene-specific)
 
+**Resolved:**
+- **`pick.world`/`pick.node`** → ✅ **first-class query intrinsics** (§4.4), taking a view
+  name and returning world coords / nearest-node name; this makes the minimap's
+  click-to-follow and target-drag ordinary `on_click`/`on_drag` actions (§9.6), retiring
+  the `custom` minimap. Requires generalizing the nav demo's `pip_world_at` unproject to
+  any view camera.
+
+**Still open (deferred — user considering):**
 1. **Scene model** — commit to the ownership tree (state-per-node) as the DSL surface
    now, and adopt `RenderView`/`VisibilityMask` for per-view subsets when it graduates
    from unit-tests to production? (Leaning yes.)
-2. **`pick.world`/`pick.node`** as first-class intrinsics vs `custom` queries — first-
-   class is what unlocks the declarative minimap; needs the unproject generalized out of
-   the nav demo.
-3. **Streamed-source contract** — buffer ownership, per-frame push vs pull, which thread;
+2. **Streamed-source contract** — buffer ownership, per-frame push vs pull, which thread;
    ties to the sim tick.
-4. **Transfer functions** — declare the TF as data on the `data()` typed channel (Q1) so
+3. **Transfer functions** — declare the TF as data on the `data()` typed channel (Q1) so
    a `volren` panel's TF editor binds to it like any other widget.
