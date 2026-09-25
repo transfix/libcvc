@@ -1,4 +1,4 @@
-# cvcGL UI DSL — Scoping Spec (v0.2, for iteration)
+# cvcGL UI DSL — Scoping Spec (v0.3, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -8,11 +8,11 @@ YAML description of the nested ImGui widget tree — composable, reusable-with-a
 with expressions and actions expressed in `state_exec` — that can express the
 existing demo UIs. This document is the thing we iterate on before writing a loader.
 
-> **v0.3 in progress:** decisions Q1/Q2/Q4 are folded in (§4.3, §4.6, §4.7, §7), and a
-> new **scene-graph section (§9)** is being drafted so the root VTK scene's
-> assets/nodes/views live in the *same* DSL as widgets and actions — which is what makes
-> the minimap (a widget embedding a second VTK view) fully declarable. §9 lands as a
-> follow-up commit on this PR.
+> **v0.3:** decisions Q1/Q2/Q4 are folded in (§4.3, §4.6, §4.7, §7), and a new
+> **scene-graph section (§9)** declares the root VTK scene's assets/nodes/views in the
+> *same* DSL as widgets and actions — which makes the **minimap** a first-class
+> `view_embed` widget (a second VTK view) rather than a hand-built C++ escape, and lets
+> the DSL describe all 10 demos (§6).
 
 ### Decisions locked (v0.2)
 
@@ -588,12 +588,14 @@ args:
 
 ## 6. Coverage — honest scope
 
-~7 of 10 demos are fully declarative (`bunny_shadow`, `volren_bunny`,
-`volslice_bunny`, `terrain_lab`, `lsystem_forest`, `lsystem_coast`). The 3 nav demos
-(`nav_city_swarm/drive`, `nav_finale`, `nav_fog_ghost`) each need one `custom:` node
-(the minimap's direct-manipulation canvas and app-driven HUD text). No demo is
-unreachable. The Python host covers the declarative subset (no C++ `custom_drawlist`/
-`invisible_button`); the C++ host covers everything.
+With the widget DSL alone, ~7 of 10 demos are fully declarative (`bunny_shadow`,
+`volren_bunny`, `volslice_bunny`, `terrain_lab`, `lsystem_forest`, `lsystem_coast`) and
+the 3 nav demos each need one `custom:` node for the minimap. **Adding the scene-graph
+section (§9) closes that gap:** the minimap becomes a declarative `view_embed` over a
+mirror viewport, so **all 10 demos are describable.** The only residual host hooks are
+narrow and well-fenced — streamed per-frame geometry (`source: stream`) and fully custom
+GLSL (`shaders:`). The Python host covers the declarative subset (no C++
+`custom_drawlist`/`invisible_button`); the C++ host covers everything.
 
 ---
 
@@ -643,6 +645,189 @@ unreachable. The Python host covers the declarative subset (no C++ `custom_drawl
 - **P3 — composition + escape hatches:** `units`/`include` (args, null-drop, PushID,
   recursion guard), `repeat`; `custom:` host nodes (minimap). Ship swarm/drive-from-
   one-unit.
-- **P4 — Python/CLI entry** over the C++ loader; a `cvc`/`grl-snam`-style command to
-  launch a `.ui.yaml` against a scene; `await`/async adapter if any action needs it.
+- **P4 — scene graph (§9):** the `scene:` block — nodes/sources/materials/lights/chrome
+  bound to state; the ownership-tree loader. Ship the volume/lsystem/terrain demos'
+  *scenes* from YAML, not just their panels.
+- **P5 — views + minimap (§9.5–9.7):** `views:` over `ViewportManager`
+  (`addSceneViewport`/`addMirrorViewport`), camera modes/framing, the `minimap`
+  `view_embed` widget with window↔region coupling, and the `pick.world`/`pick.node`
+  intrinsics — retiring the nav demos' `custom` minimap.
+- **P6 — Python/CLI entry** over the C++ loader; a `cvc`/`grl-snam`-style command to
+  launch a `.ui.yaml` against a scene.
+
+---
+
+## 9. Scene graph in the DSL
+
+Declaring the root VTK scene in the *same* document as the widgets — so one `.ui.yaml`
+carries the scene's assets, nodes, lights, views, and the minimap, all bound to the same
+state tree the widgets read. This is what makes the minimap a first-class widget instead
+of a hand-built C++ escape.
+
+### 9.1 Which scene model
+
+cvcGL has two, and the DSL commits to one:
+
+- **Ownership tree** — `SceneGraph` + `GraphicsNode` subclasses; the live tree
+  VolRover3/pycvc_gl render. **Every node is a `cvc::state_object`**, so a declared node
+  *is* a state subtree and every settable prop is already a reactive state key — loading
+  a node == writing its subtree; a widget/expression driving a prop == writing one key.
+  **This is the DSL's scene surface.** (`SceneGraph(app, statePrefix="cvcgl")`;
+  `addGraphics(name, geometry|volume|<empty>)`, `addLight(name)`; child path is
+  deterministically `<parent>.children.<name>`.)
+- **Traversal tree** — `nodes.h`/`traversal.h` (Separator/Transform/Material/Shape/
+  `VisibilityMask`), state carried by an Action's `TraversalState`; a `RenderView`
+  carries a 32-bit mask so one graph shows different content per window. Currently only
+  exercised in its own unit tests. We **borrow its `VisibilityMask` idea** for per-view
+  node subsets (§9.5) as the forward path; today's production subset mechanism is
+  prop-level.
+
+### 9.2 The `scene:` block
+
+Top-level, alongside `menubar`/`windows`/`overlays`/`huds`; rooted at the SceneGraph
+`prefix` (default `cvcgl`).
+
+```yaml
+scene:
+  shadows: { enabled: true, resolution: 1024, interval: 1 }   # -> <prefix>.shadows
+  chrome:  { grid: false, axis: false, bboxes: false }        # diagnostic chrome
+  lights:
+    - light: key
+      kind: spot            # directional | spot | fill
+      pos: [10, 8, 12]
+      target: [0, 0, 0]
+      cone: 32
+      intensity: 1.0
+      # or:  rig: stage     # a StageLighting preset rig (paired with stage_lighting_panel)
+  nodes:
+    - node: bunny
+      type: geometry        # geometry | volume | volren | volslice | group | light
+      source: { file: bunny.off }
+      material: { color: [0.8,0.8,0.9], ambient: 0.2, diffuse: 0.8 }
+      transform: { position: [0,0,0], rotation: [0,0,0], scale: 1 }
+      visible: sim.show_bunny            # bind visibility to state (or an expression)
+      children: [ ... ]                  # child path = <parent>.children.<name>
 ```
+
+Prop names mirror the C++: `GraphicsNode` carries name + transform/pose
+(`position`/`rotation`/`scale`/`matrix`, all state-bound) + bbox/label/clip/children;
+each subclass adds its own props (§9.3). `visible:` — and any prop — may be a bare state
+path or a `state_exec` expression, same binding rules as widgets (§3.5, §4).
+
+### 9.3 Node kinds
+
+| `type:` | C++ | Key props |
+|---|---|---|
+| `geometry` | GeometryNode | `source` (geometry); `texture` (image via UVs); `render_mode` {points,lines,tris,quads,tets,hexs}; `material` {color,opacity,ambient,diffuse,specular,specular_power,point_size,line_width}; `tubes`/`spheres`; `depth_offset`; `shaders:` (→ `custom`) |
+| `volume` | VolumeNode | `source` (volume); `transfer_function` {color:[s,r,g,b,…], opacity:[s,a,…]}; shading/ambient/diffuse/sample_distance |
+| `volren` | VolRenNode | one-or-many volumes via the cvc::volren raycaster + `render_settings` (CUDA/software) |
+| `volslice` | VolSliceNode | one volume as view-aligned composited slices |
+| `group` | empty GraphicsNode | a transform/clip parent for `children` |
+| `light` | LightNode | parentable, state-bound spot/directional/fill (or use `scene.lights`) |
+| — | GridNode / AxisNode | auto chrome, toggled via `scene.chrome` |
+
+### 9.4 Sources
+
+The closed set of `source:` kinds a node draws from:
+
+| `source:` | Backed by | Params |
+|---|---|---|
+| `{file: path}` | `cvc::read_geometry` / `cvc::volume(app, path)` | path; format inferred |
+| `{procedural: {gen, …}}` | lsys recipe / `world_model::generate` / navdemo helpers | `lsystem`, `terrain` (occupancy/heightmap), `ground`, `disc`, `pyramid`, `sdf`/`field` volume + their params |
+| `{transfer_function: …}` | control-point table over a volume | color + opacity control points |
+| `{texture: {image: path}}` | `setTexture(cvc::image)` | image path, sampled through the node's UVs |
+| `{stream: {handler, …}}` | `updateVertices` per frame (AgentGlyphs) | **imperative** — a fixed-topology shape whose vertex buffer a host handler fills each frame |
+| `{inline: …}` | in-memory `cvc::geometry`/`volume` | rare in YAML; prefer procedural |
+
+Streamed/dynamic geometry (thousands of agents) stays a declared *shape* + a
+host-registered data handler — the one scene piece that isn't purely declarative.
+
+### 9.5 Views and cameras
+
+One render window hosts **N layered viewports**, each its own camera — this is
+`ViewportManager` (`SceneRenderer` is its single-viewport facade and exposes
+`viewportManager()`; one GL context, mandatory under wasm). The **root view is
+implicit**; extra views are declared:
+
+```yaml
+views:
+  - view: main                                   # implicit root; declared only to set its camera
+    camera: { mode: orbit, frame: bounds }       # orbit | fly | track | map
+  - view: overview
+    kind: mirror                                 # scene (own render) | mirror (echo another view)
+    source: main
+    region: [0.72, 0.0, 1.0, 0.28]               # normalized, VTK y-up; movable every frame
+    layer: 1
+    background: { color: [0.02,0.03,0.05], opaque: true }   # opaque => clears => solid inset
+    input: false                                 # non-interactive inset; clicks fall through
+    camera: { mode: map, frame: { top_down: bounds } }      # frameMap(cx,cy,halfH,halfW)
+    show: [ agents, walls, targets ]             # per-view node subset
+```
+
+Modes map to `CameraController`: `orbit`/`fly` (3-D), `track` (cinematic follow of a
+named node — `setTrackTarget`), `map` (true top-down parallel projection, drag pans /
+wheel zooms — `frameMap`; the minimap's camera). Framing: `bounds` (`frameBounds`),
+`top_down: bounds` (`frameMap` fit-rect), or explicit `eye`/`focal`/`up`. Each view's
+camera is state-rooted at `<prefix>.viewers.<name>.camera`, so a widget or action drives
+it. `show:` selects a node subset — forward path is the traversal `VisibilityMask`;
+production path today is prop-level (`mirror` echoes the source's 3-D props, view-only
+nodes attach to just that view).
+
+### 9.6 The `minimap` widget = a view embedded in a window
+
+`ViewportManager::addMirrorViewport(name, source, region, layer, liveSync)` **is** the
+generalized minimap. The widget binds a view to an ImGui window whose **content rect
+drives the view's `region` every frame**:
+
+```yaml
+windows:
+  - window: Minimap
+    id: minimap
+    placement: { corner: bottom_right }
+    transparent: true                # WindowBg alpha 0; the view shows through
+    children:
+      - view_embed: overview         # references the view from §9.5
+        # loader computes region = window content rect (normalized, y-up), calls
+        # view.setRegion(...) before render (one-frame lag invisible), layers above main,
+        # opaque background => solid inset.
+        markers:                     # PiP-only overlay nodes, attached to THIS view only
+          - node: rally_dots
+            type: geometry
+            source: { stream: { handler: rally_glyphs } }
+            only_in: overview
+        on_click:                    # click-to-follow, as an action — not custom
+          do:
+            - { camera.chase: [ { pick.node: [ overview, {$: ui.click.x}, {$: ui.click.y} ] } ] }
+        on_drag_target:              # drag a target dot -> retarget
+          do:
+            - { set: [ sim.target, { pick.world: [ overview, {$: ui.drag.x}, {$: ui.drag.y} ] } ] }
+```
+
+The **window↔region coupling, layering, opaque-clear inset, and non-interactive
+fall-through** are exactly the mechanics the hand-rolled nav minimap implements — now
+declared. The two genuinely imperative pieces become host query intrinsics:
+`pick.world(view, px, py)` (unproject through the view's ortho camera → world x,y — the
+`pip_world_at` inverse) and `pick.node(view, px, py)` (nearest-node hit-test). With
+those, click-to-follow and target-drag are ordinary `on:` actions that write state.
+
+### 9.7 What this retires
+
+The nav demos' `custom: minimap` node **collapses to a declarative `minimap` widget + a
+mirror view + two `pick.*` intrinsics**. The only remaining non-declarative scene pieces
+are (a) streamed per-frame geometry (`source: stream`) and (b) fully custom GLSL
+(`shaders:` → `custom`) — both narrow, well-fenced host hooks, not whole hand-built UIs.
+**With §9, all 10 demos are describable**, and the nav trio no longer needs a bespoke
+C++ minimap.
+
+### 9.8 Open questions (scene-specific)
+
+1. **Scene model** — commit to the ownership tree (state-per-node) as the DSL surface
+   now, and adopt `RenderView`/`VisibilityMask` for per-view subsets when it graduates
+   from unit-tests to production? (Leaning yes.)
+2. **`pick.world`/`pick.node`** as first-class intrinsics vs `custom` queries — first-
+   class is what unlocks the declarative minimap; needs the unproject generalized out of
+   the nav demo.
+3. **Streamed-source contract** — buffer ownership, per-frame push vs pull, which thread;
+   ties to the sim tick.
+4. **Transfer functions** — declare the TF as data on the `data()` typed channel (Q1) so
+   a `volren` panel's TF editor binds to it like any other widget.
