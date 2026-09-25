@@ -58,7 +58,12 @@ those as Ariadne / the `ari` loader.)*
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
 >
 > **v0.11** names the DSL **Ariadne** (see "The name" above): `.ari` documents, the `ari` loader/CLI,
-> and the `cvc::ariadne` C++ namespace, threaded through the doc.
+> and the `cvc::ariadne` C++ namespace, threaded through the doc. It also **settles the ffmpeg license
+> boundary** (§9.9.12a/b): native = an **LGPL decode-only** ffmpeg build that links with *no boundary*
+> (the wasm build already is one) — `dlopen` of a GPL build is *not* a firewall (out-of-process is the
+> clean fallback); wasm = ffmpeg.wasm in a Worker (Model 2) or `SIDE_MODULE` `emscripten_dlopen` (Model 1),
+> with **WebCodecs** as a zero-ffmpeg GPU path. *(This supersedes the v0.10 "behind a GPL `dlopen`
+> boundary" note below.)*
 >
 > **v0.10** adds a **built-in C++ `http(s)` client** (§13.6 — `cvc::net` over the already-packaged
 > libcurl+OpenSSL, LGPL-clean, wasm→`emscripten_fetch`; web loading needs no Python, which becomes an
@@ -1161,8 +1166,9 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
 - **P4 — scene graph (§9):** the `scene:` block — nodes/sources/materials/lights/chrome bound to state;
   the ownership-tree loader; the **streamed-source contract** (§9.9: build-once + atomic-`shared_ptr`
   latest-snapshot + `updateVertices`-on-render-thread, `{stream:}` and `state://…?data` live, the **opt-in
-  pinned zero-copy vertex/color path** §9.9.3a, the **texture channel** + **ffmpeg video** (behind the GPL
-  `dlopen` boundary) + **render-to-texture** §9.9.11-13 [frameRGB now, GPU FBO-share follow-up],
+  pinned zero-copy vertex/color path** §9.9.3a, the **texture channel** + **ffmpeg video** (an **LGPL
+  decode-only** ffmpeg build → no license boundary, §9.9.12a; wasm = Worker/WebCodecs §9.9.12b) +
+  **render-to-texture** §9.9.11-13 [frameRGB now, GPU FBO-share follow-up],
   degenerate-collapse LOD, wasm inline fallback). Ship the volume/lsystem/terrain *scenes* — and the nav
   *agent stream* — from YAML.
 - **P5 — views + RenderView bridge (§9.5):** `views:` over `ViewportManager`, camera
@@ -1712,10 +1718,64 @@ a YUV→RGB fragment shader (not present today).
     pacing: { hz: 30, cap: 2 }
 ```
 
-> **License boundary (load-bearing):** the in-tree `ffmpeg` is **GPL-2.0-or-later** (`--enable-gpl`).
-> Static-linking it into LGPL libcvc makes the combined work GPL. The decoder must sit behind a
-> `dlopen`/optional boundary (or an LGPL ffmpeg variant) — natural here, since it's a handler: no ffmpeg
-> symbol is referenced unless the handler is installed.
+**9.9.12a The ffmpeg license boundary — native.** The GPL is **not intrinsic to decode.** The native
+cvcpkg `ffmpeg` is GPL for **one** reason: `--enable-gpl --enable-libx264 --enable-libx265`, and x264/x265
+are GPL *encoders*. Everything else it links is LGPL/BSD, and FFmpeg's **own H.264/HEVC/MPEG decoders are
+LGPL** (VP8/VP9 via BSD libvpx, AV1 via BSD dav1d) — a decode handler loses **nothing** by dropping them.
+
+- **Primary — LGPL decode-only, no boundary at all.** Build ffmpeg without `--enable-gpl`/`libx264`/
+  `libx265` (and, for strict LGPL-2.1, without `--enable-version3` + `--enable-openssl`) — via a
+  `CVC_FFMPEG_GPL=OFF` knob or an `ffmpeg-lgpl` recipe. The result is LGPL-2.1 `libav*` that links
+  **directly into LGPL libcvc with no license boundary**. *This is exactly what the wasm/wasi builds
+  already do* (`--disable-everything` + explicit LGPL decoders) — make native match wasm. For a *decode*
+  handler you never need more than this.
+- **Fallback — GPL only for GPL-only capability (H.264/HEVC encode), and prefer out-of-process.** The
+  FSF-clean pattern is a **separate process** — shell out to the GPL `ffmpeg` executable over pipes (what
+  `ffmpeg-cli` + `grl_snam_dbg` already do). **`dlopen` of a GPL build is *not* a license firewall:**
+  calling the `libav*` C ABI and passing `AVFrame`/`AVCodecContext` in one address space is exactly the
+  "intimate, shared-internal-structures" case the FSF treats as a combined work. (The dynamic-linking =
+  derivative theory is contested and unsettled in US courts — LGPL exists because of that uncertainty — so
+  in-process dlopen of a GPL build is a **counsel judgment, not a safe harbor**.) The handler being
+  registered *does* keep base libcvc clean (no ffmpeg symbol unless the backend TU is compiled/registered,
+  like the ImageMagick handler), but that's about *optionality*, not about escaping GPL once you link.
+
+> **Recipe defect to fix:** `ffmpeg/build.sh`'s banner comment claims it builds an "LGPL set" with "x264,
+> x265 … excluded," while its `CONFIGURE_ARGS` pass `--enable-gpl --enable-libx264 --enable-libx265`.
+> `recipe.yaml`'s `license: GPL-2.0-or-later` is correct; the build.sh comment is stale and misleads a
+> license audit — correct it.
+
+**9.9.12b The ffmpeg license boundary — wasm (answering "load it separately and call it": *yes*).** The
+wasm build is *already LGPL decode-only*, so decode "just works" with no boundary. If a GPL wasm ffmpeg is
+ever needed, ffmpeg does **not** have to be statically linked — two arms-length models (cvc emsdk is
+Emscripten 5.0.7, both supported):
+
+- **Model 1 — Emscripten dynamic linking (the literal analog of native `dlopen`).** ffmpeg as
+  `-sSIDE_MODULE`, the app as `-sMAIN_MODULE=2`, then `emscripten_dlopen("ffmpeg.wasm")` + `dlsym` at
+  runtime; the side module shares the main heap so it can decode **straight into the pinned RGBA buffer,
+  zero-copy** — one code path with native. **But** the caveats are sharp *here specifically*: the wasm
+  dynamic-linking ABI isn't stable across toolchain versions (so both modules need the **same emsdk** —
+  *tighter* coupling than native dlopen, no independently-shipped ffmpeg.wasm); must use **async**
+  `emscripten_dlopen` (Chromium blocks >8 MB sync compile on the main thread); the Asyncify+dlopen bug
+  class (emscripten #13049) **collides with the cvcGL demos' existing `-sASYNCIFY` render loop**; and a
+  SIDE_MODULE shares one memory + symbol table, so it is **no stronger a license boundary** than native
+  dlopen.
+- **Model 2 — ffmpeg.wasm in a Web Worker (recommended default).** The `ffmpegwasm/ffmpeg.wasm` core is a
+  **completely separate wasm module** in a Worker, driven by a JS message API over a MEMFS virtual FS
+  (`writeFile`/`exec([…])`/`readFile`; decode with `-pix_fmt rgba -f rawvideo`). The MT core uses
+  `SharedArrayBuffer` and needs **COOP/COEP cross-origin isolation — the exact gate the threaded nav sim
+  already requires** (`examples/wasm/serve.py`, `CVC_WASM_PTHREADS`), so no new hosting cost, and a
+  SharedArrayBuffer frame channel hands RGBA to the pinned texture near-zero-copy. With no shared symbol
+  table or linker relationship, this is **textbook mere aggregation — a cleaner GPL boundary than either
+  native dlopen or Model 1**, the browser stand-in for "separate process over a pipe." Cost: argv/file-
+  driven and batch-oriented (good for clips/demux, weaker for a tight realtime loop); the MT core is
+  upstream-"unstable," so gate it behind the same isolation switch as the sim.
+
+Design the handler behind a **single RGBA-frame interface** so the backend is pluggable — which also lets
+**WebCodecs `VideoDecoder`** (GPU-accelerated, native `VideoFrame`→RGBA, **zero ffmpeg, zero GPL**) serve
+the common-codec realtime path on wasm, with ffmpeg.wasm reserved for demux/containers/odd codecs.
+**Recommendation:** native = LGPL decode-only (no boundary); wasm = the LGPL decode build for common
+codecs (or WebCodecs), Model 2 Worker for GPL/exotic codecs, Model 1 SIDE_MODULE only if a single
+native/wasm code path is worth its ABI-lock + Asyncify collision.
 
 **9.9.13 A render-to-texture source — the "TV connected to a scene camera".** A second camera/view
 rendered into a texture another node samples:
