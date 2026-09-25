@@ -1,12 +1,48 @@
-# cvcGL UI DSL — Scoping Spec (v0.10, for iteration)
+# Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.11, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
 `RenderView`, `Settings`, `StageLighting`), all 14 cvcGL examples, and the
-`cvc::state_exec` subsystem — all on `origin/master` (`4fb4e1198`). The goal is a
-YAML description of the nested ImGui widget tree — composable, reusable-with-args,
-with expressions and actions expressed in `state_exec` — that can express the
-existing demo UIs. This document is the thing we iterate on before writing a loader.
+`cvc::state_exec` subsystem — all on `origin/master` (`4fb4e1198`). **Ariadne** is a
+YAML description of the nested ImGui widget tree *and* the VTK scene it overlays —
+composable, reusable-with-args, with expressions and actions expressed in `state_exec`
+— that can express the existing demo UIs. This document is the thing we iterate on
+before writing a loader.
+
+## The name — Ariadne
+
+In the myth, **Daedalus** built the Labyrinth — a structure so intricate its own maker
+could barely escape it. **Ariadne** gave Theseus a ball of thread (the *clew*, or *mitos*):
+one continuous line, fixed at the door, that let him enter the maze, reach its centre, and
+**retrace his path back out**. The thread didn't simplify the Labyrinth; it made it
+*navigable*.
+
+cvcGL, VTK, the scene graph, `state_exec`, ImGui — these are the Labyrinth: powerful,
+intricate machinery. **Ariadne is the thread.** One continuous declarative document,
+anchored at the root, that threads through the widget tree, the scene graph, and the state
+tree, and — because every binding is two-way — always lets you *retrace* to the state that
+produced any view. The metaphor runs deep, and each layer earns it:
+
+- **The thread is a single line through a nested space** — exactly one document describing
+  the whole app's tree of trees.
+- **Following and retracing** — the two-way `state_exec` bindings: the state tree is the map,
+  and any UI state can be traced back to the value that produced it.
+- **The thread as `mitos`** — a literal *thread* of execution: each `on:` handler is a
+  resident `state_exec` process, a thread you spin off and follow (§7.1).
+- **Ariadne's crown** — after the Labyrinth she was given a crown set among the stars as
+  *Corona Borealis*, a real constellation: the overlay that crowns the rendered scene, and a
+  quiet nod to the scientific-instrument lineage of the name.
+
+**Conventions this establishes:**
+
+- **File extension `.ari`** — an Ariadne document (YAML syntax). Shortened to **"Ari"** in
+  conversation. `ari run city.ari`.
+- **C++ namespace `cvc::ariadne`** — the DSL loader + widget/scene runtime, sitting on
+  `cvc::gl` (scene), `cvc::state_exec` (the executor + URI resolver), and `cvc::net` (HTTP).
+- The loader/CLI is **`ari`**.
+
+*(Naming is settled; the sections below still say "the DSL"/"the loader" in places — read
+those as Ariadne / the `ari` loader.)*
 
 > **v0.4:** the scene graph (§9) now makes **`RenderView` + `VisibilityMask` first-class
 > from the start** — each view renders a *masked and restyled subset* of one authored scene
@@ -20,6 +56,9 @@ existing demo UIs. This document is the thing we iterate on before writing a loa
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.11** names the DSL **Ariadne** (see "The name" above): `.ari` documents, the `ari` loader/CLI,
+> and the `cvc::ariadne` C++ namespace, threaded through the doc.
 >
 > **v0.10** adds a **built-in C++ `http(s)` client** (§13.6 — `cvc::net` over the already-packaged
 > libcurl+OpenSSL, LGPL-clean, wasm→`emscripten_fetch`; web loading needs no Python, which becomes an
@@ -771,7 +810,7 @@ The two demos are byte-identical except **8 parameters**. Each becomes ~10 lines
 `args:` over one shared `nav_scene` unit:
 
 ```yaml
-# nav_city_drive.ui.yaml
+# nav_city_drive.ari
 ui: 0.2
 viewer: main
 include: nav_scene
@@ -1137,15 +1176,15 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
   table), on-the-fly 1D LUT regen, wire `VolumeNode.handleStateChanged` to re-read its TF;
   reserve the nD `axes`/`primitives` shape. The `tf_editor` widget follows the ColorTable2
   port.
-- **P7 — Python/CLI entry** over the C++ loader; a `cvc`/`grl-snam`-style command to
-  launch a `.ui.yaml` against a scene. Stage **A** (volumes onto `Shape` subclasses) lands
+- **P7 — the `ari` loader/CLI + Python entry** over the `cvc::ariadne` C++ loader; an `ari run
+  city.ari` command launching a `.ari` document against a scene. Stage **A** (volumes onto `Shape` subclasses) lands
   as the traversal path matures.
 
 ---
 
 ## 9. Scene graph in the DSL
 
-Declaring the root VTK scene in the *same* document as the widgets — so one `.ui.yaml`
+Declaring the root VTK scene in the *same* document as the widgets — so one `.ari` document
 carries the scene's assets, nodes, lights, views, and the minimap, all bound to the same
 state tree the widgets read. This is what makes the minimap a first-class widget instead
 of a hand-built C++ escape.
@@ -1953,7 +1992,7 @@ channel (geometry/visible/collapsed persist; a widget's `data()`-channel typed m
 ## 12. Loading sub-UIs and sub-scene-graphs (modularization)
 
 `include`/`repeat` (§3.7) template widgets **in-document**. `load:` is the **cross-file module**
-primitive: it mounts an **external** fragment (a `.ui.yaml` sub-UI or a `.scene.yaml` sub-scene) **as
+primitive: it mounts an **external** `.ari` fragment (a sub-UI or a sub-scene) **as
 its own namespaced subtree with its own chroot**. As of v0.8 its argument is a **URI** resolved through
 the shared `uri_resolver` (§13), so a fragment can come from a file, a web URL, or a state node — the
 same resolver that backs `include:` and node `source:`.
@@ -1966,7 +2005,7 @@ root:
     type: group
     layout: { kind: vertical }
     children:
-      - load: file://panels/rf_telemetry.ui.yaml   # or state://…  or https://…  (bare = file:, §13)
+      - load: file://panels/rf_telemetry.ari   # or state://…  or https://…  (bare = file:, §13)
         as: rf                                # mount id under this parent
         args: { unit: alpha, max_range: 4000 }   # substituted before parse, like include args
         prefix: null                          # optional scene prefix for the fragment's scene-binds
@@ -1992,7 +2031,7 @@ namespaces the whole sub-scene for free:
 ```yaml
 scene:
   nodes:
-    - load: scenes/city_block.scene.yaml      # a scene fragment
+    - load: scenes/city_block.ari      # a scene fragment
       as: block_a
       prefix: cvcgl.block_a                    # SceneGraph(app, "cvcgl.block_a") — its whole subtree
       transform: { position: [500, 0, 0] }     # host-applied mount transform
@@ -2011,7 +2050,7 @@ All three route through `uri_resolver` (§13) but differ in **isolation**, not i
 |---|---|---|---|
 | `include:` (§3.7) | no — an in-doc `units:` template | nothing external | **shares** the enclosing chroot; in-document template |
 | `load:` (sub-UI) | **yes** | file/http/state fragment | **own** `ui.docs.<doc>.includes.<as>` chroot + `ev.*` + PushID |
-| `load:` (sub-scene) | **yes** | a `.scene.yaml` fragment | **own** `<prefix>.*` `SceneGraph` subtree |
+| `load:` (sub-scene) | **yes** | a `.ari` scene fragment | **own** `<prefix>.*` `SceneGraph` subtree |
 | node `source:` (§9.4) | **yes** | file/http/state/stream payload | **none** — the payload is *data* decoded into the owning node; no handlers |
 
 `include` is a **template** (no fetch, shared scope); `load` is a **module mount** (fetch + isolation);
@@ -2055,7 +2094,7 @@ client" constraint is lifted.)*
 
 ```
 <scheme>://<path>[?<query>]
-bare/relative/path.ui.yaml      # no scheme → file:, resolved against the enclosing fragment's mount_base
+bare/relative/path.ari      # no scheme → file:, resolved against the enclosing fragment's mount_base
 ```
 
 | Scheme | Resolves to | Backed by |
@@ -2073,7 +2112,7 @@ A URI is claimed by scheme/pattern — registration-order priority + a `can_open
 a `value_t` tree), plus a `media_hint`.
 
 ```cpp
-namespace cvc::state_exec {
+namespace cvc::ariadne {   // the DSL's own namespace; resolve_context bridges to cvc::state_exec
   struct resource { enum class kind { bytes, local_path, value } k; /* bytes | path | value_t */ std::string media_hint; };
   struct resolve_context { cvc::app* app; cvc::state* root; std::string mount_base; int depth;
                            const std::set<std::string>* in_flight; };   // built from the intrinsics_context
@@ -2088,7 +2127,7 @@ namespace cvc::state_exec {
 
 `resolve_context` is populated from the `intrinsics_context` the evaluator already carries (`root`,
 `uid`, `root_path`, …) — no new plumbing — and `mount_base` threads the enclosing fragment's URI so a
-relative `source:`/`load:` inside it joins RFC-3986-style (`pkg://austin/scene.ui.yaml` + `blocks.off` →
+relative `source:`/`load:` inside it joins RFC-3986-style (`pkg://austin/scene.ari` + `blocks.off` →
 `pkg://austin/blocks.off`).
 
 ### 13.3 `state://` — a node's value, data, or subtree
