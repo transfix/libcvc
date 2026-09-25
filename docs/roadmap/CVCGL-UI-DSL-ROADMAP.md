@@ -1,4 +1,4 @@
-# cvcGL UI DSL — Scoping Spec (v0.6, for iteration)
+# cvcGL UI DSL — Scoping Spec (v0.7, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -20,6 +20,14 @@ existing demo UIs. This document is the thing we iterate on before writing a loa
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.7** unifies the widget model (§3.0 — *everything is a widget, a window is a widget with
+> `frame:` chrome*, Qt `layout:`/`size:` semantics for a clean cvcQt port), pins down **where a
+> loaded UI's data lives** in the state tree (§11, `ui.docs.<doc>.*`), **how handlers are scoped**
+> (§7.8 — chroot is enforced by the `intrinsics_context`, `.`-separators, link-node cross-reach,
+> no local uid ACL), and adds **`load:` sub-UI/sub-scene modularization** (§12). It also **fixes a
+> path bug** (scene nodes are `<prefix>.graphics.root.children.<name>`, not `cvcgl.nodes.<name>`)
+> and corrects the §4.8 `/`-escape to a loader construct.
 >
 > **v0.6** closes §7: `on:tick`/`on:key` = **resident awaiting processes** (§7.1), a **typed
 > intent queue** (§7.2), stdlib-by-default with **reduced-env + per-handler `limits:`** sandboxing
@@ -116,12 +124,13 @@ Two more constraints on the widget set:
 Plus three **modifiers that are attributes, not children**: `tooltip`, `same_line`,
 `disabled_when`.
 
-**Window archetypes (7).** `main_menu_bar`; `control_panel` (title bar + collapse
-=minimize + drag + resize, seeded top-left); `library_own_window_panel` (a
-composite's own window + close-box); `dense_collapsing_panel` (sectioned,
-height-capped); `corner_overlay` (no-decoration, pinned by pivot); `minimap_pip`
-(transparent ImGui window hosting a 2nd VTK renderer); `vtk_text_hud`
-(FpsHud/ScreenTextHud — VTK actors, not ImGui).
+**Window archetypes (7)** — as of v0.7 these are **not** a privileged vocabulary; they are all
+just **widget `type:` values + `frame:` variants** under the one widget model (§3.0):
+`main_menu_bar` (`type: menubar`); `control_panel` (a `group` + title/collapse/drag/resize
+chrome, seeded top-left); `library_own_window_panel` (a composite + close-box);
+`dense_collapsing_panel` (sectioned, height-capped); `corner_overlay` (`type: overlay`,
+`frame.placement: always`, no background); `minimap_pip` (`type: view_embed`, §9.6);
+`vtk_text_hud` (`type: hud` — VTK actors, not ImGui).
 
 **Action kinds (9).** `toggle_bool`, `set_param`, `raise_window`, `switch_scene`,
 `sim_control`, `camera_preset`, `reset_regenerate`, `custom_interaction`,
@@ -137,6 +146,111 @@ parameterized YAML units.
 ---
 
 ## 3. The schema — structure
+
+### 3.0 One widget model: everything is a widget; a window is a widget with chrome
+
+**The Qt move (v0.7):** *everything is a widget, widgets embed widgets.* The earlier drafts
+had four sibling buckets (`menubar`/`windows`/`overlays`/`huds`) and a separate "window
+archetypes" vocabulary (§2). We collapse that to **one node type**. A "window" is not a kind
+— it is any widget that carries `frame:` chrome and sits at a document root. This makes the
+cvcQt ports (`ColorTable2`→`cvcQt::ColorTable`, the `.ui`-composed dialogs) drop in 1:1,
+because a Qt `QWidget` tree *is* this tree.
+
+**The base widget node** (one shape for windows and embedded children):
+
+```yaml
+- widget: transfer_editor        # `window:` is sugar: widget + a default frame: block
+  type: group                    # container kind OR a leaf type (slider_int, combo, …)
+  title: "Transfer Function"     # groupbox/window caption
+  frame:                         # PRESENCE of this block ⇒ this widget is a floating window
+    chrome: [title, move, resize, collapse, dock, close]   # omitted decorations → ImGui No* flags
+    placement: first_use_ever    # first_use_ever | always | system  (§3.3)
+    pos: [10, 30]
+  layout:                        # how THIS widget arranges its children (§3.0.2)
+    kind: vertical               # vertical | horizontal | grid | form | stack | free
+    spacing: 6                   # Qt layout spacing (px)
+    margins: [11, 11, 11, 11]    # Qt contentsMargins L,T,R,B
+  size:                          # this widget's sizing within its PARENT's layout (§3.0.3)
+    hint: [300, 0]               # QWidget::sizeHint; 0 = auto that axis
+    min:  [200, 0]
+    max:  [0, 0]                 # 0 = unbounded (QWIDGETSIZE_MAX)
+    policy: [expanding, fixed]   # [horizontal, vertical] — Qt names 1:1
+    stretch: 1                   # this item's stretch factor in the parent box/grid cell
+  bind: ui.controls.open         # optional two-way state (open/checked/value per type)
+  on: ...                        # actions (§4); on_click/on_drag/… (§4.6)
+  visible_when: ...              # still an attribute, not a child (§3.5)
+  children: [ ... ]              # ordered; each child is another widget node (recursion)
+```
+
+`window: X` is pure sugar for `widget: X` + a default `frame:`. There is exactly one schema;
+the loader never branches on "is this a window."
+
+**`type:` absorbs the old archetypes and buckets** — nothing is privileged:
+
+| Old thing | Now |
+|---|---|
+| `main_menu_bar`, a `menu` | `type: menubar` / `type: menu` (containers laid out horizontally / as a popup) |
+| `control_panel` / own-window panel / dense panel | `type: group` (or `panel`) + `frame:` chrome variants |
+| `corner_overlay` | `type: overlay` (a widget with `frame.placement: always` + no background) |
+| `minimap_pip` / `view_embed` (§9.6) | `type: view_embed` |
+| `vtk_text_hud` (Fps/ScreenText) | `type: hud` (VTK actors, not ImGui — §3.0.4 caveat) |
+| `tf_editor` (§10), `panel: scene`, `panel: stage_lighting` | `type: tf_editor` / `scene_panel` / … (composites) |
+| the 21 leaf widgets | unchanged `type:` values (`slider_int`, `combo`, `button`, …) |
+
+`include`/`repeat`/`custom` (§3.7–3.8) are **unchanged and purely additive**: an `include`
+expands to a subtree of these nodes; `repeat` emits N sibling widgets per frame; a `custom`
+node is a widget whose paint/`measure:` body is a host/`state_exec` closure (this is how a
+hand-coded Qt widget like `ColorTable` — a `QFrame` overriding `sizeHint()` — ports).
+
+#### 3.0.2 `layout:` — Qt layout classes, Qt semantics
+
+A container owns exactly one layout that arranges its ordered `children:`. Kinds map 1:1 to
+the classes the volrover `.ui` corpus actually uses (QGridLayout 248, QHBoxLayout 86,
+QFormLayout 54, QVBoxLayout 38, QTabWidget 34):
+
+| `layout.kind` | Qt class | ImGui realization |
+|---|---|---|
+| `vertical` | QVBoxLayout | default cursor flow, one child/line, inside `BeginChild` (clip/scroll/margins) |
+| `horizontal` | QHBoxLayout | `SameLine()` between children, **or** a 1-row `BeginTable` when any child is `expanding` |
+| `grid` | QGridLayout | `BeginTable(cols)`; children carry `at: [row,col]` + `span: [r,c]`; `col_stretch:` → column `WidthStretch` weights |
+| `form` | QFormLayout | 2-col `BeginTable`; children are `{label:, field:}`; col0 `WidthFixed`, col1 `WidthStretch` |
+| `stack` | QStackedLayout/Widget | build **only** the active child (`active:` bind); `type: tabs` → `BeginTabBar` |
+| `free` | absolute | `SetCursorPos(child.pos)` per child; sizes from each child's `size.hint` |
+
+A pure spacer is `- spacer: { orient: horizontal|vertical, policy: expanding }` (Qt's
+`QSpacerItem` — the corpus's dominant "push the button row to the edge" idiom; `expanding` →
+a `WidthStretch` column or a `GetContentRegionAvail`+`SetCursorPos` spring, `fixed` →
+`Dummy`). `spacing:` → `PushStyleVar(ItemSpacing)`; `margins:` → `BeginChild` +
+`PushStyleVar(WindowPadding)`.
+
+#### 3.0.3 `size:` — Qt size policy, per axis
+
+`size.policy: [<h>, <v>]` uses Qt names verbatim so a `.ui` `<sizepolicy>` copies straight
+across: `fixed` (only `hint`), `preferred` (default; may shrink/grow), `expanding` (grabs
+slack → `SetNextItemWidth(-FLT_MIN)` / a stretch column), `minimum` (hint is a floor),
+`maximum` (hint is a ceiling), `minexpanding`, `ignored`. Sugar: `auto`==`preferred`,
+`fill`==`expanding`. `hint`/`min`/`max` are Qt's `sizeHint`/`minimumSize`/`maximumSize`; a
+`custom` widget supplies its own via a `measure:` handler `(lambda () (list w h))` — the
+`ColorTable2` case.
+
+**Two-pass sizing** (ImGui is single-pass immediate, so a plain linear cursor can't
+distribute `expanding` slack among not-yet-drawn siblings): **(A, default) table-backed** —
+express every multi-child layout as `BeginTable`, letting ImGui's table engine do its own
+two-pass column measure (Qt-like stretch/fixed distribution for free, at the cost of exact
+first-frame pixels); **(B) explicit two-pass** — a measure pass computes each node's
+`sizeHint` bottom-up, then an arrange pass assigns rects — only for a `custom` widget that
+must reproduce a Qt `sizeHint()` exactly.
+
+#### 3.0.4 Root children unify — placement, not buckets
+
+The four root lists collapse to one ordered `root:` of widgets; what used to pick a bucket is
+now the widget's `type:` (`menubar`/`overlay`/`hud`) and `frame.placement:`. Two honest
+caveats carry over: **HUD widgets are VTK actors** (`type: hud` → the `<prefix>.viewers.<v>.hud`
+subtree and the VTK HUD API, *not* the ImGui walk); and `include`/`repeat`/`custom` are
+unchanged. The VTK canvas stays the implicit root host (§1) — these draw *on top of* the scene.
+
+The subsections below (3.1 document/root, 3.2 menus, 3.3 windows, 3.5 widgets, 3.6 composites)
+are the **specifics of particular widget types** under this one model.
 
 ### 3.1 Document / root
 
@@ -552,19 +666,24 @@ other `on:tick`/`on:key` cadence questions.
 ### 4.8 Sandboxing — per-panel chroot (Q4)
 
 Each panel / included unit runs its programs under an **`apply_chroot` to its own state
-prefix**: a unit's expressions and actions see `some.tunable` resolved *relative to that
+subtree**: a unit's expressions and actions see `some.tunable` resolved *relative to that
 panel's subtree*, so a reusable unit can't accidentally read or clobber a sibling's
-state, and two includes of the same unit are naturally isolated. **Chroots nest** — an
-included unit inside a panel chroots again under the parent's prefix, matching the
-include tree.
+state, and two includes of the same unit are naturally isolated. **Chroots nest** — the
+loader chroots an included/loaded unit's handlers to a deeper path (§7.8.7). The full
+mechanics — that chroot is enforced by the per-program `intrinsics_context`, not the
+scheduler — are in **§7.8**.
 
-Because a chroot hides everything outside the panel's subtree, cross-panel actions get
-an **explicit escape hatch**: a leading `/` (or a `{root: …}` form) addresses an
-absolute state path, and the enumerated window/scene intrinsics (`window.raise "id"`,
-`scene.set`, …) operate on document-global targets by design. So the default is
-sandboxed and local; reaching another panel is possible but must be written explicitly,
-never by accident. (Chroot granularity — one root per document vs strict per-panel — is
-now settled as **per-panel, nestable, with the absolute-path escape**.)
+Because a chroot hides everything outside the panel's subtree, cross-panel reach is
+**explicit**, two ways: (1) the enumerated `window.*`/`scene.*` intrinsics operate on
+document-global targets by design; (2) a **leading `/`** on a bind (`/cvcgl…`) reaches
+app-root-absolute state. **Correction (grounded):** `/` is **not** a state-path feature —
+`state_exec`'s separator is `.` and the intrinsic layer strips leading separators, so a
+`/`-path handed to `state-get` still resolves *inside* the chroot (`CannotAccessOutsideChroot`).
+The loader therefore realizes a `/`-bind through a **second, un-chrooted resolver** (a `ctx`
+at the app root) or a **transparent link node** (`state::linkTo`, the sanctioned cross-subtree
+mechanism) — never by passing the string through the chrooted intrinsics (§7.8.2–7.8.3). So
+the default is sandboxed and local; reaching outside is possible but must be written
+explicitly, never by accident. (Chroot granularity is settled as **per-panel, nestable**.)
 
 ---
 
@@ -826,15 +945,74 @@ for a resident that overruns its activation; whether `max_memory` wiring is in t
 ships documented-but-inert; and channel-name uniqueness for `ui.ev.<node>.<kind>` across nested
 chroots.
 
+### 7.8 How a handler is scoped — chroot root, tree access, uid/gid, where it lives
+
+Grounded in the real `state_exec` code, with one **correction** to the §4.8 model.
+
+**7.8.1 The scoping seam is the `intrinsics_context`, not the scheduler.** `scheduler::execute()`
+copies `execute_options.root_path` into `proc.root_path`, but that is a **passive record** (fork
+inheritance + migration only); the scheduler **never calls `apply_chroot`**, and its single shared
+`evaluator_` has no per-process root. **All chroot lives in a per-program `intrinsics_context`.**
+Per handler the loader must: build a fresh `ctx`; `apply_chroot(ctx, tree_root, root_path)`
+(re-bases `ctx.root` onto the subtree node, *creating* it); `register_intrinsics(env, &ctx)`
+(binds every intrinsic as a closure capturing `&ctx`, which must outlive the eval); pass `env` as
+`execute_options.env`. (This is what the chroot integration **test** does; `pycvc_exec.cpp` reuses
+one full-tree ctx — a UI must follow the test, one ctx+env per handler.)
+
+**7.8.2 Default access = its own `ui` subtree; no absolute escape at the intrinsic layer.** Wire
+each unit's handlers with `root_path = "ui.docs.<doc>.panels.<panelId>"` (or `ui.docs.<doc>`). The
+handler then gets the full state-op surface **chroot-gated to its own subtree**
+(`state-get/-set/-exists/-children/-delete`, `state-data-get/-set`, `state-watch/-unwatch`, expiry,
+messaging) — every path-taking op resolves through `ctx.root`. **There is no `/` escape at the
+intrinsic layer:** `SEPARATOR` is `.`, leading separators are stripped, so a `/`-path still
+resolves *inside* the chroot (`CannotAccessOutsideChroot`). §4.8's `/` is therefore a **loader
+construct** (a second un-chrooted resolver, or a link node), not a state-path feature.
+
+**7.8.3 Cross-subtree reach = link nodes.** `state::linkTo(target)` marks a node as a reference
+resolved against the **app root**; `transparent` + `setLinkWritable(true)` route reads/writes
+through. Place named holes inside the unit subtree (`ui.docs.d.panels.p.shared → app.shared`) so a
+handler touches shared state through **auditable links** while everything else stays sandboxed.
+
+**7.8.4 uid/gid gate nothing locally.** They ride on the process and copy to children, but the
+local scheduler enforces **no path ACL** (guide §10 "Local Sovereignty"): the chroot is the
+addressing boundary. uid/gid are identity for auditing + the cluster-consensus write boundary +
+leader-gated cross-node admin; `resource_policy` (§7.7) bounds cost, not paths. **The UI sandbox is
+chroot + reduced env + limits, not uid.**
+
+**7.8.5 Two shared-state footguns.** *Messaging is not chroot-scoped* — `deliver_to_receivers` keys
+on the raw path string, so §7.1 event channels must be namespaced per unit
+(`ui.docs.<doc>.ev.<nodeId>.<kind>`) or a bare `"clicked"` crosses units. *`state-watch` has one
+shared watch root* — mixing handlers of different chroots on one scheduler mis-resolves watched
+paths (last-writer-wins); give each chroot its own scheduler, or pin one fixed watch root per doc.
+
+**7.8.6 Where running handlers live — and the observability gap.** Handler bodies are `value_t`
+ASTs held only in the scheduler's in-memory `processes_` map — **not in the state tree.** The
+tree's only `state_exec` footprint is scheduler *config* (`state_exec.defaults.<key>`,
+`state_exec.schedulers.<id>.<key>`). Status is API-only (`get_process_info`/`ps`), and **`exit_error`
+is dropped** (`process_info` has no such field) — a UI sees `status==killed` but not why.
+**Recommendation (badges §7.5):** publish a per-handler node
+`state_exec.schedulers.<id>.processes.<pid>.{status,exit_error,step_count,uid}`, updated on
+step/kill, directly `state-watch`-able so a badge widget binds to it like any widget (it lives
+outside any unit chroot; a panel reaches it via a read-only transparent link). This also closes the
+dropped-`exit_error` gap. *(The `STATE_EXEC_PORTING_PLAN` already stores handler closures as state
+subtrees — `__signals__.handlers`, `__watches__` — so this pattern is the sanctioned direction.)*
+
+**7.8.7 One env, no runtime re-chroot.** `fork` inherits `root_path`/`uid`/`gid` + the parent's
+`global_env`. There is **no runtime nested-chroot API** — a deeper scope is a fresh `apply_chroot`
+to a deeper path *at wire time*. §4.8's "chroots nest" means the loader chroots an included/loaded
+unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-evaluator nesting.
+
 ---
 
 ## 8. If we build it — suggested phasing
 
-- **P0 — declarative core + state binding:** document/root, menubar, windows, leaf
-  widgets with `bind: <path>`, modifiers as literals, corner overlays, HUDs; promote
-  the target demos' tunables to `cvc::state`. Ship `bunny_shadow`, `terrain_lab`,
-  `lsystem_*`, `volren/volslice` from YAML. C++ loader in libcvc; `enabled()==false`
-  no-op path.
+- **P0 — declarative core + the unified widget model + state binding:** the one widget node
+  (§3.0) with `frame:`/`layout:`/`size:`; the **table-backed layout engine** (Qt VBox/HBox/
+  grid/form/stack → `BeginTable`/`SameLine`/`BeginChild`, size policies, spacers); leaf widgets
+  with `bind: <path>`; modifiers; the `ui.docs.<doc>` state-tree layout (§11) and the three bind
+  cases (relative / `/`-absolute-via-loader / scene-qualified). Promote the target demos' tunables
+  to `cvc::state`. Ship `bunny_shadow`, `terrain_lab`, `lsystem_*`, `volren/volslice` from YAML.
+  C++ loader in libcvc; `enabled()==false` no-op path.
 - **P1 — state_exec read-only lane:** `yaml_to_value()` + `parse()` dual surface with
   the round-trip test; `visible_when`/`disabled_when`/`enabled_when`/`fmt`/`options`/
   `repeat.count` on the sync `stackless_evaluator` with `CAP` + fail-safe; the `{$int:}`
@@ -852,9 +1030,11 @@ chroots.
   wire `memory_tracker::record_write` into the `state-set` intrinsics (activates `max_memory`,
   §7.7); the `restricted`-flag special-form denylist for sandboxed handlers (§7.3). These are
   libcvc `state_exec` changes the DSL depends on — sequence them with P1/P2.
-- **P3 — composition + escape hatches:** `units`/`include` (args, null-drop, PushID,
-  recursion guard), `repeat`; `custom:` host nodes (minimap). Ship swarm/drive-from-
-  one-unit.
+- **P3 — composition + modularization + escape hatches:** `units`/`include` (args, null-drop,
+  PushID, recursion guard), `repeat`; the per-handler chroot wiring (one `intrinsics_context` +
+  `apply_chroot` + `register_intrinsics` per handler, §7.8) and namespaced `ev.*` channels;
+  **`load:` sub-UI / sub-scene fragments** (§12, mount prefix + own chroot + cycle guard);
+  `custom:` host nodes. Ship swarm/drive-from-one-unit.
 - **P4 — scene graph (§9):** the `scene:` block — nodes/sources/materials/lights/chrome
   bound to state; the ownership-tree loader. Ship the volume/lsystem/terrain demos'
   *scenes* from YAML, not just their panels.
@@ -892,8 +1072,10 @@ loader compiles it into both.** They are joined on node identity (a stable `id` 
   *is* a state subtree and every settable prop is already a reactive state key — loading
   a node == writing its subtree; a widget/expression driving a prop == writing one key.
   **This is the only tree the author writes** (`SceneGraph(app, statePrefix="cvcgl")`;
-  `addGraphics(name, geometry|volume|<empty>)`, `addLight(name)`; child path
-  `<parent>.children.<name>`). It keeps state binding, pose publishing, textures/clip/
+  `addGraphics(name, geometry|volume|<empty>)`, `addLight(name)`). The scene's node root is
+  **`<prefix>.graphics.root`** (a `NullGraphicNode "root"`), and a node's real path is
+  **`<prefix>.graphics.root.children.<name>`** (nested `…children.<name>.children.<child>`) —
+  see §11 for the full state layout. It keeps state binding, pose publishing, textures/clip/
   shaders, the Python proxies, and lifetime exactly as they are.
 - **Traversal tree** — the OpenInventor-shaped render path
   (`Separator`/`Transform`/`Material`/`DrawStyleNode`/`VisibilityMask`/`Shape`, an ordered
@@ -932,7 +1114,7 @@ scene:
       material: { color: [0.8,0.8,0.9], ambient: 0.2, diffuse: 0.8 }
       transform: { position: [0,0,0], rotation: [0,0,0], scale: 1 }
       visible: sim.show_bunny            # bind visibility to state (or an expression)
-      children: [ ... ]                  # child path = <parent>.children.<name>
+      children: [ ... ]                  # real path <prefix>.graphics.root.children.<name> (see §11)
 ```
 
 Prop names mirror the C++: `GraphicsNode` carries name + transform/pose
@@ -1334,7 +1516,7 @@ windows:
   - window: Transfer Function
     children:
       - tf_editor: skull_tf
-        bind: cvcgl.nodes.skull.transfer_function   # the node's TF data() channel
+        bind: /cvcgl.graphics.root.children.skull.transfer_function   # the node's TF data() channel (§11.3)
         interactive_updates: true                   # emit-on-drag vs on-release (ColorTable2's flag)
         layers: [ histogram, contour_spectrum ]     # overlays supplied FROM OUTSIDE as generic
                                                      # 1D-function / 2D-geometry layers (no VolMagick
@@ -1345,3 +1527,152 @@ Because the TF lives on `data()`, the same editor drives `volren`, `volslice`, a
 `VolumeNode` re-reads its TF) the VTK path, and round-trips into the scene file. Persistence
 targets the roadmap's JSON form (`axes` + `primitives` + optional keyframes + optional baked
 LUT); a **load-only importer** (`load_vinay`) reads legacy ColorTable2 `.vinay` text presets.
+
+---
+
+## 11. Where a loaded UI lands in the state tree
+
+There is **one per-app root state** (`cvc::state::instance(app&)`); there is **no `cvcgl` wrapper
+above it and no app-id segment**, and `SEPARATOR` is `.` (dot). `cvcgl` (the default `SceneGraph`
+prefix) is a *direct child* of the app root, and so are `state_exec` and the UI subtree. The app
+root concretely holds:
+
+```
+cvcgl.graphics.root.children.<node>.{position,rotation,scale,matrix,show_bbox,children.*}   # scene nodes (CSV keys)
+cvcgl.shadows.{enabled,resolution,interval}
+cvcgl.lighting.{key_intensity,…,stage_x,…,ambient,show_gizmos,…}          # the StageLighting rig
+cvcgl.viewers.<v>.{camera.*, ui.*, hud.*, layout.*}                        # per-viewer objects
+cvcgl.active_viewport
+state_exec.defaults.<key>      state_exec.schedulers.<id>.<key>            # scheduler config (only state_exec footprint)
+```
+
+(`cvcgl.viewers.<v>.ui` = `UiSettings` `visible/scale/touch_mode/panels_open/toggle_button`;
+`.camera` = `CameraController` mode/pose/settings/keys/track; `.hud` = `FpsHud`; `.layout` =
+`ViewportLayout`.) Node keys are flat CSV strings (`position`="x,y,z", `matrix`=16 CSV), published
+through the scene's coalesced `state_publisher`.
+
+### 11.1 The UI subtree — `ui.docs.<docId>`, a sibling of `cvcgl`
+
+A loaded UI document deserializes into its **own top-level subtree**, *not* under
+`cvcgl.viewers.<v>.ui` (already owned by `ImGuiOverlay`; and a UI routinely spans multiple viewers
+and scenes, so it can't nest in one viewer):
+
+```
+ui.docs.<docId>.meta                  viewer:, prefix:, source, ui version
+ui.docs.<docId>.tree.<id>.*           the widget tree — one state_object per widget (11.2)
+ui.docs.<docId>.panels.<panelId>.*    per-panel transient state + the panel's chroot root for its handlers
+ui.docs.<docId>.values.<id>           loader value: store for transient widgets with no state home (rare)
+ui.docs.<docId>.ev.<nodeId>.<kind>    the msg-send/msg-recv channels for §7.1 resident handlers
+ui.docs.<docId>.includes.<as>.*       a load:'d sub-UI's namespaced subtree + chroot (§12)
+```
+
+### 11.2 The widget tree mirrors the scene-node idiom
+
+Each widget deserializes into `ui.docs.<doc>.tree.<id>` using the **same `state_object` convention
+scene nodes use** — flat CSV keys + `.children.<name>` recursion — so a Qt widget port maps onto a
+state subtree the same way a `GraphicsNode` does:
+
+```
+ui.docs.<doc>.tree.<id>.geometry      "x,y,w,h"
+ui.docs.<doc>.tree.<id>.size_policy    "expanding,fixed"
+ui.docs.<doc>.tree.<id>.layout         "vertical"
+ui.docs.<doc>.tree.<id>.visible / .enabled / .collapsed
+ui.docs.<doc>.tree.<id>.children.<name> …   (recursion, same spelling as GraphicsNode)
+```
+
+Spelling the container key `.children.<name>` lets one traversal/bind machinery walk both trees.
+(Cross-run persistence stays out of scope, decision #4 — this is the *runtime* tree.)
+
+### 11.3 How `bind: <path>` resolves — three cases
+
+- **Bare relative** (`bind: some.tunable`) → against the widget's **panel/doc chroot root**
+  (`ui.docs.<doc>.panels.<panelId>` or `ui.docs.<doc>`). The common case for promoted-local
+  tunables (decision #2); two includes of a unit can't clobber each other (§7.8).
+- **Leading `/`** (`bind: /cvcgl.graphics.root.children.bunny.show_bbox`) → **app-root-absolute**,
+  the *only* way to reach scene-node state (scene nodes live outside any UI chroot). Realized at
+  the **loader level** (a second un-chrooted resolver / a link node), not by the intrinsics (§7.8.2).
+- **Scene-qualified** → splice onto the doc's `meta.prefix` via the canonical helpers, never concat:
+  `<prefix>.graphics.root.children.<node>.<key>`, `<prefix>.shadows.<key>`, `<prefix>.lighting.<key>`,
+  `<prefix>.viewers.<v>.camera.<key>`.
+
+A **typed/structured** tunable (color, vector, TF) routes through the `data()` channel at the same
+node path (§4.3, §10). A document declares its mount id + bindings in the header:
+
+```yaml
+ui: 0.3
+doc: nav_city_drive        # → ui.docs.nav_city_drive.*  (mount prefix; default = source basename)
+viewer: main               # → meta.viewer ; binds camera/hud/ui host to cvcgl.viewers.main
+prefix: cvcgl              # → meta.prefix ; scene-qualified binds splice onto this
+chroot: per_panel          # per_panel (default) | per_doc  (the §4.8/§7.8 granularity)
+```
+
+Two UIs over one scene get distinct `ui.docs.<docId>` subtrees and both bind (absolute) to the
+same `cvcgl.*` scene keys, which two-way binding reconciles.
+
+---
+
+## 12. Loading sub-UIs and sub-scene-graphs (modularization)
+
+`include`/`repeat` (§3.7) template widgets **in-document**. `load:` is the **cross-file module**
+primitive: it mounts an **external** `.ui.yaml` fragment or a scene fragment **as its own
+namespaced subtree with its own chroot**, so large UIs decompose into files and a sub-scene drops
+in with zero code change.
+
+### 12.1 `load:` a sub-UI fragment
+
+```yaml
+root:
+  - widget: telemetry_dock
+    type: group
+    layout: { kind: vertical }
+    children:
+      - load: panels/rf_telemetry.ui.yaml     # external fragment
+        as: rf                                # mount id under this parent
+        args: { unit: alpha, max_range: 4000 }   # substituted like include args
+        prefix: null                          # optional scene prefix for the fragment's scene-binds
+```
+
+- **Namespaced state.** The fragment's tree lands at `ui.docs.<doc>.includes.rf.*`, and its
+  resident handlers (§7.1) are chrooted to that subtree via a fresh `apply_chroot` (§7.8.1); its
+  `ev.*` channels are namespaced `ui.docs.<doc>.ev.rf.<node>.<kind>` (the scheduler queue keys on
+  the raw string, §7.8.5). An auto-`PushID` on the mount guards ImGui id collisions.
+- **Nested chroot** = the loader chrooting each level's handlers to the deeper path at wire time
+  (no in-evaluator nesting, §7.8.7).
+- **Binds** resolve against the mount prefix: a bare `bind:` → `ui.docs.<doc>.includes.rf`; `/` →
+  app root (loader-realized); scene-qualified → the fragment's `prefix:` arg (default = host's
+  `meta.prefix`).
+
+### 12.2 `load:` a sub-scene-graph
+
+Because **every scene path is `<prefix>.`-relative**, giving a fragment its own `SceneGraph` prefix
+namespaces the whole sub-scene for free:
+
+```yaml
+scene:
+  nodes:
+    - load: scenes/city_block.scene.yaml      # a scene fragment
+      as: block_a
+      prefix: cvcgl.block_a                    # SceneGraph(app, "cvcgl.block_a") — its whole subtree
+      transform: { position: [500, 0, 0] }     # host-applied mount transform
+```
+
+The fragment's nodes become `cvcgl.block_a.graphics.root.children.*`; its lights/shadows/viewers are
+under `cvcgl.block_a.*`. A PiP/minimap over a second scene (§9.6) is exactly a `view_embed` whose
+camera is `cvcgl.block_a.viewers.<name>.camera`. Nothing enforces prefix uniqueness, so the loader
+**allocates** the prefix (`<parent>.<as>`) and records it in `meta`.
+
+### 12.3 `load:` vs `include:` vs a scene `node:`
+
+| | `include:` (§3.7) | `load:` sub-UI | `load:` sub-scene | a scene `node:` |
+|---|---|---|---|---|
+| Source | a `units:` template **in this doc** | an **external** `.ui.yaml` | an external `.scene.yaml` | inline in `scene.nodes` |
+| State | shares the enclosing chroot | **own** `ui.docs.<doc>.includes.<as>` chroot | **own** `<prefix>.*` subtree | `<prefix>.graphics.root.children.<name>` |
+| Handlers | wired in the enclosing chroot | re-chrooted to the mount | scene has no handlers | n/a (props are keys) |
+| Reuse across docs | no (in-document) | **yes** (a file) | **yes** (a file) | no |
+
+### 12.4 Recursion / cycle guard
+
+`load:` carries a **max mount depth** and a **visited-set cycle guard** keyed on the resolved
+absolute file path (`a → b → a` hard-errors at load with the mount chain). Args are substituted
+before parse, so a fragment is `requires:`-preflighted (§7.6) **in its own mount chroot env** — a
+fragment needing an intrinsic this build lacks fails at load, naming the mount.
