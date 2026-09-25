@@ -1,4 +1,4 @@
-# Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.11, for iteration)
+# Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.12, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -57,6 +57,15 @@ those as Ariadne / the `ari` loader.)*
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.12** promotes the **root to a first-class widget** (§3.9): the VTK canvas carries a `layout:` — default
+> `free` (the desktop metaphor: main menu + draggable sub-windows) or `horizontal`/`grid`/`stack` for a *tiled
+> application*, chosen by one field (no ImGui docking in this build → tiling is loader-computed); movability
+> defaults **by depth** (root children movable, deeper widgets laid-out). And it settles the **dynamic-DOM
+> reconcile discipline** (§11.5): one between-frames commit boundary, edge-gated reloads (the render walk is a
+> pure reader and can never trigger one — `cvc::state` has no generation counter, only `signals2`+MTime),
+> id-keyed reconciliation preserving transient widget state, and the **"Ari browser"** (a shell that `load:`s
+> `.ari` fragments from URIs with a state-held history stack).
 >
 > **v0.11** names the DSL **Ariadne** (see "The name" above): `.ari` documents, the `ari` loader/CLI,
 > and the `cvc::gl::ariadne` C++ namespace (Ariadne is part of cvcGL), threaded through the doc. It also **settles the
@@ -346,7 +355,9 @@ The four root lists collapse to one ordered `root:` of widgets; what used to pic
 now the widget's `type:` (`menubar`/`overlay`/`hud`) and `frame.placement:`. Two honest
 caveats carry over: **HUD widgets are VTK actors** (`type: hud` → the `<prefix>.viewers.<v>.hud`
 subtree and the VTK HUD API, *not* the ImGui walk); and `include`/`repeat`/`custom` are
-unchanged. The VTK canvas stays the implicit root host (§1) — these draw *on top of* the scene.
+unchanged. The VTK canvas stays the implicit root host (§1) — these draw *on top of* the scene. **(v0.12:
+the root is itself promoted to a first-class widget with its own `layout:` — desktop vs tiled — see §3.9;
+these four channels become its children arranged by `root.layout`.)**
 
 The subsections below (3.1 document/root, 3.2 menus, 3.3 windows, 3.5 widgets, 3.6 composites)
 are the **specifics of particular widget types** under this one model.
@@ -555,6 +566,108 @@ like any `on:`. Opaque handles ride as a first-class `data_object` value.
   - custom: minimap
     args: { targets: 6 }
 ```
+
+### 3.9 The root is a first-class widget — desktop metaphor vs tiled application
+
+**This supersedes the "root is the canvas, not a widget" wording in §3.1 and §3.0.4.** §3.0 made
+*everything a widget*; the one exception was the root, which §3.1 called "the canvas" with four hard-coded
+child channels. We remove that exception. **The root VTK GL context is a widget too, and it carries the
+same `layout:`/`size:`/movability semantics as any container** — even though under the hood it is a
+`vtkRenderWindow`, not an `ImGui::Begin`. The runtime is unchanged (VTK still owns the canvas + the one GL
+context); what changes is that the root now answers the same layout questions a `type: group` does, and
+those answers govern how its child windows are placed.
+
+**Why it's coherent though VTK-backed:** the root has a well-defined content rect — the main viewport's
+`GetMainViewport()->WorkPos/WorkSize` (fed from `window->GetSize()` each frame), which is **menu-bar-aware**
+(`BeginMainMenuBar()` reserves the top strip, so `WorkPos.y` drops below the menu). That rect
+`[WorkPos, WorkPos+WorkSize]` **is the root widget's child area**, exactly as a group's
+`GetContentRegionAvail` is its. The root's children — the `frame:` windows — are the ImGui windows the
+loader *places into* that rect.
+
+**`root.layout.kind`** draws from the same closed set as §3.0.2:
+
+| `root.layout.kind` | Metaphor | Placement of each root-child window |
+|---|---|---|
+| `free` **(default)** | **Desktop** — main menu + free-floating sub-windows dragged by titlebar | Seed once (`SetNextWindowPos/Size` `ImGuiCond_FirstUseEver` from `tree.<id>.geometry` else authored `pos`); stock `Begin` gives titlebar/drag/collapse/resize free; **user drag then owns geometry** |
+| `horizontal`/`vertical` | **Tiled app** — a row/column of panes | Loader **computes** each rect by splitting the content area (honoring `size.policy`/`stretch`, §3.0.3a) + forces `ImGuiCond_Always` + `NoMove\|NoResize` each frame |
+| `grid` | **Tiled app** — an R×C grid | Same, rect from `at:[row,col]`/`span:` over a computed grid |
+| `stack` | **Tabbed app** | Stock `BeginTabBar` (tabs *are* in this build), one tab per child |
+
+Default is `free`, so **the desktop metaphor is what you get by writing nothing** — a main menu + draggable
+sub-windows, exactly today's demos.
+
+**Docking is NOT available — tiling is loader-computed (confirmed).** The packaged Dear ImGui is stock
+master **1.92.9, not the docking branch** — all in-tree `deps/imgui.h` define `IMGUI_HAS_TABLE`/`_TEXTURES`
+but **not `IMGUI_HAS_DOCK`**, and there's zero `DockSpace`/`DockingEnable` anywhere. So there is no native
+tiling/drag-to-dock; a tiled `root.layout` is realized entirely by the loader computing rects + forcing
+`ImGuiCond_Always`. Tab *groups* are the one native primitive (`BeginTabBar`), which is why `stack` is
+first-class. The `dock` token in `frame.chrome` is **inert** here (accepted for forward-compat). *(If a
+docking-branch imgui is ever adopted, native drag-to-dock replaces the computed path; the DSL surface
+doesn't change.)*
+
+**`ImGuiCond` is the whole arbitration knob:** a **free** child uses `FirstUseEver` (seed, then the user
+owns geometry — the loader must *never* re-force `Always` on it); a **tiled** child uses `Always` +
+`NoMove|NoResize`, re-pinned from the loader-computed rect every frame. In-tree precedents for forced
+`Always`: the floating toggle (`Always`+`NoMove`) and the nav minimap (`Always`+`NoResize`).
+
+**Movability default — by depth** (resolving "fixed by default" vs "movable"): the global rule stays
+**fixed by default**, with one depth exception. A **direct child of the root** carrying `frame:` chrome is
+an `ImGui::Begin` window → **movable when `root.layout: free`** (titlebar drag + resize + `FirstUseEver`
+seed); under a **tiled** root those same children are laid-out/**fixed** (the root layout owns their rects).
+A **widget nested inside another widget's box/grid layout is not a window at all** — it's an item emitted
+into the parent's `BeginChild`/`BeginTable`, so the parent owns its rect and move/resize simply don't apply
+(fixed in the strong sense). So: **movability is a property of `frame:` windows, and only a direct child of
+a `free` root defaults movable.** `frame.chrome:` omissions still map to `No*` flags, so an author can pin a
+specific root-child even under a free root by dropping `move`/`resize`.
+
+**Reconciling with §3.0.4** — the four channels become root children arranged by `root.layout`: `menubar`
+(reserves the top strip → makes `WorkPos` menu-aware), `windows` (the `frame:` children the layout places),
+`overlays` (`placement: always`, **outside** the tiling — corner-pinned regardless of `root.layout`), and
+`huds` (VTK actors — *not* laid out by `root.layout`, they live on `<prefix>.viewers.<v>.hud`). A
+`view_embed`/minimap is orthogonal: an ImGui child window can *host* a `ViewportManager` viewport in its
+content rect (the nav minimap precedent).
+
+```yaml
+# Desktop metaphor (the default): a main menu + draggable sub-windows
+root:
+  layout: { kind: free }               # DEFAULT — could be omitted entirely
+  children:
+    - type: menubar
+      children: [ { menu: Sim, items: [ { menu_item: Paused, bind: sim.paused } ] } ]
+    - window: Swarm controls           # DIRECT child of a free root ⇒ MOVABLE by default
+      frame: { chrome: [title, move, resize, collapse, close], placement: first_use_ever, pos: [24, 40] }
+      layout: { kind: vertical }       # its OWN children are laid-out items, not windows
+      children: [ { slider_int: Agents, bind: sim.agents, range: [1, 512] } ]
+    - type: overlay                     # placement:always ⇒ pinned regardless of root.layout
+      corner: top_right
+      children: [ { text: "RF-DENIED", visible_when: (state-get "sim.jammed") } ]
+```
+
+```yaml
+# Tiled application: same child widgets, one field different — no free-floating windows
+root:
+  layout: { kind: grid, rows: 2, cols: 2, col_stretch: [2, 1], spacing: 4 }   # loader owns every rect
+  children:
+    - type: menubar
+      items: [ { menu: File, items: [ { menu_item: Reload, on: ui.reload } ] } ]
+    - window: Main view                 # a PANE, not a float — NoMove|NoResize
+      at: [0, 0]
+      frame: { chrome: [title] }        # move/resize dropped
+      children: [ { view_embed: cvcgl.viewers.main } ]
+    - window: Telemetry
+      at: [0, 1]
+      frame: { chrome: [title] }
+      children: [ { include: rf_telemetry } ]
+    - window: Timeline
+      at: [1, 0]
+      span: [1, 2]                       # spans both columns of the bottom row
+      frame: { chrome: [title] }
+      children: [ { include: timeline_panel } ]
+```
+
+**The only difference between the two apps is `root.layout.kind`** (and dropping `move`/`resize` from the
+panes' chrome) — the child widgets are authored identically. That is the payoff of promoting the root to a
+widget: an Ari app chooses desktop-vs-tiled by one field, not a different schema.
 
 ---
 
@@ -1129,12 +1242,15 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
 ## 8. If we build it — suggested phasing
 
 - **P0 — declarative core + the unified widget model + state binding:** the one widget node
-  (§3.0) with `frame:`/`layout:`/`size:`; the **table-backed layout engine** (Qt VBox/HBox/
-  grid/form/stack → `BeginTable`/`SameLine`/`BeginChild`, size policies, spacers); leaf widgets
-  with `bind: <path>`; modifiers; the `ui.docs.<doc>` state-tree layout (§11) and the three bind
-  cases (relative / `/`-absolute-via-loader / scene-qualified). Promote the target demos' tunables
-  to `cvc::state`. Ship `bunny_shadow`, `terrain_lab`, `lsystem_*`, `volren/volslice` from YAML.
-  C++ loader in libcvc; `enabled()==false` no-op path.
+  (§3.0) with `frame:`/`layout:`/`size:`; the **root promoted to a widget** with `root.layout: free`
+  (desktop, the default) vs tiled `horizontal`/`grid`/`stack` (loader-computed rects, `ImGuiCond`
+  arbitration, movability-by-depth, §3.9); the **table-backed layout engine** (Qt VBox/HBox/grid/form/
+  stack → `BeginTable`/`SameLine`/`BeginChild`, size policies, spacers); leaf widgets with
+  `bind: <path>`; modifiers; the `ui.docs.<doc>` state-tree layout (§11) and the three bind cases
+  (relative / `/`-absolute-via-loader / scene-qualified). Promote the target demos' tunables to
+  `cvc::state`. Ship `bunny_shadow`, `terrain_lab`, `lsystem_*`, `volren/volslice` from YAML. C++
+  loader in libcvc; `enabled()==false` no-op path. **The dynamic-DOM reconcile boundary** (§11.5.1 —
+  one between-frames commit; the walk reads a stable tree) is foundational here.
 - **P1 — state_exec read-only lane:** `yaml_to_value()` + `parse()` dual surface with
   the round-trip test; `visible_when`/`disabled_when`/`enabled_when`/`fmt`/`options`/
   `repeat.count` on the sync `stackless_evaluator` with `CAP` + fail-safe; the `{$int:}`
@@ -1157,8 +1273,10 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
   `apply_chroot` + `register_intrinsics` per handler, §7.8) and namespaced `ev.*` channels; the
   **`uri_resolver` + scheme-handler registry** (§13: `file://`/`state://`, the `image_file_io`-style
   registry, the temp-file bridge, the per-pid observability node §7.8.6a); **`load:` URI-based sub-UI /
-  sub-scene fragments** (§12, mount prefix + own chroot + cycle guard + hot-reload); `custom:` host
-  nodes. Ship swarm/drive-from-one-unit.
+  sub-scene fragments** (§12, mount prefix + own chroot + cycle guard + hot-reload); the **id-keyed
+  dynamic-DOM reconcile** (§11.5: edge-gated reloads, self-echo guards, the max-reconcile budget) and the
+  **"Ari browser"** shell (§11.5.4: a `load:` bound to `ui.nav.current`, a state-held history stack,
+  back/forward/go actions); `custom:` host nodes. Ship swarm/drive-from-one-unit.
 - **P3b — HTTP + pycvc + host handlers (§13.6, §14):** the built-in **`cvc::net` `http(s)` handler**
   over the already-packaged libcurl+OpenSSL (+ the wasm `emscripten_fetch` backend; the Haiku curl/openssl
   recipe entries); expose `Exec.register_intrinsic` (already ~present) + `register_uri_handler` (Python
@@ -2091,6 +2209,113 @@ post-interaction values back at end-of-frame, so the state node is the authority
 stays out of scope (decision #4) — and a `save()` of `ui.docs.<doc>` would capture only the `value()`
 channel (geometry/visible/collapsed persist; a widget's `data()`-channel typed model does not — the
 §13 `?data` caveat), so durable layout would need an explicit codec, not a free `json()` dump.
+
+### 11.5 The dynamic-DOM reconcile discipline — one commit boundary per frame
+
+The retained widget tree (`ui.docs.<doc>.tree`, §11.2) **is the DOM**; the immediate-mode draw walk (§4.1)
+**is the renderer** — one closure re-walks the tree every frame re-emitting `ImGui::*`. A "live Ari edit" —
+an author, an action, or a remote source changing the tree — is just a state write, and the next walk
+reflects it. This section is what keeps that live-edit path from trapping the render loop.
+
+**11.5.1 The one reconcile/commit boundary.** The draw closure runs **mid-render** (inside VTK's
+`StartEvent`, `frameOpen==true` its whole duration). So **every structural mutation — add/remove a widget,
+change a property, swap a reloaded fragment — is applied while `frameOpen==false`**: after `renderFrame()`
+of frame *N*, before `beginFrame()` of *N+1*, in the host drain phase (§4.7). This is the **single commit
+boundary per frame**; the walk always reads a **stable tree for the whole frame** (a mid-walk structural
+edit would desync the walker's `Begin`/`End` pairing). Model it on the §9.9.4 handoff — *the
+`state_publisher` model applied to the DOM*: build the new subtree off the draw path, publish by one atomic
+pointer swap (coalesce-to-latest), the **next** frame's walk picks it up. §12.5 hot-reload already does
+exactly this (deferred scoped unload+reload of one mount); §11.5 generalizes it to *all* tree edits.
+
+**11.5.2 The change gate — reload only on *actual* change; the render path can never trigger one.** Grounded
+correction: **`cvc::state` has no monotonic generation counter and no per-node dirty flag** — only
+`boost::signals2` (`valueChanged`/`childChanged`/`dataChanged`) and a per-node **MTime** (`_lastMod`), with
+an **edge-gated** setter (`value()` early-returns if unchanged, so `valueChanged` fires only on a real
+change). The sanctioned watch (`state-watch`, backing `on_change:`) is deliberately **poll + last-value
+string diff** (signals2 segfaults on macOS): `poll_watches()` fires only when `cur != last_value`. So
+**"reload only when it actually changed" is gated on a change *edge*/diff, never on re-reading `value()` from
+the render path** — the scheme-appropriate edge is exactly §12.5's: `state://`→a `state-watch` diff,
+`file://`→mtime/inotify, `http(s)://`→ETag/`poll:<sec>`. **The load-bearing safety property: the render walk
+is a pure reader** — read-only slots run on a read-only evaluator env (a stray write *fails at load*), and
+actions only *enqueue* intents drained off-callback (§4.7) — so a frame physically cannot cause a change it
+reacts to within the same frame. A strict monotonic gate, if wanted, is a per-source generation integer the
+**reconciler** (not the walk) bumps on an accepted reload — off the hot path, which also kills per-frame
+re-parse.
+
+**11.5.3 The loop-breaking rules** (feedback risk is confined to the action/watch lanes, time-separated from
+the walk):
+
+1. **Coalesce-to-latest.** All writes go through `state_publisher` — last-value-per-path, one background
+   flush per world-clock tick, eventually-consistent. A write storm collapses to one write/path/flush.
+2. **Self-echo guard.** Reuse the existing re-entry guards — `ImGuiOverlay::applyingState` and
+   `state_publisher::in_flush()` (a thread-local flush-depth counter) — so a UI-driven write cannot
+   synchronously re-invoke the draw.
+3. **Max-reconcile-per-frame + debounce.** Cap fragment swaps/re-parses per frame (like §4.7's per-tick
+   drain budget) so a burst of remote updates **spreads over frames** instead of stalling one; debounce the
+   reload trigger (collapse N changes in a window into one re-parse — what `poll:<sec>` and the flush cadence
+   already give).
+4. **Structural cycle guard (§12.4).** The visited-set keyed on the fully-resolved URI + max depth catches
+   `a → b → a` even through a `state:` indirection; navigation reuses it.
+5. **Reconcile keyed on stable node id.** Diff old vs new tree **by `tree.<id>`**, not position — an
+   unchanged node keeps its identity, and since `ui.docs.<doc>.tree.<id>` **is** where its transient runtime
+   state lives (window geometry, `visible`/`collapsed`, scroll, in-progress drag), it **keeps that state
+   across a fragment reload**. Only genuinely changed nodes are touched. (React-style keyed reconciliation
+   over the state tree.)
+
+Net: the render path is **read-only + edge-gated**; every write is **coalesced + self-echo-guarded**; reload
+is **diff/generation-gated, budgeted, debounced**; structure is **cycle-guarded**; reconciliation is
+**id-keyed** so unchanged widgets + their transient state persist. No synchronous write→signal→re-walk cycle
+can form.
+
+**11.5.4 The "Ari browser" model.** The discipline above is exactly what makes an Ari app behave like a
+**browser**: a shell whose content area `load:`s `.ari` fragments from URIs (§13) and swaps them **as the
+user navigates** — each navigation a fragment swap at the §11.5.1 boundary, needing nothing beyond `load:` +
+a nav stack:
+
+- **The content mount is a `load:` whose URI is bound to state** (`ui.nav.current`). Navigating = writing a
+  new URI to that node; `reload: on_change` performs the §11.4 ordered unload+remount at the reconcile
+  boundary (the same swap as §12.5 hot-reload, triggered by navigation). The walk only ever sees a
+  fully-built tree — a half-loaded page is never walked.
+- **History lives in state** — `ui.nav.stack.*` (visited URIs + a cursor); `nav.back`/`nav.forward`/`nav.go`
+  are deferred `state_exec` actions that move the cursor and rewrite `ui.nav.current`. Because history *is*
+  state it's inspectable and bindable (a breadcrumb bar = `repeat:` over `ui.nav.stack`).
+- **Prefetch + cache (§13.5)** — an early `resolve()` of a likely-next URI off the draw path warms the
+  cache; `http(s)` is content-addressed, `file://` honors mtime, `state://` is live.
+- **Loop safety carries over verbatim** — remote UI faster than a frame is bounded by the reconcile budget +
+  debounce (rule 3); a page that loads back to one on the stack hard-errors via the cycle guard (rule 4);
+  returning by Back re-mounts fresh while the shell chrome's scroll/geometry survive by id-keyed reconcile
+  (rule 5).
+
+```yaml
+# An Ari "browser": address bar + back/forward + a content area that pulls .ari from anywhere §13 resolves
+root:
+  layout: { kind: vertical }                 # tiled shell: chrome row on top, content fills the rest
+  children:
+    - window: Nav bar
+      at: [0, 0]
+      size: { policy: [expanding, fixed], hint: [0, 32] }
+      frame: { chrome: [] }                  # shell chrome — no titlebar/move/resize
+      layout: { kind: horizontal }
+      children:
+        - { small_button: "◀", on: nav.back }
+        - { small_button: "▶", on: nav.forward }
+        - { input_text: url, bind: ui.nav.field }
+        - { button: "Go", on: (nav.go (state-get "ui.nav.field")) }
+    - window: Content
+      at: [1, 0]
+      size: { policy: [expanding, expanding] }
+      frame: { chrome: [] }
+      children:
+        - load: state://ui.nav.current?value  # the node HOLDS the fragment URI, re-dispatched (§13.3)
+          as: page
+          reload: on_change                    # swap at the reconcile boundary when ui.nav.current changes
+```
+
+`nav.go`/`nav.back`/`nav.forward` push/pop `ui.nav.stack.*` and write `ui.nav.current`; the mount
+re-dispatches to whatever URI the node holds (`file://`, `http(s)://`, or another `state://`). A genuine
+browser — address bar, history, a content area pulling fresh `.ari` from anywhere §13 resolves — with the
+render path **provably never trapped**, because every swap lands at the one between-frames commit boundary
+and every trigger is edge-gated, budgeted, and cycle-guarded.
 
 ---
 
