@@ -1,4 +1,4 @@
-# cvcGL UI DSL — Scoping Spec (v0.9, for iteration)
+# cvcGL UI DSL — Scoping Spec (v0.10, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -20,6 +20,13 @@ existing demo UIs. This document is the thing we iterate on before writing a loa
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.10** adds a **built-in C++ `http(s)` client** (§13.6 — `cvc::net` over the already-packaged
+> libcurl+OpenSSL, LGPL-clean, wasm→`emscripten_fetch`; web loading needs no Python, which becomes an
+> override); a **texture-streaming** path (§9.9.11-13 — the zero-copy pinned-RGBA channel, an ffmpeg
+> **video** source behind a GPL `dlopen` boundary, and **render-to-texture** for the "scene-camera → mesh"
+> case); and **corrects the zero-copy caveat** (§9.9.3a — an opt-in pinned vertex/color path mirroring the
+> texture alias removes the CPU copies; only the VBO re-upload remains).
 >
 > **v0.9** resolves the **last open item** — the **streamed-source contract** (§9.9): build-once +
 > pull-latest-snapshot + `updateVertices` on the render thread, a lock-free atomic-`shared_ptr` handoff
@@ -1107,15 +1114,18 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
   registry, the temp-file bridge, the per-pid observability node §7.8.6a); **`load:` URI-based sub-UI /
   sub-scene fragments** (§12, mount prefix + own chroot + cycle guard + hot-reload); `custom:` host
   nodes. Ship swarm/drive-from-one-unit.
-- **P3b — pycvc + host handlers (§14):** expose `Exec.register_intrinsic` (already ~present) +
-  `register_uri_handler`; factor the shared PyObject wrapper out; add the `py_to_value` **`bytes`
-  branch** and a **temp-file helper** (both blockers for binary URI handlers); a Python `requests`
-  `https` handler as the reference web-fetcher.
-- **P4 — scene graph (§9):** the `scene:` block — nodes/sources/materials/lights/chrome
-  bound to state; the ownership-tree loader; the **streamed-source contract** (§9.9: the
-  build-once + atomic-`shared_ptr` latest-snapshot + `updateVertices`-on-render-thread pattern,
-  `{stream:}` and the `state://…?data` live path, degenerate-collapse LOD, the wasm inline
-  fallback). Ship the volume/lsystem/terrain *scenes* — and the nav *agent stream* — from YAML.
+- **P3b — HTTP + pycvc + host handlers (§13.6, §14):** the built-in **`cvc::net` `http(s)` handler**
+  over the already-packaged libcurl+OpenSSL (+ the wasm `emscripten_fetch` backend; the Haiku curl/openssl
+  recipe entries); expose `Exec.register_intrinsic` (already ~present) + `register_uri_handler` (Python
+  *override*); factor the shared PyObject wrapper out; add the `py_to_value` **`bytes` branch** and a
+  **temp-file helper** (blockers for binary URI handlers).
+- **P4 — scene graph (§9):** the `scene:` block — nodes/sources/materials/lights/chrome bound to state;
+  the ownership-tree loader; the **streamed-source contract** (§9.9: build-once + atomic-`shared_ptr`
+  latest-snapshot + `updateVertices`-on-render-thread, `{stream:}` and `state://…?data` live, the **opt-in
+  pinned zero-copy vertex/color path** §9.9.3a, the **texture channel** + **ffmpeg video** (behind the GPL
+  `dlopen` boundary) + **render-to-texture** §9.9.11-13 [frameRGB now, GPU FBO-share follow-up],
+  degenerate-collapse LOD, wasm inline fallback). Ship the volume/lsystem/terrain *scenes* — and the nav
+  *agent stream* — from YAML.
 - **P5 — views + RenderView bridge (§9.5):** `views:` over `ViewportManager`, camera
   modes/framing, `tags:`/`show:`/`hide:`. Stage **C first** (overlay-only `RenderView` per
   viewport — proves the wiring with zero ownership-tree change), then stage **B** (the
@@ -1513,17 +1523,44 @@ frame the source must produce exactly `3*point_count` position elements (+ match
 declared channel); **any other length logs at level 1 and no-ops** — it never resizes or corrupts.
 `handler` (imperative host-computed buffer) and `live` (declarative coalesced) are mutually exclusive.
 
-**9.9.3 Buffer ownership & per-frame cost.** GeometryNode owns the `vtkPolyData`; the producer owns a
-reused allocation-free scratch buffer (the `AgentGlyphs::xyz_` model) and never mutates a buffer after
-publishing it; the consumer **copies it in** — there is **no zero-copy vertex path**. Per
-`updateVertices` for `n` points: (1) the input vector is captured by value into the `runOnMainThread`
-lambda (~24n bytes), (2) copied again into the VTK array (double→float cast; `memcpy` for colors;
-per-point `SetTuple3` for normals — no bulk fast path), (3) a **full-array GPU VBO re-upload** next
-frame (MTime-driven; no partial/dirty-range upload). Budget O(n) CPU copy twice + O(n) upload per
-streamed channel per frame. *Zero-copy exists only for textures* (`setTexture(zeroCopy=true)` aliases a
-pinned RGBA8 buffer); there is no aliased/pinned path for points/colors/normals. The Python write path
-(`updateVertices(PyObject*)`, a hand-written `%extend`) takes a C-contiguous float64 buffer-protocol
-object (a numpy `.ravel()`) and **copies** it — the array need not outlive the call and is not pinned.
+**9.9.3 Buffer ownership & per-frame cost — the default (copy) path.** GeometryNode owns the
+`vtkPolyData`; the producer owns a reused allocation-free scratch buffer (the `AgentGlyphs::xyz_` model)
+and never mutates a buffer after publishing it; the consumer **copies it in**. Per `updateVertices` for
+`n` points: (1) the input vector is captured by value into the `runOnMainThread` lambda (~24n bytes),
+(2) copied again into the VTK array (double→float cast; `memcpy` for colors; per-point `SetTuple3` for
+normals), (3) a **full-array GPU VBO re-upload** next frame (MTime-driven; no partial/dirty-range
+upload). Budget O(n) CPU copy twice + O(n) upload per streamed channel per frame. This is the **default**
+because the producer needn't own VBO-typed memory or keep it alive past the call, and topology can vary
+via rebuild. The Python write path (`updateVertices(PyObject*)`, a hand-written `%extend`) takes a
+C-contiguous float64 buffer-protocol object (a numpy `.ravel()`) and **copies** it.
+
+**An opt-in pinned (zero-copy-to-VTK) path removes the two CPU copies** — see §9.9.3a. It mirrors the
+texture channel exactly (`setTexture(zeroCopy=true)` already aliases a pinned RGBA8 buffer via
+`vtkUnsignedCharArray::SetArray(save=1)`; points back onto a `vtkFloatArray` and per-vertex colors onto a
+`vtkUnsignedCharArray` — the same types). So zero-copy vertex+color is **addable**, not fundamentally
+absent; only the VBO re-upload remains.
+
+**9.9.3a Opt-in pinned vertex/color path (zero-copy to VTK).** Add
+`setPinnedVertices(shared_array<float>, n)` / `setPinnedColors(shared_array<uint8_t>)` / `setPinnedNormals`
+that call `vtkFloatArray/UnsignedCharArray::SetArray(ptr, …, save=1)` once and hold the buffer in a
+member (the `m_textureStorage` twin), plus a `vertices_modified()`/`stream_modified()` — the
+`texture_modified()` analog that bumps MTime + `requestRender()` with **no copy**. The producer writes
+float32/uint8 straight into the aliased buffer.
+
+```yaml
+channels:
+  positions: { pinned: true }   # SetArray(save=1) alias; float32 producer buffer
+  colors:    { pinned: true }   # uint8
+```
+
+Honest residual (what pinning does **not** fix): the **full-array VBO re-upload remains** (MTime-driven,
+no partial upload) — exactly like the texture path still re-uploads `w*h*4` on `texture_modified()` — so
+large `n` at high fps is **UPLOAD-bound, not copy-bound**. The producer buffer must be float32/uint8 (not
+`updateVertices`' float64); topology must be fixed (any array growth reallocs and abandons the pin — a
+count change is a §9.9.5 rebuild that re-aliases a fresh buffer); the explicit `vertices_modified()` is
+mandatory (writing the buffer bypasses VTK, nothing else marks it dirty); and the producer **must not
+mutate a pinned buffer mid-frame** — double-buffer the pin, aliasing the *published* immutable snapshot
+(§9.9.4) while the next frame builds elsewhere.
 
 **9.9.4 Push vs pull + thread model (the load-bearing rule).** *Producer writes snapshots OFF the
 render thread; the consumer PULLS the latest on the render thread and calls `updateVertices` there.*
@@ -1593,12 +1630,74 @@ thread, running the identical pack/`updateVertices` path (sim advance then coupl
 contract defines the snapshot *shape* and latest-wins semantics abstractly; worker-atomic-handoff vs
 inline-step is a runtime choice gated on real thread availability, transparent to the binding.
 
-**9.9.10 Honest caveats.** Per-frame two-copy + full VBO re-upload is unavoidable on this path (no
-dirty-range/partial upload, no pinned vertex buffer — zero-copy is texture-only); large `n` at high fps
-is copy/upload-bound. Python-on-the-render-thread is **banned** for non-trivial producers. The mapper
-sets no static/dynamic draw hint (a future GL draw-usage optimization is a `vtkPolyDataMapper` change,
-not a DSL change). `updateColors`/`updateNormals` require the mesh to carry those arrays — declaring
-those channels is a promise the initial `setGeometry` set them up, validated at bind time.
+**9.9.10 Honest caveats.** The default path copies twice; the opt-in **pinned path (§9.9.3a) removes the
+CPU copies** (zero-copy to VTK, mirroring the texture channel) — so large `n` at high fps is
+**UPLOAD-bound, not copy-bound**: the full-array VBO re-upload is MTime-driven with no dirty-range/partial
+upload and no draw-usage hint (a future optimization is a `vtkPolyDataMapper` change, not a DSL change).
+Python-on-the-render-thread is **banned** for non-trivial producers. `updateColors`/`updateNormals`
+require the mesh to carry those arrays — declaring those channels promises the initial `setGeometry` set
+them up, validated at bind time.
+
+**9.9.11 Streaming to a TEXTURE — the pinned-RGBA channel (zero-copy, already shipping).** The fast
+per-frame texture update *already exists*: `setTexture(img, zeroCopy=true)` aliases a `cvc::image` RGBA8
+buffer via `vtkUnsignedCharArray::SetArray(save=1)`, pins it in `m_textureStorage`, and fixes the
+image-vs-VTK origin by **flipping TCoord V** (not copying pixels), so the alias survives (mipmaps forced
+off). A producer writes a fresh RGBA8 frame **into the same pinned buffer**, then `texture_modified()`
+bumps MTime → VTK re-uploads the whole `w*h*4` texture next frame — **no CPU copy**. Thread discipline
+matches the vertex channels (write off-thread; `setTexture`/`texture_modified` marshal the re-upload via
+`runOnMainThread`).
+
+```yaml
+source:
+  stream:
+    channels: { texture: { pixel_format: rgba8, pinned: true } }   # aliases setTexture(zeroCopy=true)
+    handler: <decoder>
+    pacing: { hz: <fps>, cap: <max-catchup> }
+```
+
+Zero-copy is **RGBA8 only** — YUV/NV12 must be `sws_scale`'d to RGBA8 on decode (else it falls to the
+convert-flip-copy fallback, losing the alias); a native-YUV zero-copy path would need a 3-plane texture +
+a YUV→RGB fragment shader (not present today).
+
+**9.9.12 A video source (ffmpeg decoder handler).** A `handler`-lane stream (§9.9.6) registered like any
+§14 handler (C++ `native_fn` or Python) that owns an ffmpeg decoder and each tick decodes →
+`sws_scale`→RGBA8 → writes the pinned buffer → `texture_modified()` (decode off the render thread).
+
+```yaml
+- node: tv_screen
+  type: geometry
+  source: file://clip.mp4              # or https://… via §13
+  stream:
+    channels: { texture: { pixel_format: rgba8, pinned: true } }
+    handler: ffmpeg_decode
+    pacing: { hz: 30, cap: 2 }
+```
+
+> **License boundary (load-bearing):** the in-tree `ffmpeg` is **GPL-2.0-or-later** (`--enable-gpl`).
+> Static-linking it into LGPL libcvc makes the combined work GPL. The decoder must sit behind a
+> `dlopen`/optional boundary (or an LGPL ffmpeg variant) — natural here, since it's a handler: no ffmpeg
+> symbol is referenced unless the handler is installed.
+
+**9.9.13 A render-to-texture source — the "TV connected to a scene camera".** A second camera/view
+rendered into a texture another node samples:
+
+```yaml
+- node: security_monitor
+  type: geometry
+  source:
+    stream:
+      render_to_texture: { view: security_cam, size: [1024, 768] }   # a §9.5 view/camera ref
+      pacing: { hz: 30 }
+```
+
+Two tiers: **(a) available now — CPU readback:** `ViewportManager::frameRGB()` (a whole-window
+`glReadPixels`) → wrap as `cvc::image` → `setTexture(zeroCopy=true)` + `texture_modified()` each frame.
+Functional but two full-frame bus trips and it captures the whole window, not one view — bus-bound. **(b)
+ideal — GPU FBO-share:** a dedicated `vtkRenderer` renders into an FBO-attached `vtkTextureObject` (the
+OceanFFT `vtkOpenGLFramebufferObject` pattern) and the mesh **samples** it GPU-side via the
+already-shipping `setShaderTexture(name, vtkTextureObject*)` — **zero readback, zero re-upload**. The
+sampling half already exists; only "render a scene into the FBO" (vs OceanFFT's fragment quad) is new.
+**Ship (a) now, file (b) as follow-up.**
 
 ---
 
@@ -1946,11 +2045,11 @@ calling `read(filename)`; there is **no** URI/scheme layer in `state_exec`). §1
 they share.
 
 **Hard constraints (verified in-tree):** every reader is **filename-only** (`read_geometry(path)`,
-`readVolumeFile(app&, vol, path)` — note the required `app&`, `image::load(path)`); **libcvc has no C++
-HTTP client** (only XmlRpc++ and the state-replication transport); **no temp-file helper exists** under
-`inc/cvc`; and a `cvc::state` node has **three channels** — `value()` (string; the only one `json()`/`save()`
-persist), `data()` (a `boost::any`, in-memory only), and the child subtree — with link nodes for live
-indirection.
+`readVolumeFile(app&, vol, path)` — note the required `app&`, `image::load(path)`); **no temp-file helper
+exists** under `inc/cvc`; and a `cvc::state` node has **three channels** — `value()` (string; the only one
+`json()`/`save()` persist), `data()` (a `boost::any`, in-memory only), and the child subtree — with link
+nodes for live indirection. *(v0.10 adds a built-in C++ HTTP client, §13.6 — the earlier "no C++ HTTP
+client" constraint is lifted.)*
 
 ### 13.1 URI grammar and schemes
 
@@ -1963,7 +2062,7 @@ bare/relative/path.ui.yaml      # no scheme → file:, resolved against the encl
 |---|---|---|
 | `file://` (+ bare/relative) | a filesystem path | in-process, always available |
 | `state://<node.path>[?value\|?data\|?children][&snapshot]` | a node's value / typed `data()` / child subtree | in-process |
-| `http(s)://` | fetched bytes (or a cached temp path) | **host-supplied** handler (Python `requests`; emscripten `fetch` under wasm) |
+| `http(s)://` | fetched bytes (or a cached temp path) | **built-in C++ handler** (`cvc::net` over libcurl+OpenSSL; emscripten `fetch` under wasm) — §13.6; a Python handler may override |
 | *custom* (`pkg://`, `s3://`, `mem://`, …) | whatever the handler returns | registered by C++ or pycvc (§14) |
 
 ### 13.2 The scheme-handler registry (modeled on `image_file_io`)
@@ -2037,8 +2136,60 @@ mtime for the dev loop; `http(s)` handlers own their cache (content-addressed te
   never a silent empty `any`.
 - **The temp-file bridge is a real dependency** — `kind::bytes` → reader is dead until a temp helper is
   added; until then only handlers that name a real cache path (`kind::local_path`) feed the readers.
-- **`http(s)://` is never in-core** — a bare `https://` in a `.ui.yaml` fails "no handler for scheme https"
-  on a host that didn't register one (§14).
+- **`http(s)://` is built-in (v0.10, §13.6)** — a native `cvc::net` handler is registered by default, so
+  web loading works with **zero Python**; a Python handler can *override* it per-scheme (§13.7).
+
+### 13.6 The native HTTP client — `cvc::net` over libcurl (v0.10)
+
+**Reverses the v0.8 "host-supplied only" posture.** libcvc now ships a C++ `http(s)://` handler, so web
+loading works out of the box; Python is an override, not a requirement.
+
+**Chosen: direct libcurl** (curl 8.13.0 + openssl 3.4.1, already in cvcpkg) wrapped in a thin `cvc::net`
+RAII facade (`HttpClient`/`HttpRequest`/`HttpResponse`) — **not cpr, not a new recipe.** The stack is
+packaged and portability-proven: curl built lean/autotools (HTTP/HTTPS only, `--with-openssl`, exports
+`CURL::libcurl`, OpenBSD/NetBSD SONAME+RPATH already solved), OpenSSL 3 (Apache-2.0), and a `ca-bundle`
+(Mozilla roots) for hermetic cert verification via `CURLOPT_CAINFO`. cpr is only ergonomic sugar over the
+same stack (zero new capability, a recipe to maintain, coarser callbacks than raw `multi` which the §9.9
+texture/stream callbacks want) — kept as a documented fallback. cpp-httplib/Beast/POCO each bring their
+own socket layer (no wasm) and weaker coverage.
+
+**License fit (libcvc LGPL 2.1):** the `curl` license is MIT/X11-style and OpenSSL 3 is Apache-2.0 — both
+LGPL-clean; static **or** dynamic link is fine, notices aside. Do **not** add a second TLS stack (wolfSSL
+defaults GPL-2.0 — a trap; GnuTLS is redundant); standardize on OpenSSL 3. *(Separately: the in-tree
+`ffmpeg` is GPL-2.0 — see the §9.9.12 boundary.)*
+
+**One handler API, two backends, one TLS story:**
+
+| Target | Backend | TLS / certs |
+|---|---|---|
+| linux (glibc 2.35/2.39), macOS, Windows/MSVC, FreeBSD, OpenBSD, NetBSD | **libcurl easy+multi** | bundled OpenSSL + `ca-bundle` via `CURLOPT_CAINFO` (hermetic — not SecureTransport/Schannel) |
+| **wasm** | **`emscripten_fetch`** (async, CORS-bound) | the browser's TLS |
+| **Haiku** | libcurl (packaging gap) | OpenSSL + ca-bundle |
+
+Two packaging gaps to close: **wasm** — curl has no wasm recipe and browser sockets don't exist, so select
+`emscripten_fetch` at compile time behind the same `cvc::net::HttpHandler` interface (do **not** try to
+build libcurl for wasm); **Haiku** — add `haiku` matrix entries to both the curl and openssl recipes
+(upstream builds fine — packaging work aligned with the Haiku self-host effort).
+
+### 13.7 Registration — C++ default, Python override
+
+`register_default_handlers(app)` installs the native handler for `http`/`https` by default. Because §13.2
+registration is **append, first `can_open` wins** with registration-order priority, a later pycvc handler
+**overrides** it (`ex.register_uri_handler("https", my_handler)`) — replacing it wholesale (auth/caching/
+mocking) or wrap-and-delegating to `cvc::net` for the fetch. The C++ default is never removed from the
+build, so unregistering restores it. **The DSL is usable with zero Python** (native + wasm demos, embedded
+hosts).
+
+### 13.8 Sync vs async + thread
+
+**A fetch is not on the draw walk.** The handler contract is **async by default**: `fetch(req)` returns a
+pending handle; the transfer runs **off the resolver thread**; on completion the `resource` is posted back
+onto the resolver's `processEvents()` queue so the binding updates on the resolver thread (no scene state
+touched from the I/O thread). Native: one dedicated libcurl `multi` I/O thread services all transfers
+(`curl_multi_poll`) and pushes completions back; a `fetch_sync()` exists but is legal **only off the
+render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the main thread), so
+`fetch_sync()` is unavailable there — the async path is identical across backends. Returns
+`resource{kind::bytes|local_path}` to slot into §13.4's dispatch-by-kind.
 
 ---
 
@@ -2071,9 +2222,11 @@ ex.register_uri_handler("https", lambda url: requests.get(url, timeout=10).conte
 
 ### 14.2 Python URI-scheme handler — new surface, same wrapper
 
-Because libcvc can't fetch, `http(s)://` and custom remote schemes come from the host, and a Python
-`requests` handler is the easy path. `Exec.register_uri_handler(scheme, callable)` (plus an **app-level**
-variant, since node sources resolve outside any Exec) INCREFs the callable into a `shared_ptr<PyObject>`
+As of v0.10 libcvc fetches natively (§13.6), so `http(s)://` works with zero Python — a Python handler is
+now an **optional override** (auth/caching/mocking policy) rather than the only path, and custom remote
+schemes (`s3://`, `pkg://`, …) are still a natural fit for Python. `Exec.register_uri_handler(scheme,
+callable)` (plus an **app-level** variant, since node sources resolve outside any Exec) INCREFs the
+callable into a `shared_ptr<PyObject>`
 with a GIL-safe DECREF deleter; the lambda does `PyGILState_Ensure` → build the URL `str` → `PyObject_CallObject`
 → convert the return (`str`→string payload, `bytes`→blob, `dict`/`list`→structured) → `Py_DECREF` →
 `Release`; a null return is `PyErr_Fetch`'d and thrown → surfaces as a **load error**, not a crash.
