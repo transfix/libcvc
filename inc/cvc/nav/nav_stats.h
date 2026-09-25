@@ -58,6 +58,7 @@ struct nav_stats_params {
   double clear_safety_m = 2.00; // dwell below this clearance feeds time_below_clear_s
   double min_gap_m = 0.0;       // pairwise distance below this is a vehicle contact (0 = off)
   double reach_eps = 0.5;       // treat reached[i] as a level flag; latch on its rising edge
+  double formation_tol_m = 0.0; // in-slot threshold for formation_arrived; 0 = formation stats OFF
 };
 
 // Per-episode budget. A vehicle is over_budget (and the episode fails) when EITHER
@@ -78,6 +79,13 @@ struct nav_samplers {
   // sim_world::min_clearance() returns NORMALIZED units, so the caller must convert —
   // clearance_m = min_clearance() / cfg.scale — before pointing this here.
   const double *min_clearance_m = nullptr;
+  // Formation slot target for vehicle i in WORLD metres: return true + set (sx,sy) to the vehicle's
+  // intended formation slot (the position it holds station on), or false if it has none this step.
+  // null ⇒ formation stats OFF (the whole formation path degrades to zero, numbers unchanged). The
+  // collector accumulates |pos_i − slot| into slot_error_mean/max and latches formation_arrived
+  // when the final slot error is within params.formation_tol_m. Formation is a NAV concept, so it
+  // lives in the base — a downstream RF layer references the same (veh_index, convoy_id).
+  std::function<bool(int, double &, double &)> formation_slot;
 };
 
 // One per vehicle, accumulated over an episode. Mirrors grl_snam NavStats + the
@@ -89,6 +97,11 @@ struct veh_nav_stats {
   int vehicle_class = 0;
   double robot_radius_m = 0;
   double mass_kg = 0;
+  // formation linkage: index of the vehicle this one holds station on; -1 = the objective (the
+  // anchor/lead) or formation stats off. The linkage EDGE — with slot_error below it makes
+  // formation holding a first-class, formation-agnostic base stat (see
+  // NAV-STATS-INTRINSIC-ROADMAP).
+  int formation_parent = -1;
   // outcome
   bool arrived = false;
   double time_to_goal_s = -1; // first step reached rose; <0 = never
@@ -117,6 +130,13 @@ struct veh_nav_stats {
   // effort / fuel
   double accel_integral = 0; // Σ|Δspeed| raw effort
   double fuel_used = 0;      // the accel_integral proxy until a real f(accel, mass, material) model
+  // formation holding (0 unless a formation_slot sampler is provided) — distance to this vehicle's
+  // slot, and whether it ended in it. The continuous formation-holding measure, distinct from the
+  // mission-arrival latch above (a deep-formation slot is legitimately far from the objective
+  // point).
+  double slot_error_mean_m = 0;
+  double slot_error_max_m = 0;
+  bool formation_arrived = false; // final slot error < params.formation_tol_m
 };
 
 // One per episode; reduces the per-vehicle vector + carries campaign identity.
@@ -159,8 +179,11 @@ public:
 
   episode_nav_stats finish();
 
-  // Optional per-vehicle identity, applied at finish (defaults 0).
-  void set_identity(int i, int convoy_id, int vehicle_class, double robot_radius_m, double mass_kg);
+  // Optional per-vehicle identity, applied at finish (defaults 0). formation_parent (-1 default) is
+  // the formation linkage edge (the vehicle index this one holds station on; -1 =
+  // objective/anchor).
+  void set_identity(int i, int convoy_id, int vehicle_class, double robot_radius_m, double mass_kg,
+                    int formation_parent = -1);
 
 private:
   nav_stats_params p_;
@@ -174,6 +197,10 @@ private:
   std::vector<double> speed_sum_;
   std::vector<int> conv_, cls_;
   std::vector<double> rr_, mass_;
+  // formation-holding accumulators (active only when nav_samplers.formation_slot is provided)
+  std::vector<int> parent_; // formation linkage from set_identity
+  std::vector<double> slot_err_sum_, slot_err_max_, slot_err_last_;
+  std::vector<long> slot_err_cnt_;
 };
 
 // ── Scorecard: aggregate a CORPUS of episodes for training-fitness tracking ──
@@ -200,6 +227,13 @@ struct nav_scorecard {
   double mean_min_sep_m = 0;       // mean over episodes (finite only)
   // material dwell share (fraction of moving time per material id, fleet)
   std::array<double, kNumMaterials> material_time_share{};
+  // formation holding (0 unless a formation_slot sampler was used). arrival = fraction of FOLLOWER
+  // runs that ended in-slot; mission = fraction of episodes where every convoy's lead arrived AND
+  // all its followers ended in-slot (the honest "formation arrived"); slot_error = mean follower
+  // slot error.
+  double form_arrival_rate = 0;
+  double form_mission_rate = 0;
+  double mean_slot_error_m = 0;
 
   std::string to_json() const;
 };
