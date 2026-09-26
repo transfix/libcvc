@@ -63,9 +63,16 @@ Track-1 sub-PR (or batched), gated on Track-1 landing.
   (`fjam/fbw/fsw` via a 4-way `comm_accel` split; `eff_rate`, `bandwidth_slack`, `backbone_uptime` via
   `comm_step_output`; `outage_prob`; `pingpong_rate`) + CoefNet `heads()` + RF-specific formation
   (per-slot RF exposure, connectivity) joined by `(veh_index, convoy_id)`.
-- **3b — state-tree bridge** (SPEC 1): `cvc::gl/nav_stats_publish.{h,cpp}` (base+formation) +
-  `cvc/dbg/nav_stats_publish.{h,cpp}` (RF), wired into `dbg_austin_live3` at the `finish()` seam; per-sim
-  prefix keying; `nav_stats.sims` registry. Then the ImGui stats panel / DSL binding.
+- **3b — state-tree bridge** (SPEC 1), split three ways:
+  - **3b-1** `cvc::gl/nav_stats_publish.{h,cpp}` — base + per-convoy formation scalars on the
+    `state_publisher` value lane, keyed `<prefix>.nav_stats.*` (SceneGraph prefix).
+  - **3b-2** `publish_nav_rasters` — belief/fog planes as version-gated z=1 `cvc::volume` handles on
+    the **data() lane** (VolumeNode-renderable), `sim_world::plane_version(m)` added; efficient
+    realtime storage (deep-copy only on a changed plane).
+  - **3b-3** `cvc/dbg/nav_stats_publish.{h,cpp}` (RF sub-record → `<prefix>.nav_stats.rf.*`, joined by
+    `veh_index`) + `dbg_austin_live3` wiring at the `finish()` seam (base + RF + rasters each frame via
+    the scene's auto-started publisher).
+  Still to do on top: per-sim `nav_stats.sims` registry; the ImGui stats panel / DSL binding.
 - **3c — harness re-point**: `dbg_arrival_check3` sets `formation_tol_m`, passes `formation_slot`,
   `set_identity(..., formation_parent)`, and drops the harness-side `FORMSTATS`/`form_*` bookkeeping in
   favour of the collector's; the scorecard then carries it natively.
@@ -88,8 +95,22 @@ Track-1 sub-PR (or batched), gated on Track-1 landing.
 - [x] **Track 1a — libcvc formation base fields — MERGED transfix/libcvc#421.**
 - [x] **Track 1b — stall / closest-approach — MERGED transfix/libcvc#422.**
 - [x] **Track 1c — belief-coverage + sense-flips — MERGED transfix/libcvc#423.**
-- [~] **Track 1d — drive telemetry — implemented + adversarially reviewed; PR next → completes Track 1.**
-- [ ] Track 2 (grl-snam parity); Track 3 (cvcdbg RF + state/raster bridge); Track 4 (training) — pending.
+- [x] **Track 1d — drive telemetry — MERGED transfix/libcvc#424 → completes Track 1.**
+- [x] **Track 2 — grl-snam Python parity (`scorecard.py` + hand-computed corpus) — MERGED GRL-SNAM#96.**
+- [x] **Track 3a — cvcdbg RF ext fields — MERGED: 3a-1 (`outage_prob`, `pingpong_rate`) cvcdbg#128;
+  3a-2 (`fjam/fbw/fsw_mean`, `mean_eff_rate_mbps`, `backbone_connected_uptime`,
+  `mean_bandwidth_slack_mbps`) cvcdbg#129.** Reserved to Track 4: `composite_score`, `cvar_jam_loss`,
+  `worst_jam_loss`.
+- [x] **Track 3b-1 — libcvc base+formation state-tree publisher (`cvc::gl/nav_stats_publish`) —
+  MERGED transfix/libcvc#425.**
+- [~] **Track 3b-2 — libcvc belief/fog raster bridge (`publish_nav_rasters`, version-gated cvc::volume
+  data() lane + `sim_world::plane_version`) — PR open transfix/libcvc#426 (CI); 4 review defects fixed
+  (consumer UAF, LLP64 offset, sentinel/nullptr gating).**
+- [~] **Track 3b-3 — cvcdbg RF publisher (`cvc::dbg::publish_rf_stats`) + demo3 wiring — PR open
+  CVC-DBG/cvcdbg#130 (hermetic CI). Adversarially reviewed; veh_index join pinned.** ImGui stats
+  panel / DSL binding: still to do on top of 3b.
+- [ ] Track 3c (harness re-point: `dbg_arrival_check3` formation_tol/slot/set_identity, drop FORMSTATS);
+  Track 4 (training Phases 0–3, incl. the deferred composite/CVaR/worst-jam RF fields) — pending.
 
 ## Invariants for every PR here
 Additive / off-by-default; C++⟷Python fixture parity held; torch ⟷ torch-free (`material_train.h`)
