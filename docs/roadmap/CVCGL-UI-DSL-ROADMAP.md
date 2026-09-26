@@ -3245,6 +3245,63 @@ keeps the loader context-agnostic and is the cheapest moment to do it. What stil
 - **Shader footguns** — the VTK replacement **consumes** the `//VTK::` anchor and wasm reserves texture units 0–5 / leaves `tcoord` undeclared (memories `cvcgl-shader-replacement-consumes-anchor`, `cvcgl-wasm-shader-tcoord-undeclared`, `cvcgl-wasm-custom-shader-texture-units`); the first-class `shaders:` loader must encode these as automatic guards (§16.3).
 - **tvision licensing + terminfo closure** — treating tvision as "MIT" on the magiblot header alone would be a mistake; and a hermetic ncursesw+terminfo closure across the glibc-2.35/2.39 + macOS + Windows + BSD fleet is non-trivial. *Mitigation: both gated behind decision #5's sign-off.*
 
+### 16.6 Headless GL rendering — the ImGui/VTK backend in a terminal (EGL → FBO → Sixel/Kitty)
+
+The one thing the ImGui/VTK backend can't do that the terminal backends can is run **without a display**:
+its rendering needs a GL context and a window, so it can't be golden-image-tested in CI and can't run over
+a bare SSH session. There is a clean path out — render on the GPU headless and rasterize the frames into the
+terminal — and it doubles as both a **test harness** and a **product mode**. Worth scoping now because most
+of the machinery already exists.
+
+**What we already have.** `cvc::gl::SceneRenderer` renders **offscreen** by default (`offscreen=true`, no
+display) and hands back the framebuffer: `frameRGB()` (raw RGB) and `writePNG()`. The `ImGuiOverlay` draws
+*inside* VTK's `RenderEvent` framebuffer, so an offscreen capture already includes the ImGui UI (the wasm
+demos rely on exactly this). And the VTK in our deps ships **`vtkEGLRenderWindow`** (+ the vtkglad EGL
+loader) — an **EGL** context binds a hardware GL context directly to the GPU with **no X11/GLX**, which also
+sidesteps the headless-GLX driver-mismatch trap ([[headless-vtk-render-mesa-glx]]). So the missing piece is
+only the last hop: pixels → terminal.
+
+**The pipeline.**
+1. **EGL headless context** — a `vtkEGLRenderWindow` (device-selectable on multi-GPU; software EGL / OSMesa
+   as the no-GPU CI fallback) instead of the onscreen `vtkRenderWindow`. No display server needed.
+2. **Render to an FBO** — the existing offscreen path; the scene *and* the ImGui overlay land in one buffer.
+3. **Readback** — `frameRGB()` today (a `glReadPixels`); a PBO double-buffer for the interactive mode so the
+   read doesn't stall the pipeline.
+4. **Terminal rasterizer** — downscale the RGB frame to the terminal's cell grid and emit it, picking the
+   best surface the terminal actually supports (a fidelity ladder, detected at startup):
+   - **Kitty graphics protocol** — the highest fidelity (true pixels; kitty, wezterm, ghostty).
+   - **Sixel** — broad pixel support (xterm, mlterm, foot, wezterm, mintty).
+   - **Half-block ANSI** — `▀` with a 24-bit fg (top pixel) + bg (bottom pixel) = **2 pixels per cell** in
+     any truecolor terminal; the universal good-enough default. (Quarter-block / braille push density
+     further at the cost of colour.)
+   - **ASCII luminance ramp** — a last resort for a monochrome/legacy terminal.
+   The core produces RGB; the rasterizer is a small, testable pure function (RGB buffer → escape-sequence
+   bytes) with one implementation per tier.
+
+**Two payoffs, and they're distinct from §16.4.** The FTXUI/tvision backends draw terminal **widgets** — a
+*text UI*, no GPU, the real §16 "arbitrary UI handler" story. This is the opposite: it renders the **actual
+GL pixels** (the 3D scene + the ImGui overlay, unchanged) and mirrors them into the terminal. Two
+complementary terminal experiences — a native *text UI* vs a *pixel mirror* of the real renderer.
+- **(a) Headless test harness (near-term, high value).** Render the ImGui/VTK backend through EGL offscreen,
+  capture `frameRGB()`, and assert on pixels / compare against a golden image. This is what closes the gap
+  noted with the Ariadne tests — backend RENDERING becomes CI-testable (EGL software-fallback on a
+  runner without a GPU), instead of only compile-checked + seam-harnessed. It needs *no* terminal
+  rasterizer at all — just EGL + readback + an image-diff — so it lands first.
+- **(b) Product mode: "cvcGL in a terminal" (later).** The real renderer over SSH: the 3D scene + the
+  Ariadne ImGui UI as Sixel/Kitty graphics, with terminal input (keys, and SGR mouse where the terminal
+  reports it, bracketed paste) fed to the VTK interactor / ImGui exactly as the onscreen path does.
+
+**Honest caveats.** Readback is a GPU→CPU stall — fine for a test capture, needs PBO async + a frame cap for
+interactive use. Sixel/Kitty bandwidth and terminal latency bound the frame rate (a few fps over SSH is
+realistic, not 60). EGL device selection matters on multi-GPU boxes, and CI needs a software-EGL/OSMesa
+build for GPU-less runners. Colour fidelity drops per tier (Kitty ≫ Sixel ≫ half-block ≫ ASCII). This is a
+*presentation* of the ImGui/VTK backend, not a new backend — no `.ari` or backend-interface change; it slots
+in beside the native-window and wasm surfaces as a third way to present the same rendered frames.
+
+**Phasing.** (1) EGL offscreen + `frameRGB` **golden-image test harness** for the ImGui/VTK backend (v1.x —
+the testability win). (2) The half-block-ANSI rasterizer (a pure RGB→bytes function + tests — no GPU needed
+to test *it*). (3) Sixel, then Kitty. (4) Interactive input + the `cvcgl --terminal` product mode.
+
 ## 17. Unicode / UTF-8 text (libcvc + pycvc) — a v1 deliverable
 
 > **v0.16 — the text-encoding gap.** Ariadne can *pass* UTF-8 through today (the FTXUI backend
