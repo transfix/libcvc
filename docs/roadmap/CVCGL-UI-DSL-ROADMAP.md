@@ -3323,7 +3323,14 @@ A cross-cutting v1 workstream, sequenced so each phase is independently useful:
    `pad_to_width` (display-width-aware). Gtest `text_test` (11 cases) passes. The width table is a
    curated range set for now; generating it from the Unicode UCD (§17.3) is a later data refresh.
 2. **ImGui font coverage** — replace `AddFontDefaultVector()` with a range-covering font + a glyph-range
-   declaration hook (the visible fix for the reference backend).
+   declaration hook (the visible fix for the reference backend). **✅ LANDED** — `ImGuiOverlay` now
+   resolves a covering font when it builds its context (`load_ui_font`): `setUiFontMemory()` (wasm /
+   embedded) → `setUiFontPath()` → `$CVC_UI_FONT` → a search of common system fonts (DejaVu / Noto /
+   Arial Unicode / …) → the ASCII vector face as a logged fallback. ImGui 1.92 bakes glyphs on demand,
+   so a loaded covering font needs no glyph-range wrangling. Verified: the old default lacks Cyrillic /
+   Greek (`IsGlyphInFont` = 0); DejaVu carries them (= 1). CJK/emoji still need a larger font, supplied
+   the same way (`setUiFont*`). A future refinement is a bundled/`cvcpkg` font so wasm and font-less
+   hosts get coverage without a system font.
 3. **Layout uses display-width** — route §3.0.3 sizing / truncation / the terminal column math through
    `cvc::text::display_width`.
 4. **Codepoint-aware editing** — when editable text lands (§17.5).

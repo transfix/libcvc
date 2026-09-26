@@ -3,6 +3,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 
 struct ImGuiContext; // Dear ImGui (global namespace) — forward-declared so this
                      // header stays imgui-free for consumers that don't draw UI.
@@ -73,6 +74,25 @@ public:
 
   ImGuiOverlay(const ImGuiOverlay &) = delete;
   ImGuiOverlay &operator=(const ImGuiOverlay &) = delete;
+
+  // ---- UI font glyph coverage (roadmap §17.4 / §17.7 phase 2) ---------------
+  // The overlay's default font is a scalable ASCII face (ProggyForever) covering
+  // only Basic Latin, so accented Latin, Cyrillic, Greek, CJK and symbols render
+  // as boxes. Point it at a real font — ImGui 1.92 loads that font's glyphs on
+  // demand — to fix that regardless of which text a UI shows. Call these BEFORE
+  // constructing an overlay (the font is loaded when the ImGui context is built).
+  // When the overlay builds its context it resolves a font in this order:
+  //   1. setUiFontMemory() if set (for wasm / an embedded font), else
+  //   2. setUiFontPath(), else 3. the CVC_UI_FONT environment variable, else
+  //   4. a search of common system fonts (DejaVu / Noto / Arial Unicode / …),
+  //   5. fall back to the ASCII face.
+  // An unfound or unloadable font is a logged fallback, never a hard failure.
+  static void setUiFontPath(const std::string &ttfPath);
+
+  // Supply the UI font as an in-memory TTF (a build with no system fonts — wasm —
+  // or to embed one). The buffer must outlive every overlay. Pass compressed=true
+  // for data produced by ImGui's binary_to_compressed_c.
+  static void setUiFontMemory(const void *ttf, int len, bool compressed = false);
 
   // Your UI. Called once per rendered frame between ImGui::NewFrame() and
   // Render(); just call ImGui::* inside it.
