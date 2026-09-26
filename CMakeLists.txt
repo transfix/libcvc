@@ -82,11 +82,17 @@ if(CVC_ENABLE_CUDA)
   endif()
 endif()
 
-# Default to C++20 so we can use std::format (and other C++20 features)
-# in place of deprecated APIs like sprintf. Callers may still override
-# via -DCMAKE_CXX_STANDARD=23. C++20 is supported by GCC 13+, Clang 17+,
-# and MSVC 19.29+, all of which the project's CI already exercises.
+# C++20 is the committed floor (not just a default): std::format and other C++20
+# features are used in place of deprecated APIs like sprintf, and the Ariadne
+# terminal backend (FTXUI) requires C++20. Callers may raise to 23 via
+# -DCMAKE_CXX_STANDARD=23, but NOT below 20 — a lower override is raised with a
+# warning. C++20 is supported by GCC 13+, Clang 17+, and MSVC 19.29+, all of
+# which the project's CI already exercises.
 if(NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 20)
+elseif(CMAKE_CXX_STANDARD LESS 20)
+  message(WARNING "libcvc requires C++20 or newer; raising CMAKE_CXX_STANDARD "
+                  "${CMAKE_CXX_STANDARD} -> 20.")
   set(CMAKE_CXX_STANDARD 20)
 endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
