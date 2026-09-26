@@ -3315,7 +3315,13 @@ carries a `std::string` value, now contractually UTF-8.
 
 A cross-cutting v1 workstream, sequenced so each phase is independently useful:
 1. **Contract + `cvc::text`** — declare UTF-8 everywhere; land the codepoint/width utility + tests
-   (the enabling layer everything else builds on).
+   (the enabling layer everything else builds on). **✅ LANDED** — `inc/cvc/core/text.h` +
+   `src/cvc/core/text.cpp` in libcvc core (namespace `cvc::text`): `decode`/`encode` (malformed →
+   U+FFFD, never crashes), `codepoint_width`/`display_width` (wcwidth-style: 0 combining/zero-width/
+   control, 2 East-Asian-wide + emoji, 1 otherwise), `codepoint_count`, `is_valid_utf8`,
+   `prev`/`next_codepoint` boundaries, `truncate_to_width` (never splits a wide glyph) and
+   `pad_to_width` (display-width-aware). Gtest `text_test` (11 cases) passes. The width table is a
+   curated range set for now; generating it from the Unicode UCD (§17.3) is a later data refresh.
 2. **ImGui font coverage** — replace `AddFontDefaultVector()` with a range-covering font + a glyph-range
    declaration hook (the visible fix for the reference backend).
 3. **Layout uses display-width** — route §3.0.3 sizing / truncation / the terminal column math through

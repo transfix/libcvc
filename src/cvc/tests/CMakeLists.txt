@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.15)
 # Test executables
 add_executable(app_test app_test.cpp)
 add_executable(thread_pool_test thread_pool_test.cpp)
+add_executable(text_test text_test.cpp)
 add_executable(state_test state_test.cpp)
 add_executable(state_change_journal_test state_change_journal_test.cpp)
 add_executable(state_subscription_router_test state_subscription_router_test.cpp)
@@ -151,6 +152,7 @@ add_executable(world_bundle_test world_bundle_test.cpp)
 set(TEST_TARGETS
   app_test
   thread_pool_test
+  text_test
   state_test
   state_change_journal_test
   state_subscription_router_test
@@ -352,6 +354,13 @@ target_link_libraries(app_test
 )
 
 target_link_libraries(thread_pool_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(text_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1475,6 +1484,7 @@ endfunction()
 
 cvc_discover_tests(app_test)
 cvc_discover_tests(thread_pool_test)
+cvc_discover_tests(text_test)
 cvc_discover_tests(state_test)
 cvc_discover_tests(voxels_test)
 cvc_discover_tests(volume_test)
