@@ -13,6 +13,8 @@
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/core/config.h>     // CVC_VERSION_STRING (generated from project(VERSION))
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -199,8 +201,17 @@ bool flag(const YAML::Node &n, const char *key, bool dflt = false) {
   const YAML::Node v = n[key];
   if (!v || !v.IsScalar())
     return dflt;
-  const std::string s = v.Scalar();
-  return s == "true" || s == "1" || s == "yes" || s == "on";
+  // Case-insensitive over the YAML boolean spellings (yaml-cpp's Scalar() is the raw,
+  // UNNORMALIZED text, so "True"/"YES"/"On" would otherwise miss) — keeps "1"/"0" too.
+  // This matters most for `required:` on a customs entry, a fail-fast SAFETY flag.
+  std::string s = v.Scalar();
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (s == "true" || s == "1" || s == "yes" || s == "on" || s == "y")
+    return true;
+  if (s == "false" || s == "0" || s == "no" || s == "off" || s == "n")
+    return false;
+  return dflt;
 }
 
 std::string action(const YAML::Node &n) {
@@ -833,13 +844,22 @@ void schema_validate(const YAML::Node &doc, Ctx &ctx) {
 // Parse the `customs:` block (§ extensibility): the custom types the document uses.
 // Each entry names exactly one of widget:/node:/block: with an optional `required:`
 // flag (default false — a missing one warns; `required: true` fails the load).
-std::vector<CustomRequirement> parse_customs(const YAML::Node &c) {
+std::vector<CustomRequirement> parse_customs(Ctx &ctx, const YAML::Node &c) {
   std::vector<CustomRequirement> out;
   if (!c || !c.IsSequence())
     return out;
   for (const YAML::Node &e : c) {
     if (!e.IsMap())
       continue;
+    const int kinds = static_cast<int>(has(e, "widget")) + static_cast<int>(has(e, "node")) +
+                      static_cast<int>(has(e, "block"));
+    if (kinds == 0)
+      continue; // no widget:/node:/block: key — not a custom declaration
+    if (kinds > 1) {
+      ctx.warn("ari: customs entry names more than one of widget:/node:/block: — ignored "
+               "(declare one custom per entry)");
+      continue;
+    }
     CustomRequirement req;
     if (has(e, "widget")) {
       req.kind = CustomRequirement::Kind::Widget;
@@ -847,15 +867,16 @@ std::vector<CustomRequirement> parse_customs(const YAML::Node &c) {
     } else if (has(e, "node")) {
       req.kind = CustomRequirement::Kind::Node;
       req.name = str(e, "node");
-    } else if (has(e, "block")) {
+    } else {
       req.kind = CustomRequirement::Kind::Block;
       req.name = str(e, "block");
-    } else {
-      continue; // no widget:/node:/block: key — not a custom declaration
     }
     req.required = flag(e, "required", false); // default optional (warn); required: true = fail
-    if (!req.name.empty())
-      out.push_back(req);
+    if (req.name.empty()) {
+      ctx.warn("ari: customs entry declares a custom with no name — ignored");
+      continue;
+    }
+    out.push_back(req);
   }
   return out;
 }
@@ -879,7 +900,12 @@ LoadResult load_node(const YAML::Node &doc) {
   // can't satisfy fails the load (required) or warns (optional). Widget/block customs
   // are checked here (their registries are core); NODE customs are checked by
   // cvc::gl::ariadne::verify_scene_customs before realize (that registry is cvcGL).
-  r.customs = doc.IsMap() ? parse_customs(doc["customs"]) : std::vector<CustomRequirement>{};
+  const YAML::Node customs_node = doc.IsMap() ? doc["customs"] : YAML::Node();
+  if (customs_node.IsDefined() && !customs_node.IsSequence())
+    ctx.warn("ari: customs: must be a SEQUENCE of {widget|node|block: name, required?} entries "
+             "— this customs block is not a sequence and was ignored, so its declarations "
+             "(including any required:) are NOT enforced");
+  r.customs = parse_customs(ctx, customs_node);
   for (const CustomRequirement &req : r.customs) {
     const char *kind = "widget";
     bool present = true;

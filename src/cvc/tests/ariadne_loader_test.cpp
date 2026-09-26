@@ -980,3 +980,71 @@ customs:
   EXPECT_EQ(r.customs[0].kind, CustomRequirement::Kind::Node);
   EXPECT_TRUE(r.customs[0].required);
 }
+
+TEST(AriadneCustoms, MissingRequiredBlockFailsLoad) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  - block: definitely_unregistered_block_xyz
+    required: true
+windows: [ { window: W, children: [] } ]
+)");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("requires custom block"), std::string::npos);
+}
+
+TEST(AriadneCustoms, RegisteredBlockSatisfiesRequirement) {
+  SKIP_WITHOUT_YAML();
+  register_ari_block("customs_ok_block", [](const Value &, LoadResult &) {});
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  - block: customs_ok_block
+    required: true
+windows: [ { window: W, children: [] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+}
+
+TEST(AriadneCustoms, RequiredHonorsCanonicalYamlBooleanSpelling) {
+  SKIP_WITHOUT_YAML();
+  // `required: True` (capital) is a valid YAML boolean — it MUST still fail fast, not
+  // silently downgrade to a warning (the safety-gate case-sensitivity fix).
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  - widget: definitely_unregistered_qq
+    required: True
+)");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("requires custom widget"), std::string::npos);
+}
+
+TEST(AriadneCustoms, MalformedCustomsBlockWarnsNotSilent) {
+  SKIP_WITHOUT_YAML();
+  // A customs: written as a MAP (dropped the sequence dash) must not be silently
+  // dropped — it warns, so a botched required: declaration is visible.
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  widget: labeled
+  required: true
+)");
+  ASSERT_TRUE(r.ok) << r.error; // ignored, not fatal — but warned
+  EXPECT_TRUE(has_warning(r, "not a sequence"));
+  EXPECT_TRUE(r.customs.empty());
+}
+
+TEST(AriadneCustoms, MultipleKindKeysIgnoredWithWarning) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  - widget: a
+    node: b
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "more than one"));
+  EXPECT_TRUE(r.customs.empty()); // the ambiguous entry is dropped
+}
