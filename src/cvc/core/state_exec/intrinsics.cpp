@@ -74,6 +74,31 @@ std::string coerce_state_string(const value_t &v) {
   return to_string(v); // list/dict/symbol/closure — readable fallback
 }
 
+// Recursively clone a value's compound structure (list/dict) so the caller gets a PRIVATE
+// copy that does not alias node-resident storage. Scalars/symbols copy by value. Used by
+// state-data-get so a fetched structure cannot be mutated in place back into the state tree.
+value_t deep_copy(const value_t &v) {
+  if (auto *l = std::get_if<list_ptr>(&v.v)) {
+    std::vector<value_t> out;
+    if (*l) {
+      out.reserve((*l)->size());
+      for (const auto &e : **l)
+        out.push_back(deep_copy(e));
+    }
+    return make_list(std::move(out));
+  }
+  if (auto *dp = std::get_if<dict_ptr>(&v.v)) {
+    std::vector<std::pair<std::string, value_t>> out;
+    if (*dp) {
+      out.reserve((*dp)->size());
+      for (const auto &kv : **dp)
+        out.emplace_back(kv.first, deep_copy(kv.second));
+    }
+    return make_dict(std::move(out));
+  }
+  return v; // scalar / symbol (opaque callables are refused at state-data-set)
+}
+
 void require_root(const intrinsics_context *ctx, const char *name) {
   if (!ctx->root)
     throw std::runtime_error(std::string(name) + ": no state root bound");
@@ -156,12 +181,14 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   auto d = node->data();
   if (d.empty())
     return nil_value;
-  // If the payload is a DSL value_t (the shape state-data-set stores), return it
-  // directly so structured data round-trips transparently — (state-data-set "k" (list
-  // 1 2 3)) then (state-data-get "k") yields (1 2 3), not an opaque handle. Genuine
-  // host data (any other C++ type parked on the node) still comes back as a data_object.
+  // If the payload is a DSL value_t (the shape state-data-set stores), return a DEEP COPY
+  // so structured data round-trips transparently — (state-data-set "k" (list 1 2 3)) then
+  // (state-data-get "k") yields (1 2 3) — WITHOUT aliasing the node's stored storage (a
+  // returned list_ptr/dict_ptr would otherwise let a caller mutate persistent state in
+  // place via append/set-nth, defeating the read-only contract). Genuine host data (any
+  // other C++ type parked on the node) still comes back as a data_object.
   if (auto *v = boost::any_cast<value_t>(&d))
-    return *v;
+    return deep_copy(*v);
   auto obj = std::make_shared<data_object>();
   obj->payload = d;
   obj->type_name = d.type().name();
@@ -172,6 +199,16 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   expect_exact(args, 2, "state-data-set");
   require_root(ctx, "state-data-set");
   auto &path = as_string(args[0], "state-data-set");
+  // Refuse to store a callable. A native_fn/closure/generator captures an environment or
+  // intrinsics_context that may not outlive this (persistent) node — a use-after-free
+  // waiting to happen — and a stored callable is an invocation channel that would bypass
+  // any environment allowlist a later reader relies on. The data channel is for structured
+  // DATA (scalars/lists/dicts), not code.
+  if (std::holds_alternative<native_fn>(args[1].v) ||
+      std::holds_alternative<closure_ptr>(args[1].v) ||
+      std::holds_alternative<generator_ptr>(args[1].v))
+    throw std::runtime_error(
+        "state-data-set: cannot store a callable (function/closure/generator) as data");
   // Store the value_t as boost::any
   (*ctx->root)(path).data(boost::any(args[1]));
   return nil_value;

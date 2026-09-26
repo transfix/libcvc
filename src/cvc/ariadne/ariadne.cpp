@@ -165,16 +165,14 @@ namespace {
 namespace se = cvc::state_exec;
 
 // Evaluates a widget's read-lane expressions (visible_when, …) each frame on ONE
-// long-lived stackless evaluator over a DEFAULT-DENY environment, allowlisting BOTH the
-// builtins and the intrinsics. What is bound: pure operators/coercions, bounded list &
-// dict access, and the side-effect-free state READERS. What is NOT bound: every writer
-// (state-set/delete/…), scheduler op (spawn/kill/msg-*/sleep), state watch, and I/O
-// (print) — AND, crucially, the builtins that loop INSIDE a single native evaluator step
-// (generator/next/range/collect): the step & time caps are only checked BETWEEN steps, so
-// one of those could otherwise spin forever or materialise an unbounded list before any
-// cap fired. Special forms (if/begin/while/for/let/lambda/…) and the true/false/nil
-// literals come from the parser/evaluator, not the env, so they still work. A predicate
-// that reaches for anything off the allowlist hits an unbound symbol and fails fail-safe.
+// long-lived stackless evaluator over a DEFAULT-DENY, SCALAR-ONLY environment. Only scalar
+// arithmetic/comparison/coercion/logic and the side-effect-free scalar/bool state readers
+// are bound; every writer, scheduler op, watch, and I/O is excluded — as is anything that
+// could do unbounded work in one native step (see the ctor for why: the caps are checked
+// only BETWEEN steps, so compound builders/walkers and `apply` are barred, not just the
+// obvious looping builtins). A predicate that reaches off the allowlist hits an unbound
+// symbol and fails fail-safe. Special forms (if/begin/while/for/let/lambda/…) and the
+// true/false/nil literals are parser/evaluator-intrinsic, so an empty base still runs them.
 //
 // Each distinct expression is parsed ONCE and cached. Every eval is bounded three ways:
 // a per-eval step cap, a per-eval wall-time cap, and a per-FRAME aggregate wall-time
@@ -198,25 +196,32 @@ public:
     ctx_.pid = 1;
     se::apply_chroot(ctx_, root, prefix);
 
-    // DEFAULT-DENY for BOTH builtins and intrinsics: start from an EMPTY environment and
-    // copy in ONLY the explicit allowlist below (the evaluator's special forms and the
-    // true/false/nil literals are not env entries, so an empty base still evaluates them).
-    // This is what closes the step/time cap: the excluded generator/next/range/collect are
-    // exactly the builtins that loop inside one native step, and print is the only I/O.
+    // DEFAULT-DENY: start from an EMPTY environment and copy in ONLY the SCALAR allowlist
+    // below (special forms — if/begin/let/while/for/lambda/defun — and true/false/nil are
+    // parser/evaluator-intrinsic, so an empty base still evaluates them).
+    //
+    // The allowlist is deliberately SCALAR-ONLY. This is what actually closes the caps: the
+    // step & time caps are checked only BETWEEN evaluator steps, so ANY primitive that does
+    // work proportional to caller-supplied *structure* in one native step can bypass them —
+    // build a shared-pointer DAG with `list`/`cons` (O(d) steps, 2^d logical nodes) then walk
+    // it with `str`/`=`, or double a string with `str-concat`. So NO compound constructor
+    // (list/cons/dict/append/…), NO structure walker (str/str-concat), NO structure accessor/
+    // mutator (nth/car/set-nth/get-attr/…), and NO `apply` (which could invoke a native_fn
+    // fetched from state) is bound — nor the compound-returning readers (state-children,
+    // state-data-get). What remains does O(1)/O(len) work per call over scalars only, so a
+    // predicate's total work is bounded by the step count, which the caps enforce. Loops and
+    // recursion live in special forms (while/for/lambda), which yield per step, so they too
+    // are step-capped.
     env_ = std::make_shared<se::environment>();
     se::environment_ptr full = se::builtins::make_default_environment();
     se::register_intrinsics(full, &ctx_);
     static const char *const kAllowed[] = {
-        // pure operators / coercions / type predicates / logic
-        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "str-concat", "str",
-        "int", "float", "is-int", "is-float", "is-string", "is-null", "is-list", "type-of",
-        "not", "and", "or", "apply",
-        // bounded list / dict access (operate on values already in hand)
-        "list", "car", "cdr", "cons", "nth", "set-nth", "length", "append", "slice",
-        "del-nth", "dict", "get-attr", "set-attr", "del-attr",
-        // side-effect-free state READERS (no writer / scheduler / watch is copied)
-        "state-get", "state-exists", "state-children", "state-data-get", "state-root-path",
-        "state-has-expiry", "state-is-expired"};
+        // scalar arithmetic / comparison / coercion / type predicates / logic
+        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "is-int",
+        "is-float", "is-string", "is-null", "type-of", "not", "and", "or",
+        // side-effect-free SCALAR/BOOL state readers (no writer / scheduler / watch, and NOT
+        // the compound-returning state-children / state-data-get)
+        "state-get", "state-exists", "state-root-path", "state-has-expiry", "state-is-expired"};
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);

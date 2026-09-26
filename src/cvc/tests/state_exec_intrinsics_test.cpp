@@ -141,6 +141,29 @@ TEST_F(StateTreeIntrinsicsTest, StateDataRoundTripsTheValue) {
   EXPECT_EQ((*gl)->size(), 3u);
 }
 
+TEST_F(StateTreeIntrinsicsTest, StateDataSetRejectsCallables) {
+  // Storing a callable is a lifetime hazard (it captures a context/env that may not outlive
+  // the node) and an invocation channel that bypasses env allowlists — refuse it.
+  auto *fn = env->lookup("state-get"); // a native_fn value_t
+  ASSERT_NE(fn, nullptr);
+  EXPECT_THROW(call("state-data-set", {std::string("bad"), *fn}), std::runtime_error);
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataGetReturnsPrivateCopy) {
+  // The fetched structure must NOT alias the node's stored storage: mutating it must not
+  // change what a later state-data-get returns (else a "read" could mutate persistent state).
+  call("state-data-set",
+       {std::string("dc"), make_list({value_t{int64_t{1}}, value_t{int64_t{2}}})});
+  auto got = call("state-data-get", {std::string("dc")});
+  auto *gl = std::get_if<list_ptr>(&got.v);
+  ASSERT_NE(gl, nullptr);
+  (*gl)->push_back(value_t{int64_t{99}}); // mutate the returned handle
+  auto again = call("state-data-get", {std::string("dc")});
+  auto *gl2 = std::get_if<list_ptr>(&again.v);
+  ASSERT_NE(gl2, nullptr);
+  EXPECT_EQ((*gl2)->size(), 2u); // stored data is untouched -> the get returned a private copy
+}
+
 TEST_F(StateTreeIntrinsicsTest, StateSetCoercesScalarsToString) {
   // state-set stores string-typed scalars; non-string values are coerced to their natural
   // lexical form rather than throwing — (state-set "n" 10) stores "10".

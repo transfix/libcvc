@@ -899,16 +899,23 @@ the **same state tree the widgets bind to**.
 > `CVC_STATE_EXEC`-gated). `Widget::visible_when` is a predicate the walk re-evaluates each
 > frame; falsy → the widget and its subtree are skipped (in a grid, a hidden child consumes
 > **no** cell). Implementation notes that refine §4.1 below as-built:
-> - **Default-deny env, both layers.** The read env starts EMPTY and allowlists only pure
->   operators/coercions, bounded list/dict access, and the side-effect-free state *readers*
->   (`state-get`/`exists`/`children`/`data-get`/`root-path`/`has-expiry`/`is-expired`).
->   Crucially this also excludes the builtins that loop **inside one native evaluator step**
->   (`generator`/`next`/`range`/`collect`) and the only I/O builtin (`print`) — the caps are
->   checked only *between* steps, so an internally-looping builtin would otherwise bypass
->   them. Special forms and `true`/`false`/`nil` are parser/evaluator-intrinsic, so an empty
->   base still evaluates them; a reach for anything off the allowlist is an unbound symbol →
->   fail-safe. Per-eval isolation (each eval runs in a fresh child scope) keeps a predicate's
->   `set`/`defun` from leaking across widgets or frames.
+> - **Default-deny, SCALAR-ONLY env.** The read env starts EMPTY and allowlists only scalar
+>   arithmetic/comparison/coercion/logic and the side-effect-free scalar/bool state readers
+>   (`state-get`/`exists`/`root-path`/`has-expiry`/`is-expired`). This is what makes the caps
+>   real: they are checked only *between* evaluator steps, so ANY primitive that does work
+>   proportional to caller-supplied *structure* in one native step defeats them — a
+>   `list`/`cons` shared-pointer DAG (O(d) steps, 2^d logical nodes) walked by `str`/`=`, or
+>   `str-concat` string-doubling. So NO compound constructor/accessor/mutator, NO structure
+>   walker (`str`/`str-concat`), NO `apply` (it could invoke a `native_fn` fetched from state),
+>   and NOT the compound-returning readers (`state-children`/`state-data-get`) are bound —
+>   alongside every writer/scheduler/watch/`print`. What remains does O(1)/O(len) work per
+>   call over scalars, so total work is bounded by the step count. Special forms and
+>   `true`/`false`/`nil` are parser/evaluator-intrinsic (an empty base still runs them); loops/
+>   recursion live in special forms, which yield per step and so are step-capped. Per-eval
+>   isolation (a fresh child scope) keeps a predicate's `set`/`defun` from leaking across
+>   widgets or frames. (The `state-data` channel itself was also hardened: `state-data-set`
+>   refuses to store callables, and `state-data-get` returns a deep copy — so no context can
+>   smuggle a `native_fn` or mutate node-resident data through a fetched handle.)
 > - **Three-way bound.** Per-eval **step** cap + per-eval **wall-time** cap + a per-**frame**
 >   aggregate wall-time budget (so N reactive widgets can't together stall a frame). A step
 >   cap returns `done==false`; a time cap throws `evaluation_timeout`; both → fail-safe hide

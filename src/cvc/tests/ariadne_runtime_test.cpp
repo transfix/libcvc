@@ -615,6 +615,34 @@ TEST(AriadneReactive, HiddenGridChildConsumesNoCell) {
   EXPECT_EQ(mb.times("next_cell"), 2); // only the 2 VISIBLE children take a cell (no shift)
 }
 
+TEST(AriadneReactive, ReadLaneExcludesCompoundAndInvokeBuiltins) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The read-lane env is scalar-only: compound builders/walkers (which could do unbounded
+  // work in one uninterruptible native step) and apply / state-data-get (an invocation /
+  // capability-smuggling channel) are NOT bound. A predicate using one is an unbound symbol
+  // -> fail-safe hidden. This locks the allowlist against a regression that reopens the cap.
+  Widget wl = text("uses_list");
+  wl.visible_when = "(is-null (list 1 2))"; // list not bound
+  Widget wc = text("uses_concat");
+  wc.visible_when = "(is-string (str-concat \"a\" \"b\"))"; // str-concat not bound (string doubling)
+  Widget wa = text("uses_apply");
+  wa.visible_when = "(apply and (list #t))"; // apply not bound (invoke a fetched fn)
+  Widget wd = text("uses_data_get");
+  wd.visible_when = "(is-null (state-data-get \"k\"))"; // state-data-get not bound in read-lane
+  rt.set_root(group({wl, wc, wa, wd}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:uses_list"));
+  EXPECT_FALSE(mb.saw("text_line:uses_concat"));
+  EXPECT_FALSE(mb.saw("text_line:uses_apply"));
+  EXPECT_FALSE(mb.saw("text_line:uses_data_get"));
+  EXPECT_FALSE(rt.take_reactive_warnings().empty()); // each reported an unbound symbol
+}
+
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
   if (!have_state_exec())
     GTEST_SKIP();
