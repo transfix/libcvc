@@ -247,3 +247,54 @@ TEST(AriadneRuntime, NoBackendRenderIsSafeNoop) {
   rt.render(); // no backend set — must not crash
   SUCCEED();
 }
+
+// --- extensibility: custom widget types (register_widget_type) ---------------
+
+TEST(AriadneRuntime, CustomWidgetComposesAndBinds) {
+  cvc::app app;
+  Runtime rt(app, ""); // empty prefix -> bind resolution is identity
+  MockBackend mock;
+  rt.set_backend(&mock);
+  bool fired = false;
+  rt.on("custom_fired", [&] { fired = true; });
+
+  // A capture-free custom widget: composes built-in primitives, its structure depends
+  // on live state, and it raises an event — all through the WidgetEmitContext.
+  register_widget_type("vec2", [](const Widget &w, const WidgetEmitContext &ctx) {
+    ctx.emit(text(w.label));                          // -> text_line:<label>
+    ctx.emit(slider_float("x", w.bind + ".x", 0, 1)); // -> slider_double:x (core binds it)
+    if (ctx.read("ui.mode") == "advanced")            // structure depends on state
+      ctx.emit(slider_float("y", w.bind + ".y", 0, 1));
+    ctx.fire("custom_fired");
+  });
+  EXPECT_TRUE(has_widget_type("vec2"));
+
+  cvc::state::instance(app)("ui.mode").value(std::string("advanced"));
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "vec2";
+  c.label = "Pos";
+  c.bind = "pos";
+  rt.set_root(group({c}));
+  rt.render();
+
+  EXPECT_TRUE(mock.saw("text_line:Pos"));    // composed literal caption
+  EXPECT_TRUE(mock.saw("slider_double:x"));  // composed bound slider
+  EXPECT_TRUE(mock.saw("slider_double:y"));  // state-dependent extra slider (advanced)
+  rt.drain();
+  EXPECT_TRUE(fired); // ctx.fire enqueued; drain ran the handler off the walk
+}
+
+TEST(AriadneRuntime, UnregisteredCustomWidgetDrawsPlaceholder) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mock;
+  rt.set_backend(&mock);
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "nope";
+  rt.set_root(group({c}));
+  rt.render();
+  // Unregistered: a visible placeholder, not a crash or a silent drop.
+  EXPECT_TRUE(mock.saw("text_line:[nope?]"));
+}

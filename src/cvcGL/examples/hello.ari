@@ -47,7 +47,11 @@ windows:
         options: [shared, grouped, private]
         default: shared
       - separator
-      - text: "belief ="
+      # A custom widget type (§ extensibility) — the demo registers a "labeled" handler
+      # (register_widget_type) that composes a caption + a read-only value view. An
+      # unregistered type would draw a "[type?]" placeholder.
+      - type: labeled
+        title: Belief
         bind: demo.belief
       - checkbox: Show mesh
         bind: demo.show_mesh

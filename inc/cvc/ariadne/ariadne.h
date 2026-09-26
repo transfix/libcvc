@@ -78,6 +78,40 @@ private:
   std::unique_ptr<Impl> m_;
 };
 
+// --- extensibility: custom widget types --------------------------------------
+//
+// Context handed to a custom-widget emit fn. It lets the fn COMPOSE built-in widgets
+// (the core still owns ALL cvc::state binding), read live state (so the widget's
+// structure can depend on state), and raise action events. It exposes no Backend and
+// no toolkit — a custom widget is therefore backend-NEUTRAL: it works on ImGui, a
+// terminal, wasm, and every future backend because it drives the same primitives the
+// built-ins do.
+struct WidgetEmitContext {
+  // Emit a built-in child widget through the normal walk (binding handled by the
+  // core) — e.g. a labelled vec3 editor = a Text + three slider_float children.
+  std::function<void(const Widget &)> emit;
+  // The current raw-string value at a bind path (resolved against the document prefix,
+  // exactly as a bound widget resolves it); "<unset>" if the path has no value.
+  std::function<std::string(const std::string &bind)> read;
+  // Raise a named action event (drained on the host thread, like a Button's `on:`).
+  std::function<void(const std::string &event)> fire;
+};
+
+// A custom widget type's emit fn: render the widget `w` (config in `w.props`, a
+// cvc::ariadne::Value; bind `w.bind`; nested `w.children`) by composing built-in
+// widgets through `ctx`. Runs each frame during the walk (immediate mode).
+using WidgetEmitFn = std::function<void(const Widget &w, const WidgetEmitContext &ctx)>;
+
+// Register (or replace) the emit fn for a custom widget `type` — a type the built-ins
+// don't handle, which the loader carries as a Kind::Custom widget (custom_type +
+// props). An unregistered custom type draws a labelled placeholder. Process-global and
+// thread-safe; register before render(). Mirrors the register_scene_node_type /
+// register_ari_block registries.
+void register_widget_type(const std::string &type, WidgetEmitFn emit);
+
+// Whether a custom widget `type` has a registered emit fn (test/introspection).
+bool has_widget_type(const std::string &type);
+
 } // namespace ariadne
 } // namespace cvc
 

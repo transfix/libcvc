@@ -16,6 +16,7 @@
 
 #include <exception>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -39,6 +40,35 @@ std::string read_string(cvc::app &ctx, const std::string &path) {
 }
 
 } // namespace
+
+// --- custom widget type registry (§ extensibility) --------------------------
+namespace {
+std::mutex &widget_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::unordered_map<std::string, WidgetEmitFn> &widget_registry() {
+  static std::unordered_map<std::string, WidgetEmitFn> r;
+  return r;
+}
+WidgetEmitFn lookup_widget(const std::string &type) {
+  std::lock_guard<std::mutex> lock(widget_mutex());
+  auto it = widget_registry().find(type);
+  return it != widget_registry().end() ? it->second : WidgetEmitFn{};
+}
+} // namespace
+
+void register_widget_type(const std::string &type, WidgetEmitFn emit) {
+  if (!emit || type.empty())
+    return;
+  std::lock_guard<std::mutex> lock(widget_mutex());
+  widget_registry()[type] = std::move(emit);
+}
+
+bool has_widget_type(const std::string &type) {
+  std::lock_guard<std::mutex> lock(widget_mutex());
+  return widget_registry().find(type) != widget_registry().end();
+}
 
 struct Runtime::Impl {
   cvc::app &app;
@@ -204,6 +234,23 @@ void Runtime::Impl::emit(const Widget &w) {
     if (b.button(label))
       enqueue(w.on);
     break;
+
+  case Kind::Custom: {
+    // A registered custom widget type composes built-in widgets through a context
+    // that reuses the core's binding; an unregistered type shows a placeholder. The
+    // fn drives only built-ins, so a custom widget renders on every backend.
+    const WidgetEmitFn fn = lookup_widget(w.custom_type);
+    if (fn) {
+      WidgetEmitContext ctx;
+      ctx.emit = [this](const Widget &child) { emit(child); };
+      ctx.read = [this](const std::string &bind) { return read_string(app, resolve(bind)); };
+      ctx.fire = [this](const std::string &event) { enqueue(event); };
+      fn(w, ctx);
+    } else {
+      b.text_line(("[" + w.custom_type + "?]").c_str()); // unregistered: visible, not silent
+    }
+    break;
+  }
   }
 }
 

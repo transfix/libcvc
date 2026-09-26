@@ -3223,13 +3223,28 @@ strings — no yaml-cpp, `inc/cvc/ariadne/value.h`).
   meta/menubar/windows/overlays/root/children/scene) with a registered parser is handed its content as a
   `Value` and the `LoadResult`; it stashes parsed data into `LoadResult::extras` (or appends to
   `root`/`scene`) and may add warnings.
-- **Deferred (not requested now):** custom *widget* types (a `Kind::Custom` + a generic `Backend::custom`
-  escape virtual — a one-time ABI touch of every backend) and per-type JSON-Schema fragments (base schema
-  is already permissive, so custom types validate today; a fragment API would tighten field validation).
+- **Custom widget types (core, backend-neutral).** `register_widget_type("<type>", emit_fn)`
+  (`inc/cvc/ariadne/ariadne.h`). The loader turns an unknown `type:` into a `Kind::Custom` widget carrying
+  `custom_type` + a `props` `Value` bag + `children` (this also fixed the old lossy fallback, which dropped
+  unknown widgets to an empty group). At `emit()`, the registered `WidgetEmitFn` renders the widget by
+  **composing built-in widgets** through a `WidgetEmitContext` (`ctx.emit(child)` — the core still owns all
+  `cvc::state` binding; `ctx.read(bind)` for state-dependent structure; `ctx.fire(event)` for actions). It
+  exposes no `Backend` and no toolkit, so a custom widget works on **every** backend (ImGui, terminal,
+  wasm) with **no `Backend` ABI change** — the chosen design over a per-widget backend virtual. An
+  unregistered type draws a `[type?]` placeholder.
+- **Deferred:** a raw-backend *novel primitive* (a color wheel / GLSL canvas via raw ImGui) — that needs
+  one generic non-pure `Backend::custom` escape virtual (backends inherit a no-op default, so it is not a
+  forced edit) plus a per-backend draw registry, and only the ImGui backend would render it. The
+  compositional path above covers composite widgets; the escape virtual is the follow-up for genuinely new
+  primitives. Also deferred: per-type JSON-Schema fragments (the base schema is already permissive, so
+  custom types validate today; a fragment API would tighten field validation).
 
-Verified end-to-end: loader gtests for props capture + a custom block, and an offscreen cvcGL test that
-registers a custom `beacon` node type — its realizer builds a `GraphicsNode`, reads its `props`, and
-registers a per-frame tick that `tick_scene` runs.
+Verified end-to-end: loader gtests for props capture + a custom block + a custom widget preserved as
+`Kind::Custom`; runtime gtests that a registered widget composes primitives, its structure depends on
+state, and it fires events (+ an unregistered type draws a placeholder); and an offscreen cvcGL test that
+registers a custom `beacon` node type — its realizer builds a `GraphicsNode`, reads its `props`, registers
+a per-frame tick that `tick_scene` runs, and a built-in child nests under it with composed transforms.
+`ariadne_hello`/`hello.ari` demonstrate a `labeled` custom widget live.
 
 Do the move **now**, while the code is ~480 lines across four files, so the YAML loader, `state_exec`, and validation are written against `cvc::ariadne` from day one and never have to be un-coupled.
 1. **Headers** — `inc/cvc/gl/ariadne/{widget.h,ariadne.h}` -> `inc/cvc/ariadne/`; add `inc/cvc/ariadne/backend.h`. Namespace `cvc::gl::ariadne -> cvc::ariadne`; drop all ImGui/VTK includes.

@@ -59,6 +59,17 @@ int main(int argc, char **argv) {
 
   using namespace cvc::ariadne; // the builder helpers
 
+  // A custom widget type (§ extensibility), registered BEFORE the load so the document
+  // finds a handler. It composes built-in widgets — a caption + a read-only value view
+  // — so it works on any backend with no Backend change. A .ari uses it as
+  //   - type: labeled
+  //     title: Belief
+  //     bind: demo.belief
+  register_widget_type("labeled", [](const Widget &w, const WidgetEmitContext &ctx) {
+    ctx.emit(text(w.props.str("title", w.label)));
+    ctx.emit(text_bound("  =", w.bind));
+  });
+
   // Build the widget tree: from a .ari file if one is given on the command line
   // (`ariadne_hello hello.ari`), else the built-in programmatic tree below —
   // which the shipped hello.ari mirrors, so the two render identically.
@@ -114,7 +125,7 @@ int main(int argc, char **argv) {
                              checkbox("Wireframe", "demo.wire", false),
                              combo("Belief", "demo.belief", {"shared", "grouped", "private"}, "shared"),
                              separator(),
-                             text_bound("belief =", "demo.belief"),
+                             custom("labeled", "Belief", "demo.belief"), // a custom widget type
                              checkbox("Show mesh", "demo.show_mesh", true),
                              button("Reset", "reset"),
                          }),

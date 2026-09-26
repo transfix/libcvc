@@ -10,7 +10,8 @@
 
 #include <cvc/ariadne/loader.h>
 
-#include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
+#include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
+#include <cvc/core/config.h>     // CVC_VERSION_STRING (generated from project(VERSION))
 
 #include <cstdlib>
 #include <functional>
@@ -210,6 +211,14 @@ std::string action(const YAML::Node &n) {
 }
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n);
+Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
+
+// Widget keys the loader consumes directly; everything else on a custom widget flows
+// into Widget::props for a registered emit fn to read.
+inline bool known_widget_key(const std::string &k) {
+  return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" ||
+         k == "on" || k == "children" || k == "items" || k == "id";
+}
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
   std::vector<Widget> out;
@@ -455,13 +464,39 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
     return button(label, on);
   }
 
-  if (!type.empty()) {
-    if (type != "group" && type != "panel")
-      ctx.warn("ari: unknown widget type '" + type + "' — loaded as a plain group");
-  } else if (!has(n, "children") && n.size() > 0) {
-    // No recognized type key and no `type:`; a bare `{ children: [...] }` is a
-    // valid anonymous group, but a map with some OTHER first key is a typo'd
-    // widget (e.g. `- frobnicate: ...` instead of a real widget kind).
+  if (!type.empty() && type != "group" && type != "panel") {
+    // A CUSTOM widget type (§ extensibility) — preserved as Kind::Custom carrying its
+    // props + children, for a registered emit fn (register_widget_type) to render.
+    // (No longer silently collapsed to an empty group.) An unregistered type draws a
+    // labelled placeholder at emit; validation still warns if it is a typo.
+    Widget c;
+    c.kind = Kind::Custom;
+    c.custom_type = type;
+    c.label = label;
+    c.bind = str(n, "bind");
+    c.on = action(n);
+    const YAML::Node kids = n["children"].IsDefined() ? n["children"] : n["items"];
+    c.children = parse_seq(ctx, kids);
+    c.props.kind = Value::Kind::Map;
+    if (n.IsMap())
+      for (const auto &kv : n) {
+        if (!kv.first.IsScalar())
+          continue;
+        const std::string key = kv.first.Scalar();
+        if (key != type && !known_widget_key(key)) // skip the type-key + consumed keys
+          c.props.entries.emplace_back(key, to_value(kv.second));
+      }
+    if (!has_widget_type(type))
+      ctx.warn("ari: widget type '" + type +
+               "' has no registered handler (register_widget_type) — draws a placeholder");
+    return c;
+  }
+  // Here `type` is empty (no `type:` and no short-form key) or group/panel. A bare
+  // `{ children: [...] }` is a valid anonymous group; a map with some OTHER first key
+  // and no `type:` is a typo'd widget (e.g. `- frobnicate: ...`) — a custom widget is
+  // declared with `type:` (which returned a Kind::Custom above), so a lone unknown key
+  // is more likely a mistake.
+  if (type.empty() && !has(n, "children") && n.size() > 0) {
     std::string first_key;
     for (const auto &kv : n) {
       first_key = kv.first.Scalar();

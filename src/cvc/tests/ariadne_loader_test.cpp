@@ -230,9 +230,16 @@ TEST(AriadneLoaderValidation, UnknownExplicitType) {
 meta: { min_libcvc: "0.0.0" }
 root:
   - type: hologram
+    intensity: 0.7
 )");
   ASSERT_TRUE(r.ok) << r.error;
-  EXPECT_TRUE(has_warning(r, "unknown widget type"));
+  // An unknown `type:` is now PRESERVED as a Kind::Custom widget (not collapsed to a
+  // group), carrying its props, with a warning that no handler is registered.
+  EXPECT_TRUE(has_warning(r, "no registered handler"));
+  const Widget *c = find(r.root, Kind::Custom);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->custom_type, "hologram");
+  EXPECT_DOUBLE_EQ(c->props.num("intensity", -1.0), 0.7);
 }
 
 // ---- errors + forward-compat ----------------------------------------------

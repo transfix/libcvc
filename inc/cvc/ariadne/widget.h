@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include <cvc/ariadne/value.h> // Widget::props for a Kind::Custom widget
+
 namespace cvc {
 namespace ariadne {
 
@@ -37,6 +39,7 @@ enum class Kind {
   SliderFloat,    // bound double state, [lo, hi]
   Combo,          // bound enum-as-text state
   Button,         // a fire-once button -> raises `on` event
+  Custom,         // a registered custom widget type (custom_type + props); §extensibility
 };
 
 // ---------------------------------------------------------------------------
@@ -128,6 +131,12 @@ struct Widget {
   float frame_border = -1.0f; // §3.0.3b: widget/window border width in px; <0 = backend default
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
+
+  // Kind::Custom: the registered type name, and the config bag (every widget key the
+  // loader did not consume) a registered emit fn (register_widget_type) reads. Empty
+  // for the built-in kinds.
+  std::string custom_type;
+  Value props;
 
   std::vector<Widget> children;
 };
@@ -255,6 +264,19 @@ inline Widget button(std::string label, std::string on) {
   w.kind = Kind::Button;
   w.label = std::move(label);
   w.on = std::move(on);
+  return w;
+}
+
+// A custom widget (§ extensibility) — rendered by the emit fn registered for `type`
+// via register_widget_type (or a labelled placeholder if none). Set `props` for extra
+// config; `label`/`bind` are the common ones.
+inline Widget custom(std::string type, std::string label = std::string(),
+                     std::string bind = std::string()) {
+  Widget w;
+  w.kind = Kind::Custom;
+  w.custom_type = std::move(type);
+  w.label = std::move(label);
+  w.bind = std::move(bind);
   return w;
 }
 
