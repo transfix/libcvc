@@ -178,6 +178,19 @@ depends:
     # libyaml-cpp.so. Plain CMake C++ lib, published for every platform libcvc
     # builds, so unscoped.
     - name: yaml-cpp
+    # The other Ariadne optional deps (cvc::ariadne in libcvc core): nlohmann-json
+    # + json-schema-validator power the .ari Layer-2 JSON-Schema validation (§15);
+    # ftxui is the terminal backend (§16.4). All OPTIONAL at the CMake level
+    # (find_package; absent -> stubs), declared here so the packaged libcvc's build
+    # compiles the real paths and ships the libs. SCOPED to linux for now: these
+    # three are published for linux-x86_64 only (cy-pca/cvcpkg #111); publish the
+    # macos/windows/BSD variants and drop the `platforms:` scoping once they land.
+    - name: nlohmann-json
+      platforms: [linux]
+    - name: json-schema-validator
+      platforms: [linux]
+    - name: ftxui
+      platforms: [linux]
     - name: levmar
     - name: libiimod
     # Native mesh/model import (Phase 3: cvc::model + read_model/read_geometry for
