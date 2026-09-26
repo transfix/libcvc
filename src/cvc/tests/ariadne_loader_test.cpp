@@ -6,7 +6,10 @@
 
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/uri.h> // §13 resolver (import routes through it)
 #include <cvc/ariadne/widget.h>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <string>
@@ -37,6 +40,16 @@ bool has_warning(const LoadResult &r, const std::string &needle) {
     if (w.find(needle) != std::string::npos)
       return true;
   return false;
+}
+
+// Write a temp .ari file (under a shared test dir) and return its path — for §12 import tests.
+std::string write_temp_ari(const std::string &name, const std::string &content) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_import_test";
+  fs::create_directories(dir);
+  const fs::path p = dir / name;
+  std::ofstream(p) << content;
+  return p.string();
 }
 
 #define SKIP_WITHOUT_YAML()                                                                        \
@@ -1254,6 +1267,108 @@ windows:
   ASSERT_NE(t, nullptr);
   EXPECT_EQ(t->label, "{b}"); // single pass: {a}->'{b}', the value is NOT re-substituted to x"y
   EXPECT_EQ(t->bind, "x\"y"); // a value with a double-quote survives (no dump/reparse hazard)
+}
+
+// ---- §13 URI resolver (no yaml needed) -------------------------------------
+
+TEST(AriadneUri, ParsesSchemesAndBarePaths) {
+  Uri f = parse_uri("panels/rf.ari"); // bare -> file
+  EXPECT_EQ(f.scheme, "file");
+  EXPECT_EQ(f.path, "panels/rf.ari");
+  Uri s = parse_uri("state://ui.nav.current?value");
+  EXPECT_EQ(s.scheme, "state");
+  EXPECT_EQ(s.path, "ui.nav.current");
+  EXPECT_EQ(s.query, "value");
+  Uri h = parse_uri("HTTPS://example.com/x.ari"); // scheme lowercased
+  EXPECT_EQ(h.scheme, "https");
+}
+
+TEST(AriadneUri, FileHandlerReadsContent) {
+  const std::string path = write_temp_ari("uri_probe.txt", "hello-uri");
+  UriResult r = resolve(path); // bare path -> built-in file handler
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "hello-uri");
+  EXPECT_FALSE(r.canonical.empty());
+}
+
+TEST(AriadneUri, UnknownSchemeHasNoHandler) {
+  EXPECT_TRUE(has_uri_handler("file")); // built-in
+  EXPECT_FALSE(has_uri_handler("nosuch"));
+  UriResult r = resolve("nosuch://x");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("no handler"), std::string::npos);
+}
+
+TEST(AriadneUri, RegisterHandlerDispatches) {
+  register_uri_handler("memtest", [](const Uri &u, const std::string &) {
+    return UriResult{true, "content-for-" + u.path, "memtest:" + u.path, ""};
+  });
+  EXPECT_TRUE(has_uri_handler("memtest"));
+  UriResult r = resolve("memtest://abc");
+  ASSERT_TRUE(r.ok);
+  EXPECT_EQ(r.content, "content-for-abc");
+}
+
+TEST(AriadneModularity, ImportUnitsFromAnotherFile) {
+  SKIP_WITHOUT_YAML();
+  // A reusable LIBRARY of units in one file, imported + used from another.
+  write_temp_ari("lib.ari", R"(
+units:
+  labeled:
+    slider_int: "{label}"
+    bind: "{path}"
+    lo: 0
+    hi: 100
+)");
+  const std::string main = write_temp_ari("main.ari", R"(
+import: lib.ari
+windows:
+  - window: W
+    children:
+      - include: labeled
+        args: { label: Agents, path: demo.agents }
+)");
+  LoadResult r = load_file(main); // relative import resolves against main.ari's directory
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *s = find(r.root, Kind::SliderInt, "Agents");
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(s->bind, "demo.agents"); // the library unit expanded with this program's args
+}
+
+TEST(AriadneModularity, ImportCycleTerminates) {
+  SKIP_WITHOUT_YAML();
+  // a imports b, b imports a — the resolved-path cycle guard must terminate, and both
+  // libraries' units must still be available.
+  const std::string a = write_temp_ari("a.ari", R"(
+import: b.ari
+units:
+  ua: { text: fromA }
+windows:
+  - window: W
+    children:
+      - include: ub
+)");
+  write_temp_ari("b.ari", R"(
+import: a.ari
+units:
+  ub: { text: fromB }
+)");
+  LoadResult r = load_file(a);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find(r.root, Kind::Text, "fromB"), nullptr); // b's unit reached through the cycle
+}
+
+TEST(AriadneModularity, ImportUnknownSchemeWarns) {
+  SKIP_WITHOUT_YAML();
+  // A scheme with no registered handler (no state/http installed) is surfaced, not fatal.
+  LoadResult r = load_string(R"(
+import: state://ui.libs.controls?value
+windows:
+  - window: W
+    children: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "could not be resolved"));
 }
 
 TEST(AriadneModularity, FanOutBombIsRefusedNotExploded) {

@@ -13,8 +13,9 @@
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/uri.h> // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
-#include <filesystem>        // §12 import: resolve/canonicalize .ari library paths
+#include <filesystem>        // §12 import: dirname of a resolved library for nested bases
 #include <functional>
 #include <map>
 #include <mutex>
@@ -596,18 +597,65 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   return w;
 }
 
-// §12: collect the top-level `units:` map (name -> raw widget template). Stored RAW (not
-// parsed) so an include: can substitute its args as text before parsing — and so units may be
-// defined in any order and reference one another.
-void parse_units(Ctx &ctx, const YAML::Node &doc) {
+// §12: merge a `units:` map (name -> raw widget template) into the unit table. Stored RAW so
+// an include: can substitute its args before parsing, and so units may be defined in any order.
+void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
+  if (!unitsNode || !unitsNode.IsMap())
+    return;
+  for (const auto &kv : unitsNode) {
+    if (!kv.first.IsScalar())
+      continue;
+    const std::string name = kv.first.Scalar();
+    if (warn_collision && ctx.units.count(name))
+      ctx.warn("ari: import: unit '" + name + "' is defined by more than one library — last wins");
+    ctx.units[name] = kv.second;
+  }
+}
+
+// §12/§13: process a document's `import:` (a URI or list of URIs) — each names another .ari
+// library whose units merge into this document's table. Resolved through the shared
+// uri_resolver (file:// built in; state://, http(s):// via a registered handler), relative to
+// `base_dir`. Recurses into an imported library's OWN imports (based at its directory), and
+// dedups/cycle-guards on the resolved canonical identity (a → b → a terminates).
+void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_dir) {
   if (!doc.IsMap())
     return;
-  const YAML::Node u = doc["units"];
-  if (!u || !u.IsMap())
-    return;
-  for (const auto &kv : u)
-    if (kv.first.IsScalar())
-      ctx.units[kv.first.Scalar()] = kv.second;
+  const YAML::Node imp = doc["import"];
+  std::vector<std::string> uris;
+  if (imp && imp.IsScalar())
+    uris.push_back(imp.Scalar());
+  else if (imp && imp.IsSequence())
+    for (const auto &p : imp)
+      if (p.IsScalar())
+        uris.push_back(p.Scalar());
+  for (const std::string &uri : uris) {
+    const UriResult res = resolve(uri, base_dir);
+    if (!res.ok) {
+      ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
+      continue;
+    }
+    if (!ctx.imported.insert(res.canonical).second)
+      continue; // already imported (dedup) or on the stack (cycle) — skip
+    YAML::Node sub;
+    try {
+      sub = YAML::Load(res.content);
+    } catch (const std::exception &e) {
+      ctx.warn("ari: import '" + uri + "' parse error: " + e.what());
+      continue;
+    }
+    const std::string sub_base = std::filesystem::path(res.canonical).parent_path().string();
+    process_imports(ctx, sub, sub_base);           // the library's own imports, based at its dir
+    merge_units(ctx, sub["units"], /*warn=*/true); // then its units (import-vs-import warns)
+  }
+}
+
+// §12: collect this document's reusable units — imported libraries first (so local units may
+// build on them), then the document's own `units:` last (a local unit silently overrides an
+// imported one of the same name — the customization case).
+void parse_units(Ctx &ctx, const YAML::Node &doc) {
+  process_imports(ctx, doc, ctx.base_dir);
+  if (doc.IsMap())
+    merge_units(ctx, doc["units"], /*warn=*/false);
 }
 
 // §12: substitute `{name}` arg tokens in a scalar in a SINGLE pass — a substituted value is
@@ -1032,10 +1080,17 @@ std::vector<CustomRequirement> parse_customs(Ctx &ctx, const YAML::Node &c) {
   return out;
 }
 
-// Parse an already-loaded YAML node into a LoadResult, applying the meta gate.
-LoadResult load_node(const YAML::Node &doc) {
+// Parse an already-loaded YAML node into a LoadResult, applying the meta gate. `base_dir` is
+// the document's directory (relative `import:`s resolve against it; empty = cwd for a string);
+// `self_path` is its canonical identity, seeded into the import cycle-guard so a library that
+// imports back to this document is caught.
+LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::string(),
+                     const std::string &self_path = std::string()) {
   LoadResult r;
   Ctx ctx;
+  ctx.base_dir = base_dir;
+  if (!self_path.empty())
+    ctx.imported.insert(self_path);
   r.meta = doc.IsMap() ? parse_meta(doc["meta"]) : Meta{};
 
   // The min_libcvc gate fires FIRST (roadmap §3.1a): a document that needs a
@@ -1143,7 +1198,11 @@ LoadResult load_string(const std::string &yaml) {
 
 LoadResult load_file(const std::string &path) {
   try {
-    return load_node(YAML::LoadFile(path));
+    // §12: a relative `import:` in this file resolves against the file's directory, and the
+    // file's own canonical path seeds the import cycle-guard.
+    const std::string self = resolve_file_path(path, std::string());
+    const std::string dir = std::filesystem::path(self).parent_path().string();
+    return load_node(YAML::LoadFile(path), dir, self);
   } catch (const YAML::BadFile &e) {
     LoadResult r;
     r.error = std::string("ari: cannot open '") + path + "': " + e.what();
