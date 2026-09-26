@@ -336,6 +336,10 @@ add_executable(cvcgl_state_publisher test/cvcgl_state_publisher.cpp)
 target_link_libraries(cvcgl_state_publisher PRIVATE cvcGL)
 add_test(NAME cvcgl_state_publisher COMMAND cvcgl_state_publisher)
 
+add_executable(cvcgl_nav_stats_publish test/cvcgl_nav_stats_publish.cpp)
+target_link_libraries(cvcgl_nav_stats_publish PRIVATE cvcGL)
+add_test(NAME cvcgl_nav_stats_publish COMMAND cvcgl_nav_stats_publish)
+
 add_executable(cvcgl_state_probe test/cvcgl_state_probe.cpp)
 target_link_libraries(cvcgl_state_probe PRIVATE cvcGL)
 
