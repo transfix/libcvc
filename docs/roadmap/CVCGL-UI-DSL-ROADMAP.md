@@ -934,8 +934,17 @@ the **same state tree the widgets bind to**.
 > widget and its subtree. Fail-safe DISABLES on a broken predicate; a build without state_exec
 > leaves it enabled (+ warns once). Same hardened engine as `visible_when`.
 >
-> Deferred read-lane fields (same engine, next increments): computed `fmt`/`options`/`tooltip`,
-> computed `bind`, `repeat.count`; plus an optional load-time predicate lint (parse + reject
+> **Also LANDED — computed values + `options` + `tooltip`** (on `ReactiveEngine::eval_string` /
+> `eval_string_list`): a Text whose `bind` is an s-expression (starts with `(`) is a computed
+> value re-evaluated each frame (homoiconic — state paths never start with `(`); a combo's
+> `options:` given as a SCALAR is a computed list (a SEQUENCE stays static); and a widget's
+> `tooltip:` is a literal or computed string shown on hover (new no-op-default
+> `Backend::set_tooltip`, ImGui → hover-gated `SetTooltip`). All bounded/fail-safe like the
+> predicates (a string shows raw, a bool as true/false, computed options capped at 1024).
+>
+> Deferred read-lane fields (same engine, next increments): `repeat.count` (dynamic widget
+> repetition — a structural feature: needs a per-iteration index exposed to the repeated
+> subtree), computed `fmt` (niche); plus an optional load-time predicate lint (parse + reject
 > effectful heads).
 
 ### 4.1 One AST, two lanes
