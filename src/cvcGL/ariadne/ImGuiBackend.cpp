@@ -29,8 +29,10 @@
 namespace cvc {
 namespace gl {
 
-namespace ui = cvc::gl::ui;
-
+// NOTE: no `namespace ui = cvc::gl::ui;` alias — we are already inside `cvc::gl`, so `ui::`
+// resolves to the nested `cvc::gl::ui` namespace directly. Aliasing a name that already names
+// a namespace in the same scope is a redefinition that Clang rejects (macOS CI), though GCC
+// tolerates it. `ariadne` below IS a real alias: there is no `cvc::gl::ariadne` in this TU.
 namespace ariadne = cvc::ariadne;
 
 #ifdef CVC_ENABLE_IMGUI
