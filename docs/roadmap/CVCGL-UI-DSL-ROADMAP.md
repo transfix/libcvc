@@ -3275,7 +3275,9 @@ first `render()`. It runs the script under a state_exec **chroot at the document
 `(state-set "demo.agents" "256")` writes `<prefix>.demo.agents` — the same key a widget `bind: demo.agents`
 resolves to (the shared "." separator), and init values win because widget/scene `read_or_seed` only fills
 keys init left unset. A parse/runtime error is reported (never thrown), not fatal — init is optional
-dynamic seeding, not a hard gate; `have_state_exec()` reports whether the build can run it. This is a new
+dynamic seeding, not a hard gate; `have_state_exec()` reports whether the build can run it. The run is
+**bounded** (a finite step + wall-clock budget on both the process and the run loop, and success requires a
+`terminated` status) so a looping or blocking init script is reported rather than hanging the app at load. This is a new
 concept beyond the two §4.1 state_exec lanes (per-frame read + effectful action): a run-once init lane.
 
 Verified end-to-end: loader gtests for props capture + a custom block + a custom widget preserved as

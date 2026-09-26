@@ -384,3 +384,34 @@ TEST(AriadneRuntime, CustomWidgetUncommittedEscapeDoesNotWrite) {
   rt.render();
   EXPECT_EQ(cvc::state::instance(app)("c2").value(), "keep"); // uncommitted -> no write
 }
+
+TEST(AriadneInit, RunawayScriptIsBoundedNotHang) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  std::vector<std::string> errs;
+  // A non-terminating init must be bounded (step/time cap) and reported — never hang.
+  const bool ok = run_init(app, "", "(while true (+ 1 1))", &errs);
+  EXPECT_FALSE(ok);
+  EXPECT_FALSE(errs.empty());
+}
+
+TEST(AriadneRuntime, CustomWidgetCompositionalWinsOverEscape) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mock;
+  rt.set_backend(&mock);
+  // One type registered BOTH ways: the compositional fn must win; the backend escape
+  // must NOT be consulted.
+  register_widget_type("dup", [](const Widget &, const WidgetEmitContext &ctx) {
+    ctx.emit(text("composed"));
+  });
+  mock.custom_ret = CustomEdit{true, true, true, "x"};
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "dup";
+  rt.set_root(group({c}));
+  rt.render();
+  EXPECT_TRUE(mock.saw("text_line:composed"));        // compositional ran
+  EXPECT_FALSE(mock.saw_prefix("custom_widget:dup"));  // escape not consulted
+}

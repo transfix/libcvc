@@ -121,13 +121,26 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
     se::apply_chroot(ictx, root, prefix); // scope writes under the document prefix
     auto env = se::builtins::make_default_environment();
     se::register_intrinsics(env, &ictx);
+    // Bound the init so a looping or blocking script (e.g. an accidental infinite
+    // loop, or a (msg-recv ...) with no sender) can never hang the app at load: cap
+    // the process (check_limits kills a runner at the cap) AND the run loop (breaks out
+    // even when the sole process is blocked, which check_limits can't catch). A
+    // load-time seed/compute should finish well within these.
+    static constexpr uint64_t kInitMaxSteps = 10'000'000;
+    static constexpr double kInitMaxSeconds = 5.0;
     se::execute_options opts;
     opts.env = env;
+    opts.max_steps = kInitMaxSteps;
+    opts.max_time = kInitMaxSeconds;
     const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
-    sched.run();                                  // run to completion
+    sched.run(kInitMaxSteps, kInitMaxSeconds);   // bounded run to completion
     if (auto info = sched.get_process_info(pid)) {
-      if (info->status == se::process_status::killed) {
-        err("ari: init: script terminated abnormally (runtime error or resource limit)");
+      // Success is ONLY a normal finish. Any other terminal/non-terminal state — killed
+      // (runtime error / resource limit) or still ready/running/waiting after the cap
+      // (it blocked or looped past the budget) — is a reported failure, not silent.
+      if (info->status != se::process_status::terminated) {
+        err("ari: init: script did not complete normally (a runtime error, a resource "
+            "limit, or it blocked/looped past the init budget)");
         return false;
       }
     }
