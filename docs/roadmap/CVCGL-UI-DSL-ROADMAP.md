@@ -1,4 +1,4 @@
-# Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.12, for iteration)
+# Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.13, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -57,6 +57,16 @@ those as Ariadne / the `ari` loader.)*
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.13** adds **document provenance** (§3.1a — a `meta:` block with a **mandatory `min_libcvc`** semver
+> load gate that fires first; flags the stale `CVC_VERSION_STRING` bug to fix), a **formal `.ari` schema +
+> `ari validate`** (§15 — a `$ref`-recursive JSON Schema for structure, three validation layers, the C++
+> validator recipe gap, the string API `load:`/hot-reload uses), a **shared-memory ring `cvc::ipc::shm_ring`**
+> (§9.9.12c — same-host zero-copy large-buffer channel; honest note that shm removes no copy for the ffmpeg
+> *CLI* — it wins between our own processes / a sidecar), the **keyboard-routing update** (decision #6 landed
+> on master — text entry native + wasm), and the **ImGui-docking answer** (§3.9.2 — buildable as a
+> `v1.92.9-docking` drop-in but *not* needed for v1; multi-viewport breaks the single canvas, so docking =
+> DockSpace-viewports-off, a later opt-in with zero `.ari` change).
 >
 > **v0.12** promotes the **root to a first-class widget** (§3.9): the VTK canvas carries a `layout:` — default
 > `free` (the desktop metaphor: main menu + draggable sub-windows) or `horizontal`/`grid`/`stack` for a *tiled
@@ -121,7 +131,7 @@ those as Ariadne / the `ari` loader.)*
 | 3 | Expression / action grammar | **`state_exec`** — expressions are `state_exec` programs; per-frame predicates run sync, actions run on the **async schedulable** executor; authorable as **s-expr *or* nested YAML** |
 | 4 | Window-geometry persistence | **Out of scope for now** |
 | 5 | Escape hatches | **`custom:` opaque host nodes** |
-| 6 | wasm keyboard | **Not a constraint** — wasm keyboard support is landing in a sibling effort; text-entry widgets are allowed |
+| 6 | keyboard | **✅ LANDED on master** — `ImGuiOverlay::intercept()` now translates VTK-interactor key events to ImGui (text entry, editing keys, Ctrl-shortcuts), native **and** wasm (`vtkWebAssemblyRenderWindowInteractor` → ImGui). Text-entry widgets (`input_text`, `input_int`) are first-class. Only residual: the browser canvas must hold focus (`tabindex`) — a deploy detail, verify per deploy |
 
 ---
 
@@ -193,7 +203,7 @@ Two more constraints on the widget set:
 
 **Leaf widgets (21).** `text` (formatted / caption / disabled header), `separator`
 (+ `separator_text`), `checkbox`, `slider_int`, `slider_float`, `drag_float`,
-`input_int`, `combo` (enum-as-text), `radio_row`, `button`, `small_button`,
+`input_int`, `input_text` *(now first-class — keyboard landed, native + wasm)*, `combo` (enum-as-text), `radio_row`, `button`, `small_button`,
 `menu_item` (toggle / fire-once / radio), `collapsing_header`, `tree_node`,
 `color_edit3`, `invisible_button` *(C++ escape)*, `custom_drawlist` *(C++ escape)*.
 Plus three **modifiers that are attributes, not children**: `tooltip`, `same_line`,
@@ -380,8 +390,59 @@ overlays: [ ... ]           # corner overlays (pinned)
 huds:     [ ... ]           # VTK text/fps overlays
 ```
 
-`root` is **not** an ImGui window — it is the canvas. `menubar`/`windows`/
-`overlays`/`huds` are the four child channels drawn on top of it.
+`root` is the canvas (promoted to a first-class widget in §3.9). `menubar`/`windows`/
+`overlays`/`huds` are child channels (§3.0.4/§3.9).
+
+### 3.1a Document provenance — the `meta:` block & the `min_libcvc` load gate
+
+Every `.ari` document carries a **`meta:` block**. Exactly one field is mandatory — **`min_libcvc`**, a
+hard fail-fast **runtime floor** — and the rest is optional provenance. `meta:` is pure data (no
+`state_exec`, no widgets), so the loader parses it **first** and gates on it before trusting the rest.
+
+```yaml
+meta:
+  min_libcvc: 3.4.0               # REQUIRED — refuse to load on any libcvc < 3.4.0 (semver floor)
+  # --- optional provenance ---
+  schema:      0.12               # .ari schema revision this doc validates against (default = ui:)
+  ari_version: 1.2.0              # the DOCUMENT's own version (author-managed; never gates)
+  app:         nav_city_drive     # identity (default = source basename)
+  name:        "Austin RF-Denial Convoy"
+  author:      "Joe Rivera <joe.rivera@cyberpcangel.com>"
+  license:     LGPL-2.1-or-later  # SPDX
+  description: "…"
+  created: 2026-09-25             # ISO-8601
+  updated: 2026-09-25
+```
+
+**Why mandatory:** `min_libcvc` is the one compatibility cornerstone that lets an *old* loader safely
+**refuse** a *newer* document instead of silently misreading it. It must live in a **frozen preamble
+grammar** every future loader can still parse, so a build predating a feature emits a clean "upgrade
+libcvc" error rather than choking on syntax deeper in the file. A doc with no `meta.min_libcvc` is a
+**load error**, not a warning (a dev-only flag may waive it for scratch; every published `.ari` carries it).
+
+> **Prerequisite bug to fix first (grounded):** the gate compares against libcvc's **runtime** version, but
+> `CMakeLists.txt` declares `VERSION 3.4.0` while `inc/cvc/core/types.h` hard-codes a **stale**
+> `CVC_VERSION_STRING "3.0.0"` (the string libcvc actually stamps into its HDF5 outputs). If the gate read
+> that macro, `min_libcvc: 3.2.0` would **wrongly refuse** a genuine 3.4.0 build. **Blocking cleanup:**
+> generate `cvc_version.h` from `${PROJECT_VERSION}`, expose `cvc::version{maj,min,patch}` /
+> `cvc::version_string()`, and have the gate read **only** that — never the hand-maintained macro.
+
+**Semver semantics:** a **floor** (`libcvc_runtime >= min_libcvc`), core-triple `MAJOR.MINOR.PATCH` compared
+field-by-field (CMake `VERSION_GREATER_EQUAL` semantics); author shorthand zero-fills (`3.4` → `3.4.0`);
+build metadata (`+cvc.N`) stripped. Full SemVer pre-release precedence (`3.4.0-rc.1 < 3.4.0`) is a documented
+follow-up (v1 compares the core triple, warns on a pre-release tag). No `max_libcvc`/ranges in v1.
+
+**Composes with `requires:` (§7.6) — coarse gate vs fine gate:** `min_libcvc` fires **first** (before schema
+validation, one version compare → "upgrade libcvc"); `requires:` fires later (per-intrinsic, against the
+assembled env → "this build/host/sandbox lacks `pick.world`"). Necessary-but-not-sufficient: a new-enough
+library can still have an intrinsic compiled out. The load pipeline is strictly ordered: **(1)** parse YAML
+→ **(2)** validate `meta` against the *frozen preamble schema* → **(3)** `min_libcvc` gate → **(4)** validate
+the whole doc against `schema-<ui>` (§15) → **(5)** `requires:` preflight → **(6)** build the tree.
+
+`meta` lands (load-once, read-only) at `ui.docs.<docId>.meta.*` (§11.1, extended) — the authored fields plus
+a `libcvc_runtime` audit stamp (what we checked against). A **`load:`'d fragment carries its own `meta`**,
+checked at *its* mount (before its `requires:`), so the effective floor for the tree is `max()` of the root
+and every fragment.
 
 ### 3.2 Menu bar and menus
 
@@ -598,12 +659,29 @@ sub-windows, exactly today's demos.
 
 **Docking is NOT available — tiling is loader-computed (confirmed).** The packaged Dear ImGui is stock
 master **1.92.9, not the docking branch** — all in-tree `deps/imgui.h` define `IMGUI_HAS_TABLE`/`_TEXTURES`
-but **not `IMGUI_HAS_DOCK`**, and there's zero `DockSpace`/`DockingEnable` anywhere. So there is no native
-tiling/drag-to-dock; a tiled `root.layout` is realized entirely by the loader computing rects + forcing
-`ImGuiCond_Always`. Tab *groups* are the one native primitive (`BeginTabBar`), which is why `stack` is
-first-class. The `dock` token in `frame.chrome` is **inert** here (accepted for forward-compat). *(If a
-docking-branch imgui is ever adopted, native drag-to-dock replaces the computed path; the DSL surface
-doesn't change.)*
+but **not `IMGUI_HAS_DOCK`**, and there's zero `DockSpace`/`DockingEnable` anywhere. So a tiled `root.layout`
+is realized entirely by the loader computing rects + forcing `ImGuiCond_Always`. Tab *groups* are the one
+native primitive (`BeginTabBar`, merged to master long ago), which is why `stack` is first-class.
+
+**Can we build an ImGui *with* docking, and is it necessary?** *(§3.9.2)* **Yes, we can — it's a one-line
+recipe swap — but for v1 it is not necessary.** `IMGUI_HAS_DOCK` is a macro the **`docking` feature branch**
+defines and master does not (docking has lived on that branch since 2018, still unmerged as of 1.92.x). So
+"an ImGui with docking" means compiling from a different source ref — and the docking release tags mirror the
+stable tags 1:1, so **`v1.92.9-docking` is a same-version drop-in** (source-ref + `cvc_revision` bump only;
+`build.sh`/backends unchanged; one runtime line `io.ConfigFlags |= ImGuiConfigFlags_DockingEnable`). **The
+constraint that decides it:** the branch also brings **multi-viewport** (`ImGuiConfigFlags_ViewportsEnable`
+→ *multiple OS windows / GL contexts*), which **breaks the one-`vtkRenderWindow`/one-GL-context model that is
+mandatory under wasm's single canvas** — so multi-viewport stays **OFF permanently**. What's compatible is
+**`DockSpace` with viewports off**: drag-to-dock, splitter resize, drag-to-tab, `imgui.ini` layout
+persistence — all confined to the one canvas, native and wasm alike. **But it isn't free** (you still must
+seed a `DockBuilder` split from `root.layout` so the app boots pre-arranged — *more* loader code, not less —
+and reconcile `imgui.ini` state against the DSL's own `tree.<id>.geometry`), and the headline payoff
+(tear-out to OS windows) never arrives. **Recommendation: ship v1 on loader-computed tiling** — it needs no
+branch, already works, is the only path that survives wasm, and authors write the identical `.ari`. **Keep
+docking as a later opt-in**, staged behind the two seams already reserved for it (the `dock` chrome token and
+the `IMGUI_HAS_DOCK` compile detection); adopting it later is a **pure runtime swap with zero `.ari`
+change**. The `dock` token in `frame.chrome` is therefore **inert but valid** today (accepted for
+forward-compat).
 
 **`ImGuiCond` is the whole arbitration knob:** a **free** child uses `FirstUseEver` (seed, then the user
 owns geometry — the loader must *never* re-force `Always` on it); a **tiled** child uses `Always` +
@@ -812,7 +890,8 @@ macOS-safe), same intent discipline.
       - { if: [ {$bool: sim.comm.enabled}, { camera.chase: [] }, { camera.ortho: [true] } ] }
 ```
 
-**Input events** (`on:key` — wasm keyboard incoming; `on:tick` per-frame) use the same
+**Input events** (`on:key` — keyboard now routed VTK-interactor→ImGui on native **and** wasm, landed on
+master; `on:tick` per-frame) use the same
 model: a handler program enqueues intents the tick drains. wasm is single-threaded, so
 the handler runs inline in the input pump and the queue discipline keeps it safe.
 
@@ -1250,7 +1329,11 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
   (relative / `/`-absolute-via-loader / scene-qualified). Promote the target demos' tunables to
   `cvc::state`. Ship `bunny_shadow`, `terrain_lab`, `lsystem_*`, `volren/volslice` from YAML. C++
   loader in libcvc; `enabled()==false` no-op path. **The dynamic-DOM reconcile boundary** (§11.5.1 —
-  one between-frames commit; the walk reads a stable tree) is foundational here.
+  one between-frames commit; the walk reads a stable tree) is foundational here. Also foundational: the
+  **`meta:` block + `min_libcvc` gate** (§3.1a — *prereq:* generate `cvc_version.h` from `PROJECT_VERSION`,
+  fixing the stale `CVC_VERSION_STRING`) and **Layers 1–2 validation** (§15: `yaml-cpp` + the JSON Schema;
+  add the `nlohmann-json` + `json-schema-validator` recipes; `ari validate --structural-only` + the
+  string API). Layer-3 semantic validation folds into P1/P3 (`requires:`, cycle guard, truthiness lint).
 - **P1 — state_exec read-only lane:** `yaml_to_value()` + `parse()` dual surface with
   the round-trip test; `visible_when`/`disabled_when`/`enabled_when`/`fmt`/`options`/
   `repeat.count` on the sync `stackless_evaluator` with `CAP` + fail-safe; the `{$int:}`
@@ -1287,7 +1370,8 @@ unit's handlers to the deeper `ui.docs.<doc>.includes.<id>` path (§12), not in-
   latest-snapshot + `updateVertices`-on-render-thread, `{stream:}` and `state://…?data` live, the **opt-in
   pinned zero-copy vertex/color path** §9.9.3a, the **texture channel** + **ffmpeg video** (an **LGPL
   decode-only** ffmpeg build → no license boundary, §9.9.12a; general = linked-libav*/WebCodecs, GPL/exotic =
-  ffmpeg subprocess/Worker Model 2, §9.9.12b) +
+  ffmpeg subprocess/Worker Model 2, §9.9.12b; the pipe is v1, the **`cvc::ipc::shm_ring`** §9.9.12c is a
+  later opt-in with its own A–D phasing — only worth it between our-own processes / a sidecar) +
   **render-to-texture** §9.9.11-13 [frameRGB now, GPU FBO-share follow-up],
   degenerate-collapse LOD, wasm inline fallback). Ship the volume/lsystem/terrain *scenes* — and the nav
   *agent stream* — from YAML.
@@ -1939,6 +2023,49 @@ pulls-latest on-thread and holds it for the whole frame; **double-buffer the pin
 never `memcpy` into the buffer VTK is uploading; pace via the fixed-dt clock + `pacing:{hz,cap}`. Selecting a
 backend is a compiled/registered-TU + recipe-knob decision (`CVC_FFMPEG_GPL` / `ffmpeg-lgpl`), never a DSL
 change.
+
+**9.9.12c A dedicated shared-memory ring — `cvc::ipc::shm_ring` (fast same-host large-buffer channel).**
+§9.9.12b flagged "if zero-copy is ever wanted, add a small *dedicated* shm ring." This is that ring — a
+general **same-host large-buffer channel**, the cross-process analog of the §9.9.4 in-process lock-free
+latest-pointer. Grounding correction: `state_transport_ipc` is **not** shared memory (it's `AF_UNIX`/
+`SOCK_STREAM`, `CVCT`-framed, mutation-specific), and no shm ring exists to reuse — so the ring is a **new
+standalone primitive** in a `cvc::ipc` namespace, **not** a `state_transport` subclass (a frame is not a
+`state_mutation`; the ring needs none of state_transport's shard/journal/subscription machinery).
+
+- **Layout & publish:** one mapping = a POD header (`magic`, `format_epoch`, `w/h/stride/pix_fmt`,
+  `producer_pid`, and `std::atomic<uint64_t> seq` + `atomic latest_index` + `heartbeat`) + N slots sized
+  `w*h*4` (RGBA8, §9.9.11). **Triple-buffer + seqlock**: producer writes a free slot then publishes via one
+  atomic `latest_index` store; consumer loads `latest_index` and **holds that slot for the whole render
+  frame** (§9.9.4). Triple gives the *reader-owns-one* invariant (producer never touches the held slot).
+  **Latest-wins is the only semantics** — dropped-by-overwrite, never a backlog (automatic backpressure).
+  All atomics asserted lock-free **and address-free** (`ATOMIC_LLONG_LOCK_FREE==2`) so one object is valid
+  mapped at two addresses.
+- **Lifecycle:** Linux **preferred — `memfd_create` + `SCM_RIGHTS` fd-passing over the existing UDS**: no
+  `/dev/shm` name, kernel reaps on last-fd-close → **zero crash-leak**. macOS fallback: named
+  `shm_open(O_EXCL, 0600)` `cvc.frame.<pid>.<uuid>` + RAII `shm_unlink` + a startup sweep that unlinks
+  segments whose embedded pid is dead. Boost.Interprocess (already header-only in every deps prefix) is the
+  portable fallback; **don't** use its mutex/condition (defeats lock-free).
+- **The honest ffmpeg caveat — shm removes NO copy for the CLI.** The ffmpeg *CLI* writes a byte stream to
+  an fd and **can't** target a shm segment, and the pipe already lands one copy *in the destination* — so
+  shm changes *which process owns the one copy*, not the copy count. **The pipe stays the v1 default**
+  (§9.9.12b). shm wins in exactly two shapes: **(1)** between **our own** processes — a decode-*pump*
+  process → shm slot → renderer process makes that second crossing zero-copy; **(2)** a **sidecar decoder we
+  own** driving `libav*` (`sws_scale` straight into the slot). **License follows the sidecar binary, not the
+  shared memory** — a separate-program sidecar is the same FSF mere-aggregation boundary a pipe has; GPL
+  reappears only if `libav*` is linked *in-process*.
+- **wasm:** cross-"process" shm = **SharedArrayBuffer** across a Web Worker under the existing COOP/COEP gate
+  (`CVC_WASM_PTHREADS`, `serve.py`); the header+slots+atomic-`latest_index` contract maps 1:1 onto a SAB via
+  `Atomics.*`. Single-threaded (no SAB) falls back to `postMessage(transfer)` (one copy) or the §9.9.9
+  inline step. POSIX-shm vs SAB vs inline is a runtime choice behind one ring contract — **never a DSL
+  change**.
+
+*Phasing:* **A** the primitive (`memfd`+`SCM_RIGHTS` / named `shm_open`, triple-buffer+seqlock, crash-reaper,
+a fork-based two-process gtest) — ships independent of any video code; **B** wire into native Model 2 (split
+the video backend into a decode-pump process + renderer with `shm_ring` between them); **C** the wasm SAB
+backend; **D** an optional `shm_blob_channel` off `state_transport_ipc` for large same-host
+`fetch_chunk`/blob payloads (fd over the UDS, `mmap`, bypass the 64 MiB `CVCT` frame path). *(Open: Windows
+`CreateFileMapping`/`DuplicateHandle` — dropped for v1 like the UDS; the fd-passing handshake; the macOS
+reaper policy.)*
 
 **9.9.13 A render-to-texture source — the "TV connected to a scene camera".** A second camera/view
 rendered into a texture another node samples:
@@ -2637,3 +2764,88 @@ indistinguishable to the DSL and to node sources. (A host that prefers to *subcl
 registry in Python — override `can_open`/`read_bytes` on a `uri_io` class — is the director route instead;
 rule of thumb: **`std::function` handlers = wrap-in-`native_fn`, no director; class-based reader Python
 overrides = director-subclass**.)
+
+---
+
+## 15. Validation & the `.ari` schema
+
+Ariadne needs an *external contract* — one an author, a `load:`'d fragment, an Ari-browser address bar, or a
+hostile web source can be checked against **before** the loader walks a node. It's **three layers**, with a
+formal JSON Schema for the middle one. This reuses a shipped in-house precedent: **`cvcpkg validate` already
+ships JSON Schemas authored *as YAML*, loads them via `importlib.resources`, and validates with
+`jsonschema.Draft202012Validator`** — we adopt that model wholesale.
+
+| Layer | Engine | Catches | Cannot catch |
+|---|---|---|---|
+| **1 — YAML parse** | `yaml-cpp` / `pyyaml` | malformed YAML, bad anchors — line:col | anything structural |
+| **2 — JSON Schema (2020-12)** | typed DOM → validator | doc shape, required fields, closed enums, scalar types, array cardinalities, patterns, the recursive widget-tree grammar | expression *meaning*, name resolution, cross-refs, cycles, capability/version satisfaction |
+| **3 — semantic / load-time** | the `cvc::gl::ariadne` loader | `min_libcvc` vs runtime, `requires:` preflight (§7.6), bind resolution (§11.3), cross-refs, `load:` cycle guard (§12.4), tag→bit budget (§9.5.1), truthiness lint (§4.3) | pure YAML/structure (gone by here) |
+
+The split is the honest boundary of what a declarative schema can *prove*: layers 1–2 are pure and need no
+live build; layer 3 needs the actual runtime env (its intrinsic set, its state tree, resolved URIs) — which
+is exactly why `requires:`/cycle-guarding *belong* there and can't move up.
+
+### 15.1 The formal schema (draft 2020-12), authored as YAML
+
+**One** JSON Schema document, written as YAML (JSON ⊂ YAML, exactly as `cvcpkg/schemas/recipe-schema.yaml`),
+`additionalProperties: false` on every closed object, versioned per `ui:`/`meta.schema`. Its spine is a
+**`$ref`-recursive widget node** — because §3.0's "everything is a widget, widgets embed widgets" *is* a
+recursive grammar (`children:` is `array<#/$defs/widget>`). It closes every high-value enum: `type` (the 21
+leaf widgets §2 + `menubar`/`menu`/`overlay`/`hud`/`group`/`panel`/`view_embed`/`tf_editor`/`scene_panel`/
+`stage_lighting`/`tabs`/`spacer`/`custom`), `layout.kind`, `size.policy` (Qt names), `frame.chrome` tokens
+(incl. the forward-compat `dock`), `frame.placement`, `corner`, node `type` (§9.3), `source` kind (§9.4),
+`camera.mode`, TF `axes[].kind`/`primitives[].kind` (§10.2), `root.layout.kind` (§3.9); cardinalities
+(`region`=4, `margins`=4, `pos`/`at`/`span`=2, tag mask `maxItems: 32`); a SemVer pattern on
+`meta.min_libcvc`; and the leaf discriminated union (`slider_int` ⇒ `lo`/`hi`; `combo` ⇒ `options`|`bind`)
+via `allOf`/`if`/`then`. Every *invented* token (`layuot: vetical`, `type: menubarr`, `drawstyle: wirefame`)
+becomes a precise pointer-anchored error at load instead of a silently-ignored key.
+
+### 15.2 What the schema **can't** do — the loader's semantic pass (Layer 3)
+
+The schema validates an expression slot only as "string s-expr **or** nested-YAML object" — the *surface*,
+not the contents. It **cannot** prove a `state_exec` expression parses / resolves / type-checks (that's the
+parser + the §4.3 truthiness linter), resolve a `bind:` path under its chroot (§11.3), satisfy `requires:`
+against *this* build's env (§7.6), check cross-refs (a `view_embed` naming a real `view`, `as:` uniqueness),
+chase `load:` cycles on resolved URIs (§12.4), exhaust the 32-tag budget (§9.5.1), or run the `min_libcvc`
+*comparison*. Layer 3 is the loader run as a validation pass (no ImGui walk, no scene build), in pipeline
+order (§3.1a): `meta.schema` → `min_libcvc` gate → static `include`/`units` expansion + re-validate →
+`requires:` preflight → bind/cross-ref resolution → `load:` cycle walk → tag→bit alloc → truthiness lint —
+the direct analog of cvcpkg's post-schema "referenced scripts must exist" checks.
+
+### 15.3 The C++ validator — a deps gap to close
+
+**Grounded: there is NO C++ JSON-Schema validator in the 764 deps recipes** (no valijson / nlohmann-json /
+json-schema-validator / rapidjson; `nlohmann` only appears vendored privately inside assimp). `yaml-cpp` is
+present; Python `jsonschema` is present. So **the Python path is ready today; the C++ path needs a recipe.**
+**Recommendation:** add **`nlohmann-json` + pboettch `json-schema-validator`** — parse with `yaml-cpp` →
+convert to `nlohmann::json` with YAML-1.2 scalar inference (so `type: integer` fires correctly) → validate.
+This makes the C++ path *type-accurate and identical in behavior* to the Python path. **Engine caveat:** the
+C++ validators target **draft-7 core** while Python `jsonschema` is full 2020-12 — so keep the one authored
+schema to the **portable subset** (`type`/`enum`/`const`/`required`/`properties`/`additionalProperties`/
+`items`/`oneOf`/`anyOf`/`allOf`/`$ref`/`$defs`/`pattern`/`min|maxItems`/`minimum`/`maximum`), avoiding
+2020-12-only assertions (`unevaluatedProperties`, `prefixItems`); `$ref: "#/$defs/widget"` works on draft-7
+(it's a pure JSON-pointer). A CI schema-lint gates the subset. **Template caveat:** JSON Schema can't see
+through `{{arg}}` — validate the **static-expanded** doc (post-`include`/`units`) with the strict schema, and
+the **raw** doc (+ every `repeat` body, unexpandable) under a **relaxed variant** that permits `"{{…}}"` in
+numeric slots.
+
+### 15.4 Schema location, `ari validate`, and the string API
+
+The schema ships **in-package** (the `cvcpkg validate` model): one authored `ari-schema-v<n>.yaml` per
+version, **embedded as a compiled-in string** in C++ (so `ari validate` resolves it from any working
+directory, even headless/wasm) and byte-identical under `pycvc_gl/schemas/` for Python, with a unit test
+asserting the two copies match the repo source. `meta.schema` (default `1`) selects the file; an unknown
+version hard-errors. The **`ari validate`** subcommand (alongside `ari run`):
+
+```
+ari validate PATH [--schema N] [--strict] [--structural-only] [--format text|json]
+ari validate -                    # read an .ari YAML string from stdin
+```
+
+`--structural-only` stops after Layer 2 (pure structure — no live build env, what CI / an editor plugin /
+a web preflight wants); `--strict` promotes the §7.6/§4.3 lints to errors. **Exit codes:** `0` ok · `1`
+schema violation · `2` semantic failure · `3` YAML parse error. The CLI is a thin wrapper over a **library
+API taking a YAML string, not just a path** — `ariadne::validate(std::string_view yaml, int schema=-1)` /
+`ariadne.validate_string(s)` — the same entry `load:`/hot-reload (§12.5) calls to validate a **fetched
+fragment** before mounting it, and what an Ari-browser address bar or a `state://…` fragment uses. Validating
+an in-memory string is the primitive; the file path is the convenience.
