@@ -8,12 +8,14 @@
 // nav_stats_publish.cpp — see inc/cvc/gl/nav_stats_publish.h.
 
 #include <boost/any.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/nav_stats_publish.h>
 #include <cvc/volume/volume.h>
+#include <limits>
 #include <map>
 #include <string>
 
@@ -153,7 +155,10 @@ void publish_nav_rasters(cvc::app &app, cvc::gl::state_publisher &pub,
   if (dims.rows <= 0 || dims.cols <= 0 || dims.planes <= 0)
     return;
   const std::string rroot = navStatsStatePath(scenePrefix) + ".rasters";
-  const long cells = static_cast<long>(dims.rows) * dims.cols;
+  // size_t: a fog-of-war twin can carry O(N) planes over a large grid, so plane*cells must not
+  // truncate on LLP64 (long is 32-bit on Windows) — matches the int64 discipline used for i2s.
+  const std::size_t cells =
+      static_cast<std::size_t>(dims.rows) * static_cast<std::size_t>(dims.cols);
   cvc::state &root = cvc::state::instance(app);
 
   // dims (value lane; cheap, re-published each call so a late subscriber still learns the
@@ -174,15 +179,20 @@ void publish_nav_rasters(cvc::app &app, cvc::gl::state_publisher &pub,
   }
 
   // per-plane belief / ever_seen / last_visible, version-gated (skip the deep wrap for unchanged
-  // planes).
+  // planes). The "never published" sentinel is INT_MIN, NOT -1: sim_world::plane_version() returns
+  // -1 for an out-of-range plane, so a -1 must still be publishable (it differs from INT_MIN)
+  // rather than colliding with the sentinel and being frozen out forever.
   if (static_cast<int>(st.plane_versions.size()) != dims.planes)
-    st.plane_versions.assign(dims.planes, -1);
+    st.plane_versions.assign(dims.planes, std::numeric_limits<int>::min());
+  // No versions[] -> we cannot tell what changed, so re-publish every plane each call (fresh, never
+  // gated) rather than capturing once and freezing the fog.
+  const bool gated = versions != nullptr;
   for (int m = 0; m < dims.planes; ++m) {
-    const int v = versions ? versions[m] : 0;
-    if (v == st.plane_versions[m])
+    const int v = gated ? versions[m] : 0;
+    if (gated && v == st.plane_versions[m])
       continue; // unchanged this plane -> no re-wrap, no re-publish
     const std::string pp = rroot + ".plane." + std::to_string(m);
-    const long off = static_cast<long>(m) * cells;
+    const std::size_t off = static_cast<std::size_t>(m) * cells;
     if (belief)
       root(pp + ".belief.data").data(boost::any(wrap_plane(app, belief + off, dims)));
     if (everseen)

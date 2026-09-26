@@ -59,8 +59,11 @@ struct nav_raster_dims {
 // Records the last-published version per plane (and truth), so an unchanged plane skips the
 // (deep-copying) cvc::volume wrap.
 struct nav_raster_pub_state {
-  int truth_version = -1;          // -1 = truth not yet published (it is static — published once)
-  std::vector<int> plane_versions; // last-published version per plane (sized to planes; -1 = never)
+  int truth_version = -1; // < 0 = truth not yet published (it is static — published once)
+  // last-published version per plane (sized to planes on first use; the "never" sentinel is
+  // INT_MIN, NOT -1, so a plane_version() of -1 is still publishable rather than frozen by a
+  // sentinel clash).
+  std::vector<int> plane_versions;
 };
 
 // Publish the belief/fog rasters into <prefix>.nav_stats.rasters.* for realtime viz. `truth` is

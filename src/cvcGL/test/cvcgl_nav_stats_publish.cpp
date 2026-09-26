@@ -172,6 +172,22 @@ int main() {
   ck(st("rast.nav_stats.rasters.plane.0.version").value<int>() == 0,
      "plane0 version still 0 (gated/skipped)");
 
+  // versions == nullptr: cannot gate -> every plane re-publishes each call (must not freeze).
+  // Mutate the source between calls and confirm the stored volume tracks the change.
+  cvc::gl::nav_raster_pub_state rstnv;
+  std::uint8_t beliefNv[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  cvc::gl::publish_nav_rasters(app, pub, "nver", rd, truthR, beliefNv, nullptr, nullptr, nullptr,
+                               rstnv);
+  pub.flush();
+  ck((int)st("nver.nav_stats.rasters.plane.0.belief.data").data<cvc::volume>()(0, 0, 0) == 1,
+     "nullptr versions: plane0 published on first call");
+  beliefNv[0] = 99;
+  cvc::gl::publish_nav_rasters(app, pub, "nver", rd, truthR, beliefNv, nullptr, nullptr, nullptr,
+                               rstnv);
+  pub.flush();
+  ck((int)st("nver.nav_stats.rasters.plane.0.belief.data").data<cvc::volume>()(0, 0, 0) == 99,
+     "nullptr versions: plane0 re-published, not frozen");
+
   std::printf(failures ? "cvcgl_nav_stats_publish: %d FAILURES\n" : "cvcgl_nav_stats_publish: OK\n",
               failures);
   return failures ? 1 : 0;

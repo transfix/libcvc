@@ -773,7 +773,11 @@ void VolumeNode::onDataChanged() {
   // Note: With state_object, we access state via getState() instead of m_stateNode
   if (getState().isData<cvc::volume>()) {
     try {
-      const cvc::volume &vol = boost::any_cast<const cvc::volume &>(getState().data());
+      // By value: state::data() returns the boost::any BY VALUE (a temporary), so
+      // any_cast<const volume&>(that) would bind a reference into a temporary that dies at the
+      // semicolon (a use-after-free in setVolume). data<T>() copies the volume out (a shallow
+      // shared_array bump), which is cheap and outlives the call.
+      const cvc::volume vol = getState().data<cvc::volume>();
       setVolume(vol);
     } catch (...) {
       // Failed to load volume from state
