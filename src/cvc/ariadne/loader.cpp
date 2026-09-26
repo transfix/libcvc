@@ -483,7 +483,10 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
         if (!kv.first.IsScalar())
           continue;
         const std::string key = kv.first.Scalar();
-        if (key != type && !known_widget_key(key)) // skip the type-key + consumed keys
+        // known_widget_key already excludes "type"; do NOT also skip a prop whose name
+        // equals the type VALUE (e.g. `gauge: 0.8` on `type: gauge`) — that dropped
+        // real config. Matches the scene-node capture.
+        if (!known_widget_key(key))
           c.props.entries.emplace_back(key, to_value(kv.second));
       }
     if (!has_widget_type(type))

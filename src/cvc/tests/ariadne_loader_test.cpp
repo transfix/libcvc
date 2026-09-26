@@ -242,6 +242,29 @@ root:
   EXPECT_DOUBLE_EQ(c->props.num("intensity", -1.0), 0.7);
 }
 
+TEST(AriadneLoaderValidation, CustomWidgetKeepsChildrenAndTypeNamedProp) {
+  SKIP_WITHOUT_YAML();
+  // The anti-lossy guarantee: a custom widget's nested children survive (the old
+  // fallback dropped them), and a prop whose key equals the type value is kept.
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+root:
+  - type: gauge
+    gauge: 0.8
+    children:
+      - text: "a"
+      - button: Go
+        on: x
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *c = find(r.root, Kind::Custom);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->custom_type, "gauge");
+  EXPECT_DOUBLE_EQ(c->props.num("gauge", -1.0), 0.8); // prop named like the type kept
+  ASSERT_EQ(c->children.size(), 2u);                  // children NOT dropped
+  EXPECT_EQ(c->children[1].kind, Kind::Button);
+}
+
 // ---- errors + forward-compat ----------------------------------------------
 
 TEST(AriadneLoaderErrors, MalformedYaml) {
