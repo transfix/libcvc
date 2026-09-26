@@ -95,12 +95,32 @@ struct Runtime::Impl {
 
   void emit(const Widget &w);
   void emit_children(const Widget &w);
+  void emit_container(const Widget &w); // lay children out per w.layout (§3.0.3b)
   void render();
 };
 
 void Runtime::Impl::emit_children(const Widget &w) {
   for (const Widget &c : w.children)
     emit(c);
+}
+
+// Lay a container's children out per its layout (§3.0.3b): a Grid/Horizontal
+// layout flows them into the backend's sized tracks; anything else is a plain
+// vertical stack. Used for both a Window's body and a Group.
+void Runtime::Impl::emit_container(const Widget &w) {
+  Backend &b = *backend;
+  if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
+    const std::string &id = w.id.empty() ? w.label : w.id;
+    if (b.begin_grid(w.layout, id.c_str())) {
+      for (const Widget &c : w.children) {
+        b.grid_next_cell();
+        emit(c);
+      }
+      b.end_grid();
+    }
+  } else {
+    emit_children(w);
+  }
 }
 
 void Runtime::Impl::emit(const Widget &w) {
@@ -139,10 +159,10 @@ void Runtime::Impl::emit(const Widget &w) {
     // The stable identity is the id (defaults to the label); the backend keeps a
     // window's geometry keyed on it. Begin/End pair unconditionally.
     const std::string &id = w.id.empty() ? w.label : w.id;
-    const bool visible = b.begin_window(w.label.c_str(), id.c_str());
+    const bool visible = b.begin_window(w.label.c_str(), id.c_str(), w.size, w.frame_border);
     if (visible) {
       b.push_id(id.c_str());
-      emit_children(w);
+      emit_container(w); // §3.0.3b: the window body honours w.layout
       b.pop_id();
     }
     b.end_window();
@@ -150,7 +170,7 @@ void Runtime::Impl::emit(const Widget &w) {
   }
 
   case Kind::Group:
-    emit_children(w);
+    emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
     break;
 
   case Kind::Text:

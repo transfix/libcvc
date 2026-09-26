@@ -39,6 +39,61 @@ enum class Kind {
   Button,         // a fire-once button -> raises `on` event
 };
 
+// ---------------------------------------------------------------------------
+// Sizing & layout (roadmap §3.0.3 / §3.0.3b). A size or track value is one of:
+//   auto     — fit content
+//   px       — an absolute pixel count
+//   percent  — a fraction of the parent's content rect (a "50%" string, or a
+//              0..1 fraction the loader multiplies to 0..100)
+// ---------------------------------------------------------------------------
+enum class Unit { Auto, Px, Percent };
+
+// A size value along one axis. `value` is pixels (Px) or 0..100 (Percent);
+// unused for Auto.
+struct Extent {
+  Unit unit = Unit::Auto;
+  float value = 0.0f;
+  bool is_set() const { return unit != Unit::Auto; }
+};
+
+// A widget's sizing within its parent's layout (§3.0.3): a hint plus optional
+// min/max floors/ceilings, per axis. All-Auto = let the backend/toolkit size it.
+struct Size {
+  Extent w, h;         // preferred (hint) size
+  Extent min_w, min_h; // floor (Auto = none)
+  Extent max_w, max_h; // ceiling (Auto = none)
+  bool any() const {
+    return w.is_set() || h.is_set() || min_w.is_set() || min_h.is_set() || max_w.is_set() ||
+           max_h.is_set();
+  }
+};
+
+// One layout track — a column width (or, later, a row height): Px → fixed,
+// Percent → stretch weight, Auto → fit content (§3.0.3b).
+struct Track {
+  Unit unit = Unit::Auto;
+  float value = 0.0f;
+};
+
+enum class LayoutKind { Vertical, Horizontal, Grid };
+enum class BorderShow { None, Inner, Outer, All };
+
+// A container's layout (§3.0.2 / §3.0.3b). `col_widths` sizes the tracks of a
+// Grid/Horizontal layout; `resizable` lets the user drag the column seams (native
+// for columns; default off); `borders` shows the inter-cell seams.
+struct Layout {
+  LayoutKind kind = LayoutKind::Vertical;
+  std::vector<Track> col_widths;
+  bool resizable = false;
+  BorderShow borders = BorderShow::None;
+  bool has_border_color = false;
+  float border_color[4] = {0.3f, 0.3f, 0.35f, 1.0f};
+  bool is_set() const {
+    return kind != LayoutKind::Vertical || !col_widths.empty() || resizable ||
+           borders != BorderShow::None;
+  }
+};
+
 // One node of the retained tree. `bind` is a cvc::state path (relative to the
 // Runtime's prefix, or absolute with a leading '/'); `on` is an event name a
 // host handler is registered for (Runtime::on). Empty fields are simply unused
@@ -62,8 +117,10 @@ struct Widget {
   // Window initial placement (a backend hint; seeded first-use, user drag wins).
   bool has_pos = false;
   float pos_x = 0.f, pos_y = 0.f;
-  bool has_size = false;
-  float size_w = 0.f, size_h = 0.f;
+
+  Size size;                  // §3.0.3 / §3.0.3b: hint/min/max, px|percent|auto per axis
+  Layout layout;              // §3.0.2 / §3.0.3b: container layout + tracks + borders
+  float frame_border = -1.0f; // §3.0.3b: widget/window border width in px; <0 = backend default
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
 

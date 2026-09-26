@@ -46,8 +46,9 @@ namespace ariadne {
 namespace fx = ftxui;
 
 struct FtxuiBackend::Impl {
-  std::vector<fx::Elements> stack;  // container stack; top holds the current list
-  std::vector<std::string> titles;  // window titles, parallel to window pushes
+  std::vector<fx::Elements> stack;   // container stack; top holds the current list
+  std::vector<std::string> titles;   // window titles, parallel to window pushes
+  std::vector<Layout> grids;         // open grids, parallel to grid container pushes
   fx::Element root = fx::text("");
 
   void open() { stack.emplace_back(); }
@@ -81,6 +82,7 @@ Capabilities FtxuiBackend::capabilities() const {
 void FtxuiBackend::begin_frame() {
   m_->stack.clear();
   m_->titles.clear();
+  m_->grids.clear();
   m_->open(); // the root child-list
 }
 
@@ -108,7 +110,11 @@ bool FtxuiBackend::begin_menu(const char *label) {
 }
 void FtxuiBackend::end_menu() {}
 
-bool FtxuiBackend::begin_window(const char *title, const char * /*id*/) {
+bool FtxuiBackend::begin_window(const char *title, const char * /*id*/, const Size & /*size*/,
+                                float /*border*/) {
+  // §3.0.3b pixel sizing / border width don't translate to a terminal — FTXUI
+  // auto-sizes the window box to its content (the §16.2 degradation). The size
+  // spec is still honoured for TILED/grid tracks via begin_grid below.
   m_->open();
   m_->titles.emplace_back(title);
   return true;
@@ -119,6 +125,36 @@ void FtxuiBackend::end_window() {
   if (!m_->titles.empty())
     m_->titles.pop_back();
   m_->add(fx::window(fx::text(" " + title + " "), fx::vbox(std::move(body))));
+}
+
+bool FtxuiBackend::begin_grid(const Layout &layout, const char * /*id*/) {
+  m_->grids.push_back(layout); // copy — the walk's Widget outlives the call, but copy is cheap + safe
+  m_->open();
+  return true;
+}
+void FtxuiBackend::grid_next_cell() {} // each child accumulates as its own cell
+
+void FtxuiBackend::end_grid() {
+  fx::Elements cells = m_->close();
+  Layout layout = m_->grids.empty() ? Layout{} : m_->grids.back();
+  if (!m_->grids.empty())
+    m_->grids.pop_back();
+  // Realize the §3.0.3b tracks as a terminal row: px -> a fixed cell width,
+  // percent -> a flexible (growing) cell, auto -> natural width. Resizable
+  // splitters degrade to a static split (§16.2).
+  for (std::size_t i = 0; i < cells.size(); ++i) {
+    if (i >= layout.col_widths.size())
+      continue;
+    const Track &t = layout.col_widths[i];
+    if (t.unit == Unit::Px)
+      cells[i] = cells[i] | fx::size(fx::WIDTH, fx::EQUAL, static_cast<int>(t.value));
+    else if (t.unit == Unit::Percent)
+      cells[i] = fx::flex(cells[i]);
+  }
+  fx::Element row = cells.empty() ? fx::text("") : fx::hbox(std::move(cells));
+  if (layout.borders != BorderShow::None)
+    row = fx::border(row); // any cell-border request -> a box around the row
+  m_->add(row);
 }
 
 void FtxuiBackend::push_id(const char * /*id*/) {}
@@ -214,8 +250,11 @@ bool FtxuiBackend::begin_main_menu_bar() { return false; }
 void FtxuiBackend::end_main_menu_bar() {}
 bool FtxuiBackend::begin_menu(const char *) { return false; }
 void FtxuiBackend::end_menu() {}
-bool FtxuiBackend::begin_window(const char *, const char *) { return false; }
+bool FtxuiBackend::begin_window(const char *, const char *, const Size &, float) { return false; }
 void FtxuiBackend::end_window() {}
+bool FtxuiBackend::begin_grid(const Layout &, const char *) { return false; }
+void FtxuiBackend::grid_next_cell() {}
+void FtxuiBackend::end_grid() {}
 void FtxuiBackend::push_id(const char *) {}
 void FtxuiBackend::pop_id() {}
 void FtxuiBackend::text_line(const char *) {}

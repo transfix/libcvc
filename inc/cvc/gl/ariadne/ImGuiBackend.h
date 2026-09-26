@@ -35,8 +35,12 @@ public:
   void end_main_menu_bar() override;
   bool begin_menu(const char *label) override;
   void end_menu() override;
-  bool begin_window(const char *title, const char *id) override;
+  bool begin_window(const char *title, const char *id, const cvc::ariadne::Size &size,
+                    float border) override;
   void end_window() override;
+  bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
+  void grid_next_cell() override;
+  void end_grid() override;
   void push_id(const char *id) override;
   void pop_id() override;
 
@@ -59,6 +63,13 @@ public:
   // VTK drives Runtime::render() once per rendered frame. Call after
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
   void install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay);
+
+private:
+  // ImGui style vars pushed per open window (WindowBorderSize, §3.0.3b), popped
+  // in end_window; and style colours pushed per open grid table (the border
+  // colour), popped in end_grid. Stacks so nesting is correct.
+  std::vector<int> m_windowStylePushes;
+  std::vector<int> m_gridColorPushes;
 };
 
 } // namespace gl

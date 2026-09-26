@@ -16,6 +16,7 @@
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
 
+#include <cfloat>
 #include <string>
 #include <vector>
 
@@ -79,15 +80,141 @@ void ImGuiBackend::end_main_menu_bar() { ui::EndMainMenuBar(); }
 bool ImGuiBackend::begin_menu(const char *label) { return ui::BeginMenu(label); }
 void ImGuiBackend::end_menu() { ui::EndMenu(); }
 
-bool ImGuiBackend::begin_window(const char *title, const char *id) {
-  // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap
-  // §3.3): two windows that happen to share a title never merge.
+bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
+                                float border) {
+  int pushes = 0;
+#ifdef CVC_ENABLE_IMGUI
+  // Resolve the §3.0.3b size against the main viewport's WORK area (the menu-aware
+  // content rect), per axis: px verbatim, percent as a fraction of the work size,
+  // auto -> 0 (let ImGui fit). min/max become window size constraints.
+  const ImGuiViewport *vp = ImGui::GetMainViewport();
+  const ImVec2 avail = vp->WorkSize;
+  auto px = [](const ariadne::Extent &e, float parent) -> float {
+    if (e.unit == ariadne::Unit::Px)
+      return e.value;
+    if (e.unit == ariadne::Unit::Percent)
+      return parent * e.value / 100.0f;
+    return 0.0f; // Auto
+  };
+  if (size.w.is_set() || size.h.is_set())
+    ImGui::SetNextWindowSize(ImVec2(px(size.w, avail.x), px(size.h, avail.y)),
+                             ImGuiCond_FirstUseEver);
+  if (size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() || size.max_h.is_set()) {
+    const ImVec2 mn(size.min_w.is_set() ? px(size.min_w, avail.x) : 0.0f,
+                    size.min_h.is_set() ? px(size.min_h, avail.y) : 0.0f);
+    const ImVec2 mx(size.max_w.is_set() ? px(size.max_w, avail.x) : FLT_MAX,
+                    size.max_h.is_set() ? px(size.max_h, avail.y) : FLT_MAX);
+    ImGui::SetNextWindowSizeConstraints(mn, mx);
+  }
+  if (border >= 0.0f) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, border);
+    ++pushes;
+  }
+#else
+  (void)size;
+  (void)border;
+#endif
+  // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
   std::string name = title;
   name += "###";
   name += id;
-  return ui::Begin(name.c_str());
+  const bool vis = ui::Begin(name.c_str());
+  m_windowStylePushes.push_back(pushes);
+  return vis;
 }
-void ImGuiBackend::end_window() { ui::End(); } // unconditional per ImGui's contract
+
+void ImGuiBackend::end_window() {
+  ui::End(); // unconditional per ImGui's contract
+  if (!m_windowStylePushes.empty()) {
+    const int n = m_windowStylePushes.back();
+    m_windowStylePushes.pop_back();
+#ifdef CVC_ENABLE_IMGUI
+    if (n)
+      ImGui::PopStyleVar(n);
+#else
+    (void)n;
+#endif
+  }
+}
+
+bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
+#ifdef CVC_ENABLE_IMGUI
+  const int cols = layout.col_widths.empty() ? 1 : static_cast<int>(layout.col_widths.size());
+  ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp;
+  if (layout.resizable)
+    flags |= ImGuiTableFlags_Resizable; // native drag-resize + hover cursor (§3.0.3b)
+  switch (layout.borders) {
+  case ariadne::BorderShow::Inner:
+    flags |= ImGuiTableFlags_BordersInner;
+    break;
+  case ariadne::BorderShow::Outer:
+    flags |= ImGuiTableFlags_BordersOuter;
+    break;
+  case ariadne::BorderShow::All:
+    flags |= ImGuiTableFlags_Borders;
+    break;
+  default:
+    break;
+  }
+  int color_pushes = 0;
+  if (layout.has_border_color) {
+    const ImVec4 c(layout.border_color[0], layout.border_color[1], layout.border_color[2],
+                   layout.border_color[3]);
+    ImGui::PushStyleColor(ImGuiCol_TableBorderLight, c);
+    ImGui::PushStyleColor(ImGuiCol_TableBorderStrong, c);
+    color_pushes = 2;
+  }
+  std::string tid = "###grid.";
+  tid += (id ? id : "");
+  const bool open = ImGui::BeginTable(tid.c_str(), cols, flags);
+  if (open) {
+    for (int i = 0; i < cols; ++i) {
+      ImGuiTableColumnFlags cf = ImGuiTableColumnFlags_WidthStretch;
+      float w = 1.0f; // default stretch weight
+      if (i < static_cast<int>(layout.col_widths.size())) {
+        const ariadne::Track &t = layout.col_widths[i];
+        if (t.unit == ariadne::Unit::Px) {
+          cf = ImGuiTableColumnFlags_WidthFixed;
+          w = t.value;
+        } else if (t.unit == ariadne::Unit::Percent) {
+          cf = ImGuiTableColumnFlags_WidthStretch;
+          w = t.value; // proportional == a percentage after normalization
+        } else {
+          cf = ImGuiTableColumnFlags_WidthFixed;
+          w = 0.0f; // Auto → fit content
+        }
+      }
+      ImGui::TableSetupColumn("", cf, w);
+    }
+    m_gridColorPushes.push_back(color_pushes);
+  } else if (color_pushes) {
+    ImGui::PopStyleColor(color_pushes); // no EndTable when BeginTable() is false
+  }
+  return open;
+#else
+  (void)layout;
+  (void)id;
+  return true; // stub: emit the children as a plain vertical flow
+#endif
+}
+
+void ImGuiBackend::grid_next_cell() {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::TableNextColumn(); // advances a column, wrapping to a new row as needed
+#endif
+}
+
+void ImGuiBackend::end_grid() {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::EndTable();
+  if (!m_gridColorPushes.empty()) {
+    const int n = m_gridColorPushes.back();
+    m_gridColorPushes.pop_back();
+    if (n)
+      ImGui::PopStyleColor(n);
+  }
+#endif
+}
 void ImGuiBackend::push_id(const char *id) { ui::PushId(id); }
 void ImGuiBackend::pop_id() { ui::PopId(); }
 

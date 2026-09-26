@@ -206,19 +206,120 @@ std::string widget_type(const YAML::Node &n, std::string &label) {
   return std::string();
 }
 
-void parse_pos_size(const YAML::Node &n, Widget &w) {
+void parse_pos(const YAML::Node &n, Widget &w) {
   const YAML::Node p = n["pos"];
   if (p && p.IsSequence() && p.size() >= 2) {
     w.has_pos = true;
     w.pos_x = static_cast<float>(p[0].as<double>());
     w.pos_y = static_cast<float>(p[1].as<double>());
   }
-  const YAML::Node s = n["size"];
-  if (s && s.IsSequence() && s.size() >= 2) {
-    w.has_size = true;
-    w.size_w = static_cast<float>(s[0].as<double>());
-    w.size_h = static_cast<float>(s[1].as<double>());
+}
+
+// A §3.0.3b size/track value: "50%" (or a bare 0<v<1 fraction) -> percent;
+// "auto"/empty -> auto (fit); any other number -> pixels.
+Extent parse_extent(const YAML::Node &n) {
+  Extent e;
+  if (!n || !n.IsScalar())
+    return e; // Auto
+  const std::string s = n.Scalar();
+  if (s.empty() || s == "auto")
+    return e;
+  if (s.back() == '%') {
+    e.unit = Unit::Percent;
+    try {
+      e.value = std::stof(s.substr(0, s.size() - 1));
+    } catch (const std::exception &) {
+    }
+    return e;
   }
+  try {
+    const float v = std::stof(s);
+    if (v > 0.0f && v < 1.0f) { // a fraction -> percent
+      e.unit = Unit::Percent;
+      e.value = v * 100.0f;
+    } else {
+      e.unit = Unit::Px;
+      e.value = v;
+    }
+  } catch (const std::exception &) {
+  }
+  return e;
+}
+
+Size parse_size(const YAML::Node &n) {
+  Size sz;
+  if (!n)
+    return sz;
+  if (n.IsSequence() && n.size() >= 2) { // size: [w, h]
+    sz.w = parse_extent(n[0]);
+    sz.h = parse_extent(n[1]);
+  } else if (n.IsMap()) { // size: { hint:[w,h], min:[..], max:[..] }
+    auto pair = [&](const char *key, Extent &a, Extent &b) {
+      const YAML::Node v = n[key];
+      if (v && v.IsSequence() && v.size() >= 2) {
+        a = parse_extent(v[0]);
+        b = parse_extent(v[1]);
+      }
+    };
+    pair("hint", sz.w, sz.h);
+    pair("min", sz.min_w, sz.min_h);
+    pair("max", sz.max_w, sz.max_h);
+  }
+  return sz;
+}
+
+Layout parse_layout(const YAML::Node &n) {
+  Layout L;
+  if (!n || !n.IsMap())
+    return L;
+  const std::string kind = str(n, "kind");
+  if (kind == "horizontal")
+    L.kind = LayoutKind::Horizontal;
+  else if (kind == "grid")
+    L.kind = LayoutKind::Grid;
+  else
+    L.kind = LayoutKind::Vertical;
+  const YAML::Node cw = n["col_widths"];
+  if (cw && cw.IsSequence())
+    for (const YAML::Node &t : cw) {
+      const Extent e = parse_extent(t);
+      Track tr;
+      tr.unit = e.unit;
+      tr.value = e.value;
+      L.col_widths.push_back(tr);
+    }
+  L.resizable = flag(n, "resizable");
+  const YAML::Node b = n["borders"];
+  if (b && b.IsMap()) {
+    const std::string show = str(b, "show");
+    if (show == "inner")
+      L.borders = BorderShow::Inner;
+    else if (show == "outer")
+      L.borders = BorderShow::Outer;
+    else if (show == "all")
+      L.borders = BorderShow::All;
+    const YAML::Node col = b["color"];
+    if (col && col.IsSequence() && col.size() >= 3) {
+      L.has_border_color = true;
+      L.border_color[3] = 1.0f;
+      for (std::size_t i = 0; i < 4 && i < col.size(); ++i)
+        L.border_color[i] = static_cast<float>(col[i].as<double>());
+    }
+  }
+  return L;
+}
+
+// frame: { border: N } -> the widget/window border width in px; -1 = unset.
+float parse_frame_border(const YAML::Node &n) {
+  if (n && n.IsMap()) {
+    const YAML::Node b = n["border"];
+    if (b && b.IsScalar())
+      try {
+        return static_cast<float>(b.as<double>());
+      } catch (const std::exception &) {
+      }
+  }
+  return -1.0f;
 }
 
 // Semantic checks on a bound widget: a two-way widget with no state path is
@@ -265,7 +366,10 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   if (type == "window" || type == "overlay") {
     Widget w = window(label, parse_seq(ctx, n["children"]));
     w.id = str(n, "id");
-    parse_pos_size(n, w);
+    parse_pos(n, w);
+    w.size = parse_size(n["size"]);            // §3.0.3b window sizing (%/px/auto)
+    w.layout = parse_layout(n["layout"]);      // §3.0.3b window-body layout (grid/tracks)
+    w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
     return w;
   }
   if (type == "text") {
@@ -329,7 +433,10 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
     ctx.warn("ari: unrecognized widget key '" + first_key +
              "' — not a known widget type; loaded as an empty group");
   }
-  return group(parse_seq(ctx, n["children"]));
+  Widget g = group(parse_seq(ctx, n["children"]));
+  g.layout = parse_layout(n["layout"]); // §3.0.3b: a group can be a grid / sized tracks
+  g.size = parse_size(n["size"]);
+  return g;
 }
 
 Widget parse_document(Ctx &ctx, const YAML::Node &doc) {

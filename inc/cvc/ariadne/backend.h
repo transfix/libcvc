@@ -25,6 +25,8 @@
 #include <string>
 #include <vector>
 
+#include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
+
 namespace cvc {
 namespace ariadne {
 
@@ -91,11 +93,24 @@ public:
   virtual bool begin_menu(const char *label) = 0;
   virtual void end_menu() = 0;
   // A visible window. `id` is a stable identity (the backend keeps a window's
-  // geometry/state keyed on it, independent of the visible title).
-  virtual bool begin_window(const char *title, const char *id) = 0;
+  // geometry/state keyed on it, independent of the visible title). `size` is the
+  // §3.0.3b sizing spec (px | percent-of-parent | auto per axis, with min/max) —
+  // the backend resolves any percent against its own surface; `border` is the
+  // §3.0.3b window border width in px (<0 = the backend's default).
+  virtual bool begin_window(const char *title, const char *id, const Size &size,
+                            float border) = 0;
   virtual void end_window() = 0;
   virtual void push_id(const char *id) = 0;
   virtual void pop_id() = 0;
+
+  // Grid / column layout (§3.0.3b). A container whose children flow into sized
+  // tracks: begin_grid opens it (false → clipped, do not emit or call end_grid),
+  // grid_next_cell advances before each child, end_grid closes it. The backend
+  // realizes `layout` (col_widths tracks, resizable seams, cell borders); a
+  // backend that cannot lay out in columns may treat it as a plain vertical flow.
+  virtual bool begin_grid(const Layout &layout, const char *id) = 0;
+  virtual void grid_next_cell() = 0;
+  virtual void end_grid() = 0;
 
   // ---- leaves -------------------------------------------------------------
   virtual void text_line(const char *text) = 0;                          // literal caption

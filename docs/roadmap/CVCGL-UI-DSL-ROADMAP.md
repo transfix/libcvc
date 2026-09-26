@@ -404,6 +404,20 @@ state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for 
 
 #### 3.0.3b Percentage units, fixed/percent tracks, resizable splitters, cell borders
 
+> **✅ Implemented (increment 1).** The Widget model carries `Size` (per-axis `Extent` = auto|px|percent,
+> for hint/min/max), a container `Layout` (kind + `col_widths` tracks + `resizable` + `borders`), and a
+> `frame_border` (`inc/cvc/ariadne/widget.h`). The loader parses `size:` (`"50%"`/px/`auto`, `[w,h]` or
+> `{hint,min,max}`), `layout:` (`kind`/`col_widths`/`resizable`/`borders{show,color}`), and `frame.border`
+> (verified: a window with `size:{hint:["50%","100%"],min:[280,0]}`, a grid `col_widths:[200,"auto","30%"]`,
+> `resizable`, inner borders + colour all parse correctly). The `Backend` gains `begin_window(size,
+> border)` + `begin_grid/grid_next_cell/end_grid`; the ImGui backend resolves percent against the
+> viewport work-area (`SetNextWindowSize` + size constraints), pushes `WindowBorderSize`, and realizes a
+> grid as an `ImGui` table (`WidthFixed`/`WidthStretch`/fit per track, `BordersInner/Outer/All`,
+> `Resizable` for free); the FTXUI backend degrades — auto-sized windows, a grid as an `hbox` of
+> fixed/flex cells with a border box (§16.2). **Deferred to increment 2:** row tracks (`row_heights`) +
+> the **manual row splitter**, persisting dragged sizes to `tree.<id>` (needs §11.4 runtime state),
+> `state_exec` track expressions, and thicker-than-1px custom-drawlist borders.
+
 Four related sizing knobs — all realized on the same table engine (§3.0.3a) whose flags this build ships
 (`IMGUI_HAS_TABLE`, confirmed).
 
