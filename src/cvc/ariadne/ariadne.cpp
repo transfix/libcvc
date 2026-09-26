@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -95,7 +96,10 @@ Widget substitute_index(const Widget &w, int index) {
   out.children.clear();
   out.children.reserve(w.children.size());
   for (const Widget &c : w.children)
-    out.children.push_back(substitute_index(c, index));
+    // A nested `repeat` template is left UNtouched so its own expansion owns its `{i}` (rather
+    // than the outer index clobbering the inner template's bindings). Single-level still: the
+    // inner cannot also reference the outer index — the loader warns on a nested repeat.
+    out.children.push_back(c.repeat.empty() ? substitute_index(c, index) : c);
   return out;
 }
 
@@ -352,8 +356,13 @@ public:
       return {dflt, o.error};
     if (auto *i = std::get_if<int64_t>(&o.value.v))
       return {*i, std::string()};
-    if (auto *d = std::get_if<double>(&o.value.v))
+    if (auto *d = std::get_if<double>(&o.value.v)) {
+      // Casting a non-finite or out-of-range double to int64 is UB — guard it (a repeat
+      // count that computes to inf/nan/huge is a broken expr -> fail-safe dflt).
+      if (!std::isfinite(*d) || *d < -9.2e18 || *d > 9.2e18)
+        return {dflt, "ari: reactive expr \"" + src + "\" did not yield an in-range integer"};
       return {static_cast<int64_t>(*d), std::string()};
+    }
     if (auto *s = std::get_if<std::string>(&o.value.v)) {
       try {
         return {static_cast<int64_t>(std::stoll(*s)), std::string()};
@@ -498,6 +507,10 @@ struct Runtime::Impl {
   // §4 read-lane: evaluate a computed-value expression `expr` to a display string.
   // Fail-safe EMPTY string on a broken predicate (§4.1 fmt→""); warns once.
   std::string eval_text(const std::string &expr);
+  // Like eval_text, but for free-text fields (tooltip): if `expr` does NOT evaluate cleanly it
+  // is almost certainly a literal that merely starts with '(' — return it VERBATIM and do NOT
+  // warn. A genuinely computed value is returned; a broken one degrades to its own text.
+  std::string eval_text_or_literal(const std::string &expr);
   // §4 read-lane: evaluate a computed combo-options expression to a list of strings.
   // Fail-safe EMPTY list on a broken expr; warns once.
   std::vector<std::string> eval_options(const std::string &expr);
@@ -568,6 +581,19 @@ std::string Runtime::Impl::eval_text(const std::string &expr) {
   warn_once("ari: computed text expr ignored — this libcvc was built without state_exec "
             "(CVC_STATE_EXEC=OFF)");
   return std::string();
+#endif
+}
+
+std::string Runtime::Impl::eval_text_or_literal(const std::string &expr) {
+#ifdef CVC_STATE_EXEC
+  if (!reactive)
+    reactive = std::make_unique<ReactiveEngine>(app, prefix);
+  const ReactiveEngine::StringOutcome o = reactive->eval_string(expr, /*dflt=*/std::string());
+  // Success -> the computed value; failure -> the literal verbatim (no warning: a tooltip that
+  // starts with '(' is far more likely plain text than a broken expression).
+  return o.error.empty() ? o.value : expr;
+#else
+  return expr; // no state_exec -> show the literal
 #endif
 }
 
@@ -823,9 +849,15 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
   }
   // §4 read-lane: attach a hover tooltip to the widget just drawn (the backend's last item).
-  // Literal text, or a computed expression (starts with '('); empty result = no tooltip.
+  // A tooltip is free human text, so — unlike a bind (a dotted state path never begins with
+  // '(') — one that merely LOOKS like an expression ("(optional) …", "(beta)") must not be
+  // mistaken for one. So: try to evaluate an expr-looking tooltip, but if it does NOT evaluate
+  // cleanly, fall back to showing it verbatim (no spurious warning). A genuine computed tooltip
+  // still works; a literal that happens to start with '(' is shown as-is.
   if (!w.tooltip.empty()) {
-    const std::string tip = is_expr(w.tooltip) ? eval_text(w.tooltip) : w.tooltip;
+    std::string tip = w.tooltip;
+    if (is_expr(w.tooltip))
+      tip = eval_text_or_literal(w.tooltip);
     if (!tip.empty())
       b.set_tooltip(tip.c_str());
   }

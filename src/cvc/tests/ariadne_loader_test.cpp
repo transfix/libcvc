@@ -1151,6 +1151,23 @@ windows:
   EXPECT_EQ(t->label, "Item {i}"); // template label kept verbatim; {i} substituted at emit
 }
 
+TEST(AriadneReactive, NestedRepeatWarnsUnsupported) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - group:
+        repeat: (int 2)
+        children:
+          - checkbox: on
+            bind: rows.{i}.on
+            repeat: (int 3)
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "nested 'repeat'")); // single {i} index -> surfaced, not silent
+}
+
 TEST(AriadneReactive, TooltipParsedOntoWidget) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

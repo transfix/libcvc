@@ -931,6 +931,61 @@ TEST(AriadneReactive, RepeatBrokenCountEmitsNothing) {
   EXPECT_FALSE(rt.take_reactive_warnings().empty());
 }
 
+TEST(AriadneReactive, LiteralTooltipStartingWithParenShownVerbatim) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget b = button("Go", "go");
+  b.tooltip = "(optional) leave blank to use the default"; // plain text that starts with '('
+  rt.set_root(group({b}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("tooltip:(optional) leave blank to use the default")); // verbatim
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()); // NOT misread as a broken expression
+}
+
+TEST(AriadneReactive, DisabledWidgetStillEmitsItsTooltip) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"lock\" \"1\")", nullptr));
+  Widget b = button("Go", "go");
+  b.disabled_when = "(state-exists \"lock\")";
+  b.tooltip = "why disabled";
+  rt.set_root(group({b}));
+  rt.render();
+  // The tooltip is emitted for the disabled widget (inside the disabled scope), so the backend
+  // can surface it (ImGuiBackend uses AllowWhenDisabled). Order: begin_disabled … tooltip … end.
+  const auto pos = [&](const std::string &s) {
+    return std::find(mb.log.begin(), mb.log.end(), s) - mb.log.begin();
+  };
+  ASSERT_TRUE(mb.saw("begin_disabled"));
+  ASSERT_TRUE(mb.saw("tooltip:why disabled"));
+  ASSERT_TRUE(mb.saw("end_disabled"));
+  EXPECT_LT(pos("begin_disabled"), pos("tooltip:why disabled"));
+  EXPECT_LT(pos("tooltip:why disabled"), pos("end_disabled"));
+}
+
+TEST(AriadneReactive, RepeatCountOutOfRangeDoubleIsZero) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget t = text("X");
+  t.repeat = "(* 1e19 1e19)"; // ~1e38: out of int64 range -> guarded -> fail-safe 0
+  rt.set_root(group({t}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:X")); // no instances (not UB / a garbage count)
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
   if (!have_state_exec())
     GTEST_SKIP();

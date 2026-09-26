@@ -535,6 +535,15 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
 // per-kind branches focused on their own params and guarantees a new shared field is
 // wired for all kinds at once. §4 read-lane: visible_when is a state_exec predicate the
 // Runtime re-evaluates each frame (empty = always visible).
+// True if any widget in the subtree (excluding the root) carries a `repeat`.
+bool any_descendant_repeats(const Widget &w) {
+  for (const Widget &c : w.children) {
+    if (!c.repeat.empty() || any_descendant_repeats(c))
+      return true;
+  }
+  return false;
+}
+
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   Widget w = parse_widget_impl(ctx, n);
   if (n.IsMap()) {
@@ -544,6 +553,11 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
     w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
     w.repeat = str(n, "repeat");   // §3: a count expression -> emit this template N times
   }
+  // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
+  // reference the outer index. Surface it rather than let it silently alias state.
+  if (!w.repeat.empty() && any_descendant_repeats(w))
+    ctx.warn("ari: nested 'repeat' is not supported (a single {i} index) — the inner repeat "
+             "cannot see the outer index");
   return w;
 }
 

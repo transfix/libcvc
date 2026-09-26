@@ -301,8 +301,11 @@ void ImGuiBackend::end_disabled() {
 }
 void ImGuiBackend::set_tooltip(const char *text) {
 #ifdef CVC_ENABLE_IMGUI
-  if (text && *text && ImGui::IsItemHovered())
-    ImGui::SetTooltip("%s", text); // hover-gated so it attaches to the last item
+  // AllowWhenDisabled: the core emits the tooltip while still inside a begin_disabled() scope
+  // (enabled_when/disabled_when), and a bare IsItemHovered() returns false for disabled items —
+  // yet a disabled control is exactly where "why is this greyed out?" tooltip matters most.
+  if (text && *text && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("%s", text);
 #else
   (void)text;
 #endif
