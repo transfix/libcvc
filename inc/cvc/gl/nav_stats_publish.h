@@ -14,11 +14,14 @@
 // concurrent sims under distinct prefixes never collide.
 #pragma once
 
+#include <cstdint>
 #include <cvc/gl/state_publisher.h>
 #include <cvc/nav/nav_stats.h>
 #include <string>
+#include <vector>
 
 namespace cvc {
+class app; // fwd (the raster publisher needs it for the cvc::volume ctor + the state root)
 namespace gl {
 
 // "<prefix>.nav_stats" — the per-scene nav-stats subtree root, matching the house sceneStatePath
@@ -43,6 +46,41 @@ struct nav_stats_publish_params {
 void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePrefix,
                        const cvc::nav::episode_nav_stats &e, long tick,
                        const nav_stats_publish_params &p = {});
+
+// ── belief/fog raster bridge (realtime visualization; data() lane) ──────────────
+// Raster geometry for publish_nav_rasters: per-plane dims + the world bbox a reader needs to place
+// the volume (rows/cols per plane; planes = sim_world::planes()).
+struct nav_raster_dims {
+  int rows = 0, cols = 0, planes = 0;
+  double min_x = 0, min_y = 0, max_x = 0, max_y = 0;
+};
+
+// Version-gate state for publish_nav_rasters — ONE per scene, held by the caller across ticks.
+// Records the last-published version per plane (and truth), so an unchanged plane skips the
+// (deep-copying) cvc::volume wrap.
+struct nav_raster_pub_state {
+  int truth_version = -1; // < 0 = truth not yet published (it is static — published once)
+  // last-published version per plane (sized to planes on first use; the "never" sentinel is
+  // INT_MIN, NOT -1, so a plane_version() of -1 is still publishable rather than frozen by a
+  // sentinel clash).
+  std::vector<int> plane_versions;
+};
+
+// Publish the belief/fog rasters into <prefix>.nav_stats.rasters.* for realtime viz. `truth` is
+// [rows*cols] (one shared plane, published ONCE); `belief`/`everseen`/`lastvis` are
+// [planes*rows*cols] (plane m at m*rows*cols) — the sim_world
+// truth()/belief_occ(m)/ever_seen(m)/last_visible(m) surface. `versions[m]` is
+// sim_world::plane_version(m). Each raster is wrapped as a z=1 cvc::volume and stored on the node's
+// data() lane (a shallow-share handle; VolumeNode renders it), with the paired .version + .dims
+// scalars on the value lane through `pub`. A plane's volumes are re-wrapped only when versions[m]
+// changed vs `st` (the deep copy is version-gated). Same-process only: the data() lane does not
+// cross a process boundary — a remote viewer opts into the brick escalation behind the identical
+// version/dims.
+void publish_nav_rasters(cvc::app &app, cvc::gl::state_publisher &pub,
+                         const std::string &scenePrefix, const nav_raster_dims &dims,
+                         const std::uint8_t *truth, const std::uint8_t *belief,
+                         const std::uint8_t *everseen, const std::uint8_t *lastvis,
+                         const int *versions, nav_raster_pub_state &st);
 
 } // namespace gl
 } // namespace cvc
