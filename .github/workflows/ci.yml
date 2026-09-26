@@ -270,6 +270,11 @@ jobs:
             prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           cvcpkg install vtk xorgproto --prefix "$prefix" --config release --link shared
+          # yaml-cpp is a libcvc runtime dep (cvc::ariadne's .ari loader links it;
+          # see cvcpkg/recipes/libcvc/recipe.yaml). It rides on top here — as vtk
+          # does — until the prebuilt libcvc-deps bundle is rebuilt to include it;
+          # with it present, loader.cpp compiles the real parser (not the stub).
+          cvcpkg install yaml-cpp --prefix "$prefix" --config release --link shared
 
       # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
       # 11 of the 13 cvcgl_* tests only inspect scene/state and need no GL at

@@ -169,6 +169,15 @@ depends:
     - name: bzip2
     - name: libxml2
     - name: yaml
+    # yaml-cpp (the C++ parser, distinct from the `yaml` C libYAML above) is
+    # linked by cvc::ariadne's .ari loader — the Ariadne UI/scene DSL parses
+    # documents into the widget tree (src/cvc/ariadne/loader.cpp). It is OPTIONAL
+    # at the CMake level (find_package(yaml-cpp CONFIG); absent -> the loader
+    # compiles a stub), but declared here so the packaged libcvc's build has the
+    # headers (real parser, CVC_ARIADNE_HAVE_YAML) and the bundle ships
+    # libyaml-cpp.so. Plain CMake C++ lib, published for every platform libcvc
+    # builds, so unscoped.
+    - name: yaml-cpp
     - name: levmar
     - name: libiimod
     # Native mesh/model import (Phase 3: cvc::model + read_model/read_geometry for
