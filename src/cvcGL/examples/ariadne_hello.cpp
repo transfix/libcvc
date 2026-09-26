@@ -18,6 +18,7 @@
 #include <thread>
 
 #include <cvc/ariadne/ariadne.h>
+#include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
@@ -32,7 +33,7 @@ using cvc::gl::SceneGraph;
 using cvc::gl::SceneRenderer;
 namespace ari = cvc::ariadne;
 
-int main() {
+int main(int argc, char **argv) {
   cvc::app app;
   SceneGraph sg(app, "hello");
   SceneRenderer view(sg, 1024, 768, /*offscreen=*/false, "main");
@@ -56,7 +57,25 @@ int main() {
   rt.on("reset", [&] { std::printf("[ariadne_hello] reset pressed\n"); });
 
   using namespace cvc::ariadne; // the builder helpers
-  rt.set_root(group({
+
+  // Build the widget tree: from a .ari file if one is given on the command line
+  // (`ariadne_hello hello.ari`), else the built-in programmatic tree below —
+  // which the shipped hello.ari mirrors, so the two render identically.
+  Widget tree;
+  bool loaded = false;
+  if (argc > 1) {
+    LoadResult lr = load_file(argv[1]);
+    if (lr.ok) {
+      tree = std::move(lr.root);
+      loaded = true;
+      std::printf("[ariadne_hello] loaded %s\n", argv[1]);
+    } else {
+      std::printf("[ariadne_hello] %s\n[ariadne_hello] falling back to the built-in tree.\n",
+                  lr.error.c_str());
+    }
+  }
+  if (!loaded)
+    tree = group({
       menubar({
           menu("Sim", {
                           menu_toggle("Paused", "demo.paused", false),
@@ -75,7 +94,8 @@ int main() {
                              text_bound("belief =", "demo.belief"),
                              button("Reset", "reset"),
                          }),
-  }));
+    });
+  rt.set_root(std::move(tree));
 
   std::puts("[ariadne_hello] running — close the window or use Sim > Quit to exit.");
   while (!view.windowClosed() && !quit) {

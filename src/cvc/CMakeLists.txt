@@ -1106,16 +1106,34 @@ endif()
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
   ../../inc/cvc/ariadne/ariadne.h
+  ../../inc/cvc/ariadne/loader.h
 )
 
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
+
+# Ariadne .ari YAML loader — OPTIONAL. yaml-cpp is a light, header+lib dependency;
+# when present, ariadne/loader.cpp compiles the real parser (CVC_ARIADNE_HAVE_YAML);
+# when absent, it compiles a stub (load_* return an error) so libcvc still builds.
+find_package(yaml-cpp CONFIG QUIET)
+if(TARGET yaml-cpp::yaml-cpp OR TARGET yaml-cpp)
+  if(TARGET yaml-cpp::yaml-cpp)
+    set(_cvc_yamlcpp yaml-cpp::yaml-cpp)
+  else()
+    set(_cvc_yamlcpp yaml-cpp) # older yaml-cpp exports a bare target
+  endif()
+  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_YAML)
+  target_link_libraries(cvc PRIVATE ${_cvc_yamlcpp})
+  message(STATUS "Ariadne: .ari YAML loader ENABLED (yaml-cpp)")
+else()
+  message(STATUS "Ariadne: yaml-cpp not found - .ari loader compiles to a stub")
+endif()
 
 # Set library version
 set_target_properties(cvc PROPERTIES

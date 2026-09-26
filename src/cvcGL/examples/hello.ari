@@ -1,0 +1,53 @@
+# hello.ari — the Ariadne P0 demo tree, as a .ari document.
+#
+# Mirrors the built-in programmatic tree in ariadne_hello.cpp, so
+#   ariadne_hello hello.ari
+# renders identically (only the caption differs, to show which path built the
+# tree). Run without an argument to get the built-in tree instead. This is the
+# P0 slice-1 loader's supported subset (roadmap §3.2-3.5); the `meta:` block is
+# parsed in a later slice and harmlessly ignored for now.
+
+meta:
+  name: Ariadne hello
+  author: cvc
+  min_libcvc: 3.4.0
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Paused
+        bind: demo.paused
+      - menu_item: Reset
+        on: reset
+      - separator
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Controls
+    id: controls
+    children:
+      - text: "Ariadne P0 — loaded from hello.ari."
+      - separator
+      - slider_int: Agents
+        bind: demo.agents
+        lo: 1
+        hi: 512
+        def: 64
+      - slider_float: Speed
+        bind: demo.speed
+        lo: 0.1
+        hi: 4.0
+        def: 1.0
+        fmt: "%.2f"
+      - checkbox: Wireframe
+        bind: demo.wire
+      - combo: Belief
+        bind: demo.belief
+        options: [shared, grouped, private]
+        default: shared
+      - separator
+      - text: "belief ="
+        bind: demo.belief
+      - button: Reset
+        on: reset
