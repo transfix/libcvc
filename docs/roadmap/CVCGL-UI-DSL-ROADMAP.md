@@ -49,6 +49,17 @@ produced any view. The metaphor runs deep, and each layer earns it:
 *(Naming is settled; the sections below still say "the DSL"/"the loader" in places — read
 those as Ariadne / the `ari` loader.)*
 
+> **v0.16 — Unicode / UTF-8 text (§17), a v1 deliverable.** Flags that libcvc has **no text-encoding
+> contract and no display-width awareness**, and the reference ImGui backend ships an **ASCII-only
+> font** (`AddFontDefaultVector()`) — so non-ASCII (accented Latin, CJK, emoji) renders wrong, and
+> *differently* per backend. §17 sets the contract (**UTF-8 everywhere** in libcvc/pycvc), a core
+> `cvc::text` codepoint + `wcwidth`-style **display-width** utility (the one place byte-vs-column truth
+> lives, shared by every backend), the per-backend rendering duties (ImGui font coverage; FTXUI/ncursesw
+> already measure width), codepoint-aware editing, and the pycvc SWIG-`std::string` UTF-8 audit — phased
+> so each step is independently useful. Also landed since v0.15: the **FTXUI terminal backend** proving
+> the seam (§16.4), the **.ari loader** with the **meta/min_libcvc gate** + **Layer-2 JSON-Schema
+> validation** (§15), and the four cvcpkg recipes (ftxui/tvision/nlohmann-json/json-schema-validator).
+>
 > **v0.15 — Backend architecture (§16).** Splits Ariadne into a **context-agnostic core in pure
 > libcvc (`cvc::ariadne`)** and a **pluggable `Backend`** (the "arbitrary UI handler"); **cvcGL
 > becomes one backend** (ImGui-over-VTK) and a **pure-terminal backend** becomes possible. Adds
@@ -3211,3 +3222,109 @@ keeps the loader context-agnostic and is the cheapest moment to do it. What stil
 - **Degradation multiplies the tested surface** — every `.ari` doc effectively has a GL rendering and a degraded TUI rendering; silent degradation can mask authoring bugs. *Mitigation: the lint/preflight must **report** what degraded, not degrade silently.*
 - **Shader footguns** — the VTK replacement **consumes** the `//VTK::` anchor and wasm reserves texture units 0–5 / leaves `tcoord` undeclared (memories `cvcgl-shader-replacement-consumes-anchor`, `cvcgl-wasm-shader-tcoord-undeclared`, `cvcgl-wasm-custom-shader-texture-units`); the first-class `shaders:` loader must encode these as automatic guards (§16.3).
 - **tvision licensing + terminfo closure** — treating tvision as "MIT" on the magiblot header alone would be a mistake; and a hermetic ncursesw+terminfo closure across the glibc-2.35/2.39 + macOS + Windows + BSD fleet is non-trivial. *Mitigation: both gated behind decision #5's sign-off.*
+
+## 17. Unicode / UTF-8 text (libcvc + pycvc) — a v1 deliverable
+
+> **v0.16 — the text-encoding gap.** Ariadne can *pass* UTF-8 through today (the FTXUI backend
+> already draws box-drawing glyphs, and `std::string` carries multi-byte bytes fine), but libcvc has
+> **no defined text-encoding contract and no display-width awareness**, and the reference ImGui
+> backend ships an **ASCII-only font**. So "café", "Straße", CJK, or an emoji in a label or a
+> state-bound value renders wrong or not at all — and it renders wrong *differently* on each backend.
+> To show Unicode correctly **regardless of UI backend**, this has to be sorted at the libcvc/pycvc
+> level, not per-backend. Scoping it here as a committed v1 workstream.
+
+### 17.1 The problem (grounded in the current code)
+
+- **No encoding contract.** `cvc::state` values, and every Ariadne string field (`label`, `bind`,
+  `title`, combo `options`, …), are `std::string`/`const char*` with no stated encoding. In practice
+  they carry whatever bytes the caller put in; nothing says "these are UTF-8."
+- **Byte-based width is wrong for non-ASCII.** Any layout/measure/truncate/pad/align that reaches for
+  `.size()` or `strlen` counts **bytes**, not display columns: `é` is 2 bytes/1 column, a CJK ideograph
+  is 3 bytes/**2** columns, an emoji is 4 bytes/2 columns, a combining mark is bytes/**0** columns. §3.0.3
+  sizing, any ellipsis truncation, and a terminal backend's column math all break on multi-byte text.
+  libcvc today has **no `wcwidth`/codepoint/UTF-8 utility at all** (verified: the only "unicode" hits are
+  stb_image's Windows-filename helper and a Clipboard comment).
+- **The ImGui reference backend is ASCII-only.** `ImGuiOverlay` builds the font with
+  `io.Fonts->AddFontDefaultVector()` (the stock proggy default) — no glyph ranges beyond Basic Latin and
+  no CJK/emoji/extended-Latin glyphs. Even a correctly-encoded UTF-8 value renders as `?`/boxes there.
+- **pycvc is implicitly UTF-8, undocumented.** The bindings use SWIG's default `std::string` typemap,
+  which on Python 3 encodes/decodes UTF-8 (`str` ⇄ UTF-8 bytes) — so Python→libcvc *probably* round-trips
+  today, but it is unverified, unstated, and a non-UTF-8-decodable byte string coming back from C++ would
+  raise a `UnicodeDecodeError` at the boundary.
+
+### 17.2 The contract: UTF-8 everywhere
+
+**Every text `std::string` crossing a libcvc or pycvc boundary is UTF-8.** State values, Ariadne fields,
+labels, `state_exec` string atoms, log messages, file paths where the OS allows it. This is the single
+invariant the whole stack (and every UI backend) can rely on. Documented as a libcvc-wide contract, not
+an Ariadne-only one — VolRover3, grl-snam, and the CLI all share `cvc::state`. `char32_t`/`std::u32string`
+appear only *inside* algorithms that need codepoints (width, editing); they are never a public boundary
+type. (Windows `wchar_t`/UTF-16 stays confined to the Win32 shims — Clipboard, file APIs — converting at
+the edge, as the stb/Clipboard code already hints.)
+
+### 17.3 The core utility: `cvc::text` (codepoints + display width)
+
+A small, dependency-light module in libcvc core — the one place the byte-vs-column truth lives, shared by
+every backend and by pycvc:
+- **decode/iterate**: UTF-8 → codepoints (a forward iterator; malformed bytes → U+FFFD, never a crash).
+- **display width**: `display_width(std::string_view)` and `codepoint_width(char32_t)` — an East-Asian-Width
+  + combining-mark `wcwidth`-style table (0 for combining/zero-width, 2 for wide/fullwidth/most emoji, 1
+  otherwise). This is what §3.0.3 sizing, truncation, and terminal column math call instead of `.size()`.
+- **safe truncate/pad**: `truncate_to_width`, `pad_to_width` on column boundaries (never mid-codepoint).
+- **codepoint edit ops**: prev/next codepoint boundary, for cursor movement and backspace (§17.5).
+Ship the width table as generated data (from Unicode UCD EastAsianWidth + a combining set); a version bump
+is a data refresh, not code. No ICU dependency for v1 — the table covers width; full normalization/casing/
+BiDi is explicitly out of scope for v1 (a later, ICU- or utf8proc-backed phase if a demo needs it).
+
+### 17.4 Backend responsibilities (the §16.2 width contract)
+
+The core guarantees UTF-8 in and a display-width function; each backend renders it:
+- **ImGui/VTK (reference):** load a font that actually covers the ranges — bundle a broad-coverage TTF
+  (e.g. a Noto/DejaVu subset) and pass `GetGlyphRangesDefault` + the ranges the app declares (Latin-1,
+  CJK, symbols), or enable ImGui's dynamic glyph loading. This is the concrete fix for the ASCII-only
+  `AddFontDefaultVector()` gap; ImGui then measures width via the font (which agrees with `cvc::text`
+  for layout the core does itself). An `.ari`/app hook to declare needed glyph ranges (so a CJK app pays
+  for CJK, an ASCII app does not).
+- **FTXUI / terminal:** FTXUI already measures glyph width internally and the terminal renders UTF-8 via
+  the emulator + its own `wcwidth`; the core's `display_width` must **agree** with them so Ariadne's
+  layout math and the backend's rasterization don't disagree by a column (the classic "CJK misaligns the
+  border" bug). tvision (ncursesw) likewise renders wide chars — the ncurses recipe already builds the
+  wide (`libncursesw`) variant, so the dep is in place.
+- **Capability:** add `Capabilities::unicode` (and, later, a per-backend "supports emoji/wide" nuance) so
+  a doc/author can know whether a glyph will show; a backend that can't render a codepoint shows a
+  tofu/`?` rather than misaligning.
+
+### 17.5 Text editing (codepoint-aware)
+
+When Ariadne grows an editable text field (and for the FTXUI/tvision interactive backends), cursor
+movement, backspace/delete, and selection must step by **codepoint (grapheme, ideally) not byte**, and the
+in-progress edit buffer stays valid UTF-8 at every commit boundary. The `cvc::text` boundary ops (§17.3)
+are what the widget/backends use; the commit protocol (§16.1 `EditResult`) is unchanged — it already
+carries a `std::string` value, now contractually UTF-8.
+
+### 17.6 pycvc
+
+- **Verify + document** the SWIG `std::string` ⇄ Python `str` typemap is UTF-8 on every supported
+  interpreter (cp311/312/313), and decide the policy for a C++ string that is **not** valid UTF-8 coming
+  back to Python (raise, or `errors="surrogateescape"`) — pick one and make it explicit rather than
+  crashing at the boundary.
+- **Expose `cvc::text.display_width`** (and truncate/pad) to Python so pycvc UIs (VolRover3 panels, a
+  pycvc-driven Ariadne) do width math the same way the C++ side does.
+
+### 17.7 Scope + phasing
+
+A cross-cutting v1 workstream, sequenced so each phase is independently useful:
+1. **Contract + `cvc::text`** — declare UTF-8 everywhere; land the codepoint/width utility + tests
+   (the enabling layer everything else builds on).
+2. **ImGui font coverage** — replace `AddFontDefaultVector()` with a range-covering font + a glyph-range
+   declaration hook (the visible fix for the reference backend).
+3. **Layout uses display-width** — route §3.0.3 sizing / truncation / the terminal column math through
+   `cvc::text::display_width`.
+4. **Codepoint-aware editing** — when editable text lands (§17.5).
+5. **pycvc** — verify/document the typemap; expose the width API (§17.6).
+
+**Open decisions:** (a) v1 width-only (no normalization/BiDi) vs. pulling in utf8proc/ICU now — recommend
+width-only for v1, ICU-class work deferred until a demo needs Arabic/Indic shaping; (b) which font to
+bundle for ImGui and how large a default glyph set (size vs. coverage) — recommend a DejaVu/Noto subset
+with Latin-1 + symbols by default and CJK opt-in; (c) grapheme-cluster vs. codepoint granularity for
+editing — recommend codepoint for v1, grapheme a later refinement.
