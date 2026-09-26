@@ -563,7 +563,7 @@ scene:
     - light: key
       kind: spot
       pos: [10, 20, 30]
-      target: [0, 0, 0]
+      target: [1, 2, 3]
       cone: 30
       intensity: 1.5
     - light: soft
@@ -576,6 +576,11 @@ scene:
   EXPECT_EQ(key.id, "key");
   EXPECT_EQ(key.kind, "spot");
   EXPECT_FLOAT_EQ(key.pos[1], 20.0f);
+  // Non-default target so a dropped/mistyped `target` key can't hide (the realizer
+  // feeds these into LightNode::setTarget for spot/fill).
+  EXPECT_FLOAT_EQ(key.target[0], 1.0f);
+  EXPECT_FLOAT_EQ(key.target[1], 2.0f);
+  EXPECT_FLOAT_EQ(key.target[2], 3.0f);
   EXPECT_FLOAT_EQ(key.cone, 30.0f);
   EXPECT_FLOAT_EQ(key.intensity, 1.5f);
   EXPECT_EQ(r.scene.lights[1].rig, "three_point");
@@ -642,6 +647,11 @@ scene:
   EXPECT_EQ(n.source_file, "head.rawiv");
   ASSERT_TRUE(n.has_transform);
   EXPECT_FLOAT_EQ(n.scale[0], 2.0f);
+  // An unstyled node must report has_material==false: the realizer applies
+  // setAmbient/setDiffuse only then, so an unstyled volume keeps VolumeNode's tuned
+  // transfer-function defaults. Pin the default so a parse regression can't silently
+  // style every node.
+  EXPECT_FALSE(n.has_material);
 }
 
 TEST(AriadneScene, WidgetsAndSceneCoexist) {
