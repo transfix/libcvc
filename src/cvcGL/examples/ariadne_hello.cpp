@@ -1,4 +1,4 @@
-// ariadne_hello — the first Ariadne (cvc::gl::ariadne) demo.
+// ariadne_hello — the first Ariadne demo (context-agnostic core, one backend).
 //
 // Boots the standard cvcGL viewer (SceneGraph + SceneRenderer + ImGuiOverlay) and
 // mounts a small Ariadne widget tree built PROGRAMMATICALLY (the P0 slice; the
@@ -8,23 +8,29 @@
 //   - a Button that raises a named event, drained on the host thread.
 // Every bound widget reads/writes a cvc::state path under the scene prefix, so a
 // state observer / script / replicated peer sees the same edits.
+//
+// The tree + Runtime are pure libcvc (cvc::ariadne); the only cvcGL piece is the
+// backend — cvc::gl::ImGuiBackend renders the SAME tree as ImGui over VTK
+// (roadmap §16.1). Swap the backend and this tree would render on a terminal.
 
 #include <chrono>
 #include <cstdio>
 #include <thread>
 
+#include <cvc/ariadne/ariadne.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
-#include <cvc/gl/ariadne/ariadne.h>
+#include <cvc/gl/ariadne/ImGuiBackend.h>
 
 using cvc::gl::CameraController;
+using cvc::gl::ImGuiBackend;
 using cvc::gl::ImGuiOverlay;
 using cvc::gl::SceneGraph;
 using cvc::gl::SceneRenderer;
-namespace ari = cvc::gl::ariadne;
+namespace ari = cvc::ariadne;
 
 int main() {
   cvc::app app;
@@ -38,14 +44,18 @@ int main() {
   ImGuiOverlay ui(view);
   ui.attachCamera(cam);
 
-  // The Ariadne runtime binds relative widget paths under the scene prefix.
-  ari::Runtime rt(app, ui, sg.getStatePrefix());
+  // The Ariadne runtime binds relative widget paths under the scene prefix; the
+  // ImGui backend renders it and drives the walk from VTK's render pass.
+  ari::Runtime rt(app, sg.getStatePrefix());
+  ImGuiBackend backend;
+  rt.set_backend(&backend);
+  backend.install(rt, ui);
 
   bool quit = false;
   rt.on("quit", [&] { quit = true; });
   rt.on("reset", [&] { std::printf("[ariadne_hello] reset pressed\n"); });
 
-  using namespace cvc::gl::ariadne; // the builder helpers
+  using namespace cvc::ariadne; // the builder helpers
   rt.set_root(group({
       menubar({
           menu("Sim", {
@@ -66,7 +76,6 @@ int main() {
                              button("Reset", "reset"),
                          }),
   }));
-  rt.install();
 
   std::puts("[ariadne_hello] running — close the window or use Sim > Quit to exit.");
   while (!view.windowClosed() && !quit) {

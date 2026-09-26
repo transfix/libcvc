@@ -1102,6 +1102,17 @@ if(CVC_ENABLE_GRPC)
   )
 endif()
 
+# Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
+# the retained Widget tree, the Runtime + reconcile boundary, and direct
+# cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
+# the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp)
+list(APPEND INCLUDE_FILES
+  ../../inc/cvc/ariadne/widget.h
+  ../../inc/cvc/ariadne/backend.h
+  ../../inc/cvc/ariadne/ariadne.h
+)
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)

@@ -58,9 +58,11 @@ those as Ariadne / the `ari` loader.)*
 > owns the screen), Ariadne's root *widget* maps onto it — **superseding §1's "root = VTK canvas".**
 > Terminal-lib feasibility (§16.4): **FTXUI** the clean, zero-dep, wasm-capable **default**;
 > **tvision** an optional native-desktop-metaphor second backend behind legal + terminfo blockers;
-> **notcurses** off the roadmap. The **module move happens now** (P0 slice 0 → `cvc::ariadne`,
-> §16.1) so the loader/`state_exec`/validation are never written against the GL types. Scope calls
-> (terminal backend = v1 vs. reserved seam; tvision; the FTXUI C++20 floor) are open in §16.5.
+> **notcurses** off the roadmap. The **module move is done** (P0 slice 0 → `cvc::ariadne` core +
+> `cvc::gl::ImGuiBackend`, §16.1) so the loader/`state_exec`/validation are never written against
+> the GL types. **Scope decided (§16.5): both terminal backends are v1 goals — FTXUI *and*
+> tvision** — which activates the FTXUI C++20-floor call, tvision's Borland-licensing sign-off, and
+> a hermetic ncursesw+terminfo closure as committed work.
 
 > **v0.4:** the scene graph (§9) now makes **`RenderView` + `VisibilityMask` first-class
 > from the start** — each view renders a *masked and restyled subset* of one authored scene
@@ -3007,6 +3009,19 @@ The core `Runtime` becomes surface-free — `Runtime(cvc::app&, std::string pref
 
 #### The namespace/module move + P0-slice-0 refactor
 
+> **✅ Done (this landed).** The four steps below were executed: `cvc::ariadne` core (`widget.h`,
+> `backend.h`, `ariadne.h`, `ariadne/ariadne.cpp`) compiled into libcvc `cvc` with **no VTK/ImGui**;
+> `cvc::gl::ImGuiBackend` (`inc/cvc/gl/ariadne/ImGuiBackend.h`, `src/cvcGL/ariadne/ImGuiBackend.cpp`)
+> the only ImGui/VTK touch-point; `ariadne_hello` rewritten to `Runtime rt(app, prefix); ImGuiBackend
+> b; rt.set_backend(&b); b.install(rt, ui);`. The `cvc::state` read/seed/commit logic was lifted into
+> the core (as `read_or_seed`/`write` free functions); the backend reports the commit edge via
+> `BoolEdit/IntEdit/DoubleEdit/IndexEdit{changed,committed,value}` and the core writes on `committed`
+> — the slider drag still commits once, on release. Verified: core TU compiles imgui-agnostically;
+> `ImGuiBackend.cpp` compiles both imgui-off (stub) and imgui-on (raw cache + `IsItemDeactivatedAfterEdit`
+> + `BeginCombo`). One refinement vs. the sketch: the continuous-slider **edit cache stayed in the
+> backend** (it lives in ImGui window storage, keyed by the passed state path) — the core owns only
+> read/seed/write, which is the correct seam.
+
 Do the move **now**, while the code is ~480 lines across four files, so the YAML loader, `state_exec`, and validation are written against `cvc::ariadne` from day one and never have to be un-coupled.
 1. **Headers** — `inc/cvc/gl/ariadne/{widget.h,ariadne.h}` -> `inc/cvc/ariadne/`; add `inc/cvc/ariadne/backend.h`. Namespace `cvc::gl::ariadne -> cvc::ariadne`; drop all ImGui/VTK includes.
 2. **Core source** — `src/cvcGL/ariadne/ariadne.cpp` -> `src/cvc/ariadne/ariadne.cpp`, compiled into the core `cvc` library (`add_library(cvc …)`, `src/cvc/CMakeLists.txt:1106`); rewrite `emit()` to call `Backend*` primitives with the core doing `read_or_seed`/`write` against `cvc::state` (lifting that logic out of `ImGuiBinding.cpp`). Links only `cvc::cvc` — no VTK/ImGui.
@@ -3162,19 +3177,26 @@ When Ariadne moves into libcvc as `cvc::ariadne`, a pure-terminal backend render
 
 The core/`Backend` split is justified **regardless** of whether a terminal backend ever ships — it
 keeps the loader context-agnostic and is the cheapest moment to do it. What still needs a call is
-**how far to go**. Recommendations below are baked into the plan; ⚑ marks the ones that want an
-explicit sign-off because they change scope/cost or carry a legal/toolchain dependency.
+**how far to go**. ⚑ marks the ones that carried a scope/cost or legal/toolchain dependency.
 
-| # | Decision | Recommendation (the roadmap's default) | ⚑ |
+> **Decided (2026-09-25, project lead).** **Both terminal backends are v1 goals — FTXUI *and*
+> tvision**, not FTXUI-only and not a reserved-seam-only. So: the `Backend` seam is built now (the
+> §16.1 refactor — **done**), and the terminal backends are a committed v1 workstream, not deferred.
+> This *activates* three things that were otherwise parked: the **FTXUI C++20 floor** must be
+> resolved (a fleet toolchain call), the **tvision Borland derivative-works licensing** needs legal
+> sign-off before any tvision recipe lands, and a **hermetic ncursesw+terminfo closure** is now
+> in-scope work (the hermetic X11/GL recipes are the precedent). Rows 1 and 5 below reflect this.
+
+| # | Decision | Resolution | ⚑ |
 |---|---|---|---|
-| 1 | Is a pure-terminal backend a **v1 deliverable** or a **reserved seam**? | **Lock the `Backend` seam now** (`owns_loop`+`root_rect()`+`capabilities()`), ship **only the ImGui/VTK backend in v1**, defer the first real TUI backend (FTXUI) to a later phase. Gets the debt-avoidance at ~zero extra cost without the recipe+wasm+CI scope of an actual TUI backend. | ⚑ |
+| 1 | Is a pure-terminal backend a **v1 deliverable** or a **reserved seam**? | **DECIDED: a v1 deliverable.** Build the `Backend` seam now (`owns_loop`+`root_rect()`+`capabilities()` — done in §16.1) *and* ship real terminal backends in v1 (FTXUI + tvision, row 5). The recipe + wasm + CI scope for FTXUI, and the native ncursesw/terminfo + legal work for tvision, are committed v1 workstreams. | ⚑→ set |
 | 2 | How are **GL-only features** surfaced to authors? | Per-widget **implicit `requires:`** (auto-derived, graceful degrade) **+** optional whole-doc `requires:` for fail-fast **+** an `ari lint` that flags px-absolute layout / `view_embed` / shaders as non-portable. An unmarked `shader_canvas` **degrades-and-omits** (shows `fallback:` if present, else the layout closes the gap + a one-time log). | |
 | 3 | Is a portable **input model** (`drain_input`) P0 or deferred? | Define `capabilities().mouse/keyboard` + a `drain_input()` **seam** in P0, but keep the ImGui backend's existing VTK-routed input. A portable pointer/key event model lands with the first TUI backend. | |
 | 4 | Where does the **`cvc::state` read/seed/commit** logic live once lifted out of `ImGuiBinding.cpp`? | A **free-function set in `cvc::ariadne::detail`** the `Runtime` calls, returning `EditResult{changed,committed,value}`; the backend only reports the commit edge, the core owns write-back. **Audit every ui:: commit policy during the lift** (discrete-immediate vs deactivate-after-edit vs text-entry; `color_edit3` multi-field) so semantics don't silently change. | ⚑ (sharpest refactor risk) |
-| 5 | Pursue **tvision** at all? | **Not in v1.** FTXUI-only as/when a TUI backend ships (accept `free`→`tiled` on terminals). Revisit tvision only if the native windowed-desktop terminal feel is worth **(a)** Borland derivative-works legal sign-off and **(b)** a hermetic ncursesw+terminfo closure. | ⚑ |
+| 5 | Pursue **tvision** at all? | **DECIDED: yes, in v1** — for the native windowed-desktop terminal feel (movable/overlapping windows, pull-down menus, dialogs) that realizes Ariadne's default `free` metaphor, with `TApplication` owning the root as VTK owns the GL context. Two hard prerequisites are now active work: **(a)** legal sign-off on the Borland derivative-works cloud (MIT covers only magiblot's additions), **(b)** a hermetic ncursesw+terminfo recipe closure. FTXUI stays the portable/wasm default; tvision is the native-desktop option behind a capability flag. | ⚑→ set |
 | 6 | Add the **`shader://`** convenience scheme now? | **Defer.** Ship GLSL sourcing with inline / `file://` / `pkg://` / `state://`. The `state://` **live-hot-reload** path is the valuable one (edit GLSL in a text widget, reload on the commit boundary); `#include` expansion + shader cache (`shader://`) only if needed. | |
 | 7 | Does **reconcile + intent-drain survive a framework-owned loop**? | Designed for it (the `owns_loop` seam), but **prove it when the first `owns_loop=true` backend lands**: `drain()` must run intents off the walk on the host thread, mapped onto FTXUI/tvision idle/event hooks with no mid-walk mutation. Deferred with the backend. | |
-| — | **FTXUI C++ standard floor** | FTXUI needs **C++20** for parts of its API; libcvc's P0 core is C++17. Confirm the floor (or gate FTXUI behind a raised floor) **before** committing FTXUI as the default TUI backend — a cross-cutting fleet toolchain decision. | ⚑ |
+| — | **FTXUI C++ standard floor** | **Now a live prerequisite** (FTXUI is a committed v1 backend). FTXUI needs **C++20** for parts of its API; libcvc's P0 core is C++17. Resolve the floor (raise libcvc's standard, or gate the FTXUI backend TU at a higher standard than the core) **before** the FTXUI recipe lands — a cross-cutting fleet toolchain decision. | ⚑→ set |
 
 **Risk register (carried, not blocking the scope):**
 - **Loop-ownership retrofit** — if the P0 `Backend` bakes in only the host-pumped model (`owns_loop=false`), a framework-owned loop won't fit later without reworking the `Runtime` control surface. *Mitigation: the `owns_loop`+`root_rect()` seam is mandatory in the P0 refactor (decision #1).*

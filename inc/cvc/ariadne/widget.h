@@ -1,12 +1,13 @@
-#ifndef CVC_GL_ARIADNE_WIDGET_H
-#define CVC_GL_ARIADNE_WIDGET_H
+#ifndef CVC_ARIADNE_WIDGET_H
+#define CVC_ARIADNE_WIDGET_H
 
-// Ariadne — the cvcGL UI & scene DSL (cvc::gl::ariadne).
+// Ariadne — the context-agnostic UI & scene DSL (cvc::ariadne, pure libcvc).
 //
 // widget.h is the retained widget-tree node model — the in-memory "DOM" the
-// per-frame walk (ariadne.cpp) renders as Dear ImGui. It is deliberately
-// imgui-free (a plain data struct), so any consumer can build a tree without
-// pulling in ImGui headers; the walker emits the actual ImGui calls.
+// per-frame walk (ariadne.cpp) renders through a pluggable Backend (backend.h).
+// It is deliberately backend-free (a plain data struct): no ImGui, no VTK, no
+// terminal library — any consumer can build a tree without pulling a UI toolkit,
+// and any Backend (ImGui-over-VTK, a terminal, …) can render the same tree.
 //
 // This is the P0 slice: a useful subset of widget kinds, built programmatically
 // (see the builder helpers). The YAML loader (slice 1) will construct the same
@@ -18,7 +19,6 @@
 #include <vector>
 
 namespace cvc {
-namespace gl {
 namespace ariadne {
 
 // The widget kinds realized in the P0 walker. Structure (menubar/menu/window/
@@ -46,7 +46,7 @@ enum class Kind {
 struct Widget {
   Kind kind = Kind::Group;
 
-  std::string id;    // stable ImGui id suffix (### ); defaults to `label`
+  std::string id;    // stable widget id suffix; defaults to `label`
   std::string label; // display text / window title / menu name
   std::string bind;  // cvc::state path for bound widgets
   std::string on;    // event name for action widgets (Button / MenuItemAction)
@@ -59,7 +59,7 @@ struct Widget {
   std::string sdef;                     // Combo default option text
   std::vector<std::string> options;     // Combo options
 
-  // Window initial placement (seeded ImGuiCond_FirstUseEver; user drag wins).
+  // Window initial placement (a backend hint; seeded first-use, user drag wins).
   bool has_pos = false;
   float pos_x = 0.f, pos_y = 0.f;
   bool has_size = false;
@@ -197,7 +197,6 @@ inline Widget button(std::string label, std::string on) {
 }
 
 } // namespace ariadne
-} // namespace gl
 } // namespace cvc
 
-#endif // CVC_GL_ARIADNE_WIDGET_H
+#endif // CVC_ARIADNE_WIDGET_H
