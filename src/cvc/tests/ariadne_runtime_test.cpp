@@ -778,6 +778,44 @@ TEST(AriadneReactive, NoEnableFieldsMeansNoDisabledScope) {
   EXPECT_TRUE(mb.saw("button:Go"));
 }
 
+TEST(AriadneReactive, ComputedTextValueFromExpression) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"n\" \"7\")", nullptr));
+  cvc::state::instance(app)("demo.k").value(std::string("hi"));
+  Widget computed = text_bound("N1", "(+ (int (state-get \"n\")) 1)"); // bind is an expr: n+1
+  Widget raw = text_bound("Raw", "(state-get \"n\")");                 // expr returning a string
+  Widget path = text_bound("V", "demo.k"); // a dotted path (not an expr)
+  rt.set_root(group({computed, raw, path}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:N1=8"));  // computed (7+1) + coerced to a string
+  EXPECT_TRUE(mb.saw("text_value:Raw=7")); // a string result shows RAW (no quotes)
+  EXPECT_TRUE(mb.saw("text_value:V=hi"));  // a dotted path is still a plain state read
+  cvc::state::instance(app)("n").value(9);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:N1=10")); // reacts to state each frame
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneReactive, ComputedTextBrokenExprIsEmptyAndWarns) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget t = text_bound("X", "(+ (int"); // parse error -> fail-safe EMPTY value
+  rt.set_root(group({t}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:X=")); // empty value, still drawn (not hung/crashed)
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
   if (!have_state_exec())
     GTEST_SKIP();

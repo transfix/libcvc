@@ -56,6 +56,11 @@ windows:
       # warns once (see rt.take_reactive_warnings() in ariadne_hello.cpp).
       - text: "⚠ heavy: over 256 agents"
         visible_when: (> (int (state-get "demo.agents")) 256)
+      # §4 read-lane (reactive): a `bind` that is an s-expression (starts with '(') is a
+      # COMPUTED value re-evaluated each frame, not a state path — here a derived label that
+      # tracks the Agents slider. A plain dotted `bind:` is still a state read.
+      - text: "load"
+        bind: (if (> (int (state-get "demo.agents")) 256) "heavy" "ok")
       - slider_float: Speed
         bind: demo.speed
         lo: 0.1

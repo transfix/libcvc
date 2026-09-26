@@ -53,6 +53,18 @@ std::string read_string(cvc::app &ctx, const std::string &path) {
   }
 }
 
+// §4 read-lane: is this bind an s-EXPRESSION (a computed value) rather than a state path?
+// State paths are dotted identifiers and never begin with '('; an s-expr always does. So the
+// first non-space character decides — no ambiguity, and no new field/key needed.
+bool is_expr(const std::string &bind) {
+  for (char c : bind) {
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+      continue;
+    return c == '(';
+  }
+  return false;
+}
+
 } // namespace
 
 // --- custom widget type registry (§ extensibility) --------------------------
@@ -243,45 +255,75 @@ public:
     bool value;        // predicate result, or the caller's `dflt` on any failure
     std::string error; // empty on success; a diagnostic otherwise
   };
+  struct StringOutcome {
+    std::string value; // display string, or the caller's `dflt` on any failure
+    std::string error; // empty on success; a diagnostic otherwise
+  };
 
-  // Evaluate `src` as a boolean predicate. Fail-safe: a parse error, a runtime error
-  // (e.g. an unbound writer symbol, a type error), or a step/time-cap overrun returns
-  // {dflt, <why>} rather than throwing.
+  // Evaluate `src` as a boolean predicate (visible_when / enabled_when / …). Fail-safe: a
+  // parse error, a runtime error, or a step/time-cap overrun returns {dflt, <why>}.
   Outcome eval_bool(const std::string &src, bool dflt) {
-    const se::value_t *expr = compile(src);
-    if (!expr)
-      return {dflt, "ari: visible_when: parse error in \"" + src + "\" — widget hidden"};
-    const double remaining = kFrameBudgetSeconds - frame_spent_;
-    if (remaining <= 0.0)
-      return {dflt, "ari: visible_when: \"" + src +
-                        "\" skipped — per-frame reactive budget exhausted — widget hidden"};
-    try {
-      se::evaluator_state st = ev_->create_state(*expr);
-      const auto t0 = std::chrono::steady_clock::now();
-      // Cap this eval at the per-slot time OR the frame's remaining budget, whichever is
-      // smaller, plus the per-slot step cap. run() returns nil with done==false on a cap.
-      const se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
-      frame_spent_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-      if (!st.done) // step cap: run() returns nil with done==false
-        return {dflt, "ari: visible_when: \"" + src +
-                          "\" exceeded the eval budget (step cap) — widget hidden"};
-      return {r.is_truthy(), std::string()};
-    } catch (const se::evaluation_timeout &) {
-      // time cap: run() throws rather than returning done==false, so the post-run
-      // accounting above was skipped — charge the slot it consumed to the frame budget.
-      frame_spent_ += std::min(kMaxSeconds, remaining);
-      return {dflt, "ari: visible_when: \"" + src +
-                        "\" exceeded the eval budget (time cap) — widget hidden"};
-    } catch (const se::evaluation_interrupted &) {
-      return {dflt, "ari: visible_when: \"" + src +
-                        "\" exceeded the eval budget (interrupted) — widget hidden"};
-    } catch (const std::exception &e) {
-      return {dflt, "ari: visible_when: \"" + src + "\" failed at eval (" + e.what() +
-                        ") — widget hidden"};
-    }
+    const RawOutcome o = eval_raw(src);
+    if (!o.error.empty())
+      return {dflt, o.error};
+    return {o.value.is_truthy(), std::string()};
+  }
+
+  // Evaluate `src` and coerce the result to a display string (computed text / fmt / …).
+  // Same bounding + fail-safe as eval_bool; on any failure returns {dflt, <why>}.
+  StringOutcome eval_string(const std::string &src, const std::string &dflt) {
+    const RawOutcome o = eval_raw(src);
+    if (!o.error.empty())
+      return {dflt, o.error};
+    return {display_string(o.value), std::string()};
   }
 
 private:
+  struct RawOutcome {
+    se::value_t value; // valid only when error is empty
+    std::string error; // empty on success; a diagnostic otherwise (contains src + cause)
+  };
+
+  // The shared evaluate path for every read-lane expression: compile-cached, bounded three
+  // ways (per-eval step cap + per-eval time cap + per-frame aggregate), never throws out.
+  RawOutcome eval_raw(const std::string &src) {
+    const se::value_t *expr = compile(src);
+    if (!expr)
+      return {{}, "ari: reactive expr parse error in \"" + src + "\""};
+    const double remaining = kFrameBudgetSeconds - frame_spent_;
+    if (remaining <= 0.0)
+      return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted"};
+    try {
+      se::evaluator_state st = ev_->create_state(*expr);
+      const auto t0 = std::chrono::steady_clock::now();
+      se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
+      frame_spent_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      if (!st.done) // step cap: run() returns nil with done==false
+        return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (step cap)"};
+      return {std::move(r), std::string()};
+    } catch (const se::evaluation_timeout &) {
+      frame_spent_ += std::min(kMaxSeconds, remaining); // run() threw before the post-run charge
+      return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (time cap)"};
+    } catch (const se::evaluation_interrupted &) {
+      return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (interrupted)"};
+    } catch (const std::exception &e) {
+      return {{}, "ari: reactive expr \"" + src + "\" failed at eval (" + e.what() + ")"};
+    }
+  }
+
+  // Coerce a result value to a display string: a string is shown RAW (no quotes), a bool as
+  // true/false, nil as empty; anything else via the bounded to_string (numbers → digits, a
+  // list/dict → its readable, length-capped form).
+  static std::string display_string(const se::value_t &v) {
+    if (auto *s = std::get_if<std::string>(&v.v))
+      return *s;
+    if (auto *b = std::get_if<bool>(&v.v))
+      return *b ? "true" : "false";
+    if (v.is_nil())
+      return std::string();
+    return se::to_string(v);
+  }
+
   // Parse once; cache the AST. A parse failure caches std::nullopt so a broken predicate
   // is not re-parsed every frame. Returns nullptr on a (cached) parse failure.
   const se::value_t *compile(const std::string &src) {
@@ -362,6 +404,9 @@ struct Runtime::Impl {
   // enabled_when is falsy OR disabled_when is truthy. Fail-safe DISABLED on a broken
   // predicate; a build without state_exec leaves it enabled (+ warns once).
   bool disabled(const Widget &w);
+  // §4 read-lane: evaluate a computed-value expression `expr` to a display string.
+  // Fail-safe EMPTY string on a broken predicate (§4.1 fmt→""); warns once.
+  std::string eval_text(const std::string &expr);
   void warn_once(const std::string &msg) {
     if (reactive_warned.insert(msg).second)
       reactive_warnings.push_back(msg);
@@ -412,6 +457,21 @@ bool Runtime::Impl::disabled(const Widget &w) {
   warn_once("ari: enabled_when/disabled_when on '" + (w.label.empty() ? w.id : w.label) +
             "' ignored — this libcvc was built without state_exec (CVC_STATE_EXEC=OFF)");
   return false; // can't evaluate -> leave it functional
+#endif
+}
+
+std::string Runtime::Impl::eval_text(const std::string &expr) {
+#ifdef CVC_STATE_EXEC
+  if (!reactive)
+    reactive = std::make_unique<ReactiveEngine>(app, prefix);
+  const ReactiveEngine::StringOutcome o = reactive->eval_string(expr, /*dflt=*/std::string());
+  if (!o.error.empty())
+    warn_once(o.error);
+  return o.value;
+#else
+  warn_once("ari: computed text expr ignored — this libcvc was built without state_exec "
+            "(CVC_STATE_EXEC=OFF)");
+  return std::string();
 #endif
 }
 
@@ -508,6 +568,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::Text:
     if (w.literal_text)
       b.text_line(label);
+    else if (is_expr(w.bind))
+      // §4 read-lane (homoiconic): a `bind` that is an s-expression (starts with '(') is a
+      // COMPUTED value re-evaluated each frame, not a state path. State paths never start
+      // with '(', so this is unambiguous. Read-only, bounded, fail-safe empty.
+      b.text_value(label, eval_text(w.bind));
     else
       b.text_value(label, read_string(app, resolve(w.bind)));
     break;
