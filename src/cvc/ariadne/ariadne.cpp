@@ -473,6 +473,7 @@ struct Runtime::Impl {
 #endif
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
+  int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
 
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
 
@@ -678,7 +679,17 @@ void Runtime::Impl::each_instance(const Widget &w,
     return;
   }
   const int n = eval_count(w.repeat); // capped, fail-safe 0
+  // Per-FRAME instance budget: each repeat is capped individually, but many repeats could
+  // still compound into an unbounded per-frame walk (substitute_index deep-copy + emit),
+  // which the eval-time budget doesn't see. Bound the total across the whole frame.
+  constexpr int kMaxFrameInstances = 16384;
   for (int i = 0; i < n; ++i) {
+    if (frame_instances >= kMaxFrameInstances) {
+      warn_once("ari: too many repeated widget instances this frame (cap " +
+                std::to_string(kMaxFrameInstances) + ") — remaining instances skipped");
+      break;
+    }
+    ++frame_instances;
     Widget inst = substitute_index(w, i);
     inst.repeat.clear(); // the instance renders once
     f(inst, i);
@@ -879,6 +890,7 @@ void Runtime::Impl::render() {
   if (reactive)
     reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
 #endif
+  frame_instances = 0; // §3: reset the per-frame repeat-expansion budget
   backend->begin_frame();
   emit(root);
   backend->end_frame();
