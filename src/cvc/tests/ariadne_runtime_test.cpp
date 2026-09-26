@@ -643,6 +643,27 @@ TEST(AriadneReactive, ReadLaneExcludesCompoundAndInvokeBuiltins) {
   EXPECT_FALSE(rt.take_reactive_warnings().empty()); // each reported an unbound symbol
 }
 
+TEST(AriadneReactive, EqualityRefusesCompoundOperands) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // `=` is the only structure walker; a compound is still buildable via `quote` (or the
+  // defclass special form the env can't gate). Comparing one with `=` is refused, so a
+  // predicate can never drive values_equal over an adversarially deep structure -> hidden.
+  Widget bad = text("bad");
+  bad.visible_when = "(= (quote (1 2 3)) (quote (1 2 3)))"; // quoted lists are compound
+  Widget ok = text("ok");
+  ok.visible_when = "(= 1 1)"; // scalar equality still works
+  rt.set_root(group({bad, ok}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:bad")); // compound `=` refused -> fail-safe hidden
+  EXPECT_TRUE(mb.saw("text_line:ok"));   // scalar `=` unaffected
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
   if (!have_state_exec())
     GTEST_SKIP();

@@ -216,15 +216,41 @@ public:
     se::environment_ptr full = se::builtins::make_default_environment();
     se::register_intrinsics(full, &ctx_);
     static const char *const kAllowed[] = {
-        // scalar arithmetic / comparison / coercion / type predicates / logic
-        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "is-int",
-        "is-float", "is-string", "is-null", "type-of", "not", "and", "or",
+        // scalar arithmetic / comparison / coercion / type predicates / logic. (`<`/`>`/…
+        // use as_number and throw on a non-number; `+`/`*` flatten only one level and throw
+        // on nesting — so none can walk a deep structure. `=`/`!=` DO recurse, so they are
+        // bound as scalar-guarded wrappers below instead of copied.)
+        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "int", "float", "is-int", "is-float",
+        "is-string", "is-null", "type-of", "not", "and", "or",
         // side-effect-free SCALAR/BOOL state readers (no writer / scheduler / watch, and NOT
         // the compound-returning state-children / state-data-get)
         "state-get", "state-exists", "state-root-path", "state-has-expiry", "state-is-expired"};
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
+    // `=`/`!=` are the only structure WALKERS (values_equal recurses into list/dict with no
+    // memoization). A compound value is still *buildable* via the `quote` literal or the
+    // `defclass` special form — neither of which the env can gate — so a shared-ref DAG
+    // compared with `=` would walk 2^d nodes in one uninterruptible native step. Bind
+    // SCALAR-GUARDED `=`/`!=` that refuse a list/dict operand: a predicate compares scalars
+    // but can never drive values_equal over an adversarial structure.
+    const auto is_compound = [](const se::value_t &v) {
+      return std::holds_alternative<se::list_ptr>(v.v) || std::holds_alternative<se::dict_ptr>(v.v);
+    };
+    env_->set("=", se::value_t{se::native_fn{[is_compound](std::span<const se::value_t> a) -> se::value_t {
+                  if (a.size() != 2)
+                    throw std::runtime_error("=: expected 2 arguments");
+                  if (is_compound(a[0]) || is_compound(a[1]))
+                    throw std::runtime_error("=: read-lane comparison is scalar-only");
+                  return se::value_t{se::values_equal(a[0], a[1])};
+                }}});
+    env_->set("!=", se::value_t{se::native_fn{[is_compound](std::span<const se::value_t> a) -> se::value_t {
+                  if (a.size() != 2)
+                    throw std::runtime_error("!=: expected 2 arguments");
+                  if (is_compound(a[0]) || is_compound(a[1]))
+                    throw std::runtime_error("!=: read-lane comparison is scalar-only");
+                  return se::value_t{!se::values_equal(a[0], a[1])};
+                }}});
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
   }
 
