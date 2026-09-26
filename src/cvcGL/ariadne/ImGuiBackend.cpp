@@ -59,6 +59,28 @@ int *cache_int(const char *key, int seed, bool active) {
     *slot = seed;
   return slot;
 }
+
+// Resolve a §3.0.3b track to pixels: px verbatim, percent as a fraction of the
+// parent extent, auto -> 0 (fit / default).
+float resolve_track(const ariadne::Track &t, float parent) {
+  if (t.unit == ariadne::Unit::Px)
+    return t.value;
+  if (t.unit == ariadne::Unit::Percent)
+    return parent * t.value / 100.0f;
+  return 0.0f;
+}
+
+// A horizontal drag seam between two stacked panes (the classic ImGui splitter
+// idiom, §3.0.3b "rows are a manual splitter"): dragging adjusts *a and *b.
+bool row_splitter(float thickness, float *a, float *b, float min_a, float min_b, float long_axis) {
+  ImGuiContext &g = *GImGui;
+  ImGuiWindow *win = g.CurrentWindow;
+  const ImGuiID id = win->GetID("##cvcg.rowsplit");
+  ImRect bb;
+  bb.Min = win->DC.CursorPos;
+  bb.Max = ImVec2(bb.Min.x + long_axis, bb.Min.y + thickness);
+  return ImGui::SplitterBehavior(bb, id, ImGuiAxis_Y, a, b, min_a, min_b, 0.0f);
+}
 } // namespace
 #endif
 
@@ -139,10 +161,34 @@ void ImGuiBackend::end_window() {
 
 bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #ifdef CVC_ENABLE_IMGUI
-  const int cols = layout.col_widths.empty() ? 1 : static_cast<int>(layout.col_widths.size());
+  GridState gs;
+  gs.cols = layout.col_widths.empty() ? 1 : static_cast<int>(layout.col_widths.size());
+  const ImVec2 avail = ImGui::GetContentRegionAvail();
+  const float availH = avail.y > 0.0f ? avail.y : ImGui::GetMainViewport()->WorkSize.y;
+  const float availW = avail.x > 0.0f ? avail.x : ImGui::GetMainViewport()->WorkSize.x;
+  for (const ariadne::Track &t : layout.row_heights)
+    gs.row_px.push_back(resolve_track(t, availH));
+
+  // Resizable rows → a vertical split-pane stack with draggable seams (§3.0.3b).
+  // Pane heights persist across frames in ImGui window storage, seeded from the
+  // row tracks (cross-reload persistence to tree.<id> is the §11.4 follow-up).
+  if (layout.is_row_split()) {
+    gs.split = true;
+    gs.split_long_axis = availW;
+    ImGuiStorage *store = ImGui::GetStateStorage();
+    const std::string base = std::string("cvcg.split.") + (id ? id : "");
+    for (std::size_t i = 0; i < gs.row_px.size(); ++i) {
+      const ImGuiID key = ImHashStr((base + "." + std::to_string(i)).c_str(), 0, kCacheSalt);
+      gs.pane_h.push_back(store->GetFloatRef(key, gs.row_px[i] > 0.0f ? gs.row_px[i] : 80.0f));
+    }
+    m_grids.push_back(std::move(gs));
+    return true; // the panes themselves open in grid_next_cell
+  }
+
+  // Table mode: columns sized by col_widths, optional per-row min-heights.
   ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp;
   if (layout.resizable)
-    flags |= ImGuiTableFlags_Resizable; // native drag-resize + hover cursor (§3.0.3b)
+    flags |= ImGuiTableFlags_Resizable; // native column drag-resize (§3.0.3b)
   switch (layout.borders) {
   case ariadne::BorderShow::Inner:
     flags |= ImGuiTableFlags_BordersInner;
@@ -156,21 +202,20 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
   default:
     break;
   }
-  int color_pushes = 0;
   if (layout.has_border_color) {
     const ImVec4 c(layout.border_color[0], layout.border_color[1], layout.border_color[2],
                    layout.border_color[3]);
     ImGui::PushStyleColor(ImGuiCol_TableBorderLight, c);
     ImGui::PushStyleColor(ImGuiCol_TableBorderStrong, c);
-    color_pushes = 2;
+    gs.color_pushes = 2;
   }
   std::string tid = "###grid.";
   tid += (id ? id : "");
-  const bool open = ImGui::BeginTable(tid.c_str(), cols, flags);
+  const bool open = ImGui::BeginTable(tid.c_str(), gs.cols, flags);
   if (open) {
-    for (int i = 0; i < cols; ++i) {
+    for (int i = 0; i < gs.cols; ++i) {
       ImGuiTableColumnFlags cf = ImGuiTableColumnFlags_WidthStretch;
-      float w = 1.0f; // default stretch weight
+      float w = 1.0f;
       if (i < static_cast<int>(layout.col_widths.size())) {
         const ariadne::Track &t = layout.col_widths[i];
         if (t.unit == ariadne::Unit::Px) {
@@ -178,7 +223,7 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
           w = t.value;
         } else if (t.unit == ariadne::Unit::Percent) {
           cf = ImGuiTableColumnFlags_WidthStretch;
-          w = t.value; // proportional == a percentage after normalization
+          w = t.value;
         } else {
           cf = ImGuiTableColumnFlags_WidthFixed;
           w = 0.0f; // Auto → fit content
@@ -186,9 +231,9 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
       }
       ImGui::TableSetupColumn("", cf, w);
     }
-    m_gridColorPushes.push_back(color_pushes);
-  } else if (color_pushes) {
-    ImGui::PopStyleColor(color_pushes); // no EndTable when BeginTable() is false
+    m_grids.push_back(std::move(gs));
+  } else if (gs.color_pushes) {
+    ImGui::PopStyleColor(gs.color_pushes); // no EndTable when BeginTable() is false
   }
   return open;
 #else
@@ -200,18 +245,47 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 
 void ImGuiBackend::grid_next_cell() {
 #ifdef CVC_ENABLE_IMGUI
-  ImGui::TableNextColumn(); // advances a column, wrapping to a new row as needed
+  if (m_grids.empty())
+    return;
+  GridState &g = m_grids.back();
+  if (g.split) {
+    const int i = g.cell;
+    if (i > 0) {
+      ImGui::EndChild(); // close the previous pane
+      if (i - 1 < static_cast<int>(g.pane_h.size()) && i < static_cast<int>(g.pane_h.size()))
+        row_splitter(4.0f, g.pane_h[i - 1], g.pane_h[i], 24.0f, 24.0f, g.split_long_axis);
+    }
+    const float h = (i < static_cast<int>(g.pane_h.size())) ? *g.pane_h[i] : 0.0f;
+    const std::string pid = "##cvcg.pane" + std::to_string(i);
+    ImGui::BeginChild(pid.c_str(), ImVec2(0.0f, h), ImGuiChildFlags_Borders);
+    ++g.cell;
+    return;
+  }
+  // Table mode: at each new row, honour the row's min-height.
+  const int col = g.cell % g.cols;
+  const int row = g.cell / g.cols;
+  if (col == 0) {
+    const float h = (row < static_cast<int>(g.row_px.size())) ? g.row_px[row] : 0.0f;
+    ImGui::TableNextRow(ImGuiTableRowFlags_None, h);
+  }
+  ImGui::TableSetColumnIndex(col);
+  ++g.cell;
 #endif
 }
 
 void ImGuiBackend::end_grid() {
 #ifdef CVC_ENABLE_IMGUI
-  ImGui::EndTable();
-  if (!m_gridColorPushes.empty()) {
-    const int n = m_gridColorPushes.back();
-    m_gridColorPushes.pop_back();
-    if (n)
-      ImGui::PopStyleColor(n);
+  if (m_grids.empty())
+    return;
+  const GridState g = m_grids.back();
+  m_grids.pop_back();
+  if (g.split) {
+    if (g.cell > 0)
+      ImGui::EndChild(); // close the last pane
+  } else {
+    ImGui::EndTable();
+    if (g.color_pushes)
+      ImGui::PopStyleColor(g.color_pushes);
   }
 #endif
 }

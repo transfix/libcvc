@@ -234,7 +234,9 @@ Extent parse_extent(const YAML::Node &n) {
   }
   try {
     const float v = std::stof(s);
-    if (v > 0.0f && v < 1.0f) { // a fraction -> percent
+    if (v == 0.0f) {
+      // 0 = auto axis / no constraint (§3.0.3: "0 = auto", "0 = unbounded")
+    } else if (v > 0.0f && v < 1.0f) { // a fraction -> percent
       e.unit = Unit::Percent;
       e.value = v * 100.0f;
     } else {
@@ -279,15 +281,18 @@ Layout parse_layout(const YAML::Node &n) {
     L.kind = LayoutKind::Grid;
   else
     L.kind = LayoutKind::Vertical;
-  const YAML::Node cw = n["col_widths"];
-  if (cw && cw.IsSequence())
-    for (const YAML::Node &t : cw) {
-      const Extent e = parse_extent(t);
-      Track tr;
-      tr.unit = e.unit;
-      tr.value = e.value;
-      L.col_widths.push_back(tr);
-    }
+  auto tracks = [](const YAML::Node &seq, std::vector<Track> &out) {
+    if (seq && seq.IsSequence())
+      for (const YAML::Node &t : seq) {
+        const Extent e = parse_extent(t);
+        Track tr;
+        tr.unit = e.unit;
+        tr.value = e.value;
+        out.push_back(tr);
+      }
+  };
+  tracks(n["col_widths"], L.col_widths);
+  tracks(n["row_heights"], L.row_heights);
   L.resizable = flag(n, "resizable");
   const YAML::Node b = n["borders"];
   if (b && b.IsMap()) {

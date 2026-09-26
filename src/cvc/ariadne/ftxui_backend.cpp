@@ -139,22 +139,26 @@ void FtxuiBackend::end_grid() {
   Layout layout = m_->grids.empty() ? Layout{} : m_->grids.back();
   if (!m_->grids.empty())
     m_->grids.pop_back();
-  // Realize the §3.0.3b tracks as a terminal row: px -> a fixed cell width,
-  // percent -> a flexible (growing) cell, auto -> natural width. Resizable
-  // splitters degrade to a static split (§16.2).
+  // Row tracks / a resizable row split degrade to a VERTICAL stack (sized rows);
+  // column tracks to a horizontal row. px -> a fixed extent, percent -> flexible
+  // (growing), auto -> natural; a drag splitter degrades to a static split (§16.2).
+  const bool vertical = !layout.row_heights.empty();
+  const std::vector<Track> &tracks = vertical ? layout.row_heights : layout.col_widths;
+  const ftxui::WidthOrHeight axis = vertical ? fx::HEIGHT : fx::WIDTH;
   for (std::size_t i = 0; i < cells.size(); ++i) {
-    if (i >= layout.col_widths.size())
+    if (i >= tracks.size())
       continue;
-    const Track &t = layout.col_widths[i];
+    const Track &t = tracks[i];
     if (t.unit == Unit::Px)
-      cells[i] = cells[i] | fx::size(fx::WIDTH, fx::EQUAL, static_cast<int>(t.value));
+      cells[i] = cells[i] | fx::size(axis, fx::EQUAL, static_cast<int>(t.value));
     else if (t.unit == Unit::Percent)
       cells[i] = fx::flex(cells[i]);
   }
-  fx::Element row = cells.empty() ? fx::text("") : fx::hbox(std::move(cells));
+  fx::Element box = cells.empty() ? fx::text("")
+                                  : (vertical ? fx::vbox(std::move(cells)) : fx::hbox(std::move(cells)));
   if (layout.borders != BorderShow::None)
-    row = fx::border(row); // any cell-border request -> a box around the row
-  m_->add(row);
+    box = fx::border(box);
+  m_->add(box);
 }
 
 void FtxuiBackend::push_id(const char * /*id*/) {}

@@ -83,15 +83,20 @@ enum class BorderShow { None, Inner, Outer, All };
 // for columns; default off); `borders` shows the inter-cell seams.
 struct Layout {
   LayoutKind kind = LayoutKind::Vertical;
-  std::vector<Track> col_widths;
+  std::vector<Track> col_widths;  // Grid/Horizontal column tracks
+  std::vector<Track> row_heights; // Grid row tracks (§3.0.3b increment 2)
   bool resizable = false;
   BorderShow borders = BorderShow::None;
   bool has_border_color = false;
   float border_color[4] = {0.3f, 0.3f, 0.35f, 1.0f};
   bool is_set() const {
-    return kind != LayoutKind::Vertical || !col_widths.empty() || resizable ||
-           borders != BorderShow::None;
+    return kind != LayoutKind::Vertical || !col_widths.empty() || !row_heights.empty() ||
+           resizable || borders != BorderShow::None;
   }
+  // A resizable grid with sized rows is realized as a vertical split-pane stack
+  // with draggable seams (§3.0.3b: "rows are a manual splitter"); anything else
+  // is a table.
+  bool is_row_split() const { return resizable && !row_heights.empty(); }
 };
 
 // One node of the retained tree. `bind` is a cvc::state path (relative to the

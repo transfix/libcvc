@@ -66,10 +66,23 @@ public:
 
 private:
   // ImGui style vars pushed per open window (WindowBorderSize, §3.0.3b), popped
-  // in end_window; and style colours pushed per open grid table (the border
-  // colour), popped in end_grid. Stacks so nesting is correct.
+  // in end_window. A stack so window nesting is correct.
   std::vector<int> m_windowStylePushes;
-  std::vector<int> m_gridColorPushes;
+
+  // Per open grid (§3.0.3b). A grid is realized either as an ImGui table (columns
+  // + optional per-row min-heights) or, when resizable with row tracks, as a
+  // vertical split-pane stack with draggable seams (row splitter). Held on a
+  // stack so nested grids compose. No ImGui types here (backend-header-clean).
+  struct GridState {
+    bool split = false;               // split-pane mode vs table mode
+    int cols = 1;
+    int cell = 0;                     // cells emitted so far
+    std::vector<float> row_px;        // resolved row heights (px; 0 = auto/fit)
+    std::vector<float *> pane_h;      // split mode: pointers to each pane's live height (ImGui storage)
+    float split_long_axis = 0.0f;     // split mode: the seam's cross length
+    int color_pushes = 0;             // table border-colour style pushes to pop
+  };
+  std::vector<GridState> m_grids;
 };
 
 } // namespace gl

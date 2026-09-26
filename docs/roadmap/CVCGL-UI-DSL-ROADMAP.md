@@ -414,9 +414,17 @@ state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for 
 > viewport work-area (`SetNextWindowSize` + size constraints), pushes `WindowBorderSize`, and realizes a
 > grid as an `ImGui` table (`WidthFixed`/`WidthStretch`/fit per track, `BordersInner/Outer/All`,
 > `Resizable` for free); the FTXUI backend degrades — auto-sized windows, a grid as an `hbox` of
-> fixed/flex cells with a border box (§16.2). **Deferred to increment 2:** row tracks (`row_heights`) +
-> the **manual row splitter**, persisting dragged sizes to `tree.<id>` (needs §11.4 runtime state),
-> `state_exec` track expressions, and thicker-than-1px custom-drawlist borders.
+> fixed/flex cells with a border box (§16.2).
+>
+> **✅ Increment 2 (rows + splitters).** `Layout.row_heights` (px|percent|auto) sizes grid rows: the
+> ImGui table honours them via `TableNextRow` min-heights, and a **resizable grid with row tracks**
+> (`is_row_split()`) is realized as a **vertical split-pane stack with draggable seams** — `BeginChild`
+> panes + the classic `SplitterBehavior` idiom, pane heights held in ImGui window storage (seeded from
+> the row tracks). The FTXUI backend degrades rows to a `vbox` of fixed/flex cells. Covered by a
+> 18-case gtest (`ariadne_loader_test`) that exercises the whole loader incl. row tracks / row-split.
+> **Still deferred:** persisting dragged sizes across a reload to `tree.<id>` (needs §11.4 runtime
+> state — the seam is transient/per-session for now), `state_exec` track expressions, thicker-than-1px
+> custom-drawlist borders, and mixing resizable rows *and* columns in one grid.
 
 Four related sizing knobs — all realized on the same table engine (§3.0.3a) whose flags this build ships
 (`IMGUI_HAS_TABLE`, confirmed).
