@@ -51,6 +51,22 @@ template <typename T> T read_or_seed(cvc::app &ctx, const std::string &path, con
   }
 }
 
+// Read a state value WITHOUT seeding — returns `def` when the path has no value yet
+// and never writes. This is for a pure FOLLOWER of a key that some other layer owns
+// and seeds (e.g. a scene `visible:` bind reading a key a widget checkbox seeds with
+// its own `def:`): a follower must not pre-empt the owner's default. Never throws.
+template <typename T> T read_or(cvc::app &ctx, const std::string &path, const T &def) {
+  try {
+    cvc::state &s = cvc::state::instance(ctx)(path);
+    const std::string raw = s.value();
+    if (raw.empty())
+      return def;
+    return s.value<T>();
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+
 // Write a state value; swallows read-only / unwritable (never throws into a frame).
 // A write equal to the current value is a no-op inside cvc::state (equality guard),
 // so re-writing every frame fires observers only on an actual change.
@@ -68,20 +84,23 @@ template <typename T> void write(cvc::app &ctx, const std::string &path, const T
 // state_object machinery (SceneNode::handleStateChanged) turns the `.visible` write
 // into a setVisible on the owner thread.
 struct SceneVisibilityBinding {
-  std::string source_path;      // resolved bind path the widgets also read/write
+  std::string source_path;      // resolved bind path some widget layer OWNS (+ seeds)
   std::string target_path;      // the node's `<node-state-path>.visible` key
-  bool default_visible = true;  // seed + fallback when the source has no value yet
+  bool default_visible = true;  // fallback ONLY while the source has no value yet
 };
 
 // Poll every visibility binding once and mirror source -> node `.visible`. Reads and
 // writes cvc::state only (no VTK) — safe to call each frame from the host render
-// loop. Reading as int matches the 0/1 encoding the widgets (checkbox) use; the
-// write no-ops unless the value actually changed. Call from the owner/render thread
-// so the node's setVisible runs inline the same frame.
+// loop. The source is read WITHOUT seeding: a scene `visible:` bind is a follower, so
+// whichever widget owns the key (e.g. a checkbox with its own `def:`) is the sole
+// seeder — the node's `default_visible` is only a fallback until then, and is never
+// written into the shared source key. Reading as int matches the 0/1 encoding the
+// widgets use; the write to the node key no-ops unless the value actually changed.
+// Call from the owner/render thread so the node's setVisible runs inline the frame.
 inline void sync_scene_visibility(cvc::app &app,
                                   const std::vector<SceneVisibilityBinding> &bindings) {
   for (const SceneVisibilityBinding &b : bindings) {
-    const int v = read_or_seed<int>(app, b.source_path, b.default_visible ? 1 : 0);
+    const int v = read_or<int>(app, b.source_path, b.default_visible ? 1 : 0);
     write<int>(app, b.target_path, v);
   }
 }

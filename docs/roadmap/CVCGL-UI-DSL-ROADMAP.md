@@ -1557,20 +1557,26 @@ of a hand-built C++ escape.
 > `Runtime` and the scene binder call — so a widget `bind:` and a scene `visible:` on the
 > same relative path provably resolve to one key (a checkbox and the mesh it shows stay in
 > lockstep). `realize_scene(sg, scene, bind_prefix, warnings)` now returns a `RealizedScene`
-> `{created, visibility}`; for each bound node it resolves the source path, seeds the node's
-> initial visibility from the live value, and records a `cvc::ariadne::SceneVisibilityBinding`
-> `{source_path, target_path, default}` — **pure state-path strings, no node pointer**, so a
-> torn-down node can never be dangled into. The host calls
-> `cvc::ariadne::sync_scene_visibility(app, realized.visibility)` each frame: it mirrors the
-> source value into the node's own `<node>.visible` key, and the node's existing
-> `state_object` machinery (`SceneNode::handleStateChanged` → `runOnMainThread`, inline on the
-> owner thread) performs the `setVisible`. Visibility flows through the node's own state key —
-> `cvc::state` stays authoritative (§9.1), so inspectors/replicated peers/scripts see the same
-> value. Poll (not a boost::signals2 watch) was chosen to match the widget layer's existing
-> per-frame convention, avoid the dangling-callback teardown hazard, run on the render thread
-> where `setVisible` is safe, and future-proof `visible:` becoming an expression. 12 new core
-> gtests (`AriadneBind.*`, no VTK — resolve rules, read/seed/write, the source→node-key mirror,
-> and the shared-key property); realizer + `ariadne_hello` wiring compile-verified against the
+> `{created, visibility}`; for each bound node it resolves the source path, sets the node's own
+> initial visibility from the live source (falling back to the node default while the source is
+> unset), and records a `cvc::ariadne::SceneVisibilityBinding` `{source_path, target_path,
+> default}` — **pure state-path strings, no node pointer**, so a torn-down node can never be
+> dangled into. The host calls `cvc::ariadne::sync_scene_visibility(app, realized.visibility)`
+> each frame: it mirrors the source value into the node's own `<node>.visible` key, and the
+> node's existing `state_object` machinery (`SceneNode::handleStateChanged` → `runOnMainThread`,
+> inline on the owner thread) performs the `setVisible`. Visibility flows through the node's own
+> state key — `cvc::state` stays authoritative (§9.1), so inspectors/replicated peers/scripts see
+> the same value. **The scene `visible:` bind is a pure FOLLOWER** (`read_or`, non-seeding): it
+> never seeds the shared source key, so whichever widget owns that key (a checkbox with its own
+> `def:`) is the sole seeder and a co-bound widget's default is honored — the node's own default
+> is a fallback only while the source is unset. To let a *bound* node still start hidden without a
+> widget, `visible:` also accepts a map form `{ bind: <path>, default: <bool> }` (the scalar form
+> is either a literal bool or a bind path). Poll (not a boost::signals2 watch) was chosen to match
+> the widget layer's existing per-frame convention, avoid the dangling-callback teardown hazard,
+> run on the render thread where `setVisible` is safe, and future-proof `visible:` becoming an
+> expression. 15 core `AriadneBind.*` gtests (no VTK — resolve rules, read/seed vs non-seeding
+> read, the source→node-key mirror, follower/no-seed semantics, and the shared-key property) plus
+> a loader test for the map form; realizer + `ariadne_hello` wiring compile-verified against the
 > real cvcGL/VTK/ImGui headers. The shipped `hello.ari` demonstrates it end-to-end with **no
 > external asset**: a `scene:` node sources `stanford.bunny` (libcvc's embedded Stanford bunny —
 > `read_geometry("*.bunny")` returns it, 34835 verts / 69473 tris, verified) with `visible:
@@ -1580,7 +1586,10 @@ of a hand-built C++ escape.
 > and round-trip, but `realize_scene` only builds geometry/group today); true parent
 > nesting through a `<parent>.children.<child>` path (rides on §11 path binding — children
 > realize flat for now); binding *other* scene props (transform/material/color) to state the
-> same way visibility now is; and views/minimap (§9.5–9.6).
+> same way visibility now is; a VTK-linked `realize_scene` gtest under `src/cvcGL/test/`
+> (the realizer's node-building + seed logic is only compile-verified today — the pure-state
+> mirror is covered by `AriadneBind.*`, but building a `SceneGraph` needs VTK the core test
+> tree lacks); and views/minimap (§9.5–9.6).
 
 ### 9.1 Which scene model
 
@@ -1673,6 +1682,20 @@ so a mesh can come from disk, the web, or a live scene node) or one of the struc
 Streamed/dynamic geometry (thousands of agents) stays a declared *shape* + a host-registered data handler
 (registered through the same §13/§14 seam) — the one scene piece that isn't purely declarative, and the
 subject of the still-open streamed-source contract (§9.8).
+
+> **libcvc dependency — URI-native file I/O (not yet built).** Today the realizer resolves only
+> `source: { file: <path> }` and calls `cvc::read_geometry(path)` / (for volumes) `cvc::read_volume(path)`
+> directly — and those routines take a **plain filesystem path**, dispatching on the file *extension* to a
+> registered `geometry_file_io` / volume handler. The full `source:` URI model above (`file://` /
+> `http(s)://` / `pkg://` / `state://…?data` / custom) requires the file-I/O layer itself to accept URIs,
+> the same way Ariadne data sources (§13) do: `cvc::read_geometry`/`read_volume` should route a URI through
+> the §13 resolver — fetch/cache remote or packaged bytes to a temp file (or a memory buffer once the
+> `bytes` marshaling + temp-file helper land, §7.8.6a) and then hand off to the existing extension-keyed
+> reader; a bare path stays valid as the `file://` default. This makes `read_geometry("pkg://scenes/…")`,
+> `read_geometry("https://…/mesh.obj")`, and `state://<node>?data` work uniformly for scene sources, the
+> `cvc` CLI, and any other libcvc caller — one resolver, not a per-call-site special case. Until then the
+> realizer accepts a path (including the embedded `*.bunny` handler) and a URI `source:` degrades to its
+> path component. Tracked alongside the §13 URI resource model and the binary-URI-handler blockers (§7.8.6a).
 
 ### 9.5 Views render a masked, modified subset of the one authored scene
 

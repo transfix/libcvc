@@ -66,6 +66,14 @@ TEST(AriadneBind, WriteRoundTrips) {
   EXPECT_EQ(sval(app, "t.w"), "5");
 }
 
+TEST(AriadneBind, ReadOrDoesNotSeed) {
+  cvc::app app;
+  EXPECT_EQ(read_or<int>(app, "ro.unset", 5), 5);
+  EXPECT_EQ(sval(app, "ro.unset"), ""); // returns default WITHOUT writing the key
+  cvc::state::instance(app)("ro.set").value(2);
+  EXPECT_EQ(read_or<int>(app, "ro.set", 5), 2);
+}
+
 // --- sync_scene_visibility: source path -> node `.visible` key -----------------
 
 TEST(AriadneBind, SyncMirrorsSourceToTargetKey) {
@@ -81,18 +89,19 @@ TEST(AriadneBind, SyncMirrorsSourceToTargetKey) {
   EXPECT_EQ(sval(app, "node.visible"), "1"); // tracks the change on the next poll
 }
 
-TEST(AriadneBind, SyncSeedsSourceFromDefaultWhenEmpty) {
+TEST(AriadneBind, SyncFallsBackToDefaultWithoutSeedingSource) {
   cvc::app app;
-  // Source has no value yet: the poll seeds it from the node's default and mirrors.
+  // Source has no value yet (no widget owns it): the node falls back to its own
+  // default, and the source is NOT seeded (the scene bind is a follower, not owner).
   std::vector<SceneVisibilityBinding> hidden = {{"src.empty.a", "na.visible", false}};
   sync_scene_visibility(app, hidden);
-  EXPECT_EQ(sval(app, "src.empty.a"), "0"); // seeded from default_visible=false
-  EXPECT_EQ(sval(app, "na.visible"), "0");
+  EXPECT_EQ(sval(app, "src.empty.a"), ""); // NOT seeded
+  EXPECT_EQ(sval(app, "na.visible"), "0"); // fallback to default_visible=false
 
   std::vector<SceneVisibilityBinding> shown = {{"src.empty.b", "nb.visible", true}};
   sync_scene_visibility(app, shown);
-  EXPECT_EQ(sval(app, "src.empty.b"), "1");
-  EXPECT_EQ(sval(app, "nb.visible"), "1");
+  EXPECT_EQ(sval(app, "src.empty.b"), ""); // NOT seeded
+  EXPECT_EQ(sval(app, "nb.visible"), "1"); // fallback to default_visible=true
 }
 
 TEST(AriadneBind, SyncHandlesMultipleBindingsIndependently) {
@@ -115,6 +124,26 @@ TEST(AriadneBind, SyncIsIdempotentAcrossFrames) {
   for (int i = 0; i < 5; ++i)
     sync_scene_visibility(app, binds); // steady state: stable, no throw
   EXPECT_EQ(sval(app, "nc.visible"), "1");
+}
+
+// Regression (review §9 inc2): the scene `visible:` bind is a FOLLOWER — sync must
+// NOT seed the source key, so it can never pre-empt the widget that owns it.
+TEST(AriadneBind, SyncDoesNotSeedTheSource) {
+  cvc::app app;
+  std::vector<SceneVisibilityBinding> binds = {{"owner.key", "node.visible", true}};
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "owner.key"), "");     // source left untouched (not seeded)
+  EXPECT_EQ(sval(app, "node.visible"), "1");  // node falls back to its own default
+}
+
+// Regression: the node's default must NOT override the key owner's value. A checkbox
+// with def:false seeds the key to 0; the bound node's default_visible=true must lose.
+TEST(AriadneBind, SyncFollowsKeyOwnerNotNodeDefault) {
+  cvc::app app;
+  write<int>(app, "owner.key", 0); // the widget (owner) committed 0
+  std::vector<SceneVisibilityBinding> binds = {{"owner.key", "node.visible", true}};
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "node.visible"), "0"); // owner's 0 wins over node default true
 }
 
 // A checkbox writes int 0/1 to the same resolved path a scene node binds to; verify

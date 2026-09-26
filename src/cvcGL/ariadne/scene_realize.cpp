@@ -43,14 +43,17 @@ void apply_visibility(GraphicsNode &node, const cvc::ariadne::SceneNode &n,
                       std::vector<cvc::ariadne::SceneVisibilityBinding> &binds) {
   const std::string target = node.stateName("visible");
   if (n.visible_bind.empty()) {
-    // Literal `visible: true|false` (or default): write the key once.
+    // Literal `visible: true|false` (or default): write the node key once.
     cvc::ariadne::write<int>(app, target, n.visible_default ? 1 : 0);
     return;
   }
-  // Bound `visible: <path>` — resolve, seed the node from the live value now, and
-  // record the binding for per-frame sync.
+  // Bound `visible: <path>` — resolve, set the node's OWN key from the live source
+  // (falling back to the node default while the source is unset), and record the
+  // binding for per-frame sync. Read the source WITHOUT seeding it: the scene bind is
+  // a follower, so the widget that owns the key (its `def:`) is the sole seeder — the
+  // node default never pre-empts it in the shared key.
   const std::string source = cvc::ariadne::resolve_bind(bind_prefix, n.visible_bind);
-  const int v0 = cvc::ariadne::read_or_seed<int>(app, source, n.visible_default ? 1 : 0);
+  const int v0 = cvc::ariadne::read_or<int>(app, source, n.visible_default ? 1 : 0);
   cvc::ariadne::write<int>(app, target, v0);
   binds.push_back({source, target, n.visible_default});
 }

@@ -511,6 +511,23 @@ scene:
   EXPECT_EQ(bound->visible_bind, "demo.show_mesh");
 }
 
+TEST(AriadneScene, VisibleMapFormBindAndDefault) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: hiddenbound
+      source: { file: a.obj }
+      visible: { bind: demo.show, default: false }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &n = r.scene.nodes[0];
+  EXPECT_EQ(n.visible_bind, "demo.show"); // bound...
+  EXPECT_FALSE(n.visible_default);        // ...AND starts hidden (map form)
+}
+
 TEST(AriadneScene, GroupNestsChildren) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

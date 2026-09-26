@@ -509,12 +509,20 @@ SceneNode parse_scene_node(const YAML::Node &n) {
     }
   }
   const YAML::Node vis = n["visible"];
-  if (vis && vis.IsScalar()) {
-    const std::string v = vis.Scalar();
-    if (v == "true" || v == "false")
-      sn.visible_default = (v == "true");
-    else
-      sn.visible_bind = v; // a state path (or, later, an expression)
+  if (vis) {
+    if (vis.IsMap()) {
+      // Map form: bind AND a start default together, so a bound node can default
+      // hidden even when no widget owns the key: visible: { bind: p, default: false }
+      sn.visible_bind = str(vis, "bind");
+      if (vis["default"])
+        sn.visible_default = flag(vis, "default", true);
+    } else if (vis.IsScalar()) {
+      const std::string v = vis.Scalar();
+      if (v == "true" || v == "false")
+        sn.visible_default = (v == "true"); // literal only (bind stays empty)
+      else
+        sn.visible_bind = v; // a state path (or, later, an expression); default true
+    }
   }
   const YAML::Node kids = n["children"];
   if (kids && kids.IsSequence())
