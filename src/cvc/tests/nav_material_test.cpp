@@ -422,6 +422,104 @@ TEST(NavExtForce, FusedDriveStepNullExtMatchesPlainDriveStep) {
   EXPECT_EQ(std::memcmp(mc1.data(), mc2.data(), w.N * 4), 0);
 }
 
+TEST(DriveTelemetry, NullTelIsByteIdenticalAndPopulates) {
+  rollout_world w;
+  const coef_mlp model = coef_mlp::default_biased();
+  std::vector<float> o1 = w.o, th1 = w.th, sp1 = w.sp, mc1(w.N);
+  std::vector<float> o2 = w.o, th2 = w.th, sp2 = w.sp, mc2(w.N);
+  // Same drive twice: once with no telemetry, once with a tel[N] buffer.
+  drive_step(w.fs, o1.data(), th1.data(), sp1.data(), w.goal.data(), model, w.N, nullptr, w.v,
+             mc1.data(), 1);
+  std::vector<drive_telemetry> tel(w.N);
+  drive_step(w.fs, o2.data(), th2.data(), sp2.data(), w.goal.data(), model, w.N, nullptr, w.v,
+             mc2.data(), 1, nullptr, tel.data());
+  // Asking for telemetry must not perturb the trajectory by a single bit.
+  EXPECT_EQ(std::memcmp(o1.data(), o2.data(), o1.size() * 4), 0);
+  EXPECT_EQ(std::memcmp(th1.data(), th2.data(), w.N * 4), 0);
+  EXPECT_EQ(std::memcmp(sp1.data(), sp2.data(), w.N * 4), 0);
+  EXPECT_EQ(std::memcmp(mc1.data(), mc2.data(), w.N * 4), 0);
+  // Telemetry is populated and finite; the plain path has no material / no ext force, so those
+  // fields stay at their off-defaults.
+  for (int i = 0; i < w.N; ++i) {
+    EXPECT_TRUE(std::isfinite(tel[i].alpha));
+    EXPECT_TRUE(std::isfinite(tel[i].beta));
+    EXPECT_TRUE(std::isfinite(tel[i].gamma));
+    EXPECT_TRUE(std::isfinite(tel[i].steer));
+    EXPECT_TRUE(std::isfinite(tel[i].curvature));
+    EXPECT_EQ(tel[i].mrisk, 0.0f); // plain drive: no material stack
+    EXPECT_EQ(tel[i].lam_soft, 0.0f);
+    EXPECT_EQ(tel[i].ext_fx, 0.0f); // no external force channel
+    EXPECT_EQ(tel[i].ext_fy, 0.0f);
+  }
+}
+
+TEST(DriveTelemetry, NullTelByteIdenticalOnMaterialAndExtPaths) {
+  rollout_world w;
+  const coef_mlp model = coef_mlp::default_biased();
+  // Material path: a constant risk gradient (as in MaterialForcesChangeTheTrajectory).
+  const int hw = w.H * w.W;
+  std::vector<float> mstack(6 * hw, 0.0f);
+  for (int i = 0; i < hw; ++i) {
+    mstack[0 * hw + i] = 0.5f;   // risk
+    mstack[1 * hw + i] = 100.0f; // phi_m far -> hazard force ~0
+    mstack[2 * hw + i] = 2.0f;   // dr/dx
+  }
+  material_stack ms;
+  ms.data = mstack.data();
+  ms.M = 1;
+  ms.H = w.H;
+  ms.W = w.W;
+  ms.mnx = -10;
+  ms.mny = -10;
+  ms.mxx = 10;
+  ms.mxy = 10;
+  ms.cx = 0;
+  ms.cy = 0;
+  ms.S = 0.1;
+  std::vector<float> lam_s(w.N, 0.5f), lam_h(w.N, 1.0f);
+  material_drive md;
+  md.stack = &ms;
+  md.lam_soft = lam_s.data();
+  md.lam_hard = lam_h.data();
+  {
+    std::vector<float> o1 = w.o, th1 = w.th, sp1 = w.sp, mc1(w.N);
+    std::vector<float> o2 = w.o, th2 = w.th, sp2 = w.sp, mc2(w.N);
+    drive_step_material(w.fs, o1.data(), th1.data(), sp1.data(), w.goal.data(), model, w.N, nullptr,
+                        w.v, md, mc1.data(), 1);
+    std::vector<drive_telemetry> tel(w.N);
+    drive_step_material(w.fs, o2.data(), th2.data(), sp2.data(), w.goal.data(), model, w.N, nullptr,
+                        w.v, md, mc2.data(), 1, tel.data());
+    EXPECT_EQ(std::memcmp(o1.data(), o2.data(), o1.size() * 4), 0);
+    EXPECT_EQ(std::memcmp(th1.data(), th2.data(), w.N * 4), 0);
+    EXPECT_EQ(std::memcmp(sp1.data(), sp2.data(), w.N * 4), 0);
+    bool any_mrisk = false;
+    for (int i = 0; i < w.N; ++i)
+      any_mrisk = any_mrisk || tel[i].mrisk != 0.0f; // the material path populates mrisk
+    EXPECT_TRUE(any_mrisk);
+  }
+  // External-force path: a constant -x push (as in ExtForceChangesTheTrajectory).
+  {
+    float mag = -2.0f;
+    ext_force ef;
+    ef.sample = &ext_const_x;
+    ef.user = &mag;
+    std::vector<float> o1 = w.o, th1 = w.th, sp1 = w.sp, mc1(w.N);
+    std::vector<float> o2 = w.o, th2 = w.th, sp2 = w.sp, mc2(w.N);
+    drive_step_ext(w.fs, o1.data(), th1.data(), sp1.data(), w.goal.data(), model, w.N, nullptr, w.v,
+                   ef, mc1.data(), 1);
+    std::vector<drive_telemetry> tel(w.N);
+    drive_step_ext(w.fs, o2.data(), th2.data(), sp2.data(), w.goal.data(), model, w.N, nullptr, w.v,
+                   ef, mc2.data(), 1, tel.data());
+    EXPECT_EQ(std::memcmp(o1.data(), o2.data(), o1.size() * 4), 0);
+    EXPECT_EQ(std::memcmp(th1.data(), th2.data(), w.N * 4), 0);
+    EXPECT_EQ(std::memcmp(sp1.data(), sp2.data(), w.N * 4), 0);
+    bool any_ext = false;
+    for (int i = 0; i < w.N; ++i)
+      any_ext = any_ext || tel[i].ext_fx != 0.0f; // the ext path populates the external force
+    EXPECT_TRUE(any_ext);
+  }
+}
+
 TEST(NavExtForce, ExtForceChangesTheTrajectory) {
   rollout_world w;
   float mag = -2.0f; // push -x

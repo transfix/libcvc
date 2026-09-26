@@ -193,6 +193,26 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
     }
     if (smp.sense_flips) // epistemic churn: sum the caller's per-step flipped-cell delta
       v.sense_flips += smp.sense_flips[i];
+    if (smp.drive) { // drive telemetry: accumulate sums (divided in finish) + running peaks
+      const drive_sample &ds = smp.drive[i];
+      ++v.drive_steps;
+      v.alpha_mean += ds.alpha;
+      v.beta_mean += ds.beta;
+      v.gamma_mean += ds.gamma;
+      v.mu_mean += ds.mu;
+      if (ds.mu < v.mu_min)
+        v.mu_min = ds.mu;
+      v.mrisk_mean += ds.mrisk;
+      if (ds.mrisk > v.mrisk_max)
+        v.mrisk_max = ds.mrisk;
+      v.ext_force_mean += ds.ext_mag;
+      const double as = std::fabs((double)ds.steer);
+      v.steer_abs_mean += as;
+      if (as > v.steer_abs_max)
+        v.steer_abs_max = as;
+      if (ds.binding)
+        ++v.binding_steps;
+    }
 
     if (reached[i] && v.time_to_goal_s < 0) {
       v.time_to_goal_s = t_end;
@@ -250,6 +270,20 @@ episode_nav_stats nav_stats_collector::finish() {
       v.slot_error_mean_m = slot_err_sum_[i] / slot_err_cnt_[i];
       v.slot_error_max_m = slot_err_max_[i];
       v.formation_arrived = p_.formation_tol_m > 0 && slot_err_last_[i] < p_.formation_tol_m;
+    }
+    // drive telemetry — the *_mean fields accumulated SUMS in step(); divide by the tick count.
+    // Peaks (mu_min, mrisk_max, steer_abs_max) and counts (binding_steps) are already final. No
+    // drive feed => drive_steps 0, means stay 0 and mu_min stays at the 1e30 sentinel (serialized
+    // null).
+    if (v.drive_steps > 0) {
+      const double dn = static_cast<double>(v.drive_steps);
+      v.alpha_mean /= dn;
+      v.beta_mean /= dn;
+      v.gamma_mean /= dn;
+      v.mu_mean /= dn;
+      v.mrisk_mean /= dn;
+      v.ext_force_mean /= dn;
+      v.steer_abs_mean /= dn;
     }
 
     const double used_t = v.arrived ? v.time_to_goal_s : elapsed;
@@ -391,6 +425,27 @@ std::string episode_nav_stats::to_json() const {
     num(o, v.slot_error_max_m);
     o << ",\"formation_arrived\":" << (v.formation_arrived ? "true" : "false");
     o << ",\"sense_flips\":" << v.sense_flips;
+    o << ",\"drive_steps\":" << v.drive_steps << ",\"alpha_mean\":";
+    num(o, v.alpha_mean);
+    o << ",\"beta_mean\":";
+    num(o, v.beta_mean);
+    o << ",\"gamma_mean\":";
+    num(o, v.gamma_mean);
+    o << ",\"mu_mean\":";
+    num(o, v.mu_mean);
+    o << ",\"mu_min\":";
+    num_sentinel(o, v.mu_min);
+    o << ",\"mrisk_mean\":";
+    num(o, v.mrisk_mean);
+    o << ",\"mrisk_max\":";
+    num(o, v.mrisk_max);
+    o << ",\"ext_force_mean\":";
+    num(o, v.ext_force_mean);
+    o << ",\"steer_abs_mean\":";
+    num(o, v.steer_abs_mean);
+    o << ",\"steer_abs_max\":";
+    num(o, v.steer_abs_max);
+    o << ",\"binding_steps\":" << v.binding_steps;
     o << '}';
   }
   o << "]}";
@@ -452,6 +507,9 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   // epistemic (coverage summed over episodes; sense_flips over vehicle-runs)
   nav_coverage cov_sum;
   std::int64_t flips_sum = 0;
+  // drive telemetry (over vehicle-runs that carried a drive feed, i.e. drive_steps > 0)
+  int drive_runs = 0;
+  double al_sum = 0, be_sum = 0, ga_sum = 0, dmu_sum = 0, dmrisk_sum = 0, dext_sum = 0;
   for (const auto &e : episodes) {
     if (e.success)
       ++succ;
@@ -508,6 +566,15 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
       contacts += v.veh_contacts;
       stall_sum += v.stall_steps;
       flips_sum += v.sense_flips;
+      if (v.drive_steps > 0) {
+        ++drive_runs;
+        al_sum += v.alpha_mean;
+        be_sum += v.beta_mean;
+        ga_sum += v.gamma_mean;
+        dmu_sum += v.mu_mean;
+        dmrisk_sum += v.mrisk_mean;
+        dext_sum += v.ext_force_mean;
+      }
       if (v.closest_approach_m < 1e29) {
         approach_sum += v.closest_approach_m;
         ++approach_n;
@@ -555,6 +622,14 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
     s.mean_coverage.phantom_frac = cov_sum.phantom_frac / s.n_episodes;
   }
   s.mean_sense_flips = runs > 0 ? (double)flips_sum / runs : 0;
+  if (drive_runs > 0) {
+    s.mean_alpha = al_sum / drive_runs;
+    s.mean_beta = be_sum / drive_runs;
+    s.mean_gamma = ga_sum / drive_runs;
+    s.mean_mu = dmu_sum / drive_runs;
+    s.mean_mrisk = dmrisk_sum / drive_runs;
+    s.mean_ext_force = dext_sum / drive_runs;
+  }
   return s;
 }
 
@@ -607,6 +682,18 @@ std::string nav_scorecard::to_json() const {
   o << "}";
   o << ",\"mean_sense_flips\":";
   num(o, mean_sense_flips);
+  o << ",\"mean_alpha\":";
+  num(o, mean_alpha);
+  o << ",\"mean_beta\":";
+  num(o, mean_beta);
+  o << ",\"mean_gamma\":";
+  num(o, mean_gamma);
+  o << ",\"mean_mu\":";
+  num(o, mean_mu);
+  o << ",\"mean_mrisk\":";
+  num(o, mean_mrisk);
+  o << ",\"mean_ext_force\":";
+  num(o, mean_ext_force);
   o << "}";
   return o.str();
 }
