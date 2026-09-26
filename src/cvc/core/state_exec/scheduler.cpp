@@ -205,7 +205,18 @@ void scheduler::execute_process_step(process &proc) {
   proc.status = process_status::running;
   proc.last_run_start = std::chrono::steady_clock::now();
 
-  // 3. Execute one evaluation step
+  // 3. Execute one evaluation step, bounded by the process's remaining time budget.
+  // A single step may enter an uncapped nested evaluator (a defclass method body) or a
+  // long-running builtin (collect, a generator drive) whose INTERNAL loop the scheduler's
+  // between-steps max_time check (checked only after step() returns) cannot see. Arming the
+  // cooperative deadline for this step lets that inner work abort at the budget too — the
+  // same guarantee the read-lane's run() already has. max_time <= 0 means unlimited (nullopt).
+  std::optional<double> step_budget;
+  if (proc.max_time > 0.0) {
+    const double remaining = proc.max_time - proc.elapsed_time();
+    step_budget = remaining > 0.0 ? remaining : 0.0;
+  }
+  eval_deadline_guard step_deadline(step_budget);
   bool done = evaluator_.step(proc.state);
 
   // 4. Accumulate running time

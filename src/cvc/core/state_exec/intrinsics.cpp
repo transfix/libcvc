@@ -7,8 +7,10 @@
 #include <cvc/core/state_exec/memory_tracker.h>
 #include <cvc/core/state_exec/process.h>
 #include <cvc/core/state_exec/scheduler.h>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace cvc::state_exec {
 
@@ -50,6 +52,80 @@ double as_number(const value_t &v, const char *name) {
   throw std::runtime_error(std::string(name) + ": expected number, got " + v.type_name());
 }
 
+// Coerce any DSL value to the string form the (string-typed) state tree stores. A string
+// stores raw (NOT to_string's quoted form); scalars store their natural lexical form
+// (10, 1.5, true/false — not to_string's #t/#f); nil empties the node. Compound values
+// (list/dict) fall back to the readable to_string() — a structured payload should use
+// state-data-set instead. This lets (state-set "n" 10) store "10" instead of throwing on
+// a non-string value.
+std::string coerce_state_string(const value_t &v) {
+  if (auto *s = std::get_if<std::string>(&v.v))
+    return *s;
+  if (auto *i = std::get_if<int64_t>(&v.v))
+    return std::to_string(*i);
+  if (auto *d = std::get_if<double>(&v.v)) {
+    std::ostringstream oss;
+    oss << *d;
+    return oss.str();
+  }
+  if (auto *b = std::get_if<bool>(&v.v))
+    return *b ? "true" : "false";
+  if (v.is_nil())
+    return std::string();
+  return to_string(v); // list/dict/symbol/closure — readable fallback
+}
+
+// Clone a value's compound structure (list/dict) so the caller gets a PRIVATE copy that does
+// not alias node-resident storage. Bounded and cycle-safe, mirroring values_equal / to_string
+// (it is the third structural walker and must not be the weak link): it MEMOIZES on the source
+// node pointer, so a shared-pointer DAG is copied in PHYSICAL time (the copy preserves the same
+// sharing, disjoint from the stored original) and a cycle terminates; it caps recursion depth
+// (stack safety on a deeply-nested value); and it polls the evaluation deadline so a huge
+// payload aborts at the time budget instead of running to completion in one native step.
+constexpr int kDeepCopyMaxDepth = 1000;
+
+value_t deep_copy_impl(const value_t &v, std::unordered_map<const void *, value_t> &memo,
+                       int depth) {
+  if (eval_deadline_expired())
+    throw std::runtime_error("state-data-get: evaluation exceeded time budget");
+  if (depth > kDeepCopyMaxDepth)
+    throw std::runtime_error("state-data-get: value nested too deeply to copy");
+  if (auto *l = std::get_if<list_ptr>(&v.v)) {
+    if (!*l)
+      return v;
+    auto found = memo.find(static_cast<const void *>(l->get()));
+    if (found != memo.end())
+      return found->second; // shared node / cycle already copied -> reuse (bounds the walk)
+    auto out = std::make_shared<std::vector<value_t>>();
+    value_t result{out};
+    memo.emplace(static_cast<const void *>(l->get()), result); // register BEFORE recursing
+    out->reserve((*l)->size());
+    for (const auto &e : **l)
+      out->push_back(deep_copy_impl(e, memo, depth + 1));
+    return result;
+  }
+  if (auto *dp = std::get_if<dict_ptr>(&v.v)) {
+    if (!*dp)
+      return v;
+    auto found = memo.find(static_cast<const void *>(dp->get()));
+    if (found != memo.end())
+      return found->second;
+    auto out = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
+    value_t result{out};
+    memo.emplace(static_cast<const void *>(dp->get()), result);
+    out->reserve((*dp)->size());
+    for (const auto &kv : **dp)
+      out->emplace_back(kv.first, deep_copy_impl(kv.second, memo, depth + 1));
+    return result;
+  }
+  return v; // scalar / symbol (opaque callables are refused at state-data-set)
+}
+
+value_t deep_copy(const value_t &v) {
+  std::unordered_map<const void *, value_t> memo;
+  return deep_copy_impl(v, memo, 0);
+}
+
 void require_root(const intrinsics_context *ctx, const char *name) {
   if (!ctx->root)
     throw std::runtime_error(std::string(name) + ": no state root bound");
@@ -78,7 +154,10 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
   expect_exact(args, 2, "state-set");
   require_root(ctx, "state-set");
   auto &path = as_string(args[0], "state-set");
-  auto &val = as_string(args[1], "state-set");
+  // Coerce the value to a string (state stores string-typed scalars) rather than
+  // requiring the caller to pre-stringify — (state-set "n" 10) now stores "10". A
+  // structured value should use state-data-set (the typed data() channel).
+  const std::string val = coerce_state_string(args[1]);
   // operator() creates child nodes as needed
   (*ctx->root)(path).value(val);
   return nil_value;
@@ -129,7 +208,14 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   auto d = node->data();
   if (d.empty())
     return nil_value;
-  // Wrap the boost::any in a data_object
+  // If the payload is a DSL value_t (the shape state-data-set stores), return a DEEP COPY
+  // so structured data round-trips transparently — (state-data-set "k" (list 1 2 3)) then
+  // (state-data-get "k") yields (1 2 3) — WITHOUT aliasing the node's stored storage (a
+  // returned list_ptr/dict_ptr would otherwise let a caller mutate persistent state in
+  // place via append/set-nth, defeating the read-only contract). Genuine host data (any
+  // other C++ type parked on the node) still comes back as a data_object.
+  if (auto *v = boost::any_cast<value_t>(&d))
+    return deep_copy(*v);
   auto obj = std::make_shared<data_object>();
   obj->payload = d;
   obj->type_name = d.type().name();
@@ -140,6 +226,16 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   expect_exact(args, 2, "state-data-set");
   require_root(ctx, "state-data-set");
   auto &path = as_string(args[0], "state-data-set");
+  // Refuse to store a callable. A native_fn/closure/generator captures an environment or
+  // intrinsics_context that may not outlive this (persistent) node — a use-after-free
+  // waiting to happen — and a stored callable is an invocation channel that would bypass
+  // any environment allowlist a later reader relies on. The data channel is for structured
+  // DATA (scalars/lists/dicts), not code.
+  if (std::holds_alternative<native_fn>(args[1].v) ||
+      std::holds_alternative<closure_ptr>(args[1].v) ||
+      std::holds_alternative<generator_ptr>(args[1].v))
+    throw std::runtime_error(
+        "state-data-set: cannot store a callable (function/closure/generator) as data");
   // Store the value_t as boost::any
   (*ctx->root)(path).data(boost::any(args[1]));
   return nil_value;

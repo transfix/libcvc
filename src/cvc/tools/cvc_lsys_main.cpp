@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/core/text.h> // display-width-aware column padding (§17.3)
 #include <cvc/lsys/derive.h>
 #include <cvc/lsys/emit.h>
 #include <cvc/lsys/interp.h>
@@ -136,7 +137,9 @@ int main(int argc, char **argv) try {
     if (flag(argc, argv, "--stats")) {
       std::printf("by symbol:\n");
       for (const auto &kv : st.by_symbol)
-        std::printf("  %-10s %u\n", kv.first.c_str(), kv.second);
+        // Symbol names are DSL-authored and may be multibyte/wide, so pad to
+        // display COLUMNS (§17.3), not bytes — a byte-counted %-10s misaligns.
+        std::printf("  %s %u\n", cvc::text::pad_to_width(kv.first, 10).c_str(), kv.second);
       std::printf("by level:");
       for (int i = 0; i < 12; ++i)
         std::printf(" %u", st.level_counts[i]);

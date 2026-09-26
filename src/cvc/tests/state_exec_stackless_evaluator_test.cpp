@@ -4,6 +4,8 @@
 #include <cvc/core/state_exec/stackless_evaluator.h>
 #include <cvc/core/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <memory>
+#include <set>
 
 using namespace cvc::state_exec;
 
@@ -367,4 +369,33 @@ TEST_F(StacklessEvaluatorTest, BreakInsideLet) {
                      "  (let ((doubled (* x 2))) "
                      "    (if (> doubled 6) (break doubled) nil)))"),
             8); // x=4, doubled=8, break returns 8
+}
+
+// -- special-form gating -----------------------------------------------------
+
+TEST_F(StacklessEvaluatorTest, RestrictSpecialFormsDeniesUnlistedForms) {
+  auto allowed =
+      std::make_shared<const std::set<std::string>>(std::set<std::string>{"if", "begin"});
+  ev->restrict_special_forms(allowed);
+  EXPECT_NO_THROW(ev->evaluate_script("(if #t 1 2)"));                               // allowed
+  EXPECT_NO_THROW(ev->evaluate_script("(begin 1 2)"));                               // allowed
+  EXPECT_THROW(ev->evaluate_script("(quote 1)"), std::exception);                    // denied
+  EXPECT_THROW(ev->evaluate_script("(defclass C (init (self) 1))"), std::exception); // denied
+  // A non-special-form head is unaffected by the gate (the environment governs it).
+  EXPECT_NO_THROW(ev->evaluate_script("(+ 1 2)"));
+}
+
+TEST_F(StacklessEvaluatorTest, RestrictNullptrLeavesAllFormsAllowed) {
+  ev->restrict_special_forms(nullptr); // the default: no restriction
+  EXPECT_NO_THROW(ev->evaluate_script("(quote 1)"));
+}
+
+// -- cooperative deadline propagates into nested evaluators ------------------
+
+TEST_F(StacklessEvaluatorTest, DeadlineAbortsUncappedNestedMethodEval) {
+  // A defclass method body runs on a FRESH nested evaluator with no caps of its own; the
+  // per-thread deadline armed by the outer run() must propagate so a looping method aborts
+  // at the time budget instead of hanging inside a single outer step.
+  auto st = ev->create_state(parse("(begin (defclass B (init (self) (while 1 1))) (B))"));
+  EXPECT_THROW(ev->run(st, std::nullopt, /*timeout_sec=*/0.05), evaluation_timeout);
 }

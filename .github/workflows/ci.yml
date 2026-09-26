@@ -270,6 +270,15 @@ jobs:
             prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           cvcpkg install vtk xorgproto --prefix "$prefix" --config release --link shared
+          # The Ariadne optional deps (cvc::ariadne in libcvc core): yaml-cpp (.ari
+          # loader), nlohmann-json + json-schema-validator (.ari Layer-2 schema
+          # validation, §15), ftxui (the terminal backend, §16.4). All ride on top
+          # here — as vtk does — until the prebuilt libcvc-deps bundle is rebuilt to
+          # include them; with them present the loader/backend compile their REAL
+          # paths (not the stubs), so CI exercises Layer-2 + the FTXUI backend.
+          # (linux-x86_64 is what these four are published for so far — #111.)
+          cvcpkg install yaml-cpp nlohmann-json json-schema-validator ftxui \
+            --prefix "$prefix" --config release --link shared
 
       # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
       # 11 of the 13 cvcgl_* tests only inspect scene/state and need no GL at

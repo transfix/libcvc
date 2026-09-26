@@ -153,6 +153,17 @@ TEST_F(SchedulerTest, SingleProcessSimple) {
   EXPECT_EQ(std::get<int64_t>(val.v), 42);
 }
 
+TEST_F(SchedulerTest, DeadlineBoundsUncappedNestedMethodStep) {
+  // A defclass constructor runs its init method body on a FRESH nested evaluator; a looping
+  // body lives inside ONE scheduler step, which the between-steps max_time check cannot see.
+  // The scheduler arms the cooperative per-thread deadline for each step (from the process's
+  // remaining budget), so the nested loop aborts at the budget instead of hanging the run.
+  execute_options opts;
+  opts.max_time = 0.05; // 50 ms process budget
+  sched.execute(std::string("(begin (defclass B (init (self) (while 1 1))) (B))"), opts);
+  EXPECT_THROW(sched.run(), std::exception); // bounded abort (~50ms), not a hang
+}
+
 TEST_F(SchedulerTest, SingleProcessArithmetic) {
   int pid = sched.execute(std::string("(+ 10 20 30)"));
   auto results = sched.run();

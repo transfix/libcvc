@@ -1,0 +1,130 @@
+# hello.ari — the Ariadne P0 demo tree, as a .ari document.
+#
+# Mirrors the built-in programmatic tree in ariadne_hello.cpp, so
+#   ariadne_hello hello.ari
+# renders identically (only the caption differs, to show which path built the
+# tree). Run without an argument to get the built-in tree instead. This is the
+# P0 slice-1 loader's supported subset (roadmap §3.2-3.5); the `meta:` block is
+# parsed in a later slice and harmlessly ignored for now.
+
+meta:
+  name: Ariadne hello
+  author: cvc
+  min_libcvc: 3.4.0
+
+# customs: (§ extensibility) — the custom types this document uses, so a load on a
+# system missing one either warns (default) or fails fast (required: true). This demo
+# registers a "labeled" widget handler before loading, so this is satisfied. Change to
+# `required: true` to make a missing handler fail the load instead of a placeholder.
+customs:
+  - widget: labeled
+
+# init: (§ extensibility) — a state_exec script run ONCE on load, scoped to this
+# document's state prefix (the host calls cvc::ariadne::run_init before rendering). Use
+# it for dynamic initialization: seed or compute state before the first frame. Here it
+# opens the Agents slider at 256 instead of its default 64 (init wins over read_or_seed
+# because the key is no longer empty by the time the slider first reads it).
+init: |
+  (state-set "demo.agents" "256")
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Paused
+        bind: demo.paused
+      - menu_item: Reset
+        on: reset
+      - separator
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Controls
+    id: controls
+    children:
+      - text: "Ariadne P0 — loaded from hello.ari."
+      - separator
+      - slider_int: Agents
+        bind: demo.agents
+        lo: 1
+        hi: 512
+        def: 64
+      # §4 read-lane (reactive): visible_when is a state_exec predicate re-evaluated each
+      # frame — this caption appears only while Agents is above 256. A read of demo.agents
+      # is a string, so it is coerced with (int ...). init seeds 256, so it starts hidden;
+      # drag the slider past 256 to reveal it. A broken predicate hides the widget and
+      # warns once (see rt.take_reactive_warnings() in ariadne_hello.cpp).
+      - text: "⚠ heavy: over 256 agents"
+        visible_when: (> (int (state-get "demo.agents")) 256)
+      - slider_float: Speed
+        bind: demo.speed
+        lo: 0.1
+        hi: 4.0
+        def: 1.0
+        fmt: "%.2f"
+      - checkbox: Wireframe
+        bind: demo.wire
+      - combo: Belief
+        bind: demo.belief
+        options: [shared, grouped, private]
+        default: shared
+      - separator
+      # A custom widget type (§ extensibility) — the demo registers a "labeled" handler
+      # (register_widget_type) that composes a caption + a read-only value view. An
+      # unregistered type would draw a "[type?]" placeholder.
+      - type: labeled
+        title: Belief
+        bind: demo.belief
+      - checkbox: Show mesh
+        bind: demo.show_mesh
+        def: true
+      - button: Reset
+        on: reset
+
+# A scene block (§9) declares the VTK scene in the SAME document as the widgets.
+# The source is the Stanford bunny embedded in libcvc: read_geometry() returns it
+# for any `*.bunny` path, so this demo needs no external asset. `visible:` is bound
+# to demo.show_mesh — the SAME state path the "Show mesh" checkbox above writes — so
+# toggling the box hides/shows the bunny each frame (cvc::gl::ariadne::realize_scene
+# seeds it, cvc::ariadne::sync_scene_visibility mirrors it into the node's own
+# .visible key). A literal `visible: true|false` works too.
+scene:
+  nodes:
+    - node: bunny
+      type: geometry
+      source: { file: stanford.bunny }
+      material: { color: [0.80, 0.55, 0.35] }
+      visible: demo.show_mesh
+  # Lights (§9): a directional "sun" (azimuth/elevation, not pos/target) plus shadows.
+  # Swap this for `- light: studio` + `rig: three_point` to use a StageLighting preset.
+  lights:
+    - light: sun
+      kind: directional
+      azimuth: 135
+      elevation: 55
+      color: [1.0, 0.96, 0.9]
+      intensity: 1.0
+  shadows:
+    enabled: true
+  # Volume renderers (§9) need a volume file (no embedded one ships), so these are
+  # commented. A volren/volslice node is serviced each frame by
+  # cvc::gl::ariadne::tick_scene (the host calls it before render). volren needs an
+  # isosurface OR a transfer_function (+ a light or ambient>0); volslice needs a
+  # transfer_function whose opacity>0.
+  #
+  #   - node: head
+  #     type: volren
+  #     source: { file: /path/to/head.rawiv }
+  #     volren:
+  #       ambient: 0.4
+  #       isosurfaces:
+  #         - { value: 0.5, opacity: 1.0, color: [0.9, 0.3, 0.2], shininess: 32 }
+  #   - node: slices
+  #     type: volslice
+  #     source: { file: /path/to/head.rawiv }
+  #     volslice:
+  #       quality: 0.6
+  #       transfer_function:
+  #         points:
+  #           - { value: 0.0, color: [1, 0, 0, 0.0] }
+  #           - { value: 1.0, color: [1, 1, 0, 0.8] }

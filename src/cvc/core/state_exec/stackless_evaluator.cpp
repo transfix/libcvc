@@ -3,6 +3,7 @@
 #include <cvc/core/state_exec/generator.h>
 #include <cvc/core/state_exec/parser.h>
 #include <cvc/core/state_exec/stackless_evaluator.h>
+#include <set>
 
 namespace cvc::state_exec {
 
@@ -12,6 +13,18 @@ namespace cvc::state_exec {
 
 stackless_evaluator::stackless_evaluator(environment_ptr global_env)
     : global_env_(std::move(global_env)) {}
+
+const std::set<std::string> &stackless_evaluator::all_special_forms() {
+  static const std::set<std::string> forms = {
+      "if",    "begin", "while", "for",      "set",  "quote", "lambda", "return",  "yield",
+      "break", "let",   "defun", "defmacro", "eval", "root",  "super",  "defclass"};
+  return forms;
+}
+
+void stackless_evaluator::restrict_special_forms(
+    std::shared_ptr<const std::set<std::string>> allowed) {
+  allowed_forms_ = std::move(allowed);
+}
 
 // ---------------------------------------------------------------------------
 // public API
@@ -113,7 +126,11 @@ value_t stackless_evaluator::run(evaluator_state &state, std::optional<uint64_t>
                                  std::optional<double> timeout_sec,
                                  std::function<void(const value_t &)> on_complete) {
   std::lock_guard lk(eval_mu_);
-  auto start = timeout_sec ? std::optional{std::chrono::steady_clock::now()} : std::nullopt;
+  // Arm the per-thread evaluation deadline (tighten-only). A NESTED run() — e.g. a defclass
+  // method body evaluated on a fresh evaluator, or any re-entrant evaluate() — INHERITS this
+  // deadline through the thread-local, so a loop that lives inside a single outer step still
+  // aborts at the time budget instead of running to completion past the caps.
+  eval_deadline_guard deadline_guard(timeout_sec);
 
   state.stats.start();
   try {
@@ -121,12 +138,9 @@ value_t stackless_evaluator::run(evaluator_state &state, std::optional<uint64_t>
       step(state);
       if (max_steps && state.stats.get_step_count() >= *max_steps)
         break;
-      if (start) {
-        auto elapsed = std::chrono::steady_clock::now() - *start;
-        if (std::chrono::duration<double>(elapsed).count() > *timeout_sec) {
-          state.stats.mark_complete();
-          throw evaluation_timeout("evaluation exceeded timeout");
-        }
+      if (eval_deadline_expired()) {
+        state.stats.mark_complete();
+        throw evaluation_timeout("evaluation exceeded timeout");
       }
     }
     if (state.done) {
@@ -244,6 +258,12 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
 
   const auto &name = head->name;
   std::vector<value_t> args(elems.begin() + 1, elems.end());
+
+  // --- Special-form gate (capability control) ---
+  // If this evaluator is restricted, a special form NOT on the allowlist is refused. A
+  // non-special-form head falls through to normal application (the environment governs it).
+  if (allowed_forms_ && all_special_forms().count(name) && !allowed_forms_->count(name))
+    throw std::runtime_error("special form '" + name + "' is not permitted in this context");
 
   // --- Special forms ---
   if (name == "if") {

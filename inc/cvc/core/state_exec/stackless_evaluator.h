@@ -17,8 +17,10 @@
 #include <cvc/core/state_exec/evaluator.h>
 #include <cvc/core/state_exec/types.h>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -117,6 +119,18 @@ public:
   void resume();
   bool is_paused() const;
 
+  /// Restrict which special forms this evaluator permits (a security/capability control for
+  /// restricted contexts such as a per-frame UI predicate). `allowed` lists the permitted
+  /// special-form names (e.g. {"if","begin","let","quote"}); using any OTHER special form
+  /// (defclass/defmacro/eval/while/…) throws. Pass nullptr (the default) for NO restriction —
+  /// every existing caller is unaffected. Special forms are evaluator-intrinsic and cannot be
+  /// gated by the environment, so this is the only way to bar them. Applies to nested
+  /// evaluate()/run() on THIS evaluator, not to a separately-constructed nested evaluator.
+  void restrict_special_forms(std::shared_ptr<const std::set<std::string>> allowed);
+
+  /// The set of all special-form names this evaluator recognises (for building an allowlist).
+  static const std::set<std::string> &all_special_forms();
+
 private:
   void check_interrupted();
 
@@ -150,6 +164,8 @@ private:
   value_t substitute(const value_t &tmpl, const std::unordered_map<std::string, value_t> &subst);
 
   environment_ptr global_env_;
+  std::shared_ptr<const std::set<std::string>>
+      allowed_forms_; // nullptr = all special forms allowed
 
   std::atomic<bool> interrupted_{false};
   std::atomic<bool> paused_{false};
