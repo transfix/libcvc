@@ -1106,12 +1106,13 @@ endif()
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/ftxui_backend.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
   ../../inc/cvc/ariadne/ariadne.h
   ../../inc/cvc/ariadne/loader.h
+  ../../inc/cvc/ariadne/ftxui_backend.h
 )
 
 # Create the main library
@@ -1133,6 +1134,20 @@ if(TARGET yaml-cpp::yaml-cpp OR TARGET yaml-cpp)
   message(STATUS "Ariadne: .ari YAML loader ENABLED (yaml-cpp)")
 else()
   message(STATUS "Ariadne: yaml-cpp not found - .ari loader compiles to a stub")
+endif()
+
+# Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is
+# present, ariadne/ftxui_backend.cpp compiles the real pure-terminal backend
+# (CVC_ARIADNE_FTXUI) and links the three FTXUI libs; when absent it is an inert
+# stub (FtxuiBackend::available() == false), so libcvc still builds. FTXUI is a
+# terminal library — it pulls in NO VTK/GL/ImGui, so the core stays graphics-free.
+find_package(ftxui CONFIG QUIET)
+if(TARGET ftxui::component)
+  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_FTXUI)
+  target_link_libraries(cvc PRIVATE ftxui::component ftxui::dom ftxui::screen)
+  message(STATUS "Ariadne: FTXUI terminal backend ENABLED (ftxui)")
+else()
+  message(STATUS "Ariadne: FTXUI not found - terminal backend compiles to a stub")
 endif()
 
 # Set library version
