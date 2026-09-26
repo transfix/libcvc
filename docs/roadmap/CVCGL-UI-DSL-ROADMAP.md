@@ -1617,24 +1617,40 @@ of a hand-built C++ escape.
 > (compile-verified). Nested-volume caveat: a single nested volume renders, but multi-volume
 > compositing across a nested volume isn't toggled (`updateVolumeRendering` is private — a follow-up).
 >
-> **Follow-ups (not yet built):** **volren/volslice realization** — deferred deliberately: they need
-> a new per-frame `tick()` host seam (`RealizedScene` + the render loop + `depthSortSliceProps` need
-> the `vtkRenderer`) *and* nested transfer-function/isosurface param structs on `SceneNode` the spec
-> doesn't carry, so realizing them without that plumbing yields a node that never renders (a silent
-> no-op) — its own increment. Also: the `light` *node* type (`SceneNode` lacks the light fields —
-> declare lights in `lights:`); a `Scene`-level `rig:` (it's a scene property, not one light);
-> directional-from-pos/target derivation; multi-volume compositing across a nested volume (needs
-> `updateVolumeRendering` exposed); binding *other* scene props (transform/material/color) to state
-> as visibility now is; and views/minimap (§9.5–9.6).
+> **Status — increment 5 landed (volren/volslice + the per-frame tick seam).** `type: volren` and
+> `type: volslice` now realize into `cvc::gl::VolRenNode` / `VolSliceNode`. The spec grew backend-neutral
+> param structs (`SceneTransferFunction` points/window/auto_domain, `SceneIsosurface`, `SceneVolRenLight`,
+> `SceneVolRen`, `SceneVolSlice`) + a `volren:`/`volslice:` loader block; the realizer maps them into
+> `cvc::volren::volume_settings`/`render_settings` and `cvc::volslice::render_settings`. There is no
+> `sg.addGraphics` overload for these, so they are created via `addGraphicsChild<T>` on the parent (or
+> root) + `registerGraphics` for a top-level node, with the volume loaded through `cvc::volume(app, file)`
+> in a try/catch (node created only after a successful load). **The tick seam:** these are the only nodes
+> that render nothing without per-frame servicing, so `RealizedScene` grew `weak_ptr` ticker lists
+> (`volren_ticks`/`volslice_ticks` — the `SceneGraph` stays sole owner; a torn-down node drops out) and a
+> new `cvc::gl::ariadne::tick_scene(RealizedScene&, vtkRenderer*)` ticks each one and, for ≥2 slice nodes,
+> calls `VolSliceNode::depthSortSliceProps`. `ariadne_hello` calls it each frame between
+> `sync_scene_visibility` and `view.render()` — the first per-frame hook that needs the `vtkRenderer`.
+> Both configure paths **warn (never throw)** on a blank config (volren with no isosurface + empty TF, or
+> shaded with no light and ambient 0; volslice with an empty TF). Being `GeometryNode`s, the nodes reuse
+> the transform + `visible:` path (the meaningless mesh/material API is left untouched). Verified at
+> runtime by the offscreen test (below): a realized volren raycast **converges** and a volslice builds
+> slice planes. `hello.ari` documents the syntax (commented — no embedded volume ships).
 >
-> **Realize-side test coverage.** The realize invariants that need VTK are now pinned by an
-> offscreen cvcGL test, `src/cvcGL/test/cvcgl_ariadne_realize.cpp` (`add_test cvcgl_ariadne_realize`):
-> it realizes in-memory `Scene` structs into an offscreen `SceneRenderer` and asserts the light
-> batch bakes a spot's moved position (10,20,30) rather than the origin, directional→non-positional
-> vs spot→positional routing, that a `three_point` rig adds lights, and that a nested child at local
-> `[5,0,0]` under a group at `[100,0,0]` resolves to world `(105,0,0)`. It runs under the CI
+> **Follow-ups (not yet built):** the `light` *node* type (`SceneNode` lacks the light fields — declare
+> lights in `lights:`); a `Scene`-level `rig:` (it's a scene property, not one light); directional-from-
+> pos/target derivation; multi-volume compositing across a nested volume (needs `updateVolumeRendering`
+> exposed); binding *other* scene props (transform/material/color/TF) to state as visibility now is; and
+> views/minimap (§9.5–9.6).
+>
+> **Realize-side test coverage.** The realize invariants that need VTK are pinned by an offscreen cvcGL
+> test, `src/cvcGL/test/cvcgl_ariadne_realize.cpp` (`add_test cvcgl_ariadne_realize`): it realizes
+> in-memory `Scene` structs into an offscreen `SceneRenderer` and asserts the light batch bakes a spot's
+> moved position (10,20,30) rather than the origin, directional→non-positional vs spot→positional routing,
+> that a `three_point` rig adds lights, that a nested child at local `[5,0,0]` under a group at
+> `[100,0,0]` resolves to world `(105,0,0)`, and — driving the tick seam — that a realized volren raycast
+> converges and a volslice builds slice planes (`planesRendered() > 0`). It runs under the CI
 > `llvmpipe`+`Xvfb` cvcGL harness. The core `AriadneBind.*` + loader gtests still cover the pure-state
-> mirror and all parsing with no VTK.
+> mirror and all parsing (incl. volren/volslice params) with no VTK.
 
 ### 9.1 Which scene model
 
