@@ -398,3 +398,73 @@ TEST(NavStats, ProgressStallAndClosestApproach) {
   EXPECT_NE(sj.find("\"mean_stall_steps\""), std::string::npos);
   EXPECT_NE(sj.find("\"mean_closest_approach_m\""), std::string::npos);
 }
+
+// Epistemic stats (Track 1c): the pure compute_coverage reducer over a hand-built raster, the
+// per-vehicle sense_flips feed through the collector, and their scorecard aggregates. Coverage is
+// computed from the same rasters both repos hold (over the binary to_occupancy output), so a Python
+// twin reproduces every fraction; sense_flips is a bit-identical per-agent count, summed here.
+TEST(NavStats, CoverageReducerAndSenseFlips) {
+  // 2 belief planes over a 2x2 (4-cell) grid. truth (shared): cell 1 is a real obstacle.
+  const std::uint8_t truth[4] = {0, 1, 0, 0};
+  // belief = binary occupancy, plane0 then plane1. plane0 cell2 and plane1 cell3 are believed
+  // occupied where truth is free -> two phantoms.
+  const std::uint8_t belief[8] = {0, 1, 1, 0, /*plane1*/ 0, 0, 0, 1};
+  const std::uint8_t everseen[8] = {1, 1, 1, 0, /*plane1*/ 1, 1, 0, 0}; // 5 of 8 ever seen
+  const std::uint8_t lastvis[8] = {1, 0, 0, 0, /*plane1*/ 1, 0, 0, 0};  // 2 of 8 visible now
+  nav_coverage cov = compute_coverage(truth, belief, everseen, lastvis, /*planes*/ 2, /*cells*/ 4);
+  EXPECT_NEAR(cov.explored_frac, 0.625, 1e-12);      // 5/8
+  EXPECT_NEAR(cov.visible_frac, 0.25, 1e-12);        // 2/8
+  EXPECT_NEAR(cov.believed_free_frac, 0.625, 1e-12); // 5 belief==0 cells / 8
+  EXPECT_NEAR(cov.phantom_frac, 0.25, 1e-12);        // 2/8 believed-occ where truth free
+
+  // null / bad-arg guard -> all zero (feature off).
+  nav_coverage off = compute_coverage(nullptr, belief, everseen, lastvis, 2, 4);
+  EXPECT_DOUBLE_EQ(off.explored_frac, 0.0);
+  EXPECT_DOUBLE_EQ(off.phantom_frac, 0.0);
+
+  // sense_flips accumulation through the collector: per-step deltas 5,0,3 -> 8.
+  nav_stats_collector c;
+  const float start[2] = {0, 0};
+  const float goal[2] = {10, 0};
+  c.begin_episode(1, 1.0, start, goal);
+  const float head[1] = {0};
+  const float spd[1] = {1};
+  const std::uint8_t rch[1] = {0};
+  const int mode[1] = {0};
+  int flips[1] = {0};
+  nav_samplers smp;
+  smp.sense_flips = flips;
+  const int deltas[3] = {5, 0, 3};
+  for (int s = 0; s < 3; ++s) {
+    flips[0] = deltas[s];
+    const float pos[2] = {(float)(s + 1), 0};
+    c.step(pos, head, spd, mode, rch, smp);
+  }
+  episode_nav_stats e0 = c.finish();
+  EXPECT_EQ(e0.per_vehicle[0].sense_flips, 8);
+  e0.coverage =
+      cov; // sim_world would fill this via compute_coverage at finish; the harness attaches it
+
+  const std::string ej = e0.to_json();
+  EXPECT_NE(ej.find("\"coverage\":{\"explored_frac\":"), std::string::npos);
+  EXPECT_NE(ej.find("\"sense_flips\":8"), std::string::npos);
+
+  // scorecard: mean coverage over episodes, mean sense_flips over vehicle-runs.
+  episode_nav_stats e1;
+  e1.success = true;
+  e1.coverage = nav_coverage{0.375, 0.75, 0.375, 0.75};
+  veh_nav_stats v = mkv(true, 10, 100, 100, 1, 5, 0);
+  v.sense_flips = 2;
+  e1.per_vehicle = {v};
+
+  nav_scorecard s = aggregate_nav({e0, e1}, "ckpt-C");
+  EXPECT_NEAR(s.mean_coverage.explored_frac, 0.5, 1e-12);      // (0.625+0.375)/2
+  EXPECT_NEAR(s.mean_coverage.visible_frac, 0.5, 1e-12);       // (0.25+0.75)/2
+  EXPECT_NEAR(s.mean_coverage.believed_free_frac, 0.5, 1e-12); // (0.625+0.375)/2
+  EXPECT_NEAR(s.mean_coverage.phantom_frac, 0.5, 1e-12);       // (0.25+0.75)/2
+  EXPECT_NEAR(s.mean_sense_flips, 5.0, 1e-12);                 // (8+2)/2
+
+  const std::string sj = s.to_json();
+  EXPECT_NE(sj.find("\"mean_coverage\":{"), std::string::npos);
+  EXPECT_NE(sj.find("\"mean_sense_flips\":"), std::string::npos);
+}
