@@ -942,10 +942,18 @@ the **same state tree the widgets bind to**.
 > `Backend::set_tooltip`, ImGui → hover-gated `SetTooltip`). All bounded/fail-safe like the
 > predicates (a string shows raw, a bool as true/false, computed options capped at 1024).
 >
-> Deferred read-lane fields (same engine, next increments): `repeat.count` (dynamic widget
-> repetition — a structural feature: needs a per-iteration index exposed to the repeated
-> subtree), computed `fmt` (niche); plus an optional load-time predicate lint (parse + reject
-> effectful heads).
+> **Also LANDED — `repeat`** (dynamic widget repetition): a widget with `repeat: <count-expr>`
+> is a template emitted N times, N re-evaluated each frame (via `eval_int`, capped 4096,
+> fail-safe 0); each instance gets its own backend id and has the `{i}` index token substituted
+> into its id/label/bind/on/predicate/tooltip/options strings, so instances address distinct
+> state (`bind: items.{i}.on`). The 1-or-N expansion lives in one `each_instance()` shared by
+> the normal walk and the grid layout. Single-level for now (a nested `repeat` shares `{i}` —
+> a follow-up).
+>
+> **The §4 read-lane is now feature-complete** for v0.2: `visible_when`, `enabled_when`/
+> `disabled_when`, computed values (expr `bind`), computed `options`, `tooltip`, and `repeat`,
+> all on one hardened, bounded, fail-safe engine. Remaining niceties: computed `fmt` (niche) and
+> an optional load-time predicate lint (parse + reject effectful heads).
 
 ### 4.1 One AST, two lanes
 
