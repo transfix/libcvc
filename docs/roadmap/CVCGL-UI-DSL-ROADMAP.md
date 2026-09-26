@@ -3302,14 +3302,22 @@ in-progress edit buffer stays valid UTF-8 at every commit boundary. The `cvc::te
 are what the widget/backends use; the commit protocol (§16.1 `EditResult`) is unchanged — it already
 carries a `std::string` value, now contractually UTF-8.
 
-### 17.6 pycvc
+### 17.6 pycvc — ✅ LANDED
 
-- **Verify + document** the SWIG `std::string` ⇄ Python `str` typemap is UTF-8 on every supported
-  interpreter (cp311/312/313), and decide the policy for a C++ string that is **not** valid UTF-8 coming
-  back to Python (raise, or `errors="surrogateescape"`) — pick one and make it explicit rather than
-  crashing at the boundary.
-- **Expose `cvc::text.display_width`** (and truncate/pad) to Python so pycvc UIs (VolRover3 panels, a
-  pycvc-driven Ariadne) do width math the same way the C++ side does.
+- **Encoding boundary — AUDITED.** pycvc wraps `std::string` with the stock `std_string.i` (no custom
+  config). Verified on Python 3.12 with a SWIG-4.2 module mirroring pycvc's setup: `str → std::string →
+  str` round-trips UTF-8 in **both** directions (café, 日本語, 😀, Straße, Ω≈ç√ all survive). The
+  open policy question is **answered by the toolkit**: a C++ `std::string` that is *not* valid UTF-8
+  comes back to Python via **`surrogateescape`** (bytes `FF FE 80` → `'\udcff\udcfe\udc80'`) — lossless,
+  round-trippable, and it **never raises** at the boundary. So no custom typemap is needed; document
+  that pycvc strings are UTF-8 and non-UTF-8 C++ values surface as surrogate-escaped `str`.
+- **`cvc::text` EXPOSED.** `bindings/pycvc/pycvc_text.i` (%included by `pycvc.i`) wraps
+  `text_display_width` / `text_codepoint_width` / `text_codepoint_count` / `text_is_valid_utf8` /
+  `text_truncate_to_width` / `text_pad_to_width`, taking/returning ordinary `str`, so pycvc UIs
+  (VolRover3 panels, a pycvc-driven Ariadne) do column math in display columns — not bytes, and not
+  Python `len()` which counts codepoints (still wrong for CJK/emoji). Verified from Python against the
+  real utility (`display_width('日本語')==6`, `pad_to_width('hi',5)=='hi   '`, `truncate_to_width('日本語',3)`
+  keeps the wide glyph whole). The CMake `cvc_swig_interface_deps` scan picks the new `.i` up automatically.
 
 ### 17.7 Scope + phasing
 
@@ -3342,7 +3350,11 @@ A cross-cutting v1 workstream, sequenced so each phase is independently useful:
    The rule going forward: **any NEW manual measure/truncate/pad/align of text uses `cvc::text`**, never
    `.size()`/`%-Ns`; toolkit-drawn text (ImGui/FTXUI) stays delegated.
 4. **Codepoint-aware editing** — when editable text lands (§17.5).
-5. **pycvc** — verify/document the typemap; expose the width API (§17.6).
+5. **pycvc** — verify/document the typemap; expose the width API (§17.6). **✅ LANDED** — the
+   `std::string`↔`str` boundary is UTF-8 both ways with `surrogateescape` for non-UTF-8 C++ values
+   (audited, SWIG 4.2 default); `pycvc_text.i` exposes the `cvc::text` width API to Python. §17 is now
+   complete through phase 5; the only deferred items are text EDITING (§17.5, lands with editable
+   widgets) and UCD-generated width tables (§17.3, a data refresh).
 
 **Open decisions:** (a) v1 width-only (no normalization/BiDi) vs. pulling in utf8proc/ICU now — recommend
 width-only for v1, ICU-class work deferred until a demo needs Arabic/Indic shaping; (b) which font to

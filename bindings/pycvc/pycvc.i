@@ -1010,6 +1010,12 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 %feature("director") pycvc::state_observer;
 %include "pycvc_state.h"
 
+// ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
+// text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does
+// column math in display columns, not bytes or codepoints. std::string round-trips
+// UTF-8 both ways here (§17.6, audited).
+%include "pycvc_text.i"
+
 // ── Async state handlers on a bounded coroutine pool ────────────────────
 // AsyncStateObserver rides on the state_observer director: C++ delivers
 // on_changed(path) SYNCHRONOUSLY on the state writer thread (GIL held), and we
