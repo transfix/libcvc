@@ -895,6 +895,34 @@ This is the heart of v0.2. Every `*_when`, `fmt`, dynamic `options`, `repeat.cou
 computed `bind`, and every `on:`/`on_change:` action is a `state_exec` program over
 the **same state tree the widgets bind to**.
 
+> **Status — the read-only lane's first field, `visible_when`, is LANDED** (`cvc::ariadne`,
+> `CVC_STATE_EXEC`-gated). `Widget::visible_when` is a predicate the walk re-evaluates each
+> frame; falsy → the widget and its subtree are skipped (in a grid, a hidden child consumes
+> **no** cell). Implementation notes that refine §4.1 below as-built:
+> - **Default-deny env, both layers.** The read env starts EMPTY and allowlists only pure
+>   operators/coercions, bounded list/dict access, and the side-effect-free state *readers*
+>   (`state-get`/`exists`/`children`/`data-get`/`root-path`/`has-expiry`/`is-expired`).
+>   Crucially this also excludes the builtins that loop **inside one native evaluator step**
+>   (`generator`/`next`/`range`/`collect`) and the only I/O builtin (`print`) — the caps are
+>   checked only *between* steps, so an internally-looping builtin would otherwise bypass
+>   them. Special forms and `true`/`false`/`nil` are parser/evaluator-intrinsic, so an empty
+>   base still evaluates them; a reach for anything off the allowlist is an unbound symbol →
+>   fail-safe. Per-eval isolation (each eval runs in a fresh child scope) keeps a predicate's
+>   `set`/`defun` from leaking across widgets or frames.
+> - **Three-way bound.** Per-eval **step** cap + per-eval **wall-time** cap + a per-**frame**
+>   aggregate wall-time budget (so N reactive widgets can't together stall a frame). A step
+>   cap returns `done==false`; a time cap throws `evaluation_timeout`; both → fail-safe hide
+>   + one warning. Diagnostics are de-duplicated and drained by `Runtime::take_reactive_warnings()`.
+> - **Fail-safe polarity.** A broken/over-budget predicate HIDES the widget (§4.1). The one
+>   deliberate carve-out: on a build **without** `CVC_STATE_EXEC` a `visible_when` widget is
+>   SHOWN (+ a one-time warning), not hidden — hiding every reactive widget would gut a
+>   minimal build. That is a build-config axis, distinct from a per-eval failure on a build
+>   that *has* the evaluator (which hides).
+>
+> Deferred read-lane fields (same engine, next increments): `enabled_when`/`disabled_when`
+> (needs a backend disabled-scope), computed `fmt`/`options`/`tooltip`, computed `bind`,
+> `repeat.count`; plus an optional load-time predicate lint (parse + reject effectful heads).
+
 ### 4.1 One AST, two lanes
 
 Selection is **by slot class, not by expression content** — all evaluators are

@@ -522,3 +522,116 @@ TEST(AriadneReactive, PredicateReadsArePrefixScoped) {
   EXPECT_TRUE(mb.saw("text_line:shown"));
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.mode").value(), "on"); // confirms the key
 }
+
+TEST(AriadneReactive, RunawayPredicateIsCappedNotHung) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = text("shown");
+  w.visible_when = "(while true 1)"; // never terminates; while yields, so the cap fires
+  rt.set_root(group({w}));
+  rt.render(); // must return (the step/time cap), not hang the walk
+  EXPECT_FALSE(mb.saw("text_line:shown")); // capped -> fail-safe hidden
+  std::vector<std::string> warns = rt.take_reactive_warnings();
+  ASSERT_EQ(warns.size(), 1u);
+  EXPECT_NE(warns[0].find("budget"), std::string::npos);
+}
+
+TEST(AriadneReactive, StringValueIsTruthyAndUnsetKeyIsCleanlyFalsy) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"flag\" \"0\")", nullptr));
+  Widget shown = text("shown");
+  shown.visible_when = "(state-get \"flag\")"; // a bare string read is non-nil -> TRUTHY (§4.3)
+  Widget hidden = text("hidden");
+  hidden.visible_when = "(state-get \"never_set\")"; // missing -> nil -> cleanly falsy
+  rt.set_root(group({shown, hidden}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:shown"));           // string "0" is truthy
+  EXPECT_FALSE(mb.saw("text_line:hidden"));          // nil is falsy
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());  // nil is a clean falsy, NOT an error
+}
+
+TEST(AriadneReactive, DistinctBrokenPredicatesWarnIndependently) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget a = text("a");
+  a.visible_when = "(> (int"; // parse error
+  Widget b = text("b");
+  b.visible_when = "(foobar 1 2)"; // parses, but foobar is unbound -> distinct eval error
+  Widget c = text("c");
+  c.visible_when = "(> (int"; // IDENTICAL to a -> same message -> collapses
+  rt.set_root(group({a, b, c}));
+  rt.render();
+  std::vector<std::string> warns = rt.take_reactive_warnings();
+  EXPECT_EQ(warns.size(), 2u); // two distinct causes; the duplicate does not add a third
+}
+
+TEST(AriadneReactive, HiddenMenuIsSkippedEntirely) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget hidden_menu = menu("File", {menu_action("Open", "open")});
+  hidden_menu.visible_when = "(state-exists \"never\")"; // false
+  rt.set_root(menubar({hidden_menu, menu("Edit", {menu_action("Copy", "copy")})}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_menu:File")); // hidden -> no begin (and so no end) pairing
+  EXPECT_TRUE(mb.saw("begin_menu:Edit"));  // its sibling still renders
+}
+
+TEST(AriadneReactive, HiddenGridChildConsumesNoCell) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget g;
+  g.kind = Kind::Group;
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.col_widths = {{Unit::Px, 10}, {Unit::Px, 10}};
+  Widget b = text("b");
+  b.visible_when = "(state-exists \"never\")"; // hidden middle child
+  g.children = {text("a"), b, text("c")};
+  rt.set_root(group({g}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:a"));
+  EXPECT_FALSE(mb.saw("text_line:b"));  // hidden
+  EXPECT_TRUE(mb.saw("text_line:c"));
+  EXPECT_EQ(mb.times("next_cell"), 2); // only the 2 VISIBLE children take a cell (no shift)
+}
+
+TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // widget1 defines a function in its per-eval (throwaway) scope and calls it; widget2 must
+  // NOT see it — proving each eval is isolated, which is what keeps the read-only-STATE
+  // guarantee intact even though set/defun special forms are always available to a predicate.
+  Widget one = text("one");
+  one.visible_when = "(begin (defun f () #t) (f))"; // defines + calls -> truthy
+  Widget two = text("two");
+  two.visible_when = "(f)"; // f is unbound in this fresh eval
+  rt.set_root(group({one, two}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:one"));  // its own defun is visible within the same eval
+  EXPECT_FALSE(mb.saw("text_line:two")); // isolated: f did not leak -> unbound -> hidden
+  EXPECT_FALSE(rt.take_reactive_warnings().empty()); // widget2's failure is reported
+}

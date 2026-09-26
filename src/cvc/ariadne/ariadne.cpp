@@ -16,6 +16,7 @@
 
 #ifdef CVC_STATE_EXEC
 #include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
 #include <cvc/core/state_exec/intrinsics.h>
 #include <cvc/core/state_exec/parser.h> // parse, parse_error
 #include <cvc/core/state_exec/process.h>
@@ -23,6 +24,8 @@
 #include <cvc/core/state_exec/stackless_evaluator.h> // §4 read-lane predicate evaluator
 #endif
 
+#include <algorithm>
+#include <chrono>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -162,12 +165,20 @@ namespace {
 namespace se = cvc::state_exec;
 
 // Evaluates a widget's read-lane expressions (visible_when, …) each frame on ONE
-// long-lived stackless evaluator over a DEFAULT-DENY environment: the pure builtins
-// plus ONLY the side-effect-free state *readers*. The writers (state-set/delete/…),
-// scheduler ops (spawn/kill/msg-*), state watches, and I/O are never installed, so a
-// predicate that tries one hits an unbound symbol and fails (fail-safe) instead of
-// mutating state or blocking. Each distinct expression source is parsed ONCE and
-// cached; every evaluation is capped in BOTH steps and wall-time and never throws out.
+// long-lived stackless evaluator over a DEFAULT-DENY environment, allowlisting BOTH the
+// builtins and the intrinsics. What is bound: pure operators/coercions, bounded list &
+// dict access, and the side-effect-free state READERS. What is NOT bound: every writer
+// (state-set/delete/…), scheduler op (spawn/kill/msg-*/sleep), state watch, and I/O
+// (print) — AND, crucially, the builtins that loop INSIDE a single native evaluator step
+// (generator/next/range/collect): the step & time caps are only checked BETWEEN steps, so
+// one of those could otherwise spin forever or materialise an unbounded list before any
+// cap fired. Special forms (if/begin/while/for/let/lambda/…) and the true/false/nil
+// literals come from the parser/evaluator, not the env, so they still work. A predicate
+// that reaches for anything off the allowlist hits an unbound symbol and fails fail-safe.
+//
+// Each distinct expression is parsed ONCE and cached. Every eval is bounded three ways:
+// a per-eval step cap, a per-eval wall-time cap, and a per-FRAME aggregate wall-time
+// budget (so many reactive widgets cannot together stall a frame). It never throws out.
 //
 // state-get keys are prefix-relative (the context is chroot'd to the document prefix),
 // so `(state-get "demo.n")` reads the SAME key a widget `bind: demo.n` resolves to.
@@ -187,19 +198,36 @@ public:
     ctx_.pid = 1;
     se::apply_chroot(ctx_, root, prefix);
 
-    env_ = se::builtins::make_default_environment();
-    // Copy ONLY the read-only intrinsics out of a full registration (allowlist =
-    // default-deny). Anything not listed here is simply never bound in env_.
+    // DEFAULT-DENY for BOTH builtins and intrinsics: start from an EMPTY environment and
+    // copy in ONLY the explicit allowlist below (the evaluator's special forms and the
+    // true/false/nil literals are not env entries, so an empty base still evaluates them).
+    // This is what closes the step/time cap: the excluded generator/next/range/collect are
+    // exactly the builtins that loop inside one native step, and print is the only I/O.
+    env_ = std::make_shared<se::environment>();
     se::environment_ptr full = se::builtins::make_default_environment();
     se::register_intrinsics(full, &ctx_);
-    static const char *const kReaders[] = {
-        "state-get",       "state-exists",     "state-children", "state-data-get",
-        "state-root-path", "state-has-expiry", "state-is-expired"};
-    for (const char *name : kReaders)
+    static const char *const kAllowed[] = {
+        // pure operators / coercions / type predicates / logic
+        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "str-concat", "str",
+        "int", "float", "is-int", "is-float", "is-string", "is-null", "is-list", "type-of",
+        "not", "and", "or", "apply",
+        // bounded list / dict access (operate on values already in hand)
+        "list", "car", "cdr", "cons", "nth", "set-nth", "length", "append", "slice",
+        "del-nth", "dict", "get-attr", "set-attr", "del-attr",
+        // side-effect-free state READERS (no writer / scheduler / watch is copied)
+        "state-get", "state-exists", "state-children", "state-data-get", "state-root-path",
+        "state-has-expiry", "state-is-expired"};
+    for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
   }
+
+  // Reset the per-FRAME aggregate budget — call once at the top of each render frame,
+  // before the walk. Once the frame's cumulative predicate-eval time is spent, the
+  // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
+  // one-time warning, so N reactive widgets cannot together stall the frame.
+  void begin_frame() { frame_spent_ = 0.0; }
 
   struct Outcome {
     bool value;        // predicate result, or the caller's `dflt` on any failure
@@ -213,13 +241,31 @@ public:
     const se::value_t *expr = compile(src);
     if (!expr)
       return {dflt, "ari: visible_when: parse error in \"" + src + "\" — widget hidden"};
+    const double remaining = kFrameBudgetSeconds - frame_spent_;
+    if (remaining <= 0.0)
+      return {dflt, "ari: visible_when: \"" + src +
+                        "\" skipped — per-frame reactive budget exhausted — widget hidden"};
     try {
       se::evaluator_state st = ev_->create_state(*expr);
-      const se::value_t r = ev_->run(st, kMaxSteps, kMaxSeconds);
-      if (!st.done)
+      const auto t0 = std::chrono::steady_clock::now();
+      // Cap this eval at the per-slot time OR the frame's remaining budget, whichever is
+      // smaller, plus the per-slot step cap. run() returns nil with done==false on a cap.
+      const se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
+      frame_spent_ +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      if (!st.done) // step cap: run() returns nil with done==false
         return {dflt, "ari: visible_when: \"" + src +
-                          "\" exceeded the per-frame budget (step/time cap) — widget hidden"};
+                          "\" exceeded the eval budget (step cap) — widget hidden"};
       return {r.is_truthy(), std::string()};
+    } catch (const se::evaluation_timeout &) {
+      // time cap: run() throws rather than returning done==false, so the post-run
+      // accounting above was skipped — charge the slot it consumed to the frame budget.
+      frame_spent_ += std::min(kMaxSeconds, remaining);
+      return {dflt, "ari: visible_when: \"" + src +
+                        "\" exceeded the eval budget (time cap) — widget hidden"};
+    } catch (const se::evaluation_interrupted &) {
+      return {dflt, "ari: visible_when: \"" + src +
+                        "\" exceeded the eval budget (interrupted) — widget hidden"};
     } catch (const std::exception &e) {
       return {dflt, "ari: visible_when: \"" + src + "\" failed at eval (" + e.what() +
                         ") — widget hidden"};
@@ -243,9 +289,11 @@ private:
     }
   }
 
-  static constexpr uint64_t kMaxSteps = 200'000; // per-eval step cap (predicates are tiny)
-  static constexpr double kMaxSeconds = 0.02;    // per-eval wall-time backstop
+  static constexpr uint64_t kMaxSteps = 100'000;       // per-eval step cap (a predicate is tiny)
+  static constexpr double kMaxSeconds = 0.005;         // per-eval wall-time cap (5 ms)
+  static constexpr double kFrameBudgetSeconds = 0.010; // aggregate across all predicates/frame
 
+  double frame_spent_ = 0.0; // wall-time spent on predicate evals in the current frame
   se::scheduler sched_;
   se::memory_tracker tracker_;
   std::shared_ptr<se::process> proc_;
@@ -291,7 +339,8 @@ struct Runtime::Impl {
       queued_events.push_back(event);
   }
 
-  void emit(const Widget &w);
+  void emit(const Widget &w);      // visibility gate (§4), then emit_node
+  void emit_node(const Widget &w); // draw the widget assuming it is visible
   void emit_children(const Widget &w);
   void emit_container(const Widget &w); // lay children out per w.layout (§3.0.3b)
   void render();
@@ -337,8 +386,13 @@ void Runtime::Impl::emit_container(const Widget &w) {
     const std::string &id = w.id.empty() ? w.label : w.id;
     if (b.begin_grid(w.layout, id.c_str())) {
       for (const Widget &c : w.children) {
+        // §4: decide visibility BEFORE advancing the cell, so a hidden child consumes no
+        // cell (otherwise it would leave an empty cell and shift every following sibling).
+        // visible() already ran here, so emit_node() draws directly (no second eval).
+        if (!visible(c))
+          continue;
         b.grid_next_cell();
-        emit(c);
+        emit_node(c);
       }
       b.end_grid();
     }
@@ -350,6 +404,10 @@ void Runtime::Impl::emit_container(const Widget &w) {
 void Runtime::Impl::emit(const Widget &w) {
   if (!visible(w))
     return; // §4 read-lane: a falsy visible_when hides this widget and its whole subtree
+  emit_node(w);
+}
+
+void Runtime::Impl::emit_node(const Widget &w) {
   Backend &b = *backend;
   const char *label = w.label.c_str();
   switch (w.kind) {
@@ -497,6 +555,10 @@ void Runtime::Impl::render() {
     pending = Widget{};
     has_pending = false;
   }
+#ifdef CVC_STATE_EXEC
+  if (reactive)
+    reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
+#endif
   backend->begin_frame();
   emit(root);
   backend->end_frame();
