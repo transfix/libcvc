@@ -1539,6 +1539,23 @@ carries the scene's assets, nodes, lights, views, and the minimap, all bound to 
 state tree the widgets read. This is what makes the minimap a first-class widget instead
 of a hand-built C++ escape.
 
+> **Status — increment 1 landed (the parse + realize seam).** The `scene:` block now
+> parses into a backend-neutral spec (`cvc::ariadne::Scene`, `inc/cvc/ariadne/scene.h`):
+> `nodes:` (geometry/group, with `source.file`, `material` color/ambient/diffuse,
+> `transform` position/rotation/scale — scalar scale = uniform — and `visible:` as either
+> a literal bool or a state path), nested `children:`, `lights:`
+> (kind/pos/target/cone/intensity or a named `rig:`), and `shadows:`. The loader is pure
+> libcvc (no VTK); the cvcGL side realizes the spec into a live `SceneGraph` via
+> `cvc::gl::ariadne::realize_scene()` (`inc/cvc/gl/ariadne/scene_realize.h`) — geometry
+> nodes load their source and get transform + single-color material + initial visibility,
+> group nodes are empty hierarchy nodes. Covered by 7 loader gtests
+> (`AriadneScene.*`); the realizer is compile-verified against the real cvcGL/VTK headers.
+> **Follow-ups (not yet built):** volume/volren/volslice/light *realization* (they parse
+> and round-trip, but `realize_scene` only builds geometry/group today); true parent
+> nesting through a `<parent>.children.<child>` path (rides on §11 path binding — children
+> realize flat for now); dynamic state-bound `visible:` sync (the bind is parsed and
+> stored; the caller syncs it per-frame / via a state watch); and views/minimap (§9.5–9.6).
+
 ### 9.1 Which scene model
 
 cvcGL has two trees, and — the key move — **the DSL author writes only one, and the

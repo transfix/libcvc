@@ -38,6 +38,7 @@
 #include <string>
 #include <vector>
 
+#include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/widget.h>
 
 namespace cvc {
@@ -56,6 +57,7 @@ struct Meta {
 struct LoadResult {
   bool ok = false;                   // false if the load failed (see `error`)
   Widget root;                       // a Group of the document's widgets (empty on failure)
+  Scene scene;                       // the parsed `scene:` block (§9; empty if none)
   Meta meta;                         // parsed provenance (may be empty)
   std::vector<std::string> warnings; // non-fatal issues (unknown types, empty binds, …)
   std::string error;                 // human-readable message when !ok

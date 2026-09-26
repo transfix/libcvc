@@ -469,6 +469,92 @@ Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
   return group(std::move(roots));
 }
 
+void vec3(const YAML::Node &n, const char *key, float out[3]) {
+  const YAML::Node v = n[key];
+  if (v && v.IsSequence() && v.size() >= 3)
+    for (int i = 0; i < 3; ++i)
+      out[i] = static_cast<float>(v[i].as<double>());
+}
+
+// A scene node (§9.3), recursive over children.
+SceneNode parse_scene_node(const YAML::Node &n) {
+  SceneNode sn;
+  sn.id = str(n, "node", str(n, "id"));
+  sn.type = str(n, "type", "geometry");
+  const YAML::Node src = n["source"];
+  if (src && src.IsMap())
+    sn.source_file = str(src, "file");
+  const YAML::Node mat = n["material"];
+  if (mat && mat.IsMap()) {
+    sn.has_material = true;
+    const YAML::Node col = mat["color"];
+    if (col && col.IsSequence() && col.size() >= 3)
+      for (int i = 0; i < 3; ++i)
+        sn.color[i] = static_cast<float>(col[i].as<double>());
+    sn.ambient = static_cast<float>(num(mat, "ambient", sn.ambient));
+    sn.diffuse = static_cast<float>(num(mat, "diffuse", sn.diffuse));
+  }
+  const YAML::Node tf = n["transform"];
+  if (tf && tf.IsMap()) {
+    sn.has_transform = true;
+    vec3(tf, "position", sn.position);
+    vec3(tf, "rotation", sn.rotation);
+    const YAML::Node sc = tf["scale"];
+    if (sc && sc.IsSequence() && sc.size() >= 3)
+      for (int i = 0; i < 3; ++i)
+        sn.scale[i] = static_cast<float>(sc[i].as<double>());
+    else if (sc && sc.IsScalar()) {
+      const float s = static_cast<float>(num(tf, "scale", 1.0));
+      sn.scale[0] = sn.scale[1] = sn.scale[2] = s; // scalar → uniform scale
+    }
+  }
+  const YAML::Node vis = n["visible"];
+  if (vis && vis.IsScalar()) {
+    const std::string v = vis.Scalar();
+    if (v == "true" || v == "false")
+      sn.visible_default = (v == "true");
+    else
+      sn.visible_bind = v; // a state path (or, later, an expression)
+  }
+  const YAML::Node kids = n["children"];
+  if (kids && kids.IsSequence())
+    for (const YAML::Node &c : kids)
+      sn.children.push_back(parse_scene_node(c));
+  return sn;
+}
+
+SceneLight parse_scene_light(const YAML::Node &n) {
+  SceneLight sl;
+  sl.id = str(n, "light", str(n, "id"));
+  sl.rig = str(n, "rig");
+  sl.kind = str(n, "kind", "directional");
+  vec3(n, "pos", sl.pos);
+  vec3(n, "target", sl.target);
+  sl.cone = static_cast<float>(num(n, "cone", sl.cone));
+  sl.intensity = static_cast<float>(num(n, "intensity", sl.intensity));
+  return sl;
+}
+
+Scene parse_scene(const YAML::Node &s) {
+  Scene sc;
+  if (!s || !s.IsMap())
+    return sc;
+  const YAML::Node nodes = s["nodes"];
+  if (nodes && nodes.IsSequence())
+    for (const YAML::Node &n : nodes)
+      sc.nodes.push_back(parse_scene_node(n));
+  const YAML::Node lights = s["lights"];
+  if (lights && lights.IsSequence())
+    for (const YAML::Node &l : lights)
+      sc.lights.push_back(parse_scene_light(l));
+  const YAML::Node sh = s["shadows"];
+  if (sh && sh.IsMap()) {
+    sc.has_shadows = true;
+    sc.shadows_enabled = flag(sh, "enabled");
+  }
+  return sc;
+}
+
 Meta parse_meta(const YAML::Node &m) {
   Meta meta;
   if (!m || !m.IsMap())
@@ -571,6 +657,8 @@ LoadResult load_node(const YAML::Node &doc) {
 #endif
 
   r.root = parse_document(ctx, doc);
+  if (doc.IsMap())
+    r.scene = parse_scene(doc["scene"]); // §9: the scene graph, alongside the widgets
   if (r.meta.min_libcvc.empty())
     ctx.warn("ari: no meta.min_libcvc declared — the provenance gate is skipped "
              "(roadmap §3.1a asks every .ari to declare it)");

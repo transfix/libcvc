@@ -405,3 +405,184 @@ windows: [ { window: W, children: [ { text: "x" } ] } ]
   EXPECT_FALSE(w->size.any());
   EXPECT_LT(w->frame_border, 0.0f); // unset
 }
+
+// ---------------------------------------------------------------------------
+// §9 scene binding — the `scene:` block parses into LoadResult::scene.
+// ---------------------------------------------------------------------------
+
+namespace {
+const SceneNode *find_scene_node(const std::vector<SceneNode> &nodes, const std::string &id) {
+  for (const SceneNode &n : nodes) {
+    if (n.id == id)
+      return &n;
+    if (const SceneNode *r = find_scene_node(n.children, id))
+      return r;
+  }
+  return nullptr;
+}
+} // namespace
+
+TEST(AriadneScene, NoSceneBlockIsEmpty) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows: [ { window: W, children: [ { text: "x" } ] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(r.scene.any());
+  EXPECT_TRUE(r.scene.nodes.empty());
+  EXPECT_TRUE(r.scene.lights.empty());
+}
+
+TEST(AriadneScene, GeometryNodeSourceMaterialTransform) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: bunny
+      type: geometry
+      source: { file: bunny.obj }
+      material: { color: [0.9, 0.1, 0.2], ambient: 0.3, diffuse: 0.7 }
+      transform: { position: [1, 2, 3], rotation: [0, 90, 0], scale: [2, 2, 2] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_TRUE(r.scene.any());
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &n = r.scene.nodes[0];
+  EXPECT_EQ(n.id, "bunny");
+  EXPECT_EQ(n.type, "geometry");
+  EXPECT_EQ(n.source_file, "bunny.obj");
+  ASSERT_TRUE(n.has_material);
+  EXPECT_FLOAT_EQ(n.color[0], 0.9f);
+  EXPECT_FLOAT_EQ(n.color[2], 0.2f);
+  EXPECT_FLOAT_EQ(n.ambient, 0.3f);
+  EXPECT_FLOAT_EQ(n.diffuse, 0.7f);
+  ASSERT_TRUE(n.has_transform);
+  EXPECT_FLOAT_EQ(n.position[0], 1.0f);
+  EXPECT_FLOAT_EQ(n.position[2], 3.0f);
+  EXPECT_FLOAT_EQ(n.rotation[1], 90.0f);
+  EXPECT_FLOAT_EQ(n.scale[0], 2.0f);
+  EXPECT_TRUE(n.visible_default); // default visible, no bind
+  EXPECT_TRUE(n.visible_bind.empty());
+}
+
+TEST(AriadneScene, ScalarScaleIsUniform) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: s
+      source: { file: s.obj }
+      transform: { scale: 3 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &n = r.scene.nodes[0];
+  ASSERT_TRUE(n.has_transform);
+  EXPECT_FLOAT_EQ(n.scale[0], 3.0f);
+  EXPECT_FLOAT_EQ(n.scale[1], 3.0f);
+  EXPECT_FLOAT_EQ(n.scale[2], 3.0f);
+  EXPECT_EQ(n.type, "geometry"); // default type
+}
+
+TEST(AriadneScene, VisibleLiteralVsBind) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: hidden
+      source: { file: a.obj }
+      visible: false
+    - node: bound
+      source: { file: b.obj }
+      visible: demo.show_mesh
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  const SceneNode *hidden = find_scene_node(r.scene.nodes, "hidden");
+  ASSERT_NE(hidden, nullptr);
+  EXPECT_FALSE(hidden->visible_default);
+  EXPECT_TRUE(hidden->visible_bind.empty());
+  const SceneNode *bound = find_scene_node(r.scene.nodes, "bound");
+  ASSERT_NE(bound, nullptr);
+  EXPECT_EQ(bound->visible_bind, "demo.show_mesh");
+}
+
+TEST(AriadneScene, GroupNestsChildren) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: convoy
+      type: group
+      children:
+        - node: truck1
+          source: { file: truck.obj }
+        - node: truck2
+          source: { file: truck.obj }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &g = r.scene.nodes[0];
+  EXPECT_EQ(g.type, "group");
+  ASSERT_EQ(g.children.size(), 2u);
+  EXPECT_EQ(g.children[0].id, "truck1");
+  EXPECT_NE(find_scene_node(r.scene.nodes, "truck2"), nullptr);
+}
+
+TEST(AriadneScene, LightsAndShadows) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: g
+      source: { file: g.obj }
+  lights:
+    - light: key
+      kind: spot
+      pos: [10, 20, 30]
+      target: [0, 0, 0]
+      cone: 30
+      intensity: 1.5
+    - light: soft
+      rig: three_point
+  shadows: { enabled: true }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.lights.size(), 2u);
+  const SceneLight &key = r.scene.lights[0];
+  EXPECT_EQ(key.id, "key");
+  EXPECT_EQ(key.kind, "spot");
+  EXPECT_FLOAT_EQ(key.pos[1], 20.0f);
+  EXPECT_FLOAT_EQ(key.cone, 30.0f);
+  EXPECT_FLOAT_EQ(key.intensity, 1.5f);
+  EXPECT_EQ(r.scene.lights[1].rig, "three_point");
+  EXPECT_TRUE(r.scene.has_shadows);
+  EXPECT_TRUE(r.scene.shadows_enabled);
+}
+
+TEST(AriadneScene, WidgetsAndSceneCoexist) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: mesh
+      source: { file: m.obj }
+windows:
+  - window: Controls
+    children:
+      - checkbox: Show
+        bind: demo.show_mesh
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.nodes.size(), 1u);
+  const Widget *cb = find(r.root, Kind::Checkbox);
+  ASSERT_NE(cb, nullptr);
+  EXPECT_EQ(cb->bind, "demo.show_mesh");
+}
