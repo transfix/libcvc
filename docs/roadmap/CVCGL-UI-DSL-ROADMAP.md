@@ -3300,7 +3300,8 @@ When Ariadne grows an editable text field (and for the FTXUI/tvision interactive
 movement, backspace/delete, and selection must step by **codepoint (grapheme, ideally) not byte**, and the
 in-progress edit buffer stays valid UTF-8 at every commit boundary. The `cvc::text` boundary ops (§17.3)
 are what the widget/backends use; the commit protocol (§16.1 `EditResult`) is unchanged — it already
-carries a `std::string` value, now contractually UTF-8.
+carries a `std::string` value, now contractually UTF-8. Copy/cut/paste in an editable field goes through
+the clipboard (§17.8).
 
 ### 17.6 pycvc — ✅ LANDED
 
@@ -3361,3 +3362,69 @@ width-only for v1, ICU-class work deferred until a demo needs Arabic/Indic shapi
 bundle for ImGui and how large a default glyph set (size vs. coverage) — recommend a DejaVu/Noto subset
 with Latin-1 + symbols by default and CJK opt-in; (c) grapheme-cluster vs. codepoint granularity for
 editing — recommend codepoint for v1, grapheme a later refinement.
+
+### 17.8 Clipboard — copy / cut / paste
+
+Editable text (§17.5) needs copy/cut/paste, and that needs a clipboard. Two layers, because the
+context-agnostic core cannot assume a system clipboard exists (headless, wasm, a bare terminal), and
+because clipboards are the messiest cross-platform surface there is:
+
+**(1) The internal clipboard — core, always works.** A process-local UTF-8 text buffer in the
+backend-neutral core (`cvc::ariadne`), the source of truth for cut/copy/paste. It is what §17.5's edit
+ops read and write; it works identically on every backend, with no OS/browser access at all. It holds
+**UTF-8 text** (§17.2), set/replaced atomically; codepoint-aware slicing (§17.3) is the caller's job. A
+tiny API: `set(text)`, `get() -> text`, `clear()`. It lives above the reconcile boundary like the intent
+buffer (§7.2) — an edit's cut/copy writes it between frames, a paste reads it, all off the render walk.
+(Whether it also mirrors into a `cvc::state` node — so a script or a replicated peer can observe/seed the
+clipboard — is an open question below; default is a plain in-process buffer.)
+
+**(2) The system / browser clipboard — a Backend capability, best-effort.** When the active backend can
+reach the real clipboard, the internal clipboard **syncs through it**: a copy/cut pushes to the system
+clipboard too, and a paste prefers the system clipboard when it can read one synchronously, falling back
+to the internal buffer otherwise. This is a `Backend` capability (§16.1), not core:
+- `Capabilities::clipboard` gains sub-bits — `can_copy_system`, `can_paste_system` — because the two
+  halves are asymmetric on almost every platform (see below). The core greys out / no-ops the half a
+  backend lacks rather than lying (mirroring the existing `clipboard::canCopy/canPaste`).
+- `Backend::push_clipboard(text)` — best-effort copy to the system clipboard; returns whether it took.
+- `Backend::pull_clipboard() -> optional<text>` — a *synchronous* read, or `nullopt` when the platform
+  can't read synchronously (then the core uses the internal buffer). Never blocks.
+
+**The ImGui/VTK backend already has most of this.** `cvc::gl::clipboard` (`inc/cvc/gl/Clipboard.h`) is a
+working system-clipboard layer — Win32 (Dear ImGui's built-in), X11 (selection owner + request round
+trip), macOS NSPasteboard, wasm (`navigator.clipboard.writeText` for copy; paste via the page's real
+paste events, since `readText()` is async/secure-context/gesture-gated). Phase-3-of-clipboard wiring is
+just to expose it through the `Backend::push/pull_clipboard` seam and let the core internal clipboard sync
+with it — not to rewrite it. It moves conceptually from "the thing ImGui uses" to "the ImGui/VTK
+backend's clipboard bridge."
+
+**Terminal backends.** FTXUI / tvision reach the clipboard through the terminal, which is copy-biased and
+uneven: **OSC 52** lets an app *write* the clipboard through the terminal emulator (widely but not
+universally supported, and often disabled for security); *reading* it back is rarely available. tvision
+has its own clipboard plumbing (xsel/xclip/wl-clipboard shells on Linux, native on Windows — the recipe
+already notes these). So a terminal backend typically reports `can_copy_system=true` (OSC 52 / tvision)
+and `can_paste_system=false`, and the internal clipboard carries paste. The user's terminal "Paste"
+(bracketed paste) still delivers text as normal input — that path is unaffected.
+
+**Platform reality (the honest matrix), mostly inherited from `cvc::gl::clipboard`:**
+
+| Backend / platform | copy → system | paste ← system | notes |
+|---|---|---|---|
+| ImGui/VTK · Windows | yes | yes | Dear ImGui's Win32 default |
+| ImGui/VTK · X11 | yes | yes | selection dies with the app unless a clipboard manager takes it (X11's model) |
+| ImGui/VTK · macOS | yes | yes | NSPasteboard |
+| ImGui/VTK · wasm | yes (gesture-gated) | only via a page paste EVENT (async `readText` can't be synchronous) |
+| FTXUI / tvision | usually (OSC 52 / tvision) | usually no | terminal-support-dependent; internal buffer carries paste |
+| headless / no backend | internal only | internal only | the internal clipboard still works |
+
+**Invariant:** cut/copy/paste **always works within the app** via the internal clipboard, regardless of
+backend or platform; the system/browser bridge is an enhancement layered on top when the backend and
+platform allow, never a prerequisite. Data is UTF-8 text for v1; richer formats (multiple MIME types, a
+clipboard history ring) are out of scope.
+
+**Open questions.** (a) Mirror the internal clipboard into a `cvc::state` node (observable/replicable,
+and it would let a headless script prime a paste) vs. a plain in-process buffer — default plain, revisit
+if replication wants it. (b) wasm paste ergonomics: the async/gesture-gated `readText()` means the
+cleanest UX is to route the browser's native paste event into the internal clipboard (as
+`cvc::gl::clipboard` already does), so Ctrl-V in a wasm Ariadne edit pulls from the last real page paste.
+(c) OSC 52 is off by default in some terminals — surface `can_copy_system=false` honestly there rather
+than silently dropping copies.
