@@ -689,6 +689,29 @@ TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {
   EXPECT_FALSE(rt.take_reactive_warnings().empty());
 }
 
+TEST(AriadneReactive, StateDataDagIsCopiedBoundedNotHung) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  // The full-env init lane plants a physically-tiny SHARED DAG (~30 nodes, 2^30 logical) in
+  // typed data. A read-lane predicate then reads it via state-data-get -> deep_copy. deep_copy
+  // is memoized, so the copy is bounded (physical size); an un-memoized copy would hang/OOM.
+  ASSERT_TRUE(run_init(app, "ui.demo",
+                       "(begin (set d (list 0 0)) (set i 0) "
+                       "(while (< i 30) (begin (set d (list d d)) (set i (+ i 1)))) "
+                       "(state-data-set \"bomb\" d))",
+                       nullptr));
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = text("shown");
+  w.visible_when = "(is-null (state-data-get \"bomb\"))"; // reads the DAG each frame
+  rt.set_root(group({w}));
+  rt.render(); // must return promptly (memoized deep_copy), not hang or OOM
+  EXPECT_FALSE(mb.saw("text_line:shown")); // is-null of a non-nil value -> hidden
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()); // completed cleanly, no cap/error
+}
+
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
   if (!have_state_exec())
     GTEST_SKIP();

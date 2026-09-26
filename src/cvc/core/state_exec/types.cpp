@@ -206,12 +206,18 @@ struct ptr_pair_hash {
 };
 using ptr_pair_set = std::unordered_set<std::pair<const void *, const void *>, ptr_pair_hash>;
 
+constexpr int kValuesEqualMaxDepth = 1000; // guard the C++ stack on a deeply-nested compare
+
 // `seen` memoizes the (a,b) pointer-pairs already under comparison. Re-encountering a pair
 // (a shared node reached by two paths, or a cycle) returns true co-inductively: this bounds
 // work to the number of DISTINCT node-pairs (the physical size), never the exponential
 // logical unfolding of a shared DAG, and terminates on cyclic structures instead of
 // recursing forever. For finite acyclic values the result is identical to a naive compare.
-bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen) {
+// A depth cap + deadline poll keep even a deeply-nested or huge NON-shared structure bounded
+// (memoization alone does not: distinct nodes are never re-encountered).
+bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen, int depth) {
+  if (depth > kValuesEqualMaxDepth || eval_deadline_expired())
+    throw std::runtime_error("values_equal: structure too deep or large to compare");
   if (a.v.index() != b.v.index())
     return false;
   return std::visit(
@@ -242,7 +248,7 @@ bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen) {
                    .second)
             return true; // this pair is already being compared (shared/cyclic) -> equal
           for (std::size_t i = 0; i < arg_a->size(); ++i)
-            if (!values_equal_impl((*arg_a)[i], (*arg_b)[i], seen))
+            if (!values_equal_impl((*arg_a)[i], (*arg_b)[i], seen, depth + 1))
               return false;
           return true;
         } else if constexpr (std::is_same_v<T, closure_ptr>)
@@ -261,7 +267,7 @@ bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen) {
           for (std::size_t i = 0; i < arg_a->size(); ++i) {
             if ((*arg_a)[i].first != (*arg_b)[i].first)
               return false;
-            if (!values_equal_impl((*arg_a)[i].second, (*arg_b)[i].second, seen))
+            if (!values_equal_impl((*arg_a)[i].second, (*arg_b)[i].second, seen, depth + 1))
               return false;
           }
           return true;
@@ -280,7 +286,7 @@ bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen) {
 
 bool values_equal(const value_t &a, const value_t &b) {
   ptr_pair_set seen;
-  return values_equal_impl(a, b, seen);
+  return values_equal_impl(a, b, seen, 0);
 }
 
 } // namespace cvc::state_exec

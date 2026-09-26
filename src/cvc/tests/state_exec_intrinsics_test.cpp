@@ -164,6 +164,33 @@ TEST_F(StateTreeIntrinsicsTest, StateDataGetReturnsPrivateCopy) {
   EXPECT_EQ((*gl2)->size(), 2u); // stored data is untouched -> the get returned a private copy
 }
 
+TEST_F(StateTreeIntrinsicsTest, StateDataGetOfSharedDagIsBoundedAndPreservesSharing) {
+  // A physically-tiny shared DAG (40 doublings = 2^40 logical) round-trips via a MEMOIZED
+  // deep copy: bounded (no exponential unfold), and the returned copy preserves the DAG's
+  // sharing (both children are the SAME copied node) while aliasing none of the stored value.
+  value_t d{int64_t{0}};
+  for (int i = 0; i < 40; ++i)
+    d = make_list({d, d});
+  call("state-data-set", {std::string("dag"), d});
+  value_t got = call("state-data-get", {std::string("dag")}); // must not hang/OOM
+  auto *gl = std::get_if<list_ptr>(&got.v);
+  ASSERT_NE(gl, nullptr);
+  ASSERT_EQ((*gl)->size(), 2u);
+  auto *c0 = std::get_if<list_ptr>(&(**gl)[0].v);
+  auto *c1 = std::get_if<list_ptr>(&(**gl)[1].v);
+  ASSERT_NE(c0, nullptr);
+  ASSERT_NE(c1, nullptr);
+  EXPECT_EQ(c0->get(), c1->get()); // sharing preserved -> the copy is a DAG, not a 2^40 tree
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataGetOfTooDeepValueThrows) {
+  value_t d{int64_t{0}};
+  for (int i = 0; i < 2000; ++i)
+    d = make_list({d}); // depth 2000 > the deep-copy depth cap
+  call("state-data-set", {std::string("deep"), d});
+  EXPECT_THROW(call("state-data-get", {std::string("deep")}), std::runtime_error); // stack-safe
+}
+
 TEST_F(StateTreeIntrinsicsTest, StateSetCoercesScalarsToString) {
   // state-set stores string-typed scalars; non-string values are coerced to their natural
   // lexical form rather than throwing — (state-set "n" 10) stores "10".

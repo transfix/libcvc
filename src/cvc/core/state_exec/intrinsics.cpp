@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace cvc::state_exec {
 
@@ -74,29 +75,55 @@ std::string coerce_state_string(const value_t &v) {
   return to_string(v); // list/dict/symbol/closure — readable fallback
 }
 
-// Recursively clone a value's compound structure (list/dict) so the caller gets a PRIVATE
-// copy that does not alias node-resident storage. Scalars/symbols copy by value. Used by
-// state-data-get so a fetched structure cannot be mutated in place back into the state tree.
-value_t deep_copy(const value_t &v) {
+// Clone a value's compound structure (list/dict) so the caller gets a PRIVATE copy that does
+// not alias node-resident storage. Bounded and cycle-safe, mirroring values_equal / to_string
+// (it is the third structural walker and must not be the weak link): it MEMOIZES on the source
+// node pointer, so a shared-pointer DAG is copied in PHYSICAL time (the copy preserves the same
+// sharing, disjoint from the stored original) and a cycle terminates; it caps recursion depth
+// (stack safety on a deeply-nested value); and it polls the evaluation deadline so a huge
+// payload aborts at the time budget instead of running to completion in one native step.
+constexpr int kDeepCopyMaxDepth = 1000;
+
+value_t deep_copy_impl(const value_t &v, std::unordered_map<const void *, value_t> &memo,
+                       int depth) {
+  if (eval_deadline_expired())
+    throw std::runtime_error("state-data-get: evaluation exceeded time budget");
+  if (depth > kDeepCopyMaxDepth)
+    throw std::runtime_error("state-data-get: value nested too deeply to copy");
   if (auto *l = std::get_if<list_ptr>(&v.v)) {
-    std::vector<value_t> out;
-    if (*l) {
-      out.reserve((*l)->size());
-      for (const auto &e : **l)
-        out.push_back(deep_copy(e));
-    }
-    return make_list(std::move(out));
+    if (!*l)
+      return v;
+    auto found = memo.find(static_cast<const void *>(l->get()));
+    if (found != memo.end())
+      return found->second; // shared node / cycle already copied -> reuse (bounds the walk)
+    auto out = std::make_shared<std::vector<value_t>>();
+    value_t result{out};
+    memo.emplace(static_cast<const void *>(l->get()), result); // register BEFORE recursing
+    out->reserve((*l)->size());
+    for (const auto &e : **l)
+      out->push_back(deep_copy_impl(e, memo, depth + 1));
+    return result;
   }
   if (auto *dp = std::get_if<dict_ptr>(&v.v)) {
-    std::vector<std::pair<std::string, value_t>> out;
-    if (*dp) {
-      out.reserve((*dp)->size());
-      for (const auto &kv : **dp)
-        out.emplace_back(kv.first, deep_copy(kv.second));
-    }
-    return make_dict(std::move(out));
+    if (!*dp)
+      return v;
+    auto found = memo.find(static_cast<const void *>(dp->get()));
+    if (found != memo.end())
+      return found->second;
+    auto out = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
+    value_t result{out};
+    memo.emplace(static_cast<const void *>(dp->get()), result);
+    out->reserve((*dp)->size());
+    for (const auto &kv : **dp)
+      out->emplace_back(kv.first, deep_copy_impl(kv.second, memo, depth + 1));
+    return result;
   }
   return v; // scalar / symbol (opaque callables are refused at state-data-set)
+}
+
+value_t deep_copy(const value_t &v) {
+  std::unordered_map<const void *, value_t> memo;
+  return deep_copy_impl(v, memo, 0);
 }
 
 void require_root(const intrinsics_context *ctx, const char *name) {
