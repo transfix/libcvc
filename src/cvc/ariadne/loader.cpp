@@ -227,7 +227,7 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
          k == "children" || k == "items" || k == "id" || k == "visible_when" ||
-         k == "enabled_when" || k == "disabled_when" || k == "tooltip";
+         k == "enabled_when" || k == "disabled_when" || k == "tooltip" || k == "repeat";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -542,6 +542,7 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
     w.enabled_when = str(n, "enabled_when");
     w.disabled_when = str(n, "disabled_when");
     w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
+    w.repeat = str(n, "repeat");   // §3: a count expression -> emit this template N times
   }
   return w;
 }

@@ -136,6 +136,13 @@ struct Widget {
   // expression re-evaluated each frame. Empty = no tooltip.
   std::string tooltip;
 
+  // §3/§4 dynamic repetition: when non-empty, this widget is a TEMPLATE emitted `repeat`
+  // times, where `repeat` is a count expression re-evaluated each frame (capped, fail-safe
+  // 0). Each instance gets its own backend id and has the `{i}` token (the 0-based index)
+  // substituted into its bind / on / label / predicate / tooltip strings, so instances can
+  // address distinct state (e.g. bind: items.{i}.on). Empty = emitted once.
+  std::string repeat;
+
   // numeric widget params
   double lo = 0.0, hi = 1.0, def = 0.0; // SliderFloat
   int ilo = 0, ihi = 100, idef = 0;     // SliderInt

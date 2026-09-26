@@ -65,6 +65,40 @@ bool is_expr(const std::string &bind) {
   return false;
 }
 
+// Replace every occurrence of `token` in `s` with `rep`.
+std::string replace_all(std::string s, const std::string &token, const std::string &rep) {
+  if (token.empty())
+    return s;
+  for (std::size_t pos = s.find(token); pos != std::string::npos;
+       pos = s.find(token, pos + rep.size()))
+    s.replace(pos, token.size(), rep);
+  return s;
+}
+
+// §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
+// 0-based `index` in every field an instance uses to address distinct state or to display
+// (id/label/bind/on/predicates/tooltip/options). Recurses into children. (Single-level: a
+// nested `repeat` shares the same `{i}` token and is not independently indexed — a follow-up.)
+Widget substitute_index(const Widget &w, int index) {
+  const std::string idx = std::to_string(index);
+  static const std::string kTok = "{i}";
+  Widget out = w; // copies every field
+  out.id = replace_all(out.id, kTok, idx);
+  out.label = replace_all(out.label, kTok, idx);
+  out.bind = replace_all(out.bind, kTok, idx);
+  out.on = replace_all(out.on, kTok, idx);
+  out.visible_when = replace_all(out.visible_when, kTok, idx);
+  out.enabled_when = replace_all(out.enabled_when, kTok, idx);
+  out.disabled_when = replace_all(out.disabled_when, kTok, idx);
+  out.tooltip = replace_all(out.tooltip, kTok, idx);
+  out.options_expr = replace_all(out.options_expr, kTok, idx);
+  out.children.clear();
+  out.children.reserve(w.children.size());
+  for (const Widget &c : w.children)
+    out.children.push_back(substitute_index(c, index));
+  return out;
+}
+
 } // namespace
 
 // --- custom widget type registry (§ extensibility) --------------------------
@@ -305,6 +339,31 @@ public:
     return {std::move(out), std::string()};
   }
 
+  struct IntOutcome {
+    int64_t value;     // the caller's `dflt` on any failure
+    std::string error; // empty on success
+  };
+
+  // Evaluate `src` and coerce the result to an integer (a repeat count). int as-is, double
+  // truncated, a numeric string parsed; anything else is an error. Bounded + fail-safe.
+  IntOutcome eval_int(const std::string &src, int64_t dflt) {
+    const RawOutcome o = eval_raw(src);
+    if (!o.error.empty())
+      return {dflt, o.error};
+    if (auto *i = std::get_if<int64_t>(&o.value.v))
+      return {*i, std::string()};
+    if (auto *d = std::get_if<double>(&o.value.v))
+      return {static_cast<int64_t>(*d), std::string()};
+    if (auto *s = std::get_if<std::string>(&o.value.v)) {
+      try {
+        return {static_cast<int64_t>(std::stoll(*s)), std::string()};
+      } catch (const std::exception &) {
+        return {dflt, "ari: reactive expr \"" + src + "\" did not yield an integer"};
+      }
+    }
+    return {dflt, "ari: reactive expr \"" + src + "\" did not yield a number"};
+  }
+
 private:
   struct RawOutcome {
     se::value_t value; // valid only when error is empty
@@ -418,8 +477,12 @@ struct Runtime::Impl {
       queued_events.push_back(event);
   }
 
-  void emit(const Widget &w);      // visibility gate (§4), then emit_node
+  void emit(const Widget &w);      // repeat + visibility gates (§4), then emit_node
   void emit_node(const Widget &w); // draw the widget assuming it is visible
+  // §3 repetition: call `f(instance, i)` for each instance of `w` — once with i==-1 for a
+  // plain widget, or N times (i=0..N-1, `{i}` substituted) for a `repeat` template. The
+  // one place the 1-or-N expansion lives, shared by emit() and the grid layout.
+  void each_instance(const Widget &w, const std::function<void(const Widget &, int)> &f);
   void emit_children(const Widget &w);
   void emit_container(const Widget &w); // lay children out per w.layout (§3.0.3b)
   void render();
@@ -438,6 +501,8 @@ struct Runtime::Impl {
   // §4 read-lane: evaluate a computed combo-options expression to a list of strings.
   // Fail-safe EMPTY list on a broken expr; warns once.
   std::vector<std::string> eval_options(const std::string &expr);
+  // §3/§4: evaluate a repeat-count expression to a non-negative, capped int. Fail-safe 0.
+  int eval_count(const std::string &expr);
   void warn_once(const std::string &msg) {
     if (reactive_warned.insert(msg).second)
       reactive_warnings.push_back(msg);
@@ -521,6 +586,30 @@ std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
 #endif
 }
 
+int Runtime::Impl::eval_count(const std::string &expr) {
+  constexpr int64_t kMaxRepeat = 4096; // a UI with thousands of repeated widgets is pathological
+#ifdef CVC_STATE_EXEC
+  if (!reactive)
+    reactive = std::make_unique<ReactiveEngine>(app, prefix);
+  const ReactiveEngine::IntOutcome o = reactive->eval_int(expr, /*dflt=*/0);
+  if (!o.error.empty())
+    warn_once(o.error);
+  int64_t n = o.value;
+  if (n < 0)
+    n = 0;
+  if (n > kMaxRepeat) {
+    warn_once("ari: repeat count " + std::to_string(n) + " exceeds the cap (" +
+              std::to_string(kMaxRepeat) + ") — clamped");
+    n = kMaxRepeat;
+  }
+  return static_cast<int>(n);
+#else
+  (void)kMaxRepeat;
+  warn_once("ari: repeat ignored — this libcvc was built without state_exec (CVC_STATE_EXEC=OFF)");
+  return 0;
+#endif
+}
+
 void Runtime::Impl::emit_children(const Widget &w) {
   for (const Widget &c : w.children)
     emit(c);
@@ -535,13 +624,19 @@ void Runtime::Impl::emit_container(const Widget &w) {
     const std::string &id = w.id.empty() ? w.label : w.id;
     if (b.begin_grid(w.layout, id.c_str())) {
       for (const Widget &c : w.children) {
-        // §4: decide visibility BEFORE advancing the cell, so a hidden child consumes no
-        // cell (otherwise it would leave an empty cell and shift every following sibling).
-        // visible() already ran here, so emit_node() draws directly (no second eval).
-        if (!visible(c))
-          continue;
-        b.grid_next_cell();
-        emit_node(c);
+        // Expand a `repeat` child into per-instance cells; a plain child is one instance.
+        // Decide visibility BEFORE advancing the cell, so a hidden child/instance consumes
+        // no cell (otherwise it would leave an empty cell and shift the following siblings).
+        each_instance(c, [&](const Widget &inst, int i) {
+          if (!visible(inst))
+            return;
+          b.grid_next_cell();
+          if (i >= 0)
+            b.push_id(std::to_string(i).c_str());
+          emit_node(inst);
+          if (i >= 0)
+            b.pop_id();
+        });
       }
       b.end_grid();
     }
@@ -550,10 +645,29 @@ void Runtime::Impl::emit_container(const Widget &w) {
   }
 }
 
+void Runtime::Impl::each_instance(const Widget &w,
+                                  const std::function<void(const Widget &, int)> &f) {
+  if (w.repeat.empty()) {
+    f(w, -1); // a plain widget: one instance, no index
+    return;
+  }
+  const int n = eval_count(w.repeat); // capped, fail-safe 0
+  for (int i = 0; i < n; ++i) {
+    Widget inst = substitute_index(w, i);
+    inst.repeat.clear(); // the instance renders once
+    f(inst, i);
+  }
+}
+
 void Runtime::Impl::emit(const Widget &w) {
-  if (!visible(w))
-    return; // §4 read-lane: a falsy visible_when hides this widget and its whole subtree
-  emit_node(w);
+  each_instance(w, [this](const Widget &inst, int i) {
+    if (i >= 0)
+      backend->push_id(std::to_string(i).c_str()); // per-instance identity
+    if (visible(inst))                             // §4: a falsy visible_when hides it + subtree
+      emit_node(inst);
+    if (i >= 0)
+      backend->pop_id();
+  });
 }
 
 void Runtime::Impl::emit_node(const Widget &w) {

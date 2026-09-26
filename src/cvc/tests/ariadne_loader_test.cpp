@@ -1135,6 +1135,22 @@ windows:
   EXPECT_EQ(c->options_expr, "(list \"p\" \"q\")");
 }
 
+TEST(AriadneReactive, RepeatParsedOntoWidget) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - text: "Item {i}"
+        repeat: (int (state-get "n"))
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *t = find(r.root, Kind::Text);
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(t->repeat, "(int (state-get \"n\"))");
+  EXPECT_EQ(t->label, "Item {i}"); // template label kept verbatim; {i} substituted at emit
+}
+
 TEST(AriadneReactive, TooltipParsedOntoWidget) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

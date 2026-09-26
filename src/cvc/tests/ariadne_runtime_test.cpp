@@ -876,6 +876,61 @@ TEST(AriadneReactive, NoTooltipMeansNoSetTooltip) {
   EXPECT_FALSE(mb.saw_prefix("tooltip:"));
 }
 
+TEST(AriadneReactive, RepeatEmitsNInstancesWithIndexSubstituted) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"n\" \"3\")", nullptr));
+  Widget t = text("Item {i}"); // literal caption with the loop-index token
+  t.repeat = "(int (state-get \"n\"))";
+  rt.set_root(group({t}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:Item 0"));
+  EXPECT_TRUE(mb.saw("text_line:Item 1"));
+  EXPECT_TRUE(mb.saw("text_line:Item 2"));
+  EXPECT_FALSE(mb.saw("text_line:Item 3")); // exactly n instances
+  // reacts: raise the count
+  cvc::state::instance(app)("n").value(4);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:Item 3"));
+}
+
+TEST(AriadneReactive, RepeatSubstitutesIndexInBindsForDistinctState) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"n\" \"2\")", nullptr));
+  Widget c = checkbox("on", "items.{i}.on", false); // each instance addresses its own key
+  c.repeat = "(int (state-get \"n\"))";
+  mb.checkbox_ret = BoolEdit{true, true, true}; // every instance commits true
+  rt.set_root(group({c}));
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("items.0.on").value(), "1");
+  EXPECT_EQ(cvc::state::instance(app)("items.1.on").value(), "1"); // distinct, index-substituted
+}
+
+TEST(AriadneReactive, RepeatBrokenCountEmitsNothing) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget t = text("X");
+  t.repeat = "(int"; // parse error -> count 0 (fail-safe)
+  rt.set_root(group({t}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:X"));
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
   if (!have_state_exec())
     GTEST_SKIP();
