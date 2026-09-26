@@ -68,8 +68,14 @@ int main(int argc, char **argv) {
     if (lr.ok) {
       tree = std::move(lr.root);
       loaded = true;
-      std::printf("[ariadne_hello] loaded %s\n", argv[1]);
+      std::printf("[ariadne_hello] loaded %s", argv[1]);
+      if (!lr.meta.name.empty())
+        std::printf(" — \"%s\"", lr.meta.name.c_str());
+      std::printf("\n");
+      for (const std::string &w : lr.warnings) // §15 semantic validation
+        std::printf("[ariadne_hello]   %s\n", w.c_str());
     } else {
+      // A failed load (e.g. the min_libcvc gate) never half-renders.
       std::printf("[ariadne_hello] %s\n[ariadne_hello] falling back to the built-in tree.\n",
                   lr.error.c_str());
     }
