@@ -12,6 +12,12 @@ add_executable(lsystem_forest lsystem_forest.cpp)
 target_link_libraries(lsystem_forest PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS lsystem_forest MODULES ${VTK_LIBRARIES})
 
+# ariadne_hello — the first Ariadne (cvc::gl::ariadne) demo: mounts a
+# programmatic widget tree bound to cvc::state on the standard cvcGL viewer.
+add_executable(ariadne_hello ariadne_hello.cpp)
+target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
+
 # bunny_shadow — a Stanford-bunny shader/shadow-mapping test bench (one mesh, one
 # ground plane, a StageLighting rig). Loads the bunny via cvc::read_geometry, so
 # it needs only cvcGL (no nav helpers).
