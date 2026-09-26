@@ -682,6 +682,84 @@ scene:
   EXPECT_FALSE(n.has_material);
 }
 
+TEST(AriadneScene, VolRenNodeParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: vr
+      type: volren
+      source: { file: head.rawiv }
+      volren:
+        ambient: 0.3
+        distance_field: true
+        steps: 256
+        backend: cpu
+        isosurfaces:
+          - { value: 0.5, opacity: 0.9, color: [0.9, 0.2, 0.1], shininess: 40 }
+        transfer_function:
+          window: [0.0, 1.0]
+          points:
+            - { value: 0.0, color: [0, 0, 0, 0] }
+            - { value: 1.0, color: [1, 1, 1, 1] }
+        lights:
+          - { color: [1, 1, 1], direction: [0, 0, 1] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &n = r.scene.nodes[0];
+  EXPECT_EQ(n.type, "volren");
+  ASSERT_TRUE(n.has_volren);
+  EXPECT_FLOAT_EQ(n.volren.ambient, 0.3f);
+  EXPECT_TRUE(n.volren.distance_field);
+  EXPECT_EQ(n.volren.steps, 256);
+  ASSERT_EQ(n.volren.isosurfaces.size(), 1u);
+  EXPECT_FLOAT_EQ(n.volren.isosurfaces[0].value, 0.5f);
+  EXPECT_FLOAT_EQ(n.volren.isosurfaces[0].opacity, 0.9f);
+  EXPECT_FLOAT_EQ(n.volren.isosurfaces[0].shininess, 40.0f);
+  ASSERT_EQ(n.volren.tf.points.size(), 2u);
+  EXPECT_TRUE(n.volren.tf.has_window);
+  EXPECT_FALSE(n.volren.tf.auto_domain); // an explicit window fixes the domain
+  EXPECT_FLOAT_EQ(n.volren.tf.window_max, 1.0f);
+  EXPECT_FLOAT_EQ(n.volren.tf.points[1].color[3], 1.0f); // alpha
+  ASSERT_EQ(n.volren.lights.size(), 1u);
+  EXPECT_FLOAT_EQ(n.volren.lights[0].direction[2], 1.0f);
+}
+
+TEST(AriadneScene, VolSliceNodeParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: vs
+      type: volslice
+      source: { file: head.rawiv }
+      volslice:
+        quality: 0.75
+        near_plane: 0.1
+        filter: nearest
+        opacity_correction: true
+        transfer_function:
+          points:
+            - { value: 0.0, color: [1, 0, 0, 0] }
+            - { value: 1.0, color: [1, 0, 0, 0.8] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &n = r.scene.nodes[0];
+  EXPECT_EQ(n.type, "volslice");
+  ASSERT_TRUE(n.has_volslice);
+  EXPECT_FLOAT_EQ(n.volslice.quality, 0.75f);
+  EXPECT_FLOAT_EQ(n.volslice.near_plane, 0.1f);
+  EXPECT_TRUE(n.volslice.nearest_filter);
+  EXPECT_TRUE(n.volslice.opacity_correction);
+  ASSERT_EQ(n.volslice.tf.points.size(), 2u);
+  EXPECT_TRUE(n.volslice.tf.auto_domain); // no window given
+  EXPECT_FLOAT_EQ(n.volslice.tf.points[1].color[3], 0.8f);
+}
+
 TEST(AriadneScene, WidgetsAndSceneCoexist) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

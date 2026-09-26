@@ -80,3 +80,25 @@ scene:
       intensity: 1.0
   shadows:
     enabled: true
+  # Volume renderers (§9) need a volume file (no embedded one ships), so these are
+  # commented. A volren/volslice node is serviced each frame by
+  # cvc::gl::ariadne::tick_scene (the host calls it before render). volren needs an
+  # isosurface OR a transfer_function (+ a light or ambient>0); volslice needs a
+  # transfer_function whose opacity>0.
+  #
+  #   - node: head
+  #     type: volren
+  #     source: { file: /path/to/head.rawiv }
+  #     volren:
+  #       ambient: 0.4
+  #       isosurfaces:
+  #         - { value: 0.5, opacity: 1.0, color: [0.9, 0.3, 0.2], shininess: 32 }
+  #   - node: slices
+  #     type: volslice
+  #     source: { file: /path/to/head.rawiv }
+  #     volslice:
+  #       quality: 0.6
+  #       transfer_function:
+  #         points:
+  #           - { value: 0.0, color: [1, 0, 0, 0.0] }
+  #           - { value: 1.0, color: [1, 1, 0, 0.8] }

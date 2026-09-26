@@ -13,9 +13,15 @@
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
+#include <cvc/gl/VolRenNode.h>
+#include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
+#include <cvc/volren/settings.h>
+#include <cvc/volslice/settings.h>
+
+#include <vtkRenderer.h>
 
 namespace cvc {
 namespace gl {
@@ -61,6 +67,81 @@ void apply_visibility(GraphicsNode &node, const cvc::ariadne::SceneNode &n,
   const int v0 = cvc::ariadne::read_or<int>(app, source, n.visible_default ? 1 : 0);
   cvc::ariadne::write<int>(app, target, v0);
   binds.push_back({source, target, n.visible_default});
+}
+
+// Translate the backend-neutral SceneVolRen into cvc::volren settings + apply them to
+// a freshly created VolRenNode. Warns (never throws) on configs that render blank.
+void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const cvc::volume &vol,
+                      const std::string &id, std::vector<std::string> *warnings) {
+  cvc::volren::volume_settings vs;
+  vs.shaded = v.shaded;
+  vs.unshaded = v.unshaded;
+  vs.distance_field = v.distance_field;
+  vs.tf_auto_domain = v.tf.auto_domain;
+  if (v.tf.has_window) {
+    vs.window_enabled = true;
+    vs.window_min = v.tf.window_min;
+    vs.window_max = v.tf.window_max;
+  }
+  for (const auto &p : v.tf.points)
+    vs.tf.add({p.value, p.color[0], p.color[1], p.color[2], p.color[3]});
+  for (const auto &s : v.isosurfaces) {
+    cvc::volren::isosurface iso;
+    iso.value = s.value;
+    iso.opacity = s.opacity;
+    iso.color = {s.color[0], s.color[1], s.color[2]};
+    iso.shininess = s.shininess;
+    vs.isosurfaces.push_back(iso);
+  }
+  if (v.isosurfaces.empty() && v.tf.empty())
+    warn(warnings, "ari: volren node '" + id +
+                       "' has no isosurfaces and an empty transfer_function; it renders blank");
+  else if (v.shaded && v.lights.empty() && v.ambient == 0.0f)
+    warn(warnings, "ari: volren node '" + id +
+                       "' is shaded with no lights and ambient 0; the surface reads as a black silhouette");
+  vn.setResolutionScale(v.resolution_scale);
+  vn.addVolume(vol, vs);
+  cvc::volren::render_settings rs = vn.renderConfig();
+  rs.ambient = v.ambient;
+  rs.steps = v.steps;
+  for (const auto &l : v.lights) {
+    cvc::volren::light lt;
+    lt.color = {l.color[0], l.color[1], l.color[2]};
+    lt.direction = {l.direction[0], l.direction[1], l.direction[2]};
+    rs.lights.push_back(lt);
+  }
+  vn.setRenderConfig(rs);
+  if (v.backend == "cuda")
+    vn.setBackend(cvc::volren::backend::cuda);
+  else if (v.backend == "automatic")
+    vn.setBackend(cvc::volren::backend::automatic);
+  else
+    vn.setBackend(cvc::volren::backend::cpu);
+}
+
+// Translate SceneVolSlice into cvc::volslice settings + apply. Warns on an empty TF.
+void configure_volslice(VolSliceNode &vn, const cvc::ariadne::SceneVolSlice &v,
+                        const cvc::volume &vol, const std::string &id,
+                        std::vector<std::string> *warnings) {
+  vn.setVolume(vol);
+  cvc::volslice::render_settings s;
+  s.slices.quality = v.quality;
+  s.slices.max_planes = v.max_planes;
+  s.slices.near_plane = v.near_plane;
+  s.filter = v.nearest_filter ? cvc::volslice::interpolation::nearest
+                              : cvc::volslice::interpolation::linear;
+  s.opacity_correction = v.opacity_correction;
+  s.tf_auto_domain = v.tf.auto_domain;
+  if (v.tf.has_window) {
+    s.window_min = v.tf.window_min;
+    s.window_max = v.tf.window_max;
+  }
+  for (const auto &p : v.tf.points)
+    s.tf.add({p.value, p.color[0], p.color[1], p.color[2], p.color[3]});
+  if (v.tf.empty())
+    warn(warnings, "ari: volslice node '" + id +
+                       "' has an empty transfer_function; it renders blank");
+  vn.setConfig(s);
 }
 
 // Realize one node under `parent` (null = a top-level node parented to the graphics
@@ -128,16 +209,53 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
       vnode->setAmbient(n.ambient);
       vnode->setDiffuse(n.diffuse);
     }
+  } else if (n.type == "volren") {
+    if (n.source_file.empty()) {
+      warn(warnings, "ari: scene node '" + n.id + "' (volren) has no source.file");
+      return;
+    }
+    std::shared_ptr<VolRenNode> vn;
+    try {
+      cvc::volume vol(sg.appContext(), n.source_file); // reads on construct; throws on a bad file
+      // No sg.addGraphics overload for VolRenNode: create under the parent (or root).
+      GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
+      vn = pr->addGraphicsChild<VolRenNode>(n.id);
+      if (!parent)
+        sg.registerGraphics(n.id, vn); // name-map parity + grid enclosure for a top-level node
+      configure_volren(*vn, n.volren, vol, n.id, warnings);
+    } catch (const std::exception &e) {
+      warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
+      return;
+    }
+    out.volren_ticks.push_back(vn); // needs a per-frame tick() (tick_scene)
+    node = vn;
+  } else if (n.type == "volslice") {
+    if (n.source_file.empty()) {
+      warn(warnings, "ari: scene node '" + n.id + "' (volslice) has no source.file");
+      return;
+    }
+    std::shared_ptr<VolSliceNode> vn;
+    try {
+      cvc::volume vol(sg.appContext(), n.source_file);
+      GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
+      vn = pr->addGraphicsChild<VolSliceNode>(n.id);
+      if (!parent)
+        sg.registerGraphics(n.id, vn);
+      configure_volslice(*vn, n.volslice, vol, n.id, warnings);
+    } catch (const std::exception &e) {
+      warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
+      return;
+    }
+    out.volslice_ticks.push_back(vn); // needs a per-frame tick() + depth sort (tick_scene)
+    node = vn;
   } else if (n.type == "group") {
     node = parent ? parent->createChild(n.id) // empty nested hierarchy node
                   : sg.addGraphics(n.id);
   } else {
-    // volren/volslice/light realization is a follow-up (§9): volren/volslice need a
-    // per-frame tick() host seam + transfer-function/isosurface params the spec does
-    // not carry yet; declare a light in the `lights:` array instead. The spec still
-    // parses and round-trips so the document stays valid.
+    // light node type is a follow-up (SceneNode lacks the light fields — declare
+    // lights in the `lights:` array). The spec still parses/round-trips.
     warn(warnings, "ari: scene node '" + n.id + "' type '" + n.type +
-                       "' not realized yet (geometry/group/volume; volren/volslice/light are a follow-up)");
+                       "' not realized yet (geometry/group/volume/volren/volslice; a 'light' node is a follow-up)");
     return;
   }
 
@@ -232,6 +350,26 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       warn(warnings, "ari: shadows requested but the renderer has no shadow target yet");
   }
   return out;
+}
+
+void tick_scene(RealizedScene &realized, vtkRenderer *renderer) {
+  for (const std::weak_ptr<VolRenNode> &w : realized.volren_ticks)
+    if (std::shared_ptr<VolRenNode> n = w.lock())
+      n->tick();
+
+  // Lock the slice nodes once: keep the shared_ptrs alive across the sort, and hand
+  // depthSortSliceProps the raw pointers it wants. The sort only matters (and only
+  // runs) when ≥2 slice nodes share the renderer.
+  std::vector<std::shared_ptr<VolSliceNode>> alive;
+  std::vector<VolSliceNode *> raw;
+  for (const std::weak_ptr<VolSliceNode> &w : realized.volslice_ticks)
+    if (std::shared_ptr<VolSliceNode> n = w.lock()) {
+      n->tick();
+      raw.push_back(n.get());
+      alive.push_back(std::move(n));
+    }
+  if (renderer && raw.size() >= 2)
+    VolSliceNode::depthSortSliceProps(renderer, raw);
 }
 
 } // namespace ariadne

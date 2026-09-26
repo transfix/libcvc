@@ -26,6 +26,8 @@
 #include <cvc/ariadne/bind.h>        // SceneVisibilityBinding
 #include <cvc/gl/StageLighting.h>    // RealizedScene owns any StageLighting rigs
 
+class vtkRenderer;
+
 namespace cvc {
 namespace ariadne {
 struct Scene;
@@ -33,19 +35,35 @@ struct SceneNode;
 } // namespace ariadne
 namespace gl {
 class SceneGraph;
+class VolRenNode;
+class VolSliceNode;
 
 namespace ariadne {
 
 // The result of realizing a Scene: the top-level node ids created, the visibility
 // bindings the host must poll each frame (empty when no node uses `visible: <path>`),
-// and any StageLighting rigs. The rigs are OWNED here because `~StageLighting`
-// removes the rig's lights from the scene — so the RealizedScene must outlive the
-// render loop (as the host already keeps it) or the lights vanish.
+// any StageLighting rigs, and the volume renderers that need per-frame ticking. The
+// rigs are OWNED here because `~StageLighting` removes the rig's lights from the scene
+// — so the RealizedScene must outlive the render loop (as the host already keeps it)
+// or the lights vanish. The volren/volslice tickers are held as weak_ptr — the
+// SceneGraph is the sole owner, so a torn-down node simply drops out of the tick
+// rather than dangling (consistent with the string-only visibility bindings).
 struct RealizedScene {
   std::vector<std::string> created;
   std::vector<cvc::ariadne::SceneVisibilityBinding> visibility;
   std::vector<std::unique_ptr<StageLighting>> rigs;
+  std::vector<std::weak_ptr<VolRenNode>> volren_ticks;
+  std::vector<std::weak_ptr<VolSliceNode>> volslice_ticks;
 };
+
+// Per-frame servicing for realized volren/volslice nodes (§9): each such node needs
+// a tick() every frame or it renders nothing, and multiple volslice nodes need a
+// back-to-front depth sort. Geometry/group/volume/light nodes need NO ticking. Call
+// this each frame from the host render loop, BEFORE SceneRenderer::render(), on the
+// owner/render thread, passing the scene's vtkRenderer (SceneRenderer::renderer()) —
+// the renderer is used only for the multi-slice depth sort. A no-op when there are no
+// volume renderers.
+void tick_scene(RealizedScene &realized, vtkRenderer *renderer);
 
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME
 // cvc::state prefix the widget Runtime was constructed with (typically

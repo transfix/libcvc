@@ -128,6 +128,9 @@ int main(int argc, char **argv) {
     // §9: mirror each bound `visible:` path into its node's `.visible` key (a no-op
     // unless the value changed). On this owner thread the node flips inline.
     ari::sync_scene_visibility(app, realized.visibility);
+    // §9: service any volren/volslice nodes (they render nothing without a per-frame
+    // tick + a multi-slice depth sort). A no-op for a scene without volume renderers.
+    cvc::gl::ariadne::tick_scene(realized, view.renderer());
     view.render();          // draws the scene + the Ariadne overlay
     std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120 Hz cap
   }

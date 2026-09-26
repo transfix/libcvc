@@ -476,6 +476,34 @@ void vec3(const YAML::Node &n, const char *key, float out[3]) {
       out[i] = static_cast<float>(v[i].as<double>());
 }
 
+// A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
+// auto_domain. Shared by volren + volslice (one TF vocabulary across renderers).
+SceneTransferFunction parse_scene_tf(const YAML::Node &t) {
+  SceneTransferFunction tf;
+  if (!t || !t.IsMap())
+    return tf;
+  tf.auto_domain = flag(t, "auto_domain", true);
+  const YAML::Node win = t["window"];
+  if (win && win.IsSequence() && win.size() >= 2) {
+    tf.has_window = true;
+    tf.auto_domain = false; // an explicit window fixes the domain
+    tf.window_min = static_cast<float>(win[0].as<double>());
+    tf.window_max = static_cast<float>(win[1].as<double>());
+  }
+  const YAML::Node pts = t["points"];
+  if (pts && pts.IsSequence())
+    for (const YAML::Node &p : pts) {
+      SceneTFPoint tp;
+      tp.value = static_cast<float>(num(p, "value", 0.0));
+      const YAML::Node c = p["color"];
+      if (c && c.IsSequence())
+        for (std::size_t i = 0; i < 4 && i < c.size(); ++i)
+          tp.color[i] = static_cast<float>(c[i].as<double>());
+      tf.points.push_back(tp);
+    }
+  return tf;
+}
+
 // A scene node (§9.3), recursive over children.
 SceneNode parse_scene_node(const YAML::Node &n) {
   SceneNode sn;
@@ -523,6 +551,49 @@ SceneNode parse_scene_node(const YAML::Node &n) {
       else
         sn.visible_bind = v; // a state path (or, later, an expression); default true
     }
+  }
+  const YAML::Node vr = n["volren"];
+  if (vr && vr.IsMap()) {
+    sn.has_volren = true;
+    sn.volren.shaded = flag(vr, "shaded", true);
+    sn.volren.unshaded = flag(vr, "unshaded", false);
+    sn.volren.distance_field = flag(vr, "distance_field", false);
+    sn.volren.steps = static_cast<int>(num(vr, "steps", 512));
+    sn.volren.ambient = static_cast<float>(num(vr, "ambient", 0.0));
+    sn.volren.resolution_scale = static_cast<float>(num(vr, "resolution_scale", 0.5));
+    sn.volren.backend = str(vr, "backend", "cpu");
+    sn.volren.tf = parse_scene_tf(vr["transfer_function"]);
+    const YAML::Node iso = vr["isosurfaces"];
+    if (iso && iso.IsSequence())
+      for (const YAML::Node &s : iso) {
+        SceneIsosurface si;
+        si.value = static_cast<float>(num(s, "value", 0.0));
+        si.opacity = static_cast<float>(num(s, "opacity", 1.0));
+        const YAML::Node c = s["color"];
+        if (c && c.IsSequence() && c.size() >= 3)
+          for (int i = 0; i < 3; ++i)
+            si.color[i] = static_cast<float>(c[i].as<double>());
+        si.shininess = static_cast<float>(num(s, "shininess", 10.0));
+        sn.volren.isosurfaces.push_back(si);
+      }
+    const YAML::Node lts = vr["lights"];
+    if (lts && lts.IsSequence())
+      for (const YAML::Node &l : lts) {
+        SceneVolRenLight vl;
+        vec3(l, "color", vl.color);
+        vec3(l, "direction", vl.direction);
+        sn.volren.lights.push_back(vl);
+      }
+  }
+  const YAML::Node vsl = n["volslice"];
+  if (vsl && vsl.IsMap()) {
+    sn.has_volslice = true;
+    sn.volslice.quality = static_cast<float>(num(vsl, "quality", 0.5));
+    sn.volslice.max_planes = static_cast<int>(num(vsl, "max_planes", 1000));
+    sn.volslice.near_plane = static_cast<float>(num(vsl, "near_plane", 0.0));
+    sn.volslice.nearest_filter = (str(vsl, "filter", "linear") == "nearest");
+    sn.volslice.opacity_correction = flag(vsl, "opacity_correction", false);
+    sn.volslice.tf = parse_scene_tf(vsl["transfer_function"]);
   }
   const YAML::Node kids = n["children"];
   if (kids && kids.IsSequence())
