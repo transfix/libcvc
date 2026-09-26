@@ -1,4 +1,4 @@
-# Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.13, for iteration)
+# Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.14, for iteration)
 
 Status: **draft for discussion, no code committed.** Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -57,6 +57,13 @@ those as Ariadne / the `ari` loader.)*
 > **v0.5** resolves the §9.5 details: overrides lower to **duplicated masked branches** (robust,
 > no engine change), **last-wins** precedence with `mode: replace|merge`, **dynamic masks** via
 > `state_exec` expressions, and **dirty-propagated** incremental regen.
+>
+> **v0.14** extends sizing (§3.0.3b): **percentage sizes** (`"50%"` of the parent rect, Ari computes px),
+> **fixed-or-percent tracks** (`col_widths:`/`row_heights:`), **resizable splitters** (`layout.resizable`,
+> default off — native `ImGuiTableFlags_Resizable` for columns, a manual splitter for rows, sizes persisted
+> to `tree.<id>`), **cell borders** (`layout.borders` → `ImGuiTableFlags_Borders*` + `TableBorderLight/Strong`
+> colors + drag highlight), and **border widths** (`frame.border` → the `*BorderSize` style vars). Track
+> sizes may themselves be `state_exec` expressions.
 >
 > **v0.13** adds **document provenance** (§3.1a — a `meta:` block with a **mandatory `min_libcvc`** semver
 > load gate that fires first; flags the stale `CVC_VERSION_STRING` bug to fix), a **formal `.ari` schema +
@@ -359,6 +366,78 @@ an auto column has no finite region and collapses to content width). A mode-B `c
 fine inside a mode-A table cell (the cell is a hard region boundary). `size.hint` rides the widget's
 state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for (A).
 
+#### 3.0.3b Percentage units, fixed/percent tracks, resizable splitters, cell borders
+
+Four related sizing knobs — all realized on the same table engine (§3.0.3a) whose flags this build ships
+(`IMGUI_HAS_TABLE`, confirmed).
+
+**Percentage of the parent.** Any `size.hint`/`min`/`max` value may be a **percentage string** (or the
+loader also accepts a `0.0–1.0` fraction), resolved each frame against the parent's content rect
+(`GetContentRegionAvail`, or the root's menu-aware `WorkSize` for a root child). So a window can be *half the
+parent wide, full height* without hardcoded pixels — Ari computes the absolute placement:
+
+```yaml
+- window: Inspector
+  size: { hint: ["50%", "100%"], min: [280, 0] }   # 50% of parent width, full height, ≥280px floor
+```
+
+Absolute px (`hint: [300, 0]`) and mixed (`["50%", 200]`) both stay valid; a `%` value maps to a
+`WidthStretch` weight when the widget sits in a table cell (proportional is *exactly* a percentage), or to a
+computed `SetNextItemWidth`/`SetNextWindowSize` pixel value otherwise.
+
+**Fixed *or* percent tracks — `col_widths:` / `row_heights:`.** A `grid`/`horizontal`/`vertical`/`form`
+layout sizes its tracks as **fixed units (px)** *or* **percentages/weights**, per track:
+
+```yaml
+layout:
+  kind: grid
+  col_widths:  [200, "auto", "50%"]   # px → WidthFixed ; auto → WidthAuto (fit) ; % → WidthStretch weight
+  row_heights: ["30%", "70%"]         # rows: fixed px or % (see the row caveat below)
+```
+
+`px` → `TableSetupColumn(WidthFixed, px)`; `%`/weight → `WidthStretch(weight)` (the existing `col_stretch:`
+is the pure-weight shorthand); `auto` → `WidthAuto` (fit content). Percentages within an axis are normalized
+to the available track space (after fixed/auto tracks are subtracted).
+
+**Resizable splitters — `layout.resizable` (default off).** `layout: { …, resizable: true }` lets the user
+**drag the seam between tracks** to change their relative sizes. Columns are native — `ImGuiTableFlags_Resizable`
+gives drag-resize + a hover cursor **for free**. **Rows are not** a native table feature, so a resizable
+*row* seam is a **manual splitter** (an `InvisibleButton` seam + `IsItemActive` drag adjusting the shared
+track sizes — the `SplitterBehavior` idiom / the same `InvisibleButton`-drag the nav minimap already uses).
+Either way the dragged track sizes are **persisted to `tree.<id>`** (runtime state, like window geometry,
+§11.4) so they survive a reconcile/reload (id-keyed, §11.5.3 rule 5). **Default is off** — a fixed tiled layout doesn't wobble
+unless the author opts in.
+
+**Cell boundaries + drag highlight — `layout.borders`.** Show the seams between cells with a color and
+highlight the one being dragged:
+
+```yaml
+layout:
+  kind: grid
+  resizable: true
+  borders:
+    show:      inner        # none (default) | inner | outer | all  → ImGuiTableFlags_BordersInner*/Outer*
+    color:     [0.3, 0.3, 0.35, 1.0]   # → ImGuiCol_TableBorderLight (inner) / TableBorderStrong (outer)
+    highlight: [0.4, 0.7, 1.0, 1.0]    # the seam being dragged → ImGuiCol_SeparatorHovered/Active
+```
+
+`show:` maps to the `ImGuiTableFlags_BordersInnerV|H`/`BordersOuter*` flags; `color` pushes
+`ImGuiCol_TableBorderLight`/`TableBorderStrong`; `highlight` colors the active resize handle
+(`SeparatorHovered`/`Active`, and the manual row splitter). **Honest caveat:** native table borders are
+**1px**; a *thicker* or fancier cell boundary (a gradient, rounded seam) is not a table style var — it's a
+`custom` drawlist pass over the cell rects (a v1.x follow-up), so `border_width > 1` on a table falls back to
+that path.
+
+**Border widths — `border:`.** A widget/window border thickness maps to the ImGui border style vars:
+`frame: { border: 1 }` → `ImGuiStyleVar_WindowBorderSize`; a `group`'s child region → `ChildBorderSize`; a
+framed leaf → `FrameBorderSize`. `border: 0` (default for most) is borderless. (This is the *widget* border;
+`layout.borders` above is the *inter-cell* seam — distinct knobs.)
+
+All of these are pure loader/`ImGui*` decisions computed from the parent rect and the table flags — **no new
+`state_exec`, and the percentages/track sizes may themselves be `state_exec` expressions** (so a layout can
+re-proportion live, e.g. `col_widths: [{$: ui.split}, "auto"]`), evaluated in the read-only per-frame lane
+(§4.1) like any other computed value.
+
 #### 3.0.4 Root children unify — placement, not buckets
 
 The four root lists collapse to one ordered `root:` of widgets; what used to pick a bucket is
@@ -655,7 +734,10 @@ loader *places into* that rect.
 | `stack` | **Tabbed app** | Stock `BeginTabBar` (tabs *are* in this build), one tab per child |
 
 Default is `free`, so **the desktop metaphor is what you get by writing nothing** — a main menu + draggable
-sub-windows, exactly today's demos.
+sub-windows, exactly today's demos. A **tiled** `root.layout` takes the full §3.0.3b sizing vocabulary —
+`col_widths:`/`row_heights:` as fixed px or percentages, `resizable: true` for user-draggable pane seams
+(native for columns, a splitter for rows; default off), and `borders:` to render + highlight the pane seams
+— so a tiled Ari application can be a resizable, bordered dashboard, not just a static grid.
 
 **Docking is NOT available — tiling is loader-computed (confirmed).** The packaged Dear ImGui is stock
 master **1.92.9, not the docking branch** — all in-tree `deps/imgui.h` define `IMGUI_HAS_TABLE`/`_TEXTURES`
@@ -2794,8 +2876,11 @@ recursive grammar (`children:` is `array<#/$defs/widget>`). It closes every high
 leaf widgets §2 + `menubar`/`menu`/`overlay`/`hud`/`group`/`panel`/`view_embed`/`tf_editor`/`scene_panel`/
 `stage_lighting`/`tabs`/`spacer`/`custom`), `layout.kind`, `size.policy` (Qt names), `frame.chrome` tokens
 (incl. the forward-compat `dock`), `frame.placement`, `corner`, node `type` (§9.3), `source` kind (§9.4),
-`camera.mode`, TF `axes[].kind`/`primitives[].kind` (§10.2), `root.layout.kind` (§3.9); cardinalities
-(`region`=4, `margins`=4, `pos`/`at`/`span`=2, tag mask `maxItems: 32`); a SemVer pattern on
+`camera.mode`, TF `axes[].kind`/`primitives[].kind` (§10.2), `root.layout.kind` (§3.9),
+`layout.borders.show` (§3.0.3b); cardinalities (`region`=4, `margins`=4, `pos`/`at`/`span`=2, colors=4, tag
+mask `maxItems: 32`); the §3.0.3b sizing fields (`layout.col_widths`/`row_heights` — arrays of
+number|`"N%"`|`auto`; `layout.resizable` bool; `layout.borders`; `frame.border`; and `size.hint`/`min`/`max`
+values as number **or** a `"N%"` percentage string **or** an `expr`); a SemVer pattern on
 `meta.min_libcvc`; and the leaf discriminated union (`slider_int` ⇒ `lo`/`hi`; `combo` ⇒ `options`|`bind`)
 via `allOf`/`if`/`then`. Every *invented* token (`layuot: vetical`, `type: menubarr`, `drawstyle: wirefame`)
 becomes a precise pointer-anchored error at load instead of a silently-ignored key.
