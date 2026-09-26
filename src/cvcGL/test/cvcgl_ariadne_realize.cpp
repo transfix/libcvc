@@ -309,6 +309,8 @@ int main() {
     SceneNode b;
     b.id = "b1";
     b.type = "beacon";
+    b.has_transform = true;
+    b.position[0] = 100; // the custom node's own (local) transform
     b.props.kind = Value::Kind::Map; // as the loader would have captured `radius: 2.5`
     {
       Value radius;
@@ -316,6 +318,15 @@ int main() {
       radius.scalar = "2.5";
       b.props.entries.emplace_back("radius", radius);
     }
+    // A built-in child under the custom node — proves the shared tail (transform +
+    // visibility + children) runs on a custom node just like a built-in one.
+    SceneNode child;
+    child.id = "truck";
+    child.type = "geometry";
+    child.source_file = "x.bunny";
+    child.has_transform = true;
+    child.position[0] = 5; // local to the beacon -> world 105
+    b.children.push_back(child);
     scene.nodes.push_back(b);
 
     const int before = g_custom_ticks;
@@ -329,6 +340,17 @@ int main() {
     chk(realized.custom_ticks.size() == 1, "custom realizer registered a per-frame tick");
     cvc::gl::ariadne::tick_scene(realized, view.renderer());
     chk(g_custom_ticks == before + 1, "tick_scene runs the custom per-frame tick");
+    // The shared tail (transform + children) runs on a custom node like a built-in.
+    auto beacon = sg.getGraphics("b1");
+    auto truck = beacon ? beacon->findChildByName("truck") : nullptr;
+    chk(truck != nullptr, "a built-in child nests UNDER a custom node type");
+    if (truck) {
+      const double origin[3] = {0, 0, 0};
+      double world[3] = {0, 0, 0};
+      truck->localToWorld(origin, world);
+      chk(approx(world[0], 105),
+          "shared tail composes transforms: custom node [100] ∘ child local [5] -> world [105]");
+    }
   }
 
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");

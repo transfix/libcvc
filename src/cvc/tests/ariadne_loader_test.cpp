@@ -817,6 +817,28 @@ scene:
   EXPECT_DOUBLE_EQ(color->items[1].as_double(), 0.4);
 }
 
+TEST(AriadneScene, PropsAccessorsMatchBuiltinSemantics) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: g
+      type: gadget
+      good: 2.5
+      bad: 10px
+      caption: ""
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const Value &p = r.scene.nodes[0].props;
+  EXPECT_DOUBLE_EQ(p.num("good", -1.0), 2.5);
+  EXPECT_DOUBLE_EQ(p.num("bad", -1.0), -1.0);  // "10px" is not a whole number -> default (strict, like num())
+  EXPECT_DOUBLE_EQ(p.num("missing", 7.0), 7.0); // absent -> default
+  EXPECT_EQ(p.str("caption", "fallback"), ""); // an explicit "" overrides the default (like str())
+  EXPECT_EQ(p.str("missing", "fallback"), "fallback"); // absent -> default
+}
+
 TEST(AriadneScene, BuiltinNodeHasEmptyProps) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

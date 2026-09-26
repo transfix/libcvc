@@ -14,6 +14,8 @@
 // The accessors mirror the loader's own str()/num()/flag() helpers so extension code
 // reads config the same way the built-ins do.
 
+#include <locale>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,17 +40,23 @@ struct Value {
   }
 
   // --- this value as a scalar --------------------------------------------------
+  // Mirrors the loader's str(): a present scalar (even "") is returned verbatim, so an
+  // explicit empty string can override a non-empty default; a non-scalar yields dflt.
   std::string as_string(const std::string &dflt = std::string()) const {
-    return is_scalar() && !scalar.empty() ? scalar : dflt;
+    return is_scalar() ? scalar : dflt;
   }
+  // Mirrors the loader's num() (yaml-cpp's strict as<double>()): whole-token,
+  // locale-independent parse. Trailing garbage ("10px"), a comma decimal, or a
+  // non-number yields dflt — NOT a truncated value, and unaffected by the C locale.
   double as_double(double dflt = 0.0) const {
     if (!is_scalar())
       return dflt;
-    try {
-      return std::stod(scalar);
-    } catch (...) {
-      return dflt;
-    }
+    std::istringstream ss(scalar);
+    ss.imbue(std::locale::classic());
+    double out = 0.0;
+    if ((ss >> out) && (ss >> std::ws).eof())
+      return out; // the entire scalar was a number
+    return dflt;
   }
   bool as_bool(bool dflt = false) const {
     if (!is_scalar())

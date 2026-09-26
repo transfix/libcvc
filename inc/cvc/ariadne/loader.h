@@ -103,7 +103,7 @@ bool version_at_least(const std::string &have, const std::string &need);
 // --- extensibility: custom top-level document blocks -------------------------
 //
 // A parser for a CUSTOM top-level block — a document key that is NOT a built-in
-// (built-ins: meta/menubar/windows/overlays/panels/root/children/scene). When a
+// (built-ins: meta/menubar/windows/overlays/root/children/scene). When a
 // loaded document contains a registered key, `parse` is called with that block's
 // content as a neutral Value and the LoadResult being built, so it can stash parsed
 // data into `LoadResult::extras` (or append to `root`/`scene`) and push notes into
