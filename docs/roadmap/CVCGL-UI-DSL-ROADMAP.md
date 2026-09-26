@@ -3232,12 +3232,18 @@ strings — no yaml-cpp, `inc/cvc/ariadne/value.h`).
   exposes no `Backend` and no toolkit, so a custom widget works on **every** backend (ImGui, terminal,
   wasm) with **no `Backend` ABI change** — the chosen design over a per-widget backend virtual. An
   unregistered type draws a `[type?]` placeholder.
-- **Deferred:** a raw-backend *novel primitive* (a color wheel / GLSL canvas via raw ImGui) — that needs
-  one generic non-pure `Backend::custom` escape virtual (backends inherit a no-op default, so it is not a
-  forced edit) plus a per-backend draw registry, and only the ImGui backend would render it. The
-  compositional path above covers composite widgets; the escape virtual is the follow-up for genuinely new
-  primitives. Also deferred: per-type JSON-Schema fragments (the base schema is already permissive, so
-  custom types validate today; a fragment API would tighten field validation).
+- **Novel-primitive custom widgets (backend escape).** For a widget the compositional path can't express
+  (a colour wheel, a GLSL canvas), `Backend::custom_widget(type, current, w)` is a generic **non-pure**
+  virtual (default `{handled:false}`, so it is NOT a forced override — a backend that doesn't know the type
+  just inherits the no-op). `emit()`'s `Kind::Custom` case tries the compositional fn first, else the
+  backend escape, else a placeholder; the core still owns the `cvc::state` read/write (the backend gets the
+  value as a string and returns a `CustomEdit{handled,changed,committed,value}`, committed = the write
+  edge). `cvc::gl::ImGuiBackend::register_widget("type", drawFn)` registers a raw-ImGui draw fn (the fn,
+  living in the host TU, does the ImGui work); `custom_widget` dispatches to it. So a novel primitive is
+  ImGui-only (a terminal backend inherits the no-op and the core placeholders it) — the deliberate trade
+  vs. the backend-neutral compositional path.
+- **Deferred:** per-type JSON-Schema fragments (the base schema is already permissive, so custom types
+  validate today; a fragment API would tighten field validation).
 
 **The `customs:` gate — fail fast on a missing custom.** A document pre-declares the custom types it uses
 in a top-level `customs:` block, so a load on a system lacking one is caught before rendering (like
@@ -3275,7 +3281,8 @@ concept beyond the two §4.1 state_exec lanes (per-frame read + effectful action
 Verified end-to-end: loader gtests for props capture + a custom block + a custom widget preserved as
 `Kind::Custom` (with children) + the `customs:` gate + the `init:` block captured-not-run; run_init gtests
 (a script scoped to the prefix writes `<prefix>.key`, a syntax error is reported not thrown, an empty
-script is a no-op); the `customs:` gate (required-widget miss fails the load, non-required
+script is a no-op); the novel-primitive escape (a backend `custom_widget` binds/commits state, an
+unhandled type placeholders, an uncommitted edit doesn't write); the `customs:` gate (required-widget miss fails the load, non-required
 warns, registered satisfies, node deferred); runtime gtests that a registered widget composes primitives,
 its structure depends on state, and it fires events (+ an unregistered type draws a placeholder); and an
 offscreen cvcGL test that registers a custom `beacon` node type — its realizer builds a `GraphicsNode`,

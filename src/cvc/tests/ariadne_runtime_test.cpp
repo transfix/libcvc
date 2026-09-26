@@ -102,6 +102,11 @@ struct MockBackend : Backend {
     rec(std::string("combo:") + l + "=" + std::to_string(idx));
     return {};
   }
+  CustomEdit custom_ret{}; // programmable return for the escape path
+  CustomEdit custom_widget(const char *type, const std::string &current, const Widget &) override {
+    rec(std::string("custom_widget:") + type + "=" + current);
+    return custom_ret;
+  }
 };
 
 } // namespace
@@ -326,4 +331,56 @@ TEST(AriadneInit, SyntaxErrorReportedNotThrown) {
 TEST(AriadneInit, EmptyScriptIsNoop) {
   cvc::app app;
   EXPECT_TRUE(run_init(app, "ui", "", nullptr)); // no script -> success, nothing written
+}
+
+// --- custom widget: the backend novel-primitive escape (Backend::custom_widget) ---
+
+TEST(AriadneRuntime, CustomWidgetBackendEscapeBindsState) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mock;
+  rt.set_backend(&mock);
+  // No compositional fn for "colorpick" -> emit routes to the backend escape. The mock
+  // "handles" it and commits a new value; the core writes it to the bound state key.
+  cvc::state::instance(app)("c").value(std::string("red"));
+  mock.custom_ret = CustomEdit{/*handled*/ true, /*changed*/ true, /*committed*/ true, "blue"};
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "colorpick";
+  c.bind = "c";
+  rt.set_root(group({c}));
+  rt.render();
+  EXPECT_TRUE(mock.saw("custom_widget:colorpick=red")); // current value handed in
+  EXPECT_EQ(cvc::state::instance(app)("c").value(), "blue"); // committed value written back
+}
+
+TEST(AriadneRuntime, CustomWidgetUnhandledByBackendDrawsPlaceholder) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mock;
+  rt.set_backend(&mock);
+  mock.custom_ret = CustomEdit{}; // handled == false
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "unknown_prim";
+  rt.set_root(group({c}));
+  rt.render();
+  EXPECT_TRUE(mock.saw("custom_widget:unknown_prim=")); // backend was asked
+  EXPECT_TRUE(mock.saw("text_line:[unknown_prim?]"));   // not handled -> placeholder
+}
+
+TEST(AriadneRuntime, CustomWidgetUncommittedEscapeDoesNotWrite) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mock;
+  rt.set_backend(&mock);
+  cvc::state::instance(app)("c2").value(std::string("keep"));
+  mock.custom_ret = CustomEdit{true, true, false, "dropped"}; // handled + changed, NOT committed
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "colorpick";
+  c.bind = "c2";
+  rt.set_root(group({c}));
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("c2").value(), "keep"); // uncommitted -> no write
 }

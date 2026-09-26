@@ -52,6 +52,17 @@ struct IndexEdit {
   bool committed = false;
   int index = -1;
 };
+// The result of a backend-drawn CUSTOM widget (a novel primitive the compositional
+// path can't express — §16.1b). `handled` is the backend's signal that it actually
+// drew this custom_type (false = it doesn't know it, so the core shows a placeholder).
+// The value channel is a STRING (custom widgets bind arbitrary types via cvc::state's
+// string channel, like combo stores the option text); `committed` is the write edge.
+struct CustomEdit {
+  bool handled = false;
+  bool changed = false;
+  bool committed = false;
+  std::string value;
+};
 
 // What a surface can and cannot do. The core (and, later, the loader's
 // `requires:` preflight, §16.3/§7.6) reads this to fail-safe or substitute —
@@ -127,6 +138,23 @@ public:
                                    double hi, const char *fmt) = 0;
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
+
+  // ---- custom widgets: the novel-primitive escape (§16.1b) ----------------
+  // Draw a registered custom widget the compositional path can't express (a colour
+  // wheel, a GLSL canvas, …). `type` is the widget's custom_type, `current` its bound
+  // value as a string (empty when unbound), and `w` the full Widget (props/label). A
+  // backend that knows `type` draws it and returns {handled:true, …}; the DEFAULT is a
+  // no-op {handled:false}, so a backend need NOT implement this (it is not a forced
+  // override) — the core then shows a placeholder. The core owns the state read/write;
+  // the backend only draws value-in and reports the edit. Most custom widgets should
+  // use the compositional register_widget_type instead — this is for genuinely new
+  // primitives, and only a backend that supports them renders them.
+  virtual CustomEdit custom_widget(const char *type, const std::string &current, const Widget &w) {
+    (void)type;
+    (void)current;
+    (void)w;
+    return {};
+  }
 };
 
 } // namespace ariadne

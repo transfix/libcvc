@@ -305,19 +305,27 @@ void Runtime::Impl::emit(const Widget &w) {
     break;
 
   case Kind::Custom: {
-    // A registered custom widget type composes built-in widgets through a context
-    // that reuses the core's binding; an unregistered type shows a placeholder. The
-    // fn drives only built-ins, so a custom widget renders on every backend.
-    const WidgetEmitFn fn = lookup_widget(w.custom_type);
-    if (fn) {
+    // Three ways a custom widget renders, in priority order:
+    //  1. a COMPOSITIONAL fn (register_widget_type) — composes built-ins through a
+    //     context that reuses the core's binding; works on every backend;
+    //  2. else the BACKEND's novel-primitive escape (custom_widget) — the core reads
+    //     the bound value, hands it in, and writes back on the committed edge;
+    //  3. else a placeholder (neither knows this type).
+    if (const WidgetEmitFn fn = lookup_widget(w.custom_type)) {
       WidgetEmitContext ctx;
       ctx.emit = [this](const Widget &child) { emit(child); };
       ctx.read = [this](const std::string &bind) { return read_string(app, resolve(bind)); };
       ctx.fire = [this](const std::string &event) { enqueue(event); };
       fn(w, ctx);
-    } else {
-      b.text_line(("[" + w.custom_type + "?]").c_str()); // unregistered: visible, not silent
+      break;
     }
+    const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
+    const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
+    const CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
+    if (!e.handled)
+      b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
+    else if (e.committed && !w.bind.empty())
+      write<std::string>(app, path, e.value);
     break;
   }
   }

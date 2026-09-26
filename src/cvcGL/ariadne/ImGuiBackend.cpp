@@ -377,6 +377,23 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
   return e;
 }
 
+void ImGuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+  if (draw)
+    m_customWidgets[std::move(custom_type)] = std::move(draw);
+}
+
+ariadne::CustomEdit ImGuiBackend::custom_widget(const char *type, const std::string &current,
+                                                const cvc::ariadne::Widget &w) {
+  // Dispatch to the host's registered raw-ImGui draw fn; unknown type -> not handled,
+  // so the core draws a placeholder. The draw fn (in the host TU) does the ImGui work.
+  const auto it = m_customWidgets.find(type ? type : "");
+  if (it == m_customWidgets.end() || !it->second)
+    return {}; // handled == false
+  cvc::ariadne::CustomEdit e = it->second(current, w);
+  e.handled = true; // it was drawn by a registered handler, regardless of edit state
+  return e;
+}
+
 void ImGuiBackend::install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay) {
   cvc::ariadne::Runtime *r = &rt;
   overlay.setDrawCallback([r] { r->render(); });

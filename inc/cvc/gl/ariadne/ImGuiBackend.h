@@ -13,7 +13,9 @@
 // It degrades to safe no-ops when libcvc is built without CVC_ENABLE_IMGUI
 // (every draw becomes an inert stub, mirroring the cvc::gl::ui:: layer).
 
+#include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <cvc/ariadne/backend.h>
@@ -59,6 +61,18 @@ public:
   cvc::ariadne::IndexEdit combo(const char *label, int current_index,
                                 const std::vector<std::string> &options) override;
 
+  // Novel-primitive custom widgets (§16.1b): a host registers a raw-ImGui draw fn for
+  // a custom_type; custom_widget() dispatches to it. The draw fn gets the bound value
+  // as a string (value-in) and the Widget (props/label) and returns the edit; the
+  // Ariadne core owns the cvc::state read/write. An unregistered type -> {handled:
+  // false} -> the core draws a placeholder. Use this for widgets the compositional
+  // register_widget_type can't express (a colour wheel, a shader canvas).
+  using CustomDrawFn =
+      std::function<cvc::ariadne::CustomEdit(const std::string &current, const cvc::ariadne::Widget &w)>;
+  void register_widget(std::string custom_type, CustomDrawFn draw);
+  cvc::ariadne::CustomEdit custom_widget(const char *type, const std::string &current,
+                                         const cvc::ariadne::Widget &w) override;
+
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
   // VTK drives Runtime::render() once per rendered frame. Call after
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
@@ -83,6 +97,9 @@ private:
     int color_pushes = 0;             // table border-colour style pushes to pop
   };
   std::vector<GridState> m_grids;
+
+  // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
+  std::unordered_map<std::string, CustomDrawFn> m_customWidgets;
 };
 
 } // namespace gl
