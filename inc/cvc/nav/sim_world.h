@@ -197,6 +197,12 @@ public:
   const int *agent_planes() const { return map_id_.data(); }
   long tick() const { return gstep_; }
   int field_version() const { return field_ver_; }
+  // Per-belief-plane version (bumps when plane m's belief/occupancy raster changes on a sense tick)
+  // — lets a realtime raster consumer gate GPU re-uploads to only the planes that actually changed.
+  // Out-of-range m returns -1.
+  int plane_version(int m) const {
+    return (m >= 0 && m < static_cast<int>(version_.size())) ? version_[m] : -1;
+  }
 
   // Renderer snapshot into caller buffers (any may be null): pose in WORLD
   // metres, heading (rad), speed (world m/s), FSM mode (0 seek / 1 wall),

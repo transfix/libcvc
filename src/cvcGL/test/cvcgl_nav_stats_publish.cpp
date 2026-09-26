@@ -5,11 +5,13 @@
 #undef NDEBUG
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/nav_stats_publish.h>
 #include <cvc/gl/state_publisher.h>
+#include <cvc/volume/volume.h>
 #include <string>
 
 static int failures = 0;
@@ -124,6 +126,51 @@ int main() {
   ck(st("anch.nav_stats.formation.1.form_arrival").value<int>() == 0,
      "anchor-not-arrived -> form_arrival 0");
   ck(st("anch.nav_stats.formation.1.followers").value<int>() == 1, "anch convoy1 one follower");
+
+  // ── raster bridge: publish_nav_rasters wraps planes into the data() lane + version-gates ──
+  const int rows = 2, cols = 2, planes = 2;
+  std::uint8_t truthR[4] = {0, 1, 0, 0};
+  std::uint8_t beliefR[8] = {10, 20, 30, 40, /*plane1*/ 50, 60, 70, 80};
+  std::uint8_t everseenR[8] = {1, 1, 1, 1, 1, 1, 0, 0};
+  std::uint8_t lastvisR[8] = {1, 0, 0, 0, 0, 0, 0, 1};
+  int versions[2] = {0, 5};
+  cvc::gl::nav_raster_dims rd;
+  rd.rows = rows;
+  rd.cols = cols;
+  rd.planes = planes;
+  rd.min_x = -10;
+  rd.min_y = -10;
+  rd.max_x = 10;
+  rd.max_y = 10;
+  cvc::gl::nav_raster_pub_state rst;
+  cvc::gl::publish_nav_rasters(app, pub, "rast", rd, truthR, beliefR, everseenR, lastvisR, versions,
+                               rst);
+  pub.flush();
+  ck(st("rast.nav_stats.rasters.dims.rows").value<int>() == 2, "raster dims rows");
+  ck(st("rast.nav_stats.rasters.dims.planes").value<int>() == 2, "raster dims planes");
+  ck(st("rast.nav_stats.rasters.truth.version").value<int>() == 0, "truth version 0");
+  ck(st("rast.nav_stats.rasters.plane.1.version").value<int>() == 5, "plane1 version 5");
+  ck(st("rast.nav_stats.rasters.plane.0.belief.data").isData<cvc::volume>(),
+     "plane0 belief is a cvc::volume handle");
+  {
+    const cvc::volume vol = st("rast.nav_stats.rasters.plane.0.belief.data").data<cvc::volume>();
+    ck(vol.XDim() == 2 && vol.YDim() == 2 && vol.ZDim() == 1, "plane0 belief z=1 dims");
+    // (i=col, j=row): row-major raster [10,20 / 30,40] -> vol(0,0,0)=10, vol(1,0,0)=20,
+    // vol(0,1,0)=30.
+    ck((int)vol(0, 0, 0) == 10 && (int)vol(1, 0, 0) == 20 && (int)vol(0, 1, 0) == 30,
+       "plane0 belief voxels round-trip");
+  }
+  ck(st("rast.nav_stats.rasters.truth.data").isData<cvc::volume>(),
+     "truth is a cvc::volume handle");
+
+  // version gate: plane 0 unchanged (v 0), plane 1 bumped (v 6) -> only plane 1 re-published.
+  int versions2[2] = {0, 6};
+  cvc::gl::publish_nav_rasters(app, pub, "rast", rd, truthR, beliefR, everseenR, lastvisR,
+                               versions2, rst);
+  pub.flush();
+  ck(st("rast.nav_stats.rasters.plane.1.version").value<int>() == 6, "plane1 version bumped to 6");
+  ck(st("rast.nav_stats.rasters.plane.0.version").value<int>() == 0,
+     "plane0 version still 0 (gated/skipped)");
 
   std::printf(failures ? "cvcgl_nav_stats_publish: %d FAILURES\n" : "cvcgl_nav_stats_publish: OK\n",
               failures);

@@ -7,9 +7,13 @@
 
 // nav_stats_publish.cpp — see inc/cvc/gl/nav_stats_publish.h.
 
+#include <boost/any.hpp>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <cvc/gl/nav_stats_publish.h>
+#include <cvc/volume/volume.h>
 #include <map>
 #include <string>
 
@@ -128,6 +132,65 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     pub.publish(vp + ".formation_parent", i2s(v.formation_parent));
     pub.publish(vp + ".slot_error_mean_m", d2s(v.slot_error_mean_m));
     pub.publish(vp + ".formation_arrived", b2s(v.formation_arrived));
+  }
+}
+
+namespace {
+// Wrap a [rows*cols] uint8 plane as a z=1 cvc::volume over the world bbox. The raw-pointer ctor
+// deep-copies the bytes once (voxels memcpy), so `data` may be reused/freed after; the stored value
+// then shallow-shares that fresh buffer (an immutable snapshot — never mutated after publish).
+cvc::volume wrap_plane(cvc::app &app, const std::uint8_t *data, const nav_raster_dims &d) {
+  return cvc::volume(app, data, cvc::dimension(d.cols, d.rows, 1), cvc::UChar,
+                     cvc::bounding_box(d.min_x, d.min_y, 0.0, d.max_x, d.max_y, 1.0));
+}
+} // namespace
+
+void publish_nav_rasters(cvc::app &app, cvc::gl::state_publisher &pub,
+                         const std::string &scenePrefix, const nav_raster_dims &dims,
+                         const std::uint8_t *truth, const std::uint8_t *belief,
+                         const std::uint8_t *everseen, const std::uint8_t *lastvis,
+                         const int *versions, nav_raster_pub_state &st) {
+  if (dims.rows <= 0 || dims.cols <= 0 || dims.planes <= 0)
+    return;
+  const std::string rroot = navStatsStatePath(scenePrefix) + ".rasters";
+  const long cells = static_cast<long>(dims.rows) * dims.cols;
+  cvc::state &root = cvc::state::instance(app);
+
+  // dims (value lane; cheap, re-published each call so a late subscriber still learns the
+  // geometry).
+  pub.publish(rroot + ".dims.rows", i2s(dims.rows));
+  pub.publish(rroot + ".dims.cols", i2s(dims.cols));
+  pub.publish(rroot + ".dims.planes", i2s(dims.planes));
+  pub.publish(rroot + ".dims.min_x", d2s(dims.min_x));
+  pub.publish(rroot + ".dims.min_y", d2s(dims.min_y));
+  pub.publish(rroot + ".dims.max_x", d2s(dims.max_x));
+  pub.publish(rroot + ".dims.max_y", d2s(dims.max_y));
+
+  // truth is static — publish its handle once (data() lane), then bump the version to 0.
+  if (st.truth_version < 0 && truth) {
+    root(rroot + ".truth.data").data(boost::any(wrap_plane(app, truth, dims)));
+    pub.publish(rroot + ".truth.version", "0");
+    st.truth_version = 0;
+  }
+
+  // per-plane belief / ever_seen / last_visible, version-gated (skip the deep wrap for unchanged
+  // planes).
+  if (static_cast<int>(st.plane_versions.size()) != dims.planes)
+    st.plane_versions.assign(dims.planes, -1);
+  for (int m = 0; m < dims.planes; ++m) {
+    const int v = versions ? versions[m] : 0;
+    if (v == st.plane_versions[m])
+      continue; // unchanged this plane -> no re-wrap, no re-publish
+    const std::string pp = rroot + ".plane." + std::to_string(m);
+    const long off = static_cast<long>(m) * cells;
+    if (belief)
+      root(pp + ".belief.data").data(boost::any(wrap_plane(app, belief + off, dims)));
+    if (everseen)
+      root(pp + ".ever_seen.data").data(boost::any(wrap_plane(app, everseen + off, dims)));
+    if (lastvis)
+      root(pp + ".last_visible.data").data(boost::any(wrap_plane(app, lastvis + off, dims)));
+    pub.publish(pp + ".version", i2s(v));
+    st.plane_versions[m] = v;
   }
 }
 
