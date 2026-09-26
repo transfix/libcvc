@@ -2775,6 +2775,17 @@ and every trigger is edge-gated, budgeted, and cycle-guarded.
 
 ## 12. Loading sub-UIs and sub-scene-graphs (modularization)
 
+> **Status — the in-document half is LANDED** (`cvc::ariadne` loader): a top-level `units:` map
+> holds reusable widget templates, and `include: <unit>` with `args: {k: v}` instantiates one at
+> LOAD time. Args are a uniform text substitution (`{k}` → value, like `repeat`'s `{i}`) applied
+> to the unit's YAML before re-parsing, so a unit's own nested `include:`/`repeat` expand
+> naturally on the re-parse and args flow down into them. Units are collected before the body
+> (any-order, mutually referential); a self-referential unit is depth-guarded (16); an unknown
+> unit or a substitution that yields un-parseable YAML warns and renders empty. This is the
+> `include`/`repeat` (§3.7) template layer — **shared scope, no fetch**. The `load:` cross-file
+> module form (fetch + own chroot + hot-reload) below is deferred until §13's `uri_resolver`
+> lands, since every `load:` variant routes through it.
+
 `include`/`repeat` (§3.7) template widgets **in-document**. `load:` is the **cross-file module**
 primitive: it mounts an **external** `.ari` fragment (a sub-UI or a sub-scene) **as
 its own namespaced subtree with its own chroot**. As of v0.8 its argument is a **URI** resolved through
