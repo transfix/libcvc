@@ -3332,7 +3332,15 @@ A cross-cutting v1 workstream, sequenced so each phase is independently useful:
    the same way (`setUiFont*`). A future refinement is a bundled/`cvcpkg` font so wasm and font-less
    hosts get coverage without a system font.
 3. **Layout uses display-width** — route §3.0.3 sizing / truncation / the terminal column math through
-   `cvc::text::display_width`.
+   `cvc::text::display_width`. **✅ LANDED.** A codebase-wide audit found the UI/backend text paths are
+   **already display-correct by delegation**: the ImGui reference backend measures per-glyph via the
+   font (phase 2), and the FTXUI terminal backend both auto-sizes each Element and clips its column
+   budget with FTXUI's own wcwidth-style `string_width` — so the Ariadne backends need no change. The
+   only genuine byte-based text-layout sites were two `%-Ns` printf column-paddings; both now route
+   through `cvc::text::pad_to_width` (the L-system `--stats` "by symbol" table, whose symbol names can
+   be multibyte, is the demonstration — a wide `枝` symbol that mis-aligned under `%-10s` now lines up).
+   The rule going forward: **any NEW manual measure/truncate/pad/align of text uses `cvc::text`**, never
+   `.size()`/`%-Ns`; toolkit-drawn text (ImGui/FTXUI) stays delegated.
 4. **Codepoint-aware editing** — when editable text lands (§17.5).
 5. **pycvc** — verify/document the typemap; expose the width API (§17.6).
 
