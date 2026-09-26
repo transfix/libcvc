@@ -551,6 +551,34 @@ scene:
   EXPECT_NE(find_scene_node(r.scene.nodes, "truck2"), nullptr);
 }
 
+TEST(AriadneScene, NestedChildCarriesLocalTransform) {
+  SKIP_WITHOUT_YAML();
+  // A child under a transformed parent keeps its OWN transform; the realizer nests
+  // the child under the parent so this becomes a LOCAL transform (world = parent ∘
+  // child). Here we assert the parse carries both independently.
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: convoy
+      type: group
+      transform: { position: [100, 0, 0] }
+      children:
+        - node: truck
+          source: { file: truck.obj }
+          transform: { position: [5, 0, 0] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &convoy = r.scene.nodes[0];
+  ASSERT_TRUE(convoy.has_transform);
+  EXPECT_FLOAT_EQ(convoy.position[0], 100.0f);
+  ASSERT_EQ(convoy.children.size(), 1u);
+  const SceneNode &truck = convoy.children[0];
+  ASSERT_TRUE(truck.has_transform);
+  EXPECT_FLOAT_EQ(truck.position[0], 5.0f); // local to the convoy, not 105
+}
+
 TEST(AriadneScene, LightsAndShadows) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

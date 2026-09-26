@@ -63,9 +63,16 @@ void apply_visibility(GraphicsNode &node, const cvc::ariadne::SceneNode &n,
   binds.push_back({source, target, n.visible_default});
 }
 
+// Realize one node under `parent` (null = a top-level node parented to the graphics
+// root). A nested node is created via parent->createChild/addGraphicsChild, which
+// gives it the hierarchical state path `{parent}.children.{id}` AND makes its
+// `transform:` a LOCAL transform composed with the parent's world transform — so a
+// child moves/rotates/scales relative to its parent (§9 local transforms). Top-level
+// nodes go through sg.addGraphics (registered in the name map + null-graphic removal
+// + the volume-rendering hookup).
 void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
                   const std::string &bind_prefix, RealizedScene &out,
-                  std::vector<std::string> *warnings) {
+                  GraphicsNode *parent, std::vector<std::string> *warnings) {
   std::shared_ptr<GraphicsNode> node;
 
   if (n.type == "geometry") {
@@ -80,15 +87,16 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
       warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
       return;
     }
-    node = sg.addGraphics(n.id, geom);
-    if (auto g = std::dynamic_pointer_cast<GeometryNode>(node)) {
-      if (n.has_material) {
-        g->setUseSingleColor(true);
-        g->setColor(n.color[0], n.color[1], n.color[2]);
-        g->setAmbient(n.ambient);
-        g->setDiffuse(n.diffuse);
-      }
+    std::shared_ptr<GeometryNode> g =
+        parent ? parent->createChild<GeometryNode>(n.id, geom)
+               : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id, geom));
+    if (g && n.has_material) {
+      g->setUseSingleColor(true);
+      g->setColor(n.color[0], n.color[1], n.color[2]);
+      g->setAmbient(n.ambient);
+      g->setDiffuse(n.diffuse);
     }
+    node = g;
   } else if (n.type == "volume") {
     if (n.source_file.empty()) {
       warn(warnings, "ari: scene node '" + n.id + "' (volume) has no source.file");
@@ -97,13 +105,22 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
     std::shared_ptr<VolumeNode> vnode;
     try {
       cvc::volume vol(sg.appContext(), n.source_file); // reads on construct; throws on a bad file
-      vnode = sg.addGraphics(n.id, vol); // sets a default grayscale transfer function -> renders
+      if (parent) {
+        // Nested: local transform composes with the parent. createChild -> setVolume
+        // sets the default grayscale TF, enough to render a single volume. Multi-volume
+        // compositing across a NESTED volume isn't toggled here (SceneGraph's
+        // updateVolumeRendering is private) — a documented follow-up; a lone nested
+        // volume renders fine.
+        vnode = parent->createChild<VolumeNode>(n.id, vol);
+      } else {
+        vnode = sg.addGraphics(n.id, vol); // sets a default grayscale transfer function -> renders
+      }
     } catch (const std::exception &e) {
       warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
       return;
     }
     node = vnode;
-    if (n.has_material) {
+    if (vnode && n.has_material) {
       // A volume's colour comes from a transfer function, not a single actor colour,
       // so `color[3]` has no analog here (a TF spec is a follow-up); only the lighting
       // coefficients map. Apply only when the node is styled, so an unstyled volume
@@ -112,7 +129,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
       vnode->setDiffuse(n.diffuse);
     }
   } else if (n.type == "group") {
-    node = sg.addGraphics(n.id); // empty hierarchy node
+    node = parent ? parent->createChild(n.id) // empty nested hierarchy node
+                  : sg.addGraphics(n.id);
   } else {
     // volren/volslice/light realization is a follow-up (§9): volren/volslice need a
     // per-frame tick() host seam + transfer-function/isosurface params the spec does
@@ -125,13 +143,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
 
   if (!node)
     return;
-  apply_transform(*node, n);
+  apply_transform(*node, n); // the node's LOCAL transform (composed with the parent's)
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
 
-  // Children are realized as top-level nodes for now; true parent nesting (a
-  // <parent>.children.<child> path) rides on the §11 path binding — a follow-up.
+  // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
-    realize_node(sg, c, bind_prefix, out, warnings);
+    realize_node(sg, c, bind_prefix, out, node.get(), warnings);
 }
 
 LightNode::Kind light_kind(const std::string &k) {
@@ -196,7 +213,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   RealizedScene out;
   out.created.reserve(scene.nodes.size());
   for (const auto &n : scene.nodes) {
-    realize_node(sg, n, bind_prefix, out, warnings);
+    realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, warnings);
     out.created.push_back(n.id);
   }
   // Lights run AFTER the nodes so a StageLighting rig can frame the realized geometry.

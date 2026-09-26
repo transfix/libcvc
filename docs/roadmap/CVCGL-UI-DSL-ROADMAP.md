@@ -1600,17 +1600,35 @@ of a hand-built C++ escape.
 > directional sun + shadows over the bunny. 3 new loader gtests (light color/az/el, defaults,
 > volume-node parse); realizer + demo compile-verified against real cvcGL/VTK headers.
 >
+> **Status — increment 4 landed (local transforms via node nesting).** A node's `transform:` is now
+> a **local** transform: children are realized UNDER their declared parent (via
+> `parent->createChild<…>(id, data)` for geometry/volume and `createChild(id)` for a group), which
+> gives the child the hierarchical state path `{parent}.children.{id}` and composes its transform
+> with the parent's world transform (world = parent ∘ local, via `GraphicsNode`'s existing
+> local/world split — `m_transform` local, `m_worldMatrix` composed). So a truck at local
+> `position: [5,0,0]` under a convoy group at `[100,0,0]` renders at world `[105,0,0]`, and moving
+> the convoy moves the trucks. Top-level nodes still go through `sg.addGraphics` (name-map
+> registration + null-graphic removal + volume hookup); nested nodes are addressed by their state
+> path. Because the child's `.visible` key is under the same subtree, the visibility bind keeps
+> working for nested nodes with no change. `realize_node` gained a `parent` param; no public-API or
+> schema change (the `transform:` block already carried position/rotation/scale — it is simply
+> local now). Loader test `NestedChildCarriesLocalTransform` pins that a child keeps its own
+> transform (not pre-composed); the composition itself is a `GraphicsNode` mechanic
+> (compile-verified). Nested-volume caveat: a single nested volume renders, but multi-volume
+> compositing across a nested volume isn't toggled (`updateVolumeRendering` is private — a follow-up).
+>
 > **Follow-ups (not yet built):** **volren/volslice realization** — deferred deliberately: they need
 > a new per-frame `tick()` host seam (`RealizedScene` + the render loop + `depthSortSliceProps` need
 > the `vtkRenderer`) *and* nested transfer-function/isosurface param structs on `SceneNode` the spec
 > doesn't carry, so realizing them without that plumbing yields a node that never renders (a silent
 > no-op) — its own increment. Also: the `light` *node* type (`SceneNode` lacks the light fields —
 > declare lights in `lights:`); a `Scene`-level `rig:` (it's a scene property, not one light);
-> directional-from-pos/target derivation; true parent nesting via a `<parent>.children.<child>` path
-> (§11); binding *other* scene props (transform/material/color) to state as visibility now is; a
-> VTK-linked `realize_scene` gtest under `src/cvcGL/test/` (node-building is compile-verified only —
-> the pure-state mirror is covered by `AriadneBind.*`, but a `SceneGraph` needs VTK the core test
-> tree lacks); and views/minimap (§9.5–9.6).
+> directional-from-pos/target derivation; multi-volume compositing across a nested volume (needs
+> `updateVolumeRendering` exposed); binding *other* scene props (transform/material/color) to state
+> as visibility now is; a VTK-linked `realize_scene` gtest under `src/cvcGL/test/` (node-building +
+> the light-batch position bake + kind/preset mapping + directional-vs-spot routing + transform
+> nesting are compile-verified only — the pure-state mirror + parse are covered by `AriadneBind.*` /
+> loader gtests, but a `SceneGraph` needs VTK the core test tree lacks); and views/minimap (§9.5–9.6).
 
 ### 9.1 Which scene model
 
