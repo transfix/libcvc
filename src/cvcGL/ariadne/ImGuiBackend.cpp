@@ -299,6 +299,14 @@ void ImGuiBackend::end_disabled() {
   ImGui::EndDisabled();
 #endif
 }
+void ImGuiBackend::set_tooltip(const char *text) {
+#ifdef CVC_ENABLE_IMGUI
+  if (text && *text && ImGui::IsItemHovered())
+    ImGui::SetTooltip("%s", text); // hover-gated so it attaches to the last item
+#else
+  (void)text;
+#endif
+}
 void ImGuiBackend::push_id(const char *id) { ui::PushId(id); }
 void ImGuiBackend::pop_id() { ui::PopId(); }
 

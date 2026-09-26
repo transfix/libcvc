@@ -278,6 +278,33 @@ public:
     return {display_string(o.value), std::string()};
   }
 
+  struct StringListOutcome {
+    std::vector<std::string> value; // empty on failure or a non-list/nil result
+    std::string error;              // empty on success
+  };
+
+  // Evaluate `src` and coerce a LIST result to display strings (computed combo options). A
+  // non-list, non-nil result becomes a single-element list; nil / failure yields empty. The
+  // list length is capped (a combo with thousands of options is pathological) — extras are
+  // dropped. Same bounding + fail-safe as the others.
+  StringListOutcome eval_string_list(const std::string &src) {
+    const RawOutcome o = eval_raw(src);
+    if (!o.error.empty())
+      return {{}, o.error};
+    std::vector<std::string> out;
+    if (auto *l = std::get_if<se::list_ptr>(&o.value.v)) {
+      if (*l)
+        for (const auto &e : **l) {
+          if (out.size() >= kMaxOptions)
+            break;
+          out.push_back(display_string(e));
+        }
+    } else if (!o.value.is_nil()) {
+      out.push_back(display_string(o.value));
+    }
+    return {std::move(out), std::string()};
+  }
+
 private:
   struct RawOutcome {
     se::value_t value; // valid only when error is empty
@@ -343,6 +370,7 @@ private:
   static constexpr uint64_t kMaxSteps = 100'000;       // per-eval step cap (a predicate is tiny)
   static constexpr double kMaxSeconds = 0.005;         // per-eval wall-time cap (5 ms)
   static constexpr double kFrameBudgetSeconds = 0.010; // aggregate across all predicates/frame
+  static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
   double frame_spent_ = 0.0; // wall-time spent on predicate evals in the current frame
   se::scheduler sched_;
@@ -407,6 +435,9 @@ struct Runtime::Impl {
   // §4 read-lane: evaluate a computed-value expression `expr` to a display string.
   // Fail-safe EMPTY string on a broken predicate (§4.1 fmt→""); warns once.
   std::string eval_text(const std::string &expr);
+  // §4 read-lane: evaluate a computed combo-options expression to a list of strings.
+  // Fail-safe EMPTY list on a broken expr; warns once.
+  std::vector<std::string> eval_options(const std::string &expr);
   void warn_once(const std::string &msg) {
     if (reactive_warned.insert(msg).second)
       reactive_warnings.push_back(msg);
@@ -472,6 +503,21 @@ std::string Runtime::Impl::eval_text(const std::string &expr) {
   warn_once("ari: computed text expr ignored — this libcvc was built without state_exec "
             "(CVC_STATE_EXEC=OFF)");
   return std::string();
+#endif
+}
+
+std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
+#ifdef CVC_STATE_EXEC
+  if (!reactive)
+    reactive = std::make_unique<ReactiveEngine>(app, prefix);
+  const ReactiveEngine::StringListOutcome o = reactive->eval_string_list(expr);
+  if (!o.error.empty())
+    warn_once(o.error);
+  return o.value;
+#else
+  warn_once("ari: computed options ignored — this libcvc was built without state_exec "
+            "(CVC_STATE_EXEC=OFF)");
+  return {};
 #endif
 }
 
@@ -609,20 +655,26 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Combo: {
-    if (w.options.empty())
+    // §4 read-lane: options are either a static list or a computed expression re-evaluated
+    // each frame. A local holds the computed list so its lifetime spans the emit.
+    std::vector<std::string> computed;
+    if (!w.options_expr.empty())
+      computed = eval_options(w.options_expr);
+    const std::vector<std::string> &opts = w.options_expr.empty() ? w.options : computed;
+    if (opts.empty())
       break;
     const std::string path = resolve(w.bind);
-    const std::string fallback = w.sdef.empty() ? w.options.front() : w.sdef;
+    const std::string fallback = w.sdef.empty() ? opts.front() : w.sdef;
     const std::string cur = read_or_seed<std::string>(app, path, fallback);
     int idx = 0;
-    for (std::size_t i = 0; i < w.options.size(); ++i)
-      if (w.options[i] == cur) {
+    for (std::size_t i = 0; i < opts.size(); ++i)
+      if (opts[i] == cur) {
         idx = static_cast<int>(i);
         break;
       }
-    const IndexEdit e = b.combo(label, idx, w.options);
-    if (e.changed && e.index >= 0 && e.index < static_cast<int>(w.options.size()))
-      write<std::string>(app, path, w.options[e.index]); // store the TEXT, not an index
+    const IndexEdit e = b.combo(label, idx, opts);
+    if (e.changed && e.index >= 0 && e.index < static_cast<int>(opts.size()))
+      write<std::string>(app, path, opts[e.index]); // store the TEXT, not an index
     break;
   }
 
@@ -655,6 +707,13 @@ void Runtime::Impl::emit_node(const Widget &w) {
       write<std::string>(app, path, e.value);
     break;
   }
+  }
+  // §4 read-lane: attach a hover tooltip to the widget just drawn (the backend's last item).
+  // Literal text, or a computed expression (starts with '('); empty result = no tooltip.
+  if (!w.tooltip.empty()) {
+    const std::string tip = is_expr(w.tooltip) ? eval_text(w.tooltip) : w.tooltip;
+    if (!tip.empty())
+      b.set_tooltip(tip.c_str());
   }
   if (dis)
     b.end_disabled();

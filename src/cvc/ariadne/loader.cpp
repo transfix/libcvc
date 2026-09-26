@@ -227,7 +227,7 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
          k == "children" || k == "items" || k == "id" || k == "visible_when" ||
-         k == "enabled_when" || k == "disabled_when";
+         k == "enabled_when" || k == "disabled_when" || k == "tooltip";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -458,13 +458,21 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     check_bind(ctx, "combo", label, bind);
     std::vector<std::string> opts;
     const YAML::Node o = n["options"];
-    if (o && o.IsSequence())
+    // options: a SEQUENCE is a static list; a SCALAR is a §4 computed expression (a list)
+    // re-evaluated each frame.
+    std::string opts_expr;
+    if (o && o.IsSequence()) {
       for (const YAML::Node &e : o)
         if (e.IsScalar())
           opts.push_back(e.Scalar());
-    if (opts.empty())
+    } else if (o && o.IsScalar()) {
+      opts_expr = o.Scalar();
+    }
+    if (opts.empty() && opts_expr.empty())
       ctx.warn("ari: combo '" + label + "' has no options:");
-    return combo(label, bind, std::move(opts), str(n, "default", str(n, "def")));
+    Widget w = combo(label, bind, std::move(opts), str(n, "default", str(n, "def")));
+    w.options_expr = opts_expr;
+    return w;
   }
   if (type == "button") {
     const std::string on = action(n);
@@ -533,6 +541,7 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
     w.visible_when = str(n, "visible_when");
     w.enabled_when = str(n, "enabled_when");
     w.disabled_when = str(n, "disabled_when");
+    w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
   }
   return w;
 }

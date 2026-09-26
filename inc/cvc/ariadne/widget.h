@@ -127,6 +127,15 @@ struct Widget {
   std::string enabled_when;
   std::string disabled_when;
 
+  // §4 read-lane (reactive): a Combo's options as a computed expression (a list) evaluated
+  // each frame, instead of the static `options` list. Empty = use the static list. Fail-safe
+  // to an empty list on a broken expr.
+  std::string options_expr;
+
+  // §4 read-lane: a hover tooltip. A literal string, OR (if it starts with '(') a computed
+  // expression re-evaluated each frame. Empty = no tooltip.
+  std::string tooltip;
+
   // numeric widget params
   double lo = 0.0, hi = 1.0, def = 0.0; // SliderFloat
   int ilo = 0, ihi = 100, idef = 0;     // SliderInt

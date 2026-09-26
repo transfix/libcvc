@@ -44,6 +44,7 @@ public:
   void end_grid() override;
   void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
   void end_disabled() override;
+  void set_tooltip(const char *text) override; // §4: hover tooltip on the last item
   void push_id(const char *id) override;
   void pop_id() override;
 

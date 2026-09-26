@@ -67,6 +67,7 @@ struct MockBackend : Backend {
   void end_grid() override { rec("end_grid"); }
   void begin_disabled() override { rec("begin_disabled"); }
   void end_disabled() override { rec("end_disabled"); }
+  void set_tooltip(const char *t) override { rec(std::string("tooltip:") + (t ? t : "")); }
   void push_id(const char *id) override { rec(std::string("push_id:") + id); }
   void pop_id() override { rec("pop_id"); }
   void text_line(const char *t) override { rec(std::string("text_line:") + t); }
@@ -814,6 +815,65 @@ TEST(AriadneReactive, ComputedTextBrokenExprIsEmptyAndWarns) {
   rt.render();
   EXPECT_TRUE(mb.saw("text_value:X=")); // empty value, still drawn (not hung/crashed)
   EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneReactive, ComputedComboOptionsFromExpression) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("belief").value(std::string("grouped"));
+  Widget c = combo("Belief", "belief", {}, "");                 // no static options
+  c.options_expr = "(list \"shared\" \"grouped\" \"private\")"; // computed each frame
+  rt.set_root(group({c}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("combo:Belief=1")); // "grouped" is index 1 in the computed list
+}
+
+TEST(AriadneReactive, ComputedComboOptionsBrokenExprSkips) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget c = combo("Belief", "belief", {}, "");
+  c.options_expr = "(list \"a\""; // parse error -> empty list -> combo not drawn
+  rt.set_root(group({c}));
+  rt.render();
+  EXPECT_FALSE(mb.saw_prefix("combo:"));             // no options -> nothing to show
+  EXPECT_FALSE(rt.take_reactive_warnings().empty()); // reported
+}
+
+TEST(AriadneReactive, StaticAndComputedTooltips) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"hint\" \"dynamic\")", nullptr));
+  Widget b1 = button("Go", "go");
+  b1.tooltip = "click me"; // literal
+  Widget b2 = button("Stop", "stop");
+  b2.tooltip = "(state-get \"hint\")"; // computed
+  rt.set_root(group({b1, b2}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("button:Go"));
+  EXPECT_TRUE(mb.saw("tooltip:click me")); // literal attached after the item
+  EXPECT_TRUE(mb.saw("tooltip:dynamic"));  // computed from state
+}
+
+TEST(AriadneReactive, NoTooltipMeansNoSetTooltip) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "go")})); // no tooltip
+  rt.render();
+  EXPECT_FALSE(mb.saw_prefix("tooltip:"));
 }
 
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {

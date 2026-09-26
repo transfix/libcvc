@@ -130,6 +130,11 @@ public:
   virtual void begin_disabled() {}
   virtual void end_disabled() {}
 
+  // Attach a hover tooltip to the item JUST emitted (§4 read-lane `tooltip`). Called
+  // immediately after a widget's primitive. Non-pure NO-OP default so a backend with no
+  // tooltip concept still compiles; ImGuiBackend maps it to a hover-gated ImGui::SetTooltip.
+  virtual void set_tooltip(const char *text) {}
+
   // ---- leaves -------------------------------------------------------------
   virtual void text_line(const char *text) = 0;                             // literal caption
   virtual void text_value(const char *label, const std::string &value) = 0; // "label: value"

@@ -1111,6 +1111,46 @@ windows:
   EXPECT_EQ(b->disabled_when, "(state-exists \"busy\")");
 }
 
+TEST(AriadneReactive, ComboOptionsScalarIsExpressionSequenceIsStatic) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - combo: Static
+        bind: a
+        options: [x, y, z]
+      - combo: Computed
+        bind: b
+        options: (list "p" "q")
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *s = find(r.root, Kind::Combo, "Static");
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(s->options.size(), 3u);
+  EXPECT_TRUE(s->options_expr.empty());
+  const Widget *c = find(r.root, Kind::Combo, "Computed");
+  ASSERT_NE(c, nullptr);
+  EXPECT_TRUE(c->options.empty());
+  EXPECT_EQ(c->options_expr, "(list \"p\" \"q\")");
+}
+
+TEST(AriadneReactive, TooltipParsedOntoWidget) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: go
+        tooltip: "run the thing"
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *b = find(r.root, Kind::Button, "Go");
+  ASSERT_NE(b, nullptr);
+  EXPECT_EQ(b->tooltip, "run the thing");
+}
+
 TEST(AriadneReactive, VisibleWhenOnCustomWidgetIsConsumedNotAProp) {
   SKIP_WITHOUT_YAML();
   // visible_when is a common field for EVERY kind, custom included — it must be captured
