@@ -8,10 +8,9 @@
 // Unicode UCD (EastAsianWidth + the combining set) — a data refresh, not a code
 // change. The lookup is a binary search over sorted, non-overlapping ranges.
 
-#include <cvc/core/text.h>
-
 #include <algorithm>
 #include <cstdint>
+#include <cvc/core/text.h>
 
 namespace cvc {
 namespace text {
@@ -42,28 +41,25 @@ bool in_ranges(char32_t cp, const Range *table, std::size_t n) {
 const Range kZeroWidth[] = {
     {0x0300, 0x036F}, // Combining Diacritical Marks
     {0x0483, 0x0489}, // Cyrillic combining
-    {0x0591, 0x05BD}, {0x05BF, 0x05BF}, {0x05C1, 0x05C2},
-    {0x05C4, 0x05C5}, {0x05C7, 0x05C7},                 // Hebrew points
-    {0x0610, 0x061A}, {0x064B, 0x065F}, {0x0670, 0x0670},
-    {0x06D6, 0x06DC}, {0x06DF, 0x06E4}, {0x06E7, 0x06E8},
-    {0x06EA, 0x06ED},                                   // Arabic marks
-    {0x0711, 0x0711}, {0x0730, 0x074A},                 // Syriac
-    {0x07A6, 0x07B0}, {0x07EB, 0x07F3},                 // Thaana / NKo
-    {0x0900, 0x0902}, {0x093A, 0x093A}, {0x093C, 0x093C},
-    {0x0941, 0x0948}, {0x094D, 0x094D}, {0x0951, 0x0957},
-    {0x0962, 0x0963},                                   // Devanagari
-    {0x0981, 0x0981}, {0x09BC, 0x09BC}, {0x09C1, 0x09C4},
-    {0x09CD, 0x09CD},                                   // Bengali
-    {0x0E31, 0x0E31}, {0x0E34, 0x0E3A}, {0x0E47, 0x0E4E}, // Thai
-    {0x0EB1, 0x0EB1}, {0x0EB4, 0x0EBC}, {0x0EC8, 0x0ECD}, // Lao
-    {0x1AB0, 0x1AFF},                                   // Combining Diacriticals Ext
-    {0x1DC0, 0x1DFF},                                   // Combining Diacriticals Supplement
-    {0x200B, 0x200F},                                   // ZWSP, ZWNJ, ZWJ, LRM, RLM
-    {0x202A, 0x202E}, {0x2060, 0x2064},                 // bidi / word joiner
-    {0x20D0, 0x20F0},                                   // Combining Marks for Symbols
-    {0xFE00, 0xFE0F},                                   // Variation Selectors
-    {0xFE20, 0xFE2F},                                   // Combining Half Marks
-    {0xE0100, 0xE01EF},                                 // Variation Selectors Supplement
+    {0x0591, 0x05BD},   {0x05BF, 0x05BF}, {0x05C1, 0x05C2}, {0x05C4, 0x05C5},
+    {0x05C7, 0x05C7}, // Hebrew points
+    {0x0610, 0x061A},   {0x064B, 0x065F}, {0x0670, 0x0670}, {0x06D6, 0x06DC},
+    {0x06DF, 0x06E4},   {0x06E7, 0x06E8}, {0x06EA, 0x06ED}, // Arabic marks
+    {0x0711, 0x0711},   {0x0730, 0x074A},                   // Syriac
+    {0x07A6, 0x07B0},   {0x07EB, 0x07F3},                   // Thaana / NKo
+    {0x0900, 0x0902},   {0x093A, 0x093A}, {0x093C, 0x093C}, {0x0941, 0x0948},
+    {0x094D, 0x094D},   {0x0951, 0x0957}, {0x0962, 0x0963},                   // Devanagari
+    {0x0981, 0x0981},   {0x09BC, 0x09BC}, {0x09C1, 0x09C4}, {0x09CD, 0x09CD}, // Bengali
+    {0x0E31, 0x0E31},   {0x0E34, 0x0E3A}, {0x0E47, 0x0E4E},                   // Thai
+    {0x0EB1, 0x0EB1},   {0x0EB4, 0x0EBC}, {0x0EC8, 0x0ECD},                   // Lao
+    {0x1AB0, 0x1AFF},                     // Combining Diacriticals Ext
+    {0x1DC0, 0x1DFF},                     // Combining Diacriticals Supplement
+    {0x200B, 0x200F},                     // ZWSP, ZWNJ, ZWJ, LRM, RLM
+    {0x202A, 0x202E},   {0x2060, 0x2064}, // bidi / word joiner
+    {0x20D0, 0x20F0},                     // Combining Marks for Symbols
+    {0xFE00, 0xFE0F},                     // Variation Selectors
+    {0xFE20, 0xFE2F},                     // Combining Half Marks
+    {0xE0100, 0xE01EF},                   // Variation Selectors Supplement
 };
 
 // East-Asian wide & fullwidth, plus the emoji/pictograph planes (width 2).

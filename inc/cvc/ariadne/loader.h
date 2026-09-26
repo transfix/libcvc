@@ -35,14 +35,13 @@
 // slices; unknown keys are ignored, not errors, so a fuller document still loads
 // its P0 subset.
 
+#include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/value.h>
+#include <cvc/ariadne/widget.h>
 #include <functional>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <cvc/ariadne/scene.h>
-#include <cvc/ariadne/value.h>
-#include <cvc/ariadne/widget.h>
 
 namespace cvc {
 namespace ariadne {
@@ -73,10 +72,10 @@ struct CustomRequirement {
 };
 
 struct LoadResult {
-  bool ok = false;                   // false if the load failed (see `error`)
-  Widget root;                       // a Group of the document's widgets (empty on failure)
-  Scene scene;                       // the parsed `scene:` block (§9; empty if none)
-  Meta meta;                         // parsed provenance (may be empty)
+  bool ok = false;                        // false if the load failed (see `error`)
+  Widget root;                            // a Group of the document's widgets (empty on failure)
+  Scene scene;                            // the parsed `scene:` block (§9; empty if none)
+  Meta meta;                              // parsed provenance (may be empty)
   std::vector<CustomRequirement> customs; // declared `customs:` (widget/node/block)
   // The `init:` block's state_exec script (verbatim text; empty if none). The loader
   // only CAPTURES it (it has no cvc::app and never runs the DSL); the host runs it once

@@ -377,9 +377,9 @@ TEST_F(StacklessEvaluatorTest, RestrictSpecialFormsDeniesUnlistedForms) {
   auto allowed =
       std::make_shared<const std::set<std::string>>(std::set<std::string>{"if", "begin"});
   ev->restrict_special_forms(allowed);
-  EXPECT_NO_THROW(ev->evaluate_script("(if #t 1 2)"));          // allowed
-  EXPECT_NO_THROW(ev->evaluate_script("(begin 1 2)"));          // allowed
-  EXPECT_THROW(ev->evaluate_script("(quote 1)"), std::exception);                   // denied
+  EXPECT_NO_THROW(ev->evaluate_script("(if #t 1 2)"));                               // allowed
+  EXPECT_NO_THROW(ev->evaluate_script("(begin 1 2)"));                               // allowed
+  EXPECT_THROW(ev->evaluate_script("(quote 1)"), std::exception);                    // denied
   EXPECT_THROW(ev->evaluate_script("(defclass C (init (self) 1))"), std::exception); // denied
   // A non-special-form head is unaffected by the gate (the environment governs it).
   EXPECT_NO_THROW(ev->evaluate_script("(+ 1 2)"));

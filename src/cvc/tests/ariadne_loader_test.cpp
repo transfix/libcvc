@@ -7,10 +7,8 @@
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/widget.h>
-
-#include <gtest/gtest.h>
-
 #include <functional>
+#include <gtest/gtest.h>
 #include <string>
 
 using namespace cvc::ariadne;
@@ -41,10 +39,10 @@ bool has_warning(const LoadResult &r, const std::string &needle) {
   return false;
 }
 
-#define SKIP_WITHOUT_YAML()                                                                          \
-  do {                                                                                               \
-    if (!have_yaml())                                                                                \
-      GTEST_SKIP() << "libcvc built without yaml-cpp";                                               \
+#define SKIP_WITHOUT_YAML()                                                                        \
+  do {                                                                                             \
+    if (!have_yaml())                                                                              \
+      GTEST_SKIP() << "libcvc built without yaml-cpp";                                             \
   } while (0)
 
 } // namespace
@@ -218,10 +216,10 @@ windows:
       - frobnicate: Whatsit
 )");
   ASSERT_TRUE(r.ok) << r.error;
-  EXPECT_TRUE(has_warning(r, "no bind"));          // slider with no bind
-  EXPECT_TRUE(has_warning(r, "lo >= hi"));         // bad slider range
-  EXPECT_TRUE(has_warning(r, "no options"));       // combo with no options
-  EXPECT_TRUE(has_warning(r, "no on: action"));    // button with no action
+  EXPECT_TRUE(has_warning(r, "no bind"));                 // slider with no bind
+  EXPECT_TRUE(has_warning(r, "lo >= hi"));                // bad slider range
+  EXPECT_TRUE(has_warning(r, "no options"));              // combo with no options
+  EXPECT_TRUE(has_warning(r, "no on: action"));           // button with no action
   EXPECT_TRUE(has_warning(r, "unrecognized widget key")); // frobnicate
 }
 
@@ -835,7 +833,7 @@ scene:
   // Unknown keys land in props (a Map); known keys (node/type/...) do NOT.
   ASSERT_TRUE(n.props.is_map());
   EXPECT_DOUBLE_EQ(n.props.num("count", 0), 128.0);
-  EXPECT_EQ(n.props.find("type"), nullptr);   // a known key is not duplicated
+  EXPECT_EQ(n.props.find("type"), nullptr); // a known key is not duplicated
   EXPECT_EQ(n.props.find("node"), nullptr);
   const Value *behavior = n.props.find("behavior"); // nested map
   ASSERT_NE(behavior, nullptr);
@@ -864,9 +862,10 @@ scene:
   ASSERT_EQ(r.scene.nodes.size(), 1u);
   const Value &p = r.scene.nodes[0].props;
   EXPECT_DOUBLE_EQ(p.num("good", -1.0), 2.5);
-  EXPECT_DOUBLE_EQ(p.num("bad", -1.0), -1.0);  // "10px" is not a whole number -> default (strict, like num())
+  EXPECT_DOUBLE_EQ(p.num("bad", -1.0),
+                   -1.0); // "10px" is not a whole number -> default (strict, like num())
   EXPECT_DOUBLE_EQ(p.num("missing", 7.0), 7.0); // absent -> default
-  EXPECT_EQ(p.str("caption", "fallback"), ""); // an explicit "" overrides the default (like str())
+  EXPECT_EQ(p.str("caption", "fallback"), "");  // an explicit "" overrides the default (like str())
   EXPECT_EQ(p.str("missing", "fallback"), "fallback"); // absent -> default
 }
 
@@ -1111,6 +1110,6 @@ windows:
   ASSERT_NE(c, nullptr);
   EXPECT_EQ(c->custom_type, "gauge");
   EXPECT_EQ(c->visible_when, "(state-exists \"ready\")");
-  EXPECT_EQ(c->props.find("visible_when"), nullptr);   // consumed, not a prop
-  EXPECT_DOUBLE_EQ(c->props.num("gauge", -1.0), 0.8);  // real config still captured
+  EXPECT_EQ(c->props.find("visible_when"), nullptr);  // consumed, not a prop
+  EXPECT_DOUBLE_EQ(c->props.num("gauge", -1.0), 0.8); // real config still captured
 }

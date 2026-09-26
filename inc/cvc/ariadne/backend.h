@@ -22,10 +22,9 @@
 // The core writes to cvc::state on `committed`, so a slider drag costs ONE state
 // write (which fans out to observers / replicated peers), not one per frame.
 
+#include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <string>
 #include <vector>
-
-#include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 
 namespace cvc {
 namespace ariadne {
@@ -108,8 +107,7 @@ public:
   // §3.0.3b sizing spec (px | percent-of-parent | auto per axis, with min/max) —
   // the backend resolves any percent against its own surface; `border` is the
   // §3.0.3b window border width in px (<0 = the backend's default).
-  virtual bool begin_window(const char *title, const char *id, const Size &size,
-                            float border) = 0;
+  virtual bool begin_window(const char *title, const char *id, const Size &size, float border) = 0;
   virtual void end_window() = 0;
   virtual void push_id(const char *id) = 0;
   virtual void pop_id() = 0;
@@ -124,11 +122,11 @@ public:
   virtual void end_grid() = 0;
 
   // ---- leaves -------------------------------------------------------------
-  virtual void text_line(const char *text) = 0;                          // literal caption
+  virtual void text_line(const char *text) = 0;                             // literal caption
   virtual void text_value(const char *label, const std::string &value) = 0; // "label: value"
   virtual void separator() = 0;
-  virtual bool button(const char *label) = 0;            // returns clicked
-  virtual bool menu_item_action(const char *label) = 0;  // returns clicked
+  virtual bool button(const char *label) = 0;           // returns clicked
+  virtual bool menu_item_action(const char *label) = 0; // returns clicked
 
   // ---- state-bound (value-in / edit-out) ----------------------------------
   virtual BoolEdit menu_item_toggle(const char *label, bool current) = 0;

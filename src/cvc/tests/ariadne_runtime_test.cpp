@@ -3,15 +3,13 @@
 // the deferred action drain, cvc::state read/seed/commit, bind-path resolution, and
 // the §3.0.3b grid dispatch.
 
+#include <algorithm>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
-
 #include <gtest/gtest.h>
-
-#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -27,16 +25,16 @@ struct MockBackend : Backend {
   IntEdit slider_int_ret{};
 
   void rec(std::string s) { log.push_back(std::move(s)); }
-  bool saw(const std::string &s) const {
-    return std::find(log.begin(), log.end(), s) != log.end();
-  }
+  bool saw(const std::string &s) const { return std::find(log.begin(), log.end(), s) != log.end(); }
   bool saw_prefix(const std::string &p) const {
     for (const std::string &s : log)
       if (s.rfind(p, 0) == 0)
         return true;
     return false;
   }
-  int times(const std::string &s) const { return static_cast<int>(std::count(log.begin(), log.end(), s)); }
+  int times(const std::string &s) const {
+    return static_cast<int>(std::count(log.begin(), log.end(), s));
+  }
 
   Capabilities capabilities() const override {
     Capabilities c;
@@ -94,7 +92,8 @@ struct MockBackend : Backend {
     rec(std::string("slider_int:") + l + "=" + std::to_string(cur));
     return slider_int_ret;
   }
-  DoubleEdit slider_double(const char *l, const char *, double, double, double, const char *) override {
+  DoubleEdit slider_double(const char *l, const char *, double, double, double,
+                           const char *) override {
     rec(std::string("slider_double:") + l);
     return {};
   }
@@ -283,9 +282,9 @@ TEST(AriadneRuntime, CustomWidgetComposesAndBinds) {
   rt.set_root(group({c}));
   rt.render();
 
-  EXPECT_TRUE(mock.saw("text_line:Pos"));    // composed literal caption
-  EXPECT_TRUE(mock.saw("slider_double:x"));  // composed bound slider
-  EXPECT_TRUE(mock.saw("slider_double:y"));  // state-dependent extra slider (advanced)
+  EXPECT_TRUE(mock.saw("text_line:Pos"));   // composed literal caption
+  EXPECT_TRUE(mock.saw("slider_double:x")); // composed bound slider
+  EXPECT_TRUE(mock.saw("slider_double:y")); // state-dependent extra slider (advanced)
   rt.drain();
   EXPECT_TRUE(fired); // ctx.fire enqueued; drain ran the handler off the walk
 }
@@ -350,7 +349,7 @@ TEST(AriadneRuntime, CustomWidgetBackendEscapeBindsState) {
   c.bind = "c";
   rt.set_root(group({c}));
   rt.render();
-  EXPECT_TRUE(mock.saw("custom_widget:colorpick=red")); // current value handed in
+  EXPECT_TRUE(mock.saw("custom_widget:colorpick=red"));      // current value handed in
   EXPECT_EQ(cvc::state::instance(app)("c").value(), "blue"); // committed value written back
 }
 
@@ -403,9 +402,8 @@ TEST(AriadneRuntime, CustomWidgetCompositionalWinsOverEscape) {
   rt.set_backend(&mock);
   // One type registered BOTH ways: the compositional fn must win; the backend escape
   // must NOT be consulted.
-  register_widget_type("dup", [](const Widget &, const WidgetEmitContext &ctx) {
-    ctx.emit(text("composed"));
-  });
+  register_widget_type(
+      "dup", [](const Widget &, const WidgetEmitContext &ctx) { ctx.emit(text("composed")); });
   mock.custom_ret = CustomEdit{true, true, true, "x"};
   Widget c;
   c.kind = Kind::Custom;
@@ -413,7 +411,7 @@ TEST(AriadneRuntime, CustomWidgetCompositionalWinsOverEscape) {
   rt.set_root(group({c}));
   rt.render();
   EXPECT_TRUE(mock.saw("text_line:composed"));        // compositional ran
-  EXPECT_FALSE(mock.saw_prefix("custom_widget:dup"));  // escape not consulted
+  EXPECT_FALSE(mock.saw_prefix("custom_widget:dup")); // escape not consulted
 }
 
 // --- §4 read-lane: reactive visible_when -------------------------------------
@@ -448,7 +446,7 @@ TEST(AriadneReactive, PredicateShowsThenHidesAsStateChanges) {
   cvc::state::instance(app)("n").value(3); // drop below threshold
   mb.log.clear();
   rt.render();
-  EXPECT_FALSE(mb.saw("text_line:shown")); // 3 > 5 false -> hidden, no re-parse hazard
+  EXPECT_FALSE(mb.saw("text_line:shown"));          // 3 > 5 false -> hidden, no re-parse hazard
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // a passing predicate never warns
 }
 
@@ -463,7 +461,7 @@ TEST(AriadneReactive, FalsePredicateHidesTheWholeSubtree) {
   win.visible_when = "(state-exists \"never\")"; // key absent -> false
   rt.set_root(group({win}));
   rt.render();
-  EXPECT_FALSE(mb.saw("begin_window:W")); // the window itself is skipped...
+  EXPECT_FALSE(mb.saw("begin_window:W"));  // the window itself is skipped...
   EXPECT_FALSE(mb.saw("text_line:inner")); // ...and everything under it
   EXPECT_FALSE(mb.saw("button:B"));
 }
@@ -500,9 +498,9 @@ TEST(AriadneReactive, WriteIntrinsicIsUnavailableInAPredicate) {
   w.visible_when = "(state-set \"x\" 1)"; // a writer is NOT bound in the read-only env
   rt.set_root(group({w}));
   rt.render();
-  EXPECT_FALSE(mb.saw("text_line:shown"));                     // unbound symbol -> hidden
+  EXPECT_FALSE(mb.saw("text_line:shown"));                       // unbound symbol -> hidden
   EXPECT_EQ(cvc::state::instance(app)("x").value(), "sentinel"); // read-only: nothing written
-  EXPECT_FALSE(rt.take_reactive_warnings().empty());           // and it was reported
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());             // and it was reported
 }
 
 TEST(AriadneReactive, PredicateReadsArePrefixScoped) {
@@ -533,7 +531,7 @@ TEST(AriadneReactive, RunawayPredicateIsCappedNotHung) {
   Widget w = text("shown");
   w.visible_when = "(while true 1)"; // never terminates; while yields, so the cap fires
   rt.set_root(group({w}));
-  rt.render(); // must return (the step/time cap), not hang the walk
+  rt.render();                             // must return (the step/time cap), not hang the walk
   EXPECT_FALSE(mb.saw("text_line:shown")); // capped -> fail-safe hidden
   std::vector<std::string> warns = rt.take_reactive_warnings();
   ASSERT_EQ(warns.size(), 1u);
@@ -555,8 +553,8 @@ TEST(AriadneReactive, StringValueIsTruthyAndUnsetKeyIsCleanlyFalsy) {
   rt.set_root(group({shown, hidden}));
   rt.render();
   EXPECT_TRUE(mb.saw("text_line:shown"));           // string "0" is truthy
-  EXPECT_FALSE(mb.saw("text_line:hidden"));          // nil is falsy
-  EXPECT_TRUE(rt.take_reactive_warnings().empty());  // nil is a clean falsy, NOT an error
+  EXPECT_FALSE(mb.saw("text_line:hidden"));         // nil is falsy
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()); // nil is a clean falsy, NOT an error
 }
 
 TEST(AriadneReactive, DistinctBrokenPredicatesWarnIndependently) {
@@ -610,7 +608,7 @@ TEST(AriadneReactive, HiddenGridChildConsumesNoCell) {
   rt.set_root(group({g}));
   rt.render();
   EXPECT_TRUE(mb.saw("text_line:a"));
-  EXPECT_FALSE(mb.saw("text_line:b"));  // hidden
+  EXPECT_FALSE(mb.saw("text_line:b")); // hidden
   EXPECT_TRUE(mb.saw("text_line:c"));
   EXPECT_EQ(mb.times("next_cell"), 2); // only the 2 VISIBLE children take a cell (no shift)
 }
@@ -708,7 +706,7 @@ TEST(AriadneReactive, StateDataDagIsCopiedBoundedNotHung) {
   w.visible_when = "(is-null (state-data-get \"bomb\"))"; // reads the DAG each frame
   rt.set_root(group({w}));
   rt.render(); // must return promptly (memoized deep_copy), not hang or OOM
-  EXPECT_FALSE(mb.saw("text_line:shown")); // is-null of a non-nil value -> hidden
+  EXPECT_FALSE(mb.saw("text_line:shown"));          // is-null of a non-nil value -> hidden
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // completed cleanly, no cap/error
 }
 

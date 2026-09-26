@@ -14,11 +14,10 @@
 // Widget tree from a .ari document; the state-tree layout, expressions, and the
 // full widget vocabulary follow the roadmap (docs/roadmap/CVCGL-UI-DSL-ROADMAP.md).
 
+#include <cvc/ariadne/value.h> // Widget::props for a Kind::Custom widget
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <cvc/ariadne/value.h> // Widget::props for a Kind::Custom widget
 
 namespace cvc {
 namespace ariadne {
@@ -241,8 +240,8 @@ inline Widget slider_int(std::string label, std::string bind, int lo, int hi, in
   return w;
 }
 
-inline Widget slider_float(std::string label, std::string bind, double lo, double hi, double def = 0.0,
-                           std::string fmt = "%.3f") {
+inline Widget slider_float(std::string label, std::string bind, double lo, double hi,
+                           double def = 0.0, std::string fmt = "%.3f") {
   Widget w;
   w.kind = Kind::SliderFloat;
   w.label = std::move(label);

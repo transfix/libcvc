@@ -71,15 +71,15 @@ bool file_readable(const char *path) {
 // symbols; DejaVu/Noto also carry many more). Returns "" if none is present.
 std::string find_system_font() {
   static const char *const kCandidates[] = {
-      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",            // Debian/Ubuntu
-      "/usr/share/fonts/dejavu/DejaVuSans.ttf",                     // Fedora
-      "/usr/share/fonts/TTF/DejaVuSans.ttf",                        // Arch
-      "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",        // Noto
+      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",     // Debian/Ubuntu
+      "/usr/share/fonts/dejavu/DejaVuSans.ttf",              // Fedora
+      "/usr/share/fonts/TTF/DejaVuSans.ttf",                 // Arch
+      "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", // Noto
       "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",       // macOS (very broad)
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", // macOS (very broad)
       "/Library/Fonts/Arial Unicode.ttf",
       "/System/Library/Fonts/Helvetica.ttc",
-      "C:\\Windows\\Fonts\\arial.ttf",                             // Windows
+      "C:\\Windows\\Fonts\\arial.ttf", // Windows
       "C:\\Windows\\Fonts\\segoeui.ttf",
   };
   for (const char *c : kCandidates)
@@ -99,7 +99,8 @@ void load_ui_font(ImGuiIO &io) {
     } else {
       ImFontConfig cfg;
       cfg.FontDataOwnedByAtlas = false; // the buffer belongs to the caller
-      f = io.Fonts->AddFontFromMemoryTTF(const_cast<void *>(g_uiFontMem), g_uiFontMemLen, 0.0f, &cfg);
+      f = io.Fonts->AddFontFromMemoryTTF(const_cast<void *>(g_uiFontMem), g_uiFontMemLen, 0.0f,
+                                         &cfg);
     }
     if (f) {
       std::fprintf(stderr, "cvcGL: UI font <in-memory, %d bytes>\n", g_uiFontMemLen);
@@ -120,7 +121,8 @@ void load_ui_font(ImGuiIO &io) {
       std::fprintf(stderr, "cvcGL: UI font %s\n", path.c_str());
       return;
     }
-    std::fprintf(stderr, "cvcGL: could not load UI font '%s' — using the ASCII face\n", path.c_str());
+    std::fprintf(stderr, "cvcGL: could not load UI font '%s' — using the ASCII face\n",
+                 path.c_str());
   }
 
   io.Fonts->AddFontDefaultVector(); // ASCII-only fallback (Basic Latin)

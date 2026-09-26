@@ -18,11 +18,10 @@
 // The FTXUI types are hidden behind a Pimpl, so this header pulls in no FTXUI
 // headers — a consumer needs FTXUI only to LINK a build that uses it.
 
+#include <cvc/ariadne/backend.h>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <cvc/ariadne/backend.h>
 
 namespace cvc {
 namespace ariadne {

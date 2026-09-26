@@ -164,7 +164,8 @@ private:
   value_t substitute(const value_t &tmpl, const std::unordered_map<std::string, value_t> &subst);
 
   environment_ptr global_env_;
-  std::shared_ptr<const std::set<std::string>> allowed_forms_; // nullptr = all special forms allowed
+  std::shared_ptr<const std::set<std::string>>
+      allowed_forms_; // nullptr = all special forms allowed
 
   std::atomic<bool> interrupted_{false};
   std::atomic<bool> paused_{false};

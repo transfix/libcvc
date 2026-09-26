@@ -16,8 +16,8 @@ stackless_evaluator::stackless_evaluator(environment_ptr global_env)
 
 const std::set<std::string> &stackless_evaluator::all_special_forms() {
   static const std::set<std::string> forms = {
-      "if",   "begin",  "while",    "for",  "set",   "quote", "lambda",   "return",
-      "yield", "break", "let",      "defun", "defmacro", "eval", "root", "super", "defclass"};
+      "if",    "begin", "while", "for",      "set",  "quote", "lambda", "return",  "yield",
+      "break", "let",   "defun", "defmacro", "eval", "root",  "super",  "defclass"};
   return forms;
 }
 

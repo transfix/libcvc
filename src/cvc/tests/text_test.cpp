@@ -3,20 +3,18 @@
 // source file's encoding.
 
 #include <cvc/core/text.h>
-
 #include <gtest/gtest.h>
-
 #include <string>
 
 using namespace cvc;
 
 namespace {
 // Handy UTF-8 byte strings.
-const std::string kCafe = "caf\xC3\xA9";                         // "café" (é = U+00E9)
+const std::string kCafe = "caf\xC3\xA9";                             // "café" (é = U+00E9)
 const std::string kNihongo = "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E"; // "日本語"
-const std::string kEuro = "\xE2\x82\xAC";                        // "€" (U+20AC)
-const std::string kGrin = "\xF0\x9F\x98\x80";                    // "😀" (U+1F600)
-const std::string kCombining = "e\xCC\x81";                      // "e" + U+0301 combining acute
+const std::string kEuro = "\xE2\x82\xAC";                            // "€" (U+20AC)
+const std::string kGrin = "\xF0\x9F\x98\x80";                        // "😀" (U+1F600)
+const std::string kCombining = "e\xCC\x81";                          // "e" + U+0301 combining acute
 } // namespace
 
 TEST(CvcText, DecodeAscii) {
@@ -79,19 +77,19 @@ TEST(CvcText, EncodeRoundTrip) {
 
 TEST(CvcText, CodepointWidth) {
   EXPECT_EQ(text::codepoint_width(U'A'), 1);
-  EXPECT_EQ(text::codepoint_width(0x00E9), 1); // é
-  EXPECT_EQ(text::codepoint_width(0x20AC), 1); // €
-  EXPECT_EQ(text::codepoint_width(0x65E5), 2); // 日 (CJK)
+  EXPECT_EQ(text::codepoint_width(0x00E9), 1);  // é
+  EXPECT_EQ(text::codepoint_width(0x20AC), 1);  // €
+  EXPECT_EQ(text::codepoint_width(0x65E5), 2);  // 日 (CJK)
   EXPECT_EQ(text::codepoint_width(0x1F600), 2); // 😀
-  EXPECT_EQ(text::codepoint_width(0x0301), 0); // combining acute
-  EXPECT_EQ(text::codepoint_width(0x200B), 0); // zero-width space
-  EXPECT_EQ(text::codepoint_width(0x09), 0);   // tab (control)
+  EXPECT_EQ(text::codepoint_width(0x0301), 0);  // combining acute
+  EXPECT_EQ(text::codepoint_width(0x200B), 0);  // zero-width space
+  EXPECT_EQ(text::codepoint_width(0x09), 0);    // tab (control)
 }
 
 TEST(CvcText, DisplayWidthAndCount) {
-  EXPECT_EQ(text::display_width(kCafe), 4u);    // c a f é
+  EXPECT_EQ(text::display_width(kCafe), 4u); // c a f é
   EXPECT_EQ(text::codepoint_count(kCafe), 4u);
-  EXPECT_EQ(kCafe.size(), 5u);                  // é is 2 bytes
+  EXPECT_EQ(kCafe.size(), 5u); // é is 2 bytes
 
   EXPECT_EQ(text::display_width(kNihongo), 6u); // 3 wide glyphs
   EXPECT_EQ(text::codepoint_count(kNihongo), 3u);
@@ -106,9 +104,9 @@ TEST(CvcText, IsValidUtf8) {
   EXPECT_TRUE(text::is_valid_utf8(kCafe));
   EXPECT_TRUE(text::is_valid_utf8(kNihongo));
   EXPECT_TRUE(text::is_valid_utf8(""));
-  EXPECT_FALSE(text::is_valid_utf8("\x80"));       // lone continuation
-  EXPECT_FALSE(text::is_valid_utf8("a\xFF"));      // invalid lead
-  EXPECT_FALSE(text::is_valid_utf8("\xE6\x97"));   // truncated 3-byte
+  EXPECT_FALSE(text::is_valid_utf8("\x80"));        // lone continuation
+  EXPECT_FALSE(text::is_valid_utf8("a\xFF"));       // invalid lead
+  EXPECT_FALSE(text::is_valid_utf8("\xE6\x97"));    // truncated 3-byte
   EXPECT_TRUE(text::is_valid_utf8("\xEF\xBF\xBD")); // a genuine U+FFFD is valid
 }
 

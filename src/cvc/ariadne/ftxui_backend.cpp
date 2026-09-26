@@ -22,12 +22,10 @@
 // functions inside this namespace. Every FTXUI call is qualified fx:: to pick
 // the terminal DOM function, never the Widget builder.
 
-#include <cvc/ariadne/ftxui_backend.h>
-
-#include <cvc/ariadne/ariadne.h>
-
 #include <algorithm>
 #include <cstdio>
+#include <cvc/ariadne/ariadne.h>
+#include <cvc/ariadne/ftxui_backend.h>
 #include <string>
 #include <vector>
 
@@ -46,9 +44,9 @@ namespace ariadne {
 namespace fx = ftxui;
 
 struct FtxuiBackend::Impl {
-  std::vector<fx::Elements> stack;   // container stack; top holds the current list
-  std::vector<std::string> titles;   // window titles, parallel to window pushes
-  std::vector<Layout> grids;         // open grids, parallel to grid container pushes
+  std::vector<fx::Elements> stack; // container stack; top holds the current list
+  std::vector<std::string> titles; // window titles, parallel to window pushes
+  std::vector<Layout> grids;       // open grids, parallel to grid container pushes
   fx::Element root = fx::text("");
 
   void open() { stack.emplace_back(); }
@@ -68,12 +66,12 @@ FtxuiBackend::~FtxuiBackend() = default;
 
 Capabilities FtxuiBackend::capabilities() const {
   Capabilities c;
-  c.windows = false;  // FTXUI is fullscreen/tiled: `free` degrades to tiled (§16.2)
+  c.windows = false; // FTXUI is fullscreen/tiled: `free` degrades to tiled (§16.2)
   c.menubar = true;
   c.mouse = true;
   c.keyboard = true;
   c.color = true;
-  c.glsl = false;     // no GLSL on a terminal — a shader widget degrades (§16.3)
+  c.glsl = false; // no GLSL on a terminal — a shader widget degrades (§16.3)
   c.view_embed = false;
   c.owns_loop = true; // FTXUI's ScreenInteractive owns the loop (§16.2)
   return c;
@@ -128,7 +126,8 @@ void FtxuiBackend::end_window() {
 }
 
 bool FtxuiBackend::begin_grid(const Layout &layout, const char * /*id*/) {
-  m_->grids.push_back(layout); // copy — the walk's Widget outlives the call, but copy is cheap + safe
+  m_->grids.push_back(
+      layout); // copy — the walk's Widget outlives the call, but copy is cheap + safe
   m_->open();
   return true;
 }
@@ -154,8 +153,9 @@ void FtxuiBackend::end_grid() {
     else if (t.unit == Unit::Percent)
       cells[i] = fx::flex(cells[i]);
   }
-  fx::Element box = cells.empty() ? fx::text("")
-                                  : (vertical ? fx::vbox(std::move(cells)) : fx::hbox(std::move(cells)));
+  fx::Element box = cells.empty()
+                        ? fx::text("")
+                        : (vertical ? fx::vbox(std::move(cells)) : fx::hbox(std::move(cells)));
   if (layout.borders != BorderShow::None)
     box = fx::border(box);
   m_->add(box);

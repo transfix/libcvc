@@ -15,8 +15,6 @@
 
 #include <chrono>
 #include <cstdio>
-#include <thread>
-
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
@@ -26,6 +24,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <thread>
 
 using cvc::gl::CameraController;
 using cvc::gl::ImGuiBackend;
@@ -109,8 +108,8 @@ int main(int argc, char **argv) {
       // a widget `bind:` and a scene `visible:` on one path share one key.
       if (customs_ok && lr.scene.any()) {
         std::vector<std::string> scene_warnings;
-        realized = cvc::gl::ariadne::realize_scene(sg, lr.scene, sg.getStatePrefix(),
-                                                   &scene_warnings);
+        realized =
+            cvc::gl::ariadne::realize_scene(sg, lr.scene, sg.getStatePrefix(), &scene_warnings);
         std::printf("[ariadne_hello] scene: %zu node(s), %zu visibility bind(s)\n",
                     realized.created.size(), realized.visibility.size());
         for (const std::string &w : scene_warnings)
@@ -124,25 +123,27 @@ int main(int argc, char **argv) {
   }
   if (!loaded)
     tree = group({
-      menubar({
-          menu("Sim", {
-                          menu_toggle("Paused", "demo.paused", false),
-                          menu_action("Reset", "reset"),
-                          menu_action("Quit", "quit"),
-                      }),
-      }),
-      window("Controls", {
-                             text("Ariadne P0 — a programmatic widget tree."),
-                             separator(),
-                             slider_int("Agents", "demo.agents", 1, 512, 64),
-                             slider_float("Speed", "demo.speed", 0.1, 4.0, 1.0, "%.2f"),
-                             checkbox("Wireframe", "demo.wire", false),
-                             combo("Belief", "demo.belief", {"shared", "grouped", "private"}, "shared"),
-                             separator(),
-                             custom("labeled", "Belief", "demo.belief"), // a custom widget type
-                             checkbox("Show mesh", "demo.show_mesh", true),
-                             button("Reset", "reset"),
-                         }),
+        menubar({
+            menu("Sim",
+                 {
+                     menu_toggle("Paused", "demo.paused", false),
+                     menu_action("Reset", "reset"),
+                     menu_action("Quit", "quit"),
+                 }),
+        }),
+        window("Controls",
+               {
+                   text("Ariadne P0 — a programmatic widget tree."),
+                   separator(),
+                   slider_int("Agents", "demo.agents", 1, 512, 64),
+                   slider_float("Speed", "demo.speed", 0.1, 4.0, 1.0, "%.2f"),
+                   checkbox("Wireframe", "demo.wire", false),
+                   combo("Belief", "demo.belief", {"shared", "grouped", "private"}, "shared"),
+                   separator(),
+                   custom("labeled", "Belief", "demo.belief"), // a custom widget type
+                   checkbox("Show mesh", "demo.show_mesh", true),
+                   button("Reset", "reset"),
+               }),
     });
   rt.set_root(std::move(tree));
 
@@ -156,7 +157,7 @@ int main(int argc, char **argv) {
     // §9: service any volren/volslice nodes (they render nothing without a per-frame
     // tick + a multi-slice depth sort). A no-op for a scene without volume renderers.
     cvc::gl::ariadne::tick_scene(realized, view.renderer());
-    view.render();          // draws the scene + the Ariadne overlay (runs rt.render())
+    view.render(); // draws the scene + the Ariadne overlay (runs rt.render())
     // §4 read-lane: surface any reactive-predicate diagnostics (a broken visible_when
     // parse/eval, or a build without state_exec). De-duplicated, so each distinct issue
     // prints once however many frames it renders — safe to poll every frame.

@@ -19,14 +19,13 @@
 // machinery does the setVisible. The binding holds only state-path strings (no node
 // pointer), so it can never dangle into a torn-down node.
 
+#include <cvc/ariadne/bind.h>     // SceneVisibilityBinding
+#include <cvc/ariadne/loader.h>   // LoadResult / CustomRequirement (verify_scene_customs)
+#include <cvc/gl/StageLighting.h> // RealizedScene owns any StageLighting rigs
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <cvc/ariadne/bind.h>        // SceneVisibilityBinding
-#include <cvc/ariadne/loader.h>      // LoadResult / CustomRequirement (verify_scene_customs)
-#include <cvc/gl/StageLighting.h>    // RealizedScene owns any StageLighting rigs
 
 class vtkRenderer;
 
@@ -97,8 +96,8 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
 // cvcGL side of extensibility — the core never learns the custom type; it only carries
 // its `props` as data.
 using NodeRealizer = std::function<std::shared_ptr<GraphicsNode>(
-    SceneGraph &sg, const cvc::ariadne::SceneNode &node, GraphicsNode *parent,
-    RealizedScene &out, std::vector<std::string> *warnings)>;
+    SceneGraph &sg, const cvc::ariadne::SceneNode &node, GraphicsNode *parent, RealizedScene &out,
+    std::vector<std::string> *warnings)>;
 
 // Register (or replace) a realizer for a custom scene node `type`. Registering a
 // built-in type (geometry/volume/volren/volslice/group) is a no-op — the built-ins own

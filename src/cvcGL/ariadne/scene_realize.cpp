@@ -1,11 +1,3 @@
-#include <cvc/gl/ariadne/scene_realize.h>
-
-#include <exception>
-#include <functional>
-#include <map>
-#include <memory>
-#include <mutex>
-
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/core/app.h>
@@ -19,11 +11,16 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/volume/bounding_box.h>
-#include <cvc/volume/volume.h>
+#include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/volren/settings.h>
 #include <cvc/volslice/settings.h>
-
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/volume.h>
+#include <exception>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <vtkRenderer.h>
 
 namespace cvc {
@@ -65,8 +62,8 @@ void apply_transform(GraphicsNode &node, const cvc::ariadne::SceneNode &n) {
 // (not a direct setVisible), so cvc::state stays authoritative (§9.1) and the node's
 // state_object machinery performs the actor flip. `bind_prefix` matches the widget
 // Runtime's prefix so a `visible:`/`bind:` pair on the same path share one key.
-void apply_visibility(GraphicsNode &node, const cvc::ariadne::SceneNode &n,
-                      cvc::app &app, const std::string &bind_prefix,
+void apply_visibility(GraphicsNode &node, const cvc::ariadne::SceneNode &n, cvc::app &app,
+                      const std::string &bind_prefix,
                       std::vector<cvc::ariadne::SceneVisibilityBinding> &binds) {
   const std::string target = node.stateName("visible");
   if (n.visible_bind.empty()) {
@@ -113,12 +110,14 @@ void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const 
   }
   // Blank when there is no isosurface AND (no TF, or neither media pass is enabled).
   if (v.isosurfaces.empty() && (v.tf.empty() || !(v.shaded || v.unshaded)))
-    warn(warnings, "ari: volren node '" + id +
-                       "' has nothing to render (no isosurfaces, and its transfer_function is empty or "
-                       "both shaded and unshaded are off); it renders blank");
+    warn(warnings,
+         "ari: volren node '" + id +
+             "' has nothing to render (no isosurfaces, and its transfer_function is empty or "
+             "both shaded and unshaded are off); it renders blank");
   else if (v.shaded && v.lights.empty() && v.ambient == 0.0f)
-    warn(warnings, "ari: volren node '" + id +
-                       "' is shaded with no lights and ambient 0; the surface reads as a black silhouette");
+    warn(warnings,
+         "ari: volren node '" + id +
+             "' is shaded with no lights and ambient 0; the surface reads as a black silhouette");
   vn.setResolutionScale(v.resolution_scale);
   vn.addVolume(vol, vs);
   cvc::volren::render_settings rs = vn.renderConfig();
@@ -159,8 +158,8 @@ void configure_volslice(VolSliceNode &vn, const cvc::ariadne::SceneVolSlice &v,
   for (const auto &p : v.tf.points)
     s.tf.add({p.value, p.color[0], p.color[1], p.color[2], p.color[3]});
   if (v.tf.empty())
-    warn(warnings, "ari: volslice node '" + id +
-                       "' has an empty transfer_function; it renders blank");
+    warn(warnings,
+         "ari: volslice node '" + id + "' has an empty transfer_function; it renders blank");
   vn.setConfig(s);
 }
 
@@ -171,9 +170,8 @@ void configure_volslice(VolSliceNode &vn, const cvc::ariadne::SceneVolSlice &v,
 // child moves/rotates/scales relative to its parent (§9 local transforms). Top-level
 // nodes go through sg.addGraphics (registered in the name map + null-graphic removal
 // + the volume-rendering hookup).
-void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
-                  const std::string &bind_prefix, RealizedScene &out,
-                  GraphicsNode *parent, std::vector<std::string> *warnings) {
+void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::string &bind_prefix,
+                  RealizedScene &out, GraphicsNode *parent, std::vector<std::string> *warnings) {
   std::shared_ptr<GraphicsNode> node;
 
   if (n.type == "geometry") {
@@ -294,8 +292,10 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
     } else {
       // light node type is a follow-up (SceneNode lacks the light fields — declare
       // lights in the `lights:` array). The spec still parses/round-trips.
-      warn(warnings, "ari: scene node '" + n.id + "' type '" + n.type +
-                         "' not realized (no built-in or registered realizer; a 'light' node is a follow-up)");
+      warn(
+          warnings,
+          "ari: scene node '" + n.id + "' type '" + n.type +
+              "' not realized (no built-in or registered realizer; a 'light' node is a follow-up)");
       return;
     }
   }
@@ -367,8 +367,7 @@ void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedSc
 } // namespace
 
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
-                            const std::string &bind_prefix,
-                            std::vector<std::string> *warnings) {
+                            const std::string &bind_prefix, std::vector<std::string> *warnings) {
   RealizedScene out;
   out.created.reserve(scene.nodes.size());
   for (const auto &n : scene.nodes) {
@@ -430,7 +429,8 @@ bool has_scene_node_type(const std::string &type) {
   return node_registry().find(type) != node_registry().end();
 }
 
-bool verify_scene_customs(const cvc::ariadne::LoadResult &loaded, std::vector<std::string> *errors) {
+bool verify_scene_customs(const cvc::ariadne::LoadResult &loaded,
+                          std::vector<std::string> *errors) {
   bool ok = true;
   for (const cvc::ariadne::CustomRequirement &req : loaded.customs) {
     if (req.kind != cvc::ariadne::CustomRequirement::Kind::Node)

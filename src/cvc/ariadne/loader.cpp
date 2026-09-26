@@ -8,14 +8,12 @@
 // LOAD GATE (checked first — a document that needs a newer libcvc fails to load
 // rather than half-rendering), plus semantic validation surfaced as warnings.
 
-#include <cvc/ariadne/loader.h>
-
-#include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
-#include <cvc/core/config.h>     // CVC_VERSION_STRING (generated from project(VERSION))
-
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
+#include <cvc/ariadne/loader.h>
+#include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
 #include <functional>
 #include <map>
 #include <mutex>
@@ -85,8 +83,8 @@ std::map<std::string, AriBlockParser> &block_registry() {
   return r;
 }
 bool is_builtin_block(const std::string &k) {
-  return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" ||
-         k == "root" || k == "children" || k == "scene" || k == "customs" || k == "init";
+  return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
+         k == "children" || k == "scene" || k == "customs" || k == "init";
 }
 } // namespace
 
@@ -227,8 +225,8 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 // Widget keys the loader consumes directly; everything else on a custom widget flows
 // into Widget::props for a registered emit fn to read.
 inline bool known_widget_key(const std::string &k) {
-  return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" ||
-         k == "on" || k == "children" || k == "items" || k == "id" || k == "visible_when";
+  return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
+         k == "children" || k == "items" || k == "id" || k == "visible_when";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -240,10 +238,9 @@ std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
 }
 
 std::string widget_type(const YAML::Node &n, std::string &label) {
-  static const char *kKeys[] = {"group",   "menubar",     "menu",         "menu_item",
-                                "window",  "overlay",     "panel",        "text",
-                                "checkbox", "slider_int", "slider_float",
-                                "combo",   "button",      "separator"};
+  static const char *kKeys[] = {"group",        "menubar", "menu",   "menu_item", "window",
+                                "overlay",      "panel",   "text",   "checkbox",  "slider_int",
+                                "slider_float", "combo",   "button", "separator"};
   for (const char *k : kKeys) {
     const YAML::Node v = n[k];
     if (v.IsDefined()) {
@@ -424,8 +421,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     Widget w = window(label, parse_seq(ctx, n["children"]));
     w.id = str(n, "id");
     parse_pos(n, w);
-    w.size = parse_size(n["size"]);            // §3.0.3b window sizing (%/px/auto)
-    w.layout = parse_layout(n["layout"]);      // §3.0.3b window-body layout (grid/tracks)
+    w.size = parse_size(n["size"]);                  // §3.0.3b window sizing (%/px/auto)
+    w.layout = parse_layout(n["layout"]);            // §3.0.3b window-body layout (grid/tracks)
     w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
     return w;
   }
@@ -595,8 +592,7 @@ Value to_value(const YAML::Node &n) {
 // into SceneNode::props for a custom node type to read.
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
-         k == "transform" || k == "visible" || k == "volren" || k == "volslice" ||
-         k == "children";
+         k == "transform" || k == "visible" || k == "volren" || k == "volslice" || k == "children";
 }
 
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
@@ -900,10 +896,9 @@ LoadResult load_node(const YAML::Node &doc) {
 
   // The min_libcvc gate fires FIRST (roadmap §3.1a): a document that needs a
   // newer libcvc fails to load rather than half-rendering against a stale API.
-  if (!r.meta.min_libcvc.empty() &&
-      !version_at_least(libcvc_version(), r.meta.min_libcvc)) {
-    r.error = "ari: document requires libcvc >= " + r.meta.min_libcvc +
-              " but this build is " + libcvc_version();
+  if (!r.meta.min_libcvc.empty() && !version_at_least(libcvc_version(), r.meta.min_libcvc)) {
+    r.error = "ari: document requires libcvc >= " + r.meta.min_libcvc + " but this build is " +
+              libcvc_version();
     return r;
   }
 

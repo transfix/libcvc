@@ -13,12 +13,11 @@
 // It degrades to safe no-ops when libcvc is built without CVC_ENABLE_IMGUI
 // (every draw becomes an inert stub, mirroring the cvc::gl::ui:: layer).
 
+#include <cvc/ariadne/backend.h>
 #include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include <cvc/ariadne/backend.h>
 
 namespace cvc {
 namespace ariadne {
@@ -67,8 +66,8 @@ public:
   // Ariadne core owns the cvc::state read/write. An unregistered type -> {handled:
   // false} -> the core draws a placeholder. Use this for widgets the compositional
   // register_widget_type can't express (a colour wheel, a shader canvas).
-  using CustomDrawFn =
-      std::function<cvc::ariadne::CustomEdit(const std::string &current, const cvc::ariadne::Widget &w)>;
+  using CustomDrawFn = std::function<cvc::ariadne::CustomEdit(const std::string &current,
+                                                              const cvc::ariadne::Widget &w)>;
   void register_widget(std::string custom_type, CustomDrawFn draw);
   cvc::ariadne::CustomEdit custom_widget(const char *type, const std::string &current,
                                          const cvc::ariadne::Widget &w) override;
@@ -88,13 +87,13 @@ private:
   // vertical split-pane stack with draggable seams (row splitter). Held on a
   // stack so nested grids compose. No ImGui types here (backend-header-clean).
   struct GridState {
-    bool split = false;               // split-pane mode vs table mode
+    bool split = false; // split-pane mode vs table mode
     int cols = 1;
-    int cell = 0;                     // cells emitted so far
-    std::vector<float> row_px;        // resolved row heights (px; 0 = auto/fit)
-    std::vector<float *> pane_h;      // split mode: pointers to each pane's live height (ImGui storage)
-    float split_long_axis = 0.0f;     // split mode: the seam's cross length
-    int color_pushes = 0;             // table border-colour style pushes to pop
+    int cell = 0;                 // cells emitted so far
+    std::vector<float> row_px;    // resolved row heights (px; 0 = auto/fit)
+    std::vector<float *> pane_h;  // split mode: pointers to each pane's live height (ImGui storage)
+    float split_long_axis = 0.0f; // split mode: the seam's cross length
+    int color_pushes = 0;         // table border-colour style pushes to pop
   };
   std::vector<GridState> m_grids;
 

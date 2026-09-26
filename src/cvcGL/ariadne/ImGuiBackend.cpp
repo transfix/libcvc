@@ -10,13 +10,11 @@
 // a drag edits a cache every frame and reports `committed` only on release, so
 // the core writes cvc::state once per drag, not once per frame.
 
-#include <cvc/gl/ariadne/ImGuiBackend.h>
-
+#include <cfloat>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
-
-#include <cfloat>
+#include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <string>
 #include <vector>
 

@@ -8,7 +8,6 @@
 // release, not one per frame (writes fan out to observers / replicated peers).
 
 #include <cvc/ariadne/ariadne.h>
-
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
 #include <cvc/core/app.h>
@@ -213,8 +212,8 @@ public:
     se::register_intrinsics(full, &ctx_);
     static const char *const kAllowed[] = {
         // arithmetic / comparison / coercion / type predicates / logic
-        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "str",
-        "is-int", "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
+        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "str", "is-int",
+        "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
         // bounded compound construction (by-reference; not the doubling materializers) + access
         "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
         // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables)
@@ -228,9 +227,9 @@ public:
     // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
     // set is shared across every ReactiveEngine.
     static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
-        std::make_shared<const std::set<std::string>>(std::set<std::string>{
-            "if", "begin", "let", "while", "for", "lambda", "defun", "set", "return", "quote",
-            "yield", "break"});
+        std::make_shared<const std::set<std::string>>(
+            std::set<std::string>{"if", "begin", "let", "while", "for", "lambda", "defun", "set",
+                                  "return", "quote", "yield", "break"});
     ev_->restrict_special_forms(kAllowedForms);
   }
 
@@ -262,8 +261,7 @@ public:
       // Cap this eval at the per-slot time OR the frame's remaining budget, whichever is
       // smaller, plus the per-slot step cap. run() returns nil with done==false on a cap.
       const se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
-      frame_spent_ +=
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      frame_spent_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       if (!st.done) // step cap: run() returns nil with done==false
         return {dflt, "ari: visible_when: \"" + src +
                           "\" exceeded the eval budget (step cap) — widget hidden"};

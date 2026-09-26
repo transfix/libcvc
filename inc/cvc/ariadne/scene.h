@@ -8,10 +8,9 @@
 // it. Every realized node is a cvc::state_object, so a node IS a state subtree and
 // each prop a reactive state key (§9.1) — this struct just says what to create.
 
+#include <cvc/ariadne/value.h>
 #include <string>
 #include <vector>
-
-#include <cvc/ariadne/value.h>
 
 namespace cvc {
 namespace ariadne {
@@ -27,8 +26,8 @@ struct SceneTFPoint {
 // A transfer function for a volume renderer. Empty ⇒ nothing drawn.
 struct SceneTransferFunction {
   std::vector<SceneTFPoint> points;
-  bool auto_domain = true;   // bake over the volume's data range (vs an explicit window)
-  bool has_window = false;   // explicit value window instead of the data range
+  bool auto_domain = true; // bake over the volume's data range (vs an explicit window)
+  bool has_window = false; // explicit value window instead of the data range
   double window_min = 0.0, window_max = 0.0; // raw value domain — double like the renderer
   bool empty() const { return points.empty(); }
 };
@@ -69,7 +68,7 @@ struct SceneVolSlice {
   float quality = 0.5f;
   int max_planes = 1000;
   float near_plane = 0.0f;
-  bool nearest_filter = false;   // filter: nearest | linear
+  bool nearest_filter = false; // filter: nearest | linear
   bool opacity_correction = false;
   SceneTransferFunction tf;
 };
@@ -77,9 +76,9 @@ struct SceneVolSlice {
 // One scene node (§9.2/§9.3). `type` is geometry | volume | volren | volslice |
 // group | light. Fields not meaningful to a type are simply unused.
 struct SceneNode {
-  std::string id;                 // node name → <prefix>.graphics.root.children.<id>
-  std::string type = "geometry";  // node kind
-  std::string source_file;        // source: { file: ... } (geometry/volume load path)
+  std::string id;                // node name → <prefix>.graphics.root.children.<id>
+  std::string type = "geometry"; // node kind
+  std::string source_file;       // source: { file: ... } (geometry/volume load path)
 
   bool has_material = false;
   float color[3] = {0.8f, 0.8f, 0.9f};
@@ -91,7 +90,7 @@ struct SceneNode {
   float rotation[3] = {0.0f, 0.0f, 0.0f}; // Euler degrees
   float scale[3] = {1.0f, 1.0f, 1.0f};
 
-  bool has_volren = false;   // volren: {...} present (type: volren)
+  bool has_volren = false; // volren: {...} present (type: volren)
   SceneVolRen volren;
   bool has_volslice = false; // volslice: {...} present (type: volslice)
   SceneVolSlice volslice;
@@ -117,11 +116,11 @@ struct SceneLight {
   std::string kind = "directional"; // directional | spot | fill
   float pos[3] = {0.0f, 0.0f, 0.0f};
   float target[3] = {0.0f, 0.0f, 0.0f};
-  float cone = 45.0f;                    // spot/fill cone angle (degrees)
-  float azimuth = 0.0f;                  // directional: compass bearing (0 = +Y toward +X)
-  float elevation = 45.0f;               // directional: degrees above the horizon
+  float cone = 45.0f;      // spot/fill cone angle (degrees)
+  float azimuth = 0.0f;    // directional: compass bearing (0 = +Y toward +X)
+  float elevation = 45.0f; // directional: degrees above the horizon
   float intensity = 1.0f;
-  float color[3] = {1.0f, 1.0f, 1.0f};   // light colour (default white)
+  float color[3] = {1.0f, 1.0f, 1.0f}; // light colour (default white)
   std::string rig; // rig: <preset> (StageLighting), mutually exclusive with the above
 };
 

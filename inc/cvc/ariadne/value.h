@@ -27,8 +27,8 @@ struct Value {
   enum class Kind { Scalar, Sequence, Map };
 
   Kind kind = Kind::Scalar;
-  std::string scalar;                                // Kind::Scalar
-  std::vector<Value> items;                          // Kind::Sequence
+  std::string scalar;                                 // Kind::Scalar
+  std::vector<Value> items;                           // Kind::Sequence
   std::vector<std::pair<std::string, Value>> entries; // Kind::Map (insertion order)
 
   bool is_scalar() const { return kind == Kind::Scalar; }

@@ -21,12 +21,11 @@
 // This is the P0 slice; the full contract (dynamic-DOM reconcile, expressions,
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
+#include <cvc/ariadne/widget.h>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <cvc/ariadne/widget.h>
 
 namespace cvc {
 class app;

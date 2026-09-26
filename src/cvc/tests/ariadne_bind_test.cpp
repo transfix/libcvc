@@ -8,9 +8,7 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
-
 #include <gtest/gtest.h>
-
 #include <string>
 #include <vector>
 
@@ -26,9 +24,7 @@ std::string sval(cvc::app &app, const std::string &path) {
 
 // --- resolve_bind: the rule that MUST match the widget Runtime -----------------
 
-TEST(AriadneBind, ResolveEmptyPrefixIsIdentity) {
-  EXPECT_EQ(resolve_bind("", "a.b"), "a.b");
-}
+TEST(AriadneBind, ResolveEmptyPrefixIsIdentity) { EXPECT_EQ(resolve_bind("", "a.b"), "a.b"); }
 
 TEST(AriadneBind, ResolvePrefixSplices) {
   EXPECT_EQ(resolve_bind("ui.demo", "wire"), "ui.demo.wire");
@@ -40,9 +36,7 @@ TEST(AriadneBind, ResolveLeadingSlashEscapesPrefix) {
   EXPECT_EQ(resolve_bind("", "/x"), "x");
 }
 
-TEST(AriadneBind, ResolveEmptyBindStaysEmpty) {
-  EXPECT_EQ(resolve_bind("ui.demo", ""), "");
-}
+TEST(AriadneBind, ResolveEmptyBindStaysEmpty) { EXPECT_EQ(resolve_bind("ui.demo", ""), ""); }
 
 // --- read_or_seed / write ------------------------------------------------------
 
@@ -133,7 +127,7 @@ TEST(AriadneBind, SyncDoesNotSeedTheSource) {
   std::vector<SceneVisibilityBinding> binds = {{"owner.key", "node.visible", true}};
   sync_scene_visibility(app, binds);
   EXPECT_EQ(sval(app, "owner.key"), "");     // source left untouched (not seeded)
-  EXPECT_EQ(sval(app, "node.visible"), "1");  // node falls back to its own default
+  EXPECT_EQ(sval(app, "node.visible"), "1"); // node falls back to its own default
 }
 
 // Regression: the node's default must NOT override the key owner's value. A checkbox

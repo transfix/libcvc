@@ -9,9 +9,6 @@
 //   * a nested node's transform is LOCAL (world = parent ∘ local).
 #include <cmath>
 #include <cstdio>
-
-#include <cstdio>
-
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -87,11 +84,15 @@ int main() {
     SceneRenderer view(sg, 128, 128, /*offscreen=*/true, "main");
 
     Scene scene;
-    SceneLight key; // a spot whose trailing setters are all no-ops (defaults), so
-    key.id = "key"; // ONLY the light batch can bake its moved position — this is
-    key.kind = "spot";                            // exactly the batch-removal regression.
-    key.pos[0] = 10; key.pos[1] = 20; key.pos[2] = 30;
-    key.target[0] = 0; key.target[1] = 0; key.target[2] = 0;
+    SceneLight key;    // a spot whose trailing setters are all no-ops (defaults), so
+    key.id = "key";    // ONLY the light batch can bake its moved position — this is
+    key.kind = "spot"; // exactly the batch-removal regression.
+    key.pos[0] = 10;
+    key.pos[1] = 20;
+    key.pos[2] = 30;
+    key.target[0] = 0;
+    key.target[1] = 0;
+    key.target[2] = 0;
     key.cone = 30; // == LightNode's internal default (a no-op setCone)
     scene.lights.push_back(key);
 
@@ -111,7 +112,8 @@ int main() {
            s.directional, s.posLightPos[0], s.posLightPos[1], s.posLightPos[2]);
     chk(s.positional == 1, "spot -> exactly one positional vtkLight");
     chk(s.directional == 1, "directional -> exactly one non-positional vtkLight");
-    chk(approx(s.posLightPos[0], 10) && approx(s.posLightPos[1], 20) && approx(s.posLightPos[2], 30),
+    chk(approx(s.posLightPos[0], 10) && approx(s.posLightPos[1], 20) &&
+            approx(s.posLightPos[2], 30),
         "light batch baked the spot's moved position (10,20,30), not the origin");
   }
 
@@ -147,7 +149,8 @@ int main() {
     printf("== nesting: local transform composes through the parent ==\n");
     auto group = sg.getGraphics("convoy");
     chk(group != nullptr, "top-level group is registered and found");
-    std::shared_ptr<cvc::gl::GraphicsNode> child = group ? group->findChildByName("truck") : nullptr;
+    std::shared_ptr<cvc::gl::GraphicsNode> child =
+        group ? group->findChildByName("truck") : nullptr;
     chk(child != nullptr, "child 'truck' is nested UNDER the convoy group");
     if (child) {
       const double origin[3] = {0, 0, 0};
@@ -200,7 +203,9 @@ int main() {
       SceneIsosurface iso; // a shell at density 0.5
       iso.value = 0.5f;
       iso.opacity = 1.0f;
-      iso.color[0] = 1.0f; iso.color[1] = 0.3f; iso.color[2] = 0.2f;
+      iso.color[0] = 1.0f;
+      iso.color[1] = 0.3f;
+      iso.color[2] = 0.2f;
       iso.shininess = 32.0f;
       vr.volren.isosurfaces.push_back(iso);
     }
@@ -212,8 +217,19 @@ int main() {
     vs.source_file = volPath;
     vs.has_volslice = true;
     vs.volslice.quality = 0.5f;
-    { SceneTFPoint p; p.value = 0.0f; p.color[0] = 1.0f; vs.volslice.tf.points.push_back(p); }
-    { SceneTFPoint p; p.value = 1.0f; p.color[0] = 1.0f; p.color[3] = 0.8f; vs.volslice.tf.points.push_back(p); }
+    {
+      SceneTFPoint p;
+      p.value = 0.0f;
+      p.color[0] = 1.0f;
+      vs.volslice.tf.points.push_back(p);
+    }
+    {
+      SceneTFPoint p;
+      p.value = 1.0f;
+      p.color[0] = 1.0f;
+      p.color[3] = 0.8f;
+      vs.volslice.tf.points.push_back(p);
+    }
     scene.nodes.push_back(vs);
 
     auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "vol");
@@ -291,7 +307,7 @@ int main() {
         [](SceneGraph &sg, const cvc::ariadne::SceneNode &n, cvc::gl::GraphicsNode *parent,
            cvc::gl::ariadne::RealizedScene &out,
            std::vector<std::string> *) -> std::shared_ptr<cvc::gl::GraphicsNode> {
-          g_custom_radius = n.props.num("radius", -1.0); // reads the neutral props bag
+          g_custom_radius = n.props.num("radius", -1.0);           // reads the neutral props bag
           cvc::geometry geom = cvc::read_geometry("beacon.bunny"); // embedded, no file
           std::shared_ptr<cvc::gl::GraphicsNode> node;
           if (parent)
@@ -310,7 +326,7 @@ int main() {
     b.id = "b1";
     b.type = "beacon";
     b.has_transform = true;
-    b.position[0] = 100; // the custom node's own (local) transform
+    b.position[0] = 100;             // the custom node's own (local) transform
     b.props.kind = Value::Kind::Map; // as the loader would have captured `radius: 2.5`
     {
       Value radius;

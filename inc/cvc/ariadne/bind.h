@@ -10,12 +10,11 @@
 // MUST resolve to the identical state key, or the checkbox and the mesh would drift
 // onto two different keys. Lift, never re-hand-roll.
 
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <exception>
 #include <string>
 #include <vector>
-
-#include <cvc/core/app.h>
-#include <cvc/core/state.h>
 
 namespace cvc {
 namespace ariadne {
@@ -84,9 +83,9 @@ template <typename T> void write(cvc::app &ctx, const std::string &path, const T
 // state_object machinery (SceneNode::handleStateChanged) turns the `.visible` write
 // into a setVisible on the owner thread.
 struct SceneVisibilityBinding {
-  std::string source_path;      // resolved bind path some widget layer OWNS (+ seeds)
-  std::string target_path;      // the node's `<node-state-path>.visible` key
-  bool default_visible = true;  // fallback ONLY while the source has no value yet
+  std::string source_path;     // resolved bind path some widget layer OWNS (+ seeds)
+  std::string target_path;     // the node's `<node-state-path>.visible` key
+  bool default_visible = true; // fallback ONLY while the source has no value yet
 };
 
 // Poll every visibility binding once and mirror source -> node `.visible`. Reads and
