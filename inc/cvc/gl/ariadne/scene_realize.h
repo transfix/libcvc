@@ -19,10 +19,12 @@
 // machinery does the setVisible. The binding holds only state-path strings (no node
 // pointer), so it can never dangle into a torn-down node.
 
+#include <memory>
 #include <string>
 #include <vector>
 
-#include <cvc/ariadne/bind.h> // SceneVisibilityBinding
+#include <cvc/ariadne/bind.h>        // SceneVisibilityBinding
+#include <cvc/gl/StageLighting.h>    // RealizedScene owns any StageLighting rigs
 
 namespace cvc {
 namespace ariadne {
@@ -34,12 +36,15 @@ class SceneGraph;
 
 namespace ariadne {
 
-// The result of realizing a Scene: the top-level node ids created, and the
-// visibility bindings the host must poll each frame (empty when no node uses
-// `visible: <path>`).
+// The result of realizing a Scene: the top-level node ids created, the visibility
+// bindings the host must poll each frame (empty when no node uses `visible: <path>`),
+// and any StageLighting rigs. The rigs are OWNED here because `~StageLighting`
+// removes the rig's lights from the scene — so the RealizedScene must outlive the
+// render loop (as the host already keeps it) or the lights vanish.
 struct RealizedScene {
   std::vector<std::string> created;
   std::vector<cvc::ariadne::SceneVisibilityBinding> visibility;
+  std::vector<std::unique_ptr<StageLighting>> rigs;
 };
 
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME

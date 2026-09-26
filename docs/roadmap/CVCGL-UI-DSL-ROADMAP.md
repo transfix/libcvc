@@ -1582,13 +1582,34 @@ of a hand-built C++ escape.
 > `read_geometry("*.bunny")` returns it, 34835 verts / 69473 tris, verified) with `visible:
 > demo.show_mesh`, the same path the "Show mesh" checkbox writes, so the box hides/shows the bunny.
 >
-> **Follow-ups (not yet built):** volume/volren/volslice/light *realization* (they parse
-> and round-trip, but `realize_scene` only builds geometry/group today); true parent
-> nesting through a `<parent>.children.<child>` path (rides on §11 path binding — children
-> realize flat for now); binding *other* scene props (transform/material/color) to state the
-> same way visibility now is; a VTK-linked `realize_scene` gtest under `src/cvcGL/test/`
-> (the realizer's node-building + seed logic is only compile-verified today — the pure-state
-> mirror is covered by `AriadneBind.*`, but building a `SceneGraph` needs VTK the core test
+> **Status — increment 3 landed (volume nodes + lights + rigs + shadows).** `realize_scene` now
+> builds three more kinds. A `type: volume` node loads via the read-on-construct
+> `cvc::volume(app, source_file)` and `sg.addGraphics(id, vol)` → `VolumeNode` — which self-applies
+> a default grayscale transfer function, so it renders with no config; being a `GraphicsNode` it
+> reuses the same transform + `visible:` path as geometry (a `color:` has no single-actor analog on
+> a volume, so only `ambient`/`diffuse` map, and only when the node is styled). The `lights:` array
+> realizes into `cvc::gl::LightNode`s: `spot`/`fill` use position + target + cone, `directional`
+> uses `azimuth`/`elevation` (a compass sun — `SceneLight` gained `color`, `azimuth`, `elevation`),
+> all wrapped in `beginLightBatch`/`endLightBatch` — which is a *correctness* fix, not just perf
+> (`setPosition` fires `transformChanged`, not `lightsChanged`, and `addLight` applies the light set
+> before the move, so the batch's single final `applyLights` is what bakes the right position). A
+> `rig:` realizes a `cvc::gl::StageLighting` preset (`three_point`/`overhead`/`dramatic`/`flat`,
+> mapped explicitly since `presetName()` is hyphenated), framed to `computeGraphicsBounds()` and
+> **owned by `RealizedScene`** (its dtor removes its lights, so it must outlive the loop). `shadows:`
+> → `sg.setShadowsEnabled` (guarded — warns if there's no shadow target yet). `hello.ari` gains a
+> directional sun + shadows over the bunny. 3 new loader gtests (light color/az/el, defaults,
+> volume-node parse); realizer + demo compile-verified against real cvcGL/VTK headers.
+>
+> **Follow-ups (not yet built):** **volren/volslice realization** — deferred deliberately: they need
+> a new per-frame `tick()` host seam (`RealizedScene` + the render loop + `depthSortSliceProps` need
+> the `vtkRenderer`) *and* nested transfer-function/isosurface param structs on `SceneNode` the spec
+> doesn't carry, so realizing them without that plumbing yields a node that never renders (a silent
+> no-op) — its own increment. Also: the `light` *node* type (`SceneNode` lacks the light fields —
+> declare lights in `lights:`); a `Scene`-level `rig:` (it's a scene property, not one light);
+> directional-from-pos/target derivation; true parent nesting via a `<parent>.children.<child>` path
+> (§11); binding *other* scene props (transform/material/color) to state as visibility now is; a
+> VTK-linked `realize_scene` gtest under `src/cvcGL/test/` (node-building is compile-verified only —
+> the pure-state mirror is covered by `AriadneBind.*`, but a `SceneGraph` needs VTK the core test
 > tree lacks); and views/minimap (§9.5–9.6).
 
 ### 9.1 Which scene model

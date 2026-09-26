@@ -10,7 +10,12 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LightNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/StageLighting.h>
+#include <cvc/gl/VolumeNode.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/volume.h>
 
 namespace cvc {
 namespace gl {
@@ -84,13 +89,37 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
         g->setDiffuse(n.diffuse);
       }
     }
+  } else if (n.type == "volume") {
+    if (n.source_file.empty()) {
+      warn(warnings, "ari: scene node '" + n.id + "' (volume) has no source.file");
+      return;
+    }
+    std::shared_ptr<VolumeNode> vnode;
+    try {
+      cvc::volume vol(sg.appContext(), n.source_file); // reads on construct; throws on a bad file
+      vnode = sg.addGraphics(n.id, vol); // sets a default grayscale transfer function -> renders
+    } catch (const std::exception &e) {
+      warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
+      return;
+    }
+    node = vnode;
+    if (n.has_material) {
+      // A volume's colour comes from a transfer function, not a single actor colour,
+      // so `color[3]` has no analog here (a TF spec is a follow-up); only the lighting
+      // coefficients map. Apply only when the node is styled, so an unstyled volume
+      // keeps VolumeNode's tuned defaults.
+      vnode->setAmbient(n.ambient);
+      vnode->setDiffuse(n.diffuse);
+    }
   } else if (n.type == "group") {
     node = sg.addGraphics(n.id); // empty hierarchy node
   } else {
-    // volume/volren/volslice/light realization is a follow-up (§9); the spec still
-    // parses and round-trips so the document is valid — we just don't build it yet.
+    // volren/volslice/light realization is a follow-up (§9): volren/volslice need a
+    // per-frame tick() host seam + transfer-function/isosurface params the spec does
+    // not carry yet; declare a light in the `lights:` array instead. The spec still
+    // parses and round-trips so the document stays valid.
     warn(warnings, "ari: scene node '" + n.id + "' type '" + n.type +
-                       "' not realized yet (geometry/group only)");
+                       "' not realized yet (geometry/group/volume; volren/volslice/light are a follow-up)");
     return;
   }
 
@@ -105,6 +134,60 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
     realize_node(sg, c, bind_prefix, out, warnings);
 }
 
+LightNode::Kind light_kind(const std::string &k) {
+  if (k == "spot")
+    return LightNode::Kind::Spot;
+  if (k == "fill")
+    return LightNode::Kind::Fill;
+  return LightNode::Kind::Directional; // default + anything unrecognized
+}
+
+// Map the DSL's snake_case rig name to a StageLighting preset. Mapped explicitly —
+// StageLighting::presetName() is hyphenated ("three-point"), so it would NOT match a
+// `.ari` `rig: three_point`; do not "simplify" this into presetName().
+StageLighting::Preset preset_from(const std::string &r) {
+  if (r == "overhead")
+    return StageLighting::Preset::Overhead;
+  if (r == "dramatic")
+    return StageLighting::Preset::Dramatic;
+  if (r == "flat")
+    return StageLighting::Preset::Flat;
+  return StageLighting::Preset::ThreePoint; // "three_point" + default
+}
+
+void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedScene &out,
+                   std::vector<std::string> *warnings) {
+  if (!l.rig.empty()) {
+    // A named StageLighting rig — a whole lighting SETUP, not one light. Frame it to
+    // the realized geometry (lights are excluded from the bounds). The rig must
+    // outlive the render loop: ~StageLighting removes its lights, so RealizedScene
+    // owns it (the host keeps RealizedScene alive).
+    auto rig = std::make_unique<StageLighting>(sg);
+    const cvc::bounding_box bb = sg.computeGraphicsBounds();
+    if (!bb.isNull())
+      rig->frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+    rig->applyPreset(preset_from(l.rig));
+    out.rigs.push_back(std::move(rig));
+    return;
+  }
+  auto ln = sg.addLight(l.id);
+  if (!ln) {
+    warn(warnings, "ari: scene light '" + l.id + "' could not be created");
+    return;
+  }
+  const LightNode::Kind kind = light_kind(l.kind);
+  ln->setKind(kind); // FIRST: gates setCone's per-kind clamp
+  ln->setColor(l.color[0], l.color[1], l.color[2]);
+  ln->setIntensity(l.intensity);
+  if (kind == LightNode::Kind::Directional) {
+    ln->setDirection(l.azimuth, l.elevation); // a compass sun; pos/target don't apply
+  } else {
+    ln->setPosition(l.pos[0], l.pos[1], l.pos[2]);
+    ln->setTarget(l.target[0], l.target[1], l.target[2]);
+    ln->setCone(l.cone);
+  }
+}
+
 } // namespace
 
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
@@ -116,9 +199,21 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     realize_node(sg, n, bind_prefix, out, warnings);
     out.created.push_back(n.id);
   }
-  // Lights + shadows realization (LightNode / StageLighting) is a follow-up (§9).
-  if (!scene.lights.empty())
-    warn(warnings, "ari: scene lights parsed but not realized yet");
+  // Lights run AFTER the nodes so a StageLighting rig can frame the realized geometry.
+  // Batch the whole loop: setPosition fires transformChanged, not lightsChanged, and
+  // addLight applies the (still-origin) light set before we move it — so one
+  // endLightBatch() applyLights() reading each light's now-current world position is
+  // both the perf win and the correctness fix (no stale positions baked).
+  if (!scene.lights.empty()) {
+    sg.beginLightBatch();
+    for (const auto &l : scene.lights)
+      realize_light(sg, l, out, warnings);
+    sg.endLightBatch();
+  }
+  if (scene.has_shadows) {
+    if (!sg.setShadowsEnabled(scene.shadows_enabled))
+      warn(warnings, "ari: shadows requested but the renderer has no shadow target yet");
+  }
   return out;
 }
 

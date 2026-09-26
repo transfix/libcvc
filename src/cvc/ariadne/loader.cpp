@@ -538,7 +538,10 @@ SceneLight parse_scene_light(const YAML::Node &n) {
   sl.kind = str(n, "kind", "directional");
   vec3(n, "pos", sl.pos);
   vec3(n, "target", sl.target);
+  vec3(n, "color", sl.color);
   sl.cone = static_cast<float>(num(n, "cone", sl.cone));
+  sl.azimuth = static_cast<float>(num(n, "azimuth", sl.azimuth));
+  sl.elevation = static_cast<float>(num(n, "elevation", sl.elevation));
   sl.intensity = static_cast<float>(num(n, "intensity", sl.intensity));
   return sl;
 }

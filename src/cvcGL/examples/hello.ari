@@ -69,3 +69,14 @@ scene:
       source: { file: stanford.bunny }
       material: { color: [0.80, 0.55, 0.35] }
       visible: demo.show_mesh
+  # Lights (§9): a directional "sun" (azimuth/elevation, not pos/target) plus shadows.
+  # Swap this for `- light: studio` + `rig: three_point` to use a StageLighting preset.
+  lights:
+    - light: sun
+      kind: directional
+      azimuth: 135
+      elevation: 55
+      color: [1.0, 0.96, 0.9]
+      intensity: 1.0
+  shadows:
+    enabled: true

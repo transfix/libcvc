@@ -583,6 +583,67 @@ scene:
   EXPECT_TRUE(r.scene.shadows_enabled);
 }
 
+TEST(AriadneScene, LightColorAzimuthElevation) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  lights:
+    - light: sun
+      kind: directional
+      azimuth: 135
+      elevation: 60
+      color: [1.0, 0.9, 0.7]
+      intensity: 0.8
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.lights.size(), 1u);
+  const SceneLight &l = r.scene.lights[0];
+  EXPECT_EQ(l.kind, "directional");
+  EXPECT_FLOAT_EQ(l.azimuth, 135.0f);
+  EXPECT_FLOAT_EQ(l.elevation, 60.0f);
+  EXPECT_FLOAT_EQ(l.color[0], 1.0f);
+  EXPECT_FLOAT_EQ(l.color[1], 0.9f);
+  EXPECT_FLOAT_EQ(l.color[2], 0.7f);
+  EXPECT_FLOAT_EQ(l.intensity, 0.8f);
+}
+
+TEST(AriadneScene, LightColorDefaultsWhite) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  lights: [ { light: fill, kind: fill, cone: 20 } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.lights.size(), 1u);
+  const SceneLight &l = r.scene.lights[0];
+  EXPECT_FLOAT_EQ(l.color[0], 1.0f); // default white
+  EXPECT_FLOAT_EQ(l.color[1], 1.0f);
+  EXPECT_FLOAT_EQ(l.color[2], 1.0f);
+  EXPECT_FLOAT_EQ(l.elevation, 45.0f); // LightNode's own directional default
+}
+
+TEST(AriadneScene, VolumeNodeParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: vol
+      type: volume
+      source: { file: head.rawiv }
+      transform: { scale: 2 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &n = r.scene.nodes[0];
+  EXPECT_EQ(n.type, "volume");
+  EXPECT_EQ(n.source_file, "head.rawiv");
+  ASSERT_TRUE(n.has_transform);
+  EXPECT_FLOAT_EQ(n.scale[0], 2.0f);
+}
+
 TEST(AriadneScene, WidgetsAndSceneCoexist) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

@@ -37,15 +37,21 @@ struct SceneNode {
   std::vector<SceneNode> children; // nested nodes (…children.<id>.children.<child>)
 };
 
-// A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity)
-// or a named StageLighting preset rig.
+// A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
+// color, or azimuth/elevation for a directional sun) or a named StageLighting preset
+// rig. Realized by cvc::gl::ariadne::realize_scene into a cvc::gl::LightNode (or a
+// StageLighting rig). A directional light uses azimuth/elevation (a compass sun),
+// not pos/target — those drive spot/fill.
 struct SceneLight {
   std::string id;
   std::string kind = "directional"; // directional | spot | fill
   float pos[3] = {0.0f, 0.0f, 0.0f};
   float target[3] = {0.0f, 0.0f, 0.0f};
-  float cone = 45.0f;
+  float cone = 45.0f;                    // spot/fill cone angle (degrees)
+  float azimuth = 0.0f;                  // directional: compass bearing (0 = +Y toward +X)
+  float elevation = 45.0f;               // directional: degrees above the horizon
   float intensity = 1.0f;
+  float color[3] = {1.0f, 1.0f, 1.0f};   // light colour (default white)
   std::string rig; // rig: <preset> (StageLighting), mutually exclusive with the above
 };
 
