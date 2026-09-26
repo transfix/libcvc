@@ -1116,6 +1116,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/bind.h
   ../../inc/cvc/ariadne/loader.h
   ../../inc/cvc/ariadne/scene.h
+  ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h
 )
 

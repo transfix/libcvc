@@ -3183,6 +3183,54 @@ The core `Runtime` becomes surface-free — `Runtime(cvc::app&, std::string pref
 > backend** (it lives in ImGui window storage, keyed by the passed state path) — the core owns only
 > read/seed/write, which is the correct seam.
 
+#### 16.1a How the pure-libcvc core drives `cvc::gl` scene objects (the as-built seam)
+
+A recurring question: *if `cvc::ariadne` is pure libcvc, how does it end up using `cvc::gl` scene-graph
+objects like `VolRenNode`/`SceneGraph`?* **It doesn't — not directly.** Verified against the shipped code
+(zero `#include <cvc/gl/...>` or `<vtk...>` anywhere under `inc/cvc/ariadne` or `src/cvc/ariadne`; libcvc
+links no VTK). The dependency arrow is strictly **core → data → cvcGL**, joined at three points:
+
+1. **Widgets — the abstract `Backend`.** The core walks the `Widget` tree (`Runtime::emit`) calling
+   pure-virtual primitives; `cvc::gl::ImGuiBackend` is the one place ImGui/VTK is touched. The core holds
+   only a `Backend*` and never names a concrete type.
+2. **Scene — backend-neutral data.** The loader parses `scene:` into `cvc::ariadne::Scene` (plain structs;
+   `type` is a `std::string`; no VTK). The core stops there. `cvc::gl::ariadne::realize_scene()` (a cvcGL
+   free function) *reads* that data and builds the live `SceneGraph`/`VolRenNode`/…. The host app — which
+   links both — calls `load_file` (core) then `realize_scene` (cvcGL); the core has no symbol of it.
+3. **The rendezvous is `cvc::state`, not a pointer.** A widget `bind: demo.show` and a scene node
+   `visible: demo.show` resolve (via the shared `resolve_bind` in `bind.h`) to the *same* string state key;
+   `sync_scene_visibility` writes the node's own `.visible` key each frame and the node's `state_object`
+   machinery flips the VTK actor. A core-side write drives a VTK actor with **zero core→gl coupling** —
+   they meet on a string key. `SceneVisibilityBinding` and the volume tickers hold strings / weak_ptrs,
+   never a raw node.
+
+#### 16.1b Extensibility — register new types/blocks without editing the core
+
+Both dispatch surfaces are open via string-keyed registries (modeled on libcvc's
+`state_compression_registry`: a mutex-guarded map + a process-global instance; register before `load_*`).
+A shared enabler carries custom config: a backend-neutral `cvc::ariadne::Value` (scalar/seq/ordered-map of
+strings — no yaml-cpp, `inc/cvc/ariadne/value.h`).
+
+- **Custom scene node types (cvcGL side).** `register_scene_node_type("<type>", realizer)`
+  (`inc/cvc/gl/ariadne/scene_realize.h`). When `realize_node` meets a non-built-in `type:`, it calls the
+  registered `NodeRealizer`, which reads the node's `props` bag (every key the built-ins didn't consume,
+  captured by the loader into `SceneNode::props` as a `Value`), builds a `GraphicsNode`, and — if it needs
+  per-frame service — pushes a weak_ptr-capturing closure into `RealizedScene::custom_ticks` (run by
+  `tick_scene`). The common transform + `visible:` + children handling then runs on the returned node. The
+  registry and all VTK knowledge stay on the cvcGL side; the core only carries the type string + `props`.
+- **Custom top-level blocks (core side).** `register_ari_block("<key>", parser)`
+  (`inc/cvc/ariadne/loader.h`). A non-built-in top-level key (not
+  meta/menubar/windows/overlays/root/children/scene) with a registered parser is handed its content as a
+  `Value` and the `LoadResult`; it stashes parsed data into `LoadResult::extras` (or appends to
+  `root`/`scene`) and may add warnings.
+- **Deferred (not requested now):** custom *widget* types (a `Kind::Custom` + a generic `Backend::custom`
+  escape virtual — a one-time ABI touch of every backend) and per-type JSON-Schema fragments (base schema
+  is already permissive, so custom types validate today; a fragment API would tighten field validation).
+
+Verified end-to-end: loader gtests for props capture + a custom block, and an offscreen cvcGL test that
+registers a custom `beacon` node type — its realizer builds a `GraphicsNode`, reads its `props`, and
+registers a per-frame tick that `tick_scene` runs.
+
 Do the move **now**, while the code is ~480 lines across four files, so the YAML loader, `state_exec`, and validation are written against `cvc::ariadne` from day one and never have to be un-coupled.
 1. **Headers** — `inc/cvc/gl/ariadne/{widget.h,ariadne.h}` -> `inc/cvc/ariadne/`; add `inc/cvc/ariadne/backend.h`. Namespace `cvc::gl::ariadne -> cvc::ariadne`; drop all ImGui/VTK includes.
 2. **Core source** — `src/cvcGL/ariadne/ariadne.cpp` -> `src/cvc/ariadne/ariadne.cpp`, compiled into the core `cvc` library (`add_library(cvc …)`, `src/cvc/CMakeLists.txt:1106`); rewrite `emit()` to call `Backend*` primitives with the core doing `read_or_seed`/`write` against `cvc::state` (lifting that logic out of `ImGuiBinding.cpp`). Links only `cvc::cvc` — no VTK/ImGui.

@@ -13,7 +13,11 @@
 #include <cstdio>
 
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -31,8 +35,14 @@ using cvc::ariadne::SceneIsosurface;
 using cvc::ariadne::SceneLight;
 using cvc::ariadne::SceneNode;
 using cvc::ariadne::SceneTFPoint;
+using cvc::ariadne::Value;
 using cvc::gl::SceneGraph;
 using cvc::gl::SceneRenderer;
+
+// Observables for the custom-node-type test — namespace scope so the registered
+// realizer (process-global) captures nothing (no dangling into a test local).
+static int g_custom_ticks = 0;
+static double g_custom_radius = -1.0;
 
 static int fails = 0;
 static void chk(bool ok, const std::string &w) {
@@ -269,6 +279,56 @@ int main() {
         "the last same-id node survives");
     chk(std::dynamic_pointer_cast<cvc::gl::VolRenNode>(sg.getGraphics("dup")) != nullptr,
         "getGraphics(id) resolves to the surviving VolRenNode");
+  }
+
+  // ── custom scene node type via register_scene_node_type ─────────────────────
+  {
+    // A capture-free realizer (process-global): builds a geometry node from the
+    // embedded bunny, records that it read its props bag, and registers a per-frame
+    // tick — exercising the whole extension seam (props in, GraphicsNode out, tick).
+    cvc::gl::ariadne::register_scene_node_type(
+        "beacon",
+        [](SceneGraph &sg, const cvc::ariadne::SceneNode &n, cvc::gl::GraphicsNode *parent,
+           cvc::gl::ariadne::RealizedScene &out,
+           std::vector<std::string> *) -> std::shared_ptr<cvc::gl::GraphicsNode> {
+          g_custom_radius = n.props.num("radius", -1.0); // reads the neutral props bag
+          cvc::geometry geom = cvc::read_geometry("beacon.bunny"); // embedded, no file
+          std::shared_ptr<cvc::gl::GraphicsNode> node;
+          if (parent)
+            node = parent->createChild<cvc::gl::GeometryNode>(n.id, geom);
+          else
+            node = sg.addGraphics(n.id, geom);
+          out.custom_ticks.push_back([](vtkRenderer *) { ++g_custom_ticks; });
+          return node;
+        });
+
+    SceneGraph sg(app, "ext");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+
+    Scene scene;
+    SceneNode b;
+    b.id = "b1";
+    b.type = "beacon";
+    b.props.kind = Value::Kind::Map; // as the loader would have captured `radius: 2.5`
+    {
+      Value radius;
+      radius.kind = Value::Kind::Scalar;
+      radius.scalar = "2.5";
+      b.props.entries.emplace_back("radius", radius);
+    }
+    scene.nodes.push_back(b);
+
+    const int before = g_custom_ticks;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "ext");
+
+    printf("== custom scene node type (register_scene_node_type) ==\n");
+    chk(cvc::gl::ariadne::has_scene_node_type("beacon"), "custom type is registered");
+    chk(std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("b1")) != nullptr,
+        "custom realizer built a GraphicsNode addressable in the graph");
+    chk(std::fabs(g_custom_radius - 2.5) < 1e-9, "custom realizer read its props bag (radius=2.5)");
+    chk(realized.custom_ticks.size() == 1, "custom realizer registered a per-frame tick");
+    cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    chk(g_custom_ticks == before + 1, "tick_scene runs the custom per-frame tick");
   }
 
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");

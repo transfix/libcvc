@@ -780,3 +780,86 @@ windows:
   ASSERT_NE(cb, nullptr);
   EXPECT_EQ(cb->bind, "demo.show_mesh");
 }
+
+// ---------------------------------------------------------------------------
+// Extensibility — custom scene-node props bag + custom top-level blocks.
+// ---------------------------------------------------------------------------
+
+TEST(AriadneScene, CustomNodeTypeCapturesProps) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: swarm1
+      type: swarm
+      count: 128
+      color: [0.2, 0.4, 0.9]
+      behavior: { mode: flock, speed: 2.5 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode &n = r.scene.nodes[0];
+  EXPECT_EQ(n.type, "swarm");
+  // Unknown keys land in props (a Map); known keys (node/type/...) do NOT.
+  ASSERT_TRUE(n.props.is_map());
+  EXPECT_DOUBLE_EQ(n.props.num("count", 0), 128.0);
+  EXPECT_EQ(n.props.find("type"), nullptr);   // a known key is not duplicated
+  EXPECT_EQ(n.props.find("node"), nullptr);
+  const Value *behavior = n.props.find("behavior"); // nested map
+  ASSERT_NE(behavior, nullptr);
+  EXPECT_EQ(behavior->str("mode"), "flock");
+  EXPECT_DOUBLE_EQ(behavior->num("speed", 0), 2.5);
+  const Value *color = n.props.find("color"); // a sequence
+  ASSERT_NE(color, nullptr);
+  ASSERT_TRUE(color->is_seq());
+  ASSERT_EQ(color->items.size(), 3u);
+  EXPECT_DOUBLE_EQ(color->items[1].as_double(), 0.4);
+}
+
+TEST(AriadneScene, BuiltinNodeHasEmptyProps) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes: [ { node: m, type: geometry, source: { file: m.obj } } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_TRUE(r.scene.nodes[0].props.empty()); // all keys consumed by the built-in
+}
+
+TEST(AriadneLoader, CustomTopLevelBlockRegistered) {
+  SKIP_WITHOUT_YAML();
+  // Capture-free parser (the registry is process-global and outlives this test).
+  register_ari_block("theme", [](const Value &content, LoadResult &out) {
+    out.extras.emplace_back("theme", content);
+    out.warnings.push_back("theme applied: " + content.str("name"));
+  });
+  EXPECT_TRUE(has_ari_block("theme"));
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+theme:
+  name: midnight
+  accent: [0.1, 0.2, 0.3]
+windows: [ { window: W, children: [ { text: "x" } ] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.extras.size(), 1u);
+  EXPECT_EQ(r.extras[0].first, "theme");
+  EXPECT_EQ(r.extras[0].second.str("name"), "midnight");
+  const Value *accent = r.extras[0].second.find("accent");
+  ASSERT_NE(accent, nullptr);
+  EXPECT_TRUE(accent->is_seq());
+  bool warned = false;
+  for (const std::string &w : r.warnings)
+    if (w.find("theme applied: midnight") != std::string::npos)
+      warned = true;
+  EXPECT_TRUE(warned);
+  EXPECT_NE(find(r.root, Kind::Window), nullptr); // the built-in windows block still parsed
+}
+
+TEST(AriadneLoader, RegisterBuiltinBlockIsIgnored) {
+  register_ari_block("scene", [](const Value &, LoadResult &) {}); // built-in: ignored
+  EXPECT_FALSE(has_ari_block("scene"));
+}

@@ -19,6 +19,7 @@
 // machinery does the setVisible. The binding holds only state-path strings (no node
 // pointer), so it can never dangle into a torn-down node.
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,6 +36,7 @@ struct SceneNode;
 } // namespace ariadne
 namespace gl {
 class SceneGraph;
+class GraphicsNode;
 class VolRenNode;
 class VolSliceNode;
 
@@ -54,6 +56,11 @@ struct RealizedScene {
   std::vector<std::unique_ptr<StageLighting>> rigs;
   std::vector<std::weak_ptr<VolRenNode>> volren_ticks;
   std::vector<std::weak_ptr<VolSliceNode>> volslice_ticks;
+  // Per-frame closures a CUSTOM node type registered (register_scene_node_type) that
+  // needs servicing — run by tick_scene after the built-in tickers. A closure should
+  // capture a weak_ptr to its node (not the node), matching the volren/volslice
+  // discipline, so a torn-down node's tick is a no-op.
+  std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
 };
 
 // Per-frame servicing for realized volren/volslice nodes (§9): each such node needs
@@ -74,6 +81,31 @@ void tick_scene(RealizedScene &realized, vtkRenderer *renderer);
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix,
                             std::vector<std::string> *warnings = nullptr);
+
+// --- extensibility: custom scene node types ----------------------------------
+//
+// A realizer for a CUSTOM scene node `type` (a type: the built-ins don't handle).
+// It builds and returns a live GraphicsNode from the parsed SceneNode — whose custom
+// config is in `node.props` (a neutral cvc::ariadne::Value map). Create the node under
+// `parent` when non-null (nested — its transform is then LOCAL to the parent) else
+// under sg.getGraphicsRoot() (and call sg.registerGraphics(id, node) for a top-level
+// node, matching the built-ins). If it needs per-frame service, push a closure that
+// captures a weak_ptr to the node into `out.custom_ticks`. Return the node; the shared
+// transform + `visible:` + children handling then runs on it (so a realizer need not
+// repeat it). Return nullptr to decline. Runs on the render/owner thread. This is the
+// cvcGL side of extensibility — the core never learns the custom type; it only carries
+// its `props` as data.
+using NodeRealizer = std::function<std::shared_ptr<GraphicsNode>(
+    SceneGraph &sg, const cvc::ariadne::SceneNode &node, GraphicsNode *parent,
+    RealizedScene &out, std::vector<std::string> *warnings)>;
+
+// Register (or replace) a realizer for a custom scene node `type`. Registering a
+// built-in type (geometry/volume/volren/volslice/group) is a no-op — the built-ins own
+// their dispatch. Process-global and thread-safe; register before realize_scene.
+void register_scene_node_type(const std::string &type, NodeRealizer realizer);
+
+// Whether a custom scene node `type` has a registered realizer (test/introspection).
+bool has_scene_node_type(const std::string &type);
 
 } // namespace ariadne
 } // namespace gl

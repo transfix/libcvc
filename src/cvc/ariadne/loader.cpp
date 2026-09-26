@@ -13,6 +13,9 @@
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
 
 #include <cstdlib>
+#include <functional>
+#include <map>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -66,6 +69,35 @@ bool version_at_least(const std::string &have, const std::string &need) {
 }
 
 std::string libcvc_version() { return CVC_VERSION_STRING; }
+
+// ---- custom top-level block registry (both builds; no yaml needed) ----------
+
+namespace {
+std::mutex &block_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::map<std::string, AriBlockParser> &block_registry() {
+  static std::map<std::string, AriBlockParser> r;
+  return r;
+}
+bool is_builtin_block(const std::string &k) {
+  return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" ||
+         k == "root" || k == "children" || k == "scene";
+}
+} // namespace
+
+void register_ari_block(const std::string &key, AriBlockParser parse) {
+  if (!parse || is_builtin_block(key)) // built-ins own their own dispatch
+    return;
+  std::lock_guard<std::mutex> lock(block_mutex());
+  block_registry()[key] = std::move(parse);
+}
+
+bool has_ari_block(const std::string &key) {
+  std::lock_guard<std::mutex> lock(block_mutex());
+  return block_registry().find(key) != block_registry().end();
+}
 
 // ---- the .ari JSON Schema (Layer 2, roadmap §15) ----------------------------
 // A permissive draft-2020-12 schema: it enforces the meta block (min_libcvc
@@ -476,6 +508,37 @@ void vec3(const YAML::Node &n, const char *key, float out[3]) {
       out[i] = static_cast<float>(v[i].as<double>());
 }
 
+// Convert a YAML subtree into the backend-neutral Value tree (§ extensibility), so a
+// custom node's props / a custom block's content can be read without yaml-cpp. Keys
+// that are not scalars are skipped (YAML keys are scalars in practice). Never throws.
+Value to_value(const YAML::Node &n) {
+  Value v;
+  if (n.IsSequence()) {
+    v.kind = Value::Kind::Sequence;
+    for (const YAML::Node &c : n)
+      v.items.push_back(to_value(c));
+  } else if (n.IsMap()) {
+    v.kind = Value::Kind::Map;
+    for (const auto &kv : n) {
+      if (!kv.first.IsScalar())
+        continue;
+      v.entries.emplace_back(kv.first.Scalar(), to_value(kv.second));
+    }
+  } else if (n.IsScalar()) {
+    v.kind = Value::Kind::Scalar;
+    v.scalar = n.Scalar();
+  }
+  return v; // a null/undefined node stays a default (empty scalar)
+}
+
+// The scene-node keys the built-in parser consumes; everything else on a node flows
+// into SceneNode::props for a custom node type to read.
+bool known_scene_node_key(const std::string &k) {
+  return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
+         k == "transform" || k == "visible" || k == "volren" || k == "volslice" ||
+         k == "children";
+}
+
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
 // auto_domain. Shared by volren + volslice (one TF vocabulary across renderers).
 SceneTransferFunction parse_scene_tf(const YAML::Node &t) {
@@ -595,6 +658,17 @@ SceneNode parse_scene_node(const YAML::Node &n) {
     sn.volslice.opacity_correction = flag(vsl, "opacity_correction", false);
     sn.volslice.tf = parse_scene_tf(vsl["transfer_function"]);
   }
+  // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
+  // custom node type registered on the cvcGL side reads its own config from there.
+  sn.props.kind = Value::Kind::Map;
+  if (n.IsMap())
+    for (const auto &kv : n) {
+      if (!kv.first.IsScalar())
+        continue;
+      const std::string key = kv.first.Scalar();
+      if (!known_scene_node_key(key))
+        sn.props.entries.emplace_back(key, to_value(kv.second));
+    }
   const YAML::Node kids = n["children"];
   if (kids && kids.IsSequence())
     for (const YAML::Node &c : kids)
@@ -745,6 +819,28 @@ LoadResult load_node(const YAML::Node &doc) {
     ctx.warn("ari: no meta.min_libcvc declared — the provenance gate is skipped "
              "(roadmap §3.1a asks every .ari to declare it)");
   r.warnings = std::move(ctx.warnings);
+
+  // Custom top-level blocks (register_ari_block): dispatch any non-built-in key with a
+  // registered parser. Run AFTER warnings are moved, so a parser may append to
+  // r.warnings; copy the parser out from under the lock, then call it unlocked.
+  if (doc.IsMap())
+    for (const auto &kv : doc) {
+      if (!kv.first.IsScalar())
+        continue;
+      const std::string key = kv.first.Scalar();
+      if (is_builtin_block(key))
+        continue;
+      AriBlockParser parser;
+      {
+        std::lock_guard<std::mutex> lock(block_mutex());
+        auto it = block_registry().find(key);
+        if (it != block_registry().end())
+          parser = it->second;
+      }
+      if (parser)
+        parser(to_value(kv.second), r);
+    }
+
   r.ok = true;
   return r;
 }

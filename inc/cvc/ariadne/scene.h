@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include <cvc/ariadne/value.h>
+
 namespace cvc {
 namespace ariadne {
 
@@ -96,6 +98,11 @@ struct SceneNode {
 
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
+
+  // Every node key the built-in parser did NOT consume, as a neutral map — the
+  // config bag a CUSTOM node type (registered via cvc::gl::ariadne::
+  // register_scene_node_type) reads. Empty for the built-in types.
+  Value props;
 
   std::vector<SceneNode> children; // nested nodes (…children.<id>.children.<child>)
 };

@@ -1,7 +1,10 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 
 #include <exception>
+#include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
@@ -32,6 +35,19 @@ namespace {
 void warn(std::vector<std::string> *w, const std::string &m) {
   if (w)
     w->push_back(m);
+}
+
+// --- custom scene node type registry (§ extensibility) -----------------------
+std::mutex &node_registry_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::map<std::string, NodeRealizer> &node_registry() {
+  static std::map<std::string, NodeRealizer> r;
+  return r;
+}
+bool is_builtin_scene_type(const std::string &t) {
+  return t == "geometry" || t == "volume" || t == "volren" || t == "volslice" || t == "group";
 }
 
 // Apply the shared GraphicsNode transform. Material is GeometryNode-only, handled by
@@ -263,11 +279,25 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
     node = parent ? parent->createChild(n.id) // empty nested hierarchy node
                   : sg.addGraphics(n.id);
   } else {
-    // light node type is a follow-up (SceneNode lacks the light fields — declare
-    // lights in the `lights:` array). The spec still parses/round-trips.
-    warn(warnings, "ari: scene node '" + n.id + "' type '" + n.type +
-                       "' not realized yet (geometry/group/volume/volren/volslice; a 'light' node is a follow-up)");
-    return;
+    // Not a built-in type — a registered CUSTOM realizer (register_scene_node_type)?
+    NodeRealizer realizer;
+    {
+      std::lock_guard<std::mutex> lock(node_registry_mutex());
+      auto it = node_registry().find(n.type);
+      if (it != node_registry().end())
+        realizer = it->second;
+    }
+    if (realizer) {
+      node = realizer(sg, n, parent, out, warnings); // reads n.props; may push out.custom_ticks
+      if (!node)
+        return; // realizer declined (it warns for itself if useful)
+    } else {
+      // light node type is a follow-up (SceneNode lacks the light fields — declare
+      // lights in the `lights:` array). The spec still parses/round-trips.
+      warn(warnings, "ari: scene node '" + n.id + "' type '" + n.type +
+                         "' not realized (no built-in or registered realizer; a 'light' node is a follow-up)");
+      return;
+    }
   }
 
   if (!node)
@@ -381,6 +411,23 @@ void tick_scene(RealizedScene &realized, vtkRenderer *renderer) {
     }
   if (renderer && raw.size() >= 2)
     VolSliceNode::depthSortSliceProps(renderer, raw);
+
+  // Custom node types that registered a per-frame closure (register_scene_node_type).
+  for (const std::function<void(vtkRenderer *)> &t : realized.custom_ticks)
+    if (t)
+      t(renderer);
+}
+
+void register_scene_node_type(const std::string &type, NodeRealizer realizer) {
+  if (!realizer || is_builtin_scene_type(type)) // built-ins own their dispatch
+    return;
+  std::lock_guard<std::mutex> lock(node_registry_mutex());
+  node_registry()[type] = std::move(realizer);
+}
+
+bool has_scene_node_type(const std::string &type) {
+  std::lock_guard<std::mutex> lock(node_registry_mutex());
+  return node_registry().find(type) != node_registry().end();
 }
 
 } // namespace ariadne
