@@ -1571,7 +1571,10 @@ of a hand-built C++ escape.
 > where `setVisible` is safe, and future-proof `visible:` becoming an expression. 12 new core
 > gtests (`AriadneBind.*`, no VTK — resolve rules, read/seed/write, the source→node-key mirror,
 > and the shared-key property); realizer + `ariadne_hello` wiring compile-verified against the
-> real cvcGL/VTK/ImGui headers.
+> real cvcGL/VTK/ImGui headers. The shipped `hello.ari` demonstrates it end-to-end with **no
+> external asset**: a `scene:` node sources `stanford.bunny` (libcvc's embedded Stanford bunny —
+> `read_geometry("*.bunny")` returns it, 34835 verts / 69473 tris, verified) with `visible:
+> demo.show_mesh`, the same path the "Show mesh" checkbox writes, so the box hides/shows the bunny.
 >
 > **Follow-ups (not yet built):** volume/volren/volslice/light *realization* (they parse
 > and round-trip, but `realize_scene` only builds geometry/group today); true parent

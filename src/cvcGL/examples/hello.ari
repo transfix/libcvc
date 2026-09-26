@@ -55,17 +55,17 @@ windows:
       - button: Reset
         on: reset
 
-# A scene block (§9) declares the VTK scene in the same document. Uncomment and
-# point `source.file` at a real mesh to see it realized. Note `visible:` bound to
-# demo.show_mesh — the SAME path the "Show mesh" checkbox above writes — so toggling
-# the box hides/shows the node each frame (cvc::gl::ariadne::realize_scene +
-# cvc::ariadne::sync_scene_visibility). A literal `visible: true|false` also works.
-#
-# scene:
-#   nodes:
-#     - node: mesh
-#       type: geometry
-#       source: { file: /path/to/your/mesh.obj }
-#       material: { color: [0.8, 0.5, 0.2] }
-#       transform: { scale: 1.0 }
-#       visible: demo.show_mesh
+# A scene block (§9) declares the VTK scene in the SAME document as the widgets.
+# The source is the Stanford bunny embedded in libcvc: read_geometry() returns it
+# for any `*.bunny` path, so this demo needs no external asset. `visible:` is bound
+# to demo.show_mesh — the SAME state path the "Show mesh" checkbox above writes — so
+# toggling the box hides/shows the bunny each frame (cvc::gl::ariadne::realize_scene
+# seeds it, cvc::ariadne::sync_scene_visibility mirrors it into the node's own
+# .visible key). A literal `visible: true|false` works too.
+scene:
+  nodes:
+    - node: bunny
+      type: geometry
+      source: { file: stanford.bunny }
+      material: { color: [0.80, 0.55, 0.35] }
+      visible: demo.show_mesh
