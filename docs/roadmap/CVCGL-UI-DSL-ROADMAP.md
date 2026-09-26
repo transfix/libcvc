@@ -927,9 +927,16 @@ the **same state tree the widgets bind to**.
 >   minimal build. That is a build-config axis, distinct from a per-eval failure on a build
 >   that *has* the evaluator (which hides).
 >
-> Deferred read-lane fields (same engine, next increments): `enabled_when`/`disabled_when`
-> (needs a backend disabled-scope), computed `fmt`/`options`/`tooltip`, computed `bind`,
-> `repeat.count`; plus an optional load-time predicate lint (parse + reject effectful heads).
+> **Also LANDED — `enabled_when` / `disabled_when`** (reactive grey-out, the sibling of
+> `visible_when`): a widget stays drawn but non-interactive when `enabled_when` is falsy or
+> `disabled_when` is truthy. Realized through a new backend `begin_disabled()`/`end_disabled()`
+> scope (non-pure no-op defaults; ImGuiBackend → `ImGui::BeginDisabled/EndDisabled`) wrapping the
+> widget and its subtree. Fail-safe DISABLES on a broken predicate; a build without state_exec
+> leaves it enabled (+ warns once). Same hardened engine as `visible_when`.
+>
+> Deferred read-lane fields (same engine, next increments): computed `fmt`/`options`/`tooltip`,
+> computed `bind`, `repeat.count`; plus an optional load-time predicate lint (parse + reject
+> effectful heads).
 
 ### 4.1 One AST, two lanes
 
