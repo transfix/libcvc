@@ -91,6 +91,13 @@ int main(int argc, char **argv) {
       std::printf("\n");
       for (const std::string &w : lr.warnings) // §15 semantic validation + customs warnings
         std::printf("[ariadne_hello]   %s\n", w.c_str());
+      // §extensibility: run the init: state_exec script ONCE, scoped to the same prefix
+      // the Runtime binds against, BEFORE realize/render — so its seeds win over widget
+      // defaults. Errors are logged; init is optional dynamic init, not a hard gate.
+      std::vector<std::string> init_errs;
+      if (!run_init(app, sg.getStatePrefix(), lr.init_script, &init_errs))
+        for (const std::string &e : init_errs)
+          std::printf("[ariadne_hello]   %s\n", e.c_str());
       // §extensibility: the loader already fail-fast-checked widget/block customs; now
       // check declared NODE customs (cvcGL registry) before realizing. A missing
       // REQUIRED node custom fails fast (skip the scene); a non-required one just logs.

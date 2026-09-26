@@ -1048,3 +1048,27 @@ customs:
   EXPECT_TRUE(has_warning(r, "more than one"));
   EXPECT_TRUE(r.customs.empty()); // the ambiguous entry is dropped
 }
+
+TEST(AriadneInit, BlockCapturedNotRun) {
+  SKIP_WITHOUT_YAML();
+  // The loader only CAPTURES the init: script verbatim (it has no app, never runs it).
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+init: |
+  (state-set "demo.agents" "128")
+windows: [ { window: W, children: [] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(r.init_script.find("state-set"), std::string::npos);
+}
+
+TEST(AriadneInit, NonScalarInitWarns) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+init: [ not, a, script ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.init_script.empty());
+  EXPECT_TRUE(has_warning(r, "init: must be a scalar"));
+}

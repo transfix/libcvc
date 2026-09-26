@@ -298,3 +298,32 @@ TEST(AriadneRuntime, UnregisteredCustomWidgetDrawsPlaceholder) {
   // Unregistered: a visible placeholder, not a crash or a silent drop.
   EXPECT_TRUE(mock.saw("text_line:[nope?]"));
 }
+
+// --- the init: block runner (run_init, state_exec) ---------------------------
+
+TEST(AriadneInit, RunsScopedToPrefix) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  std::vector<std::string> errs;
+  // A relative path under the chroot prefix -> writes <prefix>.agents, the same key a
+  // widget `bind: agents` (prefix "ui.demo") would resolve to.
+  const bool ok = run_init(app, "ui.demo", "(state-set \"agents\" \"128\")", &errs);
+  ASSERT_TRUE(ok) << (errs.empty() ? std::string("(no error)") : errs[0]);
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.agents").value(), "128");
+}
+
+TEST(AriadneInit, SyntaxErrorReportedNotThrown) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  std::vector<std::string> errs;
+  const bool ok = run_init(app, "", "(state-set \"x\" ", &errs); // unbalanced
+  EXPECT_FALSE(ok);
+  EXPECT_FALSE(errs.empty());
+}
+
+TEST(AriadneInit, EmptyScriptIsNoop) {
+  cvc::app app;
+  EXPECT_TRUE(run_init(app, "ui", "", nullptr)); // no script -> success, nothing written
+}

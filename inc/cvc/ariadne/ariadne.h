@@ -24,6 +24,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <cvc/ariadne/widget.h>
 
@@ -111,6 +112,23 @@ void register_widget_type(const std::string &type, WidgetEmitFn emit);
 
 // Whether a custom widget `type` has a registered emit fn (test/introspection).
 bool has_widget_type(const std::string &type);
+
+// --- extensibility: the `init:` block (a state_exec script run on load) -------
+//
+// Run the .ari `init:` script (LoadResult::init_script) ONCE, scoped to `prefix` — so
+// `(state-set "demo.n" "5")` writes `<prefix>.demo.n`, the SAME key a widget
+// `bind: demo.n` resolves to (a state_exec chroot on the shared "." separator). Run it
+// at load, BEFORE the first render(), so init values win and widget/scene read_or_seed
+// defaults only fill keys init left unset. Returns true on success (or an empty
+// script); false with a message appended to `errors` on a parse/runtime error, or when
+// this build lacks state_exec. Never throws. (The loader stays app-free and only
+// captures the script; this is the host/Runtime-side seam that has the app.)
+bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
+              std::vector<std::string> *errors = nullptr);
+
+// Whether this build has state_exec (CVC_STATE_EXEC). When false, run_init cannot
+// execute a non-empty init: script (it reports an error instead).
+bool have_state_exec();
 
 } // namespace ariadne
 } // namespace cvc

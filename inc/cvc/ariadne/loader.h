@@ -78,6 +78,10 @@ struct LoadResult {
   Scene scene;                       // the parsed `scene:` block (§9; empty if none)
   Meta meta;                         // parsed provenance (may be empty)
   std::vector<CustomRequirement> customs; // declared `customs:` (widget/node/block)
+  // The `init:` block's state_exec script (verbatim text; empty if none). The loader
+  // only CAPTURES it (it has no cvc::app and never runs the DSL); the host runs it once
+  // at load via cvc::ariadne::run_init, scoped to the document prefix.
+  std::string init_script;
   // Custom top-level blocks (register_ari_block), keyed by block name — whatever the
   // registered parser stored. Empty unless a document uses a registered custom block.
   std::vector<std::pair<std::string, Value>> extras;

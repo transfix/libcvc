@@ -14,6 +14,14 @@
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 
+#ifdef CVC_STATE_EXEC
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/intrinsics.h>
+#include <cvc/core/state_exec/parser.h> // parse_error
+#include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/scheduler.h>
+#endif
+
 #include <exception>
 #include <functional>
 #include <mutex>
@@ -68,6 +76,67 @@ void register_widget_type(const std::string &type, WidgetEmitFn emit) {
 bool has_widget_type(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
   return widget_registry().find(type) != widget_registry().end();
+}
+
+// --- the init: block runner (state_exec, gated by CVC_STATE_EXEC) ------------
+
+bool have_state_exec() {
+#ifdef CVC_STATE_EXEC
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
+              std::vector<std::string> *errors) {
+  const auto err = [&](const std::string &m) {
+    if (errors)
+      errors->push_back(m);
+  };
+  if (script.empty())
+    return true; // nothing to run
+#ifndef CVC_STATE_EXEC
+  (void)app;
+  (void)prefix;
+  err("ari: init: script present but this libcvc was built without state_exec "
+      "(CVC_STATE_EXEC=OFF) — the script did not run");
+  return false;
+#else
+  namespace se = cvc::state_exec;
+  try {
+    // All of these must outlive execute()+run(): the intrinsics capture &ictx by
+    // pointer. A synchronous run-to-completion in this one scope satisfies that.
+    se::scheduler sched;
+    se::memory_tracker tracker;
+    auto proc = se::make_process();
+    proc->pid = 1;
+    proc->status = se::process_status::ready;
+    se::intrinsics_context ictx;
+    cvc::state &root = cvc::state::instance(app);
+    ictx.sched = &sched;
+    ictx.tracker = &tracker;
+    ictx.proc = proc;
+    ictx.pid = 1;
+    se::apply_chroot(ictx, root, prefix); // scope writes under the document prefix
+    auto env = se::builtins::make_default_environment();
+    se::register_intrinsics(env, &ictx);
+    se::execute_options opts;
+    opts.env = env;
+    const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
+    sched.run();                                  // run to completion
+    if (auto info = sched.get_process_info(pid)) {
+      if (info->status == se::process_status::killed) {
+        err("ari: init: script terminated abnormally (runtime error or resource limit)");
+        return false;
+      }
+    }
+    return true;
+  } catch (const std::exception &e) {
+    err(std::string("ari: init: script failed: ") + e.what());
+    return false;
+  }
+#endif
 }
 
 struct Runtime::Impl {

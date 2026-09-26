@@ -19,6 +19,14 @@ meta:
 customs:
   - widget: labeled
 
+# init: (§ extensibility) — a state_exec script run ONCE on load, scoped to this
+# document's state prefix (the host calls cvc::ariadne::run_init before rendering). Use
+# it for dynamic initialization: seed or compute state before the first frame. Here it
+# opens the Agents slider at 256 instead of its default 64 (init wins over read_or_seed
+# because the key is no longer empty by the time the slider first reads it).
+init: |
+  (state-set "demo.agents" "256")
+
 menubar:
   - menu: Sim
     items:

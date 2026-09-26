@@ -86,7 +86,7 @@ std::map<std::string, AriBlockParser> &block_registry() {
 }
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" ||
-         k == "root" || k == "children" || k == "scene" || k == "customs";
+         k == "root" || k == "children" || k == "scene" || k == "customs" || k == "init";
 }
 } // namespace
 
@@ -934,8 +934,16 @@ LoadResult load_node(const YAML::Node &doc) {
 #endif
 
   r.root = parse_document(ctx, doc);
-  if (doc.IsMap())
+  if (doc.IsMap()) {
     r.scene = parse_scene(doc["scene"]); // §9: the scene graph, alongside the widgets
+    // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
+    // The loader only captures the text — it has no app and never runs the DSL.
+    const YAML::Node in = doc["init"];
+    if (in && in.IsScalar())
+      r.init_script = in.Scalar();
+    else if (in && !in.IsScalar())
+      ctx.warn("ari: init: must be a scalar state_exec script string — ignored");
+  }
   if (r.meta.min_libcvc.empty())
     ctx.warn("ari: no meta.min_libcvc declared — the provenance gate is skipped "
              "(roadmap §3.1a asks every .ari to declare it)");

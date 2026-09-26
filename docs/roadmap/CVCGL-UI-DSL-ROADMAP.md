@@ -3260,8 +3260,22 @@ customs are checked by `cvc::gl::ariadne::verify_scene_customs(LoadResult, error
 cvcGL) — the host calls it after load, before `realize_scene`, and skips the scene on a required miss. Both
 points are before anything renders.
 
+**The `init:` block — a state_exec script run on load.** An optional top-level `init:` block carries a
+`cvc::state_exec` script that runs ONCE at load, for dynamic initialization (seed/compute state before the
+first frame). The loader only CAPTURES the text into `LoadResult::init_script` (it has no `cvc::app` and
+never runs the DSL); `cvc::ariadne::run_init(app, prefix, script, errors)` runs it — a core seam gated by
+`CVC_STATE_EXEC` (state_exec is core libcvc, so no VTK), which the host calls after load and BEFORE the
+first `render()`. It runs the script under a state_exec **chroot at the document prefix**, so
+`(state-set "demo.agents" "256")` writes `<prefix>.demo.agents` — the same key a widget `bind: demo.agents`
+resolves to (the shared "." separator), and init values win because widget/scene `read_or_seed` only fills
+keys init left unset. A parse/runtime error is reported (never thrown), not fatal — init is optional
+dynamic seeding, not a hard gate; `have_state_exec()` reports whether the build can run it. This is a new
+concept beyond the two §4.1 state_exec lanes (per-frame read + effectful action): a run-once init lane.
+
 Verified end-to-end: loader gtests for props capture + a custom block + a custom widget preserved as
-`Kind::Custom` (with children) + the `customs:` gate (required-widget miss fails the load, non-required
+`Kind::Custom` (with children) + the `customs:` gate + the `init:` block captured-not-run; run_init gtests
+(a script scoped to the prefix writes `<prefix>.key`, a syntax error is reported not thrown, an empty
+script is a no-op); the `customs:` gate (required-widget miss fails the load, non-required
 warns, registered satisfies, node deferred); runtime gtests that a registered widget composes primitives,
 its structure depends on state, and it fires events (+ an unregistered type draws a placeholder); and an
 offscreen cvcGL test that registers a custom `beacon` node type — its realizer builds a `GraphicsNode`,
