@@ -196,62 +196,42 @@ public:
     ctx_.pid = 1;
     se::apply_chroot(ctx_, root, prefix);
 
-    // DEFAULT-DENY: start from an EMPTY environment and copy in ONLY the SCALAR allowlist
-    // below (special forms — if/begin/let/while/for/lambda/defun — and true/false/nil are
-    // parser/evaluator-intrinsic, so an empty base still evaluates them).
-    //
-    // The allowlist is deliberately SCALAR-ONLY. This is what actually closes the caps: the
-    // step & time caps are checked only BETWEEN evaluator steps, so ANY primitive that does
-    // work proportional to caller-supplied *structure* in one native step can bypass them —
-    // build a shared-pointer DAG with `list`/`cons` (O(d) steps, 2^d logical nodes) then walk
-    // it with `str`/`=`, or double a string with `str-concat`. So NO compound constructor
-    // (list/cons/dict/append/…), NO structure walker (str/str-concat), NO structure accessor/
-    // mutator (nth/car/set-nth/get-attr/…), and NO `apply` (which could invoke a native_fn
-    // fetched from state) is bound — nor the compound-returning readers (state-children,
-    // state-data-get). What remains does O(1)/O(len) work per call over scalars only, so a
-    // predicate's total work is bounded by the step count, which the caps enforce. Loops and
-    // recursion live in special forms (while/for/lambda), which yield per step, so they too
-    // are step-capped.
+    // DEFAULT-DENY on two axes — builtins (via the env) AND special forms (via the evaluator
+    // gate) — but now leaning on the hardened MECHANISMS rather than a bare scalar allowlist:
+    //   * values_equal / to_string are memoized + bounded, so `=`/`!=`/`str` over a shared or
+    //     cyclic structure cost its PHYSICAL size, never an exponential unfolding;
+    //   * run() arms a per-thread deadline that nested evaluators inherit, so a loop that
+    //     lives inside one native step (a method body, a generator drive) aborts at the budget.
+    // With those in place a predicate can safely use compound values and structural equality.
+    // What stays OUT: the SIZE-DOUBLING materializers (str-concat, append, slice, set-*), the
+    // internal-loop / IO / capability builtins (generator/next/range/collect, print, apply,
+    // send, every writer/scheduler/watch). And via the special-form gate below, the code-gen
+    // and object-graph forms (defmacro/eval/root/defclass/super) — usable in the full-env
+    // init:/action lanes, just not in a per-frame predicate.
     env_ = std::make_shared<se::environment>();
     se::environment_ptr full = se::builtins::make_default_environment();
     se::register_intrinsics(full, &ctx_);
     static const char *const kAllowed[] = {
-        // scalar arithmetic / comparison / coercion / type predicates / logic. (`<`/`>`/…
-        // use as_number and throw on a non-number; `+`/`*` flatten only one level and throw
-        // on nesting — so none can walk a deep structure. `=`/`!=` DO recurse, so they are
-        // bound as scalar-guarded wrappers below instead of copied.)
-        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "int", "float", "is-int", "is-float",
-        "is-string", "is-null", "type-of", "not", "and", "or",
-        // side-effect-free SCALAR/BOOL state readers (no writer / scheduler / watch, and NOT
-        // the compound-returning state-children / state-data-get)
-        "state-get", "state-exists", "state-root-path", "state-has-expiry", "state-is-expired"};
+        // arithmetic / comparison / coercion / type predicates / logic
+        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "str",
+        "is-int", "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
+        // bounded compound construction (by-reference; not the doubling materializers) + access
+        "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
+        // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables)
+        "state-get", "state-exists", "state-children", "state-data-get", "state-root-path",
+        "state-has-expiry", "state-is-expired"};
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
-    // `=`/`!=` are the only structure WALKERS (values_equal recurses into list/dict with no
-    // memoization). A compound value is still *buildable* via the `quote` literal or the
-    // `defclass` special form — neither of which the env can gate — so a shared-ref DAG
-    // compared with `=` would walk 2^d nodes in one uninterruptible native step. Bind
-    // SCALAR-GUARDED `=`/`!=` that refuse a list/dict operand: a predicate compares scalars
-    // but can never drive values_equal over an adversarial structure.
-    const auto is_compound = [](const se::value_t &v) {
-      return std::holds_alternative<se::list_ptr>(v.v) || std::holds_alternative<se::dict_ptr>(v.v);
-    };
-    env_->set("=", se::value_t{se::native_fn{[is_compound](std::span<const se::value_t> a) -> se::value_t {
-                  if (a.size() != 2)
-                    throw std::runtime_error("=: expected 2 arguments");
-                  if (is_compound(a[0]) || is_compound(a[1]))
-                    throw std::runtime_error("=: read-lane comparison is scalar-only");
-                  return se::value_t{se::values_equal(a[0], a[1])};
-                }}});
-    env_->set("!=", se::value_t{se::native_fn{[is_compound](std::span<const se::value_t> a) -> se::value_t {
-                  if (a.size() != 2)
-                    throw std::runtime_error("!=: expected 2 arguments");
-                  if (is_compound(a[0]) || is_compound(a[1]))
-                    throw std::runtime_error("!=: read-lane comparison is scalar-only");
-                  return se::value_t{!se::values_equal(a[0], a[1])};
-                }}});
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
+    // Special-form gate: allow control flow, binding, functions, literals and loops (all
+    // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
+    // set is shared across every ReactiveEngine.
+    static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
+        std::make_shared<const std::set<std::string>>(std::set<std::string>{
+            "if", "begin", "let", "while", "for", "lambda", "defun", "set", "return", "quote",
+            "yield", "break"});
+    ev_->restrict_special_forms(kAllowedForms);
   }
 
   // Reset the per-FRAME aggregate budget — call once at the top of each render frame,

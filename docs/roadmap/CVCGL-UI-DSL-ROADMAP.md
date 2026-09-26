@@ -899,23 +899,24 @@ the **same state tree the widgets bind to**.
 > `CVC_STATE_EXEC`-gated). `Widget::visible_when` is a predicate the walk re-evaluates each
 > frame; falsy → the widget and its subtree are skipped (in a grid, a hidden child consumes
 > **no** cell). Implementation notes that refine §4.1 below as-built:
-> - **Default-deny, SCALAR-ONLY env.** The read env starts EMPTY and allowlists only scalar
->   arithmetic/comparison/coercion/logic and the side-effect-free scalar/bool state readers
->   (`state-get`/`exists`/`root-path`/`has-expiry`/`is-expired`). This is what makes the caps
->   real: they are checked only *between* evaluator steps, so ANY primitive that does work
->   proportional to caller-supplied *structure* in one native step defeats them — a
->   `list`/`cons` shared-pointer DAG (O(d) steps, 2^d logical nodes) walked by `str`/`=`, or
->   `str-concat` string-doubling. So NO compound constructor/accessor/mutator, NO structure
->   walker (`str`/`str-concat`), NO `apply` (it could invoke a `native_fn` fetched from state),
->   and NOT the compound-returning readers (`state-children`/`state-data-get`) are bound —
->   alongside every writer/scheduler/watch/`print`. What remains does O(1)/O(len) work per
->   call over scalars, so total work is bounded by the step count. Special forms and
->   `true`/`false`/`nil` are parser/evaluator-intrinsic (an empty base still runs them); loops/
->   recursion live in special forms, which yield per step and so are step-capped. Per-eval
->   isolation (a fresh child scope) keeps a predicate's `set`/`defun` from leaking across
->   widgets or frames. (The `state-data` channel itself was also hardened: `state-data-set`
->   refuses to store callables, and `state-data-get` returns a deep copy — so no context can
->   smuggle a `native_fn` or mutate node-resident data through a fetched handle.)
+> - **Default-deny, on mechanisms not just an allowlist.** The between-steps caps cannot see
+>   work that runs to completion *inside one native step*, so the sandbox rests on three
+>   hardened evaluator mechanisms rather than a bare scalar allowlist: (1) `values_equal` /
+>   `to_string` are **memoized + bounded**, so `=`/`str` over a shared/cyclic structure cost
+>   its physical size, never an exponential unfolding; (2) **gateable special forms** —
+>   `restrict_special_forms` bars the code-gen / object-graph forms (`defclass`/`defmacro`/
+>   `eval`/`root`/`super`) that the environment cannot gate; (3) a **cooperative per-thread
+>   deadline** armed by `run()` and inherited by nested evaluators, so an uncapped nested
+>   method body or a big generator/`collect` loop aborts at the time budget. With those in
+>   place a predicate may safely use compound values, structural equality, `quote`, `let`,
+>   `lambda`, loops, and bounded `list`/`dict` construction & access. What stays OUT of the
+>   read-lane env: the size-doubling materializers (`str-concat`/`append`/`slice`/`set-*`),
+>   the internal-loop / IO / capability builtins (`generator`/`next`/`range`/`collect`,
+>   `print`, `apply`, `send`, every writer/scheduler/watch). Per-eval isolation (a fresh child
+>   scope) keeps a predicate's `set`/`defun` from leaking across widgets or frames. The
+>   `state-data` channel is also hardened for every context: `state-data-set` refuses to store
+>   callables, and `state-data-get` returns a deep copy — no smuggled `native_fn`, no mutating
+>   node-resident data through a fetched handle.
 > - **Three-way bound.** Per-eval **step** cap + per-eval **wall-time** cap + a per-**frame**
 >   aggregate wall-time budget (so N reactive widgets can't together stall a frame). A step
 >   cap returns `done==false`; a time cap throws `evaluation_timeout`; both → fail-safe hide

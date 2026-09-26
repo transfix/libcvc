@@ -615,52 +615,77 @@ TEST(AriadneReactive, HiddenGridChildConsumesNoCell) {
   EXPECT_EQ(mb.times("next_cell"), 2); // only the 2 VISIBLE children take a cell (no shift)
 }
 
-TEST(AriadneReactive, ReadLaneExcludesCompoundAndInvokeBuiltins) {
+TEST(AriadneReactive, ReadLaneStillExcludesMaterializersAndSideEffects) {
   if (!have_state_exec())
     GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  // The read-lane env is scalar-only: compound builders/walkers (which could do unbounded
-  // work in one uninterruptible native step) and apply / state-data-get (an invocation /
-  // capability-smuggling channel) are NOT bound. A predicate using one is an unbound symbol
-  // -> fail-safe hidden. This locks the allowlist against a regression that reopens the cap.
-  Widget wl = text("uses_list");
-  wl.visible_when = "(is-null (list 1 2))"; // list not bound
+  // Compounds are now allowed, but the SIZE-DOUBLING materializers (no output cap) and the
+  // side-effect / invoke builtins are still not bound: a predicate using one is an unbound
+  // symbol -> fail-safe hidden. Locks the allowlist against re-admitting an amplifier.
   Widget wc = text("uses_concat");
-  wc.visible_when = "(is-string (str-concat \"a\" \"b\"))"; // str-concat not bound (string doubling)
+  wc.visible_when = "(is-string (str-concat \"a\" \"b\"))"; // str-concat OUT (string doubler)
+  Widget wp = text("uses_append");
+  wp.visible_when = "(is-list (append (list 1) (list 2)))"; // append OUT (list materializer)
   Widget wa = text("uses_apply");
-  wa.visible_when = "(apply and (list #t))"; // apply not bound (invoke a fetched fn)
-  Widget wd = text("uses_data_get");
-  wd.visible_when = "(is-null (state-data-get \"k\"))"; // state-data-get not bound in read-lane
-  rt.set_root(group({wl, wc, wa, wd}));
+  wa.visible_when = "(apply and (list #t))"; // apply OUT (invoke)
+  Widget wpr = text("uses_print");
+  wpr.visible_when = "(begin (print \"x\") #t)"; // print OUT (I/O)
+  rt.set_root(group({wc, wp, wa, wpr}));
   rt.render();
-  EXPECT_FALSE(mb.saw("text_line:uses_list"));
   EXPECT_FALSE(mb.saw("text_line:uses_concat"));
+  EXPECT_FALSE(mb.saw("text_line:uses_append"));
   EXPECT_FALSE(mb.saw("text_line:uses_apply"));
-  EXPECT_FALSE(mb.saw("text_line:uses_data_get"));
+  EXPECT_FALSE(mb.saw("text_line:uses_print"));
   EXPECT_FALSE(rt.take_reactive_warnings().empty()); // each reported an unbound symbol
 }
 
-TEST(AriadneReactive, EqualityRefusesCompoundOperands) {
+TEST(AriadneReactive, CompoundsAndAllowedFormsNowWork) {
   if (!have_state_exec())
     GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  // `=` is the only structure walker; a compound is still buildable via `quote` (or the
-  // defclass special form the env can't gate). Comparing one with `=` is refused, so a
-  // predicate can never drive values_equal over an adversarially deep structure -> hidden.
-  Widget bad = text("bad");
-  bad.visible_when = "(= (quote (1 2 3)) (quote (1 2 3)))"; // quoted lists are compound
-  Widget ok = text("ok");
-  ok.visible_when = "(= 1 1)"; // scalar equality still works
-  rt.set_root(group({bad, ok}));
+  // With memoized values_equal + bounded to_string, compound values and structural equality
+  // are safe and usable; let/if/list/length/quote are all allowed.
+  Widget eq = text("eq");
+  eq.visible_when = "(= (quote (1 2 3)) (quote (1 2 3)))"; // structural equality -> shown
+  Widget ne = text("ne");
+  ne.visible_when = "(= (quote (1 2)) (quote (9 9)))"; // unequal -> hidden
+  Widget lst = text("lst");
+  lst.visible_when = "(let ((xs (list 1 2 3))) (> (length xs) 2))"; // 3 > 2 -> shown
+  rt.set_root(group({eq, ne, lst}));
   rt.render();
-  EXPECT_FALSE(mb.saw("text_line:bad")); // compound `=` refused -> fail-safe hidden
-  EXPECT_TRUE(mb.saw("text_line:ok"));   // scalar `=` unaffected
+  EXPECT_TRUE(mb.saw("text_line:eq"));
+  EXPECT_FALSE(mb.saw("text_line:ne"));
+  EXPECT_TRUE(mb.saw("text_line:lst"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The special-form gate denies the code-gen / object-graph forms. In particular the
+  // defclass-method nested-eval hang is rejected at the FORM, before the constructor runs —
+  // so it is hidden + warned, never the uncapped nested loop. render() must return.
+  Widget wdc = text("wdc");
+  wdc.visible_when = "(begin (defclass B (init (self) (while 1 1))) (B))"; // defclass denied
+  Widget wev = text("wev");
+  wev.visible_when = "(eval (quote #t))"; // eval denied
+  Widget wdm = text("wdm");
+  wdm.visible_when = "(begin (defmacro m () #t) #t)"; // defmacro denied
+  rt.set_root(group({wdc, wev, wdm}));
+  rt.render(); // must return, not hang
+  EXPECT_FALSE(mb.saw("text_line:wdc"));
+  EXPECT_FALSE(mb.saw("text_line:wev"));
+  EXPECT_FALSE(mb.saw("text_line:wdm"));
   EXPECT_FALSE(rt.take_reactive_warnings().empty());
 }
 
