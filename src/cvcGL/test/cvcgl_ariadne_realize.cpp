@@ -353,6 +353,38 @@ int main() {
     }
   }
 
+  // ── verify_scene_customs: the customs: gate for NODE types (cvcGL side) ──────
+  {
+    using cvc::ariadne::CustomRequirement;
+    using K = cvc::ariadne::CustomRequirement::Kind;
+    printf("== verify_scene_customs: node customs gate ==\n");
+
+    // "beacon" was registered above; an unregistered node type is not.
+    cvc::ariadne::LoadResult good;
+    good.customs.push_back({K::Node, "beacon", true});
+    chk(cvc::gl::ariadne::verify_scene_customs(good, nullptr),
+        "required node custom that IS registered -> verify passes");
+
+    cvc::ariadne::LoadResult bad;
+    bad.customs.push_back({K::Node, "unregistered_node_zzz", true});
+    std::vector<std::string> errs;
+    chk(!cvc::gl::ariadne::verify_scene_customs(bad, &errs),
+        "required node custom that is MISSING -> verify fails");
+    chk(!errs.empty(), "... and appends an error message");
+
+    cvc::ariadne::LoadResult opt;
+    opt.customs.push_back({K::Node, "unregistered_optional", false});
+    std::vector<std::string> notes;
+    chk(cvc::gl::ariadne::verify_scene_customs(opt, &notes),
+        "non-required missing node custom -> verify passes (degrade)");
+    chk(!notes.empty(), "... with a note logged");
+
+    cvc::ariadne::LoadResult widgetOnly; // widget/block customs are the loader's job
+    widgetOnly.customs.push_back({K::Widget, "anything", true});
+    chk(cvc::gl::ariadne::verify_scene_customs(widgetOnly, nullptr),
+        "verify_scene_customs ignores widget customs (checked at load) -> passes");
+  }
+
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
   return fails ? 1 : 0;
 }

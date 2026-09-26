@@ -4,6 +4,7 @@
 // Parsing tests are skipped when the build has no yaml-cpp (the loader is then a
 // stub); the version/schema surface is tested unconditionally.
 
+#include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/widget.h>
 
@@ -914,4 +915,68 @@ windows: [ { window: W, children: [ { text: "x" } ] } ]
 TEST(AriadneLoader, RegisterBuiltinBlockIsIgnored) {
   register_ari_block("scene", [](const Value &, LoadResult &) {}); // built-in: ignored
   EXPECT_FALSE(has_ari_block("scene"));
+}
+
+// ---------------------------------------------------------------------------
+// The `customs:` gate — declare custom types the doc uses; fail fast on a
+// missing REQUIRED one, warn on a missing non-required one (default).
+// ---------------------------------------------------------------------------
+
+TEST(AriadneCustoms, MissingRequiredWidgetFailsLoad) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  - widget: definitely_unregistered_xyz
+    required: true
+windows: [ { window: W, children: [] } ]
+)");
+  EXPECT_FALSE(r.ok); // fail fast
+  EXPECT_NE(r.error.find("requires custom widget"), std::string::npos);
+  EXPECT_TRUE(r.root.children.empty()); // no tree built on a hard custom failure
+}
+
+TEST(AriadneCustoms, MissingNonRequiredWidgetWarns) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  - widget: some_optional_widget
+windows: [ { window: W, children: [] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error; // non-required missing -> loads
+  EXPECT_TRUE(has_warning(r, "optional custom widget"));
+  ASSERT_EQ(r.customs.size(), 1u);
+  EXPECT_EQ(r.customs[0].name, "some_optional_widget");
+  EXPECT_FALSE(r.customs[0].required); // default is NOT required
+}
+
+TEST(AriadneCustoms, RegisteredWidgetSatisfiesRequirement) {
+  SKIP_WITHOUT_YAML();
+  register_widget_type("customs_ok_widget", [](const Widget &, const WidgetEmitContext &) {});
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  - widget: customs_ok_widget
+    required: true
+windows: [ { window: W, children: [] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(has_warning(r, "custom widget")); // registered -> neither error nor warning
+}
+
+TEST(AriadneCustoms, NodeCustomIsDeferredNotCheckedAtLoad) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+customs:
+  - node: unregistered_node_type
+    required: true
+)");
+  // Node types register on the cvcGL side, so the loader records the requirement but
+  // does NOT check it — cvc::gl::ariadne::verify_scene_customs does, before realize.
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.customs.size(), 1u);
+  EXPECT_EQ(r.customs[0].kind, CustomRequirement::Kind::Node);
+  EXPECT_TRUE(r.customs[0].required);
 }

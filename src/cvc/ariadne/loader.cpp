@@ -84,7 +84,7 @@ std::map<std::string, AriBlockParser> &block_registry() {
 }
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" ||
-         k == "root" || k == "children" || k == "scene";
+         k == "root" || k == "children" || k == "scene" || k == "customs";
 }
 } // namespace
 
@@ -830,6 +830,36 @@ void schema_validate(const YAML::Node &doc, Ctx &ctx) {
 }
 #endif // CVC_ARIADNE_HAVE_JSONSCHEMA
 
+// Parse the `customs:` block (§ extensibility): the custom types the document uses.
+// Each entry names exactly one of widget:/node:/block: with an optional `required:`
+// flag (default false — a missing one warns; `required: true` fails the load).
+std::vector<CustomRequirement> parse_customs(const YAML::Node &c) {
+  std::vector<CustomRequirement> out;
+  if (!c || !c.IsSequence())
+    return out;
+  for (const YAML::Node &e : c) {
+    if (!e.IsMap())
+      continue;
+    CustomRequirement req;
+    if (has(e, "widget")) {
+      req.kind = CustomRequirement::Kind::Widget;
+      req.name = str(e, "widget");
+    } else if (has(e, "node")) {
+      req.kind = CustomRequirement::Kind::Node;
+      req.name = str(e, "node");
+    } else if (has(e, "block")) {
+      req.kind = CustomRequirement::Kind::Block;
+      req.name = str(e, "block");
+    } else {
+      continue; // no widget:/node:/block: key — not a custom declaration
+    }
+    req.required = flag(e, "required", false); // default optional (warn); required: true = fail
+    if (!req.name.empty())
+      out.push_back(req);
+  }
+  return out;
+}
+
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate.
 LoadResult load_node(const YAML::Node &doc) {
   LoadResult r;
@@ -843,6 +873,33 @@ LoadResult load_node(const YAML::Node &doc) {
     r.error = "ari: document requires libcvc >= " + r.meta.min_libcvc +
               " but this build is " + libcvc_version();
     return r;
+  }
+
+  // Custom-object gate (§ extensibility): a declared `customs:` entry that this build
+  // can't satisfy fails the load (required) or warns (optional). Widget/block customs
+  // are checked here (their registries are core); NODE customs are checked by
+  // cvc::gl::ariadne::verify_scene_customs before realize (that registry is cvcGL).
+  r.customs = doc.IsMap() ? parse_customs(doc["customs"]) : std::vector<CustomRequirement>{};
+  for (const CustomRequirement &req : r.customs) {
+    const char *kind = "widget";
+    bool present = true;
+    if (req.kind == CustomRequirement::Kind::Widget) {
+      present = has_widget_type(req.name);
+    } else if (req.kind == CustomRequirement::Kind::Block) {
+      kind = "block";
+      present = has_ari_block(req.name);
+    } else {
+      continue; // Node: deferred to verify_scene_customs (cvcGL)
+    }
+    if (present)
+      continue;
+    if (req.required) {
+      r.error = std::string("ari: requires custom ") + kind + " '" + req.name +
+                "' which is not registered on this system";
+      return r; // fail fast — no tree built (r.ok stays false)
+    }
+    ctx.warn(std::string("ari: optional custom ") + kind + " '" + req.name +
+             "' is not registered — it will render as a placeholder / be skipped");
   }
 
 #ifdef CVC_ARIADNE_HAVE_JSONSCHEMA

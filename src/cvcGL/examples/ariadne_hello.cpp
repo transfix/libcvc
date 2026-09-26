@@ -89,11 +89,18 @@ int main(int argc, char **argv) {
       if (!lr.meta.name.empty())
         std::printf(" — \"%s\"", lr.meta.name.c_str());
       std::printf("\n");
-      for (const std::string &w : lr.warnings) // §15 semantic validation
+      for (const std::string &w : lr.warnings) // §15 semantic validation + customs warnings
         std::printf("[ariadne_hello]   %s\n", w.c_str());
+      // §extensibility: the loader already fail-fast-checked widget/block customs; now
+      // check declared NODE customs (cvcGL registry) before realizing. A missing
+      // REQUIRED node custom fails fast (skip the scene); a non-required one just logs.
+      std::vector<std::string> custom_errs;
+      const bool customs_ok = cvc::gl::ariadne::verify_scene_customs(lr, &custom_errs);
+      for (const std::string &e : custom_errs)
+        std::printf("[ariadne_hello]   %s\n", e.c_str());
       // Realize the scene under the SAME state prefix the Runtime binds against, so
       // a widget `bind:` and a scene `visible:` on one path share one key.
-      if (lr.scene.any()) {
+      if (customs_ok && lr.scene.any()) {
         std::vector<std::string> scene_warnings;
         realized = cvc::gl::ariadne::realize_scene(sg, lr.scene, sg.getStatePrefix(),
                                                    &scene_warnings);

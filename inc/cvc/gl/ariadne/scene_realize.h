@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <cvc/ariadne/bind.h>        // SceneVisibilityBinding
+#include <cvc/ariadne/loader.h>      // LoadResult / CustomRequirement (verify_scene_customs)
 #include <cvc/gl/StageLighting.h>    // RealizedScene owns any StageLighting rigs
 
 class vtkRenderer;
@@ -106,6 +107,17 @@ void register_scene_node_type(const std::string &type, NodeRealizer realizer);
 
 // Whether a custom scene node `type` has a registered realizer (test/introspection).
 bool has_scene_node_type(const std::string &type);
+
+// Verify the NODE customs a document declared (`loaded.customs`, from the `customs:`
+// block) against the registered scene node types. The loader already fail-fast-checked
+// widget/block customs at LOAD; node types register on THIS (cvcGL) side, so the host
+// calls this after load and BEFORE realize_scene, to fail fast on a required node
+// custom this build lacks. Returns false if any REQUIRED node custom is unregistered
+// (appending a message to `errors` when non-null); an OPTIONAL missing one appends a
+// note but does not fail (realize_scene warns + skips it). Returns true when every
+// required node custom is registered (and when the document declared none).
+bool verify_scene_customs(const cvc::ariadne::LoadResult &loaded,
+                          std::vector<std::string> *errors = nullptr);
 
 } // namespace ariadne
 } // namespace gl

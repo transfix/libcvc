@@ -430,6 +430,26 @@ bool has_scene_node_type(const std::string &type) {
   return node_registry().find(type) != node_registry().end();
 }
 
+bool verify_scene_customs(const cvc::ariadne::LoadResult &loaded, std::vector<std::string> *errors) {
+  bool ok = true;
+  for (const cvc::ariadne::CustomRequirement &req : loaded.customs) {
+    if (req.kind != cvc::ariadne::CustomRequirement::Kind::Node)
+      continue; // widget/block customs are checked by the loader at load time
+    if (has_scene_node_type(req.name))
+      continue;
+    if (req.required) {
+      ok = false;
+      if (errors)
+        errors->push_back("ari: requires custom node '" + req.name +
+                          "' which is not registered on this system");
+    } else if (errors) {
+      errors->push_back("ari: optional custom node '" + req.name +
+                        "' is not registered — it will be skipped");
+    }
+  }
+  return ok;
+}
+
 } // namespace ariadne
 } // namespace gl
 } // namespace cvc

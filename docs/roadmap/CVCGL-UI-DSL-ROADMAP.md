@@ -3239,12 +3239,35 @@ strings — no yaml-cpp, `inc/cvc/ariadne/value.h`).
   primitives. Also deferred: per-type JSON-Schema fragments (the base schema is already permissive, so
   custom types validate today; a fragment API would tighten field validation).
 
+**The `customs:` gate — fail fast on a missing custom.** A document pre-declares the custom types it uses
+in a top-level `customs:` block, so a load on a system lacking one is caught before rendering (like
+`meta.min_libcvc`, and like pre-declaring `state_exec` intrinsics):
+
+```yaml
+customs:
+  - widget: color_picker      # required: false by default -> a missing one WARNS (placeholder/skip)
+  - node: swarm
+    required: true            # a missing REQUIRED custom is a hard ERROR (fail fast)
+  - block: theme
+```
+
+Each entry names one of `widget:`/`node:`/`block:` with an optional `required:` flag (default **false** —
+degrade with a warning; `required: true` — fail). Parsed into `LoadResult::customs`
+(`cvc::ariadne::CustomRequirement{kind,name,required}`). The check splits by the seam: **widget + block**
+customs are checked by the loader at LOAD (their registries are core) — a missing required one makes the
+load fail (`ok=false`/`error`, like the version gate); a missing non-required one is a warning. **Node**
+customs are checked by `cvc::gl::ariadne::verify_scene_customs(LoadResult, errors)` (their registry is
+cvcGL) — the host calls it after load, before `realize_scene`, and skips the scene on a required miss. Both
+points are before anything renders.
+
 Verified end-to-end: loader gtests for props capture + a custom block + a custom widget preserved as
-`Kind::Custom`; runtime gtests that a registered widget composes primitives, its structure depends on
-state, and it fires events (+ an unregistered type draws a placeholder); and an offscreen cvcGL test that
-registers a custom `beacon` node type — its realizer builds a `GraphicsNode`, reads its `props`, registers
-a per-frame tick that `tick_scene` runs, and a built-in child nests under it with composed transforms.
-`ariadne_hello`/`hello.ari` demonstrate a `labeled` custom widget live.
+`Kind::Custom` (with children) + the `customs:` gate (required-widget miss fails the load, non-required
+warns, registered satisfies, node deferred); runtime gtests that a registered widget composes primitives,
+its structure depends on state, and it fires events (+ an unregistered type draws a placeholder); and an
+offscreen cvcGL test that registers a custom `beacon` node type — its realizer builds a `GraphicsNode`,
+reads its `props`, registers a per-frame tick that `tick_scene` runs, a built-in child nests under it with
+composed transforms, and `verify_scene_customs` fails/degrades/passes correctly. `ariadne_hello`/`hello.ari`
+demonstrate a `labeled` custom widget + a `customs:` declaration live.
 
 Do the move **now**, while the code is ~480 lines across four files, so the YAML loader, `state_exec`, and validation are written against `cvc::ariadne` from day one and never have to be un-coupled.
 1. **Headers** — `inc/cvc/gl/ariadne/{widget.h,ariadne.h}` -> `inc/cvc/ariadne/`; add `inc/cvc/ariadne/backend.h`. Namespace `cvc::gl::ariadne -> cvc::ariadne`; drop all ImGui/VTK includes.

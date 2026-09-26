@@ -57,11 +57,27 @@ struct Meta {
   std::string min_libcvc; // minimum libcvc semver required to load this document
 };
 
+// A custom type the document declares it USES, in the `customs:` block — so a load on
+// a system missing that custom either warns (the default) or fails hard (`required:
+// true`). `kind` picks which registry checks it: Widget -> register_widget_type,
+// Block -> register_ari_block (both checked by the loader at load time), Node ->
+// register_scene_node_type (checked by cvc::gl::ariadne::verify_scene_customs at
+// realize time, since node types are cvcGL-side).
+struct CustomRequirement {
+  enum class Kind { Widget, Node, Block };
+  Kind kind = Kind::Widget;
+  std::string name;
+  // Default false: a missing NON-required custom is a WARNING (placeholder / skip).
+  // `required: true` makes a missing custom a hard ERROR (fail fast).
+  bool required = false;
+};
+
 struct LoadResult {
   bool ok = false;                   // false if the load failed (see `error`)
   Widget root;                       // a Group of the document's widgets (empty on failure)
   Scene scene;                       // the parsed `scene:` block (§9; empty if none)
   Meta meta;                         // parsed provenance (may be empty)
+  std::vector<CustomRequirement> customs; // declared `customs:` (widget/node/block)
   // Custom top-level blocks (register_ari_block), keyed by block name — whatever the
   // registered parser stored. Empty unless a document uses a registered custom block.
   std::vector<std::pair<std::string, Value>> extras;
@@ -103,7 +119,7 @@ bool version_at_least(const std::string &have, const std::string &need);
 // --- extensibility: custom top-level document blocks -------------------------
 //
 // A parser for a CUSTOM top-level block — a document key that is NOT a built-in
-// (built-ins: meta/menubar/windows/overlays/root/children/scene). When a
+// (built-ins: meta/menubar/windows/overlays/root/children/scene/customs). When a
 // loaded document contains a registered key, `parse` is called with that block's
 // content as a neutral Value and the LoadResult being built, so it can stash parsed
 // data into `LoadResult::extras` (or append to `root`/`scene`) and push notes into

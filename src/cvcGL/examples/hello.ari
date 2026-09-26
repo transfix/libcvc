@@ -12,6 +12,13 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+# customs: (§ extensibility) — the custom types this document uses, so a load on a
+# system missing one either warns (default) or fails fast (required: true). This demo
+# registers a "labeled" widget handler before loading, so this is satisfied. Change to
+# `required: true` to make a missing handler fail the load instead of a placeholder.
+customs:
+  - widget: labeled
+
 menubar:
   - menu: Sim
     items:
