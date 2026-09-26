@@ -84,7 +84,7 @@ std::map<std::string, AriBlockParser> &block_registry() {
 }
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
-         k == "children" || k == "scene" || k == "customs" || k == "init";
+         k == "children" || k == "scene" || k == "customs" || k == "init" || k == "units";
 }
 } // namespace
 
@@ -173,6 +173,12 @@ namespace {
 struct Ctx {
   std::vector<std::string> warnings;
   void warn(std::string m) { warnings.push_back(std::move(m)); }
+
+  // §12 modularization: in-document reusable widget templates (the `units:` block), stored as
+  // raw YAML so an `include:` can substitute its args (text `{name}` tokens) before parsing.
+  // include_depth guards recursive units (a unit that includes itself, directly or indirectly).
+  std::map<std::string, YAML::Node> units;
+  int include_depth = 0;
 };
 
 bool has(const YAML::Node &n, const char *key) { return n[key].IsDefined(); }
@@ -220,7 +226,18 @@ std::string action(const YAML::Node &n) {
 }
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n);
+Widget expand_include(Ctx &ctx, const YAML::Node &n); // §12 include: expand a units: template
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
+
+// Replace every occurrence of `token` in `s` with `rep`.
+inline std::string replace_all(std::string s, const std::string &token, const std::string &rep) {
+  if (token.empty())
+    return s;
+  for (std::size_t pos = s.find(token); pos != std::string::npos;
+       pos = s.find(token, pos + rep.size()))
+    s.replace(pos, token.size(), rep);
+  return s;
+}
 
 // Widget keys the loader consumes directly; everything else on a custom widget flows
 // into Widget::props for a registered emit fn to read.
@@ -397,6 +414,11 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     return group({});
   }
 
+  // §12 modularization: `include: <unit>` instantiates an in-document `units:` template with
+  // its args substituted. Handled before the widget-type dispatch (include is not a widget kind).
+  if (n["include"].IsDefined())
+    return expand_include(ctx, n);
+
   std::string label;
   const std::string type = widget_type(n, label);
 
@@ -558,6 +580,56 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   if (!w.repeat.empty() && any_descendant_repeats(w))
     ctx.warn("ari: nested 'repeat' is not supported (a single {i} index) — the inner repeat "
              "cannot see the outer index");
+  return w;
+}
+
+// §12: collect the top-level `units:` map (name -> raw widget template). Stored RAW (not
+// parsed) so an include: can substitute its args as text before parsing — and so units may be
+// defined in any order and reference one another.
+void parse_units(Ctx &ctx, const YAML::Node &doc) {
+  if (!doc.IsMap())
+    return;
+  const YAML::Node u = doc["units"];
+  if (!u || !u.IsMap())
+    return;
+  for (const auto &kv : u)
+    if (kv.first.IsScalar())
+      ctx.units[kv.first.Scalar()] = kv.second;
+}
+
+// §12: expand `include: <unit>` — instantiate a units: template with its `args:` substituted.
+// Args are a uniform text token substitution (`{name}` -> value, like repeat's `{i}`) applied
+// to the template's YAML before re-parsing, so a unit's own nested include:/repeat expand
+// naturally on the re-parse. Depth-guarded against recursive units.
+Widget expand_include(Ctx &ctx, const YAML::Node &n) {
+  constexpr int kMaxIncludeDepth = 16;
+  const std::string name = str(n, "include");
+  const auto it = ctx.units.find(name);
+  if (it == ctx.units.end()) {
+    ctx.warn("ari: include: unknown unit '" + name + "' (no such units: entry)");
+    return group({});
+  }
+  if (ctx.include_depth >= kMaxIncludeDepth) {
+    ctx.warn("ari: include: max nesting depth (" + std::to_string(kMaxIncludeDepth) +
+             ") exceeded expanding '" + name + "' — a recursive unit?");
+    return group({});
+  }
+  std::string text = YAML::Dump(it->second);
+  const YAML::Node a = n["args"];
+  if (a && a.IsMap())
+    for (const auto &kv : a)
+      if (kv.first.IsScalar() && kv.second.IsScalar())
+        text = replace_all(text, "{" + kv.first.Scalar() + "}", kv.second.Scalar());
+  YAML::Node inst;
+  try {
+    inst = YAML::Load(text);
+  } catch (const std::exception &e) {
+    ctx.warn("ari: include: '" + name + "' failed to re-parse after arg substitution: " + e.what());
+    return group({});
+  }
+  ++ctx.include_depth;
+  Widget w = parse_widget(ctx, inst);
+  --ctx.include_depth;
   return w;
 }
 
@@ -967,6 +1039,7 @@ LoadResult load_node(const YAML::Node &doc) {
   schema_validate(doc, ctx);
 #endif
 
+  parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
   r.root = parse_document(ctx, doc);
   if (doc.IsMap()) {
     r.scene = parse_scene(doc["scene"]); // §9: the scene graph, alongside the widgets

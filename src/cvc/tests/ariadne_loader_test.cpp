@@ -1135,6 +1135,88 @@ windows:
   EXPECT_EQ(c->options_expr, "(list \"p\" \"q\")");
 }
 
+// ---- §12 modularization: units + include ----------------------------------
+
+TEST(AriadneModularity, IncludeExpandsUnitWithArgs) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+units:
+  aslider:
+    slider_int: "{label}"
+    bind: "{path}"
+    lo: 0
+    hi: 100
+windows:
+  - window: W
+    children:
+      - include: aslider
+        args: { label: Agents, path: demo.agents }
+      - include: aslider
+        args: { label: Speed, path: demo.speed }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::SliderInt), 2); // the unit instantiated twice
+  const Widget *a = find(r.root, Kind::SliderInt, "Agents");
+  ASSERT_NE(a, nullptr);
+  EXPECT_EQ(a->bind, "demo.agents"); // args substituted per instance
+  const Widget *s = find(r.root, Kind::SliderInt, "Speed");
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(s->bind, "demo.speed");
+}
+
+TEST(AriadneModularity, IncludeUnknownUnitWarns) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - include: nope
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "unknown unit")); // surfaced, not silently dropped
+}
+
+TEST(AriadneModularity, NestedIncludeExpands) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+units:
+  inner:
+    checkbox: "{name}"
+    bind: "flags.{name}"
+  outer:
+    group:
+    children:
+      - include: inner
+        args: { name: wire }
+windows:
+  - window: W
+    children:
+      - include: outer
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *cb = find(r.root, Kind::Checkbox, "wire");
+  ASSERT_NE(cb, nullptr); // a unit that includes another unit expands both
+  EXPECT_EQ(cb->bind, "flags.wire");
+}
+
+TEST(AriadneModularity, RecursiveIncludeIsDepthGuarded) {
+  SKIP_WITHOUT_YAML();
+  // A unit that includes itself must terminate (depth guard), not hang or overflow.
+  LoadResult r = load_string(R"(
+units:
+  loopy:
+    group:
+    children:
+      - include: loopy
+windows:
+  - window: W
+    children:
+      - include: loopy
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "max nesting depth"));
+}
+
 TEST(AriadneReactive, RepeatParsedOntoWidget) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
