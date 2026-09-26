@@ -73,6 +73,16 @@ LoadResult load_file(const std::string &path);
 // false, load_* return {ok:false, error:"...built without yaml-cpp..."}.
 bool have_yaml();
 
+// Whether this build has the JSON-Schema validator (nlohmann-json +
+// json-schema-validator). When true, load_* run Layer-2 structural validation
+// (roadmap §15) against the .ari schema and add any violations to `warnings`.
+bool have_jsonschema();
+
+// The JSON Schema (draft 2020-12) for a .ari document — the machine-readable
+// structural contract Layer-2 validates against, also usable by external tooling
+// (an editor, `ari validate`). Available regardless of have_jsonschema().
+std::string ari_schema_json();
+
 // The libcvc version this build reports (CVC_VERSION_STRING) — what the
 // min_libcvc gate compares against. Exposed for tooling / diagnostics.
 std::string libcvc_version();

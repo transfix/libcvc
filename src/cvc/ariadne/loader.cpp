@@ -21,6 +21,10 @@
 #include <yaml-cpp/yaml.h>
 #endif
 
+#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
+#include <nlohmann/json-schema.hpp> // pulls in <nlohmann/json.hpp>
+#endif
+
 namespace cvc {
 namespace ariadne {
 
@@ -62,6 +66,72 @@ bool version_at_least(const std::string &have, const std::string &need) {
 }
 
 std::string libcvc_version() { return CVC_VERSION_STRING; }
+
+// ---- the .ari JSON Schema (Layer 2, roadmap §15) ----------------------------
+// A permissive draft-2020-12 schema: it enforces the meta block (min_libcvc
+// required) and the FIELD types of widgets (bind is a string, lo/hi numbers,
+// options an array of strings, …), while leaving the widget type-key and any
+// forward-compat keys unconstrained (additionalProperties defaults true) so a
+// newer document still validates its known structure. Exposed for tooling even
+// when the validator itself is not linked.
+namespace {
+const char *const kAriSchema = R"ARISCHEMA({
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cvcpkg.org/schemas/ari.schema.json",
+  "title": "Ariadne .ari document",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "author": {"type": "string"},
+        "description": {"type": "string"},
+        "version": {"type": "string"},
+        "min_libcvc": {"type": "string"}
+      },
+      "required": ["min_libcvc"]
+    },
+    "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "windows":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "overlays": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "root":     {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
+  },
+  "$defs": {
+    "widget": {
+      "type": ["string", "object"],
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "type": {"type": "string"},
+        "bind": {"type": "string"},
+        "on": {"type": ["string", "object"]},
+        "lo": {"type": "number"},
+        "hi": {"type": "number"},
+        "def": {"type": ["number", "boolean", "string"]},
+        "fmt": {"type": "string"},
+        "options": {"type": "array", "items": {"type": "string"}},
+        "default": {"type": "string"},
+        "pos": {"type": "array", "items": {"type": "number"}},
+        "size": {"type": "array", "items": {"type": "number"}},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+        "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
+      }
+    }
+  }
+})ARISCHEMA";
+} // namespace
+
+std::string ari_schema_json() { return kAriSchema; }
+
+bool have_jsonschema() {
+#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
+  return true;
+#else
+  return false;
+#endif
+}
 
 #ifdef CVC_ARIADNE_HAVE_YAML
 
@@ -299,6 +369,75 @@ Meta parse_meta(const YAML::Node &m) {
   return meta;
 }
 
+#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
+// Convert a yaml-cpp node to nlohmann::json so json-schema-validator can check it.
+// yaml-cpp scalars are untyped strings; coerce to int/double/bool where the whole
+// scalar parses as one, else keep the string (so "3.4.0" and "%.2f" stay strings).
+nlohmann::json yaml_to_json(const YAML::Node &n) {
+  using nlohmann::json;
+  switch (n.Type()) {
+  case YAML::NodeType::Null:
+    return json(nullptr);
+  case YAML::NodeType::Sequence: {
+    json a = json::array();
+    for (const YAML::Node &e : n)
+      a.push_back(yaml_to_json(e));
+    return a;
+  }
+  case YAML::NodeType::Map: {
+    json o = json::object();
+    for (const auto &kv : n)
+      o[kv.first.Scalar()] = yaml_to_json(kv.second);
+    return o;
+  }
+  case YAML::NodeType::Scalar: {
+    const std::string s = n.Scalar();
+    if (s == "true" || s == "false")
+      return json(s == "true");
+    try {
+      std::size_t pos = 0;
+      const long long i = std::stoll(s, &pos);
+      if (pos == s.size())
+        return json(i);
+    } catch (...) {
+    }
+    try {
+      std::size_t pos = 0;
+      const double d = std::stod(s, &pos);
+      if (pos == s.size())
+        return json(d);
+    } catch (...) {
+    }
+    return json(s);
+  }
+  default:
+    return json(nullptr);
+  }
+}
+
+// Layer 2 (roadmap §15): validate the document against the .ari JSON Schema,
+// collecting violations as warnings (advisory — the lenient loader still loads
+// what it can; the min_libcvc gate above is the only fatal provenance check).
+void schema_validate(const YAML::Node &doc, Ctx &ctx) {
+  struct Collector : nlohmann::json_schema::error_handler {
+    Ctx &ctx;
+    explicit Collector(Ctx &c) : ctx(c) {}
+    void error(const nlohmann::json::json_pointer &ptr, const nlohmann::json &,
+               const std::string &msg) override {
+      const std::string at = ptr.to_string();
+      ctx.warn("ari: schema: " + (at.empty() ? std::string("<root>") : at) + ": " + msg);
+    }
+  } collector(ctx);
+  try {
+    nlohmann::json_schema::json_validator validator;
+    validator.set_root_schema(nlohmann::json::parse(kAriSchema));
+    validator.validate(yaml_to_json(doc), collector);
+  } catch (const std::exception &e) {
+    ctx.warn(std::string("ari: schema validation could not run: ") + e.what());
+  }
+}
+#endif // CVC_ARIADNE_HAVE_JSONSCHEMA
+
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate.
 LoadResult load_node(const YAML::Node &doc) {
   LoadResult r;
@@ -313,6 +452,11 @@ LoadResult load_node(const YAML::Node &doc) {
               " but this build is " + libcvc_version();
     return r;
   }
+
+#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
+  // Layer 2: structural validation (before the semantic Layer-3 walk below).
+  schema_validate(doc, ctx);
+#endif
 
   r.root = parse_document(ctx, doc);
   if (r.meta.min_libcvc.empty())

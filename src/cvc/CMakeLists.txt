@@ -1150,6 +1150,21 @@ else()
   message(STATUS "Ariadne: FTXUI not found - terminal backend compiles to a stub")
 endif()
 
+# Ariadne .ari Layer-2 JSON-Schema validation — OPTIONAL (roadmap §15). When the
+# json-schema-validator (over nlohmann-json) is present, the loader validates each
+# document against the .ari schema and reports violations as warnings
+# (CVC_ARIADNE_HAVE_JSONSCHEMA); when absent, the schema is still exposed
+# (ari_schema_json) but no runtime validation runs. Needs yaml-cpp too (it
+# validates the parsed document). Its config does find_dependency(nlohmann_json).
+find_package(nlohmann_json_schema_validator CONFIG QUIET)
+if(TARGET nlohmann_json_schema_validator::validator)
+  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_JSONSCHEMA)
+  target_link_libraries(cvc PRIVATE nlohmann_json_schema_validator::validator)
+  message(STATUS "Ariadne: .ari Layer-2 JSON-Schema validation ENABLED (json-schema-validator)")
+else()
+  message(STATUS "Ariadne: json-schema-validator not found - Layer-2 validation off")
+endif()
+
 # Set library version
 set_target_properties(cvc PROPERTIES
   VERSION ${CVC_VERSION}
