@@ -394,6 +394,13 @@ add_executable(cvcgl_light_node test/cvcgl_light_node.cpp)
 target_link_libraries(cvcgl_light_node PRIVATE cvcGL)
 add_test(NAME cvcgl_light_node COMMAND cvcgl_light_node)
 
+# Ariadne §9 realize_scene: lights (batch position bake + kind routing), a rig, and
+# nested-node LOCAL transforms — the realize invariants the core loader gtests can't
+# reach (no VTK). Inspects the realized vtkLights + node world transforms offscreen.
+add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
+target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
+
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
 # silently flattening every state_object key in cvcGL — so it stays a gate.
