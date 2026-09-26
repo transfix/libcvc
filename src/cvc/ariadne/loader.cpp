@@ -14,9 +14,11 @@
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
+#include <filesystem>        // §12 import: resolve/canonicalize .ari library paths
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -84,7 +86,8 @@ std::map<std::string, AriBlockParser> &block_registry() {
 }
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
-         k == "children" || k == "scene" || k == "customs" || k == "init" || k == "units";
+         k == "children" || k == "scene" || k == "customs" || k == "init" || k == "units" ||
+         k == "import";
 }
 } // namespace
 
@@ -175,10 +178,19 @@ struct Ctx {
   void warn(std::string m) { warnings.push_back(std::move(m)); }
 
   // §12 modularization: in-document reusable widget templates (the `units:` block), stored as
-  // raw YAML so an `include:` can substitute its args (text `{name}` tokens) before parsing.
-  // include_depth guards recursive units (a unit that includes itself, directly or indirectly).
+  // raw YAML; an `include:` clones the template, substitutes its args (`{name}` tokens) into
+  // the cloned scalar values, and parses it. `expanding` holds the unit names currently on the
+  // expansion stack — refusing to re-enter one catches BOTH direct/indirect recursion (a→b→a)
+  // AND a fan-out bomb (a unit including itself N times), where a mere depth cap would let the
+  // count explode exponentially.
   std::map<std::string, YAML::Node> units;
-  int include_depth = 0;
+  std::set<std::string> expanding;
+
+  // §12 cross-file libraries: `import:` merges another .ari file's units in. base_dir is the
+  // importing file's directory (relative imports resolve against it; empty for load_string).
+  // imported holds the canonical paths already pulled in — dedup + cycle guard (a → b → a).
+  std::string base_dir;
+  std::set<std::string> imported;
 };
 
 bool has(const YAML::Node &n, const char *key) { return n[key].IsDefined(); }
@@ -228,16 +240,6 @@ std::string action(const YAML::Node &n) {
 Widget parse_widget(Ctx &ctx, const YAML::Node &n);
 Widget expand_include(Ctx &ctx, const YAML::Node &n); // §12 include: expand a units: template
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
-
-// Replace every occurrence of `token` in `s` with `rep`.
-inline std::string replace_all(std::string s, const std::string &token, const std::string &rep) {
-  if (token.empty())
-    return s;
-  for (std::size_t pos = s.find(token); pos != std::string::npos;
-       pos = s.find(token, pos + rep.size()))
-    s.replace(pos, token.size(), rep);
-  return s;
-}
 
 // Widget keys the loader consumes directly; everything else on a custom widget flows
 // into Widget::props for a registered emit fn to read.
@@ -568,12 +570,23 @@ bool any_descendant_repeats(const Widget &w) {
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   Widget w = parse_widget_impl(ctx, n);
+  // Assign each common field only when the node actually carries it. For a plain widget the
+  // node IS its own definition (so an absent key = the "" default, unchanged). But for an
+  // `include:` node, parse_widget_impl already returned the EXPANDED unit widget with these
+  // fields set from the TEMPLATE — an unconditional overwrite here would erase them (the
+  // include node has none). Present-guarding preserves the template's fields; an include site
+  // that DOES set one overrides for that instance.
   if (n.IsMap()) {
-    w.visible_when = str(n, "visible_when");
-    w.enabled_when = str(n, "enabled_when");
-    w.disabled_when = str(n, "disabled_when");
-    w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
-    w.repeat = str(n, "repeat");   // §3: a count expression -> emit this template N times
+    if (has(n, "visible_when"))
+      w.visible_when = str(n, "visible_when");
+    if (has(n, "enabled_when"))
+      w.enabled_when = str(n, "enabled_when");
+    if (has(n, "disabled_when"))
+      w.disabled_when = str(n, "disabled_when");
+    if (has(n, "tooltip"))
+      w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
+    if (has(n, "repeat"))
+      w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.
@@ -597,39 +610,70 @@ void parse_units(Ctx &ctx, const YAML::Node &doc) {
       ctx.units[kv.first.Scalar()] = kv.second;
 }
 
+// §12: substitute `{name}` arg tokens in a scalar in a SINGLE pass — a substituted value is
+// never re-scanned (no order-dependent double substitution), and an unknown `{x}` is left
+// literal. (Distinct from repeat's runtime `{i}`: this is load-time, over named args.)
+std::string substitute_tokens(const std::string &s,
+                              const std::map<std::string, std::string> &args) {
+  std::string out;
+  out.reserve(s.size());
+  for (std::size_t i = 0; i < s.size();) {
+    if (s[i] == '{') {
+      const std::size_t close = s.find('}', i);
+      if (close != std::string::npos) {
+        const auto it = args.find(s.substr(i + 1, close - i - 1));
+        if (it != args.end()) {
+          out += it->second;
+          i = close + 1;
+          continue;
+        }
+      }
+    }
+    out += s[i++];
+  }
+  return out;
+}
+
+// Recursively substitute args into a (cloned) YAML node's SCALAR values. Mutating a cloned
+// tree — rather than splicing into dumped text — avoids YAML re-quoting/escaping hazards (a
+// value with a backslash or quote no longer breaks the re-parse) and touches each scalar once.
+void substitute_node(YAML::Node node, const std::map<std::string, std::string> &args) {
+  if (node.IsScalar()) {
+    node = substitute_tokens(node.Scalar(), args);
+  } else if (node.IsSequence()) {
+    for (std::size_t i = 0; i < node.size(); ++i)
+      substitute_node(node[i], args);
+  } else if (node.IsMap()) {
+    for (auto it = node.begin(); it != node.end(); ++it)
+      substitute_node(it->second, args); // values only (keys are structural)
+  }
+}
+
 // §12: expand `include: <unit>` — instantiate a units: template with its `args:` substituted.
-// Args are a uniform text token substitution (`{name}` -> value, like repeat's `{i}`) applied
-// to the template's YAML before re-parsing, so a unit's own nested include:/repeat expand
-// naturally on the re-parse. Depth-guarded against recursive units.
 Widget expand_include(Ctx &ctx, const YAML::Node &n) {
-  constexpr int kMaxIncludeDepth = 16;
   const std::string name = str(n, "include");
   const auto it = ctx.units.find(name);
   if (it == ctx.units.end()) {
     ctx.warn("ari: include: unknown unit '" + name + "' (no such units: entry)");
     return group({});
   }
-  if (ctx.include_depth >= kMaxIncludeDepth) {
-    ctx.warn("ari: include: max nesting depth (" + std::to_string(kMaxIncludeDepth) +
-             ") exceeded expanding '" + name + "' — a recursive unit?");
+  // Refuse to re-enter a unit already on the expansion stack: this catches direct/indirect
+  // recursion (a→b→a) AND a fan-out bomb (a unit including itself N times) — a depth cap alone
+  // would let the expansion count explode exponentially before tripping.
+  if (!ctx.expanding.insert(name).second) {
+    ctx.warn("ari: include: recursive unit '" + name + "' — expansion refused");
     return group({});
   }
-  std::string text = YAML::Dump(it->second);
+  std::map<std::string, std::string> args;
   const YAML::Node a = n["args"];
   if (a && a.IsMap())
     for (const auto &kv : a)
       if (kv.first.IsScalar() && kv.second.IsScalar())
-        text = replace_all(text, "{" + kv.first.Scalar() + "}", kv.second.Scalar());
-  YAML::Node inst;
-  try {
-    inst = YAML::Load(text);
-  } catch (const std::exception &e) {
-    ctx.warn("ari: include: '" + name + "' failed to re-parse after arg substitution: " + e.what());
-    return group({});
-  }
-  ++ctx.include_depth;
+        args[kv.first.Scalar()] = kv.second.Scalar();
+  YAML::Node inst = YAML::Clone(it->second); // never mutate the stored template
+  substitute_node(inst, args);
   Widget w = parse_widget(ctx, inst);
-  --ctx.include_depth;
+  ctx.expanding.erase(name);
   return w;
 }
 

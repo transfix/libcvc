@@ -1214,7 +1214,67 @@ windows:
       - include: loopy
 )");
   ASSERT_TRUE(r.ok) << r.error;
-  EXPECT_TRUE(has_warning(r, "max nesting depth"));
+  EXPECT_TRUE(has_warning(r, "recursive unit")); // refused (name-based cycle guard), terminates
+}
+
+TEST(AriadneModularity, IncludedUnitReadLaneFieldsSurvive) {
+  SKIP_WITHOUT_YAML();
+  // A unit's own visible_when/repeat/… must NOT be erased by the include node (which has none).
+  LoadResult r = load_string(R"(
+units:
+  gated:
+    text: secret
+    visible_when: (state-exists "show")
+windows:
+  - window: W
+    children:
+      - include: gated
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *t = find(r.root, Kind::Text, "secret");
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(t->visible_when, "(state-exists \"show\")"); // preserved, not clobbered
+}
+
+TEST(AriadneModularity, IncludeArgsHandleSpecialCharsAndNoDoubleSubstitution) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+units:
+  row:
+    text: "{a}"
+    bind: "{b}"
+windows:
+  - window: W
+    children:
+      - include: row
+        args: { a: '{b}', b: 'x"y' }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *t = find(r.root, Kind::Text);
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(t->label, "{b}"); // single pass: {a}->'{b}', the value is NOT re-substituted to x"y
+  EXPECT_EQ(t->bind, "x\"y"); // a value with a double-quote survives (no dump/reparse hazard)
+}
+
+TEST(AriadneModularity, FanOutBombIsRefusedNotExploded) {
+  SKIP_WITHOUT_YAML();
+  // A unit that includes itself N times would be N^depth expansions under a depth cap; the
+  // name-based guard refuses re-entry, so this terminates immediately.
+  LoadResult r = load_string(R"(
+units:
+  bomb:
+    group:
+    children:
+      - include: bomb
+      - include: bomb
+      - include: bomb
+windows:
+  - window: W
+    children:
+      - include: bomb
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "recursive unit"));
 }
 
 TEST(AriadneReactive, RepeatParsedOntoWidget) {
