@@ -715,13 +715,13 @@ scene:
   EXPECT_TRUE(n.volren.distance_field);
   EXPECT_EQ(n.volren.steps, 256);
   ASSERT_EQ(n.volren.isosurfaces.size(), 1u);
-  EXPECT_FLOAT_EQ(n.volren.isosurfaces[0].value, 0.5f);
+  EXPECT_DOUBLE_EQ(n.volren.isosurfaces[0].value, 0.5); // value domain is double
   EXPECT_FLOAT_EQ(n.volren.isosurfaces[0].opacity, 0.9f);
   EXPECT_FLOAT_EQ(n.volren.isosurfaces[0].shininess, 40.0f);
   ASSERT_EQ(n.volren.tf.points.size(), 2u);
   EXPECT_TRUE(n.volren.tf.has_window);
   EXPECT_FALSE(n.volren.tf.auto_domain); // an explicit window fixes the domain
-  EXPECT_FLOAT_EQ(n.volren.tf.window_max, 1.0f);
+  EXPECT_DOUBLE_EQ(n.volren.tf.window_max, 1.0);
   EXPECT_FLOAT_EQ(n.volren.tf.points[1].color[3], 1.0f); // alpha
   ASSERT_EQ(n.volren.lights.size(), 1u);
   EXPECT_FLOAT_EQ(n.volren.lights[0].direction[2], 1.0f);

@@ -77,12 +77,14 @@ void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const 
   vs.shaded = v.shaded;
   vs.unshaded = v.unshaded;
   vs.distance_field = v.distance_field;
+  // The DSL `window` is a TF-DOMAIN statement (as volslice honors it), NOT a density
+  // clip. volren's window_min/max is a sample cull, and its only TF-domain knob is
+  // tf_auto_domain (data range vs control-point extent) — so DON'T bind `window` to
+  // the cull (that would silently delete voxels and diverge from volslice). With
+  // has_window the loader sets auto_domain=false, so volren bakes the TF over its
+  // control-point extent; author the domain via the control-point values. An explicit
+  // arbitrary TF window for volren needs a tf_domain field in cvc::volren — a follow-up.
   vs.tf_auto_domain = v.tf.auto_domain;
-  if (v.tf.has_window) {
-    vs.window_enabled = true;
-    vs.window_min = v.tf.window_min;
-    vs.window_max = v.tf.window_max;
-  }
   for (const auto &p : v.tf.points)
     vs.tf.add({p.value, p.color[0], p.color[1], p.color[2], p.color[3]});
   for (const auto &s : v.isosurfaces) {
@@ -93,9 +95,11 @@ void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const 
     iso.shininess = s.shininess;
     vs.isosurfaces.push_back(iso);
   }
-  if (v.isosurfaces.empty() && v.tf.empty())
+  // Blank when there is no isosurface AND (no TF, or neither media pass is enabled).
+  if (v.isosurfaces.empty() && (v.tf.empty() || !(v.shaded || v.unshaded)))
     warn(warnings, "ari: volren node '" + id +
-                       "' has no isosurfaces and an empty transfer_function; it renders blank");
+                       "' has nothing to render (no isosurfaces, and its transfer_function is empty or "
+                       "both shaded and unshaded are off); it renders blank");
   else if (v.shaded && v.lights.empty() && v.ambient == 0.0f)
     warn(warnings, "ari: volren node '" + id +
                        "' is shaded with no lights and ambient 0; the surface reads as a black silhouette");
@@ -219,6 +223,11 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
       cvc::volume vol(sg.appContext(), n.source_file); // reads on construct; throws on a bad file
       // No sg.addGraphics overload for VolRenNode: create under the parent (or root).
       GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
+      // Last-wins parity with sg.addGraphics: registerGraphics only reassigns the name
+      // map, so a same-named top-level node must be unlinked first or it leaks + double
+      // renders. Done only after the load succeeded, so a bad file can't drop a live node.
+      if (!parent && sg.hasGraphics(n.id))
+        sg.removeGraphics(n.id);
       vn = pr->addGraphicsChild<VolRenNode>(n.id);
       if (!parent)
         sg.registerGraphics(n.id, vn); // name-map parity + grid enclosure for a top-level node
@@ -238,6 +247,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
     try {
       cvc::volume vol(sg.appContext(), n.source_file);
       GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
+      if (!parent && sg.hasGraphics(n.id)) // last-wins parity with sg.addGraphics (see volren)
+        sg.removeGraphics(n.id);
       vn = pr->addGraphicsChild<VolSliceNode>(n.id);
       if (!parent)
         sg.registerGraphics(n.id, vn);

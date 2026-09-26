@@ -15,9 +15,10 @@ namespace cvc {
 namespace ariadne {
 
 // A transfer-function control point over the RAW value domain (mirrors
-// cvc::volren::transfer_point, shared by volren + volslice). color is r,g,b,a in [0,1].
+// cvc::volren::transfer_point, shared by volren + volslice). `value` is double to
+// match the renderer's value domain; color is r,g,b,a in [0,1].
 struct SceneTFPoint {
-  float value = 0.0f;
+  double value = 0.0;
   float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 };
 
@@ -26,13 +27,13 @@ struct SceneTransferFunction {
   std::vector<SceneTFPoint> points;
   bool auto_domain = true;   // bake over the volume's data range (vs an explicit window)
   bool has_window = false;   // explicit value window instead of the data range
-  float window_min = 0.0f, window_max = 0.0f;
+  double window_min = 0.0, window_max = 0.0; // raw value domain — double like the renderer
   bool empty() const { return points.empty(); }
 };
 
 // One volren isosurface (mirrors cvc::volren::isosurface).
 struct SceneIsosurface {
-  float value = 0.0f;
+  double value = 0.0; // raw value domain — double like cvc::volren::isosurface::value
   float opacity = 1.0f;
   float color[3] = {1.0f, 1.0f, 1.0f};
   float shininess = 10.0f;

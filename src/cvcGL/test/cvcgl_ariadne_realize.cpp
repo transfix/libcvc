@@ -231,6 +231,46 @@ int main() {
     chk(vsn && vsn->planesRendered() > 0, "volslice tick seam -> slice planes were built");
   }
 
+  // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────
+  {
+    SceneGraph sg(app, "dup");
+    const std::string p = "ari_realize_dup.rawiv";
+    {
+      const unsigned n = 16;
+      cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float,
+                      cvc::bounding_box(-1, -1, -1, 1, 1, 1));
+      for (unsigned k = 0; k < n; ++k)
+        for (unsigned j = 0; j < n; ++j)
+          for (unsigned i = 0; i < n; ++i)
+            vol(i, j, k, 0.5);
+      vol.min(0.0);
+      vol.max(1.0);
+      cvc::writeVolumeFile(app, vol, p);
+    }
+    Scene scene;
+    for (int i = 0; i < 2; ++i) { // same id "dup" twice
+      SceneNode vr;
+      vr.id = "dup";
+      vr.type = "volren";
+      vr.source_file = p;
+      vr.has_volren = true;
+      SceneIsosurface iso;
+      iso.value = 0.5;
+      vr.volren.isosurfaces.push_back(iso);
+      scene.nodes.push_back(vr);
+    }
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "dup");
+    std::remove(p.c_str());
+    printf("== duplicate top-level id: last wins, orphan unlinked ==\n");
+    chk(realized.volren_ticks.size() == 2, "both realize attempts recorded a ticker");
+    chk(realized.volren_ticks.size() == 2 && realized.volren_ticks[0].expired(),
+        "the first same-id node was unlinked/destroyed (its weak_ptr expired)");
+    chk(!realized.volren_ticks.empty() && !realized.volren_ticks.back().expired(),
+        "the last same-id node survives");
+    chk(std::dynamic_pointer_cast<cvc::gl::VolRenNode>(sg.getGraphics("dup")) != nullptr,
+        "getGraphics(id) resolves to the surviving VolRenNode");
+  }
+
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
   return fails ? 1 : 0;
 }

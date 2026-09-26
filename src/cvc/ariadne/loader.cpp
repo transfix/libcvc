@@ -487,14 +487,14 @@ SceneTransferFunction parse_scene_tf(const YAML::Node &t) {
   if (win && win.IsSequence() && win.size() >= 2) {
     tf.has_window = true;
     tf.auto_domain = false; // an explicit window fixes the domain
-    tf.window_min = static_cast<float>(win[0].as<double>());
-    tf.window_max = static_cast<float>(win[1].as<double>());
+    tf.window_min = win[0].as<double>();
+    tf.window_max = win[1].as<double>();
   }
   const YAML::Node pts = t["points"];
   if (pts && pts.IsSequence())
     for (const YAML::Node &p : pts) {
       SceneTFPoint tp;
-      tp.value = static_cast<float>(num(p, "value", 0.0));
+      tp.value = num(p, "value", 0.0);
       const YAML::Node c = p["color"];
       if (c && c.IsSequence())
         for (std::size_t i = 0; i < 4 && i < c.size(); ++i)
@@ -567,7 +567,7 @@ SceneNode parse_scene_node(const YAML::Node &n) {
     if (iso && iso.IsSequence())
       for (const YAML::Node &s : iso) {
         SceneIsosurface si;
-        si.value = static_cast<float>(num(s, "value", 0.0));
+        si.value = num(s, "value", 0.0);
         si.opacity = static_cast<float>(num(s, "opacity", 1.0));
         const YAML::Node c = s["color"];
         if (c && c.IsSequence() && c.size() >= 3)
