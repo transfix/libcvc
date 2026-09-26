@@ -37,13 +37,30 @@ produced any view. The metaphor runs deep, and each layer earns it:
 
 - **File extension `.ari`** — an Ariadne document (YAML syntax). Shortened to **"Ari"** in
   conversation. `ari run city.ari`.
-- **C++ namespace `cvc::gl::ariadne`** — Ariadne lives **inside cvcGL** (it's the cvcGL UI/scene
-  DSL), as a sub-namespace of `cvc::gl` (scene); it also builds on `cvc::state_exec` (the executor +
-  URI resolver) and `cvc::net` (HTTP).
+- **C++ namespace `cvc::ariadne`** *(core)* **+ `cvc::gl` backend** — as of **v0.15 (§16)** the
+  Ariadne **core is pure libcvc** (`cvc::ariadne`: the `Widget` tree, `Runtime`, reconcile, direct
+  `cvc::state` binding, `state_exec`, validation, `load:`/URI — no VTK/ImGui), and **cvcGL provides
+  the reference `Backend`** (`cvc::gl::ImGuiBackend`, ImGui-over-VTK) plus a possible pure-terminal
+  backend for headless use. It builds on `cvc::state_exec` (the executor + URI resolver) and
+  `cvc::net` (HTTP). *(P0 slice 0 landed under `cvc::gl::ariadne`; §16.1 is the module move back to
+  `cvc::ariadne` — done while the code is small, to avoid the un-coupling debt.)*
 - The loader/CLI is **`ari`**.
 
 *(Naming is settled; the sections below still say "the DSL"/"the loader" in places — read
 those as Ariadne / the `ari` loader.)*
+
+> **v0.15 — Backend architecture (§16).** Splits Ariadne into a **context-agnostic core in pure
+> libcvc (`cvc::ariadne`)** and a **pluggable `Backend`** (the "arbitrary UI handler"); **cvcGL
+> becomes one backend** (ImGui-over-VTK) and a **pure-terminal backend** becomes possible. Adds
+> **first-class GLSL** in `.ari` — scene-node shaders + a `shader_canvas` widget, both **capability-
+> gated** and degrading on non-GL backends (§16.3). **Generalizes the root window** (§16.2): the
+> *backend* owns/provides the root surface (guest mode: VTK/Qt host it; host mode: a fullscreen TUI
+> owns the screen), Ariadne's root *widget* maps onto it — **superseding §1's "root = VTK canvas".**
+> Terminal-lib feasibility (§16.4): **FTXUI** the clean, zero-dep, wasm-capable **default**;
+> **tvision** an optional native-desktop-metaphor second backend behind legal + terminfo blockers;
+> **notcurses** off the roadmap. The **module move happens now** (P0 slice 0 → `cvc::ariadne`,
+> §16.1) so the loader/`state_exec`/validation are never written against the GL types. Scope calls
+> (terminal backend = v1 vs. reserved seam; tvision; the FTXUI C++20 floor) are open in §16.5.
 
 > **v0.4:** the scene graph (§9) now makes **`RenderView` + `VisibilityMask` first-class
 > from the start** — each view renders a *masked and restyled subset* of one authored scene
@@ -152,6 +169,11 @@ Facts about the existing code that the schema is built *around*, not against.
    shows up in offscreen/wasm captures too). The DSL "root" is the **overlay host**;
    its children are a menu bar, floating windows, corner overlays, and HUDs drawn
    *on top of* the scene. The root is always present; everything else is a child.
+   > **⚠ v0.15 (§16.2) generalizes this.** The root is no longer *the VTK canvas* — it is
+   > *the surface the active backend provides.* VTK-owns-the-`vtkRenderWindow` is the **guest-mode
+   > reference case** (ImGui draws inside VTK's `RenderEvent` framebuffer); a fullscreen terminal
+   > backend is **host mode** (it owns the screen). The rest of §1's ImGui-specific facts describe
+   > the **cvcGL reference backend**, not Ariadne core.
 
 2. **ImGui is immediate mode — there is no retained widget tree.** `ImGuiOverlay`
    stores **one** `std::function` draw callback that VTK re-invokes once per
@@ -2934,3 +2956,230 @@ API taking a YAML string, not just a path** — `ariadne::validate(std::string_v
 `ariadne.validate_string(s)` — the same entry `load:`/hot-reload (§12.5) calls to validate a **fetched
 fragment** before mounting it, and what an Ari-browser address bar or a `state://…` fragment uses. Validating
 an in-memory string is the primitive; the file path is the convenience.
+
+## 16. Backend architecture — a context-agnostic core with pluggable UI handlers
+
+> **v0.15 — the pivot that keeps the DSL honest.** Ariadne's P0 slice was written straight onto the
+> GL stack: the `Runtime` takes an `ImGuiOverlay&`, `install()` sets a VTK draw callback, and the
+> per-frame walk calls `cvc::gl::ui::*` (Dear ImGui) directly. That was the right first vertical
+> slice — but a `.ari` document is *a retained widget tree bound to `cvc::state`*, and **nothing in
+> that idea is GL-specific.** This section splits Ariadne into a **backend-neutral core in pure
+> libcvc (`cvc::ariadne`)** and a **pluggable `Backend`** — the "arbitrary UI handler" that renders
+> the tree, owns the root surface, realizes layout, and delivers input. **cvcGL (ImGui-over-VTK)
+> becomes one concrete backend** (the enabling VTK/ImGui hooks stay in cvcGL); a **pure-terminal
+> backend** becomes possible for headless / SSH / CI use. It makes **GLSL a first-class, capability-
+> gated citizen of `.ari`** (scene-node shaders + a `shader_canvas` widget). And it **supersedes the
+> §1 framing that "the root is the VTK canvas"**: the root is now *the surface the active backend
+> provides* — VTK owns it in the GL case, a terminal owns the screen in a TUI case.
+>
+> **Do the module move now**, while the code is ~480 lines across four files (§16.1), so the YAML
+> loader, `state_exec`, and validation are written against `cvc::ariadne` from day one and never
+> have to be un-coupled. The one contract expensive to retrofit — `owns_loop` + `root_rect()` +
+> `capabilities()` — is locked in the P0 refactor even though the terminal backend itself is
+> deferred (§16.5).
+
+### 16.1 The split — `cvc::ariadne` core vs. the `Backend` interface
+
+**Pivot.** Ariadne's P0 slice was written straight onto the GL stack: `Runtime` takes an `ImGuiOverlay&` (`ariadne.h:48`), `install()` sets a VTK draw callback (`ariadne.cpp:174`), and the per-frame walk calls `cvc::gl::ui::*` (Dear ImGui) directly (`ariadne.cpp:69-147`). That is fine as a first vertical slice, but a `.ari` document is *a retained widget tree bound to `cvc::state`* — nothing in that idea is GL-specific. We split Ariadne into a **backend-neutral core in libcvc (`cvc::ariadne`)** and a **pluggable `Backend`** (the "arbitrary UI handler"). cvcGL becomes one concrete backend.
+
+#### Backend-neutral core vs. backend-specific surface
+
+**`cvc::ariadne` core — pure libcvc, zero VTK/ImGui/GL:**
+- **`Widget` / `Kind` model** (`widget.h`) — already deliberately ImGui-free (a data struct + builder helpers). Moves verbatim; only the namespace changes. This is the retained "DOM" the YAML loader also builds (§11.2).
+- **`Runtime` control surface** — `set_root()` + the `pending -> root` reconcile commit boundary applied at frame top, never mid-walk (§11.5.1); the `on()` handler registry; the intent buffer (`queued_events`) + `drain()` that runs actions off the draw callback on the host thread (§7.2/§4.7). All already backend-neutral today.
+- **DIRECT `cvc::state` binding.** Key reclassification: the `cvc::gl::ui::` helpers are ImGui-specific only in their *draw* half. Their *state* half — `read_or_seed()` (read path, coerce from the string channel, seed default if missing; `ImGuiBinding.cpp:31`) and `write()` with commit policy (`:45`) — is pure `cvc::state` logic (`cvc::state::instance(app)(path).value()`). The **core owns that**: it resolves the bind path (`resolve()`: leading `/` = app-root-absolute, else spliced onto the prefix), reads the typed value, hands it to the backend to draw, and applies write-back only when the backend reports `committed`.
+- **`state_exec` lanes (§4), `meta:`/`min_libcvc` gate (§3.1a), validation (§15), `load:`/URI resolution (§13), the `ui.docs.<doc>` subtree (§11)** — all operate on `cvc::state` + the AST, never on a surface. They land in the core as they come online (P1+), above the same `Backend` seam.
+
+**`Backend` interface — the arbitrary UI handler:**
+- **render the tree** — turn a `Widget` into native draw calls;
+- **own the root surface** — the OS window / GL context / terminal screen, and the root *content rect* children are laid into (§3.9);
+- **realize layout** — free (desktop) vs tiled/grid/stack;
+- **deliver input** — pointer/key into the core's per-handler event scope (§4.6);
+- **`capabilities()`** — what this surface can/cannot do (windows, menubar, mouse, keyboard, color, **glsl**, view_embed, **owns_loop**), so the core fail-safes or substitutes.
+
+The current code splits at exactly three GL-coupled points — the `ImGuiOverlay&` ctor, `install()`'s `setDrawCallback`, and `emit()`'s `ui::*` calls — everything else is already neutral. The existing "curated raw immediate-mode subset" (`ImGuiBinding.h:124-177`: `Begin/End`, `BeginMenu`, `Button`, `MenuItemClicked`, value-in/value-out `CheckboxValue`/`SliderFloatValue`/…) is pointer-free and `CVC_ENABLE_IMGUI`-degradable — *exactly* the shape the `Backend` virtuals need. The `IsItemDeactivatedAfterEdit` commit edge (`ImGuiBinding.cpp:98/108/117`) becomes an `EditResult{changed,committed,value}` the backend **reports**; the core owns write-back.
+
+The core `Runtime` becomes surface-free — `Runtime(cvc::app&, std::string prefix)` (no overlay), `set_backend(Backend*)`, `set_root(Widget)`, `on(...)`, `render()` (one walk: `begin_frame -> emit(root) -> end_frame`), `drain()`. `render()` stays a pure reader of `cvc::state` that only *enqueues* intents (§11.5.2 preserved); it owns neither a loop nor a thread nor the root.
+
+#### The ImGui/VTK reference backend (in cvcGL)
+
+`cvc::gl::ImGuiBackend : public cvc::ariadne::Backend` is a thin wrapper over the primitives that already exist: `begin_window -> ui::Begin` (with the `Title###id` stable-id trick, `ariadne.cpp:99-108`), `checkbox -> ui::CheckboxValue`, `slider_double -> ui::SliderFloatValue`, `button -> ui::Button`, `menu_action -> ui::MenuItemClicked`; the `committed` edge from `ImGui::IsItemDeactivatedAfterEdit()`, now reported not acted on. `capabilities()` returns `{windows, mouse, color, glsl:true, view_embed:true, owns_loop:false}`. `root_rect()` returns the ImGui main-viewport `WorkPos/WorkSize`. `install(rt, overlay)` does `overlay.setDrawCallback([&]{ rt.render(); })` — the **only** line coupling Ariadne to VTK's render pass, and it lives in the backend. This is the requested direction: the enabling VTK/ImGui hooks stay in cvcGL; the DSL surface is pure libcvc.
+
+#### The namespace/module move + P0-slice-0 refactor
+
+Do the move **now**, while the code is ~480 lines across four files, so the YAML loader, `state_exec`, and validation are written against `cvc::ariadne` from day one and never have to be un-coupled.
+1. **Headers** — `inc/cvc/gl/ariadne/{widget.h,ariadne.h}` -> `inc/cvc/ariadne/`; add `inc/cvc/ariadne/backend.h`. Namespace `cvc::gl::ariadne -> cvc::ariadne`; drop all ImGui/VTK includes.
+2. **Core source** — `src/cvcGL/ariadne/ariadne.cpp` -> `src/cvc/ariadne/ariadne.cpp`, compiled into the core `cvc` library (`add_library(cvc …)`, `src/cvc/CMakeLists.txt:1106`); rewrite `emit()` to call `Backend*` primitives with the core doing `read_or_seed`/`write` against `cvc::state` (lifting that logic out of `ImGuiBinding.cpp`). Links only `cvc::cvc` — no VTK/ImGui.
+3. **ImGui backend** — new `src/cvcGL/ariadne/ImGuiBackend.{h,cpp}` (namespace `cvc::gl`), the ONLY place ImGui/VTK is touched. cvcGL already depends on `cvc`, so no new edge.
+4. **Demo** — `ariadne_hello` becomes `Runtime rt(app, sg.getStatePrefix()); ImGuiBackend backend(ui); rt.set_backend(&backend); backend.install(rt, ui);` with the same tree literals and the same `rt.drain(); view.render();` loop — proof the widget vocabulary is already backend-neutral.
+
+Scope discipline: this slice migrates only what exists (Widget, Runtime, P0 kinds) and defines the `Backend` interface with just the P0 primitives + `owns_loop`/`root_rect()`/`capabilities()`. The `owns_loop` + `root_rect()` contract is the one thing expensive to retrofit — lock it in P0 even though the terminal backend itself is deferred.
+
+**This SUPERSEDES the §1 framing that "the root is the VTK canvas."** The root is now "the surface the active backend provides": VTK's `vtkRenderWindow` in the GL case, a terminal screen in a TUI case, a `QMainWindow` in a future Qt case. See the root-window section.
+
+### 16.2 The root window across backends
+
+§3.9 already promoted the root to a first-class widget whose `root.layout.kind` picks **free (desktop)** / **tiled** / **stack** — but it did so *assuming VTK owns the canvas and ImGui draws child windows into `GetMainViewport()->WorkPos/WorkSize`*. That assumption now becomes one case of a general contract. **This supersedes §1's "root = VTK canvas": the root is the backend-provided surface.**
+
+#### The rule: Ariadne core never owns/creates the root surface — the backend does
+
+`cvc::ariadne` core owns the *logical* tree (layout, children, menubar, state binding, `state_exec`); it never creates or owns the root *surface*. A backend hands the core three things and nothing more: (1) a **root surface** — a menu-aware content rect, its **units** (pixels for GL, character cells for a terminal), and whether the backend draws the outer chrome; (2) a **per-frame emit hook** — the core walks its tree once and emits into the backend's native primitives; (3) an **input stream + capability set**.
+
+Two attach modes fall out of *who already owns the top-level*:
+- **Guest mode** — a host already owns the top-level window and its graphics context; Ariadne draws into a surface the host hands it. **cvcGL is guest mode: VTK owns the `vtkRenderWindow` + the single GL context, and Ariadne draws inside VTK's `RenderEvent` framebuffer** (today's `ImGuiOverlay`). A future Qt `QMainWindow` is guest mode too. Outer OS chrome is the host's; `owns_root_chrome() == false`.
+- **Host mode** — no host exists; the backend *is* the application and owns the whole surface. A fullscreen terminal backend is host mode: it owns the terminal screen, so the Ariadne root widget *is* the top-level; `owns_root_chrome() == true`.
+
+This is why the caveat generalizes cleanly: **the core has no "create the root window" call at all.** Every candidate backend already owns its root + event loop exactly as VTK owns the `vtkRenderWindow`/context/interactor — FTXUI's `ScreenInteractive` owns the terminal + `.Loop()`; tvision's `TApplication`/`TDeskTop` own `TScreen` + `run()`; notcurses's context owns the terminal + stdplane. The `Backend` contract therefore makes root + event-loop ownership a backend responsibility, and supports **both** drive models behind one interface: an `owns_loop=false` embedded backend the host pumps (VTK calls `rt.render()` via the overlay callback; the host loop calls `rt.drain()`), and an `owns_loop=true` framework backend whose own loop calls `render()`/`drain()`. That `owns_loop` + `root_rect()` seam is the contract to lock in P0.
+
+#### Portable vs backend-specific semantics
+
+**Portable** (live in core + `.ari`, identical everywhere): a content area (always menubar-aware); a menubar strip + status/footer line; child windows/panes; `free`/`tiled`/`stack`; percent/stretch sizing (§3.0.3b — resolves the same in any unit system); z-order/raise/focus; child identity + persisted geometry (`tree.<id>.geometry`, §11.4).
+
+**Backend-specific** (must NOT leak into `.ari`): pixel geometry vs cell geometry; how a `free` child is *realized* (real draggable window vs emulated pane vs pure tile); who draws the outer chrome; sub-cell drawing / anti-aliasing / color depth; the movability affordance (mouse-drag titlebar vs keyboard focus-cycle).
+
+**Authoring rule:** cross-backend `.ari` uses **percent/auto sizing and `tiled` layout**; absolute px and `free` are GL-first conveniences that degrade. Absolute `pos:[10,30]`/`size:[300,0]` are in the backend's units and round to the nearest cell (lossily) on a terminal.
+
+#### Root-surface ownership matrix (feasibility-checked upstream)
+
+| Backend | Root owner | `owns_root_chrome()` | A `free` child is… | Menubar | Pixel graphics |
+|---|---|---|---|---|---|
+| **cvcGL (VTK+ImGui)** | VTK owns `vtkRenderWindow` + GL ctx; ImGui is a guest | false | a real draggable `ImGui::Begin` window over the scene | `BeginMainMenuBar` | yes — native GL |
+| **tvision** | `TApplication`/`TDeskTop` own `TScreen` (host) | true | a real movable/overlapping `TWindow` — best terminal fit | native `TMenuBar`+`TStatusLine` | no (cells) |
+| **FTXUI** | `ScreenInteractive` owns the terminal (host) | true | a draggable `Window`, no z-order manager → degrades toward tiled | composed top `hbox` | no (braille/block) |
+| **notcurses** | `notcurses_init` owns terminal + std plane (host) | true | a movable z-ordered `ncplane` + a drawn titlebar shim | native `ncmenu` | Sixel/Kitty/fb + video |
+| **(future) Qt** | `QMainWindow` owns top-level (guest) | false | `QMdiSubWindow` / `QDockWidget` | `QMenuBar` | yes |
+
+#### Per-backend degradation of the §3.9 knobs
+
+`root.layout.kind` is a **request**; the backend answers with what it can and degrades the rest — never crashes (the `CVC_ENABLE_IMGUI=OFF` philosophy).
+- **`tiled` (horizontal/vertical/grid)** — the portable lowest common denominator; every backend can split its content rect. The recommended cross-backend default.
+- **`free` (desktop)** — VTK/ImGui: native windows. tvision: native `TWindow`s (the faithful match). notcurses: movable planes + a titlebar shim. FTXUI: `Window` components with mouse-drag but no desktop manager → degrades to focus-cycled panes, or to tiled. **Any fullscreen terminal with no mouse → `free` silently degrades to `tiled`** (no pointer, no drag); logged once, authoring unchanged. Movable-window capability is a backend **capability flag** (§7.6 `requires:`), and `free -> tiled` degradation follows the §4.7 discipline.
+- **`stack` (tabs)** — ImGui `BeginTabBar` native; FTXUI a `Toggle`/tab; tvision/notcurses emulate; universal fallback is "one child visible, switch via the menu."
+- **percent/stretch** — fully portable; on a terminal it rounds to whole cells, and a px `min:` floor becomes `ceil(px / cell_w)` cells or is dropped.
+- **borders (§3.0.3b)** — ImGui table borders / tvision native frames / notcurses plane boxes / FTXUI `border` decorator; **`border_width > 1` degrades to the native 1-unit frame** everywhere.
+
+#### The contract (sketch)
+
+```cpp
+namespace cvc::ariadne {                 // CORE — pure libcvc: no VTK, no GL
+  struct root_surface {
+    Rect     content_rect() const;       // backend-owned, menubar-aware, in the backend's units
+    metrics  units() const;              // px-per-cell + DPI (GL = 1:1)
+    bool     owns_root_chrome() const;   // false = guest (VTK/Qt); true = host (fullscreen TUI)
+  };
+  struct backend {
+    Capabilities  capabilities() const;  // the agnosticism seam (windows/menubar/mouse/kbd/color/glsl/view_embed/owns_loop)
+    root_surface& root();
+    void begin_frame(); void end_frame();
+    input_events  drain_input();
+    // core emits the walk; the backend realizes into ImGui / FTXUI Elements / a TWindow tree / ncplanes
+  };
+}
+```
+
+### 16.3 GLSL in `.ari` — a gated, degrading GL-backend capability
+
+§9.3 (`geometry` row) and §9.7 currently fence GLSL as `shaders:` → **`custom`** (a C++ escape hatch). This makes GLSL **first-class** at two attach points, both gated by backend `capabilities()`.
+
+All of this rides existing cvcGL API on `GeometryNode` (verified in `inc/cvc/gl/GeometryNode.h`). **Corrected API names — the header verbs are `add*`/`clear*`, not `set*`:** `addVertexShaderReplacement(original, replacement)`, `addFragmentShaderReplacement(original, replacement)`, `clearShaderReplacements()`; plus `setShaderUniformf/i/3f(name, …)`, `setShaderTexture(name, vtkTextureObject*)` (nullptr unbinds; texture NOT owned — caller keeps it alive), and `disableCoordinateShiftScale()`.
+
+#### Attach point (i): first-class scene-node shaders (§9.3 promoted)
+
+A vertex/fragment **replacement** splices GLSL for the first occurrence of a VTK **anchor** (`original`, e.g. `//VTK::Normal::Impl`). **Uniforms** are pushed **every draw** via the mapper's `UpdateShaderEvent` — you must declare the uniform in a replacement; ones optimized out of the linked program are skipped. **Textures** let the mesh sample a live render-to-texture with zero CPU readback. `world_space: true -> disableCoordinateShiftScale()` (needed whenever a shader reads `vertexMC` as world coordinates — bump/terrain).
+
+```yaml
+- node: terrain
+  type: geometry
+  shaders:
+    world_space: true                       # -> disableCoordinateShiftScale()
+    fragment:
+      - at: "//VTK::Normal::Impl"           # the VTK anchor (header's `original`)
+        glsl: shader://terrain_bump.frag     # inline block OR a §13 URI
+    uniforms:                                # each pushed every draw via setShaderUniform*
+      uBumpScale: { type: float, bind: terrain.bump_scale }   # a slider bound here LIVE-drives the shader
+      uSunDir:    { type: vec3,  bind: env.sun_dir }
+    textures:                                # setShaderTexture(name, vtkTextureObject*)
+      uDisplacement: { source: render_to_texture, view: ocean_fft }   # live GPU field, zero readback (§9.9.13)
+```
+
+Uniform binding: each uniform names a `state` path, read in the **read-only per-frame lane (§4.1)**, typed via §4.3, dispatched to `setShaderUniform{f,i,3f}` (`float->f`, `int->i`, `vec3->3f`). A slider bound to a uniform drives the shader with **no new machinery**. Textures reuse the FBO render-to-texture path (§9.9.13).
+
+#### Attach point (ii): the `shader_canvas` widget
+
+A leaf widget whose *paint is a fragment shader*, realized as **fragment-shader-into-FBO -> `ImGui::Image`** (the OceanFFT `vtkOpenGLFramebufferObject` pattern of §9.9.13). It reuses the exact FBO + `setShaderTexture` machinery and composes with scene-node textures.
+
+```yaml
+- widget: spectrum
+  type: shader_canvas
+  fragment: shader://plasma.frag             # inline glsl: | OR a §13 URI
+  uniforms:
+    uTime:  { type: float, bind: sim.t }
+    uRes:   { type: vec2,  builtin: resolution }   # loader-provided builtins: resolution/time/mouse
+  fallback: { text: "(spectrum unavailable in text mode)" }   # shown on a non-GL backend
+```
+
+#### Capability gating and degradation (the critical point)
+
+**GLSL is a GL-backend capability; a terminal backend cannot render it.** Both the scene `shaders:` block and `shader_canvas` carry an **implicit `requires: [gl.shaders]`** (auto-derived per §7.6; the author may state it). The loader checks `requires:` against `backend.capabilities()` at **load** — §7.6's preflight, extended from intrinsic-names to backend capabilities. Granularity is the author's choice:
+- **per-widget/per-node `requires:`** → degrades just that node: a `shader_canvas` is replaced by its `fallback:` if declared, else omitted (the layout closes the gap + one-time log) while the rest of the doc loads.
+- **whole-doc `requires: [gl.shaders]`** → fails the load fast on a terminal build with a precise message.
+
+Never a crash — the `CVC_ENABLE_IMGUI=OFF` philosophy. Nuance: `raster.bitmap != gl.shaders`. notcurses can blit a *video* frame (Sixel) but cannot run a *shader*, so a video texture degrades differently from a shader node on the same backend.
+
+#### Where GLSL lives + two footguns to auto-handle
+
+**Location** — GLSL is just text, sourced **inline** (`glsl: |`) or via any **§13 URI**: `file://terrain.frag`; `pkg://austin/shaders/bump.frag` (shipped in a scene package); `state://ui.shader.src?value` (live-editable GLSL in the state tree — edit in a text widget, hot reload); or an optional **`shader://` convenience scheme** (a new §13.1 registry entry) adding `#include` expansion + a shader cache.
+
+**Two footguns the loader must absorb** (memory: `cvcgl-shader-replacement-consumes-anchor`, `cvcgl-wasm-shader-tcoord-undeclared`, `cvcgl-wasm-custom-shader-texture-units`):
+- **The anchor is consumed.** A VTK replacement *eats* the `//VTK::…` anchor, breaking downstream stages. The `at:` field IS the anchor, so the loader **auto-re-emits it** (prepends `at` to the replacement unless the `glsl:` already starts with it) — the author never repeats it.
+- **wasm profile/units.** VTK owns `#version` (desktop GL 3.2 core vs WebGL2/GLSL ES 3.00), so author GLSL must be profile-portable (no `#version`; use VTK anchors/macros). Under wasm the low-memory mapper leaves `tcoord` undeclared and reserves texture units 0–5, so `shader_canvas`/shader textures must **reserve units above 5 and re-declare varyings** — encoded as automatic loader guards.
+
+### 16.4 Terminal backend feasibility — FTXUI / tvision / notcurses
+
+When Ariadne moves into libcvc as `cvc::ariadne`, a pure-terminal backend renders the **same retained widget tree** the ImGui/VTK backend renders, for headless/SSH/CI use. Feasibility of three C++ TUI libraries as that backend, checked against upstream (2026-09-25) and the load-bearing constraint (§3.9: the root is a first-class widget; default `root.layout: free` is the desktop metaphor, tiled/grid/stack are the alternatives). libcvc is **LGPL-2.1-or-later**, so license compatibility is the first gate.
+
+| Dimension | **FTXUI** | **tvision** (magiblot) | **notcurses** |
+|---|---|---|---|
+| License | **MIT** — cleanest | MIT on magiblot's code, but the Borland base is an "AS IS" disclaimer, not a clean grant → **derivative-works cloud** | **Apache-2.0** — OK as a *linked* dep; FSF flags Apache-2.0 vs LGPLv2.1 for source combination, so never vendor into libcvc source |
+| C++ std | C++17/20 (verify vs libcvc floor) | C++14 (safest) | C17 core + C++17 bindings |
+| External deps | **NONE** (no ncurses/terminfo) | **ncursesw + terminfo** (unix), libgpm optional, clipboard tools; Windows = native Console API | **terminfo + libunistring** hard; optional libgpm/FFmpeg/OpenImageIO — **heaviest closure** |
+| Hermetic cvcpkg fit | **Trivial** — one recipe, no data closure; static-link across the fleet | **Medium** — needs a hermetic ncursesw + terminfo-database closure (precedent: libcvc's hermetic X11/GL recipes) | **Heavy** — terminfo + libunistring (+ optional multimedia) |
+| wasm / xterm.js | **First-class** emscripten; live gh-pages examples; xterm-pty bridge → matches libcvc's existing wasm demo story | none | none practical (Sixel/Kitty + terminfo) |
+| Paradigm | Functional/reactive component tree (React-like), re-rendered on event; fullscreen, **no window/desktop metaphor** | Classic retained OOP Turbo Vision: `TApplication`→`TDeskTop` owns real **movable, overlapping windows**, pull-down menus, dialogs | **Low-level rendering canvas**: z-ordered `ncplane`s composited by explicit `notcurses_render()`, blitters/Sixel/Kitty + video. **Not a widget toolkit** |
+| Ariadne fit | Maps 1:1 to **tiled** modes (hbox/vbox/gridbox); `free` degrades to tiled | Maps 1:1 to the default **`free` desktop metaphor** (native windows/menus/dialogs) | Poor — you'd reimplement the whole widget layer on planes |
+| Root ownership | `ScreenInteractive` owns terminal + `.Loop()` (`owns_loop=true`) | `TApplication` owns `TScreen` + `run()` (`owns_loop=true`) | context owns terminal + stdplane (`owns_loop` can be false) |
+| Maturity | ~10.7k★, very active, widely packaged | ~3.2k★, active | ~4.7k★, very active |
+
+#### Recommendation
+
+- **Default terminal backend: FTXUI.** MIT (cleanest for LGPL-2.1), **zero external dependencies** (a single hermetic cvcpkg recipe with no terminfo data-closure to solve across the glibc-2.35/2.39 + macOS + Windows + BSD fleet), and — decisively — **first-class wasm/emscripten**, so a pure-terminal Ariadne drops straight into libcvc's existing wasm-on-gh-pages demos via xterm.js. Its reactive re-render loop is a natural fit for the per-frame commit-boundary reconcile (§11.5), and it realizes the **tiled** root modes directly. Gaps: confirm C++20 vs libcvc's standard floor, and accept that `free` degrades to tiled (no native desktop).
+- **Optional second backend: tvision** — worth supporting purely for the **windowed-desktop feel**. It is the *only* candidate that natively delivers Ariadne's default `free` metaphor (movable/overlapping windows, pull-down menus, dialogs) and the closest terminal analog to the ImGui/VTK desktop, with `TApplication` owning the root exactly as VTK owns the GL context. **Clear two blockers first:** (1) legal sign-off on the Borland derivative-works cloud (MIT covers only magiblot's additions); (2) a hermetic ncursesw + terminfo recipe (the hermetic X11/GL recipes are the precedent). No wasm — native-only.
+- **Do NOT roadmap notcurses as the widget backend.** It is a low-level plane/blitter/multimedia canvas, not a retained widget toolkit — adopting it means reimplementing Ariadne's entire widget layer on `ncplane`s. Heaviest dep closure, the only non-MIT license, no wasm. Keep it shelved solely as a future option if a pure-terminal build ever needs inline Sixel/Kitty image or video — a job that overlaps what cvcGL/VTK already do.
+
+**Net:** two backends earn a place — **FTXUI as the portable, hermetic, wasm-capable default**, and **tvision as the native desktop-metaphor option** behind a capability flag. notcurses stays off the roadmap. Design consequence for P0: the `Backend` interface must support both a framework that owns the loop (`owns_loop=true`, the framework calls `render()`) and a primitive renderer the core drives (`owns_loop=false`, like the ImGui path). That `owns_loop` + `root_rect()` seam is the one contract expensive to retrofit — lock it in P0 even though the terminal backend itself is deferred.
+
+### 16.5 Open decisions (scope calls) + risk register
+
+The core/`Backend` split is justified **regardless** of whether a terminal backend ever ships — it
+keeps the loader context-agnostic and is the cheapest moment to do it. What still needs a call is
+**how far to go**. Recommendations below are baked into the plan; ⚑ marks the ones that want an
+explicit sign-off because they change scope/cost or carry a legal/toolchain dependency.
+
+| # | Decision | Recommendation (the roadmap's default) | ⚑ |
+|---|---|---|---|
+| 1 | Is a pure-terminal backend a **v1 deliverable** or a **reserved seam**? | **Lock the `Backend` seam now** (`owns_loop`+`root_rect()`+`capabilities()`), ship **only the ImGui/VTK backend in v1**, defer the first real TUI backend (FTXUI) to a later phase. Gets the debt-avoidance at ~zero extra cost without the recipe+wasm+CI scope of an actual TUI backend. | ⚑ |
+| 2 | How are **GL-only features** surfaced to authors? | Per-widget **implicit `requires:`** (auto-derived, graceful degrade) **+** optional whole-doc `requires:` for fail-fast **+** an `ari lint` that flags px-absolute layout / `view_embed` / shaders as non-portable. An unmarked `shader_canvas` **degrades-and-omits** (shows `fallback:` if present, else the layout closes the gap + a one-time log). | |
+| 3 | Is a portable **input model** (`drain_input`) P0 or deferred? | Define `capabilities().mouse/keyboard` + a `drain_input()` **seam** in P0, but keep the ImGui backend's existing VTK-routed input. A portable pointer/key event model lands with the first TUI backend. | |
+| 4 | Where does the **`cvc::state` read/seed/commit** logic live once lifted out of `ImGuiBinding.cpp`? | A **free-function set in `cvc::ariadne::detail`** the `Runtime` calls, returning `EditResult{changed,committed,value}`; the backend only reports the commit edge, the core owns write-back. **Audit every ui:: commit policy during the lift** (discrete-immediate vs deactivate-after-edit vs text-entry; `color_edit3` multi-field) so semantics don't silently change. | ⚑ (sharpest refactor risk) |
+| 5 | Pursue **tvision** at all? | **Not in v1.** FTXUI-only as/when a TUI backend ships (accept `free`→`tiled` on terminals). Revisit tvision only if the native windowed-desktop terminal feel is worth **(a)** Borland derivative-works legal sign-off and **(b)** a hermetic ncursesw+terminfo closure. | ⚑ |
+| 6 | Add the **`shader://`** convenience scheme now? | **Defer.** Ship GLSL sourcing with inline / `file://` / `pkg://` / `state://`. The `state://` **live-hot-reload** path is the valuable one (edit GLSL in a text widget, reload on the commit boundary); `#include` expansion + shader cache (`shader://`) only if needed. | |
+| 7 | Does **reconcile + intent-drain survive a framework-owned loop**? | Designed for it (the `owns_loop` seam), but **prove it when the first `owns_loop=true` backend lands**: `drain()` must run intents off the walk on the host thread, mapped onto FTXUI/tvision idle/event hooks with no mid-walk mutation. Deferred with the backend. | |
+| — | **FTXUI C++ standard floor** | FTXUI needs **C++20** for parts of its API; libcvc's P0 core is C++17. Confirm the floor (or gate FTXUI behind a raised floor) **before** committing FTXUI as the default TUI backend — a cross-cutting fleet toolchain decision. | ⚑ |
+
+**Risk register (carried, not blocking the scope):**
+- **Loop-ownership retrofit** — if the P0 `Backend` bakes in only the host-pumped model (`owns_loop=false`), a framework-owned loop won't fit later without reworking the `Runtime` control surface. *Mitigation: the `owns_loop`+`root_rect()` seam is mandatory in the P0 refactor (decision #1).*
+- **State/draw un-entanglement** — lifting the `cvc::state` half out of the ui:: helpers while leaving only value-in/value-out draw in the backend is the most error-prone part of the move; a botched split silently changes write-back/commit policy (e.g. a slider committing every frame instead of on deactivate). *Mitigation: decision #4's audit + a golden-value test on the demo before/after.*
+- **"Agnostic" in name only** — GLSL, `view_embed`/render-to-texture, and pixel-precise absolute layout are GL-only; authors who lean on them produce effectively GL-only `.ari` despite the promise. *Mitigation: the `ari lint` non-portability report (decision #2).*
+- **Degradation multiplies the tested surface** — every `.ari` doc effectively has a GL rendering and a degraded TUI rendering; silent degradation can mask authoring bugs. *Mitigation: the lint/preflight must **report** what degraded, not degrade silently.*
+- **Shader footguns** — the VTK replacement **consumes** the `//VTK::` anchor and wasm reserves texture units 0–5 / leaves `tcoord` undeclared (memories `cvcgl-shader-replacement-consumes-anchor`, `cvcgl-wasm-shader-tcoord-undeclared`, `cvcgl-wasm-custom-shader-texture-units`); the first-class `shaders:` loader must encode these as automatic guards (§16.3).
+- **tvision licensing + terminfo closure** — treating tvision as "MIT" on the magiblot header alone would be a mistake; and a hermetic ncursesw+terminfo closure across the glibc-2.35/2.39 + macOS + Windows + BSD fleet is non-trivial. *Mitigation: both gated behind decision #5's sign-off.*
