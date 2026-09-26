@@ -415,3 +415,110 @@ TEST(AriadneRuntime, CustomWidgetCompositionalWinsOverEscape) {
   EXPECT_TRUE(mock.saw("text_line:composed"));        // compositional ran
   EXPECT_FALSE(mock.saw_prefix("custom_widget:dup"));  // escape not consulted
 }
+
+// --- §4 read-lane: reactive visible_when -------------------------------------
+
+TEST(AriadneReactive, EmptyPredicateAlwaysShows) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({text("always")})); // no visible_when
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:always"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()); // no predicate -> no engine, no warnings
+}
+
+TEST(AriadneReactive, PredicateShowsThenHidesAsStateChanges) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // Seed n; state-set stores a string, so the predicate coerces with (int ...) — the
+  // documented read-lane pattern (a bare (state-get) is a string, not a number).
+  ASSERT_TRUE(run_init(app, "", "(state-set \"n\" \"10\")", nullptr));
+  Widget w = text("shown");
+  w.visible_when = "(> (int (state-get \"n\")) 5)";
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:shown")); // 10 > 5 -> visible
+
+  cvc::state::instance(app)("n").value(3); // drop below threshold
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:shown")); // 3 > 5 false -> hidden, no re-parse hazard
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()); // a passing predicate never warns
+}
+
+TEST(AriadneReactive, FalsePredicateHidesTheWholeSubtree) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget win = window("W", {text("inner"), button("B", "b")});
+  win.visible_when = "(state-exists \"never\")"; // key absent -> false
+  rt.set_root(group({win}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:W")); // the window itself is skipped...
+  EXPECT_FALSE(mb.saw("text_line:inner")); // ...and everything under it
+  EXPECT_FALSE(mb.saw("button:B"));
+}
+
+TEST(AriadneReactive, BrokenPredicateHidesFailSafeAndWarnsOnce) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = text("shown");
+  w.visible_when = "(> (int"; // unbalanced -> parse error
+  rt.set_root(group({w}));
+  rt.render();
+  rt.render();
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:shown")); // fail-safe: a broken predicate HIDES
+  std::vector<std::string> warns = rt.take_reactive_warnings();
+  ASSERT_EQ(warns.size(), 1u); // one message across three frames (de-duplicated)
+  EXPECT_NE(warns[0].find("parse error"), std::string::npos);
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()); // drained
+}
+
+TEST(AriadneReactive, WriteIntrinsicIsUnavailableInAPredicate) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("x").value(std::string("sentinel"));
+  Widget w = text("shown");
+  w.visible_when = "(state-set \"x\" 1)"; // a writer is NOT bound in the read-only env
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:shown"));                     // unbound symbol -> hidden
+  EXPECT_EQ(cvc::state::instance(app)("x").value(), "sentinel"); // read-only: nothing written
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());           // and it was reported
+}
+
+TEST(AriadneReactive, PredicateReadsArePrefixScoped) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // init scoped to the same prefix writes ui.demo.mode; the predicate's (state-get "mode")
+  // must read that SAME key (both chroot'd to ui.demo) — matching widget bind resolution.
+  ASSERT_TRUE(run_init(app, "ui.demo", "(state-set \"mode\" \"on\")", nullptr));
+  Widget w = text("shown");
+  w.visible_when = "(= (state-get \"mode\") \"on\")";
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:shown"));
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.mode").value(), "on"); // confirms the key
+}

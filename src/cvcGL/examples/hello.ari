@@ -49,6 +49,13 @@ windows:
         lo: 1
         hi: 512
         def: 64
+      # §4 read-lane (reactive): visible_when is a state_exec predicate re-evaluated each
+      # frame — this caption appears only while Agents is above 256. A read of demo.agents
+      # is a string, so it is coerced with (int ...). init seeds 256, so it starts hidden;
+      # drag the slider past 256 to reveal it. A broken predicate hides the widget and
+      # warns once (see rt.take_reactive_warnings() in ariadne_hello.cpp).
+      - text: "⚠ heavy: over 256 agents"
+        visible_when: (> (int (state-get "demo.agents")) 256)
       - slider_float: Speed
         bind: demo.speed
         lo: 0.1

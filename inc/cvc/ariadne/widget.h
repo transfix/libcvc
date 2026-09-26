@@ -114,6 +114,12 @@ struct Widget {
   std::string bind;  // cvc::state path for bound widgets
   std::string on;    // event name for action widgets (Button / MenuItemAction)
 
+  // §4 read-lane (reactive): a state_exec predicate re-evaluated each frame; when it
+  // is non-empty and evaluates falsy the widget (and its subtree) is skipped this
+  // frame. Read-only, prefix-scoped, step/time-capped, fail-safe (a broken predicate
+  // HIDES the widget and warns once — see Runtime). Empty = always visible.
+  std::string visible_when;
+
   // numeric widget params
   double lo = 0.0, hi = 1.0, def = 0.0; // SliderFloat
   int ilo = 0, ihi = 100, idef = 0;     // SliderInt

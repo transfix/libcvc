@@ -1072,3 +1072,45 @@ init: [ not, a, script ]
   EXPECT_TRUE(r.init_script.empty());
   EXPECT_TRUE(has_warning(r, "init: must be a scalar"));
 }
+
+// ---- §4 read-lane: visible_when parsing ------------------------------------
+
+TEST(AriadneReactive, VisibleWhenParsedOntoWidget) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - text: hello
+        visible_when: (> (int (state-get "n")) 5)
+      - text: plain
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *hello = find(r.root, Kind::Text, "hello");
+  ASSERT_NE(hello, nullptr);
+  EXPECT_EQ(hello->visible_when, "(> (int (state-get \"n\")) 5)");
+  const Widget *plain = find(r.root, Kind::Text, "plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->visible_when.empty()); // absent -> empty (always visible)
+}
+
+TEST(AriadneReactive, VisibleWhenOnCustomWidgetIsConsumedNotAProp) {
+  SKIP_WITHOUT_YAML();
+  // visible_when is a common field for EVERY kind, custom included — it must be captured
+  // on the widget and NOT leak into a custom widget's props bag.
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - type: gauge
+        gauge: 0.8
+        visible_when: (state-exists "ready")
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *c = find(r.root, Kind::Custom);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->custom_type, "gauge");
+  EXPECT_EQ(c->visible_when, "(state-exists \"ready\")");
+  EXPECT_EQ(c->props.find("visible_when"), nullptr);   // consumed, not a prop
+  EXPECT_DOUBLE_EQ(c->props.num("gauge", -1.0), 0.8);  // real config still captured
+}

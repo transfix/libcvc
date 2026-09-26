@@ -17,14 +17,18 @@
 #ifdef CVC_STATE_EXEC
 #include <cvc/core/state_exec/builtins.h>
 #include <cvc/core/state_exec/intrinsics.h>
-#include <cvc/core/state_exec/parser.h> // parse_error
+#include <cvc/core/state_exec/parser.h> // parse, parse_error
 #include <cvc/core/state_exec/process.h>
 #include <cvc/core/state_exec/scheduler.h>
+#include <cvc/core/state_exec/stackless_evaluator.h> // §4 read-lane predicate evaluator
 #endif
 
 #include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -152,6 +156,107 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
 #endif
 }
 
+// --- §4 read-lane: the per-frame reactive predicate evaluator ----------------
+#ifdef CVC_STATE_EXEC
+namespace {
+namespace se = cvc::state_exec;
+
+// Evaluates a widget's read-lane expressions (visible_when, …) each frame on ONE
+// long-lived stackless evaluator over a DEFAULT-DENY environment: the pure builtins
+// plus ONLY the side-effect-free state *readers*. The writers (state-set/delete/…),
+// scheduler ops (spawn/kill/msg-*), state watches, and I/O are never installed, so a
+// predicate that tries one hits an unbound symbol and fails (fail-safe) instead of
+// mutating state or blocking. Each distinct expression source is parsed ONCE and
+// cached; every evaluation is capped in BOTH steps and wall-time and never throws out.
+//
+// state-get keys are prefix-relative (the context is chroot'd to the document prefix),
+// so `(state-get "demo.n")` reads the SAME key a widget `bind: demo.n` resolves to.
+class ReactiveEngine {
+public:
+  ReactiveEngine(cvc::app &app, const std::string &prefix) {
+    // The intrinsics capture &ctx_ by pointer; sched_/tracker_/proc_ back it and share
+    // this object's lifetime. No scheduler op is ever exposed, so the scheduler stays
+    // idle — it exists only to give the readers a well-formed context (mirrors run_init).
+    proc_ = se::make_process();
+    proc_->pid = 1;
+    proc_->status = se::process_status::ready;
+    cvc::state &root = cvc::state::instance(app);
+    ctx_.sched = &sched_;
+    ctx_.tracker = &tracker_;
+    ctx_.proc = proc_;
+    ctx_.pid = 1;
+    se::apply_chroot(ctx_, root, prefix);
+
+    env_ = se::builtins::make_default_environment();
+    // Copy ONLY the read-only intrinsics out of a full registration (allowlist =
+    // default-deny). Anything not listed here is simply never bound in env_.
+    se::environment_ptr full = se::builtins::make_default_environment();
+    se::register_intrinsics(full, &ctx_);
+    static const char *const kReaders[] = {
+        "state-get",       "state-exists",     "state-children", "state-data-get",
+        "state-root-path", "state-has-expiry", "state-is-expired"};
+    for (const char *name : kReaders)
+      if (const se::value_t *v = full->lookup(name))
+        env_->set(name, *v);
+    ev_ = std::make_unique<se::stackless_evaluator>(env_);
+  }
+
+  struct Outcome {
+    bool value;        // predicate result, or the caller's `dflt` on any failure
+    std::string error; // empty on success; a diagnostic otherwise
+  };
+
+  // Evaluate `src` as a boolean predicate. Fail-safe: a parse error, a runtime error
+  // (e.g. an unbound writer symbol, a type error), or a step/time-cap overrun returns
+  // {dflt, <why>} rather than throwing.
+  Outcome eval_bool(const std::string &src, bool dflt) {
+    const se::value_t *expr = compile(src);
+    if (!expr)
+      return {dflt, "ari: visible_when: parse error in \"" + src + "\" — widget hidden"};
+    try {
+      se::evaluator_state st = ev_->create_state(*expr);
+      const se::value_t r = ev_->run(st, kMaxSteps, kMaxSeconds);
+      if (!st.done)
+        return {dflt, "ari: visible_when: \"" + src +
+                          "\" exceeded the per-frame budget (step/time cap) — widget hidden"};
+      return {r.is_truthy(), std::string()};
+    } catch (const std::exception &e) {
+      return {dflt, "ari: visible_when: \"" + src + "\" failed at eval (" + e.what() +
+                        ") — widget hidden"};
+    }
+  }
+
+private:
+  // Parse once; cache the AST. A parse failure caches std::nullopt so a broken predicate
+  // is not re-parsed every frame. Returns nullptr on a (cached) parse failure.
+  const se::value_t *compile(const std::string &src) {
+    auto it = compiled_.find(src);
+    if (it != compiled_.end())
+      return it->second ? &*it->second : nullptr;
+    try {
+      se::value_t v = se::parse(src);
+      auto ins = compiled_.emplace(src, std::move(v));
+      return &*ins.first->second;
+    } catch (const se::parse_error &) {
+      compiled_.emplace(src, std::nullopt);
+      return nullptr;
+    }
+  }
+
+  static constexpr uint64_t kMaxSteps = 200'000; // per-eval step cap (predicates are tiny)
+  static constexpr double kMaxSeconds = 0.02;    // per-eval wall-time backstop
+
+  se::scheduler sched_;
+  se::memory_tracker tracker_;
+  std::shared_ptr<se::process> proc_;
+  se::intrinsics_context ctx_;
+  se::environment_ptr env_;
+  std::unique_ptr<se::stackless_evaluator> ev_;
+  std::unordered_map<std::string, std::optional<se::value_t>> compiled_;
+};
+} // namespace
+#endif // CVC_STATE_EXEC
+
 struct Runtime::Impl {
   cvc::app &app;
   Backend *backend = nullptr;
@@ -163,6 +268,16 @@ struct Runtime::Impl {
 
   std::unordered_map<std::string, std::function<void()>> handlers;
   std::vector<std::string> queued_events;
+
+  // §4 read-lane: the reactive predicate evaluator (lazily built on first use so a UI
+  // with no reactive fields pays nothing), plus de-duplicated diagnostics surfaced by
+  // take_reactive_warnings(). The warnings live regardless of state_exec (the OFF path
+  // also warns once). reactive_warned keeps the dedup set across drains.
+#ifdef CVC_STATE_EXEC
+  std::unique_ptr<ReactiveEngine> reactive;
+#endif
+  std::vector<std::string> reactive_warnings;
+  std::set<std::string> reactive_warned;
 
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
 
@@ -180,7 +295,33 @@ struct Runtime::Impl {
   void emit_children(const Widget &w);
   void emit_container(const Widget &w); // lay children out per w.layout (§3.0.3b)
   void render();
+
+  // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
+  // the predicate's result (fail-safe HIDDEN on a state_exec build, fail-safe SHOWN on a
+  // build without state_exec — hiding every reactive widget would gut a minimal build).
+  bool visible(const Widget &w);
+  void warn_once(const std::string &msg) {
+    if (reactive_warned.insert(msg).second)
+      reactive_warnings.push_back(msg);
+  }
 };
+
+bool Runtime::Impl::visible(const Widget &w) {
+  if (w.visible_when.empty())
+    return true;
+#ifdef CVC_STATE_EXEC
+  if (!reactive)
+    reactive = std::make_unique<ReactiveEngine>(app, prefix);
+  const ReactiveEngine::Outcome o = reactive->eval_bool(w.visible_when, /*dflt=*/false);
+  if (!o.error.empty())
+    warn_once(o.error);
+  return o.value;
+#else
+  warn_once("ari: visible_when on '" + (w.label.empty() ? w.id : w.label) +
+            "' ignored — this libcvc was built without state_exec (CVC_STATE_EXEC=OFF)");
+  return true;
+#endif
+}
 
 void Runtime::Impl::emit_children(const Widget &w) {
   for (const Widget &c : w.children)
@@ -207,6 +348,8 @@ void Runtime::Impl::emit_container(const Widget &w) {
 }
 
 void Runtime::Impl::emit(const Widget &w) {
+  if (!visible(w))
+    return; // §4 read-lane: a falsy visible_when hides this widget and its whole subtree
   Backend &b = *backend;
   const char *label = w.label.c_str();
   switch (w.kind) {
@@ -388,6 +531,12 @@ void Runtime::drain() {
     if (it != m_->handlers.end() && it->second)
       it->second();
   }
+}
+
+std::vector<std::string> Runtime::take_reactive_warnings() {
+  std::vector<std::string> out;
+  out.swap(m_->reactive_warnings); // reactive_warned stays -> still deduped across drains
+  return out;
 }
 
 } // namespace ariadne

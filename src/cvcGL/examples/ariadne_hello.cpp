@@ -156,7 +156,12 @@ int main(int argc, char **argv) {
     // §9: service any volren/volslice nodes (they render nothing without a per-frame
     // tick + a multi-slice depth sort). A no-op for a scene without volume renderers.
     cvc::gl::ariadne::tick_scene(realized, view.renderer());
-    view.render();          // draws the scene + the Ariadne overlay
+    view.render();          // draws the scene + the Ariadne overlay (runs rt.render())
+    // §4 read-lane: surface any reactive-predicate diagnostics (a broken visible_when
+    // parse/eval, or a build without state_exec). De-duplicated, so each distinct issue
+    // prints once however many frames it renders — safe to poll every frame.
+    for (const std::string &w : rt.take_reactive_warnings())
+      std::fprintf(stderr, "%s\n", w.c_str());
     std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120 Hz cap
   }
   return 0;

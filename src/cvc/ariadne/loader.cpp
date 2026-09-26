@@ -228,7 +228,7 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 // into Widget::props for a registered emit fn to read.
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" ||
-         k == "on" || k == "children" || k == "items" || k == "id";
+         k == "on" || k == "children" || k == "items" || k == "id" || k == "visible_when";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -387,7 +387,7 @@ void check_bind(Ctx &ctx, const std::string &type, const std::string &label,
     ctx.warn("ari: " + type + " '" + label + "' has no bind: — it will not read or write state");
 }
 
-Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
+Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   if (n.IsScalar()) {
     const std::string s = n.Scalar();
     if (s == "separator")
@@ -523,6 +523,17 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   g.layout = parse_layout(n["layout"]); // §3.0.3b: a group can be a grid / sized tracks
   g.size = parse_size(n["size"]);
   return g;
+}
+
+// Build the kind-specific widget, then attach the fields common to EVERY kind. Keeps
+// per-kind branches focused on their own params and guarantees a new shared field is
+// wired for all kinds at once. §4 read-lane: visible_when is a state_exec predicate the
+// Runtime re-evaluates each frame (empty = always visible).
+Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
+  Widget w = parse_widget_impl(ctx, n);
+  if (n.IsMap())
+    w.visible_when = str(n, "visible_when");
+  return w;
 }
 
 Widget parse_document(Ctx &ctx, const YAML::Node &doc) {

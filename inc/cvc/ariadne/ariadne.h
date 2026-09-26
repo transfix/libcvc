@@ -74,6 +74,15 @@ public:
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
   void drain();
 
+  // Drain the §4 read-lane diagnostics accumulated during render() — one message per
+  // distinct failing predicate (a parse error, a runtime error, or a per-frame budget
+  // overrun; or, on a build without state_exec, one note that visible_when was ignored).
+  // De-duplicated for the Runtime's lifetime, so a broken predicate warns ONCE however
+  // many frames it renders. Empty when everything evaluated cleanly. The host may log
+  // these (e.g. after the first frame); ignoring them is safe — the walk already
+  // degraded fail-safe. Not part of render()'s hot path beyond a moved-out vector.
+  std::vector<std::string> take_reactive_warnings();
+
 private:
   struct Impl;
   std::unique_ptr<Impl> m_;
