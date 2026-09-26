@@ -1625,10 +1625,16 @@ of a hand-built C++ escape.
 > declare lights in `lights:`); a `Scene`-level `rig:` (it's a scene property, not one light);
 > directional-from-pos/target derivation; multi-volume compositing across a nested volume (needs
 > `updateVolumeRendering` exposed); binding *other* scene props (transform/material/color) to state
-> as visibility now is; a VTK-linked `realize_scene` gtest under `src/cvcGL/test/` (node-building +
-> the light-batch position bake + kind/preset mapping + directional-vs-spot routing + transform
-> nesting are compile-verified only — the pure-state mirror + parse are covered by `AriadneBind.*` /
-> loader gtests, but a `SceneGraph` needs VTK the core test tree lacks); and views/minimap (§9.5–9.6).
+> as visibility now is; and views/minimap (§9.5–9.6).
+>
+> **Realize-side test coverage.** The realize invariants that need VTK are now pinned by an
+> offscreen cvcGL test, `src/cvcGL/test/cvcgl_ariadne_realize.cpp` (`add_test cvcgl_ariadne_realize`):
+> it realizes in-memory `Scene` structs into an offscreen `SceneRenderer` and asserts the light
+> batch bakes a spot's moved position (10,20,30) rather than the origin, directional→non-positional
+> vs spot→positional routing, that a `three_point` rig adds lights, and that a nested child at local
+> `[5,0,0]` under a group at `[100,0,0]` resolves to world `(105,0,0)`. It runs under the CI
+> `llvmpipe`+`Xvfb` cvcGL harness. The core `AriadneBind.*` + loader gtests still cover the pure-state
+> mirror and all parsing with no VTK.
 
 ### 9.1 Which scene model
 
