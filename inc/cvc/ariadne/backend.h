@@ -121,6 +121,15 @@ public:
   virtual void grid_next_cell() = 0;
   virtual void end_grid() = 0;
 
+  // Disabled scope (§4 read-lane enabled_when/disabled_when). The core wraps a widget
+  // (and its subtree) that a reactive predicate has disabled in begin_disabled()/
+  // end_disabled(): it is still drawn but non-interactive (greyed). Balanced like the
+  // other begin/end pairs. Non-pure NO-OP defaults so a backend with no disabled concept
+  // still compiles and renders (always-enabled); ImGuiBackend maps them to ImGui's
+  // BeginDisabled()/EndDisabled().
+  virtual void begin_disabled() {}
+  virtual void end_disabled() {}
+
   // ---- leaves -------------------------------------------------------------
   virtual void text_line(const char *text) = 0;                             // literal caption
   virtual void text_value(const char *label, const std::string &value) = 0; // "label: value"

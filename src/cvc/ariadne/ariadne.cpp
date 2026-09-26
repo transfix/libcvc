@@ -358,6 +358,10 @@ struct Runtime::Impl {
   // the predicate's result (fail-safe HIDDEN on a state_exec build, fail-safe SHOWN on a
   // build without state_exec — hiding every reactive widget would gut a minimal build).
   bool visible(const Widget &w);
+  // §4 read-lane: is `w` disabled (greyed, non-interactive) this frame? True when
+  // enabled_when is falsy OR disabled_when is truthy. Fail-safe DISABLED on a broken
+  // predicate; a build without state_exec leaves it enabled (+ warns once).
+  bool disabled(const Widget &w);
   void warn_once(const std::string &msg) {
     if (reactive_warned.insert(msg).second)
       reactive_warnings.push_back(msg);
@@ -378,6 +382,36 @@ bool Runtime::Impl::visible(const Widget &w) {
   warn_once("ari: visible_when on '" + (w.label.empty() ? w.id : w.label) +
             "' ignored — this libcvc was built without state_exec (CVC_STATE_EXEC=OFF)");
   return true;
+#endif
+}
+
+bool Runtime::Impl::disabled(const Widget &w) {
+  if (w.enabled_when.empty() && w.disabled_when.empty())
+    return false;
+#ifdef CVC_STATE_EXEC
+  if (!reactive)
+    reactive = std::make_unique<ReactiveEngine>(app, prefix);
+  // enabled_when falsy -> disabled (fail-safe dflt=false: a broken predicate disables).
+  if (!w.enabled_when.empty()) {
+    const ReactiveEngine::Outcome o = reactive->eval_bool(w.enabled_when, /*dflt=*/false);
+    if (!o.error.empty())
+      warn_once(o.error);
+    if (!o.value)
+      return true;
+  }
+  // disabled_when truthy -> disabled (fail-safe dflt=true: a broken predicate disables).
+  if (!w.disabled_when.empty()) {
+    const ReactiveEngine::Outcome o = reactive->eval_bool(w.disabled_when, /*dflt=*/true);
+    if (!o.error.empty())
+      warn_once(o.error);
+    if (o.value)
+      return true;
+  }
+  return false;
+#else
+  warn_once("ari: enabled_when/disabled_when on '" + (w.label.empty() ? w.id : w.label) +
+            "' ignored — this libcvc was built without state_exec (CVC_STATE_EXEC=OFF)");
+  return false; // can't evaluate -> leave it functional
 #endif
 }
 
@@ -418,6 +452,11 @@ void Runtime::Impl::emit(const Widget &w) {
 
 void Runtime::Impl::emit_node(const Widget &w) {
   Backend &b = *backend;
+  // §4 read-lane: wrap the widget (and its subtree, emitted within the cases) in the
+  // backend's disabled scope when a reactive enabled_when/disabled_when says so.
+  const bool dis = disabled(w);
+  if (dis)
+    b.begin_disabled();
   const char *label = w.label.c_str();
   switch (w.kind) {
   case Kind::Menubar:
@@ -552,6 +591,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
   }
+  if (dis)
+    b.end_disabled();
 }
 
 void Runtime::Impl::render() {

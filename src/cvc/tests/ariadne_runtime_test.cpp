@@ -65,6 +65,8 @@ struct MockBackend : Backend {
   }
   void grid_next_cell() override { rec("next_cell"); }
   void end_grid() override { rec("end_grid"); }
+  void begin_disabled() override { rec("begin_disabled"); }
+  void end_disabled() override { rec("end_disabled"); }
   void push_id(const char *id) override { rec(std::string("push_id:") + id); }
   void pop_id() override { rec("pop_id"); }
   void text_line(const char *t) override { rec(std::string("text_line:") + t); }
@@ -708,6 +710,72 @@ TEST(AriadneReactive, StateDataDagIsCopiedBoundedNotHung) {
   rt.render(); // must return promptly (memoized deep_copy), not hang or OOM
   EXPECT_FALSE(mb.saw("text_line:shown"));          // is-null of a non-nil value -> hidden
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // completed cleanly, no cap/error
+}
+
+TEST(AriadneReactive, EnabledWhenGreysOutAndReacts) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"n\" \"3\")", nullptr));
+  Widget w = button("Go", "go");
+  w.enabled_when = "(> (int (state-get \"n\")) 5)"; // 3 > 5 -> false -> disabled
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_disabled")); // wrapped in a disabled scope
+  EXPECT_TRUE(mb.saw("button:Go"));      // still DRAWN (greyed, not skipped)
+  EXPECT_TRUE(mb.saw("end_disabled"));
+
+  cvc::state::instance(app)("n").value(10); // now above threshold -> enabled
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_disabled")); // enabled -> no wrap
+  EXPECT_TRUE(mb.saw("button:Go"));
+}
+
+TEST(AriadneReactive, DisabledWhenDisablesWhenTrue) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"lock\" \"1\")", nullptr));
+  Widget w = button("Go", "go");
+  w.disabled_when = "(state-exists \"lock\")"; // present -> true -> disabled
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_disabled"));
+  EXPECT_TRUE(mb.saw("end_disabled"));
+}
+
+TEST(AriadneReactive, EnabledWhenBrokenPredicateDisablesFailSafe) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = button("Go", "go");
+  w.enabled_when = "(> (int"; // parse error -> fail-safe DISABLED
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_disabled")); // broken predicate -> disabled, not enabled
+  EXPECT_TRUE(mb.saw("button:Go"));
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneReactive, NoEnableFieldsMeansNoDisabledScope) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "go")})); // no enabled_when/disabled_when
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_disabled")); // no scope opened when neither field is set
+  EXPECT_TRUE(mb.saw("button:Go"));
 }
 
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {

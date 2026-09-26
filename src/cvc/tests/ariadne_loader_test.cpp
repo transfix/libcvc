@@ -1093,6 +1093,24 @@ windows:
   EXPECT_TRUE(plain->visible_when.empty()); // absent -> empty (always visible)
 }
 
+TEST(AriadneReactive, EnabledAndDisabledWhenParsedOntoWidget) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: go
+        enabled_when: (state-exists "ready")
+        disabled_when: (state-exists "busy")
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *b = find(r.root, Kind::Button, "Go");
+  ASSERT_NE(b, nullptr);
+  EXPECT_EQ(b->enabled_when, "(state-exists \"ready\")");
+  EXPECT_EQ(b->disabled_when, "(state-exists \"busy\")");
+}
+
 TEST(AriadneReactive, VisibleWhenOnCustomWidgetIsConsumedNotAProp) {
   SKIP_WITHOUT_YAML();
   // visible_when is a common field for EVERY kind, custom included — it must be captured

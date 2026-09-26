@@ -42,6 +42,8 @@ public:
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
+  void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
+  void end_disabled() override;
   void push_id(const char *id) override;
   void pop_id() override;
 

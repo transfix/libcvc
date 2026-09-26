@@ -289,6 +289,16 @@ void ImGuiBackend::end_grid() {
   }
 #endif
 }
+void ImGuiBackend::begin_disabled() {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::BeginDisabled(true); // §4 enabled_when/disabled_when: grey + non-interactive
+#endif
+}
+void ImGuiBackend::end_disabled() {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::EndDisabled();
+#endif
+}
 void ImGuiBackend::push_id(const char *id) { ui::PushId(id); }
 void ImGuiBackend::pop_id() { ui::PopId(); }
 

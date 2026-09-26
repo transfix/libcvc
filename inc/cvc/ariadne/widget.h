@@ -119,6 +119,14 @@ struct Widget {
   // HIDES the widget and warns once — see Runtime). Empty = always visible.
   std::string visible_when;
 
+  // §4 read-lane (reactive): predicates that grey a widget (and its subtree) out —
+  // still drawn, but non-interactive. `enabled_when` disables when it is falsy;
+  // `disabled_when` disables when it is truthy (both may be set). Fail-safe DISABLES on a
+  // broken predicate (§4.1). Empty = always enabled. Realized via the backend's
+  // begin_disabled()/end_disabled() scope.
+  std::string enabled_when;
+  std::string disabled_when;
+
   // numeric widget params
   double lo = 0.0, hi = 1.0, def = 0.0; // SliderFloat
   int ilo = 0, ihi = 100, idef = 0;     // SliderInt

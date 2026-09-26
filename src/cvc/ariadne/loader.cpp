@@ -226,7 +226,8 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 // into Widget::props for a registered emit fn to read.
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
-         k == "children" || k == "items" || k == "id" || k == "visible_when";
+         k == "children" || k == "items" || k == "id" || k == "visible_when" ||
+         k == "enabled_when" || k == "disabled_when";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -528,8 +529,11 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
 // Runtime re-evaluates each frame (empty = always visible).
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   Widget w = parse_widget_impl(ctx, n);
-  if (n.IsMap())
+  if (n.IsMap()) {
     w.visible_when = str(n, "visible_when");
+    w.enabled_when = str(n, "enabled_when");
+    w.disabled_when = str(n, "disabled_when");
+  }
   return w;
 }
 
