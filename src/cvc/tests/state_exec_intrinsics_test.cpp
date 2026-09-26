@@ -124,12 +124,35 @@ TEST_F(StateTreeIntrinsicsTest, StateDeleteNonexistent) {
   EXPECT_NO_THROW(call("state-delete", {std::string("nothing.here")}));
 }
 
-TEST_F(StateTreeIntrinsicsTest, StateDataGetSet) {
+TEST_F(StateTreeIntrinsicsTest, StateDataRoundTripsTheValue) {
+  // A DSL value set via state-data-set comes back from state-data-get transparently (the
+  // original value_t, NOT an opaque data_object handle) — so structured data round-trips.
   call("state-data-set", {std::string("data.node"), std::string("data-val")});
-  auto result = call("state-data-get", {std::string("data.node")});
-  EXPECT_FALSE(result.is_nil());
-  auto *obj = std::get_if<data_object_ptr>(&result.v);
-  ASSERT_NE(obj, nullptr);
+  auto s = call("state-data-get", {std::string("data.node")});
+  ASSERT_TRUE(std::holds_alternative<std::string>(s.v));
+  EXPECT_EQ(std::get<std::string>(s.v), "data-val");
+
+  // a structured value (a list) round-trips intact
+  auto lst = make_list({value_t{int64_t{1}}, value_t{int64_t{2}}, value_t{int64_t{3}}});
+  call("state-data-set", {std::string("data.list"), lst});
+  auto got = call("state-data-get", {std::string("data.list")});
+  auto *gl = std::get_if<list_ptr>(&got.v);
+  ASSERT_NE(gl, nullptr);
+  EXPECT_EQ((*gl)->size(), 3u);
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateSetCoercesScalarsToString) {
+  // state-set stores string-typed scalars; non-string values are coerced to their natural
+  // lexical form rather than throwing — (state-set "n" 10) stores "10".
+  call("state-set", {std::string("c.int"), value_t{int64_t{10}}});
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.int")}).v), "10");
+  call("state-set", {std::string("c.dbl"), value_t{1.5}});
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.dbl")}).v), "1.5");
+  call("state-set", {std::string("c.bool"), value_t{true}});
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.bool")}).v), "true");
+  // a string is stored raw — NOT to_string's quoted form
+  call("state-set", {std::string("c.str"), std::string("hi")});
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.str")}).v), "hi");
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateDataGetNonexistent) {

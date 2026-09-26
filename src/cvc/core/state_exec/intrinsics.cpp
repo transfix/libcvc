@@ -7,6 +7,7 @@
 #include <cvc/core/state_exec/memory_tracker.h>
 #include <cvc/core/state_exec/process.h>
 #include <cvc/core/state_exec/scheduler.h>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -50,6 +51,29 @@ double as_number(const value_t &v, const char *name) {
   throw std::runtime_error(std::string(name) + ": expected number, got " + v.type_name());
 }
 
+// Coerce any DSL value to the string form the (string-typed) state tree stores. A string
+// stores raw (NOT to_string's quoted form); scalars store their natural lexical form
+// (10, 1.5, true/false — not to_string's #t/#f); nil empties the node. Compound values
+// (list/dict) fall back to the readable to_string() — a structured payload should use
+// state-data-set instead. This lets (state-set "n" 10) store "10" instead of throwing on
+// a non-string value.
+std::string coerce_state_string(const value_t &v) {
+  if (auto *s = std::get_if<std::string>(&v.v))
+    return *s;
+  if (auto *i = std::get_if<int64_t>(&v.v))
+    return std::to_string(*i);
+  if (auto *d = std::get_if<double>(&v.v)) {
+    std::ostringstream oss;
+    oss << *d;
+    return oss.str();
+  }
+  if (auto *b = std::get_if<bool>(&v.v))
+    return *b ? "true" : "false";
+  if (v.is_nil())
+    return std::string();
+  return to_string(v); // list/dict/symbol/closure — readable fallback
+}
+
 void require_root(const intrinsics_context *ctx, const char *name) {
   if (!ctx->root)
     throw std::runtime_error(std::string(name) + ": no state root bound");
@@ -78,7 +102,10 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
   expect_exact(args, 2, "state-set");
   require_root(ctx, "state-set");
   auto &path = as_string(args[0], "state-set");
-  auto &val = as_string(args[1], "state-set");
+  // Coerce the value to a string (state stores string-typed scalars) rather than
+  // requiring the caller to pre-stringify — (state-set "n" 10) now stores "10". A
+  // structured value should use state-data-set (the typed data() channel).
+  const std::string val = coerce_state_string(args[1]);
   // operator() creates child nodes as needed
   (*ctx->root)(path).value(val);
   return nil_value;
@@ -129,7 +156,12 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   auto d = node->data();
   if (d.empty())
     return nil_value;
-  // Wrap the boost::any in a data_object
+  // If the payload is a DSL value_t (the shape state-data-set stores), return it
+  // directly so structured data round-trips transparently — (state-data-set "k" (list
+  // 1 2 3)) then (state-data-get "k") yields (1 2 3), not an opaque handle. Genuine
+  // host data (any other C++ type parked on the node) still comes back as a data_object.
+  if (auto *v = boost::any_cast<value_t>(&d))
+    return *v;
   auto obj = std::make_shared<data_object>();
   obj->payload = d;
   obj->type_name = d.type().name();
