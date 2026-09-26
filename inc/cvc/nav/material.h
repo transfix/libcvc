@@ -183,9 +183,12 @@ void bicycle_rollout_material(const field_stack &f, float *o, float *th, float *
                               int n, const int *map_id, const veh_params &v,
                               const material_drive &mat, float *minclr_out, int num_threads = 0);
 
+// Optional tel[n]: per-agent drive_telemetry out (captures mrisk + lam_soft on this path);
+// null (default) is byte-identical to not asking.
 void drive_step_material(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                          const coef_mlp &model, int n, const int *map_id, const veh_params &v,
-                         const material_drive &mat, float *minclr_out, int num_threads = 0);
+                         const material_drive &mat, float *minclr_out, int num_threads = 0,
+                         drive_telemetry *tel = nullptr);
 
 // ── obstacle-list material surrogate rollout ────────────────────────────────
 // The faithful torch-free port of the source method's differentiable

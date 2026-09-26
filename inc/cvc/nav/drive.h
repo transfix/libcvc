@@ -230,14 +230,37 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
                      const veh_params &v, float *minclr_out, int num_threads = 0,
                      thread_pool *pool = nullptr);
 
+// Per-tick drive diagnostics for ONE agent — the quantities drive_step computes and
+// otherwise discards. Filled ONLY when a drive_step*/rollout caller passes a tel[n] buffer;
+// a null tel is byte-identical to not asking (the ext_force null-off house pattern). Per-substep
+// scalars are captured at the LAST substep (steer, curvature, mu, mrisk), EXCEPT clearance/binding
+// which are the WORST (min) over the tick's substeps; the coefficient fields are the tick's
+// constants. (For the default nsub == 1 these coincide.) It carries no navigation state — purely an
+// out-parameter for telemetry. cvc::nav::nav_stats reduces the useful subset via drive_sample
+// (nav_stats.h); keep the two PODs semantically in lockstep.
+struct drive_telemetry {
+  // CoefMLP policy output this tick (the al/be/ga fed to the rollout; lam_soft is the
+  // effective material soft-weight, 0 on the non-material path).
+  float alpha = 0, beta = 0, gamma = 0, lam_soft = 0;
+  float mu = 1;                 // underfoot grip at the agent cell (1 = dry / no grip field)
+  float mrisk = 0;              // material risk at the agent cell (0 = no material stack)
+  float ext_fx = 0, ext_fy = 0; // applied external force in the drive frame (0 = no ext channel)
+  float steer = 0;              // final steering angle delta (rad), clamped (last substep)
+  float curvature = 0;          // |tan(delta)| / L (last substep)
+  float clearance = 0;          // worst (min) barrier clearance over the tick (footprint: min disc)
+  std::uint8_t binding = 0;     // clearance < d_hat (geometry v.d_hat): barrier active this tick
+};
+
 // The whole per-agent drive for one tick, fused: sample -> coef_feats ->
 // coef_mlp -> bicycle_rollout(nsub substeps), given the carrot each agent is
 // chasing. Equivalent to calling coef_feats + model.forward + bicycle_rollout in
 // sequence (a CUDA kernel fuses these into one launch). Updates o[n*2], th[n],
 // sp[n] IN PLACE and writes minclr_out[n]. Agents are independent — threaded.
+// Optional tel[n]: per-agent drive_telemetry out; null (default) is byte-identical.
 void drive_step(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                 const coef_mlp &model, int n, const int *map_id, const veh_params &v,
-                float *minclr_out, int num_threads = 0, thread_pool *pool = nullptr);
+                float *minclr_out, int num_threads = 0, thread_pool *pool = nullptr,
+                drive_telemetry *tel = nullptr);
 
 // ─── Generic external force channel ──────────────────────────────────────────
 // A physics-AGNOSTIC hook that lets a caller add an extra per-agent force to the
@@ -277,9 +300,11 @@ void bicycle_rollout_ext(const field_stack &f, float *o, float *th, float *sp, c
 
 // Fused per-tick drive with an external force channel — 1:1 with drive_step,
 // plus `ext`. A null ext.sample makes it byte-identical to drive_step.
+// Optional tel[n]: per-agent drive_telemetry out (captures ext_fx/fy too); null is inert.
 void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                     const coef_mlp &model, int n, const int *map_id, const veh_params &v,
-                    const ext_force &ext, float *minclr_out, int num_threads = 0);
+                    const ext_force &ext, float *minclr_out, int num_threads = 0,
+                    drive_telemetry *tel = nullptr);
 
 // ─── Carrot state machine (swarm.py._plan_carrot) ────────────────────────────
 

@@ -468,3 +468,65 @@ TEST(NavStats, CoverageReducerAndSenseFlips) {
   EXPECT_NE(sj.find("\"mean_coverage\":{"), std::string::npos);
   EXPECT_NE(sj.find("\"mean_sense_flips\":"), std::string::npos);
 }
+
+// Drive telemetry (Track 1d): the collector reduces a per-tick drive_sample feed into per-vehicle
+// means/peaks, and aggregate_nav rolls them into corpus means over drive-carrying runs. Values are
+// chosen as exact binary fractions so the arithmetic is unambiguous. (drive_step -> drive_telemetry
+// is covered byte-identically by DriveTelemetry.NullTelIsByteIdenticalAndPopulates in
+// nav_material_test.)
+TEST(NavStats, DriveTelemetryReduction) {
+  nav_stats_collector c;
+  const float start[2] = {0, 0};
+  const float goal[2] = {10, 0};
+  c.begin_episode(1, 1.0, start, goal);
+  const float head[1] = {0};
+  const float spd[1] = {1};
+  const std::uint8_t rch[1] = {0};
+  const int mode[1] = {0};
+  // per-step drive_sample: alpha 1,3,2 | beta 4,4,4 | gamma 3,1,2 | mu .5,.25,.75 | mrisk
+  // .25,.75,.5 | ext 4,2,0 | steer .5,-.25,.75 | binding 1,0,1
+  const drive_sample dss[3] = {
+      {1, 4, 3, 0.5f, 0.25f, 4, 0.5f, 1},
+      {3, 4, 1, 0.25f, 0.75f, 2, -0.25f, 0},
+      {2, 4, 2, 0.75f, 0.5f, 0, 0.75f, 1},
+  };
+  drive_sample cur;
+  nav_samplers smp;
+  smp.drive = &cur;
+  for (int s = 0; s < 3; ++s) {
+    cur = dss[s];
+    const float pos[2] = {(float)(s + 1), 0};
+    c.step(pos, head, spd, mode, rch, smp);
+  }
+  episode_nav_stats e0 = c.finish();
+  const veh_nav_stats &v = e0.per_vehicle[0];
+  EXPECT_EQ(v.drive_steps, 3);
+  EXPECT_NEAR(v.alpha_mean, 2.0, 1e-6); // (1+3+2)/3
+  EXPECT_NEAR(v.beta_mean, 4.0, 1e-6);  // (4+4+4)/3
+  EXPECT_NEAR(v.gamma_mean, 2.0, 1e-6); // (3+1+2)/3
+  EXPECT_NEAR(v.mu_mean, 0.5, 1e-6);    // (.5+.25+.75)/3
+  EXPECT_NEAR(v.mu_min, 0.25, 1e-6);
+  EXPECT_NEAR(v.mrisk_mean, 0.5, 1e-6); // (.25+.75+.5)/3
+  EXPECT_NEAR(v.mrisk_max, 0.75, 1e-6);
+  EXPECT_NEAR(v.ext_force_mean, 2.0, 1e-6); // (4+2+0)/3
+  EXPECT_NEAR(v.steer_abs_mean, 0.5, 1e-6); // (.5+.25+.75)/3
+  EXPECT_NEAR(v.steer_abs_max, 0.75, 1e-6);
+  EXPECT_EQ(v.binding_steps, 2);
+
+  const std::string ej = e0.to_json();
+  EXPECT_NE(ej.find("\"alpha_mean\":"), std::string::npos);
+  EXPECT_NE(ej.find("\"mu_min\":"), std::string::npos);
+  EXPECT_NE(ej.find("\"binding_steps\":2"), std::string::npos);
+  EXPECT_EQ(ej.find("1e+30"), std::string::npos); // mu_min is finite here
+
+  // corpus means over drive-carrying runs (one here).
+  nav_scorecard s = aggregate_nav({e0}, "ckpt-D");
+  EXPECT_NEAR(s.mean_alpha, 2.0, 1e-6);
+  EXPECT_NEAR(s.mean_beta, 4.0, 1e-6);
+  EXPECT_NEAR(s.mean_mu, 0.5, 1e-6);
+  EXPECT_NEAR(s.mean_mrisk, 0.5, 1e-6);
+  EXPECT_NEAR(s.mean_ext_force, 2.0, 1e-6);
+  const std::string sj = s.to_json();
+  EXPECT_NE(sj.find("\"mean_alpha\":"), std::string::npos);
+  EXPECT_NE(sj.find("\"mean_mu\":"), std::string::npos);
+}

@@ -295,7 +295,8 @@ namespace {
 void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const float *goal,
                   const float *al, const float *be, const float *ga, int n, const int *map_id,
                   const veh_params &v, const material_drive *mat, const ext_force *ext,
-                  float *minclr_out, int num_threads, thread_pool *pool = nullptr) {
+                  float *minclr_out, int num_threads, thread_pool *pool = nullptr,
+                  drive_telemetry *tel = nullptr) {
   const float hdt = v.dt / static_cast<float>(v.nsub);
   const float rr = v.rr, d_hat = v.d_hat;
   // vmax / a_max / L (and the L-derived dmax / tan_dmax / v_creep_cap and the vmax-derived
@@ -327,6 +328,11 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     const float sp_min = v.allow_reverse ? -0.25f * vmax : 0.0f;
     const float v_creep_cap = 0.5f * std::sqrt(a_lat_max * L / tan_dmax);
     float minclr = 9.9f;
+    // Telemetry temporaries — write-only, never read by the drive math, so a null `tel` path is
+    // byte-identical. They hold the LAST substep's value at loop exit (mu/mrisk/ext default to the
+    // no-field case; steer/curv/clear are overwritten every substep).
+    float tel_mu = 1.0f, tel_mrisk = 0.0f, tel_lam = 0.0f, tel_ext_x = 0.0f, tel_ext_y = 0.0f;
+    float tel_steer = 0.0f, tel_curv = 0.0f;
 
     for (int s = 0; s < v.nsub; ++s) {
       // Hoisted above the sample because the footprint places its discs along
@@ -388,6 +394,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         a_max_e = a_max * mu;
         a_lat_e = a_lat_max * mu;
         creep_cap = 0.5f * std::sqrt(a_lat_e * (L / tan_dmax));
+        tel_mu = mu;
       }
       const float Fgoal_x = -bei * (ox - gx);
       const float Fgoal_y = -bei * (oy - gy);
@@ -402,10 +409,11 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         float mrisk, mphi, mgrx, mgry, mgpx, mgpy;
         detail::material_sample_point(*mat->stack, mplane, ox, oy, mrisk, mphi, mgrx, mgry, mgpx,
                                       mgpy);
-        (void)mrisk;
+        tel_mrisk = mrisk;
         // db = -sigmoid(k * (d_hat_m - phi_m)); F_hard = ((-lam)*db)*grad.
         const float db = -(1.0f / (1.0f + std::exp(-(mat->k_sharp * (mat->d_hat_m - mphi)))));
         const float ls = mat->lam_soft[i], lh = mat->lam_hard[i];
+        tel_lam = ls;
         const float fsx = -ls * mgrx;
         const float fsy = -ls * mgry;
         const float fhx = (-lh * db) * mgpx;
@@ -426,6 +434,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         ext->sample(ext->user, i, eplane, ox, oy, &Fext_x, &Fext_y);
         Fx = Fx + Fext_x;
         Fy = Fy + Fext_y;
+        tel_ext_x = Fext_x;
+        tel_ext_y = Fext_y;
       }
 
       // head = (ch, sh); left = (-sh, ch)   [ch/sh hoisted above the sample]
@@ -522,6 +532,11 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         sp2 = 1e-9f;
       const float d_cap = std::atan(a_lat_e * L / sp2);
       delta = std::min(std::max(delta, -d_cap), d_cap);
+      // telemetry: the FINAL driven steering + curvature this substep (write-only). Clearance and
+      // binding come from `minclr` (the per-tick MIN over substeps) after the loop, not from this
+      // substep, so a barrier that engages mid-tick is counted even if the last substep recovered.
+      tel_steer = delta;
+      tel_curv = std::fabs(std::tan(delta)) / L;
       thi = thi + hdt * (spi / L) * std::tan(delta);
       const float ch2 = std::cos(thi), sh2 = std::sin(thi);
       ox = ox + hdt * spi * ch2;
@@ -533,6 +548,21 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     th[i] = thi;
     sp[i] = spi;
     minclr_out[i] = minclr;
+    if (tel) {
+      drive_telemetry &t = tel[i];
+      t.alpha = ali;
+      t.beta = bei;
+      t.gamma = gai;
+      t.lam_soft = tel_lam;
+      t.mu = tel_mu;
+      t.mrisk = tel_mrisk;
+      t.ext_fx = tel_ext_x;
+      t.ext_fy = tel_ext_y;
+      t.steer = tel_steer;
+      t.curvature = tel_curv;
+      t.clearance = minclr;               // worst (min) clearance over the tick's substeps
+      t.binding = minclr < d_hat ? 1 : 0; // IPC barrier active at any point this tick
+    }
   });
 }
 
@@ -652,7 +682,7 @@ void carrot_step(const float *o, const float *goal, const float *th, float *sp, 
 
 void drive_step(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                 const coef_mlp &model, int n, const int *map_id, const veh_params &v,
-                float *minclr_out, int num_threads, thread_pool *pool) {
+                float *minclr_out, int num_threads, thread_pool *pool, drive_telemetry *tel) {
   // sample + features -> coefficients -> rollout. The intermediate buffers are
   // O(n); a CUDA drive keeps them in registers and fuses this into one launch.
   // The feature stride is the MODEL's, never an assumption: a net widened for
@@ -680,13 +710,16 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
     be[i] = coef[static_cast<std::size_t>(out_w) * i + 1];
     ga[i] = coef[static_cast<std::size_t>(out_w) * i + 2];
   }
-  bicycle_rollout(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, minclr_out,
-                  num_threads, pool);
+  // Route straight to rollout_impl (bicycle_rollout is a pure pass-through with mat=ext=null) so
+  // the optional telemetry threads through without widening the public bicycle_rollout API.
+  rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, nullptr,
+               nullptr, minclr_out, num_threads, pool, tel);
 }
 
 void drive_step_material(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                          const coef_mlp &model, int n, const int *map_id, const veh_params &v,
-                         const material_drive &mat, float *minclr_out, int num_threads) {
+                         const material_drive &mat, float *minclr_out, int num_threads,
+                         drive_telemetry *tel) {
   // The feature layout is the MODEL's, from its flags (grip and/or terrain-risk), never an
   // in_features() guess. A mismatch is a hard error rather than a short buffer quietly feeding
   // garbage into the first layer.
@@ -729,13 +762,14 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
       lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3];
     md.lam_soft = lam_learned.data();
   }
-  bicycle_rollout_material(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, md,
-                           minclr_out, num_threads);
+  rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v,
+               md.stack ? &md : nullptr, nullptr, minclr_out, num_threads, nullptr, tel);
 }
 
 void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                     const coef_mlp &model, int n, const int *map_id, const veh_params &v,
-                    const ext_force &ext, float *minclr_out, int num_threads) {
+                    const ext_force &ext, float *minclr_out, int num_threads,
+                    drive_telemetry *tel) {
   // Same fused sample -> coef_feats -> forward -> rollout as drive_step, with the
   // external force channel applied inside the rollout. A null ext.sample makes
   // this byte-identical to drive_step.
@@ -762,8 +796,8 @@ void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const 
     be[i] = coef[static_cast<std::size_t>(out_w) * i + 1];
     ga[i] = coef[static_cast<std::size_t>(out_w) * i + 2];
   }
-  bicycle_rollout_ext(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, ext,
-                      minclr_out, num_threads);
+  rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, nullptr,
+               ext.sample ? &ext : nullptr, minclr_out, num_threads, nullptr, tel);
 }
 
 } // namespace nav

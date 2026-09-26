@@ -25,7 +25,7 @@ The schema owner moves first; everything downstream depends on it. Sub-PRs (each
   collector accumulates slot error + latches `formation_arrived`; `nav_scorecard.{form_arrival_rate,
   form_mission_rate, mean_slot_error_m}` + `aggregate_nav`; `to_json` emit. Existing corpus numbers
   unchanged (feature off). (Geometry integrity/compression stats deferred to Track 3 with the harness.)
-- **1b — stall / closest-approach** *(implemented, in review)*: `veh_nav_stats.{stall_steps,
+- **1b — stall / closest-approach** *(MERGED, transfix/libcvc#422)*: `veh_nav_stats.{stall_steps,
   closest_approach_m}` + `nav_stats_params.stall_progress_eps_m` + `nav_scorecard.{mean_stall_steps,
   mean_closest_approach_m}`. **Computed collector-side from the snapshots + goal it already holds — NOT
   from `sim_world` getters.** On inspection `sim_world::stall_` is a reset-happy streak counter (zeroed
@@ -34,13 +34,22 @@ The schema owner moves first; everything downstream depends on it. Sub-PRs (each
   `closest_approach_m` seeded to `straight_m` at `begin_episode`, then min of per-step distance-to-goal;
   `stall_steps` = steps that fail to beat the closest-so-far by more than `stall_progress_eps_m`
   (default **0.05 m — a shared cross-repo constant; grl_snam.metrics must match it**).
-- **1c — belief/fog coverage**: `episode_nav_stats.{explored_frac, visible_frac, believed_free_frac,
-  phantom_frac}` per belief plane, reduced from the already-public `truth()`/`belief_occ(m)`/
-  `ever_seen(m)` rasters; `sense_flips` per vehicle (retain `flips[]` from `sense_batch` + getter).
-- **1d — drive telemetry**: one per-tick `drive_telemetry` struct out of `drive_step`
-  (`mu`, `mrisk`, applied `ext_force` mag/angle, CoefMLP `al/be/ga`(+`lam_soft`), steer δ, driven
-  curvature, binding governor, `d<d_hat`); collector reduces per-vehicle means/peaks into
-  `veh_nav_stats`. Deepest (touches `drive.cpp`/`drive.h`); do last in the track.
+- **1c — belief/fog coverage** *(MERGED, transfix/libcvc#423)*: `episode_nav_stats.coverage`
+  (`explored/visible/believed_free/phantom_frac`) via the pure `compute_coverage` reducer over
+  `truth()`/`belief_occ(m)`/`ever_seen(m)`/`last_visible(m)` (aggregate over planes; belief is the binary
+  `to_occupancy` output — pin `p_thresh 0.5 / band 0.15 / optimistic`); `veh_nav_stats.sense_flips`
+  (int64) via a `nav_samplers.sense_flips` delta feed; `nav_scorecard.{mean_coverage, mean_sense_flips}`.
+  Reducer kept out of the collector so it stays raster-free.
+- **1d — drive telemetry** *(implemented, this branch)*: `drive_telemetry` struct out of `drive_step`
+  (`mu`, `mrisk`, `ext_fx/fy`, CoefMLP `al/be/ga`+`lam_soft`, steer δ, curvature, clearance, binding).
+  Added as an optional `drive_telemetry* tel` out-param on `rollout_impl` + the three `drive_step*`
+  (rerouted straight to `rollout_impl`, keeping the public `bicycle_rollout*` training API unchanged);
+  **byte-identical when null** (pinned by `NullTelIsByteIdentical*` on plain/material/ext paths).
+  clearance/binding are the per-tick MIN over substeps; steer/mu/mrisk the last substep. The collector
+  reduces the stdlib-only `drive_sample` subset (nav_stats.h stays drive.h-free; caller maps
+  `drive_telemetry → drive_sample`, `ext_mag = std::hypot`) into `veh_nav_stats.{drive_steps, alpha/beta/
+  gamma_mean, mu_mean/mu_min, mrisk_mean/max, ext_force_mean, steer_abs_mean/max, binding_steps}` +
+  `nav_scorecard.{mean_alpha/beta/gamma/mu/mrisk/ext_force}`.
 - Each sub-PR extends `nav_stats_test.cpp` with the feature ON in a small added case; the pre-existing
   fixture stays byte-identical.
 
@@ -73,11 +82,14 @@ Track-1 sub-PR (or batched), gated on Track-1 landing.
   SELECTION-only; RF true-field stays eval-only (the comm-steering-objective-gap).
 
 ## Status
-- [x] Specs written & merged (schema §10, catalog, state-tree+training) — cvcdbg #125/#126.
+- [x] Specs written & merged (schema §10, catalog, state-tree+training) — cvcdbg #125/#126;
+  raster-storage spec — cvcdbg #127.
 - [x] Formation stats collected harness-side (`FORMSTATS`) — cvcdbg #120–#126.
 - [x] **Track 1a — libcvc formation base fields — MERGED transfix/libcvc#421.**
-- [~] **Track 1b — stall / closest-approach — implemented + adversarially reviewed; PR next.**
-- [ ] Track 1c/1d; Track 2; Track 3; Track 4 — pending, in order.
+- [x] **Track 1b — stall / closest-approach — MERGED transfix/libcvc#422.**
+- [x] **Track 1c — belief-coverage + sense-flips — MERGED transfix/libcvc#423.**
+- [~] **Track 1d — drive telemetry — implemented + adversarially reviewed; PR next → completes Track 1.**
+- [ ] Track 2 (grl-snam parity); Track 3 (cvcdbg RF + state/raster bridge); Track 4 (training) — pending.
 
 ## Invariants for every PR here
 Additive / off-by-default; C++⟷Python fixture parity held; torch ⟷ torch-free (`material_train.h`)

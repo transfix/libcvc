@@ -79,6 +79,23 @@ struct budget_policy {
   double fuel_budget = 0;   // fixed fuel/effort budget in fuel_used units
 };
 
+// One tick's drive diagnostics for one vehicle, as the stats layer consumes them — the reducible
+// subset of cvc::nav::drive_telemetry (drive.h), kept as its OWN stdlib-only POD so nav_stats stays
+// free of the drive/kernel headers (the collector depends on nothing beyond <cstdint>). The caller
+// maps drive_telemetry -> drive_sample per tick, collapsing the external force to its magnitude
+// (ext_mag = std::hypot(ext_fx, ext_fy) — an accurate <=1 ULP hypotenuse, the same one the twin
+// must use; the meaningful scalar since a signed component averages to ~0). A Python twin fills the
+// same fields from its own drive; keep it in lockstep with drive_telemetry. mu/mrisk/steer are the
+// LAST substep's value; binding is the barrier-active-any-substep flag (drive_telemetry.binding).
+struct drive_sample {
+  float alpha = 0, beta = 0, gamma = 0; // CoefMLP policy outputs this tick
+  float mu = 1;                         // underfoot grip (1 = dry / no grip field)
+  float mrisk = 0;                      // material risk at the cell (0 = no material)
+  float ext_mag = 0;                    // |applied external force| in the drive frame
+  float steer = 0;                      // final steering angle delta (rad)
+  std::uint8_t binding = 0;             // IPC barrier active this tick (min clearance < d_hat)
+};
+
 // Optional per-position samplers; any left null degrades that stat gracefully to
 // zero. material_id is abstracted so the source can be swapped with no schema change.
 struct nav_samplers {
@@ -103,6 +120,10 @@ struct nav_samplers {
   // responsible for passing the per-step DELTA (0 on non-sense ticks), never the same sweep's count
   // twice.
   const int *sense_flips = nullptr;
+  // Per-agent drive diagnostics for THIS step (drive_sample[n]); null ⇒ the drive-telemetry stats
+  // stay at their defaults (feature off). The collector reduces these per vehicle into means/peaks.
+  // The caller maps its drive_telemetry -> drive_sample (see drive_sample) once per tick.
+  const drive_sample *drive = nullptr;
 };
 
 // One per vehicle, accumulated over an episode. Mirrors grl_snam NavStats + the
@@ -172,6 +193,19 @@ struct veh_nav_stats {
   // long) so the width is identical on LP64 and Windows/LLP32 — a corpus sum can exceed 2^31 and
   // must match the grl-snam twin's unbounded Python int bit-for-bit.
   std::int64_t sense_flips = 0;
+  // drive telemetry (all 0/off unless a nav_samplers.drive feed is provided) — per-vehicle
+  // reductions of the per-tick drive_sample. The CoefMLP coefficient means show what the learned
+  // policy commanded; mu/mrisk show the terrain the agent actually drove (mean + worst);
+  // ext_force_mean is the average magnitude of the external (e.g. RF/comms) push; steer means/peak
+  // are control effort; binding_steps counts ticks the IPC barrier was active. drive_steps is the
+  // tick count these average over.
+  long drive_steps = 0;
+  double alpha_mean = 0, beta_mean = 0, gamma_mean = 0;
+  double mu_mean = 0, mu_min = 1e30;
+  double mrisk_mean = 0, mrisk_max = 0;
+  double ext_force_mean = 0;
+  double steer_abs_mean = 0, steer_abs_max = 0;
+  long binding_steps = 0;
 };
 
 // Fleet coverage fractions over an episode's belief planes — the epistemic counterpart to the
@@ -303,6 +337,12 @@ struct nav_scorecard {
   // divide-by-total. The grl-snam twin must use the same divide-by-total rule.
   nav_coverage mean_coverage;
   double mean_sense_flips = 0;
+  // drive telemetry, averaged over the vehicle-runs that carried a drive feed (drive_steps > 0);
+  // all 0 when no run has drive telemetry. Corpus-level view of the learned policy
+  // (alpha/beta/gamma), the terrain the fleet drove (mu/mrisk), and the mean external-force push —
+  // training-selection signals.
+  double mean_alpha = 0, mean_beta = 0, mean_gamma = 0;
+  double mean_mu = 0, mean_mrisk = 0, mean_ext_force = 0;
 
   std::string to_json() const;
 };
