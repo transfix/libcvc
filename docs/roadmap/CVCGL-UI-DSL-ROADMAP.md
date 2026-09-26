@@ -1550,11 +1550,34 @@ of a hand-built C++ escape.
 > nodes load their source and get transform + single-color material + initial visibility,
 > group nodes are empty hierarchy nodes. Covered by 7 loader gtests
 > (`AriadneScene.*`); the realizer is compile-verified against the real cvcGL/VTK headers.
+>
+> **Status — increment 2 landed (dynamic `visible:` sync).** A bound `visible: <path>` now
+> tracks live `cvc::state`. The bind resolution rule is factored into one shared core header
+> `inc/cvc/ariadne/bind.h` (`resolve_bind` + `read_or_seed`/`write`) that BOTH the widget
+> `Runtime` and the scene binder call — so a widget `bind:` and a scene `visible:` on the
+> same relative path provably resolve to one key (a checkbox and the mesh it shows stay in
+> lockstep). `realize_scene(sg, scene, bind_prefix, warnings)` now returns a `RealizedScene`
+> `{created, visibility}`; for each bound node it resolves the source path, seeds the node's
+> initial visibility from the live value, and records a `cvc::ariadne::SceneVisibilityBinding`
+> `{source_path, target_path, default}` — **pure state-path strings, no node pointer**, so a
+> torn-down node can never be dangled into. The host calls
+> `cvc::ariadne::sync_scene_visibility(app, realized.visibility)` each frame: it mirrors the
+> source value into the node's own `<node>.visible` key, and the node's existing
+> `state_object` machinery (`SceneNode::handleStateChanged` → `runOnMainThread`, inline on the
+> owner thread) performs the `setVisible`. Visibility flows through the node's own state key —
+> `cvc::state` stays authoritative (§9.1), so inspectors/replicated peers/scripts see the same
+> value. Poll (not a boost::signals2 watch) was chosen to match the widget layer's existing
+> per-frame convention, avoid the dangling-callback teardown hazard, run on the render thread
+> where `setVisible` is safe, and future-proof `visible:` becoming an expression. 12 new core
+> gtests (`AriadneBind.*`, no VTK — resolve rules, read/seed/write, the source→node-key mirror,
+> and the shared-key property); realizer + `ariadne_hello` wiring compile-verified against the
+> real cvcGL/VTK/ImGui headers.
+>
 > **Follow-ups (not yet built):** volume/volren/volslice/light *realization* (they parse
 > and round-trip, but `realize_scene` only builds geometry/group today); true parent
 > nesting through a `<parent>.children.<child>` path (rides on §11 path binding — children
-> realize flat for now); dynamic state-bound `visible:` sync (the bind is parsed and
-> stored; the caller syncs it per-frame / via a state watch); and views/minimap (§9.5–9.6).
+> realize flat for now); binding *other* scene props (transform/material/color) to state the
+> same way visibility now is; and views/minimap (§9.5–9.6).
 
 ### 9.1 Which scene model
 

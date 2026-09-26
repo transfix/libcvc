@@ -49,5 +49,23 @@ windows:
       - separator
       - text: "belief ="
         bind: demo.belief
+      - checkbox: Show mesh
+        bind: demo.show_mesh
+        def: true
       - button: Reset
         on: reset
+
+# A scene block (§9) declares the VTK scene in the same document. Uncomment and
+# point `source.file` at a real mesh to see it realized. Note `visible:` bound to
+# demo.show_mesh — the SAME path the "Show mesh" checkbox above writes — so toggling
+# the box hides/shows the node each frame (cvc::gl::ariadne::realize_scene +
+# cvc::ariadne::sync_scene_visibility). A literal `visible: true|false` also works.
+#
+# scene:
+#   nodes:
+#     - node: mesh
+#       type: geometry
+#       source: { file: /path/to/your/mesh.obj }
+#       material: { color: [0.8, 0.5, 0.2] }
+#       transform: { scale: 1.0 }
+#       visible: demo.show_mesh

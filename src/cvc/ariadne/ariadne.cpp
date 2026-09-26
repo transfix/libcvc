@@ -10,6 +10,7 @@
 #include <cvc/ariadne/ariadne.h>
 
 #include <cvc/ariadne/backend.h>
+#include <cvc/ariadne/bind.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 
@@ -24,30 +25,9 @@ namespace ariadne {
 
 namespace {
 
-// Read a state value, seeding it with `def` when the path has no value yet.
-// (Lifted verbatim from cvc::gl::ui — this is the pure-cvc::state half that now
-// lives in the backend-neutral core.) Never throws into a render frame.
-template <typename T> T read_or_seed(cvc::app &ctx, const std::string &path, const T &def) {
-  try {
-    cvc::state &s = cvc::state::instance(ctx)(path);
-    const std::string raw = s.value();
-    if (raw.empty()) {
-      s.value(def);
-      return def;
-    }
-    return s.value<T>();
-  } catch (const std::exception &) {
-    return def; // unreadable/unconvertible: fall back, never throw into a frame
-  }
-}
-
-template <typename T> void write(cvc::app &ctx, const std::string &path, const T &v) {
-  try {
-    cvc::state::instance(ctx)(path).value(v);
-  } catch (const std::exception &) {
-    // read-only or otherwise unwritable — the widget just won't stick.
-  }
-}
+// read_or_seed<T> / write<T> / resolve_bind now live in cvc/ariadne/bind.h so the
+// widget walk here and the scene binder (§9) share ONE definition and can't drift.
+// They are used unqualified below (same cvc::ariadne namespace).
 
 // Read a state value as a plain string with no seeding (read-only Text view).
 std::string read_string(cvc::app &ctx, const std::string &path) {
@@ -74,19 +54,10 @@ struct Runtime::Impl {
 
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
 
-  // Resolve a widget bind path to an absolute cvc::state path.
-  //   leading '/'  -> app-root-absolute (strip the '/')
-  //   else, prefix -> "<prefix>.<bind>"    (splice, never hand-concat elsewhere)
-  //   else         -> bind as-is (app-root-relative)
-  std::string resolve(const std::string &bind) const {
-    if (bind.empty())
-      return bind;
-    if (bind[0] == '/')
-      return bind.substr(1);
-    if (prefix.empty())
-      return bind;
-    return prefix + cvc::state::SEPARATOR + bind;
-  }
+  // Resolve a widget bind path to an absolute cvc::state path. Delegates to the
+  // shared rule (bind.h) so widget binds and scene `visible:` binds collide on the
+  // same key for the same relative path.
+  std::string resolve(const std::string &bind) const { return resolve_bind(prefix, bind); }
 
   void enqueue(const std::string &event) {
     if (!event.empty())
