@@ -112,6 +112,49 @@ TEST_F(StateTreeIntrinsicsTest, StateChildrenNonexistent) {
   EXPECT_TRUE((*lst)->empty());
 }
 
+// --- §7.8.3 read-through: a transparent link node is a "named hole" a read sees through -----
+
+TEST_F(StateTreeIntrinsicsTest, TransparentLinkReadsThroughValueAndChildren) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("tgt").value(std::string("through"));
+  root("tgt.a").value(std::string("1"));
+  root("tgt.b").value(std::string("2"));
+  root("hole").linkTo("tgt", cvc::state::link_mode::transparent);
+  // state-get follows the transparent link to the TARGET's value.
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("hole")}).v), "through");
+  // state-children lists the TARGET's children, not the (childless) link node's own.
+  auto ch = call("state-children", {std::string("hole")});
+  auto *lst = std::get_if<list_ptr>(&ch.v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_NE(*lst, nullptr);
+  EXPECT_EQ((*lst)->size(), 2u);
+}
+
+TEST_F(StateTreeIntrinsicsTest, OpaqueLinkReadsItsOwnValue) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("tgt_op").value(std::string("through"));
+  root("hole_op").value(std::string("own")).linkTo("tgt_op", cvc::state::link_mode::opaque);
+  // Opaque link -> the node's OWN value, not the target's (only transparent reads through).
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("hole_op")}).v), "own");
+}
+
+TEST_F(StateTreeIntrinsicsTest, BrokenTransparentLinkFallsBackToOwnValue) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("hole_broken")
+      .value(std::string("fallback"))
+      .linkTo("no.such.target", cvc::state::link_mode::transparent);
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("hole_broken")}).v), "fallback");
+}
+
+TEST_F(StateTreeIntrinsicsTest, TransparentLinkReadsThroughData) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  call("state-data-set", {std::string("dtgt"), value_t(std::string("dv"))});
+  root("dhole").linkTo("dtgt", cvc::state::link_mode::transparent);
+  auto d = call("state-data-get", {std::string("dhole")});
+  ASSERT_TRUE(std::holds_alternative<std::string>(d.v));
+  EXPECT_EQ(std::get<std::string>(d.v), "dv");
+}
+
 TEST_F(StateTreeIntrinsicsTest, StateDelete) {
   call("state-set", {std::string("del.target"), std::string("bye")});
   EXPECT_TRUE(std::get<bool>(call("state-exists", {std::string("del.target")}).v));

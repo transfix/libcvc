@@ -140,6 +140,27 @@ void require_sched(const intrinsics_context *ctx, const char *name) {
 // State tree intrinsics
 // ---------------------------------------------------------------------------
 
+namespace {
+// Follow a TRANSPARENT link to its terminal target for a READ. This is the sanctioned
+// cross-subtree channel (roadmap §7.8.3): a chrooted program cannot NAME anything outside its
+// subtree, but the host may plant a transparent link node inside it whose target lies elsewhere
+// (a "named hole"), and a read of that node should see THROUGH to the target — matching what a
+// write already does (state::value(v) routes through a writable transparent link). A non-link, an
+// opaque link, or a broken / cyclic / budget-exhausted transparent link stays put (the same
+// fallback resolvedValue() documents), so this only changes behaviour for a resolvable
+// transparent link — where pass-through is the whole point. Path traversal itself still does NOT
+// descend through a link (findDescendant stops at the link node), so this reaches the target's
+// value/children/data, not a deeper path spelled through the link.
+cvc::state *read_through_link(cvc::state *node) {
+  if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent) {
+    const cvc::state::link_resolution lr = node->resolveLink();
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
+      return lr.target;
+  }
+  return node;
+}
+} // namespace
+
 value_t intrinsic_state_get(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "state-get");
   require_root(ctx, "state-get");
@@ -147,7 +168,7 @@ value_t intrinsic_state_get(intrinsics_context *ctx, std::span<const value_t> ar
   auto *node = ctx->root->findDescendant(path);
   if (!node)
     return nil_value;
-  return value_t(node->value());
+  return value_t(read_through_link(node)->value());
 }
 
 value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -170,7 +191,7 @@ value_t intrinsic_state_children(intrinsics_context *ctx, std::span<const value_
   auto *node = ctx->root->findDescendant(path);
   if (!node)
     return make_list();
-  auto names = node->children();
+  auto names = read_through_link(node)->children();
   std::vector<value_t> result;
   result.reserve(names.size());
   for (auto &n : names)
@@ -205,7 +226,7 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   auto *node = ctx->root->findDescendant(path);
   if (!node)
     return nil_value;
-  auto d = node->data();
+  auto d = read_through_link(node)->data();
   if (d.empty())
     return nil_value;
   // If the payload is a DSL value_t (the shape state-data-set stores), return a DEEP COPY
