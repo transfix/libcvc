@@ -16,6 +16,11 @@
 #include <string>
 #include <utility>
 
+#ifndef _WIN32
+#include <cstdlib>  // mkstemps
+#include <unistd.h> // write, close, ssize_t
+#endif
+
 namespace cvc {
 namespace ariadne {
 
@@ -36,11 +41,9 @@ std::string to_lower(std::string s) {
   return s;
 }
 
-// A per-process, unpredictable token for temp-file names — collision-free ACROSS processes (a bare
-// per-process counter collides on "ari-src-0" between two processes) and unguessable, so a local
-// attacker cannot pre-create the name to hijack the open (the CWE-377 predictable-temp hazard).
-// Computed once from random_device.
-const std::string &proc_temp_token() {
+// A per-process, unpredictable token for temp-file names (the Windows fallback path; POSIX uses
+// mkstemps for exclusive creation instead). Computed once from random_device.
+[[maybe_unused]] const std::string &proc_temp_token() {
   static const std::string tok = [] {
     std::random_device rd;
     std::ostringstream os;
@@ -267,14 +270,48 @@ ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
     if (const std::size_t dot = u.path.find_last_of('.'); dot != std::string::npos && dot > seg)
       ext = u.path.substr(dot);
   }
-  static std::atomic<std::uint64_t> counter{0};
-  const std::uint64_t n = counter.fetch_add(1);
   std::error_code ec;
   const fs::path dir = fs::temp_directory_path(ec);
-  // Unpredictable, per-process-unique name: a per-process random token + a per-resolve counter +
-  // the source extension — defeats cross-process collision AND the predictable-temp hazard.
-  const fs::path tmp =
-      (ec ? fs::path(".") : dir) / ("ari-src-" + proc_temp_token() + "-" + std::to_string(n) + ext);
+  const fs::path tmp_dir = (ec ? fs::path(".") : dir);
+#ifndef _WIN32
+  // Create the temp file EXCLUSIVELY per call — mkstemps draws a FRESH random name and opens with
+  // O_CREAT|O_EXCL, so a pre-planted symlink at a predicted path cannot hijack the write (CWE-377).
+  // The trailing `ext` is kept as the suffix so an extension-keyed reader still dispatches.
+  std::string tmpl = (tmp_dir / ("ari-src-XXXXXX" + ext)).string();
+  const int fd = ::mkstemps(&tmpl[0], static_cast<int>(ext.size()));
+  if (fd < 0) {
+    rf.error = "ari: cannot create temp file for '" + uri + "'";
+    return rf;
+  }
+  const char *p = r.content.data();
+  std::size_t left = r.content.size();
+  bool wrote_ok = true;
+  while (left > 0) {
+    const ssize_t w = ::write(fd, p, left);
+    if (w <= 0) {
+      wrote_ok = false;
+      break;
+    }
+    p += w;
+    left -= static_cast<std::size_t>(w);
+  }
+  ::close(fd);
+  if (!wrote_ok) {
+    std::error_code rmec;
+    fs::remove(tmpl, rmec);
+    rf.error = "ari: cannot write temp file for '" + uri + "'";
+    return rf;
+  }
+  rf.ok = true;
+  rf.path = tmpl; // mkstemps rewrote the XXXXXX in place
+  rf.is_temp_ = true;
+  return rf;
+#else
+  // Windows fallback (no mkstemps): an unpredictable per-process random name. The POSIX O_EXCL path
+  // above is the hardened one; Windows is a lower-priority target here.
+  static std::atomic<std::uint64_t> counter{0};
+  const std::uint64_t n = counter.fetch_add(1);
+  const fs::path tmp = tmp_dir / ("ari-src-" + proc_temp_token() + "-" + std::to_string(n) + ext);
   std::ofstream out(tmp, std::ios::binary);
   if (!out) {
     rf.error = "ari: cannot create temp file for '" + uri + "'";
@@ -292,6 +329,7 @@ ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
   rf.path = tmp.string();
   rf.is_temp_ = true;
   return rf;
+#endif
 }
 
 } // namespace ariadne

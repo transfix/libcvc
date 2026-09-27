@@ -204,8 +204,10 @@ bool sources_changed(const std::vector<std::string> &sources,
     }
   }
   // Prune stamps for sources that dropped out of the graph (bounds growth; re-baselines a path
-  // that later returns). Only walk when there is something to prune.
-  if (stamps.size() > sources.size()) {
+  // that later returns). Walk whenever there are stamps — NOT gated on size, because a live source
+  // that is missing/unreadable this poll is skipped above (never stamped) yet still occupies a
+  // `sources` slot, so a size comparison can hide a genuinely-stale entry.
+  if (!stamps.empty()) {
     const std::set<std::string> live(sources.begin(), sources.end());
     for (auto it = stamps.begin(); it != stamps.end();)
       it = live.count(it->first) ? std::next(it) : stamps.erase(it);
