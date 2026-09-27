@@ -2789,10 +2789,11 @@ and every trigger is edge-gated, budgeted, and cycle-guarded.
 > dedup/cycle-guarded on the resolved canonical path. Local units override an imported one of the
 > same name; import-vs-import collisions warn. A reusable **window** is just a unit whose template
 > is a `window`, so `import:` + `include:` gives a reusable library of units AND windows across
-> programs. `file://` (+ bare paths) is built in; `state://`/`http(s)://` libraries need a
-> registered resolver handler. The `load:` **fragment mount** (a sub-UI/sub-scene as its own
-> chroot subtree, with hot-reload) is the remaining piece — its resolver seam now exists; it
-> needs the state/http handlers plus the mount/isolation machinery.
+> programs. `file://` (+ bare paths) is built in; **`state://` is now LANDED too** (§13.3), so a
+> units/window library can live in the state tree and be imported the same way; `http(s)://`
+> libraries still need a registered resolver handler. The `load:` **fragment mount** (a
+> sub-UI/sub-scene as its own chroot subtree, with hot-reload) is the remaining piece — its
+> resolver seam now exists; it needs the http handler plus the mount/isolation machinery.
 
 `include`/`repeat` (§3.7) template widgets **in-document**. `load:` is the **cross-file module**
 primitive: it mounts an **external** `.ari` fragment (a sub-UI or a sub-scene) **as
@@ -2964,6 +2965,18 @@ link node (`state::linkTo`, transparent) the resolver `resolveLink()`s and the c
 once and drops the reference (frozen, for reproducibility). **A `source:` at a node is the right choice
 over `file://` precisely when the data changes at runtime** — the per-pid badge node (§7.8.6a) and the
 streamed source are exactly this.
+
+> **Status — `state://…?value` is LANDED** (`cvc::ariadne`, `uri_state.{h,cpp}`; opt-in via
+> `register_state_uri_handler(cvc::state& root)` before `load_*`). It resolves to the addressed
+> node's **value channel** — `resolvedValue()`, so a transparent link is followed to its target's
+> value, with the documented fallback to the node's own value on a broken/cyclic chain — **not**
+> the child subtree. This is exactly the load-time `import:`/`include:` path: a units/window
+> library authored as a node's value string is imported through the one resolver. `?data`
+> (codec-decoded `boost::any`) and `?children` (the subtree as a `value_t` tree) are the **live
+> `source:` channels** and are deliberately rejected by this load-time handler with a clear error
+> (a host registers a richer handler for them). The **`&snapshot`** knob and node-`source:`
+> wiring remain future work; the handler holds `root` by pointer, so a host `unregister`s the
+> `state` scheme before the root is destroyed.
 
 ### 13.4 How each consumer uses one `resolve()`
 
