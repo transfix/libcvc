@@ -3136,21 +3136,29 @@ instead of a full transfer.
 > `SyncResolverCapsFromState` / `UnregisterRemovesBothReadAndWrite`,
 > `AriadneStateIo.SaveRestoreRoundTripsVia{File,StateScheme}`.
 >
+> **`http(s)` write + auth headers LANDED** (`uri_http.{h,cpp}`, `CVC_ARIADNE_HAVE_HTTP`):
+> `register_http_uri_handler()` now registers BOTH the GET reader and a **PUT/POST writer** (via
+> `register_uri_store_handler` for `http`/`https`), sharing one easy-handle setup (bounded timeouts,
+> http/https-only for the request AND redirects — the SSRF guard covers the write path too). A store
+> defaults to **PUT**, `CURLOPT_COPYPOSTFIELDS` after `POSTFIELDSIZE_LARGE` so the exact bytes
+> (embedded NUL included) go with the chosen verb; the response body is bounded and discarded.
+> **Auth headers** come from a host-registered **`HttpOptionsProvider`** —
+> `set_http_options_provider([](const std::string& url, bool for_write){ return HttpRequestOptions{headers, method}; })`
+> — consulted on EVERY resolve (`for_write=false`, default GET) and store (`for_write=true`, default
+> PUT, override to POST/PATCH/…). Deliberately **out-of-band, keyed on URL**: a bearer token is never
+> sourced from the `.ari` document (on-disk/shared/sandboxed) and a token for host A is never sent to
+> host B. The provider is copied under a mutex before each call (set/clear never races a transfer).
+> Tests: `AriadneUri.Http{ResolveSendsProviderAuthHeader,StorePutsBodyWithAuthHeader,StoreHonorsPostMethodOverride}`
+> over a capturing localhost server (asserts method, header, and full body on the wire).
+>
 > **Planned next:**
 > - **Deprecate `cvc::state::save`/`restore`** in favour of `cvc::ariadne::save_state`/`restore_state`
 >   — one persistence path (any scheme, atomic file writes) instead of two, and it keeps `cvc::state`
 >   free of even the local-file I/O. Needs a usage audit + migration across the tree first (grl-snam,
 >   pycvc, volrover3, …), then a `[[deprecated]]` pass, so it is staged rather than flipped now.
-> - **Request headers / options for EVERY `http(s)` method — GET, PUT, and POST** (we will end up
->   POSTing: an API endpoint that returns a fragment, or a POST-based store). Auth (a bearer token),
->   content-type, and conditional validators are needed on the *reader* (`resolve` → GET) as much as
->   the writer, so the shared plumbing is a per-call **`headers`/options channel on both `resolve` and
->   `store`** (plus a way to pick the method — a GET that must POST, a store that PUTs vs POSTs), or a
->   registered per-host auth/header provider the http handler consults — so `resolve`/`store("https://…",
->   …, {headers, method})` can carry `Authorization: Bearer …`. This is the natural companion to the
->   deferred `http(s)` writer (store seam ready; libcurl PUT/POST body + header plumbing unwritten);
->   the §13.9 cache keys must fold in the request headers/method, and a successful write invalidates
->   the cache entry.
+> - **Fold request method + headers into the §13.9 cache key** (when that cache lands): a GET with a
+>   validator/auth and a PUT to the same URL must not collide, and a successful `store` must
+>   invalidate the cached entry for that URL.
 
 The §13 resolver was **read-only**: `resolve(uri)` *fetches* bytes. So nothing that *writes*
 goes through it — notably `cvc::state::save(filename)` / `restore(filename)`, which are plain Boost
@@ -3170,9 +3178,10 @@ a symmetric **write half**, and `save`/`restore` need to route through it.
     `?value` sets the value channel, `?data` the typed `data()` blob (the write analogue of §13.3's
     read). So `save("state://scene.snapshot")` parks a serialized subtree on a node, and `restore`
     reads it back — a pure in-tree round-trip, replication-friendly.
-  - **`http(s)://`** (optional): an HTTP `PUT`/`POST` via the same libcurl handler — heavier (auth,
-    idempotency, the §13.9 cache must invalidate the entry on a successful store), so likely a later
-    increment, but the seam is uniform. `pkg://`/`s3://`/custom writers are pure registration.
+  - **`http(s)://`** (optional, **LANDED**): an HTTP `PUT` (default) / `POST` via the same libcurl
+    handler, with auth headers from a host-registered `HttpOptionsProvider` (see the status block
+    above). Idempotency and the §13.9 cache-invalidate-on-store are the remaining refinements. The
+    seam is uniform, so `pkg://`/`s3://`/custom writers are pure registration.
 - **URI-aware `state::save` / `restore`.** Add `save(uri)` / `restore(uri)` that serialize
   (`ptree()`/`json()`) then `store(uri, bytes)` / `resolve(uri) → bytes` then re-ingest — the existing
   `filename` overloads become the `file://` case. A bare/relative path stays a local file, exactly as

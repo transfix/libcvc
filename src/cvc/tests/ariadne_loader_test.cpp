@@ -5,6 +5,7 @@
 // stub); the version/schema surface is tested unconditionally.
 
 #include <boost/asio.hpp> // a localhost server for the http handler test
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
@@ -118,11 +119,123 @@ private:
   std::thread thread_;
 };
 
+// A localhost HTTP/1.1 server that CAPTURES one request (method line, headers, and the full body
+// per Content-Length) for the write/header tests, then replies 200. Unlike OneShotHttpServer it
+// drains the whole request across TCP segments so the PUT/POST body is complete. Read request()
+// only after take_request() has joined the server thread (the join is the happens-before for
+// request_).
+class CapturingHttpServer {
+public:
+  // `reply` is the 200 body. `raw_reply`, if non-empty, is sent VERBATIM instead of the 200 (used
+  // to return a 3xx redirect and prove the handler refuses to follow it). Both are fixed at
+  // construction — set before the server thread reads them, so there is no data race with the
+  // accept loop.
+  explicit CapturingHttpServer(std::string reply = "OK", std::string raw_reply = std::string())
+      : acceptor_(io_,
+                  boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0)),
+        reply_(std::move(reply)), raw_reply_(std::move(raw_reply)) {
+    port_ = acceptor_.local_endpoint().port();
+    thread_ = std::thread([this] { run(); });
+  }
+  unsigned short port() const { return port_; }
+  // Join the server thread, then return the full raw request it captured.
+  std::string take_request() {
+    if (thread_.joinable())
+      thread_.join();
+    return request_;
+  }
+  ~CapturingHttpServer() {
+    if (thread_.joinable())
+      thread_.join();
+  }
+
+private:
+  static std::size_t content_length_of(const std::string &head) {
+    std::string low = head;
+    for (char &c : low)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::size_t k = low.find("content-length:");
+    if (k == std::string::npos)
+      return 0;
+    std::size_t p = k + std::string("content-length:").size();
+    while (p < head.size() && (head[p] == ' ' || head[p] == '\t'))
+      ++p;
+    std::size_t len = 0;
+    bool any = false;
+    for (; p < head.size() && head[p] >= '0' && head[p] <= '9'; ++p) {
+      len = len * 10 + static_cast<std::size_t>(head[p] - '0');
+      any = true;
+    }
+    return any ? len : 0;
+  }
+  void run() {
+    boost::system::error_code ec;
+    boost::asio::ip::tcp::socket s(io_);
+    acceptor_.accept(s, ec);
+    if (ec)
+      return;
+    std::string data;
+    std::size_t header_end = std::string::npos;
+    std::size_t content_len = 0;
+    bool have_headers = false;
+    char buf[4096];
+    for (;;) {
+      const std::size_t n = s.read_some(boost::asio::buffer(buf), ec);
+      if (n)
+        data.append(buf, n);
+      if (!have_headers) {
+        header_end = data.find("\r\n\r\n");
+        if (header_end != std::string::npos) {
+          have_headers = true;
+          content_len = content_length_of(data.substr(0, header_end));
+        }
+      }
+      if (have_headers && data.size() - (header_end + 4) >= content_len)
+        break;
+      if (ec) // connection closed / error before we saw the whole message
+        break;
+    }
+    request_ = std::move(data);
+    const std::string resp =
+        !raw_reply_.empty()
+            ? raw_reply_
+            : "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(reply_.size()) +
+                  "\r\nConnection: close\r\n\r\n" + reply_;
+    boost::asio::write(s, boost::asio::buffer(resp), ec);
+    s.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+  }
+  boost::asio::io_context io_;
+  boost::asio::ip::tcp::acceptor acceptor_;
+  std::string reply_;
+  std::string raw_reply_;
+  std::string request_;
+  unsigned short port_ = 0;
+  std::thread thread_;
+};
+
 // The URI registry is process-global; a state:// handler captures a state root by pointer.
 // Unregister it when the test scopes out — even on an ASSERT early-return — so a later test's
 // resolve() cannot dispatch into a freed root. Declare AFTER the app so it destructs first.
 struct StateHandlerGuard {
   ~StateHandlerGuard() { unregister_state_uri_handler(); } // tears down BOTH read + write handlers
+};
+
+// Tear down BOTH the http/https read and write handlers when a test scopes out (register_http_uri_
+// handler now registers all four) — even on an ASSERT early-return — so the process-global store
+// handlers do not leak into a later test.
+struct HttpHandlerGuard {
+  ~HttpHandlerGuard() {
+    unregister_uri_handler("http");
+    unregister_uri_handler("https");
+    unregister_uri_store_handler("http");
+    unregister_uri_store_handler("https");
+  }
+};
+
+// Clear the process-global HTTP options provider on scope-out so a test's auth-header injection
+// cannot bleed into another test's request.
+struct HttpProviderGuard {
+  ~HttpProviderGuard() { set_http_options_provider(nullptr); }
 };
 
 // Unregister an arbitrary test-registered scheme when the test scopes out (even on an ASSERT) —
@@ -1485,45 +1598,180 @@ TEST(AriadneUri, ResolveToFileBytesSchemeSpillsToTempThenCleansUp) {
 TEST(AriadneUri, HttpHandlerFetchesOverLocalhost) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
   OneShotHttpServer server("hello-over-http");
   register_http_uri_handler();
   EXPECT_TRUE(has_uri_handler("http"));
   EXPECT_TRUE(has_uri_handler("https"));
+  EXPECT_TRUE(has_uri_store_handler("http")); // the write side registers alongside the reader
+  EXPECT_TRUE(has_uri_store_handler("https"));
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
   UriResult r = resolve(url);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "hello-over-http");
   EXPECT_FALSE(r.canonical.empty());
-  unregister_uri_handler("http");
-  unregister_uri_handler("https");
 }
 
 TEST(AriadneUri, HttpFetchFailureIsAnErrorNotACrash) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
   register_http_uri_handler();
   // Port 1 has nothing listening -> connection refused -> a clean error, never a throw/crash.
   UriResult r = resolve("http://127.0.0.1:1/nope");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("http fetch"), std::string::npos);
-  unregister_uri_handler("http");
-  unregister_uri_handler("https");
 }
 
 TEST(AriadneModularity, ImportUnitsOverHttp) {
   SKIP_WITHOUT_YAML();
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
   // A units library served over http, imported through the full §13 resolver.
   OneShotHttpServer server("units:\n  http_ctl: { text: FromHttp }\n");
   register_http_uri_handler();
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/lib.ari";
   LoadResult r = load_string(
       "import: " + url + "\nwindows:\n  - window: W\n    children:\n      - include: http_ctl\n");
-  unregister_uri_handler("http");
-  unregister_uri_handler("https");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find(r.root, Kind::Text, "FromHttp"), nullptr); // the http-served unit expanded
+}
+
+TEST(AriadneUri, HttpResolveSendsProviderAuthHeader) {
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
+  HttpProviderGuard pg;
+  CapturingHttpServer server("body-back");
+  register_http_uri_handler();
+  // The host injects an Authorization header out-of-band (never from the .ari doc), keyed on URL.
+  set_http_options_provider([](const std::string &url, bool for_write) {
+    EXPECT_FALSE(for_write) << "a resolve() is a read";
+    EXPECT_NE(url.find("/secret"), std::string::npos); // keyed on the request URL
+    HttpRequestOptions o;
+    o.headers.push_back("Authorization: Bearer read-token");
+    return o;
+  });
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/secret";
+  UriResult r = resolve(url);
+  const std::string req = server.take_request();
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "body-back");
+  EXPECT_EQ(req.rfind("GET ", 0), 0u); // the read stays a GET
+  EXPECT_NE(req.find("Authorization: Bearer read-token"), std::string::npos);
+}
+
+TEST(AriadneUri, HttpStorePutsBodyWithAuthHeader) {
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
+  HttpProviderGuard pg;
+  CapturingHttpServer server("stored");
+  register_http_uri_handler();
+  set_http_options_provider([](const std::string &, bool for_write) {
+    EXPECT_TRUE(for_write) << "a store() is a write";
+    HttpRequestOptions o;
+    o.headers.push_back("Authorization: Bearer write-token");
+    return o;
+  });
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
+  // A body with an embedded NUL proves the size-before-COPYPOSTFIELDS order (no strlen truncation).
+  const std::string payload = std::string("PART-A\0PART-B", 13);
+  StoreResult r = store(url, payload);
+  const std::string req = server.take_request();
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(r.canonical.empty());
+  EXPECT_EQ(req.rfind("PUT ", 0), 0u); // store defaults to PUT
+  EXPECT_NE(req.find("Authorization: Bearer write-token"), std::string::npos);
+  // The provider gave no Content-Type, so the writer defaults a neutral one — NOT libcurl's POST
+  // default of application/x-www-form-urlencoded (which would make a server form-parse the bytes).
+  EXPECT_NE(req.find("Content-Type: application/octet-stream"), std::string::npos);
+  EXPECT_EQ(req.find("application/x-www-form-urlencoded"), std::string::npos);
+  const std::size_t body_at = req.find("\r\n\r\n");
+  ASSERT_NE(body_at, std::string::npos);
+  EXPECT_EQ(req.substr(body_at + 4), payload); // full body, embedded NUL and all
+}
+
+TEST(AriadneUri, HttpStoreProviderContentTypeWins) {
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
+  HttpProviderGuard pg;
+  CapturingHttpServer server("stored");
+  register_http_uri_handler();
+  set_http_options_provider([](const std::string &, bool) {
+    HttpRequestOptions o;
+    o.headers.push_back(
+        "Content-Type: application/json"); // an explicit type must not be overridden
+    return o;
+  });
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
+  StoreResult r = store(url, "{\"k\":1}");
+  const std::string req = server.take_request();
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(req.find("Content-Type: application/json"), std::string::npos);
+  EXPECT_EQ(req.find("application/octet-stream"), std::string::npos); // default not appended
+}
+
+TEST(AriadneUri, HttpStoreRefusesRedirect) {
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
+  // A 307 preserves method+body across the hop; a write must NOT be re-sent to another origin. The
+  // Location target never exists — the point is that the handler does not follow it.
+  CapturingHttpServer server("", "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:1/"
+                                 "moved\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  register_http_uri_handler();
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
+  StoreResult r = store(url, "PAYLOAD");
+  (void)server.take_request();
+  EXPECT_FALSE(r.ok); // a 3xx on a write is an error, not a silent success
+  EXPECT_NE(r.error.find("redirect"), std::string::npos);
+}
+
+TEST(AriadneUri, HttpResolveWithAuthDoesNotFollowRedirect) {
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
+  HttpProviderGuard pg;
+  // A credentialed read must not follow a redirect (the auth header would cross an origin).
+  CapturingHttpServer server("", "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/"
+                                 "elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  register_http_uri_handler();
+  set_http_options_provider([](const std::string &, bool) {
+    HttpRequestOptions o;
+    o.headers.push_back(
+        "X-Api-Key: secret"); // a custom auth header libcurl would NOT strip on redirect
+    return o;
+  });
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/data";
+  UriResult r = resolve(url);
+  (void)server.take_request();
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("redirect"), std::string::npos);
+}
+
+TEST(AriadneUri, HttpStoreHonorsPostMethodOverride) {
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  HttpHandlerGuard hg;
+  HttpProviderGuard pg;
+  CapturingHttpServer server("posted");
+  register_http_uri_handler();
+  set_http_options_provider([](const std::string &, bool) {
+    HttpRequestOptions o;
+    o.method = "POST"; // an RPC-style store endpoint
+    return o;
+  });
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/rpc";
+  StoreResult r = store(url, "RPCPAYLOAD");
+  const std::string req = server.take_request();
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(req.rfind("POST ", 0), 0u); // method override honoured
+  const std::size_t body_at = req.find("\r\n\r\n");
+  ASSERT_NE(body_at, std::string::npos);
+  EXPECT_EQ(req.substr(body_at + 4), "RPCPAYLOAD");
 }
 
 TEST(AriadneUri, ResolveToFileExtractsExtFromFinalSegmentOnly) {
