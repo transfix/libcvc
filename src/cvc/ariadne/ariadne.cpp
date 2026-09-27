@@ -157,6 +157,61 @@ bool have_state_exec() {
 #endif
 }
 
+#ifdef CVC_STATE_EXEC
+namespace {
+// Run `script` as a FULL-ENV state_exec program chrooted to `prefix`, bounded by (max_steps,
+// max_seconds, max_bytes). Returns "" on a clean, normal finish, else a human diagnostic (no
+// leading "ari:" — the caller frames it). Shared by the load-time `init:` lane (run_init) and the
+// per-interaction ACTION lane (a program `on:`, drained by Runtime::drain) — same trust model
+// (see the ReactiveEngine note on the full-env init:/action lanes): the full intrinsics env with
+// writes confined to the document prefix, resource-capped, and it never throws.
+std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
+                               uint64_t max_steps, double max_seconds, uint64_t max_bytes) {
+  namespace se = cvc::state_exec;
+  try {
+    // All of these must outlive execute()+run(): the intrinsics capture &ictx by pointer. A
+    // synchronous run-to-completion in this one scope satisfies that.
+    se::scheduler sched;
+    se::memory_tracker tracker;
+    auto proc = se::make_process();
+    proc->pid = 1;
+    proc->status = se::process_status::ready;
+    se::intrinsics_context ictx;
+    cvc::state &root = cvc::state::instance(app);
+    ictx.sched = &sched;
+    ictx.tracker = &tracker;
+    ictx.proc = proc;
+    ictx.pid = 1;
+    se::apply_chroot(ictx, root, prefix); // scope writes under the document/mount prefix
+    auto env = se::builtins::make_default_environment();
+    se::register_intrinsics(env, &ictx);
+    // Bound the run so a looping or blocking script (an accidental infinite loop, or a
+    // (msg-recv ...) with no sender) can never hang: cap the process (check_limits kills a runner
+    // at the cap) AND the run loop (breaks out even when the sole process is blocked, which
+    // check_limits can't catch).
+    se::execute_options opts;
+    opts.env = env;
+    opts.max_steps = max_steps;
+    opts.max_time = max_seconds;
+    opts.max_memory = max_bytes;
+    const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
+    sched.run(max_steps, max_seconds);           // bounded run to completion
+    if (auto info = sched.get_process_info(pid)) {
+      // Success is ONLY a normal finish. Any other terminal/non-terminal state — killed
+      // (runtime error / resource limit) or still ready/running/waiting after the cap
+      // (it blocked or looped past the budget) — is a reported failure, not silent.
+      if (info->status != se::process_status::terminated)
+        return "did not complete normally (a runtime error, a resource limit, or it "
+               "blocked/looped past the budget)";
+    }
+    return std::string();
+  } catch (const std::exception &e) {
+    return std::string("failed: ") + e.what();
+  }
+}
+} // namespace
+#endif // CVC_STATE_EXEC
+
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
               std::vector<std::string> *errors) {
   const auto err = [&](const std::string &m) {
@@ -172,52 +227,15 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
       "(CVC_STATE_EXEC=OFF) — the script did not run");
   return false;
 #else
-  namespace se = cvc::state_exec;
-  try {
-    // All of these must outlive execute()+run(): the intrinsics capture &ictx by
-    // pointer. A synchronous run-to-completion in this one scope satisfies that.
-    se::scheduler sched;
-    se::memory_tracker tracker;
-    auto proc = se::make_process();
-    proc->pid = 1;
-    proc->status = se::process_status::ready;
-    se::intrinsics_context ictx;
-    cvc::state &root = cvc::state::instance(app);
-    ictx.sched = &sched;
-    ictx.tracker = &tracker;
-    ictx.proc = proc;
-    ictx.pid = 1;
-    se::apply_chroot(ictx, root, prefix); // scope writes under the document prefix
-    auto env = se::builtins::make_default_environment();
-    se::register_intrinsics(env, &ictx);
-    // Bound the init so a looping or blocking script (e.g. an accidental infinite
-    // loop, or a (msg-recv ...) with no sender) can never hang the app at load: cap
-    // the process (check_limits kills a runner at the cap) AND the run loop (breaks out
-    // even when the sole process is blocked, which check_limits can't catch). A
-    // load-time seed/compute should finish well within these.
-    static constexpr uint64_t kInitMaxSteps = 10'000'000;
-    static constexpr double kInitMaxSeconds = 5.0;
-    se::execute_options opts;
-    opts.env = env;
-    opts.max_steps = kInitMaxSteps;
-    opts.max_time = kInitMaxSeconds;
-    const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
-    sched.run(kInitMaxSteps, kInitMaxSeconds);   // bounded run to completion
-    if (auto info = sched.get_process_info(pid)) {
-      // Success is ONLY a normal finish. Any other terminal/non-terminal state — killed
-      // (runtime error / resource limit) or still ready/running/waiting after the cap
-      // (it blocked or looped past the budget) — is a reported failure, not silent.
-      if (info->status != se::process_status::terminated) {
-        err("ari: init: script did not complete normally (a runtime error, a resource "
-            "limit, or it blocked/looped past the init budget)");
-        return false;
-      }
-    }
-    return true;
-  } catch (const std::exception &e) {
-    err(std::string("ari: init: script failed: ") + e.what());
+  // A load-time seed/compute is generous — well above the per-tick action budget (§7.4).
+  static constexpr uint64_t kInitMaxSteps = 10'000'000;
+  static constexpr double kInitMaxSeconds = 5.0;
+  const std::string e = run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0);
+  if (!e.empty()) {
+    err("ari: init: script " + e);
     return false;
   }
+  return true;
 #endif
 }
 
@@ -488,7 +506,15 @@ struct Runtime::Impl {
   bool has_pending = false;
 
   std::unordered_map<std::string, std::function<void()>> handlers;
-  std::vector<std::string> queued_events;
+  // A queued action fired this frame (§7.2/§4.7 deferred intent buffer). `event` is EITHER a bare
+  // event name (looked up in `handlers`, the host C++ seam) OR — when it starts with '(' — a
+  // state_exec PROGRAM (the action lane), run at drain against `prefix` (the mount scope captured
+  // at enqueue time, so a mounted fragment's program writes its own subtree, like its binds).
+  struct QueuedAction {
+    std::string event;
+    std::string prefix;
+  };
+  std::vector<QueuedAction> queued_events;
 
   // §4 read-lane: the reactive predicate evaluator (lazily built on first use so a UI
   // with no reactive fields pays nothing), plus de-duplicated diagnostics surfaced by
@@ -555,7 +581,7 @@ struct Runtime::Impl {
 
   void enqueue(const std::string &event) {
     if (!event.empty())
-      queued_events.push_back(event);
+      queued_events.push_back({event, current_prefix()}); // capture the mount scope for a program
   }
 
   void emit(const Widget &w);      // repeat + visibility gates (§4), then emit_node
@@ -1052,10 +1078,35 @@ void Runtime::render() { m_->render(); }
 void Runtime::drain() {
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7).
-  std::vector<std::string> events;
+  std::vector<Impl::QueuedAction> events;
   events.swap(m_->queued_events);
-  for (const std::string &e : events) {
-    auto it = m_->handlers.find(e);
+  for (const Impl::QueuedAction &a : events) {
+    // A program action (`on:` starting with '(', like a computed `bind:`/`tooltip:`) runs through
+    // state_exec — the north-star lane: a flag toggle or reset is pure .ari, no C++ handler.
+    if (!a.event.empty() && a.event.front() == '(') {
+#ifdef CVC_STATE_EXEC
+      // §7.4 per-activation caps: an interaction is bounded tighter than a load-time init:. The
+      // STEP cap (5 000) is the deterministic guard — it bounds the real work of an action. §7.4's
+      // 1 ms is a SOFT performance target, not a safe hard kill: wall-time ≠ steps, so a scheduler
+      // context-switch mid-run flakily trips a 1 ms deadline on a legitimate tiny program. So the
+      // wall-time here is a generous anti-hang BACKSTOP (a program that loops within one native
+      // step still aborts), and memory the §7.4 cap. Same trust as init: (full env, writes chrooted
+      // to the action's prefix).
+      static constexpr uint64_t kActionMaxSteps = 5000;
+      static constexpr double kActionMaxSeconds = 0.1;
+      static constexpr uint64_t kActionMaxBytes = 262144;
+      const std::string e = run_scoped_program(m_->app, a.prefix, a.event, kActionMaxSteps,
+                                               kActionMaxSeconds, kActionMaxBytes);
+      if (!e.empty())
+        m_->warn_once("ari: on: action program " + e + " [" + a.event + "]");
+#else
+      m_->warn_once("ari: on: a program action needs state_exec (CVC_STATE_EXEC=OFF); it did not "
+                    "run [" +
+                    a.event + "]");
+#endif
+      continue;
+    }
+    auto it = m_->handlers.find(a.event); // a bare event name -> the host C++ handler seam
     if (it != m_->handlers.end() && it->second)
       it->second();
   }

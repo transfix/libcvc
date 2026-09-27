@@ -164,6 +164,68 @@ TEST(AriadneRuntime, ActionsDrainOffTheWalk) {
   EXPECT_EQ(fired, 1); // queue cleared — no double-fire
 }
 
+// §4/§7 action lane: an `on:` that is a state_exec PROGRAM (starts with '(', like a computed
+// bind:/tooltip:) runs through state_exec at drain — no C++ handler. This is the north-star seam:
+// a flag toggle / reset is pure .ari. The program is chrooted to the widget's prefix, so
+// (state-set "paused") writes <prefix>.paused, the same key a widget `bind: paused` resolves to.
+TEST(AriadneAction, ProgramOnTogglesStateThroughStateExec) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.paused").value(std::string("false"));
+  Widget b = button("Pause", "(state-set \"paused\" (if (= (state-get \"paused\") \"true\") "
+                             "\"false\" \"true\"))");
+  rt.set_root(group({b}));
+  mb.button_click = true; // the button reports a click this frame
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.paused").value(), "false"); // not run inside render
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.paused").value(), "true"); // program ran, toggled
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.paused").value(),
+            "true");                                // queue cleared, no re-run
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()); // a clean program: no warning
+}
+
+// A program `on:` may sequence several state writes in one action (a reset button).
+TEST(AriadneAction, ProgramOnRunsMultiStatementReset) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget b = button("Reset", "(begin (state-set \"agents\" \"64\") (state-set \"speed\" \"1.0\"))");
+  rt.set_root(group({b}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("agents").value(), "64");
+  EXPECT_EQ(cvc::state::instance(app)("speed").value(), "1.0");
+}
+
+// A broken program action fails SAFE: it never throws out of drain(), and it surfaces a one-time
+// warning (mirroring the read-lane's fail-safe policy) rather than silently doing nothing.
+TEST(AriadneAction, ProgramOnBrokenWarnsOnceNoThrow) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget b = button("Bad", "(state-set \"x\""); // unbalanced -> parse error
+  rt.set_root(group({b}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // must not throw
+  const std::vector<std::string> warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("on:"), std::string::npos);
+}
+
 TEST(AriadneRuntime, CheckboxCommitWritesState) {
   cvc::app app;
   Runtime rt(app, "");

@@ -1131,6 +1131,21 @@ other `on:tick`/`on:key` cadence questions.
   `state-set` (coalesced publisher). No scheduler touched on the draw thread.
 - **Action fire (during the walk):** never inline. Fast path enqueues an intent;
   general path calls `execute(ast, opts)→pid`.
+  > **Program `on:` LANDED** (`ariadne.cpp`, `CVC_STATE_EXEC`): an `on:` value that starts with
+  > `(` — an s-expression, exactly like a computed `bind:`/`tooltip:` — is a **state_exec program**
+  > run at `Runtime::drain()`, not a bare event name. So a flag toggle / reset is **pure `.ari`**,
+  > no C++ handler (`on: (state-set "paused" (if …))`). It shares one bounded runner with the
+  > `init:` lane (`run_scoped_program`): the full intrinsics env, writes chrooted to the widget's
+  > (mount-aware) prefix, capped per activation by a deterministic **5 000-step** guard (§7.4) plus
+  > a generous wall-time + 256 KiB backstop (§7.4's 1 ms is a soft target, not a safe hard kill —
+  > wall-time ≠ steps, so a context-switch would flakily trip it on a legit tiny action), fail-safe
+  > (a parse/runtime error warns once via `take_reactive_warnings`, never throws, never silently
+  > no-ops). A bare `on:` name still routes to the host `Runtime::on(name, fn)` seam for capability
+  > verbs. Tests: `AriadneAction.ProgramOn*`, `AriadneLoader.ProgramOnCapturedVerbatim`.
+  > *Deferred:* the LONG-LIVED cross-frame async scheduler (a heavy action spreading over frames);
+  > today each action runs to completion within its per-activation cap in one drain (like `init:`).
+  > Capability verbs callable INSIDE a program (e.g. `(camera.fit)`) — a host-contributed intrinsic
+  > seam — are the next increment; today a verb is a bare-name `on:` + `Runtime::on` handler.
 - **Main loop / `tick()`:** (1) `host.drain()` performs queued imperative work on the
   owning thread **before** tick; (2) sim advances; (3) fresh state published; (4) the
   action scheduler drained with a per-frame budget (`run(max_steps=BUDGET)` or a

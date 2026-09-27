@@ -355,6 +355,19 @@ windows:
   EXPECT_EQ(bt->on, "go");
 }
 
+// §4/§7 action lane: a program-shaped `on:` (an s-expression, like a computed bind:) is captured
+// on Widget::on VERBATIM — quotes and all — so the runtime can run it through state_exec at drain.
+// A bare event name stays a bare name; the runtime tells them apart by the leading '('.
+TEST(AriadneLoader, ProgramOnCapturedVerbatim) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string("windows:\n  - window: W\n    children:\n      - button: Toggle\n    "
+                             "    on: (state-set \"paused\" \"true\")\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *b = find(r.root, Kind::Button);
+  ASSERT_NE(b, nullptr);
+  EXPECT_EQ(b->on, "(state-set \"paused\" \"true\")"); // s-expr survives YAML intact
+}
+
 TEST(AriadneLoader, BareScalarsAndLiteralVsBoundText) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
