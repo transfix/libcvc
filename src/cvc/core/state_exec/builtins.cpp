@@ -672,8 +672,14 @@ value_t builtin_collect(std::span<const value_t> args) {
   if (!gp || !*gp)
     throw std::runtime_error("collect: expected generator");
   std::vector<value_t> result;
-  while (auto next = generator_next(**gp))
+  while (auto next = generator_next(**gp)) {
+    // Draining an unbounded/huge generator (e.g. (collect (range 0 1e11))) runs entirely
+    // inside this one native step; honour the evaluation deadline so it aborts at the time
+    // budget instead of hanging/OOMing (a no-op when no deadline is armed).
+    if (eval_deadline_expired())
+      throw std::runtime_error("collect: evaluation exceeded time budget");
     result.push_back(std::move(*next));
+  }
   return make_list(std::move(result));
 }
 

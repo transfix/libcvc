@@ -491,9 +491,17 @@ geometry &geometry::reorient() {
     if (points().size() != normals().size())
       calculate_surf_normals();
 
+    // boundary() is a boost::dynamic_bitset and operator[] is UNCHECKED, so
+    // indexing it when it is not sized to points() is out-of-bounds UB (it
+    // segfaults). A mesh built straight from tris has an empty boundary bitset.
+    // Mirror tri_surface(): only apply the "skip non-boundary vertices" filter
+    // when boundary info is present for every point; otherwise every vertex is
+    // a candidate.
+    const bool have_boundary = boundary().size() == points().size();
+
     for (points_t::iterator i = points().begin(); i != points().end(); i++) {
       // skip non boundary verts because their normals are null
-      if (!boundary()[distance(points().begin(), i)])
+      if (have_boundary && !boundary()[distance(points().begin(), i)])
         continue;
 
       list<unsigned int> &neighbors = neighbor_tris[*i];

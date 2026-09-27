@@ -32,6 +32,7 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#include <cvc/core/text.h> // display-width-aware column padding (§17.3)
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
@@ -441,9 +442,9 @@ void buildProps(cvc::app &app, const world::world_model &wm, const world::surfac
     }
     const lsys::structure &st = vs[i % vs.size()];
     if (dbg && dumped[pp.recipe]++ == 0)
-      std::fprintf(stderr, "  recipe %-16s segs=%zu leaves=%zu boxes=%zu bounds z[%.1f..%.1f]\n",
-                   pp.recipe.c_str(), st.segments.size(), st.leaves.size(), st.boxes.size(),
-                   st.lo.z, st.hi.z);
+      std::fprintf(stderr, "  recipe %s segs=%zu leaves=%zu boxes=%zu bounds z[%.1f..%.1f]\n",
+                   cvc::text::pad_to_width(pp.recipe, 16).c_str(), st.segments.size(),
+                   st.leaves.size(), st.boxes.size(), st.lo.z, st.hi.z);
     double yaw = pp.yaw_deg * M_PI / 180.0, yc = std::cos(yaw), ys = std::sin(yaw);
     double sc = pp.scale;
     Vec3d org{pp.x, pp.y, pp.z};

@@ -1,0 +1,29 @@
+# scene_controls.ari — a REUSABLE Ariadne component: shadow controls for a cvc::gl::SceneGraph,
+# expressed in the DSL. Binds the two-way `shadows.*` state keys (cvc::gl::ShadowSettings — state at
+# "<scene prefix>.shadows", keys enabled/resolution/interval), so toggling shadows or resizing the
+# shadow map drives the renderer with NO host C++ — the declarative replacement for the shadow half
+# of the C++ ScenePanel(). The ShadowSettings state object exists once a scene has enabled shadows
+# (a `shadows: { enabled: true }` scene block), so these controls act on it live.
+#
+# Use it:
+#     import: components/scene_controls.ari
+#     windows:
+#       - include: scene_controls
+
+units:
+  scene_controls:
+    window: Scene
+    id: scene_controls
+    children:
+      - checkbox: Shadows
+        bind: shadows.enabled
+      - slider_int: Shadow map (px)
+        bind: shadows.resolution
+        lo: 256
+        hi: 4096
+        def: 2048
+      - slider_int: Bake interval (frames)
+        bind: shadows.interval
+        lo: 1
+        hi: 8
+        def: 1

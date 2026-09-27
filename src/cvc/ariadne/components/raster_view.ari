@@ -1,0 +1,28 @@
+# raster_view.ari — a REUSABLE Ariadne component: a live image/raster viewer with a colormap menu.
+# The `image` widget shows a host-published cvc::image named by the `raster.image` key; a Colormap
+# combo writes `raster.colormap`, which the HOST reads to colorize whatever grid it publishes. So a
+# nav occupancy/risk grid (or any 2-D field) shows up here, updating each frame, with no bespoke UI.
+#
+# Host contract:
+#   - each frame, colorize your grid into a cvc::image (RGBA) per the `raster.colormap` key and
+#     publish it:  backend.set_image(name, img);
+#   - the `raster.image` key holds the name to display (seed it in init:, or drive it with a second
+#     combo of your layer names).
+#
+# Use it:
+#     import: cvc://components/raster_view.ari
+#     windows:
+#       - include: raster_view
+
+units:
+  raster_view:
+    window: Raster
+    id: raster_view
+    children:
+      - combo: Colormap
+        bind: raster.colormap
+        options: [viridis, gray, magma, plasma]
+        default: viridis
+      - image: view
+        bind: raster.image # the host-published image name (seed/switch this key in the app)
+        size: 320

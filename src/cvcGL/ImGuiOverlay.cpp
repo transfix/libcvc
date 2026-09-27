@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkNew.h>
@@ -46,6 +47,87 @@ namespace cvc {
 namespace gl {
 
 namespace {
+
+// ---- UI font configuration (roadmap §17.4 / §17.7 phase 2) -----------------
+// Set via ImGuiOverlay::setUiFont*(); consumed by load_ui_font() when the ImGui
+// context is built. ImGui 1.92 bakes glyphs on demand, so a covering font loaded
+// here fixes non-ASCII coverage with no glyph-range wrangling.
+std::string g_uiFontPath;
+const void *g_uiFontMem = nullptr;
+int g_uiFontMemLen = 0;
+bool g_uiFontMemCompressed = false;
+
+bool file_readable(const char *path) {
+  if (!path || !*path)
+    return false;
+  if (FILE *f = std::fopen(path, "rb")) {
+    std::fclose(f);
+    return true;
+  }
+  return false;
+}
+
+// Common broad-coverage system fonts (Latin + Latin-Ext + Cyrillic + Greek +
+// symbols; DejaVu/Noto also carry many more). Returns "" if none is present.
+std::string find_system_font() {
+  static const char *const kCandidates[] = {
+      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",     // Debian/Ubuntu
+      "/usr/share/fonts/dejavu/DejaVuSans.ttf",              // Fedora
+      "/usr/share/fonts/TTF/DejaVuSans.ttf",                 // Arch
+      "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", // Noto
+      "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", // macOS (very broad)
+      "/Library/Fonts/Arial Unicode.ttf",
+      "/System/Library/Fonts/Helvetica.ttc",
+      "C:\\Windows\\Fonts\\arial.ttf", // Windows
+      "C:\\Windows\\Fonts\\segoeui.ttf",
+  };
+  for (const char *c : kCandidates)
+    if (file_readable(c))
+      return c;
+  return std::string();
+}
+
+// Load the UI font in priority order (memory -> path -> $CVC_UI_FONT -> system),
+// falling back to the scalable ASCII face. An unfound/unloadable font is a logged
+// fallback, never a failure. size_pixels 0 => sized from FontSizeBase at draw time.
+void load_ui_font(ImGuiIO &io) {
+  if (g_uiFontMem && g_uiFontMemLen > 0) {
+    ImFont *f = nullptr;
+    if (g_uiFontMemCompressed) {
+      f = io.Fonts->AddFontFromMemoryCompressedTTF(g_uiFontMem, g_uiFontMemLen, 0.0f);
+    } else {
+      ImFontConfig cfg;
+      cfg.FontDataOwnedByAtlas = false; // the buffer belongs to the caller
+      f = io.Fonts->AddFontFromMemoryTTF(const_cast<void *>(g_uiFontMem), g_uiFontMemLen, 0.0f,
+                                         &cfg);
+    }
+    if (f) {
+      std::fprintf(stderr, "cvcGL: UI font <in-memory, %d bytes>\n", g_uiFontMemLen);
+      return;
+    }
+    std::fprintf(stderr, "cvcGL: in-memory UI font failed to load — trying a path/system font\n");
+  }
+
+  std::string path = g_uiFontPath;
+  if (path.empty())
+    if (const char *e = std::getenv("CVC_UI_FONT"))
+      path = e;
+  if (path.empty())
+    path = find_system_font();
+
+  if (!path.empty()) {
+    if (io.Fonts->AddFontFromFileTTF(path.c_str(), 0.0f)) {
+      std::fprintf(stderr, "cvcGL: UI font %s\n", path.c_str());
+      return;
+    }
+    std::fprintf(stderr, "cvcGL: could not load UI font '%s' — using the ASCII face\n",
+                 path.c_str());
+  }
+
+  io.Fonts->AddFontDefaultVector(); // ASCII-only fallback (Basic Latin)
+}
+
 // Every pointer/wheel event we route through ImGui before VTK's style sees it.
 const unsigned long kMouseEvents[] = {vtkCommand::MouseMoveEvent,
                                       vtkCommand::LeftButtonPressEvent,
@@ -506,8 +588,10 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   // sharp at 13px and ugly at every other size. Ask for the vector face and give
   // it a logical base size; final pixels = FontSizeBase * FontScaleMain, and
   // ImGui 1.92 re-bakes glyphs at that exact size (no stretching, so scaling up
-  // stays crisp).
-  io.Fonts->AddFontDefaultVector();
+  // stays crisp). load_ui_font() picks a covering font (system / configured /
+  // embedded) so non-ASCII text renders, and falls back to that ASCII vector face
+  // when none is available (roadmap §17.4 / §17.7 phase 2).
+  load_ui_font(io);
   ImGui::GetStyle().FontSizeBase = 16.0f;
 
   // Remember the unscaled style: ScaleAllSizes multiplies IN PLACE and rounds,
@@ -654,6 +738,14 @@ bool ImGuiOverlay::wantsKeyboard() const {
   return m_impl->ready && m_impl->visible && ImGui::GetIO().WantCaptureKeyboard;
 }
 
+void ImGuiOverlay::setUiFontPath(const std::string &ttfPath) { g_uiFontPath = ttfPath; }
+
+void ImGuiOverlay::setUiFontMemory(const void *ttf, int len, bool compressed) {
+  g_uiFontMem = ttf;
+  g_uiFontMemLen = len;
+  g_uiFontMemCompressed = compressed;
+}
+
 } // namespace gl
 } // namespace cvc
 
@@ -666,6 +758,8 @@ struct ImGuiOverlay::Impl {};
 
 ImGuiOverlay::ImGuiOverlay(SceneRenderer &) : m_impl(new Impl) {}
 ImGuiOverlay::~ImGuiOverlay() = default;
+void ImGuiOverlay::setUiFontPath(const std::string &) {}
+void ImGuiOverlay::setUiFontMemory(const void *, int, bool) {}
 void ImGuiOverlay::setDrawCallback(std::function<void()>) {}
 ImGuiContext *ImGuiOverlay::imguiContext() const { return nullptr; }
 // Every method in this block exists so consumers never need an #ifdef (see the

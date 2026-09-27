@@ -1003,12 +1003,130 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 // NavSdfField view holder; all marshaling is inline in the .i.
 %include "pycvc_nav.i"
 
+// ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
+// Like voxels/volume/geometry, the real libcvc header is %include'd here so
+// Python gets the actual cvc::state tree node — not a parallel facade. This
+// exposes the value channel (value()/value(str)), the boost::any DATA channel
+// (data()/data(obj)/resolvedData() via the typemap below), tree navigation
+// (child(), children(), name/fullName), the comment/hidden/read-only flags, and
+// the whole Phase 8 LINK surface: linkTo (opaque/transparent), writable-link
+// write-through, and resolvedValue()/resolvedData() read-through. state& is
+// app-owned (handed out by instance()/child()); the protected ctor means Python
+// never constructs or deletes one, so returned references are non-owning.
+//
+// The free functions in pycvc_state.h (state_set/get/…) and the state_observer
+// director stay: they are the string-keyed convenience layer and the change-push
+// path (boost::signals2 signals do not marshal, so Python change-notify rides
+// the director, not the wrapped signal members).
+%{
+#include <cvc/core/state.h>
+%}
+
+// boost::any <-> Python for the data channel. Marshals the common scalars both
+// ways (bool/int/float/str; empty any == None). bool BEFORE int (a Python bool
+// is a PyLong subclass). Anything else surfaces as None rather than a leaked
+// opaque pointer — the value channel or a registered codec covers richer types.
+%typemap(out) boost::any {
+  const boost::any &_a = $1;
+  if (_a.empty()) { $result = Py_None; Py_INCREF(Py_None); }
+  else if (_a.type() == typeid(bool)) { $result = PyBool_FromLong(boost::any_cast<bool>(_a) ? 1 : 0); }
+  else if (_a.type() == typeid(int)) { $result = PyLong_FromLong(boost::any_cast<int>(_a)); }
+  else if (_a.type() == typeid(long)) { $result = PyLong_FromLong(boost::any_cast<long>(_a)); }
+  else if (_a.type() == typeid(long long)) { $result = PyLong_FromLongLong(boost::any_cast<long long>(_a)); }
+  else if (_a.type() == typeid(unsigned int)) { $result = PyLong_FromUnsignedLong(boost::any_cast<unsigned int>(_a)); }
+  else if (_a.type() == typeid(unsigned long)) { $result = PyLong_FromUnsignedLong(boost::any_cast<unsigned long>(_a)); }
+  else if (_a.type() == typeid(float)) { $result = PyFloat_FromDouble(boost::any_cast<float>(_a)); }
+  else if (_a.type() == typeid(double)) { $result = PyFloat_FromDouble(boost::any_cast<double>(_a)); }
+  else if (_a.type() == typeid(std::string)) { $result = PyUnicode_FromString(boost::any_cast<std::string>(_a).c_str()); }
+  else { $result = Py_None; Py_INCREF(Py_None); }
+}
+%typemap(in) const boost::any & (boost::any _tmp) {
+  if ($input == Py_None) { _tmp = boost::any(); }
+  else if (PyBool_Check($input)) { _tmp = boost::any($input == Py_True); }
+  else if (PyLong_Check($input)) { _tmp = boost::any((int)PyLong_AsLong($input)); }
+  else if (PyFloat_Check($input)) { _tmp = boost::any(PyFloat_AsDouble($input)); }
+  else if (PyUnicode_Check($input)) { const char *_s = PyUnicode_AsUTF8($input); _tmp = boost::any(std::string(_s ? _s : "")); }
+  else { PyErr_SetString(PyExc_TypeError, "state.data: expected bool/int/float/str/None"); SWIG_fail; }
+  $1 = &_tmp;
+}
+// Overload dispatch needs a typecheck: without it SWIG cannot tell that a Python
+// scalar matches data(const boost::any&) vs the no-arg data(). Accept exactly the
+// scalars the in-typemap marshals.
+%typemap(typecheck, precedence=SWIG_TYPECHECK_STRING) const boost::any & {
+  $1 = ($input == Py_None || PyBool_Check($input) || PyLong_Check($input)
+        || PyFloat_Check($input) || PyUnicode_Check($input)) ? 1 : 0;
+}
+
+// --- members that do not marshal or are not wanted on the Python surface ---
+%ignore cvc::state_future;               // futures template (boost::chrono/signals2)
+%ignore cvc::state::startup_connection;  // process-global startup registry handle
+%ignore cvc::state::_startup;            // static registry vectors (boost::function)
+%ignore cvc::state::_appStartup;
+%ignore cvc::state::on_startup;          // boost::function registration
+%ignore cvc::state::lastMod;             // boost::posix_time::ptime
+%ignore cvc::state::ptree;               // boost::property_tree
+%ignore cvc::state::traverse;            // boost::function callback param
+%ignore cvc::state::valueData;           // template
+%ignore cvc::state::wait_for_value;      // template + boost::chrono
+%ignore cvc::state::wait_for_data;       // template + boost::chrono
+%ignore cvc::state::value_future;        // template
+%ignore cvc::state::isData;              // template
+%ignore cvc::state::expireAt;            // boost::posix_time::ptime
+%ignore cvc::state::expireAfter;         // boost::posix_time::time_duration
+%ignore cvc::state::expiryTime;          // boost::posix_time::ptime
+%ignore cvc::state::resolveLink;         // returns nested link_resolution struct
+%ignore cvc::state::link_resolution;     // (Python read-through uses resolvedValue/Data)
+%ignore cvc::state::link_resolution_kind;
+%ignore cvc::state::resolveRemote;       // distributed shard / delegation layer
+%ignore cvc::state::remote_link_resolution;
+%ignore cvc::state::remote_resolution_kind;
+%ignore cvc::state::sendMessage;         // out-of-band messaging layer
+%ignore cvc::state::send_message_result;
+// boost::signals2 signals — Python change-notify rides the state_observer director
+%ignore cvc::state::valueChanged;
+%ignore cvc::state::dataChanged;
+%ignore cvc::state::childChanged;
+%ignore cvc::state::destroyed;
+%ignore cvc::state::commentChanged;
+%ignore cvc::state::hiddenChanged;
+%ignore cvc::state::readOnlyChanged;
+%ignore cvc::state::linkChanged;
+%ignore cvc::state::traverseEnter;
+%ignore cvc::state::traverseExit;
+%ignore cvc::state::expiring;
+// conversion operators (implicit std::string / ptree)
+%ignore cvc::state::operator std::string;
+%ignore cvc::state::operator boost::property_tree::ptree;
+
+// operator()(childname) -> child(): the tree navigation accessor.
+%rename(child) cvc::state::operator();
+
+// The Python class is `State` (capitalized). This is not cosmetic: the legacy
+// free-function layer in pycvc_state.h uses names like state_save/state_children,
+// and SWIG's flat member wrappers for cvc::state::save/children would be the SAME
+// symbols (state_save/…) — a hard "multiply defined" collision. Naming the class
+// State makes the member wrappers State_save/State_children, distinct from the
+// free functions, so both coexist while callers migrate off the free layer.
+%rename(State) cvc::state;
+
+// Nested enum class link_mode {opaque, transparent} lifts to the module so
+// linkTo(path, mode) / setLinkMode(mode) / linkMode() are callable from Python.
+%feature("flatnested") cvc::state::link_mode;
+
+%include "cvc/core/state.h"
+
 // ── Phase 3: state access + push callbacks ──────────────────────────────
 // state_has/children/remove act on the shared root; state_observer is a
 // director base — a Python subclass overriding on_changed() is called by C++
 // on every state mutation. Only this class gets a director.
 %feature("director") pycvc::state_observer;
 %include "pycvc_state.h"
+
+// ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
+// text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does
+// column math in display columns, not bytes or codepoints. std::string round-trips
+// UTF-8 both ways here (§17.6, audited).
+%include "pycvc_text.i"
 
 // ── Async state handlers on a bounded coroutine pool ────────────────────
 // AsyncStateObserver rides on the state_observer director: C++ delivers

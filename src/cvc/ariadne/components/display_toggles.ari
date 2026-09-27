@@ -1,0 +1,26 @@
+# display_toggles.ari — a REUSABLE Ariadne component: show/hide scene layers. Each checkbox binds a
+# `show.<layer>` bool state key that a scene node's `visible:` ALSO binds to — so ticking a box
+# hides/shows that layer with NO host C++ (the same key drives the widget and the node's visibility,
+# exactly like the bunny demo's show_bunny). A host that adds its own layers just binds their
+# visibility to the matching show.* key.
+#
+# Use it:
+#     import: cvc://components/display_toggles.ari
+#     windows:
+#       - include: display_toggles
+#   and, in the scene, e.g.:  - node: agents ...  visible: show.agents
+
+units:
+  display_toggles:
+    window: Display
+    id: display_toggles
+    children:
+      - checkbox: Agents
+        bind: show.agents
+        def: true
+      - checkbox: Paths
+        bind: show.paths
+        def: true
+      - checkbox: Grid
+        bind: show.grid
+        def: true

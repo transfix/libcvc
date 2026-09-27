@@ -112,6 +112,49 @@ TEST_F(StateTreeIntrinsicsTest, StateChildrenNonexistent) {
   EXPECT_TRUE((*lst)->empty());
 }
 
+// --- §7.8.3 read-through: a transparent link node is a "named hole" a read sees through -----
+
+TEST_F(StateTreeIntrinsicsTest, TransparentLinkReadsThroughValueAndChildren) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("tgt").value(std::string("through"));
+  root("tgt.a").value(std::string("1"));
+  root("tgt.b").value(std::string("2"));
+  root("hole").linkTo("tgt", cvc::state::link_mode::transparent);
+  // state-get follows the transparent link to the TARGET's value.
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("hole")}).v), "through");
+  // state-children lists the TARGET's children, not the (childless) link node's own.
+  auto ch = call("state-children", {std::string("hole")});
+  auto *lst = std::get_if<list_ptr>(&ch.v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_NE(*lst, nullptr);
+  EXPECT_EQ((*lst)->size(), 2u);
+}
+
+TEST_F(StateTreeIntrinsicsTest, OpaqueLinkReadsItsOwnValue) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("tgt_op").value(std::string("through"));
+  root("hole_op").value(std::string("own")).linkTo("tgt_op", cvc::state::link_mode::opaque);
+  // Opaque link -> the node's OWN value, not the target's (only transparent reads through).
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("hole_op")}).v), "own");
+}
+
+TEST_F(StateTreeIntrinsicsTest, BrokenTransparentLinkFallsBackToOwnValue) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("hole_broken")
+      .value(std::string("fallback"))
+      .linkTo("no.such.target", cvc::state::link_mode::transparent);
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("hole_broken")}).v), "fallback");
+}
+
+TEST_F(StateTreeIntrinsicsTest, TransparentLinkReadsThroughData) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  call("state-data-set", {std::string("dtgt"), value_t(std::string("dv"))});
+  root("dhole").linkTo("dtgt", cvc::state::link_mode::transparent);
+  auto d = call("state-data-get", {std::string("dhole")});
+  ASSERT_TRUE(std::holds_alternative<std::string>(d.v));
+  EXPECT_EQ(std::get<std::string>(d.v), "dv");
+}
+
 TEST_F(StateTreeIntrinsicsTest, StateDelete) {
   call("state-set", {std::string("del.target"), std::string("bye")});
   EXPECT_TRUE(std::get<bool>(call("state-exists", {std::string("del.target")}).v));
@@ -124,12 +167,85 @@ TEST_F(StateTreeIntrinsicsTest, StateDeleteNonexistent) {
   EXPECT_NO_THROW(call("state-delete", {std::string("nothing.here")}));
 }
 
-TEST_F(StateTreeIntrinsicsTest, StateDataGetSet) {
+TEST_F(StateTreeIntrinsicsTest, StateDataRoundTripsTheValue) {
+  // A DSL value set via state-data-set comes back from state-data-get transparently (the
+  // original value_t, NOT an opaque data_object handle) — so structured data round-trips.
   call("state-data-set", {std::string("data.node"), std::string("data-val")});
-  auto result = call("state-data-get", {std::string("data.node")});
-  EXPECT_FALSE(result.is_nil());
-  auto *obj = std::get_if<data_object_ptr>(&result.v);
-  ASSERT_NE(obj, nullptr);
+  auto s = call("state-data-get", {std::string("data.node")});
+  ASSERT_TRUE(std::holds_alternative<std::string>(s.v));
+  EXPECT_EQ(std::get<std::string>(s.v), "data-val");
+
+  // a structured value (a list) round-trips intact
+  auto lst = make_list({value_t{int64_t{1}}, value_t{int64_t{2}}, value_t{int64_t{3}}});
+  call("state-data-set", {std::string("data.list"), lst});
+  auto got = call("state-data-get", {std::string("data.list")});
+  auto *gl = std::get_if<list_ptr>(&got.v);
+  ASSERT_NE(gl, nullptr);
+  EXPECT_EQ((*gl)->size(), 3u);
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataSetRejectsCallables) {
+  // Storing a callable is a lifetime hazard (it captures a context/env that may not outlive
+  // the node) and an invocation channel that bypasses env allowlists — refuse it.
+  auto *fn = env->lookup("state-get"); // a native_fn value_t
+  ASSERT_NE(fn, nullptr);
+  EXPECT_THROW(call("state-data-set", {std::string("bad"), *fn}), std::runtime_error);
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataGetReturnsPrivateCopy) {
+  // The fetched structure must NOT alias the node's stored storage: mutating it must not
+  // change what a later state-data-get returns (else a "read" could mutate persistent state).
+  call("state-data-set",
+       {std::string("dc"), make_list({value_t{int64_t{1}}, value_t{int64_t{2}}})});
+  auto got = call("state-data-get", {std::string("dc")});
+  auto *gl = std::get_if<list_ptr>(&got.v);
+  ASSERT_NE(gl, nullptr);
+  (*gl)->push_back(value_t{int64_t{99}}); // mutate the returned handle
+  auto again = call("state-data-get", {std::string("dc")});
+  auto *gl2 = std::get_if<list_ptr>(&again.v);
+  ASSERT_NE(gl2, nullptr);
+  EXPECT_EQ((*gl2)->size(), 2u); // stored data is untouched -> the get returned a private copy
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataGetOfSharedDagIsBoundedAndPreservesSharing) {
+  // A physically-tiny shared DAG (40 doublings = 2^40 logical) round-trips via a MEMOIZED
+  // deep copy: bounded (no exponential unfold), and the returned copy preserves the DAG's
+  // sharing (both children are the SAME copied node) while aliasing none of the stored value.
+  value_t d{int64_t{0}};
+  for (int i = 0; i < 40; ++i)
+    d = make_list({d, d});
+  call("state-data-set", {std::string("dag"), d});
+  value_t got = call("state-data-get", {std::string("dag")}); // must not hang/OOM
+  auto *gl = std::get_if<list_ptr>(&got.v);
+  ASSERT_NE(gl, nullptr);
+  ASSERT_EQ((*gl)->size(), 2u);
+  auto *c0 = std::get_if<list_ptr>(&(**gl)[0].v);
+  auto *c1 = std::get_if<list_ptr>(&(**gl)[1].v);
+  ASSERT_NE(c0, nullptr);
+  ASSERT_NE(c1, nullptr);
+  EXPECT_EQ(c0->get(), c1->get()); // sharing preserved -> the copy is a DAG, not a 2^40 tree
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataGetOfTooDeepValueThrows) {
+  value_t d{int64_t{0}};
+  for (int i = 0; i < 2000; ++i)
+    d = make_list({d}); // depth 2000 > the deep-copy depth cap
+  call("state-data-set", {std::string("deep"), d});
+  EXPECT_THROW(call("state-data-get", {std::string("deep")}), std::runtime_error); // stack-safe
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateSetCoercesScalarsToString) {
+  // state-set stores string-typed scalars; non-string values are coerced to their natural
+  // lexical form rather than throwing — (state-set "n" 10) stores "10".
+  call("state-set", {std::string("c.int"), value_t{int64_t{10}}});
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.int")}).v), "10");
+  call("state-set", {std::string("c.dbl"), value_t{1.5}});
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.dbl")}).v), "1.5");
+  call("state-set", {std::string("c.bool"), value_t{true}});
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.bool")}).v), "true");
+  // a string is stored raw — NOT to_string's quoted form
+  call("state-set", {std::string("c.str"), std::string("hi")});
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.str")}).v), "hi");
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateDataGetNonexistent) {

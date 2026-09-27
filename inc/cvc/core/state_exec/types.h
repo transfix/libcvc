@@ -11,10 +11,12 @@
 #define CVC_STATE_EXEC_TYPES_H
 
 #include <boost/any.hpp>
+#include <chrono>
 #include <compare>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -169,11 +171,41 @@ inline const value_t true_value{true};
 /// Boolean false value.
 inline const value_t false_value{false};
 
-/// Convert a value_t to a human-readable string representation.
+/// Convert a value_t to a human-readable string representation. Bounded and cycle-safe:
+/// output is length- and depth-capped (a shared/deep/cyclic structure is truncated with an
+/// ellipsis rather than expanding exponentially or overflowing the stack).
 std::string to_string(const value_t &val);
 
-/// Check structural equality of two values.
+/// Check structural equality of two values. Memoized on pointer-pairs, so a shared or
+/// cyclic structure is compared in time proportional to its PHYSICAL size (distinct node
+/// pairs), never its exponential logical unfolding.
 bool values_equal(const value_t &a, const value_t &b);
+
+// -- cooperative evaluation deadline ----------------------------------------
+//
+// A per-thread wall-clock deadline for the current synchronous evaluation. It lets a single
+// long-running native step — an uncapped nested evaluator (a defclass method body), a big
+// generator/collect/range loop, a deep structural walk — abort AT the time budget instead of
+// running to completion, closing the gap that the evaluator's between-steps caps cannot see.
+// A nested evaluator INHERITS the deadline automatically (it lives on the thread), and the
+// guard only ever TIGHTENS it (never relaxes an outer, tighter deadline).
+
+/// RAII: arm a deadline `seconds` from now for the current thread (no-op if nullopt); a
+/// tighter outer deadline wins. Restores the previous deadline on destruction. run() arms one.
+class eval_deadline_guard {
+public:
+  explicit eval_deadline_guard(std::optional<double> seconds);
+  ~eval_deadline_guard();
+  eval_deadline_guard(const eval_deadline_guard &) = delete;
+  eval_deadline_guard &operator=(const eval_deadline_guard &) = delete;
+
+private:
+  std::optional<std::chrono::steady_clock::time_point> prev_;
+};
+
+/// True iff a deadline is armed on this thread and has already passed. Cheap (one clock
+/// read); long-running builtins call this in their loops so they too honour the budget.
+bool eval_deadline_expired();
 
 } // namespace cvc::state_exec
 

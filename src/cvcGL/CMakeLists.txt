@@ -33,6 +33,10 @@ set(CVCGL_VTK_COMPONENTS
 find_package(VTK REQUIRED COMPONENTS ${CVCGL_VTK_COMPONENTS})
 
 file(GLOB CVCGL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+# Ariadne — the cvcGL UI & scene DSL (cvc::gl::ariadne). Sources live in a
+# subdirectory, so the non-recursive top-level glob above does not pick them up.
+file(GLOB CVCGL_ARIADNE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ariadne/*.cpp")
+list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
 # Header root is <repo>/inc  (headers under inc/cvc/gl/).
 get_filename_component(_CVCGL_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
@@ -393,6 +397,13 @@ add_test(NAME cvcgl_fps_hud COMMAND cvcgl_fps_hud)
 add_executable(cvcgl_light_node test/cvcgl_light_node.cpp)
 target_link_libraries(cvcgl_light_node PRIVATE cvcGL)
 add_test(NAME cvcgl_light_node COMMAND cvcgl_light_node)
+
+# Ariadne §9 realize_scene: lights (batch position bake + kind routing), a rig, and
+# nested-node LOCAL transforms — the realize invariants the core loader gtests can't
+# reach (no VTK). Inspects the realized vtkLights + node world transforms offscreen.
+add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
+target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been

@@ -30,11 +30,15 @@
 #include <boost/signals2.hpp>
 #include <boost/thread.hpp>
 #include <boost/tuple/tuple.hpp>
+#include <cvc/core/config.h> // CVC_VERSION_* (generated from project(VERSION))
 #include <cvc/core/namespace.h>
 #include <map>
 #include <string>
 #include <vector>
 
+// The real version comes from the generated config.h above (from the top-level
+// project(libcvc VERSION ...)); this fallback only applies if that header did
+// not define it. (It historically read "3.0.0" and silently went stale.)
 #ifndef CVC_VERSION_STRING
 #define CVC_VERSION_STRING "3.0.0"
 #endif

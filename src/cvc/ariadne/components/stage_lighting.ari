@@ -1,0 +1,72 @@
+# stage_lighting.ari — a REUSABLE Ariadne component: a control window for a cvc::gl::StageLighting
+# rig, expressed entirely in the DSL. Every slider binds a two-way `lighting.*` state key the rig
+# owns (see cvc/gl/StageLighting.h: state lives at "<scene prefix>.lighting"), so moving a slider
+# drives the realized rig with NO host C++ — the declarative replacement for the C++
+# StageLightingPanel(). This is the kind of component libcvc/pycvc should ship and demos should lean
+# on instead of hand-written panels.
+#
+# Use it:
+#     import: components/stage_lighting.ari
+#     windows:
+#       - include: stage_lighting
+# Bind paths are relative to the document/scene prefix; the rig lives at "<prefix>.lighting", so a
+# host that realizes a `rig:` light under the SAME prefix the Runtime binds against needs no wiring.
+
+units:
+  stage_lighting:
+    window: Stage lighting
+    id: stage_lighting
+    children:
+      - text: "Key light"
+      - slider_float: Intensity
+        bind: lighting.key_intensity
+        lo: 0.0
+        hi: 4.0
+        fmt: "%.2f"
+      - slider_float: Azimuth
+        bind: lighting.key_azimuth
+        lo: -180.0
+        hi: 180.0
+        fmt: "%.0f"
+      - slider_float: Elevation
+        bind: lighting.key_elevation
+        lo: 0.0
+        hi: 90.0
+        fmt: "%.0f"
+      - slider_float: Cone
+        bind: lighting.key_cone
+        lo: 5.0
+        hi: 90.0
+        fmt: "%.0f"
+      - separator
+      - text: "Fill / back / ambient"
+      - slider_float: Fill
+        bind: lighting.fill_intensity
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+      - slider_float: Back
+        bind: lighting.back_intensity
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+      - slider_float: Ambient
+        bind: lighting.ambient
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+      - slider_float: Warmth
+        bind: lighting.warm_key
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+      - slider_float: Environment
+        bind: lighting.env_intensity
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+      - slider_float: Stage radius
+        bind: lighting.stage_radius
+        lo: 1.0
+        hi: 500.0
+        fmt: "%.0f"

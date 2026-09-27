@@ -61,10 +61,15 @@ inline std::optional<value_t> generator_next(generator &gen) {
     return result;
   }
 
-  // Closure path — step until yield or done
+  // Closure path — step until yield or done. A body that never yields (e.g.
+  // (generator (lambda () (while t 1)))) would spin here inside one native step, so honour
+  // the evaluation deadline (a no-op when none is armed) rather than looping forever.
   gen.state.yielded = false;
-  while (!gen.state.done && !gen.state.yielded)
+  while (!gen.state.done && !gen.state.yielded) {
+    if (eval_deadline_expired())
+      throw std::runtime_error("generator: evaluation exceeded time budget");
     gen.evaluator.step(gen.state);
+  }
 
   // If the body yielded a value, return it even if the evaluator
   // simultaneously reached done (e.g. yield was the last expression).

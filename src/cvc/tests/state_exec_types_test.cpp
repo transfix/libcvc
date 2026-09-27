@@ -207,3 +207,41 @@ TEST(StateExecTypesTest, Truthiness) {
   EXPECT_TRUE(value_t("").is_truthy());         // empty string is truthy
   EXPECT_TRUE(make_list().is_truthy());         // empty list is truthy
 }
+
+// -- bounded / cycle-safe walks (values_equal, to_string) --------------------
+
+namespace {
+// A shared-pointer DAG: `depth` doublings => `depth` PHYSICAL nodes but 2^depth logical.
+value_t make_dag(int depth) {
+  value_t node{int64_t{1}};
+  for (int i = 0; i < depth; ++i)
+    node = make_list({node, node});
+  return node;
+}
+} // namespace
+
+TEST(StateExecTypesTest, ValuesEqualMemoizedOnSharedDag) {
+  // Two independently-built 40-deep DAGs (distinct pointers at every level) unfold to 2^40
+  // logical nodes. Memoized values_equal compares them in physical time; a naive walk hangs.
+  EXPECT_TRUE(values_equal(make_dag(40), make_dag(40)));
+  // A shape/leaf difference is detected, still bounded.
+  value_t a = make_dag(30);
+  value_t b = make_list({make_dag(29), value_t{int64_t{2}}});
+  EXPECT_FALSE(values_equal(a, b));
+}
+
+TEST(StateExecTypesTest, ToStringBoundedOnSharedDag) {
+  const std::string s = to_string(make_dag(40)); // 2^40 logical -> truncated, never OOM/hang
+  EXPECT_LT(s.size(), std::size_t{1} << 17);
+}
+
+TEST(StateExecTypesTest, WalksTerminateOnCyclicStructure) {
+  auto l = std::make_shared<std::vector<value_t>>();
+  l->push_back(value_t{int64_t{1}});
+  value_t cyc{l};
+  l->push_back(cyc); // l = [1, <-self]  (cyclic) — a naive walk would recurse forever
+  const std::string s = to_string(cyc);
+  EXPECT_FALSE(s.empty());
+  EXPECT_LT(s.size(), std::size_t{1} << 17);
+  EXPECT_TRUE(values_equal(cyc, cyc)); // must terminate, not overflow the stack
+}

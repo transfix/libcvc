@@ -81,6 +81,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/state_exec/stdlib.h
   ../../inc/cvc/core/state_exec/exec_coordinator.h
   ../../inc/cvc/core/app.h
+  ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
@@ -137,6 +138,7 @@ set(SOURCE_FILES
   utility/algorithm.cpp
   processing/anisotropic_diffusion.cpp
   core/app.cpp
+  core/text.cpp
   core/thread_pool.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
@@ -1103,9 +1105,104 @@ if(CVC_ENABLE_GRPC)
   )
 endif()
 
+# Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
+# the retained Widget tree, the Runtime + reconcile boundary, and direct
+# cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
+# the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp)
+list(APPEND INCLUDE_FILES
+  ../../inc/cvc/ariadne/widget.h
+  ../../inc/cvc/ariadne/backend.h
+  ../../inc/cvc/ariadne/ariadne.h
+  ../../inc/cvc/ariadne/bind.h
+  ../../inc/cvc/ariadne/loader.h
+  ../../inc/cvc/ariadne/uri.h
+  ../../inc/cvc/ariadne/uri_state.h
+  ../../inc/cvc/ariadne/uri_http.h
+  ../../inc/cvc/ariadne/state_io.h
+  ../../inc/cvc/ariadne/scene.h
+  ../../inc/cvc/ariadne/value.h
+  ../../inc/cvc/ariadne/ftxui_backend.h
+)
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
+
+# Ariadne .ari YAML loader — OPTIONAL. yaml-cpp is a light, header+lib dependency;
+# when present, ariadne/loader.cpp compiles the real parser (CVC_ARIADNE_HAVE_YAML);
+# when absent, it compiles a stub (load_* return an error) so libcvc still builds.
+find_package(yaml-cpp CONFIG QUIET)
+if(TARGET yaml-cpp::yaml-cpp OR TARGET yaml-cpp)
+  if(TARGET yaml-cpp::yaml-cpp)
+    set(_cvc_yamlcpp yaml-cpp::yaml-cpp)
+  else()
+    set(_cvc_yamlcpp yaml-cpp) # older yaml-cpp exports a bare target
+  endif()
+  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_YAML)
+  target_link_libraries(cvc PRIVATE ${_cvc_yamlcpp})
+  message(STATUS "Ariadne: .ari YAML loader ENABLED (yaml-cpp)")
+else()
+  message(STATUS "Ariadne: yaml-cpp not found - .ari loader compiles to a stub")
+endif()
+
+# Ariadne reusable .ari COMPONENT LIBRARY (roadmap §16.1b) — a directory of DECLARATIVE .ari UI
+# components (stage_lighting, scene_controls, …) that documents import via the location-independent
+# cvc:// scheme (import: cvc://components/foo.ari). Install it as data alongside libcvc, and compile
+# the install datadir into the resolver so register_cvc_uri_handler() finds it with no env var.
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
+        FILES_MATCHING PATTERN "*.ari")
+target_compile_definitions(
+  cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")
+
+# Ariadne http(s):// URI handler — OPTIONAL (roadmap §13.6). When libcurl is present,
+# ariadne/uri_http.cpp compiles the real network handler (CVC_ARIADNE_HAVE_HTTP) and links curl;
+# when absent it is an inert stub (register_http_uri_handler() is a no-op). The handler is opt-in
+# even when compiled — a host must call register_http_uri_handler() — so this never makes libcvc
+# fetch the network on its own. (Under Emscripten a fetch-based handler is future work.)
+find_package(CURL QUIET)
+if(TARGET CURL::libcurl OR CURL_FOUND)
+  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_HTTP)
+  if(TARGET CURL::libcurl)
+    target_link_libraries(cvc PRIVATE CURL::libcurl)
+  else()
+    target_include_directories(cvc PRIVATE ${CURL_INCLUDE_DIRS})
+    target_link_libraries(cvc PRIVATE ${CURL_LIBRARIES})
+  endif()
+  message(STATUS "Ariadne: http(s):// URI handler ENABLED (libcurl)")
+else()
+  message(STATUS "Ariadne: libcurl not found - http(s):// handler compiles to a stub")
+endif()
+
+# Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is
+# present, ariadne/ftxui_backend.cpp compiles the real pure-terminal backend
+# (CVC_ARIADNE_FTXUI) and links the three FTXUI libs; when absent it is an inert
+# stub (FtxuiBackend::available() == false), so libcvc still builds. FTXUI is a
+# terminal library — it pulls in NO VTK/GL/ImGui, so the core stays graphics-free.
+find_package(ftxui CONFIG QUIET)
+if(TARGET ftxui::component)
+  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_FTXUI)
+  target_link_libraries(cvc PRIVATE ftxui::component ftxui::dom ftxui::screen)
+  message(STATUS "Ariadne: FTXUI terminal backend ENABLED (ftxui)")
+else()
+  message(STATUS "Ariadne: FTXUI not found - terminal backend compiles to a stub")
+endif()
+
+# Ariadne .ari Layer-2 JSON-Schema validation — OPTIONAL (roadmap §15). When the
+# json-schema-validator (over nlohmann-json) is present, the loader validates each
+# document against the .ari schema and reports violations as warnings
+# (CVC_ARIADNE_HAVE_JSONSCHEMA); when absent, the schema is still exposed
+# (ari_schema_json) but no runtime validation runs. Needs yaml-cpp too (it
+# validates the parsed document). Its config does find_dependency(nlohmann_json).
+find_package(nlohmann_json_schema_validator CONFIG QUIET)
+if(TARGET nlohmann_json_schema_validator::validator)
+  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_JSONSCHEMA)
+  target_link_libraries(cvc PRIVATE nlohmann_json_schema_validator::validator)
+  message(STATUS "Ariadne: .ari Layer-2 JSON-Schema validation ENABLED (json-schema-validator)")
+else()
+  message(STATUS "Ariadne: json-schema-validator not found - Layer-2 validation off")
+endif()
 
 # Set library version
 set_target_properties(cvc PROPERTIES

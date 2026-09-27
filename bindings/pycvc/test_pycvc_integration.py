@@ -72,7 +72,16 @@ def test_full_pipeline_on_one_app():
     # pycvc_gl wraps the REAL cvcGL classes; the Scene facade this used to go
     # through is gone (see the header of pycvc_scene.h). addGraphics returns the
     # LIVE node, so the mesh below can be posed and recoloured in place.
-    import pycvc_gl
+    #
+    # The scene layer lives in the SEPARATE pycvc_gl module (CVC_BUILD_PYCVC_GL,
+    # which needs cvcGL + VTK). A CORE-only build has no pycvc_gl, so skip this
+    # tail cleanly rather than failing the whole capstone — the core pipeline
+    # (sdf -> mesh -> state/observer -> DSL) above is already fully exercised.
+    try:
+        import pycvc_gl
+    except ImportError:
+        print("  ok: core pipeline (scene layer skipped: pycvc_gl not built)")
+        return
 
     scene = pycvc_gl.SceneGraph(app)
     surf_node = scene.addGraphics("surface", surf)
