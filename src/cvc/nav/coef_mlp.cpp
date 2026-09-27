@@ -34,7 +34,13 @@
 //   u64   arch_hash
 //   per layer:  u32 rows, u32 cols, u32 act, f32 w[rows*cols], f32 b[rows]
 //   u32   out_bias_len ; f32 out_bias[out_bias_len]   (raw bias; log(expm1) at load)
+//   [v2 only, kFlagLamSigmoid] f32 lam_soft_max ; f32 lam_hard_max   (sigmoid ceilings)
 //   u32   meta_len     ; char meta[meta_len]          (provenance, ignored here)
+//
+// v2 (two-head sigmoid, kFlagLamSigmoid): out_bias_len == 3 (the abg raw biases only);
+// the lam columns (>= 3) are lam_max*sigmoid(raw) with the raw head bias in the last
+// Linear layer, so they carry no out_bias offset, and the two maxes follow the out_bias
+// block. v1 stays out_bias_len == out_features, all columns softplus.
 
 #include <cmath>
 #include <cstdlib>
@@ -63,6 +69,11 @@ inline float silu(float x) {
 inline float softplus(float x) {
   // torch F.softplus(beta=1, threshold=20): linear tail avoids exp overflow.
   return x > 20.0f ? x : std::log1p(std::exp(x));
+}
+
+inline float sigmoidf(float x) {
+  // torch sigmoid; matches the lam_max*sigmoid two-head form in material_nav.py.
+  return 1.0f / (1.0f + std::exp(-x));
 }
 
 // Read a trivially-copyable value from a little-endian byte cursor, advancing it.
@@ -114,7 +125,10 @@ void coef_mlp::build_from_bytes(const std::uint8_t *p, std::size_t n) {
   if (std::memcmp(magic, "CVNV", 4) != 0)
     throw std::runtime_error("cvc::nav::coef_mlp: bad magic (not a .cvcnav file)");
   fmt_ = take<std::uint32_t>(p, end);
-  if (fmt_ != kFormatVersion)
+  // Accept {1, 2}: a v1 file still loads and forwards identically; a v2 file (two-head
+  // sigmoid) is read below via kFlagLamSigmoid. A newer version hard-fails here rather
+  // than silently misreading a trailer this build does not know.
+  if (fmt_ != kFormatVersionLegacy && fmt_ != kFormatVersion)
     throw std::runtime_error("cvc::nav::coef_mlp: unsupported .cvcnav format version");
   flags_ = take<std::uint32_t>(p, end);
   in_ = static_cast<int>(take<std::uint32_t>(p, end));
@@ -150,16 +164,35 @@ void coef_mlp::build_from_bytes(const std::uint8_t *p, std::size_t n) {
   const std::uint32_t obn = take<std::uint32_t>(p, end);
   std::vector<float> out_bias;
   take_floats(p, end, out_bias, obn);
-  out_bias_off_.resize(out_bias.size());
-  if (flags_ & kFlagSoftplusLogExpm1) {
-    // Fold log(expm1(bias)) once, in float32, matching torch.log(torch.expm1(.)).
-    for (std::size_t i = 0; i < out_bias.size(); ++i)
-      out_bias_off_[i] = std::log(std::expm1(out_bias[i]));
+  const bool sigmoid_lam = (flags_ & kFlagLamSigmoid) != 0;
+  if (sigmoid_lam) {
+    // v2 two-head sigmoid: out_bias covers ONLY the 3 abg columns (softplus fold); the lam
+    // columns (>= 3) get a zero offset (their bias is in the last layer) and are read as
+    // lam_max*sigmoid(raw). The two ceilings follow the out_bias block.
+    if (fmt_ != kFormatVersion)
+      throw std::runtime_error("cvc::nav::coef_mlp: kFlagLamSigmoid requires .cvcnav format v2");
+    if (out_ < 4)
+      throw std::runtime_error("cvc::nav::coef_mlp: sigmoid-lam net needs out_features >= 4");
+    if (obn != 3)
+      throw std::runtime_error("cvc::nav::coef_mlp: v2 sigmoid out_bias must be the 3 abg columns");
+    out_bias_off_.assign(static_cast<std::size_t>(out_), 0.0f);
+    for (int i = 0; i < 3; ++i)
+      out_bias_off_[i] =
+          (flags_ & kFlagSoftplusLogExpm1) ? std::log(std::expm1(out_bias[i])) : out_bias[i];
+    lam_soft_max_ = take<float>(p, end);
+    lam_hard_max_ = take<float>(p, end);
   } else {
-    out_bias_off_ = out_bias; // used as a plain additive offset
+    out_bias_off_.resize(out_bias.size());
+    if (flags_ & kFlagSoftplusLogExpm1) {
+      // Fold log(expm1(bias)) once, in float32, matching torch.log(torch.expm1(.)).
+      for (std::size_t i = 0; i < out_bias.size(); ++i)
+        out_bias_off_[i] = std::log(std::expm1(out_bias[i]));
+    } else {
+      out_bias_off_ = out_bias; // used as a plain additive offset
+    }
+    if (static_cast<int>(out_bias_off_.size()) != out_)
+      throw std::runtime_error("cvc::nav::coef_mlp: out_bias length != out_features");
   }
-  if (static_cast<int>(out_bias_off_.size()) != out_)
-    throw std::runtime_error("cvc::nav::coef_mlp: out_bias length != out_features");
   // A meta trailer may follow; it is optional and ignored here.
 }
 
@@ -171,7 +204,7 @@ coef_mlp coef_mlp::load_from_memory(const void *data, std::size_t nbytes) {
 
 coef_mlp coef_mlp::default_biased() {
   coef_mlp m;
-  m.fmt_ = kFormatVersion;
+  m.fmt_ = kFormatVersionLegacy; // a plain all-softplus abg net stays v1 (loads on old hosts)
   m.flags_ = kFlagSoftplusLogExpm1;
   m.in_ = 5;
   m.out_ = 3;
@@ -198,16 +231,21 @@ coef_mlp coef_mlp::from_layers(int in, int out, const std::vector<int> &rows,
                                const std::vector<int> &cols, const std::vector<std::uint32_t> &act,
                                const std::vector<std::vector<float>> &w,
                                const std::vector<std::vector<float>> &b,
-                               const std::vector<float> &out_bias_raw, std::uint32_t extra_flags) {
+                               const std::vector<float> &out_bias_raw, std::uint32_t extra_flags,
+                               float lam_soft_max, float lam_hard_max) {
   const int num_layers = static_cast<int>(rows.size());
   if (static_cast<int>(cols.size()) != num_layers || static_cast<int>(act.size()) != num_layers ||
       static_cast<int>(w.size()) != num_layers || static_cast<int>(b.size()) != num_layers)
     throw std::runtime_error("cvc::nav::coef_mlp::from_layers: ragged layer arrays");
+  const bool sigmoid_lam = (extra_flags & kFlagLamSigmoid) != 0;
   coef_mlp m;
-  m.fmt_ = kFormatVersion;
+  // A sigmoid-lam net is the v2 format; a plain net stays v1 so it loads on a pre-v2 host.
+  m.fmt_ = sigmoid_lam ? kFormatVersion : kFormatVersionLegacy;
   m.flags_ = kFlagSoftplusLogExpm1 | extra_flags;
   m.in_ = in;
   m.out_ = out;
+  m.lam_soft_max_ = lam_soft_max;
+  m.lam_hard_max_ = lam_hard_max;
   m.layers_.resize(num_layers);
   std::vector<std::uint32_t> sa;
   int prev = in;
@@ -233,11 +271,24 @@ coef_mlp coef_mlp::from_layers(int in, int out, const std::vector<int> &rows,
   }
   if (prev != out)
     throw std::runtime_error("cvc::nav::coef_mlp::from_layers: last layer does not produce out");
-  if (static_cast<int>(out_bias_raw.size()) != out)
-    throw std::runtime_error("cvc::nav::coef_mlp::from_layers: out_bias length != out");
-  m.out_bias_off_.resize(out);
-  for (int i = 0; i < out; ++i)
-    m.out_bias_off_[i] = std::log(std::expm1(out_bias_raw[i]));
+  if (sigmoid_lam) {
+    // Two-head sigmoid: out_bias_raw is the 3 abg biases; the lam heads' init lives in the
+    // last layer's bias b (exactly as torch), so the lam columns carry a zero offset.
+    if (out < 4)
+      throw std::runtime_error("cvc::nav::coef_mlp::from_layers: sigmoid-lam net needs out >= 4");
+    if (static_cast<int>(out_bias_raw.size()) != 3)
+      throw std::runtime_error(
+          "cvc::nav::coef_mlp::from_layers: sigmoid net out_bias must be the 3 abg biases");
+    m.out_bias_off_.assign(static_cast<std::size_t>(out), 0.0f);
+    for (int i = 0; i < 3; ++i)
+      m.out_bias_off_[i] = std::log(std::expm1(out_bias_raw[i]));
+  } else {
+    if (static_cast<int>(out_bias_raw.size()) != out)
+      throw std::runtime_error("cvc::nav::coef_mlp::from_layers: out_bias length != out");
+    m.out_bias_off_.resize(out);
+    for (int i = 0; i < out; ++i)
+      m.out_bias_off_[i] = std::log(std::expm1(out_bias_raw[i]));
+  }
   m.arch_hash_ = compute_arch_hash(in, out, sa);
   return m;
 }
@@ -267,12 +318,20 @@ void coef_mlp::save(const std::string &path, const std::string &meta) const {
     wf(L.b);
   }
   // The file stores the RAW out_bias; recover it from the folded offset
-  // (log(expm1(raw)) -> raw = softplus(off)) so save/load round-trips.
-  std::vector<float> raw(out_bias_off_.size());
-  for (std::size_t i = 0; i < raw.size(); ++i)
+  // (log(expm1(raw)) -> raw = softplus(off)) so save/load round-trips. In v2 sigmoid mode
+  // only the 3 abg columns carry a bias (the lam heads' bias is in the last layer), so the
+  // block is length 3 and the two ceilings follow it — byte-identical to the Python exporter.
+  const bool sigmoid_lam = (flags_ & kFlagLamSigmoid) != 0;
+  const std::size_t nbias = sigmoid_lam ? 3u : out_bias_off_.size();
+  std::vector<float> raw(nbias);
+  for (std::size_t i = 0; i < nbias; ++i)
     raw[i] = (flags_ & kFlagSoftplusLogExpm1) ? softplus(out_bias_off_[i]) : out_bias_off_[i];
   w32(static_cast<std::uint32_t>(raw.size()));
   wf(raw);
+  if (sigmoid_lam) {
+    f.write(reinterpret_cast<const char *>(&lam_soft_max_), 4);
+    f.write(reinterpret_cast<const char *>(&lam_hard_max_), 4);
+  }
   w32(static_cast<std::uint32_t>(meta.size()));
   if (!meta.empty())
     f.write(meta.data(), static_cast<std::streamsize>(meta.size()));
@@ -387,8 +446,17 @@ void coef_mlp::forward(const float *feats, int n, float *out, int num_threads,
         a[o] = b[o];
     }
     float *o = out + static_cast<std::size_t>(s) * out_;
-    for (int k = 0; k < out_; ++k)
-      o[k] = softplus(a[k] + out_bias_off_[k]);
+    const bool sigmoid_lam = (flags_ & kFlagLamSigmoid) != 0;
+    for (int k = 0; k < out_; ++k) {
+      const float pre = a[k] + out_bias_off_[k];
+      if (sigmoid_lam && k >= 3) {
+        // Two-head sigmoid reroute: col 3 = lam_soft, col 4 = lam_hard, each lam_max*sigmoid.
+        const float mx = (k == 3) ? lam_soft_max_ : lam_hard_max_;
+        o[k] = mx * sigmoidf(pre);
+      } else {
+        o[k] = softplus(pre);
+      }
+    }
   });
 }
 
