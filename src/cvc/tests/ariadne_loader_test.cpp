@@ -1774,6 +1774,24 @@ windows:
   EXPECT_TRUE(has_warning(r, "must not start with '/'"));
 }
 
+TEST(AriadneMount, LoadNonScalarInitWarns) {
+  SKIP_WITHOUT_YAML();
+  // A fragment's init: written as a list (a common mistake) is ignored WITH a warning, matching
+  // the top-level document path — not silently dropped.
+  write_temp_ari("bad_init_panel.ari",
+                 "init: [ (state-set \"a\" \"1\") ]\nroot: [ { text: x } ]\n");
+  const std::string main = write_temp_ari("main_bad_init.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: bad_init_panel.ari
+        as: rf
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "init: must be a scalar"));
+}
+
 TEST(AriadneMount, LoadNeedsPreflightWarnsOnUngranted) {
   SKIP_WITHOUT_YAML();
   // The fragment declares it needs two holes; the mount grants only one -> a warning names the

@@ -894,9 +894,15 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   Widget wrapper = group({std::move(frag_root)});
   wrapper.scope = "includes." + as;
   // §12: carry the fragment's own init: so the Runtime can run it once at the sub-prefix (the
-  // loader is state-free; it captures the script, the Runtime executes it).
-  if (frag.IsMap() && frag["init"] && frag["init"].IsScalar())
-    wrapper.init_script = frag["init"].Scalar();
+  // loader is state-free; it captures the script, the Runtime executes it). A non-scalar init: is
+  // a malformed script — warn (matching the top-level document path), never silently drop it.
+  if (frag.IsMap() && frag["init"]) {
+    if (frag["init"].IsScalar())
+      wrapper.init_script = frag["init"].Scalar();
+    else
+      ctx.warn("ari: load '" + uri +
+               "': the fragment's init: must be a scalar state_exec script string — ignored");
+  }
   // §12 link: parent-scope holes — each entry becomes a transparent link node the Runtime plants
   // inside the mount's sub-prefix (created there, not here — the loader is state-free). Value form
   // `name: target` (rw); map form `name: { to: target, mode: ro|rw }`.
