@@ -18,6 +18,7 @@
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
 #include <filesystem>        // §12 import: dirname of a resolved library for nested bases
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -172,20 +173,28 @@ bool have_jsonschema() {
 #endif
 }
 
+// §12.5: a file's mtime as an int64 (implementation-defined ticks — only equality/inequality is
+// meaningful), or 0 when the file is missing/unreadable. Always available (no yaml needed).
+std::int64_t file_mtime(const std::string &path) {
+  std::error_code ec;
+  const std::filesystem::file_time_type t = std::filesystem::last_write_time(path, ec);
+  return ec ? 0 : static_cast<std::int64_t>(t.time_since_epoch().count());
+}
+
 // §12.5 hot-reload polling — see loader.h. Always available (no yaml needed): compares each
 // source's on-disk mtime to a caller-held stamp. First sight of a path records its stamp and is
-// NOT a change (the caller just loaded it); a later differing mtime is a change. A missing /
-// unreadable file is skipped (a mid-write flicker must not thrash a reload). Never throws.
+// NOT a change (the caller just loaded it — or, when `stamps` is seeded with LoadResult::
+// source_stamps, a difference from the load-time stamp IS caught); a later differing mtime is a
+// change. A missing/unreadable file is skipped (a mid-write flicker must not thrash a reload).
+// Prunes stamps for paths no longer in `sources` so the map stays bounded and a re-added path is
+// re-baselined. Never throws.
 bool sources_changed(const std::vector<std::string> &sources,
                      std::map<std::string, std::int64_t> &stamps) {
-  namespace fs = std::filesystem;
   bool changed = false;
   for (const std::string &p : sources) {
-    std::error_code ec;
-    const fs::file_time_type t = fs::last_write_time(p, ec);
-    if (ec)
+    const std::int64_t mtime = file_mtime(p);
+    if (mtime == 0)
       continue; // missing/unreadable -> treat as unchanged
-    const std::int64_t mtime = static_cast<std::int64_t>(t.time_since_epoch().count());
     const auto it = stamps.find(p);
     if (it == stamps.end())
       stamps.emplace(p, mtime); // baseline; not a change
@@ -193,6 +202,13 @@ bool sources_changed(const std::vector<std::string> &sources,
       it->second = mtime;
       changed = true;
     }
+  }
+  // Prune stamps for sources that dropped out of the graph (bounds growth; re-baselines a path
+  // that later returns). Only walk when there is something to prune.
+  if (stamps.size() > sources.size()) {
+    const std::set<std::string> live(sources.begin(), sources.end());
+    for (auto it = stamps.begin(); it != stamps.end();)
+      it = live.count(it->first) ? std::next(it) : stamps.erase(it);
   }
   return changed;
 }
@@ -235,7 +251,10 @@ struct Ctx {
   // §12.5 hot-reload: the local FILE paths read across this document's whole import/mount graph,
   // shared (like mount_count) so a fresh sub-Ctx contributes to the one list. Copied into
   // LoadResult::sources for a host to watch. state/http canonicals are skipped (not watchable).
+  // source_stamps captures each file's mtime AT READ TIME (paired with sources) -> LoadResult, so
+  // a host can seed the change-poll baseline with load-time values.
   std::shared_ptr<std::vector<std::string>> sources;
+  std::shared_ptr<std::map<std::string, std::int64_t>> source_stamps;
 };
 
 // §12.5: record a resolved FILE canonical for hot-reload watching — skip a state/http canonical
@@ -244,8 +263,11 @@ void note_source(Ctx &ctx, const std::string &canonical) {
   if (!ctx.sources || canonical.empty() || canonical.find("://") != std::string::npos)
     return;
   std::vector<std::string> &v = *ctx.sources;
-  if (std::find(v.begin(), v.end(), canonical) == v.end())
+  if (std::find(v.begin(), v.end(), canonical) == v.end()) {
     v.push_back(canonical);
+    if (ctx.source_stamps) // stamp its mtime at read time for the hot-reload baseline
+      (*ctx.source_stamps)[canonical] = file_mtime(canonical);
+  }
 }
 
 bool has(const YAML::Node &n, const char *key) { return n[key].IsDefined(); }
@@ -914,7 +936,8 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   sub.mounting.insert(res.canonical);
   sub.mount_count = ctx.mount_count;
   sub.sources = ctx.sources; // §12.5 the fragment's own imports/mounts feed the same watch list
-  parse_units(sub, frag);    // the fragment's OWN import:/units:
+  sub.source_stamps = ctx.source_stamps;
+  parse_units(sub, frag); // the fragment's OWN import:/units:
   Widget frag_root = parse_document(sub, frag);
   for (const std::string &w : sub.warnings)
     ctx.warn(w);
@@ -1382,6 +1405,7 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
   Ctx ctx;
   ctx.base_dir = base_dir;
   ctx.sources = std::make_shared<std::vector<std::string>>(); // §12.5 hot-reload watch list
+  ctx.source_stamps = std::make_shared<std::map<std::string, std::int64_t>>();
   if (!self_path.empty()) {
     ctx.imported.insert(self_path);
     note_source(ctx, self_path); // the main document is itself watched
@@ -1451,6 +1475,8 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
   r.warnings = std::move(ctx.warnings);
   if (ctx.sources)
     r.sources = std::move(*ctx.sources); // §12.5 the files a host watches for hot-reload
+  if (ctx.source_stamps)
+    r.source_stamps = std::move(*ctx.source_stamps); // load-time mtimes to seed the poll baseline
 
   // Custom top-level blocks (register_ari_block): dispatch any non-built-in key with a
   // registered parser. Run AFTER warnings are moved, so a parser may append to

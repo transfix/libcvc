@@ -11,6 +11,8 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <random>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -32,6 +34,27 @@ std::string to_lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return s;
+}
+
+// A per-process, unpredictable token for temp-file names — collision-free ACROSS processes (a bare
+// per-process counter collides on "ari-src-0" between two processes) and unguessable, so a local
+// attacker cannot pre-create the name to hijack the open (the CWE-377 predictable-temp hazard).
+// Computed once from random_device.
+const std::string &proc_temp_token() {
+  static const std::string tok = [] {
+    std::random_device rd;
+    std::ostringstream os;
+    os << std::hex << rd() << rd(); // ~64 bits of entropy
+    return os.str();
+  }();
+  return tok;
+}
+
+// Whether a host has REGISTERED a "file" handler (overriding the built-in). resolve() honors such
+// an override; resolve_to_file must too, rather than short-circuiting to the raw on-disk path.
+bool file_scheme_overridden() {
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  return uri_registry().find("file") != uri_registry().end();
 }
 
 // An .ari fragment is DSL text; a fragment larger than this is almost certainly a mistake (or
@@ -216,28 +239,42 @@ ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
   namespace fs = std::filesystem;
   ResolvedFile rf;
   const Uri u = parse_uri(uri);
-  // file:// (and a bare path): the reader opens the resolved path directly — no fetch, no copy.
-  if (u.scheme == "file") {
+  // file:// (and a bare path) with NO registered override: the reader opens the resolved path in
+  // place — no fetch, no copy. If a host has OVERRIDDEN the file scheme (a sandbox/remap/virtual
+  // FS handler), fall through so its bytes go through the temp bridge like any other scheme —
+  // matching what resolve() does for import:/load:.
+  if (u.scheme == "file" && !file_scheme_overridden()) {
     rf.ok = true;
     rf.path = resolve_file_path(u.path, base);
     rf.is_temp_ = false;
     return rf;
   }
-  // Any other scheme: fetch the bytes, then spill them to a temp file the reader can open. Keep
-  // the source's extension so an extension-keyed reader (geometry_file_io) still dispatches.
+  // Any other scheme (or an overridden file): fetch the bytes, then spill them to a temp file the
+  // reader can open. Keep the source's extension so an extension-keyed reader (geometry_file_io)
+  // still dispatches.
   const UriResult r = resolve(uri, base);
   if (!r.ok) {
     rf.error = r.error;
     return rf;
   }
+  // Extension from the FINAL path segment only: a '.' earlier in the path — a dotted directory, or
+  // (for a non-file URI, where u.path includes the host) the host's TLD dot — must not leak a '/'
+  // into the temp name and break the open.
   std::string ext;
-  if (const std::size_t dot = u.path.find_last_of('.'); dot != std::string::npos)
-    ext = u.path.substr(dot); // includes the '.'
+  {
+    const std::size_t slash = u.path.find_last_of('/');
+    const std::size_t seg = (slash == std::string::npos) ? 0 : slash + 1;
+    if (const std::size_t dot = u.path.find_last_of('.'); dot != std::string::npos && dot > seg)
+      ext = u.path.substr(dot);
+  }
   static std::atomic<std::uint64_t> counter{0};
   const std::uint64_t n = counter.fetch_add(1);
   std::error_code ec;
   const fs::path dir = fs::temp_directory_path(ec);
-  const fs::path tmp = (ec ? fs::path(".") : dir) / ("ari-src-" + std::to_string(n) + ext);
+  // Unpredictable, per-process-unique name: a per-process random token + a per-resolve counter +
+  // the source extension — defeats cross-process collision AND the predictable-temp hazard.
+  const fs::path tmp =
+      (ec ? fs::path(".") : dir) / ("ari-src-" + proc_temp_token() + "-" + std::to_string(n) + ext);
   std::ofstream out(tmp, std::ios::binary);
   if (!out) {
     rf.error = "ari: cannot create temp file for '" + uri + "'";

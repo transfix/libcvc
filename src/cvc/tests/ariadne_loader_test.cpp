@@ -124,6 +124,13 @@ struct StateHandlerGuard {
   ~StateHandlerGuard() { unregister_uri_handler("state"); }
 };
 
+// Unregister an arbitrary test-registered scheme when the test scopes out (even on an ASSERT) —
+// crucial for a "file" override, which would otherwise break every later file resolve.
+struct SchemeGuard {
+  std::string scheme;
+  ~SchemeGuard() { unregister_uri_handler(scheme); }
+};
+
 } // namespace
 
 // ---- version + schema surface (no yaml needed) ----------------------------
@@ -1507,6 +1514,35 @@ TEST(AriadneModularity, ImportUnitsOverHttp) {
   EXPECT_NE(find(r.root, Kind::Text, "FromHttp"), nullptr); // the http-served unit expanded
 }
 
+TEST(AriadneUri, ResolveToFileExtractsExtFromFinalSegmentOnly) {
+  register_uri_handler("memseg", [](const Uri &u, const std::string &) {
+    return UriResult{true, "BODY", "memseg:" + u.path, std::string()};
+  });
+  SchemeGuard g{"memseg"};
+  // Last '.' precedes the final '/': the ext must NOT capture "/…", which would put the temp file
+  // in a nonexistent subdir and fail the open. Success (ok) is the discriminating check.
+  ResolvedFile a = resolve_to_file("memseg://host/data.v2/model");
+  ASSERT_TRUE(a.ok) << a.error;
+  EXPECT_TRUE(std::filesystem::exists(a.path));
+  // A real final-segment extension is preserved.
+  ResolvedFile b = resolve_to_file("memseg://host/x/model.obj");
+  ASSERT_TRUE(b.ok) << b.error;
+  EXPECT_GE(b.path.size(), 4u);
+  EXPECT_EQ(b.path.substr(b.path.size() - 4), ".obj");
+}
+
+TEST(AriadneUri, ResolveToFileHonorsRegisteredFileOverride) {
+  register_uri_handler("file", [](const Uri &u, const std::string &) {
+    return UriResult{true, "OVERRIDDEN-BYTES", "file:override:" + u.path, std::string()};
+  });
+  SchemeGuard g{"file"}; // MUST restore the built-in file handler for later tests
+  ResolvedFile rf = resolve_to_file("file://whatever.off");
+  ASSERT_TRUE(rf.ok) << rf.error;
+  std::ifstream in(rf.path, std::ios::binary);
+  std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_EQ(content, "OVERRIDDEN-BYTES"); // went through the override -> temp bridge, not in-place
+}
+
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
   // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
   // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
@@ -1964,6 +2000,32 @@ TEST(AriadneMount, SourcesChangedDetectsMtimeBump) {
   std::vector<std::string> missing{"/no/such/ariadne/file.ari"};
   std::map<std::string, std::int64_t> ms;
   EXPECT_FALSE(sources_changed(missing, ms));
+}
+
+TEST(AriadneMount, SourceStampsSeedTheHotReloadBaseline) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const std::string main = write_temp_ari("ss_main.ari", "root: []\n");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_FALSE(r.source_stamps.empty()); // load-time mtimes captured
+  // Seeding the poll with the LOAD-TIME stamps catches a change that happened after read but
+  // before the first poll — which a fresh (first-sight = baseline) map would silently adopt.
+  std::map<std::string, std::int64_t> stamps = r.source_stamps;
+  const auto now = fs::last_write_time(main);
+  fs::last_write_time(main, now + std::chrono::seconds(2));
+  EXPECT_TRUE(sources_changed(r.sources, stamps));
+}
+
+TEST(AriadneMount, SourcesChangedPrunesRemovedSources) {
+  const std::string a = write_temp_ari("prune_a.ari", "root: []\n");
+  const std::string b = write_temp_ari("prune_b.ari", "root: []\n");
+  std::map<std::string, std::int64_t> stamps;
+  sources_changed({a, b}, stamps); // baseline both
+  EXPECT_EQ(stamps.size(), 2u);
+  sources_changed({a}, stamps); // b dropped from the graph
+  EXPECT_EQ(stamps.size(), 1u); // its stamp is pruned (bounded growth; re-baseline if it returns)
+  EXPECT_EQ(stamps.count(b), 0u);
 }
 
 TEST(AriadneMount, LoadMountCycleTerminates) {

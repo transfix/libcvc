@@ -93,6 +93,11 @@ struct LoadResult {
   // A host watches these for mtime changes and re-loads on change; sources_changed() does the
   // polling. De-duplicated, in first-seen order.
   std::vector<std::string> sources;
+  // §12.5 hot-reload: each source's mtime captured AT READ TIME during this load. Seed
+  // sources_changed()'s `stamps` with this so a change in the window between the load reading a
+  // file and the first poll is detected, not silently adopted as the baseline. Keys match
+  // `sources`.
+  std::map<std::string, std::int64_t> source_stamps;
 };
 
 // Parse a .ari document from an in-memory string. Never throws. Enforces the
@@ -105,11 +110,14 @@ LoadResult load_file(const std::string &path);
 
 // §12.5 hot-reload: poll whether any of `sources` (e.g. LoadResult::sources) has changed on disk
 // since the last call. `stamps` is caller-owned state carried across calls (path -> last mtime);
-// pass the same map each poll. Returns true when any source's mtime differs from its recorded
-// stamp (or is newly seen with a prior stamp), updating `stamps`. A missing/unreadable file is
-// treated as unchanged (a mid-write flicker should not thrash a reload). The host calls this on a
-// timer and, when it returns true, re-runs load_file + Runtime::set_root — the reconcile then
-// re-mounts changed fragments (holes are re-wired; §12). Never throws.
+// pass the same map each poll. SEED it with LoadResult::source_stamps right after a load, so a
+// change between the load reading a file and the first poll is caught (a first-seen path with no
+// prior stamp is adopted as a baseline and is not itself a change). Returns true when any source's
+// mtime differs from its recorded stamp, updating `stamps` and pruning entries for paths no longer
+// in `sources` (so the map stays bounded and a re-added path is re-baselined). A missing/unreadable
+// file is treated as unchanged (a mid-write flicker should not thrash a reload). On true, the host
+// re-runs load_file + Runtime::set_root — the reconcile re-mounts changed fragments (holes are
+// re-wired; §12). Never throws.
 bool sources_changed(const std::vector<std::string> &sources,
                      std::map<std::string, std::int64_t> &stamps);
 

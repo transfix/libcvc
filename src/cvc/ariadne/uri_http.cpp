@@ -57,7 +57,12 @@ UriResult http_fetch(const Uri &u, const std::string & /*base*/) {
   curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 10L);
   curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
   curl_easy_setopt(h, CURLOPT_FAILONERROR, 1L); // an HTTP >= 400 status is a fetch failure
-  curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);    // thread-safe: no SIGALRM-based timeouts
+  curl_easy_setopt(h, CURLOPT_NOSIGNAL,
+                   1L); // thread-safe: no SIGALRM-based timeouts. NOTE: with
+                        // NOSIGNAL the DNS-phase timeout needs an async
+                        // resolver — the curl recipe must build with the
+                        // threaded resolver or c-ares (CURL_VERSION_ASYNCHDNS),
+                        // else a stalled DNS lookup ignores CONNECTTIMEOUT.
   curl_easy_setopt(h, CURLOPT_USERAGENT, "cvc-ariadne/1");
   // Restrict to http/https for BOTH the request and any redirect target, so a URL cannot be
   // redirected into file:// / gopher:// / etc. (an SSRF/local-file exfil guard).
