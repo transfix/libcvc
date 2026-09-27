@@ -138,6 +138,38 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
 // execute a non-empty init: script (it reports an error instead).
 bool have_state_exec();
 
+// ---------------------------------------------------------------------------
+// Host-contributed state_exec intrinsics for the PROGRAM lanes (init: and a program `on:` action).
+// A host binds native functions — e.g. nav verbs `(nav-step)` / `(nav-arrived)` — that a .ari
+// program may call, so a program can invoke a host capability AND compute over live host state
+// inline
+// (`(if (> (nav-arrived) 5) …)`). The provider is invoked when each program-lane environment is
+// built, AFTER the standard register_intrinsics, so it registers its fns via
+// cvc::state_exec::builtins::register_fn(env, name, fn) on the given env. `ictx` is that lane's
+// context (its chrooted state root / scheduler). Process-global; register at setup, before load_*.
+//
+// NOTE the boundaries: this is ONLY the full-env program lanes (init:/action on:), never the
+// per-frame reactive READ lane (visible_when/computed binds — kept default-deny +
+// side-effect-free). A program on: runs synchronously on the host thread inside Runtime::drain(),
+// so an intrinsic that mutates async host state (a worker-thread sim) should ENQUEUE the mutation,
+// not do it inline. A no-op in a build without state_exec (the program lanes do not run).
+// ---------------------------------------------------------------------------
+} // namespace ariadne
+namespace state_exec {
+class environment;
+struct intrinsics_context;
+} // namespace state_exec
+namespace ariadne {
+
+using ActionIntrinsicProvider = std::function<void(
+    std::shared_ptr<cvc::state_exec::environment> env, cvc::state_exec::intrinsics_context &ictx)>;
+
+// Register a provider of host intrinsics for the program lanes (append; providers run in order).
+void register_action_intrinsics(ActionIntrinsicProvider provider);
+// Remove all registered providers (a host tears down before its captured context dies; also for
+// tests).
+void clear_action_intrinsics();
+
 } // namespace ariadne
 } // namespace cvc
 

@@ -181,6 +181,36 @@ bool have_state_exec() {
 #endif
 }
 
+// Host-contributed program-lane intrinsics registry (§ nav verbs et al.). Kept OUTSIDE the
+// CVC_STATE_EXEC guard so register/clear are always callable (the providers are simply never
+// applied in a build with no program lanes). ActionIntrinsicProvider is state_exec-typed via
+// forward-decls.
+namespace {
+std::mutex &action_intrinsics_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::vector<ActionIntrinsicProvider> &action_intrinsics_registry() {
+  static std::vector<ActionIntrinsicProvider> v;
+  return v;
+}
+std::vector<ActionIntrinsicProvider> action_intrinsics_snapshot() {
+  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
+  return action_intrinsics_registry();
+}
+} // namespace
+
+void register_action_intrinsics(ActionIntrinsicProvider provider) {
+  if (!provider)
+    return;
+  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
+  action_intrinsics_registry().push_back(std::move(provider));
+}
+void clear_action_intrinsics() {
+  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
+  action_intrinsics_registry().clear();
+}
+
 #ifdef CVC_STATE_EXEC
 namespace {
 // Run `script` as a FULL-ENV state_exec program chrooted to `prefix`, bounded by (max_steps,
@@ -209,6 +239,12 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     se::apply_chroot(ictx, root, prefix); // scope writes under the document/mount prefix
     auto env = se::builtins::make_default_environment();
     se::register_intrinsics(env, &ictx);
+    // Let a host bind extra program-lane intrinsics (nav verbs, …) into this env — AFTER the
+    // standard ones, so it can add or override. Snapshot the registry so a provider is free to
+    // register/throw without holding the lock.
+    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+      if (p)
+        p(env, ictx);
     // Bound the run so a looping or blocking script (an accidental infinite loop, or a
     // (msg-recv ...) with no sender) can never hang: cap the process (check_limits kills a runner
     // at the cap) AND the run loop (breaks out even when the sole process is blocked, which

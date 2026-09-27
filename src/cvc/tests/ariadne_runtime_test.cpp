@@ -10,9 +10,12 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#include <cvc/core/state_exec/builtins.h> // host-intrinsic seam test: register_fn
+#include <cvc/core/state_exec/types.h>    // value_t
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -215,6 +218,34 @@ TEST(AriadneAction, ProgramOnRunsMultiStatementReset) {
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("agents").value(), "64");
   EXPECT_EQ(cvc::state::instance(app)("speed").value(), "1.0");
+}
+
+// The host-intrinsic seam: a host binds a native fn `(host-bump)` into the program lanes, and a
+// program on: calls it — so a .ari program can invoke a host capability (e.g. a nav verb) inline.
+TEST(AriadneAction, HostIntrinsicCallableFromProgram) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  namespace se = cvc::state_exec;
+  int calls = 0;
+  register_action_intrinsics(
+      [&calls](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "host-bump", [&calls](std::span<const se::value_t>) {
+          ++calls;
+          return se::value_t{}; // nil
+        });
+      });
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget b = button("Go", "(host-bump)"); // a program on: that calls the host intrinsic
+  rt.set_root(group({b}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  clear_action_intrinsics(); // process-global — clean up before the next test
+  EXPECT_EQ(calls, 1);       // the host fn ran from the .ari program
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()); // ran cleanly (the symbol resolved)
 }
 
 // A broken program action fails SAFE: it never throws out of drain(), and it surfaces a one-time

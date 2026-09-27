@@ -1144,8 +1144,13 @@ other `on:tick`/`on:key` cadence questions.
   > verbs. Tests: `AriadneAction.ProgramOn*`, `AriadneLoader.ProgramOnCapturedVerbatim`.
   > *Deferred:* the LONG-LIVED cross-frame async scheduler (a heavy action spreading over frames);
   > today each action runs to completion within its per-activation cap in one drain (like `init:`).
-  > Capability verbs callable INSIDE a program (e.g. `(camera.fit)`) — a host-contributed intrinsic
-  > seam — are the next increment; today a verb is a bare-name `on:` + `Runtime::on` handler.
+  > **Host intrinsics in a program LANDED** (`register_action_intrinsics`): a host binds native fns —
+  > e.g. nav verbs `(nav-step)` / `(nav-arrived)` — that a program `on:` (and `init:`) may call, so a
+  > program can invoke a host capability AND compute over live host state inline. Applied when each
+  > program-lane env is built, after the standard `register_intrinsics` (never the default-deny
+  > reactive read lane). A synchronous drain-thread call, so an async-host mutation ENQUEUEs.
+  > Test `AriadneAction.HostIntrinsicCallableFromProgram`. (A bare-name `on:` + `Runtime::on` still
+  > works for a fire-and-forget verb.)
 - **Main loop / `tick()`:** (1) `host.drain()` performs queued imperative work on the
   owning thread **before** tick; (2) sim advances; (3) fresh state published; (4) the
   action scheduler drained with a per-frame budget (`run(max_steps=BUDGET)` or a
