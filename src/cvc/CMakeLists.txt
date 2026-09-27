@@ -74,6 +74,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/state_exec/state_value_codec.h
   ../../inc/cvc/core/state_exec/process.h
   ../../inc/cvc/core/state_exec/memory_tracker.h
+  ../../inc/cvc/core/state_exec/scheduler_base.h
   ../../inc/cvc/core/state_exec/scheduler.h
   ../../inc/cvc/core/state_exec/async_scheduler.h
   ../../inc/cvc/core/state_exec/intrinsics.h

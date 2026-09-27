@@ -23,7 +23,7 @@ class state;
 
 namespace cvc::state_exec {
 
-class scheduler;
+class scheduler_base;
 class memory_tracker;
 struct process;
 
@@ -41,7 +41,7 @@ struct process;
 ///     removes it from its map (e.g. after a kill); this prevents
 ///     dangling-pointer bugs on map rehash or process removal.
 struct intrinsics_context {
-  scheduler *sched = nullptr;        // Non-owning; outlives context
+  scheduler_base *sched = nullptr;   // Non-owning; outlives context (sync or async scheduler)
   cvc::state *root = nullptr;        // Non-owning; app-scoped lifetime
   memory_tracker *tracker = nullptr; // Non-owning; scheduler member
   std::shared_ptr<process> proc;     // Shared with scheduler
