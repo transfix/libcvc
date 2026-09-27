@@ -17,6 +17,7 @@
 #include <utility>
 
 #ifndef _WIN32
+#include <cerrno>   // EINTR
 #include <cstdlib>  // mkstemps
 #include <unistd.h> // write, close, ssize_t
 #endif
@@ -288,7 +289,13 @@ ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
   bool wrote_ok = true;
   while (left > 0) {
     const ssize_t w = ::write(fd, p, left);
-    if (w <= 0) {
+    if (w < 0) {
+      if (errno == EINTR)
+        continue; // an interrupted write is retryable, not a failure
+      wrote_ok = false;
+      break;
+    }
+    if (w == 0) { // a regular file should not return 0, but guard against a spin
       wrote_ok = false;
       break;
     }
