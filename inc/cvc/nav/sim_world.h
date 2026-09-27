@@ -260,6 +260,35 @@ public:
     cfg_.sep_gain = gain;
   }
 
+  // Live-tune the step-fresh scalar knobs (sensor / policy / vehicle / separation) WITHOUT a
+  // rebuild: step() re-reads cfg_ every tick, so a host (e.g. an Ariadne nav_settings panel) can
+  // push these from the UI each frame. Copies ONLY the runtime-tunable scalars — the geometry /
+  // buffer fields baked at construction (rows/cols, the min_x..max_y clip, scale/cx/cy, l_clamp,
+  // spawn_layout) are IGNORED here; change those by rebuilding the world from a fresh occupancy.
+  // The general complement of set_separation (kept for its focused two-arg convenience). Additive:
+  // existing callers are unaffected.
+  void set_live_knobs(const config &c) {
+    cfg_.range_m = c.range_m;
+    cfg_.n_rays = c.n_rays;
+    cfg_.fov_rad = c.fov_rad;
+    cfg_.veh = c.veh; // all veh_params scalars are step-fresh (drive.h)
+    cfg_.reach_tol = c.reach_tol;
+    cfg_.sense_every = c.sense_every;
+    cfg_.freeze_sense = c.freeze_sense;
+    cfg_.l_occ = c.l_occ;
+    cfg_.l_free = c.l_free;
+    cfg_.optimistic = c.optimistic;
+    cfg_.p_thresh = c.p_thresh;
+    cfg_.band = c.band;
+    cfg_.ttl_s = c.ttl_s;
+    cfg_.min_gap = c.min_gap;
+    cfg_.min_gap_iters = c.min_gap_iters;
+    cfg_.sep_radius = c.sep_radius;
+    cfg_.sep_gain = c.sep_gain;
+  }
+  // The current config — a host seeds its live-knob mirror + the UI defaults from this.
+  const config &current_config() const { return cfg_; }
+
   // ── material-aware navigation (cvc/nav/material.h) ────────────────────────
   // COPIES the rasters, derives the material planes (material_build), and
   // computes the witness gate's feasibility surface as material.hard | TRUTH
