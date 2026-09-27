@@ -244,6 +244,7 @@ public:
     ctx_.proc = proc_;
     ctx_.pid = 1;
     se::apply_chroot(ctx_, root, prefix);
+    root_path_ = prefix;
 
     // DEFAULT-DENY on two axes — builtins (via the env) AND special forms (via the evaluator
     // gate) — but now leaning on the hardened MECHANISMS rather than a bare scalar allowlist:
@@ -288,6 +289,17 @@ public:
   // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
   // one-time warning, so N reactive widgets cannot together stall the frame.
   void begin_frame() { frame_spent_ = 0.0; }
+
+  // §12: re-chroot the read-lane to `path` so a mounted fragment's predicates read state
+  // relative to its own sub-prefix, exactly as its widget binds resolve there. The evaluator,
+  // env, and compile cache are unchanged — only ctx_.root moves (apply_chroot repoints it,
+  // creating the subtree if absent). A no-op when the scope is unchanged (the common case).
+  void set_root_path(cvc::app &app, const std::string &path) {
+    if (path == root_path_)
+      return;
+    se::apply_chroot(ctx_, cvc::state::instance(app), path);
+    root_path_ = path;
+  }
 
   struct Outcome {
     bool value;        // predicate result, or the caller's `dflt` on any failure
@@ -441,6 +453,7 @@ private:
   static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
   double frame_spent_ = 0.0; // wall-time spent on predicate evals in the current frame
+  std::string root_path_;    // §12: the scope the ctx_ is currently chrooted to (set_root_path)
   se::scheduler sched_;
   se::memory_tracker tracker_;
   std::shared_ptr<se::process> proc_;
@@ -477,10 +490,32 @@ struct Runtime::Impl {
 
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
 
+  // §12: the active mount scope during emit. Empty stack = the document prefix; each entry is
+  // a composed sub-prefix pushed when the walk enters a mounted subtree (Widget::scope) and
+  // popped on exit. current_prefix() is what binds and read-lane reads resolve against.
+  std::vector<std::string> scope_stack;
+  const std::string &current_prefix() const {
+    return scope_stack.empty() ? prefix : scope_stack.back();
+  }
+
   // Resolve a widget bind path to an absolute cvc::state path. Delegates to the
   // shared rule (bind.h) so widget binds and scene `visible:` binds collide on the
-  // same key for the same relative path.
-  std::string resolve(const std::string &bind) const { return resolve_bind(prefix, bind); }
+  // same key for the same relative path — against the active mount scope (§12).
+  std::string resolve(const std::string &bind) const {
+    return resolve_bind(current_prefix(), bind);
+  }
+
+#ifdef CVC_STATE_EXEC
+  // Lazily build the read-lane engine (a UI with no reactive fields pays nothing), then point
+  // it at the active mount scope so a mounted fragment's predicates read its own sub-prefix,
+  // matching where its binds resolve. Every reactive helper goes through here.
+  ReactiveEngine &ensure_reactive() {
+    if (!reactive)
+      reactive = std::make_unique<ReactiveEngine>(app, prefix);
+    reactive->set_root_path(app, current_prefix());
+    return *reactive;
+  }
+#endif
 
   void enqueue(const std::string &event) {
     if (!event.empty())
@@ -527,9 +562,7 @@ bool Runtime::Impl::visible(const Widget &w) {
   if (w.visible_when.empty())
     return true;
 #ifdef CVC_STATE_EXEC
-  if (!reactive)
-    reactive = std::make_unique<ReactiveEngine>(app, prefix);
-  const ReactiveEngine::Outcome o = reactive->eval_bool(w.visible_when, /*dflt=*/false);
+  const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(w.visible_when, /*dflt=*/false);
   if (!o.error.empty())
     warn_once(o.error);
   return o.value;
@@ -544,11 +577,10 @@ bool Runtime::Impl::disabled(const Widget &w) {
   if (w.enabled_when.empty() && w.disabled_when.empty())
     return false;
 #ifdef CVC_STATE_EXEC
-  if (!reactive)
-    reactive = std::make_unique<ReactiveEngine>(app, prefix);
+  ReactiveEngine &re = ensure_reactive();
   // enabled_when falsy -> disabled (fail-safe dflt=false: a broken predicate disables).
   if (!w.enabled_when.empty()) {
-    const ReactiveEngine::Outcome o = reactive->eval_bool(w.enabled_when, /*dflt=*/false);
+    const ReactiveEngine::Outcome o = re.eval_bool(w.enabled_when, /*dflt=*/false);
     if (!o.error.empty())
       warn_once(o.error);
     if (!o.value)
@@ -556,7 +588,7 @@ bool Runtime::Impl::disabled(const Widget &w) {
   }
   // disabled_when truthy -> disabled (fail-safe dflt=true: a broken predicate disables).
   if (!w.disabled_when.empty()) {
-    const ReactiveEngine::Outcome o = reactive->eval_bool(w.disabled_when, /*dflt=*/true);
+    const ReactiveEngine::Outcome o = re.eval_bool(w.disabled_when, /*dflt=*/true);
     if (!o.error.empty())
       warn_once(o.error);
     if (o.value)
@@ -572,9 +604,8 @@ bool Runtime::Impl::disabled(const Widget &w) {
 
 std::string Runtime::Impl::eval_text(const std::string &expr) {
 #ifdef CVC_STATE_EXEC
-  if (!reactive)
-    reactive = std::make_unique<ReactiveEngine>(app, prefix);
-  const ReactiveEngine::StringOutcome o = reactive->eval_string(expr, /*dflt=*/std::string());
+  const ReactiveEngine::StringOutcome o =
+      ensure_reactive().eval_string(expr, /*dflt=*/std::string());
   if (!o.error.empty())
     warn_once(o.error);
   return o.value;
@@ -587,9 +618,8 @@ std::string Runtime::Impl::eval_text(const std::string &expr) {
 
 std::string Runtime::Impl::eval_text_or_literal(const std::string &expr) {
 #ifdef CVC_STATE_EXEC
-  if (!reactive)
-    reactive = std::make_unique<ReactiveEngine>(app, prefix);
-  const ReactiveEngine::StringOutcome o = reactive->eval_string(expr, /*dflt=*/std::string());
+  const ReactiveEngine::StringOutcome o =
+      ensure_reactive().eval_string(expr, /*dflt=*/std::string());
   // Success -> the computed value; failure -> the literal verbatim (no warning: a tooltip that
   // starts with '(' is far more likely plain text than a broken expression).
   return o.error.empty() ? o.value : expr;
@@ -600,9 +630,7 @@ std::string Runtime::Impl::eval_text_or_literal(const std::string &expr) {
 
 std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
 #ifdef CVC_STATE_EXEC
-  if (!reactive)
-    reactive = std::make_unique<ReactiveEngine>(app, prefix);
-  const ReactiveEngine::StringListOutcome o = reactive->eval_string_list(expr);
+  const ReactiveEngine::StringListOutcome o = ensure_reactive().eval_string_list(expr);
   if (!o.error.empty())
     warn_once(o.error);
   return o.value;
@@ -616,9 +644,7 @@ std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
 int Runtime::Impl::eval_count(const std::string &expr) {
   constexpr int64_t kMaxRepeat = 4096; // a UI with thousands of repeated widgets is pathological
 #ifdef CVC_STATE_EXEC
-  if (!reactive)
-    reactive = std::make_unique<ReactiveEngine>(app, prefix);
-  const ReactiveEngine::IntOutcome o = reactive->eval_int(expr, /*dflt=*/0);
+  const ReactiveEngine::IntOutcome o = ensure_reactive().eval_int(expr, /*dflt=*/0);
   if (!o.error.empty())
     warn_once(o.error);
   int64_t n = o.value;
@@ -647,6 +673,22 @@ void Runtime::Impl::emit_children(const Widget &w) {
 // vertical stack. Used for both a Window's body and a Group.
 void Runtime::Impl::emit_container(const Widget &w) {
   Backend &b = *backend;
+  // §12: a mount point (Widget::scope) scopes its CHILDREN — the loaded fragment — to a deeper
+  // sub-prefix; the mount widget's own reactive fields already evaluated in the parent scope
+  // (in emit() before we got here). Push the composed scope for the children walk, pop after
+  // (RAII, so a backend throw cannot leave the stack unbalanced).
+  const bool scoped = !w.scope.empty();
+  if (scoped)
+    scope_stack.push_back(resolve_bind(current_prefix(), w.scope));
+  struct ScopeGuard {
+    std::vector<std::string> &stack;
+    bool active;
+    ~ScopeGuard() {
+      if (active)
+        stack.pop_back();
+    }
+  } guard{scope_stack, scoped};
+
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
     const std::string &id = w.id.empty() ? w.label : w.id;
     if (b.begin_grid(w.layout, id.c_str())) {

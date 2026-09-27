@@ -161,6 +161,14 @@ struct Widget {
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
 
+  // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
+  // state-path segment (e.g. "includes.rf") appended to the enclosing scope, so its whole
+  // SUBTREE resolves binds and evaluates reactive/read-lane expressions against that deeper
+  // sub-prefix (its own chroot), while the mount widget's own reactive fields stay in the
+  // parent scope. Empty for ordinary widgets. This is how a loaded fragment is isolated
+  // (roadmap §12.1: ui.docs.<doc>.includes.<as>).
+  std::string scope;
+
   // Kind::Custom: the registered type name, and the config bag (every widget key the
   // loader did not consume) a registered emit fn (register_widget_type) reads. Empty
   // for the built-in kinds.

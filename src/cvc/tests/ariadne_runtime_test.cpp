@@ -453,6 +453,54 @@ TEST(AriadneReactive, PredicateShowsThenHidesAsStateChanges) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // a passing predicate never warns
 }
 
+// --- §12 module mount: a scoped subtree resolves at its own sub-prefix -------
+
+TEST(AriadneMountScope, BindsResolveAtSubPrefix) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.checkbox_ret.committed = true;
+  mb.checkbox_ret.value = true;
+  // A mount wrapper (scope = "includes.rf") holding a checkbox bound to a BARE "on".
+  Widget cb = checkbox("Flag", "on", false);
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "includes.rf";
+  mount.children = {cb};
+  rt.set_root(group({mount}));
+  rt.render();
+  // The bind resolved under the mount's sub-prefix, NOT the document prefix.
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.on").value(), "1");
+  EXPECT_NE(cvc::state::instance(app)("ui.demo.on").value(), "1");
+}
+
+TEST(AriadneMountScope, ReactiveReadsResolveAtSubPrefix) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // Seed a flag at the mount's SUB-prefix; a child predicate reads it relative to the scope.
+  cvc::state::instance(app)("ui.demo.includes.rf.show").value(std::string("1"));
+  Widget t = text("hi");
+  t.visible_when = "(= (state-get \"show\") \"1\")";
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "includes.rf";
+  mount.children = {t};
+  rt.set_root(group({mount}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:hi")); // show==1 at the sub-prefix -> visible
+  // Prove it reads the SUB-prefix: flipping the sub-prefix key hides it (a doc-scope "show"
+  // would be a different node and could not).
+  cvc::state::instance(app)("ui.demo.includes.rf.show").value(std::string("0"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:hi"));
+}
+
 TEST(AriadneReactive, FalsePredicateHidesTheWholeSubtree) {
   if (!have_state_exec())
     GTEST_SKIP();
