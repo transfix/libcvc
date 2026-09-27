@@ -933,6 +933,8 @@ void Runtime::Impl::render() {
     reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
 #endif
   frame_instances = 0; // §3: reset the per-frame repeat-expansion budget
+  scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
+                       // this is belt-and-suspenders so one bad frame can't leak into the next)
   backend->begin_frame();
   emit(root);
   backend->end_frame();
