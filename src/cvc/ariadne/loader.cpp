@@ -936,6 +936,28 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       wrapper.links.push_back(std::move(h));
     }
   }
+  // §12 needs: the fragment can DECLARE the hole names it expects the mount to grant (a scalar or
+  // list) — the parent-scope analogue of §7.6 requires:. A declared need the mount did not wire is
+  // surfaced as a warning (fail-safe: the module still renders, but its ungranted name reads its
+  // own sandboxed local node), so a module documents and self-checks its imports.
+  if (frag.IsMap()) {
+    if (const YAML::Node needs = frag["needs"]) {
+      std::vector<std::string> need_names;
+      if (needs.IsScalar())
+        need_names.push_back(needs.Scalar());
+      else if (needs.IsSequence())
+        for (const auto &nn : needs)
+          if (nn.IsScalar())
+            need_names.push_back(nn.Scalar());
+      for (const std::string &nm : need_names) {
+        const bool granted = std::any_of(wrapper.links.begin(), wrapper.links.end(),
+                                         [&](const LinkHole &h) { return h.name == nm; });
+        if (!granted)
+          ctx.warn("ari: load '" + uri + "': fragment needs link '" + nm +
+                   "' but the mount granted none — the module will see its own local node");
+      }
+    }
+  }
   return wrapper;
 }
 

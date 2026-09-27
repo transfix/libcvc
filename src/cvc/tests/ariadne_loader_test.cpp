@@ -1774,6 +1774,26 @@ windows:
   EXPECT_TRUE(has_warning(r, "must not start with '/'"));
 }
 
+TEST(AriadneMount, LoadNeedsPreflightWarnsOnUngranted) {
+  SKIP_WITHOUT_YAML();
+  // The fragment declares it needs two holes; the mount grants only one -> a warning names the
+  // ungranted one, and the granted one is silent.
+  write_temp_ari("needs_panel.ari", "needs: [theme, fleet]\nroot: [ { text: x } ]\n");
+  const std::string main = write_temp_ari("main_needs.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: needs_panel.ari
+        as: rf
+        link:
+          theme: /ui.theme
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "needs link 'fleet'"));  // ungranted -> warned
+  EXPECT_FALSE(has_warning(r, "needs link 'theme'")); // granted -> silent
+}
+
 TEST(AriadneMount, LoadMountCycleTerminates) {
   SKIP_WITHOUT_YAML();
   // a loads b loads a — the resolved-URI mount guard must terminate (warn), not recurse forever.
