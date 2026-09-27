@@ -121,6 +121,12 @@ public:
   /// the deadline passes.
   virtual bool sleep(int pid, double seconds) = 0;
 
+  /// (await expr): yield the process until the next frame boundary. On a frame-driven
+  /// scheduler (async_scheduler under the Ariadne pump) it parks the process, re-readied by
+  /// wake_awaiting() once per pump. On a scheduler with no frame concept (the sync scheduler,
+  /// CLI/pycvc) it is a no-op and `await` degrades to identity (returns its value, no park).
+  virtual bool yield_frame(int pid) = 0;
+
   // --- Inter-process messaging (msg-send/msg-recv) ---
   virtual bool receive_message(int pid, const std::string &path) = 0;
   virtual int deliver_to_receivers(const std::string &path, const value_t &msg) = 0;

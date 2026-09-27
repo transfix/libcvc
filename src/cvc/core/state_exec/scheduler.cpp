@@ -574,6 +574,12 @@ bool scheduler::sleep(int pid, double seconds) {
   return true;
 }
 
+bool scheduler::yield_frame(int /*pid*/) {
+  // No frame boundary in the synchronous scheduler — (await …) is identity here (the intrinsic
+  // already returned its value; not parking lets the process simply continue).
+  return false;
+}
+
 bool scheduler::receive_message(int pid, const std::string &path) {
   auto it = processes_.find(pid);
   if (it == processes_.end())

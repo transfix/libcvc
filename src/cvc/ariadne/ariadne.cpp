@@ -1238,6 +1238,9 @@ void Runtime::Impl::submit_action(const std::string &action_prefix, const std::s
 void Runtime::Impl::pump_and_sweep_actions() {
   namespace se = cvc::state_exec;
   auto &sched = app.exec_scheduler();
+  // Frame boundary: re-ready any process parked by (await …) on a PRIOR drain. Called here (once
+  // per drain), NOT inside step()/sync_run, so an await crosses exactly one frame.
+  sched.wake_awaiting();
   // Pump a bounded slice: a quick (non-suspending) action completes within THIS drain (so a
   // fire-then-check interaction still sees its effect immediately), while an action that parks
   // on await/sleep/msg-recv yields and resumes on a later frame. Global step + wall-time

@@ -611,6 +611,29 @@ TEST_F(AsyncSchedulerIntrinsicsTest, MsgRecvViaIntrinsicSuspendsViaScheduler) {
   EXPECT_EQ(info->status, process_status::waiting);
 }
 
+TEST_F(AsyncSchedulerIntrinsicsTest, AwaitIntrinsicParksThenResumesWithValue) {
+  // A process that awaits mid-program parks at the await (awaiting a frame), then — after
+  // wake_awaiting re-readies it — resumes and terminates with the awaited value. There must be
+  // work AFTER the await (here `r`), else the program would finish in the await's own step
+  // (done=true) and terminate before the parked status matters.
+  execute_options opts;
+  opts.env = env; // reuse the fixture's intrinsics env (has `await`); await targets the RUNNING
+                  // process via sched.current_pid(), not ictx.pid.
+  int pid = sched.execute(std::string("(begin (set r (await 42)) r)"), opts);
+  for (int i = 0; i < 16 && sched.get_process_info(pid) &&
+                  sched.get_process_info(pid)->status != process_status::waiting;
+       ++i)
+    sched.sync_step();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::waiting); // parked by (await …)
+  EXPECT_GE(sched.wake_awaiting(), 1);              // frame boundary re-readies it
+  auto results = sched.sync_run();
+  auto it = results.find(pid);
+  ASSERT_NE(it, results.end());
+  EXPECT_EQ(std::get<int64_t>(it->second.v), 42); // resumed with the awaited value
+}
+
 TEST(AsyncSchedulerTest, KillOwnerReapsProcessGroup) {
   async_scheduler sched;
   execute_options a;
@@ -644,6 +667,21 @@ TEST(AsyncSchedulerTest, PostMessageFromAnotherThreadWakesReceiver) {
   auto info = sched.get_process_info(pid);
   ASSERT_TRUE(info.has_value());
   EXPECT_NE(info->status, process_status::waiting); // woken
+}
+
+TEST(AsyncSchedulerTest, YieldFrameParksUntilWakeAwaiting) {
+  async_scheduler sched;
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.sync_step();                   // start it
+  ASSERT_TRUE(sched.yield_frame(pid)); // (await …) parks it awaiting a frame
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+  EXPECT_FALSE(sched.has_runnable()); // parked -> not runnable this frame
+  // A plain step does NOT wake it — only wake_awaiting (called once per frame by the pump) does,
+  // so an await crosses exactly one frame rather than resuming within the same pump.
+  sched.sync_step();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+  EXPECT_EQ(sched.wake_awaiting(), 1); // frame boundary
+  EXPECT_NE(sched.get_process_info(pid)->status, process_status::waiting);
 }
 
 // The app-wide scheduler service: cvc::app::exec_scheduler() is one lazily-built

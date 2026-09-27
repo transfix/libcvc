@@ -84,6 +84,14 @@ public:
   /// passes.  Identical semantics to the sync scheduler.
   bool sleep(int pid, double seconds) override;
 
+  /// (await expr): park the process (`waiting` + awaiting_frame) until the next frame
+  /// boundary; re-readied by wake_awaiting(). Returns false for an unknown/non-runnable pid.
+  bool yield_frame(int pid) override;
+  /// Re-ready every process parked by yield_frame — call ONCE per frame (the Ariadne pump
+  /// does, at the top of a drain, NOT inside step()/sync_run, so an await crosses exactly one
+  /// frame). Returns the number re-readied.
+  int wake_awaiting();
+
   // --- Inter-process messaging (msg-send/msg-recv) ---
   bool receive_message(int pid, const std::string &path) override;
   int deliver_to_receivers(const std::string &path, const value_t &msg) override;

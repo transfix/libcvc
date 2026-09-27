@@ -384,6 +384,18 @@ value_t intrinsic_sleep(intrinsics_context *ctx, std::span<const value_t> args) 
   return value_t(ctx->sched->sleep(pid, seconds));
 }
 
+value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "await");
+  require_sched(ctx, "await");
+  int pid = ctx->sched->current_pid();
+  if (pid < 0)
+    pid = ctx->pid;
+  // Yield the running process until the next frame boundary (a no-op on a scheduler with no
+  // frames, where await is identity), then resume with the already-evaluated argument value.
+  ctx->sched->yield_frame(pid);
+  return args[0];
+}
+
 value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "ps");
   require_sched(ctx, "ps");
@@ -742,6 +754,7 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("pause", intrinsic_pause);
   reg("resume", intrinsic_resume);
   reg("sleep", intrinsic_sleep);
+  reg("await", intrinsic_await);
   reg("ps", intrinsic_ps);
   reg("inspect", intrinsic_inspect);
 

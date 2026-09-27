@@ -279,6 +279,34 @@ bool async_scheduler::sleep(int pid, double seconds) {
   return true;
 }
 
+bool async_scheduler::yield_frame(int pid) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  auto &proc = *it->second;
+  if (proc.status != process_status::ready && proc.status != process_status::running)
+    return false;
+  if (proc.status == process_status::running) {
+    auto now = std::chrono::steady_clock::now();
+    proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  }
+  proc.awaiting_frame = true;
+  proc.status = process_status::waiting;
+  return true;
+}
+
+int async_scheduler::wake_awaiting() {
+  int woken = 0;
+  for (auto &[pid, proc] : processes_) {
+    if (proc->status == process_status::waiting && proc->awaiting_frame) {
+      proc->awaiting_frame = false;
+      proc->status = process_status::ready;
+      ++woken;
+    }
+  }
+  return woken;
+}
+
 bool async_scheduler::receive_message(int pid, const std::string &path) {
   auto it = processes_.find(pid);
   if (it == processes_.end())
