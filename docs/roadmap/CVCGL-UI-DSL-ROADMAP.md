@@ -3124,10 +3124,24 @@ instead of a full transfer.
 > `restore_state(state&, uri)`** land in `state_io.{h,cpp}` at the resolver layer — option **(b)**,
 > so `cvc::state` stays dependency-free; they mirror `cvc::state::save`/`restore` semantics
 > (absolute-path keys, restore at the same/root position), just re-routed through any scheme.
-> **Deferred:** the **`http(s)` PUT** writer (the store seam is ready; only the libcurl PUT body is
-> unwritten) and, separately, `cvc::state::save(uri)` member overloads if the layering is ever
-> inverted. Tests: `AriadneUri.Store*`, `AriadneStateUri.Store*` / `UnregisterRemovesBothReadAndWrite`,
+> `state://` serves **both `?value` and `?data`** (a raw string/byte blob on `data()` — the channel
+> the §13.9 HTTP cache parks a body on) for read and write, following a transparent link to its
+> target on BOTH paths (so a store is never shadowed on a non-writable link). Tests:
+> `AriadneUri.Store*`, `AriadneStateUri.Store*` / `StoreAndResolveDataChannel` /
+> `StoreThroughNonWritableTransparentLinkRoundTrips` / `UnregisterRemovesBothReadAndWrite`,
 > `AriadneStateIo.SaveRestoreRoundTripsVia{File,StateScheme}`.
+>
+> **Planned next:**
+> - **Deprecate `cvc::state::save`/`restore`** in favour of `cvc::ariadne::save_state`/`restore_state`
+>   — one persistence path (any scheme, atomic file writes) instead of two, and it keeps `cvc::state`
+>   free of even the local-file I/O. Needs a usage audit + migration across the tree first (grl-snam,
+>   pycvc, volrover3, …), then a `[[deprecated]]` pass, so it is staged rather than flipped now.
+> - **Request headers for the `http(s)` writer (and reader)** — auth (a bearer token), content-type,
+>   conditional-PUT validators. The `store`/`resolve` API needs an optional per-call `headers`/options
+>   channel (or a registered per-host auth provider the http handler consults), so
+>   `store("https://…", body, {headers})` can carry `Authorization: Bearer …`. This lands with the
+>   `http(s)` PUT writer (still deferred — the store seam is ready; only the libcurl PUT body +
+>   header plumbing are unwritten), and a successful PUT must invalidate the §13.9 cache entry.
 
 The §13 resolver was **read-only**: `resolve(uri)` *fetches* bytes. So nothing that *writes*
 goes through it — notably `cvc::state::save(filename)` / `restore(filename)`, which are plain Boost
