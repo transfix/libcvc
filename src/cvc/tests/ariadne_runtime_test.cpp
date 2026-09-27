@@ -640,6 +640,55 @@ TEST(AriadneMountScope, RepeatedMountLinkTargetsAreIndexed) {
   EXPECT_TRUE(mb.saw("slider_int:Slot=20")); // instance 1 -> fleet.1
 }
 
+TEST(AriadneMountScope, MountInitSeedsAtSubPrefix) {
+  if (!have_state_exec() || !have_yaml())
+    GTEST_SKIP() << "needs state_exec + yaml";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mount_init";
+  fs::create_directories(dir);
+  const fs::path frag = dir / "panel.ari";
+  std::ofstream(frag) << "init: (state-set \"lvl\" \"7\")\n"
+                         "root:\n  - slider_int: Level\n    bind: lvl\n    lo: 0\n    hi: 100\n";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  // The fragment's init ran at the mount's sub-prefix (before the slider was emitted), seeding lvl.
+  EXPECT_TRUE(mb.saw("slider_int:Level=7"));
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.lvl").value(), "7");
+}
+
+TEST(AriadneMountScope, MountInitRunsOnceNotPerFrame) {
+  if (!have_state_exec() || !have_yaml())
+    GTEST_SKIP() << "needs state_exec + yaml";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mount_init_once";
+  fs::create_directories(dir);
+  const fs::path frag = dir / "panel.ari";
+  std::ofstream(frag) << "init: (state-set \"n\" \"1\")\nroot: [ { text: hi } ]\n";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.n").value(), "1");
+  // Overwrite the seeded value and render again: init must NOT re-run and clobber it back to "1".
+  cvc::state::instance(app)("ui.demo.includes.rf.n").value(std::string("99"));
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.n").value(), "99");
+}
+
 TEST(AriadneMountScope, EndToEndLoadCommitsAtSubPrefix) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";

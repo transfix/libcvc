@@ -862,10 +862,6 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       if (kv.first.IsScalar() && kv.second.IsScalar())
         args[kv.first.Scalar()] = kv.second.Scalar();
   substitute_node(frag, args);
-  // Honestly flag the not-yet-wired pieces rather than silently dropping them.
-  if (frag.IsMap() && frag["init"].IsDefined())
-    ctx.warn("ari: load '" + uri +
-             "': the fragment's init: is not yet run for mounted fragments (a later slice)");
   // Parse the fragment in an ISOLATED sub-context: fresh units (module boundary), based at the
   // fragment's own directory, carrying the mount stack (with this URI pushed) + the shared mount
   // counter for the cycle/depth/aggregate guards. Its warnings bubble up to the host document.
@@ -897,6 +893,10 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   // fields evaluate at the sub-prefix, while the parent's load:-block fields land on the wrapper.
   Widget wrapper = group({std::move(frag_root)});
   wrapper.scope = "includes." + as;
+  // §12: carry the fragment's own init: so the Runtime can run it once at the sub-prefix (the
+  // loader is state-free; it captures the script, the Runtime executes it).
+  if (frag.IsMap() && frag["init"] && frag["init"].IsScalar())
+    wrapper.init_script = frag["init"].Scalar();
   // §12 link: parent-scope holes — each entry becomes a transparent link node the Runtime plants
   // inside the mount's sub-prefix (created there, not here — the loader is state-free). Value form
   // `name: target` (rw); map form `name: { to: target, mode: ro|rw }`.

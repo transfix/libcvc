@@ -526,6 +526,14 @@ struct Runtime::Impl {
   void wire_holes(const std::string &parent_prefix, const std::string &sub_prefix,
                   const std::vector<LinkHole> &links);
 
+  // §12 load: sub-prefixes whose mounted fragment's init: has already run. Init is a ONE-SHOT
+  // seed, so unlike wired_mounts this is NOT cleared on a reconcile — the fragment's init runs
+  // once when the mount first appears, never re-running when the tree is rebuilt.
+  std::set<std::string> ran_inits;
+  // Run a mounted fragment's init: once at its sub-prefix (chrooted there by run_init); any error
+  // is surfaced as a one-time runtime warning rather than thrown into the frame.
+  void run_mount_init(const std::string &sub_prefix, const std::string &script);
+
   // Resolve a widget bind path to an absolute cvc::state path. Delegates to the
   // shared rule (bind.h) so widget binds and scene `visible:` binds collide on the
   // same key for the same relative path — against the active mount scope (§12).
@@ -708,16 +716,25 @@ void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::stri
     // state-get read_through_link); setLinkWritable gates the write (rw -> target, ro -> local).
     const std::string hole_path = resolve_bind(sub_prefix, h.name);
     const std::string target = resolve_bind(parent_prefix, h.target);
+    // Record the path BEFORE linking, so even if linkTo throws mid-way the node is still torn
+    // down on the next reconcile (clearLink is idempotent on a non-link node).
+    planted_holes.push_back(hole_path);
     try {
       cvc::state &node = root(hole_path);
       node.linkTo(target, cvc::state::link_mode::transparent);
       node.setLinkWritable(h.writable);
-      planted_holes.push_back(hole_path); // remembered so a reconcile can tear it down
     } catch (const std::exception &) {
       // Never throw into a frame; a hole that cannot be wired simply isn't (the module then
       // reads/writes its own local node — sandboxed, no parent reach).
     }
   }
+}
+
+void Runtime::Impl::run_mount_init(const std::string &sub_prefix, const std::string &script) {
+  std::vector<std::string> errs;
+  run_init(app, sub_prefix, script, &errs);
+  for (const std::string &e : errs)
+    warn_once("ari: mount init at '" + sub_prefix + "': " + e);
 }
 
 void Runtime::Impl::emit_container(const Widget &w) {
@@ -733,6 +750,10 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // Plant the mount's parent-scope holes once, BEFORE emitting the fragment that reads them.
     if (!w.links.empty() && wired_mounts.insert(sub_prefix).second)
       wire_holes(parent_prefix, sub_prefix, w.links);
+    // Run the fragment's init: once (after its holes exist, so init may seed through them). Kept
+    // in ran_inits, NOT cleared on reconcile — a one-shot seed, never re-run per frame/rebuild.
+    if (!w.init_script.empty() && ran_inits.insert(sub_prefix).second)
+      run_mount_init(sub_prefix, w.init_script);
     scope_stack.push_back(sub_prefix);
   }
   struct ScopeGuard {

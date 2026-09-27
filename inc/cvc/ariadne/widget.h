@@ -186,6 +186,12 @@ struct Widget {
   // granted parent/shared scopes and nothing else (§7.8.3). Only set on a mount wrapper.
   std::vector<LinkHole> links;
 
+  // §12 load: the mounted fragment's own init: script (a state_exec program), run ONCE at the
+  // mount's sub-prefix when it first appears — after its holes are wired, so init may seed through
+  // them. A seed, not a per-frame action: it does not re-run on a reconcile. Only on a mount
+  // wrapper; empty otherwise.
+  std::string init_script;
+
   // Kind::Custom: the registered type name, and the config bag (every widget key the
   // loader did not consume) a registered emit fn (register_widget_type) reads. Empty
   // for the built-in kinds.
