@@ -77,7 +77,13 @@ recipe:
   # and will not compile until 3.4.0+cvc.2 (with the setter) is published. The
   # published 3.4.0+cvc.1 predates #433. cvcgl already sits at +cvc.2, so this
   # brings the tested-together family back to a single revision.
-  cvc_revision: 2
+  # Bumped 2 -> 3 (3.4.0 lineage): republish the family carrying the coef_mlp .cvcnav format v2
+  # (two-head sigmoid λ_soft/λ_hard, #436). The wasm-mt republish also (a) turns CVC_STATE_EXEC back
+  # ON for wasm (it was wrongly forced OFF — the state_exec evaluator has no gRPC dependency and must
+  # always build), and (b) picks up the gRPC/xmlrpc dep guard above so `cvcpkg install cvc/libcvc
+  # --platform wasm-mt` resolves again. A v2 .cvcnav hard-fails on a pre-v2 host, so hosts (demo3 /
+  # cvcdbg fleet) must land 3.4.0+cvc.3 before any v2 blob ships.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -235,12 +241,24 @@ depends:
     # falls back to `find_dependency(LAPACK)` — which resolves to Accelerate.
     - name: openblas
       platforms: [linux, freebsd, openbsd, netbsd, windows]
+    # The gRPC/xmlrpc network state-transport stack (CVC_USING_XMLRPC + CVC_ENABLE_GRPC).
+    # Scoped to the platforms this recipe actually BUILDS the transport on (the build matrix
+    # below: linux/macos/windows). The wasm-mt bundle (built separately by publish-cvcgl-wasm.yml,
+    # xmlrpc/grpc OFF, CVC_STATE_EXEC ON) links none of these, so declaring them for wasm made
+    # `cvcpkg install cvc/libcvc --platform wasm-mt` fail to resolve (abseil/protobuf/grpc are not
+    # published for wasm). The state_exec evaluator is independent of this stack and stays on.
     - name: openssl
+      platforms: [linux, macos, windows]
     - name: c-ares
+      platforms: [linux, macos, windows]
     - name: re2
+      platforms: [linux, macos, windows]
     - name: abseil
+      platforms: [linux, macos, windows]
     - name: protobuf
+      platforms: [linux, macos, windows]
     - name: grpc
+      platforms: [linux, macos, windows]
     - name: pthreads4w
       platforms: [windows]
   host_tools:
