@@ -3111,6 +3111,48 @@ instead of a full transfer.
   demand) the distributed state system already sketches — the cache is a first, local consumer of
   that path.
 
+### 13.10 The WRITE side — a `store`/PUT capability + URI-aware `state::save`/`restore` — *planned*
+
+The §13 resolver is **read-only today**: `resolve(uri)` *fetches* bytes. So nothing that *writes*
+goes through it — notably `cvc::state::save(filename)` / `restore(filename)`, which are plain Boost
+`write_json` / `read_json` straight to a local path (verified: `state.cpp` includes no `uri.h`, calls
+no `resolve()`). To let a document (or the state tree) round-trip over the *same* scheme set as
+`import:`/`load:`/`source:` — `state://`, `http(s)://`, a custom `pkg://`/`s3://` — the resolver needs
+a symmetric **write half**, and `save`/`restore` need to route through it.
+
+- **A `store` capability on the handler registry.** Mirror the read side: alongside
+  `resolve(uri) → resource`, add `store(uri, bytes, base) → store_result{ok, canonical, error}` and a
+  `register_uri_store_handler(scheme, StoreFn)` (a scheme may register a reader, a writer, or both).
+  The read/write pair per scheme:
+  - **`file`** (built-in, app-free): write the bytes to the resolved path **atomically** — write to a
+    sibling temp (the §13.4 `mkstemp` machinery) then `rename()` over the target, so a crash or a
+    concurrent reader never sees a half-written file. This is what `state::save` *should* already do.
+  - **`state://`** (opt-in, host-registered with the root): `store` writes into the addressed node —
+    `?value` sets the value channel, `?data` the typed `data()` blob (the write analogue of §13.3's
+    read). So `save("state://scene.snapshot")` parks a serialized subtree on a node, and `restore`
+    reads it back — a pure in-tree round-trip, replication-friendly.
+  - **`http(s)://`** (optional): an HTTP `PUT`/`POST` via the same libcurl handler — heavier (auth,
+    idempotency, the §13.9 cache must invalidate the entry on a successful store), so likely a later
+    increment, but the seam is uniform. `pkg://`/`s3://`/custom writers are pure registration.
+- **URI-aware `state::save` / `restore`.** Add `save(uri)` / `restore(uri)` that serialize
+  (`ptree()`/`json()`) then `store(uri, bytes)` / `resolve(uri) → bytes` then re-ingest — the existing
+  `filename` overloads become the `file://` case. A bare/relative path stays a local file, exactly as
+  now, so no caller breaks.
+- **The layering decision (open).** `uri.{h,cpp}` (the *pure* resolver) has **no** `cvc::state`
+  dependency — only the separate `uri_state.cpp` TU does — so a header cycle is not the blocker; the
+  question is architectural: should low-level `cvc::state` depend up on the resolver, or should the
+  resolver-aware save live *beside* the resolver? Two options: **(a)** `state::save(uri)` calls
+  `cvc::ariadne::store()` directly (simplest surface, but a layering inversion — state is lower-level
+  than the UI resolver); **(b, recommended)** a resolver-layer free function
+  `cvc::ariadne::save_state(state&, uri)` / `restore_state(state&, uri)` that operates *on* a `state&`
+  and keeps `cvc::state` dependency-free — or, equivalently, `cvc::state` exposes a tiny injected
+  byte-sink/source hook the resolver layer registers into. Decide (b) unless a strong reason to invert.
+- **Payoff / symmetry.** `store` completes the resolver into a genuine two-way I/O layer: read
+  (`resolve`) + write (`store`) across one scheme registry, so `load:`/`source:` (in) and
+  `save`/persist (out) are symmetric, a UI can snapshot itself to `state://`/`http(s)://`/custom
+  uniformly, and `state::save` finally gains atomic file writes for free. It also gives §18's
+  s-expr `.ari` and §19's `(load …)` a natural `(save "uri" …)` counterpart.
+
 ---
 
 ## 14. pycvc — registering Python intrinsics and Python URI handlers
