@@ -283,3 +283,40 @@ TEST(NavMaterialDeploy, LearnedLamHeadDrivesReroute) {
       << "the learned lam head did not increase reroute away from +x risk (lam0=" << x_lam0
       << " lamhi=" << x_lam_hi << ")";
 }
+
+// (5) The SHIPPED cvc-dbg-weights nav policy layout: 6-input RISK-ONLY + lam head — has_risk() but
+// NOT has_mu() (no grip column), out=4. grl-snam `coef_train --w-risk --learned-lam` produces
+// exactly this (add_lam_head(add_risk_feature(CoefMLP()))), and it's what ships as
+// coef_mlp_riskaware.cvcnav / demo3's --grip auto-load. The other tests above drive a 7-in
+// grip+risk net; pin the shipped risk-only+lam contract too — it round-trips through .cvcnav and
+// drives the material path (which a risk net REQUIRES; the grip field is present but unused as a
+// feature since has_mu()==false).
+TEST(NavMaterialDeploy, ShippedRiskOnlyLamNetRoundTripsAndDrives) {
+  deploy_world w;
+  const std::string path = tmp_cvcnav("risk_only_lam");
+  make_net(6, 4, coef_mlp::kFlagFeatRisk, 0.5f).save(path);
+  coef_mlp net = coef_mlp::load(path);
+  EXPECT_EQ(net.in_features(), 6);
+  EXPECT_EQ(net.out_features(), 4);
+  EXPECT_TRUE(net.has_risk());
+  EXPECT_FALSE(net.has_mu()); // risk-only: the kFlagFeatRisk disambiguates the 6-in net from grip
+  EXPECT_TRUE(net.has_lam());
+  std::vector<float> store;
+  material_stack ms = w.risk_stack(store);
+  std::vector<float> ls(w.N, 0.5f), lh(w.N, 1.0f);
+  material_drive md;
+  md.stack = &ms;
+  md.lam_soft = ls.data();
+  md.lam_hard = lh.data();
+  std::vector<float> o = w.o, th = w.th, sp = w.sp, mc(w.N);
+  // Must not throw (feature width 6 == 5+risk, risk source present; no grip feature needed) and
+  // move.
+  ASSERT_NO_THROW(drive_step_material(w.fs, o.data(), th.data(), sp.data(), w.carrot.data(), net,
+                                      w.N, nullptr, w.v, md, mc.data(), 1));
+  int moved = 0;
+  for (int i = 0; i < 2 * w.N; ++i)
+    if (o[i] != w.o[i])
+      ++moved;
+  EXPECT_GT(moved, 0) << "the shipped 6-in risk-only+lam net did not drive the agents";
+  fs::remove(path);
+}

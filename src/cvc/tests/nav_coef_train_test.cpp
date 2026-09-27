@@ -371,6 +371,60 @@ TEST(NavCoefTrain, BakedPolicyRoundTripsThroughCvcnav) {
   EXPECT_EQ(baked.arch_hash(), reloaded.arch_hash());
 }
 
+// End-to-end native (torch-free) TRAINING INTEGRATION test: one run through the whole deployable
+// path — measure the window loss, train, assert it strictly descends, then bake -> save .cvcnav ->
+// reload and confirm the reloaded artifact reproduces the SAME just-trained policy. The
+// loss-decrease (TrainingReducesLoss) and the save/reload byte-stability (BakedPolicyRoundTrips)
+// each exist alone; this asserts them TOGETHER — the property "the weights I trained down are the
+// ones that survive serialization", the guarantee a demo/game-engine relies on when it loads a
+// natively-trained coef_mlp. Ordinary suite (runs every PR); the heavy sim-transfer check stays in
+// NavCoefTrainConvergence. CPU-only, seconds at this size.
+TEST(NavCoefTrain, TrainThenSaveReloadIntegration) {
+#if defined(__APPLE__)
+  GTEST_SKIP()
+      << "short-run loss-decrease margin below arm64 macOS FP drift (see TrainingReducesLoss)";
+#endif
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg;
+  cfg.n = 64;
+  cfg.hidden = 64;
+  cfg.horizon = 24;
+  cfg.window = 6;
+  cfg.steps = 60;
+  cfg.seed = 0;
+
+  std::vector<float> o(2 * cfg.n), goal(2 * cfg.n), v(2 * cfg.n, 0.0f);
+  sc.sample_starts_goals(cfg.n, 999, o.data(), goal.data());
+
+  coef_trainer tr(cfg, /*init_seed=*/3);
+  const double before =
+      tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), cfg.n, cfg.window, nullptr);
+  tr.train(sc, /*verbose=*/false);
+  const double after =
+      tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), cfg.n, cfg.window, nullptr);
+  std::printf("[train-integration] window loss before=%.4f after=%.4f\n", before, after);
+  EXPECT_LT(after, before) << "native training did not reduce the rollout loss";
+
+  // Bake the TRAINED weights -> .cvcnav -> reload; the reloaded policy must reproduce it exactly.
+  cvc::nav::coef_mlp baked = tr.to_coef_mlp();
+  const std::string path = std::string(::testing::TempDir()) + "/coef_train_integration.cvcnav";
+  baked.save(path);
+  cvc::nav::coef_mlp reloaded = cvc::nav::coef_mlp::load(path);
+  EXPECT_EQ(baked.in_features(), reloaded.in_features());
+  EXPECT_EQ(baked.out_features(), reloaded.out_features());
+  EXPECT_EQ(baked.arch_hash(), reloaded.arch_hash());
+  const float feats[3][5] = {{0.4f, 8.0f, 0.6f, -0.3f, 0.2f},
+                             {1.2f, 2.0f, -0.5f, 0.5f, -0.7f},
+                             {0.0f, 15.0f, 0.1f, 0.99f, 0.3f}};
+  for (const auto &f : feats) {
+    float a[3], b[3];
+    baked.forward(f, 1, a, 1);
+    reloaded.forward(f, 1, b, 1);
+    for (int k = 0; k < 3; ++k)
+      EXPECT_NEAR(a[k], b[k], 1e-5f) << "trained coefficient did not survive .cvcnav round-trip";
+  }
+}
+
 #ifdef CVC_ENABLE_CUDA
 // The CUDA trainer's per-window loss + gradient must match the CPU trainer's,
 // float-equivalently, on the same params/scene/batch — the device backward is a
