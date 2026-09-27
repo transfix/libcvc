@@ -42,6 +42,15 @@ struct UriResult {
   std::string error;
 };
 
+// §13.10 the WRITE analogue of UriResult: `ok` with a `canonical` identity (e.g. the written
+// file's absolute path) for the stored resource, or an `error`. `store()` fills an empty
+// canonical with the raw URI, mirroring resolve().
+struct StoreResult {
+  bool ok = false;
+  std::string canonical;
+  std::string error;
+};
+
 // Parse a URI string. Never fails: a malformed/bare string falls back to scheme "file".
 Uri parse_uri(const std::string &s);
 
@@ -68,6 +77,35 @@ bool has_uri_handler(const std::string &scheme);
 // resolve a relative file path); pass "" at the top level. Dispatches by scheme: the built-in
 // "file" handler for file/bare, else a registered handler; an unknown scheme yields an error.
 UriResult resolve(const std::string &uri, const std::string &base = std::string());
+
+// -------------------------------------------------------------------------------------------------
+// §13.10 the WRITE side — a `store` (PUT) capability symmetric with resolve(). One scheme registry
+// pair backs read (resolve) and write (store); a scheme may register a reader, a writer, or both.
+// -------------------------------------------------------------------------------------------------
+
+// A scheme's WRITE handler: store `content` at `u` (its scheme matches the registration), `base`
+// as in resolve. The write analogue of UriHandler.
+using UriStoreHandler =
+    std::function<StoreResult(const Uri &u, const std::string &content, const std::string &base)>;
+
+// Register (or replace) the WRITE handler for a scheme (the write analogue of
+// register_uri_handler). The built-in "file" writer is always available (a registration overrides
+// it). Process-global and thread-safe; register before store().
+void register_uri_store_handler(const std::string &scheme, UriStoreHandler handler);
+
+// Remove a scheme's registered WRITE handler (no-op if none / for the built-in "file"). A host
+// tears down a state/http writer this way before the context it captured is destroyed.
+void unregister_uri_store_handler(const std::string &scheme);
+
+// Whether a scheme can be written (a registered writer, or the built-in "file").
+bool has_uri_store_handler(const std::string &scheme);
+
+// Store `content` at `uri`. `base` resolves a relative file path (as resolve). Dispatches by
+// scheme: a registered writer wins, else the built-in "file" writer (an ATOMIC temp-write in the
+// target's directory + rename over it, so a crash/concurrent reader never sees a half-written
+// file), else an error. Never throws.
+StoreResult store(const std::string &uri, const std::string &content,
+                  const std::string &base = std::string());
 
 // Resolve a relative `path` against `base` (the enclosing fragment's directory) to an absolute,
 // normalized path string — the file resolver's base rule, exposed for callers that compute a

@@ -53,6 +53,21 @@ UriResult state_resolve(cvc::state &root, const Uri &u) {
   return {true, std::move(content), canonical, std::string()};
 }
 
+// §13.10 the write analogue: store `content` into the addressed node's value channel. operator()
+// CREATES the node path if absent (a store may target a not-yet-existing node); an empty path is
+// the root. Writing via value() routes through a writable transparent link to its target (the
+// write analogue of state_resolve's follow), else it writes the node's own value.
+StoreResult state_store(cvc::state &root, const Uri &u, const std::string &content) {
+  const std::string channel = channel_of(u.query);
+  if (!channel.empty() && channel != "value")
+    return {false, std::string(),
+            "ari: state channel '?" + channel +
+                "' is not writable by the built-in state handler (only '?value')"};
+  cvc::state &node = u.path.empty() ? root : root(u.path);
+  node.value(content);
+  return {true, "state://" + node.fullName() + "?value", std::string()};
+}
+
 } // namespace
 
 void register_state_uri_handler(cvc::state &root) {
@@ -60,6 +75,15 @@ void register_state_uri_handler(cvc::state &root) {
   register_uri_handler("state", [root_ptr](const Uri &u, const std::string & /*base*/) {
     return state_resolve(*root_ptr, u);
   });
+  register_uri_store_handler(
+      "state", [root_ptr](const Uri &u, const std::string &content, const std::string & /*base*/) {
+        return state_store(*root_ptr, u, content);
+      });
+}
+
+void unregister_state_uri_handler() {
+  unregister_uri_handler("state");       // read
+  unregister_uri_store_handler("state"); // write
 }
 
 } // namespace ariadne

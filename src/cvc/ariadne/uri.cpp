@@ -35,6 +35,10 @@ std::map<std::string, UriHandler> &uri_registry() {
   static std::map<std::string, UriHandler> r;
   return r;
 }
+std::map<std::string, UriStoreHandler> &uri_store_registry() { // §13.10 write handlers
+  static std::map<std::string, UriStoreHandler> r;
+  return r;
+}
 
 std::string to_lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -59,6 +63,69 @@ std::string to_lower(std::string s) {
 bool file_scheme_overridden() {
   std::lock_guard<std::mutex> lock(uri_mutex());
   return uri_registry().find("file") != uri_registry().end();
+}
+
+// Create a FRESH file in `dir` named "<prefix>XXXXXX<suffix>", write `content`, return its path
+// (empty + `err` set on failure). Created EXCLUSIVELY (mkstemps: O_CREAT|O_EXCL, fresh random name,
+// no symlink-follow, mode 0600) so a predicted-name symlink cannot hijack the write (CWE-377). The
+// shared write primitive for the temp bridge (into the temp dir) and the atomic file store (into
+// the target's dir). POSIX; a Windows fallback uses an unpredictable random name.
+std::string write_new_file(const std::filesystem::path &dir, const std::string &prefix,
+                           const std::string &suffix, const std::string &content,
+                           std::string &err) {
+  namespace fs = std::filesystem;
+#ifndef _WIN32
+  std::string tmpl = (dir / (prefix + "XXXXXX" + suffix)).string();
+  const int fd = ::mkstemps(&tmpl[0], static_cast<int>(suffix.size()));
+  if (fd < 0) {
+    err = "cannot create a file in '" + dir.string() + "'";
+    return std::string();
+  }
+  const char *p = content.data();
+  std::size_t left = content.size();
+  bool ok = true;
+  while (left > 0) {
+    const ssize_t w = ::write(fd, p, left);
+    if (w < 0) {
+      if (errno == EINTR)
+        continue; // an interrupted write is retryable, not a failure
+      ok = false;
+      break;
+    }
+    if (w == 0) { // a regular file should not return 0, but guard against a spin
+      ok = false;
+      break;
+    }
+    p += w;
+    left -= static_cast<std::size_t>(w);
+  }
+  ::close(fd);
+  if (!ok) {
+    std::error_code rmec;
+    fs::remove(tmpl, rmec);
+    err = "cannot write a file in '" + dir.string() + "'";
+    return std::string();
+  }
+  return tmpl; // mkstemps rewrote the XXXXXX in place
+#else
+  static std::atomic<std::uint64_t> counter{0};
+  const std::uint64_t n = counter.fetch_add(1);
+  const fs::path path = dir / (prefix + proc_temp_token() + "-" + std::to_string(n) + suffix);
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    err = "cannot create a file in '" + dir.string() + "'";
+    return std::string();
+  }
+  out.write(content.data(), static_cast<std::streamsize>(content.size()));
+  out.close();
+  if (!out) {
+    std::error_code rmec;
+    fs::remove(path, rmec);
+    err = "cannot write a file in '" + dir.string() + "'";
+    return std::string();
+  }
+  return path.string();
+#endif
 }
 
 // An .ari fragment is DSL text; a fragment larger than this is almost certainly a mistake (or
@@ -101,6 +168,30 @@ UriResult resolve_file(const Uri &u, const std::string &base) {
   if (in.bad())
     return {false, std::string(), full, "ari: read error on file '" + full + "'"};
   return {true, std::move(content), full, std::string()};
+}
+
+// §13.10 the built-in `file` WRITER: store `content` at the resolved path ATOMICALLY — write a
+// fresh temp IN THE SAME DIRECTORY (so the rename stays on one filesystem and is atomic) then
+// rename over the target, so a reader or a crash never observes a half-written file. App-free.
+StoreResult store_file(const Uri &u, const std::string &content, const std::string &base) {
+  namespace fs = std::filesystem;
+  const std::string full = resolve_file_path(u.path, base);
+  const fs::path target(full);
+  std::error_code ec;
+  if (fs::is_directory(target, ec))
+    return {false, full, "ari: cannot store to '" + full + "': it is a directory"};
+  const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path(".");
+  std::string werr;
+  const std::string tmp = write_new_file(dir, ".ari-store-", ".tmp", content, werr);
+  if (tmp.empty())
+    return {false, full, "ari: cannot store to '" + full + "': " + werr};
+  fs::rename(tmp, target, ec); // atomic replace on the same filesystem
+  if (ec) {
+    std::error_code rmec;
+    fs::remove(tmp, rmec);
+    return {false, full, "ari: cannot store to '" + full + "': " + ec.message()};
+  }
+  return {true, full, std::string()};
 }
 
 } // namespace
@@ -212,6 +303,59 @@ UriResult resolve(const std::string &uri, const std::string &base) {
   }
 }
 
+// --- §13.10 the write side ---------------------------------------------------------------------
+
+void register_uri_store_handler(const std::string &scheme, UriStoreHandler handler) {
+  if (scheme.empty() || !handler)
+    return;
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  uri_store_registry()[to_lower(scheme)] = std::move(handler);
+}
+
+void unregister_uri_store_handler(const std::string &scheme) {
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  uri_store_registry().erase(to_lower(scheme));
+}
+
+bool has_uri_store_handler(const std::string &scheme) {
+  const std::string s = to_lower(scheme);
+  if (s == "file")
+    return true; // built-in
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  return uri_store_registry().find(s) != uri_store_registry().end();
+}
+
+StoreResult store(const std::string &uri, const std::string &content, const std::string &base) {
+  // Contain every failure here — like resolve(), store() always returns a StoreResult, never throws
+  // (a registered writer is host code that may).
+  try {
+    const Uri u = parse_uri(uri);
+    UriStoreHandler h;
+    {
+      std::lock_guard<std::mutex> lock(uri_mutex());
+      const auto it = uri_store_registry().find(u.scheme);
+      if (it != uri_store_registry().end())
+        h = it->second;
+    }
+    StoreResult r;
+    if (h)
+      r = h(u, content, base);
+    else if (u.scheme == "file")
+      r = store_file(u, content, base);
+    else
+      return {false, std::string(),
+              "ari: no store handler for URI scheme '" + u.scheme +
+                  "' (register one via register_uri_store_handler)"};
+    if (r.ok && r.canonical.empty())
+      r.canonical = uri;
+    return r;
+  } catch (const std::exception &e) {
+    return {false, std::string(), std::string("ari: store failed for '") + uri + "': " + e.what()};
+  } catch (...) {
+    return {false, std::string(), "ari: store failed for '" + uri + "' (unknown error)"};
+  }
+}
+
 // --- the temp-file bridge (§13.4): a resolved URI as a local path a reader can open ----------
 
 ResolvedFile &ResolvedFile::operator=(ResolvedFile &&other) noexcept {
@@ -272,71 +416,18 @@ ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
       ext = u.path.substr(dot);
   }
   std::error_code ec;
-  const fs::path dir = fs::temp_directory_path(ec);
-  const fs::path tmp_dir = (ec ? fs::path(".") : dir);
-#ifndef _WIN32
-  // Create the temp file EXCLUSIVELY per call — mkstemps draws a FRESH random name and opens with
-  // O_CREAT|O_EXCL, so a pre-planted symlink at a predicted path cannot hijack the write (CWE-377).
-  // The trailing `ext` is kept as the suffix so an extension-keyed reader still dispatches.
-  std::string tmpl = (tmp_dir / ("ari-src-XXXXXX" + ext)).string();
-  const int fd = ::mkstemps(&tmpl[0], static_cast<int>(ext.size()));
-  if (fd < 0) {
-    rf.error = "ari: cannot create temp file for '" + uri + "'";
-    return rf;
-  }
-  const char *p = r.content.data();
-  std::size_t left = r.content.size();
-  bool wrote_ok = true;
-  while (left > 0) {
-    const ssize_t w = ::write(fd, p, left);
-    if (w < 0) {
-      if (errno == EINTR)
-        continue; // an interrupted write is retryable, not a failure
-      wrote_ok = false;
-      break;
-    }
-    if (w == 0) { // a regular file should not return 0, but guard against a spin
-      wrote_ok = false;
-      break;
-    }
-    p += w;
-    left -= static_cast<std::size_t>(w);
-  }
-  ::close(fd);
-  if (!wrote_ok) {
-    std::error_code rmec;
-    fs::remove(tmpl, rmec);
-    rf.error = "ari: cannot write temp file for '" + uri + "'";
+  const fs::path tdir = fs::temp_directory_path(ec);
+  std::string werr;
+  const std::string path =
+      write_new_file(ec ? fs::path(".") : tdir, "ari-src-", ext, r.content, werr);
+  if (path.empty()) {
+    rf.error = "ari: " + werr + " for '" + uri + "'";
     return rf;
   }
   rf.ok = true;
-  rf.path = tmpl; // mkstemps rewrote the XXXXXX in place
+  rf.path = path;
   rf.is_temp_ = true;
   return rf;
-#else
-  // Windows fallback (no mkstemps): an unpredictable per-process random name. The POSIX O_EXCL path
-  // above is the hardened one; Windows is a lower-priority target here.
-  static std::atomic<std::uint64_t> counter{0};
-  const std::uint64_t n = counter.fetch_add(1);
-  const fs::path tmp = tmp_dir / ("ari-src-" + proc_temp_token() + "-" + std::to_string(n) + ext);
-  std::ofstream out(tmp, std::ios::binary);
-  if (!out) {
-    rf.error = "ari: cannot create temp file for '" + uri + "'";
-    return rf;
-  }
-  out.write(r.content.data(), static_cast<std::streamsize>(r.content.size()));
-  out.close();
-  if (!out) {
-    std::error_code rmec;
-    fs::remove(tmp, rmec);
-    rf.error = "ari: cannot write temp file for '" + uri + "'";
-    return rf;
-  }
-  rf.ok = true;
-  rf.path = tmp.string();
-  rf.is_temp_ = true;
-  return rf;
-#endif
 }
 
 } // namespace ariadne

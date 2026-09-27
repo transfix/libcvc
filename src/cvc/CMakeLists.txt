@@ -1108,7 +1108,7 @@ endif()
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/ftxui_backend.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1118,6 +1118,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri.h
   ../../inc/cvc/ariadne/uri_state.h
   ../../inc/cvc/ariadne/uri_http.h
+  ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h

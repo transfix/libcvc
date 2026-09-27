@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/state_io.h>  // §13.10 save_state / restore_state
 #include <cvc/ariadne/uri.h>       // §13 resolver (import routes through it)
 #include <cvc/ariadne/uri_http.h>  // §13.6 http:// handler
 #include <cvc/ariadne/uri_state.h> // §13.3 state:// handler
@@ -121,7 +122,7 @@ private:
 // Unregister it when the test scopes out — even on an ASSERT early-return — so a later test's
 // resolve() cannot dispatch into a freed root. Declare AFTER the app so it destructs first.
 struct StateHandlerGuard {
-  ~StateHandlerGuard() { unregister_uri_handler("state"); }
+  ~StateHandlerGuard() { unregister_state_uri_handler(); } // tears down BOTH read + write handlers
 };
 
 // Unregister an arbitrary test-registered scheme when the test scopes out (even on an ASSERT) —
@@ -1543,6 +1544,52 @@ TEST(AriadneUri, ResolveToFileHonorsRegisteredFileOverride) {
   EXPECT_EQ(content, "OVERRIDDEN-BYTES"); // went through the override -> temp bridge, not in-place
 }
 
+TEST(AriadneUri, StoreFileWritesAndResolvesBack) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
+  fs::create_directories(dir);
+  const std::string path = (dir / "out.json").string();
+  EXPECT_TRUE(has_uri_store_handler("file"));
+  const StoreResult s = store(path, "STORED-BYTES");
+  ASSERT_TRUE(s.ok) << s.error;
+  EXPECT_FALSE(s.canonical.empty());
+  const UriResult r = resolve(path); // round-trips through the read side
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "STORED-BYTES");
+  std::error_code ec;
+  fs::remove(path, ec);
+}
+
+TEST(AriadneUri, StoreFileAtomicallyOverwrites) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
+  fs::create_directories(dir);
+  const std::string path = (dir / "ow.json").string();
+  ASSERT_TRUE(store(path, "first").ok);
+  ASSERT_TRUE(store(path, "second-longer").ok); // rename-over replaces atomically
+  const UriResult r = resolve(path);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "second-longer"); // fully replaced, no residue of "first"
+  std::error_code ec;
+  fs::remove(path, ec);
+}
+
+TEST(AriadneUri, StoreToDirectoryErrors) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
+  fs::create_directories(dir);
+  const StoreResult s = store(dir.string(), "x");
+  EXPECT_FALSE(s.ok);
+  EXPECT_NE(s.error.find("directory"), std::string::npos);
+}
+
+TEST(AriadneUri, StoreUnknownSchemeErrors) {
+  EXPECT_FALSE(has_uri_store_handler("nostore"));
+  const StoreResult s = store("nostore://x", "y");
+  EXPECT_FALSE(s.ok);
+  EXPECT_NE(s.error.find("no store handler"), std::string::npos);
+}
+
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
   // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
   // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
@@ -1626,6 +1673,65 @@ TEST(AriadneStateUri, UnregisterRemovesHandler) {
   UriResult r = resolve("state://x");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("no handler"), std::string::npos);
+}
+
+TEST(AriadneStateUri, StoreWritesNodeValueAndRoundTrips) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  EXPECT_TRUE(has_uri_store_handler("state"));
+  const StoreResult s = store("state://cfg.theme?value", "dark");
+  ASSERT_TRUE(s.ok) << s.error;
+  EXPECT_EQ(root("cfg.theme").value(), "dark"); // wrote (and created) the node
+  const UriResult r = resolve("state://cfg.theme");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "dark"); // read back through the read handler
+}
+
+TEST(AriadneStateUri, UnregisterRemovesBothReadAndWrite) {
+  cvc::app app;
+  register_state_uri_handler(cvc::state::instance(app));
+  EXPECT_TRUE(has_uri_handler("state"));
+  EXPECT_TRUE(has_uri_store_handler("state"));
+  unregister_state_uri_handler();
+  EXPECT_FALSE(has_uri_handler("state"));
+  EXPECT_FALSE(has_uri_store_handler("state"));
+}
+
+TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
+  namespace fs = std::filesystem;
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("doc.title").value(std::string("Hello"));
+  root("doc.n").value(std::string("42"));
+  const std::string path = (fs::temp_directory_path() / "ariadne_state_io.json").string();
+  std::string err;
+  ASSERT_TRUE(save_state(root("doc"), path, &err)) << err; // serializes keys "doc.title"/"doc.n"
+  // Restore into a FRESH app's ROOT — the absolute paths reconstruct there (nested children survive
+  // the round-trip, exercising the #430 ptree deserialize fix).
+  cvc::app app2;
+  cvc::state &root2 = cvc::state::instance(app2);
+  ASSERT_TRUE(restore_state(root2, path, &err)) << err;
+  EXPECT_EQ(root2("doc.title").value(), "Hello");
+  EXPECT_EQ(root2("doc.n").value(), "42");
+  std::error_code ec;
+  fs::remove(path, ec);
+}
+
+TEST(AriadneStateIo, SaveRestoreRoundTripsViaStateScheme) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  root("cfg.color").value(std::string("red"));
+  std::string err;
+  // Snapshot the cfg subtree onto a state node (its JSON text lives on backup's value channel).
+  ASSERT_TRUE(save_state(root("cfg"), "state://backup?value", &err)) << err;
+  root("cfg.color").value(std::string("green")); // mutate after the snapshot
+  // Restore into the app root reverts cfg.color — a full round-trip through state:// store+resolve.
+  ASSERT_TRUE(restore_state(root, "state://backup?value", &err)) << err;
+  EXPECT_EQ(root("cfg.color").value(), "red");
 }
 
 TEST(AriadneModularity, ImportUnitsFromAnotherFile) {
