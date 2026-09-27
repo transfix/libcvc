@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cvc/core/state_exec/memory_tracker.h>
 #include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/scheduler_base.h>
 #include <cvc/core/state_exec/stackless_evaluator.h>
 #include <cvc/core/state_exec/types.h>
 #include <functional>
@@ -28,61 +29,8 @@ class state;
 
 namespace cvc::state_exec {
 
-/// Scheduling policies for process selection.
-enum class scheduling_policy {
-  round_robin, // Equal time slices for all runnable processes
-  priority,    // Unix nice-style (-20..19, lower = higher priority)
-  priority_rr  // Priority-based, round-robin within same priority
-};
-
-/// Options for executing a new process.
-struct execute_options {
-  std::string name;
-  int priority = 0;
-  std::string uid;
-  std::string gid;
-  std::string root_path; // Chroot: confine to subtree (empty = full tree)
-  uint64_t max_steps = 0;
-  double max_time = 0.0;
-  uint64_t max_memory = 0;
-  uint64_t max_messages = 0;
-  uint64_t max_message_bytes = 0;
-  std::unordered_map<std::string, value_t> signal_handlers;
-  std::function<void(value_t)> on_complete;
-  environment_ptr env;
-};
-
-/// Snapshot of a single process for query purposes.
-struct process_info {
-  int pid;
-  std::string name;
-  process_status status;
-  int priority;
-  std::string uid;
-  std::string gid;
-  uint64_t step_count;
-  double elapsed_time;
-  uint64_t current_memory;
-  uint64_t peak_memory;
-  uint64_t max_memory;
-  double max_time;
-  uint64_t message_count;
-  uint64_t max_messages;
-  uint64_t message_bytes;
-  uint64_t max_message_bytes;
-  int parent_pid;
-};
-
-/// Aggregate scheduler statistics.
-struct scheduler_stats {
-  int total_processes = 0;
-  int running = 0;
-  int ready = 0;
-  int paused = 0;
-  int terminated = 0;
-  int killed = 0;
-  uint64_t total_steps = 0;
-};
+// scheduling_policy, execute_options, process_info, scheduler_stats now live in
+// scheduler_base.h (shared by the sync scheduler and async_scheduler).
 
 /// Synchronous process scheduler.
 ///
@@ -90,7 +38,10 @@ struct scheduler_stats {
 /// scheduling policies to select which process(es) to step.  Enforces
 /// per-process resource limits (max_steps, max_time, max_memory,
 /// max_messages) at each step boundary.
-class scheduler {
+///
+/// Implements scheduler_base — the intrinsic-facing surface the DSL calls
+/// through intrinsics_context.sched.
+class scheduler : public scheduler_base {
 public:
   explicit scheduler(scheduling_policy policy = scheduling_policy::round_robin);
 
