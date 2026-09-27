@@ -2791,9 +2791,24 @@ and every trigger is edge-gated, budgeted, and cycle-guarded.
 > is a `window`, so `import:` + `include:` gives a reusable library of units AND windows across
 > programs. `file://` (+ bare paths) is built in; **`state://` is now LANDED too** (§13.3), so a
 > units/window library can live in the state tree and be imported the same way; `http(s)://`
-> libraries still need a registered resolver handler. The `load:` **fragment mount** (a
-> sub-UI/sub-scene as its own chroot subtree, with hot-reload) is the remaining piece — its
-> resolver seam now exists; it needs the http handler plus the mount/isolation machinery.
+> libraries still need a registered resolver handler.
+>
+> **The `load:` fragment mount is now LANDED** (`cvc::ariadne`, roadmap §12.1). A `load: <uri>`
+> child mounts an external `.ari` fragment as an **isolated module**: its widget subtree, binds,
+> reactive predicates, and `init:` are chrooted to `ui.docs.<doc>.includes.<as>` (keyed on the
+> mount id `as:`, basename default, sibling duplicates disambiguated), and its `units:` are its
+> own (a fresh parse context) — `include:`/`import:` stay shared-scope by contrast. `args:`
+> substitute like `include:`. A resolved-URI cycle guard + per-chain depth cap + document-wide
+> aggregate mount cap bound recursion/fan-out. Parent-scope access is **default-deny**: a module
+> reaches only the scopes a **`link:`** map grants, wired as **transparent link-node holes**
+> (`link: { name: target }` = rw; `{ to:, mode: ro|rw }`; `mode` fails closed; a `/`-prefixed name
+> is rejected; holes are torn down + re-wired on reconcile so a re-mount can't inherit a stale
+> grant), and reads/writes follow the hole to the target (both DSL `state-get` and widget binds).
+> A fragment may **`needs:`**-declare the hole names it expects (warns if the mount omits one —
+> the `requires:` analogue). Per-mount `init:` runs **once** at the sub-prefix (after its holes),
+> never re-running on a rebuild. Remaining: the **`http(s)://` handler** (a networking dependency
+> — a registered handler, so addable without core changes), node **`source:`** through the
+> resolver (§9/§13.4), and **hot-reload** (§12.5).
 
 `include`/`repeat` (§3.7) template widgets **in-document**. `load:` is the **cross-file module**
 primitive: it mounts an **external** `.ari` fragment (a sub-UI or a sub-scene) **as
