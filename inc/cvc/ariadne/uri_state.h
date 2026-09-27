@@ -1,17 +1,18 @@
 #ifndef CVC_ARIADNE_URI_STATE_H
 #define CVC_ARIADNE_URI_STATE_H
 
-// Ariadne — the `state://` URI scheme (roadmap §13.3). A `state://` reference addresses a node
-// in a `cvc::state` tree and resolves to that node's VALUE — the string on its value channel,
-// which for a UI library is inline `.ari` text. It is NOT the node's child subtree: the query
-// selects the channel, and only `?value` (the default) is served here.
+// Ariadne — the `state://` URI scheme (roadmap §13.3 read + §13.10 write). A `state://` reference
+// addresses a node in a `cvc::state` tree; the query selects the channel. The built-in handler
+// serves `?value` (default) and `?data` for BOTH read (resolve) and write (store):
 //
-//   state://scene.ui.forms          # ?value (default): node.value() — the fragment text
+//   state://scene.ui.forms          # ?value (default): node.value() — a string (e.g. .ari text)
 //   state://scene.ui.forms?value    #   (explicit) same channel
+//   state://scene.blob?data         # ?data: a raw string/byte blob on node.data()
 //
-// `?data` (typed node.data()) and `?children` (the subtree as a value_t tree) are documented in
-// §13.3 but need the codec / value_t machinery; the built-in handler rejects them so a host can
-// register a richer one without a silent wrong answer.
+// `?value` is a string (for a UI library, inline `.ari` text); `?data` is a raw string/byte blob on
+// the data channel (what the §13.9 HTTP cache parks a body on). `?children` (the subtree as a
+// value_t tree) is NOT served — it needs the codec / value_t machinery, so the built-in handler
+// rejects it rather than return a silent wrong answer; a host can register a richer one.
 //
 // This scheme needs a state root, which the app-free loader does not have — so it is opt-in: a
 // host with a state tree registers it (via register_state_uri_handler) before load_*, exactly
