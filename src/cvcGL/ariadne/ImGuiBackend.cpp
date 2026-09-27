@@ -398,6 +398,24 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
   return e;
 }
 
+ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
+  ariadne::ColorEdit e;
+  e.rgb[0] = rgb[0];
+  e.rgb[1] = rgb[1];
+  e.rgb[2] = rgb[2];
+#ifdef CVC_ENABLE_IMGUI
+  e.drawn = true;
+  // ColorEdit3 edits e.rgb in place and returns true on any change this frame. Commit immediately
+  // (like a discrete widget) — the core writes each change, so the picker reads its own value back
+  // next frame with no per-widget edit cache (a colour edit is infrequent, not a continuous drag).
+  e.changed = ImGui::ColorEdit3(label, e.rgb);
+  e.committed = e.changed;
+#else
+  (void)label;
+#endif
+  return e;
+}
+
 void ImGuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
   if (draw)
     m_customWidgets[std::move(custom_type)] = std::move(draw);

@@ -37,6 +37,7 @@ enum class Kind {
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
   Combo,          // bound enum-as-text state
+  Color,          // bound "r,g,b" state (an RGB picker; §G7)
   Button,         // a fire-once button -> raises `on` event
   Custom,         // a registered custom widget type (custom_type + props); §extensibility
 };
@@ -328,6 +329,17 @@ inline Widget button(std::string label, std::string on) {
   w.kind = Kind::Button;
   w.label = std::move(label);
   w.on = std::move(on);
+  return w;
+}
+
+// An RGB colour picker bound to an "r,g,b" state key (each channel 0..1). `def` seeds the key when
+// unset (e.g. "1,1,1"). §G7.
+inline Widget color_widget(std::string label, std::string bind, std::string def = std::string()) {
+  Widget w;
+  w.kind = Kind::Color;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.sdef = std::move(def);
   return w;
 }
 

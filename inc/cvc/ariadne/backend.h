@@ -62,6 +62,15 @@ struct CustomEdit {
   bool committed = false;
   std::string value;
 };
+// An RGB colour edit (§ G7). `drawn` is the backend's signal that it actually rendered a colour
+// widget (false on a backend that has none — the core then shows the value as text). `rgb` is the
+// edited colour (each channel 0..1); the core writes it back as an "r,g,b" string on `committed`.
+struct ColorEdit {
+  bool drawn = false;
+  bool changed = false;
+  bool committed = false;
+  float rgb[3] = {0.0f, 0.0f, 0.0f};
+};
 
 // What a surface can and cannot do. The core (and, later, the loader's
 // `requires:` preflight, §16.3/§7.6) reads this to fail-safe or substitute —
@@ -150,6 +159,16 @@ public:
                                    double hi, const char *fmt) = 0;
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
+
+  // An RGB colour picker bound to an "r,g,b" state key (each 0..1). NON-PURE: the default returns
+  // {drawn:false}, so a backend that has no colour widget (a terminal) need not implement it — the
+  // core then falls back to showing the value as text. A backend that draws it edits `rgb` in place
+  // and returns {drawn:true, changed, committed, rgb}. The core owns the state read/write.
+  virtual ColorEdit color(const char *label, const float rgb[3]) {
+    (void)label;
+    (void)rgb;
+    return {};
+  }
 
   // ---- custom widgets: the novel-primitive escape (§16.1b) ----------------
   // Draw a registered custom widget the compositional path can't express (a colour

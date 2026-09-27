@@ -108,6 +108,15 @@ struct MockBackend : Backend {
     rec(std::string("combo:") + l + "=" + std::to_string(idx));
     return combo_ret;
   }
+  ColorEdit color_ret{};           // programmable return for the next color()
+  float last_color[3] = {0, 0, 0}; // the rgb the core handed color() (read side)
+  ColorEdit color(const char *l, const float rgb[3]) override {
+    last_color[0] = rgb[0];
+    last_color[1] = rgb[1];
+    last_color[2] = rgb[2];
+    rec(std::string("color:") + l);
+    return color_ret;
+  }
   CustomEdit custom_ret{}; // programmable return for the escape path
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &) override {
     rec(std::string("custom_widget:") + type + "=" + current);
@@ -1162,6 +1171,38 @@ TEST(AriadneRuntime, ComboValueMappingReadsAndWrites) {
   mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
   rt.render();
   EXPECT_EQ(cvc::state::instance(app)("ss").value(), "2"); // stored the value, not "2x"
+}
+
+// §G7: a color widget reads its "r,g,b" key into the backend's picker and writes the edited colour
+// back as "r,g,b" on commit. A backend with no colour widget (drawn:false) falls back to text.
+TEST(AriadneRuntime, ColorWidgetReadsAndWritesCsv) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("tint").value(std::string("0.2,0.4,0.6"));
+  mb.color_ret = ColorEdit{/*drawn*/ true, /*changed*/ false, /*committed*/ false, {0, 0, 0}};
+  rt.set_root(group({color_widget("Tint", "tint")}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("color:Tint"));         // drawn
+  EXPECT_NEAR(mb.last_color[0], 0.2f, 1e-4); // read: the key parsed into the picker
+  EXPECT_NEAR(mb.last_color[2], 0.6f, 1e-4);
+  // Now the picker commits a new colour -> the key stores "r,g,b".
+  mb.color_ret = ColorEdit{true, true, true, {0.1f, 0.5f, 0.9f}};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("tint").value(), "0.1,0.5,0.9");
+}
+
+TEST(AriadneRuntime, ColorWidgetFallsBackToTextWhenBackendCantDraw) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("tint").value(std::string("0.3,0.3,0.3"));
+  mb.color_ret = ColorEdit{}; // drawn == false -> the core shows the value as text
+  rt.set_root(group({color_widget("Tint", "tint")}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Tint=0.3,0.3,0.3")); // fallback rendered
 }
 
 TEST(AriadneReactive, ComputedComboOptionsFromExpression) {

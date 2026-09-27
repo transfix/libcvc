@@ -62,6 +62,7 @@ public:
                                          double lo, double hi, const char *fmt) override;
   cvc::ariadne::IndexEdit combo(const char *label, int current_index,
                                 const std::vector<std::string> &options) override;
+  cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
 
   // Novel-primitive custom widgets (§16.1b): a host registers a raw-ImGui draw fn for
   // a custom_type; custom_widget() dispatches to it. The draw fn gets the bound value

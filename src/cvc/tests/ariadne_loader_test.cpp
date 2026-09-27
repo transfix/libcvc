@@ -389,6 +389,18 @@ TEST(AriadneLoader, ComboValuesParse) {
   EXPECT_TRUE(cb->values.empty()); // mapping dropped on mismatch
 }
 
+// §G7: a `color:` widget parses to Kind::Color, bound to its "r,g,b" key with an optional default.
+TEST(AriadneLoader, ColorWidgetParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string("windows:\n  - window: W\n    children:\n      - color: Tint\n        "
+                             "bind: mat.tint\n        default: \"1,0.5,0\"\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *c = find(r.root, Kind::Color);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->bind, "mat.tint");
+  EXPECT_EQ(c->sdef, "1,0.5,0");
+}
+
 TEST(AriadneLoader, BareScalarsAndLiteralVsBoundText) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

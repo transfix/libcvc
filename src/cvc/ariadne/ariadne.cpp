@@ -32,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -66,6 +67,29 @@ bool is_expr(const std::string &bind) {
     return c == '(';
   }
   return false;
+}
+
+// §G7 colour: parse an "r,g,b" state string into rgb[3] (comma- or space-separated). Returns false
+// (leaving `out` at the caller's default) unless exactly three numbers parse.
+bool parse_rgb3(const std::string &s, float out[3]) {
+  std::string t = s;
+  for (char &c : t)
+    if (c == ',')
+      c = ' ';
+  std::istringstream is(t);
+  float a = 0, b = 0, c = 0;
+  if (is >> a >> b >> c) {
+    out[0] = a;
+    out[1] = b;
+    out[2] = c;
+    return true;
+  }
+  return false;
+}
+std::string format_rgb3(const float rgb[3]) {
+  std::ostringstream os;
+  os << rgb[0] << "," << rgb[1] << "," << rgb[2];
+  return os.str();
 }
 
 // Replace every occurrence of `token` in `s` with `rep`.
@@ -977,6 +1001,22 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const IndexEdit e = b.combo(label, idx, opts); // always DISPLAY the labels
     if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size()))
       write<std::string>(app, path, store[e.index]); // store the mapped value (or the text)
+    break;
+  }
+
+  case Kind::Color: {
+    const std::string path = resolve(w.bind);
+    const std::string dflt = w.sdef.empty() ? std::string("1,1,1") : w.sdef;
+    const std::string cur = read_or_seed<std::string>(app, path, dflt);
+    float rgb[3] = {1.0f, 1.0f, 1.0f};
+    parse_rgb3(cur, rgb); // leaves the 1,1,1 default on a parse failure
+    const ColorEdit e = b.color(label, rgb);
+    if (!e.drawn) {
+      b.text_value(label, cur); // a backend with no colour widget -> show the "r,g,b" value
+      break;
+    }
+    if (e.committed)
+      write<std::string>(app, path, format_rgb3(e.rgb)); // store "r,g,b"
     break;
   }
 

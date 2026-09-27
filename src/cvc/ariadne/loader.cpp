@@ -339,9 +339,9 @@ std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
 }
 
 std::string widget_type(const YAML::Node &n, std::string &label) {
-  static const char *kKeys[] = {"group",        "menubar", "menu",   "menu_item", "window",
-                                "overlay",      "panel",   "text",   "checkbox",  "slider_int",
-                                "slider_float", "combo",   "button", "separator"};
+  static const char *kKeys[] = {"group",        "menubar", "menu",  "menu_item", "window",
+                                "overlay",      "panel",   "text",  "checkbox",  "slider_int",
+                                "slider_float", "combo",   "color", "button",    "separator"};
   for (const char *k : kKeys) {
     const YAML::Node v = n[k];
     if (v.IsDefined()) {
@@ -597,6 +597,11 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     else
       w.values = std::move(values);
     return w;
+  }
+  if (type == "color") { // §G7 an RGB picker bound to an "r,g,b" key
+    const std::string bind = str(n, "bind");
+    check_bind(ctx, "color", label, bind);
+    return color_widget(label, bind, str(n, "default", str(n, "def")));
   }
   if (type == "button") {
     const std::string on = action(n);
