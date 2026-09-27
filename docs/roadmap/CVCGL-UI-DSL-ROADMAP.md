@@ -2775,16 +2775,24 @@ and every trigger is edge-gated, budgeted, and cycle-guarded.
 
 ## 12. Loading sub-UIs and sub-scene-graphs (modularization)
 
-> **Status — the in-document half is LANDED** (`cvc::ariadne` loader): a top-level `units:` map
-> holds reusable widget templates, and `include: <unit>` with `args: {k: v}` instantiates one at
-> LOAD time. Args are a uniform text substitution (`{k}` → value, like `repeat`'s `{i}`) applied
-> to the unit's YAML before re-parsing, so a unit's own nested `include:`/`repeat` expand
-> naturally on the re-parse and args flow down into them. Units are collected before the body
-> (any-order, mutually referential); a self-referential unit is depth-guarded (16); an unknown
-> unit or a substitution that yields un-parseable YAML warns and renders empty. This is the
-> `include`/`repeat` (§3.7) template layer — **shared scope, no fetch**. The `load:` cross-file
-> module form (fetch + own chroot + hot-reload) below is deferred until §13's `uri_resolver`
-> lands, since every `load:` variant routes through it.
+> **Status — in-document `include:` AND cross-file `import:` are LANDED** (`cvc::ariadne` loader).
+> A top-level `units:` map holds reusable widget templates; `include: <unit>` with `args: {k: v}`
+> instantiates one at load time (clone the template, substitute `{k}` tokens into the cloned
+> scalar values in a single pass, parse). Units are collected before the body (any-order,
+> mutually referential); a self-referential unit — or a fan-out bomb — is refused by a name-based
+> expansion-stack guard; an unknown unit warns and renders empty. This is the `include`/`repeat`
+> (§3.7) template layer — **shared scope, no fetch**.
+>
+> A top-level **`import:`** (a URI or list) makes a **cross-file library**: it merges another
+> `.ari` file's `units:` into the document, routed through the shared §13 `uri_resolver`,
+> relative to the importing file's directory, recursing into a library's own imports and
+> dedup/cycle-guarded on the resolved canonical path. Local units override an imported one of the
+> same name; import-vs-import collisions warn. A reusable **window** is just a unit whose template
+> is a `window`, so `import:` + `include:` gives a reusable library of units AND windows across
+> programs. `file://` (+ bare paths) is built in; `state://`/`http(s)://` libraries need a
+> registered resolver handler. The `load:` **fragment mount** (a sub-UI/sub-scene as its own
+> chroot subtree, with hot-reload) is the remaining piece — its resolver seam now exists; it
+> needs the state/http handlers plus the mount/isolation machinery.
 
 `include`/`repeat` (§3.7) template widgets **in-document**. `load:` is the **cross-file module**
 primitive: it mounts an **external** `.ari` fragment (a sub-UI or a sub-scene) **as
@@ -2872,6 +2880,15 @@ watch is scheme-appropriate — `file://` mtime/inotify, `state://` a `state-wat
 ---
 
 ## 13. Resource loading — URIs, schemes, and the handler registry
+
+> **Status — the resolver core is LANDED** (`inc/cvc/ariadne/uri.h` + `src/cvc/ariadne/uri.cpp`):
+> `parse_uri` (`scheme://path?query`; a bare/relative path = `file`), a scheme→handler registry
+> (`register_uri_handler`/`has_uri_handler`), and `resolve(uri, base) → {content, canonical,
+> error}`. The `file` scheme is built in and **app-free** (so the pure-libcvc loader resolves it),
+> and `import:` (§12) routes through it today. `state://`/`http(s)://` are registered handlers
+> (they need an app / HTTP client the loader lacks); an unknown scheme is a clean error. Still to
+> come: the state & http(s) handlers (§13.6's built-in HTTP client), content-addressed caching +
+> prefetch (§13.5), and wiring node `source:` (§9.4) through the same resolver.
 
 One resolver backs every external reference: `load:`/`include:` fragments **and** node `source:` data.
 Today these are three unrelated filename-only paths (`load()` is SWIG `%extend`s on volume/geometry/image
