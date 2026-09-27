@@ -3524,6 +3524,16 @@ strings — no yaml-cpp, `inc/cvc/ariadne/value.h`).
   living in the host TU, does the ImGui work); `custom_widget` dispatches to it. So a novel primitive is
   ImGui-only (a terminal backend inherits the no-op and the core placeholders it) — the deliberate trade
   vs. the backend-neutral compositional path.
+  > **Principle — .ari components FIRST, C++ custom widgets only as the escape hatch.** A panel that
+  > is sliders/checkboxes/combos over `cvc::state` (StageLighting, the shadow/chrome controls, camera
+  > settings — every knob is a two-way-bound state key) belongs in a **reusable `.ari` component**
+  > (`units:` fragment `import:`ed by a document), NOT a hardcoded C++ `ScenePanel()`-style composite.
+  > The `register_widget`/`custom_widget` escape is for what a widget tree genuinely can't express — a
+  > colour wheel, a GLSL canvas, a live readout. `cvc::gl::ariadne::register_scene_panels` (registers
+  > the existing rich C++ `ScenePanel`/`StageLightingPanel`/`SceneMenuItems` as `scene_panel` /
+  > `stage_lighting_panel` / `scene_menu` custom widgets) is that escape hatch — a bridge for the full
+  > C++ panels; the DECLARATIVE library of `.ari` component windows is the primary path, shipped with
+  > libcvc + pycvc and leaned on across demos.
 - **Deferred:** per-type JSON-Schema fragments (the base schema is already permissive, so custom types
   validate today; a fragment API would tighten field validation).
 
