@@ -190,6 +190,27 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
                          const material_drive &mat, float *minclr_out, int num_threads = 0,
                          drive_telemetry *tel = nullptr);
 
+// ─── Fused material + external-force drive ───────────────────────────────────
+// The learned grip/risk policy (the material path, INCLUDING a lam-head net) AND a generic
+// ext_force (e.g. cvc::dbg's RF/comm force) applied in the SAME rollout — both forces summed into
+// one accumulator and one steering bias (rollout_impl already fuses them; these entry points are
+// the only ones that pass BOTH). Without this, a caller must choose material OR ext: sim_world's
+// step() gives material priority, so attaching a material stack silently drops the ext force. Use
+// the fused path when a demo must steer on a trained grip/risk net WHILE the comm transformer also
+// pushes. A null ext.sample makes drive_step_material_ext byte-identical to drive_step_material; a
+// null material stack makes it byte-identical to drive_step_ext.
+void bicycle_rollout_material_ext(const field_stack &f, float *o, float *th, float *sp,
+                                  const float *goal, const float *al, const float *be,
+                                  const float *ga, int n, const int *map_id, const veh_params &v,
+                                  const material_drive &mat, const ext_force &ext,
+                                  float *minclr_out, int num_threads = 0);
+// Optional tel[n]: captures mrisk + lam_soft AND ext_fx/fy; null (default) is inert.
+void drive_step_material_ext(const field_stack &f, float *o, float *th, float *sp,
+                             const float *carrot, const coef_mlp &model, int n, const int *map_id,
+                             const veh_params &v, const material_drive &mat, const ext_force &ext,
+                             float *minclr_out, int num_threads = 0,
+                             drive_telemetry *tel = nullptr);
+
 // ── obstacle-list material surrogate rollout ────────────────────────────────
 // The faithful torch-free port of the source method's differentiable
 // integrator (GRL-SNAM material_nav.integrate_surrogate_material): explicit

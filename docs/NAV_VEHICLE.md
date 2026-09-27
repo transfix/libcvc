@@ -68,12 +68,26 @@ untouched.
 |---|---|
 | `bicycle_rollout` | CPU, threaded |
 | `bicycle_rollout_material` | CPU + the material force |
+| `bicycle_rollout_ext` | CPU + a generic external force (e.g. cvc::dbg's RF/comm force) |
+| `bicycle_rollout_material_ext` | CPU + **both** the material force AND the external force, fused |
 | `bicycle_rollout_cuda` | GPU, **given** coefficients — the unfused device twin |
 | `drive_step`, `drive_step_material` | fused: `coef_feats` → MLP → rollout |
+| `drive_step_ext` | fused, with an external force channel |
+| `drive_step_material_ext` | fused, with **both** the material drive AND an external force |
 | `drive_step_cuda` | fused on GPU, one thread per agent |
 | `sim_world_cuda` | device-resident world; holds its own refinement buffers |
 
-`bicycle_rollout_cuda` was added with this work. CUDA previously had only
+`*_material_ext` fuses the two force channels. Without it a caller must pick one
+— and `sim_world::step()` gives the material path priority, so attaching a
+material stack silently dropped a set `ext_force`. `rollout_impl` already sums
+both the material and external forces into one accumulator and one steering bias,
+so the fused entry points just pass BOTH; a null `ext.sample` reproduces
+`drive_step_material` byte-for-byte, a null material stack reproduces
+`drive_step_ext`. `sim_world::step()` now selects `drive_step_material_ext`
+whenever a material stack AND an external force are both attached, so a run can
+steer on a learned grip/risk policy WHILE the comm/RF force also pushes.
+
+`bicycle_rollout_cuda` was added with earlier work. CUDA previously had only
 `sdf_sample_cuda` and the *fused* `drive_step_cuda`, so the device vehicle math
 could not be compared against the reference without dragging a trained net
 through the comparison — which is why `drive.cu` had been shipping

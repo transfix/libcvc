@@ -120,6 +120,40 @@ releasing the GIL). `material_gate_active()` is only meaningful while material i
 attached; its buffer is sized inside `set_material`, so ask `has_material()`
 first.
 
+### Deploying a learned grip/risk/lam policy
+
+The example above drives with `coef_mlp::default_biased()` — the fixed
+`(α,β,γ)=(1,3,4)` basin, no learned steering. To deploy a **trained** policy,
+hand the `sim_world` constructor (or `bicycle_rollout_*`/`drive_step_*` directly)
+a `coef_mlp::load("…​.cvcnav")` instead. The `.cvcnav` header carries the
+feature-layout flags, so the loaded net self-describes what the drive must feed
+it:
+
+| net | `in`/`out` | flags | drive must supply |
+|---|---|---|---|
+| geometry | 5 → 3 | — | nothing extra (plain `drive_step`) |
+| grip | 6 → 3 | `has_mu()` | a grip `friction_field` (`veh_params.grip`) |
+| grip+risk | 7 → 3 | `has_mu()`+`has_risk()` | grip field **and** a material stack |
+| + learned reroute | · → 4 | `has_lam()` | the 4th output overrides `lam_soft` |
+
+A **risk or lam** net drives ONLY through the material path
+(`drive_step_material` / `drive_step_material_ext`): the risk-lookahead feature
+reads the same `material_stack` the reroute force uses, so `drive_step` /
+`drive_step_ext` reject a `has_risk()` net rather than feed it a short vector.
+`drive_step_material` hard-errors if the net's `in_features()` disagrees with its
+flags — a mismatched weights file fails loudly, never silently mis-fed. Attach
+the grip field before construction (`cfg.veh.grip = &ff`) and the material stack
+via `set_material`, exactly as above; then the loaded net reads mu/risk ahead and
+(with a lam head) sets its own per-agent reroute weight.
+
+To steer on the learned grip/risk policy **while** an external force (e.g.
+cvc::dbg's RF/comm push) also acts, use the fused `drive_step_material_ext` /
+`bicycle_rollout_material_ext` — `sim_world::step()` selects it automatically when
+both a material stack and an `ext_force` are attached (otherwise material would
+take priority and drop the ext force). The whole round-trip — a widened net
+serialized to `.cvcnav`, reloaded, and driven (incl. the fused path and the
+learned-lam reroute) — is pinned by `nav_material_deploy_test`.
+
 ### Choosing constants
 
 The defaults are the GRL-SNAM sim-frame values, validated behaviorally there
