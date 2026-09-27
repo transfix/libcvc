@@ -557,11 +557,27 @@ boost::property_tree::ptree state::ptree() {
 //  property tree.
 // ---- Change History ----
 // 03/16/2012 -- Joe R. -- Creation.
-void state::ptree(const boost::property_tree::ptree &pt) {
-  using namespace boost;
-  BOOST_FOREACH (const property_tree::ptree::value_type &v, pt)
-    (*this)(v.first).value(v.second.get_value<std::string>());
+namespace {
+// Deserialize helper. state::ptree() (the serializer above) keys every node by
+// its FULL dotted path from the root and NESTS the subtrees, so a node's value
+// and its descendants live one or more levels deep. The old loop here was NOT
+// recursive: it set only the top-level entries and dropped every nested child,
+// so json()/restore()/from_json round-trips silently lost the whole subtree
+// (only the shallowest nodes survived). Because every key is a full path from
+// the root, a single flat recursive walk restores the tree correctly: for each
+// entry that carries a scalar value, set it at its full-path key from `root`.
+void apply_state_ptree(cvc::state &root, const boost::property_tree::ptree &pt) {
+  BOOST_FOREACH (const boost::property_tree::ptree::value_type &v, pt) {
+    std::string own = v.second.get_value<std::string>();
+    if (!own.empty())
+      root(v.first).value(own);
+    if (!v.second.empty())
+      apply_state_ptree(root, v.second);
+  }
 }
+} // namespace
+
+void state::ptree(const boost::property_tree::ptree &pt) { apply_state_ptree(*this, pt); }
 
 // -----------
 // state::json
