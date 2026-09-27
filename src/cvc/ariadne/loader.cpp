@@ -1338,6 +1338,10 @@ Scene parse_scene(const YAML::Node &s) {
       sc.shadow_interval = static_cast<int>(num(sh, "update_interval", sc.shadow_interval));
     }
   }
+  if (s["chrome"]) { // scene-level: the diagnostic grid/axis/bounding-box chrome
+    sc.has_chrome = true;
+    sc.chrome_visible = flag(s, "chrome", true);
+  }
   return sc;
 }
 

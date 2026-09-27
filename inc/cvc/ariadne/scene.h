@@ -169,7 +169,9 @@ struct Scene {
   int shadow_resolution = 1024;
   bool has_shadow_interval = false; // shadows: { update_interval: <frames> } — 1 = bake every frame
   int shadow_interval = 1;
-  bool any() const { return !nodes.empty() || !lights.empty() || has_shadows; }
+  bool has_chrome = false;    // chrome: <bool> — the SceneGraph diagnostic grid/axis/bbox chrome
+  bool chrome_visible = true; // default on (the SceneGraph default); `chrome: false` strips it
+  bool any() const { return !nodes.empty() || !lights.empty() || has_shadows || has_chrome; }
 };
 
 } // namespace ariadne

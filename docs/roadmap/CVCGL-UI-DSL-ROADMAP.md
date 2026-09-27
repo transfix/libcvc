@@ -1835,9 +1835,22 @@ subject of the still-open streamed-source contract (§9.8).
 > - **rig TUNING on a `rig:` light** — `stage: {center, radius}` (a tight cone → crisp map), `key: {intensity,
 >   azimuth, elevation, cone}`, `fill` / `back` / `warmth` / `environment` / `ambient`; each gated so
 >   an unset knob keeps the preset. The rig's own state keys stay two-way bound, so `.ari` sliders can
->   also drive them live. Tests: `AriadneScene.{PlanePrimitiveSpecularAndFit, RigTuningAndShadowResolution}`
->   (parse) + `cvcgl_ariadne_realize` §9-enrichments block (realize: quad shape, fit grounds+scales,
->   shadow res applied, tuned rig lights).
+>   also drive them live. Plus **`chrome: <bool>`** (scene-level) strips the SceneGraph diagnostic
+>   grid/axis for a clean stage. Tests: `AriadneScene.{PlanePrimitiveSpecularAndFit,
+>   RigTuningAndShadowResolution, ChromeToggle}` (parse) + `cvcgl_ariadne_realize` §9-enrichments
+>   block (realize: quad shape, fit grounds+scales, shadow res applied, tuned rig lights).
+>
+> **First ported demo LANDED — `bunny_shadow.ari`.** The cvcGL bunny/shadow bench
+> (`src/cvcGL/examples/bunny_shadow.cpp`, ~280 lines of C++) reproduced as a `.ari` document
+> (`src/cvcGL/examples/bunny_shadow.ari`): the scene (bunny `fit` to the ground + a procedural
+> `plane` + a tuned three-point `rig:` + 2048px shadows), the UI (two control windows `import:`ed as
+> **reusable `.ari` components** — `components/stage_lighting.ari`, `components/scene_controls.ari`,
+> sliders bound to the rig's / SceneGraph's own two-way state keys, NO C++ panel), and a program
+> `on:` reset action — all declared, no demo-specific C++. The generic **`ariadne_hello` runner**
+> (now frames the camera to the realized scene, navigates via TouchGestures, and captures headless
+> with `--offscreen --png`) loads it: `ariadne_hello bunny_shadow.ari`. This is the seed of the
+> reusable `.ari` component library to ship with libcvc + pycvc and lean on across demos (the demo
+> audit is next). Verified: renders the lit, shadowed bunny on its plane headless.
 
 > **libcvc dependency — URI-native file I/O (not yet built).** Today the realizer resolves only
 > `source: { file: <path> }` and calls `cvc::read_geometry(path)` / (for volumes) `cvc::read_volume(path)`

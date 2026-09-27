@@ -800,6 +800,52 @@ scene:
   EXPECT_EQ(r.scene.shadow_interval, 1);
 }
 
+// §9 chrome: strip the SceneGraph diagnostic grid/axis for a clean capture.
+TEST(AriadneScene, ChromeToggle) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  chrome: false
+  nodes:
+    - node: g
+      source: { plane: { size: 4 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.scene.any());
+  ASSERT_TRUE(r.scene.has_chrome);
+  EXPECT_FALSE(r.scene.chrome_visible);
+}
+
+// The reusable-component pattern: a `units:` window template `include:`d at the top level (the
+// `windows:` list) expands to that window — the mechanism a component library leans on (a document
+// `import:`s a component file then `include:`s its window unit). Same-document here; cross-file
+// import is covered by AriadneModularity.ImportUnitsOverHttp.
+TEST(AriadneModularity, IncludeWindowUnitAtTopLevel) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  controls:
+    window: Controls
+    id: controls
+    children:
+      - slider_float: Gain
+        bind: lighting.key_intensity
+        lo: 0
+        hi: 4
+windows:
+  - include: controls
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  EXPECT_EQ(win->label, "Controls"); // the unit expanded into a real window
+  const Widget *sl = find(r.root, Kind::SliderFloat);
+  ASSERT_NE(sl, nullptr);
+  EXPECT_EQ(sl->bind, "lighting.key_intensity"); // the component's binding survived the include
+}
+
 TEST(AriadneScene, ScalarScaleIsUniform) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

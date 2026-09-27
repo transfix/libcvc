@@ -1,0 +1,90 @@
+# bunny_shadow.ari — the cvcGL Stanford-bunny shader & shadow test bench, ported to Ariadne.
+#
+# The SCENE (bunny on a ground plane, a tuned three-point rig, shadows), the UI (lighting + scene
+# control windows, a View window), and the ACTIONS are all DECLARED here — the host is the generic
+# `ariadne_hello` runner, which just loads this file, realizes the scene, frames the camera, and
+# renders. Compare src/cvcGL/examples/bunny_shadow.cpp — the same bench in ~280 lines of C++.
+#
+#   ariadne_hello bunny_shadow.ari                       # navigable window
+#   ariadne_hello bunny_shadow.ari --offscreen --png bunny.png   # one captured frame
+#
+# The control windows are REUSABLE .ari components (components/*.ari), not hardcoded C++ panels:
+# their sliders bind the rig's and SceneGraph's own two-way state keys, so they drive the live scene
+# with no glue. This is the pattern libcvc/pycvc should ship and every demo should lean on.
+
+meta:
+  name: Bunny shadow (Ariadne)
+  author: cvc
+  min_libcvc: 3.4.0
+
+import:
+  - components/stage_lighting.ari
+  - components/scene_controls.ari
+
+# Seed the "show bunny" toggle on (init: wins over a widget default).
+init: |
+  (state-set "show_bunny" "true")
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Show bunny
+        bind: show_bunny
+      - separator
+      - menu_item: Quit
+        on: quit
+
+windows:
+  # The declarative control panels — imported components, not C++.
+  - include: stage_lighting
+  - include: scene_controls
+  - window: View
+    id: view
+    children:
+      - text: "Bunny shadow — scene, lighting and shadows, all declared in .ari."
+      - checkbox: Show bunny
+        bind: show_bunny
+      - separator
+      # A program on: (state_exec) — re-seeds the rig's key light through its state keys, the same
+      # keys the Stage lighting sliders drive. No C++ handler; pure .ari action lane.
+      - button: Reset key light
+        on: >
+          (begin
+            (state-set "lighting.key_intensity" "1.9")
+            (state-set "lighting.key_azimuth" "-38")
+            (state-set "lighting.key_elevation" "52")
+            (state-set "lighting.key_cone" "34"))
+
+# The scene (§9): a bunny standing on a ground plane, lit by a tuned three-point rig with shadows —
+# the same bench bunny_shadow.cpp builds imperatively, here as data.
+scene:
+  chrome: false # strip the diagnostic grid/axis/bbox — a clean stage for the shadow
+  nodes:
+    # The subject: the embedded Stanford bunny, fit to stand on the ground (Y-up mesh -> Z-up, base
+    # on z=0, tallest extent scaled to 100).
+    - node: bunny
+      type: geometry
+      source: { file: stanford.bunny }
+      fit: { height: 100, up: y }
+      material: { color: [0.85, 0.82, 0.88], ambient: 0.22, diffuse: 0.9, specular: 0.25, specular_power: 24 }
+      visible: show_bunny
+    # The receiver: a procedural ground plane (spans [-220, 220]^2 = 2.2 * bunny height each side).
+    - node: ground
+      type: geometry
+      source: { plane: { size: 440 } }
+      material: { color: [0.32, 0.34, 0.38], ambient: 0.35, diffuse: 0.85 }
+  # A three-point rig aimed TIGHT on the bunny (a tight cone -> a crisp shadow map).
+  lights:
+    - light: studio
+      rig: three_point
+      stage: { center: [0, 0, 50], radius: 62 }
+      key: { intensity: 1.9, azimuth: -38, elevation: 52, cone: 34 }
+      fill: 0.85
+      back: 0.6
+      warmth: 0.3
+      environment: 0.7
+      ambient: 0.4
+  shadows:
+    enabled: true
+    resolution: 2048
+    update_interval: 1

@@ -524,6 +524,8 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
         sg.setShadowUpdateInterval(scene.shadow_interval);
     }
   }
+  if (scene.has_chrome) // strip/show the SceneGraph diagnostic chrome (grid/axis/bbox)
+    sg.setDiagnosticChromeVisible(scene.chrome_visible);
   return out;
 }
 

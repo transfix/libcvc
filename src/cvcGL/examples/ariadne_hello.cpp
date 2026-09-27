@@ -15,6 +15,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
@@ -22,8 +24,13 @@
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/StageLighting.h>
+#include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
+#include <cvc/gl/ariadne/scene_panels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/volume/bounding_box.h>
+#include <string>
 #include <thread>
 
 using cvc::gl::CameraController;
@@ -31,19 +38,50 @@ using cvc::gl::ImGuiBackend;
 using cvc::gl::ImGuiOverlay;
 using cvc::gl::SceneGraph;
 using cvc::gl::SceneRenderer;
+using cvc::gl::TouchGestures;
 namespace ari = cvc::ariadne;
 
 int main(int argc, char **argv) {
+  // Generic Ariadne runner: load a .ari (widgets + scene), realize it, frame the camera to the
+  // scene, and render — a window by default, or a headless capture for verification.
+  //   ariadne_hello doc.ari [--offscreen] [--frames N] [--png PATH] [--width W] [--height H]
+  std::string docPath, png;
+  bool offscreen = false;
+  long frames = 0;
+  int width = 1024, height = 768;
+  for (int i = 1; i < argc; ++i) {
+    const char *a = argv[i];
+    auto next = [&](const char *dflt) { return (i + 1 < argc) ? argv[++i] : dflt; };
+    if (!std::strcmp(a, "--offscreen"))
+      offscreen = true;
+    else if (!std::strcmp(a, "--png")) {
+      png = next("");
+      offscreen = true;
+    } else if (!std::strcmp(a, "--frames"))
+      frames = std::atol(next("0"));
+    else if (!std::strcmp(a, "--width"))
+      width = std::atoi(next("1024"));
+    else if (!std::strcmp(a, "--height"))
+      height = std::atoi(next("768"));
+    else if (a[0] != '-' && docPath.empty())
+      docPath = a;
+  }
+  const bool capturing = offscreen || !png.empty();
+  if (capturing && frames <= 0)
+    frames = 1; // a capture defaults to one frame
+
   cvc::app app;
   SceneGraph sg(app, "hello");
-  SceneRenderer view(sg, 1024, 768, /*offscreen=*/false, "main");
+  SceneRenderer view(sg, width, height, offscreen, "main");
   view.setBackground(0.09, 0.10, 0.12);
 
   CameraController cam(view);
   cam.setMode(CameraController::Mode::Orbit);
+  TouchGestures touch(view, cam); // navigation (Tab orbit/fly, drag to look); updated each frame
 
   ImGuiOverlay ui(view);
   ui.attachCamera(cam);
+  ui.setVisible(!capturing); // a captured still has no overlay chrome
 
   // The Ariadne runtime binds relative widget paths under the scene prefix; the
   // ImGui backend renders it and drives the walk from VTK's render pass.
@@ -79,12 +117,12 @@ int main(int argc, char **argv) {
 
   Widget tree;
   bool loaded = false;
-  if (argc > 1) {
-    LoadResult lr = load_file(argv[1]);
+  if (!docPath.empty()) {
+    LoadResult lr = load_file(docPath.c_str());
     if (lr.ok) {
       tree = std::move(lr.root);
       loaded = true;
-      std::printf("[ariadne_hello] loaded %s", argv[1]);
+      std::printf("[ariadne_hello] loaded %s", docPath.c_str());
       if (!lr.meta.name.empty())
         std::printf(" — \"%s\"", lr.meta.name.c_str());
       std::printf("\n");
@@ -114,6 +152,16 @@ int main(int argc, char **argv) {
                     realized.created.size(), realized.visibility.size());
         for (const std::string &w : scene_warnings)
           std::printf("[ariadne_hello]   %s\n", w.c_str());
+        // Frame the camera to the realized scene so it fills the view (a scene demo wants this;
+        // the built-in tree, with no scene, keeps the default camera).
+        const cvc::bounding_box bb = sg.computeGraphicsBounds();
+        if (!bb.isNull())
+          cam.frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+        // Escape-hatch fallback: also expose the rich C++ scene composites as custom widgets
+        // (scene_panel / stage_lighting_panel / scene_menu), so a document may use EITHER the
+        // declarative .ari control components (preferred) OR these. Harmless if unused.
+        cvc::gl::StageLighting *rig = realized.rigs.empty() ? nullptr : realized.rigs.front().get();
+        cvc::gl::ariadne::register_scene_panels(backend, sg, rig);
       }
     } else {
       // A failed load (e.g. the min_libcvc gate) never half-renders.
@@ -147,23 +195,40 @@ int main(int argc, char **argv) {
     });
   rt.set_root(std::move(tree));
 
-  std::puts("[ariadne_hello] running — close the window or use Sim > Quit to exit.");
-  while (!view.windowClosed() && !quit) {
-    view.processUIEvents(); // pump input into the overlay + camera
-    rt.drain();             // run queued Ariadne action events on the host thread
-    // §9: mirror each bound `visible:` path into its node's `.visible` key (a no-op
-    // unless the value changed). On this owner thread the node flips inline.
-    ari::sync_scene_visibility(app, realized.visibility);
-    // §9: service any volren/volslice nodes (they render nothing without a per-frame
-    // tick + a multi-slice depth sort). A no-op for a scene without volume renderers.
-    cvc::gl::ariadne::tick_scene(realized, view.renderer());
-    view.render(); // draws the scene + the Ariadne overlay (runs rt.render())
-    // §4 read-lane: surface any reactive-predicate diagnostics (a broken visible_when
-    // parse/eval, or a build without state_exec). De-duplicated, so each distinct issue
-    // prints once however many frames it renders — safe to poll every frame.
+  // One frame of host work BEFORE the draw (the deferred-intent discipline, §7.2): pump input,
+  // advance the camera, drain queued actions, mirror scene visibility, tick volume nodes, surface
+  // reactive diagnostics. The actual draw is the caller's (view.render() or view.writePNG()).
+  auto frame_body = [&](double dt) {
+    view.processUIEvents();
+    touch.update();
+    cam.update(dt);
+    rt.drain(); // run queued Ariadne action events (incl. program on:) on the host thread
+    ari::sync_scene_visibility(app, realized.visibility); // §9 bound `visible:` -> node .visible
+    cvc::gl::ariadne::tick_scene(realized, view.renderer()); // §9 volren/volslice per-frame service
     for (const std::string &w : rt.take_reactive_warnings())
       std::fprintf(stderr, "%s\n", w.c_str());
-    std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120 Hz cap
+  };
+
+  if (capturing) {
+    // Headless capture: advance a few frames (so shadows bake and the camera settles), then write
+    // the final one — the verification path (no window, no overlay chrome).
+    for (long f = 0; f < frames; ++f) {
+      frame_body(1.0 / 30.0);
+      if (f + 1 == frames && !png.empty())
+        view.writePNG(png.c_str()); // renders + writes the final frame
+      else
+        view.render();
+    }
+    std::printf("[ariadne_hello] captured %ld frame(s)%s%s\n", frames, png.empty() ? "" : " -> ",
+                png.c_str());
+  } else {
+    std::puts("[ariadne_hello] running — close the window or use Sim > Quit to exit.");
+    while (!view.windowClosed() && !quit) {
+      frame_body(1.0 / 120.0);
+      view.render(); // draws the scene + the Ariadne overlay (runs rt.render())
+      std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120 Hz cap
+    }
   }
+  cam.detach();
   return 0;
 }
