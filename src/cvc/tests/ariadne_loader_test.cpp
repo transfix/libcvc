@@ -1724,6 +1724,74 @@ windows:
   EXPECT_TRUE(has_warning(r, "duplicate mount id"));
 }
 
+TEST(AriadneMount, LoadStateSchemeDefaultMountIdKeepsDottedTail) {
+  SKIP_WITHOUT_YAML();
+  // A non-file scheme's path is a dotted IDENTITY, not a filename — the default mount id must
+  // keep the whole tail, so two distinct state fragments do not collapse to one id.
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("libs.forms").value(std::string("root: [ { text: F } ]\n"));
+  root("libs.panels").value(std::string("root: [ { text: P } ]\n"));
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - load: state://libs.forms
+      - load: state://libs.panels
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find_scope(r.root, "includes.libs_forms"), nullptr);
+  EXPECT_NE(find_scope(r.root, "includes.libs_panels"), nullptr);
+  EXPECT_FALSE(has_warning(r, "duplicate mount id")); // distinct tails -> no collision
+}
+
+TEST(AriadneMount, FailedMountDoesNotBurnItsMountId) {
+  SKIP_WITHOUT_YAML();
+  // A mount that fails to parse must not reserve its id, or a later valid sibling with the same
+  // id would be spuriously disambiguated.
+  write_temp_ari("bad_frag.ari", "root: *nope\n"); // undefined alias -> YAML parse error
+  write_temp_ari("good_frag.ari", "root: [ { text: ok } ]\n");
+  const std::string main = write_temp_ari("main_fail_id.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: bad_frag.ari
+        as: p
+      - load: good_frag.ari
+        as: p
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find_scope(r.root, "includes.p"), nullptr);   // the good mount keeps `p`
+  EXPECT_EQ(find_scope(r.root, "includes.p_2"), nullptr); // not bumped
+  EXPECT_FALSE(has_warning(r, "duplicate mount id"));
+}
+
+TEST(AriadneMount, BranchingMountGraphIsAggregateCapped) {
+  SKIP_WITHOUT_YAML();
+  // A branching graph (each level mounts the next TWICE) would fan out 2^depth under only a
+  // per-chain depth cap; the aggregate mount cap must stop it with a warning, not exponentially.
+  const int D = 8; // 2^8 = 256 leaf mounts -> total attempts exceed kMaxMounts (256)
+  std::string l0;
+  for (int k = D; k >= 0; --k) {
+    std::string content;
+    if (k < D) {
+      const std::string next = "L" + std::to_string(k + 1) + ".ari";
+      content = "root:\n  - load: " + next + "\n    as: a\n  - load: " + next + "\n    as: b\n";
+    } else {
+      content = "root: [ { text: leaf } ]\n";
+    }
+    const std::string p = write_temp_ari("L" + std::to_string(k) + ".ari", content);
+    if (k == 0)
+      l0 = p;
+  }
+  LoadResult r = load_file(l0);
+  ASSERT_TRUE(r.ok) << r.error; // bounded, not exponential
+  EXPECT_TRUE(has_warning(r, "mount limit reached"));
+}
+
 TEST(AriadneReactive, RepeatParsedOntoWidget) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

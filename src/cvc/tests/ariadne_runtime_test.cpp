@@ -504,6 +504,29 @@ TEST(AriadneMountScope, ReactiveReadsResolveAtSubPrefix) {
   EXPECT_FALSE(mb.saw("text_line:hi"));
 }
 
+TEST(AriadneMountScope, RepeatedMountGetsPerInstanceSubPrefix) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.checkbox_ret.committed = true;
+  mb.checkbox_ret.value = true;
+  // A repeated mount: each instance must land on its OWN sub-prefix (includes.rf.<i>), not share
+  // one — otherwise every instance's fragment would bind to the same state.
+  Widget cb = checkbox("Flag", "on", false);
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "includes.rf";
+  mount.repeat = "(int 2)";
+  mount.children = {cb};
+  rt.set_root(group({mount}));
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.0.on").value(), "1");
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.1.on").value(), "1");
+}
+
 TEST(AriadneMountScope, EndToEndLoadCommitsAtSubPrefix) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";

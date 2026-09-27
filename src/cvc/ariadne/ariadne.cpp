@@ -93,6 +93,11 @@ Widget substitute_index(const Widget &w, int index) {
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
   out.tooltip = replace_all(out.tooltip, kTok, idx);
   out.options_expr = replace_all(out.options_expr, kTok, idx);
+  // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
+  // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
+  // than all N instances sharing one, which would violate repeat's per-instance-state contract.
+  if (!out.scope.empty())
+    out.scope += "." + idx;
   out.children.clear();
   out.children.reserve(w.children.size());
   for (const Widget &c : w.children)

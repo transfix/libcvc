@@ -18,6 +18,7 @@
 #include <filesystem>        // §12 import: dirname of a resolved library for nested bases
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -197,9 +198,13 @@ struct Ctx {
   // own chroot sub-prefix). `mounting` is the resolved-URI stack — refusing a canonical already
   // on it stops a mount cycle (a→b→a) and, with a depth cap, a runaway chain. `mount_ids` are
   // the mount ids (`as:`) already used AT THIS level, so a default/duplicate id is disambiguated
-  // rather than colliding two fragments onto one sub-prefix.
+  // rather than colliding two fragments onto one sub-prefix. `mount_count` is a document-wide
+  // SHARED total-mount counter (the depth cap alone lets a branching graph fan out K^depth, since
+  // the cycle guard only blocks re-mounting an ANCESTOR, not sibling reuse) — a fresh sub-Ctx
+  // copies the shared_ptr, so the count aggregates across the whole mount graph.
   std::set<std::string> mounting;
   std::set<std::string> mount_ids;
+  std::shared_ptr<int> mount_count;
 };
 
 bool has(const YAML::Node &n, const char *key) { return n[key].IsDefined(); }
@@ -759,6 +764,9 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
 // §12 load: mount depth cap — a fragment that loads a fragment that loads … this deep is
 // almost certainly a mistake or an attack; refuse past it (the cycle guard handles a → b → a).
 constexpr std::size_t kMaxMountDepth = 32;
+// Document-wide cap on TOTAL mounts (depth × breadth) — a branching mount graph past this is
+// pathological or hostile. Bounds the K^depth fan-out the per-chain depth cap cannot see.
+constexpr int kMaxMounts = 256;
 
 // A mount id must be a single, clean state-path segment (it becomes `includes.<id>`), so map
 // anything that is not [A-Za-z0-9_] to '_' and never let it be empty or start with a digit.
@@ -774,20 +782,28 @@ std::string sanitize_mount_id(const std::string &raw) {
   return out;
 }
 
-// Default a mount id from the resource: the last path segment, minus any extension — e.g.
-// "file://panels/rf_telemetry.ari" → "rf_telemetry", "state://ui.libs.forms" → "ui.libs.forms"
-// (then sanitized by the caller). A bare/empty tail falls back to "mount".
+// Default a mount id from the resource. For a FILE path it is the last path segment minus its
+// extension ("file://panels/rf_telemetry.ari" → "rf_telemetry"). For a non-file scheme the path
+// is a dotted IDENTITY, not a filename, so the trailing ".x" is a real segment, not an extension
+// — keep it whole ("state://ui.libs.forms" → "ui.libs.forms", so ui.libs.forms and ui.libs.panels
+// stay distinct). The caller sanitizes ('.' → '_'). A bare/empty tail falls back to "mount".
 std::string default_mount_id(const std::string &uri) {
   std::string s = uri;
-  const std::size_t scheme = s.find("://");
-  if (scheme != std::string::npos)
+  bool is_file = true; // a bare/relative path is the file scheme (§13.1)
+  if (const std::size_t scheme = s.find("://"); scheme != std::string::npos) {
+    std::string sch = s.substr(0, scheme);
+    std::transform(sch.begin(), sch.end(), sch.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    is_file = (sch == "file");
     s = s.substr(scheme + 3);
+  }
   if (const std::size_t q = s.find('?'); q != std::string::npos)
     s = s.substr(0, q);
   if (const std::size_t slash = s.find_last_of('/'); slash != std::string::npos)
     s = s.substr(slash + 1);
-  if (const std::size_t dot = s.find_last_of('.'); dot != std::string::npos && dot != 0)
-    s = s.substr(0, dot);
+  if (is_file) // only a file path carries an extension to strip
+    if (const std::size_t dot = s.find_last_of('.'); dot != std::string::npos && dot != 0)
+      s = s.substr(0, dot);
   return s.empty() ? "mount" : s;
 }
 
@@ -818,19 +834,17 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
              ") — refused");
     return group({});
   }
-  // Mount id: explicit `as:`, else derived from the resource; sanitized, and disambiguated
-  // against sibling mounts at this level so two fragments never collide onto one sub-prefix.
-  std::string as = sanitize_mount_id(has(n, "as") ? str(n, "as") : default_mount_id(uri));
-  if (!ctx.mount_ids.insert(as).second) {
-    std::string uniq;
-    for (int i = 2; uniq.empty(); ++i) {
-      const std::string cand = as + "_" + std::to_string(i);
-      if (ctx.mount_ids.insert(cand).second)
-        uniq = cand;
-    }
-    ctx.warn("ari: load: duplicate mount id '" + as + "' — using '" + uniq + "'");
-    as = uniq;
+  // Aggregate (document-wide) mount cap: the depth guard alone lets a BRANCHING mount graph fan
+  // out K^depth (the cycle guard only blocks re-mounting an ancestor, not sibling reuse). Count
+  // total mounts on a shared counter and refuse past the cap — the load: analogue of kMaxImports.
+  if (!ctx.mount_count)
+    ctx.mount_count = std::make_shared<int>(0);
+  if (*ctx.mount_count >= kMaxMounts) {
+    ctx.warn("ari: load: mount limit reached (" + std::to_string(kMaxMounts) +
+             " fragments) — refused");
+    return group({});
   }
+  ++*ctx.mount_count;
   YAML::Node frag;
   try {
     frag = YAML::Load(res.content);
@@ -854,16 +868,32 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
     ctx.warn("ari: load '" + uri +
              "': link: (parent-scope holes) is not yet wired (a later slice)");
   // Parse the fragment in an ISOLATED sub-context: fresh units (module boundary), based at the
-  // fragment's own directory, carrying the mount stack (with this URI pushed) for the cycle/depth
-  // guard. Its warnings bubble up to the host document.
+  // fragment's own directory, carrying the mount stack (with this URI pushed) + the shared mount
+  // counter for the cycle/depth/aggregate guards. Its warnings bubble up to the host document.
   Ctx sub;
   sub.base_dir = std::filesystem::path(res.canonical).parent_path().string();
   sub.mounting = ctx.mounting;
   sub.mounting.insert(res.canonical);
+  sub.mount_count = ctx.mount_count;
   parse_units(sub, frag); // the fragment's OWN import:/units:
   Widget frag_root = parse_document(sub, frag);
   for (const std::string &w : sub.warnings)
     ctx.warn(w);
+  // Mount id: explicit `as:`, else derived from the resource; sanitized, and disambiguated
+  // against sibling mounts at this level so two fragments never collide onto one sub-prefix.
+  // Reserved only NOW — after the fragment has actually loaded+parsed — so a mount that failed
+  // above never burns an id (which would spuriously bump a later valid sibling to <id>_2).
+  std::string as = sanitize_mount_id(has(n, "as") ? str(n, "as") : default_mount_id(uri));
+  if (!ctx.mount_ids.insert(as).second) {
+    std::string uniq;
+    for (int i = 2; uniq.empty(); ++i) {
+      const std::string cand = as + "_" + std::to_string(i);
+      if (ctx.mount_ids.insert(cand).second)
+        uniq = cand;
+    }
+    ctx.warn("ari: load: duplicate mount id '" + as + "' — using '" + uniq + "'");
+    as = uniq;
+  }
   // The wrapper carries the scope; the fragment is its child so the fragment's own root reactive
   // fields evaluate at the sub-prefix, while the parent's load:-block fields land on the wrapper.
   Widget wrapper = group({std::move(frag_root)});
