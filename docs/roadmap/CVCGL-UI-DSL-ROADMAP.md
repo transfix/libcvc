@@ -1168,6 +1168,33 @@ other `on:tick`/`on:key` cadence questions.
   stays as a fallback only for a build without the async/coroutine path; the two are
   result-identical over the same `value_t`, so this is a driver choice, not a semantic
   one. **Bringing the async executor to parity is a P0/P1 workstream, not a P4 nicety.**
+- **Scheduler instance & isolation (decided — one app-wide, namespaced per document):**
+  there is **one** long-lived `async_stackless_evaluator` + `async_scheduler` for the whole
+  host (owned by `cvc::app`, or a small service hung off it), **not one per `.ari` document**.
+  Every document's program lanes (`init:` / action `on:` / `on:tick`·`on:key` residents /
+  spawned processes) schedule on that single cooperative timeline, so cross-document
+  coordination (a shared sim world, `spawn`/`msg` between documents) is intrinsic and the
+  whole-host state_exec time budget is enforced at **one** per-frame pump — not N pumps that
+  each independently claim a full slice. Isolation is preserved by **namespacing on the shared
+  scheduler**, not by separate instances: each `Runtime` registers an **owner scope** (a
+  process-group tag + its host intrinsics) whose processes are (a) **chrooted per-process** to
+  the document's mount prefix (§4.8 / §7.8 — chroot is enforced by the `intrinsics_context`,
+  not the scheduler, so it is unaffected by sharing), and (b) evaluated in a **per-document
+  child env** over a shared, immutable base (`make_default_environment` + stdlib + host
+  intrinsics loaded **once**), so one document's `defun`/`defclass`/vars stay invisible to
+  another. Tearing down a `Runtime` **reaps its process group** (`kill` all owned processes,
+  drop their inboxes) — the one hazard a shared scheduler adds is that a parked
+  `(msg-recv)`/`(await)` from a closed document would otherwise linger forever. The reactive
+  **READ lane stays a separate, per-`Runtime`, synchronous `stackless_evaluator`** and is
+  **never** placed on the shared scheduler: per-frame predicates must return instantly, so a
+  suspended predicate is disallowed by construction (the read lane keeps its default-deny
+  special-form gate excluding `await`/`async`/`spawn`/`msg`). **"Schedule everything on the one
+  scheduler" therefore means every _program_ lane — not the read lane.** Finally, the
+  scheduler's message-delivery / wake path must be **thread-safe**: the pump runs on the
+  UI/owning thread, but an external async result (e.g. a nav step on `app.computePool()`)
+  resolves an `(await …)` / `(msg-recv …)` by **`msg-send`-ing from a worker thread**, so the
+  inbox enqueue + ready-transition must be an MPSC-safe operation, not a bare same-thread
+  mutation.
 - **Degradation:** `CVC_ENABLE_IMGUI=OFF` → draw walk skipped, no predicate/`fmt`
   evaluated, scene still renders; scheduler + state tree still run headless so
   non-UI-triggered actions keep working. Python host → identical `value_t`/scheduler
