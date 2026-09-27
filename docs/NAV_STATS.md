@@ -18,7 +18,13 @@ and `sim_world` itself all drive it identically.
   `goals_reached`), motion (`total_path_m`/`straight_m`/`turn_total_rad`/`turn_events`/`time_in_wall_s`/
   speeds), clearance/collisions (`min_clearance_m`/`time_below_clear_s`/`penetration_steps`/
   `veh_contacts`), per-material dwell (`time_over_material_s`/`dist_over_material_m`, `kNumMaterials`
-  buckets), and effort (`accel_integral`/`fuel_used`).
+  buckets), effort (`accel_integral`/`fuel_used`), and **drive telemetry** — the reduced per-tick
+  `drive_telemetry` (`drive_sample`): policy coefficients (`alpha_mean`/`beta_mean`/`gamma_mean`),
+  grip (`mu_mean`/`mu_min`), material risk (`mrisk_mean`/`mrisk_max`), external-force magnitude
+  (`ext_force_mean`), steering (`steer_abs_mean`/`steer_abs_max`), and `binding_steps`. These are
+  populated only when the driver captures telemetry (`sim_world::set_capture_drive_telemetry(true)`,
+  then feed `drive_sample` from `drive_telemetry_data()`); otherwise `mu_mean` stays 1, `mrisk_mean`
+  0 (the no-material/no-grip neutral).
 - **`episode_nav_stats`** — one per episode: the reduced fleet fields + `per_vehicle`, and `to_json()`
   (the base record; a DBG consumer nests an `"rf"` member itself). The `1e30` "unmeasured" sentinel
   for `min_clearance_m`/`min_sep_m` serializes as JSON `null`, not a huge finite number.
@@ -27,6 +33,11 @@ and `sim_world` itself all drive it identically.
   `min_clearance_m` (a `const double*` **in metres** — see the units note below).
 - **`nav_scorecard`** + **`aggregate_nav(episodes, checkpoint)`** — reduce a corpus of episodes into
   one RF-free fitness row (arrival, economy, safety, material) for ranking base-policy checkpoints.
+  Includes the fleet drive-telemetry means (`mean_alpha`/`mean_beta`/`mean_gamma`, `mean_mu`,
+  `mean_mrisk`, `mean_ext_force`) and `material_time_share[kNumMaterials]` — the signals a grip/risk
+  tuning or trained-policy A/B is judged on (lower `mean_mrisk` + off-hazard time-share at held
+  arrival). Note `composite_score` / grip-margin are reserved to a downstream (cvc::dbg) scorecard,
+  not computed here.
 
 ## Collecting
 
