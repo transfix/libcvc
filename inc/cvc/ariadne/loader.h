@@ -35,10 +35,12 @@
 // slices; unknown keys are ignored, not errors, so a fuller document still loads
 // its P0 subset.
 
+#include <cstdint>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/widget.h>
 #include <functional>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -86,6 +88,11 @@ struct LoadResult {
   std::vector<std::pair<std::string, Value>> extras;
   std::vector<std::string> warnings; // non-fatal issues (unknown types, empty binds, …)
   std::string error;                 // human-readable message when !ok
+  // §12.5 hot-reload: the local FILE paths read during this load — the main document plus every
+  // file:// import: and load: fragment (state/http sources are not file-watchable, so omitted).
+  // A host watches these for mtime changes and re-loads on change; sources_changed() does the
+  // polling. De-duplicated, in first-seen order.
+  std::vector<std::string> sources;
 };
 
 // Parse a .ari document from an in-memory string. Never throws. Enforces the
@@ -95,6 +102,16 @@ LoadResult load_string(const std::string &yaml);
 
 // Parse a .ari document from a file path. Never throws.
 LoadResult load_file(const std::string &path);
+
+// §12.5 hot-reload: poll whether any of `sources` (e.g. LoadResult::sources) has changed on disk
+// since the last call. `stamps` is caller-owned state carried across calls (path -> last mtime);
+// pass the same map each poll. Returns true when any source's mtime differs from its recorded
+// stamp (or is newly seen with a prior stamp), updating `stamps`. A missing/unreadable file is
+// treated as unchanged (a mid-write flicker should not thrash a reload). The host calls this on a
+// timer and, when it returns true, re-runs load_file + Runtime::set_root — the reconcile then
+// re-mounts changed fragments (holes are re-wired; §12). Never throws.
+bool sources_changed(const std::vector<std::string> &sources,
+                     std::map<std::string, std::int64_t> &stamps);
 
 // Whether this build has the YAML parser (libcvc built with yaml-cpp). When
 // false, load_* return {ok:false, error:"...built without yaml-cpp..."}.

@@ -4,6 +4,8 @@
 // Parsing tests are skipped when the build has no yaml-cpp (the loader is then a
 // stub); the version/schema surface is tested unconditionally.
 
+#include <chrono>
+#include <cstdint>
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/uri.h>       // §13 resolver (import routes through it)
@@ -15,6 +17,7 @@
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
+#include <map>
 #include <stdexcept>
 #include <string>
 
@@ -1836,6 +1839,45 @@ windows:
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(has_warning(r, "needs link 'fleet'"));  // ungranted -> warned
   EXPECT_FALSE(has_warning(r, "needs link 'theme'")); // granted -> silent
+}
+
+TEST(AriadneMount, LoadTracksSourcesForHotReload) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("hr_lib.ari", "units:\n  u: { text: x }\n");
+  write_temp_ari("hr_panel.ari", "root: [ { text: p } ]\n");
+  const std::string main =
+      write_temp_ari("hr_main.ari", "import: hr_lib.ari\n"
+                                    "windows:\n  - window: W\n    children:\n"
+                                    "      - load: hr_panel.ari\n        as: rf\n");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const auto has_src = [&](const std::string &needle) {
+    for (const std::string &s : r.sources)
+      if (s.find(needle) != std::string::npos)
+        return true;
+    return false;
+  };
+  EXPECT_TRUE(has_src("hr_main.ari"));  // the main document
+  EXPECT_TRUE(has_src("hr_lib.ari"));   // an imported library
+  EXPECT_TRUE(has_src("hr_panel.ari")); // a mounted fragment
+}
+
+TEST(AriadneMount, SourcesChangedDetectsMtimeBump) {
+  namespace fs = std::filesystem;
+  const std::string p = write_temp_ari("hr_watch.ari", "root: []\n");
+  std::vector<std::string> sources{p};
+  std::map<std::string, std::int64_t> stamps;
+  EXPECT_FALSE(sources_changed(sources, stamps)); // first sight = baseline, not a change
+  EXPECT_FALSE(sources_changed(sources, stamps)); // still unchanged
+  // Bump the mtime explicitly so the test is independent of filesystem timestamp granularity.
+  const auto now = fs::last_write_time(p);
+  fs::last_write_time(p, now + std::chrono::seconds(2));
+  EXPECT_TRUE(sources_changed(sources, stamps));  // change detected
+  EXPECT_FALSE(sources_changed(sources, stamps)); // stamp updated -> not reported again
+  // A missing source is treated as unchanged (never throws).
+  std::vector<std::string> missing{"/no/such/ariadne/file.ari"};
+  std::map<std::string, std::int64_t> ms;
+  EXPECT_FALSE(sources_changed(missing, ms));
 }
 
 TEST(AriadneMount, LoadMountCycleTerminates) {

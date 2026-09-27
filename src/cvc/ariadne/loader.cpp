@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/ariadne/loader.h>
@@ -171,6 +172,31 @@ bool have_jsonschema() {
 #endif
 }
 
+// §12.5 hot-reload polling — see loader.h. Always available (no yaml needed): compares each
+// source's on-disk mtime to a caller-held stamp. First sight of a path records its stamp and is
+// NOT a change (the caller just loaded it); a later differing mtime is a change. A missing /
+// unreadable file is skipped (a mid-write flicker must not thrash a reload). Never throws.
+bool sources_changed(const std::vector<std::string> &sources,
+                     std::map<std::string, std::int64_t> &stamps) {
+  namespace fs = std::filesystem;
+  bool changed = false;
+  for (const std::string &p : sources) {
+    std::error_code ec;
+    const fs::file_time_type t = fs::last_write_time(p, ec);
+    if (ec)
+      continue; // missing/unreadable -> treat as unchanged
+    const std::int64_t mtime = static_cast<std::int64_t>(t.time_since_epoch().count());
+    const auto it = stamps.find(p);
+    if (it == stamps.end())
+      stamps.emplace(p, mtime); // baseline; not a change
+    else if (it->second != mtime) {
+      it->second = mtime;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 #ifdef CVC_ARIADNE_HAVE_YAML
 
 namespace {
@@ -205,7 +231,22 @@ struct Ctx {
   std::set<std::string> mounting;
   std::set<std::string> mount_ids;
   std::shared_ptr<int> mount_count;
+
+  // §12.5 hot-reload: the local FILE paths read across this document's whole import/mount graph,
+  // shared (like mount_count) so a fresh sub-Ctx contributes to the one list. Copied into
+  // LoadResult::sources for a host to watch. state/http canonicals are skipped (not watchable).
+  std::shared_ptr<std::vector<std::string>> sources;
 };
+
+// §12.5: record a resolved FILE canonical for hot-reload watching — skip a state/http canonical
+// (has "://", not file-watchable) and dedup. Shared across the whole import/mount graph.
+void note_source(Ctx &ctx, const std::string &canonical) {
+  if (!ctx.sources || canonical.empty() || canonical.find("://") != std::string::npos)
+    return;
+  std::vector<std::string> &v = *ctx.sources;
+  if (std::find(v.begin(), v.end(), canonical) == v.end())
+    v.push_back(canonical);
+}
 
 bool has(const YAML::Node &n, const char *key) { return n[key].IsDefined(); }
 
@@ -670,6 +711,7 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
       ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
       continue;
     }
+    note_source(ctx, res.canonical); // §12.5 watch this imported file for hot-reload
     if (!ctx.imported.insert(res.canonical).second)
       continue; // already imported (dedup) or on the stack (cycle) — skip
     YAML::Node sub;
@@ -827,6 +869,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
     ctx.warn("ari: load '" + uri + "' could not be resolved: " + res.error);
     return group({});
   }
+  note_source(ctx, res.canonical); // §12.5 watch this mounted fragment for hot-reload
   if (ctx.mounting.count(res.canonical)) {
     ctx.warn("ari: load: mount cycle on '" + res.canonical + "' — refused");
     return group({});
@@ -870,7 +913,8 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   sub.mounting = ctx.mounting;
   sub.mounting.insert(res.canonical);
   sub.mount_count = ctx.mount_count;
-  parse_units(sub, frag); // the fragment's OWN import:/units:
+  sub.sources = ctx.sources; // §12.5 the fragment's own imports/mounts feed the same watch list
+  parse_units(sub, frag);    // the fragment's OWN import:/units:
   Widget frag_root = parse_document(sub, frag);
   for (const std::string &w : sub.warnings)
     ctx.warn(w);
@@ -1337,8 +1381,11 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
   LoadResult r;
   Ctx ctx;
   ctx.base_dir = base_dir;
-  if (!self_path.empty())
+  ctx.sources = std::make_shared<std::vector<std::string>>(); // §12.5 hot-reload watch list
+  if (!self_path.empty()) {
     ctx.imported.insert(self_path);
+    note_source(ctx, self_path); // the main document is itself watched
+  }
   r.meta = doc.IsMap() ? parse_meta(doc["meta"]) : Meta{};
 
   // The min_libcvc gate fires FIRST (roadmap §3.1a): a document that needs a
@@ -1402,6 +1449,8 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
     ctx.warn("ari: no meta.min_libcvc declared — the provenance gate is skipped "
              "(roadmap §3.1a asks every .ari to declare it)");
   r.warnings = std::move(ctx.warnings);
+  if (ctx.sources)
+    r.sources = std::move(*ctx.sources); // §12.5 the files a host watches for hot-reload
 
   // Custom top-level blocks (register_ari_block): dispatch any non-built-in key with a
   // registered parser. Run AFTER warnings are moved, so a parser may append to
