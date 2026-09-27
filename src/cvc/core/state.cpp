@@ -652,6 +652,33 @@ state &state::data(const boost::any &d) {
   // Get fullName before locking
   std::string full_name = fullName();
 
+  // Phase 8: writes through a writable transparent link route to the
+  // resolved target, mirroring state::value(const std::string&, bool).
+  // Opaque links and non-writable transparent links accept writes on the
+  // link node itself (the historical default). resolveLink() locks each
+  // node internally, so snapshot the link record under _mutex and RELEASE
+  // the lock before calling it.
+  {
+    link_mode mode_snapshot;
+    bool writable_snapshot;
+    bool is_link_snapshot;
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      is_link_snapshot = !_linkTarget.empty();
+      mode_snapshot = _linkMode;
+      writable_snapshot = _linkWritable;
+    }
+    if (is_link_snapshot && mode_snapshot == link_mode::transparent && writable_snapshot) {
+      link_resolution r = resolveLink();
+      if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this) {
+        r.target->data(d);
+        return *this;
+      }
+      throw read_only_error(boost::str(
+          boost::format("Cannot write through unresolvable transparent link: %1%") % full_name));
+    }
+  }
+
   // Check if this state is read-only
   {
     boost::mutex::scoped_lock lock(_mutex);
@@ -908,6 +935,20 @@ std::string state::resolvedValue(std::size_t hop_budget) {
     return r.target->value();
   // Broken / cycle / budget exhausted: fall back to own value.
   return value();
+}
+
+boost::any state::resolvedData(std::size_t hop_budget) {
+  // Cheap fast path: not a link, or opaque link, return own data.
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    if (_linkTarget.empty() || _linkMode != link_mode::transparent)
+      return _data;
+  }
+  link_resolution r = resolveLink(hop_budget);
+  if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this)
+    return r.target->data();
+  // Broken / cycle / budget exhausted: fall back to own data.
+  return data();
 }
 
 bool state::isLink() const {

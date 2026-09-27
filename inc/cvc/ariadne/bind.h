@@ -87,14 +87,17 @@ template <typename T> T read_or(cvc::app &ctx, const std::string &path, const T 
 // A write equal to the current value is a no-op inside cvc::state (equality guard),
 // so re-writing every frame fires observers only on an actual change.
 //
-// Writes go through the STRING setter (state::value(const std::string&)) rather than the typed
-// value<T>: only the string setter routes a write through a writable transparent-link HOLE to its
-// target (§12) — the typed setter writes the link node's own value, which would strand a mount's
-// write inside its own subtree. lexical_cast reproduces value<T>'s own string encoding, so the
-// stored representation is unchanged for a plain (non-link) node.
+// Goes through the typed value<T> setter. Both setters now share one Phase 8 routing
+// block, so a write through a writable transparent-link HOLE reaches its resolved target
+// (§12) whichever setter is used — but value<T> also records the target's real
+// valueTypeName instead of clobbering it to "std::string" the way the string setter does.
+// For a std::string T, .value(v) resolves to the (preferred non-template) string overload,
+// so text writes are unchanged; int/double writes now land typed. value<T> encodes via the
+// same lexical_cast the string path used, so the stored string is byte-identical for a plain
+// (non-link) node — this only upgrades the recorded type, never the representation.
 template <typename T> void write(cvc::app &ctx, const std::string &path, const T &v) {
   try {
-    cvc::state::instance(ctx)(path).value(boost::lexical_cast<std::string>(v));
+    cvc::state::instance(ctx)(path).value(v);
   } catch (const std::exception &) {
   }
 }

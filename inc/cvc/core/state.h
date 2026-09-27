@@ -269,6 +269,37 @@ public:
     // Check if read-only before acquiring lock
     std::string full_name = fullName();
 
+    // Phase 8: writes through a writable transparent link route to the
+    // resolved target, mirroring the string overload
+    // (state::value(const std::string&, bool) in state.cpp). Routing to the
+    // TEMPLATED overload on the target keeps the target's typed
+    // valueTypeName, so a typed write reaches the same target -- with the
+    // same recorded type -- that a direct write on the target would.
+    // Opaque links and non-writable transparent links accept writes on the
+    // link node itself (the historical default). resolveLink() locks each
+    // node internally, so snapshot the link record under _mutex and RELEASE
+    // the lock before calling it (never resolveLink() while holding _mutex).
+    {
+      link_mode mode_snapshot;
+      bool writable_snapshot;
+      bool is_link_snapshot;
+      {
+        boost::mutex::scoped_lock lock(_mutex);
+        is_link_snapshot = !_linkTarget.empty();
+        mode_snapshot = _linkMode;
+        writable_snapshot = _linkWritable;
+      }
+      if (is_link_snapshot && mode_snapshot == link_mode::transparent && writable_snapshot) {
+        link_resolution r = resolveLink();
+        if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this) {
+          r.target->value(v);
+          return *this;
+        }
+        throw read_only_error(boost::str(
+            boost::format("Cannot write through unresolvable transparent link: %1%") % full_name));
+      }
+    }
+
     {
       boost::mutex::scoped_lock lock(_mutex);
 
@@ -540,6 +571,16 @@ public:
   // value() for backwards compatibility. For opaque links and
   // non-links, returns this node's own value().
   std::string resolvedValue(std::size_t hop_budget = 64);
+
+  // Read this node's data(), following the link chain when the node is a
+  // transparent link. The boost::any analogue of resolvedValue(): returns
+  // the terminal node's data() when resolution succeeds; on broken / cycle
+  // / budget_exhausted resolutions, falls back to this node's own data()
+  // for backwards compatibility. For opaque links and non-links, returns
+  // this node's own data(). Like value()/resolvedValue(), the plain data()
+  // getter still returns this node's own _data; callers that want
+  // pass-through reads of a transparent-link node must use resolvedData().
+  boost::any resolvedData(std::size_t hop_budget = 64);
 
   // Remove the link mark. The node's children/value are
   // preserved. Returns true if the node was a link.
