@@ -339,9 +339,10 @@ std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
 }
 
 std::string widget_type(const YAML::Node &n, std::string &label) {
-  static const char *kKeys[] = {"group",        "menubar", "menu",  "menu_item", "window",
-                                "overlay",      "panel",   "text",  "checkbox",  "slider_int",
-                                "slider_float", "combo",   "color", "button",    "separator"};
+  static const char *kKeys[] = {"group",    "menubar",    "menu",         "menu_item",
+                                "window",   "overlay",    "panel",        "text",
+                                "checkbox", "slider_int", "slider_float", "combo",
+                                "color",    "image",      "button",       "separator"};
   for (const char *k : kKeys) {
     const YAML::Node v = n[k];
     if (v.IsDefined()) {
@@ -602,6 +603,11 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const std::string bind = str(n, "bind");
     check_bind(ctx, "color", label, bind);
     return color_widget(label, bind, str(n, "default", str(n, "def")));
+  }
+  if (type == "image") { // a host-published image viewer (a live raster)
+    Widget w = image_widget(label, str(n, "src"), num(n, "size", 256.0));
+    w.bind = str(n, "bind"); // optional: the image name comes from this key instead of src
+    return w;
   }
   if (type == "button") {
     const std::string on = action(n);

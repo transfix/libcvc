@@ -20,8 +20,10 @@
 
 #ifdef CVC_ENABLE_IMGUI
 #define IMGUI_DEFINE_MATH_OPERATORS // must precede imgui.h (imgui_internal asserts it)
+#include <cstdint>
 #include <imgui.h>
 #include <imgui_internal.h> // ImHashStr: a stable per-key slot in the window's storage
+#include <vtk_glad.h>       // GL texture entry points (the loader ImGuiOverlay uses)
 #endif
 
 namespace cvc {
@@ -419,6 +421,51 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
 void ImGuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
   if (draw)
     m_customWidgets[std::move(custom_type)] = std::move(draw);
+}
+
+void ImGuiBackend::set_image(const std::string &name, const cvc::image &img) {
+  PublishedImage &p = m_images[name];
+  p.img = img; // copy-on-write; no pixel copy until data() detaches (it won't — we read const)
+  p.dirty = true;
+}
+
+bool ImGuiBackend::draw_image(const char *name, float width) {
+#ifdef CVC_ENABLE_IMGUI
+  const auto it = m_images.find(name ? name : "");
+  if (it == m_images.end())
+    return false;
+  PublishedImage &p = it->second;
+  if (p.img.width() <= 0 || p.img.height() <= 0)
+    return false;
+  // Upload as RGBA8. `const` so data() reads the shared buffer without a COW detach.
+  const cvc::image rgba =
+      (p.img.format() == cvc::image::pixel_format::RGBA)
+          ? p.img
+          : p.img.converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  const int W = rgba.width(), H = rgba.height();
+  if (p.tex == 0) {
+    glGenTextures(1, &p.tex);
+    glBindTexture(GL_TEXTURE_2D, p.tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); // crisp grid cells
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    p.dirty = true;
+  }
+  glBindTexture(GL_TEXTURE_2D, p.tex);
+  if (p.dirty) {
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    p.dirty = false;
+  }
+  const float h = width * static_cast<float>(H) / static_cast<float>(W);
+  ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(p.tex)), ImVec2(width, h));
+  return true;
+#else
+  (void)name;
+  (void)width;
+  return false;
+#endif
 }
 
 ariadne::CustomEdit ImGuiBackend::custom_widget(const char *type, const std::string &current,

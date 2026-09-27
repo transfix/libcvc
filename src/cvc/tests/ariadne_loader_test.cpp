@@ -401,6 +401,21 @@ TEST(AriadneLoader, ColorWidgetParses) {
   EXPECT_EQ(c->sdef, "1,0.5,0");
 }
 
+// §raster viewer: an `image:` widget parses to Kind::Image with a static src, a display size, and
+// an optional bind (the image name from a key).
+TEST(AriadneLoader, ImageWidgetParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r =
+      load_string("windows:\n  - window: W\n    children:\n      - image: Belief\n       "
+                  " src: belief\n        size: 320\n        bind: raster.layer\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *im = find(r.root, Kind::Image);
+  ASSERT_NE(im, nullptr);
+  EXPECT_EQ(im->src, "belief");
+  EXPECT_EQ(im->bind, "raster.layer");
+  EXPECT_DOUBLE_EQ(im->img_size, 320.0);
+}
+
 TEST(AriadneLoader, BareScalarsAndLiteralVsBoundText) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

@@ -1056,6 +1056,17 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::Image: {
+    // The image name: a bound key's value (a combo can switch rasters) else the static src.
+    const std::string name =
+        w.bind.empty() ? w.src : read_or<std::string>(app, resolve(w.bind), w.src);
+    const float width = static_cast<float>(w.img_size > 0 ? w.img_size : 256.0);
+    if (!b.draw_image(name.c_str(), width)) // a backend with no image path -> show the name as text
+      b.text_value(w.label.empty() ? "image" : w.label.c_str(),
+                   name.empty() ? std::string("(no image)") : name);
+    break;
+  }
+
   case Kind::Button:
     if (b.button(label))
       enqueue(w.on);

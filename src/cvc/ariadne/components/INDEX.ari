@@ -51,3 +51,10 @@ catalog:
     for: "pause/speed/step/restart of a host sim loop"
     args: []
     verbs: [sim.step, sim.restart]         # bare-name on: -> Runtime::on host handlers
+  - component: raster_view
+    file: raster_view.ari
+    unit: raster_view
+    binds: "<prefix>.raster.{image,colormap}"    # host: colorize a grid -> backend.set_image(name,img)
+    for: "a live image/raster viewer (nav grids, textures) with a colormap menu"
+    args: []
+    note: "needs a host that publishes named cvc::images (ImGuiBackend::set_image) each frame"

@@ -14,6 +14,7 @@
 // (every draw becomes an inert stub, mirroring the cvc::gl::ui:: layer).
 
 #include <cvc/ariadne/backend.h>
+#include <cvc/image/image.h> // set_image publishes a cvc::image for the Kind::Image raster viewer
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -76,6 +77,13 @@ public:
   cvc::ariadne::CustomEdit custom_widget(const char *type, const std::string &current,
                                          const cvc::ariadne::Widget &w) override;
 
+  // Publish/update a named image the Kind::Image raster viewer displays (a nav grid colorized to a
+  // cvc::image, updated each frame). The image is copied (COW) and uploaded to a GL texture lazily
+  // inside draw_image (on the render thread, where the GL context is current). Call it from the
+  // host loop; draw_image references it by the name a `- image:` widget's src/bind resolves to.
+  void set_image(const std::string &name, const cvc::image &img);
+  bool draw_image(const char *name, float width) override; // §raster viewer (ImGui::Image over GL)
+
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
   // VTK drives Runtime::render() once per rendered frame. Call after
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
@@ -103,6 +111,16 @@ private:
 
   // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
   std::unordered_map<std::string, CustomDrawFn> m_customWidgets;
+
+  // Host-published images (Kind::Image). Each keeps its source cvc::image + a lazily-created GL
+  // texture; `dirty` forces a re-upload after set_image. Textures are process-lifetime (freed at
+  // exit) — deleting them would need a live GL context the destructor cannot assume.
+  struct PublishedImage {
+    cvc::image img;
+    unsigned int tex = 0; // GL texture id (0 = not yet created)
+    bool dirty = true;    // needs (re-)upload
+  };
+  std::unordered_map<std::string, PublishedImage> m_images;
 };
 
 } // namespace gl

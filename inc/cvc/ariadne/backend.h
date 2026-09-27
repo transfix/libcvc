@@ -160,6 +160,17 @@ public:
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
 
+  // Draw a host-published image named `name` at display `width` px (height from the image's
+  // aspect). A read-only viewer of a buffer the host set via a backend-specific publish API (e.g.
+  // ImGuiBackend::set_image) — used for live rasters (a nav occupancy/risk grid colorized to a
+  // cvc::image). NON-PURE: the default returns false (a backend with no image/texture path — a
+  // terminal); the core then shows the name as text. Returns true if it actually drew.
+  virtual bool draw_image(const char *name, float width) {
+    (void)name;
+    (void)width;
+    return false;
+  }
+
   // An RGB colour picker bound to an "r,g,b" state key (each 0..1). NON-PURE: the default returns
   // {drawn:false}, so a backend that has no colour widget (a terminal) need not implement it — the
   // core then falls back to showing the value as text. A backend that draws it edits `rgb` in place

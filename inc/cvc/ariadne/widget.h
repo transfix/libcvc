@@ -38,6 +38,7 @@ enum class Kind {
   SliderFloat,    // bound double state, [lo, hi]
   Combo,          // bound enum-as-text state
   Color,          // bound "r,g,b" state (an RGB picker; §G7)
+  Image,          // a host-published image viewer (a live raster); src / bound name
   Button,         // a fire-once button -> raises `on` event
   Custom,         // a registered custom widget type (custom_type + props); §extensibility
 };
@@ -177,6 +178,13 @@ struct Widget {
   float frame_border = -1.0f; // §3.0.3b: widget/window border width in px; <0 = backend default
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
+
+  // Kind::Image (§ raster viewer): the host-published image to show. `src` is a static image name;
+  // a non-empty `bind` overrides it with the name held in that state key (so a combo can switch
+  // which raster is shown). `img_size` is the display width in px (height follows the image's
+  // aspect).
+  std::string src;
+  double img_size = 256.0;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.rf") appended to the enclosing scope, so its whole
@@ -340,6 +348,17 @@ inline Widget color_widget(std::string label, std::string bind, std::string def 
   w.label = std::move(label);
   w.bind = std::move(bind);
   w.sdef = std::move(def);
+  return w;
+}
+
+// A host-published image viewer (a live raster). `src` = the image name; a non-empty `bind` names a
+// state key whose value selects the image instead. `size` = display width in px.
+inline Widget image_widget(std::string label, std::string src, double size = 256.0) {
+  Widget w;
+  w.kind = Kind::Image;
+  w.label = std::move(label);
+  w.src = std::move(src);
+  w.img_size = size;
   return w;
 }
 

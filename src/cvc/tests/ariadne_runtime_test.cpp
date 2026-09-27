@@ -120,6 +120,14 @@ struct MockBackend : Backend {
     rec(std::string("color:") + l);
     return color_ret;
   }
+  bool draw_image_ret =
+      false;              // whether the mock "drew" the image (else the core falls back to text)
+  std::string last_image; // the image name the core resolved (src or bound key)
+  bool draw_image(const char *name, float) override {
+    last_image = name ? name : "";
+    rec(std::string("image:") + last_image);
+    return draw_image_ret;
+  }
   CustomEdit custom_ret{}; // programmable return for the escape path
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &) override {
     rec(std::string("custom_widget:") + type + "=" + current);
@@ -218,6 +226,32 @@ TEST(AriadneAction, ProgramOnRunsMultiStatementReset) {
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("agents").value(), "64");
   EXPECT_EQ(cvc::state::instance(app)("speed").value(), "1.0");
+}
+
+// §raster viewer: an image widget resolves its image name (a static src, or a bound key that a
+// combo can switch) and hands it to the backend's draw_image; a backend that can't draw an image
+// (no GL / terminal) returns false and the core shows the name as text.
+TEST(AriadneRuntime, ImageWidgetResolvesNameAndFallsBackToText) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.draw_image_ret = true; // the backend draws it
+  rt.set_root(group({image_widget("Map", "belief")}));
+  rt.render();
+  EXPECT_EQ(mb.last_image, "belief"); // the static src name
+  // A bound key selects the image (a combo would write it), overriding src.
+  cvc::state::instance(app)("raster.layer").value(std::string("risk"));
+  Widget im = image_widget("Map", "belief");
+  im.bind = "raster.layer";
+  rt.set_root(group({im}));
+  rt.render();
+  EXPECT_EQ(mb.last_image, "risk"); // the bound name wins
+  // A backend that cannot draw an image -> the core shows the name as text.
+  mb.draw_image_ret = false;
+  rt.set_root(group({image_widget("Map", "gone")}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Map=gone"));
 }
 
 // The host-intrinsic seam: a host binds a native fn `(host-bump)` into the program lanes, and a
