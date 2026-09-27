@@ -71,6 +71,12 @@ public:
   bool kill(int pid) override;
   int fork(int pid) override;
 
+  /// Kill every live process tagged with `owner` — an Ariadne Runtime reaping its
+  /// process group on teardown. Returns the number killed. Parked processes
+  /// (sleep/msg-recv/await) are killed too, so nothing lingers after the document
+  /// that owned them closes. `owner` == "" reaps the unowned group.
+  int kill_owner(const std::string &owner);
+
   /// Cooperative sleep: put a process into `waiting`; woken by the pump
   /// (wake_sleeping_processes, called at the top of step()) once the deadline
   /// passes.  Identical semantics to the sync scheduler.

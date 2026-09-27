@@ -51,6 +51,7 @@ struct execute_options {
   std::string uid;
   std::string gid;
   std::string root_path; // Chroot: confine to subtree (empty = full tree)
+  std::string owner;     // Owner-scope tag (Ariadne document/Runtime); "" = unowned
   uint64_t max_steps = 0;
   double max_time = 0.0;
   uint64_t max_memory = 0;

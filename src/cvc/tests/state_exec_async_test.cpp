@@ -611,6 +611,25 @@ TEST_F(AsyncSchedulerIntrinsicsTest, MsgRecvViaIntrinsicSuspendsViaScheduler) {
   EXPECT_EQ(info->status, process_status::waiting);
 }
 
+TEST(AsyncSchedulerTest, KillOwnerReapsProcessGroup) {
+  async_scheduler sched;
+  execute_options a;
+  a.owner = "docA";
+  execute_options b;
+  b.owner = "docB";
+  int a1 = sched.execute(std::string("(begin 1 2 3 4 5)"), a);
+  int a2 = sched.execute(std::string("(begin 1 2 3 4 5)"), a);
+  int b1 = sched.execute(std::string("(begin 1 2 3 4 5)"), b);
+  sched.sync_step(); // start stepping
+  // Reap docA's whole group (both processes), leaving docB untouched.
+  EXPECT_EQ(sched.kill_owner("docA"), 2);
+  EXPECT_EQ(sched.get_process_info(a1)->status, process_status::killed);
+  EXPECT_EQ(sched.get_process_info(a2)->status, process_status::killed);
+  ASSERT_TRUE(sched.get_process_info(b1).has_value());
+  EXPECT_NE(sched.get_process_info(b1)->status, process_status::killed);
+  EXPECT_EQ(sched.kill_owner("docA"), 0); // already reaped
+}
+
 // The app-wide scheduler service: cvc::app::exec_scheduler() is one lazily-built
 // per-app async_scheduler (the single cooperative timeline all Ariadne docs share).
 TEST(AppExecScheduler, IsAppWideSingletonAndUsable) {

@@ -80,6 +80,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.uid = opts.uid;
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
+  proc.owner = opts.owner;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
@@ -104,6 +105,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.uid = opts.uid;
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
+  proc.owner = opts.owner;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;

@@ -27,6 +27,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.uid = opts.uid;
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
+  proc.owner = opts.owner;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
@@ -51,6 +52,7 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.uid = opts.uid;
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
+  proc.owner = opts.owner;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
@@ -568,6 +570,18 @@ bool async_scheduler::kill(int pid) {
     return false;
   kill_process(proc, "killed_by_user");
   return true;
+}
+
+int async_scheduler::kill_owner(const std::string &owner) {
+  int killed = 0;
+  for (auto &[pid, proc] : processes_) {
+    if (proc->owner == owner && proc->status != process_status::terminated &&
+        proc->status != process_status::killed) {
+      kill_process(*proc, "owner_reaped");
+      ++killed;
+    }
+  }
+  return killed;
 }
 
 int async_scheduler::fork(int pid) {

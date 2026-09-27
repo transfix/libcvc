@@ -49,6 +49,8 @@ struct process {
   std::string uid;       // User identity
   std::string gid;       // Group identity
   std::string root_path; // Chroot path (empty = full tree)
+  std::string owner;     // Owner-scope tag (e.g. an Ariadne document/Runtime); "" = unowned.
+                         // Lets a host reap a whole process group on teardown (kill_owner).
 
   // Resource limits (0 = unlimited)
   uint64_t max_steps = 0;
