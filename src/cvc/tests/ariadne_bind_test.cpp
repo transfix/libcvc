@@ -68,6 +68,38 @@ TEST(AriadneBind, ReadOrDoesNotSeed) {
   EXPECT_EQ(read_or<int>(app, "ro.set", 5), 2);
 }
 
+// A bool key seeded by state_exec ("true"/"false") or as an int ("1"/"0") must read the same 0/1 —
+// an int-backed bool widget must not silently desync on the "true"/"false" spelling. to_bool_int
+// tolerates both (+ yes/no/on/off + numeric truthiness); a non-bool string -> the default.
+TEST(AriadneBind, BoolReadTolerantOfTrueFalseSpelling) {
+  EXPECT_EQ(to_bool_int("true", 0), 1);
+  EXPECT_EQ(to_bool_int("false", 1), 0);
+  EXPECT_EQ(to_bool_int("True", 0), 1); // case-insensitive
+  EXPECT_EQ(to_bool_int(" false ", 1), 0);
+  EXPECT_EQ(to_bool_int("1", 0), 1);
+  EXPECT_EQ(to_bool_int("0", 1), 0);
+  EXPECT_EQ(to_bool_int("yes", 0), 1);
+  EXPECT_EQ(to_bool_int("off", 1), 0);
+  EXPECT_EQ(to_bool_int("7", 0), 1);    // any nonzero numeric is truthy
+  EXPECT_EQ(to_bool_int("junk", 1), 1); // unparsable -> the default
+  EXPECT_EQ(to_bool_int("junk", 0), 0);
+
+  cvc::app app;
+  // read_bool_or_seed reads a "true" seed as checked (1), unlike read_or_seed<int> which would
+  // throw and fall back to the default (leaving the widget unchecked while the bound scene node is
+  // shown).
+  cvc::state::instance(app)("b.t").value(std::string("true"));
+  EXPECT_EQ(read_bool_or_seed(app, "b.t", 0), 1);
+  EXPECT_EQ(read_bool_or(app, "b.t", 0), 1);
+  // A slider_int value is NOT bool-coerced by these (it stays on read_or_seed<int>) — guard the
+  // intent: to_bool_int would wrongly map 128 -> 1, so bool reads must never wrap a real int field.
+  EXPECT_EQ(read_or_seed<int>(app, "b.count", 0),
+            0); // unset -> default; (documents that sliders use the int read, not the bool read)
+  // An unset bool key seeds its default like read_or_seed.
+  EXPECT_EQ(read_bool_or_seed(app, "b.seed", 1), 1);
+  EXPECT_EQ(sval(app, "b.seed"), "1");
+}
+
 // --- sync_scene_visibility: source path -> node `.visible` key -----------------
 
 TEST(AriadneBind, SyncMirrorsSourceToTargetKey) {

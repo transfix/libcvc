@@ -11,6 +11,7 @@
 // onto two different keys. Lift, never re-hand-roll.
 
 #include <boost/lexical_cast.hpp>
+#include <cctype>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <exception>
@@ -83,6 +84,60 @@ template <typename T> T read_or(cvc::app &ctx, const std::string &path, const T 
   }
 }
 
+// Interpret a state string as a BOOLEAN 0/1, tolerantly. cvc::state backs a bool as an int
+// ("1"/"0"), but state_exec renders a bool as "true"/"false" — so an `init:`/action `(state-set
+// "flag" "true")` or a bool computed in a program would otherwise be UNREADABLE by an int-backed
+// bool widget (value<int>("true") throws). Accept both spellings (and yes/no/on/off), plus any
+// numeric (non-zero -> 1); anything else -> `def`. Used ONLY by the bool widgets + visibility
+// reads, NEVER by slider_int (a real integer must not be coerced to 0/1).
+inline int to_bool_int(const std::string &s, int def) {
+  std::string t;
+  for (char c : s)
+    if (!std::isspace(static_cast<unsigned char>(c)))
+      t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (t == "1" || t == "true" || t == "yes" || t == "on" || t == "y" || t == "t")
+    return 1;
+  if (t == "0" || t == "false" || t == "no" || t == "off" || t == "n" || t == "f")
+    return 0;
+  try {
+    return boost::lexical_cast<int>(s) != 0 ? 1 : 0; // any other numeric -> truthiness
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+
+// Read a BOOLEAN state key as 0/1, seeding `def` when unset — the bool analogue of
+// read_or_seed<int> (checkbox / menu-toggle), tolerant of the "true"/"false" spelling a
+// program/init: writes. Never throws into a frame.
+inline int read_bool_or_seed(cvc::app &ctx, const std::string &path, int def) {
+  try {
+    cvc::state &s = cvc::state::instance(ctx)(path);
+    cvc::state &eff = read_effective(s);
+    const std::string v = eff.value();
+    if (v.empty()) {
+      s.value(def); // seed via the ORIGINAL node (writable-hole aware, like read_or_seed)
+      return def;
+    }
+    return to_bool_int(v, def);
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+
+// Read a BOOLEAN state key as 0/1 WITHOUT seeding — the bool analogue of read_or<int> (a scene
+// `visible:` follower), tolerant of "true"/"false". Never throws.
+inline int read_bool_or(cvc::app &ctx, const std::string &path, int def) {
+  try {
+    cvc::state &eff = read_effective(cvc::state::instance(ctx)(path));
+    const std::string v = eff.value();
+    if (v.empty())
+      return def;
+    return to_bool_int(v, def);
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+
 // Write a state value; swallows read-only / unwritable (never throws into a frame).
 // A write equal to the current value is a no-op inside cvc::state (equality guard),
 // so re-writing every frame fires observers only on an actual change.
@@ -125,7 +180,7 @@ struct SceneVisibilityBinding {
 inline void sync_scene_visibility(cvc::app &app,
                                   const std::vector<SceneVisibilityBinding> &bindings) {
   for (const SceneVisibilityBinding &b : bindings) {
-    const int v = read_or<int>(app, b.source_path, b.default_visible ? 1 : 0);
+    const int v = read_bool_or(app, b.source_path, b.default_visible ? 1 : 0); // visible = a bool
     write<int>(app, b.target_path, v);
   }
 }

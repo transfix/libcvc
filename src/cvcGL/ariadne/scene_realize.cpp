@@ -159,7 +159,7 @@ void apply_visibility(GraphicsNode &node, const cvc::ariadne::SceneNode &n, cvc:
   // a follower, so the widget that owns the key (its `def:`) is the sole seeder — the
   // node default never pre-empts it in the shared key.
   const std::string source = cvc::ariadne::resolve_bind(bind_prefix, n.visible_bind);
-  const int v0 = cvc::ariadne::read_or<int>(app, source, n.visible_default ? 1 : 0);
+  const int v0 = cvc::ariadne::read_bool_or(app, source, n.visible_default ? 1 : 0); // visible=bool
   cvc::ariadne::write<int>(app, target, v0);
   binds.push_back({source, target, n.visible_default});
 }
@@ -276,8 +276,18 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
         return;
       }
     }
-    if (n.has_fit) // `fit:` — bake center/ground/scale (and optional Y-up→Z-up) into the geometry
-      geom = fit_to_ground(geom, n.fit_up_y, n.fit_height);
+    if (n.has_fit) {
+      // `fit:` — bake center/ground/scale (and optional Y-up→Z-up) into a LOADED mesh. A built-in
+      // primitive is already canonically placed + sized (source.plane.size), and up:y would rotate
+      // the ground quad into a vertical wall — so ignore fit on a primitive and say so.
+      if (n.source_primitive.empty())
+        geom = fit_to_ground(geom, n.fit_up_y, n.fit_height);
+      else
+        warn(warnings, "ari: scene node '" + n.id + "': `fit` is ignored on the built-in '" +
+                           n.source_primitive +
+                           "' primitive (already centered on z=0; size it via "
+                           "source.plane.size)");
+    }
     std::shared_ptr<GeometryNode> g =
         parent ? parent->createChild<GeometryNode>(n.id, geom)
                : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id, geom));
@@ -513,15 +523,20 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     sg.endLightBatch();
   }
   if (scene.has_shadows) {
-    if (!sg.setShadowsEnabled(scene.shadows_enabled)) {
-      warn(warnings, "ari: shadows requested but the renderer has no shadow target yet");
-    } else if (scene.shadows_enabled) {
-      // Bigger map = crisper shadow; update_interval 1 = bake every frame (a static scene has no
-      // lag). Only meaningful once shadows are actually on.
-      if (scene.has_shadow_resolution)
-        sg.setShadowResolution(scene.shadow_resolution);
-      if (scene.has_shadow_interval)
-        sg.setShadowUpdateInterval(scene.shadow_interval);
+    const bool applied = sg.setShadowsEnabled(scene.shadows_enabled);
+    // setShadowsEnabled returns false ONLY when there is no renderer yet — so warn only when the
+    // document actually REQUESTED shadows (enabled: false + no renderer is not an error).
+    if (scene.shadows_enabled) {
+      if (!applied) {
+        warn(warnings, "ari: shadows requested but the renderer has no shadow target yet");
+      } else {
+        // Bigger map = crisper shadow; update_interval 1 = bake every frame (a static scene has no
+        // lag). Only meaningful once shadows are actually on.
+        if (scene.has_shadow_resolution)
+          sg.setShadowResolution(scene.shadow_resolution);
+        if (scene.has_shadow_interval)
+          sg.setShadowUpdateInterval(scene.shadow_interval);
+      }
     }
   }
   if (scene.has_chrome) // strip/show the SceneGraph diagnostic chrome (grid/axis/bbox)

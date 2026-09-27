@@ -876,7 +876,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
 
   case Kind::MenuItemToggle: {
     const std::string path = resolve(w.bind);
-    const bool cur = read_or_seed<int>(app, path, w.bdef ? 1 : 0) != 0;
+    const bool cur =
+        read_bool_or_seed(app, path, w.bdef ? 1 : 0) != 0; // tolerant of "true"/"false"
     const BoolEdit e = b.menu_item_toggle(label, cur);
     if (e.committed)
       write<int>(app, path, e.value ? 1 : 0);
@@ -924,7 +925,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
 
   case Kind::Checkbox: {
     const std::string path = resolve(w.bind);
-    const bool cur = read_or_seed<int>(app, path, w.bdef ? 1 : 0) != 0;
+    const bool cur =
+        read_bool_or_seed(app, path, w.bdef ? 1 : 0) != 0; // tolerant of "true"/"false"
     const BoolEdit e = b.checkbox(label, cur);
     if (e.committed)
       write<int>(app, path, e.value ? 1 : 0);
@@ -1083,7 +1085,7 @@ void Runtime::drain() {
   for (const Impl::QueuedAction &a : events) {
     // A program action (`on:` starting with '(', like a computed `bind:`/`tooltip:`) runs through
     // state_exec — the north-star lane: a flag toggle or reset is pure .ari, no C++ handler.
-    if (!a.event.empty() && a.event.front() == '(') {
+    if (is_expr(a.event)) { // a program on: (whitespace-tolerant, exactly like a computed bind:)
 #ifdef CVC_STATE_EXEC
       // §7.4 per-activation caps: an interaction is bounded tighter than a load-time init:. The
       // STEP cap (5 000) is the deterministic guard — it bounds the real work of an action. §7.4's
