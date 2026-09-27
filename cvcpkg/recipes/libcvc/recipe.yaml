@@ -69,7 +69,15 @@ recipe:
   # GPL library on their link line. Verified on the built artifact: ldd
   # libcvc.so reports zero fftw references, and volume_ops_test passes 42/42
   # including the apply_filter=true back-projection cases.
-  cvc_revision: 1
+  # Bumped 1 -> 2 (3.4.0 lineage): republish the family so the bundle ships the
+  # nav::sim_world::set_material_lam live setter (#433). It is an inline header
+  # method (no exported symbol / ABI change), but consumers that compile against
+  # the SDK headers need it present -- notably the cvcdbg demo3 force-bias slider
+  # (CVC-DBG/cvcdbg#142), whose wasm-mt build installs cvc/libcvc from the catalog
+  # and will not compile until 3.4.0+cvc.2 (with the setter) is published. The
+  # published 3.4.0+cvc.1 predates #433. cvcgl already sits at +cvc.2, so this
+  # brings the tested-together family back to a single revision.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
