@@ -907,13 +907,30 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       LinkHole h;
       h.name = kv.first.Scalar();
       if (const YAML::Node v = kv.second; v.IsScalar()) {
-        h.target = v.Scalar();
+        h.target = v.Scalar(); // scalar form defaults rw
       } else if (v.IsMap()) {
         h.target = str(v, "to");
-        h.writable = (str(v, "mode", "rw") != "ro");
+        // Fail CLOSED: only the exact token "rw" (case-insensitive) is writable; a missing /
+        // mistyped mode is treated as read-only, and an unrecognized one warns — a security
+        // field must never fail open (a typo silently granting write).
+        std::string mode = str(v, "mode", "rw");
+        std::transform(mode.begin(), mode.end(), mode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        h.writable = (mode == "rw");
+        if (mode != "rw" && mode != "ro")
+          ctx.warn("ari: load '" + uri + "': link '" + h.name + "' has unknown mode '" + mode +
+                   "' — treated as read-only");
       }
       if (h.name.empty() || h.target.empty()) {
         ctx.warn("ari: load '" + uri + "': link '" + h.name + "' needs a target — skipped");
+        continue;
+      }
+      // A hole name must stay INSIDE the mount's chroot: a leading '/' would make resolve_bind
+      // plant it at the app root (escaping the sandbox), so reject it. (Dotted names are fine —
+      // they nest within the sub-prefix.)
+      if (h.name[0] == '/') {
+        ctx.warn("ari: load '" + uri + "': link name '" + h.name +
+                 "' must not start with '/' (it would escape the mount) — skipped");
         continue;
       }
       wrapper.links.push_back(std::move(h));

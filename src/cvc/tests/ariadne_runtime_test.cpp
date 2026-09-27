@@ -582,6 +582,64 @@ TEST(AriadneMountScope, ReadOnlyLinkHoleDoesNotWriteParent) {
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.globals.level").value(), "3"); // parent untouched
 }
 
+TEST(AriadneMountScope, ReconcileTearsDownStaleHoles) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_stale_hole";
+  fs::create_directories(dir);
+  const fs::path frag = dir / "panel.ari";
+  std::ofstream(frag) << "root:\n  - slider_int: Level\n    bind: lvl\n    lo: 0\n    hi: 100\n";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.secret").value(42);
+  // Tree A grants the module a rw hole lvl -> secret.
+  LoadResult a =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n        link:\n          lvl: secret\n");
+  ASSERT_TRUE(a.ok) << a.error;
+  rt.set_root(std::move(a.root));
+  rt.render();
+  EXPECT_TRUE(mb.saw("slider_int:Level=42")); // reads secret through the hole
+  // Tree B re-mounts the SAME fragment as `rf` but grants NO hole. The stale hole must be torn
+  // down, so the module can no longer reach `secret`.
+  LoadResult b =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n");
+  ASSERT_TRUE(b.ok) << b.error;
+  rt.set_root(std::move(b.root));
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("slider_int:Level=0"));   // reads its own local (seeded) value now
+  EXPECT_FALSE(mb.saw("slider_int:Level=42")); // no longer reaches secret
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.secret").value(), "42"); // untouched
+}
+
+TEST(AriadneMountScope, RepeatedMountLinkTargetsAreIndexed) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.fleet.0").value(10);
+  cvc::state::instance(app)("ui.demo.fleet.1").value(20);
+  // A repeated mount whose hole target is {i}-parameterized: each instance reaches its own slot.
+  Widget sl = slider_int("Slot", "slot", 0, 100, 0);
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "includes.rf";
+  mount.repeat = "(int 2)";
+  mount.links.push_back(LinkHole{"slot", "fleet.{i}", true});
+  mount.children = {sl};
+  rt.set_root(group({mount}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("slider_int:Slot=10")); // instance 0 -> fleet.0
+  EXPECT_TRUE(mb.saw("slider_int:Slot=20")); // instance 1 -> fleet.1
+}
+
 TEST(AriadneMountScope, EndToEndLoadCommitsAtSubPrefix) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";

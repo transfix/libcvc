@@ -100,6 +100,12 @@ Widget substitute_index(const Widget &w, int index) {
   // than all N instances sharing one, which would violate repeat's per-instance-state contract.
   if (!out.scope.empty())
     out.scope += "." + idx;
+  // §12: and its parent-scope holes are {i}-substituted too, so an instance can grant a
+  // per-instance target (link: { slot: fleet.{i} }) — mirroring the bind/on substitution above.
+  for (LinkHole &h : out.links) {
+    h.name = replace_all(h.name, kTok, idx);
+    h.target = replace_all(h.target, kTok, idx);
+  }
   out.children.clear();
   out.children.reserve(w.children.size());
   for (const Widget &c : w.children)
@@ -509,6 +515,12 @@ struct Runtime::Impl {
   // mount's link nodes ONCE (idempotent, but findDescendant+linkTo per hole per frame is waste).
   // Cleared on a reconcile (the swapped-in tree may mount different fragments).
   std::set<std::string> wired_mounts;
+  // §12 load: the state paths of every hole planted for the CURRENT tree. On a reconcile these
+  // are torn down (clearLink) BEFORE the new tree re-wires — otherwise a fragment re-mounted at
+  // the same sub-prefix (same `as`) would inherit the previous tree's grants it was never given,
+  // defeating default-deny (a hole node persists in cvc::state; clearing wired_mounts alone only
+  // re-plants, never removes).
+  std::vector<std::string> planted_holes;
   // Plant the transparent link-node holes for a mount: for each, a node at <sub_prefix>.<name>
   // links to `target` resolved against the mount's PARENT scope (leading '/' = app root).
   void wire_holes(const std::string &parent_prefix, const std::string &sub_prefix,
@@ -700,6 +712,7 @@ void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::stri
       cvc::state &node = root(hole_path);
       node.linkTo(target, cvc::state::link_mode::transparent);
       node.setLinkWritable(h.writable);
+      planted_holes.push_back(hole_path); // remembered so a reconcile can tear it down
     } catch (const std::exception &) {
       // Never throw into a frame; a hole that cannot be wired simply isn't (the module then
       // reads/writes its own local node — sandboxed, no parent reach).
@@ -969,7 +982,20 @@ void Runtime::Impl::render() {
     root = std::move(pending);
     pending = Widget{};
     has_pending = false;
-    wired_mounts.clear(); // §12: the new tree may mount different fragments — re-wire holes lazily
+    // §12: tear down the OLD tree's parent-scope holes before the new tree re-wires its own, so a
+    // fragment re-mounted at the same sub-prefix cannot inherit a grant the new manifest omits
+    // (clearLink turns the hole back into a plain, sandboxed local node). Re-wiring happens as
+    // this same frame walks the new tree, so there is no window where a stale grant is live.
+    cvc::state &root_state = cvc::state::instance(app);
+    for (const std::string &hole : planted_holes) {
+      try {
+        if (cvc::state *n = root_state.findDescendant(hole))
+          n->clearLink();
+      } catch (const std::exception &) {
+      }
+    }
+    planted_holes.clear();
+    wired_mounts.clear();
   }
 #ifdef CVC_STATE_EXEC
   if (reactive)

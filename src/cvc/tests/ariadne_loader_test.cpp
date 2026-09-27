@@ -1721,6 +1721,59 @@ windows:
   EXPECT_FALSE(fleet->writable); // mode: ro
 }
 
+TEST(AriadneMount, LinkModeFailsClosed) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("fc_panel.ari", "root: [ { text: x } ]\n");
+  const std::string main = write_temp_ari("main_fc.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: fc_panel.ari
+        as: rf
+        link:
+          a: { to: p.a, mode: readonly }
+          b: { to: p.b }
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *m = find_scope(r.root, "includes.rf");
+  ASSERT_NE(m, nullptr);
+  const LinkHole *a = nullptr, *b = nullptr;
+  for (const LinkHole &h : m->links) {
+    if (h.name == "a")
+      a = &h;
+    if (h.name == "b")
+      b = &h;
+  }
+  ASSERT_NE(a, nullptr);
+  EXPECT_FALSE(a->writable); // an unrecognized mode ('readonly') fails CLOSED to read-only
+  ASSERT_NE(b, nullptr);
+  EXPECT_TRUE(b->writable); // no mode -> rw default
+  EXPECT_TRUE(has_warning(r, "unknown mode"));
+}
+
+TEST(AriadneMount, LinkNameLeadingSlashIsRejected) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("ls_panel.ari", "root: [ { text: x } ]\n");
+  const std::string main = write_temp_ari("main_ls.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: ls_panel.ari
+        as: rf
+        link:
+          "/escape": /app.secret
+          ok: p.val
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *m = find_scope(r.root, "includes.rf");
+  ASSERT_NE(m, nullptr);
+  ASSERT_EQ(m->links.size(), 1u); // the '/'-prefixed escape name was dropped
+  EXPECT_EQ(m->links[0].name, "ok");
+  EXPECT_TRUE(has_warning(r, "must not start with '/'"));
+}
+
 TEST(AriadneMount, LoadMountCycleTerminates) {
   SKIP_WITHOUT_YAML();
   // a loads b loads a — the resolved-URI mount guard must terminate (warn), not recurse forever.
