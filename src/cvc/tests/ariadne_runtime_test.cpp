@@ -6,9 +6,12 @@
 #include <algorithm>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
+#include <cvc/ariadne/loader.h> // §12 end-to-end load: mount through the real Runtime
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -499,6 +502,33 @@ TEST(AriadneMountScope, ReactiveReadsResolveAtSubPrefix) {
   mb.log.clear();
   rt.render();
   EXPECT_FALSE(mb.saw("text_line:hi"));
+}
+
+TEST(AriadneMountScope, EndToEndLoadCommitsAtSubPrefix) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mount_e2e";
+  fs::create_directories(dir);
+  const fs::path frag = dir / "panel.ari";
+  std::ofstream(frag) << "root:\n  - checkbox: Flag\n    bind: on\n";
+  ASSERT_TRUE(fs::exists(frag));
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.checkbox_ret.committed = true;
+  mb.checkbox_ret.value = true;
+  // Load a doc that mounts the fragment (absolute path -> file handler), then drive it: the
+  // mounted checkbox's BARE bind must commit under the mount's sub-prefix, end to end.
+  LoadResult lr =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.on").value(), "1");
+  EXPECT_NE(cvc::state::instance(app)("ui.demo.on").value(), "1"); // not at the doc scope
 }
 
 TEST(AriadneReactive, FalsePredicateHidesTheWholeSubtree) {

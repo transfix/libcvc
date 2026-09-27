@@ -192,6 +192,14 @@ struct Ctx {
   // imported holds the canonical paths already pulled in — dedup + cycle guard (a → b → a).
   std::string base_dir;
   std::set<std::string> imported;
+
+  // §12 module mounts: `load:` mounts a fragment as an ISOLATED sub-module (its own units, its
+  // own chroot sub-prefix). `mounting` is the resolved-URI stack — refusing a canonical already
+  // on it stops a mount cycle (a→b→a) and, with a depth cap, a runaway chain. `mount_ids` are
+  // the mount ids (`as:`) already used AT THIS level, so a default/duplicate id is disambiguated
+  // rather than colliding two fragments onto one sub-prefix.
+  std::set<std::string> mounting;
+  std::set<std::string> mount_ids;
 };
 
 bool has(const YAML::Node &n, const char *key) { return n[key].IsDefined(); }
@@ -239,7 +247,9 @@ std::string action(const YAML::Node &n) {
 }
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n);
-Widget expand_include(Ctx &ctx, const YAML::Node &n); // §12 include: expand a units: template
+Widget expand_include(Ctx &ctx, const YAML::Node &n);   // §12 include: expand a units: template
+Widget expand_load(Ctx &ctx, const YAML::Node &n);      // §12 load: mount an isolated fragment
+Widget parse_document(Ctx &ctx, const YAML::Node &doc); // §12 load: parses a mounted fragment
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
 
 // Widget keys the loader consumes directly; everything else on a custom widget flows
@@ -421,6 +431,10 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   // its args substituted. Handled before the widget-type dispatch (include is not a widget kind).
   if (n["include"].IsDefined())
     return expand_include(ctx, n);
+  // §12 module mount: `load: <uri>` mounts an external .ari fragment as an isolated, scoped
+  // sub-module. Also handled before the widget-type dispatch (load is not a widget kind).
+  if (n["load"].IsDefined())
+    return expand_load(ctx, n);
 
   std::string label;
   const std::string type = widget_type(n, label);
@@ -740,6 +754,121 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   Widget w = parse_widget(ctx, inst);
   ctx.expanding.erase(name);
   return w;
+}
+
+// §12 load: mount depth cap — a fragment that loads a fragment that loads … this deep is
+// almost certainly a mistake or an attack; refuse past it (the cycle guard handles a → b → a).
+constexpr std::size_t kMaxMountDepth = 32;
+
+// A mount id must be a single, clean state-path segment (it becomes `includes.<id>`), so map
+// anything that is not [A-Za-z0-9_] to '_' and never let it be empty or start with a digit.
+std::string sanitize_mount_id(const std::string &raw) {
+  std::string out;
+  out.reserve(raw.size());
+  for (char c : raw)
+    out.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_');
+  if (out.empty())
+    out = "mount";
+  if (std::isdigit(static_cast<unsigned char>(out.front())))
+    out.insert(out.begin(), '_');
+  return out;
+}
+
+// Default a mount id from the resource: the last path segment, minus any extension — e.g.
+// "file://panels/rf_telemetry.ari" → "rf_telemetry", "state://ui.libs.forms" → "ui.libs.forms"
+// (then sanitized by the caller). A bare/empty tail falls back to "mount".
+std::string default_mount_id(const std::string &uri) {
+  std::string s = uri;
+  const std::size_t scheme = s.find("://");
+  if (scheme != std::string::npos)
+    s = s.substr(scheme + 3);
+  if (const std::size_t q = s.find('?'); q != std::string::npos)
+    s = s.substr(0, q);
+  if (const std::size_t slash = s.find_last_of('/'); slash != std::string::npos)
+    s = s.substr(slash + 1);
+  if (const std::size_t dot = s.find_last_of('.'); dot != std::string::npos && dot != 0)
+    s = s.substr(0, dot);
+  return s.empty() ? "mount" : s;
+}
+
+// §12: mount a `load: <uri>` fragment — resolve + parse another .ari as an ISOLATED module and
+// return a scoped wrapper Group. The wrapper carries `scope = includes.<as>` (§12.1), so the
+// fragment's binds, reactive predicates, and (later) init: resolve under that sub-prefix; the
+// mount widget's OWN reactive fields (from this load: block, applied by parse_widget) stay in
+// the parent scope. `args:` substitute before parse like include:. The fragment parses in a
+// FRESH sub-Ctx (its units are its own, not the host's), based at its own directory so ITS
+// relative imports/loads resolve there. A resolved-URI cycle guard + depth cap stop recursion.
+Widget expand_load(Ctx &ctx, const YAML::Node &n) {
+  const std::string uri = str(n, "load");
+  if (uri.empty()) {
+    ctx.warn("ari: load: entry has no URI");
+    return group({});
+  }
+  const UriResult res = resolve(uri, ctx.base_dir);
+  if (!res.ok) {
+    ctx.warn("ari: load '" + uri + "' could not be resolved: " + res.error);
+    return group({});
+  }
+  if (ctx.mounting.count(res.canonical)) {
+    ctx.warn("ari: load: mount cycle on '" + res.canonical + "' — refused");
+    return group({});
+  }
+  if (ctx.mounting.size() >= kMaxMountDepth) {
+    ctx.warn("ari: load: mount chain exceeds the maximum depth (" + std::to_string(kMaxMountDepth) +
+             ") — refused");
+    return group({});
+  }
+  // Mount id: explicit `as:`, else derived from the resource; sanitized, and disambiguated
+  // against sibling mounts at this level so two fragments never collide onto one sub-prefix.
+  std::string as = sanitize_mount_id(has(n, "as") ? str(n, "as") : default_mount_id(uri));
+  if (!ctx.mount_ids.insert(as).second) {
+    std::string uniq;
+    for (int i = 2; uniq.empty(); ++i) {
+      const std::string cand = as + "_" + std::to_string(i);
+      if (ctx.mount_ids.insert(cand).second)
+        uniq = cand;
+    }
+    ctx.warn("ari: load: duplicate mount id '" + as + "' — using '" + uniq + "'");
+    as = uniq;
+  }
+  YAML::Node frag;
+  try {
+    frag = YAML::Load(res.content);
+  } catch (const std::exception &e) {
+    ctx.warn("ari: load '" + uri + "' parse error: " + e.what());
+    return group({});
+  }
+  // Args substitute into the cloned fragment before parse (same single-pass rule as include:).
+  std::map<std::string, std::string> args;
+  const YAML::Node a = n["args"];
+  if (a && a.IsMap())
+    for (const auto &kv : a)
+      if (kv.first.IsScalar() && kv.second.IsScalar())
+        args[kv.first.Scalar()] = kv.second.Scalar();
+  substitute_node(frag, args);
+  // Honestly flag the not-yet-wired pieces rather than silently dropping them.
+  if (frag.IsMap() && frag["init"].IsDefined())
+    ctx.warn("ari: load '" + uri +
+             "': the fragment's init: is not yet run for mounted fragments (a later slice)");
+  if (has(n, "link"))
+    ctx.warn("ari: load '" + uri +
+             "': link: (parent-scope holes) is not yet wired (a later slice)");
+  // Parse the fragment in an ISOLATED sub-context: fresh units (module boundary), based at the
+  // fragment's own directory, carrying the mount stack (with this URI pushed) for the cycle/depth
+  // guard. Its warnings bubble up to the host document.
+  Ctx sub;
+  sub.base_dir = std::filesystem::path(res.canonical).parent_path().string();
+  sub.mounting = ctx.mounting;
+  sub.mounting.insert(res.canonical);
+  parse_units(sub, frag); // the fragment's OWN import:/units:
+  Widget frag_root = parse_document(sub, frag);
+  for (const std::string &w : sub.warnings)
+    ctx.warn(w);
+  // The wrapper carries the scope; the fragment is its child so the fragment's own root reactive
+  // fields evaluate at the sub-prefix, while the parent's load:-block fields land on the wrapper.
+  Widget wrapper = group({std::move(frag_root)});
+  wrapper.scope = "includes." + as;
+  return wrapper;
 }
 
 Widget parse_document(Ctx &ctx, const YAML::Node &doc) {

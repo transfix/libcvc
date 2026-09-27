@@ -46,6 +46,16 @@ bool has_warning(const LoadResult &r, const std::string &needle) {
   return false;
 }
 
+// First widget in the tree whose mount scope equals `scope` (§12 load: wrapper).
+const Widget *find_scope(const Widget &w, const std::string &scope) {
+  if (w.scope == scope)
+    return &w;
+  for (const Widget &c : w.children)
+    if (const Widget *r = find_scope(c, scope))
+      return r;
+  return nullptr;
+}
+
 // Write a temp .ari file (under a shared test dir) and return its path — for §12 import tests.
 std::string write_temp_ari(const std::string &name, const std::string &content) {
   namespace fs = std::filesystem;
@@ -1609,6 +1619,109 @@ windows:
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(has_warning(r, "recursive unit"));
+}
+
+TEST(AriadneMount, LoadMountsFragmentAsScopedModule) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("panel.ari", R"(
+root:
+  - slider_int: "{title}"
+    bind: level
+    lo: 0
+    hi: 10
+)");
+  const std::string main = write_temp_ari("main_load.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: panel.ari
+        as: rf
+        args: { title: Range }
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  // The fragment's widget mounted, with its arg substituted and its BARE bind kept (the Runtime
+  // scopes it at the sub-prefix — proven in the runtime test).
+  const Widget *s = find(r.root, Kind::SliderInt, "Range");
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(s->bind, "level");
+  // A scoped wrapper carries includes.<as>.
+  const Widget *scoped = find_scope(r.root, "includes.rf");
+  ASSERT_NE(scoped, nullptr);
+}
+
+TEST(AriadneMount, LoadDefaultsMountIdFromBasename) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("gauge.ari", "root: [ { text: hi } ]\n");
+  const std::string main = write_temp_ari("main_default_as.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: gauge.ari
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find_scope(r.root, "includes.gauge"), nullptr); // basename, extension stripped
+}
+
+TEST(AriadneMount, LoadUnitsAreIsolatedFromHost) {
+  SKIP_WITHOUT_YAML();
+  // The fragment defines + uses its OWN unit; the host must NOT see it (module boundary).
+  write_temp_ari("lib_panel.ari", R"(
+units:
+  knob: { slider_int: Knob, bind: k, lo: 0, hi: 4 }
+root:
+  - include: knob
+)");
+  const std::string main = write_temp_ari("main_iso.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: lib_panel.ari
+        as: p
+      - include: knob        # the host cannot see the fragment's unit
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find(r.root, Kind::SliderInt, "Knob"), nullptr); // the fragment expanded its own unit
+  EXPECT_TRUE(has_warning(r, "unknown unit 'knob'"));        // the host's include did not
+}
+
+TEST(AriadneMount, LoadMountCycleTerminates) {
+  SKIP_WITHOUT_YAML();
+  // a loads b loads a — the resolved-URI mount guard must terminate (warn), not recurse forever.
+  const std::string a = write_temp_ari("cyc_a.ari", R"(
+root:
+  - load: cyc_b.ari
+    as: b
+)");
+  write_temp_ari("cyc_b.ari", R"(
+root:
+  - load: cyc_a.ari
+    as: a
+)");
+  LoadResult r = load_file(a);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "mount cycle"));
+}
+
+TEST(AriadneMount, LoadDuplicateMountIdIsDisambiguated) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("dup_panel.ari", "root: [ { text: x } ]\n");
+  const std::string main = write_temp_ari("main_dup.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: dup_panel.ari
+        as: p
+      - load: dup_panel.ari
+        as: p
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find_scope(r.root, "includes.p"), nullptr);   // first keeps the id
+  EXPECT_NE(find_scope(r.root, "includes.p_2"), nullptr); // second disambiguated
+  EXPECT_TRUE(has_warning(r, "duplicate mount id"));
 }
 
 TEST(AriadneReactive, RepeatParsedOntoWidget) {
