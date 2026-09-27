@@ -117,9 +117,8 @@ public:
                               const std::vector<int> &cols, const std::vector<std::uint32_t> &act,
                               const std::vector<std::vector<float>> &w,
                               const std::vector<std::vector<float>> &b,
-                              const std::vector<float> &out_bias_raw,
-                              std::uint32_t extra_flags = 0, float lam_soft_max = 5.0f,
-                              float lam_hard_max = 10.0f);
+                              const std::vector<float> &out_bias_raw, std::uint32_t extra_flags = 0,
+                              float lam_soft_max = 5.0f, float lam_hard_max = 10.0f);
 
   // Serialize to the versioned `.cvcnav` (byte-identical layout to
   // grl_snam.tools.coef_export.write_coef_mlp), so a policy trained in pure C++

@@ -174,12 +174,11 @@ void coef_mlp::build_from_bytes(const std::uint8_t *p, std::size_t n) {
     if (out_ < 4)
       throw std::runtime_error("cvc::nav::coef_mlp: sigmoid-lam net needs out_features >= 4");
     if (obn != 3)
-      throw std::runtime_error(
-          "cvc::nav::coef_mlp: v2 sigmoid out_bias must be the 3 abg columns");
+      throw std::runtime_error("cvc::nav::coef_mlp: v2 sigmoid out_bias must be the 3 abg columns");
     out_bias_off_.assign(static_cast<std::size_t>(out_), 0.0f);
     for (int i = 0; i < 3; ++i)
-      out_bias_off_[i] = (flags_ & kFlagSoftplusLogExpm1) ? std::log(std::expm1(out_bias[i]))
-                                                          : out_bias[i];
+      out_bias_off_[i] =
+          (flags_ & kFlagSoftplusLogExpm1) ? std::log(std::expm1(out_bias[i])) : out_bias[i];
     lam_soft_max_ = take<float>(p, end);
     lam_hard_max_ = take<float>(p, end);
   } else {

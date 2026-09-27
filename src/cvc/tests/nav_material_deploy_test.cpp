@@ -435,7 +435,8 @@ TEST(NavMaterialDeploy, V2ByteLayoutMatchesExporterContract) {
   const std::string path = tmp_cvcnav("v2bytes");
   net.save(path);
   std::ifstream f(path, std::ios::binary);
-  std::vector<std::uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  std::vector<std::uint8_t> b((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
   f.close();
   const std::uint8_t *p = b.data();
   std::size_t off = 0;
@@ -461,8 +462,8 @@ TEST(NavMaterialDeploy, V2ByteLayoutMatchesExporterContract) {
   EXPECT_EQ(u32(20), 1u); // num_layers
   // header 32 + layer(12 + 5*6*4 + 5*4) = 32 + 12 + 120 + 20 = 184 -> out_bias_len
   off = 184;
-  EXPECT_EQ(u32(off), 3u); // out_bias_len == 3 (abg only)
-  off += 4 + 3 * 4;        // skip out_bias[3]
+  EXPECT_EQ(u32(off), 3u);              // out_bias_len == 3 (abg only)
+  off += 4 + 3 * 4;                     // skip out_bias[3]
   EXPECT_FLOAT_EQ(f32(off), 5.0f);      // lam_soft_max
   EXPECT_FLOAT_EQ(f32(off + 4), 10.0f); // lam_hard_max
   EXPECT_EQ(u32(off + 8), 0u);          // meta_len (no meta)
@@ -501,9 +502,9 @@ TEST(NavMaterialDeploy, LearnedLamHardHeadDrivesHardReroute) {
   std::vector<float> store(6 * hw, 0.0f);
   for (int r = 0; r < w.H; ++r)
     for (int c = 0; c < w.W; ++c) {
-      store[0 * hw + r * w.W + c] = 0.0f;  // risk ~0 (isolate the hard channel)
-      store[1 * hw + r * w.W + c] = 2.0f;  // phi_m small -> inside d_hat_m, hard barrier active
-      store[4 * hw + r * w.W + c] = 1.0f;  // grad_phi_x = +1 -> F_hard pushes +x (away from hazard)
+      store[0 * hw + r * w.W + c] = 0.0f; // risk ~0 (isolate the hard channel)
+      store[1 * hw + r * w.W + c] = 2.0f; // phi_m small -> inside d_hat_m, hard barrier active
+      store[4 * hw + r * w.W + c] = 1.0f; // grad_phi_x = +1 -> F_hard pushes +x (away from hazard)
     }
   material_stack ms;
   ms.data = store.data();
