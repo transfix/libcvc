@@ -1,0 +1,40 @@
+# INDEX.ari — the manifest of the Ariadne reusable component library shipped with libcvc/pycvc.
+#
+# Each component is a `units:` window fragment a document imports by the location-independent cvc://
+# scheme and includes at the top level:
+#
+#     import: cvc://components/<file>.ari
+#     windows:
+#       - include: <unit>            # or, parametrized:  { include: <unit>, args: { node: myNode } }
+#
+# Every control binds a two-way cvc::state key the corresponding C++ object owns, so a component
+# drives the live scene/camera/renderer with NO host C++ — the declarative replacement for the
+# hand-written C++ panels (cvc::gl::ui::*). This file is data-only (a catalog tooling/pycvc can read
+# to list the library); loading it registers no widgets.
+
+meta:
+  name: Ariadne component library
+  description: Reusable .ari UI components shipped with libcvc/pycvc (import via cvc://components/…).
+  min_libcvc: 3.4.0
+
+# catalog: one entry per shipped component — its file, the unit to include, the state-key subtree it
+# drives, the demos/objects it fits, and any include args. Read by tooling; not a widget tree.
+catalog:
+  - component: stage_lighting
+    file: stage_lighting.ari
+    unit: stage_lighting
+    binds: "<prefix>.lighting.*"           # cvc::gl::StageLighting rig
+    for: "any scene with a `rig:` StageLighting light"
+    args: []
+  - component: scene_controls
+    file: scene_controls.ari
+    unit: scene_controls
+    binds: "<prefix>.shadows.*"            # cvc::gl::ShadowSettings
+    for: "any scene with `shadows:`"
+    args: []
+  - component: camera_controls
+    file: camera_controls.ari
+    unit: camera_controls
+    binds: "<prefix>.viewers.main.camera.settings.*"   # cvc::gl::CameraController
+    for: "any scene with a navigable camera (single 'main' viewer)"
+    args: []                               # copy the unit + change the viewer segment for a 2nd viewport

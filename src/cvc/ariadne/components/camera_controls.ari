@@ -1,0 +1,37 @@
+# camera_controls.ari — a REUSABLE Ariadne component: navigation settings for the "main" viewer's
+# CameraController, expressed in the DSL. Binds the two-way viewers.main.camera.settings.* state
+# keys (cvc/gl/CameraController.h — state at "<scene prefix>.viewers.main.camera.settings"), so the
+# sliders/toggles drive the live camera with NO host C++ — the declarative replacement for the C++
+# cvc::gl::ui::CameraMenuItems. (For a non-"main" viewport, copy this unit and change the viewer
+# segment; the common single-viewer case needs no parameter.)
+#
+# Use it:
+#     import: cvc://components/camera_controls.ari
+#     windows:
+#       - include: camera_controls
+
+units:
+  camera_controls:
+    window: Camera
+    id: camera_controls
+    children:
+      - slider_float: Look sensitivity
+        bind: viewers.main.camera.settings.mouse_sensitivity
+        lo: 0.02
+        hi: 2.0
+        fmt: "%.2f"
+      - slider_float: Move speed
+        bind: viewers.main.camera.settings.move_speed
+        lo: 1.0
+        hi: 100.0
+        fmt: "%.0f"
+      - slider_float: Field of view
+        bind: viewers.main.camera.settings.field_of_view
+        lo: 20.0
+        hi: 120.0
+        fmt: "%.0f"
+      - separator
+      - checkbox: Invert pitch
+        bind: viewers.main.camera.settings.invert_pitch
+      - checkbox: Drag pans
+        bind: viewers.main.camera.settings.primary_drag_pans

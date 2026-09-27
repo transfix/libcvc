@@ -20,6 +20,7 @@ meta:
 import:
   - cvc://components/stage_lighting.ari
   - cvc://components/scene_controls.ari
+  - cvc://components/camera_controls.ari
 
 # Seed the "show bunny" toggle on (init: wins over a widget default).
 init: |
@@ -38,6 +39,7 @@ windows:
   # The declarative control panels — imported components, not C++.
   - include: stage_lighting
   - include: scene_controls
+  - include: camera_controls
   - window: View
     id: view
     children:

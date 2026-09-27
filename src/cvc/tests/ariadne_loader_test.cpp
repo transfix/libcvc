@@ -846,6 +846,37 @@ windows:
   EXPECT_EQ(sl->bind, "lighting.key_intensity"); // the component's binding survived the include
 }
 
+// A PARAMETRIZED component: `include: <unit>` with `args:` substitutes `{token}` into the unit's
+// binds at load time — so one component drives a chosen node/viewer (e.g. a per-volume-node volren
+// panel). This is the reuse unlock: the same unit, retargeted per include.
+TEST(AriadneModularity, ParametrizedIncludeSubstitutesBind) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  volren_shadows:
+    window: Shadows
+    children:
+      - checkbox: Enabled
+        bind: graphics.root.children.{node}.volren.shadows.enabled
+      - slider_int: Map
+        bind: graphics.root.children.{node}.volren.shadows.resolution
+        lo: 256
+        hi: 4096
+windows:
+  - include: volren_shadows
+    args: { node: bunny_volume }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *cb = find(r.root, Kind::Checkbox);
+  ASSERT_NE(cb, nullptr);
+  EXPECT_EQ(cb->bind,
+            "graphics.root.children.bunny_volume.volren.shadows.enabled"); // {node} filled
+  const Widget *sl = find(r.root, Kind::SliderInt);
+  ASSERT_NE(sl, nullptr);
+  EXPECT_EQ(sl->bind, "graphics.root.children.bunny_volume.volren.shadows.resolution");
+}
+
 TEST(AriadneScene, ScalarScaleIsUniform) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
