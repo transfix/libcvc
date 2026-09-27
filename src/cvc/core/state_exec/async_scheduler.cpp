@@ -154,7 +154,13 @@ void async_scheduler::execute_process_step(process &proc) {
     step_budget = remaining > 0.0 ? remaining : 0.0;
   }
   eval_deadline_guard step_deadline(step_budget);
-  bool done = evaluator_.step(proc.state);
+  // Drive one async_stackless_evaluator step to completion at the leaf. The evaluator's step()
+  // is a coroutine that runs one inner stackless step then yields a suspend_point; sync_wait
+  // consumes that yield here. (Propagating the suspend_point up into step()/run() as a true
+  // co_await chain is only meaningful when a coroutine executor drives the scheduler for
+  // intra-run interleaving — not the case for the synchronous sync_step/sync_run + per-frame
+  // pump paths — and multi-level co_await + suspend across sync_wait is not robust here.)
+  bool done = evaluator_.step(proc.state).sync_wait();
 
   auto now = std::chrono::steady_clock::now();
   proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();

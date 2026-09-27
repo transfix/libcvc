@@ -135,7 +135,10 @@ private:
   int current_pid_ = -1;
   process_ptr current_proc_;
 
-  stackless_evaluator evaluator_;
+  // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12): a coroutine
+  // wrapper whose step() yields a suspend_point, so the scheduler's task<> step chain can
+  // interleave processes cooperatively when driven from a coroutine executor.
+  async_stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
 
