@@ -1342,6 +1342,23 @@ Scene parse_scene(const YAML::Node &s) {
     sc.has_chrome = true;
     sc.chrome_visible = flag(s, "chrome", true);
   }
+  if (const YAML::Node bg = s["background"]) {
+    // background: [r,g,b] (solid) OR { top: [r,g,b], bottom: [r,g,b] } (vertical gradient).
+    sc.has_background = true;
+    if (bg.IsSequence() && bg.size() >= 3) {
+      for (int i = 0; i < 3; ++i)
+        sc.background_top[i] = sc.background_bottom[i] = static_cast<float>(bg[i].as<double>());
+      sc.background_gradient = false;
+    } else if (bg.IsMap()) {
+      sc.background_gradient = true;
+      if (const YAML::Node top = bg["top"]; top && top.IsSequence() && top.size() >= 3)
+        for (int i = 0; i < 3; ++i)
+          sc.background_top[i] = static_cast<float>(top[i].as<double>());
+      if (const YAML::Node bot = bg["bottom"]; bot && bot.IsSequence() && bot.size() >= 3)
+        for (int i = 0; i < 3; ++i)
+          sc.background_bottom[i] = static_cast<float>(bot[i].as<double>());
+    }
+  }
   return sc;
 }
 

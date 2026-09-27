@@ -1835,9 +1835,10 @@ subject of the still-open streamed-source contract (§9.8).
 > - **rig TUNING on a `rig:` light** — `stage: {center, radius}` (a tight cone → crisp map), `key: {intensity,
 >   azimuth, elevation, cone}`, `fill` / `back` / `warmth` / `environment` / `ambient`; each gated so
 >   an unset knob keeps the preset. The rig's own state keys stay two-way bound, so `.ari` sliders can
->   also drive them live. Plus **`chrome: <bool>`** (scene-level) strips the SceneGraph diagnostic
->   grid/axis for a clean stage. Tests: `AriadneScene.{PlanePrimitiveSpecularAndFit,
->   RigTuningAndShadowResolution, ChromeToggle}` (parse) + `cvcgl_ariadne_realize` §9-enrichments
+>   also drive them live. Plus **`chrome: <bool>`** (strip the SceneGraph diagnostic grid/axis) and
+>   **`background:`** — `[r,g,b]` solid or `{ top, bottom }` gradient (a view property the host applies,
+>   G15). Tests: `AriadneScene.{PlanePrimitiveSpecularAndFit,
+>   RigTuningAndShadowResolution, ChromeToggle, BackgroundSolidAndGradient}` (parse) + `cvcgl_ariadne_realize` §9-enrichments
 >   block (realize: quad shape, fit grounds+scales, shadow res applied, tuned rig lights).
 >
 > **First ported demo LANDED — `bunny_shadow.ari`.** The cvcGL bunny/shadow bench

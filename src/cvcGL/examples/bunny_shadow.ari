@@ -61,6 +61,7 @@ windows:
 # the same bench bunny_shadow.cpp builds imperatively, here as data.
 scene:
   chrome: false # strip the diagnostic grid/axis/bbox — a clean stage for the shadow
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] } # a studio gradient
   nodes:
     # The subject: the embedded Stanford bunny, fit to stand on the ground (Y-up mesh -> Z-up, base
     # on z=0, tallest extent scaled to 100).

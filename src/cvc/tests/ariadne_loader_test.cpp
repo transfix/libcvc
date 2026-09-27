@@ -800,6 +800,29 @@ scene:
   EXPECT_EQ(r.scene.shadow_interval, 1);
 }
 
+// §9 background: a solid colour or a top→bottom gradient (a view property the host applies).
+TEST(AriadneScene, BackgroundSolidAndGradient) {
+  SKIP_WITHOUT_YAML();
+  LoadResult solid =
+      load_string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  background: [0.2, 0.3, "
+                  "0.4]\n  nodes:\n    - node: g\n      source: { plane: { size: 4 } "
+                  "}\n");
+  ASSERT_TRUE(solid.ok) << solid.error;
+  ASSERT_TRUE(solid.scene.has_background);
+  EXPECT_FALSE(solid.scene.background_gradient);
+  EXPECT_FLOAT_EQ(solid.scene.background_top[0], 0.2f);
+  EXPECT_FLOAT_EQ(solid.scene.background_bottom[2], 0.4f); // solid: top == bottom
+  LoadResult grad = load_string(
+      "meta: { min_libcvc: \"0.0.0\" }\nscene:\n  background: { top: [0.1, 0.12, 0.16], "
+      "bottom: [0.0, 0.0, 0.02] }\n  nodes:\n    - node: g\n      source: { plane: { "
+      "size: 4 } }\n");
+  ASSERT_TRUE(grad.ok) << grad.error;
+  ASSERT_TRUE(grad.scene.has_background);
+  EXPECT_TRUE(grad.scene.background_gradient);
+  EXPECT_FLOAT_EQ(grad.scene.background_top[1], 0.12f);
+  EXPECT_FLOAT_EQ(grad.scene.background_bottom[2], 0.02f);
+}
+
 // §9 chrome: strip the SceneGraph diagnostic grid/axis for a clean capture.
 TEST(AriadneScene, ChromeToggle) {
   SKIP_WITHOUT_YAML();

@@ -171,7 +171,15 @@ struct Scene {
   int shadow_interval = 1;
   bool has_chrome = false;    // chrome: <bool> — the SceneGraph diagnostic grid/axis/bbox chrome
   bool chrome_visible = true; // default on (the SceneGraph default); `chrome: false` strips it
-  bool any() const { return !nodes.empty() || !lights.empty() || has_shadows || has_chrome; }
+  // background: [r,g,b] (a solid colour) OR { top: [r,g,b], bottom: [r,g,b] } (a vertical
+  // gradient). A VIEW property (not the scene graph), applied by the host to the renderer.
+  bool has_background = false;
+  bool background_gradient = false; // false = solid (background_top); true = top→bottom gradient
+  float background_top[3] = {0.09f, 0.10f, 0.12f};
+  float background_bottom[3] = {0.02f, 0.02f, 0.03f};
+  bool any() const {
+    return !nodes.empty() || !lights.empty() || has_shadows || has_chrome || has_background;
+  }
 };
 
 } // namespace ariadne

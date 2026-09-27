@@ -34,6 +34,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <vtkRenderer.h> // a scene background: gradient reaches the renderer directly (§16.1)
 
 using cvc::gl::CameraController;
 using cvc::gl::ImGuiBackend;
@@ -165,6 +166,21 @@ int main(int argc, char **argv) {
         const cvc::bounding_box bb = sg.computeGraphicsBounds();
         if (!bb.isNull())
           cam.frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+        // Apply the scene's background (a VIEW property): a solid colour, or a top→bottom gradient
+        // reached through the renderer (SceneRenderer exposes only a flat setBackground).
+        if (lr.scene.has_background) {
+          const auto &t = lr.scene.background_top;
+          const auto &b = lr.scene.background_bottom;
+          if (lr.scene.background_gradient) {
+            if (vtkRenderer *r = view.renderer()) {
+              r->SetGradientBackground(true);
+              r->SetBackground(b[0], b[1], b[2]);  // bottom
+              r->SetBackground2(t[0], t[1], t[2]); // top
+            }
+          } else {
+            view.setBackground(t[0], t[1], t[2]);
+          }
+        }
         // Escape-hatch fallback: also expose the rich C++ scene composites as custom widgets
         // (scene_panel / stage_lighting_panel / scene_menu), so a document may use EITHER the
         // declarative .ari control components (preferred) OR these. Harmless if unused.
