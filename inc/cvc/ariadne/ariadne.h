@@ -156,8 +156,10 @@ bool have_state_exec();
 // ---------------------------------------------------------------------------
 } // namespace ariadne
 namespace state_exec {
-class environment;
-struct intrinsics_context;
+struct environment; // NB: struct, not class — MSVC encodes the class/struct tag in the mangled
+struct intrinsics_context; // name (types.h/intrinsics.h declare both as struct); a mismatch =
+                           // LNK2019 on Windows (Itanium ABI ignores the tag, so it hides on
+                           // Linux/macOS).
 } // namespace state_exec
 namespace ariadne {
 
