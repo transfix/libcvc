@@ -1,8 +1,9 @@
-// Ariadne — the `state://` URI handler (roadmap §13.3). See uri_state.h. Resolves a state node
-// reference to the VALUE channel of the addressed node (the `.ari` text it holds), following a
-// transparent link to its target. Lives in its own TU so the pure resolver (uri.cpp) keeps zero
-// dependency on cvc::state — this scheme is the opt-in add-on that pulls it in.
+// Ariadne — the `state://` URI handler (roadmap §13.3 read + §13.10 write). See uri_state.h.
+// Read (resolve) and write (store) the addressed node's `?value` (default) or `?data` channel,
+// following a transparent link to its target on BOTH paths. Lives in its own TU so the pure
+// resolver (uri.cpp) keeps zero dependency on cvc::state — this scheme is the opt-in add-on.
 
+#include <boost/any.hpp>
 #include <cstddef>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_state.h>
@@ -24,48 +25,74 @@ std::string channel_of(const std::string &query) {
   return ch;
 }
 
+// Follow a TRANSPARENT link to its terminal target; a non-link / opaque / broken / cyclic
+// transparent link stays put (resolvedValue's fallback). SHARED by read and write so both address
+// the identical node — crucially even a DEFAULT (non-writable) transparent link: a read follows it,
+// so a write must follow it too, or a store would be shadowed on the link node and unreadable via
+// the same URI (the write-through routing in state::value() only fires for a WRITABLE link).
+cvc::state *effective_node(cvc::state *node) {
+  if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent) {
+    const cvc::state::link_resolution lr = node->resolveLink();
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
+      return lr.target;
+  }
+  return node;
+}
+
+// The `?value` / `?data` channels are served; `?children` and anything else are not (they need the
+// value_t/codec machinery a host can add). Returns "value" for the default/empty channel.
+bool served_channel(const std::string &channel, std::string &normalized) {
+  normalized = channel.empty() ? "value" : channel;
+  return normalized == "value" || normalized == "data";
+}
+
 UriResult state_resolve(cvc::state &root, const Uri &u) {
-  const std::string channel = channel_of(u.query);
-  if (!channel.empty() && channel != "value")
+  std::string channel;
+  if (!served_channel(channel_of(u.query), channel))
     return {false, std::string(), std::string(),
             "ari: state channel '?" + channel +
-                "' is not served by the built-in state handler (only '?value'); register a "
-                "custom handler for '?data' / '?children'"};
+                "' is not served by the built-in state handler (only '?value' / '?data'); register "
+                "a custom handler for '?children'"};
 
   // Navigate WITHOUT creating nodes; an empty path is the root itself.
   cvc::state *node = u.path.empty() ? &root : root.findDescendant(u.path);
   if (!node)
     return {false, std::string(), std::string(), "ari: state node '" + u.path + "' not found"};
+  cvc::state *eff = effective_node(node); // read follows a transparent link to its target
+  const std::string canonical = "state://" + eff->fullName() + "?" + channel;
 
-  // The value channel follows a transparent link to its target (matching resolvedValue). Resolve
-  // the effective node ONCE so content and canonical come from the SAME node: an opaque/broken
-  // link or a non-link stays put (own value), a transparent link lands on its terminal target.
-  // Keying the canonical on the effective node's absolute path is what lets an alias and its
-  // target collapse in the loader's dedup / cycle guard.
-  cvc::state *effective = node;
-  if (node->isLink() && node->linkMode() == cvc::state::link_mode::transparent) {
-    const cvc::state::link_resolution lr = node->resolveLink();
-    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
-      effective = lr.target; // broken / cyclic / budget-exhausted → fall back to the link node
+  if (channel == "data") {
+    // The data channel carries a raw string/byte blob (what state_store writes here, and what the
+    // §13.9 HTTP cache parks on a node). Typed data() payloads (a value_t / geometry) are a
+    // different consumer (state-data-get) and are not byte-serialized here.
+    const boost::any d = eff->data();
+    if (const std::string *s = boost::any_cast<std::string>(&d))
+      return {true, *s, canonical, std::string()};
+    if (d.empty())
+      return {true, std::string(), canonical, std::string()}; // empty data -> empty content
+    return {false, std::string(), std::string(),
+            "ari: state '" + u.path + "?data' holds a non-string payload (not byte-serializable)"};
   }
-  std::string content = effective->value();
-  const std::string canonical = "state://" + effective->fullName() + "?value";
-  return {true, std::move(content), canonical, std::string()};
+  return {true, eff->value(), canonical, std::string()};
 }
 
-// §13.10 the write analogue: store `content` into the addressed node's value channel. operator()
-// CREATES the node path if absent (a store may target a not-yet-existing node); an empty path is
-// the root. Writing via value() routes through a writable transparent link to its target (the
-// write analogue of state_resolve's follow), else it writes the node's own value.
+// §13.10 the write analogue: store `content` into the addressed node's `?value` (default) or
+// `?data` channel. operator() CREATES the node path if absent (a store may target a not-yet-
+// existing node); an empty path is the root. It writes the EFFECTIVE node (following a transparent
+// link to its target, exactly as the read does) so store and resolve address the same node — a
+// write is never shadowed on a non-writable link.
 StoreResult state_store(cvc::state &root, const Uri &u, const std::string &content) {
-  const std::string channel = channel_of(u.query);
-  if (!channel.empty() && channel != "value")
+  std::string channel;
+  if (!served_channel(channel_of(u.query), channel))
     return {false, std::string(),
             "ari: state channel '?" + channel +
-                "' is not writable by the built-in state handler (only '?value')"};
-  cvc::state &node = u.path.empty() ? root : root(u.path);
-  node.value(content);
-  return {true, "state://" + node.fullName() + "?value", std::string()};
+                "' is not writable by the built-in state handler (only '?value' / '?data')"};
+  cvc::state *eff = effective_node(u.path.empty() ? &root : &root(u.path));
+  if (channel == "data")
+    eff->data(boost::any(content)); // store the bytes as a string blob on the data channel
+  else
+    eff->value(content);
+  return {true, "state://" + eff->fullName() + "?" + channel, std::string()};
 }
 
 } // namespace

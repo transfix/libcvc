@@ -15,9 +15,9 @@
 //
 // This scheme needs a state root, which the app-free loader does not have — so it is opt-in: a
 // host with a state tree registers it (via register_state_uri_handler) before load_*, exactly
-// as §13.2 intends (state:// is "in-process", registered from the intrinsics context). The
-// handler holds `root` by pointer; the host MUST unregister_uri_handler("state") before that
-// root is destroyed (see uri.h).
+// as §13.2 intends (state:// is "in-process", registered from the intrinsics context). The read
+// AND write handlers hold `root` by pointer; the host MUST call unregister_state_uri_handler()
+// (which tears down BOTH) before that root is destroyed.
 
 namespace cvc {
 class state;
@@ -25,9 +25,9 @@ class state;
 namespace ariadne {
 
 // Register the `state://` READ and WRITE handlers against `root` (a path is relative to it,
-// dotted — `a.b.c`; an empty path is `root` itself). Reads follow a transparent link to its
-// target; writes (§13.10 store) set the addressed node's value channel, creating the node path if
-// absent and routing through a writable transparent link. Replaces any existing "state" handlers.
+// dotted — `a.b.c`; an empty path is `root` itself). Both read and write serve the `?value`
+// (default) and `?data` channels and follow a transparent link to its target; a write (§13.10
+// store) creates the node path if absent. Replaces any existing "state" handlers.
 // Not thread-safe against a concurrent resolve/store of the same scheme; register during setup.
 // The handlers hold `root` by pointer — call unregister_state_uri_handler() before it is destroyed.
 void register_state_uri_handler(cvc::state &root);

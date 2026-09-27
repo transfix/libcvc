@@ -1590,6 +1590,18 @@ TEST(AriadneUri, StoreUnknownSchemeErrors) {
   EXPECT_NE(s.error.find("no store handler"), std::string::npos);
 }
 
+TEST(AriadneUri, StoreFileRejectsOversize) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
+  fs::create_directories(dir);
+  const std::string path = (dir / "big.bin").string();
+  const std::string big(17u * 1024u * 1024u, 'x'); // > the 16 MiB cap
+  const StoreResult s = store(path, big);
+  EXPECT_FALSE(s.ok); // rejected up front (symmetric with the read cap), so it can't become
+  EXPECT_NE(s.error.find("exceeds"), std::string::npos); // a file the read side could not load
+  EXPECT_FALSE(fs::exists(path));                        // nothing written
+}
+
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
   // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
   // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
@@ -1651,17 +1663,16 @@ TEST(AriadneStateUri, MissingNodeErrors) {
   EXPECT_NE(r.error.find("not found"), std::string::npos);
 }
 
-TEST(AriadneStateUri, DataAndChildrenChannelsUnsupported) {
+TEST(AriadneStateUri, ChildrenChannelUnsupported) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   root("g.mesh").value(std::string("v"));
   register_state_uri_handler(root);
   StateHandlerGuard guard;
-  UriResult d = resolve("state://g.mesh?data");
-  EXPECT_FALSE(d.ok);
-  EXPECT_NE(d.error.find("?data"), std::string::npos);
+  // ?value and ?data are served (see other tests); ?children still needs a richer handler.
   UriResult c = resolve("state://g.mesh?children");
   EXPECT_FALSE(c.ok);
+  EXPECT_NE(c.error.find("?children"), std::string::npos);
 }
 
 TEST(AriadneStateUri, UnregisterRemovesHandler) {
@@ -1673,6 +1684,7 @@ TEST(AriadneStateUri, UnregisterRemovesHandler) {
   UriResult r = resolve("state://x");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("no handler"), std::string::npos);
+  unregister_uri_store_handler("state"); // also drop the write handler so its root can't dangle
 }
 
 TEST(AriadneStateUri, StoreWritesNodeValueAndRoundTrips) {
@@ -1687,6 +1699,36 @@ TEST(AriadneStateUri, StoreWritesNodeValueAndRoundTrips) {
   const UriResult r = resolve("state://cfg.theme");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "dark"); // read back through the read handler
+}
+
+TEST(AriadneStateUri, StoreAndResolveDataChannel) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  const StoreResult s = store("state://blob.x?data", "BINARY-ISH");
+  ASSERT_TRUE(s.ok) << s.error;
+  const UriResult r = resolve("state://blob.x?data"); // ?data round-trips through the data channel
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "BINARY-ISH");
+}
+
+TEST(AriadneStateUri, StoreThroughNonWritableTransparentLinkRoundTrips) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("libs.forms").value(std::string("orig"));
+  // A DEFAULT transparent link is NOT writable — value()'s write-routing would shadow a store on
+  // the link node, but the read follows through, so store must write the effective target too.
+  root("libs.alias").linkTo("libs.forms", cvc::state::link_mode::transparent);
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  const StoreResult s = store("state://libs.alias?value", "NEW");
+  ASSERT_TRUE(s.ok) << s.error;
+  const UriResult r = resolve("state://libs.alias?value");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "NEW");                  // read-back through the link sees the stored bytes
+  EXPECT_EQ(root("libs.forms").value(), "NEW"); // the store reached the effective target
+  EXPECT_EQ(s.canonical, r.canonical);          // and store/resolve report the same canonical
 }
 
 TEST(AriadneStateUri, UnregisterRemovesBothReadAndWrite) {

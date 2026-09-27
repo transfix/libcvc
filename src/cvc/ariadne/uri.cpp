@@ -177,6 +177,13 @@ StoreResult store_file(const Uri &u, const std::string &content, const std::stri
   namespace fs = std::filesystem;
   const std::string full = resolve_file_path(u.path, base);
   const fs::path target(full);
+  // Reject oversize UP FRONT so a save fails loudly, rather than writing a file the read side's
+  // kMaxFileBytes cap (resolve_file) could never load back — keep the write/read round trip
+  // symmetric on the same limit.
+  if (content.size() > kMaxFileBytes)
+    return {false, full,
+            "ari: cannot store to '" + full + "': content exceeds the " +
+                std::to_string(kMaxFileBytes) + "-byte cap"};
   std::error_code ec;
   if (fs::is_directory(target, ec))
     return {false, full, "ari: cannot store to '" + full + "': it is a directory"};

@@ -26,6 +26,10 @@ bool save_state(cvc::state &node, const std::string &uri, std::string *error) {
     if (error)
       *error = std::string("ari: save_state('") + uri + "') failed: " + e.what();
     return false;
+  } catch (...) {
+    if (error)
+      *error = std::string("ari: save_state('") + uri + "') failed (unknown error)";
+    return false;
   }
 }
 
@@ -42,6 +46,10 @@ bool restore_state(cvc::state &node, const std::string &uri, std::string *error)
   } catch (const std::exception &e) {
     if (error)
       *error = std::string("ari: restore_state('") + uri + "') failed: " + e.what();
+    return false;
+  } catch (...) {
+    if (error)
+      *error = std::string("ari: restore_state('") + uri + "') failed (unknown error)";
     return false;
   }
 }
