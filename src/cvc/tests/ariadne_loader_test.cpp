@@ -1320,6 +1320,21 @@ TEST(AriadneUri, RegisterHandlerDispatches) {
   EXPECT_EQ(r.content, "content-for-abc");
 }
 
+TEST(AriadneUri, RelativePathAnchorsToBaseElseCwd) {
+  namespace fs = std::filesystem;
+  // No base (a string-loaded document has no source location) -> anchor to the CWD, not left
+  // dangling as a relative path.
+  const std::string cwd_anchored = resolve_file_path("sub/x.ari", "");
+  EXPECT_TRUE(fs::path(cwd_anchored).is_absolute());
+  EXPECT_EQ(cwd_anchored, fs::weakly_canonical(fs::current_path() / "sub" / "x.ari").string());
+  // With a base directory, anchor there (base == CWD here, so the two agree).
+  const std::string base_anchored = resolve_file_path("sub/x.ari", fs::current_path().string());
+  EXPECT_EQ(base_anchored, cwd_anchored);
+  // An absolute path stands alone regardless of base.
+  EXPECT_EQ(resolve_file_path("/abs/x.ari", "/some/dir"),
+            fs::weakly_canonical(fs::path("/abs/x.ari")).string());
+}
+
 TEST(AriadneUri, FileNameWithQuestionMarkIsNotSplit) {
   // '?' is a legal POSIX filename byte, so a bare/file path is never split on it (a query
   // component belongs only to schemes that use one — state/http/custom).

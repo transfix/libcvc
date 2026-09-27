@@ -69,9 +69,11 @@ bool has_uri_handler(const std::string &scheme);
 // "file" handler for file/bare, else a registered handler; an unknown scheme yields an error.
 UriResult resolve(const std::string &uri, const std::string &base = std::string());
 
-// Resolve a relative `path` against `base` (a file or directory) to an absolute, normalized
-// path string — the file resolver's base rule, exposed for callers that compute a nested
-// fragment's base from a parent's canonical path. An absolute `path` is returned normalized.
+// Resolve a relative `path` against `base` (the enclosing fragment's directory) to an absolute,
+// normalized path string — the file resolver's base rule, exposed for callers that compute a
+// nested fragment's base from a parent's canonical path. An absolute `path` is returned
+// normalized. When `base` is empty — the document was loaded from a string, so there is no
+// source location — a relative `path` anchors to the process's current working directory.
 std::string resolve_file_path(const std::string &path, const std::string &base);
 
 } // namespace ariadne

@@ -106,9 +106,20 @@ Uri parse_uri(const std::string &s) {
 std::string resolve_file_path(const std::string &path, const std::string &base) {
   namespace fs = std::filesystem;
   fs::path p(path);
-  // `base` is the enclosing fragment's DIRECTORY (empty at the top level). A relative path
-  // resolves against it; an absolute path stands alone.
-  fs::path full = (p.is_absolute() || base.empty()) ? p : (fs::path(base) / p);
+  // An absolute path stands alone. A relative path resolves against `base` — the enclosing
+  // fragment's DIRECTORY — when we know it; when we do NOT (base is empty because the document
+  // was loaded from a string, not a file, so there is no source location), a relative path
+  // anchors to the process's current working directory instead of being left dangling.
+  fs::path full;
+  if (p.is_absolute()) {
+    full = p;
+  } else if (!base.empty()) {
+    full = fs::path(base) / p;
+  } else {
+    std::error_code cwd_ec;
+    const fs::path cwd = fs::current_path(cwd_ec);
+    full = cwd_ec ? p : (cwd / p); // CWD unavailable (rare) → best-effort lexical below
+  }
   std::error_code ec;
   const fs::path canon = fs::weakly_canonical(full, ec); // normalizes `..`, resolves symlinks
   return ec ? full.lexically_normal().string() : canon.string();
