@@ -527,6 +527,61 @@ TEST(AriadneMountScope, RepeatedMountGetsPerInstanceSubPrefix) {
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.1.on").value(), "1");
 }
 
+TEST(AriadneMountScope, LinkHoleReadsAndWritesParentScope) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_link_e2e";
+  fs::create_directories(dir);
+  const fs::path frag = dir / "panel.ari";
+  std::ofstream(frag) << "root:\n  - slider_int: Level\n    bind: lvl\n    lo: 0\n    hi: 100\n";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // Parent-owned value; the module reaches it only through the granted rw hole.
+  cvc::state::instance(app)("ui.demo.globals.level").value(7);
+  LoadResult lr =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n        link:\n          lvl: globals.level\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_TRUE(mb.saw("slider_int:Level=7")); // READ through the hole to the parent value
+  // Commit a new value: it must write THROUGH the writable hole to the parent target.
+  mb.slider_int_ret.committed = true;
+  mb.slider_int_ret.value = 9;
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.globals.level").value(), "9");
+}
+
+TEST(AriadneMountScope, ReadOnlyLinkHoleDoesNotWriteParent) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_link_ro_e2e";
+  fs::create_directories(dir);
+  const fs::path frag = dir / "panel.ari";
+  std::ofstream(frag) << "root:\n  - slider_int: Level\n    bind: lvl\n    lo: 0\n    hi: 100\n";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.globals.level").value(3);
+  LoadResult lr = load_string(
+      "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+      "\n        as: rf\n        link:\n          lvl: { to: globals.level, mode: ro }\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_TRUE(mb.saw("slider_int:Level=3")); // read-through works for a read-only hole too
+  // A commit on a READ-ONLY hole must NOT reach the parent — it stays on the hole's own node.
+  mb.slider_int_ret.committed = true;
+  mb.slider_int_ret.value = 8;
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.globals.level").value(), "3"); // parent untouched
+}
+
 TEST(AriadneMountScope, EndToEndLoadCommitsAtSubPrefix) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";

@@ -101,6 +101,18 @@ struct Layout {
   bool is_row_split() const { return resizable && !row_heights.empty(); }
 };
 
+// §12 load: one parent-scope "hole" a mount grants its module (link:). The Runtime plants a
+// transparent link node at `<mount-sub-prefix>.<name>`, so the module — otherwise chrooted to
+// its own subtree — reads/writes exactly this `target` through it. `target` is resolved against
+// the mount's PARENT scope (leading '/' = app root). `writable` false = a read-only hole (reads
+// see the target; a write stays on the hole's own local value, never scribbling the target).
+struct LinkHole {
+  std::string name; // segment the module sees inside its chroot
+  std::string
+      target; // granted path (parent-scope-relative, or /-absolute), resolved by the Runtime
+  bool writable = true; // false -> read-only (setLinkWritable(false))
+};
+
 // One node of the retained tree. `bind` is a cvc::state path (relative to the
 // Runtime's prefix, or absolute with a leading '/'); `on` is an event name a
 // host handler is registered for (Runtime::on). Empty fields are simply unused
@@ -168,6 +180,11 @@ struct Widget {
   // parent scope. Empty for ordinary widgets. This is how a loaded fragment is isolated
   // (roadmap §12.1: ui.docs.<doc>.includes.<as>).
   std::string scope;
+
+  // §12 load: parent-scope "holes" (link:) — the Runtime plants a transparent link node inside
+  // the mount's sub-prefix for each, so the otherwise-sandboxed module can reach exactly the
+  // granted parent/shared scopes and nothing else (§7.8.3). Only set on a mount wrapper.
+  std::vector<LinkHole> links;
 
   // Kind::Custom: the registered type name, and the config bag (every widget key the
   // loader did not consume) a registered emit fn (register_widget_type) reads. Empty

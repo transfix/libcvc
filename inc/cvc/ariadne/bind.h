@@ -10,6 +10,7 @@
 // MUST resolve to the identical state key, or the checkbox and the mesh would drift
 // onto two different keys. Lift, never re-hand-roll.
 
+#include <boost/lexical_cast.hpp>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <exception>
@@ -34,17 +35,34 @@ inline std::string resolve_bind(const std::string &prefix, const std::string &bi
   return prefix + cvc::state::SEPARATOR + bind;
 }
 
+// §12 load: follow a TRANSPARENT link node to its terminal target for a READ. A mount's
+// parent-scope "hole" is a transparent link (§7.8.3); a bound widget reading it must see THROUGH
+// to the granted target, matching what a WRITE already does (state::value(v) routes through a
+// writable transparent link). A non-link / opaque / broken / cyclic link stays put (the same
+// fallback resolvedValue documents), so this only changes reads of a resolvable transparent link
+// — of which an Ariadne tree has none except deliberately-planted holes. Reads use the resolved
+// node; SEEDS/WRITES stay on the ORIGINAL node so the link's writability gate still applies (a
+// read-only hole keeps its own local value on write, never scribbling the target).
+inline cvc::state &read_effective(cvc::state &s) {
+  if (s.isLink() && s.linkMode() == cvc::state::link_mode::transparent) {
+    const cvc::state::link_resolution lr = s.resolveLink();
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
+      return *lr.target;
+  }
+  return s;
+}
+
 // Read a state value, seeding it with `def` when the path has no value yet. Never
 // throws into a render frame (unreadable/unconvertible -> `def`).
 template <typename T> T read_or_seed(cvc::app &ctx, const std::string &path, const T &def) {
   try {
     cvc::state &s = cvc::state::instance(ctx)(path);
-    const std::string raw = s.value();
-    if (raw.empty()) {
-      s.value(def);
+    cvc::state &eff = read_effective(s); // read through a transparent-link hole to its target
+    if (eff.value().empty()) {
+      s.value(def); // seed via the ORIGINAL node: writable hole -> target, else local/own
       return def;
     }
-    return s.value<T>();
+    return eff.value<T>();
   } catch (const std::exception &) {
     return def;
   }
@@ -56,11 +74,10 @@ template <typename T> T read_or_seed(cvc::app &ctx, const std::string &path, con
 // its own `def:`): a follower must not pre-empt the owner's default. Never throws.
 template <typename T> T read_or(cvc::app &ctx, const std::string &path, const T &def) {
   try {
-    cvc::state &s = cvc::state::instance(ctx)(path);
-    const std::string raw = s.value();
-    if (raw.empty())
+    cvc::state &eff = read_effective(cvc::state::instance(ctx)(path));
+    if (eff.value().empty())
       return def;
-    return s.value<T>();
+    return eff.value<T>();
   } catch (const std::exception &) {
     return def;
   }
@@ -69,9 +86,15 @@ template <typename T> T read_or(cvc::app &ctx, const std::string &path, const T 
 // Write a state value; swallows read-only / unwritable (never throws into a frame).
 // A write equal to the current value is a no-op inside cvc::state (equality guard),
 // so re-writing every frame fires observers only on an actual change.
+//
+// Writes go through the STRING setter (state::value(const std::string&)) rather than the typed
+// value<T>: only the string setter routes a write through a writable transparent-link HOLE to its
+// target (§12) — the typed setter writes the link node's own value, which would strand a mount's
+// write inside its own subtree. lexical_cast reproduces value<T>'s own string encoding, so the
+// stored representation is unchanged for a plain (non-link) node.
 template <typename T> void write(cvc::app &ctx, const std::string &path, const T &v) {
   try {
-    cvc::state::instance(ctx)(path).value(v);
+    cvc::state::instance(ctx)(path).value(boost::lexical_cast<std::string>(v));
   } catch (const std::exception &) {
   }
 }

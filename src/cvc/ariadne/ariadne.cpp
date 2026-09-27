@@ -45,10 +45,12 @@ namespace {
 // widget walk here and the scene binder (§9) share ONE definition and can't drift.
 // They are used unqualified below (same cvc::ariadne namespace).
 
-// Read a state value as a plain string with no seeding (read-only Text view).
+// Read a state value as a plain string with no seeding (read-only Text view). Follows a
+// transparent-link hole to its target (§12), so a bound Text in a mounted module shows the
+// granted parent value, matching every other read path.
 std::string read_string(cvc::app &ctx, const std::string &path) {
   try {
-    return cvc::state::instance(ctx)(path).value();
+    return read_effective(cvc::state::instance(ctx)(path)).value();
   } catch (const std::exception &) {
     return "<unset>";
   }
@@ -503,6 +505,15 @@ struct Runtime::Impl {
     return scope_stack.empty() ? prefix : scope_stack.back();
   }
 
+  // §12 load: sub-prefixes whose parent-scope holes (link:) have been planted, so we wire each
+  // mount's link nodes ONCE (idempotent, but findDescendant+linkTo per hole per frame is waste).
+  // Cleared on a reconcile (the swapped-in tree may mount different fragments).
+  std::set<std::string> wired_mounts;
+  // Plant the transparent link-node holes for a mount: for each, a node at <sub_prefix>.<name>
+  // links to `target` resolved against the mount's PARENT scope (leading '/' = app root).
+  void wire_holes(const std::string &parent_prefix, const std::string &sub_prefix,
+                  const std::vector<LinkHole> &links);
+
   // Resolve a widget bind path to an absolute cvc::state path. Delegates to the
   // shared rule (bind.h) so widget binds and scene `visible:` binds collide on the
   // same key for the same relative path — against the active mount scope (§12).
@@ -676,6 +687,26 @@ void Runtime::Impl::emit_children(const Widget &w) {
 // Lay a container's children out per its layout (§3.0.3b): a Grid/Horizontal
 // layout flows them into the backend's sized tracks; anything else is a plain
 // vertical stack. Used for both a Window's body and a Group.
+void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::string &sub_prefix,
+                               const std::vector<LinkHole> &links) {
+  cvc::state &root = cvc::state::instance(app);
+  for (const LinkHole &h : links) {
+    // The hole node the module sees inside its chroot; the target it grants, resolved against the
+    // mount's PARENT scope. A transparent link so a read sees through (bind.h read_effective /
+    // state-get read_through_link); setLinkWritable gates the write (rw -> target, ro -> local).
+    const std::string hole_path = resolve_bind(sub_prefix, h.name);
+    const std::string target = resolve_bind(parent_prefix, h.target);
+    try {
+      cvc::state &node = root(hole_path);
+      node.linkTo(target, cvc::state::link_mode::transparent);
+      node.setLinkWritable(h.writable);
+    } catch (const std::exception &) {
+      // Never throw into a frame; a hole that cannot be wired simply isn't (the module then
+      // reads/writes its own local node — sandboxed, no parent reach).
+    }
+  }
+}
+
 void Runtime::Impl::emit_container(const Widget &w) {
   Backend &b = *backend;
   // §12: a mount point (Widget::scope) scopes its CHILDREN — the loaded fragment — to a deeper
@@ -683,8 +714,14 @@ void Runtime::Impl::emit_container(const Widget &w) {
   // (in emit() before we got here). Push the composed scope for the children walk, pop after
   // (RAII, so a backend throw cannot leave the stack unbalanced).
   const bool scoped = !w.scope.empty();
-  if (scoped)
-    scope_stack.push_back(resolve_bind(current_prefix(), w.scope));
+  if (scoped) {
+    const std::string parent_prefix = current_prefix(); // before the push
+    const std::string sub_prefix = resolve_bind(parent_prefix, w.scope);
+    // Plant the mount's parent-scope holes once, BEFORE emitting the fragment that reads them.
+    if (!w.links.empty() && wired_mounts.insert(sub_prefix).second)
+      wire_holes(parent_prefix, sub_prefix, w.links);
+    scope_stack.push_back(sub_prefix);
+  }
   struct ScopeGuard {
     std::vector<std::string> &stack;
     bool active;
@@ -932,6 +969,7 @@ void Runtime::Impl::render() {
     root = std::move(pending);
     pending = Widget{};
     has_pending = false;
+    wired_mounts.clear(); // §12: the new tree may mount different fragments — re-wire holes lazily
   }
 #ifdef CVC_STATE_EXEC
   if (reactive)

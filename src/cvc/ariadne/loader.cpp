@@ -782,26 +782,28 @@ std::string sanitize_mount_id(const std::string &raw) {
   return out;
 }
 
-// Default a mount id from the resource. For a FILE path it is the last path segment minus its
-// extension ("file://panels/rf_telemetry.ari" → "rf_telemetry"). For a non-file scheme the path
-// is a dotted IDENTITY, not a filename, so the trailing ".x" is a real segment, not an extension
-// — keep it whole ("state://ui.libs.forms" → "ui.libs.forms", so ui.libs.forms and ui.libs.panels
-// stay distinct). The caller sanitizes ('.' → '_'). A bare/empty tail falls back to "mount".
+// Default a mount id from the resource. For a PATH-LIKE scheme (file/bare, http, https) it is the
+// last path segment minus its filename extension ("file://panels/rf.ari" → "rf",
+// "http://h/rf.ari" → "rf" — the codebase treats an http URL as an extensioned file). For an
+// OPAQUE-IDENTITY scheme (state, and any custom one) the path is a dotted identity, not a
+// filename, so the trailing ".x" is a real segment — keep it whole ("state://ui.libs.forms" →
+// "ui.libs.forms", so ui.libs.forms and ui.libs.panels stay distinct). The caller sanitizes
+// ('.' → '_'). A bare/empty tail falls back to "mount".
 std::string default_mount_id(const std::string &uri) {
   std::string s = uri;
-  bool is_file = true; // a bare/relative path is the file scheme (§13.1)
+  bool strip_ext = true; // a bare/relative path is the file scheme (§13.1) → path-like
   if (const std::size_t scheme = s.find("://"); scheme != std::string::npos) {
     std::string sch = s.substr(0, scheme);
     std::transform(sch.begin(), sch.end(), sch.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    is_file = (sch == "file");
+    strip_ext = (sch == "file" || sch == "http" || sch == "https");
     s = s.substr(scheme + 3);
   }
   if (const std::size_t q = s.find('?'); q != std::string::npos)
     s = s.substr(0, q);
   if (const std::size_t slash = s.find_last_of('/'); slash != std::string::npos)
     s = s.substr(slash + 1);
-  if (is_file) // only a file path carries an extension to strip
+  if (strip_ext) // a path-like scheme carries a filename extension to strip
     if (const std::size_t dot = s.find_last_of('.'); dot != std::string::npos && dot != 0)
       s = s.substr(0, dot);
   return s.empty() ? "mount" : s;
@@ -864,9 +866,6 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   if (frag.IsMap() && frag["init"].IsDefined())
     ctx.warn("ari: load '" + uri +
              "': the fragment's init: is not yet run for mounted fragments (a later slice)");
-  if (has(n, "link"))
-    ctx.warn("ari: load '" + uri +
-             "': link: (parent-scope holes) is not yet wired (a later slice)");
   // Parse the fragment in an ISOLATED sub-context: fresh units (module boundary), based at the
   // fragment's own directory, carrying the mount stack (with this URI pushed) + the shared mount
   // counter for the cycle/depth/aggregate guards. Its warnings bubble up to the host document.
@@ -898,6 +897,28 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   // fields evaluate at the sub-prefix, while the parent's load:-block fields land on the wrapper.
   Widget wrapper = group({std::move(frag_root)});
   wrapper.scope = "includes." + as;
+  // §12 link: parent-scope holes — each entry becomes a transparent link node the Runtime plants
+  // inside the mount's sub-prefix (created there, not here — the loader is state-free). Value form
+  // `name: target` (rw); map form `name: { to: target, mode: ro|rw }`.
+  if (const YAML::Node lk = n["link"]; lk && lk.IsMap()) {
+    for (const auto &kv : lk) {
+      if (!kv.first.IsScalar())
+        continue;
+      LinkHole h;
+      h.name = kv.first.Scalar();
+      if (const YAML::Node v = kv.second; v.IsScalar()) {
+        h.target = v.Scalar();
+      } else if (v.IsMap()) {
+        h.target = str(v, "to");
+        h.writable = (str(v, "mode", "rw") != "ro");
+      }
+      if (h.name.empty() || h.target.empty()) {
+        ctx.warn("ari: load '" + uri + "': link '" + h.name + "' needs a target — skipped");
+        continue;
+      }
+      wrapper.links.push_back(std::move(h));
+    }
+  }
   return wrapper;
 }
 

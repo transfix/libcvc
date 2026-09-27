@@ -1687,6 +1687,40 @@ windows:
   EXPECT_TRUE(has_warning(r, "unknown unit 'knob'"));        // the host's include did not
 }
 
+TEST(AriadneMount, LoadParsesLinkHoles) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("linked_panel.ari", "root: [ { text: hi } ]\n");
+  const std::string main = write_temp_ari("main_link.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: linked_panel.ari
+        as: rf
+        link:
+          theme: /ui.theme
+          fleet: { to: shared.fleet, mode: ro }
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *m = find_scope(r.root, "includes.rf");
+  ASSERT_NE(m, nullptr);
+  ASSERT_EQ(m->links.size(), 2u);
+  const LinkHole *theme = nullptr;
+  const LinkHole *fleet = nullptr;
+  for (const LinkHole &h : m->links) {
+    if (h.name == "theme")
+      theme = &h;
+    if (h.name == "fleet")
+      fleet = &h;
+  }
+  ASSERT_NE(theme, nullptr);
+  EXPECT_EQ(theme->target, "/ui.theme");
+  EXPECT_TRUE(theme->writable); // scalar form defaults rw
+  ASSERT_NE(fleet, nullptr);
+  EXPECT_EQ(fleet->target, "shared.fleet");
+  EXPECT_FALSE(fleet->writable); // mode: ro
+}
+
 TEST(AriadneMount, LoadMountCycleTerminates) {
   SKIP_WITHOUT_YAML();
   // a loads b loads a — the resolved-URI mount guard must terminate (warn), not recurse forever.
