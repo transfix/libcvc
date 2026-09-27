@@ -109,6 +109,12 @@ struct no_init_t {};
 // without pulling in <cvc/state.h> (which itself includes <cvc/app.h>).
 class state;
 
+// Forward declaration so app::exec_scheduler() can return a reference without
+// pulling the state_exec coroutine headers into everything that includes app.h.
+namespace state_exec {
+class async_scheduler;
+}
+
 class app {
 public:
   typedef boost::shared_ptr<app> app_ptr;
@@ -408,6 +414,16 @@ public:
   cvc::world_clock &world_clock();
   cvc::world_units &world_units();
 
+  // This application's single, app-wide state_exec scheduler — the one long-lived
+  // async_stackless-backed scheduler on which all Ariadne program lanes (init:/action
+  // on:/on:tick·on:key residents/spawned), and any other state_exec host, schedule.
+  // Per-app-instance and lazily constructed (like computePool()/world_clock()), wired
+  // to this app's state root for state-watches. "App-wide" = scoped to this cvc::app:
+  // one cooperative timeline shared by every .ari document the app hosts, with
+  // per-document isolation layered on top by the Ariadne runtime (owner scope +
+  // per-process chroot + per-document child env). See CVCGL-UI-DSL-ROADMAP §4.7.
+  cvc::state_exec::async_scheduler &exec_scheduler();
+
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
   class thread_info {
@@ -635,6 +651,11 @@ protected:
   std::unique_ptr<cvc::world_clock> _worldClock;
   std::unique_ptr<cvc::world_units> _worldUnits;
   boost::mutex _worldBasesMutex;
+
+  // The app-wide state_exec scheduler (exec_scheduler()). Lazily built; the mutex
+  // guards first construction. unique_ptr so app.h needs only a forward declaration.
+  std::unique_ptr<cvc::state_exec::async_scheduler> _execScheduler;
+  boost::mutex _execSchedulerMutex;
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;

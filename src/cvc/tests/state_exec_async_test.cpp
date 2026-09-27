@@ -610,3 +610,17 @@ TEST_F(AsyncSchedulerIntrinsicsTest, MsgRecvViaIntrinsicSuspendsViaScheduler) {
   ASSERT_TRUE(info.has_value());
   EXPECT_EQ(info->status, process_status::waiting);
 }
+
+// The app-wide scheduler service: cvc::app::exec_scheduler() is one lazily-built
+// per-app async_scheduler (the single cooperative timeline all Ariadne docs share).
+TEST(AppExecScheduler, IsAppWideSingletonAndUsable) {
+  cvc::app app_ctx;
+  auto &s1 = app_ctx.exec_scheduler();
+  auto &s2 = app_ctx.exec_scheduler();
+  EXPECT_EQ(&s1, &s2); // same instance across calls — one app-wide scheduler
+  int pid = s1.execute(std::string("(+ 2 3)"));
+  auto results = s1.sync_run();
+  auto it = results.find(pid);
+  ASSERT_NE(it, results.end());
+  EXPECT_EQ(std::get<int64_t>(it->second.v), 5);
+}
