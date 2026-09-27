@@ -3070,6 +3070,47 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 `fetch_sync()` is unavailable there — the async path is identical across backends. Returns
 `resource{kind::bytes|local_path}` to slot into §13.4's dispatch-by-kind.
 
+### 13.9 A cvc::app-wide HTTP(s) cache in the state tree (TTL + conditional GET) — *planned*
+
+Repeated `import:`/`load:`/`source:` of the same `http(s)://` URL must not re-fetch every time. The
+`http` handler (§13.6) gains an **app-wide cache that lives in the state tree** and revalidates with
+HTTP-correct conditional GETs, so a warm entry costs one cheap `304` (or nothing, while fresh)
+instead of a full transfer.
+
+- **Where it lives.** Under the app root, `sys.net.http_cache.<key>` where `<key>` is a stable hash
+  of the normalized request URL (later extended by the response's `Vary` headers). Keyed on
+  `cvc::state::instance(app)`, so the cache is **per-app and app-wide** — every resolver, widget
+  `source:`, and DSL fetch in that app shares it — and it rides the existing state machinery
+  (observers, replication, expiry). Because it is *state*, a federated/clustered deployment can even
+  share cached bodies across nodes via state replication (large bodies via the blob store below).
+- **Entry shape.** The node's **value channel** holds the lightweight metadata (ETag,
+  `Last-Modified`, `Content-Type`, `fetched_at`, `freshness_ttl`, the effective URL) — all strings, so
+  it `json()`/replicates cheaply; the **`data()` channel holds the body bytes** as a blob (kept off
+  the value channel, which is for replication-light text).
+- **Freshness vs revalidation.** On a fetch: a **fresh** entry (`now < fetched_at + freshness_ttl`)
+  returns its body with no network at all. A **stale** entry triggers a **conditional GET**
+  (`If-None-Match: <etag>`, `If-Modified-Since: <last-modified>`): a `304 Not Modified` bumps
+  `fetched_at` (and any new `max-age`) and returns the cached body; a `200` replaces body +
+  validators + TTL. `freshness_ttl` comes from `Cache-Control: max-age` / `Expires`, else a
+  configurable default; `no-store` bypasses the cache and `no-cache` forces revalidation every time.
+- **Eviction = the state tree's TTL expiry.** Freshness (soft, → revalidate) is distinct from
+  **retention** (hard, → evict). The entry node's `expireAt` is set to `fetched_at + retention_ttl`
+  (retention ≥ freshness); `sweepExpired()` drops it and frees the blob. So the cache reuses the
+  **existing state-expiry functionality** for eviction, and the handler checks the stored
+  `freshness_ttl` timestamp for revalidation — two timers, one on the node, one in the metadata.
+- **Single-flight.** N concurrent requests for the same URL coalesce to one transfer via a pending
+  marker on the entry (aligns with §13.8's async model) — the rest await the one completion.
+- **The app seam.** The resolver is app-free (§13.2), so the *cached* handler needs the app for its
+  state tree — a `register_cached_http_uri_handler(app)` variant that captures the app and wires the
+  cache subtree, exactly as `state://` needs a state root. The uncached §13.6 handler stays for
+  app-free use.
+- **Blobs — a state `data()` requirement.** The body is an arbitrary-sized blob on `data()`, so
+  `cvc::state::data()` must robustly carry **arbitrary blobs of arbitrary size (memory permitting)**.
+  Offloading a large/idle body to disk or a remote store is deferred, but the natural home is the
+  federated/clustered **`state_blob_store` + `state_data_hydrator`** (content-addressed, hydrate on
+  demand) the distributed state system already sketches — the cache is a first, local consumer of
+  that path.
+
 ---
 
 ## 14. pycvc — registering Python intrinsics and Python URI handlers
@@ -3859,3 +3900,115 @@ cleanest UX is to route the browser's native paste event into the internal clipb
 `cvc::gl::clipboard` already does), so Ctrl-V in a wasm Ariadne edit pulls from the last real page paste.
 (c) OSC 52 is off by default in some terminals — surface `can_copy_system=false` honestly there rather
 than silently dropping copies.
+
+---
+
+## 18. YAML-free Ariadne — a pure `state_exec` `.ari` dialect — *planned*
+
+Today an `.ari` document is YAML (yaml-cpp → the Widget/Scene tree); without yaml-cpp the loader is a
+stub (§15). But **`state_exec`'s parser and evaluator are core** (no optional dependency), so an `.ari`
+can instead be written as a **pure s-expression `state_exec` program that BUILDS the tree** — a
+dependency-free second front-end that produces the *same* Widget/Scene tree the YAML path does, so the
+backend and everything downstream are unchanged.
+
+**The dialect.** The document is a sequence of `state_exec` forms using a UI/scene intrinsic
+vocabulary that mirrors the YAML structure one-for-one:
+
+```lisp
+(state-set "demo.n" 256)                         ; plain state, set before it is referenced
+(window "Controls"
+  (slider-int "Agents" :bind "demo.n" :lo 1 :hi 512)
+  (combo "Belief" :bind "demo.belief" :options (list "shared" "grouped" "private"))
+  (button "Reset" :on "reset"))
+(scene
+  (geometry-node "mesh" :source "file://blocks.off"
+    :visible-when (= (state-get "demo.show") "1")))
+```
+
+Each `window`/`group`/`slider-int`/`geometry-node`/… is an intrinsic that appends a node to a
+**document builder carried in the `intrinsics_context`** (the program's side effect *is* building the
+tree); the s-expr loader binds those intrinsics, runs the program, and collects the built tree.
+
+**"Code is data", answered.** Top-level forms evaluate **in order, sharing one environment and one
+state tree** (a document is an implicit `begin`/sequence — no enclosing `begin` needed). So a
+`(state-set "demo.n" 256)` executed *before* a `(window … :bind "demo.n" …)` seeds the very key the
+window's bind and reactive expressions later reference — exactly the "set data outside a begin, then
+reference it" pattern asked about. It works because there is no phase split: evaluation is sequential,
+and a later form sees every earlier form's state, `defun`s, and `set`s.
+
+**Every YAML block has an s-expr form** — and the s-expr form is *strictly more powerful*, because it
+is a real language:
+
+| YAML | s-expr |
+|---|---|
+| `windows:` / `menubar:` / `root:` | `(window …)` / `(menubar (menu …))` / top-level widget forms |
+| `scene:` | `(scene (geometry-node …) (volume-node …) …)` |
+| `units:` + `include:` | a `(defun make-labeled (label path) (slider-int label :bind path …))` and calls to it — units become **functions with real parameters**, `include` becomes a call |
+| `visible_when:` / computed / `repeat:` | the predicate/count *is already* an s-expr; a field takes the form directly, and `repeat` is an ordinary `(for …)` / `(dotimes …)` emitting widgets |
+| `init:` | just top-level forms — the whole document *is* the init lane |
+
+**Format detection.** First non-whitespace `(` ⇒ parse as a `state_exec` program (yaml-free path);
+otherwise YAML. Both dialects converge on the identical Widget/Scene tree, so `load_file`/`load_string`
+pick the path transparently and a host never knows which was used.
+
+**Payoff / why it is worth building.** (a) Ariadne runs with **zero third-party deps** (state_exec is
+core) — critical for the minimal/embedded/wasm and self-host (Haiku) builds where yaml-cpp may be
+absent. (b) The DSL and its expression language **unify** into one language — no impedance between
+"the document" and "the code in the document". (c) Full computation in a document: functions, loops,
+conditionals, locally-defined helpers, macro-like reuse — the YAML `units:`/`include:` layer is a weak
+subset of `defun`/call.
+
+**Design work.** Specify the UI/scene intrinsic vocabulary + the document-builder in the
+`intrinsics_context` (the append target); the same **default-deny/limits sandbox** questions as §4/§7
+apply if an s-expr `.ari` is untrusted (the builder intrinsics are a capability the host grants); the
+YAML front-end stays the friendly, lintable, schema-validated (§15) surface, with the s-expr dialect as
+the powerful, dependency-free one.
+
+---
+
+## 19. `state_exec` program modularity — `include` / `load` a program by URI — *planned*
+
+`state_exec` programs (an `init:` lane, an action, and — with §18 — a whole `.ari` document) want to
+reuse other programs. There is no URI-include today. Add the **exact §12 modularization model, lifted
+to the `state_exec` layer**, so *any* state_exec consumer (not only Ariadne UI) gets modular programs,
+reusing the §13 resolver, the §7.8.3 link "holes", the read-through-link reads, and `apply_chroot`.
+
+Two forms, matching the user's two asks and mirroring `include:` vs `load:`:
+
+**(a) `(include "uri")` — textual include (shared scope).** Resolve the URI through the §13 resolver
+(file/state/http/…), parse its s-expressions, and **evaluate them in the CURRENT environment and
+chroot, as if the included forms had textually replaced the `(include …)` form**. The included program's
+`defun`s, `set`s, and state writes land in the *caller's* scope — a shared library of helpers/constants.
+Resolved-URI **cycle guard + depth cap** (as §12.4). This is the state_exec analogue of `include:` (§12):
+no fetch isolation, one scope. *(Whether it is a special form evaluated when reached, or a load-time
+splice, is an open question — a special form is simpler and lets the URI be computed.)*
+
+**(b) `(load "uri" :as sub :link { name target … })` — scoped load (own sub-tree + holes).** Resolve +
+parse, then **evaluate the program chrooted to a sub-tree** (`apply_chroot` to `root_path + "." + sub`),
+so its state lives under `…​.<sub>.*` and it **cannot name anything outside** (the default-deny chroot,
+§7.8.2). Controlled up-chain reach is via **transparent link "holes"** the `:link` map wires at the
+sub-tree boundary (`state::linkTo` + `setLinkWritable`, rw/ro) — the same holes §12's `link:` plants for
+a mounted UI fragment, and reads follow them (the read-through-link work). So a loaded sub-program
+manages its own subtree and reaches exactly the parent/shared keys it was granted, nothing else. This
+is the state_exec analogue of `load:` + `link:`.
+
+**Semantics summary:**
+
+| form | scope | environment | state reach |
+|---|---|---|---|
+| `(include "uri")` | shared (inline) | the caller's env | the caller's chroot |
+| `(load "uri" :as s :link …)` | isolated module | a fresh child env (stdlib only, like the read-lane) | its own `…​.<s>.*` subtree + the declared link holes |
+
+**Why this composes cleanly.** It is the *same* three mechanisms already built for the UI layer —
+the §13 resolver, `apply_chroot`, and transparent-link holes with read-through — just exposed as two
+`state_exec` forms. So §18's s-expr `.ari` documents, `init:` lanes, and plain state_exec programs all
+get file/state/http-served libraries and isolated sub-modules with one design, and an Ariadne
+`load:`-ed *UI* fragment and a `(load …)`-ed *program* share one mental model.
+
+**Open questions.** (a) `include`/`load` as special forms (URI computable, evaluated when reached) vs a
+load-time pass — lean special form. (b) `load`'s child environment: fresh-stdlib (isolation, matches
+the reactive engine) vs inheriting `global_env` — lean fresh + an explicit capability grant. (c) how
+`:link` holes are spelled in the s-expr (a keyword-arg map name→target, `/`-absolute or
+parent-relative, `ro`/`rw`) — reuse §12's `link:` grammar and its fail-closed/`/`-rejected rules. (d)
+the return value of `include`/`load` (nil, or the last form's value) and interaction with the scheduler
+(both run to completion within the caller's step/time budget, cycle/depth-guarded).
