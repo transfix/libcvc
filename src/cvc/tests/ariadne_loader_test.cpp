@@ -132,6 +132,17 @@ struct SchemeGuard {
   ~SchemeGuard() { unregister_uri_handler(scheme); }
 };
 
+// Snapshot + restore the process-global file byte caps, so a test that lowers a cap cannot leak
+// it into later tests (which store/resolve real files at the default cap).
+struct CapGuard {
+  std::size_t r = resolve_file_byte_cap();
+  std::size_t s = store_file_byte_cap();
+  ~CapGuard() {
+    set_resolve_file_byte_cap(r);
+    set_store_file_byte_cap(s);
+  }
+};
+
 } // namespace
 
 // ---- version + schema surface (no yaml needed) ----------------------------
@@ -1602,6 +1613,40 @@ TEST(AriadneUri, StoreFileRejectsOversize) {
   EXPECT_FALSE(fs::exists(path));                        // nothing written
 }
 
+TEST(AriadneUri, ConfigurableStoreCap) {
+  CapGuard cg;
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
+  fs::create_directories(dir);
+  const std::string path = (dir / "cap.bin").string();
+  set_store_file_byte_cap(8);
+  EXPECT_EQ(store_file_byte_cap(), 8u);
+  EXPECT_FALSE(store(path, "123456789").ok); // 9 > 8 -> rejected
+  EXPECT_TRUE(store(path, "12345678").ok);   // 8 == cap -> ok
+  set_store_file_byte_cap(0);                // 0 = unlimited
+  EXPECT_TRUE(store(path, std::string(1000, 'x')).ok);
+  std::error_code ec;
+  fs::remove(path, ec);
+}
+
+TEST(AriadneUri, ConfigurableResolveCap) {
+  CapGuard cg;
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
+  fs::create_directories(dir);
+  const std::string path = (dir / "rcap.bin").string();
+  set_store_file_byte_cap(0); // unlimited store so the write itself is not what fails
+  ASSERT_TRUE(store(path, "0123456789").ok); // 10 bytes on disk
+  set_resolve_file_byte_cap(4);
+  UriResult r = resolve(path);
+  EXPECT_FALSE(r.ok); // 10 > the 4-byte read cap
+  EXPECT_NE(r.error.find("read cap"), std::string::npos);
+  set_resolve_file_byte_cap(0); // unlimited
+  EXPECT_TRUE(resolve(path).ok);
+  std::error_code ec;
+  fs::remove(path, ec);
+}
+
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
   // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
   // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
@@ -1729,6 +1774,21 @@ TEST(AriadneStateUri, StoreThroughNonWritableTransparentLinkRoundTrips) {
   EXPECT_EQ(r.content, "NEW");                  // read-back through the link sees the stored bytes
   EXPECT_EQ(root("libs.forms").value(), "NEW"); // the store reached the effective target
   EXPECT_EQ(s.canonical, r.canonical);          // and store/resolve report the same canonical
+}
+
+TEST(AriadneStateUri, SyncResolverCapsFromState) {
+  CapGuard cg;
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("sys.ariadne.resolver.read_cap_bytes").value(std::string("100"));
+  root("sys.ariadne.resolver.store_cap_bytes").value(std::string("200"));
+  sync_resolver_caps_from_state(root);
+  EXPECT_EQ(resolve_file_byte_cap(), 100u);
+  EXPECT_EQ(store_file_byte_cap(), 200u);
+  // A non-numeric (or missing/empty) node leaves that cap unchanged — a typo can't zero the cap.
+  root("sys.ariadne.resolver.read_cap_bytes").value(std::string("oops"));
+  sync_resolver_caps_from_state(root);
+  EXPECT_EQ(resolve_file_byte_cap(), 100u);
 }
 
 TEST(AriadneStateUri, UnregisterRemovesBothReadAndWrite) {

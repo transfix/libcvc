@@ -107,6 +107,16 @@ bool has_uri_store_handler(const std::string &scheme);
 StoreResult store(const std::string &uri, const std::string &content,
                   const std::string &base = std::string());
 
+// The byte caps the built-in `file` reader (resolve) and writer (store) enforce — a read/write
+// past its cap is refused rather than OOM/write-something-unreadable. Both default to 16 MiB; a
+// cap of 0 means UNLIMITED. Process-global and thread-safe (an atomic). The resolver stays
+// app-free, so these are plain setters — a host drives them from the state tree via
+// sync_resolver_caps_from_state (uri_state.h). Read and store are separate caps.
+std::size_t resolve_file_byte_cap();
+void set_resolve_file_byte_cap(std::size_t bytes);
+std::size_t store_file_byte_cap();
+void set_store_file_byte_cap(std::size_t bytes);
+
 // Resolve a relative `path` against `base` (the enclosing fragment's directory) to an absolute,
 // normalized path string — the file resolver's base rule, exposed for callers that compute a
 // nested fragment's base from a parent's canonical path. An absolute `path` is returned

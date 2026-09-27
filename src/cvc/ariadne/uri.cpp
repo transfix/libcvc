@@ -128,9 +128,20 @@ std::string write_new_file(const std::filesystem::path &dir, const std::string &
 #endif
 }
 
-// An .ari fragment is DSL text; a fragment larger than this is almost certainly a mistake (or
-// an attack). Cap the slurp so a giant file yields an error, never an OOM.
-constexpr std::uintmax_t kMaxFileBytes = 16u * 1024u * 1024u; // 16 MiB
+// The default file read/store byte cap: an .ari fragment or a saved blob larger than this is
+// almost certainly a mistake (or an attack), so the reader/writer refuses rather than OOM /
+// write-something-unreadable. Runtime-configurable via set_resolve_file_byte_cap /
+// set_store_file_byte_cap (0 = unlimited); a host drives them from the state tree
+// (sync_resolver_caps_from_state). Meyers-singleton atomics so init order is well-defined.
+constexpr std::size_t kDefaultFileByteCap = 16u * 1024u * 1024u; // 16 MiB
+std::atomic<std::size_t> &resolve_cap_cell() {
+  static std::atomic<std::size_t> c{kDefaultFileByteCap};
+  return c;
+}
+std::atomic<std::size_t> &store_cap_cell() {
+  static std::atomic<std::size_t> c{kDefaultFileByteCap};
+  return c;
+}
 
 // The built-in `file` handler: read the resolved path's bytes. App-free. Rejects anything that
 // is not an ordinary, bounded file BEFORE opening — a directory or a special file (fifo,
@@ -151,7 +162,9 @@ UriResult resolve_file(const Uri &u, const std::string &base) {
     return {false, std::string(), full, "ari: cannot open file '" + full + "'"};
   // Bound the READ, not a pre-read stat: the byte count is enforced here, so a file that
   // under-reports its size (procfs), grows under a TOCTOU, or streams past its stat size cannot
-  // exceed the cap. Read up to kMaxFileBytes; one more available byte means the file is too big.
+  // exceed the cap. Read up to the (configurable) cap; one more available byte means it is too big.
+  // A cap of 0 means unlimited.
+  const std::size_t cap = resolve_file_byte_cap();
   std::string content;
   char buf[64 * 1024];
   while (in) {
@@ -159,10 +172,9 @@ UriResult resolve_file(const Uri &u, const std::string &base) {
     const std::streamsize got = in.gcount();
     if (got <= 0)
       break;
-    if (content.size() + static_cast<std::size_t>(got) > kMaxFileBytes)
+    if (cap != 0 && content.size() + static_cast<std::size_t>(got) > cap)
       return {false, std::string(), full,
-              "ari: file '" + full + "' exceeds the " + std::to_string(kMaxFileBytes) +
-                  "-byte fragment cap"};
+              "ari: file '" + full + "' exceeds the " + std::to_string(cap) + "-byte read cap"};
     content.append(buf, static_cast<std::size_t>(got));
   }
   if (in.bad())
@@ -177,13 +189,12 @@ StoreResult store_file(const Uri &u, const std::string &content, const std::stri
   namespace fs = std::filesystem;
   const std::string full = resolve_file_path(u.path, base);
   const fs::path target(full);
-  // Reject oversize UP FRONT so a save fails loudly, rather than writing a file the read side's
-  // kMaxFileBytes cap (resolve_file) could never load back — keep the write/read round trip
-  // symmetric on the same limit.
-  if (content.size() > kMaxFileBytes)
+  // Reject oversize UP FRONT so a save fails loudly, rather than writing a file the read cap could
+  // never load back. The store cap is separately configurable (0 = unlimited); default 16 MiB.
+  if (const std::size_t cap = store_file_byte_cap(); cap != 0 && content.size() > cap)
     return {false, full,
-            "ari: cannot store to '" + full + "': content exceeds the " +
-                std::to_string(kMaxFileBytes) + "-byte cap"};
+            "ari: cannot store to '" + full + "': content exceeds the " + std::to_string(cap) +
+                "-byte store cap"};
   std::error_code ec;
   if (fs::is_directory(target, ec))
     return {false, full, "ari: cannot store to '" + full + "': it is a directory"};
@@ -361,6 +372,17 @@ StoreResult store(const std::string &uri, const std::string &content, const std:
   } catch (...) {
     return {false, std::string(), "ari: store failed for '" + uri + "' (unknown error)"};
   }
+}
+
+// --- §13.10 configurable file byte caps (read + store) ------------------------------------------
+
+std::size_t resolve_file_byte_cap() { return resolve_cap_cell().load(std::memory_order_relaxed); }
+void set_resolve_file_byte_cap(std::size_t bytes) {
+  resolve_cap_cell().store(bytes, std::memory_order_relaxed);
+}
+std::size_t store_file_byte_cap() { return store_cap_cell().load(std::memory_order_relaxed); }
+void set_store_file_byte_cap(std::size_t bytes) {
+  store_cap_cell().store(bytes, std::memory_order_relaxed);
 }
 
 // --- the temp-file bridge (§13.4): a resolved URI as a local path a reader can open ----------

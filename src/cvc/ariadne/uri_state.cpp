@@ -8,6 +8,7 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_state.h>
 #include <cvc/core/state.h>
+#include <exception>
 #include <string>
 
 namespace cvc {
@@ -111,6 +112,26 @@ void register_state_uri_handler(cvc::state &root) {
 void unregister_state_uri_handler() {
   unregister_uri_handler("state");       // read
   unregister_uri_store_handler("state"); // write
+}
+
+void sync_resolver_caps_from_state(cvc::state &root) {
+  // Read one config node's decimal byte count and push it to `setter`; leave the cap unchanged on
+  // a missing / empty / non-numeric node so partial config is fine and a typo cannot zero the cap.
+  const auto apply = [&root](const char *path, void (*setter)(std::size_t)) {
+    cvc::state *n = root.findDescendant(path);
+    if (!n)
+      return;
+    const std::string v = n->value();
+    if (v.empty())
+      return;
+    try {
+      setter(static_cast<std::size_t>(std::stoull(v)));
+    } catch (const std::exception &) {
+      // non-numeric -> leave the cap unchanged
+    }
+  };
+  apply("sys.ariadne.resolver.read_cap_bytes", &set_resolve_file_byte_cap);
+  apply("sys.ariadne.resolver.store_cap_bytes", &set_store_file_byte_cap);
 }
 
 } // namespace ariadne
