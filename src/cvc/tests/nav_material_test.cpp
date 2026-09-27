@@ -790,6 +790,84 @@ TEST(NavMaterialSimWorld, MaterialAvoidanceAndDeterminism) {
   EXPECT_EQ(std::memcmp(mat.second.data(), mat2.second.data(), mat.second.size() * 4), 0);
 }
 
+// set_material_lam is a LIVE weight tuner (no plane rebuild) — the lever a live force-bias UI
+// scales. Prove: (a) it takes effect (a different lam_soft changes the trace), and (b) tuning live
+// to value Y is byte-identical to constructing the material with lam_soft==Y (the weight is read
+// fresh each step from mat_cfg_, never baked into the planes).
+TEST(NavMaterialSimWorld, MaterialLamLiveSetterEqualsConstructionAndHasEffect) {
+  const int n = 48;
+  std::vector<std::uint8_t> occ(n * n, 0);
+  sim_world::config cfg;
+  cfg.rows = n;
+  cfg.cols = n;
+  cfg.min_x = -100;
+  cfg.min_y = -100;
+  cfg.max_x = 100;
+  cfg.max_y = 100;
+  cfg.scale = 0.05;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.35f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  // A soft-risk gradient (no hard cells): risk rises with row, so grad r~ pushes the drive; the
+  // magnitude of that push scales with lam_soft — exactly what the live setter tunes.
+  std::vector<float> risk(n * n, 0.0f);
+  std::vector<std::uint8_t> hard(n * n, 0);
+  for (int r = 0; r < n; ++r)
+    for (int c = 0; c < n; ++c)
+      risk[r * n + c] = static_cast<float>(r) / static_cast<float>(n - 1);
+
+  auto run = [&](float bake_lam, bool live, float live_lam) {
+    const float o0[2] = {-4.5f * 0.5f, 0.0f};
+    const float g0[2] = {4.5f * 0.5f, 0.0f};
+    const float col[3] = {1, 1, 1};
+    sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 1);
+    material_config mc;
+    mc.gate.horizon_cells = 8;
+    mc.lam_soft = bake_lam;
+    w.set_material(risk.data(), hard.data(), mc);
+    if (live)
+      w.set_material_lam(live_lam, mc.lam_hard); // tune AFTER set_material — no plane rebuild
+    std::vector<float> trace;
+    for (int t = 0; t < 150; ++t) {
+      w.step(2);
+      float pos[2], head, spd;
+      int mode;
+      std::uint8_t reach;
+      w.snapshot(pos, &head, &spd, &mode, &reach);
+      trace.push_back(pos[0]);
+      trace.push_back(pos[1]);
+      if (reach)
+        break;
+    }
+    return trace;
+  };
+
+  const auto baked_hi = run(2.0f, false, 0.0f); // constructed with lam_soft = 2.0
+  const auto live_hi = run(0.5f, true, 2.0f);   // constructed 0.5, tuned live to 2.0
+  const auto baked_lo = run(0.5f, false, 0.0f); // constructed with lam_soft = 0.5
+  ASSERT_EQ(baked_hi.size(), live_hi.size());
+  // (b) live-tuning to 2.0 == constructing with 2.0, byte-for-byte.
+  EXPECT_EQ(std::memcmp(baked_hi.data(), live_hi.data(), baked_hi.size() * 4), 0)
+      << "set_material_lam(2.0) diverged from constructing the material at lam_soft=2.0";
+  // (a) lam_soft actually matters: 0.5 vs 2.0 trace differently (a different reroute reaches at a
+  // different step, so the traces differ in length and/or content — either is proof).
+  const bool differs = baked_lo.size() != live_hi.size() ||
+                       std::memcmp(baked_lo.data(), live_hi.data(),
+                                   std::min(baked_lo.size(), live_hi.size()) * 4) != 0;
+  EXPECT_TRUE(differs) << "lam_soft had no effect on the trace";
+
+  // The getters reflect the live value.
+  const float o0[2] = {0.0f, 0.0f}, g0[2] = {1.0f, 0.0f}, col[3] = {1, 1, 1};
+  sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 1);
+  material_config mc;
+  w.set_material(risk.data(), hard.data(), mc);
+  w.set_material_lam(1.75f, 0.25f);
+  EXPECT_FLOAT_EQ(w.material_lam_soft(), 1.75f);
+  EXPECT_FLOAT_EQ(w.material_lam_hard(), 0.25f);
+}
+
 // P2a end-to-end: two agents, same start/goal. A private-belief (M=2) world with
 // two IDENTICAL material planes must trace byte-for-byte the same as a shared
 // (M=1) world with one material plane — proving the [M,6,H,W] material stack, the
