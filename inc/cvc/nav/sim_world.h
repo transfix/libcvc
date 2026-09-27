@@ -300,6 +300,18 @@ public:
                     int planes = 1);
   void clear_material() { mat_on_ = false; }
   bool has_material() const { return mat_on_; }
+  // LIVE-tune the material force weights without re-deriving the planes. lam_soft (the soft-risk
+  // reroute weight) and lam_hard (the hard-hazard weight) are read fresh every step() from mat_cfg_
+  // (they never enter plane derivation — unlike sigma / hard_margin), so mutating them here takes
+  // effect on the next step with no cost, exactly like set_separation. A no-op if material is not
+  // attached (mat_on_ false). This is the lever a live "force bias" UI scales — e.g. a caller that
+  // also scales the ext (RF/comm) force can trade material-reroute vs comm-steering during a drive.
+  void set_material_lam(float lam_soft, float lam_hard) {
+    mat_cfg_.lam_soft = lam_soft;
+    mat_cfg_.lam_hard = lam_hard;
+  }
+  float material_lam_soft() const { return mat_cfg_.lam_soft; }
+  float material_lam_hard() const { return mat_cfg_.lam_hard; }
   // Last tick's per-agent gate decisions (renderer/telemetry hook); valid only
   // while material is set.
   const std::uint8_t *material_gate_active() const { return mat_gate_active_.data(); }

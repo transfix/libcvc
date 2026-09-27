@@ -210,6 +210,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py
+             pycvc_nav_train:test_pycvc_nav_train.py
              pycvc_integration:test_pycvc_integration.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
