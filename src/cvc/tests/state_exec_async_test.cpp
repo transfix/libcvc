@@ -630,6 +630,22 @@ TEST(AsyncSchedulerTest, KillOwnerReapsProcessGroup) {
   EXPECT_EQ(sched.kill_owner("docA"), 0); // already reaped
 }
 
+TEST(AsyncSchedulerTest, PostMessageFromAnotherThreadWakesReceiver) {
+  async_scheduler sched;
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.sync_step();                                 // start the process
+  ASSERT_TRUE(sched.receive_message(pid, "chan.x")); // park it on the channel
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+  // Post from a WORKER thread via the thread-safe ingress (join so the check is deterministic).
+  std::thread worker([&] { sched.post_message("chan.x", value_t(std::string("done"))); });
+  worker.join();
+  // The delivery is applied on the scheduler thread at the next step (drain_ingress), waking it.
+  sched.sync_step();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_NE(info->status, process_status::waiting); // woken
+}
+
 // The app-wide scheduler service: cvc::app::exec_scheduler() is one lazily-built
 // per-app async_scheduler (the single cooperative timeline all Ariadne docs share).
 TEST(AppExecScheduler, IsAppWideSingletonAndUsable) {

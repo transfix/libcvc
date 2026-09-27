@@ -16,10 +16,12 @@
 #include <cvc/core/state_exec/scheduler_base.h>
 #include <cvc/core/state_exec/task.h>
 #include <cvc/core/state_exec/types.h>
+#include <mutex>
 #include <optional>
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -91,6 +93,14 @@ public:
   /// Max messages queued per path when no receiver waits (0 = unlimited).
   std::size_t max_pending_messages = 1024;
 
+  /// THREAD-SAFE ingress: post a message from ANY thread (e.g. an app.computePool()
+  /// worker that finished the async work a `(msg-recv "path")` action is parked on).
+  /// The message is queued under a lock and delivered on the scheduler's own thread at
+  /// the next step (drain_ingress → deliver_to_receivers), so no scheduler state is
+  /// mutated off-thread. deliver_to_receivers itself is NOT thread-safe — external
+  /// threads must use this, only the scheduler thread may call deliver_to_receivers.
+  void post_message(const std::string &path, const value_t &msg);
+
   bool set_priority(int pid, int priority);
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -152,6 +162,12 @@ private:
 
   /// Per-path FIFO for messages sent when no receiver is waiting (mirrors sync scheduler).
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
+
+  /// Thread-safe ingress for cross-thread post_message(): guarded by ingress_mutex_, drained
+  /// on the scheduler thread at the top of step() and applied via deliver_to_receivers.
+  std::mutex ingress_mutex_;
+  std::vector<std::pair<std::string, value_t>> ingress_;
+  void drain_ingress();
 
   process_ptr select_process();
   void execute_process_step(process &proc);

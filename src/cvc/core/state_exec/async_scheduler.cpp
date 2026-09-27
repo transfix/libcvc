@@ -191,7 +191,9 @@ void async_scheduler::execute_process_step(process &proc) {
 // ---------------------------------------------------------------------------
 
 task<int> async_scheduler::step() {
-  // Wake sleeping processes whose deadline has passed, then poll watched paths.
+  // Apply any cross-thread post_message() deliveries on THIS (scheduler) thread, then wake
+  // sleeping processes whose deadline has passed, then poll watched paths.
+  drain_ingress();
   wake_sleeping_processes();
   poll_watches();
   auto proc = select_process();
@@ -338,6 +340,28 @@ std::size_t async_scheduler::total_pending_messages() const {
   for (const auto &[_, q] : pending_messages_)
     total += q.size();
   return total;
+}
+
+void async_scheduler::post_message(const std::string &path, const value_t &msg) {
+  // Callable from any thread — the ONLY thread-safe entry point into messaging. Just enqueue
+  // under the lock; delivery happens on the scheduler thread in drain_ingress().
+  std::lock_guard<std::mutex> lock(ingress_mutex_);
+  ingress_.emplace_back(path, msg);
+}
+
+void async_scheduler::drain_ingress() {
+  std::vector<std::pair<std::string, value_t>> batch;
+  {
+    std::lock_guard<std::mutex> lock(ingress_mutex_);
+    if (ingress_.empty())
+      return;
+    batch.swap(ingress_);
+  }
+  // On the scheduler thread now: deliver_to_receivers mutates process state, which is safe here
+  // (no other thread touches the scheduler). A message with no waiter falls into the per-path
+  // pending FIFO, exactly as an on-thread msg-send would.
+  for (auto &[path, msg] : batch)
+    deliver_to_receivers(path, msg);
 }
 
 void async_scheduler::queue_watch_event(int pid, process::watch_event evt) {
