@@ -114,6 +114,7 @@ add_executable(nav_test nav_test.cpp)
 add_executable(nav_coef_train_test nav_coef_train_test.cpp)
 add_executable(nav_drive_refinements_test nav_drive_refinements_test.cpp)
 add_executable(nav_stats_test nav_stats_test.cpp)
+add_executable(nav_material_raster_test nav_material_raster_test.cpp)
 add_executable(nav_clearance_cost_test nav_clearance_cost_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
@@ -220,6 +221,7 @@ set(TEST_TARGETS
   nav_stats_test
   nav_clearance_cost_test
   nav_material_test
+  nav_material_raster_test
   nav_coef_energy_test
   nav_material_rollout_grad_test
   nav_coef_energy_grad_test
@@ -585,6 +587,13 @@ target_link_libraries(nav_drive_refinements_test
 )
 
 target_link_libraries(nav_stats_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_material_raster_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1505,6 +1514,7 @@ cvc_discover_tests(nav_drive_refinements_test)
 cvc_discover_tests(nav_stats_test)
 cvc_discover_tests(nav_clearance_cost_test)
 cvc_discover_tests(nav_material_test)
+cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
 cvc_discover_tests(nav_material_rollout_grad_test)
 cvc_discover_tests(nav_coef_energy_grad_test)
