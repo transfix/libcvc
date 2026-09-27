@@ -241,10 +241,11 @@ TEST(AriadneAction, ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers) {
   Runtime rt(app, ""); // app-root prefix so the channel/state paths are used as-is
   MockBackend mb;
   rt.set_backend(&mb);
-  // The action parks on (msg-recv …), then AFTER it is woken runs a state-set. We assert on the
-  // post-resume write (a sentinel), which cleanly proves park → deliver → wake → resume without
-  // depending on threading the delivered value into a nested expression (deliver_to_receivers's
-  // placeholder patch mis-targets a nested msg-recv — a separate, pre-existing issue).
+  // The action parks on (msg-recv …), then AFTER it is woken runs a state-set. Asserting on the
+  // post-resume write (a sentinel) isolates the park → deliver → wake → resume path; the sibling
+  // test ProgramActionCapturesDeliveredValueFromMsgRecv covers threading the delivered value into
+  // the enclosing expression (which works — deliver_to_receivers patches the parent frame's
+  // pending result slot where pop_frame left msg-recv's nil placeholder).
   Widget b =
       button("Go", "(begin (msg-recv \"async.done\") (state-set \"async.result\" \"resumed\"))");
   rt.set_root(group({b}));
@@ -264,6 +265,31 @@ TEST(AriadneAction, ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers) {
   rt.drain(); // pump drains the ingress -> wakes the parked action -> it resumes and completes
   EXPECT_EQ(cvc::state::instance(app)("async.result").value(), "resumed");
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The DELIVERED VALUE threads into the enclosing expression: (state-set k (msg-recv p)) writes
+// the value the worker delivered. deliver_to_receivers patches the parent frame's pending result
+// slot (where pop_frame pushed msg-recv's nil placeholder), so the resumed state-set applies it.
+TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget b = button("Go", "(state-set \"async.value\" (msg-recv \"vchan\"))");
+  rt.set_root(group({b}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // parks on msg-recv (value slot pending)
+  mb.button_click = false;
+  std::thread worker([&] {
+    app.exec_scheduler().post_message("vchan", cvc::state_exec::value_t(std::string("delivered")));
+  });
+  worker.join();
+  rt.render();
+  rt.drain(); // wakes + resumes; the delivered value flows into state-set
+  EXPECT_EQ(cvc::state::instance(app)("async.value").value(), "delivered");
 }
 
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a
