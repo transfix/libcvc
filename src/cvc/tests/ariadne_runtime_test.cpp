@@ -10,13 +10,15 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
-#include <cvc/core/state_exec/builtins.h> // host-intrinsic seam test: register_fn
-#include <cvc/core/state_exec/types.h>    // value_t
+#include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
+#include <cvc/core/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
+#include <cvc/core/state_exec/types.h>           // value_t
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc::ariadne;
@@ -226,6 +228,42 @@ TEST(AriadneAction, ProgramOnRunsMultiStatementReset) {
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("agents").value(), "64");
   EXPECT_EQ(cvc::state::instance(app)("speed").value(), "1.0");
+}
+
+// §4.7 end-to-end: an action that parks on (msg-recv …) does NOT block the drain; it suspends
+// on the app-wide scheduler and RESUMES on a later drain when a WORKER THREAD delivers the result
+// via the thread-safe exec_scheduler().post_message ingress. This is the marquee async story
+// (a compute-pool worker waking a parked .ari action) exercised through the real Runtime.
+TEST(AriadneAction, ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, ""); // app-root prefix so the channel/state paths are used as-is
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The action parks on (msg-recv …), then AFTER it is woken runs a state-set. We assert on the
+  // post-resume write (a sentinel), which cleanly proves park → deliver → wake → resume without
+  // depending on threading the delivered value into a nested expression (deliver_to_receivers's
+  // placeholder patch mis-targets a nested msg-recv — a separate, pre-existing issue).
+  Widget b =
+      button("Go", "(begin (msg-recv \"async.done\") (state-set \"async.result\" \"resumed\"))");
+  rt.set_root(group({b}));
+  mb.button_click = true;
+  rt.render();             // enqueue the action
+  rt.drain();              // submit + pump -> action PARKS on msg-recv
+  mb.button_click = false; // don't re-fire on later renders
+  EXPECT_NE(cvc::state::instance(app)("async.result").value(), "resumed"); // still parked
+
+  // A worker thread delivers off the UI thread via the thread-safe ingress.
+  std::thread worker([&] {
+    app.exec_scheduler().post_message("async.done", cvc::state_exec::value_t(std::string("go")));
+  });
+  worker.join();
+
+  rt.render();
+  rt.drain(); // pump drains the ingress -> wakes the parked action -> it resumes and completes
+  EXPECT_EQ(cvc::state::instance(app)("async.result").value(), "resumed");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a

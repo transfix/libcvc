@@ -1238,6 +1238,10 @@ void Runtime::Impl::submit_action(const std::string &action_prefix, const std::s
 void Runtime::Impl::pump_and_sweep_actions() {
   namespace se = cvc::state_exec;
   auto &sched = app.exec_scheduler();
+  // Apply any cross-thread post_message() deliveries FIRST, so a delivery that readies a parked
+  // (msg-recv …) receiver is seen by sync_run's has_runnable() gate — otherwise, with everything
+  // parked, sync_run would skip stepping and never drain the ingress itself.
+  sched.drain_ingress();
   // Frame boundary: re-ready any process parked by (await …) on a PRIOR drain. Called here (once
   // per drain), NOT inside step()/sync_run, so an await crosses exactly one frame.
   sched.wake_awaiting();

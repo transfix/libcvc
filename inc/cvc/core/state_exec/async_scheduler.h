@@ -109,6 +109,12 @@ public:
   /// threads must use this, only the scheduler thread may call deliver_to_receivers.
   void post_message(const std::string &path, const value_t &msg);
 
+  /// Apply any queued post_message() deliveries NOW, on the calling (scheduler) thread.
+  /// step() calls this, but a driver must ALSO call it before a run whose has_runnable()
+  /// gate would otherwise be false — a delivery can READY a parked receiver, and
+  /// sync_run/run skip stepping (so never drain the ingress) when nothing is runnable yet.
+  void drain_ingress();
+
   bool set_priority(int pid, int priority);
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -172,10 +178,9 @@ private:
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
 
   /// Thread-safe ingress for cross-thread post_message(): guarded by ingress_mutex_, drained
-  /// on the scheduler thread at the top of step() and applied via deliver_to_receivers.
+  /// on the scheduler thread by drain_ingress() (public) and applied via deliver_to_receivers.
   std::mutex ingress_mutex_;
   std::vector<std::pair<std::string, value_t>> ingress_;
-  void drain_ingress();
 
   process_ptr select_process();
   void execute_process_step(process &proc);
