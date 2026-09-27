@@ -1095,7 +1095,8 @@ Value to_value(const YAML::Node &n) {
 // into SceneNode::props for a custom node type to read.
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
-         k == "transform" || k == "visible" || k == "volren" || k == "volslice" || k == "children";
+         k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
+         k == "children";
 }
 
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
@@ -1135,10 +1136,21 @@ SceneNode parse_scene_node(const YAML::Node &n) {
   // Accept `source: <uri>` (scalar), `source: { uri: <uri> }`, or the legacy `{ file: <path> }`.
   const YAML::Node src = n["source"];
   if (src) {
-    if (src.IsScalar())
+    if (src.IsScalar()) {
       sn.source_file = src.Scalar();
-    else if (src.IsMap())
-      sn.source_file = str(src, "uri", str(src, "file"));
+    } else if (src.IsMap()) {
+      // A procedural primitive (no asset) takes precedence over a file: source: { plane: { size } }
+      // (or the shorthand source: { plane: <size> }). Otherwise a URI/file.
+      if (const YAML::Node plane = src["plane"]) {
+        sn.source_primitive = "plane";
+        if (plane.IsMap())
+          sn.plane_size = static_cast<float>(num(plane, "size", sn.plane_size));
+        else if (plane.IsScalar())
+          sn.plane_size = static_cast<float>(plane.as<double>());
+      } else {
+        sn.source_file = str(src, "uri", str(src, "file"));
+      }
+    }
   }
   const YAML::Node mat = n["material"];
   if (mat && mat.IsMap()) {
@@ -1149,6 +1161,12 @@ SceneNode parse_scene_node(const YAML::Node &n) {
         sn.color[i] = static_cast<float>(col[i].as<double>());
     sn.ambient = static_cast<float>(num(mat, "ambient", sn.ambient));
     sn.diffuse = static_cast<float>(num(mat, "diffuse", sn.diffuse));
+    sn.use_single_color = flag(mat, "single_color", true);
+    if (mat["specular"] || mat["specular_power"]) {
+      sn.has_specular = true;
+      sn.specular = static_cast<float>(num(mat, "specular", sn.specular));
+      sn.specular_power = static_cast<float>(num(mat, "specular_power", sn.specular_power));
+    }
   }
   const YAML::Node tf = n["transform"];
   if (tf && tf.IsMap()) {
@@ -1163,6 +1181,12 @@ SceneNode parse_scene_node(const YAML::Node &n) {
       const float s = static_cast<float>(num(tf, "scale", 1.0));
       sn.scale[0] = sn.scale[1] = sn.scale[2] = s; // scalar → uniform scale
     }
+  }
+  const YAML::Node fit = n["fit"];
+  if (fit && fit.IsMap()) {
+    sn.has_fit = true;
+    sn.fit_height = static_cast<float>(num(fit, "height", sn.fit_height));
+    sn.fit_up_y = (str(fit, "up", "z") == "y"); // up: y -> rotate a Y-up mesh to Z-up first
   }
   const YAML::Node vis = n["visible"];
   if (vis) {
@@ -1253,6 +1277,39 @@ SceneLight parse_scene_light(const YAML::Node &n) {
   sl.azimuth = static_cast<float>(num(n, "azimuth", sl.azimuth));
   sl.elevation = static_cast<float>(num(n, "elevation", sl.elevation));
   sl.intensity = static_cast<float>(num(n, "intensity", sl.intensity));
+  // rig: TUNING — only meaningful when `rig` is set; each block gates its StageLighting setter.
+  if (const YAML::Node stage = n["stage"]; stage && stage.IsMap()) {
+    sl.has_stage = true;
+    vec3(stage, "center", sl.stage_center);
+    sl.stage_radius = static_cast<float>(num(stage, "radius", sl.stage_radius));
+  }
+  if (const YAML::Node key = n["key"]; key && key.IsMap()) {
+    sl.has_key = true;
+    sl.key_intensity = static_cast<float>(num(key, "intensity", sl.key_intensity));
+    sl.key_azimuth = static_cast<float>(num(key, "azimuth", sl.key_azimuth));
+    sl.key_elevation = static_cast<float>(num(key, "elevation", sl.key_elevation));
+    sl.key_cone = static_cast<float>(num(key, "cone", sl.key_cone));
+  }
+  if (n["fill"]) {
+    sl.has_fill = true;
+    sl.fill = static_cast<float>(num(n, "fill", sl.fill));
+  }
+  if (n["back"]) {
+    sl.has_back = true;
+    sl.back = static_cast<float>(num(n, "back", sl.back));
+  }
+  if (n["warmth"]) {
+    sl.has_warmth = true;
+    sl.warmth = static_cast<float>(num(n, "warmth", sl.warmth));
+  }
+  if (n["environment"]) {
+    sl.has_environment = true;
+    sl.environment = static_cast<float>(num(n, "environment", sl.environment));
+  }
+  if (n["ambient"]) { // the rig's fill-ambient (a non-rig light has no ambient of its own)
+    sl.has_rig_ambient = true;
+    sl.rig_ambient = static_cast<float>(num(n, "ambient", sl.rig_ambient));
+  }
   return sl;
 }
 
@@ -1272,6 +1329,14 @@ Scene parse_scene(const YAML::Node &s) {
   if (sh && sh.IsMap()) {
     sc.has_shadows = true;
     sc.shadows_enabled = flag(sh, "enabled");
+    if (sh["resolution"]) {
+      sc.has_shadow_resolution = true;
+      sc.shadow_resolution = static_cast<int>(num(sh, "resolution", sc.shadow_resolution));
+    }
+    if (sh["update_interval"]) {
+      sc.has_shadow_interval = true;
+      sc.shadow_interval = static_cast<int>(num(sh, "update_interval", sc.shadow_interval));
+    }
   }
   return sc;
 }

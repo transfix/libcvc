@@ -80,10 +80,28 @@ struct SceneNode {
   std::string type = "geometry"; // node kind
   std::string source_file;       // source: { file: ... } (geometry/volume load path)
 
+  // A built-in PROCEDURAL primitive as a geometry node's source, instead of source: { file }.
+  // Empty = use source_file. "plane" = a flat quad with UP normals, spanning
+  // [-plane_size/2, +plane_size/2]² at z=0 — a ground / shadow receiver that needs no asset.
+  std::string source_primitive;
+  float plane_size = 1.0f; // "plane": full edge length
+
   bool has_material = false;
   float color[3] = {0.8f, 0.8f, 0.9f};
   float ambient = 0.2f;
   float diffuse = 0.8f;
+  bool use_single_color = true; // material: { single_color: false } to keep per-vertex colors
+  bool has_specular = false;    // gate the specular pair so an unset material keeps GeometryNode's
+  float specular = 0.25f;       //   defaults; both applied only when the material states specular
+  float specular_power = 24.0f;
+
+  // fit: bake a "stand this mesh on the ground" normalization INTO the loaded geometry — center it
+  // in XY, sit its base on z=0, and scale its tallest extent to fit_height; optionally first rotate
+  // a canonical Y-up mesh to Z-up. Geometry-only (a node transform composes on top). For placing a
+  // mesh authored at an arbitrary origin/scale (e.g. the Stanford bunny) predictably on a ground.
+  bool has_fit = false;
+  float fit_height = 1.0f;
+  bool fit_up_y = false; // fit: { up: y } — rotate the Y-up mesh +90° about X to Z-up first
 
   bool has_transform = false;
   float position[3] = {0.0f, 0.0f, 0.0f};
@@ -122,6 +140,24 @@ struct SceneLight {
   float intensity = 1.0f;
   float color[3] = {1.0f, 1.0f, 1.0f}; // light colour (default white)
   std::string rig; // rig: <preset> (StageLighting), mutually exclusive with the above
+
+  // rig: TUNING (only meaningful when `rig` is set). Each has_* gates one StageLighting setter so
+  // an unset knob keeps the preset's value — a faithful rig without re-typing the whole setup.
+  bool has_stage = false; // stage: { center: [x,y,z], radius } — the aimed spot's target volume
+  float stage_center[3] = {0.0f, 0.0f, 0.0f};
+  float stage_radius = 1.0f;
+  bool has_key = false; // key: { intensity, azimuth, elevation, cone } — the main light
+  float key_intensity = 1.0f, key_azimuth = 0.0f, key_elevation = 45.0f, key_cone = 40.0f;
+  bool has_fill = false;
+  float fill = 0.5f; // fill: <intensity>
+  bool has_back = false;
+  float back = 0.5f; // back: <intensity>
+  bool has_warmth = false;
+  float warmth = 0.0f; // warmth: <0..1>
+  bool has_environment = false;
+  float environment = 0.0f; // environment: <intensity> (lifts what the cones miss)
+  bool has_rig_ambient = false;
+  float rig_ambient = 0.2f; // ambient: <0..1> (shadowed sides readable)
 };
 
 struct Scene {
@@ -129,6 +165,10 @@ struct Scene {
   std::vector<SceneLight> lights;
   bool has_shadows = false;
   bool shadows_enabled = false;
+  bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map
+  int shadow_resolution = 1024;
+  bool has_shadow_interval = false; // shadows: { update_interval: <frames> } — 1 = bake every frame
+  int shadow_interval = 1;
   bool any() const { return !nodes.empty() || !lights.empty() || has_shadows; }
 };
 

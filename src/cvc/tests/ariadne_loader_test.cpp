@@ -720,6 +720,86 @@ scene:
   EXPECT_TRUE(n.visible_bind.empty());
 }
 
+// §9 enrichments: a procedural plane primitive, specular/single_color material, and a `fit:` block.
+TEST(AriadneScene, PlanePrimitiveSpecularAndFit) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: ground
+      type: geometry
+      source: { plane: { size: 440 } }
+      material: { color: [0.3, 0.34, 0.38], ambient: 0.35, diffuse: 0.85 }
+    - node: bunny
+      type: geometry
+      source: { file: stanford.bunny }
+      material: { color: [0.85, 0.82, 0.88], specular: 0.25, specular_power: 24, single_color: true }
+      fit: { height: 100, up: y }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  const SceneNode *g = find_scene_node(r.scene.nodes, "ground");
+  ASSERT_NE(g, nullptr);
+  EXPECT_EQ(g->source_primitive, "plane");
+  EXPECT_FLOAT_EQ(g->plane_size, 440.0f);
+  EXPECT_TRUE(g->source_file.empty()); // a primitive has no file
+  const SceneNode *b = find_scene_node(r.scene.nodes, "bunny");
+  ASSERT_NE(b, nullptr);
+  EXPECT_EQ(b->source_file, "stanford.bunny");
+  EXPECT_TRUE(b->has_specular);
+  EXPECT_FLOAT_EQ(b->specular, 0.25f);
+  EXPECT_FLOAT_EQ(b->specular_power, 24.0f);
+  EXPECT_TRUE(b->use_single_color);
+  ASSERT_TRUE(b->has_fit);
+  EXPECT_FLOAT_EQ(b->fit_height, 100.0f);
+  EXPECT_TRUE(b->fit_up_y);
+}
+
+// §9 enrichments: a tuned StageLighting rig and shadow resolution/update-interval.
+TEST(AriadneScene, RigTuningAndShadowResolution) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  lights:
+    - light: studio
+      rig: three_point
+      stage: { center: [0, 0, 50], radius: 62 }
+      key: { intensity: 1.9, azimuth: -38, elevation: 52, cone: 34 }
+      fill: 0.85
+      back: 0.6
+      warmth: 0.3
+      environment: 0.7
+      ambient: 0.4
+  shadows: { enabled: true, resolution: 2048, update_interval: 1 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.lights.size(), 1u);
+  const SceneLight &l = r.scene.lights[0];
+  EXPECT_EQ(l.rig, "three_point");
+  ASSERT_TRUE(l.has_stage);
+  EXPECT_FLOAT_EQ(l.stage_center[2], 50.0f);
+  EXPECT_FLOAT_EQ(l.stage_radius, 62.0f);
+  ASSERT_TRUE(l.has_key);
+  EXPECT_FLOAT_EQ(l.key_intensity, 1.9f);
+  EXPECT_FLOAT_EQ(l.key_azimuth, -38.0f);
+  EXPECT_FLOAT_EQ(l.key_cone, 34.0f);
+  EXPECT_TRUE(l.has_fill);
+  EXPECT_FLOAT_EQ(l.fill, 0.85f);
+  EXPECT_TRUE(l.has_back);
+  EXPECT_TRUE(l.has_warmth);
+  EXPECT_TRUE(l.has_environment);
+  EXPECT_TRUE(l.has_rig_ambient);
+  EXPECT_FLOAT_EQ(l.rig_ambient, 0.4f);
+  EXPECT_TRUE(r.scene.has_shadows);
+  EXPECT_TRUE(r.scene.shadows_enabled);
+  ASSERT_TRUE(r.scene.has_shadow_resolution);
+  EXPECT_EQ(r.scene.shadow_resolution, 2048);
+  ASSERT_TRUE(r.scene.has_shadow_interval);
+  EXPECT_EQ(r.scene.shadow_interval, 1);
+}
+
 TEST(AriadneScene, ScalarScaleIsUniform) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

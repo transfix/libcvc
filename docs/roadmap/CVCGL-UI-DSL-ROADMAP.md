@@ -1819,6 +1819,26 @@ Streamed/dynamic geometry (thousands of agents) stays a declared *shape* + a hos
 (registered through the same §13/§14 seam) — the one scene piece that isn't purely declarative, and the
 subject of the still-open streamed-source contract (§9.8).
 
+> **Scene enrichments LANDED** (`scene.h` / `loader.cpp` / `scene_realize.cpp`) — the pieces a real
+> demo (`bunny_shadow`) needs, declarable with no host C++:
+> - **`source: { plane: { size } }`** — a built-in PROCEDURAL primitive (a flat up-normal ground
+>   quad, no asset), the first concrete `procedural:` generator; the broader `{procedural: {gen}}`
+>   umbrella (`ground`/`disc`/`pyramid`/…) generalizes it.
+> - **`fit: { height, up: y|z }`** — bake a "stand this mesh on the ground" normalization into a
+>   loaded geometry (optional Y-up→Z-up, center XY, base on z=0, scale tallest extent to `height`) —
+>   the general form of a demo's hand-written mesh conditioning, so an arbitrarily-authored mesh
+>   places predictably.
+> - **material `specular` / `specular_power` / `single_color`** — the highlight + flat-vs-vertex
+>   colour the built-in geometry node previously omitted.
+> - **`shadows: { resolution, update_interval }`** — shadow-map size + bake cadence, beyond the
+>   existing `enabled`.
+> - **rig TUNING on a `rig:` light** — `stage: {center, radius}` (a tight cone → crisp map), `key: {intensity,
+>   azimuth, elevation, cone}`, `fill` / `back` / `warmth` / `environment` / `ambient`; each gated so
+>   an unset knob keeps the preset. The rig's own state keys stay two-way bound, so `.ari` sliders can
+>   also drive them live. Tests: `AriadneScene.{PlanePrimitiveSpecularAndFit, RigTuningAndShadowResolution}`
+>   (parse) + `cvcgl_ariadne_realize` §9-enrichments block (realize: quad shape, fit grounds+scales,
+>   shadow res applied, tuned rig lights).
+
 > **libcvc dependency — URI-native file I/O (not yet built).** Today the realizer resolves only
 > `source: { file: <path> }` and calls `cvc::read_geometry(path)` / (for volumes) `cvc::read_volume(path)`
 > directly — and those routines take a **plain filesystem path**, dispatching on the file *extension* to a

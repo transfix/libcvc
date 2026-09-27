@@ -7,6 +7,7 @@
 //   * directional -> non-positional (az/el) vs spot -> positional (pos/target),
 //   * a StageLighting rig actually adds lights,
 //   * a nested node's transform is LOCAL (world = parent ∘ local).
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/scene.h>
@@ -399,6 +400,109 @@ int main() {
     widgetOnly.customs.push_back({K::Widget, "anything", true});
     chk(cvc::gl::ariadne::verify_scene_customs(widgetOnly, nullptr),
         "verify_scene_customs ignores widget customs (checked at load) -> passes");
+  }
+
+  // ── §9 scene enrichments: plane primitive, fit, specular material, shadow res, rig tuning ──
+  {
+    using cvc::gl::GeometryNode;
+    SceneGraph sg(app, "enrich");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "enrich");
+    Scene scene;
+
+    // A procedural `plane` primitive — a geometry node with NO file source.
+    SceneNode ground;
+    ground.id = "ground";
+    ground.type = "geometry";
+    ground.source_primitive = "plane";
+    ground.plane_size = 20.0f; // spans [-10,10]^2 at z=0
+    ground.has_material = true;
+    ground.use_single_color = true;
+    ground.color[0] = 0.3f;
+    ground.color[1] = 0.3f;
+    ground.color[2] = 0.35f;
+    ground.has_specular = true; // exercises the setSpecular/Power forwarding (no crash / node made)
+    ground.specular = 0.25f;
+    ground.specular_power = 24.0f;
+    scene.nodes.push_back(ground);
+
+    // A `fit`ted mesh: the embedded bunny, Y-up -> Z-up, base on z=0, tallest extent == 100.
+    SceneNode bunny;
+    bunny.id = "bunny";
+    bunny.type = "geometry";
+    bunny.source_file = "x.bunny";
+    bunny.has_fit = true;
+    bunny.fit_up_y = true;
+    bunny.fit_height = 100.0f;
+    scene.nodes.push_back(bunny);
+
+    // A tuned StageLighting rig (stage + key + fill + ambient) — must still add lights, no crash.
+    SceneLight rig;
+    rig.rig = "three_point";
+    rig.has_stage = true;
+    rig.stage_center[2] = 50.0f;
+    rig.stage_radius = 62.0f;
+    rig.has_key = true;
+    rig.key_intensity = 1.9f;
+    rig.key_azimuth = -38.0f;
+    rig.key_elevation = 52.0f;
+    rig.key_cone = 34.0f;
+    rig.has_fill = true;
+    rig.fill = 0.85f;
+    rig.has_rig_ambient = true;
+    rig.rig_ambient = 0.4f;
+    scene.lights.push_back(rig);
+
+    scene.has_shadows = true;
+    scene.shadows_enabled = true;
+    scene.has_shadow_resolution = true;
+    scene.shadow_resolution = 2048;
+    scene.has_shadow_interval = true;
+    scene.shadow_interval = 1;
+
+    cvc::gl::ariadne::realize_scene(sg, scene, "enrich");
+    printf("== §9 enrichments: plane / fit / specular / shadow-res / rig tuning ==\n");
+
+    auto gnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("ground"));
+    chk(gnode != nullptr, "plane primitive -> a GeometryNode with no file source");
+    const cvc::geometry *pg = gnode ? gnode->getGeometry() : nullptr;
+    chk(pg && pg->points().size() == 4 && pg->tris().size() == 2,
+        "plane geometry is a 4-vert / 2-tri quad");
+    if (pg && pg->points().size() == 4) {
+      double lo = 1e30, hi = -1e30;
+      for (const auto &p : pg->points()) {
+        lo = std::min(lo, p[0]);
+        hi = std::max(hi, p[0]);
+      }
+      chk(approx(lo, -10.0) && approx(hi, 10.0), "plane spans [-size/2, +size/2] in X");
+    }
+
+    auto bnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("bunny"));
+    const cvc::geometry *bg = bnode ? bnode->getGeometry() : nullptr;
+    chk(bg != nullptr && bg->points().size() > 100, "fit: the bunny mesh realized");
+    if (bg && !bg->points().empty()) {
+      double zlo = 1e30, zhi = -1e30, ext[3] = {0, 0, 0};
+      double lo3[3] = {1e30, 1e30, 1e30}, hi3[3] = {-1e30, -1e30, -1e30};
+      for (const auto &p : bg->points()) {
+        for (int k = 0; k < 3; ++k) {
+          lo3[k] = std::min(lo3[k], p[k]);
+          hi3[k] = std::max(hi3[k], p[k]);
+        }
+      }
+      zlo = lo3[2];
+      zhi = hi3[2];
+      for (int k = 0; k < 3; ++k)
+        ext[k] = hi3[k] - lo3[k];
+      const double tallest = std::max({ext[0], ext[1], ext[2]});
+      chk(approx(zlo, 0.0), "fit: base sits on z=0");
+      chk(approx(tallest, 100.0), "fit: tallest extent scaled to height (100)");
+      (void)zhi;
+    }
+
+    chk(sg.shadowsEnabled(), "shadows enabled");
+    chk(sg.shadowResolution() == 2048, "shadow resolution applied from the DSL");
+    chk(sg.shadowUpdateInterval() == 1, "shadow update interval applied from the DSL");
+    chk(survey(view.renderer()).positional + survey(view.renderer()).directional >= 1,
+        "tuned rig still adds lights");
   }
 
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");

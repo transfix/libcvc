@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cstddef>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
@@ -45,6 +47,73 @@ cvc::ariadne::ResolvedFile resolve_source(const cvc::ariadne::SceneNode &n,
   if (!rf.ok)
     warn(warnings, "ari: scene node '" + n.id + "': " + rf.error);
   return rf;
+}
+
+// A flat quad with UP normals spanning [-size/2, +size/2]² at z=0 — the built-in `plane` primitive
+// (source: { plane: { size } }): a ground / shadow receiver that needs no asset. Colour comes from
+// the node's material (single-colour), so no per-vertex colours are baked.
+cvc::geometry make_plane(float size) {
+  cvc::geometry g;
+  const double h = 0.5 * static_cast<double>(size);
+  const double v[4][3] = {{-h, -h, 0}, {h, -h, 0}, {h, h, 0}, {-h, h, 0}};
+  for (const auto &p : v) {
+    g.points().push_back({p[0], p[1], p[2]});
+    g.normals().push_back({0, 0, 1});
+  }
+  g.tris().push_back({0, 1, 2});
+  g.tris().push_back({0, 2, 3});
+  return g;
+}
+
+// `fit:` — bake a "stand this mesh on the ground" normalization into `raw`: optionally rotate a
+// canonical Y-up mesh +90° about X to Z-up ((x,y,z)->(x,-z,y), a proper rotation so winding and
+// normals stay valid), centre it in XY, sit its base on z=0, and scale its tallest extent to
+// `height`. Returns a fresh geometry (points/normals/tris/colours), leaving `raw` untouched. This
+// is the general form of bunny_shadow.cpp's stand_bunny — placing an arbitrarily-authored mesh
+// predictably on a ground plane.
+cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height) {
+  const auto &P = raw.points();
+  const auto &N = raw.normals();
+  const auto &C = raw.colors();
+  const auto rot = [up_y](double x, double y, double z, double o[3]) {
+    if (up_y) {
+      o[0] = x;
+      o[1] = -z;
+      o[2] = y;
+    } else {
+      o[0] = x;
+      o[1] = y;
+      o[2] = z;
+    }
+  };
+  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &p : P) {
+    double w[3];
+    rot(p[0], p[1], p[2], w);
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], w[k]);
+      hi[k] = std::max(hi[k], w[k]);
+    }
+  }
+  const double ext = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
+  const double s = ext > 0 ? static_cast<double>(height) / ext : 1.0;
+  const double cx = 0.5 * (lo[0] + hi[0]), cy = 0.5 * (lo[1] + hi[1]);
+  cvc::geometry g;
+  for (std::size_t i = 0; i < P.size(); ++i) {
+    double w[3];
+    rot(P[i][0], P[i][1], P[i][2], w);
+    g.points().push_back({(w[0] - cx) * s, (w[1] - cy) * s, (w[2] - lo[2]) * s});
+    if (i < N.size()) {
+      double nn[3];
+      rot(N[i][0], N[i][1], N[i][2], nn); // a proper rotation preserves unit length
+      g.normals().push_back({nn[0], nn[1], nn[2]});
+    }
+    if (i < C.size())
+      g.colors().push_back(C[i]);
+  }
+  for (const auto &t : raw.tris())
+    g.tris().push_back(t);
+  return g;
 }
 
 // --- custom scene node type registry (§ extensibility) -----------------------
@@ -188,28 +257,39 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   std::shared_ptr<GraphicsNode> node;
 
   if (n.type == "geometry") {
-    if (n.source_file.empty()) {
-      warn(warnings, "ari: scene node '" + n.id + "' (geometry) has no source.file");
-      return;
-    }
-    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
-    if (!src.ok)
-      return;
     cvc::geometry geom;
-    try {
-      geom = cvc::read_geometry(src.path);
-    } catch (const std::exception &e) {
-      warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
-      return;
+    if (n.source_primitive == "plane") {
+      geom = make_plane(n.plane_size); // a procedural ground quad — no asset
+    } else {
+      if (n.source_file.empty()) {
+        warn(warnings, "ari: scene node '" + n.id +
+                           "' (geometry) has no source (a file/URI or a { plane } primitive)");
+        return;
+      }
+      cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+      if (!src.ok)
+        return;
+      try {
+        geom = cvc::read_geometry(src.path);
+      } catch (const std::exception &e) {
+        warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
+        return;
+      }
     }
+    if (n.has_fit) // `fit:` — bake center/ground/scale (and optional Y-up→Z-up) into the geometry
+      geom = fit_to_ground(geom, n.fit_up_y, n.fit_height);
     std::shared_ptr<GeometryNode> g =
         parent ? parent->createChild<GeometryNode>(n.id, geom)
                : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id, geom));
     if (g && n.has_material) {
-      g->setUseSingleColor(true);
+      g->setUseSingleColor(n.use_single_color);
       g->setColor(n.color[0], n.color[1], n.color[2]);
       g->setAmbient(n.ambient);
       g->setDiffuse(n.diffuse);
+      if (n.has_specular) {
+        g->setSpecular(n.specular);
+        g->setSpecularPower(n.specular_power);
+      }
     }
     node = g;
   } else if (n.type == "volume") {
@@ -359,15 +439,37 @@ StageLighting::Preset preset_from(const std::string &r) {
 void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedScene &out,
                    std::vector<std::string> *warnings) {
   if (!l.rig.empty()) {
-    // A named StageLighting rig — a whole lighting SETUP, not one light. Frame it to
-    // the realized geometry (lights are excluded from the bounds). The rig must
-    // outlive the render loop: ~StageLighting removes its lights, so RealizedScene
-    // owns it (the host keeps RealizedScene alive).
+    // A named StageLighting rig — a whole lighting SETUP, not one light. The rig must outlive the
+    // render loop: ~StageLighting removes its lights, so RealizedScene owns it (the host keeps
+    // RealizedScene alive).
     auto rig = std::make_unique<StageLighting>(sg);
-    const cvc::bounding_box bb = sg.computeGraphicsBounds();
-    if (!bb.isNull())
-      rig->frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+    // Aim the rig: an explicit stage: { center, radius } (a TIGHT cone on the subject → a crisp
+    // shadow map), else frame the realized geometry (lights are excluded from the bounds).
+    if (l.has_stage) {
+      rig->setStage(l.stage_center[0], l.stage_center[1], l.stage_center[2], l.stage_radius);
+    } else {
+      const cvc::bounding_box bb = sg.computeGraphicsBounds();
+      if (!bb.isNull())
+        rig->frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+    }
     rig->applyPreset(preset_from(l.rig));
+    // Optional per-knob tuning ON TOP of the preset (each gated so an unset knob keeps the preset).
+    if (l.has_key)
+      rig->setKey(l.key_intensity, l.key_azimuth, l.key_elevation, l.key_cone);
+    if (l.has_fill)
+      rig->setFill(l.fill);
+    if (l.has_back)
+      rig->setBack(l.back);
+    if (l.has_warmth)
+      rig->setWarmth(l.warmth);
+    if (l.has_environment)
+      rig->setEnvironment(l.environment);
+    if (l.has_rig_ambient)
+      rig->setAmbient(l.rig_ambient);
+    // applyPreset commits its baseline; the setters above need an explicit apply() to take effect.
+    if (l.has_key || l.has_fill || l.has_back || l.has_warmth || l.has_environment ||
+        l.has_rig_ambient || l.has_stage)
+      rig->apply();
     out.rigs.push_back(std::move(rig));
     return;
   }
@@ -411,8 +513,16 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     sg.endLightBatch();
   }
   if (scene.has_shadows) {
-    if (!sg.setShadowsEnabled(scene.shadows_enabled))
+    if (!sg.setShadowsEnabled(scene.shadows_enabled)) {
       warn(warnings, "ari: shadows requested but the renderer has no shadow target yet");
+    } else if (scene.shadows_enabled) {
+      // Bigger map = crisper shadow; update_interval 1 = bake every frame (a static scene has no
+      // lag). Only meaningful once shadows are actually on.
+      if (scene.has_shadow_resolution)
+        sg.setShadowResolution(scene.shadow_resolution);
+      if (scene.has_shadow_interval)
+        sg.setShadowUpdateInterval(scene.shadow_interval);
+    }
   }
   return out;
 }
