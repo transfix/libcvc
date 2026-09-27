@@ -1,0 +1,32 @@
+# sim_transport.ari — a REUSABLE Ariadne component: simulation transport (pause / speed / step /
+# restart). The Paused checkbox and Speed slider bind `sim.paused` / `sim.speed` — state keys the
+# HOST's sim loop reads to gate + scale its stepping (no per-widget C++). Step and Restart are
+# CAPABILITY VERBS (a bare-name on: routed to a host Runtime::on handler), since advancing/rebuilding
+# the sim is host work; Step is enabled only while paused (a reactive predicate). This is the
+# declarative replacement for the hand-rolled transport bar in the nav/sim demos.
+#
+# Use it:
+#     import: cvc://components/sim_transport.ari
+#     windows:
+#       - include: sim_transport
+#   host: read sim.paused / sim.speed in the loop; rt.on("sim.step",…); rt.on("sim.restart",…).
+
+units:
+  sim_transport:
+    window: Simulation
+    id: sim_transport
+    children:
+      - checkbox: Paused
+        bind: sim.paused
+      - slider_float: Speed
+        bind: sim.speed
+        lo: 0.0
+        hi: 4.0
+        def: 1.0
+        fmt: "%.2f"
+      - separator
+      - button: Step
+        on: sim.step
+        enabled_when: (= (state-get "sim.paused") "1") # only meaningful while paused
+      - button: Restart
+        on: sim.restart

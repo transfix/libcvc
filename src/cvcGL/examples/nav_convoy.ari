@@ -1,0 +1,86 @@
+# nav_convoy.ari — a navigation demo built ENTIRELY on the reusable Ariadne component library. The
+# scene (a ground, a streamed `agents` convoy, a tuned rig, shadows) and EVERY control window are
+# declared here + imported from cvc://components/*.ari; the host (nav_convoy.cpp) only provides the
+# genuinely-C++ parts (the streamed agent geometry, the sim/camera verbs, the stats readout keys).
+# This is the pattern the real cvc::nav integration follows: knobs + stats as state keys bound by
+# components, capability verbs as bare-name on:, live geometry/rasters as host nodes/widgets.
+#
+#   nav_convoy nav_convoy.ari --component-path <repo>/src/cvc/ariadne
+
+meta:
+  name: Nav convoy (Ariadne)
+  min_libcvc: 3.4.0
+
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/scene_controls.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/display_toggles.ari
+  - cvc://components/sim_transport.ari
+
+# The host registers the `agents` scene node type + the sim.* / camera.* verbs.
+customs:
+  - node: agents
+
+init: |
+  (begin
+    (state-set "show.agents" "1")
+    (state-set "show.grid" "1")
+    (state-set "sim.paused" "0")
+    (state-set "sim.speed" "1.0"))
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Paused
+        bind: sim.paused
+      - menu_item: Restart
+        on: sim.restart
+      - separator
+      - menu_item: Quit
+        on: quit
+
+windows:
+  # Every panel is an imported reusable component — no bespoke UI code in the host.
+  - include: sim_transport
+  - include: display_toggles
+  - include: camera_controls
+  - include: scene_controls
+  - include: stage_lighting
+  - window: Readout
+    id: readout
+    children:
+      - text: "Agents"
+        bind: stats.agents # host publishes the live count each frame
+      - text: "FPS"
+        bind: stats.fps
+      - separator
+      - button: Recenter camera
+        on: camera.recenter
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.13, 0.18], bottom: [0.01, 0.02, 0.04] }
+  nodes:
+    # The receiver: a ground plane the convoy drives on and shadows land on.
+    - node: ground
+      type: geometry
+      source: { plane: { size: 320 } }
+      material: { color: [0.20, 0.22, 0.26], ambient: 0.35, diffuse: 0.85 }
+    # The streamed convoy (a host `register_scene_node_type("agents")`); its visibility is bound to
+    # the Display > Agents toggle with no host code (the shared show.agents key).
+    - node: agents
+      type: agents
+      count: 28
+      visible: show.agents
+  lights:
+    - light: studio
+      rig: three_point
+      stage: { center: [0, 0, 20], radius: 120 }
+      key: { intensity: 1.6, azimuth: -40, elevation: 55, cone: 60 }
+      fill: 0.8
+      ambient: 0.45
+  shadows:
+    enabled: true
+    resolution: 2048
+    update_interval: 1

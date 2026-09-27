@@ -19,6 +19,13 @@ add_executable(ariadne_hello ariadne_hello.cpp)
 target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 
+# nav_convoy — a nav-style demo whose entire UI is the reusable .ari component library, with only
+# the streamed agents + sim/camera verbs + stats readouts in the host (the library-based pattern
+# the real cvc::nav integration follows).
+add_executable(nav_convoy nav_convoy.cpp)
+target_link_libraries(nav_convoy PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS nav_convoy MODULES ${VTK_LIBRARIES})
+
 # bunny_shadow — a Stanford-bunny shader/shadow-mapping test bench (one mesh, one
 # ground plane, a StageLighting rig). Loads the bunny via cvc::read_geometry, so
 # it needs only cvcGL (no nav helpers).

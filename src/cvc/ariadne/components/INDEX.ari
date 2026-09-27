@@ -38,3 +38,16 @@ catalog:
     binds: "<prefix>.viewers.main.camera.settings.*"   # cvc::gl::CameraController
     for: "any scene with a navigable camera (single 'main' viewer)"
     args: []                               # copy the unit + change the viewer segment for a 2nd viewport
+  - component: display_toggles
+    file: display_toggles.ari
+    unit: display_toggles
+    binds: "<prefix>.show.{agents,paths,grid}"   # each paired with a scene node `visible:` on the same key
+    for: "toggling scene layers on/off (bind a node's visible: to the same show.* key)"
+    args: []
+  - component: sim_transport
+    file: sim_transport.ari
+    unit: sim_transport
+    binds: "<prefix>.sim.{paused,speed}"         # host reads these; sim.step/sim.restart are host verbs
+    for: "pause/speed/step/restart of a host sim loop"
+    args: []
+    verbs: [sim.step, sim.restart]         # bare-name on: -> Runtime::on host handlers
