@@ -22,13 +22,19 @@ namespace ariadne {
 struct Uri {
   std::string scheme; // "file" | "state" | "http" | "https" | …  (lowercased)
   std::string path;   // the part after "<scheme>://" (or the whole string for a bare path)
-  std::string query;  // the part after '?', if any (no leading '?')
+  std::string query;  // the part after '?', if any (no leading '?'). Empty for the file scheme:
+                      // '?' is a legal POSIX filename byte, so file paths are never split on it.
   std::string raw;    // the original string, verbatim
 };
 
 // The result of resolving a URI: `ok` with `content` (the fetched bytes) and `canonical` (a
 // stable identity — e.g. a file's absolute path — used as the base for the fragment's own
 // relative references and as a cycle-guard key), or an `error` message.
+//
+// A handler SHOULD set a non-empty, collision-free `canonical` on success (two spellings of the
+// same resource → the same canonical; distinct resources → distinct canonicals), since callers
+// key dedup/cycle guards on it. `resolve()` enforces the non-empty half: an ok result with an
+// empty canonical falls back to the raw URI, so a forgetful handler cannot collapse the guard.
 struct UriResult {
   bool ok = false;
   std::string content;
@@ -48,6 +54,12 @@ using UriHandler = std::function<UriResult(const Uri &u, const std::string &base
 // overrides it). Process-global and thread-safe; register before load_*. Mirrors the
 // register_scene_node_type / register_ari_block / register_widget_type registries.
 void register_uri_handler(const std::string &scheme, UriHandler handler);
+
+// Remove a scheme's registered handler (no-op if none, and a no-op for the built-in "file",
+// which is not in the registry). A host tears down its state/http handler this way before the
+// context it captured (an app, a state root) is destroyed, so a later resolve() cannot call a
+// handler holding a dangling pointer.
+void unregister_uri_handler(const std::string &scheme);
 
 // Whether a scheme has a resolver (a registered handler, or the built-in "file").
 bool has_uri_handler(const std::string &scheme);

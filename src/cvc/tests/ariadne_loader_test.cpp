@@ -6,12 +6,16 @@
 
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
-#include <cvc/ariadne/uri.h> // §13 resolver (import routes through it)
+#include <cvc/ariadne/uri.h>       // §13 resolver (import routes through it)
+#include <cvc/ariadne/uri_state.h> // §13.3 state:// handler
 #include <cvc/ariadne/widget.h>
+#include <cvc/core/app.h>   // cvc::app (state:// handler tests build a state tree)
+#include <cvc/core/state.h> // cvc::state
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <string>
 
 using namespace cvc::ariadne;
@@ -57,6 +61,13 @@ std::string write_temp_ari(const std::string &name, const std::string &content) 
     if (!have_yaml())                                                                              \
       GTEST_SKIP() << "libcvc built without yaml-cpp";                                             \
   } while (0)
+
+// The URI registry is process-global; a state:// handler captures a state root by pointer.
+// Unregister it when the test scopes out — even on an ASSERT early-return — so a later test's
+// resolve() cannot dispatch into a freed root. Declare AFTER the app so it destructs first.
+struct StateHandlerGuard {
+  ~StateHandlerGuard() { unregister_uri_handler("state"); }
+};
 
 } // namespace
 
@@ -1309,6 +1320,100 @@ TEST(AriadneUri, RegisterHandlerDispatches) {
   EXPECT_EQ(r.content, "content-for-abc");
 }
 
+TEST(AriadneUri, FileNameWithQuestionMarkIsNotSplit) {
+  // '?' is a legal POSIX filename byte, so a bare/file path is never split on it (a query
+  // component belongs only to schemes that use one — state/http/custom).
+  Uri u = parse_uri("data?v2.ari");
+  EXPECT_EQ(u.scheme, "file");
+  EXPECT_EQ(u.path, "data?v2.ari");
+  EXPECT_TRUE(u.query.empty());
+  // Round-trip through the file handler where the platform allows '?' in a name.
+  const std::string p = write_temp_ari("q?mark.txt", "qm-content");
+  if (std::filesystem::exists(p)) {
+    UriResult r = resolve(p);
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(r.content, "qm-content");
+  }
+}
+
+TEST(AriadneUri, FileHandlerRejectsDirectoryWithoutThrowing) {
+  // A directory opens but throws on read (libstdc++); resolve() must return an error, not
+  // terminate. The test process surviving this call is itself the assertion.
+  const std::string probe = write_temp_ari("dir_probe.txt", "x"); // ensures the dir exists
+  const std::string dir = std::filesystem::path(probe).parent_path().string();
+  UriResult r = resolve(dir);
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("directory"), std::string::npos);
+}
+
+TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
+  // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
+  // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
+  register_uri_handler("emptycanon", [](const Uri &, const std::string &) {
+    return UriResult{true, "body", std::string(), std::string()};
+  });
+  UriResult r = resolve("emptycanon://foo");
+  ASSERT_TRUE(r.ok);
+  EXPECT_EQ(r.canonical, "emptycanon://foo");
+}
+
+TEST(AriadneUri, ThrowingHandlerIsContainedNotPropagated) {
+  register_uri_handler("boom", [](const Uri &, const std::string &) -> UriResult {
+    throw std::runtime_error("kaboom");
+  });
+  UriResult r = resolve("boom://x"); // must not escape the UriResult boundary
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("kaboom"), std::string::npos);
+}
+
+TEST(AriadneStateUri, ValueChannelResolvesNodeValue) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.libs.controls").value(std::string("hello-from-state"));
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  UriResult r = resolve("state://ui.libs.controls?value");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "hello-from-state");
+  EXPECT_FALSE(r.canonical.empty());
+  UriResult bare = resolve("state://ui.libs.controls"); // no query defaults to ?value
+  ASSERT_TRUE(bare.ok) << bare.error;
+  EXPECT_EQ(bare.content, "hello-from-state");
+}
+
+TEST(AriadneStateUri, MissingNodeErrors) {
+  cvc::app app;
+  register_state_uri_handler(cvc::state::instance(app));
+  StateHandlerGuard guard;
+  UriResult r = resolve("state://does.not.exist");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("not found"), std::string::npos);
+}
+
+TEST(AriadneStateUri, DataAndChildrenChannelsUnsupported) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("g.mesh").value(std::string("v"));
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  UriResult d = resolve("state://g.mesh?data");
+  EXPECT_FALSE(d.ok);
+  EXPECT_NE(d.error.find("?data"), std::string::npos);
+  UriResult c = resolve("state://g.mesh?children");
+  EXPECT_FALSE(c.ok);
+}
+
+TEST(AriadneStateUri, UnregisterRemovesHandler) {
+  cvc::app app;
+  register_state_uri_handler(cvc::state::instance(app));
+  EXPECT_TRUE(has_uri_handler("state"));
+  unregister_uri_handler("state");
+  EXPECT_FALSE(has_uri_handler("state"));
+  UriResult r = resolve("state://x");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("no handler"), std::string::npos);
+}
+
 TEST(AriadneModularity, ImportUnitsFromAnotherFile) {
   SKIP_WITHOUT_YAML();
   // A reusable LIBRARY of units in one file, imported + used from another.
@@ -1356,6 +1461,46 @@ units:
   LoadResult r = load_file(a);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find(r.root, Kind::Text, "fromB"), nullptr); // b's unit reached through the cycle
+}
+
+TEST(AriadneModularity, ImportOfADirectoryWarnsNotFatal) {
+  SKIP_WITHOUT_YAML();
+  // A directory-valued import must degrade to a warning (the file handler rejects it cleanly),
+  // never abort the whole document load with a fatal error.
+  const std::string probe = write_temp_ari("dir_import_probe.txt", "x");
+  const std::string dir = std::filesystem::path(probe).parent_path().string();
+  const std::string main = write_temp_ari("main_dir_import.ari", "import: '" + dir +
+                                                                     "'\n"
+                                                                     "windows:\n"
+                                                                     "  - window: W\n"
+                                                                     "    children: []\n");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error; // NOT fatal
+  EXPECT_TRUE(has_warning(r, "could not be resolved"));
+}
+
+TEST(AriadneModularity, ImportUnitsFromAStateNode) {
+  SKIP_WITHOUT_YAML();
+  // A reusable units LIBRARY living in the state tree (its .ari text on a node's value
+  // channel), imported through the full §13 resolver via the state:// handler.
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.libs.forms")
+      .value(std::string("units:\n"
+                         "  labeled:\n"
+                         "    text: \"{label}\"\n"));
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  LoadResult r = load_string(R"(
+import: state://ui.libs.forms
+windows:
+  - window: W
+    children:
+      - include: labeled
+        args: { label: FromState }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find(r.root, Kind::Text, "FromState"), nullptr);
 }
 
 TEST(AriadneModularity, ImportUnknownSchemeWarns) {

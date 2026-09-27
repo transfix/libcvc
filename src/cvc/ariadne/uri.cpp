@@ -3,6 +3,7 @@
 // resolves bytes; the loader parses them.
 
 #include <algorithm>
+#include <cstdint>
 #include <cvc/ariadne/uri.h>
 #include <filesystem>
 #include <fstream>
@@ -32,13 +33,35 @@ std::string to_lower(std::string s) {
   return s;
 }
 
-// The built-in `file` handler: read the resolved path's bytes. App-free.
+// An .ari fragment is DSL text; a fragment larger than this is almost certainly a mistake (or
+// an attack). Cap the slurp so a giant file yields an error, never an OOM.
+constexpr std::uintmax_t kMaxFileBytes = 16u * 1024u * 1024u; // 16 MiB
+
+// The built-in `file` handler: read the resolved path's bytes. App-free. Rejects anything that
+// is not an ordinary, bounded file BEFORE opening — a directory or a special file (fifo,
+// /dev/zero) would otherwise throw on read or block/OOM (istreambuf never reaches EOF).
 UriResult resolve_file(const Uri &u, const std::string &base) {
+  namespace fs = std::filesystem;
   const std::string full = resolve_file_path(u.path, base);
+  std::error_code ec;
+  const fs::file_status st = fs::status(full, ec);
+  if (ec || !fs::exists(st))
+    return {false, std::string(), full, "ari: cannot open file '" + full + "'"};
+  if (fs::is_directory(st))
+    return {false, std::string(), full, "ari: '" + full + "' is a directory, not a file"};
+  if (!fs::is_regular_file(st))
+    return {false, std::string(), full, "ari: '" + full + "' is not a regular file"};
+  const std::uintmax_t size = fs::file_size(full, ec);
+  if (!ec && size > kMaxFileBytes)
+    return {false, std::string(), full,
+            "ari: file '" + full + "' exceeds the " + std::to_string(kMaxFileBytes) +
+                "-byte fragment cap"};
   std::ifstream in(full, std::ios::binary);
   if (!in)
     return {false, std::string(), full, "ari: cannot open file '" + full + "'"};
   std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (in.bad())
+    return {false, std::string(), full, "ari: read error on file '" + full + "'"};
   return {true, std::move(content), full, std::string()};
 }
 
@@ -55,13 +78,18 @@ Uri parse_uri(const std::string &s) {
   } else {
     u.scheme = "file"; // a bare / relative path is a file reference (§13.1)
   }
-  const std::size_t q = rest.find('?');
-  if (q != std::string::npos) {
-    u.query = rest.substr(q + 1);
-    u.path = rest.substr(0, q);
-  } else {
-    u.path = rest;
+  // A '?' begins a query only for schemes that use one (state/http/custom). For `file`
+  // (including the bare-path fallback), '?' is a legal filename byte on POSIX — splitting it
+  // off would silently truncate the path to a different (or missing) file — so never split it.
+  if (u.scheme != "file") {
+    const std::size_t q = rest.find('?');
+    if (q != std::string::npos) {
+      u.query = rest.substr(q + 1);
+      u.path = rest.substr(0, q);
+      return u;
+    }
   }
+  u.path = rest;
   return u;
 }
 
@@ -83,6 +111,11 @@ void register_uri_handler(const std::string &scheme, UriHandler handler) {
   uri_registry()[to_lower(scheme)] = std::move(handler);
 }
 
+void unregister_uri_handler(const std::string &scheme) {
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  uri_registry().erase(to_lower(scheme));
+}
+
 bool has_uri_handler(const std::string &scheme) {
   const std::string s = to_lower(scheme);
   if (s == "file")
@@ -92,23 +125,42 @@ bool has_uri_handler(const std::string &scheme) {
 }
 
 UriResult resolve(const std::string &uri, const std::string &base) {
-  const Uri u = parse_uri(uri);
-  // A registered handler wins (so a host may override "file" too); else the built-in file
-  // scheme; else the scheme is unresolvable here (e.g. state/http with no handler installed).
-  UriHandler h;
-  {
-    std::lock_guard<std::mutex> lock(uri_mutex());
-    const auto it = uri_registry().find(u.scheme);
-    if (it != uri_registry().end())
-      h = it->second;
+  // A handler is host/registered code (state, http, …) that may throw; the built-in file
+  // handler must not, but a filesystem edge case could. Contain every failure here so this
+  // function honours its contract — always return a UriResult, never propagate an exception.
+  try {
+    const Uri u = parse_uri(uri);
+    // A registered handler wins (so a host may override "file" too); else the built-in file
+    // scheme; else the scheme is unresolvable here (e.g. state/http with no handler installed).
+    UriHandler h;
+    {
+      std::lock_guard<std::mutex> lock(uri_mutex());
+      const auto it = uri_registry().find(u.scheme);
+      if (it != uri_registry().end())
+        h = it->second;
+    }
+    UriResult r;
+    if (h)
+      r = h(u, base);
+    else if (u.scheme == "file")
+      r = resolve_file(u, base);
+    else
+      return {false, std::string(), std::string(),
+              "ari: no handler for URI scheme '" + u.scheme +
+                  "' (register one via register_uri_handler)"};
+    // Guarantee the caller's invariant: a successful result has a non-empty canonical identity
+    // (its dedup / cycle-guard key). A handler that neglects to set one falls back to the raw
+    // URI — stable enough to dedup exact repeats and distinguish distinct references.
+    if (r.ok && r.canonical.empty())
+      r.canonical = uri;
+    return r;
+  } catch (const std::exception &e) {
+    return {false, std::string(), std::string(),
+            "ari: URI resolution failed for '" + uri + "': " + e.what()};
+  } catch (...) {
+    return {false, std::string(), std::string(),
+            "ari: URI resolution failed for '" + uri + "' (unknown error)"};
   }
-  if (h)
-    return h(u, base);
-  if (u.scheme == "file")
-    return resolve_file(u, base);
-  return {false, std::string(), std::string(),
-          "ari: no handler for URI scheme '" + u.scheme +
-              "' (register one via register_uri_handler)"};
 }
 
 } // namespace ariadne
