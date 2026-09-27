@@ -240,8 +240,9 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
 // (nav_stats.h); keep the two PODs semantically in lockstep.
 struct drive_telemetry {
   // CoefMLP policy output this tick (the al/be/ga fed to the rollout; lam_soft is the
-  // effective material soft-weight, 0 on the non-material path).
-  float alpha = 0, beta = 0, gamma = 0, lam_soft = 0;
+  // effective material soft-weight, 0 on the non-material path; lam_hard is the ungated
+  // hard-hazard weight — learned per-agent for a two-head sigmoid net, else the fixed dial).
+  float alpha = 0, beta = 0, gamma = 0, lam_soft = 0, lam_hard = 0;
   float mu = 1;                 // underfoot grip at the agent cell (1 = dry / no grip field)
   float mrisk = 0;              // material risk at the agent cell (0 = no material stack)
   float ext_fx = 0, ext_fy = 0; // applied external force in the drive frame (0 = no ext channel)

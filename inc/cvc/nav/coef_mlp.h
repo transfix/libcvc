@@ -49,8 +49,14 @@ namespace nav {
 
 class coef_mlp {
 public:
-  // The `.cvcnav` format this build reads/writes.
-  static constexpr std::uint32_t kFormatVersion = 1;
+  // The `.cvcnav` format this build WRITES. v2 adds the paper's two-head sigmoid
+  // reroute (kFlagLamSigmoid) and the lam_soft_max/lam_hard_max trailer. The loader
+  // ACCEPTS {1, 2}: a v1 file still loads and forwards identically, and a v2 file
+  // hard-fails on a pre-v2 host rather than silently misreading the trailer (safe).
+  // A plain all-softplus net (no sigmoid lam) is still written as v1 so it loads on
+  // old hosts; only a sigmoid-lam net bumps the version.
+  static constexpr std::uint32_t kFormatVersion = 2;
+  static constexpr std::uint32_t kFormatVersionLegacy = 1; // pre-sigmoid, all-softplus
   // flags bit 0: the output is softplus(net + log(expm1(out_bias))) — the
   // CoefMLP bias-toward-a-known-good-basin trick; the raw out_bias is stored and
   // log(expm1(.)) is folded once at load.
@@ -63,6 +69,13 @@ public:
   // historical base-5 (or a bare 6-input grip net, treated as mu for back-compat).
   static constexpr std::uint32_t kFlagFeatMu = 1u << 1;
   static constexpr std::uint32_t kFlagFeatRisk = 1u << 2;
+  // flags bit 3: the lam OUTPUT columns (index >= 3: col 3 = lam_soft, col 4 = lam_hard)
+  // are `lam_max * sigmoid(raw)` — the paper's two-head sigmoid-bounded reroute
+  // (material_nav.py:175-176) — NOT the softplus(log(expm1)) fold used for cols 0..2
+  // (alpha, beta, gamma). When set: the abg columns keep the softplus fold, the lam
+  // columns carry NO out_bias offset (their bias lives in the last Linear layer), and
+  // the file stores lam_soft_max / lam_hard_max as a v2 trailer after the out_bias block.
+  static constexpr std::uint32_t kFlagLamSigmoid = 1u << 3;
   // Max layer dimension the CPU forward() supports (its stack activation arrays).
   // load()/from_layers reject a wider net at the boundary rather than overflowing.
   // The CUDA drive (drive.cu d_mlp) has a tighter cap (64) it guards separately.
@@ -96,12 +109,17 @@ public:
   // loaded .cvcnav. Throws if the shapes do not chain in -> ... -> out.
   // ``extra_flags`` OR-in the feature/output flags (kFlagFeatMu / kFlagFeatRisk) beyond the
   // always-on softplus fold — so a C++ trainer (or a test) can stamp a widened net's layout.
+  // When ``extra_flags`` includes kFlagLamSigmoid the net is a v2 two-head sigmoid policy:
+  // ``out_bias_raw`` is then the THREE abg raw biases only (the lam heads' init lives in the
+  // last layer's bias b, exactly as torch), and ``lam_soft_max`` / ``lam_hard_max`` bound the
+  // sigmoid lam columns. A non-sigmoid net stays v1 (fmt 1) so it loads on a pre-v2 host.
   static coef_mlp from_layers(int in, int out, const std::vector<int> &rows,
                               const std::vector<int> &cols, const std::vector<std::uint32_t> &act,
                               const std::vector<std::vector<float>> &w,
                               const std::vector<std::vector<float>> &b,
                               const std::vector<float> &out_bias_raw,
-                              std::uint32_t extra_flags = 0);
+                              std::uint32_t extra_flags = 0, float lam_soft_max = 5.0f,
+                              float lam_hard_max = 10.0f);
 
   // Serialize to the versioned `.cvcnav` (byte-identical layout to
   // grl_snam.tools.coef_export.write_coef_mlp), so a policy trained in pure C++
@@ -124,7 +142,12 @@ public:
   // with no risk flag is grip (the historical widen_coef_mlp output), so mu is implied there.
   bool has_risk() const { return (flags_ & kFlagFeatRisk) != 0; }
   bool has_mu() const { return (flags_ & kFlagFeatMu) != 0 || (in_ == 6 && !has_risk()); }
-  bool has_lam() const { return out_ >= 4; } // 4th output = learned reroute lam_soft
+  bool has_lam() const { return out_ >= 4; }      // 4th output (col 3) = learned reroute lam_soft
+  bool has_lam_hard() const { return out_ >= 5; } // 5th output (col 4) = learned lam_hard
+  // True when the lam columns are lam_max*sigmoid(raw) (paper two-head form), not softplus.
+  bool lam_sigmoid() const { return (flags_ & kFlagLamSigmoid) != 0; }
+  float lam_soft_max() const { return lam_soft_max_; }
+  float lam_hard_max() const { return lam_hard_max_; }
   std::uint64_t arch_hash() const { return arch_hash_; }
 
   // The architecture hash (FNV-1a over in/out/num_layers and each layer's
@@ -152,8 +175,12 @@ private:
   };
   std::vector<Layer> layers_;
   std::vector<float> out_bias_off_; // = log(expm1(out_bias)), folded once at load
+                                    // (0 for sigmoid lam columns — bias is in the last layer)
   int in_ = 0, out_ = 0;
   std::uint32_t fmt_ = 0, flags_ = 0;
+  // Sigmoid lam ceilings (kFlagLamSigmoid): lam_soft = lam_soft_max_*sigmoid(raw),
+  // lam_hard = lam_hard_max_*sigmoid(raw). Defaults match coef_energy_net (5.0 / 10.0).
+  float lam_soft_max_ = 5.0f, lam_hard_max_ = 10.0f;
   std::uint64_t arch_hash_ = 0;
 
   void build_from_bytes(const std::uint8_t *p, std::size_t n);

@@ -331,7 +331,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     // Telemetry temporaries — write-only, never read by the drive math, so a null `tel` path is
     // byte-identical. They hold the LAST substep's value at loop exit (mu/mrisk/ext default to the
     // no-field case; steer/curv/clear are overwritten every substep).
-    float tel_mu = 1.0f, tel_mrisk = 0.0f, tel_lam = 0.0f, tel_ext_x = 0.0f, tel_ext_y = 0.0f;
+    float tel_mu = 1.0f, tel_mrisk = 0.0f, tel_lam = 0.0f, tel_lam_hard = 0.0f, tel_ext_x = 0.0f,
+          tel_ext_y = 0.0f;
     float tel_steer = 0.0f, tel_curv = 0.0f;
 
     for (int s = 0; s < v.nsub; ++s) {
@@ -414,6 +415,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         const float db = -(1.0f / (1.0f + std::exp(-(mat->k_sharp * (mat->d_hat_m - mphi)))));
         const float ls = mat->lam_soft[i], lh = mat->lam_hard[i];
         tel_lam = ls;
+        tel_lam_hard = lh;
         const float fsx = -ls * mgrx;
         const float fsy = -ls * mgry;
         const float fhx = (-lh * db) * mgpx;
@@ -554,6 +556,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       t.beta = bei;
       t.gamma = gai;
       t.lam_soft = tel_lam;
+      t.lam_hard = tel_lam_hard;
       t.mu = tel_mu;
       t.mrisk = tel_mrisk;
       t.ext_fx = tel_ext_x;
@@ -753,14 +756,22 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
     ga[i] = coef[static_cast<std::size_t>(out_w) * i + 2];
   }
   // Learned reroute: a lam-head net's 4th output is the per-agent lam_soft, overriding the
-  // material_drive's fixed/gated column (the deployable twin of grl_snam coeffs_and_lam).
+  // material_drive's fixed/gated column (the deployable twin of grl_snam coeffs_and_lam). A
+  // two-head sigmoid net (has_lam_hard) also learns lam_hard from its 5th output; lam_hard is
+  // never gated (material.h:37,161), so it mirrors lam_soft's extraction with no witness gate.
   material_drive md = mat;
-  std::vector<float> lam_learned;
+  std::vector<float> lam_learned, lam_hard_learned;
   if (model.has_lam()) {
     lam_learned.resize(n);
     for (int i = 0; i < n; ++i)
       lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3];
     md.lam_soft = lam_learned.data();
+  }
+  if (model.has_lam_hard()) {
+    lam_hard_learned.resize(n);
+    for (int i = 0; i < n; ++i)
+      lam_hard_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 4];
+    md.lam_hard = lam_hard_learned.data();
   }
   rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v,
                md.stack ? &md : nullptr, nullptr, minclr_out, num_threads, nullptr, tel);
@@ -845,13 +856,21 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
     be[i] = coef[static_cast<std::size_t>(out_w) * i + 1];
     ga[i] = coef[static_cast<std::size_t>(out_w) * i + 2];
   }
+  // Same learned lam_soft (+ optional two-head lam_hard) extraction as drive_step_material; see
+  // there for the gate note. lam_hard is never gated.
   material_drive md = mat;
-  std::vector<float> lam_learned;
+  std::vector<float> lam_learned, lam_hard_learned;
   if (model.has_lam()) {
     lam_learned.resize(n);
     for (int i = 0; i < n; ++i)
       lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3];
     md.lam_soft = lam_learned.data();
+  }
+  if (model.has_lam_hard()) {
+    lam_hard_learned.resize(n);
+    for (int i = 0; i < n; ++i)
+      lam_hard_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 4];
+    md.lam_hard = lam_hard_learned.data();
   }
   rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v,
                md.stack ? &md : nullptr, ext.sample ? &ext : nullptr, minclr_out, num_threads,
