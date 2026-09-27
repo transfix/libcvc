@@ -3,6 +3,7 @@
 // resolves bytes; the loader parses them.
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cvc/ariadne/uri.h>
 #include <filesystem>
@@ -182,6 +183,78 @@ UriResult resolve(const std::string &uri, const std::string &base) {
     return {false, std::string(), std::string(),
             "ari: URI resolution failed for '" + uri + "' (unknown error)"};
   }
+}
+
+// --- the temp-file bridge (§13.4): a resolved URI as a local path a reader can open ----------
+
+ResolvedFile &ResolvedFile::operator=(ResolvedFile &&other) noexcept {
+  if (this != &other) {
+    // Drop any temp file we currently own before taking over `other`'s state.
+    if (is_temp_ && !path.empty()) {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+    ok = other.ok;
+    path = std::move(other.path);
+    error = std::move(other.error);
+    is_temp_ = other.is_temp_;
+    other.ok = false;
+    other.is_temp_ = false;
+    other.path.clear();
+  }
+  return *this;
+}
+
+ResolvedFile::~ResolvedFile() {
+  if (is_temp_ && !path.empty()) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec); // best-effort; never throw from a destructor
+  }
+}
+
+ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
+  namespace fs = std::filesystem;
+  ResolvedFile rf;
+  const Uri u = parse_uri(uri);
+  // file:// (and a bare path): the reader opens the resolved path directly — no fetch, no copy.
+  if (u.scheme == "file") {
+    rf.ok = true;
+    rf.path = resolve_file_path(u.path, base);
+    rf.is_temp_ = false;
+    return rf;
+  }
+  // Any other scheme: fetch the bytes, then spill them to a temp file the reader can open. Keep
+  // the source's extension so an extension-keyed reader (geometry_file_io) still dispatches.
+  const UriResult r = resolve(uri, base);
+  if (!r.ok) {
+    rf.error = r.error;
+    return rf;
+  }
+  std::string ext;
+  if (const std::size_t dot = u.path.find_last_of('.'); dot != std::string::npos)
+    ext = u.path.substr(dot); // includes the '.'
+  static std::atomic<std::uint64_t> counter{0};
+  const std::uint64_t n = counter.fetch_add(1);
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path(ec);
+  const fs::path tmp = (ec ? fs::path(".") : dir) / ("ari-src-" + std::to_string(n) + ext);
+  std::ofstream out(tmp, std::ios::binary);
+  if (!out) {
+    rf.error = "ari: cannot create temp file for '" + uri + "'";
+    return rf;
+  }
+  out.write(r.content.data(), static_cast<std::streamsize>(r.content.size()));
+  out.close();
+  if (!out) {
+    std::error_code rmec;
+    fs::remove(tmp, rmec);
+    rf.error = "ari: cannot write temp file for '" + uri + "'";
+    return rf;
+  }
+  rf.ok = true;
+  rf.path = tmp.string();
+  rf.is_temp_ = true;
+  return rf;
 }
 
 } // namespace ariadne

@@ -1062,9 +1062,15 @@ SceneNode parse_scene_node(const YAML::Node &n) {
   SceneNode sn;
   sn.id = str(n, "node", str(n, "id"));
   sn.type = str(n, "type", "geometry");
+  // §13.4: a node's source is a URI (file/state/http/…) resolved through the shared resolver.
+  // Accept `source: <uri>` (scalar), `source: { uri: <uri> }`, or the legacy `{ file: <path> }`.
   const YAML::Node src = n["source"];
-  if (src && src.IsMap())
-    sn.source_file = str(src, "file");
+  if (src) {
+    if (src.IsScalar())
+      sn.source_file = src.Scalar();
+    else if (src.IsMap())
+      sn.source_file = str(src, "uri", str(src, "file"));
+  }
   const YAML::Node mat = n["material"];
   if (mat && mat.IsMap()) {
     sn.has_material = true;

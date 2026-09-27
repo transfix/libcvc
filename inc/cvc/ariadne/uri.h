@@ -76,6 +76,33 @@ UriResult resolve(const std::string &uri, const std::string &base = std::string(
 // source location — a relative `path` anchors to the process's current working directory.
 std::string resolve_file_path(const std::string &path, const std::string &base);
 
+// A resolved URI materialized as a LOCAL FILE PATH a byte-oriented reader (read_geometry /
+// readVolumeFile / read_image) can open — the "temp-file bridge" of §13.4. For a file:// (or
+// bare) URI the `path` IS the resolved file, no copy. For any other scheme (state://, http://…)
+// the fetched bytes are written to a temporary file whose extension mirrors the source (so an
+// extension-keyed reader still dispatches), and that temp file is REMOVED when the ResolvedFile
+// is destroyed — so keep it alive for the whole read. Move-only.
+struct ResolvedFile {
+  bool ok = false;
+  std::string path;  // a local path to open, valid while this object lives
+  std::string error; // set (and path empty) on failure
+
+  ResolvedFile() = default;
+  ResolvedFile(const ResolvedFile &) = delete;
+  ResolvedFile &operator=(const ResolvedFile &) = delete;
+  ResolvedFile(ResolvedFile &&other) noexcept { *this = std::move(other); }
+  ResolvedFile &operator=(ResolvedFile &&other) noexcept;
+  ~ResolvedFile();
+
+private:
+  friend ResolvedFile resolve_to_file(const std::string &, const std::string &);
+  bool is_temp_ = false; // path is a temp file this object owns and must delete
+};
+
+// Resolve `uri` (relative to `base`) to a local file path — see ResolvedFile. file:// resolves to
+// the path in place; every other scheme fetches bytes into an owned temp file.
+ResolvedFile resolve_to_file(const std::string &uri, const std::string &base = std::string());
+
 } // namespace ariadne
 } // namespace cvc
 

@@ -1,5 +1,6 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -32,6 +33,18 @@ namespace {
 void warn(std::vector<std::string> *w, const std::string &m) {
   if (w)
     w->push_back(m);
+}
+
+// §13.4: resolve a node's source: URI to a local path a reader (read_geometry / cvc::volume) can
+// open — file:// in place, any other scheme spilled to an owned temp file. On failure, warn with
+// the node id and return an unset ResolvedFile (ok=false); the caller returns early. The returned
+// object must stay alive for the whole read (it owns any temp file).
+cvc::ariadne::ResolvedFile resolve_source(const cvc::ariadne::SceneNode &n,
+                                          std::vector<std::string> *warnings) {
+  cvc::ariadne::ResolvedFile rf = cvc::ariadne::resolve_to_file(n.source_file);
+  if (!rf.ok)
+    warn(warnings, "ari: scene node '" + n.id + "': " + rf.error);
+  return rf;
 }
 
 // --- custom scene node type registry (§ extensibility) -----------------------
@@ -179,9 +192,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       warn(warnings, "ari: scene node '" + n.id + "' (geometry) has no source.file");
       return;
     }
+    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+    if (!src.ok)
+      return;
     cvc::geometry geom;
     try {
-      geom = cvc::read_geometry(n.source_file);
+      geom = cvc::read_geometry(src.path);
     } catch (const std::exception &e) {
       warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
       return;
@@ -201,9 +217,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       warn(warnings, "ari: scene node '" + n.id + "' (volume) has no source.file");
       return;
     }
+    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+    if (!src.ok)
+      return;
     std::shared_ptr<VolumeNode> vnode;
     try {
-      cvc::volume vol(sg.appContext(), n.source_file); // reads on construct; throws on a bad file
+      cvc::volume vol(sg.appContext(), src.path); // reads on construct; throws on a bad file
       if (parent) {
         // Nested: local transform composes with the parent. createChild -> setVolume
         // sets the default grayscale TF, enough to render a single volume. Multi-volume
@@ -232,9 +251,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       warn(warnings, "ari: scene node '" + n.id + "' (volren) has no source.file");
       return;
     }
+    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+    if (!src.ok)
+      return;
     std::shared_ptr<VolRenNode> vn;
     try {
-      cvc::volume vol(sg.appContext(), n.source_file); // reads on construct; throws on a bad file
+      cvc::volume vol(sg.appContext(), src.path); // reads on construct; throws on a bad file
       // No sg.addGraphics overload for VolRenNode: create under the parent (or root).
       GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
       // Last-wins parity with sg.addGraphics: registerGraphics only reassigns the name
@@ -257,9 +279,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       warn(warnings, "ari: scene node '" + n.id + "' (volslice) has no source.file");
       return;
     }
+    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+    if (!src.ok)
+      return;
     std::shared_ptr<VolSliceNode> vn;
     try {
-      cvc::volume vol(sg.appContext(), n.source_file);
+      cvc::volume vol(sg.appContext(), src.path);
       GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
       if (!parent && sg.hasGraphics(n.id)) // last-wins parity with sg.addGraphics (see volren)
         sg.removeGraphics(n.id);

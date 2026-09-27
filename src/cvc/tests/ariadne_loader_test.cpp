@@ -1392,6 +1392,32 @@ TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
   fs::remove(big, ec);
 }
 
+TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
+  const std::string p = write_temp_ari("srcprobe.off", "OFF-DATA");
+  ResolvedFile rf = resolve_to_file(p);
+  ASSERT_TRUE(rf.ok) << rf.error;
+  // file:// (bare) -> the resolved path itself, no temp copy.
+  EXPECT_NE(rf.path.find("srcprobe.off"), std::string::npos);
+  EXPECT_TRUE(std::filesystem::exists(rf.path));
+}
+
+TEST(AriadneUri, ResolveToFileBytesSchemeSpillsToTempThenCleansUp) {
+  register_uri_handler("membytes", [](const Uri &u, const std::string &) {
+    return UriResult{true, "GEOM-BYTES", "membytes:" + u.path, std::string()};
+  });
+  std::string temp_path;
+  {
+    ResolvedFile rf = resolve_to_file("membytes://mesh.obj");
+    ASSERT_TRUE(rf.ok) << rf.error;
+    temp_path = rf.path;
+    EXPECT_NE(temp_path.find(".obj"), std::string::npos); // source extension preserved
+    std::ifstream in(temp_path, std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(content, "GEOM-BYTES");
+  }
+  EXPECT_FALSE(std::filesystem::exists(temp_path)); // temp removed on ResolvedFile destruction
+}
+
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
   // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
   // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
