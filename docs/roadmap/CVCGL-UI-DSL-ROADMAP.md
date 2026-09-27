@@ -3126,9 +3126,14 @@ instead of a full transfer.
 > (absolute-path keys, restore at the same/root position), just re-routed through any scheme.
 > `state://` serves **both `?value` and `?data`** (a raw string/byte blob on `data()` — the channel
 > the §13.9 HTTP cache parks a body on) for read and write, following a transparent link to its
-> target on BOTH paths (so a store is never shadowed on a non-writable link). Tests:
-> `AriadneUri.Store*`, `AriadneStateUri.Store*` / `StoreAndResolveDataChannel` /
-> `StoreThroughNonWritableTransparentLinkRoundTrips` / `UnregisterRemovesBothReadAndWrite`,
+> target on BOTH paths (so a store is never shadowed on a non-writable link). The **file read and
+> store byte caps are configurable** — `resolve_file_byte_cap`/`store_file_byte_cap` +
+> `set_*` (process-global, default 16 MiB, 0 = unlimited), driven from the state tree by
+> `sync_resolver_caps_from_state(root)` reading `sys.ariadne.resolver.read_cap_bytes` /
+> `store_cap_bytes` (the resolver stays app-free; the host syncs + can state-watch). Tests:
+> `AriadneUri.Store*` / `Configurable{Store,Resolve}Cap`, `AriadneStateUri.Store*` /
+> `StoreAndResolveDataChannel` / `StoreThroughNonWritableTransparentLinkRoundTrips` /
+> `SyncResolverCapsFromState` / `UnregisterRemovesBothReadAndWrite`,
 > `AriadneStateIo.SaveRestoreRoundTripsVia{File,StateScheme}`.
 >
 > **Planned next:**
@@ -3136,12 +3141,16 @@ instead of a full transfer.
 >   — one persistence path (any scheme, atomic file writes) instead of two, and it keeps `cvc::state`
 >   free of even the local-file I/O. Needs a usage audit + migration across the tree first (grl-snam,
 >   pycvc, volrover3, …), then a `[[deprecated]]` pass, so it is staged rather than flipped now.
-> - **Request headers for the `http(s)` writer (and reader)** — auth (a bearer token), content-type,
->   conditional-PUT validators. The `store`/`resolve` API needs an optional per-call `headers`/options
->   channel (or a registered per-host auth provider the http handler consults), so
->   `store("https://…", body, {headers})` can carry `Authorization: Bearer …`. This lands with the
->   `http(s)` PUT writer (still deferred — the store seam is ready; only the libcurl PUT body +
->   header plumbing are unwritten), and a successful PUT must invalidate the §13.9 cache entry.
+> - **Request headers / options for EVERY `http(s)` method — GET, PUT, and POST** (we will end up
+>   POSTing: an API endpoint that returns a fragment, or a POST-based store). Auth (a bearer token),
+>   content-type, and conditional validators are needed on the *reader* (`resolve` → GET) as much as
+>   the writer, so the shared plumbing is a per-call **`headers`/options channel on both `resolve` and
+>   `store`** (plus a way to pick the method — a GET that must POST, a store that PUTs vs POSTs), or a
+>   registered per-host auth/header provider the http handler consults — so `resolve`/`store("https://…",
+>   …, {headers, method})` can carry `Authorization: Bearer …`. This is the natural companion to the
+>   deferred `http(s)` writer (store seam ready; libcurl PUT/POST body + header plumbing unwritten);
+>   the §13.9 cache keys must fold in the request headers/method, and a successful write invalidates
+>   the cache entry.
 
 The §13 resolver was **read-only**: `resolve(uri)` *fetches* bytes. So nothing that *writes*
 goes through it — notably `cvc::state::save(filename)` / `restore(filename)`, which are plain Boost
