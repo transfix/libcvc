@@ -1789,6 +1789,18 @@ TEST(AriadneStateUri, SyncResolverCapsFromState) {
   root("sys.ariadne.resolver.read_cap_bytes").value(std::string("oops"));
   sync_resolver_caps_from_state(root);
   EXPECT_EQ(resolve_file_byte_cap(), 100u);
+  // std::stoull is lenient: it would silently take "16MiB" as 16 and WRAP "-1" to ~16 EiB. Both are
+  // rejected (whole-string + sign-free), so a fat-fingered human size can neither shrink the cap to
+  // a few bytes (rejecting every fragment) nor uncap the OOM guard. Cap stays at its last good 100.
+  for (const char *typo : {"16MiB", "10MB", "1,048,576", "-1", "  -5", "0x10", "16 "}) {
+    root("sys.ariadne.resolver.read_cap_bytes").value(std::string(typo));
+    sync_resolver_caps_from_state(root);
+    EXPECT_EQ(resolve_file_byte_cap(), 100u) << "malformed cap should be ignored: " << typo;
+  }
+  // A clean, complete decimal still applies — including "0" (unlimited).
+  root("sys.ariadne.resolver.read_cap_bytes").value(std::string("0"));
+  sync_resolver_caps_from_state(root);
+  EXPECT_EQ(resolve_file_byte_cap(), 0u);
 }
 
 TEST(AriadneStateUri, UnregisterRemovesBothReadAndWrite) {

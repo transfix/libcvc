@@ -41,8 +41,10 @@ void unregister_state_uri_handler();
 // §13.10: read the resolver's file byte caps FROM THE STATE TREE and apply them to the
 // process-global caps (uri.h `set_*_file_byte_cap`). The config lives under `root` at
 // `sys.ariadne.resolver.read_cap_bytes` and `sys.ariadne.resolver.store_cap_bytes` — a decimal
-// byte count, "0" = unlimited. A missing / empty / non-numeric node leaves that cap unchanged, so
-// partial config is fine. This is the opt-in bridge that pushes state config into the app-free
+// byte count, "0" = unlimited. Any node that is not a clean, complete, non-negative decimal count
+// — missing, empty, non-numeric ("oops"), partial ("16MiB"), signed ("-1"), or out of range —
+// leaves that cap unchanged, so partial config is fine and a typo can neither zero nor uncap the
+// resolver. This is the opt-in bridge that pushes state config into the app-free
 // resolver: a host calls it at setup and — to track runtime edits — from a state-watch on those
 // nodes. (The resolver never reads the state tree itself; the caps stay plain process globals.)
 void sync_resolver_caps_from_state(cvc::state &root);

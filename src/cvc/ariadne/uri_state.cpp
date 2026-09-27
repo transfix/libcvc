@@ -9,6 +9,7 @@
 #include <cvc/ariadne/uri_state.h>
 #include <cvc/core/state.h>
 #include <exception>
+#include <limits>
 #include <string>
 
 namespace cvc {
@@ -118,16 +119,25 @@ void sync_resolver_caps_from_state(cvc::state &root) {
   // Read one config node's decimal byte count and push it to `setter`; leave the cap unchanged on
   // a missing / empty / non-numeric node so partial config is fine and a typo cannot zero the cap.
   const auto apply = [&root](const char *path, void (*setter)(std::size_t)) {
-    cvc::state *n = root.findDescendant(path);
-    if (!n)
+    cvc::state *node = root.findDescendant(path);
+    if (!node)
       return;
-    const std::string v = n->value();
+    const std::string v = node->value();
     if (v.empty())
       return;
     try {
-      setter(static_cast<std::size_t>(std::stoull(v)));
+      std::size_t pos = 0;
+      const unsigned long long n = std::stoull(v, &pos);
+      // stoull is lenient: it stops at trailing garbage ("16MiB" -> 16) and WRAPS a leading '-'
+      // ("-1" -> ULLONG_MAX) instead of throwing. Require the WHOLE string to be a clean,
+      // sign-free count, and (on a 32-bit size_t) reject a value that would truncate — otherwise
+      // fall through to "leave the cap unchanged", honouring the never-silently-mis-set contract.
+      if (pos != v.size() || v.find('-') != std::string::npos ||
+          n > std::numeric_limits<std::size_t>::max())
+        return;
+      setter(static_cast<std::size_t>(n));
     } catch (const std::exception &) {
-      // non-numeric -> leave the cap unchanged
+      // non-numeric / out-of-range -> leave the cap unchanged
     }
   };
   apply("sys.ariadne.resolver.read_cap_bytes", &set_resolve_file_byte_cap);
