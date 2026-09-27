@@ -232,6 +232,23 @@ public:
   void min_clearance_world(float *out) const;
   const float *field_data() const { return field_.data(); }
 
+  // Per-agent DRIVE TELEMETRY for the last step() — the diagnostics the drive already computes each
+  // tick (drive_telemetry, drive.h): the CoefMLP coefficients (alpha/beta/gamma, lam_soft),
+  // underfoot grip mu + material risk mrisk, applied external force (ext_fx/fy), final
+  // steer/curvature, worst barrier clearance + its binding flag. The drive discards these unless
+  // asked; this captures them. OFF by default and BYTE-IDENTICAL when off (the drive_step* `tel`
+  // out-param stays null — the same null-off house pattern ext_force/material use), because
+  // capturing costs a per-agent write. Turn it on with set_capture_drive_telemetry(true) BEFORE the
+  // step()s you want to read; the pointer is valid until the next step()/reconfigure. Returns
+  // [size()] (the last captured tick) or nullptr when capture is off or no captured step() has run.
+  // A stats consumer maps each entry to the reducible nav_stats drive_sample POD (see nav_stats.h)
+  // to feed nav_samplers::drive.
+  void set_capture_drive_telemetry(bool on);
+  bool capture_drive_telemetry() const { return capture_tel_; }
+  const drive_telemetry *drive_telemetry_data() const {
+    return (capture_tel_ && static_cast<int>(tel_.size()) == n_) ? tel_.data() : nullptr;
+  }
+
   // Epistemic read surface ([rows*cols] rasters) — lets a renderer draw honest
   // belief-vs-truth: truth() is the world as it IS; belief_occ(m) is plane m's
   // current planning raster (belief & ~truth = a phantom the agents believe);
@@ -339,6 +356,11 @@ private:
   std::vector<float> turn_, dhit_, best_, init_;
   std::vector<float>
       minclr_; // [n] min footprint-wall clearance from the last step() (see min_clearance)
+  // Opt-in per-agent drive telemetry for the last step() (see set_capture_drive_telemetry /
+  // drive_telemetry_data). capture_tel_ off => tel_ stays empty and the drive_step* tel arg is
+  // null (byte-identical); on => tel_ is sized [n] and filled each step().
+  bool capture_tel_ = false;
+  std::vector<drive_telemetry> tel_;
 
   // Opt-in base nav_stats collector + its per-tick scratch (members = no per-step
   // allocation). null stats_ = disarmed. See begin_nav_stats / the fold in step().

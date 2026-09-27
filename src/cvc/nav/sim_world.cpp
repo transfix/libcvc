@@ -504,6 +504,15 @@ void sim_world::step(int num_threads) {
   // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
   // minclr_ is a member (not a discarded local) so min_clearance() can expose it.
   minclr_.resize(n_);
+  // Opt-in drive-telemetry capture: null telp (default) => the drive_step* tel arg is null and the
+  // tick is byte-identical to before this feature; when on, tel_ is sized [n] and each drive fills
+  // it.
+  drive_telemetry *telp = nullptr;
+  if (capture_tel_) {
+    if (static_cast<int>(tel_.size()) != n_)
+      tel_.assign(n_, {});
+    telp = tel_.data();
+  }
   if (mat_on_) {
     const material_stack ms = material_view();
     material_drive md;
@@ -513,16 +522,16 @@ void sim_world::step(int num_threads) {
     md.k_sharp = mat_cfg_.k_sharp;
     md.d_hat_m = mat_cfg_.d_hat_m;
     drive_step_material(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                        map_id_.data(), cfg_.veh, md, minclr_.data(), num_threads);
+                        map_id_.data(), cfg_.veh, md, minclr_.data(), num_threads, telp);
   } else if (ext_.sample) {
     // External force channel (e.g. cvc::dbg's RF/comms force) summed into the
     // drive via the sanctioned ext_force port. Byte-identical to drive_step when
     // ext_.sample is null (so this branch is only taken when a force is set).
     drive_step_ext(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                   map_id_.data(), cfg_.veh, ext_, minclr_.data(), num_threads);
+                   map_id_.data(), cfg_.veh, ext_, minclr_.data(), num_threads, telp);
   } else {
     drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
-               cfg_.veh, minclr_.data(), num_threads, pool_);
+               cfg_.veh, minclr_.data(), num_threads, pool_, telp);
   }
 
   lap(accDrive);
@@ -764,6 +773,14 @@ void sim_world::min_clearance_world(float *out) const {
     const float c = (i < static_cast<int>(minclr_.size())) ? minclr_[i] : 1e30f;
     out[i] = (c >= 1e29f) ? c : c * inv;
   }
+}
+
+void sim_world::set_capture_drive_telemetry(bool on) {
+  capture_tel_ = on;
+  if (on)
+    tel_.assign(n_, {}); // size to the current agent count; step() keeps it in sync
+  else
+    tel_.clear(); // drop the buffer so drive_telemetry_data() returns null and step() passes null
 }
 
 void sim_world::begin_nav_stats(const nav_stats_params &p, const budget_policy &b,

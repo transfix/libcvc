@@ -863,6 +863,78 @@ TEST(NavSimWorld, MaterialIdFillsPerMaterialBuckets) {
     }
 }
 
+TEST(NavDriveTelemetry, CaptureIsOptInExposesPerAgentAndIsByteIdenticalWhenOff) {
+  // set_capture_drive_telemetry exposes the per-agent drive_telemetry the drive already computes
+  // (and otherwise discards). It must be off by default, byte-identical to the pre-feature drive
+  // when off, and expose plausible per-agent diagnostics when on.
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0); // open field: agents drive, no walls
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -100;
+  cfg.min_y = -100;
+  cfg.max_x = 100;
+  cfg.max_y = 100;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  const int N = 4, STEPS = 20;
+
+  // Reference run: capture OFF (the default). No telemetry buffer is exposed.
+  cvc::nav::sim_world wOff = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 7);
+  EXPECT_FALSE(wOff.capture_drive_telemetry());
+  EXPECT_EQ(wOff.drive_telemetry_data(), nullptr);
+  for (int t = 0; t < STEPS; ++t)
+    wOff.step(1);
+  EXPECT_EQ(wOff.drive_telemetry_data(), nullptr); // still null after stepping with capture off
+  std::vector<float> posOff(2 * N), hdOff(N), spOff(N);
+  std::vector<int> mdOff(N);
+  std::vector<std::uint8_t> rcOff(N);
+  wOff.snapshot(posOff.data(), hdOff.data(), spOff.data(), mdOff.data(), rcOff.data());
+
+  // Capture ON: identical seed / config / steps.
+  cvc::nav::sim_world wOn = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 7);
+  wOn.set_capture_drive_telemetry(true);
+  EXPECT_TRUE(wOn.capture_drive_telemetry());
+  for (int t = 0; t < STEPS; ++t)
+    wOn.step(1);
+  std::vector<float> posOn(2 * N), hdOn(N), spOn(N);
+  std::vector<int> mdOn(N);
+  std::vector<std::uint8_t> rcOn(N);
+  wOn.snapshot(posOn.data(), hdOn.data(), spOn.data(), mdOn.data(), rcOn.data());
+
+  // BYTE-IDENTICAL: capturing telemetry must not perturb the drive itself.
+  for (int i = 0; i < 2 * N; ++i)
+    EXPECT_EQ(posOn[i], posOff[i]) << "position " << i << " diverged when capture is on";
+  for (int i = 0; i < N; ++i) {
+    EXPECT_EQ(hdOn[i], hdOff[i]) << "heading " << i;
+    EXPECT_EQ(spOn[i], spOff[i]) << "speed " << i;
+  }
+
+  // FEATURE ON: per-agent telemetry [size()] is exposed and semantically sane.
+  const cvc::nav::drive_telemetry *tel = wOn.drive_telemetry_data();
+  ASSERT_NE(tel, nullptr);
+  bool anyCoef = false;
+  for (int i = 0; i < N; ++i) {
+    EXPECT_FLOAT_EQ(tel[i].mu, 1.0f);    // no grip field -> default dry grip
+    EXPECT_FLOAT_EQ(tel[i].mrisk, 0.0f); // no material stack -> zero risk
+    if (tel[i].alpha != 0.0f || tel[i].beta != 0.0f || tel[i].gamma != 0.0f)
+      anyCoef = true;
+  }
+  EXPECT_TRUE(anyCoef) << "CoefMLP coefficients should be nonzero for at least one driving agent";
+
+  // Toggling capture back off drops the buffer.
+  wOn.set_capture_drive_telemetry(false);
+  EXPECT_FALSE(wOn.capture_drive_telemetry());
+  EXPECT_EQ(wOn.drive_telemetry_data(), nullptr);
+}
+
 TEST(NavSimWorld, PerAgentRadiiOverrideFootprint) {
   // set_vehicle_radii lets a heterogeneous fleet drive with real per-vehicle footprints.
   // A uniform column set to the scalar rr must be byte-identical to the scalar path
