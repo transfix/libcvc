@@ -1108,7 +1108,7 @@ endif()
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/ftxui_backend.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/ftxui_backend.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1117,6 +1117,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/loader.h
   ../../inc/cvc/ariadne/uri.h
   ../../inc/cvc/ariadne/uri_state.h
+  ../../inc/cvc/ariadne/uri_http.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h
@@ -1141,6 +1142,25 @@ if(TARGET yaml-cpp::yaml-cpp OR TARGET yaml-cpp)
   message(STATUS "Ariadne: .ari YAML loader ENABLED (yaml-cpp)")
 else()
   message(STATUS "Ariadne: yaml-cpp not found - .ari loader compiles to a stub")
+endif()
+
+# Ariadne http(s):// URI handler — OPTIONAL (roadmap §13.6). When libcurl is present,
+# ariadne/uri_http.cpp compiles the real network handler (CVC_ARIADNE_HAVE_HTTP) and links curl;
+# when absent it is an inert stub (register_http_uri_handler() is a no-op). The handler is opt-in
+# even when compiled — a host must call register_http_uri_handler() — so this never makes libcvc
+# fetch the network on its own. (Under Emscripten a fetch-based handler is future work.)
+find_package(CURL QUIET)
+if(TARGET CURL::libcurl OR CURL_FOUND)
+  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_HTTP)
+  if(TARGET CURL::libcurl)
+    target_link_libraries(cvc PRIVATE CURL::libcurl)
+  else()
+    target_include_directories(cvc PRIVATE ${CURL_INCLUDE_DIRS})
+    target_link_libraries(cvc PRIVATE ${CURL_LIBRARIES})
+  endif()
+  message(STATUS "Ariadne: http(s):// URI handler ENABLED (libcurl)")
+else()
+  message(STATUS "Ariadne: libcurl not found - http(s):// handler compiles to a stub")
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is

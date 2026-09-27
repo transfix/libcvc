@@ -4,11 +4,13 @@
 // Parsing tests are skipped when the build has no yaml-cpp (the loader is then a
 // stub); the version/schema surface is tested unconditionally.
 
+#include <boost/asio.hpp> // a localhost server for the http handler test
 #include <chrono>
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/uri.h>       // §13 resolver (import routes through it)
+#include <cvc/ariadne/uri_http.h>  // §13.6 http:// handler
 #include <cvc/ariadne/uri_state.h> // §13.3 state:// handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>   // cvc::app (state:// handler tests build a state tree)
@@ -20,6 +22,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 using namespace cvc::ariadne;
 
@@ -74,6 +77,45 @@ std::string write_temp_ari(const std::string &name, const std::string &content) 
     if (!have_yaml())                                                                              \
       GTEST_SKIP() << "libcvc built without yaml-cpp";                                             \
   } while (0)
+
+// A throwaway one-shot localhost HTTP server: binds an OS-assigned port on 127.0.0.1 (listening
+// immediately, so a client that connects before accept() is queued), then on a background thread
+// serves ONE connection a fixed 200 response with `body`. Join it via done(). For the http tests.
+class OneShotHttpServer {
+public:
+  explicit OneShotHttpServer(std::string body)
+      : acceptor_(io_,
+                  boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0)),
+        body_(std::move(body)) {
+    port_ = acceptor_.local_endpoint().port();
+    thread_ = std::thread([this] {
+      boost::system::error_code ec;
+      boost::asio::ip::tcp::socket s(io_);
+      acceptor_.accept(s, ec);
+      if (ec)
+        return;
+      char buf[4096];
+      s.read_some(boost::asio::buffer(buf), ec); // consume the request line/headers
+      const std::string resp =
+          "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body_.size()) +
+          "\r\nConnection: close\r\n\r\n" + body_;
+      boost::asio::write(s, boost::asio::buffer(resp), ec);
+      s.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+    });
+  }
+  unsigned short port() const { return port_; }
+  ~OneShotHttpServer() {
+    if (thread_.joinable())
+      thread_.join();
+  }
+
+private:
+  boost::asio::io_context io_;
+  boost::asio::ip::tcp::acceptor acceptor_;
+  std::string body_;
+  unsigned short port_ = 0;
+  std::thread thread_;
+};
 
 // The URI registry is process-global; a state:// handler captures a state root by pointer.
 // Unregister it when the test scopes out — even on an ASSERT early-return — so a later test's
@@ -1419,6 +1461,50 @@ TEST(AriadneUri, ResolveToFileBytesSchemeSpillsToTempThenCleansUp) {
     EXPECT_EQ(content, "GEOM-BYTES");
   }
   EXPECT_FALSE(std::filesystem::exists(temp_path)); // temp removed on ResolvedFile destruction
+}
+
+TEST(AriadneUri, HttpHandlerFetchesOverLocalhost) {
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  OneShotHttpServer server("hello-over-http");
+  register_http_uri_handler();
+  EXPECT_TRUE(has_uri_handler("http"));
+  EXPECT_TRUE(has_uri_handler("https"));
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
+  UriResult r = resolve(url);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.content, "hello-over-http");
+  EXPECT_FALSE(r.canonical.empty());
+  unregister_uri_handler("http");
+  unregister_uri_handler("https");
+}
+
+TEST(AriadneUri, HttpFetchFailureIsAnErrorNotACrash) {
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  register_http_uri_handler();
+  // Port 1 has nothing listening -> connection refused -> a clean error, never a throw/crash.
+  UriResult r = resolve("http://127.0.0.1:1/nope");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("http fetch"), std::string::npos);
+  unregister_uri_handler("http");
+  unregister_uri_handler("https");
+}
+
+TEST(AriadneModularity, ImportUnitsOverHttp) {
+  SKIP_WITHOUT_YAML();
+  if (!have_http_uri_handler())
+    GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
+  // A units library served over http, imported through the full §13 resolver.
+  OneShotHttpServer server("units:\n  http_ctl: { text: FromHttp }\n");
+  register_http_uri_handler();
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/lib.ari";
+  LoadResult r = load_string(
+      "import: " + url + "\nwindows:\n  - window: W\n    children:\n      - include: http_ctl\n");
+  unregister_uri_handler("http");
+  unregister_uri_handler("https");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find(r.root, Kind::Text, "FromHttp"), nullptr); // the http-served unit expanded
 }
 
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
