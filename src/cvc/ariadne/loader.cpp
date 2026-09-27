@@ -579,8 +579,23 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     }
     if (opts.empty() && opts_expr.empty())
       ctx.warn("ari: combo '" + label + "' has no options:");
+    // values: a parallel list mapping each option label -> a stored value (e.g. an int key). Each
+    // entry is stringified (a YAML int/float/string all become the stored string).
+    std::vector<std::string> values;
+    if (const YAML::Node v = n["values"]; v && v.IsSequence())
+      for (const YAML::Node &e : v)
+        if (e.IsScalar())
+          values.push_back(e.Scalar());
     Widget w = combo(label, bind, std::move(opts), str(n, "default", str(n, "def")));
     w.options_expr = opts_expr;
+    if (!values.empty() && !opts_expr.empty())
+      ctx.warn("ari: combo '" + label +
+               "' has both computed options: and values: — values ignored");
+    else if (!values.empty() && values.size() != w.options.size())
+      ctx.warn("ari: combo '" + label + "' has " + std::to_string(values.size()) + " values: for " +
+               std::to_string(w.options.size()) + " options: — value mapping ignored");
+    else
+      w.values = std::move(values);
     return w;
   }
   if (type == "button") {

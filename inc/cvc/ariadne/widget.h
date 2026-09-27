@@ -160,8 +160,12 @@ struct Widget {
   int ilo = 0, ihi = 100, idef = 0;     // SliderInt
   bool bdef = false;                    // Checkbox / MenuItemToggle default
   std::string fmt = "%.3f";             // SliderFloat printf format
-  std::string sdef;                     // Combo default option text
-  std::vector<std::string> options;     // Combo options
+  std::string sdef; // Combo default (an option label, or — with `values` — a value)
+  std::vector<std::string> options; // Combo options (the DISPLAYED labels)
+  // §4 Combo value mapping: a parallel list the same length as `options`, so the bound key holds
+  // `values[i]` (e.g. an int) while the combo shows `options[i]`. Empty = the key holds the option
+  // TEXT (the default). Ignored when `options_expr` computes the options (no parallel values).
+  std::vector<std::string> values;
 
   // Window initial placement (a backend hint; seeded first-use, user drag wins).
   bool has_pos = false;

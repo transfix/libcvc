@@ -103,9 +103,10 @@ struct MockBackend : Backend {
     rec(std::string("slider_double:") + l);
     return {};
   }
+  IndexEdit combo_ret{}; // programmable return (a select) for the next combo()
   IndexEdit combo(const char *l, int idx, const std::vector<std::string> &) override {
     rec(std::string("combo:") + l + "=" + std::to_string(idx));
-    return {};
+    return combo_ret;
   }
   CustomEdit custom_ret{}; // programmable return for the escape path
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &) override {
@@ -1140,6 +1141,27 @@ TEST(AriadneReactive, ComputedTextBrokenExprIsEmptyAndWarns) {
   rt.render();
   EXPECT_TRUE(mb.saw("text_value:X=")); // empty value, still drawn (not hung/crashed)
   EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
+// §4/G6: a combo with a parallel `values:` maps each displayed label to a stored value (e.g. an int
+// key). The key holds the VALUE; the combo shows the LABEL at the value's index; a select writes
+// the mapped value. This makes an int/enum-keyed control (volren.supersample, …) declarable.
+TEST(AriadneRuntime, ComboValueMappingReadsAndWrites) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The key holds the VALUE "4"; options [Off,2x,4x] map to values [0,2,4], so 4 -> index 2.
+  cvc::state::instance(app)("ss").value(std::string("4"));
+  Widget c = combo("Supersample", "ss", {"Off", "2x", "4x"}, "");
+  c.values = {"0", "2", "4"};
+  rt.set_root(group({c}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("combo:Supersample=2")); // read: value "4" shows at index 2 (the "4x" label)
+  // Now select index 1 ("2x") -> the key must store the MAPPED value "2", not the label "2x".
+  mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ss").value(), "2"); // stored the value, not "2x"
 }
 
 TEST(AriadneReactive, ComputedComboOptionsFromExpression) {

@@ -368,6 +368,27 @@ TEST(AriadneLoader, ProgramOnCapturedVerbatim) {
   EXPECT_EQ(b->on, "(state-set \"paused\" \"true\")"); // s-expr survives YAML intact
 }
 
+// G6: a combo `values:` list parses onto the widget parallel to `options:`; a length mismatch warns
+// and drops the mapping (fail-safe to storing the label text).
+TEST(AriadneLoader, ComboValuesParse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult ok =
+      load_string("windows:\n  - window: W\n    children:\n      - combo: Quality\n     "
+                  "   bind: q\n        options: [Low, High]\n        values: [0, 2]\n");
+  ASSERT_TRUE(ok.ok) << ok.error;
+  const Widget *c = find(ok.root, Kind::Combo);
+  ASSERT_NE(c, nullptr);
+  ASSERT_EQ(c->values.size(), 2u);
+  EXPECT_EQ(c->values[1], "2"); // a YAML int stringified
+  // A mismatched length is ignored (with a warning) — the combo stays a text combo.
+  LoadResult bad = load_string("windows:\n  - window: W\n    children:\n      - combo: Q\n        "
+                               "bind: q\n        options: [a, b, c]\n        values: [0, 1]\n");
+  ASSERT_TRUE(bad.ok) << bad.error;
+  const Widget *cb = find(bad.root, Kind::Combo);
+  ASSERT_NE(cb, nullptr);
+  EXPECT_TRUE(cb->values.empty()); // mapping dropped on mismatch
+}
+
 TEST(AriadneLoader, BareScalarsAndLiteralVsBoundText) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

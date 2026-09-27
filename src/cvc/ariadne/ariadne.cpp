@@ -960,18 +960,23 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::vector<std::string> &opts = w.options_expr.empty() ? w.options : computed;
     if (opts.empty())
       break;
+    // A `values:` list (validated equal-length at load, static options only) maps each displayed
+    // option to the value STORED in the key (e.g. an int); otherwise the key holds the option TEXT.
+    const bool mapped =
+        !w.values.empty() && w.options_expr.empty() && w.values.size() == opts.size();
+    const std::vector<std::string> &store = mapped ? w.values : opts;
     const std::string path = resolve(w.bind);
-    const std::string fallback = w.sdef.empty() ? opts.front() : w.sdef;
+    const std::string fallback = w.sdef.empty() ? store.front() : w.sdef;
     const std::string cur = read_or_seed<std::string>(app, path, fallback);
     int idx = 0;
-    for (std::size_t i = 0; i < opts.size(); ++i)
-      if (opts[i] == cur) {
+    for (std::size_t i = 0; i < store.size(); ++i)
+      if (store[i] == cur) { // match the STORED value (or text), display opts[idx]
         idx = static_cast<int>(i);
         break;
       }
-    const IndexEdit e = b.combo(label, idx, opts);
-    if (e.changed && e.index >= 0 && e.index < static_cast<int>(opts.size()))
-      write<std::string>(app, path, opts[e.index]); // store the TEXT, not an index
+    const IndexEdit e = b.combo(label, idx, opts); // always DISPLAY the labels
+    if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size()))
+      write<std::string>(app, path, store[e.index]); // store the mapped value (or the text)
     break;
   }
 
