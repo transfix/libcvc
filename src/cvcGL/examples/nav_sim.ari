@@ -1,0 +1,97 @@
+# nav_sim.ari — a REAL cvc::nav simulation under the reusable Ariadne component UI (bridge Cut 1).
+# The scene + every panel are declared; the host (nav_sim.cpp) runs the sim_world on the world clock,
+# renders the agents at their world-metre poses, applies the nav.knobs.* sliders via set_live_knobs,
+# and publishes stats.*. Later cuts extract nav_settings.ari / nav_stats.ari / a raster_view.
+#
+#   nav_sim nav_sim.ari --component-path <repo>/src/cvc/ariadne
+
+meta:
+  name: Nav sim (Ariadne + cvc::nav)
+  min_libcvc: 3.4.0
+
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/scene_controls.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/display_toggles.ari
+  - cvc://components/sim_transport.ari
+
+customs:
+  - node: agents
+
+init: |
+  (begin
+    (state-set "show.agents" "1")
+    (state-set "sim.paused" "0")
+    (state-set "sim.speed" "1.0")
+    (state-set "nav.knobs.range_m" "60")
+    (state-set "nav.knobs.sep_gain" "0.03"))
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Paused
+        bind: sim.paused
+      - menu_item: Restart
+        on: sim.restart
+      - separator
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: sim_transport
+  - include: camera_controls
+  - include: scene_controls
+  - include: stage_lighting
+  - include: display_toggles
+  # Cut-1 nav knobs (a later nav_settings.ari component generalizes these), driving the running world.
+  - window: Nav
+    id: nav
+    children:
+      - slider_float: Sensor range (m)
+        bind: nav.knobs.range_m
+        lo: 10.0
+        hi: 200.0
+        def: 60.0
+        fmt: "%.0f"
+      - slider_float: Separation gain
+        bind: nav.knobs.sep_gain
+        lo: 0.0
+        hi: 0.2
+        def: 0.03
+        fmt: "%.3f"
+  - window: Nav stats
+    id: nav_stats
+    children:
+      - text: "Agents"
+        bind: stats.agents
+      - text: "Arrived"
+        bind: stats.arrived
+      - text: "Tick"
+        bind: stats.tick
+      - separator
+      - button: Recenter camera
+        on: camera.recenter
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.13, 0.18], bottom: [0.01, 0.02, 0.04] }
+  nodes:
+    - node: ground
+      type: geometry
+      source: { plane: { size: 220 } } # covers the +/-100 m world
+      material: { color: [0.20, 0.22, 0.26], ambient: 0.35, diffuse: 0.85 }
+    - node: agents
+      type: agents
+      visible: show.agents
+  lights:
+    - light: studio
+      rig: three_point
+      stage: { center: [0, 0, 15], radius: 130 }
+      key: { intensity: 1.6, azimuth: -40, elevation: 55, cone: 70 }
+      fill: 0.8
+      ambient: 0.45
+  shadows:
+    enabled: true
+    resolution: 2048
+    update_interval: 1

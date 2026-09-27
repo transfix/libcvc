@@ -75,6 +75,13 @@ foreach(_demo nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
   vtk_module_autoinit(TARGETS ${_demo} MODULES ${VTK_LIBRARIES})
 endforeach()
 
+# nav_sim — a REAL cvc::nav sim under the reusable Ariadne .ari component UI (bridge Cut 1):
+# world-clock stepping, world-metre agent poses, live nav.knobs.* via set_live_knobs. Uses
+# navdemo::add_border from nav_common.
+add_executable(nav_sim nav_sim.cpp)
+target_link_libraries(nav_sim PRIVATE nav_demo_common cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS nav_sim MODULES ${VTK_LIBRARIES})
+
 # Headless ABI/consistency guard (no GL). The nav demos compile against the
 # in-tree cvc/nav headers but link the SHARED libcvc from the deps prefix; if that
 # libcvc is older than the headers, sim_world's by-value return from
