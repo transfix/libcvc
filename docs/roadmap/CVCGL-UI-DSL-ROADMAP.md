@@ -3111,9 +3111,25 @@ instead of a full transfer.
   demand) the distributed state system already sketches — the cache is a first, local consumer of
   that path.
 
-### 13.10 The WRITE side — a `store`/PUT capability + URI-aware `state::save`/`restore` — *planned*
+### 13.10 The WRITE side — a `store`/PUT capability + URI-aware `state::save`/`restore`
 
-The §13 resolver is **read-only today**: `resolve(uri)` *fetches* bytes. So nothing that *writes*
+> **Status — core LANDED** (`cvc::ariadne`): `store(uri, content, base)` +
+> `register_uri_store_handler`/`unregister_uri_store_handler`/`has_uri_store_handler` in
+> `uri.{h,cpp}`, a scheme registry parallel to the read side (a scheme may register a reader, a
+> writer, or both), with a try/catch barrier and empty-canonical→raw-uri fallback. The built-in
+> **`file` writer is atomic** — a fresh exclusive temp (shared `write_new_file`: `mkstemps`
+> `O_CREAT|O_EXCL`, EINTR-safe) in the target's directory, then `rename()` over it. **`state://`**
+> registers a writer too (`register_state_uri_handler` now wires read + write;
+> `unregister_state_uri_handler` tears down both). URI-aware **`save_state(state&, uri)` /
+> `restore_state(state&, uri)`** land in `state_io.{h,cpp}` at the resolver layer — option **(b)**,
+> so `cvc::state` stays dependency-free; they mirror `cvc::state::save`/`restore` semantics
+> (absolute-path keys, restore at the same/root position), just re-routed through any scheme.
+> **Deferred:** the **`http(s)` PUT** writer (the store seam is ready; only the libcurl PUT body is
+> unwritten) and, separately, `cvc::state::save(uri)` member overloads if the layering is ever
+> inverted. Tests: `AriadneUri.Store*`, `AriadneStateUri.Store*` / `UnregisterRemovesBothReadAndWrite`,
+> `AriadneStateIo.SaveRestoreRoundTripsVia{File,StateScheme}`.
+
+The §13 resolver was **read-only**: `resolve(uri)` *fetches* bytes. So nothing that *writes*
 goes through it — notably `cvc::state::save(filename)` / `restore(filename)`, which are plain Boost
 `write_json` / `read_json` straight to a local path (verified: `state.cpp` includes no `uri.h`, calls
 no `resolve()`). To let a document (or the state tree) round-trip over the *same* scheme set as
