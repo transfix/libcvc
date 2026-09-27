@@ -1,9 +1,20 @@
+#include <chrono>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <cvc/core/state_exec/async_evaluator.h>
+#include <cvc/core/state_exec/async_scheduler.h>
 #include <cvc/core/state_exec/async_stackless_evaluator.h>
 #include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/intrinsics.h>
+#include <cvc/core/state_exec/memory_tracker.h>
+#include <cvc/core/state_exec/process.h>
 #include <cvc/core/state_exec/task.h>
 #include <cvc/core/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <span>
+#include <string>
+#include <thread>
+#include <vector>
 
 using namespace cvc::state_exec;
 
@@ -471,4 +482,131 @@ TEST(AsyncCrossEvaluatorTest, AllFourEvaluatorsConsistent) {
     EXPECT_TRUE(values_equal(r1, r3)) << "ev1 vs ev3 mismatch for: " << prog;
     EXPECT_TRUE(values_equal(r1, r4)) << "ev1 vs ev4 mismatch for: " << prog;
   }
+}
+
+// ===========================================================================
+// async_scheduler now implements scheduler_base, so the DSL intrinsics
+// (spawn/sleep/msg-send/msg-recv/self) drive it identically to the sync
+// scheduler.  These exercise the sleep + messaging + current-pid paths that
+// were ported onto async_scheduler — at the scheduler API AND the intrinsic
+// layer (ictx.sched = &async_scheduler, an upcast to scheduler_base*).
+// ===========================================================================
+
+TEST(AsyncSchedulerTest, SpawnRunsToCompletion) {
+  async_scheduler sched;
+  EXPECT_EQ(sched.current_pid(), -1); // idle
+  int pid = sched.execute(std::string("(+ 40 2)"));
+  EXPECT_GT(pid, 0);
+  auto results = sched.sync_run();
+  auto it = results.find(pid);
+  ASSERT_NE(it, results.end());
+  EXPECT_EQ(std::get<int64_t>(it->second.v), 42);
+  EXPECT_EQ(sched.current_pid(), -1); // reset after stepping (guard)
+}
+
+TEST(AsyncSchedulerTest, ReceiveMessageSuspendsAndDeliverWakes) {
+  async_scheduler sched;
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.sync_step(); // start the process
+  // No receiver waiting: receive_message parks the process in `waiting`.
+  ASSERT_TRUE(sched.receive_message(pid, "chan.a"));
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::waiting);
+  // Delivery wakes exactly the one waiter and readies it.
+  int woken = sched.deliver_to_receivers("chan.a", value_t(std::string("hi")));
+  EXPECT_EQ(woken, 1);
+  info = sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::ready);
+}
+
+TEST(AsyncSchedulerTest, DeliverWithNoReceiverQueuesAndPops) {
+  async_scheduler sched;
+  value_t msg{std::string("queued")};
+  EXPECT_EQ(sched.deliver_to_receivers("chan.q", msg), 0); // nobody waiting
+  EXPECT_EQ(sched.pending_message_count("chan.q"), 1u);
+  auto popped = sched.pop_pending_message("chan.q");
+  ASSERT_TRUE(popped.has_value());
+  EXPECT_EQ(std::get<std::string>(popped->v), "queued");
+  EXPECT_EQ(sched.pending_message_count("chan.q"), 0u);
+}
+
+TEST(AsyncSchedulerTest, SleepSetsWaitingThenWakesAfterDeadline) {
+  async_scheduler sched;
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5 6 7 8)"));
+  sched.sync_step();                    // start
+  ASSERT_TRUE(sched.sleep(pid, 0.005)); // 5ms
+  ASSERT_TRUE(sched.get_process_info(pid).has_value());
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+  EXPECT_FALSE(sched.has_runnable()); // asleep -> not runnable
+  // After the deadline, step() wakes it (wake_sleeping_processes) and it resumes.
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  for (int i = 0; i < 64 && sched.get_process_info(pid) &&
+                  sched.get_process_info(pid)->status != process_status::terminated;
+       ++i)
+    sched.sync_step();
+  ASSERT_TRUE(sched.get_process_info(pid).has_value());
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::terminated);
+}
+
+class AsyncSchedulerIntrinsicsTest : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  async_scheduler sched;
+  memory_tracker tracker;
+  process_ptr proc = make_process();
+  intrinsics_context ictx;
+  environment_ptr env;
+
+  void SetUp() override {
+    proc->pid = 1;
+    proc->status = process_status::running;
+    ictx.sched = &sched; // async_scheduler* -> scheduler_base* (the whole point)
+    ictx.root = &cvc::state::instance(app_ctx);
+    ictx.tracker = &tracker;
+    ictx.proc = proc;
+    ictx.pid = 1;
+    env = builtins::make_default_environment();
+    register_intrinsics(env, &ictx);
+  }
+
+  value_t call(const std::string &name, std::vector<value_t> args) {
+    auto *fn_val = env->lookup(name);
+    EXPECT_NE(fn_val, nullptr) << "Function not found: " << name;
+    auto *fn = std::get_if<native_fn>(&fn_val->v);
+    EXPECT_NE(fn, nullptr) << "Not a function: " << name;
+    return (*fn)(std::span<const value_t>(args.data(), args.size()));
+  }
+};
+
+TEST_F(AsyncSchedulerIntrinsicsTest, SpawnViaIntrinsicCreatesProcess) {
+  auto pid_val = call("spawn", {std::string("(+ 1 2)")});
+  auto pid = std::get<int64_t>(pid_val.v);
+  EXPECT_GT(pid, 0);
+  EXPECT_GE(sched.process_count(), 1);
+}
+
+TEST_F(AsyncSchedulerIntrinsicsTest, SleepViaIntrinsicSetsWaiting) {
+  auto pid_val = call("spawn", {std::string("(begin 1 2 3 4 5)")});
+  auto pid = std::get<int64_t>(pid_val.v);
+  sched.sync_step();
+  ictx.pid = static_cast<int>(pid);
+  auto result = call("sleep", {0.01});
+  EXPECT_TRUE(std::get<bool>(result.v));
+  auto info = sched.get_process_info(static_cast<int>(pid));
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::waiting);
+}
+
+TEST_F(AsyncSchedulerIntrinsicsTest, MsgRecvViaIntrinsicSuspendsViaScheduler) {
+  auto pid_val = call("spawn", {std::string("(begin 1 2 3 4 5)")});
+  auto pid = std::get<int64_t>(pid_val.v);
+  sched.sync_step();
+  ictx.pid = static_cast<int>(pid);
+  auto result = call("msg-recv", {std::string("test.path")});
+  EXPECT_TRUE(result.is_nil()); // nil placeholder before delivery
+  auto info = sched.get_process_info(static_cast<int>(pid));
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::waiting);
 }

@@ -120,6 +120,18 @@ process_ptr async_scheduler::select_process() {
 // ---------------------------------------------------------------------------
 
 void async_scheduler::execute_process_step(process &proc) {
+  // Track which process is currently executing so intrinsics can query it (self/ps).
+  current_pid_ = proc.pid;
+  current_proc_ = processes_[proc.pid];
+  struct guard {
+    int &pid;
+    process_ptr &pp;
+    ~guard() {
+      pid = -1;
+      pp.reset();
+    }
+  } reset_guard{current_pid_, current_proc_};
+
   if (!proc.pending_signals.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
     handle_signal(proc);
     return;
@@ -133,6 +145,15 @@ void async_scheduler::execute_process_step(process &proc) {
   proc.status = process_status::running;
   proc.last_run_start = std::chrono::steady_clock::now();
 
+  // Arm the cooperative deadline for this step so an uncapped nested evaluator or a
+  // long-running builtin aborts at the process's remaining time budget too — the same
+  // guarantee the sync scheduler has (scheduler.cpp). max_time <= 0 means unlimited.
+  std::optional<double> step_budget;
+  if (proc.max_time > 0.0) {
+    const double remaining = proc.max_time - proc.elapsed_time();
+    step_budget = remaining > 0.0 ? remaining : 0.0;
+  }
+  eval_deadline_guard step_deadline(step_budget);
   bool done = evaluator_.step(proc.state);
 
   auto now = std::chrono::steady_clock::now();
@@ -151,7 +172,8 @@ void async_scheduler::execute_process_step(process &proc) {
 
   if (done) {
     terminate_process(proc, proc.state.result);
-  } else {
+  } else if (proc.status == process_status::running) {
+    // Only reset to ready if the intrinsic didn't change status (sleep/msg-recv set waiting).
     proc.status = process_status::ready;
   }
 }
@@ -161,6 +183,8 @@ void async_scheduler::execute_process_step(process &proc) {
 // ---------------------------------------------------------------------------
 
 task<int> async_scheduler::step() {
+  // Wake sleeping processes whose deadline has passed, then poll watched paths.
+  wake_sleeping_processes();
   poll_watches();
   auto proc = select_process();
   if (!proc)
@@ -210,6 +234,102 @@ bool async_scheduler::has_runnable() const {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Cooperative sleep + inter-process messaging (parity with the sync scheduler;
+// bodies mirror scheduler.cpp so the intrinsics behave identically on either).
+// ---------------------------------------------------------------------------
+
+void async_scheduler::wake_sleeping_processes() {
+  auto now = std::chrono::steady_clock::now();
+  for (auto &[pid, proc] : processes_) {
+    if (proc->status == process_status::waiting && proc->wake_time && now >= *proc->wake_time) {
+      proc->wake_time.reset();
+      proc->status = process_status::ready;
+    }
+  }
+}
+
+bool async_scheduler::sleep(int pid, double seconds) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  auto &proc = *it->second;
+  if (proc.status != process_status::ready && proc.status != process_status::running)
+    return false;
+  if (proc.status == process_status::running) {
+    auto now = std::chrono::steady_clock::now();
+    proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  }
+  proc.wake_time = std::chrono::steady_clock::now() +
+                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                       std::chrono::duration<double>(seconds));
+  proc.status = process_status::waiting;
+  return true;
+}
+
+bool async_scheduler::receive_message(int pid, const std::string &path) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  auto &proc = *it->second;
+  if (proc.status != process_status::ready && proc.status != process_status::running)
+    return false;
+  if (proc.status == process_status::running) {
+    auto now = std::chrono::steady_clock::now();
+    proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  }
+  proc.recv_path = path;
+  proc.status = process_status::waiting;
+  return true;
+}
+
+int async_scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
+  int woken = 0;
+  for (auto &[pid, proc] : processes_) {
+    if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
+      proc->recv_path.reset();
+      proc->state.result = msg;
+      // Patch the nil placeholder that msg-recv left in the parent frame.
+      if (!proc->state.stack.empty() && !proc->state.stack.back().results.empty())
+        proc->state.stack.back().results.back() = msg;
+      proc->status = process_status::ready;
+      ++woken;
+    }
+  }
+  // If no process was waiting, queue for later msg-recv calls.
+  if (woken == 0) {
+    auto &q = pending_messages_[path];
+    if (max_pending_messages == 0 || q.size() < max_pending_messages)
+      q.push(msg);
+  }
+  return woken;
+}
+
+std::optional<value_t> async_scheduler::pop_pending_message(const std::string &path) {
+  auto it = pending_messages_.find(path);
+  if (it == pending_messages_.end() || it->second.empty())
+    return std::nullopt;
+  auto msg = std::move(it->second.front());
+  it->second.pop();
+  if (it->second.empty())
+    pending_messages_.erase(it);
+  return msg;
+}
+
+std::size_t async_scheduler::pending_message_count(const std::string &path) const {
+  auto it = pending_messages_.find(path);
+  if (it == pending_messages_.end())
+    return 0;
+  return it->second.size();
+}
+
+std::size_t async_scheduler::total_pending_messages() const {
+  std::size_t total = 0;
+  for (const auto &[_, q] : pending_messages_)
+    total += q.size();
+  return total;
 }
 
 void async_scheduler::queue_watch_event(int pid, process::watch_event evt) {
