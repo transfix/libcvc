@@ -521,8 +521,18 @@ void sim_world::step(int num_threads) {
     md.lam_hard = mat_lam_hard_.data();
     md.k_sharp = mat_cfg_.k_sharp;
     md.d_hat_m = mat_cfg_.d_hat_m;
-    drive_step_material(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                        map_id_.data(), cfg_.veh, md, minclr_.data(), num_threads, telp);
+    if (ext_.sample) {
+      // BOTH a material stack and an external force are attached — fuse them so the learned
+      // grip/risk policy AND the ext (RF/comm) force drive the same tick, instead of material
+      // silently overriding ext. drive_step_material_ext == drive_step_material with the ext force
+      // also summed into the accumulator + steering bias.
+      drive_step_material_ext(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
+                              map_id_.data(), cfg_.veh, md, ext_, minclr_.data(), num_threads,
+                              telp);
+    } else {
+      drive_step_material(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
+                          map_id_.data(), cfg_.veh, md, minclr_.data(), num_threads, telp);
+    }
   } else if (ext_.sample) {
     // External force channel (e.g. cvc::dbg's RF/comms force) summed into the
     // drive via the sanctioned ext_force port. Byte-identical to drive_step when

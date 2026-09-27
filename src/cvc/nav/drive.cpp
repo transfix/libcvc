@@ -800,5 +800,63 @@ void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const 
                ext.sample ? &ext : nullptr, minclr_out, num_threads, nullptr, tel);
 }
 
+void bicycle_rollout_material_ext(const field_stack &f, float *o, float *th, float *sp,
+                                  const float *goal, const float *al, const float *be,
+                                  const float *ga, int n, const int *map_id, const veh_params &v,
+                                  const material_drive &mat, const ext_force &ext,
+                                  float *minclr_out, int num_threads) {
+  // Given-coefficients twin of drive_step_material_ext (mat AND ext both live). A null mat.stack or
+  // null ext.sample degrades to the one-sided rollout, so the byte-identity guards hold.
+  rollout_impl(f, o, th, sp, goal, al, be, ga, n, map_id, v, mat.stack ? &mat : nullptr,
+               ext.sample ? &ext : nullptr, minclr_out, num_threads, nullptr, nullptr);
+}
+
+void drive_step_material_ext(const field_stack &f, float *o, float *th, float *sp,
+                             const float *carrot, const coef_mlp &model, int n, const int *map_id,
+                             const veh_params &v, const material_drive &mat, const ext_force &ext,
+                             float *minclr_out, int num_threads, drive_telemetry *tel) {
+  // drive_step_material (feature-flag validation + lam-head extraction, IDENTICAL) but the ext
+  // force is also passed to rollout_impl, so the learned grip/risk policy and the ext (RF/comm)
+  // force drive the SAME tick — summed into one force accumulator and one steering bias. A null
+  // ext.sample reproduces drive_step_material exactly.
+  const bool want_grip = model.has_mu();
+  const bool want_risk = model.has_risk();
+  const int in_w = model.in_features();
+  const int expect = 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0);
+  if (in_w != expect)
+    throw std::runtime_error(
+        "cvc::nav::drive_step_material_ext: coef_mlp in_features does not match its feature flags");
+  if (want_grip && !(v.grip && v.grip->data))
+    throw std::runtime_error("cvc::nav::drive_step_material_ext: model takes the grip feature but "
+                             "veh_params.grip is null");
+  if (want_risk && !(mat.stack && mat.stack->data))
+    throw std::runtime_error("cvc::nav::drive_step_material_ext: model takes the risk feature but "
+                             "the material stack is null");
+  const material_stack *risk_src = want_risk ? mat.stack : nullptr;
+  std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
+  coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
+             v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3);
+  const int out_w = model.out_features();
+  std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
+  model.forward(feat.data(), n, coef.data(), num_threads);
+  std::vector<float> al(n), be(n), ga(n);
+  for (int i = 0; i < n; ++i) {
+    al[i] = coef[static_cast<std::size_t>(out_w) * i + 0];
+    be[i] = coef[static_cast<std::size_t>(out_w) * i + 1];
+    ga[i] = coef[static_cast<std::size_t>(out_w) * i + 2];
+  }
+  material_drive md = mat;
+  std::vector<float> lam_learned;
+  if (model.has_lam()) {
+    lam_learned.resize(n);
+    for (int i = 0; i < n; ++i)
+      lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3];
+    md.lam_soft = lam_learned.data();
+  }
+  rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v,
+               md.stack ? &md : nullptr, ext.sample ? &ext : nullptr, minclr_out, num_threads,
+               nullptr, tel);
+}
+
 } // namespace nav
 } // namespace cvc
