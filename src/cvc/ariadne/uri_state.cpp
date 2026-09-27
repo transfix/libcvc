@@ -37,12 +37,19 @@ UriResult state_resolve(cvc::state &root, const Uri &u) {
   if (!node)
     return {false, std::string(), std::string(), "ari: state node '" + u.path + "' not found"};
 
-  // The value channel: follow a transparent link to its target (falls back to this node's own
-  // value on a broken / cyclic / budget-exhausted chain — resolvedValue's documented contract).
-  std::string content = node->resolvedValue();
-  // Canonical identity for the loader's dedup / cycle guard: the resolved node's absolute path,
-  // so two spellings of the same node collapse and distinct nodes stay distinct.
-  const std::string canonical = "state://" + node->fullName() + "?value";
+  // The value channel follows a transparent link to its target (matching resolvedValue). Resolve
+  // the effective node ONCE so content and canonical come from the SAME node: an opaque/broken
+  // link or a non-link stays put (own value), a transparent link lands on its terminal target.
+  // Keying the canonical on the effective node's absolute path is what lets an alias and its
+  // target collapse in the loader's dedup / cycle guard.
+  cvc::state *effective = node;
+  if (node->isLink() && node->linkMode() == cvc::state::link_mode::transparent) {
+    const cvc::state::link_resolution lr = node->resolveLink();
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
+      effective = lr.target; // broken / cyclic / budget-exhausted → fall back to the link node
+  }
+  std::string content = effective->value();
+  const std::string canonical = "state://" + effective->fullName() + "?value";
   return {true, std::move(content), canonical, std::string()};
 }
 

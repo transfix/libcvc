@@ -51,15 +51,25 @@ UriResult resolve_file(const Uri &u, const std::string &base) {
     return {false, std::string(), full, "ari: '" + full + "' is a directory, not a file"};
   if (!fs::is_regular_file(st))
     return {false, std::string(), full, "ari: '" + full + "' is not a regular file"};
-  const std::uintmax_t size = fs::file_size(full, ec);
-  if (!ec && size > kMaxFileBytes)
-    return {false, std::string(), full,
-            "ari: file '" + full + "' exceeds the " + std::to_string(kMaxFileBytes) +
-                "-byte fragment cap"};
   std::ifstream in(full, std::ios::binary);
   if (!in)
     return {false, std::string(), full, "ari: cannot open file '" + full + "'"};
-  std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  // Bound the READ, not a pre-read stat: the byte count is enforced here, so a file that
+  // under-reports its size (procfs), grows under a TOCTOU, or streams past its stat size cannot
+  // exceed the cap. Read up to kMaxFileBytes; one more available byte means the file is too big.
+  std::string content;
+  char buf[64 * 1024];
+  while (in) {
+    in.read(buf, sizeof(buf));
+    const std::streamsize got = in.gcount();
+    if (got <= 0)
+      break;
+    if (content.size() + static_cast<std::size_t>(got) > kMaxFileBytes)
+      return {false, std::string(), full,
+              "ari: file '" + full + "' exceeds the " + std::to_string(kMaxFileBytes) +
+                  "-byte fragment cap"};
+    content.append(buf, static_cast<std::size_t>(got));
+  }
   if (in.bad())
     return {false, std::string(), full, "ari: read error on file '" + full + "'"};
   return {true, std::move(content), full, std::string()};

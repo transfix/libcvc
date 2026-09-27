@@ -617,9 +617,21 @@ void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
 // uri_resolver (file:// built in; state://, http(s):// via a registered handler), relative to
 // `base_dir`. Recurses into an imported library's OWN imports (based at its directory), and
 // dedups/cycle-guards on the resolved canonical identity (a → b → a terminates).
-void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_dir) {
+// The `imported` canonical set stops cycles and exact repeats, but not a linear chain of DISTINCT
+// fragments (a→b→c→…), which recurses one native C++ frame per link — a deep enough chain would
+// overflow the stack. Bound the depth (and the aggregate library count) explicitly, mirroring the
+// include: expansion guard's intent, and warn rather than crash.
+constexpr int kMaxImportDepth = 32;
+constexpr std::size_t kMaxImports = 4096;
+
+void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_dir, int depth = 0) {
   if (!doc.IsMap())
     return;
+  if (depth > kMaxImportDepth) {
+    ctx.warn("ari: import chain exceeds the maximum depth (" + std::to_string(kMaxImportDepth) +
+             ") — deeper imports skipped");
+    return;
+  }
   const YAML::Node imp = doc["import"];
   std::vector<std::string> uris;
   if (imp && imp.IsScalar())
@@ -629,6 +641,11 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
       if (p.IsScalar())
         uris.push_back(p.Scalar());
   for (const std::string &uri : uris) {
+    if (ctx.imported.size() >= kMaxImports) {
+      ctx.warn("ari: import limit reached (" + std::to_string(kMaxImports) +
+               " libraries) — remaining imports skipped");
+      break;
+    }
     const UriResult res = resolve(uri, base_dir);
     if (!res.ok) {
       ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
@@ -644,8 +661,8 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
       continue;
     }
     const std::string sub_base = std::filesystem::path(res.canonical).parent_path().string();
-    process_imports(ctx, sub, sub_base);           // the library's own imports, based at its dir
-    merge_units(ctx, sub["units"], /*warn=*/true); // then its units (import-vs-import warns)
+    process_imports(ctx, sub, sub_base, depth + 1); // the library's own imports, based at its dir
+    merge_units(ctx, sub["units"], /*warn=*/true);  // then its units (import-vs-import warns)
   }
 }
 

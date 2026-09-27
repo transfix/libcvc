@@ -1346,6 +1346,27 @@ TEST(AriadneUri, FileHandlerRejectsDirectoryWithoutThrowing) {
   EXPECT_NE(r.error.find("directory"), std::string::npos);
 }
 
+TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
+  // The cap is enforced during the read, not by a pre-read stat, so a file larger than the cap
+  // is rejected regardless of what stat reports. A sparse file makes this cheap to construct.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_import_test";
+  fs::create_directories(dir);
+  const fs::path big = dir / "toobig.bin";
+  {
+    std::ofstream o(big, std::ios::binary);
+    o.seekp(static_cast<std::streamoff>(17) * 1024 * 1024); // 17 MiB > the 16 MiB cap
+    o.put('\0');
+  }
+  if (fs::exists(big) && fs::file_size(big) > 16u * 1024u * 1024u) {
+    UriResult r = resolve(big.string());
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("exceeds"), std::string::npos);
+  }
+  std::error_code ec;
+  fs::remove(big, ec);
+}
+
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
   // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
   // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
@@ -1379,6 +1400,23 @@ TEST(AriadneStateUri, ValueChannelResolvesNodeValue) {
   UriResult bare = resolve("state://ui.libs.controls"); // no query defaults to ?value
   ASSERT_TRUE(bare.ok) << bare.error;
   EXPECT_EQ(bare.content, "hello-from-state");
+}
+
+TEST(AriadneStateUri, TransparentLinkAliasCollapsesToTargetCanonical) {
+  // An alias (transparent link) and its target hold identical content; their canonicals must
+  // match too, so the loader's import dedup collapses the two spellings into one library.
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("libs.forms").value(std::string("units:\n  u: { text: X }\n"));
+  root("libs.alias").linkTo("libs.forms", cvc::state::link_mode::transparent);
+  register_state_uri_handler(root);
+  StateHandlerGuard guard;
+  UriResult a = resolve("state://libs.alias");
+  UriResult t = resolve("state://libs.forms");
+  ASSERT_TRUE(a.ok) << a.error;
+  ASSERT_TRUE(t.ok) << t.error;
+  EXPECT_EQ(a.content, t.content);     // the link follows through to the target's value
+  EXPECT_EQ(a.canonical, t.canonical); // and the canonical follows too -> they dedup as one
 }
 
 TEST(AriadneStateUri, MissingNodeErrors) {
@@ -1501,6 +1539,27 @@ windows:
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find(r.root, Kind::Text, "FromState"), nullptr);
+}
+
+TEST(AriadneModularity, DeepImportChainIsDepthCapped) {
+  SKIP_WITHOUT_YAML();
+  // A linear chain of DISTINCT libraries (f0 imports f1 imports … imports fN) recurses one C++
+  // frame per link; the dedup set never trips (all distinct). The depth cap must stop it with a
+  // warning, not a stack overflow. N exceeds kMaxImportDepth (32).
+  const int N = 40;
+  std::string f0;
+  for (int i = 0; i <= N; ++i) {
+    std::string content;
+    if (i < N)
+      content += "import: f" + std::to_string(i + 1) + ".ari\n";
+    content += "units:\n  u" + std::to_string(i) + ": { text: T" + std::to_string(i) + " }\n";
+    const std::string p = write_temp_ari("f" + std::to_string(i) + ".ari", content);
+    if (i == 0)
+      f0 = p;
+  }
+  LoadResult r = load_file(f0);
+  ASSERT_TRUE(r.ok) << r.error; // capped, not crashed
+  EXPECT_TRUE(has_warning(r, "maximum depth"));
 }
 
 TEST(AriadneModularity, ImportUnknownSchemeWarns) {
