@@ -60,3 +60,13 @@ units:
         lo: 0.0
         hi: 1.0
         fmt: "%.2f"
+      - slider_float: Environment
+        bind: lighting.env_intensity
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+      - slider_float: Stage radius
+        bind: lighting.stage_radius
+        lo: 1.0
+        hi: 500.0
+        fmt: "%.0f"

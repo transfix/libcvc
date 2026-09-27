@@ -1145,6 +1145,16 @@ else()
   message(STATUS "Ariadne: yaml-cpp not found - .ari loader compiles to a stub")
 endif()
 
+# Ariadne reusable .ari COMPONENT LIBRARY (roadmap §16.1b) — a directory of DECLARATIVE .ari UI
+# components (stage_lighting, scene_controls, …) that documents import via the location-independent
+# cvc:// scheme (import: cvc://components/foo.ari). Install it as data alongside libcvc, and compile
+# the install datadir into the resolver so register_cvc_uri_handler() finds it with no env var.
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
+        FILES_MATCHING PATTERN "*.ari")
+target_compile_definitions(
+  cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")
+
 # Ariadne http(s):// URI handler — OPTIONAL (roadmap §13.6). When libcurl is present,
 # ariadne/uri_http.cpp compiles the real network handler (CVC_ARIADNE_HAVE_HTTP) and links curl;
 # when absent it is an inert stub (register_http_uri_handler() is a no-op). The handler is opt-in

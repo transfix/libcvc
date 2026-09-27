@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/uri.h> // register_cvc_uri_handler — the cvc:// component-library import path
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
@@ -32,6 +33,7 @@
 #include <cvc/volume/bounding_box.h>
 #include <string>
 #include <thread>
+#include <vector>
 
 using cvc::gl::CameraController;
 using cvc::gl::ImGuiBackend;
@@ -49,6 +51,7 @@ int main(int argc, char **argv) {
   bool offscreen = false;
   long frames = 0;
   int width = 1024, height = 768;
+  std::vector<std::string> componentPaths; // extra cvc:// search dirs (dev / bundled components)
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *dflt) { return (i + 1 < argc) ? argv[++i] : dflt; };
@@ -63,9 +66,14 @@ int main(int argc, char **argv) {
       width = std::atoi(next("1024"));
     else if (!std::strcmp(a, "--height"))
       height = std::atoi(next("768"));
+    else if (!std::strcmp(a, "--component-path")) // add a dir to the cvc:// component search path
+      componentPaths.push_back(next(""));
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
   }
+  // The cvc:// component-library import path (import: cvc://components/foo.ari), resolved against
+  // CVC_ARIADNE_PATH + any --component-path dirs + the install datadir + cwd. Register before load.
+  cvc::ariadne::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen || !png.empty();
   if (capturing && frames <= 0)
     frames = 1; // a capture defaults to one frame

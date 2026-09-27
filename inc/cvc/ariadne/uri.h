@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace cvc {
 namespace ariadne {
@@ -72,6 +73,25 @@ void unregister_uri_handler(const std::string &scheme);
 
 // Whether a scheme has a resolver (a registered handler, or the built-in "file").
 bool has_uri_handler(const std::string &scheme);
+
+// Register the `cvc://` scheme — a LOCATION-INDEPENDENT import path for the reusable .ari component
+// library shipped with libcvc/pycvc. `cvc://<relpath>` (e.g. `cvc://components/stage_lighting.ari`)
+// resolves `<relpath>` against a search list, first hit wins:
+//   1. each directory in the `CVC_ARIADNE_PATH` environment variable (`:`-separated on POSIX),
+//   2. `extra_search_dirs` (in order) — e.g. a pycvc package's bundled components dir,
+//   3. the compiled-in install data dir (`<prefix>/share/libcvc/ariadne`, if this build set it),
+//   4. the process's current working directory.
+// A hit resolves through the built-in `file` reader (so the canonical id is the found file's
+// absolute path and a component's OWN relative imports resolve against its directory). App-free and
+// process-global; a host calls this once at setup. So a document writes
+// `import: cvc://components/foo.ari` and loads regardless of where it lives, while a plain relative
+// `import: components/foo.ari` still works for a co-located demo.
+void register_cvc_uri_handler(const std::vector<std::string> &extra_search_dirs = {});
+
+// The directories the `cvc://` handler searches, in order (env + extra + install datadir + cwd) —
+// exposed for diagnostics and for tooling that lists the component library.
+std::vector<std::string>
+cvc_uri_search_dirs(const std::vector<std::string> &extra_search_dirs = {});
 
 // Resolve `uri` to its bytes. `base` is the enclosing fragment's canonical location (used to
 // resolve a relative file path); pass "" at the top level. Dispatches by scheme: the built-in

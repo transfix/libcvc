@@ -18,8 +18,8 @@ meta:
   min_libcvc: 3.4.0
 
 import:
-  - components/stage_lighting.ari
-  - components/scene_controls.ari
+  - cvc://components/stage_lighting.ari
+  - cvc://components/scene_controls.ari
 
 # Seed the "show bunny" toggle on (init: wins over a widget default).
 init: |

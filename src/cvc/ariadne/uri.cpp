@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cvc/ariadne/uri.h>
 #include <filesystem>
 #include <fstream>
@@ -15,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <cerrno>   // EINTR
@@ -280,6 +282,77 @@ bool has_uri_handler(const std::string &scheme) {
     return true; // built-in
   std::lock_guard<std::mutex> lock(uri_mutex());
   return uri_registry().find(s) != uri_registry().end();
+}
+
+// --- cvc:// component-library scheme (a location-independent import path) ------------------------
+
+namespace {
+// Split a PATH-style env value on the platform list separator, dropping empty entries.
+std::vector<std::string> split_env_list(const char *v) {
+#ifdef _WIN32
+  const char sep = ';';
+#else
+  const char sep = ':';
+#endif
+  std::vector<std::string> out;
+  if (!v)
+    return out;
+  std::string cur;
+  for (const char *p = v; *p; ++p) {
+    if (*p == sep) {
+      if (!cur.empty())
+        out.push_back(cur);
+      cur.clear();
+    } else {
+      cur += *p;
+    }
+  }
+  if (!cur.empty())
+    out.push_back(cur);
+  return out;
+}
+} // namespace
+
+std::vector<std::string> cvc_uri_search_dirs(const std::vector<std::string> &extra_search_dirs) {
+  std::vector<std::string> dirs = split_env_list(std::getenv("CVC_ARIADNE_PATH"));
+  for (const std::string &d : extra_search_dirs)
+    dirs.push_back(d);
+#ifdef CVC_ARIADNE_DATA_DIR
+  dirs.push_back(
+      CVC_ARIADNE_DATA_DIR); // the compiled-in install datadir (<prefix>/share/libcvc/ariadne)
+#endif
+  dirs.push_back("."); // the process CWD (last)
+  return dirs;
+}
+
+void register_cvc_uri_handler(const std::vector<std::string> &extra_search_dirs) {
+  // Snapshot the search list at registration (env read once, at host setup).
+  const std::vector<std::string> dirs = cvc_uri_search_dirs(extra_search_dirs);
+  register_uri_handler("cvc", [dirs](const Uri &u, const std::string & /*base*/) -> UriResult {
+    namespace fs = std::filesystem;
+    const std::string &rel = u.path; // the part after cvc://
+    if (rel.empty())
+      return {false, std::string(), std::string(),
+              "ari: cvc:// requires a path (e.g. cvc://components/stage_lighting.ari)"};
+    std::string tried;
+    for (const std::string &d : dirs) {
+      std::error_code ec;
+      const fs::path cand = fs::path(d) / rel;
+      if (fs::is_regular_file(cand, ec)) {
+        // Resolve through the built-in file reader so the canonical id is the found file's absolute
+        // path — a component's OWN relative imports then resolve against its directory.
+        Uri f;
+        f.scheme = "file";
+        f.path = cand.string();
+        f.raw = cand.string();
+        return resolve_file(f, std::string());
+      }
+      tried += (tried.empty() ? "" : ", ") + d;
+    }
+    return {false, std::string(), std::string(),
+            "ari: cvc://" + rel + " not found on the component search path [" + tried +
+                "] (set CVC_ARIADNE_PATH or install the component library)"};
+  });
 }
 
 UriResult resolve(const std::string &uri, const std::string &base) {

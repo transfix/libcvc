@@ -1708,6 +1708,56 @@ TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
   fs::remove(big, ec);
 }
 
+// The cvc:// scheme resolves a component name against a search path (env + extra dirs + cwd), first
+// hit wins — the location-independent import path for the shared .ari component library.
+TEST(AriadneUri, CvcSchemeResolvesFromSearchPath) {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() / "ariadne_cvc_test";
+  const fs::path comps = root / "components";
+  fs::create_directories(comps);
+  {
+    std::ofstream o(comps / "unit.ari");
+    o << "units:\n  cvc_ctl: { text: FromCvc }\n";
+  }
+  register_cvc_uri_handler(
+      {root.string()}); // root is a search dir -> cvc://components/... resolves
+  SchemeGuard g{"cvc"};
+  UriResult r = resolve("cvc://components/unit.ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(r.content.find("FromCvc"), std::string::npos);
+  EXPECT_FALSE(
+      r.canonical.empty()); // the found file's absolute path (relative imports resolve off it)
+  UriResult miss = resolve("cvc://components/nope.ari");
+  EXPECT_FALSE(miss.ok);
+  EXPECT_NE(miss.error.find("not found"), std::string::npos); // a clear diagnostic, not a crash
+  std::error_code ec;
+  fs::remove_all(root, ec);
+}
+
+// End-to-end: a document imports a component by cvc:// URI and includes its unit — the
+// library-import path a shipped .ari uses (import: cvc://components/foo.ari), location-independent.
+TEST(AriadneModularity, ImportComponentViaCvcScheme) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() / "ariadne_cvc_import";
+  const fs::path comps = root / "components";
+  fs::create_directories(comps);
+  {
+    std::ofstream o(comps / "panel.ari");
+    o << "units:\n  panel:\n    window: P\n    children:\n      - text: FromComponent\n";
+  }
+  register_cvc_uri_handler({root.string()});
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string("import: cvc://components/panel.ari\nwindows:\n  - include: panel\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  EXPECT_EQ(win->label, "P");
+  EXPECT_NE(find(r.root, Kind::Text, "FromComponent"), nullptr);
+  std::error_code ec;
+  fs::remove_all(root, ec);
+}
+
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
   const std::string p = write_temp_ari("srcprobe.off", "OFF-DATA");
   ResolvedFile rf = resolve_to_file(p);

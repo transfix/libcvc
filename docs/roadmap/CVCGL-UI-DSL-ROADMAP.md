@@ -3547,6 +3547,18 @@ strings — no yaml-cpp, `inc/cvc/ariadne/value.h`).
   > `stage_lighting_panel` / `scene_menu` custom widgets) is that escape hatch — a bridge for the full
   > C++ panels; the DECLARATIVE library of `.ari` component windows is the primary path, shipped with
   > libcvc + pycvc and leaned on across demos.
+  > **Component library + `cvc://` LANDED:** the components live at `src/cvc/ariadne/components/`
+  > (first-class, backend-neutral data) and install to `<prefix>/share/libcvc/ariadne/components/`. A
+  > document imports one location-independently via the **`cvc://` scheme** —
+  > `import: cvc://components/stage_lighting.ari` — resolved by `register_cvc_uri_handler()` against a
+  > search list: `$CVC_ARIADNE_PATH` → host-supplied dirs → the compiled-in install datadir
+  > (`CVC_ARIADNE_DATA_DIR`) → cwd (first hit wins; a plain relative `import:` still works for a
+  > co-located demo). The generic `ariadne_hello` runner registers it (+ a `--component-path` dev
+  > flag). `bunny_shadow.ari` now imports its panels via `cvc://`. Tests:
+  > `AriadneUri.CvcSchemeResolvesFromSearchPath`, `AriadneModularity.ImportComponentViaCvcScheme`.
+  > **Next:** pycvc ships `components/` as package data + registers `cvc://` at its bundled dir; an
+  > `INDEX.ari` manifest (units + args + bound state keys) for tooling/discovery; then the net-new
+  > components (`camera_controls`, `display_toggles`, …) and the demo ports.
 - **Deferred:** per-type JSON-Schema fragments (the base schema is already permissive, so custom types
   validate today; a fragment API would tighten field validation).
 
