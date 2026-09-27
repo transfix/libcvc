@@ -195,6 +195,92 @@ def test_state_persistence_guards_null_app():
     print("  ok: persistence ops reject a null app handle")
 
 
+# ── direct wrap of the REAL cvc::state class (full surface, no facade) ───
+# pycvc.State is the actual C++ tree node: value/data channels, tree
+# navigation, and the Phase 8 link surface. instance(app) is the app root;
+# child(path) navigates/creates like state::operator().
+
+
+def test_state_class_value_channel():
+    app = pycvc.make_app()
+    root = pycvc.State.instance(app)
+    n = root.child("demo.x")
+    n.value("hello")
+    assert n.value() == "hello"
+    # Same node reached again by path sees the write (one shared tree).
+    assert root.child("demo.x").value() == "hello"
+    # Tree metadata.
+    assert n.name() == "x"
+    assert n.fullName() == "demo.x"
+    assert root.child("demo").numChildren() == 1
+    print("  ok: State value channel + tree navigation")
+
+
+def test_state_class_data_channel_roundtrips_scalars():
+    # The boost::any data() channel marshals Python scalars both ways
+    # (bool/int/float/str/None) via the typemap, keeping the exact type.
+    app = pycvc.make_app()
+    d = pycvc.State.instance(app).child("d")
+    for v in [42, 3.5, "str-val", True, None]:
+        d.data(v)
+        got = d.data()
+        assert got == v and type(got) is type(v), (v, got, type(got))
+    print("  ok: State.data() boost::any round-trip (int/float/str/bool/None)")
+
+
+def test_state_class_writable_transparent_link_routes_value():
+    app = pycvc.make_app()
+    root = pycvc.State.instance(app)
+    root.child("target").value("tval")
+    lnk = root.child("alpha")
+    lnk.linkTo("target", pycvc.State.link_mode_transparent)
+    lnk.setLinkWritable(True)
+    assert lnk.isLink() and lnk.linkTarget() == "target"
+    assert lnk.linkMode() == pycvc.State.link_mode_transparent
+    lnk.value("newval")  # routes through the writable transparent link
+    assert root.child("target").value() == "newval"
+    assert lnk.resolvedValue() == "newval"  # read-through
+    print("  ok: writable transparent link value write-through + resolvedValue")
+
+
+def test_state_class_data_through_links():
+    app = pycvc.make_app()
+    root = pycvc.State.instance(app)
+    tgt = root.child("target")
+    lnk = root.child("alpha")
+    lnk.linkTo("target", pycvc.State.link_mode_transparent)
+    lnk.setLinkWritable(True)
+    tgt.data(11)
+    assert lnk.resolvedData() == 11  # read-through follows the link
+    lnk.data(99)  # writable transparent link routes the data write to target
+    assert root.child("target").data() == 99
+    assert lnk.resolvedData() == 99
+    print("  ok: State.data() through links (resolvedData + writable write-through)")
+
+
+def test_state_class_opaque_link_ignores_writable():
+    app = pycvc.make_app()
+    root = pycvc.State.instance(app)
+    root.child("otarget").value("otv")
+    op = root.child("op")
+    op.linkTo("otarget", pycvc.State.link_mode_opaque)
+    op.setLinkWritable(True)  # ignored for opaque links
+    op.value("own")
+    assert root.child("otarget").value() == "otv"  # target untouched
+    assert op.value() == "own"  # write landed on the link node itself
+    print("  ok: opaque link ignores the writable flag (write stays local)")
+
+
+def test_state_class_shares_tree_with_free_functions():
+    # The direct class wrap and the legacy free functions act on ONE tree.
+    app = pycvc.make_app()
+    pycvc.state_set(app, "bridge.k", "v1")
+    assert pycvc.State.instance(app).child("bridge.k").value() == "v1"
+    pycvc.State.instance(app).child("bridge.k").value("v2")
+    assert pycvc.state_get(app, "bridge.k") == "v2"
+    print("  ok: State class and free functions share the same state tree")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
