@@ -1034,3 +1034,39 @@ TEST(NavMaterialRollout, SurrogateIntegratorThreadDeterminism) {
   EXPECT_EQ(std::memcmp(o1.data(), o8.data(), o1.size() * 4), 0);
   EXPECT_EQ(std::memcmp(m1.data(), m8.data(), B * 4), 0);
 }
+
+// Contract: material_config::gate_enabled=false is fail-OPEN — every agent's gate bit stays
+// ACTIVE so the soft-reroute force is applied UNGATED (lam_soft_eff = lam_soft * 1), NOT gated
+// off. Pins the documented semantics so a refactor cannot silently flip the disabled-gate
+// else-branch in sim_world::step to 0. (That an ENABLED gate CAN deactivate under uniform low
+// risk is covered by NavMaterialGate::UniformRiskAndLowTriggerStayOff.)
+TEST(NavMaterialSimWorld, GateDisabledIsFailOpen) {
+  const int n = 32;
+  std::vector<std::uint8_t> occ(n * n, 0);
+  sim_world::config cfg;
+  cfg.rows = n;
+  cfg.cols = n;
+  cfg.min_x = -100;
+  cfg.min_y = -100;
+  cfg.max_x = 100;
+  cfg.max_y = 100;
+  cfg.scale = 0.05;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.35f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  // Uniform LOW risk with no cheaper corridor: an ENABLED witness gate would DEACTIVATE here, so
+  // an all-active result proves the disabled gate is fail-open rather than trivially active.
+  std::vector<float> risk(n * n, 0.05f);
+  std::vector<std::uint8_t> hard(n * n, 0);
+  const float o0[2] = {-2.0f, 0.0f};
+  const float g0[2] = {2.0f, 0.0f};
+  const float col[3] = {1, 1, 1};
+  sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 1);
+  material_config mc;
+  mc.gate_enabled = false;
+  w.set_material(risk.data(), hard.data(), mc);
+  w.step(4);
+  EXPECT_EQ(w.material_gate_active()[0], std::uint8_t(1))
+      << "gate_enabled=false must leave the agent active (fail-open), not gate the soft force off";
+}

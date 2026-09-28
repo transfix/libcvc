@@ -621,6 +621,20 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   if (fl.in == 6 && !(vp.grip && vp.grip->data))
     throw std::runtime_error(
         "cvc::nav::drive_step_cuda: model takes 6 features but veh_params.grip is null");
+  // The GPU drive is geometry-only: drive_kernel/d_bicycle read coef[0..2] (alpha/beta/gamma)
+  // and never sample the material stack or apply the learned reroute. A v2 risk/lam policy
+  // (has_risk / has_lam / kFlagLamSigmoid) passes the width check above and would run here
+  // SILENTLY as a plain geometry drive — dropping the learned lam_soft/lam_hard and the whole
+  // soft/hard-hazard force, and (because d_mlp softplus-scales every output) mis-reading col3/col4
+  // even if they were used. Refuse it rather than mislead: the CPU material drive
+  // (drive_step_material) is the only path that applies these heads. GPU material parity is a TODO
+  // (device material sampler + two-head sigmoid scaling + soft/hard force terms).
+  if (model.has_risk() || model.has_lam() || model.lam_sigmoid())
+    throw std::runtime_error(
+        "cvc::nav::drive_step_cuda: this coef_mlp carries learned terrain-risk/lam heads "
+        "(has_risk/has_lam/lam_sigmoid) that the GPU drive does not apply — it would run "
+        "geometry-only and silently drop the reroute. Use drive_step_material on the CPU for a "
+        "v2 risk/lam policy; GPU material parity is not implemented.");
   for (int L = 0; L < fl.num_layers; ++L)
     if (fl.rows[L] > kDeviceMaxWidth || fl.cols[L] > kDeviceMaxWidth)
       throw std::runtime_error("cvc::nav::drive_step_cuda: layer width > 64 unsupported on GPU");
