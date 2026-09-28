@@ -24,7 +24,13 @@ recipe:
   # being an inert stub. imgui is now a runtime dep (the export links the relocatable
   # $<INSTALL_INTERFACE:imgui>). Prior bundles shipped imgui-less, forcing consumers
   # (cvcdbg demos) to rebuild cvcGL from source.
-  cvc_revision: 2
+  # Bumped 2 -> 3: republish cvcGL against libcvc 3.4.0+cvc.3. The published +cvc.2 was built
+  # against libcvc +cvc.2 and leaks an EXACT pin to it (cvcpkg records the built-against dep
+  # version); that dragged the pre-guard libcvc +cvc.2 into wasm-mt consumer installs, so
+  # `cvcpkg install cvc/libcvc cvc/cvcgl --platform wasm-mt` failed to resolve abseil (the gRPC
+  # deps that +cvc.3 guards off wasm). Rebuilding cvcGL against +cvc.3 re-points that pin to the
+  # guarded libcvc. cvcGL source itself is unchanged.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
