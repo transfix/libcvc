@@ -25,6 +25,7 @@
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/SdlInput.h> // §4.6 SDL input source -> Runtime::post_input (on_key/on_pointer)
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
@@ -103,6 +104,50 @@ int main(int argc, char **argv) {
   rt.on("quit", [&] { quit = true; });
   rt.on("reset", [&] { std::printf("[ariadne_hello] reset pressed\n"); });
 
+  // §4.6 input source: SDL feeds keyboard/mouse events to the on_key/on_pointer residents each
+  // frame. NB SDL delivers OS input only through an SDL window, so this yields events on the
+  // wasm/wasm-mt build (VTK's WebAssembly interactor shares the SDL canvas) — on a native VTK
+  // window the SDL queue is empty and input arrives via VTK's interactor -> ImGui (which also
+  // drives widget-level on_click/on_hover). Harmless either way; a translation copies the
+  // SDL-free cvc::gl::InputEvent to the runtime's cvc::ariadne::InputEvent.
+  cvc::gl::SdlInput sdl;
+  sdl.init();
+  auto to_ari = [](const cvc::gl::InputEvent &e) {
+    ari::InputEvent a;
+    using GK = cvc::gl::InputEvent::Kind;
+    using AK = ari::InputEvent::Kind;
+    switch (e.kind) {
+    case GK::KeyDown:
+      a.kind = AK::KeyDown;
+      break;
+    case GK::KeyUp:
+      a.kind = AK::KeyUp;
+      break;
+    case GK::MouseMove:
+      a.kind = AK::MouseMove;
+      break;
+    case GK::MouseButtonDown:
+      a.kind = AK::MouseButtonDown;
+      break;
+    case GK::MouseButtonUp:
+      a.kind = AK::MouseButtonUp;
+      break;
+    case GK::MouseWheel:
+      a.kind = AK::MouseWheel;
+      break;
+    }
+    a.key = e.key;
+    a.mods = e.mods;
+    a.repeat = e.repeat;
+    a.x = e.x;
+    a.y = e.y;
+    a.dx = e.dx;
+    a.dy = e.dy;
+    a.button = e.button;
+    a.clicks = e.clicks;
+    return a;
+  };
+
   using namespace cvc::ariadne; // the builder helpers
 
   // A custom widget type (§ extensibility), registered BEFORE the load so the document
@@ -144,13 +189,12 @@ int main(int argc, char **argv) {
       if (!run_init(app, sg.getStatePrefix(), lr.init_script, &init_errs))
         for (const std::string &e : init_errs)
           std::printf("[ariadne_hello]   %s\n", e.c_str());
-      // §7.1 resident on:tick: hand the document's on_tick script to the Runtime, which submits a
-      // single per-frame resident process (parking between frames). on_key is captured by the
-      // loader but not yet wired — the Backend has no per-frame key-event seam.
+      // §7.1/§4.6 document-level resident handlers: hand each script to its Runtime setter. Each
+      // becomes ONE long-lived resident (parking between activations). on_tick runs every frame;
+      // on_key/on_pointer run per input event, fed below via SdlInput -> rt.post_input.
       rt.set_tick_program(lr.on_tick_script);
-      if (!lr.on_key_script.empty())
-        std::printf("[ariadne_hello]   note: on_key: is captured but not yet wired (no backend "
-                    "key events)\n");
+      rt.set_key_program(lr.on_key_script);
+      rt.set_pointer_program(lr.on_pointer_script);
       // §extensibility: the loader already fail-fast-checked widget/block customs; now
       // check declared NODE customs (cvcGL registry) before realizing. A missing
       // REQUIRED node custom fails fast (skip the scene); a non-required one just logs.
@@ -233,6 +277,10 @@ int main(int argc, char **argv) {
     view.processUIEvents();
     touch.update();
     cam.update(dt);
+    // Feed this frame's input to the on_key/on_pointer residents BEFORE drain(), so it is delivered
+    // this same frame (post_input queues onto the scheduler ingress; drain() drains + pumps).
+    for (const cvc::gl::InputEvent &e : sdl.poll())
+      rt.post_input(to_ari(e));
     rt.drain(); // run queued Ariadne action events (incl. program on:) on the host thread
     ari::sync_scene_visibility(app, realized.visibility); // §9 bound `visible:` -> node .visible
     cvc::gl::ariadne::tick_scene(realized, view.renderer()); // §9 volren/volslice per-frame service

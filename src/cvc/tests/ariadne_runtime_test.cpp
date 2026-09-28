@@ -332,6 +332,69 @@ TEST(AriadneResident, ClearingTickProgramStopsIt) {
   EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "0"); // no longer firing
 }
 
+// §4.6 input seam: set_key_program submits a resident that receives events posted via post_input,
+// reading the delivered event dict with (get-attr event ...). post_input BEFORE drain -> delivered
+// this frame (feed-before-drain contract). Keyboard events feed the key resident.
+TEST(AriadneInput, KeyProgramReceivesPostedEvent) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_key_program("(begin (state-set \"input.last_key\" (get-attr event \"key\")) "
+                     "(state-set \"input.kind\" (get-attr event \"kind\")))");
+  InputEvent ev;
+  ev.kind = InputEvent::Kind::KeyDown;
+  ev.key = "Escape";
+  rt.post_input(ev); // submit the key resident + queue the event
+  rt.drain();        // pump: resident wakes, binds `event`, writes state
+  EXPECT_EQ(cvc::state::instance(app)("input.last_key").value(), "Escape");
+  EXPECT_EQ(cvc::state::instance(app)("input.kind").value(), "key_down");
+}
+
+// A burst of events in one frame all deliver (FIFO — no coalescing on the input channel): three
+// keys posted before one drain, and the resident drains all three (last wins in state).
+TEST(AriadneInput, KeyBurstAllDeliveredInOrder) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_key_program("(state-set \"input.last_key\" (get-attr event \"key\"))");
+  for (const char *k : {"A", "B", "C"}) {
+    InputEvent ev;
+    ev.kind = InputEvent::Kind::KeyDown;
+    ev.key = k;
+    rt.post_input(ev);
+  }
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("input.last_key").value(), "C"); // all three ran, last wins
+}
+
+// Mouse events feed the pointer resident (a separate channel/handler); the body reads coords.
+TEST(AriadneInput, PointerProgramReceivesMouseEvent) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // state-set coerces a scalar to string, so the int button stores as "1".
+  rt.set_pointer_program("(begin (state-set \"ptr.kind\" (get-attr event \"kind\")) "
+                         "(state-set \"ptr.btn\" (get-attr event \"button\")))");
+  InputEvent ev;
+  ev.kind = InputEvent::Kind::MouseButtonDown;
+  ev.button = 1;
+  ev.x = 10.0f;
+  ev.y = 20.0f;
+  rt.post_input(ev);
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ptr.kind").value(), "mouse_button_down");
+  EXPECT_EQ(cvc::state::instance(app)("ptr.btn").value(), "1");
+}
+
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a
 // combo can switch) and hands it to the backend's draw_image; a backend that can't draw an image
 // (no GL / terminal) returns false and the core shows the name as text.
