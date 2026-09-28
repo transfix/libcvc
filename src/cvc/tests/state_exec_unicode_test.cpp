@@ -9,12 +9,16 @@
 
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#include <cvc/core/state_exec/builtins.h> // SE-1: builtin_length (A6)
 #include <cvc/core/state_exec/parser.h>
 #include <cvc/core/state_exec/state_value_codec.h>
+#include <cvc/core/state_exec/stdlib.h> // SE-1: string.* module builtins (A1-A5)
 #include <cvc/core/state_exec/types.h>
 #include <cvc/core/state_exec/utf8.h>
 #include <gtest/gtest.h>
+#include <span>
 #include <string>
+#include <vector>
 
 using namespace cvc::state_exec;
 
@@ -171,4 +175,135 @@ TEST_F(Utf8CodecTest, CodecRoundTripsUtf8Strings) {
     ASSERT_TRUE(std::holds_alternative<std::string>(r.v));
     EXPECT_EQ(std::get<std::string>(r.v), s);
   }
+}
+
+// ===========================================================================
+// SE-1 — Track A: the string builtins are now codepoint-correct (A1-A6).
+// ASCII behavior is unchanged (codepoint == byte for ASCII); the non-ASCII
+// cases below FAIL under the old byte-oriented implementations.
+// ===========================================================================
+namespace {
+// Call a registered string.* module builtin directly via the stdlib registry.
+value_t call_str(stdlib_registry &reg, const char *fn, std::vector<value_t> args) {
+  const native_fn *f = reg.lookup_qualified(fn);
+  EXPECT_NE(f, nullptr) << fn << " not registered";
+  if (!f)
+    return nil_value;
+  return (*f)(std::span<const value_t>(args.data(), args.size()));
+}
+value_t vi(int64_t i) { return value_t(i); }
+} // namespace
+
+TEST(StateExecUnicodeBuiltins, LengthCountsCodepointsAndByteLengthCountsBytes) {
+  stdlib_registry reg;
+  auto len = [&](const std::string &s) {
+    return std::get<int64_t>(call_str(reg, "string.length", {value_t(s)}).v);
+  };
+  EXPECT_EQ(len("hello"), 5); // ASCII: unchanged
+  EXPECT_EQ(len(kCafe), 4);   // was 5 (bytes) before SE-1
+  EXPECT_EQ(len(kEmoji), 1);
+  EXPECT_EQ(len(kCjk), 2);
+  // raw byte size still available
+  EXPECT_EQ(std::get<int64_t>(call_str(reg, "string.byte-length", {value_t(kCafe)}).v), 5);
+  EXPECT_EQ(std::get<int64_t>(call_str(reg, "string.byte-length", {value_t(kEmoji)}).v), 4);
+}
+
+TEST(StateExecUnicodeBuiltins, CharAtReturnsWholeCodepoint) {
+  stdlib_registry reg;
+  auto at = [&](const std::string &s, int64_t i) {
+    return std::get<std::string>(call_str(reg, "string.char-at", {value_t(s), vi(i)}).v);
+  };
+  EXPECT_EQ(at("hello", 1), "e"); // ASCII: unchanged
+  EXPECT_EQ(at(kCafe, 0), "c");
+  EXPECT_EQ(at(kCafe, 3), "\xC3\xA9");    // the whole e-acute, not a partial byte
+  EXPECT_EQ(at(kEmoji, 0), kEmoji);       // the whole 4-byte emoji
+  EXPECT_EQ(at(kCjk, 1), "\xE6\x96\x87"); // second CJK char
+  // index past the codepoint count throws
+  EXPECT_THROW(call_str(reg, "string.char-at", {value_t(kCafe), vi(4)}), std::runtime_error);
+  EXPECT_THROW(call_str(reg, "string.char-at", {value_t(kEmoji), vi(1)}), std::runtime_error);
+}
+
+TEST(StateExecUnicodeBuiltins, SubstringSlicesByCodepoint) {
+  stdlib_registry reg;
+  auto sub = [&](const std::string &s, int64_t p, int64_t l) {
+    return std::get<std::string>(call_str(reg, "string.substring", {value_t(s), vi(p), vi(l)}).v);
+  };
+  EXPECT_EQ(sub("hello", 1, 3), "ell");    // ASCII: unchanged
+  EXPECT_EQ(sub(kCafe, 3, 1), "\xC3\xA9"); // just the e-acute
+  EXPECT_EQ(sub(kCafe, 0, 3), "caf");
+  EXPECT_EQ(sub(kCjk, 1, 1), "\xE6\x96\x87");
+  // pos past the codepoint count -> ""
+  EXPECT_EQ(std::get<std::string>(call_str(reg, "string.substring", {value_t(kCafe), vi(10)}).v),
+            "");
+  // no-length form: from a codepoint index to the end
+  EXPECT_EQ(std::get<std::string>(call_str(reg, "string.substring", {value_t(kCafe), vi(3)}).v),
+            "\xC3\xA9");
+}
+
+TEST(StateExecUnicodeBuiltins, SplitEmptyDelimYieldsWholeCodepoints) {
+  stdlib_registry reg;
+  auto parts = call_str(reg, "string.split", {value_t(kCafe), value_t(std::string())});
+  auto &lst = *std::get<list_ptr>(parts.v);
+  ASSERT_EQ(lst.size(), 4u); // c a f é — not 5 bytes
+  EXPECT_EQ(std::get<std::string>(lst[0].v), "c");
+  EXPECT_EQ(std::get<std::string>(lst[3].v), "\xC3\xA9");
+  auto emoji_parts = call_str(reg, "string.split", {value_t(kEmoji), value_t(std::string())});
+  ASSERT_EQ(std::get<list_ptr>(emoji_parts.v)->size(), 1u); // one 4-byte codepoint, not 4
+}
+
+TEST(StateExecUnicodeBuiltins, UpperLowerFoldAsciiOnlyAndLeaveUtf8Intact) {
+  stdlib_registry reg;
+  // ASCII folds; the multibyte e-acute is left byte-for-byte untouched (no corruption / no UB).
+  EXPECT_EQ(std::get<std::string>(call_str(reg, "string.upper", {value_t(kCafe)}).v),
+            "CAF\xC3\xA9");
+  EXPECT_EQ(
+      std::get<std::string>(call_str(reg, "string.lower", {value_t(std::string("CAF\xC3\xA9"))}).v),
+      kCafe);
+  // a pure-multibyte string is returned unchanged by both
+  EXPECT_EQ(std::get<std::string>(call_str(reg, "string.upper", {value_t(kCjk)}).v), kCjk);
+  EXPECT_EQ(std::get<std::string>(call_str(reg, "string.lower", {value_t(kEmoji)}).v), kEmoji);
+}
+
+TEST(StateExecUnicodeBuiltins, CoreLengthBuiltinCountsCodepointsForStrings) {
+  // the core (length ...) builtin (A6), not the string module
+  std::vector<value_t> a{value_t(kCafe)};
+  EXPECT_EQ(std::get<int64_t>(builtin_length(std::span<const value_t>(a.data(), a.size())).v), 4);
+  std::vector<value_t> ascii{value_t(std::string("hello"))};
+  EXPECT_EQ(
+      std::get<int64_t>(builtin_length(std::span<const value_t>(ascii.data(), ascii.size())).v), 5);
+}
+
+// ===========================================================================
+// SE-2 — Track A parser: \u/\x/\u{} escapes decode to UTF-8, and identifiers
+// may contain non-ASCII (UTF-8) bytes (A7/A8/A11).
+// ===========================================================================
+TEST(StateExecUnicodeParser, UnicodeEscapesDecodeToUtf8) {
+  // \uXXXX (4 hex) -> codepoint -> UTF-8 bytes
+  EXPECT_EQ(std::get<std::string>(parse("\"\\u00e9\"").v), "\xC3\xA9"); // é
+  EXPECT_EQ(std::get<std::string>(parse("\"caf\\u00e9\"").v), kCafe);
+  // \u{H..H} braces, astral plane
+  EXPECT_EQ(std::get<std::string>(parse("\"\\u{1f600}\"").v), kEmoji); // 😀
+  EXPECT_EQ(std::get<std::string>(parse("\"\\u{4e2d}\\u{6587}\"").v), kCjk);
+  // \xNN -> codepoint U+00NN (text semantics), encoded UTF-8
+  EXPECT_EQ(std::get<std::string>(parse("\"\\x41\"").v), "A");        // U+0041
+  EXPECT_EQ(std::get<std::string>(parse("\"\\xe9\"").v), "\xC3\xA9"); // U+00E9 -> UTF-8
+  // \0 NUL
+  EXPECT_EQ(std::get<std::string>(parse("\"\\x00\"").v), std::string(1, '\0'));
+  // a surrogate codepoint is replaced with U+FFFD by utf8::encode
+  EXPECT_EQ(std::get<std::string>(parse("\"\\ud800\"").v), "\xEF\xBF\xBD");
+}
+
+TEST(StateExecUnicodeParser, MalformedEscapesError) {
+  EXPECT_THROW(parse("\"\\u00zz\""), parse_error); // non-hex
+  EXPECT_THROW(parse("\"\\u12\""), parse_error);   // too few hex digits
+  EXPECT_THROW(parse("\"\\u{}\""), parse_error);   // empty braces
+  EXPECT_THROW(parse("\"\\x1\""), parse_error);    // \x needs 2 hex
+}
+
+TEST(StateExecUnicodeParser, IdentifiersMayContainUtf8) {
+  // a symbol whose name carries UTF-8 parses whole (was truncated at the first high byte before).
+  // to_string(symbol) emits the name verbatim, so it round-trips the exact bytes.
+  EXPECT_EQ(to_string(parse(kCafe)), kCafe);
+  EXPECT_EQ(to_string(parse("na\xC3\xAFve")), "na\xC3\xAFve"); // naïve (ï = U+00EF)
+  EXPECT_EQ(to_string(parse(kCjk)), kCjk);
 }

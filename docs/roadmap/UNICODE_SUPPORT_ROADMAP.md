@@ -257,15 +257,24 @@ Namespaced `SE-*` to distinguish from the libcvc-wide `P0–P3` above.
   by the existing codec tests). The "text vs bytes" policy is this section, restated
   in the helper's header. **No behavior change** — the helper is added and tested in
   isolation, unwired, so SE-1 is a pure byte→codepoint swap in the string builtins.
-- **SE-1 — Track A string builtins.** Fix A1–A6 (char-at, substring, split-"",
-  upper/lower, length ×2) against the helper. Add failing-then-passing tests
-  that pin codepoint semantics. Highest user-visible impact. `upper`/`lower` (A4)
-  ship ASCII-only-and-documented here; full non-ASCII case folding pulls in
-  `utf8proc` (see the Track A note above — `utf8proc`, not ICU) as a follow-up.
-- **SE-2 — Track A lexer + escapes + wire codec.** A7 (UTF-8 identifiers, or an
-  explicit documented ASCII-only decision), A8 (`\u`/`\x` escapes), A9 (wire
-  `\u` decode + control-byte escaping), A11 (unsigned-char/locale-free
-  classification), A10 (truncate on codepoint boundary). A13 optional.
+- **SE-1 — Track A string builtins. ✅ LANDED.** A1–A6 fixed against the helper
+  (`string.length`/`char-at`/`substring`/`split ""` codepoint-correct; `upper`/
+  `lower` ASCII-only-but-safe — only bytes <0x80 fold, no signed-char UB, multibyte
+  untouched; the core `(length "…")` builtin counts codepoints; NEW `string.byte-length`
+  for raw size). Tests pin ASCII (unchanged) + café/emoji/CJK. Full non-ASCII case
+  folding pulls in `utf8proc` (Track A note — `utf8proc`, not ICU) as a follow-up.
+- **SE-2 — Track A lexer + escapes. ✅ LANDED (parser); A9/A10 excepted.** A7
+  (identifiers accept any byte ≥0x80, so UTF-8 names parse whole), A8 (`\uXXXX` /
+  `\u{…}` / `\xNN` / `\0` escapes decode to UTF-8; surrogate/out-of-range → U+FFFD),
+  A11 (ASCII classified locale-independently, not `std::isalnum`). **A10 is a
+  non-bug** — `to_string` appends whole strings and its 64 KiB check stops at a
+  whole-append boundary, so it never cuts mid-codepoint (no fix needed). **A9
+  (wire `\u` decode + `jkv` control-byte escaping) is DEFERRED** to its own
+  follow-up: `jkv`/`xstr` are in an anonymous namespace (not unit-testable in
+  isolation) and are coupled (escaping control bytes as `\u` in `jkv` forces `xstr`
+  to decode `\u`), and the internal coordinator round-trip is self-consistent
+  without it — so it is a robustness/interop fix, not a correctness gap on the live
+  path. A13 (Unicode-whitespace trim) skipped as cosmetic.
 - **SE-3 — Track B `bytes` type.** New variant alternative, literal syntax,
   `bytes` builtins, `encode`/`decode` codecs, `type-of`, wire/state-data
   marshalling. Then route the binary drivers (HTTP octet-stream, `py_to_value`

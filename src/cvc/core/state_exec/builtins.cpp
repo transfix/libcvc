@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cvc/core/state_exec/builtins.h>
 #include <cvc/core/state_exec/generator.h>
+#include <cvc/core/state_exec/utf8.h> // SE-1: (length "...") counts codepoints for a string
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -412,7 +413,7 @@ value_t builtin_length(std::span<const value_t> args) {
   if (auto *lp = std::get_if<list_ptr>(&args[0].v))
     return value_t{static_cast<int64_t>((*lp)->size())};
   if (auto *s = std::get_if<std::string>(&args[0].v))
-    return value_t{static_cast<int64_t>(s->size())};
+    return value_t{static_cast<int64_t>(utf8::count(*s))}; // SE-1 (A6): codepoints, not bytes
   if (auto *dp = std::get_if<dict_ptr>(&args[0].v))
     return value_t{static_cast<int64_t>((*dp)->size())};
   throw std::runtime_error("length: expected list, string, or dict");

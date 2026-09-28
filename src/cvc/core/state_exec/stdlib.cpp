@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cvc/core/state_exec/builtins.h>
 #include <cvc/core/state_exec/stdlib.h>
+#include <cvc/core/state_exec/utf8.h> // SE-1: codepoint-correct length/index/slice
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -68,8 +69,16 @@ void stdlib_registry::register_string_module() {
       delim = as_string(args[1], "string.split");
     std::vector<value_t> parts;
     if (delim.empty()) {
-      for (char c : s)
-        parts.emplace_back(std::string(1, c));
+      // SE-1 (A3): split into CODEPOINTS, not bytes — each element is one whole UTF-8 codepoint,
+      // so a multibyte character is never shredded into invalid fragments.
+      std::size_t pos = 0;
+      while (pos < s.size()) {
+        char32_t cp;
+        std::size_t len;
+        utf8::decode(s, pos, cp, len);
+        parts.emplace_back(s.substr(pos, len));
+        pos += len;
+      }
     } else {
       size_t start = 0;
       while (start <= s.size()) {
@@ -123,17 +132,29 @@ void stdlib_registry::register_string_module() {
     return value_t(s.substr(start, end - start + 1));
   });
 
+  // SE-1 (A4): ASCII-only case folding, but SAFE — only bytes < 0x80 are folded (cast to unsigned
+  // char first, so no signed-char UB), and every byte >= 0x80 (a UTF-8 continuation/lead byte) is
+  // left untouched, so multibyte text is never corrupted. Full Unicode case folding (é->É, ß->SS)
+  // is a documented follow-up that pulls in utf8proc (roadmap SE-1 note), NOT this.
   register_function("string", "string.upper", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 1, "string.upper");
     auto s = as_string(args[0], "string.upper");
-    std::transform(s.begin(), s.end(), s.begin(), ::toupper);
+    for (char &c : s) {
+      const unsigned char uc = static_cast<unsigned char>(c);
+      if (uc < 0x80)
+        c = static_cast<char>(::toupper(uc));
+    }
     return value_t(std::move(s));
   });
 
   register_function("string", "string.lower", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 1, "string.lower");
     auto s = as_string(args[0], "string.lower");
-    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    for (char &c : s) {
+      const unsigned char uc = static_cast<unsigned char>(c);
+      if (uc < 0x80)
+        c = static_cast<char>(::tolower(uc));
+    }
     return value_t(std::move(s));
   });
 
@@ -159,35 +180,57 @@ void stdlib_registry::register_string_module() {
     return value_t(s.find(sub) != std::string::npos);
   });
 
+  // SE-1 (A2): pos/len are CODEPOINT indices, mapped to byte offsets on UTF-8 boundaries, so a
+  // slice never splits a multibyte codepoint. byte_offset() clamps to the byte length for indices
+  // at/past the codepoint count, so the existing pos-past-end -> "" behavior is preserved.
   register_function("string", "string.substring", [](std::span<const value_t> args) -> value_t {
     expect_min(args, 2, "string.substring");
     auto &s = as_string(args[0], "string.substring");
     int64_t pos = as_int(args[1], "string.substring");
     if (pos < 0)
       pos = 0;
-    if (static_cast<size_t>(pos) >= s.size())
+    const std::size_t byte_start = utf8::byte_offset(s, static_cast<std::size_t>(pos));
+    if (byte_start >= s.size())
       return value_t(std::string());
     if (args.size() > 2) {
       int64_t len = as_int(args[2], "string.substring");
       if (len < 0)
         len = 0;
-      return value_t(s.substr(static_cast<size_t>(pos), static_cast<size_t>(len)));
+      const std::size_t byte_end =
+          utf8::byte_offset(s, static_cast<std::size_t>(pos) + static_cast<std::size_t>(len));
+      return value_t(s.substr(byte_start, byte_end - byte_start));
     }
-    return value_t(s.substr(static_cast<size_t>(pos)));
+    return value_t(s.substr(byte_start));
   });
 
+  // SE-1 (A1): index by CODEPOINT and return the whole codepoint's bytes (1-4), not a single byte.
   register_function("string", "string.char-at", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 2, "string.char-at");
     auto &s = as_string(args[0], "string.char-at");
     int64_t i = as_int(args[1], "string.char-at");
-    if (i < 0 || static_cast<size_t>(i) >= s.size())
+    if (i < 0)
       throw std::runtime_error("string.char-at: index out of range");
-    return value_t(std::string(1, s[static_cast<size_t>(i)]));
+    const std::size_t byte_start = utf8::byte_offset(s, static_cast<std::size_t>(i));
+    if (byte_start >= s.size()) // i >= codepoint count
+      throw std::runtime_error("string.char-at: index out of range");
+    char32_t cp;
+    std::size_t len;
+    utf8::decode(s, byte_start, cp, len);
+    return value_t(s.substr(byte_start, len));
   });
 
+  // SE-1 (A5): count CODEPOINTS, not bytes (length of "café" is 4, not 5). Raw byte size is
+  // available as string.byte-length below (and is what the SE-3 bytes type will report for binary).
   register_function("string", "string.length", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 1, "string.length");
     auto &s = as_string(args[0], "string.length");
+    return value_t(static_cast<int64_t>(utf8::count(s)));
+  });
+
+  // SE-1: the raw byte count, kept separate now that string.length means codepoints.
+  register_function("string", "string.byte-length", [](std::span<const value_t> args) -> value_t {
+    expect_exact(args, 1, "string.byte-length");
+    auto &s = as_string(args[0], "string.byte-length");
     return value_t(static_cast<int64_t>(s.size()));
   });
 }
