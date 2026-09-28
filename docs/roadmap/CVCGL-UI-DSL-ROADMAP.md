@@ -167,7 +167,7 @@ those as Ariadne / the `ari` loader.)*
 | 1 | Loader host | **Both** — a C++ core in libcvc + a Python/pycvc_gl entry over the same tree |
 | 2 | Non-state binding | **Promote all demo tunables to `cvc::state` paths**; `bind:` is uniformly a state path |
 | 3 | Expression / action grammar | **`state_exec`** — expressions are `state_exec` programs; per-frame predicates run sync, actions run on the **async schedulable** executor; authorable as **s-expr *or* nested YAML** |
-| 4 | Window-geometry persistence | **Out of scope for now** |
+| 4 | Window-geometry persistence | **Runtime tree persistence LANDED (v0.2 override).** Window pos/size **and** resizable split-pane track sizes persist to `ui.docs.<doc>.tree.<id>.{geometry,tracks}` as a **two-way edge** — the walk seeds `SetNextWindowPos/Size` / pane heights from state before the backend opens the surface (`FirstUseEver`, never re-forced — §16.2) and writes the post-interaction values back after, so the state node is the authority next frame and the sizes survive a reconcile/reload (id-keyed, §11.5.3 rule 5; §11.4). The core owns all of it; the backend only seeds/reports (never touches `cvc::state`). **Still out of scope:** *cross-run* durable persistence (an explicit `save()` codec of `ui.docs.<doc>` — a `json()` dump captures only the `value()` channel, §13 `?data` caveat) |
 | 5 | Escape hatches | **`custom:` opaque host nodes** |
 | 6 | keyboard | **✅ LANDED on master** — `ImGuiOverlay::intercept()` now translates VTK-interactor key events to ImGui (text entry, editing keys, Ctrl-shortcuts), native **and** wasm (`vtkWebAssemblyRenderWindowInteractor` → ImGui). Text-entry widgets (`input_text`, `input_int`) are first-class. Only residual: the browser canvas must hold focus (`tabindex`) — a deploy detail, verify per deploy |
 
@@ -422,9 +422,16 @@ state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for 
 > panes + the classic `SplitterBehavior` idiom, pane heights held in ImGui window storage (seeded from
 > the row tracks). The FTXUI backend degrades rows to a `vbox` of fixed/flex cells. Covered by a
 > 18-case gtest (`ariadne_loader_test`) that exercises the whole loader incl. row tracks / row-split.
-> **Still deferred:** persisting dragged sizes across a reload to `tree.<id>` (needs §11.4 runtime
-> state — the seam is transient/per-session for now), `state_exec` track expressions, thicker-than-1px
-> custom-drawlist borders, and mixing resizable rows *and* columns in one grid.
+>
+> **✅ Increment 3 (runtime persistence).** Dragged pane sizes now persist across a reconcile/reload to
+> `tree.<id>.tracks`, alongside window geometry to `tree.<id>.geometry` — the §11.4 **two-way edge**:
+> the walk seeds the pane heights / window pos+size from state before the grid/window opens (apply-once
+> on the backend — a live drag wins) and writes the post-interaction sizes back after (rounded to px so
+> the equality guard suppresses per-frame churn). Backend seam is state-free (`seed_grid_tracks` /
+> `grid_tracks`, `seed_window_geometry` / `window_geometry`, all non-pure so FTXUI/mock inherit no-ops);
+> the core owns the `cvc::state` round-trip. MockBackend-driven gtests in `ariadne_runtime_test`.
+> **Still deferred:** `state_exec` track expressions, thicker-than-1px custom-drawlist borders, mixing
+> resizable rows *and* columns in one grid, and *cross-run* durable persistence (decision #4).
 
 Four related sizing knobs — all realized on the same table engine (§3.0.3a) whose flags this build ships
 (`IMGUI_HAS_TABLE`, confirmed).
@@ -2759,9 +2766,14 @@ publisher. This is *why* the UI subtree is a top-level sibling and not nested un
 `cvcgl.viewers.<v>.ui` — a doc routinely spans multiple viewers/scenes.
 
 **Runtime widget geometry/layout/visible/collapsed persist in the tree, not across runs.** A user
-drag/resize/collapse writes back to `ui.docs.<doc>.tree.<id>.{geometry,visible,collapsed}` (the two-way
-edge): the walk reads those to seed `SetNextWindowPos/Size/Collapsed` when present, then writes the
-post-interaction values back at end-of-frame, so the state node is the authority next frame.
+drag/resize/collapse writes back to `ui.docs.<doc>.tree.<id>.{geometry,tracks,visible,collapsed}` (the
+two-way edge): the walk reads those to seed `SetNextWindowPos/Size/Collapsed` / split-pane heights when
+present, then writes the post-interaction values back at end-of-frame, so the state node is the
+authority next frame. ✅ **Landed for `geometry` (window pos+size) and `tracks` (split-pane sizes)** —
+the ImGui backend seeds with `FirstUseEver` (never re-forced, §16.2) and reports the current geometry
+back through a state-free backend seam; the core owns the `cvc::state` read/seed/write and rounds to px
+so a static surface no-ops the write. `collapsed` folds into the geometry back-fill (a collapsed window
+keeps its stored content size); a distinct `visible`/`collapsed` key is a follow-up.
 `layout`/`size_policy` are authored keys a handler *may* rewrite to re-flow live. Cross-run persistence
 stays out of scope (decision #4) — and a `save()` of `ui.docs.<doc>` would capture only the `value()`
 channel (geometry/visible/collapsed persist; a widget's `data()`-channel typed model does not — the

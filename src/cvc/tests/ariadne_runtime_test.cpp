@@ -112,6 +112,26 @@ struct MockBackend : Backend {
     button = ptr_button;
     return true;
   }
+  // §11.4 geometry persistence: record the seed the core hands us, and report a programmable
+  // "current" geometry / track list back so a test can drive the write-back edge.
+  WindowGeom seeded_geom{};
+  bool seeded_geom_called = false;
+  WindowGeom window_geom_ret{};
+  void seed_window_geometry(const WindowGeom &g) override {
+    seeded_geom = g;
+    seeded_geom_called = true;
+    rec("seed_window_geometry");
+  }
+  WindowGeom window_geometry() const override { return window_geom_ret; }
+  std::vector<float> seeded_tracks;
+  bool seeded_tracks_called = false;
+  std::vector<float> grid_tracks_ret;
+  void seed_grid_tracks(const std::vector<float> &sizes) override {
+    seeded_tracks = sizes;
+    seeded_tracks_called = true;
+    rec("seed_grid_tracks");
+  }
+  std::vector<float> grid_tracks() const override { return grid_tracks_ret; }
   BoolEdit menu_item_toggle(const char *l, bool) override {
     rec(std::string("toggle:") + l);
     return {};
@@ -1792,4 +1812,169 @@ TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
   EXPECT_TRUE(mb.saw("text_line:one"));  // its own defun is visible within the same eval
   EXPECT_FALSE(mb.saw("text_line:two")); // isolated: f did not leak -> unbound -> hidden
   EXPECT_FALSE(rt.take_reactive_warnings().empty()); // widget2's failure is reported
+}
+
+// ---- §11.4 runtime geometry / track persistence (tree.<id>) ----------------------------------
+// The two-way edge: the core seeds a window / split-grid from the persisted tree.<id> state before
+// the backend opens it, and writes the post-interaction geometry back after — the state node is the
+// authority next frame. Driven headlessly through the MockBackend (no ImGui): the backend records
+// the seed it was handed and reports a programmable "current" geometry / track list.
+
+TEST(AriadneRuntime, WindowGeometrySeedsBackendFromPersistedState) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // A geometry persisted under the window's id (which defaults to the label "Inspector").
+  cvc::state::instance(app)("ui.demo.tree.Inspector.geometry").value(std::string("10,20,300,400"));
+  // A settled window reports back what it was seeded to (so the write-back no-ops via the guard).
+  mb.window_geom_ret = WindowGeom{true, true, 10, 20, 300, 400};
+  rt.set_root(group({window("Inspector", {text("hi")})}));
+  rt.render();
+  ASSERT_TRUE(mb.seeded_geom_called);
+  EXPECT_TRUE(mb.seeded_geom.has_pos);
+  EXPECT_TRUE(mb.seeded_geom.has_size);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.x, 10.0f);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.y, 20.0f);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.w, 300.0f);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.h, 400.0f);
+}
+
+TEST(AriadneRuntime, WindowGeometryWritesPostInteractionBack) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The backend reports a moved/resized window this frame (fractional -> rounded to px on write).
+  mb.window_geom_ret = WindowGeom{true, true, 15.4f, 24.6f, 320.2f, 409.8f};
+  rt.set_root(group({window("Inspector", {text("hi")})}));
+  rt.render();
+  EXPECT_FALSE(mb.seeded_geom_called); // nothing persisted yet -> no seed
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.Inspector.geometry").value(), "15,25,320,410");
+}
+
+TEST(AriadneRuntime, WindowGeometryRoundTripsAcrossFrames) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.window_geom_ret = WindowGeom{true, true, 40, 50, 200, 150};
+  rt.set_root(group({window("W", {text("x")})}));
+  rt.render(); // frame 1: writes 40,50,200,150 to state (no prior state -> no seed)
+  EXPECT_FALSE(mb.seeded_geom_called);
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.W.geometry").value(), "40,50,200,150");
+  // frame 2: the core reads that back and seeds the backend with it.
+  mb.seeded_geom_called = false;
+  rt.render();
+  ASSERT_TRUE(mb.seeded_geom_called);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.x, 40.0f);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.h, 150.0f);
+}
+
+TEST(AriadneRuntime, CollapsedWindowPreservesPersistedSize) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.tree.W.geometry").value(std::string("10,20,300,400"));
+  // Collapsed: the backend reports a position but no size (has_size == false).
+  mb.window_geom_ret = WindowGeom{true, false, 12, 22, 0, 0};
+  rt.set_root(group({window("W", {text("x")})}));
+  rt.render();
+  // Position follows the drag; the size is back-filled from the seed, never clobbered to 0.
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.W.geometry").value(), "12,22,300,400");
+}
+
+TEST(AriadneRuntime, SplitGridTracksSeedAndPersist) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // A resizable grid with row tracks is a row-split (Layout::is_row_split()).
+  Widget g = group({text("top"), text("bottom")});
+  g.id = "Split";
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.resizable = true;
+  g.layout.row_heights = {Track{Unit::Px, 80.0f}, Track{Unit::Px, 200.0f}};
+  // Persisted pane sizes + a dragged report from the backend.
+  cvc::state::instance(app)("ui.demo.tree.Split.tracks").value(std::string("90,210"));
+  mb.grid_tracks_ret = {120.0f, 260.0f};
+  rt.set_root(group({g}));
+  rt.render();
+  ASSERT_TRUE(mb.seeded_tracks_called);
+  ASSERT_EQ(mb.seeded_tracks.size(), 2u);
+  EXPECT_FLOAT_EQ(mb.seeded_tracks[0], 90.0f);
+  EXPECT_FLOAT_EQ(mb.seeded_tracks[1], 210.0f);
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.Split.tracks").value(), "120,260");
+}
+
+TEST(AriadneRuntime, PlainTableGridDoesNotPersistTracks) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // A *resizable* grid with only column tracks and NO row tracks is a plain table, not a row-split
+  // (is_row_split() = resizable && !row_heights.empty() — false on the empty-rows half): no track
+  // edge.
+  Widget g = group({text("a"), text("b")});
+  g.id = "Table";
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.resizable = true; // resizable columns, but no row tracks -> still not a row-split
+  g.layout.col_widths = {Track{Unit::Px, 100.0f}, Track{Unit::Px, 100.0f}};
+  mb.grid_tracks_ret = {5.0f, 6.0f}; // even if the backend reported sizes, the core ignores them
+  rt.set_root(group({g}));
+  rt.render();
+  EXPECT_FALSE(mb.seeded_tracks_called);
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.Table.tracks").value(), ""); // never written
+}
+
+TEST(AriadneRuntime, WindowWithNoGeometryNeitherSeedsNorWrites) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // Nothing persisted, and a backend that reports no geometry (the FTXUI/terminal default {}): the
+  // core must neither seed nor write a spurious "0,0,0,0" (exercises the has_pos||has_size guard).
+  mb.window_geom_ret = WindowGeom{}; // has_pos == has_size == false
+  rt.set_root(group({window("W", {text("x")})}));
+  rt.render();
+  EXPECT_FALSE(mb.seeded_geom_called);
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.W.geometry").value(), ""); // no spurious write
+}
+
+TEST(AriadneRuntime, WindowGeometryIsKeyedPerId) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  // Two windows with distinct ids must each persist to their own tree.<id>.geometry node — the
+  // §11.5.3-rule-5 id-keying the roadmap edit claims. One backend can only report one geometry per
+  // frame, so use two runtimes/backends (one per window) to give each a distinct reported geometry.
+  MockBackend mb_a;
+  rt.set_backend(&mb_a);
+  mb_a.window_geom_ret = WindowGeom{true, true, 1, 2, 100, 100};
+  rt.set_root(group({window("A", {text("a")})}));
+  rt.render();
+  Runtime rt2(app, "ui.demo");
+  MockBackend mb_b;
+  rt2.set_backend(&mb_b);
+  mb_b.window_geom_ret = WindowGeom{true, true, 9, 8, 700, 600};
+  rt2.set_root(group({window("B", {text("b")})}));
+  rt2.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.A.geometry").value(), "1,2,100,100");
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.B.geometry").value(), "9,8,700,600");
+}
+
+TEST(AriadneRuntime, PositionOnlyPersistedGeometrySeedsPositionNotZeroSize) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // A "x,y,0,0" sentinel (a window persisted while collapsed-from-birth) must seed position only —
+  // parse_geom sets has_size=false when w/h are non-positive, so no 0x0 size is ever forced.
+  cvc::state::instance(app)("ui.demo.tree.W.geometry").value(std::string("10,20,0,0"));
+  mb.window_geom_ret = WindowGeom{true, false, 10, 20, 0, 0};
+  rt.set_root(group({window("W", {text("x")})}));
+  rt.render();
+  ASSERT_TRUE(mb.seeded_geom_called);
+  EXPECT_TRUE(mb.seeded_geom.has_pos);
+  EXPECT_FALSE(mb.seeded_geom.has_size);
 }

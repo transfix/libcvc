@@ -40,9 +40,13 @@ public:
   bool begin_window(const char *title, const char *id, const cvc::ariadne::Size &size,
                     float border) override;
   void end_window() override;
+  void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
+  cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
+  void seed_grid_tracks(const std::vector<float> &sizes) override; // §11.4 (pre begin_grid)
+  std::vector<float> grid_tracks() const override;                 // §11.4 (post end_grid)
   void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
   void end_disabled() override;
   void set_tooltip(const char *text) override; // §4: hover tooltip on the last item
@@ -114,6 +118,17 @@ private:
     int color_pushes = 0;         // table border-colour style pushes to pop
   };
   std::vector<GridState> m_grids;
+
+  // §11.4 geometry persistence. The core seeds the NEXT window / grid before begin_* and reads the
+  // current geometry back after. m_pendingSeed / m_pendingTracks are consumed by the next
+  // begin_window / begin_grid; m_lastWindowGeom / m_lastGridTracks are the snapshots
+  // window_geometry() / grid_tracks() return. No ImGui types (backend-header-clean).
+  cvc::ariadne::WindowGeom m_pendingSeed;
+  bool m_haveSeed = false;
+  cvc::ariadne::WindowGeom m_lastWindowGeom;
+  std::vector<float> m_pendingTracks;
+  bool m_haveTracks = false;
+  std::vector<float> m_lastGridTracks;
 
   // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
   std::unordered_map<std::string, CustomDrawFn> m_customWidgets;
