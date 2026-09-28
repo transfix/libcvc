@@ -228,7 +228,10 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
       float def = gs.row_px[i] > 0.0f ? gs.row_px[i] : 80.0f;
       if (haveTrackSeed && i < m_pendingTracks.size() && m_pendingTracks[i] > 0.0f)
         def = m_pendingTracks[i];
-      gs.pane_h.push_back(store->GetFloatRef(key, def));
+      store->GetFloatRef(key, def); // create/seed the slot apply-once; the returned pointer is NOT
+                                    // cached (a later iteration's insert can realloc the storage) —
+                                    // we keep only the key and re-resolve it below at use time.
+      gs.pane_keys.push_back(key);
     }
     m_grids.push_back(std::move(gs));
     return true; // the panes themselves open in grid_next_cell
@@ -301,12 +304,20 @@ void ImGuiBackend::grid_next_cell() {
   GridState &g = m_grids.back();
   if (g.split) {
     const int i = g.cell;
-    if (i > 0) {
-      ImGui::EndChild(); // close the previous pane
-      if (i - 1 < static_cast<int>(g.pane_h.size()) && i < static_cast<int>(g.pane_h.size()))
-        row_splitter(4.0f, g.pane_h[i - 1], g.pane_h[i], 24.0f, 24.0f, g.split_long_axis);
+    const int n = static_cast<int>(g.pane_keys.size());
+    if (i > 0)
+      ImGui::EndChild(); // close the previous pane -> back to the parent window
+    // Now in the parent window, whose StateStorage holds the pane-height slots seeded in
+    // begin_grid. Re-resolve pointers by key HERE (never cached across begin_grid's insert loop):
+    // every slot already exists, so these GetFloatRef calls cannot insert/realloc, and the two the
+    // splitter needs stay valid together.
+    ImGuiStorage *store = ImGui::GetStateStorage();
+    if (i > 0 && i - 1 < n && i < n) {
+      float *a = store->GetFloatRef(g.pane_keys[i - 1]);
+      float *b = store->GetFloatRef(g.pane_keys[i]);
+      row_splitter(4.0f, a, b, 24.0f, 24.0f, g.split_long_axis);
     }
-    const float h = (i < static_cast<int>(g.pane_h.size())) ? *g.pane_h[i] : 0.0f;
+    const float h = (i < n) ? store->GetFloat(g.pane_keys[i]) : 0.0f;
     const std::string pid = "##cvcg.pane" + std::to_string(i);
     ImGui::BeginChild(pid.c_str(), ImVec2(0.0f, h), ImGuiChildFlags_Borders);
     ++g.cell;
@@ -334,11 +345,12 @@ void ImGuiBackend::end_grid() {
   // non-split grid so a stale split's sizes are never reported against it.
   m_lastGridTracks.clear();
   if (g.split) {
-    for (float *p : g.pane_h)
-      if (p)
-        m_lastGridTracks.push_back(*p);
     if (g.cell > 0)
-      ImGui::EndChild(); // close the last pane
+      ImGui::EndChild(); // close the last pane FIRST -> back to the parent window, whose
+                         // StateStorage holds the pane slots we snapshot by key next.
+    ImGuiStorage *store = ImGui::GetStateStorage();
+    for (unsigned int k : g.pane_keys)
+      m_lastGridTracks.push_back(store->GetFloat(k));
   } else {
     ImGui::EndTable();
     if (g.color_pushes)
