@@ -83,7 +83,19 @@ recipe:
   # always build), and (b) picks up the gRPC/xmlrpc dep guard above so `cvcpkg install cvc/libcvc
   # --platform wasm-mt` resolves again. A v2 .cvcnav hard-fails on a pre-v2 host, so hosts (demo3 /
   # cvcdbg fleet) must land 3.4.0+cvc.3 before any v2 blob ships.
-  cvc_revision: 3
+  # Bumped 3 -> 4 (3.4.0 lineage): the +cvc.3 comment above was WRONG — wasm-mt did NOT resolve. The
+  # +cvc.3 gRPC/xmlrpc guard only scoped abseil/protobuf/grpc; `pack` bakes a bundle's required_deps
+  # from depends.runtime FILTERED BY the target platform (builder.py generate_manifest), so the wasm-mt
+  # bundle still baked 12 native-only deps that have NO wasm-mt candidate — cgal/gmp/mpfr/gsl/pocketfft/
+  # hdf5/log4cplus/expat/yaml/yaml-cpp/levmar/libiimod — and the catalog install kept failing on cgal
+  # etc. This revision scopes those 12 to [linux, macos, windows] (the wasm build links none of them:
+  # DISABLE_CGAL=ON, USING_HDF5=OFF, FFT_PROVIDER=none, IMOD_MRC=OFF, no find_package for gsl/levmar,
+  # log4cplus/yaml/yaml-cpp optional-and-absent on wasm) and ADDS wasm-mt to assimp (CVC_ENABLE_ASSIMP=ON
+  # links it and it HAS a wasm-mt candidate, but it was scoped off wasm, so its symbols were omitted from
+  # the baked closure and a wasm consumer's link would fail). zlib + the ImageMagick codec closure stay
+  # declared for wasm (they DO have wasm-mt candidates and are linked). A recipe edit alone can't fix the
+  # already-published +cvc.3 bundle — this republishes a clean +cvc.4 wasm-mt closure.
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -122,8 +134,11 @@ depends:
     # landed on consumers' link lines whether they used the feature or not.
     # Build-only: nothing in libcvc's public headers mentions it.
     - name: pocketfft
+      platforms: [linux, macos, windows]
     - name: gsl
+      platforms: [linux, macos, windows]
     - name: cgal
+      platforms: [linux, macos, windows]
     # CGAL is header-only and does NOT vendor its math backends: it declares
     # gmp/mpfr as its own runtime deps, which the FLAT `cvcpkg install` does not
     # auto-pull. So they must be listed HERE or the prefix has no gmp/mpfr and
@@ -135,9 +150,13 @@ depends:
     # a cgal-only prefix fails FindGMP; adding gmp+mpfr lands gmp.lib/mpfr.lib +
     # gmp.h/mpfr.h in the prefix and FindGMP resolves them.
     - name: gmp
+      platforms: [linux, macos, windows]
     - name: mpfr
+      platforms: [linux, macos, windows]
     - name: hdf5
+      platforms: [linux, macos, windows]
     - name: log4cplus
+      platforms: [linux, macos, windows]
     - name: tiff
     - name: imagemagick
     # ImageMagick delegates + libtiff codecs. `cvcpkg install` installs each
@@ -180,9 +199,11 @@ depends:
     # libfontconfig.dylib -> @rpath/libexpat.1.10.0.dylib turned up. Unscoped:
     # expat is published for every platform libcvc builds.
     - name: expat
+      platforms: [linux, macos, windows]
     - name: bzip2
     - name: libxml2
     - name: yaml
+      platforms: [linux, macos, windows]
     # yaml-cpp (the C++ parser, distinct from the `yaml` C libYAML above) is
     # linked by cvc::ariadne's .ari loader — the Ariadne UI/scene DSL parses
     # documents into the widget tree (src/cvc/ariadne/loader.cpp). It is OPTIONAL
@@ -192,6 +213,7 @@ depends:
     # libyaml-cpp.so. Plain CMake C++ lib, published for every platform libcvc
     # builds, so unscoped.
     - name: yaml-cpp
+      platforms: [linux, macos, windows]
     # The other Ariadne optional deps (cvc::ariadne in libcvc core): nlohmann-json
     # + json-schema-validator power the .ari Layer-2 JSON-Schema validation (§15);
     # ftxui is the terminal backend (§16.4). All OPTIONAL at the CMake level
@@ -206,7 +228,9 @@ depends:
     - name: ftxui
       platforms: [linux]
     - name: levmar
+      platforms: [linux, macos, windows]
     - name: libiimod
+      platforms: [linux, macos, windows]
     # Native mesh/model import (Phase 3: cvc::model + read_model/read_geometry for
     # obj/ply/stl/fbx/gltf/... via Assimp). Guarded by CVC_ENABLE_ASSIMP; the
     # bundle links libassimp so it must be present in the flat prefix. (libcvc's
@@ -221,7 +245,7 @@ depends:
     # (assimp 6.0.5+cvc.2) — this is what lets read_model parse buildings.glb, i.e.
     # nav_finale / nav_city_swarm --bundle load a real Austin city on Windows.
     - name: assimp
-      platforms: [linux, macos, freebsd, netbsd, windows]
+      platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
     # Scoped for the same reason as assimp above, but the other way round:
     # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
     # Accelerate framework, so libcvc-deps uses the system libraries there —
