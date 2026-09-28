@@ -525,7 +525,8 @@ void sim_world::step(int num_threads) {
     md.d_hat_m = mat_cfg_.d_hat_m;
     // The learned-lam path (a lam-head net) overwrites lam_soft/lam_hard with the net's per-agent
     // output; carry the live authority scale so the drive multiplies THAT learned lam, keeping the
-    // force-bias slider effective with a trained policy (the fixed columns above are already scaled).
+    // force-bias slider effective with a trained policy (the fixed columns above are already
+    // scaled).
     md.lam_soft_scale = mat_cfg_.lam_soft_scale;
     md.lam_hard_scale = mat_cfg_.lam_hard_scale;
     if (ext_.sample) {
