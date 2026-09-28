@@ -234,12 +234,16 @@ Track B ensures binary data is never *forced* to be text in the first place.
 
 Namespaced `SE-*` to distinguish from the libcvc-wide `P0–P3` above.
 
-- **SE-0 — Codepoint helper + test corpus + policy note.** Land the shared
-  UTF-8 decode/iterate helper. Add a Unicode test corpus (`"café"`, a 4-byte
-  emoji, a CJK string) and pin round-trip tests (parse→to_string, codec
-  snapshot, wire `jkv`/`xstr`) — these **pass today** and guard the transparent
-  paths. Write the "text vs bytes" policy (this section). No behavior change to
-  builtins yet.
+- **SE-0 — Codepoint helper + test corpus + policy note. ✅ LANDED.** The shared
+  UTF-8 helper is `inc/cvc/core/state_exec/utf8.h` (`decode`/`count`/`byte_offset`/
+  `encode`/`is_valid`, header-only, no ICU, lenient decode that always progresses on
+  malformed input). `state_exec_unicode_test.cpp` unit-tests it (every byte-length
+  class + malformed/overlong/surrogate/truncated cases) and pins the transparent
+  paths with a `"café"` / 4-byte-emoji / CJK corpus: parse→value→to_string and the
+  cvc::state snapshot codec round-trip **pass today** (wire `jkv`/`xstr` are covered
+  by the existing codec tests). The "text vs bytes" policy is this section, restated
+  in the helper's header. **No behavior change** — the helper is added and tested in
+  isolation, unwired, so SE-1 is a pure byte→codepoint swap in the string builtins.
 - **SE-1 — Track A string builtins.** Fix A1–A6 (char-at, substring, split-"",
   upper/lower, length ×2) against the helper. Add failing-then-passing tests
   that pin codepoint semantics. Highest user-visible impact.
