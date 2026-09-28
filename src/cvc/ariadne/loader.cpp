@@ -326,9 +326,10 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 // into Widget::props for a registered emit fn to read.
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
-         k == "on_click" || k == "on_hover" || k == "on_drag" || k == "children" || k == "items" ||
-         k == "id" || k == "visible_when" || k == "enabled_when" || k == "disabled_when" ||
-         k == "tooltip" || k == "repeat";
+         k == "on_click" || k == "on_hover" || k == "on_drag" || k == "on_drag_start" ||
+         k == "on_drag_end" || k == "children" || k == "items" || k == "id" ||
+         k == "visible_when" || k == "enabled_when" || k == "disabled_when" || k == "tooltip" ||
+         k == "repeat";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -705,6 +706,10 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.on_hover = str(n, "on_hover"); // §4.6 continuous: fires each frame the item is hovered
     if (has(n, "on_drag"))
       w.on_drag = str(n, "on_drag"); // §4.6 continuous: fires each frame the item is dragged
+    if (has(n, "on_drag_start"))
+      w.on_drag_start = str(n, "on_drag_start"); // §4.6 edge: gesture begin (item activated)
+    if (has(n, "on_drag_end"))
+      w.on_drag_end = str(n, "on_drag_end"); // §4.6 edge: gesture end (item deactivated)
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.

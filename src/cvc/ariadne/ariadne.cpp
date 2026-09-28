@@ -576,6 +576,11 @@ struct Runtime::Impl {
   struct QueuedAction {
     std::string event;
     std::string prefix;
+    // §4.6 event scope: pointer data for a widget-level on_click/hover/drag/drag_start/drag_end
+    // handler. When has_event, a PROGRAM action runs with an `event` dict bound (x/y/dx/dy/button).
+    bool has_event = false;
+    float ex = 0.0f, ey = 0.0f, edx = 0.0f, edy = 0.0f;
+    int ebutton = 0;
   };
   std::vector<QueuedAction> queued_events;
 
@@ -616,7 +621,7 @@ struct Runtime::Impl {
 
   // Submit a program `on:` as a process on the app-wide scheduler (owner-tagged, chrooted
   // to `prefix`), keeping its ActionContext alive in live_actions_. Returns immediately.
-  void submit_action(const std::string &action_prefix, const std::string &script);
+  void submit_action(const QueuedAction &action);
   // Pump the app scheduler a bounded slice, then sweep finished actions out of
   // live_actions_ (reporting a killed one; a still-parked one persists to a later frame).
   void pump_and_sweep_actions();
@@ -701,6 +706,12 @@ struct Runtime::Impl {
   void enqueue(const std::string &event) {
     if (!event.empty())
       queued_events.push_back({event, current_prefix()}); // capture the mount scope for a program
+  }
+  // §4.6: enqueue a widget POINTER handler carrying its event data (a program gets an `event`
+  // dict).
+  void enqueue_event(const std::string &event, float x, float y, float dx, float dy, int button) {
+    if (!event.empty())
+      queued_events.push_back({event, current_prefix(), true, x, y, dx, dy, button});
   }
 
   void emit(const Widget &w);      // repeat + visibility gates (§4), then emit_node
@@ -1162,17 +1173,29 @@ void Runtime::Impl::emit_node(const Widget &w) {
   // backend's per-item click (ImGui::IsItemClicked), so it works wherever ImGui gets input (native
   // VTK-interactor AND wasm) — no raw hit-test. Defaults off on a backend without per-item input.
   // Inside the disabled scope (below), so a disabled widget never fires (IsItemClicked is false).
+  // §4.6 widget-level pointer handlers, each fired when the backend reports the matching per-item
+  // state (a program runs through state_exec with an `event` dict of the item's pointer coords; a
+  // bare name routes to a host handler). on_click is a one-shot edge; on_hover/on_drag are
+  // continuous; on_drag_start/on_drag_end are the gesture edges (activate/deactivate). Sourced from
+  // the backend's per-item state so it works native (VTK-interactor) AND wasm, no raw hit-test. The
+  // backend query is short-circuited when the handler is empty, and a disabled widget fires none
+  // (the backend reports false while disabled). item_pointer fills the event coords once per fire.
+  auto fire_pointer = [&](const std::string &handler) {
+    float x, y, dx, dy;
+    int btn;
+    b.item_pointer(x, y, dx, dy, btn);
+    enqueue_event(handler, x, y, dx, dy, btn);
+  };
   if (!w.on_click.empty() && b.item_clicked())
-    enqueue(w.on_click);
-  // §4.6 widget-level on_hover / on_drag: the CONTINUOUS counterparts of on_click — enqueue every
-  // frame the backend reports the last item hovered / being dragged. Same enqueue path (a program
-  // runs through state_exec, a bare name routes to a host handler); no coordinate/delta is carried
-  // (that is the document-level on_pointer resident's job). A disabled widget fires neither (the
-  // backend reports false while disabled). Continuous, so an on_hover body should be idempotent.
+    fire_pointer(w.on_click);
   if (!w.on_hover.empty() && b.item_hovered())
-    enqueue(w.on_hover);
+    fire_pointer(w.on_hover);
   if (!w.on_drag.empty() && b.item_dragged())
-    enqueue(w.on_drag);
+    fire_pointer(w.on_drag);
+  if (!w.on_drag_start.empty() && b.item_drag_started())
+    fire_pointer(w.on_drag_start);
+  if (!w.on_drag_end.empty() && b.item_drag_ended())
+    fire_pointer(w.on_drag_end);
   // §4 read-lane: attach a hover tooltip to the widget just drawn (the backend's last item).
   // A tooltip is free human text, so — unlike a bind (a dotted state path never begins with
   // '(') — one that merely LOOKS like an expression ("(optional) …", "(beta)") must not be
@@ -1241,8 +1264,10 @@ Runtime::Impl::~Impl() {
 }
 
 #ifdef CVC_STATE_EXEC
-void Runtime::Impl::submit_action(const std::string &action_prefix, const std::string &script) {
+void Runtime::Impl::submit_action(const QueuedAction &action) {
   namespace se = cvc::state_exec;
+  const std::string &action_prefix = action.prefix;
+  const std::string &script = action.event;
   // §7.4 per-activation caps (same as the old synchronous action lane): the STEP cap is the
   // deterministic guard on an action's real work; wall-time is a generous anti-hang backstop;
   // memory the §7.4 cap. Full env, writes chrooted to the action's mount prefix.
@@ -1266,6 +1291,17 @@ void Runtime::Impl::submit_action(const std::string &action_prefix, const std::s
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
       if (p)
         p(ac->env, ac->ictx);
+    // §4.6 event scope: a widget pointer handler runs with an `event` dict of the item's local
+    // pointer coords, so the program can read (get-attr event "x"/"y"/"dx"/"dy"/"button").
+    if (action.has_event) {
+      std::vector<std::pair<std::string, se::value_t>> f;
+      f.emplace_back("x", se::value_t(static_cast<double>(action.ex)));
+      f.emplace_back("y", se::value_t(static_cast<double>(action.ey)));
+      f.emplace_back("dx", se::value_t(static_cast<double>(action.edx)));
+      f.emplace_back("dy", se::value_t(static_cast<double>(action.edy)));
+      f.emplace_back("button", se::value_t(static_cast<int64_t>(action.ebutton)));
+      ac->env->set("event", se::make_dict(std::move(f)));
+    }
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
@@ -1480,7 +1516,7 @@ void Runtime::drain() {
       // and return — no run-to-completion inside drain(). The per-frame pump below advances it; a
       // quick action still finishes this drain, while an (await …)/(msg-recv …)/(sleep …) parks
       // and resumes on a later frame instead of blocking the UI thread (§4.7).
-      m_->submit_action(a.prefix, a.event);
+      m_->submit_action(a);
 #else
       m_->warn_once("ari: on: a program action needs state_exec (CVC_STATE_EXEC=OFF); it did not "
                     "run [" +

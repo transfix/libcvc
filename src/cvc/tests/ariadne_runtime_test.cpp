@@ -97,6 +97,21 @@ struct MockBackend : Backend {
   bool item_hovered() override { return item_hovered_flag; }
   bool item_dragged_flag = false; // §4.6: report the last item as dragged (widget on_drag test)
   bool item_dragged() override { return item_dragged_flag; }
+  bool item_drag_started_flag = false; // §4.6: on_drag_start edge
+  bool item_drag_started() override { return item_drag_started_flag; }
+  bool item_drag_ended_flag = false; // §4.6: on_drag_end edge
+  bool item_drag_ended() override { return item_drag_ended_flag; }
+  // §4.6 event scope: deliver fixed test coords so a program handler can read (get-attr event "x").
+  float ptr_x = 0, ptr_y = 0, ptr_dx = 0, ptr_dy = 0;
+  int ptr_button = 0;
+  bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) override {
+    x = ptr_x;
+    y = ptr_y;
+    dx = ptr_dx;
+    dy = ptr_dy;
+    button = ptr_button;
+    return true;
+  }
   BoolEdit menu_item_toggle(const char *l, bool) override {
     rec(std::string("toggle:") + l);
     return {};
@@ -487,6 +502,64 @@ TEST(AriadneInput, WidgetOnDragFiresWhileDragged) {
   rt.render();
   rt.drain();
   EXPECT_EQ(drags, 2);
+}
+
+// §4.6 on_drag_start / on_drag_end: one-shot EDGE handlers (item activate / deactivate). Bare-name
+// host-handler seam, so no state_exec needed; each fires exactly on its edge frame.
+TEST(AriadneInput, WidgetOnDragStartEndFireOnEdges) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int starts = 0, ends = 0;
+  rt.on("dstart", [&] { ++starts; });
+  rt.on("dend", [&] { ++ends; });
+  Widget t = text("Draggable");
+  t.on_drag_start = "dstart";
+  t.on_drag_end = "dend";
+  rt.set_root(group({t}));
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(starts, 0);
+  EXPECT_EQ(ends, 0);
+  // drag-start edge
+  mb.item_drag_started_flag = true;
+  rt.render();
+  rt.drain();
+  mb.item_drag_started_flag = false;
+  EXPECT_EQ(starts, 1);
+  EXPECT_EQ(ends, 0);
+  // drag-end edge
+  mb.item_drag_ended_flag = true;
+  rt.render();
+  rt.drain();
+  mb.item_drag_ended_flag = false;
+  EXPECT_EQ(starts, 1);
+  EXPECT_EQ(ends, 1);
+}
+
+// §4.6 event scope: a widget POINTER handler that is a PROGRAM runs with an `event` dict bound to
+// the item's pointer coords, read with (get-attr event "..."). Assert on button (int -> a stable
+// string), like the on_pointer test, to avoid double-format brittleness.
+TEST(AriadneInput, WidgetPointerProgramReceivesEventScope) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.ptr_x = 7;
+  mb.ptr_y = 9;
+  mb.ptr_button = 2;
+  Widget t = text("Clickable");
+  t.on_click = "(begin (state-set \"ev.btn\" (get-attr event \"button\")) "
+               "(state-set \"ev.has_x\" (if (>= (get-attr event \"x\") 0) \"yes\" \"no\")))";
+  rt.set_root(group({t}));
+  mb.item_clicked_flag = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ev.btn").value(), "2");     // the event dict was delivered
+  EXPECT_EQ(cvc::state::instance(app)("ev.has_x").value(), "yes"); // and x is readable (7 >= 0)
 }
 
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a
