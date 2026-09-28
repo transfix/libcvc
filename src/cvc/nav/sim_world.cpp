@@ -494,8 +494,10 @@ void sim_world::step(int num_threads) {
       std::fill(mat_gate_active_.begin(), mat_gate_active_.end(), std::uint8_t(1));
     }
     for (int i = 0; i < n_; ++i) {
-      mat_lam_soft_[i] = mat_gate_active_[i] ? mat_cfg_.lam_soft : 0.0f;
-      mat_lam_hard_[i] = mat_cfg_.lam_hard;
+      // Apply the live authority scale to the FIXED lam here so a no-net run scales too; the drive
+      // applies the same scale to a lam-head net's LEARNED lam (see material_drive.lam_soft_scale).
+      mat_lam_soft_[i] = (mat_gate_active_[i] ? mat_cfg_.lam_soft : 0.0f) * mat_cfg_.lam_soft_scale;
+      mat_lam_hard_[i] = mat_cfg_.lam_hard * mat_cfg_.lam_hard_scale;
     }
   }
 
@@ -521,6 +523,12 @@ void sim_world::step(int num_threads) {
     md.lam_hard = mat_lam_hard_.data();
     md.k_sharp = mat_cfg_.k_sharp;
     md.d_hat_m = mat_cfg_.d_hat_m;
+    // The learned-lam path (a lam-head net) overwrites lam_soft/lam_hard with the net's per-agent
+    // output; carry the live authority scale so the drive multiplies THAT learned lam, keeping the
+    // force-bias slider effective with a trained policy (the fixed columns above are already
+    // scaled).
+    md.lam_soft_scale = mat_cfg_.lam_soft_scale;
+    md.lam_hard_scale = mat_cfg_.lam_hard_scale;
     if (ext_.sample) {
       // BOTH a material stack and an external force are attached — fuse them so the learned
       // grip/risk policy AND the ext (RF/comm) force drive the same tick, instead of material

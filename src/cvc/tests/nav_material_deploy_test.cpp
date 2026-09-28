@@ -540,3 +540,38 @@ TEST(NavMaterialDeploy, LearnedLamHardHeadDrivesHardReroute) {
       << "the learned lam_hard head did not increase hard-hazard reroute (+x) (lo=" << x_lo
       << " hi=" << x_hi << ")";
 }
+
+// (11) The force-bias slider fix: material_drive.lam_soft_scale MULTIPLIES a lam-head net's
+// LEARNED lam_soft (instead of the caller's fixed lam being clobbered by the net). A scale of 2
+// reroutes ~twice as hard down the +x risk gradient as scale 1; scale 0 zeroes the soft force so
+// the agents drive nearly straight — proving a live authority lever composes with a trained net.
+TEST(NavMaterialDeploy, LamSoftScaleMultipliesLearnedReroute) {
+  deploy_world w;
+  std::vector<float> store;
+  material_stack ms = w.risk_stack(store); // +x risk gradient -> soft force pushes -x
+  // Fixed material lam columns are 0, so ALL reroute comes from the net's lam head * the scale.
+  std::vector<float> ls(w.N, 0.0f), lh(w.N, 0.0f);
+  auto run = [&](float scale) {
+    // v1 lam-head net, lam_soft init 1.0; drive_step_material extracts col 3 and multiplies it
+    // by md.lam_soft_scale.
+    coef_mlp net = make_net(7, 4, coef_mlp::kFlagFeatMu | coef_mlp::kFlagFeatRisk, 1.0f);
+    material_drive md;
+    md.stack = &ms;
+    md.lam_soft = ls.data();
+    md.lam_hard = lh.data();
+    md.lam_soft_scale = scale;
+    std::vector<float> o = w.o, th = w.th, sp = w.sp, mc(w.N);
+    for (int step = 0; step < 8; ++step)
+      drive_step_material(w.fs, o.data(), th.data(), sp.data(), w.carrot.data(), net, w.N, nullptr,
+                          w.v, md, mc.data(), 1);
+    double sx = 0;
+    for (int i = 0; i < w.N; ++i)
+      sx += o[2 * i]; // mean x: more reroute down the +x risk gradient => smaller (more -x)
+    return sx / w.N;
+  };
+  const double x_s0 = run(0.0f); // scale 0: no soft force -> drives straight (largest mean x)
+  const double x_s1 = run(1.0f);
+  const double x_s2 = run(2.0f); // 2x reroute -> smallest mean x
+  EXPECT_LT(x_s1, x_s0 - 1e-4) << "scale=1 did not reroute more than scale=0 (clobbered?)";
+  EXPECT_LT(x_s2, x_s1 - 1e-4) << "scale=2 did not reroute more than scale=1 (scale ignored?)";
+}

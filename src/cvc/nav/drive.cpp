@@ -759,18 +759,21 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
   // material_drive's fixed/gated column (the deployable twin of grl_snam coeffs_and_lam). A
   // two-head sigmoid net (has_lam_hard) also learns lam_hard from its 5th output; lam_hard is
   // never gated (material.h:37,161), so it mirrors lam_soft's extraction with no witness gate.
+  // Each learned lam is MULTIPLIED by md.lam_soft_scale / md.lam_hard_scale (default 1.0): a live
+  // authority lever (sim_world::set_material_lam_scale) then SCALES a trained policy's reroute
+  // strength here, instead of being clobbered when the net overrides the caller's fixed column.
   material_drive md = mat;
   std::vector<float> lam_learned, lam_hard_learned;
   if (model.has_lam()) {
     lam_learned.resize(n);
     for (int i = 0; i < n; ++i)
-      lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3];
+      lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3] * md.lam_soft_scale;
     md.lam_soft = lam_learned.data();
   }
   if (model.has_lam_hard()) {
     lam_hard_learned.resize(n);
     for (int i = 0; i < n; ++i)
-      lam_hard_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 4];
+      lam_hard_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 4] * md.lam_hard_scale;
     md.lam_hard = lam_hard_learned.data();
   }
   rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v,
@@ -863,13 +866,13 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
   if (model.has_lam()) {
     lam_learned.resize(n);
     for (int i = 0; i < n; ++i)
-      lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3];
+      lam_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 3] * md.lam_soft_scale;
     md.lam_soft = lam_learned.data();
   }
   if (model.has_lam_hard()) {
     lam_hard_learned.resize(n);
     for (int i = 0; i < n; ++i)
-      lam_hard_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 4];
+      lam_hard_learned[i] = coef[static_cast<std::size_t>(out_w) * i + 4] * md.lam_hard_scale;
     md.lam_hard = lam_hard_learned.data();
   }
   rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v,
