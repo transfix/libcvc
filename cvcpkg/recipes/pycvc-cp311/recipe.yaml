@@ -9,7 +9,11 @@ recipe:
   upstream_version: "3.4.0"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
-  cvc_revision: 2
+  # Bumped 2 -> 3: republish rebuilt against the v2 libcvc (.cvcnav format v2 / two-head
+  # sigmoid, #436). The published +cvc.2 links a PRE-v2 libcvc, so the torch<->C++ coef_mlp
+  # parity test (GRL-SNAM test_coef_mlp_parity) skips on 'unsupported .cvcnav format version';
+  # rebuilding on v2 libcvc makes it run.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

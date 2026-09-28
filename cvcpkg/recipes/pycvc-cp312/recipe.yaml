@@ -14,7 +14,10 @@ recipe:
   # matnet_forward, and the MaterialTrainer handle (nav_material_trainer_{create,
   # step,save}). GRL-SNAM's material_train_native path (and
   # test_material_train_native) stays skipped until this column republishes.
-  cvc_revision: 2
+  # Bumped 2 -> 3: republish rebuilt against the v2 libcvc (.cvcnav format v2 / two-head
+  # sigmoid, #436), so pycvc links a v2-capable libcvc and the torch<->C++ coef_mlp parity
+  # test runs instead of skipping on 'unsupported .cvcnav format version'.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
