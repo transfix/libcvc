@@ -112,7 +112,7 @@ if(@CVC_ENABLE_IMAGEMAGICK@)
     endif()
   endif()
 
-  # Append the ImageMagick codec delegate closure to a SYNTHESISED MagickCore target.
+  # Append the ImageMagick codec delegate closure to the MagickCore target.
   # MagickCore.pc does not list the delegates (they are separate cvcpkg bundles), so a
   # STATIC ImageMagick needs them appended explicitly — the same set
   # src/cvc/CMakeLists.txt links PRIVATE at build time. Harmless for a SHARED
@@ -120,7 +120,16 @@ if(@CVC_ENABLE_IMAGEMAGICK@)
   # honours CMAKE_FIND_ROOT_PATH so this works under emcmake, and each missing delegate
   # is silently skipped. freetype is omitted on purpose (VTK ships vtkfreetype with the
   # same symbols -> wasm-ld duplicate-symbol).
-  if(_cvc_im_synth AND TARGET ImageMagick::MagickCore)
+  #
+  # Gate on the TARGET existing, NOT on _cvc_im_synth: the STOCK FindImageMagick tier
+  # (the first branch above) also creates a delegate-LESS ImageMagick::MagickCore from
+  # find_library, and it wins on a wasm consumer (it finds the static libs in the prefix
+  # without pkg-config). Gating on _cvc_im_synth skipped the append for that stock target,
+  # so a wasm consumer's link failed with undefined BZ2_*/lzma_*/xml* symbols — which is
+  # what broke the cvcdbg demo3 gallery even after the export was made relocatable. Any
+  # MagickCore that reaches here is either a static one that NEEDS the closure or a shared
+  # one for which the append is a harmless dedup, so run it whenever the target exists.
+  if(TARGET ImageMagick::MagickCore)
     foreach(_cvc_del bz2 jpeg png16 webp webpmux webpdemux webpdecoder sharpyuv
                      tiff xml2 lzma Lerc brotlidec brotlicommon z)
       find_library(_CVC_DEL_${_cvc_del} NAMES ${_cvc_del})

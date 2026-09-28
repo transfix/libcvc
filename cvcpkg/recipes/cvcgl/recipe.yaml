@@ -42,7 +42,11 @@ recipe:
   # broken-export libcvc +cvc.4, so `cvcpkg install cvc/libcvc cvc/cvcgl --platform wasm-mt` dragged
   # +cvc.4 back in and the demo3 wasm link still failed. This reships cvcgl +cvc.6 built against (and
   # re-pinning) libcvc +cvc.5, so the wasm consumer install stays on the clean export end-to-end.
-  cvc_revision: 6
+  # Bumped 6 -> 7: rebuild against + re-pin libcvc +cvc.6 (the consumer-side ImageMagick
+  # delegate-closure fix in cvcConfig.cmake.in). cvcGL source unchanged; the exact-pin means
+  # cvcgl +cvc.6 still pins the +cvc.5 libcvc whose consumer config skipped the delegate append,
+  # so a fresh install must land on +cvc.7 -> libcvc +cvc.6 to link cleanly end-to-end.
+  cvc_revision: 7
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
