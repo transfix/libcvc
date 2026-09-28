@@ -90,8 +90,8 @@ std::map<std::string, AriBlockParser> &block_registry() {
 }
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
-         k == "children" || k == "scene" || k == "customs" || k == "init" || k == "units" ||
-         k == "import";
+         k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
+         k == "on_key" || k == "units" || k == "import";
 }
 } // namespace
 
@@ -1582,6 +1582,20 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       r.init_script = in.Scalar();
     else if (in && !in.IsScalar())
       ctx.warn("ari: init: must be a scalar state_exec script string — ignored");
+
+    // §7.1 resident handlers: scalar state_exec scripts, captured like init:. on_tick runs once
+    // per frame via Runtime::set_tick_program; on_key is captured but not yet wired (no Backend
+    // key-event seam) — the host will pick it up when keys land.
+    const YAML::Node tk = doc["on_tick"];
+    if (tk && tk.IsScalar())
+      r.on_tick_script = tk.Scalar();
+    else if (tk && !tk.IsScalar())
+      ctx.warn("ari: on_tick: must be a scalar state_exec script string — ignored");
+    const YAML::Node ky = doc["on_key"];
+    if (ky && ky.IsScalar())
+      r.on_key_script = ky.Scalar();
+    else if (ky && !ky.IsScalar())
+      ctx.warn("ari: on_key: must be a scalar state_exec script string — ignored");
   }
   if (r.meta.min_libcvc.empty())
     ctx.warn("ari: no meta.min_libcvc declared — the provenance gate is skipped "

@@ -144,6 +144,13 @@ int main(int argc, char **argv) {
       if (!run_init(app, sg.getStatePrefix(), lr.init_script, &init_errs))
         for (const std::string &e : init_errs)
           std::printf("[ariadne_hello]   %s\n", e.c_str());
+      // §7.1 resident on:tick: hand the document's on_tick script to the Runtime, which submits a
+      // single per-frame resident process (parking between frames). on_key is captured by the
+      // loader but not yet wired — the Backend has no per-frame key-event seam.
+      rt.set_tick_program(lr.on_tick_script);
+      if (!lr.on_key_script.empty())
+        std::printf("[ariadne_hello]   note: on_key: is captured but not yet wired (no backend "
+                    "key events)\n");
       // §extensibility: the loader already fail-fast-checked widget/block customs; now
       // check declared NODE customs (cvcGL registry) before realizing. A missing
       // REQUIRED node custom fails fast (skip the scene); a non-required one just logs.

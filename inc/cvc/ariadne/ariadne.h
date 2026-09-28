@@ -63,6 +63,14 @@ public:
   // `on:`). The handler runs on the host thread inside drain(), never in the walk.
   void on(std::string event, std::function<void()> handler);
 
+  // §7.1 resident on:tick handler — register a state_exec PROGRAM that runs ONCE PER FRAME.
+  // Unlike a fire-once action `on:`, this submits ONE long-lived, owner-tagged process on the
+  // app-wide scheduler that PARKS between frames (it never re-submits per frame); each drain()
+  // posts it a tick to run the program once. Pass a LoadResult::on_tick_script here after loading.
+  // "" clears it (kills the resident). A no-op in a build without state_exec. The resident is
+  // reaped with the Runtime (kill_owner on teardown).
+  void set_tick_program(std::string script);
+
   // Render one frame: apply any pending tree swap, then walk the tree driving the
   // Backend and binding cvc::state. Called by the active backend (from the host
   // render pass, or the backend's own loop). A pure reader of state that only

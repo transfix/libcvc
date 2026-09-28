@@ -292,6 +292,46 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
   EXPECT_EQ(cvc::state::instance(app)("async.value").value(), "delivered");
 }
 
+// §7.1 resident on:tick: set_tick_program submits ONE long-lived process that runs the body once
+// per drain (parking between frames), NOT a fresh action each frame. Proven by re-firing: reset a
+// flag the body sets, and the next drain sets it again from the SAME resident.
+TEST(AriadneResident, TickProgramRunsOncePerDrain) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program("(state-set \"tick.flag\" \"1\")");
+  rt.drain(); // submit the resident + post the frame tick + pump -> body runs once
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+  cvc::state::instance(app)("tick.flag").value(std::string("0")); // reset
+  rt.drain();                                                     // the resident fires AGAIN
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+  cvc::state::instance(app)("tick.flag").value(std::string("0"));
+  rt.drain(); // and again — it is resident, not one-shot
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// set_tick_program("") clears the resident: after clearing, a drain no longer re-fires the body.
+TEST(AriadneResident, ClearingTickProgramStopsIt) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program("(state-set \"tick.flag\" \"1\")");
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+  rt.set_tick_program(""); // clear -> kills the resident
+  cvc::state::instance(app)("tick.flag").value(std::string("0"));
+  rt.drain();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "0"); // no longer firing
+}
+
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a
 // combo can switch) and hands it to the backend's draw_image; a backend that can't draw an image
 // (no GL / terminal) returns false and the core shows the name as text.

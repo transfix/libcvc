@@ -619,6 +619,17 @@ struct Runtime::Impl {
   // Pump the app scheduler a bounded slice, then sweep finished actions out of
   // live_actions_ (reporting a killed one; a still-parked one persists to a later frame).
   void pump_and_sweep_actions();
+
+  // §7.1 resident on:tick handler. tick_script_ is the author's per-frame body (empty = none).
+  // ensure_tick_resident() submits ONE long-lived process (idempotent) that loops
+  // (while t (begin (msg-recv "<owner>#tick") <body>)) — parking between frames; post_tick()
+  // wakes it once per drain. Reaped by ~Impl's kill_owner (owner-tagged) or set_tick_program.
+  std::string tick_script_;
+  std::unique_ptr<ActionContext> tick_resident_;
+  int tick_resident_pid_ = -1;
+  std::string tick_channel() const { return owner_ + "#tick"; }
+  void ensure_tick_resident();
+  void post_tick();
 #endif
 
   // §12: the active mount scope during emit. Empty stack = the document prefix; each entry is
@@ -1265,6 +1276,54 @@ void Runtime::Impl::pump_and_sweep_actions() {
     }
   }
 }
+
+void Runtime::Impl::ensure_tick_resident() {
+  if (tick_script_.empty() || tick_resident_pid_ >= 0)
+    return; // nothing to run, or already submitted (residents submit ONCE, not per frame)
+  namespace se = cvc::state_exec;
+  try {
+    auto &sched = app.exec_scheduler();
+    used_scheduler_ = true;
+    auto ac = std::make_unique<ActionContext>();
+    ac->proc = se::make_process();
+    ac->proc->status = se::process_status::ready;
+    cvc::state &root = cvc::state::instance(app);
+    ac->ictx.sched = &sched;
+    ac->ictx.tracker = &ac->tracker;
+    ac->ictx.proc = ac->proc;
+    se::apply_chroot(ac->ictx, root, prefix); // resident writes confined to the document prefix
+    ac->env = se::builtins::make_default_environment();
+    se::register_intrinsics(ac->env, &ac->ictx);
+    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+      if (p)
+        p(ac->env, ac->ictx);
+    // Wrap the author's body in a park-then-run loop on this Runtime's tick channel: msg-recv
+    // parks the process between frames, post_tick() wakes it, the body runs once, and it loops
+    // back to park. No total-step cap (a resident is intended to loop forever; the per-frame pump
+    // budget bounds each activation, and the msg-recv guarantees it parks every iteration).
+    const std::string wrapped =
+        "(while t (begin (msg-recv \"" + tick_channel() + "\") " + tick_script_ + "))";
+    se::execute_options opts;
+    opts.env = ac->env;
+    opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
+    opts.max_steps = 0;  // unlimited total — see above
+    opts.max_time = 0.0;
+    tick_resident_pid_ = sched.execute(wrapped, opts);
+    tick_resident_ = std::move(ac);
+  } catch (const std::exception &e) {
+    warn_once(std::string("ari: on_tick resident failed to start: ") + e.what());
+  }
+}
+
+void Runtime::Impl::post_tick() {
+  if (tick_resident_pid_ < 0)
+    return; // no resident registered
+  // Wake the resident for one activation this frame. Post only when nothing is already queued on
+  // the channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
+  auto &sched = app.exec_scheduler();
+  if (sched.pending_message_count(tick_channel()) == 0)
+    sched.post_message(tick_channel(), cvc::state_exec::value_t(std::string("tick")));
+}
 #endif // CVC_STATE_EXEC
 
 Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move(prefix))) {}
@@ -1280,6 +1339,20 @@ void Runtime::set_root(Widget root) {
 
 void Runtime::on(std::string event, std::function<void()> handler) {
   m_->handlers[std::move(event)] = std::move(handler);
+}
+
+void Runtime::set_tick_program(std::string script) {
+#ifdef CVC_STATE_EXEC
+  // Replacing the program kills any running resident so the new body starts fresh next drain.
+  if (m_->tick_resident_pid_ >= 0) {
+    m_->app.exec_scheduler().kill(m_->tick_resident_pid_);
+    m_->tick_resident_.reset();
+    m_->tick_resident_pid_ = -1;
+  }
+  m_->tick_script_ = std::move(script);
+#else
+  (void)script; // residents need state_exec — no-op otherwise
+#endif
 }
 
 void Runtime::render() { m_->render(); }
@@ -1311,8 +1384,11 @@ void Runtime::drain() {
       it->second();
   }
 #ifdef CVC_STATE_EXEC
-  // Advance submitted actions — and any still-parked from earlier frames — a bounded slice, then
-  // sweep the finished ones. Runs once used_scheduler_ latches (i.e. an action has ever fired).
+  // §7.1 resident on:tick: submit the resident once (idempotent), then post it this frame's tick.
+  m_->ensure_tick_resident();
+  m_->post_tick();
+  // Advance submitted actions + the resident — and anything still-parked from earlier frames — a
+  // bounded slice, then sweep the finished ones. Runs once used_scheduler_ latches.
   if (m_->used_scheduler_)
     m_->pump_and_sweep_actions();
 #endif
