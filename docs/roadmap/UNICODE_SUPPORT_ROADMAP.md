@@ -275,10 +275,17 @@ Namespaced `SE-*` to distinguish from the libcvc-wide `P0–P3` above.
   to decode `\u`), and the internal coordinator round-trip is self-consistent
   without it — so it is a robustness/interop fix, not a correctness gap on the live
   path. A13 (Unicode-whitespace trim) skipped as cosmetic.
-- **SE-3 — Track B `bytes` type.** New variant alternative, literal syntax,
-  `bytes` builtins, `encode`/`decode` codecs, `type-of`, wire/state-data
-  marshalling. Then route the binary drivers (HTTP octet-stream, `py_to_value`
-  bytes branch, binary URI handlers) to `bytes` instead of `string`.
+- **SE-3 — Track B `bytes` type. ✅ LANDED (core type); driver routing follow-up.**
+  New `bytes_value` variant alternative (a distinct wrapper — a 2nd `std::string`
+  would be ambiguous), `b"…"` literal with byte-valued `\xNN` (no `\u`), byte-semantic
+  builtins (`bytes.length`/`byte-at`/`slice`/`concat`), `string.encode`/`bytes.decode`
+  as the only text↔binary crossings (utf-8; decode is strict), `type-of`→"bytes" +
+  `is-bytes`, and cvc::state snapshot-codec marshalling via base64 (arbitrary octets
+  survive text serialization). `to_string` renders `b"…"` with non-printable/high
+  bytes hex-escaped. **Follow-up:** route the actual binary drivers (§13.10 HTTP
+  octet-stream, the P3b `py_to_value` bytes branch, binary URI handlers) to `bytes`
+  instead of `string`, and marshal `bytes` over the multiprocess WIRE codec (coupled
+  with the deferred A9 wire work — `jkv`/`xstr`).
 - **SE-4 — Normalization policy + latent validators.** Decide and document A14
   (recommended: raw-bytes keys, NFC only at the boundary if needed). If NFC IS
   adopted, it pulls in `utf8proc` (see the Track A note — `utf8proc`, not ICU).

@@ -35,6 +35,65 @@ std::string get_type(cvc::state &n) {
 
 bool has_child(cvc::state &n, const std::string &name) { return n.findDescendant(name) != nullptr; }
 
+// SE-3: a `bytes` value holds arbitrary octets (NUL, high bytes, non-UTF-8), which a text-oriented
+// state serialization could mangle — so the codec stores bytes as base64 (RFC 4648, ASCII-safe).
+std::string b64_encode(const std::string &in) {
+  static const char *T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve(((in.size() + 2) / 3) * 4);
+  auto b = [&](std::size_t i) { return static_cast<unsigned>(static_cast<unsigned char>(in[i])); };
+  std::size_t i = 0;
+  for (; i + 3 <= in.size(); i += 3) {
+    const unsigned n = (b(i) << 16) | (b(i + 1) << 8) | b(i + 2);
+    out += T[(n >> 18) & 63];
+    out += T[(n >> 12) & 63];
+    out += T[(n >> 6) & 63];
+    out += T[n & 63];
+  }
+  if (i + 1 == in.size()) {
+    const unsigned n = b(i) << 16;
+    out += T[(n >> 18) & 63];
+    out += T[(n >> 12) & 63];
+    out += "==";
+  } else if (i + 2 == in.size()) {
+    const unsigned n = (b(i) << 16) | (b(i + 1) << 8);
+    out += T[(n >> 18) & 63];
+    out += T[(n >> 12) & 63];
+    out += T[(n >> 6) & 63];
+    out += '=';
+  }
+  return out;
+}
+std::string b64_decode(const std::string &in) {
+  auto val = [](char c) -> int {
+    if (c >= 'A' && c <= 'Z')
+      return c - 'A';
+    if (c >= 'a' && c <= 'z')
+      return c - 'a' + 26;
+    if (c >= '0' && c <= '9')
+      return c - '0' + 52;
+    if (c == '+')
+      return 62;
+    if (c == '/')
+      return 63;
+    return -1; // padding '=' or any non-base64 byte
+  };
+  std::string out;
+  int buf = 0, bits = 0;
+  for (char c : in) {
+    const int v = val(c);
+    if (v < 0)
+      continue;
+    buf = (buf << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out += static_cast<char>((buf >> bits) & 0xFF);
+    }
+  }
+  return out;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -119,6 +178,9 @@ void encode_value(cvc::state &node, const value_t &val) {
             // The payload is boost::any — store it via state::data()
             node.data(arg->payload);
           }
+        } else if constexpr (std::is_same_v<T, bytes_value>) {
+          set_type(node, "bytes"); // SE-3: base64 so arbitrary octets survive text serialization
+          node.value(b64_encode(arg.data));
         }
       },
       val.v);
@@ -145,6 +207,9 @@ value_t decode_value(cvc::state &node) {
 
   if (type == "string")
     return value_t(node.value());
+
+  if (type == "bytes") // SE-3
+    return make_bytes(b64_decode(node.value()));
 
   if (type == "symbol")
     return value_t(symbol{node.value()});

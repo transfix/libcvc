@@ -69,6 +69,7 @@ private:
   value_t parse_atom();
   value_t parse_list();
   value_t parse_string();
+  value_t parse_bytes_string(); // SE-3: b"..." byte-string literal (\xNN = a raw byte, no \u)
   value_t parse_number_or_symbol(char first);
 };
 
