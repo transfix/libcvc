@@ -111,9 +111,14 @@ private:
   struct GridState {
     bool split = false; // split-pane mode vs table mode
     int cols = 1;
-    int cell = 0;                 // cells emitted so far
-    std::vector<float> row_px;    // resolved row heights (px; 0 = auto/fit)
-    std::vector<float *> pane_h;  // split mode: pointers to each pane's live height (ImGui storage)
+    int cell = 0;              // cells emitted so far
+    std::vector<float> row_px; // resolved row heights (px; 0 = auto/fit)
+    // split mode: ImGui-storage KEYS (salted ImHashStr) for each pane's live height. We store keys,
+    // NOT float* — a GetFloatRef that inserts a new key can realloc the storage's backing vector
+    // and dangle a cached pointer, so we re-resolve by key at each use (grid_next_cell drag,
+    // end_grid snapshot), by which point every slot exists and no further insert can happen.
+    // unsigned int == ImGuiID, so the header stays free of ImGui types.
+    std::vector<unsigned int> pane_keys;
     float split_long_axis = 0.0f; // split mode: the seam's cross length
     int color_pushes = 0;         // table border-colour style pushes to pop
   };
