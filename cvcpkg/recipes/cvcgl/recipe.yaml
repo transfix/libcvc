@@ -37,7 +37,12 @@ recipe:
   # package.files globbed only lib/libcvcGL*, but MSVC stages the static lib as lib/cvcGL.lib
   # (no `lib` prefix). Added lib/cvcGL* (see package.files below). cvcGL source is unchanged;
   # this republishes so a Windows-release cvcgl bundle exists at all. No-op on Unix.
-  cvc_revision: 5
+  # Bumped 5 -> 6: rebuild against the relocatable-export libcvc +cvc.5 (libcvc #453). cvcGL source
+  # is unchanged, but cvcgl exact-pins the libcvc it built against — the published +cvc.5 pins the
+  # broken-export libcvc +cvc.4, so `cvcpkg install cvc/libcvc cvc/cvcgl --platform wasm-mt` dragged
+  # +cvc.4 back in and the demo3 wasm link still failed. This reships cvcgl +cvc.6 built against (and
+  # re-pinning) libcvc +cvc.5, so the wasm consumer install stays on the clean export end-to-end.
+  cvc_revision: 6
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

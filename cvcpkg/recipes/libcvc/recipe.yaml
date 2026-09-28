@@ -95,7 +95,17 @@ recipe:
   # the baked closure and a wasm consumer's link would fail). zlib + the ImageMagick codec closure stay
   # declared for wasm (they DO have wasm-mt candidates and are linked). A recipe edit alone can't fix the
   # already-published +cvc.3 bundle — this republishes a clean +cvc.4 wasm-mt closure.
-  cvc_revision: 4
+  # Bumped 4 -> 5 (3.4.0 lineage): the +cvc.4 wasm-mt bundle resolved cleanly but its EXPORTED
+  # cvcTargets.cmake baked 15 build-machine absolute paths into cvc::cvc's INTERFACE_LINK_LIBRARIES
+  # (libMagick++/libMagickCore + the codec delegates + libzstd, all under /home/runner/.../wasm-deps),
+  # so a relocated consumer's link died with "libMagick++-7.Q16HDRI.a ... missing" — which is why the
+  # cvcdbg wasm demo3 gallery could never link. libcvc #453 makes the STATIC wasm export relocatable
+  # (synthesise ImageMagick::Magick++/::MagickCore + PkgConfig::ZSTD imported targets so the export
+  # names targets, not paths; cvcConfig.cmake.in re-resolves them per-consumer). A recipe edit can't
+  # fix the already-published +cvc.4 bundle — this reships a clean +cvc.5 wasm-mt export. Native is
+  # unaffected (publish-cvcpkg auto-bumps above this floor). cvcgl bumps in lockstep (5 -> 6) so it
+  # rebuilds against +cvc.5 and re-pins it (cvcgl exact-pins its built-against libcvc).
+  cvc_revision: 5
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
