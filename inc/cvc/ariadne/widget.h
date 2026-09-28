@@ -126,11 +126,22 @@ struct Widget {
   std::string label; // display text / window title / menu name
   std::string bind;  // cvc::state path for bound widgets
   std::string on;    // event name for action widgets (Button / MenuItemAction)
-  // §4.6 widget-level pointer handler: a two-shape value (an event name OR a program starting with
-  // '(') fired when THIS widget is clicked — enqueued in the walk when the backend reports the item
-  // was clicked (Backend::item_clicked / ImGui::IsItemClicked), like Button's `on`. Any widget kind
-  // may carry it. (on_hover / on_drag — continuous / gesture handlers — are a later addition.)
+  // §4.6 widget-level pointer handlers: each a two-shape value (an event name OR a program starting
+  // with '(') fired for THIS widget — enqueued in the walk when the backend reports the matching
+  // per-item pointer state, like Button's `on`. Any widget kind may carry any of them.
+  //   on_click — the item was clicked this frame (Backend::item_clicked / ImGui::IsItemClicked).
+  //              A one-shot edge: fires once per click.
+  //   on_hover — the item is hovered (Backend::item_hovered / ImGui::IsItemHovered). CONTINUOUS:
+  //              fires EVERY frame the pointer is over the item, so its handler should be
+  //              idempotent/cheap (typically a state-set), like an on:tick body.
+  //   on_drag  — the item is being actively dragged (Backend::item_dragged). CONTINUOUS: fires
+  //              every frame the drag is active. Neither on_hover nor on_drag carries pointer
+  //              coordinates or a drag delta — for coordinate/delta-aware handling use the
+  //              DOCUMENT-level on_pointer resident (its event dict has x/y/dx/dy).
+  // Disabled widgets fire none of these (the backend reports false while disabled).
   std::string on_click;
+  std::string on_hover;
+  std::string on_drag;
 
   // §4 read-lane (reactive): a state_exec predicate re-evaluated each frame; when it
   // is non-empty and evaluates falsy the widget (and its subtree) is skipped this

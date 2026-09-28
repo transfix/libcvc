@@ -1568,6 +1568,33 @@ windows:
   EXPECT_TRUE(found);
 }
 
+// §4.6 widget-level on_hover / on_drag are captured onto the Widget (any kind), like on_click.
+TEST(AriadneInit, CapturesWidgetOnHoverAndOnDrag) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - text: Interactive
+        on_hover: '(state-set "hovered" "1")'
+        on_drag: 'drag_event'
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  bool hover = false, drag = false;
+  std::function<void(const Widget &)> walk = [&](const Widget &w) {
+    if (w.on_hover.find("hovered") != std::string::npos)
+      hover = true;
+    if (w.on_drag == "drag_event")
+      drag = true;
+    for (const Widget &c : w.children)
+      walk(c);
+  };
+  walk(r.root);
+  EXPECT_TRUE(hover);
+  EXPECT_TRUE(drag);
+}
+
 TEST(AriadneInit, NonScalarOnTickWarns) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

@@ -93,6 +93,10 @@ struct MockBackend : Backend {
   }
   bool item_clicked_flag = false; // §4.6: report the last item as clicked (widget on_click test)
   bool item_clicked() override { return item_clicked_flag; }
+  bool item_hovered_flag = false; // §4.6: report the last item as hovered (widget on_hover test)
+  bool item_hovered() override { return item_hovered_flag; }
+  bool item_dragged_flag = false; // §4.6: report the last item as dragged (widget on_drag test)
+  bool item_dragged() override { return item_dragged_flag; }
   BoolEdit menu_item_toggle(const char *l, bool) override {
     rec(std::string("toggle:") + l);
     return {};
@@ -422,6 +426,67 @@ TEST(AriadneInput, WidgetOnClickFiresWhenBackendReportsClick) {
   EXPECT_NE(cvc::state::instance(app)("widget.clicked").value(), "yes"); // never inside render()
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("widget.clicked").value(), "yes");
+}
+
+// §4.6 widget-level on_hover: the CONTINUOUS counterpart of on_click — the walk enqueues on_hover
+// every frame the backend reports the item hovered (Backend::item_hovered -> ImGui::IsItemHovered).
+// Uses the bare-name host-handler seam (no state_exec needed) and counts invocations to prove it
+// fires only while hovered AND re-fires each frame (continuous, not a one-shot latch).
+TEST(AriadneInput, WidgetOnHoverFiresContinuouslyWhileHovered) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int hovers = 0;
+  rt.on("hovered", [&] { ++hovers; });
+  Widget t = text("Hoverable");
+  t.on_hover = "hovered"; // bare name -> host handler
+  rt.set_root(group({t}));
+  // Not hovered -> on_hover must NOT fire.
+  mb.item_hovered_flag = false;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(hovers, 0);
+  // Hovered -> fires; being continuous, each subsequent frame while still hovered fires AGAIN.
+  mb.item_hovered_flag = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(hovers, 1);
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(hovers, 2);
+  // Leaving the item stops it firing.
+  mb.item_hovered_flag = false;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(hovers, 2);
+}
+
+// §4.6 widget-level on_drag: continuous while the item is actively dragged (Backend::item_dragged
+// -> ImGui IsItemActive() && IsMouseDragging()). Same enqueue/drain path as on_click/on_hover.
+TEST(AriadneInput, WidgetOnDragFiresWhileDragged) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int drags = 0;
+  rt.on("dragging", [&] { ++drags; });
+  Widget t = text("Draggable");
+  t.on_drag = "dragging"; // bare name -> host handler
+  rt.set_root(group({t}));
+  // Not dragged -> on_drag must NOT fire.
+  mb.item_dragged_flag = false;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(drags, 0);
+  // Dragged -> render() enqueues, drain() runs; continuous while the drag is active.
+  mb.item_dragged_flag = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(drags, 1);
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(drags, 2);
 }
 
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a

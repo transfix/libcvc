@@ -158,6 +158,16 @@ public:
   // backend returns ImGui::IsItemClicked(); a mock/test backend can drive it.
   virtual bool item_clicked() { return false; }
 
+  // §4.6 widget-level on_hover / on_drag: per-item pointer state for the LAST item drawn, queried
+  // by the walk right after emitting a widget that carries on_hover / on_drag (Runtime::emit_node)
+  // — the continuous counterparts of item_clicked. item_hovered(): the pointer is over the item
+  // this frame. item_dragged(): the item is being actively dragged this frame. Both default false —
+  // a backend with no per-item pointer input reports neither (the document-level on_pointer path
+  // still works). The ImGui backend returns IsItemHovered() / (IsItemActive() &&
+  // IsMouseDragging()); a mock/test backend can drive them. A disabled item reports false for both.
+  virtual bool item_hovered() { return false; }
+  virtual bool item_dragged() { return false; }
+
   // ---- state-bound (value-in / edit-out) ----------------------------------
   virtual BoolEdit menu_item_toggle(const char *label, bool current) = 0;
   virtual BoolEdit checkbox(const char *label, bool current) = 0;
