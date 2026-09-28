@@ -4,6 +4,7 @@
 // the §3.0.3b grid dispatch.
 
 #include <algorithm>
+#include <atomic> // item 2: the nav-step worker's arrived-count accumulator
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/loader.h> // §12 end-to-end load: mount through the real Runtime
@@ -13,6 +14,7 @@
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
 #include <cvc/core/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
 #include <cvc/core/state_exec/types.h>           // value_t
+#include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -331,6 +333,68 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
   rt.render();
   rt.drain(); // wakes + resumes; the delivered value flows into state-set
   EXPECT_EQ(cvc::state::instance(app)("async.value").value(), "delivered");
+}
+
+// item 2 — the compute-pool async story, headless (no ImGui/GL): a HOST INTRINSIC launches an
+// off-thread nav step on app.computePool() and hands the result back through the ONE thread-safe
+// seam a worker may touch — exec_scheduler().post_message — waking a parked (msg-recv "nav.done")
+// action that threads the value into state. Combines the host-intrinsic seam
+// (HostIntrinsicCallableFromProgram) with the worker-delivers park/resume path
+// (ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers). msg-recv is race-free either way: it
+// pops any already-buffered pending message before parking, so worker-posts-early also delivers.
+// NB the nav_compute demo drives this through app.compute_async (which wraps exactly this
+// background-thread → parallel_for → post_message); here we hand-roll a joinable std::thread so the
+// test can join() deterministically before asserting (compute_async is fire-and-forget by design).
+TEST(AriadneAction, IntrinsicRunsNavStepOnComputePoolAndWakesMsgRecv) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  app.computePool();    // warm the lazy per-app singletons on THIS thread before a worker touches
+  app.exec_scheduler(); // them, so a background worker never races their first construction
+  Runtime rt(app, "");  // app-root prefix so the channel/state paths are used as-is
+  MockBackend mb;
+  rt.set_backend(&mb);
+
+  // The host verb (nav-step-async) kicks off a background job and returns nil immediately — it must
+  // NOT block, since it runs inline on the host thread inside drain(). The job fans the nav step
+  // out over app.computePool() and, on join, posts the result. The test owns the worker handle so
+  // it can join deterministically (no sleep/spin) before the delivering drain.
+  std::thread worker;
+  register_action_intrinsics([&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+    se::builtins::register_fn(env, "nav-step-async", [&](std::span<const se::value_t>) {
+      worker = std::thread([&app] {
+        std::atomic<int> arrived{0};
+        const int n = 256;
+        // The data-parallel nav step runs on the persistent compute-pool workers.
+        app.computePool().parallel_for(n, [&arrived](int i) {
+          if ((i % 3) == 0) // stand-in kernel: count the "arrived" agents
+            arrived.fetch_add(1, std::memory_order_relaxed);
+        });
+        // The ONLY thread-safe scheduler contact a worker may make (async_scheduler.h): a
+        // string payload matches the existing msg-recv tests and dodges int->state coercion.
+        app.exec_scheduler().post_message("nav.done", se::value_t(std::to_string(arrived.load())));
+      });
+      return se::value_t{}; // nil; the action then parks on (msg-recv "nav.done")
+    });
+  });
+
+  Widget b =
+      button("Go", "(begin (nav-step-async) (state-set \"nav.result\" (msg-recv \"nav.done\")))");
+  rt.set_root(group({b}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // intrinsic launches the worker; the action parks on msg-recv (drain never blocks)
+  mb.button_click = false;
+  ASSERT_TRUE(worker.joinable());
+  worker.join(); // make the post deterministic before the delivering drain
+
+  rt.render();
+  rt.drain(); // drain_ingress delivers "nav.done" -> wakes the parked action -> state-set runs
+  clear_action_intrinsics();
+  // i in [0,256), i%3==0 -> {0,3,...,255} = 86 values, so the worker computed arrived == 86.
+  EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
 // §7.1 resident on:tick: set_tick_program submits ONE long-lived process that runs the body once
