@@ -4177,6 +4177,17 @@ TEST_F(StateTestFixture, InvalidStateNames) {
   EXPECT_FALSE(cvc::state::isValidStateName("name#hash"));       // Contains #
 }
 
+// SE-4 (A12): non-ASCII (UTF-8) bytes must be classified WITHOUT signed-char UB. Bytes >= 0x80 are
+// not ASCII letters/digits, so a UTF-8 name is invalid and sanitizes to underscores — the point of
+// this test is that it runs with DEFINED behavior (unsigned-char cast), not UB. \xNN byte escapes
+// keep the bytes exact (and dodge MSVC's code-page-1252 warning).
+TEST_F(StateTestFixture, NonAsciiNamesHandledWithoutUB) {
+  EXPECT_FALSE(cvc::state::isValidStateName("caf\xC3\xA9"));        // "café" — é is not alnum
+  EXPECT_FALSE(cvc::state::isValidStateName("\xC3\xA9name"));       // leading high byte
+  EXPECT_EQ(cvc::state::sanitizeStateName("caf\xC3\xA9"), "caf__"); // é bytes -> underscores
+  EXPECT_EQ(cvc::state::sanitizeStateName("\xC3\xA9x"), "__x");     // leading high bytes replaced
+}
+
 TEST_F(StateTestFixture, SanitizeEmptyName) {
   std::string result = cvc::state::sanitizeStateName("");
   EXPECT_EQ(result, "unnamed");
