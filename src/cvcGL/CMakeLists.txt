@@ -116,6 +116,31 @@ if(CVC_ENABLE_IMGUI)
   endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# SDL3 (optional): the input + peripheral seam — keyboard/mouse/gamepad and later
+# audio/microphone/camera — native AND WebAssembly (wasm/wasm-mt, verified with VTK).
+# Found via its own CMake config (SDL3::SDL3 imported target, relocatable — a consumer
+# of the installed cvcGL re-finds it via find_dependency(SDL3) in cvcGLConfig.cmake, so
+# nothing hand-wires -lSDL3 or an -L path). When present, CVC_ENABLE_SDL is defined so
+# cvc::gl code (the §4.6 input backend / on_key etc.) can use SDL. GRACEFULLY ABSENT: with
+# no SDL3 in the prefix, CVC_ENABLE_SDL is off and the SDL-backed paths compile to no-ops
+# (input falls back to the VTK interactor, as today). The sdl3 cvcpkg dependency (declared
+# in the cvcgl recipe) is what puts SDL3 in the build + consumer prefix.
+option(CVC_ENABLE_SDL "Build the cvcGL SDL3 input/peripheral seam (keyboard/mouse/gamepad/audio)" ON)
+set(CVC_SDL_VIA_CONFIG OFF)  # set when linked via the SDL3::SDL3 cmake target
+if(CVC_ENABLE_SDL)
+  find_package(SDL3 CONFIG QUIET)
+  if(TARGET SDL3::SDL3)
+    target_link_libraries(cvcGL PUBLIC SDL3::SDL3)
+    target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_SDL)
+    set(CVC_SDL_VIA_CONFIG ON)
+    message(STATUS "cvcGL: SDL3 input/peripheral seam ENABLED (SDL3::SDL3)")
+  else()
+    set(CVC_ENABLE_SDL OFF)
+    message(STATUS "cvcGL: SDL3 not found -- input seam falls back to the VTK interactor")
+  endif()
+endif()
+
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
 # X11 is used by CameraController for Quake-style pointer capture (warp the cursor
@@ -186,6 +211,14 @@ if(CVC_IMGUI_VIA_CONFIG)
   set(CVCGL_IMGUI_DEP "find_dependency(imgui CONFIG)")
 else()
   set(CVCGL_IMGUI_DEP "")
+endif()
+
+# @CVCGL_SDL_DEP@ — a find_dependency(SDL3) line iff cvcGL linked SDL3::SDL3 this build
+# (so a consumer re-finds it); empty otherwise.
+if(CVC_SDL_VIA_CONFIG)
+  set(CVCGL_SDL_DEP "find_dependency(SDL3 CONFIG)")
+else()
+  set(CVCGL_SDL_DEP "")
 endif()
 
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so

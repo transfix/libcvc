@@ -22,6 +22,11 @@ find_dependency(VTK COMPONENTS @CVCGL_VTK_COMPONENTS@)
 # target, so this is idempotent.
 @CVCGL_IMGUI_DEP@
 
+# When cvcGL was built against SDL3 (CVC_ENABLE_SDL), its public interface links
+# SDL3::SDL3 (the input/peripheral seam), so consumers must re-find it. Empty when
+# built without SDL3. SDL3's config guards its own target, so this is idempotent.
+@CVCGL_SDL_DEP@
+
 include("${CMAKE_CURRENT_LIST_DIR}/cvcGLTargets.cmake")
 
 check_required_components(cvcGL)
