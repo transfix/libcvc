@@ -73,17 +73,21 @@ jobs:
           echo "CVC_EMSDK_DIR=$EMSDK_DIR" >> "$GITHUB_ENV"
 
       - name: Install the wasm-mt dep closure
-        # The same list + flags the nightly installs; libcvc/cvcGL link these.
+        # The same list + flags the nightly installs; libcvc/cvcGL link these. sdl3 backs the
+        # cvcGL input/peripheral seam (CVC_ENABLE_SDL): with it in $WASM_DEPS, cvcGL's
+        # find_package(SDL3 CONFIG) (resolved via CMAKE_FIND_ROOT_PATH below) links SDL3::SDL3
+        # instead of degrading to the VTK-interactor fallback. sdl3 wasm-mt is a static bundle
+        # and pulls no Emscripten SDL port (no -sUSE_SDL), so it does not clash with anything here.
         run: |
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui vtk; do
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3 || { echo "::error::failed to install wasm dep $p"; exit 1; }
           done
 
-      - name: Build + install libcvc + cvcGL (wasm-mt, with imgui)
+      - name: Build + install libcvc + cvcGL (wasm-mt, with imgui + sdl3)
         # The proven build from CVC-DBG/cvcdbg wasm/build-standalone.sh step 1:
         # ONE emscripten configure builds both cvc + cvcGL targets and installs
         # them into $INST. -DCVC_BUILD_EXAMPLES=OFF: libcvc's own demos never build.
@@ -106,6 +110,13 @@ jobs:
             || { echo "::error::wasm build produced no libcvc.a/libcvcGL.a"; exit 1; }
           grep -q CVC_ENABLE_IMGUI "$INST/lib/cmake/cvcGL/cvcGLTargets.cmake" \
             || echo "::warning::cvcGL wasm built WITHOUT imgui (overlay will be inert)"
+          # sdl3 is now in $WASM_DEPS, so cvcGL MUST link SDL3::SDL3 (CVC_ENABLE_SDL) — its config
+          # then emits find_dependency(SDL3 CONFIG). If it instead fell back to the VTK interactor,
+          # this wasm bundle would be identical to the pre-SDL3 one, so fail loud rather than ship a
+          # mislabeled revision. (find_package(SDL3) failing under emcmake is the thing to catch here.)
+          grep -q "find_dependency(SDL3" "$INST/lib/cmake/cvcGL/cvcGLConfig.cmake" \
+            || { echo "::error::cvcGL wasm did NOT link SDL3 (find_package(SDL3) failed under emcmake despite sdl3 in \$WASM_DEPS) — the input seam fell back to the VTK interactor"; exit 1; }
+          echo "cvcGL wasm: SDL3 input seam ENABLED (find_dependency(SDL3) present)"
 
       - name: Pack + publish libcvc + cvcgl wasm-mt
         env:
