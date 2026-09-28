@@ -206,6 +206,37 @@ if(@CVC_ENABLE_CUDA@)
   find_package(CUDAToolkit QUIET)
 endif()
 
+# zstd (state-replication compressor). A STATIC cvc links libzstd via the imported
+# target PkgConfig::ZSTD, so its name lands in cvc::cvc's INTERFACE_LINK_LIBRARIES
+# ($<LINK_ONLY:>) and every consumer must resolve it — exactly like ImageMagick /
+# assimp / FFTW3 above, and for the same reason (a raw abs path would not relocate).
+# A shared cvc absorbs zstd and never exports the target, so this is a harmless no-op
+# there. Prefer pkg-config; fall back to find_library under the prefix (honours
+# CMAKE_FIND_ROOT_PATH, so it works under emcmake).
+if(@ZSTD_FOUND@)
+  if(NOT TARGET PkgConfig::ZSTD)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      # Creates the imported target PkgConfig::ZSTD directly (same call as libcvc's
+      # own build), so no alias is needed.
+      pkg_check_modules(ZSTD QUIET IMPORTED_TARGET libzstd)
+    endif()
+  endif()
+  if(NOT TARGET PkgConfig::ZSTD)
+    find_path(_CVC_ZSTD_INC NAMES zstd.h)
+    find_library(_CVC_ZSTD_LIB NAMES zstd)
+    if(_CVC_ZSTD_LIB)
+      add_library(PkgConfig::ZSTD INTERFACE IMPORTED)
+      set_target_properties(PkgConfig::ZSTD PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${_CVC_ZSTD_LIB}")
+      if(_CVC_ZSTD_INC)
+        set_target_properties(PkgConfig::ZSTD PROPERTIES
+          INTERFACE_INCLUDE_DIRECTORIES "${_CVC_ZSTD_INC}")
+      endif()
+    endif()
+  endif()
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/cvcTargets.cmake")
 
 check_required_components(cvc)
