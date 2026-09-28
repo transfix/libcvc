@@ -2,6 +2,7 @@
 #include <charconv>
 #include <cstring>
 #include <cvc/core/state_exec/parser.h>
+#include <cvc/core/state_exec/utf8.h> // SE-2: \u/\x escapes -> UTF-8, and UTF-8 identifier bytes
 #include <sstream>
 
 namespace cvc::state_exec {
@@ -132,6 +133,19 @@ value_t parser::parse_string() {
       if (_pos >= _input.size())
         error("unexpected end of input in string escape");
       char esc = advance();
+      // SE-2 (A8): read one hex digit, or fail. `error()` is [[noreturn]].
+      auto hex1 = [&]() -> unsigned {
+        if (_pos >= _input.size())
+          error("unexpected end of input in numeric string escape");
+        const char h = advance();
+        if (h >= '0' && h <= '9')
+          return static_cast<unsigned>(h - '0');
+        if (h >= 'a' && h <= 'f')
+          return static_cast<unsigned>(h - 'a' + 10);
+        if (h >= 'A' && h <= 'F')
+          return static_cast<unsigned>(h - 'A' + 10);
+        error("invalid hex digit in string escape");
+      };
       switch (esc) {
       case 'n':
         result += '\n';
@@ -148,6 +162,36 @@ value_t parser::parse_string() {
       case '"':
         result += '"';
         break;
+      case '0': // NUL
+        result += '\0';
+        break;
+      case 'x': { // \xNN -> codepoint U+00NN, encoded UTF-8 (text semantics, like Python 3 str)
+        char32_t cp = static_cast<char32_t>((hex1() << 4) | hex1());
+        utf8::encode(cp, result);
+        break;
+      }
+      case 'u': { // \uXXXX (exactly 4 hex) or \u{H..H} (1-6 hex) -> codepoint, encoded UTF-8
+        char32_t cp = 0;
+        if (_pos < _input.size() && _input[_pos] == '{') {
+          advance(); // consume '{'
+          int ndig = 0;
+          while (_pos < _input.size() && _input[_pos] != '}') {
+            cp = (cp << 4) | hex1();
+            if (++ndig > 6)
+              error("\\u{...} has more than 6 hex digits");
+          }
+          if (_pos >= _input.size())
+            error("unterminated \\u{...} escape");
+          advance(); // consume '}'
+          if (ndig == 0)
+            error("empty \\u{} escape");
+        } else {
+          for (int i = 0; i < 4; ++i)
+            cp = (cp << 4) | hex1();
+        }
+        utf8::encode(cp, result); // out-of-range / surrogate -> U+FFFD (see utf8::encode)
+        break;
+      }
       default:
         result += '\\';
         result += esc;
@@ -167,7 +211,16 @@ value_t parser::parse_atom() {
 }
 
 static bool is_symbol_char(char c) {
-  if (std::isalnum(static_cast<unsigned char>(c)))
+  const unsigned char uc = static_cast<unsigned char>(c);
+  // SE-2 (A7): any byte >= 0x80 is a UTF-8 lead/continuation byte — accept it as an identifier
+  // constituent so symbols/variable/function names may contain non-ASCII letters (e.g. `café`),
+  // instead of being truncated at the first high byte.
+  if (uc >= 0x80)
+    return true;
+  // SE-2 (A11): classify ASCII locale-INDEPENDENTLY (not std::isalnum, whose result for bytes
+  // 0x80-0xFF is locale-dependent — moot now that >=0x80 is handled above, but this also pins the
+  // ASCII set regardless of the process locale).
+  if ((uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z') || (uc >= '0' && uc <= '9'))
     return true;
   switch (c) {
   case '_':

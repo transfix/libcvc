@@ -272,3 +272,38 @@ TEST(StateExecUnicodeBuiltins, CoreLengthBuiltinCountsCodepointsForStrings) {
   EXPECT_EQ(
       std::get<int64_t>(builtin_length(std::span<const value_t>(ascii.data(), ascii.size())).v), 5);
 }
+
+// ===========================================================================
+// SE-2 — Track A parser: \u/\x/\u{} escapes decode to UTF-8, and identifiers
+// may contain non-ASCII (UTF-8) bytes (A7/A8/A11).
+// ===========================================================================
+TEST(StateExecUnicodeParser, UnicodeEscapesDecodeToUtf8) {
+  // \uXXXX (4 hex) -> codepoint -> UTF-8 bytes
+  EXPECT_EQ(std::get<std::string>(parse("\"\\u00e9\"").v), "\xC3\xA9"); // é
+  EXPECT_EQ(std::get<std::string>(parse("\"caf\\u00e9\"").v), kCafe);
+  // \u{H..H} braces, astral plane
+  EXPECT_EQ(std::get<std::string>(parse("\"\\u{1f600}\"").v), kEmoji); // 😀
+  EXPECT_EQ(std::get<std::string>(parse("\"\\u{4e2d}\\u{6587}\"").v), kCjk);
+  // \xNN -> codepoint U+00NN (text semantics), encoded UTF-8
+  EXPECT_EQ(std::get<std::string>(parse("\"\\x41\"").v), "A");        // U+0041
+  EXPECT_EQ(std::get<std::string>(parse("\"\\xe9\"").v), "\xC3\xA9"); // U+00E9 -> UTF-8
+  // \0 NUL
+  EXPECT_EQ(std::get<std::string>(parse("\"\\x00\"").v), std::string(1, '\0'));
+  // a surrogate codepoint is replaced with U+FFFD by utf8::encode
+  EXPECT_EQ(std::get<std::string>(parse("\"\\ud800\"").v), "\xEF\xBF\xBD");
+}
+
+TEST(StateExecUnicodeParser, MalformedEscapesError) {
+  EXPECT_THROW(parse("\"\\u00zz\""), parse_error); // non-hex
+  EXPECT_THROW(parse("\"\\u12\""), parse_error);   // too few hex digits
+  EXPECT_THROW(parse("\"\\u{}\""), parse_error);   // empty braces
+  EXPECT_THROW(parse("\"\\x1\""), parse_error);    // \x needs 2 hex
+}
+
+TEST(StateExecUnicodeParser, IdentifiersMayContainUtf8) {
+  // a symbol whose name carries UTF-8 parses whole (was truncated at the first high byte before).
+  // to_string(symbol) emits the name verbatim, so it round-trips the exact bytes.
+  EXPECT_EQ(to_string(parse(kCafe)), kCafe);
+  EXPECT_EQ(to_string(parse("na\xC3\xAFve")), "na\xC3\xAFve"); // naïve (ï = U+00EF)
+  EXPECT_EQ(to_string(parse(kCjk)), kCjk);
+}
