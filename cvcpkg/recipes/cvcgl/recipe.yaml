@@ -46,7 +46,14 @@ recipe:
   # delegate-closure fix in cvcConfig.cmake.in). cvcGL source unchanged; the exact-pin means
   # cvcgl +cvc.6 still pins the +cvc.5 libcvc whose consumer config skipped the delegate append,
   # so a fresh install must land on +cvc.7 -> libcvc +cvc.6 to link cleanly end-to-end.
-  cvc_revision: 7
+  # Bumped 7 -> 8: wasm SDL3. Every prior wasm-mt cvcgl bundle shipped the VTK-interactor fallback
+  # because publish-cvcgl-wasm's $WASM_DEPS closure never installed sdl3, so find_package(SDL3)
+  # failed under emcmake and CVC_ENABLE_SDL was off. That workflow now installs sdl3 (wasm-mt has a
+  # published bundle, and no Emscripten -sUSE_SDL port is in play to clash), so cvcGL links
+  # SDL3::SDL3 and ships the real input/peripheral seam on wasm. publish-cvcgl-wasm packs cvcgl
+  # VERBATIM at this cvc_revision, so a bump is required to republish the SDL3-linked wasm bundle;
+  # +cvc.8 builds against (and re-pins) the current relocatable-export libcvc +cvc.6. Source unchanged.
+  cvc_revision: 8
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
