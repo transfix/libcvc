@@ -30,7 +30,10 @@ recipe:
   # `cvcpkg install cvc/libcvc cvc/cvcgl --platform wasm-mt` failed to resolve abseil (the gRPC
   # deps that +cvc.3 guards off wasm). Rebuilding cvcGL against +cvc.3 re-points that pin to the
   # guarded libcvc. cvcGL source itself is unchanged.
-  cvc_revision: 3
+  # Bumped 3 -> 4: SDL3 is now a build + runtime dep (CVC_ENABLE_SDL=ON) — cvcGL's export
+  # links SDL3::SDL3, the input + peripheral seam (keyboard/mouse/gamepad + audio/mic/camera,
+  # native and wasm/wasm-mt). A consumer of cvc::cvcGL must now have sdl3 in its prefix.
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -74,6 +77,12 @@ depends:
     # Dear ImGui — cvcGL's overlay (cvc::gl::ImGuiOverlay). find_path/find_library
     # in src/cvcGL/CMakeLists.txt locate it; with it present CVC_ENABLE_IMGUI=ON.
     - name: imgui
+    # SDL3 — the input + peripheral seam (keyboard / mouse / gamepad, and audio /
+    # microphone / camera), native AND wasm/wasm-mt (verified with VTK).
+    # find_package(SDL3 CONFIG) in src/cvcGL/CMakeLists.txt links it; with it present
+    # CVC_ENABLE_SDL=ON. This is the foundation for the §4.6 input handlers
+    # (on_key / on_click / on_drag / …) and later audio/peripheral support.
+    - name: sdl3
   runtime:
     # cvcGL's public interface links cvc::cvc and the VTK modules.
     - name: libcvc
@@ -81,6 +90,9 @@ depends:
     # cvcGL's export links the relocatable $<INSTALL_INTERFACE:imgui> and exposes
     # include/imgui, so a consumer of cvc::cvcGL must have imgui in its prefix.
     - name: imgui
+    # cvcGL's export links SDL3::SDL3 (re-found via find_dependency(SDL3) in
+    # cvcGLConfig.cmake), so a consumer of cvc::cvcGL must have sdl3 in its prefix.
+    - name: sdl3
   host_tools:
     - cmake
     - ninja
