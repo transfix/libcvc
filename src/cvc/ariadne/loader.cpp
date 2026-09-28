@@ -326,8 +326,9 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 // into Widget::props for a registered emit fn to read.
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
-         k == "on_click" || k == "children" || k == "items" || k == "id" || k == "visible_when" ||
-         k == "enabled_when" || k == "disabled_when" || k == "tooltip" || k == "repeat";
+         k == "on_click" || k == "on_hover" || k == "on_drag" || k == "children" || k == "items" ||
+         k == "id" || k == "visible_when" || k == "enabled_when" || k == "disabled_when" ||
+         k == "tooltip" || k == "repeat";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -700,6 +701,10 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
     if (has(n, "on_click"))
       w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
+    if (has(n, "on_hover"))
+      w.on_hover = str(n, "on_hover"); // §4.6 continuous: fires each frame the item is hovered
+    if (has(n, "on_drag"))
+      w.on_drag = str(n, "on_drag"); // §4.6 continuous: fires each frame the item is dragged
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.

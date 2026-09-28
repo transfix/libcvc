@@ -1119,6 +1119,20 @@ effectful intrinsics enqueue as usual. **Open (ties to §7.1):** whether a hot `
 is re-submitted each frame or runs as one resident `await`-ing process — deferred with the
 other `on:tick`/`on:key` cadence questions.
 
+> **Widget-level `on_click` / `on_hover` / `on_drag` LANDED** (`ariadne.cpp` `emit_node`, `widget.h`,
+> `backend.h`, loader). Each is the same two-shape `on:` value (a name → host handler, or a program
+> → state_exec) enqueued by the walk when the backend reports the matching per-item pointer state:
+> `Backend::item_clicked` / `item_hovered` / `item_dragged` (ImGui: `IsItemClicked` /
+> `IsItemHovered` / `IsItemActive && IsMouseDragging`; a mock/terminal backend defaults false).
+> `on_click` is a one-shot edge; **`on_hover` and `on_drag` are CONTINUOUS** (fire every frame the
+> item is hovered / being dragged), so a hover body should be idempotent. Sourcing from the
+> backend's per-item state means these work wherever the backend has pointer input (native
+> VTK-interactor **and** wasm) with no raw hit-test, and a disabled widget fires none of them.
+> **Not yet implemented:** the per-handler `event.*` scope above (widget-level handlers currently
+> carry NO payload — no `event.x/y/dx/dy`), and `on_drag_start` / `on_drag_end`. For
+> coordinate/delta-aware input today, use the **document-level `on_key` / `on_pointer` residents**
+> (§7.1, LANDED), whose delivered `event` dict carries `kind/key/mods/x/y/dx/dy/button/clicks/repeat`.
+
 ### 4.7 Executor selection + per-frame lifecycle + degradation
 
 - **Compile (load, once):** parse the document; compile each expression slot to

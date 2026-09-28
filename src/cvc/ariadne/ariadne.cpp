@@ -1164,6 +1164,15 @@ void Runtime::Impl::emit_node(const Widget &w) {
   // Inside the disabled scope (below), so a disabled widget never fires (IsItemClicked is false).
   if (!w.on_click.empty() && b.item_clicked())
     enqueue(w.on_click);
+  // §4.6 widget-level on_hover / on_drag: the CONTINUOUS counterparts of on_click — enqueue every
+  // frame the backend reports the last item hovered / being dragged. Same enqueue path (a program
+  // runs through state_exec, a bare name routes to a host handler); no coordinate/delta is carried
+  // (that is the document-level on_pointer resident's job). A disabled widget fires neither (the
+  // backend reports false while disabled). Continuous, so an on_hover body should be idempotent.
+  if (!w.on_hover.empty() && b.item_hovered())
+    enqueue(w.on_hover);
+  if (!w.on_drag.empty() && b.item_dragged())
+    enqueue(w.on_drag);
   // §4 read-lane: attach a hover tooltip to the widget just drawn (the backend's last item).
   // A tooltip is free human text, so — unlike a bind (a dotted state path never begins with
   // '(') — one that merely LOOKS like an expression ("(optional) …", "(beta)") must not be

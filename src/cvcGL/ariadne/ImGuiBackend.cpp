@@ -335,6 +335,28 @@ bool ImGuiBackend::item_clicked() {
   return false;
 #endif
 }
+// §4.6 widget on_hover: is the pointer over the last-submitted item this frame? Plain
+// IsItemHovered() (NOT the AllowWhenDisabled variant the tooltip path uses) so a disabled widget
+// reports no hover and its on_hover never fires. Continuous — true every frame the pointer is over
+// the item.
+bool ImGuiBackend::item_hovered() {
+#ifdef CVC_ENABLE_IMGUI
+  return ImGui::IsItemHovered();
+#else
+  return false;
+#endif
+}
+// §4.6 widget on_drag: is the last item being actively dragged this frame? IsItemActive() is true
+// while the item holds the mouse capture (press-and-hold begun on it); gating on IsMouseDragging()
+// restricts firing to frames where the pointer is actually moving past the drag threshold, so a
+// plain press without motion does not fire on_drag (that is on_click's job).
+bool ImGuiBackend::item_dragged() {
+#ifdef CVC_ENABLE_IMGUI
+  return ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left);
+#else
+  return false;
+#endif
+}
 
 ariadne::BoolEdit ImGuiBackend::menu_item_toggle(const char *label, bool current) {
   const bool next = ui::MenuItemToggle(label, current); // discrete: commit immediately
