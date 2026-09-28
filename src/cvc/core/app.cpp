@@ -987,6 +987,20 @@ cvc::thread_pool &app::computePool() {
   return *_computePool;
 }
 
+void app::compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
+                        thread_priority priority) {
+  // A background pool worker owns the blocking parallel_for; the caller returns immediately. The
+  // job captures fn/on_done by value, so a result accumulator they close over outlives this call.
+  startThreadPooled(
+      "compute-async",
+      [this, n, fn = std::move(fn), on_done = std::move(on_done)]() {
+        computePool().parallel_for(n, fn);
+        if (on_done)
+          on_done();
+      },
+      priority, /*wait=*/false);
+}
+
 cvc::world_clock &app::world_clock() {
   boost::mutex::scoped_lock lock(_worldBasesMutex);
   if (!_worldClock)

@@ -10,11 +10,15 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <atomic> // compute_async: the fan-out accumulator
+#include <chrono> // compute_async: bounded wait for the completion callback
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_units.h>
 #include <filesystem>
+#include <future> // compute_async: deterministic wait on on_done via a promise
 #include <gtest/gtest.h>
+#include <memory> // compute_async: shared accumulator captured by fn + on_done
 #include <string>
 #include <vector>
 
@@ -1812,6 +1816,31 @@ TEST_F(AppTest, WorldUnitsIsAStablePerAppInstanceWithSIDefault) {
   EXPECT_EQ(&a, &b) << "world_units() must return the same per-app instance";
   EXPECT_EQ(a.regime(), cvc::world_units::system::si);
   EXPECT_DOUBLE_EQ(a.metres_per_world_unit(), 1.0);
+}
+
+// ===========================
+// compute_async — off-thread data-parallel fan-out with a completion callback
+// ===========================
+
+// compute_async runs the fan-out on the compute pool OFF the calling thread and calls on_done when
+// it joins, WITHOUT blocking the caller — the async-schedule-safe way to drive a blocking
+// parallel_for (an Ariadne program on:/intrinsic runs inline in drain() and must not block).
+TEST_F(AppTest, ComputeAsyncRunsFanOutOffThreadThenCallsOnDone) {
+  ctx.computePool(); // warm the pool on this thread before the background job first touches it
+  auto arrived = std::make_shared<std::atomic<int>>(0);
+  std::promise<void> done;
+  std::future<void> fut = done.get_future();
+  ctx.compute_async(
+      256,
+      [arrived](int i) {
+        if ((i % 3) == 0)
+          arrived->fetch_add(1, std::memory_order_relaxed);
+      },
+      [&done] { done.set_value(); });
+  // The caller did not block; on_done fires from the worker once the fan-out joins.
+  ASSERT_EQ(fut.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "compute_async never completed";
+  EXPECT_EQ(arrived->load(), 86); // i in [0,256), i%3==0 -> {0,3,...,255} = 86 indices
 }
 
 TEST_F(AppTest, WorldBasesAreNotGlobalSingletons) {

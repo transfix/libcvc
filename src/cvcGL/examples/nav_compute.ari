@@ -1,0 +1,46 @@
+# nav_compute.ari — Ariadne's cross-thread async story, end to end (roadmap item 2).
+#
+# Click "Run nav step". The button's `on:` starts with '(', so it is a state_exec
+# PROGRAM that runs on the app-wide async lane (not a bare host-event name). It:
+#   1. sets nav.status = "running" (visible immediately),
+#   2. calls the host verb (nav-step-async) — bound by the nav_compute host via
+#      register_action_intrinsics — which kicks off a nav step on app.computePool()
+#      OFF the render thread and returns immediately (it must not block the drain),
+#   3. parks on (msg-recv "nav.done") — the UI keeps rendering while the step runs,
+#   4. resumes when the compute-pool worker joins and posts "nav.done" through the
+#      thread-safe scheduler ingress, writing the arrived count to nav.result,
+#   5. sets nav.status = "done".
+#
+# So the status flips running -> done across a real cross-thread gap, and nav.result
+# only appears after a worker on another thread posted it. Nothing blocks the frame
+# loop. Run:  nav_compute nav_compute.ari
+
+meta:
+  name: Nav compute-pool async demo
+  author: cvc
+  min_libcvc: 3.4.0
+
+init: |
+  (begin
+    (state-set "nav.status" "idle")
+    (state-set "nav.result" "-"))
+
+windows:
+  - window: Async nav step
+    id: nav_compute
+    children:
+      - text: "A nav step runs on app.computePool() off the render thread;"
+      - text: "the result returns via post_message -> (msg-recv \"nav.done\")."
+      - separator
+      - button: Run nav step
+        on: |
+          (begin
+            (state-set "nav.status" "running")
+            (nav-step-async)
+            (state-set "nav.result" (msg-recv "nav.done"))
+            (state-set "nav.status" "done"))
+      - separator
+      - text: "status"
+        bind: nav.status
+      - text: "arrived"
+        bind: nav.result

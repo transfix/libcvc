@@ -50,6 +50,7 @@
 #include <boost/thread.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <boost/utility.hpp>
+#include <functional> // compute_async: the fan-out kernel + completion callback
 #include <map>
 #include <memory>
 #include <queue>
@@ -400,6 +401,21 @@ public:
   // in flight at a time — see thread_pool.h). Lazily constructed on first use,
   // sized to hardware_concurrency() - 1 background workers.
   cvc::thread_pool &computePool();
+
+  // Run fn(i) for i in [0,n) as a data-parallel fan-out on computePool(), OFF the calling thread,
+  // then call on_done() once the fan-out joins — WITHOUT blocking the caller. A background pool
+  // worker (startThreadPooled, wait=false) owns the *blocking* parallel_for and runs on_done right
+  // after it completes. This is the async-schedule-safe way to drive a parallel_for from the
+  // scheduler / host thread: an Ariadne program `on:` / host intrinsic runs INLINE inside
+  // Runtime::drain() and must not block, so it calls compute_async and returns immediately; on_done
+  // hands the result back on the worker thread — typically through the one thread-safe seam,
+  // exec_scheduler().post_message(channel, value). Capture your own result accumulator in
+  // fn/on_done (e.g. a shared_ptr<std::atomic<int>>). parallel_for stays a plain blocking barrier —
+  // this only moves the wait off the caller's thread; it does not make the fan-out itself
+  // non-blocking. A throw from fn propagates on the worker and skips on_done; each call gets its
+  // own background job (wait=false → a unique key), so concurrent calls do not cancel each other.
+  void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
+                     thread_priority priority = PRIORITY_NORMAL);
 
   // This application's simulation clock and world-unit base. Both are owned by
   // the app and lazily constructed on first access — the per-app-instance model

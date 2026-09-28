@@ -26,6 +26,14 @@ add_executable(nav_convoy nav_convoy.cpp)
 target_link_libraries(nav_convoy PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_convoy MODULES ${VTK_LIBRARIES})
 
+# nav_compute — the cross-thread async story (roadmap item 2): an .ari button binds one host verb
+# (nav-step-async) that runs a nav step on app.compute_async() off the render thread and posts
+# "nav.done"; the .ari action parks on (msg-recv "nav.done") and resumes on a later frame, so the UI
+# never blocks. Core mechanism covered headlessly by AppTest.ComputeAsync* + AriadneAction gtests.
+add_executable(nav_compute nav_compute.cpp)
+target_link_libraries(nav_compute PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS nav_compute MODULES ${VTK_LIBRARIES})
+
 # bunny_shadow — a Stanford-bunny shader/shadow-mapping test bench (one mesh, one
 # ground plane, a StageLighting rig). Loads the bunny via cvc::read_geometry, so
 # it needs only cvcGL (no nav helpers).
