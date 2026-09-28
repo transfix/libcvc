@@ -1128,10 +1128,18 @@ other `on:tick`/`on:key` cadence questions.
 > item is hovered / being dragged), so a hover body should be idempotent. Sourcing from the
 > backend's per-item state means these work wherever the backend has pointer input (native
 > VTK-interactor **and** wasm) with no raw hit-test, and a disabled widget fires none of them.
-> **Not yet implemented:** the per-handler `event.*` scope above (widget-level handlers currently
-> carry NO payload — no `event.x/y/dx/dy`), and `on_drag_start` / `on_drag_end`. For
-> coordinate/delta-aware input today, use the **document-level `on_key` / `on_pointer` residents**
-> (§7.1, LANDED), whose delivered `event` dict carries `kind/key/mods/x/y/dx/dy/button/clicks/repeat`.
+>
+> **`on_drag_start` / `on_drag_end` + the per-handler `event.*` scope LANDED** (extends the above):
+> `on_drag_start` (`Backend::item_drag_started` / `IsItemActivated`) and `on_drag_end`
+> (`item_drag_ended` / `IsItemDeactivated`) are the one-shot gesture EDGES (press begin / release).
+> And every widget pointer handler now runs, when it is a **program**, with an `event` dict bound —
+> `event.x`/`event.y` (pointer in the item's content-rect-local pixels), `event.dx`/`event.dy` (drag
+> delta), `event.button` (1-based) — via `Backend::item_pointer` (ImGui: `GetMousePos -
+> GetItemRectMin` + `GetMouseDragDelta`), threaded through the queued action and bound in the action
+> env by `submit_action`. So a widget handler reads its own local coordinates directly; the
+> **document-level `on_key` / `on_pointer` residents** (§7.1) remain the way to see the raw pointer
+> stream (`kind/key/mods/x/y/dx/dy/button/clicks/repeat`). A bare-name handler still routes to a host
+> C++ handler and carries no payload.
 
 ### 4.7 Executor selection + per-frame lifecycle + degradation
 

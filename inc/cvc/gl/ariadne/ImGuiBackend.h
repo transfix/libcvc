@@ -57,6 +57,9 @@ public:
   bool item_clicked() override; // §4.6 widget on_click: ImGui::IsItemClicked() on the last item
   bool item_hovered() override; // §4.6 widget on_hover: ImGui::IsItemHovered() on the last item
   bool item_dragged() override; // §4.6 widget on_drag: IsItemActive() && IsMouseDragging() on it
+  bool item_drag_started() override; // §4.6 on_drag_start: ImGui::IsItemActivated() (gesture begin)
+  bool item_drag_ended() override;   // §4.6 on_drag_end: ImGui::IsItemDeactivated() (gesture end)
+  bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) override; // §4.6 event.*
 
   cvc::ariadne::BoolEdit menu_item_toggle(const char *label, bool current) override;
   cvc::ariadne::BoolEdit checkbox(const char *label, bool current) override;

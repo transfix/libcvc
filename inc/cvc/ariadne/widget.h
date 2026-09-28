@@ -135,13 +135,22 @@ struct Widget {
   //              fires EVERY frame the pointer is over the item, so its handler should be
   //              idempotent/cheap (typically a state-set), like an on:tick body.
   //   on_drag  — the item is being actively dragged (Backend::item_dragged). CONTINUOUS: fires
-  //              every frame the drag is active. Neither on_hover nor on_drag carries pointer
-  //              coordinates or a drag delta — for coordinate/delta-aware handling use the
-  //              DOCUMENT-level on_pointer resident (its event dict has x/y/dx/dy).
-  // Disabled widgets fire none of these (the backend reports false while disabled).
+  //              every frame the drag is active.
+  //   on_drag_start — the item just became active this frame (Backend::item_drag_started /
+  //              ImGui::IsItemActivated). A one-shot EDGE at the start of a press/drag gesture.
+  //   on_drag_end — the item just stopped being active this frame (Backend::item_drag_ended /
+  //              ImGui::IsItemDeactivated). A one-shot EDGE at the end of the gesture (release).
+  // §4.6 event scope: when the handler is a PROGRAM, it runs with an `event` dict bound (read with
+  // (get-attr event "x")): x/y are the pointer position in the item's own content-rect-local
+  // pixels, dx/dy the drag delta this gesture, button the 1-based button. (A bare-name handler
+  // routes to a host C++ handler and carries no payload.) The document-level on_pointer resident
+  // remains the way to see the raw pointer stream; these give a widget handler its own local
+  // coordinates. Disabled widgets fire none of these (the backend reports false while disabled).
   std::string on_click;
   std::string on_hover;
   std::string on_drag;
+  std::string on_drag_start;
+  std::string on_drag_end;
 
   // §4 read-lane (reactive): a state_exec predicate re-evaluated each frame; when it
   // is non-empty and evaluates falsy the widget (and its subtree) is skipped this

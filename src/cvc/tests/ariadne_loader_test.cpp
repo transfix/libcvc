@@ -1595,6 +1595,33 @@ windows:
   EXPECT_TRUE(drag);
 }
 
+// §4.6 on_drag_start / on_drag_end are captured onto the Widget like the other on_* handlers.
+TEST(AriadneInit, CapturesWidgetOnDragStartEnd) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - text: Draggable
+        on_drag_start: 'grab'
+        on_drag_end: '(state-set "dropped" "1")'
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  bool start = false, end = false;
+  std::function<void(const Widget &)> walk = [&](const Widget &w) {
+    if (w.on_drag_start == "grab")
+      start = true;
+    if (w.on_drag_end.find("dropped") != std::string::npos)
+      end = true;
+    for (const Widget &c : w.children)
+      walk(c);
+  };
+  walk(r.root);
+  EXPECT_TRUE(start);
+  EXPECT_TRUE(end);
+}
+
 TEST(AriadneInit, NonScalarOnTickWarns) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

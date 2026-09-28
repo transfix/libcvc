@@ -168,6 +168,25 @@ public:
   virtual bool item_hovered() { return false; }
   virtual bool item_dragged() { return false; }
 
+  // §4.6 widget-level on_drag_start / on_drag_end: one-shot EDGES for the LAST item drawn.
+  // item_drag_started(): the item just became active this frame (a press/drag gesture began).
+  // item_drag_ended(): the item just stopped being active (the gesture ended / released). The ImGui
+  // backend returns IsItemActivated() / IsItemDeactivated(); both default false.
+  virtual bool item_drag_started() { return false; }
+  virtual bool item_drag_ended() { return false; }
+
+  // §4.6 event scope: the pointer state for the LAST item drawn, for a widget handler's `event`
+  // dict. Fills x/y (pointer position in the item's own content-rect-local pixels), dx/dy (drag
+  // delta this gesture) and button (1-based; 0 = none). Returns true if it filled real values.
+  // Default false / zeros — a backend with no per-item pointer info delivers a zeroed event (the
+  // handler still fires; it just reads zeros). The ImGui backend derives these from GetMousePos -
+  // GetItemRectMin and GetMouseDragDelta.
+  virtual bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) {
+    x = y = dx = dy = 0.0f;
+    button = 0;
+    return false;
+  }
+
   // ---- state-bound (value-in / edit-out) ----------------------------------
   virtual BoolEdit menu_item_toggle(const char *label, bool current) = 0;
   virtual BoolEdit checkbox(const char *label, bool current) = 0;

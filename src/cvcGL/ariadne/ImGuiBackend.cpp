@@ -357,6 +357,46 @@ bool ImGuiBackend::item_dragged() {
   return false;
 #endif
 }
+// §4.6 on_drag_start / on_drag_end: the activate/deactivate edges of the last item —
+// IsItemActivated fires the frame a press/drag begins on it, IsItemDeactivated the frame it
+// releases.
+bool ImGuiBackend::item_drag_started() {
+#ifdef CVC_ENABLE_IMGUI
+  return ImGui::IsItemActivated();
+#else
+  return false;
+#endif
+}
+bool ImGuiBackend::item_drag_ended() {
+#ifdef CVC_ENABLE_IMGUI
+  return ImGui::IsItemDeactivated();
+#else
+  return false;
+#endif
+}
+// §4.6 event scope: the last item's pointer state for a widget handler's `event` dict. x/y are the
+// pointer in the item's content-rect-local pixels (GetMousePos - GetItemRectMin), dx/dy the left-
+// button drag delta this gesture, button the 1-based button (left=1) or 0 if none is down.
+bool ImGuiBackend::item_pointer(float &x, float &y, float &dx, float &dy, int &button) {
+#ifdef CVC_ENABLE_IMGUI
+  const ImVec2 mouse = ImGui::GetMousePos();
+  const ImVec2 origin = ImGui::GetItemRectMin();
+  x = mouse.x - origin.x;
+  y = mouse.y - origin.y;
+  const ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+  dx = drag.x;
+  dy = drag.y;
+  button = ImGui::IsMouseDown(ImGuiMouseButton_Left)     ? 1
+           : ImGui::IsMouseDown(ImGuiMouseButton_Right)  ? 2
+           : ImGui::IsMouseDown(ImGuiMouseButton_Middle) ? 3
+                                                         : 0;
+  return true;
+#else
+  x = y = dx = dy = 0.0f;
+  button = 0;
+  return false;
+#endif
+}
 
 ariadne::BoolEdit ImGuiBackend::menu_item_toggle(const char *label, bool current) {
   const bool next = ui::MenuItemToggle(label, current); // discrete: commit immediately
