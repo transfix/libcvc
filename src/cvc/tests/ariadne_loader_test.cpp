@@ -1524,6 +1524,34 @@ init: [ not, a, script ]
   EXPECT_TRUE(has_warning(r, "init: must be a scalar"));
 }
 
+// §7.1 resident handlers: on_tick / on_key are captured verbatim as document-level scalar scripts,
+// exactly like init: (the host wires on_tick via Runtime::set_tick_program).
+TEST(AriadneInit, CapturesOnTickAndOnKeyScripts) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+on_tick: |
+  (state-set "demo.frame" "1")
+on_key: |
+  (state-set "demo.key" "1")
+windows: [ { window: W, children: [] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(r.on_tick_script.find("demo.frame"), std::string::npos);
+  EXPECT_NE(r.on_key_script.find("demo.key"), std::string::npos);
+}
+
+TEST(AriadneInit, NonScalarOnTickWarns) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+on_tick: [ not, a, script ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.on_tick_script.empty());
+  EXPECT_TRUE(has_warning(r, "on_tick: must be a scalar"));
+}
+
 // ---- §4 read-lane: visible_when parsing ------------------------------------
 
 TEST(AriadneReactive, VisibleWhenParsedOntoWidget) {

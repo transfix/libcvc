@@ -24,6 +24,7 @@
 
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#include <cvc/core/state_exec/async_scheduler.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
 #include <cvc/core/world_clock.h>
@@ -998,6 +999,17 @@ cvc::world_units &app::world_units() {
   if (!_worldUnits)
     _worldUnits.reset(new cvc::world_units()); // default SI, 1 metre per world unit
   return *_worldUnits;
+}
+
+cvc::state_exec::async_scheduler &app::exec_scheduler() {
+  boost::mutex::scoped_lock lock(_execSchedulerMutex);
+  if (!_execScheduler) {
+    _execScheduler.reset(new cvc::state_exec::async_scheduler());
+    // Wire it to this app's state root so state-watches (state-watch/on_change:)
+    // resolve against the app tree. Processes are chrooted per-owner on submit.
+    _execScheduler->set_watch_root(&root());
+  }
+  return *_execScheduler;
 }
 
 void app::setThreadPoolSize(unsigned int size) {

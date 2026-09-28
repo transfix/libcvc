@@ -80,6 +80,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.uid = opts.uid;
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
+  proc.owner = opts.owner;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
@@ -104,6 +105,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.uid = opts.uid;
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
+  proc.owner = opts.owner;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
@@ -570,6 +572,12 @@ bool scheduler::sleep(int pid, double seconds) {
                        std::chrono::duration<double>(seconds));
   proc.status = process_status::waiting;
   return true;
+}
+
+bool scheduler::yield_frame(int /*pid*/) {
+  // No frame boundary in the synchronous scheduler — (await …) is identity here (the intrinsic
+  // already returned its value; not parking lets the process simply continue).
+  return false;
 }
 
 bool scheduler::receive_message(int pid, const std::string &path) {

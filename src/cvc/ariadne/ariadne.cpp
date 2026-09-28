@@ -14,6 +14,7 @@
 #include <cvc/core/state.h>
 
 #ifdef CVC_STATE_EXEC
+#include <cvc/core/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/core/state_exec/builtins.h>
 #include <cvc/core/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
 #include <cvc/core/state_exec/intrinsics.h>
@@ -24,6 +25,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -587,7 +589,48 @@ struct Runtime::Impl {
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
 
+  // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
+  // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
+  // group via kill_owner. Monotonic so two Runtimes on the same prefix never collide.
+  static std::atomic<uint64_t> owner_seq;
+  std::string owner_ = "ari#" + std::to_string(owner_seq.fetch_add(1)) + ":" + prefix;
+
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
+  ~Impl();
+
+#ifdef CVC_STATE_EXEC
+  // A submitted `on:` program's persistent context. The intrinsics capture &ictx by
+  // pointer, so — unlike the load-time init: lane's one-scope run — an action that
+  // suspends (await/sleep/msg-recv) needs its context kept alive across frames until the
+  // process terminates or is reaped. Field order matters for teardown: ictx (which points
+  // into tracker/proc) is declared last so it destructs first.
+  struct ActionContext {
+    cvc::state_exec::memory_tracker tracker;
+    cvc::state_exec::process_ptr proc;
+    cvc::state_exec::environment_ptr env;
+    cvc::state_exec::intrinsics_context ictx;
+  };
+  std::unordered_map<int, std::unique_ptr<ActionContext>> live_actions_;
+  bool used_scheduler_ = false; // did we ever submit to the app scheduler? (gate teardown reap)
+
+  // Submit a program `on:` as a process on the app-wide scheduler (owner-tagged, chrooted
+  // to `prefix`), keeping its ActionContext alive in live_actions_. Returns immediately.
+  void submit_action(const std::string &action_prefix, const std::string &script);
+  // Pump the app scheduler a bounded slice, then sweep finished actions out of
+  // live_actions_ (reporting a killed one; a still-parked one persists to a later frame).
+  void pump_and_sweep_actions();
+
+  // §7.1 resident on:tick handler. tick_script_ is the author's per-frame body (empty = none).
+  // ensure_tick_resident() submits ONE long-lived process (idempotent) that loops
+  // (while t (begin (msg-recv "<owner>#tick") <body>)) — parking between frames; post_tick()
+  // wakes it once per drain. Reaped by ~Impl's kill_owner (owner-tagged) or set_tick_program.
+  std::string tick_script_;
+  std::unique_ptr<ActionContext> tick_resident_;
+  int tick_resident_pid_ = -1;
+  std::string tick_channel() const { return owner_ + "#tick"; }
+  void ensure_tick_resident();
+  void post_tick();
+#endif
 
   // §12: the active mount scope during emit. Empty stack = the document prefix; each entry is
   // a composed sub-prefix pushed when the walk enters a mounted subtree (Widget::scope) and
@@ -1152,6 +1195,137 @@ void Runtime::Impl::render() {
 
 // --------------------------------------------------------------------------
 
+std::atomic<uint64_t> Runtime::Impl::owner_seq{0};
+
+Runtime::Impl::~Impl() {
+#ifdef CVC_STATE_EXEC
+  // Reap this document's whole process group so a parked (await/sleep/msg-recv) action never
+  // lingers on the shared app scheduler after its Runtime is gone. Only touch the scheduler if
+  // we ever used it (exec_scheduler() lazily builds it — don't force it at teardown otherwise).
+  if (used_scheduler_)
+    app.exec_scheduler().kill_owner(owner_);
+#endif
+}
+
+#ifdef CVC_STATE_EXEC
+void Runtime::Impl::submit_action(const std::string &action_prefix, const std::string &script) {
+  namespace se = cvc::state_exec;
+  // §7.4 per-activation caps (same as the old synchronous action lane): the STEP cap is the
+  // deterministic guard on an action's real work; wall-time is a generous anti-hang backstop;
+  // memory the §7.4 cap. Full env, writes chrooted to the action's mount prefix.
+  static constexpr uint64_t kActionMaxSteps = 5000;
+  static constexpr double kActionMaxSeconds = 0.1;
+  static constexpr uint64_t kActionMaxBytes = 262144;
+  try {
+    auto &sched = app.exec_scheduler();
+    used_scheduler_ = true;
+    auto ac = std::make_unique<ActionContext>();
+    ac->proc = se::make_process(); // placeholder for ictx.proc; the RUNNING process is the
+    ac->proc->status = se::process_status::ready; // scheduler's own, reached via current_process()
+    cvc::state &root = cvc::state::instance(app);
+    ac->ictx.sched = &sched;
+    ac->ictx.tracker = &ac->tracker;
+    ac->ictx.proc = ac->proc;
+    se::apply_chroot(ac->ictx, root, action_prefix); // confine writes to the document/mount subtree
+    ac->env = se::builtins::make_default_environment();
+    se::register_intrinsics(ac->env, &ac->ictx);
+    // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
+    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+      if (p)
+        p(ac->env, ac->ictx);
+    se::execute_options opts;
+    opts.env = ac->env;
+    opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
+    opts.max_steps = kActionMaxSteps;
+    opts.max_time = kActionMaxSeconds;
+    opts.max_memory = kActionMaxBytes;
+    const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
+    live_actions_[pid] = std::move(ac);          // keep the context alive until the process ends
+  } catch (const std::exception &e) {
+    warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
+  }
+}
+
+void Runtime::Impl::pump_and_sweep_actions() {
+  namespace se = cvc::state_exec;
+  auto &sched = app.exec_scheduler();
+  // Apply any cross-thread post_message() deliveries FIRST, so a delivery that readies a parked
+  // (msg-recv …) receiver is seen by sync_run's has_runnable() gate — otherwise, with everything
+  // parked, sync_run would skip stepping and never drain the ingress itself.
+  sched.drain_ingress();
+  // Frame boundary: re-ready any process parked by (await …) on a PRIOR drain. Called here (once
+  // per drain), NOT inside step()/sync_run, so an await crosses exactly one frame.
+  sched.wake_awaiting();
+  // Pump a bounded slice: a quick (non-suspending) action completes within THIS drain (so a
+  // fire-then-check interaction still sees its effect immediately), while an action that parks
+  // on await/sleep/msg-recv yields and resumes on a later frame. Global step + wall-time
+  // backstops bound the pump; per-process step caps kill runaways.
+  static constexpr uint64_t kPumpMaxSteps = 200000;
+  static constexpr double kPumpMaxSeconds = 0.1;
+  sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
+  // Sweep: drop finished actions, report a killed one, keep a still-parked one for a later frame.
+  for (auto it = live_actions_.begin(); it != live_actions_.end();) {
+    auto info = sched.get_process_info(it->first);
+    if (!info || info->status == se::process_status::terminated) {
+      it = live_actions_.erase(it); // normal completion (or already reaped from the process map)
+    } else if (info->status == se::process_status::killed) {
+      warn_once("ari: on: action program did not complete (a runtime error or resource limit)");
+      it = live_actions_.erase(it);
+    } else {
+      ++it; // ready/running/waiting — still in flight (e.g. suspended on await/msg-recv/sleep)
+    }
+  }
+}
+
+void Runtime::Impl::ensure_tick_resident() {
+  if (tick_script_.empty() || tick_resident_pid_ >= 0)
+    return; // nothing to run, or already submitted (residents submit ONCE, not per frame)
+  namespace se = cvc::state_exec;
+  try {
+    auto &sched = app.exec_scheduler();
+    used_scheduler_ = true;
+    auto ac = std::make_unique<ActionContext>();
+    ac->proc = se::make_process();
+    ac->proc->status = se::process_status::ready;
+    cvc::state &root = cvc::state::instance(app);
+    ac->ictx.sched = &sched;
+    ac->ictx.tracker = &ac->tracker;
+    ac->ictx.proc = ac->proc;
+    se::apply_chroot(ac->ictx, root, prefix); // resident writes confined to the document prefix
+    ac->env = se::builtins::make_default_environment();
+    se::register_intrinsics(ac->env, &ac->ictx);
+    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+      if (p)
+        p(ac->env, ac->ictx);
+    // Wrap the author's body in a park-then-run loop on this Runtime's tick channel: msg-recv
+    // parks the process between frames, post_tick() wakes it, the body runs once, and it loops
+    // back to park. No total-step cap (a resident is intended to loop forever; the per-frame pump
+    // budget bounds each activation, and the msg-recv guarantees it parks every iteration).
+    const std::string wrapped =
+        "(while t (begin (msg-recv \"" + tick_channel() + "\") " + tick_script_ + "))";
+    se::execute_options opts;
+    opts.env = ac->env;
+    opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
+    opts.max_steps = 0;  // unlimited total — see above
+    opts.max_time = 0.0;
+    tick_resident_pid_ = sched.execute(wrapped, opts);
+    tick_resident_ = std::move(ac);
+  } catch (const std::exception &e) {
+    warn_once(std::string("ari: on_tick resident failed to start: ") + e.what());
+  }
+}
+
+void Runtime::Impl::post_tick() {
+  if (tick_resident_pid_ < 0)
+    return; // no resident registered
+  // Wake the resident for one activation this frame. Post only when nothing is already queued on
+  // the channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
+  auto &sched = app.exec_scheduler();
+  if (sched.pending_message_count(tick_channel()) == 0)
+    sched.post_message(tick_channel(), cvc::state_exec::value_t(std::string("tick")));
+}
+#endif // CVC_STATE_EXEC
+
 Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move(prefix))) {}
 
 Runtime::~Runtime() = default;
@@ -1167,6 +1341,20 @@ void Runtime::on(std::string event, std::function<void()> handler) {
   m_->handlers[std::move(event)] = std::move(handler);
 }
 
+void Runtime::set_tick_program(std::string script) {
+#ifdef CVC_STATE_EXEC
+  // Replacing the program kills any running resident so the new body starts fresh next drain.
+  if (m_->tick_resident_pid_ >= 0) {
+    m_->app.exec_scheduler().kill(m_->tick_resident_pid_);
+    m_->tick_resident_.reset();
+    m_->tick_resident_pid_ = -1;
+  }
+  m_->tick_script_ = std::move(script);
+#else
+  (void)script; // residents need state_exec — no-op otherwise
+#endif
+}
+
 void Runtime::render() { m_->render(); }
 
 void Runtime::drain() {
@@ -1179,20 +1367,11 @@ void Runtime::drain() {
     // state_exec — the north-star lane: a flag toggle or reset is pure .ari, no C++ handler.
     if (is_expr(a.event)) { // a program on: (whitespace-tolerant, exactly like a computed bind:)
 #ifdef CVC_STATE_EXEC
-      // §7.4 per-activation caps: an interaction is bounded tighter than a load-time init:. The
-      // STEP cap (5 000) is the deterministic guard — it bounds the real work of an action. §7.4's
-      // 1 ms is a SOFT performance target, not a safe hard kill: wall-time ≠ steps, so a scheduler
-      // context-switch mid-run flakily trips a 1 ms deadline on a legitimate tiny program. So the
-      // wall-time here is a generous anti-hang BACKSTOP (a program that loops within one native
-      // step still aborts), and memory the §7.4 cap. Same trust as init: (full env, writes chrooted
-      // to the action's prefix).
-      static constexpr uint64_t kActionMaxSteps = 5000;
-      static constexpr double kActionMaxSeconds = 0.1;
-      static constexpr uint64_t kActionMaxBytes = 262144;
-      const std::string e = run_scoped_program(m_->app, a.prefix, a.event, kActionMaxSteps,
-                                               kActionMaxSeconds, kActionMaxBytes);
-      if (!e.empty())
-        m_->warn_once("ari: on: action program " + e + " [" + a.event + "]");
+      // SUBMIT it to the app-wide scheduler (owner-tagged, chrooted to the action's mount prefix)
+      // and return — no run-to-completion inside drain(). The per-frame pump below advances it; a
+      // quick action still finishes this drain, while an (await …)/(msg-recv …)/(sleep …) parks
+      // and resumes on a later frame instead of blocking the UI thread (§4.7).
+      m_->submit_action(a.prefix, a.event);
 #else
       m_->warn_once("ari: on: a program action needs state_exec (CVC_STATE_EXEC=OFF); it did not "
                     "run [" +
@@ -1204,6 +1383,15 @@ void Runtime::drain() {
     if (it != m_->handlers.end() && it->second)
       it->second();
   }
+#ifdef CVC_STATE_EXEC
+  // §7.1 resident on:tick: submit the resident once (idempotent), then post it this frame's tick.
+  m_->ensure_tick_resident();
+  m_->post_tick();
+  // Advance submitted actions + the resident — and anything still-parked from earlier frames — a
+  // bounded slice, then sweep the finished ones. Runs once used_scheduler_ latches.
+  if (m_->used_scheduler_)
+    m_->pump_and_sweep_actions();
+#endif
 }
 
 std::vector<std::string> Runtime::take_reactive_warnings() {

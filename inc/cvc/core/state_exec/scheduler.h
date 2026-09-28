@@ -79,7 +79,11 @@ public:
   /// Put a process to sleep for the given number of seconds.
   /// The process enters `waiting` status and is automatically woken
   /// by the scheduler loop once the deadline expires.
-  bool sleep(int pid, double seconds);
+  bool sleep(int pid, double seconds) override;
+
+  /// No-op on the synchronous scheduler (no frame boundary): `(await …)` degrades to
+  /// identity. Returns false (nothing parked).
+  bool yield_frame(int pid) override;
 
   /// Put a process into `waiting` status until a message arrives at
   /// the given state-tree path.  Returns false if the PID is invalid

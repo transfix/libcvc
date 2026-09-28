@@ -610,3 +610,90 @@ TEST_F(AsyncSchedulerIntrinsicsTest, MsgRecvViaIntrinsicSuspendsViaScheduler) {
   ASSERT_TRUE(info.has_value());
   EXPECT_EQ(info->status, process_status::waiting);
 }
+
+TEST_F(AsyncSchedulerIntrinsicsTest, AwaitIntrinsicParksThenResumesWithValue) {
+  // A process that awaits mid-program parks at the await (awaiting a frame), then — after
+  // wake_awaiting re-readies it — resumes and terminates with the awaited value. There must be
+  // work AFTER the await (here `r`), else the program would finish in the await's own step
+  // (done=true) and terminate before the parked status matters.
+  execute_options opts;
+  opts.env = env; // reuse the fixture's intrinsics env (has `await`); await targets the RUNNING
+                  // process via sched.current_pid(), not ictx.pid.
+  int pid = sched.execute(std::string("(begin (set r (await 42)) r)"), opts);
+  for (int i = 0; i < 16 && sched.get_process_info(pid) &&
+                  sched.get_process_info(pid)->status != process_status::waiting;
+       ++i)
+    sched.sync_step();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::waiting); // parked by (await …)
+  EXPECT_GE(sched.wake_awaiting(), 1);              // frame boundary re-readies it
+  auto results = sched.sync_run();
+  auto it = results.find(pid);
+  ASSERT_NE(it, results.end());
+  EXPECT_EQ(std::get<int64_t>(it->second.v), 42); // resumed with the awaited value
+}
+
+TEST(AsyncSchedulerTest, KillOwnerReapsProcessGroup) {
+  async_scheduler sched;
+  execute_options a;
+  a.owner = "docA";
+  execute_options b;
+  b.owner = "docB";
+  int a1 = sched.execute(std::string("(begin 1 2 3 4 5)"), a);
+  int a2 = sched.execute(std::string("(begin 1 2 3 4 5)"), a);
+  int b1 = sched.execute(std::string("(begin 1 2 3 4 5)"), b);
+  sched.sync_step(); // start stepping
+  // Reap docA's whole group (both processes), leaving docB untouched.
+  EXPECT_EQ(sched.kill_owner("docA"), 2);
+  EXPECT_EQ(sched.get_process_info(a1)->status, process_status::killed);
+  EXPECT_EQ(sched.get_process_info(a2)->status, process_status::killed);
+  ASSERT_TRUE(sched.get_process_info(b1).has_value());
+  EXPECT_NE(sched.get_process_info(b1)->status, process_status::killed);
+  EXPECT_EQ(sched.kill_owner("docA"), 0); // already reaped
+}
+
+TEST(AsyncSchedulerTest, PostMessageFromAnotherThreadWakesReceiver) {
+  async_scheduler sched;
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.sync_step();                                 // start the process
+  ASSERT_TRUE(sched.receive_message(pid, "chan.x")); // park it on the channel
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+  // Post from a WORKER thread via the thread-safe ingress (join so the check is deterministic).
+  std::thread worker([&] { sched.post_message("chan.x", value_t(std::string("done"))); });
+  worker.join();
+  // The delivery is applied on the scheduler thread at the next step (drain_ingress), waking it.
+  sched.sync_step();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_NE(info->status, process_status::waiting); // woken
+}
+
+TEST(AsyncSchedulerTest, YieldFrameParksUntilWakeAwaiting) {
+  async_scheduler sched;
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.sync_step();                   // start it
+  ASSERT_TRUE(sched.yield_frame(pid)); // (await …) parks it awaiting a frame
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+  EXPECT_FALSE(sched.has_runnable()); // parked -> not runnable this frame
+  // A plain step does NOT wake it — only wake_awaiting (called once per frame by the pump) does,
+  // so an await crosses exactly one frame rather than resuming within the same pump.
+  sched.sync_step();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+  EXPECT_EQ(sched.wake_awaiting(), 1); // frame boundary
+  EXPECT_NE(sched.get_process_info(pid)->status, process_status::waiting);
+}
+
+// The app-wide scheduler service: cvc::app::exec_scheduler() is one lazily-built
+// per-app async_scheduler (the single cooperative timeline all Ariadne docs share).
+TEST(AppExecScheduler, IsAppWideSingletonAndUsable) {
+  cvc::app app_ctx;
+  auto &s1 = app_ctx.exec_scheduler();
+  auto &s2 = app_ctx.exec_scheduler();
+  EXPECT_EQ(&s1, &s2); // same instance across calls — one app-wide scheduler
+  int pid = s1.execute(std::string("(+ 2 3)"));
+  auto results = s1.sync_run();
+  auto it = results.find(pid);
+  ASSERT_NE(it, results.end());
+  EXPECT_EQ(std::get<int64_t>(it->second.v), 5);
+}

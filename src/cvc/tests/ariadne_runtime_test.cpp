@@ -10,13 +10,15 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
-#include <cvc/core/state_exec/builtins.h> // host-intrinsic seam test: register_fn
-#include <cvc/core/state_exec/types.h>    // value_t
+#include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
+#include <cvc/core/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
+#include <cvc/core/state_exec/types.h>           // value_t
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc::ariadne;
@@ -226,6 +228,108 @@ TEST(AriadneAction, ProgramOnRunsMultiStatementReset) {
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("agents").value(), "64");
   EXPECT_EQ(cvc::state::instance(app)("speed").value(), "1.0");
+}
+
+// §4.7 end-to-end: an action that parks on (msg-recv …) does NOT block the drain; it suspends
+// on the app-wide scheduler and RESUMES on a later drain when a WORKER THREAD delivers the result
+// via the thread-safe exec_scheduler().post_message ingress. This is the marquee async story
+// (a compute-pool worker waking a parked .ari action) exercised through the real Runtime.
+TEST(AriadneAction, ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, ""); // app-root prefix so the channel/state paths are used as-is
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The action parks on (msg-recv …), then AFTER it is woken runs a state-set. Asserting on the
+  // post-resume write (a sentinel) isolates the park → deliver → wake → resume path; the sibling
+  // test ProgramActionCapturesDeliveredValueFromMsgRecv covers threading the delivered value into
+  // the enclosing expression (which works — deliver_to_receivers patches the parent frame's
+  // pending result slot where pop_frame left msg-recv's nil placeholder).
+  Widget b =
+      button("Go", "(begin (msg-recv \"async.done\") (state-set \"async.result\" \"resumed\"))");
+  rt.set_root(group({b}));
+  mb.button_click = true;
+  rt.render();             // enqueue the action
+  rt.drain();              // submit + pump -> action PARKS on msg-recv
+  mb.button_click = false; // don't re-fire on later renders
+  EXPECT_NE(cvc::state::instance(app)("async.result").value(), "resumed"); // still parked
+
+  // A worker thread delivers off the UI thread via the thread-safe ingress.
+  std::thread worker([&] {
+    app.exec_scheduler().post_message("async.done", cvc::state_exec::value_t(std::string("go")));
+  });
+  worker.join();
+
+  rt.render();
+  rt.drain(); // pump drains the ingress -> wakes the parked action -> it resumes and completes
+  EXPECT_EQ(cvc::state::instance(app)("async.result").value(), "resumed");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The DELIVERED VALUE threads into the enclosing expression: (state-set k (msg-recv p)) writes
+// the value the worker delivered. deliver_to_receivers patches the parent frame's pending result
+// slot (where pop_frame pushed msg-recv's nil placeholder), so the resumed state-set applies it.
+TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget b = button("Go", "(state-set \"async.value\" (msg-recv \"vchan\"))");
+  rt.set_root(group({b}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // parks on msg-recv (value slot pending)
+  mb.button_click = false;
+  std::thread worker([&] {
+    app.exec_scheduler().post_message("vchan", cvc::state_exec::value_t(std::string("delivered")));
+  });
+  worker.join();
+  rt.render();
+  rt.drain(); // wakes + resumes; the delivered value flows into state-set
+  EXPECT_EQ(cvc::state::instance(app)("async.value").value(), "delivered");
+}
+
+// §7.1 resident on:tick: set_tick_program submits ONE long-lived process that runs the body once
+// per drain (parking between frames), NOT a fresh action each frame. Proven by re-firing: reset a
+// flag the body sets, and the next drain sets it again from the SAME resident.
+TEST(AriadneResident, TickProgramRunsOncePerDrain) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program("(state-set \"tick.flag\" \"1\")");
+  rt.drain(); // submit the resident + post the frame tick + pump -> body runs once
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+  cvc::state::instance(app)("tick.flag").value(std::string("0")); // reset
+  rt.drain();                                                     // the resident fires AGAIN
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+  cvc::state::instance(app)("tick.flag").value(std::string("0"));
+  rt.drain(); // and again — it is resident, not one-shot
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// set_tick_program("") clears the resident: after clearing, a drain no longer re-fires the body.
+TEST(AriadneResident, ClearingTickProgramStopsIt) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program("(state-set \"tick.flag\" \"1\")");
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+  rt.set_tick_program(""); // clear -> kills the resident
+  cvc::state::instance(app)("tick.flag").value(std::string("0"));
+  rt.drain();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "0"); // no longer firing
 }
 
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a

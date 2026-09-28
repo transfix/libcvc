@@ -16,10 +16,12 @@
 #include <cvc/core/state_exec/scheduler_base.h>
 #include <cvc/core/state_exec/task.h>
 #include <cvc/core/state_exec/types.h>
+#include <mutex>
 #include <optional>
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -71,10 +73,24 @@ public:
   bool kill(int pid) override;
   int fork(int pid) override;
 
+  /// Kill every live process tagged with `owner` — an Ariadne Runtime reaping its
+  /// process group on teardown. Returns the number killed. Parked processes
+  /// (sleep/msg-recv/await) are killed too, so nothing lingers after the document
+  /// that owned them closes. `owner` == "" reaps the unowned group.
+  int kill_owner(const std::string &owner);
+
   /// Cooperative sleep: put a process into `waiting`; woken by the pump
   /// (wake_sleeping_processes, called at the top of step()) once the deadline
   /// passes.  Identical semantics to the sync scheduler.
   bool sleep(int pid, double seconds) override;
+
+  /// (await expr): park the process (`waiting` + awaiting_frame) until the next frame
+  /// boundary; re-readied by wake_awaiting(). Returns false for an unknown/non-runnable pid.
+  bool yield_frame(int pid) override;
+  /// Re-ready every process parked by yield_frame — call ONCE per frame (the Ariadne pump
+  /// does, at the top of a drain, NOT inside step()/sync_run, so an await crosses exactly one
+  /// frame). Returns the number re-readied.
+  int wake_awaiting();
 
   // --- Inter-process messaging (msg-send/msg-recv) ---
   bool receive_message(int pid, const std::string &path) override;
@@ -84,6 +100,20 @@ public:
   std::size_t total_pending_messages() const;
   /// Max messages queued per path when no receiver waits (0 = unlimited).
   std::size_t max_pending_messages = 1024;
+
+  /// THREAD-SAFE ingress: post a message from ANY thread (e.g. an app.computePool()
+  /// worker that finished the async work a `(msg-recv "path")` action is parked on).
+  /// The message is queued under a lock and delivered on the scheduler's own thread at
+  /// the next step (drain_ingress → deliver_to_receivers), so no scheduler state is
+  /// mutated off-thread. deliver_to_receivers itself is NOT thread-safe — external
+  /// threads must use this, only the scheduler thread may call deliver_to_receivers.
+  void post_message(const std::string &path, const value_t &msg);
+
+  /// Apply any queued post_message() deliveries NOW, on the calling (scheduler) thread.
+  /// step() calls this, but a driver must ALSO call it before a run whose has_runnable()
+  /// gate would otherwise be false — a delivery can READY a parked receiver, and
+  /// sync_run/run skip stepping (so never drain the ingress) when nothing is runnable yet.
+  void drain_ingress();
 
   bool set_priority(int pid, int priority);
   bool set_max_steps(int pid, uint64_t max_steps);
@@ -146,6 +176,11 @@ private:
 
   /// Per-path FIFO for messages sent when no receiver is waiting (mirrors sync scheduler).
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
+
+  /// Thread-safe ingress for cross-thread post_message(): guarded by ingress_mutex_, drained
+  /// on the scheduler thread by drain_ingress() (public) and applied via deliver_to_receivers.
+  std::mutex ingress_mutex_;
+  std::vector<std::pair<std::string, value_t>> ingress_;
 
   process_ptr select_process();
   void execute_process_step(process &proc);
