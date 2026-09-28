@@ -33,7 +33,11 @@ recipe:
   # Bumped 3 -> 4: SDL3 is now a build + runtime dep (CVC_ENABLE_SDL=ON) — cvcGL's export
   # links SDL3::SDL3, the input + peripheral seam (keyboard/mouse/gamepad + audio/mic/camera,
   # native and wasm/wasm-mt). A consumer of cvc::cvcGL must now have sdl3 in its prefix.
-  cvc_revision: 4
+  # Bumped 4 -> 5: packaging fix — the +cvc.4 Windows-release publish FAILED because
+  # package.files globbed only lib/libcvcGL*, but MSVC stages the static lib as lib/cvcGL.lib
+  # (no `lib` prefix). Added lib/cvcGL* (see package.files below). cvcGL source is unchanged;
+  # this republishes so a Windows-release cvcgl bundle exists at all. No-op on Unix.
+  cvc_revision: 5
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -108,6 +112,13 @@ build:
 package:
   files:
     - lib/libcvcGL*
+    # MSVC names the static lib `cvcGL.lib` (no `lib` prefix), which matches
+    # neither lib/libcvcGL* nor any glob above -- the same MSVC-spelling reason
+    # the libcvc recipe packs lib/cvc* beside lib/libcvc*. Without this the
+    # Windows-release bundle stages lib/cvcGL.lib fine but package.files matches
+    # nothing there, and `cvcpkg pack` fails with "no archive found for recipe
+    # cvcgl". No-op on Unix (libcvcGL.a/.so/.dylib already match lib/libcvcGL*).
+    - lib/cvcGL*
     - lib/cmake/cvcGL/
     - include/cvc/gl/
   cmake_packages:
