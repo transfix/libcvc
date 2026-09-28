@@ -1342,6 +1342,38 @@ if(CVC_ENABLE_IMAGEMAGICK)
   endforeach()
   # Link via imported targets when available (config-mode from libcvc-deps),
   # otherwise fall back to the raw library paths from FindImageMagick.
+  # The raw-libs path (stock module / cvcpkg-prefix fallback) sets only
+  # ImageMagick_LIBRARIES — ABSOLUTE paths — and never the ImageMagick::* imported
+  # targets. Linking those raw paths bakes a build-machine absolute path (e.g.
+  # /home/runner/work/.../lib/libMagick++-7.Q16HDRI.a) into cvc's EXPORTED
+  # INTERFACE_LINK_LIBRARIES; for a STATIC cvc (wasm) that path propagates to every
+  # consumer and exists on none of them, so the relocated link dies with
+  # "libMagick++-7.Q16HDRI.a ... missing and no known rule to make it" (exactly how
+  # the wasm demo bundle failed). Synthesise the imported targets from the found
+  # libs so the EXPORT names the relocatable ImageMagick::Magick++/::MagickCore
+  # targets instead — the same targets cvcConfig.cmake.in recreates (with the
+  # delegate closure) in each consumer's own prefix. The absolute IMPORTED_LOCATION
+  # stays build-local: imported targets are not part of install(EXPORT), so it is
+  # never written into cvcTargets.cmake.
+  if(NOT (TARGET ImageMagick::Magick++ AND TARGET ImageMagick::MagickCore))
+    set(_cvc_im_rawlibs TRUE)
+    if(ImageMagick_MagickCore_LIBRARY AND NOT TARGET ImageMagick::MagickCore)
+      add_library(ImageMagick::MagickCore UNKNOWN IMPORTED)
+      set_target_properties(ImageMagick::MagickCore PROPERTIES
+        IMPORTED_LOCATION "${ImageMagick_MagickCore_LIBRARY}")
+    endif()
+    if(ImageMagick_Magickxx_LIBRARY AND NOT TARGET ImageMagick::Magick++)
+      add_library(ImageMagick::Magick++ UNKNOWN IMPORTED)
+      set_target_properties(ImageMagick::Magick++ PROPERTIES
+        IMPORTED_LOCATION "${ImageMagick_Magickxx_LIBRARY}")
+      if(TARGET ImageMagick::MagickCore)
+        set_property(TARGET ImageMagick::Magick++ APPEND PROPERTY
+          INTERFACE_LINK_LIBRARIES ImageMagick::MagickCore)
+      endif()
+    endif()
+  endif()
+  # Link via imported targets when available (config-mode from libcvc-deps, or the
+  # ones just synthesised); only the last-ditch no-libs case links the raw paths.
   if(TARGET ImageMagick::Magick++ AND TARGET ImageMagick::MagickCore)
     target_link_libraries(cvc PUBLIC ImageMagick::Magick++ ImageMagick::MagickCore)
   else()
@@ -1355,7 +1387,10 @@ if(CVC_ENABLE_IMAGEMAGICK)
   # static delegates only if the imported targets weren't set (i.e. only the
   # raw-libs FindImageMagick path). Missing packages are silently skipped so
   # this stays correct on any platform where the delegate isn't present.
-  if(NOT (TARGET ImageMagick::Magick++ AND TARGET ImageMagick::MagickCore))
+  # Gate on _cvc_im_rawlibs (set above when we took the raw-libs path), NOT on the
+  # target existence — we just synthesised ImageMagick::Magick++/::MagickCore, so a
+  # TARGET check would now wrongly skip the delegate closure the raw-libs path needs.
+  if(_cvc_im_rawlibs)
     # Prefer pkg-config (has the exact link line for a hermetic delegate), but
     # in cross-compile (emcmake) it isn't always available / correctly rooted,
     # so fall back to find_library — which DOES honor CMAKE_FIND_ROOT_PATH.
@@ -1401,9 +1436,22 @@ if(CVC_ENABLE_IMAGEMAGICK)
       if(NOT _pc_found)
         find_library(${_im_var}_LIB NAMES ${_libname})
         if(${_im_var}_LIB)
-          # PRIVATE for the same reason, and to keep the absolute find_library path
-          # out of the exported interface.
-          target_link_libraries(cvc PRIVATE ${${_im_var}_LIB})
+          # A direct PRIVATE link of this absolute find_library path leaks into the
+          # STATIC export — a static cvc propagates PRIVATE deps as
+          # $<LINK_ONLY:abs-path>, so the comment's old claim ("keeps the path out of
+          # the exported interface") holds only for a SHARED cvc. Bake it into the
+          # export and every relocated consumer breaks (the delegate half of the wasm
+          # bug). When the ImageMagick::* targets were synthesised above, hang the
+          # delegate off MagickCore's interface instead: build-local (imported
+          # targets are not exported) and the consumer's cvcConfig.cmake.in re-adds
+          # its OWN delegate closure. Otherwise keep the direct PRIVATE link (shared
+          # build — absorbed into the .so, never exported).
+          if(TARGET ImageMagick::MagickCore)
+            set_property(TARGET ImageMagick::MagickCore APPEND PROPERTY
+              INTERFACE_LINK_LIBRARIES "${${_im_var}_LIB}")
+          else()
+            target_link_libraries(cvc PRIVATE ${${_im_var}_LIB})
+          endif()
         endif()
       endif()
     endforeach()
@@ -1491,8 +1539,19 @@ if(ZSTD_FOUND)
   if(TARGET PkgConfig::ZSTD)
     target_link_libraries(cvc PRIVATE PkgConfig::ZSTD)
   else()
-    target_include_directories(cvc PRIVATE ${ZSTD_INCLUDE_DIRS})
-    target_link_libraries(cvc PRIVATE ${ZSTD_LIBRARIES})
+    # Synthesise PkgConfig::ZSTD from the absolute find_library path rather than
+    # linking that path directly. A direct PRIVATE abs-path link leaks into the
+    # STATIC export ($<LINK_ONLY:abs>) and breaks relocated consumers (the zstd half
+    # of the wasm bug); the imported target's location is build-local (imported
+    # targets are not exported), and cvcConfig.cmake.in recreates PkgConfig::ZSTD in
+    # the consumer prefix (mirroring the FFTW3 handling there).
+    if(NOT TARGET PkgConfig::ZSTD)
+      add_library(PkgConfig::ZSTD INTERFACE IMPORTED)
+      set_target_properties(PkgConfig::ZSTD PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES "${ZSTD_LIBRARIES}")
+    endif()
+    target_link_libraries(cvc PRIVATE PkgConfig::ZSTD)
   endif()
 else()
   message(WARNING "libzstd not found; zstd compression codec will not link")
