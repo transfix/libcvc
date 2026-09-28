@@ -483,6 +483,13 @@ add_executable(cvcgl_viewport_input test/cvcgl_viewport_input.cpp)
 target_link_libraries(cvcgl_viewport_input PRIVATE cvcGL)
 add_test(NAME cvcgl_viewport_input COMMAND cvcgl_viewport_input)
 
+# SdlInput: SDL3 event -> normalized cvc::gl::InputEvent translation (the §4.6 input seam's SDL
+# source). Pushes synthetic SDL key/mouse events onto the queue and verifies poll() returns them.
+# Headless (the SDL EVENTS subsystem needs no window). SKIPs (rc 0) in a build without SDL.
+add_executable(cvcgl_sdl_input test/cvcgl_sdl_input.cpp)
+target_link_libraries(cvcgl_sdl_input PRIVATE cvcGL)
+add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
