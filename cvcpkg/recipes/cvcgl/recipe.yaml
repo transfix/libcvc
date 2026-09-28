@@ -37,7 +37,13 @@ recipe:
   # package.files globbed only lib/libcvcGL*, but MSVC stages the static lib as lib/cvcGL.lib
   # (no `lib` prefix). Added lib/cvcGL* (see package.files below). cvcGL source is unchanged;
   # this republishes so a Windows-release cvcgl bundle exists at all. No-op on Unix.
-  cvc_revision: 5
+  # Bumped 5 -> 6: the +cvc.5 bundle was published BEFORE the publish workflow installed sdl3,
+  # so it shipped the VTK-interactor fallback (find_package(SDL3) failed, CVC_ENABLE_SDL off).
+  # PR #444 fixed the workflow to install sdl3 into the cvcgl + pycvc-gl build prefixes, so the
+  # build now links SDL3::SDL3 and ships the actual input seam — but that is a DIFFERENT built
+  # artifact, and republishing at +cvc.5 would hit the catalog skip-guard and keep the fallback
+  # bundle. This bump forces the SDL3-linked build onto the catalog. cvcGL source is unchanged.
+  cvc_revision: 6
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
