@@ -51,6 +51,7 @@ private:
   std::unordered_map<std::string, module_entry> modules_;
 
   void register_string_module();
+  void register_bytes_module();
   void register_math_module();
   void register_collections_module();
 };

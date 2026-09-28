@@ -34,6 +34,13 @@ const std::string &as_string(const value_t &v, const char *name) {
   throw std::runtime_error(std::string(name) + ": expected string, got " + v.type_name());
 }
 
+// SE-3: extract the raw byte buffer of a bytes value.
+const std::string &as_bytes(const value_t &v, const char *name) {
+  if (auto *b = std::get_if<bytes_value>(&v.v))
+    return b->data;
+  throw std::runtime_error(std::string(name) + ": expected bytes, got " + v.type_name());
+}
+
 int64_t as_int(const value_t &v, const char *name) {
   if (auto *i = std::get_if<int64_t>(&v.v))
     return *i;
@@ -232,6 +239,80 @@ void stdlib_registry::register_string_module() {
     expect_exact(args, 1, "string.byte-length");
     auto &s = as_string(args[0], "string.byte-length");
     return value_t(static_cast<int64_t>(s.size()));
+  });
+
+  // SE-3: string.encode — the text->binary crossing. state_exec strings are already UTF-8, so
+  // encoding to utf-8 just re-tags the same bytes as `bytes`. Only utf-8 is supported.
+  register_function("string", "string.encode", [](std::span<const value_t> args) -> value_t {
+    expect_min(args, 1, "string.encode");
+    auto &s = as_string(args[0], "string.encode");
+    if (args.size() > 1) {
+      auto &enc = as_string(args[1], "string.encode");
+      if (enc != "utf-8" && enc != "utf8" && enc != "UTF-8")
+        throw std::runtime_error("string.encode: unsupported encoding '" + enc + "' (only utf-8)");
+    }
+    return make_bytes(s);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Bytes module (SE-3) — the binary counterpart of the string module. All ops are BYTE-semantic:
+// bytes are opaque octets (no codepoints, no case, no normalization). string.encode / bytes.decode
+// (in the string / bytes modules) are the only sanctioned text<->binary crossings.
+// ---------------------------------------------------------------------------
+
+void stdlib_registry::register_bytes_module() {
+  register_function("bytes", "bytes.length", [](std::span<const value_t> args) -> value_t {
+    expect_exact(args, 1, "bytes.length");
+    return value_t(static_cast<int64_t>(as_bytes(args[0], "bytes.length").size()));
+  });
+
+  register_function("bytes", "bytes.byte-at", [](std::span<const value_t> args) -> value_t {
+    expect_exact(args, 2, "bytes.byte-at");
+    auto &b = as_bytes(args[0], "bytes.byte-at");
+    int64_t i = as_int(args[1], "bytes.byte-at");
+    if (i < 0 || static_cast<size_t>(i) >= b.size())
+      throw std::runtime_error("bytes.byte-at: index out of range");
+    return value_t(static_cast<int64_t>(static_cast<unsigned char>(b[static_cast<size_t>(i)])));
+  });
+
+  register_function("bytes", "bytes.slice", [](std::span<const value_t> args) -> value_t {
+    expect_min(args, 2, "bytes.slice");
+    auto &b = as_bytes(args[0], "bytes.slice");
+    int64_t pos = as_int(args[1], "bytes.slice");
+    if (pos < 0)
+      pos = 0;
+    if (static_cast<size_t>(pos) >= b.size())
+      return make_bytes(std::string());
+    if (args.size() > 2) {
+      int64_t len = as_int(args[2], "bytes.slice");
+      if (len < 0)
+        len = 0;
+      return make_bytes(b.substr(static_cast<size_t>(pos), static_cast<size_t>(len)));
+    }
+    return make_bytes(b.substr(static_cast<size_t>(pos)));
+  });
+
+  register_function("bytes", "bytes.concat", [](std::span<const value_t> args) -> value_t {
+    std::string out;
+    for (const value_t &a : args)
+      out += as_bytes(a, "bytes.concat");
+    return make_bytes(std::move(out));
+  });
+
+  // bytes.decode — binary->text. Only utf-8; the bytes MUST be valid UTF-8 (strict, like Python's
+  // bytes.decode default) or it errors rather than yielding an invalid string.
+  register_function("bytes", "bytes.decode", [](std::span<const value_t> args) -> value_t {
+    expect_min(args, 1, "bytes.decode");
+    auto &b = as_bytes(args[0], "bytes.decode");
+    if (args.size() > 1) {
+      auto &enc = as_string(args[1], "bytes.decode");
+      if (enc != "utf-8" && enc != "utf8" && enc != "UTF-8")
+        throw std::runtime_error("bytes.decode: unsupported encoding '" + enc + "' (only utf-8)");
+    }
+    if (!utf8::is_valid(b))
+      throw std::runtime_error("bytes.decode: invalid UTF-8");
+    return value_t(b); // a string holding the validated UTF-8 bytes
   });
 }
 
@@ -550,6 +631,7 @@ void stdlib_registry::register_collections_module() {
 
 stdlib_registry::stdlib_registry() {
   register_string_module();
+  register_bytes_module();
   register_math_module();
   register_collections_module();
 }

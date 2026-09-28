@@ -58,6 +58,8 @@ std::string value_tag::type_name() const {
           return "data_object";
         else if constexpr (std::is_same_v<T, generator_ptr>)
           return "generator";
+        else if constexpr (std::is_same_v<T, bytes_value>)
+          return "bytes";
         else
           return "unknown";
       },
@@ -137,6 +139,25 @@ void to_string_impl(const value_t &val, std::string &out, int depth) {
         } else if constexpr (std::is_same_v<T, std::string>) {
           out += '"';
           out += arg;
+          out += '"';
+        } else if constexpr (std::is_same_v<T, bytes_value>) {
+          // b"..." — printable ASCII verbatim, everything else (incl. all bytes >= 0x80)
+          // hex-escaped as \xNN, so the rendering is always valid ASCII text and never dumps raw
+          // binary bytes.
+          static const char kHex[] = "0123456789abcdef";
+          out += "b\"";
+          for (unsigned char b : arg.data) {
+            if (b == '"' || b == '\\') {
+              out += '\\';
+              out += static_cast<char>(b);
+            } else if (b >= 0x20 && b < 0x7F) {
+              out += static_cast<char>(b);
+            } else {
+              out += "\\x";
+              out += kHex[b >> 4];
+              out += kHex[b & 0x0F];
+            }
+          }
           out += '"';
         } else if constexpr (std::is_same_v<T, symbol>)
           out += arg.name;
@@ -277,6 +298,8 @@ bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen, i
           return arg_a == arg_b; // identity comparison
         else if constexpr (std::is_same_v<T, generator_ptr>)
           return arg_a == arg_b; // identity comparison
+        else if constexpr (std::is_same_v<T, bytes_value>)
+          return arg_a == arg_b; // byte-wise value comparison
         else
           return false;
       },

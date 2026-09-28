@@ -59,6 +59,18 @@ using list_ptr = std::shared_ptr<std::vector<value_tag>>;
 using dict_ptr = std::shared_ptr<std::vector<std::pair<std::string, value_tag>>>;
 using native_fn = std::function<value_tag(std::span<const value_tag>)>;
 
+/// A raw byte buffer — the binary counterpart of the (text) `string` type (SE-3 of the Unicode
+/// roadmap). A distinct wrapper (NOT a second std::string alternative — the variant would be
+/// ambiguous) so the variant discriminates text from binary: `string` is UTF-8 TEXT with codepoint
+/// semantics (length/index/slice by codepoint, see SE-1), whereas `bytes` is opaque OCTETS with
+/// byte semantics and no case/normalization/codepoint meaning. Backed by std::string purely as a
+/// byte container. Binary data (HTTP octet-stream bodies, Python `bytes`, binary payloads) belongs
+/// here, never in a `string`; `string.encode`/`bytes.decode` are the only sanctioned crossings.
+struct bytes_value {
+  std::string data;
+  bool operator==(const bytes_value &o) const { return data == o.data; }
+};
+
 /// The DSL value variant.  All runtime values are represented as value_t.
 ///
 /// Variants:
@@ -74,10 +86,11 @@ using native_fn = std::function<value_tag(std::span<const value_tag>)>;
 ///   native_fn  → C++ callable (built-in or stdlib bridge)
 ///   data_object_ptr → typed data from state::data()
 ///   generator_ptr → lazy sequence with yield support
+///   bytes_value → raw octet buffer (binary; the counterpart of the text `string`)
 struct value_tag {
   using variant_type =
       std::variant<std::monostate, bool, int64_t, double, std::string, symbol, list_ptr,
-                   closure_ptr, dict_ptr, native_fn, data_object_ptr, generator_ptr>;
+                   closure_ptr, dict_ptr, native_fn, data_object_ptr, generator_ptr, bytes_value>;
 
   variant_type v;
 
@@ -99,6 +112,7 @@ struct value_tag {
   value_tag(native_fn f) : v(std::move(f)) {}
   value_tag(data_object_ptr d) : v(std::move(d)) {}
   value_tag(generator_ptr g) : v(std::move(g)) {}
+  value_tag(bytes_value b) : v(std::move(b)) {}
 
   /// Check if the value is nil (monostate).
   bool is_nil() const { return std::holds_alternative<std::monostate>(v); }
@@ -161,6 +175,9 @@ inline value_t make_dict(std::vector<std::pair<std::string, value_t>> entries = 
   return value_t(
       std::make_shared<std::vector<std::pair<std::string, value_t>>>(std::move(entries)));
 }
+
+/// Make a bytes value from a raw byte buffer (SE-3). The std::string is a byte container, NOT text.
+inline value_t make_bytes(std::string data) { return value_t(bytes_value{std::move(data)}); }
 
 /// The nil value.
 inline const value_t nil_value{};

@@ -98,6 +98,12 @@ value_t parser::parse_expr() {
   }
   if (c == '"')
     return parse_string();
+  // SE-3: a `b` immediately followed by `"` (no space) is a bytes literal b"...". A lone `b`, or
+  // `b` followed by anything else, stays an ordinary symbol.
+  if (c == 'b' && _pos + 1 < _input.size() && _input[_pos + 1] == '"') {
+    advance(); // consume the 'b' prefix
+    return parse_bytes_string();
+  }
 
   return parse_atom();
 }
@@ -203,6 +209,70 @@ value_t parser::parse_string() {
     }
   }
   error("unterminated string literal");
+}
+
+// SE-3: b"..." bytes literal. Unlike parse_string (text), escapes are BYTE-valued: \xNN is a raw
+// byte (0-255), NOT a codepoint, and there is no \u (codepoints are meaningless for opaque octets).
+// Raw source bytes (incl. >= 0x80) are taken verbatim.
+value_t parser::parse_bytes_string() {
+  advance(); // consume opening '"'
+  std::string bytes;
+  auto hex1 = [&]() -> unsigned {
+    if (_pos >= _input.size())
+      error("unexpected end of input in bytes escape");
+    const char h = advance();
+    if (h >= '0' && h <= '9')
+      return static_cast<unsigned>(h - '0');
+    if (h >= 'a' && h <= 'f')
+      return static_cast<unsigned>(h - 'a' + 10);
+    if (h >= 'A' && h <= 'F')
+      return static_cast<unsigned>(h - 'A' + 10);
+    error("invalid hex digit in bytes escape");
+  };
+  while (_pos < _input.size()) {
+    char c = _input[_pos];
+    if (c == '"') {
+      advance(); // consume closing '"'
+      return make_bytes(std::move(bytes));
+    }
+    if (c == '\\') {
+      advance();
+      if (_pos >= _input.size())
+        error("unexpected end of input in bytes escape");
+      char esc = advance();
+      switch (esc) {
+      case 'n':
+        bytes += '\n';
+        break;
+      case 't':
+        bytes += '\t';
+        break;
+      case 'r':
+        bytes += '\r';
+        break;
+      case '\\':
+        bytes += '\\';
+        break;
+      case '"':
+        bytes += '"';
+        break;
+      case '0':
+        bytes += '\0';
+        break;
+      case 'x':
+        bytes += static_cast<char>((hex1() << 4) | hex1()); // a raw byte, not a codepoint
+        break;
+      default:
+        bytes += '\\';
+        bytes += esc;
+        break;
+      }
+    } else {
+      bytes += c;
+      advance();
+    }
+  }
+  error("unterminated bytes literal");
 }
 
 value_t parser::parse_atom() {

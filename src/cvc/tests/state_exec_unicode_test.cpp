@@ -307,3 +307,89 @@ TEST(StateExecUnicodeParser, IdentifiersMayContainUtf8) {
   EXPECT_EQ(to_string(parse("na\xC3\xAFve")), "na\xC3\xAFve"); // naïve (ï = U+00EF)
   EXPECT_EQ(to_string(parse(kCjk)), kCjk);
 }
+
+// ===========================================================================
+// SE-3 — Track B: the `bytes` type (opaque octets, byte-semantic), distinct
+// from the (text, codepoint-semantic) `string`.
+// ===========================================================================
+TEST(StateExecBytes, ParserBytesLiteralAndByteEscapes) {
+  // b"..." is a bytes value; \xNN is a RAW byte (not a codepoint like in a text string).
+  auto v = parse("b\"caf\\xc3\\xa9\"");
+  ASSERT_TRUE(std::holds_alternative<bytes_value>(v.v));
+  EXPECT_EQ(std::get<bytes_value>(v.v).data, kCafe); // c a f 0xC3 0xA9
+  // contrast: in a TEXT string, \xe9 is codepoint U+00E9 -> 2 UTF-8 bytes; in bytes, \xe9 is 1
+  // byte.
+  EXPECT_EQ(std::get<bytes_value>(parse("b\"\\xe9\"").v).data, std::string("\xe9"));
+  EXPECT_EQ(std::get<std::string>(parse("\"\\xe9\"").v), "\xC3\xA9");
+  // NUL + high bytes
+  EXPECT_EQ(std::get<bytes_value>(parse("b\"\\x00\\xff\"").v).data, std::string("\x00\xff", 2));
+  // a lone `b` is still a symbol, not a bytes literal
+  EXPECT_EQ(to_string(parse("b")), "b");
+}
+
+TEST(StateExecBytes, ToStringAndTypeName) {
+  EXPECT_EQ(make_bytes(kCafe).type_name(), "bytes");
+  EXPECT_EQ(value_t(std::string(kCafe)).type_name(), "string"); // still text
+  // b"..." rendering: printable ASCII verbatim, other bytes hex-escaped
+  EXPECT_EQ(to_string(make_bytes("caf\xC3\xA9")), "b\"caf\\xc3\\xa9\"");
+  EXPECT_EQ(to_string(make_bytes(std::string("\x00\x1f\xff", 3))), "b\"\\x00\\x1f\\xff\"");
+}
+
+TEST(StateExecBytes, EqualityIsByteWiseAndTypeDistinct) {
+  EXPECT_TRUE(values_equal(make_bytes("ab"), make_bytes("ab")));
+  EXPECT_FALSE(values_equal(make_bytes("ab"), make_bytes("ac")));
+  // bytes and a string with the same bytes are NOT equal (distinct types)
+  EXPECT_FALSE(values_equal(make_bytes("ab"), value_t(std::string("ab"))));
+}
+
+TEST(StateExecBytes, BytesModuleBuiltinsAreByteSemantic) {
+  stdlib_registry reg;
+  auto call = [&](const char *fn, std::vector<value_t> args) {
+    const native_fn *f = reg.lookup_qualified(fn);
+    EXPECT_NE(f, nullptr) << fn;
+    return (*f)(std::span<const value_t>(args.data(), args.size()));
+  };
+  // bytes.length is BYTES (contrast string.length = codepoints): "café" bytes = 5
+  EXPECT_EQ(std::get<int64_t>(call("bytes.length", {make_bytes(kCafe)}).v), 5);
+  EXPECT_EQ(std::get<int64_t>(call("bytes.byte-at", {make_bytes(kCafe), value_t((int64_t)3)}).v),
+            0xC3); // first byte of é
+  EXPECT_EQ(
+      std::get<bytes_value>(
+          call("bytes.slice", {make_bytes(kCafe), value_t((int64_t)3), value_t((int64_t)2)}).v)
+          .data,
+      "\xC3\xA9");
+  EXPECT_EQ(std::get<bytes_value>(
+                call("bytes.concat", {make_bytes("ca"), make_bytes("f"), make_bytes("\xC3\xA9")}).v)
+                .data,
+            kCafe);
+}
+
+TEST(StateExecBytes, EncodeDecodeRoundTrip) {
+  stdlib_registry reg;
+  auto call = [&](const char *fn, std::vector<value_t> args) {
+    const native_fn *f = reg.lookup_qualified(fn);
+    EXPECT_NE(f, nullptr) << fn;
+    return (*f)(std::span<const value_t>(args.data(), args.size()));
+  };
+  // string.encode -> bytes; bytes.decode -> string, round-trips a UTF-8 string
+  value_t enc = call("string.encode", {value_t(kCafe)});
+  ASSERT_TRUE(std::holds_alternative<bytes_value>(enc.v));
+  EXPECT_EQ(std::get<bytes_value>(enc.v).data, kCafe); // 5 bytes
+  EXPECT_EQ(std::get<std::string>(call("bytes.decode", {enc}).v), kCafe);
+  // bytes.decode of invalid UTF-8 errors (strict)
+  EXPECT_THROW(call("bytes.decode", {make_bytes(std::string("\xff", 1))}), std::runtime_error);
+  // unsupported encoding errors
+  EXPECT_THROW(call("string.encode", {value_t(std::string("x")), value_t(std::string("latin-1"))}),
+               std::runtime_error);
+}
+
+TEST_F(Utf8CodecTest, CodecRoundTripsBytesIncludingBinary) {
+  // arbitrary octets (NUL, control, high bytes, non-UTF-8) survive the state snapshot codec
+  // (base64)
+  const std::string bin = std::string("\x00\x01\x1f\x80\xfe\xff", 6);
+  auto r = roundtrip(make_bytes(bin));
+  ASSERT_TRUE(std::holds_alternative<bytes_value>(r.v));
+  EXPECT_EQ(std::get<bytes_value>(r.v).data, bin);
+  // a bytes value stays bytes through the codec (not silently a string)
+  EXPECT_EQ(r.type_name(), "bytes");
+}

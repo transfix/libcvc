@@ -355,6 +355,11 @@ value_t builtin_is_string(std::span<const value_t> args) {
   return value_t{std::holds_alternative<std::string>(args[0].v)};
 }
 
+value_t builtin_is_bytes(std::span<const value_t> args) { // SE-3
+  expect_exact(args, 1, "is-bytes");
+  return value_t{std::holds_alternative<bytes_value>(args[0].v)};
+}
+
 // ---------------------------------------------------------------------------
 // List
 // ---------------------------------------------------------------------------
@@ -741,6 +746,7 @@ environment_ptr builtins::make_default_environment() {
   register_fn(env, "is-int", builtin_is_int);
   register_fn(env, "is-float", builtin_is_float);
   register_fn(env, "is-string", builtin_is_string);
+  register_fn(env, "is-bytes", builtin_is_bytes);
 
   // List
   register_fn(env, "list", builtin_list);
