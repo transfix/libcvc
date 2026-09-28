@@ -1487,16 +1487,17 @@ bool state::isValidStateName(const std::string &name) {
     return false;
   }
 
-  // First character must be letter or underscore
+  // First character must be letter or underscore. Cast to unsigned char before the <cctype>
+  // call: passing a plain (possibly negative) char is UB for a byte >= 0x80 (SE-4, A12).
   char first = name[0];
-  if (!std::isalpha(first) && first != '_') {
+  if (!std::isalpha(static_cast<unsigned char>(first)) && first != '_') {
     return false;
   }
 
   // Remaining characters must be alphanumeric or underscore
   for (size_t i = 1; i < name.length(); ++i) {
     char c = name[i];
-    if (!std::isalnum(c) && c != '_') {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
       return false;
     }
   }
@@ -1522,11 +1523,11 @@ std::string state::sanitizeStateName(const std::string &name) {
   std::string result;
   result.reserve(name.length());
 
-  // Handle first character
+  // Handle first character (unsigned-char cast avoids <cctype> UB on bytes >= 0x80; SE-4, A12)
   char first = name[0];
-  if (std::isalpha(first) || first == '_') {
+  if (std::isalpha(static_cast<unsigned char>(first)) || first == '_') {
     result += first;
-  } else if (std::isdigit(first)) {
+  } else if (std::isdigit(static_cast<unsigned char>(first))) {
     // If starts with digit, prepend underscore
     result += '_';
     result += first;
@@ -1538,7 +1539,7 @@ std::string state::sanitizeStateName(const std::string &name) {
   // Handle remaining characters
   for (size_t i = 1; i < name.length(); ++i) {
     char c = name[i];
-    if (std::isalnum(c) || c == '_') {
+    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
       result += c;
     } else {
       // Replace invalid characters (including dashes, spaces, etc.) with underscore

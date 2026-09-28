@@ -286,11 +286,18 @@ Namespaced `SE-*` to distinguish from the libcvc-wide `P0–P3` above.
   octet-stream, the P3b `py_to_value` bytes branch, binary URI handlers) to `bytes`
   instead of `string`, and marshal `bytes` over the multiprocess WIRE codec (coupled
   with the deferred A9 wire work — `jkv`/`xstr`).
-- **SE-4 — Normalization policy + latent validators.** Decide and document A14
-  (recommended: raw-bytes keys, NFC only at the boundary if needed). If NFC IS
-  adopted, it pulls in `utf8proc` (see the Track A note — `utf8proc`, not ICU).
-  Fix the A12 signed-char UB regardless, and gate on UTF-8-aware rules if those
-  validators are ever wired to DSL keys.
+- **SE-4 — Normalization policy + latent validators. ✅ LANDED.** **A14 decision:
+  keys and values are RAW UTF-8 BYTES with NO normalization** — two byte-different
+  encodings of the same character (composed vs decomposed) are distinct keys/unequal
+  strings, and that is the documented, intended behavior (it matches state_exec's
+  byte-transparent storage and avoids a Unicode-data dependency). NFC/NFD is adopted
+  ONLY if canonical-equivalence matching is ever explicitly required, and it would
+  pull in `utf8proc` (Track A note — `utf8proc`, not ICU), applied at the DSL
+  boundary. **A12 FIXED:** `cvc::state::isValidStateName`/`sanitizeStateName` now cast
+  to `unsigned char` before the `<cctype>` calls (was UB for bytes ≥0x80). These
+  validators remain ASCII-only and are NOT on the state_exec key path (DSL keys are
+  byte-transparent, unvalidated); if they are ever wired to gate DSL keys, replace the
+  rule with a UTF-8-aware one (that is a future task, gated on that wiring).
 
 ## Status (state_exec)
 
