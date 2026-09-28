@@ -59,6 +59,7 @@ if(CVC_STATE_EXEC)
   add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
   add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
   add_executable(state_exec_codec_test state_exec_codec_test.cpp)
+  add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
   add_executable(state_exec_async_test state_exec_async_test.cpp)
   add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
   add_executable(state_exec_intrinsics_test state_exec_intrinsics_test.cpp)
@@ -289,6 +290,7 @@ if(CVC_STATE_EXEC)
     state_exec_evaluator_test
     state_exec_stackless_evaluator_test
     state_exec_codec_test
+    state_exec_unicode_test
     state_exec_async_test
     state_exec_scheduler_test
     state_exec_intrinsics_test
@@ -1109,6 +1111,12 @@ if(CVC_STATE_EXEC)
       GTest::gtest
       GTest::gtest_main
   )
+  target_link_libraries(state_exec_unicode_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
   target_link_libraries(state_exec_async_test
     PRIVATE
@@ -1384,6 +1392,7 @@ if(CVC_STATE_EXEC)
   target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
   target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
   target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
   target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
   target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
   target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
@@ -1655,6 +1664,7 @@ if(CVC_STATE_EXEC)
   cvc_discover_tests(state_exec_evaluator_test)
   cvc_discover_tests(state_exec_stackless_evaluator_test)
   cvc_discover_tests(state_exec_codec_test)
+  cvc_discover_tests(state_exec_unicode_test)
   cvc_discover_tests(state_exec_async_test)
   cvc_discover_tests(state_exec_scheduler_test)
   cvc_discover_tests(state_exec_intrinsics_test)

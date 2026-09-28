@@ -175,11 +175,24 @@ width from the start**, never on `std::string::size()`, or every row with
 multibyte text misaligns.
 
 The whole track rests on **one shared UTF-8 codepoint helper**
-(decode/iterate/length/index→byte-offset). Add it once (a small hand-rolled
-decoder, or vendor a header-only `utfcpp`; **no ICU dependency needed for A1–A11
-and A13** — ICU/a case table is only required for real (non-ASCII) case folding
-in A4 and for NFC in A14). Everything else is byte-arithmetic replaced by
-codepoint-arithmetic against that one helper.
+(decode/iterate/length/index→byte-offset) — landed in SE-0 as
+`inc/cvc/core/state_exec/utf8.h` (hand-rolled, header-only, no dependency).
+**No ICU and no Unicode data at all is needed for A1–A11 and A13** — they are
+byte-arithmetic replaced by codepoint-arithmetic against that one helper.
+
+The ONLY features that need Unicode *data tables* are real (non-ASCII) **case
+folding** (A4 — `upper`/`lower` doing é↔É, ß→SS, …) and **NFC/NFD
+normalization** (A14). **Decision: use `utf8proc`, NOT ICU**, if/when we take
+those on. Rationale: `utf8proc` is a single small file (~a few hundred KB of
+tables, MIT-style, wasm-friendly) that provides exactly case-folding + NFC/NFD;
+full ICU is tens of MB of CLDR data, painful to make hermetic in cvcpkg and
+heavy on wasm, and its extra machinery (locale collation, break iteration, bidi)
+is not something a scene/UI DSL needs. ICU would only ever be justified by
+locale-aware **collation**, which is out of scope. Note both A4 and A14 are
+deferrable/policy-avoidable (A4 ships ASCII-only-and-documented first; A14's
+recommended policy is raw-bytes keys with NO normalization), so `utf8proc`
+becomes a dependency only if we deliberately choose full case-fold or
+canonical-equivalence — not before.
 
 ### Track B — add a `bytes` type (Python-3-style)
 
@@ -234,15 +247,21 @@ Track B ensures binary data is never *forced* to be text in the first place.
 
 Namespaced `SE-*` to distinguish from the libcvc-wide `P0–P3` above.
 
-- **SE-0 — Codepoint helper + test corpus + policy note.** Land the shared
-  UTF-8 decode/iterate helper. Add a Unicode test corpus (`"café"`, a 4-byte
-  emoji, a CJK string) and pin round-trip tests (parse→to_string, codec
-  snapshot, wire `jkv`/`xstr`) — these **pass today** and guard the transparent
-  paths. Write the "text vs bytes" policy (this section). No behavior change to
-  builtins yet.
+- **SE-0 — Codepoint helper + test corpus + policy note. ✅ LANDED.** The shared
+  UTF-8 helper is `inc/cvc/core/state_exec/utf8.h` (`decode`/`count`/`byte_offset`/
+  `encode`/`is_valid`, header-only, no ICU, lenient decode that always progresses on
+  malformed input). `state_exec_unicode_test.cpp` unit-tests it (every byte-length
+  class + malformed/overlong/surrogate/truncated cases) and pins the transparent
+  paths with a `"café"` / 4-byte-emoji / CJK corpus: parse→value→to_string and the
+  cvc::state snapshot codec round-trip **pass today** (wire `jkv`/`xstr` are covered
+  by the existing codec tests). The "text vs bytes" policy is this section, restated
+  in the helper's header. **No behavior change** — the helper is added and tested in
+  isolation, unwired, so SE-1 is a pure byte→codepoint swap in the string builtins.
 - **SE-1 — Track A string builtins.** Fix A1–A6 (char-at, substring, split-"",
   upper/lower, length ×2) against the helper. Add failing-then-passing tests
-  that pin codepoint semantics. Highest user-visible impact.
+  that pin codepoint semantics. Highest user-visible impact. `upper`/`lower` (A4)
+  ship ASCII-only-and-documented here; full non-ASCII case folding pulls in
+  `utf8proc` (see the Track A note above — `utf8proc`, not ICU) as a follow-up.
 - **SE-2 — Track A lexer + escapes + wire codec.** A7 (UTF-8 identifiers, or an
   explicit documented ASCII-only decision), A8 (`\u`/`\x` escapes), A9 (wire
   `\u` decode + control-byte escaping), A11 (unsigned-char/locale-free
@@ -252,8 +271,9 @@ Namespaced `SE-*` to distinguish from the libcvc-wide `P0–P3` above.
   marshalling. Then route the binary drivers (HTTP octet-stream, `py_to_value`
   bytes branch, binary URI handlers) to `bytes` instead of `string`.
 - **SE-4 — Normalization policy + latent validators.** Decide and document A14
-  (recommended: raw-bytes keys, NFC only at the boundary if needed). Fix the
-  A12 signed-char UB regardless, and gate on UTF-8-aware rules if those
+  (recommended: raw-bytes keys, NFC only at the boundary if needed). If NFC IS
+  adopted, it pulls in `utf8proc` (see the Track A note — `utf8proc`, not ICU).
+  Fix the A12 signed-char UB regardless, and gate on UTF-8-aware rules if those
   validators are ever wired to DSL keys.
 
 ## Status (state_exec)
