@@ -215,10 +215,9 @@ TEST(NavMaterialRolloutCuda, VjpMatchesCpu) {
 TEST(NavMaterialRolloutCuda, DriveStepCudaRefusesRiskLamNet) {
   // v2 two-head sigmoid net: in=6 (grip), out=5 (lam_soft+lam_hard), kFlagLamSigmoid.
   const std::vector<float> abg = {1.0f, 3.0f, 4.0f};
-  coef_mlp net =
-      coef_mlp::from_layers(6, 5, {5}, {6}, {0}, {std::vector<float>(5 * 6, 0.0f)},
-                            {std::vector<float>(5, 0.0f)}, abg,
-                            coef_mlp::kFlagFeatMu | coef_mlp::kFlagLamSigmoid, 5.0f, 10.0f);
+  coef_mlp net = coef_mlp::from_layers(
+      6, 5, {5}, {6}, {0}, {std::vector<float>(5 * 6, 0.0f)}, {std::vector<float>(5, 0.0f)}, abg,
+      coef_mlp::kFlagFeatMu | coef_mlp::kFlagLamSigmoid, 5.0f, 10.0f);
   ASSERT_TRUE(net.has_lam());
   ASSERT_TRUE(net.lam_sigmoid());
   const int H = 8, W = 8, N = 2;
@@ -247,9 +246,9 @@ TEST(NavMaterialRolloutCuda, DriveStepCudaRefusesRiskLamNet) {
   v.nsub = 1;
   v.grip = &grip;
   std::vector<float> o(2 * N, 0.0f), th(N, 0.0f), sp(N, 0.3f), carrot(2 * N, 1.0f), mc(N);
-  EXPECT_THROW(drive_step_cuda(fs, o.data(), th.data(), sp.data(), carrot.data(), net, N, v,
-                               mc.data()),
-               std::runtime_error);
+  EXPECT_THROW(
+      drive_step_cuda(fs, o.data(), th.data(), sp.data(), carrot.data(), net, N, v, mc.data()),
+      std::runtime_error);
 }
 
 #endif // CVC_ENABLE_CUDA
