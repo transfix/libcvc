@@ -9,7 +9,10 @@ recipe:
   upstream_version: "3.4.0"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
-  cvc_revision: 2
+  # Bumped 2 -> 3: republish rebuilt against the v2 libcvc (.cvcnav format v2 / two-head
+  # sigmoid, #436), so pycvc links a v2-capable libcvc and the torch<->C++ coef_mlp parity
+  # test runs instead of skipping on 'unsupported .cvcnav format version'.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
