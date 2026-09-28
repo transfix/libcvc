@@ -151,6 +151,13 @@ public:
   virtual bool button(const char *label) = 0;           // returns clicked
   virtual bool menu_item_action(const char *label) = 0; // returns clicked
 
+  // §4.6 widget-level on_click: did the LAST item drawn get clicked this frame? The walk queries
+  // this after emitting any widget carrying an on_click (Runtime::emit_node), the same way it uses
+  // button()'s return for a Button's `on`. Defaults false — a backend with no per-item pointer
+  // input reports no widget clicks (the SDL document-level on_pointer path still works). The ImGui
+  // backend returns ImGui::IsItemClicked(); a mock/test backend can drive it.
+  virtual bool item_clicked() { return false; }
+
   // ---- state-bound (value-in / edit-out) ----------------------------------
   virtual BoolEdit menu_item_toggle(const char *label, bool current) = 0;
   virtual BoolEdit checkbox(const char *label, bool current) = 0;

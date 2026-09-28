@@ -326,7 +326,7 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 // into Widget::props for a registered emit fn to read.
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
-         k == "children" || k == "items" || k == "id" || k == "visible_when" ||
+         k == "on_click" || k == "children" || k == "items" || k == "id" || k == "visible_when" ||
          k == "enabled_when" || k == "disabled_when" || k == "tooltip" || k == "repeat";
 }
 
@@ -698,6 +698,8 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
     if (has(n, "repeat"))
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
+    if (has(n, "on_click"))
+      w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.

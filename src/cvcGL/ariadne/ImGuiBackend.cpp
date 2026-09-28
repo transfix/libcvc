@@ -325,6 +325,16 @@ void ImGuiBackend::text_value(const char *label, const std::string &value) {
 void ImGuiBackend::separator() { ui::Separator(); }
 bool ImGuiBackend::button(const char *label) { return ui::Button(label); }
 bool ImGuiBackend::menu_item_action(const char *label) { return ui::MenuItemClicked(label); }
+// §4.6 widget on_click: was the last-submitted item clicked (left button, released over it)? Works
+// for any item ImGui submitted this frame — the walk queries it right after drawing the widget.
+// Guarded like the other raw-ImGui calls: without imgui the overlay is inert, so no widget clicks.
+bool ImGuiBackend::item_clicked() {
+#ifdef CVC_ENABLE_IMGUI
+  return ImGui::IsItemClicked();
+#else
+  return false;
+#endif
+}
 
 ariadne::BoolEdit ImGuiBackend::menu_item_toggle(const char *label, bool current) {
   const bool next = ui::MenuItemToggle(label, current); // discrete: commit immediately

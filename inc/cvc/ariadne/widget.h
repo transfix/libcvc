@@ -126,6 +126,11 @@ struct Widget {
   std::string label; // display text / window title / menu name
   std::string bind;  // cvc::state path for bound widgets
   std::string on;    // event name for action widgets (Button / MenuItemAction)
+  // §4.6 widget-level pointer handler: a two-shape value (an event name OR a program starting with
+  // '(') fired when THIS widget is clicked — enqueued in the walk when the backend reports the item
+  // was clicked (Backend::item_clicked / ImGui::IsItemClicked), like Button's `on`. Any widget kind
+  // may carry it. (on_hover / on_drag — continuous / gesture handlers — are a later addition.)
+  std::string on_click;
 
   // §4 read-lane (reactive): a state_exec predicate re-evaluated each frame; when it
   // is non-empty and evaluates falsy the widget (and its subtree) is skipped this

@@ -91,6 +91,8 @@ struct MockBackend : Backend {
     rec(std::string("menu_action:") + l);
     return false;
   }
+  bool item_clicked_flag = false; // §4.6: report the last item as clicked (widget on_click test)
+  bool item_clicked() override { return item_clicked_flag; }
   BoolEdit menu_item_toggle(const char *l, bool) override {
     rec(std::string("toggle:") + l);
     return {};
@@ -393,6 +395,33 @@ TEST(AriadneInput, PointerProgramReceivesMouseEvent) {
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("ptr.kind").value(), "mouse_button_down");
   EXPECT_EQ(cvc::state::instance(app)("ptr.btn").value(), "1");
+}
+
+// §4.6 widget-level on_click: any widget can carry an on_click program; the walk enqueues it when
+// the backend reports the item was clicked (Backend::item_clicked -> ImGui::IsItemClicked natively
+// and on wasm). Fired like a Button's on: (queued in render(), run in drain()) — NOT the SDL
+// document-level stream. This is the natively-working widget input path.
+TEST(AriadneInput, WidgetOnClickFiresWhenBackendReportsClick) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget t = text("Clickable");
+  t.on_click = "(state-set \"widget.clicked\" \"yes\")";
+  rt.set_root(group({t}));
+  // No click reported -> on_click must NOT fire.
+  mb.item_clicked_flag = false;
+  rt.render();
+  rt.drain();
+  EXPECT_NE(cvc::state::instance(app)("widget.clicked").value(), "yes");
+  // Click reported -> render() enqueues on_click, drain() runs it.
+  mb.item_clicked_flag = true;
+  rt.render();
+  EXPECT_NE(cvc::state::instance(app)("widget.clicked").value(), "yes"); // never inside render()
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("widget.clicked").value(), "yes");
 }
 
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a

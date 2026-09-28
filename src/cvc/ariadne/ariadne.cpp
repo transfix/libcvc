@@ -1156,6 +1156,14 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
   }
+  // §4.6 widget-level on_click: if this widget carries an on_click and the backend reports the item
+  // just drawn was clicked, enqueue it — a fire-once action drained + submitted like a Button's on:
+  // (a program on: runs through state_exec; a bare name routes to a host handler). Sourced from the
+  // backend's per-item click (ImGui::IsItemClicked), so it works wherever ImGui gets input (native
+  // VTK-interactor AND wasm) — no raw hit-test. Defaults off on a backend without per-item input.
+  // Inside the disabled scope (below), so a disabled widget never fires (IsItemClicked is false).
+  if (!w.on_click.empty() && b.item_clicked())
+    enqueue(w.on_click);
   // §4 read-lane: attach a hover tooltip to the widget just drawn (the backend's last item).
   // A tooltip is free human text, so — unlike a bind (a dotted state path never begins with
   // '(') — one that merely LOOKS like an expression ("(optional) …", "(beta)") must not be
