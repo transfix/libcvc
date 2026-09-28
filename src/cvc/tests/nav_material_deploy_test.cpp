@@ -575,3 +575,32 @@ TEST(NavMaterialDeploy, LamSoftScaleMultipliesLearnedReroute) {
   EXPECT_LT(x_s1, x_s0 - 1e-4) << "scale=1 did not reroute more than scale=0 (clobbered?)";
   EXPECT_LT(x_s2, x_s1 - 1e-4) << "scale=2 did not reroute more than scale=1 (scale ignored?)";
 }
+
+// Regression for cvcdbg #141 ("attach material stack to the STARTUP world under --grip"). The
+// demo3 crash was a --grip startup world that auto-loaded the widened risk net but stepped it
+// through the NON-material drive (no material stack attached) — which the plain drive REJECTS, so
+// the throw escaped as an uncaught exception at the first frame. The demo binary is not in CI, so
+// pin the underlying library invariant here: a terrain-risk net is rejected by drive_step and
+// accepted by drive_step_material (with a stack attached). If a future change lets a risk net fall
+// through the plain drive, this fails instead of the demo crashing.
+TEST(NavMaterialDeploy, RiskNetRejectedByPlainDriveAcceptedByMaterialDrive) {
+  deploy_world w;
+  coef_mlp net = make_net(7, 4, coef_mlp::kFlagFeatMu | coef_mlp::kFlagFeatRisk, 0.5f);
+  ASSERT_TRUE(net.has_risk());
+  // Non-material drive on a risk net: throws (this is the exact throw the demo3 startup hit).
+  std::vector<float> o1 = w.o, th1 = w.th, sp1 = w.sp, mc1(w.N);
+  EXPECT_THROW(drive_step(w.fs, o1.data(), th1.data(), sp1.data(), w.carrot.data(), net, w.N,
+                          nullptr, w.v, mc1.data(), 1),
+               std::runtime_error);
+  // Same net through the material drive with a stack attached: accepted (the fix's path).
+  std::vector<float> store;
+  material_stack ms = w.risk_stack(store);
+  std::vector<float> ls(w.N, 0.5f), lh(w.N, 1.0f);
+  material_drive md;
+  md.stack = &ms;
+  md.lam_soft = ls.data();
+  md.lam_hard = lh.data();
+  std::vector<float> o2 = w.o, th2 = w.th, sp2 = w.sp, mc2(w.N);
+  EXPECT_NO_THROW(drive_step_material(w.fs, o2.data(), th2.data(), sp2.data(), w.carrot.data(), net,
+                                      w.N, nullptr, w.v, md, mc2.data(), 1));
+}

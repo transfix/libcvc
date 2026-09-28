@@ -185,6 +185,12 @@ struct material_config {
   float k_sharp = 1.25f; // 1/m
   float d_hat_m = 12.0f; // m
   double sigma = 1.0;    // blur, in cells
+  // gate_enabled=false means the witness gate is BYPASSED so lam_soft_eff = lam_soft * 1 —
+  // the soft-reroute force runs UNGATED (always-on at full lam_soft for every agent), NOT
+  // turned off. It is the `gate` factor pinned to 1 in the lam_soft_eff = lam_soft * gate model
+  // above, the fail-OPEN complement of the fail-CLOSED witness_gate kernel. To turn the soft
+  // force OFF, set lam_soft = 0 or clear_material() — do not disable the gate. lam_hard is never
+  // gated in either case. Defaults true (the gate is applied unless a caller opts out).
   bool gate_enabled = true;
   gate_params gate; // horizon_cells/margins; hard_margin_m <= 0 => 2*cell_w
 };

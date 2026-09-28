@@ -23,6 +23,8 @@ TEST(NavMaterialRolloutCuda, SkippedNoCuda) { GTEST_SKIP() << "built without CVC
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/drive.h>
 #include <cvc/nav/material.h>
 #include <random>
 #include <vector>
@@ -204,6 +206,50 @@ TEST(NavMaterialRolloutCuda, VjpMatchesCpu) {
   std::printf("[mat-cuda-vjp] worst_rel=%.3e min_cos=%.6f\n", worst, mincos);
   EXPECT_LT(worst, 5e-3) << "CUDA gradient disagrees with CPU";
   EXPECT_GT(mincos, 0.9999) << "CUDA gradient direction diverges from CPU";
+}
+
+// Guard (audit follow-up): the GPU drive is geometry-only — drive_kernel/d_bicycle read only
+// alpha/beta/gamma and apply no material/lam force. So drive_step_cuda must REFUSE a v2 risk/lam
+// net rather than silently run it as a plain geometry drive and drop the learned reroute. The
+// guard throws host-side (before any cudaMalloc), so this passes on a device-less CUDA build too.
+TEST(NavMaterialRolloutCuda, DriveStepCudaRefusesRiskLamNet) {
+  // v2 two-head sigmoid net: in=6 (grip), out=5 (lam_soft+lam_hard), kFlagLamSigmoid.
+  const std::vector<float> abg = {1.0f, 3.0f, 4.0f};
+  coef_mlp net =
+      coef_mlp::from_layers(6, 5, {5}, {6}, {0}, {std::vector<float>(5 * 6, 0.0f)},
+                            {std::vector<float>(5, 0.0f)}, abg,
+                            coef_mlp::kFlagFeatMu | coef_mlp::kFlagLamSigmoid, 5.0f, 10.0f);
+  ASSERT_TRUE(net.has_lam());
+  ASSERT_TRUE(net.lam_sigmoid());
+  const int H = 8, W = 8, N = 2;
+  std::vector<float> field(3 * H * W, 0.1f), mu(H * W, 1.0f);
+  auto setframe = [&](auto &g, float *d) {
+    g.data = d;
+    g.M = 1;
+    g.H = H;
+    g.W = W;
+    g.mnx = -10;
+    g.mny = -10;
+    g.mxx = 10;
+    g.mxy = 10;
+    g.cx = 0;
+    g.cy = 0;
+    g.S = 0.1;
+  };
+  field_stack fs;
+  setframe(fs, field.data());
+  friction_field grip;
+  setframe(grip, mu.data());
+  veh_params v;
+  v.rr = 0.15f;
+  v.d_hat = 0.35f;
+  v.dt = 0.06f;
+  v.nsub = 1;
+  v.grip = &grip;
+  std::vector<float> o(2 * N, 0.0f), th(N, 0.0f), sp(N, 0.3f), carrot(2 * N, 1.0f), mc(N);
+  EXPECT_THROW(drive_step_cuda(fs, o.data(), th.data(), sp.data(), carrot.data(), net, N, v,
+                               mc.data()),
+               std::runtime_error);
 }
 
 #endif // CVC_ENABLE_CUDA

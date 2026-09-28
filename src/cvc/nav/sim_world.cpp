@@ -491,6 +491,11 @@ void sim_world::step(int num_threads) {
                          best.data(), cnt.data(), num_threads,
                          mat_planes_ > 1 ? map_id_.data() : nullptr);
     } else {
+      // gate disabled => fail-OPEN: every agent is active, so lam_soft below is applied UNGATED
+      // (always-on at full lam_soft), i.e. the gate factor is pinned to 1 in lam_soft_eff =
+      // lam_soft * gate. This is intended (see material_config::gate_enabled) — NOT a way to
+      // turn the soft force off (use lam_soft=0 / clear_material() for that). Do not "tidy" this
+      // to 0: that would silently flip the documented contract to fail-closed.
       std::fill(mat_gate_active_.begin(), mat_gate_active_.end(), std::uint8_t(1));
     }
     for (int i = 0; i < n_; ++i) {
