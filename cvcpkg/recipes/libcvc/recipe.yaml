@@ -105,7 +105,15 @@ recipe:
   # fix the already-published +cvc.4 bundle — this reships a clean +cvc.5 wasm-mt export. Native is
   # unaffected (publish-cvcpkg auto-bumps above this floor). cvcgl bumps in lockstep (5 -> 6) so it
   # rebuilds against +cvc.5 and re-pins it (cvcgl exact-pins its built-against libcvc).
-  cvc_revision: 5
+  # Bumped 5 -> 6 (3.4.0 lineage): +cvc.5 made the export relocatable, but a wasm CONSUMER
+  # then failed to LINK with undefined BZ2_*/lzma_*/xml* symbols — cvcConfig.cmake.in only
+  # appended the ImageMagick static codec-delegate closure to a SYNTHESISED MagickCore
+  # (`_cvc_im_synth`), but on a wasm consumer the STOCK FindImageMagick tier wins (finds the
+  # static libs in the prefix) and creates a delegate-LESS MagickCore, so the append was
+  # skipped. This ships a cvcConfig.cmake.in that appends the closure whenever the MagickCore
+  # target exists (self-guarding find_library; harmless dedup for a shared ImageMagick).
+  # Reships to embed the corrected consumer config. cvcgl bumps in lockstep (6 -> 7).
+  cvc_revision: 6
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
