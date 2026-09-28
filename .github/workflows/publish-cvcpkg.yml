@@ -654,10 +654,19 @@ jobs:
           # its own prefix and joined only here.
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
           cvcpkg install imgui --prefix "$IMGUI"
+          # SDL3 backs the cvcGL input+peripheral seam (CVC_ENABLE_SDL). Like imgui
+          # it is a declared cvcgl dep but NOT part of libcvc's install-deps closure
+          # (libcvc doesn't depend on sdl3), so it must be installed explicitly here
+          # or find_package(SDL3 CONFIG) fails and the SDK silently degrades to the
+          # VTK-interactor fallback. cvcGL links the relocatable SDL3::SDL3 target and
+          # emits find_dependency(SDL3) into cvcGLConfig.cmake, so no path leaks (see
+          # the imgui note above). Own prefix, joined only here.
+          SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          cvcpkg install sdl3 --prefix "$SDL3"
           cmake -S src/cvcGL -B build-cvcgl -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-cvcgl" \
-            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$DEPS"
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS"
           cmake --build build-cvcgl --parallel
           cmake --install build-cvcgl
           if [ "$PACK_CVCGL" != "1" ]; then
@@ -822,6 +831,12 @@ jobs:
           # doesn't use the overlay itself.
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
           cvcpkg install imgui --prefix "$IMGUI"
+          # Likewise cvcgl now links SDL3::SDL3 (CVC_ENABLE_SDL) and emits
+          # find_dependency(SDL3) into cvcGLConfig.cmake, so the find_package(cvcGL)
+          # pulled in by linking stage-cvcgl below needs sdl3 on the prefix too --
+          # same rationale as imgui, though pycvc-gl doesn't use the input seam itself.
+          SDL3="$GITHUB_WORKSPACE/prefix-sdl3-pycvcgl"
+          cvcpkg install sdl3 --prefix "$SDL3"
           cmake -S bindings/pycvc -B build-pycvcgl -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCVC_BUILD_PYCVC_CORE=OFF \
@@ -829,7 +844,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvcgl" \
             -DPython3_EXECUTABLE="$PYBIN" \
             -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
-            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS;$IMGUI;$GITHUB_WORKSPACE/stage-cvcgl"
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS;$IMGUI;$SDL3;$GITHUB_WORKSPACE/stage-cvcgl"
           cmake --build build-pycvcgl --parallel
           cmake --install build-pycvcgl
           mkdir -p dist
@@ -874,11 +889,17 @@ jobs:
           # Linux step's note; the imgui export is relocatable, so no path leaks).
           $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-cvcgl"
           cvcpkg install imgui --prefix "$imgui" --config release --link shared
+          # SDL3 backs the cvcGL input+peripheral seam (CVC_ENABLE_SDL) -- a declared
+          # cvcgl dep that isn't in libcvc's install-deps closure, so install it here
+          # or find_package(SDL3) fails and the SDK degrades to the VTK fallback. The
+          # SDL3::SDL3 link + find_dependency(SDL3) are relocatable (see Linux note).
+          $sdl3 = "$env:GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          cvcpkg install sdl3 --prefix "$sdl3" --config release --link shared
           cmake -B build-cvcgl -S src/cvcGL `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_CONFIGURATION_TYPES=Release `
             -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-cvcgl" `
-            -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$depsPath"
+            -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath"
           cmake --build build-cvcgl --config Release
           cmake --install build-cvcgl --config Release
           New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -940,15 +961,19 @@ jobs:
             -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath"
           cmake --build build-pycvc --config Release
           cmake --install build-pycvc --config Release
-          # ── pycvc-gl (scene; links installed cvcgl, which now exports -limgui) ──
+          # ── pycvc-gl (scene; links installed cvcgl, which now exports -limgui + SDL3::SDL3) ──
           $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
           cvcpkg install imgui --prefix "$imgui" --config release --link shared
+          # cvcgl now links SDL3::SDL3 (CVC_ENABLE_SDL) + emits find_dependency(SDL3),
+          # so find_package(cvcGL) via stage-cvcgl below needs sdl3 on the prefix too.
+          $sdl3 = "$env:GITHUB_WORKSPACE/prefix-sdl3-pycvcgl"
+          cvcpkg install sdl3 --prefix "$sdl3" --config release --link shared
           cmake -B build-pycvcgl -S bindings/pycvc `
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CONFIGURATION_TYPES=Release `
             -DCVC_BUILD_PYCVC_CORE=OFF -DCVC_BUILD_PYCVC_GL=ON `
             -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-pycvcgl" `
             -DPython3_EXECUTABLE="$python" -DPython3_NumPy_INCLUDE_DIR="$npyInc" `
-            -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath;$imgui;$env:GITHUB_WORKSPACE/stage-cvcgl"
+            -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath;$imgui;$sdl3;$env:GITHUB_WORKSPACE/stage-cvcgl"
           cmake --build build-pycvcgl --config Release
           cmake --install build-pycvcgl --config Release
           New-Item -ItemType Directory -Force -Path dist | Out-Null
