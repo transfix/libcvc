@@ -41,6 +41,8 @@
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/gl/Viewport.h>
+#include <cvc/gl/ViewportManager.h>
 #include <cvc/lod/select.h> // agent distance-LOD selection (--lod)
 #include <future>
 #include <utility> // std::pair (lod score list)
@@ -639,6 +641,10 @@ int main(int argc, char **argv) {
   cvc::app app;
   app.properties("system.log_verbosity", "2");
   SceneGraph sg(app, "city");
+  // A tiny second scene holding ONLY the minimap's PiP-only agent dots. They are
+  // drawn over the minimap through their own viewport, so they never enter the
+  // main view or the 3-D minimap mirror (which echoes the main scene's props).
+  SceneGraph dotsScene(app, "city_pip");
 
   const double wall_rgb[3] = {0.58, 0.58, 0.64};
   const double ground_rgb[3] = {0.20, 0.23, 0.27};
@@ -826,7 +832,7 @@ int main(int argc, char **argv) {
   std::vector<int> bwVertCell;      // per-vertex cell index (exact, set on emit)
   std::vector<unsigned char> bwRgb; // per-vertex colour scratch
   std::vector<unsigned char> cellRgb(static_cast<std::size_t>(3) * rows * cols, 0);
-  long bwLastCells = -1;                   // re-mesh trigger
+  long bwLastCells = -1; // re-mesh trigger
   const double kBeliefWallH =
       std::min(40.0, 0.013 * span); // EXACTLY cvcdbg demo3s sensed-wall height (~40 m)
 
@@ -1259,7 +1265,10 @@ int main(int argc, char **argv) {
     }
     pt = {0, 1, 2, 0, 2, 3, 0, 3, 4}; // triangle fan
     cvc::geometry dotGeom = pipDotGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.5);
-    pipDotNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("pip_dots", dotGeom));
+    // Into dotsScene, NOT the main scene: these are minimap-only and must never
+    // reach the main view or the mirror.
+    pipDotNode =
+        std::dynamic_pointer_cast<GeometryNode>(dotsScene.addGraphics("pip_dots", dotGeom));
     if (pipDotNode) {
       pipDotNode->setUseSingleColor(false);
       pipDotNode->setAmbient(1.0); // flat, no shadow tint — reads as a UI marker
@@ -1518,7 +1527,6 @@ int main(int argc, char **argv) {
   // the PiP renders wherever the window sits. Default: the bottom-right corner.
   double pipVp[4] = {0.72, 0.0, 1.0, 0.28};
   int dragTarget = -1; // minimap: index of the target currently being dragged (-1 = none)
-  vtkSmartPointer<vtkRenderer> pipRenderer = vtkSmartPointer<vtkRenderer>::New();
   vtkSmartPointer<vtkCamera> pipCam = vtkSmartPointer<vtkCamera>::New();
   {
     const double halfH = 0.5 * (bounds.max_y - bounds.min_y);
@@ -1530,44 +1538,42 @@ int main(int argc, char **argv) {
     pipCam->SetFocalPoint(cx, cy, 0.0);
     pipCam->SetViewUp(0.0, 1.0, 0.0);
     pipCam->SetClippingRange(1.0, wall_h * 10.0 + 5000.0);
-    pipRenderer->SetActiveCamera(pipCam);
-    pipRenderer->SetViewport(pipVp[0], pipVp[1], pipVp[2],
-                             pipVp[3]); // driven by the draggable overlay
-    pipRenderer->SetBackground(0.02, 0.03, 0.05);
-    pipRenderer->SetLayer(1);
-    // Own lighting so the top-down view is evenly lit regardless of the main
-    // scene's stage rig (which is aimed at the chase framing).
-    pipRenderer->AutomaticLightCreationOff();
-    pipRenderer->RemoveAllLights();
-    {
-      // Dim, ambient-only headlight so the satellite ground doesn't blow out
-      // and vehicle glyphs stay legible against it.
-      auto hl = vtkSmartPointer<vtkLight>::New();
-      hl->SetLightTypeToHeadlight();
-      hl->SetIntensity(0.55);
-      pipRenderer->AddLight(hl);
-    }
-    // Mirror the main renderer's 3-D props onto the PiP. Each vtkProp3D can live
-    // in multiple renderers — VTK handles that fine. SKIP 2-D actors (HUD text,
-    // FPS overlay): those are viewport-relative and would double-draw on top of
-    // the PiP looking like a bug.
-    vtkRenderer *main = view.renderer();
-    vtkPropCollection *props = main->GetViewProps();
-    props->InitTraversal();
-    while (vtkProp *p = props->GetNextProp())
-      if (!vtkActor2D::SafeDownCast(p))
-        pipRenderer->AddViewProp(p);
-    // The pip_dots overlay is PiP-only: remove from main, keep on PiP.
-    if (pipDotNode) {
-      vtkProp *dotsProp = pipDotNode->prop();
-      if (dotsProp) {
-        main->RemoveViewProp(dotsProp);
-        pipRenderer->AddViewProp(dotsProp);
+
+    // The minimap is now two library viewports on the SAME window/context that
+    // SceneRenderer already owns (reached via viewportManager()), instead of a
+    // hand-rolled second vtkRenderer:
+    //   * "minimap" — a FROZEN mirror of the main scene (layer 1). liveSync=false
+    //     snapshots the props once, so it shows what the old hand-rolled one-time
+    //     prop copy showed (no belief walls discovered later) and keeps its OWN
+    //     flat headlight instead of the main scene's chase-aimed stage rig.
+    //   * "minimap_dots" — the PiP-only agent dots (layer 2), a separate scene
+    //     over the SAME rect + camera, non-clearing so the mirror shows through.
+    // Both draw top-down through the shared pipCam, are non-interactive, and
+    // track the draggable rect (setRegion each frame, below). --no-pip creates
+    // neither (perf diagnostic), exactly as before.
+    if (!noPip) {
+      cvc::gl::ViewportManager &vm = view.viewportManager();
+      cvc::gl::Viewport &mm =
+          vm.addMirrorViewport("minimap", "main", pipVp, /*layer=*/1, /*liveSync=*/false);
+      mm.setBackground(0.02, 0.03, 0.05, /*opaque=*/true);
+      mm.setInputEnabled(false); // "a minimap that pans or dollies stops being a map"
+      mm.renderer()->SetActiveCamera(pipCam);
+      mm.renderer()->AutomaticLightCreationOff();
+      mm.renderer()->RemoveAllLights();
+      {
+        // Dim ambient-only headlight so the satellite ground doesn't blow out
+        // and vehicle glyphs stay legible against it.
+        auto hl = vtkSmartPointer<vtkLight>::New();
+        hl->SetLightTypeToHeadlight();
+        hl->SetIntensity(0.55);
+        mm.renderer()->AddLight(hl);
       }
-    }
-    if (!noPip) { // --no-pip skips activation so the PiP never renders (perf diagnostic)
-      view.renderWindow()->SetNumberOfLayers(2);
-      view.renderWindow()->AddRenderer(pipRenderer);
+      if (pipDotNode) {
+        cvc::gl::Viewport &md = vm.addSceneViewport("minimap_dots", dotsScene, pipVp, /*layer=*/2);
+        md.setBackground(0.0, 0.0, 0.0, /*opaque=*/false); // transparent overlay
+        md.setInputEnabled(false);
+        md.renderer()->SetActiveCamera(pipCam);
+      }
     }
   }
   // Click-in-PiP → follow. We record the last click and, if it lands over the
@@ -2402,8 +2408,12 @@ int main(int argc, char **argv) {
     // the minimap ImGui window (previous frame's callback); re-applying it here — before
     // the render — is what makes the PiP actually FOLLOW the window instead of staying
     // pinned to its initial bottom-right rect. One-frame lag during a drag is invisible.
-    if (!noPip && pipRenderer)
-      pipRenderer->SetViewport(pipVp[0], pipVp[1], pipVp[2], pipVp[3]);
+    if (!noPip) {
+      cvc::gl::ViewportManager &vm = view.viewportManager();
+      vm.viewport("minimap").setRegion(pipVp[0], pipVp[1], pipVp[2], pipVp[3]);
+      if (pipDotNode)
+        vm.viewport("minimap_dots").setRegion(pipVp[0], pipVp[1], pipVp[2], pipVp[3]);
+    }
 
     if (capturing) {
       char path[1024];
