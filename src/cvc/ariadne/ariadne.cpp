@@ -31,6 +31,8 @@
 #include <cmath>
 #include <exception>
 #include <functional>
+#include <locale> // §11.4 geometry (de)serialize: pin std::locale::classic() so digit grouping
+                  // in a global locale can't corrupt the comma-joined "x,y,w,h" round-trip
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -93,6 +95,63 @@ std::string format_rgb3(const float rgb[3]) {
   std::ostringstream os;
   os << rgb[0] << "," << rgb[1] << "," << rgb[2];
   return os.str();
+}
+
+// §11.4 runtime geometry persistence: (de)serialize a WindowGeom / track list to the comma-joined
+// string the tree.<id>.geometry / tree.<id>.tracks state keys use (§11.2 spells geometry
+// "x,y,w,h"). Rounded to whole pixels so a static window's write is byte-stable and cvc::state's
+// equality guard suppresses per-frame observer churn (write<> no-ops when the string is unchanged).
+std::string format_geom(const WindowGeom &g) {
+  std::ostringstream os;
+  os.imbue(std::locale::classic()); // no digit grouping: a "C"-locale-independent "x,y,w,h" (a
+                                    // grouping global locale would emit "1,000" and break the join)
+  os << std::lround(g.x) << "," << std::lround(g.y) << "," << std::lround(g.w) << ","
+     << std::lround(g.h);
+  return os.str();
+}
+// Parse "x,y,w,h" (comma- or space-separated). Returns false (leaving `out` untouched) unless four
+// numbers parse; has_size stays false when w/h are non-positive (a collapsed/unsized sentinel), so
+// a window with position-only persisted geometry seeds its position but not a zero size.
+bool parse_geom(const std::string &s, WindowGeom &out) {
+  std::string t = s;
+  for (char &c : t)
+    if (c == ',')
+      c = ' ';
+  std::istringstream is(t);
+  is.imbue(std::locale::classic()); // match format_geom's locale-independent encoding
+  float x = 0, y = 0, w = 0, h = 0;
+  if (!(is >> x >> y >> w >> h))
+    return false;
+  out.x = x;
+  out.y = y;
+  out.w = w;
+  out.h = h;
+  out.has_pos = true;
+  out.has_size = (w > 0.0f && h > 0.0f);
+  return true;
+}
+std::string format_tracks(const std::vector<float> &tr) {
+  std::ostringstream os;
+  os.imbue(std::locale::classic()); // no digit grouping (see format_geom)
+  for (std::size_t i = 0; i < tr.size(); ++i) {
+    if (i)
+      os << ",";
+    os << std::lround(tr[i]);
+  }
+  return os.str();
+}
+std::vector<float> parse_tracks(const std::string &s) {
+  std::vector<float> out;
+  std::string t = s;
+  for (char &c : t)
+    if (c == ',')
+      c = ' ';
+  std::istringstream is(t);
+  is.imbue(std::locale::classic()); // match format_tracks (see format_geom)
+  float v = 0.0f;
+  while (is >> v)
+    out.push_back(v);
+  return out;
 }
 
 // Replace every occurrence of `token` in `s` with `rep`.
@@ -923,6 +982,18 @@ void Runtime::Impl::emit_container(const Widget &w) {
 
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
     const std::string &id = w.id.empty() ? w.label : w.id;
+    // §11.4 two-way track edge: a resizable row-split grid persists its dragged pane sizes to
+    // tree.<id>.tracks. Seed the backend from the persisted sizes before opening (apply-once on the
+    // backend side), then write the post-drag sizes back after closing. A plain table has no
+    // draggable rows, so it neither seeds nor persists.
+    const bool split = w.layout.is_row_split();
+    std::string tracks_path;
+    if (split) {
+      tracks_path = resolve("tree." + id + ".tracks");
+      const std::vector<float> seed = parse_tracks(read_string(app, tracks_path));
+      if (!seed.empty())
+        b.seed_grid_tracks(seed);
+    }
     if (b.begin_grid(w.layout, id.c_str())) {
       for (const Widget &c : w.children) {
         // Expand a `repeat` child into per-instance cells; a plain child is one instance.
@@ -940,6 +1011,11 @@ void Runtime::Impl::emit_container(const Widget &w) {
         });
       }
       b.end_grid();
+      if (split) {
+        const std::vector<float> cur = b.grid_tracks();
+        if (!cur.empty())
+          write<std::string>(app, tracks_path, format_tracks(cur));
+      }
     }
   } else {
     emit_children(w);
@@ -1023,7 +1099,25 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // The stable identity is the id (defaults to the label); the backend keeps a
     // window's geometry keyed on it. Begin/End pair unconditionally.
     const std::string &id = w.id.empty() ? w.label : w.id;
+    // §11.4 two-way geometry edge: seed the window from a persisted tree.<id>.geometry (if any)
+    // BEFORE opening it, then write the post-interaction geometry back AFTER — so the state node is
+    // the authority next frame. The backend never touches cvc::state; it only seeds/reports.
+    const std::string geo_path = resolve("tree." + id + ".geometry");
+    WindowGeom seed;
+    const bool have_seed = parse_geom(read_string(app, geo_path), seed);
+    if (have_seed)
+      b.seed_window_geometry(seed);
     const bool visible = b.begin_window(w.label.c_str(), id.c_str(), w.size, w.frame_border);
+    // Persist the current geometry. When the backend can't report a size (a collapsed window),
+    // back-fill it from the seed so a collapse doesn't clobber the stored content size.
+    WindowGeom persist = b.window_geometry();
+    if (!persist.has_size && have_seed && seed.has_size) {
+      persist.w = seed.w;
+      persist.h = seed.h;
+      persist.has_size = true;
+    }
+    if (persist.has_pos || persist.has_size)
+      write<std::string>(app, geo_path, format_geom(persist));
     if (visible) {
       b.push_id(id.c_str());
       emit_container(w); // §3.0.3b: the window body honours w.layout

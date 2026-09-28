@@ -120,7 +120,20 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       return parent * e.value / 100.0f;
     return 0.0f; // Auto
   };
-  if (size.w.is_set() || size.h.is_set())
+  // §11.4: seed the window from a persisted tree.<id>.geometry when the core supplied one. A FREE
+  // window uses ImGuiCond_FirstUseEver (apply-once: the seed takes only on the window's first
+  // appearance — a genuinely new window, or one whose imgui.ini state was cleared — and the user's
+  // drag then owns it; the core re-passes the seed each frame, harmless under FirstUseEver, §16.2).
+  // A seeded size wins over the authored size below (skip that seeding when a seed carries a size).
+  const bool seededSize = m_haveSeed && m_pendingSeed.has_size;
+  if (m_haveSeed) {
+    if (m_pendingSeed.has_pos)
+      ImGui::SetNextWindowPos(ImVec2(m_pendingSeed.x, m_pendingSeed.y), ImGuiCond_FirstUseEver);
+    if (m_pendingSeed.has_size)
+      ImGui::SetNextWindowSize(ImVec2(m_pendingSeed.w, m_pendingSeed.h), ImGuiCond_FirstUseEver);
+    m_haveSeed = false;
+  }
+  if (!seededSize && (size.w.is_set() || size.h.is_set()))
     ImGui::SetNextWindowSize(ImVec2(px(size.w, avail.x), px(size.h, avail.y)),
                              ImGuiCond_FirstUseEver);
   if (size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() || size.max_h.is_set()) {
@@ -137,6 +150,7 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 #else
   (void)size;
   (void)border;
+  m_haveSeed = false; // consume the seed even in the inert (no-ImGui) build
 #endif
   // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
   std::string name = title;
@@ -144,8 +158,32 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   name += id;
   const bool vis = ui::Begin(name.c_str());
   m_windowStylePushes.push_back(pushes);
+  // §11.4: snapshot this window's current geometry for the core to persist. Position is always
+  // valid; size only when NOT collapsed (a collapsed window reports just its title-bar height,
+  // which must not clobber the persisted content size — the core back-fills the size from the
+  // seed). A build without ImGui reports nothing (has_pos/has_size stay false).
+  m_lastWindowGeom = ariadne::WindowGeom{};
+#ifdef CVC_ENABLE_IMGUI
+  const ImVec2 wp = ImGui::GetWindowPos();
+  m_lastWindowGeom.has_pos = true;
+  m_lastWindowGeom.x = wp.x;
+  m_lastWindowGeom.y = wp.y;
+  if (!ImGui::IsWindowCollapsed()) {
+    const ImVec2 ws = ImGui::GetWindowSize();
+    m_lastWindowGeom.has_size = true;
+    m_lastWindowGeom.w = ws.x;
+    m_lastWindowGeom.h = ws.y;
+  }
+#endif
   return vis;
 }
+
+void ImGuiBackend::seed_window_geometry(const ariadne::WindowGeom &g) {
+  m_pendingSeed = g;
+  m_haveSeed = true;
+}
+
+ariadne::WindowGeom ImGuiBackend::window_geometry() const { return m_lastWindowGeom; }
 
 void ImGuiBackend::end_window() {
   ui::End(); // unconditional per ImGui's contract
@@ -163,6 +201,8 @@ void ImGuiBackend::end_window() {
 
 bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #ifdef CVC_ENABLE_IMGUI
+  const bool haveTrackSeed = m_haveTracks; // §11.4: consumed by this grid whatever its mode
+  m_haveTracks = false;
   GridState gs;
   gs.cols = layout.col_widths.empty() ? 1 : static_cast<int>(layout.col_widths.size());
   const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -181,7 +221,14 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
     const std::string base = std::string("cvcg.split.") + (id ? id : "");
     for (std::size_t i = 0; i < gs.row_px.size(); ++i) {
       const ImGuiID key = ImHashStr((base + "." + std::to_string(i)).c_str(), 0, kCacheSalt);
-      gs.pane_h.push_back(store->GetFloatRef(key, gs.row_px[i] > 0.0f ? gs.row_px[i] : 80.0f));
+      // §11.4: a persisted track size (seed_grid_tracks) is the pane's create-time default, so it
+      // wins when the ImGui-storage slot is (re)created after a reload; a live slot keeps the
+      // user's drag (GetFloatRef ignores the default when the slot exists — apply-once). No / short
+      // seed → the authored row track (or an 80px floor).
+      float def = gs.row_px[i] > 0.0f ? gs.row_px[i] : 80.0f;
+      if (haveTrackSeed && i < m_pendingTracks.size() && m_pendingTracks[i] > 0.0f)
+        def = m_pendingTracks[i];
+      gs.pane_h.push_back(store->GetFloatRef(key, def));
     }
     m_grids.push_back(std::move(gs));
     return true; // the panes themselves open in grid_next_cell
@@ -241,6 +288,8 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #else
   (void)layout;
   (void)id;
+  m_haveTracks =
+      false;   // consume the seed even in the inert build (parity with begin_window's #else)
   return true; // stub: emit the children as a plain vertical flow
 #endif
 }
@@ -281,7 +330,13 @@ void ImGuiBackend::end_grid() {
     return;
   const GridState g = m_grids.back();
   m_grids.pop_back();
+  // §11.4: snapshot the (possibly dragged) pane sizes for the core to persist; clear it for a
+  // non-split grid so a stale split's sizes are never reported against it.
+  m_lastGridTracks.clear();
   if (g.split) {
+    for (float *p : g.pane_h)
+      if (p)
+        m_lastGridTracks.push_back(*p);
     if (g.cell > 0)
       ImGui::EndChild(); // close the last pane
   } else {
@@ -291,6 +346,13 @@ void ImGuiBackend::end_grid() {
   }
 #endif
 }
+
+void ImGuiBackend::seed_grid_tracks(const std::vector<float> &sizes) {
+  m_pendingTracks = sizes;
+  m_haveTracks = true;
+}
+
+std::vector<float> ImGuiBackend::grid_tracks() const { return m_lastGridTracks; }
 void ImGuiBackend::begin_disabled() {
 #ifdef CVC_ENABLE_IMGUI
   ImGui::BeginDisabled(true); // §4 enabled_when/disabled_when: grey + non-interactive

@@ -72,6 +72,18 @@ struct ColorEdit {
   float rgb[3] = {0.0f, 0.0f, 0.0f};
 };
 
+// §11.4 runtime geometry persistence. The CORE owns the state (tree.<id>.geometry /
+// tree.<id>.tracks per §11.2); the backend only SEEDS a window / split-grid from a persisted
+// geometry and REPORTS the surface's current geometry back — the same value-in / report-out split
+// the state-bound widgets use, so the backend still NEVER touches cvc::state. A backend with no
+// movable-window / draggable-pane concept (a terminal) leaves the non-pure defaults below and
+// nothing is persisted.
+struct WindowGeom {
+  bool has_pos = false;  // x,y carry a real on-screen position
+  bool has_size = false; // w,h carry a real size
+  float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+};
+
 // What a surface can and cannot do. The core (and, later, the loader's
 // `requires:` preflight, §16.3/§7.6) reads this to fail-safe or substitute —
 // e.g. a shader widget needs `glsl`, `free` layout needs `windows`. `owns_loop`
@@ -118,6 +130,18 @@ public:
   // §3.0.3b window border width in px (<0 = the backend's default).
   virtual bool begin_window(const char *title, const char *id, const Size &size, float border) = 0;
   virtual void end_window() = 0;
+
+  // §11.4 window-geometry persistence (the two-way edge). seed_window_geometry() is called right
+  // BEFORE begin_window when the core holds a persisted tree.<id>.geometry: the backend positions /
+  // sizes the NEXT window from `g`. A FREE window seeds with apply-once semantics (ImGuiCond_
+  // FirstUseEver — the seed takes only on the window's first appearance and the user's drag then
+  // owns it; the core re-passes the seed each frame, harmless under FirstUseEver, §16.2), so the
+  // core never asks the backend to re-force geometry. window_geometry() is queried right AFTER
+  // begin_window: the window's current on-screen geometry, so the core writes a user move / resize
+  // back to state. Both default to no-op / {} — a backend with no movable windows persists nothing.
+  virtual void seed_window_geometry(const WindowGeom &g) { (void)g; }
+  virtual WindowGeom window_geometry() const { return {}; }
+
   virtual void push_id(const char *id) = 0;
   virtual void pop_id() = 0;
 
@@ -129,6 +153,16 @@ public:
   virtual bool begin_grid(const Layout &layout, const char *id) = 0;
   virtual void grid_next_cell() = 0;
   virtual void end_grid() = 0;
+
+  // §11.4 split-pane track persistence (the row-split counterpart of the window-geometry pair).
+  // seed_grid_tracks() is called right BEFORE begin_grid when the core holds a persisted
+  // tree.<id>.tracks for a resizable row-split grid (is_row_split()): the backend seeds the NEXT
+  // grid's draggable pane sizes from `sizes` (apply-once on the backend side — a later user drag
+  // wins; empty / short = fall back to the authored row tracks). grid_tracks() returns the
+  // row-split pane sizes after the last grid closed (post-drag) for the core to persist; empty =
+  // the last grid was not a row-split. Both default to no-op / {}.
+  virtual void seed_grid_tracks(const std::vector<float> &sizes) { (void)sizes; }
+  virtual std::vector<float> grid_tracks() const { return {}; }
 
   // Disabled scope (§4 read-lane enabled_when/disabled_when). The core wraps a widget
   // (and its subtree) that a reactive predicate has disabled in begin_disabled()/
