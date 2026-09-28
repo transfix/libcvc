@@ -161,6 +161,12 @@ struct material_drive {
   const float *lam_hard = nullptr; // [n]
   float k_sharp = 1.25f;           // 1/m   (source constants: 5.0, 3.0 m — see
   float d_hat_m = 12.0f;           // m      grl_snam MaterialParams for why)
+  // Authority MULTIPLIERS on the reroute weights (default 1.0 = no-op). A lam-head net
+  // OVERRIDES lam_soft/lam_hard with its learned per-agent columns, so a caller that wants to
+  // live-scale material authority (e.g. demo3's force-bias slider) applies the factor here and
+  // the drive multiplies the learned lam by it, instead of the caller's fixed lam being clobbered.
+  float lam_soft_scale = 1.0f;
+  float lam_hard_scale = 1.0f;
 };
 
 // Everything sim_world needs to run material-aware: force weights + barrier
@@ -171,6 +177,11 @@ struct material_drive {
 struct material_config {
   float lam_soft = 0.5f;
   float lam_hard = 1.0f;
+  // Live authority multipliers on the reroute weights (default 1.0 = no-op). Scale the FIXED lam
+  // columns AND (via material_drive) the LEARNED lam a lam-head net emits, so tuning material
+  // authority at runtime composes with a trained policy instead of being overridden by it.
+  float lam_soft_scale = 1.0f;
+  float lam_hard_scale = 1.0f;
   float k_sharp = 1.25f; // 1/m
   float d_hat_m = 12.0f; // m
   double sigma = 1.0;    // blur, in cells

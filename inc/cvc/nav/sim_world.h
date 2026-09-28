@@ -341,6 +341,19 @@ public:
   }
   float material_lam_soft() const { return mat_cfg_.lam_soft; }
   float material_lam_hard() const { return mat_cfg_.lam_hard; }
+  // LIVE authority MULTIPLIER on the reroute weights — the correct lever for a "force bias" UI when
+  // a LAM-HEAD net is loaded. set_material_lam mutates the FIXED lam, which drive_step_material
+  // OVERWRITES with the net's learned per-agent lam, so scaling the fixed value is silently ignored
+  // for a trained policy. This factor is read fresh each step and applied to BOTH the fixed lam AND
+  // the learned lam (via material_drive), so it scales a learned policy's reroute strength rather
+  // than being clobbered. Default 1.0 = no-op. Leave hard=1.0 to scale soft-risk steering only and
+  // never the hard-hazard safety barrier. A no-op if material is not attached.
+  void set_material_lam_scale(float soft, float hard = 1.0f) {
+    mat_cfg_.lam_soft_scale = soft;
+    mat_cfg_.lam_hard_scale = hard;
+  }
+  float material_lam_soft_scale() const { return mat_cfg_.lam_soft_scale; }
+  float material_lam_hard_scale() const { return mat_cfg_.lam_hard_scale; }
   // Last tick's per-agent gate decisions (renderer/telemetry hook); valid only
   // while material is set.
   const std::uint8_t *material_gate_active() const { return mat_gate_active_.data(); }
