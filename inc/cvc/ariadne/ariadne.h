@@ -21,6 +21,7 @@
 // This is the P0 slice; the full contract (dynamic-DOM reconcile, expressions,
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
+#include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
 #include <cvc/ariadne/widget.h>
 #include <functional>
 #include <memory>
@@ -70,6 +71,24 @@ public:
   // "" clears it (kills the resident). A no-op in a build without state_exec. The resident is
   // reaped with the Runtime (kill_owner on teardown).
   void set_tick_program(std::string script);
+
+  // §4.6 document-level input handlers — register a state_exec PROGRAM run per input event. Like
+  // on:tick, each is ONE long-lived resident (owner-tagged, reaped with the Runtime); it parks and
+  // is woken by post_input with the event bound as `event`, which the body reads via
+  // (get-attr event "key"/"kind"/"x"/"y"/"button"/"mods"/"dx"/"dy"/"clicks"/"repeat").
+  // set_key_program handles keyboard events (key_down/key_up); set_pointer_program handles mouse
+  // events (mouse_move/mouse_button_*/mouse_wheel). Pass LoadResult::on_key_script /
+  // on_pointer_script.
+  // "" clears it. No-ops without state_exec. (Widget-level on_click/on_hover are a separate path.)
+  void set_key_program(std::string script);
+  void set_pointer_program(std::string script);
+
+  // Feed one input event to the runtime — the host calls this each frame for every event from its
+  // input source (e.g. cvc::gl::SdlInput), BEFORE drain(), so the event is delivered to the
+  // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Thread-safe
+  // (routes through the scheduler's MPSC ingress). A no-op without state_exec, or if no matching
+  // handler is registered.
+  void post_input(const InputEvent &ev);
 
   // Render one frame: apply any pending tree swap, then walk the tree driving the
   // Backend and binding cvc::state. Called by the active backend (from the host

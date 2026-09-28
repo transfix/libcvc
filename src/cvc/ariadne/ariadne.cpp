@@ -10,6 +10,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 
@@ -624,12 +625,27 @@ struct Runtime::Impl {
   // ensure_tick_resident() submits ONE long-lived process (idempotent) that loops
   // (while t (begin (msg-recv "<owner>#tick") <body>)) — parking between frames; post_tick()
   // wakes it once per drain. Reaped by ~Impl's kill_owner (owner-tagged) or set_tick_program.
-  std::string tick_script_;
-  std::unique_ptr<ActionContext> tick_resident_;
-  int tick_resident_pid_ = -1;
+  std::string tick_script_;    // §7.1 on:tick body (woken every frame, coalesced)
+  std::string key_script_;     // §4.6 document-level on_key body (keyboard events, via post_input)
+  std::string pointer_script_; // §4.6 document-level on_pointer body (mouse events, via post_input)
+  std::unique_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_;
+  int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1;
   std::string tick_channel() const { return owner_ + "#tick"; }
-  void ensure_tick_resident();
-  void post_tick();
+  std::string key_channel() const { return owner_ + "#key"; }
+  std::string pointer_channel() const { return owner_ + "#pointer"; }
+  // Submit ONE long-lived resident wrapping `body` on `channel`, storing its context/pid in the
+  // slots (idempotent — no-op if body is empty or a resident is already running). The wrapper is
+  // (while t (let ((event (msg-recv "<channel>"))) <body>)): msg-recv parks the process between
+  // deliveries and binds each delivered value as `event`, so an on_key/on_pointer body reads
+  // (get-attr event "key") etc. (on:tick's body simply ignores `event`).
+  void ensure_resident(const std::string &channel, const std::string &body,
+                       std::unique_ptr<ActionContext> &ctx_slot, int &pid_slot);
+  void ensure_tick_resident();   // submit the tick resident (woken by the coalesced post_tick)
+  void post_tick();              // wake the tick resident once this drain
+  void ensure_input_residents(); // submit the key + pointer residents (woken by post_input)
+  // Deliver one input event: serialize it to a dict and post_message it (NO coalesce — a burst in
+  // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse).
+  void deliver_input(const InputEvent &ev);
 #endif
 
   // §12: the active mount scope during emit. Empty stack = the document prefix; each entry is
@@ -1140,6 +1156,14 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
   }
+  // §4.6 widget-level on_click: if this widget carries an on_click and the backend reports the item
+  // just drawn was clicked, enqueue it — a fire-once action drained + submitted like a Button's on:
+  // (a program on: runs through state_exec; a bare name routes to a host handler). Sourced from the
+  // backend's per-item click (ImGui::IsItemClicked), so it works wherever ImGui gets input (native
+  // VTK-interactor AND wasm) — no raw hit-test. Defaults off on a backend without per-item input.
+  // Inside the disabled scope (below), so a disabled widget never fires (IsItemClicked is false).
+  if (!w.on_click.empty() && b.item_clicked())
+    enqueue(w.on_click);
   // §4 read-lane: attach a hover tooltip to the widget just drawn (the backend's last item).
   // A tooltip is free human text, so — unlike a bind (a dotted state path never begins with
   // '(') — one that merely LOOKS like an expression ("(optional) …", "(beta)") must not be
@@ -1277,8 +1301,9 @@ void Runtime::Impl::pump_and_sweep_actions() {
   }
 }
 
-void Runtime::Impl::ensure_tick_resident() {
-  if (tick_script_.empty() || tick_resident_pid_ >= 0)
+void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
+                                    std::unique_ptr<ActionContext> &ctx_slot, int &pid_slot) {
+  if (body.empty() || pid_slot >= 0)
     return; // nothing to run, or already submitted (residents submit ONCE, not per frame)
   namespace se = cvc::state_exec;
   try {
@@ -1297,32 +1322,69 @@ void Runtime::Impl::ensure_tick_resident() {
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
       if (p)
         p(ac->env, ac->ictx);
-    // Wrap the author's body in a park-then-run loop on this Runtime's tick channel: msg-recv
-    // parks the process between frames, post_tick() wakes it, the body runs once, and it loops
-    // back to park. No total-step cap (a resident is intended to loop forever; the per-frame pump
-    // budget bounds each activation, and the msg-recv guarantees it parks every iteration).
+    // Park-then-run loop on `channel`: msg-recv parks the process between deliveries and BINDS each
+    // delivered value as `event`, so an on_key/on_pointer body reads (get-attr event "key");
+    // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
+    // total step cap (a resident loops forever; the per-frame pump budget bounds each activation,
+    // and the msg-recv guarantees a park every iteration).
     const std::string wrapped =
-        "(while t (begin (msg-recv \"" + tick_channel() + "\") " + tick_script_ + "))";
+        "(while t (let ((event (msg-recv \"" + channel + "\"))) " + body + "))";
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
     opts.max_steps = 0;  // unlimited total — see above
     opts.max_time = 0.0;
-    tick_resident_pid_ = sched.execute(wrapped, opts);
-    tick_resident_ = std::move(ac);
+    pid_slot = sched.execute(wrapped, opts);
+    ctx_slot = std::move(ac);
   } catch (const std::exception &e) {
-    warn_once(std::string("ari: on_tick resident failed to start: ") + e.what());
+    warn_once("ari: resident failed to start [" + channel + "]: " + e.what());
   }
+}
+
+void Runtime::Impl::ensure_tick_resident() {
+  ensure_resident(tick_channel(), tick_script_, tick_resident_, tick_resident_pid_);
 }
 
 void Runtime::Impl::post_tick() {
   if (tick_resident_pid_ < 0)
-    return; // no resident registered
-  // Wake the resident for one activation this frame. Post only when nothing is already queued on
-  // the channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
+    return; // no tick resident registered
+  // Wake the tick resident for one activation this frame. Post only when nothing is queued on the
+  // channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
   auto &sched = app.exec_scheduler();
   if (sched.pending_message_count(tick_channel()) == 0)
     sched.post_message(tick_channel(), cvc::state_exec::value_t(std::string("tick")));
+}
+
+void Runtime::Impl::ensure_input_residents() {
+  ensure_resident(key_channel(), key_script_, key_resident_, key_resident_pid_);
+  ensure_resident(pointer_channel(), pointer_script_, pointer_resident_, pointer_resident_pid_);
+}
+
+void Runtime::Impl::deliver_input(const InputEvent &ev) {
+  namespace se = cvc::state_exec;
+  // Keyboard events feed the on_key resident, mouse events the on_pointer resident. Drop the event
+  // if that handler is not registered (no point queueing events nothing will drain).
+  const bool keyboard = ev.is_keyboard();
+  if ((keyboard ? key_resident_pid_ : pointer_resident_pid_) < 0)
+    return;
+  // A dict with EVERY field always populated: get-attr throws on a missing key, so an on_* body can
+  // read any field of any event kind (unused fields are 0/""). These names are the .ari event
+  // contract — (get-attr event "kind"/"key"/"mods"/"x"/"y"/"dx"/"dy"/"button"/"clicks"/"repeat").
+  std::vector<std::pair<std::string, se::value_t>> f;
+  f.emplace_back("kind", se::value_t(std::string(ev.kind_name())));
+  f.emplace_back("key", se::value_t(ev.key));
+  f.emplace_back("mods", se::value_t(static_cast<int64_t>(ev.mods)));
+  f.emplace_back("repeat", se::value_t(ev.repeat));
+  f.emplace_back("x", se::value_t(static_cast<double>(ev.x)));
+  f.emplace_back("y", se::value_t(static_cast<double>(ev.y)));
+  f.emplace_back("dx", se::value_t(static_cast<double>(ev.dx)));
+  f.emplace_back("dy", se::value_t(static_cast<double>(ev.dy)));
+  f.emplace_back("button", se::value_t(static_cast<int64_t>(ev.button)));
+  f.emplace_back("clicks", se::value_t(static_cast<int64_t>(ev.clicks)));
+  // NO coalesce (unlike post_tick): every event must arrive. A burst in one frame FIFO-queues on
+  // the channel and the resident drains them one per loop iteration during the pump.
+  app.exec_scheduler().post_message(keyboard ? key_channel() : pointer_channel(),
+                                    se::make_dict(std::move(f)));
 }
 #endif // CVC_STATE_EXEC
 
@@ -1352,6 +1414,44 @@ void Runtime::set_tick_program(std::string script) {
   m_->tick_script_ = std::move(script);
 #else
   (void)script; // residents need state_exec — no-op otherwise
+#endif
+}
+
+void Runtime::set_key_program(std::string script) {
+#ifdef CVC_STATE_EXEC
+  if (m_->key_resident_pid_ >= 0) {
+    m_->app.exec_scheduler().kill(m_->key_resident_pid_);
+    m_->key_resident_.reset();
+    m_->key_resident_pid_ = -1;
+  }
+  m_->key_script_ = std::move(script);
+#else
+  (void)script;
+#endif
+}
+
+void Runtime::set_pointer_program(std::string script) {
+#ifdef CVC_STATE_EXEC
+  if (m_->pointer_resident_pid_ >= 0) {
+    m_->app.exec_scheduler().kill(m_->pointer_resident_pid_);
+    m_->pointer_resident_.reset();
+    m_->pointer_resident_pid_ = -1;
+  }
+  m_->pointer_script_ = std::move(script);
+#else
+  (void)script;
+#endif
+}
+
+void Runtime::post_input(const InputEvent &ev) {
+#ifdef CVC_STATE_EXEC
+  // Submit the input residents on first use so the delivered event is consumed, not dropped, then
+  // deliver it. The pump in drain() steps the resident; feed input BEFORE drain() for same-frame
+  // delivery (see the header contract). A no-op without state_exec.
+  m_->ensure_input_residents();
+  m_->deliver_input(ev);
+#else
+  (void)ev;
 #endif
 }
 
@@ -1387,6 +1487,9 @@ void Runtime::drain() {
   // §7.1 resident on:tick: submit the resident once (idempotent), then post it this frame's tick.
   m_->ensure_tick_resident();
   m_->post_tick();
+  // §4.6 input residents (on_key/on_pointer): ensure they exist (idempotent; post_input also does,
+  // but a host that set a program yet fed no input this frame still gets its resident submitted).
+  m_->ensure_input_residents();
   // Advance submitted actions + the resident — and anything still-parked from earlier frames — a
   // bounded slice, then sweep the finished ones. Runs once used_scheduler_ latches.
   if (m_->used_scheduler_)

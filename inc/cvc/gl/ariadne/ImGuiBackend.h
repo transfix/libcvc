@@ -54,6 +54,7 @@ public:
   void separator() override;
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
+  bool item_clicked() override; // §4.6 widget on_click: ImGui::IsItemClicked() on the last item
 
   cvc::ariadne::BoolEdit menu_item_toggle(const char *label, bool current) override;
   cvc::ariadne::BoolEdit checkbox(const char *label, bool current) override;

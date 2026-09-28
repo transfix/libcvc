@@ -91,7 +91,7 @@ std::map<std::string, AriBlockParser> &block_registry() {
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
-         k == "on_key" || k == "units" || k == "import";
+         k == "on_key" || k == "on_pointer" || k == "units" || k == "import";
 }
 } // namespace
 
@@ -326,7 +326,7 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 // into Widget::props for a registered emit fn to read.
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
-         k == "children" || k == "items" || k == "id" || k == "visible_when" ||
+         k == "on_click" || k == "children" || k == "items" || k == "id" || k == "visible_when" ||
          k == "enabled_when" || k == "disabled_when" || k == "tooltip" || k == "repeat";
 }
 
@@ -698,6 +698,8 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
     if (has(n, "repeat"))
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
+    if (has(n, "on_click"))
+      w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.
@@ -1583,9 +1585,10 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
     else if (in && !in.IsScalar())
       ctx.warn("ari: init: must be a scalar state_exec script string — ignored");
 
-    // §7.1 resident handlers: scalar state_exec scripts, captured like init:. on_tick runs once
-    // per frame via Runtime::set_tick_program; on_key is captured but not yet wired (no Backend
-    // key-event seam) — the host will pick it up when keys land.
+    // §7.1/§4.6 document-level resident handlers: scalar state_exec scripts, captured like init:.
+    // The host wires each to a Runtime setter: on_tick -> set_tick_program (per frame), on_key ->
+    // set_key_program (per keyboard event), on_pointer -> set_pointer_program (per mouse event);
+    // events arrive via Runtime::post_input from the host's input source (cvc::gl::SdlInput).
     const YAML::Node tk = doc["on_tick"];
     if (tk && tk.IsScalar())
       r.on_tick_script = tk.Scalar();
@@ -1596,6 +1599,11 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       r.on_key_script = ky.Scalar();
     else if (ky && !ky.IsScalar())
       ctx.warn("ari: on_key: must be a scalar state_exec script string — ignored");
+    const YAML::Node pt = doc["on_pointer"];
+    if (pt && pt.IsScalar())
+      r.on_pointer_script = pt.Scalar();
+    else if (pt && !pt.IsScalar())
+      ctx.warn("ari: on_pointer: must be a scalar state_exec script string — ignored");
   }
   if (r.meta.min_libcvc.empty())
     ctx.warn("ari: no meta.min_libcvc declared — the provenance gate is skipped "

@@ -91,6 +91,8 @@ struct MockBackend : Backend {
     rec(std::string("menu_action:") + l);
     return false;
   }
+  bool item_clicked_flag = false; // §4.6: report the last item as clicked (widget on_click test)
+  bool item_clicked() override { return item_clicked_flag; }
   BoolEdit menu_item_toggle(const char *l, bool) override {
     rec(std::string("toggle:") + l);
     return {};
@@ -330,6 +332,96 @@ TEST(AriadneResident, ClearingTickProgramStopsIt) {
   rt.drain();
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "0"); // no longer firing
+}
+
+// §4.6 input seam: set_key_program submits a resident that receives events posted via post_input,
+// reading the delivered event dict with (get-attr event ...). post_input BEFORE drain -> delivered
+// this frame (feed-before-drain contract). Keyboard events feed the key resident.
+TEST(AriadneInput, KeyProgramReceivesPostedEvent) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_key_program("(begin (state-set \"input.last_key\" (get-attr event \"key\")) "
+                     "(state-set \"input.kind\" (get-attr event \"kind\")))");
+  InputEvent ev;
+  ev.kind = InputEvent::Kind::KeyDown;
+  ev.key = "Escape";
+  rt.post_input(ev); // submit the key resident + queue the event
+  rt.drain();        // pump: resident wakes, binds `event`, writes state
+  EXPECT_EQ(cvc::state::instance(app)("input.last_key").value(), "Escape");
+  EXPECT_EQ(cvc::state::instance(app)("input.kind").value(), "key_down");
+}
+
+// A burst of events in one frame all deliver (FIFO — no coalescing on the input channel): three
+// keys posted before one drain, and the resident drains all three (last wins in state).
+TEST(AriadneInput, KeyBurstAllDeliveredInOrder) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_key_program("(state-set \"input.last_key\" (get-attr event \"key\"))");
+  for (const char *k : {"A", "B", "C"}) {
+    InputEvent ev;
+    ev.kind = InputEvent::Kind::KeyDown;
+    ev.key = k;
+    rt.post_input(ev);
+  }
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("input.last_key").value(), "C"); // all three ran, last wins
+}
+
+// Mouse events feed the pointer resident (a separate channel/handler); the body reads coords.
+TEST(AriadneInput, PointerProgramReceivesMouseEvent) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // state-set coerces a scalar to string, so the int button stores as "1".
+  rt.set_pointer_program("(begin (state-set \"ptr.kind\" (get-attr event \"kind\")) "
+                         "(state-set \"ptr.btn\" (get-attr event \"button\")))");
+  InputEvent ev;
+  ev.kind = InputEvent::Kind::MouseButtonDown;
+  ev.button = 1;
+  ev.x = 10.0f;
+  ev.y = 20.0f;
+  rt.post_input(ev);
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ptr.kind").value(), "mouse_button_down");
+  EXPECT_EQ(cvc::state::instance(app)("ptr.btn").value(), "1");
+}
+
+// §4.6 widget-level on_click: any widget can carry an on_click program; the walk enqueues it when
+// the backend reports the item was clicked (Backend::item_clicked -> ImGui::IsItemClicked natively
+// and on wasm). Fired like a Button's on: (queued in render(), run in drain()) — NOT the SDL
+// document-level stream. This is the natively-working widget input path.
+TEST(AriadneInput, WidgetOnClickFiresWhenBackendReportsClick) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget t = text("Clickable");
+  t.on_click = "(state-set \"widget.clicked\" \"yes\")";
+  rt.set_root(group({t}));
+  // No click reported -> on_click must NOT fire.
+  mb.item_clicked_flag = false;
+  rt.render();
+  rt.drain();
+  EXPECT_NE(cvc::state::instance(app)("widget.clicked").value(), "yes");
+  // Click reported -> render() enqueues on_click, drain() runs it.
+  mb.item_clicked_flag = true;
+  rt.render();
+  EXPECT_NE(cvc::state::instance(app)("widget.clicked").value(), "yes"); // never inside render()
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("widget.clicked").value(), "yes");
 }
 
 // §raster viewer: an image widget resolves its image name (a static src, or a bound key that a

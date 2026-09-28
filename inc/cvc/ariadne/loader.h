@@ -83,14 +83,16 @@ struct LoadResult {
   // only CAPTURES it (it has no cvc::app and never runs the DSL); the host runs it once
   // at load via cvc::ariadne::run_init, scoped to the document prefix.
   std::string init_script;
-  // §7.1 resident handlers (verbatim scripts; empty if none). Like init_script the loader only
-  // CAPTURES these — the host hands on_tick_script to Runtime::set_tick_program, which submits ONE
-  // long-lived process that runs the script once per frame (parking between frames). on_key_script
-  // is captured for forward-compatibility but is NOT wired yet: the Backend exposes no per-frame
-  // key events (only a static Capabilities::keyboard flag), so on:key awaits a Backend key-event
-  // seam.
+  // §7.1/§4.6 document-level resident handlers (verbatim scripts; empty if none). Like init_script
+  // the loader only CAPTURES these — the host hands each to the matching Runtime setter, which
+  // submits ONE long-lived resident process (parking between activations): on_tick_script ->
+  // set_tick_program (runs each frame); on_key_script -> set_key_program (runs per keyboard event);
+  // on_pointer_script -> set_pointer_program (runs per mouse event). The on_key/on_pointer bodies
+  // read the event with (get-attr event "key"/"x"/…). The host feeds events via Runtime::post_input
+  // from its input source (e.g. cvc::gl::SdlInput).
   std::string on_tick_script;
   std::string on_key_script;
+  std::string on_pointer_script;
   // Custom top-level blocks (register_ari_block), keyed by block name — whatever the
   // registered parser stored. Empty unless a document uses a registered custom block.
   std::vector<std::pair<std::string, Value>> extras;
