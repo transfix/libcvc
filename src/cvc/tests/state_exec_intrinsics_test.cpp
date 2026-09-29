@@ -1,6 +1,7 @@
 /// @file state_exec_intrinsics_test.cpp
 /// @brief Tests for Phase 5: Intrinsics, Resource Policy, Stdlib.
 
+#include <boost/any.hpp>
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
@@ -251,6 +252,51 @@ TEST_F(StateTreeIntrinsicsTest, StateSetCoercesScalarsToString) {
 TEST_F(StateTreeIntrinsicsTest, StateDataGetNonexistent) {
   auto result = call("state-data-get", {std::string("no.data")});
   EXPECT_TRUE(result.is_nil());
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataGetReadsRawStringBlobAsBytes) {
+  // A RAW std::string parked on the data channel — what the ?data URI channel (uri_state.cpp) and
+  // the §13.9 HTTP cache write — reads back as the DSL `bytes` type, NOT an opaque data_object.
+  // This is the coherence the cache depends on: a byte blob is the same on both sides.
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("blob").data(boost::any(std::string("raw-octets")));
+  auto got = call("state-data-get", {std::string("blob")});
+  ASSERT_TRUE(std::holds_alternative<bytes_value>(got.v));
+  EXPECT_EQ(std::get<bytes_value>(got.v).data, "raw-octets");
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataSetBytesStoredAsRawStringForDataChannel) {
+  // A `bytes` value set from the DSL is stored as a RAW std::string on the data channel (the ?data
+  // / cache representation), so it round-trips as `bytes` AND is byte-serializable via
+  // state://…?data.
+  const std::string octets("A\0B\0C", 5); // embedded NULs prove byte transparency
+  call("state-data-set", {std::string("b"), make_bytes(octets)});
+
+  auto got = call("state-data-get", {std::string("b")}); // round-trips as bytes, byte-exact
+  ASSERT_TRUE(std::holds_alternative<bytes_value>(got.v));
+  EXPECT_EQ(std::get<bytes_value>(got.v).data, octets);
+
+  // the on-node payload is a raw std::string — exactly what uri_state.cpp's ?data any_cast reads
+  cvc::state *n = cvc::state::instance(app_ctx).findDescendant("b");
+  ASSERT_NE(n, nullptr);
+  const boost::any d = n->data();
+  const std::string *raw = boost::any_cast<std::string>(&d);
+  ASSERT_NE(raw, nullptr) << "a bytes value must land as a raw std::string for ?data compatibility";
+  EXPECT_EQ(*raw, octets);
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateDataStringAndBytesTracksAreDistinct) {
+  // The text `string` track and the `bytes` track stay distinct through state-data-set/get: a text
+  // string comes back a string (stored as a value_t), a bytes value comes back bytes.
+  call("state-data-set", {std::string("t"), value_t(std::string("text"))});
+  auto t = call("state-data-get", {std::string("t")});
+  ASSERT_TRUE(std::holds_alternative<std::string>(t.v)); // string track (unchanged)
+  EXPECT_EQ(std::get<std::string>(t.v), "text");
+
+  call("state-data-set", {std::string("y"), make_bytes(std::string("bin"))});
+  auto y = call("state-data-get", {std::string("y")});
+  ASSERT_TRUE(std::holds_alternative<bytes_value>(y.v)); // bytes track
+  EXPECT_EQ(std::get<bytes_value>(y.v).data, "bin");
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateGetWrongArgCount) {
