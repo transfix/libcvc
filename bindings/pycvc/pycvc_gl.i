@@ -1246,3 +1246,8 @@ void poke_update(const std::shared_ptr<cvc::gl::GraphicsNode> &node) {
 // %include'd last: it references CameraController / StageLighting / SceneGraph /
 // SceneRenderer (all wrapped above) and reuses the file-scope callable typemap.
 %include "pycvc_imgui.i"
+
+// ── AriRuntime: a full Ariadne (.ari) app from Python ───────────────────────
+// After pycvc_imgui.i so SceneRenderer / CameraController / ImGuiOverlay proxies
+// resolve; reuses the file-scope std::function<void()> typemap for on()/register_verb().
+%include "pycvc_ari.i"
