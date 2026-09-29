@@ -96,6 +96,43 @@ def test_coro_and_offload_and_sync_compose():
     assert ex.run("(begin (plus10 (inc (triple 4))))") == "23"
 
 
+def test_async_def_rejected_by_sync_and_pool_paths():
+    # An async def belongs in register_async_coro; the sync/pool paths reject it up front so a
+    # mistake surfaces as an error, not an un-awaited-coroutine repr string.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+
+    async def acoro(n):
+        return n
+
+    for reg in (ex.register_fn, ex.register_async_fn):
+        try:
+            reg("bad", acoro)
+            assert False, "expected async def to be rejected"
+        except Exception as e:
+            assert "async def" in str(e), str(e)
+
+
+def test_reentrant_run_is_rejected():
+    # A registered fn that calls back into run() must fail fast (one Exec, one thread), not corrupt
+    # the scheduler. The re-entrant error is contained and surfaces as the program error.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+
+    def reenter(_):
+        ex.run("(+ 1 1)")  # illegal: re-entrant
+        return 0
+
+    ex.register_fn("reenter", reenter)
+    try:
+        ex.run("(begin (reenter 1))")
+        assert False, "expected a re-entrant run to raise"
+    except Exception as e:
+        assert "re-entrant" in str(e), str(e)
+    # The Exec is still usable after the contained re-entrancy error.
+    assert ex.run("(+ 2 3)") == "5"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

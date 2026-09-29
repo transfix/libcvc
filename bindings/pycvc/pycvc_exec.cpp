@@ -139,6 +139,27 @@ std::string fetch_py_error() {
   return msg;
 }
 
+// Best-effort: is `fn` an `async def` (a coroutine function)? Its code object carries the
+// CO_COROUTINE flag. A plain async def is caught; a decorated/wrapped one may slip through. Used to
+// steer an async def away from the sync/pool paths (where its un-awaited coroutine would marshal as
+// a nonsense repr) and toward register_async_coro.
+bool is_coroutine_function(PyObject *fn) {
+  PyObject *code = PyObject_GetAttrString(fn, "__code__");
+  if (code == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+  bool coro = false;
+  if (PyObject *flags = PyObject_GetAttrString(code, "co_flags")) {
+    coro = (PyLong_AsLong(flags) & 0x0080) != 0; // CO_COROUTINE
+    Py_DECREF(flags);
+  } else {
+    PyErr_Clear();
+  }
+  Py_DECREF(code);
+  return coro;
+}
+
 // INCREF a callable and wrap it in a shared_ptr whose deleter DECREFs under the
 // GIL, so it is owned for as long as the holder lives and torn down safely from
 // any thread.
@@ -210,16 +231,38 @@ void drive_coros(PyObject *loop, std::vector<std::pair<PyObject *, std::string>>
                  async_scheduler &sched, double budget_secs) {
   if (loop == nullptr || pending.empty())
     return;
-  // Run the loop until a call_later(budget) stops it: ready coroutine steps + timers/IO due within
-  // the slice advance, then control returns to the DSL pump. Public asyncio API only.
+  // Step the loop until a call_later(budget) stops it: ready coroutine steps + timers/IO due within
+  // the slice advance, then control returns to the DSL pump. Public asyncio API only. NOTE: the
+  // slice is COOPERATIVE — asyncio cannot preempt a running coroutine step, so the budget is
+  // honored only at the coroutine's await points. A coroutine that never awaits (CPU-bound work, an
+  // accidental (while True) with no await) holds this thread inside run_forever and wedges the
+  // whole pump — put blocking/CPU work in register_async_fn (the pool), not register_async_coro.
+  bool step_failed = true;
   if (PyObject *stop = PyObject_GetAttrString(loop, "stop")) {
-    if (PyObject *h = PyObject_CallMethod(loop, "call_later", "dO", budget_secs, stop))
-      Py_DECREF(h);
+    PyObject *h = PyObject_CallMethod(loop, "call_later", "dO", budget_secs, stop);
     Py_DECREF(stop);
-    if (PyObject *r = PyObject_CallMethod(loop, "run_forever", nullptr))
-      Py_DECREF(r);
+    if (h != nullptr) {
+      Py_DECREF(h);
+      // run_forever ONLY when a stop timer is armed — otherwise it would never return.
+      if (PyObject *r = PyObject_CallMethod(loop, "run_forever", nullptr)) {
+        Py_DECREF(r);
+        step_failed = false;
+      }
+    }
   }
-  PyErr_Clear(); // a stray error from stepping must not leak into the next Python call
+  if (step_failed) {
+    // The loop cannot be stepped (call_later/run_forever/getattr failed): the pending coroutines
+    // can never advance, so fail them all rather than clearing the error and spinning an unkillable
+    // pump.
+    const std::string msg = "python coro: event loop step failed: " + fetch_py_error();
+    for (auto &pc : pending) {
+      sched.post_message(pc.second, async_error_dict(msg));
+      Py_DECREF(pc.first);
+    }
+    pending.clear();
+    return;
+  }
+  PyErr_Clear(); // a stray (already-handled) error from stepping must not leak into the next call
   for (auto it = pending.begin(); it != pending.end();) {
     PyObject *task = it->first;
     PyObject *done_obj = PyObject_CallMethod(task, "done", nullptr);
@@ -315,6 +358,7 @@ struct Exec::ExecImpl {
   // run() thread (the verb during sync_run + drive_coros after), so no lock needed.
   PyObject *loop = nullptr;
   std::vector<std::pair<PyObject *, std::string>> pending_coros;
+  bool running = false; // re-entrancy guard: a registered fn/coro must not call back into run()
 };
 
 Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecImpl>()) {
@@ -370,12 +414,19 @@ Exec::~Exec() {
 void Exec::register_fn(const std::string &name, PyObject *callable) {
   if (callable == nullptr || !PyCallable_Check(callable))
     throw std::invalid_argument("pycvc.Exec.register_fn: '" + name + "' is not callable");
+  if (is_coroutine_function(callable))
+    throw std::invalid_argument("pycvc.Exec.register_fn: '" + name +
+                                "' is an async def — use register_async_coro");
   builtins::register_fn(impl_->env, name, make_python_native_fn(name, callable));
 }
 
 void Exec::register_async_fn(const std::string &name, PyObject *callable) {
   if (callable == nullptr || !PyCallable_Check(callable))
     throw std::invalid_argument("pycvc.Exec.register_async_fn: '" + name + "' is not callable");
+  if (is_coroutine_function(callable))
+    throw std::invalid_argument("pycvc.Exec.register_async_fn: '" + name +
+                                "' is an async def — use register_async_coro (register_async_fn is "
+                                "for a blocking callable offloaded to a pool worker)");
   std::shared_ptr<PyObject> holder = own_callable(callable);
   cvc::app *app = impl_->app.get();
   async_scheduler *sched = &impl_->sched; // this Exec's PRIVATE scheduler (the offload posts here)
@@ -462,6 +513,34 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
 }
 
 std::string Exec::run(const std::string &src) {
+  // One Exec is driven by ONE thread. A registered fn/coro that calls back into run() (or a second
+  // thread) would corrupt the shared scheduler + asyncio loop, so reject re-entrancy up front.
+  if (impl_->running)
+    throw std::runtime_error("pycvc.Exec.run: re-entrant call — a registered fn/coro must not call "
+                             "run() (use a separate Exec per thread)");
+  impl_->running = true;
+  // On EVERY exit: clear the running flag, and cancel+drop any coroutine Tasks still pending for
+  // this run (e.g. an orphaned coroutine of a sibling process that never completed) so it can't
+  // suppress the NEXT run()'s idle timeout. PyGILState_Ensure re-acquires the GIL on whatever path
+  // we unwind.
+  struct RunGuard {
+    ExecImpl *impl;
+    ~RunGuard() {
+      if (!impl->pending_coros.empty()) {
+        PyGILState_STATE gil = PyGILState_Ensure();
+        for (auto &pc : impl->pending_coros) {
+          if (PyObject *r = PyObject_CallMethod(pc.first, "cancel", nullptr))
+            Py_DECREF(r);
+          Py_DECREF(pc.first);
+        }
+        impl->pending_coros.clear();
+        PyErr_Clear();
+        PyGILState_Release(gil);
+      }
+      impl->running = false;
+    }
+  } run_guard{impl_.get()};
+
   async_scheduler &sched = impl_->sched;
   Inflight &inflight = *impl_->inflight;
   execute_options opts;
