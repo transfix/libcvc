@@ -134,7 +134,8 @@ it:
 | geometry | 5 → 3 | — | nothing extra (plain `drive_step`) |
 | grip | 6 → 3 | `has_mu()` | a grip `friction_field` (`veh_params.grip`) |
 | grip+risk | 7 → 3 | `has_mu()`+`has_risk()` | grip field **and** a material stack |
-| + learned reroute | · → 4 | `has_lam()` | the 4th output overrides `lam_soft` |
+| + learned reroute (soft only) | · → 4 | `has_lam()` | the 4th output overrides `lam_soft` (single softplus head) |
+| + two-head reroute (soft **and** hard) | · → 5 | `has_lam()`+`has_lam_hard()`+`kFlagLamSigmoid` | 4th/5th outputs are `lam_soft`/`lam_hard`, each **sigmoid-bounded** `λ_max·σ(·)` (`.cvcnav` **format v2**) |
 
 A **risk or lam** net drives ONLY through the material path
 (`drive_step_material` / `drive_step_material_ext`): the risk-lookahead feature
@@ -146,6 +147,19 @@ the grip field before construction (`cfg.veh.grip = &ff`) and the material stack
 via `set_material`, exactly as above; then the loaded net reads mu/risk ahead and
 (with a lam head) sets its own per-agent reroute weight.
 
+**The two-head reroute (`kFlagLamSigmoid`, `.cvcnav` format v2).** The
+single-softplus `has_lam()` net learns only `lam_soft` (`lam_hard` stays a fixed
+barrier). A **two-head** net learns both: with `kFlagLamSigmoid` set, output
+columns `≥ 3` are `λ_max·σ(raw)` rather than `softplus(raw)`, so the 4th output is
+`lam_soft = lam_soft_max·σ(·)` and the 5th is `lam_hard = lam_hard_max·σ(·)` — the
+paper's sigmoid-bounded two-head reroute (`grl_snam` `material_nav.py`). Sigmoid
+bounding is what lets a head cleanly *suppress* its channel (`λ → 0`) as readily
+as engage it; the ceilings default to `lam_soft_max = 5`, `lam_hard_max = 10`
+(`coef_mlp.h`) and are stored in the `.cvcnav` v2 trailer, so the runtime
+reconstructs the exact map. A v2 blob **hard-fails on a pre-v2 host** (the loader
+requires format v2 for `kFlagLamSigmoid`); the whole round-trip — widen to two
+heads, serialize, reload, drive — is pinned by `nav_material_deploy_test`.
+
 To steer on the learned grip/risk policy **while** an external force (e.g.
 cvc::dbg's RF/comm push) also acts, use the fused `drive_step_material_ext` /
 `bicycle_rollout_material_ext` — `sim_world::step()` selects it automatically when
@@ -153,6 +167,16 @@ both a material stack and an `ext_force` are attached (otherwise material would
 take priority and drop the ext force). The whole round-trip — a widened net
 serialized to `.cvcnav`, reloaded, and driven (incl. the fused path and the
 learned-lam reroute) — is pinned by `nav_material_deploy_test`.
+
+> **Boundary — `cvc::nav` is force-agnostic.** The `ext_force` port knows only
+> "a force field sampled at a pose"; it has no vocabulary for what the force
+> *means*. The two-head material soft/hard channel documented here is the
+> reusable template — a precomputed risk/hazard field driving `−λ_s∇r̃ −
+> λ_h b′(φ)∇φ`. A downstream layer can re-source that template from a different
+> field entirely and inject it through the same seam without any change here; the
+> RF/comm re-sourcing (the `cvc::dbg` layer) is exactly that, and its
+> domain-specific logic stays in that layer, never in this core (as with the
+> RF-free base statistics — see `NAV_STATS.md`).
 
 ### Choosing constants
 
