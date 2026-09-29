@@ -924,7 +924,10 @@ lcov --directory . --zerocounters
 ./bin/state_test --gtest_filter="*Futures*"
 
 # Capture and generate report
-lcov --directory . --capture --output-file coverage.info
+# --ignore-errors negative,gcov,mismatch: geninfo can emit a spurious
+# negative count for inlined STL symbols (a gcov quirk) and gcov can fail
+# on toolchain version skew; neither should abort the capture.
+lcov --directory . --capture --output-file coverage.info --ignore-errors negative,gcov,mismatch
 lcov --remove coverage.info '/usr/*' '*/test/*' -o coverage_filtered.info
 genhtml coverage_filtered.info -o coverage_html
 ```

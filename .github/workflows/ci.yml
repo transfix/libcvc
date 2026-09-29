@@ -458,7 +458,16 @@ jobs:
       - name: Generate coverage report
         if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
         run: |
-          lcov --directory build --capture --output-file build/coverage.info --ignore-errors mismatch
+          # geninfo (invoked by --capture) can emit a spurious negative
+          # execution count for an inlined STL symbol — a gcov quirk, e.g.
+          # char_traits.h under gcc 13 — and treats it as a hard error; gcov
+          # version skew across the self-hosted fleet can likewise fail here.
+          # Ignore both tooling faults (alongside the pre-existing mismatch) so
+          # a capture-time gcov artifact can't red-flag a PR. These only affect
+          # capture; the line-coverage gate is enforced separately below
+          # ("Enforce coverage gate") and is unaffected.
+          lcov --directory build --capture --output-file build/coverage.info \
+            --ignore-errors negative,gcov,mismatch
           # Allowlist, not blocklist: --extract to workspace src/ + inc/.
           # The old --remove of '/usr/*' still counted Boost/CGAL/HDF5
           # headers from the libcvc-deps prefix ($HOME/libcvc-deps),
