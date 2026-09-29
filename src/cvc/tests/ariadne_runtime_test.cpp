@@ -1367,6 +1367,52 @@ TEST(AriadneReactive, RunawayPredicateIsCappedNotHung) {
   EXPECT_NE(warns[0].find("budget"), std::string::npos);
 }
 
+// PR-C render-pass park safety: a park verb (msg-recv/await/http-get/fetch) in a reactive predicate
+// is NOT in the read-lane allowlist, so it is DENIED — the render walk cannot park (its private
+// scheduler is never pumped; a park there would silent-nil). render() must return, hidden +
+// reported.
+TEST(AriadneReactive, ParkVerbInPredicateIsDeniedNotHung) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  // Both park verbs (msg-recv AND await) must be denied in the reactive read lane — neither is in
+  // the read-lane allowlist, so a predicate using one is unbound → fail-safe hidden, render
+  // returns.
+  for (const char *predicate : {"(msg-recv \"x\")", "(await 1)"}) {
+    cvc::app app;
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    Widget w = text("shown");
+    w.visible_when = predicate;
+    rt.set_root(group({w}));
+    rt.render(); // MUST return — the read lane cannot park/block
+    EXPECT_FALSE(mb.saw("text_line:shown")) << "predicate: " << predicate; // denied -> hidden
+    EXPECT_FALSE(rt.take_reactive_warnings().empty()) << "predicate: " << predicate; // and reported
+  }
+}
+
+// PR-C end-to-end: a runaway on:tick resident (a body that never parks) is bounded by the
+// per-activation budget wired in ensure_resident — drain() returns, and the scheduler recovers so a
+// subsequently-installed healthy resident still fires.
+TEST(AriadneResident, RunawayTickResidentIsBoundedAndSchedulerRecovers) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program("(while true (+ 1 1))"); // runaway: the body never parks
+  rt.render();
+  rt.drain(); // MUST return (per-activation budget aborts the body; the pump caps regardless)
+  // Replace with a healthy resident; if the runaway had wedged the scheduler this would never fire.
+  rt.set_tick_program("(state-set \"tick.flag\" \"1\")");
+  for (int i = 0; i < 4; ++i) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
+}
+
 TEST(AriadneReactive, StringValueIsTruthyAndUnsetKeyIsCleanlyFalsy) {
   if (!have_state_exec())
     GTEST_SKIP();

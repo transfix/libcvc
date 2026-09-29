@@ -45,28 +45,36 @@ struct process {
   process_status status = process_status::ready;
 
   // Scheduling
-  int priority = 0;      // Nice value: -20 (high) to +19 (low)
-  std::string uid;       // User identity
-  std::string gid;       // Group identity
-  std::string root_path; // Chroot path (empty = full tree)
-  std::string owner;     // Owner-scope tag (e.g. an Ariadne document/Runtime); "" = unowned.
-                         // Lets a host reap a whole process group on teardown (kill_owner).
+  int priority = 0;            // Nice value: -20 (high) to +19 (low)
+  std::string uid;             // User identity
+  std::string gid;             // Group identity
+  std::string root_path;       // Chroot path (empty = full tree)
+  std::string owner;           // Owner-scope tag (e.g. an Ariadne document/Runtime); "" = unowned.
+                               // Lets a host reap a whole process group on teardown (kill_owner).
   bool awaiting_frame = false; // (await expr) parked this process until the next frame boundary;
                                // re-readied by async_scheduler::wake_awaiting() once per pump.
 
   // Resource limits (0 = unlimited)
   uint64_t max_steps = 0;
-  double max_time = 0.0;          // Wall-clock seconds
+  double max_time = 0.0;          // Wall-clock seconds (TOTAL run-time, across all activations)
   uint64_t max_memory = 0;        // Bytes
   uint64_t max_messages = 0;      // Outbound message count
   uint64_t max_message_bytes = 0; // Total outbound message bytes
+  // §13.8 per-STEP wall-clock cap (0 = unlimited): the deadline armed for a SINGLE evaluator step,
+  // fresh each step (never accumulates), so a long-lived resident with total max_time == 0 still
+  // can never HANG the host's per-frame drain — a single step that loops in-place (e.g. a runaway
+  // native builtin) is aborted at the cap and the process killed, while a healthy step (far under
+  // the cap) and a normal event-loop are untouched. (A per-node DSL loop yields per step, so the
+  // pump's own per-drain cap bounds it; this cap is the backstop for an in-STEP loop the pump can't
+  // interrupt.)
+  double max_step_time = 0.0;
 
   // Evaluator state (stackless — serializable)
   evaluator_state state;
 
   // Timing
   std::chrono::steady_clock::time_point create_time;
-  double accumulated_time = 0.0; // Seconds running so far
+  double accumulated_time = 0.0; // Seconds running so far (TOTAL run-time; parked time uncounted)
   std::chrono::steady_clock::time_point last_run_start;
 
   // Sleep support: process is in `waiting` status until this deadline.

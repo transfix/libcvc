@@ -3293,8 +3293,25 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 > ari-generated blocks the render thread today; a DSL program that wants async loading uses `(fetch)`.
 > **NOT YET:** chunked/streaming bodies; the dedicated libcurl-`multi` I/O thread (today each in-flight
 > fetch blocks one compute-pool worker); an async scene `source:{uri:}` realize (so a large remote
-> asset doesn't block scene setup — a follow-up); render-pass park budget (separate PR). NATIVE only
-> until the wasm worker/`-sASYNCIFY` fetch path is confirmed.
+> asset doesn't block scene setup — a follow-up). NATIVE only until the wasm worker/`-sASYNCIFY` fetch
+> path is confirmed.
+>
+> **LANDED (render-pass park safety).** Two layers keep a render-pass program that awaits/parks from
+> breaking the render thread. (1) The reactive READ lane (visible_when/computed) is structurally
+> park-proof: it evaluates on a private idle scheduler that is never pumped and its allowlist excludes
+> `await`/`msg-recv`/`http-get`/`fetch`, so a park verb in a predicate is DENIED (unbound → fail-safe
+> hidden, render returns) — asserted by a unit test over both `msg-recv` and `await`. (2) Residents +
+> actions run in `drain()`, off the draw walk, bounded by the pump's per-drain cap, so a per-node DSL
+> loop degrades but never hangs; and a **per-STEP wall-clock cap** (`process.max_step_time`, wired for
+> residents in `ensure_resident` at 50 ms — the same `eval_deadline_guard` an action's `max_time`
+> arms, but fresh each step so it never kills a long-lived resident) is the backstop against an
+> in-STEP loop (a runaway native builtin) that the pump can't interrupt: it is aborted + the process
+> killed. A latent double-count of a parking step's slice into `accumulated_time` (the accrual re-added
+> a slice a parking intrinsic already booked) is fixed alongside. **NOT killing a *persistently
+> spinning* resident** (vs the pump bounding it each drain) is deferred: the naive per-activation
+> budget that would do so false-kills a legitimate input-event burst (buffered events drain sharing one
+> budget) and misses a `sleep(0)`/self-wake spin (resets every wake) — distinguishing a genuine
+> external wait from a self-spin needs more than a wake-count, so it is left as future work.
 
 ### 13.9 A cvc::app-wide HTTP(s) cache in the state tree (TTL + conditional GET) — *planned*
 

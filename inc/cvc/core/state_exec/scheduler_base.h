@@ -53,7 +53,8 @@ struct execute_options {
   std::string root_path; // Chroot: confine to subtree (empty = full tree)
   std::string owner;     // Owner-scope tag (Ariadne document/Runtime); "" = unowned
   uint64_t max_steps = 0;
-  double max_time = 0.0;
+  double max_time = 0.0;      // TOTAL wall-clock run-time seconds
+  double max_step_time = 0.0; // §13.8 per-STEP wall-clock cap (fresh each step); 0 = unlimited
   uint64_t max_memory = 0;
   uint64_t max_messages = 0;
   uint64_t max_message_bytes = 0;
