@@ -238,6 +238,13 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   // other C++ type parked on the node) still comes back as a data_object.
   if (auto *v = boost::any_cast<value_t>(&d))
     return deep_copy(*v);
+  // A RAW std::string blob on the data channel reads back as the DSL `bytes` type (opaque octets),
+  // NOT an opaque data_object. That raw representation is what state-data-set stores for a `bytes`
+  // value, what the `?data` URI channel writes (uri_state.cpp), and what the §13.9 HTTP cache parks
+  // on a node — so a byte blob stays coherent across the resolver and state_exec (types.h: `bytes`
+  // is opaque octets backed by std::string, the sanctioned home for HTTP octet-stream bodies).
+  if (const std::string *s = boost::any_cast<std::string>(&d))
+    return make_bytes(*s);
   auto obj = std::make_shared<data_object>();
   obj->payload = d;
   obj->type_name = d.type().name();
@@ -258,8 +265,15 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
       std::holds_alternative<generator_ptr>(args[1].v))
     throw std::runtime_error(
         "state-data-set: cannot store a callable (function/closure/generator) as data");
-  // Store the value_t as boost::any
-  (*ctx->root)(path).data(boost::any(args[1]));
+  // A `bytes` value (opaque octets) is stored as a RAW std::string on the data channel — the SAME
+  // representation the `?data` URI channel (uri_state.cpp) and the §13.9 HTTP cache use — so a byte
+  // blob written from the DSL is readable via state://…?data and a blob parked by the cache reads
+  // back as `bytes` here (state-data-get, above). Every other value_t is stored as-is, so
+  // structured data (lists/dicts/scalars/text strings) round-trips via the value_t path.
+  if (const bytes_value *b = std::get_if<bytes_value>(&args[1].v))
+    (*ctx->root)(path).data(boost::any(b->data));
+  else
+    (*ctx->root)(path).data(boost::any(args[1]));
   return nil_value;
 }
 
