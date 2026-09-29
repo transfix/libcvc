@@ -1406,6 +1406,17 @@ Two distinct budgets (`scheduler::run(max_steps,max_time)` is the shared per-*ti
 | **BUDGET** — per-tick action drain | bounded `run(max_steps=BUDGET)` | **20,000 steps/tick**, soft **4 ms** | `state_exec.defaults.tick_budget_steps` |
 | **Per-handler / activation** | `execute_options.max_*` | **5,000 steps**, **1 ms**, **256 KiB** *per activation* | `state_exec.schedulers.<id>.*` |
 
+> **As-built (2026-09).** The reactive read lane's caps are the compile-time constants
+> `kMaxSteps = 100,000` steps/eval, `kMaxSeconds = 5 ms`/eval, and `kFrameBudgetSeconds = 10 ms`
+> aggregate/frame (`src/cvc/ariadne/ariadne.cpp:603-605`) — the per-frame aggregate is **10 ms**,
+> not the 2 ms provisional above, and these live in `ReactiveEngine`, so they are **not** yet
+> tree-tunable. The per-activation action caps are `kActionMaxSteps = 5,000` / `kActionMaxSeconds =
+> 0.1 s` / `kActionMaxBytes = 256 KiB` (`ariadne.cpp:1382-1384`) — the time ceiling is **0.1 s**, not
+> the 1 ms provisional above; the action pump is soft-capped at `kPumpMaxSeconds = 0.1 s`
+> (`ariadne.cpp:1442`) and each resident step at `kResidentStepSeconds = 0.05 s` (`ariadne.cpp:1497`).
+> The `scheduler::load_settings()` tunability below applies to the scheduler's own run budgets, not to
+> these `ReactiveEngine` constants.
+
 All numbers are **provisional pending profiling** against **`terrain_lab`** (predicate-dense),
 **`lsystem_coast`**, **`nav_city_swarm`**. Tunability is already wired: `scheduler::load_settings()`
 resolves `state_exec.schedulers.<id>.<key>` → `state_exec.defaults.<key>` → fallback, so budgets
@@ -1914,19 +1925,20 @@ subject of the still-open streamed-source contract (§9.8).
 > reusable `.ari` component library to ship with libcvc + pycvc and lean on across demos (the demo
 > audit is next). Verified: renders the lit, shadowed bunny on its plane headless.
 
-> **libcvc dependency — URI-native file I/O (not yet built).** Today the realizer resolves only
-> `source: { file: <path> }` and calls `cvc::read_geometry(path)` / (for volumes) `cvc::read_volume(path)`
-> directly — and those routines take a **plain filesystem path**, dispatching on the file *extension* to a
-> registered `geometry_file_io` / volume handler. The full `source:` URI model above (`file://` /
-> `http(s)://` / `pkg://` / `state://…?data` / custom) requires the file-I/O layer itself to accept URIs,
-> the same way Ariadne data sources (§13) do: `cvc::read_geometry`/`read_volume` should route a URI through
-> the §13 resolver — fetch/cache remote or packaged bytes to a temp file (or a memory buffer once the
-> `bytes` marshaling + temp-file helper land, §7.8.6a) and then hand off to the existing extension-keyed
-> reader; a bare path stays valid as the `file://` default. This makes `read_geometry("pkg://scenes/…")`,
-> `read_geometry("https://…/mesh.obj")`, and `state://<node>?data` work uniformly for scene sources, the
-> `cvc` CLI, and any other libcvc caller — one resolver, not a per-call-site special case. Until then the
-> realizer accepts a path (including the embedded `*.bunny` handler) and a URI `source:` degrades to its
-> path component. Tracked alongside the §13 URI resource model and the binary-URI-handler blockers (§7.8.6a).
+> **libcvc dependency — URI-native file I/O (partially built: temp-file bridge landed; in-memory
+> path pending).** The realizer now resolves any `source:` URI: `loader.cpp` folds a scalar
+> `source:`, a `{uri: …}`, and a `{file: …}` into `source_file`, and `scene_realize.cpp:46` calls
+> `resolve_to_file(n.source_file)` — so `file://` / `http(s)://` / `state://…` sources **do** resolve
+> today, by fetching non-`file` bytes to a temp file (`write_new_file`, `uri.cpp`, closing the former
+> "missing temp helper" blocker of §7.8.6a) and handing the resulting path to the existing
+> extension-keyed `cvc::read_geometry` / `cvc::read_volume`. What remains is the **no-temp-file**
+> in-memory path: the decoders already support bytes (`stbi_load_from_memory`,
+> `Magick::Image(Blob)`, `assimp ReadFileFromMemory`), so a `kind::bytes` resolve result feeding
+> in-memory read overloads would skip the temp-file round-trip for the schemes that produce bytes
+> (§13.4 dispatch-by-kind), falling back to `resolve_to_file` only for formats without an in-memory
+> reader (hdf5/vtk). Note the caveat: assimp resolves external textures relative to the file's
+> directory, so an in-memory mesh with relative texture refs still needs the temp-file bridge.
+> Tracked alongside the §13 URI resource model (§7.8.6a).
 
 ### 9.5 Views render a masked, modified subset of the one authored scene
 
