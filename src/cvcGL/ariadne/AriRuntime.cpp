@@ -136,7 +136,7 @@ std::vector<std::string> AriRuntime::load(const std::string &path) {
     std::vector<std::string> declared, global;
     for (const ari::ChannelDecl &c : lr.channels) {
       declared.push_back(c.name);
-      if (c.shared)
+      if (c.global) // app-root-global allowlist keys on `global`, not `shared`
         global.push_back(c.name);
     }
     rt_.set_channel_policy(declared, global, lr.lint.channels == ari::LintConfig::Mode::Strict,
