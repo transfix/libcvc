@@ -3208,6 +3208,27 @@ Two packaging gaps to close: **wasm** — curl has no wasm recipe and browser so
 build libcurl for wasm); **Haiku** — add `haiku` matrix entries to both the curl and openssl recipes
 (upstream builds fine — packaging work aligned with the Haiku self-host effort).
 
+> **LANDED (PR1 of the §13.9 cache work) — the `cvc::net` facade + both backends.**
+> `inc/cvc/net/http_client.h` defines the synchronous `cvc::net::{HttpRequest, HttpResponse,
+> HttpClient}` with a single blocking `send()`; two configure-time backends implement it — **libcurl**
+> (`src/cvc/net/http_client_curl.cpp`, `CVC_NET_HAVE_CURL`) and **Emscripten fetch**
+> (`http_client_fetch.cpp`, `CVC_NET_HAVE_FETCH`) — plus a `NullHttpClient` when neither is compiled.
+> `cvc::net::send()` dispatches to the process-global client; `set_http_client()` injects a fake for
+> tests/hosts; `have_http_backend()` reports the compiled capability. Ariadne's `http(s)://` handler
+> (`ariadne/uri_http.cpp`) is now a thin adapter over `send()` — the redirect-safety, byte-cap, and
+> Content-Type-default policy live in the adapter, identical on both backends — so the same handler
+> works native and in the browser.
+>
+> **Relationship to §13.8:** `send()` is the synchronous slice — it *is* `fetch_sync`, legal because
+> the resolver runs off the draw walk (every `resolve()` caller is synchronous). The async
+> `fetch(req)→handle` + libcurl-`multi` I/O-thread model stays future work. The wasm backend's blocking
+> `send()` issues an async `emscripten_fetch` and yields via `emscripten_sleep(0)` under the demos'
+> existing `-sASYNCIFY` (plus a new `-sFETCH=1` link flag on the wasm executables), so it needs no
+> pthreads/COOP-COEP; a non-Asyncify wasm exe would instead run `send()` off the main thread on
+> `-pthread`. The facade drops libcurl's `FAILONERROR` and captures response **status + headers**
+> (the ETag/Last-Modified/Cache-Control validators the §13.9 cache reads), leaving ">= 400 is an
+> error" to each caller — so a cache can act on a `304`.
+
 ### 13.7 Registration — C++ default, Python override
 
 `register_default_handlers(app)` installs the native handler for `http`/`https` by default. Because §13.2

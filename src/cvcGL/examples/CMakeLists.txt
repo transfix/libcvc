@@ -145,6 +145,10 @@ if(EMSCRIPTEN)
       -sMAXIMUM_MEMORY=4GB
       -sSTACK_SIZE=2097152
       -sEXIT_RUNTIME=0
+      # cvc::net's Emscripten-fetch HTTP backend: -sFETCH links the emscripten_fetch symbols; the
+      # blocking send() spins on emscripten_sleep, which returns under the -sASYNCIFY above. Needed by
+      # any demo that resolves an http(s):// URI (or the §13.9 HTTP cache) in the browser.
+      -sFETCH=1
     )
     if(CVC_WASM_PTHREADS)
       # Pre-spawn workers so std::thread creation doesn't stall on the busy main thread.

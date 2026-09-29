@@ -8,6 +8,7 @@ add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
+add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(state_test state_test.cpp)
 add_executable(state_change_journal_test state_change_journal_test.cpp)
 add_executable(state_subscription_router_test state_subscription_router_test.cpp)
@@ -162,6 +163,7 @@ set(TEST_TARGETS
   ariadne_loader_test
   ariadne_runtime_test
   ariadne_bind_test
+  net_http_client_test
   state_test
   state_change_journal_test
   state_subscription_router_test
@@ -387,6 +389,13 @@ target_link_libraries(ariadne_loader_test
 )
 
 target_link_libraries(ariadne_runtime_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(net_http_client_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1543,6 +1552,7 @@ cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_bind_test)
+cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(state_test)
 cvc_discover_tests(voxels_test)
 cvc_discover_tests(volume_test)

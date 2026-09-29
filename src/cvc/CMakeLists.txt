@@ -1106,6 +1106,14 @@ if(CVC_ENABLE_GRPC)
   )
 endif()
 
+# cvc::net — the synchronous HTTP client facade (roadmap §13.x). One HttpClient interface
+# (inc/cvc/net/http_client.h) with two interchangeable backends selected below at configure time
+# (libcurl native / Emscripten fetch wasm). Ariadne's http(s):// URI handler and the §13.9 HTTP cache
+# are thin adapters over it, so they work identically on both targets. All three TUs are always
+# compiled; the inactive backend #ifdefs to empty, so exactly one make_default_backend() links.
+list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_client_fetch.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
+
 # Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
@@ -1157,23 +1165,34 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
 target_compile_definitions(
   cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")
 
-# Ariadne http(s):// URI handler — OPTIONAL (roadmap §13.6). When libcurl is present,
-# ariadne/uri_http.cpp compiles the real network handler (CVC_ARIADNE_HAVE_HTTP) and links curl;
-# when absent it is an inert stub (register_http_uri_handler() is a no-op). The handler is opt-in
-# even when compiled — a host must call register_http_uri_handler() — so this never makes libcvc
-# fetch the network on its own. (Under Emscripten a fetch-based handler is future work.)
-find_package(CURL QUIET)
-if(TARGET CURL::libcurl OR CURL_FOUND)
-  target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_HTTP)
-  if(TARGET CURL::libcurl)
-    target_link_libraries(cvc PRIVATE CURL::libcurl)
-  else()
-    target_include_directories(cvc PRIVATE ${CURL_INCLUDE_DIRS})
-    target_link_libraries(cvc PRIVATE ${CURL_LIBRARIES})
-  endif()
-  message(STATUS "Ariadne: http(s):// URI handler ENABLED (libcurl)")
+# cvc::net HTTP backend selection (roadmap §13.x). Pick the transport for cvc::net at configure time:
+# Emscripten fetch on wasm, libcurl on native. CVC_ARIADNE_HAVE_HTTP stays defined whenever a real
+# backend exists, so ariadne/uri_http.cpp's (now thin) adapter registers the http(s):// scheme; with
+# no backend it is left unresolved (register_http_uri_handler() no-ops), exactly as the old
+# libcurl-less stub did. The handler is opt-in either way — a host must call it — so libcvc never
+# touches the network on its own.
+if(EMSCRIPTEN)
+  target_compile_definitions(cvc PRIVATE CVC_NET_HAVE_FETCH CVC_ARIADNE_HAVE_HTTP)
+  # The fetch backend's blocking send() spins on emscripten_sleep under Asyncify, so a wasm
+  # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sASYNCIFY (main thread, the demo gallery)
+  # OR -pthread (off the main thread). Link flags do not propagate out of this static archive; the
+  # executable sets them (see src/cvcGL/examples/CMakeLists.txt).
+  message(STATUS "cvc::net: Emscripten-fetch HTTP backend ENABLED "
+                 "(link exes with -sFETCH=1 + -sASYNCIFY or -pthread)")
 else()
-  message(STATUS "Ariadne: libcurl not found - http(s):// handler compiles to a stub")
+  find_package(CURL QUIET)
+  if(TARGET CURL::libcurl OR CURL_FOUND)
+    target_compile_definitions(cvc PRIVATE CVC_NET_HAVE_CURL CVC_ARIADNE_HAVE_HTTP)
+    if(TARGET CURL::libcurl)
+      target_link_libraries(cvc PRIVATE CURL::libcurl)
+    else()
+      target_include_directories(cvc PRIVATE ${CURL_INCLUDE_DIRS})
+      target_link_libraries(cvc PRIVATE ${CURL_LIBRARIES})
+    endif()
+    message(STATUS "cvc::net: libcurl HTTP backend ENABLED")
+  else()
+    message(STATUS "cvc::net: no HTTP backend (libcurl not found) - http(s):// compiles to a stub")
+  endif()
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is
