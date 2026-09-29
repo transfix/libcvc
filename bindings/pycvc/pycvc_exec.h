@@ -34,11 +34,40 @@ public:
   // (int/float/bool/str/None/list/dict) and the return value converts back. A
   // Python exception inside it is contained and surfaced as a run() error, not
   // a crash. The callable is kept alive for this Exec's lifetime.
+  //
+  // SYNCHRONOUS: the callable runs inline on the thread that calls run(), with
+  // the GIL held, and blocks the DSL program (and run()) until it returns. Use
+  // register_async_fn for slow work that should not stall the scheduler.
   void register_fn(const std::string &name, PyObject *callable);
+
+  // Register a Python callable as an ASYNC DSL function named `name`. Calling
+  // (name args...) in a DSL program OFFLOADS the callable to the app's compute
+  // pool and PARKS the calling program until it finishes, so the scheduler stays
+  // live — other DSL processes (and other Python threads) run meanwhile. The
+  // program resumes with the callable's return value (converted back to a DSL
+  // value); if the callable raises, it resumes with a {"__async_error__":
+  // <message>} dict — a reserved key that a normal dict result cannot collide
+  // with, so a program can tell an error from data.
+  //
+  // The callable runs on a pool WORKER thread with the GIL acquired for the call,
+  // so a blocking request (urllib/requests) or a GIL-releasing compute (numpy)
+  // runs truly concurrently. It must NOT call back into this Exec (run() /
+  // register*) or touch the DSL/state tree — it receives its args and returns a
+  // value, nothing more. `(name ...)` must be nested (not the whole program) so
+  // the park has an enclosing frame — e.g. (begin (name ...)) or
+  // (state-set "r" (name ...)).
+  void register_async_fn(const std::string &name, PyObject *callable);
 
   // Execute a DSL program in this app's context; returns the rendered result
   // (strings raw, nil as "", others via the DSL's printed form). Throws on a
-  // parse/eval error (surfaced as a Python exception).
+  // parse/eval error (surfaced as a Python exception). Drives this Exec's PRIVATE
+  // async scheduler to completion, so a program that awaits an async fn parks and
+  // resumes here; the GIL is released while idle-waiting so pool workers run, and
+  // run() does not return until every worker it launched has finished.
+  //
+  // NOT thread-safe: one Exec is driven by ONE thread. Do not call run() (or
+  // register*) concurrently on the same Exec; use a separate Exec per thread
+  // (each owns its own scheduler, so they do not interfere).
   std::string run(const std::string &src);
 
 private:

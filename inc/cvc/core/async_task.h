@@ -46,6 +46,9 @@
 namespace cvc {
 
 class app;
+namespace state_exec {
+class async_scheduler;
+}
 
 /// The work kernel: runs on a compute-pool worker, returns the DSL value to deliver.
 using pool_task_work = std::function<state_exec::value_t()>;
@@ -53,24 +56,28 @@ using pool_task_work = std::function<state_exec::value_t()>;
 /// never hangs — every path posts exactly one value.
 using pool_task_on_error = std::function<state_exec::value_t(const std::string &)>;
 
-/// Kick `work` on a compute-pool worker (OFF the scheduler thread); when it finishes, post its
-/// result — or `on_error(message)` if it throws — to a UNIQUE reply channel scoped under `root`,
-/// and return that channel key.  The caller then either parks on it or wraps it as a future (see
-/// the two helpers below).  Returns immediately; never blocks the caller.
-std::string launch_pool_task(app &a, const std::string &root, const std::string &chan_prefix,
-                             pool_task_work work, pool_task_on_error on_error);
+/// Kick `work` on one of `a`'s compute-pool workers (OFF the scheduler thread); when it finishes,
+/// post its result — or `on_error(message)` if it throws — to a UNIQUE reply channel scoped under
+/// `root` ON `sched`, and return that channel key.  `sched` is the scheduler the CALLER drives (so
+/// the delivery lands where the parked process will be resumed): the app-wide `a.exec_scheduler()`
+/// for an Ariadne host, or a private per-Exec scheduler for pycvc.  Returns immediately.
+std::string launch_pool_task(app &a, state_exec::async_scheduler &sched, const std::string &root,
+                             const std::string &chan_prefix, pool_task_work work,
+                             pool_task_on_error on_error);
 
-/// Transparent form: launch the task and SELF-PARK the current process, resuming with the result
-/// value threaded into the enclosing expression.  Call only from a native_fn running under the
-/// async scheduler (current_pid()/current_process() must be valid).
-state_exec::value_t park_on_pool_task(app &a, const std::string &root,
-                                      const std::string &chan_prefix, pool_task_work work,
-                                      pool_task_on_error on_error);
+/// Transparent form: launch the task and SELF-PARK the current process ON `sched`, resuming with
+/// the result value threaded into the enclosing expression.  Call only from a native_fn running
+/// under `sched` (sched.current_pid()/current_process() must be valid — i.e. `sched` is the
+/// driver).
+state_exec::value_t park_on_pool_task(app &a, state_exec::async_scheduler &sched,
+                                      const std::string &root, const std::string &chan_prefix,
+                                      pool_task_work work, pool_task_on_error on_error);
 
-/// Future form: launch the task and return a future handle you (await ...) or (msg-recv ...).
-state_exec::value_t future_pool_task(app &a, const std::string &root,
-                                     const std::string &chan_prefix, pool_task_work work,
-                                     pool_task_on_error on_error);
+/// Future form: launch the task and return a future handle you (await ...) or (msg-recv ...) on
+/// `sched`.
+state_exec::value_t future_pool_task(app &a, state_exec::async_scheduler &sched,
+                                     const std::string &root, const std::string &chan_prefix,
+                                     pool_task_work work, pool_task_on_error on_error);
 
 } // namespace cvc
 

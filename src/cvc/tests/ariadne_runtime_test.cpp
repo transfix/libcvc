@@ -2742,12 +2742,14 @@ TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
     se::builtins::register_fn(
         env, "pool-double",
         [&app, root, arg_int, make_work, on_err](std::span<const se::value_t> args) -> se::value_t {
-          return cvc::park_on_pool_task(app, root, "test.reply", make_work(arg_int(args)), on_err);
+          return cvc::park_on_pool_task(app, app.exec_scheduler(), root, "test.reply",
+                                        make_work(arg_int(args)), on_err);
         });
     se::builtins::register_fn(
         env, "pool-double-async",
         [&app, root, arg_int, make_work, on_err](std::span<const se::value_t> args) -> se::value_t {
-          return cvc::future_pool_task(app, root, "test.reply", make_work(arg_int(args)), on_err);
+          return cvc::future_pool_task(app, app.exec_scheduler(), root, "test.reply",
+                                       make_work(arg_int(args)), on_err);
         });
   });
 
