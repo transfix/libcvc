@@ -46,6 +46,13 @@ public:
   std::vector<HttpRequest> requests;
   int calls = 0;
   HttpResponse send(const HttpRequest &req) override {
+    // ConcurrentDistinctKeysAreServedSafely drives DISTINCT keys, which do not coalesce in
+    // single-flight, so every resolve becomes a leader and calls send() concurrently (the cache
+    // correctly releases cache_mutex across the transport). A real HttpClient is thread-safe or
+    // per-call independent; this fake mutates shared std::deque/std::vector/int, so it must lock or
+    // it races — concurrent push_back reallocates the vector mid-access → UB (a Windows-CI
+    // SEGFAULT).
+    std::lock_guard<std::mutex> lk(m_);
     requests.push_back(req);
     ++calls;
     if (responses.empty()) {
@@ -59,6 +66,9 @@ public:
       responses.pop_front(); // keep the last so a surprise extra call still answers
     return r;
   }
+
+private:
+  std::mutex m_;
 };
 
 bool req_has_header(const HttpRequest &r, const std::string &needle) {
