@@ -54,6 +54,44 @@ se::value_t marshal_error(const std::string &url, const std::string &message) {
   return marshal_response(r);
 }
 
+// Shared by both verbs: build the request from (url [, headers]), kick the BLOCKING cvc::net::send
+// onto a compute-pool worker, and have the worker post the marshalled dict to a UNIQUE '#'-suffixed
+// reply channel when it joins. Returns that channel (already resolved; '#' => policy-exempt +
+// identity). The verb never blocks the scheduler thread — compute_async returns immediately — and
+// the worker ALWAYS posts (an error dict on a throw), so a waiter never hangs.
+std::string launch_http_fetch(cvc::app &app, const std::string &root,
+                              std::span<const se::value_t> args) {
+  cvc::net::HttpRequest req;
+  if (!args.empty())
+    if (const std::string *url = std::get_if<std::string>(&args[0].v))
+      req.url = *url;
+  if (args.size() > 1)
+    if (const se::list_ptr *lp = std::get_if<se::list_ptr>(&args[1].v))
+      for (const se::value_t &e : **lp)
+        if (const std::string *h = std::get_if<std::string>(&e.v))
+          req.headers.push_back(*h);
+
+  static std::atomic<std::uint64_t> seq{0};
+  const std::string chan =
+      "http.reply#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+  const std::string done = se::resolve_channel_key(root, chan); // '#' => == chan
+  const std::string url = req.url;
+  app.compute_async(
+      1, [](int) {},
+      [&app, req, done, url] {
+        se::value_t payload;
+        try {
+          payload = marshal_response(cvc::net::send(req));
+        } catch (const std::exception &e) {
+          payload = marshal_error(url, std::string("http-get: ") + e.what());
+        } catch (...) {
+          payload = marshal_error(url, "http-get: unknown error");
+        }
+        app.exec_scheduler().post_message(done, payload);
+      });
+  return done;
+}
+
 } // namespace
 
 void register_net_intrinsics(cvc::app &app) {
@@ -64,52 +102,32 @@ void register_net_intrinsics(cvc::app &app) {
   app.computePool();
   app.exec_scheduler();
 
-  register_action_intrinsics(
-      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
-        // Capture the lane's chroot so the reply channel is scoped the same way the program's
-        // (msg-recv <chan>) will resolve it. The verb generates a UNIQUE '#'-suffixed channel per
-        // call (returned verbatim by resolve_channel_key + exempt from channel-policy), so two
-        // in-flight fetches never collide on the single recv_path a process has.
-        const std::string root = ictx.root_path;
-        se::builtins::register_fn(
-            env, "http-get-async", [&app, root](std::span<const se::value_t> args) -> se::value_t {
-              cvc::net::HttpRequest req;
-              if (!args.empty())
-                if (const std::string *url = std::get_if<std::string>(&args[0].v))
-                  req.url = *url;
-              // Optional second arg: a list of verbatim "Name: value" header strings.
-              if (args.size() > 1)
-                if (const se::list_ptr *lp = std::get_if<se::list_ptr>(&args[1].v))
-                  for (const se::value_t &e : **lp)
-                    if (const std::string *h = std::get_if<std::string>(&e.v))
-                      req.headers.push_back(*h);
+  register_action_intrinsics([&app](std::shared_ptr<se::environment> env,
+                                    se::intrinsics_context &ictx) {
+    // Capture the lane's chroot so the reply channel is scoped the same way an (msg-recv)/(await)
+    // resolves it (launch_http_fetch uses a UNIQUE '#'-suffixed channel per call — policy-exempt +
+    // identity — so two in-flight fetches never collide on the single recv_path a process has).
+    const std::string root = ictx.root_path;
 
-              static std::atomic<std::uint64_t> seq{0};
-              const std::string chan =
-                  "http.reply#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
-              const std::string done = se::resolve_channel_key(root, chan); // '#' => == chan
+    // (http-get-async URL [HEADERS]) — kicks the fetch and returns a FUTURE handle; the program
+    // awaits it with (await …) or (msg-recv …). The low-level primitive for fanning out N fetches.
+    se::builtins::register_fn(env, "http-get-async",
+                              [&app, root](std::span<const se::value_t> args) -> se::value_t {
+                                return se::make_future(launch_http_fetch(app, root, args));
+                              });
 
-              // Run the BLOCKING fetch on a compute-pool worker; post the marshalled dict when it
-              // joins. compute_async returns immediately, so the verb never blocks the scheduler
-              // thread. The worker ALWAYS posts (an error dict on a throw), so the parked
-              // (msg-recv) always resumes.
-              const std::string url = req.url;
-              app.compute_async(
-                  1, [](int) {},
-                  [&app, req, done, url] {
-                    se::value_t payload;
-                    try {
-                      payload = marshal_response(cvc::net::send(req));
-                    } catch (const std::exception &e) {
-                      payload = marshal_error(url, std::string("http-get: ") + e.what());
-                    } catch (...) {
-                      payload = marshal_error(url, "http-get: unknown error");
-                    }
-                    app.exec_scheduler().post_message(done, payload);
-                  });
-              return se::value_t(chan); // the program awaits with (msg-recv <chan>)
-            });
-      });
+    // (http-get URL [HEADERS]) — TRANSPARENT: kicks the fetch and SELF-PARKS the calling process,
+    // resuming with the response dict threaded straight into the enclosing expression (no channel,
+    // no msg-recv). Reaches the scheduler via the captured app; current_pid()/current_process() are
+    // valid here (set around the evaluator step). Equivalent to (await (http-get-async URL)).
+    se::builtins::register_fn(env, "http-get",
+                              [&app, root](std::span<const se::value_t> args) -> se::value_t {
+                                const std::string done = launch_http_fetch(app, root, args);
+                                auto &sched = app.exec_scheduler();
+                                return se::park_on_channel(&sched, sched.current_process().get(),
+                                                           sched.current_pid(), done);
+                              });
+  });
 }
 
 } // namespace ariadne

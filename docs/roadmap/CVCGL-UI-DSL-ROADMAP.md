@@ -3261,11 +3261,27 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 > precursor bridge). Registered host-level (needs `cvc::net` + the app), not a core builtin. Tests in
 > `ariadne_runtime_test` (AriadneNetIntrinsics: full-dict await, error-path resume, and a
 > BlockingHttpClient proof that the scheduler is not blocked while the fetch is in flight), offline via
-> the PR1 `set_http_client` fake. **NOT YET:** a *transparent* `(http-get url)` that returns the body
-> directly (needs a new evaluator park-token hook — a host `native_fn` gets no `intrinsics_context` at
-> call time, so it can't self-park); chunked/streaming bodies; and the dedicated libcurl-`multi` I/O
-> thread (today each in-flight fetch blocks one compute-pool worker). NATIVE only until the wasm
-> worker/`-sASYNCIFY` fetch path is confirmed.
+> the PR1 `set_http_client` fake.
+>
+> **LANDED (async/await core) — transparent `(http-get url)` + proper `await`, ZERO evaluator edits.**
+> The suspend/resume-with-value mechanism already existed (`msg-recv` proves it), so the linchpin was
+> *factoring* it, not extending the evaluator: `park_on_channel(sched, proc, pid, ch)`
+> (`intrinsics.{h,cpp}`) is the one audited "suspend the running process, return a nil placeholder,
+> resume with the delivered value in the enclosing expression" primitive `msg-recv`, `await`, and
+> `http-get` all share (a host verb self-parks by reaching the scheduler through its captured `&app` —
+> `current_pid()`/`receive_message()` — no `intrinsics_context` needed). A top-level-call guard rejects
+> a park with no enclosing frame (else a done-and-waiting zombie). `(await x)` is now value-carrying:
+> a **future handle** (a tagged dict `{"__future__": chan}`, no new `value_t` alternative) parks and
+> resumes with the resolved value; a settled value keeps its one-frame yield. `(http-get-async)` now
+> returns a future (so `(await (http-get-async url))` works), and `msg-recv` accepts a future *or* a
+> channel string (so the two-step `(msg-recv (http-get-async url))` still works verbatim).
+> **`(http-get url)`** is the transparent one-shot: it self-parks and yields the dict straight into the
+> enclosing expression — `(get-attr (http-get url) "status")`, no `msg-recv`. Tests: AriadneNetIntrinsics
+> gains the transparent-verb + await-future cases; the msg-recv/await refactor is regression-clean
+> across the state_exec suites. **NOT YET:** chunked/streaming bodies; the dedicated libcurl-`multi`
+> I/O thread (today each in-flight fetch blocks one compute-pool worker); making ALL ari-generated URI
+> requests async (the resolver — separate PR); render-pass park budget (separate PR). NATIVE only until
+> the wasm worker/`-sASYNCIFY` fetch path is confirmed.
 
 ### 13.9 A cvc::app-wide HTTP(s) cache in the state tree (TTL + conditional GET) — *planned*
 

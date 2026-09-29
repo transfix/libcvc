@@ -405,8 +405,19 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
   int pid = ctx->sched->current_pid();
   if (pid < 0)
     pid = ctx->pid;
-  // Yield the running process until the next frame boundary (a no-op on a scheduler with no
-  // frames, where await is identity), then resume with the already-evaluated argument value.
+  // A FUTURE handle {"__future__": chan} → value-carrying park (the §13.8 proper await): suspend
+  // until the producer delivers, then resume with the resolved value threaded into the enclosing
+  // expression, exactly as (msg-recv) does — via the shared park_on_channel primitive.
+  if (const std::optional<std::string> fchan = future_channel_of(args[0])) {
+    process *proc = nullptr;
+    if (ctx->sched->current_process())
+      proc = ctx->sched->current_process().get();
+    else if (ctx->proc)
+      proc = ctx->proc.get();
+    return park_on_channel(ctx->sched, proc, pid, *fchan);
+  }
+  // An already-settled value → the cooperative one-frame yield await has always been (a no-op on a
+  // scheduler with no frames, where await is identity), then resume with the value unchanged.
   ctx->sched->yield_frame(pid);
   return args[0];
 }
@@ -759,41 +770,28 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
 value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "msg-recv");
   require_sched(ctx, "msg-recv");
-  const std::string &raw = as_string(args[0], "msg-recv");
-  enforce_channel_policy(ctx, raw);                 // §12 runtime enforcement (strict → throw)
-  const std::string ch = resolve_channel(ctx, raw); // §12 chroot-scoped scheduler key
+  // Accept a future handle {"__future__": chan} (from an async producer like (http-get-async)) OR a
+  // raw channel string. A future's channel is an already-resolved '#'-channel (policy-exempt); a
+  // raw string goes through §12 policy + chroot-scoping as before.
+  std::string ch;
+  if (const std::optional<std::string> fchan = future_channel_of(args[0])) {
+    ch = *fchan;
+  } else {
+    const std::string &raw = as_string(args[0], "msg-recv");
+    enforce_channel_policy(ctx, raw);
+    ch = resolve_channel(ctx, raw);
+  }
 
-  // Resolve the actual PID of the currently executing process.
   int pid = ctx->sched->current_pid();
   if (pid < 0)
     pid = ctx->pid; // fallback for unit-test contexts
-
-  // Resolve the process pointer for inbox check.
   process *proc = nullptr;
   if (ctx->sched->current_process())
     proc = ctx->sched->current_process().get();
   else if (ctx->proc)
     proc = ctx->proc.get();
 
-  // If the process already has a message in its inbox, return it immediately.
-  if (proc && !proc->inbox.empty()) {
-    auto msg = std::move(proc->inbox.front());
-    proc->inbox.pop();
-    return msg;
-  }
-
-  // Check the scheduler's pending message queue for this channel.
-  auto pending = ctx->sched->pop_pending_message(ch);
-  if (pending)
-    return *pending;
-
-  // Otherwise, suspend the process until a message arrives.
-  bool ok = ctx->sched->receive_message(pid, ch);
-  if (!ok)
-    throw std::runtime_error("msg-recv: cannot suspend process " + std::to_string(pid));
-  // Return nil as a placeholder — the scheduler will overwrite
-  // state.result with the actual message when delivery occurs.
-  return nil_value;
+  return park_on_channel(ctx->sched, proc, pid, ch);
 }
 
 value_t intrinsic_msg_pending(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -891,6 +889,50 @@ std::string resolve_channel_key(const std::string &root_path, const std::string 
   if (root_path.empty())
     return channel; // root scope: identity — backward-compatible with every raw-key msg-* caller
   return root_path + cvc::state::SEPARATOR + "channels" + cvc::state::SEPARATOR + channel;
+}
+
+value_t make_future(const std::string &channel) {
+  return make_dict({{"__future__", value_t(channel)}});
+}
+
+std::optional<std::string> future_channel_of(const value_t &v) {
+  const dict_ptr *dp = std::get_if<dict_ptr>(&v.v);
+  if (!dp || !*dp)
+    return std::nullopt;
+  const std::vector<std::pair<std::string, value_t>> &entries = **dp;
+  if (entries.size() != 1 || entries[0].first != "__future__")
+    return std::nullopt;
+  const std::string *chan = std::get_if<std::string>(&entries[0].second.v);
+  if (!chan)
+    return std::nullopt;
+  return *chan;
+}
+
+value_t park_on_channel(scheduler_base *sched, process *proc, int pid, const std::string &ch) {
+  // A message that arrived before the park is returned without suspending: first the process inbox,
+  // then the scheduler's per-channel pending queue.
+  if (proc && !proc->inbox.empty()) {
+    value_t msg = std::move(proc->inbox.front());
+    proc->inbox.pop();
+    return msg;
+  }
+  if (const std::optional<value_t> pending = sched->pop_pending_message(ch))
+    return *pending;
+
+  // A park needs an ENCLOSING frame to receive the value deliver_to_receivers patches in. During
+  // the native call the apply frame is on top of the stack; size 1 means it is the ONLY frame — a
+  // top-level call whose pop would empty the stack (done=true) and skip the patch, leaving a
+  // done-and-waiting zombie. (size 0 == a direct unit-test call with no evaluator frames — allowed;
+  // the test drives delivery itself.)
+  if (proc && proc->state.stack.size() == 1)
+    throw std::runtime_error("cannot suspend a top-level call (no enclosing expression to receive "
+                             "the value); wrap it, e.g. bind the result or use (begin …)");
+
+  if (!sched->receive_message(pid, ch))
+    throw std::runtime_error("cannot suspend process " + std::to_string(pid));
+  // Nil placeholder — deliver_to_receivers overwrites the enclosing frame's results.back() with the
+  // delivered value when the message arrives on `ch`.
+  return nil_value;
 }
 
 } // namespace cvc::state_exec

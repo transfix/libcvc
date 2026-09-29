@@ -13,6 +13,7 @@
 #include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -105,6 +106,28 @@ void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::str
 /// on the scheduler thread (the intrinsic path does that) and capture the string — never walk the
 /// tree off-thread.
 std::string resolve_channel_key(const std::string &root_path, const std::string &channel);
+
+// §13.8 async park primitive — suspend the CURRENTLY-RUNNING process until a value is delivered on
+// scheduler channel `ch`, returning a nil placeholder that the scheduler's delivery
+// (deliver_to_receivers) patches with the real value in the ENCLOSING expression. This is the
+// msg-recv protocol, factored so `await` and host async verbs (e.g. an (http-get) that self-parks)
+// share ONE audited suspend path — no evaluator change needed. `ch` must be an ALREADY-RESOLVED
+// scheduler key (the caller applies channel policy/scoping; a '#'-runtime channel is exempt). The
+// running process is named by `proc` + `pid` (from sched->current_process()/current_pid(), with the
+// ctx->proc / ctx->pid fallback for unit-test contexts). Fast-paths a buffered inbox / pending so a
+// value that beat the park is returned without suspending. THROWS if the process cannot be
+// suspended, or if this is a top-level call with no enclosing frame to receive the delivered value
+// (which would otherwise leave a done-and-waiting zombie).
+value_t park_on_channel(scheduler_base *sched, process *proc, int pid, const std::string &ch);
+
+// §13.8 futures — a future handle is a tagged one-key dict {"__future__": "<reply-channel>"} (a
+// dict_ptr; NO new value_t alternative, so no codec/serialization ripple). An async producer such
+// as (http-get-async) returns make_future(chan); (await <future>) and (msg-recv <future>) unwrap it
+// with future_channel_of and park on the channel, while a plain value / non-future dict yields
+// nullopt (treated as an already-settled value). make_future + future_channel_of are the single
+// shared convention so producers and consumers never disagree on the tag.
+value_t make_future(const std::string &channel);
+std::optional<std::string> future_channel_of(const value_t &v);
 
 } // namespace cvc::state_exec
 
