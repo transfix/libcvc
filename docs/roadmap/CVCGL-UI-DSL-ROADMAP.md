@@ -3296,6 +3296,23 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 > asset doesn't block scene setup — a follow-up); render-pass park budget (separate PR). NATIVE only
 > until the wasm worker/`-sASYNCIFY` fetch path is confirmed.
 
+> **LANDED (general method verb) — `(http-request METHOD URL [BODY [HEADERS]])` / `(http-request-async …)`.**
+> `net_intrinsics.cpp` generalizes the launcher into `launch_http(app, root, HttpRequest)` (mint reply
+> channel → `compute_async` blocking `send` → post the marshalled dict) and adds the two verbs on top of
+> it — `http-request` self-parks (transparent), `http-request-async` returns a future — resuming with the
+> SAME `{ ok status body(bytes) url headers error }` dict as `http-get`. `METHOD` is any verb
+> (`GET`/`PUT`/`POST`/`PATCH`/`DELETE`/…); `BODY` is a string OR a `bytes` value (byte-exact — a body
+> fetched as `bytes` re-uploads without a lossy text round-trip; empty for a bodyless verb); `HEADERS` is
+> a list of verbatim `"Name: value"` lines — so **bearer-token auth is just**
+> `(http-request "POST" url body (list "Authorization: Bearer <tok>" "Content-Type: application/json"))`.
+> `http-get` is now GET sugar over the same launcher (headers-only, no body). BOTH transports already
+> carry method+body+headers: curl via `CUSTOMREQUEST`/`COPYPOSTFIELDS` (size set first → embedded NULs
+> survive) / `HTTPHEADER` (fail-closed on OOM — never sends WITHOUT the auth header), Emscripten fetch via
+> `requestMethod`/`requestData`+`requestDataSize`/split header array — so the verb works native **and**
+> wasm by construction. Tests: AriadneNetIntrinsics POST-carries-method-body-headers (string body + bearer
+> + content-type, transparent) and async-PUT-with-bytes-body-awaited (a prior `http-get` body re-PUT as a
+> `bytes` body, awaited via a future), offline over the canned transport.
+
 ### 13.9 A cvc::app-wide HTTP(s) cache in the state tree (TTL + conditional GET) — *planned*
 
 Repeated `import:`/`load:`/`source:` of the same `http(s)://` URL must not re-fetch every time. The

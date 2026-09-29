@@ -55,23 +55,30 @@ se::value_t marshal_error(const std::string &url, const std::string &message) {
   return marshal_response(r);
 }
 
-// Shared by both verbs: build the request from (url [, headers]), kick the BLOCKING cvc::net::send
-// onto a compute-pool worker, and have the worker post the marshalled dict to a UNIQUE '#'-suffixed
-// reply channel when it joins. Returns that channel (already resolved; '#' => policy-exempt +
-// identity). The verb never blocks the scheduler thread — compute_async returns immediately — and
-// the worker ALWAYS posts (an error dict on a throw), so a waiter never hangs.
-std::string launch_http_fetch(cvc::app &app, const std::string &root,
-                              std::span<const se::value_t> args) {
-  cvc::net::HttpRequest req;
-  if (!args.empty())
-    if (const std::string *url = std::get_if<std::string>(&args[0].v))
-      req.url = *url;
-  if (args.size() > 1)
-    if (const se::list_ptr *lp = std::get_if<se::list_ptr>(&args[1].v))
+// arg N as a string ("" if absent / not a string).
+std::string arg_string(std::span<const se::value_t> args, std::size_t idx) {
+  if (args.size() > idx)
+    if (const std::string *s = std::get_if<std::string>(&args[idx].v))
+      return *s;
+  return std::string();
+}
+
+// Append arg N (a list of verbatim "Name: value" strings — e.g. "Authorization: Bearer <token>")
+// onto `out`. A non-list / absent arg contributes nothing.
+void append_header_list(std::span<const se::value_t> args, std::size_t idx,
+                        std::vector<std::string> &out) {
+  if (args.size() > idx)
+    if (const se::list_ptr *lp = std::get_if<se::list_ptr>(&args[idx].v))
       for (const se::value_t &e : **lp)
         if (const std::string *h = std::get_if<std::string>(&e.v))
-          req.headers.push_back(*h);
+          out.push_back(*h);
+}
 
+// Kick a fully-built request on a compute-pool worker (OFF the scheduler thread) and post the
+// marshalled response dict to a unique '#'-reply channel; return that channel. Shared by all the
+// verbs — GET, and the general method verb. The worker ALWAYS posts a dict (an error dict on a
+// throw), so a waiter never hangs.
+std::string launch_http(cvc::app &app, const std::string &root, cvc::net::HttpRequest req) {
   static std::atomic<std::uint64_t> seq{0};
   const std::string chan =
       "http.reply#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
@@ -79,18 +86,43 @@ std::string launch_http_fetch(cvc::app &app, const std::string &root,
   const std::string url = req.url;
   app.compute_async(
       1, [](int) {},
-      [&app, req, done, url] {
+      [&app, req = std::move(req), done, url] {
         se::value_t payload;
         try {
           payload = marshal_response(cvc::net::send(req));
         } catch (const std::exception &e) {
-          payload = marshal_error(url, std::string("http-get: ") + e.what());
+          payload = marshal_error(url, std::string("http: ") + e.what());
         } catch (...) {
-          payload = marshal_error(url, "http-get: unknown error");
+          payload = marshal_error(url, "http: unknown error");
         }
         app.exec_scheduler().post_message(done, payload);
       });
   return done;
+}
+
+// (http-get URL [HEADERS]) — a bodyless GET; HEADERS is a list of "Name: value" lines.
+cvc::net::HttpRequest build_get_request(std::span<const se::value_t> args) {
+  cvc::net::HttpRequest req;
+  req.url = arg_string(args, 0);
+  append_header_list(args, 1, req.headers);
+  return req;
+}
+
+// (http-request METHOD URL [BODY [HEADERS]]) — any method (GET/PUT/POST/PATCH/DELETE/…). BODY is a
+// string OR bytes value (byte-safe; empty for a bodyless verb); HEADERS a list of "Name: value"
+// lines (e.g. an "Authorization: Bearer <token>" for auth, or a "Content-Type: application/json").
+cvc::net::HttpRequest build_method_request(std::span<const se::value_t> args) {
+  cvc::net::HttpRequest req;
+  req.method = arg_string(args, 0);
+  req.url = arg_string(args, 1);
+  if (args.size() > 2) {
+    if (const std::string *s = std::get_if<std::string>(&args[2].v))
+      req.body = *s;
+    else if (const se::bytes_value *b = std::get_if<se::bytes_value>(&args[2].v))
+      req.body = b->data; // binary body (opaque octets)
+  }
+  append_header_list(args, 3, req.headers);
+  return req;
 }
 
 // Marshal a resolver UriResult into the DSL reply dict (scheme-agnostic — no HTTP status/headers).
@@ -106,7 +138,7 @@ se::value_t marshal_uri_result(const UriResult &r) {
 
 // The generic async resolve (any registered scheme: file/state/cvc/http). Runs the SYNCHRONOUS
 // resolve() on a compute-pool worker (OFF the scheduler thread) and posts the marshalled dict to a
-// unique '#'-reply channel — the same launch shape as launch_http_fetch, for arbitrary URIs.
+// unique '#'-reply channel — the same launch shape as launch_http, for arbitrary URIs.
 std::string launch_uri_fetch(cvc::app &app, const std::string &root,
                              std::span<const se::value_t> args) {
   std::string uri;
@@ -171,23 +203,44 @@ void register_net_intrinsics(cvc::app &app) {
       // (http-get-async URL [HEADERS]) — kicks the fetch and returns a FUTURE handle; the program
       // awaits it with (await …) or (msg-recv …). The low-level primitive for fanning out N
       // fetches.
-      se::builtins::register_fn(env, "http-get-async",
-                                [&app, root](std::span<const se::value_t> args) -> se::value_t {
-                                  return se::make_future(launch_http_fetch(app, root, args));
-                                });
+      se::builtins::register_fn(
+          env, "http-get-async", [&app, root](std::span<const se::value_t> args) -> se::value_t {
+            return se::make_future(launch_http(app, root, build_get_request(args)));
+          });
 
       // (http-get URL [HEADERS]) — TRANSPARENT: kicks the fetch and SELF-PARKS the calling process,
       // resuming with the response dict threaded straight into the enclosing expression (no
       // channel, no msg-recv). Reaches the scheduler via the captured app;
       // current_pid()/current_process() are valid here (set around the evaluator step). Equivalent
       // to (await (http-get-async URL)).
-      se::builtins::register_fn(env, "http-get",
+      se::builtins::register_fn(
+          env, "http-get", [&app, root](std::span<const se::value_t> args) -> se::value_t {
+            const std::string done = launch_http(app, root, build_get_request(args));
+            auto &sched = app.exec_scheduler();
+            return se::park_on_channel(&sched, sched.current_process().get(), sched.current_pid(),
+                                       done);
+          });
+
+      // (http-request-async METHOD URL [BODY [HEADERS]]) — the GENERAL verb: any method
+      // (GET/PUT/POST/PATCH/DELETE/…) with an optional request BODY (string or bytes) and custom
+      // HEADERS (a list of "Name: value" lines — e.g. "Authorization: Bearer <token>"). Returns a
+      // FUTURE handle.
+      se::builtins::register_fn(env, "http-request-async",
                                 [&app, root](std::span<const se::value_t> args) -> se::value_t {
-                                  const std::string done = launch_http_fetch(app, root, args);
-                                  auto &sched = app.exec_scheduler();
-                                  return se::park_on_channel(&sched, sched.current_process().get(),
-                                                             sched.current_pid(), done);
+                                  return se::make_future(
+                                      launch_http(app, root, build_method_request(args)));
                                 });
+
+      // (http-request METHOD URL [BODY [HEADERS]]) — TRANSPARENT self-parking form of the general
+      // verb; resumes with the same {ok status body(bytes) url headers error} dict as (http-get).
+      // Equivalent to (await (http-request-async METHOD URL BODY HEADERS)).
+      se::builtins::register_fn(
+          env, "http-request", [&app, root](std::span<const se::value_t> args) -> se::value_t {
+            const std::string done = launch_http(app, root, build_method_request(args));
+            auto &sched = app.exec_scheduler();
+            return se::park_on_channel(&sched, sched.current_process().get(), sched.current_pid(),
+                                       done);
+          });
     }
 
     // (fetch-async URI [BASE]) / (fetch URI [BASE]) — the GENERIC async resolver over ANY

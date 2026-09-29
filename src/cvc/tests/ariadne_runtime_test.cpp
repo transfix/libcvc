@@ -2153,8 +2153,14 @@ public:
   explicit CannedHttpClient(cvc::net::HttpResponse r) : resp_(std::move(r)) {}
   std::atomic<int> calls{0};
   std::string last_url;
+  std::string last_method;
+  std::string last_body;
+  std::vector<std::string> last_headers;
   cvc::net::HttpResponse send(const cvc::net::HttpRequest &req) override {
     last_url = req.url;
+    last_method = req.method;
+    last_body = req.body;
+    last_headers = req.headers;
     ++calls;
     return resp_;
   }
@@ -2459,4 +2465,91 @@ TEST(AriadneNetIntrinsics, FetchAsyncFutureAwaited) {
   ASSERT_TRUE(pump_until(rt, [&] { return !node_data_string(app, "r.body").empty(); }))
       << "(await (fetch-async …)) never resolved";
   EXPECT_EQ(node_data_string(app, "r.body"), "world");
+}
+
+// The general method verb — (http-request METHOD URL [BODY [HEADERS]]) — carries an arbitrary
+// method, a string request body, and custom headers (a bearer token + a content-type) through to
+// the transport, and self-parks like (http-get). This is the POST-a-form / authenticated-request
+// path the user asked for.
+TEST(AriadneNetIntrinsics, HttpRequestPostCarriesMethodBodyAndHeaders) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new CannedHttpClient(http_ok(201, "created"));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button(
+      "Go", "(begin"
+            "  (set r (http-request \"POST\" \"http://ex/api\" \"grip=1&risk=2\""
+            "           (list \"Authorization: Bearer tok-123\" \"Content-Type: text/plain\")))"
+            "  (state-set \"r.status\" (get-attr r \"status\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return !cvc::state::instance(app)("r.status").value().empty();
+  })) << "(http-request …) never resumed";
+  EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "201");
+  EXPECT_EQ(fake->calls.load(), 1);
+  EXPECT_EQ(fake->last_method, "POST");
+  EXPECT_EQ(fake->last_url, "http://ex/api");
+  EXPECT_EQ(fake->last_body, "grip=1&risk=2");
+  auto has_hdr = [&](const char *h) {
+    return std::find(fake->last_headers.begin(), fake->last_headers.end(), h) !=
+           fake->last_headers.end();
+  };
+  EXPECT_TRUE(has_hdr("Authorization: Bearer tok-123")) << "bearer header not forwarded";
+  EXPECT_TRUE(has_hdr("Content-Type: text/plain"));
+}
+
+// (http-request-async …) returns a future the program awaits; a BYTES body (here, the octet body a
+// prior (http-get) yielded) rides through byte-exact — so a fetched blob can be re-uploaded with a
+// PUT without a lossy text round-trip.
+TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new CannedHttpClient(http_ok(200, "payload-bytes"));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button(
+      "Go", "(begin"
+            "  (set g (await (http-get-async \"http://ex/src\")))"
+            "  (set r (await (http-request-async \"PUT\" \"http://ex/dst\" (get-attr g \"body\")"
+            "                   (list \"Authorization: Bearer tok\"))))"
+            "  (state-set \"r.status\" (get-attr r \"status\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return !cvc::state::instance(app)("r.status").value().empty();
+  })) << "(await (http-request-async …)) never resumed";
+  EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
+  EXPECT_EQ(fake->calls.load(), 2); // the GET, then the PUT
+  EXPECT_EQ(fake->last_method, "PUT");
+  EXPECT_EQ(fake->last_url, "http://ex/dst");
+  EXPECT_EQ(fake->last_body, "payload-bytes"); // the bytes body threaded through byte-exact
+  auto has_hdr = [&](const char *h) {
+    return std::find(fake->last_headers.begin(), fake->last_headers.end(), h) !=
+           fake->last_headers.end();
+  };
+  EXPECT_TRUE(has_hdr("Authorization: Bearer tok"));
 }
