@@ -389,3 +389,40 @@ TEST_F(BuiltinsTest, TypeOfGenerator) {
   auto r = call("type-of", {gen});
   EXPECT_EQ(std::get<std::string>(r.v), "generator");
 }
+
+// ─── URL encoding ──────────────────────────────────────────────────────────
+
+TEST_F(BuiltinsTest, UrlEncodeUnreservedPassesThrough) {
+  EXPECT_EQ(std::get<std::string>(call("url-encode", {std::string("aZ0-_.~")}).v), "aZ0-_.~");
+}
+
+TEST_F(BuiltinsTest, UrlEncodeEscapesReservedAndSpace) {
+  // space -> %20 (not '+'), and reserved delimiters are percent-escaped with uppercase hex
+  EXPECT_EQ(std::get<std::string>(call("url-encode", {std::string("a b&c=d/e?f")}).v),
+            "a%20b%26c%3Dd%2Fe%3Ff");
+}
+
+TEST_F(BuiltinsTest, UrlEncodeStringifiesNonString) {
+  EXPECT_EQ(std::get<std::string>(call("url-encode", {int64_t{42}}).v), "42");
+}
+
+TEST_F(BuiltinsTest, UrlDecodeReversesPercentAndPlus) {
+  EXPECT_EQ(std::get<std::string>(call("url-decode", {std::string("a%20b%26c")}).v), "a b&c");
+  EXPECT_EQ(std::get<std::string>(call("url-decode", {std::string("a+b")}).v), "a b"); // form '+'
+}
+
+TEST_F(BuiltinsTest, UrlDecodeKeepsMalformedEscapeLiterally) {
+  // a lone '%' or a truncated escape is preserved verbatim, never dropped
+  EXPECT_EQ(std::get<std::string>(call("url-decode", {std::string("100%")}).v), "100%");
+  EXPECT_EQ(std::get<std::string>(call("url-decode", {std::string("%zz")}).v), "%zz");
+}
+
+TEST_F(BuiltinsTest, UrlEncodeDecodeRoundTripsBytes) {
+  // every byte value survives an encode -> decode round trip
+  std::string all;
+  for (int c = 1; c < 256; ++c)
+    all.push_back(static_cast<char>(c));
+  const value_t enc = call("url-encode", {all});
+  const value_t dec = call("url-decode", {std::get<std::string>(enc.v)});
+  EXPECT_EQ(std::get<std::string>(dec.v), all);
+}

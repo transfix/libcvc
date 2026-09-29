@@ -302,6 +302,63 @@ value_t builtin_str(std::span<const value_t> args) {
   return value_t{to_string(args[0])};
 }
 
+std::string percent_encode(const std::string &s) {
+  static const char *const kHex = "0123456789ABCDEF";
+  std::string out;
+  out.reserve(s.size() * 3);
+  for (unsigned char c : s) {
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+        c == '_' || c == '.' || c == '~') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('%');
+      out.push_back(kHex[c >> 4]);
+      out.push_back(kHex[c & 0x0F]);
+    }
+  }
+  return out;
+}
+
+std::string percent_decode(const std::string &s) {
+  const auto nibble = [](char c) -> int {
+    if (c >= '0' && c <= '9')
+      return c - '0';
+    if (c >= 'a' && c <= 'f')
+      return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+      return c - 'A' + 10;
+    return -1;
+  };
+  std::string out;
+  out.reserve(s.size());
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    const char c = s[i];
+    if (c == '%' && i + 2 < s.size()) {
+      const int hi = nibble(s[i + 1]);
+      const int lo = nibble(s[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        out.push_back(static_cast<char>((hi << 4) | lo));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(c == '+' ? ' ' : c); // '+' is space in form-encoded strings
+  }
+  return out;
+}
+
+value_t builtin_url_encode(std::span<const value_t> args) {
+  expect_exact(args, 1, "url-encode");
+  const std::string *s = std::get_if<std::string>(&args[0].v);
+  return value_t{percent_encode(s ? *s : to_string(args[0]))};
+}
+
+value_t builtin_url_decode(std::span<const value_t> args) {
+  expect_exact(args, 1, "url-decode");
+  const std::string *s = std::get_if<std::string>(&args[0].v);
+  return value_t{percent_decode(s ? *s : to_string(args[0]))};
+}
+
 value_t builtin_int(std::span<const value_t> args) {
   expect_exact(args, 1, "int");
   auto &a = args[0];
@@ -741,6 +798,8 @@ environment_ptr builtins::make_default_environment() {
   // String / conversion
   register_fn(env, "str-concat", builtin_str_concat);
   register_fn(env, "str", builtin_str);
+  register_fn(env, "url-encode", builtin_url_encode);
+  register_fn(env, "url-decode", builtin_url_decode);
   register_fn(env, "int", builtin_int);
   register_fn(env, "float", builtin_float);
   register_fn(env, "is-int", builtin_is_int);
