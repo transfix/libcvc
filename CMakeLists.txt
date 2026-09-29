@@ -287,7 +287,10 @@ if(CVC_ENABLE_COVERAGE)
         COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
         
         COMMAND ${CMAKE_COMMAND} -E echo "Capturing coverage data..."
-        COMMAND ${LCOV_PATH} --directory . --capture --output-file coverage.info --ignore-errors mismatch
+        # --ignore-errors negative,gcov,mismatch mirrors ci.yml: geninfo can
+        # emit a spurious negative count for an inlined STL symbol and gcov can
+        # fail on version skew; neither should abort a local coverage run.
+        COMMAND ${LCOV_PATH} --directory . --capture --output-file coverage.info --ignore-errors negative,gcov,mismatch
         
         COMMAND ${CMAKE_COMMAND} -E echo "Filtering coverage data..."
         # Mirror ci.yml's "Generate coverage report" filter exactly, so
