@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <boost/asio.hpp> // a throwaway localhost server for the live-backend test
+#include <chrono>
 #include <cvc/net/http_client.h>
 #include <gtest/gtest.h>
 #include <memory>
@@ -127,6 +128,66 @@ TEST(NetInjection, NullptrRestoresCompiledDefault) {
   EXPECT_NE(cvc::net::send(req).status, 222);
 }
 
+// The dispatcher normalizes every request so both backends see one canonical form
+// (backend-agnostic, so an injected fake observes exactly what a real transport would).
+TEST(NetNormalize, DefaultsMethodDropsGetHeadBodyAndRejectsInvalid) {
+  ClientGuard g;
+  HttpResponse canned;
+  canned.ok = true;
+  canned.status = 200;
+  auto *fake = new FakeClient(canned);
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+
+  { // an empty method becomes GET (the documented default), made explicit for both backends
+    HttpRequest req;
+    req.url = "http://x/";
+    const HttpResponse r = cvc::net::send(req);
+    EXPECT_TRUE(r.ok);
+    EXPECT_EQ(fake->last.method, "GET");
+  }
+  { // a GET carrying a body: the body is stripped before dispatch (XHR would drop it anyway)
+    HttpRequest req;
+    req.url = "http://x/";
+    req.method = "GET";
+    req.body = "payload";
+    cvc::net::send(req);
+    EXPECT_TRUE(fake->last.body.empty()) << "GET body should be dropped";
+  }
+  { // HEAD (case-insensitive) likewise carries no body
+    HttpRequest req;
+    req.url = "http://x/";
+    req.method = "head";
+    req.body = "payload";
+    cvc::net::send(req);
+    EXPECT_TRUE(fake->last.body.empty()) << "HEAD body should be dropped";
+  }
+  { // a body-bearing verb keeps its body untouched
+    HttpRequest req;
+    req.url = "http://x/";
+    req.method = "POST";
+    req.body = "payload";
+    cvc::net::send(req);
+    EXPECT_EQ(fake->last.method, "POST");
+    EXPECT_EQ(fake->last.body, "payload");
+  }
+  { // an out-of-token method is rejected at the facade — the backend is never reached
+    const int before = fake->calls;
+    HttpRequest req;
+    req.url = "http://x/";
+    req.method = "BAD VERB"; // contains a space
+    const HttpResponse r = cvc::net::send(req);
+    EXPECT_FALSE(r.ok);
+    EXPECT_FALSE(r.error.empty());
+    EXPECT_EQ(fake->calls, before) << "invalid method must short-circuit before dispatch";
+  }
+  { // a method too long for the wasm requestMethod buffer (32 bytes) is rejected uniformly
+    HttpRequest req;
+    req.url = "http://x/";
+    req.method = std::string(40, 'A');
+    EXPECT_FALSE(cvc::net::send(req).ok);
+  }
+}
+
 // --- the compiled backend, end to end against localhost ----------------------------------------
 
 namespace {
@@ -145,12 +206,16 @@ public:
       if (ec)
         return;
       char buf[4096];
-      sock.read_some(boost::asio::buffer(buf), ec); // consume the request line/headers
+      const std::size_t got = sock.read_some(boost::asio::buffer(buf), ec); // request line/headers
+      const bool is_head = std::string(buf, ec ? 0 : got).rfind("HEAD ", 0) == 0;
       const std::string body = "hi-from-localhost";
-      const std::string reply = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Test: abc\r\n"
-                                "Content-Length: " +
-                                std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" +
-                                body;
+      std::string reply = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Test: abc\r\n"
+                          "Content-Length: " +
+                          std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n";
+      // A standards-compliant HEAD reply carries the headers + Content-Length but NO body — exactly
+      // the case that hangs a curl backend which set CUSTOMREQUEST=HEAD without CURLOPT_NOBODY.
+      if (!is_head)
+        reply += body;
       boost::asio::write(sock, boost::asio::buffer(reply), ec);
       sock.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
     });
@@ -191,6 +256,24 @@ TEST(NetCurlBackend, CapturesStatusAndResponseHeaders) {
   EXPECT_TRUE(header_present(r.headers, "Content-Type: text/plain"));
   for (const std::string &l : r.headers)
     EXPECT_NE(l.rfind("HTTP/", 0), 0u) << "status line should be dropped: " << l;
+}
+
+TEST(NetCurlBackend, HeadRequestReturnsPromptlyWithNoBody) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "built without an HTTP backend";
+  OneShotServer server;
+  HttpRequest req;
+  req.method = "HEAD";
+  req.url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
+  req.timeout_secs = 5; // without CURLOPT_NOBODY curl would block on a body until this fires
+  const auto start = std::chrono::steady_clock::now();
+  const HttpResponse r = cvc::net::send(req);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.status, 200);
+  EXPECT_TRUE(r.body.empty()) << "a HEAD response must not carry a body";
+  EXPECT_TRUE(header_present(r.headers, "Content-Type: text/plain")) << "HEAD headers not captured";
+  EXPECT_LT(elapsed, std::chrono::seconds(3)) << "HEAD hung — CURLOPT_NOBODY not set for HEAD";
 }
 
 TEST(NetCurlBackend, TransportFailureIsErrorNotThrow) {

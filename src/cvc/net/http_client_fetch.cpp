@@ -51,6 +51,11 @@ public:
     // Buffer the whole body to memory; keep OUR cache authoritative rather than the browser HTTP
     // cache / IndexedDB (no EMSCRIPTEN_FETCH_PERSIST_FILE).
     attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_REPLACE;
+    // KNOWN DIVERGENCE (documented, not fixable here): emscripten_fetch_attr_t exposes no redirect
+    // control, so req.follow_redirects and req.max_redirects cannot be honored on wasm — XHR always
+    // follows redirects up to the browser's own (~20) limit. The curl backend enforces both. A
+    // caller that depends on no-follow as a credential/SSRF guard must not rely on it in the
+    // browser.
     attr.timeoutMSecs =
         req.timeout_secs > 0 ? static_cast<unsigned long>(req.timeout_secs) * 1000u : 0u;
 

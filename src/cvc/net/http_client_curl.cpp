@@ -94,6 +94,44 @@ bool build_header_list(const std::vector<std::string> &lines, struct curl_slist 
   return true;
 }
 
+// Case-insensitive ASCII equality of a method token against a literal (HEAD/GET tests).
+bool method_ieq(const std::string &m, const char *lit) {
+  std::size_t i = 0;
+  for (; i < m.size() && lit[i]; ++i) {
+    char a = m[i], b = lit[i];
+    if (a >= 'a' && a <= 'z')
+      a = static_cast<char>(a - 32);
+    if (b >= 'a' && b <= 'z')
+      b = static_cast<char>(b - 32);
+    if (a != b)
+      return false;
+  }
+  return i == m.size() && lit[i] == '\0';
+}
+
+// Is a header named `name` already present (case-insensitive) among the "Name: value" lines?
+bool has_header(const std::vector<std::string> &lines, const std::string &name) {
+  for (const std::string &line : lines) {
+    if (line.size() <= name.size() || line[name.size()] != ':')
+      continue;
+    bool match = true;
+    for (std::size_t i = 0; i < name.size(); ++i) {
+      char a = line[i], b = name[i];
+      if (a >= 'A' && a <= 'Z')
+        a = static_cast<char>(a + 32);
+      if (b >= 'A' && b <= 'Z')
+        b = static_cast<char>(b + 32);
+      if (a != b) {
+        match = false;
+        break;
+      }
+    }
+    if (match)
+      return true;
+  }
+  return false;
+}
+
 class CurlHttpClient : public HttpClient {
 public:
   HttpResponse send(const HttpRequest &req) override {
@@ -141,18 +179,37 @@ public:
     // Body + method. Order matters: set the size BEFORE COPYPOSTFIELDS so libcurl copies exactly
     // body.size() bytes (it would otherwise strlen() the buffer and truncate an embedded NUL).
     // COPYPOSTFIELDS copies the body (no lifetime worry) and defaults the verb to POST;
-    // CUSTOMREQUEST then overrides it to the requested method. A bodyless custom verb sets
-    // CUSTOMREQUEST only; a plain GET sets neither.
+    // CUSTOMREQUEST then overrides it to the requested method. (The facade has already dropped a
+    // body for GET/HEAD and defaulted an empty method to GET, so req is canonical here.)
     if (!req.body.empty()) {
       curl_easy_setopt(h.get(), CURLOPT_POSTFIELDSIZE_LARGE,
                        static_cast<curl_off_t>(req.body.size()));
       curl_easy_setopt(h.get(), CURLOPT_COPYPOSTFIELDS, req.body.data());
     }
-    if (!req.method.empty())
+    // HEAD is driven by NOBODY, NOT by the CUSTOMREQUEST string: with CUSTOMREQUEST="HEAD" alone
+    // libcurl sends HEAD but still waits for a response body that never comes, hanging until the
+    // timeout. NOBODY sends a proper HEAD (fetch/XHR already does). GET is curl's default, so it
+    // needs no override; any other verb goes through CUSTOMREQUEST.
+    if (method_ieq(req.method, "HEAD")) {
+      curl_easy_setopt(h.get(), CURLOPT_NOBODY, 1L);
+    } else if (!method_ieq(req.method, "GET") && !req.method.empty()) {
       curl_easy_setopt(h.get(), CURLOPT_CUSTOMREQUEST, req.method.c_str());
+    }
+
+    // Keep native and the browser byte-identical on request headers. With a body set via
+    // COPYPOSTFIELDS and no caller Content-Type, libcurl would auto-inject
+    // "Content-Type: application/x-www-form-urlencoded" (and "Expect: 100-continue" for a >1KB
+    // body) that the fetch backend never adds. Neutralize both with removers ("Name:" with no value
+    // disables a curl auto-header) unless the caller set Content-Type themselves.
+    std::vector<std::string> header_lines = req.headers;
+    if (!req.body.empty()) {
+      if (!has_header(header_lines, "Content-Type"))
+        header_lines.emplace_back("Content-Type:"); // drop curl's default; neither backend adds one
+      header_lines.emplace_back("Expect:");         // never use 100-continue (parity + latency)
+    }
 
     struct curl_slist *raw_hdrs = nullptr;
-    if (!build_header_list(req.headers, &raw_hdrs)) {
+    if (!build_header_list(header_lines, &raw_hdrs)) {
       resp.error = "cvc::net: out of memory building request headers";
       return resp;
     }
