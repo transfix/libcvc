@@ -6,6 +6,7 @@
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
+#include <cvc/core/async_task.h> // launch_pool_task — the shared offload-and-park primitive
 #include <cvc/net/http_client.h>
 
 #ifdef CVC_STATE_EXEC
@@ -192,25 +193,11 @@ void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts) {
 // verbs — GET, and the general method verb. The worker ALWAYS posts a dict (an error dict on a
 // throw), so a waiter never hangs.
 std::string launch_http(cvc::app &app, const std::string &root, cvc::net::HttpRequest req) {
-  static std::atomic<std::uint64_t> seq{0};
-  const std::string chan =
-      "http.reply#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
-  const std::string done = se::resolve_channel_key(root, chan); // '#' => == chan
-  const std::string url = req.url;
-  app.compute_async(
-      1, [](int) {},
-      [&app, req = std::move(req), done, url] {
-        se::value_t payload;
-        try {
-          payload = marshal_response(cvc::net::send(req));
-        } catch (const std::exception &e) {
-          payload = marshal_error(url, std::string("http: ") + e.what());
-        } catch (...) {
-          payload = marshal_error(url, "http: unknown error");
-        }
-        app.exec_scheduler().post_message(done, payload);
-      });
-  return done;
+  const std::string url = req.url; // capture before the move for the error path
+  return cvc::launch_pool_task(
+      app, root, "http.reply",
+      [req = std::move(req)]() { return marshal_response(cvc::net::send(req)); },
+      [url](const std::string &msg) { return marshal_error(url, std::string("http: ") + msg); });
 }
 
 // (http-get URL [OPTS]) — a GET; OPTS is an options dict (query/headers — see apply_http_options).
@@ -261,33 +248,17 @@ std::string launch_uri_fetch(cvc::app &app, const std::string &root,
     if (const std::string *b = std::get_if<std::string>(&args[1].v))
       base = *b;
 
-  static std::atomic<std::uint64_t> seq{0};
-  const std::string chan =
-      "uri.reply#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
-  const std::string done = se::resolve_channel_key(root, chan);
-  app.compute_async(
-      1, [](int) {},
-      [&app, uri, base, done] {
-        se::value_t payload;
-        try {
-          payload =
-              marshal_uri_result(resolve(uri, base)); // resolve() is app-free + has its own barrier
-        } catch (const std::exception &e) {
-          UriResult er;
-          er.ok = false;
-          er.canonical = uri;
-          er.error = std::string("fetch: ") + e.what();
-          payload = marshal_uri_result(er);
-        } catch (...) {
-          UriResult er;
-          er.ok = false;
-          er.canonical = uri;
-          er.error = "fetch: unknown error";
-          payload = marshal_uri_result(er);
-        }
-        app.exec_scheduler().post_message(done, payload);
+  return cvc::launch_pool_task(
+      app, root, "uri.reply",
+      // resolve() is app-free + has its own barrier, so it is safe on a pool worker.
+      [uri, base]() { return marshal_uri_result(resolve(uri, base)); },
+      [uri](const std::string &msg) {
+        UriResult er;
+        er.ok = false;
+        er.canonical = uri;
+        er.error = std::string("fetch: ") + msg;
+        return marshal_uri_result(er);
       });
-  return done;
 }
 
 } // namespace

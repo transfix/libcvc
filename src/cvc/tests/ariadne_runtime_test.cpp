@@ -15,9 +15,11 @@
 #include <cvc/ariadne/uri.h>            // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
+#include <cvc/core/async_task.h> // launch_pool_task generalization test
 #include <cvc/core/state.h>
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
 #include <cvc/core/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
+#include <cvc/core/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/core/state_exec/types.h>           // value_t
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
@@ -2709,4 +2711,59 @@ TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
   EXPECT_EQ(fake->last_url, "http://ex/dst");
   EXPECT_EQ(fake->last_body, "payload-bytes"); // the bytes body threaded through byte-exact
   EXPECT_TRUE(headers_contain(fake->last_headers, "Authorization: Bearer tok"));
+}
+
+// launch_pool_task generalizes beyond HTTP: a NON-network "heavy" kernel offloaded to the compute
+// pool and awaited by a DSL action — the exact shape a volume/geometry intrinsic follows. Registers
+// a transparent (pool-double n) and a future (pool-double-async n) via the SAME action-intrinsics
+// seam register_net_intrinsics uses, so both land in the action lane only (never the render lane).
+TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  NetIntrinsicsGuard guard; // clears the action intrinsics on teardown
+  app.computePool();        // warm the lazy singletons on THIS thread before a worker touches them
+  app.exec_scheduler();
+  register_action_intrinsics([&app](std::shared_ptr<se::environment> env,
+                                    se::intrinsics_context &ictx) {
+    const std::string root = ictx.root_path;
+    auto arg_int = [](std::span<const se::value_t> args) -> std::int64_t {
+      if (!args.empty())
+        if (const std::int64_t *v = std::get_if<std::int64_t>(&args[0].v))
+          return *v;
+      return 0;
+    };
+    // A pure C++ kernel: doubles its input. Runs on a pool worker; no evaluator/state re-entry.
+    auto make_work = [](std::int64_t n) {
+      return [n]() { return se::value_t(static_cast<std::int64_t>(n * 2)); };
+    };
+    auto on_err = [](const std::string &e) { return se::value_t(std::string("err: ") + e); };
+    se::builtins::register_fn(
+        env, "pool-double",
+        [&app, root, arg_int, make_work, on_err](std::span<const se::value_t> args) -> se::value_t {
+          return cvc::park_on_pool_task(app, root, "test.reply", make_work(arg_int(args)), on_err);
+        });
+    se::builtins::register_fn(
+        env, "pool-double-async",
+        [&app, root, arg_int, make_work, on_err](std::span<const se::value_t> args) -> se::value_t {
+          return cvc::future_pool_task(app, root, "test.reply", make_work(arg_int(args)), on_err);
+        });
+  });
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (state-set \"r.t\" (str (pool-double 21)))"
+                                  "  (state-set \"r.a\" (str (await (pool-double-async 10)))))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.a").value().empty(); }))
+      << "the offloaded pool task never resumed the action";
+  EXPECT_EQ(cvc::state::instance(app)("r.t").value(), "42"); // transparent self-park
+  EXPECT_EQ(cvc::state::instance(app)("r.a").value(), "20"); // awaited future
 }
