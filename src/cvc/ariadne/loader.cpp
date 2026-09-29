@@ -552,7 +552,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     // border colour). A colour-capable backend renders it; others fall back to plain text.
     const YAML::Node col = n["color"];
     if (col && col.IsSequence() && col.size() >= 3)
-      w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f), col[2].as<float>(1.0f));
+      w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f),
+                          col[2].as<float>(1.0f));
     return w;
   }
   if (type == "checkbox") {

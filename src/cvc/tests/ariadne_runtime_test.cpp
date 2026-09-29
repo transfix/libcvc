@@ -228,13 +228,13 @@ TEST(AriadneRuntime, ColoredTextEmitsTintedLeaf) {
   rt.set_backend(&mb);
   // A tinted literal Text and a tinted bound Text take the *_colored leaves; an untinted Text
   // alongside them still takes the plain leaf (the tint is purely additive).
-  rt.set_root(group({with_text_color(text("hi"), 0.9f, 0.2f, 0.2f),
-                     with_text_color(text_bound("PDR", "rf.pdr"), 0.1f, 0.8f, 0.3f),
-                     text("plain")}));
+  rt.set_root(
+      group({with_text_color(text("hi"), 0.9f, 0.2f, 0.2f),
+             with_text_color(text_bound("PDR", "rf.pdr"), 0.1f, 0.8f, 0.3f), text("plain")}));
   rt.render();
   EXPECT_TRUE(mb.saw("text_line_colored:hi")); // literal tinted -> colored leaf
-  EXPECT_FALSE(mb.saw("text_line:hi"));         // ... and NOT the plain leaf
-  EXPECT_TRUE(mb.saw("text_line:plain"));       // untinted -> plain leaf (default preserved)
+  EXPECT_FALSE(mb.saw("text_line:hi"));        // ... and NOT the plain leaf
+  EXPECT_TRUE(mb.saw("text_line:plain"));      // untinted -> plain leaf (default preserved)
   // The bound tinted Text ran the value-colored leaf; its colour reached the backend (it is the
   // last tinted widget walked).
   EXPECT_FLOAT_EQ(mb.last_text_rgb[0], 0.1f);

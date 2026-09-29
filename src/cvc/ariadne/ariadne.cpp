@@ -1148,7 +1148,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
       // §4 read-lane (homoiconic): a `bind` that is an s-expression (starts with '(') is a
       // COMPUTED value re-evaluated each frame, not a state path. State paths never start
       // with '(', so this is unambiguous. Read-only, bounded, fail-safe empty.
-      const std::string val = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+      const std::string val =
+          is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
       if (w.has_text_color)
         b.text_value_colored(label, val, w.text_color);
       else
