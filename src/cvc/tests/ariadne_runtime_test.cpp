@@ -2328,3 +2328,65 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncDoesNotBlockTheScheduler) {
       pump_until(rt, [&] { return !cvc::state::instance(app)("r.status").value().empty(); }));
   EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
 }
+
+// PR-A: the TRANSPARENT verb — (http-get url) self-parks and yields the dict directly, no msg-recv.
+TEST(AriadneNetIntrinsics, HttpGetTransparentReturnsDictNoMsgRecv) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new CannedHttpClient(http_ok(200, "hi", {"Content-Type: text/plain"}));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set r (http-get \"http://ex/x\"))"
+                                  "  (state-set \"r.status\" (get-attr r \"status\"))"
+                                  "  (state-data-set \"r.body\" (get-attr r \"body\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // (http-get …) self-parks the action; drain never blocks
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return !cvc::state::instance(app)("r.status").value().empty();
+  })) << "the self-parked (http-get) never resumed";
+  EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
+  EXPECT_EQ(node_data_string(app, "r.body"), "hi"); // the dict flowed into `set r` transparently
+  EXPECT_EQ(fake->calls.load(), 1);                 // one transparent fetch, one transfer
+}
+
+// PR-A: PROPER await — (await (http-get-async url)) resolves the future returned by the async verb.
+TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new CannedHttpClient(http_ok(200, "hi"));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(
+      group({button("Go", "(state-set \"r.status\" "
+                          "(get-attr (await (http-get-async \"http://ex/x\")) \"status\"))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return !cvc::state::instance(app)("r.status").value().empty();
+  })) << "(await <future>) never resolved";
+  EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
+  EXPECT_EQ(fake->calls.load(), 1);
+}
