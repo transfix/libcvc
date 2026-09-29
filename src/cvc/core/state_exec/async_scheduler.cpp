@@ -162,7 +162,21 @@ void async_scheduler::execute_process_step(process &proc) {
   // co_await chain is only meaningful when a coroutine executor drives the scheduler for
   // intra-run interleaving — not the case for the synchronous sync_step/sync_run + per-frame
   // pump paths — and multi-level co_await + suspend across sync_wait is not robust here.)
-  bool done = evaluator_.step(proc.state).sync_wait();
+  bool done = false;
+  try {
+    done = evaluator_.step(proc.state).sync_wait();
+  } catch (const std::exception &e) {
+    // A runtime error thrown by a step — a throwing intrinsic (e.g. a channel-policy refusal) or a
+    // bad-arg builtin — must NOT propagate out of the pump: it would escape sync_run() and crash
+    // the host's per-frame drain loop. Mark the process killed with the reason (mirroring the sync
+    // scheduler's runtime-error handling); a caller sweep reports a killed process fail-safe. This
+    // is the async lane's analogue of the sync evaluator's re-throw-to-caller, made drain-safe.
+    proc.accumulated_time +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
+            .count();
+    kill_process(proc, e.what());
+    return;
+  }
 
   auto now = std::chrono::steady_clock::now();
   proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();

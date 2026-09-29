@@ -3008,6 +3008,49 @@ mount** (§11.4 teardown restricted to `includes.<as>`: kill the mount's handler
 watch is scheme-appropriate — `file://` mtime/inotify, `state://` a `state-watch` on the target node
 (`valueChanged`/`dataChanged`/`childChanged`), `https://` an ETag or `poll:<sec>`.
 
+### 12.6 Message-channel scoping — ✅ LANDED (PRs #463–#465 + runtime policy)
+
+Message channels (`msg-send`/`msg-recv`/`msg-pending` on the app-wide scheduler, §4.7) are **chrooted
+per document, exactly like state** — closing an isolation gap where they were previously global (two
+documents on one app collided on a channel name, contradicting §4.7's per-document-isolation intent).
+The resolution mirrors `resolve_bind`, entirely at the `msg-*` intrinsic boundary (the
+`async_scheduler` keying is untouched — it is still an opaque-string map):
+
+- **Private-by-prefix (default):** a bare channel resolves to `<doc-prefix>.channels.<name>`, so a
+  document cannot name another's channel — isolation is the inability to spell the key, as with state.
+- **`#`-runtime channels** (the framework's own `…#tick`/`#key`/`#pointer` residents) and an **empty
+  chroot** resolve verbatim — the backward-compatible identity path (every pre-existing `msg-*` caller
+  and the input/tick residents keep working unchanged).
+- **`/`-app-root-global escape:** a leading `/` resolves to the app root, but only for a channel the
+  document **declared `global: true`** (default-deny — a chrooted sub-document cannot blanket-escape;
+  the enclosing scope states which globals are reachable).
+- **Cross-scope sharing via the §12 link mechanism:** a mount's `channels:` grant lowers into the
+  same transparent-link **hole** as `link:` (planted by `wire_holes` under the reserved `channels.`
+  subtree); `resolve_channel` follows the link's `linkTarget()` — a channel key is a *redirect string*,
+  not a state value, so the target node need not exist — so a granted child and the parent agree on
+  one key. No parallel registry, no scheduler change.
+
+**Authoring surface (`.ari`):** a top-level `channels:` block declares a document's own channels
+(`- name`, or `{channel, shared, global}`); a mount `channels:` block grants a parent channel into a
+child (`local: parent`, or `{to:, mode: ro|rw}`). Strictness lives in a document-level **`lint:`**
+block (a broader lint/correctness effort): `lint: { channels: strict|warn|off, quiet: bool }`, default
+**strict** once a `channels:` block is present (a document with no `channels:` block is never
+channel-linted, so existing docs are unaffected).
+
+**Enforcement — two layers, both driven by `lint.channels`:**
+1. **Load-time lint (fail-fast, static):** the loader parses each program lane (`init`/`on_tick`/
+   `on_key`/`on_pointer` + every widget `on:`) and walks the AST for the string-literal channel of a
+   `(msg-* "literal")`; an undeclared reference is a hard load error (strict), a warning (warn), or
+   skipped (off). Covers the common static case.
+2. **Runtime policy (backstop, dynamic):** the Runtime installs a `channel_policy` (declared set +
+   globals + strict/quiet) on every action/resident `intrinsics_context`; in strict mode a `msg-*` on
+   an undeclared channel is refused (throw, caught **fail-safe** — the pump marks the action killed and
+   warns once, never crashing `drain()`). Catches dynamic `(msg-recv (expr))` names the static lint
+   can't see. `#`-runtime channels and grant-linked channels are always exempt.
+
+The host wires it after load: `Runtime::set_channel_policy(declared, global, strict, quiet)` fed from
+`LoadResult.channels`/`lint` (the generic `.ari` runner does this when a document declares `channels:`).
+
 ---
 
 ## 13. Resource loading — URIs, schemes, and the handler registry

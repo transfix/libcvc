@@ -40,6 +40,20 @@ struct process;
 ///   - proc: shared_ptr so the process survives even if the scheduler
 ///     removes it from its map (e.g. after a kill); this prevents
 ///     dangling-pointer bugs on map rehash or process removal.
+// §12 channel enforcement (the runtime backstop for DYNAMIC channel names the load-time lint can't
+// see). A host (the Ariadne Runtime) installs this on each action/resident context from a
+// document's channels:/lint: declaration. When `enforce` (strict mode), a msg-* is refused unless
+// its channel is a '#'-runtime channel, a declared channel, a declared app-root-global (for a
+// '/'-ref), or granted via a planted transparent-link (throw, caught fail-safe). In warn/off mode
+// the host leaves `enforce` false — the load lint already surfaced those. Empty/absent = permissive
+// (non-Ariadne state_exec, or a document with no channels: block).
+struct channel_policy {
+  bool enforce = false;              // strict: throw on an undeclared channel
+  bool quiet = false;                // advisory; the load-time lint owns the "relaxed" notices
+  std::vector<std::string> declared; // channel names the document declared
+  std::vector<std::string> global;   // declared app-root-globals (the '/'-escape allowlist)
+};
+
 struct intrinsics_context {
   scheduler_base *sched = nullptr;   // Non-owning; outlives context (sync or async scheduler)
   cvc::state *root = nullptr;        // Non-owning; app-scoped lifetime
@@ -50,6 +64,7 @@ struct intrinsics_context {
   std::string cluster_id;            // Cluster identity
   std::string node_id;               // Node identity
   std::string root_path;             // Chroot path (empty = full tree)
+  const channel_policy *channels = nullptr; // §12 channel enforcement (non-owning; host-installed)
 
   // State-watch connection registry (opaque — managed by intrinsics impl)
   struct watch_entry {

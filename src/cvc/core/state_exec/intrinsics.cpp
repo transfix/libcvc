@@ -1,3 +1,4 @@
+#include <algorithm> // §12 enforce_channel_policy: std::find over the declared/global channel lists
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
 #include <chrono>
@@ -662,10 +663,44 @@ std::string resolve_channel(const intrinsics_context *ctx, const std::string &ch
   return key;
 }
 
+// §12 channel enforcement (runtime backstop). When the host installed a strict channel_policy on
+// this context, a msg-* on an undeclared channel is refused — the completeness layer for DYNAMIC
+// channel names the load-time lint can't see. Allowed: a '#'-runtime channel; a declared channel; a
+// declared app-root-global (for a '/'-ref); or a channel granted via a planted transparent-link
+// (a §12 mount grant). Otherwise throw (the action lane catches it fail-safe and warns once). A
+// no-op unless enforce is set (warn/off leave it false — the load lint handled those at load).
+void enforce_channel_policy(const intrinsics_context *ctx, const std::string &channel) {
+  if (!ctx || !ctx->channels || !ctx->channels->enforce)
+    return;
+  if (channel.find('#') != std::string::npos)
+    return; // runtime-internal channel (tick/key/pointer) — never enforced
+  const channel_policy &p = *ctx->channels;
+  if (!channel.empty() && channel.front() == '/') {
+    const std::string g = channel.substr(1);
+    if (std::find(p.global.begin(), p.global.end(), g) != p.global.end())
+      return; // a declared app-root-global
+    throw std::runtime_error("channel policy: undeclared app-root-global '/" + g +
+                             "' (declare it as a global in the channels: block)");
+  }
+  if (std::find(p.declared.begin(), p.declared.end(), channel) != p.declared.end())
+    return;        // a declared channel
+  if (ctx->root) { // or a channel granted via a planted transparent-link (a §12 mount grant)
+    const std::string rel = std::string("channels") + cvc::state::SEPARATOR + channel;
+    if (cvc::state *n = ctx->root->findDescendant(rel))
+      if (n->isLink() && n->linkMode() == cvc::state::link_mode::transparent &&
+          !n->linkTarget().empty())
+        return;
+  }
+  throw std::runtime_error("channel policy: undeclared channel '" + channel +
+                           "' (add it to the channels: block, or relax lint.channels)");
+}
+
 value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_min(args, 2, "msg-send");
   require_root(ctx, "msg-send");
   auto &path = as_string(args[0], "msg-send");
+  enforce_channel_policy(ctx,
+                         path); // §12 runtime enforcement (strict policy → throw if undeclared)
   auto &payload = as_string(args[1], "msg-send");
   std::string content_type = "text/plain";
   if (args.size() > 2)
@@ -710,7 +745,9 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
 value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "msg-recv");
   require_sched(ctx, "msg-recv");
-  const std::string ch = resolve_channel(ctx, as_string(args[0], "msg-recv")); // §12 chroot-scoped
+  const std::string &raw = as_string(args[0], "msg-recv");
+  enforce_channel_policy(ctx, raw);                 // §12 runtime enforcement (strict → throw)
+  const std::string ch = resolve_channel(ctx, raw); // §12 chroot-scoped scheduler key
 
   // Resolve the actual PID of the currently executing process.
   int pid = ctx->sched->current_pid();
@@ -748,7 +785,9 @@ value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> arg
 value_t intrinsic_msg_pending(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "msg-pending");
   require_sched(ctx, "msg-pending");
-  const std::string ch = resolve_channel(ctx, as_string(args[0], "msg-pending")); // §12 scoped
+  const std::string &raw = as_string(args[0], "msg-pending");
+  enforce_channel_policy(ctx, raw);                 // §12 runtime enforcement (strict → throw)
+  const std::string ch = resolve_channel(ctx, raw); // §12 chroot-scoped scheduler key
   return value_t(static_cast<int64_t>(ctx->sched->pending_message_count(ch)));
 }
 
