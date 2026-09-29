@@ -1,29 +1,23 @@
-// AriRuntime — run a full Ariadne (.ari) application from a host program with ONE object.
+// AriRuntime — run a full Ariadne (.ari) application over cvcGL from a host program with
+// ONE object. It is the thin GL composer over the backend-neutral
+// cvc::ariadne::AppRuntime: an ImGui-over-VTK backend (cvc::gl::ariadne::ImGuiBackend), a
+// cvcGL SceneAdapter (realize_scene / tick_scene over the SceneRenderer's SceneGraph), and
+// an AppRuntime that owns all the neutral bundling (loader, init:/on_* lanes, host verbs,
+// the per-frame drain + scene-service loop). The GL-driving bits — VTK input pump, camera
+// integration, and the draw — stay here; everything else lives in AppRuntime.
 //
-// It bundles the wiring src/cvcGL/examples/ariadne_hello.cpp does by hand: a cvc::ariadne::Runtime
-// over a SceneGraph's state prefix, the cvc::gl::ariadne::ImGuiBackend that renders the widget tree
-// as ImGui over VTK, the .ari loader, scene realization, and the per-frame drain/render/tick loop.
-// The host supplies the window (SceneRenderer), camera (CameraController) and overlay
-// (ImGuiOverlay) and drives the frame loop; AriRuntime owns the Runtime/backend/realized-scene and
-// the sequencing.
-//
-// This class is libpython-free (it takes std::function, never PyObject*) so native demos, the
-// static wasm build, and the pycvc_gl binding all use it. Input is VTK's (widget on_click/on_hover
-// + camera nav arrive through the VTK interactor -> ImGui, zero plumbing); document-level
-// on_key/on_pointer residents need a producer fed via post_key/post_pointer (a follow-up seam),
-// never SDL.
-//
-// The program lanes (init:/on_tick/on_key/on_pointer, register_verb*, the scheduler pump) are
-// no-ops without CVC_STATE_EXEC; loading a YAML .ari needs the yaml build.
-// have_state_exec()/have_yaml() report which are live.
+// The public API is unchanged from the pre-split class, so pycvc_gl, demos, and the CI
+// render test consume it exactly as before. libpython-free (std::function, never
+// PyObject*). Input is VTK's (widget on_click/on_hover + camera nav arrive through the VTK
+// interactor -> ImGui); document-level on_key/on_pointer residents need a producer fed via
+// post_key/post_pointer (a follow-up seam), never SDL. The program lanes are no-ops without
+// CVC_STATE_EXEC; loading a YAML .ari needs the yaml build.
 #pragma once
 
-#include <cstdint>
-#include <cvc/ariadne/ariadne.h>          // cvc::ariadne::Runtime
-#include <cvc/gl/ariadne/ImGuiBackend.h>  // cvc::gl::ImGuiBackend
-#include <cvc/gl/ariadne/scene_realize.h> // RealizedScene
+#include <cvc/ariadne/app_runtime.h>     // cvc::ariadne::AppRuntime, SceneAdapter
+#include <cvc/gl/ariadne/ImGuiBackend.h> // cvc::gl::ImGuiBackend
 #include <functional>
-#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -48,53 +42,27 @@ public:
   AriRuntime &operator=(const AriRuntime &) = delete;
 
   // --- setup (call BEFORE load()) ---
-
-  // A search dir for cvc:// component imports; forwarded to register_cvc_uri_handler on load().
   void add_component_path(const std::string &dir);
-
-  // Bind a host action `event` (a widget `event: quit` / menu_action) to a C++ handler, run on the
-  // host thread inside frame()'s drain(), never mid-walk.
   void on(const std::string &event, std::function<void()> handler);
-
-  // Register a host verb the .ari program can call. `register_verb` is SYNCHRONOUS (fn runs inline
-  // on the host thread inside drain(), no args/return marshalling — a pure side-effecting hook).
-  // `register_async_verb` OFFLOADS `work` to the app compute pool and posts its string result to
-  // `done_channel`; the .ari program parks on (msg-recv "done_channel") and resumes under drain()'s
-  // slice budget — the nav_compute pattern. Both are no-ops without state_exec.
   void register_verb(const std::string &name, std::function<void()> fn);
   void register_async_verb(const std::string &name, const std::string &done_channel,
                            std::function<std::string()> work);
 
   // --- document ---
-
-  // Load + mount a .ari document (widgets and/or a scene), running its init:/on_* scripts and
-  // realizing its scene under the state prefix. Returns non-fatal warnings; THROWS
-  // std::runtime_error(lr.error) on a fatal load (min_libcvc gate, parse error, no yaml support).
-  // A widgets-only document skips the scene entirely.
   std::vector<std::string> load(const std::string &path);
-
-  // Mount a programmatically-built widget tree instead of loading a file (the P0 path). Applied at
-  // the next frame boundary.
   void set_root(cvc::ariadne::Widget root);
 
   // --- per-frame ---
-
-  // Host work for one frame (NO draw): pump VTK input, advance the camera, drain queued Ariadne
-  // actions + the scheduler slice, mirror bound scene visibility, service volume nodes. Call once
-  // per frame, BEFORE render().
+  // Host work for one frame (NO draw): pump VTK input, advance the camera, then AppRuntime::drain()
+  // (queued actions + scheduler slice + scene visibility/tick). Call once per frame, BEFORE
+  // render().
   void frame(double dt_seconds);
   // The draw: view.render(), which fires the widget-tree walk (rt.render()) through the overlay
-  // callback. NEVER call rt.render() directly.
+  // callback. NEVER call the Runtime's render() directly.
   void render();
-  // Convenience: frame(dt) then render().
-  void step(double dt_seconds);
-  // view.windowClosed() OR a host `quit` handler set the flag.
-  bool should_close() const;
-  // Optional blocking host loop at ~fps until should_close(); yields the GIL between frames when
-  // the caller is Python (the pycvc_gl typemap wraps this).
-  void run(double fps = 120.0);
-
-  // A `quit` event marks should_close(); a convenience for the common menu action.
+  void step(double dt_seconds); // frame(dt) then render()
+  bool should_close() const;    // a host `quit` OR the window closed
+  void run(double fps = 120.0); // optional blocking host loop until should_close()
   void request_close();
 
   // --- input seam (document-level on_key/on_pointer residents; VTK-sourced, never SDL) ---
@@ -102,31 +70,19 @@ public:
   void post_pointer(int kind, double x, double y, double dx, double dy, int button, int clicks);
 
   // --- diagnostics / capabilities ---
-  std::vector<std::string> take_warnings(); // reactive read-lane diagnostics from render()
-  bool reload_if_changed();                 // §12.5 hot reload if a watched source changed
-  static bool have_state_exec();            // program lanes + verbs live?
-  static bool have_yaml();                  // can load a YAML .ari?
+  std::vector<std::string> take_warnings();
+  bool reload_if_changed();
+  static bool have_state_exec();
+  static bool have_yaml();
 
 private:
-  void ensure_intrinsics(); // lazily install the register_action_intrinsics provider
-
   SceneRenderer *view_;
   CameraController *cam_;
   ImGuiOverlay *overlay_;
   cvc::app &app_;
-  cvc::gl::ImGuiBackend
-      backend_; // DECLARED BEFORE rt_ => destroyed AFTER rt_ (backend outlives Runtime)
-  cvc::ariadne::Runtime rt_;
-  RealizedScene realized_; // owns StageLighting rigs; must outlive the render loop
-  std::vector<std::string> componentPaths_;
-  std::vector<std::string> sources_;
-  std::map<std::string, std::int64_t> stamps_;
-  bool quit_ = false;
-  bool haveScene_ = false;
-  bool intrinsicsRegistered_ = false;
-  // Verbs registered before the intrinsics provider is installed (installed once, lazily).
-  std::vector<std::pair<std::string, std::function<void()>>> syncVerbs_;
-  std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> asyncVerbs_;
+  cvc::gl::ImGuiBackend backend_; // DECLARED BEFORE app_rt_ => the Runtime it points at dies first
+  std::unique_ptr<cvc::ariadne::SceneAdapter> scene_; // the GL scene seam; before app_rt_
+  cvc::ariadne::AppRuntime app_rt_; // owns the neutral bundling; holds scene_.get()
 };
 
 } // namespace ariadne
