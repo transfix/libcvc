@@ -12,6 +12,7 @@
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/loader.h>         // §12 end-to-end load: mount through the real Runtime
 #include <cvc/ariadne/net_intrinsics.h> // §13.8 async (http-get-async) intrinsic test
+#include <cvc/ariadne/uri.h>            // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
@@ -2389,4 +2390,73 @@ TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
   })) << "(await <future>) never resolved";
   EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
   EXPECT_EQ(fake->calls.load(), 1);
+}
+
+// PR-B: the GENERIC async resolver — (fetch uri) resolves ANY registered scheme off-thread and
+// self-parks, returning { ok body(bytes) url error }. No HTTP backend needed (a custom scheme
+// here).
+TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  cvc::app app;
+  struct Teardown {
+    ~Teardown() {
+      clear_action_intrinsics();
+      unregister_uri_handler("mem");
+    }
+  } td;
+  // A canned custom scheme; the handler runs on the compute-pool worker, so it must be thread-safe
+  // (a pure lambda returning a fixed UriResult is).
+  register_uri_handler("mem", [](const Uri &u, const std::string &) {
+    return UriResult{true, "hello", u.raw, std::string()};
+  });
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set r (fetch \"mem://x\"))"
+                                  "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                                  "  (state-data-set \"r.body\" (get-attr r \"body\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.ok").value().empty(); }))
+      << "(fetch …) never resolved";
+  EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "true");
+  EXPECT_EQ(node_data_string(app, "r.body"), "hello"); // resolved bytes threaded in transparently
+}
+
+// PR-B: (await (fetch-async uri)) resolves the generic resolver's future.
+TEST(AriadneNetIntrinsics, FetchAsyncFutureAwaited) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  cvc::app app;
+  struct Teardown {
+    ~Teardown() {
+      clear_action_intrinsics();
+      unregister_uri_handler("mem");
+    }
+  } td;
+  register_uri_handler("mem", [](const Uri &u, const std::string &) {
+    return UriResult{true, "world", u.raw, std::string()};
+  });
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(state-data-set \"r.body\" "
+                                  "(get-attr (await (fetch-async \"mem://y\")) \"body\"))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] { return !node_data_string(app, "r.body").empty(); }))
+      << "(await (fetch-async …)) never resolved";
+  EXPECT_EQ(node_data_string(app, "r.body"), "world");
 }

@@ -4,6 +4,7 @@
 
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics, have_state_exec
 #include <cvc/ariadne/net_intrinsics.h>
+#include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
 #include <cvc/net/http_client.h>
 
@@ -92,37 +93,115 @@ std::string launch_http_fetch(cvc::app &app, const std::string &root,
   return done;
 }
 
+// Marshal a resolver UriResult into the DSL reply dict (scheme-agnostic — no HTTP status/headers).
+// The body is `bytes` (opaque octets), consistent with (http-get)'s body.
+se::value_t marshal_uri_result(const UriResult &r) {
+  return se::make_dict({
+      {"ok", se::value_t(r.ok)},
+      {"body", se::make_bytes(r.content)},
+      {"url", se::value_t(r.canonical)},
+      {"error", se::value_t(r.error)},
+  });
+}
+
+// The generic async resolve (any registered scheme: file/state/cvc/http). Runs the SYNCHRONOUS
+// resolve() on a compute-pool worker (OFF the scheduler thread) and posts the marshalled dict to a
+// unique '#'-reply channel — the same launch shape as launch_http_fetch, for arbitrary URIs.
+std::string launch_uri_fetch(cvc::app &app, const std::string &root,
+                             std::span<const se::value_t> args) {
+  std::string uri;
+  if (!args.empty())
+    if (const std::string *u = std::get_if<std::string>(&args[0].v))
+      uri = *u;
+  std::string base; // optional second arg: the base for a relative URI
+  if (args.size() > 1)
+    if (const std::string *b = std::get_if<std::string>(&args[1].v))
+      base = *b;
+
+  static std::atomic<std::uint64_t> seq{0};
+  const std::string chan =
+      "uri.reply#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+  const std::string done = se::resolve_channel_key(root, chan);
+  app.compute_async(
+      1, [](int) {},
+      [&app, uri, base, done] {
+        se::value_t payload;
+        try {
+          payload =
+              marshal_uri_result(resolve(uri, base)); // resolve() is app-free + has its own barrier
+        } catch (const std::exception &e) {
+          UriResult er;
+          er.ok = false;
+          er.canonical = uri;
+          er.error = std::string("fetch: ") + e.what();
+          payload = marshal_uri_result(er);
+        } catch (...) {
+          UriResult er;
+          er.ok = false;
+          er.canonical = uri;
+          er.error = "fetch: unknown error";
+          payload = marshal_uri_result(er);
+        }
+        app.exec_scheduler().post_message(done, payload);
+      });
+  return done;
+}
+
 } // namespace
 
 void register_net_intrinsics(cvc::app &app) {
-  if (!have_state_exec() || !cvc::net::have_http_backend())
+  if (!have_state_exec())
     return;
   // Warm the lazy per-app singletons on THIS thread before any background worker touches them, so a
   // worker never races their first construction (the nav_compute discipline).
   app.computePool();
   app.exec_scheduler();
+  // (http-get*) need a compiled cvc::net backend; (fetch*) resolve over any registered scheme
+  // (file/state/cvc/http) and are useful with or without an HTTP backend.
+  const bool have_http = cvc::net::have_http_backend();
 
-  register_action_intrinsics([&app](std::shared_ptr<se::environment> env,
-                                    se::intrinsics_context &ictx) {
+  register_action_intrinsics([&app, have_http](std::shared_ptr<se::environment> env,
+                                               se::intrinsics_context &ictx) {
     // Capture the lane's chroot so the reply channel is scoped the same way an (msg-recv)/(await)
-    // resolves it (launch_http_fetch uses a UNIQUE '#'-suffixed channel per call — policy-exempt +
+    // resolves it (the launchers use a UNIQUE '#'-suffixed channel per call — policy-exempt +
     // identity — so two in-flight fetches never collide on the single recv_path a process has).
     const std::string root = ictx.root_path;
 
-    // (http-get-async URL [HEADERS]) — kicks the fetch and returns a FUTURE handle; the program
-    // awaits it with (await …) or (msg-recv …). The low-level primitive for fanning out N fetches.
-    se::builtins::register_fn(env, "http-get-async",
-                              [&app, root](std::span<const se::value_t> args) -> se::value_t {
-                                return se::make_future(launch_http_fetch(app, root, args));
-                              });
+    if (have_http) {
+      // (http-get-async URL [HEADERS]) — kicks the fetch and returns a FUTURE handle; the program
+      // awaits it with (await …) or (msg-recv …). The low-level primitive for fanning out N
+      // fetches.
+      se::builtins::register_fn(env, "http-get-async",
+                                [&app, root](std::span<const se::value_t> args) -> se::value_t {
+                                  return se::make_future(launch_http_fetch(app, root, args));
+                                });
 
-    // (http-get URL [HEADERS]) — TRANSPARENT: kicks the fetch and SELF-PARKS the calling process,
-    // resuming with the response dict threaded straight into the enclosing expression (no channel,
-    // no msg-recv). Reaches the scheduler via the captured app; current_pid()/current_process() are
-    // valid here (set around the evaluator step). Equivalent to (await (http-get-async URL)).
-    se::builtins::register_fn(env, "http-get",
+      // (http-get URL [HEADERS]) — TRANSPARENT: kicks the fetch and SELF-PARKS the calling process,
+      // resuming with the response dict threaded straight into the enclosing expression (no
+      // channel, no msg-recv). Reaches the scheduler via the captured app;
+      // current_pid()/current_process() are valid here (set around the evaluator step). Equivalent
+      // to (await (http-get-async URL)).
+      se::builtins::register_fn(env, "http-get",
+                                [&app, root](std::span<const se::value_t> args) -> se::value_t {
+                                  const std::string done = launch_http_fetch(app, root, args);
+                                  auto &sched = app.exec_scheduler();
+                                  return se::park_on_channel(&sched, sched.current_process().get(),
+                                                             sched.current_pid(), done);
+                                });
+    }
+
+    // (fetch-async URI [BASE]) / (fetch URI [BASE]) — the GENERIC async resolver over ANY
+    // registered scheme (file/state/cvc/http). fetch-async returns a future; fetch is transparent
+    // (self-parks, returns the dict). resolve() runs on the compute pool, so an ari program
+    // async-loads any URI without blocking the scheduler thread. Reply dict: { ok body(bytes) url
+    // error }.
+    se::builtins::register_fn(env, "fetch-async",
                               [&app, root](std::span<const se::value_t> args) -> se::value_t {
-                                const std::string done = launch_http_fetch(app, root, args);
+                                return se::make_future(launch_uri_fetch(app, root, args));
+                              });
+    se::builtins::register_fn(env, "fetch",
+                              [&app, root](std::span<const se::value_t> args) -> se::value_t {
+                                const std::string done = launch_uri_fetch(app, root, args);
                                 auto &sched = app.exec_scheduler();
                                 return se::park_on_channel(&sched, sched.current_process().get(),
                                                            sched.current_pid(), done);

@@ -3278,10 +3278,23 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 > **`(http-get url)`** is the transparent one-shot: it self-parks and yields the dict straight into the
 > enclosing expression — `(get-attr (http-get url) "status")`, no `msg-recv`. Tests: AriadneNetIntrinsics
 > gains the transparent-verb + await-future cases; the msg-recv/await refactor is regression-clean
-> across the state_exec suites. **NOT YET:** chunked/streaming bodies; the dedicated libcurl-`multi`
-> I/O thread (today each in-flight fetch blocks one compute-pool worker); making ALL ari-generated URI
-> requests async (the resolver — separate PR); render-pass park budget (separate PR). NATIVE only until
-> the wasm worker/`-sASYNCIFY` fetch path is confirmed.
+> across the state_exec suites.
+>
+> **LANDED (generic async resolver) — `(fetch uri)` / `(fetch-async uri)`.** `net_intrinsics.cpp`
+> registers a scheme-agnostic async resolver: it runs the synchronous `resolve()` on the compute pool
+> (OFF the scheduler thread) and, like `http-get`, either self-parks (`fetch`) or returns a future
+> (`fetch-async`), resuming with `{ ok body(bytes) url error }`. So an ari PROGRAM can async-load ANY
+> registered scheme — `file`/`state`/`cvc`/`http` — via one primitive: `(get-attr (fetch uri) "body")`.
+> It reuses the PR-A launch+park machinery and needs no HTTP backend (only `http-get*` do), so it works
+> even in a curl-less build. Tests: AriadneNetIntrinsics fetch-transparent + fetch-async-future over a
+> canned custom scheme, offline. **The other ari-generated URI requests stay synchronous by design:**
+> `import:`/`load:`/`include:` resolve at LOAD time, off the draw walk (roadmap §13.8 — sync is legal
+> there), and scene `source:{uri:}` is a one-shot at scene-setup (not per-frame). So nothing
+> ari-generated blocks the render thread today; a DSL program that wants async loading uses `(fetch)`.
+> **NOT YET:** chunked/streaming bodies; the dedicated libcurl-`multi` I/O thread (today each in-flight
+> fetch blocks one compute-pool worker); an async scene `source:{uri:}` realize (so a large remote
+> asset doesn't block scene setup — a follow-up); render-pass park budget (separate PR). NATIVE only
+> until the wasm worker/`-sASYNCIFY` fetch path is confirmed.
 
 ### 13.9 A cvc::app-wide HTTP(s) cache in the state tree (TTL + conditional GET) — *planned*
 
