@@ -623,6 +623,12 @@ struct Runtime::Impl {
   Backend *backend = nullptr;
   std::string prefix;
 
+  // §12 channel enforcement: the document's channel policy, installed on every action/resident
+  // ictx. Default (enforce=false, empty) = permissive; set_channel_policy fills it from a
+  // LoadResult. Pointed-to by ictx.channels (non-owning), so it must outlive the contexts — it
+  // lives here in the Impl, which owns the live_actions_ / residents that reference it.
+  cvc::state_exec::channel_policy channel_policy_;
+
   Widget root;
   Widget pending;
   bool has_pending = false;
@@ -1379,6 +1385,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     ac->ictx.tracker = &ac->tracker;
     ac->ictx.proc = ac->proc;
     se::apply_chroot(ac->ictx, root, action_prefix); // confine writes to the document/mount subtree
+    ac->ictx.channels = &channel_policy_; // §12 channel enforcement (no-op unless strict)
     ac->env = se::builtins::make_default_environment();
     se::register_intrinsics(ac->env, &ac->ictx);
     // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
@@ -1456,6 +1463,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     ac->ictx.tracker = &ac->tracker;
     ac->ictx.proc = ac->proc;
     se::apply_chroot(ac->ictx, root, prefix); // resident writes confined to the document prefix
+    ac->ictx.channels = &channel_policy_;     // §12 channel enforcement (no-op unless strict)
     ac->env = se::builtins::make_default_environment();
     se::register_intrinsics(ac->env, &ac->ictx);
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
@@ -1579,6 +1587,26 @@ void Runtime::set_pointer_program(std::string script) {
   m_->pointer_script_ = std::move(script);
 #else
   (void)script;
+#endif
+}
+
+void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<std::string> global,
+                                 bool strict, bool quiet) {
+#ifdef CVC_STATE_EXEC
+  // Installed on every action/resident ictx via the &channel_policy_ pointer set in submit_action /
+  // submit_resident, so this applies from the next activation on. `strict` is the enforce switch;
+  // warn/off pass strict=false (the load-time lint already surfaced those), leaving runtime
+  // enforcement disabled. Empty lists + strict=false (the caller's default for an undeclared doc)
+  // is fully permissive.
+  m_->channel_policy_.declared = std::move(declared);
+  m_->channel_policy_.global = std::move(global);
+  m_->channel_policy_.enforce = strict;
+  m_->channel_policy_.quiet = quiet;
+#else
+  (void)declared;
+  (void)global;
+  (void)strict;
+  (void)quiet;
 #endif
 }
 

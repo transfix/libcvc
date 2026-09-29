@@ -195,6 +195,20 @@ int main(int argc, char **argv) {
       rt.set_tick_program(lr.on_tick_script);
       rt.set_key_program(lr.on_key_script);
       rt.set_pointer_program(lr.on_pointer_script);
+      // §12 channel enforcement: install the document's channel policy so a program that sends/
+      // receives on an undeclared channel is refused at run time (the backstop for dynamic channel
+      // names; the load-time lint already checked static refs). Only when the doc declared
+      // channels: (else fully permissive); strict unless lint.channels relaxed it.
+      if (lr.has_channels_block) {
+        std::vector<std::string> declared, global;
+        for (const ari::ChannelDecl &c : lr.channels) {
+          declared.push_back(c.name);
+          if (c.global)
+            global.push_back(c.name);
+        }
+        rt.set_channel_policy(std::move(declared), std::move(global),
+                              lr.lint.channels == ari::LintConfig::Mode::Strict, lr.lint.quiet);
+      }
       // §extensibility: the loader already fail-fast-checked widget/block customs; now
       // check declared NODE customs (cvcGL registry) before realizing. A missing
       // REQUIRED node custom fails fast (skip the scene); a non-required one just logs.

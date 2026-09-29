@@ -2042,3 +2042,94 @@ TEST(AriadneRuntime, PositionOnlyPersistedGeometrySeedsPositionNotZeroSize) {
   EXPECT_TRUE(mb.seeded_geom.has_pos);
   EXPECT_FALSE(mb.seeded_geom.has_size);
 }
+
+// ===========================================================================
+// §12 channel enforcement — the RUNTIME policy (PR-D), the backstop for dynamic channel names
+// ===========================================================================
+// set_channel_policy installs the doc's declared/global channels + strict flag. In strict mode a
+// program msg-* on an undeclared channel is refused: enforce_channel_policy throws BEFORE
+// deliver_to_receivers, so the message is never queued. That delivery outcome
+// (pending_message_count on the app scheduler) is the reliable signal — a refused send delivers
+// nothing, an allowed send queues one. warn/off pass strict=false (no runtime enforcement — the
+// load-time lint handled those). Prefix "" so resolve_channel is identity: a plain name keys to
+// itself, "/g" keys to "g".
+
+// Run a one-shot `(msg-send "<ch>" "x")` action under the current policy; return whether it was
+// delivered (queued under `key` on the app scheduler). false => the send was refused.
+static bool msg_delivered(cvc::app &app, Runtime &rt, MockBackend &mb, const std::string &ch,
+                          const std::string &key) {
+  rt.set_root(group({button("Go", "(msg-send \"" + ch + "\" \"x\")")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  return app.exec_scheduler().pending_message_count(key) > 0;
+}
+
+TEST(AriadneChannelPolicy, StrictRefusesUndeclaredChannel) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({"nav.done"}, {}, /*strict=*/true, /*quiet=*/false);
+  EXPECT_FALSE(
+      msg_delivered(app, rt, mb, "other", "other")); // undeclared -> refused, not delivered
+}
+
+TEST(AriadneChannelPolicy, AllowsDeclaredChannel) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({"nav.done"}, {}, true, false);
+  EXPECT_TRUE(msg_delivered(app, rt, mb, "nav.done", "nav.done")); // declared -> allowed, delivered
+}
+
+TEST(AriadneChannelPolicy, PermissiveWhenNotStrict) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, /*strict=*/false, false); // warn/off -> no runtime enforcement
+  EXPECT_TRUE(msg_delivered(app, rt, mb, "anything", "anything"));
+}
+
+TEST(AriadneChannelPolicy, AllowsDeclaredGlobal) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {"app.quit"}, true, false);
+  EXPECT_TRUE(
+      msg_delivered(app, rt, mb, "/app.quit", "app.quit")); // declared global (key strips /)
+}
+
+TEST(AriadneChannelPolicy, RefusesUndeclaredGlobal) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {"app.quit"}, true, false);
+  EXPECT_FALSE(
+      msg_delivered(app, rt, mb, "/other.g", "other.g")); // not a declared global -> refused
+}
+
+TEST(AriadneChannelPolicy, ExemptsHashChannel) {
+  if (!have_state_exec())
+    GTEST_SKIP();
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({"nav.done"}, {}, true, false);
+  EXPECT_TRUE(msg_delivered(app, rt, mb, "sys#evt", "sys#evt")); // '#'-runtime channel is exempt
+}

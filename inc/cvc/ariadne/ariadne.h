@@ -83,6 +83,19 @@ public:
   void set_key_program(std::string script);
   void set_pointer_program(std::string script);
 
+  // §12 channel enforcement (runtime backstop): install the document's channel policy so a program
+  // `on:`/resident that sends or receives on an UNDECLARED channel is refused at run time — the
+  // completeness layer for DYNAMIC channel names the load-time lint (loader) can't see. `declared`
+  // is the document's declared channel names, `global` its declared app-root-globals (the
+  // '/'-escape allowlist); `strict` enforces (throw, caught fail-safe) — pass false for warn/off
+  // (the load lint already surfaced those), which clears enforcement. The host feeds these from a
+  // LoadResult (channels: + lint:); pass plain vectors so this header stays independent of the
+  // loader. Calling with `strict=false` and empty lists (the default) disables runtime enforcement.
+  // A no-op without state_exec. Set once after load, before render/drain; it applies to every
+  // action + resident.
+  void set_channel_policy(std::vector<std::string> declared, std::vector<std::string> global,
+                          bool strict, bool quiet);
+
   // Feed one input event to the runtime — the host calls this each frame for every event from its
   // input source (e.g. cvc::gl::SdlInput), BEFORE drain(), so the event is delivered to the
   // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Thread-safe
