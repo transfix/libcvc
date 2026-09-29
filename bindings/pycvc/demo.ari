@@ -1,0 +1,45 @@
+# demo.ari — a minimal Ariadne document for the AriRuntime demo, driven from Python (test_pycvc_ari.py)
+# and usable natively. Widgets only (no scene block, no custom widget types), so it loads with no
+# cvc:// component dependency and renders as an ImGui panel over VTK. See cvc::gl::ariadne::AriRuntime.
+meta:
+  name: AriRuntime demo
+  author: cvc
+  min_libcvc: 3.4.0
+
+# init: runs once on load, scoped to the document's state prefix (before the first frame).
+init: |
+  (state-set "demo.agents" "128")
+  (state-set "demo.speed" "1.0")
+  (state-set "demo.wire" "false")
+
+menubar:
+  - menu: App
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Controls
+    id: controls
+    children:
+      - text: "AriRuntime demo — a full .ari app from Python."
+      - separator
+      - slider_int: Agents
+        bind: demo.agents
+        lo: 1
+        hi: 512
+        def: 128
+      - slider_float: Speed
+        bind: demo.speed
+        lo: 0.1
+        hi: 4.0
+        def: 1.0
+        fmt: "%.2f"
+      - checkbox: Wireframe
+        bind: demo.wire
+      # reactive computed label — re-evaluated each frame from the Agents slider
+      - text: load
+        bind: (if (> (int (state-get "demo.agents")) 256) "many" "few")
+      - separator
+      - button: Ping
+        on: ping
