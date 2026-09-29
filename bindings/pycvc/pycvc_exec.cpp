@@ -139,6 +139,27 @@ std::string fetch_py_error() {
   return msg;
 }
 
+// Best-effort: is `fn` an `async def` (a coroutine function)? Its code object carries the
+// CO_COROUTINE flag. A plain async def is caught; a decorated/wrapped one may slip through. Used to
+// steer an async def away from the sync/pool paths (where its un-awaited coroutine would marshal as
+// a nonsense repr) and toward register_async_coro.
+bool is_coroutine_function(PyObject *fn) {
+  PyObject *code = PyObject_GetAttrString(fn, "__code__");
+  if (code == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+  bool coro = false;
+  if (PyObject *flags = PyObject_GetAttrString(code, "co_flags")) {
+    coro = (PyLong_AsLong(flags) & 0x0080) != 0; // CO_COROUTINE
+    Py_DECREF(flags);
+  } else {
+    PyErr_Clear();
+  }
+  Py_DECREF(code);
+  return coro;
+}
+
 // INCREF a callable and wrap it in a shared_ptr whose deleter DECREFs under the
 // GIL, so it is owned for as long as the holder lives and torn down safely from
 // any thread.
@@ -191,6 +212,86 @@ std::string render_result(const value_t &v) {
   if (v.is_nil())
     return "";
   return to_string(v);
+}
+
+// The value an async fn/coroutine resumes its DSL process with when the Python side raised: a
+// one-key dict on a RESERVED key a normal dict result can't collide with, so the program can tell
+// an error from data.
+value_t async_error_dict(const std::string &message) {
+  auto pairs = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
+  pairs->emplace_back("__async_error__", value_t(message));
+  return value_t(dict_ptr(std::move(pairs)));
+}
+
+// Step the Exec's asyncio loop for a BOUNDED wall-time slice, then deliver every completed
+// coroutine's result (or error) to its parked DSL process. Runs on the run() thread with the GIL
+// held; a no-op when no coroutine is pending, so a coro-free Exec pays nothing. `pending` holds
+// (asyncio.Task*, reply-channel) pairs owned here (each Task is DECREF'd when collected).
+void drive_coros(PyObject *loop, std::vector<std::pair<PyObject *, std::string>> &pending,
+                 async_scheduler &sched, double budget_secs) {
+  if (loop == nullptr || pending.empty())
+    return;
+  // Step the loop until a call_later(budget) stops it: ready coroutine steps + timers/IO due within
+  // the slice advance, then control returns to the DSL pump. Public asyncio API only. NOTE: the
+  // slice is COOPERATIVE — asyncio cannot preempt a running coroutine step, so the budget is
+  // honored only at the coroutine's await points. A coroutine that never awaits (CPU-bound work, an
+  // accidental (while True) with no await) holds this thread inside run_forever and wedges the
+  // whole pump — put blocking/CPU work in register_async_fn (the pool), not register_async_coro.
+  bool step_failed = true;
+  if (PyObject *stop = PyObject_GetAttrString(loop, "stop")) {
+    PyObject *h = PyObject_CallMethod(loop, "call_later", "dO", budget_secs, stop);
+    Py_DECREF(stop);
+    if (h != nullptr) {
+      Py_DECREF(h);
+      // run_forever ONLY when a stop timer is armed — otherwise it would never return.
+      if (PyObject *r = PyObject_CallMethod(loop, "run_forever", nullptr)) {
+        Py_DECREF(r);
+        step_failed = false;
+      }
+    }
+  }
+  if (step_failed) {
+    // The loop cannot be stepped (call_later/run_forever/getattr failed): the pending coroutines
+    // can never advance, so fail them all rather than clearing the error and spinning an unkillable
+    // pump.
+    const std::string msg = "python coro: event loop step failed: " + fetch_py_error();
+    for (auto &pc : pending) {
+      sched.post_message(pc.second, async_error_dict(msg));
+      Py_DECREF(pc.first);
+    }
+    pending.clear();
+    return;
+  }
+  PyErr_Clear(); // a stray (already-handled) error from stepping must not leak into the next call
+  for (auto it = pending.begin(); it != pending.end();) {
+    PyObject *task = it->first;
+    PyObject *done_obj = PyObject_CallMethod(task, "done", nullptr);
+    const bool done = done_obj != nullptr && PyObject_IsTrue(done_obj) == 1;
+    Py_XDECREF(done_obj);
+    if (!done) {
+      ++it;
+      continue;
+    }
+    value_t payload;
+    PyObject *exc = PyObject_CallMethod(task, "exception", nullptr); // None if it returned normally
+    if (exc == nullptr) {
+      payload = async_error_dict("python coro: " + fetch_py_error());
+    } else if (exc == Py_None) {
+      Py_DECREF(exc);
+      PyObject *res = PyObject_CallMethod(task, "result", nullptr);
+      payload = res ? py_to_value(res) : async_error_dict("python coro: " + fetch_py_error());
+      Py_XDECREF(res);
+    } else {
+      PyObject *s = PyObject_Str(exc);
+      const char *cs = s ? PyUnicode_AsUTF8(s) : nullptr;
+      payload = async_error_dict(std::string("python coro: ") + (cs ? cs : "error"));
+      Py_XDECREF(s);
+      Py_DECREF(exc);
+    }
+    sched.post_message(it->second, payload);
+    Py_DECREF(task);
+    it = pending.erase(it);
+  }
 }
 
 // Counts the async pool tasks a run() has in flight so no worker (which posts back to this Exec's
@@ -252,6 +353,12 @@ struct Exec::ExecImpl {
   process_ptr host_proc;
   environment_ptr env;
   std::shared_ptr<Inflight> inflight = std::make_shared<Inflight>();
+  // Coroutine support (register_async_coro): a private asyncio loop (lazily created; owned) and the
+  // in-flight (asyncio.Task*, reply-channel) pairs the pump steps + collects. Touched only on the
+  // run() thread (the verb during sync_run + drive_coros after), so no lock needed.
+  PyObject *loop = nullptr;
+  std::vector<std::pair<PyObject *, std::string>> pending_coros;
+  bool running = false; // re-entrancy guard: a registered fn/coro must not call back into run()
 };
 
 Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecImpl>()) {
@@ -285,17 +392,41 @@ Exec::~Exec() {
   // scheduler) tear down. run() already drains on every exit, so this is normally a no-op.
   if (impl_ && impl_->inflight)
     impl_->inflight->wait_idle();
+  // Cancel + drop any un-collected coroutine Tasks and close the asyncio loop (GIL held: ~Exec is
+  // called from Python via SWIG).
+  if (impl_ && impl_->loop) {
+    PyGILState_STATE gil = PyGILState_Ensure();
+    for (auto &pc : impl_->pending_coros) {
+      if (PyObject *r = PyObject_CallMethod(pc.first, "cancel", nullptr))
+        Py_DECREF(r);
+      Py_DECREF(pc.first);
+    }
+    impl_->pending_coros.clear();
+    if (PyObject *r = PyObject_CallMethod(impl_->loop, "close", nullptr))
+      Py_DECREF(r);
+    Py_DECREF(impl_->loop);
+    impl_->loop = nullptr;
+    PyErr_Clear();
+    PyGILState_Release(gil);
+  }
 }
 
 void Exec::register_fn(const std::string &name, PyObject *callable) {
   if (callable == nullptr || !PyCallable_Check(callable))
     throw std::invalid_argument("pycvc.Exec.register_fn: '" + name + "' is not callable");
+  if (is_coroutine_function(callable))
+    throw std::invalid_argument("pycvc.Exec.register_fn: '" + name +
+                                "' is an async def — use register_async_coro");
   builtins::register_fn(impl_->env, name, make_python_native_fn(name, callable));
 }
 
 void Exec::register_async_fn(const std::string &name, PyObject *callable) {
   if (callable == nullptr || !PyCallable_Check(callable))
     throw std::invalid_argument("pycvc.Exec.register_async_fn: '" + name + "' is not callable");
+  if (is_coroutine_function(callable))
+    throw std::invalid_argument("pycvc.Exec.register_async_fn: '" + name +
+                                "' is an async def — use register_async_coro (register_async_fn is "
+                                "for a blocking callable offloaded to a pool worker)");
   std::shared_ptr<PyObject> holder = own_callable(callable);
   cvc::app *app = impl_->app.get();
   async_scheduler *sched = &impl_->sched; // this Exec's PRIVATE scheduler (the offload posts here)
@@ -321,15 +452,95 @@ void Exec::register_async_fn(const std::string &name, PyObject *callable) {
                   inflight}; // --in-flight when this body returns/throws, before the post
               return call_python(holder, *argv, name);
             },
-            [](const std::string &e) -> value_t {
-              auto pairs = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-              pairs->emplace_back("__async_error__", value_t(e));
-              return value_t(dict_ptr(std::move(pairs)));
+            [name](const std::string &e) -> value_t {
+              return async_error_dict("python async fn '" + name + "': " + e);
             });
       });
 }
 
+void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
+  if (coro_fn == nullptr || !PyCallable_Check(coro_fn))
+    throw std::invalid_argument("pycvc.Exec.register_async_coro: '" + name + "' is not callable");
+  // Lazily create the asyncio loop this Exec drives (once, at setup, GIL held by the caller).
+  if (impl_->loop == nullptr) {
+    PyObject *asyncio = PyImport_ImportModule("asyncio");
+    if (asyncio == nullptr)
+      throw std::runtime_error("pycvc.Exec.register_async_coro: cannot import asyncio: " +
+                               fetch_py_error());
+    impl_->loop = PyObject_CallMethod(asyncio, "new_event_loop", nullptr);
+    Py_DECREF(asyncio);
+    if (impl_->loop == nullptr)
+      throw std::runtime_error("pycvc.Exec.register_async_coro: new_event_loop failed: " +
+                               fetch_py_error());
+  }
+  std::shared_ptr<PyObject> holder = own_callable(coro_fn);
+  ExecImpl *impl = impl_.get();
+  async_scheduler *sched = &impl_->sched;
+  const std::string root = impl_->ictx.root_path;
+  // (name args...) calls coro_fn(*args) -> a coroutine, schedules it as a Task on the loop, records
+  // (Task, reply-channel), and SELF-PARKS. run()'s pump steps the loop (drive_coros) and delivers
+  // the Task's result to this channel when it completes.
+  builtins::register_fn(
+      impl_->env, name,
+      [impl, sched, root, holder, name](std::span<const value_t> args) -> value_t {
+        static std::atomic<std::uint64_t> seq{0};
+        const std::string chan =
+            name + ".coro#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+        const std::string done = resolve_channel_key(root, chan);
+        // The verb runs during sync_run (GIL released by the pump) — re-acquire it to touch Python.
+        PyGILState_STATE gil = PyGILState_Ensure();
+        PyObject *pyargs = PyTuple_New(static_cast<Py_ssize_t>(args.size()));
+        for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(args.size()); ++i)
+          PyTuple_SET_ITEM(pyargs, i, value_to_py(args[i]));
+        PyObject *coro = PyObject_CallObject(holder.get(), pyargs);
+        Py_DECREF(pyargs);
+        PyObject *task = nullptr;
+        if (coro != nullptr) {
+          task = PyObject_CallMethod(impl->loop, "create_task", "O", coro);
+          Py_DECREF(coro);
+        }
+        if (task == nullptr) {
+          const std::string msg = "python coro fn '" + name + "': " + fetch_py_error();
+          PyGILState_Release(gil);
+          // Nothing to await — deliver the error now; the park below resumes on the next drain.
+          sched->post_message(done, async_error_dict(msg));
+        } else {
+          impl->pending_coros.emplace_back(task, done); // owns the Task ref until collected
+          PyGILState_Release(gil);
+        }
+        return park_on_channel(sched, sched->current_process().get(), sched->current_pid(), done);
+      });
+}
+
 std::string Exec::run(const std::string &src) {
+  // One Exec is driven by ONE thread. A registered fn/coro that calls back into run() (or a second
+  // thread) would corrupt the shared scheduler + asyncio loop, so reject re-entrancy up front.
+  if (impl_->running)
+    throw std::runtime_error("pycvc.Exec.run: re-entrant call — a registered fn/coro must not call "
+                             "run() (use a separate Exec per thread)");
+  impl_->running = true;
+  // On EVERY exit: clear the running flag, and cancel+drop any coroutine Tasks still pending for
+  // this run (e.g. an orphaned coroutine of a sibling process that never completed) so it can't
+  // suppress the NEXT run()'s idle timeout. PyGILState_Ensure re-acquires the GIL on whatever path
+  // we unwind.
+  struct RunGuard {
+    ExecImpl *impl;
+    ~RunGuard() {
+      if (!impl->pending_coros.empty()) {
+        PyGILState_STATE gil = PyGILState_Ensure();
+        for (auto &pc : impl->pending_coros) {
+          if (PyObject *r = PyObject_CallMethod(pc.first, "cancel", nullptr))
+            Py_DECREF(r);
+          Py_DECREF(pc.first);
+        }
+        impl->pending_coros.clear();
+        PyErr_Clear();
+        PyGILState_Release(gil);
+      }
+      impl->running = false;
+    }
+  } run_guard{impl_.get()};
+
   async_scheduler &sched = impl_->sched;
   Inflight &inflight = *impl_->inflight;
   execute_options opts;
@@ -343,6 +554,7 @@ std::string Exec::run(const std::string &src) {
   // wedge the pump.
   static constexpr uint64_t kSliceSteps = 2000000;
   static constexpr double kSliceSeconds = 0.05;
+  static constexpr double kCoroSliceSeconds = 0.005; // asyncio-loop slice per pump iteration
   static constexpr double kIdleTimeoutSecs = 60.0; // parked with NO pending work this long -> bail
   using clock = std::chrono::steady_clock;
   auto idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
@@ -358,7 +570,12 @@ std::string Exec::run(const std::string &src) {
       // async body is never starved of the GIL by a co-runnable process — the deadlock the review
       // found.
       Py_BEGIN_ALLOW_THREADS sched.sync_run(kSliceSteps, kSliceSeconds);
-      Py_END_ALLOW_THREADS result = sched.get_result(pid);
+      Py_END_ALLOW_THREADS
+          // Coroutine leg: step the asyncio loop a bounded slice and deliver any completed
+          // coroutine's result to its parked process (GIL held here). A no-op when no coroutine is
+          // pending, so a coro-free Exec is unaffected.
+          drive_coros(impl_->loop, impl_->pending_coros, sched, kCoroSliceSeconds);
+      result = sched.get_result(pid);
       if (result)
         break; // the program terminated
       const std::optional<process_info> info = sched.get_process_info(pid);
@@ -386,7 +603,8 @@ std::string Exec::run(const std::string &src) {
       // a delivery is coming, so keep the idle clock fresh; only a park with NOTHING pending can
       // time out (e.g. a msg-recv on a channel nobody sends to) — safe to abandon then, no worker
       // to outlive us.
-      if (inflight.pending() > 0 || sched.has_runnable() || had_runnable) {
+      if (inflight.pending() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
+          had_runnable) {
         idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
       } else if (clock::now() > idle_deadline) {
         sched.kill(pid);

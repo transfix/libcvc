@@ -58,6 +58,25 @@ public:
   // (state-set "r" (name ...)).
   void register_async_fn(const std::string &name, PyObject *callable);
 
+  // Register a Python COROUTINE function (an `async def`) as an async DSL function
+  // named `name`. Calling (name args...) calls coro_fn(*args) to get a coroutine,
+  // schedules it on an asyncio event loop this Exec owns, and PARKS the calling
+  // program until it completes. Unlike register_async_fn (which offloads a blocking
+  // callable to a pool WORKER), the coroutine runs ON the run() thread, cooperatively
+  // stepped one slice per pump iteration — so it and the DSL march along together, and
+  // its `await asyncio.sleep`/`aiohttp`/... progress between DSL slices. The program
+  // resumes with the coroutine's return value; a raise resumes it with a
+  // {"__async_error__": <message>} dict (do not return a dict using that reserved key).
+  //
+  // The coroutine MUST YIELD (use await). The slice is COOPERATIVE — asyncio cannot
+  // preempt a running step — so a coroutine that does CPU-bound work without awaiting
+  // (or an accidental non-awaiting loop) holds the run() thread and wedges the pump:
+  // put blocking/CPU work in register_async_fn (the pool), not here. And, as with any
+  // awaited async work, a coroutine whose await NEVER resolves leaves run() waiting
+  // (the same as a never-returning register_async_fn callable). Same nesting rule as
+  // register_async_fn.
+  void register_async_coro(const std::string &name, PyObject *coro_fn);
+
   // Execute a DSL program in this app's context; returns the rendered result
   // (strings raw, nil as "", others via the DSL's printed form). Throws on a
   // parse/eval error (surfaced as a Python exception). Drives this Exec's PRIVATE
