@@ -16,7 +16,13 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/uri.h> // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
-#include <filesystem>        // §12 import: dirname of a resolved library for nested bases
+#ifdef CVC_STATE_EXEC
+// §12 channel lint: parse a script (parser.h) and walk its value_t / symbol / list_ptr AST
+// (types.h) for the static msg-* channel references.
+#include <cvc/core/state_exec/parser.h>
+#include <cvc/core/state_exec/types.h>
+#endif
+#include <filesystem> // §12 import: dirname of a resolved library for nested bases
 #include <functional>
 #include <iterator>
 #include <map>
@@ -1620,6 +1626,108 @@ std::vector<CustomRequirement> parse_customs(Ctx &ctx, const YAML::Node &c) {
   return out;
 }
 
+// §12 channel lint (A) — the fail-fast, load-time pass over a document's STATIC msg-* channel
+// references, gated on the document declaring a `channels:` block. Only literal channel names are
+// visible here; a dynamic `(msg-recv (expr))` name is the runtime policy's job (a follow-up). No-op
+// without state_exec (there are no program lanes to lint, and the parser is unavailable).
+#ifdef CVC_STATE_EXEC
+// Walk a parsed script's value_t tree, collecting the string-literal FIRST arg of every
+// (msg-send|msg-recv|msg-pending …) call — the static channel references. Depth-bounded.
+void collect_channel_refs(const cvc::state_exec::value_t &v, std::vector<std::string> &out,
+                          int depth) {
+  using namespace cvc::state_exec;
+  if (depth > 256)
+    return;
+  const auto *lp = std::get_if<list_ptr>(&v.v);
+  if (!lp || !*lp)
+    return;
+  const std::vector<value_t> &lst = **lp;
+  if (!lst.empty()) {
+    if (const auto *head = std::get_if<symbol>(&lst[0].v)) {
+      if ((head->name == "msg-send" || head->name == "msg-recv" || head->name == "msg-pending") &&
+          lst.size() >= 2)
+        if (const auto *s = std::get_if<std::string>(&lst[1].v))
+          out.push_back(*s);
+    }
+  }
+  for (const value_t &e : lst)
+    collect_channel_refs(e, out, depth + 1);
+}
+// Collect static channel refs from one script string. Only an s-expr (a program, first non-space
+// '(') can hold a msg-* call; a bare event name or empty script has none. A syntactically-invalid
+// script is skipped here — its parse error surfaces at run time (run_init / drain), not the lint.
+void refs_from_script(const std::string &script, std::vector<std::string> &out) {
+  const std::size_t i = script.find_first_not_of(" \t\r\n");
+  if (i == std::string::npos || script[i] != '(')
+    return;
+  try {
+    collect_channel_refs(cvc::state_exec::parse(script), out, 0);
+  } catch (...) {
+  }
+}
+// Recurse the widget tree collecting each widget's action-program (`on:`) channel refs.
+void refs_from_widget(const Widget &w, std::vector<std::string> &out) {
+  refs_from_script(w.on, out);
+  for (const Widget &c : w.children)
+    refs_from_widget(c, out);
+}
+#endif
+
+// Run the §12 channel lint against a fully-built LoadResult (root + scripts populated). Sets
+// r.error on a STRICT violation (fails the load), else appends warnings. A no-op unless the doc
+// declared a `channels:` block and lint.channels != Off.
+void lint_channels(Ctx &ctx, LoadResult &r) {
+#ifdef CVC_STATE_EXEC
+  if (!r.has_channels_block)
+    return; // no declaration -> enforcement is not active for this document
+  if (r.lint.channels == LintConfig::Mode::Off) {
+    if (!r.lint.quiet)
+      ctx.warn("ari: channel lint is OFF (lint.channels: off) — undeclared channel use is not "
+               "checked for this document");
+    return;
+  }
+  const bool warn_only = (r.lint.channels == LintConfig::Mode::Warn);
+  if (warn_only && !r.lint.quiet)
+    ctx.warn("ari: channel lint is in WARN mode (lint.channels: warn) — undeclared channel use "
+             "warns instead of failing the load");
+  std::vector<std::string> refs;
+  refs_from_script(r.init_script, refs);
+  refs_from_script(r.on_tick_script, refs);
+  refs_from_script(r.on_key_script, refs);
+  refs_from_script(r.on_pointer_script, refs);
+  refs_from_widget(r.root, refs);
+  for (const std::string &ch : refs) {
+    if (ch.find('#') != std::string::npos)
+      continue; // a '#'-runtime channel (tick/key/pointer) is never linted
+    bool declared;
+    std::string what;
+    if (!ch.empty() && ch.front() == '/') {
+      const std::string g = ch.substr(1); // app-root-global escape: must be a DECLARED global
+      declared = std::any_of(r.channels.begin(), r.channels.end(),
+                             [&](const ChannelDecl &d) { return d.global && d.name == g; });
+      what = "app-root-global '/" + g + "'";
+    } else {
+      declared = std::any_of(r.channels.begin(), r.channels.end(),
+                             [&](const ChannelDecl &d) { return d.name == ch; });
+      what = "channel '" + ch + "'";
+    }
+    if (declared)
+      continue;
+    const std::string msg =
+        "ari: undeclared " + what + " is used but not declared in the channels: block";
+    if (warn_only) {
+      ctx.warn(msg);
+    } else { // Strict: fail the load
+      r.error = msg;
+      return;
+    }
+  }
+#else
+  (void)ctx;
+  (void)r;
+#endif
+}
+
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate. `base_dir` is
 // the document's directory (relative `import:`s resolve against it; empty = cwd for a string);
 // `self_path` is its canonical identity, seeded into the import cycle-guard so a library that
@@ -1729,6 +1837,13 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       r.on_pointer_script = pt.Scalar();
     else if (pt && !pt.IsScalar())
       ctx.warn("ari: on_pointer: must be a scalar state_exec script string — ignored");
+  }
+  // §12 channel lint (A): now that root + all scripts are populated, scan static msg-* refs
+  // (only if the doc declared channels:). A strict violation fails the load (r.error set).
+  lint_channels(ctx, r);
+  if (!r.error.empty()) {
+    r.warnings = std::move(ctx.warnings); // keep the warnings gathered before the violation
+    return r;
   }
   if (r.meta.min_libcvc.empty())
     ctx.warn("ari: no meta.min_libcvc declared — the provenance gate is skipped "

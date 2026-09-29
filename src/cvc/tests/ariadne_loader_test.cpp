@@ -3162,3 +3162,150 @@ windows:
   EXPECT_EQ(risk->target, "channels.risk.overlay");
   EXPECT_FALSE(risk->writable); // mode: ro
 }
+
+// ===========================================================================
+// §12 channel lint (A) — the load-time, fail-fast enforcement pass (PR-C)
+// ===========================================================================
+// Gated on a channels: block being present; strictness from lint.channels. Only STATIC (literal)
+// msg-* channel refs are visible to the loader. Requires state_exec (the parser); skipped without.
+
+TEST(AriadneChannelLint, StrictUndeclaredChannelFailsLoad) {
+  SKIP_WITHOUT_YAML();
+  if (!have_state_exec())
+    GTEST_SKIP();
+  LoadResult r = load_string(R"(
+channels:
+  - nav.done
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: '(msg-send "other.chan" "x")'
+)");
+  EXPECT_FALSE(r.ok); // strict (default): the undeclared "other.chan" fails the load
+  EXPECT_NE(r.error.find("other.chan"), std::string::npos);
+}
+
+TEST(AriadneChannelLint, DeclaredChannelPasses) {
+  SKIP_WITHOUT_YAML();
+  if (!have_state_exec())
+    GTEST_SKIP();
+  LoadResult r = load_string(R"(
+channels:
+  - nav.done
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: '(state-set "r" (msg-recv "nav.done"))'
+)");
+  ASSERT_TRUE(r.ok) << r.error; // "nav.done" is declared
+}
+
+TEST(AriadneChannelLint, WarnModeWarnsNotFails) {
+  SKIP_WITHOUT_YAML();
+  if (!have_state_exec())
+    GTEST_SKIP();
+  LoadResult r = load_string(R"(
+lint:
+  channels: warn
+channels:
+  - nav.done
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: '(msg-send "other.chan" "x")'
+)");
+  ASSERT_TRUE(r.ok) << r.error; // warn: not fatal
+  const bool warned = std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string &w) {
+    return w.find("other.chan") != std::string::npos;
+  });
+  EXPECT_TRUE(warned);
+}
+
+TEST(AriadneChannelLint, OffModeSkipsCheck) {
+  SKIP_WITHOUT_YAML();
+  if (!have_state_exec())
+    GTEST_SKIP();
+  LoadResult r = load_string(R"(
+lint:
+  channels: off
+channels:
+  - nav.done
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: '(msg-send "other.chan" "x")'
+)");
+  ASSERT_TRUE(r.ok) << r.error; // off: undeclared use is not checked
+}
+
+TEST(AriadneChannelLint, GlobalRefNeedsDeclaredGlobal) {
+  SKIP_WITHOUT_YAML();
+  if (!have_state_exec())
+    GTEST_SKIP();
+  LoadResult ok = load_string(R"(
+channels:
+  - channel: app.quit
+    global: true
+windows:
+  - window: W
+    children:
+      - button: Q
+        on: '(msg-send "/app.quit" "x")'
+)");
+  EXPECT_TRUE(ok.ok) << ok.error; // /app.quit is a declared global
+  LoadResult bad = load_string(R"(
+channels:
+  - channel: app.quit
+    global: true
+windows:
+  - window: W
+    children:
+      - button: Q
+        on: '(msg-send "/other.global" "x")'
+)");
+  EXPECT_FALSE(bad.ok); // /other.global is not a declared global -> strict fail
+  EXPECT_NE(bad.error.find("other.global"), std::string::npos);
+}
+
+TEST(AriadneChannelLint, HashChannelExempt) {
+  SKIP_WITHOUT_YAML();
+  if (!have_state_exec())
+    GTEST_SKIP();
+  LoadResult r = load_string(R"(
+channels:
+  - nav.done
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: '(msg-recv "sys#tick")'
+)");
+  ASSERT_TRUE(r.ok) << r.error; // a '#'-runtime channel is never linted, even undeclared
+}
+
+TEST(AriadneChannelLint, NoChannelsBlockNoEnforcement) {
+  SKIP_WITHOUT_YAML();
+  if (!have_state_exec())
+    GTEST_SKIP();
+  LoadResult r = load_string(R"(
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: '(msg-send "anything" "x")'
+)");
+  ASSERT_TRUE(r.ok) << r.error; // no channels: block -> enforcement not active
+}
+
+TEST(AriadneChannelLint, InitScriptLinted) {
+  SKIP_WITHOUT_YAML();
+  if (!have_state_exec())
+    GTEST_SKIP();
+  LoadResult r = load_string("channels:\n  - a\ninit: '(msg-send \"b\" \"x\")'\nwindows: []\n");
+  EXPECT_FALSE(r.ok); // the init: script is linted too; "b" is undeclared -> strict fail
+  EXPECT_NE(r.error.find("'b'"), std::string::npos);
+}
