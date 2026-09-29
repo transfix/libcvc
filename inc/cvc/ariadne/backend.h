@@ -181,6 +181,18 @@ public:
   // ---- leaves -------------------------------------------------------------
   virtual void text_line(const char *text) = 0;                             // literal caption
   virtual void text_value(const char *label, const std::string &value) = 0; // "label: value"
+  // Coloured variants (§G? Text tint). `rgb` is a 3-float [0,1] colour. The DEFAULT impls drop the
+  // colour and call the plain leaves, so a backend that cannot tint text (or predates this) stays
+  // correct — only a colour-capable backend (e.g. ImGuiBackend) overrides them. The walker calls
+  // these only when a Kind::Text carries has_text_color.
+  virtual void text_line_colored(const char *text, const float rgb[3]) {
+    (void)rgb;
+    text_line(text);
+  }
+  virtual void text_value_colored(const char *label, const std::string &value, const float rgb[3]) {
+    (void)rgb;
+    text_value(label, value);
+  }
   virtual void separator() = 0;
   virtual bool button(const char *label) = 0;           // returns clicked
   virtual bool menu_item_action(const char *label) = 0; // returns clicked

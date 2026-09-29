@@ -547,9 +547,13 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     return w;
   }
   if (type == "text") {
-    if (has(n, "bind"))
-      return text_bound(label, str(n, "bind"));
-    return text(label);
+    Widget w = has(n, "bind") ? text_bound(label, str(n, "bind")) : text(label);
+    // Optional fixed tint: `color: [r, g, b]` in [0,1] (same sequence convention as a layout
+    // border colour). A colour-capable backend renders it; others fall back to plain text.
+    const YAML::Node col = n["color"];
+    if (col && col.IsSequence() && col.size() >= 3)
+      w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f), col[2].as<float>(1.0f));
+    return w;
   }
   if (type == "checkbox") {
     const std::string bind = str(n, "bind");

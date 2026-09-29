@@ -416,6 +416,28 @@ TEST(AriadneLoader, ImageWidgetParses) {
   EXPECT_DOUBLE_EQ(im->img_size, 320.0);
 }
 
+TEST(AriadneLoader, ColoredTextParses) {
+  SKIP_WITHOUT_YAML();
+  // A `color: [r,g,b]` on a text widget sets the fixed tint; the value binds as usual.
+  LoadResult r = load_string("windows:\n  - window: W\n    children:\n      - text: Status\n     "
+                             "   bind: rf.min_pdr\n        color: [0.9, 0.2, 0.2]\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *t = find(r.root, Kind::Text);
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(t->bind, "rf.min_pdr");
+  ASSERT_TRUE(t->has_text_color);
+  EXPECT_FLOAT_EQ(t->text_color[0], 0.9f);
+  EXPECT_FLOAT_EQ(t->text_color[1], 0.2f);
+  EXPECT_FLOAT_EQ(t->text_color[2], 0.2f);
+  // A text WITHOUT color: stays uncoloured (additive default — byte-identical to before).
+  LoadResult r2 =
+      load_string("windows:\n  - window: W\n    children:\n      - text: Plain\n        bind: x\n");
+  ASSERT_TRUE(r2.ok) << r2.error;
+  const Widget *t2 = find(r2.root, Kind::Text);
+  ASSERT_NE(t2, nullptr);
+  EXPECT_FALSE(t2->has_text_color);
+}
+
 TEST(AriadneLoader, BareScalarsAndLiteralVsBoundText) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

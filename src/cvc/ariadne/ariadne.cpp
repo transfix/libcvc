@@ -1138,15 +1138,22 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
 
   case Kind::Text:
-    if (w.literal_text)
-      b.text_line(label);
-    else if (is_expr(w.bind))
+    if (w.literal_text) {
+      // §G? optional fixed tint (has_text_color) -> the *_colored leaf; else the plain draw.
+      if (w.has_text_color)
+        b.text_line_colored(label, w.text_color);
+      else
+        b.text_line(label);
+    } else {
       // §4 read-lane (homoiconic): a `bind` that is an s-expression (starts with '(') is a
       // COMPUTED value re-evaluated each frame, not a state path. State paths never start
       // with '(', so this is unambiguous. Read-only, bounded, fail-safe empty.
-      b.text_value(label, eval_text(w.bind));
-    else
-      b.text_value(label, read_string(app, resolve(w.bind)));
+      const std::string val = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+      if (w.has_text_color)
+        b.text_value_colored(label, val, w.text_color);
+      else
+        b.text_value(label, val);
+    }
     break;
 
   case Kind::Separator:

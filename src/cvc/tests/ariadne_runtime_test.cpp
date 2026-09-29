@@ -92,6 +92,21 @@ struct MockBackend : Backend {
   void text_value(const char *l, const std::string &v) override {
     rec(std::string("text_value:") + l + "=" + v);
   }
+  // Colour-capable overrides (the default impls would drop the colour and call the plain leaves —
+  // this records the colour so a test can prove the tint reaches the backend).
+  float last_text_rgb[3] = {-1.f, -1.f, -1.f};
+  void text_line_colored(const char *t, const float rgb[3]) override {
+    last_text_rgb[0] = rgb[0];
+    last_text_rgb[1] = rgb[1];
+    last_text_rgb[2] = rgb[2];
+    rec(std::string("text_line_colored:") + t);
+  }
+  void text_value_colored(const char *l, const std::string &v, const float rgb[3]) override {
+    last_text_rgb[0] = rgb[0];
+    last_text_rgb[1] = rgb[1];
+    last_text_rgb[2] = rgb[2];
+    rec(std::string("text_value_colored:") + l + "=" + v);
+  }
   void separator() override { rec("separator"); }
   bool button(const char *l) override {
     rec(std::string("button:") + l);
@@ -204,6 +219,27 @@ TEST(AriadneRuntime, EmitsWindowAndWidgetsInOrder) {
   EXPECT_TRUE(mb.saw("button:Go"));
   EXPECT_TRUE(mb.saw("end_window"));
   EXPECT_TRUE(mb.saw("end_frame"));
+}
+
+TEST(AriadneRuntime, ColoredTextEmitsTintedLeaf) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // A tinted literal Text and a tinted bound Text take the *_colored leaves; an untinted Text
+  // alongside them still takes the plain leaf (the tint is purely additive).
+  rt.set_root(group({with_text_color(text("hi"), 0.9f, 0.2f, 0.2f),
+                     with_text_color(text_bound("PDR", "rf.pdr"), 0.1f, 0.8f, 0.3f),
+                     text("plain")}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line_colored:hi")); // literal tinted -> colored leaf
+  EXPECT_FALSE(mb.saw("text_line:hi"));         // ... and NOT the plain leaf
+  EXPECT_TRUE(mb.saw("text_line:plain"));       // untinted -> plain leaf (default preserved)
+  // The bound tinted Text ran the value-colored leaf; its colour reached the backend (it is the
+  // last tinted widget walked).
+  EXPECT_FLOAT_EQ(mb.last_text_rgb[0], 0.1f);
+  EXPECT_FLOAT_EQ(mb.last_text_rgb[1], 0.8f);
+  EXPECT_FLOAT_EQ(mb.last_text_rgb[2], 0.3f);
 }
 
 TEST(AriadneRuntime, ReconcileSwapAppliedAtRenderBoundary) {

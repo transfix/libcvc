@@ -204,6 +204,14 @@ struct Widget {
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
 
+  // §G? Text COLOUR (severity styling). A Kind::Text (literal OR bound) may carry a fixed RGB
+  // tint; the walker then emits the *_colored backend leaf instead of the plain one. Backends
+  // that cannot colour text fall back to the uncoloured draw (Backend default impls), so this is
+  // purely additive — a widget with has_text_color=false is byte-identical to before. Kept
+  // deliberately general (any Text, not a demo-specific status widget) so every HUD can reuse it.
+  bool has_text_color = false;
+  float text_color[3] = {1.0f, 1.0f, 1.0f};
+
   // Kind::Image (§ raster viewer): the host-published image to show. `src` is a static image name;
   // a non-empty `bind` overrides it with the name held in that state key (so a combo can switch
   // which raster is shown). `img_size` is the display width in px (height follows the image's
@@ -304,6 +312,17 @@ inline Widget text_bound(std::string label, std::string bind) {
   w.kind = Kind::Text;
   w.label = std::move(label);
   w.bind = std::move(bind);
+  return w;
+}
+
+// Tint ANY Text widget (literal or bound) a fixed RGB — the general severity-colour mutator, e.g.
+// `with_text_color(text_bound("PDR", "rf.min_pdr"), 0.9f, 0.2f, 0.2f)`. Chainable; a no-op-safe
+// pass-through for non-Text widgets (the walker only reads text_color on Kind::Text).
+inline Widget with_text_color(Widget w, float r, float g, float b) {
+  w.has_text_color = true;
+  w.text_color[0] = r;
+  w.text_color[1] = g;
+  w.text_color[2] = b;
   return w;
 }
 
