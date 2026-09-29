@@ -3290,6 +3290,29 @@ instead of a full transfer.
   demand) the distributed state system already sketches — the cache is a first, local consumer of
   that path.
 
+> **LANDED (PR2 of the §13.9 work) — the state-tree cache.** `ariadne/uri_http_cache.cpp` +
+> `register_cached_http_uri_handler(cvc::app&)` (inc/cvc/ariadne/uri_http_cache.h). Entries at
+> `sys.net.http_cache.entries.<key>` (`key = cvc::sha256_hex(normalized-URL)`): body on the entry
+> node's `data()` (raw `std::string` → shows as `bytes` in state_exec, serves via `state://…?data`),
+> metadata (status/etag/last_modified/content_type/effective_url/fetched_at/freshness_ttl) as child
+> value nodes. Freshness (Cache-Control `max-age`, anchored at `now - Age`; else `0`-with-validator
+> heuristic; `no-cache`→revalidate; `no-store`→bypass) serves with no network; a stale/miss does a
+> conditional GET (`If-None-Match`/`If-Modified-Since`) — 304 refreshes + serves cached, 200 replaces.
+> Retention rides node `expireAt` (>= freshness) + `sweepExpired()` on access; a successful store
+> invalidates. Concurrency: one process-wide `cache_mutex` serializes all `entries`-subtree work
+> (sweep+read+write+invalidate) — held only briefly, released across the network send — because
+> `findDescendant`/`operator()` hand back a bare pointer a concurrent `sweepExpired()` can free;
+> single-flight coalesces concurrent same-URL fetches. A credentialed request (provider headers or
+> URL userinfo) BYPASSES the cache (no cross-principal reuse in a process-global cache). Reviewed
+> adversarially (15 findings fixed). Tests: `uri_http_cache_test` (12, offline via the PR1
+> `set_http_client` fake). **Deferred to PR3:** the `sys.net.http_cache.policy.*` knobs + a
+> max-entries/max-bytes **LRU budget** (today bounded only by per-entry 64 MiB + retention, so a flood
+> of distinct fresh URLs grows unbounded), full `Vary`/`private`, `Expires`-based freshness, and
+> richer URL normalization (percent-encoding, query-key order). **The transport stays synchronous
+> (§13.8's `fetch_sync`); an async/awaitable `(http-get)` intrinsic — chunked, off-thread on the
+> compute/I/O pool, parking the state_exec process via the `compute_async → post_message → msg-recv`
+> path and returning `bytes` — is a natural later PR the cache rides unchanged.**
+
 ### 13.10 The WRITE side — a `store`/PUT capability + URI-aware `state::save`/`restore`
 
 > **Status — core LANDED** (`cvc::ariadne`): `store(uri, content, base)` +
