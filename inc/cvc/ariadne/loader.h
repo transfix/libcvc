@@ -73,12 +73,43 @@ struct CustomRequirement {
   bool required = false;
 };
 
+// A channel declared in the document's `channels:` block (§12 channel scoping). `shared` marks a
+// channel that a mount may be granted (documentation/intent). `global` puts the channel at app-root
+// and adds it to the default-deny GLOBALS allowlist, so a '/'-prefixed reference to it is permitted
+// (a chrooted sub-document may only reach an app-root-global the enclosing scope declared). Purely
+// declarative — the enforcement layer (the lint pass + the runtime policy, PR-C) consumes these;
+// channel RESOLUTION (private-by-prefix + link-hole grants) works with or without a declaration.
+struct ChannelDecl {
+  std::string name;
+  bool shared = false;
+  bool global = false;
+};
+
+// §12 lint / correctness policy (a document-level `lint:` block — part of a broader lint effort,
+// not buried in `channels:`). `channels` decides how an UNDECLARED channel reference is treated
+// once the document declares a `channels:` block: Strict = a hard load error, Warn = a warning, Off
+// = no check. Default Strict when a `channels:` block is present; a document with NO `channels:`
+// block is never channel-linted (existing/undeclared docs keep working). `quiet` suppresses the
+// one-time "channel enforcement relaxed" notice emitted under Warn/Off.
+struct LintConfig {
+  enum class Mode { Strict, Warn, Off };
+  Mode channels = Mode::Strict;
+  bool quiet = false;
+};
+
 struct LoadResult {
   bool ok = false;                        // false if the load failed (see `error`)
   Widget root;                            // a Group of the document's widgets (empty on failure)
   Scene scene;                            // the parsed `scene:` block (§9; empty if none)
   Meta meta;                              // parsed provenance (may be empty)
   std::vector<CustomRequirement> customs; // declared `customs:` (widget/node/block)
+  // §12 channel scoping: the document's declared `channels:` (empty if none). `has_channels_block`
+  // records whether the block was PRESENT (even if empty) — the enforcement gate: enforcement runs
+  // only for a document that declares channels:. `lint` is the doc-level `lint:` policy (strictness
+  // of the channel check). The loader CAPTURES these; the enforcement layer (PR-C) consumes them.
+  std::vector<ChannelDecl> channels;
+  bool has_channels_block = false;
+  LintConfig lint;
   // The `init:` block's state_exec script (verbatim text; empty if none). The loader
   // only CAPTURES it (it has no cvc::app and never runs the DSL); the host runs it once
   // at load via cvc::ariadne::run_init, scoped to the document prefix.

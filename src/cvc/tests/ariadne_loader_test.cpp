@@ -3070,3 +3070,95 @@ windows:
   EXPECT_EQ(c->props.find("visible_when"), nullptr);  // consumed, not a prop
   EXPECT_DOUBLE_EQ(c->props.num("gauge", -1.0), 0.8); // real config still captured
 }
+
+// ===========================================================================
+// §12 channel scoping — the `channels:` declaration, `lint:` policy, and mount grant (PR-B)
+// ===========================================================================
+
+TEST(AriadneChannels, DeclarationParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+channels:
+  - nav.done
+  - channel: telemetry
+    shared: true
+  - channel: app.quit
+    global: true
+windows: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.has_channels_block);
+  ASSERT_EQ(r.channels.size(), 3u);
+  EXPECT_EQ(r.channels[0].name, "nav.done"); // bare-scalar shorthand
+  EXPECT_FALSE(r.channels[0].shared);
+  EXPECT_EQ(r.channels[1].name, "telemetry");
+  EXPECT_TRUE(r.channels[1].shared);
+  EXPECT_EQ(r.channels[2].name, "app.quit");
+  EXPECT_TRUE(r.channels[2].global); // added to the globals allowlist
+}
+
+TEST(AriadneChannels, NoBlockMeansNoEnforcementGate) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string("windows: []\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(r.has_channels_block); // absent -> enforcement never runs for this doc
+  EXPECT_TRUE(r.channels.empty());
+}
+
+TEST(AriadneChannels, DuplicateDeclarationWarnsAndDrops) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string("channels:\n  - sig\n  - sig\nwindows: []\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.channels.size(), 1u); // the duplicate is dropped
+}
+
+TEST(AriadneChannels, LintBlockParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string("lint:\n  channels: warn\n  quiet: true\nwindows: []\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.lint.channels, LintConfig::Mode::Warn);
+  EXPECT_TRUE(r.lint.quiet);
+}
+
+TEST(AriadneChannels, LintDefaultsStrict) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string("windows: []\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.lint.channels, LintConfig::Mode::Strict); // strict unless opted out
+  EXPECT_FALSE(r.lint.quiet);
+}
+
+TEST(AriadneChannels, MountGrantLowersToLinkHole) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("ch_panel.ari", "root: [ { text: hi } ]\n");
+  const std::string main = write_temp_ari("main_ch.ari", R"(
+windows:
+  - window: W
+    children:
+      - load: ch_panel.ari
+        as: rf
+        channels:
+          done: nav.done
+          risk: { to: risk.overlay, mode: ro }
+)");
+  LoadResult r = load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *m = find_scope(r.root, "includes.rf");
+  ASSERT_NE(m, nullptr);
+  // A channel grant lowers into a transparent-link hole under the reserved channels. subtree, so
+  // wire_holes plants it and resolve_channel follows it.
+  const LinkHole *done = nullptr;
+  const LinkHole *risk = nullptr;
+  for (const LinkHole &h : m->links) {
+    if (h.name == "channels.done")
+      done = &h;
+    if (h.name == "channels.risk")
+      risk = &h;
+  }
+  ASSERT_NE(done, nullptr);
+  EXPECT_EQ(done->target, "channels.nav.done"); // resolved against the PARENT scope by wire_holes
+  EXPECT_TRUE(done->writable);                  // scalar form defaults rw
+  ASSERT_NE(risk, nullptr);
+  EXPECT_EQ(risk->target, "channels.risk.overlay");
+  EXPECT_FALSE(risk->writable); // mode: ro
+}

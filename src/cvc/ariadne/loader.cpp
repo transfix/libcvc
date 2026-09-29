@@ -91,7 +91,8 @@ std::map<std::string, AriBlockParser> &block_registry() {
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
-         k == "on_key" || k == "on_pointer" || k == "units" || k == "import";
+         k == "on_key" || k == "on_pointer" || k == "units" || k == "import" || k == "channels" ||
+         k == "lint";
 }
 } // namespace
 
@@ -1049,6 +1050,46 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       wrapper.links.push_back(std::move(h));
     }
   }
+  // §12 channels: grant — the messaging analogue of link:. Each entry grants the mounted child a
+  // channel its parent exposes; it LOWERS into a transparent-link hole under the reserved
+  // `channels.` subtree, so wire_holes plants it and intrinsics.cpp's resolve_channel follows it (a
+  // granted channel resolves to the parent's key). Value form `local: parent` (rw); map form
+  // `local: { to: parent, mode: ro|rw }`. Fail-closed on mode, like link:.
+  if (const YAML::Node ch = n["channels"]; ch && ch.IsMap()) {
+    for (const auto &kv : ch) {
+      if (!kv.first.IsScalar())
+        continue;
+      const std::string local = kv.first.Scalar();
+      std::string target;
+      bool writable = true;
+      if (const YAML::Node v = kv.second; v.IsScalar()) {
+        target = v.Scalar();
+      } else if (v.IsMap()) {
+        target = str(v, "to");
+        std::string mode = str(v, "mode", "rw");
+        std::transform(mode.begin(), mode.end(), mode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        writable = (mode == "rw");
+        if (mode != "rw" && mode != "ro")
+          ctx.warn("ari: load '" + uri + "': channel grant '" + local + "' has unknown mode '" +
+                   mode + "' — treated as read-only");
+      }
+      if (local.empty() || target.empty()) {
+        ctx.warn("ari: load '" + uri + "': channel grant '" + local + "' needs a target — skipped");
+        continue;
+      }
+      if (local[0] == '/') {
+        ctx.warn("ari: load '" + uri + "': channel grant name '" + local +
+                 "' must not start with '/' (it would escape the mount) — skipped");
+        continue;
+      }
+      LinkHole h;
+      h.name = "channels." + local;    // planted inside the mount's own channels. subtree
+      h.target = "channels." + target; // resolved against the PARENT scope by wire_holes
+      h.writable = writable;
+      wrapper.links.push_back(std::move(h));
+    }
+  }
   // §12 needs: the fragment can DECLARE the hole names it expects the mount to grant (a scalar or
   // list) — the parent-scope analogue of §7.6 requires:. A declared need the mount did not wire is
   // surfaced as a warning (fail-safe: the module still renders, but its ungranted name reads its
@@ -1484,6 +1525,64 @@ void schema_validate(const YAML::Node &doc, Ctx &ctx) {
 // Parse the `customs:` block (§ extensibility): the custom types the document uses.
 // Each entry names exactly one of widget:/node:/block: with an optional `required:`
 // flag (default false — a missing one warns; `required: true` fails the load).
+// §12 channel scoping: parse the top-level `channels:` declaration — a SEQUENCE of channel names,
+// each a bare scalar (`- nav.done`) or a map (`- channel: nav.done`, with `shared:`/`global:`
+// flags). Purely declarative (documentation + the globals allowlist + the enforcement input); a
+// duplicate name warns and is dropped. Mirrors parse_customs.
+std::vector<ChannelDecl> parse_channels(Ctx &ctx, const YAML::Node &c) {
+  std::vector<ChannelDecl> out;
+  if (!c || !c.IsSequence())
+    return out;
+  for (const YAML::Node &e : c) {
+    ChannelDecl d;
+    if (e.IsScalar()) {
+      d.name = e.Scalar(); // bare "- nav.done" shorthand
+    } else if (e.IsMap()) {
+      d.name = str(e, "channel");
+      d.shared = flag(e, "shared", false);
+      d.global = flag(e, "global", false);
+    } else {
+      continue;
+    }
+    if (d.name.empty()) {
+      ctx.warn("ari: channels entry declares a channel with no name — ignored");
+      continue;
+    }
+    if (std::any_of(out.begin(), out.end(),
+                    [&](const ChannelDecl &x) { return x.name == d.name; })) {
+      ctx.warn("ari: channels declares '" + d.name + "' more than once — later entry ignored");
+      continue;
+    }
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
+// §12 lint policy: parse the doc-level `lint:` MAP. `channels: strict|warn|off` sets how an
+// undeclared channel reference is treated (default strict); `quiet: true` suppresses the relaxed-
+// enforcement notice. Unknown keys/values warn and fall back to the default (fail-safe).
+LintConfig parse_lint(Ctx &ctx, const YAML::Node &l) {
+  LintConfig cfg;
+  if (!l || !l.IsMap())
+    return cfg;
+  if (const YAML::Node ch = l["channels"]; ch && ch.IsScalar()) {
+    std::string m = ch.Scalar();
+    std::transform(m.begin(), m.end(), m.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (m == "strict")
+      cfg.channels = LintConfig::Mode::Strict;
+    else if (m == "warn")
+      cfg.channels = LintConfig::Mode::Warn;
+    else if (m == "off" || m == "none" || m == "false")
+      cfg.channels = LintConfig::Mode::Off;
+    else
+      ctx.warn("ari: lint.channels '" + m +
+               "' unknown — using 'strict' (expected strict|warn|off)");
+  }
+  cfg.quiet = flag(l, "quiet", false);
+  return cfg;
+}
+
 std::vector<CustomRequirement> parse_customs(Ctx &ctx, const YAML::Node &c) {
   std::vector<CustomRequirement> out;
   if (!c || !c.IsSequence())
@@ -1576,6 +1675,22 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
     }
     ctx.warn(std::string("ari: optional custom ") + kind + " '" + req.name +
              "' is not registered — it will render as a placeholder / be skipped");
+  }
+
+  // §12 channel scoping: capture the `channels:` declaration + the doc-level `lint:` policy. The
+  // loader only PARSES them (like init:/customs:); the enforcement layer (lint pass + runtime
+  // policy, PR-C) consumes them. has_channels_block records PRESENCE (even if empty) — the gate
+  // that enforcement is active for this document at all.
+  if (doc.IsMap()) {
+    if (const YAML::Node cn = doc["channels"]) {
+      r.has_channels_block = true;
+      if (!cn.IsSequence())
+        ctx.warn("ari: channels: must be a SEQUENCE of channel names or "
+                 "{channel:, shared?, global?} entries — this channels block is not a sequence and "
+                 "was ignored");
+      r.channels = parse_channels(ctx, cn);
+    }
+    r.lint = parse_lint(ctx, doc["lint"]);
   }
 
 #ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
