@@ -1515,6 +1515,20 @@ if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
   target_include_directories(hdf5_volume_test PRIVATE ${HDF5_INCLUDE_DIRS})
   target_compile_features(hdf5_volume_test PRIVATE cxx_std_14)
   list(APPEND TEST_TARGETS hdf5_volume_test)
+
+  # LOD pyramid persistence (cvc::lod::write/read_*_pyramid + read_lod_index) —
+  # scene.cvch5 round-trip; needs HDF5 like the rest of this block.
+  add_executable(lod_store_test lod_store_test.cpp)
+  target_link_libraries(lod_store_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+      ${HDF5_LIBRARIES}
+  )
+  target_include_directories(lod_store_test PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_compile_features(lod_store_test PRIVATE cxx_std_14)
+  list(APPEND TEST_TARGETS lod_store_test)
 else()
   message(STATUS "HDF5 disabled; skipping hdf5_test")
 endif()
@@ -1649,6 +1663,9 @@ if(TARGET mtxlib_test)
 endif()
 if(TARGET hdf5_volume_test)
   cvc_discover_tests(hdf5_volume_test)
+endif()
+if(TARGET lod_store_test)
+  cvc_discover_tests(lod_store_test)
 endif()
 if(TARGET state_exec_gaps_test)
   cvc_discover_tests(state_exec_gaps_test)
