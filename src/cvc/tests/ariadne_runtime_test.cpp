@@ -5,9 +5,13 @@
 
 #include <algorithm>
 #include <atomic> // item 2: the nav-step worker's arrived-count accumulator
+#include <boost/any.hpp>
+#include <chrono>
+#include <condition_variable>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
-#include <cvc/ariadne/loader.h> // §12 end-to-end load: mount through the real Runtime
+#include <cvc/ariadne/loader.h>         // §12 end-to-end load: mount through the real Runtime
+#include <cvc/ariadne/net_intrinsics.h> // §13.8 async (http-get-async) intrinsic test
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
@@ -15,9 +19,12 @@
 #include <cvc/core/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
 #include <cvc/core/state_exec/types.h>           // value_t
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
+#include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <thread>
@@ -2132,4 +2139,192 @@ TEST(AriadneChannelPolicy, ExemptsHashChannel) {
   rt.set_backend(&mb);
   rt.set_channel_policy({"nav.done"}, {}, true, false);
   EXPECT_TRUE(msg_delivered(app, rt, mb, "sys#evt", "sys#evt")); // '#'-runtime channel is exempt
+}
+
+// ---------------------------------------------------------------------------
+// §13.8 async (http-get-async) intrinsic — offline via the cvc::net fake transport.
+// ---------------------------------------------------------------------------
+namespace {
+
+// A canned transport (PR1's set_http_client seam): returns one fixed response, records the call.
+class CannedHttpClient : public cvc::net::HttpClient {
+public:
+  explicit CannedHttpClient(cvc::net::HttpResponse r) : resp_(std::move(r)) {}
+  std::atomic<int> calls{0};
+  std::string last_url;
+  cvc::net::HttpResponse send(const cvc::net::HttpRequest &req) override {
+    last_url = req.url;
+    ++calls;
+    return resp_;
+  }
+
+private:
+  cvc::net::HttpResponse resp_;
+};
+
+// A transport that blocks in send() until released — proves the verb does NOT block the scheduler.
+class BlockingHttpClient : public cvc::net::HttpClient {
+public:
+  explicit BlockingHttpClient(cvc::net::HttpResponse r) : resp_(std::move(r)) {}
+  cvc::net::HttpResponse send(const cvc::net::HttpRequest &) override {
+    std::unique_lock<std::mutex> lk(m_);
+    cv_.wait(lk, [&] { return release_; });
+    return resp_;
+  }
+  void release() {
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      release_ = true;
+    }
+    cv_.notify_all();
+  }
+
+private:
+  std::mutex m_;
+  std::condition_variable cv_;
+  bool release_ = false;
+  cvc::net::HttpResponse resp_;
+};
+
+// Restore process-global state so one test never leaks into another.
+struct NetIntrinsicsGuard {
+  ~NetIntrinsicsGuard() {
+    clear_action_intrinsics();
+    cvc::net::set_http_client(nullptr);
+  }
+};
+
+cvc::net::HttpResponse http_ok(long status, std::string body, std::vector<std::string> headers = {},
+                               std::string url = "http://ex/x") {
+  cvc::net::HttpResponse r;
+  r.ok = true;
+  r.status = status;
+  r.body = std::move(body);
+  r.headers = std::move(headers);
+  r.canonical_url = std::move(url);
+  return r;
+}
+
+// Pump render+drain until `pred` holds or the budget elapses (compute_async posts from a background
+// worker, so a bounded pump stands in for the nav test's hand-rolled join()).
+template <class Pred> bool pump_until(Runtime &rt, Pred pred, int budget_ms = 5000) {
+  using namespace std::chrono;
+  const auto deadline = steady_clock::now() + milliseconds(budget_ms);
+  while (steady_clock::now() < deadline) {
+    rt.render();
+    rt.drain();
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(milliseconds(2));
+  }
+  return pred();
+}
+
+std::string node_data_string(cvc::app &app, const char *path) {
+  const boost::any d = cvc::state::instance(app)(path).data();
+  const std::string *s = boost::any_cast<std::string>(&d);
+  return s ? *s : std::string();
+}
+
+} // namespace
+
+TEST(AriadneNetIntrinsics, HttpGetAsyncAwaitsResponseDict) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new CannedHttpClient(http_ok(200, "hi", {"Content-Type: text/plain"}));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set r (msg-recv (http-get-async \"http://ex/x\")))"
+                                  "  (state-set \"r.status\" (get-attr r \"status\"))"
+                                  "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                                  "  (state-set \"r.error\" (get-attr r \"error\"))"
+                                  "  (state-data-set \"r.body\" (get-attr r \"body\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // http-get-async launches the worker; the action parks on msg-recv (drain never
+              // blocks)
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return !cvc::state::instance(app)("r.status").value().empty();
+  })) << "the parked action never resumed";
+  EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
+  EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("r.error").value(), ""); // empty on success
+  EXPECT_EQ(node_data_string(app, "r.body"), "hi"); // the bytes body round-trips byte-exact
+  EXPECT_EQ(fake->calls.load(), 1);
+  EXPECT_EQ(fake->last_url, "http://ex/x");
+}
+
+TEST(AriadneNetIntrinsics, HttpGetAsyncErrorPathResumesWithErrorDict) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  cvc::net::HttpResponse err;
+  err.ok = false;
+  err.status = 0;
+  err.error = "boom";
+  cvc::net::set_http_client(std::make_unique<CannedHttpClient>(err));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set r (msg-recv (http-get-async \"http://ex/down\")))"
+                                  "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                                  "  (state-set \"r.error\" (get-attr r \"error\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.error").value().empty(); }))
+      << "the action must resume even on a transport error";
+  EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "false");
+  EXPECT_EQ(cvc::state::instance(app)("r.error").value(), "boom");
+}
+
+TEST(AriadneNetIntrinsics, HttpGetAsyncDoesNotBlockTheScheduler) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new BlockingHttpClient(http_ok(200, "later"));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group(
+      {button("Go", "(state-set \"r.status\" "
+                    "(get-attr (msg-recv (http-get-async \"http://ex/slow\")) \"status\"))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // the verb returns immediately + the action parks; the fetch is still blocked in
+              // send()
+  mb.button_click = false;
+  // drain() returned though the transport is blocked → the scheduler thread was not blocked.
+  EXPECT_TRUE(cvc::state::instance(app)("r.status").value().empty())
+      << "the result must not be delivered while the fetch is in flight";
+
+  fake->release(); // let the worker's send() complete
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return !cvc::state::instance(app)("r.status").value().empty(); }));
+  EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
 }

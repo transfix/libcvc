@@ -3249,6 +3249,24 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 `fetch_sync()` is unavailable there — the async path is identical across backends. Returns
 `resource{kind::bytes|local_path}` to slot into §13.4's dispatch-by-kind.
 
+> **LANDED (first slice) — the async `(http-get-async)` state_exec intrinsic.**
+> `ariadne/net_intrinsics.cpp` + `register_net_intrinsics(cvc::app&)` (inc/cvc/ariadne/net_intrinsics.h)
+> bind a program-lane verb `(http-get-async URL [HEADERS])` that runs the blocking `cvc::net::send`
+> on `app.computePool()` (OFF the scheduler thread) and posts the response to a UNIQUE `#`-suffixed
+> reply channel it RETURNS; a program awaits with the existing `(msg-recv <chan>)`, resuming with a
+> dict `{ ok status body(bytes) url headers(list) error }`. This is the nav_compute pattern
+> (host-intrinsic → `compute_async` → `exec_scheduler().post_message` → parked `msg-recv` woken by
+> `drain_ingress`, the delivered value threaded into the enclosing expression). The verb ALWAYS posts
+> a dict (an error dict on failure) so a parked recv never hangs; the body is `bytes` (the §13.9
+> precursor bridge). Registered host-level (needs `cvc::net` + the app), not a core builtin. Tests in
+> `ariadne_runtime_test` (AriadneNetIntrinsics: full-dict await, error-path resume, and a
+> BlockingHttpClient proof that the scheduler is not blocked while the fetch is in flight), offline via
+> the PR1 `set_http_client` fake. **NOT YET:** a *transparent* `(http-get url)` that returns the body
+> directly (needs a new evaluator park-token hook — a host `native_fn` gets no `intrinsics_context` at
+> call time, so it can't self-park); chunked/streaming bodies; and the dedicated libcurl-`multi` I/O
+> thread (today each in-flight fetch blocks one compute-pool worker). NATIVE only until the wasm
+> worker/`-sASYNCIFY` fetch path is confirmed.
+
 ### 13.9 A cvc::app-wide HTTP(s) cache in the state tree (TTL + conditional GET) — *planned*
 
 Repeated `import:`/`load:`/`source:` of the same `http(s)://` URL must not re-fetch every time. The
