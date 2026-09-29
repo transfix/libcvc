@@ -131,6 +131,15 @@ public:
   std::vector<process_info> list_processes() const override;
   std::optional<process_info> get_process_info(int pid) const override;
   std::optional<value_t> get_result(int pid) const;
+  /// The failure reason of a killed process (e.g. the message of a native_fn that threw, or a
+  /// resource-limit tag), or nullopt if the pid is unknown or did not fail. A driver reports this
+  /// so a caught exception is not flattened to a generic "killed".
+  std::optional<std::string> get_exit_error(int pid) const;
+  /// Erase a FINISHED (terminated or killed) process and its side-table entries from the scheduler,
+  /// freeing its env/state/captured values. Returns false (no-op) for an unknown pid or a live one
+  /// — never drops a runnable/waiting process. A one-shot driver (pycvc.Exec.run) reaps its pid
+  /// after collecting the result so a long-lived scheduler does not accumulate dead processes.
+  bool reap(int pid);
   std::unordered_map<int, value_t> get_results() const;
   scheduler_stats get_stats() const override;
 

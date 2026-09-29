@@ -815,6 +815,26 @@ std::optional<value_t> async_scheduler::get_result(int pid) const {
   return it->second->exit_code;
 }
 
+std::optional<std::string> async_scheduler::get_exit_error(int pid) const {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return std::nullopt;
+  return it->second->exit_error;
+}
+
+bool async_scheduler::reap(int pid) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  const process_status st = it->second->status;
+  if (st != process_status::terminated && st != process_status::killed)
+    return false; // never drop a still-live (ready/running/waiting/paused) process
+  // Its env, state, watch_handlers and captured values (including any Python holders) all live on
+  // the process object, so erasing it frees them.
+  processes_.erase(it);
+  return true;
+}
+
 std::unordered_map<int, value_t> async_scheduler::get_results() const {
   std::unordered_map<int, value_t> results;
   for (const auto &[pid, proc] : processes_) {

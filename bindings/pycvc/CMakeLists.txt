@@ -206,6 +206,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state:test_pycvc_state.py
              pycvc_async:test_pycvc_async.py
              pycvc_exec:test_pycvc_exec.py
+             pycvc_exec_async:test_pycvc_exec_async.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py

@@ -195,7 +195,7 @@ void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts) {
 std::string launch_http(cvc::app &app, const std::string &root, cvc::net::HttpRequest req) {
   const std::string url = req.url; // capture before the move for the error path
   return cvc::launch_pool_task(
-      app, root, "http.reply",
+      app, app.exec_scheduler(), root, "http.reply",
       [req = std::move(req)]() { return marshal_response(cvc::net::send(req)); },
       [url](const std::string &msg) { return marshal_error(url, std::string("http: ") + msg); });
 }
@@ -249,7 +249,7 @@ std::string launch_uri_fetch(cvc::app &app, const std::string &root,
       base = *b;
 
   return cvc::launch_pool_task(
-      app, root, "uri.reply",
+      app, app.exec_scheduler(), root, "uri.reply",
       // resolve() is app-free + has its own barrier, so it is safe on a pool worker.
       [uri, base]() { return marshal_uri_result(resolve(uri, base)); },
       [uri](const std::string &msg) {
