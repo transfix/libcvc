@@ -634,6 +634,27 @@ TEST_F(AsyncSchedulerIntrinsicsTest, AwaitIntrinsicParksThenResumesWithValue) {
   EXPECT_EQ(std::get<int64_t>(it->second.v), 42); // resumed with the awaited value
 }
 
+// §13.8 per-STEP cap: max_step_time arms a fresh per-step deadline (fresh each step, so it never
+// accumulates and cannot kill a long-lived resident) — the SAME eval_deadline_guard mechanism the
+// action time-limit uses, just applied to residents so an in-step loop can't hang the drain. This
+// checks the wiring + that a NORMAL body under the cap completes untouched (no false-kill); the
+// abort-on-overrun behaviour is covered by the existing action time-limit tests (same guard).
+TEST_F(AsyncSchedulerIntrinsicsTest, PerStepCapLeavesHealthyWorkUntouched) {
+  execute_options opts;
+  opts.env = env;
+  opts.max_step_time = 0.05; // a generous per-step cap; every normal step is far under it
+  int pid =
+      sched.execute(std::string("(begin (set s 0) (set i 0) "
+                                "(while (< i 200) (begin (set s (+ s i)) (set i (+ i 1)))) s)"),
+                    opts);
+  auto results = sched.sync_run(2000000, 1.0);
+  auto it = results.find(pid);
+  ASSERT_NE(it, results.end());                      // completed, not killed
+  EXPECT_EQ(std::get<int64_t>(it->second.v), 19900); // sum 0..199
+  auto info = sched.get_process_info(pid);
+  EXPECT_TRUE(!info.has_value() || info->status != process_status::killed);
+}
+
 TEST(AsyncSchedulerTest, KillOwnerReapsProcessGroup) {
   async_scheduler sched;
   execute_options a;

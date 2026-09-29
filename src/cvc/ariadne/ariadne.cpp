@@ -1479,8 +1479,15 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
-    opts.max_steps = 0;  // unlimited total — see above
-    opts.max_time = 0.0;
+    opts.max_steps = 0;  // unlimited total — a resident loops forever (see above)
+    opts.max_time = 0.0; // unlimited TOTAL run-time; the per-STEP cap below is the hang backstop
+    // §13.8 resident per-STEP wall-clock cap: a resident has no total budget, so give it a per-step
+    // deadline (fresh each step) so a single step that loops in-place (a runaway native builtin)
+    // can't HANG the host's per-frame drain — it is aborted + the resident killed. A healthy
+    // on:tick/on_key body is far under this, and a per-node DSL loop is bounded by the pump's own
+    // per-drain cap; this only bites an in-STEP loop the pump can't interrupt.
+    constexpr double kResidentStepSeconds = 0.05;
+    opts.max_step_time = kResidentStepSeconds;
     pid_slot = sched.execute(wrapped, opts);
     ctx_slot = std::move(ac);
   } catch (const std::exception &e) {

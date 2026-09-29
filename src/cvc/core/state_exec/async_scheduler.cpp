@@ -30,6 +30,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.owner = opts.owner;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
+  proc.max_step_time = opts.max_step_time;
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
@@ -55,6 +56,7 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.owner = opts.owner;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
+  proc.max_step_time = opts.max_step_time;
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
@@ -155,6 +157,12 @@ void async_scheduler::execute_process_step(process &proc) {
     const double remaining = proc.max_time - proc.elapsed_time();
     step_budget = remaining > 0.0 ? remaining : 0.0;
   }
+  // §13.8 per-STEP cap: bound a SINGLE step's wall time too (fresh each step, never accumulates),
+  // so a resident with total max_time == 0 still can't HANG the host's drain on an in-step loop. A
+  // healthy step is far under the cap; a per-node DSL loop yields per step and is bounded by the
+  // pump's own per-drain cap instead. Take the tighter of the two.
+  if (proc.max_step_time > 0.0)
+    step_budget = step_budget ? std::min(*step_budget, proc.max_step_time) : proc.max_step_time;
   eval_deadline_guard step_deadline(step_budget);
   // Drive one async_stackless_evaluator step to completion at the leaf. The evaluator's step()
   // is a coroutine that runs one inner stackless step then yields a suspend_point; sync_wait
@@ -179,7 +187,12 @@ void async_scheduler::execute_process_step(process &proc) {
   }
 
   auto now = std::chrono::steady_clock::now();
-  proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  // A parking intrinsic (sleep / yield-frame / receive_message) already closed out this running
+  // slice into accumulated_time and flipped status to `waiting`; accrue here only while still
+  // running, so a parking step's slice is not double-counted (mirrors process::elapsed_time()'s own
+  // status guard — previously the unconditional add booked the pre-park slice twice).
+  if (proc.status == process_status::running)
+    proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
 
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
     restore_from_signal(proc);
@@ -669,6 +682,7 @@ int async_scheduler::fork(int pid) {
   child->root_path = parent.root_path;
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
+  child->max_step_time = parent.max_step_time;
   child->max_memory = parent.max_memory;
   child->max_messages = parent.max_messages;
   child->max_message_bytes = parent.max_message_bytes;
