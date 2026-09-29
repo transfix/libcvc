@@ -138,6 +138,7 @@ add_executable(nav_geom_rollout_grad_test nav_geom_rollout_grad_test.cpp)
 add_executable(lod_select_test lod_select_test.cpp)
 add_executable(lod_select_bench_test lod_select_bench_test.cpp)
 add_executable(geometry_simplify_test geometry_simplify_test.cpp)
+add_executable(lod_pyramid_test lod_pyramid_test.cpp)
 add_executable(vis_frustum_test vis_frustum_test.cpp)
 add_executable(vis_oracle_test vis_oracle_test.cpp)
 add_executable(vis_grid_test vis_grid_test.cpp)
@@ -251,6 +252,7 @@ set(TEST_TARGETS
   lod_select_test
   lod_select_bench_test
   geometry_simplify_test
+  lod_pyramid_test
   vis_frustum_test
   vis_oracle_test
   vis_grid_test
@@ -766,6 +768,13 @@ target_link_libraries(lod_select_bench_test
 )
 
 target_link_libraries(geometry_simplify_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(lod_pyramid_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1617,6 +1626,7 @@ cvc_discover_tests(nav_geom_rollout_grad_test)
 cvc_discover_tests(lod_select_test)
 cvc_discover_tests(lod_select_bench_test)
 cvc_discover_tests(geometry_simplify_test)
+cvc_discover_tests(lod_pyramid_test)
 cvc_discover_tests(vis_frustum_test)
 cvc_discover_tests(vis_oracle_test)
 cvc_discover_tests(vis_grid_test)
