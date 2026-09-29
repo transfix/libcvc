@@ -396,6 +396,16 @@ void ImGuiBackend::text_value(const char *label, const std::string &value) {
   line += value;
   ui::TextLine(line.c_str());
 }
+void ImGuiBackend::text_line_colored(const char *text, const float rgb[3]) {
+  ui::TextLineColored(text, rgb[0], rgb[1], rgb[2]);
+}
+void ImGuiBackend::text_value_colored(const char *label, const std::string &value,
+                                      const float rgb[3]) {
+  std::string line = label;
+  line += ": ";
+  line += value;
+  ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
+}
 void ImGuiBackend::separator() { ui::Separator(); }
 bool ImGuiBackend::button(const char *label) { return ui::Button(label); }
 bool ImGuiBackend::menu_item_action(const char *label) { return ui::MenuItemClicked(label); }

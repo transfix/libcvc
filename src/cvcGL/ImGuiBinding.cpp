@@ -515,6 +515,9 @@ void PushId(const char *strId) { ImGui::PushID(strId); }
 void PushIdInt(int id) { ImGui::PushID(id); }
 void PopId() { ImGui::PopID(); }
 void TextLine(const char *text) { ImGui::TextUnformatted(text); }
+void TextLineColored(const char *text, float r, float g, float b) {
+  ImGui::TextColored(ImVec4(r, g, b, 1.0f), "%s", text);
+}
 void TextDisabledLine(const char *text) { ImGui::TextDisabled("%s", text); }
 bool Button(const char *label, double width, double height) {
   return ImGui::Button(label, ImVec2(static_cast<float>(width), static_cast<float>(height)));
@@ -595,6 +598,7 @@ void PushId(const char *) {}
 void PushIdInt(int) {}
 void PopId() {}
 void TextLine(const char *) {}
+void TextLineColored(const char *, float, float, float) {}
 void TextDisabledLine(const char *) {}
 bool Button(const char *, double, double) { return false; }
 bool SmallButton(const char *) { return false; }

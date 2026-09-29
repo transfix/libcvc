@@ -148,6 +148,7 @@ void PushIdInt(int id);
 void PopId();
 // text (a raw label to draw, NOT a state path like Text() above).
 void TextLine(const char *text);
+void TextLineColored(const char *text, float r, float g, float b); // TextLine tinted rgb (a=1)
 void TextDisabledLine(const char *text);
 // buttons — return "clicked this frame".
 bool Button(const char *label, double width = 0.0, double height = 0.0);
