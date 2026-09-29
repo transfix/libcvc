@@ -56,7 +56,17 @@ value_t builtin_ne(std::span<const value_t> args);
 /// @{
 value_t builtin_str_concat(std::span<const value_t> args);
 value_t builtin_str(std::span<const value_t> args);
+value_t builtin_url_encode(std::span<const value_t> args); // (url-encode s) -> percent-encoded
+value_t builtin_url_decode(std::span<const value_t> args); // (url-decode s) -> percent-decoded
 /// @}
+
+/// Percent-encode `s` per RFC 3986: the unreserved set (A-Za-z0-9 and -._~) passes through, every
+/// other byte becomes %XX (uppercase hex; space -> %20). Shared by (url-encode) and Ariadne's HTTP
+/// query/form builders so a query string and (url-encode) agree byte for byte.
+std::string percent_encode(const std::string &s);
+/// Reverse of percent_encode: %XX -> the byte (a malformed escape is kept literally); '+' -> space
+/// (the application/x-www-form-urlencoded convention, so a decoded query value reads naturally).
+std::string percent_decode(const std::string &s);
 
 /// @name List
 /// @{

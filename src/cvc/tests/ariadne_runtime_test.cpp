@@ -2467,11 +2467,20 @@ TEST(AriadneNetIntrinsics, FetchAsyncFutureAwaited) {
   EXPECT_EQ(node_data_string(app, "r.body"), "world");
 }
 
-// The general method verb — (http-request METHOD URL [BODY [HEADERS]]) — carries an arbitrary
-// method, a string request body, and custom headers (a bearer token + a content-type) through to
-// the transport, and self-parks like (http-get). This is the POST-a-form / authenticated-request
-// path the user asked for.
-TEST(AriadneNetIntrinsics, HttpRequestPostCarriesMethodBodyAndHeaders) {
+namespace {
+bool headers_contain(const std::vector<std::string> &h, const char *needle) {
+  return std::find(h.begin(), h.end(), needle) != h.end();
+}
+bool headers_have_prefix(const std::vector<std::string> &h, const std::string &prefix) {
+  return std::any_of(h.begin(), h.end(),
+                     [&](const std::string &line) { return line.rfind(prefix, 0) == 0; });
+}
+} // namespace
+
+// The general method verb via the options dict: (http-request "POST" URL (dict "headers" (dict …)
+// "form" (dict …))) — a form body is percent-encoded with a default Content-Type, and a bearer
+// token rides in as a header. This is the authenticated form-POST the user asked for.
+TEST(AriadneNetIntrinsics, HttpRequestPostFormBodyAndBearer) {
   if (!have_state_exec())
     GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
@@ -2485,11 +2494,12 @@ TEST(AriadneNetIntrinsics, HttpRequestPostCarriesMethodBodyAndHeaders) {
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  rt.set_root(group({button(
-      "Go", "(begin"
-            "  (set r (http-request \"POST\" \"http://ex/api\" \"grip=1&risk=2\""
-            "           (list \"Authorization: Bearer tok-123\" \"Content-Type: text/plain\")))"
-            "  (state-set \"r.status\" (get-attr r \"status\")))")}));
+  rt.set_root(
+      group({button("Go", "(begin"
+                          "  (set r (http-request \"POST\" \"http://ex/api\""
+                          "           (dict \"headers\" (dict \"Authorization\" \"Bearer tok-123\")"
+                          "                 \"form\"    (dict \"grip\" 1 \"risk\" 2))))"
+                          "  (state-set \"r.status\" (get-attr r \"status\")))")}));
   mb.button_click = true;
   rt.render();
   rt.drain();
@@ -2502,18 +2512,86 @@ TEST(AriadneNetIntrinsics, HttpRequestPostCarriesMethodBodyAndHeaders) {
   EXPECT_EQ(fake->calls.load(), 1);
   EXPECT_EQ(fake->last_method, "POST");
   EXPECT_EQ(fake->last_url, "http://ex/api");
-  EXPECT_EQ(fake->last_body, "grip=1&risk=2");
-  auto has_hdr = [&](const char *h) {
-    return std::find(fake->last_headers.begin(), fake->last_headers.end(), h) !=
-           fake->last_headers.end();
-  };
-  EXPECT_TRUE(has_hdr("Authorization: Bearer tok-123")) << "bearer header not forwarded";
-  EXPECT_TRUE(has_hdr("Content-Type: text/plain"));
+  EXPECT_EQ(fake->last_body,
+            "grip=1&risk=2"); // form dict -> x-www-form-urlencoded, order preserved
+  EXPECT_TRUE(headers_contain(fake->last_headers, "Authorization: Bearer tok-123"))
+      << "bearer header not forwarded";
+  EXPECT_TRUE(
+      headers_contain(fake->last_headers, "Content-Type: application/x-www-form-urlencoded"))
+      << "form body should default a Content-Type";
+}
+
+// (http-get URL (dict "query" (dict …))) percent-encodes the params into the URL's query string —
+// the caller never hand-encodes. A space becomes %20 and '&' is escaped so it can't inject a pair.
+TEST(AriadneNetIntrinsics, HttpGetQueryParamsEncodedIntoUrl) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new CannedHttpClient(http_ok(200, "ok"));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group(
+      {button("Go", "(begin"
+                    "  (set r (http-get \"http://ex/x\" (dict \"query\" (dict \"q\" \"hello world\""
+                    "                                                         \"n\" 2))))"
+                    "  (state-set \"r.status\" (get-attr r \"status\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return !cvc::state::instance(app)("r.status").value().empty();
+  })) << "(http-get …) never resumed";
+  EXPECT_EQ(fake->calls.load(), 1);
+  EXPECT_EQ(fake->last_method, "GET");
+  EXPECT_EQ(fake->last_url, "http://ex/x?q=hello%20world&n=2");
+}
+
+// A raw string "body" option is sent verbatim and does NOT get a defaulted Content-Type (only the
+// "form" helper adds one) — the caller controls the content type.
+TEST(AriadneNetIntrinsics, HttpRequestRawBodyNoDefaultContentType) {
+  if (!have_state_exec())
+    GTEST_SKIP() << "libcvc built without state_exec";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new CannedHttpClient(http_ok(200, "ok"));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button(
+      "Go", "(begin"
+            "  (set r (http-request \"PUT\" \"http://ex/raw\" (dict \"body\" \"raw-payload\")))"
+            "  (state-set \"r.status\" (get-attr r \"status\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return !cvc::state::instance(app)("r.status").value().empty();
+  })) << "(http-request …) never resumed";
+  EXPECT_EQ(fake->last_method, "PUT");
+  EXPECT_EQ(fake->last_body, "raw-payload");
+  EXPECT_FALSE(headers_have_prefix(fake->last_headers, "Content-Type"))
+      << "a raw body must not get a defaulted Content-Type";
 }
 
 // (http-request-async …) returns a future the program awaits; a BYTES body (here, the octet body a
-// prior (http-get) yielded) rides through byte-exact — so a fetched blob can be re-uploaded with a
-// PUT without a lossy text round-trip.
+// prior (http-get) yielded, carried via the "body" option) rides through byte-exact — so a fetched
+// blob can be re-uploaded with a PUT without a lossy text round-trip.
 TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
   if (!have_state_exec())
     GTEST_SKIP() << "libcvc built without state_exec";
@@ -2531,8 +2609,9 @@ TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
   rt.set_root(group({button(
       "Go", "(begin"
             "  (set g (await (http-get-async \"http://ex/src\")))"
-            "  (set r (await (http-request-async \"PUT\" \"http://ex/dst\" (get-attr g \"body\")"
-            "                   (list \"Authorization: Bearer tok\"))))"
+            "  (set r (await (http-request-async \"PUT\" \"http://ex/dst\""
+            "                   (dict \"body\" (get-attr g \"body\")"
+            "                         \"headers\" (dict \"Authorization\" \"Bearer tok\")))))"
             "  (state-set \"r.status\" (get-attr r \"status\")))")}));
   mb.button_click = true;
   rt.render();
@@ -2547,9 +2626,5 @@ TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
   EXPECT_EQ(fake->last_method, "PUT");
   EXPECT_EQ(fake->last_url, "http://ex/dst");
   EXPECT_EQ(fake->last_body, "payload-bytes"); // the bytes body threaded through byte-exact
-  auto has_hdr = [&](const char *h) {
-    return std::find(fake->last_headers.begin(), fake->last_headers.end(), h) !=
-           fake->last_headers.end();
-  };
-  EXPECT_TRUE(has_hdr("Authorization: Bearer tok"));
+  EXPECT_TRUE(headers_contain(fake->last_headers, "Authorization: Bearer tok"));
 }

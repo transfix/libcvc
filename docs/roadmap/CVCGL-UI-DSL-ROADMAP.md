@@ -3296,22 +3296,37 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 > asset doesn't block scene setup — a follow-up); render-pass park budget (separate PR). NATIVE only
 > until the wasm worker/`-sASYNCIFY` fetch path is confirmed.
 
-> **LANDED (general method verb) — `(http-request METHOD URL [BODY [HEADERS]])` / `(http-request-async …)`.**
+> **LANDED (general method verb, options-dict shape) — `(http-request METHOD URL [OPTS])` /
+> `(http-request-async …)`, plus `(url-encode s)`/`(url-decode s)`.**
 > `net_intrinsics.cpp` generalizes the launcher into `launch_http(app, root, HttpRequest)` (mint reply
-> channel → `compute_async` blocking `send` → post the marshalled dict) and adds the two verbs on top of
-> it — `http-request` self-parks (transparent), `http-request-async` returns a future — resuming with the
-> SAME `{ ok status body(bytes) url headers error }` dict as `http-get`. `METHOD` is any verb
-> (`GET`/`PUT`/`POST`/`PATCH`/`DELETE`/…); `BODY` is a string OR a `bytes` value (byte-exact — a body
-> fetched as `bytes` re-uploads without a lossy text round-trip; empty for a bodyless verb); `HEADERS` is
-> a list of verbatim `"Name: value"` lines — so **bearer-token auth is just**
-> `(http-request "POST" url body (list "Authorization: Bearer <tok>" "Content-Type: application/json"))`.
-> `http-get` is now GET sugar over the same launcher (headers-only, no body). BOTH transports already
-> carry method+body+headers: curl via `CUSTOMREQUEST`/`COPYPOSTFIELDS` (size set first → embedded NULs
-> survive) / `HTTPHEADER` (fail-closed on OOM — never sends WITHOUT the auth header), Emscripten fetch via
-> `requestMethod`/`requestData`+`requestDataSize`/split header array — so the verb works native **and**
-> wasm by construction. Tests: AriadneNetIntrinsics POST-carries-method-body-headers (string body + bearer
-> + content-type, transparent) and async-PUT-with-bytes-body-awaited (a prior `http-get` body re-PUT as a
-> `bytes` body, awaited via a future), offline over the canned transport.
+> channel → `compute_async` blocking `send` → post the marshalled dict) and adds two verbs on top —
+> `http-request` self-parks (transparent), `http-request-async` returns a future — resuming with the SAME
+> `{ ok status body(bytes) url headers error }` dict as `http-get`. `METHOD` is any verb
+> (`GET`/`PUT`/`POST`/`PATCH`/`DELETE`/…). **`OPTS` is an options dict** (`apply_http_options`) with
+> optional keys: `query` (dict → percent-encoded query string appended to the URL), `headers` (dict
+> `{Name value}` → `"Name: value"` lines, or a list of verbatim lines for a repeated header), `body`
+> (string OR `bytes` → raw body, byte-exact), `form` (dict → `application/x-www-form-urlencoded` body +
+> a defaulted `Content-Type` unless the caller set one). `body`+`form` together is an error; unknown keys
+> are ignored (forward-compat: `json`/`timeout`/… later). So the encoding the caller used to hand-format
+> is under the hood — **an authenticated form POST is**
+> `(http-request "POST" url (dict "headers" (dict "Authorization" (str-concat "Bearer " tok)) "form" (dict "grip" 1 "risk" 2)))`
+> and a GET with query is `(http-get url (dict "query" (dict "q" "hello world")))`. `http-get` is GET
+> sugar over the same launcher; both take the same `OPTS`. `url-encode`/`url-decode` are core
+> `state_exec` builtins (RFC 3986; space→`%20`, decode also maps `+`→space) shared with the query/form
+> builder so they agree byte for byte.
+>
+> **Cross-backend parity (adversarial review, 6 findings — all native-vs-wasm divergence — fixed).** The
+> facade dispatcher `cvc::net::send()` now NORMALIZES every request so curl and fetch see one canonical
+> form: empty method → GET; a GET/HEAD body is dropped (XHR drops it, curl mis-sends it); an out-of-token
+> or >31-char verb (the fetch `requestMethod` buffer is 32 bytes) is rejected before dispatch. The curl
+> backend sets `CURLOPT_NOBODY` for HEAD (previously `CUSTOMREQUEST="HEAD"` without NOBODY hung ~30s until
+> timeout — the one HIGH), and neutralizes curl's implicit `Content-Type`/`Expect: 100-continue` on a body
+> so neither backend adds a header the other omits. The fetch backend documents the one gap it cannot
+> close: emscripten exposes no redirect control, so `follow_redirects`/`max_redirects` are unenforced on
+> wasm (curl honors both). Tests: NetNormalize + NetCurlBackend.HeadRequestReturnsPromptly (a real
+> localhost HEAD returns in <3s — would hang without NOBODY); AriadneNetIntrinsics form-POST-with-bearer,
+> query-encoded-into-URL, raw-body-no-default-content-type, async-PUT-with-bytes-body; BuiltinsTest url
+> encode/decode (reserved/space, malformed-escape-literal, all-byte round trip).
 
 ### 13.9 A cvc::app-wide HTTP(s) cache in the state tree (TTL + conditional GET) — *planned*
 
