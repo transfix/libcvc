@@ -77,6 +77,20 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx);
 /// register_intrinsics().
 void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path);
 
+/// §12 channel scoping: the message-channel key for `channel` under chroot `root_path`, mirroring
+/// how state paths are chrooted. This is the PURE-STRING form (no state-tree walk, so it is
+/// thread-safe) for HOST posters that must post to the same key a scoped `(msg-recv …)` resolves —
+/// e.g. a compute-pool worker calling exec_scheduler().post_message(resolve_channel_key(root_path,
+/// "nav.done"), …), where root_path comes from the action's intrinsics_context.root_path.
+/// Rules (identical to the intrinsic-side resolver, minus grant-link following which needs the
+/// tree): a '#'-bearing channel (the runtime's own tick/key/pointer channels) and an empty
+/// root_path return `channel` verbatim (backward-compatible); a leading '/' is an app-root-global
+/// escape (returned with the '/' stripped); otherwise the channel is private to the document at
+/// "<root_path>.channels.<name>". A host that needs to post to a link-GRANTED channel must resolve
+/// on the scheduler thread (the intrinsic path does that) and capture the string — never walk the
+/// tree off-thread.
+std::string resolve_channel_key(const std::string &root_path, const std::string &channel);
+
 } // namespace cvc::state_exec
 
 #endif // CVC_STATE_EXEC_INTRINSICS_H

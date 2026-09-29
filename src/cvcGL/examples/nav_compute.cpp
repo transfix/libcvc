@@ -25,9 +25,10 @@
 #include <cvc/ariadne/uri.h> // register_cvc_uri_handler — the cvc:// component-library import path
 #include <cvc/core/app.h>
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
-#include <cvc/core/state_exec/builtins.h> // register_fn — bind the host verb into the lanes
-#include <cvc/core/state_exec/types.h>    // value_t payload
-#include <cvc/core/thread_pool.h>         // compute_async drives computePool().parallel_for
+#include <cvc/core/state_exec/builtins.h>   // register_fn — bind the host verb into the lanes
+#include <cvc/core/state_exec/intrinsics.h> // resolve_channel_key — scope the completion channel
+#include <cvc/core/state_exec/types.h>      // value_t payload
+#include <cvc/core/thread_pool.h>           // compute_async drives computePool().parallel_for
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
@@ -98,24 +99,27 @@ int main(int argc, char **argv) {
   // worker and touches only the one thread-safe seam, exec_scheduler().post_message. Guarded so a
   // CVC_STATE_EXEC=OFF build still links (the program lanes just don't run there).
   if (ari::have_state_exec()) {
-    ari::register_action_intrinsics(
-        [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
-          se::builtins::register_fn(env, "nav-step-async", [&app](std::span<const se::value_t>) {
-            auto arrived = std::make_shared<std::atomic<int>>(0);
-            const int n = 4096;
-            app.compute_async(
-                n,
-                [arrived](int i) { // stand-in nav kernel: count the "arrived" agents
-                  if ((i % 3) == 0)
-                    arrived->fetch_add(1, std::memory_order_relaxed);
-                },
-                [&app, arrived] {
-                  app.exec_scheduler().post_message("nav.done",
-                                                    se::value_t(std::to_string(arrived->load())));
-                });
-            return se::value_t{}; // nil; the .ari action parks on (msg-recv "nav.done")
-          });
-        });
+    ari::register_action_intrinsics([&app](std::shared_ptr<se::environment> env,
+                                           se::intrinsics_context &ictx) {
+      // §12 channel scoping: the .ari's (msg-recv "nav.done") resolves against this document's
+      // chroot, so the host must post to the SAME scoped key. Resolve it on THIS (scheduler)
+      // thread and capture the string — the compute worker must never walk the state tree.
+      const std::string done = se::resolve_channel_key(ictx.root_path, "nav.done");
+      se::builtins::register_fn(env, "nav-step-async", [&app, done](std::span<const se::value_t>) {
+        auto arrived = std::make_shared<std::atomic<int>>(0);
+        const int n = 4096;
+        app.compute_async(
+            n,
+            [arrived](int i) { // stand-in nav kernel: count the "arrived" agents
+              if ((i % 3) == 0)
+                arrived->fetch_add(1, std::memory_order_relaxed);
+            },
+            [&app, arrived, done] {
+              app.exec_scheduler().post_message(done, se::value_t(std::to_string(arrived->load())));
+            });
+        return se::value_t{}; // nil; the .ari action parks on (msg-recv "nav.done")
+      });
+    });
   }
 
   ari::LoadResult lr = ari::load_file(docPath.c_str());

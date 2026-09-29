@@ -633,6 +633,35 @@ value_t intrinsic_state_sweep(intrinsics_context *ctx, std::span<const value_t> 
 // Messaging intrinsics
 // ---------------------------------------------------------------------------
 
+// §12 channel scoping: resolve a message channel to its scheduler key, mirroring how state paths
+// are chrooted. resolve_channel_key (intrinsics.h) does the pure-string rules ('#'-runtime +
+// empty-root identity, '/'-global escape, else "<root_path>.channels.<name>"); this adds grant-link
+// following — a §12 mount plants a transparent link at <root_path>.channels.<name> (wire_holes), so
+// a sender and a granted receiver resolve to ONE absolute key via the SAME resolveLink() state uses
+// (no parallel registry, no async_scheduler change). Every msg-* intrinsic resolves once at entry.
+std::string resolve_channel(const intrinsics_context *ctx, const std::string &channel) {
+  const std::string key = resolve_channel_key(ctx ? ctx->root_path : std::string(), channel);
+  // Only a private-by-prefix channel (not a '#'-runtime channel, not a '/'-global, non-empty root)
+  // can carry a planted grant link; if one is planted, follow it to the granted target's key.
+  if (ctx && ctx->root && !ctx->root_path.empty() && channel.find('#') == std::string::npos &&
+      !(!channel.empty() && channel.front() == '/')) {
+    const std::string rel = std::string("channels") + cvc::state::SEPARATOR + channel;
+    if (cvc::state *n = ctx->root->findDescendant(rel)) {
+      // A grant is a transparent link whose TARGET PATH is the shared channel key. Read the target
+      // string directly (linkTarget), NOT resolveLink: a channel is a scheduler key, not a state
+      // value, so the target node need not exist (resolveLink would report it "broken"). The stored
+      // target is app-root-relative, exactly what the sender's own resolve produces — so a granted
+      // receiver and the sender agree on one key. Single hop (the §12 mount-grant model).
+      if (n->isLink() && n->linkMode() == cvc::state::link_mode::transparent) {
+        const std::string tgt = n->linkTarget();
+        if (!tgt.empty())
+          return tgt; // granted: resolve to the parent/shared channel key
+      }
+    }
+  }
+  return key;
+}
+
 value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_min(args, 2, "msg-send");
   require_root(ctx, "msg-send");
@@ -669,9 +698,11 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
   entries.emplace_back("path", value_t(result.resolved_path));
   auto msg = make_dict(std::move(entries));
 
-  // Deliver to any processes waiting to receive on this path.
+  // Deliver to any processes waiting to receive on this channel. The SCHEDULER key is chroot-scoped
+  // (resolve_channel); the state-side sendMessage above stays on the raw chroot-relative `path`
+  // (already scoped via ctx->root) — the two buses are independent, as they were before scoping.
   if (ctx->sched)
-    ctx->sched->deliver_to_receivers(path, msg);
+    ctx->sched->deliver_to_receivers(resolve_channel(ctx, path), msg);
 
   return msg;
 }
@@ -679,7 +710,7 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
 value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "msg-recv");
   require_sched(ctx, "msg-recv");
-  auto &path = as_string(args[0], "msg-recv");
+  const std::string ch = resolve_channel(ctx, as_string(args[0], "msg-recv")); // §12 chroot-scoped
 
   // Resolve the actual PID of the currently executing process.
   int pid = ctx->sched->current_pid();
@@ -700,13 +731,13 @@ value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> arg
     return msg;
   }
 
-  // Check the scheduler's pending message queue for this path.
-  auto pending = ctx->sched->pop_pending_message(path);
+  // Check the scheduler's pending message queue for this channel.
+  auto pending = ctx->sched->pop_pending_message(ch);
   if (pending)
     return *pending;
 
   // Otherwise, suspend the process until a message arrives.
-  bool ok = ctx->sched->receive_message(pid, path);
+  bool ok = ctx->sched->receive_message(pid, ch);
   if (!ok)
     throw std::runtime_error("msg-recv: cannot suspend process " + std::to_string(pid));
   // Return nil as a placeholder — the scheduler will overwrite
@@ -717,8 +748,8 @@ value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> arg
 value_t intrinsic_msg_pending(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "msg-pending");
   require_sched(ctx, "msg-pending");
-  auto &path = as_string(args[0], "msg-pending");
-  return value_t(static_cast<int64_t>(ctx->sched->pending_message_count(path)));
+  const std::string ch = resolve_channel(ctx, as_string(args[0], "msg-pending")); // §12 scoped
+  return value_t(static_cast<int64_t>(ctx->sched->pending_message_count(ch)));
 }
 
 } // anonymous namespace
@@ -797,6 +828,16 @@ void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::str
   // Navigate or create the subtree node
   ctx.root = &tree_root(root_path);
   ctx.root_path = root_path;
+}
+
+std::string resolve_channel_key(const std::string &root_path, const std::string &channel) {
+  if (channel.find('#') != std::string::npos)
+    return channel; // runtime-internal channel (tick/key/pointer) — never scoped
+  if (!channel.empty() && channel.front() == '/')
+    return channel.substr(1); // explicit app-root-global (the '/' escape; the loader gates its use)
+  if (root_path.empty())
+    return channel; // root scope: identity — backward-compatible with every raw-key msg-* caller
+  return root_path + cvc::state::SEPARATOR + "channels" + cvc::state::SEPARATOR + channel;
 }
 
 } // namespace cvc::state_exec

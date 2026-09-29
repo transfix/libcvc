@@ -1506,3 +1506,39 @@ TEST_F(StdlibViaEvaluatorTest, CollectionsRangeViaDSL) {
   ASSERT_NE(lst, nullptr);
   EXPECT_EQ((*lst)->size(), 3u);
 }
+
+// ===========================================================================
+// §12 message-channel scoping — the pure-string key rule (resolve_channel_key).
+// ===========================================================================
+// resolve_channel_key mirrors state's chroot for message channels. The intrinsic-side resolver
+// (resolve_channel, file-local) adds transparent-link grant-following on top of these rules; that
+// path is covered end-to-end by ChannelScopeIntegrationTest in state_exec_integration_test.cpp.
+
+TEST(ChannelScopeKey, RootPrefixIsIdentity) {
+  // Empty chroot -> the channel is used verbatim. This is the backward-compat guarantee that keeps
+  // every existing raw-key msg-* caller (all use prefix "") green.
+  EXPECT_EQ(resolve_channel_key("", "nav.done"), "nav.done");
+}
+
+TEST(ChannelScopeKey, PrivateByPrefix) {
+  // A chrooted document's channel lives under its own reserved channels. subtree.
+  EXPECT_EQ(resolve_channel_key("ui.docs.a", "nav.done"), "ui.docs.a.channels.nav.done");
+}
+
+TEST(ChannelScopeKey, DistinctPrefixesDoNotCollide) {
+  // Two documents using the SAME channel name resolve to distinct keys -> no cross-talk. Isolation
+  // is the inability to name another scope's key, exactly as state chroot gets it.
+  EXPECT_NE(resolve_channel_key("ui.docs.a", "sig"), resolve_channel_key("ui.docs.b", "sig"));
+}
+
+TEST(ChannelScopeKey, SlashIsAppRootGlobalEscape) {
+  // A leading '/' is the explicit app-root-global escape (the '/' is stripped). Whether a chrooted
+  // document MAY use it is a loader-enforcement concern (PR-B), not this mechanical resolver.
+  EXPECT_EQ(resolve_channel_key("ui.docs.a", "/app.quit"), "app.quit");
+}
+
+TEST(ChannelScopeKey, HashChannelsAreRuntimeGlobalExempt) {
+  // The runtime's own owner#tick / #key / #pointer channels contain '#' and are never scoped, so
+  // the input/tick residents keep working unchanged under any prefix.
+  EXPECT_EQ(resolve_channel_key("ui.docs.a", "ari#7:ui.docs.a#tick"), "ari#7:ui.docs.a#tick");
+}

@@ -18,6 +18,7 @@
 #include <cvc/core/state_exec/types.h>
 #include <cvc/core/state_message.h>
 #include <cvc/core/state_message_bus.h>
+#include <deque> // §12 channel-scope test: stable-address per-doc intrinsics contexts
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -2330,4 +2331,83 @@ TEST_F(SchedulerSettingsTest, TwoSchedulersWithDifferentOverrides) {
 
   EXPECT_EQ(sched_fast.max_pending_messages, 100u);
   EXPECT_EQ(sched_heavy.max_pending_messages, 5000u);
+}
+// ===========================================================================
+// §12 message-channel scoping — end-to-end through the scheduler + chroot
+// ===========================================================================
+// The intrinsic-side resolver (resolve_channel) scopes a channel to its document's chroot and
+// follows a §12 transparent-link grant, mirroring how state paths are isolated + shared. Each doc
+// gets its own chrooted intrinsics_context + env sharing ONE scheduler + state root; contexts live
+// in a deque so register_intrinsics()'s captured &ctx stays valid across the run.
+
+class ChannelScopeIntegrationTest : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  scheduler sched;
+  memory_tracker tracker;
+  std::deque<intrinsics_context> ctxs; // stable addresses; must outlive sched.run()
+  std::deque<process_ptr> procs;
+
+  cvc::state &root() { return cvc::state::instance(app_ctx); }
+
+  // Execute `script` as a process chrooted to `prefix` (empty = app root). Returns its pid.
+  int exec_under(const std::string &prefix, const std::string &script) {
+    procs.push_back(make_process());
+    ctxs.emplace_back();
+    intrinsics_context &c = ctxs.back();
+    c.sched = &sched;
+    c.root = &root();
+    c.tracker = &tracker;
+    c.proc = procs.back();
+    c.pid = static_cast<int>(ctxs.size());
+    c.proc->pid = c.pid;
+    c.proc->status = process_status::ready;
+    apply_chroot(c, root(), prefix);
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &c);
+    execute_options opts;
+    opts.env = env;
+    return sched.execute(script, opts);
+  }
+};
+
+TEST_F(ChannelScopeIntegrationTest, DistinctDocsDoNotCrossTalkOnSameChannel) {
+  // Doc A sends on "sig"; with no receiver it queues under A's scoped key ONLY.
+  exec_under("ui.docs.a", R"((msg-send "sig" "hi"))");
+  sched.run();
+  EXPECT_EQ(sched.pending_message_count("ui.docs.a.channels.sig"), 1u);
+  EXPECT_EQ(sched.pending_message_count("ui.docs.b.channels.sig"),
+            0u); // B's "sig" is a different key
+  // Doc B's (msg-pending "sig") sees nothing; Doc A's sees its own one.
+  int bp = exec_under("ui.docs.b", R"((msg-pending "sig"))");
+  int ap = exec_under("ui.docs.a", R"((msg-pending "sig"))");
+  sched.run();
+  ASSERT_TRUE(sched.get_result(bp).has_value());
+  ASSERT_TRUE(sched.get_result(ap).has_value());
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(bp)->v), 0);
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(ap)->v), 1);
+}
+
+TEST_F(ChannelScopeIntegrationTest, LinkGrantedChannelCrossesScope) {
+  // Simulate a §12 mount grant: a transparent link at B's channels.sig -> A's channels.sig, exactly
+  // what wire_holes plants for a `channels:` grant (the target node need not exist — a channel key
+  // is a redirect, not a state value). Queue a message on A's scoped key, then B — granted —
+  // receives it through the hole because its "sig" resolves via the link to A's key.
+  root()("ui.docs.b.channels.sig")
+      .linkTo("ui.docs.a.channels.sig", cvc::state::link_mode::transparent);
+  sched.deliver_to_receivers("ui.docs.a.channels.sig", value_t(std::string("crossed")));
+  EXPECT_EQ(sched.pending_message_count("ui.docs.a.channels.sig"), 1u);
+  int br = exec_under("ui.docs.b", R"((msg-recv "sig"))");
+  sched.run();
+  ASSERT_TRUE(sched.get_result(br).has_value());
+  EXPECT_EQ(std::get<std::string>(sched.get_result(br)->v), "crossed"); // B got A's message value
+  EXPECT_EQ(sched.pending_message_count("ui.docs.a.channels.sig"), 0u); // consumed via the grant
+}
+
+TEST_F(ChannelScopeIntegrationTest, RootScopeKeepsRawKeys) {
+  // A root-scope program (empty chroot) uses raw keys — the backward-compat identity path.
+  exec_under("", R"((msg-send "raw.chan" "x"))");
+  sched.run();
+  EXPECT_EQ(sched.pending_message_count("raw.chan"), 1u);
+  EXPECT_EQ(sched.pending_message_count("channels.raw.chan"), 0u); // NOT scoped
 }
