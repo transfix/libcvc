@@ -598,6 +598,7 @@ void PushId(const char *) {}
 void PushIdInt(int) {}
 void PopId() {}
 void TextLine(const char *) {}
+void TextLineColored(const char *, float, float, float) {}
 void TextDisabledLine(const char *) {}
 bool Button(const char *, double, double) { return false; }
 bool SmallButton(const char *) { return false; }
