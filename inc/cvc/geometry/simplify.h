@@ -186,22 +186,23 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
 // simplify reports as world_error. Each surface is sampled at every vertex used
 // by a triangle, every unique edge midpoint and every face centroid; each sample
 // takes its exact point-to-triangle distance to the other surface (accelerated
-// by a bounding-volume hierarchy, so wildly mixed triangle sizes cost no more
-// than uniform ones), and the result is the largest over both directions. It
-// is exact at the samples, so it never over-reports: it is a lower bound on the
-// continuous Hausdorff distance, short of it by at most the sample spacing
-// (under half a triangle's longest edge). Where the worst point is a vertex --
-// the corners of feature-aligned, architectural meshes -- the two agree; on a
-// strongly curved surface decimated coarsely the worst point can fall between
-// samples (on synthetic bumpy terrain the dense distance was up to ~1.25x this
-// value; denser fixed lattices barely help there). Distances below the
-// round-off floor -- 1e-9 of the larger surface's bounding-box diagonal, or
-// 2^-48 (16 ulps) of its largest coordinate magnitude, whichever is larger --
-// count as zero, so two coincident surfaces measure exactly 0 wherever they
-// sit. 0 when both surfaces are empty; +infinity when exactly one is, or when
-// a vertex a triangle uses has a non-finite coordinate (or the coordinates are
-// so large that a squared distance overflows). `pool` fans the samples; the
-// result is identical with or without it.
+// by a bounding-volume hierarchy, so wildly mixed triangle sizes -- or a mesh
+// that lists its vertices in no spatial order -- cost no more than uniform
+// ones), and the result is the largest over both directions. It is exact at
+// the samples, so it never over-reports: it is a lower bound on the continuous
+// Hausdorff distance, short of it by at most the sample spacing (under half a
+// triangle's longest edge). Where the worst point is a vertex -- the corners of
+// feature-aligned, architectural meshes -- the two agree; on a strongly curved
+// surface decimated coarsely the worst point can fall between samples (on
+// synthetic bumpy terrain the dense distance was up to ~1.25x this value;
+// denser fixed lattices barely help there). Distances below the round-off
+// floor -- 1e-9 of the larger surface's bounding-box diagonal, or 2^-48 (16
+// ulps) of its largest coordinate magnitude, whichever is larger -- count as
+// zero, so two coincident surfaces measure exactly 0 wherever they sit. 0 when
+// both surfaces are empty; +infinity when exactly one is, or when a vertex a
+// triangle uses has a non-finite coordinate (or the coordinates are so large
+// that a squared distance overflows). `pool` fans the samples and the tree
+// builds; the result is identical with or without it.
 double sampled_hausdorff(const geometry &a, const geometry &b, thread_pool *pool = nullptr);
 
 } // namespace cvc

@@ -317,14 +317,16 @@ inline void pfor_blocks(thread_pool *pool, std::size_t n, std::size_t block,
 
 // Bounding-volume hierarchy over a triangle set, for nearest-surface distance
 // queries: median split along the longest axis of the triangle centroids' box,
-// a few triangles per leaf (their corners copied into leaf order). Unlike a
-// uniform grid it adapts to wildly mixed triangle sizes (a ground quad
-// kilometres wide under centimetre detail), so a query stays logarithmic
-// wherever it lands. Ties in the split order break by triangle index, so the
-// tree -- and every query -- is a pure function of the input.
+// a few triangles per leaf (their corners copied into leaf order), nodes in
+// preorder (a node's left child follows it). Unlike a uniform grid it adapts to
+// wildly mixed triangle sizes (a ground quad kilometres wide under centimetre
+// detail), so a query stays logarithmic wherever it lands. Ties in the split
+// order break by triangle index and every subtree's place in the node array is
+// fixed by its size alone, so the tree -- and every query -- is a pure function
+// of the input, whether or not `pool` builds the lower subtrees in parallel.
 class tri_bvh {
 public:
-  tri_bvh(const std::vector<Vec3> &P, const std::vector<Tri> &T) {
+  tri_bvh(const std::vector<Vec3> &P, const std::vector<Tri> &T, thread_pool *pool) {
     const u32 n = u32(T.size());
     _ntri = n;
     if (n == 0)
@@ -334,63 +336,47 @@ public:
         _finite = false; // not measurable: see hausdorff()
         return;
       }
-    std::vector<Vec3> ctr(n);
+    // Each triangle's centroid travels with its index, so the splits below
+    // read memory in order.
+    std::vector<Item> items(n);
     for (u32 i = 0; i < n; ++i) {
       const Vec3 &a = P[T[i][0]], &b = P[T[i][1]], &c = P[T[i][2]];
-      ctr[i] = {(a.x + b.x + c.x) / 3.0, (a.y + b.y + c.y) / 3.0, (a.z + b.z + c.z) / 3.0};
+      items[i] =
+          Item{{(a.x + b.x + c.x) / 3.0, (a.y + b.y + c.y) / 3.0, (a.z + b.z + c.z) / 3.0}, i};
     }
-    std::vector<u32> items(n);
-    std::iota(items.begin(), items.end(), 0u);
-    _nodes.reserve(2 * (n / kLeaf) + 2);
-    _nodes.push_back(Node());
+    _nodes.resize(subtree_nodes(n));
+    _parent.resize(_nodes.size());
+    _tri.resize(n);
+    // The top levels split serially, down to subtrees small enough to fan out;
+    // their boxes are filled in afterwards, children first.
     struct Job {
-      u32 node, b, e;
+      u32 node, parent, b, e;
     };
-    std::vector<Job> jobs(1, Job{0, 0, n});
-    while (!jobs.empty()) {
-      const Job j = jobs.back();
-      jobs.pop_back();
-      Node nd;
-      double clo[3] = {kInf, kInf, kInf}, chi[3] = {-kInf, -kInf, -kInf};
-      for (u32 i = j.b; i < j.e; ++i) {
-        const Tri &t = T[items[i]];
-        for (int k = 0; k < 3; ++k)
-          for (int a = 0; a < 3; ++a) {
-            nd.lo[a] = std::min(nd.lo[a], axis(P[t[k]], a));
-            nd.hi[a] = std::max(nd.hi[a], axis(P[t[k]], a));
-          }
-        for (int a = 0; a < 3; ++a) {
-          clo[a] = std::min(clo[a], axis(ctr[items[i]], a));
-          chi[a] = std::max(chi[a], axis(ctr[items[i]], a));
-        }
-      }
-      if (j.e - j.b <= kLeaf) {
-        nd.first = j.b;
-        nd.count = j.e - j.b;
-        _nodes[j.node] = nd;
+    std::vector<Job> stack(1, Job{0, kNone, 0, n}), frontier;
+    std::vector<u32> top;
+    const u32 grain = std::max(u32(4096), n / 64);
+    while (!stack.empty()) {
+      const Job j = stack.back();
+      stack.pop_back();
+      if (j.e - j.b <= grain) {
+        frontier.push_back(j);
         continue;
       }
-      int ax = 0;
-      for (int a = 1; a < 3; ++a)
-        if (chi[a] - clo[a] > chi[ax] - clo[ax])
-          ax = a;
-      const u32 mid = j.b + (j.e - j.b) / 2;
-      std::nth_element(items.begin() + j.b, items.begin() + mid, items.begin() + j.e,
-                       [&](u32 x, u32 y) {
-                         const double kx = axis(ctr[x], ax), ky = axis(ctr[y], ax);
-                         return kx < ky || (kx == ky && x < y);
-                       });
-      nd.first = u32(_nodes.size());
-      nd.count = 0;
-      _nodes[j.node] = nd;
-      _nodes.push_back(Node());
-      _nodes.push_back(Node());
-      jobs.push_back(Job{nd.first, j.b, mid});
-      jobs.push_back(Job{nd.first + 1, mid, j.e});
+      const u32 mid = split(items, j.b, j.e);
+      const u32 right = j.node + 1 + subtree_nodes(mid - j.b);
+      _nodes[j.node].first = right;
+      _nodes[j.node].count = 0;
+      _parent[j.node] = j.parent;
+      top.push_back(j.node);
+      stack.push_back(Job{right, j.node, mid, j.e});
+      stack.push_back(Job{j.node + 1, j.node, j.b, mid});
     }
-    _tri.resize(n);
-    for (u32 i = 0; i < n; ++i)
-      _tri[i] = {P[T[items[i]][0]], P[T[items[i]][1]], P[T[items[i]][2]]};
+    pfor(pool, u32(frontier.size()), [&](int i) {
+      const Job &j = frontier[i];
+      build(P, T, items, j.node, j.parent, j.b, j.e);
+    });
+    for (auto it = top.rbegin(); it != top.rend(); ++it)
+      join(*it);
     const Node &r = _nodes[0];
     const double ext[3] = {r.hi[0] - r.lo[0], r.hi[1] - r.lo[1], r.hi[2] - r.lo[2]};
     _diag = std::sqrt(ext[0] * ext[0] + ext[1] * ext[1] + ext[2] * ext[2]);
@@ -403,8 +389,14 @@ public:
   bool empty() const { return _ntri == 0; }
   // Every corner finite, and the extent small enough for squared distances.
   bool finite() const { return _finite; }
-  double diagonal() const { return _diag; } // of the triangles' bounding box
-  double magnitude() const { return _mag; } // largest |coordinate| of any corner
+  double diagonal() const { return _diag; }    // of the triangles' bounding box
+  double magnitude() const { return _mag; }    // largest |coordinate| of any corner
+  void box(double lo[3], double hi[3]) const { // the triangles' bounding box (0s when empty)
+    for (int a = 0; a < 3; ++a) {
+      lo[a] = _nodes.empty() ? 0.0 : _nodes[0].lo[a];
+      hi[a] = _nodes.empty() ? 0.0 : _nodes[0].hi[a];
+    }
+  }
 
   // Squared distance from p to the nearest triangle, visiting the nearer child
   // first and skipping any box no closer than the best so far. Returns early --
@@ -412,8 +404,10 @@ public:
   // distance is known not to exceed stop2 (the caller only wants the largest).
   // `hint` names a leaf to try first (kNone for none) and receives the leaf of
   // the nearest triangle found: consecutive samples are usually neighbours, so
-  // a query that only has to prove "within stop2" often ends there, without a
-  // descent. The hint never changes an exact distance returned above stop2.
+  // a query that only has to prove "within stop2" often ends in that leaf, or
+  // in the small subtree a few levels above it, without a descent from the
+  // root. The hint never changes an exact distance returned above stop2: it
+  // only seeds the search with real triangle distances.
   double nearest2(const Vec3 &p, double stop2, u32 &hint) const {
     double best = kInf;
     if (_nodes.empty())
@@ -425,7 +419,111 @@ public:
         if (best <= stop2)
           return best;
       }
+      u32 near = hint;
+      for (int k = 0; k < kClimb && _parent[near] != kNone; ++k)
+        near = _parent[near];
+      if (search(near, p, stop2, best, hint))
+        return best;
     }
+    search(0, p, stop2, best, hint);
+    return best;
+  }
+
+private:
+  static constexpr u32 kLeaf = 4;  // triangles per leaf
+  static constexpr int kClimb = 5; // levels above the hint leaf searched before the root
+  struct Node {
+    double lo[3] = {kInf, kInf, kInf}; // bounding box of the node's triangles
+    double hi[3] = {-kInf, -kInf, -kInf};
+    u32 first = 0; // leaf: _tri[first .. first+count); interior: right child (left: next node)
+    u32 count = 0;
+  };
+
+  // Nodes in the subtree over m triangles: the median split makes it a
+  // function of m alone.
+  static u32 subtree_leaves(u32 m) {
+    return m <= kLeaf ? 1 : subtree_leaves(m / 2) + subtree_leaves(m - m / 2);
+  }
+  static u32 subtree_nodes(u32 m) { return 2 * subtree_leaves(m) - 1; }
+
+  // A triangle's centroid and index, as the build sorts them.
+  struct Item {
+    double c[3];
+    u32 id;
+  };
+
+  // Reorder items[b, e) about its median along the centroids' longest axis;
+  // returns the split point.
+  static u32 split(std::vector<Item> &items, u32 b, u32 e) {
+    double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
+    for (u32 i = b; i < e; ++i)
+      for (int a = 0; a < 3; ++a) {
+        lo[a] = std::min(lo[a], items[i].c[a]);
+        hi[a] = std::max(hi[a], items[i].c[a]);
+      }
+    int ax = 0;
+    for (int a = 1; a < 3; ++a)
+      if (hi[a] - lo[a] > hi[ax] - lo[ax])
+        ax = a;
+    const u32 mid = b + (e - b) / 2;
+    std::nth_element(items.begin() + b, items.begin() + mid, items.begin() + e,
+                     [ax](const Item &x, const Item &y) {
+                       return x.c[ax] < y.c[ax] || (x.c[ax] == y.c[ax] && x.id < y.id);
+                     });
+    return mid;
+  }
+
+  // The subtree over items[b, e) at `node`: its triangles' corners in leaf
+  // order, and its boxes.
+  void build(const std::vector<Vec3> &P, const std::vector<Tri> &T, std::vector<Item> &items,
+             u32 node, u32 parent, u32 b, u32 e) {
+    _parent[node] = parent;
+    Node &nd = _nodes[node];
+    if (e - b <= kLeaf) {
+      nd.first = b;
+      nd.count = e - b;
+      for (u32 i = b; i < e; ++i) {
+        const Tri &t = T[items[i].id];
+        _tri[i] = {P[t[0]], P[t[1]], P[t[2]]};
+        for (int k = 0; k < 3; ++k)
+          for (int a = 0; a < 3; ++a) {
+            nd.lo[a] = std::min(nd.lo[a], axis(_tri[i][k], a));
+            nd.hi[a] = std::max(nd.hi[a], axis(_tri[i][k], a));
+          }
+      }
+      return;
+    }
+    const u32 mid = split(items, b, e);
+    const u32 right = node + 1 + subtree_nodes(mid - b);
+    nd.first = right;
+    nd.count = 0;
+    build(P, T, items, node + 1, node, b, mid);
+    build(P, T, items, right, node, mid, e);
+    join(node);
+  }
+  // An interior node's box: the union of its children's.
+  void join(u32 node) {
+    Node &nd = _nodes[node];
+    const Node &l = _nodes[node + 1], &r = _nodes[nd.first];
+    for (int a = 0; a < 3; ++a) {
+      nd.lo[a] = std::min(l.lo[a], r.lo[a]);
+      nd.hi[a] = std::max(l.hi[a], r.hi[a]);
+    }
+  }
+
+  static double box_dist2(const Node &nd, const Vec3 &p) {
+    double d2 = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      const double x = axis(p, a);
+      const double d = x < nd.lo[a] ? nd.lo[a] - x : (x > nd.hi[a] ? x - nd.hi[a] : 0.0);
+      d2 += d * d;
+    }
+    return d2;
+  }
+
+  // Best-first search of the subtree at `root`, lowering best (and moving the
+  // hint to the leaf that holds it); true as soon as best <= stop2.
+  bool search(u32 root, const Vec3 &p, double stop2, double &best, u32 &hint) const {
     struct Entry {
       double d2;
       u32 node;
@@ -434,7 +532,7 @@ public:
     // split halves every node, so the depth (< 32 levels) bounds the stack.
     Entry stack[96];
     int sp = 0;
-    stack[sp++] = Entry{box_dist2(_nodes[0], p), 0};
+    stack[sp++] = Entry{box_dist2(_nodes[root], p), root};
     while (sp > 0) {
       const Entry e = stack[--sp];
       if (e.d2 >= best)
@@ -447,43 +545,26 @@ public:
             best = d;
             hint = e.node;
             if (best <= stop2)
-              return best;
+              return true;
           }
         }
         continue;
       }
-      const double dl = box_dist2(_nodes[nd.first], p), dr = box_dist2(_nodes[nd.first + 1], p);
+      const u32 left = e.node + 1, right = nd.first;
+      const double dl = box_dist2(_nodes[left], p), dr = box_dist2(_nodes[right], p);
       const bool left_first = !(dr < dl);
-      const Entry nearer = left_first ? Entry{dl, nd.first} : Entry{dr, nd.first + 1};
-      const Entry farther = left_first ? Entry{dr, nd.first + 1} : Entry{dl, nd.first};
+      const Entry nearer = left_first ? Entry{dl, left} : Entry{dr, right};
+      const Entry farther = left_first ? Entry{dr, right} : Entry{dl, left};
       if (farther.d2 < best)
         stack[sp++] = farther;
       if (nearer.d2 < best)
         stack[sp++] = nearer; // popped first
     }
-    return best;
-  }
-
-private:
-  static constexpr u32 kLeaf = 4; // triangles per leaf
-  struct Node {
-    double lo[3] = {kInf, kInf, kInf}; // bounding box of the node's triangles
-    double hi[3] = {-kInf, -kInf, -kInf};
-    u32 first = 0; // leaf: _tri[first .. first+count); interior: children first, first+1
-    u32 count = 0;
-  };
-
-  static double box_dist2(const Node &nd, const Vec3 &p) {
-    double d2 = 0.0;
-    for (int a = 0; a < 3; ++a) {
-      const double x = axis(p, a);
-      const double d = x < nd.lo[a] ? nd.lo[a] - x : (x > nd.hi[a] ? x - nd.hi[a] : 0.0);
-      d2 += d * d;
-    }
-    return d2;
+    return false;
   }
 
   std::vector<Node> _nodes;
+  std::vector<u32> _parent;              // kNone for the root
   std::vector<std::array<Vec3, 3>> _tri; // triangle corners in leaf order
   u32 _ntri = 0;
   bool _finite = true;
@@ -547,25 +628,78 @@ sample_set all_samples(const std::vector<Vec3> &P, const std::vector<Tri> &T) {
   return s;
 }
 
+// The 10 bits of x spread to every third bit (bit k -> bit 3k).
+inline u32 spread10(u32 x) {
+  x &= 0x3ffu;
+  x = (x | (x << 16)) & 0x030000ffu;
+  x = (x | (x << 8)) & 0x0300f00fu;
+  x = (x | (x << 4)) & 0x030c30c3u;
+  x = (x | (x << 2)) & 0x09249249u;
+  return x;
+}
+
+// The samples' indices in Morton (Z-curve) order of their positions, on a
+// 1024^3 lattice over the tree's box -- one scale on every axis, so a thin
+// surface keeps its lateral order -- with ties in index order: consecutive
+// samples are then neighbours whatever order the mesh lists its vertices and
+// triangles in, and each query's hint lands. An LSD radix sort on the 30 code
+// bits, stable, so the order is a pure function of the samples.
+std::vector<u64> morton_order(const sample_set &s, const tri_bvh &g, thread_pool *pool) {
+  const std::size_t n = s.size();
+  std::vector<u64> key(n); // code << 32 | index
+  double lo[3], hi[3], ext = 0.0;
+  g.box(lo, hi);
+  for (int a = 0; a < 3; ++a)
+    ext = std::max(ext, hi[a] - lo[a]);
+  const double scale = ext > 0.0 ? 1023.0 / ext : 0.0;
+  pfor_blocks(pool, n, 1 << 14, [&](std::size_t b, std::size_t e) {
+    for (std::size_t i = b; i < e; ++i) {
+      const Vec3 p = s.at(i);
+      u32 code = 0;
+      for (int a = 0; a < 3; ++a) {
+        const double t = std::min(1023.0, std::max(0.0, (axis(p, a) - lo[a]) * scale));
+        code |= spread10(u32(t)) << a;
+      }
+      key[i] = (u64(code) << 32) | u64(i);
+    }
+  });
+  std::vector<u64> tmp(n);
+  std::vector<std::size_t> start(1025);
+  for (int shift = 32; shift < 62; shift += 10) {
+    std::fill(start.begin(), start.end(), 0);
+    for (u64 k : key)
+      ++start[((k >> shift) & 1023u) + 1];
+    for (int d = 0; d < 1024; ++d)
+      start[d + 1] += start[d];
+    for (u64 k : key)
+      tmp[start[(k >> shift) & 1023u]++] = k;
+    key.swap(tmp);
+  }
+  return key;
+}
+
 // max over the samples of the squared distance to the tree's surface, exact
-// whenever it exceeds floor2. Blocks fan over the pool; each block keeps its own
-// running max, which lets a query stop as soon as it cannot raise it (or is
-// already known to be under floor2), and the block maxima reduce in order: the
-// sample achieving the max is never cut short, so pooled == serial bit for bit.
+// whenever it exceeds floor2. The samples are visited in Morton order, in
+// fixed-size blocks that fan over the pool; each block keeps its own running
+// max, which lets a query stop as soon as it cannot raise it (or is already
+// known to be under floor2), and the block maxima reduce in order: the sample
+// achieving the max is never cut short, so pooled == serial bit for bit.
 double max_dist2(const sample_set &s, const tri_bvh &g, double floor2, thread_pool *pool) {
   const std::size_t block = 2048, stride = 61;
   const std::size_t n = s.size();
+  const std::vector<u64> order = morton_order(s, g, pool);
+  auto sample = [&](std::size_t j) { return s.at(std::size_t(order[j] & 0xffffffffu)); };
   // A sparse first pass seeds every block with a lower bound on the answer.
   double seed = 0.0;
   u32 hint = kNone;
-  for (std::size_t i = 0; i < n; i += stride)
-    seed = std::max(seed, g.nearest2(s.at(i), std::max(seed, floor2), hint));
+  for (std::size_t j = 0; j < n; j += stride)
+    seed = std::max(seed, g.nearest2(sample(j), std::max(seed, floor2), hint));
   std::vector<double> bmax((n + block - 1) / block, 0.0);
   pfor_blocks(pool, n, block, [&](std::size_t lo, std::size_t hi) {
     double m = seed;
     u32 last = kNone; // each block threads its own hint through its samples
-    for (std::size_t i = lo; i < hi; ++i)
-      m = std::max(m, g.nearest2(s.at(i), std::max(m, floor2), last));
+    for (std::size_t j = lo; j < hi; ++j)
+      m = std::max(m, g.nearest2(sample(j), std::max(m, floor2), last));
     bmax[lo / block] = m;
   });
   double m = seed;
@@ -1290,7 +1424,7 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
   std::vector<u64> src_edges;
   auto measure = [&]() {
     if (!src_tree) {
-      src_tree.reset(new tri_bvh(Pin, S0));
+      src_tree.reset(new tri_bvh(Pin, S0, pool));
       src_verts = used_vertices(Pin.size(), S0);
       src_edges = unique_edges(S0);
     }
@@ -1308,7 +1442,7 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
         changed.push_back(u32(live.size()));
       live.push_back(W[ti]);
     }
-    const tri_bvh tree(Pin, live);
+    const tri_bvh tree(Pin, live, pool);
     const std::vector<u64> live_edges = unique_edges(live);
     std::vector<char> on_live(Pin.size(), 0);
     for (const Tri &t : live)
@@ -1460,7 +1594,7 @@ double sampled_hausdorff(const geometry &a, const geometry &b, thread_pool *pool
   std::vector<Tri> TA, TB;
   gather(a, PA, TA);
   gather(b, PB, TB);
-  const tri_bvh ga(PA, TA), gb(PB, TB);
+  const tri_bvh ga(PA, TA, pool), gb(PB, TB, pool);
   return hausdorff(all_samples(PA, TA), ga, all_samples(PB, TB), gb, pool);
 }
 
