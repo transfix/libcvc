@@ -5,9 +5,11 @@ the existing bus, and (b) a real-time high-bandwidth stream transport (video/cam
 audio/mic, peripherals, sensors). Produced by a design workflow + adversarial critique;
 every load-bearing claim is grounded in `file:line` against master.*
 
-Status: **DRAFT for review.** The Layer-(b) mechanisms below already incorporate the
-adversarial review's corrections (see §7); the open questions in §6 need your sign-off
-before implementation.
+Status: **APPROVED (signed off 2026-09-30).** The Layer-(b) mechanisms below already
+incorporate the adversarial review's corrections (see §7). All open questions (Q1–Q9) are
+now decided — see §5a. Layer (a) Changes 1–4 have landed (Change 1–3 in #499, Change 4
+transport size-limits in #501); Change 5 (pycvc bytes) and Phase 1 (`cvc::stream` core)
+follow.
 
 ## Table of Contents
 - [1. The two distinct needs](#1-the-two-distinct-needs)
@@ -303,12 +305,28 @@ glass-to-glass camera→texture latency.
 - **Q3 cross-node → gRPC-LAN first (Phase 4), THEN RTP/WebRTC (Phase 6).** RTP/WebRTC is required for
   future engagements needing real-time A/V, so it is committed, not optional — just sequenced second.
 
-Remaining open (Q4 A/V master clock, Q5 stream scoping/ACLs, Q6 frame mutability, Q7 pool sizing
-defaults, Q8 snapshot binary gap, Q9 namespace) still need sign-off before the phases they gate.
+- **Q4 A/V master clock → `cvc::world` clock time base.** The producer's clock stamps
+  `frame.pts_seconds`; the `cvc::world` clock is the intended cross-stream time base for A/V
+  alignment/resampling. Gates Phase 6; Phase 1 only carries the `double` pts.
+- **Q5 stream scoping/ACLs → inherit §12 channel-scoping/chroot + per-stream ACLs.** Streams
+  are scoped like channels (chroot-relative `/streams/<id>`); cross-node consumers are subject
+  to per-stream ACLs. Gates Phase 4 (cross-node); no Phase-1 impact (in-process).
+- **Q6 frame mutability → publish-IMMUTABLE + pool-recycle.** Frames are frozen after
+  `publish`; no mutable-aliased mode. (A future in-place mode can be added if a real consumer
+  needs `texture_modified()`-style edits.)
+- **Q7 pool sizing → enforce the §3.2 invariant in code; defaults depth-3/subscriber.** Default
+  per-subscriber queue depth = 3; slab_bytes = frame format size; pool provisioned to
+  Σ over subscribers of (depth + in-flight) + producer working set, with explicit
+  borrow-fail/drop-at-source (never a hidden producer stall). All tunable at `stream-open`.
+- **Q8 snapshot binary gap → YES, but separate independent PR.** Extend the initial-sync
+  snapshot path (`SnapshotEntry` / IPC snapshot serializer) to carry a bytes field so
+  replicated binary node values survive a full-tree resync. Tracked independently of streaming.
+- **Q9 namespace → `cvc::stream`, new small library.** New CMake target `cvc::stream`
+  (not folded into `cvc::core`, not `cvc::media`).
 
-## 6. Open questions for sign-off
+## 6. Open questions — ALL DECIDED
 
-*(Q1–Q3 decided — see §5a.)*
+*(Q1–Q9 decided — see §5a. Retained below for the reasoning behind each call.)*
 
 1. **`msg-recv` contract:** deliver the **envelope** `{status,path,content_type,payload}`
    (recommended — backward-compatible, cheaper, carries content_type) or the **raw payload**
