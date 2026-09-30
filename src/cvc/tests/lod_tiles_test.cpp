@@ -860,7 +860,7 @@ TEST(LodTiles, ExtremeCoordinatesSaturateDeterministically) {
   EXPECT_EQ(tiles[0].parts, std::vector<std::string>{"nfar"});
   EXPECT_LT(tiles[0].cell.i, -std::int64_t(1e18));
   EXPECT_GT(tiles[1].cell.i, std::int64_t(1e18));
-  EXPECT_EQ(tiles[0].content_hash, lod::content_hash(nfar));
+  EXPECT_EQ(tiles[0].content_hash, lod::content_hash(nfarTri));
   expect_tiles_identical(tiles, lod::partition_parts(parts, kCell));
 
   // A NaN attribute saturates too: deterministic, and distinct from a finite one.
