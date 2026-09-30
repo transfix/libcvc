@@ -87,6 +87,30 @@ TEST(StateLifetime, PinnedLeafSurvivesAncestorSweep) {
   EXPECT_EQ(leaf->value(), "V");
 }
 
+// The WRITE analogue: mutating a node (value()/data()) internally walks its _parent chain
+// (fullName() + parent()->childChanged()), so a safe write after an ancestor sweep needs the whole
+// ANCESTOR CHAIN pinned — not just the leaf. This is what the state:// store path now does via
+// sharedChild(path, &chain); a leaf-only pin would UAF here.
+TEST(StateLifetime, PinnedChainMakesWriteSafeAfterAncestorSweep) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("s.item.leaf").value("V");
+
+  std::vector<state::state_ptr> chain; // pins root-child .. leaf
+  state::state_ptr leaf = root.sharedChild("s.item.leaf", &chain);
+  ASSERT_TRUE(static_cast<bool>(leaf));
+  ASSERT_FALSE(chain.empty());
+
+  root("s.item").expireAt(now_utc() - pt::seconds(1));
+  root.sweepExpired();
+  EXPECT_EQ(root.findDescendant("s.item"), nullptr) << "intermediate unlinked";
+
+  // Writing the leaf walks its _parent chain; with the chain pinned every ancestor is still alive,
+  // so the write is UAF-free (with only a leaf pin this would be a use-after-free).
+  leaf->value("W");
+  EXPECT_EQ(leaf->value(), "W");
+}
+
 // sharedChild is the create-or-get owning analogue of operator(): same path semantics, but pins.
 TEST(StateLifetime, SharedChildCreatesAndPins) {
   cvc::app a;
@@ -106,7 +130,8 @@ TEST(StateLifetime, SharedChildCreatesAndPins) {
 // subtree — expire the intermediate, sweep (freeing the unpinned leaves), recreate. Under the fix,
 // findDescendantShared either returns a pinned node (safe to read) or nullptr (already unlinked);
 // it never yields a dangling pointer, so there is no crash/UAF. (With bare findDescendant this
-// races on a freed node.)
+// races on a freed node.) NOTE: a plain run only catches a UAF if it happens to corrupt memory
+// observably; run under ASan/TSan (this repo needs `setarch -R` for TSan) for a reliable signal.
 TEST(StateLifetime, ConcurrentPinnedReadVsSweep) {
   cvc::app a;
   auto &root = state::instance(a);

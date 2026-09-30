@@ -523,6 +523,10 @@ public:
     // terminal held as a state_ptr, so a caller that keeps `target_owned` (or the whole result)
     // alive cannot have the resolved node freed under it by a concurrent sweepExpired().
     state_ptr target_owned;
+    // Owning pins of the resolved terminal's ancestor chain (root's child .. terminal), so a caller
+    // that MUTATES `target` (writes walk its _parent chain) is safe against a concurrent sweep.
+    // Empty when the start node was itself the terminal (a non-link resolveLink caller).
+    std::vector<state_ptr> target_pins;
     std::vector<std::string> visited; // ordered absolute paths
     std::size_t hops = 0;
   };
@@ -618,6 +622,13 @@ public:
   // Useful for link resolution and any other read-only navigation.
   state *findDescendant(const std::string &path);
 
+  // Normalize a state path to its canonical dot-separated form (trim; drop
+  // leading/trailing/duplicate separators). A pure STRING operation — unlike fullName(), it never
+  // walks the _parent chain, so it is the safe way to obtain a node's canonical absolute path when
+  // the node may have been orphaned by a concurrent sweep (used by the state:// resolver to build
+  // its canonical URI).
+  static std::string normalize_path(const std::string &path);
+
   // Owning analogues of findDescendant() and operator(): they return the map's shared_ptr rather
   // than a bare state* / state&, so the returned node stays alive for as long as the caller holds
   // the returned state_ptr (or a `handle` wrapping it) — a concurrent sweepExpired() can then only
@@ -631,8 +642,16 @@ public:
   //
   // findDescendantShared: read-only, returns a null state_ptr when any segment is absent.
   // sharedChild: create-or-get (like operator()), returns the pinning state_ptr for the terminal.
-  state_ptr findDescendantShared(const std::string &path);
-  state_ptr sharedChild(const std::string &childname = std::string());
+  //
+  // The optional `pins` out-vector collects an owning state_ptr for EVERY node on the resolved path
+  // (root's child .. the returned node), so a caller can keep the whole ANCESTOR CHAIN alive. Pass
+  // it when the caller will MUTATE the returned node (value()/data() internally call fullName() and
+  // parent()->childChanged(), which walk _parent — a leaf-only pin leaves those ancestors exposed
+  // to a concurrent sweep). Pass nullptr for a bare leaf pin — a read via the parent-free getters,
+  // or a caller that never walks _parent, needs no more.
+  state_ptr findDescendantShared(const std::string &path, std::vector<state_ptr> *pins = nullptr);
+  state_ptr sharedChild(const std::string &childname = std::string(),
+                        std::vector<state_ptr> *pins = nullptr);
 
   // RAII sugar: a movable handle that reads like a node (operator-> / operator*) while pinning it
   // alive. `handle h = node.sharedChild("a.b"); h->value("x");` keeps a.b alive for h's lifetime.
