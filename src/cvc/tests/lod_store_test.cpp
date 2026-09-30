@@ -5,9 +5,11 @@
 // bit-for-bit; then that read_lod_index() enumerates both assets and has_pyramid()
 // honours the content hash. Then that in-memory writers and blob readers alive at
 // the same time (also concurrently on a pool) each keep their own container, and
-// that corrupt, empty or truncated blobs surface as std::exception. HDF5-only
-// (gated in CMake by CVC_USING_HDF5).
+// that failures -- corrupt/empty/truncated blobs, missing or non-HDF5 files,
+// tampered pixels -- surface as std::exception without a reader ever creating or
+// truncating a file. HDF5-only (gated in CMake by CVC_USING_HDF5).
 
+#include <H5Cpp.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +21,10 @@
 #include <cvc/image/image.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/lod/store.h>
+#include <cvc/volume/hdf5_utils.h>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <utility>
@@ -57,6 +62,8 @@ std::string tmp_h5() {
          ::testing::UnitTest::GetInstance()->current_test_info()->name() + "_" +
          std::to_string(::testing::UnitTest::GetInstance()->random_seed()) + ".cvch5";
 }
+
+bool file_exists(const std::string &path) { return std::ifstream(path.c_str()).good(); }
 
 // A one-rung mesh pyramid named by, and carrying, `tag` in every x coordinate,
 // so a reader that hands back another container's bytes is caught by value and
@@ -409,4 +416,97 @@ TEST(LodStore, CorruptBlobThrowsStdException) {
   EXPECT_FALSE(re.has("absent"));
   const std::string msg = std_error_of([&] { re.read_mesh_pyramid("absent"); });
   EXPECT_NE(msg.find("no mesh pyramid 'absent'"), std::string::npos) << msg;
+}
+
+TEST(LodStore, MissingFileThrowsStdExceptionAndIsNotCreated) {
+  cvc::app ctx;
+  const std::string file = tmp_h5() + ".missing";
+  std::remove(file.c_str());
+
+  const std::string msg = std_error_of([&] { cvc::lod::scene_reader r(ctx, file); });
+  EXPECT_FALSE(msg.empty());
+  EXPECT_NE(msg.find(file), std::string::npos) << msg;
+  EXPECT_FALSE(file_exists(file)) << "opening a reader created the file";
+
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::read_lod_index(ctx, file); }).empty());
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::read_mesh_pyramid(ctx, file, "x"); }).empty());
+  EXPECT_FALSE(cvc::lod::has_pyramid(ctx, file, "x", ""));
+  EXPECT_FALSE(file_exists(file));
+
+  // A writer whose directory does not exist fails the same way.
+  const std::string nodir = tmp_h5() + ".nodir/scene.cvch5";
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::scene_writer w(ctx, nodir); }).empty());
+}
+
+TEST(LodStore, ReaderNeverTruncatesANonHdf5File) {
+  cvc::app ctx;
+  const std::string file = tmp_h5() + ".txt";
+  const std::string text = "not an HDF5 file -- a reader must leave it alone\n";
+  {
+    std::ofstream o(file.c_str(), std::ios::binary);
+    o << text;
+  }
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::scene_reader r(ctx, file); }).empty());
+  EXPECT_FALSE(cvc::lod::has_pyramid(ctx, file, "x", ""));
+  std::ifstream in(file.c_str(), std::ios::binary);
+  const std::string after((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_EQ(after, text);
+  in.close();
+  std::remove(file.c_str());
+}
+
+TEST(LodStore, FileWriterAndReaderOnOnePath) {
+  cvc::app ctx;
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+  cvc::lod::write_mesh_pyramid(ctx, file, tagged_name(1), tagged_pyramid(ctx, 1));
+
+  {
+    // A reader may join a live writer and sees what it has written.
+    cvc::lod::scene_writer w(ctx, file);
+    cvc::lod::scene_reader r(ctx, file);
+    w.write_mesh_pyramid(tagged_name(2), tagged_pyramid(ctx, 2));
+    EXPECT_EQ(r.index().size(), 2u);
+    EXPECT_EQ(contents(r, 2).second, fingerprint(tagged_pyramid(ctx, 2)));
+  }
+  {
+    // A live reader holds the file read-only: a writer is refused up front,
+    // with a std::exception, rather than at its first write.
+    cvc::lod::scene_reader r(ctx, file);
+    const std::string msg = std_error_of([&] { cvc::lod::scene_writer w(ctx, file); });
+    EXPECT_NE(msg.find("read-only"), std::string::npos) << msg;
+    EXPECT_EQ(r.index().size(), 2u);
+  }
+  // Once the reader is gone the path is writable again.
+  cvc::lod::write_mesh_pyramid(ctx, file, tagged_name(3), tagged_pyramid(ctx, 3));
+  EXPECT_EQ(cvc::lod::read_lod_index(ctx, file).size(), 3u);
+  std::remove(file.c_str());
+}
+
+TEST(LodStore, ImagePixelsThatDisagreeWithTheirSizeAreRejected) {
+  cvc::app ctx;
+  image src(16, 16, image::pixel_format::RGBA, image::data_type::u8);
+  cvc::lod::image_pyramid pyr = cvc::lod::build_image_pyramid(src, {});
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+  cvc::lod::write_image_pyramid(ctx, file, "tex", pyr);
+
+  // Tamper with rung 0's recorded size. The reader sizes the image from these
+  // attributes and reads the whole pixels dataset into it, so trusting them
+  // would overrun the buffer; it must refuse instead.
+  auto set_rung0 = [&](const char *attr, int value) {
+    cvc::hdf5_utils::library_lock lock(ctx, file, "lod_store_test");
+    H5::H5File f(file, H5F_ACC_RDWR);
+    H5::Group g = f.openGroup("/cvc/images/tex/lod/0");
+    cvc::hdf5_utils::setAttribute<int>(g, attr, value);
+  };
+  set_rung0("w", 4);
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); }).empty());
+  set_rung0("w", 16);
+  EXPECT_EQ(cvc::lod::read_image_pyramid(ctx, file, "tex").rungs.size(), pyr.rungs.size());
+  set_rung0("format", int(image::pixel_format::GRAY)); // 1 channel, 4 stored
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); }).empty());
+  set_rung0("format", 42);
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); }).empty());
+  std::remove(file.c_str());
 }

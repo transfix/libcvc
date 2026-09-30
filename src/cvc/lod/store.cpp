@@ -31,7 +31,6 @@
 #include <cvc/core/state_blob_store.h>
 #include <cvc/lod/store.h>
 #include <cvc/volume/hdf5_utils.h>
-#include <fstream>
 #include <memory>
 #include <sstream>
 
@@ -241,9 +240,24 @@ image_pyramid read_image_from(H5File &f, const std::string &name) {
     hu::getAttribute<int>(rg, "w", w);
     hu::getAttribute<int>(rg, "h", h);
     hu::getAttribute<int>(rg, "format", fmt);
+    if (fmt < int(image::pixel_format::GRAY) || fmt > int(image::pixel_format::RGBA))
+      throw hdf5_exception("lod::read_image_pyramid: bad pixel format in '" + name + "'");
     image im(w, h, image::pixel_format(fmt), image::data_type::u8);
     DataSet ds = rg.openDataSet("pixels");
-    ds.read(im.data(), PredType::NATIVE_UINT8);
+    // The read fills the whole dataset into im's buffer, so the dataset must be
+    // exactly the H x W x C the attributes sized it for -- a blob is untrusted
+    // input, and a mismatch would otherwise overrun the image.
+    DataSpace sp = ds.getSpace();
+    hsize_t dims[3] = {0, 0, 0};
+    const bool rank3 = sp.getSimpleExtentNdims() == 3;
+    if (rank3)
+      sp.getSimpleExtentDims(dims);
+    if (!rank3 || dims[0] != hsize_t(std::max(h, 0)) || dims[1] != hsize_t(std::max(w, 0)) ||
+        dims[2] != hsize_t(im.channels()))
+      throw hdf5_exception("lod::read_image_pyramid: pixels do not match w/h/format in '" + name +
+                           "'");
+    if (im.size_bytes())
+      ds.read(im.data(), PredType::NATIVE_UINT8);
     double we = 0.0;
     hu::getAttribute<double>(rg, "world_error_m", we);
     out.rungs.push_back(std::move(im));
@@ -365,6 +379,22 @@ boost::shared_ptr<H5File> open_blob(const std::string &name, const unsigned char
     throw h5_failure("lod::scene_reader", name, e);
   }
 }
+// A reader opens an EXISTING file read-only. (hdf5_utils::getH5File is
+// create-or-open: it would create a missing path and truncate a non-HDF5 one.)
+boost::shared_ptr<H5File> open_existing(const std::string &path) {
+  return boost::make_shared<H5File>(path, H5F_ACC_RDONLY);
+}
+// A writer creates or opens, preserving prior assets. getH5File quietly falls
+// back to read-only when it cannot get write access; say so now rather than
+// fail at the first write with an opaque "H5Gcreate2 failed".
+boost::shared_ptr<H5File> open_writable(const std::string &path) {
+  boost::shared_ptr<H5File> f = hu::getH5File(path, false);
+  unsigned intent = 0;
+  if (H5Fget_intent(f->getId(), &intent) < 0 || !(intent & H5F_ACC_RDWR))
+    throw hdf5_exception("lod::scene_writer '" + path +
+                         "': opened read-only (not writable, or a scene_reader has it open)");
+  return f;
+}
 std::vector<unsigned char> file_image(H5File &f) {
   f.flush(H5F_SCOPE_GLOBAL);
   ssize_t sz = H5Fget_file_image(f.getId(), nullptr, 0);
@@ -417,9 +447,8 @@ scene_writer::scene_writer(app &ctx) {
 scene_writer::scene_writer(app &ctx, const std::string &path) {
   hu::library_lock lock(ctx, path, "cvc::lod::scene_writer(file)");
   H5::Exception::dontPrint();
-  // create-or-open, preserving prior assets
-  _p.reset(new impl(
-      ctx, guarded("lod::scene_writer", path, [&] { return hu::getH5File(path, false); }), path));
+  _p.reset(
+      new impl(ctx, guarded("lod::scene_writer", path, [&] { return open_writable(path); }), path));
 }
 scene_writer::~scene_writer() { release_locked(_p); }
 scene_writer::scene_writer(scene_writer &&) noexcept = default;
@@ -462,8 +491,8 @@ struct scene_reader::impl {
 scene_reader::scene_reader(app &ctx, const std::string &path) {
   hu::library_lock lock(ctx, path, "cvc::lod::scene_reader(file)");
   H5::Exception::dontPrint();
-  _p.reset(new impl(
-      ctx, guarded("lod::scene_reader", path, [&] { return hu::getH5File(path, false); }), path));
+  _p.reset(
+      new impl(ctx, guarded("lod::scene_reader", path, [&] { return open_existing(path); }), path));
 }
 scene_reader::scene_reader(app &ctx, const unsigned char *bytes, std::size_t n) {
   const std::string name = unique_core_name("blob");
@@ -541,14 +570,12 @@ bool bake_mesh_asset(app &ctx, const std::string &h5file, const std::string &nam
                      thread_pool *pool) {
   const std::string hash = mesh_content_hash(src);
   if (!force) {
-    std::ifstream probe(h5file.c_str(), std::ios::binary);
-    if (probe.good()) {
-      probe.close();
-      try {
-        if (scene_reader(ctx, h5file).has(name, hash))
-          return false; // an up-to-date pyramid is already baked
-      } catch (...) {
-      }
+    try {
+      // A missing or unreadable h5file throws here (the reader never creates
+      // one) and simply means there is nothing current to skip.
+      if (scene_reader(ctx, h5file).has(name, hash))
+        return false; // an up-to-date pyramid is already baked
+    } catch (...) {
     }
   }
   mesh_pyramid pyr = build_mesh_pyramid(src, params, pool);
