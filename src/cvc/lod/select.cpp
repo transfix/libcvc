@@ -38,6 +38,21 @@ inline int clamp_rung(int r, int nrungs) noexcept {
   return r;
 }
 
+// An orthographic view -- see view_params::ortho_px_per_m.
+inline bool is_ortho(const view_params &vp) noexcept { return vp.ortho_px_per_m > 0.0; }
+
+// Does a rung with `world_error_m` fit the budget at this orthographic scale,
+// with the budget tightened by `widen` (1 for the plain test, 1 + hysteresis for
+// the coarsen test)? Mirrors switch_radius_m's edge cases: an errorless rung
+// always fits, and an errorful one never fits a non-positive budget.
+inline bool ortho_affordable(double world_error_m, double widen, const view_params &vp) noexcept {
+  if (!(world_error_m > 0.0))
+    return true;
+  if (!(vp.desired_pixel_error > 0.0))
+    return false;
+  return world_error_m * vp.ortho_px_per_m * widen <= vp.desired_pixel_error;
+}
+
 } // namespace
 
 // --- View ------------------------------------------------------------------
@@ -69,12 +84,16 @@ double k_px(const view_params &vp) noexcept {
 }
 
 double screen_error_px(double world_error_m, double dist_m, const view_params &vp) noexcept {
+  if (is_ortho(vp))
+    return world_error_m * vp.ortho_px_per_m; // distance-free
   if (!(dist_m > 0.0))
     return kInf;
   return world_error_m * k_px(vp) / dist_m;
 }
 
 double screen_radius_px(double radius_m, double dist_m, const view_params &vp) noexcept {
+  if (is_ortho(vp))
+    return radius_m * vp.ortho_px_per_m; // distance-free
   if (!(dist_m > 0.0))
     return kInf;
   return radius_m * k_px(vp) / dist_m;
@@ -87,6 +106,9 @@ double switch_radius_m(double world_error_m, const view_params &vp) noexcept {
   // A non-positive error budget can never be met by a rung that has error.
   if (!(vp.desired_pixel_error > 0.0))
     return kInf;
+  // Orthographic: no distance changes the cost, so it fits everywhere or nowhere.
+  if (is_ortho(vp))
+    return ortho_affordable(world_error_m, 1.0, vp) ? 0.0 : kInf;
   return world_error_m * k_px(vp) / vp.desired_pixel_error;
 }
 
@@ -107,6 +129,10 @@ double impostor_switch_radius_m(double radius_m, double impostor_px,
   // A non-positive width threshold means "never switch".
   if (!(impostor_px > 0.0))
     return kInf;
+  // Orthographic: the width is 2 * r * px_per_m at every distance, so the
+  // sphere is an impostor everywhere or nowhere.
+  if (is_ortho(vp))
+    return 2.0 * radius_m * vp.ortho_px_per_m <= impostor_px ? 0.0 : kInf;
   const double k = k_px(vp);
   // A degenerate camera projects nothing; do not silently turn the whole world
   // into impostors -- treat it as "never switch", matching switch_radius_m's
@@ -159,6 +185,15 @@ int select_rung(double dist_m, const double *world_error_m, int nrungs, int curr
   double err = world_error_m[0];
   for (int L = 1; L < nrungs; ++L) {
     err = std::max(err, world_error_m[L]);
+    if (is_ortho(vp)) {
+      // No distance to widen: the coarsen test tightens the pixel budget by the
+      // same factor instead, which is the identical band expressed in pixels.
+      if (ortho_affordable(err, 1.0, vp))
+        plain_target = L;
+      if (ortho_affordable(err, widen, vp))
+        widened_target = L;
+      continue;
+    }
     const double r = switch_radius_m(err, vp);
     if (dist_m >= r)
       plain_target = L;
