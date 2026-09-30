@@ -999,6 +999,9 @@ public:
   vtkTypeMacro(StridedShadowBaker, vtkShadowMapBakerPass);
 
   int Interval = 1;
+  // Set by SceneGraph::invalidateShadowBake(): bake on the next Render() however
+  // the interval falls, then clear. The cadence counter is left alone.
+  bool ForceNext = false;
 
   void Render(const vtkRenderState *s) override {
     // Skipping a bake is only safe while the SET OF SHADOW CASTERS is unchanged.
@@ -1017,9 +1020,10 @@ public:
     // the wash count looked fine and increasing it did not.
     const std::size_t casters = countShadowCasters(s);
     const bool due = (Interval <= 1) || (m_counter % static_cast<unsigned long>(Interval)) == 0;
-    if (due || casters != m_bakedCasters) {
+    if (due || ForceNext || casters != m_bakedCasters) {
       this->Superclass::Render(s); // real bake, resizes ShadowMaps
       m_bakedCasters = casters;
+      ForceNext = false;
     } else {
       this->SetUpToDate(); // reuse the last-baked maps this frame
     }
@@ -1098,6 +1102,13 @@ void SceneGraph::setShadowUpdateInterval(int frames) {
   requestRender();
 }
 
+void SceneGraph::invalidateShadowBake() {
+  if (auto *b = StridedShadowBaker::SafeDownCast(m_shadowBaker)) {
+    b->ForceNext = true;
+    requestRender();
+  }
+}
+
 void SceneGraph::setShadowResolution(int pixels) {
   m_shadowResolution = pixels < 64 ? 64 : pixels;
   if (m_shadowBaker)
@@ -1158,15 +1169,44 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   return true;
 }
 
-int SceneGraph::selectLOD(const cvc::lod::view_params &view) {
-  int n = 0;
+int SceneGraph::selectLOD(const cvc::lod::view_params &view, lod_stats *stats) {
+  if (stats)
+    stats->reset();
+  int changes = 0;
   for (const auto &node : getAllGraphicsOfType<LodGraphicsNode>()) {
-    if (node) {
-      node->select(view);
-      ++n;
+    if (!node || node->rungCount() == 0)
+      continue;
+    // Compare ACTIVE rungs: a node's first selection landing on rung 0, which it
+    // was already drawing, is not a switch.
+    const int before = node->activeRung();
+    const int rung = m_lodEnabled ? node->select(view) : node->setRung(0);
+    if (rung != before)
+      ++changes;
+    if (!stats)
+      continue;
+    ++stats->nodes;
+    if (static_cast<std::size_t>(rung) >= stats->rung_nodes.size())
+      stats->rung_nodes.resize(static_cast<std::size_t>(rung) + 1, 0);
+    ++stats->rung_nodes[static_cast<std::size_t>(rung)];
+    if (!node->isVisibleInHierarchy()) {
+      ++stats->hidden;
+      continue;
     }
+    stats->drawn_tris += node->rungTriangles(rung);
+    stats->full_tris += node->rungTriangles(0);
   }
-  return n;
+  if (stats)
+    stats->changes = changes;
+  if (changes > 0)
+    requestRender();
+  return changes;
+}
+
+void SceneGraph::setLODEnabled(bool enabled) {
+  if (m_lodEnabled == enabled)
+    return;
+  m_lodEnabled = enabled;
+  requestRender();
 }
 
 } // namespace gl

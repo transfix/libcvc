@@ -131,6 +131,10 @@ void SceneNode::setVisible(bool visible) {
     });
   }
 
+  propagateVisible(visible);
+}
+
+void SceneNode::propagateVisible(bool visible) {
   for (auto &child : m_children) {
     child->setVisible(visible);
   }

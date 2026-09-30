@@ -210,6 +210,13 @@ public:
   // them — the base only knows about the single getProp() actor + the label.
   virtual void setVisible(bool visible);
 
+  // True when this node AND every graphics ancestor are visible, i.e. whether
+  // the node can draw at all. isVisible() is only the node's own flag, which a
+  // hidden parent does not always reach: a child added under an already-hidden
+  // parent keeps its own `true`. A walk up the parent chain; cheap at scene
+  // depths.
+  bool isVisibleInHierarchy() const;
+
   // Override update to handle transform changes
   void update() override;
 

@@ -75,6 +75,13 @@ protected:
   virtual vtkProp *getProp() = 0;
   virtual void handleStateChanged(const std::string &childState) override;
 
+  // Hand a visibility change on to the children. setVisible() calls this after
+  // updating this node's own prop, and only when the visibility actually
+  // changed; the default shows or hides every child. A node whose children's
+  // visibility is its own policy overrides it -- LodGraphicsNode draws exactly
+  // one of its rung children, so re-showing it must not show them all.
+  virtual void propagateVisible(bool visible);
+
   // Run work on the SceneGraph's owner thread. On the owner thread (or with no
   // SceneGraph attached) it runs inline. From any other thread it is marshalled
   // through the event queue (drained by processEvents()), guarded by a weak_ptr
