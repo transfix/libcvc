@@ -8,7 +8,8 @@
 // positions, with no orphaned vertices, in every rung of a flat-shaded sheet
 // and a triangle soup; a rung the collapse cannot reach, or one a single
 // collapse jumped past, is left out, not repeated, and the ladder goes on past
-// it; a faceted curved mesh (per-face normals) cannot coarsen with its normals
+// it; a snapshot 5% coarser than the rung before is kept, one ~3% coarser is
+// left out; a faceted curved mesh (per-face normals) cannot coarsen with its normals
 // carried -- the rung that only erodes its border is left out -- and builds a
 // full ladder with recompute_normals; pooled == serial; a volume ladder that
 // halves each axis with a
@@ -313,6 +314,49 @@ TEST(LodPyramid, MeshLadderRecomputesNormalsOfAFacetedMesh) {
     sp.target_tris = fresh.rungs[k].num_tris();
     sp.recompute_normals = true;
     EXPECT_TRUE(same_mesh(fresh.rungs[k], cvc::simplify(src, sp))) << "rung " << k;
+  }
+}
+
+// A snapshot 5% or more coarser than the rung before it is worth a switch and
+// is kept, even where the pass then stalls, and one less coarse is not: a flat
+// 7 x 7 sheet collapses to two triangles beside closed tetrahedra colored per
+// face, which cannot give up a triangle. Beside 232 of them the first snapshot
+// is ~7% coarser than the source and is kept; beside 500, ~3%, and it is left
+// out. The targets past it repeat it and are left out.
+TEST(LodPyramid, MeshLadderKeepsOnlyRungsFivePercentCoarser) {
+  cvc::app ctx;
+  for (int tets : {232, 500}) {
+    SCOPED_TRACE(testing::Message() << tets << " tetrahedra");
+    geometry src = bumpy_grid(ctx, 7);
+    for (auto &p : src.points())
+      p[2] = 0.0;
+    src.colors().assign(src.num_points(), {0.5, 0.5, 0.5});
+    for (int k = 0; k < tets; ++k) {
+      const double x = 10.0 + 2.0 * (k % 16), y = 2.0 * (k / 16);
+      const geometry::point_t c[4] = {{x, y, 0}, {x + 1, y, 0}, {x, y + 1, 0}, {x, y, 1}};
+      const int face[4][3] = {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}};
+      for (int f = 0; f < 4; ++f) {
+        const std::uint64_t o = src.num_points();
+        for (int v : face[f]) {
+          src.points().push_back(c[v]);
+          src.colors().push_back({double(f), double(k), 0.0});
+        }
+        src.tris().push_back({o, o + 1, o + 2});
+      }
+    }
+    const std::uint64_t n = src.num_tris();
+    cvc::simplify_params sp;
+    sp.target_tris = std::uint64_t(std::llround(double(n) * 0.35));
+    sp.preserve_boundary = true;
+    const geometry first = cvc::simplify(src, sp);
+    const double removed = 1.0 - double(first.num_tris()) / double(n);
+    ASSERT_GT(removed, tets == 232 ? 0.05 : 0.02);
+    ASSERT_LT(removed, tets == 232 ? 0.10 : 0.05);
+    cvc::lod::pyramid_params pp; // mesh_ratio 0.35
+    const cvc::lod::mesh_pyramid pyr = cvc::lod::build_mesh_pyramid(src, pp);
+    ASSERT_EQ(pyr.rungs.size(), tets == 232 ? 2u : 1u);
+    if (tets == 232)
+      EXPECT_TRUE(same_mesh(pyr.rungs[1], first));
   }
 }
 

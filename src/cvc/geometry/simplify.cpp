@@ -849,6 +849,7 @@ struct weld_classes {
   std::vector<u32> rep;    // class -> representative (its smallest input vertex)
   std::vector<char> multi; // class -> holds more than one wedge (a seam runs through it)
   u64 seam = 0;            // used input vertices that share their class with another
+  u64 pairs_held = 0;      // the most pairs a block of the near search held at once
 };
 
 // Keep only a spanning forest of `pr`: the pairs that join two sets the pairs
@@ -901,9 +902,10 @@ void spanning_pairs(std::vector<std::pair<u32, u32>> &pr) {
 // spanning forest of the pairs it finds -- fewer pairs than the positions they
 // touch -- so memory does not grow with the number of pairs, and the forests
 // are united in block order. The union is a function of the positions alone.
-void weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
-               const std::vector<u32> &gcomp, const std::vector<double> &tol, std::vector<u32> &cls,
-               thread_pool *pool) {
+// Returns the most pairs any block held at once.
+std::size_t weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
+                      const std::vector<u32> &gcomp, const std::vector<double> &tol,
+                      std::vector<u32> &cls, thread_pool *pool) {
   std::vector<split_item> items;
   for (u32 g = 0; g < u32(gmin.size()); ++g)
     if (tol[g] > 0.0) {
@@ -912,7 +914,7 @@ void weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
     }
   const u32 n = u32(items.size());
   if (n < 2)
-    return;
+    return 0;
   const u32 kLeaf = 8;
   const u32 kVarious = u32(-3); // a node holding more than one component
   struct Rec {                  // a position, in tree order
@@ -1001,6 +1003,7 @@ void weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
 
   const std::size_t block = 1024;
   std::vector<std::vector<std::pair<u32, u32>>> found((n + block - 1) / block);
+  std::vector<std::size_t> held(found.size(), 0); // per block: the most pairs held at once
   pfor_blocks(pool, n, block, [&](std::size_t b, std::size_t e) {
     std::vector<std::pair<u32, u32>> &out = found[b / block];
     std::size_t limit = 4 * block;
@@ -1060,6 +1063,7 @@ void weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
         stack[sp++] = nd.right;
         stack[sp++] = node + 1;
       }
+      held[b / block] = std::max(held[b / block], out.size());
       if (out.size() > limit) {
         spanning_pairs(out);
         limit = std::max(limit, 2 * out.size());
@@ -1070,6 +1074,7 @@ void weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
   for (const auto &blk : found)
     for (const auto &pr : blk)
       unite(cls, gmin[pr.first], gmin[pr.second]);
+  return *std::max_element(held.begin(), held.end());
 }
 
 // Without welding every used vertex is its own wedge, position and class. With
@@ -1081,11 +1086,19 @@ void weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
 // position; every other member is within tolerance of a member.
 //
 // The tolerance is seam_epsilon when given. By default it is 1e-6 of the
-// bounding-box diagonal, but at each position no more than 1e-3 of its shortest
-// incident edge, and two positions pair only within both their tolerances: a
-// fine part in a large scene keeps its own scale, so separate parts a few of
-// their own edge lengths apart never weld into one another, and a part's own
-// triangles cannot weld away through its neighbours.
+// bounding-box diagonal, but at each position no more than 1e-3 of its median
+// incident edge (over the two sides of every triangle corner there, zero
+// lengths left out; the upper median of an even count), and two positions pair
+// only within both their tolerances: a fine part in a large scene keeps its
+// own scale, so separate parts a few of their own edge lengths apart never
+// weld into one another, and a part's own triangles weld away through its
+// neighbours only where they are slivers, thinner than 1e-3 of the edges
+// around them. (The median, not the shortest edge: a sliver at a join vertex
+// does not shrink its tolerance and leave the join open.) Nor is it below 4
+// float32 epsilons of the position's largest coordinate magnitude (still
+// within the 1e-6 cap): coordinates stored as floats far from the origin are
+// rounded by about that much, and the two sides of a join rounded apart must
+// still weld -- so there, parts closer than that weld too.
 //
 // Exact coincidence is found by sorting the position bits, O(n log n) however
 // many vertices pile onto one point; the near-coincidence search (weld_near)
@@ -1173,24 +1186,42 @@ weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const c
     if (eps > 0.0 && ng > 1) {
       std::vector<double> tol(ng, eps);
       if (seam_epsilon < 0.0) {
-        // the default: capped at 1e-3 of each position's shortest non-zero
-        // incident edge (0 -- no near welding -- for a position with none)
-        std::vector<double> e2(ng, kInf);
-        for (const Tri &t : T) {
-          const double l2[3] = {dist2(P[t[0]], P[t[1]]), dist2(P[t[1]], P[t[2]]),
-                                dist2(P[t[2]], P[t[0]])};
-          for (int k = 0; k < 3; ++k) { // corner k: sides k and k+2
-            double &m = e2[wc.pos[t[k]]];
-            if (l2[k] > 0.0)
-              m = std::min(m, l2[k]);
-            if (l2[(k + 2) % 3] > 0.0)
-              m = std::min(m, l2[(k + 2) % 3]);
+        // The default: capped at 1e-3 of each position's median non-zero
+        // incident side (every triangle corner there brings its two), but not
+        // below 4 float32 epsilons of its largest coordinate magnitude; 0 --
+        // no near welding -- for a position with no such side.
+        auto each_side = [&](auto &&visit) { // (position, squared length)
+          for (const Tri &t : T) {
+            const double l2[3] = {dist2(P[t[0]], P[t[1]]), dist2(P[t[1]], P[t[2]]),
+                                  dist2(P[t[2]], P[t[0]])};
+            for (int k = 0; k < 3; ++k) // corner k: sides k and k+2
+              for (int s : {k, (k + 2) % 3})
+                if (l2[s] > 0.0)
+                  visit(wc.pos[t[k]], l2[s]);
           }
+        };
+        std::vector<std::size_t> at(ng + 1, 0); // position g's sides: side[at[g], at[g+1])
+        each_side([&](u32 g, double) { ++at[g + 1]; });
+        std::partial_sum(at.begin(), at.end(), at.begin());
+        std::vector<double> side(at[ng]);
+        std::vector<std::size_t> fill(at.begin(), at.end() - 1);
+        each_side([&](u32 g, double l2) { side[fill[g]++] = l2; });
+        for (u32 g = 0; g < ng; ++g) {
+          if (at[g] == at[g + 1]) {
+            tol[g] = 0.0;
+            continue;
+          }
+          const auto b = side.begin() + std::ptrdiff_t(at[g]);
+          const auto e = side.begin() + std::ptrdiff_t(at[g + 1]);
+          const auto mid = b + (e - b) / 2; // the median (the upper one of two)
+          std::nth_element(b, mid, e);
+          const Vec3 &p = P[gmin[g]];
+          const double mag = std::max({std::fabs(p.x), std::fabs(p.y), std::fabs(p.z)});
+          tol[g] = std::min(eps, std::max(1e-3 * std::sqrt(*mid),
+                                          4.0 * std::numeric_limits<float>::epsilon() * mag));
         }
-        for (u32 g = 0; g < ng; ++g)
-          tol[g] = e2[g] < kInf ? std::min(eps, 1e-3 * std::sqrt(e2[g])) : 0.0;
       }
-      weld_near(P, gmin, gcomp, tol, cls, pool);
+      wc.pairs_held = weld_near(P, gmin, gcomp, tol, cls, pool);
     }
   }
 
@@ -1704,6 +1735,7 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
       r.world_error = ncollapse > 0 || welded_away > 0 ? measure() : 0.0;
       r.hit_error_limit = hit_limit;
       r.seam_vertices = wc.seam;
+      r.weld_pairs_held = wc.pairs_held;
     }
     last = k;
     last_collapses = ncollapse;

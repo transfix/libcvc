@@ -16,7 +16,9 @@
 // to their walls. Fine parts in a large scene keep their own scale -- they do
 // not weld into one another under the default tolerance, and what an explicit
 // one welds shut is still measured -- a position two parts share welds to
-// both, and a near-coincident join stays closed. Splits whose attributes agree
+// both, and a near-coincident join stays closed, also when float32 rounding
+// far from the origin, a sliver or a point at a join vertex sets its sides
+// apart. Splits whose attributes agree
 // weld into exactly the welded mesh (a soup or a flat-shaded sheet: no crack,
 // no orphaned vertex, no uv sheared off its position); genuine attribute seams
 // -- color blocks, a crease inside one component (also across -0/+0), the
@@ -43,7 +45,9 @@
 #include <cvc/geometry/simplify.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/lod/select.h>
+#include <functional>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -864,20 +868,35 @@ TEST(GeometrySimplify, SeamEpsilonIsTheCoincidenceTolerance) {
   cvc::simplify(pair, q, &r);
   EXPECT_EQ(r.seam_vertices, 2u);
 
-  // The default tolerance is capped at each vertex by 1e-3 of its shortest
-  // edge (1 m here), so a far away part that stretches the extent to 100 km
-  // (1e-6 of which is 0.1 m) does not weld two parts 5 mm apart -- while a
-  // 0.1 mm contact still welds.
-  for (double gap : {5e-3, 1e-4}) {
+  // The default tolerance is capped at each vertex by 1e-3 of its median
+  // edge (2 m or more here -- not the 1 km edge each touching corner also
+  // has), so a far away part that stretches the extent to 100 km (1e-6 of
+  // which is 0.1 m) does not weld two parts 5 mm apart -- while a 1 mm
+  // contact still welds.
+  for (double gap : {5e-3, 1e-3}) {
     geometry scene(ctx);
-    scene.points() = {{0, 0, 0}, {3 - gap, 0, 0}, {0, 1, 0},       {3, 0, 0},  {5, 0, 0},
-                      {3, 1, 0}, {1e5, 0, 0},     {1e5 + 1, 0, 0}, {1e5, 1, 0}};
-    scene.tris() = {{0, 1, 2}, {3, 4, 5}, {6, 7, 8}};
+    scene.points() = {
+        {0, 0, 0},     {3 - gap, 0, 0}, {0, 1, 0},       {3, 0, 0},   {5, 0, 0},
+        {3, 1, 0},     {1e5, 0, 0},     {1e5 + 1, 0, 0}, {1e5, 1, 0}, {3 - gap, 0, -1000.0},
+        {3, 0, 1000.0}};
+    scene.tris() = {{0, 1, 2}, {3, 4, 5}, {6, 7, 8}, {1, 2, 9}, {3, 5, 10}};
     cvc::simplify_params d;
     d.target_tris = 2;
     cvc::simplify(scene, d, &r);
-    EXPECT_EQ(r.seam_vertices, gap < 1e-3 ? 2u : 0u) << "gap " << gap;
+    EXPECT_EQ(r.seam_vertices, gap < 2e-3 ? 2u : 0u) << "gap " << gap;
   }
+  // Nor does the floor for float32 rounding -- 4 float32 epsilons of the
+  // coordinates, ~0.5 m 1000 km out -- ever pass the scene-wide 1e-6 cap:
+  // there, two parts 1 cm apart in a scene 5 m across stay apart.
+  const double o = 1e6;
+  geometry far(ctx);
+  far.points() = {{o, 0, 0},     {o + 2.99, 0, 0}, {o, 1, 0},
+                  {o + 3, 0, 0}, {o + 5, 0, 0},    {o + 3, 1, 0}};
+  far.tris() = {{0, 1, 2}, {3, 4, 5}};
+  cvc::simplify_params d;
+  d.target_tris = 1;
+  cvc::simplify(far, d, &r);
+  EXPECT_EQ(r.seam_vertices, 0u);
 }
 
 namespace {
@@ -901,7 +920,7 @@ std::pair<int, int> tris_above(const geometry &g, double z_min, double x_split) 
 // 2 mm tetrahedra 3 mm apart, and a flat-shaded 20 x 20 sheet at 1 mm spacing
 // (per-face normals: every vertex split). The scene-wide default tolerance
 // (1e-6 of the extent, ~4 mm) spans both parts' own edges, but the default is
-// capped at each vertex by 1e-3 of its shortest edge: no tetrahedron welds to
+// capped at each vertex by 1e-3 of its median edge: no tetrahedron welds to
 // its neighbours, no sheet vertex to the next, and the parts stay in place
 // (bar what a collapse or two takes). An explicit 4 mm tolerance does weld
 // them -- their triangles weld shut and leave the result -- and world_error
@@ -1012,18 +1031,22 @@ TEST(GeometrySimplify, APositionTwoPartsShareWeldsToBoth) {
 }
 
 // 300 copies of a unit triangle whose corners are jittered by up to 1e-5, and
-// among their first corners 300 tiny triangles jittered as much: the tiny
-// parts' tolerance (1e-3 of their own ~1e-5 edges) keeps them apart, and
-// keeps the big parts' corners from being joined a whole cluster at a time --
-// so every pair of big corners is found on its own, far more pairs than the
-// search keeps. The big parts still weld into one triangle, the tiny ones stay
-// apart, and a pooled run matches a serial one bit for bit.
+// among their first corners 300 tiny triangles jittered as much -- at the
+// origin, where the tolerance's float32 floor is nil: the tiny parts'
+// tolerance (1e-3 of their own ~1e-5 edges) keeps them apart, and keeps the
+// big parts' corners from being joined a whole cluster at a time -- so every
+// pair of big corners there is found on its own, ~45000 pairs, far more than
+// the search holds at once (it keeps a spanning set of them). The big parts
+// still weld into one triangle, the tiny ones stay apart, and a pooled run
+// matches a serial one bit for bit.
 TEST(GeometrySimplify, NearCoincidentPileOfMixedScalesWelds) {
   cvc::app ctx;
   std::mt19937_64 rng(11);
   auto jitter = [&]() { return 1e-5 * double(rng() >> 11) / 9007199254740992.0; };
   geometry g = make_grid(ctx, 20, 0.5);
-  const double C[3][3] = {{5, 5, 3}, {6, 5, 3}, {5, 6, 3.5}};
+  for (auto &q : g.points())
+    q[2] += 3.0; // clear of the pile
+  const double C[3][3] = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0.5}};
   for (int i = 0; i < 600; ++i) {
     const bool tiny = i % 2 == 1;
     const std::uint64_t o = g.points().size();
@@ -1040,6 +1063,11 @@ TEST(GeometrySimplify, NearCoincidentPileOfMixedScalesWelds) {
   const geometry pooled = cvc::simplify(g, p, &rp, &ctx.computePool());
   EXPECT_EQ(rs.seam_vertices, 900u); // the big copies' corners; no tiny one
   EXPECT_EQ(rp.seam_vertices, rs.seam_vertices);
+  // 2200 positions searched (the grid's 400 and the pile's 1800): a block's
+  // pairs pass the search's first budget (4 per position), and it trims them
+  EXPECT_GT(rs.weld_pairs_held, 4u * 1024u);
+  EXPECT_LE(rs.weld_pairs_held, 4u * 1024u + 2200u);
+  EXPECT_EQ(rp.weld_pairs_held, rs.weld_pairs_held);
   EXPECT_TRUE(bitwise_equal(serial.const_points(), pooled.const_points()));
   EXPECT_TRUE(bitwise_equal(serial.const_tris(), pooled.const_tris()));
   EXPECT_EQ(0, std::memcmp(&rs.world_error, &rp.world_error, sizeof(double)));
@@ -1080,6 +1108,139 @@ TEST(GeometrySimplify, NearCoincidentJoinStaysClosed) {
   EXPECT_LT(left.size(), std::size_t(n)) << "the join was decimated, not frozen";
   EXPECT_EQ(left, right);
   EXPECT_EQ(r.world_error, cvc::sampled_hausdorff(g, s));
+}
+
+namespace {
+
+// Two n x n sheets of edge h from (X, X), the second continuing the first
+// past the column x = X + h (n - 1) that both list a copy of, with a bump that
+// agrees along it. `right(i, j, p)` may move the second sheet's point p (its
+// column i, row j) before it is stored. `ground` > 0 adds a 2-triangle ground
+// that wide, 5 below the sheets: it widens the scene's extent.
+geometry joined_sheets(cvc::app &ctx, int n, double X, double h, double ground,
+                       const std::function<void(int, int, geometry::point_t &)> &right) {
+  geometry g(ctx);
+  for (int s = 0; s < 2; ++s) {
+    const std::uint64_t o = g.num_points();
+    for (int i = 0; i < n; ++i)
+      for (int j = 0; j < n; ++j) {
+        const int c = s == 0 ? i : n - 1 + i;
+        geometry::point_t p = {X + h * c, X + h * j,
+                               0.3 * h * std::sin(0.7 * c) * std::cos(0.9 * j)};
+        if (s == 1)
+          right(i, j, p);
+        g.points().push_back(p);
+      }
+    for (int i = 0; i + 1 < n; ++i)
+      for (int j = 0; j + 1 < n; ++j) {
+        const std::uint64_t a = o + std::uint64_t(i * n + j), b = a + std::uint64_t(n);
+        g.tris().push_back({a, b, a + 1});
+        g.tris().push_back({b, b + 1, a + 1});
+      }
+  }
+  if (ground > 0.0) {
+    const std::uint64_t o = g.num_points();
+    g.points().insert(g.points().end(),
+                      {{0, 0, -5}, {ground, 0, -5}, {ground, ground, -5}, {0, ground, -5}});
+    g.tris().insert(g.tris().end(), {{o, o + 1, o + 2}, {o, o + 2, o + 3}});
+  }
+  g.set_geometry_type(geometry::SURFACE_TRI);
+  return g;
+}
+
+// The rows of joined_sheets' join column the first sheet keeps, and the rows
+// one sheet keeps and the other does not (a crack). The first sheet's copy of
+// the column sits exactly on it; the second's, moved off it by less than
+// `off`, is told apart by that.
+std::pair<int, int> join_rows(const geometry &g, int n, double X, double h, double off) {
+  const double xj = X + h * (n - 1);
+  std::set<long> first, second;
+  for (const auto &q : g.const_points()) {
+    if (std::fabs(q[0] - xj) > off || q[1] < X - off || q[1] > X + h * (n - 1) + off)
+      continue;
+    const long row = std::lround((q[1] - X) / h);
+    (q[0] == xj && q[1] == X + h * double(row) ? first : second).insert(row);
+  }
+  std::vector<long> crack;
+  std::set_symmetric_difference(first.begin(), first.end(), second.begin(), second.end(),
+                                std::back_inserter(crack));
+  return std::make_pair(int(first.size()), int(crack.size()));
+}
+
+} // namespace
+
+// A join far from the origin whose two sides were rounded apart: the second
+// sheet is stored at float32 precision 2.5 km out, so its copy of the join
+// column is off the first's by up to ~1.1e-4 -- over 2e-3 of the 5 cm edge,
+// past the 1e-3 local cap -- yet within 4 float32 epsilons of the coordinates
+// (~1.2e-3), the tolerance's floor there. (A ground 3 km wide lifts the
+// scene-wide cap, 1e-6 of the extent, above that floor.) The join welds, and
+// stays closed as the sheets decimate.
+TEST(GeometrySimplify, JoinRoundedApartFarFromTheOriginStaysClosed) {
+  cvc::app ctx;
+  const int n = 40;
+  const double X = 2500.0, h = 0.05;
+  double moved = 0.0; // the farthest a join point was rounded off the first sheet's copy
+  const geometry g = joined_sheets(ctx, n, X, h, 3000.0, [&](int i, int, geometry::point_t &p) {
+    double d2 = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      const double f = double(float(p[k]));
+      d2 += (f - p[k]) * (f - p[k]);
+      p[k] = f;
+    }
+    if (i == 0)
+      moved = std::max(moved, std::sqrt(d2));
+  });
+  ASSERT_GT(moved, 2e-3 * h);
+  cvc::simplify_params p;
+  p.target_ratio = 0.02;
+  cvc::simplify_result r;
+  const geometry s = cvc::simplify(g, p, &r, &ctx.computePool());
+  EXPECT_EQ(r.seam_vertices, 2u * n);
+  expect_wellformed(s);
+  const std::pair<int, int> rows = join_rows(s, n, X, h, 1e-3);
+  EXPECT_LT(rows.first, n) << "the join was decimated, not frozen";
+  EXPECT_EQ(rows.second, 0) << "join rows only one side keeps";
+}
+
+// A join vertex's tolerance is set by its median edge, not its shortest one,
+// and zero-length edges do not count. The second sheet's copy of the join
+// column is moved 2e-5 off the first's: within 1e-3 of the 0.5 m edges around
+// it, beyond the float32 floor this near the origin. Its first column of cells
+// is a 1 mm sliver -- 1e-3 of that would not reach -- or the first sheet's
+// join vertices each carry a point (a triangle with all three corners there,
+// whose edges have no length). Either way the join welds, and stays closed as
+// the sheets decimate.
+TEST(GeometrySimplify, JoinVertexWithASliverOrAPointStaysClosed) {
+  cvc::app ctx;
+  const int n = 40;
+  const double h = 0.5, d = 2e-5, xj = h * (n - 1);
+  for (int kind = 0; kind < 2; ++kind) {
+    SCOPED_TRACE(kind == 0 ? "sliver" : "point");
+    geometry g = joined_sheets(ctx, n, 0.0, h, 0.0, [&](int i, int j, geometry::point_t &p) {
+      if (i == 1 && kind == 0) // the sliver column, level with the join
+        p = {xj + 1e-3, h * j, 0.3 * h * std::sin(0.7 * (n - 1)) * std::cos(0.9 * j)};
+      if (i == 0) {
+        p[0] += j % 2 ? d : -d;
+        p[1] += 0.5 * d;
+      }
+    });
+    if (kind == 1)
+      for (int j = 0; j < n; ++j) {
+        const std::uint64_t v = std::uint64_t((n - 1) * n + j), o = g.num_points();
+        g.points().insert(g.points().end(), 2, g.const_points()[v]);
+        g.tris().push_back({v, o, o + 1});
+      }
+    cvc::simplify_params p;
+    p.target_ratio = 0.2;
+    cvc::simplify_result r;
+    const geometry s = cvc::simplify(g, p, &r, &ctx.computePool());
+    EXPECT_EQ(r.seam_vertices, (kind == 0 ? 2u : 4u) * n); // a point's corners too
+    expect_wellformed(s);
+    const std::pair<int, int> rows = join_rows(s, n, 0.0, h, 4.0 * d);
+    EXPECT_LT(rows.first, n) << "the join was decimated, not frozen";
+    EXPECT_EQ(rows.second, 0) << "join rows only one side keeps";
+  }
 }
 
 // --- welding split faces, and attribute seams --------------------------------
@@ -2187,6 +2348,21 @@ TEST(GeometrySimplify, ZeroAreaNeedlesAreNotMeasured) {
   EXPECT_EQ(r.out_tris, 2u);
   EXPECT_EQ(r.world_error, 0.0);
   EXPECT_TRUE(bitwise_equal(kept.const_tris(), slivers.const_tris()));
+
+  // A point -- all three corners at one position -- has no edge to set a
+  // weld tolerance by: it does not weld to the sheet vertex 1e-7 from it,
+  // and the sheet decimates exactly as it does alone.
+  geometry point = sheet;
+  const std::uint64_t q = point.points().size();
+  geometry::point_t at = sheet.const_points()[33];
+  at[2] += 1e-7;
+  point.points().insert(point.points().end(), 3, at);
+  point.tris().push_back({q, q + 1, q + 2});
+  p.target_tris = 120;
+  const geometry c = cvc::simplify(point, p, &r);
+  EXPECT_EQ(r.seam_vertices, 3u); // the point's own corners, not vertex 33
+  EXPECT_TRUE(bitwise_equal(a.const_points(), c.const_points()));
+  EXPECT_TRUE(bitwise_equal(a.const_tris(), c.const_tris()));
 }
 
 // Round-off is judged against the coordinates' magnitude as well as the

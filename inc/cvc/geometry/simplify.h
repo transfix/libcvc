@@ -123,11 +123,19 @@ struct simplify_params {
   // together through its neighbours, and its triangles that weld shut leave
   // the result (they still count toward world_error). < 0 (the default) is
   // local: 1e-6 of the bounding-box diagonal, but for each vertex no more than
-  // 1e-3 of its shortest incident edge, and two vertices weld only within both
+  // 1e-3 of its median incident edge, and two vertices weld only within both
   // their tolerances -- so a large scene cannot weld the vertices of its fine
   // parts (separate parts a few of their own edge lengths apart stay
-  // separate), nor weld a part's own triangles shut. A vertex whose incident
-  // edges all have zero length does not near-weld.
+  // separate), nor weld a part's own triangles shut unless they are slivers
+  // thinner than 1e-3 of the edges around them. Within the 1e-6 cap, it is
+  // never below 4 float32 epsilons (~4.8e-7) of the vertex's largest
+  // coordinate magnitude, the rounding of float32-stored coordinates: a join
+  // rounded apart far from the origin still welds, and parts closer than that
+  // there weld too. A join whose sides are apart by more -- above 1e-3 of their
+  // median edge and above that rounding, or beyond the 1e-6 cap -- is NOT
+  // welded, and each side decimates its border on its own: it can open a crack
+  // that world_error does not see (give such input an explicit seam_epsilon).
+  // A vertex whose incident edges all have zero length does not near-weld.
   double seam_epsilon = -1.0;
 };
 
@@ -151,6 +159,12 @@ struct simplify_result {
   // Input vertices that share their collapse position with another input
   // vertex under weld_seams (0 when the input is returned unchanged).
   std::uint64_t seam_vertices = 0;
+  // The most near-coincident vertex pairs the seam search held at once, in any
+  // one of its blocks of 1024 positions: its memory, which stays under 4096
+  // plus a few times the positions it searches, however many pairs lie within
+  // tolerance (0 when nothing was searched, or the input is returned
+  // unchanged).
+  std::uint64_t weld_pairs_held = 0;
 };
 
 // Returns a simplified copy of `mesh`. `mesh` is not modified. The input is
