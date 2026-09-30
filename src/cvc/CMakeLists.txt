@@ -1138,6 +1138,23 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/ftxui_backend.h
 )
 
+# cvc::stream — Layer-(b) real-time in-process frame transport (roadmap
+# STATE_BINARY_STREAMING.md Phase 1). Compiled INTO the core cvc library as a
+# C++ namespace (like cvc::net / cvc::ariadne), NOT a separate CMake target: a
+# standalone target would break the single-export find_package(cvc) contract
+# (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
+# frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
+# thread; borrows cvc::state only for the /streams/<id> descriptor.
+list(APPEND SOURCE_FILES stream/frame_pool.cpp stream/stream_channel.cpp stream/stream_registry.cpp stream/producer_thread.cpp stream/stream.cpp)
+list(APPEND INCLUDE_FILES
+  ../../inc/cvc/stream/frame.h
+  ../../inc/cvc/stream/frame_pool.h
+  ../../inc/cvc/stream/stream_channel.h
+  ../../inc/cvc/stream/stream_registry.h
+  ../../inc/cvc/stream/producer_thread.h
+  ../../inc/cvc/stream/stream.h
+)
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
