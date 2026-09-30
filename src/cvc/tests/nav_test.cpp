@@ -1292,6 +1292,82 @@ TEST(NavSimWorld, LiveSensingRebuildsTheField) {
   EXPECT_GT(moved, 0) << "agents should drive on the live-sensing path";
 }
 
+// The rebuild trigger is the composited OCCUPANCY, not the belief version. A belief
+// flip (log-odds crossing 0, which bumps plane_version) that stays on the occupied side
+// of the planning threshold must NOT rebuild the field or bump field_version; the later
+// sense that actually crosses the threshold must. Setup: a single phantom cell (prior
+// occupied, truth free) east of a stationary agent (vmax 0) whose one ray (n_rays 1,
+// fov 0, heading 0) passes through it exactly once per tick, so its log-odds walks
+// 8, 6.6, ..., 1.0, -0.4, -1.8 in l_free steps. Under the pessimistic policy (occupied
+// iff p >= 0.35, i.e. log-odds >= ~-0.62) the -0.4 step is a flip with no occupancy
+// change; the -1.8 step is an occupancy change with no flip.
+TEST(NavSimWorld, VersionOnlyFlipDoesNotRebuildButOccupancyChangeDoes) {
+  const int R = 16, C = 16;
+  std::vector<std::uint8_t> truth((std::size_t)R * C, 0), prior((std::size_t)R * C, 0);
+  const int pr = 8, pc = 10; // the phantom cell
+  prior[pr * C + pc] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = 0;
+  cfg.min_y = 0;
+  cfg.max_x = C - 1; // cell_w = cell_h = 1
+  cfg.max_y = R - 1;
+  cfg.scale = 1.0;
+  cfg.veh.rr = 0.2f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.vmax = 0.0f; // stationary: position and heading never change
+  cfg.range_m = 12.0;
+  cfg.n_rays = 1;
+  cfg.fov_rad = 0.0; // the single ray points straight along the heading
+  cfg.sense_every = 1;
+  cfg.freeze_sense = false;
+  cfg.optimistic = false; // pessimistic: occupied iff p >= min(1 - p_thresh, 0.5 - band)
+  cfg.l_free = -1.4;
+  cfg.l_clamp = 8.0;
+
+  // Agent at (row 8, col 4); goal due east => initial heading 0 => the ray walks the row.
+  float o[2] = {4.0f, 8.0f}, goal[2] = {14.0f, 8.0f}, color[3] = {1, 1, 1};
+  cvc::nav::sim_world world(cfg, truth.data(), prior.data(), cvc::nav::coef_mlp::default_biased(),
+                            o, goal, color, 1);
+  const long hw = (long)R * C;
+  auto phantom_occ = [&] { return world.belief_occ(0)[pr * C + pc]; };
+  auto phantom_phi = [&] { return world.field_data()[pr * C + pc]; };
+  ASSERT_EQ(phantom_occ(), 1);
+  ASSERT_LT(phantom_phi(), 0.0f); // the prior phantom is inside a "building"
+
+  int flip_step = -1, clear_step = -1;
+  for (int t = 0; t < 12 && clear_step < 0; ++t) {
+    const int pv0 = world.plane_version(0), fv0 = world.field_version();
+    const std::vector<float> field0(world.field_data(), world.field_data() + 3 * hw);
+    world.step(1);
+    const bool flipped = world.plane_version(0) != pv0;
+    const bool bumped = world.field_version() != fv0;
+    const bool field_same =
+        std::equal(field0.begin(), field0.end(), world.field_data()); // bit-exact
+    if (flipped && phantom_occ() == 1) {
+      // version-only: the belief flipped but the planning surface did not change
+      flip_step = t;
+      EXPECT_FALSE(bumped) << "a version-only flip must not bump field_version (tick " << t << ")";
+      EXPECT_TRUE(field_same) << "a version-only flip must not touch the field (tick " << t << ")";
+    } else if (phantom_occ() == 0) {
+      clear_step = t;
+      EXPECT_FALSE(flipped) << "the threshold crossing is past the flip (tick " << t << ")";
+      EXPECT_TRUE(bumped) << "an occupancy change must bump field_version (tick " << t << ")";
+      EXPECT_FALSE(field_same) << "an occupancy change must rebuild the field (tick " << t << ")";
+      EXPECT_GT(phantom_phi(), 0.0f) << "the sensed-away phantom is free space now";
+    } else {
+      EXPECT_FALSE(flipped) << "tick " << t;
+      EXPECT_FALSE(bumped) << "nothing changed, nothing to rebuild (tick " << t << ")";
+      EXPECT_TRUE(field_same) << "tick " << t;
+    }
+  }
+  EXPECT_EQ(flip_step, 5) << "log-odds 8 -> -0.4 after six l_free=-1.4 hits";
+  EXPECT_EQ(clear_step, 6) << "log-odds -0.4 -> -1.8 crosses the pessimistic threshold";
+}
+
 // step()'s per-plane field rebuild is fanned out across a borrowed thread_pool when
 // one is injected (pool_ && M_ > 1). Each plane m touches only its own [m*hw] belief/
 // occ/field slice with its own scratch, so the pooled rebuild MUST be bit-identical to

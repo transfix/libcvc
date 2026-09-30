@@ -71,7 +71,6 @@ sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::ui
       logodds_[static_cast<long>(m) * hw + i] =
           prior_occ[i] ? static_cast<float>(cfg.l_clamp) : -static_cast<float>(cfg.l_clamp);
   version_.assign(M_, 0);
-  last_version_.assign(M_, 0);
   dyn_stamp_.assign(Mhw, -std::numeric_limits<double>::infinity());
 
   occ_.resize(Mhw);
@@ -331,7 +330,15 @@ void sim_world::step(int num_threads) {
     const unknown_policy pol =
         cfg_.optimistic ? unknown_policy::optimistic : unknown_policy::pessimistic;
     // Composite each plane's log-odds into an occupancy grid and, when its planning
-    // surface actually changed, rebuild that plane's SDF/normals. Each plane m is
+    // surface actually changed, rebuild that plane's SDF/normals. The trigger is the
+    // composited occupancy ALONE: rebuild_plane() is a pure function of occ_ plane m
+    // (+ fixed cfg_ bounds/scale), so an unchanged occupancy would rebuild a
+    // bit-identical field. version_[m] is deliberately NOT part of the trigger: it counts
+    // log-odds sign flips (p crossing 0.5), which need not cross the planning threshold
+    // (p_thresh / band / unknown policy) — e.g. a pessimistic plane whose phantom wall
+    // decays to p in (0.35, 0.5) flips without changing occupancy. Rebuilding (and
+    // bumping field_version) on such a flip was a full EDT pair for nothing, and a
+    // spurious replan signal to field_version() consumers. Each plane m is
     // INDEPENDENT — it reads only its own log-odds/dyn-stamp/occ slice and writes only
     // its own occ_ and field_ slice — so the loop parallelizes cleanly across planes.
     // rebuild_plane() (two EDT passes over rows_*cols_) is the whole cost of step() once
@@ -356,11 +363,9 @@ void sim_world::step(int num_threads) {
         std::vector<std::uint8_t> occ2(hw);
         composite_occupancy(logodds_.data() + off, rows_, cols_, pol, cfg_.p_thresh, cfg_.band,
                             dyn_stamp_.data() + off, t_now, cfg_.ttl_s, occ2.data());
-        if (version_[m] != last_version_[m] ||
-            !std::equal(occ2.begin(), occ2.end(), occ_.begin() + off)) {
+        if (!std::equal(occ2.begin(), occ2.end(), occ_.begin() + off)) {
           std::copy(occ2.begin(), occ2.end(), occ_.begin() + off);
           rebuild_plane(m);
-          last_version_[m] = version_[m];
           changed[m] = 1;
         }
       } catch (...) {
