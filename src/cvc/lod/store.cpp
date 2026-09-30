@@ -28,6 +28,7 @@
 #include <cvc/core/state_blob_store.h>
 #include <cvc/lod/store.h>
 #include <cvc/volume/hdf5_utils.h>
+#include <fstream>
 
 namespace cvc {
 namespace lod {
@@ -414,6 +415,26 @@ bool has_pyramid(app &ctx, const std::string &h5file, const std::string &name,
   } catch (...) {
     return false;
   }
+}
+
+bool bake_mesh_asset(app &ctx, const std::string &h5file, const std::string &name,
+                     const geometry &src, const pyramid_params &params, bool force,
+                     thread_pool *pool) {
+  const std::string hash = mesh_content_hash(src);
+  if (!force) {
+    std::ifstream probe(h5file.c_str(), std::ios::binary);
+    if (probe.good()) {
+      probe.close();
+      try {
+        if (scene_reader(ctx, h5file).has(name, hash))
+          return false; // an up-to-date pyramid is already baked
+      } catch (...) {
+      }
+    }
+  }
+  mesh_pyramid pyr = build_mesh_pyramid(src, params, pool);
+  scene_writer(ctx, h5file).write_mesh_pyramid(name, pyr, hash);
+  return true;
 }
 
 } // namespace lod

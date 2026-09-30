@@ -1705,6 +1705,13 @@ if(CVC_BUILD_LSYS_TOOLS)
   add_executable(cvc-worldgen ${CMAKE_CURRENT_SOURCE_DIR}/tools/cvc_worldgen_main.cpp)
   target_link_libraries(cvc-worldgen PRIVATE cvc)
   target_compile_features(cvc-worldgen PRIVATE cxx_std_17)
+  # cvc-lod-bake caches a mesh's LOD pyramid in a scene.cvch5 (needs the HDF5 store).
+  if(CVC_USING_HDF5)
+    add_executable(cvc-lod-bake ${CMAKE_CURRENT_SOURCE_DIR}/tools/cvc_lod_bake_main.cpp)
+    target_link_libraries(cvc-lod-bake PRIVATE cvc)
+    target_include_directories(cvc-lod-bake PRIVATE ${HDF5_INCLUDE_DIRS})
+    target_compile_features(cvc-lod-bake PRIVATE cxx_std_17)
+  endif()
 endif()
 
 # Windows-specific batch file

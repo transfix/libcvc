@@ -14,6 +14,7 @@
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/LodGraphicsNode.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/lod/select.h>
 
@@ -70,6 +71,22 @@ int main() {
     assert(r >= prev && "rung must not get FINER as the camera retreats");
     assert(r >= 0 && r < node->rungCount());
     prev = r;
+  }
+
+  // SceneGraph::selectLOD drives every LodGraphicsNode in the scene at once.
+  {
+    cvc::gl::SceneGraph sg(app, "lodtest");
+    auto lod = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::LodGraphicsNode>("lodnode");
+    lod->setPyramid(pyr);
+    view.eye[0] = 0.0;
+    view.eye[1] = 0.0;
+    view.eye[2] = 1.0e6; // far
+    const int visited = sg.selectLOD(view);
+    assert(visited == 1 && "selectLOD visits the one LOD node");
+    assert(lod->selectedRung() == 2 && "far view -> coarsest rung via selectLOD");
+    view.eye[2] = 1.0; // near
+    sg.selectLOD(view);
+    assert(lod->selectedRung() == 0 && "near view -> finest rung via selectLOD");
   }
 
   std::printf("cvcgl_lod_node OK\n");

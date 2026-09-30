@@ -178,3 +178,22 @@ TEST(LodStore, InMemoryBlobRoundTrips) {
   EXPECT_TRUE(r.has("buildings", cvc::lod::mesh_content_hash(m)));
   EXPECT_FALSE(r.has("buildings", "nope"));
 }
+
+TEST(LodStore, BakeMeshAssetSkipsWhenCurrent) {
+  cvc::app ctx;
+  geometry m = bumpy_grid(ctx, 20);
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+
+  EXPECT_TRUE(cvc::lod::bake_mesh_asset(ctx, file, "buildings", m)); // first -> baked
+  EXPECT_TRUE(cvc::lod::has_pyramid(ctx, file, "buildings", cvc::lod::mesh_content_hash(m)));
+  EXPECT_GE(cvc::lod::read_mesh_pyramid(ctx, file, "buildings").rungs.size(), 2u);
+
+  EXPECT_FALSE(cvc::lod::bake_mesh_asset(ctx, file, "buildings", m)); // same mesh -> skipped
+  EXPECT_TRUE(cvc::lod::bake_mesh_asset(ctx, file, "buildings", m, cvc::lod::pyramid_params(),
+                                        /*force=*/true)); // forced -> rebaked
+
+  geometry m2 = bumpy_grid(ctx, 26);                                  // different content
+  EXPECT_TRUE(cvc::lod::bake_mesh_asset(ctx, file, "buildings", m2)); // new hash -> rebaked
+  std::remove(file.c_str());
+}

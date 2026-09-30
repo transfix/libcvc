@@ -25,6 +25,9 @@ class app;
 class geometry;
 class volume;
 class state;
+namespace lod {
+struct view_params;
+}
 namespace gl {
 class state_publisher;
 class ShadowSettings;
@@ -35,6 +38,7 @@ class NullGraphicNode;
 class GridNode;
 class AxisNode;
 class BBoxNode;
+class LodGraphicsNode;
 
 class SceneGraph {
 public:
@@ -278,6 +282,12 @@ public:
     return getAllGraphicsOfType<GeometryNode>();
   }
   size_t getGeometryGraphicsCount() const { return getAllGeometryGraphics().size(); }
+
+  // Per-frame LOD pass: choose the rung for every LodGraphicsNode in the scene
+  // from this camera view (cvc::lod::view_params: eye, viewport height, fov, error
+  // budget), toggling each node's visible rung. Call once per frame before render.
+  // Returns the number of LOD nodes visited. A no-op (0) when there are none.
+  int selectLOD(const cvc::lod::view_params &view);
 
   // Multi-volume rendering control
   void enableMultiVolumeRendering(bool enable);
