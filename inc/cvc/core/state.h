@@ -733,9 +733,13 @@ public:
     std::size_t peers_targeted = 0;
   };
 
+  // `binary` routes `payload` to the message's wire `bytes` field (for the transports' proto
+  // bytes_payload) instead of `string_value`; content_type then defaults to octet-stream semantics.
+  // The payload is byte-safe either way (std::string holds arbitrary octets); `binary` only picks
+  // the typed wire slot so a receiver / cross-node peer sees bytes-vs-text correctly.
   send_message_result sendMessage(const std::string &payload,
                                   const std::string &content_type = std::string("text/plain"),
-                                  std::size_t hop_budget = 64);
+                                  std::size_t hop_budget = 64, bool binary = false);
 
   // -------- Expiring state --------
   //
