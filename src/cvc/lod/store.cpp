@@ -77,9 +77,27 @@ void write_2d(Group &g, const char *name, const T *data, hsize_t rows, hsize_t c
   ds.write(data, pt);
 }
 
+// A reader sizes its buffer from a dataset's extent before HDF5 reads a byte,
+// and that extent is untrusted: a small crafted blob can declare a huge one over
+// storage it never allocated (read back as fill values), or storage running past
+// its own end. The store writes every dataset contiguous and unfiltered, so its
+// `rows` x `per_row` elements are all physically in the file: refuse one whose
+// storage holds fewer, or more than the file itself (`file_bytes`), before
+// allocating anything. (Were the format ever to compress datasets, this bound
+// would have to come from somewhere else.)
+void check_stored(const DataSet &ds, hsize_t rows, hsize_t per_row, hsize_t file_bytes,
+                  const std::string &what) {
+  if (rows == 0 || per_row == 0)
+    return;
+  const hsize_t esz = ds.getDataType().getSize();
+  const hsize_t stored = ds.getStorageSize();
+  if (esz == 0 || stored > file_bytes || rows > stored / esz / per_row) // no overflow
+    throw hdf5_exception("lod::store: " + what + " declares more data than the file stores");
+}
+
 template <class T>
-hsize_t read_2d(const Group &g, const char *name, hsize_t cols, std::vector<T> &out,
-                const PredType &pt) {
+hsize_t read_2d(const Group &g, const char *name, hsize_t cols, hsize_t file_bytes,
+                std::vector<T> &out, const PredType &pt) {
   out.clear();
   if (!g.nameExists(name))
     return 0;
@@ -91,6 +109,7 @@ hsize_t read_2d(const Group &g, const char *name, hsize_t cols, std::vector<T> &
   sp.getSimpleExtentDims(dims);
   if (dims[1] != cols)
     throw hdf5_exception(std::string("lod::store: cols mismatch for ") + name);
+  check_stored(ds, dims[0], cols, file_bytes, name);
   out.resize(std::size_t(dims[0]) * cols);
   if (dims[0])
     ds.read(out.data(), pt);
@@ -156,13 +175,20 @@ mesh_pyramid read_mesh_from(app &ctx, H5File &f, const std::string &name) {
   boost::shared_ptr<Group> ag = hu::getGroup(f, base, false);
   int nrungs = 0;
   hu::getAttribute<int>(*ag, "nrungs", nrungs);
+  const hsize_t fbytes = f.getFileSize();
   for (int k = 0; k < nrungs; ++k) {
     Group rg = f.openGroup(base + "/lod/" + std::to_string(k));
     geometry m(ctx);
     std::vector<double> P;
-    hsize_t nv = read_2d(rg, "points", 3, P, PredType::NATIVE_DOUBLE);
+    hsize_t nv = read_2d(rg, "points", 3, fbytes, P, PredType::NATIVE_DOUBLE);
     std::vector<std::uint64_t> Tt;
-    hsize_t nt = read_2d(rg, "tris", 3, Tt, PredType::NATIVE_UINT64);
+    hsize_t nt = read_2d(rg, "tris", 3, fbytes, Tt, PredType::NATIVE_UINT64);
+    // A triangle naming a vertex past the end would send every consumer of
+    // the mesh reading out of bounds.
+    for (std::uint64_t v : Tt)
+      if (v >= nv)
+        throw hdf5_exception("lod::read_mesh_pyramid: triangle index out of range in '" + name +
+                             "'");
     geometry::points_t &mp = m.points();
     mp.resize(nv);
     for (hsize_t i = 0; i < nv; ++i)
@@ -172,7 +198,7 @@ mesh_pyramid read_mesh_from(app &ctx, H5File &f, const std::string &name) {
     for (hsize_t i = 0; i < nt; ++i)
       mt[i] = {Tt[i * 3], Tt[i * 3 + 1], Tt[i * 3 + 2]};
     std::vector<double> U;
-    hsize_t nu = read_2d(rg, "uv", 2, U, PredType::NATIVE_DOUBLE);
+    hsize_t nu = read_2d(rg, "uv", 2, fbytes, U, PredType::NATIVE_DOUBLE);
     if (nu == nv && nv) {
       geometry::uvs_t &mu = m.uvs();
       mu.resize(nv);
@@ -180,7 +206,7 @@ mesh_pyramid read_mesh_from(app &ctx, H5File &f, const std::string &name) {
         mu[i] = {U[i * 2], U[i * 2 + 1]};
     }
     std::vector<double> Cc;
-    hsize_t nc = read_2d(rg, "colors", 3, Cc, PredType::NATIVE_DOUBLE);
+    hsize_t nc = read_2d(rg, "colors", 3, fbytes, Cc, PredType::NATIVE_DOUBLE);
     if (nc == nv && nv) {
       geometry::colors_t &mc = m.colors();
       mc.resize(nv);
@@ -234,6 +260,7 @@ image_pyramid read_image_from(H5File &f, const std::string &name) {
   boost::shared_ptr<Group> ag = hu::getGroup(f, base, false);
   int nrungs = 0;
   hu::getAttribute<int>(*ag, "nrungs", nrungs);
+  const hsize_t fbytes = f.getFileSize();
   for (int k = 0; k < nrungs; ++k) {
     Group rg = f.openGroup(base + "/lod/" + std::to_string(k));
     int w = 0, h = 0, fmt = int(image::pixel_format::RGBA);
@@ -242,20 +269,26 @@ image_pyramid read_image_from(H5File &f, const std::string &name) {
     hu::getAttribute<int>(rg, "format", fmt);
     if (fmt < int(image::pixel_format::GRAY) || fmt > int(image::pixel_format::RGBA))
       throw hdf5_exception("lod::read_image_pyramid: bad pixel format in '" + name + "'");
-    image im(w, h, image::pixel_format(fmt), image::data_type::u8);
+    // A negative size would make an image whose size_bytes() wraps to ~2^64.
+    if (w < 0 || h < 0)
+      throw hdf5_exception("lod::read_image_pyramid: negative size in '" + name + "'");
+    const image::pixel_format pf = image::pixel_format(fmt);
+    const int nc = image(0, 0, pf).channels(); // allocates nothing
+    // The read fills the whole dataset into the image's buffer, so the dataset
+    // must be exactly the H x W x C the attributes size it for, and actually
+    // stored -- all checked BEFORE the image allocates (and zero-fills) that
+    // buffer, since a blob is untrusted input.
     DataSet ds = rg.openDataSet("pixels");
-    // The read fills the whole dataset into im's buffer, so the dataset must be
-    // exactly the H x W x C the attributes sized it for -- a blob is untrusted
-    // input, and a mismatch would otherwise overrun the image.
     DataSpace sp = ds.getSpace();
     hsize_t dims[3] = {0, 0, 0};
     const bool rank3 = sp.getSimpleExtentNdims() == 3;
     if (rank3)
       sp.getSimpleExtentDims(dims);
-    if (!rank3 || dims[0] != hsize_t(std::max(h, 0)) || dims[1] != hsize_t(std::max(w, 0)) ||
-        dims[2] != hsize_t(im.channels()))
+    if (!rank3 || dims[0] != hsize_t(h) || dims[1] != hsize_t(w) || dims[2] != hsize_t(nc))
       throw hdf5_exception("lod::read_image_pyramid: pixels do not match w/h/format in '" + name +
                            "'");
+    check_stored(ds, dims[0], dims[1] * dims[2], fbytes, "pixels of '" + name + "'");
+    image im(w, h, pf, image::data_type::u8);
     if (im.size_bytes())
       ds.read(im.data(), PredType::NATIVE_UINT8);
     double we = 0.0;
@@ -287,6 +320,12 @@ std::vector<lod_index_entry> read_index_from(H5File &f) {
       } catch (...) {
       }
       if (ag.attrExists("world_error_m") && e.nrungs > 0) {
+        // Check the stored length BEFORE sizing a buffer by nrungs: a corrupt
+        // nrungs (up to INT_MAX) would otherwise zero-fill gigabytes first.
+        const hssize_t n = ag.openAttribute("world_error_m").getSpace().getSimpleExtentNpoints();
+        if (n != hssize_t(e.nrungs))
+          throw hdf5_exception("lod::read_lod_index: '" + name + "' has " + std::to_string(n) +
+                               " world_error_m entries for nrungs " + std::to_string(e.nrungs));
         e.world_error_m.resize(e.nrungs);
         hu::getAttribute<double>(ag, "world_error_m", e.nrungs, e.world_error_m.data());
       }

@@ -65,6 +65,33 @@ std::string tmp_h5() {
 
 bool file_exists(const std::string &path) { return std::ifstream(path.c_str()).good(); }
 
+std::string slurp(const std::string &path) {
+  std::ifstream in(path.c_str(), std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// Replaces dataset `ds` of group `group` in `file` with a `rank`-D one of the
+// given extent, writing `data` into it -- or, with data == nullptr, leaving it
+// declared but never stored (HDF5 then reads it back as fill values).
+void replace_dataset(cvc::app &ctx, const std::string &file, const std::string &group,
+                     const char *ds, int rank, const hsize_t *dims, const H5::PredType &pt,
+                     const void *data) {
+  cvc::hdf5_utils::library_lock lock(ctx, file, "lod_store_test");
+  H5::H5File f(file, H5F_ACC_RDWR);
+  H5::Group g = f.openGroup(group);
+  g.unlink(ds);
+  H5::DataSet d = g.createDataSet(ds, pt, H5::DataSpace(rank, dims));
+  if (data)
+    d.write(data, pt);
+}
+void set_int_attr(cvc::app &ctx, const std::string &file, const std::string &group,
+                  const char *attr, int value) {
+  cvc::hdf5_utils::library_lock lock(ctx, file, "lod_store_test");
+  H5::H5File f(file, H5F_ACC_RDWR);
+  H5::Group g = f.openGroup(group);
+  cvc::hdf5_utils::setAttribute<int>(g, attr, value);
+}
+
 // A one-rung mesh pyramid named by, and carrying, `tag` in every x coordinate,
 // so a reader that hands back another container's bytes is caught by value and
 // by name, not just by a count that might coincide.
@@ -529,5 +556,115 @@ TEST(LodStore, ImagePixelsThatDisagreeWithTheirSizeAreRejected) {
   EXPECT_FALSE(std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); }).empty());
   set_rung0("format", 42);
   EXPECT_FALSE(std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); }).empty());
+  std::remove(file.c_str());
+}
+
+TEST(LodStore, ImageSizesAreCheckedBeforeTheImageIsAllocated) {
+  cvc::app ctx;
+  image src(16, 16, image::pixel_format::RGBA, image::data_type::u8);
+  cvc::lod::image_pyramid pyr = cvc::lod::build_image_pyramid(src, {});
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+  cvc::lod::write_image_pyramid(ctx, file, "tex", pyr);
+  const std::string rung0 = "/cvc/images/tex/lod/0";
+
+  // Rung 0 becomes a w x h RGBA image whose pixels dataset is h x dw x 4,
+  // stored or only declared.
+  auto make_rung0 = [&](int w, int h, hsize_t dw, bool stored) {
+    const hsize_t dims[3] = {hsize_t(h < 0 ? 0 : h), dw, 4};
+    std::vector<unsigned char> px;
+    if (stored)
+      px.assign(std::size_t(dims[0] * dims[1] * dims[2]), 7);
+    replace_dataset(ctx, file, rung0, "pixels", 3, dims, H5::PredType::NATIVE_UINT8,
+                    px.empty() ? nullptr : px.data());
+    set_int_attr(ctx, file, rung0, "w", w);
+    set_int_attr(ctx, file, rung0, "h", h);
+  };
+  auto read_error = [&] {
+    return std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); });
+  };
+
+  // A negative width over an empty dataset used to come back as an "image"
+  // whose size_bytes() wrapped to ~2^64, crashing whatever trusted it next.
+  make_rung0(-7, 5, 0, true);
+  std::string msg = read_error();
+  EXPECT_NE(msg.find("negative size"), std::string::npos) << msg;
+
+  // A 64 MiB image declared over storage that was never written: the file is
+  // tiny, so the reader must refuse before allocating the image, not read back
+  // 64 MiB of fill values.
+  make_rung0(4096, 4096, 4096, false);
+  EXPECT_LT(slurp(file).size(), std::size_t(1) << 20);
+  msg = read_error();
+  EXPECT_NE(msg.find("declares more data than the file stores"), std::string::npos) << msg;
+
+  // Attributes far larger than the stored pixels are refused by the extent
+  // check, which now runs before the image is allocated.
+  make_rung0(8, 8, 8, true);
+  set_int_attr(ctx, file, rung0, "w", 16384);
+  set_int_attr(ctx, file, rung0, "h", 16384);
+  msg = read_error();
+  EXPECT_NE(msg.find("pixels do not match"), std::string::npos) << msg;
+
+  // A consistent, stored rung still reads back.
+  make_rung0(8, 8, 8, true);
+  const cvc::lod::image_pyramid rd = cvc::lod::read_image_pyramid(ctx, file, "tex");
+  ASSERT_EQ(rd.rungs.size(), pyr.rungs.size());
+  ASSERT_EQ(rd.rungs[0].width(), 8);
+  ASSERT_EQ(rd.rungs[0].size_bytes(), 8u * 8u * 4u);
+  EXPECT_EQ(rd.rungs[0].data()[0], 7);
+  std::remove(file.c_str());
+}
+
+TEST(LodStore, MeshDatasetsMustBeStoredAndIndexInRange) {
+  cvc::app ctx;
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+  const std::string rung0 = "/cvc/geometry/m/lod/0";
+  auto read_error = [&] {
+    return std_error_of([&] { cvc::lod::read_mesh_pyramid(ctx, file, "m"); });
+  };
+
+  // A million vertices declared but never stored.
+  cvc::lod::write_mesh_pyramid(ctx, file, "m", tagged_pyramid(ctx, 1));
+  const hsize_t huge[2] = {hsize_t(1) << 20, 3};
+  replace_dataset(ctx, file, rung0, "points", 2, huge, H5::PredType::NATIVE_DOUBLE, nullptr);
+  std::string msg = read_error();
+  EXPECT_NE(msg.find("declares more data than the file stores"), std::string::npos) << msg;
+
+  // A triangle naming a vertex one past the end.
+  cvc::lod::write_mesh_pyramid(ctx, file, "m", tagged_pyramid(ctx, 1));
+  const cvc::lod::mesh_pyramid good = cvc::lod::read_mesh_pyramid(ctx, file, "m");
+  const std::uint64_t nv = good.rungs[0].num_points();
+  const std::uint64_t tri[3] = {0, 1, nv};
+  const hsize_t one[2] = {1, 3};
+  replace_dataset(ctx, file, rung0, "tris", 2, one, H5::PredType::NATIVE_UINT64, tri);
+  msg = read_error();
+  EXPECT_NE(msg.find("triangle index out of range"), std::string::npos) << msg;
+
+  // Rewritten, it reads back whole.
+  cvc::lod::write_mesh_pyramid(ctx, file, "m", tagged_pyramid(ctx, 1));
+  EXPECT_EQ(fingerprint(cvc::lod::read_mesh_pyramid(ctx, file, "m")),
+            fingerprint(tagged_pyramid(ctx, 1)));
+  std::remove(file.c_str());
+}
+
+TEST(LodStore, IndexChecksTheErrorLadderLengthBeforeSizingIt) {
+  cvc::app ctx;
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+  cvc::lod::write_mesh_pyramid(ctx, file, "m", tagged_pyramid(ctx, 1)); // one rung
+
+  // nrungs is only an attribute: sizing the ladder by it before checking the
+  // stored world_error_m length let a corrupt value zero-fill gigabytes first.
+  set_int_attr(ctx, file, "/cvc/geometry/m", "nrungs", 1 << 24);
+  const std::string msg = std_error_of([&] { cvc::lod::read_lod_index(ctx, file); });
+  EXPECT_NE(msg.find("1 world_error_m entries for nrungs 16777216"), std::string::npos) << msg;
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::read_mesh_pyramid(ctx, file, "m"); }).empty());
+
+  set_int_attr(ctx, file, "/cvc/geometry/m", "nrungs", 1);
+  const auto idx = cvc::lod::read_lod_index(ctx, file);
+  ASSERT_EQ(idx.size(), 1u);
+  EXPECT_EQ(idx[0].world_error_m, std::vector<double>{0.25});
   std::remove(file.c_str());
 }
