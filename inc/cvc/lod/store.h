@@ -17,12 +17,12 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-// store.h -- persist LOD pyramids into a per-bundle "scene.cvch5" HDF5 file, and
-// read them back. This is the cache/serialization half named alongside the
-// pyramid_builder (volrover3 section 22.1); it fills the `/cvc/geometry`
-// placeholder the CVC HDF5 schema reserved (hdf5_utils.h, "define fully later").
+// store.h -- persist LOD pyramids into a "scene.cvch5" HDF5 container, on disk OR
+// entirely in memory (no file). This is the cache/serialization half named
+// alongside the pyramid_builder (volrover3 section 22.1); it fills the
+// `/cvc/geometry` group the CVC HDF5 schema reserved (hdf5_utils.h).
 //
-// Layout (one file per bundle):
+// Layout (identical for a file or an in-memory image):
 //   /cvc/geometry/<name>          group; attrs: kind='M', nrungs, source_hash,
 //                                 world_error_m (nrungs doubles = the ladder)
 //   /cvc/geometry/<name>/lod/<k>  group; datasets: points (Nx3 f64), tris (Mx3 u64),
@@ -32,17 +32,28 @@
 //   /cvc/images/<name>/lod/<k>    dataset pixels (H x W x C u8); attrs: w, h, channels,
 //                                 format, world_error_m
 //
-// The HDF5 hierarchy IS the lod_index: read_lod_index() walks these groups. A
-// content hash on the SOURCE asset lets a bake step skip a pyramid that is already
-// present and current (has_pyramid). Requires CVC_USING_HDF5; the whole header is
-// a no-op declaration otherwise (the .cpp is compiled only with HDF5).
+// Two ways in:
+//   * FILE      -- the free write_/read_*_pyramid functions and scene_writer/
+//                  scene_reader(ctx, path). Standard HDF5 file IO.
+//   * IN-MEMORY -- scene_writer(ctx) builds the whole container in RAM (HDF5's core
+//                  VFD) and to_blob() hands back the exact bytes an on-disk file
+//                  would have, ready to POST over the network; scene_reader(ctx,
+//                  bytes, len) opens such a blob (e.g. one fetched with cvc::net)
+//                  with no temp file. A blob is byte-identical to the file image,
+//                  so either side can produce what the other consumes.
+//
+// The HDF5 hierarchy IS the lod_index (read_lod_index / index() walk it); a
+// content hash on the SOURCE asset lets a bake step skip a pyramid already present
+// and current (has_pyramid / has). Requires CVC_USING_HDF5.
 //
 // LOD is a render proxy: a scene.cvch5 never feeds a nav/material/RF path.
 
 #ifndef __CVC_LOD_STORE_H__
 #define __CVC_LOD_STORE_H__
 
+#include <cstddef>
 #include <cvc/lod/pyramid.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -64,21 +75,62 @@ struct lod_index_entry {
 std::string mesh_content_hash(const geometry &g);
 std::string image_content_hash(const image &img);
 
-// Write / read a mesh pyramid under /cvc/geometry/<name>. write creates the file
-// if needed and replaces any existing pyramid at that name.
+// ── writer ────────────────────────────────────────────────────────────────
+// Accumulates pyramids into one scene.cvch5. File-backed: writes land on disk as
+// each call returns (create-or-open, preserving prior assets). In-memory: nothing
+// touches the disk until to_blob() serializes the container to bytes.
+class scene_writer {
+public:
+  explicit scene_writer(app &ctx);                 // in-memory (core VFD, no file)
+  scene_writer(app &ctx, const std::string &path); // on disk at `path`
+  ~scene_writer();
+  scene_writer(scene_writer &&) noexcept;
+  scene_writer &operator=(scene_writer &&) noexcept;
+
+  void write_mesh_pyramid(const std::string &name, const mesh_pyramid &pyr,
+                          const std::string &source_hash = std::string());
+  void write_image_pyramid(const std::string &name, const image_pyramid &pyr,
+                           const std::string &source_hash = std::string());
+
+  // The container's bytes -- exactly what an on-disk scene.cvch5 holds. Valid for
+  // both in-memory and file-backed writers (a file writer flushes then images
+  // itself), so a bake can build once and both save and POST it.
+  std::vector<unsigned char> to_blob();
+
+private:
+  struct impl;
+  std::unique_ptr<impl> _p;
+};
+
+// ── reader ────────────────────────────────────────────────────────────────
+// Reads pyramids from a scene.cvch5 -- a file on disk, or a blob in RAM (e.g. a
+// body fetched with cvc::net), with no temp file for the blob case.
+class scene_reader {
+public:
+  scene_reader(app &ctx, const std::string &path);                   // from a file
+  scene_reader(app &ctx, const unsigned char *bytes, std::size_t n); // from a blob
+  ~scene_reader();
+  scene_reader(scene_reader &&) noexcept;
+  scene_reader &operator=(scene_reader &&) noexcept;
+
+  mesh_pyramid read_mesh_pyramid(const std::string &name);
+  image_pyramid read_image_pyramid(const std::string &name);
+  std::vector<lod_index_entry> index();
+  bool has(const std::string &name, const std::string &source_hash = std::string());
+
+private:
+  struct impl;
+  std::unique_ptr<impl> _p;
+};
+
+// ── free functions (file only; thin wrappers over the writer/reader) ────────
 void write_mesh_pyramid(app &ctx, const std::string &h5file, const std::string &name,
                         const mesh_pyramid &pyr, const std::string &source_hash = std::string());
 mesh_pyramid read_mesh_pyramid(app &ctx, const std::string &h5file, const std::string &name);
-
-// Write / read an image mip pyramid under /cvc/images/<name>.
 void write_image_pyramid(app &ctx, const std::string &h5file, const std::string &name,
                          const image_pyramid &pyr, const std::string &source_hash = std::string());
 image_pyramid read_image_pyramid(app &ctx, const std::string &h5file, const std::string &name);
-
-// Walk the file and return every asset's index entry (any kind).
 std::vector<lod_index_entry> read_lod_index(app &ctx, const std::string &h5file);
-
-// True when <name> is present with a matching source_hash (skip the rebuild).
 bool has_pyramid(app &ctx, const std::string &h5file, const std::string &name,
                  const std::string &source_hash);
 

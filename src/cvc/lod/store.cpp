@@ -17,10 +17,11 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-// store.cpp -- scene.cvch5 LOD pyramid persistence. Compiled only with HDF5.
+// store.cpp -- scene.cvch5 LOD pyramid persistence (file + in-memory). HDF5 only.
 
 #include <H5Cpp.h>
 #include <algorithm>
+#include <boost/make_shared.hpp>
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
@@ -51,8 +52,6 @@ std::string asset_path(char kind, const std::string &name) {
   return std::string("/cvc/") + kind_group(kind) + "/" + name;
 }
 
-// A contiguous typed 2-D array (rows x cols); libcvc's point/tri/uv/color arrays
-// are all std::vector<boost::array<T,cols>>, so their storage is exactly this.
 template <class T>
 void write_2d(Group &g, const char *name, const T *data, hsize_t rows, hsize_t cols,
               const PredType &pt) {
@@ -64,8 +63,6 @@ void write_2d(Group &g, const char *name, const T *data, hsize_t rows, hsize_t c
   ds.write(data, pt);
 }
 
-// Read an (rows x cols) dataset into `out` (resized to rows*cols); returns rows.
-// cols is asserted. Missing dataset -> out cleared, returns 0.
 template <class T>
 hsize_t read_2d(const Group &g, const char *name, hsize_t cols, std::vector<T> &out,
                 const PredType &pt) {
@@ -74,9 +71,9 @@ hsize_t read_2d(const Group &g, const char *name, hsize_t cols, std::vector<T> &
     return 0;
   DataSet ds = g.openDataSet(name);
   DataSpace sp = ds.getSpace();
-  hsize_t dims[2] = {0, 0};
   if (sp.getSimpleExtentNdims() != 2)
     throw hdf5_exception(std::string("lod::store: rank!=2 for ") + name);
+  hsize_t dims[2] = {0, 0};
   sp.getSimpleExtentDims(dims);
   if (dims[1] != cols)
     throw hdf5_exception(std::string("lod::store: cols mismatch for ") + name);
@@ -102,36 +99,25 @@ std::vector<unsigned char> mesh_bytes(const geometry &g) {
   return b;
 }
 
-} // namespace
+// ── per-asset ops on an open file (the caller already holds the library lock) ──
 
-std::string mesh_content_hash(const geometry &g) { return sha256_hex(mesh_bytes(g)); }
-
-std::string image_content_hash(const image &img) {
-  return sha256_hex(img.data(), img.size_bytes());
-}
-
-void write_mesh_pyramid(app &ctx, const std::string &h5file, const std::string &name,
-                        const mesh_pyramid &pyr, const std::string &source_hash) {
-  hu::library_lock lock(ctx, h5file, "cvc::lod::write_mesh_pyramid");
-  H5::Exception::dontPrint();
-  boost::shared_ptr<H5File> f = hu::getH5File(h5file, /*create-or-open, preserving*/ false);
+void write_mesh_into(H5File &f, const std::string &name, const mesh_pyramid &pyr,
+                     const std::string &hash) {
   const std::string base = asset_path('M', name);
   try {
-    f->unlink(base); // replace any prior pyramid at this name (no-op if absent)
+    f.unlink(base); // replace any prior pyramid at this name (no-op if absent)
   } catch (const H5::Exception &) {
   }
-  boost::shared_ptr<Group> ag = hu::getGroup(*f, base, /*create=*/true);
+  boost::shared_ptr<Group> ag = hu::getGroup(f, base, true);
   hu::setAttribute<std::string>(*ag, "kind", std::string("M"));
   hu::setAttribute<int>(*ag, "nrungs", int(pyr.rungs.size()));
-  hu::setAttribute<std::string>(*ag, "source_hash", source_hash);
+  hu::setAttribute<std::string>(*ag, "source_hash", hash);
   if (!pyr.world_error_m.empty())
     hu::setAttribute<double>(*ag, "world_error_m", pyr.world_error_m.size(),
                              pyr.world_error_m.data());
-
   for (std::size_t k = 0; k < pyr.rungs.size(); ++k) {
     const geometry &m = pyr.rungs[k];
-    boost::shared_ptr<Group> rg =
-        hu::getGroup(*f, base + "/lod/" + std::to_string(k), /*create=*/true);
+    boost::shared_ptr<Group> rg = hu::getGroup(f, base + "/lod/" + std::to_string(k), true);
     const geometry::points_t &P = m.const_points();
     const geometry::tris_t &T = m.const_tris();
     write_2d(*rg, "points", P.empty() ? nullptr : &P[0][0], P.size(), 3, PredType::NATIVE_DOUBLE);
@@ -148,19 +134,16 @@ void write_mesh_pyramid(app &ctx, const std::string &h5file, const std::string &
   }
 }
 
-mesh_pyramid read_mesh_pyramid(app &ctx, const std::string &h5file, const std::string &name) {
-  hu::library_lock lock(ctx, h5file, "cvc::lod::read_mesh_pyramid");
-  H5::Exception::dontPrint();
+mesh_pyramid read_mesh_from(app &ctx, H5File &f, const std::string &name) {
   mesh_pyramid out;
-  boost::shared_ptr<H5File> f = hu::getH5File(h5file, false);
   const std::string base = asset_path('M', name);
-  if (!f->nameExists(base))
+  if (!f.nameExists("/cvc/geometry") || !f.nameExists(base))
     throw hdf5_exception("lod::read_mesh_pyramid: no mesh pyramid '" + name + "'");
-  boost::shared_ptr<Group> ag = hu::getGroup(*f, base, false);
+  boost::shared_ptr<Group> ag = hu::getGroup(f, base, false);
   int nrungs = 0;
   hu::getAttribute<int>(*ag, "nrungs", nrungs);
   for (int k = 0; k < nrungs; ++k) {
-    Group rg = f->openGroup(base + "/lod/" + std::to_string(k));
+    Group rg = f.openGroup(base + "/lod/" + std::to_string(k));
     geometry m(ctx);
     std::vector<double> P;
     hsize_t nv = read_2d(rg, "points", 3, P, PredType::NATIVE_DOUBLE);
@@ -199,26 +182,23 @@ mesh_pyramid read_mesh_pyramid(app &ctx, const std::string &h5file, const std::s
   return out;
 }
 
-void write_image_pyramid(app &ctx, const std::string &h5file, const std::string &name,
-                         const image_pyramid &pyr, const std::string &source_hash) {
-  hu::library_lock lock(ctx, h5file, "cvc::lod::write_image_pyramid");
-  H5::Exception::dontPrint();
-  boost::shared_ptr<H5File> f = hu::getH5File(h5file, /*create-or-open, preserving*/ false);
+void write_image_into(H5File &f, const std::string &name, const image_pyramid &pyr,
+                      const std::string &hash) {
   const std::string base = asset_path('I', name);
   try {
-    f->unlink(base); // replace any prior pyramid at this name (no-op if absent)
+    f.unlink(base);
   } catch (const H5::Exception &) {
   }
-  boost::shared_ptr<Group> ag = hu::getGroup(*f, base, true);
+  boost::shared_ptr<Group> ag = hu::getGroup(f, base, true);
   hu::setAttribute<std::string>(*ag, "kind", std::string("I"));
   hu::setAttribute<int>(*ag, "nrungs", int(pyr.rungs.size()));
-  hu::setAttribute<std::string>(*ag, "source_hash", source_hash);
+  hu::setAttribute<std::string>(*ag, "source_hash", hash);
   if (!pyr.world_error_m.empty())
     hu::setAttribute<double>(*ag, "world_error_m", pyr.world_error_m.size(),
                              pyr.world_error_m.data());
   for (std::size_t k = 0; k < pyr.rungs.size(); ++k) {
     const image &im = pyr.rungs[k];
-    boost::shared_ptr<Group> rg = hu::getGroup(*f, base + "/lod/" + std::to_string(k), true);
+    boost::shared_ptr<Group> rg = hu::getGroup(f, base + "/lod/" + std::to_string(k), true);
     hsize_t dims[3] = {hsize_t(im.height()), hsize_t(im.width()), hsize_t(im.channels())};
     DataSpace sp(3, dims);
     DataSet ds = rg->createDataSet("pixels", PredType::NATIVE_UINT8, sp);
@@ -232,19 +212,16 @@ void write_image_pyramid(app &ctx, const std::string &h5file, const std::string 
   }
 }
 
-image_pyramid read_image_pyramid(app &ctx, const std::string &h5file, const std::string &name) {
-  hu::library_lock lock(ctx, h5file, "cvc::lod::read_image_pyramid");
-  H5::Exception::dontPrint();
+image_pyramid read_image_from(H5File &f, const std::string &name) {
   image_pyramid out;
-  boost::shared_ptr<H5File> f = hu::getH5File(h5file, false);
   const std::string base = asset_path('I', name);
-  if (!f->nameExists(base))
+  if (!f.nameExists("/cvc/images") || !f.nameExists(base))
     throw hdf5_exception("lod::read_image_pyramid: no image pyramid '" + name + "'");
-  boost::shared_ptr<Group> ag = hu::getGroup(*f, base, false);
+  boost::shared_ptr<Group> ag = hu::getGroup(f, base, false);
   int nrungs = 0;
   hu::getAttribute<int>(*ag, "nrungs", nrungs);
   for (int k = 0; k < nrungs; ++k) {
-    Group rg = f->openGroup(base + "/lod/" + std::to_string(k));
+    Group rg = f.openGroup(base + "/lod/" + std::to_string(k));
     int w = 0, h = 0, fmt = int(image::pixel_format::RGBA);
     hu::getAttribute<int>(rg, "w", w);
     hu::getAttribute<int>(rg, "h", h);
@@ -260,17 +237,14 @@ image_pyramid read_image_pyramid(app &ctx, const std::string &h5file, const std:
   return out;
 }
 
-std::vector<lod_index_entry> read_lod_index(app &ctx, const std::string &h5file) {
-  hu::library_lock lock(ctx, h5file, "cvc::lod::read_lod_index");
-  H5::Exception::dontPrint();
+std::vector<lod_index_entry> read_index_from(H5File &f) {
   std::vector<lod_index_entry> out;
-  boost::shared_ptr<H5File> f = hu::getH5File(h5file, false);
   const char kinds[3] = {'M', 'I', 'V'};
   for (char kind : kinds) {
     std::string kg = std::string("/cvc/") + kind_group(kind);
-    if (!f->nameExists(kg))
+    if (!f.nameExists("/cvc") || !f.nameExists(kg))
       continue;
-    Group g = f->openGroup(kg);
+    Group g = f.openGroup(kg);
     const hsize_t n = g.getNumObjs();
     for (hsize_t i = 0; i < n; ++i) {
       std::string name = g.getObjnameByIdx(i);
@@ -293,16 +267,153 @@ std::vector<lod_index_entry> read_lod_index(app &ctx, const std::string &h5file)
   return out;
 }
 
-bool has_pyramid(app &ctx, const std::string &h5file, const std::string &name,
-                 const std::string &source_hash) {
+// ── backings ──
+boost::shared_ptr<H5File> open_memory() {
+  FileAccPropList fapl;
+  fapl.setCore(64u * 1024u, /*backing_store=*/false);
+  return boost::make_shared<H5File>("cvc-lod-mem.cvch5", H5F_ACC_TRUNC, FileCreatPropList::DEFAULT,
+                                    fapl);
+}
+boost::shared_ptr<H5File> open_blob(const unsigned char *bytes, std::size_t n) {
+  FileAccPropList fapl;
+  fapl.setCore(64u * 1024u, /*backing_store=*/false);
+  // Supply the in-RAM image so the "file" is exactly these bytes (no temp file).
+  if (H5Pset_file_image(fapl.getId(), const_cast<unsigned char *>(bytes), n) < 0)
+    throw hdf5_exception("lod::store: H5Pset_file_image failed");
+  return boost::make_shared<H5File>("cvc-lod-blob.cvch5", H5F_ACC_RDONLY,
+                                    FileCreatPropList::DEFAULT, fapl);
+}
+std::vector<unsigned char> file_image(H5File &f) {
+  f.flush(H5F_SCOPE_GLOBAL);
+  ssize_t sz = H5Fget_file_image(f.getId(), nullptr, 0);
+  if (sz <= 0)
+    return {};
+  const std::size_t len = static_cast<std::size_t>(sz);
+  std::vector<unsigned char> buf(len);
+  if (H5Fget_file_image(f.getId(), buf.data(), len) < 0)
+    throw hdf5_exception("lod::store: H5Fget_file_image failed");
+  return buf;
+}
+
+} // namespace
+
+std::string mesh_content_hash(const geometry &g) { return sha256_hex(mesh_bytes(g)); }
+std::string image_content_hash(const image &img) {
+  return sha256_hex(img.data(), img.size_bytes());
+}
+
+// ── scene_writer ──
+struct scene_writer::impl {
+  app &ctx;
+  boost::shared_ptr<H5File> f;
+  std::string key;
+  impl(app &c, boost::shared_ptr<H5File> ff, std::string k) : ctx(c), f(ff), key(std::move(k)) {}
+};
+
+scene_writer::scene_writer(app &ctx) {
+  hu::library_lock lock(ctx, "<cvc-lod-memory>", "cvc::lod::scene_writer(memory)");
+  H5::Exception::dontPrint();
+  _p.reset(new impl(ctx, open_memory(), "<cvc-lod-memory>"));
+}
+scene_writer::scene_writer(app &ctx, const std::string &path) {
+  hu::library_lock lock(ctx, path, "cvc::lod::scene_writer(file)");
+  H5::Exception::dontPrint();
+  _p.reset(new impl(ctx, hu::getH5File(path, /*create-or-open, preserving*/ false), path));
+}
+scene_writer::~scene_writer() = default;
+scene_writer::scene_writer(scene_writer &&) noexcept = default;
+scene_writer &scene_writer::operator=(scene_writer &&) noexcept = default;
+
+void scene_writer::write_mesh_pyramid(const std::string &name, const mesh_pyramid &pyr,
+                                      const std::string &source_hash) {
+  hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_writer::write_mesh_pyramid");
+  H5::Exception::dontPrint();
+  write_mesh_into(*_p->f, name, pyr, source_hash);
+}
+void scene_writer::write_image_pyramid(const std::string &name, const image_pyramid &pyr,
+                                       const std::string &source_hash) {
+  hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_writer::write_image_pyramid");
+  H5::Exception::dontPrint();
+  write_image_into(*_p->f, name, pyr, source_hash);
+}
+std::vector<unsigned char> scene_writer::to_blob() {
+  hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_writer::to_blob");
+  H5::Exception::dontPrint();
+  return file_image(*_p->f);
+}
+
+// ── scene_reader ──
+struct scene_reader::impl {
+  app &ctx;
+  boost::shared_ptr<H5File> f;
+  std::string key;
+  impl(app &c, boost::shared_ptr<H5File> ff, std::string k) : ctx(c), f(ff), key(std::move(k)) {}
+};
+
+scene_reader::scene_reader(app &ctx, const std::string &path) {
+  hu::library_lock lock(ctx, path, "cvc::lod::scene_reader(file)");
+  H5::Exception::dontPrint();
+  _p.reset(new impl(ctx, hu::getH5File(path, false), path));
+}
+scene_reader::scene_reader(app &ctx, const unsigned char *bytes, std::size_t n) {
+  hu::library_lock lock(ctx, "<cvc-lod-blob>", "cvc::lod::scene_reader(blob)");
+  H5::Exception::dontPrint();
+  _p.reset(new impl(ctx, open_blob(bytes, n), "<cvc-lod-blob>"));
+}
+scene_reader::~scene_reader() = default;
+scene_reader::scene_reader(scene_reader &&) noexcept = default;
+scene_reader &scene_reader::operator=(scene_reader &&) noexcept = default;
+
+mesh_pyramid scene_reader::read_mesh_pyramid(const std::string &name) {
+  hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_reader::read_mesh_pyramid");
+  H5::Exception::dontPrint();
+  return read_mesh_from(_p->ctx, *_p->f, name);
+}
+image_pyramid scene_reader::read_image_pyramid(const std::string &name) {
+  hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_reader::read_image_pyramid");
+  H5::Exception::dontPrint();
+  return read_image_from(*_p->f, name);
+}
+std::vector<lod_index_entry> scene_reader::index() {
+  hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_reader::index");
+  H5::Exception::dontPrint();
+  return read_index_from(*_p->f);
+}
+bool scene_reader::has(const std::string &name, const std::string &source_hash) {
   try {
-    std::vector<lod_index_entry> idx = read_lod_index(ctx, h5file);
-    for (const auto &e : idx)
+    for (const auto &e : index())
       if (e.name == name)
         return source_hash.empty() || e.source_hash == source_hash;
   } catch (...) {
   }
   return false;
+}
+
+// ── free functions (file only) ──
+void write_mesh_pyramid(app &ctx, const std::string &h5file, const std::string &name,
+                        const mesh_pyramid &pyr, const std::string &source_hash) {
+  scene_writer(ctx, h5file).write_mesh_pyramid(name, pyr, source_hash);
+}
+mesh_pyramid read_mesh_pyramid(app &ctx, const std::string &h5file, const std::string &name) {
+  return scene_reader(ctx, h5file).read_mesh_pyramid(name);
+}
+void write_image_pyramid(app &ctx, const std::string &h5file, const std::string &name,
+                         const image_pyramid &pyr, const std::string &source_hash) {
+  scene_writer(ctx, h5file).write_image_pyramid(name, pyr, source_hash);
+}
+image_pyramid read_image_pyramid(app &ctx, const std::string &h5file, const std::string &name) {
+  return scene_reader(ctx, h5file).read_image_pyramid(name);
+}
+std::vector<lod_index_entry> read_lod_index(app &ctx, const std::string &h5file) {
+  return scene_reader(ctx, h5file).index();
+}
+bool has_pyramid(app &ctx, const std::string &h5file, const std::string &name,
+                 const std::string &source_hash) {
+  try {
+    return scene_reader(ctx, h5file).has(name, source_hash);
+  } catch (...) {
+    return false;
+  }
 }
 
 } // namespace lod

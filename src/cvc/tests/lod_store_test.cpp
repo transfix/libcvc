@@ -131,3 +131,50 @@ TEST(LodStore, ImagePyramidRoundTripsAndIndex) {
   EXPECT_FALSE(cvc::lod::has_pyramid(ctx, file, "missing", ihash));
   std::remove(file.c_str());
 }
+
+TEST(LodStore, InMemoryBlobRoundTrips) {
+  cvc::app ctx;
+  geometry m = bumpy_grid(ctx, 22);
+  cvc::lod::mesh_pyramid mp = cvc::lod::build_mesh_pyramid(m, {});
+  image src(12, 12, image::pixel_format::RGBA, image::data_type::u8);
+  {
+    unsigned char *d = src.data();
+    for (std::size_t i = 0; i < src.size_bytes(); ++i)
+      d[i] = static_cast<unsigned char>((i * 53) & 0xff);
+  }
+  cvc::lod::image_pyramid ip = cvc::lod::build_image_pyramid(src, {});
+
+  // Bake to a blob ENTIRELY in memory -- no file ever touched.
+  std::vector<unsigned char> blob;
+  {
+    cvc::lod::scene_writer w(ctx);
+    w.write_mesh_pyramid("buildings", mp, cvc::lod::mesh_content_hash(m));
+    w.write_image_pyramid("satellite", ip, cvc::lod::image_content_hash(src));
+    blob = w.to_blob();
+  }
+  ASSERT_GT(blob.size(), 8u);
+  // The blob is a real HDF5 image: it opens with the HDF5 signature.
+  EXPECT_EQ(blob[0], 0x89);
+  EXPECT_EQ(blob[1], 'H');
+  EXPECT_EQ(blob[2], 'D');
+  EXPECT_EQ(blob[3], 'F');
+
+  // Read it back from the blob as if it had been fetched over the network.
+  cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+  cvc::lod::mesh_pyramid rm = r.read_mesh_pyramid("buildings");
+  ASSERT_EQ(rm.rungs.size(), mp.rungs.size());
+  for (std::size_t k = 0; k < mp.rungs.size(); ++k) {
+    EXPECT_EQ(rm.rungs[k].num_tris(), mp.rungs[k].num_tris());
+    EXPECT_EQ(rm.rungs[k].num_points(), mp.rungs[k].num_points());
+    EXPECT_DOUBLE_EQ(rm.world_error_m[k], mp.world_error_m[k]);
+  }
+  cvc::lod::image_pyramid ri = r.read_image_pyramid("satellite");
+  ASSERT_EQ(ri.rungs.size(), ip.rungs.size());
+  for (std::size_t k = 0; k < ip.rungs.size(); ++k) {
+    ASSERT_EQ(ri.rungs[k].size_bytes(), ip.rungs[k].size_bytes());
+    EXPECT_EQ(0, std::memcmp(ri.rungs[k].data(), ip.rungs[k].data(), ip.rungs[k].size_bytes()));
+  }
+  EXPECT_EQ(r.index().size(), 2u);
+  EXPECT_TRUE(r.has("buildings", cvc::lod::mesh_content_hash(m)));
+  EXPECT_FALSE(r.has("buildings", "nope"));
+}
