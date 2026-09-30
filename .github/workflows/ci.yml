@@ -310,10 +310,13 @@ jobs:
             [ -e /tmp/.X11-unix/X99 ] && break
             sleep 0.2
           done
+          # CVC_REQUIRE_RENDER: this job CAN rasterise, so a render test that
+          # finds it cannot (cvcgl_lod_node) fails instead of skipping.
           {
             echo "DISPLAY=:99"
             echo "LIBGL_ALWAYS_SOFTWARE=1"
             echo "GALLIUM_DRIVER=llvmpipe"
+            echo "CVC_REQUIRE_RENDER=1"
           } >> "$GITHUB_ENV"
 
       - name: Configure

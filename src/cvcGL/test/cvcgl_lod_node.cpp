@@ -23,9 +23,10 @@
 //     poses must actually save triangles.
 //
 // Everything above runs headless (a bare vtkRenderer needs no window). The last
-// section renders offscreen -- rung colours on screen, a zero-error switch is
-// pixel-identical, and the shadow-bake hook -- and skips itself when this build
-// cannot rasterise.
+// section renders offscreen -- rung-0 tiles match the merged mesh, rung colours
+// on screen, a zero-error switch is pixel-identical, and the shadow-bake hook.
+// It skips itself when a plain control node cannot be rasterised (never judged
+// by the LOD node under test), unless CVC_REQUIRE_RENDER=1 makes that a failure.
 //
 // NOT assert(): these tests build Release (NDEBUG), where assert() compiles to
 // nothing and a "passing" run would prove nothing.
@@ -43,6 +44,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/lod/select.h>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -645,16 +647,50 @@ void test_feature_on_city(cvc::app &app) {
   CHECK(st.rung_nodes[0] == N && st.drawn_tris == st.full_tris);
   CHECK(props_in(ren) == props);
 
-  // The simplifier's OWN ladders, unmodified: whatever their scale, from far
-  // enough away every tile lands on its coarsest rung and the saving is real.
+  // The simplifier's OWN ladders, unmodified. These poses are DERIVED from the
+  // ladders rather than fixed, so they hold whatever scale the error metric has
+  // and still fail if the real ladder does not reach select(): between every
+  // tile's rung-2 and rung-3 switch radii every tile draws rung 2, and beyond
+  // every rung-3 radius (plus the coarsen hysteresis) rung 3.
+  //
+  // TODO: assert the FIXED poses above on the real ladders as well. They cannot
+  // pass yet: cvc::simplify reports world_error_m as sqrt(max quadric cost),
+  // which on this relief comes to about a fifth of the tile's width at rung 1 --
+  // far above the true deviation -- so rung 1 only becomes affordable ~10 km
+  // out and nothing coarsens at 2.5 km. Once world_error_m is a measured
+  // (Hausdorff) distance, the 2.5 km and 8 km poses should save >= 3x on the
+  // real ladders just as they do on the authored ones.
+  double r2max = 0.0, r3min = std::numeric_limits<double>::infinity(), r3max = 0.0;
+  for (const cvc::lod::mesh_pyramid &pyr : real) {
+    // select_rung makes the ladder monotone with a running max; so does this.
+    const double e2 = std::max(pyr.world_error_m[1], pyr.world_error_m[2]);
+    const double e3 = std::max(e2, pyr.world_error_m[3]);
+    r2max = std::max(r2max, cvc::lod::switch_radius_m(e2, ref));
+    r3min = std::min(r3min, cvc::lod::switch_radius_m(e3, ref));
+    r3max = std::max(r3max, cvc::lod::switch_radius_m(e3, ref));
+  }
+  std::printf("  real ladders: rung 2 affordable from <= %.0f m, rung 3 from %.0f..%.0f m\n", r2max,
+              r3min, r3max);
+  CHECK(r3min > 1.5 * r2max); // the coarsest rung is clearly coarser
+
   SceneGraph sg2(app, "lodcity2");
   for (int t = 0; t < N; ++t)
     sg2.getGraphicsRoot()
         ->addGraphicsChild<LodGraphicsNode>("t" + std::to_string(t))
         ->setPyramid(real[t]);
-  sg2.selectLOD(view_at(300, 300, 1.0e7), &st);
+  // Overhead, geometrically halfway between the radii. A first selection has
+  // no hysteresis.
+  sg2.selectLOD(view_at(300, 300, std::sqrt(r2max * r3min)), &st);
+  CHECK(st.rung_nodes.size() >= 3 && st.rung_nodes[2] == N);
+  CHECK(st.drawn_tris < st.full_tris);
+  // Well beyond every rung-3 radius, widened by the hysteresis.
+  sg2.selectLOD(view_at(300, 300, 2.0 * (1.0 + ref.hysteresis) * r3max), &st);
   CHECK(st.rung_nodes.size() == 4 && st.rung_nodes[3] == N);
   CHECK(st.drawn_tris * 3 <= st.full_tris);
+  // Where the real ladders stand at the fixed 2.5 km pose today (see the TODO).
+  sg2.selectLOD(view_at(300, 300, 2500), &st);
+  std::printf("  real ladders, overhead 2.5 km: %llu of %llu tris\n",
+              (unsigned long long)st.drawn_tris, (unsigned long long)st.full_tris);
 }
 
 // --- offscreen renders ----------------------------------------------------------
@@ -704,8 +740,98 @@ vtkShadowMapBakerPass *find_baker(vtkRenderPass *p) {
   return nullptr;
 }
 
+// Can this build rasterise at all? Asked of a CONTROL -- a plain GeometryNode in
+// a scene of its own -- and never of the LOD node under test: a regression that
+// left every rung dark would otherwise look exactly like "no GL here" and skip
+// the very assertions that exist to catch it.
+bool can_rasterise(cvc::app &app) {
+  SceneGraph sg(app, "lodcontrol");
+  sg.setDiagnosticChromeVisible(false);
+  auto box = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("control");
+  box->setGeometry(unit_box(app));
+  box->setScale(4.0, 4.0, 4.0);
+  flat(*box, 1.0, 1.0, 1.0);
+  SceneRenderer sr(sg, 64, 64, /*offscreen=*/true);
+  sr.setBackground(0.0, 0.0, 0.0);
+  sr.setCamera(6, 5, 12, 0, 0, 0, 0, 1, 0, 40.0, 0.5, 100.0);
+  return classify(sr).lit > 0;
+}
+
+// A scene split into LOD tiles, every one on rung 0, draws the same picture as
+// the one mesh the tiles would otherwise be merged into.
+void test_merged_vs_tiles(cvc::app &app) {
+  std::printf("merged mesh vs rung-0 tiles\n");
+  const int G = 3;
+  const double pitch = 100.0;
+  cvc::lod::pyramid_params pp;
+  pp.max_rungs = 2;
+  pp.preserve_boundary = false;
+
+  cvc::geometry merged(app);
+  std::vector<cvc::lod::mesh_pyramid> tiles;
+  for (int ty = 0; ty < G; ++ty)
+    for (int tx = 0; tx < G; ++tx) {
+      const cvc::geometry tile = city_tile(app, tx * pitch, ty * pitch, pitch, 8);
+      const cvc::geometry::index_t base = merged.points().size();
+      for (const auto &p : tile.const_points())
+        merged.points().push_back(p);
+      for (const auto &t : tile.const_tris())
+        merged.tris().push_back({t[0] + base, t[1] + base, t[2] + base});
+      tiles.push_back(cvc::lod::build_mesh_pyramid(tile, pp));
+    }
+  merged.set_geometry_type(cvc::geometry::SURFACE_TRI);
+
+  auto frame = [](SceneGraph &sg) {
+    SceneRenderer sr(sg, 96, 96, /*offscreen=*/true);
+    sr.setBackground(0.0, 0.0, 0.0);
+    sr.setCamera(150, -150, 350, 150, 150, 6, 0, 0, 1, 40.0, 1.0, 2000.0);
+    return sr.frameRGB();
+  };
+
+  SceneGraph one(app, "lodmerged");
+  one.setDiagnosticChromeVisible(false);
+  auto mesh = one.getGraphicsRoot()->addGraphicsChild<GeometryNode>("merged");
+  mesh->setGeometry(merged);
+  flat(*mesh, 0.9, 0.6, 0.2);
+  const std::vector<unsigned char> a = frame(one);
+
+  SceneGraph split(app, "lodsplit");
+  split.setDiagnosticChromeVisible(false);
+  for (std::size_t t = 0; t < tiles.size(); ++t) {
+    auto lod = split.getGraphicsRoot()->addGraphicsChild<LodGraphicsNode>("t" + std::to_string(t));
+    lod->setRungStyle([](GeometryNode &g) { flat(g, 0.9, 0.6, 0.2); });
+    lod->setPyramid(tiles[t]);
+  }
+  lod_stats st;
+  split.selectLOD(view_at(150, 150, 20), &st);
+  CHECK(st.nodes == G * G && st.rung_nodes[0] == G * G);
+  const std::vector<unsigned char> b = frame(split);
+
+  long lit = 0;
+  int maxDiff = 0;
+  for (std::size_t i = 0; i < a.size() && i < b.size(); ++i) {
+    maxDiff = std::max(maxDiff, std::abs(int(a[i]) - int(b[i])));
+    lit += a[i] > 20 ? 1 : 0;
+  }
+  CHECK(a.size() == b.size() && lit > 0 && maxDiff <= 2);
+}
+
 void test_offscreen_render(cvc::app &app) {
   std::printf("offscreen render\n");
+  if (!can_rasterise(app)) {
+    // CVC_REQUIRE_RENDER=1 (the software-GL CI job sets it) makes this fatal,
+    // so a runner that silently lost its GL driver cannot pass as "skipped".
+    const char *require = std::getenv("CVC_REQUIRE_RENDER");
+    if (require && *require && std::string(require) != "0") {
+      std::printf("  CVC_REQUIRE_RENDER is set, but this build did not rasterise\n");
+      CHECK(false);
+    } else {
+      std::printf("  skipped: this build did not rasterise (the plain control drew nothing)\n");
+    }
+    return;
+  }
+  test_merged_vs_tiles(app);
+
   SceneGraph sg(app, "lodrender");
   sg.setDiagnosticChromeVisible(false);
   auto group = sg.addGraphics("group");
@@ -721,10 +847,6 @@ void test_offscreen_render(cvc::app &app) {
   sr.setCamera(6, 5, 12, 0, 0, 0, 0, 1, 0, 40.0, 0.5, 100.0);
 
   counts c = classify(sr);
-  if (c.lit == 0) {
-    std::printf("  skipped: this build did not rasterise\n");
-    return;
-  }
   // Before any selection rung 0 draws, alone.
   CHECK(c.red > 0 && c.green == 0 && c.blue == 0);
 
