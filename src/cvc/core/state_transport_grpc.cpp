@@ -27,6 +27,11 @@ namespace {
 
 namespace pb = ::cvc::transport::v1;
 
+// Largest gRPC message we accept/send, in bytes. The gRPC default receive cap is ~4 MiB, too small
+// for a large binary message payload (a 1080p RGBA frame is ~8 MiB); match the IPC transport's
+// 64 MiB frame cap so both wire paths agree on the ceiling.
+constexpr int kMaxGrpcMessageBytes = 64 * 1024 * 1024;
+
 pb::MutationOp encode_op(state_mutation_op op) {
   switch (op) {
   case state_mutation_op::set_value:
@@ -353,6 +358,10 @@ void state_transport_grpc::start(const std::string &listen_addr, const std::stri
   } else {
     server_creds = grpc::InsecureServerCredentials();
   }
+  // Raise the message-size limits from the ~4 MiB gRPC default so large binary payloads round-trip
+  // (see kMaxGrpcMessageBytes); the client channel below sets the matching caps.
+  builder.SetMaxReceiveMessageSize(kMaxGrpcMessageBytes);
+  builder.SetMaxSendMessageSize(kMaxGrpcMessageBytes);
   builder.AddListeningPort(listen_addr, server_creds, &bound_port);
   builder.RegisterService(_impl->service.get());
   _impl->server = builder.BuildAndStart();
@@ -403,7 +412,10 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   } else {
     chan_creds = grpc::InsecureChannelCredentials();
   }
-  auto channel = grpc::CreateChannel(target, chan_creds);
+  grpc::ChannelArguments chan_args;
+  chan_args.SetMaxReceiveMessageSize(kMaxGrpcMessageBytes);
+  chan_args.SetMaxSendMessageSize(kMaxGrpcMessageBytes);
+  auto channel = grpc::CreateCustomChannel(target, chan_creds, chan_args);
   auto deadline = std::chrono::system_clock::now() + timeout;
   if (!channel->WaitForConnected(deadline))
     return false;
