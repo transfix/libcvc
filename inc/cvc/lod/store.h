@@ -85,8 +85,11 @@ std::string image_content_hash(const image &img);
 
 // ── writer ────────────────────────────────────────────────────────────────
 // Accumulates pyramids into one scene.cvch5. File-backed: writes land on disk as
-// each call returns (create-or-open, preserving prior assets). In-memory: nothing
-// touches the disk until to_blob() serializes the container to bytes.
+// each call returns (an existing scene is opened, preserving prior assets; a
+// missing one is created). It never truncates: an existing path it cannot open
+// read-write -- not HDF5, damaged, read-only, or open in a live scene_reader --
+// throws rather than being replaced. In-memory: nothing touches the disk until
+// to_blob() serializes the container to bytes.
 class scene_writer {
 public:
   explicit scene_writer(app &ctx);                 // in-memory (core VFD, no file)

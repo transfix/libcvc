@@ -69,6 +69,9 @@ std::string slurp(const std::string &path) {
   std::ifstream in(path.c_str(), std::ios::binary);
   return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
+void spit(const std::string &path, const std::string &bytes) {
+  std::ofstream(path.c_str(), std::ios::binary | std::ios::trunc) << bytes;
+}
 
 // Replaces dataset `ds` of group `group` in `file` with a `rank`-D one of the
 // given extent, writing `data` into it -- or, with data == nullptr, leaving it
@@ -667,4 +670,42 @@ TEST(LodStore, IndexChecksTheErrorLadderLengthBeforeSizingIt) {
   ASSERT_EQ(idx.size(), 1u);
   EXPECT_EQ(idx[0].world_error_m, std::vector<double>{0.25});
   std::remove(file.c_str());
+}
+
+TEST(LodStore, WriterNeverTruncatesAnExistingFile) {
+  cvc::app ctx;
+  const geometry mesh = bumpy_grid(ctx, 6);
+
+  // A mistyped output path naming some other file is refused, not replaced by
+  // an empty scene -- by a writer, and so by a bake.
+  const std::string png = tmp_h5() + ".png";
+  const std::string text = "not an HDF5 file -- a writer must leave it alone\n";
+  spit(png, text);
+  std::string msg = std_error_of([&] { cvc::lod::scene_writer w(ctx, png); });
+  EXPECT_NE(msg.find("will not overwrite"), std::string::npos) << msg;
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::bake_mesh_asset(ctx, png, "m", mesh); }).empty());
+  EXPECT_EQ(slurp(png), text);
+  std::remove(png.c_str());
+
+  // A scene cut short keeps what is left of its assets for recovery.
+  const std::string scene = tmp_h5();
+  std::remove(scene.c_str());
+  for (int tag = 1; tag <= 3; ++tag)
+    cvc::lod::write_mesh_pyramid(ctx, scene, tagged_name(tag), tagged_pyramid(ctx, tag));
+  const std::string whole = slurp(scene);
+  ASSERT_GT(whole.size(), 100u);
+  const std::string cut = whole.substr(0, whole.size() - 100);
+  spit(scene, cut);
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::scene_writer w(ctx, scene); }).empty());
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::bake_mesh_asset(ctx, scene, "m", mesh); }).empty());
+  EXPECT_EQ(slurp(scene), cut);
+
+  // An intact scene is opened and added to, and a missing one is created.
+  spit(scene, whole);
+  EXPECT_TRUE(cvc::lod::bake_mesh_asset(ctx, scene, "m", mesh));
+  EXPECT_EQ(cvc::lod::read_lod_index(ctx, scene).size(), 4u);
+  std::remove(scene.c_str());
+  EXPECT_TRUE(cvc::lod::bake_mesh_asset(ctx, scene, "m", mesh));
+  EXPECT_EQ(cvc::lod::read_lod_index(ctx, scene).size(), 1u);
+  std::remove(scene.c_str());
 }

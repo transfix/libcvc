@@ -31,8 +31,10 @@
 #include <cvc/core/state_blob_store.h>
 #include <cvc/lod/store.h>
 #include <cvc/volume/hdf5_utils.h>
+#include <filesystem>
 #include <memory>
 #include <sstream>
+#include <system_error>
 
 namespace cvc {
 namespace lod {
@@ -349,15 +351,18 @@ herr_t innermost_error(unsigned n, const H5E_error2_t *err, void *out) {
   return 0;
 }
 
-hdf5_exception h5_failure(const char *call, const std::string &file, const H5::Exception &e) {
+hdf5_exception h5_failure(const char *call, const std::string &file, const H5::Exception &e,
+                          const char *hint = nullptr) {
   // The wrapper's text ("H5Fopen failed") says little; the innermost entry of
   // HDF5's error stack ("file signature not found") says why. Any later HDF5
   // call -- a handle closed while unwinding -- clears that stack, so this is
   // best-effort unless called right at the failure.
   std::string cause;
   H5Ewalk2(H5E_DEFAULT, H5E_WALK_UPWARD, innermost_error, &cause);
-  std::string msg =
-      std::string(call) + " '" + file + "': " + e.getFuncName() + ": " + e.getDetailMsg();
+  std::string msg = std::string(call) + " '" + file + "': ";
+  if (hint)
+    msg += std::string(hint) + ": ";
+  msg += e.getFuncName() + ": " + e.getDetailMsg();
   if (!cause.empty())
     msg += " (" + cause + ")";
   return hdf5_exception(msg);
@@ -423,16 +428,25 @@ boost::shared_ptr<H5File> open_blob(const std::string &name, const unsigned char
 boost::shared_ptr<H5File> open_existing(const std::string &path) {
   return boost::make_shared<H5File>(path, H5F_ACC_RDONLY);
 }
-// A writer creates or opens, preserving prior assets. getH5File quietly falls
-// back to read-only when it cannot get write access; say so now rather than
-// fail at the first write with an opaque "H5Gcreate2 failed".
+// A writer opens an existing scene read-write, preserving its assets, and
+// creates one only where nothing exists yet. It never truncates: an existing
+// path it cannot open read-write -- not HDF5 (a mistyped path), damaged (cut
+// short), read-only, or held open by a live scene_reader -- is an error, not
+// something to replace with an empty scene. (hdf5_utils::getH5File would
+// truncate the first two and quietly fall back to read-only for the others.)
 boost::shared_ptr<H5File> open_writable(const std::string &path) {
-  boost::shared_ptr<H5File> f = hu::getH5File(path, false);
-  unsigned intent = 0;
-  if (H5Fget_intent(f->getId(), &intent) < 0 || !(intent & H5F_ACC_RDWR))
-    throw hdf5_exception("lod::scene_writer '" + path +
-                         "': opened read-only (not writable, or a scene_reader has it open)");
-  return f;
+  try {
+    return boost::make_shared<H5File>(path, H5F_ACC_RDWR);
+  } catch (const H5::Exception &e) {
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec) || ec) // unsure counts as present
+      throw h5_failure("lod::scene_writer", path, e,
+                       "will not overwrite a path it cannot open read-write (not an HDF5 scene, "
+                       "damaged, read-only, or a scene_reader has it open)");
+  }
+  // Nothing there: create it. EXCL rather than TRUNC, so a file that appears in
+  // the meantime makes this fail instead of being clobbered.
+  return boost::make_shared<H5File>(path, H5F_ACC_EXCL);
 }
 std::vector<unsigned char> file_image(H5File &f) {
   f.flush(H5F_SCOPE_GLOBAL);
