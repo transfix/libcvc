@@ -134,6 +134,16 @@ std::vector<lod_index_entry> read_lod_index(app &ctx, const std::string &h5file)
 bool has_pyramid(app &ctx, const std::string &h5file, const std::string &name,
                  const std::string &source_hash);
 
+// ── bake ────────────────────────────────────────────────────────────────────
+// Build a mesh's LOD pyramid and write it into `h5file` under `name`, SKIPPING the
+// work when a current pyramid (one whose source_hash matches this mesh) is already
+// present -- unless `force`. `pool` fans the pyramid build over the app workers.
+// Returns true if it (re)baked, false if it skipped an up-to-date pyramid. This is
+// the reusable core of the cvc-lod-bake tool.
+bool bake_mesh_asset(app &ctx, const std::string &h5file, const std::string &name,
+                     const geometry &src, const pyramid_params &params = pyramid_params(),
+                     bool force = false, thread_pool *pool = nullptr);
+
 } // namespace lod
 } // namespace cvc
 

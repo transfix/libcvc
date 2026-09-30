@@ -9,6 +9,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/GridNode.h>
 #include <cvc/gl/LightNode.h>
+#include <cvc/gl/LodGraphicsNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneNode.h>
@@ -1155,6 +1156,17 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   syncShadowState();
   requestRender();
   return true;
+}
+
+int SceneGraph::selectLOD(const cvc::lod::view_params &view) {
+  int n = 0;
+  for (const auto &node : getAllGraphicsOfType<LodGraphicsNode>()) {
+    if (node) {
+      node->select(view);
+      ++n;
+    }
+  }
+  return n;
 }
 
 } // namespace gl
