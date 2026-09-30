@@ -7,15 +7,26 @@
 // the same time (also concurrently on a pool) each keep their own container, and
 // that failures -- corrupt/empty/truncated blobs, missing or non-HDF5 files,
 // tampered pixels -- surface as std::exception without a reader ever creating or
-// truncating a file. HDF5-only (gated in CMake by CVC_USING_HDF5).
+// truncating a file. Then the trust model (store.h): a blob is parsed only once
+// its hash checks out (open_verified), or unauthenticated only on HDF5 >= 1.14.4;
+// and a hostile container -- links out of it, external or virtual storage, hard
+// links or aliased storage that read its bytes many times -- is refused whichever
+// way it is opened. HDF5-only (gated in CMake by CVC_USING_HDF5).
+//
+// The blob tests open their blobs with open_verified, hashing the bytes they
+// just built: that is the path a network client takes, and it parses on every
+// HDF5, so the in-memory machinery is covered even where the unauthenticated
+// constructor is compiled to refuse (HDF5 < 1.14.4, e.g. Ubuntu's 1.10).
 
 #include <H5Cpp.h>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cvc/core/app.h>
+#include <cvc/core/state_blob_store.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/image/image.h>
@@ -23,9 +34,11 @@
 #include <cvc/lod/store.h>
 #include <cvc/volume/hdf5_utils.h>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -126,6 +139,47 @@ std::vector<unsigned char> tagged_blob(cvc::app &ctx, int tag) {
   cvc::lod::scene_writer w(ctx);
   w.write_mesh_pyramid(tagged_name(tag), tagged_pyramid(ctx, tag));
   return w.to_blob();
+}
+
+// A reader on `blob`, authenticated against its own hash -- this test built it.
+cvc::lod::scene_reader open_blob(cvc::app &ctx, const std::vector<unsigned char> &blob) {
+  return cvc::lod::scene_reader::open_verified(ctx, blob.data(), blob.size(),
+                                               cvc::sha256_hex(blob));
+}
+
+std::vector<unsigned char> bytes_of(const std::string &path) {
+  const std::string s = slurp(path);
+  return std::vector<unsigned char>(s.begin(), s.end());
+}
+
+// Runs `fn` with `file` open read-write through the raw HDF5 API, for crafting
+// what the store's writer never would.
+template <class F> void edit_h5(cvc::app &ctx, const std::string &file, F &&fn) {
+  cvc::hdf5_utils::library_lock lock(ctx, file, "lod_store_test");
+  H5::H5File f(file, H5F_ACC_RDWR);
+  fn(f);
+}
+
+// Every way a reader can open `file`: by path, as an authenticated blob, and --
+// where this build's HDF5 allows it -- as an unauthenticated one. The hardening
+// is the reader's own, so a hostile container must be refused by all of them.
+template <class F> void for_each_reader(cvc::app &ctx, const std::string &file, F &&fn) {
+  {
+    SCOPED_TRACE("file reader");
+    cvc::lod::scene_reader r(ctx, file);
+    fn(r);
+  }
+  const std::vector<unsigned char> blob = bytes_of(file);
+  {
+    SCOPED_TRACE("authenticated blob reader");
+    cvc::lod::scene_reader r = open_blob(ctx, blob);
+    fn(r);
+  }
+  if (cvc::lod::scene_reader::unverified_blobs_supported()) {
+    SCOPED_TRACE("unauthenticated blob reader");
+    cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+    fn(r);
+  }
 }
 
 // What `r` holds, as (index names, fingerprint of the one tagged asset).
@@ -269,7 +323,7 @@ TEST(LodStore, InMemoryBlobRoundTrips) {
   EXPECT_EQ(blob[3], 'F');
 
   // Read it back from the blob as if it had been fetched over the network.
-  cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+  cvc::lod::scene_reader r = open_blob(ctx, blob);
   cvc::lod::mesh_pyramid rm = r.read_mesh_pyramid("buildings");
   ASSERT_EQ(rm.rungs.size(), mp.rungs.size());
   for (std::size_t k = 0; k < mp.rungs.size(); ++k) {
@@ -323,11 +377,11 @@ TEST(LodStore, TwoLiveInMemoryWritersKeepTheirOwnContent) {
   ASSERT_FALSE(blob_b.empty());
   EXPECT_NE(blob_a, blob_b);
 
-  cvc::lod::scene_reader ra(ctx, blob_a.data(), blob_a.size());
+  cvc::lod::scene_reader ra = open_blob(ctx, blob_a);
   const auto ca = contents(ra, 1);
   EXPECT_EQ(ca.first, std::vector<std::string>{tagged_name(1)});
   EXPECT_EQ(ca.second, fingerprint(tagged_pyramid(ctx, 1)));
-  cvc::lod::scene_reader rb(ctx, blob_b.data(), blob_b.size());
+  cvc::lod::scene_reader rb = open_blob(ctx, blob_b);
   const auto cb = contents(rb, 2);
   EXPECT_EQ(cb.first, std::vector<std::string>{tagged_name(2)});
   EXPECT_EQ(cb.second, fingerprint(tagged_pyramid(ctx, 2)));
@@ -340,8 +394,8 @@ TEST(LodStore, TwoLiveBlobReadersDoNotAlias) {
 
   // Open B while A is still open, then read both: B must see B's bytes, not the
   // container A already registered.
-  cvc::lod::scene_reader ra(ctx, blob_a.data(), blob_a.size());
-  cvc::lod::scene_reader rb(ctx, blob_b.data(), blob_b.size());
+  cvc::lod::scene_reader ra = open_blob(ctx, blob_a);
+  cvc::lod::scene_reader rb = open_blob(ctx, blob_b);
   const auto cb = contents(rb, 4);
   EXPECT_EQ(cb.first, std::vector<std::string>{tagged_name(4)});
   EXPECT_EQ(cb.second, fingerprint(tagged_pyramid(ctx, 4)));
@@ -353,7 +407,7 @@ TEST(LodStore, TwoLiveBlobReadersDoNotAlias) {
   std::unique_ptr<cvc::lod::scene_reader> rc;
   {
     const std::vector<unsigned char> transient = tagged_blob(ctx, 5);
-    rc.reset(new cvc::lod::scene_reader(ctx, transient.data(), transient.size()));
+    rc.reset(new cvc::lod::scene_reader(open_blob(ctx, transient)));
   }
   EXPECT_EQ(contents(*rc, 5).second, fingerprint(tagged_pyramid(ctx, 5)));
 }
@@ -366,7 +420,7 @@ TEST(LodStore, ConcurrentWritersAndReadersOnAPoolMatchSerial) {
   std::vector<std::vector<double>> serial(n);
   for (int i = 0; i < n; ++i) {
     const std::vector<unsigned char> blob = tagged_blob(ctx, i);
-    cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+    cvc::lod::scene_reader r = open_blob(ctx, blob);
     serial[i] = contents(r, i).second;
     ASSERT_EQ(serial[i], fingerprint(tagged_pyramid(ctx, i))) << "tag " << i;
   }
@@ -377,9 +431,8 @@ TEST(LodStore, ConcurrentWritersAndReadersOnAPoolMatchSerial) {
   std::vector<std::vector<unsigned char>> blobs(n);
   pool.parallel_for(n, [&](int i) { blobs[i] = tagged_blob(ctx, i); });
   std::vector<std::unique_ptr<cvc::lod::scene_reader>> readers(n);
-  pool.parallel_for(n, [&](int i) {
-    readers[i].reset(new cvc::lod::scene_reader(ctx, blobs[i].data(), blobs[i].size()));
-  });
+  pool.parallel_for(
+      n, [&](int i) { readers[i].reset(new cvc::lod::scene_reader(open_blob(ctx, blobs[i]))); });
   std::vector<std::pair<std::vector<std::string>, std::vector<double>>> got(n);
   pool.parallel_for(n, [&](int i) { got[i] = contents(*readers[i], i); });
   pool.parallel_for(n, [&](int i) { readers[i].reset(); });
@@ -420,7 +473,7 @@ TEST(LodStore, MoveAssignReplacesTheContainer) {
   a = std::move(b); // a's old container is closed; a now owns b's
   const std::vector<unsigned char> blob = a.to_blob();
 
-  cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+  cvc::lod::scene_reader r = open_blob(ctx, blob);
   cvc::lod::scene_reader moved(std::move(r));
   const auto c = contents(moved, 6);
   EXPECT_EQ(c.first, std::vector<std::string>{tagged_name(6)});
@@ -435,23 +488,29 @@ TEST(LodStore, CorruptBlobThrowsStdException) {
   for (std::size_t i = 0; i < garbage.size(); ++i)
     garbage[i] = static_cast<unsigned char>((i * 131 + 7) & 0xff);
   EXPECT_FALSE(std_error_of([&] {
-                 cvc::lod::scene_reader r(ctx, garbage.data(), garbage.size());
+                 cvc::lod::scene_reader r = open_blob(ctx, garbage);
                  r.index();
                }).empty());
 
-  EXPECT_FALSE(std_error_of([&] { cvc::lod::scene_reader r(ctx, nullptr, 0); }).empty());
+  const std::string none = std_error_of(
+      [&] { cvc::lod::scene_reader::open_verified(ctx, nullptr, 0, cvc::sha256_hex(nullptr, 0)); });
+  EXPECT_NE(none.find("empty blob"), std::string::npos) << none;
 
   // A real image cut short: the superblock promises bytes that are not there.
+  // The message names the in-memory container -- by a counter and a random
+  // nonce, never by an address that would leak the process's layout.
   std::vector<unsigned char> cut = tagged_blob(ctx, 7);
   cut.resize(cut.size() / 2);
-  EXPECT_FALSE(std_error_of([&] {
-                 cvc::lod::scene_reader r(ctx, cut.data(), cut.size());
-                 r.read_mesh_pyramid(tagged_name(7));
-               }).empty());
+  const std::string msg_cut = std_error_of([&] {
+    cvc::lod::scene_reader r = open_blob(ctx, cut);
+    r.read_mesh_pyramid(tagged_name(7));
+  });
+  EXPECT_NE(msg_cut.find("'cvc-lod-blob-"), std::string::npos) << msg_cut;
+  EXPECT_EQ(msg_cut.find("0x"), std::string::npos) << msg_cut;
 
   // An in-range lookup failure is reported the same way.
   const std::vector<unsigned char> blob = tagged_blob(ctx, 8);
-  cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+  cvc::lod::scene_reader r = open_blob(ctx, blob);
   EXPECT_FALSE(std_error_of([&] { r.read_mesh_pyramid("absent"); }).empty());
   EXPECT_FALSE(std_error_of([&] { r.read_image_pyramid(tagged_name(8)); }).empty());
 
@@ -462,7 +521,7 @@ TEST(LodStore, CorruptBlobThrowsStdException) {
     cvc::lod::scene_writer w(ctx);
     empty = w.to_blob();
   }
-  cvc::lod::scene_reader re(ctx, empty.data(), empty.size());
+  cvc::lod::scene_reader re = open_blob(ctx, empty);
   EXPECT_TRUE(re.index().empty());
   EXPECT_FALSE(re.has("absent"));
   const std::string msg = std_error_of([&] { re.read_mesh_pyramid("absent"); });
@@ -559,6 +618,11 @@ TEST(LodStore, ImagePixelsThatDisagreeWithTheirSizeAreRejected) {
   EXPECT_FALSE(std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); }).empty());
   set_rung0("format", 42);
   EXPECT_FALSE(std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); }).empty());
+  set_rung0("format", int(image::pixel_format::RGBA));
+  // A rung with no pixels at all.
+  edit_h5(ctx, file, [](H5::H5File &f) { f.openGroup("/cvc/images/tex/lod/0").unlink("pixels"); });
+  const std::string msg = std_error_of([&] { cvc::lod::read_image_pyramid(ctx, file, "tex"); });
+  EXPECT_NE(msg.find("no dataset 'pixels'"), std::string::npos) << msg;
   std::remove(file.c_str());
 }
 
@@ -708,4 +772,373 @@ TEST(LodStore, WriterNeverTruncatesAnExistingFile) {
   EXPECT_TRUE(cvc::lod::bake_mesh_asset(ctx, scene, "m", mesh));
   EXPECT_EQ(cvc::lod::read_lod_index(ctx, scene).size(), 1u);
   std::remove(scene.c_str());
+}
+
+// ── trust model: authentication, the HDF5 version gate, hostile containers ──
+
+TEST(LodStore, OpenVerifiedChecksTheHashBeforeParsing) {
+  cvc::app ctx;
+  const std::vector<unsigned char> blob = tagged_blob(ctx, 10);
+  const std::string hash = cvc::sha256_hex(blob);
+
+  // The right hash, in either case, opens the blob.
+  {
+    cvc::lod::scene_reader r = open_blob(ctx, blob);
+    EXPECT_EQ(contents(r, 10).second, fingerprint(tagged_pyramid(ctx, 10)));
+  }
+  std::string upper = hash;
+  for (char &ch : upper)
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  {
+    cvc::lod::scene_reader r =
+        cvc::lod::scene_reader::open_verified(ctx, blob.data(), blob.size(), upper);
+    EXPECT_EQ(r.index().size(), 1u);
+  }
+
+  // Anything else is refused with std::runtime_error -- not the
+  // cvc::hdf5_exception a parse failure would raise, since HDF5 never sees
+  // the bytes.
+  auto refused = [&](const std::vector<unsigned char> &bytes, const std::string &expected) {
+    try {
+      cvc::lod::scene_reader::open_verified(ctx, bytes.data(), bytes.size(), expected);
+    } catch (const std::runtime_error &e) {
+      return std::string(e.what());
+    } catch (...) {
+      ADD_FAILURE() << "threw something other than std::runtime_error";
+      return std::string();
+    }
+    ADD_FAILURE() << "did not throw";
+    return std::string();
+  };
+  std::string wrong = hash;
+  wrong[0] = wrong[0] == '0' ? '1' : '0';
+  std::string msg = refused(blob, wrong);
+  EXPECT_NE(msg.find("refusing to parse"), std::string::npos) << msg;
+
+  // A blob altered in transit fails against the catalog's hash of the original.
+  std::vector<unsigned char> tampered = blob;
+  tampered[tampered.size() / 2] ^= 0x01;
+  msg = refused(tampered, hash);
+  EXPECT_NE(msg.find("refusing to parse"), std::string::npos) << msg;
+
+  // So does garbage, which HDF5 would otherwise be handed.
+  std::vector<unsigned char> garbage(4096, 0xab);
+  EXPECT_FALSE(refused(garbage, hash).empty());
+
+  // An expected value that is not a SHA-256 digest is itself an error.
+  for (const std::string &bad :
+       {std::string(), std::string("abc123"), hash.substr(1), hash + "0", std::string(64, 'g')}) {
+    msg = refused(blob, bad);
+    EXPECT_NE(msg.find("not a SHA-256 digest"), std::string::npos) << bad << ": " << msg;
+  }
+}
+
+TEST(LodStore, UnverifiedBlobReaderFollowsTheHdf5VersionGate) {
+  cvc::app ctx;
+  const std::vector<unsigned char> blob = tagged_blob(ctx, 11);
+  // The gate is the HDF5 this test (and so libcvc) is compiled against.
+  EXPECT_EQ(cvc::lod::scene_reader::unverified_blobs_supported(), bool(H5_VERSION_GE(1, 14, 4)));
+  if (cvc::lod::scene_reader::unverified_blobs_supported()) {
+    // HDF5 >= 1.14.4 (e.g. the cvcpkg prefix): unauthenticated bytes parse,
+    // with every hardening check in place (the tests below run this way too).
+    cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+    EXPECT_EQ(contents(r, 11).second, fingerprint(tagged_pyramid(ctx, 11)));
+  } else {
+    // Older HDF5 (e.g. Ubuntu's 1.10): refused before HDF5 sees a byte, with a
+    // std::runtime_error that says what is needed and what to do instead.
+    try {
+      cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+      ADD_FAILURE() << "an unauthenticated blob was parsed by HDF5 < 1.14.4";
+    } catch (const std::runtime_error &e) {
+      const std::string msg = e.what();
+      EXPECT_NE(msg.find("HDF5 >= 1.14.4"), std::string::npos) << msg;
+      EXPECT_NE(msg.find("open_verified"), std::string::npos) << msg;
+    }
+  }
+  // Either way the same bytes, authenticated, parse.
+  cvc::lod::scene_reader r = open_blob(ctx, blob);
+  EXPECT_EQ(contents(r, 11).second, fingerprint(tagged_pyramid(ctx, 11)));
+}
+
+TEST(LodStore, LinksOutOfTheContainerAreRefused) {
+  cvc::app ctx;
+  // Another scene on this machine, which a container must not be able to reach.
+  const std::string other = tmp_h5() + ".other";
+  std::remove(other.c_str());
+  cvc::lod::write_mesh_pyramid(ctx, other, "m", tagged_pyramid(ctx, 1));
+
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+  cvc::lod::write_mesh_pyramid(ctx, file, "own", tagged_pyramid(ctx, 2));
+  edit_h5(ctx, file, [&](H5::H5File &f) {
+    ASSERT_GE(H5Lcreate_external(other.c_str(), "/cvc/geometry/m", f.getId(), "/cvc/geometry/ext",
+                                 H5P_DEFAULT, H5P_DEFAULT),
+              0);
+    ASSERT_GE(H5Lcreate_soft("/cvc/geometry/own", f.getId(), "/cvc/geometry/alias", H5P_DEFAULT,
+                             H5P_DEFAULT),
+              0);
+    // A soft link higher up the path: /cvc/images -> /cvc/geometry.
+    ASSERT_GE(H5Lcreate_soft("/cvc/geometry", f.getId(), "/cvc/images", H5P_DEFAULT, H5P_DEFAULT),
+              0);
+  });
+
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    std::string msg = std_error_of([&] { r.read_mesh_pyramid("ext"); });
+    EXPECT_NE(msg.find("'ext' is an external link"), std::string::npos) << msg;
+    msg = std_error_of([&] { r.read_mesh_pyramid("alias"); });
+    EXPECT_NE(msg.find("'alias' is a soft link"), std::string::npos) << msg;
+    msg = std_error_of([&] { r.read_image_pyramid("own"); });
+    EXPECT_NE(msg.find("'images' is a soft link"), std::string::npos) << msg;
+    // The index walks every name, so it refuses the container outright ...
+    EXPECT_FALSE(std_error_of([&] { r.index(); }).empty());
+    EXPECT_FALSE(r.has("own"));
+    // ... while an asset reached only through hard links still reads.
+    EXPECT_EQ(fingerprint(r.read_mesh_pyramid("own")), fingerprint(tagged_pyramid(ctx, 2)));
+    // A path component that is no link name at all is refused, not resolved.
+    EXPECT_FALSE(std_error_of([&] { r.read_mesh_pyramid("."); }).empty());
+  });
+  EXPECT_FALSE(cvc::lod::has_pyramid(ctx, file, "own", ""));
+  std::remove(file.c_str());
+  std::remove(other.c_str());
+}
+
+TEST(LodStore, DataOutsideTheContainerIsRefused) {
+  cvc::app ctx;
+  image src(16, 16, image::pixel_format::RGBA, image::data_type::u8);
+  const cvc::lod::image_pyramid pyr = cvc::lod::build_image_pyramid(src, {});
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+  const std::string rung0 = "/cvc/images/tex/lod/0";
+
+  // Some other file's bytes, which must never come back as pixels.
+  const std::string local = tmp_h5() + ".local";
+  const std::string secret = "synthetic-local-bytes-0123456789";
+  spit(local, secret);
+  const hsize_t dims[3] = {1, hsize_t(secret.size()), 1};
+  auto rebuild = [&](const std::function<void(H5::Group &)> &make_pixels) {
+    std::remove(file.c_str());
+    cvc::lod::write_image_pyramid(ctx, file, "tex", pyr);
+    edit_h5(ctx, file, [&](H5::H5File &f) {
+      H5::Group g = f.openGroup(rung0);
+      g.unlink("pixels");
+      make_pixels(g);
+      cvc::hdf5_utils::setAttribute<int>(g, "w", int(secret.size()));
+      cvc::hdf5_utils::setAttribute<int>(g, "h", 1);
+      cvc::hdf5_utils::setAttribute<int>(g, "format", int(image::pixel_format::GRAY));
+    });
+  };
+  auto refused_with = [&](const char *why) {
+    for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+      const std::string msg = std_error_of([&] { r.read_image_pyramid("tex"); });
+      EXPECT_NE(msg.find(why), std::string::npos) << msg;
+      EXPECT_EQ(msg.find(secret), std::string::npos) << msg;
+    });
+  };
+
+  // External raw storage: the dataset's bytes ARE the local file.
+  rebuild([&](H5::Group &g) {
+    H5::DSetCreatPropList dcpl;
+    dcpl.setExternal(local.c_str(), 0, hsize_t(secret.size()));
+    g.createDataSet("pixels", H5::PredType::NATIVE_UINT8, H5::DataSpace(3, dims), dcpl);
+  });
+  refused_with("keeps its data in an external file");
+
+  // A virtual dataset mapping another file's dataset.
+  rebuild([&](H5::Group &g) {
+    H5::DataSpace vs(3, dims);
+    H5::DSetCreatPropList dcpl;
+    ASSERT_GE(H5Pset_virtual(dcpl.getId(), vs.getId(), local.c_str(), "/pixels", vs.getId()), 0);
+    g.createDataSet("pixels", H5::PredType::NATIVE_UINT8, vs, dcpl);
+  });
+  refused_with("chunked or virtual");
+
+  // Chunked storage, which the store never writes.
+  rebuild([&](H5::Group &g) {
+    H5::DSetCreatPropList dcpl;
+    dcpl.setChunk(3, dims);
+    const std::vector<unsigned char> px(secret.begin(), secret.end());
+    g.createDataSet("pixels", H5::PredType::NATIVE_UINT8, H5::DataSpace(3, dims), dcpl)
+        .write(px.data(), H5::PredType::NATIVE_UINT8);
+  });
+  refused_with("chunked or virtual");
+
+  // The same bytes stored contiguously in the container read back as pixels.
+  rebuild([&](H5::Group &g) {
+    const std::vector<unsigned char> px(secret.begin(), secret.end());
+    g.createDataSet("pixels", H5::PredType::NATIVE_UINT8, H5::DataSpace(3, dims))
+        .write(px.data(), H5::PredType::NATIVE_UINT8);
+  });
+  const cvc::lod::image_pyramid rd = cvc::lod::read_image_pyramid(ctx, file, "tex");
+  ASSERT_EQ(rd.rungs[0].size_bytes(), secret.size());
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(rd.rungs[0].data()), secret.size()), secret);
+  std::remove(file.c_str());
+  std::remove(local.c_str());
+}
+
+TEST(LodStore, ObjectsLinkedUnderASecondNameAreRefused) {
+  cvc::app ctx;
+  const std::string file = tmp_h5();
+  const std::string m = "/cvc/geometry/m";
+  auto fresh = [&] {
+    std::remove(file.c_str());
+    cvc::lod::write_mesh_pyramid(ctx, file, "m", tagged_pyramid(ctx, 3));
+  };
+  auto hard_link = [&](H5::H5File &f, const std::string &target, const std::string &link) {
+    ASSERT_GE(H5Lcreate_hard(f.getId(), target.c_str(), f.getId(), link.c_str(), H5P_DEFAULT,
+                             H5P_DEFAULT),
+              0)
+        << link;
+  };
+  auto mesh_error = [&](cvc::lod::scene_reader &r) {
+    return std_error_of([&] { r.read_mesh_pyramid("m"); });
+  };
+  const char *twice = "linked under a second name";
+
+  // nrungs = N with lod/1 .. lod/N-1 all hard links to lod/0: a container
+  // posing as N copies of its one rung.
+  fresh();
+  const int n = 8;
+  edit_h5(ctx, file, [&](H5::H5File &f) {
+    for (int k = 1; k < n; ++k)
+      hard_link(f, m + "/lod/0", m + "/lod/" + std::to_string(k));
+    H5::Group ag = f.openGroup(m);
+    cvc::hdf5_utils::setAttribute<int>(ag, "nrungs", n);
+  });
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    const std::string msg = mesh_error(r);
+    EXPECT_NE(msg.find(twice), std::string::npos) << msg;
+  });
+
+  // One dataset under two names in a rung (colors -> points).
+  fresh();
+  edit_h5(ctx, file,
+          [&](H5::H5File &f) { hard_link(f, m + "/lod/0/points", m + "/lod/0/colors"); });
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    const std::string msg = mesh_error(r);
+    EXPECT_NE(msg.find(twice), std::string::npos) << msg;
+  });
+
+  // An asset, or a whole kind group, listed twice in the index.
+  fresh();
+  edit_h5(ctx, file, [&](H5::H5File &f) { hard_link(f, m, "/cvc/geometry/twin"); });
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    const std::string msg = std_error_of([&] { r.index(); });
+    EXPECT_NE(msg.find(twice), std::string::npos) << msg;
+  });
+  fresh();
+  edit_h5(ctx, file, [&](H5::H5File &f) { hard_link(f, "/cvc/geometry", "/cvc/images"); });
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    const std::string msg = std_error_of([&] { r.index(); });
+    EXPECT_NE(msg.find(twice), std::string::npos) << msg;
+  });
+
+  // nrungs may not exceed the links in the lod group.
+  fresh();
+  set_int_attr(ctx, file, m, "nrungs", 5);
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    const std::string msg = mesh_error(r);
+    EXPECT_NE(msg.find("claims 5 rungs but its lod group holds 1"), std::string::npos) << msg;
+  });
+  // ... and enough links is not enough: they must be the rungs 0 .. nrungs-1.
+  edit_h5(ctx, file, [&](H5::H5File &f) { f.createGroup(m + "/lod/x"); });
+  set_int_attr(ctx, file, m, "nrungs", 2);
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    const std::string msg = mesh_error(r);
+    EXPECT_NE(msg.find("no group '1'"), std::string::npos) << msg;
+  });
+
+  // A dataset where a rung group belongs is refused too.
+  fresh();
+  edit_h5(ctx, file, [&](H5::H5File &f) {
+    f.unlink(m + "/lod/0");
+    const hsize_t one[2] = {1, 3};
+    f.createDataSet(m + "/lod/0", H5::PredType::NATIVE_DOUBLE, H5::DataSpace(2, one));
+  });
+  for_each_reader(ctx, file,
+                  [&](cvc::lod::scene_reader &r) { EXPECT_FALSE(mesh_error(r).empty()); });
+
+  // Untouched, the same pyramid reads back whole every way.
+  fresh();
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    EXPECT_EQ(fingerprint(r.read_mesh_pyramid("m")), fingerprint(tagged_pyramid(ctx, 3)));
+    EXPECT_EQ(r.index().size(), 1u);
+  });
+  std::remove(file.c_str());
+}
+
+TEST(LodStore, OneByteBudgetPerCallRefusesBytesReadMoreThanOnce) {
+  cvc::app ctx;
+  const std::string file = tmp_h5();
+  std::remove(file.c_str());
+  const std::string m = "/cvc/geometry/m";
+
+  // Rung 0 stores `bytes` of points -- most of the file. Rungs 1..extra are
+  // distinct groups and datasets of the same extent that store nothing; the
+  // file is then patched so each one's storage address is rung 0's. Every
+  // dataset is then its own object, stored within the file -- the per-dataset
+  // and per-object checks pass -- but one read would decode rung 0's bytes
+  // extra+1 times: a container many times smaller than what it decodes to.
+  const hsize_t nv = 4096, bytes = nv * 3 * sizeof(double);
+  const int extra = 4;
+  {
+    geometry g(ctx);
+    for (hsize_t i = 0; i < nv; ++i)
+      g.points().push_back({double(i), 0.5 * double(i), -double(i)});
+    cvc::lod::mesh_pyramid pyr;
+    pyr.rungs.push_back(g);
+    pyr.world_error_m.push_back(0.0);
+    cvc::lod::write_mesh_pyramid(ctx, file, "m", pyr);
+  }
+  haddr_t rung0 = HADDR_UNDEF;
+  edit_h5(ctx, file, [&](H5::H5File &f) {
+    const hsize_t dims[2] = {nv, 3};
+    H5::Group lod = f.openGroup(m + "/lod");
+    for (int k = 1; k <= extra; ++k) {
+      H5::Group rg = lod.createGroup(std::to_string(k));
+      rg.createDataSet("points", H5::PredType::NATIVE_DOUBLE, H5::DataSpace(2, dims));
+      cvc::hdf5_utils::setAttribute<double>(rg, "world_error_m", 0.0);
+    }
+    H5::Group ag = f.openGroup(m);
+    cvc::hdf5_utils::setAttribute<int>(ag, "nrungs", extra + 1);
+    rung0 = H5Dget_offset(f.openDataSet(m + "/lod/0/points").getId());
+  });
+  ASSERT_NE(rung0, HADDR_UNDEF);
+
+  // Unpatched, the empty rungs are refused one dataset at a time.
+  std::string msg = std_error_of([&] { cvc::lod::read_mesh_pyramid(ctx, file, "m"); });
+  EXPECT_NE(msg.find("declares more data than the file stores"), std::string::npos) << msg;
+
+  // Patch: a contiguous layout message (version 3, class 1) is followed by the
+  // storage address -- undefined (all ones) while nothing is stored -- and the
+  // storage size, both little-endian in the HDF5 format on every platform.
+  auto le64 = [](std::uint64_t v) {
+    std::string s(8, '\0');
+    for (int b = 0; b < 8; ++b)
+      s[b] = static_cast<char>((v >> (8 * b)) & 0xff);
+    return s;
+  };
+  std::string raw = slurp(file);
+  const std::string unstored = std::string("\x03\x01", 2) + std::string(8, '\xff') + le64(bytes);
+  int patched = 0;
+  for (std::size_t at = raw.find(unstored); at != std::string::npos;
+       at = raw.find(unstored, at + 1), ++patched)
+    raw.replace(at + 2, 8, le64(rung0));
+  ASSERT_EQ(patched, extra) << "the layout messages are not encoded as this test expects";
+  spit(file, raw);
+  ASSERT_GT((extra + 1) * bytes, raw.size()); // more than the container holds
+
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    msg = std_error_of([&] { r.read_mesh_pyramid("m"); });
+    EXPECT_NE(msg.find("takes this call past the bytes the container holds"), std::string::npos)
+        << msg;
+  });
+
+  // With only rung 0 the budget is not in the way, and a later call gets a
+  // budget of its own.
+  set_int_attr(ctx, file, m, "nrungs", 1);
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    for (int call = 0; call < 3; ++call)
+      EXPECT_EQ(r.read_mesh_pyramid("m").rungs[0].num_points(), nv);
+  });
+  std::remove(file.c_str());
 }
