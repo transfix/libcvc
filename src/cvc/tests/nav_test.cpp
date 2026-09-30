@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cvc/core/thread_pool.h>
+#include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/grid_math.h>
 #include <cvc/nav/drive.h>
@@ -24,6 +25,7 @@
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -318,6 +320,71 @@ TEST(NavEdtExact, EmptyGridIsEmpty) {
   EXPECT_TRUE(edt2_squared(nullptr, 5, 0).empty());
   const sdf_field f = build_sdf(nullptr, 0, 0, 0.0, 0.0, 1.0, 1.0, 1.0);
   EXPECT_TRUE(f.phi.empty() && f.normal_x.empty() && f.normal_y.empty());
+}
+
+// to_occupancy reuses the previous cell's decision when the log-odds bits repeat
+// (belief planes are long runs of the saturated prior). The raster must equal the
+// plain per-cell float32 sigmoid + threshold for every input, including values
+// one ulp either side of both thresholds, signed zeros, infinities and NaN.
+TEST(NavBeliefOccupancy, ToOccupancyMatchesPerCellReference) {
+  auto ref = [](const std::vector<float> &lo, unknown_policy pol, double p_thresh, double band) {
+    std::vector<std::uint8_t> out(lo.size());
+    for (std::size_t i = 0; i < lo.size(); ++i) {
+      const float p = 1.0f / (1.0f + std::exp(-lo[i]));
+      out[i] = pol == unknown_policy::optimistic
+                   ? ((static_cast<double>(p) > std::max(p_thresh, 0.5 + band)) ? 1 : 0)
+                   : ((static_cast<double>(p) < std::min(1.0 - p_thresh, 0.5 - band)) ? 0 : 1);
+    }
+    return out;
+  };
+  // Special values plus a ladder of ulps around each policy's log-odds threshold
+  // (logit(0.65) and logit(0.35) for the default p_thresh/band) and around 0.
+  std::vector<float> specials = {0.0f,
+                                 -0.0f,
+                                 8.0f,
+                                 -8.0f,
+                                 std::numeric_limits<float>::infinity(),
+                                 -std::numeric_limits<float>::infinity(),
+                                 std::numeric_limits<float>::quiet_NaN(),
+                                 std::numeric_limits<float>::denorm_min(),
+                                 -std::numeric_limits<float>::denorm_min()};
+  for (float c : {0.6190392f, -0.6190392f, 0.0f}) {
+    float up = c, dn = c;
+    for (int k = 0; k < 40; ++k) {
+      up = std::nextafter(up, 1.0f);
+      dn = std::nextafter(dn, -1.0f);
+      specials.push_back(up);
+      specials.push_back(dn);
+    }
+  }
+  const int R = 23, C = 29;
+  std::vector<float> lo((std::size_t)R * C);
+  edt_ref::Rng g{777u};
+  std::size_t i = 0;
+  while (i < lo.size()) { // runs of 1..9 repeats of a random special, like a belief plane
+    const float v = specials[g.next() % specials.size()];
+    for (int run = 1 + (int)(g.next() % 9u); run > 0 && i < lo.size(); --run)
+      lo[i++] = v;
+  }
+  lo[0] = std::numeric_limits<float>::quiet_NaN(); // a NaN first cell seeds the run cache
+  for (auto pol : {unknown_policy::optimistic, unknown_policy::pessimistic})
+    for (double pt : {0.5, 0.7})
+      for (double band : {0.15, 0.0}) {
+        std::vector<std::uint8_t> got(lo.size(), 7);
+        to_occupancy(lo.data(), R, C, pol, pt, band, got.data());
+        EXPECT_EQ(got, ref(lo, pol, pt, band)) << (int)pol << " " << pt << " " << band;
+        // composite_occupancy = the same raster OR the live dynamic layer.
+        std::vector<double> dyn(lo.size(), -std::numeric_limits<double>::infinity());
+        dyn[5] = 1.0;  // live at t=2 with ttl 4
+        dyn[40] = -9.; // expired
+        std::vector<std::uint8_t> comp(lo.size(), 7);
+        composite_occupancy(lo.data(), R, C, pol, pt, band, dyn.data(), 2.0, 4.0, comp.data());
+        std::vector<std::uint8_t> want = ref(lo, pol, pt, band);
+        want[5] = 1;
+        EXPECT_EQ(comp, want);
+      }
+  std::vector<std::uint8_t> none;
+  to_occupancy(lo.data(), 0, 0, unknown_policy::optimistic, 0.5, 0.15, none.data()); // no-op
 }
 
 // ─── build_sdf ──────────────────────────────────────────────────────────────
