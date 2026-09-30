@@ -4,7 +4,9 @@
 // and a verbatim rung 0; its single progressive pass reproduces an independent
 // cvc::simplify per rung bit-for-bit; its error is metric (a 10x mesh has a 10x
 // ladder); a flat-shaded (split-face) mesh coarsens like the welded sheet unless
-// welding is turned off; a rung the collapse cannot reach is left out, not
+// welding is turned off; a planar-projected texture stays exactly on its
+// positions, with no orphaned vertices, in every rung of a flat-shaded sheet
+// and a triangle soup; a rung the collapse cannot reach is left out, not
 // repeated; pooled == serial; a volume ladder that halves each axis with a
 // growing voxel-size error; and an image mip ladder whose box filter actually
 // area-averages (a 2x2 checker becomes mid-grey) rather than point-samples.
@@ -73,6 +75,27 @@ geometry flat_shaded(const geometry &g) {
   }
   s.set_geometry_type(geometry::SURFACE_TRI);
   return s;
+}
+
+// `g` as a triangle soup: every triangle owns copies of its vertices.
+geometry soup(const geometry &g) {
+  geometry s(g.ctx());
+  for (const auto &t : g.const_tris()) {
+    const std::uint64_t o = s.points().size();
+    for (int k = 0; k < 3; ++k)
+      s.points().push_back(g.const_points()[t[k]]);
+    s.tris().push_back({o, o + 1, o + 2});
+  }
+  s.set_geometry_type(geometry::SURFACE_TRI);
+  return s;
+}
+
+// uv = (x, y) of each position: a planar-projected texture.
+geometry with_planar_uv(geometry g) {
+  g.uvs().clear();
+  for (const auto &p : g.const_points())
+    g.uvs().push_back({p[0], p[1]});
+  return g;
 }
 
 // A ladder's error column must be monotone non-decreasing and start at 0.
@@ -162,6 +185,41 @@ TEST(LodPyramid, MeshLadderCoarsensSplitFaces) {
   const cvc::lod::mesh_pyramid torn = cvc::lod::build_mesh_pyramid(src, pp);
   ASSERT_GE(torn.rungs.size(), 2u);
   EXPECT_GT(torn.world_error_m[1], welded.world_error_m[1]);
+}
+
+// Every rung of a flat-shaded sheet and of a triangle soup, both carrying a
+// planar-projected texture (uv = xy, continuous across every split), keeps each
+// corner's uv exactly on its position -- no uv is re-attached to another
+// position, so no rung shears the texture -- and holds only vertices its
+// triangles use.
+TEST(LodPyramid, MeshLadderKeepsPlanarUvOnItsPositions) {
+  cvc::app ctx;
+  const geometry sheet = bumpy_grid(ctx, 40);
+  for (int kind = 0; kind < 2; ++kind) {
+    const geometry src = with_planar_uv(kind == 0 ? flat_shaded(sheet) : soup(sheet));
+    cvc::lod::pyramid_params pp;
+    pp.max_rungs = 4;
+    const cvc::lod::mesh_pyramid pyr = cvc::lod::build_mesh_pyramid(src, pp, &ctx.computePool());
+    ASSERT_EQ(pyr.rungs.size(), 4u) << (kind == 0 ? "flat-shaded" : "soup"); // targets 1065 .. 130
+    for (std::size_t k = 0; k < pyr.rungs.size(); ++k) {
+      SCOPED_TRACE(testing::Message() << (kind == 0 ? "flat-shaded" : "soup") << " rung " << k);
+      const geometry &r = pyr.rungs[k];
+      ASSERT_EQ(r.const_uvs().size(), r.num_points());
+      std::vector<char> used(r.num_points(), 0);
+      int sheared = 0;
+      for (const auto &t : r.const_tris())
+        for (int c = 0; c < 3; ++c) {
+          used[t[c]] = 1;
+          const auto &p = r.const_points()[t[c]];
+          const auto &uv = r.const_uvs()[t[c]];
+          sheared += uv[0] != p[0] || uv[1] != p[1] ? 1 : 0;
+        }
+      EXPECT_EQ(sheared, 0);
+      EXPECT_EQ(std::count(used.begin(), used.end(), 0), 0) << "points no triangle uses";
+      if (k > 0)
+        EXPECT_LT(r.num_tris(), pyr.rungs[k - 1].num_tris());
+    }
+  }
 }
 
 // A rung whose target the collapse cannot reach (every remaining collapse is
