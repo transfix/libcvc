@@ -3,14 +3,17 @@
 // It sits in front of the plain handler's transport + policy (cvc::net + uri_http_detail.h) and
 // adds a state-tree cache under `sys.net.http_cache.entries.<key>`:
 //   - key            = cvc::sha256_hex(normalized URL) — a clean 64-hex path segment.
-//   - body           = the entry node's data() channel (a raw std::string blob; state_exec reads it
-//                      back as `bytes`, and it serves via state://…?data — the precursor bridge).
-//   - metadata       = child value nodes (status/etag/last_modified/content_type/effective_url/
-//                      fetched_at/freshness_ttl) — replication-light strings.
+//   - entry          = ONE opaque blob on the entry node's data(): a version byte + 8
+//   length-prefixed
+//                      fields (status/etag/last_modified/content_type/effective_url/fetched_at/
+//                      freshness_ttl/body). Packing everything into a single value makes a
+//                      read/write one atomic node op (no torn multi-node entry) — see the
+//                      CONCURRENCY note.
 //   - freshness      = SOFT: now < fetched_at + freshness_ttl → serve with NO network; else a
 //                      conditional GET revalidates (304 bump / 200 replace).
 //   - retention      = HARD: the node's expireAt (>= freshness) + sweepExpired() (swept on access)
-//                      evicts and frees the body blob — one mechanism, the state tree's own expiry.
+//                      evicts and frees the entry blob — one mechanism, the state tree's own
+//                      expiry.
 //   - single-flight  = concurrent requests for one URL coalesce to a single transfer.
 //
 // CONCURRENCY: each entry is stored as ONE opaque blob on its node's data() (never as separate
@@ -350,11 +353,15 @@ void write_entry(cvc::state &entries, const std::string &key, long status, const
                  const std::string &last_modified, const std::string &content_type,
                  const std::string &effective_url, const std::string &body,
                  const pt::ptime &fetched_at, long freshness_ttl) {
-  cvc::state &e = entries(key); // create-or-get the entry node
-  e.data(boost::any(encode_entry(status, etag, last_modified, content_type, effective_url,
-                                 pt::to_iso_string(fetched_at), freshness_ttl, body)));
+  // sharedChild PINS the entry node (create-or-get), so a concurrent evict/sweepExpired (e.g. a
+  // store invalidation of the same key) can only unlink it, never free it under the data()/expireAt
+  // below — which lock the node and walk its _parent. The entry's ancestors are the fixed,
+  // never-expiring sys.net.http_cache.entries path, so pinning the entry alone is sufficient here.
+  cvc::state::state_ptr e = entries.sharedChild(key);
+  e->data(boost::any(encode_entry(status, etag, last_modified, content_type, effective_url,
+                                  pt::to_iso_string(fetched_at), freshness_ttl, body)));
   const long retention = std::max(kRetentionSecs, freshness_ttl);
-  e.expireAt(fetched_at + pt::seconds(retention));
+  e->expireAt(fetched_at + pt::seconds(retention));
 }
 
 // Force-expire + sweep the entry for `key` (cache invalidation). The pin keeps the node alive
