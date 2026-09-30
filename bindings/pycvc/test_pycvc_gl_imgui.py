@@ -124,7 +124,14 @@ try:
     ov.setDrawCallback(lambda: None)  # a Python draw callback (reuses the callable typemap)
     check("draw callback accepted", True)
     ov.setUiScale(1.5)
-    check("uiScale round-trips", abs(ov.uiScale() - 1.5) < 1e-6)
+    if ov.enabled():
+        check("uiScale round-trips", abs(ov.uiScale() - 1.5) < 1e-6)
+    else:
+        # Inert overlay (libcvc built without CVC_ENABLE_IMGUI, or setup failed): every
+        # method is a documented no-op and uiScale() stays 1.0, so there is nothing to
+        # round-trip. (This check never ran before: ImGuiOverlay(view) raised NameError in
+        # its keepalive hook, which the except below reported as a SKIP.)
+        print("  skip: uiScale round-trip (overlay inert: enabled() == False)")
     # exercise the bool controls; their inert-mode (CVC_ENABLE_IMGUI off) value is
     # not asserted, only that the getters marshal a bool.
     ov.setVisible(True)

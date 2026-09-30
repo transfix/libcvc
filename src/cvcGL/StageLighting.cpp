@@ -169,10 +169,16 @@ void StageLighting::setStage(double cx, double cy, double cz, double radius) {
   s.cy = cy;
   s.cz = cz;
   s.radius = std::max(1e-3, radius);
-  getState("stage_x").value(s.cx);
-  getState("stage_y").value(s.cy);
-  getState("stage_z").value(s.cz);
-  getState("stage_radius").value(s.radius);
+  {
+    // Mirror to state WITHOUT our own change callback: it re-reads every field from
+    // state, so the first write would pull the not-yet-written fields' OLD values back
+    // into m_impl and only stage_x would stick. Bound UI still sees every write.
+    cvc::state_init_scope<StageLighting> quiet(*this);
+    getState("stage_x").value(s.cx);
+    getState("stage_y").value(s.cy);
+    getState("stage_z").value(s.cz);
+    getState("stage_radius").value(s.radius);
+  }
   apply();
 }
 
@@ -255,7 +261,12 @@ void StageLighting::applyPreset(Preset p) {
     s.warmth = 0.0;
     break;
   }
-  seedState(); // push the preset out through state so bound UI follows
+  {
+    // Push the preset out through state so bound UI follows -- quietly, for the same
+    // reason as setStage: otherwise only the first changed field of the preset sticks.
+    cvc::state_init_scope<StageLighting> quiet(*this);
+    seedState();
+  }
   apply();
 }
 
@@ -266,10 +277,13 @@ void StageLighting::setKey(double intensity, double azimuthDeg, double elevation
   s.keyAz = azimuthDeg;
   s.keyEl = elevationDeg;
   s.keyCone = coneDeg;
-  getState("key_intensity").value(s.keyI);
-  getState("key_azimuth").value(s.keyAz);
-  getState("key_elevation").value(s.keyEl);
-  getState("key_cone").value(s.keyCone);
+  {
+    cvc::state_init_scope<StageLighting> quiet(*this); // see setStage
+    getState("key_intensity").value(s.keyI);
+    getState("key_azimuth").value(s.keyAz);
+    getState("key_elevation").value(s.keyEl);
+    getState("key_cone").value(s.keyCone);
+  }
   apply();
 }
 
@@ -290,9 +304,12 @@ void StageLighting::setWash(double intensity, int count, double heightScale) {
   s.washI = intensity;
   s.washCount = std::max(0, count);
   s.washHeight = std::max(0.2, heightScale);
-  getState("wash_intensity").value(s.washI);
-  getState("wash_count").value(s.washCount);
-  getState("wash_height").value(s.washHeight);
+  {
+    cvc::state_init_scope<StageLighting> quiet(*this); // see setStage
+    getState("wash_intensity").value(s.washI);
+    getState("wash_count").value(s.washCount);
+    getState("wash_height").value(s.washHeight);
+  }
   apply();
 }
 

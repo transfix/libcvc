@@ -467,6 +467,13 @@ add_executable(cvcgl_stage_caster_truth test/cvcgl_stage_caster_truth.cpp)
 target_link_libraries(cvcgl_stage_caster_truth PRIVATE cvcGL)
 add_test(NAME cvcgl_stage_caster_truth COMMAND cvcgl_stage_caster_truth)
 
+# Multi-field StageLighting setters (setStage/setKey/setWash/applyPreset) must keep
+# EVERY field: the rig's own change callback re-reads all fields from state, so
+# writing them one at a time with it live kept only the first. Headless.
+add_executable(cvcgl_stage_setters test/cvcgl_stage_setters.cpp)
+target_link_libraries(cvcgl_stage_setters PRIVATE cvcGL)
+add_test(NAME cvcgl_stage_setters COMMAND cvcgl_stage_setters)
+
 # ViewportManager composites N Viewports (each its own vtkRenderer + camera +
 # scene) as SetViewport/SetLayer regions in ONE vtkRenderWindow (one GL context —
 # mandatory under WASM). Pins the picture-in-picture path the SceneRenderer test

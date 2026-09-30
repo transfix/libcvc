@@ -44,10 +44,11 @@
 // Python — the Python surface loads .ari files instead.
 %ignore cvc::gl::ariadne::AriRuntime::set_root;
 
-// Keep the window/camera/overlay the AriRuntime borrows alive for its whole life.
+// Keep the window/camera/overlay the AriRuntime borrows alive for its whole life. The ctor has a
+// single signature, so its proxy takes NAMED parameters (no `args`; see the %pythonappend note in
+// pycvc_gl.i).
 %pythonappend cvc::gl::ariadne::AriRuntime::AriRuntime %{
-    if len(args) >= 3:
-        self._pycvc_view, self._pycvc_cam, self._pycvc_overlay = args[0], args[1], args[2]
+    self._pycvc_view, self._pycvc_cam, self._pycvc_overlay = view, cam, ui
 %}
 
 %include "cvc/gl/ariadne/AriRuntime.h"
