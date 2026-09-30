@@ -22,7 +22,8 @@
 // -- color blocks, a crease inside one component (also across -0/+0), the
 // edges of a closed box, a round patch -- collapse only along themselves,
 // never open, never trade attributes, keep their line and still reach the
-// target; and a double-sided sheet keeps its border. Collapse ties survive scaling
+// target; a double-sided sheet keeps its border; and seamed spheres never fold
+// two faces together or put a third on an edge. Collapse ties survive scaling
 // and moving the mesh; a far away part cannot change how another decimates;
 // the last triangle is never removed; needles are not measured and non-finite
 // input is never measured as exact; coincident surfaces measure 0 far from the
@@ -1696,6 +1697,142 @@ TEST(GeometrySimplify, DoubleSidedSheetKeepsItsBorder) {
     const auto back = faces.find({f.first[0], f.first[2], f.first[1]});
     EXPECT_TRUE(back != faces.end() && back->second == f.second);
   }
+}
+
+namespace {
+
+// A closed bumpy sphere cut into regions, from `rng` (its raw output only, so
+// the mesh is the same on every platform): its faces go to the nearest of K
+// seed vertices (by centroid), each region owns its vertices, a color
+// (region, 0, 0) and a uv (3x + region / 4, y) -- so region borders are seams
+// where both jump -- and faces are listed in a shuffled order. With `soup`, a
+// face owns its vertices outright one time in two; with `salt`, one face in
+// ten goes to one of three extra regions.
+geometry seamed_sphere(cvc::app &ctx, std::mt19937_64 &rng, bool soup, bool salt) {
+  const int nu = 8 + int(rng() % 20), nv = 6 + int(rng() % 16);
+  const double bump = double(rng() % 3) * 0.1;
+  geometry base(ctx);
+  auto &P = base.points();
+  P.push_back({0, 0, 1});
+  for (int i = 1; i < nv; ++i)
+    for (int j = 0; j < nu; ++j) {
+      const double th = kPi * i / nv, ph = 2 * kPi * j / nu;
+      const double r = 1 + bump * std::sin(5 * th) * std::cos(3 * ph);
+      P.push_back(
+          {r * std::sin(th) * std::cos(ph), r * std::sin(th) * std::sin(ph), r * std::cos(th)});
+    }
+  P.push_back({0, 0, -1});
+  auto id = [&](int i, int j) { return std::uint64_t(1 + (i - 1) * nu + (j % nu)); };
+  const std::uint64_t south = P.size() - 1;
+  auto &T = base.tris();
+  for (int j = 0; j < nu; ++j)
+    T.push_back({0, id(1, j), id(1, j + 1)});
+  for (int i = 1; i < nv - 1; ++i)
+    for (int j = 0; j < nu; ++j) {
+      T.push_back({id(i, j), id(i + 1, j), id(i + 1, j + 1)});
+      T.push_back({id(i, j), id(i + 1, j + 1), id(i, j + 1)});
+    }
+  for (int j = 0; j < nu; ++j)
+    T.push_back({id(nv - 1, j), south, id(nv - 1, j + 1)});
+
+  const int K = 1 + int(rng() % 8);
+  std::vector<v3> seeds;
+  for (int k = 0; k < K; ++k)
+    seeds.push_back(to3(P[rng() % P.size()]));
+  std::vector<std::size_t> order(T.size());
+  std::iota(order.begin(), order.end(), std::size_t(0));
+  for (std::size_t i = order.size() - 1; i > 0; --i)
+    std::swap(order[i], order[rng() % (i + 1)]);
+  geometry g(ctx);
+  std::map<std::pair<int, std::uint64_t>, std::uint64_t> copy;
+  for (std::size_t f : order) {
+    const auto &t = T[f];
+    v3 c = {0, 0, 0};
+    for (int k = 0; k < 3; ++k)
+      for (int a = 0; a < 3; ++a)
+        c[a] += P[t[k]][a] / 3.0;
+    int reg = 0;
+    for (int k = 1; k < K; ++k)
+      if (vdot(vsub(c, seeds[k]), vsub(c, seeds[k])) <
+          vdot(vsub(c, seeds[reg]), vsub(c, seeds[reg])))
+        reg = k;
+    if (salt && rng() % 10 == 0)
+      reg = K + int(rng() % 3);
+    const int key = soup && rng() % 2 ? 1000 + int(f) : reg;
+    std::array<std::uint64_t, 3> v;
+    for (int k = 0; k < 3; ++k) {
+      auto it = copy.find(std::make_pair(key, t[k]));
+      if (it == copy.end()) {
+        const auto &q = P[t[k]];
+        g.points().push_back(q);
+        g.colors().push_back({double(reg), 0.0, 0.0});
+        g.uvs().push_back({3.0 * q[0] + 0.25 * reg, q[1]});
+        it = copy.insert(std::make_pair(std::make_pair(key, t[k]), g.num_points() - 1)).first;
+      }
+      v[k] = it->second;
+    }
+    g.tris().push_back({v[0], v[1], v[2]});
+  }
+  g.set_geometry_type(geometry::SURFACE_TRI);
+  return g;
+}
+
+} // namespace
+
+// Collapses keep the link condition over the welded topology: on closed,
+// seamed spheres decimated to 60%, 30% and 10% of their triangles -- with and
+// without the constraint planes -- no two faces ever fold onto the same three
+// positions and no edge gains a third triangle; every edge keeps a triangle
+// on each side, no face mixes regions, and every uv stays on its position.
+TEST(GeometrySimplify, SeamedSpheresNeverFoldOntoThemselves) {
+  cvc::app ctx;
+  std::mt19937_64 rng(1000);
+  int checked = 0;
+  for (int cs = 0; cs < 48; ++cs) {
+    const int mode = int(rng() % 3);
+    const geometry g = seamed_sphere(ctx, rng, mode == 1, mode == 2);
+    const std::uint64_t n = g.num_tris();
+    const std::vector<std::uint64_t> targets = {n * 6 / 10, n * 3 / 10, n / 10};
+    for (bool constrained : {true, false}) {
+      cvc::simplify_params p;
+      p.preserve_boundary = constrained;
+      std::vector<cvc::simplify_result> res;
+      const std::vector<geometry> snaps = cvc::simplify_progressive(g, targets, p, &res);
+      for (std::size_t k = 0; k < targets.size(); ++k) {
+        SCOPED_TRACE(testing::Message() << "case " << cs << " mode " << mode << " constrained "
+                                        << constrained << " target " << targets[k]);
+        const geometry &s = snaps[k];
+        const auto &P = s.const_points();
+        std::map<std::pair<v3, v3>, int> edges;
+        std::map<std::array<v3, 3>, int> faces;
+        int mixed = 0, sheared = 0;
+        for (const auto &t : s.const_tris()) {
+          std::array<v3, 3> f = {to3(P[t[0]]), to3(P[t[1]]), to3(P[t[2]])};
+          for (int e = 0; e < 3; ++e) {
+            ++edges[std::make_pair(std::min(f[e], f[(e + 1) % 3]), std::max(f[e], f[(e + 1) % 3]))];
+            const auto &c = s.const_colors()[t[e]];
+            const auto &uv = s.const_uvs()[t[e]];
+            mixed += c != s.const_colors()[t[0]] ? 1 : 0;
+            sheared += uv[0] != 3.0 * P[t[e]][0] + 0.25 * c[0] || uv[1] != P[t[e]][1] ? 1 : 0;
+          }
+          std::sort(f.begin(), f.end());
+          ++faces[f];
+        }
+        int doubled = 0, unpaired = 0;
+        for (const auto &f : faces)
+          doubled += f.second > 1 ? 1 : 0;
+        for (const auto &e : edges)
+          unpaired += e.second != 2 ? 1 : 0;
+        EXPECT_EQ(doubled, 0);
+        EXPECT_EQ(unpaired, 0);
+        EXPECT_EQ(mixed, 0);
+        EXPECT_EQ(sheared, 0);
+        expect_all_referenced(s);
+        ++checked;
+      }
+    }
+  }
+  EXPECT_EQ(checked, 48 * 6);
 }
 
 // --- locality ----------------------------------------------------------------

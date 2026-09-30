@@ -58,7 +58,9 @@
 // collapse. A lazy binary heap keyed on a per-vertex version pops the cheapest
 // valid collapse, with ties broken by vertex index so the pop sequence never
 // depends on the standard library's heap. Fold-overs are rejected by a per-face
-// normal-flip test so the coarse rung never self-intersects.
+// normal-flip test so the coarse rung never self-intersects, and a collapse that
+// breaks the link condition (it would fold two faces onto one another, or put a
+// third triangle on an edge) is rejected too.
 //
 // The quadric cost is area x distance^2 -- not a length -- so the reported error
 // is measured instead of derived: a sampled symmetric Hausdorff distance between
@@ -1555,6 +1557,42 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
     return false;
   };
 
+  // The link condition, over classes: the classes adjacent to both keep and
+  // drop must be exactly the third corners of the triangles on the edge. Any
+  // other common neighbour w would merge the edges keep-w and drop-w into one
+  // carrying the triangles of both: more than two, or two faces folded onto
+  // the same three positions. Checked in O(degree) with per-class stamps: a
+  // neighbour of drop off the edge gets `stamp`, a third corner `stamp + 1`.
+  std::vector<u32> link(nv, 0);
+  u32 stamp = 0;
+  auto links_ok = [&](u32 keep, u32 drop) -> bool {
+    if (stamp > u32(-4)) { // restart the stamps before they wrap
+      std::fill(link.begin(), link.end(), 0u);
+      stamp = 0;
+    }
+    stamp += 2;
+    for (u32 ti : vtri[drop]) {
+      if (tremoved[ti])
+        continue;
+      const Tri &f = T[ti];
+      const bool on_edge = f[0] == keep || f[1] == keep || f[2] == keep;
+      for (int k = 0; k < 3; ++k)
+        if (f[k] != drop && f[k] != keep && link[f[k]] != stamp + 1)
+          link[f[k]] = on_edge ? stamp + 1 : stamp;
+    }
+    for (u32 ti : vtri[keep]) {
+      if (tremoved[ti])
+        continue;
+      const Tri &f = T[ti];
+      if (f[0] == drop || f[1] == drop || f[2] == drop)
+        continue; // on the edge
+      for (int k = 0; k < 3; ++k)
+        if (f[k] != keep && link[f[k]] == stamp)
+          return false; // a common neighbour that is no third corner
+    }
+    return true;
+  };
+
   u64 ncollapse = 0;
   bool hit_limit = false;
 
@@ -1698,6 +1736,8 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
       continue; // leave this edge out; a re-pushed copy may succeed later
     if (!partners(keep, drop, pairs))
       continue; // no clean wedge map (it was clean when pushed; kept as a guard)
+    if (!links_ok(keep, drop))
+      continue; // it would fold the surface onto itself
 
     // The triangles on the collapsed edge vanish.
     u64 vanish = 0;

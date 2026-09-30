@@ -162,7 +162,10 @@ struct simplify_result {
 // triangle (a target of 0 decimates as far as the guards allow). Triangles
 // whose corners weld together -- zero-area needles (two corners at one
 // position), and triangles welded shut within the coincidence tolerance (see
-// seam_epsilon) -- are left out of it.
+// seam_epsilon) -- are left out of it. No collapse folds two faces onto the
+// same three positions or puts a third triangle on an edge that had two (the
+// link condition, over the welded topology) -- except that a closed surface
+// decimated as far as it goes can end as a two-sided triangle.
 //
 // `pool` (optional) is used to fan the embarrassingly-parallel work -- per-face
 // plane quadrics, the per-vertex quadric gather, the seam search, and the
