@@ -291,6 +291,10 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::SceneNode::runOnMainThread;
 %ignore cvc::gl::SceneNode::setSceneGraph;
 %ignore cvc::gl::SceneNode::getSceneGraph;
+// Visibility-propagation plumbing (setVisible is the API; these are its hooks).
+%ignore cvc::gl::SceneNode::propagateVisible;
+%ignore cvc::gl::SceneNode::ancestorVisibilityChanged;
+%ignore cvc::gl::SceneNode::pushVisible;
 %include "cvc/gl/SceneNode.h"
 
 // ── GraphicsNode: keep transform / material / label; ignore VTK/any/templates ─

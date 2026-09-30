@@ -172,7 +172,26 @@ void LodGraphicsNode::propagateVisible(bool visible) {
   // the ordinary propagation.
   for (auto &child : m_children)
     if (!isRung(child.get()))
-      child->setVisible(visible);
+      pushVisible(*child, visible);
+  runOnMainThread([this]() { applyRungVisibility(); });
+}
+
+void LodGraphicsNode::ancestorVisibilityChanged() {
+  // An ancestor was shown or hidden while this node's own flag already matched,
+  // so setVisible() -- and propagateVisible() above -- never ran here. Whether
+  // the active rung may draw is a question about the whole hierarchy, so ask it
+  // again: a node attached under a hidden parent lights up when that parent is
+  // shown. (The rungs' own subtrees hear of it too, to no effect.)
+  GraphicsNode::ancestorVisibilityChanged();
+  runOnMainThread([this]() { applyRungVisibility(); });
+}
+
+void LodGraphicsNode::addToRenderer(vtkRenderer *renderer) {
+  GraphicsNode::addToRenderer(renderer);
+  // Attached (or re-attached under a new parent, which removeGraphicsChild /
+  // addGraphicsChild route through here): the hierarchy above may now be hidden
+  // where it was not, or the reverse, so re-derive the rung actors at once
+  // rather than at the next select().
   runOnMainThread([this]() { applyRungVisibility(); });
 }
 
@@ -218,10 +237,6 @@ cvc::lod::view_params make_view_params(vtkRenderer *renderer, const cvc::lod::vi
   cvc::lod::view_params v = base;
   if (!renderer)
     return v;
-  vtkCamera *cam = renderer->GetActiveCamera();
-  if (!cam)
-    return v;
-  cam->GetPosition(v.eye);
 
   // The renderer's viewport in pixels -- its share of the window, not the
   // window -- so each view of a split layout budgets against its own height.
@@ -231,6 +246,16 @@ cvc::lod::view_params make_view_params(vtkRenderer *renderer, const cvc::lod::vi
   const double h = size ? size[1] : 0.0;
   if (h > 0.0)
     v.viewport_h_px = h;
+
+  // Never CREATE the camera: GetActiveCamera() would, on a renderer that has
+  // none yet, and VTK auto-frames (ResetCamera) only a camera the renderer
+  // creates itself during its first render -- so the first frame would look
+  // from VTK's default pose instead of at the scene. No camera yet, no view to
+  // read: base's eye and projection stand.
+  if (!renderer->IsActiveCameraCreated())
+    return v;
+  vtkCamera *cam = renderer->GetActiveCamera();
+  cam->GetPosition(v.eye);
 
   if (cam->GetParallelProjection()) {
     // ParallelScale is half the view HEIGHT in world units.

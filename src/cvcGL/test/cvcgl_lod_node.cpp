@@ -8,7 +8,9 @@
 //     monotone in between;
 //   * user visibility (B4) -- a hidden LOD node, or one under a hidden parent,
 //     stays hidden through selectLOD, and re-showing the parent shows exactly ONE
-//     rung, not the whole ladder SceneNode::setVisible used to propagate to;
+//     rung, not the whole ladder SceneNode::setVisible used to propagate to --
+//     at once, without a select(), even for a node attached or moved under an
+//     already-hidden parent;
 //   * switching (B5) -- a switch flips actor visibility and every rung stays
 //     registered, so the renderer's prop count never moves;
 //   * re-population (B6) -- setPyramid replaces the old rungs rather than
@@ -247,6 +249,48 @@ void test_visibility_and_registration(cvc::app &app) {
   CHECK(st.nodes == 2 && st.hidden == 1);
   CHECK(st.drawn_tris == 12 && st.full_tris == 12); // the hidden node draws nothing
 
+  // Showing that parent brings back exactly one rung with NO select(): lod2's
+  // own flag never changed, so only the ancestor notification reaches it. A
+  // caller that selects only when the camera moves depends on this.
+  dark->setVisible(true);
+  CHECK(visible_count(*lod2) == 1 && visible_rung(*lod2) == 0);
+  dark->setVisible(false);
+  CHECK(visible_count(*lod2) == 0);
+
+  // Moving a DRAWING node under a hidden parent darkens it at once, and
+  // showing that parent brings back its current rung -- again, no select().
+  sg.selectLOD(far);
+  CHECK(visible_rung(*lod) == 2);
+  group->removeGraphicsChild(lod);
+  dark->addGraphicsChild(lod);
+  CHECK(lod->isVisible() && visible_count(*lod) == 0);
+  CHECK(rungs_registered(ren, *lod));
+  dark->setVisible(true);
+  CHECK(visible_rung(*lod) == 2 && visible_rung(*lod2) == 2);
+
+  // Two levels down: a plain group attached under a hidden grandparent keeps
+  // its own `true`, so showing the grandparent flips no flag below it at all.
+  auto grand = sg.addGraphics("grand");
+  grand->setVisible(false);
+  auto mid = grand->createChild("mid");
+  auto plain = mid->createChild("plain");
+  plain->setVisible(false); // hidden on its own
+  auto lod3 = mid->addGraphicsChild<LodGraphicsNode>("lod3");
+  lod3->setPyramid(box_pyramid(app, {0.0, 1.0, 4.0}));
+  CHECK(mid->isVisible() && visible_count(*lod3) == 0);
+  grand->setVisible(true);
+  CHECK(visible_count(*lod3) == 1 && visible_rung(*lod3) == 0);
+  CHECK(!plain->isVisible()); // an ordinary node's own flag is left alone, as before
+
+  // Shown on its own while an ancestor is hidden: the ancestor wins until it is
+  // shown as well, by which time the node's flag already matches.
+  grand->setVisible(false);
+  CHECK(!lod3->isVisible() && visible_count(*lod3) == 0);
+  lod3->setVisible(true);
+  CHECK(visible_count(*lod3) == 0);
+  grand->setVisible(true);
+  CHECK(visible_count(*lod3) == 1 && visible_rung(*lod3) == 0);
+
   // Detaching the scene's renderer takes every rung with it.
   sg.setRenderer(nullptr);
   CHECK(!ren->GetViewProps()->IsItemPresent(lod->rung(0)->prop()));
@@ -438,6 +482,22 @@ void test_make_view_params(cvc::app &app) {
   // A renderer with no window keeps base's height (its size is 0 x 0).
   vtkNew<vtkRenderer> bare;
   CHECK(cvc::gl::make_view_params(bare, base).viewport_h_px == base.viewport_h_px);
+  CHECK(!bare->IsActiveCameraCreated());
+
+  // A renderer with no camera yet does not get one from here -- VTK auto-frames
+  // only the camera it creates during the first render. Its height is read; the
+  // eye and projection stay base's.
+  vtkNew<vtkRenderWindow> win2;
+  win2->SetOffScreenRendering(1);
+  win2->SetSize(200, 100);
+  vtkNew<vtkRenderer> fresh;
+  win2->AddRenderer(fresh);
+  cvc::lod::view_params seeded = base;
+  seeded.eye[0] = 7.0;
+  const cvc::lod::view_params vf = cvc::gl::make_view_params(fresh, seeded);
+  CHECK(!fresh->IsActiveCameraCreated());
+  CHECK(vf.viewport_h_px == 100.0);
+  CHECK(vf.eye[0] == 7.0 && vf.tan_half_fov == base.tan_half_fov && vf.ortho_px_per_m == 0.0);
 }
 
 // --- setLODEnabled + lod_stats -------------------------------------------------

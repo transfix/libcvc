@@ -37,7 +37,12 @@
 // the node is visible in the hierarchy (GraphicsNode::isVisibleInHierarchy).
 // SceneNode::setVisible would otherwise pass a parent's "show" down to every
 // rung at once; this node overrides that propagation, so re-showing a parent
-// shows one rung, not the whole ladder.
+// shows one rung, not the whole ladder. The rung actors are re-derived whenever
+// either side can have moved -- the node's own flag, ANY ancestor's (even when
+// this node's flag already matched, e.g. it was attached under a hidden
+// parent), re-attachment to a renderer or a new parent, and every select() --
+// so a caller that selects only when the camera moves still draws the right
+// thing.
 //
 // --- Rung switching and GPU memory ------------------------------------------
 //
@@ -170,11 +175,18 @@ public:
   // culling should see regardless of which rung currently draws.
   cvc::bounding_box getBoundingBox() const override;
 
+  // Also re-derives the rung actors: the node may have come back under a
+  // different (hidden or shown) parent.
+  void addToRenderer(vtkRenderer *renderer) override;
+
 protected:
   vtkProp *getProp() override; // prop-less container; the rungs are children
   // Re-applies the rung policy instead of showing/hiding every rung; other
   // children, if any, get the usual propagation.
   void propagateVisible(bool visible) override;
+  // Re-applies the rung policy when an ancestor's visibility changed but this
+  // node's flag did not.
+  void ancestorVisibilityChanged() override;
 
 private:
   void clearRungs(std::size_t keep = 0); // remove and destroy rungs [keep, n)
@@ -204,7 +216,11 @@ private:
 // hysteresis and z_near come from `base` (a quality preset, typically), so
 // call this once per frame with the same base and hand the result to
 // SceneGraph::selectLOD. A null renderer, or one with no window yet (viewport
-// size 0), leaves the corresponding fields of `base` untouched.
+// size 0), leaves the corresponding fields of `base` untouched. So does a
+// renderer with no active camera yet (IsActiveCameraCreated() false, i.e. before
+// its first render unless the caller set one): this never creates the camera,
+// because a camera created outside the render is not auto-framed by VTK, so the
+// eye and projection come from `base` for that frame.
 cvc::lod::view_params make_view_params(vtkRenderer *renderer,
                                        const cvc::lod::view_params &base = cvc::lod::view_params());
 
