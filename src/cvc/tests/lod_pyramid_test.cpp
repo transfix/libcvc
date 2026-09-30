@@ -1,16 +1,21 @@
 // lod_pyramid_test -- the per-asset LOD ladder builders (cvc::lod::build_*_pyramid).
 //
 // Covers: a mesh ladder that strictly coarsens with a monotone world-error ladder
-// and a verbatim rung 0; pooled == serial; a volume ladder that halves each axis
-// with a growing voxel-size error; and an image mip ladder whose box filter
-// actually area-averages (a 2x2 checker becomes mid-grey) rather than point-samples.
+// and a verbatim rung 0; its single progressive pass reproduces an independent
+// cvc::simplify per rung bit-for-bit; its error is metric (a 10x mesh has a 10x
+// ladder); pooled == serial; a volume ladder that halves each axis with a
+// growing voxel-size error; and an image mip ladder whose box filter actually
+// area-averages (a 2x2 checker becomes mid-grey) rather than point-samples.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/geometry/simplify.h>
 #include <cvc/image/image.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/volume/volume.h>
@@ -37,6 +42,18 @@ geometry bumpy_grid(cvc::app &ctx, int n) {
     }
   g.set_geometry_type(geometry::SURFACE_TRI);
   return g;
+}
+
+template <class V> bool bitwise_equal(const V &a, const V &b) {
+  if (a.size() != b.size())
+    return false;
+  return a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(a[0])) == 0;
+}
+
+bool same_mesh(const geometry &a, const geometry &b) {
+  return bitwise_equal(a.const_points(), b.const_points()) &&
+         bitwise_equal(a.const_tris(), b.const_tris()) &&
+         bitwise_equal(a.const_normals(), b.const_normals());
 }
 
 // A ladder's error column must be monotone non-decreasing and start at 0.
@@ -75,7 +92,53 @@ TEST(LodPyramid, MeshLadderPoolMatchesSerial) {
   ASSERT_EQ(s.rungs.size(), p.rungs.size());
   for (std::size_t k = 0; k < s.rungs.size(); ++k) {
     EXPECT_EQ(s.rungs[k].num_tris(), p.rungs[k].num_tris()) << "rung " << k;
-    EXPECT_DOUBLE_EQ(s.world_error_m[k], p.world_error_m[k]) << "rung " << k;
+    EXPECT_TRUE(same_mesh(s.rungs[k], p.rungs[k])) << "rung " << k;
+    EXPECT_EQ(s.world_error_m[k], p.world_error_m[k]) << "rung " << k;
+  }
+}
+
+// The ladder is ONE progressive pass, yet every rung is exactly what an
+// independent simplify() of the source to that rung's target produces, and its
+// error is that run's world_error (under the running max).
+TEST(LodPyramid, MeshLadderMatchesIndependentSimplify) {
+  cvc::app ctx;
+  geometry src = bumpy_grid(ctx, 40);
+  src.compute_normals(); // carried through every rung
+  cvc::lod::pyramid_params pp;
+  pp.max_rungs = 4;
+  pp.mesh_ratio = 0.4;
+  cvc::lod::mesh_pyramid pyr = cvc::lod::build_mesh_pyramid(src, pp);
+  ASSERT_EQ(pyr.rungs.size(), 5u);
+  double ratio = 1.0, prev = 0.0;
+  for (std::size_t k = 1; k < pyr.rungs.size(); ++k) {
+    ratio *= pp.mesh_ratio;
+    cvc::simplify_params sp;
+    sp.target_tris = std::uint64_t(std::llround(double(src.num_tris()) * ratio));
+    sp.preserve_boundary = pp.preserve_boundary;
+    cvc::simplify_result r;
+    const geometry one = cvc::simplify(src, sp, &r);
+    EXPECT_TRUE(same_mesh(pyr.rungs[k], one)) << "rung " << k;
+    prev = std::max(prev, r.world_error);
+    EXPECT_EQ(pyr.world_error_m[k], prev) << "rung " << k;
+  }
+}
+
+// world_error_m is a length: the same terrain at 10x scale has a 10x ladder.
+TEST(LodPyramid, MeshLadderErrorScalesWithTheMesh) {
+  cvc::app ctx;
+  geometry src = bumpy_grid(ctx, 30), big = bumpy_grid(ctx, 30);
+  for (auto &p : big.points())
+    for (int k = 0; k < 3; ++k)
+      p[k] *= 10.0;
+  cvc::lod::pyramid_params pp;
+  pp.max_rungs = 3;
+  cvc::lod::mesh_pyramid a = cvc::lod::build_mesh_pyramid(src, pp);
+  cvc::lod::mesh_pyramid b = cvc::lod::build_mesh_pyramid(big, pp);
+  ASSERT_EQ(a.rungs.size(), b.rungs.size());
+  ASSERT_GE(a.rungs.size(), 3u);
+  for (std::size_t k = 1; k < a.rungs.size(); ++k) {
+    ASSERT_GT(a.world_error_m[k], 1e-6) << "rung " << k;
+    EXPECT_NEAR(b.world_error_m[k] / (10.0 * a.world_error_m[k]), 1.0, 0.05) << "rung " << k;
   }
 }
 

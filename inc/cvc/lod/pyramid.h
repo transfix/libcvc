@@ -23,10 +23,12 @@
 // This is the BUILDER half the roadmap named cvc::lod::pyramid_builder: the pure
 // selection math in <cvc/lod/select.h> consumes a monotone world_error_m[] ladder
 // plus per-rung sizes, and this produces exactly that from a source asset. Each
-// builder is hermetic (no VTK/GL/I/O): meshes decimate via cvc::simplify (QEM),
-// volumes downsample via cvc::vol_downsample, images box-average via
-// image::resized(box). The embarrassingly-parallel work -- independent rungs, and
-// the per-face/per-voxel/per-pixel kernels -- fans over the app compute pool.
+// builder is hermetic (no VTK/GL/I/O): meshes decimate via one progressive
+// cvc::simplify_progressive (QEM) pass, volumes downsample via
+// cvc::vol_downsample, images box-average via image::resized(box). The
+// embarrassingly-parallel work -- independent volume/image rungs, and the
+// per-face/per-sample/per-voxel/per-pixel kernels -- fans over the app compute
+// pool.
 //
 // rung 0 is the FINEST and world_error_m[0] == 0; the ladder is monotone
 // non-decreasing (forced with a running max), which is the property select_rung
@@ -65,8 +67,12 @@ struct pyramid_params {
 };
 
 struct mesh_pyramid {
-  std::vector<geometry> rungs;       // rungs[0] = source (finest)
-  std::vector<double> world_error_m; // per rung, monotone; world_error_m[0] == 0
+  std::vector<geometry> rungs; // rungs[0] = source (finest)
+  // Per rung, monotone; world_error_m[0] == 0. Rung k's value is the sampled
+  // symmetric Hausdorff distance between the source and that rung (see
+  // cvc::sampled_hausdorff), in the mesh's length unit (metres for scene
+  // geometry), lifted by the running max.
+  std::vector<double> world_error_m;
 };
 struct volume_pyramid {
   std::vector<volume> rungs;
@@ -77,9 +83,13 @@ struct image_pyramid {
   std::vector<double> world_error_m; // ~ the coarser rung's texel world-size
 };
 
-// Build a mesh LOD ladder by repeated QEM decimation of the source. `pool`, when
-// given, fans the independent rungs (or the per-rung setup) over the app compute
-// workers; the result is identical either way.
+// Build a mesh LOD ladder by QEM decimation of the source. One progressive
+// collapse pass snapshots every rung on its way to the coarsest target, so rung k
+// is bit-identical to cvc::simplify(src) at rung k's target (with
+// preserve_boundary from `params` and simplify_params defaults otherwise: input
+// normals carried, component seams locked) at the cost of the coarsest rung
+// alone. `pool`, when given, fans the per-face setup and each rung's error
+// measurement over the app compute workers; the result is identical either way.
 mesh_pyramid build_mesh_pyramid(const geometry &src,
                                 const pyramid_params &params = pyramid_params(),
                                 thread_pool *pool = nullptr);

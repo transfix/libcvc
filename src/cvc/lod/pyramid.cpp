@@ -76,22 +76,21 @@ mesh_pyramid build_mesh_pyramid(const geometry &src, const pyramid_params &param
       break;
     targets.push_back(t);
   }
-  const int R = int(targets.size());
-  if (R == 0)
+  if (targets.empty())
     return out;
 
-  std::vector<geometry> rungs(R, src); // overwritten below (copies carry src.ctx())
-  std::vector<double> errs(R, 0.0);
-  // Fan the rungs; each simplify runs serial internally so the pool is used at
-  // exactly one level (rungs OR the per-rung setup), never nested.
-  build_rungs(pool, R, [&](int k) {
-    simplify_params sp;
-    sp.target_tris = targets[k];
-    sp.preserve_boundary = params.preserve_boundary;
-    simplify_result res;
-    rungs[k] = simplify(src, sp, &res, pool && R >= 2 ? nullptr : pool);
-    errs[k] = res.world_error;
-  });
+  // ONE progressive collapse pass snapshots every rung on its way down to the
+  // coarsest target: each rung is bit-identical to an independent simplify() of
+  // the source to its target, for the cost of the coarsest rung alone. The pass
+  // itself is serial; its setup and each rung's Hausdorff measurement fan over
+  // the pool.
+  simplify_params sp;
+  sp.preserve_boundary = params.preserve_boundary;
+  std::vector<simplify_result> res;
+  std::vector<geometry> rungs = simplify_progressive(src, targets, sp, &res, pool);
+  std::vector<double> errs(res.size(), 0.0);
+  for (std::size_t k = 0; k < res.size(); ++k)
+    errs[k] = res[k].world_error;
   append_monotone(out.rungs, out.world_error_m, rungs, errs);
   return out;
 }
