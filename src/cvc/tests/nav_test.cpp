@@ -15,8 +15,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cvc/core/thread_pool.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/detail/grid_math.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/sim_thread.h>
@@ -71,6 +73,245 @@ TEST(NavEdt, EmptyGridIsAllInf) {
   const auto d = edt2_squared(m.data(), 2, 2);
   for (double v : d)
     EXPECT_GT(v, 1e19); // no seed -> ~1e20
+}
+
+// ─── EDT / build_sdf exactness vs the reference kernel ─────────────────────
+//
+// edt2_squared / build_sdf run an exact binary-mask fast path (grid_nav.cpp)
+// instead of the generic column-then-row Felzenszwalb-Huttenlocher kernel. The
+// contract is BIT identity with that kernel — the one the GRL-SNAM Python
+// parity suite was verified against — so a verbatim copy of it lives here and
+// every output bit (including the ~1e20 seed-free values and the float32
+// normals) is compared on randomized and degenerate grids.
+
+namespace edt_ref {
+
+constexpr double EDT_INF = 1e20;
+
+void edt1d_line(const double *f, int n, int fs, double *d, int ds) {
+  std::vector<int> v(n);
+  std::vector<double> z(n + 1);
+  int k = 0;
+  v[0] = 0;
+  z[0] = -EDT_INF;
+  z[1] = EDT_INF;
+  for (int q = 1; q < n; ++q) {
+    double s = ((f[q * fs] + static_cast<double>(q * q)) -
+                (f[v[k] * fs] + static_cast<double>(v[k] * v[k]))) /
+               static_cast<double>(2 * q - 2 * v[k]);
+    while (s <= z[k]) {
+      --k;
+      s = ((f[q * fs] + static_cast<double>(q * q)) -
+           (f[v[k] * fs] + static_cast<double>(v[k] * v[k]))) /
+          static_cast<double>(2 * q - 2 * v[k]);
+    }
+    ++k;
+    v[k] = q;
+    z[k] = s;
+    z[k + 1] = EDT_INF;
+  }
+  k = 0;
+  for (int q = 0; q < n; ++q) {
+    while (z[k + 1] < q)
+      ++k;
+    int diff = q - v[k];
+    d[q * ds] = static_cast<double>(diff * diff) + f[v[k] * fs];
+  }
+}
+
+std::vector<double> edt2_squared(const std::uint8_t *mask, int rows, int cols) {
+  const int n = rows * cols;
+  std::vector<double> f(n);
+  for (int i = 0; i < n; ++i)
+    f[i] = mask[i] ? 0.0 : EDT_INF;
+  std::vector<double> tmp(n);
+  for (int c = 0; c < cols; ++c)
+    edt1d_line(&f[c], rows, cols, &tmp[c], cols);
+  std::vector<double> out(n);
+  for (int r = 0; r < rows; ++r)
+    edt1d_line(&tmp[r * cols], cols, 1, &out[r * cols], 1);
+  return out;
+}
+
+sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double max_x,
+                    double scale) {
+  const int n = rows * cols;
+  const std::vector<double> d_out = edt2_squared(occ, rows, cols);
+  std::vector<std::uint8_t> inv(n);
+  for (int i = 0; i < n; ++i)
+    inv[i] = occ[i] ? 0 : 1;
+  const std::vector<double> d_in = edt2_squared(inv.data(), rows, cols);
+  const double cell_w = (max_x - min_x) / static_cast<double>(cols - 1);
+  sdf_field field;
+  field.rows = rows;
+  field.cols = cols;
+  field.phi.resize(n);
+  for (int i = 0; i < n; ++i) {
+    const double phi_w = (std::sqrt(d_out[i]) - std::sqrt(d_in[i])) * cell_w;
+    field.phi[i] = static_cast<float>(phi_w * scale);
+  }
+  const float *phi = field.phi.data();
+  field.normal_x.resize(n);
+  field.normal_y.resize(n);
+  for (int r = 0; r < rows; ++r)
+    for (int c = 0; c < cols; ++c) {
+      const int i = r * cols + c;
+      const float gx = cvc::nav::detail::grad1d(phi + r * cols, c, cols, 1);
+      const float gy = cvc::nav::detail::grad1d(phi + c, r, rows, cols);
+      const float gmag = std::sqrt(gx * gx + gy * gy) + 1e-9f;
+      field.normal_x[i] = gx / gmag;
+      field.normal_y[i] = gy / gmag;
+    }
+  return field;
+}
+
+// Deterministic grid generators (no <random>): density in 1/1000ths, plus
+// "city" rectangles for long runs and single-seed / single-hole grids.
+struct Rng {
+  unsigned x;
+  unsigned next() {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return x;
+  }
+};
+
+std::vector<std::uint8_t> noise(int rows, int cols, int permille, Rng &g) {
+  std::vector<std::uint8_t> m((std::size_t)rows * cols);
+  for (auto &v : m)
+    v = (int)(g.next() % 1000u) < permille ? 1 : 0;
+  return m;
+}
+
+std::vector<std::uint8_t> blocks(int rows, int cols, Rng &g) {
+  std::vector<std::uint8_t> m((std::size_t)rows * cols, 0);
+  const int nb = 1 + (int)(g.next() % 12u);
+  for (int b = 0; b < nb; ++b) {
+    const int r0 = (int)(g.next() % (unsigned)rows), c0 = (int)(g.next() % (unsigned)cols);
+    const int h = 1 + (int)(g.next() % (unsigned)std::max(1, rows / 3));
+    const int w = 1 + (int)(g.next() % (unsigned)std::max(1, cols / 3));
+    for (int r = r0; r < std::min(rows, r0 + h); ++r)
+      for (int c = c0; c < std::min(cols, c0 + w); ++c)
+        m[(std::size_t)r * cols + c] = 1;
+  }
+  return m;
+}
+
+// Every grid the exactness tests sweep: odd/even, 1xN / Nx1, all-free,
+// all-set, single seed, single hole, sparse/dense noise and block cities.
+std::vector<std::pair<std::pair<int, int>, std::vector<std::uint8_t>>> corpus() {
+  std::vector<std::pair<std::pair<int, int>, std::vector<std::uint8_t>>> out;
+  Rng g{0x9e3779b9u};
+  const int sizes[][2] = {{1, 1},   {1, 2},   {2, 1},   {1, 37},  {37, 1},  {1, 200},
+                          {200, 1}, {2, 2},   {3, 5},   {5, 3},   {7, 7},   {17, 31},
+                          {31, 17}, {64, 64}, {97, 61}, {128, 7}, {7, 128}, {40, 90}};
+  for (const auto &sz : sizes) {
+    const int R = sz[0], C = sz[1];
+    const std::size_t n = (std::size_t)R * C;
+    auto add = [&](std::vector<std::uint8_t> m) { out.push_back({{R, C}, std::move(m)}); };
+    add(std::vector<std::uint8_t>(n, 0)); // all free: no seed anywhere
+    add(std::vector<std::uint8_t>(n, 1)); // all set
+    for (int t = 0; t < 3; ++t) {         // a single seed / a single hole
+      std::vector<std::uint8_t> one(n, 0), hole(n, 1);
+      const std::size_t at = g.next() % n;
+      one[at] = 1;
+      hole[at] = 0;
+      add(one);
+      add(hole);
+    }
+    for (int permille : {5, 50, 220, 500, 900})
+      for (int t = 0; t < 3; ++t)
+        add(noise(R, C, permille, g));
+    for (int t = 0; t < 3; ++t)
+      add(blocks(R, C, g));
+  }
+  return out;
+}
+
+// Bitwise equality (so -0 != +0 and every ulp counts), except that any two NaNs
+// match: a 1-column grid has cell_w = x/0 = inf, so its phi is +-inf and some
+// normals are inf/inf in BOTH implementations, and a NaN's payload is not output.
+template <class T> bool same_bits(const std::vector<T> &a, const std::vector<T> &b) {
+  if (a.size() != b.size())
+    return false;
+  for (std::size_t i = 0; i < a.size(); ++i)
+    if (std::memcmp(&a[i], &b[i], sizeof(T)) != 0 && !(std::isnan(a[i]) && std::isnan(b[i])))
+      return false;
+  return true;
+}
+
+} // namespace edt_ref
+
+TEST(NavEdtExact, Edt2SquaredMatchesReferenceKernelBitForBit) {
+  int checked = 0;
+  for (const auto &e : edt_ref::corpus()) {
+    const int R = e.first.first, C = e.first.second;
+    const auto &m = e.second;
+    const auto want = edt_ref::edt2_squared(m.data(), R, C);
+    const auto got = edt2_squared(m.data(), R, C);
+    ASSERT_TRUE(edt_ref::same_bits(got, want)) << R << "x" << C << " grid #" << checked;
+    ++checked;
+  }
+  EXPECT_GT(checked, 400);
+}
+
+TEST(NavEdtExact, BuildSdfMatchesReferenceBitForBit) {
+  int checked = 0;
+  for (const auto &e : edt_ref::corpus()) {
+    const int R = e.first.first, C = e.first.second;
+    const auto &m = e.second;
+    // Unequal bounds / scale so cell_w and scale are not 1; a 1-column grid has
+    // cell_w = x/0 = inf in both implementations (phi +-inf, normals 0).
+    const double mnx = -37.5, mxx = 91.25, sc = 0.0625;
+    const sdf_field want = edt_ref::build_sdf(m.data(), R, C, mnx, mxx, sc);
+    const sdf_field got = build_sdf(m.data(), R, C, mnx, -3.0, mxx, 4.0, sc);
+    ASSERT_EQ(got.rows, R);
+    ASSERT_EQ(got.cols, C);
+    ASSERT_TRUE(edt_ref::same_bits(got.phi, want.phi)) << R << "x" << C << " #" << checked;
+    ASSERT_TRUE(edt_ref::same_bits(got.normal_x, want.normal_x))
+        << R << "x" << C << " #" << checked;
+    ASSERT_TRUE(edt_ref::same_bits(got.normal_y, want.normal_y))
+        << R << "x" << C << " #" << checked;
+    ++checked;
+  }
+  EXPECT_GT(checked, 400);
+}
+
+TEST(NavEdtExact, ClearanceCostAndLargeCityMatchReference) {
+  // A 300x260 block city (long runs, big seed-free stretches) through both
+  // edt2_squared and the clearance_cost consumer.
+  edt_ref::Rng g{12345u};
+  const int R = 300, C = 260;
+  std::vector<std::uint8_t> m((std::size_t)R * C, 0);
+  for (int b = 0; b < 60; ++b) {
+    const int r0 = (int)(g.next() % R), c0 = (int)(g.next() % C);
+    const int h = 2 + (int)(g.next() % 14), w = 2 + (int)(g.next() % 14);
+    for (int r = r0; r < std::min(R, r0 + h); ++r)
+      for (int c = c0; c < std::min(C, c0 + w); ++c)
+        m[(std::size_t)r * C + c] = 1;
+  }
+  const auto want = edt_ref::edt2_squared(m.data(), R, C);
+  EXPECT_TRUE(edt_ref::same_bits(edt2_squared(m.data(), R, C), want));
+  const auto cost = clearance_cost(m.data(), R, C, 6.0, 1.5);
+  std::vector<double> want_cost(want.size());
+  for (std::size_t i = 0; i < want.size(); ++i) {
+    const double shortfall = 6.0 - std::sqrt(want[i]);
+    want_cost[i] = shortfall > 0.0 ? 1.5 * shortfall : 0.0;
+  }
+  EXPECT_TRUE(edt_ref::same_bits(cost, want_cost));
+  const sdf_field want_f = edt_ref::build_sdf(m.data(), R, C, 0.0, 259.0, 0.05);
+  const sdf_field got_f = build_sdf(m.data(), R, C, 0.0, 0.0, 259.0, 299.0, 0.05);
+  EXPECT_TRUE(edt_ref::same_bits(got_f.phi, want_f.phi));
+  EXPECT_TRUE(edt_ref::same_bits(got_f.normal_x, want_f.normal_x));
+  EXPECT_TRUE(edt_ref::same_bits(got_f.normal_y, want_f.normal_y));
+}
+
+TEST(NavEdtExact, EmptyGridIsEmpty) {
+  EXPECT_TRUE(edt2_squared(nullptr, 0, 5).empty());
+  EXPECT_TRUE(edt2_squared(nullptr, 5, 0).empty());
+  const sdf_field f = build_sdf(nullptr, 0, 0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  EXPECT_TRUE(f.phi.empty() && f.normal_x.empty() && f.normal_y.empty());
 }
 
 // ─── build_sdf ──────────────────────────────────────────────────────────────
