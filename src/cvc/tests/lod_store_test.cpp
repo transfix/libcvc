@@ -360,6 +360,27 @@ TEST(LodStore, ConcurrentWritersAndReadersOnAPoolMatchSerial) {
   }
 }
 
+TEST(LodStore, BlobCarriesNoStrayMemoryAfterAStringAttribute) {
+  cvc::app ctx;
+  geometry m = bumpy_grid(ctx, 6);
+  const std::string hash = cvc::lod::mesh_content_hash(m);
+  ASSERT_EQ(hash.size(), 64u);
+  cvc::lod::scene_writer w(ctx);
+  w.write_mesh_pyramid("m", tagged_pyramid(ctx, 1), hash);
+  const std::vector<unsigned char> blob = w.to_blob();
+
+  // source_hash is a fixed 256-byte string attribute stored inline, so the
+  // blob holds the 64 hash characters and then 192 padding bytes. Those must
+  // be zeros, not whatever followed the hash in the writer's memory: a blob
+  // is meant to be sent over the network.
+  const std::string bytes(blob.begin(), blob.end());
+  const std::size_t at = bytes.find(hash);
+  ASSERT_NE(at, std::string::npos);
+  ASSERT_LE(at + 256, bytes.size());
+  for (std::size_t i = at + hash.size(); i < at + 256; ++i)
+    ASSERT_EQ(bytes[i], '\0') << "stray byte " << (i - at) << " after source_hash";
+}
+
 TEST(LodStore, MoveAssignReplacesTheContainer) {
   cvc::app ctx;
   cvc::lod::scene_writer a(ctx);

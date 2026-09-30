@@ -317,10 +317,15 @@ inline void setAttribute(const H5::H5Object &obj, const std::string &name, const
 // setAttribute
 // ---------------------
 // Purpose:
-//   Sets a string attribute on an object.
+//   Sets a string attribute on an object.  The attribute is a fixed
+//   ATTRIBUTE_STRING_MAXLEN-byte string; longer values are truncated.
 // ---- Change History ----
 // 12/29/2009 -- Joe R. -- Creation.
 // 06/24/2011 -- Joe R. -- Changed to specialized template
+// 09/29/2026 -- Joe R. -- Write from a zero-padded buffer.  HDF5 copies all
+//                         ATTRIBUTE_STRING_MAXLEN bytes, so handing it
+//                         value.c_str() read past the end of any shorter
+//                         value and stored whatever memory followed it.
 template <>
 inline void setAttribute<std::string>(const H5::H5Object &obj, const std::string &name,
                                       const std::string &value) {
@@ -336,7 +341,11 @@ inline void setAttribute<std::string>(const H5::H5Object &obj, const std::string
   DataSpace attrDS(1, dim);
   attr = obj.createAttribute(name, StrType(0, ATTRIBUTE_STRING_MAXLEN), attrDS);
 
-  attr.write(StrType(0, ATTRIBUTE_STRING_MAXLEN), value.c_str());
+  char cvalue[ATTRIBUTE_STRING_MAXLEN];
+  memset(cvalue, 0, sizeof(cvalue));
+  memcpy(cvalue, value.data(),
+         value.size() < ATTRIBUTE_STRING_MAXLEN ? value.size() : size_t(ATTRIBUTE_STRING_MAXLEN));
+  attr.write(StrType(0, ATTRIBUTE_STRING_MAXLEN), cvalue);
 }
 
 // ---------------------
