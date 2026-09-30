@@ -32,6 +32,7 @@
 #include <cvc/lod/store.h>
 #include <cvc/volume/hdf5_utils.h>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
 namespace cvc {
@@ -55,6 +56,15 @@ const char *kind_group(char kind) {
 }
 std::string asset_path(char kind, const std::string &name) {
   return std::string("/cvc/") + kind_group(kind) + "/" + name;
+}
+// H5Lexists FAILS, rather than answering false, when an intermediate group is
+// missing (e.g. "/cvc/geometry/x" in a container with no /cvc yet), so walk the
+// path one component at a time.
+bool path_exists(const H5File &f, const std::string &path) {
+  for (std::size_t pos = path.find('/', 1); pos != std::string::npos; pos = path.find('/', pos + 1))
+    if (!f.nameExists(path.substr(0, pos)))
+      return false;
+  return f.nameExists(path);
 }
 
 template <class T>
@@ -142,7 +152,7 @@ void write_mesh_into(H5File &f, const std::string &name, const mesh_pyramid &pyr
 mesh_pyramid read_mesh_from(app &ctx, H5File &f, const std::string &name) {
   mesh_pyramid out;
   const std::string base = asset_path('M', name);
-  if (!f.nameExists("/cvc/geometry") || !f.nameExists(base))
+  if (!path_exists(f, base))
     throw hdf5_exception("lod::read_mesh_pyramid: no mesh pyramid '" + name + "'");
   boost::shared_ptr<Group> ag = hu::getGroup(f, base, false);
   int nrungs = 0;
@@ -220,7 +230,7 @@ void write_image_into(H5File &f, const std::string &name, const image_pyramid &p
 image_pyramid read_image_from(H5File &f, const std::string &name) {
   image_pyramid out;
   const std::string base = asset_path('I', name);
-  if (!f.nameExists("/cvc/images") || !f.nameExists(base))
+  if (!path_exists(f, base))
     throw hdf5_exception("lod::read_image_pyramid: no image pyramid '" + name + "'");
   boost::shared_ptr<Group> ag = hu::getGroup(f, base, false);
   int nrungs = 0;
@@ -247,7 +257,7 @@ std::vector<lod_index_entry> read_index_from(H5File &f) {
   const char kinds[3] = {'M', 'I', 'V'};
   for (char kind : kinds) {
     std::string kg = std::string("/cvc/") + kind_group(kind);
-    if (!f.nameExists("/cvc") || !f.nameExists(kg))
+    if (!path_exists(f, kg))
       continue;
     Group g = f.openGroup(kg);
     const hsize_t n = g.getNumObjs();
@@ -272,6 +282,43 @@ std::vector<lod_index_entry> read_index_from(H5File &f) {
   return out;
 }
 
+// ── error boundary ──
+// H5::Exception does not derive from std::exception, so one escaping a public
+// call slips past every `catch (const std::exception &)` (cvc-lod-bake's
+// included). Each public entry point runs its HDF5 work through guarded(), which
+// rethrows it as cvc::hdf5_exception -- what the rest of hdf5_utils reports --
+// naming the call, the file and HDF5's own reason. Both run with the library
+// lock held: reading the error stack is itself an HDF5 call.
+
+herr_t innermost_error(unsigned n, const H5E_error2_t *err, void *out) {
+  if (n == 0 && err && err->desc)
+    *static_cast<std::string *>(out) = err->desc;
+  return 0;
+}
+
+hdf5_exception h5_failure(const char *call, const std::string &file, const H5::Exception &e) {
+  // The wrapper's text ("H5Fopen failed") says little; the innermost entry of
+  // HDF5's error stack ("file signature not found") says why. Any later HDF5
+  // call -- a handle closed while unwinding -- clears that stack, so this is
+  // best-effort unless called right at the failure.
+  std::string cause;
+  H5Ewalk2(H5E_DEFAULT, H5E_WALK_UPWARD, innermost_error, &cause);
+  std::string msg =
+      std::string(call) + " '" + file + "': " + e.getFuncName() + ": " + e.getDetailMsg();
+  if (!cause.empty())
+    msg += " (" + cause + ")";
+  return hdf5_exception(msg);
+}
+
+template <class F>
+auto guarded(const char *call, const std::string &file, F &&fn) -> decltype(fn()) {
+  try {
+    return fn();
+  } catch (const H5::Exception &e) {
+    throw h5_failure(call, file, e);
+  }
+}
+
 // ── backings ──
 
 // A name no other open HDF5 file in this process can have. HDF5 knows an open
@@ -291,20 +338,32 @@ std::string unique_core_name(const char *what) {
   return os.str();
 }
 
+// The core-VFD opens report their own failure: closing `fapl` on the way out
+// would clear HDF5's error stack before guarded() could read it.
 boost::shared_ptr<H5File> open_memory(const std::string &name) {
   FileAccPropList fapl;
   fapl.setCore(64u * 1024u, /*backing_store=*/false);
-  return boost::make_shared<H5File>(name, H5F_ACC_TRUNC, FileCreatPropList::DEFAULT, fapl);
+  try {
+    return boost::make_shared<H5File>(name, H5F_ACC_TRUNC, FileCreatPropList::DEFAULT, fapl);
+  } catch (const H5::Exception &e) {
+    throw h5_failure("lod::scene_writer", name, e);
+  }
 }
 boost::shared_ptr<H5File> open_blob(const std::string &name, const unsigned char *bytes,
                                     std::size_t n) {
+  if (!bytes || n == 0)
+    throw hdf5_exception("lod::scene_reader: empty blob");
   FileAccPropList fapl;
   fapl.setCore(64u * 1024u, /*backing_store=*/false);
   // Supply the in-RAM image so the "file" is exactly these bytes (no temp file).
   // HDF5 copies them, so the caller's buffer need not outlive the reader.
   if (H5Pset_file_image(fapl.getId(), const_cast<unsigned char *>(bytes), n) < 0)
     throw hdf5_exception("lod::store: H5Pset_file_image failed");
-  return boost::make_shared<H5File>(name, H5F_ACC_RDONLY, FileCreatPropList::DEFAULT, fapl);
+  try {
+    return boost::make_shared<H5File>(name, H5F_ACC_RDONLY, FileCreatPropList::DEFAULT, fapl);
+  } catch (const H5::Exception &e) {
+    throw h5_failure("lod::scene_reader", name, e);
+  }
 }
 std::vector<unsigned char> file_image(H5File &f) {
   f.flush(H5F_SCOPE_GLOBAL);
@@ -316,6 +375,21 @@ std::vector<unsigned char> file_image(H5File &f) {
   if (H5Fget_file_image(f.getId(), buf.data(), len) < 0)
     throw hdf5_exception("lod::store: H5Fget_file_image failed");
   return buf;
+}
+
+// Destroys `p` -- closing its HDF5 file -- under the library lock, since
+// H5Fclose is an entry into HDF5 like any other (hdf5_utils.h, library_lock).
+// Never throws: were the lock ever unobtainable, the handle is leaked rather
+// than closed unlocked, and HDF5 closes it at exit.
+template <class Impl> void release_locked(std::unique_ptr<Impl> &p) noexcept {
+  if (!p)
+    return; // moved-from
+  try {
+    hu::library_lock lock(p->ctx, p->key, "cvc::lod::store close");
+    p.reset();
+  } catch (...) {
+    static_cast<void>(p.release());
+  }
 }
 
 } // namespace
@@ -337,33 +411,44 @@ scene_writer::scene_writer(app &ctx) {
   const std::string name = unique_core_name("mem");
   hu::library_lock lock(ctx, name, "cvc::lod::scene_writer(memory)");
   H5::Exception::dontPrint();
-  _p.reset(new impl(ctx, open_memory(name), name));
+  _p.reset(
+      new impl(ctx, guarded("lod::scene_writer", name, [&] { return open_memory(name); }), name));
 }
 scene_writer::scene_writer(app &ctx, const std::string &path) {
   hu::library_lock lock(ctx, path, "cvc::lod::scene_writer(file)");
   H5::Exception::dontPrint();
-  _p.reset(new impl(ctx, hu::getH5File(path, /*create-or-open, preserving*/ false), path));
+  // create-or-open, preserving prior assets
+  _p.reset(new impl(
+      ctx, guarded("lod::scene_writer", path, [&] { return hu::getH5File(path, false); }), path));
 }
-scene_writer::~scene_writer() = default;
+scene_writer::~scene_writer() { release_locked(_p); }
 scene_writer::scene_writer(scene_writer &&) noexcept = default;
-scene_writer &scene_writer::operator=(scene_writer &&) noexcept = default;
+scene_writer &scene_writer::operator=(scene_writer &&o) noexcept {
+  if (this != &o) {
+    release_locked(_p); // a defaulted move would close the old file unlocked
+    _p = std::move(o._p);
+  }
+  return *this;
+}
 
 void scene_writer::write_mesh_pyramid(const std::string &name, const mesh_pyramid &pyr,
                                       const std::string &source_hash) {
   hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_writer::write_mesh_pyramid");
   H5::Exception::dontPrint();
-  write_mesh_into(*_p->f, name, pyr, source_hash);
+  guarded("lod::scene_writer::write_mesh_pyramid", _p->key,
+          [&] { write_mesh_into(*_p->f, name, pyr, source_hash); });
 }
 void scene_writer::write_image_pyramid(const std::string &name, const image_pyramid &pyr,
                                        const std::string &source_hash) {
   hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_writer::write_image_pyramid");
   H5::Exception::dontPrint();
-  write_image_into(*_p->f, name, pyr, source_hash);
+  guarded("lod::scene_writer::write_image_pyramid", _p->key,
+          [&] { write_image_into(*_p->f, name, pyr, source_hash); });
 }
 std::vector<unsigned char> scene_writer::to_blob() {
   hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_writer::to_blob");
   H5::Exception::dontPrint();
-  return file_image(*_p->f);
+  return guarded("lod::scene_writer::to_blob", _p->key, [&] { return file_image(*_p->f); });
 }
 
 // ── scene_reader ──
@@ -377,32 +462,42 @@ struct scene_reader::impl {
 scene_reader::scene_reader(app &ctx, const std::string &path) {
   hu::library_lock lock(ctx, path, "cvc::lod::scene_reader(file)");
   H5::Exception::dontPrint();
-  _p.reset(new impl(ctx, hu::getH5File(path, false), path));
+  _p.reset(new impl(
+      ctx, guarded("lod::scene_reader", path, [&] { return hu::getH5File(path, false); }), path));
 }
 scene_reader::scene_reader(app &ctx, const unsigned char *bytes, std::size_t n) {
   const std::string name = unique_core_name("blob");
   hu::library_lock lock(ctx, name, "cvc::lod::scene_reader(blob)");
   H5::Exception::dontPrint();
-  _p.reset(new impl(ctx, open_blob(name, bytes, n), name));
+  _p.reset(new impl(
+      ctx, guarded("lod::scene_reader", name, [&] { return open_blob(name, bytes, n); }), name));
 }
-scene_reader::~scene_reader() = default;
+scene_reader::~scene_reader() { release_locked(_p); }
 scene_reader::scene_reader(scene_reader &&) noexcept = default;
-scene_reader &scene_reader::operator=(scene_reader &&) noexcept = default;
+scene_reader &scene_reader::operator=(scene_reader &&o) noexcept {
+  if (this != &o) {
+    release_locked(_p); // a defaulted move would close the old file unlocked
+    _p = std::move(o._p);
+  }
+  return *this;
+}
 
 mesh_pyramid scene_reader::read_mesh_pyramid(const std::string &name) {
   hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_reader::read_mesh_pyramid");
   H5::Exception::dontPrint();
-  return read_mesh_from(_p->ctx, *_p->f, name);
+  return guarded("lod::scene_reader::read_mesh_pyramid", _p->key,
+                 [&] { return read_mesh_from(_p->ctx, *_p->f, name); });
 }
 image_pyramid scene_reader::read_image_pyramid(const std::string &name) {
   hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_reader::read_image_pyramid");
   H5::Exception::dontPrint();
-  return read_image_from(*_p->f, name);
+  return guarded("lod::scene_reader::read_image_pyramid", _p->key,
+                 [&] { return read_image_from(*_p->f, name); });
 }
 std::vector<lod_index_entry> scene_reader::index() {
   hu::library_lock lock(_p->ctx, _p->key, "cvc::lod::scene_reader::index");
   H5::Exception::dontPrint();
-  return read_index_from(*_p->f);
+  return guarded("lod::scene_reader::index", _p->key, [&] { return read_index_from(*_p->f); });
 }
 bool scene_reader::has(const std::string &name, const std::string &source_hash) {
   try {

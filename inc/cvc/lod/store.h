@@ -46,6 +46,13 @@
 // content hash on the SOURCE asset lets a bake step skip a pyramid already present
 // and current (has_pyramid / has). Requires CVC_USING_HDF5.
 //
+// Any number of writers and readers, in-memory or not, may be alive at once and
+// used from any thread; each in-memory container is its own. Every call goes
+// through the process-wide hdf5_utils::library_lock (destruction included), so
+// a writer/reader must not outlive its app. Failures -- a corrupt or truncated
+// file or blob, an absent asset -- throw cvc::hdf5_exception, a std::exception;
+// HDF5's own H5::Exception never escapes.
+//
 // LOD is a render proxy: a scene.cvch5 never feeds a nav/material/RF path.
 
 #ifndef __CVC_LOD_STORE_H__

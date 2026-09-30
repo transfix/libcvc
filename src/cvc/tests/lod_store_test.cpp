@@ -4,8 +4,9 @@
 // assert the rungs (positions, triangles, pixels, world-error ladder) survive
 // bit-for-bit; then that read_lod_index() enumerates both assets and has_pyramid()
 // honours the content hash. Then that in-memory writers and blob readers alive at
-// the same time (also concurrently on a pool) each keep their own container.
-// HDF5-only (gated in CMake by CVC_USING_HDF5).
+// the same time (also concurrently on a pool) each keep their own container, and
+// that corrupt, empty or truncated blobs surface as std::exception. HDF5-only
+// (gated in CMake by CVC_USING_HDF5).
 
 #include <cmath>
 #include <cstddef>
@@ -100,6 +101,22 @@ std::pair<std::vector<std::string>, std::vector<double>> contents(cvc::lod::scen
   if (r.has(tagged_name(tag)))
     fp = fingerprint(r.read_mesh_pyramid(tagged_name(tag)));
   return {names, fp};
+}
+
+// Runs `fn`, which must fail, and returns the what() of the std::exception it
+// threw. H5::Exception is NOT a std::exception, so one leaking out of the store
+// fails here instead of slipping past a caller's catch (const std::exception &).
+template <class F> std::string std_error_of(F &&fn) {
+  try {
+    fn();
+  } catch (const std::exception &e) {
+    return e.what();
+  } catch (...) {
+    ADD_FAILURE() << "threw something that is not a std::exception";
+    return std::string();
+  }
+  ADD_FAILURE() << "did not throw";
+  return std::string();
 }
 
 } // namespace
@@ -334,4 +351,62 @@ TEST(LodStore, ConcurrentWritersAndReadersOnAPoolMatchSerial) {
     EXPECT_EQ(got[i].first, std::vector<std::string>{tagged_name(i)}) << "tag " << i;
     EXPECT_EQ(got[i].second, serial[i]) << "tag " << i;
   }
+}
+
+TEST(LodStore, MoveAssignReplacesTheContainer) {
+  cvc::app ctx;
+  cvc::lod::scene_writer a(ctx);
+  a.write_mesh_pyramid(tagged_name(5), tagged_pyramid(ctx, 5));
+  cvc::lod::scene_writer b(ctx);
+  b.write_mesh_pyramid(tagged_name(6), tagged_pyramid(ctx, 6));
+  a = std::move(b); // a's old container is closed; a now owns b's
+  const std::vector<unsigned char> blob = a.to_blob();
+
+  cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+  cvc::lod::scene_reader moved(std::move(r));
+  const auto c = contents(moved, 6);
+  EXPECT_EQ(c.first, std::vector<std::string>{tagged_name(6)});
+  EXPECT_EQ(c.second, fingerprint(tagged_pyramid(ctx, 6)));
+}
+
+// ── failures surface as std::exception, and a reader never damages a file ────
+
+TEST(LodStore, CorruptBlobThrowsStdException) {
+  cvc::app ctx;
+  std::vector<unsigned char> garbage(4096);
+  for (std::size_t i = 0; i < garbage.size(); ++i)
+    garbage[i] = static_cast<unsigned char>((i * 131 + 7) & 0xff);
+  EXPECT_FALSE(std_error_of([&] {
+                 cvc::lod::scene_reader r(ctx, garbage.data(), garbage.size());
+                 r.index();
+               }).empty());
+
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::scene_reader r(ctx, nullptr, 0); }).empty());
+
+  // A real image cut short: the superblock promises bytes that are not there.
+  std::vector<unsigned char> cut = tagged_blob(ctx, 7);
+  cut.resize(cut.size() / 2);
+  EXPECT_FALSE(std_error_of([&] {
+                 cvc::lod::scene_reader r(ctx, cut.data(), cut.size());
+                 r.read_mesh_pyramid(tagged_name(7));
+               }).empty());
+
+  // An in-range lookup failure is reported the same way.
+  const std::vector<unsigned char> blob = tagged_blob(ctx, 8);
+  cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+  EXPECT_FALSE(std_error_of([&] { r.read_mesh_pyramid("absent"); }).empty());
+  EXPECT_FALSE(std_error_of([&] { r.read_image_pyramid(tagged_name(8)); }).empty());
+
+  // ... including in a container with no /cvc group at all, where the lookup
+  // must say the asset is absent rather than fail inside HDF5's path walk.
+  std::vector<unsigned char> empty;
+  {
+    cvc::lod::scene_writer w(ctx);
+    empty = w.to_blob();
+  }
+  cvc::lod::scene_reader re(ctx, empty.data(), empty.size());
+  EXPECT_TRUE(re.index().empty());
+  EXPECT_FALSE(re.has("absent"));
+  const std::string msg = std_error_of([&] { re.read_mesh_pyramid("absent"); });
+  EXPECT_NE(msg.find("no mesh pyramid 'absent'"), std::string::npos) << msg;
 }
