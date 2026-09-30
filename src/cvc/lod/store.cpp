@@ -21,7 +21,10 @@
 
 #include <H5Cpp.h>
 #include <algorithm>
+#include <atomic>
 #include <boost/make_shared.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
@@ -29,6 +32,7 @@
 #include <cvc/lod/store.h>
 #include <cvc/volume/hdf5_utils.h>
 #include <fstream>
+#include <sstream>
 
 namespace cvc {
 namespace lod {
@@ -269,20 +273,38 @@ std::vector<lod_index_entry> read_index_from(H5File &f) {
 }
 
 // ── backings ──
-boost::shared_ptr<H5File> open_memory() {
+
+// A name no other open HDF5 file in this process can have. HDF5 knows an open
+// file only by what its driver compares, and the core VFD with no backing file
+// compares NAMES (strcmp). A second open of a name already open is handed the
+// first file's shared state: with one fixed name, a second live in-memory
+// writer fails (HDF5 won't truncate an open file) and a second blob reader
+// silently reads the FIRST blob's bytes. The atomic counter makes every name
+// unique across threads; the counter's own address keeps two statically linked
+// copies of libcvc that share one HDF5 apart. Nothing is created on disk
+// (backing_store is off) -- the name is only an identity.
+std::string unique_core_name(const char *what) {
+  static std::atomic<std::uint64_t> counter(0);
+  std::ostringstream os;
+  os << "cvc-lod-" << what << '-' << static_cast<const void *>(&counter) << '-'
+     << counter.fetch_add(1, std::memory_order_relaxed) << ".cvch5";
+  return os.str();
+}
+
+boost::shared_ptr<H5File> open_memory(const std::string &name) {
   FileAccPropList fapl;
   fapl.setCore(64u * 1024u, /*backing_store=*/false);
-  return boost::make_shared<H5File>("cvc-lod-mem.cvch5", H5F_ACC_TRUNC, FileCreatPropList::DEFAULT,
-                                    fapl);
+  return boost::make_shared<H5File>(name, H5F_ACC_TRUNC, FileCreatPropList::DEFAULT, fapl);
 }
-boost::shared_ptr<H5File> open_blob(const unsigned char *bytes, std::size_t n) {
+boost::shared_ptr<H5File> open_blob(const std::string &name, const unsigned char *bytes,
+                                    std::size_t n) {
   FileAccPropList fapl;
   fapl.setCore(64u * 1024u, /*backing_store=*/false);
   // Supply the in-RAM image so the "file" is exactly these bytes (no temp file).
+  // HDF5 copies them, so the caller's buffer need not outlive the reader.
   if (H5Pset_file_image(fapl.getId(), const_cast<unsigned char *>(bytes), n) < 0)
     throw hdf5_exception("lod::store: H5Pset_file_image failed");
-  return boost::make_shared<H5File>("cvc-lod-blob.cvch5", H5F_ACC_RDONLY,
-                                    FileCreatPropList::DEFAULT, fapl);
+  return boost::make_shared<H5File>(name, H5F_ACC_RDONLY, FileCreatPropList::DEFAULT, fapl);
 }
 std::vector<unsigned char> file_image(H5File &f) {
   f.flush(H5F_SCOPE_GLOBAL);
@@ -312,9 +334,10 @@ struct scene_writer::impl {
 };
 
 scene_writer::scene_writer(app &ctx) {
-  hu::library_lock lock(ctx, "<cvc-lod-memory>", "cvc::lod::scene_writer(memory)");
+  const std::string name = unique_core_name("mem");
+  hu::library_lock lock(ctx, name, "cvc::lod::scene_writer(memory)");
   H5::Exception::dontPrint();
-  _p.reset(new impl(ctx, open_memory(), "<cvc-lod-memory>"));
+  _p.reset(new impl(ctx, open_memory(name), name));
 }
 scene_writer::scene_writer(app &ctx, const std::string &path) {
   hu::library_lock lock(ctx, path, "cvc::lod::scene_writer(file)");
@@ -357,9 +380,10 @@ scene_reader::scene_reader(app &ctx, const std::string &path) {
   _p.reset(new impl(ctx, hu::getH5File(path, false), path));
 }
 scene_reader::scene_reader(app &ctx, const unsigned char *bytes, std::size_t n) {
-  hu::library_lock lock(ctx, "<cvc-lod-blob>", "cvc::lod::scene_reader(blob)");
+  const std::string name = unique_core_name("blob");
+  hu::library_lock lock(ctx, name, "cvc::lod::scene_reader(blob)");
   H5::Exception::dontPrint();
-  _p.reset(new impl(ctx, open_blob(bytes, n), "<cvc-lod-blob>"));
+  _p.reset(new impl(ctx, open_blob(name, bytes, n), name));
 }
 scene_reader::~scene_reader() = default;
 scene_reader::scene_reader(scene_reader &&) noexcept = default;

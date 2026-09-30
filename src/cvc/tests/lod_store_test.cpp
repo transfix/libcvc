@@ -3,19 +3,26 @@
 // Build mesh + image pyramids, write them to an HDF5 file, read them back, and
 // assert the rungs (positions, triangles, pixels, world-error ladder) survive
 // bit-for-bit; then that read_lod_index() enumerates both assets and has_pyramid()
-// honours the content hash. HDF5-only (gated in CMake by CVC_USING_HDF5).
+// honours the content hash. Then that in-memory writers and blob readers alive at
+// the same time (also concurrently on a pool) each keep their own container.
+// HDF5-only (gated in CMake by CVC_USING_HDF5).
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cvc/core/app.h>
+#include <cvc/core/thread_pool.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/image/image.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/lod/store.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 using cvc::geometry;
 using cvc::image;
@@ -42,9 +49,57 @@ geometry bumpy_grid(cvc::app &ctx, int n) {
   return g;
 }
 
+// Per-test, because ctest runs each discovered test in its own process in
+// parallel: a name shared by every test lets one test's file clobber another's.
 std::string tmp_h5() {
   return std::string(::testing::TempDir()) + "/lod_store_test_" +
+         ::testing::UnitTest::GetInstance()->current_test_info()->name() + "_" +
          std::to_string(::testing::UnitTest::GetInstance()->random_seed()) + ".cvch5";
+}
+
+// A one-rung mesh pyramid named by, and carrying, `tag` in every x coordinate,
+// so a reader that hands back another container's bytes is caught by value and
+// by name, not just by a count that might coincide.
+cvc::lod::mesh_pyramid tagged_pyramid(cvc::app &ctx, int tag) {
+  geometry g = bumpy_grid(ctx, 5 + tag % 4);
+  for (auto &p : g.points())
+    p[0] += 1000.0 * tag;
+  cvc::lod::mesh_pyramid pyr;
+  pyr.rungs.push_back(g);
+  pyr.world_error_m.push_back(0.25 * tag);
+  return pyr;
+}
+std::string tagged_name(int tag) { return "asset_" + std::to_string(tag); }
+
+// Everything a round trip must preserve, flattened for one EXPECT_EQ.
+std::vector<double> fingerprint(const cvc::lod::mesh_pyramid &pyr) {
+  std::vector<double> f;
+  for (std::size_t k = 0; k < pyr.rungs.size(); ++k) {
+    f.push_back(pyr.world_error_m[k]);
+    for (const auto &p : pyr.rungs[k].const_points())
+      f.insert(f.end(), {p[0], p[1], p[2]});
+    for (const auto &t : pyr.rungs[k].const_tris())
+      f.insert(f.end(), {double(t[0]), double(t[1]), double(t[2])});
+  }
+  return f;
+}
+
+std::vector<unsigned char> tagged_blob(cvc::app &ctx, int tag) {
+  cvc::lod::scene_writer w(ctx);
+  w.write_mesh_pyramid(tagged_name(tag), tagged_pyramid(ctx, tag));
+  return w.to_blob();
+}
+
+// What `r` holds, as (index names, fingerprint of the one tagged asset).
+std::pair<std::vector<std::string>, std::vector<double>> contents(cvc::lod::scene_reader &r,
+                                                                  int tag) {
+  std::vector<std::string> names;
+  for (const auto &e : r.index())
+    names.push_back(e.name);
+  std::vector<double> fp;
+  if (r.has(tagged_name(tag)))
+    fp = fingerprint(r.read_mesh_pyramid(tagged_name(tag)));
+  return {names, fp};
 }
 
 } // namespace
@@ -196,4 +251,87 @@ TEST(LodStore, BakeMeshAssetSkipsWhenCurrent) {
   geometry m2 = bumpy_grid(ctx, 26);                                  // different content
   EXPECT_TRUE(cvc::lod::bake_mesh_asset(ctx, file, "buildings", m2)); // new hash -> rebaked
   std::remove(file.c_str());
+}
+
+// ── in-memory containers are independent (core-VFD file identity) ──────────
+
+TEST(LodStore, TwoLiveInMemoryWritersKeepTheirOwnContent) {
+  cvc::app ctx;
+  // Both alive at once: each must be its own container, not a second handle on
+  // (or a refused truncate of) the first.
+  cvc::lod::scene_writer a(ctx);
+  cvc::lod::scene_writer b(ctx);
+  a.write_mesh_pyramid(tagged_name(1), tagged_pyramid(ctx, 1));
+  b.write_mesh_pyramid(tagged_name(2), tagged_pyramid(ctx, 2));
+  const std::vector<unsigned char> blob_a = a.to_blob();
+  const std::vector<unsigned char> blob_b = b.to_blob();
+  ASSERT_FALSE(blob_a.empty());
+  ASSERT_FALSE(blob_b.empty());
+  EXPECT_NE(blob_a, blob_b);
+
+  cvc::lod::scene_reader ra(ctx, blob_a.data(), blob_a.size());
+  const auto ca = contents(ra, 1);
+  EXPECT_EQ(ca.first, std::vector<std::string>{tagged_name(1)});
+  EXPECT_EQ(ca.second, fingerprint(tagged_pyramid(ctx, 1)));
+  cvc::lod::scene_reader rb(ctx, blob_b.data(), blob_b.size());
+  const auto cb = contents(rb, 2);
+  EXPECT_EQ(cb.first, std::vector<std::string>{tagged_name(2)});
+  EXPECT_EQ(cb.second, fingerprint(tagged_pyramid(ctx, 2)));
+}
+
+TEST(LodStore, TwoLiveBlobReadersDoNotAlias) {
+  cvc::app ctx;
+  const std::vector<unsigned char> blob_a = tagged_blob(ctx, 3);
+  const std::vector<unsigned char> blob_b = tagged_blob(ctx, 4);
+
+  // Open B while A is still open, then read both: B must see B's bytes, not the
+  // container A already registered.
+  cvc::lod::scene_reader ra(ctx, blob_a.data(), blob_a.size());
+  cvc::lod::scene_reader rb(ctx, blob_b.data(), blob_b.size());
+  const auto cb = contents(rb, 4);
+  EXPECT_EQ(cb.first, std::vector<std::string>{tagged_name(4)});
+  EXPECT_EQ(cb.second, fingerprint(tagged_pyramid(ctx, 4)));
+  const auto ca = contents(ra, 3);
+  EXPECT_EQ(ca.first, std::vector<std::string>{tagged_name(3)});
+  EXPECT_EQ(ca.second, fingerprint(tagged_pyramid(ctx, 3)));
+
+  // The reader keeps its own copy: the blob may go away once it is open.
+  std::unique_ptr<cvc::lod::scene_reader> rc;
+  {
+    const std::vector<unsigned char> transient = tagged_blob(ctx, 5);
+    rc.reset(new cvc::lod::scene_reader(ctx, transient.data(), transient.size()));
+  }
+  EXPECT_EQ(contents(*rc, 5).second, fingerprint(tagged_pyramid(ctx, 5)));
+}
+
+TEST(LodStore, ConcurrentWritersAndReadersOnAPoolMatchSerial) {
+  cvc::app ctx;
+  const int n = 16;
+
+  // Serial reference: write, reopen, read back, one container at a time.
+  std::vector<std::vector<double>> serial(n);
+  for (int i = 0; i < n; ++i) {
+    const std::vector<unsigned char> blob = tagged_blob(ctx, i);
+    cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+    serial[i] = contents(r, i).second;
+    ASSERT_EQ(serial[i], fingerprint(tagged_pyramid(ctx, i))) << "tag " << i;
+  }
+
+  // The same on a pool, with many writers and then many readers alive at once
+  // and closed concurrently.
+  cvc::thread_pool pool(4);
+  std::vector<std::vector<unsigned char>> blobs(n);
+  pool.parallel_for(n, [&](int i) { blobs[i] = tagged_blob(ctx, i); });
+  std::vector<std::unique_ptr<cvc::lod::scene_reader>> readers(n);
+  pool.parallel_for(n, [&](int i) {
+    readers[i].reset(new cvc::lod::scene_reader(ctx, blobs[i].data(), blobs[i].size()));
+  });
+  std::vector<std::pair<std::vector<std::string>, std::vector<double>>> got(n);
+  pool.parallel_for(n, [&](int i) { got[i] = contents(*readers[i], i); });
+  pool.parallel_for(n, [&](int i) { readers[i].reset(); });
+
+  for (int i = 0; i < n; ++i) {
+    EXPECT_EQ(got[i].first, std::vector<std::string>{tagged_name(i)}) << "tag " << i;
+    EXPECT_EQ(got[i].second, serial[i]) << "tag " << i;
+  }
 }
