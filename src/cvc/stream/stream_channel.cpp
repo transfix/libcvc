@@ -30,9 +30,10 @@ void subscription::deliver(const frame_ptr &f) {
       ring_->push(f); // drop_oldest: never blocks, bumps total_dropped_oldest() on overflow
     return;
   }
-  // latest register: publish the freshest frame with one atomic swap; if it
-  // superseded an unread frame, count it as an overwrite (a "drop" for this
-  // freshest-wins subscriber).
+  // latest register: publish the freshest frame with one atomic swap. Count
+  // every supersession of a non-null slot as an overwrite (telemetry: an upper
+  // bound on frames this freshest-wins subscriber skipped — read state is not
+  // tracked, so a frame the consumer already sampled still counts).
   frame_ptr prev = std::atomic_exchange(&latest_, f);
   if (prev)
     overwrites_.fetch_add(1, std::memory_order_relaxed);

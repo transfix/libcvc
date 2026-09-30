@@ -79,6 +79,7 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
   }
 
   s->update_stats();
+  s->live_ = true; // fully constructed: the "closed" teardown is now this stream's to post
   s->post_lifecycle("live");
   return s;
 }
@@ -128,6 +129,17 @@ void stream::close() {
   if (channel_)
     channel_->close(); // unblock parked ring consumers
   stream_registry::for_app(ctx_).uninstall(token_, channel_ ? channel_.get() : nullptr);
+  // Only a stream that actually went live owns the "closed" transition on the
+  // (id-shared) evt/seq channels + descriptor. A failed open() tears down
+  // silently so it cannot disturb an already-live stream of the same id.
+  if (!live_)
+    return;
+  // Flush the final seq the heartbeat throttle may have withheld, so a receiver
+  // sees the last frame index before the "closed" event.
+  if (pending_seq_.load(std::memory_order_relaxed) >= 0)
+    ctx_.exec_scheduler().post_message(
+        seq_channel_, cvc::state_exec::value_t(
+                          static_cast<int64_t>(pending_seq_.load(std::memory_order_relaxed))));
   if (descriptor_) {
     try {
       descriptor_->value("closed");

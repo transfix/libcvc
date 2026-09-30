@@ -57,6 +57,7 @@ public:
   // slab_count is clamped to >= 1 and slab_bytes to >= 1 so a degenerate size
   // never yields a zero-capacity buffer.
   static std::shared_ptr<frame_pool> create(std::size_t slab_bytes, std::size_t slab_count);
+  ~frame_pool();
 
   frame_pool(const frame_pool &) = delete;
   frame_pool &operator=(const frame_pool &) = delete;

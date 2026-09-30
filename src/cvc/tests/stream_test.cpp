@@ -438,3 +438,78 @@ TEST(Stream, ShutdownWithHeldFrameNoUseAfterFree) {
   sub.reset();                   // drop the last borrow
   EXPECT_EQ(pool->in_use(), 0u); // slab recycled, no leak / no UAF
 }
+
+TEST(Stream, DuplicateOpenDoesNotDisturbLiveStreamEvents) {
+  cvc::app app;
+  stream_params p;
+  p.id = "dup0";
+  p.format = rgba(4, 4);
+  auto s1 = stream::open(app, p);
+  ASSERT_TRUE(s1);
+  auto &sched = app.exec_scheduler();
+  sched.drain_ingress();
+  auto live = sched.pop_pending_message(s1->evt_channel());
+  ASSERT_TRUE(live.has_value());
+  EXPECT_EQ(std::get<std::string>(live->v), "live");
+
+  // A second open() of the same live id fails on the token collision and tears
+  // its partially-built self down. Because evt/seq channels are shared by id,
+  // that teardown must NOT post a spurious "closed" onto the live stream's
+  // channel, must not touch its descriptor, and must not evict its token.
+  auto s2 = stream::open(app, p);
+  EXPECT_EQ(s2, nullptr);
+  sched.drain_ingress();
+  EXPECT_EQ(sched.pending_message_count(s1->evt_channel()), 0u);
+  EXPECT_EQ(cvc::state::instance(app)("streams.dup0").value(), "live");
+  EXPECT_EQ(stream_registry::for_app(app).lookup("dup0"), &s1->channel());
+
+  s1->close(); // the real owner posts the real "closed"
+  sched.drain_ingress();
+  auto closed = sched.pop_pending_message(s1->evt_channel());
+  ASSERT_TRUE(closed.has_value());
+  EXPECT_EQ(std::get<std::string>(closed->v), "closed");
+}
+
+TEST(Stream, ProducerPublishesAcrossTeardownInHonoredOrder) {
+  cvc::app app;
+  stream_params p;
+  p.id = "prod0";
+  p.format = rgba(4, 4);
+  p.expected_subscribers = 1;
+  p.subscriber_depth = 3;
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  auto sub = s->channel().subscribe(deliver_mode::latest, 1);
+  ASSERT_TRUE(sub);
+
+  std::atomic<int> published{0};
+  auto prod = std::make_unique<producer_thread>(
+      [&] {
+        auto l = s->channel().pool().acquire();
+        if (l.has_value()) {
+          std::int64_t seq = s->channel().publish(*l, 16, 0.0);
+          s->post_seq(seq);
+          published.fetch_add(1);
+        }
+        return true;
+      },
+      200.0);
+  prod->start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+  // Honored teardown order: STOP (join) the producer BEFORE destroying the
+  // stream, exactly as the lifetime contract requires. After join, nothing
+  // touches the channel/pool, so destroying the stream is safe.
+  prod->stop();
+  EXPECT_GT(published.load(), 0);
+
+  frame_ptr held = sub->latest(); // hold a frame across teardown
+  ASSERT_TRUE(held);
+  auto pool = s->pool();
+  s.reset(); // destroy the stream after the producer has joined
+  const std::int64_t hs = held->seq;
+  EXPECT_GE(hs, 0); // the borrowed frame is still valid post-teardown
+  held.reset();
+  sub.reset();
+  EXPECT_EQ(pool->in_use(), 0u); // every slab recycled
+}

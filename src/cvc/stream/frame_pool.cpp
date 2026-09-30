@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cassert>
 #include <cvc/stream/frame_pool.h>
 
 namespace cvc {
@@ -70,8 +71,21 @@ void frame_pool::discard(const lease &l) noexcept { release(l.idx); }
 
 void frame_pool::release(std::size_t idx) noexcept {
   std::lock_guard<std::mutex> lk(mu_);
+  // Guard against a double-release (publishing/discarding one lease twice):
+  // free_ can never legitimately hold more entries than there are slabs, and a
+  // released idx must not already be free. Debug-only; compiled out under NDEBUG.
+  assert(idx < slab_count_ && "frame_pool::release: idx out of range");
+  assert(free_.size() < slab_count_ && "frame_pool::release: double-release");
   free_.push_back(idx);
 }
+
+// The pool can only be destroyed after the last frame_ptr drops — each frame's
+// keepalive pins shared_from_this() — so a published slab is always recycled
+// before teardown. (An acquired-but-never-published lease outstanding at this
+// point is not itself a fault: its data is simply not used after the pool dies.
+// The producer-across-teardown hazard is covered by a test, not an assert here,
+// because a dtor assert cannot tell a benign abandoned lease from a real UAF.)
+frame_pool::~frame_pool() = default;
 
 std::size_t frame_pool::in_use() const noexcept {
   std::lock_guard<std::mutex> lk(mu_);

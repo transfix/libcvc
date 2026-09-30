@@ -107,6 +107,12 @@ private:
   std::vector<state::state_ptr> descriptor_pins_; // root-child..node ancestor pins (H1)
   state::handle descriptor_;
   state::handle stats_node_;
+  // True only after a fully successful open(). A failed open() (token collision
+  // or descriptor-build throw) destroys a partially-built stream whose evt/seq
+  // channels are SHARED by id with any already-live stream of that id; gating
+  // the "closed" side effects on live_ keeps that failure from posting a
+  // spurious "closed"/final-seq onto a live stream's channel.
+  bool live_ = false;
   std::atomic<bool> closed_{false};
 };
 
