@@ -850,11 +850,11 @@ TEST(LodTiles, ExtremeCoordinatesSaturateDeterministically) {
   cvc::app ctx;
   // Coordinates far beyond the int64 cell / lattice range saturate rather than
   // overflow, so they still partition and hash the same way every time.
-  const geometry far = one_triangle(ctx, 1e300, 2e300);
-  const geometry nfar = one_triangle(ctx, -2e300, -1e300);
+  const geometry farTri = one_triangle(ctx, 1e300, 2e300);
+  const geometry nfarTri = one_triangle(ctx, -2e300, -1e300);
   std::vector<lod::named_part> parts;
-  parts.push_back(lod::named_part("far", far));
-  parts.push_back(lod::named_part("nfar", nfar));
+  parts.push_back(lod::named_part("far", farTri));
+  parts.push_back(lod::named_part("nfar", nfarTri));
   const std::vector<lod::tile> tiles = lod::partition_parts(parts, kCell);
   ASSERT_EQ(tiles.size(), 2u);
   EXPECT_EQ(tiles[0].parts, std::vector<std::string>{"nfar"});
