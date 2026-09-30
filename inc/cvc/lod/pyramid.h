@@ -63,6 +63,13 @@ struct pyramid_params {
   // wherever parts touch.
   bool weld_seams = true;
   double seam_epsilon = -1.0; // mesh: weld tolerance, world units (< 0 => cvc::simplify's default)
+  // mesh: give every rung freshly computed smooth normals instead of carrying
+  // the source's (see cvc::simplify_params::recompute_normals). The source's
+  // normals then do not split vertices either -- which is what lets a faceted
+  // curved mesh exported with per-face normals (every vertex split) coarsen at
+  // all: with its normals carried, only its open border can go, and the ladder
+  // ends at rung 0.
+  bool recompute_normals = false;
   unsigned vol_factor = 2;          // volume rung k is src downsampled by vol_factor^k per axis
   std::uint64_t vol_min_dim = 8;    // stop when any axis would fall below this
   unsigned img_factor = 2;          // image rung k is src downsampled by img_factor^k per axis
@@ -104,14 +111,16 @@ struct image_pyramid {
 // round(src_tris * mesh_ratio^k) triangles. One progressive collapse pass
 // snapshots every target on its way to the coarsest, so each kept rung is
 // bit-identical to cvc::simplify(src) at its own target (with
-// preserve_boundary, weld_seams and seam_epsilon from `params` and
-// simplify_params defaults otherwise: input normals carried) at the cost of the
-// coarsest target alone. A snapshot that would not have fewer triangles than
-// the rung before it repeats that rung -- the collapse guards stalled short of
-// its target, or one collapse passed two close targets at once -- and is left
-// out, so the ladder can hold fewer than max_rungs coarse rungs and rung k need
-// not be the one built for the k-th target. `pool`, when given, fans the
-// per-face setup and each rung's error measurement over the app compute
+// preserve_boundary, weld_seams, seam_epsilon and recompute_normals from
+// `params`, and simplify_params defaults otherwise) at the cost of the coarsest
+// target alone. A snapshot is kept only if it removes at least 5% of the
+// triangles of the rung before it (or half the step mesh_ratio asks for, when
+// that is less): one that barely coarsens -- the collapse guards stalled short
+// of its target, as they do on a mesh whose attributes jump at every vertex, or
+// one collapse passed two close targets at once -- is not worth a switch, and is
+// left out. So the ladder can hold fewer than max_rungs coarse rungs, and rung
+// k need not be the one built for the k-th target. `pool`, when given, fans
+// the per-face setup and each rung's error measurement over the app compute
 // workers; the result is identical either way.
 mesh_pyramid build_mesh_pyramid(const geometry &src,
                                 const pyramid_params &params = pyramid_params(),

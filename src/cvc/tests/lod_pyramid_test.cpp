@@ -8,7 +8,10 @@
 // positions, with no orphaned vertices, in every rung of a flat-shaded sheet
 // and a triangle soup; a rung the collapse cannot reach, or one a single
 // collapse jumped past, is left out, not repeated, and the ladder goes on past
-// it; pooled == serial; a volume ladder that halves each axis with a
+// it; a faceted curved mesh (per-face normals) cannot coarsen with its normals
+// carried -- the rung that only erodes its border is left out -- and builds a
+// full ladder with recompute_normals; pooled == serial; a volume ladder that
+// halves each axis with a
 // growing voxel-size error; and an image mip ladder whose box filter actually
 // area-averages (a 2x2 checker becomes mid-grey) rather than point-samples.
 
@@ -266,6 +269,50 @@ TEST(LodPyramid, MeshLadderSkipsARepeatAndGoesOn) {
     cvc::simplify_params sp;
     sp.target_tris = counts[k];
     EXPECT_TRUE(same_mesh(pyr.rungs[k], cvc::simplify(src, sp))) << "rung " << k;
+  }
+}
+
+// A faceted curved mesh -- a bumpy sheet exported with per-face normals, so
+// its attributes jump at every vertex -- can only give up its open border
+// while its normals are carried: that barely coarser rung is not worth a
+// switch and is left out, so the ladder is rung 0 alone. With
+// recompute_normals the input normals no longer split its vertices: it builds
+// a full ladder, every rung at least 5% coarser than the one before and equal to
+// an independent simplify() with the same switch.
+TEST(LodPyramid, MeshLadderRecomputesNormalsOfAFacetedMesh) {
+  cvc::app ctx;
+  const geometry sheet = soup(bumpy_grid(ctx, 40));
+  geometry src = sheet;
+  for (std::size_t f = 0; f < src.num_tris(); ++f) {
+    const auto &t = src.const_tris()[f];
+    const auto &a = src.const_points()[t[0]], &b = src.const_points()[t[1]],
+               &c = src.const_points()[t[2]];
+    const double e[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const double g[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+    const double n[3] = {e[1] * g[2] - e[2] * g[1], e[2] * g[0] - e[0] * g[2],
+                         e[0] * g[1] - e[1] * g[0]};
+    const double l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    src.normals().insert(src.normals().end(), 3, {n[0] / l, n[1] / l, n[2] / l});
+  }
+  cvc::lod::pyramid_params pp;
+  pp.max_rungs = 4;
+  const cvc::lod::mesh_pyramid carried = cvc::lod::build_mesh_pyramid(src, pp);
+  EXPECT_EQ(carried.rungs.size(), 1u);
+  cvc::simplify_params sp;
+  sp.target_tris = std::uint64_t(std::llround(0.35 * double(src.num_tris())));
+  cvc::simplify_result r;
+  cvc::simplify(src, sp, &r);
+  EXPECT_GT(r.out_tris, src.num_tris() * 97 / 100) << "only the border can go";
+
+  pp.recompute_normals = true;
+  const cvc::lod::mesh_pyramid fresh = cvc::lod::build_mesh_pyramid(src, pp);
+  ASSERT_EQ(fresh.rungs.size(), 4u); // targets 1065 .. 130
+  expect_monotone(fresh.world_error_m);
+  for (std::size_t k = 1; k < fresh.rungs.size(); ++k) {
+    EXPECT_LE(fresh.rungs[k].num_tris() * 100, fresh.rungs[k - 1].num_tris() * 95) << "rung " << k;
+    sp.target_tris = fresh.rungs[k].num_tris();
+    sp.recompute_normals = true;
+    EXPECT_TRUE(same_mesh(fresh.rungs[k], cvc::simplify(src, sp))) << "rung " << k;
   }
 }
 

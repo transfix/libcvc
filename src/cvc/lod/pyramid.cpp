@@ -90,17 +90,23 @@ mesh_pyramid build_mesh_pyramid(const geometry &src, const pyramid_params &param
   sp.preserve_boundary = params.preserve_boundary;
   sp.weld_seams = params.weld_seams;
   sp.seam_epsilon = params.seam_epsilon;
+  sp.recompute_normals = params.recompute_normals;
   std::vector<simplify_result> res;
   std::vector<geometry> snaps = simplify_progressive(src, targets, sp, &res, pool);
-  // Keep only the snapshots that coarsen. Snapshots never gain triangles, so an
-  // equal count means no collapse happened since the one before -- the pass
+  // Keep only the snapshots that coarsen enough to be worth a switch: at least
+  // 5% fewer triangles than the rung kept before, or half the step mesh_ratio
+  // asks for when that is smaller -- and always at least one fewer. A snapshot
+  // short of that repeats, or nearly repeats, the rung before it: the pass
   // stalled (every remaining collapse guarded), or a single collapse removed
-  // enough triangles to pass both targets -- and it repeats that one.
+  // enough triangles to pass two targets at once.
+  const double min_step = std::min(0.05, 0.5 * (1.0 - params.mesh_ratio));
   std::vector<geometry> rungs;
   std::vector<double> errs;
   std::uint64_t prev = src_tris;
   for (std::size_t k = 0; k < snaps.size(); ++k) {
-    if (res[k].out_tris >= prev)
+    const std::uint64_t need =
+        std::max<std::uint64_t>(1, std::uint64_t(std::floor(min_step * double(prev))));
+    if (res[k].out_tris + need > prev)
       continue;
     prev = res[k].out_tris;
     rungs.push_back(std::move(snaps[k]));
