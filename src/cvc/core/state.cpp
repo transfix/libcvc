@@ -1270,6 +1270,12 @@ state::send_message_result state::sendMessage(const std::string &payload,
     case link_resolution_kind::resolved:
     case link_resolution_kind::none:
       target = lr.target;
+      // Take the resolved absolute path from the walk while `lr` (and its pins) are still alive.
+      // Calling target->fullName() AFTER `lr` is dropped would walk the resolved terminal's _parent
+      // chain unpinned — safe today (sendMessage is scheduler-thread only) but a latent cross-node
+      // hazard if this ever runs off-thread; visited.back() is already that absolute path.
+      if (!lr.visited.empty())
+        r.resolved_path = lr.visited.back();
       break;
     case link_resolution_kind::broken:
       r.status = send_message_result::status_kind::broken_link;
@@ -1288,7 +1294,8 @@ state::send_message_result state::sendMessage(const std::string &payload,
       return r;
     }
   }
-  r.resolved_path = target->fullName();
+  if (r.resolved_path.empty())
+    r.resolved_path = target->fullName(); // non-link node (target == this): its own path
 
   // 2. Find the default shard for this app context. With no
   // shard registered (common in unit tests of pure-state code)
