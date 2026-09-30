@@ -505,8 +505,11 @@ void state_transport_ipc::send_backfill_locked(connection &c,
     if (s == nullptr)
       continue;
     for (const auto &m : s->replay_local()) {
-      if (!write_frame_locked(c, kMsgMutation, encode_mutation(m)))
-        return; // Connection died mid-backfill; reader_loop will reap it.
+      if (!write_frame_locked(c, kMsgMutation, encode_mutation(m))) {
+        if (!c.alive.load())
+          return; // Connection died mid-backfill; reader_loop will reap it.
+        continue; // Oversize frame skipped (connection still alive); backfill the rest.
+      }
       _backfilled.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -516,6 +519,15 @@ bool state_transport_ipc::write_frame_locked(connection &c, std::uint16_t msg_ty
                                              const std::vector<unsigned char> &payload) {
   if (c.fd < 0 || !c.alive.load())
     return false;
+  if (payload.size() > kMaxFrameBytes) {
+    // Reject an oversize frame on the SEND side with a clean failure, WITHOUT marking the
+    // connection dead. Otherwise we would write a frame whose length exceeds the peer's receive
+    // cap, and the peer's reader_loop drops the whole connection on `len > kMaxFrameBytes` —
+    // silently disconnecting it over one too-big message. (The u32 length field also cannot
+    // represent a size above 4 GiB, which kMaxFrameBytes is well under.) The connection stays
+    // alive; only this send fails.
+    return false;
+  }
   std::vector<unsigned char> hdr;
   hdr.reserve(12 + payload.size());
   put_u32(hdr, kMagic);
