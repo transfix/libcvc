@@ -84,6 +84,14 @@ struct sdf_field {
 sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double min_y,
                     double max_x, double max_y, double scale);
 
+// The same field written into caller-owned rows×cols float buffers (no
+// allocation of its own beyond reused per-thread scratch) — for a caller that
+// rebuilds into persistent storage, e.g. sim_world's [M,3,H,W] field block.
+// Bit-identical to the sdf_field overload; the three buffers must not overlap.
+void build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double min_y,
+               double max_x, double max_y, double scale, float *phi, float *normal_x,
+               float *normal_y);
+
 // ─── Belief-space grid navigation (planner.py) ──────────────────────────────
 
 // Binary dilation by `cells` 4-connected steps (planner.inflate). `occ` is

@@ -326,19 +326,28 @@ std::vector<double> edt2_squared(const std::uint8_t *mask, int rows, int cols) {
   return out;
 }
 
-sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double /*min_y*/,
-                    double max_x, double /*max_y*/, double scale) {
+sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double min_y,
+                    double max_x, double max_y, double scale) {
   sdf_field field;
   field.rows = rows;
   field.cols = cols;
   if (rows <= 0 || cols <= 0)
     return field;
   const std::size_t n = static_cast<std::size_t>(rows) * cols;
-  const double cell_w = (max_x - min_x) / static_cast<double>(cols - 1);
   field.phi.resize(n);
   field.normal_x.resize(n);
   field.normal_y.resize(n);
-  float *phi = field.phi.data();
+  build_sdf(occ, rows, cols, min_x, min_y, max_x, max_y, scale, field.phi.data(),
+            field.normal_x.data(), field.normal_y.data());
+  return field;
+}
+
+void build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double /*min_y*/,
+               double max_x, double /*max_y*/, double scale, float *phi, float *normal_x,
+               float *normal_y) {
+  if (rows <= 0 || cols <= 0)
+    return;
+  const double cell_w = (max_x - min_x) / static_cast<double>(cols - 1);
 
   // d_out = edt2_squared(occ) (to building) and d_in = edt2_squared(!occ) (to
   // free) come out of ONE binary pass a row at a time, and phi for that row is
@@ -364,7 +373,7 @@ sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, d
   // grad1d (detail/grid_math.h) with its per-cell edge branches hoisted: the
   // row's case picks gy's operands once, the interior columns run branch-free,
   // and every float expression is unchanged.
-  float *nx = field.normal_x.data(), *ny = field.normal_y.data();
+  float *nx = normal_x, *ny = normal_y;
   float *gy = S.gy.data();
   for (int r = 0; r < rows; ++r) {
     const std::size_t o = static_cast<std::size_t>(r) * cols;
@@ -398,7 +407,6 @@ sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, d
     }
     emit(cols - 1, p[cols - 1] - p[cols - 2]);
   }
-  return field;
 }
 
 std::vector<std::uint8_t> inflate(const std::uint8_t *occ, int rows, int cols, int cells) {

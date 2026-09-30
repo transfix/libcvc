@@ -273,6 +273,12 @@ TEST(NavEdtExact, BuildSdfMatchesReferenceBitForBit) {
         << R << "x" << C << " #" << checked;
     ASSERT_TRUE(edt_ref::same_bits(got.normal_y, want.normal_y))
         << R << "x" << C << " #" << checked;
+    // The caller-buffer overload writes the same bits into caller storage.
+    std::vector<float> phi((std::size_t)R * C, -7.0f), nx(phi), ny(phi);
+    build_sdf(m.data(), R, C, mnx, -3.0, mxx, 4.0, sc, phi.data(), nx.data(), ny.data());
+    ASSERT_TRUE(edt_ref::same_bits(phi, want.phi)) << R << "x" << C << " #" << checked;
+    ASSERT_TRUE(edt_ref::same_bits(nx, want.normal_x)) << R << "x" << C << " #" << checked;
+    ASSERT_TRUE(edt_ref::same_bits(ny, want.normal_y)) << R << "x" << C << " #" << checked;
     ++checked;
   }
   EXPECT_GT(checked, 400);

@@ -250,16 +250,16 @@ field_stack sim_world::field_view() const {
 
 void sim_world::rebuild_plane(int m) {
   const long hw = static_cast<long>(rows_) * cols_;
-  const sdf_field f = build_sdf(occ_.data() + static_cast<long>(m) * hw, rows_, cols_, cfg_.min_x,
-                                cfg_.min_y, cfg_.max_x, cfg_.max_y, cfg_.scale);
+  // Build phi / normal_x / normal_y straight into plane m's [3,H,W] slice (no
+  // temporary field + copy), then clip phi in place — AFTER the normals, which
+  // build_sdf takes from the unclipped phi, exactly as before.
+  float *fp = field_.data() + static_cast<long>(m) * 3 * hw;
+  build_sdf(occ_.data() + static_cast<long>(m) * hw, rows_, cols_, cfg_.min_x, cfg_.min_y,
+            cfg_.max_x, cfg_.max_y, cfg_.scale, fp, fp + hw, fp + 2 * hw);
   // _finalize_field: clip phi to +/- 2*region_n (region = bounds max_x).
   const float clip = static_cast<float>(2.0 * cfg_.max_x * cfg_.scale);
-  float *fp = field_.data() + static_cast<long>(m) * 3 * hw;
-  for (long i = 0; i < hw; ++i) {
-    fp[i] = std::min(std::max(f.phi[i], -clip), clip);
-    fp[hw + i] = f.normal_x[i];
-    fp[2 * hw + i] = f.normal_y[i];
-  }
+  for (long i = 0; i < hw; ++i)
+    fp[i] = std::min(std::max(fp[i], -clip), clip);
 }
 
 void sim_world::rebuild_all_fields() {
