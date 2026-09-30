@@ -281,8 +281,6 @@ TEST(AriadneRuntime, ActionsDrainOffTheWalk) {
 // a flag toggle / reset is pure .ari. The program is chrooted to the widget's prefix, so
 // (state-set "paused") writes <prefix>.paused, the same key a widget `bind: paused` resolves to.
 TEST(AriadneAction, ProgramOnTogglesStateThroughStateExec) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, "ui.demo");
   MockBackend mb;
@@ -304,8 +302,6 @@ TEST(AriadneAction, ProgramOnTogglesStateThroughStateExec) {
 
 // A program `on:` may sequence several state writes in one action (a reset button).
 TEST(AriadneAction, ProgramOnRunsMultiStatementReset) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -324,8 +320,6 @@ TEST(AriadneAction, ProgramOnRunsMultiStatementReset) {
 // via the thread-safe exec_scheduler().post_message ingress. This is the marquee async story
 // (a compute-pool worker waking a parked .ari action) exercised through the real Runtime.
 TEST(AriadneAction, ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, ""); // app-root prefix so the channel/state paths are used as-is
   MockBackend mb;
@@ -360,8 +354,6 @@ TEST(AriadneAction, ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers) {
 // the value the worker delivered. deliver_to_receivers patches the parent frame's pending result
 // slot (where pop_frame pushed msg-recv's nil placeholder), so the resumed state-set applies it.
 TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -392,8 +384,6 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
 // background-thread → parallel_for → post_message); here we hand-roll a joinable std::thread so the
 // test can join() deterministically before asserting (compute_async is fire-and-forget by design).
 TEST(AriadneAction, IntrinsicRunsNavStepOnComputePoolAndWakesMsgRecv) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   namespace se = cvc::state_exec;
   cvc::app app;
   app.computePool();    // warm the lazy per-app singletons on THIS thread before a worker touches
@@ -447,8 +437,6 @@ TEST(AriadneAction, IntrinsicRunsNavStepOnComputePoolAndWakesMsgRecv) {
 // per drain (parking between frames), NOT a fresh action each frame. Proven by re-firing: reset a
 // flag the body sets, and the next drain sets it again from the SAME resident.
 TEST(AriadneResident, TickProgramRunsOncePerDrain) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -467,8 +455,6 @@ TEST(AriadneResident, TickProgramRunsOncePerDrain) {
 
 // set_tick_program("") clears the resident: after clearing, a drain no longer re-fires the body.
 TEST(AriadneResident, ClearingTickProgramStopsIt) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -487,8 +473,6 @@ TEST(AriadneResident, ClearingTickProgramStopsIt) {
 // reading the delivered event dict with (get-attr event ...). post_input BEFORE drain -> delivered
 // this frame (feed-before-drain contract). Keyboard events feed the key resident.
 TEST(AriadneInput, KeyProgramReceivesPostedEvent) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -507,8 +491,6 @@ TEST(AriadneInput, KeyProgramReceivesPostedEvent) {
 // A burst of events in one frame all deliver (FIFO — no coalescing on the input channel): three
 // keys posted before one drain, and the resident drains all three (last wins in state).
 TEST(AriadneInput, KeyBurstAllDeliveredInOrder) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -526,8 +508,6 @@ TEST(AriadneInput, KeyBurstAllDeliveredInOrder) {
 
 // Mouse events feed the pointer resident (a separate channel/handler); the body reads coords.
 TEST(AriadneInput, PointerProgramReceivesMouseEvent) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -551,8 +531,6 @@ TEST(AriadneInput, PointerProgramReceivesMouseEvent) {
 // and on wasm). Fired like a Button's on: (queued in render(), run in drain()) — NOT the SDL
 // document-level stream. This is the natively-working widget input path.
 TEST(AriadneInput, WidgetOnClickFiresWhenBackendReportsClick) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -672,8 +650,6 @@ TEST(AriadneInput, WidgetOnDragStartEndFireOnEdges) {
 // the item's pointer coords, read with (get-attr event "..."). Assert on button (int -> a stable
 // string), like the on_pointer test, to avoid double-format brittleness.
 TEST(AriadneInput, WidgetPointerProgramReceivesEventScope) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -721,8 +697,6 @@ TEST(AriadneRuntime, ImageWidgetResolvesNameAndFallsBackToText) {
 // The host-intrinsic seam: a host binds a native fn `(host-bump)` into the program lanes, and a
 // program on: calls it — so a .ari program can invoke a host capability (e.g. a nav verb) inline.
 TEST(AriadneAction, HostIntrinsicCallableFromProgram) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   namespace se = cvc::state_exec;
   int calls = 0;
   register_action_intrinsics(
@@ -749,8 +723,6 @@ TEST(AriadneAction, HostIntrinsicCallableFromProgram) {
 // A broken program action fails SAFE: it never throws out of drain(), and it surfaces a one-time
 // warning (mirroring the read-lane's fail-safe policy) rather than silently doing nothing.
 TEST(AriadneAction, ProgramOnBrokenWarnsOnceNoThrow) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -913,8 +885,6 @@ TEST(AriadneRuntime, UnregisteredCustomWidgetDrawsPlaceholder) {
 // --- the init: block runner (run_init, state_exec) ---------------------------
 
 TEST(AriadneInit, RunsScopedToPrefix) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   std::vector<std::string> errs;
   // A relative path under the chroot prefix -> writes <prefix>.agents, the same key a
@@ -925,8 +895,6 @@ TEST(AriadneInit, RunsScopedToPrefix) {
 }
 
 TEST(AriadneInit, SyntaxErrorReportedNotThrown) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   std::vector<std::string> errs;
   const bool ok = run_init(app, "", "(state-set \"x\" ", &errs); // unbalanced
@@ -992,8 +960,6 @@ TEST(AriadneRuntime, CustomWidgetUncommittedEscapeDoesNotWrite) {
 }
 
 TEST(AriadneInit, RunawayScriptIsBoundedNotHang) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   std::vector<std::string> errs;
   // A non-terminating init must be bounded (step/time cap) and reported — never hang.
@@ -1035,8 +1001,6 @@ TEST(AriadneReactive, EmptyPredicateAlwaysShows) {
 }
 
 TEST(AriadneReactive, PredicateShowsThenHidesAsStateChanges) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1080,8 +1044,6 @@ TEST(AriadneMountScope, BindsResolveAtSubPrefix) {
 }
 
 TEST(AriadneMountScope, ReactiveReadsResolveAtSubPrefix) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, "ui.demo");
   MockBackend mb;
@@ -1106,8 +1068,6 @@ TEST(AriadneMountScope, ReactiveReadsResolveAtSubPrefix) {
 }
 
 TEST(AriadneMountScope, RepeatedMountGetsPerInstanceSubPrefix) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, "ui.demo");
   MockBackend mb;
@@ -1219,8 +1179,6 @@ TEST(AriadneMountScope, ReconcileTearsDownStaleHoles) {
 }
 
 TEST(AriadneMountScope, RepeatedMountLinkTargetsAreIndexed) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec (CVC_STATE_EXEC=OFF)";
   cvc::app app;
   Runtime rt(app, "ui.demo");
   MockBackend mb;
@@ -1242,8 +1200,8 @@ TEST(AriadneMountScope, RepeatedMountLinkTargetsAreIndexed) {
 }
 
 TEST(AriadneMountScope, MountInitSeedsAtSubPrefix) {
-  if (!have_state_exec() || !have_yaml())
-    GTEST_SKIP() << "needs state_exec + yaml";
+  if (!have_yaml())
+    GTEST_SKIP() << "needs yaml";
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_mount_init";
   fs::create_directories(dir);
@@ -1266,8 +1224,8 @@ TEST(AriadneMountScope, MountInitSeedsAtSubPrefix) {
 }
 
 TEST(AriadneMountScope, MountInitRunsOnceNotPerFrame) {
-  if (!have_state_exec() || !have_yaml())
-    GTEST_SKIP() << "needs state_exec + yaml";
+  if (!have_yaml())
+    GTEST_SKIP() << "needs yaml";
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_mount_init_once";
   fs::create_directories(dir);
@@ -1318,8 +1276,6 @@ TEST(AriadneMountScope, EndToEndLoadCommitsAtSubPrefix) {
 }
 
 TEST(AriadneReactive, FalsePredicateHidesTheWholeSubtree) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1334,8 +1290,6 @@ TEST(AriadneReactive, FalsePredicateHidesTheWholeSubtree) {
 }
 
 TEST(AriadneReactive, BrokenPredicateHidesFailSafeAndWarnsOnce) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1354,8 +1308,6 @@ TEST(AriadneReactive, BrokenPredicateHidesFailSafeAndWarnsOnce) {
 }
 
 TEST(AriadneReactive, WriteIntrinsicIsUnavailableInAPredicate) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1371,8 +1323,6 @@ TEST(AriadneReactive, WriteIntrinsicIsUnavailableInAPredicate) {
 }
 
 TEST(AriadneReactive, PredicateReadsArePrefixScoped) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "ui.demo");
   MockBackend mb;
@@ -1389,8 +1339,6 @@ TEST(AriadneReactive, PredicateReadsArePrefixScoped) {
 }
 
 TEST(AriadneReactive, RunawayPredicateIsCappedNotHung) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1410,8 +1358,6 @@ TEST(AriadneReactive, RunawayPredicateIsCappedNotHung) {
 // scheduler is never pumped; a park there would silent-nil). render() must return, hidden +
 // reported.
 TEST(AriadneReactive, ParkVerbInPredicateIsDeniedNotHung) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   // Both park verbs (msg-recv AND await) must be denied in the reactive read lane — neither is in
   // the read-lane allowlist, so a predicate using one is unbound → fail-safe hidden, render
   // returns.
@@ -1433,8 +1379,6 @@ TEST(AriadneReactive, ParkVerbInPredicateIsDeniedNotHung) {
 // per-activation budget wired in ensure_resident — drain() returns, and the scheduler recovers so a
 // subsequently-installed healthy resident still fires.
 TEST(AriadneResident, RunawayTickResidentIsBoundedAndSchedulerRecovers) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1452,8 +1396,6 @@ TEST(AriadneResident, RunawayTickResidentIsBoundedAndSchedulerRecovers) {
 }
 
 TEST(AriadneReactive, StringValueIsTruthyAndUnsetKeyIsCleanlyFalsy) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1471,8 +1413,6 @@ TEST(AriadneReactive, StringValueIsTruthyAndUnsetKeyIsCleanlyFalsy) {
 }
 
 TEST(AriadneReactive, DistinctBrokenPredicatesWarnIndependently) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1490,8 +1430,6 @@ TEST(AriadneReactive, DistinctBrokenPredicatesWarnIndependently) {
 }
 
 TEST(AriadneReactive, HiddenMenuIsSkippedEntirely) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1505,8 +1443,6 @@ TEST(AriadneReactive, HiddenMenuIsSkippedEntirely) {
 }
 
 TEST(AriadneReactive, HiddenGridChildConsumesNoCell) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1527,8 +1463,6 @@ TEST(AriadneReactive, HiddenGridChildConsumesNoCell) {
 }
 
 TEST(AriadneReactive, ReadLaneStillExcludesMaterializersAndSideEffects) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1554,8 +1488,6 @@ TEST(AriadneReactive, ReadLaneStillExcludesMaterializersAndSideEffects) {
 }
 
 TEST(AriadneReactive, CompoundsAndAllowedFormsNowWork) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1577,8 +1509,6 @@ TEST(AriadneReactive, CompoundsAndAllowedFormsNowWork) {
 }
 
 TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1601,8 +1531,6 @@ TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {
 }
 
 TEST(AriadneReactive, StateDataDagIsCopiedBoundedNotHung) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   // The full-env init lane plants a physically-tiny SHARED DAG (~30 nodes, 2^30 logical) in
   // typed data. A read-lane predicate then reads it via state-data-get -> deep_copy. deep_copy
@@ -1624,8 +1552,6 @@ TEST(AriadneReactive, StateDataDagIsCopiedBoundedNotHung) {
 }
 
 TEST(AriadneReactive, EnabledWhenGreysOutAndReacts) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1647,8 +1573,6 @@ TEST(AriadneReactive, EnabledWhenGreysOutAndReacts) {
 }
 
 TEST(AriadneReactive, DisabledWhenDisablesWhenTrue) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1663,8 +1587,6 @@ TEST(AriadneReactive, DisabledWhenDisablesWhenTrue) {
 }
 
 TEST(AriadneReactive, EnabledWhenBrokenPredicateDisablesFailSafe) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1690,8 +1612,6 @@ TEST(AriadneReactive, NoEnableFieldsMeansNoDisabledScope) {
 }
 
 TEST(AriadneReactive, ComputedTextValueFromExpression) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1714,8 +1634,6 @@ TEST(AriadneReactive, ComputedTextValueFromExpression) {
 }
 
 TEST(AriadneReactive, ComputedTextBrokenExprIsEmptyAndWarns) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1781,8 +1699,6 @@ TEST(AriadneRuntime, ColorWidgetFallsBackToTextWhenBackendCantDraw) {
 }
 
 TEST(AriadneReactive, ComputedComboOptionsFromExpression) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1796,8 +1712,6 @@ TEST(AriadneReactive, ComputedComboOptionsFromExpression) {
 }
 
 TEST(AriadneReactive, ComputedComboOptionsBrokenExprSkips) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1811,8 +1725,6 @@ TEST(AriadneReactive, ComputedComboOptionsBrokenExprSkips) {
 }
 
 TEST(AriadneReactive, StaticAndComputedTooltips) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1840,8 +1752,6 @@ TEST(AriadneReactive, NoTooltipMeansNoSetTooltip) {
 }
 
 TEST(AriadneReactive, RepeatEmitsNInstancesWithIndexSubstituted) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1863,8 +1773,6 @@ TEST(AriadneReactive, RepeatEmitsNInstancesWithIndexSubstituted) {
 }
 
 TEST(AriadneReactive, RepeatSubstitutesIndexInBindsForDistinctState) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1880,8 +1788,6 @@ TEST(AriadneReactive, RepeatSubstitutesIndexInBindsForDistinctState) {
 }
 
 TEST(AriadneReactive, RepeatBrokenCountEmitsNothing) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1895,8 +1801,6 @@ TEST(AriadneReactive, RepeatBrokenCountEmitsNothing) {
 }
 
 TEST(AriadneReactive, LiteralTooltipStartingWithParenShownVerbatim) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1910,8 +1814,6 @@ TEST(AriadneReactive, LiteralTooltipStartingWithParenShownVerbatim) {
 }
 
 TEST(AriadneReactive, DisabledWidgetStillEmitsItsTooltip) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1935,8 +1837,6 @@ TEST(AriadneReactive, DisabledWidgetStillEmitsItsTooltip) {
 }
 
 TEST(AriadneReactive, RepeatCountOutOfRangeDoubleIsZero) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -1950,8 +1850,6 @@ TEST(AriadneReactive, RepeatCountOutOfRangeDoubleIsZero) {
 }
 
 TEST(AriadneReactive, PredicateEvalsAreIsolatedPerWidget) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -2158,8 +2056,6 @@ static bool msg_delivered(cvc::app &app, Runtime &rt, MockBackend &mb, const std
 }
 
 TEST(AriadneChannelPolicy, StrictRefusesUndeclaredChannel) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -2170,8 +2066,6 @@ TEST(AriadneChannelPolicy, StrictRefusesUndeclaredChannel) {
 }
 
 TEST(AriadneChannelPolicy, AllowsDeclaredChannel) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -2181,8 +2075,6 @@ TEST(AriadneChannelPolicy, AllowsDeclaredChannel) {
 }
 
 TEST(AriadneChannelPolicy, PermissiveWhenNotStrict) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -2192,8 +2084,6 @@ TEST(AriadneChannelPolicy, PermissiveWhenNotStrict) {
 }
 
 TEST(AriadneChannelPolicy, AllowsDeclaredGlobal) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -2204,8 +2094,6 @@ TEST(AriadneChannelPolicy, AllowsDeclaredGlobal) {
 }
 
 TEST(AriadneChannelPolicy, RefusesUndeclaredGlobal) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -2216,8 +2104,6 @@ TEST(AriadneChannelPolicy, RefusesUndeclaredGlobal) {
 }
 
 TEST(AriadneChannelPolicy, ExemptsHashChannel) {
-  if (!have_state_exec())
-    GTEST_SKIP();
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
@@ -2320,8 +2206,6 @@ std::string node_data_string(cvc::app &app, const char *path) {
 } // namespace
 
 TEST(AriadneNetIntrinsics, HttpGetAsyncAwaitsResponseDict) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2357,8 +2241,6 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncAwaitsResponseDict) {
 }
 
 TEST(AriadneNetIntrinsics, HttpGetAsyncErrorPathResumesWithErrorDict) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2389,8 +2271,6 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncErrorPathResumesWithErrorDict) {
 }
 
 TEST(AriadneNetIntrinsics, HttpGetAsyncDoesNotBlockTheScheduler) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2422,8 +2302,6 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncDoesNotBlockTheScheduler) {
 
 // PR-A: the TRANSPARENT verb — (http-get url) self-parks and yields the dict directly, no msg-recv.
 TEST(AriadneNetIntrinsics, HttpGetTransparentReturnsDictNoMsgRecv) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2454,8 +2332,6 @@ TEST(AriadneNetIntrinsics, HttpGetTransparentReturnsDictNoMsgRecv) {
 
 // PR-A: PROPER await — (await (http-get-async url)) resolves the future returned by the async verb.
 TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2486,8 +2362,6 @@ TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
 // self-parks, returning { ok body(bytes) url error }. No HTTP backend needed (a custom scheme
 // here).
 TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   cvc::app app;
   struct Teardown {
     ~Teardown() {
@@ -2522,8 +2396,6 @@ TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
 
 // PR-B: (await (fetch-async uri)) resolves the generic resolver's future.
 TEST(AriadneNetIntrinsics, FetchAsyncFutureAwaited) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   cvc::app app;
   struct Teardown {
     ~Teardown() {
@@ -2565,8 +2437,6 @@ bool headers_have_prefix(const std::vector<std::string> &h, const std::string &p
 // "form" (dict …))) — a form body is percent-encoded with a default Content-Type, and a bearer
 // token rides in as a header. This is the authenticated form-POST the user asked for.
 TEST(AriadneNetIntrinsics, HttpRequestPostFormBodyAndBearer) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2608,8 +2478,6 @@ TEST(AriadneNetIntrinsics, HttpRequestPostFormBodyAndBearer) {
 // (http-get URL (dict "query" (dict …))) percent-encodes the params into the URL's query string —
 // the caller never hand-encodes. A space becomes %20 and '&' is escaped so it can't inject a pair.
 TEST(AriadneNetIntrinsics, HttpGetQueryParamsEncodedIntoUrl) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2642,8 +2510,6 @@ TEST(AriadneNetIntrinsics, HttpGetQueryParamsEncodedIntoUrl) {
 // A raw string "body" option is sent verbatim and does NOT get a defaulted Content-Type (only the
 // "form" helper adds one) — the caller controls the content type.
 TEST(AriadneNetIntrinsics, HttpRequestRawBodyNoDefaultContentType) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2677,8 +2543,6 @@ TEST(AriadneNetIntrinsics, HttpRequestRawBodyNoDefaultContentType) {
 // prior (http-get) yielded, carried via the "body" option) rides through byte-exact — so a fetched
 // blob can be re-uploaded with a PUT without a lossy text round-trip.
 TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
@@ -2718,8 +2582,6 @@ TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
 // a transparent (pool-double n) and a future (pool-double-async n) via the SAME action-intrinsics
 // seam register_net_intrinsics uses, so both land in the action lane only (never the render lane).
 TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
-  if (!have_state_exec())
-    GTEST_SKIP() << "libcvc built without state_exec";
   namespace se = cvc::state_exec;
   cvc::app app;
   NetIntrinsicsGuard guard; // clears the action intrinsics on teardown

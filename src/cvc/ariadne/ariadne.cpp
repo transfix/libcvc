@@ -7,14 +7,16 @@
 // backend reports the edit committed — so a slider drag costs one state write on
 // release, not one per frame (writes fan out to observers / replicated peers).
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
-
-#ifdef CVC_STATE_EXEC
 #include <cvc/core/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/core/state_exec/builtins.h>
 #include <cvc/core/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
@@ -23,12 +25,6 @@
 #include <cvc/core/state_exec/process.h>
 #include <cvc/core/state_exec/scheduler.h>
 #include <cvc/core/state_exec/stackless_evaluator.h> // §4 read-lane predicate evaluator
-#endif
-
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <cmath>
 #include <exception>
 #include <functional>
 #include <locale> // §11.4 geometry (de)serialize: pin std::locale::classic() so digit grouping
@@ -233,20 +229,10 @@ bool has_widget_type(const std::string &type) {
   return widget_registry().find(type) != widget_registry().end();
 }
 
-// --- the init: block runner (state_exec, gated by CVC_STATE_EXEC) ------------
+// --- the init: block runner (state_exec) --------------------------------------
 
-bool have_state_exec() {
-#ifdef CVC_STATE_EXEC
-  return true;
-#else
-  return false;
-#endif
-}
-
-// Host-contributed program-lane intrinsics registry (§ nav verbs et al.). Kept OUTSIDE the
-// CVC_STATE_EXEC guard so register/clear are always callable (the providers are simply never
-// applied in a build with no program lanes). ActionIntrinsicProvider is state_exec-typed via
-// forward-decls.
+// Host-contributed program-lane intrinsics registry (§ nav verbs et al.). ActionIntrinsicProvider
+// is state_exec-typed via forward-decls.
 namespace {
 std::mutex &action_intrinsics_mutex() {
   static std::mutex m;
@@ -273,7 +259,6 @@ void clear_action_intrinsics() {
   action_intrinsics_registry().clear();
 }
 
-#ifdef CVC_STATE_EXEC
 namespace {
 // Run `script` as a FULL-ENV state_exec program chrooted to `prefix`, bounded by (max_steps,
 // max_seconds, max_bytes). Returns "" on a clean, normal finish, else a human diagnostic (no
@@ -332,7 +317,6 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
   }
 }
 } // namespace
-#endif // CVC_STATE_EXEC
 
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
               std::vector<std::string> *errors) {
@@ -342,13 +326,6 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
   };
   if (script.empty())
     return true; // nothing to run
-#ifndef CVC_STATE_EXEC
-  (void)app;
-  (void)prefix;
-  err("ari: init: script present but this libcvc was built without state_exec "
-      "(CVC_STATE_EXEC=OFF) — the script did not run");
-  return false;
-#else
   // A load-time seed/compute is generous — well above the per-tick action budget (§7.4).
   static constexpr uint64_t kInitMaxSteps = 10'000'000;
   static constexpr double kInitMaxSeconds = 5.0;
@@ -358,11 +335,9 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
     return false;
   }
   return true;
-#endif
 }
 
 // --- §4 read-lane: the per-frame reactive predicate evaluator ----------------
-#ifdef CVC_STATE_EXEC
 namespace {
 namespace se = cvc::state_exec;
 
@@ -616,7 +591,6 @@ private:
   std::unordered_map<std::string, std::optional<se::value_t>> compiled_;
 };
 } // namespace
-#endif // CVC_STATE_EXEC
 
 struct Runtime::Impl {
   cvc::app &app;
@@ -627,10 +601,8 @@ struct Runtime::Impl {
   // ictx. Default (enforce=false, empty) = permissive; set_channel_policy fills it from a
   // LoadResult. Pointed-to by ictx.channels (non-owning), so it must outlive the contexts — it
   // lives here in the Impl, which owns the live_actions_ / residents that reference it. Declared
-  // before them so it destructs after them. Only exists with state_exec (no ictx to point at it).
-#ifdef CVC_STATE_EXEC
+  // before them so it destructs after them.
   cvc::state_exec::channel_policy channel_policy_;
-#endif
 
   Widget root;
   Widget pending;
@@ -654,11 +626,8 @@ struct Runtime::Impl {
 
   // §4 read-lane: the reactive predicate evaluator (lazily built on first use so a UI
   // with no reactive fields pays nothing), plus de-duplicated diagnostics surfaced by
-  // take_reactive_warnings(). The warnings live regardless of state_exec (the OFF path
-  // also warns once). reactive_warned keeps the dedup set across drains.
-#ifdef CVC_STATE_EXEC
+  // take_reactive_warnings(). reactive_warned keeps the dedup set across drains.
   std::unique_ptr<ReactiveEngine> reactive;
-#endif
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
@@ -672,7 +641,6 @@ struct Runtime::Impl {
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
   ~Impl();
 
-#ifdef CVC_STATE_EXEC
   // A submitted `on:` program's persistent context. The intrinsics capture &ictx by
   // pointer, so — unlike the load-time init: lane's one-scope run — an action that
   // suspends (await/sleep/msg-recv) needs its context kept alive across frames until the
@@ -719,7 +687,6 @@ struct Runtime::Impl {
   // Deliver one input event: serialize it to a dict and post_message it (NO coalesce — a burst in
   // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse).
   void deliver_input(const InputEvent &ev);
-#endif
 
   // §12: the active mount scope during emit. Empty stack = the document prefix; each entry is
   // a composed sub-prefix pushed when the walk enters a mounted subtree (Widget::scope) and
@@ -759,7 +726,6 @@ struct Runtime::Impl {
     return resolve_bind(current_prefix(), bind);
   }
 
-#ifdef CVC_STATE_EXEC
   // Lazily build the read-lane engine (a UI with no reactive fields pays nothing), then point
   // it at the active mount scope so a mounted fragment's predicates read its own sub-prefix,
   // matching where its binds resolve. Every reactive helper goes through here.
@@ -769,7 +735,6 @@ struct Runtime::Impl {
     reactive->set_root_path(app, current_prefix());
     return *reactive;
   }
-#endif
 
   void enqueue(const std::string &event) {
     if (!event.empty())
@@ -793,12 +758,11 @@ struct Runtime::Impl {
   void render();
 
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
-  // the predicate's result (fail-safe HIDDEN on a state_exec build, fail-safe SHOWN on a
-  // build without state_exec — hiding every reactive widget would gut a minimal build).
+  // the predicate's result (fail-safe HIDDEN on a broken predicate).
   bool visible(const Widget &w);
   // §4 read-lane: is `w` disabled (greyed, non-interactive) this frame? True when
   // enabled_when is falsy OR disabled_when is truthy. Fail-safe DISABLED on a broken
-  // predicate; a build without state_exec leaves it enabled (+ warns once).
+  // predicate.
   bool disabled(const Widget &w);
   // §4 read-lane: evaluate a computed-value expression `expr` to a display string.
   // Fail-safe EMPTY string on a broken predicate (§4.1 fmt→""); warns once.
@@ -821,22 +785,15 @@ struct Runtime::Impl {
 bool Runtime::Impl::visible(const Widget &w) {
   if (w.visible_when.empty())
     return true;
-#ifdef CVC_STATE_EXEC
   const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(w.visible_when, /*dflt=*/false);
   if (!o.error.empty())
     warn_once(o.error);
   return o.value;
-#else
-  warn_once("ari: visible_when on '" + (w.label.empty() ? w.id : w.label) +
-            "' ignored — this libcvc was built without state_exec (CVC_STATE_EXEC=OFF)");
-  return true;
-#endif
 }
 
 bool Runtime::Impl::disabled(const Widget &w) {
   if (w.enabled_when.empty() && w.disabled_when.empty())
     return false;
-#ifdef CVC_STATE_EXEC
   ReactiveEngine &re = ensure_reactive();
   // enabled_when falsy -> disabled (fail-safe dflt=false: a broken predicate disables).
   if (!w.enabled_when.empty()) {
@@ -855,55 +812,33 @@ bool Runtime::Impl::disabled(const Widget &w) {
       return true;
   }
   return false;
-#else
-  warn_once("ari: enabled_when/disabled_when on '" + (w.label.empty() ? w.id : w.label) +
-            "' ignored — this libcvc was built without state_exec (CVC_STATE_EXEC=OFF)");
-  return false; // can't evaluate -> leave it functional
-#endif
 }
 
 std::string Runtime::Impl::eval_text(const std::string &expr) {
-#ifdef CVC_STATE_EXEC
   const ReactiveEngine::StringOutcome o =
       ensure_reactive().eval_string(expr, /*dflt=*/std::string());
   if (!o.error.empty())
     warn_once(o.error);
   return o.value;
-#else
-  warn_once("ari: computed text expr ignored — this libcvc was built without state_exec "
-            "(CVC_STATE_EXEC=OFF)");
-  return std::string();
-#endif
 }
 
 std::string Runtime::Impl::eval_text_or_literal(const std::string &expr) {
-#ifdef CVC_STATE_EXEC
   const ReactiveEngine::StringOutcome o =
       ensure_reactive().eval_string(expr, /*dflt=*/std::string());
   // Success -> the computed value; failure -> the literal verbatim (no warning: a tooltip that
   // starts with '(' is far more likely plain text than a broken expression).
   return o.error.empty() ? o.value : expr;
-#else
-  return expr; // no state_exec -> show the literal
-#endif
 }
 
 std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
-#ifdef CVC_STATE_EXEC
   const ReactiveEngine::StringListOutcome o = ensure_reactive().eval_string_list(expr);
   if (!o.error.empty())
     warn_once(o.error);
   return o.value;
-#else
-  warn_once("ari: computed options ignored — this libcvc was built without state_exec "
-            "(CVC_STATE_EXEC=OFF)");
-  return {};
-#endif
 }
 
 int Runtime::Impl::eval_count(const std::string &expr) {
   constexpr int64_t kMaxRepeat = 4096; // a UI with thousands of repeated widgets is pathological
-#ifdef CVC_STATE_EXEC
   const ReactiveEngine::IntOutcome o = ensure_reactive().eval_int(expr, /*dflt=*/0);
   if (!o.error.empty())
     warn_once(o.error);
@@ -916,11 +851,6 @@ int Runtime::Impl::eval_count(const std::string &expr) {
     n = kMaxRepeat;
   }
   return static_cast<int>(n);
-#else
-  (void)kMaxRepeat;
-  warn_once("ari: repeat ignored — this libcvc was built without state_exec (CVC_STATE_EXEC=OFF)");
-  return 0;
-#endif
 }
 
 void Runtime::Impl::emit_children(const Widget &w) {
@@ -1348,10 +1278,8 @@ void Runtime::Impl::render() {
     planted_holes.clear();
     wired_mounts.clear();
   }
-#ifdef CVC_STATE_EXEC
   if (reactive)
     reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
-#endif
   frame_instances = 0; // §3: reset the per-frame repeat-expansion budget
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
@@ -1365,16 +1293,13 @@ void Runtime::Impl::render() {
 std::atomic<uint64_t> Runtime::Impl::owner_seq{0};
 
 Runtime::Impl::~Impl() {
-#ifdef CVC_STATE_EXEC
   // Reap this document's whole process group so a parked (await/sleep/msg-recv) action never
   // lingers on the shared app scheduler after its Runtime is gone. Only touch the scheduler if
   // we ever used it (exec_scheduler() lazily builds it — don't force it at teardown otherwise).
   if (used_scheduler_)
     app.exec_scheduler().kill_owner(owner_);
-#endif
 }
 
-#ifdef CVC_STATE_EXEC
 void Runtime::Impl::submit_action(const QueuedAction &action) {
   namespace se = cvc::state_exec;
   const std::string &action_prefix = action.prefix;
@@ -1551,7 +1476,6 @@ void Runtime::Impl::deliver_input(const InputEvent &ev) {
   app.exec_scheduler().post_message(keyboard ? key_channel() : pointer_channel(),
                                     se::make_dict(std::move(f)));
 }
-#endif // CVC_STATE_EXEC
 
 Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move(prefix))) {}
 
@@ -1569,7 +1493,6 @@ void Runtime::on(std::string event, std::function<void()> handler) {
 }
 
 void Runtime::set_tick_program(std::string script) {
-#ifdef CVC_STATE_EXEC
   // Replacing the program kills any running resident so the new body starts fresh next drain.
   if (m_->tick_resident_pid_ >= 0) {
     m_->app.exec_scheduler().kill(m_->tick_resident_pid_);
@@ -1577,40 +1500,28 @@ void Runtime::set_tick_program(std::string script) {
     m_->tick_resident_pid_ = -1;
   }
   m_->tick_script_ = std::move(script);
-#else
-  (void)script; // residents need state_exec — no-op otherwise
-#endif
 }
 
 void Runtime::set_key_program(std::string script) {
-#ifdef CVC_STATE_EXEC
   if (m_->key_resident_pid_ >= 0) {
     m_->app.exec_scheduler().kill(m_->key_resident_pid_);
     m_->key_resident_.reset();
     m_->key_resident_pid_ = -1;
   }
   m_->key_script_ = std::move(script);
-#else
-  (void)script;
-#endif
 }
 
 void Runtime::set_pointer_program(std::string script) {
-#ifdef CVC_STATE_EXEC
   if (m_->pointer_resident_pid_ >= 0) {
     m_->app.exec_scheduler().kill(m_->pointer_resident_pid_);
     m_->pointer_resident_.reset();
     m_->pointer_resident_pid_ = -1;
   }
   m_->pointer_script_ = std::move(script);
-#else
-  (void)script;
-#endif
 }
 
 void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<std::string> global,
                                  bool strict, bool quiet) {
-#ifdef CVC_STATE_EXEC
   // Installed on every action/resident ictx via the &channel_policy_ pointer set in submit_action /
   // submit_resident, so this applies from the next activation on. `strict` is the enforce switch;
   // warn/off pass strict=false (the load-time lint already surfaced those), leaving runtime
@@ -1620,24 +1531,14 @@ void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<
   m_->channel_policy_.global = std::move(global);
   m_->channel_policy_.enforce = strict;
   m_->channel_policy_.quiet = quiet;
-#else
-  (void)declared;
-  (void)global;
-  (void)strict;
-  (void)quiet;
-#endif
 }
 
 void Runtime::post_input(const InputEvent &ev) {
-#ifdef CVC_STATE_EXEC
   // Submit the input residents on first use so the delivered event is consumed, not dropped, then
   // deliver it. The pump in drain() steps the resident; feed input BEFORE drain() for same-frame
-  // delivery (see the header contract). A no-op without state_exec.
+  // delivery (see the header contract).
   m_->ensure_input_residents();
   m_->deliver_input(ev);
-#else
-  (void)ev;
-#endif
 }
 
 void Runtime::render() { m_->render(); }
@@ -1651,24 +1552,17 @@ void Runtime::drain() {
     // A program action (`on:` starting with '(', like a computed `bind:`/`tooltip:`) runs through
     // state_exec — the north-star lane: a flag toggle or reset is pure .ari, no C++ handler.
     if (is_expr(a.event)) { // a program on: (whitespace-tolerant, exactly like a computed bind:)
-#ifdef CVC_STATE_EXEC
       // SUBMIT it to the app-wide scheduler (owner-tagged, chrooted to the action's mount prefix)
       // and return — no run-to-completion inside drain(). The per-frame pump below advances it; a
       // quick action still finishes this drain, while an (await …)/(msg-recv …)/(sleep …) parks
       // and resumes on a later frame instead of blocking the UI thread (§4.7).
       m_->submit_action(a);
-#else
-      m_->warn_once("ari: on: a program action needs state_exec (CVC_STATE_EXEC=OFF); it did not "
-                    "run [" +
-                    a.event + "]");
-#endif
       continue;
     }
     auto it = m_->handlers.find(a.event); // a bare event name -> the host C++ handler seam
     if (it != m_->handlers.end() && it->second)
       it->second();
   }
-#ifdef CVC_STATE_EXEC
   // §7.1 resident on:tick: submit the resident once (idempotent), then post it this frame's tick.
   m_->ensure_tick_resident();
   m_->post_tick();
@@ -1679,7 +1573,6 @@ void Runtime::drain() {
   // bounded slice, then sweep the finished ones. Runs once used_scheduler_ latches.
   if (m_->used_scheduler_)
     m_->pump_and_sweep_actions();
-#endif
 }
 
 std::vector<std::string> Runtime::take_reactive_warnings() {

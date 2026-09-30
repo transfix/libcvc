@@ -68,8 +68,8 @@ public:
   // Unlike a fire-once action `on:`, this submits ONE long-lived, owner-tagged process on the
   // app-wide scheduler that PARKS between frames (it never re-submits per frame); each drain()
   // posts it a tick to run the program once. Pass a LoadResult::on_tick_script here after loading.
-  // "" clears it (kills the resident). A no-op in a build without state_exec. The resident is
-  // reaped with the Runtime (kill_owner on teardown).
+  // "" clears it (kills the resident). The resident is reaped with the Runtime (kill_owner on
+  // teardown).
   void set_tick_program(std::string script);
 
   // §4.6 document-level input handlers — register a state_exec PROGRAM run per input event. Like
@@ -79,7 +79,7 @@ public:
   // set_key_program handles keyboard events (key_down/key_up); set_pointer_program handles mouse
   // events (mouse_move/mouse_button_*/mouse_wheel). Pass LoadResult::on_key_script /
   // on_pointer_script.
-  // "" clears it. No-ops without state_exec. (Widget-level on_click/on_hover are a separate path.)
+  // "" clears it. (Widget-level on_click/on_hover are a separate path.)
   void set_key_program(std::string script);
   void set_pointer_program(std::string script);
 
@@ -91,16 +91,14 @@ public:
   // (the load lint already surfaced those), which clears enforcement. The host feeds these from a
   // LoadResult (channels: + lint:); pass plain vectors so this header stays independent of the
   // loader. Calling with `strict=false` and empty lists (the default) disables runtime enforcement.
-  // A no-op without state_exec. Set once after load, before render/drain; it applies to every
-  // action + resident.
+  // Set once after load, before render/drain; it applies to every action + resident.
   void set_channel_policy(std::vector<std::string> declared, std::vector<std::string> global,
                           bool strict, bool quiet);
 
   // Feed one input event to the runtime — the host calls this each frame for every event from its
   // input source (e.g. cvc::gl::SdlInput), BEFORE drain(), so the event is delivered to the
   // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Thread-safe
-  // (routes through the scheduler's MPSC ingress). A no-op without state_exec, or if no matching
-  // handler is registered.
+  // (routes through the scheduler's MPSC ingress). A no-op if no matching handler is registered.
   void post_input(const InputEvent &ev);
 
   // Render one frame: apply any pending tree swap, then walk the tree driving the
@@ -115,7 +113,7 @@ public:
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
   // distinct failing predicate (a parse error, a runtime error, or a per-frame budget
-  // overrun; or, on a build without state_exec, one note that visible_when was ignored).
+  // overrun).
   // De-duplicated for the Runtime's lifetime, so a broken predicate warns ONCE however
   // many frames it renders. Empty when everything evaluated cleanly. The host may log
   // these (e.g. after the first frame); ignoring them is safe — the walk already
@@ -168,15 +166,11 @@ bool has_widget_type(const std::string &type);
 // `bind: demo.n` resolves to (a state_exec chroot on the shared "." separator). Run it
 // at load, BEFORE the first render(), so init values win and widget/scene read_or_seed
 // defaults only fill keys init left unset. Returns true on success (or an empty
-// script); false with a message appended to `errors` on a parse/runtime error, or when
-// this build lacks state_exec. Never throws. (The loader stays app-free and only
-// captures the script; this is the host/Runtime-side seam that has the app.)
+// script); false with a message appended to `errors` on a parse/runtime error. Never
+// throws. (The loader stays app-free and only captures the script; this is the
+// host/Runtime-side seam that has the app.)
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
               std::vector<std::string> *errors = nullptr);
-
-// Whether this build has state_exec (CVC_STATE_EXEC). When false, run_init cannot
-// execute a non-empty init: script (it reports an error instead).
-bool have_state_exec();
 
 // ---------------------------------------------------------------------------
 // Host-contributed state_exec intrinsics for the PROGRAM lanes (init: and a program `on:` action).
@@ -192,7 +186,7 @@ bool have_state_exec();
 // per-frame reactive READ lane (visible_when/computed binds — kept default-deny +
 // side-effect-free). A program on: runs synchronously on the host thread inside Runtime::drain(),
 // so an intrinsic that mutates async host state (a worker-thread sim) should ENQUEUE the mutation,
-// not do it inline. A no-op in a build without state_exec (the program lanes do not run).
+// not do it inline.
 // ---------------------------------------------------------------------------
 } // namespace ariadne
 namespace state_exec {

@@ -11,25 +11,12 @@ Exec shares the app's state tree, DSL <-> Python <-> state all interoperate.
 import pycvc
 
 
-def _exec(app):
-    """Exec(app), or None if this build lacks state_exec."""
-    try:
-        return pycvc.Exec(app)
-    except Exception as e:
-        if "without state_exec" in str(e):
-            return None
-        raise
-
-
 # ── core DSL evaluation ─────────────────────────────────────────────────
 
 
 def test_arithmetic_and_forms():
     app = pycvc.make_app()
-    ex = _exec(app)
-    if ex is None:
-        print("  skip: build has no state_exec")
-        return
+    ex = pycvc.Exec(app)
     assert ex.run("(+ 2 3)") == "5"
     assert ex.run("(* 6 7)") == "42"
     assert ex.run("(begin (set x 5) x)") == "5"
@@ -40,9 +27,7 @@ def test_arithmetic_and_forms():
 
 def test_parse_error_raises():
     app = pycvc.make_app()
-    ex = _exec(app)
-    if ex is None:
-        return
+    ex = pycvc.Exec(app)
     try:
         ex.run("(begin (set x")  # unbalanced
     except Exception:
@@ -56,9 +41,7 @@ def test_parse_error_raises():
 
 def test_dsl_reads_and_writes_shared_state():
     app = pycvc.make_app()
-    ex = _exec(app)
-    if ex is None:
-        return
+    ex = pycvc.Exec(app)
     # Python writes state; DSL reads it.
     pycvc.state_set(app, "shared.x", "7")
     assert ex.run('(state-get "shared.x")') == "7"
@@ -72,9 +55,7 @@ def test_dsl_reads_and_writes_shared_state():
 
 def test_python_function_called_from_dsl():
     app = pycvc.make_app()
-    ex = _exec(app)
-    if ex is None:
-        return
+    ex = pycvc.Exec(app)
 
     ex.register_fn("py-double", lambda x: x * 2)
     ex.register_fn("py-add", lambda a, b: a + b)
@@ -89,9 +70,7 @@ def test_python_function_called_from_dsl():
 
 def test_python_dsl_function_touches_state():
     app = pycvc.make_app()
-    ex = _exec(app)
-    if ex is None:
-        return
+    ex = pycvc.Exec(app)
 
     # A Python DSL function that writes state on the shared app.
     def stash(key, value):
@@ -109,9 +88,7 @@ def test_python_dsl_function_touches_state():
 
 def test_python_exception_is_contained():
     app = pycvc.make_app()
-    ex = _exec(app)
-    if ex is None:
-        return
+    ex = pycvc.Exec(app)
 
     def boom(*_):
         raise ValueError("kaboom")
@@ -130,9 +107,7 @@ def test_python_exception_is_contained():
 
 def test_value_marshaling_types():
     app = pycvc.make_app()
-    ex = _exec(app)
-    if ex is None:
-        return
+    ex = pycvc.Exec(app)
     seen = {}
 
     def capture(x):

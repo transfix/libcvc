@@ -100,7 +100,7 @@ Full design: [STATE_EXEC_PORTING_PLAN.md](STATE_EXEC_PORTING_PLAN.md)
 
 | Component | Status | Tests |
 |-----------|--------|-------|
-| `CVC_STATE_EXEC` feature flag | ✅ Done | — |
+| `CVC_STATE_EXEC` feature flag | ✅ Done, later removed (#493) — always built | — |
 | `CVC_STATE_MEMORY_MANAGER` feature flag | ✅ Done | — |
 | Doxygen `@file`/`@brief` on all 17 headers | ✅ Done | — |
 | Benchmark tests | ✅ Done | 7 |

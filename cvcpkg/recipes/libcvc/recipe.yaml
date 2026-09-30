@@ -286,9 +286,9 @@ depends:
     # The gRPC/xmlrpc network state-transport stack (CVC_USING_XMLRPC + CVC_ENABLE_GRPC).
     # Scoped to the platforms this recipe actually BUILDS the transport on (the build matrix
     # below: linux/macos/windows). The wasm-mt bundle (built separately by publish-cvcgl-wasm.yml,
-    # xmlrpc/grpc OFF, CVC_STATE_EXEC ON) links none of these, so declaring them for wasm made
+    # xmlrpc/grpc OFF) links none of these, so declaring them for wasm made
     # `cvcpkg install cvc/libcvc --platform wasm-mt` fail to resolve (abseil/protobuf/grpc are not
-    # published for wasm). The state_exec evaluator is independent of this stack and stays on.
+    # published for wasm). The state_exec evaluator is independent of this stack (always built).
     - name: openssl
       platforms: [linux, macos, windows]
     - name: c-ares

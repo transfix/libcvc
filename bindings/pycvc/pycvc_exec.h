@@ -5,9 +5,6 @@
 // environment + scheduler over that app's state root, so registered Python
 // functions and run() programs all see the same shared tree. A Python function
 // registered here becomes callable from DSL source like any builtin.
-//
-// Guarded by CVC_STATE_EXEC (a PUBLIC compile def on the cvc target); when the
-// build lacks state_exec, the ctor throws.
 #pragma once
 
 #include <memory>

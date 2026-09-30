@@ -14,9 +14,9 @@ recipe:
   # build-pages.py into share/cvcgl-examples/web/, so cvcgl-examples-web serves
   # the same gallery that deploys to gh-pages. lsystem_forest dropped from the
   # wasm gallery (irrelevant to navigation).
-  # Bumped 2 -> 3: build-wasm.sh now builds with CVC_STATE_EXEC=ON (was forced
-  # OFF), so the wasm gallery carries the state_exec program lanes that Ariadne
-  # apps run on — matching the wasm-mt libcvc/cvcgl bundles (#438).
+  # Bumped 2 -> 3: build-wasm.sh no longer forces state_exec OFF (the
+  # CVC_STATE_EXEC option is gone; state_exec is always built), so the wasm
+  # gallery carries the program lanes that Ariadne apps run on.
   cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"

@@ -78,8 +78,8 @@ safety property. You cannot make a "read" slot perform an action, or vice versa.
 
 Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `bind` /
 `text`, `tooltip`, `options`, `repeat.count` — run in a long-lived stackless evaluator
-(`class ReactiveEngine`, [`ariadne.cpp:385`](../src/cvc/ariadne/ariadne.cpp), compiled
-under `CVC_STATE_EXEC`) over a **default-deny** environment:
+(`class ReactiveEngine`, [`ariadne.cpp:385`](../src/cvc/ariadne/ariadne.cpp)) over a
+**default-deny** environment:
 
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)).
@@ -91,9 +91,8 @@ Nothing that writes state, schedules, watches, sends messages, or does I/O is
 reachable. An off-allowlist symbol does not error loudly — it **fails safe**: the slot
 degrades to hidden / disabled / empty / last-good value and the frame records a
 one-shot warning (`take_reactive_warnings`,
-[`ariadne.cpp:1682`](../src/cvc/ariadne/ariadne.cpp)). When the build lacks
-`CVC_STATE_EXEC` the whole engine is `#ifdef`'d out and reactive slots default to their
-fail-safe *shown* state.
+[`ariadne.cpp:1682`](../src/cvc/ariadne/ariadne.cpp)). state_exec is always built (there is
+no build option to drop it), so the engine is always present.
 
 **The read lane never parks.** It is bounded three ways
 ([`ariadne.cpp:603`](../src/cvc/ariadne/ariadne.cpp)):

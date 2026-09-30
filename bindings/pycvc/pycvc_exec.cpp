@@ -6,10 +6,6 @@
 
 #include "pycvc_exec.h"
 
-#include <stdexcept>
-
-#ifdef CVC_STATE_EXEC
-
 #include <chrono>
 #include <condition_variable>
 #include <cvc/core/app.h>
@@ -23,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <variant>
@@ -634,24 +631,3 @@ std::string Exec::run(const std::string &src) {
 }
 
 } // namespace pycvc
-
-#else // !CVC_STATE_EXEC
-
-namespace pycvc {
-
-struct Exec::ExecImpl {};
-
-Exec::Exec(const std::shared_ptr<cvc::app> &) {
-  throw std::runtime_error("pycvc.Exec: this libcvc build was compiled without state_exec");
-}
-Exec::~Exec() = default;
-void Exec::register_fn(const std::string &, PyObject *) {
-  throw std::runtime_error("pycvc.Exec: this libcvc build was compiled without state_exec");
-}
-std::string Exec::run(const std::string &) {
-  throw std::runtime_error("pycvc.Exec: this libcvc build was compiled without state_exec");
-}
-
-} // namespace pycvc
-
-#endif // CVC_STATE_EXEC
