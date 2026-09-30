@@ -55,25 +55,23 @@ add_executable(state_list_test state_list_test.cpp)
 if(CVC_STATE_MEMORY_MANAGER)
   add_executable(state_memory_manager_test state_memory_manager_test.cpp)
 endif()
-if(CVC_STATE_EXEC)
-  add_executable(state_exec_types_test state_exec_types_test.cpp)
-  add_executable(state_exec_parser_test state_exec_parser_test.cpp)
-  add_executable(state_exec_builtins_test state_exec_builtins_test.cpp)
-  add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
-  add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
-  add_executable(state_exec_codec_test state_exec_codec_test.cpp)
-  add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
-  add_executable(state_exec_async_test state_exec_async_test.cpp)
-  add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
-  add_executable(state_exec_intrinsics_test state_exec_intrinsics_test.cpp)
-  add_executable(state_exec_coordinator_test state_exec_coordinator_test.cpp)
-  add_executable(state_exec_bench_test state_exec_bench_test.cpp)
-  add_executable(state_exec_integration_test state_exec_integration_test.cpp)
-  add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
-  add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
-  if(NOT WIN32)
-    add_executable(state_exec_multiprocess_test state_exec_multiprocess_test.cpp)
-  endif()
+add_executable(state_exec_types_test state_exec_types_test.cpp)
+add_executable(state_exec_parser_test state_exec_parser_test.cpp)
+add_executable(state_exec_builtins_test state_exec_builtins_test.cpp)
+add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
+add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
+add_executable(state_exec_codec_test state_exec_codec_test.cpp)
+add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
+add_executable(state_exec_async_test state_exec_async_test.cpp)
+add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
+add_executable(state_exec_intrinsics_test state_exec_intrinsics_test.cpp)
+add_executable(state_exec_coordinator_test state_exec_coordinator_test.cpp)
+add_executable(state_exec_bench_test state_exec_bench_test.cpp)
+add_executable(state_exec_integration_test state_exec_integration_test.cpp)
+add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
+add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
+if(NOT WIN32)
+  add_executable(state_exec_multiprocess_test state_exec_multiprocess_test.cpp)
 endif()
 add_executable(state_delta_codec_test state_delta_codec_test.cpp)
 add_executable(state_volume_codec_test state_volume_codec_test.cpp)
@@ -292,27 +290,25 @@ if(NOT WIN32)
   )
 endif()
 
-if(CVC_STATE_EXEC)
-  list(APPEND TEST_TARGETS
-    state_exec_types_test
-    state_exec_parser_test
-    state_exec_builtins_test
-    state_exec_evaluator_test
-    state_exec_stackless_evaluator_test
-    state_exec_codec_test
-    state_exec_unicode_test
-    state_exec_async_test
-    state_exec_scheduler_test
-    state_exec_intrinsics_test
-    state_exec_coordinator_test
-    state_exec_bench_test
-    state_exec_integration_test
-    state_exec_advanced_integration_test
-    state_exec_gaps_test
-  )
-  if(NOT WIN32)
-    list(APPEND TEST_TARGETS state_exec_multiprocess_test)
-  endif()
+list(APPEND TEST_TARGETS
+  state_exec_types_test
+  state_exec_parser_test
+  state_exec_builtins_test
+  state_exec_evaluator_test
+  state_exec_stackless_evaluator_test
+  state_exec_codec_test
+  state_exec_unicode_test
+  state_exec_async_test
+  state_exec_scheduler_test
+  state_exec_intrinsics_test
+  state_exec_coordinator_test
+  state_exec_bench_test
+  state_exec_integration_test
+  state_exec_advanced_integration_test
+  state_exec_gaps_test
+)
+if(NOT WIN32)
+  list(APPEND TEST_TARGETS state_exec_multiprocess_test)
 endif()
 
 if(CVC_STATE_MEMORY_MANAGER)
@@ -1114,111 +1110,109 @@ target_link_libraries(state_telemetry_aggregator_test
     GTest::gtest_main
 )
 
-if(CVC_STATE_EXEC)
-  target_link_libraries(state_exec_parser_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_parser_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_types_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_types_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_builtins_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_builtins_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_evaluator_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_evaluator_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_stackless_evaluator_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_stackless_evaluator_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_codec_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
-  target_link_libraries(state_exec_unicode_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_codec_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_exec_unicode_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_async_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_async_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_scheduler_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_scheduler_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_intrinsics_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_intrinsics_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_coordinator_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_coordinator_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_bench_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_bench_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_integration_test
-    PRIVATE
-      cvc
-      GTest::gtest
-      GTest::gtest_main
-  )
+target_link_libraries(state_exec_integration_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
-  target_link_libraries(state_exec_advanced_integration_test
+target_link_libraries(state_exec_advanced_integration_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+if(TARGET state_exec_multiprocess_test)
+  target_link_libraries(state_exec_multiprocess_test
     PRIVATE
       cvc
       GTest::gtest
       GTest::gtest_main
   )
-  if(TARGET state_exec_multiprocess_test)
-    target_link_libraries(state_exec_multiprocess_test
-      PRIVATE
-        cvc
-        GTest::gtest
-        GTest::gtest_main
-    )
-  endif()
 endif()
 
 if(CVC_STATE_MEMORY_MANAGER)
@@ -1430,24 +1424,22 @@ target_compile_features(state_transparent_link_index_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_link_forwarding_test PRIVATE cxx_std_17)
 target_compile_features(state_cross_cluster_link_test PRIVATE cxx_std_17)
 target_compile_features(state_link_bench_test PRIVATE cxx_std_17)
-if(CVC_STATE_EXEC)
-  target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_integration_test PRIVATE cxx_std_20)
-  target_compile_features(state_exec_advanced_integration_test PRIVATE cxx_std_20)
-  if(TARGET state_exec_multiprocess_test)
-    target_compile_features(state_exec_multiprocess_test PRIVATE cxx_std_20)
-  endif()
+target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_integration_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_advanced_integration_test PRIVATE cxx_std_20)
+if(TARGET state_exec_multiprocess_test)
+  target_compile_features(state_exec_multiprocess_test PRIVATE cxx_std_20)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
@@ -1724,29 +1716,27 @@ cvc_discover_tests(state_transparent_link_index_test)
 cvc_discover_tests(state_sync_adapter_link_forwarding_test)
 cvc_discover_tests(state_cross_cluster_link_test)
 cvc_discover_tests(state_link_bench_test)
-if(CVC_STATE_EXEC)
-  cvc_discover_tests(state_exec_parser_test)
-  cvc_discover_tests(state_exec_types_test)
-  cvc_discover_tests(state_exec_builtins_test)
-  cvc_discover_tests(state_exec_evaluator_test)
-  cvc_discover_tests(state_exec_stackless_evaluator_test)
-  cvc_discover_tests(state_exec_codec_test)
-  cvc_discover_tests(state_exec_unicode_test)
-  cvc_discover_tests(state_exec_async_test)
-  cvc_discover_tests(state_exec_scheduler_test)
-  cvc_discover_tests(state_exec_intrinsics_test)
-  cvc_discover_tests(state_exec_coordinator_test)
-  cvc_discover_tests(state_exec_bench_test)
-  cvc_discover_tests(state_exec_integration_test)
-  cvc_discover_tests(state_exec_advanced_integration_test)
-  if(TARGET state_exec_multiprocess_test)
-    # Forks real OS processes and replicates state over Unix-domain-socket IPC
-    # with internal pump deadlines. Under `ctest --parallel` on a loaded CI
-    # runner the forked children get starved and miss those windows, so
-    # StateTreeReplication intermittently fails all `until-pass` retries.
-    # RUN_SERIAL keeps this suite off the shared parallel scheduler.
-    cvc_discover_tests(state_exec_multiprocess_test PROPERTIES RUN_SERIAL TRUE)
-  endif()
+cvc_discover_tests(state_exec_parser_test)
+cvc_discover_tests(state_exec_types_test)
+cvc_discover_tests(state_exec_builtins_test)
+cvc_discover_tests(state_exec_evaluator_test)
+cvc_discover_tests(state_exec_stackless_evaluator_test)
+cvc_discover_tests(state_exec_codec_test)
+cvc_discover_tests(state_exec_unicode_test)
+cvc_discover_tests(state_exec_async_test)
+cvc_discover_tests(state_exec_scheduler_test)
+cvc_discover_tests(state_exec_intrinsics_test)
+cvc_discover_tests(state_exec_coordinator_test)
+cvc_discover_tests(state_exec_bench_test)
+cvc_discover_tests(state_exec_integration_test)
+cvc_discover_tests(state_exec_advanced_integration_test)
+if(TARGET state_exec_multiprocess_test)
+  # Forks real OS processes and replicates state over Unix-domain-socket IPC
+  # with internal pump deadlines. Under `ctest --parallel` on a loaded CI
+  # runner the forked children get starved and miss those windows, so
+  # StateTreeReplication intermittently fails all `until-pass` retries.
+  # RUN_SERIAL keeps this suite off the shared parallel scheduler.
+  cvc_discover_tests(state_exec_multiprocess_test PROPERTIES RUN_SERIAL TRUE)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   cvc_discover_tests(state_memory_manager_test)

@@ -1,13 +1,10 @@
 // cvc::async_task — offload a blocking kernel to the compute pool and resume a parked state_exec
 // process when it finishes.  See inc/cvc/core/async_task.h for the contract and the two rules.
 
-#include <cvc/core/async_task.h>
-
-#ifdef CVC_STATE_EXEC
-
 #include <atomic>
 #include <cstdint>
 #include <cvc/core/app.h>
+#include <cvc/core/async_task.h>
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/core/state_exec/intrinsics.h> // resolve_channel_key, make_future, park_on_channel
 #include <exception>
@@ -64,5 +61,3 @@ se::value_t future_pool_task(app &a, se::async_scheduler &sched, const std::stri
 }
 
 } // namespace cvc
-
-#endif // CVC_STATE_EXEC

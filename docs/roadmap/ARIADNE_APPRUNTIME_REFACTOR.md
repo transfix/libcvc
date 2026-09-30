@@ -85,7 +85,6 @@ public:
 
   std::vector<std::string> take_warnings();
   bool reload_if_changed();
-  static bool have_state_exec();
   static bool have_yaml();
 };
 }

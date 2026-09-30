@@ -12,10 +12,8 @@
 // + a cvcGL SceneAdapter + an AppRuntime. A terminal host would compose an FtxuiBackend
 // + no adapter over the same AppRuntime.
 //
-// libpython-free (std::function, never PyObject*). The program lanes (init:/on_tick/
-// on_key/on_pointer, register_verb*, the scheduler pump) are no-ops without
-// CVC_STATE_EXEC; loading a YAML .ari needs the yaml build. have_state_exec()/have_yaml()
-// report which are live.
+// libpython-free (std::function, never PyObject*). Loading a YAML .ari needs the yaml
+// build; have_yaml() reports whether it is live.
 #pragma once
 
 #include <cstdint>
@@ -64,7 +62,7 @@ public:
   // inline on the drain thread, no args/return). register_async_verb OFFLOADS `work` to the
   // app compute pool and posts its string result to `done_channel`; the program parks on
   // (msg-recv "done_channel") and resumes under drain()'s slice budget (the nav_compute
-  // pattern). Both are no-ops without state_exec.
+  // pattern).
   void register_verb(const std::string &name, std::function<void()> fn);
   void register_async_verb(const std::string &name, const std::string &done_channel,
                            std::function<std::string()> work);
@@ -96,7 +94,6 @@ public:
   // --- diagnostics / capabilities ---
   std::vector<std::string> take_warnings(); // reactive read-lane diagnostics from the last render
   bool reload_if_changed();                 // §12.5 hot reload if a watched source changed
-  static bool have_state_exec();            // program lanes + verbs live?
   static bool have_yaml();                  // can load a YAML .ari?
 
 private:

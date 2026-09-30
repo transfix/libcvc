@@ -902,8 +902,8 @@ This is the heart of v0.2. Every `*_when`, `fmt`, dynamic `options`, `repeat.cou
 computed `bind`, and every `on:`/`on_change:` action is a `state_exec` program over
 the **same state tree the widgets bind to**.
 
-> **Status — the read-only lane's first field, `visible_when`, is LANDED** (`cvc::ariadne`,
-> `CVC_STATE_EXEC`-gated). `Widget::visible_when` is a predicate the walk re-evaluates each
+> **Status — the read-only lane's first field, `visible_when`, is LANDED** (`cvc::ariadne`).
+> `Widget::visible_when` is a predicate the walk re-evaluates each
 > frame; falsy → the widget and its subtree are skipped (in a grid, a hidden child consumes
 > **no** cell). Implementation notes that refine §4.1 below as-built:
 > - **Default-deny, on mechanisms not just an allowlist.** The between-steps caps cannot see
@@ -928,18 +928,16 @@ the **same state tree the widgets bind to**.
 >   aggregate wall-time budget (so N reactive widgets can't together stall a frame). A step
 >   cap returns `done==false`; a time cap throws `evaluation_timeout`; both → fail-safe hide
 >   + one warning. Diagnostics are de-duplicated and drained by `Runtime::take_reactive_warnings()`.
-> - **Fail-safe polarity.** A broken/over-budget predicate HIDES the widget (§4.1). The one
->   deliberate carve-out: on a build **without** `CVC_STATE_EXEC` a `visible_when` widget is
->   SHOWN (+ a one-time warning), not hidden — hiding every reactive widget would gut a
->   minimal build. That is a build-config axis, distinct from a per-eval failure on a build
->   that *has* the evaluator (which hides).
+> - **Fail-safe polarity.** A broken/over-budget predicate HIDES the widget (§4.1). (An earlier
+>   carve-out SHOWED `visible_when` widgets on builds without state_exec; the `CVC_STATE_EXEC`
+>   option was removed in #493, so every build has the evaluator.)
 >
 > **Also LANDED — `enabled_when` / `disabled_when`** (reactive grey-out, the sibling of
 > `visible_when`): a widget stays drawn but non-interactive when `enabled_when` is falsy or
 > `disabled_when` is truthy. Realized through a new backend `begin_disabled()`/`end_disabled()`
 > scope (non-pure no-op defaults; ImGuiBackend → `ImGui::BeginDisabled/EndDisabled`) wrapping the
-> widget and its subtree. Fail-safe DISABLES on a broken predicate; a build without state_exec
-> leaves it enabled (+ warns once). Same hardened engine as `visible_when`.
+> widget and its subtree. Fail-safe DISABLES on a broken predicate. Same hardened engine as
+> `visible_when`.
 >
 > **Also LANDED — computed values + `options` + `tooltip`** (on `ReactiveEngine::eval_string` /
 > `eval_string_list`): a Text whose `bind` is an s-expression (starts with `(`) is a computed
@@ -1160,7 +1158,7 @@ other `on:tick`/`on:key` cadence questions.
   `state-set` (coalesced publisher). No scheduler touched on the draw thread.
 - **Action fire (during the walk):** never inline. Fast path enqueues an intent;
   general path calls `execute(ast, opts)→pid`.
-  > **Program `on:` LANDED** (`ariadne.cpp`, `CVC_STATE_EXEC`): an `on:` value that starts with
+  > **Program `on:` LANDED** (`ariadne.cpp`): an `on:` value that starts with
   > `(` — an s-expression, exactly like a computed `bind:`/`tooltip:` — is a **state_exec program**
   > run at `Runtime::drain()`, not a bare event name. So a flag toggle / reset is **pure `.ari`**,
   > no C++ handler (`on: (state-set "paused" (if …))`). It shares one bounded runner with the
@@ -3848,13 +3846,13 @@ points are before anything renders.
 **The `init:` block — a state_exec script run on load.** An optional top-level `init:` block carries a
 `cvc::state_exec` script that runs ONCE at load, for dynamic initialization (seed/compute state before the
 first frame). The loader only CAPTURES the text into `LoadResult::init_script` (it has no `cvc::app` and
-never runs the DSL); `cvc::ariadne::run_init(app, prefix, script, errors)` runs it — a core seam gated by
-`CVC_STATE_EXEC` (state_exec is core libcvc, so no VTK), which the host calls after load and BEFORE the
+never runs the DSL); `cvc::ariadne::run_init(app, prefix, script, errors)` runs it — a core seam
+(state_exec is core libcvc, so no VTK), which the host calls after load and BEFORE the
 first `render()`. It runs the script under a state_exec **chroot at the document prefix**, so
 `(state-set "demo.agents" "256")` writes `<prefix>.demo.agents` — the same key a widget `bind: demo.agents`
 resolves to (the shared "." separator), and init values win because widget/scene `read_or_seed` only fills
 keys init left unset. A parse/runtime error is reported (never thrown), not fatal — init is optional
-dynamic seeding, not a hard gate; `have_state_exec()` reports whether the build can run it. The run is
+dynamic seeding, not a hard gate. The run is
 **bounded** (a finite step + wall-clock budget on both the process and the run loop, and success requires a
 `terminated` status) so a looping or blocking init script is reported rather than hanging the app at load. This is a new
 concept beyond the two §4.1 state_exec lanes (per-frame read + effectful action): a run-once init lane.

@@ -348,15 +348,9 @@ if(WIN32)
   list(REMOVE_ITEM SOURCE_FILES core/state_transport_ipc.cpp)
 endif()
 
-# state_exec / state_memory_manager feature flags
-option(CVC_STATE_EXEC "Enable state_exec DSL evaluator and process scheduler" ON)
+# state_memory_manager feature flag
 option(CVC_STATE_MEMORY_MANAGER "Enable state memory manager with LRU/LFU eviction" ON)
 
-if(NOT CVC_STATE_EXEC)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX "core/state_exec/")
-endif()
-
-# state_memory_manager feature flag
 if(NOT CVC_STATE_MEMORY_MANAGER)
   list(REMOVE_ITEM SOURCE_FILES core/state_memory_manager.cpp core/state_eviction_store.cpp)
 endif()
@@ -1318,9 +1312,6 @@ if(CVC_ENABLE_GRPC)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
   target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
-endif()
-if(CVC_STATE_EXEC)
-  target_compile_definitions(cvc PUBLIC CVC_STATE_EXEC)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)

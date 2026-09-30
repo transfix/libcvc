@@ -25,7 +25,7 @@
 // `init:` (no per-frame pump, so a park never resumes) and NOT in the reactive read lane
 // (visible_when/computed, default-deny). NATIVE ONLY for now: the background-worker model assumes
 // native threads (wasm needs the §13.8 async-fetch path). A no-op without a compiled cvc::net
-// backend or without state_exec.
+// backend.
 
 namespace cvc {
 class app;
