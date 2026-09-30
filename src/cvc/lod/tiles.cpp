@@ -46,8 +46,9 @@ typedef geometry::tri_t tri_t;
 // colours in [0,1], uvs, tangents).
 const double k_attr_quantum = 1e-6;
 
-// llround(v / q), saturated so a wild or NaN coordinate stays deterministic
-// instead of overflowing (NaN maps to the minimum).
+// llround(v / q), saturated so a huge coordinate or a NaN attribute stays
+// deterministic instead of overflowing (NaN maps to the minimum). Positions are
+// always finite here: surface_tris drops triangles with a non-finite corner.
 std::int64_t quantize(double v, double q) {
   const double s = v / q;
   const double lim = 9.2e18; // just inside +-2^63
@@ -58,8 +59,9 @@ std::int64_t quantize(double v, double q) {
   return static_cast<std::int64_t>(std::llround(s));
 }
 
-// floor((c - origin) / cell_m) as an integer cell coordinate, saturated (NaN maps
-// to the minimum) for the same reason.
+// floor((c - origin) / cell_m) as an integer cell coordinate, saturated for the
+// same reason (a finite centroid far outside the int64 range, or one whose
+// computation overflowed to +-inf).
 std::int64_t cell_coord(double c, double origin, double cell_m) {
   const double f = std::floor((c - origin) / cell_m);
   const double lim = 4.0e18;
@@ -78,6 +80,9 @@ void validate(double cell_m, const partition_params &p) {
   if (!(std::isfinite(p.hash_quantum_m) && p.hash_quantum_m > 0.0))
     throw std::invalid_argument(
         "cvc::lod: partition_params::hash_quantum_m must be finite and > 0");
+  for (int a = 0; a < 3; ++a)
+    if (a != p.up_axis && !std::isfinite(p.origin[a]))
+      throw std::invalid_argument("cvc::lod: partition_params::origin must be finite");
 }
 
 // The two ground axes for an up axis, in increasing order.
@@ -88,10 +93,18 @@ void ground_axes(int up, int &a0, int &a1) {
 
 // The triangle surface the tiler works on: tris, then quads fan-split
 // (0,1,2),(0,2,3) as cvc::simplify does, dropping any triangle with an
-// out-of-range vertex index (a malformed part loses a triangle, not the tile).
+// out-of-range vertex index or a non-finite (NaN/inf) corner position. A
+// malformed part loses a triangle, not the tile; a non-finite corner has no cell
+// to land in and would otherwise escape the tile's bounds while still being carried.
 std::vector<tri_t> surface_tris(const geometry &g) {
-  const index_t n = g.num_points();
-  const auto ok = [n](index_t a, index_t b, index_t c) { return a < n && b < n && c < n; };
+  const geometry::points_t &P = g.const_points();
+  const index_t n = P.size();
+  const auto good = [&P, n](index_t v) {
+    return v < n && std::isfinite(P[v][0]) && std::isfinite(P[v][1]) && std::isfinite(P[v][2]);
+  };
+  const auto ok = [&good](index_t a, index_t b, index_t c) {
+    return good(a) && good(b) && good(c);
+  };
   std::vector<tri_t> out;
   out.reserve(g.num_tris() + 2 * g.num_quads());
   for (const tri_t &t : g.const_tris())

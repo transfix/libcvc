@@ -9,11 +9,13 @@
 // Covers: every group lands whole in exactly one tile, triangle and vertex counts
 // are conserved and empty cells produce no tile; the content hash is stable
 // across input permutation, repeat runs, vertex/triangle order and triangle
-// rotation but changes with geometry, winding and attributes; pooled == serial
-// for both the partition and the pyramids (bit-identical); the progress callback
-// fires once per tile and never concurrently; the connected-component overload
-// matches the named-part path; and the edge cases (no parts, triangle-less
-// parts, bad cell sizes, a huge cell, Y-up, quads, bad indices).
+// rotation but changes with geometry, winding and attributes, and is pinned to
+// golden values; pooled == serial for both the partition and the pyramids
+// (bit-identical); the progress callback fires once per tile and never
+// concurrently; the connected-component overload matches the named-part path
+// (and differs exactly by model-wide attribute padding when attributes are
+// mixed); and the edge cases (no parts, triangle-less parts, bad cell sizes, a
+// huge cell, Y-up, quads, bad indices, non-finite corners).
 
 #include <algorithm>
 #include <atomic>
@@ -29,6 +31,7 @@
 #include <cvc/lod/tiles.h>
 #include <cvc/model/model.h>
 #include <gtest/gtest.h>
+#include <ios>
 #include <limits>
 #include <map>
 #include <random>
@@ -637,6 +640,55 @@ TEST(LodTiles, ConnectedComponentsMatchNamedParts) {
   }
 }
 
+TEST(LodTiles, ComponentHashesFollowTheModelWidePadding) {
+  // With mixed attributes (coloured walls on some buildings, uvs on every roof),
+  // model::merged() pads colours across the WHOLE model, while partition_model
+  // pads only within a tile. The two paths still agree on cells and triangles,
+  // but a tile's hash matches only when both carry the same attribute set --
+  // which is why a bake and its runtime check must use the same partition path.
+  cvc::app ctx;
+  const std::vector<building> city = make_city(ctx);
+  cvc::model m;
+  for (const building &b : city) {
+    m.meshes.push_back(cvc::model::mesh());
+    m.meshes.back().geom = b.walls;
+    m.meshes.back().name = b.name + "_walls";
+    m.meshes.push_back(cvc::model::mesh());
+    m.meshes.back().geom = b.roof;
+    m.meshes.back().name = b.name + "_roof";
+  }
+  const std::vector<lod::tile> named = lod::partition_model(m, kCell, building_key());
+  const std::vector<lod::tile> cc = lod::partition_components(m.merged(), kCell);
+  ASSERT_EQ(cc.size(), named.size());
+  int same = 0, differ = 0;
+  for (std::size_t k = 0; k < cc.size(); ++k) {
+    const geometry &n = named[k].geom, &c = cc[k].geom;
+    EXPECT_EQ(cc[k].cell, named[k].cell) << "tile " << k;
+    EXPECT_EQ(c.num_tris(), n.num_tris()) << "tile " << k;
+    EXPECT_EQ(c.num_points(), n.num_points()) << "tile " << k;
+    // The merged model carries colours everywhere; a named tile only when one of
+    // its buildings has coloured walls. Nothing else differs.
+    EXPECT_EQ(c.const_colors().size(), c.num_points());
+    EXPECT_EQ(c.const_uvs().size(), n.const_uvs().size());
+    EXPECT_EQ(c.const_normals().size(), n.const_normals().size());
+    const bool same_set = n.const_colors().size() == c.const_colors().size();
+    EXPECT_EQ(cc[k].content_hash == named[k].content_hash, same_set) << "tile " << k;
+    if (same_set) {
+      ++same;
+      continue;
+    }
+    ++differ;
+    // Dropping the all-white padding recovers the named tile's hash exactly.
+    for (const geometry::color_t &col : c.const_colors())
+      EXPECT_EQ(col, (geometry::color_t{{1.0, 1.0, 1.0}}));
+    geometry stripped = c;
+    stripped.colors().clear();
+    EXPECT_EQ(lod::content_hash(stripped), named[k].content_hash) << "tile " << k;
+  }
+  EXPECT_GT(same, 0);
+  EXPECT_GT(differ, 0);
+}
+
 TEST(LodTiles, CoincidentVerticesJoinComponents) {
   cvc::app ctx;
   // Two triangles sharing the position (90,0,0) but not an index: joined, their
@@ -705,6 +757,12 @@ TEST(LodTiles, EdgeCases) {
   bad_q.hash_quantum_m = 0.0;
   EXPECT_THROW(lod::partition_components(tri, kCell, bad_q), std::invalid_argument);
   EXPECT_THROW(lod::content_hash(tri, -1.0), std::invalid_argument);
+  lod::partition_params bad_origin;
+  bad_origin.origin[1] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_THROW(lod::partition_parts(parts, kCell, lod::group_key_fn(), bad_origin),
+               std::invalid_argument);
+  bad_origin.up_axis = 1; // the up-axis component is ignored
+  EXPECT_FALSE(lod::partition_parts(parts, kCell, lod::group_key_fn(), bad_origin).empty());
   std::vector<lod::named_part> null_part(1);
   null_part[0].name = "nothing";
   EXPECT_THROW(lod::partition_parts(null_part, kCell), std::invalid_argument);
@@ -805,8 +863,98 @@ TEST(LodTiles, ExtremeCoordinatesSaturateDeterministically) {
   EXPECT_EQ(tiles[0].content_hash, lod::content_hash(nfar));
   expect_tiles_identical(tiles, lod::partition_parts(parts, kCell));
 
-  geometry nan = one_triangle(ctx, 0.0, 10.0);
-  nan.points()[1][0] = std::numeric_limits<double>::quiet_NaN();
-  EXPECT_EQ(lod::content_hash(nan), lod::content_hash(nan));
-  EXPECT_NE(lod::content_hash(nan), lod::content_hash(one_triangle(ctx, 0.0, 10.0)));
+  // A NaN attribute saturates too: deterministic, and distinct from a finite one.
+  geometry nan_n = one_triangle(ctx, 0.0, 10.0);
+  nan_n.normals().assign(3, geometry::normal_t{{0.0, 0.0, 1.0}});
+  const std::uint64_t finite_n = lod::content_hash(nan_n);
+  nan_n.normals()[1][0] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(lod::content_hash(nan_n), lod::content_hash(nan_n));
+  EXPECT_NE(lod::content_hash(nan_n), finite_n);
+}
+
+TEST(LodTiles, NonFiniteCornersDropTheirTriangle) {
+  cvc::app ctx;
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  // One good triangle in cell (2,0), plus a NaN-x, a +inf-y and a -inf-z triangle
+  // whose finite corners sit elsewhere (x in [0, 900]).
+  const geometry good = one_triangle(ctx, 250.0, 260.0);
+  geometry g = good;
+  g.merge(one_triangle(ctx, 0.0, 900.0));
+  g.points()[4][0] = nan;
+  g.merge(one_triangle(ctx, 0.0, 900.0));
+  g.points()[6][1] = inf;
+  g.merge(one_triangle(ctx, 0.0, 900.0));
+  g.points()[11][2] = -inf;
+  ASSERT_EQ(g.num_tris(), 4u);
+
+  // The bad triangles are dropped from the tile (so its bounds cover every point
+  // it carries) and from the hash, exactly like out-of-range indices.
+  const std::uint64_t h_good = lod::content_hash(good);
+  EXPECT_EQ(lod::content_hash(g), h_good);
+  std::vector<lod::named_part> parts(1, lod::named_part("mixed", g));
+  const std::vector<lod::tile> tiles = lod::partition_parts(parts, kCell);
+  const std::vector<lod::tile> comps = lod::partition_components(g, kCell);
+  for (const std::vector<lod::tile> *ts : {&tiles, &comps}) {
+    ASSERT_EQ(ts->size(), 1u);
+    const lod::tile &t = (*ts)[0];
+    EXPECT_EQ(t.cell.i, 2);
+    EXPECT_EQ(t.cell.j, 0);
+    EXPECT_EQ(t.geom.num_tris(), 1u);
+    ASSERT_EQ(t.geom.num_points(), 3u);
+    for (const geometry::point_t &p : t.geom.const_points())
+      for (int a = 0; a < 3; ++a)
+        EXPECT_TRUE(std::isfinite(p[a]));
+    EXPECT_EQ(t.bounds.minx, 250.0);
+    EXPECT_EQ(t.bounds.maxx, 260.0);
+    EXPECT_EQ(t.bounds.maxy, 5.0);
+    EXPECT_EQ(t.content_hash, h_good);
+  }
+
+  // A part made only of non-finite triangles is like one with no triangles: it
+  // contributes nothing (rather than throwing on an empty bounding box).
+  geometry all_nan = one_triangle(ctx, 0.0, 10.0);
+  for (geometry::point_t &p : all_nan.points())
+    p = geometry::point_t{{nan, nan, nan}};
+  parts.push_back(lod::named_part("all_nan", all_nan));
+  const std::vector<lod::tile> with_nan = lod::partition_parts(parts, kCell);
+  ASSERT_EQ(with_nan.size(), 1u);
+  EXPECT_EQ(with_nan[0].parts, std::vector<std::string>{"mixed"});
+  EXPECT_TRUE(lod::partition_parts(std::vector<lod::named_part>(1, parts[1]), kCell).empty());
+  EXPECT_TRUE(lod::partition_components(all_nan, kCell).empty());
+}
+
+TEST(LodTiles, ContentHashGoldenValues) {
+  // content_hash keys persistent caches (a baked pyramid is reused when its
+  // tile's hash still matches, possibly in another process, OS or wasm), so its
+  // value must not drift. These constants pin the key layout, quanta, header and
+  // FNV-1a parameters (and were cross-checked against an independent
+  // re-implementation of the algorithm content_hash documents). If a deliberate
+  // change breaks them, every existing bake is invalid: bump the bake format
+  // version together with these values.
+  cvc::app ctx;
+  geometry g(ctx);
+  g.points().push_back({{1.25, -3.5, 2.0}});
+  g.points().push_back({{4.75, -3.5, 2.0}});
+  g.points().push_back({{4.75, 0.125, 2.5}});
+  g.points().push_back({{1.25, 0.125, 2.5}});
+  g.tris().push_back({{0, 1, 2}});
+  g.quads().push_back({{0, 1, 2, 3}});
+  EXPECT_EQ(lod::content_hash(g), 0xe8e6951476aba453ull) << std::hex << lod::content_hash(g);
+  EXPECT_EQ(lod::content_hash(g, 0.25), 0xb5000845472484f8ull)
+      << std::hex << lod::content_hash(g, 0.25);
+
+  for (int v = 0; v < 4; ++v) {
+    g.normals().push_back({{0.0, -0.6, 0.8}});
+    g.colors().push_back({{0.25 * v, 0.5, 1.0}});
+    g.uvs().push_back({{0.5 * (v & 1), 0.5 * (v >> 1)}});
+    g.tangents().push_back({{1.0, 0.0, 0.0, v < 2 ? 1.0 : -1.0}});
+  }
+  EXPECT_EQ(lod::content_hash(g), 0xe7a2085da81bb3ddull) << std::hex << lod::content_hash(g);
+
+  // A tile hash is content_hash of the tile geometry, so it is pinned too.
+  std::vector<lod::named_part> parts(1, lod::named_part("p", g));
+  const std::vector<lod::tile> tiles = lod::partition_parts(parts, kCell);
+  ASSERT_EQ(tiles.size(), 1u);
+  EXPECT_EQ(tiles[0].content_hash, lod::content_hash(g));
 }

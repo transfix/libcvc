@@ -120,9 +120,10 @@ struct partition_params {
 // One non-empty cell of a partition.
 //
 // `geom` is a SURFACE_TRI merge of the tile's groups: quads are fan-split
-// (0,1,2),(0,2,3) as cvc::simplify does, triangles with an out-of-range index are
-// dropped, only vertices referenced by a kept triangle are carried, and indices
-// are remapped. Per-vertex normals, colours, uvs and tangents are carried when a
+// (0,1,2),(0,2,3) as cvc::simplify does, triangles with an out-of-range index or
+// a non-finite (NaN/inf) corner position are dropped, only vertices referenced by
+// a kept triangle are carried (so every point is finite), and indices are
+// remapped. Per-vertex normals, colours, uvs and tangents are carried when a
 // part has them aligned with its points; if only some parts of a tile carry an
 // attribute, the rest are padded with a neutral default (normal +Z, colour white,
 // uv 0, tangent +X) exactly as model::merged() does, so every per-vertex array
@@ -138,12 +139,14 @@ struct tile {
 
 // Partition named parts into tiles of `cell_m` world units (metres for a
 // metre-scale scene). Parts with no usable triangles (none, or only ones with an
-// out-of-range index) contribute nothing and are not listed in any tile. Throws
-// std::invalid_argument if cell_m is not finite and > 0, up_axis is not 0..2,
-// hash_quantum_m is not finite and > 0, or a part has a null geometry pointer.
+// out-of-range index or a non-finite corner) contribute nothing and are not
+// listed in any tile. Throws std::invalid_argument if cell_m is not finite and
+// > 0, up_axis is not 0..2, hash_quantum_m is not finite and > 0, origin is not
+// finite on the ground axes, or a part has a null geometry pointer.
 //
-// `pool`, when given, fans the per-tile merge + hash over its workers; the
-// result is identical either way.
+// `pool`, when given, fans the per-tile merge + hash over its workers (holding
+// its job slot for the duration; see build_tiled_pyramids); the result is
+// identical either way.
 std::vector<tile> partition_parts(const std::vector<named_part> &parts, double cell_m,
                                   const group_key_fn &group_key = group_key_fn(),
                                   const partition_params &params = partition_params(),
@@ -163,12 +166,21 @@ std::vector<tile> partition_model(const model &m, double cell_m,
 // in input order and named "component_<k>"; a tile merges its components in
 // that order. Vertices no kept triangle references are dropped. Throws like
 // partition_parts.
+//
+// On model::merged() output this reproduces partition_model's cells and
+// triangles, but its tile hashes match only where the two paths carry the same
+// attribute SET (see content_hash): merged() pads a missing attribute across the
+// WHOLE model, partition_model only within a tile, so a tile of colour-less parts
+// hashes differently here (white padding) than there (no colours). A baked
+// pyramid and the runtime check that validates it must use the same partition
+// path.
 std::vector<tile> partition_components(const geometry &merged, double cell_m,
                                        const partition_params &params = partition_params(),
                                        thread_pool *pool = nullptr);
 
 // A canonical 64-bit content hash of `g`'s triangle surface (the same triangle
-// set a tile carries: tris, then fan-split quads, out-of-range ones dropped).
+// set a tile carries: tris, then fan-split quads, those with an out-of-range
+// index or a non-finite corner position dropped).
 //
 // Each triangle corner is keyed by its position quantized to `quantum_m`
 // (llround(p / quantum_m)) followed by whichever of normal, colour, uv and
@@ -180,9 +192,15 @@ std::vector<tile> partition_components(const geometry &merged, double cell_m,
 // on vertex order, triangle order, the rotation a triangle starts at,
 // unreferenced vertices, or the platform, but it DOES change when any
 // position moves to another lattice point, a triangle flips, or a carried
-// attribute changes. (A value sitting on a rounding boundary may still flip on
-// sub-quantum noise; that is inherent to any lattice.) Throws
-// std::invalid_argument if quantum_m is not finite and > 0.
+// attribute changes -- including the attribute SET: an attribute padded with
+// its neutral default still counts, so the same triangles with and without
+// (say) all-white colours hash differently. (A value sitting on a rounding
+// boundary may still flip on sub-quantum noise; that is inherent to any
+// lattice.) Throws std::invalid_argument if quantum_m is not finite and > 0.
+//
+// The value is persistent: baked caches are keyed by it, and lod_tiles_test pins
+// it for fixed meshes. Any change to the key layout, quanta or hash function
+// must bump the bake format version along with those golden values.
 std::uint64_t content_hash(const geometry &g, double quantum_m = 0.001);
 
 // Called by build_tiled_pyramids as each tile's pyramid completes.
@@ -210,6 +228,15 @@ typedef std::function<void(std::size_t tile_index, const tile &t, const mesh_pyr
 // finishing builder waits on the mutex. An exception thrown by the callback or
 // a build propagates to the caller after the fan-out joins, as
 // thread_pool::parallel_for documents.
+//
+// Pool occupancy: the call blocks until every tile is built, and a pooled call
+// is ONE parallel_for over all the tiles. thread_pool runs one fan-out at a
+// time, so for that whole (possibly multi-second) build every other thread's
+// parallel_for on the same pool waits its turn. For a progressive build behind a
+// running render or sim loop, call this from a loader thread with a pool of its
+// own (a small cvc::thread_pool the loader owns), not app::computePool() shared
+// with per-frame work. (A parallel_for issued from inside on_tile on this pool
+// runs inline, so it cannot deadlock.)
 std::vector<mesh_pyramid> build_tiled_pyramids(const std::vector<tile> &tiles,
                                                const pyramid_params &params = pyramid_params(),
                                                thread_pool *pool = nullptr,
