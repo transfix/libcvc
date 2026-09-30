@@ -21,6 +21,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/dimension.h
   ../../inc/cvc/volume/voxels.h
   ../../inc/cvc/geometry/geometry.h
+  ../../inc/cvc/geometry/simplify.h
   ../../inc/cvc/core/state.h
   ../../inc/cvc/core/state_change_journal.h
   ../../inc/cvc/core/state_subscription_router.h
@@ -148,6 +149,7 @@ set(SOURCE_FILES
   volume/cvcraw_io.cpp
   processing/gdtv_filter.cpp
   geometry/geometry.cpp
+  geometry/simplify.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
