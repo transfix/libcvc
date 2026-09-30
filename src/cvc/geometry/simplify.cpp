@@ -20,29 +20,43 @@
 // simplify.cpp -- native Quadric Error Metrics mesh decimation.
 //
 // Half-edge collapse variant: each collapse snaps the higher-error endpoint onto
-// the lower-error one, so surviving vertices never move and keep their exact
-// position + uv + color + normal. That is robust (no optimal-placement 3x3 solve
-// or its singular fallbacks), attribute-safe across uv seams, and a good fit for
-// the feature-aligned architectural meshes this first targets. A per-vertex 4x4
-// quadric accumulates the area-weighted squared distance to the planes of every
-// incident face (Garland & Heckbert '97); boundary edges add a perpendicular
-// constraint plane weighted by |edge|^2 so open borders stay put and every term
-// shares the same units (length^2 weight x length^2 distance), which keeps the
-// collapse order invariant under a uniform scale. The collapse cost is that
-// quadric evaluated at the surviving endpoint (in a frame centred on the mesh,
-// with round-off snapped to 0 and the rest compared at 24-bit precision, so
-// geometric ties stay ties when the mesh is scaled or moved); a lazy binary heap
+// the lower-error one, so no vertex is ever placed anywhere but at an input
+// position. That is robust (no optimal-placement 3x3 solve or its singular
+// fallbacks), attribute-safe across uv seams, and a good fit for the
+// feature-aligned architectural meshes this first targets.
+//
+// Collapses run on the WELDED topology: input vertices that coincide across
+// connected components (unwelded parts that touch, like a roof on its walls) or
+// sit at bit-identical positions (splits for hard-edge normals, uv seams) form
+// one collapse vertex -- a "class" -- so the parts decimate together and no seam
+// opens. The input vertices themselves ("wedges") stay distinct and keep their
+// own uv, color and normal. When a class is dropped onto a neighbour, each of its
+// wedges follows the wedge it shares a vanishing triangle with; a wedge with no
+// such partner (a face split away from the collapsed edge) moves onto the kept
+// position.
+//
+// A per-class 4x4 quadric accumulates the area-weighted squared distance to the
+// planes of every incident face (Garland & Heckbert '97); boundary edges add a
+// perpendicular constraint plane weighted by |edge|^2, so open borders stay put
+// and every term shares the same units (length^2 weight x length^2 distance),
+// which keeps the collapse order invariant under a uniform scale. Each quadric
+// lives in a frame centred on its own vertex, where every incident plane passes
+// through the origin exactly; absorbing a neighbour translates that neighbour's
+// quadric by the edge vector (an exact difference of nearby coordinates). The
+// round-off of a cost is thus relative to local lengths -- never to the mesh's
+// extent or to its distance from the world origin -- and is tracked: a cost
+// inside its round-off band is snapped to exactly 0 and the rest are compared at
+// 24-bit precision, so geometric ties stay ties when the mesh is scaled or moved,
+// and geometry elsewhere cannot perturb a local collapse. A lazy binary heap
 // keyed on a per-vertex version pops the cheapest valid collapse, with ties
 // broken by vertex index so the pop sequence never depends on the standard
-// library's heap.
-// Fold-overs are rejected by a per-face normal-flip test so the coarse rung
-// never self-intersects, and vertices that coincide with a vertex of another
-// connected component are never dropped, so touching unwelded parts stay closed.
+// library's heap. Fold-overs are rejected by a per-face normal-flip test so the
+// coarse rung never self-intersects.
 //
 // The quadric cost is area x distance^2 -- not a length -- so the reported error
 // is measured instead of derived: a sampled symmetric Hausdorff distance between
 // the input and each result, answered by exact point-to-triangle distances over
-// a uniform grid.
+// a bounding-volume hierarchy.
 //
 // One engine serves both entry points: it runs a single collapse pass toward the
 // smallest requested target and snapshots the mesh as each target is reached.
@@ -63,6 +77,7 @@
 #include <memory>
 #include <numeric>
 #include <queue>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -74,50 +89,19 @@ typedef std::int64_t i64;
 typedef std::array<u32, 3> Tri;
 
 const double kInf = std::numeric_limits<double>::infinity();
+const u32 kNone = u32(-1);
 
-// Symmetric 4x4 error quadric stored as its 10 upper-triangular entries:
-//   [ a2 ab ac ad ]
-//   [ ab b2 bc bd ]
-//   [ ac bc c2 cd ]
-//   [ ad bd cd d2 ]
-// for the homogeneous plane p = (a,b,c,d) with a^2+b^2+c^2 = 1 and d = -n.v0,
-// plus the total weight `w` of the planes summed into it (so cost / w is the
-// weighted mean squared plane distance -- the max_error proxy).
-struct Quadric {
-  double m[10];
-  double w;
-  Quadric() : w(0.0) { std::fill(m, m + 10, 0.0); }
-
-  static Quadric from_plane(double a, double b, double c, double d, double w) {
-    Quadric q;
-    q.m[0] = w * a * a;
-    q.m[1] = w * a * b;
-    q.m[2] = w * a * c;
-    q.m[3] = w * a * d;
-    q.m[4] = w * b * b;
-    q.m[5] = w * b * c;
-    q.m[6] = w * b * d;
-    q.m[7] = w * c * c;
-    q.m[8] = w * c * d;
-    q.m[9] = w * d * d;
-    q.w = w;
-    return q;
-  }
-  void operator+=(const Quadric &o) {
-    for (int i = 0; i < 10; ++i)
-      m[i] += o.m[i];
-    w += o.w;
-  }
-  // v^T Q v for v = (x,y,z,1); the squared, plane-summed distance at that point.
-  double error(double x, double y, double z) const {
-    return m[0] * x * x + 2 * m[1] * x * y + 2 * m[2] * x * z + 2 * m[3] * x + m[4] * y * y +
-           2 * m[5] * y * z + 2 * m[6] * y + m[7] * z * z + 2 * m[8] * z + m[9];
-  }
-};
+// A collapse cost within this fraction of the magnitude of the terms it was
+// summed from (Quadric::mag, Quadric::m) is round-off, not geometry. 2^-40 is
+// ~4096 ulps: well above what an evaluation, a merge or a long plane sum can
+// accumulate, and far below any real cost (it is an RMS plane distance of ~1e-6
+// of the lengths involved).
+const double kCostRoundoff = 1.0 / 1099511627776.0;
 
 struct Vec3 {
   double x, y, z;
 };
+inline Vec3 add(const Vec3 &a, const Vec3 &b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 inline Vec3 sub(const Vec3 &a, const Vec3 &b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 inline Vec3 cross(const Vec3 &a, const Vec3 &b) {
   return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -133,6 +117,59 @@ inline double dist2(const Vec3 &a, const Vec3 &b) {
   const Vec3 d = sub(a, b);
   return dot(d, d);
 }
+
+// Symmetric 4x4 error quadric in a frame centred on its vertex: the squared,
+// plane-summed distance at offset o from the vertex is
+//   o^T A o + 2 b.o + c,   A = sum w n n^T  (stored xx xy xz yy yz zz).
+// A plane through the vertex adds to A only; the planes of an absorbed
+// neighbour bring their offsets in b and c. `w` is the total weight of the
+// planes summed in (so cost / w is the weighted mean squared plane distance --
+// the max_error proxy), and `m` accumulates the magnitude of every term folded
+// into b and c: the scale of their round-off.
+struct Quadric {
+  double a[6];
+  Vec3 b;
+  double c, w, m;
+  Quadric() : b{0.0, 0.0, 0.0}, c(0.0), w(0.0), m(0.0) { std::fill(a, a + 6, 0.0); }
+
+  // Add the plane through the vertex with unit normal n, weighted wt.
+  void add_plane(const Vec3 &n, double wt) {
+    a[0] += wt * n.x * n.x;
+    a[1] += wt * n.x * n.y;
+    a[2] += wt * n.x * n.z;
+    a[3] += wt * n.y * n.y;
+    a[4] += wt * n.y * n.z;
+    a[5] += wt * n.z * n.z;
+    w += wt;
+  }
+  // Add planes through the vertex held in q (q.b, q.c are 0).
+  void add_planes(const Quadric &q) {
+    for (int i = 0; i < 6; ++i)
+      a[i] += q.a[i];
+    w += q.w;
+  }
+  Vec3 A(const Vec3 &o) const {
+    return {a[0] * o.x + a[1] * o.y + a[2] * o.z, a[1] * o.x + a[3] * o.y + a[4] * o.z,
+            a[2] * o.x + a[4] * o.y + a[5] * o.z};
+  }
+  // The squared, plane-summed distance at offset o from the vertex.
+  double at(const Vec3 &o) const { return dot(o, A(o)) + 2.0 * dot(b, o) + c; }
+  // A bound on the magnitude of at(o)'s terms: sum w (|o| + |d|)^2 over the
+  // planes (d = a plane's offset), which Cauchy-Schwarz bounds by
+  // (sqrt(w)|o| + sqrt(c))^2.
+  double mag(const Vec3 &o) const {
+    const double s = std::sqrt(w) * len(o) + std::sqrt(std::max(0.0, c));
+    return s * s;
+  }
+  // Absorb q, the quadric of a vertex at offset -o from this one (o = this
+  // vertex's position minus q's): q's planes, re-expressed in this frame.
+  void merge(const Quadric &q, const Vec3 &o) {
+    m += q.m + q.mag(o);
+    c += q.at(o);
+    b = add(b, add(q.b, q.A(o)));
+    add_planes(q);
+  }
+};
 
 // Unit face normal (0 for a degenerate tri).
 inline Vec3 face_normal(const Vec3 &a, const Vec3 &b, const Vec3 &c) {
@@ -261,204 +298,169 @@ inline void pfor_blocks(thread_pool *pool, std::size_t n, std::size_t block,
   });
 }
 
-// Every undirected edge of T as a sorted key list (duplicates kept, so a run
-// length is the number of incident triangles).
-std::vector<u64> sorted_edge_keys(const std::vector<Tri> &T) {
-  std::vector<u64> keys;
-  keys.reserve(T.size() * 3);
-  for (const Tri &t : T)
-    for (int k = 0; k < 3; ++k)
-      keys.push_back(edge_key(t[k], t[(k + 1) % 3]));
-  std::sort(keys.begin(), keys.end());
-  return keys;
-}
-
-// Uniform grid over a triangle set, for nearest-surface distance queries. The
-// cell size is ~sqrt(mean triangle area) (a surface fills few cells of its
-// bounding box), capped so the dense cell array stays within ~8 cells per
-// triangle. Each triangle is binned into every cell of its bounding box that its
-// plane passes through (a conservative plane/box overlap test), stored CSR-style
-// in triangle order, so construction and every query are deterministic.
-class tri_grid {
+// Bounding-volume hierarchy over a triangle set, for nearest-surface distance
+// queries: median split along the longest axis of the triangle centroids' box,
+// a few triangles per leaf (their corners copied into leaf order). Unlike a
+// uniform grid it adapts to wildly mixed triangle sizes (a ground quad
+// kilometres wide under centimetre detail), so a query stays logarithmic
+// wherever it lands. Ties in the split order break by triangle index, so the
+// tree -- and every query -- is a pure function of the input.
+class tri_bvh {
 public:
-  tri_grid(const std::vector<Vec3> &P, const std::vector<Tri> &T) : _P(P), _T(T) {
-    if (T.empty())
+  tri_bvh(const std::vector<Vec3> &P, const std::vector<Tri> &T) {
+    const u32 n = u32(T.size());
+    if (n == 0)
       return;
-    double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
-    double area = 0.0;
-    for (const Tri &t : T) {
-      for (int k = 0; k < 3; ++k)
+    std::vector<Vec3> ctr(n);
+    for (u32 i = 0; i < n; ++i) {
+      const Vec3 &a = P[T[i][0]], &b = P[T[i][1]], &c = P[T[i][2]];
+      ctr[i] = {(a.x + b.x + c.x) / 3.0, (a.y + b.y + c.y) / 3.0, (a.z + b.z + c.z) / 3.0};
+    }
+    std::vector<u32> items(n);
+    std::iota(items.begin(), items.end(), 0u);
+    _nodes.reserve(2 * (n / kLeaf) + 2);
+    _nodes.push_back(Node());
+    struct Job {
+      u32 node, b, e;
+    };
+    std::vector<Job> jobs(1, Job{0, 0, n});
+    while (!jobs.empty()) {
+      const Job j = jobs.back();
+      jobs.pop_back();
+      Node nd;
+      double clo[3] = {kInf, kInf, kInf}, chi[3] = {-kInf, -kInf, -kInf};
+      for (u32 i = j.b; i < j.e; ++i) {
+        const Tri &t = T[items[i]];
+        for (int k = 0; k < 3; ++k)
+          for (int a = 0; a < 3; ++a) {
+            nd.lo[a] = std::min(nd.lo[a], axis(P[t[k]], a));
+            nd.hi[a] = std::max(nd.hi[a], axis(P[t[k]], a));
+          }
         for (int a = 0; a < 3; ++a) {
-          lo[a] = std::min(lo[a], axis(P[t[k]], a));
-          hi[a] = std::max(hi[a], axis(P[t[k]], a));
+          clo[a] = std::min(clo[a], axis(ctr[items[i]], a));
+          chi[a] = std::max(chi[a], axis(ctr[items[i]], a));
         }
-      area += 0.5 * len(cross(sub(P[t[1]], P[t[0]]), sub(P[t[2]], P[t[0]])));
+      }
+      if (j.e - j.b <= kLeaf) {
+        nd.first = j.b;
+        nd.count = j.e - j.b;
+        _nodes[j.node] = nd;
+        continue;
+      }
+      int ax = 0;
+      for (int a = 1; a < 3; ++a)
+        if (chi[a] - clo[a] > chi[ax] - clo[ax])
+          ax = a;
+      // A NaN coordinate sorts last, so the order stays strict and weak.
+      auto key = [&](u32 i) {
+        const double v = axis(ctr[i], ax);
+        return v == v ? v : kInf;
+      };
+      const u32 mid = j.b + (j.e - j.b) / 2;
+      std::nth_element(items.begin() + j.b, items.begin() + mid, items.begin() + j.e,
+                       [&](u32 x, u32 y) {
+                         const double kx = key(x), ky = key(y);
+                         return kx < ky || (kx == ky && x < y);
+                       });
+      nd.first = u32(_nodes.size());
+      nd.count = 0;
+      _nodes[j.node] = nd;
+      _nodes.push_back(Node());
+      _nodes.push_back(Node());
+      jobs.push_back(Job{nd.first, j.b, mid});
+      jobs.push_back(Job{nd.first + 1, mid, j.e});
     }
-    const double nt = double(T.size());
-    const double ext[3] = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
-    const double diag = std::sqrt(ext[0] * ext[0] + ext[1] * ext[1] + ext[2] * ext[2]);
-    _diag = diag;
-    double h = area > 0.0 ? std::sqrt(area / nt) : diag / std::cbrt(nt);
-    if (!(h > 0.0))
-      h = 1.0; // every vertex coincides; one cell holds everything
-    const double cap = 8.0 * nt + 1024.0;
-    double cells = 1.0;
-    for (int a = 0; a < 3; ++a)
-      cells *= std::max(1.0, ext[a] / h);
-    if (cells > cap)
-      h *= std::cbrt(cells / cap);
-    _h = h;
-    _inv_h = 1.0 / h;
-    for (int a = 0; a < 3; ++a) {
-      _org[a] = lo[a];
-      _n[a] = std::max<i64>(1, i64(std::ceil(ext[a] / h)));
-      _top[a] = lo[a] + double(_n[a]) * h;
-    }
-    const std::size_t ncell = std::size_t(_n[0] * _n[1] * _n[2]);
-
-    // Two passes over the same cell enumeration: count, then fill.
-    _start.assign(ncell + 1, 0);
-    for (u32 ti = 0; ti < u32(T.size()); ++ti)
-      for_each_cell(ti, [&](std::size_t c) { ++_start[c + 1]; });
-    for (std::size_t c = 0; c < ncell; ++c)
-      _start[c + 1] += _start[c];
-    _items.resize(_start[ncell]);
-    std::vector<u32> fill(_start.begin(), _start.end() - 1);
-    for (u32 ti = 0; ti < u32(T.size()); ++ti)
-      for_each_cell(ti, [&](std::size_t c) { _items[fill[c]++] = ti; });
+    _tri.resize(n);
+    for (u32 i = 0; i < n; ++i)
+      _tri[i] = {P[T[items[i]][0]], P[T[items[i]][1]], P[T[items[i]][2]]};
+    const Node &r = _nodes[0];
+    const double ext[3] = {r.hi[0] - r.lo[0], r.hi[1] - r.lo[1], r.hi[2] - r.lo[2]};
+    _diag = std::sqrt(ext[0] * ext[0] + ext[1] * ext[1] + ext[2] * ext[2]);
   }
 
-  bool empty() const { return _T.empty(); }
+  bool empty() const { return _tri.empty(); }
   double diagonal() const { return _diag; } // of the triangles' bounding box
 
-  // Squared distance from p to the nearest triangle. Searches shells of cells
-  // outward from p's cell until no unvisited cell can hold anything closer.
-  // Returns early -- with some value <= stop2 -- as soon as the distance is known
-  // not to exceed stop2 (the caller only wants the largest distance).
-  double nearest2(const Vec3 &p, double stop2) const {
+  // Squared distance from p to the nearest triangle, visiting the nearer child
+  // first and skipping any box no closer than the best so far. Returns early --
+  // with some value <= stop2, never below the true distance -- as soon as the
+  // distance is known not to exceed stop2 (the caller only wants the largest).
+  // `hint` names a leaf to try first (kNone for none) and receives the leaf of
+  // the nearest triangle found: consecutive samples are usually neighbours, so
+  // a query that only has to prove "within stop2" often ends there, without a
+  // descent. The hint never changes an exact distance returned above stop2.
+  double nearest2(const Vec3 &p, double stop2, u32 &hint) const {
     double best = kInf;
-    // Clamp p into the grid box: q. For any point x in the box,
-    // |p-x|^2 >= |p-q|^2 + |q-x|^2, so bounds taken from q stay valid for p.
-    double q[3];
-    i64 c[3];
-    for (int a = 0; a < 3; ++a) {
-      q[a] = std::min(_top[a], std::max(_org[a], axis(p, a)));
-      c[a] = index(q[a], a);
-    }
-    const double dpq2 =
-        (q[0] - p.x) * (q[0] - p.x) + (q[1] - p.y) * (q[1] - p.y) + (q[2] - p.z) * (q[2] - p.z);
-    if (scan(cell(c[0], c[1], c[2]), p, stop2, best)) // shell 0: p's own cell
+    if (_nodes.empty())
       return best;
-    for (i64 r = 0;; ++r) {
-      // Distance from q to the nearest cell outside the (2r+1)^3 block; sides
-      // clipped by the grid border have nothing beyond them.
-      double lb = kInf;
-      for (int a = 0; a < 3; ++a) {
-        if (c[a] - r > 0)
-          lb = std::min(lb, q[a] - (_org[a] + double(c[a] - r) * _h));
-        if (c[a] + r + 1 < _n[a])
-          lb = std::min(lb, (_org[a] + double(c[a] + r + 1) * _h) - q[a]);
+    if (hint != kNone) {
+      const Node &nd = _nodes[hint];
+      for (u32 k = nd.first; k < nd.first + nd.count; ++k) {
+        best = std::min(best, tri_dist2(p, _tri[k][0], _tri[k][1], _tri[k][2]));
+        if (best <= stop2)
+          return best;
       }
-      if (lb == kInf)
-        return best; // the block covers the whole grid
-      lb = std::max(0.0, lb);
-      if (best <= dpq2 + lb * lb)
-        return best;
-      if (visit_shell(p, c, r + 1, stop2, best))
-        return best;
     }
+    struct Entry {
+      double d2;
+      u32 node;
+    };
+    // Each level pushes at most one entry more than it pops, and the median
+    // split halves every node, so the depth (< 32 levels) bounds the stack.
+    Entry stack[96];
+    int sp = 0;
+    stack[sp++] = Entry{box_dist2(_nodes[0], p), 0};
+    while (sp > 0) {
+      const Entry e = stack[--sp];
+      if (e.d2 >= best)
+        continue;
+      const Node &nd = _nodes[e.node];
+      if (nd.count > 0) {
+        for (u32 k = nd.first; k < nd.first + nd.count; ++k) {
+          const double d = tri_dist2(p, _tri[k][0], _tri[k][1], _tri[k][2]);
+          if (d < best) {
+            best = d;
+            hint = e.node;
+            if (best <= stop2)
+              return best;
+          }
+        }
+        continue;
+      }
+      const double dl = box_dist2(_nodes[nd.first], p), dr = box_dist2(_nodes[nd.first + 1], p);
+      const bool left_first = !(dr < dl);
+      const Entry nearer = left_first ? Entry{dl, nd.first} : Entry{dr, nd.first + 1};
+      const Entry farther = left_first ? Entry{dr, nd.first + 1} : Entry{dl, nd.first};
+      if (farther.d2 < best)
+        stack[sp++] = farther;
+      if (nearer.d2 < best)
+        stack[sp++] = nearer; // popped first
+    }
+    return best;
   }
 
 private:
-  template <class F> void for_each_cell(u32 ti, F f) const {
-    const Vec3 &a = _P[_T[ti][0]], &b = _P[_T[ti][1]], &c = _P[_T[ti][2]];
-    i64 i0[3], i1[3];
-    for (int k = 0; k < 3; ++k) {
-      const double mn = std::min(axis(a, k), std::min(axis(b, k), axis(c, k)));
-      const double mx = std::max(axis(a, k), std::max(axis(b, k), axis(c, k)));
-      // padded by a hair so rounding can only add a cell
-      i0[k] = index(mn - 1e-9 * _h, k);
-      i1[k] = index(mx + 1e-9 * _h, k);
+  static constexpr u32 kLeaf = 4; // triangles per leaf
+  struct Node {
+    double lo[3] = {kInf, kInf, kInf}; // bounding box of the node's triangles
+    double hi[3] = {-kInf, -kInf, -kInf};
+    u32 first = 0; // leaf: _tri[first .. first+count); interior: children first, first+1
+    u32 count = 0;
+  };
+
+  static double box_dist2(const Node &nd, const Vec3 &p) {
+    double d2 = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      const double x = axis(p, a);
+      const double d = x < nd.lo[a] ? nd.lo[a] - x : (x > nd.hi[a] ? x - nd.hi[a] : 0.0);
+      d2 += d * d;
     }
-    if (i0[0] == i1[0] && i0[1] == i1[1] && i0[2] == i1[2]) {
-      f(cell(i0[0], i0[1], i0[2])); // the common case: a triangle inside one cell
-      return;
-    }
-    // plane/box: the box's support along n is (h/2)(|nx|+|ny|+|nz|); pad it so
-    // rounding can only add cells, never drop one.
-    const Vec3 n = cross(sub(b, a), sub(c, a));
-    const double reach =
-        0.5 * _h * (std::fabs(n.x) + std::fabs(n.y) + std::fabs(n.z)) * (1.0 + 1e-6) + 1e-300;
-    for (i64 iz = i0[2]; iz <= i1[2]; ++iz)
-      for (i64 iy = i0[1]; iy <= i1[1]; ++iy)
-        for (i64 ix = i0[0]; ix <= i1[0]; ++ix) {
-          const Vec3 ctr = {_org[0] + (double(ix) + 0.5) * _h, _org[1] + (double(iy) + 0.5) * _h,
-                            _org[2] + (double(iz) + 0.5) * _h};
-          if (std::fabs(dot(n, sub(ctr, a))) <= reach)
-            f(cell(ix, iy, iz));
-        }
+    return d2;
   }
 
-  // Cell index of coordinate x along axis k, clamped to the grid.
-  i64 index(double x, int k) const {
-    const double f = (x - _org[k]) * _inv_h;
-    return f <= 0.0 ? 0 : std::min(_n[k] - 1, i64(f)); // f > 0: truncation is floor
-  }
-  std::size_t cell(i64 ix, i64 iy, i64 iz) const {
-    return std::size_t((iz * _n[1] + iy) * _n[0] + ix);
-  }
-
-  // Test the triangles of one cell, lowering `best`. True once best <= stop2.
-  bool scan(std::size_t cl, const Vec3 &p, double stop2, double &best) const {
-    for (u32 k = _start[cl]; k < _start[cl + 1]; ++k) {
-      const Tri &t = _T[_items[k]];
-      const double d = tri_dist2(p, _P[t[0]], _P[t[1]], _P[t[2]]);
-      if (d < best) {
-        best = d;
-        if (best <= stop2)
-          return true;
-      }
-    }
-    return false;
-  }
-
-  // Visit the cells at Chebyshev distance exactly r from c, lowering `best`.
-  // Returns true once best <= stop2.
-  bool visit_shell(const Vec3 &p, const i64 c[3], i64 r, double stop2, double &best) const {
-    auto visit = [&](i64 ix, i64 iy, i64 iz) { return scan(cell(ix, iy, iz), p, stop2, best); };
-    for (i64 dz = -r; dz <= r; ++dz) {
-      const i64 iz = c[2] + dz;
-      if (iz < 0 || iz >= _n[2])
-        continue;
-      for (i64 dy = -r; dy <= r; ++dy) {
-        const i64 iy = c[1] + dy;
-        if (iy < 0 || iy >= _n[1])
-          continue;
-        if (dz == -r || dz == r || dy == -r || dy == r) { // a full row of the shell
-          const i64 x0 = std::max<i64>(0, c[0] - r), x1 = std::min(_n[0] - 1, c[0] + r);
-          for (i64 ix = x0; ix <= x1; ++ix)
-            if (visit(ix, iy, iz))
-              return true;
-        } else { // interior row: only its two end cells are on the shell
-          if (c[0] - r >= 0 && visit(c[0] - r, iy, iz))
-            return true;
-          if (c[0] + r < _n[0] && visit(c[0] + r, iy, iz))
-            return true;
-        }
-      }
-    }
-    return best <= stop2;
-  }
-
-  const std::vector<Vec3> &_P;
-  const std::vector<Tri> &_T;
-  double _org[3] = {0.0, 0.0, 0.0}; // grid box: _org .. _top
-  double _top[3] = {0.0, 0.0, 0.0};
-  double _h = 1.0, _inv_h = 1.0; // cell size
+  std::vector<Node> _nodes;
+  std::vector<std::array<Vec3, 3>> _tri; // triangle corners in leaf order
   double _diag = 0.0;
-  i64 _n[3] = {1, 1, 1};
-  std::vector<u32> _start; // cell c's triangles are _items[_start[c] .. _start[c+1])
-  std::vector<u32> _items;
 };
 
 // Hausdorff sample points on a triangle surface: vertices, edge midpoints and
@@ -498,8 +500,14 @@ std::vector<u32> used_vertices(std::size_t nv, const std::vector<Tri> &T) {
   return v;
 }
 
+// Every undirected edge of T once, sorted.
 std::vector<u64> unique_edges(const std::vector<Tri> &T) {
-  std::vector<u64> e = sorted_edge_keys(T);
+  std::vector<u64> e;
+  e.reserve(T.size() * 3);
+  for (const Tri &t : T)
+    for (int k = 0; k < 3; ++k)
+      e.push_back(edge_key(t[k], t[(k + 1) % 3]));
+  std::sort(e.begin(), e.end());
   e.erase(std::unique(e.begin(), e.end()), e.end());
   return e;
 }
@@ -512,23 +520,25 @@ sample_set all_samples(const std::vector<Vec3> &P, const std::vector<Tri> &T) {
   return s;
 }
 
-// max over the samples of the squared distance to the grid's surface, exact
+// max over the samples of the squared distance to the tree's surface, exact
 // whenever it exceeds floor2. Blocks fan over the pool; each block keeps its own
 // running max, which lets a query stop as soon as it cannot raise it (or is
 // already known to be under floor2), and the block maxima reduce in order: the
 // sample achieving the max is never cut short, so pooled == serial bit for bit.
-double max_dist2(const sample_set &s, const tri_grid &g, double floor2, thread_pool *pool) {
+double max_dist2(const sample_set &s, const tri_bvh &g, double floor2, thread_pool *pool) {
   const std::size_t block = 2048, stride = 61;
   const std::size_t n = s.size();
   // A sparse first pass seeds every block with a lower bound on the answer.
   double seed = 0.0;
+  u32 hint = kNone;
   for (std::size_t i = 0; i < n; i += stride)
-    seed = std::max(seed, g.nearest2(s.at(i), std::max(seed, floor2)));
+    seed = std::max(seed, g.nearest2(s.at(i), std::max(seed, floor2), hint));
   std::vector<double> bmax((n + block - 1) / block, 0.0);
   pfor_blocks(pool, n, block, [&](std::size_t lo, std::size_t hi) {
     double m = seed;
+    u32 last = kNone; // each block threads its own hint through its samples
     for (std::size_t i = lo; i < hi; ++i)
-      m = std::max(m, g.nearest2(s.at(i), std::max(m, floor2)));
+      m = std::max(m, g.nearest2(s.at(i), std::max(m, floor2), last));
     bmax[lo / block] = m;
   });
   double m = seed;
@@ -541,7 +551,7 @@ double max_dist2(const sample_set &s, const tri_grid &g, double floor2, thread_p
 // on a coplanar triangle lands ~1e-16 off it): they count as zero, so a result
 // that lost no geometry reports exactly 0, and every sample that lands on the
 // other surface stops at the first triangle that proves it.
-double hausdorff(const sample_set &sa, const tri_grid &ga, const sample_set &sb, const tri_grid &gb,
+double hausdorff(const sample_set &sa, const tri_bvh &ga, const sample_set &sb, const tri_bvh &gb,
                  thread_pool *pool) {
   if (ga.empty() && gb.empty())
     return 0.0;
@@ -571,124 +581,182 @@ void gather(const geometry &g, std::vector<Vec3> &P, std::vector<Tri> &T) {
   }
 }
 
-// Mark every vertex whose position lies within eps of a vertex of a DIFFERENT
-// connected component (triangles joined through shared vertex indices); those
-// are the seams between touching unwelded parts. Returns the number marked.
-u64 find_seam_locks(const std::vector<Vec3> &P, const std::vector<Tri> &T, double seam_epsilon,
-                    thread_pool *pool, std::vector<char> &locked) {
+// Union-find root (the smallest index of the set, given unite() below).
+inline u32 find_root(std::vector<u32> &parent, u32 x) {
+  while (parent[x] != x) {
+    parent[x] = parent[parent[x]];
+    x = parent[x];
+  }
+  return x;
+}
+inline void unite(std::vector<u32> &parent, u32 a, u32 b) {
+  a = find_root(parent, a);
+  b = find_root(parent, b);
+  if (a != b)
+    parent[std::max(a, b)] = std::min(a, b);
+}
+
+// Collapse classes: the input vertices a collapse moves as one.
+struct weld_classes {
+  std::vector<u32> of;  // input vertex -> class (kNone: used by no triangle)
+  std::vector<u32> rep; // class -> representative (its smallest input vertex)
+  u64 seam = 0;         // used input vertices that share their class with another
+};
+
+// Without welding every used vertex is its own class. With it, a used vertex
+// joins every used vertex of a DIFFERENT connected component (triangles joined
+// through shared vertex indices) within eps of it -- the seam between touching
+// unwelded parts -- and every vertex at the bit-identical position -- a split
+// for hard-edge normals or a uv seam -- transitively. A class sits at its
+// representative's position; every other member is within eps of it.
+weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, bool on,
+                  double seam_epsilon, thread_pool *pool) {
   const u32 nv = u32(P.size());
-  // components: union-find over triangle edges, rooted at the smallest index
-  std::vector<u32> parent(nv);
-  std::iota(parent.begin(), parent.end(), 0u);
-  auto find = [&](u32 x) {
-    while (parent[x] != x) {
-      parent[x] = parent[parent[x]];
-      x = parent[x];
-    }
-    return x;
-  };
-  auto unite = [&](u32 a, u32 b) {
-    a = find(a);
-    b = find(b);
-    if (a != b)
-      parent[std::max(a, b)] = std::min(a, b);
-  };
   std::vector<char> used(nv, 0);
-  for (const Tri &t : T) {
+  for (const Tri &t : T)
     used[t[0]] = used[t[1]] = used[t[2]] = 1;
-    unite(t[0], t[1]);
-    unite(t[0], t[2]);
-  }
-  std::vector<u32> comp(nv);
-  std::vector<u32> verts;
-  double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
-  bool several = false;
-  for (u32 v = 0; v < nv; ++v) {
-    comp[v] = find(v);
-    if (!used[v])
-      continue;
-    if (!verts.empty() && comp[v] != comp[verts.front()])
-      several = true;
-    verts.push_back(v);
-    for (int a = 0; a < 3; ++a) {
-      lo[a] = std::min(lo[a], axis(P[v], a));
-      hi[a] = std::max(hi[a], axis(P[v], a));
+  std::vector<u32> cls(nv);
+  std::iota(cls.begin(), cls.end(), 0u);
+
+  std::vector<u32> verts, finite; // used vertices; those a coincidence search can place
+  for (u32 v = 0; v < nv; ++v)
+    if (used[v]) {
+      verts.push_back(v);
+      if (std::isfinite(P[v].x) && std::isfinite(P[v].y) && std::isfinite(P[v].z))
+        finite.push_back(v);
     }
-  }
-  if (!several)
-    return 0; // one component: nothing to seam
-
-  const double diag =
-      std::sqrt((hi[0] - lo[0]) * (hi[0] - lo[0]) + (hi[1] - lo[1]) * (hi[1] - lo[1]) +
-                (hi[2] - lo[2]) * (hi[2] - lo[2]));
-  const double eps = seam_epsilon >= 0.0 ? seam_epsilon : 1e-6 * diag;
-  // Hash cells of 64*eps: an eps-ball then touches a second cell along an axis
-  // only when it lies within eps of that cell's face (1 time in 32), so nearly
-  // every search stays inside the vertex's own cell.
-  // (Never finer than 1e-12 of the extent, so cell indices stay far from overflow.)
-  const double cellw =
-      std::max(eps > 0.0 ? 64.0 * eps : (diag > 0.0 ? 1e-6 * diag : 1.0), 1e-12 * diag);
-  auto cell_of = [&](double x, int a) { return i64(std::floor((x - lo[a]) / cellw)); };
-
-  struct Key {
-    i64 c[3];
-    u32 v;
-  };
-  auto cell_less = [](const Key &a, const Key &b) {
-    if (a.c[0] != b.c[0])
-      return a.c[0] < b.c[0];
-    if (a.c[1] != b.c[1])
-      return a.c[1] < b.c[1];
-    return a.c[2] < b.c[2];
-  };
-  std::vector<Key> keys(verts.size());
-  for (std::size_t i = 0; i < verts.size(); ++i) {
-    const Vec3 &p = P[verts[i]];
-    keys[i] = {{cell_of(p.x, 0), cell_of(p.y, 1), cell_of(p.z, 2)}, verts[i]};
-  }
-  std::sort(keys.begin(), keys.end(), [&](const Key &a, const Key &b) {
-    return cell_less(a, b) || (!cell_less(b, a) && a.v < b.v);
-  });
-
-  // Each vertex writes only its own flag.
-  const double eps2 = eps * eps;
-  auto partner = [&](u32 v, const Key &k) {
-    return comp[k.v] != comp[v] && dist2(P[k.v], P[v]) <= eps2;
-  };
-  pfor_blocks(pool, keys.size(), 1024, [&](std::size_t b, std::size_t e) {
-    for (std::size_t i = b; i < e; ++i) {
-      const u32 v = keys[i].v;
-      const Vec3 &p = P[v];
-      bool hit = false;
-      // own cell: the run of equal cells around i
-      for (std::size_t j = i; j-- > 0 && !cell_less(keys[j], keys[i]) && !hit;)
-        hit = partner(v, keys[j]);
-      for (std::size_t j = i + 1; j < keys.size() && !cell_less(keys[i], keys[j]) && !hit; ++j)
-        hit = partner(v, keys[j]);
-      // neighbour cells the eps-ball reaches into
-      i64 c0[3], c1[3];
+  if (on && finite.size() > 1) {
+    // components: union-find over triangle edges
+    std::vector<u32> comp(nv);
+    std::iota(comp.begin(), comp.end(), 0u);
+    for (const Tri &t : T) {
+      unite(comp, t[0], t[1]);
+      unite(comp, t[0], t[2]);
+    }
+    double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
+    for (u32 v : finite) {
+      comp[v] = find_root(comp, v);
       for (int a = 0; a < 3; ++a) {
-        c0[a] = cell_of(axis(p, a) - eps, a);
-        c1[a] = cell_of(axis(p, a) + eps, a);
+        lo[a] = std::min(lo[a], axis(P[v], a));
+        hi[a] = std::max(hi[a], axis(P[v], a));
       }
-      for (i64 x = c0[0]; x <= c1[0] && !hit; ++x)
-        for (i64 y = c0[1]; y <= c1[1] && !hit; ++y)
-          for (i64 z = c0[2]; z <= c1[2] && !hit; ++z) {
-            const Key probe = {{x, y, z}, 0};
-            if (!cell_less(probe, keys[i]) && !cell_less(keys[i], probe))
-              continue; // own cell, done above
-            auto it = std::lower_bound(keys.begin(), keys.end(), probe, cell_less);
-            for (; it != keys.end() && !cell_less(probe, *it) && !hit; ++it)
-              hit = partner(v, *it);
-          }
-      if (hit)
-        locked[v] = 1;
     }
-  });
-  u64 n = 0;
+    const double diag =
+        std::sqrt((hi[0] - lo[0]) * (hi[0] - lo[0]) + (hi[1] - lo[1]) * (hi[1] - lo[1]) +
+                  (hi[2] - lo[2]) * (hi[2] - lo[2]));
+    // Default tolerance: 1e-6 of the extent, but never more than 1e-3 of the
+    // median edge, so a large scene cannot weld the vertices of its fine parts.
+    double eps = seam_epsilon;
+    if (eps < 0.0) {
+      std::vector<double> e2;
+      e2.reserve(T.size() * 3);
+      for (const Tri &t : T)
+        for (int k = 0; k < 3; ++k) {
+          const double l2 = dist2(P[t[k]], P[t[(k + 1) % 3]]);
+          if (std::isfinite(l2))
+            e2.push_back(l2);
+        }
+      const std::size_t mid = e2.size() / 2;
+      std::nth_element(e2.begin(), e2.begin() + mid, e2.end());
+      eps = std::min(1e-6 * diag, e2.empty() ? 0.0 : 1e-3 * std::sqrt(e2[mid]));
+    }
+    // Hash cells of 64*eps: an eps-ball then touches a second cell along an axis
+    // only when it lies within eps of that cell's face (1 time in 32), so nearly
+    // every search stays inside the vertex's own cell.
+    // (Never finer than 1e-12 of the extent, so cell indices stay far from overflow.)
+    const double cellw =
+        std::max(eps > 0.0 ? 64.0 * eps : (diag > 0.0 ? 1e-6 * diag : 1.0), 1e-12 * diag);
+    auto cell_of = [&](double x, int a) { return i64(std::floor((x - lo[a]) / cellw)); };
+
+    struct Key {
+      i64 c[3];
+      u32 v;
+    };
+    auto cell_less = [](const Key &a, const Key &b) {
+      if (a.c[0] != b.c[0])
+        return a.c[0] < b.c[0];
+      if (a.c[1] != b.c[1])
+        return a.c[1] < b.c[1];
+      return a.c[2] < b.c[2];
+    };
+    std::vector<Key> keys(finite.size());
+    for (std::size_t i = 0; i < finite.size(); ++i) {
+      const Vec3 &p = P[finite[i]];
+      keys[i] = {{cell_of(p.x, 0), cell_of(p.y, 1), cell_of(p.z, 2)}, finite[i]};
+    }
+    std::sort(keys.begin(), keys.end(), [&](const Key &a, const Key &b) {
+      return cell_less(a, b) || (!cell_less(b, a) && a.v < b.v);
+    });
+
+    // Each block lists the pairs it finds, each once (from its larger vertex);
+    // the union below does not depend on their order. Bit-identical positions
+    // are an equivalence, so a vertex pairs only with the smallest of its exact
+    // duplicates: a pile of them costs one pair each, not one per couple.
+    const double eps2 = eps * eps;
+    const std::size_t block = 1024;
+    std::vector<std::vector<std::pair<u32, u32>>> found((keys.size() + block - 1) / block);
+    pfor_blocks(pool, keys.size(), block, [&](std::size_t b, std::size_t e) {
+      std::vector<std::pair<u32, u32>> &out = found[b / block];
+      for (std::size_t i = b; i < e; ++i) {
+        const u32 v = keys[i].v;
+        const Vec3 &p = P[v];
+        u32 same = v; // smallest exact duplicate of v
+        auto test = [&](const Key &k) {
+          if (k.v >= v)
+            return;
+          const double d2 = dist2(P[k.v], p);
+          if (d2 == 0.0)
+            same = std::min(same, k.v);
+          else if (d2 <= eps2 && comp[k.v] != comp[v])
+            out.push_back(std::make_pair(k.v, v));
+        };
+        // own cell: the run of equal cells around i
+        for (std::size_t j = i; j-- > 0 && !cell_less(keys[j], keys[i]);)
+          test(keys[j]);
+        for (std::size_t j = i + 1; j < keys.size() && !cell_less(keys[i], keys[j]); ++j)
+          test(keys[j]);
+        // neighbour cells the eps-ball reaches into
+        i64 c0[3], c1[3];
+        for (int a = 0; a < 3; ++a) {
+          c0[a] = cell_of(axis(p, a) - eps, a);
+          c1[a] = cell_of(axis(p, a) + eps, a);
+        }
+        for (i64 x = c0[0]; x <= c1[0]; ++x)
+          for (i64 y = c0[1]; y <= c1[1]; ++y)
+            for (i64 z = c0[2]; z <= c1[2]; ++z) {
+              const Key probe = {{x, y, z}, 0};
+              if (!cell_less(probe, keys[i]) && !cell_less(keys[i], probe))
+                continue; // own cell, done above
+              auto it = std::lower_bound(keys.begin(), keys.end(), probe, cell_less);
+              for (; it != keys.end() && !cell_less(probe, *it); ++it)
+                test(*it);
+            }
+        if (same != v)
+          out.push_back(std::make_pair(same, v));
+      }
+    });
+    for (const auto &blk : found)
+      for (const auto &pr : blk)
+        unite(cls, pr.first, pr.second);
+  }
+
+  weld_classes wc;
+  wc.of.assign(nv, kNone);
+  std::vector<u32> members;
+  for (u32 v : verts) {
+    const u32 r = find_root(cls, v); // the class's smallest vertex: seen first
+    if (r == v) {
+      wc.of[v] = u32(wc.rep.size());
+      wc.rep.push_back(v);
+      members.push_back(0);
+    } else {
+      wc.of[v] = wc.of[r];
+    }
+    ++members[wc.of[v]];
+  }
   for (u32 v : verts)
-    n += locked[v] ? 1 : 0;
-  return n;
+    wc.seam += members[wc.of[v]] > 1 ? 1 : 0;
+  return wc;
 }
 
 } // namespace
@@ -704,11 +772,11 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
   if (K == 0)
     return snaps;
 
-  // --- gather triangles (triangulating quads) + positions ---
-  std::vector<Vec3> P;
-  std::vector<Tri> T;
-  gather(mesh, P, T);
-  const u64 n_in = T.size();
+  // --- gather triangles (triangulating quads) over the input vertices ---
+  std::vector<Vec3> Pin;
+  std::vector<Tri> W; // each triangle's input vertices ("wedges"), rewritten by collapses
+  gather(mesh, Pin, W);
+  const u64 n_in = W.size();
   if (out)
     for (simplify_result &r : *out)
       r.in_tris = r.out_tris = n_in;
@@ -726,77 +794,90 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
   if (next == K)
     return snaps;
 
+  // --- collapse classes: the vertices of the welded topology the loop runs on ---
+  const weld_classes wc = weld(Pin, W, params.weld_seams, params.seam_epsilon, pool);
+  const u32 nv = u32(wc.rep.size());
+  std::vector<Vec3> P(nv);
+  for (u32 v = 0; v < nv; ++v)
+    P[v] = Pin[wc.rep[v]];
+  std::vector<Tri> T(W.size());
+  for (std::size_t ti = 0; ti < W.size(); ++ti)
+    T[ti] = {wc.of[W[ti][0]], wc.of[W[ti][1]], wc.of[W[ti][2]]};
   const std::vector<Tri> T0 = out ? T : std::vector<Tri>(); // source surface, for world_error
-  const u32 nv = u32(P.size());
+  std::vector<u32> wcls(wc.of);              // each wedge's class; a moved wedge changes class
+  std::vector<char> wremoved(Pin.size(), 0); // wedges collapsed onto a partner
 
-  // The quadrics work in a frame centred on the mesh's bounding box, so their
-  // round-off does not grow with the distance from the world origin. Costs whose
-  // RMS plane distance is below 1e-6 of the bounding-box diagonal are that
-  // round-off, not geometry: they are snapped to exactly 0 so coplanar collapses
-  // tie exactly (and resolve by vertex index) whatever the mesh's scale or
-  // placement.
-  std::vector<Vec3> L(P);
-  double cost_floor = 0.0; // squared RMS distance below which a cost is 0
-  {
-    double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
-    for (const Tri &t : T)
-      for (int k = 0; k < 3; ++k)
-        for (int a = 0; a < 3; ++a) {
-          lo[a] = std::min(lo[a], axis(P[t[k]], a));
-          hi[a] = std::max(hi[a], axis(P[t[k]], a));
-        }
-    const Vec3 c = {0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), 0.5 * (lo[2] + hi[2])};
-    for (Vec3 &v : L)
-      v = sub(v, c);
-    const Vec3 ext = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
-    cost_floor = 1e-12 * dot(ext, ext);
-  }
   std::vector<bool> vremoved(nv, false);
   std::vector<u32> vver(nv, 0);
   std::vector<bool> tremoved(T.size(), false);
+  u64 ntris = n_in;
+  // A triangle with two corners in one class is (to within seam_epsilon) a
+  // segment: it takes no part in the collapse and is left out of the result.
+  u64 ndropped = 0;
+  for (u32 ti = 0; ti < T.size(); ++ti) {
+    const Tri &f = T[ti];
+    if (f[0] == f[1] || f[1] == f[2] || f[0] == f[2]) {
+      tremoved[ti] = true;
+      --ntris;
+      ++ndropped;
+    }
+  }
 
   // vertex -> incident triangle indices
   std::vector<std::vector<u32>> vtri(nv);
   for (u32 ti = 0; ti < T.size(); ++ti)
-    for (int k = 0; k < 3; ++k)
-      vtri[T[ti][k]].push_back(ti);
+    if (!tremoved[ti])
+      for (int k = 0; k < 3; ++k)
+        vtri[T[ti][k]].push_back(ti);
 
   // --- per-vertex quadrics from incident face planes ---
   // The natural form is a scatter (each face adds to its 3 vertices), which races
   // under a pool. Split it into two data-parallel gathers via the vtri adjacency:
-  // (1) each face computes its own area-weighted plane quadric; (2) each vertex
-  // sums the quadrics of its incident faces. Result is bit-identical to serial.
+  // (1) each face computes its own area-weighted plane; (2) each vertex sums the
+  // planes of its incident faces. In the vertex's own frame each of those planes
+  // passes through the origin, so only A and w accumulate. Result is bit-identical
+  // to serial.
   std::vector<Quadric> FQ(T.size());
   pfor(pool, u32(T.size()), [&](int ti) {
-    const Vec3 &a = L[T[ti][0]], &b = L[T[ti][1]], &c = L[T[ti][2]];
+    if (tremoved[ti])
+      return;
+    const Vec3 &a = P[T[ti][0]], &b = P[T[ti][1]], &c = P[T[ti][2]];
     Vec3 n = cross(sub(b, a), sub(c, a));
     double l = len(n);
     if (l < 1e-30)
       return;
-    n = {n.x / l, n.y / l, n.z / l};
-    double d = -dot(n, a);
-    FQ[ti] = Quadric::from_plane(n.x, n.y, n.z, d, 0.5 * l); // area-weighted
+    FQ[ti].add_plane({n.x / l, n.y / l, n.z / l}, 0.5 * l); // area-weighted
   });
   std::vector<Quadric> Q(nv);
   pfor(pool, nv, [&](int v) {
     Quadric acc;
     for (u32 ti : vtri[v])
-      acc += FQ[ti];
+      acc.add_planes(FQ[ti]);
     Q[v] = acc;
   });
 
-  // Every undirected edge once (sorted), and the boundary ones: on exactly one tri.
-  std::vector<u64> edges = sorted_edge_keys(T);
-  std::vector<u64> boundary;
-  for (std::size_t i = 0; i < edges.size();) {
-    std::size_t j = i + 1;
-    while (j < edges.size() && edges[j] == edges[i])
-      ++j;
-    if (j - i == 1)
-      boundary.push_back(edges[i]);
-    i = j;
+  // Every undirected edge once (sorted), and the boundary ones: an edge whose
+  // triangles all share one opposite corner -- a single triangle, or coincident
+  // copies of it (the two faces of a double-sided sheet).
+  std::vector<u64> edges, boundary;
+  {
+    std::vector<std::pair<u64, u32>> eo; // (edge, opposite corner)
+    eo.reserve(3 * ntris);
+    for (u32 ti = 0; ti < T.size(); ++ti)
+      if (!tremoved[ti])
+        for (int k = 0; k < 3; ++k)
+          eo.push_back(std::make_pair(edge_key(T[ti][k], T[ti][(k + 1) % 3]), T[ti][(k + 2) % 3]));
+    std::sort(eo.begin(), eo.end());
+    for (std::size_t i = 0; i < eo.size();) {
+      std::size_t j = i + 1;
+      while (j < eo.size() && eo[j].first == eo[i].first)
+        ++j;
+      edges.push_back(eo[i].first);
+      if (eo[j - 1].second == eo[i].second) // sorted: first == last opposite => one opposite
+        boundary.push_back(eo[i].first);
+      i = j;
+    }
   }
-  edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
 
   // --- boundary constraint quadrics: for each boundary edge, add a plane through
   // the edge, perpendicular to the face, so the border holds. Weighted by
@@ -805,48 +886,45 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
   // of the mesh's scale. ---
   if (params.preserve_boundary && !boundary.empty()) {
     for (u32 ti = 0; ti < T.size(); ++ti) {
-      const Vec3 &a = L[T[ti][0]], &b = L[T[ti][1]], &c = L[T[ti][2]];
+      if (tremoved[ti])
+        continue;
+      const Vec3 &a = P[T[ti][0]], &b = P[T[ti][1]], &c = P[T[ti][2]];
       Vec3 fn = face_normal(a, b, c);
       for (int k = 0; k < 3; ++k) {
         u32 v0 = T[ti][k], v1 = T[ti][(k + 1) % 3];
         if (!std::binary_search(boundary.begin(), boundary.end(), edge_key(v0, v1)))
           continue; // interior edge
         // plane containing edge (v0,v1) and perpendicular to the face
-        Vec3 e = sub(L[v1], L[v0]);
+        Vec3 e = sub(P[v1], P[v0]);
         Vec3 pn = cross(e, fn);
         double pl = len(pn);
         if (pl < 1e-30)
           continue;
         pn = {pn.x / pl, pn.y / pl, pn.z / pl};
-        double d = -dot(pn, L[v0]);
-        double w = params.boundary_weight * dot(e, e);
-        Quadric bq = Quadric::from_plane(pn.x, pn.y, pn.z, d, w);
-        Q[v0] += bq;
-        Q[v1] += bq;
+        const double w = params.boundary_weight * dot(e, e);
+        Q[v0].add_plane(pn, w);
+        Q[v1].add_plane(pn, w);
       }
     }
   }
 
-  // --- seam locks: never drop a vertex shared with another component ---
-  std::vector<char> locked(nv, 0);
-  const u64 nlocked =
-      params.lock_component_seams ? find_seam_locks(P, T, params.seam_epsilon, pool, locked) : 0;
-
   const double flip_cos = std::cos(params.max_normal_flip_deg * 3.14159265358979323846 / 180.0);
 
-  // Evaluate the half-edge collapse of edge (u,v): the cheaper allowed direction.
-  // A seam-locked vertex may absorb its neighbour but is never the one dropped;
-  // an edge between two locked vertices is not collapsible at all.
-  auto eval = [&](u32 u, u32 v, double &cost, u32 &keep, u32 &drop) -> bool {
-    if (locked[u] && locked[v])
-      return false;
-    Quadric q = Q[u];
-    q += Q[v];
-    double eu = q.error(L[u].x, L[u].y, L[u].z);
-    double ev = q.error(L[v].x, L[v].y, L[v].z);
-    eu = eu <= cost_floor * q.w ? 0.0 : quantize(eu);
-    ev = ev <= cost_floor * q.w ? 0.0 : quantize(ev);
-    if (locked[u] || (!locked[v] && eu <= ev)) {
+  // Evaluate the half-edge collapse of edge (u,v): the cheaper direction. Keeping
+  // u costs u's own quadric at u (its c) plus v's quadric at u's offset from v.
+  // A cost inside its round-off band -- the magnitude of the terms it sums, plus
+  // the round-off already carried in both quadrics -- is exactly 0.
+  auto eval = [&](u32 u, u32 v, double &cost, u32 &keep, u32 &drop) {
+    const Vec3 o = sub(P[u], P[v]); // u seen from v; v seen from u is exactly -o
+    const Vec3 no = {-o.x, -o.y, -o.z};
+    const double carried = Q[u].m + Q[v].m;
+    double eu = Q[u].c + Q[v].at(o);
+    double ev = Q[v].c + Q[u].at(no);
+    const double bu = kCostRoundoff * (carried + std::max(0.0, Q[u].c) + Q[v].mag(o));
+    const double bv = kCostRoundoff * (carried + std::max(0.0, Q[v].c) + Q[u].mag(no));
+    eu = eu <= bu ? 0.0 : quantize(eu);
+    ev = ev <= bv ? 0.0 : quantize(ev);
+    if (eu <= ev) {
       keep = u;
       drop = v;
       cost = eu;
@@ -855,7 +933,6 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
       drop = u;
       cost = ev;
     }
-    return true;
   };
 
   std::priority_queue<HeapItem> heap;
@@ -864,8 +941,8 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
       return;
     double cost;
     u32 keep, drop;
-    if (eval(u, v, cost, keep, drop))
-      heap.push(HeapItem{cost, keep, drop, vver[keep], vver[drop]});
+    eval(u, v, cost, keep, drop);
+    heap.push(HeapItem{cost, keep, drop, vver[keep], vver[drop]});
   };
 
   // seed the heap with every unique edge
@@ -882,8 +959,8 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
         continue; // this face degenerates away, not a flip
       Vec3 p[3];
       for (int k = 0; k < 3; ++k)
-        p[k] = (f[k] == drop) ? L[keep] : L[f[k]];
-      Vec3 before = face_normal(L[f[0]], L[f[1]], L[f[2]]);
+        p[k] = (f[k] == drop) ? P[keep] : P[f[k]];
+      Vec3 before = face_normal(P[f[0]], P[f[1]], P[f[2]]);
       Vec3 after = face_normal(p[0], p[1], p[2]);
       if (len(before) == 0.0 || len(after) == 0.0)
         return true; // collapse makes a sliver
@@ -893,11 +970,10 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
     return false;
   };
 
-  u64 ntris = n_in;
   u64 ncollapse = 0;
   bool hit_limit = false;
 
-  // --- snapshots: rebuild a compact geometry from the survivors ---
+  // --- snapshots: rebuild a compact geometry from the surviving wedges ---
   const geometry::points_t &in_pts = mesh.const_points();
   const geometry::uvs_t &in_uv = mesh.const_uvs();
   const geometry::colors_t &in_col = mesh.const_colors();
@@ -908,28 +984,30 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
 
   auto build = [&]() {
     geometry result(mesh.ctx());
-    std::vector<u32> remap(nv, u32(-1));
+    const u32 nw = u32(in_pts.size());
+    std::vector<u32> remap(nw, kNone);
     geometry::points_t &op = result.points();
     geometry::uvs_t *ouv = has_uv ? &result.uvs() : nullptr;
     geometry::colors_t *ocol = has_col ? &result.colors() : nullptr;
     geometry::normals_t *onrm = has_nrm ? &result.normals() : nullptr;
-    for (u32 v = 0; v < nv; ++v) {
-      if (vremoved[v])
+    for (u32 w = 0; w < nw; ++w) {
+      if (wremoved[w])
         continue;
-      remap[v] = u32(op.size());
-      op.push_back(in_pts[v]);
+      remap[w] = u32(op.size());
+      // a wedge that was moved sits exactly on its new class's input position
+      op.push_back(wcls[w] == wc.of[w] ? in_pts[w] : in_pts[wc.rep[wcls[w]]]);
       if (ouv)
-        ouv->push_back(in_uv[v]);
+        ouv->push_back(in_uv[w]);
       if (ocol)
-        ocol->push_back(in_col[v]);
+        ocol->push_back(in_col[w]);
       if (onrm)
-        onrm->push_back(in_nrm[v]); // half-edge collapse: the vertex never moved
+        onrm->push_back(in_nrm[w]); // every wedge keeps its own attributes
     }
     geometry::tris_t &ot = result.tris();
-    for (u32 ti = 0; ti < T.size(); ++ti) {
+    for (u32 ti = 0; ti < W.size(); ++ti) {
       if (tremoved[ti])
         continue;
-      const Tri &f = T[ti];
+      const Tri &f = W[ti];
       // guard against any residual degeneracy
       if (f[0] == f[1] || f[1] == f[2] || f[0] == f[2])
         continue;
@@ -942,19 +1020,21 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
   };
 
   // world_error: symmetric sampled Hausdorff between the source and the live
-  // surface. The source side (grid, used vertices, unique edges) is built once
-  // and reused by every snapshot; construction is deterministic, so a
-  // progressive snapshot measures exactly what an independent run would. Samples
-  // the two surfaces share -- every live vertex, an edge present in both, an
-  // untouched triangle's centroid -- lie ON the other surface (distance 0, under
-  // the round-off floor), so they are not queried: the value is bit-identical to
+  // surface, both over the class positions (exactly the input and result
+  // surfaces when seams coincide exactly; within seam_epsilon otherwise). The
+  // source side (tree, used vertices, unique edges) is built once and reused by
+  // every snapshot; construction is deterministic, so a progressive snapshot
+  // measures exactly what an independent run would. Samples the two surfaces
+  // share -- every live vertex, an edge present in both, an untouched triangle's
+  // centroid -- lie ON the other surface (distance 0, under the round-off
+  // floor), so they are not queried: the value is bit-identical to
   // sampled_hausdorff(mesh, snapshot), for less work on fine rungs.
-  std::unique_ptr<tri_grid> src_grid;
+  std::unique_ptr<tri_bvh> src_tree;
   std::vector<u32> src_verts;
   std::vector<u64> src_edges;
   auto measure = [&]() {
-    if (!src_grid) {
-      src_grid.reset(new tri_grid(P, T0));
+    if (!src_tree) {
+      src_tree.reset(new tri_bvh(P, T0));
       src_verts = used_vertices(nv, T0);
       src_edges = unique_edges(T0);
     }
@@ -971,7 +1051,7 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
         changed.push_back(u32(live.size()));
       live.push_back(T[ti]);
     }
-    const tri_grid grid(P, live);
+    const tri_bvh tree(P, live);
     const std::vector<u64> live_edges = unique_edges(live);
     std::vector<char> on_live(nv, 0);
     for (const Tri &t : live)
@@ -990,7 +1070,7 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
     sample_set lv{&P, &live, {}, {}, changed};
     std::set_difference(live_edges.begin(), live_edges.end(), src_edges.begin(), src_edges.end(),
                         std::back_inserter(lv.edges));
-    return hausdorff(src, *src_grid, lv, grid, pool);
+    return hausdorff(src, *src_tree, lv, tree, pool);
   };
 
   std::size_t last = K; // most recent snapshot, reused while no collapse happened since
@@ -1009,12 +1089,21 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
       simplify_result &r = (*out)[k];
       r.out_tris = ntris;
       r.collapses = ncollapse;
-      r.world_error = ncollapse > 0 ? measure() : 0.0;
+      r.world_error = ncollapse > 0 || ndropped > 0 ? measure() : 0.0;
       r.hit_error_limit = hit_limit;
-      r.locked_vertices = nlocked;
+      r.seam_vertices = wc.seam;
     }
     last = k;
     last_collapses = ncollapse;
+  };
+
+  // drop's wedges paired with the keep wedge they share a vanishing triangle with
+  std::vector<std::pair<u32, u32>> pairs;
+  auto partner = [&](u32 w) {
+    for (const auto &pr : pairs)
+      if (pr.first == w)
+        return pr.second;
+    return kNone;
   };
 
   while (true) {
@@ -1042,6 +1131,30 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
 
     const u32 keep = it.keep, drop = it.drop;
 
+    // The triangles on the collapsed edge vanish. Each pairs the drop wedge at
+    // its drop corner with the keep wedge at its keep corner (first pairing wins).
+    pairs.clear();
+    u64 vanish = 0;
+    for (u32 ti : vtri[drop]) {
+      if (tremoved[ti])
+        continue;
+      const Tri &f = T[ti];
+      int kd = 0, kk = -1;
+      for (int k = 0; k < 3; ++k) {
+        if (f[k] == drop)
+          kd = k;
+        else if (f[k] == keep)
+          kk = k;
+      }
+      if (kk < 0)
+        continue;
+      ++vanish;
+      if (partner(W[ti][kd]) == kNone)
+        pairs.push_back(std::make_pair(W[ti][kd], W[ti][kk]));
+    }
+    if (vanish == ntris)
+      continue; // never remove the last triangle: an empty rung has no finite error
+
     // rewrite drop's faces onto keep; drop degenerate ones
     for (u32 ti : vtri[drop]) {
       if (tremoved[ti])
@@ -1050,15 +1163,23 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
       if (f[0] == keep || f[1] == keep || f[2] == keep) {
         tremoved[ti] = true; // shared face collapses to a line
         --ntris;
-      } else {
-        for (int k = 0; k < 3; ++k)
-          if (f[k] == drop)
-            f[k] = keep;
-        vtri[keep].push_back(ti);
+        continue;
       }
+      for (int k = 0; k < 3; ++k)
+        if (f[k] == drop) {
+          f[k] = keep;
+          const u32 dw = W[ti][k], kw = partner(dw);
+          if (kw != kNone)
+            W[ti][k] = kw; // follow its partner
+          else
+            wcls[dw] = keep; // no partner on this face's side: move onto keep
+        }
+      vtri[keep].push_back(ti);
     }
+    for (const auto &pr : pairs)
+      wremoved[pr.first] = 1;
 
-    Q[keep] += Q[drop];
+    Q[keep].merge(Q[drop], sub(P[keep], P[drop]));
     vremoved[drop] = true;
     ++vver[keep];
     ++ncollapse;
@@ -1105,7 +1226,7 @@ double sampled_hausdorff(const geometry &a, const geometry &b, thread_pool *pool
   std::vector<Tri> TA, TB;
   gather(a, PA, TA);
   gather(b, PB, TB);
-  const tri_grid ga(PA, TA), gb(PB, TB);
+  const tri_bvh ga(PA, TA), gb(PB, TB);
   return hausdorff(all_samples(PA, TA), ga, all_samples(PB, TB), gb, pool);
 }
 

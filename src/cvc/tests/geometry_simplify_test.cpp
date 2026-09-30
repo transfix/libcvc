@@ -9,12 +9,17 @@
 // The metric half runs on an unwelded "box city" (separate wall and roof meshes,
 // closed sheds, a round tower on a podium) with preserve_boundary on: the
 // reported world_error is a sampled symmetric Hausdorff distance that scales
-// linearly with the mesh and matches an independent brute-force measurement;
-// input normals survive bit-for-bit; progressive snapshots equal independent
-// runs bit-for-bit; and seam locking keeps roofs sealed to their walls.
+// linearly with the mesh, matches an independent brute-force measurement and
+// holds the pixel budget at the switch radius select derives from it; input
+// normals survive bit-for-bit; progressive snapshots equal independent runs
+// bit-for-bit; seam welding keeps roofs sealed to their walls and decimates
+// faces split for hard edges (down to a triangle soup) without cracks; a far
+// away part cannot change how another decimates; the last triangle is never
+// removed; and a huge triangle under fine detail does not slow the measurement.
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -22,6 +27,8 @@
 #include <cvc/core/thread_pool.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/simplify.h>
+#include <cvc/lod/pyramid.h>
+#include <cvc/lod/select.h>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
@@ -527,20 +534,23 @@ TEST(GeometrySimplify, WorldErrorScalesWithTheMesh) {
   const double floor = 1e-3 * bbox_diag(g1);
   struct Case {
     std::uint64_t target;
-    bool lock;
+    bool weld;
   };
-  const Case cases[] = {{300, true}, {280, true}, {250, true}, {137, false}, {86, false}};
+  // Welded, the city loses nothing down to ~146 triangles; unwelded, its parts
+  // decimate on their own.
+  const Case cases[] = {{132, true}, {106, true},  {85, true},
+                        {61, true},  {118, false}, {76, false}};
   for (const Case &c : cases) {
     cvc::simplify_params p;
     p.target_tris = c.target;
-    p.lock_component_seams = c.lock;
+    p.weld_seams = c.weld;
     ASSERT_TRUE(p.preserve_boundary);
     cvc::simplify_result r1, r10;
     cvc::simplify(g1, p, &r1);
     cvc::simplify(g10, p, &r10);
     ASSERT_GT(r1.world_error, floor) << "target " << c.target << ": error is only round-off";
     EXPECT_NEAR(r10.world_error / (10.0 * r1.world_error), 1.0, 0.05)
-        << "target " << c.target << " lock " << c.lock;
+        << "target " << c.target << " weld " << c.weld;
   }
 }
 
@@ -553,15 +563,15 @@ TEST(GeometrySimplify, WorldErrorIsTheSampledHausdorffDistance) {
   const geometry g = mini_city(ctx);
   struct Case {
     std::uint64_t target;
-    bool lock;
+    bool weld;
   };
-  for (const Case &c : {Case{60, true}, Case{50, false}}) {
+  for (const Case &c : {Case{50, true}, Case{40, true}, Case{45, false}}) {
     cvc::simplify_params p;
     p.target_tris = c.target;
-    p.lock_component_seams = c.lock;
+    p.weld_seams = c.weld;
     cvc::simplify_result r;
     const geometry s = cvc::simplify(g, p, &r);
-    SCOPED_TRACE(testing::Message() << "target " << c.target << " lock " << c.lock);
+    SCOPED_TRACE(testing::Message() << "target " << c.target << " weld " << c.weld);
     ASSERT_GT(r.world_error, 0.1);
 
     const double brute = brute_hausdorff(g, s, 0);
@@ -663,8 +673,9 @@ TEST(GeometrySimplify, CarriesSourceNormalsBitForBit) {
 
 // One progressive pass == one independent simplify() per target, bit for bit
 // (points, tris, uvs, colors, normals and every result field), for targets in
-// any order, with duplicates, an above-input no-op, a target below what the
-// seam locks allow, and an error budget that stops the pass part-way.
+// any order, with duplicates, an above-input no-op, targets on both sides of
+// where the welded city starts to lose geometry, and an error budget that stops
+// the pass part-way.
 TEST(GeometrySimplify, ProgressiveMatchesIndependentRuns) {
   cvc::app ctx;
   geometry g = box_city(ctx);
@@ -697,7 +708,7 @@ TEST(GeometrySimplify, ProgressiveMatchesIndependentRuns) {
       EXPECT_EQ(res[k].collapses, rk.collapses);
       EXPECT_EQ(0, std::memcmp(&res[k].world_error, &rk.world_error, sizeof(double)));
       EXPECT_EQ(res[k].hit_error_limit, rk.hit_error_limit);
-      EXPECT_EQ(res[k].locked_vertices, rk.locked_vertices);
+      EXPECT_EQ(res[k].seam_vertices, rk.seam_vertices);
       any_limited = any_limited || rk.hit_error_limit;
     }
     EXPECT_EQ(any_limited, budget >= 0.0) << "the budget must actually bind part-way";
@@ -713,47 +724,56 @@ TEST(GeometrySimplify, ProgressivePoolMatchesSerial) {
   geometry g = box_city(ctx);
   paint_normals(g);
   const std::vector<std::uint64_t> targets = {1000, 500, 300, 137};
-  for (bool lock : {true, false}) {
+  for (bool weld : {true, false}) {
     cvc::simplify_params p;
-    p.lock_component_seams = lock;
+    p.weld_seams = weld;
     std::vector<cvc::simplify_result> rs, rp;
     const std::vector<geometry> serial = cvc::simplify_progressive(g, targets, p, &rs, nullptr);
     const std::vector<geometry> pooled =
         cvc::simplify_progressive(g, targets, p, &rp, &ctx.computePool());
     for (std::size_t k = 0; k < targets.size(); ++k) {
-      SCOPED_TRACE(testing::Message() << "lock " << lock << " target " << targets[k]);
+      SCOPED_TRACE(testing::Message() << "weld " << weld << " target " << targets[k]);
       EXPECT_TRUE(bitwise_equal(serial[k].const_points(), pooled[k].const_points()));
       EXPECT_TRUE(bitwise_equal(serial[k].const_tris(), pooled[k].const_tris()));
       EXPECT_TRUE(bitwise_equal(serial[k].const_normals(), pooled[k].const_normals()));
       EXPECT_EQ(0, std::memcmp(&rs[k].world_error, &rp[k].world_error, sizeof(double)));
-      EXPECT_EQ(rs[k].locked_vertices, rp[k].locked_vertices);
+      EXPECT_EQ(rs[k].seam_vertices, rp[k].seam_vertices);
     }
     EXPECT_GT(rs.back().world_error, 0.0);
   }
 }
 
-// Unwelded roofs sit on their walls through coincident vertices only. With seam
-// locking (the default) no roof lifts off its walls however hard the city is
-// decimated; without it the two rims thin independently and open a gap -- which
+// Unwelded roofs sit on their walls through coincident vertices only. Welded
+// (the default), the roof rims and the walls' top rings collapse together: they
+// thin, yet no roof lifts off its walls however hard the city is decimated.
+// Without welding the two rims thin independently and open a gap -- which
 // proves the gap measurement bites.
-TEST(GeometrySimplify, SeamLockKeepsRoofsOnWalls) {
+TEST(GeometrySimplify, SeamWeldKeepsRoofsOnWalls) {
   cvc::app ctx;
   const geometry g = box_city(ctx);
-  const double eps = 1e-6 * bbox_diag(g); // the default seam_epsilon
+  const double eps = 1e-6 * bbox_diag(g); // no more than the default seam_epsilon
   ASSERT_LT(max_roof_gap(g), eps);
+  // every roof rim vertex and every wall top-ring vertex: 2 x (28+24+20+30+24)
+  const std::uint64_t rim = 126;
   for (std::uint64_t target : {137u, 86u}) {
     cvc::simplify_params p;
     p.target_tris = target;
     cvc::simplify_result on, off;
-    const geometry locked = cvc::simplify(g, p, &on);
-    p.lock_component_seams = false;
+    const geometry welded = cvc::simplify(g, p, &on);
+    p.weld_seams = false;
     const geometry loose = cvc::simplify(g, p, &off);
-    // every roof rim vertex and every wall top-ring vertex: 2 x (28+24+20+30+24)
-    EXPECT_EQ(on.locked_vertices, 252u);
-    EXPECT_EQ(off.locked_vertices, 0u);
-    ASSERT_EQ(parts_with_role(locked, ROOF), 5) << "every roof is still there to measure";
-    EXPECT_LE(max_roof_gap(locked), eps) << "target " << target;
+    EXPECT_EQ(on.seam_vertices, 2 * rim);
+    EXPECT_EQ(off.seam_vertices, 0u);
+    EXPECT_LE(on.out_tris, target);
+    ASSERT_EQ(parts_with_role(welded, ROOF), 5) << "every roof is still there to measure";
+    EXPECT_LE(max_roof_gap(welded), eps) << "target " << target;
     EXPECT_GT(max_roof_gap(loose), 100.0 * eps) << "target " << target;
+    // the seams were decimated, not frozen: fewer roof vertices survive than
+    // the rims alone held
+    std::uint64_t roof_verts = 0;
+    for (const auto &c : welded.const_colors())
+      roof_verts += int(c[1]) == ROOF ? 1 : 0;
+    EXPECT_LT(roof_verts, rim) << "target " << target;
   }
 }
 
@@ -773,13 +793,16 @@ TEST(GeometrySimplify, SeamEpsilonIsTheCoincidenceTolerance) {
   cvc::simplify_result r;
   p.seam_epsilon = 1e-4;
   cvc::simplify(g, p, &r);
-  EXPECT_EQ(r.locked_vertices, 20u); // the 10-vertex rim on both parts
+  EXPECT_EQ(r.seam_vertices, 20u); // the 10-vertex rim on both parts
   p.seam_epsilon = 1e-6;
   cvc::simplify(g, p, &r);
-  EXPECT_EQ(r.locked_vertices, 0u);
+  EXPECT_EQ(r.seam_vertices, 0u);
   p.seam_epsilon = 0.0; // exact coincidence only
   cvc::simplify(c.g, p, &r);
-  EXPECT_EQ(r.locked_vertices, 20u);
+  EXPECT_EQ(r.seam_vertices, 20u);
+  p.seam_epsilon = -1.0; // the default: 1e-6 of this building's ~14 m extent
+  cvc::simplify(g, p, &r);
+  EXPECT_EQ(r.seam_vertices, 20u);
 
   // Two parts whose touching corners (0.002 apart) straddle a boundary of the
   // coincidence search's hash cells (64 * seam_epsilon = 1 wide, starting at the
@@ -792,5 +815,288 @@ TEST(GeometrySimplify, SeamEpsilonIsTheCoincidenceTolerance) {
   q.target_tris = 1;
   q.seam_epsilon = 1.0 / 64.0;
   cvc::simplify(pair, q, &r);
-  EXPECT_EQ(r.locked_vertices, 2u);
+  EXPECT_EQ(r.seam_vertices, 2u);
+
+  // The default tolerance is capped by the median edge (1e-3 of it), so a far
+  // away part that stretches the extent to 100 km (1e-6 of which is 0.1 m) does
+  // not weld two parts 5 mm apart -- while a 0.1 mm contact still welds.
+  for (double gap : {5e-3, 1e-4}) {
+    geometry scene(ctx);
+    scene.points() = {{0, 0, 0}, {3 - gap, 0, 0}, {0, 1, 0},       {3, 0, 0},  {5, 0, 0},
+                      {3, 1, 0}, {1e5, 0, 0},     {1e5 + 1, 0, 0}, {1e5, 1, 0}};
+    scene.tris() = {{0, 1, 2}, {3, 4, 5}, {6, 7, 8}};
+    cvc::simplify_params d;
+    d.target_tris = 2;
+    cvc::simplify(scene, d, &r);
+    EXPECT_EQ(r.seam_vertices, gap < 1e-3 ? 2u : 0u) << "gap " << gap;
+  }
+}
+
+// --- welding split faces ----------------------------------------------------
+
+namespace {
+
+// `g` with every run of `group` consecutive triangles given its own copies of
+// their vertices -- make_grid's quad pairs (group 2) are then a flat-shaded
+// export, single triangles (group 1) a triangle soup. Each copy's uv traces it
+// to its index here; normals are painted.
+geometry split_faces(const geometry &g, std::size_t group) {
+  geometry s(g.ctx());
+  const auto &T = g.const_tris();
+  for (std::size_t f = 0; f < T.size(); f += group) {
+    std::map<std::uint64_t, std::uint64_t> copy;
+    for (std::size_t t = f; t < std::min(T.size(), f + group); ++t) {
+      std::array<std::uint64_t, 3> c;
+      for (int k = 0; k < 3; ++k) {
+        auto it = copy.find(T[t][k]);
+        if (it == copy.end()) {
+          it = copy.insert(std::make_pair(T[t][k], std::uint64_t(s.points().size()))).first;
+          s.points().push_back(g.const_points()[T[t][k]]);
+          s.uvs().push_back({double(it->second), 0.0});
+        }
+        c[k] = it->second;
+      }
+      s.tris().push_back({c[0], c[1], c[2]});
+    }
+  }
+  paint_normals(s);
+  s.set_geometry_type(geometry::SURFACE_TRI);
+  return s;
+}
+
+// Cracks in a make_grid(n) sheet: edges, keyed by their endpoints' POSITIONS,
+// that bound a single triangle yet do not lie on the sheet's outer border.
+int interior_cracks(const geometry &g, int n) {
+  const auto &P = g.const_points();
+  auto key = [&](std::uint64_t v) { return std::make_pair(P[v][0], P[v][1]); };
+  std::map<std::pair<std::pair<double, double>, std::pair<double, double>>, int> count;
+  for (const auto &t : g.const_tris())
+    for (int k = 0; k < 3; ++k) {
+      auto a = key(t[k]), b = key(t[(k + 1) % 3]);
+      ++count[std::make_pair(std::min(a, b), std::max(a, b))];
+    }
+  const double hi = double(n - 1);
+  int cracks = 0;
+  for (const auto &e : count) {
+    const auto &a = e.first.first, &b = e.first.second;
+    const bool border = (a.first == b.first && (a.first == 0.0 || a.first == hi)) ||
+                        (a.second == b.second && (a.second == 0.0 || a.second == hi));
+    cracks += e.second == 1 && !border ? 1 : 0;
+  }
+  return cracks;
+}
+
+} // namespace
+
+// Faces split apart for hard-edge normals -- per quad, or all the way down to a
+// triangle soup, where EVERY vertex coincides with another part's -- decimate
+// like the welded sheet they form: to the target, without cracks, and with
+// every surviving vertex (including those moved onto a kept position) carrying
+// its own source normal bit-for-bit. Without welding they fall apart.
+TEST(GeometrySimplify, WeldDecimatesSplitFacesWithoutCracks) {
+  cvc::app ctx;
+  const int n = 24;
+  const geometry sheet = make_grid(ctx, n, 1.5);
+  for (std::size_t group : {2u, 1u}) {
+    const geometry g = split_faces(sheet, group);
+    SCOPED_TRACE(testing::Message() << "group " << group);
+    ASSERT_EQ(interior_cracks(g, n), 0);
+    cvc::simplify_params p;
+    p.target_ratio = 0.2;
+    cvc::simplify_result r;
+    const geometry s = cvc::simplify(g, p, &r, &ctx.computePool());
+    expect_wellformed(s);
+    const std::uint64_t target = std::uint64_t(std::llround(0.2 * double(g.num_tris())));
+    EXPECT_LE(r.out_tris, target);
+    EXPECT_GE(r.out_tris + 2, target); // an interior collapse removes two triangles
+    // every copy is welded to another but those at the sheet's corners that
+    // only one part touches: 4 per-quad, 2 in the soup (the diagonal's ends)
+    EXPECT_EQ(r.seam_vertices, g.num_points() - (group == 2 ? 4u : 2u));
+    EXPECT_EQ(interior_cracks(s, n), 0);
+    EXPECT_EQ(r.world_error, cvc::sampled_hausdorff(g, s));
+    for (std::size_t i = 0; i < s.num_points(); ++i) {
+      const std::size_t from = std::size_t(s.const_uvs()[i][0]);
+      EXPECT_EQ(0, std::memcmp(&s.const_normals()[i], &g.const_normals()[from],
+                               sizeof(g.const_normals()[from])));
+    }
+    // The same split mesh without welding: every part decimates on its own and
+    // the sheet tears.
+    p.weld_seams = false;
+    const geometry torn = cvc::simplify(g, p);
+    EXPECT_GT(interior_cracks(torn, n), 0);
+  }
+}
+
+// --- locality ----------------------------------------------------------------
+
+// A collapse is costed in its own vertex's frame, with a round-off band made of
+// local lengths, so geometry elsewhere -- here one far away triangle that only
+// stretches the bounding box -- cannot change how a part decimates: the part's
+// result is bit-identical with or without it.
+TEST(GeometrySimplify, DistantGeometryDoesNotChangeALocalResult) {
+  cvc::app ctx;
+  const geometry g = make_grid(ctx, 40, 0.01); // 1 cm bumps on a 39 m sheet
+  cvc::simplify_params p;
+  p.target_tris = g.num_tris() / 4;
+  cvc::simplify_result r;
+  const geometry alone = cvc::simplify(g, p, &r);
+  ASSERT_GT(r.world_error, 0.0);
+  for (double far : {200.0, 1e4, 1e6}) {
+    geometry f = g;
+    const std::uint64_t o = f.points().size();
+    f.points().push_back({far, far, 0.0});
+    f.points().push_back({far + 1.0, far, 0.0});
+    f.points().push_back({far, far + 1.0, 0.0});
+    f.tris().push_back({o, o + 1, o + 2});
+    cvc::simplify_params q = p;
+    q.target_tris = p.target_tris + 1; // the far triangle survives
+    const geometry both = cvc::simplify(f, q, nullptr, &ctx.computePool());
+    SCOPED_TRACE(testing::Message() << "far " << far);
+    ASSERT_EQ(both.num_tris(), alone.num_tris() + 1);
+    ASSERT_EQ(both.num_points(), alone.num_points() + 3);
+    // The part's vertices and triangles come first; the far triangle is last.
+    const geometry::points_t head(both.const_points().begin(),
+                                  both.const_points().begin() + alone.num_points());
+    const geometry::tris_t tris(both.const_tris().begin(), both.const_tris().end() - 1);
+    EXPECT_TRUE(bitwise_equal(head, alone.const_points()));
+    EXPECT_TRUE(bitwise_equal(tris, alone.const_tris()));
+  }
+}
+
+// --- edge cases --------------------------------------------------------------
+
+// The loop never removes the last triangle, so even a target of 0 leaves a
+// non-empty result with a finite (measured) error.
+TEST(GeometrySimplify, NeverRemovesTheLastTriangle) {
+  cvc::app ctx;
+  geometry tri(ctx);
+  tri.points() = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+  tri.tris().push_back({0, 1, 2});
+  geometry tet(ctx);
+  tet.points() = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+  tet.tris() = {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}};
+  const geometry sheet = make_grid(ctx, 8, 0.0);
+  for (const geometry *g : std::vector<const geometry *>{&tri, &tet, &sheet}) {
+    cvc::simplify_params p;
+    p.target_ratio = 0.0;
+    p.preserve_boundary = false;
+    cvc::simplify_result r;
+    const geometry s = cvc::simplify(*g, p, &r);
+    expect_wellformed(s);
+    EXPECT_GE(s.num_tris(), 1u);
+    EXPECT_EQ(r.out_tris, s.num_tris());
+    EXPECT_TRUE(std::isfinite(r.world_error));
+    EXPECT_EQ(r.world_error, cvc::sampled_hausdorff(*g, s));
+    std::vector<cvc::simplify_result> rp;
+    cvc::simplify_progressive(*g, {0u}, p, &rp);
+    EXPECT_EQ(rp[0].out_tris, r.out_tris);
+  }
+}
+
+// The Hausdorff queries run over a bounding-volume hierarchy, so a ground quad
+// 10 km wide under 5 cm detail (triangle areas ~10^11 apart) costs about what
+// the detail alone does. (A uniform grid sized from the mean triangle area piles
+// the detail into a few cells and goes quadratic: ~100x slower here.)
+TEST(GeometrySimplify, MeasureCostIgnoresTriangleSizeSpread) {
+  cvc::app ctx;
+  geometry detail = make_grid(ctx, 80, 6.0);
+  for (auto &q : detail.points()) {
+    q[0] *= 0.05;
+    q[1] *= 0.05;
+    q[2] = 1.0 + 0.05 * q[2];
+  }
+  geometry scene = detail;
+  const std::uint64_t o = scene.points().size();
+  const double G = 5000.0;
+  scene.points().push_back({-G, -G, 0.0});
+  scene.points().push_back({G, -G, 0.0});
+  scene.points().push_back({G, G, 0.0});
+  scene.points().push_back({-G, G, 0.0});
+  scene.tris().push_back({o, o + 1, o + 2});
+  scene.tris().push_back({o, o + 2, o + 3});
+  cvc::simplify_params p;
+  p.target_ratio = 0.3;
+  auto timed = [&](const geometry &g, cvc::simplify_result &r) {
+    const auto t0 = std::chrono::steady_clock::now();
+    cvc::simplify(g, p, &r);
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  };
+  cvc::simplify_result ra, rb;
+  const double ta = timed(detail, ra), tb = timed(scene, rb);
+  EXPECT_GT(ra.world_error, 0.0);
+  EXPECT_GT(rb.world_error, 0.0);
+  EXPECT_LT(tb, 10.0 * ta + 0.5) << "detail alone " << ta << " s, under the ground quad " << tb
+                                 << " s";
+}
+
+// --- the LOD contract ----------------------------------------------------------
+
+namespace {
+
+// `g` with every triangle split into 4^levels by repeated midpoint subdivision:
+// the same surface, sampled far more densely by sampled_hausdorff.
+geometry subdivide(const geometry &g, int levels) {
+  geometry s = g;
+  for (int l = 0; l < levels; ++l) {
+    geometry next(g.ctx());
+    next.points() = s.const_points();
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> mid;
+    auto midpoint = [&](std::uint64_t a, std::uint64_t b) {
+      const auto key = std::make_pair(std::min(a, b), std::max(a, b));
+      auto it = mid.find(key);
+      if (it == mid.end()) {
+        const auto &P = s.const_points();
+        next.points().push_back(
+            {0.5 * (P[a][0] + P[b][0]), 0.5 * (P[a][1] + P[b][1]), 0.5 * (P[a][2] + P[b][2])});
+        it = mid.insert(std::make_pair(key, std::uint64_t(next.points().size() - 1))).first;
+      }
+      return it->second;
+    };
+    for (const auto &t : s.const_tris()) {
+      const std::uint64_t ab = midpoint(t[0], t[1]), bc = midpoint(t[1], t[2]),
+                          ca = midpoint(t[2], t[0]);
+      next.tris().push_back({t[0], ab, ca});
+      next.tris().push_back({ab, t[1], bc});
+      next.tris().push_back({ca, bc, t[2]});
+      next.tris().push_back({ab, bc, ca});
+    }
+    s = next;
+  }
+  return s;
+}
+
+} // namespace
+
+// lod_final's P1 check, on the box city: at the switch radius select derives
+// from a rung's world_error_m, the rung's DENSELY sampled Hausdorff distance to
+// the source (both surfaces subdivided 16x first) costs at most 1.05x the pixel
+// budget. (On this feature-aligned fixture the worst point is a sampled corner;
+// see sampled_hausdorff for why a strongly curved surface can fall short of
+// that.)
+TEST(GeometrySimplify, SwitchRadiusHoldsThePixelBudgetOnTheBoxCity) {
+  cvc::app ctx;
+  const geometry g = box_city(ctx);
+  const geometry dense_src = subdivide(g, 2);
+  cvc::lod::pyramid_params pp;
+  pp.max_rungs = 6; // targets 857 .. 27; lossless down to ~146
+  pp.mesh_ratio = 0.5;
+  pp.mesh_min_tris = 16;
+  const cvc::lod::mesh_pyramid pyr = cvc::lod::build_mesh_pyramid(g, pp, &ctx.computePool());
+  const cvc::lod::view_params v = cvc::lod::preset_view(cvc::lod::quality_preset::balanced);
+  int lossy = 0;
+  for (std::size_t k = 1; k < pyr.rungs.size(); ++k) {
+    const double err = pyr.world_error_m[k];
+    SCOPED_TRACE(testing::Message() << "rung " << k << " err " << err);
+    if (err == 0.0) {
+      // coplanar collapses only: the rung lies on the source and vice versa
+      EXPECT_EQ(cvc::sampled_hausdorff(g, pyr.rungs[k]), 0.0);
+      continue;
+    }
+    ++lossy;
+    const double dense = cvc::sampled_hausdorff(dense_src, subdivide(pyr.rungs[k], 2));
+    const double r = cvc::lod::switch_radius_m(err, v);
+    EXPECT_LE(cvc::lod::screen_error_px(dense, r, v), 1.05 * v.desired_pixel_error)
+        << "dense " << dense;
+  }
+  EXPECT_GE(lossy, 3);
 }
