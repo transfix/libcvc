@@ -858,6 +858,13 @@ void GraphicsNode::setVisible(bool visible) {
   }
 }
 
+bool GraphicsNode::isVisibleInHierarchy() const {
+  for (const GraphicsNode *n = this; n; n = n->m_parent)
+    if (!n->isVisible())
+      return false;
+  return true;
+}
+
 void GraphicsNode::setShowBBox(bool show) {
   if (m_showBBox == show)
     return;

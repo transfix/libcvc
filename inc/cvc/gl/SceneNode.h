@@ -75,6 +75,27 @@ protected:
   virtual vtkProp *getProp() = 0;
   virtual void handleStateChanged(const std::string &childState) override;
 
+  // Hand a visibility change on to the children. setVisible() calls this after
+  // updating this node's own prop, and only when the visibility actually
+  // changed; the default runs pushVisible() on every child. A node whose
+  // children's visibility is its own policy overrides it -- LodGraphicsNode
+  // draws exactly one of its rung children, so re-showing it must not show them
+  // all.
+  virtual void propagateVisible(bool visible);
+
+  // An ancestor's visibility changed, but this node's own flag already had the
+  // value pushed down -- it was attached under an already-hidden parent, say, or
+  // shown on its own while one was -- so its setVisible() was not called. The
+  // default passes the news on to the children and changes nothing: an ordinary
+  // node draws by its own flag alone. A node whose drawing depends on its
+  // ANCESTORS' visibility re-derives it here, as LodGraphicsNode does.
+  virtual void ancestorVisibilityChanged();
+
+  // The default propagation to one child: setVisible(visible) when its flag
+  // differs, else ancestorVisibilityChanged(). For propagateVisible() overrides
+  // that keep the default for some of their children.
+  static void pushVisible(SceneNode &child, bool visible);
+
   // Run work on the SceneGraph's owner thread. On the owner thread (or with no
   // SceneGraph attached) it runs inline. From any other thread it is marshalled
   // through the event queue (drained by processEvents()), guarded by a weak_ptr
