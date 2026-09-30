@@ -92,13 +92,16 @@ mesh_pyramid build_mesh_pyramid(const geometry &src, const pyramid_params &param
   sp.seam_epsilon = params.seam_epsilon;
   std::vector<simplify_result> res;
   std::vector<geometry> snaps = simplify_progressive(src, targets, sp, &res, pool);
-  // Keep only the rungs that coarsen. Snapshots never gain triangles, so an
-  // equal count means the pass stalled (every remaining collapse guarded) and
-  // this rung -- and each after it -- repeats the one before.
+  // Keep only the snapshots that coarsen. Snapshots never gain triangles, so an
+  // equal count means no collapse happened since the one before -- the pass
+  // stalled (every remaining collapse guarded), or a single collapse removed
+  // enough triangles to pass both targets -- and it repeats that one.
   std::vector<geometry> rungs;
   std::vector<double> errs;
   std::uint64_t prev = src_tris;
-  for (std::size_t k = 0; k < snaps.size() && res[k].out_tris < prev; ++k) {
+  for (std::size_t k = 0; k < snaps.size(); ++k) {
+    if (res[k].out_tris >= prev)
+      continue;
     prev = res[k].out_tris;
     rungs.push_back(std::move(snaps[k]));
     errs.push_back(res[k].world_error);

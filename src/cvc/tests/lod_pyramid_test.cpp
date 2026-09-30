@@ -6,8 +6,9 @@
 // ladder); a flat-shaded (split-face) mesh coarsens like the welded sheet unless
 // welding is turned off; a planar-projected texture stays exactly on its
 // positions, with no orphaned vertices, in every rung of a flat-shaded sheet
-// and a triangle soup; a rung the collapse cannot reach is left out, not
-// repeated; pooled == serial; a volume ladder that halves each axis with a
+// and a triangle soup; a rung the collapse cannot reach, or one a single
+// collapse jumped past, is left out, not repeated, and the ladder goes on past
+// it; pooled == serial; a volume ladder that halves each axis with a
 // growing voxel-size error; and an image mip ladder whose box filter actually
 // area-averages (a 2x2 checker becomes mid-grey) rather than point-samples.
 
@@ -241,6 +242,31 @@ TEST(LodPyramid, MeshLadderLeavesOutStalledRungs) {
   EXPECT_EQ(pyr.rungs[1].num_tris(), 2u);
   EXPECT_GT(pyr.world_error_m[1], 0.0);
   EXPECT_TRUE(std::isfinite(pyr.world_error_m[1]));
+}
+
+// Close targets can fall within one collapse: on this sheet a single collapse
+// takes the count from 96 to 94, past the targets 95 and 94, so those two
+// snapshots are equal. The repeat is left out, yet the ladder goes on to the
+// targets beyond it, each rung matching an independent simplify() to its own
+// target.
+TEST(LodPyramid, MeshLadderSkipsARepeatAndGoesOn) {
+  cvc::app ctx;
+  const geometry src = bumpy_grid(ctx, 8); // 98 tris: targets 97 96 95 94 93 92
+  cvc::lod::pyramid_params pp;
+  pp.max_rungs = 6;
+  pp.mesh_ratio = 0.99;
+  pp.mesh_min_tris = 1;
+  const cvc::lod::mesh_pyramid pyr = cvc::lod::build_mesh_pyramid(src, pp);
+  std::vector<std::uint64_t> counts;
+  for (const geometry &r : pyr.rungs)
+    counts.push_back(r.num_tris());
+  ASSERT_EQ(counts, (std::vector<std::uint64_t>{98, 97, 96, 94, 93, 92}));
+  expect_monotone(pyr.world_error_m);
+  for (std::size_t k = 1; k < pyr.rungs.size(); ++k) {
+    cvc::simplify_params sp;
+    sp.target_tris = counts[k];
+    EXPECT_TRUE(same_mesh(pyr.rungs[k], cvc::simplify(src, sp))) << "rung " << k;
+  }
 }
 
 // world_error_m is a length: the same terrain at 10x scale has a 10x ladder.

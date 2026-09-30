@@ -106,11 +106,12 @@ struct image_pyramid {
 // preserve_boundary, weld_seams and seam_epsilon from `params` and
 // simplify_params defaults otherwise: input normals carried) at the cost of the
 // coarsest target alone. A snapshot that would not have fewer triangles than
-// the rung before it (the collapse guards stalled short of its target) is left
-// out, along with every later one, so the ladder can hold fewer than max_rungs
-// coarse rungs and rung k's index need not match its target's. `pool`, when
-// given, fans the per-face setup and each rung's error measurement over the app
-// compute workers; the result is identical either way.
+// the rung before it repeats that rung -- the collapse guards stalled short of
+// its target, or one collapse passed two close targets at once -- and is left
+// out, so the ladder can hold fewer than max_rungs coarse rungs and rung k need
+// not be the one built for the k-th target. `pool`, when given, fans the
+// per-face setup and each rung's error measurement over the app compute
+// workers; the result is identical either way.
 mesh_pyramid build_mesh_pyramid(const geometry &src,
                                 const pyramid_params &params = pyramid_params(),
                                 thread_pool *pool = nullptr);
