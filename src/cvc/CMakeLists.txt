@@ -93,6 +93,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/nav/grid_nav.h
   ../../inc/cvc/lod/select.h
+  ../../inc/cvc/lod/pyramid.h
   ../../inc/cvc/vis/types.h
   ../../inc/cvc/vis/scene_view.h
   ../../inc/cvc/vis/view_params.h
@@ -239,6 +240,7 @@ set(SOURCE_FILES
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   lod/select.cpp
+  lod/pyramid.cpp
   vis/types.cpp
   vis/reference.cpp
   vis/grid_index.cpp

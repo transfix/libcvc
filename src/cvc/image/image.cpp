@@ -94,15 +94,47 @@ image image::flipped_vertical() const {
   return out;
 }
 
-image image::resized(int w, int h) const {
+image image::resized(int w, int h, resize_filter filter) const {
   if (empty() || w <= 0 || h <= 0)
     return image(w, h, _fmt, _dt);
-  // Nearest-neighbour resample (works for any format/type; a higher-quality
-  // filter is a follow-up, and the Magick handler can resample too).
   image out(w, h, _fmt, _dt);
-  std::size_t bpp = bytes_per_pixel();
+  const std::size_t bpp = bytes_per_pixel();
+  const int nch = channels();
   const unsigned char *src = _data.get();
   unsigned char *dst = out._data.get();
+
+  // Box (area-average) downscale — the quality path for LOD mips. Each output
+  // pixel averages the source pixels whose columns/rows map into its footprint,
+  // so an exact 2x downscale is a 2x2 average. u8 only (1 byte/channel); other
+  // types fall through to nearest, as does any upscale.
+  if (filter == resize_filter::box && _dt == data_type::u8 && w <= _w && h <= _h) {
+    for (int y = 0; y < h; ++y) {
+      int sy0 = static_cast<int>((static_cast<long long>(y) * _h) / h);
+      int sy1 = static_cast<int>((static_cast<long long>(y + 1) * _h) / h);
+      if (sy1 <= sy0)
+        sy1 = sy0 + 1;
+      for (int x = 0; x < w; ++x) {
+        int sx0 = static_cast<int>((static_cast<long long>(x) * _w) / w);
+        int sx1 = static_cast<int>((static_cast<long long>(x + 1) * _w) / w);
+        if (sx1 <= sx0)
+          sx1 = sx0 + 1;
+        for (int c = 0; c < nch; ++c) {
+          unsigned long acc = 0, cnt = 0;
+          for (int sy = sy0; sy < sy1; ++sy)
+            for (int sx = sx0; sx < sx1; ++sx) {
+              acc += src[(std::size_t(sy) * _w + sx) * bpp + c];
+              ++cnt;
+            }
+          dst[(std::size_t(y) * w + x) * bpp + c] =
+              static_cast<unsigned char>(cnt ? (acc + cnt / 2) / cnt : 0);
+        }
+      }
+    }
+    return out;
+  }
+
+  // Nearest-neighbour resample (works for any format/type; the Magick handler can
+  // resample too).
   for (int y = 0; y < h; ++y) {
     int sy = static_cast<int>((static_cast<long long>(y) * _h) / h);
     if (sy >= _h)

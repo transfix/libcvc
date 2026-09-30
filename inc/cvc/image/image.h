@@ -61,7 +61,12 @@ public:
   void save(const std::string &path, int quality) const; // jpeg/webp quality 0..100
 
   // -- manipulate (non-mutating; return a new image) --
-  image resized(int w, int h) const;                   // resample (nearest for now)
+  enum class resize_filter {
+    nearest, // point sample (any format/type)
+    box      // area-average over the source footprint — the quality path for
+             // building downscaled LOD mips; u8 only, else falls back to nearest
+  };
+  image resized(int w, int h, resize_filter filter = resize_filter::nearest) const;
   image converted(pixel_format f, data_type dt) const; // channel/type convert
   image flipped_vertical() const;                      // GL/VTK bottom-left origin helper
 
