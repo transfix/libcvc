@@ -245,9 +245,14 @@ add_executable(cvcgl_smoke test/cvcgl_smoke.cpp)
 target_link_libraries(cvcgl_smoke PRIVATE cvcGL)
 add_test(NAME cvcgl_smoke COMMAND cvcgl_smoke)
 
-# LodGraphicsNode distance-based rung selection (the cvc::lod -> scene-graph seam).
-# Headless: null renderer, no GL context; asserts close->finest, far->coarsest,
-# monotone coarsening with distance.
+# LodGraphicsNode + SceneGraph::selectLOD (the cvc::lod -> scene-graph seam):
+# distance selection, user visibility vs the drawn rung (a hidden parent stays
+# hidden; re-showing it shows ONE rung), rungs kept registered across switches,
+# setPyramid/appendRungs re-population and the rung style, make_view_params from
+# a real vtkCamera (vertical ViewAngle, ParallelScale), setLODEnabled + lod_stats
+# and a feature-on synthetic tiled city. All headless (bare vtkRenderer) except a
+# final offscreen section -- rung colours, a pixel-identical zero-error switch and
+# the shadow-bake hook -- which skips itself when the build cannot rasterise.
 add_executable(cvcgl_lod_node test/cvcgl_lod_node.cpp)
 target_link_libraries(cvcgl_lod_node PRIVATE cvcGL)
 add_test(NAME cvcgl_lod_node COMMAND cvcgl_lod_node)
@@ -466,6 +471,13 @@ add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
 add_executable(cvcgl_stage_caster_truth test/cvcgl_stage_caster_truth.cpp)
 target_link_libraries(cvcgl_stage_caster_truth PRIVATE cvcGL)
 add_test(NAME cvcgl_stage_caster_truth COMMAND cvcgl_stage_caster_truth)
+
+# Multi-field StageLighting setters (setStage/setKey/setWash/applyPreset) must keep
+# EVERY field: the rig's own change callback re-reads all fields from state, so
+# writing them one at a time with it live kept only the first. Headless.
+add_executable(cvcgl_stage_setters test/cvcgl_stage_setters.cpp)
+target_link_libraries(cvcgl_stage_setters PRIVATE cvcGL)
+add_test(NAME cvcgl_stage_setters COMMAND cvcgl_stage_setters)
 
 # ViewportManager composites N Viewports (each its own vtkRenderer + camera +
 # scene) as SetViewport/SetLayer regions in ONE vtkRenderWindow (one GL context —

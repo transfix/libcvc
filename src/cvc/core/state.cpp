@@ -784,6 +784,50 @@ state &state::operator()(const std::string &childname) {
   return (*child)(join(keys, SEPARATOR));
 }
 
+// state::sharedChild
+// -----------------
+// Owning create-or-get analogue of operator(): walks (creating as needed) the child path, holding
+// each hop as a state_ptr, and returns the terminal PINNED. Same create/lock semantics as
+// operator() (child under the parent's lock, released before descending); the difference is the
+// return type — the caller gets an owning pointer that keeps the node alive across a concurrent
+// sweepExpired(), where operator()'s bare state& would dangle.
+state::state_ptr state::sharedChild(const std::string &childname, std::vector<state_ptr> *pins) {
+  using namespace boost::algorithm;
+
+  boost::this_thread::interruption_point();
+
+  std::vector<std::string> keys;
+  split(keys, childname, is_any_of(SEPARATOR));
+  BOOST_FOREACH (std::string &key, keys)
+    trim(key);
+  while (!keys.empty() && keys.front().empty())
+    keys.erase(keys.begin());
+
+  state_ptr cur = shared_from_this();
+  BOOST_FOREACH (std::string &key, keys) {
+    if (key.empty())
+      continue; // skip empty interior/trailing segments, as operator() does via its leading-drop
+    state_ptr next;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      auto it = cur->_children.find(key);
+      if (it != cur->_children.end() && it->second) {
+        next = it->second;
+      } else {
+        next.reset(new state(cur->_ctx, key, cur.get()));
+        cur->_children[key] = next;
+        cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
+        cur->_initialized = true;
+      }
+    }
+    cur = next;
+    if (pins)
+      pins->push_back(
+          cur); // pin every hop so the caller can safely walk the result's _parent chain
+  }
+  return cur;
+}
+
 // ----------------
 // state::linkTo / clearLink / isLink / linkTarget / resolveLink
 // ----------------
@@ -999,6 +1043,38 @@ state *state::findDescendant(const std::string &path) {
   return cur;
 }
 
+state::state_ptr state::findDescendantShared(const std::string &path,
+                                             std::vector<state_ptr> *pins) {
+  using namespace boost::algorithm;
+  std::string normalized = normalize_state_path(path);
+  if (normalized.empty())
+    return shared_from_this();
+  std::vector<std::string> keys;
+  split(keys, normalized, is_any_of(SEPARATOR));
+  state_ptr cur = shared_from_this();
+  for (auto &k : keys) {
+    trim(k);
+    if (k.empty())
+      continue;
+    state_ptr next;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      auto it = cur->_children.find(k);
+      if (it == cur->_children.end() || !it->second)
+        return state_ptr();
+      next = it->second; // copy the OWNING shared_ptr — pins this hop past a concurrent sweep
+    }
+    cur = next;
+    if (pins)
+      pins->push_back(
+          cur); // pin every hop so the caller can safely walk the result's _parent chain
+  }
+  return cur;
+}
+
+// static
+std::string state::normalize_path(const std::string &path) { return normalize_state_path(path); }
+
 state::link_resolution state::resolveLink(std::size_t hop_budget) {
   link_resolution result;
 
@@ -1009,7 +1085,17 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
   // when multi-tree lands the key extends to (tree_id, path).
   std::unordered_set<std::string> seen;
 
-  state *cur = this;
+  // Pin the walk: hold each hop as a state_ptr (start via shared_from_this(), each subsequent hop
+  // via findDescendantShared) so a concurrent sweepExpired() cannot free the node we read the link
+  // target from, and collect the terminal's ancestor chain into result.target_pins so a caller that
+  // MUTATES the terminal (a write walks its _parent chain) is safe too. Each hop's path comes from
+  // the target STRING (normalize_path == that node's fullName, since the target is absolute) rather
+  // than a fullName() _parent walk. The one remaining _parent walk is the START node's fullName()
+  // just below; it is safe when the caller pinned the addressed node's chain (the state:// resolver
+  // does), and is otherwise the caller's responsibility (a resolvedValue/resolvedData caller must
+  // not hold an orphaned start). See docs/roadmap/STATE_LIFETIME_AND_ATOMICITY.md.
+  state_ptr cur_owned = shared_from_this();
+  state *cur = cur_owned.get();
   // Record the starting node's path so cycles that loop back to
   // the start (including a self-link) are detected as cycles
   // rather than mistakenly classified as "resolved".
@@ -1026,6 +1112,9 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       // Terminal node: not a link.
       result.kind = (cur == this) ? link_resolution_kind::none : link_resolution_kind::resolved;
       result.target = cur;
+      result.target_owned = cur_owned; // pin the resolved terminal for the caller
+      // result.target_pins already holds this terminal's ancestor chain (set on the hop that
+      // reached it); empty iff the start node was itself the terminal.
       return result;
     }
 
@@ -1035,8 +1124,9 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
 
-    state *next = root.findDescendant(target);
-    if (next == nullptr) {
+    std::vector<state_ptr> hop_pins;
+    state_ptr next_owned = root.findDescendantShared(target, &hop_pins);
+    if (!next_owned) {
       result.kind = link_resolution_kind::broken;
       result.target = nullptr;
       result.visited.push_back(target);
@@ -1044,7 +1134,9 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
     }
     ++result.hops;
 
-    std::string next_path = next->fullName();
+    // The target is an app-root-absolute path, so its normalized form IS next_owned->fullName() —
+    // use the string to avoid walking next_owned's (unpinned) ancestor chain.
+    std::string next_path = normalize_state_path(target);
     if (!seen.insert(next_path).second) {
       result.kind = link_resolution_kind::cycle_detected;
       result.target = nullptr;
@@ -1052,7 +1144,9 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
     result.visited.push_back(next_path);
-    cur = next;
+    result.target_pins = std::move(hop_pins); // this hop's chain; kept iff it becomes the terminal
+    cur_owned = next_owned;
+    cur = cur_owned.get();
   }
 }
 
@@ -1165,7 +1259,7 @@ state::remote_link_resolution state::resolveRemote(std::size_t hop_budget) {
 // -------------------
 state::send_message_result state::sendMessage(const std::string &payload,
                                               const std::string &content_type,
-                                              std::size_t hop_budget) {
+                                              std::size_t hop_budget, bool binary) {
   send_message_result r;
 
   // 1. Resolve through any link chain.
@@ -1176,6 +1270,12 @@ state::send_message_result state::sendMessage(const std::string &payload,
     case link_resolution_kind::resolved:
     case link_resolution_kind::none:
       target = lr.target;
+      // Take the resolved absolute path from the walk while `lr` (and its pins) are still alive.
+      // Calling target->fullName() AFTER `lr` is dropped would walk the resolved terminal's _parent
+      // chain unpinned — safe today (sendMessage is scheduler-thread only) but a latent cross-node
+      // hazard if this ever runs off-thread; visited.back() is already that absolute path.
+      if (!lr.visited.empty())
+        r.resolved_path = lr.visited.back();
       break;
     case link_resolution_kind::broken:
       r.status = send_message_result::status_kind::broken_link;
@@ -1194,7 +1294,8 @@ state::send_message_result state::sendMessage(const std::string &payload,
       return r;
     }
   }
-  r.resolved_path = target->fullName();
+  if (r.resolved_path.empty())
+    r.resolved_path = target->fullName(); // non-link node (target == this): its own path
 
   // 2. Find the default shard for this app context. With no
   // shard registered (common in unit tests of pure-state code)
@@ -1210,7 +1311,10 @@ state::send_message_result state::sendMessage(const std::string &payload,
   state_message m;
   m.path = r.resolved_path;
   m.content_type = content_type;
-  m.string_value = payload;
+  if (binary)
+    m.bytes.assign(payload.begin(), payload.end()); // binary rides the wire `bytes` field
+  else
+    m.string_value = payload;
 
   auto sr = shard->send_message(std::move(m));
   r.owner_cluster_id = sr.owner_cluster_id;

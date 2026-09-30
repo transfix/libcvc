@@ -290,6 +290,116 @@ TEST(LodSelect, DegenerateLadders) {
   EXPECT_GE(select_rung(1.0, kTerrain, 5, 99, vp), 0);
 }
 
+// --- Orthographic ----------------------------------------------------------
+
+TEST(LodSelect, PerspectiveByDefault) {
+  // The orthographic scale is opt-in: a default view is the perspective camera
+  // every other test in this file measures.
+  EXPECT_EQ(view_params().ortho_px_per_m, 0.0);
+  EXPECT_EQ(preset_view(quality_preset::aggressive).ortho_px_per_m, 0.0);
+}
+
+TEST(LodSelect, OrthoScreenSizeIgnoresDistance) {
+  view_params vp = balanced_view();
+  vp.ortho_px_per_m = 10.0; // a metre spans 10 px wherever it is
+  EXPECT_DOUBLE_EQ(screen_error_px(0.5, 1.0, vp), 5.0);
+  EXPECT_DOUBLE_EQ(screen_error_px(0.5, 1.0e6, vp), 5.0);
+  EXPECT_DOUBLE_EQ(screen_error_px(0.5, 0.0, vp), 5.0); // no divide-by-distance
+  EXPECT_DOUBLE_EQ(screen_radius_px(3.0, 1.0, vp), 30.0);
+  EXPECT_DOUBLE_EQ(screen_radius_px(3.0, 1.0e6, vp), 30.0);
+  // tan_half_fov is not consulted: a degenerate fov changes nothing.
+  vp.tan_half_fov = 0.0;
+  EXPECT_DOUBLE_EQ(screen_error_px(0.5, 7.0, vp), 5.0);
+}
+
+TEST(LodSelect, OrthoSwitchRadiusIsAllOrNothing) {
+  view_params vp = balanced_view(); // 2.0 px budget
+  vp.ortho_px_per_m = 10.0;
+  EXPECT_EQ(switch_radius_m(0.1, vp), 0.0);          // 1 px: fits at any distance
+  EXPECT_EQ(switch_radius_m(0.2, vp), 0.0);          // exactly the budget still fits
+  EXPECT_TRUE(std::isinf(switch_radius_m(0.5, vp))); // 5 px: no distance helps
+  EXPECT_EQ(switch_radius_m(0.0, vp), 0.0);          // errorless: free everywhere
+  vp.desired_pixel_error = 0.0;
+  EXPECT_TRUE(std::isinf(switch_radius_m(0.1, vp))); // no budget: never
+  EXPECT_EQ(switch_radius_m(0.0, vp), 0.0);          // ...but errorless still fits
+  // Authoring is perspective-only: the orthographic scale does not leak in.
+  view_params persp = balanced_view();
+  view_params ortho = persp;
+  ortho.ortho_px_per_m = 10.0;
+  EXPECT_DOUBLE_EQ(world_error_for_switch_radius(500.0, ortho),
+                   world_error_for_switch_radius(500.0, persp));
+}
+
+TEST(LodSelect, OrthoImpostorSwitchIsAllOrNothing) {
+  view_params vp = balanced_view();
+  vp.ortho_px_per_m = 4.0;
+  // Width = 2 * r * 4 px: a 3 m sphere is 24 px wide, a 5 m one 40 px.
+  EXPECT_EQ(impostor_switch_radius_m(3.0, 32.0, vp), 0.0); // narrower everywhere
+  EXPECT_EQ(impostor_switch_radius_m(4.0, 32.0, vp), 0.0); // exactly the threshold
+  EXPECT_TRUE(std::isinf(impostor_switch_radius_m(5.0, 32.0, vp)));
+  // The perspective edge cases are unchanged.
+  EXPECT_EQ(impostor_switch_radius_m(0.0, 32.0, vp), 0.0);
+  EXPECT_TRUE(std::isinf(impostor_switch_radius_m(5.0, 0.0, vp)));
+}
+
+TEST(LodSelect, OrthoSelectionFollowsTheZoomNotTheEye) {
+  view_params vp = balanced_view(); // 2.0 px budget, 0.15 hysteresis
+  // kTerrain = 2/4/8/16/32 m. The rung that fits is the coarsest whose error,
+  // times the scale, stays within 2 px -- whatever the distance.
+  vp.ortho_px_per_m = 2.0 / 8.0; // 8 m costs exactly 2 px -> rung 2
+  for (double d : {0.5, 100.0, 1.0e6})
+    EXPECT_EQ(select_rung(d, kTerrain, 5, -1, vp), 2) << "d = " << d;
+
+  vp.ortho_px_per_m = 10.0; // zoomed right in: only rung 0 (it is the floor)
+  EXPECT_EQ(select_rung(1.0e6, kTerrain, 5, -1, vp), 0);
+  // ...except that an errorless rung is free at any zoom.
+  const double lossless[3] = {0.0, 0.0, 4.0};
+  EXPECT_EQ(select_rung(1.0, lossless, 3, -1, vp), 1);
+  vp.ortho_px_per_m = 0.01; // zoomed right out: even 32 m is 0.32 px
+  EXPECT_EQ(select_rung(0.5, kTerrain, 5, -1, vp), 4);
+
+  // Coarsening monotonically as the view zooms out.
+  int prev = 0;
+  for (double s = 10.0; s > 1.0e-3; s *= 0.8) {
+    vp.ortho_px_per_m = s;
+    const int r = select_rung(1.0, kTerrain, 5, -1, vp);
+    EXPECT_GE(r, prev) << "rung got finer as the view zoomed out, s = " << s;
+    prev = r;
+  }
+  EXPECT_EQ(prev, 4);
+}
+
+TEST(LodSelect, OrthoHysteresisHoldsInsideTheBand) {
+  view_params vp = balanced_view(); // hysteresis = 0.15
+  // Rung 1 (4 m) costs 4 * s px. Plain boundary at s = 0.5 (2 px); the widened
+  // one at s = 0.5 / 1.15.
+  vp.ortho_px_per_m = 0.5 / 1.07;                      // inside the band
+  EXPECT_EQ(select_rung(1.0, kTerrain, 5, -1, vp), 1); // no history: plain test
+  EXPECT_EQ(select_rung(1.0, kTerrain, 5, 0, vp), 0);  // arrived at rung 0: hold
+  EXPECT_EQ(select_rung(1.0, kTerrain, 5, 1, vp), 1);  // arrived at rung 1: hold
+
+  vp.ortho_px_per_m = 0.5 / 1.16; // past the widened boundary: rung 0 coarsens
+  EXPECT_EQ(select_rung(1.0, kTerrain, 5, 0, vp), 1);
+  vp.ortho_px_per_m = 0.5 * 1.01; // back past the plain boundary: rung 1 refines
+  EXPECT_EQ(select_rung(1.0, kTerrain, 5, 1, vp), 0);
+
+  // A zoom dithering across the plain boundary never transitions.
+  int rung = 0;
+  int transitions = 0;
+  for (int frame = 0; frame < 200; ++frame) {
+    vp.ortho_px_per_m = (frame % 2 == 0) ? 0.5 * 1.02 : 0.5 / 1.02;
+    const int next = select_rung(1.0, kTerrain, 5, rung, vp);
+    transitions += next != rung ? 1 : 0;
+    rung = next;
+  }
+  EXPECT_EQ(transitions, 0);
+
+  // No budget: nothing with error is ever affordable, so the floor holds.
+  vp.desired_pixel_error = 0.0;
+  vp.ortho_px_per_m = 1.0e-6;
+  EXPECT_EQ(select_rung(1.0, kTerrain, 5, -1, vp), 0);
+}
+
 // --- Priority --------------------------------------------------------------
 
 TEST(LodSelect, PriorityFallsWithDistanceAndRisesWithArea) {

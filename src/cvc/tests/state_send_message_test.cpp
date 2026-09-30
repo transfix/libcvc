@@ -110,12 +110,13 @@ TEST(StateSendMessage, CycleIsReported) {
 
 TEST(StateSendMessage, CallerNeverNamesClusterId_ApiCompileCheck) {
   // Compile-time guard: the only sendMessage overload takes
-  // (payload, content_type=, hop_budget=); there is no cluster
-  // parameter the caller could pass. This test exists so a future
-  // refactor that re-introduces cluster_id into the signature
-  // fails the build here.
-  using FnPtr = cvc::state::send_message_result (cvc::state::*)(const std::string &,
-                                                                const std::string &, std::size_t);
+  // (payload, content_type=, hop_budget=, binary=); there is no
+  // cluster parameter the caller could pass. This test exists so a
+  // future refactor that re-introduces cluster_id into the signature
+  // fails the build here. (`binary` selects the text-vs-bytes wire
+  // slot, not a cluster.)
+  using FnPtr = cvc::state::send_message_result (cvc::state::*)(
+      const std::string &, const std::string &, std::size_t, bool);
   FnPtr p = &cvc::state::sendMessage;
   (void)p;
   SUCCEED();

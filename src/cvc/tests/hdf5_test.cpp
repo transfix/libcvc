@@ -364,6 +364,43 @@ TEST_F(HDF5Test, SetGetStringAttribute) {
   EXPECT_TRUE(hdf5_utils::hasAttribute(dataset, "name"));
 }
 
+TEST_F(HDF5Test, GetStringAttributeSingleElementForms) {
+  std::string filepath = getTestFilePath("test_string_attr_forms.h5");
+  boost::shared_ptr<H5::H5File> file = hdf5_utils::getH5File(filepath, true);
+  H5::StrType stype(H5::PredType::C_S1, 32);
+  char buf[32] = "scalar value";
+  file->createAttribute("scalar", stype, H5::DataSpace(H5S_SCALAR)).write(stype, buf);
+  hsize_t one[1] = {1};
+  char buf1[32] = "one-element array";
+  file->createAttribute("one", stype, H5::DataSpace(1, one)).write(stype, buf1);
+
+  std::string v;
+  hdf5_utils::getAttribute(*file, "scalar", v);
+  EXPECT_EQ(v, "scalar value");
+  hdf5_utils::getAttribute(*file, "one", v);
+  EXPECT_EQ(v, "one-element array");
+}
+
+// A file controls its attributes' shapes. A multi-element string attribute used to be read into
+// a single ATTRIBUTE_STRING_MAXLEN stack buffer -- N x 256 file-controlled bytes written past it.
+// It must now be rejected before any read (ASan flags the old behaviour as a stack overflow).
+TEST_F(HDF5Test, GetStringAttributeRejectsMultiElement) {
+  std::string filepath = getTestFilePath("test_string_attr_multi.h5");
+  boost::shared_ptr<H5::H5File> file = hdf5_utils::getH5File(filepath, true);
+  H5::StrType stype(H5::PredType::C_S1, hdf5_utils::ATTRIBUTE_STRING_MAXLEN);
+  hsize_t n[1] = {8};
+  std::vector<char> payload(8 * hdf5_utils::ATTRIBUTE_STRING_MAXLEN, 'A');
+  file->createAttribute("many", stype, H5::DataSpace(1, n)).write(stype, payload.data());
+  hsize_t two[2] = {2, 2};
+  std::vector<char> payload2(4 * hdf5_utils::ATTRIBUTE_STRING_MAXLEN, 'B');
+  file->createAttribute("grid", stype, H5::DataSpace(2, two)).write(stype, payload2.data());
+
+  std::string v = "untouched";
+  EXPECT_THROW(hdf5_utils::getAttribute(*file, "many", v), H5::AttributeIException);
+  EXPECT_THROW(hdf5_utils::getAttribute(*file, "grid", v), H5::AttributeIException);
+  EXPECT_EQ(v, "untouched");
+}
+
 // ===========================
 // Complex Multi-type Tests
 // ===========================

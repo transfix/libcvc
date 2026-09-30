@@ -10,8 +10,8 @@
 // render test consume it exactly as before. libpython-free (std::function, never
 // PyObject*). Input is VTK's (widget on_click/on_hover + camera nav arrive through the VTK
 // interactor -> ImGui); document-level on_key/on_pointer residents need a producer fed via
-// post_key/post_pointer (a follow-up seam), never SDL. The program lanes are no-ops without
-// CVC_STATE_EXEC; loading a YAML .ari needs the yaml build.
+// post_key/post_pointer (a follow-up seam), never SDL. Loading a YAML .ari needs the yaml
+// build.
 #pragma once
 
 #include <cvc/ariadne/app_runtime.h>     // cvc::ariadne::AppRuntime, SceneAdapter
@@ -72,7 +72,6 @@ public:
   // --- diagnostics / capabilities ---
   std::vector<std::string> take_warnings();
   bool reload_if_changed();
-  static bool have_state_exec();
   static bool have_yaml();
 
 private:

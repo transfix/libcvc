@@ -140,7 +140,6 @@ void AriRuntime::post_pointer(int kind, double x, double y, double dx, double dy
 
 std::vector<std::string> AriRuntime::take_warnings() { return app_rt_.take_warnings(); }
 bool AriRuntime::reload_if_changed() { return app_rt_.reload_if_changed(); }
-bool AriRuntime::have_state_exec() { return ari::AppRuntime::have_state_exec(); }
 bool AriRuntime::have_yaml() { return ari::AppRuntime::have_yaml(); }
 
 } // namespace ariadne

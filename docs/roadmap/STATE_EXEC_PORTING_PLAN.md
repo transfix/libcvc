@@ -2315,7 +2315,8 @@ Map per category:
 #### Phase 7: CMake Integration + Polish
 
 34. ✅ **CMakeLists.txt** updates — `CVC_STATE_EXEC` and
-    `CVC_STATE_MEMORY_MANAGER` feature-flag options (default ON).
+    `CVC_STATE_MEMORY_MANAGER` feature-flag options (default ON). (`CVC_STATE_EXEC`
+    was later removed in #493 — state_exec is always built.)
     Conditional source filtering and test target guards
     (`add_executable`, `target_link_libraries`, `target_compile_features`,
     `gtest_discover_tests`) wrap all state_exec and memory_manager targets.

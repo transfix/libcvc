@@ -16,12 +16,10 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/uri.h> // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
-#ifdef CVC_STATE_EXEC
 // §12 channel lint: parse a script (parser.h) and walk its value_t / symbol / list_ptr AST
 // (types.h) for the static msg-* channel references.
 #include <cvc/core/state_exec/parser.h>
 #include <cvc/core/state_exec/types.h>
-#endif
 #include <filesystem> // §12 import: dirname of a resolved library for nested bases
 #include <functional>
 #include <iterator>
@@ -1633,9 +1631,7 @@ std::vector<CustomRequirement> parse_customs(Ctx &ctx, const YAML::Node &c) {
 
 // §12 channel lint (A) — the fail-fast, load-time pass over a document's STATIC msg-* channel
 // references, gated on the document declaring a `channels:` block. Only literal channel names are
-// visible here; a dynamic `(msg-recv (expr))` name is the runtime policy's job (a follow-up). No-op
-// without state_exec (there are no program lanes to lint, and the parser is unavailable).
-#ifdef CVC_STATE_EXEC
+// visible here; a dynamic `(msg-recv (expr))` name is the runtime policy's job (a follow-up).
 // Walk a parsed script's value_t tree, collecting the string-literal FIRST arg of every
 // (msg-send|msg-recv|msg-pending …) call — the static channel references. Depth-bounded.
 void collect_channel_refs(const cvc::state_exec::value_t &v, std::vector<std::string> &out,
@@ -1676,13 +1672,11 @@ void refs_from_widget(const Widget &w, std::vector<std::string> &out) {
   for (const Widget &c : w.children)
     refs_from_widget(c, out);
 }
-#endif
 
 // Run the §12 channel lint against a fully-built LoadResult (root + scripts populated). Sets
 // r.error on a STRICT violation (fails the load), else appends warnings. A no-op unless the doc
 // declared a `channels:` block and lint.channels != Off.
 void lint_channels(Ctx &ctx, LoadResult &r) {
-#ifdef CVC_STATE_EXEC
   if (!r.has_channels_block)
     return; // no declaration -> enforcement is not active for this document
   if (r.lint.channels == LintConfig::Mode::Off) {
@@ -1727,10 +1721,6 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
       return;
     }
   }
-#else
-  (void)ctx;
-  (void)r;
-#endif
 }
 
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate. `base_dir` is

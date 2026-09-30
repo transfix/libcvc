@@ -3193,8 +3193,6 @@ windows:
 
 TEST(AriadneChannelLint, StrictUndeclaredChannelFailsLoad) {
   SKIP_WITHOUT_YAML();
-  if (!have_state_exec())
-    GTEST_SKIP();
   LoadResult r = load_string(R"(
 channels:
   - nav.done
@@ -3210,8 +3208,6 @@ windows:
 
 TEST(AriadneChannelLint, DeclaredChannelPasses) {
   SKIP_WITHOUT_YAML();
-  if (!have_state_exec())
-    GTEST_SKIP();
   LoadResult r = load_string(R"(
 channels:
   - nav.done
@@ -3226,8 +3222,6 @@ windows:
 
 TEST(AriadneChannelLint, WarnModeWarnsNotFails) {
   SKIP_WITHOUT_YAML();
-  if (!have_state_exec())
-    GTEST_SKIP();
   LoadResult r = load_string(R"(
 lint:
   channels: warn
@@ -3248,8 +3242,6 @@ windows:
 
 TEST(AriadneChannelLint, OffModeSkipsCheck) {
   SKIP_WITHOUT_YAML();
-  if (!have_state_exec())
-    GTEST_SKIP();
   LoadResult r = load_string(R"(
 lint:
   channels: off
@@ -3266,8 +3258,6 @@ windows:
 
 TEST(AriadneChannelLint, GlobalRefNeedsDeclaredGlobal) {
   SKIP_WITHOUT_YAML();
-  if (!have_state_exec())
-    GTEST_SKIP();
   LoadResult ok = load_string(R"(
 channels:
   - channel: app.quit
@@ -3295,8 +3285,6 @@ windows:
 
 TEST(AriadneChannelLint, HashChannelExempt) {
   SKIP_WITHOUT_YAML();
-  if (!have_state_exec())
-    GTEST_SKIP();
   LoadResult r = load_string(R"(
 channels:
   - nav.done
@@ -3311,8 +3299,6 @@ windows:
 
 TEST(AriadneChannelLint, NoChannelsBlockNoEnforcement) {
   SKIP_WITHOUT_YAML();
-  if (!have_state_exec())
-    GTEST_SKIP();
   LoadResult r = load_string(R"(
 windows:
   - window: W
@@ -3325,8 +3311,6 @@ windows:
 
 TEST(AriadneChannelLint, InitScriptLinted) {
   SKIP_WITHOUT_YAML();
-  if (!have_state_exec())
-    GTEST_SKIP();
   LoadResult r = load_string("channels:\n  - a\ninit: '(msg-send \"b\" \"x\")'\nwindows: []\n");
   EXPECT_FALSE(r.ok); // the init: script is linted too; "b" is undeclared -> strict fail
   EXPECT_NE(r.error.find("'b'"), std::string::npos);

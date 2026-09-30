@@ -258,8 +258,16 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 
 // A Python-CONSTRUCTED node (a director subclass built as MyNode(app, path,
 // name)) must keep its app alive too — its ~SceneNode touches the app's state
-// tree by raw reference. args[0] is the app the node ctor takes. (Nodes obtained
-// from a SceneGraph get this via the SceneGraph appends below instead.)
+// tree by raw reference. (Nodes obtained from a SceneGraph get this via the
+// SceneGraph appends below instead.)
+//
+// NB on %pythonappend: SWIG emits `def f(self, *args)` ONLY for an overloaded
+// function; a single-signature one gets NAMED parameters (`def f(self, ctx,
+// statePath, name)`), where `args` is undefined and the append raises NameError
+// on every call. So an overloaded ctor reads args[0], a single-signature one
+// names its parameter — and adding/removing an overload flips which applies.
+// test_pycvc_proxy_hooks.py fails the build's tests on any proxy that references
+// an undefined name, so a flip cannot slip through silently.
 %pythonappend cvc::gl::GraphicsNode::GraphicsNode %{
     if args: self._pycvc_app = args[0]
 %}
@@ -270,7 +278,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     if args: self._pycvc_app = args[0]
 %}
 %pythonappend cvc::gl::VolRenNode::VolRenNode %{
-    if args: self._pycvc_app = args[0]
+    self._pycvc_app = ctx  # single signature -> named-parameter proxy
 %}
 %pythonappend cvc::gl::LightNode::LightNode %{
     if args: self._pycvc_app = args[0]
@@ -282,7 +290,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     if args: self._pycvc_app = args[0]
 %}
 %pythonappend cvc::gl::VolSliceNode::VolSliceNode %{
-    if args: self._pycvc_app = args[0]
+    self._pycvc_app = ctx  # single signature -> named-parameter proxy
 %}
 
 // ── SceneNode (abstract base): trim VTK / threading internals ───────────────
@@ -291,6 +299,10 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::SceneNode::runOnMainThread;
 %ignore cvc::gl::SceneNode::setSceneGraph;
 %ignore cvc::gl::SceneNode::getSceneGraph;
+// Visibility-propagation plumbing (setVisible is the API; these are its hooks).
+%ignore cvc::gl::SceneNode::propagateVisible;
+%ignore cvc::gl::SceneNode::ancestorVisibilityChanged;
+%ignore cvc::gl::SceneNode::pushVisible;
 %include "cvc/gl/SceneNode.h"
 
 // ── GraphicsNode: keep transform / material / label; ignore VTK/any/templates ─
@@ -978,6 +990,13 @@ def _typed_node(sg, name):
 // pickWorld has a double[3] OUT param SWIG can't express; re-exposed as pick_world
 // below (returns an (x,y,z) tuple or None).
 %ignore cvc::gl::SceneRenderer::pickWorld;
+// Keep the borrowed SceneGraph alive: ~SceneRenderer detaches from it (close() ->
+// ~ViewportManager -> SceneGraph::setRenderer), so a scene released FIRST — e.g. a
+// function returning drops its `sg` local before `view` — was a use-after-free
+// segfault at teardown. (Default args make this an overloaded, *args proxy.)
+%pythonappend cvc::gl::SceneRenderer::SceneRenderer %{
+    if args: self._pycvc_scene = args[0]
+%}
 %include "cvc/gl/SceneRenderer.h"
 
 %extend cvc::gl::SceneRenderer {
@@ -1109,9 +1128,9 @@ def _typed_node(sg, name):
 %pythonappend cvc::gl::ViewportManager::activeViewport %{
     if val is not None: val._pycvc_keepalive = self
 %}
-// addSceneViewport is a named-parameter proxy (no *args), so reference the
-// `scene` argument by name — `args` is undefined here (only the *args ctor
-// wrappers get it), which raised NameError the moment a viewport was added.
+// addSceneViewport is a named-parameter proxy (single signature, no *args), so
+// reference the `scene` argument by name — `args` is undefined here, which raised
+// NameError the moment a viewport was added. (See the %pythonappend note above.)
 %pythonappend cvc::gl::ViewportManager::addSceneViewport %{
     if val is not None:
         val._pycvc_keepalive = self

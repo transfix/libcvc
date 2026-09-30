@@ -37,8 +37,6 @@
 #ifndef CVC_CORE_ASYNC_TASK_H
 #define CVC_CORE_ASYNC_TASK_H
 
-#ifdef CVC_STATE_EXEC
-
 #include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <string>
@@ -80,7 +78,5 @@ state_exec::value_t future_pool_task(app &a, state_exec::async_scheduler &sched,
                                      pool_task_work work, pool_task_on_error on_error);
 
 } // namespace cvc
-
-#endif // CVC_STATE_EXEC
 
 #endif // CVC_CORE_ASYNC_TASK_H

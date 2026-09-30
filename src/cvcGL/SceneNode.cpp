@@ -131,8 +131,28 @@ void SceneNode::setVisible(bool visible) {
     });
   }
 
+  propagateVisible(visible);
+}
+
+void SceneNode::propagateVisible(bool visible) {
   for (auto &child : m_children) {
-    child->setVisible(visible);
+    pushVisible(*child, visible);
+  }
+}
+
+void SceneNode::pushVisible(SceneNode &child, bool visible) {
+  // A child whose flag already matches keeps it, exactly as a plain setVisible()
+  // would; it and its subtree are only told that an ancestor changed.
+  if (child.m_visible != visible) {
+    child.setVisible(visible);
+  } else {
+    child.ancestorVisibilityChanged();
+  }
+}
+
+void SceneNode::ancestorVisibilityChanged() {
+  for (auto &child : m_children) {
+    child->ancestorVisibilityChanged();
   }
 }
 

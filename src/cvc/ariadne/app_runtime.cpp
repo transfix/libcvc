@@ -7,17 +7,14 @@
 #include <cvc/ariadne/loader.h>  // load_file / LoadResult / ChannelDecl / sources_changed
 #include <cvc/ariadne/uri.h>     // register_cvc_uri_handler
 #include <cvc/core/app.h>
-#include <stdexcept>
-#include <utility>
-
-#ifdef CVC_STATE_EXEC
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/core/state_exec/builtins.h>        // register_fn
 #include <cvc/core/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
 #include <cvc/core/state_exec/types.h>           // value_t
 #include <memory>
 #include <span>
-#endif
+#include <stdexcept>
+#include <utility>
 
 namespace cvc {
 namespace ariadne {
@@ -36,7 +33,6 @@ void AppRuntime::on(const std::string &event, std::function<void()> handler) {
   rt_.on(event, std::move(handler));
 }
 
-bool AppRuntime::have_state_exec() { return cvc::ariadne::have_state_exec(); }
 bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
 
 // ── host verbs on the app-wide scheduler ────────────────────────────────────────────────────────
@@ -52,9 +48,8 @@ void AppRuntime::register_async_verb(const std::string &name, const std::string 
   ensure_intrinsics();
 }
 
-#ifdef CVC_STATE_EXEC
 void AppRuntime::ensure_intrinsics() {
-  if (intrinsicsRegistered_ || !have_state_exec())
+  if (intrinsicsRegistered_)
     return;
   intrinsicsRegistered_ = true;
   cvc::app *app = &app_;
@@ -97,9 +92,6 @@ void AppRuntime::ensure_intrinsics() {
     }
   });
 }
-#else
-void AppRuntime::ensure_intrinsics() {}
-#endif
 
 // ── document ────────────────────────────────────────────────────────────────────────────────────
 

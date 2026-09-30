@@ -85,7 +85,6 @@ Invoke-CvcWasmCMakeBuild -ExtraArgs @(
     '-DCVC_ENABLE_ASSIMP=ON',
     '-DCVC_ENABLE_MESHER=OFF',
     '-DCVC_ENABLE_SDF=ON',
-    '-DCVC_STATE_EXEC=OFF',
     '-DCVC_BUILD_CVCGL=ON',
     '-DCVC_BUILD_EXAMPLES=OFF',
     "-DCVC_WASM_PTHREADS=$pthreads",

@@ -1,22 +1,19 @@
 // Ariadne — async HTTP host intrinsics for the state_exec program lanes (roadmap §13.8). See
-// net_intrinsics.h. The whole implementation is gated on CVC_STATE_EXEC (no program lanes without
-// it) and on a compiled cvc::net backend (cvc::net::have_http_backend()).
+// net_intrinsics.h. The (http-get*) verbs are gated on a compiled cvc::net backend
+// (cvc::net::have_http_backend()).
 
-#include <cvc/ariadne/ariadne.h> // register_action_intrinsics, have_state_exec
+#include <atomic>
+#include <cstdint>
+#include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task — the shared offload-and-park primitive
-#include <cvc/net/http_client.h>
-
-#ifdef CVC_STATE_EXEC
-
-#include <atomic>
-#include <cstdint>
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/core/state_exec/builtins.h>   // register_fn — bind the host verb into the lanes
 #include <cvc/core/state_exec/intrinsics.h> // resolve_channel_key — scope the reply channel
 #include <cvc/core/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
+#include <cvc/net/http_client.h>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -264,8 +261,6 @@ std::string launch_uri_fetch(cvc::app &app, const std::string &root,
 } // namespace
 
 void register_net_intrinsics(cvc::app &app) {
-  if (!have_state_exec())
-    return;
   // Warm the lazy per-app singletons on THIS thread before any background worker touches them, so a
   // worker never races their first construction (the nav_compute discipline).
   app.computePool();
@@ -346,15 +341,3 @@ void register_net_intrinsics(cvc::app &app) {
 
 } // namespace ariadne
 } // namespace cvc
-
-#else // !CVC_STATE_EXEC
-
-namespace cvc {
-namespace ariadne {
-void register_net_intrinsics(cvc::app & /*app*/) {
-  // No program lanes without state_exec — nothing to register.
-}
-} // namespace ariadne
-} // namespace cvc
-
-#endif // CVC_STATE_EXEC

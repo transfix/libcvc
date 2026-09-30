@@ -114,6 +114,22 @@ struct view_params {
   double desired_pixel_error = 2.0;          // 22.1.6's knob; 8.5's default
   double hysteresis = 0.15;                  // widens the coarsen radius only
   double z_near = 0.1;                       // floor for bound-nearest distance
+
+  // ORTHOGRAPHIC scale in pixels per world metre; 0 (the default) means a
+  // perspective camera and everything above applies unchanged.
+  //
+  // A parallel projection has no field of view: a metre covers the same number
+  // of pixels at every distance, so the perspective k_px / dist falls out and
+  // the screen-space error of a rung is simply world_error_m * ortho_px_per_m.
+  // When this is > 0, screen_error_px, screen_radius_px, switch_radius_m,
+  // impostor_switch_radius_m and select_rung use it and ignore tan_half_fov and
+  // the distance; zooming (changing the scale) is what moves a rung, and the
+  // hysteresis band widens the budget instead of the radius.
+  //
+  // For a VTK camera with ParallelProjection on this is
+  // viewport_h_px / (2 * ParallelScale) -- ParallelScale is half the viewport
+  // HEIGHT in world units. cvc::gl::make_view_params() fills it from a renderer.
+  double ortho_px_per_m = 0.0;
 };
 
 // Quality presets. `desired_pixel_error` per RENDER_PERF_ROADMAP phase 1;
@@ -125,23 +141,31 @@ enum class quality_preset { pristine, balanced, aggressive };
 view_params preset_view(quality_preset) noexcept;
 
 // h / (2 * tan(fov/2)) -- pixels per unit of (world size / distance). Both
-// roadmaps call this k_px and both agree on it.
+// roadmaps call this k_px and both agree on it. PERSPECTIVE only: it reads
+// tan_half_fov whatever ortho_px_per_m says, because an orthographic view has
+// no k_px (its screen size does not fall with distance).
 double k_px(const view_params &) noexcept;
 
 // Screen-space error of a rung whose world-space error is `world_error_m`,
 // seen at `dist_m`. Section 8.5: world_error * h / (2 * dist * tan(fov/2)).
+// Orthographic (ortho_px_per_m > 0): world_error * ortho_px_per_m, at any
+// distance.
 double screen_error_px(double world_error_m, double dist_m, const view_params &) noexcept;
 
 // Apparent radius in pixels of a bounding sphere of radius `radius_m`.
 // Section 6.1's screen_px = k_px * r / d. Representation changes (mesh to
 // impostor) switch on THIS, not on the error metric: a billboard has no
-// meaningful geometric error.
+// meaningful geometric error. Orthographic: r * ortho_px_per_m, at any distance.
 double screen_radius_px(double radius_m, double dist_m, const view_params &) noexcept;
 
 // The crossover distance at which `world_error_m` costs exactly
 // `desired_pixel_error` on screen. At or beyond it the rung is affordable.
 // Returns 0.0 for a zero or negative error (a rung with no error is affordable
 // everywhere) and +inf if `desired_pixel_error` is non-positive.
+//
+// Orthographic: distance plays no part, so the answer is all-or-nothing -- 0.0
+// when the rung is affordable at this scale (world_error * ortho_px_per_m <=
+// desired_pixel_error) and +inf when no distance would make it so.
 double switch_radius_m(double world_error_m, const view_params &) noexcept;
 
 // The inverse of switch_radius_m: the world-space error a rung must have for
@@ -157,6 +181,9 @@ double switch_radius_m(double world_error_m, const view_params &) noexcept;
 // makes the presets do anything. Re-deriving the ladder at the runtime preset
 // instead pins all boundaries to the published radii and silently neuters the
 // preset, and it is an easy mistake to make because it still looks correct.
+//
+// A radius is a perspective notion, so this ignores ortho_px_per_m: author
+// against a perspective reference view even when the runtime camera is parallel.
 double world_error_for_switch_radius(double radius_m, const view_params &) noexcept;
 
 // The distance beyond which a bounding sphere of radius `radius_m` projects to a
@@ -177,7 +204,8 @@ double world_error_for_switch_radius(double radius_m, const view_params &) noexc
 //
 // Returns 0 for a non-positive radius (a zero-width object is always an
 // impostor) and +inf if `impostor_px` is non-positive or the camera is
-// degenerate (the switch never fires).
+// degenerate (the switch never fires). Orthographic: all-or-nothing like
+// switch_radius_m -- 0 when 2 * r * ortho_px_per_m <= impostor_px, else +inf.
 double impostor_switch_radius_m(double radius_m, double impostor_px, const view_params &) noexcept;
 
 // Bound-NEAREST distance from the eye to a bounding sphere, floored at
@@ -201,6 +229,12 @@ bool ladder_is_monotonic(const double *world_error_m, int nrungs) noexcept;
 // Coarsening requires clearing the widened boundary r[L] * (1 + hysteresis);
 // refining requires falling back inside the plain boundary r[L]. Between the
 // two the rung is held, so a camera parked on a boundary cannot oscillate.
+//
+// Orthographic (ortho_px_per_m > 0): `dist_m` is ignored. Rung L is affordable
+// when its error costs at most desired_pixel_error at this scale, and
+// coarsening requires it to fit the tighter desired_pixel_error / (1 +
+// hysteresis) -- the same band, expressed in pixels because a zoom, not a
+// dolly, is what moves an orthographic rung.
 //
 // Returns 0 when nrungs <= 0 or world_error_m is null.
 int select_rung(double dist_m, const double *world_error_m, int nrungs, int current,

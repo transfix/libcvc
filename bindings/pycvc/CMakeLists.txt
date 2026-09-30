@@ -213,7 +213,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py
              pycvc_nav_train:test_pycvc_nav_train.py
-             pycvc_integration:test_pycvc_integration.py)
+             pycvc_integration:test_pycvc_integration.py
+             pycvc_proxy_hooks:test_pycvc_proxy_hooks.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
@@ -332,45 +333,67 @@ if(CVC_BUILD_PYCVC_GL)
   install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/"
     DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl
     FILES_MATCHING PATTERN "*.py")
+  # Mirror that INSTALLED package layout in the build tree (pkg/pycvc_gl/: the proxy as
+  # __init__.py, the extension inside, pymod_gl/*.py as submodules) and run the pycvc_gl
+  # tests against it, so they import pycvc_gl exactly as a consumer does. The flat
+  # pycvc_gl.py beside _pycvc_gl.so is a plain module, not a package, so
+  # `pycvc_gl.camera` et al. could never resolve from the build tree.
+  set(_PYCVC_GL_PKGROOT "${CMAKE_CURRENT_BINARY_DIR}/pkg")
+  set(_PYCVC_GL_PKG "${_PYCVC_GL_PKGROOT}/pycvc_gl")
+  file(GLOB _PYCVC_GL_PYMODS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/*.py")
+  add_custom_command(
+    OUTPUT "${_PYCVC_GL_PKGROOT}/pycvc_gl.staged"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_PYCVC_GL_PKG}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:pycvc_gl>" "${_PYCVC_GL_PKG}/"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/pycvc_gl.py"
+            "${_PYCVC_GL_PKG}/__init__.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PYCVC_GL_PYMODS} "${_PYCVC_GL_PKG}/"
+    COMMAND ${CMAKE_COMMAND} -E touch "${_PYCVC_GL_PKGROOT}/pycvc_gl.staged"
+    DEPENDS pycvc_gl ${_PYCVC_GL_PYMODS}
+    COMMENT "Staging the pycvc_gl package layout for the build-tree tests"
+    VERBATIM)
+  add_custom_target(pycvc_gl_pkg ALL DEPENDS "${_PYCVC_GL_PKGROOT}/pycvc_gl.staged")
+  # The package root first (so `pycvc_gl` is the package), then the binary dir (pycvc).
+  set(_PYCVC_GL_TEST_PYTHONPATH "${_PYCVC_GL_PKGROOT}:${CMAKE_CURRENT_BINARY_DIR}")
   add_test(NAME pycvc_gl_smoke
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
   set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # AriRuntime: load demo.ari + run the frame loop from Python. Skips (exit 0) without a GL context.
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
   # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
   add_test(NAME pycvc_vtk
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_vtk.py)
   set_tests_properties(pycvc_vtk PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # Phase-5 zero-copy texture: node.set_texture + image.numpy() live edit +
   # texture_modified (the strong VTK-inspection check self-skips without vtkmodules).
   add_test(NAME pycvc_texture
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_texture.py)
   set_tests_properties(pycvc_texture PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # CameraController: navigation + full cvc::state config (both directions),
   # construct from an injected app OR a SceneRenderer, canonical viewer path.
   add_test(NAME pycvc_gl_camera
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_camera.py)
   set_tests_properties(pycvc_gl_camera PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # world_units scene surface: GraphicsNode dimensions through the transform
   # chain, the built-in grid/axis nodes, lights, VolRenNode + volren value types.
   add_test(NAME pycvc_gl_world
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_world.py)
   set_tests_properties(pycvc_gl_world PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # Dear ImGui overlay + state-bound ui panels: binding presence + an offscreen
   # overlay round-trip (self-skips without offscreen GL).
   add_test(NAME pycvc_gl_imgui
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_imgui.py)
   set_tests_properties(pycvc_gl_imgui PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # ViewportManager / Viewport: picture-in-picture from Python — N viewports over
   # separate scenes + a mirror, the input router (viewportAt, focus-follows-click
   # into cvc::state, per-viewport camera), region tuples, frameRGB bytes
@@ -378,12 +401,12 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_viewport
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_viewport.py)
   set_tests_properties(pycvc_gl_viewport PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # ChaseCamera parity: the native (C++ Track) chase camera returns the same pose
   # as the pure-Python ChaseCamera on one position stream — the Python side of
   # "the cameras work the same" (its C++ side is cvcgl_track_parity).
   add_test(NAME pycvc_gl_chase_parity
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_chase_parity.py)
   set_tests_properties(pycvc_gl_chase_parity PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL

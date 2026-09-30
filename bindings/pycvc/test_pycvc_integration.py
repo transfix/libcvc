@@ -52,19 +52,13 @@ def test_full_pipeline_on_one_app():
 
     # Phase 4: a DSL program calls a Python function that reads the state we just
     # wrote — Python <-> state <-> DSL, all on the same app.
-    ex = None
-    try:
-        ex = pycvc.Exec(app)
-    except Exception as e:
-        if "without state_exec" not in str(e):
-            raise
-    if ex is not None:
-        ex.register_fn("verts", lambda: int(pycvc.state_get(app, "mesh.verts")))
-        # (+ 0 (verts)) forces numeric context; equals the vertex count.
-        assert ex.run("(+ 0 (verts))") == str(surf.num_vertices())
-        # A DSL write is visible back in Python.
-        ex.run('(state-set "dsl.done" "yes")')
-        assert pycvc.state_get(app, "dsl.done") == "yes"
+    ex = pycvc.Exec(app)
+    ex.register_fn("verts", lambda: int(pycvc.state_get(app, "mesh.verts")))
+    # (+ 0 (verts)) forces numeric context; equals the vertex count.
+    assert ex.run("(+ 0 (verts))") == str(surf.num_vertices())
+    # A DSL write is visible back in Python.
+    ex.run('(state-set "dsl.done" "yes")')
+    assert pycvc.state_get(app, "dsl.done") == "yes"
 
     # Phase 5a: drop the meshes into a scene bound to the SAME app (no cvcGL
     # singleton). num_graphics reflects what we added.

@@ -29,12 +29,15 @@
 // the HUD to the shared state-driven controller, the same seam in C++ and Python.
 %ignore cvc::gl::ImGuiOverlay::imguiContext; // opaque ImGuiContext*
 // Keep the injected viewer alive: ~ImGuiOverlay detaches its window observers.
+// Both are single-signature, i.e. NAMED-parameter proxies: reference the parameter
+// by name (`args` does not exist there; see the %pythonappend note in pycvc_gl.i).
 %pythonappend cvc::gl::ImGuiOverlay::ImGuiOverlay %{
-    if args: self._pycvc_keepalive = args[0]
+    self._pycvc_keepalive = viewer
 %}
-// Keep the attached camera alive: the overlay holds it by raw pointer.
+// Keep the attached camera alive: the overlay holds it by raw pointer (None detaches
+// and releases it).
 %pythonappend cvc::gl::ImGuiOverlay::attachCamera %{
-    if args: self._pycvc_camera = args[0]
+    self._pycvc_camera = cam
 %}
 %include "cvc/gl/ImGuiOverlay.h"
 

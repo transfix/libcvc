@@ -94,6 +94,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/grid_nav.h
   ../../inc/cvc/lod/select.h
   ../../inc/cvc/lod/pyramid.h
+  ../../inc/cvc/lod/tiles.h
   ../../inc/cvc/vis/types.h
   ../../inc/cvc/vis/scene_view.h
   ../../inc/cvc/vis/view_params.h
@@ -241,6 +242,7 @@ set(SOURCE_FILES
   nav/nav_stats.cpp
   lod/select.cpp
   lod/pyramid.cpp
+  lod/tiles.cpp
   vis/types.cpp
   vis/reference.cpp
   vis/grid_index.cpp
@@ -348,15 +350,9 @@ if(WIN32)
   list(REMOVE_ITEM SOURCE_FILES core/state_transport_ipc.cpp)
 endif()
 
-# state_exec / state_memory_manager feature flags
-option(CVC_STATE_EXEC "Enable state_exec DSL evaluator and process scheduler" ON)
+# state_memory_manager feature flag
 option(CVC_STATE_MEMORY_MANAGER "Enable state memory manager with LRU/LFU eviction" ON)
 
-if(NOT CVC_STATE_EXEC)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX "core/state_exec/")
-endif()
-
-# state_memory_manager feature flag
 if(NOT CVC_STATE_MEMORY_MANAGER)
   list(REMOVE_ITEM SOURCE_FILES core/state_memory_manager.cpp core/state_eviction_store.cpp)
 endif()
@@ -1144,6 +1140,23 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/ftxui_backend.h
 )
 
+# cvc::stream — Layer-(b) real-time in-process frame transport (roadmap
+# STATE_BINARY_STREAMING.md Phase 1). Compiled INTO the core cvc library as a
+# C++ namespace (like cvc::net / cvc::ariadne), NOT a separate CMake target: a
+# standalone target would break the single-export find_package(cvc) contract
+# (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
+# frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
+# thread; borrows cvc::state only for the /streams/<id> descriptor.
+list(APPEND SOURCE_FILES stream/frame_pool.cpp stream/stream_channel.cpp stream/stream_registry.cpp stream/producer_thread.cpp stream/stream.cpp)
+list(APPEND INCLUDE_FILES
+  ../../inc/cvc/stream/frame.h
+  ../../inc/cvc/stream/frame_pool.h
+  ../../inc/cvc/stream/stream_channel.h
+  ../../inc/cvc/stream/stream_registry.h
+  ../../inc/cvc/stream/producer_thread.h
+  ../../inc/cvc/stream/stream.h
+)
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
@@ -1318,9 +1331,6 @@ if(CVC_ENABLE_GRPC)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
   target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
-endif()
-if(CVC_STATE_EXEC)
-  target_compile_definitions(cvc PUBLIC CVC_STATE_EXEC)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)

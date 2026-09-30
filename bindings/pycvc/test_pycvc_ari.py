@@ -35,7 +35,6 @@ def _child():
 
     ari = pycvc_gl.AriRuntime(view, cam, ui)
     try:
-        assert pycvc_gl.AriRuntime.have_state_exec(), "expected state_exec in this build"
         pinged = {"n": 0}
         ari.on("ping", lambda: pinged.__setitem__("n", pinged["n"] + 1))
         warnings = ari.load(os.path.join(HERE, "demo.ari"))

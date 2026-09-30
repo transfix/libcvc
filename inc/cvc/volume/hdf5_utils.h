@@ -234,6 +234,15 @@ inline void getAttribute<std::string>(const H5::H5Object &obj, const std::string
                                       std::string &value) {
   using namespace H5;
   Attribute attr = obj.openAttribute(name);
+  // attr.read() below writes one ATTRIBUTE_STRING_MAXLEN-byte string PER ELEMENT of the
+  // attribute's dataspace, so a file with a multi-element string attribute would write past
+  // cvalue. The file decides that shape: accept exactly one element (scalar, or 1-D of 1).
+  {
+    DataSpace attrDS = attr.getSpace();
+    if (attrDS.getSimpleExtentNpoints() != 1)
+      throw AttributeIException(BOOST_CURRENT_FUNCTION,
+                                "String attribute '" + name + "' must have exactly one element");
+  }
   // Not satisfied with the below hack, TODO: investigate later
   char cvalue[ATTRIBUTE_STRING_MAXLEN + 1];
   memset(cvalue, 0, sizeof(char) * (ATTRIBUTE_STRING_MAXLEN + 1));

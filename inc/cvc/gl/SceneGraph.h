@@ -39,6 +39,7 @@ class GridNode;
 class AxisNode;
 class BBoxNode;
 class LodGraphicsNode;
+struct lod_stats;
 
 class SceneGraph {
 public:
@@ -187,6 +188,15 @@ public:
   void setShadowUpdateInterval(int frames);
   int shadowUpdateInterval() const { return m_shadowInterval; }
 
+  // Make the NEXT rendered frame bake the shadow maps even if the update
+  // interval says to skip it. With an interval of 1 nothing is needed: VTK's
+  // baker already re-bakes whenever a prop changes, visibility included. With
+  // n > 1 a skipped frame reuses the last maps, so geometry that APPEARED or
+  // DISAPPEARED since -- an LOD rung switch above all -- would be shadowed by
+  // (and self-shadow against) the old geometry until the next due bake. Call it
+  // when selectLOD() reports rung changes; a no-op with shadows off.
+  void invalidateShadowBake();
+
   // Shadow-map texture resolution (pixels per side). VTK defaults to a low 256,
   // which aliases thin casters (a forest of trunks/needles shows torn, "inverted"
   // shadows) and speckles broad surfaces with self-shadow acne. Larger is crisper
@@ -284,10 +294,28 @@ public:
   size_t getGeometryGraphicsCount() const { return getAllGeometryGraphics().size(); }
 
   // Per-frame LOD pass: choose the rung for every LodGraphicsNode in the scene
-  // from this camera view (cvc::lod::view_params: eye, viewport height, fov, error
-  // budget), toggling each node's visible rung. Call once per frame before render.
-  // Returns the number of LOD nodes visited. A no-op (0) when there are none.
-  int selectLOD(const cvc::lod::view_params &view);
+  // from this camera view (cvc::lod::view_params: eye, viewport height, fov or
+  // orthographic scale, error budget -- cvc::gl::make_view_params builds one
+  // from the renderer), toggling each node's visible rung. Call once per frame,
+  // immediately before render.
+  //
+  // Returns the number of nodes whose active rung changed this call (0 when
+  // nothing switched, or there are no LOD nodes). A node's first selection
+  // landing on the rung 0 it was already drawing is not a change. Hidden nodes
+  // are selected too -- so they come back on the right rung -- and counted, but
+  // draw nothing. With a shadow update interval > 1, a non-zero return is the
+  // cue for invalidateShadowBake(). `stats`, when given, is reset and filled:
+  // rung histogram, drawn vs rung-0 triangles (see lod_stats).
+  int selectLOD(const cvc::lod::view_params &view, lod_stats *stats = nullptr);
+
+  // Master LOD switch, on by default. Off pins every LodGraphicsNode to rung 0
+  // (full detail) -- the A/B toggle for "what is LOD costing me / buying me".
+  // It takes effect in selectLOD(), which keeps pinning while off (so nodes
+  // added later are pinned too) and counts the switches back to rung 0 in its
+  // return value; keep calling it every frame either way. Back on, the next
+  // selectLOD() resumes normal selection from rung 0.
+  void setLODEnabled(bool enabled);
+  bool lodEnabled() const { return m_lodEnabled; }
 
   // Multi-volume rendering control
   void enableMultiVolumeRendering(bool enable);
@@ -388,6 +416,7 @@ private:
   int m_shadowInterval = 1;                             // re-bake every N frames
   int m_shadowResolution = 1024;                        // shadow-map pixels per side
   vtkSmartPointer<vtkShadowMapBakerPass> m_shadowBaker; // held so the interval is live
+  bool m_lodEnabled = true;                             // see setLODEnabled
   void applyLights();
   cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under
   std::unique_ptr<cvc::gl::state_publisher> m_publisher; // scene-owned, runs under m_ctx
