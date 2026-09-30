@@ -200,8 +200,13 @@ public:
   // and therefore its SDF field — changed (and once at construction). A belief flip
   // that leaves every plane's occupancy unchanged does not bump it.
   int field_version() const { return field_ver_; }
-  // Per-belief-plane version (bumps when plane m's belief/occupancy raster changes on a sense tick)
-  // — lets a realtime raster consumer gate GPU re-uploads to only the planes that actually changed.
+  // Per-belief-plane BELIEF-FLIP counter: on a sense tick it bumps once per agent sensing into
+  // plane m whose update flips some cell's log-odds sign (p crossing 0.5). It is NOT a raster
+  // version. belief_occ(m) can change with no bump: a planning-threshold crossing that is not a
+  // sign flip (p_thresh / band / unknown policy), or an add_obstacle() stamp entering or expiring
+  // (ttl_s). ever_seen(m) / last_visible(m) change whenever a field of view moves, also with no
+  // bump. A consumer gating raster re-uploads on it can therefore show a stale raster;
+  // field_version() is the exact occupancy/field change signal (world-level, not per plane).
   // Out-of-range m returns -1.
   int plane_version(int m) const {
     return (m >= 0 && m < static_cast<int>(version_.size())) ? version_[m] : -1;
