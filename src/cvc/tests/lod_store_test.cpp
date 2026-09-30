@@ -9,16 +9,14 @@
 // tampered pixels -- surface as std::exception without a reader ever creating or
 // truncating a file. Then the trust model (store.h): a blob is parsed only once
 // its hash checks out (open_verified) -- and it is the hashed bytes that are
-// parsed -- or, opted into by name (open_unverified), only on HDF5 >= 1.14.4;
-// and a hostile container -- links out of it, external or virtual storage, hard
+// parsed -- while a blob from a trusted source opens with the plain constructor
+// on any HDF5; and a hostile container -- links out of it, external or virtual storage, hard
 // links, aliased storage or shared attribute messages that read its bytes many
 // times -- is refused whichever way it is opened. HDF5-only (gated in CMake by
 // CVC_USING_HDF5).
 //
-// The blob tests open their blobs with open_verified, hashing the bytes they
-// just built: that is the path a network client takes, and it parses on every
-// HDF5, so the in-memory machinery is covered even where open_unverified is
-// compiled to refuse (HDF5 < 1.14.4, e.g. Ubuntu's 1.10).
+// The blob tests open their blobs both ways -- open_verified, hashing the bytes
+// they just built, and the trusted-source constructor -- on every HDF5.
 
 #include <H5Cpp.h>
 #include <cctype>
@@ -192,10 +190,9 @@ template <class F> void for_each_reader(cvc::app &ctx, const std::string &file, 
     cvc::lod::scene_reader r = open_blob(ctx, blob);
     fn(r);
   }
-  if (cvc::lod::scene_reader::unverified_blobs_supported()) {
-    SCOPED_TRACE("unauthenticated blob reader");
-    cvc::lod::scene_reader r =
-        cvc::lod::scene_reader::open_unverified(ctx, blob.data(), blob.size());
+  {
+    SCOPED_TRACE("trusted blob reader");
+    cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
     fn(r);
   }
 }
@@ -899,33 +896,15 @@ TEST(LodStore, OpenVerifiedParsesTheBytesItHashed) {
   EXPECT_NE(got.first, std::vector<std::string>{tagged_name(16)}) << "parsed unhashed bytes";
 }
 
-TEST(LodStore, UnverifiedBlobReaderFollowsTheHdf5VersionGate) {
+TEST(LodStore, TrustedBlobConstructorParsesOnAnyHdf5) {
+  // D11: a blob from a trusted source opens with the plain constructor, with no
+  // version gate -- the same bytes the authenticated path accepts.
   cvc::app ctx;
   const std::vector<unsigned char> blob = tagged_blob(ctx, 11);
-  // The gate is the HDF5 this test (and so libcvc) is compiled against.
-  EXPECT_EQ(cvc::lod::scene_reader::unverified_blobs_supported(), bool(H5_VERSION_GE(1, 14, 4)));
-  if (cvc::lod::scene_reader::unverified_blobs_supported()) {
-    // HDF5 >= 1.14.4 (e.g. the cvcpkg prefix): unauthenticated bytes parse when
-    // asked for by name, with every hardening check in place (the tests below
-    // run this way too).
-    cvc::lod::scene_reader r =
-        cvc::lod::scene_reader::open_unverified(ctx, blob.data(), blob.size());
-    EXPECT_EQ(contents(r, 11).second, fingerprint(tagged_pyramid(ctx, 11)));
-  } else {
-    // Older HDF5 (e.g. Ubuntu's 1.10): refused before HDF5 sees a byte, with a
-    // std::runtime_error that says what is needed and what to do instead.
-    try {
-      cvc::lod::scene_reader::open_unverified(ctx, blob.data(), blob.size());
-      ADD_FAILURE() << "an unauthenticated blob was parsed by HDF5 < 1.14.4";
-    } catch (const std::runtime_error &e) {
-      const std::string msg = e.what();
-      EXPECT_NE(msg.find("HDF5 >= 1.14.4"), std::string::npos) << msg;
-      EXPECT_NE(msg.find("open_verified"), std::string::npos) << msg;
-    }
-  }
-  // Either way the same bytes, authenticated, parse.
-  cvc::lod::scene_reader r = open_blob(ctx, blob);
-  EXPECT_EQ(contents(r, 11).second, fingerprint(tagged_pyramid(ctx, 11)));
+  cvc::lod::scene_reader trusted(ctx, blob.data(), blob.size());
+  EXPECT_EQ(contents(trusted, 11).second, fingerprint(tagged_pyramid(ctx, 11)));
+  cvc::lod::scene_reader verified = open_blob(ctx, blob);
+  EXPECT_EQ(contents(verified, 11).second, fingerprint(tagged_pyramid(ctx, 11)));
 }
 
 TEST(LodStore, LinksOutOfTheContainerAreRefused) {

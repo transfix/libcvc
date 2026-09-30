@@ -442,21 +442,19 @@ if(CVC_USING_HDF5)
   endif()
   if(HDF5_FOUND)
     message(STATUS "HDF5 found - Enabling *.cvc file support")
-    # cvc::lod::scene_reader::open_unverified parses an UNAUTHENTICATED blob
-    # only when built against HDF5 >= 1.14.4: older HDF5 corrupts memory on
-    # many malformed files, so there it throws (open_verified and file readers
-    # still work). Newer HDF5 is not memory-safe on crafted files either, which
-    # is why network blobs go through open_verified; see the trust model in
-    # inc/cvc/lod/store.h. store.cpp decides from the HDF5 headers it is
-    # compiled against, since the version found here can be wrong (above), so
-    # this is only the configure-time notice.
+    # No HDF5 release is memory-safe on a crafted file, and releases before
+    # 1.14.4 fault on many merely malformed ones. cvc::lod scene blobs are
+    # trusted by default (inc/cvc/lod/store.h trust model, roadmap D11); bytes
+    # from a source the application does not control should go through
+    # lod::scene_reader::open_verified. This is only a configure-time notice.
     set(_cvc_hdf5_version "${HDF5_VERSION}")
     if(NOT _cvc_hdf5_version)
       set(_cvc_hdf5_version "${hdf5_VERSION}")
     endif()
     if(_cvc_hdf5_version AND _cvc_hdf5_version VERSION_LESS 1.14.4)
-      message(STATUS "HDF5 ${_cvc_hdf5_version} < 1.14.4 - lod::scene_reader::open_unverified "
-                     "will refuse unauthenticated blobs (scene_reader::open_verified still parses)")
+      message(STATUS "HDF5 ${_cvc_hdf5_version} < 1.14.4 - faults on malformed files are likelier; "
+                     "authenticate scene blobs from untrusted sources with "
+                     "lod::scene_reader::open_verified")
     endif()
 
     add_compile_definitions(CVC_USING_HDF5 ${HDF5_DEFINITIONS})

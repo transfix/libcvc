@@ -639,36 +639,12 @@ std::string unique_core_name(const char *what) {
   return os.str();
 }
 
-// No HDF5 is memory-safe on a crafted file. Before 1.14.4 it is plainly unsafe:
-// a mutation fuzz of scene blobs faulted inside HDF5 1.10 hundreds of times.
-// 1.14.4 faulted on none of those inputs, but that fuzz mutated one base blob
-// and proves little -- public CVEs report heap overflows from crafted files
-// through 1.14.6 (e.g. CVE-2025-6516). So open_unverified is opt-in by name
-// (store.h: network bytes go through open_verified or a sandboxed worker), and
-// even then refused below 1.14.4, where the risk is plainly worst. The headers
-// compiled against decide (a configure-time version can be wrong -- see the
-// FindHDF5 note in src/cvc/CMakeLists.txt); the library loaded at run time is
-// checked again in case it is older than those headers.
-#if H5_VERSION_GE(1, 14, 4)
-constexpr bool kParsesUnverifiedBlobs = true;
-#else
-constexpr bool kParsesUnverifiedBlobs = false;
-#endif
-void require_unverified_blob_support() { // library lock held
-  unsigned maj = 0, min = 0, rel = 0;
-  const bool loaded_ok = H5get_libversion(&maj, &min, &rel) >= 0 &&
-                         std::make_tuple(maj, min, rel) >= std::make_tuple(1u, 14u, 4u);
-  if (kParsesUnverifiedBlobs && loaded_ok)
-    return;
-  std::ostringstream os;
-  os << "lod::scene_reader::open_unverified: parsing an unauthenticated blob needs HDF5 >= "
-        "1.14.4, but this build has HDF5 "
-     << H5_VERS_MAJOR << '.' << H5_VERS_MINOR << '.' << H5_VERS_RELEASE << " (library " << maj
-     << '.' << min << '.' << rel
-     << "), which corrupts memory on many malformed files; authenticate the blob with "
-        "scene_reader::open_verified, or read a trusted file";
-  throw std::runtime_error(os.str());
-}
+// Trust (inc/cvc/lod/store.h; roadmap D11): a blob handed to the plain constructor
+// is from a TRUSTED source, as a local file is, and parses with any HDF5; bytes
+// from a source the application does not control go through open_verified. No
+// HDF5 release is memory-safe on a crafted file (e.g. CVE-2025-6516 through
+// 1.14.6), which is why authentication is offered at all; the structural hardening
+// below applies to every container whichever way it is opened.
 
 bool is_sha256_hex(const std::string &s) {
   return s.size() == 64 && std::all_of(s.begin(), s.end(), [](char ch) {
@@ -839,10 +815,8 @@ scene_reader::scene_reader(app &ctx, const std::string &path) {
   _p.reset(
       new impl(ctx, guarded("lod::scene_reader", path, [&] { return open_existing(path); }), path));
 }
-scene_reader scene_reader::open_unverified(app &ctx, const unsigned char *bytes, std::size_t n) {
-  scene_reader r;
-  r.open_bytes(ctx, bytes, n, /*authenticated=*/false);
-  return r;
+scene_reader::scene_reader(app &ctx, const unsigned char *bytes, std::size_t n) {
+  open_bytes(ctx, bytes, n);
 }
 scene_reader scene_reader::open_verified(app &ctx, const unsigned char *bytes, std::size_t n,
                                          const std::string &expected_sha256_hex) {
@@ -863,17 +837,13 @@ scene_reader scene_reader::open_verified(app &ctx, const unsigned char *bytes, s
                              ", not the expected " + lower(expected_sha256_hex) +
                              "; refusing to parse it");
   scene_reader r;
-  r.open_bytes(ctx, own.data(), own.size(), /*authenticated=*/true);
+  r.open_bytes(ctx, own.data(), own.size());
   return r;
 }
-bool scene_reader::unverified_blobs_supported() noexcept { return kParsesUnverifiedBlobs; }
-void scene_reader::open_bytes(app &ctx, const unsigned char *bytes, std::size_t n,
-                              bool authenticated) {
+void scene_reader::open_bytes(app &ctx, const unsigned char *bytes, std::size_t n) {
   const std::string name = unique_core_name("blob");
   hu::library_lock lock(ctx, name, "cvc::lod::scene_reader(blob)");
   H5::Exception::dontPrint();
-  if (!authenticated)
-    require_unverified_blob_support();
   _p.reset(new impl(
       ctx, guarded("lod::scene_reader", name, [&] { return open_blob_file(name, bytes, n); }), name,
       n));
