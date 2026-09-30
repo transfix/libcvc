@@ -288,7 +288,27 @@ glass-to-glass camera→texture latency.
 
 ---
 
+## 5a. Decisions (signed off 2026-09-30)
+
+- **Q1 msg-recv contract → ENVELOPE.** Deliver `{status, path, content_type, payload}` to receivers;
+  keep the sender's return value `{status, path}` unchanged (backward-compatible).
+- **Q2 codec scope → raw-first + ffmpeg PROCESS-PIPE (+ optional in-process LGPL).** Raw frames first.
+  Then a license-clean **ffmpeg subprocess pipe** in BOTH directions — accept a decoded stream *from* an
+  external ffmpeg process, and forward our frames *to* an ffmpeg process for encoding — as the primary
+  full-codec path (a separate ffmpeg *process* is not linked, so even a GPL ffmpeg build, incl.
+  libx264/x265, does not taint us). PLUS optional **in-process** codecs strictly via the existing
+  **LGPL** ffmpeg (`ffmpeg-lgpl`, PR #110 — dynamic-link-safe) for low-latency, limited to non-GPL
+  encoders: hardware (VideoToolbox/NVENC), **openh264** (BSD), or royalty-free **VP9/AV1/Opus**. NEVER
+  link libx264/libx265 or build ffmpeg `--enable-gpl` in-process — that copylefts the whole project.
+- **Q3 cross-node → gRPC-LAN first (Phase 4), THEN RTP/WebRTC (Phase 6).** RTP/WebRTC is required for
+  future engagements needing real-time A/V, so it is committed, not optional — just sequenced second.
+
+Remaining open (Q4 A/V master clock, Q5 stream scoping/ACLs, Q6 frame mutability, Q7 pool sizing
+defaults, Q8 snapshot binary gap, Q9 namespace) still need sign-off before the phases they gate.
+
 ## 6. Open questions for sign-off
+
+*(Q1–Q3 decided — see §5a.)*
 
 1. **`msg-recv` contract:** deliver the **envelope** `{status,path,content_type,payload}`
    (recommended — backward-compatible, cheaper, carries content_type) or the **raw payload**
