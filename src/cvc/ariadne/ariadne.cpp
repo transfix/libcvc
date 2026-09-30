@@ -626,8 +626,11 @@ struct Runtime::Impl {
   // §12 channel enforcement: the document's channel policy, installed on every action/resident
   // ictx. Default (enforce=false, empty) = permissive; set_channel_policy fills it from a
   // LoadResult. Pointed-to by ictx.channels (non-owning), so it must outlive the contexts — it
-  // lives here in the Impl, which owns the live_actions_ / residents that reference it.
+  // lives here in the Impl, which owns the live_actions_ / residents that reference it. Declared
+  // before them so it destructs after them. Only exists with state_exec (no ictx to point at it).
+#ifdef CVC_STATE_EXEC
   cvc::state_exec::channel_policy channel_policy_;
+#endif
 
   Widget root;
   Widget pending;
