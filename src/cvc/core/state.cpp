@@ -1259,7 +1259,7 @@ state::remote_link_resolution state::resolveRemote(std::size_t hop_budget) {
 // -------------------
 state::send_message_result state::sendMessage(const std::string &payload,
                                               const std::string &content_type,
-                                              std::size_t hop_budget) {
+                                              std::size_t hop_budget, bool binary) {
   send_message_result r;
 
   // 1. Resolve through any link chain.
@@ -1311,7 +1311,10 @@ state::send_message_result state::sendMessage(const std::string &payload,
   state_message m;
   m.path = r.resolved_path;
   m.content_type = content_type;
-  m.string_value = payload;
+  if (binary)
+    m.bytes.assign(payload.begin(), payload.end()); // binary rides the wire `bytes` field
+  else
+    m.string_value = payload;
 
   auto sr = shard->send_message(std::move(m));
   r.owner_cluster_id = sr.owner_cluster_id;

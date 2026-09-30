@@ -686,6 +686,61 @@ TEST_F(MsgSendIntrinsicsTest, SendIncreasesCount) {
   EXPECT_EQ(proc->message_count, 3u);
 }
 
+namespace {
+const value_t *dict_field(const dict_ptr &d, const char *key) {
+  for (const auto &kv : *d)
+    if (kv.first == key)
+      return &kv.second;
+  return nullptr;
+}
+} // namespace
+
+// msg-send accepts a BINARY payload (previously threw "expected string"), and a receiver on the
+// channel gets an ENVELOPE {status, path, content_type, payload} with the bytes preserved as bytes.
+TEST_F(MsgSendIntrinsicsTest, SendBytesDeliversBinaryEnvelope) {
+  const std::string raw("\x00\x01\x02\xff"
+                        "bin",
+                        7); // arbitrary octets incl. NUL + high byte
+
+  auto sent = call("msg-send", {std::string("msg.bin"), make_bytes(raw)});
+  auto *sd = std::get_if<dict_ptr>(&sent.v);
+  ASSERT_NE(sd, nullptr);
+  // Return contract UNCHANGED: {status, path}, no payload.
+  EXPECT_NE(dict_field(*sd, "status"), nullptr);
+  EXPECT_NE(dict_field(*sd, "path"), nullptr);
+  EXPECT_EQ(dict_field(*sd, "payload"), nullptr);
+
+  // The receiver drains the delivered envelope (park_on_channel returns a pending message).
+  auto recv = call("msg-recv", {std::string("msg.bin")});
+  auto *rd = std::get_if<dict_ptr>(&recv.v);
+  ASSERT_NE(rd, nullptr);
+
+  const value_t *ct = dict_field(*rd, "content_type");
+  ASSERT_NE(ct, nullptr);
+  EXPECT_EQ(std::get<std::string>(ct->v), "application/octet-stream"); // defaulted for bytes
+
+  const value_t *pl = dict_field(*rd, "payload");
+  ASSERT_NE(pl, nullptr);
+  auto *bv = std::get_if<bytes_value>(&pl->v);
+  ASSERT_NE(bv, nullptr);   // preserved AS BYTES, not stringified
+  EXPECT_EQ(bv->data, raw); // exact octets round-trip
+}
+
+// A text msg-send still delivers a text envelope (content_type text/plain, payload a string).
+TEST_F(MsgSendIntrinsicsTest, SendStringDeliversTextEnvelope) {
+  call("msg-send", {std::string("msg.txt"), std::string("hello")});
+  auto recv = call("msg-recv", {std::string("msg.txt")});
+  auto *rd = std::get_if<dict_ptr>(&recv.v);
+  ASSERT_NE(rd, nullptr);
+  const value_t *ct = dict_field(*rd, "content_type");
+  ASSERT_NE(ct, nullptr);
+  EXPECT_EQ(std::get<std::string>(ct->v), "text/plain");
+  const value_t *pl = dict_field(*rd, "payload");
+  ASSERT_NE(pl, nullptr);
+  ASSERT_NE(std::get_if<std::string>(&pl->v), nullptr);
+  EXPECT_EQ(std::get<std::string>(pl->v), "hello");
+}
+
 TEST_F(MsgSendIntrinsicsTest, WrongArgCount) {
   EXPECT_THROW(call("msg-send", {std::string("only-path")}), std::runtime_error);
 }

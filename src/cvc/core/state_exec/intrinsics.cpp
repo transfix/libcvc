@@ -39,6 +39,18 @@ const std::string &as_string(const value_t &v, const char *name) {
   throw std::runtime_error(std::string(name) + ": expected string, got " + v.type_name());
 }
 
+// A message payload may be TEXT (string) or BINARY (bytes); both are std::string byte buffers under
+// the hood. Return the raw bytes of either and reject anything else. `is_bytes_value` distinguishes
+// the two so a caller can tag the content type / route to the bytes wire field.
+const std::string &as_string_or_bytes(const value_t &v, const char *name) {
+  if (auto *s = std::get_if<std::string>(&v.v))
+    return *s;
+  if (auto *b = std::get_if<bytes_value>(&v.v))
+    return b->data;
+  throw std::runtime_error(std::string(name) + ": expected string or bytes, got " + v.type_name());
+}
+bool is_bytes_value(const value_t &v) { return std::get_if<bytes_value>(&v.v) != nullptr; }
+
 int64_t as_int(const value_t &v, const char *name) {
   if (auto *i = std::get_if<int64_t>(&v.v))
     return *i;
@@ -726,8 +738,9 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
   auto &path = as_string(args[0], "msg-send");
   enforce_channel_policy(ctx,
                          path); // §12 runtime enforcement (strict policy → throw if undeclared)
-  auto &payload = as_string(args[1], "msg-send");
-  std::string content_type = "text/plain";
+  auto &payload = as_string_or_bytes(args[1], "msg-send"); // text OR binary
+  const bool binary = is_bytes_value(args[1]);
+  std::string content_type = binary ? "application/octet-stream" : "text/plain";
   if (args.size() > 2)
     content_type = as_string(args[2], "msg-send");
   auto *node = ctx->root->findDescendant(path);
@@ -735,7 +748,7 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
     // Create the node so we can send to it
     node = &(*ctx->root)(path);
   }
-  auto result = node->sendMessage(payload, content_type);
+  auto result = node->sendMessage(payload, content_type, /*hop_budget=*/64, /*binary=*/binary);
   // Update message counters on the currently executing process.
   process *proc = nullptr;
   if (ctx->sched && ctx->sched->current_process())
@@ -749,22 +762,31 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
     ctx->proc->message_count++;
     ctx->proc->message_bytes += payload.size();
   }
-  std::vector<std::pair<std::string, value_t>> entries;
-  entries.emplace_back(
-      "status",
-      value_t(std::string(result.status == cvc::state::send_message_result::status_kind::delivered
-                              ? "delivered"
-                              : "error")));
-  entries.emplace_back("path", value_t(result.resolved_path));
-  auto msg = make_dict(std::move(entries));
+  const std::string status_str =
+      result.status == cvc::state::send_message_result::status_kind::delivered ? "delivered"
+                                                                               : "error";
 
-  // Deliver to any processes waiting to receive on this channel. The SCHEDULER key is chroot-scoped
-  // (resolve_channel); the state-side sendMessage above stays on the raw chroot-relative `path`
-  // (already scoped via ctx->root) — the two buses are independent, as they were before scoping.
-  if (ctx->sched)
-    ctx->sched->deliver_to_receivers(resolve_channel(ctx, path), msg);
+  // Return value to the SENDER: {status, path} — unchanged contract (callers/tests rely on this).
+  std::vector<std::pair<std::string, value_t>> ret_entries;
+  ret_entries.emplace_back("status", value_t(status_str));
+  ret_entries.emplace_back("path", value_t(result.resolved_path));
+  auto ret = make_dict(std::move(ret_entries));
 
-  return msg;
+  // Deliver an ENVELOPE to receivers on this channel: {status, path, content_type, payload}. The
+  // payload keeps the ORIGINAL value type — a string stays a string, bytes stay bytes — so a
+  // (msg-recv) on this channel gets the actual binary/text data (not just the {status,path} ack it
+  // used to get). The SCHEDULER key is chroot-scoped (resolve_channel); the state-side sendMessage
+  // above stays on the raw path — the two buses are independent, as before.
+  if (ctx->sched) {
+    std::vector<std::pair<std::string, value_t>> env_entries;
+    env_entries.emplace_back("status", value_t(status_str));
+    env_entries.emplace_back("path", value_t(result.resolved_path));
+    env_entries.emplace_back("content_type", value_t(content_type));
+    env_entries.emplace_back("payload", args[1]); // original value_t — binary preserved
+    ctx->sched->deliver_to_receivers(resolve_channel(ctx, path), make_dict(std::move(env_entries)));
+  }
+
+  return ret;
 }
 
 value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> args) {
