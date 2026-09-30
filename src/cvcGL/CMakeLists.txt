@@ -245,6 +245,13 @@ add_executable(cvcgl_smoke test/cvcgl_smoke.cpp)
 target_link_libraries(cvcgl_smoke PRIVATE cvcGL)
 add_test(NAME cvcgl_smoke COMMAND cvcgl_smoke)
 
+# LodGraphicsNode distance-based rung selection (the cvc::lod -> scene-graph seam).
+# Headless: null renderer, no GL context; asserts close->finest, far->coarsest,
+# monotone coarsening with distance.
+add_executable(cvcgl_lod_node test/cvcgl_lod_node.cpp)
+target_link_libraries(cvcgl_lod_node PRIVATE cvcGL)
+add_test(NAME cvcgl_lod_node COMMAND cvcgl_lod_node)
+
 # Spectral GPU FFT ocean (the ABYSSAL port used by lsystem_coast). Checks the
 # invariants a broken butterfly IFFT / bit-reversal / conjugate-symmetry would
 # violate: zero-mean height, unit-mean Jacobian, determinism, time evolution and
