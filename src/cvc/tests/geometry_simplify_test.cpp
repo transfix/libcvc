@@ -13,17 +13,22 @@
 // (changed centroids included) and holds the pixel budget at the switch radius
 // select derives from it; input normals survive bit-for-bit; progressive
 // snapshots equal independent runs bit-for-bit; seam welding keeps roofs sealed
-// to their walls. Splits whose attributes agree weld into exactly the welded
-// mesh (a soup or a flat-shaded sheet: no crack, no orphaned vertex, no uv
-// sheared off its position); genuine attribute seams -- color blocks, a crease
-// inside one component, the edges of a closed box, a round patch -- collapse
-// only along themselves, never open, never trade attributes, and keep their
-// line. Collapse ties survive scaling and moving the mesh; a far away part
-// cannot change how another decimates; the last triangle is never removed;
-// triangles that weld away and non-finite input are never measured as exact;
-// coincident surfaces measure 0 far from the origin; and neither a huge
-// triangle under fine detail, a pile of coincident corners nor a finely
-// tessellated part in a large scene slows the measurement or the weld.
+// to their walls. Fine parts in a large scene keep their own scale -- they do
+// not weld into one another under the default tolerance, and what an explicit
+// one welds shut is still measured -- a position two parts share welds to
+// both, and a near-coincident join stays closed. Splits whose attributes agree
+// weld into exactly the welded mesh (a soup or a flat-shaded sheet: no crack,
+// no orphaned vertex, no uv sheared off its position); genuine attribute seams
+// -- color blocks, a crease inside one component (also across -0/+0), the
+// edges of a closed box, a round patch -- collapse only along themselves,
+// never open, never trade attributes, keep their line and still reach the
+// target; and a double-sided sheet keeps its border. Collapse ties survive scaling
+// and moving the mesh; a far away part cannot change how another decimates;
+// the last triangle is never removed; needles are not measured and non-finite
+// input is never measured as exact; coincident surfaces measure 0 far from the
+// origin; and neither a huge triangle under fine detail, a pile of coincident
+// or near-coincident corners nor a finely tessellated part in a large scene
+// slows the measurement or the weld.
 
 #include <algorithm>
 #include <array>
@@ -40,6 +45,8 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
+#include <numeric>
+#include <random>
 #include <set>
 #include <utility>
 #include <vector>
@@ -856,9 +863,10 @@ TEST(GeometrySimplify, SeamEpsilonIsTheCoincidenceTolerance) {
   cvc::simplify(pair, q, &r);
   EXPECT_EQ(r.seam_vertices, 2u);
 
-  // The default tolerance is capped by the median edge (1e-3 of it), so a far
-  // away part that stretches the extent to 100 km (1e-6 of which is 0.1 m) does
-  // not weld two parts 5 mm apart -- while a 0.1 mm contact still welds.
+  // The default tolerance is capped at each vertex by 1e-3 of its shortest
+  // edge (1 m here), so a far away part that stretches the extent to 100 km
+  // (1e-6 of which is 0.1 m) does not weld two parts 5 mm apart -- while a
+  // 0.1 mm contact still welds.
   for (double gap : {5e-3, 1e-4}) {
     geometry scene(ctx);
     scene.points() = {{0, 0, 0}, {3 - gap, 0, 0}, {0, 1, 0},       {3, 0, 0},  {5, 0, 0},
@@ -869,6 +877,208 @@ TEST(GeometrySimplify, SeamEpsilonIsTheCoincidenceTolerance) {
     cvc::simplify(scene, d, &r);
     EXPECT_EQ(r.seam_vertices, gap < 1e-3 ? 2u : 0u) << "gap " << gap;
   }
+}
+
+namespace {
+
+// Triangles of `g` with a corner above z_min, left (x < x_split) and right of
+// x_split.
+std::pair<int, int> tris_above(const geometry &g, double z_min, double x_split) {
+  std::pair<int, int> n(0, 0);
+  for (const auto &t : g.const_tris()) {
+    const auto &p = g.const_points()[t[0]];
+    if (p[2] > z_min)
+      ++(p[0] < x_split ? n.first : n.second);
+  }
+  return n;
+}
+
+} // namespace
+
+// Fine parts in a large scene keep their own scale. A bumpy terrain 3 km
+// across (50 m edges) carries, 20 m up, a 10 x 10 array of separate closed
+// 2 mm tetrahedra 3 mm apart, and a flat-shaded 20 x 20 sheet at 1 mm spacing
+// (per-face normals: every vertex split). The scene-wide default tolerance
+// (1e-6 of the extent, ~4 mm) spans both parts' own edges, but the default is
+// capped at each vertex by 1e-3 of its shortest edge: no tetrahedron welds to
+// its neighbours, no sheet vertex to the next, and the parts stay in place
+// (bar what a collapse or two takes). An explicit 4 mm tolerance does weld
+// them -- their triangles weld shut and leave the result -- and world_error
+// still reports exactly what that lost: it is the sampled Hausdorff distance
+// to the input either way, and every rung's error in a pyramid is at least
+// that.
+TEST(GeometrySimplify, FinePartsInALargeSceneKeepTheirOwnScale) {
+  cvc::app ctx;
+  geometry g = make_grid(ctx, 60, 5.0);
+  for (auto &q : g.points()) {
+    q[0] *= 50.0;
+    q[1] *= 50.0;
+  }
+  g.normals().assign(g.num_points(), {0.0, 0.0, 1.0});
+  for (int i = 0; i < 10; ++i)
+    for (int j = 0; j < 10; ++j) {
+      const double x = 1000.0 + 3e-3 * i, y = 1000.0 + 3e-3 * j, z = 20.0, s = 2e-3;
+      const std::uint64_t o = g.num_points();
+      g.points().insert(g.points().end(), {{x, y, z}, {x + s, y, z}, {x, y + s, z}, {x, y, z + s}});
+      g.normals().insert(g.normals().end(), 4, {0.0, 0.0, 1.0});
+      g.tris().insert(
+          g.tris().end(),
+          {{o, o + 2, o + 1}, {o, o + 1, o + 3}, {o, o + 3, o + 2}, {o + 1, o + 2, o + 3}});
+    }
+  const geometry sheet = make_grid(ctx, 20, 0.5);
+  for (const auto &t : sheet.const_tris()) {
+    const std::uint64_t o = g.num_points();
+    v3 c[3];
+    for (int k = 0; k < 3; ++k) {
+      const auto &q = sheet.const_points()[t[k]];
+      c[k] = {1100.0 + 1e-3 * q[0], 1000.0 + 1e-3 * q[1], 20.0 + 1e-3 * q[2]};
+      g.points().push_back({c[k][0], c[k][1], c[k][2]});
+    }
+    const v3 nrm = vcross(vsub(c[1], c[0]), vsub(c[2], c[0]));
+    const double l = std::sqrt(vdot(nrm, nrm));
+    g.normals().insert(g.normals().end(), 3, {nrm[0] / l, nrm[1] / l, nrm[2] / l});
+    g.tris().push_back({o, o + 1, o + 2});
+  }
+  g.set_geometry_type(geometry::SURFACE_TRI);
+  const int tets = 400, flat = int(sheet.num_tris());
+  ASSERT_EQ(tris_above(g, 10.0, 1050.0), std::make_pair(tets, flat));
+
+  cvc::simplify_params p;
+  p.target_tris = g.num_tris() - 2; // a collapse or two
+  cvc::simplify_result r;
+  const geometry s = cvc::simplify(g, p, &r, &ctx.computePool());
+  ASSERT_LE(r.collapses, 2u);
+  const std::pair<int, int> kept = tris_above(s, 10.0, 1050.0);
+  EXPECT_GE(kept.first, tets - 4);
+  EXPECT_GE(kept.second, flat - 4);
+  EXPECT_EQ(r.world_error, cvc::sampled_hausdorff(g, s));
+
+  cvc::lod::pyramid_params pp;
+  const cvc::lod::mesh_pyramid pyr = cvc::lod::build_mesh_pyramid(g, pp, &ctx.computePool());
+  ASSERT_GE(pyr.rungs.size(), 3u);
+  for (std::size_t k = 1; k < pyr.rungs.size(); ++k)
+    EXPECT_GE(pyr.world_error_m[k], cvc::sampled_hausdorff(g, pyr.rungs[k])) << "rung " << k;
+
+  p.seam_epsilon = 4e-3;
+  const geometry w = cvc::simplify(g, p, &r, &ctx.computePool());
+  EXPECT_EQ(tris_above(w, 10.0, 1050.0), std::make_pair(0, 0));
+  EXPECT_EQ(r.collapses, 0u); // welding them shut already met the target
+  EXPECT_GT(r.world_error, 10.0);
+  EXPECT_EQ(r.world_error, cvc::sampled_hausdorff(g, w));
+}
+
+// A position two parts share exactly (their vertices there differ in color, so
+// the parts stay two) holds a vertex of each, so a vertex within tolerance of
+// it welds to it through either part -- even one of the same part as one of
+// them, which could never weld to that part's own vertex there. Here part B
+// folds back so that its vertex h lies 1e-4 from its corner g, where part A's
+// corner also sits: h welds to A's corner, and so to both, whichever part
+// lists its vertex at g last.
+TEST(GeometrySimplify, APositionTwoPartsShareWeldsToBoth) {
+  cvc::app ctx;
+  for (bool a_first : {true, false}) {
+    geometry g(ctx);
+    const geometry::point_t pa[3] = {{0, 0, 0}, {-2, 1, 0}, {-2, -1, 0}};
+    const geometry::point_t pb[4] = {{0, 0, 0}, {2, 1, 0}, {2, -1, 0}, {1e-4, 0, 0}};
+    auto add_a = [&]() {
+      const std::uint64_t o = g.num_points();
+      g.points().insert(g.points().end(), pa, pa + 3);
+      g.colors().insert(g.colors().end(), 3, {1.0, 0.0, 0.0});
+      g.tris().push_back({o, o + 1, o + 2});
+    };
+    auto add_b = [&]() {
+      const std::uint64_t o = g.num_points();
+      g.points().insert(g.points().end(), pb, pb + 4);
+      g.colors().insert(g.colors().end(), 4, {0.0, 1.0, 0.0});
+      g.tris().push_back({o, o + 1, o + 2});
+      g.tris().push_back({o + 1, o + 3, o + 2});
+    };
+    if (a_first) {
+      add_a();
+      add_b();
+    } else {
+      add_b();
+      add_a();
+    }
+    g.set_geometry_type(geometry::SURFACE_TRI);
+    cvc::simplify_params p;
+    p.target_tris = 1;
+    p.seam_epsilon = 1e-3;
+    cvc::simplify_result r;
+    cvc::simplify(g, p, &r);
+    EXPECT_EQ(r.seam_vertices, 3u) << "A first " << a_first; // A's g, B's g and h
+  }
+}
+
+// 300 copies of a unit triangle whose corners are jittered by up to 1e-5, and
+// among their first corners 300 tiny triangles jittered as much: the tiny
+// parts' tolerance (1e-3 of their own ~1e-5 edges) keeps them apart, and
+// keeps the big parts' corners from being joined a whole cluster at a time --
+// so every pair of big corners is found on its own, far more pairs than the
+// search keeps. The big parts still weld into one triangle, the tiny ones stay
+// apart, and a pooled run matches a serial one bit for bit.
+TEST(GeometrySimplify, NearCoincidentPileOfMixedScalesWelds) {
+  cvc::app ctx;
+  std::mt19937_64 rng(11);
+  auto jitter = [&]() { return 1e-5 * double(rng() >> 11) / 9007199254740992.0; };
+  geometry g = make_grid(ctx, 20, 0.5);
+  const double C[3][3] = {{5, 5, 3}, {6, 5, 3}, {5, 6, 3.5}};
+  for (int i = 0; i < 600; ++i) {
+    const bool tiny = i % 2 == 1;
+    const std::uint64_t o = g.points().size();
+    for (int c = 0; c < 3; ++c) {
+      const double *b = C[tiny ? 0 : c];
+      g.points().push_back({b[0] + jitter(), b[1] + jitter(), b[2] + jitter()});
+    }
+    g.tris().push_back({o, o + 1, o + 2});
+  }
+  cvc::simplify_params p;
+  p.target_ratio = 0.5;
+  cvc::simplify_result rs, rp;
+  const geometry serial = cvc::simplify(g, p, &rs);
+  const geometry pooled = cvc::simplify(g, p, &rp, &ctx.computePool());
+  EXPECT_EQ(rs.seam_vertices, 900u); // the big copies' corners; no tiny one
+  EXPECT_EQ(rp.seam_vertices, rs.seam_vertices);
+  EXPECT_TRUE(bitwise_equal(serial.const_points(), pooled.const_points()));
+  EXPECT_TRUE(bitwise_equal(serial.const_tris(), pooled.const_tris()));
+  EXPECT_EQ(0, std::memcmp(&rs.world_error, &rp.world_error, sizeof(double)));
+}
+
+// Two 60 x 60 sheets meet along a column, and the second sheet's copy of the
+// column is moved 1e-9 along it: every one of its 60 positions is found by the
+// near-coincidence search among the sheets' 7200, and the join stays closed as
+// the sheets decimate -- every join row one side keeps, the other keeps too.
+TEST(GeometrySimplify, NearCoincidentJoinStaysClosed) {
+  cvc::app ctx;
+  const int n = 60;
+  const geometry a = make_grid(ctx, n, 0.4);
+  geometry g = a;
+  const std::uint64_t o = g.num_points();
+  for (auto q : a.const_points()) {
+    q[0] += n - 1;
+    if (q[0] == n - 1)
+      q[1] += 1e-9;
+    g.points().push_back(q);
+  }
+  for (const auto &t : a.const_tris())
+    g.tris().push_back({t[0] + o, t[1] + o, t[2] + o});
+  for (auto &q : g.points())
+    if (q[0] == n - 1)
+      q[2] = 0.0; // the sheets agree along the join
+  cvc::simplify_params p;
+  p.target_ratio = 0.1;
+  cvc::simplify_result r;
+  const geometry s = cvc::simplify(g, p, &r, &ctx.computePool());
+  EXPECT_EQ(r.seam_vertices, 2u * n);
+  expect_wellformed(s);
+  // join rows each side keeps, told apart by the jitter
+  std::set<double> left, right;
+  for (const auto &q : s.const_points())
+    if (q[0] == n - 1)
+      (q[1] == std::round(q[1]) ? left : right).insert(std::round(q[1]));
+  EXPECT_LT(left.size(), std::size_t(n)) << "the join was decimated, not frozen";
+  EXPECT_EQ(left, right);
+  EXPECT_EQ(r.world_error, cvc::sampled_hausdorff(g, s));
 }
 
 // --- welding split faces, and attribute seams --------------------------------
@@ -1175,19 +1385,23 @@ TEST(GeometrySimplify, AttributeSeamsCollapseOnlyAlongThemselves) {
 // the copies, and the copies carry other normals. The crease is a seam inside
 // ONE connected component, and it ends inside the sheet. It stays closed and
 // keeps its sides' normals apart as the sheet decimates, with or without the
-// constraint planes -- and when the copies' attributes agree with their
-// originals, they weld away and the result is the unsplit sheet's, bit for bit.
+// constraint planes, and also when each copy's z is the other signed zero of
+// its original's (-0 and +0 are one position). Split further into a triangle
+// soup, it decimates exactly as it does unsplit. And when the copies'
+// attributes agree with their originals, they weld away and the result is the
+// uncreased sheet's, bit for bit.
 TEST(GeometrySimplify, CreaseInsideOneComponentStaysClosed) {
   cvc::app ctx;
   const int n = 30, m = 15, rows = 20; // the crease: column m, rows [0, rows)
   struct Case {
     double amp;
-    bool constrained, agree;
+    bool constrained, agree, flip_zero;
   };
-  for (const Case &c : {Case{1.2, true, false}, Case{0.0, true, false}, Case{0.0, false, false},
-                        Case{1.2, true, true}}) {
+  for (const Case &c : {Case{1.2, true, false, false}, Case{0.0, true, false, false},
+                        Case{0.0, false, false, false}, Case{1.2, true, true, false},
+                        Case{0.0, true, false, true}}) {
     SCOPED_TRACE(testing::Message() << "amp " << c.amp << " constrained " << c.constrained
-                                    << " attributes agree " << c.agree);
+                                    << " attributes agree " << c.agree << " -0/+0 " << c.flip_zero);
     const geometry sheet = painted_grid(ctx, n, c.amp);
     geometry g = sheet;
     std::vector<std::int64_t> copy_of(g.num_points(), -1);
@@ -1195,6 +1409,10 @@ TEST(GeometrySimplify, CreaseInsideOneComponentStaysClosed) {
       const std::uint64_t v = std::uint64_t(m * n + i); // make_grid: index i * n + j at (i, j)
       copy_of[v] = std::int64_t(g.num_points());
       g.points().push_back(g.points()[v]);
+      if (c.flip_zero) { // z is a signed zero on the flat sheet
+        ASSERT_EQ(g.points().back()[2], 0.0);
+        g.points().back()[2] = -g.points().back()[2];
+      }
       g.uvs().push_back(g.uvs()[v]);
       auto nv = g.normals()[v];
       if (!c.agree)
@@ -1219,6 +1437,13 @@ TEST(GeometrySimplify, CreaseInsideOneComponentStaysClosed) {
     EXPECT_EQ(r.seam_vertices, 2u * rows);
     if (c.constrained) // (unconstrained, the sheet's open border erodes)
       EXPECT_EQ(interior_cracks(s, n), 0);
+    // The same mesh as a triangle soup (each vertex's first copy keeping its
+    // index) is that mesh: its copies weld back exactly, crease and all.
+    const geometry soup = cvc::simplify(split_faces(g, 1, true), p);
+    EXPECT_TRUE(bitwise_equal(soup.const_points(), s.const_points()));
+    EXPECT_TRUE(bitwise_equal(soup.const_tris(), s.const_tris()));
+    EXPECT_TRUE(bitwise_equal(soup.const_uvs(), s.const_uvs()));
+    EXPECT_TRUE(bitwise_equal(soup.const_normals(), s.const_normals()));
     if (c.agree) {
       const geometry plain = cvc::simplify(sheet, p);
       EXPECT_TRUE(bitwise_equal(s.const_points(), plain.const_points()));
@@ -1408,6 +1633,71 @@ TEST(GeometrySimplify, SeamConstraintsHoldAColorBoundary) {
   }
 }
 
+// An edge is collapsed in the cheaper direction the seams allow: when the
+// wedge map forbids dropping one end, dropping the other may still be clean.
+// On a sheet cut into small color blocks -- seams everywhere -- that is what
+// reaches the target, with or without the constraint planes, while no face
+// leaves its block and uv stays exactly xy. (So hard a target erodes the
+// sheet's corners; seams that stay closed are AttributeSeamsCollapseOnly-
+// AlongThemselves' to check.)
+TEST(GeometrySimplify, SeamedBlocksReachTheirTarget) {
+  cvc::app ctx;
+  const int n = 31, R = 3;
+  const geometry g = blocks(ctx, n, 0.5, R);
+  struct Case {
+    bool constrained;
+    double ratio;
+  };
+  for (const Case &c : {Case{false, 0.1}, Case{false, 0.05}, Case{true, 0.05}}) {
+    SCOPED_TRACE(testing::Message() << "constrained " << c.constrained << " ratio " << c.ratio);
+    cvc::simplify_params p;
+    p.target_ratio = c.ratio;
+    p.preserve_boundary = c.constrained;
+    cvc::simplify_result r;
+    const geometry s = cvc::simplify(g, p, &r);
+    expect_wellformed(s);
+    EXPECT_LE(r.out_tris, std::uint64_t(std::llround(c.ratio * double(g.num_tris()))));
+    EXPECT_EQ(faces_off_their_block(s, R), 0);
+    EXPECT_EQ(sheared_uv_corners(s), 0);
+  }
+}
+
+// A double-sided sheet lists every triangle twice, front and back, over the
+// same vertices. Each border side then bounds two coincident triangles, and is
+// still an open border, so it is pinned: the flat sheet decimates hard, both
+// sides alike, yet keeps its corners and its exact extent (unpinned, the free
+// collapses of a flat sheet eat its corners).
+TEST(GeometrySimplify, DoubleSidedSheetKeepsItsBorder) {
+  cvc::app ctx;
+  const geometry one = make_grid(ctx, 20, 0.0);
+  geometry g = one;
+  for (const auto &t : one.const_tris())
+    g.tris().push_back({t[0], t[2], t[1]});
+  cvc::simplify_params p;
+  p.target_ratio = 0.1;
+  cvc::simplify_result r;
+  const geometry s = cvc::simplify(g, p, &r);
+  expect_wellformed(s);
+  EXPECT_LE(r.out_tris, std::uint64_t(std::llround(0.1 * double(g.num_tris()))));
+  const cvc::bounding_box b0 = g.extents(), b1 = s.extents();
+  EXPECT_EQ(b1.minx, b0.minx);
+  EXPECT_EQ(b1.maxx, b0.maxx);
+  EXPECT_EQ(b1.miny, b0.miny);
+  EXPECT_EQ(b1.maxy, b0.maxy);
+  EXPECT_EQ(r.world_error, 0.0);
+  // every face's back is there too
+  std::map<std::array<std::uint64_t, 3>, int> faces;
+  for (const auto &t : s.const_tris()) {
+    std::array<std::uint64_t, 3> f = {t[0], t[1], t[2]};
+    std::rotate(f.begin(), std::min_element(f.begin(), f.end()), f.end());
+    ++faces[f];
+  }
+  for (const auto &f : faces) {
+    const auto back = faces.find({f.first[0], f.first[2], f.first[1]});
+    EXPECT_TRUE(back != faces.end() && back->second == f.second);
+  }
+}
+
 // --- locality ----------------------------------------------------------------
 
 // A collapse is costed in its own vertex's frame, with a round-off band made of
@@ -1582,13 +1872,15 @@ namespace {
 
 // Best of three simplify() runs with seam welding on, and with it off,
 // interleaved so a change in machine load hits both alike.
-std::pair<double, double> weld_on_off_seconds(const geometry &g, cvc::simplify_result &on) {
+std::pair<double, double> weld_on_off_seconds(const geometry &g, cvc::simplify_result &on,
+                                              double seam_epsilon = -1.0) {
   double t[2] = {1e9, 1e9};
   for (int rep = 0; rep < 3; ++rep)
     for (int weld = 1; weld >= 0; --weld) {
       cvc::simplify_params p;
       p.target_ratio = 0.5;
       p.weld_seams = weld != 0;
+      p.seam_epsilon = seam_epsilon;
       cvc::simplify_result r;
       const auto t0 = std::chrono::steady_clock::now();
       cvc::simplify(g, p, &r);
@@ -1622,11 +1914,11 @@ TEST(GeometrySimplify, WeldCostIgnoresAPileOfCoincidentCorners) {
       << "welded " << t.first << " s, unwelded " << t.second << " s";
 }
 
-// The eps search skips, by binary search, the positions of the searching
-// vertex's own component, so a 1 mm-tessellated part inside a 3 km scene --
-// whose seam tolerance (1e-6 of the extent, ~4.5 mm) spans many of the part's
-// vertices -- costs what the scene costs unwelded. (A cell scan compared every
-// pair of the part: ~4x.)
+// A 1 mm-tessellated part inside a 3 km scene, whose scene-wide tolerance
+// (1e-6 of the extent, ~4.5 mm) spans many of the part's vertices, costs what
+// the scene costs unwelded: the part's vertices search only within 1e-3 of
+// their own edges, and the search skips subtrees of a vertex's own component.
+// (A cell scan compared every pair of the part: ~4x.)
 TEST(GeometrySimplify, WeldCostIgnoresFineDetailInALargeScene) {
   cvc::app ctx;
   geometry g = make_grid(ctx, 160, 5.0);
@@ -1645,6 +1937,44 @@ TEST(GeometrySimplify, WeldCostIgnoresFineDetailInALargeScene) {
   EXPECT_EQ(on.seam_vertices, 0u);
   EXPECT_LT(t.first, 2.5 * t.second + 0.1)
       << "welded " << t.first << " s, unwelded " << t.second << " s";
+  // An explicit 5 cm tolerance, for every vertex, reaches thousands of the
+  // part's vertices from each of them, but the search skips subtrees of a
+  // vertex's own component: it still finds nothing to weld, at no extra cost.
+  const std::pair<double, double> te = weld_on_off_seconds(g, on, 0.05);
+  EXPECT_EQ(on.seam_vertices, 0u);
+  EXPECT_LT(te.first, 2.5 * te.second + 0.1)
+      << "welded " << te.first << " s, unwelded " << te.second << " s";
+}
+
+// Near-coincident parts: 7000 copies of a unit triangle, each corner jittered
+// by up to 1e-5 -- distinct positions, every copy its own part -- weld into
+// one triangle, and so do 7000 tiny triangles jittered about one point under
+// an explicit tolerance. Neither costs much more than the mesh unwelded: the
+// search joins each cluster of mutually close positions once instead of
+// pairing them all, and keeps only a spanning set of the pairs it finds.
+// (Storing every pair took O(k^2) time and memory: ~8x and 2.3 GB at 8000.)
+TEST(GeometrySimplify, WeldCostIgnoresAJitteredPile) {
+  cvc::app ctx;
+  std::mt19937_64 rng(7);
+  auto jitter = [&]() { return 1e-5 * double(rng() >> 11) / 9007199254740992.0; };
+  for (int tiny = 0; tiny < 2; ++tiny) {
+    geometry g = make_grid(ctx, 100, 0.5);
+    const double C[3][3] = {{50, 50, 3}, {51, 50, 3}, {50, 51, 3.5}};
+    for (int i = 0; i < 7000; ++i) {
+      const std::uint64_t o = g.points().size();
+      for (int c = 0; c < 3; ++c) {
+        const double *b = C[tiny ? 0 : c];
+        g.points().push_back({b[0] + jitter(), b[1] + jitter(), b[2] + jitter()});
+      }
+      g.tris().push_back({o, o + 1, o + 2});
+    }
+    cvc::simplify_result on;
+    const std::pair<double, double> t = weld_on_off_seconds(g, on, tiny ? 1e-4 : -1.0);
+    SCOPED_TRACE(testing::Message() << (tiny ? "tiny, explicit tolerance" : "unit, default"));
+    EXPECT_EQ(on.seam_vertices, 21000u);
+    EXPECT_LT(t.first, 3.0 * t.second + 0.1)
+        << "welded " << t.first << " s, unwelded " << t.second << " s";
+  }
 }
 
 // A coordinate the measure cannot use -- infinite, NaN, or finite but so large
@@ -1683,12 +2013,14 @@ TEST(GeometrySimplify, NonFiniteInputIsNeverMeasuredAsExact) {
   EXPECT_LT(r.out_tris, r.in_tris);
 }
 
-// A triangle whose corners weld together (two at one position) is a segment:
-// it is left out of the result AND of the surface world_error measures, so a
-// zero-area needle standing off a sheet neither survives nor pins every rung's
-// error at its length -- the sheet decimates exactly as it does without it. An
-// input made only of such triangles is returned unchanged, never emptied.
-TEST(GeometrySimplify, TrianglesThatWeldAwayAreNotMeasured) {
+// A triangle with two corners at one position is a zero-area needle, a
+// segment: it is left out of the result AND of the surface world_error
+// measures, so a needle standing off a sheet neither survives nor pins every
+// rung's error at its length -- the sheet decimates exactly as it does without
+// it. An input made only of needles is returned unchanged, never emptied. (A
+// triangle that only welds shut within the tolerance is measured; see
+// FinePartsInALargeSceneKeepTheirOwnScale.)
+TEST(GeometrySimplify, ZeroAreaNeedlesAreNotMeasured) {
   cvc::app ctx;
   const geometry sheet = make_grid(ctx, 10, 0.2);
   geometry needle = sheet;

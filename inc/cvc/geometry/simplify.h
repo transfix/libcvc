@@ -100,27 +100,34 @@ struct simplify_params {
   // itself (its vertices numbered by each position's smallest input index,
   // which is what breaks collapse ties). Vertices that still share a position
   // -- they differ in an attribute (a uv seam, a hard-edge normal, a color
-  // boundary), or belong to DIFFERENT connected components within seam_epsilon
-  // of each other (a roof mesh sitting on its walls) -- move as one, and the
-  // edges between them are seams. A collapse that drops a seam position maps
-  // each of its vertices onto the vertex of the kept position it shares a
-  // vanishing triangle with, and is refused unless each of them that a
-  // surviving triangle still uses has exactly one such partner: a seam
-  // collapses only along itself, each side onto its own side, so it never
-  // opens and no uv, color or normal is ever re-attached to another position.
-  // (So a mesh whose attributes jump at EVERY vertex -- per-face colors, or
-  // per-face normals on a curved surface -- can only give up its open border;
-  // with recompute_normals the input normals do not count.) Only
-  // vertex-to-vertex contacts are detected: a vertex touching the interior of
-  // another part's edge or face (a T-junction) is not welded. Coincidence is
-  // transitive, so a chain of vertices each within seam_epsilon of the next
-  // welds together. false decimates every connected component on its own, over
-  // the input's own vertex indices.
+  // boundary), or belong to DIFFERENT connected components within the
+  // coincidence tolerance of each other (a roof mesh sitting on its walls; see
+  // seam_epsilon) -- move as one, and the edges between them are seams. A
+  // collapse that drops a seam position maps each of its vertices onto the
+  // vertex of the kept position it shares a vanishing triangle with, and is
+  // refused unless each of them that a surviving triangle still uses has
+  // exactly one such partner: a seam collapses only along itself, each side
+  // onto its own side, so it never opens and no uv, color or normal is ever
+  // re-attached to another position. (So a mesh whose attributes jump at EVERY
+  // vertex -- per-face colors, or per-face normals on a curved surface -- can
+  // only give up its open border; with recompute_normals the input normals do
+  // not count.) Only vertex-to-vertex contacts are detected: a vertex touching
+  // the interior of another part's edge or face (a T-junction) is not welded.
+  // Coincidence is transitive, so a chain of vertices each within tolerance of
+  // the next welds together. false decimates every connected component on its
+  // own, over the input's own vertex indices.
   bool weld_seams = true;
   // Coincidence tolerance across components, world units (bit-identical
-  // positions always weld). < 0 => 1e-6 of the bounding-box diagonal, capped at
-  // 1e-3 of the median edge length (so a large scene cannot weld the vertices
-  // of its fine parts).
+  // positions always weld). >= 0 is used as given, for every vertex pair: a
+  // tolerance wider than a part's own edges welds that part's vertices
+  // together through its neighbours, and its triangles that weld shut leave
+  // the result (they still count toward world_error). < 0 (the default) is
+  // local: 1e-6 of the bounding-box diagonal, but for each vertex no more than
+  // 1e-3 of its shortest incident edge, and two vertices weld only within both
+  // their tolerances -- so a large scene cannot weld the vertices of its fine
+  // parts (separate parts a few of their own edge lengths apart stay
+  // separate), nor weld a part's own triangles shut. A vertex whose incident
+  // edges all have zero length does not near-weld.
   double seam_epsilon = -1.0;
 };
 
@@ -130,13 +137,15 @@ struct simplify_result {
   std::uint64_t collapses = 0;
   // Sampled symmetric Hausdorff distance between the input surface and the
   // result, in world units: exactly sampled_hausdorff(input, result), except
-  // that the input triangles left out of the result because their corners weld
-  // together (see simplify) are not part of the input surface either. 0 when
-  // the result is the input surface. It is exact at the samples, so it is a
-  // LOWER bound on the continuous distance (see sampled_hausdorff). Finite for
-  // a measurable input: the loop never removes the last triangle. +infinity
-  // for one sampled_hausdorff cannot measure (a non-finite coordinate), which
-  // is returned unchanged. Feeds cvc::lod's world_error_m ladder directly.
+  // that zero-area needles -- input triangles with two corners at one
+  // position, which the result leaves out (see simplify) -- are not part of the
+  // input surface either. Every other input triangle counts, including one
+  // that welds shut within the coincidence tolerance. 0 when the result is the
+  // input surface. It is exact at the samples, so it is a LOWER bound on the
+  // continuous distance (see sampled_hausdorff). Finite for a measurable input:
+  // the loop never removes the last triangle. +infinity for one
+  // sampled_hausdorff cannot measure (a non-finite coordinate), which is
+  // returned unchanged. Feeds cvc::lod's world_error_m ladder directly.
   double world_error = 0.0;
   bool hit_error_limit = false; // true if max_error stopped the loop before the tri target
   // Input vertices that share their collapse position with another input
@@ -151,8 +160,9 @@ struct simplify_result {
 // +infinity). Otherwise the result has no NaNs, degenerate triangles or unused
 // vertices, never more triangles than the input, and never loses its last
 // triangle (a target of 0 decimates as far as the guards allow). Triangles
-// whose corners weld together (two corners at one position: zero-area needles,
-// and slivers thinner than seam_epsilon) are left out of it.
+// whose corners weld together -- zero-area needles (two corners at one
+// position), and triangles welded shut within the coincidence tolerance (see
+// seam_epsilon) -- are left out of it.
 //
 // `pool` (optional) is used to fan the embarrassingly-parallel work -- per-face
 // plane quadrics, the per-vertex quadric gather, the seam search, and the

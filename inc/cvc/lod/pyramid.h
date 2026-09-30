@@ -84,10 +84,11 @@ struct mesh_pyramid {
   // and the two agree, but on a strongly curved surface decimated coarsely the
   // true worst point can fall between samples, and a switch radius derived
   // from this value can then exceed the pixel budget by that margin (the dense
-  // distance was up to ~1.25x this value on synthetic bumpy terrain). Source
-  // triangles whose corners weld together (zero-area needles, slivers thinner
-  // than the seam tolerance) are in no coarse rung and do not count toward its
-  // error, so one stray needle cannot pin the whole ladder at its length.
+  // distance was up to ~1.25x this value on synthetic bumpy terrain). Zero-area
+  // source needles (two corners at one position) are in no coarse rung and do
+  // not count toward its error, so one stray needle cannot pin the whole ladder
+  // at its length; every other source triangle counts, including one that
+  // welds shut within the seam tolerance.
   std::vector<double> world_error_m;
 };
 struct volume_pyramid {

@@ -30,8 +30,9 @@
 // attribute (uv, color, normal) become one "wedge": a soup or a split mesh whose
 // attributes are continuous is then exactly the welded mesh. Wedges that still
 // share a position -- they differ in an attribute (a uv seam, a hard edge) or
-// belong to parts that touch within seam_epsilon (a roof on its walls) -- form
-// one collapse vertex, a "class". The loop runs on classes, and wedges never
+// belong to parts that touch within the coincidence tolerance (a roof on its
+// walls) -- form one collapse vertex, a "class". The loop runs on classes, and
+// wedges never
 // move: collapsing class D onto class K re-points each triangle's D corner from
 // its wedge to that wedge's partner, the wedge of K it shares a vanishing
 // triangle with. A collapse is allowed only when every wedge of D that a
@@ -83,6 +84,7 @@
 #include <memory>
 #include <numeric>
 #include <queue>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -91,7 +93,6 @@ namespace {
 
 typedef std::uint32_t u32;
 typedef std::uint64_t u64;
-typedef std::int64_t i64;
 typedef std::array<u32, 3> Tri;
 
 const double kInf = std::numeric_limits<double>::infinity();
@@ -315,15 +316,124 @@ inline void pfor_blocks(thread_pool *pool, std::size_t n, std::size_t block,
   });
 }
 
+// --- median-split trees ------------------------------------------------------
+//
+// Both spatial trees below (the Hausdorff BVH over triangles, and the weld's
+// k-d tree over positions) split their items at the median along the longest
+// axis of the items' box, down to at most `leaf` items per leaf, and store their
+// nodes in preorder: a node's left child follows it, and its right child starts
+// after the left subtree, whose size is a function of its item count alone. Ties
+// in the split order break by index, so a tree is a pure function of its items
+// whether or not a pool builds its lower subtrees.
+
+// A point (a triangle's centroid, or a position) and its index.
+struct split_item {
+  double c[3];
+  u32 id;
+};
+
+// Leaves (and nodes) of the subtree over m items.
+u32 subtree_leaves(u32 m, u32 leaf) {
+  return m <= leaf ? 1 : subtree_leaves(m / 2, leaf) + subtree_leaves(m - m / 2, leaf);
+}
+inline u32 subtree_nodes(u32 m, u32 leaf) { return 2 * subtree_leaves(m, leaf) - 1; }
+
+// Reorder items[b, e) about its median along the longest axis of their box;
+// returns the split point.
+u32 median_split(std::vector<split_item> &items, u32 b, u32 e) {
+  double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
+  for (u32 i = b; i < e; ++i)
+    for (int a = 0; a < 3; ++a) {
+      lo[a] = std::min(lo[a], items[i].c[a]);
+      hi[a] = std::max(hi[a], items[i].c[a]);
+    }
+  int ax = 0;
+  for (int a = 1; a < 3; ++a)
+    if (hi[a] - lo[a] > hi[ax] - lo[ax])
+      ax = a;
+  const u32 mid = b + (e - b) / 2;
+  std::nth_element(items.begin() + b, items.begin() + mid, items.begin() + e,
+                   [ax](const split_item &x, const split_item &y) {
+                     return x.c[ax] < y.c[ax] || (x.c[ax] == y.c[ax] && x.id < y.id);
+                   });
+  return mid;
+}
+
+// Build the median-split tree over `items` (non-empty): make_leaf(node, parent,
+// b, e) for a leaf over items[b, e); inner(node, parent, b, e, right) for an
+// interior node, before its subtrees; join(node) for an interior node, after
+// both of them. The top levels split serially, down to subtrees small enough to
+// fan out over the pool; each of those writes only its own nodes and items.
+template <class Leaf, class Inner, class Join>
+void build_median_tree(std::vector<split_item> &items, u32 leaf, thread_pool *pool,
+                       const Leaf &make_leaf, const Inner &inner, const Join &join) {
+  struct Subtree {
+    std::vector<split_item> &items;
+    u32 leaf;
+    const Leaf &make_leaf;
+    const Inner &inner;
+    const Join &join;
+    void operator()(u32 node, u32 parent, u32 b, u32 e) const {
+      if (e - b <= leaf) {
+        make_leaf(node, parent, b, e);
+        return;
+      }
+      const u32 mid = median_split(items, b, e);
+      const u32 right = node + 1 + subtree_nodes(mid - b, leaf);
+      inner(node, parent, b, e, right);
+      (*this)(node + 1, node, b, mid);
+      (*this)(right, node, mid, e);
+      join(node);
+    }
+  };
+  const Subtree subtree{items, leaf, make_leaf, inner, join};
+  const u32 n = u32(items.size());
+  struct Job {
+    u32 node, parent, b, e;
+  };
+  std::vector<Job> stack(1, Job{0, kNone, 0, n}), frontier;
+  std::vector<u32> top;
+  const u32 grain = std::max(u32(4096), n / 64);
+  while (!stack.empty()) {
+    const Job j = stack.back();
+    stack.pop_back();
+    if (j.e - j.b <= grain) {
+      frontier.push_back(j);
+      continue;
+    }
+    const u32 mid = median_split(items, j.b, j.e);
+    const u32 right = j.node + 1 + subtree_nodes(mid - j.b, leaf);
+    inner(j.node, j.parent, j.b, j.e, right);
+    top.push_back(j.node);
+    stack.push_back(Job{right, j.node, mid, j.e});
+    stack.push_back(Job{j.node + 1, j.node, j.b, mid});
+  }
+  pfor(pool, u32(frontier.size()), [&](int i) {
+    const Job &j = frontier[i];
+    subtree(j.node, j.parent, j.b, j.e);
+  });
+  for (auto it = top.rbegin(); it != top.rend(); ++it) // children first
+    join(*it);
+}
+
+// Squared distance from p to the box [lo, hi] (0 inside).
+inline double point_box_dist2(const double lo[3], const double hi[3], const Vec3 &p) {
+  double d2 = 0.0;
+  for (int a = 0; a < 3; ++a) {
+    const double x = axis(p, a);
+    const double d = x < lo[a] ? lo[a] - x : (x > hi[a] ? x - hi[a] : 0.0);
+    d2 += d * d;
+  }
+  return d2;
+}
+
 // Bounding-volume hierarchy over a triangle set, for nearest-surface distance
-// queries: median split along the longest axis of the triangle centroids' box,
-// a few triangles per leaf (their corners copied into leaf order), nodes in
-// preorder (a node's left child follows it). Unlike a uniform grid it adapts to
-// wildly mixed triangle sizes (a ground quad kilometres wide under centimetre
-// detail), so a query stays logarithmic wherever it lands. Ties in the split
-// order break by triangle index and every subtree's place in the node array is
-// fixed by its size alone, so the tree -- and every query -- is a pure function
-// of the input, whether or not `pool` builds the lower subtrees in parallel.
+// queries: a median-split tree over the triangle centroids, a few triangles per
+// leaf (their corners copied into leaf order). Unlike a uniform grid it adapts
+// to wildly mixed triangle sizes (a ground quad kilometres wide under
+// centimetre detail), so a query stays logarithmic wherever it lands. The tree
+// -- and so every query -- is a pure function of the input, whether or not
+// `pool` builds the lower subtrees in parallel.
 class tri_bvh {
 public:
   tri_bvh(const std::vector<Vec3> &P, const std::vector<Tri> &T, thread_pool *pool) {
@@ -336,47 +446,40 @@ public:
         _finite = false; // not measurable: see hausdorff()
         return;
       }
-    // Each triangle's centroid travels with its index, so the splits below
-    // read memory in order.
-    std::vector<Item> items(n);
+    // Each triangle's centroid travels with its index, so the splits read
+    // memory in order.
+    std::vector<split_item> items(n);
     for (u32 i = 0; i < n; ++i) {
       const Vec3 &a = P[T[i][0]], &b = P[T[i][1]], &c = P[T[i][2]];
-      items[i] =
-          Item{{(a.x + b.x + c.x) / 3.0, (a.y + b.y + c.y) / 3.0, (a.z + b.z + c.z) / 3.0}, i};
+      items[i] = split_item{
+          {(a.x + b.x + c.x) / 3.0, (a.y + b.y + c.y) / 3.0, (a.z + b.z + c.z) / 3.0}, i};
     }
-    _nodes.resize(subtree_nodes(n));
+    _nodes.resize(subtree_nodes(n, kLeaf));
     _parent.resize(_nodes.size());
     _tri.resize(n);
-    // The top levels split serially, down to subtrees small enough to fan out;
-    // their boxes are filled in afterwards, children first.
-    struct Job {
-      u32 node, parent, b, e;
-    };
-    std::vector<Job> stack(1, Job{0, kNone, 0, n}), frontier;
-    std::vector<u32> top;
-    const u32 grain = std::max(u32(4096), n / 64);
-    while (!stack.empty()) {
-      const Job j = stack.back();
-      stack.pop_back();
-      if (j.e - j.b <= grain) {
-        frontier.push_back(j);
-        continue;
-      }
-      const u32 mid = split(items, j.b, j.e);
-      const u32 right = j.node + 1 + subtree_nodes(mid - j.b);
-      _nodes[j.node].first = right;
-      _nodes[j.node].count = 0;
-      _parent[j.node] = j.parent;
-      top.push_back(j.node);
-      stack.push_back(Job{right, j.node, mid, j.e});
-      stack.push_back(Job{j.node + 1, j.node, j.b, mid});
-    }
-    pfor(pool, u32(frontier.size()), [&](int i) {
-      const Job &j = frontier[i];
-      build(P, T, items, j.node, j.parent, j.b, j.e);
-    });
-    for (auto it = top.rbegin(); it != top.rend(); ++it)
-      join(*it);
+    build_median_tree(
+        items, kLeaf, pool,
+        [&](u32 node, u32 parent, u32 b, u32 e) { // a leaf: its triangles' corners, and its box
+          _parent[node] = parent;
+          Node &nd = _nodes[node];
+          nd.first = b;
+          nd.count = e - b;
+          for (u32 i = b; i < e; ++i) {
+            const Tri &t = T[items[i].id];
+            _tri[i] = {P[t[0]], P[t[1]], P[t[2]]};
+            for (int k = 0; k < 3; ++k)
+              for (int a = 0; a < 3; ++a) {
+                nd.lo[a] = std::min(nd.lo[a], axis(_tri[i][k], a));
+                nd.hi[a] = std::max(nd.hi[a], axis(_tri[i][k], a));
+              }
+          }
+        },
+        [&](u32 node, u32 parent, u32, u32, u32 right) {
+          _parent[node] = parent;
+          _nodes[node].first = right;
+          _nodes[node].count = 0;
+        },
+        [&](u32 node) { join(node); });
     const Node &r = _nodes[0];
     const double ext[3] = {r.hi[0] - r.lo[0], r.hi[1] - r.lo[1], r.hi[2] - r.lo[2]};
     _diag = std::sqrt(ext[0] * ext[0] + ext[1] * ext[1] + ext[2] * ext[2]);
@@ -439,68 +542,6 @@ private:
     u32 count = 0;
   };
 
-  // Nodes in the subtree over m triangles: the median split makes it a
-  // function of m alone.
-  static u32 subtree_leaves(u32 m) {
-    return m <= kLeaf ? 1 : subtree_leaves(m / 2) + subtree_leaves(m - m / 2);
-  }
-  static u32 subtree_nodes(u32 m) { return 2 * subtree_leaves(m) - 1; }
-
-  // A triangle's centroid and index, as the build sorts them.
-  struct Item {
-    double c[3];
-    u32 id;
-  };
-
-  // Reorder items[b, e) about its median along the centroids' longest axis;
-  // returns the split point.
-  static u32 split(std::vector<Item> &items, u32 b, u32 e) {
-    double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
-    for (u32 i = b; i < e; ++i)
-      for (int a = 0; a < 3; ++a) {
-        lo[a] = std::min(lo[a], items[i].c[a]);
-        hi[a] = std::max(hi[a], items[i].c[a]);
-      }
-    int ax = 0;
-    for (int a = 1; a < 3; ++a)
-      if (hi[a] - lo[a] > hi[ax] - lo[ax])
-        ax = a;
-    const u32 mid = b + (e - b) / 2;
-    std::nth_element(items.begin() + b, items.begin() + mid, items.begin() + e,
-                     [ax](const Item &x, const Item &y) {
-                       return x.c[ax] < y.c[ax] || (x.c[ax] == y.c[ax] && x.id < y.id);
-                     });
-    return mid;
-  }
-
-  // The subtree over items[b, e) at `node`: its triangles' corners in leaf
-  // order, and its boxes.
-  void build(const std::vector<Vec3> &P, const std::vector<Tri> &T, std::vector<Item> &items,
-             u32 node, u32 parent, u32 b, u32 e) {
-    _parent[node] = parent;
-    Node &nd = _nodes[node];
-    if (e - b <= kLeaf) {
-      nd.first = b;
-      nd.count = e - b;
-      for (u32 i = b; i < e; ++i) {
-        const Tri &t = T[items[i].id];
-        _tri[i] = {P[t[0]], P[t[1]], P[t[2]]};
-        for (int k = 0; k < 3; ++k)
-          for (int a = 0; a < 3; ++a) {
-            nd.lo[a] = std::min(nd.lo[a], axis(_tri[i][k], a));
-            nd.hi[a] = std::max(nd.hi[a], axis(_tri[i][k], a));
-          }
-      }
-      return;
-    }
-    const u32 mid = split(items, b, e);
-    const u32 right = node + 1 + subtree_nodes(mid - b);
-    nd.first = right;
-    nd.count = 0;
-    build(P, T, items, node + 1, node, b, mid);
-    build(P, T, items, right, node, mid, e);
-    join(node);
-  }
   // An interior node's box: the union of its children's.
   void join(u32 node) {
     Node &nd = _nodes[node];
@@ -512,13 +553,7 @@ private:
   }
 
   static double box_dist2(const Node &nd, const Vec3 &p) {
-    double d2 = 0.0;
-    for (int a = 0; a < 3; ++a) {
-      const double x = axis(p, a);
-      const double d = x < nd.lo[a] ? nd.lo[a] - x : (x > nd.hi[a] ? x - nd.hi[a] : 0.0);
-      d2 += d * d;
-    }
-    return d2;
+    return point_box_dist2(nd.lo, nd.hi, p);
   }
 
   // Best-first search of the subtree at `root`, lowering best (and moving the
@@ -805,28 +840,254 @@ struct weld_classes {
   // input vertex -> its wedge: the smallest input vertex bit-identical to it in
   // position and every carried attribute (kNone: used by no triangle)
   std::vector<u32> wedge;
+  // input vertex -> its position: one id per bit-identical position (-0 == +0)
+  // under welding, the vertex itself without (kNone: used by no triangle)
+  std::vector<u32> pos;
   std::vector<u32> of;     // input vertex -> class (kNone: used by no triangle)
   std::vector<u32> rep;    // class -> representative (its smallest input vertex)
   std::vector<char> multi; // class -> holds more than one wedge (a seam runs through it)
   u64 seam = 0;            // used input vertices that share their class with another
 };
 
-// Without welding every used vertex is its own wedge and its own class. With
+// Keep only a spanning forest of `pr`: the pairs that join two sets the pairs
+// before them have not joined yet. Their union is unchanged.
+void spanning_pairs(std::vector<std::pair<u32, u32>> &pr) {
+  std::vector<u32> ids;
+  ids.reserve(2 * pr.size());
+  for (const auto &p : pr) {
+    ids.push_back(p.first);
+    ids.push_back(p.second);
+  }
+  std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  auto at = [&](u32 x) { return u32(std::lower_bound(ids.begin(), ids.end(), x) - ids.begin()); };
+  std::vector<u32> up(ids.size());
+  std::iota(up.begin(), up.end(), 0u);
+  std::size_t k = 0;
+  for (const auto &p : pr) {
+    const u32 a = find_root(up, at(p.first)), b = find_root(up, at(p.second));
+    if (a != b) {
+      up[std::max(a, b)] = std::min(a, b);
+      pr[k++] = p;
+    }
+  }
+  pr.resize(k);
+}
+
+// The near-coincidence search. Two distinct positions g, h pair when they lie
+// within min(tol[g], tol[h]) of each other (a tolerance of 0 takes no part) and
+// belong to different components, or either one to several (kMixed); every pair
+// is united in `cls` (over input vertices; gmin names each position's vertex).
+//
+// A median-split k-d tree over the positions answers each position's query of
+// its own radius. A node records the largest tolerance under it and, when all
+// its positions belong to one component, that component, so a query skips any
+// subtree out of every tolerance's reach, and any subtree of its own component:
+// a finely tessellated part costs its own vertices nothing, and the work per
+// position is bounded by the positions of other parts within its reach. A node
+// whose box fits within the smallest tolerance under it and that holds more
+// than one component (or a kMixed position) is a clique -- every two of its
+// positions pair, directly or through a third of another component -- so its
+// positions are chained together once, and a query that reaches it looks for
+// one pair into it, not one per position; and the members of a clique, which
+// sit side by side in the tree's order, pair with each clique or position only
+// once between them. So a pile of near-coincident parts costs O(n log n), not
+// O(n^2) -- unless parts of a much finer scale are mixed into it, whose small
+// tolerance keeps its nodes from being cliques; then its pairs are found one
+// by one. A pair is sought from its later position in the tree's order only.
+// The queries run in fixed blocks over the pool; each block keeps only a
+// spanning forest of the pairs it finds -- fewer pairs than the positions they
+// touch -- so memory does not grow with the number of pairs, and the forests
+// are united in block order. The union is a function of the positions alone.
+void weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
+               const std::vector<u32> &gcomp, const std::vector<double> &tol, std::vector<u32> &cls,
+               thread_pool *pool) {
+  std::vector<split_item> items;
+  for (u32 g = 0; g < u32(gmin.size()); ++g)
+    if (tol[g] > 0.0) {
+      const Vec3 &p = P[gmin[g]];
+      items.push_back(split_item{{p.x, p.y, p.z}, g});
+    }
+  const u32 n = u32(items.size());
+  if (n < 2)
+    return;
+  const u32 kLeaf = 8;
+  const u32 kVarious = u32(-3); // a node holding more than one component
+  struct Rec {                  // a position, in tree order
+    Vec3 p;
+    double tol;
+    u32 g, comp;
+  };
+  struct Node {
+    double lo[3] = {kInf, kInf, kInf}; // the box of its positions
+    double hi[3] = {-kInf, -kInf, -kInf};
+    double maxtol = 0.0, mintol = kInf; // over its positions
+    u32 b = 0, e = 0;                   // its positions: rec[b, e)
+    u32 right = 0;                      // interior: the right child (the left one follows); leaf: 0
+    u32 comp = kNone;                   // the one component of all its positions, or kVarious
+    bool clique = false;
+  };
+  std::vector<Rec> rec(n);
+  std::vector<Node> nodes(subtree_nodes(n, kLeaf));
+  // Its box within its smallest tolerance -- by a margin far above round-off,
+  // so every pair in it passes the exact test below too -- and more than one
+  // component in it.
+  auto set_clique = [&](Node &nd) {
+    double d2 = 0.0;
+    for (int a = 0; a < 3; ++a)
+      d2 += (nd.hi[a] - nd.lo[a]) * (nd.hi[a] - nd.lo[a]);
+    nd.clique = nd.e - nd.b > 1 && (nd.comp == kVarious || nd.comp == kMixed) &&
+                d2 <= (1.0 - 1e-9) * nd.mintol * nd.mintol;
+  };
+  build_median_tree(
+      items, kLeaf, pool,
+      [&](u32 node, u32, u32 b, u32 e) {
+        Node &nd = nodes[node];
+        nd.b = b;
+        nd.e = e;
+        nd.comp = gcomp[items[b].id];
+        for (u32 i = b; i < e; ++i) {
+          const u32 g = items[i].id;
+          rec[i] = Rec{P[gmin[g]], tol[g], g, gcomp[g]};
+          for (int a = 0; a < 3; ++a) {
+            nd.lo[a] = std::min(nd.lo[a], axis(rec[i].p, a));
+            nd.hi[a] = std::max(nd.hi[a], axis(rec[i].p, a));
+          }
+          nd.maxtol = std::max(nd.maxtol, tol[g]);
+          nd.mintol = std::min(nd.mintol, tol[g]);
+          if (gcomp[g] != nd.comp)
+            nd.comp = kVarious;
+        }
+        set_clique(nd);
+      },
+      [&](u32 node, u32, u32 b, u32 e, u32 right) {
+        nodes[node].b = b;
+        nodes[node].e = e;
+        nodes[node].right = right;
+      },
+      [&](u32 node) {
+        Node &nd = nodes[node];
+        const Node &l = nodes[node + 1], &r = nodes[nd.right];
+        for (int a = 0; a < 3; ++a) {
+          nd.lo[a] = std::min(l.lo[a], r.lo[a]);
+          nd.hi[a] = std::max(l.hi[a], r.hi[a]);
+        }
+        nd.maxtol = std::max(l.maxtol, r.maxtol);
+        nd.mintol = std::min(l.mintol, r.mintol);
+        nd.comp = l.comp == r.comp ? l.comp : kVarious;
+        set_clique(nd);
+      });
+
+  // Chain the positions of every top clique (one with no clique above it), and
+  // note each position's.
+  std::vector<u32> top(n, kNone), walk(1, 0u);
+  while (!walk.empty()) {
+    const u32 node = walk.back();
+    walk.pop_back();
+    const Node &nd = nodes[node];
+    if (nd.clique) {
+      top[nd.b] = node;
+      for (u32 i = nd.b + 1; i < nd.e; ++i) {
+        top[i] = node;
+        unite(cls, gmin[rec[i - 1].g], gmin[rec[i].g]);
+      }
+    } else if (nd.right != 0) {
+      walk.push_back(nd.right);
+      walk.push_back(node + 1);
+    }
+  }
+
+  const std::size_t block = 1024;
+  std::vector<std::vector<std::pair<u32, u32>>> found((n + block - 1) / block);
+  pfor_blocks(pool, n, block, [&](std::size_t b, std::size_t e) {
+    std::vector<std::pair<u32, u32>> &out = found[b / block];
+    std::size_t limit = 4 * block;
+    // The members of a clique are one set and sit side by side in the tree's
+    // order, so what one of them has paired with -- a clique (by node) or a
+    // position (by slot, offset past the nodes) -- the next need not pair with.
+    u32 clique = kNone;
+    std::unordered_set<u64> linked;
+    for (u32 s = u32(b); s < u32(e); ++s) {
+      const Rec &me = rec[s];
+      const bool mixed = me.comp == kMixed;
+      if (top[s] != clique) {
+        clique = top[s];
+        linked.clear();
+      }
+      // false if my clique has already paired with `key`; else note it
+      auto fresh = [&](u64 key) { return clique == kNone || linked.insert(key).second; };
+      auto pairs_with = [&](u32 j) {
+        const Rec &o = rec[j];
+        if (o.comp == me.comp && !mixed)
+          return false; // one component: never welded to itself
+        const double r = std::min(me.tol, o.tol);
+        return dist2(me.p, o.p) <= r * r;
+      };
+      // The median split halves every node, so the depth (< 32 levels) bounds
+      // the stack: each level pushes at most one entry more than it pops.
+      u32 stack[64];
+      int sp = 0;
+      stack[sp++] = 0;
+      while (sp > 0) {
+        const u32 node = stack[--sp];
+        const Node &nd = nodes[node];
+        if (nd.b >= s)
+          continue; // its pairs with me are sought from their other end
+        const double r = std::min(me.tol, nd.maxtol);
+        if (!(point_box_dist2(nd.lo, nd.hi, me.p) <= r * r))
+          continue; // out of reach
+        if (nd.comp == me.comp && !mixed)
+          continue; // my own component only
+        if (nd.clique) {
+          if (s < nd.e || (clique != kNone && linked.count(node)))
+            continue; // my own clique, whose chain holds me, or one mine has joined
+          for (u32 j = nd.b; j < nd.e; ++j)
+            if (pairs_with(j)) {
+              if (fresh(node))
+                out.push_back(std::make_pair(rec[j].g, me.g)); // one pair joins all of it
+              break;
+            }
+          continue;
+        }
+        if (nd.right == 0) {
+          for (u32 j = nd.b; j < std::min(nd.e, s); ++j)
+            if (pairs_with(j) && fresh(u64(nodes.size()) + j))
+              out.push_back(std::make_pair(rec[j].g, me.g));
+          continue;
+        }
+        stack[sp++] = nd.right;
+        stack[sp++] = node + 1;
+      }
+      if (out.size() > limit) {
+        spanning_pairs(out);
+        limit = std::max(limit, 2 * out.size());
+      }
+    }
+    spanning_pairs(out);
+  });
+  for (const auto &blk : found)
+    for (const auto &pr : blk)
+      unite(cls, gmin[pr.first], gmin[pr.second]);
+}
+
+// Without welding every used vertex is its own wedge, position and class. With
 // it, used vertices bit-identical in position and in every carried attribute
-// are one wedge; wedges at the same position (-0 == +0) are one class, and so
-// are, transitively, wedges of DIFFERENT connected components (triangles joined
-// through shared wedges) within eps of each other -- the seam between touching
-// unwelded parts. A class sits at its representative's position; every other
-// member is within eps of a member.
+// are one wedge; wedges at one position (-0 == +0) are one class, and so are,
+// transitively, positions of DIFFERENT connected components (triangles joined
+// through shared wedges) within the coincidence tolerance of each other -- the
+// seam between touching unwelded parts. A class sits at its representative's
+// position; every other member is within tolerance of a member.
+//
+// The tolerance is seam_epsilon when given. By default it is 1e-6 of the
+// bounding-box diagonal, but at each position no more than 1e-3 of its shortest
+// incident edge, and two positions pair only within both their tolerances: a
+// fine part in a large scene keeps its own scale, so separate parts a few of
+// their own edge lengths apart never weld into one another, and a part's own
+// triangles cannot weld away through its neighbours.
 //
 // Exact coincidence is found by sorting the position bits, O(n log n) however
-// many vertices pile onto one point. The eps search then runs over the distinct
-// positions only, on cells 2*eps wide -- an eps-ball meets at most 2 cells per
-// axis, each found in O(1) through a hash table -- and within a cell skips, by
-// binary search, the run of positions of the searching one's own component,
-// which could never weld to it: the work per position is bounded by the
-// cross-component neighbours within ~2*eps, however finely a part is
-// tessellated under a scene-sized tolerance.
+// many vertices pile onto one point; the near-coincidence search (weld_near)
+// runs over the distinct positions only.
 weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const carried &attr,
                   bool on, double seam_epsilon, thread_pool *pool) {
   const u32 nv = u32(P.size());
@@ -840,8 +1101,9 @@ weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const c
 
   weld_classes wc;
   wc.wedge.assign(nv, kNone);
+  wc.pos.assign(nv, kNone);
   for (u32 v : verts)
-    wc.wedge[v] = v;
+    wc.wedge[v] = wc.pos[v] = v;
   std::vector<u32> cls(nv); // union-find over input vertices
   std::iota(cls.begin(), cls.end(), 0u);
 
@@ -861,8 +1123,7 @@ weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const c
       const int c = attr.compare(a, b);
       return c != 0 ? c < 0 : a < b;
     });
-    std::vector<u32> grp(nv, kNone); // input vertex -> distinct position
-    std::vector<u32> gmin;           // distinct position -> its smallest input vertex
+    std::vector<u32> gmin; // distinct position -> its smallest input vertex
     for (std::size_t i = 0; i < order.size();) {
       const u32 g = u32(gmin.size());
       u32 lo = order[i];
@@ -873,7 +1134,7 @@ weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const c
                attr.compare(order[k], order[j]) == 0;
              ++k) {
           wc.wedge[order[k]] = order[j];
-          grp[order[k]] = g;
+          wc.pos[order[k]] = g;
         }
         lo = std::min(lo, order[j]);
         j = k;
@@ -882,7 +1143,7 @@ weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const c
       i = j;
     }
     for (u32 v : verts)
-      unite(cls, v, gmin[grp[v]]);
+      unite(cls, v, gmin[wc.pos[v]]);
 
     // --- near coincidence across components, over the distinct positions ---
     std::vector<u32> comp(nv);
@@ -894,7 +1155,7 @@ weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const c
     const u32 ng = u32(gmin.size());
     std::vector<u32> gcomp(ng, kNone); // a position's component, or kMixed
     for (u32 v : verts) {
-      const u32 c = find_root(comp, wc.wedge[v]), g = grp[v];
+      const u32 c = find_root(comp, wc.wedge[v]), g = wc.pos[v];
       gcomp[g] = gcomp[g] == kNone || gcomp[g] == c ? c : kMixed;
     }
     double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
@@ -906,120 +1167,28 @@ weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const c
     const double diag =
         std::sqrt((hi[0] - lo[0]) * (hi[0] - lo[0]) + (hi[1] - lo[1]) * (hi[1] - lo[1]) +
                   (hi[2] - lo[2]) * (hi[2] - lo[2]));
-    // Default tolerance: 1e-6 of the extent, but never more than 1e-3 of the
-    // median edge, so a large scene cannot weld the vertices of its fine parts.
-    double eps = seam_epsilon;
-    if (eps < 0.0) {
-      std::vector<double> e2;
-      e2.reserve(T.size() * 3);
-      for (const Tri &t : T)
-        for (int k = 0; k < 3; ++k)
-          e2.push_back(dist2(P[t[k]], P[t[(k + 1) % 3]]));
-      const std::size_t mid = e2.size() / 2;
-      std::nth_element(e2.begin(), e2.begin() + mid, e2.end());
-      eps = std::min(1e-6 * diag, 1e-3 * std::sqrt(e2[mid]));
-    }
+    const double eps = seam_epsilon >= 0.0 ? seam_epsilon : 1e-6 * diag;
     if (eps > 0.0 && ng > 1) {
-      // (Never finer than 1e-12 of the extent, so cell indices stay far from overflow.)
-      const double cellw = std::max(2.0 * eps, 1e-12 * diag);
-      auto cell_of = [&](double x, int a) { return i64(std::floor((x - lo[a]) / cellw)); };
-      struct Key {
-        i64 c[3];
-        u32 comp, g;
-      };
-      auto cell_less = [](const Key &a, const Key &b) {
-        if (a.c[0] != b.c[0])
-          return a.c[0] < b.c[0];
-        if (a.c[1] != b.c[1])
-          return a.c[1] < b.c[1];
-        return a.c[2] < b.c[2];
-      };
-      std::vector<Key> keys(ng);
-      for (u32 g = 0; g < ng; ++g) {
-        const Vec3 &p = P[gmin[g]];
-        keys[g] = {{cell_of(p.x, 0), cell_of(p.y, 1), cell_of(p.z, 2)}, gcomp[g], g};
-      }
-      std::sort(keys.begin(), keys.end(), [&](const Key &a, const Key &b) {
-        if (cell_less(a, b) || cell_less(b, a))
-          return cell_less(a, b);
-        return a.comp != b.comp ? a.comp < b.comp : a.g < b.g;
-      });
-      // Occupied cell -> its run [b, e) of keys, in an open-addressing table
-      // (its contents, and so every lookup, are a function of the input alone).
-      struct Slot {
-        i64 c[3];
-        u32 b, e; // e == 0: empty
-      };
-      std::size_t cap = 16;
-      while (cap < 2 * std::size_t(ng))
-        cap *= 2;
-      std::vector<Slot> table(cap, Slot{{0, 0, 0}, 0, 0});
-      auto slot_of = [&](const i64 c[3]) {
-        u64 h = u64(c[0]) * 0x9E3779B97F4A7C15ull;
-        h = (h ^ (h >> 29) ^ u64(c[1])) * 0xBF58476D1CE4E5B9ull;
-        h = (h ^ (h >> 32) ^ u64(c[2])) * 0x94D049BB133111EBull;
-        std::size_t s = std::size_t(h ^ (h >> 31)) & (cap - 1);
-        while (table[s].e != 0 &&
-               (table[s].c[0] != c[0] || table[s].c[1] != c[1] || table[s].c[2] != c[2]))
-          s = (s + 1) & (cap - 1);
-        return s;
-      };
-      for (std::size_t i = 0; i < keys.size();) {
-        std::size_t j = i + 1;
-        while (j < keys.size() && !cell_less(keys[i], keys[j]))
-          ++j;
-        Slot &s = table[slot_of(keys[i].c)];
-        s = Slot{{keys[i].c[0], keys[i].c[1], keys[i].c[2]}, u32(i), u32(j)};
-        i = j;
-      }
-      // Each block lists the pairs it finds, each once (from its larger
-      // position); the union below does not depend on their order.
-      const double eps2 = eps * eps;
-      const std::size_t block = 1024;
-      std::vector<std::vector<std::pair<u32, u32>>> found((ng + block - 1) / block);
-      pfor_blocks(pool, ng, block, [&](std::size_t b, std::size_t e) {
-        std::vector<std::pair<u32, u32>> &out = found[b / block];
-        for (std::size_t i = b; i < e; ++i) {
-          const Key &me = keys[i];
-          const u32 v = gmin[me.g];
-          const Vec3 &p = P[v];
-          auto scan = [&](std::size_t from, std::size_t to) {
-            for (std::size_t j = from; j < to; ++j) {
-              const u32 u = gmin[keys[j].g];
-              if (u < v && dist2(P[u], p) <= eps2)
-                out.push_back(std::make_pair(u, v));
-            }
-          };
-          i64 c0[3], c1[3];
-          for (int a = 0; a < 3; ++a) {
-            c0[a] = cell_of(axis(p, a) - eps, a);
-            c1[a] = cell_of(axis(p, a) + eps, a);
+      std::vector<double> tol(ng, eps);
+      if (seam_epsilon < 0.0) {
+        // the default: capped at 1e-3 of each position's shortest non-zero
+        // incident edge (0 -- no near welding -- for a position with none)
+        std::vector<double> e2(ng, kInf);
+        for (const Tri &t : T) {
+          const double l2[3] = {dist2(P[t[0]], P[t[1]]), dist2(P[t[1]], P[t[2]]),
+                                dist2(P[t[2]], P[t[0]])};
+          for (int k = 0; k < 3; ++k) { // corner k: sides k and k+2
+            double &m = e2[wc.pos[t[k]]];
+            if (l2[k] > 0.0)
+              m = std::min(m, l2[k]);
+            if (l2[(k + 2) % 3] > 0.0)
+              m = std::min(m, l2[(k + 2) % 3]);
           }
-          for (i64 x = c0[0]; x <= c1[0]; ++x)
-            for (i64 y = c0[1]; y <= c1[1]; ++y)
-              for (i64 z = c0[2]; z <= c1[2]; ++z) {
-                const i64 c[3] = {x, y, z};
-                const Slot &s = table[slot_of(c)];
-                if (s.e == 0)
-                  continue; // empty cell
-                const auto cb = keys.begin() + s.b, ce = keys.begin() + s.e;
-                if (me.comp == kMixed) {
-                  scan(s.b, s.e);
-                  continue;
-                }
-                // skip the positions of this one's own component
-                auto sb = std::lower_bound(cb, ce, me.comp,
-                                           [](const Key &k, u32 cc) { return k.comp < cc; });
-                auto se = std::upper_bound(sb, ce, me.comp,
-                                           [](u32 cc, const Key &k) { return cc < k.comp; });
-                scan(s.b, sb - keys.begin());
-                scan(se - keys.begin(), s.e);
-              }
         }
-      });
-      for (const auto &blk : found)
-        for (const auto &pr : blk)
-          unite(cls, pr.first, pr.second);
+        for (u32 g = 0; g < ng; ++g)
+          tol[g] = e2[g] < kInf ? std::min(eps, 1e-3 * std::sqrt(e2[g])) : 0.0;
+      }
+      weld_near(P, gmin, gcomp, tol, cls, pool);
     }
   }
 
@@ -1118,28 +1287,37 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
   std::vector<u32> vver(nv, 0);
   std::vector<char> tremoved(T.size(), 0);
   u64 ntris = n_in;
-  // A triangle with two corners in one class is (to within seam_epsilon) a
-  // segment: it takes no part in the collapse, is left out of the result, and is
-  // no part of the surface world_error measures against.
+  // A triangle with two corners in one class takes no part in the collapse and
+  // is left out of the result. When two of its corners share a position it is a
+  // zero-area needle, and no part of the surface world_error measures against
+  // either; one that only welds shut within the coincidence tolerance is
+  // measured, so its loss counts.
+  std::vector<char> needle(T.size(), 0);
+  u64 welded_away = 0; // measured triangles left out before the loop
   for (u32 ti = 0; ti < T.size(); ++ti) {
-    const Tri &f = T[ti];
+    const Tri &f = T[ti], &w = W[ti];
     if (f[0] == f[1] || f[1] == f[2] || f[0] == f[2]) {
       tremoved[ti] = 1;
       --ntris;
+      const u32 a = wc.pos[w[0]], b = wc.pos[w[1]], c = wc.pos[w[2]];
+      needle[ti] = a == b || b == c || a == c ? 1 : 0;
+      welded_away += needle[ti] ? 0 : 1;
     }
   }
   if (ntris == 0) // every triangle welds away: keep the input rather than return nothing
     return snaps;
 
-  // The source surface world_error measures against: the welded input triangles.
+  // The source surface world_error measures against: the input without its
+  // needles.
   std::vector<u32> src_ids;
   std::vector<Tri> S0;
   if (out)
     for (u32 ti = 0; ti < T.size(); ++ti)
-      if (!tremoved[ti]) {
+      if (!needle[ti]) {
         src_ids.push_back(ti);
         S0.push_back(W[ti]);
       }
+  std::vector<char>().swap(needle);
 
   // vertex -> incident triangle indices
   std::vector<std::vector<u32>> vtri(nv);
@@ -1254,12 +1432,12 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
   // (drop lies on a seam the edge does not run along) or two (a seam ends at
   // drop): re-pointing it anywhere would attach its attributes to a position
   // other than its own, or tear the triangles that share it apart.
+  // The map is sorted by drop wedge, so a class with many wedges (a pile of
+  // near-coincident parts) costs O(k log k), not O(k^2).
   const u32 kTwo = kMixed; // a wedge with two different partners
   auto partner_of = [](const std::vector<std::pair<u32, u32>> &pr, u32 w) {
-    for (const auto &p : pr)
-      if (p.first == w)
-        return p.second;
-    return kNone;
+    const auto p = std::lower_bound(pr.begin(), pr.end(), std::make_pair(w, u32(0)));
+    return p != pr.end() && p->first == w ? p->second : kNone;
   };
   auto partners = [&](u32 keep, u32 drop, std::vector<std::pair<u32, u32>> &pr) {
     pr.clear();
@@ -1274,21 +1452,26 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
         else if (f[k] == keep)
           kk = k;
       }
-      if (kk < 0)
-        continue;
-      const u32 dw = W[ti][kd], kw = W[ti][kk];
-      auto p = pr.begin();
-      while (p != pr.end() && p->first != dw)
-        ++p;
-      if (p == pr.end())
-        pr.push_back(std::make_pair(dw, kw));
-      else if (p->second != kw)
-        p->second = kTwo;
+      if (kk >= 0)
+        pr.push_back(std::make_pair(W[ti][kd], W[ti][kk]));
     }
     if (pr.empty())
       return false; // no triangle on the edge
-    if (!wc.multi[drop] && !wc.multi[keep])
-      return true; // one wedge each: a unique partner
+    if (!wc.multi[drop] && !wc.multi[keep]) {
+      pr.resize(1); // one wedge each: a unique partner
+      return true;
+    }
+    std::sort(pr.begin(), pr.end());
+    pr.erase(std::unique(pr.begin(), pr.end()), pr.end());
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < pr.size();) {
+      std::size_t j = i + 1;
+      while (j < pr.size() && pr[j].first == pr[i].first)
+        ++j;
+      pr[n++] = std::make_pair(pr[i].first, j - i > 1 ? kTwo : pr[i].second);
+      i = j;
+    }
+    pr.resize(n);
     for (u32 ti : vtri[drop]) {
       if (tremoved[ti])
         continue;
@@ -1409,16 +1592,16 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
     return result;
   };
 
-  // world_error: symmetric sampled Hausdorff between the source (the welded
-  // input, S0) and the live surface, both over the wedges' own positions --
-  // exactly the input and result surfaces. The source side (tree, used
-  // vertices, unique edges) is built once and reused by every snapshot;
+  // world_error: symmetric sampled Hausdorff between the source (the input
+  // without its needles, S0) and the live surface, both over the wedges' own
+  // positions -- exactly the input and result surfaces. The source side (tree,
+  // used vertices, unique edges) is built once and reused by every snapshot;
   // construction is deterministic, so a progressive snapshot measures exactly
   // what an independent run would. Samples the two surfaces share -- every live
   // vertex, an edge present in both, an untouched triangle's centroid -- lie ON
   // the other surface (under the round-off floor), so they are not queried: the
-  // value is bit-identical to sampled_hausdorff(input, snapshot) when no input
-  // triangle welds away, for less work on fine rungs.
+  // value is bit-identical to sampled_hausdorff(input, snapshot) when the input
+  // has no needles, for less work on fine rungs.
   std::unique_ptr<tri_bvh> src_tree;
   std::vector<u32> src_verts;
   std::vector<u64> src_edges;
@@ -1480,7 +1663,7 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
       simplify_result &r = (*out)[k];
       r.out_tris = ntris;
       r.collapses = ncollapse;
-      r.world_error = ncollapse > 0 ? measure() : 0.0;
+      r.world_error = ncollapse > 0 || welded_away > 0 ? measure() : 0.0;
       r.hit_error_limit = hit_limit;
       r.seam_vertices = wc.seam;
     }
