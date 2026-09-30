@@ -639,13 +639,16 @@ std::string unique_core_name(const char *what) {
   return os.str();
 }
 
-// HDF5 before 1.14.4 is not memory-safe on a malformed file: a mutation fuzz of
-// scene blobs faulted inside HDF5 1.10 hundreds of times, and the same inputs
-// replayed against 1.14.4 faulted none. So only a build against 1.14.4 or later
-// parses bytes nobody authenticated. The headers compiled against decide (a
-// configure-time version can be wrong -- see the FindHDF5 note in
-// src/cvc/CMakeLists.txt); the library loaded at run time is checked again in
-// case it is older than those headers.
+// No HDF5 is memory-safe on a crafted file. Before 1.14.4 it is plainly unsafe:
+// a mutation fuzz of scene blobs faulted inside HDF5 1.10 hundreds of times.
+// 1.14.4 faulted on none of those inputs, but that fuzz mutated one base blob
+// and proves little -- public CVEs report heap overflows from crafted files
+// through 1.14.6 (e.g. CVE-2025-6516). So open_unverified is opt-in by name
+// (store.h: network bytes go through open_verified or a sandboxed worker), and
+// even then refused below 1.14.4, where the risk is plainly worst. The headers
+// compiled against decide (a configure-time version can be wrong -- see the
+// FindHDF5 note in src/cvc/CMakeLists.txt); the library loaded at run time is
+// checked again in case it is older than those headers.
 #if H5_VERSION_GE(1, 14, 4)
 constexpr bool kParsesUnverifiedBlobs = true;
 #else
@@ -658,11 +661,11 @@ void require_unverified_blob_support() { // library lock held
   if (kParsesUnverifiedBlobs && loaded_ok)
     return;
   std::ostringstream os;
-  os << "lod::scene_reader: parsing an unauthenticated blob needs HDF5 >= 1.14.4, but this build "
-        "has HDF5 "
+  os << "lod::scene_reader::open_unverified: parsing an unauthenticated blob needs HDF5 >= "
+        "1.14.4, but this build has HDF5 "
      << H5_VERS_MAJOR << '.' << H5_VERS_MINOR << '.' << H5_VERS_RELEASE << " (library " << maj
      << '.' << min << '.' << rel
-     << "), which can corrupt memory on a malformed file; authenticate the blob with "
+     << "), which corrupts memory on many malformed files; authenticate the blob with "
         "scene_reader::open_verified, or read a trusted file";
   throw std::runtime_error(os.str());
 }
@@ -836,8 +839,10 @@ scene_reader::scene_reader(app &ctx, const std::string &path) {
   _p.reset(
       new impl(ctx, guarded("lod::scene_reader", path, [&] { return open_existing(path); }), path));
 }
-scene_reader::scene_reader(app &ctx, const unsigned char *bytes, std::size_t n) {
-  open_bytes(ctx, bytes, n, /*authenticated=*/false);
+scene_reader scene_reader::open_unverified(app &ctx, const unsigned char *bytes, std::size_t n) {
+  scene_reader r;
+  r.open_bytes(ctx, bytes, n, /*authenticated=*/false);
+  return r;
 }
 scene_reader scene_reader::open_verified(app &ctx, const unsigned char *bytes, std::size_t n,
                                          const std::string &expected_sha256_hex) {
@@ -846,13 +851,19 @@ scene_reader scene_reader::open_verified(app &ctx, const unsigned char *bytes, s
   if (!is_sha256_hex(expected_sha256_hex))
     throw std::runtime_error("lod::scene_reader::open_verified: the expected hash is not a "
                              "SHA-256 digest (64 hex digits)");
-  const std::string actual = sha256_hex(bytes, bytes ? n : 0);
+  // The caller's buffer is read ONCE, into a private copy that is both hashed
+  // and parsed. Hashing the caller's bytes and handing HDF5 the caller's bytes
+  // would read them twice, with the wait for the library lock in between: a
+  // buffer that changes meanwhile (mmapped, shared, reused for the next
+  // download) would put bytes nobody authenticated into the parser.
+  const std::vector<unsigned char> own(bytes, bytes ? bytes + n : bytes);
+  const std::string actual = sha256_hex(own);
   if (actual != lower(expected_sha256_hex))
     throw std::runtime_error("lod::scene_reader::open_verified: the blob's SHA-256 is " + actual +
                              ", not the expected " + lower(expected_sha256_hex) +
                              "; refusing to parse it");
   scene_reader r;
-  r.open_bytes(ctx, bytes, n, /*authenticated=*/true);
+  r.open_bytes(ctx, own.data(), own.size(), /*authenticated=*/true);
   return r;
 }
 bool scene_reader::unverified_blobs_supported() noexcept { return kParsesUnverifiedBlobs; }

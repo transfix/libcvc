@@ -8,18 +8,21 @@
 // that failures -- corrupt/empty/truncated blobs, missing or non-HDF5 files,
 // tampered pixels -- surface as std::exception without a reader ever creating or
 // truncating a file. Then the trust model (store.h): a blob is parsed only once
-// its hash checks out (open_verified), or unauthenticated only on HDF5 >= 1.14.4;
+// its hash checks out (open_verified) -- and it is the hashed bytes that are
+// parsed -- or, opted into by name (open_unverified), only on HDF5 >= 1.14.4;
 // and a hostile container -- links out of it, external or virtual storage, hard
-// links or aliased storage that read its bytes many times -- is refused whichever
-// way it is opened. HDF5-only (gated in CMake by CVC_USING_HDF5).
+// links, aliased storage or shared attribute messages that read its bytes many
+// times -- is refused whichever way it is opened. HDF5-only (gated in CMake by
+// CVC_USING_HDF5).
 //
 // The blob tests open their blobs with open_verified, hashing the bytes they
 // just built: that is the path a network client takes, and it parses on every
-// HDF5, so the in-memory machinery is covered even where the unauthenticated
-// constructor is compiled to refuse (HDF5 < 1.14.4, e.g. Ubuntu's 1.10).
+// HDF5, so the in-memory machinery is covered even where open_unverified is
+// compiled to refuse (HDF5 < 1.14.4, e.g. Ubuntu's 1.10).
 
 #include <H5Cpp.h>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -40,8 +43,22 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+// Whether this is a ThreadSanitizer build (GCC defines the macro; Clang has the
+// feature test).
+#if defined(__SANITIZE_THREAD__)
+#define LOD_STORE_TEST_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define LOD_STORE_TEST_TSAN 1
+#endif
+#endif
+#ifndef LOD_STORE_TEST_TSAN
+#define LOD_STORE_TEST_TSAN 0
+#endif
 
 using cvc::geometry;
 using cvc::image;
@@ -177,7 +194,8 @@ template <class F> void for_each_reader(cvc::app &ctx, const std::string &file, 
   }
   if (cvc::lod::scene_reader::unverified_blobs_supported()) {
     SCOPED_TRACE("unauthenticated blob reader");
-    cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+    cvc::lod::scene_reader r =
+        cvc::lod::scene_reader::open_unverified(ctx, blob.data(), blob.size());
     fn(r);
   }
 }
@@ -833,21 +851,71 @@ TEST(LodStore, OpenVerifiedChecksTheHashBeforeParsing) {
   }
 }
 
+TEST(LodStore, OpenVerifiedParsesTheBytesItHashed) {
+#if LOD_STORE_TEST_TSAN
+  GTEST_SKIP() << "rewrites the caller's buffer from another thread on purpose, which TSan "
+                  "rightly reports as the caller's data race";
+#endif
+  cvc::app ctx;
+  // Two blobs of one size (same grid, same-length names), told apart by tag.
+  const std::vector<unsigned char> a = tagged_blob(ctx, 12);
+  const std::vector<unsigned char> b = tagged_blob(ctx, 16);
+  ASSERT_EQ(a.size(), b.size());
+  ASSERT_NE(a, b);
+  const std::string hash_a = cvc::sha256_hex(a);
+
+  // The caller's buffer -- think of an mmapped download, shared memory, or a
+  // network buffer about to be reused -- holds blob A when open_verified hashes
+  // it, and blob B by the time the library lock frees up (another HDF5 user
+  // holds it meanwhile). Whatever the timing, the reader must parse the bytes
+  // it hashed: A's content, or a refusal if B landed before the hash. Never B.
+  std::vector<unsigned char> buf = a;
+  std::pair<std::vector<std::string>, std::vector<double>> got;
+  std::string error;
+  std::thread opener;
+  {
+    cvc::hdf5_utils::library_lock busy(ctx, "another-hdf5-user", "lod_store_test");
+    opener = std::thread([&] {
+      try {
+        cvc::lod::scene_reader r =
+            cvc::lod::scene_reader::open_verified(ctx, buf.data(), buf.size(), hash_a);
+        got = contents(r, 12);
+      } catch (const std::exception &e) {
+        error = e.what();
+      }
+    });
+    // Long enough for the opener to hash and block on the lock.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::memcpy(buf.data(), b.data(), b.size());
+  }
+  opener.join();
+
+  if (error.empty()) {
+    EXPECT_EQ(got.first, std::vector<std::string>{tagged_name(12)});
+    EXPECT_EQ(got.second, fingerprint(tagged_pyramid(ctx, 12)));
+  } else {
+    EXPECT_NE(error.find("refusing to parse"), std::string::npos) << error;
+  }
+  EXPECT_NE(got.first, std::vector<std::string>{tagged_name(16)}) << "parsed unhashed bytes";
+}
+
 TEST(LodStore, UnverifiedBlobReaderFollowsTheHdf5VersionGate) {
   cvc::app ctx;
   const std::vector<unsigned char> blob = tagged_blob(ctx, 11);
   // The gate is the HDF5 this test (and so libcvc) is compiled against.
   EXPECT_EQ(cvc::lod::scene_reader::unverified_blobs_supported(), bool(H5_VERSION_GE(1, 14, 4)));
   if (cvc::lod::scene_reader::unverified_blobs_supported()) {
-    // HDF5 >= 1.14.4 (e.g. the cvcpkg prefix): unauthenticated bytes parse,
-    // with every hardening check in place (the tests below run this way too).
-    cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+    // HDF5 >= 1.14.4 (e.g. the cvcpkg prefix): unauthenticated bytes parse when
+    // asked for by name, with every hardening check in place (the tests below
+    // run this way too).
+    cvc::lod::scene_reader r =
+        cvc::lod::scene_reader::open_unverified(ctx, blob.data(), blob.size());
     EXPECT_EQ(contents(r, 11).second, fingerprint(tagged_pyramid(ctx, 11)));
   } else {
     // Older HDF5 (e.g. Ubuntu's 1.10): refused before HDF5 sees a byte, with a
     // std::runtime_error that says what is needed and what to do instead.
     try {
-      cvc::lod::scene_reader r(ctx, blob.data(), blob.size());
+      cvc::lod::scene_reader::open_unverified(ctx, blob.data(), blob.size());
       ADD_FAILURE() << "an unauthenticated blob was parsed by HDF5 < 1.14.4";
     } catch (const std::runtime_error &e) {
       const std::string msg = e.what();
@@ -1140,5 +1208,59 @@ TEST(LodStore, OneByteBudgetPerCallRefusesBytesReadMoreThanOnce) {
     for (int call = 0; call < 3; ++call)
       EXPECT_EQ(r.read_mesh_pyramid("m").rungs[0].num_points(), nv);
   });
+  std::remove(file.c_str());
+}
+
+TEST(LodStore, IndexChargesEveryErrorLadderEvenWhenStoredOnce) {
+  cvc::app ctx;
+  const std::string file = tmp_h5();
+  const int nrungs = 4000;
+  const std::vector<double> ladder(nrungs, 0.5);
+
+  // `assets` asset groups, each claiming nrungs rungs and carrying the same
+  // world_error_m ladder, in a file with a shared object-header message (SOHM)
+  // index for attributes -- which the store never writes, but HDF5 reads. HDF5
+  // then stores the ladder ONCE and has every group refer to it: the groups are
+  // distinct objects, so the once-per-object check does not see the repetition;
+  // only index()'s charge for each ladder it decodes does.
+  auto write_shared = [&](int assets) {
+    std::remove(file.c_str());
+    cvc::hdf5_utils::library_lock lock(ctx, file, "lod_store_test");
+    H5::FileCreatPropList fcpl;
+    ASSERT_GE(H5Pset_shared_mesg_nindexes(fcpl.getId(), 1), 0);
+    ASSERT_GE(H5Pset_shared_mesg_index(fcpl.getId(), 0, H5O_SHMESG_ATTR_FLAG, 16), 0);
+    H5::H5File f(file, H5F_ACC_TRUNC, fcpl);
+    H5::Group geometry_group = f.createGroup("/cvc").createGroup("geometry");
+    for (int i = 0; i < assets; ++i) {
+      H5::Group ag = geometry_group.createGroup("a" + std::to_string(i));
+      cvc::hdf5_utils::setAttribute<int>(ag, "nrungs", nrungs);
+      cvc::hdf5_utils::setAttribute<double>(ag, "world_error_m", ladder.size(), ladder.data());
+    }
+  };
+
+  // One asset reads back whole, every way: the charge is not in the way of a
+  // ladder read once.
+  write_shared(1);
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    const auto idx = r.index();
+    ASSERT_EQ(idx.size(), 1u);
+    EXPECT_EQ(idx[0].nrungs, nrungs);
+    EXPECT_EQ(idx[0].world_error_m, ladder);
+  });
+
+  // 200 of them: 6.4 MB of ladders from a file that stores one. (Without the
+  // shared index the file would hold every ladder, and nothing is refused.)
+  const int assets = 200;
+  write_shared(assets);
+  ASSERT_LT(slurp(file).size() * 8, std::size_t(assets) * nrungs * sizeof(double))
+      << "HDF5 did not share the ladders; the test proves nothing";
+  for_each_reader(ctx, file, [&](cvc::lod::scene_reader &r) {
+    const std::string msg = std_error_of([&] { r.index(); });
+    EXPECT_NE(msg.find("world_error_m of 'a"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("takes this call past the bytes the container holds"), std::string::npos)
+        << msg;
+    EXPECT_FALSE(r.has("a0"));
+  });
+  EXPECT_FALSE(std_error_of([&] { cvc::lod::read_lod_index(ctx, file); }).empty());
   std::remove(file.c_str());
 }
