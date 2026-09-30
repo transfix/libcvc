@@ -784,6 +784,47 @@ state &state::operator()(const std::string &childname) {
   return (*child)(join(keys, SEPARATOR));
 }
 
+// state::sharedChild
+// -----------------
+// Owning create-or-get analogue of operator(): walks (creating as needed) the child path, holding
+// each hop as a state_ptr, and returns the terminal PINNED. Same create/lock semantics as
+// operator() (child under the parent's lock, released before descending); the difference is the
+// return type — the caller gets an owning pointer that keeps the node alive across a concurrent
+// sweepExpired(), where operator()'s bare state& would dangle.
+state::state_ptr state::sharedChild(const std::string &childname) {
+  using namespace boost::algorithm;
+
+  boost::this_thread::interruption_point();
+
+  std::vector<std::string> keys;
+  split(keys, childname, is_any_of(SEPARATOR));
+  BOOST_FOREACH (std::string &key, keys)
+    trim(key);
+  while (!keys.empty() && keys.front().empty())
+    keys.erase(keys.begin());
+
+  state_ptr cur = shared_from_this();
+  BOOST_FOREACH (std::string &key, keys) {
+    if (key.empty())
+      continue; // skip empty interior/trailing segments, as operator() does via its leading-drop
+    state_ptr next;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      auto it = cur->_children.find(key);
+      if (it != cur->_children.end() && it->second) {
+        next = it->second;
+      } else {
+        next.reset(new state(cur->_ctx, key, cur.get()));
+        cur->_children[key] = next;
+        cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
+        cur->_initialized = true;
+      }
+    }
+    cur = next;
+  }
+  return cur;
+}
+
 // ----------------
 // state::linkTo / clearLink / isLink / linkTarget / resolveLink
 // ----------------
@@ -999,6 +1040,31 @@ state *state::findDescendant(const std::string &path) {
   return cur;
 }
 
+state::state_ptr state::findDescendantShared(const std::string &path) {
+  using namespace boost::algorithm;
+  std::string normalized = normalize_state_path(path);
+  if (normalized.empty())
+    return shared_from_this();
+  std::vector<std::string> keys;
+  split(keys, normalized, is_any_of(SEPARATOR));
+  state_ptr cur = shared_from_this();
+  for (auto &k : keys) {
+    trim(k);
+    if (k.empty())
+      continue;
+    state_ptr next;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      auto it = cur->_children.find(k);
+      if (it == cur->_children.end() || !it->second)
+        return state_ptr();
+      next = it->second; // copy the OWNING shared_ptr — pins this hop past a concurrent sweep
+    }
+    cur = next;
+  }
+  return cur;
+}
+
 state::link_resolution state::resolveLink(std::size_t hop_budget) {
   link_resolution result;
 
@@ -1009,7 +1075,14 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
   // when multi-tree lands the key extends to (tree_id, path).
   std::unordered_set<std::string> seen;
 
-  state *cur = this;
+  // Pin the walk: hold each hop as a state_ptr (start via shared_from_this(), each subsequent hop
+  // via findDescendantShared) so a concurrent sweepExpired() cannot free the node we are reading
+  // the link target / path from. The terminal is returned pinned in result.target_owned, so a
+  // caller that keeps the result can safely use `target` after we return. (Residual: fullName()
+  // below still walks each hop's unpinned ANCESTOR chain — a narrower window tracked with the
+  // fullName hardening in docs/roadmap/STATE_LIFETIME_AND_ATOMICITY.md.)
+  state_ptr cur_owned = shared_from_this();
+  state *cur = cur_owned.get();
   // Record the starting node's path so cycles that loop back to
   // the start (including a self-link) are detected as cycles
   // rather than mistakenly classified as "resolved".
@@ -1026,6 +1099,7 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       // Terminal node: not a link.
       result.kind = (cur == this) ? link_resolution_kind::none : link_resolution_kind::resolved;
       result.target = cur;
+      result.target_owned = cur_owned; // pin the resolved terminal for the caller
       return result;
     }
 
@@ -1035,8 +1109,8 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
 
-    state *next = root.findDescendant(target);
-    if (next == nullptr) {
+    state_ptr next_owned = root.findDescendantShared(target);
+    if (!next_owned) {
       result.kind = link_resolution_kind::broken;
       result.target = nullptr;
       result.visited.push_back(target);
@@ -1044,7 +1118,7 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
     }
     ++result.hops;
 
-    std::string next_path = next->fullName();
+    std::string next_path = next_owned->fullName();
     if (!seen.insert(next_path).second) {
       result.kind = link_resolution_kind::cycle_detected;
       result.target = nullptr;
@@ -1052,7 +1126,8 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
     result.visited.push_back(next_path);
-    cur = next;
+    cur_owned = next_owned;
+    cur = cur_owned.get();
   }
 }
 

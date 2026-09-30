@@ -28,10 +28,12 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/chrono.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
+#include <boost/enable_shared_from_this.hpp>
 #include <boost/foreach.hpp>
 #include <boost/function.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include <boost/shared_ptr.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <cstddef>
 #include <cvc/core/app.h>
@@ -147,7 +149,14 @@ private:
 // 01/12/2014 -- Joe R. -- Added init_funcs and json()
 // 01/13/2014 -- Joe R. -- Removing notifyXmlRpc() once and for all.
 // 12/08/2025 -- Added futures API for async value retrieval.
-class state {
+//
+// enable_shared_from_this (boost variant, matching state_ptr = boost::shared_ptr<state>): every
+// live node is already shared_ptr-owned (the root via instancePtr(), children via the _children
+// map), so a node can hand out its own owning pointer. This backs the owning accessors
+// (findDescendantShared / sharedChild / handle) that let a caller PIN a node across a concurrent
+// sweepExpired() — the bare state& / state* that operator() / findDescendant return do NOT keep the
+// node alive, so a concurrent structural mutation can free it under the caller (a cross-node UAF).
+class state : public boost::enable_shared_from_this<state> {
 public:
   typedef boost::shared_ptr<state> state_ptr;
   typedef std::map<std::string, state_ptr> child_map;
@@ -510,6 +519,10 @@ public:
   struct link_resolution {
     link_resolution_kind kind = link_resolution_kind::resolved;
     state *target = nullptr;
+    // Owning pin of `target` (non-null exactly when `target` is): resolveLink walks and returns the
+    // terminal held as a state_ptr, so a caller that keeps `target_owned` (or the whole result)
+    // alive cannot have the resolved node freed under it by a concurrent sweepExpired().
+    state_ptr target_owned;
     std::vector<std::string> visited; // ordered absolute paths
     std::size_t hops = 0;
   };
@@ -604,6 +617,38 @@ public:
   // missing nodes. Returns nullptr when any segment is absent.
   // Useful for link resolution and any other read-only navigation.
   state *findDescendant(const std::string &path);
+
+  // Owning analogues of findDescendant() and operator(): they return the map's shared_ptr rather
+  // than a bare state* / state&, so the returned node stays alive for as long as the caller holds
+  // the returned state_ptr (or a `handle` wrapping it) — a concurrent sweepExpired() can then only
+  // UNLINK the node from its parent, never free it under the caller. Use these (not the bare
+  // accessors) whenever a node is read/used on a thread that a tree-wide sweep could run against
+  // (e.g. a compute-pool worker resolving `state://…`). NOTE: the pin covers the returned node's
+  // own storage (value/data/children/mutex); it does NOT pin the node's ancestor chain, so
+  // fullName() / parentName() on a node whose ancestor was concurrently swept is still unsafe —
+  // avoid those on a pinned-but-possibly-orphaned node (see
+  // docs/roadmap/STATE_LIFETIME_AND_ATOMICITY.md).
+  //
+  // findDescendantShared: read-only, returns a null state_ptr when any segment is absent.
+  // sharedChild: create-or-get (like operator()), returns the pinning state_ptr for the terminal.
+  state_ptr findDescendantShared(const std::string &path);
+  state_ptr sharedChild(const std::string &childname = std::string());
+
+  // RAII sugar: a movable handle that reads like a node (operator-> / operator*) while pinning it
+  // alive. `handle h = node.sharedChild("a.b"); h->value("x");` keeps a.b alive for h's lifetime.
+  class handle {
+  public:
+    handle() = default;
+    explicit handle(state_ptr p) : _p(std::move(p)) {}
+    state *operator->() const { return _p.get(); }
+    state &operator*() const { return *_p; }
+    state *get() const { return _p.get(); }
+    const state_ptr &ptr() const { return _p; }
+    explicit operator bool() const { return static_cast<bool>(_p); }
+
+  private:
+    state_ptr _p;
+  };
 
   // -------- Phase 8 slice 6: pull-on-demand remote link resolution --------
   //

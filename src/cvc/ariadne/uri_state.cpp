@@ -27,18 +27,32 @@ std::string channel_of(const std::string &query) {
   return ch;
 }
 
+// The effective (link-followed) node, PINNED, plus its canonical absolute path. `node` is held as
+// an owning state_ptr and `path` is captured from strings we already hold (the addressed path, or
+// resolveLink's visited chain) — never a post-resolution fullName() on `node`, which would walk the
+// node's _parent chain and UAF if a concurrent sweepExpired() orphaned it (the confirmed cross-node
+// hazard for a `state://` resolve on a compute-pool worker).
+struct effective {
+  cvc::state::state_ptr node;
+  std::string path;
+};
+
 // Follow a TRANSPARENT link to its terminal target; a non-link / opaque / broken / cyclic
 // transparent link stays put (resolvedValue's fallback). SHARED by read and write so both address
 // the identical node — crucially even a DEFAULT (non-writable) transparent link: a read follows it,
 // so a write must follow it too, or a store would be shadowed on the link node and unreadable via
 // the same URI (the write-through routing in state::value() only fires for a WRITABLE link).
-cvc::state *effective_node(cvc::state *node) {
+// `addressed_path` is the canonical path of `node` itself (its normalized `state://` path), used
+// when the node is not a followed link.
+effective effective_node(cvc::state::state_ptr node, const std::string &addressed_path) {
   if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent) {
     const cvc::state::link_resolution lr = node->resolveLink();
-    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
-      return lr.target;
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target_owned)
+      // target_owned pins the terminal; visited.back() is its absolute path captured during the
+      // walk (safe), avoiding a fullName() on a possibly-orphaned node.
+      return {lr.target_owned, lr.visited.empty() ? addressed_path : lr.visited.back()};
   }
-  return node;
+  return {std::move(node), addressed_path};
 }
 
 // The `?value` / `?data` channels are served; `?children` and anything else are not (they need the
@@ -56,18 +70,22 @@ UriResult state_resolve(cvc::state &root, const Uri &u) {
                 "' is not served by the built-in state handler (only '?value' / '?data'); register "
                 "a custom handler for '?children'"};
 
-  // Navigate WITHOUT creating nodes; an empty path is the root itself.
-  cvc::state *node = u.path.empty() ? &root : root.findDescendant(u.path);
+  // Navigate WITHOUT creating nodes; an empty path is the root itself. PIN the addressed node so a
+  // concurrent sweepExpired() (on the scheduler/pycvc thread) cannot free it while this resolve —
+  // which may run on a compute-pool worker — reads its value/data below.
+  cvc::state::state_ptr node =
+      u.path.empty() ? root.shared_from_this() : root.findDescendantShared(u.path);
   if (!node)
     return {false, std::string(), std::string(), "ari: state node '" + u.path + "' not found"};
-  cvc::state *eff = effective_node(node); // read follows a transparent link to its target
-  const std::string canonical = "state://" + eff->fullName() + "?" + channel;
+  const effective eff =
+      effective_node(node, u.path); // read follows a transparent link to its target
+  const std::string canonical = "state://" + eff.path + "?" + channel;
 
   if (channel == "data") {
     // The data channel carries a raw string/byte blob (what state_store writes here, and what the
     // §13.9 HTTP cache parks on a node). Typed data() payloads (a value_t / geometry) are a
     // different consumer (state-data-get) and are not byte-serialized here.
-    const boost::any d = eff->data();
+    const boost::any d = eff.node->data();
     if (const std::string *s = boost::any_cast<std::string>(&d))
       return {true, *s, canonical, std::string()};
     if (d.empty())
@@ -75,7 +93,7 @@ UriResult state_resolve(cvc::state &root, const Uri &u) {
     return {false, std::string(), std::string(),
             "ari: state '" + u.path + "?data' holds a non-string payload (not byte-serializable)"};
   }
-  return {true, eff->value(), canonical, std::string()};
+  return {true, eff.node->value(), canonical, std::string()};
 }
 
 // §13.10 the write analogue: store `content` into the addressed node's `?value` (default) or
@@ -89,12 +107,16 @@ StoreResult state_store(cvc::state &root, const Uri &u, const std::string &conte
     return {false, std::string(),
             "ari: state channel '?" + channel +
                 "' is not writable by the built-in state handler (only '?value' / '?data')"};
-  cvc::state *eff = effective_node(u.path.empty() ? &root : &root(u.path));
+  // sharedChild CREATES the path if absent (a store may target a not-yet-existing node) and PINS
+  // the terminal, so the write below is safe against a concurrent sweep — same rationale as the
+  // read.
+  cvc::state::state_ptr node = u.path.empty() ? root.shared_from_this() : root.sharedChild(u.path);
+  const effective eff = effective_node(node, u.path);
   if (channel == "data")
-    eff->data(boost::any(content)); // store the bytes as a string blob on the data channel
+    eff.node->data(boost::any(content)); // store the bytes as a string blob on the data channel
   else
-    eff->value(content);
-  return {true, "state://" + eff->fullName() + "?" + channel, std::string()};
+    eff.node->value(content);
+  return {true, "state://" + eff.path + "?" + channel, std::string()};
 }
 
 } // namespace

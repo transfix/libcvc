@@ -11,6 +11,7 @@ add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
+add_executable(state_lifetime_stress_test state_lifetime_stress_test.cpp)
 add_executable(state_change_journal_test state_change_journal_test.cpp)
 add_executable(state_subscription_router_test state_subscription_router_test.cpp)
 add_executable(state_sync_adapter_test state_sync_adapter_test.cpp)
@@ -169,6 +170,7 @@ set(TEST_TARGETS
   net_http_client_test
   uri_http_cache_test
   state_test
+  state_lifetime_stress_test
   state_change_journal_test
   state_subscription_router_test
   state_sync_adapter_test
@@ -423,6 +425,13 @@ target_link_libraries(ariadne_bind_test
 )
 
 target_link_libraries(state_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_lifetime_stress_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1596,6 +1605,7 @@ cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)
+cvc_discover_tests(state_lifetime_stress_test)
 cvc_discover_tests(voxels_test)
 cvc_discover_tests(volume_test)
 cvc_discover_tests(volren_math_test)
