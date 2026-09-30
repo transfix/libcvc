@@ -3,7 +3,9 @@
 // Covers: a mesh ladder that strictly coarsens with a monotone world-error ladder
 // and a verbatim rung 0; its single progressive pass reproduces an independent
 // cvc::simplify per rung bit-for-bit; its error is metric (a 10x mesh has a 10x
-// ladder); pooled == serial; a volume ladder that halves each axis with a
+// ladder); a flat-shaded (split-face) mesh coarsens like the welded sheet unless
+// welding is turned off; a rung the collapse cannot reach is left out, not
+// repeated; pooled == serial; a volume ladder that halves each axis with a
 // growing voxel-size error; and an image mip ladder whose box filter actually
 // area-averages (a 2x2 checker becomes mid-grey) rather than point-samples.
 
@@ -54,6 +56,23 @@ bool same_mesh(const geometry &a, const geometry &b) {
   return bitwise_equal(a.const_points(), b.const_points()) &&
          bitwise_equal(a.const_tris(), b.const_tris()) &&
          bitwise_equal(a.const_normals(), b.const_normals());
+}
+
+// `g` with its vertices split per quad (make_grid order: triangle pairs), the
+// way a flat-shaded export stores hard edges.
+geometry flat_shaded(const geometry &g) {
+  geometry s(g.ctx());
+  const geometry::tris_t &T = g.const_tris();
+  for (std::size_t q = 0; q + 1 < T.size(); q += 2) {
+    const std::uint64_t o = s.points().size();
+    const std::uint64_t id[4] = {T[q][0], T[q][1], T[q][2], T[q + 1][1]};
+    for (std::uint64_t v : id)
+      s.points().push_back(g.const_points()[v]);
+    s.tris().push_back({o, o + 1, o + 2});
+    s.tris().push_back({o + 1, o + 3, o + 2});
+  }
+  s.set_geometry_type(geometry::SURFACE_TRI);
+  return s;
 }
 
 // A ladder's error column must be monotone non-decreasing and start at 0.
@@ -121,6 +140,49 @@ TEST(LodPyramid, MeshLadderMatchesIndependentSimplify) {
     prev = std::max(prev, r.world_error);
     EXPECT_EQ(pyr.world_error_m[k], prev) << "rung " << k;
   }
+}
+
+// A flat-shaded mesh (every quad its own part, touching its neighbours only
+// through coincident vertices) builds a full ladder that coarsens like the
+// welded sheet; with pyramid_params::weld_seams off each quad decimates on its
+// own, tearing the sheet for a larger error.
+TEST(LodPyramid, MeshLadderCoarsensSplitFaces) {
+  cvc::app ctx;
+  const geometry src = flat_shaded(bumpy_grid(ctx, 60)); // 6962 tris: targets 2437 .. 104
+  cvc::lod::pyramid_params pp;
+  pp.max_rungs = 4;
+  const cvc::lod::mesh_pyramid welded = cvc::lod::build_mesh_pyramid(src, pp);
+  ASSERT_EQ(welded.rungs.size(), 5u);
+  expect_monotone(welded.world_error_m);
+  for (std::size_t k = 1; k < welded.rungs.size(); ++k)
+    EXPECT_LE(welded.rungs[k].num_tris(),
+              std::uint64_t(std::llround(double(src.num_tris()) * std::pow(pp.mesh_ratio, k))))
+        << "rung " << k;
+  pp.weld_seams = false;
+  const cvc::lod::mesh_pyramid torn = cvc::lod::build_mesh_pyramid(src, pp);
+  ASSERT_GE(torn.rungs.size(), 2u);
+  EXPECT_GT(torn.world_error_m[1], welded.world_error_m[1]);
+}
+
+// A rung whose target the collapse cannot reach (every remaining collapse is
+// guarded) would repeat the rung before it: it is left out. A tetrahedron
+// collapses once, to a two-sided triangle, and then stops -- the last triangle
+// never goes -- so of the targets 2, 1, 1 only the first yields a rung.
+TEST(LodPyramid, MeshLadderLeavesOutStalledRungs) {
+  cvc::app ctx;
+  geometry tet(ctx);
+  tet.points() = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+  tet.tris() = {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}};
+  tet.set_geometry_type(geometry::SURFACE_TRI);
+  cvc::lod::pyramid_params pp;
+  pp.max_rungs = 3;
+  pp.mesh_ratio = 0.6;
+  pp.mesh_min_tris = 1;
+  const cvc::lod::mesh_pyramid pyr = cvc::lod::build_mesh_pyramid(tet, pp);
+  ASSERT_EQ(pyr.rungs.size(), 2u);
+  EXPECT_EQ(pyr.rungs[1].num_tris(), 2u);
+  EXPECT_GT(pyr.world_error_m[1], 0.0);
+  EXPECT_TRUE(std::isfinite(pyr.world_error_m[1]));
 }
 
 // world_error_m is a length: the same terrain at 10x scale has a 10x ladder.

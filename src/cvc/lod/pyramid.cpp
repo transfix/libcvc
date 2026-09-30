@@ -21,11 +21,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cvc/core/thread_pool.h>
 #include <cvc/geometry/simplify.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/volume/volume_ops.h>
 #include <functional>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -86,11 +88,21 @@ mesh_pyramid build_mesh_pyramid(const geometry &src, const pyramid_params &param
   // the pool.
   simplify_params sp;
   sp.preserve_boundary = params.preserve_boundary;
+  sp.weld_seams = params.weld_seams;
+  sp.seam_epsilon = params.seam_epsilon;
   std::vector<simplify_result> res;
-  std::vector<geometry> rungs = simplify_progressive(src, targets, sp, &res, pool);
-  std::vector<double> errs(res.size(), 0.0);
-  for (std::size_t k = 0; k < res.size(); ++k)
-    errs[k] = res[k].world_error;
+  std::vector<geometry> snaps = simplify_progressive(src, targets, sp, &res, pool);
+  // Keep only the rungs that coarsen. Snapshots never gain triangles, so an
+  // equal count means the pass stalled (every remaining collapse guarded) and
+  // this rung -- and each after it -- repeats the one before.
+  std::vector<geometry> rungs;
+  std::vector<double> errs;
+  std::uint64_t prev = src_tris;
+  for (std::size_t k = 0; k < snaps.size() && res[k].out_tris < prev; ++k) {
+    prev = res[k].out_tris;
+    rungs.push_back(std::move(snaps[k]));
+    errs.push_back(res[k].world_error);
+  }
   append_monotone(out.rungs, out.world_error_m, rungs, errs);
   return out;
 }

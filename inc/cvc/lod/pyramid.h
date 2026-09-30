@@ -56,6 +56,12 @@ struct pyramid_params {
   double mesh_ratio = 0.35;         // mesh rung k targets round(src_tris * mesh_ratio^k)
   std::uint64_t mesh_min_tris = 64; // stop adding mesh rungs at/below this triangle count
   bool preserve_boundary = true;    // mesh: pin open borders (see cvc::simplify)
+  // mesh: decimate unwelded input as the surface it forms -- touching parts,
+  // hard-edge/uv splits, triangle soup -- without opening seams (see
+  // cvc::simplify_params::weld_seams); false decimates each connected component
+  // on its own, which opens gaps wherever parts touch.
+  bool weld_seams = true;
+  double seam_epsilon = -1.0; // mesh: weld tolerance, world units (< 0 => cvc::simplify's default)
   unsigned vol_factor = 2;          // volume rung k is src downsampled by vol_factor^k per axis
   std::uint64_t vol_min_dim = 8;    // stop when any axis would fall below this
   unsigned img_factor = 2;          // image rung k is src downsampled by img_factor^k per axis
@@ -71,7 +77,13 @@ struct mesh_pyramid {
   // Per rung, monotone; world_error_m[0] == 0. Rung k's value is the sampled
   // symmetric Hausdorff distance between the source and that rung (see
   // cvc::sampled_hausdorff), in the mesh's length unit (metres for scene
-  // geometry), lifted by the running max.
+  // geometry), lifted by the running max. It is exact at the samples -- a
+  // LOWER bound on the continuous distance: on feature-aligned (architectural)
+  // meshes the worst point is a sampled corner and the two agree, but on a
+  // strongly curved surface decimated coarsely the true worst point can fall
+  // between samples, and a switch radius derived from this value can then
+  // exceed the pixel budget by that margin (by up to ~25% on synthetic bumpy
+  // terrain).
   std::vector<double> world_error_m;
 };
 struct volume_pyramid {
@@ -86,10 +98,13 @@ struct image_pyramid {
 // Build a mesh LOD ladder by QEM decimation of the source. One progressive
 // collapse pass snapshots every rung on its way to the coarsest target, so rung k
 // is bit-identical to cvc::simplify(src) at rung k's target (with
-// preserve_boundary from `params` and simplify_params defaults otherwise: input
-// normals carried, component seams locked) at the cost of the coarsest rung
-// alone. `pool`, when given, fans the per-face setup and each rung's error
-// measurement over the app compute workers; the result is identical either way.
+// preserve_boundary, weld_seams and seam_epsilon from `params` and
+// simplify_params defaults otherwise: input normals carried) at the cost of the
+// coarsest rung alone. A rung that would not have fewer triangles than the one
+// before it (the collapse guards stalled short of its target) is left out, so
+// the ladder can hold fewer than max_rungs coarse rungs. `pool`, when given,
+// fans the per-face setup and each rung's error measurement over the app compute
+// workers; the result is identical either way.
 mesh_pyramid build_mesh_pyramid(const geometry &src,
                                 const pyramid_params &params = pyramid_params(),
                                 thread_pool *pool = nullptr);
