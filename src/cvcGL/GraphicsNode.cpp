@@ -847,12 +847,8 @@ std::shared_ptr<GraphicsNode> GraphicsNode::findChildByName(const std::string &n
 }
 
 cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const {
-  // Check if this is a NullGraphicNode and if it should include own bounds
-  const NullGraphicNode *nullNode = dynamic_cast<const NullGraphicNode *>(this);
-  bool includeOwnBounds = true;
-  if (nullNode) {
-    includeOwnBounds = nullNode->getIncludeOwnBounds();
-  }
+  // Every node includes its own box, except a NullGraphicNode told not to.
+  const bool includeOwnBounds = m_combinedIncludesOwnBounds;
 
   // Accumulate extents without creating invalid bbox
   double acc_minx = std::numeric_limits<double>::max();

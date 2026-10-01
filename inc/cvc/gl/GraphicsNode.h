@@ -142,6 +142,11 @@ public:
   cvc::bounding_box getWorldBoundingBox() const;
   cvc::bounding_box getCombinedWorldBoundingBox() const;
 
+  // Whether this node counts toward the scene's world bounds
+  // (SceneGraph::computeGraphicsBounds). False for a light: it draws nothing,
+  // yet its box would sit at the light's position and drag the bounds out to it.
+  bool contributesToSceneBounds() const { return m_contributesToSceneBounds; }
+
   // The node's real-world size in the given regime: the extents of its
   // world-space bounding box (this node, or with all descendants when
   // includeChildren) converted through world_units. The three components share
@@ -342,6 +347,12 @@ protected:
   GraphicsNode *m_parent; // Weak pointer to parent for world transform calculation
   std::map<std::string, std::any> m_metadata;
   std::atomic<bool> m_castsShadow{true}; // see setCastsShadow
+  // Plain flags where the bounds walks used to ask dynamic_cast, once per node
+  // per walk: does this node count toward the scene bounds (not a LightNode),
+  // and does its getCombinedBoundingBox() include its own box (a NullGraphicNode
+  // may frame only its children).
+  bool m_contributesToSceneBounds = true;
+  bool m_combinedIncludesOwnBounds = true;
   bool m_showBBox;
   std::shared_ptr<BBoxNode> m_bboxNode;
 

@@ -515,6 +515,12 @@ private:
   std::atomic<bool> m_boundsRefreshQueued{false};      // one refreshWorldBounds() event is queued
   mutable std::atomic<std::uint64_t> m_boundsWalks{0}; // see boundsWalkCount()
   std::atomic<std::uint64_t> m_contentVersion{0};      // see contentVersion()
+  // A grow-only walk skipped while nothing showed the world box (grid, axis and
+  // root box all hidden); run by catchUpWorldBounds() or processEvents() once
+  // one of them is shown again.
+  std::atomic<bool> m_boundsGrowDeferred{false};
+  bool worldBoundsShown() const;
+  void catchUpWorldBounds();
   std::vector<boost::signals2::scoped_connection> m_boundsConns;
   void trackNodeBounds(const std::shared_ptr<GraphicsNode> &node);
   void onGraphicsBoundsChanged();

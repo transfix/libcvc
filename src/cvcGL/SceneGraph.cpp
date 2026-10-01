@@ -149,6 +149,16 @@ void SceneGraph::processEvents() {
     // consumed that request before pumping still draws the latest poses.
     requestRender();
   }
+
+  // A grow-only walk skipped while nothing showed the world box: run it now if
+  // something does again, however it was shown -- setGridVisible (which also
+  // catches up at once), the grid/axis node's own setVisible or "visible"
+  // state key, setBBoxesVisible, the root's setShowBBox.
+  if (m_boundsGrowDeferred.load(std::memory_order_relaxed) && worldBoundsShown() &&
+      m_boundsGrowDeferred.exchange(false, std::memory_order_relaxed)) {
+    onGraphicsBoundsChanged();
+    requestRender();
+  }
 }
 
 void SceneGraph::requestRender() { m_events->requestRender(); }
@@ -182,11 +192,39 @@ void SceneGraph::update() {
   }
 }
 
-void SceneGraph::setGridVisible(bool visible) { m_gridNode->setVisible(visible); }
+void SceneGraph::setGridVisible(bool visible) {
+  m_gridNode->setVisible(visible);
+  if (visible)
+    catchUpWorldBounds();
+}
 
 bool SceneGraph::gridVisible() const { return m_gridNode && m_gridNode->isVisible(); }
 
-void SceneGraph::setAxisVisible(bool visible) { m_axisNode->setVisible(visible); }
+void SceneGraph::setAxisVisible(bool visible) {
+  m_axisNode->setVisible(visible);
+  if (visible)
+    catchUpWorldBounds();
+}
+
+bool SceneGraph::worldBoundsShown() const {
+  // What draws the world box: the grid, the axis (sized from it), and the
+  // graphics root's own box (updateGrid sets the root's bounds; shown by default).
+  return gridVisible() || axisVisible() || (m_nullGraphic && m_nullGraphic->getShowBBox());
+}
+
+void SceneGraph::catchUpWorldBounds() {
+  // Moves made while nothing showed the world box: grow it over them now,
+  // before the grid that shows it is drawn. Inline on the owner thread (updateGrid
+  // touches VTK actors); from another thread the next processEvents() does it.
+  if (!m_boundsGrowDeferred.exchange(false, std::memory_order_relaxed))
+    return;
+  if (onOwnerThread()) {
+    onGraphicsBoundsChanged();
+  } else {
+    m_boundsDirty.store(true, std::memory_order_release);
+  }
+  requestRender();
+}
 
 // The axis node is private and had no accessor at all, so a control could set
 // axis visibility but never read it back to draw its own tick.
@@ -301,12 +339,13 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
   // Process each direct child of the graphics root
   // Each child's getCombinedBoundingBox() already includes its descendants recursively
   if (m_graphicsRoot) {
-    for (const auto &child : m_graphicsRoot->getGraphicsChildren()) {
+    for (const auto &childPtr : m_graphicsRoot->getGraphicsChildren()) {
+      const GraphicsNode *child = childPtr.get();
       if (!child)
         continue;
 
       // Skip grid and axis nodes - they don't contribute to scene bounds
-      if (child.get() == m_gridNode.get() || child.get() == m_axisNode.get()) {
+      if (child == m_gridNode.get() || child == m_axisNode.get()) {
         continue;
       }
 
@@ -315,65 +354,32 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
       // bounds out to it. The overhead fill sits at 3x the stage radius, which
       // lifted the whole scene box — and with it the orbit centre that
       // frameBounds() derives, so the camera sat raised and could not be brought
-      // back down.
-      if (std::dynamic_pointer_cast<cvc::gl::LightNode>(child))
+      // back down. (A flag on the node, not a dynamic_cast per child per walk.)
+      if (!child->contributesToSceneBounds())
         continue;
 
-      // Get combined bbox of this child (includes all its descendants in local space)
-      cvc::bounding_box childBBox = child->getCombinedBoundingBox();
+      // This child and its descendants in WORLD space: its combined local box
+      // through its CACHED world matrix, the same 8-corner AABB re-fit this walk
+      // used to do on a fresh vtkMatrix4x4 copy (getWorldTransform) per child.
+      // Bit-identical for the affine transforms a scene holds (w stays 1).
+      const cvc::bounding_box b = child->getCombinedWorldBoundingBox();
 
-      // Skip invalid bounding boxes
-      if (childBBox[0] > childBBox[3] || childBBox[1] > childBBox[4] ||
-          childBBox[2] > childBBox[5]) {
+      // Skip invalid bounding boxes (an invalid box comes back unchanged)
+      if (b[0] > b[3] || b[1] > b[4] || b[2] > b[5]) {
         continue;
-      }
-
-      // Apply world transform to the bounding box by transforming all 8 corners
-      vtkSmartPointer<vtkMatrix4x4> worldTransform = child->getWorldTransform();
-
-      double corners[8][3] = {
-          {childBBox[0], childBBox[1], childBBox[2]}, // min, min, min
-          {childBBox[3], childBBox[1], childBBox[2]}, // max, min, min
-          {childBBox[0], childBBox[4], childBBox[2]}, // min, max, min
-          {childBBox[3], childBBox[4], childBBox[2]}, // max, max, min
-          {childBBox[0], childBBox[1], childBBox[5]}, // min, min, max
-          {childBBox[3], childBBox[1], childBBox[5]}, // max, min, max
-          {childBBox[0], childBBox[4], childBBox[5]}, // min, max, max
-          {childBBox[3], childBBox[4], childBBox[5]}  // max, max, max
-      };
-
-      // Transform all corners and find new axis-aligned bounds
-      double minx = std::numeric_limits<double>::max();
-      double miny = std::numeric_limits<double>::max();
-      double minz = std::numeric_limits<double>::max();
-      double maxx = std::numeric_limits<double>::lowest();
-      double maxy = std::numeric_limits<double>::lowest();
-      double maxz = std::numeric_limits<double>::lowest();
-
-      for (int i = 0; i < 8; ++i) {
-        double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
-        double out[4];
-        worldTransform->MultiplyPoint(in, out);
-
-        minx = std::min(minx, out[0]);
-        miny = std::min(miny, out[1]);
-        minz = std::min(minz, out[2]);
-        maxx = std::max(maxx, out[0]);
-        maxy = std::max(maxy, out[1]);
-        maxz = std::max(maxz, out[2]);
       }
 
       // Merge with combined bounds
       if (first) {
-        combinedBounds = cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz);
+        combinedBounds = b;
         first = false;
       } else {
-        combinedBounds[0] = std::min(combinedBounds[0], minx);
-        combinedBounds[1] = std::min(combinedBounds[1], miny);
-        combinedBounds[2] = std::min(combinedBounds[2], minz);
-        combinedBounds[3] = std::max(combinedBounds[3], maxx);
-        combinedBounds[4] = std::max(combinedBounds[4], maxy);
-        combinedBounds[5] = std::max(combinedBounds[5], maxz);
+        combinedBounds[0] = std::min(combinedBounds[0], b[0]);
+        combinedBounds[1] = std::min(combinedBounds[1], b[1]);
+        combinedBounds[2] = std::min(combinedBounds[2], b[2]);
+        combinedBounds[3] = std::max(combinedBounds[3], b[3]);
+        combinedBounds[4] = std::max(combinedBounds[4], b[4]);
+        combinedBounds[5] = std::max(combinedBounds[5], b[5]);
       }
     }
   }
@@ -562,6 +568,18 @@ void SceneGraph::refreshWorldBounds() {
 }
 
 void SceneGraph::onGraphicsBoundsChanged() {
+  // The world box sizes the grid, the axis and the graphics root's own box.
+  // With all three hidden nothing on screen follows it, so the walk waits until
+  // one is shown (catchUpWorldBounds, or the end of processEvents) -- for a
+  // scene posing registered nodes every frame under hidden chrome that is a
+  // whole walk of the scene per frame saved. Meanwhile the root's bounds (and
+  // its "<prefix>.graphics.root.bounds" state key) do not grow over moves;
+  // computeGraphicsBounds() is the live answer. A refresh (add/remove) still
+  // runs: it is rare.
+  if (!worldBoundsShown()) {
+    m_boundsGrowDeferred.store(true, std::memory_order_relaxed);
+    return;
+  }
   cvc::bounding_box b = computeGraphicsBounds();
   // Grow-only: only resize the grid when graphics have moved OUTSIDE the current
   // world box (a node "left" it) — so in-bounds animation never jitters the grid.

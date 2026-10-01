@@ -383,6 +383,16 @@ def test_casts_shadow():
     print("  ok: setCastsShadow / castsShadow")
 
 
+def test_scene_bounds_flags():
+    """A light does not count toward the scene bounds; geometry does."""
+    sg = pycvc_gl.SceneGraph(app, "pybounds")
+    node = sg.addGraphics("tri", _make_tri())
+    assert node.contributesToSceneBounds()
+    light = sg.addLight("sun")
+    assert not light.contributesToSceneBounds()
+    print("  ok: contributesToSceneBounds")
+
+
 if __name__ == "__main__":
     test_build_scene()
     test_volume_scattering()
@@ -399,4 +409,5 @@ if __name__ == "__main__":
     test_content_version()
     test_texture_modified_rows()
     test_casts_shadow()
+    test_scene_bounds_flags()
     print("pycvc_gl scene tests: OK")

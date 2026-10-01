@@ -304,6 +304,15 @@ add_executable(cvcgl_grid_bounds test/cvcgl_grid_bounds.cpp)
 target_link_libraries(cvcgl_grid_bounds PRIVATE cvcGL)
 add_test(NAME cvcgl_grid_bounds COMMAND cvcgl_grid_bounds)
 
+# The world-bounds walk (computeGraphicsBounds) through cached world matrices and
+# plain flags instead of a matrix copy and two dynamic_casts per child: the same
+# bounds bit for bit over random hierarchies (against the old walk, replicated),
+# no grow-only walk while the grid and axis are hidden, and a catch-up when one
+# is shown. Headless.
+add_executable(cvcgl_bounds_walk test/cvcgl_bounds_walk.cpp)
+target_link_libraries(cvcgl_bounds_walk PRIVATE cvcGL)
+add_test(NAME cvcgl_bounds_walk COMMAND cvcgl_bounds_walk)
+
 # Scene-wide diagnostic chrome: the setters reach every node (not just the root),
 # and the getters are derived from the nodes so a checkbox can show real state.
 add_executable(cvcgl_scene_chrome test/cvcgl_scene_chrome.cpp)
