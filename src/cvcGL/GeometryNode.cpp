@@ -44,10 +44,14 @@ namespace cvc {
 namespace gl {
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
+    : GeometryNode(ctx, statePath, name, vtkSmartPointer<vtkPolyDataMapper>::New()) {}
+
+GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name,
+                           vtkSmartPointer<vtkPolyDataMapper> mapper)
     : GraphicsNode(ctx, statePath, name), m_hasGeometry(false),
       m_renderMode(GeometryRenderMode::TRIS), m_useSingleColor(false),
       m_actor(vtkSmartPointer<vtkActor>::New()),
-      m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
+      m_mapper(mapper ? mapper : vtkSmartPointer<vtkPolyDataMapper>::New()),
       m_polyData(vtkSmartPointer<vtkPolyData>::New()), m_textureFlipV(false) {
   m_mapper->SetInputData(m_polyData);
   m_actor->SetMapper(m_mapper);
@@ -324,6 +328,12 @@ void GeometryNode::setUseSingleColor(bool useSingleColor) {
 }
 
 vtkProp *GeometryNode::getProp() { return m_actor; }
+
+vtkActor *GeometryNode::actor() const { return m_actor; }
+
+vtkPolyDataMapper *GeometryNode::mapper() const { return m_mapper; }
+
+vtkPolyData *GeometryNode::polyData() const { return m_polyData; }
 
 void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
   if (!m_actor)
@@ -744,6 +754,20 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
   for (auto &kv : self->m_uniforms3F)
     if (program->IsUniformUsed(kv.first.c_str()))
       program->SetUniform3f(kv.first.c_str(), kv.second.data());
+  if (self->m_shaderTextures.empty())
+    return;
+  std::vector<std::pair<std::string, vtkTextureObject *>> textures;
+  textures.reserve(self->m_shaderTextures.size());
+  for (auto &kv : self->m_shaderTextures)
+    textures.emplace_back(kv.first, kv.second.GetPointer());
+  bindShaderTextures(program, textures);
+}
+
+void GeometryNode::bindShaderTextures(
+    vtkShaderProgram *program,
+    const std::vector<std::pair<std::string, vtkTextureObject *>> &textures) {
+  if (!program)
+    return;
   // Bind our custom textures onto units the mapper won't reuse. The wasm
   // low-memory poly-data mapper has no real VBOs: it emulates every vertex buffer
   // (positions, normals, cell/edge id maps) as sampler2D/isampler2D/usampler2D
@@ -757,7 +781,7 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
   // our Activate() above the mapper's emulated buffers — then release the
   // reservation so the mapper still gets its low units back for the draw.
   vtkTextureUnitManager *tum = nullptr;
-  for (auto &kv : self->m_shaderTextures)
+  for (auto &kv : textures)
     if (kv.second && kv.second->GetContext()) {
       tum = kv.second->GetContext()->GetTextureUnitManager();
       break;
@@ -772,8 +796,8 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
         break;
       reserved[nReserved++] = u;
     }
-  for (auto &kv : self->m_shaderTextures) {
-    if (kv.second && program->IsUniformUsed(kv.first.c_str())) {
+  for (auto &kv : textures) {
+    if (kv.second && kv.second->GetContext() && program->IsUniformUsed(kv.first.c_str())) {
       kv.second->Activate();
       program->SetUniformi(kv.first.c_str(), kv.second->GetTextureUnit());
     }

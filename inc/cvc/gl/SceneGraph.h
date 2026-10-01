@@ -15,6 +15,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -216,6 +217,22 @@ public:
   // Post a callback to be executed on the main thread during processEvents()
   // This is thread-safe and can be called from any thread
   void postEvent(std::function<void()> callback);
+
+  // postEvent, coalesced by `key`: at most ONE callback per key runs per
+  // processEvents(), and it is the LATEST one posted (latest wins). Any thread.
+  //
+  // For change-driven producers that may post many times between two frames --
+  // a geometry worker staging vertex ranges into a streaming node, say -- where
+  // only the newest state matters and running every intermediate apply would be
+  // wasted main-thread work. The callback keeps the queue position of the FIRST
+  // post for its key since the last drain, so it still runs after any ordinary
+  // postEvent() queued before it (e.g. the node's construction) and before any
+  // queued after that first post. A post that arrives while processEvents() is
+  // draining replaces the callback of a slot that has not run yet; once the
+  // slot has run, the next post queues a new slot for the next drain. Keys are
+  // compared by address only (typically the posting node's `this`); the
+  // callback must guard its own lifetime, as runOnMainThread's do.
+  void postEventCoalesced(const void *key, std::function<void()> callback);
 
   // True when called from this SceneGraph's owner thread — the thread that
   // constructed it and drives processEvents() (main/GUI thread, or the sole
@@ -444,6 +461,10 @@ private:
   // Event queue for thread-safe main thread execution
   std::queue<std::function<void()>> m_eventQueue;
   std::mutex m_eventQueueMutex;
+  // postEventCoalesced: the latest callback per key, guarded by m_eventQueueMutex.
+  // A key is present exactly while its single queue slot is waiting to run.
+  std::unordered_map<const void *, std::function<void()>> m_coalesced;
+  void runCoalesced(const void *key);
   bool m_renderNeeded;
 
   std::vector<std::shared_ptr<SceneNode>> m_rootNodes;

@@ -471,6 +471,15 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // texture_modified auto-wrap (cvc::image is %import'd from pycvc.i); the snake
 // aliases below match the pycvc image/texture demo surface.
 %ignore cvc::gl::GeometryNode::getBoundingBox;
+// The protected subclass hooks (a mapper-taking ctor, the raw VTK objects, the
+// texture binder) are C++-only plumbing for StreamingGeometryNode et al.;
+// dirprot would otherwise expose them on the director with opaque VTK types.
+%ignore cvc::gl::GeometryNode::GeometryNode(cvc::app &, const std::string &, const std::string &,
+                                            vtkSmartPointer<vtkPolyDataMapper>);
+%ignore cvc::gl::GeometryNode::actor;
+%ignore cvc::gl::GeometryNode::mapper;
+%ignore cvc::gl::GeometryNode::polyData;
+%ignore cvc::gl::GeometryNode::bindShaderTextures;
 // Replace the std::vector<double> updateVertices with a numpy-direct one (below) so
 // the per-frame deform path reads the buffer directly instead of via .tolist().
 %ignore cvc::gl::GeometryNode::updateVertices(const std::vector<double> &);
@@ -1021,6 +1030,9 @@ def _typed_node(sg, name):
 %pythonappend cvc::gl::SceneGraph::lod_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
+// postEventCoalesced's raw const void* key is re-exposed as
+// post_event_coalesced(key_object, callable).
+%ignore cvc::gl::SceneGraph::postEventCoalesced;
 %extend cvc::gl::SceneGraph {
   // NOTE: swig parses the DECLARATIONS below in cvc::gl scope (so a bare
   // `GeometryNode` return type resolves), but emits each BODY verbatim as a
@@ -1214,6 +1226,11 @@ def _typed_node(sg, name):
   // Connect a Python callable to the scene's graphics-changed signal (fires when
   // a node is added or removed) — Python functions as scene callbacks.
   void on_graphics_changed(std::function<void()> cb) { $self->graphicsChanged.connect(cb); }
+  // postEventCoalesced keyed by a Python object's identity: at most one `cb`
+  // per key per processEvents(), the latest posted.
+  void post_event_coalesced(PyObject *key, std::function<void()> cb) {
+    $self->postEventCoalesced(static_cast<const void *>(key), cb);
+  }
 }
 %include "cvc/gl/SceneGraph.h"
 

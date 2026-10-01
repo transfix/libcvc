@@ -112,6 +112,39 @@ void SceneGraph::postEvent(std::function<void()> callback) {
   m_renderNeeded = true;
 }
 
+void SceneGraph::postEventCoalesced(const void *key, std::function<void()> callback) {
+  // The callback this one replaces is destroyed AFTER the lock is released: its
+  // captures may take other locks on the way out (a Python callable's deleter
+  // takes the GIL, which the owner thread may hold while it waits for us).
+  std::function<void()> replaced;
+  std::lock_guard<std::mutex> lock(m_eventQueueMutex);
+  m_renderNeeded = true;
+  auto it = m_coalesced.find(key);
+  if (it != m_coalesced.end()) {
+    replaced = std::move(it->second); // a slot is already queued: latest wins
+    it->second = std::move(callback);
+    return;
+  }
+  m_coalesced.emplace(key, std::move(callback));
+  // One slot per key, at the position of the first post since the last drain.
+  // It runs whatever callback is latest when the slot is reached.
+  m_eventQueue.push([this, key]() { runCoalesced(key); });
+}
+
+void SceneGraph::runCoalesced(const void *key) {
+  std::function<void()> fn;
+  {
+    std::lock_guard<std::mutex> lock(m_eventQueueMutex);
+    auto it = m_coalesced.find(key);
+    if (it == m_coalesced.end())
+      return;
+    fn = std::move(it->second);
+    m_coalesced.erase(it); // a post from here on queues a new slot (next drain)
+  }
+  if (fn)
+    fn();
+}
+
 void SceneGraph::processEvents() {
   // Process all pending events on the main thread
   // Extract all events while holding the lock, then execute without lock

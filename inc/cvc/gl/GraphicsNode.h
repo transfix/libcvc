@@ -12,6 +12,8 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vtkMatrix4x4.h>
 #include <vtkPlaneCollection.h>
 #include <vtkSmartPointer.h>
@@ -164,14 +166,20 @@ public:
   // Template factory method for creating child graphics nodes
   // Automatically constructs the proper state path based on parent's state
   // Usage: auto node = parent->addGraphicsChild<GeometryNode>("myGeom");
-  template <typename T> std::shared_ptr<T> addGraphicsChild(const std::string &name) {
+  // Extra arguments are forwarded to T's constructor after (app, statePath,
+  // name), for node types that need more to exist (a StreamingGeometryNode's
+  // layout, a RibbonNode's capacity):
+  //        auto track = parent->addGraphicsChild<RibbonNode>("track", 1024, 1.5f, box);
+  template <typename T, typename... Args>
+  std::shared_ptr<T> addGraphicsChild(const std::string &name, Args &&...args) {
     static_assert(std::is_base_of<GraphicsNode, T>::value, "T must be derived from GraphicsNode");
 
     // Construct state path: {parent_path}.children.{name}
     std::string childStatePath = getState().fullName() + ".children." + name;
 
     // Create the child node with proper state path and name
-    auto child = std::make_shared<T>(this->app(), childStatePath, name);
+    auto child =
+        std::make_shared<T>(this->app(), childStatePath, name, std::forward<Args>(args)...);
 
     // Add to children using the non-template version
     addGraphicsChild(std::static_pointer_cast<GraphicsNode>(child));

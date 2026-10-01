@@ -18,6 +18,7 @@ class vtkTextureObject;
 class vtkImageData;
 class vtkCallbackCommand;
 class vtkObject;
+class vtkShaderProgram;
 
 namespace cvc {
 class geometry;
@@ -189,6 +190,29 @@ public:
   static bool isComputedMetadata(const std::string &key);
 
 protected:
+  // For subclasses that need a specific vtkPolyDataMapper instead of the
+  // factory one the public constructor creates (vtkPolyDataMapper::New(), i.e.
+  // vtkOpenGLPolyDataMapper on desktop GL and vtkOpenGLLowMemoryPolyDataMapper
+  // on GLES/WebGL2). StreamingGeometryNode passes its streaming mapper here.
+  // The mapper is wired to this node's actor and polydata exactly like the
+  // default one; a null mapper falls back to the factory mapper.
+  GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name,
+               vtkSmartPointer<vtkPolyDataMapper> mapper);
+
+  // The VTK objects behind this node, for subclasses that drive them directly.
+  // Owner thread only, like every other VTK access in cvcGL.
+  vtkActor *actor() const;
+  vtkPolyDataMapper *mapper() const;
+  vtkPolyData *polyData() const;
+
+  // Bind `textures` to `program` on units above the ones the low-memory mapper
+  // hands its emulated vertex buffers (see onUpdateShader for why), setting each
+  // sampler uniform that the program actually uses. For UpdateShaderEvent
+  // observers; textures without a context, or unused by the program, are skipped.
+  static void
+  bindShaderTextures(vtkShaderProgram *program,
+                     const std::vector<std::pair<std::string, vtkTextureObject *>> &textures);
+
   vtkProp *getProp() override;
   void handleStateChanged(const std::string &childState) override;
   void applyTransformToVTK() override;                       // Apply transform to actor
