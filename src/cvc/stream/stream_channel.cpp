@@ -122,9 +122,7 @@ void stream_channel::unsubscribe(const std::shared_ptr<subscription> &s) {
     found->close(); // outside the lock: only touches the subscription's own state
 }
 
-std::int64_t stream_channel::publish(const frame_pool::lease &l, std::size_t used, double pts) {
-  const std::int64_t seq = seq_.fetch_add(1, std::memory_order_relaxed);
-  frame_ptr f = pool_->publish(l, used, seq, pts, fmt_);
+void stream_channel::fan_out(const frame_ptr &f) {
   // Snapshot the subscription handles under the lock, then deliver OFF the lock:
   // the shared_ptr copies keep a concurrently-unsubscribing subscription alive
   // through delivery, and delivery never blocks on subs_mu_.
@@ -135,6 +133,29 @@ std::int64_t stream_channel::publish(const frame_pool::lease &l, std::size_t use
   }
   for (const auto &s : snapshot)
     s->deliver(f);
+}
+
+std::int64_t stream_channel::publish(const frame_pool::lease &l, std::size_t used, double pts) {
+  const std::int64_t seq = seq_.fetch_add(1, std::memory_order_relaxed);
+  frame_ptr f = pool_->publish(l, used, seq, pts, fmt_);
+  fan_out(f);
+  return seq;
+}
+
+std::int64_t stream_channel::publish_external(const std::uint8_t *data, std::size_t size,
+                                              double pts, std::shared_ptr<void> keepalive) {
+  const std::int64_t seq = seq_.fetch_add(1, std::memory_order_relaxed);
+  // Build a frame that borrows the caller's storage directly (no pool slab). The
+  // keepalive co-owns `data` for the frame's whole life, so a subscriber that
+  // still holds the frame_ptr keeps the caller's buffer alive.
+  auto f = std::make_shared<frame>();
+  f->data = data;
+  f->size = size;
+  f->seq = seq;
+  f->pts_seconds = pts;
+  f->format = fmt_;
+  f->keepalive = std::move(keepalive);
+  fan_out(frame_ptr(std::move(f)));
   return seq;
 }
 

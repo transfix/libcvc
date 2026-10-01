@@ -245,6 +245,69 @@ TEST(StreamChannel, ConcurrentSubscribeUnsubscribeDuringPublish) {
   SUCCEED();
 }
 
+TEST(StreamChannel, PublishExternalAliasesCallerStorageZeroCopy) {
+  cvc::app app;
+  auto pool = frame_pool::create(16, 8);
+  stream_channel ch(app, "vid", rgba(2, 2), pool, 2, 1);
+  auto sub = ch.subscribe(deliver_mode::latest, 1);
+  ASSERT_TRUE(sub);
+
+  auto buf = std::make_shared<std::vector<std::uint8_t>>(16, 0xAB);
+  const std::int64_t seq = ch.publish_external(buf->data(), buf->size(), 1.5, buf);
+  EXPECT_EQ(seq, 0);
+  auto f = sub->latest();
+  ASSERT_TRUE(f);
+  EXPECT_EQ(f->data, buf->data()); // zero-copy alias, not a slab
+  EXPECT_EQ(f->size, 16u);
+  EXPECT_EQ(f->pts_seconds, 1.5);
+  EXPECT_EQ(ch.pool().in_use(), 0u); // the pool was never touched
+}
+
+TEST(StreamChannel, PublishExternalInterleavesSeqWithPool) {
+  cvc::app app;
+  auto pool = frame_pool::create(16, 8);
+  stream_channel ch(app, "vid", rgba(2, 2), pool, 2, 1);
+  auto sub = ch.subscribe(deliver_mode::latest, 1);
+  ASSERT_TRUE(sub);
+
+  auto l0 = ch.pool().acquire();
+  ASSERT_TRUE(l0.has_value());
+  EXPECT_EQ(ch.publish(*l0, 16, 0.0), 0); // pool seq 0
+  auto buf = std::make_shared<std::vector<std::uint8_t>>(16, 0x01);
+  EXPECT_EQ(ch.publish_external(buf->data(), 16, 0.0, buf), 1); // external seq 1
+  auto l2 = ch.pool().acquire();
+  ASSERT_TRUE(l2.has_value());
+  EXPECT_EQ(ch.publish(*l2, 16, 0.0), 2); // pool seq 2
+
+  EXPECT_EQ(ch.last_seq(), 2);
+  EXPECT_EQ(ch.total_published(), 3u);
+  ASSERT_TRUE(sub->latest());
+  EXPECT_EQ(sub->latest()->seq, 2); // seq monotonic across both producer paths
+}
+
+TEST(StreamChannel, PublishExternalKeepaliveReleasedWhenFrameDrops) {
+  bool released = false;
+  std::shared_ptr<std::vector<std::uint8_t>> storage(new std::vector<std::uint8_t>(16, 0x7f),
+                                                     [&released](std::vector<std::uint8_t> *v) {
+                                                       released = true;
+                                                       delete v;
+                                                     });
+  cvc::app app;
+  auto pool = frame_pool::create(16, 8);
+  stream_channel ch(app, "vid", rgba(2, 2), pool, 2, 1);
+  auto sub = ch.subscribe(deliver_mode::ring, 2);
+  ASSERT_TRUE(sub);
+
+  ch.publish_external(storage->data(), storage->size(), 0.0, storage);
+  storage.reset(); // the ring's frame_ptr now solely pins the buffer
+  EXPECT_FALSE(released);
+  frame_ptr out;
+  ASSERT_TRUE(sub->try_pop(out));
+  EXPECT_FALSE(released); // we hold the frame
+  out.reset();
+  EXPECT_TRUE(released); // last borrow dropped -> caller storage freed
+}
+
 // --------------------------------------------------------------------------
 // stream_registry
 // --------------------------------------------------------------------------
