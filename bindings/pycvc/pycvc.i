@@ -978,6 +978,11 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 // machinery + capsule dtor defined above.
 %include "pycvc_image.i"
 
+// ── cvc::stream: real-time frame transport (video) ───────────────────────
+// Phase-2 streaming bindings. %included AFTER pycvc_image.i so it reuses the
+// ArrayView out-typemap + the pycvc_owner capsule dtor for StreamFrame.numpy().
+%include "pycvc_stream.i"
+
 // ── cvc::volren: software raycaster value types + headless raycaster ─────
 // The volren settings structs + raycaster (renders a cvc::volume to a cvc::image,
 // no VTK). Placed here, after volume + image + bounding_box + world_units are all
