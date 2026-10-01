@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
+#include <cvc/core/state_exec/intrinsics.h>      // resolve_channel_key (§12 channel scoping)
 #include <cvc/stream/stream.h>
 #include <cvc/stream/stream_registry.h>
 
@@ -28,6 +29,15 @@ std::int64_t steady_now_ns() {
 
 stream::stream(app &ctx, std::string id) : ctx_(ctx), id_(std::move(id)) {}
 
+std::string stream::registry_key(const std::string &root_path, const std::string &id) {
+  // Canonical: <root_path>.streams.<id>, normalized (root_path empty => streams.<id>).
+  std::string p = root_path.empty() ? std::string() : root_path + state::SEPARATOR;
+  p += "streams";
+  p += state::SEPARATOR;
+  p += id;
+  return state::normalize_path(p);
+}
+
 stream::~stream() {
   close();
   // Release the descriptor pins/handles. The channel's dtor close()s again
@@ -41,13 +51,24 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
   const std::size_t slab_bytes = p.format.frame_bytes();
   if (slab_bytes == 0 || p.id.empty())
     return nullptr; // unsized format or missing id
+  // id must be a single path segment: it is the leaf of the canonical key
+  // <root_path>.streams.<id>, and a '.' in it would make the root/id boundary
+  // ambiguous (registry_key("a.streams","b") == registry_key("a","streams.b")),
+  // breaking the cross-scope collision-free guarantee.
+  if (p.id.find(state::SEPARATOR) != std::string::npos)
+    return nullptr;
 
   std::unique_ptr<stream> s(new stream(ctx, p.id));
-  s->token_ = p.id; // Phase 1: token == id (unique per app)
-  // '#'-prefixed segment keeps these keys identity/policy-exempt so channel
-  // chroot-scoping cannot rewrite them out from under the producer's posts.
-  s->seq_channel_ = p.id + "#stream.seq";
-  s->evt_channel_ = p.id + "#stream.evt";
+  s->scope_ = p.root_path;
+  // §4.1 scoping. The registry key / descriptor path is the canonical
+  // <root_path>.streams.<id>. The seq/evt event channels are scoped through the
+  // SAME chroot resolver a (msg-recv ...) in this document uses, computed ONCE
+  // here on the owner thread; the producer then posts these pre-resolved keys, so
+  // producer and a same-scope receiver resolve to the identical string (and a
+  // bottom-up `channels:` grant can bridge them across documents).
+  s->token_ = registry_key(p.root_path, p.id);
+  s->seq_channel_ = cvc::state_exec::resolve_channel_key(p.root_path, "streams." + p.id + ".seq");
+  s->evt_channel_ = cvc::state_exec::resolve_channel_key(p.root_path, "streams." + p.id + ".evt");
   s->heartbeat_ns_ = p.heartbeat_hz > 0.0 ? static_cast<std::int64_t>(1.0e9 / p.heartbeat_hz) : 0;
 
   std::size_t slab_count =
@@ -62,12 +83,14 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
   if (!stream_registry::for_app(ctx).install(s->token_, s->channel_.get()))
     return nullptr; // token already live
 
-  // Publish the descriptor node on the owner thread. Pin the whole ancestor
-  // chain: value()/data() walk _parent via fullName()/childChanged (H1).
+  // Publish the descriptor node at the canonical scoped path <root_path>.streams.<id>
+  // (== token_) on the owner thread. sharedChild with the whole dotted path pins
+  // EVERY ancestor hop (root_path's segments + streams + id), because value()/data()
+  // walk _parent via fullName()/childChanged (H1); a leaf-only pin would leave a
+  // chrooted stream's ancestors exposed to a concurrent sweep.
   try {
     state &root = state::instance(ctx);
-    state::state_ptr streams = root.sharedChild("streams", &s->descriptor_pins_);
-    state::state_ptr node = streams->sharedChild(p.id, &s->descriptor_pins_);
+    state::state_ptr node = root.sharedChild(s->token_, &s->descriptor_pins_);
     node->data(boost::any(p.format));
     node->value("live");
     state::state_ptr stats = node->sharedChild("stats", &s->descriptor_pins_);

@@ -94,7 +94,8 @@ int main() {
   node->setUseSingleColor(false);
   node->setGeometry(uv_quad());
 
-  StreamTextureBinding binding(app, "vid", node, sub);
+  // The binding resolves the channel by the stream's canonical registry key.
+  StreamTextureBinding binding(app, s->token(), node, sub);
   assert(binding.last_seq() == -1 && "fresh binding should have no applied frame");
 
   // 1. Publish a frame; a tick aliases it into the texture ZERO-COPY.

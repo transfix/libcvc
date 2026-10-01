@@ -52,21 +52,31 @@ struct stream_stats {
 };
 
 struct stream_params {
-  std::string id;                       // unique per app; also the Phase-1 registry token
-  format_desc format;                   // must be sized (frame_bytes() > 0) or open() returns null
-  std::size_t subscriber_depth = 3;     // Q7 default ring/register depth per subscriber
-  std::size_t expected_subscribers = 1; // sizes the pool to the §3.2 invariant
-  std::size_t producer_working_set = 2; // slabs reserved for the producer (double-buffer)
+  std::string id; // unique within the scope; the descriptor node name under <root_path>.streams
+  std::string root_path; // §4.1 chroot scope (empty = app root / standalone); the opening Ariadne
+                         // document passes its ictx.root_path so streams are isolated per document
+  format_desc format;    // must be sized (frame_bytes() > 0) or open() returns null
+  std::size_t subscriber_depth = 3;         // Q7 default ring/register depth per subscriber
+  std::size_t expected_subscribers = 1;     // sizes the pool to the §3.2 invariant
+  std::size_t producer_working_set = 2;     // slabs reserved for the producer (double-buffer)
   std::size_t in_flight_per_subscriber = 1; // slab a consumer holds while draining/rendering
   double heartbeat_hz = 10.0;               // cap on seq-tick posts (0 => post every seq)
 };
 
 class stream {
 public:
-  // Returns null if the format is unsized, the id is empty, or the token is
-  // already live in this app's registry.
+  // Returns null if the format is unsized, the id is empty, or a stream is
+  // already live under the same (root_path, id) in this app's registry.
   static std::unique_ptr<stream> open(app &ctx, const stream_params &p);
   ~stream();
+
+  // The canonical stream key: the descriptor node's full path under the scope,
+  // `<root_path>.streams.<id>` (normalized). This is BOTH the stream_registry key
+  // AND the descriptor node path — a single identity that same-scope lookups and a
+  // link:-grant-followed resolution both produce (§4.1), so a granted sub-app
+  // resolves the identical key. A consumer (e.g. StreamTextureBinding) that knows
+  // (root_path, id) uses this to look the channel up; token() returns it.
+  static std::string registry_key(const std::string &root_path, const std::string &id);
 
   stream(const stream &) = delete;
   stream &operator=(const stream &) = delete;
@@ -96,7 +106,8 @@ private:
 
   app &ctx_;
   std::string id_;
-  std::string token_;
+  std::string scope_; // root_path this stream was opened under
+  std::string token_; // == registry_key(scope_, id_): canonical descriptor path + registry key
   std::string seq_channel_;
   std::string evt_channel_;
   std::int64_t heartbeat_ns_ = 0;
