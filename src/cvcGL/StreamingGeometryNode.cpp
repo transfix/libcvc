@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cvc/gl/SceneEventSink.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StreamingGeometryNode.h>
 #include <cvc/gl/StreamingMappers.h>
@@ -228,14 +229,18 @@ void StreamingGeometryNode::growReservedBounds(const cvc::bounding_box &b) {
 }
 
 bool StreamingGeometryNode::stageDerivedBounds(const cvc::bounding_box &bounds) {
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_boundsPinned)
-      return false;
-    m_bounds = bounds;
-    m_boundsPending = true;
-  }
+  if (!commitDerivedBounds(bounds))
+    return false;
   scheduleApply();
+  return true;
+}
+
+bool StreamingGeometryNode::commitDerivedBounds(const cvc::bounding_box &bounds) {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  if (m_boundsPinned)
+    return false;
+  m_bounds = bounds;
+  m_boundsPending = true;
   return true;
 }
 
@@ -343,12 +348,14 @@ void StreamingGeometryNode::beforeComputeBounds() {}
 void StreamingGeometryNode::updateShaderProgram(vtkShaderProgram *) {}
 
 void StreamingGeometryNode::requestRenderIfAttached() {
-  if (SceneGraph *sg = getSceneGraph())
-    sg->requestRender();
+  // The locked sink, not a raw SceneGraph*: callable from producer threads
+  // (setUniform) while the owner may be destroying the scene.
+  if (std::shared_ptr<SceneEventSink> events = sceneEvents())
+    events->requestRender();
 }
 
 void StreamingGeometryNode::onSceneGraphChanged() {
-  if (!getSceneGraph())
+  if (!sceneEvents())
     return;
   bool pending = false;
   {
@@ -364,11 +371,17 @@ bool StreamingGeometryNode::hasPendingLocked() const {
          m_pickablePending;
 }
 
+void StreamingGeometryNode::requestApply() { scheduleApply(); }
+
 void StreamingGeometryNode::scheduleApply() {
-  SceneGraph *sg = getSceneGraph();
-  if (!sg)
+  // Hold the scene's event sink, not a raw SceneGraph*: the owner thread may
+  // destroy the scene while this (producer) thread is on its way to post. The
+  // sink outlives it while held, and refuses the post once closed -- the staged
+  // state then simply stays pending for the next attach.
+  std::shared_ptr<SceneEventSink> events = sceneEvents();
+  if (!events)
     return; // unattached: staged only, applied on the owner thread at attach
-  if (sg->onOwnerThread()) {
+  if (events->onOwnerThread()) {
     applyPending(); // owner thread: nothing to marshal
     return;
   }
@@ -377,9 +390,19 @@ void StreamingGeometryNode::scheduleApply() {
   // posted" flag: a slot that never runs (its scene destroyed first) must not
   // stop the next change from posting again.
   std::weak_ptr<SceneNode> weak = weak_from_this();
-  sg->postEventCoalesced(&m_applyKey, [weak]() {
-    if (auto self = weak.lock())
-      static_cast<StreamingGeometryNode *>(self.get())->applyPending();
+  const SceneEventSink *drainedBy = events.get(); // identity only, never dereferenced
+  events->postCoalesced(&m_applyKey, [weak, drainedBy]() {
+    auto self = weak.lock();
+    if (!self)
+      return;
+    auto *node = static_cast<StreamingGeometryNode *>(self.get());
+    // Only the scene the node is in NOW may apply, on its own owner thread.
+    // A slot left behind in a scene the node has since moved out of (to one
+    // that another thread may own) leaves the staging alone: the new scene got
+    // its own apply when the node arrived (onSceneGraphChanged).
+    if (node->sceneEvents().get() != drainedBy)
+      return;
+    node->applyPending();
   });
 }
 

@@ -524,14 +524,27 @@ add_test(NAME cvcgl_viewport_input COMMAND cvcgl_viewport_input)
 #   cvcgl_streaming_overlays: track append, spine replan + visible range, draped
 #     link, pixel parity against the equivalent wholesale GeometryNode, and all of
 #     it under vtkShadowMapPass (one upload per frame, not per pass).
-add_executable(cvcgl_streaming_geometry test/cvcgl_streaming_geometry.cpp
-                                        test/gl_upload_counter.cpp)
-target_link_libraries(cvcgl_streaming_geometry PRIVATE cvcGL)
-add_test(NAME cvcgl_streaming_geometry COMMAND cvcgl_streaming_geometry)
-add_executable(cvcgl_streaming_overlays test/cvcgl_streaming_overlays.cpp
-                                        test/gl_upload_counter.cpp)
-target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
-add_test(NAME cvcgl_streaming_overlays COMMAND cvcgl_streaming_overlays)
+#   cvcgl_streaming_races: interleavings forced at chosen lock acquisitions (an
+#     interposed pthread_mutex_lock, so Linux only): a producer posting while the
+#     owner destroys the scene, and the draped link's bounds derive/commit races.
+# Desktop GL only: gl_upload_counter.cpp swaps glad function pointers and the
+# texture read-back uses glGetTexImage, neither of which exists on GLES/WebGL2
+# (the wasm VTK includes <GLES3/gl3.h>, not glad).
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_streaming_geometry test/cvcgl_streaming_geometry.cpp
+                                          test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_streaming_geometry PRIVATE cvcGL)
+  add_test(NAME cvcgl_streaming_geometry COMMAND cvcgl_streaming_geometry)
+  add_executable(cvcgl_streaming_overlays test/cvcgl_streaming_overlays.cpp
+                                          test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
+  add_test(NAME cvcgl_streaming_overlays COMMAND cvcgl_streaming_overlays)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
+    target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})
+    add_test(NAME cvcgl_streaming_races COMMAND cvcgl_streaming_races)
+  endif()
+endif()
 
 # SdlInput: SDL3 event -> normalized cvc::gl::InputEvent translation (the §4.6 input seam's SDL
 # source). Pushes synthetic SDL key/mouse events onto the queue and verifies poll() returns them.

@@ -133,20 +133,28 @@ void DrapedLinkNode::setEndpoints(float x0, float y0, float x1, float y1) {
 
 void DrapedLinkNode::setStyle(float halfWidth, float lift, float r, float g, float b,
                               float opacity) {
-  bool translucent = opacity < 1.0f, crossed = false;
+  bool translucent = opacity < 1.0f, crossed = false, staged = false;
   {
-    std::lock_guard<std::mutex> lock(m_linkMutex);
-    m_half = halfWidth;
-    m_lift = lift;
-    crossed = translucent != m_translucent;
-    m_translucent = translucent;
+    // New style -> derived box -> commit, as ONE step against beforeComputeBounds
+    // and refreshReservedBounds (all three hold m_boundsMutex): whichever commits
+    // last derived from the newest style and heights, so an older box can never
+    // overwrite a newer one. A box the caller pinned stays put.
+    std::lock_guard<std::mutex> boundsLock(m_boundsMutex);
+    {
+      std::lock_guard<std::mutex> lock(m_linkMutex);
+      m_half = halfWidth;
+      m_lift = lift;
+      crossed = translucent != m_translucent;
+      m_translucent = translucent;
+    }
+    staged = commitDerivedLocked();
   }
   setUniform("cvcLinkHalf", halfWidth);
   setUniform("cvcLinkLift", lift);
   setUniform("cvcLinkColor", r, g, b);
   setUniform("cvcLinkOpacity", opacity);
-  // Width and lift move the derived box; a box the caller pinned stays put.
-  stageDerivedBounds(derivedBounds());
+  if (staged)
+    requestApply(); // outside m_boundsMutex: on the owner thread this applies inline
   if (crossed) {
     // Route the actor to the translucent pass (or back). A property change, so
     // only when crossing 1, never per frame.
@@ -168,21 +176,40 @@ cvc::bounding_box DrapedLinkNode::derivedBounds() const {
                            e.maxx + pad, e.maxy + pad, e.maxz + std::max(0.0f, lift) + 1.0);
 }
 
+bool DrapedLinkNode::commitDerivedLocked() {
+  // The height generation is read BEFORE the extent the box is derived from:
+  // heights that change in between make the box newer than the generation
+  // recorded with it, so the next beforeComputeBounds derives once more --
+  // never the reverse (a stale box recorded as current).
+  const std::uint64_t gen = m_heights->generation();
+  const bool committed = commitDerivedBounds(derivedBounds());
+  m_seenGeneration = gen;
+  return committed;
+}
+
 void DrapedLinkNode::refreshReservedBounds() {
-  m_seenGeneration = m_heights->generation();
-  unpinReservedBounds();
-  stageDerivedBounds(derivedBounds());
+  bool staged = false;
+  {
+    std::lock_guard<std::mutex> boundsLock(m_boundsMutex);
+    unpinReservedBounds();
+    staged = commitDerivedLocked();
+  }
+  if (staged)
+    requestApply();
 }
 
 void DrapedLinkNode::beforeComputeBounds() {
   // Heights changed since the box was derived (terrain loaded after the link
   // was made, say): re-derive it now, before VTK culls by it. Here rather than
   // in beforeDraw because a link whose stale box is out of view is never drawn.
-  const std::uint64_t gen = m_heights->generation();
+  if (m_heights->generation() == m_seenGeneration.load())
+    return; // the per-frame fast path: no lock
+  std::lock_guard<std::mutex> boundsLock(m_boundsMutex);
+  const std::uint64_t gen = m_heights->generation(); // before the extent, as above
   if (gen == m_seenGeneration.load())
-    return;
-  m_seenGeneration = gen;
+    return; // a setStyle / refresh derived it meanwhile
   setDerivedBoundsNow(derivedBounds());
+  m_seenGeneration = gen;
 }
 
 void DrapedLinkNode::centerAt(double t, double out[3]) const {

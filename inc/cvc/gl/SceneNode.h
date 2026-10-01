@@ -15,6 +15,7 @@ namespace cvc {
 namespace gl {
 
 class SceneGraph;
+class SceneEventSink;
 
 // Lifetime / threading contract
 // ------------------------------
@@ -110,6 +111,12 @@ protected:
   // A node that buffers work while it has no scene flushes it from here.
   virtual void onSceneGraphChanged() {}
 
+  // The event sink of this node's scene (SceneGraph::eventSink()), LOCKED: the
+  // queue stays valid for as long as the caller holds it, even if the scene is
+  // destroyed meanwhile (posts are then refused). nullptr with no live scene.
+  // What a producer thread must post through, instead of a raw SceneGraph*.
+  std::shared_ptr<SceneEventSink> sceneEvents() const;
+
   bool m_visible;
   std::vector<std::shared_ptr<SceneNode>> m_children;
   vtkRenderer *m_renderer;
@@ -120,6 +127,7 @@ private:
   // read that can tell "detached" from "dangling", so subclasses go through it.
   SceneGraph *m_sceneGraph;
   std::weak_ptr<void> m_sceneAlive; // SceneGraph::aliveToken() of m_sceneGraph
+  std::weak_ptr<SceneEventSink> m_sceneEvents; // SceneGraph::eventSink() of m_sceneGraph
   // Guards the pair above: a producer thread may ask for the scene (to marshal
   // work onto it) while the owner thread attaches or detaches the node.
   mutable std::mutex m_sceneMutex;

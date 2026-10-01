@@ -92,6 +92,10 @@ protected:
 
 private:
   cvc::bounding_box derivedBounds() const;
+  // Derive the box and commit it (unless pinned), recording the height
+  // generation it was derived from. m_boundsMutex held; returns whether it
+  // committed (the caller then requestApply()s, outside the lock).
+  bool commitDerivedLocked();
 
   std::shared_ptr<HeightFieldTexture> m_heights;
   const int m_stations;
@@ -101,6 +105,9 @@ private:
   bool m_translucent = false;
   // HeightFieldTexture::generation() the derived bounds were last taken at.
   std::atomic<std::uint64_t> m_seenGeneration{0};
+  // Serialises every derive-and-commit of the bounds (setStyle,
+  // refreshReservedBounds, beforeComputeBounds). Taken before m_linkMutex.
+  std::mutex m_boundsMutex;
 };
 
 } // namespace gl

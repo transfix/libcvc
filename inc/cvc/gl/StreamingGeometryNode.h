@@ -206,6 +206,11 @@ protected:
   // then); unpinReservedBounds hands the box back to the subclass.
   void growReservedBounds(const cvc::bounding_box &bounds);
   bool stageDerivedBounds(const cvc::bounding_box &bounds);
+  // stageDerivedBounds without the apply: for a subclass that commits under a
+  // lock of its own and calls requestApply() once it has released it.
+  bool commitDerivedBounds(const cvc::bounding_box &bounds);
+  // Apply what is staged: inline on the owner thread, else posted to it.
+  void requestApply();
   void unpinReservedBounds();
   bool reservedBoundsPinned() const;
   // Owner/render thread only, e.g. from beforeComputeBounds(): replace the box

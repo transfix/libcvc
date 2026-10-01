@@ -319,6 +319,8 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // it); a Python override would run on whatever thread attaches the node.
 // Unqualified so the director classes' inherited copies are skipped too.
 %ignore onSceneGraphChanged;
+// The locked event sink is C++ plumbing for producer threads (opaque type).
+%ignore cvc::gl::SceneNode::sceneEvents;
 %include "cvc/gl/SceneNode.h"
 
 // ── GraphicsNode: keep transform / material / label; ignore VTK/any/templates ─
@@ -1366,6 +1368,7 @@ def _typed_node(sg, name):
 // postEventCoalesced's raw const void* key is re-exposed as
 // post_event_coalesced(key_object, callable).
 %ignore cvc::gl::SceneGraph::postEventCoalesced;
+%ignore cvc::gl::SceneGraph::eventSink; // SceneEventSink is C++-only
 %extend cvc::gl::SceneGraph {
   // NOTE: swig parses the DECLARATIONS below in cvc::gl scope (so a bare
   // `GeometryNode` return type resolves), but emits each BODY verbatim as a

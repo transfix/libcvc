@@ -176,6 +176,75 @@ void testUnattachedAndDroppedSlot(cvc::app &app) {
   check(rib->streamStats().applies == a0 + 2, "the stale slot finds nothing left to apply");
 }
 
+// ── a throwing callback strands nothing ────────────────────────────────────
+// processEvents used to drop the rest of its batch when a callback threw,
+// leaving their coalesced keys registered with no queued slot: every later post
+// for those keys (a streaming node's applies) was swallowed for good.
+void testThrowingCallback(cvc::app &app) {
+  std::printf("processEvents: a throwing callback strands nothing\n");
+  SceneGraph sg(app, "throwing");
+  int key = 0;
+  std::vector<std::string> log;
+  auto joined = [&log]() {
+    std::string s;
+    for (auto &e : log)
+      s += e + " ";
+    return s;
+  };
+  sg.postEvent([]() { throw std::runtime_error("boom"); });
+  sg.postEventCoalesced(&key, [&log]() { log.push_back("K1"); });
+  sg.postEvent([&log]() { log.push_back("E"); });
+  bool threw = false;
+  try {
+    sg.processEvents();
+  } catch (const std::runtime_error &) {
+    threw = true;
+  }
+  check(threw && log.empty(), "the exception propagates; nothing after it has run yet");
+  sg.postEventCoalesced(&key, [&log]() { log.push_back("K2"); });
+  sg.postEvent([&log]() { log.push_back("F"); });
+  sg.processEvents();
+  check(joined() == "K2 E F ",
+        "the unrun events keep their slots and order; the key runs once, latest callback",
+        joined());
+
+  auto rib = sg.getGraphicsRoot()->addGraphicsChild<RibbonNode>(
+      "r", 16, 1.0f, cvc::bounding_box(-10, -10, -1, 10, 10, 1), StreamingMapperKind::Classic);
+  const std::uint64_t a0 = rib->streamStats().applies;
+  sg.postEvent([]() { throw std::runtime_error("boom"); });
+  std::thread([&]() { rib->append(1, 2, 0); }).join();
+  try {
+    sg.processEvents();
+  } catch (const std::runtime_error &) {
+  }
+  std::thread([&]() { rib->append(3, 4, 0); }).join();
+  sg.processEvents();
+  check(rib->streamStats().applies == a0 + 1 && rib->centerCount() == 2,
+        "a streaming node's apply survives a throwing neighbour in the queue",
+        "applies +" + std::to_string(rib->streamStats().applies - a0));
+}
+
+// ── a slot left in a scene the node moved out of ───────────────────────────
+void testMovedNodeStaleSlot(cvc::app &app) {
+  std::printf("a stale slot in the scene a node left does not apply it\n");
+  SceneGraph from(app, "move_from"), to(app, "move_to");
+  auto rib = from.getGraphicsRoot()->addGraphicsChild<RibbonNode>(
+      "r", 16, 1.0f, cvc::bounding_box(-10, -10, -1, 10, 10, 1), StreamingMapperKind::Classic);
+  const std::uint64_t a0 = rib->streamStats().applies;
+  std::thread([&]() { rib->append(1, 2, 0); }).join(); // a slot in `from`
+  // Moved by a thread that owns neither scene: the move posts its apply to `to`.
+  std::thread([&]() {
+    from.getGraphicsRoot()->removeGraphicsChild(rib);
+    to.getGraphicsRoot()->addGraphicsChild(rib);
+  }).join();
+  from.processEvents();
+  check(rib->streamStats().applies == a0,
+        "the old scene's slot leaves a node that now belongs to another scene alone");
+  to.processEvents();
+  check(rib->streamStats().applies == a0 + 1 && rib->centerCount() == 1,
+        "the scene it belongs to applies it");
+}
+
 // ── bounds: ribbons grow theirs, links derive theirs unless pinned ─────────
 bool boxCovers(const cvc::bounding_box &b, double x, double y, double z) {
   return b.minx <= x && x <= b.maxx && b.miny <= y && y <= b.maxy && b.minz <= z && z <= b.maxz;
@@ -624,6 +693,8 @@ int main() {
   testCoalescedEvents(app);
   testApplyKeyIsPrivate(app);
   testUnattachedAndDroppedSlot(app);
+  testThrowingCallback(app);
+  testMovedNodeStaleSlot(app);
   testBounds(app);
   testInternalShaderReplacements(app);
   testMapperSelection(app);

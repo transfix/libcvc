@@ -424,13 +424,20 @@ void testLink(cvc::app &app, StreamingMapperKind kind) {
         "updateRows(5 rows) = one 2560-byte glTexSubImage2D", glcountStr(d));
   check(onLink(f, C - 30), "the link follows the patched terrain");
 
-  // The public shader-replacement API cannot take the drape away.
+  // The public shader-replacement API reaches the GPU after the first draw on
+  // BOTH mappers (VTK's low-memory one ignores its shader property once its
+  // program is built) -- and cannot take the drape away.
   const int errors0 = ErrorCounter::errors();
+  link->addFragmentShaderReplacement("//VTK::UniformFlow::Impl",
+                                     "//VTK::UniformFlow::Impl\n  discard;\n");
+  f = grab(sr);
+  check(!onLink(f, C) && !onLink(f, C - 30),
+        "a caller replacement added after the first draw takes effect (discards it all)");
   link->clearShaderReplacements();
   link->addVertexShaderReplacement("//VTK::Clip::Impl", "//VTK::Clip::Impl\n  // caller code\n");
   f = grab(sr);
   check(onLink(f, C) && onLink(f, C - 30) && ErrorCounter::errors() == errors0,
-        "still draped after clearShaderReplacements() + a caller replacement on its anchor");
+        "cleared again: drawn, and still draped, with a caller replacement on the drape's anchor");
 }
 
 // The link under clipping planes (what a parent's setClipChildren hands its
@@ -547,10 +554,12 @@ void testPicking(cvc::app &app, StreamingMapperKind kind) {
   std::printf("picking [%s]\n", kindName(kind));
   SceneGraph sg(app, std::string("pick_") + kindName(kind));
   sg.setDiagnosticChromeVisible(false);
-  auto hf = bumpField(32);
+  // A flat field whose extent CONTAINS the origin, so the link's reserved box
+  // does too and VTK's bounds pre-filter lets a pick there reach the template
+  // cells at (t, +-1, 0). The drawn link is far from them.
+  auto hf = std::make_shared<HeightFieldTexture>(32, 32, -100.0, -100.0, 200.0 / 31, 200.0 / 31);
   auto link = sg.getGraphicsRoot()->addGraphicsChild<DrapedLinkNode>("link", hf, 12, kind);
-  link->setEndpoints(static_cast<float>(C - 50), static_cast<float>(C), static_cast<float>(C + 50),
-                     static_cast<float>(C));
+  link->setEndpoints(40.0f, 40.0f, 80.0f, 40.0f);
   auto route = sg.getGraphicsRoot()->addGraphicsChild<RibbonNode>("route", 32, 1.5f, kBounds, kind);
   flat(*route, 1.0, 0.1, 0.1);
   {
@@ -569,6 +578,11 @@ void testPicking(cvc::app &app, StreamingMapperKind kind) {
   sr.render();
   const auto t = toPx(sr, 0.5, 0.0, 0.0);
   check(!sr.pickWorld(t[0], t[1], w), "nothing picked at the link's invisible template");
+  link->setPickable(true); // what every streaming node did before
+  sr.render();
+  check(sr.pickWorld(t[0], t[1], w) && std::fabs(w[0] - 0.5) < 0.1,
+        "... which a pickable link WOULD report (the check can fail)");
+  link->setPickable(false);
   topView(sr, C, C, 100);
   sr.render();
   const auto tail = toPx(sr, C - 90 + 60, C - 60, 0.5);

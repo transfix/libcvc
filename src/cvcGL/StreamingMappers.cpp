@@ -35,6 +35,8 @@
 #include <vtkPolyData.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
+#include <vtkShaderProgram.h>
+#include <vtkShaderProperty.h>
 #include <vtkStringToken.h>
 #include <vtkTextureObject.h>
 #include <vtk_glad.h>
@@ -214,6 +216,14 @@ void StreamingLowMemoryPolyDataMapper::ComputeBounds() {
 void StreamingLowMemoryPolyDataMapper::RenderPieceStart(vtkRenderer *ren, vtkActor *act) {
   if (Core.beforeDraw)
     Core.beforeDraw(ren);
+  // VTK 9.5's low-memory mapper never looks at the actor's shader property once
+  // its program is built: IsShaderUpToDate ignores it, where the classic mapper
+  // compares GetShaderMTime(). A replacement added or cleared after the first
+  // draw (GeometryNode::add*ShaderReplacement / clearShaderReplacements) would
+  // never reach the GPU. Dropping the program makes the base rebuild it.
+  if (vtkShaderProperty *sp = act->GetShaderProperty())
+    if (sp->GetShaderMTime() > this->ShaderBuildTimeStamp.GetMTime())
+      this->ShaderProgram = nullptr;
   // IsUpToDate() false => the base deletes EVERY array texture and re-binds them
   // all (the per-frame churn this mapper exists to avoid). That only happens on
   // a real input/topology/shader change; streaming writes never touch the

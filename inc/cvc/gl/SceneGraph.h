@@ -37,6 +37,7 @@ class ShadowSettings;
 class LightNode;
 
 class SceneNode;
+class SceneEventSink;
 class NullGraphicNode;
 class GridNode;
 class AxisNode;
@@ -76,6 +77,13 @@ public:
   // SceneNode::getSceneGraph() == nullptr instead of dereferencing a freed scene
   // (and, through it, a freed publisher mutex). See SceneNode::setSceneGraph.
   std::weak_ptr<void> aliveToken() const { return m_alive; }
+
+  // The event queue / render flag / owner thread behind postEvent,
+  // postEventCoalesced, processEvents, requestRender and onOwnerThread, as a
+  // shared object a producer thread can hold while it posts: it outlives this
+  // scene for as long as someone holds it, and refuses posts once ~SceneGraph
+  // has closed it. Nodes reach it through SceneNode::sceneEvents().
+  std::shared_ptr<SceneEventSink> eventSink() const { return m_events; }
 
   void setRenderer(vtkRenderer *renderer);
 
@@ -212,6 +220,9 @@ public:
   // This MUST be called regularly from the main event loop. After the queue is
   // drained it runs the world-bounds follow-up for any registered node that
   // moved since the last call -- once, however many moved (boundsWalkCount()).
+  // If a callback throws, the exception propagates and the callbacks not yet
+  // run stay queued, ahead of later posts, for the next call (a coalesced key
+  // keeps its slot -- see postEventCoalesced).
   void processEvents();
 
   // Post a callback to be executed on the main thread during processEvents()
@@ -246,11 +257,11 @@ public:
   // thread in a headless/scripted context). Node work initiated on the owner
   // thread runs inline; work from any other thread is marshalled through the
   // event queue. See SceneNode::runOnMainThread().
-  bool onOwnerThread() const { return std::this_thread::get_id() == m_ownerThread; }
+  bool onOwnerThread() const;
 
   // Rebind the owner thread to the caller. Use only if a different thread will
   // henceforth own the scene and drive processEvents().
-  void adoptOwnerThread() { m_ownerThread = std::this_thread::get_id(); }
+  void adoptOwnerThread();
 
   // Check if a render is needed and reset the flag
   bool checkAndResetRenderNeeded();
@@ -460,19 +471,13 @@ private:
   // which is what detaches every node at once.
   std::shared_ptr<void> m_alive = std::make_shared<char>();
   std::string m_statePrefix;
-  std::thread::id m_ownerThread; // thread that owns the scene / drives the pump
 
   std::shared_ptr<GridNode> m_gridNode;
   std::shared_ptr<AxisNode> m_axisNode;
 
-  // Event queue for thread-safe main thread execution
-  std::queue<std::function<void()>> m_eventQueue;
-  std::mutex m_eventQueueMutex;
-  // postEventCoalesced: the latest callback per key, guarded by m_eventQueueMutex.
-  // A key is present exactly while its single queue slot is waiting to run.
-  std::unordered_map<const void *, std::function<void()>> m_coalesced;
-  void runCoalesced(const void *key);
-  bool m_renderNeeded;
+  // Event queue, render flag and owner thread (see eventSink()). Closed, not
+  // just released, in ~SceneGraph: producers may still hold it.
+  std::shared_ptr<SceneEventSink> m_events;
 
   std::vector<std::shared_ptr<SceneNode>> m_rootNodes;
 
