@@ -595,6 +595,28 @@ if(NOT EMSCRIPTEN)
   endif()
 endif()
 
+# LowMemoryPolyDataMapper (the GLES3/WebGL2 mapper with empty cell types and the
+# per-draw shader-cache lookup taken out of its draw), forced on natively. Counts
+# every GL call at the driver (test/gl_call_counter.cpp swaps VTK's glad function
+# pointers) to pin the VTK 9.5.0 replica call-for-call against the stock draw and
+# measure the saving, and compares RGBA frames byte for byte -- shadows on and
+# off, bake and steady frames, released resources, a re-opened window, the
+# offset / picking / vertex-visibility guards. Renders for real; skips where
+# nothing rasterises unless CVC_REQUIRE_RENDER=1. CVCGL_LOWMEM_REPORT=1 prints
+# per-draw breakdowns. Desktop GL only: the wasm VTK calls GLES directly, not
+# through glad.
+#
+# cvcgl_lowmem_bench (not a test) prints GL calls and draw-stage CPU per frame
+# and per draw, Stock vs Fast, for a city of single-colour box nodes on a
+# textured ground with overlays, shadows on and off.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_lowmem_fastdraw test/cvcgl_lowmem_fastdraw.cpp test/gl_call_counter.cpp)
+  target_link_libraries(cvcgl_lowmem_fastdraw PRIVATE cvcGL)
+  add_test(NAME cvcgl_lowmem_fastdraw COMMAND cvcgl_lowmem_fastdraw)
+  add_executable(cvcgl_lowmem_bench test/cvcgl_lowmem_bench.cpp test/gl_call_counter.cpp)
+  target_link_libraries(cvcgl_lowmem_bench PRIVATE cvcGL)
+endif()
+
 # SdlInput: SDL3 event -> normalized cvc::gl::InputEvent translation (the §4.6 input seam's SDL
 # source). Pushes synthetic SDL key/mouse events onto the queue and verifies poll() returns them.
 # Headless (the SDL EVENTS subsystem needs no window). SKIPs (rc 0) in a build without SDL.

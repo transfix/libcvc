@@ -1,0 +1,969 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+*/
+
+// cvc::gl::LowMemoryPolyDataMapper -- the WebGL2/GLES mapper with the empty
+// cell types and the per-draw shader-cache lookup taken out of its draw.
+//
+// Runs that mapper natively (policy Force) on cvcGL's real pipeline -- a
+// SceneGraph with shadows on (camera -> strided shadow baker -> shadow map ->
+// translucent -> volumetric -> overlay) and off -- over GeometryNodes of every
+// kind a scene uses (lit single colour, textured ground, translucent with a
+// depth offset, lines, points, per-vertex colour) plus raw VTK actors whose
+// mapper counts the GL calls of its own draws. Checks:
+//   1. the policy: CVCGL_LOWMEM_MAPPER is read, Force/Off/Auto pick the mapper;
+//   2. the replica: DrawPath::AllCellTypes issues exactly VTK's GL calls (every
+//      entry point, whole frame, bake and plain frames, shadows on and off);
+//   3. pixels: Stock, AllCellTypes and Fast frames are byte-identical (RGBA);
+//   4. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
+//      fraction of the stock calls, with no synchronous GL query in any draw,
+//      and a steady frame does no shader-cache lookup;
+//   5. lifecycle: a shader rebuild (the shadow bake's pass change), a mapper's
+//      released resources, programs released in the shader cache and the scene
+//      re-opened in a new window all go back through the full lookup (or a
+//      recompile) and still match;
+//   6. guards: an offset layout where skipping would change a drawn type's
+//      depth offset, picking and vertex visibility all draw the stock way.
+// Frames are rendered without MSAA: with VTK's default 8x, NVIDIA's resolve
+// varies by 1 LSB at a few edge pixels between identical GL streams.
+// Renders for real; skips (rc 0) where nothing rasterises unless
+// CVC_REQUIRE_RENDER=1. Set CVCGL_LOWMEM_REPORT=1 for the per-draw breakdown.
+//
+// NOT assert(): built Release, where NDEBUG makes assert() a no-op.
+#include "gl_call_counter.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/LowMemoryPolyDataMapper.h>
+#include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/SceneRenderer.h>
+#include <cvc/image/image.h>
+#include <deque>
+#include <memory>
+#include <string>
+#include <vector>
+#include <vtkActor.h>
+#include <vtkActorCollection.h>
+#include <vtkCellArray.h>
+#include <vtkDataObject.h>
+#include <vtkFloatArray.h>
+#include <vtkHardwareSelector.h>
+#include <vtkImageData.h>
+#include <vtkInformation.h>
+#include <vtkMatrix4x4.h>
+#include <vtkObjectFactory.h>
+#include <vtkOpenGLRenderWindow.h>
+#include <vtkOutputWindow.h>
+#include <vtkPointData.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
+#include <vtkPolyDataNormals.h>
+#include <vtkProperty.h>
+#include <vtkRenderWindow.h>
+#include <vtkRenderer.h>
+#include <vtkSelection.h>
+#include <vtkSelectionNode.h>
+#include <vtkSphereSource.h>
+#include <vtkTexture.h>
+#include <vtkUnsignedCharArray.h>
+
+using cvc::gl::GeometryNode;
+using cvc::gl::GeometryRenderMode;
+using cvc::gl::LowMemoryMapperPolicy;
+using cvc::gl::LowMemoryPolyDataMapper;
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+using cvcgl_test::GLCalls;
+using cvcgl_test::glcallsInstall;
+using cvcgl_test::glcallsRead;
+using DrawPath = LowMemoryPolyDataMapper::DrawPath;
+
+namespace {
+
+int g_failures = 0, g_checks = 0;
+bool g_report = false;
+
+bool check(bool ok, const std::string &what, const std::string &detail = "") {
+  ++g_checks;
+  if (!ok)
+    ++g_failures;
+  std::printf("  [%s] %s%s%s\n", ok ? "PASS" : "FAIL", what.c_str(), detail.empty() ? "" : " -- ",
+              detail.c_str());
+  std::fflush(stdout);
+  return ok;
+}
+
+std::string fmt(const char *f, double a, double b = 0, double c = 0) {
+  char buf[256];
+  std::snprintf(buf, sizeof buf, f, a, b, c);
+  return buf;
+}
+
+const char *pathName(DrawPath p) {
+  return p == DrawPath::Stock ? "Stock" : p == DrawPath::AllCellTypes ? "AllCellTypes" : "Fast";
+}
+
+// Counts VTK errors (shader compile/link failures arrive here, not as exceptions).
+class ErrorCounter : public vtkOutputWindow {
+public:
+  static ErrorCounter *New();
+  vtkTypeMacro(ErrorCounter, vtkOutputWindow);
+  static int &errors() {
+    static int n = 0;
+    return n;
+  }
+  void DisplayErrorText(const char *t) override {
+    ++errors();
+    std::fprintf(stderr, "VTK ERROR: %s\n", t);
+  }
+  void DisplayWarningText(const char *t) override { std::fprintf(stderr, "VTK WARNING: %s\n", t); }
+  void DisplayGenericWarningText(const char *t) override {
+    std::fprintf(stderr, "VTK WARNING: %s\n", t);
+  }
+  void DisplayText(const char *t) override { std::fprintf(stderr, "%s", t); }
+};
+vtkStandardNewMacro(ErrorCounter);
+
+// The production mapper plus a GL-call tally of its own RenderPieceDraw calls.
+class ProbeMapper : public LowMemoryPolyDataMapper {
+public:
+  static ProbeMapper *New();
+  vtkTypeMacro(ProbeMapper, LowMemoryPolyDataMapper);
+  GLCalls calls;
+  double draws = 0;
+  void clearTally() {
+    calls = GLCalls();
+    draws = 0;
+  }
+  void RenderPieceDraw(vtkRenderer *ren, vtkActor *act) override {
+    const GLCalls before = glcallsRead();
+    Superclass::RenderPieceDraw(ren, act);
+    calls += glcallsRead() - before;
+    draws += 1;
+  }
+
+protected:
+  ProbeMapper() = default;
+};
+vtkStandardNewMacro(ProbeMapper);
+
+// A GeometryNode whose actor the test can reach.
+class PeekNode : public GeometryNode {
+public:
+  using GeometryNode::GeometryNode;
+  vtkActor *actor() { return vtkActor::SafeDownCast(getProp()); }
+};
+
+// ── geometry ─────────────────────────────────────────────────────────────────
+// A closed, lit box (separate faces so the normals are flat).
+cvc::geometry boxGeometry(double cx, double cy, double cz, double sx, double sy, double sz) {
+  cvc::geometry g;
+  const double x0 = cx - sx, x1 = cx + sx, y0 = cy - sy, y1 = cy + sy, z0 = cz - sz, z1 = cz + sz;
+  const double faces[6][4][3] = {{{x0, y0, z1}, {x1, y0, z1}, {x1, y1, z1}, {x0, y1, z1}}, // top
+                                 {{x0, y0, z0}, {x0, y1, z0}, {x1, y1, z0}, {x1, y0, z0}}, // bottom
+                                 {{x0, y0, z0}, {x1, y0, z0}, {x1, y0, z1}, {x0, y0, z1}}, // -y
+                                 {{x1, y1, z0}, {x0, y1, z0}, {x0, y1, z1}, {x1, y1, z1}}, // +y
+                                 {{x0, y1, z0}, {x0, y0, z0}, {x0, y0, z1}, {x0, y1, z1}}, // -x
+                                 {{x1, y0, z0}, {x1, y1, z0}, {x1, y1, z1}, {x1, y0, z1}}}; // +x
+  for (const auto &f : faces) {
+    const unsigned base = static_cast<unsigned>(g.points().size());
+    for (const auto &p : f)
+      g.points().push_back({p[0], p[1], p[2]});
+    g.tris().push_back({base, base + 1, base + 2});
+    g.tris().push_back({base, base + 2, base + 3});
+  }
+  return g;
+}
+
+// An n x n height-field grid over [-s, s]^2 with UVs.
+cvc::geometry groundGeometry(int n, double s) {
+  cvc::geometry g;
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i) {
+      const double x = -s + 2 * s * i / (n - 1), y = -s + 2 * s * j / (n - 1);
+      g.points().push_back({x, y, 0.6 * std::sin(x * 0.35) * std::cos(y * 0.3)});
+      g.uvs().push_back({double(i) / (n - 1), double(j) / (n - 1)});
+    }
+  for (int j = 0; j + 1 < n; ++j)
+    for (int i = 0; i + 1 < n; ++i) {
+      const unsigned a = j * n + i, b = a + 1, c = a + n, d = c + 1;
+      g.tris().push_back({a, b, d});
+      g.tris().push_back({a, d, c});
+    }
+  return g;
+}
+
+cvc::geometry ribbonGeometry(int n, double x0, double y0, double z) {
+  cvc::geometry g;
+  for (int k = 0; k < n; ++k) {
+    g.points().push_back({x0 + 0.8 * k, y0 - 0.6, z});
+    g.points().push_back({x0 + 0.8 * k, y0 + 0.6, z});
+  }
+  for (int k = 0; k + 1 < n; ++k) {
+    const unsigned l0 = 2 * k, r0 = l0 + 1, l1 = l0 + 2, r1 = l0 + 3;
+    g.tris().push_back({l0, r0, r1});
+    g.tris().push_back({l0, r1, l1});
+  }
+  return g;
+}
+
+cvc::geometry polylineGeometry(int n, double x0, double y0, double z) {
+  cvc::geometry g;
+  for (int k = 0; k < n; ++k) {
+    g.points().push_back({x0 + 0.5 * k, y0 + std::sin(k * 0.4), z});
+    if (k)
+      g.lines().push_back({static_cast<unsigned>(k - 1), static_cast<unsigned>(k)});
+  }
+  return g;
+}
+
+cvc::geometry cloudGeometry(int n, double x0, double y0, double z) {
+  cvc::geometry g;
+  for (int k = 0; k < n; ++k)
+    g.points().push_back({x0 + 0.4 * (k % 10), y0 + 0.4 * (k / 10), z + 0.1 * (k % 3)});
+  return g;
+}
+
+cvc::geometry colouredGeometry(double cx, double cy) {
+  cvc::geometry g = boxGeometry(cx, cy, 1.0, 1.0, 1.0, 1.0);
+  for (size_t i = 0; i < g.points().size(); ++i)
+    g.colors().push_back({(i % 3) / 2.0, ((i / 3) % 3) / 2.0, ((i / 9) % 3) / 2.0});
+  return g;
+}
+
+cvc::image checkerImage(int n) {
+  cvc::image img(n, n, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  unsigned char *p = img.data();
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i) {
+      unsigned char *q = p + 4 * (j * n + i);
+      const bool on = ((i / 8) + (j / 8)) % 2 == 0;
+      q[0] = on ? 200 : 60;
+      q[1] = static_cast<unsigned char>(i * 255 / n);
+      q[2] = static_cast<unsigned char>(j * 255 / n);
+      q[3] = 255;
+    }
+  return img;
+}
+
+// Raw VTK poly data for the probe actors.
+vtkSmartPointer<vtkPolyData> withNormals(vtkPolyData *pd) {
+  vtkNew<vtkPolyDataNormals> f;
+  f->SetInputData(pd);
+  f->SplittingOff();
+  f->ComputePointNormalsOn();
+  f->ComputeCellNormalsOff();
+  f->Update();
+  auto out = vtkSmartPointer<vtkPolyData>::New();
+  out->ShallowCopy(pd);
+  out->GetPointData()->SetNormals(f->GetOutput()->GetPointData()->GetNormals());
+  return out;
+}
+
+vtkSmartPointer<vtkPolyData> spherePoly(double r) {
+  vtkNew<vtkSphereSource> s;
+  s->SetRadius(r);
+  s->SetThetaResolution(24);
+  s->SetPhiResolution(18);
+  s->Update();
+  auto pd = vtkSmartPointer<vtkPolyData>::New();
+  pd->DeepCopy(s->GetOutput());
+  return pd;
+}
+
+vtkSmartPointer<vtkPolyData> terrainPoly(int n, double x0, double y0, double s) {
+  auto pts = vtkSmartPointer<vtkPoints>::New();
+  pts->SetDataTypeToFloat();
+  auto tc = vtkSmartPointer<vtkFloatArray>::New();
+  tc->SetNumberOfComponents(2);
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i) {
+      pts->InsertNextPoint(x0 + s * i / (n - 1), y0 + s * j / (n - 1), 0.05 * ((i + j) % 3));
+      tc->InsertNextTuple2(double(i) / (n - 1), double(j) / (n - 1));
+    }
+  auto polys = vtkSmartPointer<vtkCellArray>::New();
+  for (int j = 0; j + 1 < n; ++j)
+    for (int i = 0; i + 1 < n; ++i) {
+      const vtkIdType a = j * n + i, b = a + 1, c = a + n, d = c + 1;
+      const vtkIdType t1[3] = {a, b, d}, t2[3] = {a, d, c};
+      polys->InsertNextCell(3, t1);
+      polys->InsertNextCell(3, t2);
+    }
+  auto pd = vtkSmartPointer<vtkPolyData>::New();
+  pd->SetPoints(pts);
+  pd->SetPolys(polys);
+  pd->GetPointData()->SetTCoords(tc);
+  return withNormals(pd);
+}
+
+vtkSmartPointer<vtkPolyData> ribbonPoly(int n, double x0, double y0, double z) {
+  auto pts = vtkSmartPointer<vtkPoints>::New();
+  pts->SetDataTypeToFloat();
+  auto polys = vtkSmartPointer<vtkCellArray>::New();
+  for (int k = 0; k < n; ++k) {
+    pts->InsertNextPoint(x0 + 0.7 * k, y0 - 0.5, z);
+    pts->InsertNextPoint(x0 + 0.7 * k, y0 + 0.5, z);
+  }
+  for (int k = 0; k + 1 < n; ++k) {
+    const vtkIdType l0 = 2 * k, r0 = l0 + 1, l1 = l0 + 2, r1 = l0 + 3;
+    const vtkIdType t1[3] = {l0, r0, r1}, t2[3] = {l0, r1, l1};
+    polys->InsertNextCell(3, t1);
+    polys->InsertNextCell(3, t2);
+  }
+  auto pd = vtkSmartPointer<vtkPolyData>::New();
+  pd->SetPoints(pts);
+  pd->SetPolys(polys);
+  return withNormals(pd);
+}
+
+vtkSmartPointer<vtkPolyData> linesPoly(int n, double x0, double y0, double z) {
+  auto pts = vtkSmartPointer<vtkPoints>::New();
+  pts->SetDataTypeToFloat();
+  auto lines = vtkSmartPointer<vtkCellArray>::New();
+  for (int k = 0; k < n; ++k) {
+    pts->InsertNextPoint(x0 + 0.6 * k, y0 + 0.8 * std::cos(k * 0.5), z);
+    if (k) {
+      const vtkIdType ids[2] = {k - 1, k};
+      lines->InsertNextCell(2, ids);
+    }
+  }
+  auto pd = vtkSmartPointer<vtkPolyData>::New();
+  pd->SetPoints(pts);
+  pd->SetLines(lines);
+  return pd;
+}
+
+// One cell type of a 3 x 4 point patch: 'v' verts, 's' a triangle strip. (One
+// type per data set: VTK 9.5.0's low-memory mapper crashes on its first upload
+// of a data set with two or more cell types -- vtkDrawTexturedElements::
+// AppendArrayToTexture flags a not-yet-created buffer dirty; fixed upstream in
+// 9.5.1 by 26ef893b5d9. cvcGL nodes always produce a single cell type.)
+vtkSmartPointer<vtkPolyData> patchPoly(char kind, double x0, double y0, double z) {
+  auto pts = vtkSmartPointer<vtkPoints>::New();
+  pts->SetDataTypeToFloat();
+  for (int k = 0; k < 12; ++k)
+    pts->InsertNextPoint(x0 + (k % 4), y0 + (k / 4), z + 0.2 * (k % 2));
+  auto cells = vtkSmartPointer<vtkCellArray>::New();
+  auto pd = vtkSmartPointer<vtkPolyData>::New();
+  pd->SetPoints(pts);
+  if (kind == 'v') {
+    for (vtkIdType k = 0; k < 12; ++k)
+      cells->InsertNextCell(1, &k);
+    pd->SetVerts(cells);
+  } else {
+    const vtkIdType a[8] = {0, 4, 1, 5, 2, 6, 3, 7}, b[8] = {4, 8, 5, 9, 6, 10, 7, 11};
+    cells->InsertNextCell(8, a);
+    cells->InsertNextCell(8, b);
+    pd->SetStrips(cells);
+  }
+  return pd;
+}
+
+vtkSmartPointer<vtkTexture> checkerTexture(int n) {
+  auto img = vtkSmartPointer<vtkImageData>::New();
+  img->SetDimensions(n, n, 1);
+  img->AllocateScalars(VTK_UNSIGNED_CHAR, 4);
+  auto *px = static_cast<unsigned char *>(img->GetScalarPointer());
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i) {
+      unsigned char *q = px + 4 * (j * n + i);
+      q[0] = static_cast<unsigned char>(i * 255 / n);
+      q[1] = ((i / 4 + j / 4) % 2) ? 220 : 40;
+      q[2] = 128;
+      q[3] = 255;
+    }
+  auto tex = vtkSmartPointer<vtkTexture>::New();
+  tex->SetInputData(img);
+  tex->InterpolateOn();
+  return tex;
+}
+
+// ── the scene ────────────────────────────────────────────────────────────────
+struct Probe {
+  std::string name;
+  vtkSmartPointer<ProbeMapper> mapper;
+  vtkSmartPointer<vtkActor> actor;
+};
+
+struct Scene {
+  explicit Scene(cvc::app &app) : sg(app, "lowmem") { sg.setDiagnosticChromeVisible(false); }
+  SceneGraph sg;
+  std::unique_ptr<SceneRenderer> sr;
+  std::vector<std::shared_ptr<PeekNode>> nodes;
+  std::deque<Probe> probes; // stable references across probe()
+  int w = 320, h = 240;
+
+  void open() {
+    sr = std::make_unique<SceneRenderer>(sg, w, h, /*offscreen=*/true, "lowmem");
+    // No MSAA: with VTK's default 8x, NVIDIA's resolve differs by 1 LSB at a few
+    // edge pixels from one frame to the next for an identical GL stream, so two
+    // stock frames would not compare equal either.
+    sr->renderWindow()->SetMultiSamples(0);
+    sr->setBackground(0.18, 0.22, 0.30);
+    sr->setCamera(-14, -20, 16, 0, 0, 0, 0, 0, 1, 40.0, 1.0, 200.0);
+    for (auto &p : probes)
+      sr->renderer()->AddActor(p.actor);
+  }
+
+  std::shared_ptr<PeekNode> node(const std::string &name) {
+    auto n = sg.getGraphicsRoot()->addGraphicsChild<PeekNode>(name);
+    nodes.push_back(n);
+    return n;
+  }
+
+  Probe &probe(const std::string &name, vtkSmartPointer<vtkPolyData> pd) {
+    Probe p;
+    p.name = name;
+    p.mapper = vtkSmartPointer<ProbeMapper>::New();
+    p.mapper->SetInputData(pd);
+    p.mapper->ScalarVisibilityOff();
+    p.actor = vtkSmartPointer<vtkActor>::New();
+    p.actor->SetMapper(p.mapper);
+    p.actor->GetProperty()->SetSpecular(0.3);
+    p.actor->GetProperty()->SetSpecularPower(20);
+    probes.push_back(p);
+    return probes.back();
+  }
+
+  // Every LowMemoryPolyDataMapper drawing in this scene.
+  std::vector<LowMemoryPolyDataMapper *> mappers() {
+    std::vector<LowMemoryPolyDataMapper *> out;
+    vtkActorCollection *actors = sr->renderer()->GetActors();
+    actors->InitTraversal();
+    while (vtkActor *a = actors->GetNextActor())
+      if (auto *m = LowMemoryPolyDataMapper::SafeDownCast(a->GetMapper()))
+        out.push_back(m);
+    return out;
+  }
+  LowMemoryPolyDataMapper::Stats stats() {
+    LowMemoryPolyDataMapper::Stats s;
+    for (auto *m : mappers()) {
+      const auto &t = m->stats();
+      s.draws += t.draws;
+      s.stockDraws += t.stockDraws;
+      s.cellTypesSkipped += t.cellTypesSkipped;
+      s.coincidentFallbacks += t.coincidentFallbacks;
+      s.programLookups += t.programLookups;
+      s.programLookupsSkipped += t.programLookupsSkipped;
+    }
+    return s;
+  }
+  void resetCounters() {
+    for (auto *m : mappers())
+      m->resetStats();
+    for (auto &p : probes)
+      p.mapper->clearTally();
+  }
+
+  // Render one frame; the GL calls it issued.
+  GLCalls frame() {
+    const GLCalls before = glcallsRead();
+    sr->render();
+    return glcallsRead() - before;
+  }
+  std::vector<unsigned char> rgba() {
+    vtkNew<vtkUnsignedCharArray> px;
+    sr->renderWindow()->GetRGBACharPixelData(0, 0, w - 1, h - 1, /*front=*/0, px);
+    const unsigned char *p = px->GetPointer(0);
+    return std::vector<unsigned char>(p, p + px->GetNumberOfValues());
+  }
+};
+
+void buildCity(Scene &s) {
+  // Nodes: every kind of GeometryNode a scene uses.
+  auto veh = s.node("veh");
+  veh->setGeometry(boxGeometry(0, 0, 1.2, 1.6, 0.9, 0.7));
+  veh->setUseSingleColor(true);
+  veh->setColor(0.3, 0.5, 0.9);
+  const double pose[16] = {0.8, -0.6, 0, 2.5, 0.6, 0.8, 0, -1.0, 0, 0, 1, 0.1, 0, 0, 0, 1};
+  veh->setPoseMatrix(pose);
+
+  auto ground = s.node("ground");
+  ground->setGeometry(groundGeometry(40, 14.0));
+  ground->setUseSingleColor(true);
+  ground->setColor(1, 1, 1);
+  ground->setAmbient(0.4);
+  ground->setDiffuse(0.7);
+  ground->setTexture(checkerImage(64));
+
+  auto ribbon = s.node("ribbon");
+  ribbon->setGeometry(ribbonGeometry(30, -9, 4, 0.9));
+  ribbon->setUseSingleColor(true);
+  ribbon->setColor(0.98, 0.85, 0.3);
+  ribbon->setOpacity(0.6);
+  ribbon->setDepthOffset(2.0);
+
+  auto trail = s.node("trail");
+  trail->setGeometry(polylineGeometry(40, -10, -6, 0.8));
+  trail->setRenderMode(GeometryRenderMode::LINES); // after setGeometry, which picks a mode
+  trail->setUseSingleColor(true);
+  trail->setColor(0.2, 0.95, 0.3);
+  trail->setLineWidth(2.0);
+
+  auto cloud = s.node("cloud");
+  cloud->setGeometry(cloudGeometry(60, 5, -9, 1.5));
+  cloud->setRenderMode(GeometryRenderMode::POINTS);
+  cloud->setUseSingleColor(true);
+  cloud->setColor(0.95, 0.3, 0.9);
+  cloud->setPointSize(4.0);
+
+  auto vcol = s.node("vcol");
+  vcol->setUseSingleColor(false);
+  vcol->setGeometry(colouredGeometry(-4, -3));
+
+  // Probes: the same kinds as raw actors whose draws are tallied.
+  {
+    Probe &p = s.probe("lit", spherePoly(1.4));
+    p.actor->GetProperty()->SetColor(0.85, 0.35, 0.25);
+    vtkNew<vtkMatrix4x4> m;
+    m->SetElement(0, 3, 6.0);
+    m->SetElement(1, 3, 3.0);
+    m->SetElement(2, 3, 1.6);
+    p.actor->SetUserMatrix(m);
+  }
+  {
+    Probe &p = s.probe("textured", terrainPoly(24, -13, 6, 7));
+    p.actor->GetProperty()->SetColor(1, 1, 1);
+    p.actor->SetTexture(checkerTexture(32));
+  }
+  {
+    Probe &p = s.probe("translucent", ribbonPoly(24, -6, 8.5, 0.7));
+    p.actor->GetProperty()->SetColor(0.3, 0.9, 0.95);
+    p.actor->GetProperty()->SetOpacity(0.5);
+    p.mapper->SetRelativeCoincidentTopologyPolygonOffsetParameters(0.0, -2.0);
+    p.mapper->SetRelativeCoincidentTopologyLineOffsetParameters(0.0, -2.0);
+    p.mapper->SetRelativeCoincidentTopologyPointOffsetParameter(-2.0);
+  }
+  {
+    Probe &p = s.probe("lines", linesPoly(30, -12, -10, 0.5));
+    p.actor->GetProperty()->SetColor(0.95, 0.95, 0.2);
+  }
+  {
+    Probe &p = s.probe("verts", patchPoly('v', 8, -12, 0.8));
+    p.actor->GetProperty()->SetColor(0.7, 0.7, 0.9);
+    p.actor->GetProperty()->SetPointSize(5.0);
+  }
+  {
+    Probe &p = s.probe("strips", patchPoly('s', 2, 9, 0.6));
+    p.actor->GetProperty()->SetColor(0.5, 0.9, 0.6);
+  }
+}
+
+void addLights(SceneGraph &sg) {
+  sg.addSpotLight(-12, -16, 26, 0, 0, 0, 40.0, 1.0, 0.97, 0.9, 1.0);
+  sg.addFillLight(14, 10, 20, 0, 0, 0, 0.8, 0.85, 1.0, 0.4);
+}
+
+struct PathRun {
+  GLCalls first, steady;                        // whole frame
+  std::vector<unsigned char> firstPx, steadyPx; // RGBA
+  LowMemoryPolyDataMapper::Stats firstStats, steadyStats;
+  std::vector<GLCalls> probeCalls; // steady frame, per probe
+  std::vector<double> probeDraws;  // steady frame, per probe
+  std::vector<GLCalls> probeFirst; // first frame, per probe
+  std::vector<double> probeFirstDraws;
+};
+
+// Two frames on one draw path: `first` (a real shadow bake when shadows are on:
+// every opaque mapper draws twice, rebuilding its shader for each pass) and
+// `steady` (re-uses the bake; nothing rebuilt).
+PathRun runPath(Scene &s, DrawPath path) {
+  LowMemoryPolyDataMapper::setDrawPath(path);
+  // One frame on this path first, so the counted frames start from the GL
+  // state this path leaves (on desktop the empty verts agent's glPointSize is
+  // cached state, so the first frame after a switch would differ by one call).
+  s.sr->render();
+  PathRun r;
+  // vtkShadowMapBakerPass only re-bakes when a light or prop changed since the
+  // last bake; touch one so the first frame really bakes.
+  s.sg.invalidateShadowBake();
+  if (vtkActor *a = s.sr->renderer()->GetActors()->GetLastActor())
+    a->Modified();
+  s.resetCounters();
+  r.first = s.frame();
+  r.firstStats = s.stats();
+  for (auto &p : s.probes) {
+    r.probeFirst.push_back(p.mapper->calls);
+    r.probeFirstDraws.push_back(p.mapper->draws);
+  }
+  r.firstPx = s.rgba();
+  s.resetCounters();
+  r.steady = s.frame();
+  r.steadyStats = s.stats();
+  for (auto &p : s.probes) {
+    r.probeCalls.push_back(p.mapper->calls);
+    r.probeDraws.push_back(p.mapper->draws);
+  }
+  r.steadyPx = s.rgba();
+  return r;
+}
+
+long diffBytes(const std::vector<unsigned char> &a, const std::vector<unsigned char> &b) {
+  if (a.size() != b.size())
+    return -1;
+  long n = 0;
+  for (size_t i = 0; i < a.size(); ++i)
+    n += a[i] != b[i];
+  return n;
+}
+
+bool samePixels(const std::string &what, const std::vector<unsigned char> &a,
+                const std::vector<unsigned char> &b) {
+  const long d = diffBytes(a, b);
+  return check(d == 0 && !a.empty(), what, d == 0 ? "" : fmt("%.0f differing bytes", double(d)));
+}
+
+// Every pixel the background colour? (a frame that drew nothing)
+bool drewSomething(const std::vector<unsigned char> &px) {
+  if (px.size() < 8)
+    return false;
+  for (size_t i = 4; i < px.size(); i += 4)
+    if (px[i] != px[0] || px[i + 1] != px[1] || px[i + 2] != px[2])
+      return true;
+  return false;
+}
+
+// ── 1. policy ────────────────────────────────────────────────────────────────
+void testPolicy() {
+  std::printf("policy\n");
+  check(cvc::gl::lowMemoryMapperPolicy() == LowMemoryMapperPolicy::Force,
+        "CVCGL_LOWMEM_MAPPER=force is read on first use");
+  check(LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper()) != nullptr,
+        "Force: newPolyDataMapper() is a LowMemoryPolyDataMapper");
+  const bool factoryLowMem =
+      vtkSmartPointer<vtkPolyDataMapper>::New()->IsA("vtkOpenGLLowMemoryPolyDataMapper") != 0;
+  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Off);
+  check(LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper()) == nullptr,
+        "Off: newPolyDataMapper() is the factory's mapper");
+  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Auto);
+  check((LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper()) != nullptr) ==
+            factoryLowMem,
+        "Auto: LowMemoryPolyDataMapper exactly where the factory hands out the low-memory one",
+        factoryLowMem ? "factory: low-memory" : "factory: classic");
+  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Force);
+  if (!std::getenv("CVCGL_LOWMEM_DRAW"))
+    check(LowMemoryPolyDataMapper::drawPath() == DrawPath::Fast, "the default draw path is Fast");
+}
+
+// Can this build rasterise at all? Asked of a plain node in a scene of its own.
+bool renderAvailable(cvc::app &app) {
+  bool drew = false;
+  {
+    Scene s(app);
+    auto n = s.node("control");
+    n->setGeometry(boxGeometry(0, 0, 0, 5, 5, 0.5));
+    n->setColor(1, 1, 1);
+    s.w = 48;
+    s.h = 48;
+    s.open();
+    s.sr->setCamera(0, 0, 50, 0, 0, 0, 0, 1, 0, 30.0, 1.0, 200.0);
+    s.sr->render();
+    drew = drewSomething(s.rgba());
+  }
+  if (drew)
+    return true;
+  const char *require = std::getenv("CVC_REQUIRE_RENDER");
+  if (require && *require && std::string(require) != "0")
+    check(false, "CVC_REQUIRE_RENDER is set, but this build did not rasterise");
+  else
+    std::printf("  skipped: this build did not rasterise\n");
+  return false;
+}
+
+// ── 2-4. replica, pixels, savings ────────────────────────────────────────────
+void comparePaths(Scene &s, const std::string &label, bool shadows) {
+  std::printf("%s\n", label.c_str());
+  // Settle: build every shader both ways first so no path pays a first compile.
+  for (DrawPath p : {DrawPath::Stock, DrawPath::Fast})
+    runPath(s, p);
+  const PathRun stock = runPath(s, DrawPath::Stock);
+  const PathRun all = runPath(s, DrawPath::AllCellTypes);
+  const PathRun fast = runPath(s, DrawPath::Fast);
+
+  check(drewSomething(stock.steadyPx), label + ": the scene draws");
+  std::string diff;
+  const bool pinFirst = all.first.sameAs(stock.first, &diff);
+  check(pinFirst, label + ": AllCellTypes issues VTK's GL calls, first frame", diff);
+  diff.clear();
+  const bool pinSteady = all.steady.sameAs(stock.steady, &diff);
+  check(pinSteady, label + ": AllCellTypes issues VTK's GL calls, steady frame", diff);
+  samePixels(label + ": AllCellTypes pixels == Stock, first frame", stock.firstPx, all.firstPx);
+  samePixels(label + ": AllCellTypes pixels == Stock, steady frame", stock.steadyPx, all.steadyPx);
+  samePixels(label + ": Fast pixels == Stock, first frame", stock.firstPx, fast.firstPx);
+  samePixels(label + ": Fast pixels == Stock, steady frame", stock.steadyPx, fast.steadyPx);
+
+  std::printf("  frame GL calls, first  : Stock %s\n", stock.first.str().c_str());
+  std::printf("                           Fast  %s\n", fast.first.str().c_str());
+  std::printf("  frame GL calls, steady : Stock %s\n", stock.steady.str().c_str());
+  std::printf("                           Fast  %s\n", fast.steady.str().c_str());
+  check(fast.steady.total() < 0.75 * stock.steady.total(),
+        label + ": Fast frame issues well under Stock's GL calls",
+        fmt("steady %.0f -> %.0f, first %.0f", stock.steady.total(), fast.steady.total(),
+            stock.first.total()) +
+            fmt(" -> %.0f", fast.first.total()));
+  check(fast.steady.sync() == stock.steady.sync(),
+        label + ": Fast adds no synchronous GL query to the frame",
+        fmt("sync %.0f vs %.0f", fast.steady.sync(), stock.steady.sync()));
+  check(fast.steadyStats.programLookups == 0 && fast.steadyStats.programLookupsSkipped > 0,
+        label + ": Fast steady frame re-binds every program without a lookup",
+        fmt("lookups %.0f, skipped %.0f", double(fast.steadyStats.programLookups),
+            double(fast.steadyStats.programLookupsSkipped)));
+  check(fast.steadyStats.cellTypesSkipped > 0 && fast.steadyStats.coincidentFallbacks == 0 &&
+            fast.steadyStats.stockDraws == 0,
+        label + ": Fast skipped empty cell types, no fallback",
+        fmt("skipped %.0f of %.0f draws x 4", double(fast.steadyStats.cellTypesSkipped),
+            double(fast.steadyStats.draws)));
+  check(stock.steadyStats.stockDraws == stock.steadyStats.draws && stock.steadyStats.draws > 0,
+        label + ": Stock draws through VTK's own path");
+  if (shadows)
+    check(fast.firstStats.programLookups > 0,
+          label + ": a shadow bake (render-pass change) takes the full lookup",
+          fmt("lookups %.0f", double(fast.firstStats.programLookups)));
+
+  // Per draw, on the probes (steady frame: one draw per probe and pass).
+  for (size_t i = 0; i < s.probes.size(); ++i) {
+    const Probe &p = s.probes[i];
+    const double nStock = stock.probeDraws[i], nFast = fast.probeDraws[i];
+    if (nStock <= 0 || nFast <= 0) {
+      check(false, label + ": probe " + p.name + " drew");
+      continue;
+    }
+    const GLCalls &cs = stock.probeCalls[i];
+    const GLCalls &cf = fast.probeCalls[i];
+    std::printf("  per draw %-11s Stock %s\n", p.name.c_str(), cs.str(nStock).c_str());
+    std::printf("  %-20s Fast  %s\n", "", cf.str(nFast).c_str());
+    check(cs.sync() == 0 && cf.sync() == 0 && all.probeCalls[i].sync() == 0,
+          label + ": " + p.name + " draws issue no synchronous GL query");
+    check(cf.count("UseProgram") <= 2 * nFast, label + ": " + p.name + " <= 2 glUseProgram/draw");
+    check(cf.count("BindVertexArray") == 2 * nFast,
+          label + ": " + p.name + " binds the VAO once per draw (+ unbind)",
+          fmt("%.1f per draw", cf.count("BindVertexArray") / nFast));
+    check(cf.count("DrawArraysInstanced") == cs.count("DrawArraysInstanced") &&
+              cf.count("DrawArraysInstanced") == nFast,
+          label + ": " + p.name + " one draw call per draw, as Stock");
+    const double perFast = cf.total() / nFast, perStock = cs.total() / nStock;
+    check(perFast <= 0.45 * perStock, label + ": " + p.name + " Fast <= 45% of Stock calls/draw",
+          fmt("%.1f -> %.1f", perStock, perFast));
+  }
+  if (g_report) {
+    LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+    s.resetCounters();
+    s.sr->render();
+    for (auto *m : s.mappers()) {
+      const auto &t = m->stats();
+      vtkPolyData *in = m->GetInput();
+      std::printf(
+          "  mapper %-24s points %5lld v/l/p/s %lld/%lld/%lld/%lld: draws %llu skipped %llu "
+          "lookups %llu/%llu\n",
+          m->GetClassName(), static_cast<long long>(in->GetNumberOfPoints()),
+          static_cast<long long>(in->GetNumberOfVerts()),
+          static_cast<long long>(in->GetNumberOfLines()),
+          static_cast<long long>(in->GetNumberOfPolys()),
+          static_cast<long long>(in->GetNumberOfStrips()), static_cast<unsigned long long>(t.draws),
+          static_cast<unsigned long long>(t.cellTypesSkipped),
+          static_cast<unsigned long long>(t.programLookups),
+          static_cast<unsigned long long>(t.programLookupsSkipped));
+    }
+    for (size_t i = 0; i < s.probes.size(); ++i)
+      std::printf("  first frame per draw %-11s Stock %s\n  %-32s Fast  %s\n",
+                  s.probes[i].name.c_str(),
+                  stock.probeFirst[i].str(std::max(1.0, stock.probeFirstDraws[i])).c_str(), "",
+                  fast.probeFirst[i].str(std::max(1.0, fast.probeFirstDraws[i])).c_str());
+  }
+}
+
+// ── 5. lifecycle ─────────────────────────────────────────────────────────────
+void testLifecycle(Scene &s) {
+  std::printf("lifecycle\n");
+  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+  s.sr->render();
+
+  // A mapper's graphics resources released (what removing a prop from its
+  // renderer does): its next draw looks the program up afresh.
+  for (auto *m : s.mappers())
+    m->ReleaseGraphicsResources(s.sr->renderWindow());
+  s.resetCounters();
+  s.sr->render();
+  const auto rel = s.stats();
+  check(rel.programLookups == rel.draws && rel.programLookupsSkipped == 0 && rel.draws > 0,
+        "after a mapper's ReleaseGraphicsResources its next draw looks the program up",
+        fmt("lookups %.0f of %.0f draws", double(rel.programLookups), double(rel.draws)));
+  {
+    const PathRun a = runPath(s, DrawPath::Stock);
+    const PathRun b = runPath(s, DrawPath::Fast);
+    samePixels("after mapper release: Fast pixels == Stock", a.steadyPx, b.steadyPx);
+  }
+
+  // The shader cache's programs released and recompiled in place (the cache
+  // keeps the objects): the re-bound program is compiled again before use.
+  auto *win = vtkOpenGLRenderWindow::SafeDownCast(s.sr->renderWindow());
+  const PathRun before = runPath(s, DrawPath::Stock);
+  win->GetShaderCache()->ReleaseGraphicsResources(win);
+  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+  s.sr->render();
+  const PathRun after = runPath(s, DrawPath::Fast);
+  samePixels("programs released in the cache: Fast recompiles and matches Stock", before.steadyPx,
+             after.steadyPx);
+
+  // The same scene -- the same nodes and mappers -- closed and re-opened in a
+  // new window (new context, new shader cache): the first draws resolve fully
+  // and the frames match the old window's.
+  s.sr.reset();
+  s.open();
+  s.sg.setShadowsEnabled(true); // the pass chain belongs to the renderer, not the scene
+  s.sg.setShadowUpdateInterval(1000);
+  s.resetCounters();
+  s.sr->render();
+  glcallsInstall(); // the new context re-loaded glad
+  const auto st = s.stats();
+  check(st.programLookups > 0 && st.programLookupsSkipped == 0,
+        "re-opened in a new window: the first draws look their programs up",
+        fmt("lookups %.0f, skipped %.0f", double(st.programLookups),
+            double(st.programLookupsSkipped)));
+  const PathRun a = runPath(s, DrawPath::Stock);
+  const PathRun b = runPath(s, DrawPath::Fast);
+  samePixels("new window: Fast pixels == Stock", a.steadyPx, b.steadyPx);
+  samePixels("new window: same frame as the old window", before.steadyPx, b.steadyPx);
+}
+
+// ── 6. guards ────────────────────────────────────────────────────────────────
+void testGuards(cvc::app &app) {
+  std::printf("guards\n");
+  Scene s(app);
+  // Coincident offsets under the global POLYGON_OFFSET mode, where VTK's
+  // defaults give points -8 and lines -4 units but polygons 0:
+  //   zeroPoly  polys only, polygon offset 0 -> stock's empty verts/lines agents
+  //             leave -4 in the program for the polys draw; skipping them would
+  //             not. Must fall back to all four.
+  //   shifted   polys only, the same relative offset on every class -> the polys
+  //             draw sets its own non-zero value. Safe to skip.
+  Probe &zero = s.probe("zeroPoly", spherePoly(1.5));
+  zero.actor->GetProperty()->SetColor(0.9, 0.4, 0.3);
+  Probe &shifted = s.probe("shifted", ribbonPoly(12, -4, 3, 0.2));
+  shifted.mapper->SetRelativeCoincidentTopologyPolygonOffsetParameters(0.0, -3.0);
+  shifted.mapper->SetRelativeCoincidentTopologyLineOffsetParameters(0.0, -3.0);
+  shifted.mapper->SetRelativeCoincidentTopologyPointOffsetParameter(-3.0);
+  Probe &vv = s.probe("vertexVis", terrainPoly(6, -5, -5, 4));
+  vv.actor->GetProperty()->VertexVisibilityOn();
+  vv.actor->GetProperty()->SetVertexColor(1, 0, 0);
+  s.open();
+  s.sr->setCamera(0, -14, 10, 0, 0, 0, 0, 0, 1, 40.0, 1.0, 100.0);
+  s.sr->render();
+  glcallsInstall();
+
+  const int savedMode = vtkMapper::GetResolveCoincidentTopology();
+  vtkMapper::SetResolveCoincidentTopologyToPolygonOffset();
+  for (DrawPath p : {DrawPath::Stock, DrawPath::Fast})
+    runPath(s, p);
+  const PathRun stock = runPath(s, DrawPath::Stock);
+  const PathRun fast = runPath(s, DrawPath::Fast);
+  samePixels("POLYGON_OFFSET mode: Fast pixels == Stock", stock.steadyPx, fast.steadyPx);
+  const auto &zs = zero.mapper->stats();
+  const auto &ss = shifted.mapper->stats();
+  check(zs.coincidentFallbacks == zs.draws && zs.cellTypesSkipped == 0 && zs.draws > 0,
+        "zero polygon offset under defaults that offset points/lines: all four agents run",
+        fmt("fallbacks %.0f of %.0f draws", double(zs.coincidentFallbacks), double(zs.draws)));
+  check(ss.coincidentFallbacks == 0 && ss.cellTypesSkipped == 3 * ss.draws && ss.draws > 0,
+        "an offset the drawn type sets itself: empty types skipped",
+        fmt("skipped %.0f over %.0f draws", double(ss.cellTypesSkipped), double(ss.draws)));
+  vtkMapper::SetResolveCoincidentTopology(savedMode);
+
+  const auto &vs = vv.mapper->stats();
+  check(vs.stockDraws == vs.draws && vs.draws > 0, "vertex visibility draws the stock way");
+
+  // Picking: the selector's passes draw the stock way, and select the same.
+  auto select = [&](DrawPath p) {
+    LowMemoryPolyDataMapper::setDrawPath(p);
+    s.resetCounters();
+    vtkNew<vtkHardwareSelector> sel;
+    sel->SetRenderer(s.sr->renderer());
+    sel->SetArea(0, 0, s.w - 1, s.h - 1);
+    sel->SetFieldAssociation(vtkDataObject::FIELD_ASSOCIATION_CELLS);
+    vtkSmartPointer<vtkSelection> res = vtk::TakeSmartPointer(sel->Select());
+    std::string sig;
+    for (unsigned i = 0; res && i < res->GetNumberOfNodes(); ++i) {
+      vtkSelectionNode *n = res->GetNode(i);
+      sig += fmt("[%.0f:%.0f]", n->GetProperties()->Get(vtkSelectionNode::PROP_ID()),
+                 n->GetSelectionList() ? double(n->GetSelectionList()->GetNumberOfTuples()) : 0.0);
+    }
+    return std::make_pair(sig, s.stats());
+  };
+  const auto pickStock = select(DrawPath::Stock);
+  const auto pickFast = select(DrawPath::Fast);
+  check(
+      pickFast.second.stockDraws == pickFast.second.draws && pickFast.second.draws > 0,
+      "picking draws the stock way on the Fast path",
+      fmt("%.0f of %.0f draws", double(pickFast.second.stockDraws), double(pickFast.second.draws)));
+  check(pickFast.first == pickStock.first, "picking selects the same cells on both paths",
+        pickStock.first);
+  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+}
+
+} // namespace
+
+int main() {
+#ifdef _WIN32
+  _putenv_s("CVCGL_LOWMEM_MAPPER", "force");
+  if (!std::getenv("__GL_SYNC_TO_VBLANK"))
+    _putenv_s("__GL_SYNC_TO_VBLANK", "0");
+  if (!std::getenv("vblank_mode"))
+    _putenv_s("vblank_mode", "0");
+#else
+  setenv("CVCGL_LOWMEM_MAPPER", "force", 1);
+  setenv("__GL_SYNC_TO_VBLANK", "0", 0); // NVIDIA throttles offscreen swaps otherwise
+  setenv("vblank_mode", "0", 0);
+#endif
+  const char *rep = std::getenv("CVCGL_LOWMEM_REPORT");
+  g_report = rep && *rep && std::string(rep) != "0";
+  vtkOutputWindow::SetInstance(vtkSmartPointer<ErrorCounter>::New());
+
+  testPolicy();
+  if (!LowMemoryPolyDataMapper::replicaActive()) {
+    std::printf("  skipped: this VTK is not 9.5.0, so the mapper draws the stock way\n");
+    std::printf("PASS: cvcgl_lowmem_fastdraw (%d checks)\n", g_checks);
+    return g_failures == 0 ? 0 : 1;
+  }
+
+  cvc::app app;
+  if (renderAvailable(app)) {
+    // Shadows on and off in separate scenes: SceneGraph::setShadowsEnabled(false)
+    // drops the shadow passes without releasing their GL resources, which VTK
+    // reports as an error when they are destroyed.
+    for (bool shadows : {true, false}) {
+      Scene s(app);
+      buildCity(s);
+      addLights(s.sg);
+      s.open();
+      if (shadows) {
+        check(s.sg.setShadowsEnabled(true), "shadows enabled");
+        s.sg.setShadowUpdateInterval(1000); // bake only when invalidated
+      }
+      s.sr->render();
+      glcallsInstall();
+      check(s.mappers().size() == s.nodes.size() + s.probes.size(),
+            "every node and probe draws through LowMemoryPolyDataMapper",
+            fmt("%.0f of %.0f", double(s.mappers().size()),
+                double(s.nodes.size() + s.probes.size())));
+      comparePaths(s, shadows ? "shadows on" : "shadows off", shadows);
+      if (shadows)
+        testLifecycle(s);
+    }
+    testGuards(app);
+  }
+  check(ErrorCounter::errors() == 0, "no VTK errors",
+        fmt("%.0f errors", double(ErrorCounter::errors())));
+  std::printf("%s: cvcgl_lowmem_fastdraw (%d checks, %d failed)\n",
+              g_failures == 0 ? "PASS" : "FAIL", g_checks, g_failures);
+  return g_failures == 0 ? 0 : 1;
+}
