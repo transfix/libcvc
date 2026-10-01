@@ -21,11 +21,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cvc/core/thread_pool.h>
 #include <cvc/geometry/simplify.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/volume/volume_ops.h>
 #include <functional>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -76,22 +78,40 @@ mesh_pyramid build_mesh_pyramid(const geometry &src, const pyramid_params &param
       break;
     targets.push_back(t);
   }
-  const int R = int(targets.size());
-  if (R == 0)
+  if (targets.empty())
     return out;
 
-  std::vector<geometry> rungs(R, src); // overwritten below (copies carry src.ctx())
-  std::vector<double> errs(R, 0.0);
-  // Fan the rungs; each simplify runs serial internally so the pool is used at
-  // exactly one level (rungs OR the per-rung setup), never nested.
-  build_rungs(pool, R, [&](int k) {
-    simplify_params sp;
-    sp.target_tris = targets[k];
-    sp.preserve_boundary = params.preserve_boundary;
-    simplify_result res;
-    rungs[k] = simplify(src, sp, &res, pool && R >= 2 ? nullptr : pool);
-    errs[k] = res.world_error;
-  });
+  // ONE progressive collapse pass snapshots every rung on its way down to the
+  // coarsest target: each rung is bit-identical to an independent simplify() of
+  // the source to its target, for the cost of the coarsest rung alone. The pass
+  // itself is serial; its setup and each rung's Hausdorff measurement fan over
+  // the pool.
+  simplify_params sp;
+  sp.preserve_boundary = params.preserve_boundary;
+  sp.weld_seams = params.weld_seams;
+  sp.seam_epsilon = params.seam_epsilon;
+  sp.recompute_normals = params.recompute_normals;
+  std::vector<simplify_result> res;
+  std::vector<geometry> snaps = simplify_progressive(src, targets, sp, &res, pool);
+  // Keep only the snapshots that coarsen enough to be worth a switch: at least
+  // 5% fewer triangles than the rung kept before, or half the step mesh_ratio
+  // asks for when that is smaller -- and always at least one fewer. A snapshot
+  // short of that repeats, or nearly repeats, the rung before it: the pass
+  // stalled (every remaining collapse guarded), or a single collapse removed
+  // enough triangles to pass two targets at once.
+  const double min_step = std::min(0.05, 0.5 * (1.0 - params.mesh_ratio));
+  std::vector<geometry> rungs;
+  std::vector<double> errs;
+  std::uint64_t prev = src_tris;
+  for (std::size_t k = 0; k < snaps.size(); ++k) {
+    const std::uint64_t need =
+        std::max<std::uint64_t>(1, std::uint64_t(std::floor(min_step * double(prev))));
+    if (res[k].out_tris + need > prev)
+      continue;
+    prev = res[k].out_tris;
+    rungs.push_back(std::move(snaps[k]));
+    errs.push_back(res[k].world_error);
+  }
   append_monotone(out.rungs, out.world_error_m, rungs, errs);
   return out;
 }
