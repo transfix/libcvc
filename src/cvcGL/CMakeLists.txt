@@ -257,6 +257,14 @@ add_executable(cvcgl_lod_node test/cvcgl_lod_node.cpp)
 target_link_libraries(cvcgl_lod_node PRIVATE cvcGL)
 add_test(NAME cvcgl_lod_node COMMAND cvcgl_lod_node)
 
+# GraphicsNode::setMetadata's read-only state mirror: it follows the node (it
+# used to keep the first value forever, each later write throwing a swallowed
+# read_only_error), stays locked to other writers, costs nothing for an
+# unchanged value, mirrors Python ints, and asks for no redraw. Headless.
+add_executable(cvcgl_metadata_mirror test/cvcgl_metadata_mirror.cpp)
+target_link_libraries(cvcgl_metadata_mirror PRIVATE cvcGL)
+add_test(NAME cvcgl_metadata_mirror COMMAND cvcgl_metadata_mirror)
+
 # Spectral GPU FFT ocean (the ABYSSAL port used by lsystem_coast). Checks the
 # invariants a broken butterfly IFFT / bit-reversal / conjugate-symmetry would
 # violate: zero-mean height, unit-mean Jacobian, determinism, time evolution and

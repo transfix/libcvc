@@ -314,6 +314,36 @@ def test_scene_owned_lighting():
     print("  ok: a scene owns its lighting, and shadows refuse honestly")
 
 
+def test_metadata_mirror_follows_node():
+    """Metadata mirrors into state, read-only to others, and FOLLOWS the node.
+
+    It used to keep the first value: every later write threw a read-only error
+    that was swallowed. A Python int (a C++ long) was not mirrored at all.
+    """
+    sg = pycvc_gl.SceneGraph(app, "pymeta")
+    node = sg.addGraphics("tri", _make_tri())
+    sg.processEvents()
+    path = "pymeta.graphics.root.children.tri.metadata."
+    node.set_metadata("count", 3)
+    assert pycvc.state_get(app, path + "count") == "3"
+    node.set_metadata("count", 4)
+    assert pycvc.state_get(app, path + "count") == "4", pycvc.state_get(app, path + "count")
+    node.set_metadata("label", "a")
+    node.set_metadata("label", "b")
+    assert pycvc.state_get(app, path + "label") == "b"
+    assert node.get_metadata("count") == 4
+    mirror = pycvc.State.instance(app).child(path + "count")
+    assert mirror.readOnly()
+    try:
+        mirror.value("99")
+    except Exception:
+        pass
+    else:
+        raise AssertionError("the metadata mirror must stay read-only to other writers")
+    assert pycvc.state_get(app, path + "count") == "4"
+    print("  ok: metadata mirror follows the node, stays read-only, mirrors ints")
+
+
 if __name__ == "__main__":
     test_build_scene()
     test_volume_scattering()
@@ -326,4 +356,5 @@ if __name__ == "__main__":
     test_director_python_node_type()
     test_group_nodes_compose_transforms()
     test_scene_owned_lighting()
+    test_metadata_mirror_follows_node()
     print("pycvc_gl scene tests: OK")

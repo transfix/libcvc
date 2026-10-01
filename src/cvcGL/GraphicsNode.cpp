@@ -595,6 +595,13 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
   // publishPoseMatrix): the echo arrives here, inline, during that write.
   if (childState == "matrix" && m_writingPose)
     return;
+  // The metadata mirror is written by setMetadata and read by nobody here: it
+  // changes nothing drawn, so there is nothing to marshal or redraw -- for this
+  // node's own ("metadata.k") or, as every ancestor hears it too, a
+  // descendant's ("children.n.metadata.k").
+  if (childState.compare(0, 9, "metadata.") == 0 ||
+      childState.find(".metadata.") != std::string::npos)
+    return;
 
   // Marshal to main thread via event queue
   runOnMainThread([this, childState]() {
@@ -928,34 +935,95 @@ cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const {
   return cvc::bounding_box(acc_minx, acc_miny, acc_minz, acc_maxx, acc_maxy, acc_maxz);
 }
 
+namespace {
+// The metadata value types mirrored into the state tree. Each is written TYPED
+// (state::value<T>), so the tree records the C++ type, as it always has. long
+// and the unsigned/float types are what a Python int or a size_t arrive as.
+template <typename T> bool any_is(const std::any &a) { return a.type() == typeid(T); }
+
+template <typename T> bool any_equal_as(const std::any &a, const std::any &b) {
+  return any_is<T>(a) && any_is<T>(b) && std::any_cast<T>(a) == std::any_cast<T>(b);
+}
+
+// Same type and same value, for the types above; anything else counts as
+// changed (std::any has no equality of its own).
+bool metadata_equal(const std::any &a, const std::any &b) {
+  if (a.type() != b.type())
+    return false;
+  if (any_is<const char *>(a)) {
+    const char *x = std::any_cast<const char *>(a), *y = std::any_cast<const char *>(b);
+    return x && y && std::string(x) == y;
+  }
+  return any_equal_as<int>(a, b) || any_equal_as<long>(a, b) || any_equal_as<long long>(a, b) ||
+         any_equal_as<unsigned int>(a, b) || any_equal_as<unsigned long>(a, b) ||
+         any_equal_as<unsigned long long>(a, b) || any_equal_as<double>(a, b) ||
+         any_equal_as<float>(a, b) || any_equal_as<bool>(a, b) || any_equal_as<std::string>(a, b);
+}
+
+template <typename T> bool write_as(cvc::state &s, const std::any &v) {
+  if (!any_is<T>(v))
+    return false;
+  s.value(std::any_cast<T>(v));
+  return true;
+}
+
+// Write `v` to `s` if it is one of the mirrored types; false for any other type.
+bool write_metadata(cvc::state &s, const std::any &v) {
+  if (any_is<const char *>(v)) {
+    const char *c = std::any_cast<const char *>(v);
+    s.value(std::string(c ? c : ""));
+    return true;
+  }
+  return write_as<int>(s, v) || write_as<long>(s, v) || write_as<long long>(s, v) ||
+         write_as<unsigned int>(s, v) || write_as<unsigned long>(s, v) ||
+         write_as<unsigned long long>(s, v) || write_as<double>(s, v) || write_as<float>(s, v) ||
+         write_as<bool>(s, v) || write_as<std::string>(s, v);
+}
+
+bool is_mirrored_metadata(const std::any &v) {
+  return any_is<int>(v) || any_is<long>(v) || any_is<long long>(v) || any_is<unsigned int>(v) ||
+         any_is<unsigned long>(v) || any_is<unsigned long long>(v) || any_is<double>(v) ||
+         any_is<float>(v) || any_is<bool>(v) || any_is<std::string>(v) || any_is<const char *>(v);
+}
+} // namespace
+
 void GraphicsNode::setMetadata(const std::string &key, const std::any &value) {
+  // Unchanged: nothing to do. GeometryNode::updateMetadata re-sends ~17 keys on
+  // every setGeometry, and a mesh rebuilt in place (a wall layer that grows by a
+  // few cells) keeps most of them. Each skipped key saves a state path lookup and
+  // a write.
+  auto it = m_metadata.find(key);
+  if (it != m_metadata.end() && metadata_equal(it->second, value))
+    return;
   m_metadata[key] = value;
+  if (!is_mirrored_metadata(value))
+    return; // kept on the node only, as before
 
-  // Also sync to state tree for persistence and visibility
-  // Create metadata substate if needed
+  // Mirror into the state tree, where a state browser shows it. The mirror is
+  // READ-ONLY to everyone else: the node never reads it back (handleStateChanged
+  // has no metadata branch), so an edit made there would only make the tree lie
+  // about the node -- the lock keeps a dashboard or script from doing that, and
+  // makes VolRover3's state tree show the key as locked. The node itself is the
+  // owner, so it lifts the lock for its own write and puts it back, as
+  // VolRover3's AppState does for world_bounds. Writing through the lock used to
+  // throw read_only_error on every write after the first; the throw was
+  // swallowed, so the mirror kept the FIRST value forever and each re-mesh paid
+  // for ~17 exceptions.
   try {
-    std::string metadataPath = "metadata." + key;
-
-    // Convert std::any to appropriate type and store in state
-    if (value.type() == typeid(int)) {
-      getState(metadataPath).value(std::any_cast<int>(value));
-      getState(metadataPath).readOnly(true);
-    } else if (value.type() == typeid(double)) {
-      getState(metadataPath).value(std::any_cast<double>(value));
-      getState(metadataPath).readOnly(true);
-    } else if (value.type() == typeid(std::string)) {
-      getState(metadataPath).value(std::any_cast<std::string>(value));
-      getState(metadataPath).readOnly(true);
-    } else if (value.type() == typeid(const char *)) {
-      getState(metadataPath).value(std::string(std::any_cast<const char *>(value)));
-      getState(metadataPath).readOnly(true);
-    } else if (value.type() == typeid(bool)) {
-      getState(metadataPath).value(std::any_cast<bool>(value));
-      getState(metadataPath).readOnly(true);
-    }
-    // Add more types as needed
+    cvc::state &s = getState("metadata." + key); // one path lookup per write
+    struct relock {
+      cvc::state &s;
+      ~relock() {
+        try {
+          s.readOnly(true);
+        } catch (...) {
+        }
+      }
+    } guard{s};
+    s.readOnly(false); // no-op (no signal) for a key written for the first time
+    write_metadata(s, value);
   } catch (...) {
-    // Ignore metadata sync errors
+    // The mirror is best effort; the node's own copy above is authoritative.
   }
 }
 
