@@ -5,11 +5,13 @@ the existing bus, and (b) a real-time high-bandwidth stream transport (video/cam
 audio/mic, peripherals, sensors). Produced by a design workflow + adversarial critique;
 every load-bearing claim is grounded in `file:line` against master.*
 
-Status: **APPROVED (signed off 2026-09-30).** The Layer-(b) mechanisms below already
-incorporate the adversarial review's corrections (see §7). All open questions (Q1–Q9) are
-now decided — see §5a. Layer (a) Changes 1–4 have landed (Change 1–3 in #499, Change 4
-transport size-limits in #501); Change 5 (pycvc bytes) and Phase 1 (`cvc::stream` core)
-follow.
+Status: **APPROVED (signed off 2026-09-30); Phase 1 LANDED.** The Layer-(b) mechanisms below
+already incorporate the adversarial review's corrections (see §7). All open questions (Q1–Q9)
+are decided — see §5a. Layer (a) Changes 1–4 landed (1–3 in #499, Change 4 transport
+size-limits in #501); **Phase 1 `cvc::stream` in-process core landed in #502.** Q5 scoping is
+**refined (§4.1)** — streams reuse the Ariadne chroot + `link:`/`channels:` grant model and that
+work moves up to Phase 2 (with the DSL surface). Next: Change 5 (pycvc bytes), Q8 snapshot
+binary-gap (independent PR), Phase 2 sinks + scoping.
 
 ## Table of Contents
 - [1. The two distinct needs](#1-the-two-distinct-needs)
@@ -257,6 +259,52 @@ sanctioned peripheral seam; capture is marked "later", so it's new work — §7 
   (small, slow, benefits from watch+replication); NEVER for frame bytes or anything at
   frame rate.
 
+### 4.1 Scoping & security — reuse the Ariadne chroot + grant model (refined 2026-09-30)
+
+This refines **Q5**. The right isolation model for streams is the one Ariadne already has;
+streams must **not** invent a parallel ACL system.
+
+**The Ariadne model (the yardstick).** A `load:`-mounted sub-app runs in an isolated scope —
+its own channel prefix *and* its own `cvc::state` sub-tree at `<parent_prefix>.includes.<as>`.
+Isolation is by **chroot prefix** plus a **default-deny grant model**: to reach across the
+boundary a document must declare an explicit `link:` (state) or `channels:` (messaging) hole,
+which fails closed and rejects `/`-escapes. DSL `state-get`/`state-set` are chroot-relative
+with no `/` escape (`intrinsics.cpp` state intrinsics resolve against `ctx->root`); a private
+channel key is rewritten to `<root_path>.channels.<name>` (`resolve_channel_key`). There is no
+per-node runtime ACL — isolation is naming + grants.
+
+**Current Phase-1 baseline (a deliberate shortcut, NOT the target).** Phase 1 ships streams
+*outside* that model, which is safe only because Phase 1 exposes **no DSL surface** (no
+`stream-open` intrinsic; the data plane is reachable solely from C++):
+- The descriptor is created at the **global** state root (`state::instance(ctx)."streams".<id>`),
+  bypassing `apply_chroot`. It is *not* reachable by a chrooted sub-app's `state-get` (chroot-
+  relative, no `/` escape), only via the global `state://` loader facility or an explicit grant.
+- The seq/evt event channels use `<id>#stream.seq` / `#stream.evt`. The `#` makes them
+  **identity + policy-exempt** under `resolve_channel_key` — so they are *not* rewritten or
+  grant-gated, and **any** document that knows the `id` can `(msg-recv "<id>#stream.evt")` and
+  observe a stream's lifecycle + per-frame seq cadence with zero capability grant. This is the
+  one real cross-scope leak; it exists because the producer thread posts a raw key and the `#`
+  was the simplest way to make producer and receiver match with no multi-tenant surface to scope.
+- The `stream_registry` is per-app (keyed by `const app*`), token namespace flat and `token==id`,
+  first-writer-wins — so ids collide across documents and any id-holder resolves any stream.
+
+**Phase-2 target (lands WITH the DSL surface, moved up from Phase 4).** The instant a `.ari`
+document can open/bind/discover a stream, streams must inherit the chroot + grant model:
+1. **Descriptor under the opening document's `root_path`** (chroot-relative, like every other
+   node), not the global root.
+2. **Private (non-`#`) channels resolved through `resolve_channel`** at open time under the
+   document's chroot. The producer thread posts the *pre-resolved* scoped key (computed once at
+   open), so producer/receiver still match **and** the key is chroot-scoped and policy-gated.
+   The `#` identity trick is retired for DSL-opened streams.
+3. **Registry keyed by `(scope, token)`**, not a flat per-app token — ids are per-document.
+4. **Cross-scope sharing = the existing `link:` / `channels:` grant holes** (default-deny,
+   explicit, fail-closed). A host app shares a stream with a `load:`-ed sub-app exactly the way
+   it shares any channel. **This subsumes the "per-stream ACL" half of Q5** — no bespoke ACL is
+   needed; the same grant mechanism also covers the cross-node consumer case (Phase 4).
+
+Net: default-**isolated** per document, **explicitly shared** via grants. A nested sub-app sees
+only its own streams unless the host grants one.
+
 ---
 
 ## 5. Phased plan + validation
@@ -265,13 +313,19 @@ sanctioned peripheral seam; capture is marked "later", so it's new work — §7 
   `msg-send` bytes round-trip through both buses; IPC + gRPC wire round-trip of
   `bytes_payload` (octet-safety incl. NUL/high bytes); backward-compat (return dict
   unchanged; delivered envelope additive); pycvc bytes.
-- **Phase 1 — `cvc::stream` core (native, in-process):** `frame`/`frame_ptr`, `frame_pool`
-  (with the §3.2 sizing invariant), `stream_channel` on `state_bounded_queue<frame_ptr>`,
-  `stream_registry`, event hookup via `post_message`, **dedicated producer thread** (not the
-  compute pool). Unit + microbench.
-- **Phase 2 — consumer sinks:** the **new `image` adopt-ctor + keepalive bridge** (H2), then
-  cvcGL `StreamTextureBinding`; pycvc producer/consumer; a synthetic test-pattern producer
-  (end-to-end with no hardware).
+- **Phase 1 — `cvc::stream` core (native, in-process) — LANDED (#502):** `frame`/`frame_ptr`,
+  `frame_pool` (with the §3.2 sizing invariant), `stream_channel` (video = lock-free latest
+  register, audio = drop-oldest `state_bounded_queue<frame_ptr>` — the queue has no
+  non-destructive read, so the two modes use different primitives), `stream_registry`, event
+  hookup via `post_message` (throttled seq heartbeat + lifecycle only), **dedicated producer
+  thread** (not the compute pool). 15 gtests + valgrind-clean. Ships no DSL surface.
+- **Phase 2 — consumer sinks + Ariadne surface & scoping:** the **new `image` adopt-ctor +
+  keepalive bridge** (H2), then cvcGL `StreamTextureBinding`; pycvc producer/consumer; a
+  synthetic test-pattern producer (end-to-end with no hardware). **Plus the DSL surface
+  (`stream-open`/`stream-info`/`gl-bind-stream`) and, landing WITH it, the §4.1 scoping work**
+  (document-scoped descriptor + private resolved channels + `(scope, token)` registry +
+  `link:`/`channels:` grants) — moved up from Phase 4 so streams are never exposed to `.ari`
+  outside the chroot/grant model.
 - **Phase 3 — producers:** SDL3 camera/mic capture (new device-capture work) + a
   decoded-file producer.
 - **Phase 4 — cross-node:** dedicated gRPC `StreamService` bidi (own connection, size
@@ -308,9 +362,14 @@ glass-to-glass camera→texture latency.
 - **Q4 A/V master clock → `cvc::world` clock time base.** The producer's clock stamps
   `frame.pts_seconds`; the `cvc::world` clock is the intended cross-stream time base for A/V
   alignment/resampling. Gates Phase 6; Phase 1 only carries the `double` pts.
-- **Q5 stream scoping/ACLs → inherit §12 channel-scoping/chroot + per-stream ACLs.** Streams
-  are scoped like channels (chroot-relative `/streams/<id>`); cross-node consumers are subject
-  to per-stream ACLs. Gates Phase 4 (cross-node); no Phase-1 impact (in-process).
+- **Q5 stream scoping/ACLs → REUSE the Ariadne chroot + `link:`/`channels:` grant model; land it
+  with the DSL surface at Phase 2 (refined — see §4.1).** Streams inherit §12 scoping the same way
+  every other Ariadne resource does: chroot-relative descriptor under the document's `root_path`,
+  private (non-`#`) channels resolved through `resolve_channel`, registry keyed by `(scope, token)`,
+  and cross-scope sharing via the existing default-deny `link:`/`channels:` grant holes — which
+  **subsumes** the per-stream ACL (no bespoke ACL). Moved from Phase 4 to **Phase 2**, because that
+  is when a sub-app first gains a surface to open/subscribe a stream. Phase 1 (in-process, no DSL
+  surface) ships a deliberate global/`#` shortcut (§4.1) that is safe only until the DSL surface exists.
 - **Q6 frame mutability → publish-IMMUTABLE + pool-recycle.** Frames are frozen after
   `publish`; no mutable-aliased mode. (A future in-place mode can be added if a real consumer
   needs `texture_modified()`-style edits.)
@@ -321,8 +380,12 @@ glass-to-glass camera→texture latency.
 - **Q8 snapshot binary gap → YES, but separate independent PR.** Extend the initial-sync
   snapshot path (`SnapshotEntry` / IPC snapshot serializer) to carry a bytes field so
   replicated binary node values survive a full-tree resync. Tracked independently of streaming.
-- **Q9 namespace → `cvc::stream`, new small library.** New CMake target `cvc::stream`
-  (not folded into `cvc::core`, not `cvc::media`).
+- **Q9 namespace → `cvc::stream`, own `inc/cvc/stream/` + `src/cvc/stream/` area (as built, #502).**
+  A new C++ namespace with its own header/source directory, **compiled into the single monolithic
+  `cvc` target** like `cvc::net`/`cvc::ariadne` — NOT a standalone CMake target. (The verified build
+  convention overrode the original "separate library" wording: `install(EXPORT cvcTargets NAMESPACE
+  cvc::)` exports only `cvc::cvc`, so a separate target would break the single-export
+  `find_package(cvc)` contract.)
 
 ## 6. Open questions — ALL DECIDED
 
