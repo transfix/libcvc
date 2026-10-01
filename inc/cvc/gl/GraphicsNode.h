@@ -3,11 +3,14 @@
 
 #include <any>
 #include <array>
+#include <atomic>
 #include <boost/signals2.hpp>
+#include <cstdint>
 #include <cvc/core/world_units.h>
 #include <cvc/gl/SceneNode.h>
 #include <cvc/volume/bounding_box.h>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vtkMatrix4x4.h>
 #include <vtkPlaneCollection.h>
@@ -66,6 +69,40 @@ public:
   vtkMatrix4x4 *getTransform() { return m_transform; }
   const vtkMatrix4x4 *getTransform() const { return m_transform; }
 
+  // The per-frame POSE path: set this node's local transform to a row-major 4x4
+  // (the same layout as setTransform(const double[16])), for scenes that move
+  // many nodes every frame -- vehicles, agents, anything driven by a simulation.
+  //
+  // What it does differently from setTransform, and why:
+  //   * No state-string round trip on the calling thread. setTransform formats
+  //     16 doubles, writes the state tree inline, and its own "matrix" handler
+  //     re-parses the echo and runs the transform cascade a second time. Here the
+  //     matrix is applied once and PUBLISHED through the scene's state_publisher
+  //     (as setPosition publishes), which formats it on the flushing thread; the
+  //     value it writes comes back as an echo and is dropped. The state tree
+  //     still ends up holding the pose ("matrix"), eventually-consistent like
+  //     every published value.
+  //   * Thread-safe. On the scene's owner thread (or with no scene) it applies
+  //     immediately. From any other thread nothing is touched there: the matrix
+  //     is parked in a one-slot mailbox and applied on the owner thread at the
+  //     next processEvents(). Latest wins -- a simulation thread posing faster
+  //     than the frame rate queues ONE apply per node per frame, not one per
+  //     call -- and an owner-thread call drops any older parked pose.
+  //   * Change-detected. An identical matrix is a no-op: no cascade, no actor
+  //     Modified() (which would make the shadow baker re-bake), no publish.
+  //     The one exception: if the publisher has shed values since this node
+  //     last published, the unchanged pose is published again (state only),
+  //     because the shed value may have been ours.
+  //   * Safe to mix with setTransform/resetTransform and with external writes
+  //     to "matrix". Once a node has published a pose, those paths also queue
+  //     the matrix they set, so a pose still waiting to be flushed cannot be
+  //     written over the newer value later.
+  //   * Like every move, it fires transformChanged once; the SceneGraph folds all
+  //     the moves between two pumps into ONE world-bounds walk.
+  // The result -- local, world and actor matrices, children, bounds -- is
+  // exactly what setTransform produces for the same matrix.
+  void setPoseMatrix(const double matrix[16]);
+
   // Convenience transform methods
   void setPosition(double x, double y, double z);
   void setRotation(double x, double y, double z); // Euler angles in degrees
@@ -114,9 +151,12 @@ public:
                                               bool includeChildren = true) const;
 
   // Fired ONCE when this node's transform changes (setPosition/setRotation/
-  // setScale/setTransform/resetTransform, or a state-driven move) — not once per
-  // recursively-updated child. The SceneGraph connects to it to recompute the
-  // world bounds/grid so the world box tracks a node that moves out of it.
+  // setScale/setTransform/setPoseMatrix/resetTransform, or a state-driven move)
+  // — not once per recursively-updated child. The SceneGraph connects to it to
+  // recompute the world bounds/grid so the world box tracks a node that moves
+  // out of it; it only flags the scene, and the walk itself runs once per
+  // processEvents() however many nodes moved. Emitted on the thread that made
+  // the move, so a slot must be thread-safe.
   boost::signals2::signal<void(GraphicsNode *)> transformChanged;
 
   // Hierarchical structure
@@ -292,6 +332,39 @@ protected:
 
   // State change handler override
   virtual void handleStateChanged(const std::string &childState) override;
+
+private:
+  // setPoseMatrix plumbing. applyPoseMatrix runs on the owner thread only; the
+  // mailbox below hands a pose made on another thread to it.
+  void applyPoseMatrix(const double matrix[16]);
+  void applyParkedPose();
+  void publishPoseMatrix(const double matrix[16]);
+  // Called after any OTHER path puts a new matrix on this node and writes it to
+  // state directly (setTransform, resetTransform, an external "matrix" write).
+  // Re-queues the node's current matrix so it replaces a pose that is still
+  // waiting in the publisher, or one a flush is writing right now. Without this,
+  // that older pose would be written over the newer value, and a node that then
+  // stays still would never correct it.
+  void supersedePublishedMatrix();
+  // setPoseMatrix has published through a scene publisher at least once, so a
+  // pose of ours may be queued there. Never cleared, because "nothing queued
+  // any more" cannot be known without racing the flush. It stays false for a
+  // node that only uses setTransform, so that node's behaviour is unchanged.
+  // Atomic because setTransform may be called on any thread.
+  std::atomic<bool> m_matrixPublished{false};
+  // The publisher's dropped() count read just BEFORE our last pose publish
+  // (owner thread only). If dropped() has moved since then, the publisher may
+  // have shed our pose, so an unchanged pose is published again instead of
+  // being skipped as a no-op. See applyPoseMatrix.
+  std::uint64_t m_poseDropMark = 0;
+  std::mutex m_poseMutex;                // guards m_parkedPose + m_posePending writes
+  std::array<double, 16> m_parkedPose{}; // the latest off-thread pose, not yet applied
+  // A parked pose is waiting (and one apply is queued for it). Atomic so the
+  // owner-thread fast path can see "nothing parked" without taking the lock.
+  std::atomic<bool> m_posePending{false};
+  // True only while a scene-less node writes its own pose to state directly:
+  // the handler that write fires runs inline on this thread and is our echo.
+  bool m_writingPose = false;
 };
 
 } // namespace gl

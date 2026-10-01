@@ -129,6 +129,19 @@ void SceneGraph::processEvents() {
     }
     events.pop();
   }
+
+  // Then the world-bounds follow-up for every tracked node that moved since the
+  // last pump -- including the moves the drain above just applied (a pose
+  // marshalled from another thread) -- in ONE walk. Moves only raise the flag
+  // (see trackNodeBounds); a frame that poses N vehicles used to run N walks
+  // here, 2N through setTransform.
+  if (m_boundsDirty.exchange(false, std::memory_order_acq_rel)) {
+    onGraphicsBoundsChanged();
+    // A move is something to draw even when the grid did not have to grow. The
+    // slot requested a render when it raised the flag; ask again so a host that
+    // consumed that request before pumping still draws the latest poses.
+    requestRender();
+  }
 }
 
 void SceneGraph::requestRender() {
@@ -277,6 +290,7 @@ void SceneGraph::updateTransferFunction(const std::vector<double> &colorTable,
 }
 
 cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
+  m_boundsWalks.fetch_add(1, std::memory_order_relaxed); // boundsWalkCount()
   cvc::bounding_box combinedBounds;
   bool first = true;
 
@@ -494,11 +508,17 @@ void SceneGraph::registerGraphics(const std::string &name, std::shared_ptr<Graph
 void SceneGraph::trackNodeBounds(const std::shared_ptr<GraphicsNode> &node) {
   if (!node)
     return;
-  // When the node moves, marshal the world-bounds recompute onto the owner thread
-  // (updateGrid touches the VTK grid/axis actors). The connection is owned here
-  // and dies with the SceneGraph, so the captured `this` is safe.
-  m_boundsConns.push_back(node->transformChanged.connect(
-      [this](GraphicsNode *) { postEvent([this]() { onGraphicsBoundsChanged(); }); }));
+  // When the node moves, FLAG the world bounds as stale; processEvents() runs
+  // the recompute once, on the owner thread (updateGrid touches the VTK
+  // grid/axis actors), however many nodes moved. transformChanged fires on the
+  // mover's thread, so this only touches atomics and the render flag. The first
+  // move since the last pump also requests a render, which the per-move
+  // postEvent used to do as a side effect. The connection is owned here and dies
+  // with the SceneGraph, so the captured `this` is safe.
+  m_boundsConns.push_back(node->transformChanged.connect([this](GraphicsNode *) {
+    if (!m_boundsDirty.exchange(true, std::memory_order_acq_rel))
+      requestRender();
+  }));
 }
 
 void SceneGraph::refreshWorldBounds() {
@@ -518,7 +538,19 @@ void SceneGraph::refreshWorldBounds() {
   // Pinned by cvcgl_grid_bounds (8 failing checks before this change).
   //
   // Marshalled onto the owner thread: updateGrid() touches VTK actors.
+  //
+  // Coalesced: while one recompute is queued, further adds/removes ride on it --
+  // it reads the scene when it RUNS, so it sees them all. Building a scene of N
+  // nodes therefore costs one walk instead of N walks of up to N nodes each.
+  if (m_boundsRefreshQueued.exchange(true, std::memory_order_acq_rel))
+    return;
   postEvent([this]() {
+    m_boundsRefreshQueued.store(false, std::memory_order_release);
+    // This authoritative walk sees every move made so far, so a grow-only
+    // follow-up still flagged for them would walk again for nothing. A node
+    // that moves AFTER this point (a later event in the same drain) raises the
+    // flag again and is covered at the end of processEvents().
+    m_boundsDirty.store(false, std::memory_order_release);
     updateGrid(computeGraphicsBounds());
     m_renderNeeded = true;
   });

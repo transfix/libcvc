@@ -17,6 +17,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/state_publisher.h>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -255,6 +256,85 @@ void test_concurrent_flushers_keep_write_order() {
   std::printf("  ok: two concurrent flushers never invert write order\n");
 }
 
+// publish_matrix defers the text: the queue holds 16 doubles and flush()
+// writes format_matrix() of the LAST one, which parses back bit-for-bit. It
+// shares the per-path slot with publish(), so mixing the two on one path still
+// means last-writer-wins.
+void test_publish_matrix_formats_at_flush() {
+  cvc::app app;
+  SceneGraph sg(app);
+  auto &pub = sg.publisher();
+  pub.stop(); // drive the flushes by hand
+  const std::string path = "pubmat.node.matrix";
+
+  const double a[16] = {1, 0, 0, 0.1, 0, 1, 0, 1.0 / 3.0, 0, 0, 1, -2.5e7, 0, 0, 0, 1};
+  double b[16];
+  for (int i = 0; i < 16; ++i)
+    b[i] = a[i] * 0.7 + i;
+  pub.publish_matrix(path, a);
+  pub.publish_matrix(path, b); // coalesced: only b is formatted and written
+  assert(pub.pending() == 1);
+  pub.flush();
+  const std::string v = read(app, path);
+  assert(v == cvc::gl::state_publisher::format_matrix(b));
+  std::istringstream iss(v);
+  char comma;
+  for (int i = 0; i < 16; ++i) {
+    double x;
+    if (i > 0)
+      iss >> comma;
+    iss >> x;
+    assert(x == b[i] && "17 significant digits round-trip exactly");
+  }
+
+  pub.publish_matrix(path, a);
+  pub.publish(path, "text wins"); // the later write owns the slot
+  pub.flush();
+  assert(read(app, path) == "text wins");
+  pub.publish(path, "text first");
+  pub.publish_matrix(path, a);
+  pub.flush();
+  assert(read(app, path) == cvc::gl::state_publisher::format_matrix(a));
+  std::printf("  ok: publish_matrix formats the last matrix at flush, exactly\n");
+}
+
+// flushing() names the publisher whose flush the calling thread is in. Node
+// echo guards compare it with their own scene's publisher, so a write by a
+// different scene's publisher is not mistaken for their own. Nested flushes
+// report the innermost publisher, then the outer one again.
+void test_flushing_names_the_innermost_publisher() {
+  using cvc::gl::state_publisher;
+  cvc::app app;
+  state_publisher outer(app), inner(app); // no workers: flushed by hand here
+  assert(state_publisher::flushing() == nullptr && !state_publisher::in_flush());
+
+  const std::string outerPath = "flushing.outer", innerPath = "flushing.inner";
+  cvc::state::instance(app)(outerPath).value(std::string("0"));
+  cvc::state::instance(app)(innerPath).value(std::string("0"));
+  const state_publisher *seenOuter = nullptr, *seenInner = nullptr, *seenOuterAgain = nullptr;
+  const state_publisher *seenOtherThread = &outer;
+  boost::signals2::scoped_connection ci = cvc::state::instance(app)(innerPath).valueChanged.connect(
+      [&]() { seenInner = state_publisher::flushing(); });
+  boost::signals2::scoped_connection co =
+      cvc::state::instance(app)(outerPath).valueChanged.connect([&]() {
+        seenOuter = state_publisher::flushing();
+        // Thread-local: another thread is not inside this flush.
+        std::thread([&]() { seenOtherThread = state_publisher::flushing(); }).join();
+        inner.flush(); // a handler that drains a second publisher
+        seenOuterAgain = state_publisher::flushing();
+      });
+
+  inner.publish(innerPath, "1");
+  outer.publish(outerPath, "1");
+  outer.flush();
+  assert(seenOuter == &outer);
+  assert(seenInner == &inner);
+  assert(seenOuterAgain == &outer);
+  assert(seenOtherThread == nullptr);
+  assert(state_publisher::flushing() == nullptr && !state_publisher::in_flush());
+  std::printf("  ok: flushing() names the innermost publisher, per thread\n");
+}
+
 } // namespace
 
 int main() {
@@ -267,6 +347,8 @@ int main() {
   test_teardown_joins_worker();
   test_publisher_independent_of_pool();
   test_concurrent_flushers_keep_write_order();
+  test_publish_matrix_formats_at_flush();
+  test_flushing_names_the_innermost_publisher();
   std::printf("cvcgl_state_publisher: OK\n");
   return 0;
 }

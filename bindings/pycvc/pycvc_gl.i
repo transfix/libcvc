@@ -308,6 +308,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // ── GraphicsNode: keep transform / material / label; ignore VTK/any/templates ─
 %ignore cvc::gl::GraphicsNode::setTransform(vtkMatrix4x4 *);
 %ignore cvc::gl::GraphicsNode::setTransform(const double[16]); // replaced by the vector<double> %extend
+%ignore cvc::gl::GraphicsNode::setPoseMatrix(const double[16]); // replaced by the vector<double> %extend
 %ignore cvc::gl::GraphicsNode::getTransform;
 %ignore cvc::gl::GraphicsNode::getWorldTransform;
 %ignore cvc::gl::GraphicsNode::getClipPlanes;
@@ -342,6 +343,15 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     if (m.size() != 16)
       throw std::invalid_argument("setTransform: need 16 doubles (row-major 4x4)");
     $self->setTransform(m.data());
+  }
+  // The per-frame pose path (row-major 16, same layout as setTransform): no
+  // state-string round trip, marshalled to the scene's owner thread when called
+  // from another one (latest wins), a no-op for an unchanged matrix, and all the
+  // moves between two processEvents() share ONE scene-bounds walk.
+  void setPoseMatrix(const std::vector<double>& m) {
+    if (m.size() != 16)
+      throw std::invalid_argument("setPoseMatrix: need 16 doubles (row-major 4x4)");
+    $self->setPoseMatrix(m.data());
   }
   // Read this node's local transform as a 16-element row-major list (the
   // vtkMatrix4x4 return is ignored; this marshals cleanly).

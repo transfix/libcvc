@@ -11,6 +11,7 @@
 #ifndef __CVC_GL_STATE_PUBLISHER_H__
 #define __CVC_GL_STATE_PUBLISHER_H__
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -19,6 +20,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace cvc {
@@ -69,6 +71,21 @@ public:
   // the same path overwrite earlier ones — the point of the exercise.
   void publish(const std::string &path, std::string value);
 
+  // Queue a row-major 4x4 matrix for `path`, formatted to text only when it is
+  // FLUSHED, on the flushing thread. Writing 16 doubles at round-trip precision
+  // is the bulk of what publishing a pose costs (~10 us, against well under one
+  // for the enqueue), so a node posed every frame no longer pays it on the
+  // render thread at all, and coalescing means it is paid once per flush window
+  // rather than once per call. Same coalescing and back pressure as publish();
+  // the text written is exactly format_matrix(rowMajor).
+  void publish_matrix(const std::string &path, const double rowMajor[16]);
+
+  // The text form of a row-major 4x4 that publish_matrix() writes: 16
+  // comma-separated values at 17 significant digits, so it parses back to the
+  // same doubles bit for bit. The same form GraphicsNode::setTransform writes to
+  // a node's "matrix" key.
+  static std::string format_matrix(const double rowMajor[16]);
+
   // Apply everything queued, on the CALLING thread. Used by the worker, and by
   // anyone who needs the tree current right now (tests, teardown).
   //
@@ -95,12 +112,23 @@ public:
   // GraphicsNode::handleStateChanged, and test/cvcgl_pose_echo.cpp).
   //
   // Thread-local rather than per-instance because flush() runs its writes on
-  // the calling thread, so a handler those writes fire is on that same thread;
-  // and a publisher only ever writes paths its own scene's nodes published, so
-  // there is no cross-scene confusion to disambiguate. Nesting is counted, not
-  // flagged, so a flush reached from inside a flush still reports correctly on
-  // the way back out.
+  // the calling thread, so a handler those writes fire is on that same thread.
+  // Nesting is counted, not flagged, so a flush reached from inside a flush
+  // still reports correctly on the way back out.
+  //
+  // "Some publisher is flushing" is NOT "my publisher is flushing", though. Two
+  // scenes can bind nodes to the same state path (a second view built with the
+  // same prefix to mirror the first), and then one scene's flush writes a path
+  // the other scene's node listens to. To that node the write is foreign and
+  // must be applied. A handler that is asking "is this my own echo?" wants
+  // flushing() and a comparison with its own scene's publisher.
   static bool in_flush();
+
+  // The publisher whose flush() the CALLING thread is inside right now, or
+  // nullptr. When flushes nest (a handler fired by one publisher's write drains
+  // another), this is the innermost, and the outer one is reported again once
+  // the inner flush returns.
+  static const state_publisher *flushing();
 
   // Start/stop the background flusher. `hz` is the flush cadence; matching the
   // world clock's rate keeps state updates in step with simulation ticks rather
@@ -145,6 +173,11 @@ public:
   std::uint64_t dropped() const { return m_dropped.load(); }
 
 private:
+  // A queued value: ready text from publish(), or a matrix from
+  // publish_matrix() that flush() formats.
+  using pending_value = std::variant<std::string, std::array<double, 16>>;
+
+  void enqueue(const std::string &path, pending_value value);
   void worker(double hz);
 
   cvc::app &m_ctx;
@@ -158,7 +191,7 @@ private:
   // counts nesting rather than flagging it); on one thread program order
   // already orders those writes.
   std::recursive_mutex m_flushMutex;
-  std::unordered_map<std::string, std::string> m_pending;
+  std::unordered_map<std::string, pending_value> m_pending;
   // Pending keys, kept alongside the map purely so eviction can be O(1) AND
   // uniform. Probing random hash buckets does not work: the map keeps a large
   // bucket_count from earlier peaks, so at a low load factor the probes miss,
