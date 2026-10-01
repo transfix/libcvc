@@ -107,6 +107,18 @@ public:
   // into a frame, and fan it out to every subscriber. Returns the stamped seq.
   std::int64_t publish(const frame_pool::lease &l, std::size_t used, double pts);
 
+  // Producer thread: publish a frame that ALIASES caller-owned storage with no
+  // pool slab. `keepalive` must own `data` (treated as read-only and immutable
+  // after this call) for at least as long as any subscriber holds the frame;
+  // `size` is the valid bytes at `data` (typically format().frame_bytes()). Use
+  // this for a producer that already owns its buffers — e.g. a numpy array or a
+  // decoder's output — so the stream borrows them zero-copy instead of copying
+  // into a pool slab. Stamps the next seq (shared with the pool path, so seq is
+  // monotonic across both producer paths) and returns it. Thread-safe for a
+  // single producer thread; the caller must not mutate `data` after publishing.
+  std::int64_t publish_external(const std::uint8_t *data, std::size_t size, double pts,
+                                std::shared_ptr<void> keepalive);
+
   frame_pool &pool() noexcept { return *pool_; }
   const std::shared_ptr<frame_pool> &pool_ptr() const noexcept { return pool_; }
   const std::string &id() const noexcept { return id_; }
@@ -124,6 +136,9 @@ public:
 private:
   // Slots a subscription of (mode, depth) consumes against the pool.
   std::size_t slots_for(deliver_mode m, std::size_t depth) const noexcept;
+  // Snapshot the subscriber set under the lock, then deliver off the lock (the
+  // shared_ptr copies keep a concurrently-unsubscribing subscription alive).
+  void fan_out(const frame_ptr &f);
 
   app &ctx_;
   const std::string id_;
