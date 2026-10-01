@@ -38,6 +38,17 @@ namespace cvc {
 namespace gl {
 namespace ariadne {
 
+// THREADING & LIFETIME CONTRACT (load-bearing — the implementation relies on it):
+//   - NOT thread-safe. Construction, every tick(), and destruction must all run on
+//     the single owner/render thread (the thread that drives the scene). last_seq_
+//     and released_ are plain scalars, and release() re-resolves the channel through
+//     the registry's raw pointer, both of which are safe only under this rule.
+//   - The stream (and its channel) must OUTLIVE the binding, and both must be torn
+//     down on that same owner thread. The producer may run on its own thread (it only
+//     publish()es); it must never destroy the stream. (If a future model needs
+//     cross-thread stream teardown, release() must stop re-resolving via the registry
+//     raw pointer and instead hold a safe back-reference to the channel.)
+//   - The cvc::app passed to the ctor must outlive the binding (used in release()).
 class StreamTextureBinding {
 public:
   // `token` is the stream's registry token (used only to re-resolve the live

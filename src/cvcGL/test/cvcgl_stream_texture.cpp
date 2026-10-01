@@ -117,13 +117,21 @@ int main() {
   assert(texture_scalars(*node)->GetVoidPointer(0) == frame1 &&
          "second frame not aliased into the texture");
 
-  // 4. Node teardown: the next tick unsubscribes, releasing the slab + slots.
+  // 4. Node teardown: the next tick unsubscribes, releasing the committed slots.
   assert(s->channel().subscriber_count() == 1 && "expected one subscriber");
-  node.reset(); // binding holds only a weak_ptr
+  node.reset(); // drops the texture (its m_textureStorage ref to the last slab);
+                // the binding holds only a weak_ptr
   binding.tick();
   assert(!binding.subscribed() && "binding did not unsubscribe after node teardown");
   assert(s->channel().subscriber_count() == 0 &&
          "subscription leaked after node teardown (committed slots not released)");
+
+  // 5. The last slab is still pinned by the test's own surviving subscription
+  //    ref (its latest_ register); dropping it recycles the slab -> pool empty.
+  //    This proves the slab (not just the slot accounting) is released.
+  assert(s->channel().pool().in_use() == 1 && "expected the last frame still pinned by `sub`");
+  sub.reset();
+  assert(s->channel().pool().in_use() == 0 && "pool slab not recycled after last ref dropped");
 
   std::printf("cvcgl_stream_texture: OK\n");
   return 0;

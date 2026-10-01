@@ -59,6 +59,16 @@ void StreamTextureBinding::release() {
   if (sub_) {
     // Re-resolve the channel (it may already be gone if the stream closed first,
     // in which case the subscription is already closed and dropping it suffices).
+    // Safe only under the owner-thread contract (no cross-thread teardown races the
+    // lookup→use gap). Erase-before-destruct in ~stream (close() uninstalls the
+    // token before channel_ is freed) guarantees lookup() never returns a freed
+    // channel on this thread.
+    // TODO(PR5 §4.1 scoping): when stream_registry is re-keyed by (scope, token),
+    // this lookup must become scope-aware (carry the owner scope), or it will
+    // resolve null / the wrong channel and this unsubscribe silently no-ops,
+    // regressing the prompt slot/slab release. (A same-id stream reopened after the
+    // original closed already makes token-only lookup resolve the NEW channel here;
+    // unsubscribe then harmlessly no-ops since sub_ is not in its subs_.)
     if (auto *ch = cvc::stream::stream_registry::for_app(app_).lookup(token_))
       ch->unsubscribe(sub_);
     sub_.reset();
