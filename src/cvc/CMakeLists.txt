@@ -438,6 +438,20 @@ if(CVC_USING_HDF5)
   endif()
   if(HDF5_FOUND)
     message(STATUS "HDF5 found - Enabling *.cvc file support")
+    # No HDF5 release is memory-safe on a crafted file, and releases before
+    # 1.14.4 fault on many merely malformed ones. cvc::lod scene blobs are
+    # trusted by default (inc/cvc/lod/store.h trust model, roadmap D11); bytes
+    # from a source the application does not control should go through
+    # lod::scene_reader::open_verified. This is only a configure-time notice.
+    set(_cvc_hdf5_version "${HDF5_VERSION}")
+    if(NOT _cvc_hdf5_version)
+      set(_cvc_hdf5_version "${hdf5_VERSION}")
+    endif()
+    if(_cvc_hdf5_version AND _cvc_hdf5_version VERSION_LESS 1.14.4)
+      message(STATUS "HDF5 ${_cvc_hdf5_version} < 1.14.4 - faults on malformed files are likelier; "
+                     "authenticate scene blobs from untrusted sources with "
+                     "lod::scene_reader::open_verified")
+    endif()
 
     add_compile_definitions(CVC_USING_HDF5 ${HDF5_DEFINITIONS})
     list(APPEND INCLUDE_FILES ../../inc/cvc/volume/hdf5_utils.h ../../inc/cvc/lod/store.h)

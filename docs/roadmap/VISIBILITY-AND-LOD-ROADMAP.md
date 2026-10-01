@@ -1651,6 +1651,17 @@ Dithered LOD transition — Unreal's answer, chosen there because it has *"essen
 
 `deterministic = true` **disables fades entirely** (instant switch), so headless and batch renders are frame-exact. Fading is an interactive-only nicety and must never be on the dataset path.
 
+### 6.6 Baked pyramids for static assets — `scene.cvch5`, and who may hand us one
+
+Procedural content re-derives its LOD (§6.3); **static imported assets** — photogrammetry, CAD, a city's building meshes, satellite imagery, volumes — cannot, so their ladders are built once and cached. The pieces, all in `cvc::lod`:
+
+- **Build.** `cvc::simplify` (native QEM, metric `world_error`) → `build_{mesh,volume,image}_pyramid` produce a monotone `world_error_m` ladder per asset, fanned over a `thread_pool`.
+- **Partition.** A single mesh spanning the scene never leaves rung 0 — the camera is inside its bounds — so large scenes are cut first: `partition_parts` / `partition_model` / `partition_components` (`lod/tiles.h`) place each named group of parts whole into a ground-plane cell, each tile with an order-independent content hash; `build_tiled_pyramids` builds the per-tile ladders on a pool, bit-identical to serial, with a per-tile callback for progressive attach.
+- **Cache.** One HDF5 `scene.cvch5` per bundle (`lod/store.h`): `/cvc/{geometry,images,volumes}/<name>/lod/<k>` plus an index keyed by source content hash, so a bake is detected-or-rebuilt, never silently reused for different content. The same file image serves disk, memory and the network: `scene_writer::to_blob()` bakes to bytes with no file, `scene_reader(bytes, n)` opens a fetched blob.
+- **Draw.** `cvc::gl::LodGraphicsNode` (one child per rung, visibility-switched so no rung re-uploads) and `SceneGraph::selectLOD(view)` per frame; `make_view_params(renderer)` derives the camera terms.
+
+**Trust (D11, decided).** HDF5 is not a format that can be parsed safely from a hostile source: older HDF5 releases corrupt memory on malformed files, and even current ones can be driven into unbounded allocation by crafted metadata. The reader is hardened regardless — hard links only, no external links or external raw storage, one byte budget per call, every failure a `std::exception` — but **by default a blob is assumed to come from a trusted source**, and **authentication is opt-in**: `scene_reader::open_verified(bytes, n, expected_sha256)` parses only after the content hash matches one obtained from a trusted place (a bundle manifest fetched over TLS, a pinned hash). A **sandboxed parse** for genuinely untrusted blobs — an isolated worker process with memory and CPU limits on native targets; the browser tab's own sandbox on wasm — is an **optional** roadmap item, not scheduled: it is only needed if third-party bakes are ever accepted.
+
 ---
 
 ## 7. Bounding the CPU work
@@ -2558,6 +2569,8 @@ The indoor VRAM adder is the whole `office_3storey`: 932 k triangles × 46.8 B/v
 
 **D10 — VRAM target.** The design fits the 4 GB GTX 1650 on both branches. Should it be sized for 8 GB or 24 GB machines instead, which would allow a larger band A and a richer L0?
 *Recommendation: keep 4 GB as the floor* — it is the only CUDA box and therefore the box that has to run everything.
+
+**D11 — Trust model for network-loaded LOD bakes (`scene.cvch5` blobs). Decided 2026-09-30.** Blobs are assumed to come from **trusted sources by default**; **authentication is opt-in** via `scene_reader::open_verified(..., expected_sha256)` against a hash from a trusted place. The **sandboxed parse** (isolated worker with memory/CPU limits on native; the tab sandbox on wasm) is booked as an **optional** item, to be decided if and when third-party bakes are accepted. Rationale and the hardening that ships regardless: §6.6.
 
 ---
 

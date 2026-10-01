@@ -39,12 +39,69 @@
 //                  VFD) and to_blob() hands back the exact bytes an on-disk file
 //                  would have, ready to POST over the network; scene_reader(ctx,
 //                  bytes, len) opens such a blob (e.g. one fetched with cvc::net)
-//                  with no temp file. A blob is byte-identical to the file image,
-//                  so either side can produce what the other consumes.
+//                  with no temp file, and scene_reader::open_verified(ctx, bytes,
+//                  len, sha256) does so only once its hash checks out (trust model
+//                  below). A blob is byte-identical to the file image, so either
+//                  side can produce what the other consumes.
 //
 // The HDF5 hierarchy IS the lod_index (read_lod_index / index() walk it); a
 // content hash on the SOURCE asset lets a bake step skip a pyramid already present
 // and current (has_pyramid / has). Requires CVC_USING_HDF5.
+//
+// Any number of writers and readers may be alive at once and used from any
+// thread (but see scene_reader on sharing a file with a writer); each in-memory
+// container is its own. Every call goes through the process-wide
+// hdf5_utils::library_lock (destruction included), so a writer/reader must not
+// outlive its app. Failures -- a missing, corrupt or truncated file or blob, an
+// absent asset, a container the reader refuses (below) -- throw
+// cvc::hdf5_exception, a std::exception; HDF5's own H5::Exception never
+// escapes. open_verified's hash check, which runs before HDF5 sees a byte,
+// throws std::runtime_error.
+//
+// Trust model (roadmap D11: docs/roadmap/VISIBILITY-AND-LOD-ROADMAP.md §6.6).
+// A scene.cvch5 is parsed by HDF5, and HDF5 is NOT memory-safe on hostile
+// metadata, in any release: before 1.14.4 malformed files routinely corrupt
+// memory, and public CVEs report heap buffer overflows from crafted files
+// through at least 1.14.6 (e.g. CVE-2025-6516). A small crafted file can also
+// make HDF5 spin and allocate gigabytes -- all while holding the process-wide
+// library lock, which stalls every HDF5 user in the process. So:
+//   * BY DEFAULT a scene is assumed to come from a TRUSTED source: a file the
+//     application baked or installed (scene_reader(ctx, path)), or a blob from
+//     infrastructure it controls (scene_reader(ctx, bytes, len)). Both parse
+//     with any HDF5; below 1.14.4 a merely corrupt (not hostile) download is
+//     more likely to fault, so prefer a newer HDF5 or authenticate anyway;
+//   * AUTHENTICATION is opt-in: scene_reader::open_verified checks a blob's
+//     SHA-256 against a digest from a trusted, authenticated place (a signed
+//     catalog, a manifest fetched over an authenticated channel) before HDF5
+//     sees a byte. Use it for bytes from any source the application does not
+//     control;
+//   * a sandboxed parse -- a resource-limited worker process (RLIMIT_AS /
+//     RLIMIT_CPU) for genuinely untrusted blobs -- is an optional roadmap item,
+//     not provided here.
+// On top of that the reader is hardened against a hostile container whatever
+// its source, so that a crafted one is refused with an exception rather than
+// reaching outside itself or multiplying its size:
+//   * only HARD links are followed: a soft, external or user-defined link
+//     anywhere on a path is refused (and external-link traversal is denied on
+//     the reader's access property lists as well), so a container cannot open
+//     another file;
+//   * a dataset must keep its data inside the container, contiguous or compact:
+//     external raw storage (which reads another file's bytes), virtual and
+//     chunked layouts are refused before the dataset is read;
+//   * every public call has ONE byte budget: the stored bytes of every dataset
+//     (and attribute array) it reads may add up to at most the container's size
+//     -- the blob length, or the file's size -- and the bytes decoded from them
+//     to at most 8x that (a 1-byte stored element may widen to an 8-byte double
+//     or uint64). Distinct objects of a well-formed container occupy distinct
+//     bytes, so this only ever refuses one that reads the same bytes more than
+//     once; the call's peak memory is a small constant multiple of that bound;
+//   * no group or dataset is reached twice in one call: a rung, dataset or
+//     asset hard-linked under a second name (a 1 MB file posing as gigabytes of
+//     rungs) is refused, and an asset's nrungs may not exceed its lod group's
+//     links.
+// None of this bounds the work HDF5 itself does on corrupt metadata, or makes
+// that parsing memory-safe: that is what authentication (or a sandboxed worker
+// process) is for.
 //
 // LOD is a render proxy: a scene.cvch5 never feeds a nav/material/RF path.
 
@@ -77,8 +134,11 @@ std::string image_content_hash(const image &img);
 
 // ── writer ────────────────────────────────────────────────────────────────
 // Accumulates pyramids into one scene.cvch5. File-backed: writes land on disk as
-// each call returns (create-or-open, preserving prior assets). In-memory: nothing
-// touches the disk until to_blob() serializes the container to bytes.
+// each call returns (an existing scene is opened, preserving prior assets; a
+// missing one is created). It never truncates: an existing path it cannot open
+// read-write -- not HDF5, damaged, read-only, or open in a live scene_reader --
+// throws rather than being replaced. In-memory: nothing touches the disk until
+// to_blob() serializes the container to bytes.
 class scene_writer {
 public:
   explicit scene_writer(app &ctx);                 // in-memory (core VFD, no file)
@@ -104,11 +164,34 @@ private:
 
 // ── reader ────────────────────────────────────────────────────────────────
 // Reads pyramids from a scene.cvch5 -- a file on disk, or a blob in RAM (e.g. a
-// body fetched with cvc::net), with no temp file for the blob case.
+// body fetched with cvc::net), with no temp file for the blob case. A file is
+// opened read-only and must already exist: a reader never creates or modifies
+// it (so a file writer cannot open that path while the reader is alive). A blob
+// is copied, so its bytes need not outlive the call that opens it. See the
+// trust model above: blobs are trusted by default; open_verified authenticates.
 class scene_reader {
 public:
-  scene_reader(app &ctx, const std::string &path);                   // from a file
-  scene_reader(app &ctx, const unsigned char *bytes, std::size_t n); // from a blob
+  // From a file -- trusted input. Available with any HDF5.
+  scene_reader(app &ctx, const std::string &path);
+
+  // From a blob from a TRUSTED source (the default; trust model above): copies
+  // the n bytes and parses them. Available with any HDF5. For bytes from a
+  // source the application does not control, use open_verified.
+  scene_reader(app &ctx, const unsigned char *bytes, std::size_t n);
+
+  // From an AUTHENTICATED blob: copies the n bytes once, hashes that copy
+  // (SHA-256, as sha256_hex in cvc/core/state_blob_store.h) and throws
+  // std::runtime_error, before HDF5 sees a byte, unless the digest equals
+  // `expected_sha256_hex` (64 hex digits, either case); then parses that same
+  // copy. So the bytes parsed are exactly the bytes hashed, even if the
+  // caller's buffer (mmapped, shared, reused) changes meanwhile. The expected
+  // hash must come from a trusted, authenticated source -- a signed catalog, a
+  // manifest fetched over an authenticated channel -- never from the same
+  // response as the bytes. Bytes that match are exactly what that source
+  // vouched for, as trusted as a local file, so this parses with any HDF5.
+  static scene_reader open_verified(app &ctx, const unsigned char *bytes, std::size_t n,
+                                    const std::string &expected_sha256_hex);
+
   ~scene_reader();
   scene_reader(scene_reader &&) noexcept;
   scene_reader &operator=(scene_reader &&) noexcept;
@@ -119,6 +202,9 @@ public:
   bool has(const std::string &name, const std::string &source_hash = std::string());
 
 private:
+  scene_reader(); // empty, for open_verified to fill
+  void open_bytes(app &ctx, const unsigned char *bytes, std::size_t n);
+
   struct impl;
   std::unique_ptr<impl> _p;
 };
