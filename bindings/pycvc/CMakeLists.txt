@@ -403,6 +403,15 @@ if(CVC_BUILD_PYCVC_GL)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_viewport.py)
   set_tests_properties(pycvc_gl_viewport PROPERTIES ENVIRONMENT
     "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # LOD from Python: LodGraphicsNode (setPyramid / progressive setBase+appendRungs /
+  # a Python rung style), SceneGraph.selectLOD + lod_stats + setLODEnabled, and
+  # the examples/lod_city.py feature-on run (loader-thread build, bytes bake,
+  # open_verified reload, camera fly-out: drawn triangles drop >= 3x). Headless;
+  # the make_view_params check self-skips without offscreen GL.
+  add_test(NAME pycvc_gl_lod
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_lod.py)
+  set_tests_properties(pycvc_gl_lod PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # ChaseCamera parity: the native (C++ Track) chase camera returns the same pose
   # as the pure-Python ChaseCamera on one position stream — the Python side of
   # "the cameras work the same" (its C++ side is cvcgl_track_parity).

@@ -115,6 +115,38 @@ The `cvc::state`-driven viewer/scene controllers are wrapped too, mirroring
 Contract tests: `test_pycvc_world_units.py`, `test_pycvc_gl_world.py`, and the
 `extents_metres` case in `test_pycvc_model.py`.
 
+## Level of detail (cvc::simplify + cvc::lod)
+
+The whole LOD family is wrapped directly (`pycvc_lod.i`, `LodGraphicsNode` in
+`pycvc_gl.i`): QEM `simplify`, per-asset pyramids, the selection math, tile
+partitioning, pooled tiled builds and the `scene.cvch5` store.
+
+```python
+pool = pycvc.thread_pool(3)                      # a pool the caller owns
+mesh, res = pycvc.simplify(g, params)            # out-params come back as values
+pyr = pycvc.build_mesh_pyramid(g, pool=pool)     # .rungs / .world_error_m / .rung(k)
+tiles = pycvc.partition_parts([(name, geom), ...], 100.0, group_key=["_walls", "_roof"])
+pyrs = pycvc.build_tiled_pyramids(tiles, pool=pool, on_tile=lambda i, tile, pyr: q.put(i))
+
+w = pycvc.scene_writer(app)                      # in-memory scene.cvch5
+w.write_mesh_pyramid("tile0", pyrs[0], "%016x" % tiles[0].content_hash)
+blob = w.to_blob()                               # bytes
+r = pycvc.scene_reader.open_verified(app, blob, hashlib.sha256(blob).hexdigest())
+
+node = sg.add_lod("tile0"); node.setPyramid(r.read_mesh_pyramid("tile0"))
+stats = sg.select_lod_stats(view.make_view_params(pycvc.preset_view("balanced")))
+```
+
+The long calls release the GIL (other Python threads keep running); Python
+callbacks (`on_tile`, `group_key`, `LodGraphicsNode.setRungStyle`) reacquire it,
+and an exception they raise comes back out of the call that started them.
+Failures map to `ValueError` / `IndexError` / `OSError` (HDF5) / `RuntimeError`
+(SHA-256 mismatch). `examples/lod_city.py` runs the whole pipeline on a
+synthetic city -- progressive attach from a loader thread, bake to bytes,
+verified reload, a camera fly-out printing `lod_stats` per pose (`--render DIR`
+draws each pose offscreen). Contract tests: `test_pycvc_lod.py`,
+`test_pycvc_gl_lod.py`.
+
 ## HUDs & UIs (Dear ImGui, no raw ImGui needed)
 
 `ImGuiOverlay(view)` is the per-viewer Dear ImGui integration. Python draws a HUD

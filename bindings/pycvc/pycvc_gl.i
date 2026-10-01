@@ -49,6 +49,7 @@ if _sys.platform == "win32":
 #include <cvc/gl/GridNode.h>   // the built-in reference grid (getGridNode)
 #include <cvc/gl/AxisNode.h>   // the built-in world axis (getAxisNode)
 #include <cvc/gl/VolSliceNode.h> // cvc::volslice view-aligned slice renderer node
+#include <cvc/gl/LodGraphicsNode.h> // a mesh LOD ladder drawn one rung at a time
 #include <cvc/volren/volren.h> // volume_settings/render_settings etc. VolRenNode takes
 #include <cvc/gl/NullGraphicNode.h> // the concrete empty node behind add_child_group
 #include <cvc/gl/SceneGraph.h>
@@ -239,6 +240,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %shared_ptr(cvc::gl::GridNode)
 %shared_ptr(cvc::gl::AxisNode)
 %shared_ptr(cvc::gl::VolSliceNode)
+%shared_ptr(cvc::gl::LodGraphicsNode)
 %shared_ptr(cvc::gl::SceneGraph)
 
 // ── directors: Python-defined scene node types ──────────────────────────────
@@ -675,6 +677,202 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
   }
 }
 
+// ── LodGraphicsNode: a mesh LOD ladder, exactly one rung drawn per frame ────
+// The REAL cvcGL node (shared_ptr'd like every node). Populate it from a
+// pycvc.mesh_pyramid (setPyramid), or progressively (setBase now, appendRungs
+// when the pyramid is built -- rung 0's node and uploaded buffers are kept);
+// SceneGraph.selectLOD(view, stats) picks every LOD node's rung per frame from a
+// pycvc.view_params (SceneRenderer.make_view_params() builds one from the live
+// camera). Like every scene node: populate and select on the scene's owner
+// thread. A rung is a render proxy only.
+//
+// setRungStyle takes a Python callable f(geometry_node), run on every rung's
+// GeometryNode now and on each one created later, before it can draw (None
+// stops styling new rungs). The node is the LIVE rung (a co-owning proxy). If
+// the callable raises, the rung is still built -- the ladder stays consistent
+// -- and the first such exception is re-raised from the call that ran the
+// style (setRungStyle / setPyramid / setBase / appendRungs) once it returns.
+%{
+namespace pycvc {
+namespace gl_lod {
+// The first exception a rung-style callable raised during the current call, on
+// this thread; re-raised by the wrapper once the C++ call has returned.
+struct deferred_error {
+  PyObject *type = nullptr;
+  PyObject *value = nullptr;
+  PyObject *traceback = nullptr;
+};
+inline deferred_error &style_error() {
+  static thread_local deferred_error e;
+  return e;
+}
+inline void defer_current_error() { // GIL held
+  deferred_error &e = style_error();
+  if (e.type) { // keep the first
+    PyErr_Clear();
+    return;
+  }
+  PyErr_Fetch(&e.type, &e.value, &e.traceback);
+}
+inline bool restore_deferred_error() { // GIL held; true if one was raised
+  deferred_error &e = style_error();
+  if (!e.type)
+    return false;
+  PyErr_Restore(e.type, e.value, e.traceback);
+  e = deferred_error();
+  return true;
+}
+inline void discard_deferred_error() { // GIL held
+  deferred_error &e = style_error();
+  Py_XDECREF(e.type);
+  Py_XDECREF(e.value);
+  Py_XDECREF(e.traceback);
+  e = deferred_error();
+}
+} // namespace gl_lod
+} // namespace pycvc
+%}
+%typemap(in) cvc::gl::LodGraphicsNode::RungStyle {
+  // Always assign: SWIG holds this by-value std::function in a SwigValueWrapper,
+  // which is EMPTY (a null pointer) until assigned -- None must still pass an
+  // (empty) function, not nothing.
+  $1 = cvc::gl::LodGraphicsNode::RungStyle();
+  if ($input != Py_None) {
+    if (!PyCallable_Check($input))
+      SWIG_exception_fail(SWIG_TypeError, "setRungStyle: expected a callable f(node) or None");
+    Py_INCREF($input);
+    std::shared_ptr<PyObject> _cb($input, [](PyObject *p) {
+      PyGILState_STATE g = PyGILState_Ensure();
+      Py_DECREF(p);
+      PyGILState_Release(g);
+    });
+    swig_type_info *_node_t = $descriptor(std::shared_ptr< cvc::gl::GeometryNode > *);
+    $1 = [_cb, _node_t](cvc::gl::GeometryNode &node) {
+      PyGILState_STATE g = PyGILState_Ensure();
+      PyObject *arg = nullptr;
+      try {
+        auto *sp = new std::shared_ptr<cvc::gl::GeometryNode>(
+            std::static_pointer_cast<cvc::gl::GeometryNode>(node.shared_from_this()));
+        arg = SWIG_NewPointerObj(SWIG_as_voidptr(sp), _node_t, SWIG_POINTER_OWN);
+      } catch (const std::bad_weak_ptr &) {
+        PyErr_SetString(PyExc_RuntimeError, "setRungStyle: rung node is not shared_ptr-owned");
+      }
+      PyObject *r = arg ? PyObject_CallFunctionObjArgs(_cb.get(), arg, nullptr) : nullptr;
+      Py_XDECREF(arg);
+      if (r)
+        Py_DECREF(r);
+      else
+        pycvc::gl_lod::defer_current_error();
+      PyGILState_Release(g);
+    };
+  }
+}
+%typemap(typecheck, precedence = SWIG_TYPECHECK_POINTER) cvc::gl::LodGraphicsNode::RungStyle {
+  $1 = ($input == Py_None || PyCallable_Check($input)) ? 1 : 0;
+}
+// The four calls that can run the style: re-raise a deferred style error.
+%define PYCVC_GL_LOD_STYLED(NAME)
+%exception NAME {
+  try {
+    $action
+  } catch (const cvc::exception &e) {
+    pycvc::gl_lod::discard_deferred_error();
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  } catch (const std::exception &e) {
+    pycvc::gl_lod::discard_deferred_error();
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  } catch (...) {
+    pycvc::gl_lod::discard_deferred_error();
+    SWIG_exception(SWIG_RuntimeError, "pycvc_gl: C++ exception (see cvcGL)");
+  }
+  if (pycvc::gl_lod::restore_deferred_error())
+    SWIG_fail;
+}
+%enddef
+PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::setPyramid)
+PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::setBase)
+PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::appendRungs)
+PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::setRungStyle)
+
+%ignore cvc::gl::LodGraphicsNode::getBoundingBox; // opaque bbox; GraphicsNode.get_bounding_box() covers it
+%ignore cvc::gl::LodGraphicsNode::addToRenderer;  // vtkRenderer*
+%ignore cvc::gl::lod_stats::rung_nodes;           // std::vector<int> -> the rung_nodes property below
+%pythonappend cvc::gl::LodGraphicsNode::LodGraphicsNode %{
+    if args: self._pycvc_app = args[0]
+%}
+%pythonappend cvc::gl::LodGraphicsNode::rung %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%include "cvc/gl/LodGraphicsNode.h"
+%extend cvc::gl::lod_stats {
+  // rung_nodes[k] = LOD nodes whose active rung is k, as a list.
+  PyObject *rung_histogram() const {
+    PyObject *lst = PyList_New(static_cast<Py_ssize_t>($self->rung_nodes.size()));
+    if (!lst)
+      return nullptr;
+    for (std::size_t k = 0; k < $self->rung_nodes.size(); ++k)
+      PyList_SET_ITEM(lst, static_cast<Py_ssize_t>(k), PyLong_FromLong($self->rung_nodes[k]));
+    return lst;
+  }
+  std::string __repr__() const {
+    std::string h;
+    for (std::size_t k = 0; k < $self->rung_nodes.size(); ++k)
+      h += (k ? ", " : "") + std::to_string($self->rung_nodes[k]);
+    return "lod_stats(nodes=" + std::to_string($self->nodes) +
+           ", hidden=" + std::to_string($self->hidden) +
+           ", changes=" + std::to_string($self->changes) + ", rung_nodes=[" + h +
+           "], drawn_tris=" + std::to_string($self->drawn_tris) +
+           ", full_tris=" + std::to_string($self->full_tris) + ")";
+  }
+%pythoncode %{
+    rung_nodes = property(rung_histogram)
+
+    def saving(self):
+        """full_tris / drawn_tris: how many times fewer triangles LOD draws (1.0 = none)."""
+        return float(self.full_tris) / self.drawn_tris if self.drawn_tris else 1.0
+%}
+}
+%extend cvc::gl::LodGraphicsNode {
+  // Rungs whose actor is drawing right now (vtkProp visibility -- what a switch
+  // flips; the rung nodes' own isVisible() flags never change). [] when the
+  // node or an ancestor is hidden; one rung otherwise.
+  PyObject *drawn_rungs() {
+    PyObject *lst = PyList_New(0);
+    if (!lst)
+      return nullptr;
+    for (int k = 0; k < $self->rungCount(); ++k) {
+      vtkProp *p = $self->rung(k)->prop();
+      if (p && p->GetVisibility()) {
+        PyObject *v = PyLong_FromLong(k);
+        if (!v || PyList_Append(lst, v) < 0) {
+          Py_XDECREF(v);
+          Py_DECREF(lst);
+          return nullptr;
+        }
+        Py_DECREF(v);
+      }
+    }
+    return lst;
+  }
+  // The ladder as lists, finest first: world_error_m and triangles per rung.
+  PyObject *rung_errors() const {
+    PyObject *lst = PyList_New($self->rungCount());
+    if (!lst)
+      return nullptr;
+    for (int k = 0; k < $self->rungCount(); ++k)
+      PyList_SET_ITEM(lst, k, PyFloat_FromDouble($self->rungError(k)));
+    return lst;
+  }
+  PyObject *rung_triangle_counts() const {
+    PyObject *lst = PyList_New($self->rungCount());
+    if (!lst)
+      return nullptr;
+    for (int k = 0; k < $self->rungCount(); ++k)
+      PyList_SET_ITEM(lst, k, PyLong_FromUnsignedLongLong($self->rungTriangles(k)));
+    return lst;
+  }
+}
+
 // ── SceneGraph: the top-level graph. App injected explicitly (no singleton). ─
 %ignore cvc::gl::SceneGraph::SceneGraph(const std::string &);           // process-wide singleton ctor
 %ignore cvc::gl::SceneGraph::SceneGraph(cvc::app &, const std::string &); // re-exposed via shared_ptr factory
@@ -731,6 +929,8 @@ def _typed_node(sg, name):
         n = sg.volren_node(name)
     if n is None:
         n = sg.light_node(name)
+    if n is None:
+        n = sg.lod_node(name)
     return n
 %}
 %pythonappend cvc::gl::SceneGraph::getGraphics %{
@@ -799,6 +999,16 @@ def _typed_node(sg, name):
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %pythonappend cvc::gl::SceneGraph::volslice_node %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+// LOD node factories return live node proxies -- same app keep-alive.
+%pythonappend cvc::gl::SceneGraph::add_lod %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::add_child_lod %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::lod_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %extend cvc::gl::SceneGraph {
@@ -962,6 +1172,35 @@ def _typed_node(sg, name):
   std::shared_ptr<cvc::gl::VolSliceNode> volslice_node(const std::string& name) {
     return std::dynamic_pointer_cast<cvc::gl::VolSliceNode>($self->getGraphics(name));
   }
+  // An (empty) LodGraphicsNode as a child of `parent` / at the root, registered
+  // so getGraphics(name) / lod_node(name) find it. Fill it with setPyramid or
+  // setBase + appendRungs. addGraphicsChild<T> is a template (unwrappable), so
+  // this clones the add_volren factory.
+  std::shared_ptr<cvc::gl::LodGraphicsNode> add_child_lod(const std::string& parent,
+                                                          const std::string& name) {
+    auto p = $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_child_lod: no parent node named '" + parent + "'");
+    auto child = p->addGraphicsChild<cvc::gl::LodGraphicsNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  std::shared_ptr<cvc::gl::LodGraphicsNode> add_lod(const std::string& name) {
+    auto child = $self->getGraphicsRoot()->addGraphicsChild<cvc::gl::LodGraphicsNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  // Typed downcast: the concrete LodGraphicsNode. Null if absent/wrong type.
+  std::shared_ptr<cvc::gl::LodGraphicsNode> lod_node(const std::string& name) {
+    return std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>($self->getGraphics(name));
+  }
+  // selectLOD with a fresh lod_stats, returned: the per-frame HUD/profile line
+  // in one call (stats.changes is selectLOD's return value).
+  cvc::gl::lod_stats select_lod_stats(const cvc::lod::view_params& view) {
+    cvc::gl::lod_stats st;
+    $self->selectLOD(view, &st);
+    return st;
+  }
   // Connect a Python callable to the scene's graphics-changed signal (fires when
   // a node is added or removed) — Python functions as scene callbacks.
   void on_graphics_changed(std::function<void()> cb) { $self->graphicsChanged.connect(cb); }
@@ -1009,6 +1248,15 @@ def _typed_node(sg, name):
     if (!$self->pickWorld(display_x, display_y, w))
       Py_RETURN_NONE;
     return Py_BuildValue("(ddd)", w[0], w[1], w[2]);
+  }
+  // A pycvc.view_params for what this renderer's camera sees right now (eye,
+  // viewport height, fov or parallel scale), with the error budget, hysteresis
+  // and z_near taken from `base` (a quality preset, typically) -- what
+  // SceneGraph.selectLOD wants once per frame. cvc::gl::make_view_params on the
+  // owned renderer, so no VTK object crosses into Python.
+  cvc::lod::view_params make_view_params(
+      const cvc::lod::view_params &base = cvc::lod::view_params()) const {
+    return cvc::gl::make_view_params($self->renderer(), base);
   }
 }
 
