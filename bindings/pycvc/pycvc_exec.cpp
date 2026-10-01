@@ -45,6 +45,8 @@ PyObject *value_to_py(const value_t &v) {
     return PyFloat_FromDouble(*d);
   if (const auto *s = std::get_if<std::string>(&v.v))
     return PyUnicode_FromStringAndSize(s->data(), static_cast<Py_ssize_t>(s->size()));
+  if (const auto *by = std::get_if<bytes_value>(&v.v))
+    return PyBytes_FromStringAndSize(by->data.data(), static_cast<Py_ssize_t>(by->data.size()));
   if (const auto *l = std::get_if<list_ptr>(&v.v)) {
     const auto &vec = **l;
     PyObject *out = PyList_New(static_cast<Py_ssize_t>(vec.size()));
@@ -82,6 +84,15 @@ value_t py_to_value(PyObject *o) {
     Py_ssize_t n = 0;
     const char *s = PyUnicode_AsUTF8AndSize(o, &n);
     return value_t(std::string(s ? s : "", s ? static_cast<size_t>(n) : 0));
+  }
+  // Python `bytes` -> a first-class binary value (bytes_value), the counterpart
+  // of the text `str` path above. Lets a Python DSL fn receive/return a raw
+  // binary msg-send/msg-recv payload without lossy UTF-8 coercion.
+  if (PyBytes_Check(o)) {
+    char *buf = nullptr;
+    Py_ssize_t n = 0;
+    PyBytes_AsStringAndSize(o, &buf, &n);
+    return make_bytes(std::string(buf ? buf : "", buf ? static_cast<size_t>(n) : 0));
   }
   if (PyList_Check(o) || PyTuple_Check(o)) {
     bool tup = PyTuple_Check(o);
