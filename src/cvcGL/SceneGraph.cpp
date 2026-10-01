@@ -19,6 +19,7 @@
 #include <cvc/gl/state_publisher.h>
 #include <cvc/volume/volume.h>
 #include <limits>
+#include <unordered_map>
 #include <vtkActor.h>
 #include <vtkCameraPass.h>
 #include <vtkDataObject.h>
@@ -40,6 +41,7 @@
 #include <vtkShadowMapPass.h>
 #include <vtkTranslucentPass.h>
 #include <vtkVolumetricPass.h>
+#include <vtkWeakPointer.h>
 
 namespace cvc {
 namespace gl {
@@ -1164,6 +1166,10 @@ protected:
         return true;
       now.add(p);
     }
+    // Forget mappers no longer drawn (a key whose address a new mapper reuses
+    // is harmless: the new one's MTime differs, so its input is looked up).
+    if (m_mapperInputs.size() > 2 * now.count + 64)
+      m_mapperInputs.clear();
     return now != m_bakedSet;
   }
 
@@ -1171,14 +1177,27 @@ protected:
   // deformed in place (GeometryNode::updateVertices / updateNormals /
   // updateColors -- a swaying tree) changes only those. Their MTimes, read
   // as they are: no Update(), no GetRedrawMTime().
-  static bool casterGeometryChanged(vtkProp *p, vtkMTimeType t) {
+  //
+  // Finding the input is an executive lookup (vtkAlgorithm::GetInputDataObject:
+  // port checks and two information-key reads), several times the cost of the
+  // rest of this check, and it runs for every caster on every due frame. The
+  // input changes only through SetInputData / SetInputConnection, which mark
+  // the mapper modified, so it is looked up again only when the mapper's MTime
+  // moves (or the input it named is gone).
+  bool casterGeometryChanged(vtkProp *p, vtkMTimeType t) {
     auto *actor = vtkActor::SafeDownCast(p);
     vtkMapper *mapper = actor ? actor->GetMapper() : nullptr;
     if (!mapper)
       return false;
-    if (mapper->GetMTime() > t)
+    const vtkMTimeType mapperTime = mapper->GetMTime();
+    if (mapperTime > t)
       return true;
-    vtkDataObject *input = mapper->GetInputDataObject(0, 0);
+    MapperInput &in = m_mapperInputs[mapper];
+    if (in.mapperTime != mapperTime || !in.input) {
+      in.mapperTime = mapperTime;
+      in.input = mapper->GetInputDataObject(0, 0);
+    }
+    vtkDataObject *input = in.input;
     return input && input->GetMTime() > t;
   }
 
@@ -1203,6 +1222,13 @@ private:
   bool m_baked = false;    // has a real bake happened yet
   vtkTimeStamp m_lastBake; // when it did
   CasterSet m_bakedSet;    // the casters it drew
+  // casterGeometryChanged's cache: per mapper, its MTime when its input was
+  // last looked up, and that input (weak: the mapper owns it).
+  struct MapperInput {
+    vtkMTimeType mapperTime = 0;
+    vtkWeakPointer<vtkDataObject> input;
+  };
+  std::unordered_map<const vtkMapper *, MapperInput> m_mapperInputs;
   StridedShadowBaker(const StridedShadowBaker &) = delete;
   void operator=(const StridedShadowBaker &) = delete;
 };

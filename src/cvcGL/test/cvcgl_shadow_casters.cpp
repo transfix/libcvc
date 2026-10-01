@@ -42,7 +42,11 @@
 #include <vector>
 #include <vtkActor.h>
 #include <vtkCameraPass.h>
+#include <vtkMapper.h>
 #include <vtkNew.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
+#include <vtkPolyDataMapper.h>
 #include <vtkRenderPassCollection.h>
 #include <vtkRenderer.h>
 #include <vtkSequencePass.h>
@@ -386,6 +390,28 @@ static void rendered(cvc::app &app) {
   bool baked = frame();
   baked = frame() || baked; // the drape is re-derived as VTK asks for the bounds
   chk(baked, "new heights under a casting link re-bake");
+
+  // The baker remembers each caster mapper's input and looks it up again only
+  // when the mapper changes: a new input object must be followed, the old one
+  // forgotten.
+  auto swap = sg.getGraphicsRoot()->addGraphicsChild<Node>("swap");
+  swap->setGeometry(box(40, 40, 0, 45, 45, 6));
+  chk(settle(), "a caster to re-wire settles");
+  auto *swapActor = vtkActor::SafeDownCast(swap->actor());
+  vtkPolyData *oldInput =
+      vtkPolyData::SafeDownCast(swapActor->GetMapper()->GetInputDataObject(0, 0));
+  vtkNew<vtkPolyData> newInput;
+  newInput->DeepCopy(oldInput);
+  vtkPolyDataMapper::SafeDownCast(swapActor->GetMapper())->SetInputData(newInput);
+  chk(frame(), "a new input object bakes");
+  chk(!frame(), "once");
+  newInput->GetPoints()->SetPoint(0, 40.0, 40.0, 9.0);
+  newInput->GetPoints()->Modified();
+  newInput->Modified();
+  chk(frame(), "the new input deformed in place bakes");
+  oldInput->GetPoints()->SetPoint(0, 40.0, 40.0, 12.0);
+  oldInput->Modified();
+  chk(!frame(), "the old, replaced input changing does not");
 
   std::printf("E. the interval still strides a moving caster's bakes\n");
   // A scene of its own, with the interval set BEFORE shadows go on: changing a
