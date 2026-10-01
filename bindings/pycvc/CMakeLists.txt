@@ -419,4 +419,12 @@ if(CVC_BUILD_PYCVC_GL)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_chase_parity.py)
   set_tests_properties(pycvc_gl_chase_parity PROPERTIES ENVIRONMENT
     "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # Streaming overlays from Python: the SceneGraph factories (ribbon / draped
+  # link / generic streaming mesh), numpy or list point data, the capacity
+  # contract, the height field's CPU twin, post_event_coalesced, and -- with
+  # offscreen GL -- the upload accounting (self-skips without it).
+  add_test(NAME pycvc_gl_streaming
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_streaming.py)
+  set_tests_properties(pycvc_gl_streaming PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL
