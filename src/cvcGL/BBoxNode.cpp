@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cvc/gl/BBoxNode.h>
+#include <cvc/gl/LowMemoryPolyDataMapper.h>
 #include <cvc/gl/line_normals.h>
 #include <iomanip>
 #include <sstream>
@@ -21,10 +22,9 @@ namespace cvc {
 namespace gl {
 
 BBoxNode::BBoxNode()
-    : m_actor(vtkSmartPointer<vtkActor>::New()),
-      m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()), m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
-      m_transform(vtkSmartPointer<vtkMatrix4x4>::New()), m_coordinatesVisible(true),
-      m_coordinateLabelFontSize(12), m_renderer(nullptr) {
+    : m_actor(vtkSmartPointer<vtkActor>::New()), m_mapper(newPolyDataMapper()),
+      m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
+      m_coordinatesVisible(true), m_coordinateLabelFontSize(12), m_renderer(nullptr) {
   m_transform->Identity();
   m_actor->SetMapper(m_mapper);
 

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/gl/GridNode.h>
+#include <cvc/gl/LowMemoryPolyDataMapper.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/line_normals.h>
 #include <iomanip>
@@ -24,12 +25,10 @@ namespace gl {
 GridNode::GridNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_yzActor(vtkSmartPointer<vtkActor>::New()),
       m_xzActor(vtkSmartPointer<vtkActor>::New()), m_xyActor(vtkSmartPointer<vtkActor>::New()),
-      m_yzMapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
-      m_xzMapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
-      m_xyMapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
-      m_bounds(-10.0, -10.0, -10.0, 10.0, 10.0, 10.0), m_divisionsX(64), m_divisionsY(64),
-      m_divisionsZ(64), m_tickIntervalX(8), m_tickIntervalY(8), m_tickIntervalZ(8),
-      m_tickLabelFontSize(12), m_yzPlaneVisible(true), m_xzPlaneVisible(true),
+      m_yzMapper(newPolyDataMapper()), m_xzMapper(newPolyDataMapper()),
+      m_xyMapper(newPolyDataMapper()), m_bounds(-10.0, -10.0, -10.0, 10.0, 10.0, 10.0),
+      m_divisionsX(64), m_divisionsY(64), m_divisionsZ(64), m_tickIntervalX(8), m_tickIntervalY(8),
+      m_tickIntervalZ(8), m_tickLabelFontSize(12), m_yzPlaneVisible(true), m_xzPlaneVisible(true),
       m_xyPlaneVisible(true), m_renderer(nullptr) {
   // Initialize default colors
   m_yzPlaneColor[0] = m_yzPlaneColor[1] = m_yzPlaneColor[2] = 0.5;
