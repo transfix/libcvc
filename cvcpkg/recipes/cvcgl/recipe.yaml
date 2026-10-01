@@ -53,7 +53,11 @@ recipe:
   # SDL3::SDL3 and ships the real input/peripheral seam on wasm. publish-cvcgl-wasm packs cvcgl
   # VERBATIM at this cvc_revision, so a bump is required to republish the SDL3-linked wasm bundle;
   # +cvc.8 builds against (and re-pins) the current relocatable-export libcvc +cvc.6. Source unchanged.
-  cvc_revision: 8
+  # Bumped 8 -> 12: lockstep with libcvc 3.4.0+cvc.12 (the LOD family: LodGraphicsNode
+  # visibility/lifetime fixes, make_view_params, selectLOD stats, ortho view_params -- #496 --
+  # on top of #483-#505). SceneNode gained virtuals, so the published +cvc.8 is ABI-stale.
+  # 12, not 9: native cvcgl is already at +cvc.11 on the catalog; this keeps platforms monotonic.
+  cvc_revision: 12
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
