@@ -38,12 +38,15 @@
 
 // Keepalive: the C++ stream holds a RAW cvc::app& (writes the descriptor,
 // uninstalls the registry token, posts lifecycle on teardown), so the Python
-// Stream must keep the app alive or ~stream can touch a GC'd app's mutexes
-// (boost::lock_error). Stash the app on the returned Stream — the same borrowed-
-// app keepalive idiom as GeometryNode._pycvc_app / raycaster._pycvc_app. stream_open
-// has a single signature, so its proxy exposes `app` as a named parameter.
+// Stream must keep the app INSTANCE alive or ~stream touches a freed app's
+// scheduler/state mutexes (boost::lock_error abort). Stash the app on the
+// returned Stream — the same borrowed-app keepalive idiom as GeometryNode._pycvc_app.
+// stream_open has default args, so SWIG emits an overloaded `def stream_open(*args)`
+// proxy: the app is args[0], NOT a named `app` (a bare `app` would resolve to the
+// module-global app CLASS and pin nothing — the bug this fixes).
 %pythonappend pycvc::stream_open %{
-    val._pycvc_app = app
+    if args:
+        val._pycvc_app = args[0]
 %}
 
 %inline %{
@@ -225,7 +228,8 @@ struct Stream {
 // non-zero frame size. Throws on a bad codec or if open() fails.
 static Stream stream_open(cvc::app &app, const std::string &id, const std::string &codec, int w,
                           int h, double heartbeat_hz = 10.0, std::size_t subscriber_depth = 3,
-                          std::size_t expected_subscribers = 1) {
+                          std::size_t expected_subscribers = 1,
+                          const std::string &root_path = std::string()) {
   const int ch = stream_codec_channels(codec);
   if (ch == 0)
     throw std::invalid_argument("stream_open: unsupported codec '" + codec + "'");
@@ -233,6 +237,7 @@ static Stream stream_open(cvc::app &app, const std::string &id, const std::strin
     throw std::invalid_argument("stream_open: non-positive dimensions");
   cvc::stream::stream_params p;
   p.id = id;
+  p.root_path = root_path;
   p.format.kind = cvc::stream::frame_kind::video_raw;
   p.format.codec = codec;
   p.format.w = w;

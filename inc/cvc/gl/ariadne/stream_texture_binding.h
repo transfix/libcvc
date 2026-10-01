@@ -51,10 +51,10 @@ namespace ariadne {
 //   - The cvc::app passed to the ctor must outlive the binding (used in release()).
 class StreamTextureBinding {
 public:
-  // `token` is the stream's registry token (used only to re-resolve the live
-  // channel for a clean unsubscribe at teardown). `node` is held weakly so the
-  // binding never keeps a torn-down node alive. `sub` is a latest-mode
-  // subscription on the stream's channel.
+  // `token` is the stream's canonical registry key (stream::registry_key(root, id)
+  // == stream.token()), used only to re-resolve the live channel for a clean
+  // unsubscribe at teardown. `node` is held weakly so the binding never keeps a
+  // torn-down node alive. `sub` is a latest-mode subscription on the stream's channel.
   StreamTextureBinding(cvc::app &app, std::string token, std::weak_ptr<cvc::gl::GeometryNode> node,
                        std::shared_ptr<cvc::stream::subscription> sub);
   ~StreamTextureBinding();

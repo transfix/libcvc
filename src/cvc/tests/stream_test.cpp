@@ -430,12 +430,14 @@ TEST(Stream, OpenPublishesDescriptorAndRegistersToken) {
   EXPECT_EQ(fmt.codec, "rgba8");
   EXPECT_EQ(fmt.w, 8);
 
-  // Registry resolves the token to the live channel.
-  EXPECT_EQ(stream_registry::for_app(app).lookup("cam0"), &s->channel());
+  // Registry resolves the canonical key (empty root -> "streams.cam0") to the
+  // live channel.
+  EXPECT_EQ(s->token(), "streams.cam0");
+  EXPECT_EQ(stream_registry::for_app(app).lookup(s->token()), &s->channel());
 
   s->close();
   EXPECT_EQ(cvc::state::instance(app)("streams.cam0").value(), "closed");
-  EXPECT_EQ(stream_registry::for_app(app).lookup("cam0"), nullptr);
+  EXPECT_EQ(stream_registry::for_app(app).lookup(s->token()), nullptr);
 }
 
 TEST(Stream, EventHookupDeliversSeqAndLifecycleThrottled) {
@@ -524,7 +526,7 @@ TEST(Stream, DuplicateOpenDoesNotDisturbLiveStreamEvents) {
   sched.drain_ingress();
   EXPECT_EQ(sched.pending_message_count(s1->evt_channel()), 0u);
   EXPECT_EQ(cvc::state::instance(app)("streams.dup0").value(), "live");
-  EXPECT_EQ(stream_registry::for_app(app).lookup("dup0"), &s1->channel());
+  EXPECT_EQ(stream_registry::for_app(app).lookup(s1->token()), &s1->channel());
 
   s1->close(); // the real owner posts the real "closed"
   sched.drain_ingress();
@@ -575,4 +577,62 @@ TEST(Stream, ProducerPublishesAcrossTeardownInHonoredOrder) {
   held.reset();
   sub.reset();
   EXPECT_EQ(pool->in_use(), 0u); // every slab recycled
+}
+
+// --------------------------------------------------------------------------
+// §4.1 scoping: scope-aware open + canonical-path registry
+// --------------------------------------------------------------------------
+
+TEST(StreamScoping, RegistryKeyIsCanonicalScopedPath) {
+  EXPECT_EQ(cvc::stream::stream::registry_key("", "cam0"), "streams.cam0");
+  EXPECT_EQ(cvc::stream::stream::registry_key("doc.a", "cam0"), "doc.a.streams.cam0");
+}
+
+TEST(StreamScoping, SameIdDifferentScopesDoNotCollideAndAreIsolated) {
+  cvc::app app;
+  stream_params pa;
+  pa.id = "cam0";
+  pa.root_path = "doc.a";
+  pa.format = rgba(4, 2);
+  stream_params pb;
+  pb.id = "cam0";
+  pb.root_path = "doc.b";
+  pb.format = rgba(4, 2);
+
+  auto a = stream::open(app, pa);
+  auto b = stream::open(app, pb);
+  ASSERT_TRUE(a);
+  ASSERT_TRUE(b); // same id under different scopes -> no registry collision
+  EXPECT_EQ(a->token(), "doc.a.streams.cam0");
+  EXPECT_EQ(b->token(), "doc.b.streams.cam0");
+
+  // Independent channels: a publish on a is not seen by b's subscriber.
+  auto sa = a->channel().subscribe(deliver_mode::latest, 1);
+  auto sb = b->channel().subscribe(deliver_mode::latest, 1);
+  ASSERT_TRUE(sa);
+  ASSERT_TRUE(sb);
+  auto l = a->channel().pool().acquire();
+  ASSERT_TRUE(l.has_value());
+  a->channel().publish(*l, l->cap, 0.0);
+  EXPECT_TRUE(sa->latest());
+  EXPECT_FALSE(sb->latest()); // scope isolation
+
+  // Descriptors live under distinct scoped paths; events are chroot-scoped.
+  EXPECT_EQ(cvc::state::instance(app)("doc.a.streams.cam0").value(), "live");
+  EXPECT_EQ(cvc::state::instance(app)("doc.b.streams.cam0").value(), "live");
+  EXPECT_EQ(a->seq_channel(), "doc.a.channels.streams.cam0.seq");
+  EXPECT_EQ(b->evt_channel(), "doc.b.channels.streams.cam0.evt");
+}
+
+TEST(StreamScoping, EmptyRootIsBackwardCompatibleIdentity) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam0";
+  p.format = rgba(4, 2); // root_path empty
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  EXPECT_EQ(s->token(), "streams.cam0");
+  EXPECT_EQ(s->seq_channel(), "streams.cam0.seq"); // empty root -> identity
+  EXPECT_EQ(s->evt_channel(), "streams.cam0.evt");
+  EXPECT_EQ(cvc::state::instance(app)("streams.cam0").value(), "live");
 }
