@@ -82,6 +82,11 @@ static void pycvc_owner_capsule_dtor(PyObject* cap) {
 // arm MUST come FIRST — without it a thrown cvc error would slip past a
 // std::exception catch and only the catch(...) fallback (or std::terminate)
 // would see it. cvc::exception::what() yields the real message.
+//
+// A macro so a sub-interface that installs its own mapping for a stretch of
+// declarations (pycvc_lod.i maps to ValueError/IndexError/OSError and releases
+// the GIL) can restore this one afterwards.
+%define PYCVC_DEFAULT_EXCEPTION
 %exception {
   try {
     $action
@@ -93,6 +98,8 @@ static void pycvc_owner_capsule_dtor(PyObject* cap) {
     SWIG_exception(SWIG_RuntimeError, "pycvc: C++ exception (see libcvc)");
   }
 }
+%enddef
+PYCVC_DEFAULT_EXCEPTION
 
 namespace std {
   %template(DoubleVector) vector<double>;
@@ -1002,6 +1009,15 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 // numpy in and out via the ArrayView typemap above. Free functions + the
 // NavSdfField view holder; all marshaling is inline in the .i.
 %include "pycvc_nav.i"
+
+// ── cvc::lod + cvc::simplify: LOD pyramids, selection, tiles, scene.cvch5 ─
+// QEM simplify, per-asset pyramids, the selection math, tile partitioning +
+// pooled tiled builds (with a Python on_tile callback), and the HDF5 store
+// (scene_writer -> bytes, scene_reader from a path / bytes / open_verified).
+// After geometry/volume/image/model (the pyramids and tiles hold them). It
+// installs its own exception mapping + GIL release for its calls and restores
+// PYCVC_DEFAULT_EXCEPTION at its end.
+%include "pycvc_lod.i"
 
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
