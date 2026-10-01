@@ -1163,7 +1163,7 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES stream/frame_pool.cpp stream/stream_channel.cpp stream/stream_registry.cpp stream/producer_thread.cpp stream/stream.cpp)
+list(APPEND SOURCE_FILES stream/frame_pool.cpp stream/stream_channel.cpp stream/stream_registry.cpp stream/producer_thread.cpp stream/stream.cpp stream/to_image.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/stream/frame.h
   ../../inc/cvc/stream/frame_pool.h
@@ -1171,6 +1171,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/stream/stream_registry.h
   ../../inc/cvc/stream/producer_thread.h
   ../../inc/cvc/stream/stream.h
+  ../../inc/cvc/stream/to_image.h
 )
 
 # Create the main library

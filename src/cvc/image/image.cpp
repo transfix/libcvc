@@ -41,6 +41,22 @@ image::image(int w, int h, pixel_format f, data_type dt, const void *src)
   }
 }
 
+image::image(int w, int h, pixel_format f, data_type dt, const void *bytes,
+             std::shared_ptr<void> keepalive)
+    : _w(w), _h(h), _fmt(f), _dt(dt) {
+  if (w > 0 && h > 0 && bytes) {
+    unsigned char *p = const_cast<unsigned char *>(static_cast<const unsigned char *>(bytes));
+    // Alias the foreign bytes: wrap them in a shared_array whose deleter does
+    // NOT free them (the captured keepalive owns them) and that holds the
+    // keepalive alive for exactly as long as this buffer and any copy-on-write
+    // copy / storage() handle. This deliberately overrides boost's default
+    // checked_array_deleter (delete[]), which must never run on foreign storage.
+    _data = boost::shared_array<unsigned char>(
+        p, [keep = std::move(keepalive)](unsigned char *) noexcept { /* keepalive owns p */ });
+    _adopted = true;
+  }
+}
+
 int image::channels() const {
   switch (_fmt) {
   case pixel_format::GRAY:
@@ -68,12 +84,17 @@ std::size_t image::bytes_per_channel() const {
 }
 
 void image::detach() {
-  // Copy-on-write: if the buffer is shared, give this image its own copy.
-  if (_data && _data.use_count() > 1) {
+  // Copy-on-write: if the buffer is shared OR aliases foreign (adopted) storage,
+  // give this image its own private, writable copy before any mutation. An
+  // adopted buffer has use_count()==1 (its keepalive lives inside the deleter,
+  // not as a second shared_array ref), so the plain use_count()>1 test alone
+  // would hand a writable pointer into immutable, shared frame bytes.
+  if (_data && (_adopted || _data.use_count() > 1)) {
     std::size_t n = size_bytes();
     boost::shared_array<unsigned char> copy(new unsigned char[n]);
     std::memcpy(copy.get(), _data.get(), n);
     _data = copy;
+    _adopted = false; // now owns a private heap buffer
   }
 }
 

@@ -21,6 +21,7 @@
 #include <boost/shared_ptr.hpp>
 #include <cstddef>
 #include <list>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,16 @@ public:
   image(int w, int h, pixel_format f = pixel_format::RGBA, data_type dt = data_type::u8);
   // Copy `interleaved_src` (w*h*bpp bytes, row-major, top-left origin) into a new image.
   image(int w, int h, pixel_format f, data_type dt, const void *interleaved_src);
+  // ADOPT (alias) `bytes` with NO copy. `bytes` must point at w*h*bytes_per_pixel()
+  // densely-packed, top-left-origin pixels of (f,dt); `keepalive` must own those
+  // bytes for at least as long as this image and any copy-on-write copy or
+  // storage() handle derived from it (its destruction, via the internal deleter,
+  // is what releases the foreign storage). The image is LOGICALLY READ-ONLY: the
+  // first mutating data()/detach() forks a private copy, leaving the adopted bytes
+  // untouched. Used for the zero-copy stream→texture path (a stream frame's bytes,
+  // owned by its shared_ptr<void> keepalive).
+  image(int w, int h, pixel_format f, data_type dt, const void *bytes,
+        std::shared_ptr<void> keepalive);
 
   // Decode from a file (dispatched by extension/magic through the registry).
   static image load(const std::string &path);
@@ -74,7 +85,10 @@ public:
   unsigned char *data(); // detaches (copy-on-write), interleaved
   const unsigned char *data() const { return _data.get(); }
   // The owning buffer, for zero-copy pinning (e.g. a numpy view or a
-  // vtkUnsignedCharArray::SetArray that must keep the storage alive).
+  // vtkUnsignedCharArray::SetArray that must keep the storage alive). Treat the
+  // handle as READ-ONLY for an adopted image: writing through it bypasses the
+  // copy-on-write guard and would mutate aliased (possibly immutable, shared)
+  // storage. Zero-copy consumers (GL SetArray, pycvc writable=false) only read.
   boost::shared_array<unsigned char> storage() const { return _data; }
 
 private:
@@ -83,6 +97,11 @@ private:
   pixel_format _fmt = pixel_format::RGBA;
   data_type _dt = data_type::u8;
   boost::shared_array<unsigned char> _data;
+  // True when _data aliases foreign (adopt-ctor) storage. Such a buffer has
+  // use_count()==1 (its keepalive lives inside the deleter, not as a second
+  // shared_array ref), so detach() must fork it on first mutation even though
+  // the plain use_count()>1 test would miss it.
+  bool _adopted = false;
 };
 
 // Pluggable per-format handler, mirroring geometry_file_io / volume_file_io. A
