@@ -889,13 +889,13 @@ TEST(GeometrySimplify, SeamEpsilonIsTheCoincidenceTolerance) {
   // coordinates, ~0.5 m 1000 km out -- ever pass the scene-wide 1e-6 cap:
   // there, two parts 1 cm apart in a scene 5 m across stay apart.
   const double o = 1e6;
-  geometry far(ctx);
-  far.points() = {{o, 0, 0},     {o + 2.99, 0, 0}, {o, 1, 0},
+  geometry farMesh(ctx);
+  farMesh.points() = {{o, 0, 0},     {o + 2.99, 0, 0}, {o, 1, 0},
                   {o + 3, 0, 0}, {o + 5, 0, 0},    {o + 3, 1, 0}};
-  far.tris() = {{0, 1, 2}, {3, 4, 5}};
+  farMesh.tris() = {{0, 1, 2}, {3, 4, 5}};
   cvc::simplify_params d;
   d.target_tris = 1;
-  cvc::simplify(far, d, &r);
+  cvc::simplify(farMesh, d, &r);
   EXPECT_EQ(r.seam_vertices, 0u);
 }
 
@@ -2010,17 +2010,17 @@ TEST(GeometrySimplify, DistantGeometryDoesNotChangeALocalResult) {
   cvc::simplify_result r;
   const geometry alone = cvc::simplify(g, p, &r);
   ASSERT_GT(r.world_error, 0.0);
-  for (double far : {200.0, 1e4, 1e6}) {
+  for (double dist : {200.0, 1e4, 1e6}) {
     geometry f = g;
     const std::uint64_t o = f.points().size();
-    f.points().push_back({far, far, 0.0});
-    f.points().push_back({far + 1.0, far, 0.0});
-    f.points().push_back({far, far + 1.0, 0.0});
+    f.points().push_back({dist, dist, 0.0});
+    f.points().push_back({dist + 1.0, dist, 0.0});
+    f.points().push_back({dist, dist + 1.0, 0.0});
     f.tris().push_back({o, o + 1, o + 2});
     cvc::simplify_params q = p;
     q.target_tris = p.target_tris + 1; // the far triangle survives
     const geometry both = cvc::simplify(f, q, nullptr, &ctx.computePool());
-    SCOPED_TRACE(testing::Message() << "far " << far);
+    SCOPED_TRACE(testing::Message() << "far " << dist);
     ASSERT_EQ(both.num_tris(), alone.num_tris() + 1);
     ASSERT_EQ(both.num_points(), alone.num_points() + 3);
     // The part's vertices and triangles come first; the far triangle is last.

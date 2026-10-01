@@ -524,10 +524,10 @@ public:
         if (best <= stop2)
           return best;
       }
-      u32 near = hint;
-      for (int k = 0; k < kClimb && _parent[near] != kNone; ++k)
-        near = _parent[near];
-      if (search(near, p, stop2, best, hint))
+      u32 start = hint;
+      for (int k = 0; k < kClimb && _parent[start] != kNone; ++k)
+        start = _parent[start];
+      if (search(start, p, stop2, best, hint))
         return best;
     }
     search(0, p, stop2, best, hint);
