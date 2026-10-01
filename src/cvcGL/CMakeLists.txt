@@ -511,6 +511,28 @@ add_executable(cvcgl_viewport_input test/cvcgl_viewport_input.cpp)
 target_link_libraries(cvcgl_viewport_input PRIVATE cvcGL)
 add_test(NAME cvcgl_viewport_input COMMAND cvcgl_viewport_input)
 
+# Streaming geometry (StreamingGeometryNode / RibbonNode / DrapedLinkNode over the
+# two streaming VTK mappers). Uploads are counted twice: by the node's own
+# streamStats() and at the driver, by test/gl_upload_counter.cpp, which swaps
+# VTK's glad function pointers for counting wrappers. Both mapper families run
+# natively (the low-memory one forced), and the GLES texture-emulation upload is
+# checked against a real 2-D texture. Renders for real; skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+#   cvcgl_streaming_geometry: coalesced events, mapper choice, the GLES row-span
+#     upload, height-field sampling, partial uploads / draw ranges / uniforms,
+#     capacity overflow, off-thread writes, ribbon growth.
+#   cvcgl_streaming_overlays: track append, spine replan + visible range, draped
+#     link, pixel parity against the equivalent wholesale GeometryNode, and all of
+#     it under vtkShadowMapPass (one upload per frame, not per pass).
+add_executable(cvcgl_streaming_geometry test/cvcgl_streaming_geometry.cpp
+                                        test/gl_upload_counter.cpp)
+target_link_libraries(cvcgl_streaming_geometry PRIVATE cvcGL)
+add_test(NAME cvcgl_streaming_geometry COMMAND cvcgl_streaming_geometry)
+add_executable(cvcgl_streaming_overlays test/cvcgl_streaming_overlays.cpp
+                                        test/gl_upload_counter.cpp)
+target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
+add_test(NAME cvcgl_streaming_overlays COMMAND cvcgl_streaming_overlays)
+
 # SdlInput: SDL3 event -> normalized cvc::gl::InputEvent translation (the §4.6 input seam's SDL
 # source). Pushes synthetic SDL key/mouse events onto the queue and verifies poll() returns them.
 # Headless (the SDL EVENTS subsystem needs no window). SKIPs (rc 0) in a build without SDL.
