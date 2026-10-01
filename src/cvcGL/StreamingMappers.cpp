@@ -190,18 +190,11 @@ void StreamingPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
 }
 
 // ─────────────────────────────── low-memory mapper ──────────────────────────
+// The base, LowMemoryPolyDataMapper, initialises the shift/scale members VTK
+// 9.5.0 leaves uninitialised: with garbage there the mapper uploaded a
+// shift/scale COPY of the positions, which also defeats streaming (the uploaded
+// array must be the input's own).
 vtkStandardNewMacro(StreamingLowMemoryPolyDataMapper);
-
-StreamingLowMemoryPolyDataMapper::StreamingLowMemoryPolyDataMapper() {
-  // VTK 9.5.0 never initialises these (9.5.2 fixes the bool only). With
-  // DISABLE_SHIFT_SCALE nothing ever assigns them, so the mapper applied a
-  // GARBAGE shift/scale copy of the positions whenever the heap byte under the
-  // bool happened to be non-zero -- nondeterministic, and it also defeats the
-  // streaming path (the uploaded array is then a copy, not the input's).
-  this->CoordinateShiftAndScaleInUse = false;
-  this->ShiftValues.fill(0.0);
-  this->ScaleValues.fill(1.0);
-}
 
 void StreamingLowMemoryPolyDataMapper::ComputeBounds() {
   if (Core.beforeBounds)

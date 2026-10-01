@@ -125,10 +125,11 @@ CoincidentValue coincidentValue(vtkMapper *mapper, vtkProperty *prop, int slot) 
 vtkStandardNewMacro(LowMemoryPolyDataMapper);
 
 LowMemoryPolyDataMapper::LowMemoryPolyDataMapper() {
-#if CVC_GL_LOWMEM_REPLICA
-  // VTK 9.5.0 declares these without initialisers. With DISABLE_SHIFT_SCALE
-  // nothing ever assigns them, so whether the mapper uploaded a (garbage)
-  // shift/scale copy of the positions depended on a heap byte.
+#if VTK_MAJOR_VERSION == 9
+  // VTK 9.5.0 declares these without initialisers (9.5.1 initialises the bool
+  // only). With DISABLE_SHIFT_SCALE nothing ever assigns them, so whether the
+  // mapper uploaded a (garbage) shift/scale copy of the positions depended on a
+  // heap byte.
   this->CoordinateShiftAndScaleInUse = false;
   this->ShiftValues.fill(0.0);
   this->ScaleValues.fill(1.0);
