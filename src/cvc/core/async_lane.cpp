@@ -88,6 +88,11 @@ bool async_lane::submit(job j) {
     if (stopping_)
       return false;
     queue_.push_back(std::move(j));
+    // Drop the moved-from parameter while the worker still cannot take the job. libc++ moves a
+    // small-buffer std::function by copying the callable and leaves the source holding it, so
+    // without this the caller's `j` could keep the captures alive past the worker's release in
+    // run_job() -- and past in_flight() == 0 -- if the job finishes before submit() returns.
+    j = nullptr;
     in_flight_.fetch_add(1, std::memory_order_acq_rel);
   }
   if (mode_ == lane_mode::threaded)
