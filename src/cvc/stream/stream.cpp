@@ -51,6 +51,12 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
   const std::size_t slab_bytes = p.format.frame_bytes();
   if (slab_bytes == 0 || p.id.empty())
     return nullptr; // unsized format or missing id
+  // id must be a single path segment: it is the leaf of the canonical key
+  // <root_path>.streams.<id>, and a '.' in it would make the root/id boundary
+  // ambiguous (registry_key("a.streams","b") == registry_key("a","streams.b")),
+  // breaking the cross-scope collision-free guarantee.
+  if (p.id.find(state::SEPARATOR) != std::string::npos)
+    return nullptr;
 
   std::unique_ptr<stream> s(new stream(ctx, p.id));
   s->scope_ = p.root_path;

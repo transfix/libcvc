@@ -413,6 +413,11 @@ TEST(Stream, OpenRejectsUnsizedFormatAndEmptyId) {
   q.id = ""; // missing id
   q.format = rgba(4, 4);
   EXPECT_EQ(stream::open(app, q), nullptr);
+
+  stream_params d;
+  d.id = "cam.0"; // '.' makes the root/id boundary ambiguous in the canonical key
+  d.format = rgba(4, 4);
+  EXPECT_EQ(stream::open(app, d), nullptr);
 }
 
 TEST(Stream, OpenPublishesDescriptorAndRegistersToken) {
