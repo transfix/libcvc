@@ -4,6 +4,7 @@
 #include <cvc/core/state_object.h>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -14,6 +15,7 @@ namespace cvc {
 namespace gl {
 
 class SceneGraph;
+class SceneEventSink;
 
 // Lifetime / threading contract
 // ------------------------------
@@ -63,6 +65,7 @@ public:
   // keep the node past the scene itself), so the back-pointer alone is not
   // enough: it is paired with a weak handle on the scene's lifetime and only
   // handed out while that handle is live. ALWAYS reach the scene through here.
+  // Safe to call from any thread, concurrently with setSceneGraph().
   SceneGraph *getSceneGraph() const;
 
   // Public accessor for the node's primary VTK prop. Needed by callers that
@@ -102,6 +105,18 @@ protected:
   // to this node so it is skipped if the node is destroyed before it runs.
   void runOnMainThread(std::function<void()> func);
 
+  // Called by setSceneGraph() after this node's scene changed (attached to a
+  // scene, moved to another, or detached: getSceneGraph() is already the new
+  // value), on the thread that attached it and before the children hear of it.
+  // A node that buffers work while it has no scene flushes it from here.
+  virtual void onSceneGraphChanged() {}
+
+  // The event sink of this node's scene (SceneGraph::eventSink()), LOCKED: the
+  // queue stays valid for as long as the caller holds it, even if the scene is
+  // destroyed meanwhile (posts are then refused). nullptr with no live scene.
+  // What a producer thread must post through, instead of a raw SceneGraph*.
+  std::shared_ptr<SceneEventSink> sceneEvents() const;
+
   bool m_visible;
   std::vector<std::shared_ptr<SceneNode>> m_children;
   vtkRenderer *m_renderer;
@@ -112,6 +127,10 @@ private:
   // read that can tell "detached" from "dangling", so subclasses go through it.
   SceneGraph *m_sceneGraph;
   std::weak_ptr<void> m_sceneAlive; // SceneGraph::aliveToken() of m_sceneGraph
+  std::weak_ptr<SceneEventSink> m_sceneEvents; // SceneGraph::eventSink() of m_sceneGraph
+  // Guards the pair above: a producer thread may ask for the scene (to marshal
+  // work onto it) while the owner thread attaches or detaches the node.
+  mutable std::mutex m_sceneMutex;
 };
 
 } // namespace gl

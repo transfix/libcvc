@@ -38,11 +38,17 @@ if _sys.platform == "win32":
 %{
 #include <cvc/core/exception.h> // the %import'd %exception block catches cvc::exception
 #include <any>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <stdexcept>
 #include <cvc/gl/SceneNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/StreamingGeometryNode.h> // streaming overlays (partial uploads)
+#include <cvc/gl/RibbonNode.h>
+#include <cvc/gl/HeightFieldTexture.h>
+#include <cvc/gl/DrapedLinkNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/LightNode.h>  // scene light rig (addLight)
@@ -234,6 +240,10 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %shared_ptr(cvc::gl::SceneNode)
 %shared_ptr(cvc::gl::GraphicsNode)
 %shared_ptr(cvc::gl::GeometryNode)
+%shared_ptr(cvc::gl::StreamingGeometryNode)
+%shared_ptr(cvc::gl::RibbonNode)
+%shared_ptr(cvc::gl::DrapedLinkNode)
+%shared_ptr(cvc::gl::HeightFieldTexture)
 %shared_ptr(cvc::gl::VolumeNode)
 %shared_ptr(cvc::gl::VolRenNode)
 %shared_ptr(cvc::gl::LightNode)
@@ -305,6 +315,12 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::SceneNode::propagateVisible;
 %ignore cvc::gl::SceneNode::ancestorVisibilityChanged;
 %ignore cvc::gl::SceneNode::pushVisible;
+// The attach hook is C++ plumbing (a streaming node flushes staged writes from
+// it); a Python override would run on whatever thread attaches the node.
+// Unqualified so the director classes' inherited copies are skipped too.
+%ignore onSceneGraphChanged;
+// The locked event sink is C++ plumbing for producer threads (opaque type).
+%ignore cvc::gl::SceneNode::sceneEvents;
 %include "cvc/gl/SceneNode.h"
 
 // ── GraphicsNode: keep transform / material / label; ignore VTK/any/templates ─
@@ -471,6 +487,17 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // texture_modified auto-wrap (cvc::image is %import'd from pycvc.i); the snake
 // aliases below match the pycvc image/texture demo surface.
 %ignore cvc::gl::GeometryNode::getBoundingBox;
+// The protected subclass hooks (a mapper-taking ctor, the raw VTK objects, the
+// texture binder) are C++-only plumbing for StreamingGeometryNode et al.;
+// dirprot would otherwise expose them on the director with opaque VTK types.
+%ignore cvc::gl::GeometryNode::GeometryNode(cvc::app &, const std::string &, const std::string &,
+                                            vtkSmartPointer<vtkPolyDataMapper>);
+%ignore cvc::gl::GeometryNode::actor;
+%ignore cvc::gl::GeometryNode::mapper;
+%ignore cvc::gl::GeometryNode::polyData;
+%ignore cvc::gl::GeometryNode::bindShaderTextures;
+%ignore cvc::gl::GeometryNode::addInternalVertexShaderReplacement;
+%ignore cvc::gl::GeometryNode::addInternalFragmentShaderReplacement;
 // Replace the std::vector<double> updateVertices with a numpy-direct one (below) so
 // the per-frame deform path reads the buffer directly instead of via .tolist().
 %ignore cvc::gl::GeometryNode::updateVertices(const std::vector<double> &);
@@ -506,6 +533,296 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
   }
 }
 %include "cvc/gl/GeometryNode.h"
+
+// ── Streaming overlays: StreamingGeometryNode / RibbonNode / DrapedLinkNode ──
+// Fixed-capacity meshes rewritten piecewise from any thread, each frame
+// uploading only what changed (see StreamingGeometryNode.h). Built through the
+// SceneGraph factories below (add_ribbon / add_draped_link /
+// add_streaming_geometry): their C++ constructors take a StreamingLayout and a
+// bounding_box, neither of which marshals. Point data crosses as any float
+// buffer (a numpy float32/float64 array, C-contiguous) or a flat sequence of
+// numbers. No directors: the protected draw hooks take raw VTK types.
+%{
+// A flat float list from a buffer (float32 / float64, C-contiguous) or any
+// sequence of numbers. Throws std::invalid_argument otherwise.
+static std::vector<float> pycvc_gl_floats(PyObject *obj, const char *what) {
+  std::vector<float> out;
+  if (PyObject_CheckBuffer(obj)) {
+    Py_buffer view;
+    if (PyObject_GetBuffer(obj, &view, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) == 0) {
+      const char *fmt = view.format ? view.format : "B";
+      char f = fmt[0];
+      if (f == '<' || f == '=' || f == '@')
+        f = fmt[1];
+      if (f == 'f') {
+        const float *p = static_cast<const float *>(view.buf);
+        out.assign(p, p + view.len / static_cast<Py_ssize_t>(sizeof(float)));
+      } else if (f == 'd') {
+        const double *p = static_cast<const double *>(view.buf);
+        const Py_ssize_t n = view.len / static_cast<Py_ssize_t>(sizeof(double));
+        out.resize(static_cast<std::size_t>(n));
+        for (Py_ssize_t i = 0; i < n; ++i)
+          out[static_cast<std::size_t>(i)] = static_cast<float>(p[i]);
+      } else {
+        PyBuffer_Release(&view);
+        throw std::invalid_argument(std::string(what) +
+                                    ": expected float32 or float64 data in the buffer");
+      }
+      PyBuffer_Release(&view);
+      return out;
+    }
+    PyErr_Clear();
+  }
+  PyObject *seq = PySequence_Fast(obj, "expected a sequence");
+  if (!seq) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string(what) +
+                                ": expected a float buffer or a sequence of numbers");
+  }
+  const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+  out.resize(static_cast<std::size_t>(n));
+  for (Py_ssize_t i = 0; i < n; ++i) {
+    const double v = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, i));
+    if (PyErr_Occurred()) {
+      PyErr_Clear();
+      Py_DECREF(seq);
+      throw std::invalid_argument(std::string(what) + ": element " + std::to_string(i) +
+                                  " is not a number");
+    }
+    out[static_cast<std::size_t>(i)] = static_cast<float>(v);
+  }
+  Py_DECREF(seq);
+  return out;
+}
+// One integer element of a buffer, signed or not, read without aliasing.
+template <typename S, typename U>
+static void pycvc_gl_read_int(const unsigned char *at, bool isSigned, long long &sv,
+                              unsigned long long &uv) {
+  if (isSigned) {
+    S t;
+    std::memcpy(&t, at, sizeof t);
+    sv = static_cast<long long>(t);
+  } else {
+    U t;
+    std::memcpy(&t, at, sizeof t);
+    uv = static_cast<unsigned long long>(t);
+  }
+}
+// A flat list of non-negative 32-bit indices: an integer buffer (a numpy
+// int/uint array of any width, C-contiguous) or any sequence of integers
+// (Python ints or anything with __index__, e.g. numpy scalars).
+static std::vector<std::uint32_t> pycvc_gl_indices(PyObject *obj, const char *what) {
+  if (PyObject_CheckBuffer(obj)) {
+    Py_buffer view;
+    if (PyObject_GetBuffer(obj, &view, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) == 0) {
+      const char *fmt = view.format ? view.format : "B";
+      char f = fmt[0];
+      if (f == '<' || f == '=' || f == '@')
+        f = fmt[1];
+      const bool isSigned = f == 'b' || f == 'h' || f == 'i' || f == 'l' || f == 'q' || f == 'n';
+      const bool isUnsigned =
+          f == 'B' || f == 'H' || f == 'I' || f == 'L' || f == 'Q' || f == 'N';
+      if ((isSigned || isUnsigned) && view.itemsize > 0 && view.itemsize <= 8) {
+        const Py_ssize_t n = view.len / view.itemsize;
+        std::vector<std::uint32_t> out(static_cast<std::size_t>(n));
+        const unsigned char *bytes = static_cast<const unsigned char *>(view.buf);
+        for (Py_ssize_t i = 0; i < n; ++i) {
+          long long sv = 0;
+          unsigned long long uv = 0;
+          const unsigned char *at = bytes + i * view.itemsize;
+          switch (view.itemsize) {
+          case 1:
+            pycvc_gl_read_int<std::int8_t, std::uint8_t>(at, isSigned, sv, uv);
+            break;
+          case 2:
+            pycvc_gl_read_int<std::int16_t, std::uint16_t>(at, isSigned, sv, uv);
+            break;
+          case 4:
+            pycvc_gl_read_int<std::int32_t, std::uint32_t>(at, isSigned, sv, uv);
+            break;
+          default:
+            pycvc_gl_read_int<std::int64_t, std::uint64_t>(at, isSigned, sv, uv);
+            break;
+          }
+          if (isSigned) {
+            if (sv < 0 || sv > 0xffffffffLL) {
+              PyBuffer_Release(&view);
+              throw std::invalid_argument(std::string(what) + ": element " + std::to_string(i) +
+                                          " is not a 32-bit index");
+            }
+            uv = static_cast<unsigned long long>(sv);
+          } else if (uv > 0xffffffffULL) {
+            PyBuffer_Release(&view);
+            throw std::invalid_argument(std::string(what) + ": element " + std::to_string(i) +
+                                        " is not a 32-bit index");
+          }
+          out[static_cast<std::size_t>(i)] = static_cast<std::uint32_t>(uv);
+        }
+        PyBuffer_Release(&view);
+        return out;
+      }
+      PyBuffer_Release(&view);
+      if (f == 'f' || f == 'd' || f == 'e')
+        throw std::invalid_argument(std::string(what) + ": indices must be integers, not floats");
+    } else {
+      PyErr_Clear();
+    }
+  }
+  PyObject *seq = PySequence_Fast(obj, "expected a sequence");
+  if (!seq) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string(what) + ": expected a sequence of indices");
+  }
+  const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+  std::vector<std::uint32_t> out(static_cast<std::size_t>(n));
+  for (Py_ssize_t i = 0; i < n; ++i) {
+    // __index__ first: numpy integer scalars are not int subclasses, and
+    // PyLong_AsUnsignedLongLong would reject them.
+    PyObject *idx = PyNumber_Index(PySequence_Fast_GET_ITEM(seq, i));
+    const unsigned long long v = idx ? PyLong_AsUnsignedLongLong(idx) : 0ULL;
+    Py_XDECREF(idx);
+    if (!idx || PyErr_Occurred() || v > 0xffffffffULL) {
+      PyErr_Clear();
+      Py_DECREF(seq);
+      throw std::invalid_argument(std::string(what) + ": element " + std::to_string(i) +
+                                  " is not a 32-bit index");
+    }
+    out[static_cast<std::size_t>(i)] = static_cast<std::uint32_t>(v);
+  }
+  Py_DECREF(seq);
+  return out;
+}
+static cvc::gl::StreamingMapperKind pycvc_gl_mapper_kind(const std::string &k) {
+  if (k == "auto")
+    return cvc::gl::StreamingMapperKind::Auto;
+  if (k == "classic")
+    return cvc::gl::StreamingMapperKind::Classic;
+  if (k == "lowmem" || k == "low_memory")
+    return cvc::gl::StreamingMapperKind::LowMemory;
+  throw std::invalid_argument("mapper must be 'auto', 'classic' or 'lowmem'");
+}
+static cvc::bounding_box pycvc_gl_bounds(const std::vector<double> &b, const char *what) {
+  if (b.size() != 6)
+    throw std::invalid_argument(std::string(what) + ": need (minx, miny, minz, maxx, maxy, maxz)");
+  return cvc::bounding_box(b[0], b[1], b[2], b[3], b[4], b[5]);
+}
+static PyObject *pycvc_gl_stream_stats(const cvc::gl::StreamStats &s) {
+  return Py_BuildValue("{s:K,s:K,s:K,s:K,s:K,s:K,s:K}", "writes",
+                       static_cast<unsigned long long>(s.writes), "points_written",
+                       static_cast<unsigned long long>(s.pointsWritten), "applies",
+                       static_cast<unsigned long long>(s.applies), "uploads",
+                       static_cast<unsigned long long>(s.uploads), "upload_bytes",
+                       static_cast<unsigned long long>(s.uploadBytes), "upload_calls",
+                       static_cast<unsigned long long>(s.uploadCalls), "full_uploads",
+                       static_cast<unsigned long long>(s.fullUploads));
+}
+%}
+%ignore cvc::gl::StreamingLayout;
+%ignore cvc::gl::StreamStats;
+%ignore cvc::gl::StreamingGeometryNode::StreamingGeometryNode; // -> SceneGraph.add_streaming_geometry
+%ignore cvc::gl::StreamingGeometryNode::kAllTriangles;         // setDrawRange(first) = to the end
+%ignore cvc::gl::StreamingGeometryNode::writePoints(std::size_t, const float *, std::size_t); // -> buffer below
+%ignore cvc::gl::StreamingGeometryNode::setReservedBounds; // opaque bbox -> 6 doubles below
+%ignore cvc::gl::StreamingGeometryNode::reservedBounds;
+%ignore cvc::gl::StreamingGeometryNode::streamStats;       // -> stream_stats() dict
+%ignore cvc::gl::StreamingGeometryNode::getBoundingBox;    // opaque bbox (get_bounding_box above)
+%ignore cvc::gl::StreamingGeometryNode::relayout;
+%ignore cvc::gl::StreamingGeometryNode::growReservedBounds;
+%ignore cvc::gl::StreamingGeometryNode::stageDerivedBounds;
+%ignore cvc::gl::StreamingGeometryNode::unpinReservedBounds;
+%ignore cvc::gl::StreamingGeometryNode::reservedBoundsPinned;
+%ignore cvc::gl::StreamingGeometryNode::setDerivedBoundsNow;
+%ignore cvc::gl::StreamingGeometryNode::beforeComputeBounds;
+%ignore cvc::gl::StreamingGeometryNode::beforeDraw;
+%ignore cvc::gl::StreamingGeometryNode::updateShaderProgram;
+%include "cvc/gl/StreamingGeometryNode.h"
+%extend cvc::gl::StreamingGeometryNode {
+  // Stage points [first, first + len(xyz) / 3) from a flat xyz buffer/sequence.
+  void writePoints(std::size_t first, PyObject *xyz) {
+    const std::vector<float> v = pycvc_gl_floats(xyz, "writePoints");
+    if (v.size() % 3)
+      throw std::invalid_argument("writePoints: need x, y, z triples");
+    $self->writePoints(first, v.data(), v.size() / 3);
+  }
+  void set_reserved_bounds(double minx, double miny, double minz, double maxx, double maxy,
+                           double maxz) {
+    $self->setReservedBounds(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
+  }
+  std::vector<double> get_reserved_bounds() {
+    const cvc::bounding_box b = $self->reservedBounds();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  // {writes, points_written, applies, uploads, upload_bytes, upload_calls, full_uploads}
+  PyObject *stream_stats() { return pycvc_gl_stream_stats($self->streamStats()); }
+  std::string mapper_kind_str() const {
+    return $self->mapperKind() == cvc::gl::StreamingMapperKind::LowMemory ? "lowmem" : "classic";
+  }
+}
+
+%ignore cvc::gl::RibbonNode::RibbonNode;     // bbox ctor -> SceneGraph.add_ribbon
+%ignore cvc::gl::RibbonNode::assign(const float *, std::size_t); // -> buffer below
+%ignore cvc::gl::RibbonNode::centerVertices; // vector<float> -> tuple below
+%include "cvc/gl/RibbonNode.h"
+%extend cvc::gl::RibbonNode {
+  // Replace the centre line with len(xyz) / 3 centres (a route replan).
+  void assign(PyObject *xyz) {
+    const std::vector<float> v = pycvc_gl_floats(xyz, "assign");
+    if (v.size() % 3)
+      throw std::invalid_argument("assign: need x, y, z triples");
+    $self->assign(v.data(), v.size() / 3);
+  }
+  // The two vertices of centre k as written: (lx, ly, lz, rx, ry, rz).
+  PyObject *center_vertices(std::size_t k) const {
+    const std::vector<float> v = $self->centerVertices(k);
+    return Py_BuildValue("(dddddd)", v[0], v[1], v[2], v[3], v[4], v[5]);
+  }
+}
+
+%ignore cvc::gl::HeightFieldTexture::Stats;
+%ignore cvc::gl::HeightFieldTexture::stats;
+%ignore cvc::gl::HeightFieldTexture::setHeights; // shared_ptr/vector<float> -> buffer below
+%ignore cvc::gl::HeightFieldTexture::updateRows; // const float* -> buffer below
+%ignore cvc::gl::HeightFieldTexture::extent;     // opaque bbox -> 6-tuple below
+%ignore cvc::gl::HeightFieldTexture::prepare;    // render-thread VTK plumbing
+%ignore cvc::gl::HeightFieldTexture::texture;
+%ignore cvc::gl::HeightFieldTexture::generation; // std::uint64_t (no stdint.i here)
+%include "cvc/gl/HeightFieldTexture.h"
+%extend cvc::gl::HeightFieldTexture {
+  // nx * ny heights, row-major (row j along x at y0 + j*dy).
+  void set_heights(PyObject *heights) {
+    $self->setHeights(pycvc_gl_floats(heights, "set_heights"));
+  }
+  // Replace rows [row0, row0 + len(heights) / nx).
+  void update_rows(int row0, PyObject *heights) {
+    const std::vector<float> v = pycvc_gl_floats(heights, "update_rows");
+    if (v.size() % static_cast<std::size_t>($self->nx()))
+      throw std::invalid_argument("update_rows: need whole rows of nx heights");
+    $self->updateRows(row0, static_cast<int>(v.size() / $self->nx()), v.data());
+  }
+  std::vector<double> get_extent() const {
+    const cvc::bounding_box b = $self->extent();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  PyObject *upload_stats() const {
+    const cvc::gl::HeightFieldTexture::Stats s = $self->stats();
+    return Py_BuildValue("{s:K,s:K,s:K}", "full_uploads",
+                         static_cast<unsigned long long>(s.fullUploads), "row_uploads",
+                         static_cast<unsigned long long>(s.rowUploads), "bytes",
+                         static_cast<unsigned long long>(s.bytes));
+  }
+}
+
+%ignore cvc::gl::DrapedLinkNode::DrapedLinkNode; // -> SceneGraph.add_draped_link
+%ignore cvc::gl::DrapedLinkNode::centerAt;       // double[3] out -> tuple below
+%include "cvc/gl/DrapedLinkNode.h"
+%extend cvc::gl::DrapedLinkNode {
+  // Where the drawn centre line is at t in [0, 1] (the GPU's drape, on the CPU).
+  PyObject *center_at(double t) const {
+    double p[3];
+    $self->centerAt(t, p);
+    return Py_BuildValue("(ddd)", p[0], p[1], p[2]);
+  }
+}
 
 // ── VolumeNode: transfer function (vector<double>) + rendering props ────────
 %ignore cvc::gl::VolumeNode::addToRenderer;
@@ -932,7 +1249,15 @@ PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::setRungStyle)
 // volume_node(). args[0] is the node name for both wrapped methods.
 %pythoncode %{
 def _typed_node(sg, name):
-    n = sg.geometry_node(name)
+    # Most-derived first: a RibbonNode is also a StreamingGeometryNode and a
+    # GeometryNode, and the first cast that succeeds decides the proxy type.
+    n = sg.ribbon_node(name)
+    if n is None:
+        n = sg.draped_link_node(name)
+    if n is None:
+        n = sg.streaming_node(name)
+    if n is None:
+        n = sg.geometry_node(name)
     if n is None:
         n = sg.volume_node(name)
     if n is None:
@@ -1021,6 +1346,29 @@ def _typed_node(sg, name):
 %pythonappend cvc::gl::SceneGraph::lod_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
+// Streaming-overlay factories / accessors return live node proxies too.
+%pythonappend cvc::gl::SceneGraph::add_streaming_geometry %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::add_ribbon %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::add_draped_link %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::streaming_node %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::ribbon_node %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend cvc::gl::SceneGraph::draped_link_node %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+// postEventCoalesced's raw const void* key is re-exposed as
+// post_event_coalesced(key_object, callable).
+%ignore cvc::gl::SceneGraph::postEventCoalesced;
+%ignore cvc::gl::SceneGraph::eventSink; // SceneEventSink is C++-only
 %extend cvc::gl::SceneGraph {
   // NOTE: swig parses the DECLARATIONS below in cvc::gl scope (so a bare
   // `GeometryNode` return type resolves), but emits each BODY verbatim as a
@@ -1214,6 +1562,106 @@ def _typed_node(sg, name):
   // Connect a Python callable to the scene's graphics-changed signal (fires when
   // a node is added or removed) — Python functions as scene callbacks.
   void on_graphics_changed(std::function<void()> cb) { $self->graphicsChanged.connect(cb); }
+  // postEventCoalesced from Python -- see post_event_coalesced (pythoncode
+  // below), which picks one of these two by the key's type.
+  //
+  // A scene NODE key coalesces by the C++ node, so every proxy of one node is
+  // one key (SWIG hands out a fresh proxy per lookup). The pending callback
+  // owns a reference to the node, so its address cannot be freed and reused by
+  // another node while the slot waits.
+  void _post_event_coalesced_node(std::shared_ptr<cvc::gl::SceneNode> node,
+                                  std::function<void()> cb) {
+    if (!node)
+      throw std::invalid_argument("post_event_coalesced: null node key");
+    const void *key = node.get();
+    $self->postEventCoalesced(key, [node, cb]() { cb(); });
+  }
+  // Any other key coalesces by object identity. The pending callback owns a
+  // strong reference to the key, so the object cannot be freed -- and its
+  // address handed to a different key object -- while the slot waits.
+  void _post_event_coalesced_obj(PyObject *key, std::function<void()> cb) {
+    Py_INCREF(key);
+    std::shared_ptr<PyObject> hold(key, [](PyObject *p) {
+      PyGILState_STATE g = PyGILState_Ensure();
+      Py_DECREF(p);
+      PyGILState_Release(g);
+    });
+    $self->postEventCoalesced(static_cast<const void *>(key), [hold, cb]() { cb(); });
+  }
+  %pythoncode %{
+    def post_event_coalesced(self, key, cb):
+        """Post `cb` to run on the scene's owner thread at the next processEvents(),
+        coalesced by `key`: at most one callback per key per drain, the latest
+        posted. A scene node key means "this node" (any proxy of it); any other
+        object is compared by identity and kept alive until its slot drains."""
+        if isinstance(key, SceneNode):
+            return self._post_event_coalesced_node(key, cb)
+        return self._post_event_coalesced_obj(key, cb)
+  %}
+
+  // ── streaming overlays (StreamingGeometryNode.h) ─────────────────────────
+  // A generic streaming mesh: capacity_points points (all at the origin until
+  // written), `triangles` a flat index list (3 per triangle), `bounds` the
+  // reserved (minx, miny, minz, maxx, maxy, maxz) box, `mapper` 'auto' |
+  // 'classic' | 'lowmem'. Under `parent` when given, else at the root.
+  std::shared_ptr<cvc::gl::StreamingGeometryNode>
+  add_streaming_geometry(const std::string &name, std::size_t capacity_points,
+                         PyObject *triangles, const std::vector<double> &bounds,
+                         const std::string &mapper = "auto", const std::string &parent = "") {
+    cvc::gl::StreamingLayout l;
+    l.capacity_points = capacity_points;
+    l.reserved_bounds = pycvc_gl_bounds(bounds, "add_streaming_geometry");
+    l.mapper = pycvc_gl_mapper_kind(mapper);
+    const std::vector<std::uint32_t> idx = pycvc_gl_indices(triangles, "add_streaming_geometry");
+    if (idx.size() % 3)
+      throw std::invalid_argument("add_streaming_geometry: triangles need 3 indices each");
+    for (std::size_t i = 0; i < idx.size(); i += 3)
+      l.triangles.push_back({{idx[i], idx[i + 1], idx[i + 2]}});
+    auto p = parent.empty() ? $self->getGraphicsRoot() : $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_streaming_geometry: no parent node named '" + parent + "'");
+    auto n = p->addGraphicsChild<cvc::gl::StreamingGeometryNode>(name, l);
+    $self->registerGraphics(name, n);
+    return n;
+  }
+  // A ribbon (a track or route) of `capacity` centres, `half_width` either side.
+  std::shared_ptr<cvc::gl::RibbonNode> add_ribbon(const std::string &name, std::size_t capacity,
+                                                  float half_width,
+                                                  const std::vector<double> &bounds,
+                                                  const std::string &mapper = "auto",
+                                                  const std::string &parent = "") {
+    auto p = parent.empty() ? $self->getGraphicsRoot() : $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_ribbon: no parent node named '" + parent + "'");
+    auto n = p->addGraphicsChild<cvc::gl::RibbonNode>(
+        name, capacity, half_width, pycvc_gl_bounds(bounds, "add_ribbon"),
+        pycvc_gl_mapper_kind(mapper));
+    $self->registerGraphics(name, n);
+    return n;
+  }
+  // A terrain-draped link over `heights` (shared by any number of links).
+  std::shared_ptr<cvc::gl::DrapedLinkNode>
+  add_draped_link(const std::string &name, std::shared_ptr<cvc::gl::HeightFieldTexture> heights,
+                  int stations = 24, const std::string &mapper = "auto",
+                  const std::string &parent = "") {
+    auto p = parent.empty() ? $self->getGraphicsRoot() : $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_draped_link: no parent node named '" + parent + "'");
+    auto n = p->addGraphicsChild<cvc::gl::DrapedLinkNode>(name, heights, stations,
+                                                          pycvc_gl_mapper_kind(mapper));
+    $self->registerGraphics(name, n);
+    return n;
+  }
+  // Typed downcasts (like geometry_node). Null if absent or of another type.
+  std::shared_ptr<cvc::gl::StreamingGeometryNode> streaming_node(const std::string &name) {
+    return std::dynamic_pointer_cast<cvc::gl::StreamingGeometryNode>($self->getGraphics(name));
+  }
+  std::shared_ptr<cvc::gl::RibbonNode> ribbon_node(const std::string &name) {
+    return std::dynamic_pointer_cast<cvc::gl::RibbonNode>($self->getGraphics(name));
+  }
+  std::shared_ptr<cvc::gl::DrapedLinkNode> draped_link_node(const std::string &name) {
+    return std::dynamic_pointer_cast<cvc::gl::DrapedLinkNode>($self->getGraphics(name));
+  }
 }
 %include "cvc/gl/SceneGraph.h"
 

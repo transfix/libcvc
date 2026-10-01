@@ -44,10 +44,14 @@ namespace cvc {
 namespace gl {
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
+    : GeometryNode(ctx, statePath, name, vtkSmartPointer<vtkPolyDataMapper>::New()) {}
+
+GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name,
+                           vtkSmartPointer<vtkPolyDataMapper> mapper)
     : GraphicsNode(ctx, statePath, name), m_hasGeometry(false),
       m_renderMode(GeometryRenderMode::TRIS), m_useSingleColor(false),
       m_actor(vtkSmartPointer<vtkActor>::New()),
-      m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
+      m_mapper(mapper ? mapper : vtkSmartPointer<vtkPolyDataMapper>::New()),
       m_polyData(vtkSmartPointer<vtkPolyData>::New()), m_textureFlipV(false) {
   m_mapper->SetInputData(m_polyData);
   m_actor->SetMapper(m_mapper);
@@ -324,6 +328,12 @@ void GeometryNode::setUseSingleColor(bool useSingleColor) {
 }
 
 vtkProp *GeometryNode::getProp() { return m_actor; }
+
+vtkActor *GeometryNode::actor() const { return m_actor; }
+
+vtkPolyDataMapper *GeometryNode::mapper() const { return m_mapper; }
+
+vtkPolyData *GeometryNode::polyData() const { return m_polyData; }
 
 void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
   if (!m_actor)
@@ -656,8 +666,8 @@ void GeometryNode::setDepthOffset(double units) {
 void GeometryNode::addVertexShaderReplacement(const std::string &original,
                                               const std::string &replacement) {
   runOnMainThread([this, original, replacement]() {
-    if (m_actor && m_actor->GetShaderProperty())
-      m_actor->GetShaderProperty()->AddVertexShaderReplacement(original, true, replacement, false);
+    m_userShaderRepl[{0, original}] = replacement;
+    installShaderReplacement({0, original});
     if (SceneGraph *sg = getSceneGraph())
       sg->requestRender();
   });
@@ -666,9 +676,8 @@ void GeometryNode::addVertexShaderReplacement(const std::string &original,
 void GeometryNode::addFragmentShaderReplacement(const std::string &original,
                                                 const std::string &replacement) {
   runOnMainThread([this, original, replacement]() {
-    if (m_actor && m_actor->GetShaderProperty())
-      m_actor->GetShaderProperty()->AddFragmentShaderReplacement(original, true, replacement,
-                                                                 false);
+    m_userShaderRepl[{1, original}] = replacement;
+    installShaderReplacement({1, original});
     if (SceneGraph *sg = getSceneGraph())
       sg->requestRender();
   });
@@ -676,13 +685,63 @@ void GeometryNode::addFragmentShaderReplacement(const std::string &original,
 
 void GeometryNode::clearShaderReplacements() {
   runOnMainThread([this]() {
+    m_userShaderRepl.clear();
     if (m_actor && m_actor->GetShaderProperty()) {
       m_actor->GetShaderProperty()->ClearAllVertexShaderReplacements();
       m_actor->GetShaderProperty()->ClearAllFragmentShaderReplacements();
     }
+    // The subclass's own replacements are not the caller's to clear.
+    for (const auto &kv : m_internalShaderRepl)
+      installShaderReplacement(kv.first);
     if (SceneGraph *sg = getSceneGraph())
       sg->requestRender();
   });
+}
+
+void GeometryNode::addInternalVertexShaderReplacement(const std::string &anchor,
+                                                      const std::string &text) {
+  m_internalShaderRepl[{0, anchor}] = text;
+  installShaderReplacement({0, anchor});
+}
+
+void GeometryNode::addInternalFragmentShaderReplacement(const std::string &anchor,
+                                                        const std::string &text) {
+  m_internalShaderRepl[{1, anchor}] = text;
+  installShaderReplacement({1, anchor});
+}
+
+void GeometryNode::installShaderReplacement(const ShaderReplKey &key) {
+  vtkShaderProperty *sp = m_actor ? m_actor->GetShaderProperty() : nullptr;
+  if (!sp)
+    return;
+  const std::string &anchor = key.second;
+  const auto in = m_internalShaderRepl.find(key);
+  const auto user = m_userShaderRepl.find(key);
+  if (in == m_internalShaderRepl.end() && user == m_userShaderRepl.end()) {
+    if (key.first == 0)
+      sp->ClearVertexShaderReplacement(anchor, true);
+    else
+      sp->ClearFragmentShaderReplacement(anchor, true);
+    return;
+  }
+  // vtkShaderProperty keeps ONE replacement per anchor, so compose: the
+  // subclass's text first, then the caller's applied to the anchor that text
+  // re-emits -- exactly what applying the two in turn to the shader would do.
+  std::string text;
+  if (in != m_internalShaderRepl.end()) {
+    text = in->second;
+    if (user != m_userShaderRepl.end()) {
+      const std::size_t pos = text.find(anchor);
+      if (pos != std::string::npos)
+        text.replace(pos, anchor.size(), user->second);
+    }
+  } else {
+    text = user->second;
+  }
+  if (key.first == 0)
+    sp->AddVertexShaderReplacement(anchor, true, text, false);
+  else
+    sp->AddFragmentShaderReplacement(anchor, true, text, false);
 }
 
 void GeometryNode::disableCoordinateShiftScale() {
@@ -744,6 +803,20 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
   for (auto &kv : self->m_uniforms3F)
     if (program->IsUniformUsed(kv.first.c_str()))
       program->SetUniform3f(kv.first.c_str(), kv.second.data());
+  if (self->m_shaderTextures.empty())
+    return;
+  std::vector<std::pair<std::string, vtkTextureObject *>> textures;
+  textures.reserve(self->m_shaderTextures.size());
+  for (auto &kv : self->m_shaderTextures)
+    textures.emplace_back(kv.first, kv.second.GetPointer());
+  bindShaderTextures(program, textures);
+}
+
+void GeometryNode::bindShaderTextures(
+    vtkShaderProgram *program,
+    const std::vector<std::pair<std::string, vtkTextureObject *>> &textures) {
+  if (!program)
+    return;
   // Bind our custom textures onto units the mapper won't reuse. The wasm
   // low-memory poly-data mapper has no real VBOs: it emulates every vertex buffer
   // (positions, normals, cell/edge id maps) as sampler2D/isampler2D/usampler2D
@@ -757,7 +830,7 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
   // our Activate() above the mapper's emulated buffers — then release the
   // reservation so the mapper still gets its low units back for the draw.
   vtkTextureUnitManager *tum = nullptr;
-  for (auto &kv : self->m_shaderTextures)
+  for (auto &kv : textures)
     if (kv.second && kv.second->GetContext()) {
       tum = kv.second->GetContext()->GetTextureUnitManager();
       break;
@@ -772,8 +845,8 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
         break;
       reserved[nReserved++] = u;
     }
-  for (auto &kv : self->m_shaderTextures) {
-    if (kv.second && program->IsUniformUsed(kv.first.c_str())) {
+  for (auto &kv : textures) {
+    if (kv.second && kv.second->GetContext() && program->IsUniformUsed(kv.first.c_str())) {
       kv.second->Activate();
       program->SetUniformi(kv.first.c_str(), kv.second->GetTextureUnit());
     }

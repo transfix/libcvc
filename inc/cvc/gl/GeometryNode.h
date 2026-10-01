@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -18,6 +19,7 @@ class vtkTextureObject;
 class vtkImageData;
 class vtkCallbackCommand;
 class vtkObject;
+class vtkShaderProgram;
 
 namespace cvc {
 class geometry;
@@ -115,7 +117,11 @@ public:
   // can't express — e.g. fragment BUMP MAPPING (perturb normalVCVSOutput by the
   // surface-gradient of a procedural height, no tangents), so grass/dirt shades
   // with fine detail instead of a smooth moulded sheen. Caller owns the GLSL;
-  // clearShaderReplacements() removes all injected code.
+  // clearShaderReplacements() removes all code injected through these two
+  // calls. A subclass's OWN replacements (RibbonNode's clip, DrapedLinkNode's
+  // drape) are kept apart: they survive clearShaderReplacements(), and a
+  // replacement here on the same anchor is applied after the subclass's
+  // (to the anchor it re-emits) instead of replacing it.
   void addVertexShaderReplacement(const std::string &original, const std::string &replacement);
   void addFragmentShaderReplacement(const std::string &original, const std::string &replacement);
   void clearShaderReplacements();
@@ -189,6 +195,36 @@ public:
   static bool isComputedMetadata(const std::string &key);
 
 protected:
+  // For subclasses that need a specific vtkPolyDataMapper instead of the
+  // factory one the public constructor creates (vtkPolyDataMapper::New(), i.e.
+  // vtkOpenGLPolyDataMapper on desktop GL and vtkOpenGLLowMemoryPolyDataMapper
+  // on GLES/WebGL2). StreamingGeometryNode passes its streaming mapper here.
+  // The mapper is wired to this node's actor and polydata exactly like the
+  // default one; a null mapper falls back to the factory mapper.
+  GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name,
+               vtkSmartPointer<vtkPolyDataMapper> mapper);
+
+  // The VTK objects behind this node, for subclasses that drive them directly.
+  // Owner thread only, like every other VTK access in cvcGL.
+  vtkActor *actor() const;
+  vtkPolyDataMapper *mapper() const;
+  vtkPolyData *polyData() const;
+
+  // Bind `textures` to `program` on units above the ones the low-memory mapper
+  // hands its emulated vertex buffers (see onUpdateShader for why), setting each
+  // sampler uniform that the program actually uses. For UpdateShaderEvent
+  // observers; textures without a context, or unused by the program, are skipped.
+  static void
+  bindShaderTextures(vtkShaderProgram *program,
+                     const std::vector<std::pair<std::string, vtkTextureObject *>> &textures);
+
+  // Shader replacements a SUBCLASS needs for itself. Kept out of reach of the
+  // public add*ShaderReplacement / clearShaderReplacements (see there), and
+  // composed with a caller's replacement on the same anchor. `text` must
+  // re-emit `anchor`. Before attach, or on the owner thread.
+  void addInternalVertexShaderReplacement(const std::string &anchor, const std::string &text);
+  void addInternalFragmentShaderReplacement(const std::string &anchor, const std::string &text);
+
   vtkProp *getProp() override;
   void handleStateChanged(const std::string &childState) override;
   void applyTransformToVTK() override;                       // Apply transform to actor
@@ -224,6 +260,14 @@ private:
   std::map<std::string, vtkSmartPointer<vtkTextureObject>> m_shaderTextures;
   vtkSmartPointer<vtkCallbackCommand> m_shaderTexCb;
   bool m_shaderTexObserverInstalled = false;
+
+  // Shader replacements by (stage: 0 vertex, 1 fragment; anchor): the caller's
+  // (public API) and the subclass's own. The actor's shader property holds one
+  // entry per anchor -- their composition -- rebuilt by installShaderReplacement.
+  using ShaderReplKey = std::pair<int, std::string>;
+  std::map<ShaderReplKey, std::string> m_userShaderRepl;
+  std::map<ShaderReplKey, std::string> m_internalShaderRepl;
+  void installShaderReplacement(const ShaderReplKey &key);
   void ensureShaderTexObserver();
   static void onUpdateShader(vtkObject *caller, unsigned long eid, void *clientData,
                              void *callData);

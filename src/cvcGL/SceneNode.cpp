@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cvc/core/app.h>
+#include <cvc/gl/SceneEventSink.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneNode.h>
 #include <vtkProp.h>
@@ -10,11 +11,16 @@ namespace cvc {
 namespace gl {
 
 void SceneNode::setSceneGraph(SceneGraph *sceneGraph) {
-  m_sceneGraph = sceneGraph;
-  // Take a weak handle on the scene alongside the raw pointer. The scene resets
-  // its token in ~SceneGraph, which is how a node that outlives its scene finds
-  // out — see getSceneGraph().
-  m_sceneAlive = sceneGraph ? sceneGraph->aliveToken() : std::weak_ptr<void>();
+  {
+    std::lock_guard<std::mutex> lock(m_sceneMutex);
+    m_sceneGraph = sceneGraph;
+    // Take a weak handle on the scene alongside the raw pointer. The scene resets
+    // its token in ~SceneGraph, which is how a node that outlives its scene finds
+    // out — see getSceneGraph().
+    m_sceneAlive = sceneGraph ? sceneGraph->aliveToken() : std::weak_ptr<void>();
+    m_sceneEvents = sceneGraph ? sceneGraph->eventSink() : std::weak_ptr<SceneEventSink>();
+  }
+  onSceneGraphChanged();
 
   // Propagate to all children so they marshal through the same pump.
   for (auto &child : m_children) {
@@ -24,9 +30,16 @@ void SceneNode::setSceneGraph(SceneGraph *sceneGraph) {
 
 SceneGraph *SceneNode::getSceneGraph() const {
   // The back-pointer is only good while the scene that installed it is alive.
-  // expired() is a single atomic load, so this stays cheap enough for the pose
-  // hot path (GraphicsNode::setPosition consults it per call).
+  // The lock is uncontended except while the node is being attached, so this
+  // stays cheap enough for the pose hot path (GraphicsNode::setPosition consults
+  // it per call); it makes the pair read consistent from producer threads.
+  std::lock_guard<std::mutex> lock(m_sceneMutex);
   return m_sceneAlive.expired() ? nullptr : m_sceneGraph;
+}
+
+std::shared_ptr<SceneEventSink> SceneNode::sceneEvents() const {
+  std::lock_guard<std::mutex> lock(m_sceneMutex);
+  return m_sceneAlive.expired() ? nullptr : m_sceneEvents.lock();
 }
 
 void SceneNode::runOnMainThread(std::function<void()> func) {
@@ -35,8 +48,10 @@ void SceneNode::runOnMainThread(std::function<void()> func) {
   // immediately and in order. This matters for teardown: removing a node runs
   // its removeFromRenderer() synchronously, pulling its prop from the renderer
   // *before* the node is destroyed — never leaving a dangling prop behind.
-  SceneGraph *sg = getSceneGraph();
-  if (!sg || sg->onOwnerThread()) {
+  // Through the LOCKED event sink, never a raw SceneGraph*: the scene may be
+  // destroyed by its owner while this thread is between the check and the post.
+  std::shared_ptr<SceneEventSink> events = sceneEvents();
+  if (!events || events->onOwnerThread()) {
     func();
     return;
   }
@@ -47,11 +62,17 @@ void SceneNode::runOnMainThread(std::function<void()> func) {
   // dereferencing a freed `this`. This keeps cross-thread marshalling safe
   // across teardown: a destroyed node's still-queued callbacks become no-ops.
   std::weak_ptr<SceneNode> weak = weak_from_this();
-  sg->postEvent([weak, func = std::move(func)]() {
+  std::function<void()> job = [weak, func = std::move(func)]() {
     if (auto self = weak.lock()) {
       func();
     }
-  });
+  };
+  // Refused only once ~SceneGraph has closed the sink -- which it does after
+  // dropping its alive token, so this node already has no scene
+  // (getSceneGraph() == nullptr) and its work runs inline on the no-scene path,
+  // as above. tryPost leaves `job` with us when it refuses: no copy of `func`.
+  if (!events->tryPost(job))
+    job();
 }
 
 SceneNode::SceneNode(cvc::app &ctx, const std::string &statePath)

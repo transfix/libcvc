@@ -11,6 +11,7 @@
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/LodGraphicsNode.h>
 #include <cvc/gl/NullGraphicNode.h>
+#include <cvc/gl/SceneEventSink.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneNode.h>
 #include <cvc/gl/Settings.h>
@@ -38,10 +39,12 @@ namespace cvc {
 namespace gl {
 
 SceneGraph::SceneGraph(cvc::app &ctx, const std::string &statePrefix)
-    : m_renderer(nullptr), m_ctx(ctx), m_statePrefix(statePrefix),
-      m_ownerThread(std::this_thread::get_id()), m_gridNode(nullptr), m_axisNode(nullptr),
-      m_graphicsRoot(nullptr), m_nullGraphic(nullptr), m_multiVolumeRenderingEnabled(false),
-      m_renderNeeded(false) {
+    : m_renderer(nullptr), m_ctx(ctx), m_statePrefix(statePrefix), m_gridNode(nullptr),
+      m_axisNode(nullptr),
+      // Not make_shared: the nodes' weak_ptrs would keep its storage allocated
+      // after the last owner let go, hiding a use-after-free from ASan/valgrind.
+      m_events(new SceneEventSink()), m_graphicsRoot(nullptr), m_nullGraphic(nullptr),
+      m_multiVolumeRenderingEnabled(false) {
   // This scene's own state publisher, running under the injected app — node poses
   // publish through it (SceneGraph::publisher()), coalesced off the render path.
   // Started eagerly, like the scene's pump, and drained in the destructor.
@@ -104,31 +107,29 @@ SceneGraph::~SceneGraph() {
   // destroyed publisher's mutex. From here on those nodes see no scene and take
   // their own no-scene path (GraphicsNode::setPosition writes state directly).
   m_alive.reset();
+  // THEN close the event sink, in this order. A producer thread that fetched
+  // the sink before the reset above holds it alive and may still be on its way
+  // to post. A post that lands before close() is queued and dropped by it, as
+  // events queued to a dying scene always were. A post after close() is
+  // refused -- and because the token is already gone, the refused producer
+  // already sees getSceneGraph() == nullptr: runOnMainThread then runs its work
+  // inline on the no-scene path (never against this dying scene), and a
+  // streaming node keeps what it staged pending for a later attach. Closing
+  // first would leave a window where a refused post runs owner-thread work
+  // inline on the producer while getSceneGraph() still returns this scene.
+  m_events->close();
 }
 
-void SceneGraph::postEvent(std::function<void()> callback) {
-  std::lock_guard<std::mutex> lock(m_eventQueueMutex);
-  m_eventQueue.push(std::move(callback));
-  m_renderNeeded = true;
+void SceneGraph::postEvent(std::function<void()> callback) { m_events->post(std::move(callback)); }
+
+void SceneGraph::postEventCoalesced(const void *key, std::function<void()> callback) {
+  m_events->postCoalesced(key, std::move(callback));
 }
 
 void SceneGraph::processEvents() {
-  // Process all pending events on the main thread
-  // Extract all events while holding the lock, then execute without lock
-  std::queue<std::function<void()>> events;
-  {
-    std::lock_guard<std::mutex> lock(m_eventQueueMutex);
-    std::swap(events, m_eventQueue);
-  }
-
-  // Execute all events on the main thread
-  while (!events.empty()) {
-    auto &callback = events.front();
-    if (callback) {
-      callback();
-    }
-    events.pop();
-  }
+  // The queued callbacks first. If one throws, the rest stay queued for the next
+  // call (SceneEventSink::processEvents) and so does this follow-up.
+  m_events->processEvents();
 
   // Then the world-bounds follow-up for every tracked node that moved since the
   // last pump -- including the moves the drain above just applied (a pose
@@ -144,17 +145,13 @@ void SceneGraph::processEvents() {
   }
 }
 
-void SceneGraph::requestRender() {
-  std::lock_guard<std::mutex> lock(m_eventQueueMutex);
-  m_renderNeeded = true;
-}
+void SceneGraph::requestRender() { m_events->requestRender(); }
 
-bool SceneGraph::checkAndResetRenderNeeded() {
-  std::lock_guard<std::mutex> lock(m_eventQueueMutex);
-  bool needed = m_renderNeeded;
-  m_renderNeeded = false;
-  return needed;
-}
+bool SceneGraph::checkAndResetRenderNeeded() { return m_events->checkAndResetRenderNeeded(); }
+
+bool SceneGraph::onOwnerThread() const { return m_events->onOwnerThread(); }
+
+void SceneGraph::adoptOwnerThread() { m_events->adoptOwnerThread(); }
 
 void SceneGraph::setRenderer(vtkRenderer *renderer) {
   if (m_renderer) {
@@ -552,7 +549,7 @@ void SceneGraph::refreshWorldBounds() {
     // flag again and is covered at the end of processEvents().
     m_boundsDirty.store(false, std::memory_order_release);
     updateGrid(computeGraphicsBounds());
-    m_renderNeeded = true;
+    requestRender();
   });
 }
 
@@ -572,7 +569,7 @@ void SceneGraph::onGraphicsBoundsChanged() {
     grown[i + 3] = std::max(b[i + 3], m_worldBounds[i + 3]);
   }
   updateGrid(grown);
-  m_renderNeeded = true;
+  requestRender();
 }
 
 // Volume graphics management
