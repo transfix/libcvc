@@ -73,6 +73,22 @@ def test_publish_rejects_malformed_arrays():
         pass
 
 
+def test_publish_accepts_readonly_contiguous_array():
+    app = pycvc.make_app()
+    s = pycvc.stream_open(app, "cam4", "rgba8", 4, 2)  # 32 bytes/frame
+    sub = s.subscribe("latest", 1)
+    # np.frombuffer yields a READ-ONLY, C-contiguous uint8 array — a common
+    # zero-copy producer source (decoder output / mmap). It must be ACCEPTED
+    # (aliased read-only), not rejected for not being writable.
+    ro = np.frombuffer(bytes(4 * 2 * 4), dtype=np.uint8)
+    assert ro.flags.writeable is False
+    seq = s.publish(ro, 0.0)
+    assert seq == 0
+    f = sub.latest()
+    assert f.valid() and f.seq() == 0
+    assert f.numpy().shape == (2, 4, 4)
+
+
 def test_ring_drops_oldest_and_pops_in_order():
     app = pycvc.make_app()
     s = pycvc.stream_open(app, "cam2", "rgba8", 4, 2)

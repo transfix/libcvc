@@ -71,6 +71,12 @@ struct PyArrayKeepalive {
   ~PyArrayKeepalive() {
     if (!arr)
       return;
+    // The last frame_ptr may drop on a non-Python thread, so acquire the GIL to
+    // DECREF. But if the interpreter has already finalized (a frame retained past
+    // Py_Finalize by a host C++ thread), PyGILState_Ensure is undefined — leak the
+    // ref (the lesser evil at shutdown) rather than crash.
+    if (!Py_IsInitialized())
+      return;
     PyGILState_STATE g = PyGILState_Ensure();
     Py_DECREF(arr);
     PyGILState_Release(g);
@@ -85,7 +91,7 @@ struct StreamFrame {
   cvc::stream::frame_ptr fp;
 
   bool valid() const { return static_cast<bool>(fp); }
-  long seq() const { return fp ? static_cast<long>(fp->seq) : -1; }
+  long long seq() const { return fp ? static_cast<long long>(fp->seq) : -1; } // int64 (Windows LLP64)
   double pts() const { return fp ? fp->pts_seconds : 0.0; }
   int width() const { return fp ? fp->format.w : 0; }
   int height() const { return fp ? fp->format.h : 0; }
@@ -98,10 +104,19 @@ struct StreamFrame {
     const int ch = stream_codec_channels(fp->format.codec);
     if (ch == 0)
       throw std::runtime_error("StreamFrame.numpy: unsupported codec '" + fp->format.codec + "'");
+    const int w = fp->format.w, h = fp->format.h;
+    // A dense (h,w,ch) view is valid only for a densely-packed frame of the
+    // expected size. Phase-2 streams are dense (stream_open sets stride=w*ch) and
+    // publish() validates the byte size, but a padded-stride or short frame (e.g.
+    // a future codec or a host-C++ publish) would misalign rows / read OOB.
+    if (fp->format.stride != 0 && fp->format.stride != w * ch)
+      throw std::runtime_error("StreamFrame.numpy: padded-stride frame cannot be viewed densely");
+    const std::size_t need = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * ch;
+    if (fp->size < need)
+      throw std::runtime_error("StreamFrame.numpy: frame buffer smaller than h*w*channels");
     v.dtype = pycvc::DType::UInt8;
     v.writable = false; // frames are immutable
-    v.shape = {static_cast<long>(fp->format.h), static_cast<long>(fp->format.w),
-               static_cast<long>(ch)};
+    v.shape = {static_cast<long>(h), static_cast<long>(w), static_cast<long>(ch)};
     v.data = fp->data;
     // Pin the frame (its keepalive -> pool slab or producer ndarray) for the
     // view's life via an aliasing shared_ptr sharing fp's control block.
@@ -172,7 +187,7 @@ struct Stream {
   // byte size; a wrong dtype/shape/layout is REJECTED, never coerced (a coerce
   // would silently copy and defeat zero-copy). The array is kept alive until the
   // last subscriber drops the frame.
-  long publish(PyObject *arr, double pts = 0.0) {
+  long long publish(PyObject *arr, double pts = 0.0) {
     if (!s)
       throw std::runtime_error("Stream.publish: closed stream");
     if (!arr || !PyArray_Check(arr))
@@ -180,15 +195,18 @@ struct Stream {
     PyArrayObject *a = reinterpret_cast<PyArrayObject *>(arr);
     if (PyArray_TYPE(a) != NPY_UINT8)
       throw std::invalid_argument("Stream.publish: array must be uint8 (never coerced)");
-    if (!PyArray_ISCARRAY(a))
-      throw std::invalid_argument("Stream.publish: array must be C-contiguous");
+    // Aliased READ-ONLY, so a read-only source is fine: require C-contiguous +
+    // aligned (ISCARRAY_RO), NOT writable (ISCARRAY would also demand WRITEABLE
+    // and wrongly reject np.frombuffer(...) / mmap — common zero-copy sources).
+    if (!PyArray_ISCARRAY_RO(a))
+      throw std::invalid_argument("Stream.publish: array must be C-contiguous and aligned");
     const std::size_t need = s->channel().format().frame_bytes();
     if (static_cast<std::size_t>(PyArray_NBYTES(a)) != need)
       throw std::invalid_argument(
           "Stream.publish: array byte size does not match the stream frame size");
     auto keep = std::make_shared<PyArrayKeepalive>(arr); // INCREF now (holding the GIL)
     const std::uint8_t *data = static_cast<const std::uint8_t *>(PyArray_DATA(a));
-    return static_cast<long>(
+    return static_cast<long long>(
         s->channel().publish_external(data, need, pts, std::shared_ptr<void>(std::move(keep))));
   }
 
