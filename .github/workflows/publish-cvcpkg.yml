@@ -155,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install 'git+https://github.com/cy-pca/cvcpkg@master'
+          pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
       - name: Push libcvc's recipes
         shell: bash
         env:
@@ -413,6 +413,26 @@ jobs:
           # This is why Windows debug is excluded above (CRT mismatch).
           build_type: Release
           link: shared
+
+      # cy-pca/cvcpkg#105 moved httpx -- which `cvcpkg publish` needs -- behind
+      # the `[publish]` extra. fetch-libcvc-deps installs its own core-only
+      # cvcpkg, which shadows the [publish] install above, so put httpx back
+      # into whichever Python backs the cvcpkg now on PATH. This runs on dry
+      # runs too, so a broken publish path fails here instead of at the end.
+      - name: Ensure cvcpkg can publish (httpx)
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="$(command -v cvcpkg)"
+          py="$(head -n1 "$exe" | sed -e 's/^#!//' -e 's/[[:space:]].*$//')"
+          # pip writes a /bin/sh trampoline when the interpreter path is long;
+          # the interpreter is then quoted on line 2 after "'''exec'".
+          if [ "$py" = "/bin/sh" ]; then
+            py="$(sed -n "2s/^'''exec' \"\([^\"]*\)\".*/\1/p" "$exe")"
+          fi
+          case "$py" in */python*) ;; *) py="$(command -v python3)" ;; esac
+          "$py" -m pip install 'httpx>=0.24'
+          "$py" -c 'import httpx; print("cvcpkg publish extra ok: httpx", httpx.__version__)'
 
       - name: Configure (Linux/macOS)
         if: matrix.target.platform != 'windows'
@@ -1119,6 +1139,26 @@ jobs:
       # the builder's temp path baked in (`swig -swiglib` reports
       # /tmp/cvcpkg-builder/...), so without it every invocation dies with
       # "Unable to find 'swig.swg'". Point it at the installed share/swig/<ver>.
+
+      # cy-pca/cvcpkg#105 moved httpx -- which `cvcpkg publish` needs -- behind
+      # the `[publish]` extra. fetch-libcvc-deps installs its own core-only
+      # cvcpkg, which shadows the [publish] install above, so put httpx back
+      # into whichever Python backs the cvcpkg now on PATH. This runs on dry
+      # runs too, so a broken publish path fails here instead of at the end.
+      - name: Ensure cvcpkg can publish (httpx)
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="$(command -v cvcpkg)"
+          py="$(head -n1 "$exe" | sed -e 's/^#!//' -e 's/[[:space:]].*$//')"
+          # pip writes a /bin/sh trampoline when the interpreter path is long;
+          # the interpreter is then quoted on line 2 after "'''exec'".
+          if [ "$py" = "/bin/sh" ]; then
+            py="$(sed -n "2s/^'''exec' \"\([^\"]*\)\".*/\1/p" "$exe")"
+          fi
+          case "$py" in */python*) ;; *) py="$(command -v python3)" ;; esac
+          "$py" -m pip install 'httpx>=0.24'
+          "$py" -c 'import httpx; print("cvcpkg publish extra ok: httpx", httpx.__version__)'
       - name: Install swig (cvcpkg)
         shell: bash
         run: |
@@ -1684,7 +1724,7 @@ jobs:
           # build requirement (pyproject: requires = ["poetry-core>=1.8.0"]).
           & $env:PYEXE -m pip install 'poetry-core>=1.8.0'
           if ($LASTEXITCODE -ne 0) { throw "poetry-core install failed ($LASTEXITCODE)" }
-          & $env:PYEXE -m pip install --no-build-isolation 'git+https://github.com/cy-pca/cvcpkg@master'
+          & $env:PYEXE -m pip install --no-build-isolation 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install failed ($LASTEXITCODE)" }
           & $env:PYEXE -m cvcpkg --version
 
