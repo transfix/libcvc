@@ -359,6 +359,18 @@ def test_content_version():
     print("  ok: contentVersion / markContentChanged")
 
 
+def test_texture_modified_rows():
+    """The partial texture upload is callable; headless there is nothing on the
+    GPU yet, so it is a no-op (the first draw uploads every pixel)."""
+    sg = pycvc_gl.SceneGraph(app, "pytexrows")
+    sg.addGraphics("tri", _make_tri())
+    gn = sg.geometry_node("tri")
+    gn.texture_modified_rows(0, 4)
+    gn.texture_modified_rect(0, 0, 2, 2)
+    sg.processEvents()
+    print("  ok: texture_modified_rows / _rect wrapped")
+
+
 if __name__ == "__main__":
     test_build_scene()
     test_volume_scattering()
@@ -373,4 +385,5 @@ if __name__ == "__main__":
     test_scene_owned_lighting()
     test_metadata_mirror_follows_node()
     test_content_version()
+    test_texture_modified_rows()
     print("pycvc_gl scene tests: OK")

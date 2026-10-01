@@ -381,6 +381,16 @@ add_executable(cvcgl_stream_texture test/cvcgl_stream_texture.cpp)
 target_link_libraries(cvcgl_stream_texture PRIVATE cvcGL)
 add_test(NAME cvcgl_stream_texture COMMAND cvcgl_stream_texture)
 
+# texture_modified_rows / _rect: a zero-copy texture patched on the GPU with
+# glTexSubImage2D and nothing marked modified -- no whole-texture re-upload, no
+# shadow re-bake. Reads the texture back (glGetTexImage), so desktop GL only;
+# skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_texture_rows test/cvcgl_texture_rows.cpp)
+  target_link_libraries(cvcgl_texture_rows PRIVATE cvcGL)
+  add_test(NAME cvcgl_texture_rows COMMAND cvcgl_texture_rows)
+endif()
+
 # SceneRenderer: a render target held open across frames (one GL context for a
 # whole sequence, a camera that survives the next render, live scene updates).
 add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
