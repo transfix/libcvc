@@ -32,12 +32,19 @@ namespace stream {
 
 enum class frame_kind { unknown, video_raw, audio_pcm, sensor };
 
+// Raster row order for video_raw frames. top_left matches cvc::image (and the
+// zero-copy adopt path); bottom_left (e.g. a GL framebuffer/camera capture)
+// cannot be aliased into a top-left image without a flip, so the zero-copy
+// bridge rejects it.
+enum class frame_origin { top_left, bottom_left };
+
 // Describes the wire/pixel layout of every frame on a stream. Round-trips into
 // the /streams/<id> descriptor node so a remote consumer can negotiate.
 struct format_desc {
   frame_kind kind = frame_kind::unknown;
   std::string codec; // e.g. "rgba8", "s16le"
   int w = 0, h = 0, stride = 0;
+  frame_origin origin = frame_origin::top_left; // raster row order (video_raw)
   int sample_rate = 0, channels = 0;
   // Explicit per-frame byte size. Required for non-video kinds (audio/sensor)
   // whose size is not stride*h; for video it may stay 0 and be derived.
