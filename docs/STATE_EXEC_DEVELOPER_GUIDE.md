@@ -767,6 +767,41 @@ A complete receiver that waits for messages and accumulates results:
   results)
 ```
 
+### Results From a Worker Lane (`cvc::async_lane`)
+
+Slow native work must not run inside a process step: the step deadline is
+cooperative, so a blocking native function freezes the thread that pumps the
+scheduler. `cvc::async_lane` (`cvc/core/async_lane.h`) is a persistent named
+worker thread with a FIFO job queue. `launch_lane_task`, `park_on_lane_task`,
+`future_lane_task` and `post_lane_task` run a kernel on a lane and post its
+value (or `on_error(message)` if it throws) to a channel that a process,
+chrooted or not, receives with `msg-recv`. They mirror the compute-pool
+helpers in `cvc/core/async_task.h`, but reuse one thread instead of starting
+a thread per call, which suits per-frame work such as a simulation tick.
+
+```cpp
+#include <cvc/core/async_lane.h>
+
+cvc::async_lane sim_lane("sim");  // declare AFTER what its jobs capture
+se::builtins::register_fn(env, "sim-launch", [&](std::span<const se::value_t>) {
+  // Runs on the pump thread: returns the unique '#' reply channel "demo#sim.<n>".
+  return se::value_t(cvc::launch_lane_task(sim_lane, sched, ictx.root_path, "demo",
+                                           [&] { return run_ticks(); }, on_err));
+});
+sched.execute("(while t (apply-sim (msg-recv (sim-launch))))", opts);
+
+// Every frame, on the thread that owns the scheduler:
+cvc::pump_exec_frame(sched, {&sim_lane});
+```
+
+- Post to `#` channels. A `#` channel is the same key inside and outside a
+  chroot, and channel policy never refuses it.
+- Every task posts exactly one value, even when the kernel throws, the
+  `on_error` builder throws, or the lane has been stopped.
+- `stop()` (also called by the destructor) runs every queued job, then joins.
+- On Emscripten without `-pthread`, lanes run their jobs on the pump thread
+  inside `pump_exec_frame` (`lane_mode::deferred`).
+
 ---
 
 ## 7. Resource Limits & Policies
@@ -1473,6 +1508,14 @@ resumes on the **next `step()` after** the duration expires.  If the
 host calls `step()` infrequently (e.g. a pump loop with a 50 ms
 sleep), the effective granularity is limited by that polling interval,
 not by the requested duration.
+
+A host that pumps with `sync_run()` alone never wakes a sleeper when nothing
+else is runnable: `sync_run()` only steps while `has_runnable()` is true, and
+sleepers are woken inside `step()`. A per-frame pump must therefore call
+`sync_step()` unconditionally, after `drain_ingress()` (which delivers
+cross-thread `post_message` values) and `wake_awaiting()`, and before
+`sync_run()`. `cvc::pump_exec_frame()` (`cvc/core/async_lane.h`) does this
+in the right order.
 
 ### 12.9 `break` Exits Only the Innermost Loop
 
