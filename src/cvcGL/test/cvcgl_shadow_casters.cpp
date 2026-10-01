@@ -15,20 +15,29 @@
 //   C. a node starting or stopping casting bakes; a light change bakes;
 //   D. on screen: a non-caster casts no shadow (same pixels as no object at
 //      all), a caster does;
-//   E. the update interval still strides bakes of a moving caster.
-// B-E render for real and skip where nothing rasterises (fatal under
+//   E. the update interval still strides bakes of a moving caster;
+//   F. a caster deformed in place (updateVertices / updateNormals /
+//      updateColors) bakes, a non-caster does not; a RibbonNode does not cast
+//      by default; a casting StreamingGeometryNode's streamed write bakes, and
+//      so does a draw-range or relayout change alone; a DrapedLinkNode does not
+//      cast by default, and a casting one moved or reshaped by uniforms
+//      (endpoints, width, heights) re-bakes while uploading nothing.
+// B-F render for real and skip where nothing rasterises (fatal under
 // CVC_REQUIRE_RENDER=1).
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/gl/DrapedLinkNode.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/HeightFieldTexture.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/RibbonNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/StreamingGeometryNode.h>
+#include <memory>
 #include <string>
 #include <vector>
 #include <vtkActor.h>
@@ -81,6 +90,16 @@ static vtkShadowMapBakerPass *findBaker(vtkRenderPass *p) {
     }
   return nullptr;
 }
+
+// A StreamingGeometryNode whose relayout (protected: subclasses own their
+// topology) the test can call.
+class StreamNode : public cvc::gl::StreamingGeometryNode {
+public:
+  using Layout = cvc::gl::StreamingLayout;
+  StreamNode(cvc::app &a, const std::string &path, const std::string &name, const Layout &l)
+      : StreamingGeometryNode(a, path, name, l) {}
+  void relayoutTo(const Layout &l) { relayout(l); }
+};
 
 // Exposes the node's actor.
 class Node : public GeometryNode {
@@ -318,6 +337,55 @@ static void rendered(cvc::app &app) {
   frame(); // it leaves the maps
   streamed->writePoints(0, quad, 4);
   chk(!frame(), "a non-casting one's write does not");
+
+  // Changes with no point write: a new draw range, a relayout.
+  StreamNode::Layout lay2 = lay;
+  lay2.triangles.push_back({{1, 2, 3}});
+  auto shaped = sg.getGraphicsRoot()->addGraphicsChild<StreamNode>("shaped", lay);
+  shaped->writePoints(0, quad, 4);
+  chk(settle(), "a second casting streaming node settles");
+  shaped->setDrawRange(0, 1);
+  chk(frame(), "a casting node's setDrawRange alone bakes");
+  chk(!frame(), "once");
+  shaped->relayoutTo(lay2);
+  chk(frame(), "a casting node's relayout alone bakes");
+  chk(settle(), "and settles");
+  shaped->setCastsShadow(false);
+  frame();
+  shaped->setDrawRange(0, 2);
+  chk(!frame(), "a non-casting node's setDrawRange does not");
+  shaped->relayoutTo(lay);
+  chk(!frame(), "nor its relayout");
+
+  // A draped link moved and reshaped by uniforms alone.
+  auto heights = std::make_shared<cvc::gl::HeightFieldTexture>(8, 8, -60.0, -60.0, 17.0, 17.0);
+  auto link = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::DrapedLinkNode>("link", heights, 12);
+  chk(!link->castsShadow(), "a DrapedLinkNode does not cast by default");
+  link->setEndpoints(-50.0f, 20.0f, -20.0f, 50.0f);
+  link->setStyle(2.0f, 15.0f, 0.9f, 0.2f, 0.2f, 1.0f); // lifted: it has a shadow to throw
+  chk(settle(), "it settles");
+  link->setEndpoints(-50.0f, 20.0f, -20.0f, 52.0f);
+  chk(!frame(), "a non-casting link's move does not bake");
+  link->setCastsShadow(true);
+  chk(frame(), "it starts casting: a bake");
+  chk(settle(), "and settles");
+  const cvc::gl::StreamStats u0 = link->streamStats();
+  link->setEndpoints(-48.0f, 20.0f, -20.0f, 54.0f);
+  chk(frame(), "a casting link's setEndpoints bakes");
+  const cvc::gl::StreamStats u1 = link->streamStats();
+  chk(u1.uploads == u0.uploads && u1.fullUploads == u0.fullUploads,
+      "and uploads nothing (uniforms only)");
+  chk(!frame(), "once");
+  link->setStyle(2.0f, 15.0f, 0.2f, 0.9f, 0.2f, 1.0f);
+  chk(!frame(), "a colour-only restyle does not bake");
+  link->setStyle(3.0f, 15.0f, 0.2f, 0.9f, 0.2f, 1.0f);
+  chk(frame(), "a new width does");
+  chk(settle(), "settles");
+  std::vector<float> row(8, 4.0f);
+  heights->updateRows(2, 1, row.data());
+  bool baked = frame();
+  baked = frame() || baked; // the drape is re-derived as VTK asks for the bounds
+  chk(baked, "new heights under a casting link re-bake");
 
   std::printf("E. the interval still strides a moving caster's bakes\n");
   // A scene of its own, with the interval set BEFORE shadows go on: changing a

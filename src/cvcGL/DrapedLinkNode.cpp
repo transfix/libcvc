@@ -131,11 +131,15 @@ void DrapedLinkNode::setEndpoints(float x0, float y0, float x1, float y1) {
   }
   setUniform("cvcLinkA", x0, y0, 0.0f);
   setUniform("cvcLinkB", x1, y1, 0.0f);
+  // Moved by uniforms alone, which no shadow bake sees: a casting link says so
+  // (an actor Modified() at the apply; still no upload).
+  if (castsShadow())
+    markShapeChanged();
 }
 
 void DrapedLinkNode::setStyle(float halfWidth, float lift, float r, float g, float b,
                               float opacity) {
-  bool translucent = opacity < 1.0f, crossed = false, staged = false;
+  bool translucent = opacity < 1.0f, crossed = false, staged = false, shapeMoved = false;
   {
     // New style -> derived box -> commit, as ONE step against beforeComputeBounds
     // and refreshReservedBounds (all three hold m_boundsMutex): whichever commits
@@ -144,18 +148,26 @@ void DrapedLinkNode::setStyle(float halfWidth, float lift, float r, float g, flo
     std::lock_guard<std::mutex> boundsLock(m_boundsMutex);
     {
       std::lock_guard<std::mutex> lock(m_linkMutex);
+      shapeMoved = halfWidth != m_half || lift != m_lift;
       m_half = halfWidth;
       m_lift = lift;
       crossed = translucent != m_translucent;
       m_translucent = translucent;
     }
+    // Heights that changed since the box was last derived reshape the drape too.
+    shapeMoved = shapeMoved || m_heights->generation() != m_seenGeneration.load();
     staged = commitDerivedLocked();
   }
+  // Width, lift and heights reshape what is drawn (uniforms and the height
+  // texture); colour and opacity do not. Only a casting link needs to say so.
+  const bool reshaped = shapeMoved && castsShadow();
+  if (reshaped)
+    stageShapeChanged();
   setUniform("cvcLinkHalf", halfWidth);
   setUniform("cvcLinkLift", lift);
   setUniform("cvcLinkColor", r, g, b);
   setUniform("cvcLinkOpacity", opacity);
-  if (staged)
+  if (staged || reshaped)
     requestApply(); // outside m_boundsMutex: on the owner thread this applies inline
   if (crossed) {
     // Route the actor to the translucent pass (or back). A property change, so
@@ -190,13 +202,17 @@ bool DrapedLinkNode::commitDerivedLocked() {
 }
 
 void DrapedLinkNode::refreshReservedBounds() {
-  bool staged = false;
+  bool staged = false, heightsMoved = false;
   {
     std::lock_guard<std::mutex> boundsLock(m_boundsMutex);
     unpinReservedBounds();
+    heightsMoved = m_heights->generation() != m_seenGeneration.load();
     staged = commitDerivedLocked();
   }
-  if (staged)
+  const bool reshaped = heightsMoved && castsShadow(); // see setStyle
+  if (reshaped)
+    stageShapeChanged();
+  if (staged || reshaped)
     requestApply();
 }
 
@@ -212,6 +228,11 @@ void DrapedLinkNode::beforeComputeBounds() {
     return; // a setStyle / refresh derived it meanwhile
   setDerivedBoundsNow(derivedBounds());
   m_seenGeneration = gen;
+  // New heights re-drape the link: a casting one's shadow must follow. This
+  // runs on the render thread, as VTK asks for the bounds, so mark the actor
+  // here rather than stage an apply mid-render.
+  if (castsShadow() && actor())
+    actor()->Modified();
 }
 
 void DrapedLinkNode::centerAt(double t, double out[3]) const {

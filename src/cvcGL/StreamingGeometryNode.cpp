@@ -392,10 +392,20 @@ void StreamingGeometryNode::onSceneGraphChanged() {
 
 bool StreamingGeometryNode::hasPendingLocked() const {
   return m_pendingLayout || m_dirtyHi > m_dirtyLo || m_boundsPending || m_drawRangePending ||
-         m_pickablePending;
+         m_pickablePending || m_shapePending;
 }
 
 void StreamingGeometryNode::requestApply() { scheduleApply(); }
+
+void StreamingGeometryNode::stageShapeChanged() {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_shapePending = true;
+}
+
+void StreamingGeometryNode::markShapeChanged() {
+  stageShapeChanged();
+  scheduleApply();
+}
 
 void StreamingGeometryNode::scheduleApply() {
   // Hold the scene's event sink, not a raw SceneGraph*: the owner thread may
@@ -432,6 +442,7 @@ void StreamingGeometryNode::scheduleApply() {
 
 void StreamingGeometryNode::applyPending() {
   bool layoutChanged = false, boundsChanged = false, rangeChanged = false, pickChanged = false;
+  bool shapeChanged = false;
   bool pick = false;
   std::size_t lo = 0, hi = 0, drawFirst = 0, drawCount = kAllTriangles;
   cvc::bounding_box bounds;
@@ -473,6 +484,8 @@ void StreamingGeometryNode::applyPending() {
       m_pickablePending = false;
       pickChanged = true;
     }
+    shapeChanged = m_shapePending;
+    m_shapePending = false;
   }
   ++m_applies;
   if (boundsChanged || layoutChanged)
@@ -483,7 +496,7 @@ void StreamingGeometryNode::applyPending() {
   // partial), so a CASTING node says itself that what it draws changed: an
   // actor Modified() re-bakes the shadow maps at the scene's update interval
   // and re-uploads nothing.
-  if ((hi > lo || layoutChanged || rangeChanged) && castsShadow() && actor())
+  if ((hi > lo || layoutChanged || rangeChanged || shapeChanged) && castsShadow() && actor())
     actor()->Modified();
   if (!m_core)
     return;

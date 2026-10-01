@@ -122,9 +122,10 @@ struct StreamStats {
 //   * Shadows. Streamed writes bump no MTime, so they would never re-bake a
 //     shadow map on their own. A node that casts (GraphicsNode::setCastsShadow,
 //     the default here) therefore marks its actor modified when an apply
-//     changes what it draws -- points written, a relayout, a new draw range --
-//     and the scene's baker re-bakes it at its update interval (nothing is
-//     re-uploaded). RibbonNode and DrapedLinkNode are flat overlays and do not
+//     changes what it draws -- points written, a relayout, a new draw range, a
+//     subclass's markShapeChanged() (a DrapedLinkNode moved or restyled by
+//     uniforms) -- and the scene's baker re-bakes it at its update interval
+//     (nothing is re-uploaded). RibbonNode and DrapedLinkNode are flat overlays and do not
 //     cast by default, so streaming them never costs a bake.
 //   * Re-showing a hidden node costs ONE full upload: setVisible(false) removes
 //     the prop from the renderer, and VTK releases its buffers. Material
@@ -219,6 +220,15 @@ protected:
   bool commitDerivedBounds(const cvc::bounding_box &bounds);
   // Apply what is staged: inline on the owner thread, else posted to it.
   void requestApply();
+  // What this node draws changed without a point write, relayout or draw
+  // range -- a subclass that places its geometry with uniforms (DrapedLinkNode's
+  // endpoints, width, lift, heights). A CASTING node then marks its actor
+  // modified at the next apply, so the shadow follows; nothing is uploaded.
+  // markShapeChanged stages and applies; stageShapeChanged only stages (for a
+  // caller that holds a lock of its own and calls requestApply() after).
+  // Any thread.
+  void markShapeChanged();
+  void stageShapeChanged();
   void unpinReservedBounds();
   bool reservedBoundsPinned() const;
   // Owner/render thread only, e.g. from beforeComputeBounds(): replace the box
@@ -262,6 +272,7 @@ private:
   std::size_t m_stagingCapacity = 0;
   std::size_t m_dirtyLo = 0, m_dirtyHi = 0; // merged staged-but-unapplied point range
   bool m_drawRangePending = false;
+  bool m_shapePending = false; // markShapeChanged
   std::size_t m_drawFirst = 0, m_drawCount = kAllTriangles;
   bool m_boundsPending = false;
   bool m_boundsPinned = false;
