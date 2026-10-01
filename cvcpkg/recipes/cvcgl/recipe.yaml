@@ -57,7 +57,11 @@ recipe:
   # visibility/lifetime fixes, make_view_params, selectLOD stats, ortho view_params -- #496 --
   # on top of #483-#505). SceneNode gained virtuals, so the published +cvc.8 is ABI-stale.
   # 12, not 9: native cvcgl is already at +cvc.11 on the catalog; this keeps platforms monotonic.
-  cvc_revision: 12
+  # Bumped 12 -> 14: lockstep with libcvc 3.4.0+cvc.14 -- GraphicsNode::setPoseMatrix + the
+  # coalesced scene-bounds walk (#508), the fast per-frame pose path the change-driven demo
+  # overlays need on wasm (a setTransform there costs ~1.4 ms of posted-event drain). 14, not
+  # 13: native cvcgl is already at +cvc.13 on the catalog.
+  cvc_revision: 14
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
