@@ -51,6 +51,8 @@ bool codec_to_image_format(const std::string &codec, cvc::image::pixel_format &p
 cvc::image to_image(const frame_ptr &fp) {
   if (!fp)
     throw std::runtime_error("cvc::stream::to_image: null frame");
+  if (!fp->data)
+    throw std::runtime_error("cvc::stream::to_image: frame has null data");
   if (fp->format.kind != frame_kind::video_raw)
     throw std::runtime_error("cvc::stream::to_image: frame is not video_raw");
 

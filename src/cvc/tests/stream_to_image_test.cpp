@@ -52,6 +52,10 @@ std::shared_ptr<std::vector<std::uint8_t>> rgba_buf(int w, int h, std::uint8_t f
   return std::make_shared<std::vector<std::uint8_t>>(static_cast<std::size_t>(w) * h * 4, fill);
 }
 
+std::shared_ptr<std::vector<std::uint8_t>> packed_buf(int w, int h, int bpp, std::uint8_t fill) {
+  return std::make_shared<std::vector<std::uint8_t>>(static_cast<std::size_t>(w) * h * bpp, fill);
+}
+
 } // namespace
 
 // --------------------------------------------------------------------------
@@ -80,6 +84,23 @@ TEST(ImageAdoptCtor, MutationForksPrivateCopyLeavingSourceUntouched) {
   EXPECT_EQ((*buf)[0], 0x22); // source bytes untouched
   // A second data() does not re-fork (now owns a private buffer).
   EXPECT_EQ(img.data(), p);
+}
+
+TEST(ImageAdoptCtor, CopyDivergesOnMutationLeavingSibling) {
+  auto buf = rgba_buf(2, 2, 0x22);
+  cvc::image a(2, 2, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8, buf->data(), buf);
+  cvc::image b = a; // COW copy shares the alias
+
+  unsigned char *pa = a.data(); // a forks (adopted)
+  EXPECT_NE(pa, buf->data());
+  pa[0] = 0xEE;
+  // b still aliases the original, unmutated source bytes.
+  EXPECT_EQ(static_cast<const cvc::image &>(b).data(), buf->data());
+  EXPECT_EQ((*buf)[0], 0x22);
+  // b now forks on its own mutation.
+  unsigned char *pb = b.data();
+  EXPECT_NE(pb, buf->data());
+  EXPECT_NE(pb, pa);
 }
 
 TEST(ImageAdoptCtor, KeepaliveReleasedOnlyWhenLastAliasDrops) {
@@ -175,6 +196,41 @@ TEST(StreamToImage, RejectsShortBuffer) {
 TEST(StreamToImage, RejectsNullFrame) {
   frame_ptr fp;
   EXPECT_THROW(to_image(fp), std::runtime_error);
+}
+
+TEST(StreamToImage, RejectsNullData) {
+  // A malformed frame: null data but a claimed size big enough to pass the
+  // size check. Must throw, not silently yield an empty image.
+  auto f = std::make_shared<frame>();
+  f->data = nullptr;
+  f->size = static_cast<std::size_t>(4) * 4 * 4;
+  f->format.kind = frame_kind::video_raw;
+  f->format.codec = "rgba8";
+  f->format.w = 4;
+  f->format.h = 4;
+  frame_ptr fp(std::move(f));
+  EXPECT_THROW(to_image(fp), std::runtime_error);
+}
+
+TEST(StreamToImage, AliasesNonRgbaMatchingCodecs) {
+  struct Case {
+    const char *codec;
+    int bpp;
+    cvc::image::pixel_format pf;
+  };
+  const Case cases[] = {
+      {"rgb8", 3, cvc::image::pixel_format::RGB},
+      {"gray8", 1, cvc::image::pixel_format::GRAY},
+      {"graya8", 2, cvc::image::pixel_format::GRAY_ALPHA},
+  };
+  for (const auto &c : cases) {
+    auto buf = packed_buf(8, 4, c.bpp, 0x5a);
+    frame_ptr fp = make_video_frame(8, 4, c.codec, buf);
+    cvc::image img = to_image(fp);
+    EXPECT_EQ(img.format(), c.pf) << c.codec;
+    EXPECT_EQ(static_cast<const cvc::image &>(img).data(), buf->data()) << c.codec;
+    EXPECT_EQ(img.size_bytes(), static_cast<std::size_t>(8) * 4 * c.bpp) << c.codec;
+  }
 }
 
 TEST(StreamToImage, RoundTripsPixelsByReference) {
