@@ -61,7 +61,15 @@ recipe:
   # coalesced scene-bounds walk (#508), the fast per-frame pose path the change-driven demo
   # overlays need on wasm (a setTransform there costs ~1.4 ms of posted-event drain). 14, not
   # 13: native cvcgl is already at +cvc.13 on the catalog.
-  cvc_revision: 14
+  # Bumped 14 -> 15: lockstep with libcvc 3.4.0+cvc.15 -- the L3 streaming overlay geometry
+  # (#512: StreamingGeometryNode/RibbonNode/DrapedLinkNode with partial uploads, the
+  # HeightFieldTexture drape, coalesced scene events via SceneEventSink), StreamTextureBinding
+  # (#518), and the frame-cost fixes (perf/cvcgl-frame-costs): the metadata mirror that follows
+  # its node, CameraController's idle skip (SceneGraph::contentVersion), texture_modified_rows /
+  # _rect partial texture uploads, caster-aware shadow baking (setCastsShadow), and the cheaper
+  # scene-bounds walk deferred under hidden chrome. ABI-stale: SceneGraph/GraphicsNode/
+  # NullGraphicNode layouts changed, so the published +cvc.14 must not be mixed with this build.
+  cvc_revision: 15
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
