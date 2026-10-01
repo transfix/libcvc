@@ -10,9 +10,13 @@ What is proved here, beyond "the names exist":
   * the out-parameters arrive as return values (simplify -> (mesh, result)),
     and pooled builds match serial ones (content_hash of every rung);
   * the long calls RELEASE THE GIL: another Python thread keeps running for the
-    whole of build_mesh_pyramid / simplify / build_tiled_pyramids /
-    partition_parts / to_blob, measured as the largest gap between that
-    thread's ticks inside the call window;
+    whole of build_mesh_pyramid / simplify / simplify_progressive /
+    build_tiled_pyramids / partition_parts / content_hash /
+    build_image_pyramid and, in the store, write_mesh_pyramid / to_blob /
+    scene_reader(bytes) / open_verified / read_mesh_pyramid / bake_mesh_asset,
+    measured ONE C++ call at a time as the largest gap between that thread's
+    ticks inside the call window (index / has are metadata walks too short to
+    time; they release the GIL through the same guard);
   * Python callbacks run under the GIL from pool workers, and an exception a
     callback raises comes back out of the call that started it, type intact;
   * C++ failures map to the natural Python exception: ValueError for bad
@@ -22,6 +26,7 @@ What is proved here, beyond "the names exist":
 Runs under pytest or as a plain script (ctest: pycvc_lod).
 """
 
+import gc
 import hashlib
 import math
 import os
@@ -130,7 +135,13 @@ def test_simplify_progressive_matches_simplify():
         assert pycvc.content_hash(one) == pycvc.content_hash(r)
         assert np.array_equal(one.vertices(), r.vertices())
         assert one_res.world_error == res.world_error and res.out_tris == r.num_triangles()
-    print("  ok: simplify_progressive snapshots == simplify at each target")
+    # numpy integers are ints too (an array, or np.int64 items in a list)
+    for np_targets in (np.array(targets), [np.int64(t) for t in targets]):
+        np_rungs, _ = pycvc.simplify_progressive(g, np_targets)
+        assert [pycvc.content_hash(r) for r in np_rungs] == [pycvc.content_hash(r) for r in rungs]
+    _expect(TypeError, pycvc.simplify_progressive, g, [1000, 2.5])
+    _expect(OverflowError, pycvc.simplify_progressive, g, [-1])
+    print("  ok: simplify_progressive snapshots == simplify at each target (list or numpy)")
 
 
 # ── pyramids ─────────────────────────────────────────────────────────────────
@@ -282,6 +293,36 @@ def test_partition_parts_and_group_keys():
     comp = pycvc.partition_components(merged, 100.0, pp)
     assert len(comp) == 1 and comp[0].parts == ("component_0", "component_1")
     print("  ok: partition_parts / partition_components, suffix + callable group keys")
+
+
+def test_tile_geom_and_cell_outlive_the_tile():
+    """tile.geom / tile.cell are owned copies, not pointers into the tile: they
+    stay valid after the tile is gone -- a temporary from indexing a result, or
+    a tile the on_tile callback was handed -- even once its memory is reused."""
+    parts = _city_parts(nx=2, ny=1)
+    tile_tris = 12 * 12 * 2 + 24
+    g = pycvc.partition_parts(parts, 100.0)[1].geom  # that tile is freed here
+    c = pycvc.partition_parts(parts, 100.0)[1].cell
+    kept = []
+    tiles = pycvc.partition_parts(parts, 100.0)
+    pycvc.build_tiled_pyramids(tiles, on_tile=lambda i, t, p: kept.append((t.geom, t.cell)))
+    del tiles
+    gc.collect()
+    # churn the allocator with other tiles, so freed tile storage is reused
+    churn = [pycvc.partition_parts(_city_parts(nx=2, ny=1, n=3 + k), 100.0) for k in range(8)]
+    assert g.num_triangles() == tile_tris and g.vertices().min(axis=0)[0] == 100.0
+    assert (c.i, c.j) == (1, 0)
+    assert sorted((kc.i, kc.j) for _, kc in kept) == [(0, 0), (1, 0)]
+    assert [kg.num_triangles() for kg, _ in kept] == [tile_tris, tile_tris]
+    # a copy: editing it leaves the tile alone until it is assigned back
+    t = churn[0][0]
+    cell = t.cell
+    cell.i = 5
+    assert t.cell.i == 0
+    t.cell = cell
+    t.geom = _box(0.0, 0.0, 1.0, 1.0)
+    assert (t.cell.i, t.cell.j) == (5, 0) and t.geom.num_triangles() == 12
+    print("  ok: tile.geom / tile.cell are owned copies that outlive their tile")
 
 
 def test_tiled_pyramids_callback_from_pool_threads():
@@ -436,10 +477,12 @@ def test_store_exceptions():
 
 
 def _assert_releases_gil(label, fn):
-    """Run fn on a worker thread while this thread ticks in pure Python. If fn
-    held the GIL, this thread could not tick for the whole C++ call: the
-    largest gap between ticks inside the call window would be ~the call's
-    duration. Released, the ticks keep coming."""
+    """Run fn -- exactly ONE C++ call, its inputs built beforehand -- on a
+    worker thread while this thread ticks in pure Python. If the call held the
+    GIL, this thread could not tick for its whole duration: the largest gap
+    between ticks inside the call window would be ~the window itself. Released,
+    the ticks keep coming. (Several calls, or Python work, in one window would
+    let this thread tick between them and hide a call that held the GIL.)"""
     window = {}
 
     def run():
@@ -476,16 +519,37 @@ def test_long_calls_release_the_gil():
     _assert_releases_gil("build_tiled_pyramids",
                          lambda: pycvc.build_tiled_pyramids(tiles, pool=pool, on_tile=lambda i, t, p: None))
     _assert_releases_gil("simplify_progressive", lambda: pycvc.simplify_progressive(big, [8000, 2000, 500]))
-    if pycvc.HAVE_LOD_STORE:
-        pyr = pycvc.build_mesh_pyramid(big)
+    parts = [("t%d" % i, _terrain(32, 25.0 * (i % 8), 25.0 * (i // 8), 25.0)) for i in range(64)]
+    _assert_releases_gil("partition_parts", lambda: pycvc.partition_parts(parts, 50.0))
+    dense = _terrain(320)  # 204800 triangles
+    _assert_releases_gil("content_hash", lambda: pycvc.content_hash(dense))
+    img = pycvc.image(1536, 1024, pycvc.image.RGBA, pycvc.image.u8)
+    _assert_releases_gil("build_image_pyramid", lambda: pycvc.build_image_pyramid(img))
 
-        def bake():
-            w = pycvc.scene_writer(app)
-            for k in range(6):
-                w.write_mesh_pyramid("p%d" % k, pyr)
-            return w.to_blob()
 
-        _assert_releases_gil("scene_writer + to_blob", bake)
+def test_store_calls_release_the_gil():
+    if not pycvc.HAVE_LOD_STORE:
+        print("  skip: libcvc built without HDF5 (no scene.cvch5 store)")
+        return
+    # Three full-size rungs of a 524288-triangle mesh (the store does not care
+    # how a ladder was made): a ~57 MB container, so each call below runs for
+    # 50 ms or more.
+    big = _terrain(512)
+    pyr = pycvc.mesh_pyramid()
+    pyr.rungs = [big, big, big]
+    pyr.world_error_m = [0.0, 1.0, 2.0]
+    w = pycvc.scene_writer(app)
+    _assert_releases_gil("write_mesh_pyramid", lambda: w.write_mesh_pyramid("p", pyr))
+    blob = _assert_releases_gil("to_blob", w.to_blob)
+    r = _assert_releases_gil("scene_reader(bytes)", lambda: pycvc.scene_reader(app, blob))
+    sha = hashlib.sha256(blob).hexdigest()
+    _assert_releases_gil("open_verified", lambda: pycvc.scene_reader.open_verified(app, blob, sha))
+    back = _assert_releases_gil("read_mesh_pyramid", lambda: r.read_mesh_pyramid("p"))
+    assert back.rung_triangles() == [524288] * 3
+    src = _terrain(80)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "bake.cvch5")
+        assert _assert_releases_gil("bake_mesh_asset", lambda: pycvc.bake_mesh_asset(app, path, "g", src))
 
 
 def test_thread_pool_handles():

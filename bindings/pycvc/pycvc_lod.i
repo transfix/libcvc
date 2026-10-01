@@ -14,7 +14,10 @@
 //    cvc::geometry member reads as a Python value (a tuple of copies, a str) and
 //    assigns from any sequence. cvc::geometry and cvc::image copy-on-write, so a
 //    pyramid's `rungs` tuple shares the rung buffers rather than duplicating
-//    them -- but it IS a copy: mutate a rung and assign it back.
+//    them -- but it IS a copy: mutate a rung and assign it back. A tile's
+//    `geom` and `cell` are the same kind of copy, through properties (a
+//    %naturalvar class member would read as a pointer INTO the tile, dangling
+//    once the tile proxy is collected).
 //  * OUT-PARAMETERS become extra return values: simplify(mesh) returns
 //    (geometry, simplify_result); simplify_progressive returns (rungs, results).
 //  * BYTES cross as bytes: scene_writer.to_blob() returns `bytes`, and
@@ -66,6 +69,7 @@
 #include <cvc/lod/select.h>
 #include <cvc/lod/tiles.h>
 #include <cstdio>
+#include <cstring>
 #ifndef CVC_HDF5_DISABLED
 #include <cvc/lod/store.h>
 #endif
@@ -267,7 +271,8 @@ inline PyObject *bbox_tuple(const cvc::bounding_box &b) {
   $1 = tmp.data();
 }
 
-// Triangle-count targets from any sequence of non-negative ints.
+// Triangle-count targets from any sequence of non-negative ints, including
+// numpy integers (through __index__, which PyLong_AsUnsignedLongLong skips).
 %typemap(in) const std::vector<std::uint64_t> &targets (std::vector<std::uint64_t> tmp) {
   PyObject *seq = PySequence_Fast($input, "targets must be a sequence of ints");
   if (!seq)
@@ -275,7 +280,9 @@ inline PyObject *bbox_tuple(const cvc::bounding_box &b) {
   const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
   tmp.reserve(static_cast<std::size_t>(n));
   for (Py_ssize_t i = 0; i < n; ++i) {
-    const unsigned long long v = PyLong_AsUnsignedLongLong(PySequence_Fast_GET_ITEM(seq, i));
+    PyObject *as_int = PyNumber_Index(PySequence_Fast_GET_ITEM(seq, i));
+    const unsigned long long v = as_int ? PyLong_AsUnsignedLongLong(as_int) : 0;
+    Py_XDECREF(as_int);
     if (PyErr_Occurred()) {
       Py_DECREF(seq);
       SWIG_fail;
@@ -590,10 +597,10 @@ PYCVC_LOD_KWARGS(cvc::lod::build_image_pyramid)
     if len(args) > 1: self._pycvc_geom = args[1]
 %}
 %naturalvar cvc::lod::named_part::name;
-%naturalvar cvc::lod::tile::cell;
-%naturalvar cvc::lod::tile::geom;
 %naturalvar cvc::lod::tile::parts;
 %ignore cvc::lod::named_part::geom;          // raw pointer; the ctor sets it
+%ignore cvc::lod::tile::cell;                // -> the `cell` / `geom` copy properties below
+%ignore cvc::lod::tile::geom;
 %ignore cvc::lod::partition_params::origin;  // boost::array -> the `origin` property below
 %ignore cvc::lod::tile::bounds;              // opaque bounding_box -> the `bounds` property below
 %ignore cvc::lod::suffix_group_key;          // pass the suffix list as group_key instead
@@ -646,6 +653,12 @@ PYCVC_LOD_KWARGS(cvc::lod::build_tiled_pyramids)
 %}
 }
 %extend cvc::lod::tile {
+  // By value, so the result owns itself and outlives the tile (geometry is
+  // copy-on-write: the copy shares the tile's buffers).
+  cvc::geometry get_geom() const { return $self->geom; }
+  void set_geom(const cvc::geometry &g) { $self->geom = g; }
+  cvc::lod::cell_index get_cell() const { return $self->cell; }
+  void set_cell(const cvc::lod::cell_index &c) { $self->cell = c; }
   // World AABB of the tile's points as (minx, miny, minz, maxx, maxy, maxz).
   PyObject *bounds_box() const { return pycvc::bbox_tuple($self->bounds); }
   std::string __repr__() const {
@@ -654,6 +667,8 @@ PYCVC_LOD_KWARGS(cvc::lod::build_tiled_pyramids)
            ", parts=" + std::to_string($self->parts.size()) + ")";
   }
 %pythoncode %{
+    geom = property(get_geom, set_geom)
+    cell = property(get_cell, set_cell)
     bounds = property(bounds_box)
 %}
 }
@@ -686,10 +701,18 @@ PYCVC_LOD_KWARGS(cvc::lod::build_tiled_pyramids)
 %typemap(typecheck, precedence = SWIG_TYPECHECK_CHAR_PTR) (const unsigned char *bytes, std::size_t n) {
   $1 = (PyObject_CheckBuffer($input) && !PyUnicode_Check($input)) ? 1 : 0;
 }
-// Bytes out: the container image as one `bytes` object.
+// Bytes out: the container image as one `bytes` object. Only the allocation
+// holds the GIL: the copy, which page-faults a fresh buffer as large as the
+// container (as slow as to_blob itself), runs without it -- the object is not
+// visible to any other thread until this returns.
 %typemap(out) std::vector<unsigned char> cvc::lod::scene_writer::to_blob {
-  $result = PyBytes_FromStringAndSize(reinterpret_cast<const char *>($1.data()),
-                                      static_cast<Py_ssize_t>($1.size()));
+  $result = PyBytes_FromStringAndSize(nullptr, static_cast<Py_ssize_t>($1.size()));
+  if (!$result)
+    SWIG_fail;
+  if (!$1.empty()) {
+    pycvc::gil_release _pycvc_nogil;
+    std::memcpy(PyBytes_AS_STRING($result), $1.data(), $1.size());
+  }
 }
 
 // Readers and writers hold the app by reference: keep it alive on the proxy.
