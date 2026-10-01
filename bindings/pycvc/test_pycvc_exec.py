@@ -124,6 +124,31 @@ def test_value_marshaling_types():
     assert seen["type"] == "bool" and seen["val"] is True
 
 
+def test_bytes_marshaling_round_trip():
+    # A binary payload crosses Python -> DSL -> Python as native `bytes`, with no
+    # lossy UTF-8 coercion. Exercises both directions of the value_t marshaling:
+    # py_to_value (make-bytes return) and value_to_py (capture arg). The payload
+    # carries a NUL and a 0xFF byte so a str() round-trip (the pre-fix behavior)
+    # would corrupt it.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    blob = b"\x00\x01\xffhello\x00"
+    seen = {}
+
+    ex.register_fn("make-bytes", lambda: blob)
+
+    def capture(x):
+        seen["type"] = type(x).__name__
+        seen["val"] = x
+        return x
+
+    ex.register_fn("capture", capture)
+
+    ex.run("(capture (make-bytes))")
+    assert seen["type"] == "bytes", seen["type"]
+    assert seen["val"] == blob, seen["val"]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
