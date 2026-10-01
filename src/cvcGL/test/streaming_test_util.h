@@ -37,6 +37,23 @@
 
 namespace cvcgl_test {
 
+// NVIDIA's GLX driver throttles buffer swaps of an unmapped (offscreen) window
+// to about one per second while sync-to-vblank is on, which turned these tests
+// into minutes of wall time for a second of CPU. Call before the first GL
+// context; an explicit setting in the environment wins. (Mesa reads
+// vblank_mode; other drivers ignore both.)
+inline void disableSwapThrottle() {
+#ifdef _WIN32
+  if (!std::getenv("__GL_SYNC_TO_VBLANK"))
+    _putenv_s("__GL_SYNC_TO_VBLANK", "0");
+  if (!std::getenv("vblank_mode"))
+    _putenv_s("vblank_mode", "0");
+#else
+  setenv("__GL_SYNC_TO_VBLANK", "0", 0);
+  setenv("vblank_mode", "0", 0);
+#endif
+}
+
 inline int &failures() {
   static int n = 0;
   return n;

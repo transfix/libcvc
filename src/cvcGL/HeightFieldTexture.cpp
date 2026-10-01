@@ -59,6 +59,7 @@ void HeightFieldTexture::setHeights(std::shared_ptr<const std::vector<float>> he
   rangeLocked();
   m_fullPending = true;
   m_rowLo = m_rowHi = 0;
+  ++m_generation;
 }
 
 void HeightFieldTexture::setHeights(const std::vector<float> &heights) {
@@ -90,6 +91,7 @@ void HeightFieldTexture::updateRows(int row0, int rows, const float *heights) {
     m_rowLo = std::min(m_rowLo, row0);
     m_rowHi = std::max(m_rowHi, row0 + rows);
   }
+  ++m_generation;
 }
 
 double HeightFieldTexture::sample(double x, double y) const {

@@ -34,7 +34,11 @@
 #include <cvc/gl/HeightFieldTexture.h>
 #include <cvc/gl/RibbonNode.h>
 #include <memory>
+#include <vtkActor.h>
 #include <vtkCamera.h>
+#include <vtkPlane.h>
+#include <vtkPlaneCollection.h>
+#include <vtkPolyDataMapper.h>
 #include <vtkRenderer.h>
 
 using namespace cvcgl_test;
@@ -152,9 +156,16 @@ void testTrack(cvc::app &app, StreamingMapperKind kind) {
   flat(*twin, 1.0, 0.1, 0.1);
   long lit = 0;
   const long diff = parity(sr, *track, *twin, lit);
-  check(lit > 500 && diff >= 0 && diff <= lit / 100,
+  // The floor is the ribbon's own area in pixels (width x arc length at
+  // topView's H / 200 px per unit; 498 px here), with slack: a fixed 500 sat
+  // ABOVE that area and only passed where the rasteriser adds edge pixels
+  // (Linux, 584) -- Apple's software renderer lights exactly 498.
+  const double ppu = H / (2.0 * 100.0);
+  const double area = 2.0 * track->halfWidth() * track->arcLength() * ppu * ppu;
+  check(lit > 0.8 * area && diff >= 0 && diff <= lit / 100,
         "pixels match the wholesale GeometryNode render",
-        std::to_string(diff) + " of " + std::to_string(lit) + " lit pixels differ");
+        std::to_string(diff) + " of " + std::to_string(lit) + " lit pixels differ (area " +
+            std::to_string(static_cast<long>(area)) + " px)");
 
   if (kind != StreamingMapperKind::Classic)
     return;
@@ -412,6 +423,162 @@ void testLink(cvc::app &app, StreamingMapperKind kind) {
             h1.rowUploads - h0.rowUploads == 1 && h1.fullUploads == h0.fullUploads,
         "updateRows(5 rows) = one 2560-byte glTexSubImage2D", glcountStr(d));
   check(onLink(f, C - 30), "the link follows the patched terrain");
+
+  // The public shader-replacement API cannot take the drape away.
+  const int errors0 = ErrorCounter::errors();
+  link->clearShaderReplacements();
+  link->addVertexShaderReplacement("//VTK::Clip::Impl", "//VTK::Clip::Impl\n  // caller code\n");
+  f = grab(sr);
+  check(onLink(f, C) && onLink(f, C - 30) && ErrorCounter::errors() == errors0,
+        "still draped after clearShaderReplacements() + a caller replacement on its anchor");
+}
+
+// The link under clipping planes (what a parent's setClipChildren hands its
+// children through applyClipPlanes): VTK's clip distances must use the draped
+// point, not the template's (t, side, 0) near the origin. The planes are set on
+// the mapper directly, oriented the way VTK keeps geometry (normals INTO the
+// box), so the check is about the drape alone.
+vtkSmartPointer<vtkPlaneCollection> inwardBox(const cvc::bounding_box &b) {
+  auto pc = vtkSmartPointer<vtkPlaneCollection>::New();
+  const double o[6][3] = {{b.maxx, 0, 0}, {b.minx, 0, 0}, {0, b.maxy, 0},
+                          {0, b.miny, 0}, {0, 0, b.maxz}, {0, 0, b.minz}};
+  const double n[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+  for (int i = 0; i < 6; ++i) {
+    auto plane = vtkSmartPointer<vtkPlane>::New();
+    plane->SetOrigin(o[i][0], o[i][1], o[i][2]);
+    plane->SetNormal(n[i][0], n[i][1], n[i][2]);
+    pc->AddItem(plane);
+  }
+  return pc;
+}
+
+void testLinkClip(cvc::app &app, StreamingMapperKind kind) {
+  std::printf("link clip: DrapedLinkNode under clipping planes [%s]\n", kindName(kind));
+  for (const bool boxHoldsLink : {true, false}) {
+    // VTK's low-memory mapper has no clip planes at all: only "not wrongly
+    // clipped" is meaningful there.
+    if (!boxHoldsLink && kind != StreamingMapperKind::Classic)
+      continue;
+    SceneGraph sg(app, std::string("clip_") + kindName(kind) + (boxHoldsLink ? "_in" : "_out"));
+    sg.setDiagnosticChromeVisible(false);
+    auto hf = bumpField(64);
+    auto link = sg.getGraphicsRoot()->addGraphicsChild<DrapedLinkNode>("link", hf, 24, kind);
+    link->setStyle(2.0f, 1.0f, 0.15f, 0.35f, 1.0f);
+    link->setEndpoints(static_cast<float>(C - 50), static_cast<float>(C),
+                       static_cast<float>(C + 50), static_cast<float>(C));
+    // In: a box around the drawn link (not the origin). Out: a box around the
+    // template only.
+    const cvc::bounding_box box =
+        boxHoldsLink ? cvc::bounding_box(C - 100, C - 100, -50, C + 100, C + 100, 80)
+                     : cvc::bounding_box(-5, -5, -5, 5, 5, 5);
+    vtkActor::SafeDownCast(link->prop())->GetMapper()->SetClippingPlanes(inwardBox(box));
+    SceneRenderer sr(sg, W, H, /*offscreen=*/true);
+    sr.setBackground(0, 0, 0);
+    obliqueView(sr);
+    const Frame f = grab(sr);
+    int hits = 0;
+    for (double t : {0.1, 0.3, 0.5, 0.7, 0.9}) {
+      double p[3];
+      link->centerAt(t, p);
+      hits += hueNear(f, toPx(sr, p[0], p[1], p[2]), 3, 2) ? 1 : 0;
+    }
+    if (boxHoldsLink)
+      check(hits == 5, "a link inside the clip box is drawn", std::to_string(hits) + "/5 stations");
+    else
+      check(hits == 0 && litPixels(f) == 0,
+            "a link outside the clip box is clipped, though its template is inside",
+            std::to_string(hits) + "/5 stations");
+  }
+}
+
+// Terrain that arrives AFTER the link (heights changed under it): the derived
+// bounds follow, or VTK culls the link by its stale box.
+void testLinkTerrainLater(cvc::app &app, StreamingMapperKind kind) {
+  std::printf("link bounds follow the height field [%s]\n", kindName(kind));
+  SceneGraph sg(app, std::string("later_") + kindName(kind));
+  sg.setDiagnosticChromeVisible(false);
+  const int n = 32;
+  const double d = 200.0 / (n - 1);
+  auto hf = std::make_shared<HeightFieldTexture>(n, n, C - 100, C - 100, d, d); // flat, z = 0
+  auto link = sg.getGraphicsRoot()->addGraphicsChild<DrapedLinkNode>("link", hf, 24, kind);
+  link->setStyle(3.0f, 1.0f, 0.15f, 0.35f, 1.0f);
+  link->setEndpoints(static_cast<float>(C - 50), static_cast<float>(C), static_cast<float>(C + 50),
+                     static_cast<float>(C));
+  SceneRenderer sr(sg, W, H, /*offscreen=*/true);
+  sr.setBackground(0, 0, 0);
+  // Looking down from z = 500 with a far plane at 250: z 250..499 is in view,
+  // the link's flat-terrain box (z ~0) is not.
+  sr.setCamera(C, C, 500, C, C, 0, 0, 1, 0, 30.0, 1.0, 250.0);
+  sr.renderer()->GetActiveCamera()->ParallelProjectionOn();
+  sr.renderer()->GetActiveCamera()->SetParallelScale(100);
+  sr.render();
+  hf->setHeights(std::vector<float>(static_cast<std::size_t>(n) * n, 300.0f));
+  const Frame f = grab(sr);
+  double p[3];
+  link->centerAt(0.5, p);
+  check(sr.renderer()->GetNumberOfPropsRendered() == 1 &&
+            hueNear(f, toPx(sr, p[0], p[1], p[2]), 3, 2),
+        "drawn at its new height, not culled by the flat-terrain box",
+        "z " + std::to_string(p[2]) + ", maxz " + std::to_string(link->reservedBounds().maxz));
+}
+
+// A track that drives out of its reserved box stays drawn.
+void testTrackLeavesBox(cvc::app &app, StreamingMapperKind kind) {
+  std::printf("track leaves its box [%s]\n", kindName(kind));
+  SceneGraph sg(app, std::string("leave_") + kindName(kind));
+  sg.setDiagnosticChromeVisible(false);
+  auto track = sg.getGraphicsRoot()->addGraphicsChild<RibbonNode>(
+      "track", 8, 1.5f, cvc::bounding_box(C - 10, C - 10, -1, C + 10, C + 10, 1), kind);
+  flat(*track, 1.0, 0.1, 0.1);
+  for (int k = 0; k < 30; ++k)
+    track->append(static_cast<float>(C + 10 * k), static_cast<float>(C), 0.5f);
+  SceneRenderer sr(sg, W, H, /*offscreen=*/true);
+  sr.setBackground(0, 0, 0);
+  topView(sr, C + 250, C, 40); // the original box is well off-screen
+  const Frame f = grab(sr);
+  check(sr.renderer()->GetNumberOfPropsRendered() == 1 &&
+            hueNear(f, toPx(sr, C + 255, C, 0.5), 2, 0),
+        "the far end is drawn (the box grew with it), not frustum-culled");
+}
+
+// VTK's CPU picker hits the polydata, not what the shader draws: by default
+// the streaming overlays are not pickable at all.
+void testPicking(cvc::app &app, StreamingMapperKind kind) {
+  std::printf("picking [%s]\n", kindName(kind));
+  SceneGraph sg(app, std::string("pick_") + kindName(kind));
+  sg.setDiagnosticChromeVisible(false);
+  auto hf = bumpField(32);
+  auto link = sg.getGraphicsRoot()->addGraphicsChild<DrapedLinkNode>("link", hf, 12, kind);
+  link->setEndpoints(static_cast<float>(C - 50), static_cast<float>(C), static_cast<float>(C + 50),
+                     static_cast<float>(C));
+  auto route = sg.getGraphicsRoot()->addGraphicsChild<RibbonNode>("route", 32, 1.5f, kBounds, kind);
+  flat(*route, 1.0, 0.1, 0.1);
+  {
+    std::vector<float> xyz;
+    for (int k = 0; k < 10; ++k)
+      xyz.insert(xyz.end(),
+                 {static_cast<float>(C - 90 + 10 * k), static_cast<float>(C - 60), 0.5f});
+    route->assign(xyz.data(), 10);
+    route->assign(xyz.data(), 3); // replan shorter: centres 3..9 are a hidden tail
+  }
+  SceneRenderer sr(sg, W, H, /*offscreen=*/true);
+  sr.setBackground(0, 0, 0);
+  check(!link->pickable() && !route->pickable(), "not pickable by default");
+  double w[3];
+  topView(sr, 0.5, 0.0, 10); // where the link's undraped template sits
+  sr.render();
+  const auto t = toPx(sr, 0.5, 0.0, 0.0);
+  check(!sr.pickWorld(t[0], t[1], w), "nothing picked at the link's invisible template");
+  topView(sr, C, C, 100);
+  sr.render();
+  const auto tail = toPx(sr, C - 90 + 60, C - 60, 0.5);
+  check(!sr.pickWorld(tail[0], tail[1], w), "nothing picked on the route's hidden tail");
+  route->setPickable(true);
+  sr.render();
+  const auto shown = toPx(sr, C - 90 + 10, C - 60, 0.5);
+  check(route->pickable() && sr.pickWorld(shown[0], shown[1], w) &&
+            std::fabs(w[0] - (C - 80)) < 2.0,
+        "setPickable(true) opts a node in");
 }
 
 // ── all of it under shadows ─────────────────────────────────────────────────
@@ -499,6 +666,7 @@ void testShadows(cvc::app &app, StreamingMapperKind kind) {
 } // namespace
 
 int main() {
+  disableSwapThrottle();
   installErrorCounter();
   cvc::app app;
   if (renderAvailable(app)) {
@@ -512,6 +680,10 @@ int main() {
       testTrack(app, k);
       testSpine(app, k);
       testLink(app, k);
+      testLinkClip(app, k);
+      testLinkTerrainLater(app, k);
+      testTrackLeavesBox(app, k);
+      testPicking(app, k);
       testShadows(app, k);
     }
   }

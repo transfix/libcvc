@@ -20,6 +20,8 @@
 #ifndef CVC_GL_DRAPED_LINK_NODE_H
 #define CVC_GL_DRAPED_LINK_NODE_H
 
+#include <atomic>
+#include <cstdint>
 #include <cvc/gl/HeightFieldTexture.h>
 #include <cvc/gl/StreamingGeometryNode.h>
 #include <memory>
@@ -41,9 +43,13 @@ namespace gl {
 // uniforms -- setEndpoints() -- and NO upload, however often it moves.
 //
 // The draping is spliced in with `#define vertexMC <draped>` ahead of VTK's
-// position code, which re-points every later use (VTK's own, and the shadow
-// baker's depth pass) at the draped point: vertexMC is a read-only input on the
-// classic mapper and a local on the low-memory one, and the #define covers both.
+// clipping and position code (at //VTK::Clip::Impl, which precedes
+// //VTK::PositionVC::Impl), so every later use -- the clip-plane distances of
+// a parent's setClipChildren, VTK's position code, the shadow baker's depth
+// pass -- sees the draped point: vertexMC is a read-only input on the classic
+// mapper and a local on the low-memory one, and the #define covers both. The
+// drape is an internal shader replacement (GeometryNode): a caller's own
+// replacements compose with it and clearShaderReplacements() keeps it.
 //
 // Colour and opacity are fragment uniforms (setStyle), unlit, so restyling a
 // link per frame (signal quality, jamming) does not bump the property MTime --
@@ -51,9 +57,12 @@ namespace gl {
 // actor to the translucent pass (a property change, made only when crossing 1).
 //
 // The template's own coordinates are near the origin, so the node always draws
-// with RESERVED bounds -- by default the height field's extent padded by the
-// width and lift -- or VTK would frustum-cull it. Call refreshReservedBounds()
-// after loading much taller terrain, or setReservedBounds() for your own box.
+// with RESERVED bounds or VTK would frustum-cull it. By default they are
+// DERIVED: the height field's extent padded by the width and lift, re-derived
+// when setStyle changes those and, lazily (when VTK next asks for the bounds,
+// so a culled link recovers too), whenever the height field's heights change.
+// setReservedBounds() pins your own box instead -- setStyle and height changes
+// then leave it alone -- until refreshReservedBounds() hands it back.
 class DrapedLinkNode : public StreamingGeometryNode {
 public:
   DrapedLinkNode(cvc::app &ctx, const std::string &statePath, const std::string &name,
@@ -66,7 +75,8 @@ public:
   // Half width and lift above the ground (world units), colour and opacity.
   // Any thread; uniforms (see the class note on opacity).
   void setStyle(float halfWidth, float lift, float r, float g, float b, float opacity = 1.0f);
-  // Re-derive the reserved bounds from the height field's current extent.
+  // Re-derive the reserved bounds from the height field's current extent, and
+  // un-pin a box set with setReservedBounds(). Any thread.
   void refreshReservedBounds();
 
   int stations() const { return m_stations; }
@@ -77,6 +87,7 @@ public:
 
 protected:
   void beforeDraw(vtkRenderer *renderer) override;
+  void beforeComputeBounds() override;
   void updateShaderProgram(vtkShaderProgram *program) override;
 
 private:
@@ -88,6 +99,8 @@ private:
   float m_a[2] = {0, 0}, m_b[2] = {0, 0};
   float m_half = 1.0f, m_lift = 0.5f;
   bool m_translucent = false;
+  // HeightFieldTexture::generation() the derived bounds were last taken at.
+  std::atomic<std::uint64_t> m_seenGeneration{0};
 };
 
 } // namespace gl

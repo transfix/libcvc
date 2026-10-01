@@ -666,8 +666,8 @@ void GeometryNode::setDepthOffset(double units) {
 void GeometryNode::addVertexShaderReplacement(const std::string &original,
                                               const std::string &replacement) {
   runOnMainThread([this, original, replacement]() {
-    if (m_actor && m_actor->GetShaderProperty())
-      m_actor->GetShaderProperty()->AddVertexShaderReplacement(original, true, replacement, false);
+    m_userShaderRepl[{0, original}] = replacement;
+    installShaderReplacement({0, original});
     if (SceneGraph *sg = getSceneGraph())
       sg->requestRender();
   });
@@ -676,9 +676,8 @@ void GeometryNode::addVertexShaderReplacement(const std::string &original,
 void GeometryNode::addFragmentShaderReplacement(const std::string &original,
                                                 const std::string &replacement) {
   runOnMainThread([this, original, replacement]() {
-    if (m_actor && m_actor->GetShaderProperty())
-      m_actor->GetShaderProperty()->AddFragmentShaderReplacement(original, true, replacement,
-                                                                 false);
+    m_userShaderRepl[{1, original}] = replacement;
+    installShaderReplacement({1, original});
     if (SceneGraph *sg = getSceneGraph())
       sg->requestRender();
   });
@@ -686,13 +685,63 @@ void GeometryNode::addFragmentShaderReplacement(const std::string &original,
 
 void GeometryNode::clearShaderReplacements() {
   runOnMainThread([this]() {
+    m_userShaderRepl.clear();
     if (m_actor && m_actor->GetShaderProperty()) {
       m_actor->GetShaderProperty()->ClearAllVertexShaderReplacements();
       m_actor->GetShaderProperty()->ClearAllFragmentShaderReplacements();
     }
+    // The subclass's own replacements are not the caller's to clear.
+    for (const auto &kv : m_internalShaderRepl)
+      installShaderReplacement(kv.first);
     if (SceneGraph *sg = getSceneGraph())
       sg->requestRender();
   });
+}
+
+void GeometryNode::addInternalVertexShaderReplacement(const std::string &anchor,
+                                                      const std::string &text) {
+  m_internalShaderRepl[{0, anchor}] = text;
+  installShaderReplacement({0, anchor});
+}
+
+void GeometryNode::addInternalFragmentShaderReplacement(const std::string &anchor,
+                                                        const std::string &text) {
+  m_internalShaderRepl[{1, anchor}] = text;
+  installShaderReplacement({1, anchor});
+}
+
+void GeometryNode::installShaderReplacement(const ShaderReplKey &key) {
+  vtkShaderProperty *sp = m_actor ? m_actor->GetShaderProperty() : nullptr;
+  if (!sp)
+    return;
+  const std::string &anchor = key.second;
+  const auto in = m_internalShaderRepl.find(key);
+  const auto user = m_userShaderRepl.find(key);
+  if (in == m_internalShaderRepl.end() && user == m_userShaderRepl.end()) {
+    if (key.first == 0)
+      sp->ClearVertexShaderReplacement(anchor, true);
+    else
+      sp->ClearFragmentShaderReplacement(anchor, true);
+    return;
+  }
+  // vtkShaderProperty keeps ONE replacement per anchor, so compose: the
+  // subclass's text first, then the caller's applied to the anchor that text
+  // re-emits -- exactly what applying the two in turn to the shader would do.
+  std::string text;
+  if (in != m_internalShaderRepl.end()) {
+    text = in->second;
+    if (user != m_userShaderRepl.end()) {
+      const std::size_t pos = text.find(anchor);
+      if (pos != std::string::npos)
+        text.replace(pos, anchor.size(), user->second);
+    }
+  } else {
+    text = user->second;
+  }
+  if (key.first == 0)
+    sp->AddVertexShaderReplacement(anchor, true, text, false);
+  else
+    sp->AddFragmentShaderReplacement(anchor, true, text, false);
 }
 
 void GeometryNode::disableCoordinateShiftScale() {

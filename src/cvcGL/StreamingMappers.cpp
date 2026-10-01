@@ -74,6 +74,8 @@ void StreamingMapperCore::clampedRange(vtkIdType nTris, vtkIdType &first, vtkIdT
 vtkStandardNewMacro(StreamingPolyDataMapper);
 
 void StreamingPolyDataMapper::ComputeBounds() {
+  if (Core.beforeBounds)
+    Core.beforeBounds();
   if (Core.reservedBounds) {
     std::memcpy(this->Bounds, Core.bounds, sizeof(Core.bounds));
     return;
@@ -200,6 +202,8 @@ StreamingLowMemoryPolyDataMapper::StreamingLowMemoryPolyDataMapper() {
 }
 
 void StreamingLowMemoryPolyDataMapper::ComputeBounds() {
+  if (Core.beforeBounds)
+    Core.beforeBounds();
   if (Core.reservedBounds) {
     std::memcpy(this->Bounds, Core.bounds, sizeof(Core.bounds));
     return;

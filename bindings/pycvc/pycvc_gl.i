@@ -38,6 +38,8 @@ if _sys.platform == "win32":
 %{
 #include <cvc/core/exception.h> // the %import'd %exception block catches cvc::exception
 #include <any>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <stdexcept>
 #include <cvc/gl/SceneNode.h>
@@ -313,6 +315,10 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::SceneNode::propagateVisible;
 %ignore cvc::gl::SceneNode::ancestorVisibilityChanged;
 %ignore cvc::gl::SceneNode::pushVisible;
+// The attach hook is C++ plumbing (a streaming node flushes staged writes from
+// it); a Python override would run on whatever thread attaches the node.
+// Unqualified so the director classes' inherited copies are skipped too.
+%ignore onSceneGraphChanged;
 %include "cvc/gl/SceneNode.h"
 
 // ── GraphicsNode: keep transform / material / label; ignore VTK/any/templates ─
@@ -488,6 +494,8 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::GeometryNode::mapper;
 %ignore cvc::gl::GeometryNode::polyData;
 %ignore cvc::gl::GeometryNode::bindShaderTextures;
+%ignore cvc::gl::GeometryNode::addInternalVertexShaderReplacement;
+%ignore cvc::gl::GeometryNode::addInternalFragmentShaderReplacement;
 // Replace the std::vector<double> updateVertices with a numpy-direct one (below) so
 // the per-frame deform path reads the buffer directly instead of via .tolist().
 %ignore cvc::gl::GeometryNode::updateVertices(const std::vector<double> &);
@@ -584,8 +592,80 @@ static std::vector<float> pycvc_gl_floats(PyObject *obj, const char *what) {
   Py_DECREF(seq);
   return out;
 }
-// A flat list of non-negative integer indices from any sequence of ints.
+// One integer element of a buffer, signed or not, read without aliasing.
+template <typename S, typename U>
+static void pycvc_gl_read_int(const unsigned char *at, bool isSigned, long long &sv,
+                              unsigned long long &uv) {
+  if (isSigned) {
+    S t;
+    std::memcpy(&t, at, sizeof t);
+    sv = static_cast<long long>(t);
+  } else {
+    U t;
+    std::memcpy(&t, at, sizeof t);
+    uv = static_cast<unsigned long long>(t);
+  }
+}
+// A flat list of non-negative 32-bit indices: an integer buffer (a numpy
+// int/uint array of any width, C-contiguous) or any sequence of integers
+// (Python ints or anything with __index__, e.g. numpy scalars).
 static std::vector<std::uint32_t> pycvc_gl_indices(PyObject *obj, const char *what) {
+  if (PyObject_CheckBuffer(obj)) {
+    Py_buffer view;
+    if (PyObject_GetBuffer(obj, &view, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) == 0) {
+      const char *fmt = view.format ? view.format : "B";
+      char f = fmt[0];
+      if (f == '<' || f == '=' || f == '@')
+        f = fmt[1];
+      const bool isSigned = f == 'b' || f == 'h' || f == 'i' || f == 'l' || f == 'q' || f == 'n';
+      const bool isUnsigned =
+          f == 'B' || f == 'H' || f == 'I' || f == 'L' || f == 'Q' || f == 'N';
+      if ((isSigned || isUnsigned) && view.itemsize > 0 && view.itemsize <= 8) {
+        const Py_ssize_t n = view.len / view.itemsize;
+        std::vector<std::uint32_t> out(static_cast<std::size_t>(n));
+        const unsigned char *bytes = static_cast<const unsigned char *>(view.buf);
+        for (Py_ssize_t i = 0; i < n; ++i) {
+          long long sv = 0;
+          unsigned long long uv = 0;
+          const unsigned char *at = bytes + i * view.itemsize;
+          switch (view.itemsize) {
+          case 1:
+            pycvc_gl_read_int<std::int8_t, std::uint8_t>(at, isSigned, sv, uv);
+            break;
+          case 2:
+            pycvc_gl_read_int<std::int16_t, std::uint16_t>(at, isSigned, sv, uv);
+            break;
+          case 4:
+            pycvc_gl_read_int<std::int32_t, std::uint32_t>(at, isSigned, sv, uv);
+            break;
+          default:
+            pycvc_gl_read_int<std::int64_t, std::uint64_t>(at, isSigned, sv, uv);
+            break;
+          }
+          if (isSigned) {
+            if (sv < 0 || sv > 0xffffffffLL) {
+              PyBuffer_Release(&view);
+              throw std::invalid_argument(std::string(what) + ": element " + std::to_string(i) +
+                                          " is not a 32-bit index");
+            }
+            uv = static_cast<unsigned long long>(sv);
+          } else if (uv > 0xffffffffULL) {
+            PyBuffer_Release(&view);
+            throw std::invalid_argument(std::string(what) + ": element " + std::to_string(i) +
+                                        " is not a 32-bit index");
+          }
+          out[static_cast<std::size_t>(i)] = static_cast<std::uint32_t>(uv);
+        }
+        PyBuffer_Release(&view);
+        return out;
+      }
+      PyBuffer_Release(&view);
+      if (f == 'f' || f == 'd' || f == 'e')
+        throw std::invalid_argument(std::string(what) + ": indices must be integers, not floats");
+    } else {
+      PyErr_Clear();
+    }
+  }
   PyObject *seq = PySequence_Fast(obj, "expected a sequence");
   if (!seq) {
     PyErr_Clear();
@@ -594,8 +674,12 @@ static std::vector<std::uint32_t> pycvc_gl_indices(PyObject *obj, const char *wh
   const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
   std::vector<std::uint32_t> out(static_cast<std::size_t>(n));
   for (Py_ssize_t i = 0; i < n; ++i) {
-    const unsigned long v = PyLong_AsUnsignedLong(PySequence_Fast_GET_ITEM(seq, i));
-    if (PyErr_Occurred() || v > 0xffffffffUL) {
+    // __index__ first: numpy integer scalars are not int subclasses, and
+    // PyLong_AsUnsignedLongLong would reject them.
+    PyObject *idx = PyNumber_Index(PySequence_Fast_GET_ITEM(seq, i));
+    const unsigned long long v = idx ? PyLong_AsUnsignedLongLong(idx) : 0ULL;
+    Py_XDECREF(idx);
+    if (!idx || PyErr_Occurred() || v > 0xffffffffULL) {
       PyErr_Clear();
       Py_DECREF(seq);
       throw std::invalid_argument(std::string(what) + ": element " + std::to_string(i) +
@@ -641,6 +725,12 @@ static PyObject *pycvc_gl_stream_stats(const cvc::gl::StreamStats &s) {
 %ignore cvc::gl::StreamingGeometryNode::streamStats;       // -> stream_stats() dict
 %ignore cvc::gl::StreamingGeometryNode::getBoundingBox;    // opaque bbox (get_bounding_box above)
 %ignore cvc::gl::StreamingGeometryNode::relayout;
+%ignore cvc::gl::StreamingGeometryNode::growReservedBounds;
+%ignore cvc::gl::StreamingGeometryNode::stageDerivedBounds;
+%ignore cvc::gl::StreamingGeometryNode::unpinReservedBounds;
+%ignore cvc::gl::StreamingGeometryNode::reservedBoundsPinned;
+%ignore cvc::gl::StreamingGeometryNode::setDerivedBoundsNow;
+%ignore cvc::gl::StreamingGeometryNode::beforeComputeBounds;
 %ignore cvc::gl::StreamingGeometryNode::beforeDraw;
 %ignore cvc::gl::StreamingGeometryNode::updateShaderProgram;
 %include "cvc/gl/StreamingGeometryNode.h"
@@ -693,6 +783,7 @@ static PyObject *pycvc_gl_stream_stats(const cvc::gl::StreamStats &s) {
 %ignore cvc::gl::HeightFieldTexture::extent;     // opaque bbox -> 6-tuple below
 %ignore cvc::gl::HeightFieldTexture::prepare;    // render-thread VTK plumbing
 %ignore cvc::gl::HeightFieldTexture::texture;
+%ignore cvc::gl::HeightFieldTexture::generation; // std::uint64_t (no stdint.i here)
 %include "cvc/gl/HeightFieldTexture.h"
 %extend cvc::gl::HeightFieldTexture {
   // nx * ny heights, row-major (row j along x at y0 + j*dy).
@@ -1468,11 +1559,42 @@ def _typed_node(sg, name):
   // Connect a Python callable to the scene's graphics-changed signal (fires when
   // a node is added or removed) — Python functions as scene callbacks.
   void on_graphics_changed(std::function<void()> cb) { $self->graphicsChanged.connect(cb); }
-  // postEventCoalesced keyed by a Python object's identity: at most one `cb`
-  // per key per processEvents(), the latest posted.
-  void post_event_coalesced(PyObject *key, std::function<void()> cb) {
-    $self->postEventCoalesced(static_cast<const void *>(key), cb);
+  // postEventCoalesced from Python -- see post_event_coalesced (pythoncode
+  // below), which picks one of these two by the key's type.
+  //
+  // A scene NODE key coalesces by the C++ node, so every proxy of one node is
+  // one key (SWIG hands out a fresh proxy per lookup). The pending callback
+  // owns a reference to the node, so its address cannot be freed and reused by
+  // another node while the slot waits.
+  void _post_event_coalesced_node(std::shared_ptr<cvc::gl::SceneNode> node,
+                                  std::function<void()> cb) {
+    if (!node)
+      throw std::invalid_argument("post_event_coalesced: null node key");
+    const void *key = node.get();
+    $self->postEventCoalesced(key, [node, cb]() { cb(); });
   }
+  // Any other key coalesces by object identity. The pending callback owns a
+  // strong reference to the key, so the object cannot be freed -- and its
+  // address handed to a different key object -- while the slot waits.
+  void _post_event_coalesced_obj(PyObject *key, std::function<void()> cb) {
+    Py_INCREF(key);
+    std::shared_ptr<PyObject> hold(key, [](PyObject *p) {
+      PyGILState_STATE g = PyGILState_Ensure();
+      Py_DECREF(p);
+      PyGILState_Release(g);
+    });
+    $self->postEventCoalesced(static_cast<const void *>(key), [hold, cb]() { cb(); });
+  }
+  %pythoncode %{
+    def post_event_coalesced(self, key, cb):
+        """Post `cb` to run on the scene's owner thread at the next processEvents(),
+        coalesced by `key`: at most one callback per key per drain, the latest
+        posted. A scene node key means "this node" (any proxy of it); any other
+        object is compared by identity and kept alive until its slot drains."""
+        if isinstance(key, SceneNode):
+            return self._post_event_coalesced_node(key, cb)
+        return self._post_event_coalesced_obj(key, cb)
+  %}
 
   // ── streaming overlays (StreamingGeometryNode.h) ─────────────────────────
   // A generic streaming mesh: capacity_points points (all at the origin until

@@ -28,7 +28,6 @@
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
-#include <vtkShaderProperty.h>
 
 namespace cvc {
 namespace gl {
@@ -90,26 +89,24 @@ DrapedLinkNode::DrapedLinkNode(cvc::app &ctx, const std::string &statePath, cons
   }
   writePoints(0, tmpl.data(), 2 * static_cast<std::size_t>(stations));
 
-  // Not attached yet, so the shader property is set directly. The #define
-  // follows the draped point into VTK's position code and the shadow baker.
-  vtkShaderProperty *sp = actor()->GetShaderProperty();
-  sp->AddVertexShaderReplacement("//VTK::PositionVC::Dec", true, drapeDeclarations(), false);
-  sp->AddVertexShaderReplacement("//VTK::PositionVC::Impl", true,
-                                 "vec4 cvcLinkMC = cvc_link_drape(vertexMC);\n"
-                                 "#define vertexMC cvcLinkMC\n"
-                                 "  //VTK::PositionVC::Impl\n",
-                                 false);
+  // The drape goes in at //VTK::Clip::Impl, the earliest point after the
+  // low-memory mapper declares vertexMC (//VTK::CustomBegin::Impl): the #define
+  // then re-points the clip-plane distances, VTK's position code and the
+  // shadow baker at the draped point. Internal replacements (GeometryNode), so
+  // a caller's replacements compose with them instead of evicting them.
+  addInternalVertexShaderReplacement("//VTK::PositionVC::Dec", drapeDeclarations());
+  addInternalVertexShaderReplacement("//VTK::Clip::Impl",
+                                     "vec4 cvcLinkMC = cvc_link_drape(vertexMC);\n"
+                                     "#define vertexMC cvcLinkMC\n"
+                                     "  //VTK::Clip::Impl\n");
   // Flat, unlit colour from uniforms (after VTK declares the colour terms).
-  sp->AddFragmentShaderReplacement("//VTK::Color::Dec", true,
-                                   "//VTK::Color::Dec\nuniform vec3 cvcLinkColor;\n"
-                                   "uniform float cvcLinkOpacity;\n",
-                                   false);
-  sp->AddFragmentShaderReplacement("//VTK::Color::Impl", true,
-                                   "//VTK::Color::Impl\n"
-                                   "  ambientColor = cvcLinkColor;\n"
-                                   "  diffuseColor = vec3(0.0);\n"
-                                   "  opacity = cvcLinkOpacity;\n",
-                                   false);
+  addInternalFragmentShaderReplacement("//VTK::Color::Dec",
+                                       "//VTK::Color::Dec\nuniform vec3 cvcLinkColor;\n"
+                                       "uniform float cvcLinkOpacity;\n");
+  addInternalFragmentShaderReplacement("//VTK::Color::Impl", "//VTK::Color::Impl\n"
+                                                             "  ambientColor = cvcLinkColor;\n"
+                                                             "  diffuseColor = vec3(0.0);\n"
+                                                             "  opacity = cvcLinkOpacity;\n");
   setSpecular(0.0); // no highlight on a flat overlay
 
   setUniform(HeightFieldTexture::originName(), static_cast<float>(m_heights->x0()),
@@ -118,6 +115,7 @@ DrapedLinkNode::DrapedLinkNode(cvc::app &ctx, const std::string &statePath, cons
              static_cast<float>(m_heights->dy()), 0.0f);
   setUniform("cvcLinkA", 0.0f, 0.0f, 0.0f);
   setUniform("cvcLinkB", 0.0f, 0.0f, 0.0f);
+  m_seenGeneration = m_heights->generation();
   setStyle(1.0f, 0.5f, 0.2f, 0.6f, 1.0f, 1.0f);
 }
 
@@ -147,7 +145,8 @@ void DrapedLinkNode::setStyle(float halfWidth, float lift, float r, float g, flo
   setUniform("cvcLinkLift", lift);
   setUniform("cvcLinkColor", r, g, b);
   setUniform("cvcLinkOpacity", opacity);
-  refreshReservedBounds();
+  // Width and lift move the derived box; a box the caller pinned stays put.
+  stageDerivedBounds(derivedBounds());
   if (crossed) {
     // Route the actor to the translucent pass (or back). A property change, so
     // only when crossing 1, never per frame.
@@ -169,7 +168,22 @@ cvc::bounding_box DrapedLinkNode::derivedBounds() const {
                            e.maxx + pad, e.maxy + pad, e.maxz + std::max(0.0f, lift) + 1.0);
 }
 
-void DrapedLinkNode::refreshReservedBounds() { setReservedBounds(derivedBounds()); }
+void DrapedLinkNode::refreshReservedBounds() {
+  m_seenGeneration = m_heights->generation();
+  unpinReservedBounds();
+  stageDerivedBounds(derivedBounds());
+}
+
+void DrapedLinkNode::beforeComputeBounds() {
+  // Heights changed since the box was derived (terrain loaded after the link
+  // was made, say): re-derive it now, before VTK culls by it. Here rather than
+  // in beforeDraw because a link whose stale box is out of view is never drawn.
+  const std::uint64_t gen = m_heights->generation();
+  if (gen == m_seenGeneration.load())
+    return;
+  m_seenGeneration = gen;
+  setDerivedBoundsNow(derivedBounds());
+}
 
 void DrapedLinkNode::centerAt(double t, double out[3]) const {
   float a[2], b[2], lift;

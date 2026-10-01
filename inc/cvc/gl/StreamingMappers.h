@@ -93,6 +93,10 @@ struct StreamingMapperCore {
   // the GL context current -- the place to create or refresh GL resources the
   // shader needs (a height-field texture). Cleared by the owning node's dtor.
   std::function<void(vtkRenderer *)> beforeDraw;
+  // Called at the start of ComputeBounds (on the thread asking VTK for the
+  // bounds -- the owner/render thread), before the reserved box is reported.
+  // Cleared by the owning node's dtor.
+  std::function<void()> beforeBounds;
 
   void markPoints(vtkIdType first, vtkIdType count);
   bool dirty() const { return dirtyHi > dirtyLo; }

@@ -106,7 +106,15 @@ struct StreamStats {
 //     shader sees the true coordinate. Fine for a local frame a few km across;
 //     use a node transform for a far-off origin.
 //   * Bounds come from the reserved box, never from the points: writes do not
-//     call Modified(), so VTK never re-walks them. Keep the content inside it.
+//     call Modified(), so VTK never re-walks them. Keep the content inside it
+//     (a RibbonNode grows its box to fit what it appends; a DrapedLinkNode
+//     derives its box from the height field).
+//   * NOT PICKABLE by default. VTK's CPU pickers (SceneRenderer::pickWorld's
+//     vtkCellPicker) intersect the polydata, not what the shader draws: the
+//     reserved-but-unwritten capacity, triangles outside the draw range and a
+//     DrapedLinkNode's undraped template would all be hit while the drawn
+//     overlay was missed. setPickable(true) opts in for a node whose drawn
+//     triangles ARE its polydata (no draw range, no vertex-shader placement).
 //   * Streamed writes do not trigger a shadow re-bake (VTK's baker watches
 //     MTimes, and writes bump none). Overlays drawn with shadows on cast stale
 //     shadows until something else causes a bake.
@@ -120,10 +128,20 @@ struct StreamStats {
 //     wholesale; they defeat streaming and are not meant for this node.
 //
 // Threading: writePoints / setDrawRange / setReservedBounds / setUniform are
-// callable from ANY thread. On the owner thread (or with no scene attached)
-// writes apply immediately; elsewhere they are applied by the next
-// processEvents(). The node must be owned by a std::shared_ptr (as every
-// addGraphicsChild node is): the queued apply is guarded by a weak_ptr.
+// callable from ANY thread. On the owner thread writes apply immediately;
+// elsewhere they are applied by the next processEvents(). With no scene
+// attached they are only STAGED -- nothing touches VTK on the caller's thread --
+// and are applied on the owner thread as soon as the node is attached. The
+// node must be owned by a std::shared_ptr (as every addGraphicsChild node is):
+// the queued apply is guarded by a weak_ptr.
+//
+// Known costs, deliberately left for later:
+//   * relayout() (a RibbonNode growing) rebuilds the vtkPolyData in the apply,
+//     on the owner thread, in O(capacity) -- size capacities so growth is rare.
+//   * setUniform takes effect at the next draw, a staged range at the next
+//     apply: an OFF-thread producer that changes both (RibbonNode's fractional
+//     clip and its draw range) can show one frame with the new uniforms over the
+//     old range. On the owner thread both land together.
 class StreamingGeometryNode : public GeometryNode {
 public:
   // setDrawRange count meaning "every triangle from firstTri on".
@@ -155,8 +173,15 @@ public:
   void setUniform(const std::string &name, float x, float y, float z);
 
   // The box VTK culls and clips this node by (and getBoundingBox()). Any thread.
+  // Setting it PINS it: a subclass that derives its own box (DrapedLinkNode)
+  // stops re-deriving it until asked to (DrapedLinkNode::refreshReservedBounds).
   void setReservedBounds(const cvc::bounding_box &bounds);
   cvc::bounding_box reservedBounds() const;
+
+  // Whether VTK's pickers may hit this node (default false; see the class
+  // note). Any thread.
+  void setPickable(bool pickable);
+  bool pickable() const;
 
   StreamStats streamStats() const;
 
@@ -174,11 +199,31 @@ protected:
   // subclasses that own their topology and grow it.
   void relayout(const StreamingLayout &layout);
 
+  // Reserved-bounds plumbing for subclasses. Any thread; staged and applied
+  // like a write. growReservedBounds unions `bounds` into the current box (a
+  // no-op when it already fits) and never pins; stageDerivedBounds replaces the
+  // box unless the caller pinned one with setReservedBounds (returns false
+  // then); unpinReservedBounds hands the box back to the subclass.
+  void growReservedBounds(const cvc::bounding_box &bounds);
+  bool stageDerivedBounds(const cvc::bounding_box &bounds);
+  void unpinReservedBounds();
+  bool reservedBoundsPinned() const;
+  // Owner/render thread only, e.g. from beforeComputeBounds(): replace the box
+  // the mapper reports right now (no apply round trip), unless pinned.
+  void setDerivedBoundsNow(const cvc::bounding_box &bounds);
+
   // Render thread, GL context current, at the start of every draw of this node.
   virtual void beforeDraw(vtkRenderer *renderer);
+  // Render/owner thread, each time VTK asks the mapper for its bounds (frustum
+  // culling, clipping range) -- also for a node that ends up culled, which is
+  // what makes it the place to re-derive bounds that may have gone stale.
+  virtual void beforeComputeBounds();
   // After the stored uniforms were pushed to a program about to draw this node
   // (every pass). Bind textures here (GeometryNode::bindShaderTextures).
   virtual void updateShaderProgram(vtkShaderProgram *program);
+
+  // Staged-but-unapplied work goes to the owner thread once a scene appears.
+  void onSceneGraphChanged() override;
 
 private:
   struct UniformValue {
@@ -189,6 +234,7 @@ private:
   void buildPolyData(const StreamingLayout &layout, const float *points, std::size_t nPoints);
   void scheduleApply();
   void applyPending();
+  bool hasPendingLocked() const;
   static void onUpdateShader(vtkObject *caller, unsigned long eid, void *clientData,
                              void *callData);
   void requestRenderIfAttached();
@@ -204,10 +250,16 @@ private:
   bool m_drawRangePending = false;
   std::size_t m_drawFirst = 0, m_drawCount = kAllTriangles;
   bool m_boundsPending = false;
+  bool m_boundsPinned = false;
   cvc::bounding_box m_bounds;
   std::unique_ptr<StreamingLayout> m_pendingLayout;
   std::size_t m_triangleCount = 0;
-  std::atomic<bool> m_applyPosted{false};
+  // The SceneGraph::postEventCoalesced key of this node's applies: the address
+  // of a private member, so no other producer can post under it (a node
+  // pointer would collide with anyone coalescing "per node").
+  const char m_applyKey = 0;
+  std::atomic<bool> m_pickable{false};
+  bool m_pickablePending = false; // guarded by m_mutex; applied with the rest
 
   // Draw-time uniforms, guarded by m_uniformMutex.
   mutable std::mutex m_uniformMutex;

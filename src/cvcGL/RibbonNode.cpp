@@ -22,8 +22,6 @@
 #include <cvc/gl/RibbonNode.h>
 #include <stdexcept>
 #include <string>
-#include <vtkActor.h>
-#include <vtkShaderProperty.h>
 
 namespace cvc {
 namespace gl {
@@ -74,24 +72,21 @@ RibbonNode::RibbonNode(cvc::app &ctx, const std::string &statePath, const std::s
   // The fractional cut of setVisibleCenters: the centre-line position of every
   // fragment, L = pointId / 2 interpolated across each segment's quad, against
   // two uniforms. The discard goes AFTER VTK's uniform-flow code (derivatives).
-  // Set straight on the shader property: the node is not attached yet.
-  vtkShaderProperty *sp = actor()->GetShaderProperty();
-  sp->AddVertexShaderReplacement("//VTK::PositionVC::Dec", true,
-                                 "//VTK::PositionVC::Dec\nout float cvcRibbonL;\n", false);
-  sp->AddVertexShaderReplacement("//VTK::PositionVC::Impl", true,
-                                 std::string("cvcRibbonL = float(") + pointIdGLSL() +
-                                     " / 2);\n  //VTK::PositionVC::Impl\n",
-                                 false);
-  sp->AddFragmentShaderReplacement("//VTK::PositionVC::Dec", true,
-                                   "//VTK::PositionVC::Dec\nin float cvcRibbonL;\n"
-                                   "uniform float cvcRibbonClipLo;\n"
-                                   "uniform float cvcRibbonClipHi;\n",
-                                   false);
-  sp->AddFragmentShaderReplacement(
-      "//VTK::UniformFlow::Impl", true,
+  // Internal replacements: a caller's add*ShaderReplacement on the same anchor
+  // composes with them, and clearShaderReplacements() leaves them in place.
+  addInternalVertexShaderReplacement("//VTK::PositionVC::Dec",
+                                     "//VTK::PositionVC::Dec\nout float cvcRibbonL;\n");
+  addInternalVertexShaderReplacement("//VTK::PositionVC::Impl",
+                                     std::string("cvcRibbonL = float(") + pointIdGLSL() +
+                                         " / 2);\n  //VTK::PositionVC::Impl\n");
+  addInternalFragmentShaderReplacement("//VTK::PositionVC::Dec",
+                                       "//VTK::PositionVC::Dec\nin float cvcRibbonL;\n"
+                                       "uniform float cvcRibbonClipLo;\n"
+                                       "uniform float cvcRibbonClipHi;\n");
+  addInternalFragmentShaderReplacement(
+      "//VTK::UniformFlow::Impl",
       "//VTK::UniformFlow::Impl\n"
-      "  if (cvcRibbonL < cvcRibbonClipLo || cvcRibbonL > cvcRibbonClipHi) discard;\n",
-      false);
+      "  if (cvcRibbonL < cvcRibbonClipLo || cvcRibbonL > cvcRibbonClipHi) discard;\n");
   std::lock_guard<std::mutex> lock(m_ribbonMutex);
   updateWindowLocked(); // nothing assigned: draws nothing
 }
@@ -185,6 +180,26 @@ void RibbonNode::writeCentersLocked(std::size_t first, std::size_t last) {
   writePoints(2 * first, m_scratch.data(), 2 * n);
 }
 
+void RibbonNode::fitBoundsLocked(std::size_t first, std::size_t last) {
+  if (last < first || last >= m_count)
+    return;
+  // A mitred vertex sits up to 2x halfWidth off its centre (computeVerticesLocked).
+  const double pad = 2.0 * std::fabs(static_cast<double>(m_half));
+  const float *p = &m_centers[3 * first];
+  double lo[3] = {p[0], p[1], p[2]}, hi[3] = {p[0], p[1], p[2]};
+  for (std::size_t k = first + 1; k <= last; ++k) {
+    p = &m_centers[3 * k];
+    for (int i = 0; i < 3; ++i) {
+      lo[i] = std::min(lo[i], static_cast<double>(p[i]));
+      hi[i] = std::max(hi[i], static_cast<double>(p[i]));
+    }
+  }
+  // Only ever grows, so a track that drives out of its box keeps all of it in
+  // view: what VTK culls and clips by is this box, never the points.
+  growReservedBounds(
+      cvc::bounding_box(lo[0] - pad, lo[1] - pad, lo[2], hi[0] + pad, hi[1] + pad, hi[2]));
+}
+
 void RibbonNode::growLocked(std::size_t minCenters) {
   if (minCenters <= m_capacity)
     return;
@@ -231,6 +246,7 @@ std::size_t RibbonNode::append(float x, float y, float z) {
     m_arc[k] = m_arc[k - 1] + std::sqrt(dx * dx + dy * dy + dz * dz);
   }
   m_count = k + 1;
+  fitBoundsLocked(k, k);
   // The new centre, plus the previous one re-mitred now that its outgoing
   // direction is known: 4 vertices (2 for the very first centre).
   writeCentersLocked(k == 0 ? 0 : k - 1, k);
@@ -257,6 +273,7 @@ void RibbonNode::assign(const float *xyz, std::size_t nCenters) {
   m_count = nCenters;
   m_visFirst = 0.0;
   m_visLast = kToEnd;
+  fitBoundsLocked(0, nCenters - 1);
   writeCentersLocked(0, nCenters - 1); // one sub-range upload of 2n points
   updateWindowLocked();
 }
@@ -279,8 +296,10 @@ void RibbonNode::clearCenters() {
 void RibbonNode::setHalfWidth(float halfWidth) {
   std::lock_guard<std::mutex> lock(m_ribbonMutex);
   m_half = halfWidth;
-  if (m_count)
+  if (m_count) {
+    fitBoundsLocked(0, m_count - 1);
     writeCentersLocked(0, m_count - 1);
+  }
 }
 
 } // namespace gl

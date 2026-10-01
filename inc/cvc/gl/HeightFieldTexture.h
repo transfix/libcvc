@@ -20,6 +20,7 @@
 #ifndef CVC_GL_HEIGHT_FIELD_TEXTURE_H
 #define CVC_GL_HEIGHT_FIELD_TEXTURE_H
 
+#include <atomic>
 #include <cstdint>
 #include <cvc/volume/bounding_box.h>
 #include <memory>
@@ -88,6 +89,10 @@ public:
   double sample(double x, double y) const;
   // XY extent of the grid; z spans the current heights.
   cvc::bounding_box extent() const;
+  // Bumped by every setHeights / updateRows: lets a consumer that derived
+  // something from the heights (a DrapedLinkNode's bounds) notice, cheaply,
+  // that it has gone stale. Any thread.
+  std::uint64_t generation() const { return m_generation.load(); }
 
   // Render thread, `window`'s context current: create the texture on first use
   // (or in a new context) and upload what changed. Returns the texture.
@@ -117,6 +122,7 @@ private:
   float m_hLo = 0.0f, m_hHi = 0.0f;                    // height range (rows only widen it)
   bool m_fullPending = true;
   int m_rowLo = 0, m_rowHi = 0; // pending row band [lo, hi)
+  std::atomic<std::uint64_t> m_generation{0};
   vtkSmartPointer<vtkTextureObject> m_texture;
   vtkOpenGLRenderWindow *m_context = nullptr;
   Stats m_stats;

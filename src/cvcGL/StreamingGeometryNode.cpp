@@ -79,6 +79,10 @@ StreamingGeometryNode::StreamingGeometryNode(cvc::app &ctx, const std::string &s
   m_uniformCb->SetCallback(&StreamingGeometryNode::onUpdateShader);
   mapper()->AddObserver(vtkCommand::UpdateShaderEvent, m_uniformCb);
   m_core->beforeDraw = [this](vtkRenderer *ren) { this->beforeDraw(ren); };
+  m_core->beforeBounds = [this]() { this->beforeComputeBounds(); };
+
+  // CPU pickers would hit the polydata, not what is drawn (see the header).
+  actor()->PickableOff();
 }
 
 StreamingGeometryNode::~StreamingGeometryNode() {
@@ -86,8 +90,10 @@ StreamingGeometryNode::~StreamingGeometryNode() {
   // later draw must not call back into freed state (cf. ~GeometryNode).
   if (mapper() && m_uniformCb)
     mapper()->RemoveObserver(m_uniformCb);
-  if (m_core)
+  if (m_core) {
     m_core->beforeDraw = nullptr;
+    m_core->beforeBounds = nullptr;
+  }
 }
 
 void StreamingGeometryNode::buildPolyData(const StreamingLayout &layout, const float *points,
@@ -192,9 +198,81 @@ void StreamingGeometryNode::setReservedBounds(const cvc::bounding_box &bounds) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_bounds = bounds;
     m_boundsPending = true;
+    m_boundsPinned = true;
   }
   scheduleApply();
 }
+
+void StreamingGeometryNode::growReservedBounds(const cvc::bounding_box &b) {
+  bool grew = false;
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    // Field by field: cvc::bounding_box's own union drops zero-volume boxes, and
+    // a flat ribbon's box is exactly that.
+    cvc::bounding_box u = m_bounds;
+    u.minx = std::min(u.minx, b.minx);
+    u.miny = std::min(u.miny, b.miny);
+    u.minz = std::min(u.minz, b.minz);
+    u.maxx = std::max(u.maxx, b.maxx);
+    u.maxy = std::max(u.maxy, b.maxy);
+    u.maxz = std::max(u.maxz, b.maxz);
+    grew = u.minx != m_bounds.minx || u.miny != m_bounds.miny || u.minz != m_bounds.minz ||
+           u.maxx != m_bounds.maxx || u.maxy != m_bounds.maxy || u.maxz != m_bounds.maxz;
+    if (grew) {
+      m_bounds = u;
+      m_boundsPending = true;
+    }
+  }
+  if (grew)
+    scheduleApply();
+}
+
+bool StreamingGeometryNode::stageDerivedBounds(const cvc::bounding_box &bounds) {
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_boundsPinned)
+      return false;
+    m_bounds = bounds;
+    m_boundsPending = true;
+  }
+  scheduleApply();
+  return true;
+}
+
+void StreamingGeometryNode::unpinReservedBounds() {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_boundsPinned = false;
+}
+
+bool StreamingGeometryNode::reservedBoundsPinned() const {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_boundsPinned;
+}
+
+void StreamingGeometryNode::setDerivedBoundsNow(const cvc::bounding_box &bounds) {
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_boundsPinned)
+      return;
+    m_bounds = bounds; // a pending apply re-sends this same (latest) box
+  }
+  if (m_core) {
+    double b[6];
+    toArray(bounds, b);
+    m_core->setReservedBounds(b);
+  }
+}
+
+void StreamingGeometryNode::setPickable(bool pickable) {
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_pickable = pickable;
+    m_pickablePending = true;
+  }
+  scheduleApply();
+}
+
+bool StreamingGeometryNode::pickable() const { return m_pickable.load(); }
 
 cvc::bounding_box StreamingGeometryNode::reservedBounds() const {
   std::lock_guard<std::mutex> lock(m_mutex);
@@ -260,6 +338,8 @@ const char *StreamingGeometryNode::pointIdGLSL() const {
 
 void StreamingGeometryNode::beforeDraw(vtkRenderer *) {}
 
+void StreamingGeometryNode::beforeComputeBounds() {}
+
 void StreamingGeometryNode::updateShaderProgram(vtkShaderProgram *) {}
 
 void StreamingGeometryNode::requestRenderIfAttached() {
@@ -267,30 +347,51 @@ void StreamingGeometryNode::requestRenderIfAttached() {
     sg->requestRender();
 }
 
+void StreamingGeometryNode::onSceneGraphChanged() {
+  if (!getSceneGraph())
+    return;
+  bool pending = false;
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    pending = hasPendingLocked();
+  }
+  if (pending)
+    scheduleApply(); // what was staged while unattached (or posted to a dead scene)
+}
+
+bool StreamingGeometryNode::hasPendingLocked() const {
+  return m_pendingLayout || m_dirtyHi > m_dirtyLo || m_boundsPending || m_drawRangePending ||
+         m_pickablePending;
+}
+
 void StreamingGeometryNode::scheduleApply() {
   SceneGraph *sg = getSceneGraph();
-  if (!sg || sg->onOwnerThread()) {
-    applyPending(); // owner thread (or no scene yet): nothing to marshal
+  if (!sg)
+    return; // unattached: staged only, applied on the owner thread at attach
+  if (sg->onOwnerThread()) {
+    applyPending(); // owner thread: nothing to marshal
     return;
   }
-  // One apply in flight per node. A write that races the apply's start either
-  // lands in it (it reads the staging under the lock) or posts the next one.
-  if (m_applyPosted.exchange(true))
-    return;
+  // Every off-thread change posts; the scene keeps ONE slot per key until it
+  // drains, and the apply reads whatever is staged when it runs. No "already
+  // posted" flag: a slot that never runs (its scene destroyed first) must not
+  // stop the next change from posting again.
   std::weak_ptr<SceneNode> weak = weak_from_this();
-  sg->postEventCoalesced(this, [weak]() {
+  sg->postEventCoalesced(&m_applyKey, [weak]() {
     if (auto self = weak.lock())
       static_cast<StreamingGeometryNode *>(self.get())->applyPending();
   });
 }
 
 void StreamingGeometryNode::applyPending() {
-  m_applyPosted.store(false);
-  bool layoutChanged = false, boundsChanged = false, rangeChanged = false;
+  bool layoutChanged = false, boundsChanged = false, rangeChanged = false, pickChanged = false;
+  bool pick = false;
   std::size_t lo = 0, hi = 0, drawFirst = 0, drawCount = kAllTriangles;
   cvc::bounding_box bounds;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (!hasPendingLocked())
+      return; // an earlier apply (inline, or another slot) already took it all
     if (m_pendingLayout) {
       // Topology change: rebuild the polydata (full upload at the next draw)
       // from every staged point.
@@ -318,8 +419,15 @@ void StreamingGeometryNode::applyPending() {
       m_drawRangePending = false;
       rangeChanged = true;
     }
+    if (m_pickablePending) {
+      pick = m_pickable.load();
+      m_pickablePending = false;
+      pickChanged = true;
+    }
   }
   ++m_applies;
+  if (pickChanged && actor())
+    actor()->SetPickable(pick ? 1 : 0);
   if (!m_core)
     return;
   if (hi > lo)

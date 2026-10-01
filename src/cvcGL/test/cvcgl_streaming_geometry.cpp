@@ -29,18 +29,22 @@
 
 #include <atomic>
 #include <cmath>
+#include <cvc/gl/DrapedLinkNode.h>
 #include <cvc/gl/HeightFieldTexture.h>
 #include <cvc/gl/RibbonNode.h>
 #include <cvc/gl/StreamingMappers.h>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <vtkActor.h>
 #include <vtkOpenGLLowMemoryPolyDataMapper.h>
+#include <vtkOpenGLShaderProperty.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkTextureObject.h>
 #include <vtk_glad.h>
 
 using namespace cvcgl_test;
+using cvc::gl::DrapedLinkNode;
 using cvc::gl::HeightFieldTexture;
 using cvc::gl::RibbonNode;
 using cvc::gl::SceneGraph;
@@ -95,6 +99,185 @@ void testCoalescedEvents(cvc::app &app) {
   log.clear();
   sg.processEvents();
   check(log.empty(), "nothing left behind");
+}
+
+// ── a node's apply key is its own ───────────────────────────────────────────
+// Anyone else coalescing "per node" (the SceneGraph doc once suggested the
+// node's `this`) used to replace the node's own apply, which then never ran
+// again: every later off-thread write was staged and never applied.
+void testApplyKeyIsPrivate(cvc::app &app) {
+  std::printf("apply key: a caller coalescing by the node pointer does not evict the apply\n");
+  SceneGraph sg(app, "applykey");
+  auto rib = sg.getGraphicsRoot()->addGraphicsChild<RibbonNode>(
+      "track", 64, 1.0f, cvc::bounding_box(-100, -100, -1, 100, 100, 1),
+      StreamingMapperKind::Classic);
+  const std::uint64_t a0 = rib->streamStats().applies;
+  int userRuns = 0;
+  std::thread([&]() {
+    rib->append(0, 0, 0);
+    sg.postEventCoalesced(rib.get(), [&userRuns]() { ++userRuns; });
+  }).join();
+  sg.processEvents();
+  check(userRuns == 1 && rib->streamStats().applies == a0 + 1,
+        "both ran: the caller's callback and the node's apply",
+        "user " + std::to_string(userRuns) + ", applies +" +
+            std::to_string(rib->streamStats().applies - a0));
+  for (int i = 1; i <= 5; ++i) {
+    std::thread([&]() { rib->append(static_cast<float>(i), 0, 0); }).join();
+    sg.processEvents();
+  }
+  check(rib->streamStats().applies == a0 + 6,
+        "and every later off-thread append is still applied (one apply per drain)",
+        "applies +" + std::to_string(rib->streamStats().applies - a0));
+}
+
+// ── unattached nodes, and slots their scene never ran ──────────────────────
+void testUnattachedAndDroppedSlot(cvc::app &app) {
+  std::printf("unattached writes stage only; a dead scene's slot cannot strand them\n");
+  StreamingLayout l;
+  l.capacity_points = 8;
+  l.triangles = {{{0, 1, 2}}};
+  l.reserved_bounds = cvc::bounding_box(-1, -1, -1, 1, 1, 1);
+  l.mapper = StreamingMapperKind::Classic;
+  auto node = std::make_shared<StreamingGeometryNode>(app, "stream_unattached.n", "n", l);
+  std::thread([&]() {
+    const float p[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    node->writePoints(0, p, 3);
+    node->setDrawRange(0, 1);
+  }).join();
+  check(node->streamStats().writes == 1 && node->streamStats().applies == 0,
+        "no scene: an off-thread write is staged, nothing applied on the producer thread");
+  {
+    SceneGraph sg(app, "stream_attach");
+    sg.getGraphicsRoot()->addGraphicsChild(node);
+    check(node->streamStats().applies == 1,
+          "attaching applies everything staged, once, on the owner thread");
+    sg.getGraphicsRoot()->removeGraphicsChild(node);
+  }
+
+  // A slot posted to a scene that is never pumped, then the node moves on: the
+  // old one-slot-in-flight flag stayed set, and the node never posted again.
+  auto sg1 = std::make_unique<SceneGraph>(app, "stream_unpumped");
+  auto rib = sg1->getGraphicsRoot()->addGraphicsChild<RibbonNode>(
+      "r", 16, 1.0f, cvc::bounding_box(-10, -10, -1, 10, 10, 1), StreamingMapperKind::Classic);
+  const std::uint64_t a0 = rib->streamStats().applies;
+  std::thread([&]() { rib->append(1, 2, 0); }).join(); // posted to sg1, which nobody pumps
+  check(rib->streamStats().applies == a0, "posted to an unpumped scene: not applied yet");
+  sg1->getGraphicsRoot()->removeGraphicsChild(rib);
+  SceneGraph sg2(app, "stream_alive");
+  sg2.getGraphicsRoot()->addGraphicsChild(rib);
+  check(rib->streamStats().applies == a0 + 1,
+        "moving it to a live scene applies what the first one never ran");
+  std::thread([&]() { rib->append(3, 4, 0); }).join();
+  sg2.processEvents();
+  check(rib->streamStats().applies == a0 + 2 && rib->centerCount() == 2,
+        "later off-thread writes still post and apply (no stuck 'already posted' flag)");
+  sg1.reset(); // its dtor drains the stale slot
+  check(rib->streamStats().applies == a0 + 2, "the stale slot finds nothing left to apply");
+}
+
+// ── bounds: ribbons grow theirs, links derive theirs unless pinned ─────────
+bool boxCovers(const cvc::bounding_box &b, double x, double y, double z) {
+  return b.minx <= x && x <= b.maxx && b.miny <= y && y <= b.maxy && b.minz <= z && z <= b.maxz;
+}
+
+void testBounds(cvc::app &app) {
+  std::printf("reserved bounds: ribbon growth, link pinning, height-field refresh\n");
+  SceneGraph sg(app, "bounds");
+  const cvc::bounding_box small(-10, -10, -1, 10, 10, 1);
+  auto rib = sg.getGraphicsRoot()->addGraphicsChild<RibbonNode>("track", 8, 1.5f, small,
+                                                                StreamingMapperKind::Classic);
+  for (int k = 0; k < 30; ++k)
+    rib->append(10.0f * k, 0.5f * k, 2.0f);
+  cvc::bounding_box b = rib->reservedBounds();
+  check(boxCovers(b, 290 + 3.0, 14.5, 2.0) && boxCovers(b, -10, -10, -1),
+        "appends past the box grow it (by the mitred width), never shrinking it",
+        "maxx " + std::to_string(b.maxx));
+  const double *vb = rib->prop()->GetBounds(); // what VTK culls by
+  check(vb[1] >= 293.0 && vb[0] <= -10.0, "VTK culls by the grown box",
+        std::to_string(vb[0]) + ".." + std::to_string(vb[1]));
+  const float route[6] = {-400, 50, 0, -380, 60, 0};
+  rib->assign(route, 2);
+  b = rib->reservedBounds();
+  check(boxCovers(b, -403, 50, 0) && boxCovers(b, 293, 14.5, 2.0), "assign grows it too");
+  rib->setHalfWidth(20.0f);
+  check(boxCovers(rib->reservedBounds(), -440, 50, 0), "setHalfWidth grows it to the new width");
+
+  auto hf = std::make_shared<HeightFieldTexture>(8, 8, 0.0, 0.0, 10.0, 10.0); // flat
+  auto link = sg.getGraphicsRoot()->addGraphicsChild<DrapedLinkNode>("link", hf, 8,
+                                                                     StreamingMapperKind::Classic);
+  link->setEndpoints(10, 10, 60, 10);
+  const cvc::bounding_box derived = link->reservedBounds();
+  const cvc::bounding_box mine(-1000, -1000, -1000, 1000, 1000, 1000);
+  link->setReservedBounds(mine);
+  link->setStyle(3.0f, 2.0f, 1, 0, 0);
+  check(link->reservedBounds() == mine, "setStyle keeps a box the caller pinned");
+  link->refreshReservedBounds();
+  check(link->reservedBounds().maxx < 1000 && link->reservedBounds().maxz < 10,
+        "refreshReservedBounds derives it again");
+  hf->setHeights(std::vector<float>(64, 300.0f)); // terrain arrives after the link
+  vb = link->prop()->GetBounds();                 // asks the mapper, as culling does
+  check(vb[5] >= 300.0 && link->reservedBounds().maxz >= 300.0,
+        "new heights re-derive the box the next time VTK asks (culled or not)",
+        "maxz " + std::to_string(vb[5]));
+  link->setReservedBounds(mine);
+  hf->setHeights(std::vector<float>(64, 900.0f));
+  vb = link->prop()->GetBounds();
+  check(vb[5] == 1000.0 && link->reservedBounds() == mine, "... but leave a pinned box alone");
+  (void)derived;
+}
+
+// ── internal shader replacements ───────────────────────────────────────────
+std::string replacementText(cvc::gl::GraphicsNode &n, vtkShader::Type type,
+                            const std::string &anchor) {
+  auto *actor = vtkActor::SafeDownCast(n.prop());
+  auto *sp = actor ? vtkOpenGLShaderProperty::SafeDownCast(actor->GetShaderProperty()) : nullptr;
+  if (!sp)
+    return "<no shader property>";
+  for (const auto &kv : sp->GetAllShaderReplacements())
+    if (kv.first.ShaderType == type && kv.first.OriginalValue == anchor && kv.first.ReplaceFirst)
+      return kv.second.Replacement;
+  return "";
+}
+
+void testInternalShaderReplacements(cvc::app &app) {
+  std::printf("internal shader replacements survive the public replacement API\n");
+  SceneGraph sg(app, "repl");
+  auto hf = std::make_shared<HeightFieldTexture>(4, 4, 0.0, 0.0, 1.0, 1.0);
+  auto link = sg.getGraphicsRoot()->addGraphicsChild<DrapedLinkNode>("link", hf, 4,
+                                                                     StreamingMapperKind::Classic);
+  const std::string anchor = "//VTK::Clip::Impl";
+  const std::string drape = replacementText(*link, vtkShader::Vertex, anchor);
+  check(drape.find("cvc_link_drape") != std::string::npos &&
+            drape.find("#define vertexMC") < drape.find(anchor),
+        "the drape (and its #define) is spliced in AHEAD of VTK's clip code");
+  link->addVertexShaderReplacement(anchor, anchor + "\n  // caller-marker\n");
+  const std::string both = replacementText(*link, vtkShader::Vertex, anchor);
+  check(both.find("cvc_link_drape") != std::string::npos &&
+            both.find("caller-marker") != std::string::npos &&
+            both.find("#define vertexMC") < both.find("caller-marker"),
+        "a caller's replacement on the same anchor composes after it");
+  link->clearShaderReplacements();
+  const std::string after = replacementText(*link, vtkShader::Vertex, anchor);
+  check(after == drape, "clearShaderReplacements() removes the caller's, keeps the drape");
+  check(replacementText(*link, vtkShader::Fragment, "//VTK::Color::Impl").find("cvcLinkColor") !=
+            std::string::npos,
+        "... and the link's fragment colour");
+
+  auto plain = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::GeometryNode>("plain");
+  plain->addVertexShaderReplacement(anchor, anchor + "\n  // plain-marker\n");
+  check(replacementText(*plain, vtkShader::Vertex, anchor).find("plain-marker") !=
+            std::string::npos,
+        "a plain GeometryNode's replacement is installed as before");
+  plain->clearShaderReplacements();
+  check(replacementText(*plain, vtkShader::Vertex, anchor).empty(), "... and cleared as before");
+
+  auto rib = sg.getGraphicsRoot()->addGraphicsChild<RibbonNode>(
+      "rib", 8, 1.0f, cvc::bounding_box(-1, -1, -1, 1, 1, 1), StreamingMapperKind::Classic);
+  rib->clearShaderReplacements();
+  check(replacementText(*rib, vtkShader::Fragment, "//VTK::UniformFlow::Impl")
+                .find("cvcRibbonClipLo") != std::string::npos,
+        "a ribbon keeps its fragment clip through clearShaderReplacements()");
 }
 
 // ── mapper selection ────────────────────────────────────────────────────────
@@ -435,9 +618,14 @@ void testRibbonGrowth(cvc::app &app, StreamingMapperKind kind) {
 } // namespace
 
 int main() {
+  disableSwapThrottle();
   installErrorCounter();
   cvc::app app;
   testCoalescedEvents(app);
+  testApplyKeyIsPrivate(app);
+  testUnattachedAndDroppedSlot(app);
+  testBounds(app);
+  testInternalShaderReplacements(app);
   testMapperSelection(app);
   testTexelSpans();
   testHeightSample();

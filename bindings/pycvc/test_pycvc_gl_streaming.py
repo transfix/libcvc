@@ -16,6 +16,11 @@ import os
 import sys
 import threading
 
+# NVIDIA's GLX throttles swaps of an unmapped (offscreen) window to ~1/s with
+# sync-to-vblank on; set before any GL context exists (Mesa reads vblank_mode).
+os.environ.setdefault("__GL_SYNC_TO_VBLANK", "0")
+os.environ.setdefault("vblank_mode", "0")
+
 import pycvc
 
 app = pycvc.make_app()
@@ -71,6 +76,26 @@ def test_factories_and_types():
         check("an unknown mapper name raises", False)
     except RuntimeError:
         check("an unknown mapper name raises", True)
+    if np is not None:
+        for dt in (np.uint32, np.int64, np.uint16, np.int32):
+            g = sg.add_streaming_geometry("np_" + dt.__name__, 4,
+                                          np.array([0, 1, 2, 0, 2, 3], dtype=dt), [0, 0, -1, 1, 1, 1])
+            check("numpy %s triangle indices" % dt.__name__, g.triangleCount() == 2)
+        g = sg.add_streaming_geometry("np_scalars", 4, [np.int64(0), np.uint8(1), 2],
+                                      [0, 0, -1, 1, 1, 1])
+        check("a list of numpy integer scalars", g.triangleCount() == 1)
+        for bad, why in ((np.array([0.0, 1.0, 2.0]), "float indices"),
+                         (np.array([0, -1, 2], dtype=np.int32), "a negative index"),
+                         ([0, 1, np.float64(2.0)], "a float in a list")):
+            try:
+                sg.add_streaming_geometry("np_bad", 4, bad, [0, 0, -1, 1, 1, 1])
+                check(why + " raises", False)
+            except RuntimeError:
+                check(why + " raises", True)
+    check("streaming overlays are not pickable by default",
+          not rib.pickable() and not gen.pickable())
+    rib.setPickable(True)
+    check("setPickable opts in", rib.pickable())
 
 
 def test_points_and_capacity():
@@ -123,6 +148,13 @@ def test_points_and_capacity():
     rib.clearCenters()
     check("visible window + clear", rib.centerCount() == 0)
 
+    far = sg.add_ribbon("far", 8, 1.0, BOUNDS)
+    for k in range(4):
+        far.append(200.0 * k, 0.0, 0.0)
+    b = far.get_reserved_bounds()
+    check("a track that leaves its box grows the box (never culled)",
+          b[3] >= 600.0 + 2.0 and b[0] <= BOUNDS[0], str(list(b)))
+
 
 def test_height_field():
     print("HeightFieldTexture + DrapedLinkNode")
@@ -167,6 +199,34 @@ def test_coalesced():
     check("one call per key per drain, the latest", seen == [4], str(seen))
     sg.processEvents()
     check("nothing left over", seen == [4])
+
+    # Distinct keys never coalesce, even short-lived ones whose memory Python
+    # would otherwise reuse for the next key before the drain.
+    seen.clear()
+    for v in range(3):
+        sg.post_event_coalesced(object(), lambda v=v: seen.append(v))
+    sg.processEvents()
+    check("three fresh keys = three callbacks", sorted(seen) == [0, 1, 2], str(seen))
+
+    # A node key means the node: every lookup returns a new proxy, yet they are
+    # one key -- and a node key does not evict the node's own streaming apply.
+    seen.clear()
+    rib = sg.add_ribbon("r", 8, 1.0, BOUNDS)
+    applies0 = rib.stream_stats()["applies"]
+
+    def post_nodes():
+        rib.append(1.0, 2.0, 0.0)
+        for v in range(3):
+            sg.post_event_coalesced(sg.ribbon_node("r"), lambda v=v: seen.append(v))
+
+    t = threading.Thread(target=post_nodes)
+    t.start()
+    t.join()
+    sg.processEvents()
+    check("proxies of one node are one key (the latest wins)", seen == [2], str(seen))
+    check("... and the ribbon's own apply still ran",
+          rib.stream_stats()["applies"] == applies0 + 1 and rib.centerCount() == 1,
+          str(rib.stream_stats()))
 
 
 def test_render():

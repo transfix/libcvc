@@ -54,6 +54,11 @@ namespace gl {
 // topology, and a track must not lose history. A growth is one full re-upload
 // (counted in streamStats().fullUploads); size the capacity so it is rare.
 //
+// BOUNDS: the reserved box given at construction is a MINIMUM. append, assign
+// and setHalfWidth grow it to cover every centre written (plus the mitred
+// width), staged with the points, so a track that drives out of its box is
+// never frustum-culled or depth-clipped. It never shrinks on its own.
+//
 // Any thread, like StreamingGeometryNode; calls on one ribbon serialise on its
 // own lock. Material (colour, ambient/diffuse) is GeometryNode's.
 class RibbonNode : public StreamingGeometryNode {
@@ -94,6 +99,7 @@ private:
   void growLocked(std::size_t minCenters);
   void computeVerticesLocked(std::size_t k, float out[6]) const;
   void writeCentersLocked(std::size_t first, std::size_t last); // vertices of [first, last]
+  void fitBoundsLocked(std::size_t first, std::size_t last);    // grow the box over them
   void updateWindowLocked();
 
   mutable std::mutex m_ribbonMutex;

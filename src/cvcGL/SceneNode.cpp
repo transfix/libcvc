@@ -10,11 +10,15 @@ namespace cvc {
 namespace gl {
 
 void SceneNode::setSceneGraph(SceneGraph *sceneGraph) {
-  m_sceneGraph = sceneGraph;
-  // Take a weak handle on the scene alongside the raw pointer. The scene resets
-  // its token in ~SceneGraph, which is how a node that outlives its scene finds
-  // out — see getSceneGraph().
-  m_sceneAlive = sceneGraph ? sceneGraph->aliveToken() : std::weak_ptr<void>();
+  {
+    std::lock_guard<std::mutex> lock(m_sceneMutex);
+    m_sceneGraph = sceneGraph;
+    // Take a weak handle on the scene alongside the raw pointer. The scene resets
+    // its token in ~SceneGraph, which is how a node that outlives its scene finds
+    // out — see getSceneGraph().
+    m_sceneAlive = sceneGraph ? sceneGraph->aliveToken() : std::weak_ptr<void>();
+  }
+  onSceneGraphChanged();
 
   // Propagate to all children so they marshal through the same pump.
   for (auto &child : m_children) {
@@ -24,8 +28,10 @@ void SceneNode::setSceneGraph(SceneGraph *sceneGraph) {
 
 SceneGraph *SceneNode::getSceneGraph() const {
   // The back-pointer is only good while the scene that installed it is alive.
-  // expired() is a single atomic load, so this stays cheap enough for the pose
-  // hot path (GraphicsNode::setPosition consults it per call).
+  // The lock is uncontended except while the node is being attached, so this
+  // stays cheap enough for the pose hot path (GraphicsNode::setPosition consults
+  // it per call); it makes the pair read consistent from producer threads.
+  std::lock_guard<std::mutex> lock(m_sceneMutex);
   return m_sceneAlive.expired() ? nullptr : m_sceneGraph;
 }
 

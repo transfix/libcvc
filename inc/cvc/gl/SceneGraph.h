@@ -229,9 +229,16 @@ public:
   // postEvent() queued before it (e.g. the node's construction) and before any
   // queued after that first post. A post that arrives while processEvents() is
   // draining replaces the callback of a slot that has not run yet; once the
-  // slot has run, the next post queues a new slot for the next drain. Keys are
-  // compared by address only (typically the posting node's `this`); the
+  // slot has run, the next post queues a new slot for the next drain. The
   // callback must guard its own lifetime, as runOnMainThread's do.
+  //
+  // Keys are compared by address only, so a key must be PRIVATE to one
+  // producer: use the address of a member (or static) that nothing else posts
+  // under -- never a node pointer such as `this` or `node.get()`. Two producers
+  // sharing a key silently replace each other's callbacks (a streaming node keys
+  // its own applies by a private member for exactly this reason). The key must
+  // also stay allocated until its slot has drained; a freed and reused address
+  // would coalesce with an unrelated producer.
   void postEventCoalesced(const void *key, std::function<void()> callback);
 
   // True when called from this SceneGraph's owner thread — the thread that
