@@ -84,6 +84,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/state_exec/exec_coordinator.h
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
+  ../../inc/cvc/core/async_lane.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/volume/volmagick.h
@@ -144,6 +145,7 @@ set(SOURCE_FILES
   processing/anisotropic_diffusion.cpp
   core/app.cpp
   core/async_task.cpp
+  core/async_lane.cpp
   core/text.cpp
   core/thread_pool.cpp
   processing/bilateral_filter.cpp
