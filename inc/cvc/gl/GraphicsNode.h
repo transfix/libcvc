@@ -222,6 +222,24 @@ public:
   bool hasMetadata(const std::string &key) const;
   const std::map<std::string, std::any> &getAllMetadata() const { return m_metadata; }
 
+  // Shadow casting. A node that does not cast is left out of the shadow maps --
+  // it is still lit and still RECEIVES shadows -- and, the reason to use it,
+  // changing it (a pose, a colour, a texture) no longer makes the shadow baker
+  // re-render the scene: VTK re-bakes when ANY prop changed, the scene's baker
+  // only when a caster or a light did. Mark what moves every frame and casts
+  // little (vehicles over a city, overlays, a fog layer). Translucent geometry
+  // never casts in VTK, so marking it costs nothing on screen.
+  //
+  // Default true. Applies to this node, its graphics descendants, and those
+  // added later. Any thread: applied on the owner thread (inline there, at the
+  // next processEvents() from another), and castsShadow() reports it from then.
+  void setCastsShadow(bool casts);
+  bool castsShadow() const { return m_castsShadow.load(std::memory_order_relaxed); }
+  // The same flag on a vtkProp a host put in the renderer itself (owner thread).
+  // A prop casts unless marked.
+  static void setPropCastsShadow(vtkProp *prop, bool casts);
+  static bool propCastsShadow(vtkProp *prop);
+
   // Bounding box visibility
   void setShowBBox(bool show);
   bool getShowBBox() const { return m_showBBox; }
@@ -323,6 +341,7 @@ protected:
   std::vector<std::shared_ptr<GraphicsNode>> m_graphicsChildren;
   GraphicsNode *m_parent; // Weak pointer to parent for world transform calculation
   std::map<std::string, std::any> m_metadata;
+  std::atomic<bool> m_castsShadow{true}; // see setCastsShadow
   bool m_showBBox;
   std::shared_ptr<BBoxNode> m_bboxNode;
 

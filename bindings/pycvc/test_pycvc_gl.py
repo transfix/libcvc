@@ -371,6 +371,18 @@ def test_texture_modified_rows():
     print("  ok: texture_modified_rows / _rect wrapped")
 
 
+def test_casts_shadow():
+    """setCastsShadow takes a node out of the shadow maps and the bake decision."""
+    sg = pycvc_gl.SceneGraph(app, "pycasts")
+    node = sg.addGraphics("tri", _make_tri())
+    assert node.castsShadow()
+    node.setCastsShadow(False)
+    assert not node.castsShadow()
+    node.setCastsShadow(True)
+    assert node.castsShadow()
+    print("  ok: setCastsShadow / castsShadow")
+
+
 if __name__ == "__main__":
     test_build_scene()
     test_volume_scattering()
@@ -386,4 +398,5 @@ if __name__ == "__main__":
     test_metadata_mirror_follows_node()
     test_content_version()
     test_texture_modified_rows()
+    test_casts_shadow()
     print("pycvc_gl scene tests: OK")

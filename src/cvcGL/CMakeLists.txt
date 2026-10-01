@@ -506,6 +506,14 @@ add_executable(cvcgl_shadow_caster_growth test/cvcgl_shadow_caster_growth.cpp)
 target_link_libraries(cvcgl_shadow_caster_growth PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
 
+# GraphicsNode::setCastsShadow: a non-caster is left out of the shadow maps AND
+# out of the re-bake decision -- moving or restyling one never bakes, while a
+# caster, a light, or a node joining/leaving the casters still does. Checks the
+# picture too (a non-caster throws no shadow). Renders; skips without GL.
+add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
+target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
+
 # The rig used to advertise "2 shadow casters" while VTK baked seven: fill and
 # wash were Spots with cones under 90, which LightCreatesShadow accepts. Pins the
 # advertised count to the real one, and pins which roles may cast.

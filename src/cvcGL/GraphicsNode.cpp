@@ -10,6 +10,8 @@
 #include <iomanip>
 #include <sstream>
 #include <vtkActor2D.h>
+#include <vtkInformation.h>
+#include <vtkInformationIntegerKey.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPlane.h>
@@ -788,6 +790,10 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   // Propagate SceneGraph reference to child
   child->setSceneGraph(getSceneGraph());
 
+  // A non-casting subtree stays non-casting as it grows (LOD rungs, parts).
+  if (!castsShadow())
+    child->setCastsShadow(false);
+
   // Also add as SceneNode child so it gets rendered
   addChild(child);
 
@@ -1025,6 +1031,51 @@ void GraphicsNode::setMetadata(const std::string &key, const std::any &value) {
   } catch (...) {
     // The mirror is best effort; the node's own copy above is authoritative.
   }
+}
+
+namespace {
+// setCastsShadow's flag lives ON the vtkProp, in its PropertyKeys -- where VTK's
+// render passes keep their own per-prop keys -- so the shadow baker can read it
+// from the prop alone, for a node's actor and a host's raw prop alike.
+vtkInformationIntegerKey *nonCasterKey() {
+  static vtkInformationIntegerKey *key =
+      new vtkInformationIntegerKey("NON_SHADOW_CASTER", "cvc::gl::GraphicsNode");
+  return key;
+}
+} // namespace
+
+void GraphicsNode::setPropCastsShadow(vtkProp *prop, bool casts) {
+  if (!prop)
+    return;
+  vtkInformation *info = prop->GetPropertyKeys();
+  if (casts) {
+    if (info)
+      info->Remove(nonCasterKey());
+    return;
+  }
+  if (!info) {
+    auto fresh = vtkSmartPointer<vtkInformation>::New();
+    prop->SetPropertyKeys(fresh);
+    info = fresh;
+  }
+  info->Set(nonCasterKey(), 1);
+}
+
+bool GraphicsNode::propCastsShadow(vtkProp *prop) {
+  vtkInformation *info = prop ? prop->GetPropertyKeys() : nullptr;
+  return !(info && info->Has(nonCasterKey()));
+}
+
+void GraphicsNode::setCastsShadow(bool casts) {
+  // All of it on the owner thread: the flag and the child list are what
+  // addGraphicsChild reads and grows there, and the key is VTK state.
+  runOnMainThread([this, casts]() {
+    m_castsShadow.store(casts, std::memory_order_relaxed);
+    setPropCastsShadow(getProp(), casts);
+    for (auto &child : m_graphicsChildren)
+      if (child)
+        child->setCastsShadow(casts); // owner thread: inline
+  });
 }
 
 std::any GraphicsNode::getMetadata(const std::string &key) const {

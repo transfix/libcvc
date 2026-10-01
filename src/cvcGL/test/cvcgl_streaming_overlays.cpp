@@ -635,6 +635,12 @@ void testShadows(cvc::app &app, StreamingMapperKind kind) {
   g->setAmbient(0.3);
   g->setDiffuse(0.7);
   const int sun = sg.addDirectionalLight(135.0, 60.0);
+  // Ribbons and links do not cast by default; make these cast, so each is drawn
+  // by the bake AND the shadow pass -- the case where one upload must serve two
+  // passes.
+  track->setCastsShadow(true);
+  spine->setCastsShadow(true);
+  link->setCastsShadow(true);
 
   SceneRenderer sr(sg, W, H, /*offscreen=*/true);
   sr.setBackground(0, 0, 0);
@@ -647,9 +653,10 @@ void testShadows(cvc::app &app, StreamingMapperKind kind) {
     const GLCount g0 = glcountRead();
     const cvc::gl::StreamStats s0 = track->streamStats();
     const int k = 39 + fr;
-    // Re-aim the sun a hair so VTK's baker re-bakes THIS frame: streamed writes
-    // bump no MTime, so on their own they never trigger a bake (and
-    // invalidateShadowBake() only lifts cvcGL's interval, not VTK's own check).
+    // Re-aim the sun a hair so the baker re-bakes THIS frame whatever the nodes
+    // do (a casting streaming node's apply also asks for one, with an actor
+    // Modified(); invalidateShadowBake() only lifts cvcGL's interval, not VTK's
+    // own check).
     sg.setLightDirection(sun, 135.0 + 0.01 * fr, 60.0);
     track->append(static_cast<float>(C - 80 + 3 * k), static_cast<float>(C - 30), 0.5f);
     spine->setVisibleCenters(5.0 * fr + 0.5);

@@ -74,6 +74,8 @@ DrapedLinkNode::DrapedLinkNode(cvc::app &ctx, const std::string &statePath, cons
                                StreamingMapperKind mapper)
     : StreamingGeometryNode(ctx, statePath, name, linkLayout(heights, stations, mapper)),
       m_heights(std::move(heights)), m_stations(stations) {
+  // Draped on the terrain, it has nothing to cast; see RibbonNode.
+  setCastsShadow(false);
   // The template, written once: centre k at t = k / (stations - 1), left side
   // +1, right side -1 (the same left/right convention as RibbonNode).
   std::vector<float> tmpl(6 * static_cast<std::size_t>(stations));

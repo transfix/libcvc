@@ -115,9 +115,13 @@ struct StreamStats {
 //     DrapedLinkNode's undraped template would all be hit while the drawn
 //     overlay was missed. setPickable(true) opts in for a node whose drawn
 //     triangles ARE its polydata (no draw range, no vertex-shader placement).
-//   * Streamed writes do not trigger a shadow re-bake (VTK's baker watches
-//     MTimes, and writes bump none). Overlays drawn with shadows on cast stale
-//     shadows until something else causes a bake.
+//   * Shadows. Streamed writes bump no MTime, so they would never re-bake a
+//     shadow map on their own. A node that casts (GraphicsNode::setCastsShadow,
+//     the default here) therefore marks its actor modified when an apply
+//     changes what it draws -- points written, a relayout, a new draw range --
+//     and the scene's baker re-bakes it at its update interval (nothing is
+//     re-uploaded). RibbonNode and DrapedLinkNode are flat overlays and do not
+//     cast by default, so streaming them never costs a bake.
 //   * Re-showing a hidden node costs ONE full upload: setVisible(false) removes
 //     the prop from the renderer, and VTK releases its buffers. Material
 //     changes (GeometryNode::setColor, ...) upload nothing but bump the

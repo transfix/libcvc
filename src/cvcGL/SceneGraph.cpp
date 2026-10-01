@@ -19,13 +19,19 @@
 #include <cvc/gl/state_publisher.h>
 #include <cvc/volume/volume.h>
 #include <limits>
+#include <vtkActor.h>
 #include <vtkCameraPass.h>
+#include <vtkDataObject.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
+#include <vtkMapper.h>
 #include <vtkMultiVolume.h>
 #include <vtkObjectFactory.h>
 #include <vtkOverlayPass.h>
+#include <vtkProp.h>
+#include <vtkPropCollection.h>
+#include <vtkRenderPass.h>
 #include <vtkRenderPassCollection.h>
 #include <vtkRenderState.h>
 #include <vtkRenderer.h>
@@ -1035,7 +1041,7 @@ public:
   bool ForceNext = false;
 
   void Render(const vtkRenderState *s) override {
-    // Skipping a bake is only safe while the SET OF SHADOW CASTERS is unchanged.
+    // Skipping a bake is only safe while the SET OF SHADOW-CASTING LIGHTS is unchanged.
     //
     // vtkShadowMapBakerPass sizes its ShadowMaps vector inside Render(), and
     // only when NeedUpdate is set. SetUpToDate() clears NeedUpdate without
@@ -1051,10 +1057,20 @@ public:
     // the wash count looked fine and increasing it did not.
     const std::size_t casters = countShadowCasters(s);
     const bool due = (Interval <= 1) || (m_counter % static_cast<unsigned long>(Interval)) == 0;
-    if (due || ForceNext || casters != m_bakedCasters) {
-      this->Superclass::Render(s); // real bake, resizes ShadowMaps
+    // On a due frame, bake only if something that can change the maps changed
+    // (shadowInputsChanged). VTK alone re-bakes when ANY prop changed: a vehicle
+    // marked a non-caster moving, a fog texture repainted, an overlay restyled.
+    const bool inputsChanged = due && shadowInputsChanged(s);
+    if (ForceNext || casters != m_bakedCasters || inputsChanged) {
+      // VTK's own test can miss what ours saw: a prop that started or stopped
+      // casting has not itself changed. Make it bake whatever its test says.
+      if (inputsChanged)
+        this->LastRenderTime = vtkTimeStamp();
+      this->Superclass::Render(s); // bakes if anything at all changed; resizes ShadowMaps
       m_bakedCasters = casters;
       ForceNext = false;
+      if (this->GetNeedUpdate())
+        noteBake(s);
     } else {
       this->SetUpToDate(); // reuse the last-baked maps this frame
     }
@@ -1082,14 +1098,140 @@ protected:
     return n;
   }
 
+  // The props whose depth the maps hold: visible, and not marked non-casters
+  // (GraphicsNode::setCastsShadow). Identified by count and two order-free
+  // sums of their addresses, so one joining or leaving shows.
+  struct CasterSet {
+    std::size_t count = 0;
+    std::uint64_t sum = 0, mix = 0;
+    void add(const vtkProp *p) {
+      std::uint64_t z = reinterpret_cast<std::uintptr_t>(p) + 0x9e3779b97f4a7c15ull; // splitmix64
+      z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+      z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+      sum += reinterpret_cast<std::uintptr_t>(p);
+      mix += z ^ (z >> 31);
+      ++count;
+    }
+    bool operator!=(const CasterSet &o) const {
+      return count != o.count || sum != o.sum || mix != o.mix;
+    }
+  };
+
+  // vtkShadowMapBakerPass's own test, narrowed to what the maps depend on: a
+  // light (as VTK checks them), or a CASTING prop -- changed since the last
+  // bake, joined or left. A non-caster's MTime is ignored, which is the point:
+  // moving or repainting one never forces a bake. (The bake itself draws only
+  // casters, through ShadowCasterFilterPass.)
+  bool shadowInputsChanged(const vtkRenderState *s) {
+    vtkRenderer *r = s ? s->GetRenderer() : nullptr;
+    if (!r || !m_baked)
+      return true;
+    const vtkMTimeType t = m_lastBake.GetMTime();
+    vtkLightCollection *lights = r->GetLights();
+    if (lights->GetMTime() > t)
+      return true;
+    vtkCollectionSimpleIterator lit;
+    lights->InitTraversal(lit);
+    while (vtkLight *l = lights->GetNextLight(lit))
+      if (l->GetMTime() > t)
+        return true;
+    CasterSet now;
+    vtkPropCollection *props = r->GetViewProps();
+    vtkCollectionSimpleIterator pit;
+    props->InitTraversal(pit);
+    while (vtkProp *p = props->GetNextProp(pit)) {
+      if (!p->GetVisibility() || !GraphicsNode::propCastsShadow(p))
+        continue;
+      if (p->GetMTime() > t || casterGeometryChanged(p, t))
+        return true;
+      now.add(p);
+    }
+    return now != m_bakedSet;
+  }
+
+  // vtkActor::GetMTime() leaves out the mapper and its input, so a caster
+  // deformed in place (GeometryNode::updateVertices / updateNormals /
+  // updateColors -- a swaying tree) changes only those. Their MTimes, read
+  // as they are: no Update(), no GetRedrawMTime().
+  static bool casterGeometryChanged(vtkProp *p, vtkMTimeType t) {
+    auto *actor = vtkActor::SafeDownCast(p);
+    vtkMapper *mapper = actor ? actor->GetMapper() : nullptr;
+    if (!mapper)
+      return false;
+    if (mapper->GetMTime() > t)
+      return true;
+    vtkDataObject *input = mapper->GetInputDataObject(0, 0);
+    return input && input->GetMTime() > t;
+  }
+
+  void noteBake(const vtkRenderState *s) {
+    m_lastBake.Modified();
+    m_baked = true;
+    m_bakedSet = CasterSet();
+    if (vtkRenderer *r = s ? s->GetRenderer() : nullptr) {
+      vtkPropCollection *props = r->GetViewProps();
+      vtkCollectionSimpleIterator pit;
+      props->InitTraversal(pit);
+      while (vtkProp *p = props->GetNextProp(pit))
+        if (p->GetVisibility() && GraphicsNode::propCastsShadow(p))
+          m_bakedSet.add(p);
+    }
+  }
+
 private:
   unsigned long m_counter = 0;
   // (std::size_t)-1 so the first frame always bakes rather than matching 0.
   std::size_t m_bakedCasters = static_cast<std::size_t>(-1);
+  bool m_baked = false;    // has a real bake happened yet
+  vtkTimeStamp m_lastBake; // when it did
+  CasterSet m_bakedSet;    // the casters it drew
   StridedShadowBaker(const StridedShadowBaker &) = delete;
   void operator=(const StridedShadowBaker &) = delete;
 };
 vtkStandardNewMacro(StridedShadowBaker);
+
+// The baker's depth pass, restricted to the props that cast. vtkShadowMapBakerPass
+// hands its opaque sequence every visible prop; this one passes on only those
+// GraphicsNode::propCastsShadow() accepts, so a non-caster is left out of the
+// maps rather than frozen into them at its last-baked pose.
+class ShadowCasterFilterPass : public vtkRenderPass {
+public:
+  static ShadowCasterFilterPass *New();
+  vtkTypeMacro(ShadowCasterFilterPass, vtkRenderPass);
+
+  vtkSmartPointer<vtkRenderPass> Delegate; // VTK's camera -> lights -> opaque sequence
+
+  void Render(const vtkRenderState *s) override {
+    this->NumberOfRenderedProps = 0;
+    if (!this->Delegate || !s)
+      return;
+    m_props.clear();
+    vtkProp **all = s->GetPropArray();
+    for (int i = 0; i < s->GetPropArrayCount(); ++i)
+      if (GraphicsNode::propCastsShadow(all[i]))
+        m_props.push_back(all[i]);
+    vtkRenderState casters(s->GetRenderer());
+    casters.SetPropArrayAndCount(m_props.data(), static_cast<int>(m_props.size()));
+    casters.SetFrameBuffer(s->GetFrameBuffer());
+    casters.SetRequiredKeys(s->GetRequiredKeys());
+    this->Delegate->Render(&casters);
+    this->NumberOfRenderedProps = this->Delegate->GetNumberOfRenderedProps();
+  }
+
+  void ReleaseGraphicsResources(vtkWindow *w) override {
+    if (this->Delegate)
+      this->Delegate->ReleaseGraphicsResources(w);
+  }
+
+protected:
+  ShadowCasterFilterPass() = default;
+
+private:
+  std::vector<vtkProp *> m_props;
+  ShadowCasterFilterPass(const ShadowCasterFilterPass &) = delete;
+  void operator=(const ShadowCasterFilterPass &) = delete;
+};
+vtkStandardNewMacro(ShadowCasterFilterPass);
 
 // Shadow settings mirrored into cvc::state at "<prefix>.shadows". Created lazily
 // (the ctor runs before the renderer exists) and guarded against re-entry: a
@@ -1167,6 +1309,11 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   baker->Interval = m_shadowInterval;
   baker->SetResolution(m_shadowResolution); // crisper than VTK's low 256 default
   m_shadowBaker = baker;                    // kept so the interval/resolution stay live
+  // Bake casters only (GraphicsNode::setCastsShadow): wrap VTK's own depth pass.
+  vtkSmartPointer<ShadowCasterFilterPass> casterFilter =
+      vtkSmartPointer<ShadowCasterFilterPass>::New();
+  casterFilter->Delegate = baker->GetOpaqueSequence();
+  baker->SetOpaqueSequence(casterFilter);
   vtkSmartPointer<vtkShadowMapPass> shadows = vtkSmartPointer<vtkShadowMapPass>::New();
   shadows->SetShadowMapBakerPass(baker);
 

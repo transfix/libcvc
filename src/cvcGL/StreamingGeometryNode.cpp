@@ -466,6 +466,12 @@ void StreamingGeometryNode::applyPending() {
       sg->markContentChanged();
   if (pickChanged && actor())
     actor()->SetPickable(pick ? 1 : 0);
+  // Streamed writes bump no MTime by design (that is what keeps the upload
+  // partial), so a CASTING node says itself that what it draws changed: an
+  // actor Modified() re-bakes the shadow maps at the scene's update interval
+  // and re-uploads nothing.
+  if ((hi > lo || layoutChanged || rangeChanged) && castsShadow() && actor())
+    actor()->Modified();
   if (!m_core)
     return;
   if (hi > lo)
