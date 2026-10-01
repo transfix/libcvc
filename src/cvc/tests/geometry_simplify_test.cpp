@@ -891,7 +891,7 @@ TEST(GeometrySimplify, SeamEpsilonIsTheCoincidenceTolerance) {
   const double o = 1e6;
   geometry farMesh(ctx);
   farMesh.points() = {{o, 0, 0},     {o + 2.99, 0, 0}, {o, 1, 0},
-                  {o + 3, 0, 0}, {o + 5, 0, 0},    {o + 3, 1, 0}};
+                      {o + 3, 0, 0}, {o + 5, 0, 0},    {o + 3, 1, 0}};
   farMesh.tris() = {{0, 1, 2}, {3, 4, 5}};
   cvc::simplify_params d;
   d.target_tris = 1;
