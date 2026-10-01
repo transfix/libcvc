@@ -505,6 +505,9 @@ void GeometryNode::setGeometry(const cvc::geometry &geom) {
     updateBoundingBoxNode();
 
     updateMetadata(geom);
+    // The mesh's extent may have changed: cameras re-fit their clipping range.
+    if (SceneGraph *sg = getSceneGraph())
+      sg->markContentChanged();
 
     // Notify parent to resync bounds if it's a NullGraphicNode with auto-sync enabled
     if (m_parent) {

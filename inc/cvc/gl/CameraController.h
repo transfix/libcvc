@@ -221,6 +221,13 @@ public:
   std::string keyBinding(const std::string &action) const;
 
   // Push the current pose to the vtkCamera and reset the clipping range.
+  // update() calls it only when something it depends on moved: the pose, the
+  // camera (changed by someone else), the renderer's prop list, or -- with a
+  // scene -- SceneGraph::contentVersion(). Without a scene it calls it every
+  // frame. Call it yourself after changing what is visible in a way none of
+  // those see (vertices pushed far out in place, a host's own prop shown with
+  // SetVisibility, an unregistered node moved), or bump the scene's
+  // markContentChanged().
   void applyToCamera();
   void getPose(double eye[3], double focal[3], double up[3]) const;
 
@@ -237,7 +244,10 @@ private:
   bool trackedWorldPos(double out[3]); // world pos of the tracked actor, or false
   double viewportAspect() const;       // renderer width/height, or 0 if unknown
   double mapFitScale(double halfHeight, double halfWidth) const; // parallel scale fitting a rect
-  void refitMapIfResized(); // re-fit the map rect when the viewport changes shape
+  void refitMapIfResized();     // re-fit the map rect when the viewport changes shape
+  bool applyNeeded() const;     // update(): has anything applyToCamera() derives from moved?
+  bool poseMirrorStale() const; // does the pose differ from the one last mirrored to state?
+  void poseMirrorValues(double out[14]) const; // what syncPoseToState() writes, in order
 
   struct Impl;
   std::unique_ptr<Impl> m_impl;

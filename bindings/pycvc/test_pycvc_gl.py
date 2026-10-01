@@ -344,6 +344,21 @@ def test_metadata_mirror_follows_node():
     print("  ok: metadata mirror follows the node, stays read-only, mirrors ints")
 
 
+def test_content_version():
+    """contentVersion() moves when the scene's extent may have (a camera re-fits
+    its clipping range on it); markContentChanged() bumps it by hand."""
+    sg = pycvc_gl.SceneGraph(app, "pycontent")
+    node = sg.addGraphics("tri", _make_tri())
+    sg.processEvents()
+    v0 = sg.contentVersion()
+    node.setPosition(5.0, 0.0, 0.0)  # a registered node moved
+    assert sg.contentVersion() > v0
+    v1 = sg.contentVersion()
+    sg.markContentChanged()
+    assert sg.contentVersion() == v1 + 1
+    print("  ok: contentVersion / markContentChanged")
+
+
 if __name__ == "__main__":
     test_build_scene()
     test_volume_scattering()
@@ -357,4 +372,5 @@ if __name__ == "__main__":
     test_group_nodes_compose_transforms()
     test_scene_owned_lighting()
     test_metadata_mirror_follows_node()
+    test_content_version()
     print("pycvc_gl scene tests: OK")

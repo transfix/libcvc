@@ -434,6 +434,14 @@ add_executable(cvcgl_camera test/cvcgl_camera.cpp)
 target_link_libraries(cvcgl_camera PRIVATE cvcGL)
 add_test(NAME cvcgl_camera COMMAND cvcgl_camera)
 
+# CameraController::update() on a still camera over a still scene: no clipping-
+# range reset and no pose mirror, yet the range is re-fitted the moment the scene
+# could have grown (node added/moved/re-meshed, prop shown) or the camera moved.
+# Headless, plus a rendered section (shadows on) that skips without GL.
+add_executable(cvcgl_camera_idle test/cvcgl_camera_idle.cpp)
+target_link_libraries(cvcgl_camera_idle PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
+
 # Numeric parity: the push-fed Track controller reproduces pymod_gl/camera.py's
 # ChaseCamera (the two-stage EMA follow) to floating point, so the C++ and Python
 # chase cameras genuinely "work the same". Headless (getPose reads trackEye/Focal

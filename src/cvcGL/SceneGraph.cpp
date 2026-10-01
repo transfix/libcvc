@@ -239,6 +239,7 @@ void SceneGraph::updateGrid(const cvc::bounding_box &bounds) {
   // Update grid to match combined bounds
   m_gridNode->setBounds(combinedBounds);
   m_worldBounds = combinedBounds; // track for grow-only recompute on node moves
+  markContentChanged();           // the set of graphics changed, or the box grew
 
   // Scale axis length to be proportional to combined bounding box size
   double spanX = combinedBounds[3] - combinedBounds[0];
@@ -513,6 +514,7 @@ void SceneGraph::trackNodeBounds(const std::shared_ptr<GraphicsNode> &node) {
   // postEvent used to do as a side effect. The connection is owned here and dies
   // with the SceneGraph, so the captured `this` is safe.
   m_boundsConns.push_back(node->transformChanged.connect([this](GraphicsNode *) {
+    markContentChanged(); // whether or not it left the world box
     if (!m_boundsDirty.exchange(true, std::memory_order_acq_rel))
       requestRender();
   }));

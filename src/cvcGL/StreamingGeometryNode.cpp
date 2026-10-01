@@ -255,10 +255,14 @@ bool StreamingGeometryNode::reservedBoundsPinned() const {
 }
 
 void StreamingGeometryNode::setDerivedBoundsNow(const cvc::bounding_box &bounds) {
+  bool changed = false;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_boundsPinned)
       return;
+    changed = bounds.minx != m_bounds.minx || bounds.miny != m_bounds.miny ||
+              bounds.minz != m_bounds.minz || bounds.maxx != m_bounds.maxx ||
+              bounds.maxy != m_bounds.maxy || bounds.maxz != m_bounds.maxz;
     m_bounds = bounds; // a pending apply re-sends this same (latest) box
   }
   if (m_core) {
@@ -266,6 +270,11 @@ void StreamingGeometryNode::setDerivedBoundsNow(const cvc::bounding_box &bounds)
     toArray(bounds, b);
     m_core->setReservedBounds(b);
   }
+  // The box VTK culls and clips by moved: a camera holding still re-fits its
+  // clipping range to it (CameraController::update watches contentVersion).
+  if (changed)
+    if (SceneGraph *sg = getSceneGraph())
+      sg->markContentChanged();
 }
 
 void StreamingGeometryNode::setPickable(bool pickable) {
@@ -449,6 +458,12 @@ void StreamingGeometryNode::applyPending() {
     }
   }
   ++m_applies;
+  // A new box (grown over appended points, re-derived, re-laid out) is what VTK
+  // culls and clips by, and it changes no MTime: tell the scene, so a camera
+  // holding still re-fits its clipping range to it.
+  if (boundsChanged || layoutChanged)
+    if (SceneGraph *sg = getSceneGraph())
+      sg->markContentChanged();
   if (pickChanged && actor())
     actor()->SetPickable(pick ? 1 : 0);
   if (!m_core)
