@@ -25,13 +25,25 @@ namespace {
 // Depth, not a flag, so a flush reached from inside a flush still reports
 // correctly on the way back out. See state_publisher::in_flush().
 thread_local int t_flushDepth = 0;
+// The innermost publisher flushing on this thread; the scope restores the outer
+// one on the way out. See state_publisher::flushing().
+thread_local const state_publisher *t_flushing = nullptr;
 struct flush_scope {
-  flush_scope() { ++t_flushDepth; }
-  ~flush_scope() { --t_flushDepth; }
+  const state_publisher *outer;
+  explicit flush_scope(const state_publisher *self) : outer(t_flushing) {
+    ++t_flushDepth;
+    t_flushing = self;
+  }
+  ~flush_scope() {
+    t_flushing = outer;
+    --t_flushDepth;
+  }
 };
 } // namespace
 
 bool state_publisher::in_flush() { return t_flushDepth > 0; }
+
+const state_publisher *state_publisher::flushing() { return t_flushing; }
 
 state_publisher::state_publisher(cvc::app &ctx) : m_ctx(ctx) {}
 
@@ -104,9 +116,10 @@ void state_publisher::flush() {
     m_keys.clear();
     m_seen = 0; // new sampling window
   }
-  // Handlers fired by the writes below run on THIS thread, and in_flush() is
-  // how they tell a value out of this queue from one a script wrote.
-  flush_scope inFlush;
+  // Handlers fired by the writes below run on THIS thread, and flushing() is
+  // how they tell a value out of this queue from one a script (or another
+  // scene's publisher) wrote.
+  flush_scope inFlush(this);
   for (auto &kv : batch) {
     // operator()(path) resolves (creating as needed) and value() fires
     // valueChanged only on an actual change — the same path pycvc's state_set

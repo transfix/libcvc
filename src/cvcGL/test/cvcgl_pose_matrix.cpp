@@ -24,9 +24,20 @@
 //      back, and an external write still moves the node;
 //   5. the visible result is identical to setTransform for the same matrix --
 //      structurally, through a parent, and in rendered pixels (that last part
-//      SKIPs when the build cannot rasterise).
+//      SKIPs when the build cannot rasterise);
+//   6. state ends on the node's current matrix when setPoseMatrix is mixed
+//      with setTransform, resetTransform or an external write, when a flush is
+//      already writing the older pose, and when the publisher shed a pose of
+//      a node that then stays still;
+//   7. the echo guard drops only this scene's publisher's writes, so a mirror
+//      scene bound to the same paths follows published poses;
+//   8. the bounds walk is coalesced in every case it claims: an off-thread
+//      pose needs one pump, N adds cost one walk, an add plus a move in one
+//      frame cost one walk, and a move after a consumed render request is
+//      still drawn.
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -389,6 +400,338 @@ void test_detached_node() {
   CHECK(parseMatrix(cvc::state::instance(app)(n->getState("matrix").fullName()).value()) == m);
 }
 
+// A pose waiting in the publisher must not be written over a newer matrix that
+// setTransform or resetTransform put on the node directly. If it were, the node
+// would show the newer matrix while state kept the older one. A node that then
+// stays still would never correct that, because re-sending its current pose is
+// a no-op.
+void test_set_transform_supersedes_a_queued_pose() {
+  std::printf("test_set_transform_supersedes_a_queued_pose\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  auto &pub = sg.publisher();
+  pub.stop();
+  auto n = sg.addGraphics("v", tri());
+  sg.processEvents();
+  pub.flush();
+
+  const Mat a = pose(25.0, 5.0, 10.0, 0.5, -1.0);
+  const Mat b = pose(-40.0, 0.0, 20.0, -0.75, 2.0);
+
+  // A node that never used setPoseMatrix keeps setTransform exactly as it was:
+  // a direct write, nothing queued.
+  n->setTransform(b.data());
+  CHECK(pub.pending() == 0);
+  CHECK(parseMatrix(stateMatrix(app, n)) == b);
+
+  n->setPoseMatrix(a.data()); // queued
+  n->setTransform(b.data());  // newer, written directly
+  pub.flush();
+  sg.processEvents();
+  CHECK(equals(n->getTransform(), b));
+  CHECK(parseMatrix(stateMatrix(app, n)) == b);
+
+  // The vtkMatrix4x4 overload.
+  n->setPoseMatrix(a.data());
+  auto vb = vtkSmartPointer<vtkMatrix4x4>::New();
+  vb->DeepCopy(b.data());
+  n->setTransform(vb);
+  pub.flush();
+  sg.processEvents();
+  CHECK(equals(n->getTransform(), b));
+  CHECK(parseMatrix(stateMatrix(app, n)) == b);
+
+  // resetTransform.
+  n->setPoseMatrix(a.data());
+  n->resetTransform();
+  pub.flush();
+  sg.processEvents();
+  vtkSmartPointer<vtkMatrix4x4> identity = vtkSmartPointer<vtkMatrix4x4>::New();
+  CHECK(equals(n->getTransform(), identity));
+  CHECK(stateMatrix(app, n) == "1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1");
+}
+
+// The harder ordering. A flush has already taken the queued pose but has not
+// written it yet, and setTransform runs in that gap. This is a worker flush
+// racing the render thread. Removing the queued entry cannot fix it, because
+// the flush already holds it. Queueing the newer matrix fixes it: the next
+// flush writes it after the stale one.
+//
+// The gap is reached deterministically. Listeners on pad paths published in
+// the same batch run inside the flush, and the first one to fire calls
+// setTransform. Whether that happens before or after the pose is written
+// depends on hash order, so the test reports which case ran. It checks the
+// result in both cases.
+void test_pose_being_flushed_is_superseded() {
+  std::printf("test_pose_being_flushed_is_superseded\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  auto &pub = sg.publisher();
+  pub.stop();
+  auto n = sg.addGraphics("v", tri());
+  sg.processEvents();
+  pub.flush();
+
+  const Mat a = pose(25.0, 5.0, 10.0, 0.5, -1.0);
+  const Mat b = pose(-40.0, 0.0, 20.0, -0.75, 2.0);
+  const std::string path = n->getState("matrix").fullName();
+  const std::string textA = cvc::gl::state_publisher::format_matrix(a.data());
+
+  bool fired = false, beforeA = false;
+  std::vector<std::string> pads;
+  std::vector<boost::signals2::scoped_connection> conns;
+  for (int k = 0; k < 32; ++k) {
+    pads.push_back("posetest.flushgap.pad" + std::to_string(k));
+    cvc::state::instance(app)(pads.back()).value(std::string("0"));
+    conns.emplace_back(cvc::state::instance(app)(pads.back()).valueChanged.connect([&]() {
+      if (fired)
+        return;
+      fired = true;
+      beforeA = cvc::state::instance(app)(path).value() != textA;
+      n->setTransform(b.data());
+    }));
+  }
+
+  n->setPoseMatrix(a.data());
+  for (const std::string &p : pads)
+    pub.publish(p, "1");
+  pub.flush();
+  pub.flush(); // what was queued during the first flush
+  sg.processEvents();
+  std::printf("  setTransform ran %s the queued pose was written\n", beforeA ? "BEFORE" : "after");
+  CHECK(fired);
+  CHECK(equals(n->getTransform(), b));
+  CHECK(parseMatrix(stateMatrix(app, n)) == b);
+}
+
+// The same applies to a write from outside the node. A script that moves a node
+// while one of the node's poses is queued must not be undone by the next flush.
+void test_external_write_supersedes_a_queued_pose() {
+  std::printf("test_external_write_supersedes_a_queued_pose\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  auto &pub = sg.publisher();
+  pub.stop();
+  auto n = sg.addGraphics("v", tri());
+  sg.processEvents();
+
+  const Mat a = pose(25.0, 5.0, 10.0, 0.5, -1.0);
+  n->setPoseMatrix(a.data()); // queued
+  const std::string path = n->getState("matrix").fullName();
+  offOwnerThread([&] {
+    cvc::state::instance(app)(path).value(std::string("1,0,0,7,0,1,0,8,0,0,1,9,0,0,0,1"));
+  });
+  sg.processEvents(); // the node follows the script
+  pub.flush();        // ... and the queued pose must not overwrite it
+  sg.processEvents();
+  CHECK(n->getTransform()->GetElement(0, 3) == 7.0);
+  CHECK(n->getTransform()->GetElement(1, 3) == 8.0);
+  CHECK(n->getTransform()->GetElement(2, 3) == 9.0);
+  Mat cur;
+  std::copy(n->getTransform()->GetData(), n->getTransform()->GetData() + 16, cur.begin());
+  CHECK(parseMatrix(stateMatrix(app, n)) == cur);
+}
+
+// The publisher sheds values past its path cap, which is safe only because a
+// moving node republishes next frame. A parked node re-sends an unchanged pose,
+// which change detection skips. So once the publisher has shed anything since a
+// node's last publish, the node publishes the unchanged pose again (state only,
+// no cascade) instead of leaving state stale indefinitely.
+void test_shed_pose_is_published_again_when_parked() {
+  std::printf("test_shed_pose_is_published_again_when_parked\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  auto &pub = sg.publisher();
+  pub.stop();
+  auto a = sg.addGraphics("a", tri());
+  auto b = sg.addGraphics("b", tri());
+  sg.processEvents();
+  pub.flush();
+
+  const Mat pa = pose(12.0, 0.0, 1.0, 2.0, 3.0);
+  const Mat pb = pose(-12.0, 0.0, -1.0, -2.0, -3.0);
+  pub.set_max_pending(1); // room for one of the two
+  a->setPoseMatrix(pa.data());
+  b->setPoseMatrix(pb.data());
+  CHECK(pub.dropped() == 1);
+  pub.set_max_pending(8192);
+  pub.flush();
+  const bool aStale = parseMatrix(stateMatrix(app, a)) != pa;
+  const bool bStale = parseMatrix(stateMatrix(app, b)) != pb;
+  CHECK(aStale != bStale); // exactly one pose was shed
+
+  int fired = 0;
+  boost::signals2::scoped_connection ca =
+      a->transformChanged.connect([&fired](GraphicsNode *) { ++fired; });
+  boost::signals2::scoped_connection cb =
+      b->transformChanged.connect([&fired](GraphicsNode *) { ++fired; });
+
+  // Both vehicles are parked and re-send their poses.
+  a->setPoseMatrix(pa.data());
+  b->setPoseMatrix(pb.data());
+  pub.flush();
+  sg.processEvents();
+  CHECK(fired == 0); // nothing moved
+  CHECK(parseMatrix(stateMatrix(app, a)) == pa);
+  CHECK(parseMatrix(stateMatrix(app, b)) == pb);
+
+  // With nothing shed since, a parked pose is free again.
+  a->setPoseMatrix(pa.data());
+  b->setPoseMatrix(pb.data());
+  CHECK(pub.pending() == 0);
+}
+
+// A second scene built with the same state prefix binds its nodes to the same
+// paths. For example, a mirror view. The echo guard must drop only this scene's
+// own publisher's writes, so the mirror follows a published pose just as it
+// follows setTransform.
+void test_mirror_scene_follows_published_poses() {
+  std::printf("test_mirror_scene_follows_published_poses\n");
+  cvc::app app;
+  SceneGraph src(app, "posemirror");
+  SceneGraph mir(app, "posemirror");
+  src.publisher().stop();
+  mir.publisher().stop();
+  auto a = src.addGraphics("v", tri());
+  auto b = mir.addGraphics("v", tri());
+  src.processEvents();
+  mir.processEvents();
+  CHECK(a->getState("matrix").fullName() == b->getState("matrix").fullName());
+
+  int aFired = 0;
+  boost::signals2::scoped_connection c =
+      a->transformChanged.connect([&aFired](GraphicsNode *) { ++aFired; });
+
+  const Mat m1 = pose(30.0, 10.0, 4.0, -5.0, 6.0);
+  a->setPoseMatrix(m1.data());
+  src.publisher().flush();
+  src.processEvents();
+  mir.processEvents();
+  CHECK(equals(b->getTransform(), m1)); // the mirror follows
+  CHECK(aFired == 1);                   // and the source still drops its own echo
+
+  // Flushed on another thread, as the worker does. The mirror's move is
+  // marshalled to its owner thread.
+  const Mat m2 = pose(-60.0, 0.0, -7.0, 8.0, -9.0);
+  a->setPoseMatrix(m2.data());
+  offOwnerThread([&] { src.publisher().flush(); });
+  src.processEvents();
+  mir.processEvents();
+  CHECK(equals(b->getTransform(), m2));
+  CHECK(aFired == 2);
+
+  // The published "position" key uses the same guard.
+  a->setPosition(1.5, -2.5, 3.5);
+  src.publisher().flush();
+  src.processEvents();
+  mir.processEvents();
+  CHECK(b->getTransform()->GetElement(0, 3) == 1.5);
+  CHECK(b->getTransform()->GetElement(1, 3) == -2.5);
+  CHECK(b->getTransform()->GetElement(2, 3) == 3.5);
+  CHECK(aFired == 3);
+}
+
+// --- world-bounds coalescing -------------------------------------------------
+
+// A pose made on another thread is applied while processEvents drains the
+// queue. The walk runs after the drain, so ONE pump both applies the pose and
+// grows the grid to it. A walk run before the drain would miss the pose until
+// the next pump.
+void test_off_thread_pose_out_of_the_grid_needs_one_pump() {
+  std::printf("test_off_thread_pose_out_of_the_grid_needs_one_pump\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  sg.publisher().stop();
+  auto n = sg.addGraphics("v", tri());
+  sg.processEvents();
+
+  const std::uint64_t w0 = sg.boundsWalkCount();
+  const Mat far = pose(20.0, 0.0, 800.0, -600.0, 50.0);
+  offOwnerThread([&] { n->setPoseMatrix(far.data()); });
+  CHECK(sg.boundsWalkCount() == w0);
+  sg.processEvents();
+  CHECK(sg.boundsWalkCount() - w0 == 1);
+  CHECK(equals(n->getTransform(), far));
+  const cvc::bounding_box grid = sg.getGridNode()->bounds();
+  CHECK(grid[3] >= 800.0 && grid[1] <= -600.0);
+  CHECK(encloses(grid, sg.computeGraphicsBounds()));
+}
+
+// Each add or remove asks for an authoritative recompute. One queued recompute
+// covers all of them, so building a scene of N nodes costs one walk, not N.
+void test_adding_nodes_costs_one_walk() {
+  std::printf("test_adding_nodes_costs_one_walk\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  sg.processEvents();
+
+  const std::uint64_t w0 = sg.boundsWalkCount();
+  for (int i = 0; i < 50; ++i)
+    sg.addGraphics("v" + std::to_string(i), tri(1.0 + 4.0 * i));
+  CHECK(sg.boundsWalkCount() == w0); // nothing walked inline
+  sg.processEvents();
+  std::printf("  50 adds -> %llu bounds walk(s)\n",
+              static_cast<unsigned long long>(sg.boundsWalkCount() - w0));
+  CHECK(sg.boundsWalkCount() - w0 == 1);
+  CHECK(encloses(sg.getGridNode()->bounds(), sg.computeGraphicsBounds()));
+}
+
+// An add and a move in the same frame. The recompute the add queued already
+// sees the move, so the grow-only walk the move flagged is cleared rather than
+// run again.
+void test_add_and_move_in_one_frame_costs_one_walk() {
+  std::printf("test_add_and_move_in_one_frame_costs_one_walk\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  sg.publisher().stop();
+  sg.processEvents();
+
+  const std::uint64_t w0 = sg.boundsWalkCount();
+  auto n = sg.addGraphics("v", tri());
+  const Mat far = pose(0.0, 0.0, -900.0, 300.0, 0.0);
+  n->setPoseMatrix(far.data());
+  sg.processEvents();
+  CHECK(sg.boundsWalkCount() - w0 == 1);
+  const cvc::bounding_box grid = sg.getGridNode()->bounds();
+  CHECK(grid[0] <= -900.0);
+  CHECK(encloses(grid, sg.computeGraphicsBounds()));
+}
+
+// Only the first move since a pump requests a render. A host may consume that
+// request (draw a frame) before the pump, and a node can move after that frame.
+// The pump must then request another render, or the later move is not drawn
+// until something else asks for a frame.
+void test_move_after_a_consumed_render_request_is_drawn() {
+  std::printf("test_move_after_a_consumed_render_request_is_drawn\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  sg.publisher().stop();
+  auto a = sg.addGraphics("a", tri());
+  auto b = sg.addGraphics("b", tri());
+  const Mat wideA = pose(0.0, 0.0, -20.0, 0.0, 0.0);
+  const Mat wideB = pose(0.0, 0.0, 20.0, 0.0, 0.0);
+  a->setPoseMatrix(wideA.data());
+  b->setPoseMatrix(wideB.data());
+  sg.processEvents(); // the grid now spans both, so the moves below stay inside it
+  sg.checkAndResetRenderNeeded();
+  const cvc::bounding_box grid0 = sg.getGridNode()->bounds();
+
+  // Moves inside the grid: the walk will not grow it, so it will not ask for
+  // a frame itself.
+  const Mat pa = pose(0.0, 0.0, -15.0, 0.0, 0.0);
+  const Mat pb = pose(0.0, 0.0, 15.0, 0.0, 0.0);
+  a->setPoseMatrix(pa.data());
+  CHECK(sg.checkAndResetRenderNeeded()); // the host draws a frame
+  b->setPoseMatrix(pb.data());           // the scene is already flagged
+  const std::uint64_t w0 = sg.boundsWalkCount();
+  sg.processEvents();
+  CHECK(sg.boundsWalkCount() - w0 == 1);
+  const cvc::bounding_box grid1 = sg.getGridNode()->bounds();
+  for (int i = 0; i < 6; ++i)
+    CHECK(grid1[i] == grid0[i]);         // the grid did not grow ...
+  CHECK(sg.checkAndResetRenderNeeded()); // ... yet b's move gets drawn too
+}
+
 // Structural parity with setTransform: same local, world, actor matrices and
 // world box, including through a parent whose pose its child inherits.
 void test_matches_set_transform() {
@@ -470,6 +813,15 @@ int main() {
   test_pose_reaches_state_without_reapplying();
   test_identical_pose_is_a_no_op();
   test_detached_node();
+  test_set_transform_supersedes_a_queued_pose();
+  test_pose_being_flushed_is_superseded();
+  test_external_write_supersedes_a_queued_pose();
+  test_shed_pose_is_published_again_when_parked();
+  test_mirror_scene_follows_published_poses();
+  test_off_thread_pose_out_of_the_grid_needs_one_pump();
+  test_adding_nodes_costs_one_walk();
+  test_add_and_move_in_one_frame_costs_one_walk();
+  test_move_after_a_consumed_render_request_is_drawn();
   test_matches_set_transform();
   test_render_matches_set_transform();
 

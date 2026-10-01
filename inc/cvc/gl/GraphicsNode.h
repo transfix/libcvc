@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <boost/signals2.hpp>
+#include <cstdint>
 #include <cvc/core/world_units.h>
 #include <cvc/gl/SceneNode.h>
 #include <cvc/volume/bounding_box.h>
@@ -89,6 +90,13 @@ public:
   //     call -- and an owner-thread call drops any older parked pose.
   //   * Change-detected. An identical matrix is a no-op: no cascade, no actor
   //     Modified() (which would make the shadow baker re-bake), no publish.
+  //     The one exception: if the publisher has shed values since this node
+  //     last published, the unchanged pose is published again (state only),
+  //     because the shed value may have been ours.
+  //   * Safe to mix with setTransform/resetTransform and with external writes
+  //     to "matrix". Once a node has published a pose, those paths also queue
+  //     the matrix they set, so a pose still waiting to be flushed cannot be
+  //     written over the newer value later.
   //   * Like every move, it fires transformChanged once; the SceneGraph folds all
   //     the moves between two pumps into ONE world-bounds walk.
   // The result -- local, world and actor matrices, children, bounds -- is
@@ -331,6 +339,24 @@ private:
   void applyPoseMatrix(const double matrix[16]);
   void applyParkedPose();
   void publishPoseMatrix(const double matrix[16]);
+  // Called after any OTHER path puts a new matrix on this node and writes it to
+  // state directly (setTransform, resetTransform, an external "matrix" write).
+  // Re-queues the node's current matrix so it replaces a pose that is still
+  // waiting in the publisher, or one a flush is writing right now. Without this,
+  // that older pose would be written over the newer value, and a node that then
+  // stays still would never correct it.
+  void supersedePublishedMatrix();
+  // setPoseMatrix has published through a scene publisher at least once, so a
+  // pose of ours may be queued there. Never cleared, because "nothing queued
+  // any more" cannot be known without racing the flush. It stays false for a
+  // node that only uses setTransform, so that node's behaviour is unchanged.
+  // Atomic because setTransform may be called on any thread.
+  std::atomic<bool> m_matrixPublished{false};
+  // The publisher's dropped() count read just BEFORE our last pose publish
+  // (owner thread only). If dropped() has moved since then, the publisher may
+  // have shed our pose, so an unchanged pose is published again instead of
+  // being skipped as a no-op. See applyPoseMatrix.
+  std::uint64_t m_poseDropMark = 0;
   std::mutex m_poseMutex;                // guards m_parkedPose + m_posePending writes
   std::array<double, 16> m_parkedPose{}; // the latest off-thread pose, not yet applied
   // A parked pose is waiting (and one apply is queued for it). Atomic so the

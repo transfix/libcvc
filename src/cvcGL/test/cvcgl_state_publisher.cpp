@@ -298,6 +298,43 @@ void test_publish_matrix_formats_at_flush() {
   std::printf("  ok: publish_matrix formats the last matrix at flush, exactly\n");
 }
 
+// flushing() names the publisher whose flush the calling thread is in. Node
+// echo guards compare it with their own scene's publisher, so a write by a
+// different scene's publisher is not mistaken for their own. Nested flushes
+// report the innermost publisher, then the outer one again.
+void test_flushing_names_the_innermost_publisher() {
+  using cvc::gl::state_publisher;
+  cvc::app app;
+  state_publisher outer(app), inner(app); // no workers: flushed by hand here
+  assert(state_publisher::flushing() == nullptr && !state_publisher::in_flush());
+
+  const std::string outerPath = "flushing.outer", innerPath = "flushing.inner";
+  cvc::state::instance(app)(outerPath).value(std::string("0"));
+  cvc::state::instance(app)(innerPath).value(std::string("0"));
+  const state_publisher *seenOuter = nullptr, *seenInner = nullptr, *seenOuterAgain = nullptr;
+  const state_publisher *seenOtherThread = &outer;
+  boost::signals2::scoped_connection ci = cvc::state::instance(app)(innerPath).valueChanged.connect(
+      [&]() { seenInner = state_publisher::flushing(); });
+  boost::signals2::scoped_connection co =
+      cvc::state::instance(app)(outerPath).valueChanged.connect([&]() {
+        seenOuter = state_publisher::flushing();
+        // Thread-local: another thread is not inside this flush.
+        std::thread([&]() { seenOtherThread = state_publisher::flushing(); }).join();
+        inner.flush(); // a handler that drains a second publisher
+        seenOuterAgain = state_publisher::flushing();
+      });
+
+  inner.publish(innerPath, "1");
+  outer.publish(outerPath, "1");
+  outer.flush();
+  assert(seenOuter == &outer);
+  assert(seenInner == &inner);
+  assert(seenOuterAgain == &outer);
+  assert(seenOtherThread == nullptr);
+  assert(state_publisher::flushing() == nullptr && !state_publisher::in_flush());
+  std::printf("  ok: flushing() names the innermost publisher, per thread\n");
+}
+
 } // namespace
 
 int main() {
@@ -311,6 +348,7 @@ int main() {
   test_publisher_independent_of_pool();
   test_concurrent_flushers_keep_write_order();
   test_publish_matrix_formats_at_flush();
+  test_flushing_names_the_innermost_publisher();
   std::printf("cvcgl_state_publisher: OK\n");
   return 0;
 }

@@ -112,12 +112,23 @@ public:
   // GraphicsNode::handleStateChanged, and test/cvcgl_pose_echo.cpp).
   //
   // Thread-local rather than per-instance because flush() runs its writes on
-  // the calling thread, so a handler those writes fire is on that same thread;
-  // and a publisher only ever writes paths its own scene's nodes published, so
-  // there is no cross-scene confusion to disambiguate. Nesting is counted, not
-  // flagged, so a flush reached from inside a flush still reports correctly on
-  // the way back out.
+  // the calling thread, so a handler those writes fire is on that same thread.
+  // Nesting is counted, not flagged, so a flush reached from inside a flush
+  // still reports correctly on the way back out.
+  //
+  // "Some publisher is flushing" is NOT "my publisher is flushing", though. Two
+  // scenes can bind nodes to the same state path (a second view built with the
+  // same prefix to mirror the first), and then one scene's flush writes a path
+  // the other scene's node listens to. To that node the write is foreign and
+  // must be applied. A handler that is asking "is this my own echo?" wants
+  // flushing() and a comparison with its own scene's publisher.
   static bool in_flush();
+
+  // The publisher whose flush() the CALLING thread is inside right now, or
+  // nullptr. When flushes nest (a handler fired by one publisher's write drains
+  // another), this is the innermost, and the outer one is reported again once
+  // the inner flush returns.
+  static const state_publisher *flushing();
 
   // Start/stop the background flusher. `hz` is the flush cadence; matching the
   // world clock's rate keeps state updates in step with simulation ticks rather
