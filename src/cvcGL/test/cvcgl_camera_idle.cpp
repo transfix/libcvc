@@ -21,7 +21,8 @@
 //   F. nodes that change what is drawn without touching the renderer's prop
 //      list: a RibbonNode whose box grows as its track drives away from a still
 //      camera (its far end stays inside [near, far]), and an LOD node shown,
-//      hidden or switched to another rung.
+//      hidden or switched to another rung -- while a streaming node restyled
+//      or re-pinned to the box it already has (every frame) costs nothing.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -30,7 +31,9 @@
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/DrapedLinkNode.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/HeightFieldTexture.h>
 #include <cvc/gl/LodGraphicsNode.h>
 #include <cvc/gl/RibbonNode.h>
 #include <cvc/gl/SceneGraph.h>
@@ -309,6 +312,40 @@ static void streamingAndLod(cvc::app &app) {
   sg.processEvents();
   cam.update(0.016);
   chk(resets.take() == 0, "re-selecting the same rung does not");
+
+  // Restyles and re-pins that leave a streaming node's box where it is cost
+  // nothing: a link recoloured every frame (signal quality), a host re-pinning
+  // the same box every frame.
+  auto heights = std::make_shared<cvc::gl::HeightFieldTexture>(8, 8, -40.0, -40.0, 10.0, 10.0);
+  auto link = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::DrapedLinkNode>("link", heights, 12);
+  link->setEndpoints(-20.0f, -20.0f, 20.0f, 20.0f);
+  link->setStyle(1.0f, 0.5f, 0.2f, 0.6f, 1.0f, 1.0f);
+  sg.processEvents();
+  cam.update(0.016);
+  resets.take();
+  for (int i = 0; i < 20; ++i) {
+    link->setStyle(1.0f, 0.5f, 0.01f * static_cast<float>(i), 0.6f, 1.0f, 1.0f); // colour only
+    link->setEndpoints(-20.0f, -20.0f, 20.0f + 0.1f * static_cast<float>(i), 20.0f);
+    sg.processEvents();
+    cam.update(0.016);
+  }
+  chk(resets.take() == 0, "20 frames recolouring and moving a draped link: no re-fit");
+  link->setStyle(4.0f, 0.5f, 0.2f, 0.6f, 1.0f, 1.0f); // wider: its box grows
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "widening it (a bigger box) re-fits once");
+
+  const cvc::bounding_box pinned(-700, -700, -10, 700, 700, 10);
+  track->setReservedBounds(pinned);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "a new pinned box re-fits once");
+  for (int i = 0; i < 10; ++i) {
+    track->setReservedBounds(pinned);
+    sg.processEvents();
+    cam.update(0.016);
+  }
+  chk(resets.take() == 0, "re-pinning the same box every frame does not");
 }
 
 static bool canRasterise(cvc::app &app) {

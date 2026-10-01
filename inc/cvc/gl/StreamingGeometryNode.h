@@ -261,6 +261,9 @@ private:
   bool m_boundsPending = false;
   bool m_boundsPinned = false;
   cvc::bounding_box m_bounds;
+  // The box last handed to the mapper. Owner/render thread only (the ctor,
+  // applyPending, setDerivedBoundsNow): an apply of the same box is a no-op.
+  cvc::bounding_box m_appliedBounds;
   std::unique_ptr<StreamingLayout> m_pendingLayout;
   std::size_t m_triangleCount = 0;
   // The SceneGraph::postEventCoalesced key of this node's applies: the address

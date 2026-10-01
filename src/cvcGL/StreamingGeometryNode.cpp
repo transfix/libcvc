@@ -56,6 +56,11 @@ void toArray(const cvc::bounding_box &b, double out[6]) {
   out[4] = b.minz;
   out[5] = b.maxz;
 }
+
+bool sameBox(const cvc::bounding_box &a, const cvc::bounding_box &b) {
+  return a.minx == b.minx && a.miny == b.miny && a.minz == b.minz && a.maxx == b.maxx &&
+         a.maxy == b.maxy && a.maxz == b.maxz;
+}
 } // namespace
 
 StreamingGeometryNode::StreamingGeometryNode(cvc::app &ctx, const std::string &statePath,
@@ -73,6 +78,7 @@ StreamingGeometryNode::StreamingGeometryNode(cvc::app &ctx, const std::string &s
   double b[6];
   toArray(m_bounds, b);
   m_core->setReservedBounds(b);
+  m_appliedBounds = m_bounds;
 
   // Draw-time uniforms + the subclass shader hook, in every pass.
   m_uniformCb = vtkSmartPointer<vtkCallbackCommand>::New();
@@ -255,26 +261,24 @@ bool StreamingGeometryNode::reservedBoundsPinned() const {
 }
 
 void StreamingGeometryNode::setDerivedBoundsNow(const cvc::bounding_box &bounds) {
-  bool changed = false;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_boundsPinned)
       return;
-    changed = bounds.minx != m_bounds.minx || bounds.miny != m_bounds.miny ||
-              bounds.minz != m_bounds.minz || bounds.maxx != m_bounds.maxx ||
-              bounds.maxy != m_bounds.maxy || bounds.maxz != m_bounds.maxz;
     m_bounds = bounds; // a pending apply re-sends this same (latest) box
   }
+  if (sameBox(bounds, m_appliedBounds))
+    return; // what the mapper already reports
   if (m_core) {
     double b[6];
     toArray(bounds, b);
     m_core->setReservedBounds(b);
   }
+  m_appliedBounds = bounds;
   // The box VTK culls and clips by moved: a camera holding still re-fits its
   // clipping range to it (CameraController::update watches contentVersion).
-  if (changed)
-    if (SceneGraph *sg = getSceneGraph())
-      sg->markContentChanged();
+  if (SceneGraph *sg = getSceneGraph())
+    sg->markContentChanged();
 }
 
 void StreamingGeometryNode::setPickable(bool pickable) {
@@ -443,7 +447,9 @@ void StreamingGeometryNode::applyPending() {
     if (m_boundsPending) {
       bounds = m_bounds;
       m_boundsPending = false;
-      boundsChanged = true;
+      // Staged is not changed: setReservedBounds and a restyle's re-derived box
+      // stage whatever they are given, often the very box already applied.
+      boundsChanged = !sameBox(bounds, m_appliedBounds);
     }
     if (m_drawRangePending) {
       drawFirst = m_drawFirst;
@@ -480,6 +486,7 @@ void StreamingGeometryNode::applyPending() {
     double b[6];
     toArray(bounds, b);
     m_core->setReservedBounds(b);
+    m_appliedBounds = bounds;
     updateBoundingBoxNode();
   }
   if (rangeChanged)
