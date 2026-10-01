@@ -63,14 +63,16 @@
  *   A lane completion only reaches the scheduler's thread-safe ingress queue. The thread that
  *   drives the scheduler must, EVERY frame:
  *
- *     sched.drain_ingress(); // deliver lane posts, readying their receivers
  *     sched.wake_awaiting(); // re-ready (await ...) frame-yielders, once per frame
- *     sched.sync_step();     // UNCONDITIONAL: wakes (sleep ...) processes that are due
+ *     sched.sync_step();     // UNCONDITIONAL: drains the ingress (delivering lane posts, readying
+ *                            // their receivers), then wakes (sleep ...) processes that are due
  *     sched.sync_run(steps, secs);
  *
- *   sync_run() steps only while has_runnable() is true, and sleepers are woken only inside step(),
- *   so a pump without the sync_step() call never wakes a process that sleeps while nothing else
- *   is runnable: a (while t (sleep (msg-recv (sim-launch)))) loop stops after its first sleep.
+ *   sync_run() steps only while has_runnable() is true, and the ingress is drained and sleepers
+ *   woken only inside step(), so a pump without the sync_step() call never delivers a lane post
+ *   to, or wakes, a process parked while nothing else is runnable: a
+ *   (while t (sleep (msg-recv (sim-launch)))) loop stops after its first sleep. (A driver that
+ *   skips sync_step() must call sched.drain_ingress() itself before sync_run.)
  *   pump_exec_frame() is this pump, plus run_deferred() on the lanes passed to it.
  *
  * BUILD FLAG
@@ -138,9 +140,10 @@ public:
   bool submit(job j);
 
   /// Refuse new jobs, run every job already queued, then join the worker (a deferred lane runs them
-  /// on the caller). Idempotent and thread-safe. Called from one of the lane's own jobs it only
-  /// marks the lane stopping (a thread cannot join itself); the destructor or a later stop() from
-  /// another thread completes the join.
+  /// on the caller). Idempotent and thread-safe. Called from one of the lane's own jobs -- or from
+  /// another lane's job drained inside one of them -- it only marks the lane stopping (a thread
+  /// cannot join itself, nor wait out a drain it is running); the destructor or a later stop() from
+  /// outside the lane's jobs completes the join or the drain.
   void stop();
 
   /// Deferred lanes: run up to `max_jobs` of the jobs queued at entry, in FIFO order, on the
@@ -239,8 +242,8 @@ state_exec::value_t future_lane_task(async_lane &lane, state_exec::async_schedul
                                      lane_task_work work, lane_task_on_error on_error);
 
 /// One frame of the scheduler pump, in the required order: run_deferred() on each of `lanes` (a
-/// no-op for threaded lanes), then sched.drain_ingress(), sched.wake_awaiting(), one
-/// UNCONDITIONAL sched.sync_step() (wakes due sleepers even when nothing is runnable), and
+/// no-op for threaded lanes), then sched.wake_awaiting(), one UNCONDITIONAL sched.sync_step()
+/// (drains the ingress and wakes due sleepers even when nothing is runnable), and
 /// sched.sync_run(max_steps, max_time). Call once per frame on the scheduler's thread. Returns the
 /// number of deferred lane jobs run. The defaults are a render-loop budget (20000 steps, 3 ms).
 std::size_t pump_exec_frame(state_exec::async_scheduler &sched,

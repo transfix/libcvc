@@ -4,7 +4,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
 #include <cvc/core/state.h>
@@ -44,6 +47,40 @@ template <class F> bool wait_until(F done, std::chrono::milliseconds timeout = 5
 }
 
 se::value_t err_value(const std::string &e) { return se::value_t("err: " + e); }
+
+// Aborts the test binary with `what` unless destroyed within `timeout`. Used where a regression
+// would spin forever ON THE TEST THREAD, which no gtest assertion can interrupt, so it fails fast
+// instead of hanging CI until the ctest timeout.
+class hang_watchdog {
+public:
+  explicit hang_watchdog(std::string what, std::chrono::milliseconds timeout = 10000ms)
+      : what_(std::move(what)) {
+    thread_ = std::thread([this, timeout] {
+      std::unique_lock<std::mutex> lk(m_);
+      if (!cv_.wait_for(lk, timeout, [this] { return disarmed_; })) {
+        std::fprintf(stderr, "hang_watchdog: %s\n", what_.c_str());
+        std::abort();
+      }
+    });
+  }
+  ~hang_watchdog() {
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      disarmed_ = true;
+    }
+    cv_.notify_one();
+    thread_.join();
+  }
+  hang_watchdog(const hang_watchdog &) = delete;
+  hang_watchdog &operator=(const hang_watchdog &) = delete;
+
+private:
+  std::string what_;
+  std::mutex m_;
+  std::condition_variable cv_;
+  bool disarmed_ = false;
+  std::thread thread_;
+};
 
 } // namespace
 
@@ -279,6 +316,90 @@ TEST(AsyncLane, DeferredStopRunsTheRestOnTheCaller) {
   EXPECT_EQ(threaded.run_deferred(), 0u) << "run_deferred is a no-op on a threaded lane";
 }
 
+// run_job releases a job's captures BEFORE the job counts as finished, so an owner that sees
+// in_flight() == 0 knows the lane holds none of its objects any more. The capture's deleter runs on
+// the thread that releases it and records the counters at that moment.
+TEST(AsyncLane, JobCapturesAreReleasedBeforeTheJobCountsAsDone) {
+  for (const lane_mode mode : {lane_mode::threaded, lane_mode::deferred}) {
+    SCOPED_TRACE(mode == lane_mode::threaded ? "threaded" : "deferred");
+    async_lane lane("release", mode);
+    std::atomic<std::size_t> in_flight_at_release{99};
+    std::atomic<std::uint64_t> completed_at_release{99};
+    auto capture = std::shared_ptr<int>(new int(7), [&](int *p) {
+      in_flight_at_release = lane.in_flight();
+      completed_at_release = lane.completed();
+      delete p;
+    });
+    const std::weak_ptr<int> watch = capture;
+    ASSERT_TRUE(lane.submit([capture = std::move(capture)] { (void)*capture; }));
+    if (mode == lane_mode::deferred)
+      EXPECT_EQ(lane.run_deferred(), 1u);
+    ASSERT_TRUE(wait_until([&] { return lane.in_flight() == 0; }));
+    EXPECT_TRUE(watch.expired()) << "the lane still held the job's capture at in_flight() == 0";
+    EXPECT_EQ(in_flight_at_release.load(), 1u) << "the capture outlived the job's in_flight count";
+    EXPECT_EQ(completed_at_release.load(), 0u) << "the capture outlived the job's completion";
+  }
+}
+
+// stop() on a deferred lane whose drain is further up THIS thread's stack -- B's job drains lane C,
+// and C's job stops B -- must only mark B stopping, exactly like a stop() from B's own job. Waiting
+// for B's drain to end would spin forever (this thread owns it) and hang a single-threaded wasm.
+TEST(AsyncLane, StopFromANestedDrainOfAnotherLaneOnlyMarksTheLane) {
+  hang_watchdog watchdog("a deferred stop() from a nested drain of another lane spun forever");
+  std::vector<std::string> order;
+  std::size_t b_reentered = 99;
+  async_lane b("b", lane_mode::deferred);
+  async_lane c("c", lane_mode::deferred);
+  c.submit([&] {
+    b_reentered = b.run_deferred(); // B is draining further up: a no-op, not a re-entry
+    order.push_back("c: stop b");
+    b.stop();
+    order.push_back("c: stopped b");
+  });
+  b.submit([&] {
+    order.push_back("b1");
+    b.submit([&] { order.push_back("b-late"); }); // beyond this drain's budget: waits
+    EXPECT_EQ(c.run_deferred(), 1u);
+  });
+  b.submit([&] { order.push_back("b2"); }); // queued before the stop: runs in this drain
+  EXPECT_EQ(b.run_deferred(), 2u);
+  EXPECT_EQ(order, (std::vector<std::string>{"b1", "c: stop b", "c: stopped b", "b2"}));
+  EXPECT_EQ(b_reentered, 0u);
+  EXPECT_EQ(c.failed(), 0u) << c.last_error();
+  EXPECT_TRUE(b.stopped());
+  EXPECT_FALSE(b.submit([] {}));
+  EXPECT_EQ(b.pending(), 1u);
+  b.stop(); // from outside any drain: runs the rest on the caller
+  EXPECT_EQ(order.back(), "b-late");
+  EXPECT_EQ(b.in_flight(), 0u);
+}
+
+// The threaded form of the same nesting: a threaded lane's job drains a deferred lane whose job
+// stops the threaded lane. That stop() runs on the threaded lane's own worker, so it must only mark
+// the lane; joining would throw resource_deadlock_would_occur into the deferred lane's job.
+TEST(AsyncLane, StopFromAnotherLanesJobOnTheWorkerDoesNotSelfJoin) {
+  std::promise<void> gate;
+  std::shared_future<void> gate_open = gate.get_future().share();
+  std::promise<void> drained;
+  std::future<void> drained_f = drained.get_future();
+  std::atomic<int> after{0};
+  async_lane d("d", lane_mode::deferred);
+  async_lane t("t"); // destroyed first: its job drains d
+  d.submit([&t] { t.stop(); });
+  ASSERT_TRUE(t.submit([&, gate_open] {
+    gate_open.wait(); // hold the worker until the job below is queued too
+    d.run_deferred();
+    drained.set_value();
+  }));
+  ASSERT_TRUE(t.submit([&after] { ++after; })); // queued before the stop: still drained
+  gate.set_value();
+  drained_f.wait();
+  EXPECT_TRUE(t.stopped());
+  EXPECT_EQ(d.failed(), 0u) << d.last_error();
+  t.stop(); // from this thread: completes the join
+  EXPECT_EQ(after.load(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // state_exec integration
 // ---------------------------------------------------------------------------
@@ -481,6 +602,26 @@ TEST_F(LaneTaskTest, LaunchReturnsAUniqueHashChannelPerTask) {
   sched.drain_ingress();
   EXPECT_TRUE(take(a).has_value());
   EXPECT_TRUE(take(b).has_value());
+}
+
+// pump_exec_frame must re-ready (await ...) frame-yielders once per frame: a resident that ticks
+// and then yields a frame advances exactly one tick per pump, and never without one.
+TEST_F(LaneTaskTest, PumpAdvancesAnAwaitFrameYielderOncePerFrame) {
+  int ticks = 0; // written by tick, which runs on the pump (this thread)
+  proc_ctx &c = make_ctx("demo3");
+  se::builtins::register_fn(c.env, "tick", [&ticks](std::span<const se::value_t>) {
+    ++ticks;
+    return se::value_t();
+  });
+  const int pid = spawn(c, "(while t (begin (tick) (await 0)))");
+  for (int frame = 1; frame <= 5; ++frame) {
+    // A generous time budget, so only the frame boundary limits the run.
+    cvc::pump_exec_frame(sched, {}, 20000, 1.0);
+    ASSERT_EQ(ticks, frame) << "the frame-yielder did not advance exactly once on frame " << frame;
+    ASSERT_EQ(status(pid), se::process_status::waiting);
+  }
+  sched.sync_run(1000, 1.0); // no frame boundary: nothing advances
+  EXPECT_EQ(ticks, 5);
 }
 
 // Regression (plan critique: "live sim stalls"): a resident (while t (sleep (msg-recv

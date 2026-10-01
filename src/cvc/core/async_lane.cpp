@@ -21,19 +21,33 @@ namespace se = state_exec;
 
 namespace {
 
-// The lane whose job is running on this thread (the worker thread for its whole life; the pump
-// thread while it runs a deferred lane's jobs). stop() and run_deferred() use it to detect a call
-// made from inside one of the lane's own jobs, which must neither join itself nor re-enter the
-// drain.
-thread_local const async_lane *t_running_lane = nullptr;
+struct running_lane_scope;
+
+// The innermost lane running a job on this thread; each scope links to the one it nests in. A
+// threaded lane's worker holds its scope for its whole life; a deferred drain holds one while it
+// runs, and a job of one lane can drain another lane, so the chain can be several lanes deep.
+thread_local const running_lane_scope *t_running_top = nullptr;
 
 struct running_lane_scope {
-  const async_lane *prev;
-  explicit running_lane_scope(const async_lane *l) : prev(t_running_lane) { t_running_lane = l; }
-  ~running_lane_scope() { t_running_lane = prev; }
+  const async_lane *lane;
+  const running_lane_scope *outer;
+  explicit running_lane_scope(const async_lane *l) : lane(l), outer(t_running_top) {
+    t_running_top = this;
+  }
+  ~running_lane_scope() { t_running_top = outer; }
   running_lane_scope(const running_lane_scope &) = delete;
   running_lane_scope &operator=(const running_lane_scope &) = delete;
 };
+
+// True when a job of `l` is running anywhere on this thread's stack: this is `l`'s worker, or a
+// drain of `l` sits further up, even beneath another lane's drain. stop() and run_deferred() must
+// then neither join this thread nor wait for (or re-enter) that drain, which this thread owns.
+bool lane_running_on_this_thread(const async_lane *l) {
+  for (const running_lane_scope *s = t_running_top; s; s = s->outer)
+    if (s->lane == l)
+      return true;
+  return false;
+}
 
 void name_this_thread(const std::string &lane_name) {
 #if defined(CVC_ASYNC_LANE_NAMES_THREADS)
@@ -151,10 +165,11 @@ void async_lane::stop() {
     std::lock_guard<std::mutex> lk(mtx_);
     stopping_ = true;
   }
-  // From inside one of this lane's own jobs: a thread cannot join itself, and a deferred drain is
-  // already running further up this stack. The lane is marked stopping; the join (or the rest of
-  // the drain) happens in the destructor or in a stop() from another thread.
-  if (t_running_lane == this)
+  // From inside one of this lane's jobs, directly or through another lane's job nested in it: a
+  // thread cannot join itself, and this thread owns the deferred drain further up its stack, so
+  // waiting for that drain would spin forever. The lane is marked stopping; the join (or the rest
+  // of the drain) happens in the destructor or in a stop() from outside the lane's jobs.
+  if (lane_running_on_this_thread(this))
     return;
   if (mode_ == lane_mode::threaded) {
     cv_.notify_all();
@@ -180,7 +195,7 @@ void async_lane::stop() {
 }
 
 std::size_t async_lane::run_deferred(std::size_t max_jobs) {
-  if (mode_ != lane_mode::deferred || t_running_lane == this)
+  if (mode_ != lane_mode::deferred || lane_running_on_this_thread(this))
     return 0;
   bool expected = false;
   if (!draining_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
@@ -311,9 +326,10 @@ std::size_t pump_exec_frame(se::async_scheduler &sched, std::initializer_list<as
   for (async_lane *lane : lanes)
     if (lane)
       ran += lane->run_deferred(); // no-thread builds: the lane's work runs here, on the pump
-  sched.drain_ingress();           // deliver lane posts (sync_run alone never drains when idle)
   sched.wake_awaiting();           // (await ...) frame-yielders: once per frame
-  sched.sync_step();               // unconditional: wakes due sleepers when nothing is runnable
+  // Unconditional: its step() drains the ingress (delivering lane posts, which sync_run alone
+  // never does while nothing is runnable) and wakes due sleepers, so no separate drain_ingress().
+  sched.sync_step();
   sched.sync_run(max_steps, max_time);
   return ran;
 }
