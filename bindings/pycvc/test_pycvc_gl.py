@@ -115,6 +115,42 @@ def test_update_ops_no_rebuild():
     print("  ok: in-place update ops (move/scale/rotate/transform/color/data) — no rebuild")
 
 
+def test_set_pose_matrix():
+    """The per-frame pose path: a full matrix with no state-string round trip.
+
+    Many vehicles posed between two pumps cost ONE scene-bounds walk
+    (boundsWalkCount), and the pose lands exactly -- the same local and world
+    matrix setTransform would give.
+    """
+    sg = pycvc_gl.SceneGraph(app)
+    nodes = [sg.addGraphics("pm%d" % i, _make_tri()) for i in range(10)]
+    sg.processEvents()  # registration's own walk
+
+    # A quarter turn about Z plus a translation, in exactly-representable doubles.
+    m = [0.0, -1.0, 0.0, 3.5, 1.0, 0.0, 0.0, -2.25, 0.0, 0.0, 1.0, 0.125, 0.0, 0.0, 0.0, 1.0]
+    w0 = sg.boundsWalkCount()
+    for n in nodes:
+        n.setPoseMatrix(m)
+    sg.processEvents()
+    assert sg.boundsWalkCount() - w0 == 1, sg.boundsWalkCount() - w0
+    assert list(nodes[0].get_transform()) == m
+    assert list(nodes[-1].get_world_transform()) == m
+
+    # Same matrix through setTransform: same result.
+    ref = sg.addGraphics("pm_ref", _make_tri())
+    ref.setTransform(m)
+    sg.processEvents()
+    assert list(ref.get_world_transform()) == list(nodes[0].get_world_transform())
+
+    try:
+        nodes[0].setPoseMatrix([1, 2, 3])
+    except Exception:
+        pass
+    else:
+        raise AssertionError("setPoseMatrix must require 16 elements")
+    print("  ok: setPoseMatrix poses exactly; N poses -> one bounds walk")
+
+
 def test_remove():
     sg = pycvc_gl.SceneGraph(app)
     sg.addGraphics("a", _make_tri())
@@ -282,6 +318,7 @@ if __name__ == "__main__":
     test_build_scene()
     test_volume_scattering()
     test_update_ops_no_rebuild()
+    test_set_pose_matrix()
     test_remove()
     test_scene_teardown_no_crash()
     test_scene_add_destroy_churn()

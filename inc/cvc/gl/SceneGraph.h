@@ -1,7 +1,9 @@
 #ifndef SCENEGRAPH_H
 #define SCENEGRAPH_H
 
+#include <atomic>
 #include <boost/signals2.hpp>
+#include <cstdint>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/VolumeNode.h>
@@ -206,7 +208,9 @@ public:
   void update();
 
   // Process pending events on the main thread
-  // This MUST be called regularly from the main event loop
+  // This MUST be called regularly from the main event loop. After the queue is
+  // drained it runs the world-bounds follow-up for any registered node that
+  // moved since the last call -- once, however many moved (boundsWalkCount()).
   void processEvents();
 
   // Post a callback to be executed on the main thread during processEvents()
@@ -380,6 +384,14 @@ public:
   // Compute combined bounding box of all graphics
   cvc::bounding_box computeGraphicsBounds() const; // public: lights are excluded
 
+  // How many computeGraphicsBounds() walks this scene has run, by anyone -- the
+  // scene's own world-bounds tracking and outside callers alike. A diagnostic
+  // counter for perf HUDs and tests. Node moves only FLAG the scene; the walk
+  // that follows them runs once per processEvents() however many registered
+  // nodes moved since the previous pump (and adds/removes coalesce the same
+  // way), so a frame that poses N vehicles should read one walk, not N or 2N.
+  std::uint64_t boundsWalkCount() const { return m_boundsWalks.load(std::memory_order_relaxed); }
+
   // Compute combined bounding box of all volumes
   cvc::bounding_box computeVolumeBounds() const;
 
@@ -443,9 +455,19 @@ private:
 
   // World-bounds tracking: the grid box GROWS to follow a node that moves out of
   // it. Each registered node's transformChanged signal is connected (connections
-  // owned here, so they die with the scene) to marshal onGraphicsBoundsChanged()
-  // onto the owner thread; grow-only so in-bounds animation never resizes the grid.
+  // owned here, so they die with the scene) to a slot that only raises
+  // m_boundsDirty; processEvents() then runs onGraphicsBoundsChanged() ONCE, on
+  // the owner thread, after draining the queue -- so every move up to and
+  // including those the drain itself applied is covered by one walk. It used to
+  // post one walk per move, and setTransform's echo made that two: N moving
+  // nodes cost 2N full walks a frame. Grow-only so in-bounds animation never
+  // resizes the grid.
   cvc::bounding_box m_worldBounds;
+  // The flags are declared BEFORE the connections that write them, so the
+  // connections are dropped first at destruction.
+  std::atomic<bool> m_boundsDirty{false};              // a tracked node moved since the last pump
+  std::atomic<bool> m_boundsRefreshQueued{false};      // one refreshWorldBounds() event is queued
+  mutable std::atomic<std::uint64_t> m_boundsWalks{0}; // see boundsWalkCount()
   std::vector<boost::signals2::scoped_connection> m_boundsConns;
   void trackNodeBounds(const std::shared_ptr<GraphicsNode> &node);
   void onGraphicsBoundsChanged();
@@ -453,7 +475,9 @@ private:
   // (add/remove) rather than one of them moving. onGraphicsBoundsChanged() is
   // deliberately grow-only so in-bounds animation cannot jitter the grid; that
   // is wrong here — an added node must be enclosed even from a degenerate start,
-  // and a removed one should let the grid shrink back.
+  // and a removed one should let the grid shrink back. Coalesced: one queued
+  // recompute covers every add/remove made before it runs, so building a scene
+  // of N nodes is N registrations and ONE walk, not N walks over up to N nodes.
   void refreshWorldBounds();
 
   // Multi-volume rendering state

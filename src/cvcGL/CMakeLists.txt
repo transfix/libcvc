@@ -339,6 +339,15 @@ add_executable(cvcgl_pose_echo test/cvcgl_pose_echo.cpp)
 target_link_libraries(cvcgl_pose_echo PRIVATE cvcGL)
 add_test(NAME cvcgl_pose_echo COMMAND cvcgl_pose_echo)
 
+# GraphicsNode::setPoseMatrix, the per-frame pose path for many moving nodes:
+# exact actor matrix, 100 poses between two pumps = ONE scene-bounds walk, an
+# off-thread call marshalled to the owner thread (latest-wins), the pose reaching
+# state without a second cascade, and pixel parity with setTransform (the render
+# part SKIPs when the build cannot rasterise).
+add_executable(cvcgl_pose_matrix test/cvcgl_pose_matrix.cpp)
+target_link_libraries(cvcgl_pose_matrix PRIVATE cvcGL)
+add_test(NAME cvcgl_pose_matrix COMMAND cvcgl_pose_matrix)
+
 # A node can outlive the scene that made it (removeGraphics hands it back; a
 # Python proxy or a viewer keeps holding it). Guards the raw back-pointers that
 # used to dangle in that window -- SceneGraph* (a pose write locked the freed

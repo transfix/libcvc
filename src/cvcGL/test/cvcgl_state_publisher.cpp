@@ -17,6 +17,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/state_publisher.h>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -255,6 +256,48 @@ void test_concurrent_flushers_keep_write_order() {
   std::printf("  ok: two concurrent flushers never invert write order\n");
 }
 
+// publish_matrix defers the text: the queue holds 16 doubles and flush()
+// writes format_matrix() of the LAST one, which parses back bit-for-bit. It
+// shares the per-path slot with publish(), so mixing the two on one path still
+// means last-writer-wins.
+void test_publish_matrix_formats_at_flush() {
+  cvc::app app;
+  SceneGraph sg(app);
+  auto &pub = sg.publisher();
+  pub.stop(); // drive the flushes by hand
+  const std::string path = "pubmat.node.matrix";
+
+  const double a[16] = {1, 0, 0, 0.1, 0, 1, 0, 1.0 / 3.0, 0, 0, 1, -2.5e7, 0, 0, 0, 1};
+  double b[16];
+  for (int i = 0; i < 16; ++i)
+    b[i] = a[i] * 0.7 + i;
+  pub.publish_matrix(path, a);
+  pub.publish_matrix(path, b); // coalesced: only b is formatted and written
+  assert(pub.pending() == 1);
+  pub.flush();
+  const std::string v = read(app, path);
+  assert(v == cvc::gl::state_publisher::format_matrix(b));
+  std::istringstream iss(v);
+  char comma;
+  for (int i = 0; i < 16; ++i) {
+    double x;
+    if (i > 0)
+      iss >> comma;
+    iss >> x;
+    assert(x == b[i] && "17 significant digits round-trip exactly");
+  }
+
+  pub.publish_matrix(path, a);
+  pub.publish(path, "text wins"); // the later write owns the slot
+  pub.flush();
+  assert(read(app, path) == "text wins");
+  pub.publish(path, "text first");
+  pub.publish_matrix(path, a);
+  pub.flush();
+  assert(read(app, path) == cvc::gl::state_publisher::format_matrix(a));
+  std::printf("  ok: publish_matrix formats the last matrix at flush, exactly\n");
+}
+
 } // namespace
 
 int main() {
@@ -267,6 +310,7 @@ int main() {
   test_teardown_joins_worker();
   test_publisher_independent_of_pool();
   test_concurrent_flushers_keep_write_order();
+  test_publish_matrix_formats_at_flush();
   std::printf("cvcgl_state_publisher: OK\n");
   return 0;
 }

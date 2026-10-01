@@ -8,10 +8,13 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/state_publisher.h>
+#include <iomanip>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -38,6 +41,27 @@ state_publisher::~state_publisher() {
 }
 
 void state_publisher::publish(const std::string &path, std::string value) {
+  enqueue(path, pending_value(std::move(value)));
+}
+
+void state_publisher::publish_matrix(const std::string &path, const double rowMajor[16]) {
+  std::array<double, 16> m;
+  std::copy(rowMajor, rowMajor + 16, m.begin());
+  enqueue(path, pending_value(m));
+}
+
+std::string state_publisher::format_matrix(const double rowMajor[16]) {
+  std::ostringstream oss;
+  oss << std::setprecision(17); // exact round-trip through the state tree
+  for (int i = 0; i < 16; ++i) {
+    if (i > 0)
+      oss << ",";
+    oss << rowMajor[i];
+  }
+  return oss.str();
+}
+
+void state_publisher::enqueue(const std::string &path, pending_value value) {
   std::lock_guard<std::mutex> lock(m_mutex);
   auto it = m_pending.find(path);
   if (it != m_pending.end()) {
@@ -71,7 +95,7 @@ void state_publisher::flush() {
   // inversion this prevents. Taken before m_mutex and never the other way, so
   // the two cannot deadlock against each other.
   std::lock_guard<std::recursive_mutex> flushOrder(m_flushMutex);
-  std::unordered_map<std::string, std::string> batch;
+  std::unordered_map<std::string, pending_value> batch;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_pending.empty())
@@ -87,8 +111,12 @@ void state_publisher::flush() {
     // operator()(path) resolves (creating as needed) and value() fires
     // valueChanged only on an actual change — the same path pycvc's state_set
     // uses. Node handlers marshal to their owner thread, so a write from here
-    // is safe.
-    cvc::state::instance(m_ctx)(kv.first).value(kv.second);
+    // is safe. A publish_matrix() value is formatted HERE, off the publishing
+    // thread, and only for the one value per path that survived coalescing.
+    if (const auto *m = std::get_if<std::array<double, 16>>(&kv.second))
+      cvc::state::instance(m_ctx)(kv.first).value(format_matrix(m->data()));
+    else
+      cvc::state::instance(m_ctx)(kv.first).value(std::get<std::string>(kv.second));
   }
   m_written.fetch_add(batch.size(), std::memory_order_relaxed);
 }

@@ -151,6 +151,79 @@ void GraphicsNode::setTransform(const double matrix[16]) {
   updateTransform();
 }
 
+void GraphicsNode::setPoseMatrix(const double matrix[16]) {
+  SceneGraph *sg = getSceneGraph();
+  if (!sg || sg->onOwnerThread()) {
+    // Applied here and now. A pose another thread parked earlier is older than
+    // this one, so drop it rather than let its queued apply land on top at the
+    // next pump. The atomic read keeps the common case (nothing parked) free of
+    // the lock.
+    if (m_posePending.load(std::memory_order_acquire)) {
+      std::lock_guard<std::mutex> lock(m_poseMutex);
+      m_posePending.store(false, std::memory_order_relaxed);
+    }
+    applyPoseMatrix(matrix);
+    return;
+  }
+
+  // Off the owner thread: touch nothing VTK-side here. Park the matrix in the
+  // one-slot mailbox and queue ONE apply for it; later calls before that apply
+  // runs just overwrite the slot (latest wins), so a simulation posing faster
+  // than the frame rate cannot grow the event queue.
+  bool queueApply = false;
+  {
+    std::lock_guard<std::mutex> lock(m_poseMutex);
+    std::copy(matrix, matrix + 16, m_parkedPose.begin());
+    queueApply = !m_posePending.exchange(true, std::memory_order_acq_rel);
+  }
+  if (queueApply)
+    runOnMainThread([this]() { applyParkedPose(); }); // weak-guarded against node teardown
+}
+
+void GraphicsNode::applyParkedPose() {
+  double m[16];
+  {
+    std::lock_guard<std::mutex> lock(m_poseMutex);
+    if (!m_posePending.load(std::memory_order_relaxed))
+      return; // an owner-thread call superseded it
+    std::copy(m_parkedPose.begin(), m_parkedPose.end(), m);
+    m_posePending.store(false, std::memory_order_relaxed);
+  }
+  applyPoseMatrix(m);
+}
+
+void GraphicsNode::applyPoseMatrix(const double matrix[16]) {
+  // Change detection. A parked vehicle re-sent every frame must cost nothing:
+  // no cascade, no actor Modified() (the shadow baker re-bakes on that), no
+  // publish, no bounds walk. vtkMatrix4x4 stores row-major, as the input is.
+  const double *cur = m_transform->GetData();
+  if (std::equal(matrix, matrix + 16, cur))
+    return;
+  m_transform->DeepCopy(matrix);
+  publishPoseMatrix(matrix);
+  updateTransform(); // one cascade, one transformChanged
+}
+
+void GraphicsNode::publishPoseMatrix(const double matrix[16]) {
+  if (m_pathMatrix.empty())
+    return;
+  // Through THIS scene's publisher, which formats on the flushing thread; the
+  // echo is recognised in handleStateChanged (state_publisher::in_flush()).
+  if (SceneGraph *sg = getSceneGraph()) {
+    sg->publisher().publish_matrix(m_pathMatrix, matrix);
+    return;
+  }
+  // No scene, so no publisher: write directly (the slow path, but a scene-less
+  // node is not on an animation loop). The handler this fires runs inline on
+  // this thread; m_writingPose tells it the value is our own.
+  struct writing_scope {
+    bool &flag;
+    explicit writing_scope(bool &f) : flag(f) { flag = true; }
+    ~writing_scope() { flag = false; }
+  } writing(m_writingPose);
+  cvc::state::instance(app())(m_pathMatrix).value(state_publisher::format_matrix(matrix));
+}
+
 void GraphicsNode::setPosition(double x, double y, double z) {
   m_transform->SetElement(0, 3, x);
   m_transform->SetElement(1, 3, y);
@@ -460,10 +533,20 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
   // write arriving during a flush is this node's own, stale or not. Dropping it
   // loses nothing — setPosition() already applied the pose to m_transform.
   //
-  // Everything else keeps going through the check below: only position
-  // publishes (see setPosition), and a node with no scene writes state directly
+  // The same holds for "matrix", which setPoseMatrix publishes: the pose is
+  // already applied, so its echo -- current or stale -- is dropped here before
+  // it can re-parse 16 numbers and run the cascade a second time. (setTransform
+  // writes "matrix" directly rather than through the publisher, so its echo
+  // still takes the marshalled path below exactly as before.)
+  //
+  // Everything else keeps going through the check below: only position and
+  // the pose matrix publish, and a node with no scene writes state directly
   // and echoes back inline on this same thread, where the values do line up.
-  if (childState == "position" && state_publisher::in_flush())
+  if ((childState == "position" || childState == "matrix") && state_publisher::in_flush())
+    return;
+  // A scene-less node's setPoseMatrix writing its own value (see
+  // publishPoseMatrix): the echo arrives here, inline, during that write.
+  if (childState == "matrix" && m_writingPose)
     return;
 
   // Marshal to main thread via event queue
