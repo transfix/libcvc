@@ -275,8 +275,19 @@ void StreamingGeometryNode::setDerivedBoundsNow(const cvc::bounding_box &bounds)
     m_core->setReservedBounds(b);
   }
   m_appliedBounds = bounds;
-  // The box VTK culls and clips by moved: a camera holding still re-fits its
-  // clipping range to it (CameraController::update watches contentVersion).
+  noteExtentChanged();
+}
+
+void StreamingGeometryNode::noteExtentChanged() {
+  // A new box (grown over appended points, re-derived, re-laid out) is what VTK
+  // culls and clips by, and it changes no MTime: tell the scene, so a camera
+  // holding still re-fits its clipping range to it -- if the range is fitted to
+  // this prop at all. vtkRenderer::ComputeVisiblePropBounds skips a prop with
+  // UseBounds off (what a host sets on dynamic overlays to keep them out of the
+  // fit) or Visibility off; a re-fit for one of those would change nothing.
+  vtkActor *a = actor();
+  if (!a || !a->GetUseBounds() || !a->GetVisibility())
+    return;
   if (SceneGraph *sg = getSceneGraph())
     sg->markContentChanged();
 }
@@ -464,12 +475,8 @@ void StreamingGeometryNode::applyPending() {
     }
   }
   ++m_applies;
-  // A new box (grown over appended points, re-derived, re-laid out) is what VTK
-  // culls and clips by, and it changes no MTime: tell the scene, so a camera
-  // holding still re-fits its clipping range to it.
   if (boundsChanged || layoutChanged)
-    if (SceneGraph *sg = getSceneGraph())
-      sg->markContentChanged();
+    noteExtentChanged();
   if (pickChanged && actor())
     actor()->SetPickable(pick ? 1 : 0);
   // Streamed writes bump no MTime by design (that is what keeps the upload

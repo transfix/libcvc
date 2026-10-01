@@ -346,6 +346,28 @@ static void streamingAndLod(cvc::app &app) {
     cam.update(0.016);
   }
   chk(resets.take() == 0, "re-pinning the same box every frame does not");
+
+  // A streaming node the host keeps out of the clipping fit (UseBounds off, as
+  // demo3 does for its dynamic overlays) grows without re-fitting anything.
+  auto loose = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::RibbonNode>(
+      "loose", 64, 1.0f, cvc::bounding_box(0, 0, 0, 10, 10, 1));
+  loose->prop()->UseBoundsOff();
+  loose->append(1, 5, 0.5f);
+  sg.processEvents();
+  cam.update(0.016);
+  resets.take();
+  for (int k = 1; k <= 20; ++k) {
+    double p[3];
+    ahead(vc, 30.0 * k, p);
+    loose->append(static_cast<float>(p[0]), static_cast<float>(p[1]), static_cast<float>(p[2]));
+    sg.processEvents();
+    cam.update(0.016);
+  }
+  chk(resets.take() == 0, "a UseBounds-off ribbon growing away: no re-fit");
+  loose->prop()->UseBoundsOn();
+  sg.markContentChanged(); // the documented hand-off
+  cam.update(0.016);
+  chk(resets.take() == 1, "turned back on, with markContentChanged(): re-fitted");
 }
 
 static bool canRasterise(cvc::app &app) {

@@ -108,7 +108,11 @@ struct StreamStats {
 //   * Bounds come from the reserved box, never from the points: writes do not
 //     call Modified(), so VTK never re-walks them. Keep the content inside it
 //     (a RibbonNode grows its box to fit what it appends; a DrapedLinkNode
-//     derives its box from the height field).
+//     derives its box from the height field). A box that actually changes
+//     bumps SceneGraph::contentVersion(), so a still CameraController re-fits
+//     its clipping range to it -- unless the actor is left out of that fit
+//     (UseBounds or Visibility off). A host that turns UseBounds back on should
+//     call SceneGraph::markContentChanged().
 //   * NOT PICKABLE by default. VTK's CPU pickers (SceneRenderer::pickWorld's
 //     vtkCellPicker) intersect the polydata, not what the shader draws: the
 //     reserved-but-unwritten capacity, triangles outside the draw range and a
@@ -247,6 +251,7 @@ private:
   static void onUpdateShader(vtkObject *caller, unsigned long eid, void *clientData,
                              void *callData);
   void requestRenderIfAttached();
+  void noteExtentChanged(); // bump SceneGraph::contentVersion if the prop is fitted
 
   StreamingMapperKind m_kind = StreamingMapperKind::Classic;
   StreamingMapperCore *m_core = nullptr; // owned by the mapper (GeometryNode::mapper())

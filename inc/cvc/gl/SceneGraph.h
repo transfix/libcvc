@@ -437,7 +437,7 @@ public:
   std::uint64_t contentVersion() const { return m_contentVersion.load(std::memory_order_acquire); }
   // Bump contentVersion() for a change the scene cannot see on its own: vertices
   // rewritten in place (GeometryNode::updateVertices) so that a mesh now reaches
-  // well outside where it was. Any thread.
+  // well outside where it was, a prop's UseBounds turned back on. Any thread.
   void markContentChanged() { m_contentVersion.fetch_add(1, std::memory_order_acq_rel); }
 
   // Compute combined bounding box of all volumes
