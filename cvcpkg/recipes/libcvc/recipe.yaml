@@ -121,7 +121,11 @@ recipe:
   # must rebuild. 12, not 7: native builds were already auto-bumped to +cvc.11 on the catalog,
   # and the wasm publish packs verbatim at this revision, so 12 keeps every platform monotonic.
   # cvcgl bumps in lockstep (8 -> 12) and re-pins this build.
-  cvc_revision: 12
+  # Bumped 12 -> 14: ships cvc::async_lane (#509, the persistent FIFO worker lane for
+  # state_exec) and the pycvc LOD bindings (#511) to every platform, with cvcGL's
+  # setPoseMatrix (#508) in lockstep. 14, not 13: native was already auto-bumped to +cvc.13
+  # (from #508) while the wasm publish packs verbatim at this revision.
+  cvc_revision: 14
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
