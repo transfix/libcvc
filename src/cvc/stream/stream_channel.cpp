@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cassert>
 #include <cvc/stream/stream_channel.h>
 
 namespace cvc {
@@ -144,6 +145,11 @@ std::int64_t stream_channel::publish(const frame_pool::lease &l, std::size_t use
 
 std::int64_t stream_channel::publish_external(const std::uint8_t *data, std::size_t size,
                                               double pts, std::shared_ptr<void> keepalive) {
+  // Debug guard against the documented caller contract: `keepalive` must own
+  // `data` and `data` must be non-null (a null keepalive with a live `data`
+  // yields a frame that pins nothing -> UAF when the caller frees its buffer).
+  assert(data && "publish_external: null data");
+  assert(keepalive && "publish_external: null keepalive (must own data)");
   const std::int64_t seq = seq_.fetch_add(1, std::memory_order_relaxed);
   // Build a frame that borrows the caller's storage directly (no pool slab). The
   // keepalive co-owns `data` for the frame's whole life, so a subscriber that

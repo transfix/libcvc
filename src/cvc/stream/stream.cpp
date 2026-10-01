@@ -111,7 +111,10 @@ void stream::update_stats() {
   if (!stats_node_)
     return;
   stream_stats st;
-  st.published = pool_ ? pool_->total_published() : 0;
+  // Use the CHANNEL's count (= seq_), which includes both pool and external
+  // (publish_external) publishes; pool_->total_published() would undercount a
+  // producer that aliases its own buffers via publish_external.
+  st.published = channel_ ? channel_->total_published() : 0;
   st.borrow_fail = pool_ ? pool_->total_borrow_fail() : 0;
   st.slabs_in_use = pool_ ? pool_->in_use() : 0;
   st.subscribers = channel_ ? channel_->subscriber_count() : 0;
