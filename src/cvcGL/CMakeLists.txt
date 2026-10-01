@@ -367,6 +367,12 @@ add_executable(cvcgl_texture_zerocopy test/cvcgl_texture_zerocopy.cpp)
 target_link_libraries(cvcgl_texture_zerocopy PRIVATE cvcGL)
 add_test(NAME cvcgl_texture_zerocopy COMMAND cvcgl_texture_zerocopy)
 
+# Phase-2 stream sink: StreamTextureBinding aliases a cvc::stream video frame into
+# a GeometryNode's texture zero-copy on each tick (end-to-end, headless).
+add_executable(cvcgl_stream_texture test/cvcgl_stream_texture.cpp)
+target_link_libraries(cvcgl_stream_texture PRIVATE cvcGL)
+add_test(NAME cvcgl_stream_texture COMMAND cvcgl_stream_texture)
+
 # SceneRenderer: a render target held open across frames (one GL context for a
 # whole sequence, a camera that survives the next render, live scene updates).
 add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
