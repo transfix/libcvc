@@ -113,7 +113,15 @@ recipe:
   # skipped. This ships a cvcConfig.cmake.in that appends the closure whenever the MagickCore
   # target exists (self-guarding find_library; harmless dedup for a shared ImageMagick).
   # Reships to embed the corrected consumer config. cvcgl bumps in lockstep (6 -> 7).
-  cvc_revision: 6
+  # Bumped 6 -> 12 (3.4.0 lineage): ships the LOD family -- metric simplify + seam-aware QEM
+  # and progressive pyramids (#505), tiled partitioning (#497), the hardened scene.cvch5 store
+  # with opt-in blob authentication (#504), LodGraphicsNode visibility/lifetime fixes (#496),
+  # the exact-EDT speedup (#503) -- plus the hdf5_utils string-attribute overflow fix (#500).
+  # ABI: SceneNode gained virtuals (#496) and sim_world dropped a member (#503), so dependents
+  # must rebuild. 12, not 7: native builds were already auto-bumped to +cvc.11 on the catalog,
+  # and the wasm publish packs verbatim at this revision, so 12 keeps every platform monotonic.
+  # cvcgl bumps in lockstep (8 -> 12) and re-pins this build.
+  cvc_revision: 12
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
