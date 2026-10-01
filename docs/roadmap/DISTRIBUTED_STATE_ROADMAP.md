@@ -421,6 +421,60 @@ Delivered so far on `feature/phase9-telemetry`:
   - Failure mode: an aggregator stops receiving from a peer for > 3× publish interval and marks the peer `stale`.
   - Bench: 100-node simulated cluster, 1 Hz telemetry, assert per-node CPU overhead is < 1% and aggregator memory is bounded.
 
+### Phase 10: Replicated structured/binary node `data()` (codec-backed) — NOT STARTED
+
+Surfaced 2026-10-01 while reviewing the binary-messaging/streaming work (originally floated as the
+"snapshot binary gap"). On investigation the gap is **not** a snapshot-field tweak — it is the whole
+`data()` replication path, which is stubbed out end to end.
+
+**What already works (so this phase does NOT need to touch it):** a node's `value()` (a `std::string`)
+replicates byte-safely over both transports *and* survives a full-tree snapshot resync. IPC frames every
+string length-prefixed (`state_transport_ipc.cpp` `put_string`/`reader::str`), and proto3 `string` is a
+length-delimited field the C++ runtime passes arbitrary octets through. So a binary *value()* is fine on
+both the mutation and snapshot paths — there is no asymmetry to fix there.
+
+**The actual gap:** a node's `data()` (a `boost::any` holding structured/typed/binary payload — e.g. the
+`format_desc` a stream descriptor stores) does **not replicate at all**:
+
+- Nothing emits a `SET_DATA` mutation. `state_sync_adapter` only hooks `valueChanged` and emits
+  `set_value`; it never hooks `dataChanged`.
+- The apply side is an explicit no-op: `state_sync_adapter`'s `set_data` case is `// accept it but do not
+  decode … phase 2 will provide a codec registry`.
+- The snapshot serializer (`state_cluster_shard::snapshot()`) captures only `value()`, `comment`,
+  `hidden`, `read_only` — never `data()`.
+- The *carriers* already exist but are unused end to end: the journal's `state_payload`
+  (`none|inline_bytes|blob`), the proto `Mutation.SET_DATA` + `Payload{inline_bytes|blob}`, the blob store,
+  and `state_data_hydrator` (which can already reassemble + decode a blob-ref payload — but only once a
+  codec registry exists to decode it).
+
+So "binary data survives resync" presupposes a `data()`-replication path that was never built; it is the
+deferred **codec registry** the no-op comment names, not an extra `bytes` field on `SnapshotEntry`.
+
+**Design to close it:**
+
+1. **Codec registry** — `encode(const boost::any&, type_name) -> bytes` / `decode(bytes, type_name) ->
+   boost::any`, keyed by a registered `type_name`; pluggable per data type (volume, geometry, image, the
+   small structured types first). An unregistered type is skipped with a structured diagnostic, never a
+   silent corruption.
+2. **Emit** — `state_sync_adapter` hooks `dataChanged` and emits a `set_data` mutation carrying
+   `type_name` + `state_payload`: `inline_bytes` for small payloads, a content-addressed `blob_ref`
+   (through the existing blob store) above a threshold.
+3. **Apply** — the `set_data` case decodes via the registry (inline) or routes a `blob_ref` through
+   `state_data_hydrator` (fetch chunks → reassemble → decode → `node->data(decoded)`), replacing the
+   current no-op.
+4. **Snapshot** — add a `payload` (type_name + `state_payload`) to the `snapshot_entry` struct, the proto
+   `SnapshotEntry`, and the IPC snapshot wire format; populate it from `node.data()` via the registry in
+   `state_cluster_shard::snapshot()`; apply it on receive via the same registry/hydrator path as a
+   `set_data` mutation. (Also carry `type_name` for values, which the snapshot currently drops.)
+
+**Testing:** a typed `data()` value round-trips through (a) a live mutation and (b) a full snapshot
+resync, on both IPC and gRPC; a large payload round-trips as a blob-ref through the hydrator; an
+unregistered type degrades gracefully; echo-suppression still holds (a `set_data` apply must not re-emit).
+
+**Dependency note:** this is independent of the cvc::stream work but complements it — a replicated
+`/streams/<id>` descriptor (Phase 4 of the streaming roadmap) stores `format_desc` via `data()`, so it
+needs this to survive a cross-node resync.
+
 ## Testing Requirements
 
 Every production unit added for this feature must have unit tests in the same change or an explicitly documented reason why it cannot be tested yet. The network implementation must not be considered complete until it has integration, stress, and performance coverage.
