@@ -22,7 +22,10 @@
 //      list: a RibbonNode whose box grows as its track drives away from a still
 //      camera (its far end stays inside [near, far]), and an LOD node shown,
 //      hidden or switched to another rung -- while a streaming node restyled
-//      or re-pinned to the box it already has (every frame) costs nothing.
+//      or re-pinned to the box it already has (every frame) costs nothing;
+//   G. the grid and axis shown/hidden through their own nodes, one grid plane
+//      toggled through its state key, and a node that toggles its actor in
+//      place (SetVisibility, no prop-list change): one re-fit each.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -30,9 +33,11 @@
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/gl/AxisNode.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/DrapedLinkNode.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/GridNode.h>
 #include <cvc/gl/HeightFieldTexture.h>
 #include <cvc/gl/LodGraphicsNode.h>
 #include <cvc/gl/RibbonNode.h>
@@ -40,10 +45,15 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/lod/pyramid.h>
 #include <string>
+#include <vtkActor.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCamera.h>
+#include <vtkCellArray.h>
 #include <vtkCommand.h>
 #include <vtkNew.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
+#include <vtkPolyDataMapper.h>
 #include <vtkRenderer.h>
 
 using cvc::gl::CameraController;
@@ -370,6 +380,117 @@ static void streamingAndLod(cvc::app &app) {
   chk(resets.take() == 1, "turned back on, with markContentChanged(): re-fitted");
 }
 
+// A node that shows and hides its actor with SetVisibility, in place, the way
+// GridNode's planes and an LOD node's rungs do: the renderer's prop list never
+// changes, so only the content version tells a still camera.
+class InPlaceNode : public cvc::gl::GraphicsNode {
+public:
+  InPlaceNode(cvc::app &a, const std::string &path, const std::string &name)
+      : GraphicsNode(a, path, name) {
+    vtkNew<vtkPoints> pts;
+    pts->InsertNextPoint(-900.0, -900.0, -900.0);
+    pts->InsertNextPoint(-890.0, -890.0, -890.0);
+    vtkNew<vtkCellArray> verts;
+    const vtkIdType ids[2] = {0, 1};
+    verts->InsertNextCell(2, ids);
+    m_data->SetPoints(pts);
+    m_data->SetVerts(verts);
+    m_mapper->SetInputData(m_data);
+    m_actor->SetMapper(m_mapper);
+  }
+  cvc::bounding_box getBoundingBox() const override {
+    return cvc::bounding_box(-900, -900, -900, -890, -890, -890);
+  }
+  void addToRenderer(vtkRenderer *r) override {
+    GraphicsNode::addToRenderer(r);
+    if (r)
+      r->AddViewProp(m_actor);
+  }
+  void setVisible(bool v) override {
+    GraphicsNode::setVisible(v);
+    m_actor->SetVisibility(v ? 1 : 0);
+  }
+
+protected:
+  vtkProp *getProp() override { return nullptr; } // the actor is managed here
+
+private:
+  vtkNew<vtkPolyData> m_data;
+  vtkNew<vtkPolyDataMapper> m_mapper;
+  vtkNew<vtkActor> m_actor;
+};
+
+static void chromeAndInPlace(cvc::app &app) {
+  std::printf("G. chrome and in-place visibility\n");
+  vtkNew<vtkRenderer> ren;
+  SceneGraph sg(app, "idlechrome"); // grid and axis shown, attached to the renderer
+  sg.setRenderer(ren);
+  sg.addGraphics("a", box(0, 0, 0, 10));
+  sg.processEvents();
+  CameraController cam(app, "idlechrome.camera");
+  cam.setScene(&sg);
+  cam.setRenderer(ren);
+  cam.setCamera(ren->GetActiveCamera());
+  cam.frameBounds(0, 0, 0, 10, 10, 10);
+  sg.processEvents();
+  cam.update(0.016);
+  ResetCounter resets(ren);
+  auto idle = [&]() {
+    for (int i = 0; i < 3; ++i) {
+      sg.processEvents();
+      cam.update(0.016);
+    }
+    return resets.take();
+  };
+  chk(idle() == 0, "idle with the chrome shown");
+
+  // Shown and hidden through the nodes themselves (pycvc_gl wraps them), not
+  // the SceneGraph setters.
+  sg.getGridNode()->setVisible(false);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "the grid node hidden: one re-fit");
+  chk(idle() == 0, "then idle");
+  sg.getGridNode()->setVisible(true);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "the grid node shown: one re-fit");
+  sg.getAxisNode()->setVisible(false);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "the axis node hidden: one re-fit");
+  chk(idle() == 0, "then idle");
+  sg.getAxisNode()->setVisible(true);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "the axis node shown: one re-fit");
+
+  // One grid plane toggled (SetVisibility only, through its state key).
+  sg.getGridNode()->setXYPlaneVisible(false);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "a grid plane hidden: one re-fit");
+  chk(idle() == 0, "then idle");
+  sg.getGridNode()->setXYPlaneVisible(true);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "and shown again: one re-fit");
+
+  auto inplace = sg.getGraphicsRoot()->addGraphicsChild<InPlaceNode>("inplace");
+  idle(); // its own arrival
+  inplace->setVisible(false);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "it hides itself in place: one re-fit");
+  chk(idle() == 0, "then idle");
+  inplace->setVisible(true);
+  sg.processEvents();
+  cam.update(0.016);
+  chk(resets.take() == 1, "and shows itself again: one re-fit");
+  const double inPt[3] = {-895.0, -895.0, -895.0};
+  chk(inSlab(ren->GetActiveCamera(), inPt), "and it lies inside [near, far]");
+}
+
 static bool canRasterise(cvc::app &app) {
   SceneGraph sg(app, "idlecontrol");
   sg.setDiagnosticChromeVisible(false);
@@ -432,6 +553,7 @@ int main() {
   app.properties("system.log_verbosity", "0");
   headless(app);
   streamingAndLod(app);
+  chromeAndInPlace(app);
   rendered(app);
   std::printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
   return fails ? 1 : 0;

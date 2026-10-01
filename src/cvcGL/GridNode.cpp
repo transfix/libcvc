@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/gl/GridNode.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/line_normals.h>
 #include <iomanip>
 #include <sstream>
@@ -210,6 +211,7 @@ void GridNode::handleStateChanged(const std::string &childState) {
       for (auto &actor : m_yzTickLabelActors) {
         actor->SetVisibility(m_yzPlaneVisible && isVisible());
       }
+      planeVisibilityChanged();
     });
   } else if (childState == "xz_plane.visible") {
     runOnMainThread([this]() {
@@ -218,6 +220,7 @@ void GridNode::handleStateChanged(const std::string &childState) {
       for (auto &actor : m_xzTickLabelActors) {
         actor->SetVisibility(m_xzPlaneVisible && isVisible());
       }
+      planeVisibilityChanged();
     });
   } else if (childState == "xy_plane.visible") {
     runOnMainThread([this]() {
@@ -226,6 +229,7 @@ void GridNode::handleStateChanged(const std::string &childState) {
       for (auto &actor : m_xyTickLabelActors) {
         actor->SetVisibility(m_xyPlaneVisible && isVisible());
       }
+      planeVisibilityChanged();
     });
   } else if (childState == "yz_plane.color_r" || childState == "yz_plane.color_g" ||
              childState == "yz_plane.color_b") {
@@ -419,6 +423,14 @@ void GridNode::setXZPlaneVisible(bool visible) {
 
 void GridNode::setXYPlaneVisible(bool visible) {
   getState("xy_plane.visible").value(visible ? 1 : 0);
+}
+
+void GridNode::planeVisibilityChanged() {
+  // A plane shown or hidden with SetVisibility: the renderer's prop list does
+  // not change, so tell the scene -- a camera holding still re-fits its
+  // clipping range to what the grid now draws.
+  if (SceneGraph *sg = getSceneGraph())
+    sg->markContentChanged();
 }
 
 void GridNode::setVisible(bool visible) {
