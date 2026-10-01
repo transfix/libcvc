@@ -26,10 +26,42 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cvc/nav/belief_occupancy.h>
 
 namespace cvc {
 namespace nav {
+
+namespace {
+
+// Thresholding is a pure function of each cell's float bits, and a belief plane
+// is mostly long runs of one value (the +-l_clamp saturated prior, cells sensed
+// back to the clamp), so a cell whose bits repeat its predecessor's reuses that
+// decision instead of re-evaluating expf. Every distinct value still goes
+// through the exact float32 sigmoid + compare below, so the raster is identical;
+// it is just ~4x cheaper, which matters because step() composites every plane on
+// every sense tick to find the ones that changed.
+template <class Decide>
+void threshold_runs(const float *logodds, long n, std::uint8_t *occ_out, Decide decide) {
+  static_assert(sizeof(float) == sizeof(std::uint32_t), "float32 bit pattern");
+  if (n <= 0)
+    return;
+  std::uint32_t last_bits;
+  std::memcpy(&last_bits, logodds, sizeof last_bits);
+  std::uint8_t last = decide(logodds[0]);
+  occ_out[0] = last;
+  for (long i = 1; i < n; ++i) {
+    std::uint32_t bits;
+    std::memcpy(&bits, logodds + i, sizeof bits);
+    if (bits != last_bits) {
+      last_bits = bits;
+      last = decide(logodds[i]);
+    }
+    occ_out[i] = last;
+  }
+}
+
+} // namespace
 
 void to_occupancy(const float *logodds, int rows, int cols, unknown_policy policy, double p_thresh,
                   double band, std::uint8_t *occ_out) {
@@ -38,17 +70,17 @@ void to_occupancy(const float *logodds, int rows, int cols, unknown_policy polic
     // occ = p > max(p_thresh, 0.5 + band). numpy compares the float32 p against
     // the float64 threshold, upcasting p (exact) to double.
     const double thr = std::max(p_thresh, 0.5 + band);
-    for (long i = 0; i < n; ++i) {
-      const float p = 1.0f / (1.0f + std::exp(-logodds[i])); // float32 sigmoid
-      occ_out[i] = (static_cast<double>(p) > thr) ? 1 : 0;
-    }
+    threshold_runs(logodds, n, occ_out, [thr](float lo) -> std::uint8_t {
+      const float p = 1.0f / (1.0f + std::exp(-lo)); // float32 sigmoid
+      return (static_cast<double>(p) > thr) ? 1 : 0;
+    });
   } else {
     // occ = !(p < min(1-p_thresh, 0.5 - band))  ==  p >= that threshold.
     const double thr = std::min(1.0 - p_thresh, 0.5 - band);
-    for (long i = 0; i < n; ++i) {
-      const float p = 1.0f / (1.0f + std::exp(-logodds[i]));
-      occ_out[i] = (static_cast<double>(p) < thr) ? 0 : 1;
-    }
+    threshold_runs(logodds, n, occ_out, [thr](float lo) -> std::uint8_t {
+      const float p = 1.0f / (1.0f + std::exp(-lo));
+      return (static_cast<double>(p) < thr) ? 0 : 1;
+    });
   }
 }
 

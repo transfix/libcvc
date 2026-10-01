@@ -15,13 +15,17 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cvc/core/thread_pool.h>
+#include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/detail/grid_math.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -71,6 +75,316 @@ TEST(NavEdt, EmptyGridIsAllInf) {
   const auto d = edt2_squared(m.data(), 2, 2);
   for (double v : d)
     EXPECT_GT(v, 1e19); // no seed -> ~1e20
+}
+
+// ─── EDT / build_sdf exactness vs the reference kernel ─────────────────────
+//
+// edt2_squared / build_sdf run an exact binary-mask fast path (grid_nav.cpp)
+// instead of the generic column-then-row Felzenszwalb-Huttenlocher kernel. The
+// contract is BIT identity with that kernel — the one the GRL-SNAM Python
+// parity suite was verified against — so a verbatim copy of it lives here and
+// every output bit (including the ~1e20 seed-free values and the float32
+// normals) is compared on randomized and degenerate grids.
+
+namespace edt_ref {
+
+constexpr double EDT_INF = 1e20;
+
+void edt1d_line(const double *f, int n, int fs, double *d, int ds) {
+  std::vector<int> v(n);
+  std::vector<double> z(n + 1);
+  int k = 0;
+  v[0] = 0;
+  z[0] = -EDT_INF;
+  z[1] = EDT_INF;
+  for (int q = 1; q < n; ++q) {
+    double s = ((f[q * fs] + static_cast<double>(q * q)) -
+                (f[v[k] * fs] + static_cast<double>(v[k] * v[k]))) /
+               static_cast<double>(2 * q - 2 * v[k]);
+    while (s <= z[k]) {
+      --k;
+      s = ((f[q * fs] + static_cast<double>(q * q)) -
+           (f[v[k] * fs] + static_cast<double>(v[k] * v[k]))) /
+          static_cast<double>(2 * q - 2 * v[k]);
+    }
+    ++k;
+    v[k] = q;
+    z[k] = s;
+    z[k + 1] = EDT_INF;
+  }
+  k = 0;
+  for (int q = 0; q < n; ++q) {
+    while (z[k + 1] < q)
+      ++k;
+    int diff = q - v[k];
+    d[q * ds] = static_cast<double>(diff * diff) + f[v[k] * fs];
+  }
+}
+
+std::vector<double> edt2_squared(const std::uint8_t *mask, int rows, int cols) {
+  const int n = rows * cols;
+  std::vector<double> f(n);
+  for (int i = 0; i < n; ++i)
+    f[i] = mask[i] ? 0.0 : EDT_INF;
+  std::vector<double> tmp(n);
+  for (int c = 0; c < cols; ++c)
+    edt1d_line(&f[c], rows, cols, &tmp[c], cols);
+  std::vector<double> out(n);
+  for (int r = 0; r < rows; ++r)
+    edt1d_line(&tmp[r * cols], cols, 1, &out[r * cols], 1);
+  return out;
+}
+
+sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double max_x,
+                    double scale) {
+  const int n = rows * cols;
+  const std::vector<double> d_out = edt2_squared(occ, rows, cols);
+  std::vector<std::uint8_t> inv(n);
+  for (int i = 0; i < n; ++i)
+    inv[i] = occ[i] ? 0 : 1;
+  const std::vector<double> d_in = edt2_squared(inv.data(), rows, cols);
+  const double cell_w = (max_x - min_x) / static_cast<double>(cols - 1);
+  sdf_field field;
+  field.rows = rows;
+  field.cols = cols;
+  field.phi.resize(n);
+  for (int i = 0; i < n; ++i) {
+    const double phi_w = (std::sqrt(d_out[i]) - std::sqrt(d_in[i])) * cell_w;
+    field.phi[i] = static_cast<float>(phi_w * scale);
+  }
+  const float *phi = field.phi.data();
+  field.normal_x.resize(n);
+  field.normal_y.resize(n);
+  for (int r = 0; r < rows; ++r)
+    for (int c = 0; c < cols; ++c) {
+      const int i = r * cols + c;
+      const float gx = cvc::nav::detail::grad1d(phi + r * cols, c, cols, 1);
+      const float gy = cvc::nav::detail::grad1d(phi + c, r, rows, cols);
+      const float gmag = std::sqrt(gx * gx + gy * gy) + 1e-9f;
+      field.normal_x[i] = gx / gmag;
+      field.normal_y[i] = gy / gmag;
+    }
+  return field;
+}
+
+// Deterministic grid generators (no <random>): density in 1/1000ths, plus
+// "city" rectangles for long runs and single-seed / single-hole grids.
+struct Rng {
+  unsigned x;
+  unsigned next() {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return x;
+  }
+};
+
+std::vector<std::uint8_t> noise(int rows, int cols, int permille, Rng &g) {
+  std::vector<std::uint8_t> m((std::size_t)rows * cols);
+  for (auto &v : m)
+    v = (int)(g.next() % 1000u) < permille ? 1 : 0;
+  return m;
+}
+
+std::vector<std::uint8_t> blocks(int rows, int cols, Rng &g) {
+  std::vector<std::uint8_t> m((std::size_t)rows * cols, 0);
+  const int nb = 1 + (int)(g.next() % 12u);
+  for (int b = 0; b < nb; ++b) {
+    const int r0 = (int)(g.next() % (unsigned)rows), c0 = (int)(g.next() % (unsigned)cols);
+    const int h = 1 + (int)(g.next() % (unsigned)std::max(1, rows / 3));
+    const int w = 1 + (int)(g.next() % (unsigned)std::max(1, cols / 3));
+    for (int r = r0; r < std::min(rows, r0 + h); ++r)
+      for (int c = c0; c < std::min(cols, c0 + w); ++c)
+        m[(std::size_t)r * cols + c] = 1;
+  }
+  return m;
+}
+
+// Every grid the exactness tests sweep: odd/even, 1xN / Nx1, all-free,
+// all-set, single seed, single hole, sparse/dense noise and block cities.
+std::vector<std::pair<std::pair<int, int>, std::vector<std::uint8_t>>> corpus() {
+  std::vector<std::pair<std::pair<int, int>, std::vector<std::uint8_t>>> out;
+  Rng g{0x9e3779b9u};
+  const int sizes[][2] = {{1, 1},   {1, 2},   {2, 1},   {1, 37},  {37, 1},  {1, 200},
+                          {200, 1}, {2, 2},   {3, 5},   {5, 3},   {7, 7},   {17, 31},
+                          {31, 17}, {64, 64}, {97, 61}, {128, 7}, {7, 128}, {40, 90}};
+  for (const auto &sz : sizes) {
+    const int R = sz[0], C = sz[1];
+    const std::size_t n = (std::size_t)R * C;
+    auto add = [&](std::vector<std::uint8_t> m) { out.push_back({{R, C}, std::move(m)}); };
+    add(std::vector<std::uint8_t>(n, 0)); // all free: no seed anywhere
+    add(std::vector<std::uint8_t>(n, 1)); // all set
+    for (int t = 0; t < 3; ++t) {         // a single seed / a single hole
+      std::vector<std::uint8_t> one(n, 0), hole(n, 1);
+      const std::size_t at = g.next() % n;
+      one[at] = 1;
+      hole[at] = 0;
+      add(one);
+      add(hole);
+    }
+    for (int permille : {5, 50, 220, 500, 900})
+      for (int t = 0; t < 3; ++t)
+        add(noise(R, C, permille, g));
+    for (int t = 0; t < 3; ++t)
+      add(blocks(R, C, g));
+  }
+  return out;
+}
+
+// Bitwise equality (so -0 != +0 and every ulp counts), except that any two NaNs
+// match: a 1-column grid has cell_w = x/0 = inf, so its phi is +-inf and some
+// normals are inf/inf in BOTH implementations, and a NaN's payload is not output.
+template <class T> bool same_bits(const std::vector<T> &a, const std::vector<T> &b) {
+  if (a.size() != b.size())
+    return false;
+  for (std::size_t i = 0; i < a.size(); ++i)
+    if (std::memcmp(&a[i], &b[i], sizeof(T)) != 0 && !(std::isnan(a[i]) && std::isnan(b[i])))
+      return false;
+  return true;
+}
+
+} // namespace edt_ref
+
+TEST(NavEdtExact, Edt2SquaredMatchesReferenceKernelBitForBit) {
+  int checked = 0;
+  for (const auto &e : edt_ref::corpus()) {
+    const int R = e.first.first, C = e.first.second;
+    const auto &m = e.second;
+    const auto want = edt_ref::edt2_squared(m.data(), R, C);
+    const auto got = edt2_squared(m.data(), R, C);
+    ASSERT_TRUE(edt_ref::same_bits(got, want)) << R << "x" << C << " grid #" << checked;
+    ++checked;
+  }
+  EXPECT_GT(checked, 400);
+}
+
+TEST(NavEdtExact, BuildSdfMatchesReferenceBitForBit) {
+  int checked = 0;
+  for (const auto &e : edt_ref::corpus()) {
+    const int R = e.first.first, C = e.first.second;
+    const auto &m = e.second;
+    // Unequal bounds / scale so cell_w and scale are not 1; a 1-column grid has
+    // cell_w = x/0 = inf in both implementations (phi +-inf, normals 0).
+    const double mnx = -37.5, mxx = 91.25, sc = 0.0625;
+    const sdf_field want = edt_ref::build_sdf(m.data(), R, C, mnx, mxx, sc);
+    const sdf_field got = build_sdf(m.data(), R, C, mnx, -3.0, mxx, 4.0, sc);
+    ASSERT_EQ(got.rows, R);
+    ASSERT_EQ(got.cols, C);
+    ASSERT_TRUE(edt_ref::same_bits(got.phi, want.phi)) << R << "x" << C << " #" << checked;
+    ASSERT_TRUE(edt_ref::same_bits(got.normal_x, want.normal_x))
+        << R << "x" << C << " #" << checked;
+    ASSERT_TRUE(edt_ref::same_bits(got.normal_y, want.normal_y))
+        << R << "x" << C << " #" << checked;
+    // The caller-buffer overload writes the same bits into caller storage.
+    std::vector<float> phi((std::size_t)R * C, -7.0f), nx(phi), ny(phi);
+    build_sdf(m.data(), R, C, mnx, -3.0, mxx, 4.0, sc, phi.data(), nx.data(), ny.data());
+    ASSERT_TRUE(edt_ref::same_bits(phi, want.phi)) << R << "x" << C << " #" << checked;
+    ASSERT_TRUE(edt_ref::same_bits(nx, want.normal_x)) << R << "x" << C << " #" << checked;
+    ASSERT_TRUE(edt_ref::same_bits(ny, want.normal_y)) << R << "x" << C << " #" << checked;
+    ++checked;
+  }
+  EXPECT_GT(checked, 400);
+}
+
+TEST(NavEdtExact, ClearanceCostAndLargeCityMatchReference) {
+  // A 300x260 block city (long runs, big seed-free stretches) through both
+  // edt2_squared and the clearance_cost consumer.
+  edt_ref::Rng g{12345u};
+  const int R = 300, C = 260;
+  std::vector<std::uint8_t> m((std::size_t)R * C, 0);
+  for (int b = 0; b < 60; ++b) {
+    const int r0 = (int)(g.next() % R), c0 = (int)(g.next() % C);
+    const int h = 2 + (int)(g.next() % 14), w = 2 + (int)(g.next() % 14);
+    for (int r = r0; r < std::min(R, r0 + h); ++r)
+      for (int c = c0; c < std::min(C, c0 + w); ++c)
+        m[(std::size_t)r * C + c] = 1;
+  }
+  const auto want = edt_ref::edt2_squared(m.data(), R, C);
+  EXPECT_TRUE(edt_ref::same_bits(edt2_squared(m.data(), R, C), want));
+  const auto cost = clearance_cost(m.data(), R, C, 6.0, 1.5);
+  std::vector<double> want_cost(want.size());
+  for (std::size_t i = 0; i < want.size(); ++i) {
+    const double shortfall = 6.0 - std::sqrt(want[i]);
+    want_cost[i] = shortfall > 0.0 ? 1.5 * shortfall : 0.0;
+  }
+  EXPECT_TRUE(edt_ref::same_bits(cost, want_cost));
+  const sdf_field want_f = edt_ref::build_sdf(m.data(), R, C, 0.0, 259.0, 0.05);
+  const sdf_field got_f = build_sdf(m.data(), R, C, 0.0, 0.0, 259.0, 299.0, 0.05);
+  EXPECT_TRUE(edt_ref::same_bits(got_f.phi, want_f.phi));
+  EXPECT_TRUE(edt_ref::same_bits(got_f.normal_x, want_f.normal_x));
+  EXPECT_TRUE(edt_ref::same_bits(got_f.normal_y, want_f.normal_y));
+}
+
+TEST(NavEdtExact, EmptyGridIsEmpty) {
+  EXPECT_TRUE(edt2_squared(nullptr, 0, 5).empty());
+  EXPECT_TRUE(edt2_squared(nullptr, 5, 0).empty());
+  const sdf_field f = build_sdf(nullptr, 0, 0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  EXPECT_TRUE(f.phi.empty() && f.normal_x.empty() && f.normal_y.empty());
+}
+
+// to_occupancy reuses the previous cell's decision when the log-odds bits repeat
+// (belief planes are long runs of the saturated prior). The raster must equal the
+// plain per-cell float32 sigmoid + threshold for every input, including values
+// one ulp either side of both thresholds, signed zeros, infinities and NaN.
+TEST(NavBeliefOccupancy, ToOccupancyMatchesPerCellReference) {
+  auto ref = [](const std::vector<float> &lo, unknown_policy pol, double p_thresh, double band) {
+    std::vector<std::uint8_t> out(lo.size());
+    for (std::size_t i = 0; i < lo.size(); ++i) {
+      const float p = 1.0f / (1.0f + std::exp(-lo[i]));
+      out[i] = pol == unknown_policy::optimistic
+                   ? ((static_cast<double>(p) > std::max(p_thresh, 0.5 + band)) ? 1 : 0)
+                   : ((static_cast<double>(p) < std::min(1.0 - p_thresh, 0.5 - band)) ? 0 : 1);
+    }
+    return out;
+  };
+  // Special values plus a ladder of ulps around each policy's log-odds threshold
+  // (logit(0.65) and logit(0.35) for the default p_thresh/band) and around 0.
+  std::vector<float> specials = {0.0f,
+                                 -0.0f,
+                                 8.0f,
+                                 -8.0f,
+                                 std::numeric_limits<float>::infinity(),
+                                 -std::numeric_limits<float>::infinity(),
+                                 std::numeric_limits<float>::quiet_NaN(),
+                                 std::numeric_limits<float>::denorm_min(),
+                                 -std::numeric_limits<float>::denorm_min()};
+  for (float c : {0.6190392f, -0.6190392f, 0.0f}) {
+    float up = c, dn = c;
+    for (int k = 0; k < 40; ++k) {
+      up = std::nextafter(up, 1.0f);
+      dn = std::nextafter(dn, -1.0f);
+      specials.push_back(up);
+      specials.push_back(dn);
+    }
+  }
+  const int R = 23, C = 29;
+  std::vector<float> lo((std::size_t)R * C);
+  edt_ref::Rng g{777u};
+  std::size_t i = 0;
+  while (i < lo.size()) { // runs of 1..9 repeats of a random special, like a belief plane
+    const float v = specials[g.next() % specials.size()];
+    for (int run = 1 + (int)(g.next() % 9u); run > 0 && i < lo.size(); --run)
+      lo[i++] = v;
+  }
+  lo[0] = std::numeric_limits<float>::quiet_NaN(); // a NaN first cell seeds the run cache
+  for (auto pol : {unknown_policy::optimistic, unknown_policy::pessimistic})
+    for (double pt : {0.5, 0.7})
+      for (double band : {0.15, 0.0}) {
+        std::vector<std::uint8_t> got(lo.size(), 7);
+        to_occupancy(lo.data(), R, C, pol, pt, band, got.data());
+        EXPECT_EQ(got, ref(lo, pol, pt, band)) << (int)pol << " " << pt << " " << band;
+        // composite_occupancy = the same raster OR the live dynamic layer.
+        std::vector<double> dyn(lo.size(), -std::numeric_limits<double>::infinity());
+        dyn[5] = 1.0;  // live at t=2 with ttl 4
+        dyn[40] = -9.; // expired
+        std::vector<std::uint8_t> comp(lo.size(), 7);
+        composite_occupancy(lo.data(), R, C, pol, pt, band, dyn.data(), 2.0, 4.0, comp.data());
+        std::vector<std::uint8_t> want = ref(lo, pol, pt, band);
+        want[5] = 1;
+        EXPECT_EQ(comp, want);
+      }
+  std::vector<std::uint8_t> none;
+  to_occupancy(lo.data(), 0, 0, unknown_policy::optimistic, 0.5, 0.15, none.data()); // no-op
 }
 
 // ─── build_sdf ──────────────────────────────────────────────────────────────
@@ -1290,6 +1604,82 @@ TEST(NavSimWorld, LiveSensingRebuildsTheField) {
       ++moved;
   }
   EXPECT_GT(moved, 0) << "agents should drive on the live-sensing path";
+}
+
+// The rebuild trigger is the composited OCCUPANCY, not the belief version. A belief
+// flip (log-odds crossing 0, which bumps plane_version) that stays on the occupied side
+// of the planning threshold must NOT rebuild the field or bump field_version; the later
+// sense that actually crosses the threshold must. Setup: a single phantom cell (prior
+// occupied, truth free) east of a stationary agent (vmax 0) whose one ray (n_rays 1,
+// fov 0, heading 0) passes through it exactly once per tick, so its log-odds walks
+// 8, 6.6, ..., 1.0, -0.4, -1.8 in l_free steps. Under the pessimistic policy (occupied
+// iff p >= 0.35, i.e. log-odds >= ~-0.62) the -0.4 step is a flip with no occupancy
+// change; the -1.8 step is an occupancy change with no flip.
+TEST(NavSimWorld, VersionOnlyFlipDoesNotRebuildButOccupancyChangeDoes) {
+  const int R = 16, C = 16;
+  std::vector<std::uint8_t> truth((std::size_t)R * C, 0), prior((std::size_t)R * C, 0);
+  const int pr = 8, pc = 10; // the phantom cell
+  prior[pr * C + pc] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = 0;
+  cfg.min_y = 0;
+  cfg.max_x = C - 1; // cell_w = cell_h = 1
+  cfg.max_y = R - 1;
+  cfg.scale = 1.0;
+  cfg.veh.rr = 0.2f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.vmax = 0.0f; // stationary: position and heading never change
+  cfg.range_m = 12.0;
+  cfg.n_rays = 1;
+  cfg.fov_rad = 0.0; // the single ray points straight along the heading
+  cfg.sense_every = 1;
+  cfg.freeze_sense = false;
+  cfg.optimistic = false; // pessimistic: occupied iff p >= min(1 - p_thresh, 0.5 - band)
+  cfg.l_free = -1.4;
+  cfg.l_clamp = 8.0;
+
+  // Agent at (row 8, col 4); goal due east => initial heading 0 => the ray walks the row.
+  float o[2] = {4.0f, 8.0f}, goal[2] = {14.0f, 8.0f}, color[3] = {1, 1, 1};
+  cvc::nav::sim_world world(cfg, truth.data(), prior.data(), cvc::nav::coef_mlp::default_biased(),
+                            o, goal, color, 1);
+  const long hw = (long)R * C;
+  auto phantom_occ = [&] { return world.belief_occ(0)[pr * C + pc]; };
+  auto phantom_phi = [&] { return world.field_data()[pr * C + pc]; };
+  ASSERT_EQ(phantom_occ(), 1);
+  ASSERT_LT(phantom_phi(), 0.0f); // the prior phantom is inside a "building"
+
+  int flip_step = -1, clear_step = -1;
+  for (int t = 0; t < 12 && clear_step < 0; ++t) {
+    const int pv0 = world.plane_version(0), fv0 = world.field_version();
+    const std::vector<float> field0(world.field_data(), world.field_data() + 3 * hw);
+    world.step(1);
+    const bool flipped = world.plane_version(0) != pv0;
+    const bool bumped = world.field_version() != fv0;
+    const bool field_same =
+        std::equal(field0.begin(), field0.end(), world.field_data()); // bit-exact
+    if (flipped && phantom_occ() == 1) {
+      // version-only: the belief flipped but the planning surface did not change
+      flip_step = t;
+      EXPECT_FALSE(bumped) << "a version-only flip must not bump field_version (tick " << t << ")";
+      EXPECT_TRUE(field_same) << "a version-only flip must not touch the field (tick " << t << ")";
+    } else if (phantom_occ() == 0) {
+      clear_step = t;
+      EXPECT_FALSE(flipped) << "the threshold crossing is past the flip (tick " << t << ")";
+      EXPECT_TRUE(bumped) << "an occupancy change must bump field_version (tick " << t << ")";
+      EXPECT_FALSE(field_same) << "an occupancy change must rebuild the field (tick " << t << ")";
+      EXPECT_GT(phantom_phi(), 0.0f) << "the sensed-away phantom is free space now";
+    } else {
+      EXPECT_FALSE(flipped) << "tick " << t;
+      EXPECT_FALSE(bumped) << "nothing changed, nothing to rebuild (tick " << t << ")";
+      EXPECT_TRUE(field_same) << "tick " << t;
+    }
+  }
+  EXPECT_EQ(flip_step, 5) << "log-odds 8 -> -0.4 after six l_free=-1.4 hits";
+  EXPECT_EQ(clear_step, 6) << "log-odds -0.4 -> -1.8 crosses the pessimistic threshold";
 }
 
 // step()'s per-plane field rebuild is fanned out across a borrowed thread_pool when

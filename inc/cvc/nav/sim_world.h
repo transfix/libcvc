@@ -196,9 +196,17 @@ public:
   // by their group (shared: all 0; clustered: group id; private: 0..n-1).
   const int *agent_planes() const { return map_id_.data(); }
   long tick() const { return gstep_; }
+  // Bumps once per sense tick on which at least one plane's composited occupancy —
+  // and therefore its SDF field — changed (and once at construction). A belief flip
+  // that leaves every plane's occupancy unchanged does not bump it.
   int field_version() const { return field_ver_; }
-  // Per-belief-plane version (bumps when plane m's belief/occupancy raster changes on a sense tick)
-  // — lets a realtime raster consumer gate GPU re-uploads to only the planes that actually changed.
+  // Per-belief-plane BELIEF-FLIP counter: on a sense tick it bumps once per agent sensing into
+  // plane m whose update flips some cell's log-odds sign (p crossing 0.5). It is NOT a raster
+  // version. belief_occ(m) can change with no bump: a planning-threshold crossing that is not a
+  // sign flip (p_thresh / band / unknown policy), or an add_obstacle() stamp entering or expiring
+  // (ttl_s). ever_seen(m) / last_visible(m) change whenever a field of view moves, also with no
+  // bump. A consumer gating raster re-uploads on it can therefore show a stale raster;
+  // field_version() is the exact occupancy/field change signal (world-level, not per plane).
   // Out-of-range m returns -1.
   int plane_version(int m) const {
     return (m >= 0 && m < static_cast<int>(version_.size())) ? version_[m] : -1;
@@ -392,13 +400,13 @@ private:
   std::vector<int> map_id_; // [n] agent -> belief plane in [0, M)
 
   // M belief planes (contiguous, plane m at offset m*rows*cols) + per-plane
-  // dynamic layer, occupancy raster, and version / last-rebuilt-version.
+  // dynamic layer, occupancy raster, and belief version (log-odds flip count).
+  // A plane's field is rebuilt iff its composited occupancy changes (step()).
   std::vector<float> logodds_; // [M*rows*cols]
   std::vector<std::uint8_t> lastvis_, everseen_;
   std::vector<std::int32_t> version_; // [M]
   std::vector<double> dyn_stamp_;     // [M*rows*cols], -inf where unmarked
   std::vector<std::uint8_t> occ_;     // [M*rows*cols] current planning rasters
-  std::vector<int> last_version_;     // [M]
 
   // M SDF fields [M,3,H,W] (plane m at m*3*rows*cols).
   std::vector<float> field_;
