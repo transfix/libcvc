@@ -44,6 +44,8 @@ namespace gl {
 // every post is refused (returns false) instead of touching freed memory. A
 // refused post leaves the producer's own state as it was: a streaming node's
 // staged writes stay pending and are applied when it is attached again.
+// ~SceneGraph resets the scene's alive token BEFORE closing the sink, so by the
+// time a post is refused SceneNode::getSceneGraph() is already nullptr.
 class SceneEventSink {
 public:
   SceneEventSink(); // owned by the constructing thread
@@ -51,6 +53,9 @@ public:
   // Queue `callback` for the next processEvents(). Any thread. False (the
   // callback is dropped) once the sink is closed.
   bool post(std::function<void()> callback);
+  // post() that takes `callback` only if it accepts it: on refusal (closed)
+  // the caller still owns it, untouched -- for a fallback without a copy.
+  bool tryPost(std::function<void()> &callback);
   // Coalesced by `key` -- see SceneGraph::postEventCoalesced. Any thread. False
   // once the sink is closed.
   bool postCoalesced(const void *key, std::function<void()> callback);

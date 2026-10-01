@@ -26,9 +26,14 @@ namespace gl {
 SceneEventSink::SceneEventSink() : m_owner(std::this_thread::get_id()) {}
 
 bool SceneEventSink::post(std::function<void()> callback) {
+  // On refusal `callback` dies with the parameter, after the lock is released.
+  return tryPost(callback);
+}
+
+bool SceneEventSink::tryPost(std::function<void()> &callback) {
   std::lock_guard<std::mutex> lock(m_mutex);
   if (m_closed)
-    return false; // `callback` dies with the parameter, after the lock is released
+    return false; // `callback` is left to the caller
   m_queue.push(std::move(callback));
   m_renderNeeded = true;
   return true;

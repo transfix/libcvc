@@ -62,15 +62,17 @@ void SceneNode::runOnMainThread(std::function<void()> func) {
   // dereferencing a freed `this`. This keeps cross-thread marshalling safe
   // across teardown: a destroyed node's still-queued callbacks become no-ops.
   std::weak_ptr<SceneNode> weak = weak_from_this();
-  std::function<void()> job = [weak, func]() {
+  std::function<void()> job = [weak, func = std::move(func)]() {
     if (auto self = weak.lock()) {
       func();
     }
   };
-  // Refused only if the scene was closed meanwhile: the node has no scene now,
-  // and a node with no scene runs its work inline (as above).
-  if (!events->post(std::move(job)))
-    func();
+  // Refused only once ~SceneGraph has closed the sink -- which it does after
+  // dropping its alive token, so this node already has no scene
+  // (getSceneGraph() == nullptr) and its work runs inline on the no-scene path,
+  // as above. tryPost leaves `job` with us when it refuses: no copy of `func`.
+  if (!events->tryPost(job))
+    job();
 }
 
 SceneNode::SceneNode(cvc::app &ctx, const std::string &statePath)

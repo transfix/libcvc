@@ -106,13 +106,18 @@ SceneGraph::~SceneGraph() {
   // holding a back-pointer to freed memory — a later setPosition() then locks the
   // destroyed publisher's mutex. From here on those nodes see no scene and take
   // their own no-scene path (GraphicsNode::setPosition writes state directly).
-  //
-  // Close the event sink first. A producer thread that fetched it before this
-  // point holds it alive and may still be on its way to post: from here on its
-  // post is refused rather than queued into a scene that is going away (and
-  // what it staged stays pending on the node for a later attach).
-  m_events->close();
   m_alive.reset();
+  // THEN close the event sink, in this order. A producer thread that fetched
+  // the sink before the reset above holds it alive and may still be on its way
+  // to post. A post that lands before close() is queued and dropped by it, as
+  // events queued to a dying scene always were. A post after close() is
+  // refused -- and because the token is already gone, the refused producer
+  // already sees getSceneGraph() == nullptr: runOnMainThread then runs its work
+  // inline on the no-scene path (never against this dying scene), and a
+  // streaming node keeps what it staged pending for a later attach. Closing
+  // first would leave a window where a refused post runs owner-thread work
+  // inline on the producer while getSceneGraph() still returns this scene.
+  m_events->close();
 }
 
 void SceneGraph::postEvent(std::function<void()> callback) { m_events->post(std::move(callback)); }

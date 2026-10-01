@@ -26,6 +26,10 @@
 //     right before it locks the sink to post, the owner destroys the scene, then
 //     the producer posts. With a raw SceneGraph* that post locked freed memory;
 //     now it is refused, and the staged write is applied at the next attach.
+//   * teardown, runOnMainThread: the same producer, paused the same way, is let
+//     go while the owner is INSIDE ~SceneGraph's closing of the sink. Its post is
+//     refused and its work runs inline -- and it must already see no scene
+//     (getSceneGraph() == nullptr), never the scene being destroyed.
 //   * link bounds, owner first: the owner (beforeComputeBounds) is paused
 //     mid-derive while a producer's setStyle runs. The producer's newer box must
 //     survive -- not be overwritten by the owner's older one.
@@ -47,6 +51,7 @@
 #include <cvc/gl/DrapedLinkNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/HeightFieldTexture.h>
+#include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneEventSink.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StreamingGeometryNode.h>
@@ -187,6 +192,59 @@ void testTeardownWhilePosting(cvc::app &app) {
         "the staged write is applied when the node is attached again");
 }
 
+// ── runOnMainThread while the owner destroys the scene ─────────────────────
+// A node that exposes runOnMainThread (protected) to the test.
+class MarshalNode : public cvc::gl::NullGraphicNode {
+public:
+  using cvc::gl::NullGraphicNode::NullGraphicNode;
+  void marshal(std::function<void()> f) { runOnMainThread(std::move(f)); }
+};
+
+std::atomic<bool> g_producerDone{false};
+
+// Captured by a callback that is still queued when ~SceneGraph closes the sink:
+// close() drops it, and this destructor runs INSIDE close(), on the owner. It
+// lets the paused producer go and holds the owner there until it is done -- so
+// the producer's post meets a closed sink while the scene is mid-destruction.
+struct HoldOwnerInClose {
+  ~HoldOwnerInClose() {
+    g_gate.release = true;
+    waitFlag(g_producerDone, 5000);
+  }
+};
+
+void testTeardownRunOnMainThread(cvc::app &app) {
+  std::printf("teardown: runOnMainThread refused mid-destruction runs with no scene\n");
+  auto sg = std::make_unique<SceneGraph>(app, "races_marshal");
+  auto node = sg->getGraphicsRoot()->addGraphicsChild<MarshalNode>("m");
+  sg->processEvents();
+  SceneEventSink *sink = sg->eventSink().get(); // address only
+  // Runs in ~SceneGraph's own drain and queues the holder AFTER it, so the
+  // holder is still queued -- and dropped by close() -- when the owner closes.
+  sg->postEvent([sink]() { sink->post([hold = std::make_shared<HoldOwnerInClose>()]() {}); });
+
+  g_gate.reset();
+  g_gate.target(sink);
+  g_producerDone = false;
+  const std::thread::id owner = std::this_thread::get_id();
+  std::atomic<bool> ran{false}, onProducer{false}, sawScene{true};
+  std::thread producer([&]() {
+    arm();
+    node->marshal([&]() { // fetches the sink, pauses before posting
+      ran = true;
+      onProducer = std::this_thread::get_id() != owner;
+      sawScene = node->getSceneGraph() != nullptr;
+    });
+    g_producerDone = true;
+  });
+  check(waitFlag(g_gate.reached, 5000), "the producer holds the sink, about to post");
+  sg.reset(); // released (and waited for) from inside the sink's close()
+  producer.join();
+  check(ran.load() && onProducer.load(), "the refused post ran its work inline, on the producer");
+  check(!sawScene.load(),
+        "... with getSceneGraph() already nullptr: never the scene being destroyed");
+}
+
 // ── draped link bounds ──────────────────────────────────────────────────────
 struct LinkRig {
   SceneGraph sg;
@@ -255,6 +313,7 @@ void testStyleVsNewHeights(cvc::app &app) {
 int main() {
   cvc::app app;
   testTeardownWhilePosting(app);
+  testTeardownRunOnMainThread(app);
   testOwnerDeriveVsStyle(app);
   testStyleVsNewHeights(app);
   std::printf("%s: cvcgl_streaming_races (%d checks, %d failed)\n",
