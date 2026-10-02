@@ -14,7 +14,9 @@
 //   B. moving / restyling a non-caster never bakes; moving a caster does;
 //   C. a node starting or stopping casting bakes; a light change bakes;
 //   D. on screen: a non-caster casts no shadow (same pixels as no object at
-//      all), a caster does;
+//      all -- byte for byte, except on Apple's renderer, within 1 luma), a
+//      caster does, and only inside its footprint; judged against reference
+//      renders of the same run, on frames that show the whole ground;
 //   E. the update interval still strides bakes of a moving caster;
 //   F. a caster deformed in place (updateVertices / updateNormals /
 //      updateColors) bakes, a non-caster does not; a RibbonNode does not cast
@@ -44,10 +46,12 @@
 #include <vtkCameraPass.h>
 #include <vtkMapper.h>
 #include <vtkNew.h>
+#include <vtkOpenGLRenderWindow.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkRenderPassCollection.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkSequencePass.h>
 #include <vtkShadowMapBakerPass.h>
@@ -75,6 +79,30 @@ static cvc::geometry box(double x0, double y0, double z0, double x1, double y1, 
   for (const auto &t : f)
     g.tris().push_back({static_cast<unsigned int>(t[0]), static_cast<unsigned int>(t[1]),
                         static_cast<unsigned int>(t[2])});
+  return g;
+}
+
+// A flat, upward-facing ground at height z, cut into step x step tiles. Not two
+// big triangles: Apple's software renderer (GitHub's arm64 macOS runners)
+// intermittently drops triangles that are clipped far outside the frustum, and
+// two triangles spanning a 120-unit ground are exactly that, both in the 16-unit
+// view and in the shadow bake, whose light frustum is fitted to the scene bounds
+// so the ground's edges sit on it. Lost from the frame, or from the maps (which
+// VTK then reads as total shadow), the ground read luma 0.0 in both halves.
+static cvc::geometry tiledGround(double x0, double y0, double x1, double y1, double z,
+                                 double step) {
+  cvc::geometry g;
+  const int nx = static_cast<int>(std::lround((x1 - x0) / step));
+  const int ny = static_cast<int>(std::lround((y1 - y0) / step));
+  for (int j = 0; j <= ny; ++j)
+    for (int i = 0; i <= nx; ++i)
+      g.points().push_back({x0 + (x1 - x0) * i / nx, y0 + (y1 - y0) * j / ny, z});
+  auto at = [nx](int i, int j) { return static_cast<unsigned int>(j * (nx + 1) + i); };
+  for (int j = 0; j < ny; ++j)
+    for (int i = 0; i < nx; ++i) {
+      g.tris().push_back({at(i, j), at(i + 1, j), at(i + 1, j + 1)});
+      g.tris().push_back({at(i, j), at(i + 1, j + 1), at(i, j + 1)});
+    }
   return g;
 }
 
@@ -138,7 +166,11 @@ static void flags(cvc::app &app) {
   chk(GraphicsNode::propCastsShadow(nullptr), "null is harmless");
 }
 
+// Mean luma over columns [x0, x1) of the middle half of the rows; -1 for a
+// frame that is not w x h.
 static double meanLuma(const std::vector<unsigned char> &rgb, int w, int h, int x0, int x1) {
+  if (rgb.size() != static_cast<std::size_t>(w) * h * 3)
+    return -1.0;
   double sum = 0.0;
   long n = 0;
   for (int y = h / 4; y < 3 * h / 4; ++y)
@@ -148,6 +180,48 @@ static double meanLuma(const std::vector<unsigned char> &rgb, int w, int h, int 
       ++n;
     }
   return n ? sum / n : 0.0;
+}
+
+// Whether two w x h frames agree byte for byte over the region meanLuma reads.
+static bool sameRegion(const std::vector<unsigned char> &a, const std::vector<unsigned char> &b,
+                       int w, int h, int x0, int x1) {
+  if (a.size() != static_cast<std::size_t>(w) * h * 3 || b.size() != a.size())
+    return false;
+  for (int y = h / 4; y < 3 * h / 4; ++y)
+    for (int x = x0; x < x1; ++x)
+      for (int c = 0; c < 3; ++c) {
+        const std::size_t o = (static_cast<std::size_t>(y) * w + x) * 3 + c;
+        if (a[o] != b[o])
+          return false;
+      }
+  return true;
+}
+
+// Pixels showing the background. It is pure blue; the white ground is grey at
+// any light level, black included, so these are pixels where the ground is
+// MISSING -- not merely in shadow.
+static long backgroundPixels(const std::vector<unsigned char> &rgb) {
+  long n = 0;
+  for (std::size_t o = 0; o + 2 < rgb.size(); o += 3)
+    if (rgb[o + 2] > rgb[o] + 64 && rgb[o + 2] > rgb[o + 1] + 64)
+      ++n;
+  return n;
+}
+
+// The "OpenGL renderer string" line of the window's capability report.
+static std::string glRendererName(vtkRenderWindow *w) {
+  auto *gl = vtkOpenGLRenderWindow::SafeDownCast(w);
+  const char *caps = gl ? gl->ReportCapabilities() : nullptr;
+  const std::string all = caps ? caps : "";
+  const std::string key = "renderer string:";
+  const std::size_t at = all.find(key);
+  if (at == std::string::npos)
+    return "unknown";
+  std::size_t b = all.find_first_not_of(' ', at + key.size());
+  const std::size_t e = all.find('\n', at);
+  if (b == std::string::npos || b > e)
+    b = e;
+  return all.substr(b, e == std::string::npos ? std::string::npos : e - b);
 }
 
 static bool canRasterise(cvc::app &app) {
@@ -179,11 +253,12 @@ static void rendered(cvc::app &app) {
   // A white ground seen from straight above; a slab high up and OUT of view to
   // the +x side; a sun from +x at 45 degrees throws the slab's shadow onto the
   // right half of the view. A building (caster) and a vehicle (non-caster)
-  // stand elsewhere, out of view too.
+  // stand elsewhere, out of view too. The ground is tiled (tiledGround) and the
+  // background blue, so a frame that lost the ground cannot pass for shadow.
   SceneGraph sg(app, "casters");
   sg.setDiagnosticChromeVisible(false);
   auto ground = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("ground");
-  ground->setGeometry(box(-60, -60, -1, 60, 60, 0));
+  ground->setGeometry(tiledGround(-60, -60, 60, 60, 0.0, 2.0));
   ground->setColor(1.0, 1.0, 1.0);
   auto slab = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("slab");
   slab->setGeometry(box(20, -6, 20, 30, 6, 21));
@@ -195,7 +270,9 @@ static void rendered(cvc::app &app) {
 
   const int W = 96, H = 96;
   SceneRenderer view(sg, W, H, /*offscreen=*/true, "main");
-  view.setBackground(0.0, 0.0, 0.0);
+  // Red 0, as before: VTK clears the shadow maps to the background, and the
+  // maps are single-channel (red).
+  view.setBackground(0.0, 0.0, 1.0);
   view.setCamera(0, 0, 30, 0, 0, 0, 0, 1, 0, 30.0, 1.0, 200.0);
   const int sun = sg.addDirectionalLight(90.0, 45.0); // from +x
   if (!sg.setShadowsEnabled(true)) {
@@ -246,34 +323,81 @@ static void rendered(cvc::app &app) {
   sg.setLightDirection(sun, 90.0, 45.0);
   frame();
 
-  std::printf("D. on screen\n");
-  const std::vector<unsigned char> casting = view.frameRGB();
-  slab->setCastsShadow(false);
-  frame();
-  const std::vector<unsigned char> notCasting = view.frameRGB();
-  slab->setVisible(false);
-  frame();
-  const std::vector<unsigned char> absent = view.frameRGB();
-  slab->setVisible(true);
-  slab->setCastsShadow(true);
-  frame();
-  const double lCast = meanLuma(casting, W, H, W / 2 + 8, W - 4);
-  const double lNot = meanLuma(notCasting, W, H, W / 2 + 8, W - 4);
-  const double lAbsent = meanLuma(absent, W, H, W / 2 + 8, W - 4);
-  const double lLeft = meanLuma(casting, W, H, 4, W / 2 - 8);
-  std::printf("  luma, right half: caster %.1f  non-caster %.1f  absent %.1f  (left half %.1f)\n",
-              lCast, lNot, lAbsent, lLeft);
-  chk(lLeft > 20.0, "the ground is lit");
-  chk(lCast < lNot - 5.0, "a casting slab darkens the ground");
-  chk(std::fabs(lNot - lAbsent) < 1.0, "a non-casting slab leaves it as if the slab were absent");
-
-  std::printf("F. deformed in place, and streamed\n");
+  // Frames until one does not bake: the maps then match the scene.
   auto settle = [&]() {
     for (int i = 0; i < 6; ++i)
       if (!frame())
         return true;
     return false;
   };
+
+  std::printf("D. on screen (%s)\n", glRendererName(view.renderer()->GetRenderWindow()).c_str());
+  // Judged against reference renders of this same run, not absolute levels:
+  // the right half lies in the slab's shadow footprint, the left half outside
+  // it and is each frame's lit reference. Casting must darken the footprint
+  // well below it, not casting must leave the footprint lit like it, `absent`
+  // must match `notCasting`, and casting must leave the left half alone.
+  //
+  // First, every capture must show the ground, whole (see tiledGround). Any
+  // renderer but Apple's must manage that on its first draw; on Apple's, a
+  // capture that still lost some is redrawn -- same scene, same maps, no bake
+  // -- at most kRedraws times, each redraw reported.
+#ifdef __APPLE__
+  const int kRedraws = 3;
+#else
+  const int kRedraws = 0;
+#endif
+  auto capture = [&](const std::string &what) {
+    const bool settled = settle();
+    std::vector<unsigned char> px = view.frameRGB();
+    long missing = backgroundPixels(px);
+    for (int i = 0; missing && i < kRedraws; ++i) {
+      std::printf("  (%s: %ld pixel(s) without the ground; redraw %d of %d)\n", what.c_str(),
+                  missing, i + 1, kRedraws);
+      px = view.frameRGB();
+      missing = backgroundPixels(px);
+    }
+    chk(settled && view.frameWidth() == W && view.frameHeight() == H && missing == 0,
+        what + ": a settled " + std::to_string(view.frameWidth()) + "x" +
+            std::to_string(view.frameHeight()) + " frame, the ground in all of it (" +
+            std::to_string(missing) + " background pixels)");
+    return px;
+  };
+  const std::vector<unsigned char> casting = capture("slab casting");
+  slab->setCastsShadow(false);
+  const std::vector<unsigned char> notCasting = capture("slab not casting");
+  slab->setVisible(false);
+  const std::vector<unsigned char> absent = capture("slab absent");
+  slab->setVisible(true);
+  slab->setCastsShadow(true);
+  frame();
+  const int rx0 = W / 2 + 8, rx1 = W - 4, lx0 = 4, lx1 = W / 2 - 8;
+  const double lCast = meanLuma(casting, W, H, rx0, rx1);
+  const double lNot = meanLuma(notCasting, W, H, rx0, rx1);
+  const double lAbsent = meanLuma(absent, W, H, rx0, rx1);
+  const double lLeft = meanLuma(casting, W, H, lx0, lx1);
+  const double lLeftNot = meanLuma(notCasting, W, H, lx0, lx1);
+  std::printf("  luma, right half: caster %.1f  non-caster %.1f  absent %.1f  (left half %.1f, "
+              "%.1f without the caster)\n",
+              lCast, lNot, lAbsent, lLeft, lLeftNot);
+  // The left half is the lit reference of the same frame.
+  chk(lLeft > 20.0, "the ground is lit");
+  chk(lCast < 0.5 * lLeft, "a casting slab darkens the ground (to under half its lit level)");
+  chk(lNot > 0.9 * lLeftNot, "a non-casting slab does not (its footprint is lit like the rest)");
+#ifdef __APPLE__
+  // Apple's renderer: within the 1-luma bound the absent / non-casting
+  // comparison has always met there, rather than byte for byte.
+  chk(std::fabs(lNot - lAbsent) < 1.0 && std::fabs(lLeft - lLeftNot) < 1.0,
+      "a non-casting slab leaves the ground as if the slab were absent; the shadow stays in "
+      "its footprint (within 1 luma)");
+#else
+  chk(!notCasting.empty() && notCasting == absent &&
+          sameRegion(casting, notCasting, W, H, lx0, lx1),
+      "a non-casting slab leaves the ground as if the slab were absent; the shadow stays in "
+      "its footprint (byte-exact)");
+#endif
+
+  std::printf("F. deformed in place, and streamed\n");
   cvc::geometry tg = box(-50, 40, 0, -45, 45, 6);
   for (std::size_t i = 0; i < tg.points().size(); ++i)
     tg.colors().push_back({0.2 + 0.1 * static_cast<double>(i % 3), 0.5, 0.3});
