@@ -36,6 +36,9 @@
 #include <thread>
 #include <vector>
 #include <vtkRenderer.h> // a scene background: gradient reaches the renderer directly (§16.1)
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 using cvc::gl::CameraController;
 using cvc::gl::ImGuiBackend;
@@ -316,10 +319,22 @@ int main(int argc, char **argv) {
                 png.c_str());
   } else {
     std::puts("[ariadne_hello] running — close the window or use Sim > Quit to exit.");
+    // This loop yields to the browser once per frame in the WebAssembly build (emscripten_sleep(0)
+    // at its end), so VTK need not yield again inside every render (FrameYield::App; a no-op
+    // natively). Only here: the capture branch above renders back to back without yielding, so it
+    // keeps VTK's in-render yield.
+    view.setFrameYield(SceneRenderer::FrameYield::App);
     while (!view.windowClosed() && !quit) {
       frame_body(1.0 / 120.0);
       view.render(); // draws the scene + the Ariadne overlay (runs rt.render())
+#ifdef __EMSCRIPTEN__
+#ifndef __EMSCRIPTEN_PTHREADS__
+      sg.publisher().flush(); // no worker thread — drain publishes at frame cadence
+#endif
+      emscripten_sleep(0); // yield to the browser event loop once per frame (Asyncify)
+#else
       std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120 Hz cap
+#endif
     }
   }
   cam.detach();

@@ -81,6 +81,13 @@ fi
 
 printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHONHOME='/py';%sENV.PYTHONDONTWRITEBYTECODE='1';});\n" "$VTK_PYPATH" > "$OUT/pre.js"
 
+# TODO(cvcGL wasm app contract, docs/CVCGL_WASM.md): this host is node-only today, so it links
+# neither of cvcGL's browser-side speedups. When it gets a browser page, that link must add
+#   --pre-js "$INST/share/cvcGL/wasm/webgl_state_shadow.js"   (the WebGL state shim), and
+#   -sMALLOC=mimalloc                                         (on a wasm-mt / -pthread build only)
+# -- what cvcgl_wasm_app() does for a CMake app. It links no -sASYNCIFY, so FrameYield and
+# -sASYNCIFY_IGNORE_INDIRECT do not apply until it does.
+
 "$EMCC" "$SRC/bindings/pycvc/wasm/pycvc_host.cpp" "$GEN" \
     -std=c++17 -O1 -DPYCVC_EMBED_NUMPY ${VTK_DEF[@]+"${VTK_DEF[@]}"} -I "$PYINC" \
     -Wl,--allow-multiple-definition \

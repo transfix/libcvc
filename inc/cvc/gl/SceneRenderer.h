@@ -11,6 +11,7 @@
 #ifndef __CVC_GL_SCENE_RENDERER_H__
 #define __CVC_GL_SCENE_RENDERER_H__
 
+#include <cvc/gl/FrameYield.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -143,6 +144,20 @@ public:
   // primary full-screen viewport is this renderer's view; do not detach or
   // re-point it. Throws if the renderer is closed.
   ViewportManager &viewportManager() const;
+
+  // Who yields to the browser once per frame in a WebAssembly build: VTK inside
+  // every render (FrameYield::Vtk, the default) or the caller's loop
+  // (FrameYield::App, which turns VTK 9.5's in-render emscripten_sleep off). Only
+  // pass App from a loop that calls emscripten_sleep(0) once per frame on every
+  // path that renders. No-op natively. Forwards to the ViewportManager; see
+  // ViewportManager::setFrameYield for the URL override and the watchdog, and
+  // ViewportManager::lockFrameYield for the lock an -sASYNCIFY_IGNORE_INDIRECT=1
+  // app needs (App for good: no URL override, no watchdog fallback to Vtk).
+  using FrameYield = cvc::gl::FrameYield;
+  void setFrameYield(FrameYield mode);
+  FrameYield frameYield() const; // the EFFECTIVE mode
+  void lockFrameYield();
+  bool frameYieldLocked() const;
 
   // Detach from the scene and release the GL context. Idempotent; the
   // destructor calls it. Exposed so a caller can decide WHEN the context dies

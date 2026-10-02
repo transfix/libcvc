@@ -4,7 +4,8 @@ recipe:
   upstream_version: "3.4.0"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
-  cvc_revision: 1
+  # Bumped 1 -> 3 (2 is #522's): ships share/cvcGL/ (the wasm state shim), as cvcgl 3.4.0+cvc.18.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -74,6 +75,7 @@ package:
     - lib/libcvcGL*
     - lib/cmake/cvcGL/
     - include/cvc/gl/
+    - share/cvcGL/
   cmake_packages:
     - name: cvcGL
       targets:
