@@ -80,8 +80,9 @@ int main(int argc, char **argv) {
       docPath = a;
   }
   // A wasm demo build bakes in its own .ari (CVC_ARIADNE_WASM_DOC) and embeds the component library
-  // in MEMFS (see the examples CMake --embed-file). With no argv in the browser, default to that doc
-  // and add the MEMFS root to the search path so `cvc://components/*.ari` resolves at /components.
+  // in MEMFS (see the examples CMake --embed-file). With no argv in the browser, default to that
+  // doc and add the MEMFS root to the search path so `cvc://components/*.ari` resolves at
+  // /components.
 #ifdef CVC_ARIADNE_WASM_DOC
   if (docPath.empty()) {
     docPath = CVC_ARIADNE_WASM_DOC;
