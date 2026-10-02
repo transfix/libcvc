@@ -373,6 +373,12 @@ add_executable(cvcgl_stream_texture test/cvcgl_stream_texture.cpp)
 target_link_libraries(cvcgl_stream_texture PRIVATE cvcGL)
 add_test(NAME cvcgl_stream_texture COMMAND cvcgl_stream_texture)
 
+# Phase-2 PR7: the "stream" scene-node realizer (register_stream_node_type) builds a UV'd
+# quad, resolves+subscribes the named stream, and wires a per-frame tick into the scene.
+add_executable(cvcgl_stream_node test/cvcgl_stream_node.cpp)
+target_link_libraries(cvcgl_stream_node PRIVATE cvcGL)
+add_test(NAME cvcgl_stream_node COMMAND cvcgl_stream_node)
+
 # SceneRenderer: a render target held open across frames (one GL context for a
 # whole sequence, a camera that survives the next render, live scene updates).
 add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
