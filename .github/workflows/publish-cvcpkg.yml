@@ -683,9 +683,9 @@ jobs:
           # Dear ImGui powers the cvcGL overlay (cvc::gl::ImGuiOverlay). Build the
           # SDK WITH it so CVC_ENABLE_IMGUI is on and the overlay actually renders
           # for downstream GUI consumers (dbg_austin_live*, cvcgl-examples). Safe:
-          # cvcGL's imgui export is $<INSTALL_INTERFACE:imgui> / include/imgui
-          # (relocatable link name, not this builder's abs path) + a co-installed
-          # imgui runtime dep, so no path leaks into cvcGLTargets.cmake. Built into
+          # cvcGL's imgui export is the imgui::imgui target name (relocatable, not
+          # this builder's abs path), re-resolved from the CONSUMER's prefix by
+          # cvcGLConfig.cmake, so no path leaks into cvcGLTargets.cmake. Built into
           # its own prefix and joined only here.
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
           cvcpkg install imgui --prefix "$IMGUI"
@@ -868,9 +868,9 @@ jobs:
           # Scene module only; links the installed cvcgl (stage-cvcgl) + VTK +
           # this column's vtk-python-cp${{ matrix.pyver }} (installed into $PY
           # by the family-deps step).
-          # cvcgl now exports a relocatable -limgui (built with CVC_ENABLE_IMGUI),
-          # so anything linking it needs imgui on the prefix, even though pycvc-gl
-          # doesn't use the overlay itself.
+          # cvcgl now exports imgui::imgui (built with CVC_ENABLE_IMGUI), which its
+          # config re-finds on the consumer's prefix, so anything linking it needs
+          # imgui there, even though pycvc-gl doesn't use the overlay itself.
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
           cvcpkg install imgui --prefix "$IMGUI"
           # Likewise cvcgl now links SDL3::SDL3 (CVC_ENABLE_SDL) and emits
@@ -1027,7 +1027,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "pycvc build failed ($LASTEXITCODE)" }
           cmake --install build-pycvc --config Release
           if ($LASTEXITCODE -ne 0) { throw "pycvc install failed ($LASTEXITCODE)" }
-          # ── pycvc-gl (scene; links installed cvcgl, which now exports -limgui + SDL3::SDL3) ──
+          # ── pycvc-gl (scene; links installed cvcgl, which exports imgui::imgui + SDL3::SDL3) ──
+          # The windows imgui bundle ships no cmake config, so cvcGLConfig.cmake
+          # re-creates imgui::imgui by header/lib from THIS prefix list ($imgui) —
+          # it no longer assumes imgui is co-installed in stage-cvcgl.
           $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
           cvcpkg install imgui --prefix "$imgui" --config release --link shared
           # cvcgl now links SDL3::SDL3 (CVC_ENABLE_SDL) + emits find_dependency(SDL3),
@@ -1459,6 +1462,14 @@ jobs:
           : "${SWIG_LIB:?SWIG_LIB unset -- the Install swig (cvcpkg) step did not run}"
           # Scene module. cvcgl comes from $PY (the published single package),
           # not from a source build — see the family header above.
+          #
+          # -L$PY/lib: the published static cvcgl's export links libX11 BY NAME
+          # ($<LINK_ONLY:X11> -> a bare -lX11). This container has no system
+          # libX11.so (the GitHub images get one from libx11-dev via libxkbfile-dev,
+          # which is the only reason the CPU lane links), so put the hermetic
+          # libX11 in $PY on the linker's search path. Never apt: the X11 libs come
+          # from the cvcpkg vtk closure. Redundant (harmless) once cvcgl is
+          # republished with the X11::X11 + find_dependency(X11) export.
           cmake -S bindings/pycvc -B build-pycvcgl-cuda -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCVC_BUILD_PYCVC_CORE=OFF \
@@ -1469,6 +1480,8 @@ jobs:
             -DSWIG_EXECUTABLE="$CVC_SWIG_EXECUTABLE" \
             -DSWIG_DIR="$SWIG_LIB" \
             -DCVC_PYCVC_REQUIRE_SWIG_VERSION="$CVC_SWIG_VERSION" \
+            -DCMAKE_MODULE_LINKER_FLAGS="-L$PY/lib" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-L$PY/lib" \
             -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
           cmake --build build-pycvcgl-cuda --parallel
           cmake --install build-pycvcgl-cuda
