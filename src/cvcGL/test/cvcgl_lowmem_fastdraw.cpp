@@ -41,8 +41,9 @@
 //      the stats check;
 //   4. pixels: Stock, AllCellTypes and Fast frames are byte-identical (RGBA);
 //   5. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
-//      fraction of the stock calls, with no desktop round-trip in any draw,
-//      and a steady frame does no shader-cache lookup;
+//      fraction of the stock calls, with no desktop round-trip in any draw
+//      beyond Stock's (none, but VTK's own warning on a line width the driver
+//      cannot draw), and a steady frame does no shader-cache lookup;
 //   6. lifecycle: a shader rebuild (the shadow bake's pass change), a mapper's
 //      released resources, GetShader(), programs released in the shader cache
 //      and the scene re-opened in a new window all go back through the full
@@ -1190,6 +1191,18 @@ bool renderAvailable(cvc::app &app) {
     s.sr->setCamera(0, 0, 50, 0, 0, 0, 0, 1, 0, 30.0, 1.0, 200.0);
     s.sr->render();
     drew = drewSomething(s.rgba());
+    // Which renderer the pixel and round-trip checks below ran on.
+    if (auto *win = vtkOpenGLRenderWindow::SafeDownCast(s.sr->renderWindow())) {
+      const char *report = win->ReportCapabilities();
+      const std::string caps = report ? report : "";
+      for (const char *key : {"OpenGL renderer string:", "OpenGL version string:"}) {
+        const size_t at = caps.find(key);
+        if (at != std::string::npos)
+          std::printf("  %s\n", caps.substr(at, caps.find('\n', at) - at).c_str());
+      }
+      std::printf("  maximum hardware line width: %g\n",
+                  double(win->GetMaximumHardwareLineWidth()));
+    }
   }
   if (drew)
     return true;
@@ -1436,19 +1449,42 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
           fmt("lookups %.0f", double(fast.firstStats.programLookups)));
 
   // Per draw, on the probes (steady frame: one draw per probe and pass).
+  auto *glWin = vtkOpenGLRenderWindow::SafeDownCast(s.sr->renderWindow());
+  const double maxLineWidth = glWin ? glWin->GetMaximumHardwareLineWidth() : 0.0;
   for (size_t i = 0; i < s.probes.size(); ++i) {
     const Probe &p = s.probes[i];
     const double nStock = stock.probeDraws[i], nFast = fast.probeDraws[i];
-    if (nStock <= 0 || nFast <= 0) {
+    const double nAll = all.probeDraws[i];
+    if (nStock <= 0 || nFast <= 0 || nAll <= 0) {
       check(false, label + ": probe " + p.name + " drew");
       continue;
     }
     const GLCalls &cs = stock.probeCalls[i];
     const GLCalls &cf = fast.probeCalls[i];
+    const GLCalls &ca = all.probeCalls[i];
     std::printf("  per draw %-12s Stock %s\n", p.name.c_str(), cs.str(nStock).c_str());
     std::printf("  %-21s Fast  %s\n", "", cf.str(nFast).c_str());
-    check(cs.roundTrips() == 0 && cf.roundTrips() == 0 && all.probeCalls[i].roundTrips() == 0,
-          label + ": " + p.name + " draws issue no desktop round-trip");
+    // Desktop round-trips: Stock's draw has none but VTK's own warning about a
+    // line width the driver cannot draw -- vtkDrawTexturedElements::PreDraw
+    // (9.5.0) logs it with glGetString(GL_VERSION) on every such draw. A core
+    // profile without wide lines (macOS: GetMaximumHardwareLineWidth() 1) does
+    // that for litLines (width 3) on every path; where the driver draws the
+    // width (NVIDIA, llvmpipe) Stock has none. Fast and AllCellTypes add none.
+    const double lineWidth = p.actor->GetProperty()->GetLineWidth();
+    const bool vtkWarning = lineWidth > maxLineWidth && cs.roundTrips() == cs.count("GetString");
+    const bool stockExplained = cs.roundTrips() == 0 || vtkWarning;
+    const double tripsStock = cs.roundTrips() / nStock;
+    check(stockExplained && cf.roundTrips() / nFast <= tripsStock &&
+              ca.roundTrips() / nAll <= tripsStock,
+          label + ": " + p.name +
+              " draws issue no desktop round-trip beyond Stock's (none, but VTK's warning on a "
+              "line width the driver lacks)",
+          fmt("per draw: Stock %.1f, AllCellTypes %.1f", tripsStock, ca.roundTrips() / nAll) +
+              fmt(", Fast %.1f", cf.roundTrips() / nFast) +
+              (cs.roundTrips() == 0
+                   ? std::string()
+                   : fmt("; Stock's glGetString %.1f, line width %g, driver max %g",
+                         cs.count("GetString") / nStock, lineWidth, maxLineWidth)));
     check(cf.count("DrawArraysInstanced") == cs.count("DrawArraysInstanced") &&
               cf.count("DrawArraysInstanced") == nFast,
           label + ": " + p.name + " one draw call per draw, as Stock");
