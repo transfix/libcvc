@@ -88,6 +88,18 @@ Trace glcallsTraceStop();
 void glcallsMark(int kind, int arg);
 // glDraw* / glDispatchCompute.
 bool glcallsIsDraw(int entry);
+// glUniform* (scalar, vector or matrix).
+bool glcallsIsUniform(int entry);
+// A traced glUniform* call as the uniform locations it sets (in its bound
+// program, the record's ctx): an upload of n array elements is n writes, at
+// location, location + 1, ... Each value is the element's type and bytes, so
+// glUniform1i(l, v) and glUniform1iv(l, 1, &v) set the same value. Empty for any
+// other record, and for location -1 (which GL ignores).
+struct UniformWrite {
+  int location = 0;
+  std::string value;
+};
+std::vector<UniformWrite> glcallsUniformWrites(const TraceRec &r);
 // The index of an entry point ("PointSize"), or -1.
 int glcallsEntry(const std::string &name);
 // "glUniform1i prog=3 [05 00 00 00 01 00 00 00]" / "mark 5 (2)".

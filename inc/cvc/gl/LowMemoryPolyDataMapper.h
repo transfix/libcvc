@@ -145,10 +145,10 @@ public:
 
   // Test instrumentation: when set, the replica reports where each stage of a
   // draw begins and ends (the cvcgl_lowmem_fastdraw GL trace interleaves these
-  // with the GL calls to derive what Fast must leave out). Null -- the default
-  // -- costs one relaxed load per stage. Stock draws report nothing.
+  // with the GL calls to cut a trace into draws and cell-type blocks). Null --
+  // the default -- costs one relaxed load per stage. Stock draws report nothing.
   enum class DrawStage : int {
-    DrawBegin,   // arg: 1 if Fast may skip empty cell types in this draw
+    DrawBegin,   // arg: 1 if this draw skips its empty cell types (Fast only)
     LookupBegin, // full shader-cache lookup
     LookupEnd,
     RebindBegin, // cached program re-bound instead

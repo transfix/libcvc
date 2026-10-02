@@ -291,10 +291,8 @@ void LowMemoryPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
   }
   const bool fast = path == DrawPath::Fast;
   const StageObserver observe = g_stageObserver.load(std::memory_order_relaxed);
-  // CPU only (no GL); asked on AllCellTypes too when observed, so a test can
-  // derive from an AllCellTypes trace what Fast must leave out.
-  const bool skipSafe = (fast || observe) && coincidentSkipSafe(act);
-  observeStage(observe, DrawStage::DrawBegin, skipSafe ? 1 : 0);
+  const bool skip = fast && coincidentSkipSafe(act); // CPU only (no GL)
+  observeStage(observe, DrawStage::DrawBegin, skip ? 1 : 0);
   readyProgram(ren, fast);
   // Uniforms common to every cell type; also fires UpdateShaderEvent, which
   // GeometryNode's custom shader textures hang off.
@@ -303,9 +301,8 @@ void LowMemoryPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
     observeStage(observe, DrawStage::DrawEnd);
     return; // compile/link failure: VTK's agents would dereference null here
   }
-  if (fast && !skipSafe)
+  if (fast && !skip)
     ++m_stats.coincidentFallbacks;
-  const bool skip = fast && skipSafe;
   for (int t = 0; t < 4; ++t) { // verts, lines, polys, strips: VTK's order
     if (skip && !renderable(t)) {
       ++m_stats.cellTypesSkipped;
@@ -363,7 +360,10 @@ bool LowMemoryPolyDataMapper::coincidentSkipSafe(vtkActor *act) const {
   // what an earlier cell type -- possibly one with nothing to draw -- left
   // behind, and the last one leaves a value for the next draw of that program.
   // Skipping is safe when every drawn type, and the program afterwards, ends up
-  // with the same value either way.
+  // with the same value either way. Conservative: the mod declares the offset
+  // uniforms only if the shader was BUILT under a non-zero offset, which this
+  // does not ask -- with the global mode switched on after the build (an offset
+  // VTK then never applies) it falls back for nothing.
   vtkProperty *prop = act->GetProperty();
   const int mode = vtkMapper::GetResolveCoincidentTopology();
   if (mode != VTK_RESOLVE_POLYGON_OFFSET && mode != VTK_RESOLVE_SHIFT_ZBUFFER &&

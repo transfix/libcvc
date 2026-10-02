@@ -650,8 +650,10 @@ endif()
 # texture unit, argument bytes, uniform values (test/gl_call_counter.cpp swaps
 # VTK's glad function pointers) -- and asserts the VTK 9.5.0 replica's trace
 # equals the stock draw's exactly and Fast's equals it with the empty cell-type
-# blocks removed (derived from the replica's stage markers); compares RGBA frames
-# byte for byte -- shadows on and off, bake and steady frames, every
+# blocks removed wherever removing them leaves every draw call's uniform state
+# unchanged (derived by replaying the trace's glUniform* calls, not from the
+# mapper's own decision) and that Fast's draw calls see that state; compares
+# RGBA frames byte for byte -- shadows on and off, bake and steady frames, every
 # representation / scalar / edge / line kind, the hardware selector, released
 # resources, a re-opened window, the offset / picking / vertex-visibility guards,
 # and shader replacements made after the first draw. This is the gate for any

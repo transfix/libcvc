@@ -28,11 +28,17 @@
 //      and plain frames, shadows on and off, and the hardware selector's cell
 //      and point picking passes);
 //   3. Fast's trace equals that same trace with what Fast leaves out removed,
-//      DERIVED from the AllCellTypes trace (the replica marks where each draw's
-//      stages begin and end): every cell-type block that issued no draw call,
-//      in every draw where skipping is allowed. A skipped shader-cache lookup
-//      removes no GL call -- the lookup's GL calls are the bind tail the
-//      re-bind issues too; what it saves is CPU, which the stats check;
+//      DERIVED from the AllCellTypes trace alone (the replica marks where each
+//      draw's stages begin and end): a draw's cell-type blocks that issued no
+//      draw call go iff replaying the trace's glUniform* calls without them
+//      leaves every draw call's uniform state unchanged -- never from the
+//      mapper's own skip decision, whose markers are only counted. And Fast's
+//      own trace, replayed the same way, shows every draw call the uniform
+//      state (every location of its program) it sees on AllCellTypes, and
+//      leaves each program what the next frame's draws read before writing. A
+//      skipped shader-cache lookup removes no GL call -- the lookup's GL calls
+//      are the bind tail the re-bind issues too; what it saves is CPU, which
+//      the stats check;
 //   4. pixels: Stock, AllCellTypes and Fast frames are byte-identical (RGBA);
 //   5. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
 //      fraction of the stock calls, with no desktop round-trip in any draw,
@@ -66,8 +72,11 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/image/image.h>
 #include <deque>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 #include <vtkActor.h>
 #include <vtkActorCollection.h>
@@ -92,6 +101,7 @@
 #include <vtkSelection.h>
 #include <vtkSelectionNode.h>
 #include <vtkShader.h>
+#include <vtkShaderProgram.h>
 #include <vtkSphereSource.h>
 #include <vtkTexture.h>
 #include <vtkUnsignedCharArray.h>
@@ -247,51 +257,251 @@ Trace asDrawState(const Trace &t) {
   return out;
 }
 
-// What Fast's GL trace must be, derived from an AllCellTypes trace and its
-// stage markers. In every draw where skipping is allowed (DrawBegin arg 1),
-// each cell-type block (AgentBegin..AgentEnd) that issued no draw call is
-// removed. Everything else stays -- including each full lookup's GL calls,
-// which are the ReadyShaderProgram(program) tail (compile if released, bind)
-// that the re-bind replacing it issues too.
+// ── the uniforms each draw call sees ─────────────────────────────────────────
+// A trace's glUniform* calls replayed into (program, location) -> value: at
+// every draw call, the bound program's locations the trace has written so far
+// (a location it has not written holds what the program had before the trace).
+struct UniformView {
+  struct DrawCall {
+    size_t at = 0; // index in the trace
+    unsigned program = 0;
+    std::map<int, std::string> written;
+  };
+  std::vector<DrawCall> calls;
+  std::map<unsigned, std::map<int, std::string>> end; // each program, at the trace's end
+};
+
+// resetDraw >= 0: forget what the program of the trace's resetDraw-th replica
+// draw (DrawBegin) holds when that draw first touches it -- that draw then sees
+// only what it writes itself, whatever an earlier draw left.
+UniformView replayUniforms(const Trace &t, int resetDraw = -1) {
+  static const int link = cvcgl_test::glcallsEntry("LinkProgram");
+  static const int del = cvcgl_test::glcallsEntry("DeleteProgram");
+  UniformView v;
+  auto &state = v.end;
+  int draw = -1;
+  bool resetPending = false;
+  for (size_t i = 0; i < t.size(); ++i) {
+    const TraceRec &r = t[i];
+    if (r.marker()) {
+      if (isStage(r, DrawStage::DrawBegin) && ++draw == resetDraw)
+        resetPending = true;
+      continue;
+    }
+    const bool uniform = cvcgl_test::glcallsIsUniform(r.entry);
+    const bool drawCall = cvcgl_test::glcallsIsDraw(r.entry);
+    if (resetPending && (uniform || drawCall)) {
+      state.erase(r.ctx);
+      resetPending = false;
+    }
+    if ((r.entry == link || r.entry == del) && r.args.size() >= sizeof(unsigned)) {
+      unsigned program = 0; // a (re)link resets every uniform; a deleted name is reused
+      std::memcpy(&program, r.args.data(), sizeof program);
+      state.erase(program);
+    } else if (uniform) {
+      for (auto &w : cvcgl_test::glcallsUniformWrites(r))
+        state[r.ctx][w.location] = std::move(w.value);
+    } else if (drawCall) {
+      v.calls.push_back({i, r.ctx, state[r.ctx]});
+    }
+  }
+  return v;
+}
+
+// A UniformWrite value ("3f:<bytes>") as its type and numbers.
+std::string uniformValue(const std::string &v) {
+  const size_t colon = v.find(':');
+  if (colon == std::string::npos)
+    return v;
+  const std::string type = v.substr(0, colon);
+  const bool f = type.find('f') != std::string::npos; // "3f", "Matrix4f", "Matrix4fT"
+  const bool u = type.find("ui") != std::string::npos;
+  std::string out = type + " (";
+  char buf[32];
+  for (size_t at = colon + 1, k = 0; at + 4 <= v.size() && k < 16; at += 4, ++k) {
+    if (f) {
+      float x;
+      std::memcpy(&x, v.data() + at, sizeof x);
+      std::snprintf(buf, sizeof buf, k ? " %g" : "%g", double(x));
+    } else if (u) {
+      unsigned x;
+      std::memcpy(&x, v.data() + at, sizeof x);
+      std::snprintf(buf, sizeof buf, k ? " %u" : "%u", x);
+    } else {
+      int x;
+      std::memcpy(&x, v.data() + at, sizeof x);
+      std::snprintf(buf, sizeof buf, k ? " %d" : "%d", x);
+    }
+    out += buf;
+  }
+  return out + ")";
+}
+
+// Do two traces' draw calls see the same uniforms? The traces issue the same
+// draw calls in the same order (the trace checks pin that), and at each one the
+// bound program must hold the same value at every location either trace wrote:
+// written to the same value in both, or written in neither so far (both see
+// the value from before the trace). Where a draw call sees such an inherited
+// value it reads what the previous frame left -- for a repeated frame, what this
+// frame leaves -- so for those (program, location)s the two frames' end values
+// must agree too. End values no draw call reads before writing are not
+// compared: on AllCellTypes a lines-only draw leaves the empty polys/strips
+// blocks' cellType and primitiveSize in its program, Fast leaves the lines
+// values, and every cell-type block writes both before it draws.
+bool sameUniformsSeen(const UniformView &a, const UniformView &b, const Trace &ta,
+                      std::string *why) {
+  const auto describe = [](const std::map<int, std::string> &m, int loc) {
+    const auto it = m.find(loc);
+    return it == m.end() ? std::string("(not written yet)") : uniformValue(it->second);
+  };
+  if (a.calls.size() != b.calls.size()) {
+    if (why)
+      *why = fmt("%.0f vs %.0f draw calls", double(a.calls.size()), double(b.calls.size()));
+    return false;
+  }
+  static const std::map<int, std::string> kNone;
+  const auto endOf = [](const UniformView &v,
+                        unsigned program) -> const std::map<int, std::string> & {
+    const auto it = v.end.find(program);
+    return it == v.end.end() ? kNone : it->second;
+  };
+  std::set<std::pair<unsigned, int>> inherited;
+  for (size_t k = 0; k < a.calls.size(); ++k) {
+    const auto &x = a.calls[k], &y = b.calls[k];
+    if (x.program != y.program) {
+      if (why)
+        *why = fmt("draw call %.0f: program %.0f vs %.0f", double(k), double(x.program),
+                   double(y.program));
+      return false;
+    }
+    std::set<int> locations;
+    for (const auto *m : {&x.written, &y.written, &endOf(a, x.program), &endOf(b, x.program)})
+      for (const auto &kv : *m)
+        locations.insert(kv.first);
+    for (int loc : locations) {
+      const auto i = x.written.find(loc), j = y.written.find(loc);
+      if (i == x.written.end() && j == y.written.end()) {
+        inherited.insert({x.program, loc});
+        continue;
+      }
+      if (i != x.written.end() && j != y.written.end() && i->second == j->second)
+        continue;
+      if (why)
+        *why = fmt("draw call %.0f (trace #%.0f, ", double(k), double(x.at)) +
+               cvcgl_test::glcallsDescribe(ta[x.at]) + fmt("): location %.0f: ", double(loc)) +
+               describe(x.written, loc) + " vs " + describe(y.written, loc);
+      return false;
+    }
+  }
+  for (const auto &[program, loc] : inherited) {
+    const auto &ea = endOf(a, program), &eb = endOf(b, program);
+    const auto i = ea.find(loc), j = eb.find(loc);
+    const bool same = (i == ea.end() && j == eb.end()) ||
+                      (i != ea.end() && j != eb.end() && i->second == j->second);
+    if (!same) {
+      if (why)
+        *why = fmt("program %.0f location %.0f, read before the frame writes it: the frame "
+                   "leaves ",
+                   double(program), double(loc)) +
+               describe(ea, loc) + " vs " + describe(eb, loc);
+      return false;
+    }
+  }
+  return true;
+}
+
+// For each replica draw (DrawBegin) of a trace: its cell-type blocks that issued
+// no draw call.
+std::vector<std::vector<int>> emptyBlocks(const Trace &t) {
+  std::vector<std::vector<int>> out;
+  bool inBlock = false, drew = false;
+  int type = 0;
+  for (const auto &r : t) {
+    if (!r.marker()) {
+      drew = drew || (inBlock && cvcgl_test::glcallsIsDraw(r.entry));
+      continue;
+    }
+    if (isStage(r, DrawStage::DrawBegin)) {
+      out.emplace_back();
+    } else if (isStage(r, DrawStage::AgentBegin)) {
+      inBlock = true;
+      drew = false;
+      type = static_cast<int>(r.ctx);
+    } else if (isStage(r, DrawStage::AgentEnd)) {
+      inBlock = false;
+      if (!drew && !out.empty())
+        out.back().push_back(type);
+    }
+  }
+  return out;
+}
+
+// `t` without the cell-type blocks (AgentBegin..AgentEnd, markers included)
+// that drop(draw, type) selects; draw counts the trace's replica draws.
+template <typename Drop> Trace without(const Trace &t, Drop drop) {
+  Trace out;
+  out.reserve(t.size());
+  int draw = -1;
+  bool dropping = false;
+  for (const auto &r : t) {
+    if (isStage(r, DrawStage::DrawBegin))
+      ++draw;
+    if (isStage(r, DrawStage::AgentBegin) && drop(draw, static_cast<int>(r.ctx)))
+      dropping = true;
+    if (!dropping)
+      out.push_back(r);
+    if (isStage(r, DrawStage::AgentEnd))
+      dropping = false;
+  }
+  return out;
+}
+
+// What Fast's GL trace must be, derived from an AllCellTypes trace alone --
+// never from the mapper's own skip decision (coincidentSkipSafe). A replica
+// draw's empty cell-type blocks may go iff removing them (that draw's alone)
+// changes no uniform any draw call sees, with the draw's program state on
+// entry treated as unknown (what earlier draws leave in a shared program is not
+// the draw's to rely on): the blocks' writes either reach no draw call or are
+// written again, to the same value, before one reads them. Everything else
+// stays -- including each full lookup's GL calls, which are the
+// ReadyShaderProgram(program) tail (compile if released, bind) that the re-bind
+// replacing it issues too.
 struct Expected {
-  Trace gl;
-  int blocksRemoved = 0, blocksKept = 0, lookups = 0, draws = 0, unskippableDraws = 0;
+  Trace trace; // with the markers of what stays
+  int blocksRemoved = 0, blocksKept = 0, lookups = 0, draws = 0, fallbacks = 0;
+  std::string firstFallback; // why the first draw that keeps its empty blocks must
 };
 
 Expected expectFast(const Trace &all) {
   Expected e;
-  bool skipAllowed = false, inBlock = false, blockDraws = false;
-  Trace block;
-  for (const auto &r : all) {
-    if (!r.marker()) {
-      if (inBlock) {
-        block.push_back(r);
-        blockDraws = blockDraws || cvcgl_test::glcallsIsDraw(r.entry);
-      } else {
-        e.gl.push_back(r);
-      }
+  const auto empty = emptyBlocks(all);
+  const auto isEmpty = [&](int d, int type) {
+    const auto &v = empty[static_cast<size_t>(d)];
+    return std::find(v.begin(), v.end(), type) != v.end();
+  };
+  std::vector<bool> removable(empty.size(), false);
+  for (size_t d = 0; d < empty.size(); ++d) {
+    if (empty[d].empty())
       continue;
-    }
-    if (isStage(r, DrawStage::DrawBegin)) {
-      ++e.draws;
-      skipAllowed = r.ctx != 0;
-      e.unskippableDraws += !skipAllowed;
-    } else if (isStage(r, DrawStage::LookupBegin)) {
-      ++e.lookups;
-    } else if (isStage(r, DrawStage::AgentBegin)) {
-      inBlock = true;
-      blockDraws = false;
-      block.clear();
-    } else if (isStage(r, DrawStage::AgentEnd)) {
-      inBlock = false;
-      if (skipAllowed && !blockDraws) {
-        ++e.blocksRemoved;
-      } else {
-        ++e.blocksKept;
-        e.gl.insert(e.gl.end(), block.begin(), block.end());
-      }
+    const int draw = static_cast<int>(d);
+    const Trace removed =
+        without(all, [&](int dd, int type) { return dd == draw && isEmpty(dd, type); });
+    std::string why;
+    removable[d] =
+        sameUniformsSeen(replayUniforms(all, draw), replayUniforms(removed, draw), all, &why);
+    if (!removable[d]) {
+      ++e.fallbacks;
+      if (e.firstFallback.empty())
+        e.firstFallback = fmt("draw %.0f: ", double(d)) + why;
     }
   }
+  e.trace = without(all, [&](int d, int type) {
+    return d >= 0 && removable[static_cast<size_t>(d)] && isEmpty(d, type);
+  });
+  e.draws = static_cast<int>(empty.size());
+  for (size_t d = 0; d < empty.size(); ++d)
+    (removable[d] ? e.blocksRemoved : e.blocksKept) += static_cast<int>(empty[d].size());
+  e.lookups = countStage(all, DrawStage::LookupBegin);
   return e;
 }
 
@@ -1034,32 +1244,53 @@ void checkTraces(const std::string &what, const Trace &stock, const Trace &all, 
   why.clear();
   // The draw state is read off the full AllCellTypes trace, before the blocks
   // go: what each draw saw there is what it must see on Fast.
-  const Expected e = expectFast(asDrawState(all));
-  const Trace got = glOnly(asDrawState(fast));
-  const bool derived = sameTrace(got, glOnly(e.gl), &why);
+  const Trace allState = asDrawState(all), fastState = asDrawState(fast);
+  const Expected e = expectFast(allState);
+  const Trace got = glOnly(fastState);
+  const bool derived = sameTrace(got, glOnly(e.trace), &why);
   if (!derived)
-    dumpTraces(what, {{"all", all}, {"fast", fast}, {"expected", e.gl}, {"fast_state", got}});
+    dumpTraces(what, {{"all", all}, {"fast", fast}, {"expected", e.trace}, {"fast_state", got}});
   check(derived,
-        what + ": Fast trace == AllCellTypes trace minus its empty cell-type blocks (cached "
-               "point size / line width compared at the draws)",
+        what + ": Fast trace == AllCellTypes trace minus the empty cell-type blocks whose "
+               "removal no draw call's uniforms see (cached point size / line width compared "
+               "at the draws)",
         derived ? fmt("%.0f calls; %.0f blocks removed, %.0f kept", double(got.size()),
-                      double(e.blocksRemoved), double(e.blocksKept))
+                      double(e.blocksRemoved), double(e.blocksKept)) +
+                      (e.firstFallback.empty() ? "" : "; kept e.g. " + e.firstFallback)
                 : why);
+  why.clear();
+  // Fast's own trace, replayed: every draw call sees the uniforms it sees on
+  // AllCellTypes, and the frame leaves what the next frame's draws read.
+  const UniformView allUniforms = replayUniforms(allState),
+                    fastUniforms = replayUniforms(fastState);
+  const bool uniforms = sameUniformsSeen(allUniforms, fastUniforms, allState, &why);
+  if (!uniforms)
+    dumpTraces(what + " (uniforms)", {{"all", allState}, {"fast", fastState}});
+  check(uniforms,
+        what + ": every Fast draw call sees AllCellTypes' uniform state (every location of "
+               "its program), and the frame leaves the values the next frame reads",
+        uniforms ? fmt("%.0f draw calls", double(fastUniforms.calls.size())) : why);
+  // The mapper's own markers and stats: counts only.
   const int skipped = countStage(fast, DrawStage::AgentSkipped);
   check(e.blocksRemoved == skipped && (skipped > 0) == mayDraw &&
             static_cast<double>(skipped) == double(fastStats.cellTypesSkipped),
-        what + ": the blocks derived as removable are exactly the ones Fast skipped",
+        what + ": Fast skipped as many blocks as derived",
         fmt("derived %.0f, Fast skipped %.0f (stats %.0f)", double(e.blocksRemoved),
             double(skipped), double(fastStats.cellTypesSkipped)));
   const int looked = countStage(fast, DrawStage::LookupBegin);
   const int rebound = countStage(fast, DrawStage::RebindBegin);
+  int fastFallbacks = 0;
+  for (const auto &r : fast)
+    fastFallbacks += isStage(r, DrawStage::DrawBegin) && r.ctx == 0;
   check(looked + rebound == e.lookups && countStage(fast, DrawStage::DrawBegin) == e.draws &&
-            static_cast<double>(e.unskippableDraws) == double(fastStats.coincidentFallbacks),
+            e.fallbacks == fastFallbacks &&
+            static_cast<double>(e.fallbacks) == double(fastStats.coincidentFallbacks),
         what + ": every AllCellTypes lookup is a Fast lookup or re-bind; same draws, same "
                "fallbacks",
         fmt("lookups %.0f = %.0f + %.0f re-bound", double(e.lookups), double(looked),
             double(rebound)) +
-            fmt(", fallbacks %.0f", double(e.unskippableDraws)));
+            fmt(", fallbacks derived %.0f, Fast %.0f (stats %.0f)", double(e.fallbacks),
+                double(fastFallbacks), double(fastStats.coincidentFallbacks)));
 }
 
 // The hardware selector's passes on one draw path: what it selected, the GL
@@ -1363,13 +1594,22 @@ void testGuards(cvc::app &app) {
   Probe &vv = s.probe("vertexVis", terrainPoly(6, -5, -5, 4));
   vv.actor->GetProperty()->VertexVisibilityOn();
   vv.actor->GetProperty()->SetVertexColor(1, 0, 0);
+  // The mode is set before the first render: vtkGLSLModCoincidentTopology
+  // declares the offset uniforms only if the shader is BUILT under an offset,
+  // and nothing rebuilds it when the global mode changes later -- switched on
+  // after the build, the offsets never reach the GPU on any path.
+  const int savedMode = vtkMapper::GetResolveCoincidentTopology();
+  vtkMapper::SetResolveCoincidentTopologyToPolygonOffset();
   s.open();
   s.sr->setCamera(0, -14, 10, 0, 0, 0, 0, 0, 1, 40.0, 1.0, 100.0);
   s.sr->render();
   glcallsInstall();
+  for (const Probe *p : {&zero, &shifted}) {
+    vtkShaderProgram *prog = p->mapper->vtkDrawTexturedElements::GetShaderProgram();
+    check(prog && prog->IsUniformUsed("cOffset") && prog->IsUniformUsed("cFactor"),
+          "POLYGON_OFFSET mode: " + p->name + "'s program carries the depth offset uniforms");
+  }
 
-  const int savedMode = vtkMapper::GetResolveCoincidentTopology();
-  vtkMapper::SetResolveCoincidentTopologyToPolygonOffset();
   for (DrawPath p : {DrawPath::Stock, DrawPath::Fast})
     runPath(s, p);
   const PathRun stock = runPath(s, DrawPath::Stock);

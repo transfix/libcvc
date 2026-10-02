@@ -573,6 +573,45 @@ void glcallsMark(int kind, int arg) {
 
 bool glcallsIsDraw(int entry) { return entry >= 0 && entry < E_COUNT && g_cls[entry] == kDraw; }
 
+bool glcallsIsUniform(int entry) {
+  return entry >= 0 && entry < E_COUNT && g_cls[entry] == kUniform;
+}
+
+std::vector<UniformWrite> glcallsUniformWrites(const TraceRec &r) {
+  std::vector<UniformWrite> out;
+  if (r.marker() || !glcallsIsUniform(r.entry) || r.args.size() < sizeof(GLint))
+    return out;
+  // The args as recorded: location, then count for the *v forms, then the
+  // transpose byte for the matrices, then the values. The type is the name less
+  // "Uniform" and the trailing "v": "3f", "1ui", "Matrix4x3f".
+  const std::string name = g_names[r.entry];
+  const bool matrix = name.compare(0, 13, "UniformMatrix") == 0;
+  const bool array = name.back() == 'v';
+  std::string type = name.substr(7, name.size() - 7 - (array ? 1 : 0));
+  GLint location = 0;
+  std::memcpy(&location, r.args.data(), sizeof location);
+  size_t at = sizeof location;
+  GLsizei count = 1;
+  if (array) {
+    if (r.args.size() < at + sizeof count)
+      return out;
+    std::memcpy(&count, r.args.data() + at, sizeof count);
+    at += sizeof count;
+  }
+  if (matrix) {
+    if (r.args.size() < at + 1)
+      return out;
+    type += r.args[at] ? "T" : "";
+    ++at;
+  }
+  if (location < 0 || count <= 0)
+    return out;
+  const size_t each = (r.args.size() - at) / static_cast<size_t>(count);
+  for (GLsizei k = 0; k < count; ++k)
+    out.push_back({location + k, type + ':' + r.args.substr(at + k * each, each)});
+  return out;
+}
+
 int glcallsEntry(const std::string &name) {
   for (int i = 0; i < E_COUNT; ++i)
     if (name == g_names[i])
