@@ -163,7 +163,7 @@ struct material_drive {
   float d_hat_m = 12.0f;           // m      grl_snam MaterialParams for why)
   // Authority MULTIPLIERS on the reroute weights (default 1.0 = no-op). A lam-head net
   // OVERRIDES lam_soft/lam_hard with its learned per-agent columns, so a caller that wants to
-  // live-scale material authority (e.g. demo3's force-bias slider) applies the factor here and
+  // live-scale material authority (e.g. a live UI force-bias slider) applies the factor here and
   // the drive multiplies the learned lam by it, instead of the caller's fixed lam being clobbered.
   float lam_soft_scale = 1.0f;
   float lam_hard_scale = 1.0f;
@@ -209,13 +209,13 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
 
 // ─── Fused material + external-force drive ───────────────────────────────────
 // The learned grip/risk policy (the material path, INCLUDING a lam-head net) AND a generic
-// ext_force (e.g. cvc::dbg's RF/comm force) applied in the SAME rollout — both forces summed into
-// one accumulator and one steering bias (rollout_impl already fuses them; these entry points are
-// the only ones that pass BOTH). Without this, a caller must choose material OR ext: sim_world's
-// step() gives material priority, so attaching a material stack silently drops the ext force. Use
-// the fused path when a demo must steer on a trained grip/risk net WHILE the comm transformer also
-// pushes. A null ext.sample makes drive_step_material_ext byte-identical to drive_step_material; a
-// null material stack makes it byte-identical to drive_step_ext.
+// ext_force (e.g. a downstream layer's steering force) applied in the SAME rollout — both forces
+// summed into one accumulator and one steering bias (rollout_impl already fuses them; these entry
+// points are the only ones that pass BOTH). Without this, a caller must choose material OR ext:
+// sim_world's step() gives material priority, so attaching a material stack silently drops the ext
+// force. Use the fused path when a host must steer on a trained grip/risk net WHILE its external
+// force also pushes. A null ext.sample makes drive_step_material_ext byte-identical to
+// drive_step_material; a null material stack makes it byte-identical to drive_step_ext.
 void bicycle_rollout_material_ext(const field_stack &f, float *o, float *th, float *sp,
                                   const float *goal, const float *al, const float *be,
                                   const float *ga, int n, const int *map_id, const veh_params &v,

@@ -1,7 +1,7 @@
 name: publish-cvcgl-wasm
 
 # Build + publish libcvc and cvcgl for the wasm-mt platform (WebAssembly +
-# pthreads), so downstream wasm consumers (CVC-DBG/cvcdbg's demos) can
+# pthreads), so downstream wasm consumers (browser apps built on cvcGL) can
 # `cvcpkg install cvc/cvcgl --platform wasm-mt` instead of rebuilding cvcGL from
 # source. The wasm-mt DEPS (vtk/imgui/boost/codecs, all wasm32) are already on
 # the catalog; only libcvc + cvcgl were missing. cvcgl is built WITH imgui, so
@@ -88,9 +88,9 @@ jobs:
           done
 
       - name: Build + install libcvc + cvcGL (wasm-mt, with imgui + sdl3)
-        # The proven build from CVC-DBG/cvcdbg wasm/build-standalone.sh step 1:
         # ONE emscripten configure builds both cvc + cvcGL targets and installs
-        # them into $INST. -DCVC_BUILD_EXAMPLES=OFF: libcvc's own demos never build.
+        # them into $INST (the same single-configure shape a standalone downstream
+        # wasm-mt app build uses). -DCVC_BUILD_EXAMPLES=OFF: libcvc's own demos never build.
         run: |
           # shellcheck disable=SC1091
           source "$CVC_EMSDK_DIR/emsdk_env.sh"

@@ -283,7 +283,7 @@ std::string material_raster::to_json() const {
     return t.str();
   };
   o << "{\"schema\":\"cvc-scene-material/1\",\"provenance\":\"scene land cover (cvc::nav "
-       "material_raster: masks if present, else satellite); ids = cvc::dbg MATERIAL_TABLE\",";
+       "material_raster: masks if present, else satellite); ids = the 13-class material palette\",";
   o << "\"rows\":" << rows << ",\"cols\":" << cols << ",\"bounds\":{\"min_x\":" << fnum(min_x)
     << ",\"min_y\":" << fnum(min_y) << ",\"max_x\":" << fnum(max_x) << ",\"max_y\":" << fnum(max_y)
     << "},";

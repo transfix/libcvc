@@ -174,9 +174,24 @@ TEST(MultiProcessIpcIntegration, BidirectionalReplication) {
     ct.pump_all();
     ct.flush();
 
-    // Wait for server's value.
-    ct.wait_for_received(1, std::chrono::milliseconds(5000));
-    bool ok = ca.root()("server_val").value() == "from_server";
+    // Wait for (and APPLY) the server's value. wait_for_received counts frames DECODED by the
+    // reader thread, NOT frames applied to the tree — and inbound frames are ingested on pump_all —
+    // so checking the tree right after wait_for_received could read a stale value, and the child
+    // intermittently exited 12 ("did not receive server's value"). Poll the actual condition,
+    // pumping so received frames are applied.
+    bool ok = false;
+    {
+      const auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+      while (std::chrono::steady_clock::now() < dl) {
+        ct.pump_all();
+        ct.flush();
+        if (ca.root()("server_val").value() == "from_server") {
+          ok = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
 
     // Keep pumping so server receives ours.
     for (int i = 0; i < 40; ++i) {
@@ -210,9 +225,21 @@ TEST(MultiProcessIpcIntegration, BidirectionalReplication) {
   st.pump_all();
   st.flush();
 
-  // Wait for client's value.
-  st.wait_for_received(1, std::chrono::milliseconds(5000));
-  bool got_client = sa.root()("client_val").value() == "from_client";
+  // Wait for (and APPLY) the client's value — same apply-barrier race as the child above: poll the
+  // actual condition, pumping so received frames are ingested, instead of trusting the frame count.
+  bool got_client = false;
+  {
+    const auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+    while (std::chrono::steady_clock::now() < dl) {
+      st.pump_all();
+      st.flush();
+      if (sa.root()("client_val").value() == "from_client") {
+        got_client = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
 
   // Keep pumping so child gets our value.
   for (int i = 0; i < 80; ++i) {

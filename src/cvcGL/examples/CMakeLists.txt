@@ -19,6 +19,14 @@ add_executable(ariadne_hello ariadne_hello.cpp)
 target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 
+# ariadne_stream — the Phase-3 streaming "holy grail": one live video stream shown both as the main
+# scene (a `type: stream` quad filling the viewport) AND in a draggable ImGui `type: stream_view`
+# widget window, wired from stream.ari. Synthetic test pattern by default (headless-verifiable),
+# or a real SDL3 camera with --camera.
+add_executable(ariadne_stream ariadne_stream.cpp)
+target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
+
 # nav_convoy — a nav-style demo whose entire UI is the reusable .ari component library, with only
 # the streamed agents + sim/camera verbs + stats readouts in the host (the library-based pattern
 # the real cvc::nav integration follows).
@@ -60,10 +68,11 @@ target_link_libraries(lsystem_coast PRIVATE cvcGL ${VTK_LIBRARIES} Boost::progra
 vtk_module_autoinit(TARGETS lsystem_coast MODULES ${VTK_LIBRARIES})
 
 # terrain_lab — the visual QA surface for the cvc::world L-system terrain source
-# (dbg-technical/21 §5). RENDERS the generator's own output: terrain coloured by
-# the raster's per-cell material (or risk/occupancy/height), props grown from the
-# built-in L-system recipes and tessellated in place, volumetric water below the
-# sea level, a drifting cloud slab — all regenerated live from the ImGui panel.
+# (docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md). RENDERS the generator's own output:
+# terrain coloured by the raster's per-cell material (or risk/occupancy/height),
+# props grown from the built-in L-system recipes and tessellated in place,
+# volumetric water below the sea level, a drifting cloud slab — all regenerated
+# live from the ImGui panel.
 # cvc::world + cvc::lsys are compiled into cvc::cvc (linked transitively via cvcGL),
 # so no extra find_package/link. Enrolled in _wasm_demos below.
 add_executable(terrain_lab terrain_lab.cpp)

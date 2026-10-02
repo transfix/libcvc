@@ -269,9 +269,9 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
 // repulsion F_rep and (when present) the material force — and, when `steer`,
 // into the steering bias too, exactly like material_drive. cvc::nav knows only
 // "a force field evaluated at a pose"; it has NO vocabulary for what the force
-// MEANS. A private consumer (e.g. cvc::dbg's RF/comms force) builds an ext_force
+// MEANS. A downstream consumer with its own domain-specific force builds an ext_force
 // whose `user` carries its state and whose `sample` computes its physics, then
-// calls drive_step_ext — so the open core never grows an RF/comm concept.
+// calls drive_step_ext — so the open core never grows a domain-specific concept.
 //
 // `sample(user, i, plane, onx, ony, fx, fy)` writes the force for agent i at its
 // current NORMALIZED (centered) position (onx, ony) — cvc::nav's native drive

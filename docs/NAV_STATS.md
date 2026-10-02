@@ -1,15 +1,18 @@
 # cvc::nav navigation statistics
 
-`cvc::nav::nav_stats` (`inc/cvc/nav/nav_stats.h`) is the **base, RF-free** navigation-telemetry
-layer: per-vehicle + per-episode motion/clearance/collision/material/time/fuel/budget stats over a
-`sim_world` drive, plus a corpus scorecard for ranking training checkpoints. It is the shared base of
-the two-layer nav-stats design (the RF/comms extension lives in `cvc::dbg`, in the CVC-DBG/cvcdbg
-repo, and joins this record by `veh_index`; it never lives here). Field names mirror the Python
-`grl_snam.scorecard` schema, and the two are held to the same hand-computed numbers by parity tests.
+`cvc::nav::nav_stats` (`inc/cvc/nav/nav_stats.h`) is the **base, domain-neutral**
+navigation-telemetry layer: per-vehicle + per-episode motion/clearance/collision/material/time/fuel/
+budget stats over a `sim_world` drive, plus a corpus scorecard for ranking training checkpoints. It is
+the open core of a two-layer design. Everything here is generic navigation; the second layer is an
+**extension seam**. A downstream layer that needs domain-specific metrics (for example, about an
+external force it injects through `ext_force`) keeps its own per-vehicle record, joins it to this one
+by `veh_index`, and nests it in the JSON itself. Nothing domain-specific lives here. Field names
+mirror the Python `grl_snam.scorecard` schema, and the two are held to the same hand-computed numbers
+by parity tests.
 
 The collector is stdlib-only (no libcvc-internal dependency beyond the STL): it consumes the
-`sim_world::snapshot` arrays plus optional position samplers, so grl-snam, the cvcdbg demos/harness,
-and `sim_world` itself all drive it identically.
+`sim_world::snapshot` arrays plus optional position samplers, so grl-snam, the cvcGL nav demos, a
+downstream app or test harness, and `sim_world` itself all drive it identically.
 
 ## Types
 
@@ -26,18 +29,19 @@ and `sim_world` itself all drive it identically.
   then feed `drive_sample` from `drive_telemetry_data()`); otherwise `mu_mean` stays 1, `mrisk_mean`
   0 (the no-material/no-grip neutral).
 - **`episode_nav_stats`** — one per episode: the reduced fleet fields + `per_vehicle`, and `to_json()`
-  (the base record; a DBG consumer nests an `"rf"` member itself). The `1e30` "unmeasured" sentinel
+  (the base record; an extension layer nests its own member itself). The `1e30` "unmeasured" sentinel
   for `min_clearance_m`/`min_sep_m` serializes as JSON `null`, not a huge finite number.
 - **`nav_stats_params`** (thresholds) and **`budget_policy`** (time / ETA-multiple / fuel bounds).
 - **`nav_samplers`** — optional per-position hooks: `material_id(x,y)`, `occupied(x,y)`, and
   `min_clearance_m` (a `const double*` **in metres** — see the units note below).
 - **`nav_scorecard`** + **`aggregate_nav(episodes, checkpoint)`** — reduce a corpus of episodes into
-  one RF-free fitness row (arrival, economy, safety, material) for ranking base-policy checkpoints.
+  one domain-neutral fitness row (arrival, economy, safety, material) for ranking base-policy
+  checkpoints.
   Includes the fleet drive-telemetry means (`mean_alpha`/`mean_beta`/`mean_gamma`, `mean_mu`,
   `mean_mrisk`, `mean_ext_force`) and `material_time_share[kNumMaterials]` — the signals a grip/risk
   tuning or trained-policy A/B is judged on (lower `mean_mrisk` + off-hazard time-share at held
-  arrival). Note `composite_score` / grip-margin are reserved to a downstream (cvc::dbg) scorecard,
-  not computed here.
+  arrival). A weighted composite score or a grip margin is left to a downstream extension's own
+  scorecard, not computed here.
 
 ## Collecting
 
@@ -85,24 +89,25 @@ homogeneous convoy.
 `veh_nav_stats::arrived` / `time_to_goal_s` latch on the **rising edge of the sim's `reached[i]`**
 flag (`nav_stats_params::reach_eps`), i.e. when a vehicle actually gets within `sim_world`'s
 `reach_tol` of *its own* goal. That is the per-vehicle truth. A **convoy/harness may carry its own
-coarser arrival tolerance** for a whole-column "done" check — e.g. cvcdbg's `ConvoyController::arrive_m()
-= N·standoff + 40 m`, ~172 m for a 6-vehicle column. That column tolerance is fine as a formation
-check but **hides a tail follower that parked short**: the harness can print `atObjective=6/6` while
-two followers never latched `reached`. When you are debugging "did each vehicle arrive?", read the
-per-vehicle `arrived`/`time_to_goal_s` (`time_to_goal_s < 0` = never reached), **not** the aggregate
-column count.
+coarser arrival tolerance** for a whole-column "done" check — e.g. one that grows with the number of
+vehicles times their standoff, so a long column's tolerance is many times a single vehicle's
+`reach_tol`. That column tolerance is fine as a formation check but **hides a tail follower that
+parked short**: the harness can report the whole column at the objective while some followers never
+latched `reached`. When you are debugging "did each vehicle arrive?", read the per-vehicle
+`arrived`/`time_to_goal_s` (`time_to_goal_s < 0` = never reached), **not** the aggregate column
+count.
 
-Worked example — the cvcdbg demo3 tail-follower loss was isolated entirely with this schema via
-`cvcdbg-nativedemo/tools/dbg_arrival_check3.cpp` (`--json` per-vehicle records): comm-off arrives 6/6
-in every condition, while the bounded comm-steer force loses the two tail followers under sustained
-jamming (`reached=0`, `turn_total_rad` 12→252 = looping, `wall_entries` 0→19). Two traps that turn
-these stats into noise if ignored: (1) the coarse column tolerance above, and (2) a harness whose jam
-schedule scales with total run length — hold the run length fixed when A/B-ing. See
-`cvcdbg-nativedemo/docs/demo3-follower-loss.md` for the full case and the `turn_total_rad` /
-`wall_entries` / `time_stopped_s` interpretation used to distinguish "looping" from "frozen."
+The per-vehicle records (`to_json()`) are enough on their own to isolate a follower that fails to
+arrive. A/B the same scenario with and without the suspect influence (e.g. an extra steering force
+injected through `ext_force`): a follower that is **looping** shows `reached=0` with `turn_total_rad`
+and `wall_entries` far above the baseline run, while a **frozen** one shows `time_stopped_s` climbing
+instead. Two traps turn these stats into noise if ignored: (1) the coarse column tolerance above, and
+(2) a harness whose disturbance schedule scales with total run length — hold the run length fixed
+when A/B-ing.
 
 ## Tests
 
 `src/cvc/tests/nav_stats_test.cpp` (the base accumulators/scorecard over a scripted trajectory) and
 `nav_test.cpp`'s `NavSimWorld` suite (the `sim_world` internal collector + `min_clearance_world`). The
-scripted corpus + numbers are mirrored in cvcdbg's and grl-snam's tests — the shared-schema contract.
+scripted corpus + numbers are mirrored in grl-snam's tests (and in any downstream extension that
+re-checks the base record) — the shared-schema contract.

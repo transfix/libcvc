@@ -297,14 +297,14 @@ This is the "belt and suspenders" layer. It does **not** add atomicity.
 hazard-pointer / quiescence machinery** in `cvc::core` today (`thread_pool::_epoch`
 at `thread_pool.h:125` is a per-job wake counter, unrelated). The only ambient
 per-frame drain (`AriRuntime`) lives in the cvcGL layer, absent from CLI / headless /
-pycvc / DBG.
+pycvc / non-Ariadne downstream apps.
 
 So C requires designing a drain mechanism first. Options to evaluate:
 - an **epoch/quiescent-state** scheme where sweep unlinks + parks nodes in a graveyard
   reclaimed once all reader threads have passed a quiescent point;
 - **hazard pointers** per reader thread;
 - a **scheduler-tick barrier** as the natural drain point for the DSL/scheduler world
-  (but headless/CLI/DBG need their own).
+  (but headless/CLI/non-Ariadne apps need their own).
 
 ### 5.2 Costs to resolve before C ships
 
@@ -391,4 +391,4 @@ primitive (§4.2) and annotate/covert `state_value_codec`/`state_list`.
 2. Phase 2 — is collapsing the cache entry to one `data()` blob acceptable (loses
    per-field `state://…?children` addressability of cache internals)?
 3. Phase 3 — which drain mechanism (epoch / hazard-pointer / scheduler-tick), given
-   headless/CLI/DBG have no ambient frame loop?
+   headless/CLI/non-Ariadne apps have no ambient frame loop?

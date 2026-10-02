@@ -5,7 +5,7 @@
 // nothing exercised the WHOLE deploy loop: a widened net serialized to .cvcnav, reloaded, and
 // driven on the C++ host — the exact path a demo/game engine takes when it loads a trained policy.
 // These tests are that guarantee, plus the fused material+ext drive (drive_step_material_ext) that
-// lets a run steer on the learned grip/risk policy WHILE an external RF/comm force also pushes.
+// lets a run steer on the learned grip/risk policy WHILE an external force also pushes.
 
 #include <cmath>
 #include <cstdint>
@@ -304,10 +304,10 @@ TEST(NavMaterialDeploy, LearnedLamHeadDrivesReroute) {
       << " lamhi=" << x_lam_hi << ")";
 }
 
-// (5) The SHIPPED cvc-dbg-weights nav policy layout: 6-input RISK-ONLY + lam head — has_risk() but
+// (5) A SHIPPED risk-aware nav policy layout: 6-input RISK-ONLY + lam head — has_risk() but
 // NOT has_mu() (no grip column), out=4. grl-snam `coef_train --w-risk --learned-lam` produces
-// exactly this (add_lam_head(add_risk_feature(CoefMLP()))), and it's what ships as
-// coef_mlp_riskaware.cvcnav / demo3's --grip auto-load. The other tests above drive a 7-in
+// exactly this (add_lam_head(add_risk_feature(CoefMLP()))), and it's the layout a host auto-loads
+// when it drives grip/risk-aware. The other tests above drive a 7-in
 // grip+risk net; pin the shipped risk-only+lam contract too — it round-trips through .cvcnav and
 // drives the material path (which a risk net REQUIRES; the grip field is present but unused as a
 // feature since has_mu()==false).
@@ -576,23 +576,22 @@ TEST(NavMaterialDeploy, LamSoftScaleMultipliesLearnedReroute) {
   EXPECT_LT(x_s2, x_s1 - 1e-4) << "scale=2 did not reroute more than scale=1 (scale ignored?)";
 }
 
-// Regression for cvcdbg #141 ("attach material stack to the STARTUP world under --grip"). The
-// demo3 crash was a --grip startup world that auto-loaded the widened risk net but stepped it
-// through the NON-material drive (no material stack attached) — which the plain drive REJECTS, so
-// the throw escaped as an uncaught exception at the first frame. The demo binary is not in CI, so
+// Regression: a host that auto-loads a terrain-risk net at startup but steps it through the
+// NON-material drive (no material stack attached) throws at the first frame, because the plain
+// drive REJECTS a risk net; uncaught, that throw crashes the host. Such hosts are not in CI, so
 // pin the underlying library invariant here: a terrain-risk net is rejected by drive_step and
 // accepted by drive_step_material (with a stack attached). If a future change lets a risk net fall
-// through the plain drive, this fails instead of the demo crashing.
+// through the plain drive, this fails instead of a host crashing.
 TEST(NavMaterialDeploy, RiskNetRejectedByPlainDriveAcceptedByMaterialDrive) {
   deploy_world w;
   coef_mlp net = make_net(7, 4, coef_mlp::kFlagFeatMu | coef_mlp::kFlagFeatRisk, 0.5f);
   ASSERT_TRUE(net.has_risk());
-  // Non-material drive on a risk net: throws (this is the exact throw the demo3 startup hit).
+  // Non-material drive on a risk net: throws (the throw such a host hits at startup).
   std::vector<float> o1 = w.o, th1 = w.th, sp1 = w.sp, mc1(w.N);
   EXPECT_THROW(drive_step(w.fs, o1.data(), th1.data(), sp1.data(), w.carrot.data(), net, w.N,
                           nullptr, w.v, mc1.data(), 1),
                std::runtime_error);
-  // Same net through the material drive with a stack attached: accepted (the fix's path).
+  // Same net through the material drive with a stack attached: accepted (the correct path).
   std::vector<float> store;
   material_stack ms = w.risk_stack(store);
   std::vector<float> ls(w.N, 0.5f), lh(w.N, 1.0f);

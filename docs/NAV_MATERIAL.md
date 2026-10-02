@@ -160,8 +160,8 @@ reconstructs the exact map. A v2 blob **hard-fails on a pre-v2 host** (the loade
 requires format v2 for `kFlagLamSigmoid`); the whole round-trip — widen to two
 heads, serialize, reload, drive — is pinned by `nav_material_deploy_test`.
 
-To steer on the learned grip/risk policy **while** an external force (e.g.
-cvc::dbg's RF/comm push) also acts, use the fused `drive_step_material_ext` /
+To steer on the learned grip/risk policy **while** an external force (e.g. a
+downstream layer's own steering push) also acts, use the fused `drive_step_material_ext` /
 `bicycle_rollout_material_ext` — `sim_world::step()` selects it automatically when
 both a material stack and an `ext_force` are attached (otherwise material would
 take priority and drop the ext force). The whole round-trip — a widened net
@@ -173,10 +173,9 @@ learned-lam reroute) — is pinned by `nav_material_deploy_test`.
 > *means*. The two-head material soft/hard channel documented here is the
 > reusable template — a precomputed risk/hazard field driving `−λ_s∇r̃ −
 > λ_h b′(φ)∇φ`. A downstream layer can re-source that template from a different
-> field entirely and inject it through the same seam without any change here; the
-> RF/comm re-sourcing (the `cvc::dbg` layer) is exactly that, and its
+> field entirely and inject it through the same seam without any change here; its
 > domain-specific logic stays in that layer, never in this core (as with the
-> RF-free base statistics — see `NAV_STATS.md`).
+> domain-neutral base statistics and their extension seam — see `NAV_STATS.md`).
 
 ### Choosing constants
 
