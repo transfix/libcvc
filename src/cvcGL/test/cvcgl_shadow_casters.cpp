@@ -13,10 +13,10 @@
 //      ones added later -- and readable from the bare vtkProp;
 //   B. moving / restyling a non-caster never bakes; moving a caster does;
 //   C. a node starting or stopping casting bakes; a light change bakes;
-//   D. on screen: a non-caster casts no shadow (same pixels as no object at
-//      all -- byte for byte, except on Apple's renderer, within 1 luma), a
-//      caster does, and only inside its footprint; judged against reference
-//      renders of the same run, on frames that show the whole ground;
+//   D. on screen: a non-caster casts no shadow, a caster does, and only inside
+//      its footprint; judged against reference renders of the same run, on
+//      frames that show the whole ground; byte for byte where rendering is
+//      deterministic (on Apple's GL, master's 1-luma check, carried over);
 //   E. the update interval still strides bakes of a moving caster;
 //   F. a caster deformed in place (updateVertices / updateNormals /
 //      updateColors) bakes, a non-caster does not; a RibbonNode does not cast
@@ -26,6 +26,7 @@
 //      (endpoints, width, heights) re-bakes while uploading nothing.
 // B-F render for real and skip where nothing rasterises (fatal under
 // CVC_REQUIRE_RENDER=1).
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -82,13 +83,13 @@ static cvc::geometry box(double x0, double y0, double z0, double x1, double y1, 
   return g;
 }
 
-// A flat, upward-facing ground at height z, cut into step x step tiles. Not two
-// big triangles: Apple's software renderer (GitHub's arm64 macOS runners)
-// intermittently drops triangles that are clipped far outside the frustum, and
-// two triangles spanning a 120-unit ground are exactly that, both in the 16-unit
-// view and in the shadow bake, whose light frustum is fitted to the scene bounds
-// so the ground's edges sit on it. Lost from the frame, or from the maps (which
-// VTK then reads as total shadow), the ground read luma 0.0 in both halves.
+// A flat, upward-facing ground at height z, cut into step x step tiles rather
+// than a box top's two triangles. A guard against one HYPOTHESIS for the macOS
+// flake (see D), not a confirmed cause: that Apple's GL now and then drops
+// triangles clipped far outside the frustum -- as two triangles spanning a
+// 120-unit ground are, in the 16-unit view and in the shadow bake, whose light
+// frustum is fitted to the scene bounds so the ground's edges sit on it.
+// Nothing has shown that it does; the tiles cost nothing and remove the case.
 static cvc::geometry tiledGround(double x0, double y0, double x1, double y1, double z,
                                  double step) {
   cvc::geometry g;
@@ -182,19 +183,30 @@ static double meanLuma(const std::vector<unsigned char> &rgb, int w, int h, int 
   return n ? sum / n : 0.0;
 }
 
-// Whether two w x h frames agree byte for byte over the region meanLuma reads.
-static bool sameRegion(const std::vector<unsigned char> &a, const std::vector<unsigned char> &b,
-                       int w, int h, int x0, int x1) {
-  if (a.size() != static_cast<std::size_t>(w) * h * 3 || b.size() != a.size())
-    return false;
-  for (int y = h / 4; y < 3 * h / 4; ++y)
+// How two w x h frames differ over columns [x0, x1) of rows [y0, y1): how many
+// bytes, and the largest step. bytes is -1 when either frame is not w x h.
+struct Diff {
+  long bytes = -1;
+  int step = 0;
+};
+static Diff diffRegion(const std::vector<unsigned char> &a, const std::vector<unsigned char> &b,
+                       int w, int h, int x0, int x1, int y0, int y1) {
+  Diff d;
+  const std::size_t n = static_cast<std::size_t>(w) * h * 3;
+  if (a.size() != n || b.size() != n)
+    return d;
+  d.bytes = 0;
+  for (int y = y0; y < y1; ++y)
     for (int x = x0; x < x1; ++x)
       for (int c = 0; c < 3; ++c) {
         const std::size_t o = (static_cast<std::size_t>(y) * w + x) * 3 + c;
-        if (a[o] != b[o])
-          return false;
+        const int s = std::abs(static_cast<int>(a[o]) - static_cast<int>(b[o]));
+        if (s) {
+          ++d.bytes;
+          d.step = std::max(d.step, s);
+        }
       }
-  return true;
+  return d;
 }
 
 // Pixels showing the background. It is pure blue; the white ground is grey at
@@ -331,32 +343,29 @@ static void rendered(cvc::app &app) {
     return false;
   };
 
-  std::printf("D. on screen (%s)\n", glRendererName(view.renderer()->GetRenderWindow()).c_str());
+  const std::string renderer = glRendererName(view.renderer()->GetRenderWindow());
+  std::printf("D. on screen (%s)\n", renderer.c_str());
   // Judged against reference renders of this same run, not absolute levels:
   // the right half lies in the slab's shadow footprint, the left half outside
   // it and is each frame's lit reference. Casting must darken the footprint
   // well below it, not casting must leave the footprint lit like it, `absent`
   // must match `notCasting`, and casting must leave the left half alone.
   //
-  // First, every capture must show the ground, whole (see tiledGround). Any
-  // renderer but Apple's must manage that on its first draw; on Apple's, a
-  // capture that still lost some is redrawn -- same scene, same maps, no bake
-  // -- at most kRedraws times, each redraw reported.
-#ifdef __APPLE__
-  const int kRedraws = 3;
-#else
-  const int kRedraws = 0;
-#endif
+  // On the macOS runners the first ctest attempt of this test failed in every
+  // Debug job seen (#521 x2, #522, #523) with luma 0.0 in both halves of all
+  // three captures; each retry passed. The leading explanation is contention:
+  // each failing attempt ran while cvcgl_shadow_caster_growth (it grows to six
+  // shadow-casting spots) was rendering, and no passing attempt did -- so the
+  // GL tests now hold one CTest resource lock (src/cvcGL/CMakeLists.txt). No
+  // Mac has reproduced it, so the next log has to tell: every capture must
+  // show the ground, whole, on its FIRST draw. The background is blue, so a
+  // frame that lost the ground counts background pixels, while a ground drawn
+  // black (a shadow map read as empty) counts none and reads luma 0. All of it
+  // prints, pass or fail, and CI prints this section from passing runs too.
   auto capture = [&](const std::string &what) {
     const bool settled = settle();
     std::vector<unsigned char> px = view.frameRGB();
-    long missing = backgroundPixels(px);
-    for (int i = 0; missing && i < kRedraws; ++i) {
-      std::printf("  (%s: %ld pixel(s) without the ground; redraw %d of %d)\n", what.c_str(),
-                  missing, i + 1, kRedraws);
-      px = view.frameRGB();
-      missing = backgroundPixels(px);
-    }
+    const long missing = backgroundPixels(px);
     chk(settled && view.frameWidth() == W && view.frameHeight() == H && missing == 0,
         what + ": a settled " + std::to_string(view.frameWidth()) + "x" +
             std::to_string(view.frameHeight()) + " frame, the ground in all of it (" +
@@ -377,25 +386,42 @@ static void rendered(cvc::app &app) {
   const double lAbsent = meanLuma(absent, W, H, rx0, rx1);
   const double lLeft = meanLuma(casting, W, H, lx0, lx1);
   const double lLeftNot = meanLuma(notCasting, W, H, lx0, lx1);
+  // The whole frame, and the left half's rows meanLuma reads.
+  const Diff dAbsent = diffRegion(notCasting, absent, W, H, 0, W, 0, H);
+  const Diff dLeft = diffRegion(casting, notCasting, W, H, lx0, lx1, H / 4, 3 * H / 4);
   std::printf("  luma, right half: caster %.1f  non-caster %.1f  absent %.1f  (left half %.1f, "
               "%.1f without the caster)\n",
               lCast, lNot, lAbsent, lLeft, lLeftNot);
+  std::printf("  bytes differing: non-caster vs absent %ld (max step %d), whole frame; caster vs "
+              "non-caster %ld (max step %d), left half\n",
+              dAbsent.bytes, dAbsent.step, dLeft.bytes, dLeft.step);
   // The left half is the lit reference of the same frame.
   chk(lLeft > 20.0, "the ground is lit");
   chk(lCast < 0.5 * lLeft, "a casting slab darkens the ground (to under half its lit level)");
   chk(lNot > 0.9 * lLeftNot, "a non-casting slab does not (its footprint is lit like the rest)");
+  // Byte for byte wherever rendering is deterministic (NVIDIA, Mesa llvmpipe).
+  // Apple's GL has drawn frames a few bytes apart from identical GL call
+  // traces with shadows on (cvcgl_lowmem_fastdraw, PR #522's macOS CI), so
+  // there -- an Apple build whose renderer string says Apple -- this keeps
+  // master's check: the footprint's mean luma within 1 of the slab-absent
+  // frame's. That tolerance is carried over, not measured: ctest kept passing
+  // runs' output out of the log, and the failing runs read 0.0 everywhere. The
+  // left-half claim is not judged there until a macOS log shows its numbers
+  // (printed above).
 #ifdef __APPLE__
-  // Apple's renderer: within the 1-luma bound the absent / non-casting
-  // comparison has always met there, rather than byte for byte.
-  chk(std::fabs(lNot - lAbsent) < 1.0 && std::fabs(lLeft - lLeftNot) < 1.0,
-      "a non-casting slab leaves the ground as if the slab were absent; the shadow stays in "
-      "its footprint (within 1 luma)");
+  const bool appleGL = renderer.find("Apple") != std::string::npos;
 #else
-  chk(!notCasting.empty() && notCasting == absent &&
-          sameRegion(casting, notCasting, W, H, lx0, lx1),
-      "a non-casting slab leaves the ground as if the slab were absent; the shadow stays in "
-      "its footprint (byte-exact)");
+  const bool appleGL = false;
 #endif
+  if (appleGL) {
+    chk(std::fabs(lNot - lAbsent) < 1.0, "a non-casting slab leaves the footprint as if the slab "
+                                         "were absent (Apple's GL: master's 1-luma check)");
+  } else {
+    chk(dAbsent.bytes == 0,
+        "a non-casting slab leaves the frame as if the slab were absent (byte-exact)");
+    chk(dLeft.bytes == 0, "the shadow stays in its footprint: casting leaves the left half as it "
+                          "was (byte-exact)");
+  }
 
   std::printf("F. deformed in place, and streamed\n");
   cvc::geometry tg = box(-50, 40, 0, -45, 45, 6);
