@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cvc/ariadne/stream/audio_sources.h>
 #include <cvc/ariadne/stream/frame.h>
 #include <cvc/ariadne/stream/frame_pool.h>
 #include <cvc/ariadne/stream/producer_thread.h>
@@ -60,6 +61,18 @@ format_desc pcm(int frames, int channels) {
   f.bytes = static_cast<std::size_t>(frames) * channels * 2; // explicit non-video sizing
   return f;
 }
+
+// A frame_source that is always LIVE but never produces a frame (bytes 0, never stop) — models a
+// device input that is stalled/warming up. Its frame_bytes() matches a given size so a mix accepts
+// it.
+struct silent_source : frame_source {
+  std::size_t bytes_;
+  explicit silent_source(std::size_t bytes) : bytes_(bytes) {}
+  std::size_t frame_bytes() const override { return bytes_; }
+  produced_frame fill(std::uint8_t *, std::size_t) override {
+    return {};
+  } // always skip, never stop
+};
 
 // A controllable test frame_source: produces `bytes`-sized frames, stops after `limit` (0 = never).
 struct test_source : frame_source {
@@ -767,4 +780,108 @@ TEST(StreamProducer, RejectsASourceWhoseFrameExceedsTheSlab) {
   s->start_producer(std::make_unique<test_source>(/*bytes*/ 128, /*limit*/ 0), 200.0);
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
   EXPECT_EQ(s->channel().total_published(), 0u) << "oversized source should have been rejected";
+}
+
+// --------------------------------------------------------------------------
+// pure/virtual audio sources (cvc::ariadne): tone / gain / mix — the composable
+// audio-source family (f32 PCM), fully testable with no device.
+// --------------------------------------------------------------------------
+
+TEST(AudioSources, ToneGeneratesBoundedSeamlessSine) {
+  const int sr = 48000, ch = 2, frames = 256;
+  tone_source tone(sr, ch, frames, /*hz*/ 440.0, /*amp*/ 0.25);
+  const std::size_t need = audio_f32_bytes(frames, ch);
+  EXPECT_EQ(tone.frame_bytes(), need);
+
+  std::vector<float> a(static_cast<std::size_t>(frames) * ch),
+      b(static_cast<std::size_t>(frames) * ch);
+  auto p1 = tone.fill(reinterpret_cast<std::uint8_t *>(a.data()), a.size() * sizeof(float));
+  EXPECT_EQ(p1.bytes, need);
+  // Interleaved: both channels carry the same sample; all within [-amp, amp]; not all-zero.
+  bool nonzero = false;
+  for (int n = 0; n < frames; ++n) {
+    EXPECT_FLOAT_EQ(a[n * ch + 0], a[n * ch + 1]);
+    EXPECT_LE(std::fabs(a[n * ch]), 0.25f + 1e-6f);
+    if (std::fabs(a[n * ch]) > 1e-6f)
+      nonzero = true;
+  }
+  EXPECT_TRUE(nonzero) << "tone produced silence";
+  // Phase carries across chunks: the second chunk continues the wave (differs from the first) and
+  // its pts advances by one chunk.
+  auto p2 = tone.fill(reinterpret_cast<std::uint8_t *>(b.data()), b.size() * sizeof(float));
+  EXPECT_EQ(p2.bytes, need);
+  EXPECT_GT(p2.pts_seconds, p1.pts_seconds);
+  EXPECT_NE(a, b) << "phase did not carry across chunks";
+}
+
+TEST(AudioSources, GainScalesEverySample) {
+  const int sr = 48000, ch = 1, frames = 128;
+  const std::size_t need = audio_f32_bytes(frames, ch);
+  // gain 2.0 over a tone vs a reference tone with identical params in lockstep (both from phase 0),
+  // so gained[i] == 2 * ref[i].
+  gain_source gained(std::make_unique<tone_source>(sr, ch, frames, 440.0, 0.25), ch, frames, 2.0f);
+  tone_source ref(sr, ch, frames, 440.0, 0.25);
+  std::vector<float> g(frames * ch), r(frames * ch);
+  for (int chunk = 0; chunk < 3; ++chunk) {
+    auto pg = gained.fill(reinterpret_cast<std::uint8_t *>(g.data()), g.size() * sizeof(float));
+    auto pr = ref.fill(reinterpret_cast<std::uint8_t *>(r.data()), r.size() * sizeof(float));
+    ASSERT_EQ(pg.bytes, need);
+    ASSERT_EQ(pr.bytes, need);
+    for (int i = 0; i < frames * ch; ++i)
+      EXPECT_NEAR(g[i], 2.0f * r[i], 1e-6f);
+  }
+}
+
+TEST(AudioSources, MixSumsInputsWithClamp) {
+  const int sr = 48000, ch = 1, frames = 128;
+  const std::size_t need = audio_f32_bytes(frames, ch);
+  std::vector<std::unique_ptr<frame_source>> ins;
+  ins.push_back(std::make_unique<tone_source>(sr, ch, frames, 300.0, 0.2));
+  ins.push_back(std::make_unique<tone_source>(sr, ch, frames, 700.0, 0.2));
+  mix_source mix(std::move(ins), sr, ch, frames);
+  // Reference tones in lockstep (same params/order); their sum stays within [-0.4, 0.4] (no clamp).
+  tone_source a(sr, ch, frames, 300.0, 0.2), b(sr, ch, frames, 700.0, 0.2);
+  std::vector<float> m(frames * ch), ra(frames * ch), rb(frames * ch);
+  for (int chunk = 0; chunk < 3; ++chunk) {
+    auto pm = mix.fill(reinterpret_cast<std::uint8_t *>(m.data()), m.size() * sizeof(float));
+    a.fill(reinterpret_cast<std::uint8_t *>(ra.data()), ra.size() * sizeof(float));
+    b.fill(reinterpret_cast<std::uint8_t *>(rb.data()), rb.size() * sizeof(float));
+    ASSERT_EQ(pm.bytes, need);
+    for (int i = 0; i < frames * ch; ++i)
+      EXPECT_NEAR(m[i], ra[i] + rb[i], 1e-6f);
+  }
+}
+
+// Review must-fix #1: a composite whose input disagrees on frame size must report end-of-stream
+// LOUDLY, not discard every frame forever. gain over a 64-frame tone while itself expecting 128.
+TEST(AudioSources, GainStopsOnSizeMismatchInsteadOfSkippingForever) {
+  const int sr = 48000, ch = 1;
+  gain_source gained(std::make_unique<tone_source>(sr, ch, /*frames*/ 64, 440.0, 0.25), ch,
+                     /*frames*/ 128, 2.0f);
+  std::vector<float> g(128 * ch);
+  auto p = gained.fill(reinterpret_cast<std::uint8_t *>(g.data()), g.size() * sizeof(float));
+  EXPECT_EQ(p.bytes, 0u);
+  EXPECT_TRUE(p.stop) << "size-mismatched input must stop the gain, not skip silently forever";
+}
+
+// Review must-fix #2: a tick where every live input skips (produces 0 bytes but does not stop) must
+// still emit silence with a MONOTONIC pts off the mix's own time base — never stuck at 0, so a
+// stalling device input downstream can't make the output pts go backwards.
+TEST(AudioSources, MixAdvancesPtsOnSilentTicks) {
+  const int sr = 48000, ch = 1, frames = 128;
+  const std::size_t need = audio_f32_bytes(frames, ch);
+  std::vector<std::unique_ptr<frame_source>> ins;
+  ins.push_back(std::make_unique<silent_source>(need)); // live, always skips
+  mix_source mix(std::move(ins), sr, ch, frames);
+  std::vector<float> m(frames * ch);
+  double prev = -1.0;
+  for (int chunk = 0; chunk < 3; ++chunk) {
+    auto pm = mix.fill(reinterpret_cast<std::uint8_t *>(m.data()), m.size() * sizeof(float));
+    ASSERT_EQ(pm.bytes, need) << "a live-but-skipping input still emits a silent frame";
+    EXPECT_FALSE(pm.stop);
+    EXPECT_GT(pm.pts_seconds, prev) << "pts must advance even on an all-skip tick";
+    prev = pm.pts_seconds;
+    for (int i = 0; i < frames * ch; ++i)
+      EXPECT_FLOAT_EQ(m[i], 0.0f) << "skipped inputs contribute silence";
+  }
 }
