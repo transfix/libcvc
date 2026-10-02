@@ -307,7 +307,7 @@ TEST(NavMaterialDeploy, LearnedLamHeadDrivesReroute) {
 // (5) The SHIPPED cvc-dbg-weights nav policy layout: 6-input RISK-ONLY + lam head — has_risk() but
 // NOT has_mu() (no grip column), out=4. grl-snam `coef_train --w-risk --learned-lam` produces
 // exactly this (add_lam_head(add_risk_feature(CoefMLP()))), and it's what ships as
-// coef_mlp_riskaware.cvcnav / demo3's --grip auto-load. The other tests above drive a 7-in
+// coef_mlp_riskaware.cvcnav / the --grip auto-load. The other tests above drive a 7-in
 // grip+risk net; pin the shipped risk-only+lam contract too — it round-trips through .cvcnav and
 // drives the material path (which a risk net REQUIRES; the grip field is present but unused as a
 // feature since has_mu()==false).
@@ -577,7 +577,7 @@ TEST(NavMaterialDeploy, LamSoftScaleMultipliesLearnedReroute) {
 }
 
 // Regression for cvcdbg #141 ("attach material stack to the STARTUP world under --grip"). The
-// demo3 crash was a --grip startup world that auto-loaded the widened risk net but stepped it
+// crash was a --grip startup world that auto-loaded the widened risk net but stepped it
 // through the NON-material drive (no material stack attached) — which the plain drive REJECTS, so
 // the throw escaped as an uncaught exception at the first frame. The demo binary is not in CI, so
 // pin the underlying library invariant here: a terrain-risk net is rejected by drive_step and
@@ -587,7 +587,7 @@ TEST(NavMaterialDeploy, RiskNetRejectedByPlainDriveAcceptedByMaterialDrive) {
   deploy_world w;
   coef_mlp net = make_net(7, 4, coef_mlp::kFlagFeatMu | coef_mlp::kFlagFeatRisk, 0.5f);
   ASSERT_TRUE(net.has_risk());
-  // Non-material drive on a risk net: throws (this is the exact throw the demo3 startup hit).
+  // Non-material drive on a risk net: throws (this is the exact throw the --grip startup hit).
   std::vector<float> o1 = w.o, th1 = w.th, sp1 = w.sp, mc1(w.N);
   EXPECT_THROW(drive_step(w.fs, o1.data(), th1.data(), sp1.data(), w.carrot.data(), net, w.N,
                           nullptr, w.v, mc1.data(), 1),
