@@ -163,7 +163,7 @@ struct material_drive {
   float d_hat_m = 12.0f;           // m      grl_snam MaterialParams for why)
   // Authority MULTIPLIERS on the reroute weights (default 1.0 = no-op). A lam-head net
   // OVERRIDES lam_soft/lam_hard with its learned per-agent columns, so a caller that wants to
-  // live-scale material authority (e.g. demo3's force-bias slider) applies the factor here and
+  // live-scale material authority (e.g. a live UI force-bias slider) applies the factor here and
   // the drive multiplies the learned lam by it, instead of the caller's fixed lam being clobbered.
   float lam_soft_scale = 1.0f;
   float lam_hard_scale = 1.0f;
