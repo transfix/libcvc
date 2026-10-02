@@ -1,0 +1,43 @@
+# stream.ari — the Phase-3 streaming "holy grail": ONE live video stream, shown two ways from one
+# document. The host (ariadne_stream) opens a stream under the token `streams.cam0` (a synthetic
+# moving test pattern, or a real camera with --camera) and registers the two stream sinks; this doc
+# wires them up declaratively:
+#   - the SCENE is a `type: stream` node — a quad textured with the live frames, filling the view;
+#   - a draggable/resizable "Camera" window holds a `type: stream_view` widget fed the SAME stream.
+#
+#   ariadne_stream stream.ari                                 # navigable window
+#   ariadne_stream stream.ari --offscreen --png stream.png    # one captured frame (headless)
+
+meta:
+  name: Ariadne stream (holy grail)
+  author: cvc
+  min_libcvc: 3.4.0
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  # The stream routed to an Ariadne widget in a draggable/resizable ImGui window. The same widget
+  # shows a static image when no stream is live for the token (see stream_view_widget.h).
+  - window: Camera
+    id: camera
+    children:
+      - text: "Live stream routed to a stream_view widget:"
+      - type: stream_view
+        stream: streams.cam0
+        size: 480
+
+# The scene (§9): the stream as the MAIN view — a UV quad textured with the live frames. The host
+# frames the camera to it so it fills the viewport.
+scene:
+  chrome: false
+  background: { top: [0.05, 0.06, 0.09], bottom: [0.01, 0.01, 0.02] }
+  nodes:
+    - node: screen
+      type: stream
+      stream: streams.cam0
+      width: 1.6
+      height: 1.2

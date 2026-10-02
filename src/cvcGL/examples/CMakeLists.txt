@@ -19,6 +19,14 @@ add_executable(ariadne_hello ariadne_hello.cpp)
 target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 
+# ariadne_stream — the Phase-3 streaming "holy grail": one live video stream shown both as the main
+# scene (a `type: stream` quad filling the viewport) AND in a draggable ImGui `type: stream_view`
+# widget window, wired from stream.ari. Synthetic test pattern by default (headless-verifiable),
+# or a real SDL3 camera with --camera.
+add_executable(ariadne_stream ariadne_stream.cpp)
+target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
+
 # nav_convoy — a nav-style demo whose entire UI is the reusable .ari component library, with only
 # the streamed agents + sim/camera verbs + stats readouts in the host (the library-based pattern
 # the real cvc::nav integration follows).
