@@ -368,6 +368,15 @@ TEST(ImageTest, SavedPngHasPngMagicNotMiff) {
 TEST(ImageTest, NoRegisteredExtensionSilentlyWritesMiff) {
   const image a = make_rgba(4, 4);
   for (const std::string &ext : cvc::image_file_io::known_extensions()) {
+    // Skip the synthetic "cvcfbk…" extensions the WriteDispatch* tests register into the
+    // process-global, append-only io registry (there is no unregister — see the note by
+    // fake_write_io). Those are dispatch-test fakes, not real codecs: the non-failing fake reports
+    // write success but writes no file, which is NOT "silently writing MIFF". Iterating them made
+    // this test order-dependent — it passed in source order but failed (at the f.good() assert
+    // below) whenever a WriteDispatch* test happened to run first, e.g. under --gtest_shuffle.
+    // Scope the check to real encoders so it is robust to test order.
+    if (ext.rfind("cvcfbk", 0) == 0)
+      continue;
     const std::string path = std::string(::testing::TempDir()) + "/cvc_image_notmiff." + ext;
     std::remove(path.c_str());
     try {
