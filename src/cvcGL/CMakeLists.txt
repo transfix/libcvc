@@ -37,6 +37,10 @@ file(GLOB CVCGL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 # subdirectory, so the non-recursive top-level glob above does not pick them up.
 file(GLOB CVCGL_ARIADNE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ariadne/*.cpp")
 list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
+# Phase-3 peripheral capture (SDL3 camera / audio-device sources). SDL-gated internally; with no SDL
+# the sources compile to graceful no-ops (open_camera returns an empty result).
+file(GLOB CVCGL_CAPTURE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/capture/*.cpp")
+list(APPEND CVCGL_SOURCES ${CVCGL_CAPTURE_SOURCES})
 # Phase-3 peripheral playback (SDL3 audio-output sink, cvc::gl::playback). Lives in a subdirectory,
 # so the non-recursive top-level glob does not pick it up. SDL-gated internally; with no SDL the
 # sink compiles to a graceful no-op (open_audio_output returns an empty result).
@@ -407,6 +411,13 @@ add_test(NAME cvcgl_stream_node COMMAND cvcgl_stream_node)
 add_executable(cvcgl_stream_bind test/cvcgl_stream_bind.cpp)
 target_link_libraries(cvcgl_stream_bind PRIVATE cvcGL)
 add_test(NAME cvcgl_stream_bind COMMAND cvcgl_stream_bind)
+
+# Phase-3 video capture: cvc::gl::capture::camera_source (SDL3 camera -> stream frame_source).
+# DEVICE-GATED — skips (passes) with no camera; the transport side is covered hardware-free by
+# stream_test's StreamProducer.* (synthetic_source).
+add_executable(cvcgl_camera_source test/cvcgl_camera_source.cpp)
+target_link_libraries(cvcgl_camera_source PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_source COMMAND cvcgl_camera_source)
 
 # Phase-3 audio playback: cvc::gl::playback::audio_output (f32 PCM -> SDL3 playback device).
 # DEVICE-GATED — enumeration always; live playback behind CVC_TEST_AUDIO, skips (passes) with no
