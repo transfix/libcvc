@@ -44,10 +44,9 @@
 //      new window -- byte for byte, and so do pairs of Stock frames of one GL
 //      trace. Only on Apple's renderer (GL version or renderer string naming
 //      Apple), which rounds a few bytes 1 LSB apart now and then, in one window
-//      and across windows, is every pixel check held to a fixed envelope
-//      instead: identical, or no byte off by more than 1 and at most 64 bytes;
-//      there the pairs of Stock frames are printed, never judged; see
-//      checkPixels();
+//      and across windows, is every pixel check -- the pairs of Stock frames
+//      too -- held to a fixed envelope instead: identical, or no byte off by
+//      more than 1 and at most 64 bytes; see checkPixels();
 //   5. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
 //      fraction of the stock calls, with no desktop round-trip in any draw
 //      beyond Stock's (none, but VTK's own warning on a line width the driver
@@ -1201,27 +1200,28 @@ std::string describe(const PixelDiff &d, int w) {
 // pixel check -- in one window, across a recompile, across a new window --
 // passes iff its two frames are byte-identical or differ by LSB rounding
 // alone: no byte off by more than 1 (kAppleLsbMaxDelta), at most 64 bytes
-// (kSelfVarianceMaxBytes, ~6x the most measured). The envelope is the
+// (kAppleLsbMaxBytes, ~6x the most measured). The envelope is the
 // renderer's, fixed, not the run's: no frame widens it, so no frame can
 // excuse itself, and a shading change (a colour off by 2 or more) or a
 // changed region (more than 64 bytes) fails. The pairs of Stock frames are
-// still sampled and printed, as a diagnostic of the renderer's self-variance
-// in that run; they excuse nothing. Byte counts that are no multiple of 3 (1,
-// 2, 4, 5, ...) mean pixels that changed in some colour channels and not the
-// others: rounding, not a shading change. Hence the relaxation is Apple's
-// alone, where it is needed; the GL traces stay the exact oracle on every
-// renderer, and point picking has its own rule (comparePicking()).
-constexpr long kSelfVarianceMaxBytes = 64;
+// held to the same envelope, and those that differ are printed as well, a
+// diagnostic of the renderer's self-variance in that run; they excuse
+// nothing. Byte counts that are no multiple of 3 (1, 2, 4, 5, ...) mean
+// pixels that changed in some colour channels and not the others: rounding,
+// not a shading change. Hence the relaxation is Apple's alone, where it is
+// needed; the GL traces stay the exact oracle on every renderer, and point
+// picking has its own rule (comparePicking()).
+constexpr long kAppleLsbMaxBytes = 64;
 constexpr int kAppleLsbMaxDelta = 1;
 
 // Apple-tolerance mode: identical, or LSB rounding at a few pixels.
 bool withinAppleLsbEnvelope(const PixelDiff &d) {
-  return d.bytes >= 0 && d.bytes <= kSelfVarianceMaxBytes && d.maxDelta <= kAppleLsbMaxDelta;
+  return d.bytes >= 0 && d.bytes <= kAppleLsbMaxBytes && d.maxDelta <= kAppleLsbMaxDelta;
 }
 
 std::string appleLsbEnvelope() {
   return fmt("Apple LSB envelope (delta<=%.0f, bytes<=%.0f)", double(kAppleLsbMaxDelta),
-             double(kSelfVarianceMaxBytes));
+             double(kAppleLsbMaxBytes));
 }
 
 // The renderer the frames are drawn by, as renderAvailable() reads it, and
@@ -1280,6 +1280,11 @@ void sampleSelfVariance(const std::string &scope, const std::string &what, const
           d.bytes ? describe(d, w) + ", identical GL traces" : std::string());
     return;
   }
+  // Apple-tolerance mode: the pair is held to the same fixed envelope as every
+  // other pixel check, and printed when it differs at all.
+  check(withinAppleLsbEnvelope(d),
+        what + " is byte-identical or within the " + appleLsbEnvelope() + " on Apple's renderer",
+        d.bytes ? describe(d, w) + ", identical GL traces" : std::string());
   if (d.bytes == 0)
     return;
   g_noisy.push_back({scope, what, d, w}); // a diagnostic: it excuses nothing
@@ -1316,7 +1321,7 @@ void checkPixels() {
   } else {
     std::printf("pixels (apple-tolerance mode: every check, in one window or across a recompile "
                 "or a new window, byte-identical or within the %s; the pairs of Stock frames "
-                "sampled are a diagnostic and excuse nothing)\n",
+                "sampled are held to the same envelope and excuse nothing)\n",
                 appleLsbEnvelope().c_str());
     std::set<std::string> scopes;
     for (const auto &p : g_pairs)
@@ -1413,8 +1418,8 @@ bool renderAvailable(cvc::app &app) {
       rule = "every check, in one window or across a recompile or a new window, byte-identical or "
              "within the " +
              appleLsbEnvelope() +
-             ", pairs of Stock frames printed only (they excuse nothing); point picking by <= 1 "
-             "point per prop, cell picking exact";
+             ", pairs of Stock frames held to the same envelope (they excuse nothing); point "
+             "picking by <= 1 point per prop, cell picking exact";
     std::printf("  pixel checks: %s (OpenGL renderer \"%s\", version \"%s\") -- %s\n", mode,
                 g_glRenderer.c_str(), g_glVersion.c_str(), rule.c_str());
   }
@@ -1644,8 +1649,9 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
   for (DrawPath p : {DrawPath::Fast, DrawPath::Stock})
     runPath(s, p);
   // Pairs of the Stock runs before Fast's (one after AllCellTypes) are checked
-  // byte-identical -- on Apple's renderer, printed as its self-variance; the
-  // Stock run right after Fast is judged, like the AllCellTypes and Fast frames.
+  // byte-identical -- on Apple's renderer, within its LSB envelope, and printed
+  // as its self-variance; the Stock run right after Fast is judged, like the
+  // AllCellTypes and Fast frames.
   const PathRun stock = runPath(s, DrawPath::Stock);
   const PathRun stock2 = runPath(s, DrawPath::Stock);
   const PathRun all = runPath(s, DrawPath::AllCellTypes);
@@ -1810,7 +1816,8 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
 }
 
 // ── 6. lifecycle ─────────────────────────────────────────────────────────────
-// scope: the scene's label, whose self-variance samples judge these pixels.
+// scope: the scene's label, under which this lifecycle's pairs of Stock frames are counted
+// and printed.
 void testLifecycle(Scene &s, const std::string &scope) {
   std::printf("lifecycle\n");
   LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
@@ -1848,7 +1855,7 @@ void testLifecycle(Scene &s, const std::string &scope) {
         fmt("lookups %.0f of %.0f draws", double(rel.programLookups), double(rel.draws)));
   const PathRun released = runPath(s, DrawPath::Fast);
   // Stock to compare against: two runs, a self-variance pair (checked
-  // byte-identical but on Apple's renderer, where it is printed), after one
+  // byte-identical, or on Apple's renderer within its LSB envelope), after one
   // that follows Fast (judged, not sampled).
   const PathRun afterFast = runPath(s, DrawPath::Stock);
   const PathRun before = runPath(s, DrawPath::Stock);
