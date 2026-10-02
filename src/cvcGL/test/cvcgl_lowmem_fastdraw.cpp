@@ -41,11 +41,11 @@
 //      the stats check;
 //   4. pixels: AllCellTypes and Fast frames (RGBA) match Stock's -- as do a
 //      Stock frame right after Fast, and frames across a recompile and across a
-//      new window -- byte for byte, or by no more than one pair of Stock frames
-//      of one GL trace (same scene and window, neither right after Fast)
-//      differed in the same run: the renderer's self-variance. None on NVIDIA
-//      and llvmpipe, so byte-exact there; a few bytes now and then on Apple's
-//      software renderer;
+//      new window -- byte for byte, and so do pairs of Stock frames of one GL
+//      trace. Only on Apple's renderer (GL version or renderer string naming
+//      Apple), which varies by a few bytes now and then, may a check differ by
+//      no more than one such pair (same scene and window, neither right after
+//      Fast) differed in the same run;
 //   5. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
 //      fraction of the stock calls, with no desktop round-trip in any draw
 //      beyond Stock's (none, but VTK's own warning on a line width the driver
@@ -1176,24 +1176,33 @@ std::string describe(const PixelDiff &d, int w) {
 // Two Stock frames whose GL traces are identical -- VTK's own draws, every
 // call with its arguments and uniform values, in order, in one window -- can
 // differ only by what the rasteriser does with that stream. NVIDIA and Mesa
-// llvmpipe give the same bytes every time: no sample differs and every pixel
-// check is byte-exact. Apple's software renderer (macOS CI, GL 4.1) does not:
-// with shadows on, AllCellTypes and Stock frames -- identical traces -- came
-// out 1 to 4 bytes apart, and frames across a recompile or a new window up to
-// 9, in some runs and not in others (never with shadows off).
+// llvmpipe give the same bytes every time. Apple's software renderer (macOS
+// CI, GL 4.1) does not: with shadows on, AllCellTypes and Stock frames --
+// identical traces -- came out 1 to 4 bytes apart, and frames across a
+// recompile or a new window up to 9, in some runs and not in others (never
+// with shadows off).
 //
-// So a pixel check passes when one sampled pair -- in the same scene, so the
+// Exact mode (every renderer but Apple's): a sampled pair -- two Stock frames
+// of one GL trace -- that differs fails the run on its own, and every pixel
+// check is byte for byte.
+//
+// Apple-tolerance mode (the GL version or renderer string names Apple): a
+// pixel check passes when one sampled pair -- in the same scene, so the
 // shadowed scene's noise excuses nothing elsewhere -- differed by at least as
 // many bytes AND by at least as large a step: an envelope an actual pair
 // filled, not the most bytes of one pair with the largest step of another.
-// Which pairs may be samples is what keeps the bound from excusing a real
-// difference:
+// Which pairs may be samples narrows what they can excuse:
 //   - both frames Stock, in one window (a pair across a re-open would measure
 //     as noise the very difference the cross-window check looks for);
 //   - neither right after a Fast run (whatever a Fast frame leaves that the
 //     trace cannot see -- buffer contents, the untraced warm-up frame -- would
 //     count as noise); a Stock frame right after Fast is judged instead;
 //   - no compared pair is a sampled pair.
+// That narrows it, no more: a sampled pair and a check may share a frame (a
+// scene's first counted Stock run is in two samples and in all six of its
+// checks; the new window's first sampled run is in two of its checks), and if
+// that frame alone is wrong the pair measures exactly the check's difference
+// and excuses it. Hence the relaxation is Apple's alone, where it is needed.
 // Every check is judged at the end, once the run's samples are in. The GL
 // traces stay the exact oracle on every renderer.
 //
@@ -1209,6 +1218,11 @@ constexpr int kSelfVarianceMaxDelta = 8;
 bool withinCap(const PixelDiff &d) {
   return d.bytes >= 0 && d.bytes <= kSelfVarianceMaxBytes && d.maxDelta <= kSelfVarianceMaxDelta;
 }
+
+// The renderer the frames are drawn by, as renderAvailable() reads it, and
+// whether its pixels are judged in Apple-tolerance mode (exact otherwise).
+std::string g_glRenderer, g_glVersion;
+bool g_appleTolerance = false;
 
 struct SelfVarianceSample {
   std::string scope, what;
@@ -1242,6 +1256,11 @@ void sampleSelfVariance(const std::string &scope, const std::string &what, const
     return;
   }
   ++g_pairs[scope];
+  if (!g_appleTolerance) { // exact mode: the pair is itself a check, never an excuse
+    check(d.bytes == 0, what + " is byte-identical on a deterministic renderer",
+          d.bytes ? describe(d, w) + ", identical GL traces" : std::string());
+    return;
+  }
   if (d.bytes == 0)
     return;
   g_noisy.push_back({scope, what, d, w});
@@ -1273,11 +1292,17 @@ void samePixels(const std::string &scope, const std::string &what,
 void checkPixels() {
   if (g_pixelChecks.empty())
     return;
+  if (!g_appleTolerance) {
+    std::printf("pixels (exact mode: byte for byte)\n");
+    for (const auto &c : g_pixelChecks)
+      check(c.d.bytes == 0, c.what, describe(c.d, c.w));
+    return;
+  }
   std::set<std::string> scopes;
   for (const auto &c : g_pixelChecks)
     scopes.insert(c.scope);
-  std::printf("pixels (the renderer's self-variance: pairs of Stock frames of identical GL "
-              "traces, in one window, neither right after Fast)\n");
+  std::printf("pixels (apple-tolerance mode, the renderer's self-variance: pairs of Stock frames "
+              "of identical GL traces, in one window, neither right after Fast)\n");
   for (const auto &scope : scopes) {
     int noisy = 0;
     for (const auto &n : g_noisy)
@@ -1367,18 +1392,34 @@ bool renderAvailable(cvc::app &app) {
     s.sr->setCamera(0, 0, 50, 0, 0, 0, 0, 1, 0, 30.0, 1.0, 200.0);
     s.sr->render();
     drew = drewSomething(s.rgba());
-    // Which renderer the pixel and round-trip checks below ran on.
+    // Which renderer the pixel and round-trip checks below ran on, and so how
+    // its pixels are judged (see checkPixels()).
     if (auto *win = vtkOpenGLRenderWindow::SafeDownCast(s.sr->renderWindow())) {
       const char *report = win->ReportCapabilities();
       const std::string caps = report ? report : "";
-      for (const char *key : {"OpenGL renderer string:", "OpenGL version string:"}) {
+      const auto value = [&caps](const std::string &key) {
         const size_t at = caps.find(key);
-        if (at != std::string::npos)
-          std::printf("  %s\n", caps.substr(at, caps.find('\n', at) - at).c_str());
-      }
+        if (at == std::string::npos)
+          return std::string();
+        const size_t end = std::min(caps.find('\n', at), caps.size());
+        const size_t from = std::min(caps.find_first_not_of(' ', at + key.size()), end);
+        return caps.substr(from, end - from);
+      };
+      g_glRenderer = value("OpenGL renderer string:");
+      g_glVersion = value("OpenGL version string:");
+      const auto apple = [](const std::string &v) {
+        return v.find("APPLE") != std::string::npos || v.find("Apple") != std::string::npos;
+      };
+      g_appleTolerance = apple(g_glVersion) || apple(g_glRenderer);
       std::printf("  maximum hardware line width: %g\n",
                   double(win->GetMaximumHardwareLineWidth()));
     }
+    const char *mode = g_appleTolerance ? "apple-tolerance" : "exact";
+    const char *rule = g_appleTolerance
+                           ? "a check may differ by no more than a sampled pair of Stock frames"
+                           : "every pair of Stock frames and every check byte for byte";
+    std::printf("  pixel checks: %s (OpenGL renderer \"%s\", version \"%s\") -- %s\n", mode,
+                g_glRenderer.c_str(), g_glVersion.c_str(), rule);
   }
   if (drew)
     return true;
@@ -1571,9 +1612,9 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
   // (Stock last: the first counted Stock run must not follow a Fast one).
   for (DrawPath p : {DrawPath::Fast, DrawPath::Stock})
     runPath(s, p);
-  // The renderer's self-variance is sampled from the Stock runs before Fast's
-  // (one after AllCellTypes); the Stock run right after Fast is judged, like
-  // the AllCellTypes and Fast frames.
+  // Pairs of the Stock runs before Fast's (one after AllCellTypes) are checked
+  // byte-identical -- on Apple's renderer, sampled as its self-variance; the
+  // Stock run right after Fast is judged, like the AllCellTypes and Fast frames.
   const PathRun stock = runPath(s, DrawPath::Stock);
   const PathRun stock2 = runPath(s, DrawPath::Stock);
   const PathRun all = runPath(s, DrawPath::AllCellTypes);
@@ -1777,8 +1818,8 @@ void testLifecycle(Scene &s, const std::string &scope) {
         "after a mapper's ReleaseGraphicsResources its next draw looks the program up",
         fmt("lookups %.0f of %.0f draws", double(rel.programLookups), double(rel.draws)));
   const PathRun released = runPath(s, DrawPath::Fast);
-  // Stock to compare against: two runs sampled for the renderer's
-  // self-variance, after one that follows Fast (judged, not sampled).
+  // Stock to compare against: two runs, a self-variance pair (byte-identical
+  // but on Apple's renderer), after one that follows Fast (judged, not sampled).
   const PathRun afterFast = runPath(s, DrawPath::Stock);
   const PathRun before = runPath(s, DrawPath::Stock);
   const PathRun before2 = runPath(s, DrawPath::Stock);
