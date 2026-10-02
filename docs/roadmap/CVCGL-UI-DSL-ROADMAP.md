@@ -2610,8 +2610,8 @@ the separate `isosurfaces` list are declarable as sibling fields.
 ### 10.2 Dimensionality is a runtime property — `dims:` / `axes:` with room for nD
 
 Dimensionality is **one field on one TF type**, not N types — adopting the unified model from
-the **volrover3 modernization roadmap §11–§12** (`cvc-engagement-docs-status/modernization/
-2026-08-11-volrover3-roadmap.md`; the `CVC-modernization*.md` trio only records the parity gap
+the **volrover3 modernization roadmap §11–§12** (`2026-08-11-volrover3-roadmap.md`, maintained
+outside this repository; the `CVC-modernization*.md` trio only records the parity gap
 and the `cvcQt` consolidation). A TF is a function of an ordered **tuple of axes**; `dims:` (or
 the length of `axes:`) *is* the dimensionality — 1D today, 2D/3D supported, shape open for
 nD/4D (a `Time` axis + keyframes).

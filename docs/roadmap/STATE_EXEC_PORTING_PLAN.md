@@ -2026,7 +2026,7 @@ has no built-in ACL.
 
 ### 5. File Layout
 
-All new files go under `/home/joe/src/libcvc/` (the working copy, not cvc/libcvc):
+All new files go under the libcvc repository root:
 
 ```
 inc/cvc/
