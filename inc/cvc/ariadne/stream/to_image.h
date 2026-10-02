@@ -8,21 +8,22 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#ifndef __CVC_STREAM_TO_IMAGE_H__
-#define __CVC_STREAM_TO_IMAGE_H__
+#ifndef __CVC_ARIADNE_STREAM_TO_IMAGE_H__
+#define __CVC_ARIADNE_STREAM_TO_IMAGE_H__
 
+#include <cvc/ariadne/stream/frame.h>
 #include <cvc/image/image.h>
-#include <cvc/stream/frame.h>
 
 // Bridge a video stream frame to a cvc::image with NO copy (roadmap
 // STATE_BINARY_STREAMING.md Phase 2 / §7 H2). The returned image ALIASES the
 // frame's bytes and co-owns the frame's keepalive, so the underlying slab
 // survives for the image's lifetime even if the frame_ptr is dropped first.
 //
-// This lives in cvc::stream (not cvc::image) so cvc::image keeps zero dependency
-// on cvc::stream: the dependency points stream -> image.
+// This lives in cvc::ariadne::stream (not cvc::image) so cvc::image keeps zero dependency
+// on cvc::ariadne::stream: the dependency points stream -> image.
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 // Alias a video_raw frame as a cvc::image (zero copy). Throws std::runtime_error
@@ -35,6 +36,7 @@ namespace stream {
 cvc::image to_image(const frame_ptr &fp);
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc
 
-#endif // __CVC_STREAM_TO_IMAGE_H__
+#endif // __CVC_ARIADNE_STREAM_TO_IMAGE_H__

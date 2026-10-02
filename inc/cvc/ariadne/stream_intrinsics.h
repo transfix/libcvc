@@ -11,7 +11,7 @@
 #ifndef __CVC_ARIADNE_STREAM_INTRINSICS_H__
 #define __CVC_ARIADNE_STREAM_INTRINSICS_H__
 
-// Ariadne DSL surface for cvc::stream (roadmap STATE_BINARY_STREAMING.md Phase 2,
+// Ariadne DSL surface for cvc::ariadne::stream (roadmap STATE_BINARY_STREAMING.md Phase 2,
 // PR6 core). Opt-in, exactly like register_net_intrinsics: a host/test calls
 // register_stream_intrinsics(app) to add the program-lane verbs:
 //

@@ -1603,5 +1603,9 @@ std::vector<std::string> Runtime::take_reactive_warnings() {
   return out;
 }
 
+// The same per-document scope submit_action/ensure_resident install on each lane as
+// ictx.document — exposed so a scene-bound host can publish a routing handle for its verbs.
+cvc::state_exec::document_scope &Runtime::document_scope() { return m_->doc_scope_; }
+
 } // namespace ariadne
 } // namespace cvc

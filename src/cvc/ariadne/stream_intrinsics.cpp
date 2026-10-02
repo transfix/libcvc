@@ -9,13 +9,13 @@
 */
 
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream_intrinsics.h>
 #include <cvc/core/app.h>                   // exec_scheduler warm
 #include <cvc/core/state_exec/builtins.h>   // register_fn
 #include <cvc/core/state_exec/intrinsics.h> // intrinsics_context
 #include <cvc/core/state_exec/types.h>      // value_t, make_dict
-#include <cvc/stream/stream.h>
-#include <cvc/stream/stream_channel.h>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -36,24 +36,25 @@ namespace {
 // process-static table keyed by app* — so ownership follows the document's lifetime: a stream
 // opened here lives until (stream-close) or document teardown, when the Runtime clear()s the scope
 // and ~stream_table destroys any still-open stream while the app is still alive. Distinct from
-// cvc::stream::stream_registry (the non-owning channel side-table); this OWNS the unique_ptr.
+// cvc::ariadne::stream::stream_registry (the non-owning channel side-table); this OWNS the
+// unique_ptr.
 constexpr const char *kStreamSlot = "cvc.ariadne.stream"; // document_scope slot key
 struct stream_table {
   std::mutex mu;
-  std::unordered_map<std::string, std::unique_ptr<cvc::stream::stream>> by_token;
+  std::unordered_map<std::string, std::unique_ptr<cvc::ariadne::stream::stream>> by_token;
 
-  void own(std::unique_ptr<cvc::stream::stream> s) {
+  void own(std::unique_ptr<cvc::ariadne::stream::stream> s) {
     std::lock_guard<std::mutex> lk(mu);
     by_token[s->token()] = std::move(s); // token is unique in this scope (open() refused a dup)
   }
-  cvc::stream::stream *find(const std::string &token) {
+  cvc::ariadne::stream::stream *find(const std::string &token) {
     std::lock_guard<std::mutex> lk(mu);
     auto it = by_token.find(token);
     return it == by_token.end() ? nullptr : it->second.get();
   }
   bool close(const std::string &token) {
-    std::unique_ptr<cvc::stream::stream> victim; // destroyed OUTSIDE the lock: ~stream ->
-    {                                            // close() touches state + the scheduler.
+    std::unique_ptr<cvc::ariadne::stream::stream> victim; // destroyed OUTSIDE the lock: ~stream ->
+    {                                                     // close() touches state + the scheduler.
       std::lock_guard<std::mutex> lk(mu);
       auto it = by_token.find(token);
       if (it == by_token.end())
@@ -182,10 +183,10 @@ void register_stream_intrinsics(cvc::app &app) {
           if (exp_subs < 1 || exp_subs > kMaxSubs)
             return err("stream-open: 'expected_subscribers' must be in [1, 4096]");
 
-          cvc::stream::stream_params p;
+          cvc::ariadne::stream::stream_params p;
           p.id = id;
           p.root_path = root;
-          p.format.kind = cvc::stream::frame_kind::video_raw;
+          p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
           p.format.codec = codec;
           p.format.w = static_cast<int>(w);
           p.format.h = static_cast<int>(h);
@@ -194,7 +195,7 @@ void register_stream_intrinsics(cvc::app &app) {
           p.expected_subscribers = static_cast<std::size_t>(exp_subs);
           p.heartbeat_hz = get_num(dict_get(d, "heartbeat_hz"), 10.0);
 
-          auto s = cvc::stream::stream::open(app, p);
+          auto s = cvc::ariadne::stream::stream::open(app, p);
           if (!s)
             return err("stream-open: open failed (bad params, or id already open in this scope)");
           const std::string token = s->token();
@@ -223,7 +224,7 @@ void register_stream_intrinsics(cvc::app &app) {
           const std::string token = handle_token(args[0]);
           if (token.empty())
             return err("stream-info: handle must be a stream dict or a token string");
-          cvc::stream::stream *s = tbl->find(token);
+          cvc::ariadne::stream::stream *s = tbl->find(token);
           if (!s)
             return se::make_dict({{"ok", se::value_t(true)},
                                   {"live", se::value_t(false)},

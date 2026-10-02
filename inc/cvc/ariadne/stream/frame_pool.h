@@ -8,13 +8,13 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#ifndef __CVC_STREAM_FRAME_POOL_H__
-#define __CVC_STREAM_FRAME_POOL_H__
+#ifndef __CVC_ARIADNE_STREAM_FRAME_POOL_H__
+#define __CVC_ARIADNE_STREAM_FRAME_POOL_H__
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cvc/stream/frame.h>
+#include <cvc/ariadne/stream/frame.h>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -43,6 +43,7 @@
 // frame_ptrs), so there is no ownership cycle.
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 class frame_pool : public std::enable_shared_from_this<frame_pool> {
@@ -105,6 +106,7 @@ private:
 };
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc
 
-#endif // __CVC_STREAM_FRAME_POOL_H__
+#endif // __CVC_ARIADNE_STREAM_FRAME_POOL_H__

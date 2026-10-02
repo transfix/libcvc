@@ -471,7 +471,7 @@ deferred **codec registry** the no-op comment names, not an extra `bytes` field 
 resync, on both IPC and gRPC; a large payload round-trips as a blob-ref through the hydrator; an
 unregistered type degrades gracefully; echo-suppression still holds (a `set_data` apply must not re-emit).
 
-**Dependency note:** this is independent of the cvc::stream work but complements it — a replicated
+**Dependency note:** this is independent of the cvc::ariadne::stream work but complements it — a replicated
 `/streams/<id>` descriptor (Phase 4 of the streaming roadmap) stores `format_desc` via `data()`, so it
 needs this to survive a cross-node resync.
 

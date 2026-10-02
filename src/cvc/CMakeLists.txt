@@ -1157,22 +1157,25 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/ftxui_backend.h
 )
 
-# cvc::stream — Layer-(b) real-time in-process frame transport (roadmap
+# cvc::ariadne::stream — Layer-(b) real-time in-process frame transport (roadmap
 # STATE_BINARY_STREAMING.md Phase 1). Compiled INTO the core cvc library as a
 # C++ namespace (like cvc::net / cvc::ariadne), NOT a separate CMake target: a
 # standalone target would break the single-export find_package(cvc) contract
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES stream/frame_pool.cpp stream/stream_channel.cpp stream/stream_registry.cpp stream/producer_thread.cpp stream/stream.cpp stream/to_image.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp)
 list(APPEND INCLUDE_FILES
-  ../../inc/cvc/stream/frame.h
-  ../../inc/cvc/stream/frame_pool.h
-  ../../inc/cvc/stream/stream_channel.h
-  ../../inc/cvc/stream/stream_registry.h
-  ../../inc/cvc/stream/producer_thread.h
-  ../../inc/cvc/stream/stream.h
-  ../../inc/cvc/stream/to_image.h
+  ../../inc/cvc/ariadne/stream/frame.h
+  ../../inc/cvc/ariadne/stream/frame_pool.h
+  ../../inc/cvc/ariadne/stream/stream_channel.h
+  ../../inc/cvc/ariadne/stream/stream_registry.h
+  ../../inc/cvc/ariadne/stream/producer_thread.h
+  ../../inc/cvc/ariadne/stream/stream.h
+  ../../inc/cvc/ariadne/stream/to_image.h
+  ../../inc/cvc/ariadne/stream/frame_source.h
+  ../../inc/cvc/ariadne/stream/synthetic_source.h
+  ../../inc/cvc/ariadne/stream/audio_sources.h
 )
 
 # Create the main library

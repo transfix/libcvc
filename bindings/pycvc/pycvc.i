@@ -978,7 +978,7 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 // machinery + capsule dtor defined above.
 %include "pycvc_image.i"
 
-// ── cvc::stream: real-time frame transport (video) ───────────────────────
+// ── cvc::ariadne::stream: real-time frame transport (video) ───────────────────────
 // Phase-2 streaming bindings. %included AFTER pycvc_image.i so it reuses the
 // ArrayView out-typemap + the pycvc_owner capsule dtor for StreamFrame.numpy().
 %include "pycvc_stream.i"
