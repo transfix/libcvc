@@ -415,6 +415,12 @@ add_executable(cvcgl_audio_output test/cvcgl_audio_output.cpp)
 target_link_libraries(cvcgl_audio_output PRIVATE cvcGL)
 add_test(NAME cvcgl_audio_output COMMAND cvcgl_audio_output)
 
+# Phase-3 Ariadne stream WIDGET: cvc::gl::ariadne stream_view — its render-thread stream->image
+# pull step (next_stream_frame_image), exercised hardware-free with synthetic_source (no GL/ImGui).
+add_executable(cvcgl_stream_view test/cvcgl_stream_view.cpp)
+target_link_libraries(cvcgl_stream_view PRIVATE cvcGL)
+add_test(NAME cvcgl_stream_view COMMAND cvcgl_stream_view)
+
 # texture_modified_rows / _rect: a zero-copy texture patched on the GPU with
 # glTexSubImage2D and nothing marked modified -- no whole-texture re-upload, no
 # shadow re-bake. Reads the texture back (glGetTexImage), so desktop GL only;
