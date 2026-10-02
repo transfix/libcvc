@@ -124,6 +124,24 @@ endif()
 if(EMSCRIPTEN)
   set(_wasm_demos lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost)
   set(_wasm_extra_demos ariadne_hello)
+
+  # Ariadne (.ari) demos as wasm: build the generic ariadne_hello host once per document, with that
+  # .ari baked in as the default doc (CVC_ARIADNE_WASM_DOC) and the shared component library embedded
+  # in MEMFS (--embed-file), so a pure-DSL demo runs in the browser with no argv. Distinct slugs
+  # (<name>_ari) so they sit ALONGSIDE the C++ volren_bunny/volslice_bunny demos, not replacing them.
+  # This is also the path for every future .ari demo (A/V, lsystem, …) to reach the web gallery.
+  get_filename_component(_CVC_ARIADNE_COMPONENTS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../cvc/ariadne/components" ABSOLUTE)
+  foreach(_ari volren_bunny volslice_bunny)
+    add_executable(${_ari}_ari ariadne_hello.cpp)
+    target_link_libraries(${_ari}_ari PRIVATE cvcGL ${VTK_LIBRARIES})
+    vtk_module_autoinit(TARGETS ${_ari}_ari MODULES ${VTK_LIBRARIES})
+    target_compile_definitions(${_ari}_ari PRIVATE CVC_ARIADNE_WASM_DOC="/${_ari}.ari")
+    target_link_options(${_ari}_ari PRIVATE
+      "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/${_ari}.ari@/${_ari}.ari"
+      "--embed-file=${_CVC_ARIADNE_COMPONENTS}@/components")
+    list(APPEND _wasm_demos ${_ari}_ari)
+  endforeach()
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
   # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
   # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
