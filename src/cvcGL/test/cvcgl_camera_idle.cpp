@@ -5,9 +5,10 @@
 // update() used to call applyToCamera() every frame. Re-setting an unchanged
 // pose is a no-op for vtkCamera, but the vtkRenderer::ResetCameraClippingRange()
 // that comes with it re-derives every visible prop's bounds -- a mapper Update
-// plus a cell-bounds pass for each mesh rewritten since the last frame. In the
-// demo3 wasm profile that was 1-1.5 ms a frame (plus ~2 ms of throttled pose
-// mirroring: 14 state writes, each a path lookup), with the camera standing still.
+// plus a cell-bounds pass for each mesh rewritten since the last frame. In a wasm
+// profile of a large scene with heavy per-frame overlays that was a measurable cost
+// every frame (plus the throttled pose mirroring: 14 state writes, each a path
+// lookup), with the camera standing still.
 //
 // Pins:
 //   A. idle frames: no clipping-range reset, no camera change, no pose mirror;
@@ -173,7 +174,7 @@ static void headless(cvc::app &app) {
   chk(resets.take() == 1, "a registered node moved: re-fitted");
   chk(inSlab(vc, movedPt), "and the moved node lies inside [near, far]");
 
-  // Not registered: a direct child of the graphics root (demo3's vehicle slots).
+  // Not registered: a direct child of the graphics root (e.g. an app's per-vehicle nodes).
   auto loose = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("loose");
   sg.processEvents();
   cam.update(0.016);
@@ -357,8 +358,8 @@ static void streamingAndLod(cvc::app &app) {
   }
   chk(resets.take() == 0, "re-pinning the same box every frame does not");
 
-  // A streaming node the host keeps out of the clipping fit (UseBounds off, as
-  // demo3 does for its dynamic overlays) grows without re-fitting anything.
+  // A streaming node the host keeps out of the clipping fit (UseBounds off, as an
+  // app might for its dynamic overlays) grows without re-fitting anything.
   auto loose = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::RibbonNode>(
       "loose", 64, 1.0f, cvc::bounding_box(0, 0, 0, 10, 10, 1));
   loose->prop()->UseBoundsOff();

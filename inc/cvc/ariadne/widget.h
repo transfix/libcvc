@@ -220,7 +220,7 @@ struct Widget {
   double img_size = 256.0;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
-  // state-path segment (e.g. "includes.rf") appended to the enclosing scope, so its whole
+  // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
   // SUBTREE resolves binds and evaluates reactive/read-lane expressions against that deeper
   // sub-prefix (its own chroot), while the mount widget's own reactive fields stay in the
   // parent scope. Empty for ordinary widgets. This is how a loaded fragment is isolated
@@ -316,8 +316,9 @@ inline Widget text_bound(std::string label, std::string bind) {
 }
 
 // Tint ANY Text widget (literal or bound) a fixed RGB — the general severity-colour mutator, e.g.
-// `with_text_color(text_bound("PDR", "rf.min_pdr"), 0.9f, 0.2f, 0.2f)`. Chainable; a no-op-safe
-// pass-through for non-Text widgets (the walker only reads text_color on Kind::Text).
+// `with_text_color(text_bound("Min clearance", "stats.min_clearance"), 0.9f, 0.2f, 0.2f)`.
+// Chainable; a no-op-safe pass-through for non-Text widgets (the walker only reads text_color on
+// Kind::Text).
 inline Widget with_text_color(Widget w, float r, float g, float b) {
   w.has_text_color = true;
   w.text_color[0] = r;

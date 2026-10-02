@@ -118,9 +118,9 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     if (stride > 1 && (int)(i % stride) != 0)
       continue;
     const auto &v = e.per_vehicle[i];
-    // Key by veh_index (the RF-record join key), not array position — identical on a
-    // collector-produced record (position == veh_index) but self-consistent with the RF publisher
-    // for reordered/sparse ones.
+    // Key by veh_index (the extension-record join key), not array position — identical on a
+    // collector-produced record (position == veh_index) but self-consistent with an extension's
+    // publisher for reordered/sparse ones.
     const std::string vp = root + ".veh." + std::to_string(v.veh_index);
     pub.publish(vp + ".arrived", b2s(v.arrived));
     pub.publish(vp + ".time_to_goal_s", d2s(v.time_to_goal_s));

@@ -23,18 +23,19 @@
 // nav_stats.h — the BASE navigation-statistics layer: per-vehicle + per-episode
 // telemetry over a sim_world drive, plus a corpus scorecard for training fitness.
 //
-// This is the RF-FREE half of the two-layer nav-stats design (CVC-DBG/cvcdbg
-// docs/nav-stats-design.md). It lives in cvc::nav — below cvc::dbg — so the
-// non-DBG grl-snam swarm, any cvc::nav-only demo, AND the cvcdbg convoy demos all
-// collect the SAME base row (motion, clearance, collisions/penetration, material
-// dwell, time, fuel, budgets). The RF/comms-force extension (exposure, PDR/SINR,
-// band/retunes) is a SEPARATE cvc::dbg record joined by veh_index; it never lives
-// here. The collector consumes only the sim_world::snapshot arrays plus optional
-// position samplers, so it has no libcvc-internal dependency beyond the stdlib.
+// This is the domain-neutral BASE half of a two-layer nav-stats design (see
+// docs/NAV_STATS.md). It lives in cvc::nav, so the grl-snam swarm, the cvcGL nav
+// demos, AND any downstream app built on cvc::nav all collect the SAME base row
+// (motion, clearance, collisions/penetration, material dwell, time, fuel,
+// budgets). A downstream extension's domain-specific metrics (e.g. about an
+// external force it injects) are a SEPARATE record it keeps, joined by veh_index;
+// they never live here. The collector consumes only the sim_world::snapshot arrays
+// plus optional position samplers, so it has no libcvc-internal dependency beyond
+// the stdlib.
 // The scorecard fields mirror the Python grl_snam.scorecard schema (the per-vehicle
 // veh_nav_stats is a superset of grl_snam.metrics.NavStats) — reuse, not reinvent. C++
 // and Python are held in step today by independent hand-computed corpora sharing the
-// same literals (this repo's nav_stats_test, cvcdbg's, grl-snam's test_scorecard); a
+// same literals (this repo's nav_stats_test, grl-snam's test_scorecard); a
 // single shared-fixture parity gate is a tracked follow-up.
 #pragma once
 
@@ -110,7 +111,7 @@ struct nav_samplers {
   // null ⇒ formation stats OFF (the whole formation path degrades to zero, numbers unchanged). The
   // collector accumulates |pos_i − slot| into slot_error_mean/max and latches formation_arrived
   // when the final slot error is within params.formation_tol_m. Formation is a NAV concept, so it
-  // lives in the base — a downstream RF layer references the same (veh_index, convoy_id).
+  // lives in the base — a downstream extension references the same (veh_index, convoy_id).
   std::function<bool(int, double &, double &)> formation_slot;
   // Per-agent belief "sense flips" for THIS step: the number of cells whose occupied/free belief
   // bit flipped on the agent's most recent sense sweep (0 on ticks where the agent did not sense).
@@ -196,7 +197,7 @@ struct veh_nav_stats {
   // drive telemetry (all 0/off unless a nav_samplers.drive feed is provided) — per-vehicle
   // reductions of the per-tick drive_sample. The CoefMLP coefficient means show what the learned
   // policy commanded; mu/mrisk show the terrain the agent actually drove (mean + worst);
-  // ext_force_mean is the average magnitude of the external (e.g. RF/comms) push; steer means/peak
+  // ext_force_mean is the average magnitude of the external (ext_force) push; steer means/peak
   // are control effort; binding_steps counts ticks the IPC barrier was active. drive_steps is the
   // tick count these average over.
   long drive_steps = 0;
@@ -246,12 +247,12 @@ struct episode_nav_stats {
   nav_coverage coverage;
   std::vector<veh_nav_stats> per_vehicle;
 
-  std::string to_json() const; // the base record (a DBG consumer nests an "rf" member itself)
+  std::string to_json() const; // the base record (an extension nests its own member itself)
 };
 
 // Collector: begin_episode -> step (once per sim frame) -> finish. Consumes the
-// sim_world::snapshot arrays, so grl-snam and the cvcdbg demos/harness drive it
-// identically.
+// sim_world::snapshot arrays, so grl-snam, the cvcGL nav demos and any downstream
+// harness drive it identically.
 class nav_stats_collector {
 public:
   explicit nav_stats_collector(nav_stats_params p = {}) : p_(p) {}
@@ -293,7 +294,8 @@ private:
 // ── Scorecard: aggregate a CORPUS of episodes for training-fitness tracking ──
 //
 // The base nav-fitness row grl-snam uses to rank its OWN base-policy checkpoints
-// over a scene corpus (RF-free). The DBG campaign layers an rf_scorecard on top.
+// over a scene corpus (domain-neutral). A downstream extension can layer its own
+// scorecard on top.
 struct nav_scorecard {
   std::string checkpoint;
   int n_episodes = 0;

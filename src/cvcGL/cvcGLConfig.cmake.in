@@ -23,10 +23,40 @@ find_dependency(VTK COMPONENTS @CVCGL_VTK_COMPONENTS@)
 
 # When cvcGL was built against an imgui that ships a cmake config, its public
 # interface links the imgui::imgui imported target, so consumers must re-find it
-# (empty otherwise — a config-less imgui bundle exports a relocatable -limgui the
-# consumer's linker resolves from its own prefix). imgui's config guards its own
-# target, so this is idempotent.
+# (empty otherwise). imgui's config guards its own target, so this is idempotent.
 @CVCGL_IMGUI_DEP@
+
+# When cvcGL was built against a CONFIG-LESS imgui bundle (the cvcpkg windows and
+# wasm builds ship no imguiConfig.cmake), its public interface still names
+# imgui::imgui: re-create that target from the consumer's own prefix. Prefer an
+# imgui cmake package if this prefix has one; otherwise locate imgui by header/lib
+# on the consumer's search path (CMAKE_PREFIX_PATH / CMAKE_FIND_ROOT_PATH), with
+# cvcGL's own prefix as the last resort for a co-installed bundle. Nothing here
+# assumes imgui sits next to cvcGL, so split prefixes resolve too.
+if(@CVC_IMGUI_VIA_FIND@ AND NOT TARGET imgui::imgui)
+  find_package(imgui CONFIG QUIET)
+  if(NOT TARGET imgui::imgui)
+    find_path(CVCGL_IMGUI_INCLUDE_DIR imgui.h PATH_SUFFIXES imgui
+              PATHS "${PACKAGE_PREFIX_DIR}/include")
+    find_library(CVCGL_IMGUI_LIBRARY NAMES imgui PATHS "${PACKAGE_PREFIX_DIR}/lib")
+    if(NOT CVCGL_IMGUI_INCLUDE_DIR OR NOT CVCGL_IMGUI_LIBRARY)
+      set(${CMAKE_FIND_PACKAGE_NAME}_NOT_FOUND_MESSAGE
+          "cvcGL was built with Dear ImGui (CVC_ENABLE_IMGUI), but imgui was not found: put the imgui package's prefix on CMAKE_PREFIX_PATH (imgui.h=${CVCGL_IMGUI_INCLUDE_DIR}, library=${CVCGL_IMGUI_LIBRARY}).")
+      set(${CMAKE_FIND_PACKAGE_NAME}_FOUND FALSE)
+      return()
+    endif()
+    add_library(imgui::imgui UNKNOWN IMPORTED)
+    set_target_properties(imgui::imgui PROPERTIES
+      IMPORTED_LOCATION "${CVCGL_IMGUI_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${CVCGL_IMGUI_INCLUDE_DIR}")
+  endif()
+endif()
+
+# When cvcGL is a STATIC archive linking X11 (Linux CameraController pointer
+# capture), its export carries $<LINK_ONLY:X11::X11>: resolve it to the consumer's
+# own libX11. VTK's config already runs this FindX11 pass, so it adds no new
+# requirement. Empty otherwise.
+@CVCGL_X11_DEP@
 
 # When cvcGL was built against SDL3 (CVC_ENABLE_SDL), its public interface links
 # SDL3::SDL3 (the input/peripheral seam), so consumers must re-find it. Empty when

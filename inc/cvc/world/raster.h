@@ -51,7 +51,7 @@ namespace cvc {
 namespace world {
 
 struct world_params {
-  double min_x = -120.0, min_y = -120.0, max_x = 120.0, max_y = 120.0; // metres (±120 DBG scale)
+  double min_x = -120.0, min_y = -120.0, max_x = 120.0, max_y = 120.0; // metres (±120 m default)
   std::uint64_t seed = 0;
   heightfield_params hf;
   scatter_params sc = scatter_params::defaults();

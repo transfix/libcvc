@@ -426,7 +426,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         Fy = Fy + Fmat_y;
       }
 
-      // Generic external force (e.g. cvc::dbg's RF/comms force). Sampled at the
+      // Generic external force (e.g. a downstream layer's own force). Sampled at the
       // current pose AFTER geometry + material, and summed into the same F — the
       // physics-agnostic port; see ext_force in drive.h. A null ext leaves Fx/Fy
       // untouched, so the plain and _material paths stay byte-identical.
@@ -830,7 +830,7 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
                              const veh_params &v, const material_drive &mat, const ext_force &ext,
                              float *minclr_out, int num_threads, drive_telemetry *tel) {
   // drive_step_material (feature-flag validation + lam-head extraction, IDENTICAL) but the ext
-  // force is also passed to rollout_impl, so the learned grip/risk policy and the ext (RF/comm)
+  // force is also passed to rollout_impl, so the learned grip/risk policy and the ext
   // force drive the SAME tick — summed into one force accumulator and one steering bias. A null
   // ext.sample reproduces drive_step_material exactly.
   const bool want_grip = model.has_mu();

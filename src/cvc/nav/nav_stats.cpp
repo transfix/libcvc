@@ -20,7 +20,7 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-// nav_stats.cpp — see nav_stats.h. The base (RF-free) telemetry collector +
+// nav_stats.cpp — see nav_stats.h. The base (domain-neutral) telemetry collector +
 // corpus scorecard, extracted from the two-layer nav-stats design.
 #include <algorithm>
 #include <cmath>

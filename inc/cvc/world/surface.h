@@ -33,11 +33,11 @@
 //
 // Each class also carries a generic `rf_material` name from the shared physical
 // vocabulary (wood / foliage / soil / rock / reinforced_concrete / brick /
-// drywall / glass / metal / water / open_air). This is the seam the DBG side
-// keys its RF penetration table off; cvc::world does NOT know the DBG integer
-// ids or the n_materials cap — that mapping stays private to cvc::dbg. The
-// `penetration_db_per_m[3]` triple is carried as sub-6 GHz PROVENANCE only (the
-// authoritative attenuation is the DBG MATERIAL_TABLE, resolved from the name).
+// drywall / glass / metal / water / open_air). This is the seam a downstream
+// propagation model keys its own penetration table off; cvc::world does NOT know
+// that consumer's integer ids or class cap — that mapping stays with the consumer.
+// The `penetration_db_per_m[3]` triple is carried as sub-6 GHz PROVENANCE only
+// (the authoritative attenuation is the consumer's own table, resolved from the name).
 
 #ifndef CVC_WORLD_SURFACE_H
 #define CVC_WORLD_SURFACE_H

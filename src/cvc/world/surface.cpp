@@ -63,8 +63,8 @@ const char *nav_name(nav_class n) {
   return "free";
 }
 
-// Sub-6 GHz penetration (low, mid, high) dB/m, PROVENANCE only; the DBG side is
-// authoritative. Sourced from grl_snam_dbg simulator/materials.py MATERIAL_TABLE
+// Sub-6 GHz penetration (low, mid, high) dB/m, PROVENANCE only; a consumer's own
+// table is authoritative. Taken from a downstream RF simulator's material table
 // (sub6 triple). `rock` is the new id-12 material (granite-ish, between brick
 // and reinforced_concrete).
 void penetration_for(const char *rf, float out[3]) {

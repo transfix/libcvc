@@ -839,8 +839,8 @@ void CameraController::update(double dtSeconds) {
   // A still camera over a still scene costs nothing here: re-applying the same
   // pose is a no-op for vtkCamera, but the clipping-range reset re-derives every
   // visible prop's bounds (a mapper Update + cell-bounds pass per rewritten mesh)
-  // -- 1-1.5 ms a frame in the demo3 wasm profile, for a range that cannot have
-  // changed. applyNeeded() says when it can have.
+  // -- a measurable per-frame cost in a large WebGL2 scene with heavy per-frame
+  // overlays, for a range that cannot have changed. applyNeeded() says when it can have.
   if (applyNeeded())
     applyToCamera();
   // Mirror the live pose to state on a throttle (per-frame writes are a known

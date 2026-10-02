@@ -4,9 +4,9 @@
 // The walk ran, per root child: a dynamic_pointer_cast<LightNode>, a
 // dynamic_cast<NullGraphicNode> inside getCombinedBoundingBox, and a
 // vtkMatrix4x4 New + DeepCopy (getWorldTransform) to push 8 corners through.
-// In the demo3 wasm profile one walk over ~110 nodes cost 0.6-1 ms in Firefox,
-// ~27% of it the matrix copies and ~23% the casts. Now: flags instead of casts,
-// and the node's cached world matrix (getCombinedWorldBoundingBox).
+// In a wasm profile of a large scene the walk was a visible per-frame cost in
+// Firefox, much of it the matrix copies and the casts. Now: flags instead of
+// casts, and the node's cached world matrix (getCombinedWorldBoundingBox).
 //
 // Pins (headless):
 //   A. the result is BIT-IDENTICAL to the old algorithm (replicated here) over

@@ -2,8 +2,9 @@
 a :class:`pycvc_gl.lab.Lab`.
 
 These are generic loaders for a ``geometry_bundle`` export — a ``terrain.json``
-heightfield plus a ``buildings.glb`` (glTF 2.0) city mesh, as produced by the
-CVC-DBG ``geometry-scene-gen`` tool (e.g. the Austin bundle). The glTF is loaded
+heightfield plus a ``buildings.glb`` (glTF 2.0) city mesh, as produced by an
+OpenStreetMap + SRTM scene generator (e.g. the Austin scene bundle the nav demos
+load, ``scene-austin-south-small`` on cvcpkg). The glTF is loaded
 NATIVELY via libcvc (``pycvc.load_model`` → ``cvc::model``, the Assimp-backed
 mesh loader — no ``vtkGLTFReader``, no trimesh/pygltflib) and added as a single
 native geometry node; the terrain becomes a draped surface mesh; a bilinear
@@ -29,7 +30,7 @@ def terrain_grid(path: str):
     ``bounds2d`` = ``(min_x, min_y, max_x, max_y)``.
 
     The stored grid is TOP-DOWN (row 0 = north = ``max_y``, the raster/SRTM/GeoTIFF
-    convention the geometry-scene-gen tool inherits). Our mesh + sampler use the
+    convention the scene generator inherits). Our mesh + sampler use the
     opposite, bottom-up convention (row 0 -> ``min_y``, so a rising world ``y``
     walks up the row index). We normalize here by reversing the rows so BOTH the
     terrain mesh and the drape sampler agree with the glTF's world frame — without

@@ -43,7 +43,7 @@ calls → triangles**, not the other way around. Rasterisation optimisations
   its vocabulary (`desired_pixel_error`, priority = projected area / distance²)
   so the streaming layer slots in later.
 - **Not** mesh decimation of authored `.glb` files as a first pass. For
-  imported meshes (buildings.glb, Humvee.glb, Soldier.glb) the ladder is
+  imported meshes (buildings.glb, Humvee.glb, character meshes) the ladder is
   culling → LOD-swap → impostor; decimation is a bake-time tool
   (`quadric_decimate`, volrover3 §26.4.2) applied to the archetype library.
 - **Not** GPU-instanced glyphs on wasm. `vtkOpenGLGlyph3DHelper::GlyphRender`
@@ -156,7 +156,7 @@ Trees)*, §5 range degradation: *"With progressively increasing ranges, a
 tree will re-interpret stem meshes as lines and leaf polygons as points…
 A 100 000 facet tree geometry may be rendered at 2 kilometres as about 30
 lines and 1000 points."* Re-interpret, do not convert. For imported meshes
-(Humvee/Soldier), the pre-baked LOD tiers are the analogue.
+(vehicles, characters), the pre-baked LOD tiers are the analogue.
 
 Success criteria: 500-agent Austin swarm at 60 FPS with shadows on. The
 chase cam still sees the full mesh at close range; a top-down orbit sees

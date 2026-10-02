@@ -550,7 +550,7 @@ meta:
   schema:      0.12               # .ari schema revision this doc validates against (default = ui:)
   ari_version: 1.2.0              # the DOCUMENT's own version (author-managed; never gates)
   app:         nav_city_drive     # identity (default = source basename)
-  name:        "Austin RF-Denial Convoy"
+  name:        "Austin City Drive"
   author:      "Joe Rivera <joe.rivera@cyberpcangel.com>"
   license:     LGPL-2.1-or-later  # SPDX
   description: "…"
@@ -660,7 +660,7 @@ children:
   - combo: belief
     bind: sim.belief
     options: [shared, grouped, private]   # static list = literal
-    visible_when: (= (state-get "sim.comm.mode") "expert")
+    visible_when: (= (state-get "sim.fog") "true")
   - checkbox: fog (sensing)
     bind: sim.fog
     tooltip: "toggle range-limited sensing"
@@ -865,7 +865,7 @@ root:
       children: [ { slider_int: Agents, bind: sim.agents, range: [1, 512] } ]
     - type: overlay                     # placement:always ⇒ pinned regardless of root.layout
       corner: top_right
-      children: [ { text: "RF-DENIED", visible_when: (state-get "sim.jammed") } ]
+      children: [ { text: "PAUSED", visible_when: (state-get "sim.paused") } ]
 ```
 
 ```yaml
@@ -882,7 +882,7 @@ root:
     - window: Telemetry
       at: [0, 1]
       frame: { chrome: [title] }
-      children: [ { include: rf_telemetry } ]
+      children: [ { include: stats_panel } ]
     - window: Timeline
       at: [1, 0]
       span: [1, 2]                       # spans both columns of the bottom row
@@ -1088,11 +1088,11 @@ watch mechanism (`state-watch`; polled per scheduler step — no `boost::signals
 macOS-safe), same intent discipline.
 
 ```yaml
-- custom: comm-reactor
+- custom: fog-reactor
   on_change:
-    path: sim.comm.enabled
+    path: sim.fog
     do:
-      - { if: [ {$bool: sim.comm.enabled}, { camera.chase: [] }, { camera.ortho: [true] } ] }
+      - { if: [ {$bool: sim.fog}, { camera.chase: [] }, { camera.ortho: [true] } ] }
 ```
 
 **Input events** (`on:key` — keyboard now routed VTK-interactor→ImGui on native **and** wasm, landed on
@@ -2382,7 +2382,7 @@ LGPL** (VP8/VP9 via BSD libvpx, AV1 via BSD dav1d) — a decode handler loses **
   handler you never need more than this.
 - **Fallback — GPL only for GPL-only capability (H.264/HEVC encode), and prefer out-of-process.** The
   FSF-clean pattern is a **separate process** — shell out to the GPL `ffmpeg` executable over pipes (what
-  `ffmpeg-cli` + `grl_snam_dbg` already do). **`dlopen` of a GPL build is *not* a license firewall:**
+  `ffmpeg-cli` and downstream video-export tools already do). **`dlopen` of a GPL build is *not* a license firewall:**
   calling the `libav*` C ABI and passing `AVFrame`/`AVCodecContext` in one address space is exactly the
   "intimate, shared-internal-structures" case the FSF treats as a combined work. (The dynamic-linking =
   derivative theory is contested and unsettled in US courts — LGPL exists because of that uncertainty — so
@@ -2417,8 +2417,8 @@ executable over pipes"). The Web Worker is just the browser stand-in for a subpr
   `memcpy`s into the pinned RGBA8 buffer, then marshals `texture_modified()` to the render thread. The decode
   args are **byte-for-byte identical** to the wasm Worker's. Resolve the binary as the project already does —
   `os.path.join(sys.prefix, "bin", "ffmpeg[.exe]")` (bare `ffmpeg` is deliberately not on `PATH`; the static
-  cvcpkg build lives in the active prefix). This reuses the exact out-of-process shape `ffmpeg-cli` +
-  `grl_snam_dbg` run — though those are **encode-direction, batch, disk-mediated** (`subprocess.run`, PNG→mp4);
+  cvcpkg build lives in the active prefix). This reuses the exact out-of-process shape `ffmpeg-cli` and
+  downstream video-export tools run — though those are **encode-direction, batch, disk-mediated** (`subprocess.run`, PNG→mp4);
   a *streaming decode* pump (`Popen` + `-f rawvideo`) is net-new code in the same shape.
 - **Transport: simple pipe for v1; shm is a later micro-opt.** The pipe costs **one** copy at the boundary
   (kernel pipe → `read()` into the pinned buffer); single-digit-ms, decode-dominated — realtime-adequate. True
@@ -2610,8 +2610,8 @@ the separate `isosurfaces` list are declarable as sibling fields.
 ### 10.2 Dimensionality is a runtime property — `dims:` / `axes:` with room for nD
 
 Dimensionality is **one field on one TF type**, not N types — adopting the unified model from
-the **volrover3 modernization roadmap §11–§12** (`cvc-engagement-docs-status/modernization/
-2026-08-11-volrover3-roadmap.md`; the `CVC-modernization*.md` trio only records the parity gap
+the **volrover3 modernization roadmap §11–§12** (`2026-08-11-volrover3-roadmap.md`, maintained
+outside this repository; the `CVC-modernization*.md` trio only records the parity gap
 and the `cvcQt` consolidation). A TF is a function of an ordered **tuple of axes**; `dims:` (or
 the length of `axes:`) *is* the dimensionality — 1D today, 2D/3D supported, shape open for
 nD/4D (a `Time` axis + keyframes).
@@ -2949,20 +2949,20 @@ root:
     type: group
     layout: { kind: vertical }
     children:
-      - load: file://panels/rf_telemetry.ari   # or state://…  or https://…  (bare = file:, §13)
-        as: rf                                # mount id under this parent
-        args: { unit: alpha, max_range: 4000 }   # substituted before parse, like include args
+      - load: file://panels/stats_panel.ari    # or state://…  or https://…  (bare = file:, §13)
+        as: stats                             # mount id under this parent
+        args: { vehicle: 0, max_range: 4000 }    # substituted before parse, like include args
         prefix: null                          # optional scene prefix for the fragment's scene-binds
         reload: on_change                     # off (default) | on_change | poll:<sec>   (hot-reload, §12.5)
 ```
 
-- **Namespaced state.** The fragment's tree lands at `ui.docs.<doc>.includes.rf.*`, and its
+- **Namespaced state.** The fragment's tree lands at `ui.docs.<doc>.includes.stats.*`, and its
   resident handlers (§7.1) are chrooted to that subtree via a fresh `apply_chroot` (§7.8.1); its
-  `ev.*` channels are namespaced `ui.docs.<doc>.ev.rf.<node>.<kind>` (the scheduler queue keys on
+  `ev.*` channels are namespaced `ui.docs.<doc>.ev.stats.<node>.<kind>` (the scheduler queue keys on
   the raw string, §7.8.5). An auto-`PushID` on the mount guards ImGui id collisions.
 - **Nested chroot** = the loader chrooting each level's handlers to the deeper path at wire time
   (no in-evaluator nesting, §7.8.7).
-- **Binds** resolve against the mount prefix: a bare `bind:` → `ui.docs.<doc>.includes.rf`; `/` →
+- **Binds** resolve against the mount prefix: a bare `bind:` → `ui.docs.<doc>.includes.stats`; `/` →
   app root (loader-realized); scene-qualified → the fragment's `prefix:` arg (default = host's
   `meta.prefix`). A **relative `load:`/`source:` inside the fragment** resolves against the URI it was
   loaded from (its `mount_base`, §13).

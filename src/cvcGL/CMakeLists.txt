@@ -73,6 +73,7 @@ target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 # what lets the same code path work in the browser (VTK owns the canvas).
 option(CVC_ENABLE_IMGUI "Build the cvcGL Dear ImGui overlay (ImGuiOverlay)" ON)
 set(CVC_IMGUI_VIA_CONFIG OFF)  # set when linked via the imgui::imgui cmake target
+set(CVC_IMGUI_VIA_FIND OFF)    # set when located by header/lib (config-less imgui bundle)
 if(CVC_ENABLE_IMGUI)
   # Prefer the imgui cmake package (imgui::imgui imported target — relocatable,
   # carries its own include + lib). A consumer of the installed cvcGL then
@@ -96,22 +97,25 @@ if(CVC_ENABLE_IMGUI)
     set(CVC_IMGUI_VIA_CONFIG ON)
     message(STATUS "cvcGL: Dear ImGui overlay ENABLED (imgui::imgui target)")
   else()
-    # Fallback: a config-less imgui bundle — locate by header/lib. The export
-    # carries a relocatable -limgui the consumer resolves out of its own prefix
-    # (see the X11 comment below for the same BUILD_/INSTALL_INTERFACE split;
-    # find_library returns an absolute builder path a static archive would bake
-    # into cvcGLTargets.cmake verbatim).
+    # Fallback: a config-less imgui bundle (the cvcpkg windows + wasm builds ship
+    # no imguiConfig.cmake) — locate by header/lib. find_path/find_library return
+    # absolute BUILDER paths, so they stay $<BUILD_INTERFACE>-only; the export
+    # names the imgui::imgui target instead, which cvcGLConfig.cmake re-creates
+    # from the CONSUMER's own prefix (see cvcGLConfig.cmake.in). It used to export
+    # $<INSTALL_INTERFACE:include/imgui> + a bare imgui: that assumed imgui was
+    # co-installed in cvcGL's prefix (a split prefix failed configure with
+    # "non-existent path .../include/imgui"), and a bare imgui has no -L/LIBPATH.
     find_path(CVC_IMGUI_INCLUDE_DIR imgui.h PATH_SUFFIXES imgui)
     find_library(CVC_IMGUI_LIBRARY NAMES imgui)
     if(CVC_IMGUI_INCLUDE_DIR AND CVC_IMGUI_LIBRARY
        AND EXISTS "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
       target_sources(cvcGL PRIVATE "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
       target_include_directories(cvcGL PUBLIC
-        "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>"
-        "$<INSTALL_INTERFACE:include/imgui>")
+        "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>")
       target_link_libraries(cvcGL PUBLIC
         "$<BUILD_INTERFACE:${CVC_IMGUI_LIBRARY}>"
-        "$<INSTALL_INTERFACE:imgui>")
+        "$<INSTALL_INTERFACE:imgui::imgui>")
+      set(CVC_IMGUI_VIA_FIND ON)
       target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_IMGUI)
       if(EMSCRIPTEN) # WebGL2 loader for the browser build
         set_source_files_properties("${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp"
@@ -161,13 +165,22 @@ vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 # ABSOLUTE builder paths (e.g. .../py/lib/libX11.so) — baking those into
 # cvcGLTargets.cmake breaks any downstream consumer (volrover3) on another machine
 # with "missing and no known rule to make it". cvcGL only calls Xlib (XWarpPointer/
-# XFlush), so link libX11 BY NAME: the export then carries a relocatable "-lX11" the
-# consumer's own linker resolves, not a path from this builder.
+# XFlush), so link the X11::X11 imported TARGET (libX11 alone): the export carries the
+# relocatable name $<LINK_ONLY:X11::X11>, and cvcGLConfig.cmake's find_dependency(X11)
+# re-resolves it to the CONSUMER's own libX11 (the same FindX11 pass VTK's config
+# already runs). A bare "-lX11" (the previous fix) only resolved where libX11.so sat
+# on the default linker path — e.g. the GitHub images' system libx11-dev — and failed
+# in a clean container ("cannot find -lX11") even with the hermetic libX11 present.
+set(CVCGL_X11_DEP "")
 if(UNIX AND NOT APPLE)
   find_package(X11)
   if(X11_FOUND)
-    target_link_libraries(cvcGL PRIVATE X11)
+    target_link_libraries(cvcGL PRIVATE X11::X11)
     target_include_directories(cvcGL PRIVATE ${X11_INCLUDE_DIR})
+    get_target_property(_cvcgl_type cvcGL TYPE)
+    if(_cvcgl_type STREQUAL "STATIC_LIBRARY") # a shared cvcGL resolves libX11 itself
+      set(CVCGL_X11_DEP "find_dependency(X11)")
+    endif()
   endif()
 endif()
 
@@ -458,6 +471,13 @@ add_executable(cvcgl_camera_source test/cvcgl_camera_source.cpp)
 target_link_libraries(cvcgl_camera_source PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_source COMMAND cvcgl_camera_source)
 
+# Phase-3 audio capture: cvc::gl::capture::audio_source (SDL3 recording device -> stream
+# frame_source). DEVICE-GATED — skips (passes) with no microphone / without CVC_TEST_AUDIO; the
+# transport side and the pure audio sources (tone/gain/mix) are covered hardware-free by stream_test.
+add_executable(cvcgl_audio_source test/cvcgl_audio_source.cpp)
+target_link_libraries(cvcgl_audio_source PRIVATE cvcGL)
+add_test(NAME cvcgl_audio_source COMMAND cvcgl_audio_source)
+
 # Phase-3 audio playback: cvc::gl::playback::audio_output (f32 PCM -> SDL3 playback device).
 # DEVICE-GATED — enumeration always; live playback behind CVC_TEST_AUDIO, skips (passes) with no
 # output device / no SDL.
@@ -734,6 +754,28 @@ else()
                  "tests (cvcgl_webgl_state_shadow, cvcgl_glsync) are NOT registered; "
                  "src/cvcGL/wasm/run-js-tests.sh runs them (CI: the cvcgl-wasm-js job)")
 endif()
+
+# ── GL tests: one at a time ──
+# Every cvcGL test that renders through a GL context takes the CTest resource
+# lock cvcgl_gl_context, so ctest never runs two of them at once; the headless
+# tests listed below keep running in parallel. Why: on the macOS runners every
+# failed attempt of cvcgl_shadow_casters (4 of 12 seen) ran alongside
+# cvcgl_shadow_caster_growth and other GL tests under ctest --parallel, no
+# passing attempt overlapped growth, and each retry passed. On every platform,
+# on purpose: it costs only wall time (the GL tests run end to end instead of
+# overlapped) and takes GL contention out of every run. A test added above is
+# locked unless it is listed here as headless.
+get_property(_cvcgl_gl_tests DIRECTORY PROPERTY TESTS)
+list(REMOVE_ITEM _cvcgl_gl_tests
+  cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal
+  cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
+  cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo
+  cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
+  cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
+  cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
+  cvcgl_streaming_races cvcgl_sdl_input
+  cvcgl_webgl_state_shadow cvcgl_glsync)
+set_tests_properties(${_cvcgl_gl_tests} PROPERTIES RESOURCE_LOCK cvcgl_gl_context)
 
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer

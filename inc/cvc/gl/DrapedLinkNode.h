@@ -52,7 +52,7 @@ namespace gl {
 // replacements compose with it and clearShaderReplacements() keeps it.
 //
 // Colour and opacity are fragment uniforms (setStyle), unlit, so restyling a
-// link per frame (signal quality, jamming) does not bump the property MTime --
+// link per frame (e.g. by a live per-link quality metric) does not bump the property MTime --
 // which would re-bake the shadow maps. Opacity < 1 additionally moves the
 // actor to the translucent pass (a property change, made only when crossing 1).
 //

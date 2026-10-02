@@ -31,7 +31,7 @@ class Viewport;
 // context — mandatory under WASM's single canvas) and composites N Viewports as
 // LAYERED vtkRenderers in that window, differentiated by SetViewport rect and
 // SetLayer, drawn by a single window->Render(). This is the picture-in-picture
-// path (the DBG minimap, generalised): alternate views of one scene, or entirely
+// path (the overview minimap, generalised): alternate views of one scene, or entirely
 // separate scenes, all in one app instance and one context.
 //
 // It is constructed like a SceneRenderer (a main scene + size + offscreen flag)

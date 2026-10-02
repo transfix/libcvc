@@ -494,7 +494,7 @@ Baked `columnH` also makes the shoreline **immune to terrain LOD**: when a chunk
 
 #### 5.2.1 Why the two-draw composite was removed
 
-An earlier revision of this document rendered the lid **twice** — draw A under `glBlendFunc(GL_ZERO, GL_SRC_COLOR)` to multiply the framebuffer by the chromatic transmittance `T`, draw B additively for the surface radiance. **That mechanism cannot be built on VTK 9.5 and has been deleted.** Four independent blockers, each verified against the shipped headers at `/home/joe/src/cvc/wt-volrover-perf/deps-live/include/vtk-9.5` (`vtkVersionMacros.h:` `VTK_VERSION "9.5.0"`):
+An earlier revision of this document rendered the lid **twice** — draw A under `glBlendFunc(GL_ZERO, GL_SRC_COLOR)` to multiply the framebuffer by the chromatic transmittance `T`, draw B additively for the surface radiance. **That mechanism cannot be built on VTK 9.5 and has been deleted.** Four independent blockers, each verified against the shipped VTK 9.5 headers (`<prefix>/include/vtk-9.5`) (`vtkVersionMacros.h:` `VTK_VERSION "9.5.0"`):
 
 | # | Blocker | Verification |
 |---|---|---|
