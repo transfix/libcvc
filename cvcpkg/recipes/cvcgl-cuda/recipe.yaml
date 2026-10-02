@@ -4,13 +4,17 @@ recipe:
   upstream_version: "3.4.0"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
-  cvc_revision: 1
+  # Bumped 1 -> 2: carries cvcGL's fast-draw low-memory mapper and the BSD-3-Clause license
+  # metadata for its VTK 9.5.0-derived code (same as cvcgl 3.4.0+cvc.16).
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
   description: "cvcGL (CUDA/GPU build) — the Qt-free VTK scene-graph library built against the CUDA libcvc-cuda SDK, so its GPU-only code paths (GL <-> CUDA interop: mapping a volume's CUDA unified/device buffer into a GL 3D texture for on-device volume rendering) compile in. Same cmake package (cvc::cvcGL) and same API as the CPU `cvcgl` package."
   homepage: https://github.com/transfix/libcvc
-  license: LGPL-2.1-only
+  # BSD-3-Clause: libcvcGL carries code derived from VTK 9.5.0
+  # (LowMemoryPolyDataMapper.cpp); THIRD_PARTY_NOTICES.md ships in share/doc/cvcGL.
+  license: "LGPL-2.1-only AND BSD-3-Clause"
   tags: [scientific, volumetric, scene, vtk, graphics, cuda, gpu]
 
 # The GPU build of cvcGL — identical sources to the CPU `cvcgl` recipe, built

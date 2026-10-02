@@ -69,13 +69,20 @@ recipe:
   # _rect partial texture uploads, caster-aware shadow baking (setCastsShadow), and the cheaper
   # scene-bounds walk deferred under hidden chrome. ABI-stale: SceneGraph/GraphicsNode/
   # NullGraphicNode layouts changed, so the published +cvc.14 must not be mixed with this build.
-  cvc_revision: 15
+  # Bumped 15 -> 16: the fast-draw low-memory mapper (LowMemoryPolyDataMapper: skips empty
+  # cell-type agents and re-binds the cached shader program; ~2/3 fewer GL calls per frame on
+  # WebGL2 with byte-identical pixels; CVCGL_LOWMEM_DRAW / setDrawPath for A/B), now the base of
+  # StreamingLowMemoryPolyDataMapper; late shader replacements reach the GPU on the low-memory
+  # path. License metadata now LGPL-2.1-only AND BSD-3-Clause (VTK 9.5.0-derived code).
+  cvc_revision: 16
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
   description: "cvcGL — the Qt-free VTK scene-graph library extracted from volrover3: a reactive SceneGraph of GraphicsNode/GeometryNode/VolumeNode over cvc::state that renders cvc::geometry / cvc::volume via VTK. Ships libcvcGL.a + headers + a cmake package config; provides the cvcGL cmake package (cvc::cvcGL target). Consumed by pycvc-gl and other non-Qt scene consumers."
   homepage: https://github.com/transfix/libcvc
-  license: LGPL-2.1-only
+  # BSD-3-Clause: libcvcGL carries code derived from VTK 9.5.0
+  # (LowMemoryPolyDataMapper.cpp); THIRD_PARTY_NOTICES.md ships in share/doc/cvcGL.
+  license: "LGPL-2.1-only AND BSD-3-Clause"
   tags: [scientific, volumetric, scene, vtk, graphics]
 
 # cvcGL is its OWN package, separate from libcvc: a plain libcvc bundle is a

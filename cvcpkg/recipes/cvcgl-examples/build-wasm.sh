@@ -75,3 +75,8 @@ python3 "$CVC_SOURCE_DIR/src/cvcGL/examples/wasm/build-pages.py" \
     --bin "$CVC_BUILD_DIR/bin" \
     --out "$WEB" \
     --assets "$CVC_SOURCE_DIR/src/cvcGL/examples/wasm/gallery-assets"
+# The .wasm files embed third-party code (VTK-derived code in cvcGL, BSD-3-Clause;
+# stb, sdf / mtxlib and the DTU .vtk reader in the cvc core) whose notices a binary
+# redistribution must reproduce: ship them, and the LICENSE they link to, beside
+# the gallery.
+install -m 644 "$CVC_SOURCE_DIR/THIRD_PARTY_NOTICES.md" "$CVC_SOURCE_DIR/LICENSE" "$WEB/"

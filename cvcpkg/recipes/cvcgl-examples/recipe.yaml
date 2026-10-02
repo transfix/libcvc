@@ -17,13 +17,20 @@ recipe:
   # Bumped 2 -> 3: build-wasm.sh no longer forces state_exec OFF (the
   # CVC_STATE_EXEC option is gone; state_exec is always built), so the wasm
   # gallery carries the program lanes that Ariadne apps run on.
-  cvc_revision: 3
+  # Bumped 3 -> 4: ships THIRD_PARTY_NOTICES.md + LICENSE (native share/cvcgl-examples/ and
+  # the wasm web/ payload), declares LGPL-2.1-only AND BSD-3-Clause AND MIT, and rebuilds the
+  # demos against cvcgl 3.4.0+cvc.16 (fast-draw low-memory mapper).
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
   description: "cvcGL example programs as ready-to-run commands: the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost / nav_finale — the torch-free cvc::nav reactive swarm rendered natively) plus terrain_lab, as native binaries in bin/, AND the full navigation gallery as a threaded (wasm-mt) WebAssembly browser build (share/cvcgl-examples/web/) with a cvcgl-examples-web launcher that serves it cross-origin-isolated (COOP/COEP) and opens a browser."
   homepage: https://github.com/transfix/libcvc
-  license: LGPL-2.1-only
+  # BSD-3-Clause: the demos link cvcGL statically, which carries code derived
+  # from VTK 9.5.0. MIT: lsystem_coast's OceanFFT is a port of ABYSSAL. Both
+  # notices are in THIRD_PARTY_NOTICES.md, shipped in share/cvcgl-examples/ (and
+  # share/cvcgl-examples/web/ for the browser build).
+  license: "LGPL-2.1-only AND BSD-3-Clause AND MIT"
   tags: [scientific, graphics, examples, vtk, wasm]
 
 # The examples are demos of cvcGL-as-a-toolkit, packaged separately from the

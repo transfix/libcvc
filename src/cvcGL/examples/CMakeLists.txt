@@ -176,6 +176,14 @@ set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH_USE_LINK_PATH ON)
 install(TARGETS ${_cvcgl_example_bins}
         RUNTIME DESTINATION bin COMPONENT cvcgl-examples)
+# The bins carry third-party code whose notices a binary redistribution must
+# reproduce -- VTK-derived code in the statically linked cvcGL (BSD-3-Clause) and
+# lsystem_coast's OceanFFT, a port of ABYSSAL (MIT) -- so the component ships
+# THIRD_PARTY_NOTICES.md, with the LICENSE it links to. (The browser build gets
+# the same two files from cvcpkg/recipes/cvcgl-examples/build-wasm.sh.)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../../../THIRD_PARTY_NOTICES.md"
+              "${CMAKE_CURRENT_SOURCE_DIR}/../../../LICENSE"
+        DESTINATION share/cvcgl-examples COMPONENT cvcgl-examples)
 
 # Unit tests for nav_common's bounds-safe compositing (the minimap-overflow crash
 # guard) + the occupancy rasterizer. Only when GoogleTest is available (CVC_BUILD_TESTS
