@@ -31,7 +31,52 @@ else()
   set(_PYCVC_CVC_TARGET cvc)
 endif()
 
+# ── Which SWIG ───────────────────────────────────────────────────────────────
+# The bindings are generated with the cvcpkg `swig` (a host_tool of every pycvc
+# recipe), never a system one. Name it explicitly whenever you can:
+#   -DSWIG_EXECUTABLE=<prefix>/bin/swig -DSWIG_DIR=<prefix>/share/swig/<ver>
+# and add -DCVC_PYCVC_REQUIRE_SWIG_VERSION=<major.minor> (the CI lanes do) to
+# turn any other SWIG into a configure error instead of a different wrapper.
+#
+# Left to itself FindSWIG is NOT prefix-first: it hands find_program the
+# versioned names (swig4.0, swig3.0, ...) BEFORE plain `swig`, and find_program
+# tries one name in every directory before the next. So a distro
+# /usr/bin/swig4.0 beats <prefix>/bin/swig even when that prefix leads
+# CMAKE_PREFIX_PATH -- which is how the publish lanes quietly generated pycvc
+# with Ubuntu's SWIG 4.0.2. Look for a plain `swig` in the CMake prefixes first,
+# so a cvcpkg prefix wins; only if none has one does FindSWIG search the system.
+if(NOT SWIG_EXECUTABLE)
+  find_program(SWIG_EXECUTABLE NAMES swig NAMES_PER_DIR
+    NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+endif()
+# The packaged swig reports its BUILDER's library dir (`swig -swiglib` prints
+# /tmp/cvcpkg-builder/...), so FindSWIG cannot derive SWIG_DIR from it and every
+# swig run would die with "Unable to find 'swig.swg'". Use the share/swig/<ver>
+# installed beside the executable instead; UseSWIG passes SWIG_DIR to each swig
+# run as SWIG_LIB.
+if(SWIG_EXECUTABLE AND NOT SWIG_DIR AND NOT DEFINED ENV{SWIG_LIB})
+  get_filename_component(_pycvc_swig_prefix "${SWIG_EXECUTABLE}" DIRECTORY)
+  get_filename_component(_pycvc_swig_prefix "${_pycvc_swig_prefix}" DIRECTORY)
+  file(GLOB _pycvc_swig_libs "${_pycvc_swig_prefix}/share/swig/*/swig.swg")
+  if(_pycvc_swig_libs)
+    list(GET _pycvc_swig_libs 0 _pycvc_swig_lib)
+    get_filename_component(_pycvc_swig_lib "${_pycvc_swig_lib}" DIRECTORY)
+    set(SWIG_DIR "${_pycvc_swig_lib}" CACHE PATH "SWIG runtime library (swig.swg) directory")
+  endif()
+endif()
 find_package(SWIG 4.0 REQUIRED COMPONENTS python)
+set(CVC_PYCVC_REQUIRE_SWIG_VERSION "" CACHE STRING
+  "Fail configure unless SWIG is this version (e.g. 4.4 or 4.4.1). Empty accepts any SWIG >= 4.0.")
+message(STATUS "pycvc: SWIG ${SWIG_VERSION}: ${SWIG_EXECUTABLE} (library: ${SWIG_DIR})")
+if(CVC_PYCVC_REQUIRE_SWIG_VERSION)
+  string(REPLACE "." "\\." _pycvc_swig_want "${CVC_PYCVC_REQUIRE_SWIG_VERSION}")
+  if(NOT SWIG_VERSION MATCHES "^${_pycvc_swig_want}(\\.|$)")
+    message(FATAL_ERROR
+      "pycvc: SWIG ${SWIG_VERSION} at ${SWIG_EXECUTABLE} is not the required "
+      "${CVC_PYCVC_REQUIRE_SWIG_VERSION}. Build the bindings with the cvcpkg swig: "
+      "-DSWIG_EXECUTABLE=<prefix>/bin/swig -DSWIG_DIR=<prefix>/share/swig/<ver>.")
+  endif()
+endif()
 include(UseSWIG)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module NumPy)
 
