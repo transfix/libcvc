@@ -533,6 +533,10 @@ int main(int argc, char **argv) {
   int wantRig = -1;
 
   SceneRenderer view(sg, width, height, capturing || offscreen, "main");
+  // The loop yields to the browser once per frame (emscripten_sleep(0) at its end), so VTK
+  // need not yield again inside every render (FrameYield::App: VTK 9.5's in-render
+  // emscripten_sleep off; a no-op natively).
+  view.setFrameYield(SceneRenderer::FrameYield::App);
   const bool shadows = !no_shadows && sg.setShadowsEnabled(true);
   if (shadows) {
     sg.setShadowResolution(2048);

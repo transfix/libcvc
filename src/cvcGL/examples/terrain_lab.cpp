@@ -1236,6 +1236,10 @@ int main(int argc, char **argv) {
   rig.setWarmth(0.4);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
+  // The loop yields to the browser once per frame (emscripten_sleep(0) at its end), so VTK
+  // need not yield again inside every render (FrameYield::App: VTK 9.5's in-render
+  // emscripten_sleep off; a no-op natively).
+  view.setFrameYield(SceneRenderer::FrameYield::App);
   view.renderer()->GradientBackgroundOn();
   view.renderer()->SetBackground(0.66, 0.71, 0.74);
   view.renderer()->SetBackground2(0.23, 0.44, 0.80);

@@ -102,8 +102,19 @@ endif()
 # imagemagick + a runtime bundle the wasm toolchain lacks). Add a new browser demo
 # to _wasm_demos and it builds via the `wasm-demos` target and is auto-discovered
 # into the gallery by wasm/build-pages.py — no host page to hand-write.
+#
+# _wasm_extra_demos are browser-capable too but stay OUT of the gallery: they build
+# only on request (`--target wasm-extra-demos`, or by name) into bin/extra/, which
+# build-pages.py does not scan. ariadne_hello is the Ariadne app there (its .ari
+# siblings nav_convoy / nav_compute load documents from disk and stay native-only).
+#
+# Every one of them is a cvcgl_wasm_app (src/cvcGL/wasm/cvcGLWasm.cmake): the WebGL
+# state shim as a --pre-js, plus mimalloc on the threaded (wasm-mt) build. Each also
+# calls SceneRenderer::setFrameYield(FrameYield::App) in its C++, because its loop
+# yields once per frame on every path that renders.
 if(EMSCRIPTEN)
   set(_wasm_demos lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost)
+  set(_wasm_extra_demos ariadne_hello)
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
   # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
   # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
@@ -129,7 +140,7 @@ if(EMSCRIPTEN)
     message(STATUS "cvcGL nav_city_swarm wasm: preloading trained weights from ${CVC_WASM_NAV_WEIGHTS}")
     list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_NAV_WEIGHTS}@/coef_sdf.cvcnav")
   endif()
-  foreach(_wt ${_wasm_demos})
+  foreach(_wt ${_wasm_demos} ${_wasm_extra_demos})
     # Asyncify: each demo keeps its own while-loop and yields via emscripten_sleep.
     # Growable heap: the forest/sea/sky volumes and city scenes exceed the 16 MB default.
     # VTK's patched FindOpenGL injects the WebGL2/GLES3 flags; RenderingUI its js-library.
@@ -158,10 +169,19 @@ if(EMSCRIPTEN)
     if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
       target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
     endif()
+    # The browser-side speedups: state shim (--pre-js) + mimalloc on wasm-mt.
+    cvcgl_wasm_app(${_wt})
   endforeach()
+  if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(_wasm_extra_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/extra")
+  else()
+    set(_wasm_extra_dir "${CMAKE_CURRENT_BINARY_DIR}/extra")
+  endif()
+  set_target_properties(${_wasm_extra_demos} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${_wasm_extra_dir}")
   # One target builds them all; wasm/build-wasm-demo.sh drives it, then build-pages.py
   # turns the built bin/ into the servable gallery (per-demo page + index of cards).
   add_custom_target(wasm-demos DEPENDS ${_wasm_demos})
+  add_custom_target(wasm-extra-demos DEPENDS ${_wasm_extra_demos})
 endif()
 
 # Install rules so the cvcgl-examples recipe packages the example binaries with no

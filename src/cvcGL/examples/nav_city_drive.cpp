@@ -1424,6 +1424,10 @@ int main(int argc, char **argv) {
   auto rig = navdemo::make_stage_rig(sg, bounds, wall_h);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
+  // The loop yields to the browser once per frame (emscripten_sleep(0) at its end), so VTK
+  // need not yield again inside every render (FrameYield::App: VTK 9.5's in-render
+  // emscripten_sleep off; a no-op natively).
+  view.setFrameYield(SceneRenderer::FrameYield::App);
   // Shadows must be enabled AFTER the renderer exists (they attach to its passes).
   bool shadows = !no_shadows && sg.setShadowsEnabled(true);
   if (shadows) {
