@@ -17,6 +17,49 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+/*
+  Portions of this file -- the regions between "BEGIN VTK 9.5.0-DERIVED" and
+  "END VTK 9.5.0-DERIVED" below -- are derived from VTK 9.5.0
+  (Rendering/OpenGL2: vtkGLSLModCoincidentTopology.cxx,
+  vtkOpenGLLowMemoryPolyDataMapper.cxx, vtkOpenGLLowMemoryCellTypeAgent.cxx,
+  vtkOpenGLLowMemoryVerticesAgent.cxx, vtkOpenGLLowMemoryLinesAgent.cxx,
+  vtkOpenGLLowMemoryPolygonsAgent.cxx) and are used under VTK's license:
+
+  SPDX-FileCopyrightText: Copyright (c) Ken Martin, Will Schroeder, Bill Lorensen
+  SPDX-License-Identifier: BSD-3-Clause
+
+  Copyright (c) 1993-2015 Ken Martin, Will Schroeder, Bill Lorensen
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+   * Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+   * Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+   * Neither name of Ken Martin, Will Schroeder, or Bill Lorensen nor the names
+     of any contributors may be used to endorse or promote products derived
+     from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS IS''
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE FOR
+  ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  The rest of the file is libcvc's own (LGPL-2.1, above). The notice is also
+  recorded in THIRD_PARTY_NOTICES.md.
+*/
+
 // No vtkOpenGL*ErrorMacro anywhere in this file: those macros are inline in the
 // including translation unit, so a cvcGL build without NDEBUG would issue a
 // glGetError per draw -- a synchronous round trip on WebGL.
@@ -33,9 +76,19 @@
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkShaderProgram.h>
+#include <vtkShaderProperty.h>
 #include <vtkVersionMacros.h>
 
-#if VTK_MAJOR_VERSION == 9 && VTK_MINOR_VERSION == 5 && VTK_BUILD_VERSION == 0
+// The replica is VTK 9.5.0's own agent code, so it is on only for an UNPATCHED
+// 9.5.0 (the contract is in the class header):
+//   VTK_CVC_LOWMEM_PATCHLEVEL       defined by any libcvc-deps VTK recipe patch
+//                                   to the low-memory / vtkDrawTexturedElements
+//                                   code, in the installed
+//                                   vtkOpenGLLowMemoryPolyDataMapper.h;
+//   CVC_GL_LOWMEM_REPLICA_DISABLED  set by cvcGL's configure-time check when an
+//                                   installed header differs from 9.5.0's.
+#if VTK_MAJOR_VERSION == 9 && VTK_MINOR_VERSION == 5 && VTK_BUILD_VERSION == 0 &&                  \
+    !defined(VTK_CVC_LOWMEM_PATCHLEVEL) && !defined(CVC_GL_LOWMEM_REPLICA_DISABLED)
 #define CVC_GL_LOWMEM_REPLICA 1
 #else
 #define CVC_GL_LOWMEM_REPLICA 0
@@ -74,6 +127,9 @@ std::atomic<int> &policyStore() {
   return policy;
 }
 
+// Constant-initialised: no guard on the per-stage load.
+std::atomic<LowMemoryPolyDataMapper::StageObserver> g_stageObserver{nullptr};
+
 // Does VTK's object factory hand out the low-memory mapper on this build? Asked
 // once, on the first node construction (the OpenGL2 factory is registered by
 // then: cvcGL's sources carry the module auto-init).
@@ -84,6 +140,12 @@ bool factoryIsLowMemory() {
 }
 
 #if CVC_GL_LOWMEM_REPLICA
+// ---- BEGIN VTK 9.5.0-DERIVED ------------------------------------------------
+// Portions derived from VTK 9.5.0, Copyright (c) Ken Martin, Will Schroeder,
+// Bill Lorensen; All rights reserved. SPDX-License-Identifier: BSD-3-Clause
+// (full notice at the top of this file). coincidentValue() below is
+// vtkGLSLModCoincidentTopology::GetCoincidentParameters.
+//
 // The depth offset vtkGLSLModCoincidentTopology::GetCoincidentParameters (VTK
 // 9.5.0) computes for one primitive class, as the floats it would upload.
 // slot: 0 points, 1 lines, 2 polygons. `set` false: the mod uploads nothing.
@@ -118,6 +180,7 @@ CoincidentValue coincidentValue(vtkMapper *mapper, vtkProperty *prop, int slot) 
   v.offset = offset;
   return v;
 }
+// ---- END VTK 9.5.0-DERIVED --------------------------------------------------
 #endif
 
 } // namespace
@@ -146,10 +209,40 @@ LowMemoryPolyDataMapper::DrawPath LowMemoryPolyDataMapper::drawPath() {
 
 bool LowMemoryPolyDataMapper::replicaActive() { return CVC_GL_LOWMEM_REPLICA != 0; }
 
-void LowMemoryPolyDataMapper::ReleaseGraphicsResources(vtkWindow *win) {
-  // The cached program belongs to that window's context; look it up afresh.
+void LowMemoryPolyDataMapper::setStageObserver(StageObserver observer) {
+  g_stageObserver.store(observer, std::memory_order_relaxed);
+}
+
+void LowMemoryPolyDataMapper::invalidateProgramCache() {
   m_cache = nullptr;
   m_builtStamp = 0;
+}
+
+vtkShader *LowMemoryPolyDataMapper::GetShader(vtkShader::Type shaderType) {
+  // The caller may edit the source: the next draw must resolve it again.
+  invalidateProgramCache();
+  return this->vtkDrawTexturedElements::GetShader(shaderType);
+}
+
+void LowMemoryPolyDataMapper::RenderPieceStart(vtkRenderer *ren, vtkActor *act) {
+  // VTK's low-memory mapper (9.5 through 9.7) never looks at the actor's shader
+  // property once its program is built: IsShaderUpToDate ignores it, where the
+  // classic mapper compares GetShaderMTime(). A replacement added or cleared
+  // after the first draw (GeometryNode::add*ShaderReplacement /
+  // clearShaderReplacements), or a custom uniform declared after it, would
+  // never reach the GPU. Dropping the program makes the base rebuild it
+  // (UpdateShaders + a new ShaderBuildTimeStamp, so the draw that follows also
+  // takes the full shader-cache lookup). Uniform VALUE changes do not move
+  // GetShaderMTime, so they never cost a rebuild.
+  if (vtkShaderProperty *sp = act->GetShaderProperty())
+    if (sp->GetShaderMTime() > this->ShaderBuildTimeStamp.GetMTime())
+      this->ShaderProgram = nullptr;
+  Superclass::RenderPieceStart(ren, act);
+}
+
+void LowMemoryPolyDataMapper::ReleaseGraphicsResources(vtkWindow *win) {
+  // The cached program belongs to that window's context; look it up afresh.
+  invalidateProgramCache();
   Superclass::ReleaseGraphicsResources(win);
 }
 
@@ -170,6 +263,22 @@ void LowMemoryPolyDataMapper::agentDraw(int, vtkRenderer *, vtkActor *) {}
 
 #else
 
+namespace {
+inline void observeStage(LowMemoryPolyDataMapper::StageObserver observe,
+                         LowMemoryPolyDataMapper::DrawStage stage, int arg = 0) {
+  if (observe)
+    observe(stage, arg);
+}
+} // namespace
+
+// ---- BEGIN VTK 9.5.0-DERIVED ------------------------------------------------
+// Portions derived from VTK 9.5.0, Copyright (c) Ken Martin, Will Schroeder,
+// Bill Lorensen; All rights reserved. SPDX-License-Identifier: BSD-3-Clause
+// (full notice at the top of this file). RenderPieceDraw's agent loop is
+// vtkOpenGLLowMemoryPolyDataMapper::RenderPieceDraw; renderable(), agentPreDraw()
+// and agentDraw() are vtkOpenGLLowMemoryCellTypeAgent::PreDraw / Draw and the
+// vtkOpenGLLowMemory{Vertices,Lines,Polygons}Agent::PreDrawInternal they call.
+// readyProgram() and coincidentSkipSafe() are libcvc's own.
 void LowMemoryPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
   ++m_stats.draws;
   const DrawPath path = drawPath();
@@ -181,45 +290,61 @@ void LowMemoryPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
     return;
   }
   const bool fast = path == DrawPath::Fast;
+  const StageObserver observe = g_stageObserver.load(std::memory_order_relaxed);
+  // CPU only (no GL); asked on AllCellTypes too when observed, so a test can
+  // derive from an AllCellTypes trace what Fast must leave out.
+  const bool skipSafe = (fast || observe) && coincidentSkipSafe(act);
+  observeStage(observe, DrawStage::DrawBegin, skipSafe ? 1 : 0);
   readyProgram(ren, fast);
   // Uniforms common to every cell type; also fires UpdateShaderEvent, which
   // GeometryNode's custom shader textures hang off.
   this->SetShaderParameters(ren, act);
-  if (!this->ShaderProgram)
+  if (!this->ShaderProgram) {
+    observeStage(observe, DrawStage::DrawEnd);
     return; // compile/link failure: VTK's agents would dereference null here
-  bool skip = fast;
-  if (skip && !coincidentSkipSafe(act)) {
-    skip = false;
-    ++m_stats.coincidentFallbacks;
   }
+  if (fast && !skipSafe)
+    ++m_stats.coincidentFallbacks;
+  const bool skip = fast && skipSafe;
   for (int t = 0; t < 4; ++t) { // verts, lines, polys, strips: VTK's order
     if (skip && !renderable(t)) {
       ++m_stats.cellTypesSkipped;
+      observeStage(observe, DrawStage::AgentSkipped, t);
       continue;
     }
+    observeStage(observe, DrawStage::AgentBegin, t);
     agentPreDraw(t, ren, act);
     agentDraw(t, ren, act);
     // vtkOpenGLLowMemoryCellTypeAgent::PostDraw; every 9.5.0 PostDrawInternal is empty.
     this->vtkDrawTexturedElements::PostDraw(ren, act, this);
+    observeStage(observe, DrawStage::AgentEnd, t);
   }
+  observeStage(observe, DrawStage::DrawEnd);
 }
 
 void LowMemoryPolyDataMapper::readyProgram(vtkRenderer *ren, bool allowSkip) {
+  const StageObserver observe = g_stageObserver.load(std::memory_order_relaxed);
   auto *win = vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow());
   vtkOpenGLShaderCache *cache = win ? win->GetShaderCache() : nullptr;
   const vtkMTimeType stamp = this->ShaderBuildTimeStamp.GetMTime();
   // this->Shaders only changes in UpdateShaders, which RenderPieceStart follows
-  // with ShaderBuildTimeStamp.Modified(); while the stamp and the cache are the
-  // ones the last lookup saw, that lookup would find the same program again.
-  // ReadyShaderProgram(program) still compiles it if its context was released
-  // and binds it exactly as the lookup's tail would.
+  // with ShaderBuildTimeStamp.Modified() (GetShader() and
+  // invalidateProgramCache() clear m_cache for any other route); while the
+  // stamp and the cache are the ones the last lookup saw, that lookup would
+  // find the same program again. ReadyShaderProgram(program) still compiles it
+  // if its context was released and binds it exactly as the lookup's tail
+  // would, so the two issue the same GL calls.
   if (allowSkip && cache && this->ShaderProgram && cache == m_cache.GetPointer() &&
       stamp == m_builtStamp && this->ElementType != AbstractPatches) {
+    observeStage(observe, DrawStage::RebindBegin);
     this->ShaderProgram = cache->ReadyShaderProgram(this->ShaderProgram.GetPointer());
+    observeStage(observe, DrawStage::RebindEnd);
     ++m_stats.programLookupsSkipped;
     return;
   }
+  observeStage(observe, DrawStage::LookupBegin);
   this->vtkDrawTexturedElements::ReadyShaderProgram(ren); // copy, substitute, MD5, find, bind
+  observeStage(observe, DrawStage::LookupEnd);
   ++m_stats.programLookups;
   m_cache = cache;
   m_builtStamp = stamp;
@@ -340,6 +465,7 @@ void LowMemoryPolyDataMapper::agentDraw(int t, vtkRenderer *ren, vtkActor *act) 
   program->SetUniformi("usesEdgeValues", group.UsesEdgeValueBuffer);
   this->vtkDrawTexturedElements::DrawInstancedElementsImpl(ren, act, this);
 }
+// ---- END VTK 9.5.0-DERIVED --------------------------------------------------
 
 #endif // CVC_GL_LOWMEM_REPLICA
 

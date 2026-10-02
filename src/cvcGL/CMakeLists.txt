@@ -54,6 +54,50 @@ target_include_directories(cvcGL PUBLIC
 )
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 
+# LowMemoryPolyDataMapper carries a replica of VTK 9.5.0's private low-memory
+# cell-type agents, valid only against an UNPATCHED 9.5.0 (the contract is in
+# inc/cvc/gl/LowMemoryPolyDataMapper.h). The version number cannot tell a
+# libcvc-deps recipe patch from pristine 9.5.0, so: a patch to that code must
+# define VTK_CVC_LOWMEM_PATCHLEVEL in the installed
+# vtkOpenGLLowMemoryPolyDataMapper.h (checked in the source), and here the
+# installed headers the replica builds on are hashed against v9.5.0's (line
+# endings normalised) -- any difference builds the replica off.
+if(VTK_VERSION VERSION_EQUAL "9.5.0")
+  set(_cvc_lowmem_pristine
+    "vtkOpenGLLowMemoryPolyDataMapper.h=a4100d6d90f72861ce4eacd6e29506bbab727fd28fe60d6fdb319d2695d61c1a"
+    "vtkDrawTexturedElements.h=07df517fba54da88b2ac1b1ad4ca847aea7b2eda72422bbeeafe0f8d20a520af"
+    "vtkGLSLModCoincidentTopology.h=708637ca8dc0695a60c1bb71269220b726cfe7f37af54c214430d4f8f2b42033")
+  set(_cvc_lowmem_inc "${VTK_PREFIX_PATH}/include/vtk-${VTK_VERSION_MAJOR}.${VTK_VERSION_MINOR}")
+  set(_cvc_lowmem_changed "")
+  set(_cvc_lowmem_missing "")
+  foreach(_entry IN LISTS _cvc_lowmem_pristine)
+    string(REPLACE "=" ";" _pair "${_entry}")
+    list(GET _pair 0 _hdr)
+    list(GET _pair 1 _want)
+    if(EXISTS "${_cvc_lowmem_inc}/${_hdr}")
+      file(READ "${_cvc_lowmem_inc}/${_hdr}" _text)
+      string(REPLACE "\r\n" "\n" _text "${_text}")
+      string(SHA256 _have "${_text}")
+      if(NOT _have STREQUAL _want)
+        list(APPEND _cvc_lowmem_changed "${_hdr}")
+      endif()
+    else()
+      list(APPEND _cvc_lowmem_missing "${_hdr}")
+    endif()
+  endforeach()
+  if(_cvc_lowmem_changed)
+    target_compile_definitions(cvcGL PRIVATE CVC_GL_LOWMEM_REPLICA_DISABLED=1)
+    message(WARNING "cvcGL: VTK 9.5.0 headers differ from upstream v9.5.0 (${_cvc_lowmem_changed}); "
+                    "LowMemoryPolyDataMapper's replica is OFF (stock draw). Re-validate it with "
+                    "cvcgl_lowmem_fastdraw against the patched VTK before re-enabling.")
+  elseif(_cvc_lowmem_missing)
+    message(STATUS "cvcGL: could not find ${_cvc_lowmem_missing} under ${_cvc_lowmem_inc}; "
+                   "LowMemoryPolyDataMapper relies on VTK_CVC_LOWMEM_PATCHLEVEL alone")
+  else()
+    message(STATUS "cvcGL: VTK 9.5.0 low-memory mapper headers are pristine; replica enabled")
+  endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # Dear ImGui overlay (optional): real menus/panels/widgets drawn inside the VTK
 # render, native AND WebAssembly. The cvcpkg imgui bundle ships no CMake config,
@@ -238,6 +282,11 @@ install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfigVersion.cmake"
   DESTINATION lib/cmake/cvcGL
 )
+# libcvcGL carries code derived from VTK 9.5.0 (BSD-3-Clause, in
+# LowMemoryPolyDataMapper.cpp), whose notice a binary redistribution must
+# reproduce in its documentation: the standalone cvcGL package ships it too.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../../THIRD_PARTY_NOTICES.md"
+  DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 # ── functional smoke test ──
 enable_testing()
@@ -596,19 +645,25 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # LowMemoryPolyDataMapper (the GLES3/WebGL2 mapper with empty cell types and the
-# per-draw shader-cache lookup taken out of its draw), forced on natively. Counts
-# every GL call at the driver (test/gl_call_counter.cpp swaps VTK's glad function
-# pointers) to pin the VTK 9.5.0 replica call-for-call against the stock draw and
-# measure the saving, and compares RGBA frames byte for byte -- shadows on and
-# off, bake and steady frames, released resources, a re-opened window, the
-# offset / picking / vertex-visibility guards. Renders for real; skips where
-# nothing rasterises unless CVC_REQUIRE_RENDER=1. CVCGL_LOWMEM_REPORT=1 prints
-# per-draw breakdowns. Desktop GL only: the wasm VTK calls GLES directly, not
-# through glad.
+# per-draw shader-cache lookup taken out of its draw), forced on natively. Records
+# an ordered trace of every GL call at the driver -- entry point, bound program /
+# texture unit, argument bytes, uniform values (test/gl_call_counter.cpp swaps
+# VTK's glad function pointers) -- and asserts the VTK 9.5.0 replica's trace
+# equals the stock draw's exactly and Fast's equals it with the empty cell-type
+# blocks removed (derived from the replica's stage markers); compares RGBA frames
+# byte for byte -- shadows on and off, bake and steady frames, every
+# representation / scalar / edge / line kind, the hardware selector, released
+# resources, a re-opened window, the offset / picking / vertex-visibility guards,
+# and shader replacements made after the first draw. This is the gate for any
+# libcvc-deps VTK recipe change. Renders for real; skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1. CVCGL_LOWMEM_REPORT=1 prints per-draw
+# breakdowns; CVCGL_LOWMEM_DUMP=<dir> writes the traces of a failing comparison.
+# Desktop GL only: the wasm VTK calls GLES directly, not through glad.
 #
-# cvcgl_lowmem_bench (not a test) prints GL calls and draw-stage CPU per frame
-# and per draw, Stock vs Fast, for a city of single-colour box nodes on a
-# textured ground with overlays, shadows on and off.
+# cvcgl_lowmem_bench (not a test) prints GL calls (counted pass) and draw-stage /
+# frame CPU (timed pass, no GL wrappers) per frame and per draw, Stock vs Fast,
+# for a city of single-colour box nodes on a textured ground with overlays,
+# shadows on and off.
 if(NOT EMSCRIPTEN)
   add_executable(cvcgl_lowmem_fastdraw test/cvcgl_lowmem_fastdraw.cpp test/gl_call_counter.cpp)
   target_link_libraries(cvcgl_lowmem_fastdraw PRIVATE cvcGL)
