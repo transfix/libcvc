@@ -37,6 +37,11 @@ file(GLOB CVCGL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 # subdirectory, so the non-recursive top-level glob above does not pick them up.
 file(GLOB CVCGL_ARIADNE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ariadne/*.cpp")
 list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
+
+# Phase-3 peripheral capture (SDL3 camera / audio-device sources). SDL-gated internally; with no SDL
+# the sources compile to graceful no-ops (open_camera returns an empty result).
+file(GLOB CVCGL_CAPTURE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/capture/*.cpp")
+list(APPEND CVCGL_SOURCES ${CVCGL_CAPTURE_SOURCES})
 # Header root is <repo>/inc  (headers under inc/cvc/gl/).
 get_filename_component(_CVCGL_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
@@ -402,6 +407,13 @@ add_test(NAME cvcgl_stream_node COMMAND cvcgl_stream_node)
 add_executable(cvcgl_stream_bind test/cvcgl_stream_bind.cpp)
 target_link_libraries(cvcgl_stream_bind PRIVATE cvcGL)
 add_test(NAME cvcgl_stream_bind COMMAND cvcgl_stream_bind)
+
+# Phase-3 video capture: cvc::gl::capture::camera_source (SDL3 camera -> stream frame_source).
+# DEVICE-GATED — skips (passes) with no camera; the transport side is covered hardware-free by
+# stream_test's StreamProducer.* (synthetic_source).
+add_executable(cvcgl_camera_source test/cvcgl_camera_source.cpp)
+target_link_libraries(cvcgl_camera_source PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_source COMMAND cvcgl_camera_source)
 
 # texture_modified_rows / _rect: a zero-copy texture patched on the GPU with
 # glTexSubImage2D and nothing marked modified -- no whole-texture re-upload, no
