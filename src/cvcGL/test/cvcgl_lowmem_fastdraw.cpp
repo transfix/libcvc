@@ -43,9 +43,11 @@
 //      Stock frame right after Fast, and frames across a recompile and across a
 //      new window -- byte for byte, and so do pairs of Stock frames of one GL
 //      trace. Only on Apple's renderer (GL version or renderer string naming
-//      Apple), which varies by a few bytes now and then, may a check differ by
-//      no more than one such pair (same scene and window, neither right after
-//      Fast) differed in the same run;
+//      Apple), which varies by a few bytes now and then, may a check in one
+//      window differ by no more than one such pair (same scene and window,
+//      neither right after Fast) differed in the same run, and a check across
+//      a recompile or a new window by LSB rounding only (no byte by more than
+//      1, at most 64 bytes); see checkPixels();
 //   5. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
 //      fraction of the stock calls, with no desktop round-trip in any draw
 //      beyond Stock's (none, but VTK's own warning on a line width the driver
@@ -55,7 +57,9 @@
 //      and the scene re-opened in a new window all go back through the full
 //      lookup (or a recompile) and still match;
 //   7. guards: an offset layout where skipping would change a drawn type's
-//      depth offset, picking and vertex visibility all draw the stock way;
+//      depth offset, picking and vertex visibility all draw the stock way (and
+//      pick the same; on Apple's renderer point picking may differ by 1 point
+//      per prop, see comparePicking());
 //   8. a plain GeometryNode's shader replacement added (and cleared) after its
 //      first draw reaches the GPU, on every draw path.
 // Frames are rendered without MSAA: with VTK's default 8x, NVIDIA's resolve
@@ -1177,47 +1181,79 @@ std::string describe(const PixelDiff &d, int w) {
 // call with its arguments and uniform values, in order, in one window -- can
 // differ only by what the rasteriser does with that stream. NVIDIA and Mesa
 // llvmpipe give the same bytes every time. Apple's software renderer (macOS
-// CI, GL 4.1) does not: with shadows on, AllCellTypes and Stock frames --
-// identical traces -- came out 1 to 4 bytes apart, and frames across a
-// recompile or a new window up to 9, in some runs and not in others (never
-// with shadows off).
+// CI, "Apple Software Renderer", GL 4.1) does not: with shadows on,
+// AllCellTypes and Stock frames -- identical traces -- came out 1 to 7 bytes
+// apart in one window, in some runs and not in others (never with shadows
+// off). Across a program recompile (the shader cache's programs released) or a
+// new window (new context, new cache) it rounds differently again: on the
+// first attempt of every macOS CI run over three heads, Stock against Stock
+// across a new window -- the fast path not involved -- and Fast across a
+// recompile or a new window came out 7 to 10 bytes apart (1 to 10 over all
+// attempts), every one by a single LSB (max delta 1), and more than any pair
+// sampled in one window that run.
 //
 // Exact mode (every renderer but Apple's): a sampled pair -- two Stock frames
 // of one GL trace -- that differs fails the run on its own, and every pixel
 // check is byte for byte.
 //
-// Apple-tolerance mode (the GL version or renderer string names Apple): a
-// pixel check passes when one sampled pair -- in the same scene, so the
-// shadowed scene's noise excuses nothing elsewhere -- differed by at least as
-// many bytes AND by at least as large a step: an envelope an actual pair
-// filled, not the most bytes of one pair with the largest step of another.
-// Which pairs may be samples narrows what they can excuse:
+// Apple-tolerance mode (the GL version or renderer string names Apple), by
+// where a check's two frames come from (FramePair):
+//
+// Across program caches or windows (FramePair::AcrossPrograms): a fixed
+// envelope, pure LSB rounding -- no byte off by more than 1, at most 64 bytes
+// (kSelfVarianceMaxBytes). It is the renderer's, not the run's: no sampled
+// pair widens it, so no frame can excuse itself, and a shading change (a
+// colour off by 2 or more) or a changed region (more than 64 bytes) fails.
+// Pairs across a recompile or a re-open are never samples: they would measure
+// as noise the very difference these checks look for.
+//
+// In one window and one shader cache (FramePair::InWindow): a pixel check
+// passes when one sampled pair -- in the same scene, so the shadowed scene's
+// noise excuses nothing elsewhere -- differed by at least as many bytes AND by
+// at least as large a step: an envelope an actual pair filled, not the most
+// bytes of one pair with the largest step of another. Which pairs may be
+// samples narrows what they can excuse:
 //   - both frames Stock, in one window (a pair across a re-open would measure
 //     as noise the very difference the cross-window check looks for);
 //   - neither right after a Fast run (whatever a Fast frame leaves that the
 //     trace cannot see -- buffer contents, the untraced warm-up frame -- would
 //     count as noise); a Stock frame right after Fast is judged instead;
 //   - no compared pair is a sampled pair.
-// That narrows it, no more: a sampled pair and a check may share a frame (a
-// scene's first counted Stock run is in two samples and in all six of its
-// checks; the new window's first sampled run is in two of its checks), and if
-// that frame alone is wrong the pair measures exactly the check's difference
-// and excuses it. Hence the relaxation is Apple's alone, where it is needed.
+// That narrows it, no more: a sampled pair and an in-window check may share a
+// frame (a scene's first counted Stock run is in two samples and in all six of
+// its checks; the new window's first sampled run is in one), and if that frame
+// alone is wrong the pair measures exactly the check's difference and excuses
+// it -- in one window; a check of that frame across the re-open is held to the
+// LSB envelope. Hence the relaxation is Apple's alone, where it is needed.
 // Every check is judged at the end, once the run's samples are in. The GL
 // traces stay the exact oracle on every renderer.
 //
 // The most a sampled pair may differ by for the renderer to be judged on at
-// all -- a noisier pair excuses nothing and fails the run: 64 bytes, ~7x the
-// most seen on macOS (9), and a step of a few LSB. The old check logged byte
+// all -- a noisier pair excuses nothing and fails the run: 64 bytes, ~6x the
+// most seen on macOS (10), and a step of a few LSB. The old check logged byte
 // counts only, not the step; counts that are no multiple of 3 (1, 2, 4, 5)
 // mean pixels that changed in some colour channels and not the others, which
-// is rounding, not a shading change.
+// is rounding, not a shading change. The same byte cap bounds the LSB envelope
+// across program caches and windows, whose step is 1: what macOS measured.
 constexpr long kSelfVarianceMaxBytes = 64;
 constexpr int kSelfVarianceMaxDelta = 8;
+constexpr int kAppleLsbMaxDelta = 1;
 
 bool withinCap(const PixelDiff &d) {
   return d.bytes >= 0 && d.bytes <= kSelfVarianceMaxBytes && d.maxDelta <= kSelfVarianceMaxDelta;
 }
+
+// Apple-tolerance mode, frames across program caches or windows: LSB rounding.
+bool withinAppleLsbEnvelope(const PixelDiff &d) {
+  return d.bytes >= 0 && d.bytes <= kSelfVarianceMaxBytes && d.maxDelta <= kAppleLsbMaxDelta;
+}
+
+// Where a pixel check's two frames come from, and so (Apple-tolerance mode
+// only) the rule that judges them; exact mode judges both byte for byte.
+enum class FramePair {
+  InWindow,       // one window, one shader cache: against the sampled pairs
+  AcrossPrograms, // across a program recompile or a new window: LSB envelope
+};
 
 // The renderer the frames are drawn by, as renderAvailable() reads it, and
 // whether its pixels are judged in Apple-tolerance mode (exact otherwise).
@@ -1237,6 +1273,7 @@ struct PixelCheck {
   std::string scope, what;
   PixelDiff d;
   int w;
+  FramePair pair;
 };
 std::vector<PixelCheck> g_pixelChecks;
 
@@ -1285,8 +1322,9 @@ void sampleSelfVariance(const std::string &scope, const std::string &what, const
 
 // Deferred: judged by checkPixels() once the run's samples are in.
 void samePixels(const std::string &scope, const std::string &what,
-                const std::vector<unsigned char> &a, const std::vector<unsigned char> &b, int w) {
-  g_pixelChecks.push_back({scope, what, pixelDiff(a, b), w});
+                const std::vector<unsigned char> &a, const std::vector<unsigned char> &b, int w,
+                FramePair pair = FramePair::InWindow) {
+  g_pixelChecks.push_back({scope, what, pixelDiff(a, b), w, pair});
 }
 
 void checkPixels() {
@@ -1301,20 +1339,36 @@ void checkPixels() {
   std::set<std::string> scopes;
   for (const auto &c : g_pixelChecks)
     scopes.insert(c.scope);
-  std::printf("pixels (apple-tolerance mode, the renderer's self-variance: pairs of Stock frames "
-              "of identical GL traces, in one window, neither right after Fast)\n");
+  const std::string envelope = fmt("Apple LSB envelope (delta<=%.0f, bytes<=%.0f)",
+                                   double(kAppleLsbMaxDelta), double(kSelfVarianceMaxBytes));
+  std::printf("pixels (apple-tolerance mode: in one window, the renderer's self-variance -- pairs "
+              "of Stock frames of identical GL traces, in one window, neither right after Fast; "
+              "across a recompile or a new window, the %s)\n",
+              envelope.c_str());
   for (const auto &scope : scopes) {
     int noisy = 0;
     for (const auto &n : g_noisy)
       noisy += n.scope == scope;
     std::string line = "  " + scope + fmt(": %.0f pairs, ", double(g_pairs[scope]));
     line += noisy ? fmt("%.0f differ (listed above)", double(noisy))
-                  : std::string("none differ, so its checks are byte-exact");
+                  : std::string("none differ, so its in-window checks are byte-exact");
     if (g_pairsSkipped[scope])
       line += fmt("; %.0f not sampled", double(g_pairsSkipped[scope]));
     std::printf("%s\n", line.c_str());
   }
   for (const auto &c : g_pixelChecks) {
+    std::string detail = describe(c.d, c.w);
+    if (c.pair == FramePair::AcrossPrograms) {
+      // The fixed envelope alone: no sampled pair widens it.
+      const bool lsb = withinAppleLsbEnvelope(c.d);
+      if (c.d.bytes == 0)
+        detail += " (across program caches / windows: " + envelope + ")";
+      else
+        detail += std::string(lsb ? ": within " : ": BEYOND ") + envelope +
+                  ", across program caches / windows";
+      check(c.d.bytes == 0 || lsb, c.what, detail);
+      continue;
+    }
     const SelfVarianceSample *excuse = nullptr;
     for (const auto &n : g_noisy)
       if (c.d.bytes > 0 && n.scope == c.scope && withinCap(n.d) && n.d.bytes >= c.d.bytes &&
@@ -1322,11 +1376,13 @@ void checkPixels() {
         excuse = &n;
         break;
       }
-    std::string detail = describe(c.d, c.w);
-    if (excuse)
-      detail += ": within " + excuse->what + " (" + describe(excuse->d, excuse->w) + ")";
-    else if (c.d.bytes > 0)
-      detail += ": BEYOND every pair of Stock frames sampled in " + c.scope;
+    if (c.d.bytes == 0)
+      detail += " (in one window: a sampled pair of Stock frames)";
+    else if (excuse)
+      detail +=
+          ": in one window, within " + excuse->what + " (" + describe(excuse->d, excuse->w) + ")";
+    else
+      detail += ": in one window, BEYOND every pair of Stock frames sampled in " + c.scope;
     check(c.d.bytes == 0 || excuse, c.what, detail);
   }
   // A renderer noisy enough to blur a real difference is not one to judge on.
@@ -1415,9 +1471,12 @@ bool renderAvailable(cvc::app &app) {
                   double(win->GetMaximumHardwareLineWidth()));
     }
     const char *mode = g_appleTolerance ? "apple-tolerance" : "exact";
-    const char *rule = g_appleTolerance
-                           ? "a check may differ by no more than a sampled pair of Stock frames"
-                           : "every pair of Stock frames and every check byte for byte";
+    const char *rule =
+        g_appleTolerance
+            ? "a check in one window may differ by no more than a sampled pair of Stock frames, "
+              "one across a recompile or a new window by LSB rounding only (delta<=1, "
+              "bytes<=64); point picking by <= 1 point per prop"
+            : "every pair of Stock frames and every check byte for byte";
     std::printf("  pixel checks: %s (OpenGL renderer \"%s\", version \"%s\") -- %s\n", mode,
                 g_glRenderer.c_str(), g_glVersion.c_str(), rule);
   }
@@ -1527,9 +1586,27 @@ void checkTraces(const std::string &what, const Trace &stock, const Trace &all, 
 // trace of the selection, the stats.
 struct Pick {
   std::string signature;
+  std::vector<std::pair<double, double>> hits; // (prop id, items), in prop-id order
   Trace trace;
   LowMemoryPolyDataMapper::Stats stats;
 };
+
+// Apple-tolerance mode, point picking: the same props, each picked within
+// `tolerance` items of the reference. Where the counts differ, *diff lists them.
+bool pickCountsWithin(const Pick &ref, const Pick &p, double tolerance, const char *name,
+                      std::string *diff) {
+  if (p.hits.size() != ref.hits.size())
+    return false;
+  for (size_t i = 0; i < ref.hits.size(); ++i) {
+    if (p.hits[i].first != ref.hits[i].first ||
+        std::abs(p.hits[i].second - ref.hits[i].second) > tolerance)
+      return false;
+    if (p.hits[i].second != ref.hits[i].second)
+      *diff += fmt("; prop %.0f: Stock %.0f, ", ref.hits[i].first, ref.hits[i].second) + name +
+               fmt(" %.0f", p.hits[i].second);
+  }
+  return true;
+}
 
 Pick pick(Scene &s, DrawPath p, int association) {
   LowMemoryPolyDataMapper::setDrawPath(p);
@@ -1543,7 +1620,7 @@ Pick pick(Scene &s, DrawPath p, int association) {
   vtkSmartPointer<vtkSelection> res = vtk::TakeSmartPointer(sel->Select());
   Pick out;
   out.trace = cvcgl_test::glcallsTraceStop();
-  std::vector<std::pair<double, double>> hits; // (prop id, items), in prop-id order
+  auto &hits = out.hits;
   for (unsigned i = 0; res && i < res->GetNumberOfNodes(); ++i) {
     vtkSelectionNode *n = res->GetNode(i);
     hits.emplace_back(n->GetProperties()->Get(vtkSelectionNode::PROP_ID()),
@@ -1597,10 +1674,26 @@ void comparePicking(Scene &s, const std::string &label) {
               fmt(" (+%.0f in the ordinary depth frame)", ordinary));
     const bool sameSelection = !stock.signature.empty() && fast.signature == stock.signature &&
                                all.signature == stock.signature;
-    check(sameSelection, what + " selects the same on every path",
-          sameSelection ? stock.signature
-                        : "Stock " + stock.signature + " AllCellTypes " + all.signature + " Fast " +
-                              fast.signature);
+    // Apple's renderer, point picking only: the selector's point pass picked
+    // 1117 points of a prop on one path and 1118 on another, in runs where
+    // AllCellTypes' GL trace equalled Stock's -- the rasteriser's rounding at
+    // a point's edge, like its pixels. There a path may pick 1 point more or
+    // fewer per prop (the same props); cell picking, and every other renderer,
+    // stay exact.
+    std::string within;
+    const bool nearSelection = !sameSelection && g_appleTolerance && points &&
+                               !stock.signature.empty() &&
+                               pickCountsWithin(stock, all, 1.0, "AllCellTypes", &within) &&
+                               pickCountsWithin(stock, fast, 1.0, "Fast", &within);
+    std::string detail = sameSelection ? stock.signature
+                                       : "Stock " + stock.signature + " AllCellTypes " +
+                                             all.signature + " Fast " + fast.signature;
+    if (nearSelection)
+      detail += ": within 1 point per prop on Apple's renderer" + within;
+    else if (g_appleTolerance && points)
+      detail += sameSelection ? " (Apple's renderer: <= 1 point per prop)"
+                              : ": BEYOND 1 point per prop on Apple's renderer";
+    check(sameSelection || nearSelection, what + " selects the same on every path", detail);
     checkTraces(what, stock.trace, all.trace, fast.trace, fast.stats, points);
   }
   LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
@@ -1836,8 +1929,9 @@ void testLifecycle(Scene &s, const std::string &scope) {
   LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
   s.sr->render();
   const PathRun after = runPath(s, DrawPath::Fast);
+  // Across the recompile: on Apple's renderer, the LSB envelope (checkPixels()).
   samePixels(scope, "programs released in the cache: Fast recompiles and matches Stock",
-             before.steadyPx, after.steadyPx, s.w);
+             before.steadyPx, after.steadyPx, s.w, FramePair::AcrossPrograms);
 
   // The same scene -- the same nodes and mappers -- closed and re-opened in a
   // new window (new context, new shader cache): the first draws resolve fully
@@ -1864,10 +1958,11 @@ void testLifecycle(Scene &s, const std::string &scope) {
   const PathRun b = runPath(s, DrawPath::Fast);
   sampleSelfVariance(scope, "new window: Stock twice", a, a2, s.w);
   samePixels(scope, "new window: Fast pixels == Stock", a.steadyPx, b.steadyPx, s.w);
+  // Across the windows: on Apple's renderer, the LSB envelope (checkPixels()).
   samePixels(scope, "new window: the Stock frame == the old window's", before.steadyPx, a.steadyPx,
-             s.w);
+             s.w, FramePair::AcrossPrograms);
   samePixels(scope, "new window: the Fast frame == the old window's Stock frame", before.steadyPx,
-             b.steadyPx, s.w);
+             b.steadyPx, s.w, FramePair::AcrossPrograms);
 }
 
 // ── 7. guards ────────────────────────────────────────────────────────────────
