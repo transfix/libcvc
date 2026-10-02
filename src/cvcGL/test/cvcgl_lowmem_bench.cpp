@@ -17,13 +17,21 @@
 // line trails, and optionally many extra small single-colour nodes; shadows on
 // (camera -> strided shadow baker -> shadow map -> translucent -> volumetric ->
 // overlay) and off. Each node's mapper is swapped for one that tallies the GL
-// calls and CPU time of its own draws, so "per draw" is exactly
+// calls or the CPU time of its own draws, so "per draw" is exactly
 // RenderPieceDraw. Frames are rendered without glFinish; times are CPU.
+//
+// Every configuration runs twice per path: a TIMED pass with VTK's own GL
+// function pointers (no counting wrapper on any call; each mapper draw only
+// reads the clock) and a COUNTED pass with the wrappers installed, which also
+// track uniform redundancy per (program, location) -- that costs CPU in
+// proportion to the calls, so its times are not reported. Times come from the
+// timed pass, call counts from the counted one.
 //
 //   cvcgl_lowmem_bench [--frames=40] [--boxes=20000] [--vehicles=6] [--extra=0]
 //                      [--size=960x540]
 #include "gl_call_counter.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -62,7 +70,9 @@ double msSince(clk::time_point t0) {
   return std::chrono::duration<double, std::milli>(clk::now() - t0).count();
 }
 
-// Tallies the GL calls and CPU time of every draw of every TallyMapper.
+// Tallies the GL calls (counted pass) or the CPU time (timed pass) of every
+// draw of every TallyMapper.
+bool g_counting = false;
 GLCalls g_drawCalls;
 double g_drawMs = 0, g_draws = 0;
 
@@ -71,12 +81,16 @@ public:
   static TallyMapper *New();
   vtkTypeMacro(TallyMapper, LowMemoryPolyDataMapper);
   void RenderPieceDraw(vtkRenderer *ren, vtkActor *act) override {
-    const GLCalls before = glcallsRead();
+    g_draws += 1;
+    if (g_counting) {
+      const GLCalls before = glcallsRead();
+      Superclass::RenderPieceDraw(ren, act);
+      g_drawCalls += glcallsRead() - before;
+      return;
+    }
     const auto t0 = clk::now();
     Superclass::RenderPieceDraw(ren, act);
     g_drawMs += msSince(t0);
-    g_drawCalls += glcallsRead() - before;
-    g_draws += 1;
   }
 
 protected:
@@ -256,10 +270,23 @@ void poseVehicles(Bench &b, int frame) {
   }
 }
 
+// One pass: timed (frameMs, drawMs) or counted (frame, draw).
 struct Run {
   double frames = 0, frameMs = 0, drawMs = 0, draws = 0;
   GLCalls frame, draw;
   LowMemoryPolyDataMapper::Stats stats;
+  Run &operator+=(const Run &o) {
+    frames += o.frames;
+    frameMs += o.frameMs;
+    drawMs += o.drawMs;
+    draws += o.draws;
+    frame += o.frame;
+    draw += o.draw;
+    stats.programLookups += o.stats.programLookups;
+    stats.programLookupsSkipped += o.stats.programLookupsSkipped;
+    stats.stockDraws += o.stats.stockDraws;
+    return *this;
+  }
 };
 
 LowMemoryPolyDataMapper::Stats sumStats(Bench &b) {
@@ -276,8 +303,21 @@ LowMemoryPolyDataMapper::Stats sumStats(Bench &b) {
   return s;
 }
 
-Run measure(Bench &b, DrawPath path, bool bake, int frames, int &frameNo) {
+Run measure(Bench &b, DrawPath path, bool bake, int frames, int &frameNo, bool counted) {
   LowMemoryPolyDataMapper::setDrawPath(path);
+  if (counted)
+    cvcgl_test::glcallsInstall();
+  else
+    cvcgl_test::glcallsUninstall(); // VTK's own pointers: no wrapper cost in the timing
+  g_counting = counted;
+  if (counted) {
+    // One frame on this path first: the first frame after a path switch differs
+    // by a call or two of vtkOpenGLState-cached state (glPointSize).
+    poseVehicles(b, frameNo++);
+    if (bake)
+      b.sg.invalidateShadowBake();
+    b.sr->render();
+  }
   Run r;
   for (auto &n : b.nodes)
     if (auto *m = LowMemoryPolyDataMapper::SafeDownCast(n->actor()->GetMapper()))
@@ -289,17 +329,22 @@ Run measure(Bench &b, DrawPath path, bool bake, int frames, int &frameNo) {
     g_drawCalls = GLCalls();
     g_drawMs = 0;
     g_draws = 0;
-    const GLCalls before = glcallsRead();
-    const auto t0 = clk::now();
-    b.sr->render();
-    r.frameMs += msSince(t0);
-    r.frame += glcallsRead() - before;
-    r.draw += g_drawCalls;
-    r.drawMs += g_drawMs;
+    if (counted) {
+      const GLCalls before = glcallsRead();
+      b.sr->render();
+      r.frame += glcallsRead() - before;
+      r.draw += g_drawCalls;
+    } else {
+      const auto t0 = clk::now();
+      b.sr->render();
+      r.frameMs += msSince(t0);
+      r.drawMs += g_drawMs;
+    }
     r.draws += g_draws;
     r.frames += 1;
   }
   r.stats = sumStats(b);
+  g_counting = false;
   return r;
 }
 
@@ -311,31 +356,36 @@ std::vector<unsigned char> rgba(Bench &b) {
   return std::vector<unsigned char>(p, p + px->GetNumberOfValues());
 }
 
-void report(const char *label, const Run &s, const Run &f) {
-  const double n = s.frames;
-  std::printf("\n== %s (%g frames each)\n", label, n);
-  std::printf("  draws/frame           %8.1f   %8.1f\n", s.draws / n, f.draws / n);
+// st/ft: the timed passes; sc/fc: the counted passes (Stock / Fast).
+void report(const char *label, const Run &st, const Run &ft, const Run &sc, const Run &fc) {
+  const double n = st.frames, nc = sc.frames;
+  std::printf("\n== %s (%g timed + %g counted frames per path)\n", label, n, nc);
   std::printf("                           Stock       Fast\n");
-  std::printf("  GL calls/frame        %8.1f   %8.1f   (%+.1f, %+.0f%%)\n", s.frame.total() / n,
-              f.frame.total() / n, (f.frame.total() - s.frame.total()) / n,
-              100.0 * (f.frame.total() - s.frame.total()) / s.frame.total());
-  std::printf("    in mapper draws     %8.1f   %8.1f\n", s.draw.total() / n, f.draw.total() / n);
+  std::printf("  draws/frame           %8.1f   %8.1f\n", st.draws / n, ft.draws / n);
+  std::printf("  GL calls/frame        %8.1f   %8.1f   (%+.1f, %+.0f%%)\n", sc.frame.total() / nc,
+              fc.frame.total() / nc, (fc.frame.total() - sc.frame.total()) / nc,
+              100.0 * (fc.frame.total() - sc.frame.total()) / sc.frame.total());
+  std::printf("    in mapper draws     %8.1f   %8.1f\n", sc.draw.total() / nc,
+              fc.draw.total() / nc);
   std::printf("    uniforms            %8.1f   %8.1f   (redundant %.1f -> %.1f)\n",
-              s.frame.uniforms() / n, f.frame.uniforms() / n, s.frame.uniformRedundant / n,
-              f.frame.uniformRedundant / n);
-  std::printf("    sync queries        %8.1f   %8.1f\n", s.frame.sync() / n, f.frame.sync() / n);
-  std::printf("  GL calls/draw         %8.1f   %8.1f\n", s.draw.total() / s.draws,
-              f.draw.total() / f.draws);
-  std::printf("  draw-stage CPU ms/frame %6.3f   %8.3f\n", s.drawMs / n, f.drawMs / n);
-  std::printf("  draw-stage CPU ms/draw  %6.4f   %8.4f\n", s.drawMs / s.draws, f.drawMs / f.draws);
-  std::printf("  frame CPU ms (no finish)%6.2f   %8.2f\n", s.frameMs / n, f.frameMs / n);
+              sc.frame.uniforms() / nc, fc.frame.uniforms() / nc, sc.frame.uniformRedundant / nc,
+              fc.frame.uniformRedundant / nc);
+  std::printf("    desktop round-trips (upper bound) %8.1f   %8.1f\n", sc.frame.roundTrips() / nc,
+              fc.frame.roundTrips() / nc);
+  std::printf("  GL calls/draw         %8.1f   %8.1f\n", sc.draw.total() / sc.draws,
+              fc.draw.total() / fc.draws);
+  std::printf("  timed, no GL wrappers:\n");
+  std::printf("  draw-stage CPU ms/frame %6.3f   %8.3f\n", st.drawMs / n, ft.drawMs / n);
+  std::printf("  draw-stage CPU ms/draw  %6.4f   %8.4f\n", st.drawMs / st.draws,
+              ft.drawMs / ft.draws);
+  std::printf("  frame CPU ms (no finish)%6.2f   %8.2f\n", st.frameMs / n, ft.frameMs / n);
   std::printf("  lookups/frame         %8.1f   %8.1f   (skipped %.1f)\n",
-              double(s.stats.programLookups + s.stats.stockDraws) / n,
-              double(f.stats.programLookups) / n, double(f.stats.programLookupsSkipped) / n);
-  std::printf("  Stock per frame: %s\n", s.frame.str(n).c_str());
-  std::printf("  Fast  per frame: %s\n", f.frame.str(n).c_str());
-  std::printf("  Stock per draw : %s\n", s.draw.str(s.draws).c_str());
-  std::printf("  Fast  per draw : %s\n", f.draw.str(f.draws).c_str());
+              double(st.stats.programLookups + st.stats.stockDraws) / n,
+              double(ft.stats.programLookups) / n, double(ft.stats.programLookupsSkipped) / n);
+  std::printf("  Stock per frame: %s\n", sc.frame.str(nc).c_str());
+  std::printf("  Fast  per frame: %s\n", fc.frame.str(nc).c_str());
+  std::printf("  Stock per draw : %s\n", sc.draw.str(sc.draws).c_str());
+  std::printf("  Fast  per draw : %s\n", fc.draw.str(fc.draws).c_str());
 }
 
 } // namespace
@@ -394,29 +444,23 @@ int main(int argc, char **argv) {
     if (!shadows)
       b.sg.setShadowsEnabled(false);
     for (DrawPath p : {DrawPath::Stock, DrawPath::Fast}) // warm both paths
-      measure(b, p, shadows != 0, 2, frameNo);
+      measure(b, p, shadows != 0, 2, frameNo, false);
     const auto kinds = shadows ? std::vector<bool>{true, false} : std::vector<bool>{false};
     for (bool bake : kinds) {
-      // Interleave the two paths in halves so drift hits both alike.
-      Run s, f;
+      // Timed: interleave the two paths in halves so drift hits both alike.
+      Run st, ft, sc, fc;
       for (int half = 0; half < 2; ++half) {
-        const Run s1 = measure(b, DrawPath::Stock, bake, o.frames / 2, frameNo);
-        const Run f1 = measure(b, DrawPath::Fast, bake, o.frames / 2, frameNo);
-        for (auto [dst, src] : {std::make_pair(&s, &s1), std::make_pair(&f, &f1)}) {
-          dst->frames += src->frames;
-          dst->frameMs += src->frameMs;
-          dst->drawMs += src->drawMs;
-          dst->draws += src->draws;
-          dst->frame += src->frame;
-          dst->draw += src->draw;
-          dst->stats.programLookups += src->stats.programLookups;
-          dst->stats.programLookupsSkipped += src->stats.programLookupsSkipped;
-          dst->stats.stockDraws += src->stats.stockDraws;
-        }
+        st += measure(b, DrawPath::Stock, bake, o.frames / 2, frameNo, false);
+        ft += measure(b, DrawPath::Fast, bake, o.frames / 2, frameNo, false);
       }
+      // Counted: GL call counts are the same every frame of a kind; a few do.
+      const int countedFrames = std::max(2, o.frames / 8);
+      sc = measure(b, DrawPath::Stock, bake, countedFrames, frameNo, true);
+      fc = measure(b, DrawPath::Fast, bake, countedFrames, frameNo, true);
+      cvcgl_test::glcallsUninstall();
       report(shadows ? (bake ? "shadows ON, bake every frame" : "shadows ON, steady (no bake)")
                      : "shadows OFF",
-             s, f);
+             st, ft, sc, fc);
       // Same pose on both paths, then compare the frames.
       LowMemoryPolyDataMapper::setDrawPath(DrawPath::Stock);
       poseVehicles(b, 7);

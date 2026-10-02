@@ -15,21 +15,36 @@
 // SceneGraph with shadows on (camera -> strided shadow baker -> shadow map ->
 // translucent -> volumetric -> overlay) and off -- over GeometryNodes of every
 // kind a scene uses (lit single colour, textured ground, translucent with a
-// depth offset, lines, points, per-vertex colour) plus raw VTK actors whose
-// mapper counts the GL calls of its own draws. Checks:
+// depth offset, wireframe lines, points, per-vertex colour, quads) plus raw VTK
+// actors whose mapper counts the GL calls of its own draws: surface, wireframe
+// and points representations of a triangle mesh, edge visibility (with and
+// without its own offset), cell colours on quads, point colours, texture
+// coordinates, translucency, verts, strips, and lines flat / lit / wide / as
+// points. Checks:
 //   1. the policy: CVCGL_LOWMEM_MAPPER is read, Force/Off/Auto pick the mapper;
-//   2. the replica: DrawPath::AllCellTypes issues exactly VTK's GL calls (every
-//      entry point, whole frame, bake and plain frames, shadows on and off);
-//   3. pixels: Stock, AllCellTypes and Fast frames are byte-identical (RGBA);
-//   4. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
-//      fraction of the stock calls, with no synchronous GL query in any draw,
+//   2. the replica: the ordered GL trace of a DrawPath::AllCellTypes frame --
+//      every call, its bound program or texture unit, its argument bytes and
+//      the uniform values it sends -- equals the Stock frame's exactly (bake
+//      and plain frames, shadows on and off, and the hardware selector's cell
+//      and point picking passes);
+//   3. Fast's trace equals that same trace with what Fast leaves out removed,
+//      DERIVED from the AllCellTypes trace (the replica marks where each draw's
+//      stages begin and end): every cell-type block that issued no draw call,
+//      in every draw where skipping is allowed. A skipped shader-cache lookup
+//      removes no GL call -- the lookup's GL calls are the bind tail the
+//      re-bind issues too; what it saves is CPU, which the stats check;
+//   4. pixels: Stock, AllCellTypes and Fast frames are byte-identical (RGBA);
+//   5. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
+//      fraction of the stock calls, with no desktop round-trip in any draw,
 //      and a steady frame does no shader-cache lookup;
-//   5. lifecycle: a shader rebuild (the shadow bake's pass change), a mapper's
-//      released resources, programs released in the shader cache and the scene
-//      re-opened in a new window all go back through the full lookup (or a
-//      recompile) and still match;
-//   6. guards: an offset layout where skipping would change a drawn type's
-//      depth offset, picking and vertex visibility all draw the stock way.
+//   6. lifecycle: a shader rebuild (the shadow bake's pass change), a mapper's
+//      released resources, GetShader(), programs released in the shader cache
+//      and the scene re-opened in a new window all go back through the full
+//      lookup (or a recompile) and still match;
+//   7. guards: an offset layout where skipping would change a drawn type's
+//      depth offset, picking and vertex visibility all draw the stock way;
+//   8. a plain GeometryNode's shader replacement added (and cleared) after its
+//      first draw reaches the GPU, on every draw path.
 // Frames are rendered without MSAA: with VTK's default 8x, NVIDIA's resolve
 // varies by 1 LSB at a few edge pixels between identical GL streams.
 // Renders for real; skips (rc 0) where nothing rasterises unless
@@ -42,6 +57,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
@@ -56,6 +72,7 @@
 #include <vtkActor.h>
 #include <vtkActorCollection.h>
 #include <vtkCellArray.h>
+#include <vtkCellData.h>
 #include <vtkDataObject.h>
 #include <vtkFloatArray.h>
 #include <vtkHardwareSelector.h>
@@ -74,9 +91,11 @@
 #include <vtkRenderer.h>
 #include <vtkSelection.h>
 #include <vtkSelectionNode.h>
+#include <vtkShader.h>
 #include <vtkSphereSource.h>
 #include <vtkTexture.h>
 #include <vtkUnsignedCharArray.h>
+#include <vtk_glad.h> // GL_POINTS ... (desktop-only test)
 
 using cvc::gl::GeometryNode;
 using cvc::gl::GeometryRenderMode;
@@ -87,7 +106,11 @@ using cvc::gl::SceneRenderer;
 using cvcgl_test::GLCalls;
 using cvcgl_test::glcallsInstall;
 using cvcgl_test::glcallsRead;
+using cvcgl_test::kTraceMarkBase;
+using cvcgl_test::Trace;
+using cvcgl_test::TraceRec;
 using DrawPath = LowMemoryPolyDataMapper::DrawPath;
+using DrawStage = LowMemoryPolyDataMapper::DrawStage;
 
 namespace {
 
@@ -134,6 +157,143 @@ public:
   void DisplayText(const char *t) override { std::fprintf(stderr, "%s", t); }
 };
 vtkStandardNewMacro(ErrorCounter);
+
+// ── GL traces ────────────────────────────────────────────────────────────────
+// The replica's stage observer: each stage boundary becomes a trace marker.
+void onStage(DrawStage stage, int arg) { cvcgl_test::glcallsMark(static_cast<int>(stage), arg); }
+
+bool isStage(const TraceRec &r, DrawStage stage) {
+  return r.marker() && r.entry - kTraceMarkBase == static_cast<int>(stage);
+}
+
+int countStage(const Trace &t, DrawStage stage) {
+  int n = 0;
+  for (const auto &r : t)
+    n += isStage(r, stage);
+  return n;
+}
+
+// The GL calls alone.
+Trace glOnly(const Trace &t) {
+  Trace out;
+  out.reserve(t.size());
+  for (const auto &r : t)
+    if (!r.marker())
+      out.push_back(r);
+  return out;
+}
+
+// Equal GL traces (every call, in order, with its context and bytes)? If not,
+// where they first part.
+bool sameTrace(const Trace &a, const Trace &b, std::string *why) {
+  const size_t n = std::min(a.size(), b.size());
+  size_t i = 0;
+  while (i < n && a[i] == b[i])
+    ++i;
+  if (i == n && a.size() == b.size())
+    return true;
+  if (why) {
+    *why = fmt("%.0f vs %.0f calls, first difference at #%.0f: ", double(a.size()),
+               double(b.size()), double(i));
+    *why += i < a.size() ? cvcgl_test::glcallsDescribe(a[i]) : std::string("(end)");
+    *why += "  vs  ";
+    *why += i < b.size() ? cvcgl_test::glcallsDescribe(b[i]) : std::string("(end)");
+  }
+  return false;
+}
+
+// vtkOpenGLState caches glPointSize and glLineWidth (desktop GL only: GLES 3 /
+// WebGL have neither call). Whether a kept block's vtkglPointSize reaches GL
+// therefore depends on what the blocks before it set, so leaving out an empty
+// block can add or drop one of these calls without changing what any draw
+// sees. Compare them as that: drop the calls, and append to every GL_POINTS
+// draw the point size it draws with and to every line draw the line width
+// (tracked from the trace's initial-state markers and its calls).
+Trace asDrawState(const Trace &t) {
+  static const int pointSize = cvcgl_test::glcallsEntry("PointSize");
+  static const int lineWidth = cvcgl_test::glcallsEntry("LineWidth");
+  static const int dispatch = cvcgl_test::glcallsEntry("DispatchCompute");
+  std::string ps(4, '\0'), lw(4, '\0');
+  Trace out;
+  out.reserve(t.size());
+  for (const auto &r : t) {
+    if (r.marker()) {
+      if (r.entry == kTraceMarkBase + cvcgl_test::kTraceInitPointSize)
+        ps = r.args;
+      else if (r.entry == kTraceMarkBase + cvcgl_test::kTraceInitLineWidth)
+        lw = r.args;
+      else
+        out.push_back(r);
+      continue;
+    }
+    if (r.entry == pointSize) {
+      ps = r.args;
+      continue;
+    }
+    if (r.entry == lineWidth) {
+      lw = r.args;
+      continue;
+    }
+    out.push_back(r);
+    if (cvcgl_test::glcallsIsDraw(r.entry) && r.entry != dispatch && r.args.size() >= 4) {
+      GLenum mode = 0;
+      std::memcpy(&mode, r.args.data(), sizeof mode);
+      if (mode == GL_POINTS)
+        out.back().args += ps;
+      else if (mode == GL_LINES || mode == GL_LINE_STRIP || mode == GL_LINE_LOOP)
+        out.back().args += lw;
+    }
+  }
+  return out;
+}
+
+// What Fast's GL trace must be, derived from an AllCellTypes trace and its
+// stage markers. In every draw where skipping is allowed (DrawBegin arg 1),
+// each cell-type block (AgentBegin..AgentEnd) that issued no draw call is
+// removed. Everything else stays -- including each full lookup's GL calls,
+// which are the ReadyShaderProgram(program) tail (compile if released, bind)
+// that the re-bind replacing it issues too.
+struct Expected {
+  Trace gl;
+  int blocksRemoved = 0, blocksKept = 0, lookups = 0, draws = 0, unskippableDraws = 0;
+};
+
+Expected expectFast(const Trace &all) {
+  Expected e;
+  bool skipAllowed = false, inBlock = false, blockDraws = false;
+  Trace block;
+  for (const auto &r : all) {
+    if (!r.marker()) {
+      if (inBlock) {
+        block.push_back(r);
+        blockDraws = blockDraws || cvcgl_test::glcallsIsDraw(r.entry);
+      } else {
+        e.gl.push_back(r);
+      }
+      continue;
+    }
+    if (isStage(r, DrawStage::DrawBegin)) {
+      ++e.draws;
+      skipAllowed = r.ctx != 0;
+      e.unskippableDraws += !skipAllowed;
+    } else if (isStage(r, DrawStage::LookupBegin)) {
+      ++e.lookups;
+    } else if (isStage(r, DrawStage::AgentBegin)) {
+      inBlock = true;
+      blockDraws = false;
+      block.clear();
+    } else if (isStage(r, DrawStage::AgentEnd)) {
+      inBlock = false;
+      if (skipAllowed && !blockDraws) {
+        ++e.blocksRemoved;
+      } else {
+        ++e.blocksKept;
+        e.gl.insert(e.gl.end(), block.begin(), block.end());
+      }
+    }
+  }
+  return e;
+}
 
 // The production mapper plus a GL-call tally of its own RenderPieceDraw calls.
 class ProbeMapper : public LowMemoryPolyDataMapper {
@@ -370,6 +530,63 @@ vtkSmartPointer<vtkPolyData> patchPoly(char kind, double x0, double y0, double z
   return pd;
 }
 
+// An n x n patch of quads (4-point polygons: VTK triangulates them, so the
+// draw needs the cell map) with one RGB colour per quad.
+vtkSmartPointer<vtkPolyData> quadsPoly(int n, double x0, double y0, double z) {
+  auto pts = vtkSmartPointer<vtkPoints>::New();
+  pts->SetDataTypeToFloat();
+  for (int j = 0; j <= n; ++j)
+    for (int i = 0; i <= n; ++i)
+      pts->InsertNextPoint(x0 + 0.8 * i, y0 + 0.8 * j, z + 0.15 * ((i + j) % 2));
+  auto quads = vtkSmartPointer<vtkCellArray>::New();
+  auto colours = vtkSmartPointer<vtkUnsignedCharArray>::New();
+  colours->SetNumberOfComponents(3);
+  colours->SetName("quadColours");
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i) {
+      const vtkIdType a = j * (n + 1) + i, ids[4] = {a, a + 1, a + n + 2, a + n + 1};
+      quads->InsertNextCell(4, ids);
+      const unsigned char c[3] = {static_cast<unsigned char>(40 + 200 * i / n),
+                                  static_cast<unsigned char>(40 + 200 * j / n),
+                                  static_cast<unsigned char>((i + j) % 2 ? 220 : 60)};
+      colours->InsertNextTypedTuple(c);
+    }
+  auto pd = vtkSmartPointer<vtkPolyData>::New();
+  pd->SetPoints(pts);
+  pd->SetPolys(quads);
+  pd->GetCellData()->SetScalars(colours);
+  return withNormals(pd);
+}
+
+// One RGB colour per point.
+vtkSmartPointer<vtkPolyData> withPointColours(vtkSmartPointer<vtkPolyData> pd) {
+  auto colours = vtkSmartPointer<vtkUnsignedCharArray>::New();
+  colours->SetNumberOfComponents(3);
+  colours->SetName("pointColours");
+  for (vtkIdType k = 0; k < pd->GetNumberOfPoints(); ++k) {
+    const unsigned char c[3] = {static_cast<unsigned char>(37 * k % 256),
+                                static_cast<unsigned char>(91 * k % 256),
+                                static_cast<unsigned char>(151 * k % 256)};
+    colours->InsertNextTypedTuple(c);
+  }
+  pd->GetPointData()->SetScalars(colours);
+  return pd;
+}
+
+// Lines with a point normal each (VTK lights lines only with normals and
+// non-flat interpolation).
+vtkSmartPointer<vtkPolyData> withLineNormals(vtkSmartPointer<vtkPolyData> pd) {
+  auto normals = vtkSmartPointer<vtkFloatArray>::New();
+  normals->SetNumberOfComponents(3);
+  normals->SetName("Normals");
+  for (vtkIdType k = 0; k < pd->GetNumberOfPoints(); ++k) {
+    const double a = 0.3 * k;
+    normals->InsertNextTuple3(0.3 * std::cos(a), 0.3 * std::sin(a), 0.9);
+  }
+  pd->GetPointData()->SetNormals(normals);
+  return pd;
+}
+
 vtkSmartPointer<vtkTexture> checkerTexture(int n) {
   auto img = vtkSmartPointer<vtkImageData>::New();
   img->SetDimensions(n, n, 1);
@@ -394,6 +611,9 @@ struct Probe {
   std::string name;
   vtkSmartPointer<ProbeMapper> mapper;
   vtkSmartPointer<vtkActor> actor;
+  // Expected to take the coincident-offset fallback (all four cell types) on
+  // the Fast path.
+  bool fallback = false;
 };
 
 struct Scene {
@@ -522,6 +742,23 @@ void buildCity(Scene &s) {
   vcol->setUseSingleColor(false);
   vcol->setGeometry(colouredGeometry(-4, -3));
 
+  auto quads = s.node("quads");
+  {
+    cvc::geometry g;
+    for (int j = 0; j < 4; ++j)
+      for (int i = 0; i < 4; ++i)
+        g.points().push_back({1.0 + 0.9 * i, 3.0 + 0.9 * j, 0.4 + 0.1 * ((i + j) % 2)});
+    for (unsigned j = 0; j + 1 < 4; ++j)
+      for (unsigned i = 0; i + 1 < 4; ++i) {
+        const unsigned a = j * 4 + i;
+        g.quads().push_back({a, a + 1, a + 5, a + 4});
+      }
+    quads->setGeometry(g);
+  }
+  quads->setRenderMode(GeometryRenderMode::QUADS);
+  quads->setUseSingleColor(true);
+  quads->setColor(0.6, 0.4, 0.95);
+
   // Probes: the same kinds as raw actors whose draws are tallied.
   {
     Probe &p = s.probe("lit", spherePoly(1.4));
@@ -558,6 +795,74 @@ void buildCity(Scene &s) {
     Probe &p = s.probe("strips", patchPoly('s', 2, 9, 0.6));
     p.actor->GetProperty()->SetColor(0.5, 0.9, 0.6);
   }
+  // Representations of a triangle mesh other than the surface.
+  {
+    Probe &p = s.probe("wireframe", spherePoly(1.3));
+    p.actor->GetProperty()->SetRepresentationToWireframe();
+    p.actor->GetProperty()->SetColor(0.95, 0.6, 0.2);
+    p.actor->SetPosition(-8, 0, 2);
+  }
+  {
+    Probe &p = s.probe("pointsRep", spherePoly(1.3)); // lit: point normals, Gouraud
+    p.actor->GetProperty()->SetRepresentationToPoints();
+    p.actor->GetProperty()->SetPointSize(3.0);
+    p.actor->GetProperty()->SetColor(0.3, 0.95, 0.95);
+    p.actor->SetPosition(8, -4, 2);
+  }
+  // Edge visibility on a surface puts every draw under the coincident-offset
+  // rules: with VTK's defaults the polys draw sees the -4 units the empty lines
+  // block left in the program, so Fast must fall back to all four ...
+  {
+    Probe &p = s.probe("edges", spherePoly(1.2));
+    p.actor->GetProperty()->EdgeVisibilityOn();
+    p.actor->GetProperty()->SetEdgeColor(0.1, 0.1, 0.1);
+    p.actor->GetProperty()->SetColor(0.8, 0.8, 0.5);
+    p.actor->SetPosition(0, 6, 2);
+    p.fallback = true;
+  }
+  // ... while one whose own polygon offset is non-zero skips them.
+  {
+    Probe &p = s.probe("edgesOffset", ribbonPoly(10, -7, -12, 0.5));
+    p.actor->GetProperty()->EdgeVisibilityOn();
+    p.actor->GetProperty()->SetEdgeColor(0.9, 0.1, 0.1);
+    p.actor->GetProperty()->SetColor(0.4, 0.5, 0.9);
+    p.mapper->SetRelativeCoincidentTopologyPolygonOffsetParameters(0.0, -2.0);
+    p.mapper->SetRelativeCoincidentTopologyLineOffsetParameters(0.0, -2.0);
+    p.mapper->SetRelativeCoincidentTopologyPointOffsetParameter(-2.0);
+  }
+  // Scalars: cell colours on quads (cell map), point colours on a sphere.
+  {
+    Probe &p = s.probe("cellColours", quadsPoly(5, -3, -9, 0.3));
+    p.mapper->ScalarVisibilityOn();
+    p.mapper->SetScalarModeToUseCellData();
+    p.mapper->SetColorModeToDirectScalars();
+  }
+  {
+    Probe &p = s.probe("pointColours", withPointColours(spherePoly(1.1)));
+    p.mapper->ScalarVisibilityOn();
+    p.mapper->SetScalarModeToUsePointData();
+    p.mapper->SetColorModeToDirectScalars();
+    p.actor->SetPosition(-3, 3, 3);
+  }
+  // Lines: flat with normals (unlit), Gouraud with normals and wide (lit,
+  // instanced), and drawn as points.
+  {
+    Probe &p = s.probe("flatLines", withLineNormals(linesPoly(20, -9, 8, 1.0)));
+    p.actor->GetProperty()->SetInterpolationToFlat();
+    p.actor->GetProperty()->SetColor(0.9, 0.3, 0.3);
+  }
+  {
+    Probe &p = s.probe("litLines", withLineNormals(linesPoly(20, -9, 10, 1.2)));
+    p.actor->GetProperty()->SetInterpolationToGouraud();
+    p.actor->GetProperty()->SetLineWidth(3.0);
+    p.actor->GetProperty()->SetColor(0.3, 0.3, 0.9);
+  }
+  {
+    Probe &p = s.probe("linePoints", linesPoly(20, 0, -6, 1.4));
+    p.actor->GetProperty()->SetRepresentationToPoints();
+    p.actor->GetProperty()->SetPointSize(4.0);
+    p.actor->GetProperty()->SetColor(0.95, 0.95, 0.95);
+  }
 }
 
 void addLights(SceneGraph &sg) {
@@ -567,6 +872,7 @@ void addLights(SceneGraph &sg) {
 
 struct PathRun {
   GLCalls first, steady;                        // whole frame
+  Trace firstTrace, steadyTrace;                // whole frame, with stage markers
   std::vector<unsigned char> firstPx, steadyPx; // RGBA
   LowMemoryPolyDataMapper::Stats firstStats, steadyStats;
   std::vector<GLCalls> probeCalls; // steady frame, per probe
@@ -591,7 +897,9 @@ PathRun runPath(Scene &s, DrawPath path) {
   if (vtkActor *a = s.sr->renderer()->GetActors()->GetLastActor())
     a->Modified();
   s.resetCounters();
+  cvcgl_test::glcallsTraceStart();
   r.first = s.frame();
+  r.firstTrace = cvcgl_test::glcallsTraceStop();
   r.firstStats = s.stats();
   for (auto &p : s.probes) {
     r.probeFirst.push_back(p.mapper->calls);
@@ -599,7 +907,9 @@ PathRun runPath(Scene &s, DrawPath path) {
   }
   r.firstPx = s.rgba();
   s.resetCounters();
+  cvcgl_test::glcallsTraceStart();
   r.steady = s.frame();
+  r.steadyTrace = cvcgl_test::glcallsTraceStop();
   r.steadyStats = s.stats();
   for (auto &p : s.probes) {
     r.probeCalls.push_back(p.mapper->calls);
@@ -681,7 +991,160 @@ bool renderAvailable(cvc::app &app) {
   return false;
 }
 
-// ── 2-4. replica, pixels, savings ────────────────────────────────────────────
+// ── 2-5. replica, derived Fast trace, pixels, savings ────────────────────────
+// The replica (AllCellTypes) against Stock, call for call, and Fast against the
+// trace derived from it, for one frame of each kind.
+// CVCGL_LOWMEM_DUMP=<dir>: write the traces of each failing comparison there
+// (<n>_<trace>.txt, one call per line), for a diff.
+void dumpTraces(const std::string &what, const std::vector<std::pair<std::string, Trace>> &ts) {
+  static int dumped = 0;
+  const char *dir = std::getenv("CVCGL_LOWMEM_DUMP");
+  if (!dir || !*dir)
+    return;
+  ++dumped;
+  for (const auto &[name, t] : ts) {
+    const std::string path = std::string(dir) + "/" + std::to_string(dumped) + "_" + name + ".txt";
+    if (FILE *f = std::fopen(path.c_str(), "w")) {
+      std::fprintf(f, "# %s\n", what.c_str());
+      for (const auto &r : t)
+        std::fprintf(f, "%s\n", cvcgl_test::glcallsDescribe(r).c_str());
+      std::fclose(f);
+    }
+  }
+}
+
+// mayDraw: whether the frame has replica draws at all (a cell-picking trace is
+// selection passes only, every one of them the stock draw).
+void checkTraces(const std::string &what, const Trace &stock, const Trace &all, const Trace &fast,
+                 const LowMemoryPolyDataMapper::Stats &fastStats, bool mayDraw = true) {
+  std::string why;
+  check(countStage(stock, DrawStage::DrawBegin) == 0 &&
+            countStage(all, DrawStage::RebindBegin) == 0 &&
+            countStage(all, DrawStage::AgentSkipped) == 0 &&
+            (countStage(all, DrawStage::DrawBegin) > 0) == mayDraw,
+        what + ": Stock reports no stages; AllCellTypes looks every program up and runs every "
+               "cell type");
+  // (Each comparison runs before its message is built: argument order is unspecified.)
+  const bool replica = sameTrace(glOnly(all), glOnly(stock), &why);
+  if (!replica)
+    dumpTraces(what, {{"stock", stock}, {"all", all}});
+  check(replica,
+        what + ": AllCellTypes trace == Stock trace (every call, program/unit, bytes, values)",
+        replica ? fmt("%.0f calls", double(stock.size())) : why);
+  why.clear();
+  // The draw state is read off the full AllCellTypes trace, before the blocks
+  // go: what each draw saw there is what it must see on Fast.
+  const Expected e = expectFast(asDrawState(all));
+  const Trace got = glOnly(asDrawState(fast));
+  const bool derived = sameTrace(got, glOnly(e.gl), &why);
+  if (!derived)
+    dumpTraces(what, {{"all", all}, {"fast", fast}, {"expected", e.gl}, {"fast_state", got}});
+  check(derived,
+        what + ": Fast trace == AllCellTypes trace minus its empty cell-type blocks (cached "
+               "point size / line width compared at the draws)",
+        derived ? fmt("%.0f calls; %.0f blocks removed, %.0f kept", double(got.size()),
+                      double(e.blocksRemoved), double(e.blocksKept))
+                : why);
+  const int skipped = countStage(fast, DrawStage::AgentSkipped);
+  check(e.blocksRemoved == skipped && (skipped > 0) == mayDraw &&
+            static_cast<double>(skipped) == double(fastStats.cellTypesSkipped),
+        what + ": the blocks derived as removable are exactly the ones Fast skipped",
+        fmt("derived %.0f, Fast skipped %.0f (stats %.0f)", double(e.blocksRemoved),
+            double(skipped), double(fastStats.cellTypesSkipped)));
+  const int looked = countStage(fast, DrawStage::LookupBegin);
+  const int rebound = countStage(fast, DrawStage::RebindBegin);
+  check(looked + rebound == e.lookups && countStage(fast, DrawStage::DrawBegin) == e.draws &&
+            static_cast<double>(e.unskippableDraws) == double(fastStats.coincidentFallbacks),
+        what + ": every AllCellTypes lookup is a Fast lookup or re-bind; same draws, same "
+               "fallbacks",
+        fmt("lookups %.0f = %.0f + %.0f re-bound", double(e.lookups), double(looked),
+            double(rebound)) +
+            fmt(", fallbacks %.0f", double(e.unskippableDraws)));
+}
+
+// The hardware selector's passes on one draw path: what it selected, the GL
+// trace of the selection, the stats.
+struct Pick {
+  std::string signature;
+  Trace trace;
+  LowMemoryPolyDataMapper::Stats stats;
+};
+
+Pick pick(Scene &s, DrawPath p, int association) {
+  LowMemoryPolyDataMapper::setDrawPath(p);
+  s.sr->render(); // the same state before each path's selection
+  s.resetCounters();
+  vtkNew<vtkHardwareSelector> sel;
+  sel->SetRenderer(s.sr->renderer());
+  sel->SetArea(0, 0, s.w - 1, s.h - 1);
+  sel->SetFieldAssociation(association);
+  cvcgl_test::glcallsTraceStart();
+  vtkSmartPointer<vtkSelection> res = vtk::TakeSmartPointer(sel->Select());
+  Pick out;
+  out.trace = cvcgl_test::glcallsTraceStop();
+  std::vector<std::pair<double, double>> hits; // (prop id, items), in prop-id order
+  for (unsigned i = 0; res && i < res->GetNumberOfNodes(); ++i) {
+    vtkSelectionNode *n = res->GetNode(i);
+    hits.emplace_back(n->GetProperties()->Get(vtkSelectionNode::PROP_ID()),
+                      n->GetSelectionList() ? double(n->GetSelectionList()->GetNumberOfTuples())
+                                            : 0.0);
+  }
+  std::sort(hits.begin(), hits.end());
+  for (const auto &h : hits)
+    out.signature += fmt("[%.0f:%.0f]", h.first, h.second);
+  out.stats = s.stats();
+  return out;
+}
+
+// Picking takes the stock draw on every path: identical selections and GL.
+// (Point picking first renders one ordinary frame for the depth buffer --
+// vtkOpenGLHardwareSelector::BeginSelection -- with no selector set, so those
+// draws take the path under test; the trace check covers them like a frame.)
+void comparePicking(Scene &s, const std::string &label) {
+  // Replica draws in one ordinary frame (vertex visibility is stock anyway).
+  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+  s.sr->render();
+  s.resetCounters();
+  s.sr->render();
+  const double frameDraws = double(s.stats().draws - s.stats().stockDraws);
+  for (int assoc :
+       {vtkDataObject::FIELD_ASSOCIATION_CELLS, vtkDataObject::FIELD_ASSOCIATION_POINTS}) {
+    const bool points = assoc == vtkDataObject::FIELD_ASSOCIATION_POINTS;
+    const std::string what = label + (points ? ": point picking" : ": cell picking");
+    // Warm: the selection passes' shader variants are compiled by the first
+    // selection on any path; compare the ones after.
+    for (DrawPath p : {DrawPath::Stock, DrawPath::Fast})
+      pick(s, p, assoc);
+    const Pick stock = pick(s, DrawPath::Stock, assoc);
+    const Pick all = pick(s, DrawPath::AllCellTypes, assoc);
+    const Pick fast = pick(s, DrawPath::Fast, assoc);
+    const Pick stock2 = pick(s, DrawPath::Stock, assoc);
+    {
+      std::string why;
+      const bool reproducible = sameTrace(glOnly(stock2.trace), glOnly(stock.trace), &why);
+      if (!reproducible)
+        dumpTraces(what + " (Stock twice)", {{"stock", stock.trace}, {"stock2", stock2.trace}});
+      check(reproducible, what + ": the selection trace is reproducible (Stock twice)",
+            reproducible ? fmt("%.0f calls", double(stock.trace.size())) : why);
+    }
+    const double ordinary = points ? frameDraws : 0.0;
+    check(double(fast.stats.draws - fast.stats.stockDraws) == ordinary &&
+              double(all.stats.draws - all.stats.stockDraws) == ordinary &&
+              fast.stats.stockDraws > 0,
+          what + ": every selection-pass draw takes the stock path, on every path",
+          fmt("stock %.0f of %.0f draws", double(fast.stats.stockDraws), double(fast.stats.draws)) +
+              fmt(" (+%.0f in the ordinary depth frame)", ordinary));
+    const bool sameSelection = !stock.signature.empty() && fast.signature == stock.signature &&
+                               all.signature == stock.signature;
+    check(sameSelection, what + " selects the same on every path",
+          sameSelection ? stock.signature
+                        : "Stock " + stock.signature + " AllCellTypes " + all.signature + " Fast " +
+                              fast.signature);
+    checkTraces(what, stock.trace, all.trace, fast.trace, fast.stats, points);
+  }
+  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+}
+
 void comparePaths(Scene &s, const std::string &label, bool shadows) {
   std::printf("%s\n", label.c_str());
   // Settle: build every shader both ways first so no path pays a first compile.
@@ -690,14 +1153,18 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
   const PathRun stock = runPath(s, DrawPath::Stock);
   const PathRun all = runPath(s, DrawPath::AllCellTypes);
   const PathRun fast = runPath(s, DrawPath::Fast);
+  const PathRun stock2 = runPath(s, DrawPath::Stock);
 
   check(drewSomething(stock.steadyPx), label + ": the scene draws");
-  std::string diff;
-  const bool pinFirst = all.first.sameAs(stock.first, &diff);
-  check(pinFirst, label + ": AllCellTypes issues VTK's GL calls, first frame", diff);
-  diff.clear();
-  const bool pinSteady = all.steady.sameAs(stock.steady, &diff);
-  check(pinSteady, label + ": AllCellTypes issues VTK's GL calls, steady frame", diff);
+  std::string why;
+  const bool reproducible = sameTrace(stock2.firstTrace, stock.firstTrace, &why) &&
+                            sameTrace(stock2.steadyTrace, stock.steadyTrace, &why);
+  check(reproducible, label + ": the GL trace is reproducible (Stock twice, same trace)",
+        reproducible ? fmt("%.0f calls", double(stock.steadyTrace.size())) : why);
+  checkTraces(label + ", first frame" + (shadows ? " (shadow bake)" : ""), stock.firstTrace,
+              all.firstTrace, fast.firstTrace, fast.firstStats);
+  checkTraces(label + ", steady frame", stock.steadyTrace, all.steadyTrace, fast.steadyTrace,
+              fast.steadyStats);
   samePixels(label + ": AllCellTypes pixels == Stock, first frame", stock.firstPx, all.firstPx);
   samePixels(label + ": AllCellTypes pixels == Stock, steady frame", stock.steadyPx, all.steadyPx);
   samePixels(label + ": Fast pixels == Stock, first frame", stock.firstPx, fast.firstPx);
@@ -712,18 +1179,24 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
         fmt("steady %.0f -> %.0f, first %.0f", stock.steady.total(), fast.steady.total(),
             stock.first.total()) +
             fmt(" -> %.0f", fast.first.total()));
-  check(fast.steady.sync() == stock.steady.sync(),
-        label + ": Fast adds no synchronous GL query to the frame",
-        fmt("sync %.0f vs %.0f", fast.steady.sync(), stock.steady.sync()));
+  check(fast.steady.roundTrips() == stock.steady.roundTrips(),
+        label + ": Fast adds no desktop round-trip to the frame",
+        fmt("%.0f vs %.0f", fast.steady.roundTrips(), stock.steady.roundTrips()));
   check(fast.steadyStats.programLookups == 0 && fast.steadyStats.programLookupsSkipped > 0,
         label + ": Fast steady frame re-binds every program without a lookup",
         fmt("lookups %.0f, skipped %.0f", double(fast.steadyStats.programLookups),
             double(fast.steadyStats.programLookupsSkipped)));
-  check(fast.steadyStats.cellTypesSkipped > 0 && fast.steadyStats.coincidentFallbacks == 0 &&
+  // The only fallbacks are the probes built to need one.
+  double expectFallbacks = 0;
+  for (size_t i = 0; i < s.probes.size(); ++i)
+    expectFallbacks += s.probes[i].fallback ? fast.probeDraws[i] : 0.0;
+  check(fast.steadyStats.cellTypesSkipped > 0 &&
+            double(fast.steadyStats.coincidentFallbacks) == expectFallbacks &&
             fast.steadyStats.stockDraws == 0,
-        label + ": Fast skipped empty cell types, no fallback",
-        fmt("skipped %.0f of %.0f draws x 4", double(fast.steadyStats.cellTypesSkipped),
-            double(fast.steadyStats.draws)));
+        label + ": Fast skipped empty cell types; falls back only where an offset needs it",
+        fmt("skipped %.0f of %.0f draws x 4, fallbacks %.0f",
+            double(fast.steadyStats.cellTypesSkipped), double(fast.steadyStats.draws),
+            double(fast.steadyStats.coincidentFallbacks)));
   check(stock.steadyStats.stockDraws == stock.steadyStats.draws && stock.steadyStats.draws > 0,
         label + ": Stock draws through VTK's own path");
   if (shadows)
@@ -741,17 +1214,23 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
     }
     const GLCalls &cs = stock.probeCalls[i];
     const GLCalls &cf = fast.probeCalls[i];
-    std::printf("  per draw %-11s Stock %s\n", p.name.c_str(), cs.str(nStock).c_str());
-    std::printf("  %-20s Fast  %s\n", "", cf.str(nFast).c_str());
-    check(cs.sync() == 0 && cf.sync() == 0 && all.probeCalls[i].sync() == 0,
-          label + ": " + p.name + " draws issue no synchronous GL query");
+    std::printf("  per draw %-12s Stock %s\n", p.name.c_str(), cs.str(nStock).c_str());
+    std::printf("  %-21s Fast  %s\n", "", cf.str(nFast).c_str());
+    check(cs.roundTrips() == 0 && cf.roundTrips() == 0 && all.probeCalls[i].roundTrips() == 0,
+          label + ": " + p.name + " draws issue no desktop round-trip");
+    check(cf.count("DrawArraysInstanced") == cs.count("DrawArraysInstanced") &&
+              cf.count("DrawArraysInstanced") == nFast,
+          label + ": " + p.name + " one draw call per draw, as Stock");
+    if (p.fallback) {
+      check(cf.total() / nFast == cs.total() / nStock,
+            label + ": " + p.name + " falls back to all four cell types (Stock's calls)",
+            fmt("%.1f vs %.1f per draw", cf.total() / nFast, cs.total() / nStock));
+      continue;
+    }
     check(cf.count("UseProgram") <= 2 * nFast, label + ": " + p.name + " <= 2 glUseProgram/draw");
     check(cf.count("BindVertexArray") == 2 * nFast,
           label + ": " + p.name + " binds the VAO once per draw (+ unbind)",
           fmt("%.1f per draw", cf.count("BindVertexArray") / nFast));
-    check(cf.count("DrawArraysInstanced") == cs.count("DrawArraysInstanced") &&
-              cf.count("DrawArraysInstanced") == nFast,
-          label + ": " + p.name + " one draw call per draw, as Stock");
     const double perFast = cf.total() / nFast, perStock = cs.total() / nStock;
     check(perFast <= 0.45 * perStock, label + ": " + p.name + " Fast <= 45% of Stock calls/draw",
           fmt("%.1f -> %.1f", perStock, perFast));
@@ -765,29 +1244,56 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
       vtkPolyData *in = m->GetInput();
       std::printf(
           "  mapper %-24s points %5lld v/l/p/s %lld/%lld/%lld/%lld: draws %llu skipped %llu "
-          "lookups %llu/%llu\n",
+          "fallbacks %llu lookups %llu/%llu\n",
           m->GetClassName(), static_cast<long long>(in->GetNumberOfPoints()),
           static_cast<long long>(in->GetNumberOfVerts()),
           static_cast<long long>(in->GetNumberOfLines()),
           static_cast<long long>(in->GetNumberOfPolys()),
           static_cast<long long>(in->GetNumberOfStrips()), static_cast<unsigned long long>(t.draws),
           static_cast<unsigned long long>(t.cellTypesSkipped),
+          static_cast<unsigned long long>(t.coincidentFallbacks),
           static_cast<unsigned long long>(t.programLookups),
           static_cast<unsigned long long>(t.programLookupsSkipped));
     }
     for (size_t i = 0; i < s.probes.size(); ++i)
-      std::printf("  first frame per draw %-11s Stock %s\n  %-32s Fast  %s\n",
+      std::printf("  first frame per draw %-12s Stock %s\n  %-33s Fast  %s\n",
                   s.probes[i].name.c_str(),
                   stock.probeFirst[i].str(std::max(1.0, stock.probeFirstDraws[i])).c_str(), "",
                   fast.probeFirst[i].str(std::max(1.0, fast.probeFirstDraws[i])).c_str());
   }
+  // The hardware selector over the whole probe set. Not with shadows on:
+  // cvcGL's shadow pass chain renders props outside the selector's
+  // BeginRenderProp/EndRenderProp, which VTK rejects ("Too many props") on
+  // every path alike.
+  if (!shadows)
+    comparePicking(s, label);
 }
 
-// ── 5. lifecycle ─────────────────────────────────────────────────────────────
+// ── 6. lifecycle ─────────────────────────────────────────────────────────────
 void testLifecycle(Scene &s) {
   std::printf("lifecycle\n");
   LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
   s.sr->render();
+
+  // GetShader() hands out a mutable shader source: that mapper's next draw
+  // resolves its program in the cache again; nobody else's does.
+  {
+    s.sr->render();
+    s.resetCounters();
+    LowMemoryPolyDataMapper *m = s.probes.front().mapper;
+    m->GetShader(vtkShader::Fragment);
+    s.sr->render();
+    const auto all = s.stats();
+    check(m->stats().programLookups == 1 && all.programLookups == 1,
+          "GetShader(): that mapper's next draw looks its program up (and only that one)",
+          fmt("lookups: mapper %.0f, scene %.0f", double(m->stats().programLookups),
+              double(all.programLookups)));
+    s.resetCounters();
+    m->invalidateProgramCache();
+    s.sr->render();
+    check(m->stats().programLookups == 1 && s.stats().programLookups == 1,
+          "invalidateProgramCache(): the same");
+  }
 
   // A mapper's graphics resources released (what removing a prop from its
   // renderer does): its next draw looks the program up afresh.
@@ -837,7 +1343,7 @@ void testLifecycle(Scene &s) {
   samePixels("new window: same frame as the old window", before.steadyPx, b.steadyPx);
 }
 
-// ── 6. guards ────────────────────────────────────────────────────────────────
+// ── 7. guards ────────────────────────────────────────────────────────────────
 void testGuards(cvc::app &app) {
   std::printf("guards\n");
   Scene s(app);
@@ -867,8 +1373,11 @@ void testGuards(cvc::app &app) {
   for (DrawPath p : {DrawPath::Stock, DrawPath::Fast})
     runPath(s, p);
   const PathRun stock = runPath(s, DrawPath::Stock);
+  const PathRun all = runPath(s, DrawPath::AllCellTypes);
   const PathRun fast = runPath(s, DrawPath::Fast);
   samePixels("POLYGON_OFFSET mode: Fast pixels == Stock", stock.steadyPx, fast.steadyPx);
+  checkTraces("POLYGON_OFFSET mode", stock.steadyTrace, all.steadyTrace, fast.steadyTrace,
+              fast.steadyStats);
   const auto &zs = zero.mapper->stats();
   const auto &ss = shifted.mapper->stats();
   check(zs.coincidentFallbacks == zs.draws && zs.cellTypesSkipped == 0 && zs.draws > 0,
@@ -883,30 +1392,54 @@ void testGuards(cvc::app &app) {
   check(vs.stockDraws == vs.draws && vs.draws > 0, "vertex visibility draws the stock way");
 
   // Picking: the selector's passes draw the stock way, and select the same.
-  auto select = [&](DrawPath p) {
+  comparePicking(s, "guards scene");
+}
+
+// ── 8. shader replacements after the first draw ─────────────────────────────
+// VTK's low-memory mapper ignores its actor's shader property once the program
+// is built; LowMemoryPolyDataMapper::RenderPieceStart rebuilds it. A plain
+// GeometryNode (no streaming), every draw path.
+void testLateShaderReplacement(cvc::app &app) {
+  std::printf("shader replacement after the first draw\n");
+  for (DrawPath p : {DrawPath::Stock, DrawPath::AllCellTypes, DrawPath::Fast}) {
     LowMemoryPolyDataMapper::setDrawPath(p);
+    Scene s(app);
+    auto n = s.node("plain");
+    n->setGeometry(boxGeometry(0, 0, 0, 5, 5, 0.5));
+    n->setUseSingleColor(true);
+    n->setColor(1, 1, 1);
+    s.w = 48;
+    s.h = 48;
+    s.open();
+    s.sr->setCamera(0, 0, 50, 0, 0, 0, 0, 1, 0, 30.0, 1.0, 200.0);
+    s.sr->render();
+    s.sr->render();
+    const auto centre = [&](const std::vector<unsigned char> &px) {
+      const size_t i = 4 * (static_cast<size_t>(s.h / 2) * s.w + s.w / 2);
+      return std::vector<unsigned char>(px.begin() + i, px.begin() + i + 3);
+    };
+    const auto corner = [](const std::vector<unsigned char> &px) {
+      return std::vector<unsigned char>(px.begin(), px.begin() + 3);
+    };
+    const auto drawn = s.rgba();
+    const bool visible = centre(drawn) != corner(drawn);
+
+    n->addFragmentShaderReplacement("//VTK::UniformFlow::Impl",
+                                    "//VTK::UniformFlow::Impl\n  discard;\n");
     s.resetCounters();
-    vtkNew<vtkHardwareSelector> sel;
-    sel->SetRenderer(s.sr->renderer());
-    sel->SetArea(0, 0, s.w - 1, s.h - 1);
-    sel->SetFieldAssociation(vtkDataObject::FIELD_ASSOCIATION_CELLS);
-    vtkSmartPointer<vtkSelection> res = vtk::TakeSmartPointer(sel->Select());
-    std::string sig;
-    for (unsigned i = 0; res && i < res->GetNumberOfNodes(); ++i) {
-      vtkSelectionNode *n = res->GetNode(i);
-      sig += fmt("[%.0f:%.0f]", n->GetProperties()->Get(vtkSelectionNode::PROP_ID()),
-                 n->GetSelectionList() ? double(n->GetSelectionList()->GetNumberOfTuples()) : 0.0);
-    }
-    return std::make_pair(sig, s.stats());
-  };
-  const auto pickStock = select(DrawPath::Stock);
-  const auto pickFast = select(DrawPath::Fast);
-  check(
-      pickFast.second.stockDraws == pickFast.second.draws && pickFast.second.draws > 0,
-      "picking draws the stock way on the Fast path",
-      fmt("%.0f of %.0f draws", double(pickFast.second.stockDraws), double(pickFast.second.draws)));
-  check(pickFast.first == pickStock.first, "picking selects the same cells on both paths",
-        pickStock.first);
+    s.sr->render();
+    const auto discarded = s.rgba();
+    const auto st = s.stats();
+    check(visible && centre(discarded) == corner(discarded),
+          std::string(pathName(p)) + ": a replacement added after the first draw reaches the GPU",
+          fmt("lookups %.0f", double(st.programLookups + st.stockDraws)));
+
+    n->clearShaderReplacements();
+    s.sr->render();
+    const auto back = s.rgba();
+    check(diffBytes(back, drawn) == 0,
+          std::string(pathName(p)) + ": cleared again, the original frame comes back");
+  }
   LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
 }
 
@@ -929,13 +1462,18 @@ int main() {
   vtkOutputWindow::SetInstance(vtkSmartPointer<ErrorCounter>::New());
 
   testPolicy();
+  cvc::app app;
   if (!LowMemoryPolyDataMapper::replicaActive()) {
-    std::printf("  skipped: this VTK is not 9.5.0, so the mapper draws the stock way\n");
-    std::printf("PASS: cvcgl_lowmem_fastdraw (%d checks)\n", g_checks);
+    // The shader-property rebuild is not part of the replica: every VTK.
+    std::printf("  replica off (VTK is not an unpatched 9.5.0): every path draws the stock way\n");
+    if (renderAvailable(app))
+      testLateShaderReplacement(app);
+    std::printf("%s: cvcgl_lowmem_fastdraw (%d checks, %d failed)\n",
+                g_failures == 0 ? "PASS" : "FAIL", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
   }
 
-  cvc::app app;
+  LowMemoryPolyDataMapper::setStageObserver(&onStage);
   if (renderAvailable(app)) {
     // Shadows on and off in separate scenes: SceneGraph::setShadowsEnabled(false)
     // drops the shadow passes without releasing their GL resources, which VTK
@@ -960,7 +1498,9 @@ int main() {
         testLifecycle(s);
     }
     testGuards(app);
+    testLateShaderReplacement(app);
   }
+  LowMemoryPolyDataMapper::setStageObserver(nullptr);
   check(ErrorCounter::errors() == 0, "no VTK errors",
         fmt("%.0f errors", double(ErrorCounter::errors())));
   std::printf("%s: cvcgl_lowmem_fastdraw (%d checks, %d failed)\n",
