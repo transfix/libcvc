@@ -547,9 +547,14 @@ TEST_F(LaneTaskTest, ProcessChrootedToAppReceivesCrossThreadHashPosts) {
   for (std::size_t i = 0; i < got.size(); ++i)
     EXPECT_EQ(got[i], static_cast<std::int64_t>(i + 1)) << "lane results reordered end to end";
   EXPECT_EQ(plain.front(), "scoped");
-  // Still resident: parked for the next generation.
-  EXPECT_EQ(status(pid), se::process_status::waiting);
-  EXPECT_EQ(status(pid2), se::process_status::waiting);
+  // Still resident: both re-park for the NEXT generation. Reaching got==50 only means the 50th
+  // value was applied INSIDE apply-built; the process re-enters (msg-recv …) a step later, so it is
+  // momentarily `ready`, not yet `waiting`. Pump until both have settled back to waiting rather
+  // than asserting it immediately — that race intermittently read `ready` (status 0) and flaked.
+  EXPECT_TRUE(pump_until([&] {
+    return status(pid) == se::process_status::waiting &&
+           status(pid2) == se::process_status::waiting;
+  })) << "processes did not re-park on msg-recv";
 }
 
 TEST_F(LaneTaskTest, EveryTaskPostsExactlyOneValueOnEveryErrorPath) {
