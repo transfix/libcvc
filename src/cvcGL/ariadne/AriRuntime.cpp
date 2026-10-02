@@ -4,16 +4,24 @@
 // that owns the neutral bundling. Only the GL-driving frame bits (input pump, camera, the
 // draw) live here.
 
-#include <cvc/ariadne/bind.h>        // sync_scene_visibility
-#include <cvc/core/app.h>            // cvc::app
-#include <cvc/gl/CameraController.h> // cam.update / frameBounds
-#include <cvc/gl/ImGuiOverlay.h>     // overlay draw callback
-#include <cvc/gl/SceneGraph.h>       // scene().computeGraphicsBounds()/appContext()/prefix
-#include <cvc/gl/SceneRenderer.h>    // view.render()/processUIEvents()/renderer()/windowClosed()
+#include <cvc/ariadne/ariadne.h>                // Runtime::document_scope()
+#include <cvc/ariadne/bind.h>                   // sync_scene_visibility
+#include <cvc/ariadne/stream/stream_channel.h>  // subscribe / deliver_mode
+#include <cvc/ariadne/stream/stream_registry.h> // stream_registry::for_app / lookup
+#include <cvc/core/app.h>                       // cvc::app
+#include <cvc/core/state_exec/intrinsics.h>     // document_scope::slot
+#include <cvc/gl/CameraController.h>            // cam.update / frameBounds
+#include <cvc/gl/GeometryNode.h>                // GeometryNode (gl-bind-stream target)
+#include <cvc/gl/ImGuiOverlay.h>                // overlay draw callback
+#include <cvc/gl/SceneGraph.h>    // scene().computeGraphicsBounds()/appContext()/prefix
+#include <cvc/gl/SceneRenderer.h> // view.render()/processUIEvents()/renderer()/windowClosed()
 #include <cvc/gl/ariadne/AriRuntime.h>
-#include <cvc/gl/ariadne/scene_realize.h> // realize_scene / RealizedScene / tick_scene
+#include <cvc/gl/ariadne/scene_realize.h>          // realize_scene / RealizedScene / tick_scene
+#include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
+#include <cvc/gl/ariadne/stream_verbs.h> // StreamBindingSink / register_gl_stream_intrinsics
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -28,12 +36,20 @@ namespace {
 // The GL implementation of the neutral SceneAdapter seam: realize a parsed Ariadne Scene
 // into the SceneRenderer's SceneGraph, frame the camera to it, and service it per frame.
 // Everything GL/VTK about running an .ari app is confined to this class.
-class GlSceneAdapter : public ari::SceneAdapter {
+// Also a StreamBindingSink (stream_verbs.h): the (gl-bind-stream) verb, resolved to THIS document
+// via its document_scope, calls bind_stream() here on the render thread, and this adapter owns +
+// ticks the resulting StreamTextureBinding alongside the declarative ones.
+class GlSceneAdapter : public ari::SceneAdapter, public StreamBindingSink {
 public:
   GlSceneAdapter(SceneRenderer &view, CameraController &cam) : view_(&view), cam_(&cam) {}
 
   void realize(const ari::Scene &scene, const std::string &prefix,
                std::vector<std::string> *warns) override {
+    // A reload rebuilds every node, so drop the imperative (gl-bind-stream) bindings now (render
+    // thread) rather than letting them tick a stale node for a frame. They are runtime-only state
+    // tied to the previous node graph, not part of the document, so they do NOT survive a reload;
+    // re-run the binding action after the reload to re-establish them.
+    verb_bindings_.clear();
     realized_ = realize_scene(view_->scene(), scene, prefix, warns);
     haveScene_ = true;
     const cvc::bounding_box bb = view_->scene().computeGraphicsBounds();
@@ -48,7 +64,48 @@ public:
 
   void tick() override {
     if (haveScene_)
-      tick_scene(realized_, view_->renderer()); // volren/volslice per-frame service
+      tick_scene(realized_, view_->renderer()); // declarative stream / volren / volslice service
+    // Service the imperative (gl-bind-stream) bindings here, on the render thread, right after the
+    // declarative ones. They are NOT in realized_.custom_ticks (that vector is rebuilt wholesale on
+    // every realize()); this adapter owns them so they survive across frames and are torn down with
+    // the adapter. Reap a binding whose node has gone away: a vanished node expires the binding's
+    // weak_ptr, its next tick() unsubscribes, subscribed() turns false, and we erase it here (its
+    // dtor runs on this render thread) — so repeated binds / node churn can't grow the map forever.
+    for (auto it = verb_bindings_.begin(); it != verb_bindings_.end();) {
+      it->second->tick();
+      if (!it->second->subscribed())
+        it = verb_bindings_.erase(it);
+      else
+        ++it;
+    }
+  }
+
+  // StreamBindingSink — bind TOKEN's open stream onto the GeometryNode NODE-ID. Render thread
+  // (called inline from the action lane). "" on success, else a "gl-bind-stream: ..." diagnostic.
+  std::string bind_stream(const std::string &node_id, const std::string &token) override {
+    auto node =
+        std::dynamic_pointer_cast<cvc::gl::GeometryNode>(view_->scene().getGraphics(node_id));
+    if (!node)
+      return "gl-bind-stream: no GeometryNode '" + node_id +
+             "' in the scene (NODE-ID must name a top-level geometry node)";
+    // Replace any prior binding on this node FIRST, so its subscription (and frame-pool slot) is
+    // released before we subscribe again — otherwise a same-token rebind would momentarily need two
+    // subscribers and a pool sized to exactly one would refuse the new one.
+    verb_bindings_.erase(node_id);
+    cvc::app &app = view_->scene().appContext();
+    cvc::ariadne::stream::stream_channel *ch =
+        cvc::ariadne::stream::stream_registry::for_app(app).lookup(token);
+    if (!ch)
+      return "gl-bind-stream: no live stream for token '" + token + "' (open it first)";
+    std::shared_ptr<cvc::ariadne::stream::subscription> sub =
+        ch->subscribe(cvc::ariadne::stream::deliver_mode::latest);
+    if (!sub)
+      return "gl-bind-stream: stream '" + token +
+             "' cannot admit another subscriber (frame pool full)";
+    node->setUseSingleColor(false); // show the streamed texture, not a flat material colour
+    verb_bindings_[node_id] = std::make_shared<StreamTextureBinding>(
+        app, token, std::weak_ptr<cvc::gl::GeometryNode>(node), std::move(sub));
+    return {}; // ok — first tick() applies a frame this same frame
   }
 
 private:
@@ -57,6 +114,10 @@ private:
   RealizedScene
       realized_; // owns StageLighting rigs; outlives the render loop (adapter outlives use)
   bool haveScene_ = false;
+  // (gl-bind-stream) bindings, keyed by node id (one per node; a rebind replaces). Owned here — a
+  // per-document instance member on the scene seam, NOT realized_.custom_ticks (rebuilt on reload)
+  // and NOT a process-static table. Destroyed with the adapter on the render thread.
+  std::unordered_map<std::string, std::shared_ptr<StreamTextureBinding>> verb_bindings_;
 };
 
 } // namespace
@@ -72,6 +133,17 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   // declared before app_rt_, so the Runtime it points at is destroyed first.
   app_rt_.set_backend(backend_);
   backend_.install(app_rt_.runtime(), *overlay_);
+
+  // (gl-bind-stream): register the process-global verb once, and publish THIS document's GL sink
+  // (the adapter) into its Runtime's document_scope so the verb routes here via ictx.document — no
+  // process-global capture, correct per-document routing. Teardown order makes this safe:
+  // ~AriRuntime destroys app_rt_ (hence the Runtime + its document_scope, dropping this handle)
+  // BEFORE scene_, so the handle never outlives the adapter, and the bindings' dtors (in
+  // ~GlSceneAdapter) run after the handle is gone — all on the render thread. Must run before the
+  // first load()/drain().
+  register_gl_stream_intrinsics();
+  if (auto *sink = dynamic_cast<StreamBindingSink *>(scene_.get()))
+    app_rt_.runtime().document_scope().slot<GlStreamSinkHandle>(kGlStreamSinkSlot)->sink = sink;
 }
 
 AriRuntime::~AriRuntime() {

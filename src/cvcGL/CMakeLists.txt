@@ -390,11 +390,18 @@ add_executable(cvcgl_stream_texture test/cvcgl_stream_texture.cpp)
 target_link_libraries(cvcgl_stream_texture PRIVATE cvcGL)
 add_test(NAME cvcgl_stream_texture COMMAND cvcgl_stream_texture)
 
-# Phase-2 PR7: the "stream" scene-node realizer (register_stream_node_type) builds a UV'd
+# Phase-2 PR7: the "stream" scene-node realizer (register_scene_node_type) builds a UV'd
 # quad, resolves+subscribes the named stream, and wires a per-frame tick into the scene.
 add_executable(cvcgl_stream_node test/cvcgl_stream_node.cpp)
 target_link_libraries(cvcgl_stream_node PRIVATE cvcGL)
 add_test(NAME cvcgl_stream_node COMMAND cvcgl_stream_node)
+
+# Phase-2 PR8: the imperative (gl-bind-stream NODE-ID TOKEN) verb seam — registration, the
+# per-document ictx.document routing, arg parsing and error paths (via a mock StreamBindingSink,
+# no GL). The live GL binding is covered by cvcgl_stream_texture / cvcgl_stream_node.
+add_executable(cvcgl_stream_bind test/cvcgl_stream_bind.cpp)
+target_link_libraries(cvcgl_stream_bind PRIVATE cvcGL)
+add_test(NAME cvcgl_stream_bind COMMAND cvcgl_stream_bind)
 
 # texture_modified_rows / _rect: a zero-copy texture patched on the GPU with
 # glTexSubImage2D and nothing marked modified -- no whole-texture re-upload, no
