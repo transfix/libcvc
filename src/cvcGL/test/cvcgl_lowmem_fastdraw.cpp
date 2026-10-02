@@ -39,10 +39,13 @@
 //      skipped shader-cache lookup removes no GL call -- the lookup's GL calls
 //      are the bind tail the re-bind issues too; what it saves is CPU, which
 //      the stats check;
-//   4. pixels: Stock, AllCellTypes and Fast frames (RGBA) differ by no more
-//      than two Stock frames of one GL trace do -- the renderer's self-variance,
-//      measured through the run: none (byte-identical frames) on NVIDIA and
-//      llvmpipe, a few bytes now and then on Apple's software renderer;
+//   4. pixels: AllCellTypes and Fast frames (RGBA) match Stock's -- as do a
+//      Stock frame right after Fast, and frames across a recompile and across a
+//      new window -- byte for byte, or by no more than one pair of Stock frames
+//      of one GL trace (same scene and window, neither right after Fast)
+//      differed in the same run: the renderer's self-variance. None on NVIDIA
+//      and llvmpipe, so byte-exact there; a few bytes now and then on Apple's
+//      software renderer;
 //   5. the saving: Fast draws a single-cell-type mesh in <= 2 VAO binds and a
 //      fraction of the stock calls, with no desktop round-trip in any draw
 //      beyond Stock's (none, but VTK's own warning on a line width the driver
@@ -76,6 +79,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/image/image.h>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -1172,52 +1176,75 @@ std::string describe(const PixelDiff &d, int w) {
 // Two Stock frames whose GL traces are identical -- VTK's own draws, every
 // call with its arguments and uniform values, in order, in one window -- can
 // differ only by what the rasteriser does with that stream. NVIDIA and Mesa
-// llvmpipe give the same bytes every time: the measured bound stays 0 and every
-// pixel check is byte-exact. Apple's software renderer (macOS CI, GL 4.1) does
-// not: with shadows on, AllCellTypes and Stock frames -- identical traces --
-// came out up to 4 bytes apart, and frames across a recompile or a new window
-// up to 9, in some runs and not in others (never with shadows off). So a pixel
-// check passes when its frames differ by no more bytes, and by no larger a
-// step, than two Stock frames of one trace were seen to differ by. The samples
-// are taken all through the test -- each Stock run, like each compared frame,
-// follows a switch from another path -- and every check is judged at the end,
-// against the bound of the whole run. The GL traces stay the exact oracle on
-// every renderer.
-struct SelfVariance {
-  long bytes = 0; // the most bytes two Stock frames of one trace differed by
-  int maxDelta = 0;
-  long frameBytes = 0; // the largest frame sampled
-  int pairs = 0, noisy = 0, skipped = 0;
+// llvmpipe give the same bytes every time: no sample differs and every pixel
+// check is byte-exact. Apple's software renderer (macOS CI, GL 4.1) does not:
+// with shadows on, AllCellTypes and Stock frames -- identical traces -- came
+// out 1 to 4 bytes apart, and frames across a recompile or a new window up to
+// 9, in some runs and not in others (never with shadows off).
+//
+// So a pixel check passes when one sampled pair -- in the same scene, so the
+// shadowed scene's noise excuses nothing elsewhere -- differed by at least as
+// many bytes AND by at least as large a step: an envelope an actual pair
+// filled, not the most bytes of one pair with the largest step of another.
+// Which pairs may be samples is what keeps the bound from excusing a real
+// difference:
+//   - both frames Stock, in one window (a pair across a re-open would measure
+//     as noise the very difference the cross-window check looks for);
+//   - neither right after a Fast run (whatever a Fast frame leaves that the
+//     trace cannot see -- buffer contents, the untraced warm-up frame -- would
+//     count as noise); a Stock frame right after Fast is judged instead;
+//   - no compared pair is a sampled pair.
+// Every check is judged at the end, once the run's samples are in. The GL
+// traces stay the exact oracle on every renderer.
+//
+// The most a sampled pair may differ by for the renderer to be judged on at
+// all -- a noisier pair excuses nothing and fails the run: 64 bytes, ~7x the
+// most seen on macOS (9), and a step of a few LSB. The old check logged byte
+// counts only, not the step; counts that are no multiple of 3 (1, 2, 4, 5)
+// mean pixels that changed in some colour channels and not the others, which
+// is rounding, not a shading change.
+constexpr long kSelfVarianceMaxBytes = 64;
+constexpr int kSelfVarianceMaxDelta = 8;
+
+bool withinCap(const PixelDiff &d) {
+  return d.bytes >= 0 && d.bytes <= kSelfVarianceMaxBytes && d.maxDelta <= kSelfVarianceMaxDelta;
+}
+
+struct SelfVarianceSample {
+  std::string scope, what;
+  PixelDiff d;
+  int w;
 };
-SelfVariance g_noise;
+std::vector<SelfVarianceSample> g_noisy;   // the sampled pairs that differed
+std::map<std::string, int> g_pairs;        // pairs sampled, per scope
+std::map<std::string, int> g_pairsSkipped; // not sampled (traces differ), per scope
 
 struct PixelCheck {
-  std::string what;
+  std::string scope, what;
   PixelDiff d;
   int w;
 };
 std::vector<PixelCheck> g_pixelChecks;
 
-void sampleSelfVariance(const std::string &what, const Trace &ta, const Trace &tb,
-                        const std::vector<unsigned char> &a, const std::vector<unsigned char> &b,
-                        int w) {
+void sampleSelfVariance(const std::string &scope, const std::string &what, const Trace &ta,
+                        const Trace &tb, const std::vector<unsigned char> &a,
+                        const std::vector<unsigned char> &b, int w) {
   std::string why;
   if (!sameTrace(ta, tb, &why)) {
-    ++g_noise.skipped; // not one GL stream: what the frames differ by is not noise
+    ++g_pairsSkipped[scope]; // not one GL stream: what the frames differ by is not noise
     std::printf("  self-variance: %s not sampled, GL traces differ -- %s\n", what.c_str(),
                 why.c_str());
     return;
   }
   const PixelDiff d = pixelDiff(a, b);
-  if (d.bytes < 0)
+  if (d.bytes < 0) {
+    ++g_pairsSkipped[scope];
     return;
-  ++g_noise.pairs;
-  g_noise.frameBytes = std::max(g_noise.frameBytes, static_cast<long>(a.size()));
+  }
+  ++g_pairs[scope];
   if (d.bytes == 0)
     return;
-  ++g_noise.noisy;
-  g_noise.bytes = std::max(g_noise.bytes, d.bytes);
-  g_noise.maxDelta = std::max(g_noise.maxDelta, d.maxDelta);
+  g_noisy.push_back({scope, what, d, w});
   std::printf("  self-variance: %s -- %s, identical GL traces\n", what.c_str(),
               describe(d, w).c_str());
 }
@@ -1225,46 +1252,73 @@ void sampleSelfVariance(const std::string &what, const Trace &ta, const Trace &t
 // Two Stock runs of one draw path: the first frames (a shadow bake when
 // shadows are on) and the steady frames, which sample that bake -- so the
 // steady pair counts only if the first frames' traces match too.
-void sampleSelfVariance(const std::string &what, const PathRun &a, const PathRun &b, int w) {
+void sampleSelfVariance(const std::string &scope, const std::string &what, const PathRun &a,
+                        const PathRun &b, int w) {
   const bool firstSame = sameTrace(a.firstTrace, b.firstTrace, nullptr);
-  sampleSelfVariance(what + ", first frame", a.firstTrace, b.firstTrace, a.firstPx, b.firstPx, w);
+  sampleSelfVariance(scope, what + ", first frame", a.firstTrace, b.firstTrace, a.firstPx,
+                     b.firstPx, w);
   if (firstSame)
-    sampleSelfVariance(what + ", steady frame", a.steadyTrace, b.steadyTrace, a.steadyPx,
+    sampleSelfVariance(scope, what + ", steady frame", a.steadyTrace, b.steadyTrace, a.steadyPx,
                        b.steadyPx, w);
   else
-    ++g_noise.skipped;
+    ++g_pairsSkipped[scope];
 }
 
-// Deferred: judged by checkPixels() once the whole run's self-variance is in.
-void samePixels(const std::string &what, const std::vector<unsigned char> &a,
-                const std::vector<unsigned char> &b, int w) {
-  g_pixelChecks.push_back({what, pixelDiff(a, b), w});
+// Deferred: judged by checkPixels() once the run's samples are in.
+void samePixels(const std::string &scope, const std::string &what,
+                const std::vector<unsigned char> &a, const std::vector<unsigned char> &b, int w) {
+  g_pixelChecks.push_back({scope, what, pixelDiff(a, b), w});
 }
 
 void checkPixels() {
   if (g_pixelChecks.empty())
     return;
-  const bool exact = g_noise.bytes == 0;
-  std::string head = exact ? std::string("none, so every check is byte-exact")
-                           : fmt("up to %.0f bytes, max delta %.0f", double(g_noise.bytes),
-                                 double(g_noise.maxDelta)) +
-                                 fmt(" (in %.0f pairs)", double(g_noise.noisy));
-  head += fmt(", over %.0f Stock frame pairs of identical GL traces", double(g_noise.pairs));
-  if (g_noise.skipped)
-    head += fmt("; %.0f not sampled: traces differ", double(g_noise.skipped));
-  std::printf("pixels (renderer self-variance: %s)\n", head.c_str());
+  std::set<std::string> scopes;
+  for (const auto &c : g_pixelChecks)
+    scopes.insert(c.scope);
+  std::printf("pixels (the renderer's self-variance: pairs of Stock frames of identical GL "
+              "traces, in one window, neither right after Fast)\n");
+  for (const auto &scope : scopes) {
+    int noisy = 0;
+    for (const auto &n : g_noisy)
+      noisy += n.scope == scope;
+    std::string line = "  " + scope + fmt(": %.0f pairs, ", double(g_pairs[scope]));
+    line += noisy ? fmt("%.0f differ (listed above)", double(noisy))
+                  : std::string("none differ, so its checks are byte-exact");
+    if (g_pairsSkipped[scope])
+      line += fmt("; %.0f not sampled", double(g_pairsSkipped[scope]));
+    std::printf("%s\n", line.c_str());
+  }
   for (const auto &c : g_pixelChecks) {
-    const bool ok =
-        c.d.bytes >= 0 && c.d.bytes <= g_noise.bytes && c.d.maxDelta <= g_noise.maxDelta;
+    const SelfVarianceSample *excuse = nullptr;
+    for (const auto &n : g_noisy)
+      if (c.d.bytes > 0 && n.scope == c.scope && withinCap(n.d) && n.d.bytes >= c.d.bytes &&
+          n.d.maxDelta >= c.d.maxDelta) {
+        excuse = &n;
+        break;
+      }
     std::string detail = describe(c.d, c.w);
-    if (!exact && c.d.bytes != 0)
-      detail += std::string(ok ? ": within" : ": BEYOND") + " the renderer's self-variance";
-    check(ok, c.what, detail);
+    if (excuse)
+      detail += ": within " + excuse->what + " (" + describe(excuse->d, excuse->w) + ")";
+    else if (c.d.bytes > 0)
+      detail += ": BEYOND every pair of Stock frames sampled in " + c.scope;
+    check(c.d.bytes == 0 || excuse, c.what, detail);
   }
   // A renderer noisy enough to blur a real difference is not one to judge on.
-  check(g_noise.bytes * 1000 <= g_noise.frameBytes,
-        "the renderer's self-variance, if any, is a few bytes (<= 0.1% of a frame)",
-        fmt("%.0f of %.0f bytes", double(g_noise.bytes), double(g_noise.frameBytes)));
+  const SelfVarianceSample *beyond = nullptr, *largest = nullptr;
+  for (const auto &n : g_noisy) {
+    if (!beyond && !withinCap(n.d))
+      beyond = &n;
+    if (!largest || std::make_pair(n.d.bytes, n.d.maxDelta) >
+                        std::make_pair(largest->d.bytes, largest->d.maxDelta))
+      largest = &n;
+  }
+  const SelfVarianceSample *shown = beyond ? beyond : largest;
+  check(!beyond,
+        fmt("the renderer's self-variance, if any, is a few LSB at a few pixels (every sampled "
+            "pair <= %.0f bytes, max delta <= %.0f)",
+            double(kSelfVarianceMaxBytes), double(kSelfVarianceMaxDelta)),
+        shown ? shown->what + ": " + describe(shown->d, shown->w) : std::string("none differ"));
 }
 
 // Every pixel the background colour? (a frame that drew nothing)
@@ -1513,38 +1567,47 @@ void comparePicking(Scene &s, const std::string &label) {
 
 void comparePaths(Scene &s, const std::string &label, bool shadows) {
   std::printf("%s\n", label.c_str());
-  // Settle: build every shader both ways first so no path pays a first compile.
-  for (DrawPath p : {DrawPath::Stock, DrawPath::Fast})
+  // Settle: build every shader both ways first so no path pays a first compile
+  // (Stock last: the first counted Stock run must not follow a Fast one).
+  for (DrawPath p : {DrawPath::Fast, DrawPath::Stock})
     runPath(s, p);
-  // Stock between and after the others: the renderer's self-variance is
-  // sampled where the compared frames are rendered, each after a path switch.
+  // The renderer's self-variance is sampled from the Stock runs before Fast's
+  // (one after AllCellTypes); the Stock run right after Fast is judged, like
+  // the AllCellTypes and Fast frames.
   const PathRun stock = runPath(s, DrawPath::Stock);
-  const PathRun all = runPath(s, DrawPath::AllCellTypes);
   const PathRun stock2 = runPath(s, DrawPath::Stock);
-  const PathRun fast = runPath(s, DrawPath::Fast);
+  const PathRun all = runPath(s, DrawPath::AllCellTypes);
   const PathRun stock3 = runPath(s, DrawPath::Stock);
+  const PathRun fast = runPath(s, DrawPath::Fast);
+  const PathRun afterFast = runPath(s, DrawPath::Stock);
 
   check(drewSomething(stock.steadyPx), label + ": the scene draws");
   std::string why;
   bool reproducible = true;
-  for (const PathRun *again : {&stock2, &stock3})
+  for (const PathRun *again : {&stock2, &stock3, &afterFast})
     reproducible = reproducible && sameTrace(again->firstTrace, stock.firstTrace, &why) &&
                    sameTrace(again->steadyTrace, stock.steadyTrace, &why);
-  check(reproducible, label + ": the GL trace is reproducible (Stock three times, same trace)",
+  check(reproducible, label + ": the GL trace is reproducible (Stock four times, same trace)",
         reproducible ? fmt("%.0f calls", double(stock.steadyTrace.size())) : why);
-  sampleSelfVariance(label + ": Stock twice", stock, stock2, s.w);
-  sampleSelfVariance(label + ": Stock twice", stock, stock3, s.w);
-  sampleSelfVariance(label + ": Stock twice", stock2, stock3, s.w);
+  sampleSelfVariance(label, label + ": Stock twice", stock, stock2, s.w);
+  sampleSelfVariance(label, label + ": Stock twice", stock, stock3, s.w);
+  sampleSelfVariance(label, label + ": Stock twice", stock2, stock3, s.w);
   checkTraces(label + ", first frame" + (shadows ? " (shadow bake)" : ""), stock.firstTrace,
               all.firstTrace, fast.firstTrace, fast.firstStats);
   checkTraces(label + ", steady frame", stock.steadyTrace, all.steadyTrace, fast.steadyTrace,
               fast.steadyStats);
-  samePixels(label + ": AllCellTypes pixels == Stock, first frame", stock.firstPx, all.firstPx,
+  samePixels(label, label + ": AllCellTypes pixels == Stock, first frame", stock.firstPx,
+             all.firstPx, s.w);
+  samePixels(label, label + ": AllCellTypes pixels == Stock, steady frame", stock.steadyPx,
+             all.steadyPx, s.w);
+  samePixels(label, label + ": Fast pixels == Stock, first frame", stock.firstPx, fast.firstPx,
              s.w);
-  samePixels(label + ": AllCellTypes pixels == Stock, steady frame", stock.steadyPx, all.steadyPx,
+  samePixels(label, label + ": Fast pixels == Stock, steady frame", stock.steadyPx, fast.steadyPx,
              s.w);
-  samePixels(label + ": Fast pixels == Stock, first frame", stock.firstPx, fast.firstPx, s.w);
-  samePixels(label + ": Fast pixels == Stock, steady frame", stock.steadyPx, fast.steadyPx, s.w);
+  samePixels(label, label + ": a Stock frame right after Fast == Stock, first frame", stock.firstPx,
+             afterFast.firstPx, s.w);
+  samePixels(label, label + ": a Stock frame right after Fast == Stock, steady frame",
+             stock.steadyPx, afterFast.steadyPx, s.w);
 
   std::printf("  frame GL calls, first  : Stock %s\n", stock.first.str().c_str());
   std::printf("                           Fast  %s\n", fast.first.str().c_str());
@@ -1581,8 +1644,10 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
           fmt("lookups %.0f", double(fast.firstStats.programLookups)));
 
   // Per draw, on the probes (steady frame: one draw per probe and pass).
+  // Without the window's limit no width counts as one the driver lacks.
   auto *glWin = vtkOpenGLRenderWindow::SafeDownCast(s.sr->renderWindow());
-  const double maxLineWidth = glWin ? glWin->GetMaximumHardwareLineWidth() : 0.0;
+  const double maxLineWidth =
+      glWin ? glWin->GetMaximumHardwareLineWidth() : std::numeric_limits<double>::infinity();
   for (size_t i = 0; i < s.probes.size(); ++i) {
     const Probe &p = s.probes[i];
     const double nStock = stock.probeDraws[i], nFast = fast.probeDraws[i];
@@ -1598,12 +1663,18 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
     std::printf("  %-21s Fast  %s\n", "", cf.str(nFast).c_str());
     // Desktop round-trips: Stock's draw has none but VTK's own warning about a
     // line width the driver cannot draw -- vtkDrawTexturedElements::PreDraw
-    // (9.5.0) logs it with glGetString(GL_VERSION) on every such draw. A core
-    // profile without wide lines (macOS: GetMaximumHardwareLineWidth() 1) does
-    // that for litLines (width 3) on every path; where the driver draws the
-    // width (NVIDIA, llvmpipe) Stock has none. Fast and AllCellTypes add none.
+    // (9.5.0) logs it with one glGetString(GL_VERSION) per draw of lines. A
+    // core profile without wide lines (macOS: GetMaximumHardwareLineWidth() 1)
+    // does that for litLines (width 3) on every path; where the driver draws
+    // the width (NVIDIA, llvmpipe) Stock has none. Fast and AllCellTypes add
+    // none.
     const double lineWidth = p.actor->GetProperty()->GetLineWidth();
-    const bool vtkWarning = lineWidth > maxLineWidth && cs.roundTrips() == cs.count("GetString");
+    vtkPolyData *input = p.mapper->GetInput();
+    const bool drawsLines = (input && input->GetNumberOfLines() > 0) ||
+                            p.actor->GetProperty()->GetRepresentation() == VTK_WIREFRAME;
+    const bool vtkWarning = drawsLines && lineWidth > maxLineWidth &&
+                            cs.roundTrips() == cs.count("GetString") &&
+                            cs.count("GetString") == nStock;
     const bool stockExplained = cs.roundTrips() == 0 || vtkWarning;
     const double tripsStock = cs.roundTrips() / nStock;
     check(stockExplained && cf.roundTrips() / nFast <= tripsStock &&
@@ -1669,7 +1740,8 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
 }
 
 // ── 6. lifecycle ─────────────────────────────────────────────────────────────
-void testLifecycle(Scene &s) {
+// scope: the scene's label, whose self-variance samples judge these pixels.
+void testLifecycle(Scene &s, const std::string &scope) {
   std::printf("lifecycle\n");
   LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
   s.sr->render();
@@ -1704,23 +1776,27 @@ void testLifecycle(Scene &s) {
   check(rel.programLookups == rel.draws && rel.programLookupsSkipped == 0 && rel.draws > 0,
         "after a mapper's ReleaseGraphicsResources its next draw looks the program up",
         fmt("lookups %.0f of %.0f draws", double(rel.programLookups), double(rel.draws)));
-  const PathRun released = runPath(s, DrawPath::Stock);
-  {
-    const PathRun b = runPath(s, DrawPath::Fast);
-    samePixels("after mapper release: Fast pixels == Stock", released.steadyPx, b.steadyPx, s.w);
-  }
+  const PathRun released = runPath(s, DrawPath::Fast);
+  // Stock to compare against: two runs sampled for the renderer's
+  // self-variance, after one that follows Fast (judged, not sampled).
+  const PathRun afterFast = runPath(s, DrawPath::Stock);
+  const PathRun before = runPath(s, DrawPath::Stock);
+  const PathRun before2 = runPath(s, DrawPath::Stock);
+  sampleSelfVariance(scope, "lifecycle: Stock twice", before, before2, s.w);
+  samePixels(scope, "after mapper release: Fast pixels == Stock", before.steadyPx,
+             released.steadyPx, s.w);
+  samePixels(scope, "lifecycle: a Stock frame right after Fast == Stock", before.steadyPx,
+             afterFast.steadyPx, s.w);
 
   // The shader cache's programs released and recompiled in place (the cache
   // keeps the objects): the re-bound program is compiled again before use.
   auto *win = vtkOpenGLRenderWindow::SafeDownCast(s.sr->renderWindow());
-  const PathRun before = runPath(s, DrawPath::Stock);
-  sampleSelfVariance("lifecycle: Stock twice", released, before, s.w);
   win->GetShaderCache()->ReleaseGraphicsResources(win);
   LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
   s.sr->render();
   const PathRun after = runPath(s, DrawPath::Fast);
-  samePixels("programs released in the cache: Fast recompiles and matches Stock", before.steadyPx,
-             after.steadyPx, s.w);
+  samePixels(scope, "programs released in the cache: Fast recompiles and matches Stock",
+             before.steadyPx, after.steadyPx, s.w);
 
   // The same scene -- the same nodes and mappers -- closed and re-opened in a
   // new window (new context, new shader cache): the first draws resolve fully
@@ -1737,15 +1813,20 @@ void testLifecycle(Scene &s) {
         "re-opened in a new window: the first draws look their programs up",
         fmt("lookups %.0f, skipped %.0f", double(st.programLookups),
             double(st.programLookupsSkipped)));
+  // The window's first Stock run follows that Fast frame: neither sampled nor
+  // compared. The two after it are sampled -- in this window, never with the
+  // old window's: a pair across the re-open would measure as noise the very
+  // difference the cross-window checks look for.
+  runPath(s, DrawPath::Stock);
   const PathRun a = runPath(s, DrawPath::Stock);
-  const PathRun b = runPath(s, DrawPath::Fast);
-  // The same Stock frame in the fresh window, against the old window's. (Not
-  // the window's first Stock run: its bake frame starts from a fresh context's
-  // GL state, so its trace differs from every later one by a cached enable.)
   const PathRun a2 = runPath(s, DrawPath::Stock);
-  sampleSelfVariance("Stock, old window and new", before, a2, s.w);
-  samePixels("new window: Fast pixels == Stock", a.steadyPx, b.steadyPx, s.w);
-  samePixels("new window: same frame as the old window", before.steadyPx, b.steadyPx, s.w);
+  const PathRun b = runPath(s, DrawPath::Fast);
+  sampleSelfVariance(scope, "new window: Stock twice", a, a2, s.w);
+  samePixels(scope, "new window: Fast pixels == Stock", a.steadyPx, b.steadyPx, s.w);
+  samePixels(scope, "new window: the Stock frame == the old window's", before.steadyPx, a.steadyPx,
+             s.w);
+  samePixels(scope, "new window: the Fast frame == the old window's Stock frame", before.steadyPx,
+             b.steadyPx, s.w);
 }
 
 // ── 7. guards ────────────────────────────────────────────────────────────────
@@ -1784,14 +1865,16 @@ void testGuards(cvc::app &app) {
           "POLYGON_OFFSET mode: " + p->name + "'s program carries the depth offset uniforms");
   }
 
-  for (DrawPath p : {DrawPath::Stock, DrawPath::Fast})
+  // Stock last in the settle, so that neither sampled Stock run follows Fast.
+  for (DrawPath p : {DrawPath::Fast, DrawPath::Stock})
     runPath(s, p);
   const PathRun stock = runPath(s, DrawPath::Stock);
   const PathRun all = runPath(s, DrawPath::AllCellTypes);
   const PathRun stock2 = runPath(s, DrawPath::Stock);
   const PathRun fast = runPath(s, DrawPath::Fast); // last: the mapper stats below are Fast's
-  sampleSelfVariance("POLYGON_OFFSET mode: Stock twice", stock, stock2, s.w);
-  samePixels("POLYGON_OFFSET mode: Fast pixels == Stock", stock.steadyPx, fast.steadyPx, s.w);
+  sampleSelfVariance("guards", "POLYGON_OFFSET mode: Stock twice", stock, stock2, s.w);
+  samePixels("guards", "POLYGON_OFFSET mode: Fast pixels == Stock", stock.steadyPx, fast.steadyPx,
+             s.w);
   checkTraces("POLYGON_OFFSET mode", stock.steadyTrace, all.steadyTrace, fast.steadyTrace,
               fast.steadyStats);
   const auto &zs = zero.mapper->stats();
@@ -1850,10 +1933,14 @@ void testLateShaderReplacement(cvc::app &app) {
           std::string(pathName(p)) + ": a replacement added after the first draw reaches the GPU",
           fmt("lookups %.0f", double(st.programLookups + st.stockDraws)));
 
+    // Exact on every renderer: an unshadowed 48x48 scene, where no renderer has
+    // been seen to vary, and no self-variance is sampled here.
     n->clearShaderReplacements();
     s.sr->render();
-    samePixels(std::string(pathName(p)) + ": cleared again, the original frame comes back", drawn,
-               s.rgba(), s.w);
+    const PixelDiff back = pixelDiff(drawn, s.rgba());
+    check(back.bytes == 0,
+          std::string(pathName(p)) + ": cleared again, the original frame comes back",
+          describe(back, s.w));
   }
   LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
 }
@@ -1883,7 +1970,6 @@ int main() {
     std::printf("  replica off (VTK is not an unpatched 9.5.0): every path draws the stock way\n");
     if (renderAvailable(app))
       testLateShaderReplacement(app);
-    checkPixels();
     std::printf("%s: cvcgl_lowmem_fastdraw (%d checks, %d failed)\n",
                 g_failures == 0 ? "PASS" : "FAIL", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
@@ -1909,9 +1995,10 @@ int main() {
             "every node and probe draws through LowMemoryPolyDataMapper",
             fmt("%.0f of %.0f", double(s.mappers().size()),
                 double(s.nodes.size() + s.probes.size())));
-      comparePaths(s, shadows ? "shadows on" : "shadows off", shadows);
+      const std::string label = shadows ? "shadows on" : "shadows off";
+      comparePaths(s, label, shadows);
       if (shadows)
-        testLifecycle(s);
+        testLifecycle(s, label);
     }
     testGuards(app);
     testLateShaderReplacement(app);
