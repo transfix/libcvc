@@ -154,6 +154,58 @@ jobs:
           echo "$out"
           exit 1
 
+  # ─────────────── cvcGL browser-side JS (state shim, glsync, serve.py) ───────────────
+  #
+  # webgl_state_shadow.js (the --pre-js cvcgl_wasm_app links into every cvcGL wasm app), the
+  # glsync census and serve.py's flags are plain JS / Python, tested under node against mock
+  # WebGL contexts -- no browser and no wasm build. Only when those files changed: the node
+  # comes from the cvcpkg emsdk bundle (hermetic, no apt), which is a big download.
+  cvcgl-wasm-js:
+    name: cvcGL wasm JS tests
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-cvcgl-wasm-js
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the browser-side files change?
+        id: paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvcGL/wasm \
+                   src/cvcGL/test/webgl_state_shadow_test.js src/cvcGL/examples/wasm/serve.py \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "browser-side files changed: $run"
+
+      - name: Provision node from the cvcpkg emsdk bundle
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Run the JS tests
+        if: steps.paths.outputs.run == 'true'
+        run: src/cvcGL/wasm/run-js-tests.sh
+
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
   # Mirrors release.yml's linux job exactly, but injects -<sha> into

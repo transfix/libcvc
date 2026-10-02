@@ -661,6 +661,51 @@ add_executable(cvcgl_sdl_input test/cvcgl_sdl_input.cpp)
 target_link_libraries(cvcgl_sdl_input PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
 
+# ── JavaScript tests (node) ──
+# The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node
+# against mock WebGL contexts -- no browser and no wasm build needed. node must come from the
+# Emscripten SDK (the cvcpkg emsdk bundle ships it), never from PATH (hermetic toolchain): under
+# emcmake that is CMAKE_CROSSCOMPILING_EMULATOR; otherwise $CVC_EMSDK_DIR/node/*/bin or the fleet's
+# /opt/cvc-wasm/emsdk, searched with NO_DEFAULT_PATH (or -DCVCGL_EMSDK_NODE=<node> by hand). No
+# emsdk node: the tests are not registered here, and CI runs them in its own job instead
+# (src/cvcGL/wasm/run-js-tests.sh, cvcgl-wasm-js in ci.yml).
+if(EMSCRIPTEN AND CMAKE_CROSSCOMPILING_EMULATOR)
+  set(_cvcgl_node ${CMAKE_CROSSCOMPILING_EMULATOR})
+else()
+  # A different CVC_EMSDK_DIR than the cached node was found under: look again (a node given
+  # with -D on the first configure is kept).
+  if(NOT DEFINED _CVCGL_EMSDK_NODE_FROM)
+    set(_CVCGL_EMSDK_NODE_FROM "$ENV{CVC_EMSDK_DIR}" CACHE INTERNAL
+        "CVC_EMSDK_DIR that CVCGL_EMSDK_NODE was looked up under")
+  elseif(DEFINED ENV{CVC_EMSDK_DIR} AND NOT "$ENV{CVC_EMSDK_DIR}" STREQUAL
+                                        "${_CVCGL_EMSDK_NODE_FROM}")
+    unset(CVCGL_EMSDK_NODE CACHE)
+    set(_CVCGL_EMSDK_NODE_FROM "$ENV{CVC_EMSDK_DIR}" CACHE INTERNAL
+        "CVC_EMSDK_DIR that CVCGL_EMSDK_NODE was looked up under")
+  endif()
+  file(GLOB _cvcgl_node_hints LIST_DIRECTORIES true "$ENV{CVC_EMSDK_DIR}/node/*/bin"
+       "/opt/cvc-wasm/emsdk/node/*/bin")
+  find_program(CVCGL_EMSDK_NODE NAMES node HINTS ${_cvcgl_node_hints} NO_DEFAULT_PATH
+               DOC "the Emscripten SDK's node, for cvcGL's JS tests (never a PATH node)")
+  set(_cvcgl_node ${CVCGL_EMSDK_NODE})
+endif()
+if(_cvcgl_node)
+  # webgl_state_shadow.js (the state shim): fuzzed against a mock WebGL with real GL/WebGL
+  # semantics, plus its mode precedence (URL > page > build > on).
+  add_test(NAME cvcgl_webgl_state_shadow
+           COMMAND ${_cvcgl_node} ${CMAKE_CURRENT_SOURCE_DIR}/test/webgl_state_shadow_test.js
+                   ${CMAKE_CURRENT_SOURCE_DIR}/wasm/webgl_state_shadow.js)
+  # glsync.js (wasm/devtools, the Firefox WebGL sync census dev tool): its flush model, frame
+  # clocks and URL handling, against a mock WebGL2 + fake rAF.
+  add_test(NAME cvcgl_glsync
+           COMMAND ${_cvcgl_node} ${CMAKE_CURRENT_SOURCE_DIR}/wasm/devtools/tests/test_glsync.js)
+  set_tests_properties(cvcgl_webgl_state_shadow cvcgl_glsync PROPERTIES LABELS js)
+else()
+  message(STATUS "cvcGL: no Emscripten SDK node (CVC_EMSDK_DIR, /opt/cvc-wasm/emsdk) -- the JS "
+                 "tests (cvcgl_webgl_state_shadow, cvcgl_glsync) are NOT registered; "
+                 "src/cvcGL/wasm/run-js-tests.sh runs them (CI: the cvcgl-wasm-js job)")
+endif()
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
