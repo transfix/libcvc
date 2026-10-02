@@ -23,7 +23,7 @@ recipe:
   # so cvc::gl::ImGuiOverlay actually renders for downstream GUI consumers instead of
   # being an inert stub. imgui is now a runtime dep (the export links the relocatable
   # $<INSTALL_INTERFACE:imgui>). Prior bundles shipped imgui-less, forcing consumers
-  # (cvcdbg demos) to rebuild cvcGL from source.
+  # that draw an overlay to rebuild cvcGL from source.
   # Bumped 2 -> 3: republish cvcGL against libcvc 3.4.0+cvc.3. The published +cvc.2 was built
   # against libcvc +cvc.2 and leaks an EXACT pin to it (cvcpkg records the built-against dep
   # version); that dragged the pre-guard libcvc +cvc.2 into wasm-mt consumer installs, so
@@ -40,7 +40,7 @@ recipe:
   # Bumped 5 -> 6: rebuild against the relocatable-export libcvc +cvc.5 (libcvc #453). cvcGL source
   # is unchanged, but cvcgl exact-pins the libcvc it built against — the published +cvc.5 pins the
   # broken-export libcvc +cvc.4, so `cvcpkg install cvc/libcvc cvc/cvcgl --platform wasm-mt` dragged
-  # +cvc.4 back in and the demo3 wasm link still failed. This reships cvcgl +cvc.6 built against (and
+  # +cvc.4 back in and a consumer's wasm link still failed. This reships cvcgl +cvc.6 built against (and
   # re-pinning) libcvc +cvc.5, so the wasm consumer install stays on the clean export end-to-end.
   # Bumped 6 -> 7: rebuild against + re-pin libcvc +cvc.6 (the consumer-side ImageMagick
   # delegate-closure fix in cvcConfig.cmake.in). cvcGL source unchanged; the exact-pin means

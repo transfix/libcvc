@@ -60,10 +60,11 @@ target_link_libraries(lsystem_coast PRIVATE cvcGL ${VTK_LIBRARIES} Boost::progra
 vtk_module_autoinit(TARGETS lsystem_coast MODULES ${VTK_LIBRARIES})
 
 # terrain_lab — the visual QA surface for the cvc::world L-system terrain source
-# (dbg-technical/21 §5). RENDERS the generator's own output: terrain coloured by
-# the raster's per-cell material (or risk/occupancy/height), props grown from the
-# built-in L-system recipes and tessellated in place, volumetric water below the
-# sea level, a drifting cloud slab — all regenerated live from the ImGui panel.
+# (docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md). RENDERS the generator's own output:
+# terrain coloured by the raster's per-cell material (or risk/occupancy/height),
+# props grown from the built-in L-system recipes and tessellated in place,
+# volumetric water below the sea level, a drifting cloud slab — all regenerated
+# live from the ImGui panel.
 # cvc::world + cvc::lsys are compiled into cvc::cvc (linked transitively via cvcGL),
 # so no extra find_package/link. Enrolled in _wasm_demos below.
 add_executable(terrain_lab terrain_lab.cpp)

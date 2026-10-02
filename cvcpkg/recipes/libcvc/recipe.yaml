@@ -72,8 +72,8 @@ recipe:
   # Bumped 1 -> 2 (3.4.0 lineage): republish the family so the bundle ships the
   # nav::sim_world::set_material_lam live setter (#433). It is an inline header
   # method (no exported symbol / ABI change), but consumers that compile against
-  # the SDK headers need it present -- notably the cvcdbg demo3 force-bias slider
-  # (CVC-DBG/cvcdbg#142), whose wasm-mt build installs cvc/libcvc from the catalog
+  # the SDK headers need it present -- notably a downstream wasm-mt app's live
+  # force-bias control, whose build installs cvc/libcvc from the catalog
   # and will not compile until 3.4.0+cvc.2 (with the setter) is published. The
   # published 3.4.0+cvc.1 predates #433. cvcgl already sits at +cvc.2, so this
   # brings the tested-together family back to a single revision.
@@ -81,8 +81,8 @@ recipe:
   # (two-head sigmoid λ_soft/λ_hard, #436). The wasm-mt republish also (a) turns CVC_STATE_EXEC back
   # ON for wasm (it was wrongly forced OFF — the state_exec evaluator has no gRPC dependency and must
   # always build), and (b) picks up the gRPC/xmlrpc dep guard above so `cvcpkg install cvc/libcvc
-  # --platform wasm-mt` resolves again. A v2 .cvcnav hard-fails on a pre-v2 host, so hosts (demo3 /
-  # cvcdbg fleet) must land 3.4.0+cvc.3 before any v2 blob ships.
+  # --platform wasm-mt` resolves again. A v2 .cvcnav hard-fails on a pre-v2 host, so every host that
+  # loads .cvcnav blobs must land 3.4.0+cvc.3 before any v2 blob ships.
   # Bumped 3 -> 4 (3.4.0 lineage): the +cvc.3 comment above was WRONG — wasm-mt did NOT resolve. The
   # +cvc.3 gRPC/xmlrpc guard only scoped abseil/protobuf/grpc; `pack` bakes a bundle's required_deps
   # from depends.runtime FILTERED BY the target platform (builder.py generate_manifest), so the wasm-mt
@@ -98,8 +98,8 @@ recipe:
   # Bumped 4 -> 5 (3.4.0 lineage): the +cvc.4 wasm-mt bundle resolved cleanly but its EXPORTED
   # cvcTargets.cmake baked 15 build-machine absolute paths into cvc::cvc's INTERFACE_LINK_LIBRARIES
   # (libMagick++/libMagickCore + the codec delegates + libzstd, all under /home/runner/.../wasm-deps),
-  # so a relocated consumer's link died with "libMagick++-7.Q16HDRI.a ... missing" — which is why the
-  # cvcdbg wasm demo3 gallery could never link. libcvc #453 makes the STATIC wasm export relocatable
+  # so a relocated consumer's link died with "libMagick++-7.Q16HDRI.a ... missing" — which is why a
+  # downstream wasm app could never link. libcvc #453 makes the STATIC wasm export relocatable
   # (synthesise ImageMagick::Magick++/::MagickCore + PkgConfig::ZSTD imported targets so the export
   # names targets, not paths; cvcConfig.cmake.in re-resolves them per-consumer). A recipe edit can't
   # fix the already-published +cvc.4 bundle — this reships a clean +cvc.5 wasm-mt export. Native is

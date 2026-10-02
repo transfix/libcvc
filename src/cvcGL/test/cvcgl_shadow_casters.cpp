@@ -2,11 +2,12 @@
 // out of the shadow maps, and -- the point -- out of the decision to re-bake.
 //
 // vtkShadowMapBakerPass re-renders every caster into its depth maps whenever ANY
-// view prop's MTime moved, hidden or not, casting or not. In the demo3 wasm
-// profile that was a 30-37 ms bake on every due frame, triggered by vehicle
-// poses, a fog texture repaint and overlay restyles -- none of which change a
-// building's shadow. The scene's baker now re-bakes only for a light, or a prop
-// that casts, that changed (or joined or left), and draws casters only.
+// view prop's MTime moved, hidden or not, casting or not. In a wasm profile of a
+// large scene with heavy per-frame overlays that was an expensive bake on every due
+// frame, triggered by vehicle poses, a fog texture repaint and overlay restyles --
+// none of which change a building's shadow. The scene's baker now re-bakes only for
+// a light, or a prop that casts, that changed (or joined or left), and draws
+// casters only.
 //
 // Pins:
 //   A. (headless) the flag: default true, inherited by descendants -- including

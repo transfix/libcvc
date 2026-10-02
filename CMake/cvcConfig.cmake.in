@@ -126,7 +126,7 @@ if(@CVC_ENABLE_IMAGEMAGICK@)
   # find_library, and it wins on a wasm consumer (it finds the static libs in the prefix
   # without pkg-config). Gating on _cvc_im_synth skipped the append for that stock target,
   # so a wasm consumer's link failed with undefined BZ2_*/lzma_*/xml* symbols — which is
-  # what broke the cvcdbg demo3 gallery even after the export was made relocatable. Any
+  # what kept a downstream wasm app from linking even after the export was made relocatable. Any
   # MagickCore that reaches here is either a static one that NEEDS the closure or a shared
   # one for which the append is a harmless dedup, so run it whenever the target exists.
   if(TARGET ImageMagick::MagickCore)

@@ -5,11 +5,10 @@
   This file is part of VolMagick. LGPL 2.1 (see other headers).
 */
 
-// nav_stats_test — the base (RF-free) cvc::nav::nav_stats collector + scorecard,
+// nav_stats_test — the base (domain-neutral) cvc::nav::nav_stats collector + scorecard,
 // driven over a hand-computed scripted trajectory. Every accumulator is checked
 // against a value worked out on paper; the same corpus + numbers are mirrored in
-// CVC-DBG/cvcdbg tests/nav_stats_test.cpp and CVC-Lab/GRL-SNAM tests/test_scorecard.py
-// (the shared cross-repo schema contract).
+// CVC-Lab/GRL-SNAM tests/test_scorecard.py (the shared cross-repo schema contract).
 
 #include <array>
 #include <cmath>
