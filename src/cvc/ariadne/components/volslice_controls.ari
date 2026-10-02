@@ -1,0 +1,33 @@
+# volslice_controls.ari — a REUSABLE Ariadne component: live controls for a `type: volslice` node.
+# Binds the two-way cvc::volslice::state_settings keys (state at
+# "<scene>.graphics.root.children.bunny_volume.volslice.*"), so a slider drives the slice renderer
+# with NO host C++ — the declarative replacement for volslice_bunny.cpp's "Volume slices" panel.
+#
+# Convention: it binds a volslice node named `bunny_volume` (the id the volume demos use). To drive a
+# differently-named node, copy this file and change the node id in the bind paths.
+#
+# Use it:
+#     import: components/volslice_controls.ari
+#     windows:
+#       - include: volslice_controls
+
+units:
+  volslice_controls:
+    window: Volume slices
+    id: volslice_controls
+    children:
+      - slider_float: Quality
+        bind: graphics.root.children.bunny_volume.volslice.quality
+        lo: 0.1
+        hi: 1.0
+        def: 0.6
+      - slider_float: Near-plane peel
+        bind: graphics.root.children.bunny_volume.volslice.near_plane
+        lo: 0.0
+        hi: 2.0
+        def: 0.0
+      - slider_int: Max planes
+        bind: graphics.root.children.bunny_volume.volslice.max_planes
+        lo: 32
+        hi: 2000
+        def: 1000

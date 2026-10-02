@@ -1,0 +1,51 @@
+# volren_bunny.ari — the cvcGL volume-raycast bunny, ported to Ariadne. The volume is the signed
+# distance field of the embedded Stanford bunny MESH, declared with `source: { sdf: { mesh:, dim } }`
+# (no asset file). Run by the generic ariadne_hello host:
+#
+#   ariadne_hello volren_bunny.ari --component-path src/cvc/ariadne/components
+#   ariadne_hello volren_bunny.ari --offscreen --png volren.png --frames 200 --component-path …
+
+meta:
+  name: Volren bunny (Ariadne)
+  author: cvc
+  min_libcvc: 3.4.0
+
+# Reusable control components (shared with the other bunny demos): the lighting rig + camera
+# navigation, plus the volume-raycast panel. All declarative — no host C++ panels.
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/volren_controls.ari
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: stage_lighting
+  - include: camera_controls
+  - include: volren_controls
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: bunny_volume
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 64 } }
+      fit: { height: 100, up: y }
+      volren:
+        distance_field: true
+        ambient: 0.35
+        steps: 384
+        resolution_scale: 0.6
+        isosurfaces:
+          - { value: 0.0, color: [0.85, 0.82, 0.88], opacity: 1.0, shininess: 24 }
+        lights:
+          - { color: [1.0, 1.0, 1.0], direction: [-0.4, -0.3, -0.85] }
+    - node: ground
+      type: geometry
+      source: { plane: { size: 440 } }
+      material: { color: [0.18, 0.19, 0.22], ambient: 0.3, diffuse: 0.8 }

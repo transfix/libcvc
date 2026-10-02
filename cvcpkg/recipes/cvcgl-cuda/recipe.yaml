@@ -4,9 +4,11 @@ recipe:
   upstream_version: "3.4.0"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
-  # Bumped 1 -> 2: carries cvcGL's fast-draw low-memory mapper and the BSD-3-Clause license
-  # metadata for its VTK 9.5.0-derived code (same as cvcgl 3.4.0+cvc.17).
-  cvc_revision: 2
+  # Bumped 1 -> 3 (2 is #522's): ships share/cvcGL/ (the wasm state shim), as cvcgl 3.4.0+cvc.18.
+  # Bumped 3 -> 4 (3 is master's wasm app contract above, and the 2 set aside for this change
+  # sits below it; none published yet): carries cvcGL's fast-draw low-memory mapper and the
+  # BSD-3-Clause license metadata for its VTK 9.5.0-derived code (same as cvcgl 3.4.0+cvc.19).
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -78,6 +80,7 @@ package:
     - lib/libcvcGL*
     - lib/cmake/cvcGL/
     - include/cvc/gl/
+    - share/cvcGL/
   cmake_packages:
     - name: cvcGL
       targets:

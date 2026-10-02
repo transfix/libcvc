@@ -1694,6 +1694,9 @@ def _typed_node(sg, name):
 %pythonappend cvc::gl::SceneRenderer::SceneRenderer %{
     if args: self._pycvc_scene = args[0]
 %}
+// FrameYield: SceneRenderer / ViewportManager::setFrameYield take it. At namespace
+// scope, so it must be seen before either header (SWIG does not follow #include).
+%include "cvc/gl/FrameYield.h"
 %include "cvc/gl/SceneRenderer.h"
 
 %extend cvc::gl::SceneRenderer {

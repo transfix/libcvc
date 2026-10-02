@@ -97,6 +97,12 @@ cmake --install "$CVC_BUILD_DIR" --component cvcgl-examples
 install -d "$CVC_INSTALL_DIR/share/cvcgl-examples"
 install -m 755 "$CVC_SOURCE_DIR/src/cvcGL/examples/wasm/serve.py" \
   "$CVC_INSTALL_DIR/share/cvcgl-examples/serve.py"
+# The Firefox WebGL sync census (a dev tool, off unless serve.py --glsync): serve.py finds it in
+# devtools/ next to itself. The launcher below does not pass --glsync, so pages are unchanged.
+install -d "$CVC_INSTALL_DIR/share/cvcgl-examples/devtools"
+install -m 644 "$CVC_SOURCE_DIR/src/cvcGL/wasm/devtools/glsync.js" \
+  "$CVC_SOURCE_DIR/src/cvcGL/wasm/devtools/GLSYNC.md" \
+  "$CVC_INSTALL_DIR/share/cvcgl-examples/devtools/"
 
 cat > "$CVC_INSTALL_DIR/bin/cvcgl-examples-web" <<'LAUNCHER'
 #!/usr/bin/env bash

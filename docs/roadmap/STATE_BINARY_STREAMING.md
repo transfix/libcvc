@@ -21,6 +21,7 @@ binary-gap (independent PR), Phase 2 sinks + scoping.
 - [5. Phased plan + validation](#5-phased-plan--validation)
 - [6. Open questions for sign-off](#6-open-questions-for-sign-off)
 - [7. Corrections from the adversarial review](#7-corrections-from-the-adversarial-review)
+- [8. Application showcase — the live A/V capture app (Ariadne)](#8-application-showcase--the-live-av-capture-app-ariadne)
 
 ---
 
@@ -443,3 +444,104 @@ Confirmed sound by the review: the two-layer thesis; frame lifetime under drop-o
 (UAF-safe by refcount); Change 1 (pure widening); Change 2 envelope (backward-compatible);
 `state_bounded_queue` drop-oldest reuse; "don't content-address live frames / don't reuse
 pull-based chunking for live."
+
+---
+
+## 8. Application showcase — the live A/V capture app (Ariadne)
+
+*Status: **PLANNED — spec only, not yet built.** Proposed 2026-10-02. This is a **libcvc-side**
+capability showcase and reusable-component effort; it is NOT an engagement/downstream-app demo (see §8.7). It
+builds entirely on substrate already landed: the `stream` scene node + `stream_view` widget (Phase 2),
+and the SDL3 camera source, SDL3 audio capture source, and SDL3 audio-output sink (Phase 3). The
+first proof-of-concept host `ariadne_stream` + `stream.ari` (one synthetic/camera stream shown as a
+world-space quad AND in a draggable `stream_view` window) is the seed this phase generalizes.*
+
+**Goal.** Demonstrate the capture → stream → sink pipeline end-to-end as a polished, reusable Ariadne
+application: a live camera shown two ways (viewport-filling and windowed), plus microphone
+record/playback, with the UI expressed in the Ariadne DSL as **reusable components** that other
+Ariadne apps can import and build on.
+
+### 8.1 Modes
+
+- **Fullscreen camera (ortho fill).** The camera stream drawn on a viewport-filling quad under an
+  **orthographic** projection, NDC-aligned, independent of the 3D navigation camera. This is the
+  headline framerate proof: we can stream video at a good framerate that fills the whole screen (with
+  or without the UI overlay). *The current `ariadne_stream` PoC uses the perspective/orbit camera +
+  a world-space quad; the ortho viewport-fill is the new piece here (see §8.4).*
+- **Windowed camera.** The same stream routed to a draggable/resizable ImGui `stream_view` window
+  (the reusable widget already landed). **Near-term extension (likely its own Ariadne app):** a
+  **video-conference grid** — N participants, each a `stream_view` instance in a grid layout — reusing
+  the exact same window component. The windowed mode here is the single-tile proof of that component.
+- **Switching.** A `view.mode` state key toggles fullscreen ⟷ windowed (driven by the menu and a
+  hotkey). One stream stays open across the switch; the frame pool is sized for whichever sinks are
+  live (`expected_subscribers`), so a mode change never under-provisions.
+
+### 8.2 Reusable Ariadne components (DSL-first)
+
+Each is a `components/*.ari` fragment imported via `cvc://` (like the existing `scene_controls.ari` /
+`stage_lighting.ari`), bound to `cvc::state`, parameterized by the stream token, and reusable
+standalone:
+
+- **`stream_viewport`** — the ortho viewport-fill of a stream (the fullscreen mode; needs §8.4).
+- **`stream_window`** — a titled, draggable/resizable window wrapping `stream_view`, parameterized by
+  `{title, stream}`; the conference grid instantiates N of these.
+- **`camera_settings`** — a settings dialog: device picker (`list_cameras`), resolution/fps, start/stop
+  — all bound to state keys.
+- **`mic_controls`** — a capture-device picker, a record toggle, a playback button, and a level meter;
+  drives the audio capture source → a record buffer → the audio-output sink.
+- **`av_menu`** — the main menubar: **View** (fullscreen/windowed toggle), **Camera…**, **Microphone…**
+  (open the settings dialogs), **Record / Playback**, **Quit**.
+
+Every setting is a state key, so a script, a replicated peer, or another app can drive it; each dialog
+is a window toggled by a `*.open` bind. The components carry no app-specific assumptions so a different
+Ariadne app can `import` any of them.
+
+### 8.3 The app is the composition
+
+The app document (`stream_av.ari`) is almost entirely DSL: it `import`s the components, lays out the
+menubar + the active-mode view + the settings windows, and wires the state keys. The C++ host (the
+evolved `ariadne_stream`, or a new `ariadne_av`) does ONLY the non-DSL work: open the camera / mic /
+audio-output devices, register the stream node + `stream_view` widget + the new ortho-viewport node,
+and run the frame loop. Everything the user touches is a reusable `.ari` component — the pattern the
+whole Ariadne line should lean on.
+
+### 8.4 New capabilities needed (small, enumerated)
+
+- **Ortho viewport-fill stream quad** — a cvcGL path that draws the stream texture on an NDC-aligned
+  quad under an orthographic projection filling the viewport, independent of the navigation camera.
+  Either a `type: stream` option (`fill: viewport`, ortho) or a dedicated `stream_viewport` node.
+  (`stream_view`/`StreamTextureBinding` already give the zero-copy frame→texture upload; this adds the
+  ortho full-frame draw target.)
+- **Record buffer + replay** — a pure `buffer_source` (cvc core `frame_source` that replays a captured
+  byte buffer as chunked frames, then stops) + the mic→buffer record glue + buffer→audio-output
+  playback. (The audio capture source and audio-output sink already exist; the record/replay buffer and
+  wiring are new, and hardware-free-testable.)
+- **Mode-conditional view** — Ariadne visibility/conditional binding to show the fullscreen quad OR the
+  windowed component from `view.mode` (confirm this is already expressible with the existing
+  `visible:`/bind machinery; if not, a small conditional-container addition).
+- **Audio level meter** (optional polish) — a bound bar widget fed by the capture RMS.
+
+### 8.5 Framerate / validation
+
+- Fullscreen ortho quad sustains camera-native fps (30/60) filling a 1080p viewport, UI on and off;
+  measure glass-to-glass latency; confirm the frame→texture path stays zero-copy (a single
+  `glTexImage2D` per new frame, no intermediate copy; reuse the Phase-2 zero-copy assertion).
+- Windowed mode: the same stream in a resizable window; dragging/resizing never stalls the producer
+  (drop-at-source holds; the pool's `expected_subscribers` covers both sinks).
+- Record/playback: record N seconds of mic, replay through the audio-output sink (audible round-trip
+  interactively); a headless test asserts the record buffer length and the replayed frame count/pts
+  monotonicity (the device open is gated, like the other capture tests).
+
+### 8.6 Docs + examples
+
+Extend `docs/STREAMING.md` with an **"A/V application"** section: the two modes, each reusable
+component with a short `.ari` snippet, how to drive settings through state, and how to reuse
+`stream_window` to build the conference grid. Ship the `components/*.ari` files + the app doc + a
+captured screenshot.
+
+### 8.7 Scope note — libcvc-side, not an engagement demo
+
+This is a general **libcvc/cvcGL** capability showcase and reusable Ariadne A/V component library — it
+is **not** an engagement/downstream-app demo. It lives in `src/cvcGL/examples/` + `docs/`, uses only
+public libcvc/cvcGL, and the components are intended for any Ariadne application (e.g. the future
+video-conference app). No downstream-project names in the code, components, or docs.

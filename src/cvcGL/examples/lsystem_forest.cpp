@@ -1221,6 +1221,10 @@ int main(int argc, char **argv) {
   rig.setWarmth(0.45);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
+  // The loop yields to the browser once per frame (emscripten_sleep(0) at its end), so VTK
+  // need not yield again inside every render (FrameYield::App: VTK 9.5's in-render
+  // emscripten_sleep off; a no-op natively).
+  view.setFrameYield(SceneRenderer::FrameYield::App);
   // A real sky, not a flat void: a vertical gradient background (hazy horizon at
   // the bottom, deep blue at the zenith). Done on the renderer rather than as a
   // sky sphere on purpose — an enclosing sky sphere would occlude the directional

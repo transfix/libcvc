@@ -69,13 +69,15 @@ recipe:
   # _rect partial texture uploads, caster-aware shadow baking (setCastsShadow), and the cheaper
   # scene-bounds walk deferred under hidden chrome. ABI-stale: SceneGraph/GraphicsNode/
   # NullGraphicNode layouts changed, so the published +cvc.14 must not be mixed with this build.
-  # Bumped 15 -> 17 (16 went out as a native publish of master without this):
-  # the fast-draw low-memory mapper (LowMemoryPolyDataMapper: skips empty
-  # cell-type agents and re-binds the cached shader program; ~2/3 fewer GL calls per frame on
-  # WebGL2 with byte-identical pixels; CVCGL_LOWMEM_DRAW / setDrawPath for A/B), now the base of
-  # StreamingLowMemoryPolyDataMapper; late shader replacements reach the GPU on the low-memory
-  # path. License metadata now LGPL-2.1-only AND BSD-3-Clause (VTK 9.5.0-derived code).
-  cvc_revision: 17
+  # Bumped 15 -> 18 (16 published, 17 is #522's): cvcgl_wasm_app(), the WebGL state shim, FrameYield.
+  # Bumped 18 -> 19 (16 went out as a native publish of master without this, 18 is master's wasm
+  # app contract above, and the 17 set aside for this change sits below it): the fast-draw
+  # low-memory mapper (LowMemoryPolyDataMapper: skips empty cell-type agents and re-binds the
+  # cached shader program; ~2/3 fewer GL calls per frame on WebGL2 with byte-identical pixels;
+  # CVCGL_LOWMEM_DRAW / setDrawPath for A/B), now the base of StreamingLowMemoryPolyDataMapper;
+  # late shader replacements reach the GPU on the low-memory path. License metadata now
+  # LGPL-2.1-only AND BSD-3-Clause (VTK 9.5.0-derived code).
+  cvc_revision: 19
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -161,6 +163,10 @@ package:
     - lib/cvcGL*
     - lib/cmake/cvcGL/
     - include/cvc/gl/
+    # The browser-side half of cvcGL: webgl_state_shadow.js, which cvcgl_wasm_app() (from
+    # lib/cmake/cvcGL/cvcGLWasm.cmake) links into a wasm app as a --pre-js. Installed on every
+    # platform so the layout is uniform; only Emscripten consumers use it.
+    - share/cvcGL/
   cmake_packages:
     - name: cvcGL
       targets:

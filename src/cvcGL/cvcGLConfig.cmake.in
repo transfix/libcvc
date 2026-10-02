@@ -1,5 +1,11 @@
 @PACKAGE_INIT@
 
+# The WebAssembly JS directory (share/cvcGL/wasm), captured NOW, before any find_dependency: it is
+# computed from PACKAGE_PREFIX_DIR, which on CMake <= 3.29 every dependency config generated with
+# configure_package_config_file's PACKAGE_INIT (cvc, SDL3, zstd, libxml2, ...) overwrites with ITS
+# prefix. Used and unset below.
+set(_cvcGL_wasm_data_dir "@PACKAGE_CVCGL_WASM_DATADIR@")
+
 include(CMakeFindDependencyMacro)
 
 # cvcGL's public interface links cvc::cvc and the VTK modules below, so both
@@ -58,5 +64,17 @@ endif()
 @CVCGL_SDL_DEP@
 
 include("${CMAKE_CURRENT_LIST_DIR}/cvcGLTargets.cmake")
+
+# WebAssembly app support: cvcgl_wasm_app(<target> ...) (cvcGLWasm.cmake, next to this file).
+# GLOBAL properties, so the function works whichever directory scope called find_package. The JS
+# directory was computed from this file's own location (PACKAGE_PREFIX_DIR, captured at the top),
+# so a relocated prefix hands out its own share/cvcGL/wasm. A plain set, not set_and_check: a
+# bundle without the JS still passes find_package; cvcgl_wasm_app fails only if asked for the shim
+# and the file is missing.
+set_property(GLOBAL PROPERTY CVCGL_WASM_DATA_DIR "${_cvcGL_wasm_data_dir}")
+unset(_cvcGL_wasm_data_dir)
+# Whether this cvcGL was built -pthread (wasm-mt); MIMALLOC AUTO follows it.
+set_property(GLOBAL PROPERTY CVCGL_WASM_PTHREADS @CVCGL_WASM_PTHREADS@)
+include("${CMAKE_CURRENT_LIST_DIR}/cvcGLWasm.cmake" OPTIONAL)
 
 check_required_components(cvcGL)

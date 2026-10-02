@@ -257,6 +257,36 @@ if(WIN32)
   set_target_properties(cvcGL PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
 
+# ── WebAssembly app support: cvcgl_wasm_app() ──
+# The browser-side half of cvcGL: webgl_state_shadow.js (a --pre-js that answers the GL state
+# queries ImGuiOverlay's imgui_impl_opengl3 and VTK make every frame without a synchronous
+# GPU-process round-trip) and the CMake function that links it, plus mimalloc, into an app. See
+# wasm/cvcGLWasm.cmake and docs/CVCGL_WASM.md. In-tree consumers (examples/) get the function
+# from the include below; installed consumers from cvcGLConfig.cmake. Two GLOBAL properties tell
+# it where the JS is and whether this cvcGL is -pthread (wasm-mt: Emscripten forbids mixing
+# pthread and non-pthread objects, so a consumer of a -pthread libcvcGL.a is -pthread too).
+set(CVCGL_WASM_PTHREADS OFF)
+if(EMSCRIPTEN)
+  if(CVC_WASM_PTHREADS) # in-tree (top-level CMakeLists.txt option)
+    set(CVCGL_WASM_PTHREADS ON)
+  else() # standalone: whatever made this build -pthread
+    get_directory_property(_cvcgl_dir_copts COMPILE_OPTIONS)
+    set(_cvcgl_pt_flags "${_cvcgl_dir_copts};${CMAKE_CXX_FLAGS};${CMAKE_EXE_LINKER_FLAGS}")
+    foreach(_p INTERFACE_COMPILE_OPTIONS INTERFACE_LINK_OPTIONS)
+      get_target_property(_v cvc::cvc ${_p})
+      if(_v)
+        string(APPEND _cvcgl_pt_flags ";${_v}")
+      endif()
+    endforeach()
+    if(_cvcgl_pt_flags MATCHES "(^|[; ])-pthread($|[; ])")
+      set(CVCGL_WASM_PTHREADS ON)
+    endif()
+  endif()
+endif()
+set_property(GLOBAL PROPERTY CVCGL_WASM_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/wasm")
+set_property(GLOBAL PROPERTY CVCGL_WASM_PTHREADS ${CVCGL_WASM_PTHREADS})
+include("${CMAKE_CURRENT_SOURCE_DIR}/wasm/cvcGLWasm.cmake")
+
 # ── Install + export a package config so consumers can find_package(cvcGL) ──
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -292,10 +322,14 @@ endif()
 
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so
 # find_dependency(VTK COMPONENTS ...) re-finds the same modules for consumers.
+# PATH_VARS: @PACKAGE_CVCGL_WASM_DATADIR@ is computed from the INSTALLED config's own location
+# (PACKAGE_PREFIX_DIR) when a consumer configures -- relocatable, no builder path baked in.
+set(CVCGL_WASM_DATADIR share/cvcGL/wasm)
 configure_package_config_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/cvcGLConfig.cmake.in"
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfig.cmake"
   INSTALL_DESTINATION lib/cmake/cvcGL
+  PATH_VARS CVCGL_WASM_DATADIR
 )
 write_basic_package_version_file(
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfigVersion.cmake"
@@ -305,8 +339,13 @@ write_basic_package_version_file(
 install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfig.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfigVersion.cmake"
+  "${CMAKE_CURRENT_SOURCE_DIR}/wasm/cvcGLWasm.cmake"
   DESTINATION lib/cmake/cvcGL
 )
+# Installed on every platform (the bundle layout stays uniform, and cvcgl_wasm_app is a no-op
+# outside Emscripten): the state shim cvcgl_wasm_app() links.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/wasm/webgl_state_shadow.js"
+        DESTINATION ${CVCGL_WASM_DATADIR})
 # libcvcGL carries code derived from VTK 9.5.0 (BSD-3-Clause, in
 # LowMemoryPolyDataMapper.cpp), whose notice a binary redistribution must
 # reproduce in its documentation: the standalone cvcGL package ships it too.
@@ -525,6 +564,13 @@ add_test(NAME cvcgl_renderer COMMAND cvcgl_renderer)
 add_executable(cvcgl_scene_renderer_facade test/cvcgl_scene_renderer_facade.cpp)
 target_link_libraries(cvcgl_scene_renderer_facade PRIVATE cvcGL)
 add_test(NAME cvcgl_scene_renderer_facade COMMAND cvcgl_scene_renderer_facade)
+
+# FrameYield: natively App is a no-op (DoubleBuffer stays on, the effective mode
+# reads Vtk), SceneRenderer forwards to its ViewportManager, and the nested alias
+# + CVC_GL_HAS_FRAME_YIELD consumers feature-detect with exist. Headless.
+add_executable(cvcgl_frame_yield test/cvcgl_frame_yield.cpp)
+target_link_libraries(cvcgl_frame_yield PRIVATE cvcGL)
+add_test(NAME cvcgl_frame_yield COMMAND cvcgl_frame_yield)
 
 add_executable(cvcgl_volren_node test/cvcgl_volren_node.cpp)
 target_link_libraries(cvcgl_volren_node PRIVATE cvcGL)
@@ -746,6 +792,51 @@ add_executable(cvcgl_sdl_input test/cvcgl_sdl_input.cpp)
 target_link_libraries(cvcgl_sdl_input PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
 
+# ── JavaScript tests (node) ──
+# The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node
+# against mock WebGL contexts -- no browser and no wasm build needed. node must come from the
+# Emscripten SDK (the cvcpkg emsdk bundle ships it), never from PATH (hermetic toolchain): under
+# emcmake that is CMAKE_CROSSCOMPILING_EMULATOR; otherwise $CVC_EMSDK_DIR/node/*/bin or the fleet's
+# /opt/cvc-wasm/emsdk, searched with NO_DEFAULT_PATH (or -DCVCGL_EMSDK_NODE=<node> by hand). No
+# emsdk node: the tests are not registered here, and CI runs them in its own job instead
+# (src/cvcGL/wasm/run-js-tests.sh, cvcgl-wasm-js in ci.yml).
+if(EMSCRIPTEN AND CMAKE_CROSSCOMPILING_EMULATOR)
+  set(_cvcgl_node ${CMAKE_CROSSCOMPILING_EMULATOR})
+else()
+  # A different CVC_EMSDK_DIR than the cached node was found under: look again (a node given
+  # with -D on the first configure is kept).
+  if(NOT DEFINED _CVCGL_EMSDK_NODE_FROM)
+    set(_CVCGL_EMSDK_NODE_FROM "$ENV{CVC_EMSDK_DIR}" CACHE INTERNAL
+        "CVC_EMSDK_DIR that CVCGL_EMSDK_NODE was looked up under")
+  elseif(DEFINED ENV{CVC_EMSDK_DIR} AND NOT "$ENV{CVC_EMSDK_DIR}" STREQUAL
+                                        "${_CVCGL_EMSDK_NODE_FROM}")
+    unset(CVCGL_EMSDK_NODE CACHE)
+    set(_CVCGL_EMSDK_NODE_FROM "$ENV{CVC_EMSDK_DIR}" CACHE INTERNAL
+        "CVC_EMSDK_DIR that CVCGL_EMSDK_NODE was looked up under")
+  endif()
+  file(GLOB _cvcgl_node_hints LIST_DIRECTORIES true "$ENV{CVC_EMSDK_DIR}/node/*/bin"
+       "/opt/cvc-wasm/emsdk/node/*/bin")
+  find_program(CVCGL_EMSDK_NODE NAMES node HINTS ${_cvcgl_node_hints} NO_DEFAULT_PATH
+               DOC "the Emscripten SDK's node, for cvcGL's JS tests (never a PATH node)")
+  set(_cvcgl_node ${CVCGL_EMSDK_NODE})
+endif()
+if(_cvcgl_node)
+  # webgl_state_shadow.js (the state shim): fuzzed against a mock WebGL with real GL/WebGL
+  # semantics, plus its mode precedence (URL > page > build > on).
+  add_test(NAME cvcgl_webgl_state_shadow
+           COMMAND ${_cvcgl_node} ${CMAKE_CURRENT_SOURCE_DIR}/test/webgl_state_shadow_test.js
+                   ${CMAKE_CURRENT_SOURCE_DIR}/wasm/webgl_state_shadow.js)
+  # glsync.js (wasm/devtools, the Firefox WebGL sync census dev tool): its flush model, frame
+  # clocks and URL handling, against a mock WebGL2 + fake rAF.
+  add_test(NAME cvcgl_glsync
+           COMMAND ${_cvcgl_node} ${CMAKE_CURRENT_SOURCE_DIR}/wasm/devtools/tests/test_glsync.js)
+  set_tests_properties(cvcgl_webgl_state_shadow cvcgl_glsync PROPERTIES LABELS js)
+else()
+  message(STATUS "cvcGL: no Emscripten SDK node (CVC_EMSDK_DIR, /opt/cvc-wasm/emsdk) -- the JS "
+                 "tests (cvcgl_webgl_state_shadow, cvcgl_glsync) are NOT registered; "
+                 "src/cvcGL/wasm/run-js-tests.sh runs them (CI: the cvcgl-wasm-js job)")
+endif()
+
 # ── GL tests: one at a time ──
 # Every cvcGL test that renders through a GL context takes the CTest resource
 # lock cvcgl_gl_context, so ctest never runs two of them at once; the headless
@@ -764,7 +855,8 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
-  cvcgl_streaming_races cvcgl_sdl_input)
+  cvcgl_streaming_races cvcgl_sdl_input
+  cvcgl_webgl_state_shadow cvcgl_glsync)
 set_tests_properties(${_cvcgl_gl_tests} PROPERTIES RESOURCE_LOCK cvcgl_gl_context)
 
 # ── examples (opt-in, OFF by default) ──

@@ -1,0 +1,35 @@
+# volren_controls.ari — a REUSABLE Ariadne component: live controls for a `type: volren` node.
+# Binds the two-way cvc::volren::state_settings keys (state at
+# "<scene>.graphics.root.children.bunny_volume.volren.*"), so a slider drives the software raycaster
+# with NO host C++ — the declarative replacement for the volren_bunny.cpp "Volume raycast" panel.
+#
+# Convention: it binds a volren node named `bunny_volume`. To drive a differently-named node, copy
+# this file and change the node id in the bind paths.
+#
+# Use it:
+#     import: components/volren_controls.ari
+#     windows:
+#       - include: volren_controls
+
+units:
+  volren_controls:
+    window: Volume raycast
+    id: volren_controls
+    children:
+      - slider_int: Steps
+        bind: graphics.root.children.bunny_volume.volren.steps
+        lo: 64
+        hi: 1024
+        def: 384
+      - slider_float: Ambient
+        bind: graphics.root.children.bunny_volume.volren.ambient
+        lo: 0.0
+        hi: 1.0
+        def: 0.35
+      - slider_int: Supersample (AA)
+        bind: graphics.root.children.bunny_volume.volren.supersample
+        lo: 1
+        hi: 4
+        def: 1
+      - checkbox: Volumetric shadows
+        bind: graphics.root.children.bunny_volume.volren.shadows.enabled
