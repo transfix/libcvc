@@ -183,6 +183,26 @@ vtkRenderWindow *SceneRenderer::renderWindow() const {
 SceneGraph &SceneRenderer::scene() const { return *m_impl->scene; }
 const std::string &SceneRenderer::name() const { return m_impl->name; }
 
+void SceneRenderer::setFrameYield(FrameYield mode) {
+  m_impl->requireOpen();
+  m_impl->vm->setFrameYield(mode);
+}
+
+SceneRenderer::FrameYield SceneRenderer::frameYield() const {
+  m_impl->requireOpen();
+  return m_impl->vm->frameYield();
+}
+
+void SceneRenderer::lockFrameYield() {
+  m_impl->requireOpen();
+  m_impl->vm->lockFrameYield();
+}
+
+bool SceneRenderer::frameYieldLocked() const {
+  m_impl->requireOpen();
+  return m_impl->vm->frameYieldLocked();
+}
+
 ViewportManager &SceneRenderer::viewportManager() const {
   m_impl->requireOpen();
   return *m_impl->vm;

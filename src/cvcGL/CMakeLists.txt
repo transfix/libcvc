@@ -425,6 +425,13 @@ add_executable(cvcgl_scene_renderer_facade test/cvcgl_scene_renderer_facade.cpp)
 target_link_libraries(cvcgl_scene_renderer_facade PRIVATE cvcGL)
 add_test(NAME cvcgl_scene_renderer_facade COMMAND cvcgl_scene_renderer_facade)
 
+# FrameYield: natively App is a no-op (DoubleBuffer stays on, the effective mode
+# reads Vtk), SceneRenderer forwards to its ViewportManager, and the nested alias
+# + CVC_GL_HAS_FRAME_YIELD consumers feature-detect with exist. Headless.
+add_executable(cvcgl_frame_yield test/cvcgl_frame_yield.cpp)
+target_link_libraries(cvcgl_frame_yield PRIVATE cvcGL)
+add_test(NAME cvcgl_frame_yield COMMAND cvcgl_frame_yield)
+
 add_executable(cvcgl_volren_node test/cvcgl_volren_node.cpp)
 target_link_libraries(cvcgl_volren_node PRIVATE cvcGL)
 add_test(NAME cvcgl_volren_node COMMAND cvcgl_volren_node)

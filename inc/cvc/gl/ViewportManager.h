@@ -11,6 +11,7 @@
 #ifndef __CVC_GL_VIEWPORT_MANAGER_H__
 #define __CVC_GL_VIEWPORT_MANAGER_H__
 
+#include <cvc/gl/FrameYield.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -170,6 +171,47 @@ public:
   int frameHeight() const;
 
   vtkRenderWindow *renderWindow() const; // escape hatch, parity with SceneRenderer
+
+  // ---- frame yield (WebAssembly) ---------------------------------------------
+  // Who yields to the browser once per frame: VTK inside every render (Vtk, the
+  // default) or the caller's loop (App) -- see cvc/gl/FrameYield.h. Call
+  // setFrameYield(FrameYield::App) only from a loop that calls
+  // emscripten_sleep(0) once per frame on EVERY path that renders; cvcGL then
+  // switches VTK 9.5's in-render sleep off (SetDoubleBuffer(0) on the window),
+  // which saves a clamped trip through the event loop per frame.
+  //
+  // A no-op natively and in a wasm build without Asyncify (there is no in-render
+  // yield to remove), where frameYield() stays Vtk and DoubleBuffer is untouched.
+  // A page URL can override the app for an A/B without a rebuild:
+  // ?frameyield=vtk|app, read once when the window is created (not while locked).
+  //
+  // Watchdog (wasm, App): if this window renders 8 times without the page having
+  // yielded to the browser in between, cvcGL logs once and restores VTK's yield
+  // (frameYield() is Vtk again), so a loop that broke the contract stays alive
+  // instead of freezing the page. Calling setFrameYield(App) again re-arms it.
+  // Every vtkRenderWindow::Render() counts (a StartEvent observer on the window),
+  // whichever path made it: render(), writePNG / frameRGB, renderWindow()->Render(),
+  // a resize. When cvcGL turned DoubleBuffer off it restores the value it found
+  // then, so an app's own SetDoubleBuffer(0) survives the trip if the app made it
+  // first (before setFrameYield(App), or under ?frameyield=app before the window
+  // exists); one made after is undone. With VTK >= 9.6
+  // (no in-render yield to restore), or while locked, it only reports.
+  using FrameYield = cvc::gl::FrameYield;
+  void setFrameYield(FrameYield mode);
+  FrameYield frameYield() const; // the EFFECTIVE mode
+
+  // Lock FrameYield::App for the life of this window. For an app linked with
+  // -sASYNCIFY_IGNORE_INDIRECT=1: VTK 9.5's in-render emscripten_sleep is reached
+  // through the virtual Render(), so under that flag it TRAPS, and App must not be
+  // undone at runtime. Once locked, ?frameyield=vtk and setFrameYield(Vtk) are
+  // refused (and logged), and the watchdog reports loudly instead of turning
+  // VTK's yield back on. One-way: there is no unlock. A page can lock every window
+  // before the app starts with Module.cvcglFrameYieldLocked = 1, which
+  // cvcgl_wasm_app() links in automatically when the app's final link options
+  // carry -sASYNCIFY_IGNORE_INDIRECT=1 (or on FRAME_YIELD_LOCKED ON). Natively it
+  // only records the lock (frameYield() still reads Vtk: nothing yields in-render).
+  void lockFrameYield();
+  bool frameYieldLocked() const;
 
 private:
   struct Impl;
