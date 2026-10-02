@@ -63,11 +63,12 @@ class StreamBindingSink {
 public:
   virtual ~StreamBindingSink() = default;
 
-  // Bind TOKEN's already-open stream onto the GeometryNode named NODE-ID, replacing any prior
-  // binding on that node (which frees its frame-pool slot first, so a same-token rebind does
-  // not hit the fixed pool's refuse-another-subscriber limit). Returns "" on success, else a
-  // human-readable "gl-bind-stream: ..." error. MUST be called on the render thread (the verb
-  // runs inline in the action lane, which is that thread).
+  // Bind TOKEN's already-open stream onto the GeometryNode named NODE-ID. On SUCCESS it replaces
+  // any prior binding on that node; on FAILURE (unknown token, node missing, pool full) it leaves
+  // an existing binding intact — the new token is resolved and subscribed before the old binding is
+  // released, so a failed rebind never drops a working stream. Returns "" on success, else a
+  // human-readable "gl-bind-stream: ..." error. MUST be called on the render thread (the verb runs
+  // inline in the action lane, which is that thread).
   virtual std::string bind_stream(const std::string &node_id, const std::string &token) = 0;
 };
 

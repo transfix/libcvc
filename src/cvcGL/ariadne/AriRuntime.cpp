@@ -88,10 +88,9 @@ public:
     if (!node)
       return "gl-bind-stream: no GeometryNode '" + node_id +
              "' in the scene (NODE-ID must name a top-level geometry node)";
-    // Replace any prior binding on this node FIRST, so its subscription (and frame-pool slot) is
-    // released before we subscribe again — otherwise a same-token rebind would momentarily need two
-    // subscribers and a pool sized to exactly one would refuse the new one.
-    verb_bindings_.erase(node_id);
+    // Resolve + subscribe the NEW token BEFORE touching any existing binding on this node, so a
+    // failed rebind (unknown token, or pool full) leaves a working binding intact rather than
+    // dropping it. The replace below only happens once the new subscription is in hand.
     cvc::app &app = view_->scene().appContext();
     cvc::ariadne::stream::stream_channel *ch =
         cvc::ariadne::stream::stream_registry::for_app(app).lookup(token);
@@ -103,6 +102,12 @@ public:
       return "gl-bind-stream: stream '" + token +
              "' cannot admit another subscriber (frame pool full)";
     node->setUseSingleColor(false); // show the streamed texture, not a flat material colour
+    // Install the new binding, replacing any prior one on this node. operator[] destroys the old
+    // binding (unsubscribing it) only now that the new one holds its subscription, so the swap is
+    // non-destructive on failure. A same-token rebind briefly holds two subscribers across this
+    // line, so it needs pool room (expected_subscribers >= 2); on a pool sized to one the subscribe
+    // above fails cleanly and the existing binding keeps running (rebinding a node to the stream it
+    // already shows is a no-op anyway).
     verb_bindings_[node_id] = std::make_shared<StreamTextureBinding>(
         app, token, std::weak_ptr<cvc::gl::GeometryNode>(node), std::move(sub));
     return {}; // ok — first tick() applies a frame this same frame
@@ -134,13 +139,16 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   app_rt_.set_backend(backend_);
   backend_.install(app_rt_.runtime(), *overlay_);
 
-  // (gl-bind-stream): register the process-global verb once, and publish THIS document's GL sink
-  // (the adapter) into its Runtime's document_scope so the verb routes here via ictx.document — no
-  // process-global capture, correct per-document routing. Teardown order makes this safe:
-  // ~AriRuntime destroys app_rt_ (hence the Runtime + its document_scope, dropping this handle)
-  // BEFORE scene_, so the handle never outlives the adapter, and the bindings' dtors (in
-  // ~GlSceneAdapter) run after the handle is gone — all on the render thread. Must run before the
-  // first load()/drain().
+  // (gl-bind-stream): register the process-global verb, and publish THIS document's GL sink (the
+  // adapter) into its Runtime's document_scope so the verb routes here via ictx.document — no
+  // process-global capture, correct per-document routing. Teardown order makes this safe: member
+  // order (scene_ before app_rt_) means ~AriRuntime destroys app_rt_ (hence the Runtime + its
+  // document_scope, dropping this handle, and ~Runtime closes the document's streams) BEFORE
+  // scene_, so the handle never outlives the adapter and each verb binding's dtor unsubscribes
+  // against an already-closed (null-lookup) channel. Thread contract: this teardown — like the
+  // whole scene, the declarative bindings, and StreamTextureBinding in general — must run on the
+  // render thread; the host destroys the AriRuntime there (the shared single-thread contract, not
+  // new to this verb). Must run before the first load()/drain().
   register_gl_stream_intrinsics();
   if (auto *sink = dynamic_cast<StreamBindingSink *>(scene_.get()))
     app_rt_.runtime().document_scope().slot<GlStreamSinkHandle>(kGlStreamSinkSlot)->sink = sink;
