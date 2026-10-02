@@ -13,9 +13,11 @@
 #include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -55,6 +57,71 @@ struct channel_policy {
   std::vector<std::string> global;   // declared app-root-globals (the '/'-escape allowlist)
 };
 
+// A per-DOCUMENT resource scope, threaded through intrinsics_context by a non-owning pointer. The
+// HOST (e.g. the Ariadne Runtime) owns exactly ONE per live document and tears it down during
+// document teardown — while the app and its state tree are still alive — so resources an intrinsic
+// opens during the document's life (streams, handles, …) are destroyed deterministically WITH the
+// document, not at process exit. This is the non-singleton alternative to a process-static owning
+// table: ownership follows the owning object's lifetime, never a global. A context whose host
+// installs no scope (e.g. the load-time init: lane) leaves `document` null; such an intrinsic must
+// fail cleanly rather than leak a resource with no owner.
+//
+// Resources live in typed, named slots. slot<T>(key, args…) get-or-creates a T owned by the scope
+// and returns a stable pointer to it; every call with the SAME key returns the SAME object (a key
+// reused with a different T returns nullptr — a programming error, caught without RTTI via a
+// per-type tag). On clear()/destruction the slots are destroyed in REVERSE creation order, each
+// resource's destructor running while the owning document/app is still alive.
+class document_scope {
+public:
+  document_scope() = default;
+  ~document_scope() { clear(); }
+  document_scope(const document_scope &) = delete;
+  document_scope &operator=(const document_scope &) = delete;
+
+  template <class T, class... Args> T *slot(const std::string &key, Args &&...args) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = slots_.find(key);
+    if (it != slots_.end())
+      return it->second.tag == type_tag<T>() ? static_cast<T *>(it->second.obj.get()) : nullptr;
+    auto obj = std::make_shared<T>(std::forward<Args>(args)...);
+    T *raw = obj.get();
+    slots_.emplace(key, entry{std::static_pointer_cast<void>(std::move(obj)), type_tag<T>()});
+    order_.push_back(key);
+    return raw;
+  }
+
+  // Destroy every slot now (reverse creation order), running each resource's destructor while the
+  // owner is still alive. Idempotent; the destructor calls it. Resources are released OUTSIDE the
+  // lock — a resource dtor may re-enter state/scheduler.
+  void clear() {
+    std::vector<std::shared_ptr<void>> victims;
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      victims.reserve(order_.size());
+      for (auto it = order_.rbegin(); it != order_.rend(); ++it) {
+        auto s = slots_.find(*it);
+        if (s != slots_.end())
+          victims.push_back(std::move(s->second.obj));
+      }
+      slots_.clear();
+      order_.clear();
+    }
+  } // victims' destructors run here, after the lock is released
+
+private:
+  template <class T> static const void *type_tag() {
+    static const char t = 0; // unique address per instantiated T — an RTTI-free type identity
+    return &t;
+  }
+  struct entry {
+    std::shared_ptr<void> obj;
+    const void *tag;
+  };
+  std::mutex mu_;
+  std::vector<std::string> order_; // creation order, for LIFO teardown
+  std::unordered_map<std::string, entry> slots_;
+};
+
 struct intrinsics_context {
   scheduler_base *sched = nullptr;   // Non-owning; outlives context (sync or async scheduler)
   cvc::state *root = nullptr;        // Non-owning; app-scoped lifetime
@@ -66,6 +133,7 @@ struct intrinsics_context {
   std::string node_id;               // Node identity
   std::string root_path;             // Chroot path (empty = full tree)
   const channel_policy *channels = nullptr; // §12 channel enforcement (non-owning; host-installed)
+  document_scope *document = nullptr; // Per-document resource owner (non-owning; host-installed)
 
   // State-watch connection registry (opaque — managed by intrinsics impl)
   struct watch_entry {
