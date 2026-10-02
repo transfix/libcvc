@@ -398,9 +398,7 @@ int main(int argc, char **argv) {
   if (bundle.empty()) {
     for (const char *p :
          {"deps/share/cvc-scenes/austin_south", "../deps/share/cvc-scenes/austin_south",
-          "share/cvc-scenes/austin_south", "platoon-sim/scene_viewer/exports/scenes/austin_south",
-          "../platoon-sim/scene_viewer/exports/scenes/austin_south", "scenes/austin_south",
-          "../scenes/austin_south"}) {
+          "share/cvc-scenes/austin_south", "scenes/austin_south", "../scenes/austin_south"}) {
       if (std::filesystem::exists(std::string(p) + "/terrain.json")) {
         bundle = p;
         std::printf("nav_city_drive: no --bundle given, autodetected %s\n", bundle.c_str());
