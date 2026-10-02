@@ -154,8 +154,17 @@ void stream::update_stats() {
 }
 
 void stream::start_producer(std::unique_ptr<frame_source> source, double hz) {
-  if (closed_.load(std::memory_order_relaxed) || !source || !channel_)
+  // Owner-thread API (like close()/update_stats) — not the producer thread, and not concurrent with
+  // close(). seq_cst here pairs with close()'s seq_cst exchange so the closed-check and the
+  // re-check below bracket a racing close() rather than reading a stale relaxed value.
+  if (closed_.load(std::memory_order_seq_cst) || !source || !channel_)
     return; // a closed (or never-opened) stream takes no producer
+  // Reject a source whose frames can't fit the pool slab (a width/height/codec mismatch) up front,
+  // so it fails loudly here instead of silently discarding every frame forever on the producer
+  // thread. (frame_bytes()==0 — an unsized source — is also rejected.)
+  const std::size_t need = source->frame_bytes();
+  if (need == 0 || need > channel_->pool().slab_bytes())
+    return;
   // Replace any existing producer: stop()+join the old one before dropping its source, so its tick
   // (which captured the old source) can never run against a freed source.
   if (producer_)
@@ -185,6 +194,14 @@ void stream::start_producer(std::unique_ptr<frame_source> source, double hz) {
       },
       hz);
   producer_->start();
+  // Defensive against a close() that raced in on another thread (the API is owner-thread, so this
+  // should never trigger; it keeps a mis-threaded caller from leaving a producer publishing onto an
+  // already-closed channel). If close() completed while producer_ was still null it stopped
+  // nothing, so stop the one we just started.
+  if (closed_.load(std::memory_order_seq_cst)) {
+    producer_->stop();
+    producer_.reset();
+  }
 }
 
 void stream::close() {

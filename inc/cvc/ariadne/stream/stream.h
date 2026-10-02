@@ -108,7 +108,10 @@ public:
   // source that returns stop=true ends the producer loop. Replaces any existing producer (the old
   // one is stopped+joined first). The producer is always stopped (joined) by close()/~stream BEFORE
   // the channel and pool it publishes into are torn down, so no producer callback races teardown.
-  // Called on the owner thread (not the producer thread).
+  // Rejected (no-op) if the stream is closed or the source is unsized / its frame_bytes() exceed
+  // the pool slab (a format mismatch), so a bad source fails here rather than silently producing
+  // nothing. Called on the OWNER thread (the same thread as close()/drain); not the producer
+  // thread.
   void start_producer(std::unique_ptr<frame_source> source, double hz);
 
   // Idempotent. Stops (joins) the producer if one is running, then closes the channel (unblocking

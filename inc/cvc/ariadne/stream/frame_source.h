@@ -47,6 +47,12 @@ class frame_source {
 public:
   virtual ~frame_source() = default;
 
+  // The exact byte size of one frame this source produces (e.g. w*h*4 for dense rgba8). The stream
+  // checks this against its pool slab size at start_producer() and refuses a source whose frames
+  // would not fit — so a width/height/codec mismatch is a loud rejection, not an invisible dead
+  // stream that discards every frame. Must match what fill() writes.
+  virtual std::size_t frame_bytes() const = 0;
+
   // Fill ONE frame into `buf` (capacity `cap` bytes, the stream's slab size) and report what was
   // written. The source knows its own format (width/height/codec), fixed when it was created to
   // match the stream it feeds, so it needs no format argument. Called on the producer thread.

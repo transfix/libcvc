@@ -61,6 +61,27 @@ format_desc pcm(int frames, int channels) {
   return f;
 }
 
+// A controllable test frame_source: produces `bytes`-sized frames, stops after `limit` (0 = never).
+struct test_source : frame_source {
+  std::size_t bytes_;
+  int limit_;
+  int made_ = 0;
+  test_source(std::size_t bytes, int limit) : bytes_(bytes), limit_(limit) {}
+  std::size_t frame_bytes() const override { return bytes_; }
+  produced_frame fill(std::uint8_t *buf, std::size_t cap) override {
+    produced_frame out;
+    if (bytes_ == 0 || bytes_ > cap)
+      return out;
+    for (std::size_t i = 0; i < bytes_; ++i)
+      buf[i] = 0xAB;
+    out.bytes = bytes_;
+    out.pts_seconds = made_ * 0.01;
+    ++made_;
+    out.stop = (limit_ > 0 && made_ >= limit_); // spent after `limit_` frames
+    return out;
+  }
+};
+
 } // namespace
 
 // --------------------------------------------------------------------------
@@ -717,4 +738,33 @@ TEST(StreamProducer, RestartReplacesThePriorProducer) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   EXPECT_GT(s->channel().total_published(), at_restart) << "restarted producer did not run";
   s->close();
+}
+
+TEST(StreamProducer, SelfStoppingSourceEndsTheProducer) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam3";
+  p.format = rgba(4, 4); // slab = 64 bytes
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  // A source that publishes exactly 5 frames then returns stop=true.
+  s->start_producer(std::make_unique<test_source>(/*bytes*/ 64, /*limit*/ 5), /*hz*/ 500.0);
+  for (int i = 0; i < 200 && s->channel().total_published() < 5; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(10)); // let the stop tick settle
+  EXPECT_EQ(s->channel().total_published(), 5u) << "self-stopping source published the wrong count";
+  s->close(); // joins the already-finished thread — no hang
+}
+
+TEST(StreamProducer, RejectsASourceWhoseFrameExceedsTheSlab) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam4";
+  p.format = rgba(4, 4); // slab = 64 bytes
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  // 128 bytes > 64-byte slab: start_producer must reject it up front (no silent dead stream).
+  s->start_producer(std::make_unique<test_source>(/*bytes*/ 128, /*limit*/ 0), 200.0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_EQ(s->channel().total_published(), 0u) << "oversized source should have been rejected";
 }

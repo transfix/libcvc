@@ -31,6 +31,10 @@ public:
   // produced pts (the producer_thread's own rate governs real cadence); defaults to 30.
   synthetic_source(int w, int h, double fps = 30.0);
 
+  std::size_t frame_bytes() const override {
+    return static_cast<std::size_t>(w_) * static_cast<std::size_t>(h_) * 4u; // dense rgba8
+  }
+
   // Writes a w*h*4 rgba8 frame whose pattern is offset by the frame counter (motion), returns
   // w*h*4 bytes and a pts advanced by 1/fps. Skips (bytes = 0) only if the slab is too small for
   // one frame. Never stops on its own (an endless generator).
