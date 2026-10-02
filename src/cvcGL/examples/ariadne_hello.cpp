@@ -17,6 +17,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h> // emscripten_sleep — yield the asyncify main loop to the browser
+#endif
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/uri.h> // register_cvc_uri_handler — the cvc:// component-library import path
@@ -73,6 +76,15 @@ int main(int argc, char **argv) {
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
   }
+  // A wasm demo build bakes in its own .ari (CVC_ARIADNE_WASM_DOC) and embeds the component library
+  // in MEMFS (see the examples CMake --embed-file). With no argv in the browser, default to that doc
+  // and add the MEMFS root to the search path so `cvc://components/*.ari` resolves at /components.
+#ifdef CVC_ARIADNE_WASM_DOC
+  if (docPath.empty()) {
+    docPath = CVC_ARIADNE_WASM_DOC;
+    componentPaths.push_back("/");
+  }
+#endif
   // The cvc:// component-library import path (import: cvc://components/foo.ari), resolved against
   // CVC_ARIADNE_PATH + any --component-path dirs + the install datadir + cwd. Register before load.
   cvc::ariadne::register_cvc_uri_handler(componentPaths);
@@ -319,7 +331,11 @@ int main(int argc, char **argv) {
     while (!view.windowClosed() && !quit) {
       frame_body(1.0 / 120.0);
       view.render(); // draws the scene + the Ariadne overlay (runs rt.render())
+#ifdef __EMSCRIPTEN__
+      emscripten_sleep(0); // yield to the browser each frame (asyncify); the canvas drives cadence
+#else
       std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120 Hz cap
+#endif
     }
   }
   cam.detach();
