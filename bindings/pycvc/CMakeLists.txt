@@ -58,10 +58,16 @@ if(SWIG_EXECUTABLE AND NOT SWIG_DIR AND NOT DEFINED ENV{SWIG_LIB})
   get_filename_component(_pycvc_swig_prefix "${SWIG_EXECUTABLE}" DIRECTORY)
   get_filename_component(_pycvc_swig_prefix "${_pycvc_swig_prefix}" DIRECTORY)
   file(GLOB _pycvc_swig_libs "${_pycvc_swig_prefix}/share/swig/*/swig.swg")
-  if(_pycvc_swig_libs)
+  list(LENGTH _pycvc_swig_libs _pycvc_swig_nlibs)
+  if(_pycvc_swig_nlibs EQUAL 1)
     list(GET _pycvc_swig_libs 0 _pycvc_swig_lib)
     get_filename_component(_pycvc_swig_lib "${_pycvc_swig_lib}" DIRECTORY)
     set(SWIG_DIR "${_pycvc_swig_lib}" CACHE PATH "SWIG runtime library (swig.swg) directory")
+  elseif(_pycvc_swig_nlibs GREATER 1)
+    # Several share/swig/<ver> trees (e.g. left over from an upgrade): pairing the binary with
+    # another version's runtime library would generate wrong code silently, so make the caller pick.
+    message(FATAL_ERROR "pycvc: ${_pycvc_swig_prefix}/share/swig holds several SWIG libraries "
+                        "(${_pycvc_swig_libs}); pass -DSWIG_DIR=<the one matching ${SWIG_EXECUTABLE}>.")
   endif()
 endif()
 find_package(SWIG 4.0 REQUIRED COMPONENTS python)
@@ -69,10 +75,17 @@ set(CVC_PYCVC_REQUIRE_SWIG_VERSION "" CACHE STRING
   "Fail configure unless SWIG is this version (e.g. 4.4 or 4.4.1). Empty accepts any SWIG >= 4.0.")
 message(STATUS "pycvc: SWIG ${SWIG_VERSION}: ${SWIG_EXECUTABLE} (library: ${SWIG_DIR})")
 if(CVC_PYCVC_REQUIRE_SWIG_VERSION)
+  # Ask the executable itself: FindSWIG caches SWIG_VERSION and does not re-run `swig -version`
+  # when SWIG_EXECUTABLE changes in a reused build directory, so the cached value can describe a
+  # different binary than the one that will generate the wrappers.
+  execute_process(COMMAND "${SWIG_EXECUTABLE}" -version OUTPUT_VARIABLE _pycvc_swig_out
+                  ERROR_QUIET RESULT_VARIABLE _pycvc_swig_rc)
+  string(REGEX MATCH "SWIG Version ([0-9]+(\\.[0-9]+)*)" _pycvc_swig_m "${_pycvc_swig_out}")
+  set(_pycvc_swig_actual "${CMAKE_MATCH_1}")
   string(REPLACE "." "\\." _pycvc_swig_want "${CVC_PYCVC_REQUIRE_SWIG_VERSION}")
-  if(NOT SWIG_VERSION MATCHES "^${_pycvc_swig_want}(\\.|$)")
+  if(NOT _pycvc_swig_rc EQUAL 0 OR NOT _pycvc_swig_actual MATCHES "^${_pycvc_swig_want}(\\.|$)")
     message(FATAL_ERROR
-      "pycvc: SWIG ${SWIG_VERSION} at ${SWIG_EXECUTABLE} is not the required "
+      "pycvc: SWIG '${_pycvc_swig_actual}' at ${SWIG_EXECUTABLE} is not the required "
       "${CVC_PYCVC_REQUIRE_SWIG_VERSION}. Build the bindings with the cvcpkg swig: "
       "-DSWIG_EXECUTABLE=<prefix>/bin/swig -DSWIG_DIR=<prefix>/share/swig/<ver>.")
   endif()
