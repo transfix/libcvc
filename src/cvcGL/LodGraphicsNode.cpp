@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LodGraphicsNode.h>
+#include <cvc/gl/SceneGraph.h>
 #include <vtkCamera.h>
 #include <vtkProp.h>
 #include <vtkRenderer.h>
@@ -199,13 +200,25 @@ void LodGraphicsNode::applyRungVisibility() {
   const bool drawable = isVisibleInHierarchy();
   const int active = activeRung();
   const int n = rungCount();
+  bool changed = false;
   for (int i = 0; i < n; ++i) {
     // SetVisibility, not Add/RemoveViewProp: the rung stays registered and keeps
     // its GPU buffers (see the header). vtkSetMacro only bumps the MTime on a
     // real change, so an unchanged frame costs the shadow bake nothing.
-    if (vtkProp *p = m_rungs[i]->prop())
-      p->SetVisibility(drawable && i == active ? 1 : 0);
+    if (vtkProp *p = m_rungs[i]->prop()) {
+      const int want = drawable && i == active ? 1 : 0;
+      if (p->GetVisibility() != want) {
+        p->SetVisibility(want);
+        changed = true;
+      }
+    }
   }
+  // What is drawn changed without the renderer's prop list changing, which is
+  // all a still camera watches besides the scene's content version: bump it,
+  // so the clipping range is re-fitted to the rung now showing.
+  if (changed)
+    if (SceneGraph *sg = getSceneGraph())
+      sg->markContentChanged();
 }
 
 int LodGraphicsNode::select(const cvc::lod::view_params &view) {

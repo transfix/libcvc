@@ -56,6 +56,11 @@ void toArray(const cvc::bounding_box &b, double out[6]) {
   out[4] = b.minz;
   out[5] = b.maxz;
 }
+
+bool sameBox(const cvc::bounding_box &a, const cvc::bounding_box &b) {
+  return a.minx == b.minx && a.miny == b.miny && a.minz == b.minz && a.maxx == b.maxx &&
+         a.maxy == b.maxy && a.maxz == b.maxz;
+}
 } // namespace
 
 StreamingGeometryNode::StreamingGeometryNode(cvc::app &ctx, const std::string &statePath,
@@ -73,6 +78,7 @@ StreamingGeometryNode::StreamingGeometryNode(cvc::app &ctx, const std::string &s
   double b[6];
   toArray(m_bounds, b);
   m_core->setReservedBounds(b);
+  m_appliedBounds = m_bounds;
 
   // Draw-time uniforms + the subclass shader hook, in every pass.
   m_uniformCb = vtkSmartPointer<vtkCallbackCommand>::New();
@@ -261,11 +267,29 @@ void StreamingGeometryNode::setDerivedBoundsNow(const cvc::bounding_box &bounds)
       return;
     m_bounds = bounds; // a pending apply re-sends this same (latest) box
   }
+  if (sameBox(bounds, m_appliedBounds))
+    return; // what the mapper already reports
   if (m_core) {
     double b[6];
     toArray(bounds, b);
     m_core->setReservedBounds(b);
   }
+  m_appliedBounds = bounds;
+  noteExtentChanged();
+}
+
+void StreamingGeometryNode::noteExtentChanged() {
+  // A new box (grown over appended points, re-derived, re-laid out) is what VTK
+  // culls and clips by, and it changes no MTime: tell the scene, so a camera
+  // holding still re-fits its clipping range to it -- if the range is fitted to
+  // this prop at all. vtkRenderer::ComputeVisiblePropBounds skips a prop with
+  // UseBounds off (what a host sets on dynamic overlays to keep them out of the
+  // fit) or Visibility off; a re-fit for one of those would change nothing.
+  vtkActor *a = actor();
+  if (!a || !a->GetUseBounds() || !a->GetVisibility())
+    return;
+  if (SceneGraph *sg = getSceneGraph())
+    sg->markContentChanged();
 }
 
 void StreamingGeometryNode::setPickable(bool pickable) {
@@ -368,10 +392,20 @@ void StreamingGeometryNode::onSceneGraphChanged() {
 
 bool StreamingGeometryNode::hasPendingLocked() const {
   return m_pendingLayout || m_dirtyHi > m_dirtyLo || m_boundsPending || m_drawRangePending ||
-         m_pickablePending;
+         m_pickablePending || m_shapePending;
 }
 
 void StreamingGeometryNode::requestApply() { scheduleApply(); }
+
+void StreamingGeometryNode::stageShapeChanged() {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_shapePending = true;
+}
+
+void StreamingGeometryNode::markShapeChanged() {
+  stageShapeChanged();
+  scheduleApply();
+}
 
 void StreamingGeometryNode::scheduleApply() {
   // Hold the scene's event sink, not a raw SceneGraph*: the owner thread may
@@ -408,6 +442,7 @@ void StreamingGeometryNode::scheduleApply() {
 
 void StreamingGeometryNode::applyPending() {
   bool layoutChanged = false, boundsChanged = false, rangeChanged = false, pickChanged = false;
+  bool shapeChanged = false;
   bool pick = false;
   std::size_t lo = 0, hi = 0, drawFirst = 0, drawCount = kAllTriangles;
   cvc::bounding_box bounds;
@@ -434,7 +469,9 @@ void StreamingGeometryNode::applyPending() {
     if (m_boundsPending) {
       bounds = m_bounds;
       m_boundsPending = false;
-      boundsChanged = true;
+      // Staged is not changed: setReservedBounds and a restyle's re-derived box
+      // stage whatever they are given, often the very box already applied.
+      boundsChanged = !sameBox(bounds, m_appliedBounds);
     }
     if (m_drawRangePending) {
       drawFirst = m_drawFirst;
@@ -447,10 +484,20 @@ void StreamingGeometryNode::applyPending() {
       m_pickablePending = false;
       pickChanged = true;
     }
+    shapeChanged = m_shapePending;
+    m_shapePending = false;
   }
   ++m_applies;
+  if (boundsChanged || layoutChanged)
+    noteExtentChanged();
   if (pickChanged && actor())
     actor()->SetPickable(pick ? 1 : 0);
+  // Streamed writes bump no MTime by design (that is what keeps the upload
+  // partial), so a CASTING node says itself that what it draws changed: an
+  // actor Modified() re-bakes the shadow maps at the scene's update interval
+  // and re-uploads nothing.
+  if ((hi > lo || layoutChanged || rangeChanged || shapeChanged) && castsShadow() && actor())
+    actor()->Modified();
   if (!m_core)
     return;
   if (hi > lo)
@@ -459,6 +506,7 @@ void StreamingGeometryNode::applyPending() {
     double b[6];
     toArray(bounds, b);
     m_core->setReservedBounds(b);
+    m_appliedBounds = bounds;
     updateBoundingBoxNode();
   }
   if (rangeChanged)

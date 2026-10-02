@@ -108,16 +108,25 @@ struct StreamStats {
 //   * Bounds come from the reserved box, never from the points: writes do not
 //     call Modified(), so VTK never re-walks them. Keep the content inside it
 //     (a RibbonNode grows its box to fit what it appends; a DrapedLinkNode
-//     derives its box from the height field).
+//     derives its box from the height field). A box that actually changes
+//     bumps SceneGraph::contentVersion(), so a still CameraController re-fits
+//     its clipping range to it -- unless the actor is left out of that fit
+//     (UseBounds or Visibility off). A host that turns UseBounds back on should
+//     call SceneGraph::markContentChanged().
 //   * NOT PICKABLE by default. VTK's CPU pickers (SceneRenderer::pickWorld's
 //     vtkCellPicker) intersect the polydata, not what the shader draws: the
 //     reserved-but-unwritten capacity, triangles outside the draw range and a
 //     DrapedLinkNode's undraped template would all be hit while the drawn
 //     overlay was missed. setPickable(true) opts in for a node whose drawn
 //     triangles ARE its polydata (no draw range, no vertex-shader placement).
-//   * Streamed writes do not trigger a shadow re-bake (VTK's baker watches
-//     MTimes, and writes bump none). Overlays drawn with shadows on cast stale
-//     shadows until something else causes a bake.
+//   * Shadows. Streamed writes bump no MTime, so they would never re-bake a
+//     shadow map on their own. A node that casts (GraphicsNode::setCastsShadow,
+//     the default here) therefore marks its actor modified when an apply
+//     changes what it draws -- points written, a relayout, a new draw range, a
+//     subclass's markShapeChanged() (a DrapedLinkNode moved or restyled by
+//     uniforms) -- and the scene's baker re-bakes it at its update interval
+//     (nothing is re-uploaded). RibbonNode and DrapedLinkNode are flat overlays and do not
+//     cast by default, so streaming them never costs a bake.
 //   * Re-showing a hidden node costs ONE full upload: setVisible(false) removes
 //     the prop from the renderer, and VTK releases its buffers. Material
 //     changes (GeometryNode::setColor, ...) upload nothing but bump the
@@ -211,6 +220,15 @@ protected:
   bool commitDerivedBounds(const cvc::bounding_box &bounds);
   // Apply what is staged: inline on the owner thread, else posted to it.
   void requestApply();
+  // What this node draws changed without a point write, relayout or draw
+  // range -- a subclass that places its geometry with uniforms (DrapedLinkNode's
+  // endpoints, width, lift, heights). A CASTING node then marks its actor
+  // modified at the next apply, so the shadow follows; nothing is uploaded.
+  // markShapeChanged stages and applies; stageShapeChanged only stages (for a
+  // caller that holds a lock of its own and calls requestApply() after).
+  // Any thread.
+  void markShapeChanged();
+  void stageShapeChanged();
   void unpinReservedBounds();
   bool reservedBoundsPinned() const;
   // Owner/render thread only, e.g. from beforeComputeBounds(): replace the box
@@ -243,6 +261,7 @@ private:
   static void onUpdateShader(vtkObject *caller, unsigned long eid, void *clientData,
                              void *callData);
   void requestRenderIfAttached();
+  void noteExtentChanged(); // bump SceneGraph::contentVersion if the prop is fitted
 
   StreamingMapperKind m_kind = StreamingMapperKind::Classic;
   StreamingMapperCore *m_core = nullptr; // owned by the mapper (GeometryNode::mapper())
@@ -253,10 +272,14 @@ private:
   std::size_t m_stagingCapacity = 0;
   std::size_t m_dirtyLo = 0, m_dirtyHi = 0; // merged staged-but-unapplied point range
   bool m_drawRangePending = false;
+  bool m_shapePending = false; // markShapeChanged
   std::size_t m_drawFirst = 0, m_drawCount = kAllTriangles;
   bool m_boundsPending = false;
   bool m_boundsPinned = false;
   cvc::bounding_box m_bounds;
+  // The box last handed to the mapper. Owner/render thread only (the ctor,
+  // applyPending, setDerivedBoundsNow): an apply of the same box is a no-op.
+  cvc::bounding_box m_appliedBounds;
   std::unique_ptr<StreamingLayout> m_pendingLayout;
   std::size_t m_triangleCount = 0;
   // The SceneGraph::postEventCoalesced key of this node's applies: the address

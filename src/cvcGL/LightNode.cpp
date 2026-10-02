@@ -47,6 +47,7 @@ struct LightNode::Impl {
 
 LightNode::LightNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_impl(std::make_unique<Impl>()) {
+  m_contributesToSceneBounds = false; // see SceneGraph::computeGraphicsBounds
   seedState();
 }
 

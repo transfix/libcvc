@@ -314,6 +314,85 @@ def test_scene_owned_lighting():
     print("  ok: a scene owns its lighting, and shadows refuse honestly")
 
 
+def test_metadata_mirror_follows_node():
+    """Metadata mirrors into state, read-only to others, and FOLLOWS the node.
+
+    It used to keep the first value: every later write threw a read-only error
+    that was swallowed. A Python int (a C++ long) was not mirrored at all.
+    """
+    sg = pycvc_gl.SceneGraph(app, "pymeta")
+    node = sg.addGraphics("tri", _make_tri())
+    sg.processEvents()
+    path = "pymeta.graphics.root.children.tri.metadata."
+    node.set_metadata("count", 3)
+    assert pycvc.state_get(app, path + "count") == "3"
+    node.set_metadata("count", 4)
+    assert pycvc.state_get(app, path + "count") == "4", pycvc.state_get(app, path + "count")
+    node.set_metadata("label", "a")
+    node.set_metadata("label", "b")
+    assert pycvc.state_get(app, path + "label") == "b"
+    assert node.get_metadata("count") == 4
+    mirror = pycvc.State.instance(app).child(path + "count")
+    assert mirror.readOnly()
+    try:
+        mirror.value("99")
+    except Exception:
+        pass
+    else:
+        raise AssertionError("the metadata mirror must stay read-only to other writers")
+    assert pycvc.state_get(app, path + "count") == "4"
+    print("  ok: metadata mirror follows the node, stays read-only, mirrors ints")
+
+
+def test_content_version():
+    """contentVersion() moves when the scene's extent may have (a camera re-fits
+    its clipping range on it); markContentChanged() bumps it by hand."""
+    sg = pycvc_gl.SceneGraph(app, "pycontent")
+    node = sg.addGraphics("tri", _make_tri())
+    sg.processEvents()
+    v0 = sg.contentVersion()
+    node.setPosition(5.0, 0.0, 0.0)  # a registered node moved
+    assert sg.contentVersion() > v0
+    v1 = sg.contentVersion()
+    sg.markContentChanged()
+    assert sg.contentVersion() == v1 + 1
+    print("  ok: contentVersion / markContentChanged")
+
+
+def test_texture_modified_rows():
+    """The partial texture upload is callable; headless there is nothing on the
+    GPU yet, so it is a no-op (the first draw uploads every pixel)."""
+    sg = pycvc_gl.SceneGraph(app, "pytexrows")
+    sg.addGraphics("tri", _make_tri())
+    gn = sg.geometry_node("tri")
+    gn.texture_modified_rows(0, 4)
+    gn.texture_modified_rect(0, 0, 2, 2)
+    sg.processEvents()
+    print("  ok: texture_modified_rows / _rect wrapped")
+
+
+def test_casts_shadow():
+    """setCastsShadow takes a node out of the shadow maps and the bake decision."""
+    sg = pycvc_gl.SceneGraph(app, "pycasts")
+    node = sg.addGraphics("tri", _make_tri())
+    assert node.castsShadow()
+    node.setCastsShadow(False)
+    assert not node.castsShadow()
+    node.setCastsShadow(True)
+    assert node.castsShadow()
+    print("  ok: setCastsShadow / castsShadow")
+
+
+def test_scene_bounds_flags():
+    """A light does not count toward the scene bounds; geometry does."""
+    sg = pycvc_gl.SceneGraph(app, "pybounds")
+    node = sg.addGraphics("tri", _make_tri())
+    assert node.contributesToSceneBounds()
+    light = sg.addLight("sun")
+    assert not light.contributesToSceneBounds()
+    print("  ok: contributesToSceneBounds")
+
+
 if __name__ == "__main__":
     test_build_scene()
     test_volume_scattering()
@@ -326,4 +405,9 @@ if __name__ == "__main__":
     test_director_python_node_type()
     test_group_nodes_compose_transforms()
     test_scene_owned_lighting()
+    test_metadata_mirror_follows_node()
+    test_content_version()
+    test_texture_modified_rows()
+    test_casts_shadow()
+    test_scene_bounds_flags()
     print("pycvc_gl scene tests: OK")

@@ -4,6 +4,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/NullGraphicNode.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/volume/volume.h>
 #include <iomanip>
@@ -255,6 +256,9 @@ void VolumeNode::setVolume(const cvc::volume &vol) {
   updateTransferFunctions();
   updateMetadata(vol);
   m_hasVolume = true;
+  // The volume's extent may have changed: cameras re-fit their clipping range.
+  if (SceneGraph *sg = getSceneGraph())
+    sg->markContentChanged();
 
   // Update bbox to match volume bounds
   updateBoundingBoxNode();

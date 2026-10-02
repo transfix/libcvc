@@ -37,7 +37,7 @@ public:
   // When false, only children's bounds are included (useful for root nodes)
   // When true, this node's bounds are included (useful for clipping regions)
   void setIncludeOwnBounds(bool include);
-  bool getIncludeOwnBounds() const { return m_includeOwnBounds; }
+  bool getIncludeOwnBounds() const { return m_combinedIncludesOwnBounds; }
 
   // Control whether this node's bounds automatically sync with children's combined bounds
   // When true (default), bounds expand to encompass all children
@@ -66,7 +66,6 @@ protected:
 private:
   cvc::bounding_box m_bounds;
   vtkSmartPointer<vtkActor> m_dummyActor; // Empty actor (never rendered)
-  bool m_includeOwnBounds;                // Whether to include own bounds in combined bbox
   bool m_syncBoundsWithChildren;          // Whether to auto-update bounds to match children
 };
 

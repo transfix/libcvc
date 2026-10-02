@@ -66,6 +66,10 @@ RibbonNode::RibbonNode(cvc::app &ctx, const std::string &statePath, const std::s
           ctx, statePath, name,
           ribbonLayout(std::max<std::size_t>(capacityCenters, 2), reservedBounds, mapper)),
       m_capacity(std::max<std::size_t>(capacityCenters, 2)), m_half(halfWidth) {
+  // A flat strip on the ground casts nothing worth a shadow bake, and a cast
+  // shadow would freeze at the first bake (streamed writes bump no MTime).
+  // setCastsShadow(true) opts back in.
+  setCastsShadow(false);
   m_centers.assign(3 * m_capacity, 0.0f);
   m_arc.assign(m_capacity, 0.0);
 

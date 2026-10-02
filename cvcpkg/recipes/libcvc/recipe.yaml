@@ -125,7 +125,16 @@ recipe:
   # state_exec) and the pycvc LOD bindings (#511) to every platform, with cvcGL's
   # setPoseMatrix (#508) in lockstep. 14, not 13: native was already auto-bumped to +cvc.13
   # (from #508) while the wasm publish packs verbatim at this revision.
-  cvc_revision: 14
+  # Bumped 14 -> 15: ships the stream/image zero-copy family -- the image adopt-ctor and
+  # stream to_image bridge (#516), stream_channel::publish_external (#517) -- with cvcGL's
+  # L3 streaming overlay geometry (#512: StreamingGeometryNode/RibbonNode/DrapedLinkNode,
+  # HeightFieldTexture, coalesced scene events), StreamTextureBinding (#518), the pycvc
+  # stream bindings (#519), stream scoping (#520) and the cvcGL frame-cost fixes (the
+  # metadata mirror, the idle-camera skip + SceneGraph::contentVersion, texture_modified_rows,
+  # caster-aware shadow baking, the cheaper bounds walk). ABI: SceneGraph, GraphicsNode and
+  # NullGraphicNode layouts changed (#512 and the frame-cost fixes) with the SOVERSION
+  # unchanged, so dependents must rebuild. cvcgl bumps in lockstep (14 -> 15).
+  cvc_revision: 15
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

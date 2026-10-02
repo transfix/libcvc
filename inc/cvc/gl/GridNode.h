@@ -79,6 +79,7 @@ protected:
   applyClipPlanes(vtkPlaneCollection *planes) override; // Apply clip planes to all grid mappers
 
 private:
+  void planeVisibilityChanged(); // bump the scene's content version (camera re-fit)
   void createGridPlanes();
   void createYZPlane(); // Grid at X=0
   void createXZPlane(); // Grid at Y=0

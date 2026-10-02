@@ -427,6 +427,19 @@ public:
   // way), so a frame that poses N vehicles should read one walk, not N or 2N.
   std::uint64_t boundsWalkCount() const { return m_boundsWalks.load(std::memory_order_relaxed); }
 
+  // A counter bumped whenever the scene's content may have changed EXTENT: a
+  // graphics node registered or removed (the world box refreshed or grown), a
+  // registered node moved, a node shown or hidden (an LOD rung switched), a
+  // node's geometry or volume replaced, or a streaming node's reserved box
+  // grown or re-derived. Something
+  // that caches a value derived from where the content is -- CameraController's
+  // clipping range -- compares it to know when to work it out again. Any thread.
+  std::uint64_t contentVersion() const { return m_contentVersion.load(std::memory_order_acquire); }
+  // Bump contentVersion() for a change the scene cannot see on its own: vertices
+  // rewritten in place (GeometryNode::updateVertices) so that a mesh now reaches
+  // well outside where it was, a prop's UseBounds turned back on. Any thread.
+  void markContentChanged() { m_contentVersion.fetch_add(1, std::memory_order_acq_rel); }
+
   // Compute combined bounding box of all volumes
   cvc::bounding_box computeVolumeBounds() const;
 
@@ -501,6 +514,13 @@ private:
   std::atomic<bool> m_boundsDirty{false};              // a tracked node moved since the last pump
   std::atomic<bool> m_boundsRefreshQueued{false};      // one refreshWorldBounds() event is queued
   mutable std::atomic<std::uint64_t> m_boundsWalks{0}; // see boundsWalkCount()
+  std::atomic<std::uint64_t> m_contentVersion{0};      // see contentVersion()
+  // A grow-only walk skipped while nothing showed the world box (grid, axis and
+  // root box all hidden); run by catchUpWorldBounds() or processEvents() once
+  // one of them is shown again.
+  std::atomic<bool> m_boundsGrowDeferred{false};
+  bool worldBoundsShown() const;
+  void catchUpWorldBounds();
   std::vector<boost::signals2::scoped_connection> m_boundsConns;
   void trackNodeBounds(const std::shared_ptr<GraphicsNode> &node);
   void onGraphicsBoundsChanged();

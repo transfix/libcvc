@@ -9,6 +9,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/line_normals.h>
 #include <cvc/image/image.h>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <vtkActor.h>
@@ -21,6 +22,8 @@
 #include <vtkLine.h>
 #include <vtkOpenGLPolyDataMapper.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkOpenGLState.h>
+#include <vtkOpenGLTexture.h>
 #include <vtkOpenGLVertexBufferObject.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
@@ -39,6 +42,7 @@
 #include <vtkUniforms.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkVertex.h>
+#include <vtk_glad.h>
 
 namespace cvc {
 namespace gl {
@@ -457,6 +461,67 @@ void GeometryNode::texture_modified() {
   });
 }
 
+void GeometryNode::texture_modified_rows(int row0, int row1) {
+  // Full-width rows: INT_MAX is clamped to the width below.
+  texture_modified_rect(0, row0, std::numeric_limits<int>::max(), row1);
+}
+
+void GeometryNode::texture_modified_rect(int x0, int y0, int x1, int y1) {
+  runOnMainThread([this, x0, y0, x1, y1]() {
+    if (!m_texture || !m_textureImageData)
+      return;
+    if (!m_textureStorage) {
+      // The copy path: the texture holds its own flipped copy, which the
+      // caller's edit never reached. Keep texture_modified()'s behaviour.
+      texture_modified();
+      return;
+    }
+    int dims[3] = {0, 0, 0};
+    m_textureImageData->GetDimensions(dims);
+    const int w = dims[0], h = dims[1];
+    const int cx0 = std::max(0, x0), cy0 = std::max(0, y0);
+    const int cx1 = std::min(w, x1), cy1 = std::min(h, y1);
+    if (cx0 >= cx1 || cy0 >= cy1)
+      return;
+
+    // The texture vtkOpenGLTexture::Load made from this buffer: RGBA8 (the
+    // zero-copy path is RGBA8 only), w x h, no mipmaps, row r of the image is
+    // row r of the texture (the V flip lives in the TCoords, not the pixels).
+    auto *otex = vtkOpenGLTexture::SafeDownCast(m_texture);
+    vtkTextureObject *to = otex ? otex->GetTextureObject() : nullptr;
+    vtkOpenGLRenderWindow *ctx = to ? to->GetContext() : nullptr;
+    if (!to || !ctx || to->GetHandle() == 0)
+      return; // not on the GPU yet: its first Load uploads every pixel, edits included
+    if (static_cast<int>(to->GetWidth()) != w || static_cast<int>(to->GetHeight()) != h ||
+        to->GetComponents() != 4) {
+      texture_modified(); // not the texture we think it is: re-upload the lot
+      return;
+    }
+
+    if (!ctx->IsCurrent())
+      ctx->MakeCurrent();
+    vtkOpenGLState *gl = ctx->GetState();
+    to->Activate();
+    // Client memory, not a pixel-unpack buffer (VTK's GLES texture-buffer
+    // emulation binds one while it uploads).
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    gl->vtkglPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    const bool fullRows = cx0 == 0 && cx1 == w;
+    if (!fullRows)
+      gl->vtkglPixelStorei(GL_UNPACK_ROW_LENGTH, w); // stride of the whole image
+    const std::size_t first = (static_cast<std::size_t>(cy0) * w + cx0) * 4;
+    glTexSubImage2D(to->GetTarget(), 0, cx0, cy0, cx1 - cx0, cy1 - cy0, GL_RGBA, GL_UNSIGNED_BYTE,
+                    m_textureStorage.get() + first);
+    if (!fullRows)
+      gl->vtkglPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    to->Deactivate();
+
+    // Nothing was marked modified, so nothing else will ask for the frame.
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
 void GeometryNode::setGeometry(const cvc::geometry &geom) {
   cvc::thread_info ti(app(), BOOST_CURRENT_FUNCTION);
 
@@ -505,6 +570,9 @@ void GeometryNode::setGeometry(const cvc::geometry &geom) {
     updateBoundingBoxNode();
 
     updateMetadata(geom);
+    // The mesh's extent may have changed: cameras re-fit their clipping range.
+    if (SceneGraph *sg = getSceneGraph())
+      sg->markContentChanged();
 
     // Notify parent to resync bounds if it's a NullGraphicNode with auto-sync enabled
     if (m_parent) {

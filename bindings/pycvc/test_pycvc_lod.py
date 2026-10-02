@@ -405,6 +405,10 @@ def test_store_round_trip_through_bytes():
                pycvc.scene_reader(app, memoryview(blob)),
                pycvc.scene_reader.open_verified(app, blob, sha),  # authenticated
                pycvc.scene_reader.open_verified(app, np.frombuffer(blob, np.uint8), sha.upper())]
+    # Every reader -- including open_verified's, a factory over a MOVE-ONLY type
+    # -- is owned by Python and keeps the app it borrows alive.
+    for r in readers:
+        assert type(r) is pycvc.scene_reader and r.thisown and r._pycvc_app is app
     for r in readers:
         idx = {e.name: e for e in r.index()}
         assert len(idx) == len(tiles) + 1 and idx["albedo"].kind == "I" and idx["tile0"].kind == "M"

@@ -17,10 +17,11 @@ NullGraphicNode::NullGraphicNode(cvc::app &ctx, const std::string &statePath,
       m_bounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5) // Default 1x1x1 box centered at origin
       ,
       m_dummyActor(vtkSmartPointer<vtkActor>::New()),
-      m_includeOwnBounds(false) // Don't include own bounds by default (typical for root nodes)
-      ,
       m_syncBoundsWithChildren(true) // By default, sync bounds to encompass children
 {
+  // Don't include own bounds by default (typical for root nodes). The flag lives
+  // on GraphicsNode, where getCombinedBoundingBox reads it.
+  m_combinedIncludesOwnBounds = false;
   // Dummy actor has no mapper, won't render anything
   // This node exists only to provide bounding box extents
 
@@ -30,7 +31,7 @@ NullGraphicNode::NullGraphicNode(cvc::app &ctx, const std::string &statePath,
     oss << m_bounds.minx << "," << m_bounds.miny << "," << m_bounds.minz << "," << m_bounds.maxx
         << "," << m_bounds.maxy << "," << m_bounds.maxz;
     getState("bounds").value(oss.str());
-    getState("include_own_bounds").value(m_includeOwnBounds ? 1 : 0);
+    getState("include_own_bounds").value(m_combinedIncludesOwnBounds ? 1 : 0);
     getState("sync_bounds_with_children").value(m_syncBoundsWithChildren ? 1 : 0);
   }
 }
@@ -74,10 +75,10 @@ cvc::bounding_box NullGraphicNode::getBoundingBox() const {
 }
 
 void NullGraphicNode::setIncludeOwnBounds(bool include) {
-  if (m_includeOwnBounds == include)
+  if (m_combinedIncludesOwnBounds == include)
     return;
 
-  m_includeOwnBounds = include;
+  m_combinedIncludesOwnBounds = include;
 
   // Update state tree
   getState("include_own_bounds").value(include ? 1 : 0);
@@ -204,7 +205,7 @@ void NullGraphicNode::handleStateChanged(const std::string &childState) {
     }
   } else if (childState == "include_own_bounds") {
     int includeOwn = getState("include_own_bounds").value<int>();
-    m_includeOwnBounds = (includeOwn != 0);
+    m_combinedIncludesOwnBounds = (includeOwn != 0);
     // Update bbox visualization since combined bounds may have changed
     updateBoundingBoxNode();
   } else if (childState == "sync_bounds_with_children") {

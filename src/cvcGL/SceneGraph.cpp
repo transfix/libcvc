@@ -19,13 +19,20 @@
 #include <cvc/gl/state_publisher.h>
 #include <cvc/volume/volume.h>
 #include <limits>
+#include <unordered_map>
+#include <vtkActor.h>
 #include <vtkCameraPass.h>
+#include <vtkDataObject.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
+#include <vtkMapper.h>
 #include <vtkMultiVolume.h>
 #include <vtkObjectFactory.h>
 #include <vtkOverlayPass.h>
+#include <vtkProp.h>
+#include <vtkPropCollection.h>
+#include <vtkRenderPass.h>
 #include <vtkRenderPassCollection.h>
 #include <vtkRenderState.h>
 #include <vtkRenderer.h>
@@ -34,6 +41,7 @@
 #include <vtkShadowMapPass.h>
 #include <vtkTranslucentPass.h>
 #include <vtkVolumetricPass.h>
+#include <vtkWeakPointer.h>
 
 namespace cvc {
 namespace gl {
@@ -143,6 +151,16 @@ void SceneGraph::processEvents() {
     // consumed that request before pumping still draws the latest poses.
     requestRender();
   }
+
+  // A grow-only walk skipped while nothing showed the world box: run it now if
+  // something does again, however it was shown -- setGridVisible (which also
+  // catches up at once), the grid/axis node's own setVisible or "visible"
+  // state key, setBBoxesVisible, the root's setShowBBox.
+  if (m_boundsGrowDeferred.load(std::memory_order_relaxed) && worldBoundsShown() &&
+      m_boundsGrowDeferred.exchange(false, std::memory_order_relaxed)) {
+    onGraphicsBoundsChanged();
+    requestRender();
+  }
 }
 
 void SceneGraph::requestRender() { m_events->requestRender(); }
@@ -176,11 +194,39 @@ void SceneGraph::update() {
   }
 }
 
-void SceneGraph::setGridVisible(bool visible) { m_gridNode->setVisible(visible); }
+void SceneGraph::setGridVisible(bool visible) {
+  m_gridNode->setVisible(visible);
+  if (visible)
+    catchUpWorldBounds();
+}
 
 bool SceneGraph::gridVisible() const { return m_gridNode && m_gridNode->isVisible(); }
 
-void SceneGraph::setAxisVisible(bool visible) { m_axisNode->setVisible(visible); }
+void SceneGraph::setAxisVisible(bool visible) {
+  m_axisNode->setVisible(visible);
+  if (visible)
+    catchUpWorldBounds();
+}
+
+bool SceneGraph::worldBoundsShown() const {
+  // What draws the world box: the grid, the axis (sized from it), and the
+  // graphics root's own box (updateGrid sets the root's bounds; shown by default).
+  return gridVisible() || axisVisible() || (m_nullGraphic && m_nullGraphic->getShowBBox());
+}
+
+void SceneGraph::catchUpWorldBounds() {
+  // Moves made while nothing showed the world box: grow it over them now,
+  // before the grid that shows it is drawn. Inline on the owner thread (updateGrid
+  // touches VTK actors); from another thread the next processEvents() does it.
+  if (!m_boundsGrowDeferred.exchange(false, std::memory_order_relaxed))
+    return;
+  if (onOwnerThread()) {
+    onGraphicsBoundsChanged();
+  } else {
+    m_boundsDirty.store(true, std::memory_order_release);
+  }
+  requestRender();
+}
 
 // The axis node is private and had no accessor at all, so a control could set
 // axis visibility but never read it back to draw its own tick.
@@ -239,6 +285,7 @@ void SceneGraph::updateGrid(const cvc::bounding_box &bounds) {
   // Update grid to match combined bounds
   m_gridNode->setBounds(combinedBounds);
   m_worldBounds = combinedBounds; // track for grow-only recompute on node moves
+  markContentChanged();           // the set of graphics changed, or the box grew
 
   // Scale axis length to be proportional to combined bounding box size
   double spanX = combinedBounds[3] - combinedBounds[0];
@@ -294,12 +341,13 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
   // Process each direct child of the graphics root
   // Each child's getCombinedBoundingBox() already includes its descendants recursively
   if (m_graphicsRoot) {
-    for (const auto &child : m_graphicsRoot->getGraphicsChildren()) {
+    for (const auto &childPtr : m_graphicsRoot->getGraphicsChildren()) {
+      const GraphicsNode *child = childPtr.get();
       if (!child)
         continue;
 
       // Skip grid and axis nodes - they don't contribute to scene bounds
-      if (child.get() == m_gridNode.get() || child.get() == m_axisNode.get()) {
+      if (child == m_gridNode.get() || child == m_axisNode.get()) {
         continue;
       }
 
@@ -308,65 +356,32 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
       // bounds out to it. The overhead fill sits at 3x the stage radius, which
       // lifted the whole scene box — and with it the orbit centre that
       // frameBounds() derives, so the camera sat raised and could not be brought
-      // back down.
-      if (std::dynamic_pointer_cast<cvc::gl::LightNode>(child))
+      // back down. (A flag on the node, not a dynamic_cast per child per walk.)
+      if (!child->contributesToSceneBounds())
         continue;
 
-      // Get combined bbox of this child (includes all its descendants in local space)
-      cvc::bounding_box childBBox = child->getCombinedBoundingBox();
+      // This child and its descendants in WORLD space: its combined local box
+      // through its CACHED world matrix, the same 8-corner AABB re-fit this walk
+      // used to do on a fresh vtkMatrix4x4 copy (getWorldTransform) per child.
+      // Bit-identical for the affine transforms a scene holds (w stays 1).
+      const cvc::bounding_box b = child->getCombinedWorldBoundingBox();
 
-      // Skip invalid bounding boxes
-      if (childBBox[0] > childBBox[3] || childBBox[1] > childBBox[4] ||
-          childBBox[2] > childBBox[5]) {
+      // Skip invalid bounding boxes (an invalid box comes back unchanged)
+      if (b[0] > b[3] || b[1] > b[4] || b[2] > b[5]) {
         continue;
-      }
-
-      // Apply world transform to the bounding box by transforming all 8 corners
-      vtkSmartPointer<vtkMatrix4x4> worldTransform = child->getWorldTransform();
-
-      double corners[8][3] = {
-          {childBBox[0], childBBox[1], childBBox[2]}, // min, min, min
-          {childBBox[3], childBBox[1], childBBox[2]}, // max, min, min
-          {childBBox[0], childBBox[4], childBBox[2]}, // min, max, min
-          {childBBox[3], childBBox[4], childBBox[2]}, // max, max, min
-          {childBBox[0], childBBox[1], childBBox[5]}, // min, min, max
-          {childBBox[3], childBBox[1], childBBox[5]}, // max, min, max
-          {childBBox[0], childBBox[4], childBBox[5]}, // min, max, max
-          {childBBox[3], childBBox[4], childBBox[5]}  // max, max, max
-      };
-
-      // Transform all corners and find new axis-aligned bounds
-      double minx = std::numeric_limits<double>::max();
-      double miny = std::numeric_limits<double>::max();
-      double minz = std::numeric_limits<double>::max();
-      double maxx = std::numeric_limits<double>::lowest();
-      double maxy = std::numeric_limits<double>::lowest();
-      double maxz = std::numeric_limits<double>::lowest();
-
-      for (int i = 0; i < 8; ++i) {
-        double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
-        double out[4];
-        worldTransform->MultiplyPoint(in, out);
-
-        minx = std::min(minx, out[0]);
-        miny = std::min(miny, out[1]);
-        minz = std::min(minz, out[2]);
-        maxx = std::max(maxx, out[0]);
-        maxy = std::max(maxy, out[1]);
-        maxz = std::max(maxz, out[2]);
       }
 
       // Merge with combined bounds
       if (first) {
-        combinedBounds = cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz);
+        combinedBounds = b;
         first = false;
       } else {
-        combinedBounds[0] = std::min(combinedBounds[0], minx);
-        combinedBounds[1] = std::min(combinedBounds[1], miny);
-        combinedBounds[2] = std::min(combinedBounds[2], minz);
-        combinedBounds[3] = std::max(combinedBounds[3], maxx);
-        combinedBounds[4] = std::max(combinedBounds[4], maxy);
-        combinedBounds[5] = std::max(combinedBounds[5], maxz);
+        combinedBounds[0] = std::min(combinedBounds[0], b[0]);
+        combinedBounds[1] = std::min(combinedBounds[1], b[1]);
+        combinedBounds[2] = std::min(combinedBounds[2], b[2]);
+        combinedBounds[3] = std::max(combinedBounds[3], b[3]);
+        combinedBounds[4] = std::max(combinedBounds[4], b[4]);
+        combinedBounds[5] = std::max(combinedBounds[5], b[5]);
       }
     }
   }
@@ -513,6 +528,7 @@ void SceneGraph::trackNodeBounds(const std::shared_ptr<GraphicsNode> &node) {
   // postEvent used to do as a side effect. The connection is owned here and dies
   // with the SceneGraph, so the captured `this` is safe.
   m_boundsConns.push_back(node->transformChanged.connect([this](GraphicsNode *) {
+    markContentChanged(); // whether or not it left the world box
     if (!m_boundsDirty.exchange(true, std::memory_order_acq_rel))
       requestRender();
   }));
@@ -554,6 +570,18 @@ void SceneGraph::refreshWorldBounds() {
 }
 
 void SceneGraph::onGraphicsBoundsChanged() {
+  // The world box sizes the grid, the axis and the graphics root's own box.
+  // With all three hidden nothing on screen follows it, so the walk waits until
+  // one is shown (catchUpWorldBounds, or the end of processEvents) -- for a
+  // scene posing registered nodes every frame under hidden chrome that is a
+  // whole walk of the scene per frame saved. Meanwhile the root's bounds (and
+  // its "<prefix>.graphics.root.bounds" state key) do not grow over moves;
+  // computeGraphicsBounds() is the live answer. A refresh (add/remove) still
+  // runs: it is rare.
+  if (!worldBoundsShown()) {
+    m_boundsGrowDeferred.store(true, std::memory_order_relaxed);
+    return;
+  }
   cvc::bounding_box b = computeGraphicsBounds();
   // Grow-only: only resize the grid when graphics have moved OUTSIDE the current
   // world box (a node "left" it) — so in-bounds animation never jitters the grid.
@@ -1033,7 +1061,7 @@ public:
   bool ForceNext = false;
 
   void Render(const vtkRenderState *s) override {
-    // Skipping a bake is only safe while the SET OF SHADOW CASTERS is unchanged.
+    // Skipping a bake is only safe while the SET OF SHADOW-CASTING LIGHTS is unchanged.
     //
     // vtkShadowMapBakerPass sizes its ShadowMaps vector inside Render(), and
     // only when NeedUpdate is set. SetUpToDate() clears NeedUpdate without
@@ -1049,10 +1077,20 @@ public:
     // the wash count looked fine and increasing it did not.
     const std::size_t casters = countShadowCasters(s);
     const bool due = (Interval <= 1) || (m_counter % static_cast<unsigned long>(Interval)) == 0;
-    if (due || ForceNext || casters != m_bakedCasters) {
-      this->Superclass::Render(s); // real bake, resizes ShadowMaps
+    // On a due frame, bake only if something that can change the maps changed
+    // (shadowInputsChanged). VTK alone re-bakes when ANY prop changed: a vehicle
+    // marked a non-caster moving, a fog texture repainted, an overlay restyled.
+    const bool inputsChanged = due && shadowInputsChanged(s);
+    if (ForceNext || casters != m_bakedCasters || inputsChanged) {
+      // VTK's own test can miss what ours saw: a prop that started or stopped
+      // casting has not itself changed. Make it bake whatever its test says.
+      if (inputsChanged)
+        this->LastRenderTime = vtkTimeStamp();
+      this->Superclass::Render(s); // bakes if anything at all changed; resizes ShadowMaps
       m_bakedCasters = casters;
       ForceNext = false;
+      if (this->GetNeedUpdate())
+        noteBake(s);
     } else {
       this->SetUpToDate(); // reuse the last-baked maps this frame
     }
@@ -1080,14 +1118,164 @@ protected:
     return n;
   }
 
+  // The props whose depth the maps hold: visible, and not marked non-casters
+  // (GraphicsNode::setCastsShadow). Identified by count and two order-free
+  // sums of their addresses, so one joining or leaving shows.
+  struct CasterSet {
+    std::size_t count = 0;
+    std::uint64_t sum = 0, mix = 0;
+    void add(const vtkProp *p) {
+      std::uint64_t z = reinterpret_cast<std::uintptr_t>(p) + 0x9e3779b97f4a7c15ull; // splitmix64
+      z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+      z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+      sum += reinterpret_cast<std::uintptr_t>(p);
+      mix += z ^ (z >> 31);
+      ++count;
+    }
+    bool operator!=(const CasterSet &o) const {
+      return count != o.count || sum != o.sum || mix != o.mix;
+    }
+  };
+
+  // vtkShadowMapBakerPass's own test, narrowed to what the maps depend on: a
+  // light (as VTK checks them), or a CASTING prop -- changed since the last
+  // bake, joined or left. A non-caster's MTime is ignored, which is the point:
+  // moving or repainting one never forces a bake. (The bake itself draws only
+  // casters, through ShadowCasterFilterPass.)
+  bool shadowInputsChanged(const vtkRenderState *s) {
+    vtkRenderer *r = s ? s->GetRenderer() : nullptr;
+    if (!r || !m_baked)
+      return true;
+    const vtkMTimeType t = m_lastBake.GetMTime();
+    vtkLightCollection *lights = r->GetLights();
+    if (lights->GetMTime() > t)
+      return true;
+    vtkCollectionSimpleIterator lit;
+    lights->InitTraversal(lit);
+    while (vtkLight *l = lights->GetNextLight(lit))
+      if (l->GetMTime() > t)
+        return true;
+    CasterSet now;
+    vtkPropCollection *props = r->GetViewProps();
+    vtkCollectionSimpleIterator pit;
+    props->InitTraversal(pit);
+    while (vtkProp *p = props->GetNextProp(pit)) {
+      if (!p->GetVisibility() || !GraphicsNode::propCastsShadow(p))
+        continue;
+      if (p->GetMTime() > t || casterGeometryChanged(p, t))
+        return true;
+      now.add(p);
+    }
+    // Forget mappers no longer drawn (a key whose address a new mapper reuses
+    // is harmless: the new one's MTime differs, so its input is looked up).
+    if (m_mapperInputs.size() > 2 * now.count + 64)
+      m_mapperInputs.clear();
+    return now != m_bakedSet;
+  }
+
+  // vtkActor::GetMTime() leaves out the mapper and its input, so a caster
+  // deformed in place (GeometryNode::updateVertices / updateNormals /
+  // updateColors -- a swaying tree) changes only those. Their MTimes, read
+  // as they are: no Update(), no GetRedrawMTime().
+  //
+  // Finding the input is an executive lookup (vtkAlgorithm::GetInputDataObject:
+  // port checks and two information-key reads), several times the cost of the
+  // rest of this check, and it runs for every caster on every due frame. The
+  // input changes only through SetInputData / SetInputConnection, which mark
+  // the mapper modified, so it is looked up again only when the mapper's MTime
+  // moves (or the input it named is gone).
+  bool casterGeometryChanged(vtkProp *p, vtkMTimeType t) {
+    auto *actor = vtkActor::SafeDownCast(p);
+    vtkMapper *mapper = actor ? actor->GetMapper() : nullptr;
+    if (!mapper)
+      return false;
+    const vtkMTimeType mapperTime = mapper->GetMTime();
+    if (mapperTime > t)
+      return true;
+    MapperInput &in = m_mapperInputs[mapper];
+    if (in.mapperTime != mapperTime || !in.input) {
+      in.mapperTime = mapperTime;
+      in.input = mapper->GetInputDataObject(0, 0);
+    }
+    vtkDataObject *input = in.input;
+    return input && input->GetMTime() > t;
+  }
+
+  void noteBake(const vtkRenderState *s) {
+    m_lastBake.Modified();
+    m_baked = true;
+    m_bakedSet = CasterSet();
+    if (vtkRenderer *r = s ? s->GetRenderer() : nullptr) {
+      vtkPropCollection *props = r->GetViewProps();
+      vtkCollectionSimpleIterator pit;
+      props->InitTraversal(pit);
+      while (vtkProp *p = props->GetNextProp(pit))
+        if (p->GetVisibility() && GraphicsNode::propCastsShadow(p))
+          m_bakedSet.add(p);
+    }
+  }
+
 private:
   unsigned long m_counter = 0;
   // (std::size_t)-1 so the first frame always bakes rather than matching 0.
   std::size_t m_bakedCasters = static_cast<std::size_t>(-1);
+  bool m_baked = false;    // has a real bake happened yet
+  vtkTimeStamp m_lastBake; // when it did
+  CasterSet m_bakedSet;    // the casters it drew
+  // casterGeometryChanged's cache: per mapper, its MTime when its input was
+  // last looked up, and that input (weak: the mapper owns it).
+  struct MapperInput {
+    vtkMTimeType mapperTime = 0;
+    vtkWeakPointer<vtkDataObject> input;
+  };
+  std::unordered_map<const vtkMapper *, MapperInput> m_mapperInputs;
   StridedShadowBaker(const StridedShadowBaker &) = delete;
   void operator=(const StridedShadowBaker &) = delete;
 };
 vtkStandardNewMacro(StridedShadowBaker);
+
+// The baker's depth pass, restricted to the props that cast. vtkShadowMapBakerPass
+// hands its opaque sequence every visible prop; this one passes on only those
+// GraphicsNode::propCastsShadow() accepts, so a non-caster is left out of the
+// maps rather than frozen into them at its last-baked pose.
+class ShadowCasterFilterPass : public vtkRenderPass {
+public:
+  static ShadowCasterFilterPass *New();
+  vtkTypeMacro(ShadowCasterFilterPass, vtkRenderPass);
+
+  vtkSmartPointer<vtkRenderPass> Delegate; // VTK's camera -> lights -> opaque sequence
+
+  void Render(const vtkRenderState *s) override {
+    this->NumberOfRenderedProps = 0;
+    if (!this->Delegate || !s)
+      return;
+    m_props.clear();
+    vtkProp **all = s->GetPropArray();
+    for (int i = 0; i < s->GetPropArrayCount(); ++i)
+      if (GraphicsNode::propCastsShadow(all[i]))
+        m_props.push_back(all[i]);
+    vtkRenderState casters(s->GetRenderer());
+    casters.SetPropArrayAndCount(m_props.data(), static_cast<int>(m_props.size()));
+    casters.SetFrameBuffer(s->GetFrameBuffer());
+    casters.SetRequiredKeys(s->GetRequiredKeys());
+    this->Delegate->Render(&casters);
+    this->NumberOfRenderedProps = this->Delegate->GetNumberOfRenderedProps();
+  }
+
+  void ReleaseGraphicsResources(vtkWindow *w) override {
+    if (this->Delegate)
+      this->Delegate->ReleaseGraphicsResources(w);
+  }
+
+protected:
+  ShadowCasterFilterPass() = default;
+
+private:
+  std::vector<vtkProp *> m_props;
+  ShadowCasterFilterPass(const ShadowCasterFilterPass &) = delete;
+  void operator=(const ShadowCasterFilterPass &) = delete;
+};
+vtkStandardNewMacro(ShadowCasterFilterPass);
 
 // Shadow settings mirrored into cvc::state at "<prefix>.shadows". Created lazily
 // (the ctor runs before the renderer exists) and guarded against re-entry: a
@@ -1165,6 +1353,11 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   baker->Interval = m_shadowInterval;
   baker->SetResolution(m_shadowResolution); // crisper than VTK's low 256 default
   m_shadowBaker = baker;                    // kept so the interval/resolution stay live
+  // Bake casters only (GraphicsNode::setCastsShadow): wrap VTK's own depth pass.
+  vtkSmartPointer<ShadowCasterFilterPass> casterFilter =
+      vtkSmartPointer<ShadowCasterFilterPass>::New();
+  casterFilter->Delegate = baker->GetOpaqueSequence();
+  baker->SetOpaqueSequence(casterFilter);
   vtkSmartPointer<vtkShadowMapPass> shadows = vtkSmartPointer<vtkShadowMapPass>::New();
   shadows->SetShadowMapBakerPass(baker);
 

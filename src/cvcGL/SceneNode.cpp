@@ -137,6 +137,12 @@ void SceneNode::setVisible(bool visible) {
     return;
 
   m_visible = visible;
+  // What is drawn changed. A plain node's prop leaves or joins the renderer
+  // below, but nodes that toggle VTK visibility in place (GridNode's planes,
+  // AxisNode, an LOD node's rungs) change no prop list: either way, tell the
+  // scene, so a camera holding still re-fits its clipping range.
+  if (SceneGraph *sg = getSceneGraph())
+    sg->markContentChanged();
 
   if (m_renderer && getProp()) {
     // Wrap VTK operations in runOnMainThread for thread safety
