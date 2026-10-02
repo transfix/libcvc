@@ -72,6 +72,10 @@ jobs:
             || { echo "::error::emsdk bundle has no emsdk_env.sh at $EMSDK_DIR"; exit 1; }
           echo "CVC_EMSDK_DIR=$EMSDK_DIR" >> "$GITHUB_ENV"
 
+      - name: cvcGL browser-side JS tests (state shim, glsync, serve.py)
+        # The shim ships in the bundle built below; test it first, with the emsdk's own node.
+        run: src/cvcGL/wasm/run-js-tests.sh
+
       - name: Install the wasm-mt dep closure
         # The same list + flags the nightly installs; libcvc/cvcGL link these. sdl3 backs the
         # cvcGL input/peripheral seam (CVC_ENABLE_SDL): with it in $WASM_DEPS, cvcGL's
@@ -117,6 +121,20 @@ jobs:
           grep -q "find_dependency(SDL3" "$INST/lib/cmake/cvcGL/cvcGLConfig.cmake" \
             || { echo "::error::cvcGL wasm did NOT link SDL3 (find_package(SDL3) failed under emcmake despite sdl3 in \$WASM_DEPS) — the input seam fell back to the VTK interactor"; exit 1; }
           echo "cvcGL wasm: SDL3 input seam ENABLED (find_dependency(SDL3) present)"
+          # cvcgl_wasm_app(): the WebGL state shim and the CMake function that links it must ship,
+          # the config must say this cvcGL is -pthread (MIMALLOC AUTO follows it), and none of the
+          # three CMake files may name a path on this runner (the JS dir is computed from the
+          # installed config's own location).
+          test -f "$INST/share/cvcGL/wasm/webgl_state_shadow.js" \
+            || { echo "::error::cvcGL wasm bundle has no share/cvcGL/wasm/webgl_state_shadow.js"; exit 1; }
+          grep -q "function(cvcgl_wasm_app" "$INST/lib/cmake/cvcGL/cvcGLWasm.cmake" \
+            || { echo "::error::cvcGL wasm bundle has no cvcgl_wasm_app() (lib/cmake/cvcGL/cvcGLWasm.cmake)"; exit 1; }
+          grep -q "CVCGL_WASM_PTHREADS ON" "$INST/lib/cmake/cvcGL/cvcGLConfig.cmake" \
+            || { echo "::error::cvcGLConfig.cmake does not record the -pthread build (CVCGL_WASM_PTHREADS)"; exit 1; }
+          if grep -nF -e "$GITHUB_WORKSPACE" -e "$INST" "$INST"/lib/cmake/cvcGL/cvcGLConfig.cmake \
+               "$INST"/lib/cmake/cvcGL/cvcGLTargets.cmake "$INST"/lib/cmake/cvcGL/cvcGLWasm.cmake; then
+            echo "::error::cvcGL's installed CMake files name a path on this runner (not relocatable)"; exit 1
+          fi
 
       - name: Pack + publish libcvc + cvcgl wasm-mt
         env:
@@ -186,6 +204,9 @@ jobs:
           bash cvcpkg/recipes/cvcgl-examples/build-wasm.sh
           test -f "$EX_INST/share/cvcgl-examples/web/index.html" \
             || { echo "::error::cvcgl-examples wasm gallery missing web/index.html"; exit 1; }
+          # Every gallery demo is a cvcgl_wasm_app: the state shim is in its module JS.
+          grep -q __cvcGlShadow "$EX_INST/share/cvcgl-examples/web/nav_city_drive/nav_city_drive.js" \
+            || { echo "::error::nav_city_drive.js has no WebGL state shim (cvcgl_wasm_app not applied)"; exit 1; }
           echo "=== gallery web/ contents ==="; ls -la "$EX_INST/share/cvcgl-examples/web" | head -20
           cvcpkg pack cvcpkg/recipes/cvcgl-examples --from-prefix "$EX_INST" \
             --platform wasm-mt --config release --link static \

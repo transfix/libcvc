@@ -503,6 +503,10 @@ int main(int argc, char **argv) {
   sg.addDirectionalLight(150, 34, 0.5, 0.58, 0.72, 0.45);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
+  // The loop yields to the browser once per frame on both paths that render (the paused one
+  // and the frame end), so VTK need not yield again inside every render (FrameYield::App:
+  // VTK 9.5's in-render emscripten_sleep off; a no-op natively).
+  view.setFrameYield(SceneRenderer::FrameYield::App);
   const bool shadows = !no_shadows && sg.setShadowsEnabled(true);
   if (shadows) {
     sg.setShadowResolution(1024);
@@ -726,6 +730,14 @@ int main(int argc, char **argv) {
     }
     if (uiPaused) {
       view.render();
+#ifdef __EMSCRIPTEN__
+      // This path renders too, so it yields too: FrameYield::App (above) took VTK's in-render
+      // yield away, and a `continue` past the frame end's yield would freeze the paused page.
+#ifndef __EMSCRIPTEN_PTHREADS__
+      sg.publisher().flush(); // no worker thread — drain publishes at frame cadence
+#endif
+      emscripten_sleep(0);
+#endif
       continue; // frozen world, live camera + UI
     }
 #endif
