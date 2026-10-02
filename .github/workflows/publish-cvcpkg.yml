@@ -682,7 +682,7 @@ jobs:
           # cvcgl links the installed libcvc SDK ($STAGE) + VTK (from $PY).
           # Dear ImGui powers the cvcGL overlay (cvc::gl::ImGuiOverlay). Build the
           # SDK WITH it so CVC_ENABLE_IMGUI is on and the overlay actually renders
-          # for downstream GUI consumers (dbg_austin_live*, cvcgl-examples). Safe:
+          # for downstream GUI consumers (e.g. cvcgl-examples). Safe:
           # cvcGL's imgui export is the imgui::imgui target name (relocatable, not
           # this builder's abs path), re-resolved from the CONSUMER's prefix by
           # cvcGLConfig.cmake, so no path leaks into cvcGLTargets.cmake. Built into
