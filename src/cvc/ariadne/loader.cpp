@@ -1235,6 +1235,11 @@ SceneNode parse_scene_node(const YAML::Node &n) {
           sn.plane_size = static_cast<float>(num(plane, "size", sn.plane_size));
         else if (plane.IsScalar())
           sn.plane_size = static_cast<float>(plane.as<double>());
+      } else if (const YAML::Node sdf = src["sdf"]) {
+        // source: { sdf: { mesh: <uri>, dim: N } } — a volren/volslice volume computed as the
+        // signed distance field of a mesh (no pre-baked volume asset).
+        sn.source_sdf_mesh = str(sdf, "mesh", str(sdf, "file"));
+        sn.sdf_dim = static_cast<int>(num(sdf, "dim", sn.sdf_dim));
       } else {
         sn.source_file = str(src, "uri", str(src, "file"));
       }

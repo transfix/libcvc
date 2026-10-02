@@ -86,6 +86,15 @@ struct SceneNode {
   std::string source_primitive;
   float plane_size = 1.0f; // "plane": full edge length
 
+  // A VOLUME computed as a signed distance field from a MESH (for volren/volslice), instead of
+  // loading a pre-baked volume with source: { file }. `source: { sdf: { mesh: <uri>, dim: N } }` —
+  // the realizer loads the mesh and runs cvc::sdf over an N³ grid framed to the mesh extents. Empty
+  // = not an SDF source. Needs a CVC_ENABLE_SDF build (the realizer warns and skips the node
+  // without it). This is how a demo turns a mesh (e.g. stanford.bunny) into a volume with no asset
+  // file.
+  std::string source_sdf_mesh;
+  int sdf_dim = 64;
+
   bool has_material = false;
   float color[3] = {0.8f, 0.8f, 0.9f};
   float ambient = 0.2f;

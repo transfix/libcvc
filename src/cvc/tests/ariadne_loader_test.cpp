@@ -826,6 +826,34 @@ scene:
   EXPECT_TRUE(b->fit_up_y);
 }
 
+// A volren/volslice volume declared as the signed distance field of a MESH:
+// source: { sdf: { mesh: <uri>, dim: N } } — no pre-baked volume asset.
+TEST(AriadneScene, VolumeSdfMeshSource) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: bunny_volume
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 48 } }
+      fit: { height: 100, up: y }
+      volren: { distance_field: true, isosurfaces: [ { value: 0.0, color: [0.8, 0.8, 0.9] } ] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode *v = find_scene_node(r.scene.nodes, "bunny_volume");
+  ASSERT_NE(v, nullptr);
+  EXPECT_EQ(v->type, "volren");
+  EXPECT_EQ(v->source_sdf_mesh, "stanford.bunny"); // the mesh the SDF is computed from
+  EXPECT_EQ(v->sdf_dim, 48);
+  EXPECT_TRUE(v->source_file.empty()); // an sdf source is not a file
+  ASSERT_TRUE(v->has_fit);             // fit is applied to the mesh BEFORE the SDF (framing parity)
+  EXPECT_FLOAT_EQ(v->fit_height, 100.0f);
+  ASSERT_TRUE(v->has_volren);
+  ASSERT_EQ(v->volren.isosurfaces.size(), 1u);
+}
+
 // §9 enrichments: a tuned StageLighting rig and shadow resolution/update-interval.
 TEST(AriadneScene, RigTuningAndShadowResolution) {
   SKIP_WITHOUT_YAML();

@@ -1,0 +1,58 @@
+# volslice_bunny.ari — the cvcGL volume-slice bunny, ported to Ariadne. The volume is the signed
+# distance field of the embedded Stanford bunny MESH (source: { sdf: { mesh:, dim } }); the transfer
+# function paints a window around the zero level set (the surface). Run by the generic ariadne_hello:
+#
+#   ariadne_hello volslice_bunny.ari --component-path src/cvc/ariadne/components
+#   ariadne_hello volslice_bunny.ari --offscreen --png volslice.png --frames 8 --component-path …
+
+meta:
+  name: Volslice bunny (Ariadne)
+  author: cvc
+  min_libcvc: 3.4.0
+
+# Reusable control components (shared with the other bunny demos): the lighting rig + camera
+# navigation, plus the volume-slice panel. All declarative — no host C++ panels.
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/volslice_controls.ari
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: stage_lighting
+  - include: camera_controls
+  - include: volslice_controls
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The bunny as a sliced volume. Slices are unlit by design — the transfer function supplies the
+    # colour; opacity is highest inside the surface (negative SDF) and fades to transparent air.
+    - node: bunny_volume
+      type: volslice
+      source: { sdf: { mesh: stanford.bunny, dim: 96 } }
+      fit: { height: 100, up: y }
+      volslice:
+        quality: 0.6
+        opacity_correction: true
+        transfer_function:
+          window: [-6, 6]
+          points:
+            - { value: -6.0, color: [0.90, 0.60, 0.20, 0.85] }
+            - { value: -0.5, color: [1.00, 0.85, 0.60, 0.45] }
+            - { value: 0.5, color: [1.00, 0.95, 0.85, 0.12] }
+            - { value: 6.0, color: [1.00, 1.00, 1.00, 0.00] }
+    - node: ground
+      type: geometry
+      source: { plane: { size: 440 } }
+      material: { color: [0.18, 0.19, 0.22], ambient: 0.3, diffuse: 0.8 }
+
+  lights:
+    - rig: three_point
+      key: { intensity: 1.9, azimuth: -38, elevation: 52 }
