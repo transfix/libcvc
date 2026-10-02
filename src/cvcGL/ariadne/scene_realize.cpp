@@ -15,6 +15,7 @@
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/utility/algorithm.h> // cvc::sdf — source: { sdf: { mesh:, dim: } } volume source
 #include <cvc/volren/settings.h>
 #include <cvc/volslice/settings.h>
 #include <cvc/volume/bounding_box.h>
@@ -245,6 +246,47 @@ void configure_volslice(VolSliceNode &vn, const cvc::ariadne::SceneVolSlice &v,
   vn.setConfig(s);
 }
 
+#if CVC_ENABLE_SDF
+// A dim³ signed-distance-field volume of a mesh, framed like the volume demos' bunny_sdf: the grid
+// spans the mesh extents padded 10% (cubic), SDF_V2. Lets a volren/volslice node declare
+// `source: { sdf: { mesh:, dim: } }` instead of a pre-baked volume file.
+cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
+                                 bool apply_fit, bool fit_up_y, float fit_height) {
+  cvc::geometry mesh = cvc::read_geometry(mesh_uri);
+  if (apply_fit)
+    mesh = fit_to_ground(mesh, fit_up_y, fit_height); // stand/centre/scale the mesh before the SDF,
+                                                      // so the volume is framed like the geometry
+  const cvc::bounding_box e = mesh.extents();
+  const double ext = std::max({e.maxx - e.minx, e.maxy - e.miny, e.maxz - e.minz});
+  const double half = ext * 1.1 * 0.5;
+  const double cx = 0.5 * (e.minx + e.maxx), cy = 0.5 * (e.miny + e.maxy),
+               cz = 0.5 * (e.minz + e.maxz);
+  const cvc::bounding_box bbox(cx - half, cy - half, cz - half, cx + half, cy + half, cz + half);
+  const int d = dim > 0 ? dim : 64;
+  return cvc::sdf(app, mesh, cvc::dimension(d, d, d), bbox, cvc::SDF_V2);
+}
+#endif
+
+// The volume a volren/volslice node draws: loaded from `source: { file }`, or computed as the SDF
+// of a mesh (`source: { sdf: { mesh:, dim: } }`). Throws on failure — the caller's try/catch warns
+// and skips the node.
+cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+                             std::vector<std::string> *warnings) {
+  if (!n.source_sdf_mesh.empty()) {
+#if CVC_ENABLE_SDF
+    return sdf_volume_from_mesh(sg.appContext(), n.source_sdf_mesh, n.sdf_dim, n.has_fit,
+                                n.fit_up_y, n.fit_height);
+#else
+    (void)warnings;
+    throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
+#endif
+  }
+  cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+  if (!src.ok)
+    throw std::runtime_error("unresolved source");
+  return cvc::volume(sg.appContext(), src.path);
+}
+
 // Realize one node under `parent` (null = a top-level node parented to the graphics
 // root). A nested node is created via parent->createChild/addGraphicsChild, which
 // gives it the hierarchical state path `{parent}.children.{id}` AND makes its
@@ -337,16 +379,13 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       vnode->setDiffuse(n.diffuse);
     }
   } else if (n.type == "volren") {
-    if (n.source_file.empty()) {
-      warn(warnings, "ari: scene node '" + n.id + "' (volren) has no source.file");
+    if (n.source_file.empty() && n.source_sdf_mesh.empty()) {
+      warn(warnings, "ari: scene node '" + n.id + "' (volren) has no source (file or sdf)");
       return;
     }
-    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
-    if (!src.ok)
-      return;
     std::shared_ptr<VolRenNode> vn;
     try {
-      cvc::volume vol(sg.appContext(), src.path); // reads on construct; throws on a bad file
+      cvc::volume vol = load_node_volume(sg, n, warnings); // file, or an SDF of a mesh
       // No sg.addGraphics overload for VolRenNode: create under the parent (or root).
       GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
       // Last-wins parity with sg.addGraphics: registerGraphics only reassigns the name
@@ -365,16 +404,13 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     out.volren_ticks.push_back(vn); // needs a per-frame tick() (tick_scene)
     node = vn;
   } else if (n.type == "volslice") {
-    if (n.source_file.empty()) {
-      warn(warnings, "ari: scene node '" + n.id + "' (volslice) has no source.file");
+    if (n.source_file.empty() && n.source_sdf_mesh.empty()) {
+      warn(warnings, "ari: scene node '" + n.id + "' (volslice) has no source (file or sdf)");
       return;
     }
-    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
-    if (!src.ok)
-      return;
     std::shared_ptr<VolSliceNode> vn;
     try {
-      cvc::volume vol(sg.appContext(), src.path);
+      cvc::volume vol = load_node_volume(sg, n, warnings);
       GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
       if (!parent && sg.hasGraphics(n.id)) // last-wins parity with sg.addGraphics (see volren)
         sg.removeGraphics(n.id);

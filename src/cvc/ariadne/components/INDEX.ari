@@ -58,3 +58,15 @@ catalog:
     for: "a live image/raster viewer (nav grids, textures) with a colormap menu"
     args: []
     note: "needs a host that publishes named cvc::images (ImGuiBackend::set_image) each frame"
+  - component: volren_controls
+    file: volren_controls.ari
+    unit: volren_controls
+    binds: "<prefix>.graphics.root.children.bunny_volume.volren.*"   # cvc::volren::state_settings
+    for: "a `type: volren` node (steps / ambient / supersample / volumetric shadows)"
+    args: []                               # convention: node id `bunny_volume`; copy + rename for another
+  - component: volslice_controls
+    file: volslice_controls.ari
+    unit: volslice_controls
+    binds: "<prefix>.graphics.root.children.bunny_volume.volslice.*" # cvc::volslice::state_settings
+    for: "a `type: volslice` node (quality / near-plane peel / max planes)"
+    args: []                               # convention: node id `bunny_volume`; copy + rename for another
