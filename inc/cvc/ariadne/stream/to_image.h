@@ -11,8 +11,8 @@
 #ifndef __CVC_ARIADNE_STREAM_TO_IMAGE_H__
 #define __CVC_ARIADNE_STREAM_TO_IMAGE_H__
 
-#include <cvc/image/image.h>
 #include <cvc/ariadne/stream/frame.h>
+#include <cvc/image/image.h>
 
 // Bridge a video stream frame to a cvc::image with NO copy (roadmap
 // STATE_BINARY_STREAMING.md Phase 2 / §7 H2). The returned image ALIASES the

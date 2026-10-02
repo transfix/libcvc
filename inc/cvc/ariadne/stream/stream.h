@@ -14,10 +14,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cvc/core/state.h>
 #include <cvc/ariadne/stream/frame.h>
 #include <cvc/ariadne/stream/frame_pool.h>
 #include <cvc/ariadne/stream/stream_channel.h>
+#include <cvc/core/state.h>
 #include <memory>
 #include <string>
 #include <vector>
