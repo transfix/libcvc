@@ -715,6 +715,19 @@ PYCVC_LOD_KWARGS(cvc::lod::build_tiled_pyramids)
   }
 }
 
+// scene_reader is MOVE-ONLY (it owns an HDF5 handle), so the static by-value
+// factory open_verified is not wrapped as declared: how a by-value return gets
+// onto the heap is up to SWIG, and SWIG < 4.1 copy-constructs it
+// (`new scene_reader(static_cast<const scene_reader &>(result))`), a hard
+// compile error. The %extend below exposes the same Python call,
+// scene_reader.open_verified(ctx, blob, sha256) -- same name, arguments,
+// bytes-like typemap, GIL release and exception mapping -- as a factory that
+// constructs the reader on the heap from the prvalue (no copy, no move) and
+// hands Python ownership of it (%newobject).
+%ignore cvc::lod::scene_reader::open_verified;
+%rename(open_verified) cvc::lod::scene_reader::_pycvc_open_verified;
+%newobject cvc::lod::scene_reader::_pycvc_open_verified;
+
 // Readers and writers hold the app by reference: keep it alive on the proxy.
 %pythonappend cvc::lod::scene_writer::scene_writer %{
     if args: self._pycvc_app = args[0]
@@ -722,7 +735,7 @@ PYCVC_LOD_KWARGS(cvc::lod::build_tiled_pyramids)
 %pythonappend cvc::lod::scene_reader::scene_reader %{
     if args: self._pycvc_app = args[0]
 %}
-%pythonappend cvc::lod::scene_reader::open_verified %{
+%pythonappend cvc::lod::scene_reader::_pycvc_open_verified %{
     val._pycvc_app = ctx
 %}
 %ignore cvc::lod::scene_writer::scene_writer(scene_writer &&);
@@ -735,7 +748,7 @@ PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_writer::write_mesh_pyramid)
 PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_writer::write_image_pyramid)
 PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_writer::to_blob)
 PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_reader::scene_reader)
-PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_reader::open_verified)
+PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_reader::_pycvc_open_verified)
 PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_reader::read_mesh_pyramid)
 PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_reader::read_image_pyramid)
 PYCVC_LOD_STORE_NOGIL(cvc::lod::scene_reader::index)
@@ -751,6 +764,17 @@ PYCVC_LOD_NOGIL(cvc::lod::mesh_content_hash)
 PYCVC_LOD_NOGIL(cvc::lod::image_content_hash)
 PYCVC_LOD_KWARGS(cvc::lod::bake_mesh_asset)
 %include "cvc/lod/store.h"
+
+%extend cvc::lod::scene_reader {
+  // Python's scene_reader.open_verified (renamed above). The parameter names
+  // bind the bytes-like (bytes, n) typemap and the %pythonappend's `ctx`.
+  static cvc::lod::scene_reader *_pycvc_open_verified(cvc::app &ctx, const unsigned char *bytes,
+                                                      std::size_t n,
+                                                      const std::string &expected_sha256_hex) {
+    return new cvc::lod::scene_reader(
+        cvc::lod::scene_reader::open_verified(ctx, bytes, n, expected_sha256_hex));
+  }
+}
 
 %extend cvc::lod::lod_index_entry {
   std::string __repr__() const {

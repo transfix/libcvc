@@ -1136,7 +1136,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/app_runtime.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/app_runtime.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1150,28 +1150,32 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http.h
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
+  ../../inc/cvc/ariadne/stream_intrinsics.h
   ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h
 )
 
-# cvc::stream — Layer-(b) real-time in-process frame transport (roadmap
+# cvc::ariadne::stream — Layer-(b) real-time in-process frame transport (roadmap
 # STATE_BINARY_STREAMING.md Phase 1). Compiled INTO the core cvc library as a
 # C++ namespace (like cvc::net / cvc::ariadne), NOT a separate CMake target: a
 # standalone target would break the single-export find_package(cvc) contract
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES stream/frame_pool.cpp stream/stream_channel.cpp stream/stream_registry.cpp stream/producer_thread.cpp stream/stream.cpp stream/to_image.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp)
 list(APPEND INCLUDE_FILES
-  ../../inc/cvc/stream/frame.h
-  ../../inc/cvc/stream/frame_pool.h
-  ../../inc/cvc/stream/stream_channel.h
-  ../../inc/cvc/stream/stream_registry.h
-  ../../inc/cvc/stream/producer_thread.h
-  ../../inc/cvc/stream/stream.h
-  ../../inc/cvc/stream/to_image.h
+  ../../inc/cvc/ariadne/stream/frame.h
+  ../../inc/cvc/ariadne/stream/frame_pool.h
+  ../../inc/cvc/ariadne/stream/stream_channel.h
+  ../../inc/cvc/ariadne/stream/stream_registry.h
+  ../../inc/cvc/ariadne/stream/producer_thread.h
+  ../../inc/cvc/ariadne/stream/stream.h
+  ../../inc/cvc/ariadne/stream/to_image.h
+  ../../inc/cvc/ariadne/stream/frame_source.h
+  ../../inc/cvc/ariadne/stream/synthetic_source.h
+  ../../inc/cvc/ariadne/stream/audio_sources.h
 )
 
 # Create the main library

@@ -8,15 +8,15 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#ifndef __CVC_STREAM_STREAM_CHANNEL_H__
-#define __CVC_STREAM_STREAM_CHANNEL_H__
+#ifndef __CVC_ARIADNE_STREAM_STREAM_CHANNEL_H__
+#define __CVC_ARIADNE_STREAM_STREAM_CHANNEL_H__
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/ariadne/stream/frame.h>
+#include <cvc/ariadne/stream/frame_pool.h>
 #include <cvc/core/state_bounded_queue.h>
-#include <cvc/stream/frame.h>
-#include <cvc/stream/frame_pool.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,6 +42,7 @@ namespace cvc {
 
 class app;
 
+namespace ariadne {
 namespace stream {
 
 enum class deliver_mode { latest, ring };
@@ -154,6 +155,7 @@ private:
 };
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc
 
-#endif // __CVC_STREAM_STREAM_CHANNEL_H__
+#endif // __CVC_ARIADNE_STREAM_STREAM_CHANNEL_H__

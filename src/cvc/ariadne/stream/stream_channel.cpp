@@ -9,9 +9,10 @@
 */
 
 #include <cassert>
-#include <cvc/stream/stream_channel.h>
+#include <cvc/ariadne/stream/stream_channel.h>
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 // --------------------------------------------------------------------------
@@ -183,4 +184,5 @@ void stream_channel::close() {
 }
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc

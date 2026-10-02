@@ -9,9 +9,10 @@
 */
 
 #include <cassert>
-#include <cvc/stream/frame_pool.h>
+#include <cvc/ariadne/stream/frame_pool.h>
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 std::shared_ptr<frame_pool> frame_pool::create(std::size_t slab_bytes, std::size_t slab_count) {
@@ -93,4 +94,5 @@ std::size_t frame_pool::in_use() const noexcept {
 }
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc

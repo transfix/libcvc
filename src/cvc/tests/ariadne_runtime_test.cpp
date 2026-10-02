@@ -10,9 +10,10 @@
 #include <condition_variable>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
-#include <cvc/ariadne/loader.h>         // §12 end-to-end load: mount through the real Runtime
-#include <cvc/ariadne/net_intrinsics.h> // §13.8 async (http-get-async) intrinsic test
-#include <cvc/ariadne/uri.h>            // §13.8 (fetch uri): register a custom scheme handler
+#include <cvc/ariadne/loader.h>            // §12 end-to-end load: mount through the real Runtime
+#include <cvc/ariadne/net_intrinsics.h>    // §13.8 async (http-get-async) intrinsic test
+#include <cvc/ariadne/stream_intrinsics.h> // Phase-2 PR6 (stream-open/stream-info/stream-close)
+#include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task generalization test
@@ -2630,4 +2631,147 @@ TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
       << "the offloaded pool task never resumed the action";
   EXPECT_EQ(cvc::state::instance(app)("r.t").value(), "42"); // transparent self-park
   EXPECT_EQ(cvc::state::instance(app)("r.a").value(), "20"); // awaited future
+}
+
+// ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──
+namespace {
+struct StreamActionGuard {
+  ~StreamActionGuard() { clear_action_intrinsics(); } // process-global registry
+};
+} // namespace
+
+TEST(AriadneStreamIntrinsics, OpenInfoCloseRoundTrip) {
+  cvc::app app;
+  StreamActionGuard guard;
+  register_stream_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(
+      group({button("Go", "(begin"
+                          "  (set h (stream-open (dict \"id\" \"cam0\" \"w\" 4 \"h\" 2)))"
+                          "  (state-set \"t.ok\" (get-attr h \"ok\"))"
+                          "  (state-set \"t.token\" (get-attr h \"token\"))"
+                          "  (state-set \"t.seq\" (get-attr h \"seq_channel\"))"
+                          "  (state-set \"t.live\" (get-attr (stream-info h) \"live\"))"
+                          "  (state-set \"t.closed\" (get-attr (stream-close h) \"ok\"))"
+                          "  (state-set \"t.live2\" (get-attr (stream-info h) \"live\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // the verbs are synchronous; the action completes in this drain
+  mb.button_click = false;
+
+  EXPECT_EQ(cvc::state::instance(app)("t.ok").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("t.token").value(), "streams.cam0"); // empty root -> identity
+  EXPECT_EQ(cvc::state::instance(app)("t.seq").value(), "streams.cam0.seq");
+  EXPECT_EQ(cvc::state::instance(app)("t.live").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("t.closed").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("t.live2").value(), "false"); // closed -> no longer owned
+  EXPECT_EQ(cvc::state::instance(app)("streams.cam0").value(),
+            "closed"); // descriptor marked closed
+}
+
+TEST(AriadneStreamIntrinsics, OpenIsScopedToTheCallingDocument) {
+  cvc::app app;
+  StreamActionGuard guard;
+  register_stream_intrinsics(app);
+
+  Runtime rt(app, "demo"); // the document's chroot
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set h (stream-open (dict \"id\" \"cam0\" \"w\" 4 \"h\" 2)))"
+                                  "  (state-set \"t.token\" (get-attr h \"token\"))"
+                                  "  (state-set \"t.seq\" (get-attr h \"seq_channel\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  // DSL state-set is chroot-relative to "demo"; the stream is scoped under it.
+  EXPECT_EQ(cvc::state::instance(app)("demo.t.token").value(), "demo.streams.cam0");
+  EXPECT_EQ(cvc::state::instance(app)("demo.t.seq").value(), "demo.channels.streams.cam0.seq");
+  EXPECT_EQ(cvc::state::instance(app)("demo.streams.cam0").value(), "live"); // still open
+}
+
+// A stream the author opens but never (stream-close)s must be closed when its DOCUMENT tears down,
+// while the app is still alive — the lifetime a process-static app*-keyed owning table could NOT
+// give (under that model this case HUNG at ~Runtime, the stream's ~close running against a dead
+// app at process exit). Here the Runtime owns the stream via its document_scope and clear()s it in
+// ~Impl, so the descriptor flips to "closed" the moment the document goes away.
+TEST(AriadneStreamIntrinsics, DocumentTeardownClosesAnUnclosedStream) {
+  cvc::app app;
+  StreamActionGuard guard;
+  register_stream_intrinsics(app);
+
+  {
+    Runtime rt(app, "demo");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_root(group({button("Go", "(begin"
+                                    "  (set h (stream-open (dict \"id\" \"cam0\" \"w\" 4 \"h\" 2)))"
+                                    "  (state-set \"t.ok\" (get-attr h \"ok\")))")}));
+    mb.button_click = true;
+    rt.render();
+    rt.drain(); // opens the stream; the action never closes it
+    mb.button_click = false;
+
+    EXPECT_EQ(cvc::state::instance(app)("demo.t.ok").value(), "true");
+    EXPECT_EQ(cvc::state::instance(app)("demo.streams.cam0").value(),
+              "live"); // open, document live
+  } // ~Runtime -> ~Impl clear()s the document_scope -> ~stream closes the still-open stream
+
+  EXPECT_EQ(cvc::state::instance(app)("demo.streams.cam0").value(), "closed")
+      << "a stream left open must be closed when its document tears down (app still alive)";
+}
+
+// Out-of-range sizing knobs must fail cleanly (an { ok #f error } dict), not wrap size_t into a
+// wild frame_pool allocation or truncate a huge dimension through static_cast<int>.
+TEST(AriadneStreamIntrinsics, OutOfRangeSizingFailsCleanly) {
+  cvc::app app;
+  StreamActionGuard guard;
+  register_stream_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button(
+      "Go",
+      "(begin"
+      // negative expected_subscribers would cast to a ~1.8e19 size_t slab count
+      "  (set a (stream-open (dict \"id\" \"c0\" \"w\" 4 \"h\" 2 \"expected_subscribers\" -1)))"
+      "  (state-set \"t.a\" (get-attr a \"ok\"))"
+      "  (set b (stream-open (dict \"id\" \"c1\" \"w\" 999999 \"h\" 2)))" // absurd dimension
+      "  (state-set \"t.b\" (get-attr b \"ok\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  EXPECT_EQ(cvc::state::instance(app)("t.a").value(), "false"); // rejected, not an OOM
+  EXPECT_EQ(cvc::state::instance(app)("t.b").value(), "false");
+  EXPECT_EQ(cvc::state::instance(app)("streams.c0").value(), ""); // nothing opened
+  EXPECT_EQ(cvc::state::instance(app)("streams.c1").value(), "");
+}
+
+// The load-time init: lane has no document scope to own a stream, so (stream-open) there fails
+// cleanly (a stream with no owner is the leak model B exists to prevent) rather than leaking.
+TEST(AriadneStreamIntrinsics, OpenOnTheInitLaneFailsWithoutADocumentScope) {
+  cvc::app app;
+  StreamActionGuard guard;
+  register_stream_intrinsics(app);
+
+  std::vector<std::string> errors;
+  const bool ok = run_init(app, "demo",
+                           "(begin"
+                           "  (set h (stream-open (dict \"id\" \"cam0\" \"w\" 4 \"h\" 2)))"
+                           "  (state-set \"t.ok\" (get-attr h \"ok\"))"
+                           "  (state-set \"t.err\" (get-attr h \"error\")))",
+                           &errors);
+  EXPECT_TRUE(ok) << "the script itself runs to completion; only (stream-open) returns an error";
+  EXPECT_EQ(cvc::state::instance(app)("demo.t.ok").value(), "false");
+  EXPECT_NE(cvc::state::instance(app)("demo.t.err").value().find("no document scope"),
+            std::string::npos);
+  EXPECT_EQ(cvc::state::instance(app)("demo.streams.cam0").value(), ""); // nothing was opened
 }

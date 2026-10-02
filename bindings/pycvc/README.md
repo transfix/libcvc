@@ -56,7 +56,19 @@ g.compute_normals()
 g.save("tri.off")
 ```
 
-Requires SWIG ≥ 4.0 and Python 3 development headers.
+Requires SWIG ≥ 4.0 and Python 3 development headers. Build with the cvcpkg
+`swig` (`cvcpkg install swig --prefix <p>`), never a distro one, and name it
+explicitly; its binary reports a stale `-swiglib`, so pass the library too:
+
+```bash
+export SWIG_LIB=<p>/share/swig/4.4.1
+cmake ... -DSWIG_EXECUTABLE=<p>/bin/swig -DSWIG_DIR="$SWIG_LIB" \
+          -DCVC_PYCVC_REQUIRE_SWIG_VERSION=4.4   # any other SWIG: configure error
+```
+
+Without `-DSWIG_EXECUTABLE`, a `swig` in a `CMAKE_PREFIX_PATH` prefix is taken
+(and its `share/swig/<ver>` used as `SWIG_DIR`) before CMake's FindSWIG searches
+the system, where its versioned names (`swig4.0`) would otherwise win.
 
 ## In-library data prep
 

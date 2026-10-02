@@ -1,5 +1,5 @@
 // Phase-2 PR2: StreamTextureBinding drives a GeometryNode's texture from a
-// cvc::stream video subscription. This proves the END-TO-END ZERO-COPY path with
+// cvc::ariadne::stream video subscription. This proves the END-TO-END ZERO-COPY path with
 // no GL context and no hardware: a frame published on the stream is, on tick(),
 // aliased into the node's vtkTexture whose scalar array points at the SAME bytes
 // the stream frame borrows (no memcpy). Also covers the seq dirty-check (a tick
@@ -14,13 +14,13 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/ariadne/stream/frame.h>
+#include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/ariadne/stream_texture_binding.h>
-#include <cvc/stream/frame.h>
-#include <cvc/stream/stream.h>
-#include <cvc/stream/stream_channel.h>
 #include <memory>
 #include <vtkActor.h>
 #include <vtkDataArray.h>
@@ -47,10 +47,10 @@ static geometry uv_quad() {
   return g;
 }
 
-static cvc::stream::stream_params video_params(const char *id, int w, int h) {
-  cvc::stream::stream_params p;
+static cvc::ariadne::stream::stream_params video_params(const char *id, int w, int h) {
+  cvc::ariadne::stream::stream_params p;
   p.id = id;
-  p.format.kind = cvc::stream::frame_kind::video_raw;
+  p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
   p.format.codec = "rgba8";
   p.format.w = w;
   p.format.h = h;
@@ -60,8 +60,8 @@ static cvc::stream::stream_params video_params(const char *id, int w, int h) {
   return p;
 }
 
-static const void *publish_tagged(cvc::stream::stream &s, cvc::stream::subscription &sub,
-                                  std::uint8_t tag) {
+static const void *publish_tagged(cvc::ariadne::stream::stream &s,
+                                  cvc::ariadne::stream::subscription &sub, std::uint8_t tag) {
   auto l = s.channel().pool().acquire();
   assert(l.has_value() && "pool exhausted");
   l->data[0] = tag;
@@ -85,9 +85,9 @@ int main() {
   cvc::app app;
   const int W = 8, H = 8;
 
-  auto s = cvc::stream::stream::open(app, video_params("vid", W, H));
+  auto s = cvc::ariadne::stream::stream::open(app, video_params("vid", W, H));
   assert(s && "stream::open failed");
-  auto sub = s->channel().subscribe(cvc::stream::deliver_mode::latest, 2);
+  auto sub = s->channel().subscribe(cvc::ariadne::stream::deliver_mode::latest, 2);
   assert(sub && "subscribe failed");
 
   auto node = std::make_shared<TestGeomNode>(app);

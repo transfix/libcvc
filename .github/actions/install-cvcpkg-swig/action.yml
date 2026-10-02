@@ -1,0 +1,108 @@
+name: 'Install swig (cvcpkg)'
+description: |
+  Installs SWIG from the cvcpkg catalog into a hermetic host-tools prefix and
+  exports what every SWIG-bindings configure needs to use that swig and ONLY
+  that swig. Never the runner image's: the GitHub ubuntu images ship
+  /usr/bin/swig4.0 (SWIG 4.0.2), and CMake's FindSWIG searches the versioned
+  name `swig4.0` in every directory before a plain `swig`, so a cvcpkg swig
+  merely on PATH or CMAKE_PREFIX_PATH still loses to it. That is how the
+  publish lanes generated pycvc with 4.0.2 and failed to compile the LOD
+  bindings (#511). Callers therefore pass ALL of these to cmake:
+
+      -DSWIG_EXECUTABLE="$CVC_SWIG_EXECUTABLE"
+      -DSWIG_DIR="$SWIG_LIB"
+      -DCVC_PYCVC_REQUIRE_SWIG_VERSION="$CVC_SWIG_VERSION"
+
+  and the last one turns any other SWIG into a configure error.
+
+  Exported to the job environment (GITHUB_ENV):
+    CVC_SWIG_EXECUTABLE  absolute path of the cvcpkg swig (swig.exe on Windows)
+    SWIG_LIB             its share/swig/<version> library. MANDATORY, not
+                         belt-and-braces: the packaged binary has its BUILDER's
+                         temp dir baked in as -swiglib (/tmp/cvcpkg-builder/...),
+                         so without it every run dies "Unable to find 'swig.swg'".
+    CVC_SWIG_VERSION     the required version prefix (the `version` input).
+
+  Requires `cvcpkg` on PATH. bash on every OS (Git Bash on Windows runners);
+  paths are exported in forward-slash form so pwsh and CMake take them as-is.
+
+inputs:
+  prefix:
+    description: 'Host-tools prefix to install swig into. Default: $GITHUB_WORKSPACE/host-tools.'
+    required: false
+    default: ''
+  version:
+    description: 'Required SWIG version prefix (major.minor). The step fails unless the installed swig reports it.'
+    required: false
+    default: '4.4'
+
+outputs:
+  executable:
+    description: 'Absolute path of the installed swig.'
+    value: ${{ steps.swig.outputs.executable }}
+  swig-lib:
+    description: 'Its runtime library directory (share/swig/<version>).'
+    value: ${{ steps.swig.outputs.swig-lib }}
+  version:
+    description: 'The full version the installed swig reports.'
+    value: ${{ steps.swig.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install swig from the cvcpkg catalog
+      id: swig
+      shell: bash
+      env:
+        HT_INPUT: ${{ inputs.prefix }}
+        WANT: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        HT="${HT_INPUT:-$GITHUB_WORKSPACE/host-tools}"
+        # Git Bash on Windows: D:\a\... -> D:/a/..., which bash, pwsh, Python
+        # and CMake all accept.
+        if command -v cygpath >/dev/null 2>&1; then HT="$(cygpath -m "$HT")"; fi
+        # --no-fallback-to-source: a missing bundle must fail here, not turn
+        # into a from-source swig build (bison/autotools/pcre2) mid-publish.
+        cvcpkg install swig --prefix "$HT" --config release --link shared \
+          --no-fallback-to-source
+
+        exe=""
+        for c in "$HT/bin/swig.exe" "$HT/bin/swig"; do
+          if [ -f "$c" ]; then exe="$c"; break; fi
+        done
+        if [ -z "$exe" ]; then
+          echo "::error::cvcpkg installed swig but there is no bin/swig under $HT"
+          ls -la "$HT/bin" 2>/dev/null || true
+          exit 1
+        fi
+
+        shopt -s nullglob
+        libs=( "$HT"/share/swig/*/swig.swg )
+        shopt -u nullglob
+        if [ "${#libs[@]}" -ne 1 ]; then
+          echo "::error::expected exactly one share/swig/<version>/swig.swg under $HT, found ${#libs[@]}"
+          exit 1
+        fi
+        swiglib="$(dirname "${libs[0]}")"
+
+        ver="$(SWIG_LIB="$swiglib" "$exe" -version | tr -d '\r' | sed -n 's/^SWIG Version //p')"
+        case "$ver" in
+          "$WANT"|"$WANT".*) ;;
+          *)
+            echo "::error::$exe reports SWIG '${ver:-<nothing>}', not the required $WANT.x"
+            exit 1
+            ;;
+        esac
+        echo "cvcpkg swig $ver: $exe (SWIG_LIB=$swiglib)"
+
+        {
+          echo "CVC_SWIG_EXECUTABLE=$exe"
+          echo "SWIG_LIB=$swiglib"
+          echo "CVC_SWIG_VERSION=$WANT"
+        } >> "$GITHUB_ENV"
+        {
+          echo "executable=$exe"
+          echo "swig-lib=$swiglib"
+          echo "version=$ver"
+        } >> "$GITHUB_OUTPUT"
