@@ -701,6 +701,26 @@ jobs:
                   -E "${STRESS_REGEX}"
           fi
 
+      # --output-on-failure keeps a passing test's output out of this log, so
+      # a flake that passes on retry leaves no numbers behind, and a tolerance
+      # that always passes is never measured. LastTest.log keeps every
+      # attempt's output: print cvcgl_shadow_casters' on-screen section (GL
+      # renderer, background-pixel counts, luma, differing bytes) from each
+      # attempt, pass or fail. A Release push runs a second ctest after the
+      # first, which replaces LastTest.log, so there it finds nothing.
+      - name: cvcgl_shadow_casters on-screen numbers
+        if: always() && matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^"cvcgl_shadow_casters" start time:/ { run = 1; print "-- attempt " ++n }
+               run && /^D\. on screen/ { d = 1 }
+               run && /^(F\. |<end of output>)/ { d = 0 }
+               d
+               run && /^Test (Passed|Failed)/ { print "   " $0 }
+               /^"cvcgl_shadow_casters" end time:/ { run = 0; d = 0 }' "$log"
+
       - name: Pack libcvc zip
         if: matrix.kind == 'libcvc'
         working-directory: build
