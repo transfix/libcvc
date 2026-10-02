@@ -5,6 +5,7 @@
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/LowMemoryPolyDataMapper.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/line_normals.h>
@@ -48,14 +49,13 @@ namespace cvc {
 namespace gl {
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
-    : GeometryNode(ctx, statePath, name, vtkSmartPointer<vtkPolyDataMapper>::New()) {}
+    : GeometryNode(ctx, statePath, name, newPolyDataMapper()) {}
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name,
                            vtkSmartPointer<vtkPolyDataMapper> mapper)
     : GraphicsNode(ctx, statePath, name), m_hasGeometry(false),
       m_renderMode(GeometryRenderMode::TRIS), m_useSingleColor(false),
-      m_actor(vtkSmartPointer<vtkActor>::New()),
-      m_mapper(mapper ? mapper : vtkSmartPointer<vtkPolyDataMapper>::New()),
+      m_actor(vtkSmartPointer<vtkActor>::New()), m_mapper(mapper ? mapper : newPolyDataMapper()),
       m_polyData(vtkSmartPointer<vtkPolyData>::New()), m_textureFlipV(false) {
   m_mapper->SetInputData(m_polyData);
   m_actor->SetMapper(m_mapper);

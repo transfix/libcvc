@@ -390,7 +390,7 @@ if(CVC_BUILD_PYCVC)
 endif()
 
 # ************* Install documentation & resources *************
-install(FILES README.md USAGE.md LICENSE
+install(FILES README.md USAGE.md LICENSE THIRD_PARTY_NOTICES.md
   DESTINATION ${CMAKE_INSTALL_DOCDIR}
   COMPONENT libcvc)
 

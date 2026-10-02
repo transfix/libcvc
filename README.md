@@ -705,6 +705,15 @@ libcvc is licensed under the **GNU Lesser General Public License, version 2.1**
 The bundled XmlRpc++ sources under `inc/xmlrpc/` and `src/xmlrpc/` are
 Copyright (c) 2002-2003 Chris Morley and are used under LGPL-2.1-or-later.
 
+Portions of `src/cvcGL/LowMemoryPolyDataMapper.cpp` are derived from VTK 9.5.0,
+Copyright (c) Ken Martin, Will Schroeder, Bill Lorensen, and are used under the
+BSD-3-Clause license. That and the other third-party code in, or compiled into,
+libcvc and cvcGL -- stb_image, PocketFFT, the contour library, kazlib, sdf,
+mtxlib, the DTU `.vtk` reader, VTK's marching-cubes table, the ABYSSAL ocean
+port in the cvcGL examples, and the vendored CMake modules -- are listed with
+their notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which is
+installed with the documentation.
+
 ## Credits
 
 Based on research and software developed at the **Computational Visualization Center, University of Texas at Austin**.

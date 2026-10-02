@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/geometry/geometry.h>
+#include <cvc/gl/LowMemoryPolyDataMapper.h>
 #include <cvc/gl/RenderView.h>
 #include <cvc/gl/nodes.h>
 #include <vtkActor.h>
@@ -294,7 +295,7 @@ void GeometryShape::setGeometry(const cvc::geometry &geom) {
 }
 
 vtkSmartPointer<vtkProp> GeometryShape::createProp(RenderView &) {
-  auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+  auto mapper = newPolyDataMapper();
   if (m_polyData)
     mapper->SetInputData(m_polyData);
   auto actor = vtkSmartPointer<vtkActor>::New();

@@ -60,9 +60,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cvc/gl/LowMemoryPolyDataMapper.h>
 #include <cvc/gl/StreamingGeometryNode.h> // StreamingMapperKind
 #include <functional>
-#include <vtkOpenGLLowMemoryPolyDataMapper.h>
 #include <vtkOpenGLPolyDataMapper.h>
 #include <vtkSmartPointer.h>
 
@@ -139,10 +139,14 @@ private:
   void operator=(const StreamingPolyDataMapper &) = delete;
 };
 
-class StreamingLowMemoryPolyDataMapper : public vtkOpenGLLowMemoryPolyDataMapper {
+// On top of cvc::gl::LowMemoryPolyDataMapper, so a streaming overlay also gets
+// its per-draw cuts (empty cell types skipped, cached program re-bound) and its
+// shift/scale initialisation; the draw range below narrows cell group 0 before
+// that draw runs.
+class StreamingLowMemoryPolyDataMapper : public LowMemoryPolyDataMapper {
 public:
   static StreamingLowMemoryPolyDataMapper *New();
-  vtkTypeMacro(StreamingLowMemoryPolyDataMapper, vtkOpenGLLowMemoryPolyDataMapper);
+  vtkTypeMacro(StreamingLowMemoryPolyDataMapper, LowMemoryPolyDataMapper);
 
   StreamingMapperCore &core() { return Core; }
   const StreamingMapperCore &core() const { return Core; }
@@ -151,7 +155,7 @@ public:
   void RenderPieceDraw(vtkRenderer *ren, vtkActor *act) override;
 
 protected:
-  StreamingLowMemoryPolyDataMapper();
+  StreamingLowMemoryPolyDataMapper() = default;
   ~StreamingLowMemoryPolyDataMapper() override = default;
   void ComputeBounds() override;
 

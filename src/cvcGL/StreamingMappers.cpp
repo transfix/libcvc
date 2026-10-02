@@ -36,7 +36,6 @@
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkShaderProgram.h>
-#include <vtkShaderProperty.h>
 #include <vtkStringToken.h>
 #include <vtkTextureObject.h>
 #include <vtk_glad.h>
@@ -190,18 +189,11 @@ void StreamingPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
 }
 
 // ─────────────────────────────── low-memory mapper ──────────────────────────
+// The base, LowMemoryPolyDataMapper, initialises the shift/scale members VTK
+// 9.5.0 leaves uninitialised: with garbage there the mapper uploaded a
+// shift/scale COPY of the positions, which also defeats streaming (the uploaded
+// array must be the input's own).
 vtkStandardNewMacro(StreamingLowMemoryPolyDataMapper);
-
-StreamingLowMemoryPolyDataMapper::StreamingLowMemoryPolyDataMapper() {
-  // VTK 9.5.0 never initialises these (9.5.2 fixes the bool only). With
-  // DISABLE_SHIFT_SCALE nothing ever assigns them, so the mapper applied a
-  // GARBAGE shift/scale copy of the positions whenever the heap byte under the
-  // bool happened to be non-zero -- nondeterministic, and it also defeats the
-  // streaming path (the uploaded array is then a copy, not the input's).
-  this->CoordinateShiftAndScaleInUse = false;
-  this->ShiftValues.fill(0.0);
-  this->ScaleValues.fill(1.0);
-}
 
 void StreamingLowMemoryPolyDataMapper::ComputeBounds() {
   if (Core.beforeBounds)
@@ -216,14 +208,9 @@ void StreamingLowMemoryPolyDataMapper::ComputeBounds() {
 void StreamingLowMemoryPolyDataMapper::RenderPieceStart(vtkRenderer *ren, vtkActor *act) {
   if (Core.beforeDraw)
     Core.beforeDraw(ren);
-  // VTK 9.5's low-memory mapper never looks at the actor's shader property once
-  // its program is built: IsShaderUpToDate ignores it, where the classic mapper
-  // compares GetShaderMTime(). A replacement added or cleared after the first
-  // draw (GeometryNode::add*ShaderReplacement / clearShaderReplacements) would
-  // never reach the GPU. Dropping the program makes the base rebuild it.
-  if (vtkShaderProperty *sp = act->GetShaderProperty())
-    if (sp->GetShaderMTime() > this->ShaderBuildTimeStamp.GetMTime())
-      this->ShaderProgram = nullptr;
+  // (The base, LowMemoryPolyDataMapper::RenderPieceStart, rebuilds the program
+  // when the actor's shader property changed after it was built -- VTK's
+  // low-memory mapper ignores that property once its program exists.)
   // IsUpToDate() false => the base deletes EVERY array texture and re-binds them
   // all (the per-frame churn this mapper exists to avoid). That only happens on
   // a real input/topology/shader change; streaming writes never touch the
