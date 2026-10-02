@@ -507,6 +507,7 @@ Measured 3.7–6.0× fewer triangles on the Austin bundle; `solve()` for a
 - **[docs/NAV_VEHICLE.md](docs/NAV_VEHICLE.md)** - `cvc::nav` optional vehicle refinements: multi-disc footprint (+ the `body_gain` correction it needs), inner-wheel steering lock, and a material grip field
 - **[docs/NAV_STATS.md](docs/NAV_STATS.md)** - `cvc::nav::nav_stats` base navigation telemetry: the per-vehicle/per-episode collector + corpus scorecard, the `sim_world` internal collector, and the `min_clearance_world()` units contract (RF-free base of the two-layer nav-stats design)
 - **[docs/LOD_API.md](docs/LOD_API.md)** - `cvc::lod` level-of-detail selection math: rung selection, budget solver, presets, and the user-facing knobs
+- **[docs/STREAMING.md](docs/STREAMING.md)** - `cvc::ariadne::stream` real-time frame transport: zero-copy video/audio/sensor streams, the host interface (DSL `stream-open`/`gl-bind-stream`, the `/streams/<id>` descriptor, §4.1 scoping), GL/pycvc sinks, and the peripheral `frame_source` model (SDL3 camera + the composable audio-source family) with examples
 
 ### Testing Documentation
 

@@ -33,6 +33,11 @@ class app;
 namespace ariadne {
 class Backend;
 }
+namespace state_exec {
+// Runtime::document_scope() return type; full definition in <cvc/core/state_exec/intrinsics.h>.
+// `class` (not struct) to match the real declaration — a tag mismatch is an LNK2019 on MSVC.
+class document_scope;
+} // namespace state_exec
 } // namespace cvc
 
 namespace cvc {
@@ -119,6 +124,16 @@ public:
   // these (e.g. after the first frame); ignoring them is safe — the walk already
   // degraded fail-safe. Not part of render()'s hot path beyond a moved-out vector.
   std::vector<std::string> take_reactive_warnings();
+
+  // This document's per-resource scope (the se::document_scope installed on every action/resident
+  // intrinsics_context as ictx.document). A host that contributes SCENE-BOUND intrinsics — whose
+  // verb must reach live host objects a neutral register_action_intrinsics provider never sees (the
+  // SceneGraph, a per-frame sink) — writes a NON-OWNING handle to those objects here, so the verb
+  // reaches THIS document's host via ictx.document rather than capturing it in the process-global
+  // provider. That routes correctly per document (two documents each resolve their own handle) and
+  // cannot dangle across documents. Used by cvcGL's (gl-bind-stream) verb (stream_verbs.h). Lives
+  // on the Impl, torn down with the Runtime; call between construction and the first drain().
+  cvc::state_exec::document_scope &document_scope();
 
 private:
   struct Impl;

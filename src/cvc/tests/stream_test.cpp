@@ -20,17 +20,20 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cvc/ariadne/stream/audio_sources.h>
 #include <cvc/ariadne/stream/frame.h>
 #include <cvc/ariadne/stream/frame_pool.h>
 #include <cvc/ariadne/stream/producer_thread.h>
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream/stream_registry.h>
+#include <cvc/ariadne/stream/synthetic_source.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/core/state_exec/async_scheduler.h>
 #include <cvc/core/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -58,6 +61,39 @@ format_desc pcm(int frames, int channels) {
   f.bytes = static_cast<std::size_t>(frames) * channels * 2; // explicit non-video sizing
   return f;
 }
+
+// A frame_source that is always LIVE but never produces a frame (bytes 0, never stop) — models a
+// device input that is stalled/warming up. Its frame_bytes() matches a given size so a mix accepts
+// it.
+struct silent_source : frame_source {
+  std::size_t bytes_;
+  explicit silent_source(std::size_t bytes) : bytes_(bytes) {}
+  std::size_t frame_bytes() const override { return bytes_; }
+  produced_frame fill(std::uint8_t *, std::size_t) override {
+    return {};
+  } // always skip, never stop
+};
+
+// A controllable test frame_source: produces `bytes`-sized frames, stops after `limit` (0 = never).
+struct test_source : frame_source {
+  std::size_t bytes_;
+  int limit_;
+  int made_ = 0;
+  test_source(std::size_t bytes, int limit) : bytes_(bytes), limit_(limit) {}
+  std::size_t frame_bytes() const override { return bytes_; }
+  produced_frame fill(std::uint8_t *buf, std::size_t cap) override {
+    produced_frame out;
+    if (bytes_ == 0 || bytes_ > cap)
+      return out;
+    for (std::size_t i = 0; i < bytes_; ++i)
+      buf[i] = 0xAB;
+    out.bytes = bytes_;
+    out.pts_seconds = made_ * 0.01;
+    ++made_;
+    out.stop = (limit_ > 0 && made_ >= limit_); // spent after `limit_` frames
+    return out;
+  }
+};
 
 } // namespace
 
@@ -640,4 +676,212 @@ TEST(StreamScoping, EmptyRootIsBackwardCompatibleIdentity) {
   EXPECT_EQ(s->seq_channel(), "streams.cam0.seq"); // empty root -> identity
   EXPECT_EQ(s->evt_channel(), "streams.cam0.evt");
   EXPECT_EQ(cvc::state::instance(app)("streams.cam0").value(), "live");
+}
+
+// --------------------------------------------------------------------------
+// stream producer (Phase 3): the stream owns + drives a frame_source via a
+// producer_thread, and stops (joins) it before teardown.
+// --------------------------------------------------------------------------
+
+TEST(StreamProducer, SyntheticSourceFeedsFramesAndJoinsOnClose) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam0";
+  p.format = rgba(4, 4);
+  p.subscriber_depth = 2;
+  p.expected_subscribers = 1;
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  auto sub = s->channel().subscribe(deliver_mode::latest, 2);
+  ASSERT_TRUE(sub);
+
+  // The stream owns the producer thread that drives the synthetic source at 200 Hz.
+  s->start_producer(std::make_unique<synthetic_source>(4, 4), /*hz*/ 200.0);
+
+  // Frames flow (bounded wait, no fixed sleep race).
+  for (int i = 0; i < 200 && s->channel().total_published() < 3; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  EXPECT_GE(s->channel().total_published(), 3u) << "producer did not publish frames";
+  EXPECT_GE(s->channel().last_seq(), 2) << "seq did not advance";
+
+  // The subscriber sees a full-size rgba frame the source actually filled (alpha = 0xFF).
+  frame_ptr a = sub->latest();
+  ASSERT_TRUE(a);
+  EXPECT_EQ(a->size, static_cast<std::size_t>(4 * 4 * 4));
+  EXPECT_EQ(a->format.kind, frame_kind::video_raw);
+  ASSERT_NE(a->data, nullptr);
+  EXPECT_EQ(a->data[3], 0xFF) << "synthetic source did not fill the slab";
+
+  // close() stops+joins the producer: publishing stops and there is no hang.
+  s->close();
+  const std::uint64_t after_close = s->channel().total_published();
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  EXPECT_EQ(s->channel().total_published(), after_close) << "producer kept running after close()";
+  // ~stream at end of scope joins again (idempotent) — no hang/crash.
+}
+
+TEST(StreamProducer, StartProducerOnClosedStreamIsIgnored) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam1";
+  p.format = rgba(2, 2);
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  s->close();
+  s->start_producer(std::make_unique<synthetic_source>(2, 2), 60.0); // no-op on a closed stream
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_EQ(s->channel().total_published(), 0u);
+}
+
+TEST(StreamProducer, RestartReplacesThePriorProducer) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam2";
+  p.format = rgba(4, 4);
+  p.expected_subscribers = 1;
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  s->start_producer(std::make_unique<synthetic_source>(4, 4), 200.0);
+  for (int i = 0; i < 100 && s->channel().total_published() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  // A second start_producer stops+joins the first (no two threads on one pool) and keeps producing.
+  s->start_producer(std::make_unique<synthetic_source>(4, 4), 200.0);
+  const std::uint64_t at_restart = s->channel().total_published();
+  for (int i = 0; i < 100 && s->channel().total_published() < at_restart + 3; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  EXPECT_GT(s->channel().total_published(), at_restart) << "restarted producer did not run";
+  s->close();
+}
+
+TEST(StreamProducer, SelfStoppingSourceEndsTheProducer) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam3";
+  p.format = rgba(4, 4); // slab = 64 bytes
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  // A source that publishes exactly 5 frames then returns stop=true.
+  s->start_producer(std::make_unique<test_source>(/*bytes*/ 64, /*limit*/ 5), /*hz*/ 500.0);
+  for (int i = 0; i < 200 && s->channel().total_published() < 5; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(10)); // let the stop tick settle
+  EXPECT_EQ(s->channel().total_published(), 5u) << "self-stopping source published the wrong count";
+  s->close(); // joins the already-finished thread — no hang
+}
+
+TEST(StreamProducer, RejectsASourceWhoseFrameExceedsTheSlab) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam4";
+  p.format = rgba(4, 4); // slab = 64 bytes
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  // 128 bytes > 64-byte slab: start_producer must reject it up front (no silent dead stream).
+  s->start_producer(std::make_unique<test_source>(/*bytes*/ 128, /*limit*/ 0), 200.0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_EQ(s->channel().total_published(), 0u) << "oversized source should have been rejected";
+}
+
+// --------------------------------------------------------------------------
+// pure/virtual audio sources (cvc::ariadne): tone / gain / mix — the composable
+// audio-source family (f32 PCM), fully testable with no device.
+// --------------------------------------------------------------------------
+
+TEST(AudioSources, ToneGeneratesBoundedSeamlessSine) {
+  const int sr = 48000, ch = 2, frames = 256;
+  tone_source tone(sr, ch, frames, /*hz*/ 440.0, /*amp*/ 0.25);
+  const std::size_t need = audio_f32_bytes(frames, ch);
+  EXPECT_EQ(tone.frame_bytes(), need);
+
+  std::vector<float> a(static_cast<std::size_t>(frames) * ch),
+      b(static_cast<std::size_t>(frames) * ch);
+  auto p1 = tone.fill(reinterpret_cast<std::uint8_t *>(a.data()), a.size() * sizeof(float));
+  EXPECT_EQ(p1.bytes, need);
+  // Interleaved: both channels carry the same sample; all within [-amp, amp]; not all-zero.
+  bool nonzero = false;
+  for (int n = 0; n < frames; ++n) {
+    EXPECT_FLOAT_EQ(a[n * ch + 0], a[n * ch + 1]);
+    EXPECT_LE(std::fabs(a[n * ch]), 0.25f + 1e-6f);
+    if (std::fabs(a[n * ch]) > 1e-6f)
+      nonzero = true;
+  }
+  EXPECT_TRUE(nonzero) << "tone produced silence";
+  // Phase carries across chunks: the second chunk continues the wave (differs from the first) and
+  // its pts advances by one chunk.
+  auto p2 = tone.fill(reinterpret_cast<std::uint8_t *>(b.data()), b.size() * sizeof(float));
+  EXPECT_EQ(p2.bytes, need);
+  EXPECT_GT(p2.pts_seconds, p1.pts_seconds);
+  EXPECT_NE(a, b) << "phase did not carry across chunks";
+}
+
+TEST(AudioSources, GainScalesEverySample) {
+  const int sr = 48000, ch = 1, frames = 128;
+  const std::size_t need = audio_f32_bytes(frames, ch);
+  // gain 2.0 over a tone vs a reference tone with identical params in lockstep (both from phase 0),
+  // so gained[i] == 2 * ref[i].
+  gain_source gained(std::make_unique<tone_source>(sr, ch, frames, 440.0, 0.25), ch, frames, 2.0f);
+  tone_source ref(sr, ch, frames, 440.0, 0.25);
+  std::vector<float> g(frames * ch), r(frames * ch);
+  for (int chunk = 0; chunk < 3; ++chunk) {
+    auto pg = gained.fill(reinterpret_cast<std::uint8_t *>(g.data()), g.size() * sizeof(float));
+    auto pr = ref.fill(reinterpret_cast<std::uint8_t *>(r.data()), r.size() * sizeof(float));
+    ASSERT_EQ(pg.bytes, need);
+    ASSERT_EQ(pr.bytes, need);
+    for (int i = 0; i < frames * ch; ++i)
+      EXPECT_NEAR(g[i], 2.0f * r[i], 1e-6f);
+  }
+}
+
+TEST(AudioSources, MixSumsInputsWithClamp) {
+  const int sr = 48000, ch = 1, frames = 128;
+  const std::size_t need = audio_f32_bytes(frames, ch);
+  std::vector<std::unique_ptr<frame_source>> ins;
+  ins.push_back(std::make_unique<tone_source>(sr, ch, frames, 300.0, 0.2));
+  ins.push_back(std::make_unique<tone_source>(sr, ch, frames, 700.0, 0.2));
+  mix_source mix(std::move(ins), sr, ch, frames);
+  // Reference tones in lockstep (same params/order); their sum stays within [-0.4, 0.4] (no clamp).
+  tone_source a(sr, ch, frames, 300.0, 0.2), b(sr, ch, frames, 700.0, 0.2);
+  std::vector<float> m(frames * ch), ra(frames * ch), rb(frames * ch);
+  for (int chunk = 0; chunk < 3; ++chunk) {
+    auto pm = mix.fill(reinterpret_cast<std::uint8_t *>(m.data()), m.size() * sizeof(float));
+    a.fill(reinterpret_cast<std::uint8_t *>(ra.data()), ra.size() * sizeof(float));
+    b.fill(reinterpret_cast<std::uint8_t *>(rb.data()), rb.size() * sizeof(float));
+    ASSERT_EQ(pm.bytes, need);
+    for (int i = 0; i < frames * ch; ++i)
+      EXPECT_NEAR(m[i], ra[i] + rb[i], 1e-6f);
+  }
+}
+
+// Review must-fix #1: a composite whose input disagrees on frame size must report end-of-stream
+// LOUDLY, not discard every frame forever. gain over a 64-frame tone while itself expecting 128.
+TEST(AudioSources, GainStopsOnSizeMismatchInsteadOfSkippingForever) {
+  const int sr = 48000, ch = 1;
+  gain_source gained(std::make_unique<tone_source>(sr, ch, /*frames*/ 64, 440.0, 0.25), ch,
+                     /*frames*/ 128, 2.0f);
+  std::vector<float> g(128 * ch);
+  auto p = gained.fill(reinterpret_cast<std::uint8_t *>(g.data()), g.size() * sizeof(float));
+  EXPECT_EQ(p.bytes, 0u);
+  EXPECT_TRUE(p.stop) << "size-mismatched input must stop the gain, not skip silently forever";
+}
+
+// Review must-fix #2: a tick where every live input skips (produces 0 bytes but does not stop) must
+// still emit silence with a MONOTONIC pts off the mix's own time base — never stuck at 0, so a
+// stalling device input downstream can't make the output pts go backwards.
+TEST(AudioSources, MixAdvancesPtsOnSilentTicks) {
+  const int sr = 48000, ch = 1, frames = 128;
+  const std::size_t need = audio_f32_bytes(frames, ch);
+  std::vector<std::unique_ptr<frame_source>> ins;
+  ins.push_back(std::make_unique<silent_source>(need)); // live, always skips
+  mix_source mix(std::move(ins), sr, ch, frames);
+  std::vector<float> m(frames * ch);
+  double prev = -1.0;
+  for (int chunk = 0; chunk < 3; ++chunk) {
+    auto pm = mix.fill(reinterpret_cast<std::uint8_t *>(m.data()), m.size() * sizeof(float));
+    ASSERT_EQ(pm.bytes, need) << "a live-but-skipping input still emits a silent frame";
+    EXPECT_FALSE(pm.stop);
+    EXPECT_GT(pm.pts_seconds, prev) << "pts must advance even on an all-skip tick";
+    prev = pm.pts_seconds;
+    for (int i = 0; i < frames * ch; ++i)
+      EXPECT_FLOAT_EQ(m[i], 0.0f) << "skipped inputs contribute silence";
+  }
 }
