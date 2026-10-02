@@ -75,6 +75,9 @@ if(VTK_VERSION VERSION_EQUAL "9.5.0")
     list(GET _pair 0 _hdr)
     list(GET _pair 1 _want)
     if(EXISTS "${_cvc_lowmem_inc}/${_hdr}")
+      # A VTK re-installed into the same prefix (a patched recipe) re-runs the
+      # configure, and with it this check, on the next build.
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_cvc_lowmem_inc}/${_hdr}")
       file(READ "${_cvc_lowmem_inc}/${_hdr}" _text)
       string(REPLACE "\r\n" "\n" _text "${_text}")
       string(SHA256 _have "${_text}")
