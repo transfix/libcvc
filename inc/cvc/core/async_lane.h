@@ -42,15 +42,15 @@
  *   resolves the same channel to in (msg-recv ...). Every path posts exactly one value, so a waiter
  *   never hangs: a throwing on_error posts a fallback error string, and a stopped lane posts
  *   on_error("... is stopped") at once instead of dropping the task.
- *   Use '#' channels (e.g. "demo3#built.tracks") for anything a lane posts: a '#' channel is
+ *   Use '#' channels (e.g. "app#built.tracks") for anything a lane posts: a '#' channel is
  *   the identity under chroot scoping and exempt from the section 12 channel policy, so the
  *   poster and a scoped receiver always agree on the key. A resident process can then wait on
  *   lane results forever:
  *
  *     register_fn(env, "sim-launch", [&](auto) {      // runs on the pump thread
- *       return se::value_t(cvc::launch_lane_task(sim_lane, sched, ictx.root_path, "demo3",
+ *       return se::value_t(cvc::launch_lane_task(sim_lane, sched, ictx.root_path, "app",
  *                                                [&] { return run_ticks(); }, on_err));
- *     });                                             // -> "demo3#sim.<n>"
+ *     });                                             // -> "app#sim.<n>"
  *     sched.execute("(while t (apply-sim (msg-recv (sim-launch))))", opts);
  *
  *   The `work` rules of async_task.h apply unchanged: it runs OFF the scheduler thread, so marshal
@@ -214,7 +214,7 @@ using lane_task_on_error = pool_task_on_error;
 /// Run `work` on `lane` and post its value -- or on_error(message) if it throws -- on `sched` to
 /// the FIXED channel `channel`, resolved for chroot `root` with resolve_channel_key (the key a
 /// process chrooted to `root` gets for (msg-recv channel); a '#' channel is used verbatim). For a
-/// resident receiver such as (while t (apply-x (msg-recv "demo3#built.x"))). Callable from any
+/// resident receiver such as (while t (apply-x (msg-recv "app#built.x"))). Callable from any
 /// thread, including from inside another lane's job. Returns the resolved key.
 std::string post_lane_task(async_lane &lane, state_exec::async_scheduler &sched,
                            const std::string &root, const std::string &channel, lane_task_work work,

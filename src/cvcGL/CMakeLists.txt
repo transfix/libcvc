@@ -419,6 +419,13 @@ add_executable(cvcgl_camera_source test/cvcgl_camera_source.cpp)
 target_link_libraries(cvcgl_camera_source PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_source COMMAND cvcgl_camera_source)
 
+# Phase-3 audio capture: cvc::gl::capture::audio_source (SDL3 recording device -> stream
+# frame_source). DEVICE-GATED — skips (passes) with no microphone / without CVC_TEST_AUDIO; the
+# transport side and the pure audio sources (tone/gain/mix) are covered hardware-free by stream_test.
+add_executable(cvcgl_audio_source test/cvcgl_audio_source.cpp)
+target_link_libraries(cvcgl_audio_source PRIVATE cvcGL)
+add_test(NAME cvcgl_audio_source COMMAND cvcgl_audio_source)
+
 # Phase-3 audio playback: cvc::gl::playback::audio_output (f32 PCM -> SDL3 playback device).
 # DEVICE-GATED — enumeration always; live playback behind CVC_TEST_AUDIO, skips (passes) with no
 # output device / no SDL.
@@ -643,6 +650,27 @@ endif()
 add_executable(cvcgl_sdl_input test/cvcgl_sdl_input.cpp)
 target_link_libraries(cvcgl_sdl_input PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
+
+# ── GL tests: one at a time ──
+# Every cvcGL test that renders through a GL context takes the CTest resource
+# lock cvcgl_gl_context, so ctest never runs two of them at once; the headless
+# tests listed below keep running in parallel. Why: on the macOS runners every
+# failed attempt of cvcgl_shadow_casters (4 of 12 seen) ran alongside
+# cvcgl_shadow_caster_growth and other GL tests under ctest --parallel, no
+# passing attempt overlapped growth, and each retry passed. On every platform,
+# on purpose: it costs only wall time (the GL tests run end to end instead of
+# overlapped) and takes GL contention out of every run. A test added above is
+# locked unless it is listed here as headless.
+get_property(_cvcgl_gl_tests DIRECTORY PROPERTY TESTS)
+list(REMOVE_ITEM _cvcgl_gl_tests
+  cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal
+  cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
+  cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo
+  cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
+  cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
+  cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
+  cvcgl_streaming_races cvcgl_sdl_input)
+set_tests_properties(${_cvcgl_gl_tests} PROPERTIES RESOURCE_LOCK cvcgl_gl_context)
 
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
