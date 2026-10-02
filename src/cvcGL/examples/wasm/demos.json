@@ -6,7 +6,9 @@
     "lsystem_forest",
     "lsystem_coast",
     "volren_bunny",
+    "volren_bunny_ari",
     "volslice_bunny",
+    "volslice_bunny_ari",
     "nav_city_swarm",
     "nav_city_drive",
     "nav_fog_ghost",
@@ -66,6 +68,18 @@
       "blurb":
           "The classic view-aligned slice compositor from VolumeRover2, ported to cvc::volslice: the bunny's signed-distance volume windowed into a byte texture and colored by a 256-entry transfer function, hundreds of camera-facing slices blended back to front. Add up to nine bunnies — each is its own scene-graph volume node, depth-sorted per frame — and drive quality, near-plane peel, the value window and spacing-corrected opacity live in the panel.",
       "thumb": "img/volslice_bunny.jpg"
+    },
+    "volren_bunny_ari": {
+      "desc": "the volren bunny, built entirely in the Ariadne UI DSL (.ari)",
+      "blurb":
+          "The same CPU-raycast bunny, rebuilt in the Ariadne UI DSL: the scene, lighting rig and raycast control panel are all declared in one .ari document — no demo-specific C++, just the generic host. The volume is computed live as the signed distance field of the embedded Stanford mesh via a single DSL source (source: { sdf: { mesh } }), and the controls are reusable .ari components shared with the other bunny demos.",
+      "thumb": "img/volren_bunny_ari.jpg"
+    },
+    "volslice_bunny_ari": {
+      "desc": "the volslice bunny, built entirely in the Ariadne UI DSL (.ari)",
+      "blurb":
+          "The slice-based bunny, rebuilt in the Ariadne UI DSL: scene, transfer function, lighting and the slice control panel declared in one .ari document, driven by the generic host — no demo-specific C++. The volume is the signed distance field of the embedded Stanford mesh (source: { sdf: { mesh } }), and the controls are reusable .ari components.",
+      "thumb": "img/volslice_bunny_ari.jpg"
     }
   }
 }

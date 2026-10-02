@@ -74,6 +74,42 @@ EOF_EMCFG
     echo "build-wasm-demo: shared emsdk cache not writable by $(id -un); using seeded per-user cache ${_em_cache}"
 fi
 
+# yaml-cpp for wasm — the Ariadne .ari loader's only extra dependency (src/cvc/
+# CMakeLists.txt: find_package(yaml-cpp) → CVC_ARIADNE_HAVE_YAML). It is NOT in
+# the cvcpkg wasm catalog (published linux/macos/win/bsd only), so without this
+# the loader silently compiles to a stub and the .ari demos (volren_bunny_ari,
+# volslice_bunny_ari) deploy BLANK. Build it from the pinned upstream tarball
+# into CVC_WASM_DEPS, STATIC, and pthread-matched to the module so the emscripten
+# link doesn't reject mixed -pthread objects. Idempotent: skipped once installed.
+if [ ! -f "${CVC_WASM_DEPS}/lib/cmake/yaml-cpp/yaml-cpp-config.cmake" ] \
+   && [ ! -f "${CVC_WASM_DEPS}/share/cmake/yaml-cpp/yaml-cpp-config.cmake" ]; then
+    echo "build-wasm-demo: yaml-cpp not in ${CVC_WASM_DEPS}; building it for wasm from source"
+    _yc_ver=0.8.0
+    _yc_sha=fbe74bbdcee21d656715688706da3c8becfd946d92cd44705cc6098bb23b3a16
+    _yc_work="${BUILD_DIR}/_yaml-cpp"
+    _yc_src="${_yc_work}/yaml-cpp-${_yc_ver}"
+    _yc_tar="${_yc_work}/yaml-cpp-${_yc_ver}.tar.gz"
+    mkdir -p "${_yc_work}"
+    if [ ! -d "${_yc_src}" ]; then
+        curl -fL "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${_yc_ver}.tar.gz" \
+            -o "${_yc_tar}"
+        echo "${_yc_sha}  ${_yc_tar}" | sha256sum -c -
+        tar -xzf "${_yc_tar}" -C "${_yc_work}"
+    fi
+    _yc_pthread=""
+    [[ "${PTHREAD}" == "ON" ]] && _yc_pthread="-pthread"
+    emcmake cmake -G Ninja -S "${_yc_src}" -B "${_yc_work}/build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${CVC_WASM_DEPS}" \
+        -DYAML_CPP_BUILD_TESTS=OFF \
+        -DYAML_CPP_BUILD_TOOLS=OFF \
+        -DYAML_CPP_BUILD_CONTRIB=OFF \
+        -DYAML_BUILD_SHARED_LIBS=OFF \
+        -DCMAKE_CXX_FLAGS="${_yc_pthread}" \
+        -DCMAKE_C_FLAGS="${_yc_pthread}"
+    cmake --build "${_yc_work}/build" --target install
+fi
+
 emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_FIND_ROOT_PATH="${CVC_WASM_DEPS}" \
