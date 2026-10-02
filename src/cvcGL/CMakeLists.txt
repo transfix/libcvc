@@ -64,6 +64,7 @@ target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 # what lets the same code path work in the browser (VTK owns the canvas).
 option(CVC_ENABLE_IMGUI "Build the cvcGL Dear ImGui overlay (ImGuiOverlay)" ON)
 set(CVC_IMGUI_VIA_CONFIG OFF)  # set when linked via the imgui::imgui cmake target
+set(CVC_IMGUI_VIA_FIND OFF)    # set when located by header/lib (config-less imgui bundle)
 if(CVC_ENABLE_IMGUI)
   # Prefer the imgui cmake package (imgui::imgui imported target — relocatable,
   # carries its own include + lib). A consumer of the installed cvcGL then
@@ -87,22 +88,25 @@ if(CVC_ENABLE_IMGUI)
     set(CVC_IMGUI_VIA_CONFIG ON)
     message(STATUS "cvcGL: Dear ImGui overlay ENABLED (imgui::imgui target)")
   else()
-    # Fallback: a config-less imgui bundle — locate by header/lib. The export
-    # carries a relocatable -limgui the consumer resolves out of its own prefix
-    # (see the X11 comment below for the same BUILD_/INSTALL_INTERFACE split;
-    # find_library returns an absolute builder path a static archive would bake
-    # into cvcGLTargets.cmake verbatim).
+    # Fallback: a config-less imgui bundle (the cvcpkg windows + wasm builds ship
+    # no imguiConfig.cmake) — locate by header/lib. find_path/find_library return
+    # absolute BUILDER paths, so they stay $<BUILD_INTERFACE>-only; the export
+    # names the imgui::imgui target instead, which cvcGLConfig.cmake re-creates
+    # from the CONSUMER's own prefix (see cvcGLConfig.cmake.in). It used to export
+    # $<INSTALL_INTERFACE:include/imgui> + a bare imgui: that assumed imgui was
+    # co-installed in cvcGL's prefix (a split prefix failed configure with
+    # "non-existent path .../include/imgui"), and a bare imgui has no -L/LIBPATH.
     find_path(CVC_IMGUI_INCLUDE_DIR imgui.h PATH_SUFFIXES imgui)
     find_library(CVC_IMGUI_LIBRARY NAMES imgui)
     if(CVC_IMGUI_INCLUDE_DIR AND CVC_IMGUI_LIBRARY
        AND EXISTS "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
       target_sources(cvcGL PRIVATE "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
       target_include_directories(cvcGL PUBLIC
-        "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>"
-        "$<INSTALL_INTERFACE:include/imgui>")
+        "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>")
       target_link_libraries(cvcGL PUBLIC
         "$<BUILD_INTERFACE:${CVC_IMGUI_LIBRARY}>"
-        "$<INSTALL_INTERFACE:imgui>")
+        "$<INSTALL_INTERFACE:imgui::imgui>")
+      set(CVC_IMGUI_VIA_FIND ON)
       target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_IMGUI)
       if(EMSCRIPTEN) # WebGL2 loader for the browser build
         set_source_files_properties("${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp"
@@ -152,13 +156,22 @@ vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 # ABSOLUTE builder paths (e.g. .../py/lib/libX11.so) — baking those into
 # cvcGLTargets.cmake breaks any downstream consumer (volrover3) on another machine
 # with "missing and no known rule to make it". cvcGL only calls Xlib (XWarpPointer/
-# XFlush), so link libX11 BY NAME: the export then carries a relocatable "-lX11" the
-# consumer's own linker resolves, not a path from this builder.
+# XFlush), so link the X11::X11 imported TARGET (libX11 alone): the export carries the
+# relocatable name $<LINK_ONLY:X11::X11>, and cvcGLConfig.cmake's find_dependency(X11)
+# re-resolves it to the CONSUMER's own libX11 (the same FindX11 pass VTK's config
+# already runs). A bare "-lX11" (the previous fix) only resolved where libX11.so sat
+# on the default linker path — e.g. the GitHub images' system libx11-dev — and failed
+# in a clean container ("cannot find -lX11") even with the hermetic libX11 present.
+set(CVCGL_X11_DEP "")
 if(UNIX AND NOT APPLE)
   find_package(X11)
   if(X11_FOUND)
-    target_link_libraries(cvcGL PRIVATE X11)
+    target_link_libraries(cvcGL PRIVATE X11::X11)
     target_include_directories(cvcGL PRIVATE ${X11_INCLUDE_DIR})
+    get_target_property(_cvcgl_type cvcGL TYPE)
+    if(_cvcgl_type STREQUAL "STATIC_LIBRARY") # a shared cvcGL resolves libX11 itself
+      set(CVCGL_X11_DEP "find_dependency(X11)")
+    endif()
   endif()
 endif()
 
