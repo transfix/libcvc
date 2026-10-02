@@ -1,7 +1,7 @@
 // cvcgl_nav_stats_publish — publish_nav_stats writes a base episode into <prefix>.nav_stats.* on
 // the value lane, and the values read back correctly after a flush. Pins the path layout + the
-// per-convoy formation aggregate the ImGui panel / DSL will read (SPEC 1, CVC-DBG/cvcdbg
-// stats-statetree spec).
+// per-convoy formation aggregate the ImGui panel / DSL will read
+// (docs/roadmap/NAV-STATS-INTRINSIC-ROADMAP.md, Track 3b-1).
 #undef NDEBUG
 #include <cassert>
 #include <cmath>

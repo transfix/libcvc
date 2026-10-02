@@ -3,7 +3,7 @@
 **Status:** **Revision 2.1** — design approved for implementation, revised after an adversarial review pass and a rebase, then amended by the **connected-terrain decision (D9)**. Target branch family `feat/lsystem-lab-*`, baselined on `origin/master` @ **`8b6f426`** (was `10b7904`; `a33851f`, `e97d06c` and `8b6f426` have since merged).
 **Owner:** L-System Laboratory session.
 **Document path:** `docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md`
-**Last verified against the tree:** 2026-08-27, worktree `/home/joe/src/cvc/wt-libcvc-lsyslab`, rebased onto `8b6f426`.
+**Last verified against the tree:** 2026-08-27, on a branch rebased onto `8b6f426`.
 **What changed in revision 2:** see §17 (Revision history). The archipelago is now specified rather than asserted (§4.3a), the indoor clearance scheme is derived from one number rather than three contradictory ones (§6b.1a), hard classes carry ρ = 0 (§7.2a), the export frame confronts σ-in-cells (§7.1a), and the collision map is rebuilt for the post-merge world (§14).
 **What changed in revision 2.1:** the user decided **D9** — *"let the terrain be connected throughout."* The generator now **forces isthmuses** so the landmass is one component; `forced-bridges` is the v1 default, `single-island` survives only as an opt-in ablation, the binding gate criterion is **`components == 1`** (not a 0.98 area fraction), and the D2 × D9 window-size blocker **dissolves**. Propagated through §0, §1.2, §4.3a, §7.8, §9.4, §10.1, §11.2, §12.3, §13.2, §15.1 R19, §15.3 D2/D9, §16.3 and the closing claims. See §17.
 
@@ -85,7 +85,7 @@ The Laboratory is the tool that closes that loop: an interactive procedural worl
 
 ## 2. Relationship to the modernization roadmap
 
-The roadmap of record is `/home/joe/src/cvc/cvc-engagement-docs/modernization/2026-08-11-volrover3-roadmap.md` (10 852 lines). It specifies **three independent LOD mechanisms**, and it is important not to conflate them.
+The roadmap of record is the volrover3 modernization roadmap (`2026-08-11-volrover3-roadmap.md`, 10 852 lines, maintained outside this repository). It specifies **three independent LOD mechanisms**, and it is important not to conflate them.
 
 | # | System | § | Phases | Selection axis | Our relationship |
 |---|---|---|---|---|---|
@@ -1133,7 +1133,7 @@ material_planes material_build(const float *risk_raw, const std::uint8_t *hard,
 
 It takes `rows, cols` **and** `cell_w` directly. It does **not** take `bounds` or `center`.
 
-**The Python surface** — `/home/joe/src/cvc/GRL-SNAM/grl_snam/material.py:224-234` and `:255-257`:
+**The Python surface** — GRL-SNAM's `grl_snam/material.py:224-234` and `:255-257`:
 
 ```python
 class MaterialGrid:
@@ -3077,7 +3077,7 @@ brush_feather_m   = 0.0              # the consumer blurs; extra feather is addi
 
 **Consumer constants — recorded in the manifest ONLY under `consumer_frame_ref`, as provenance, never read back**
 
-Verified in `/home/joe/src/cvc/GRL-SNAM/grl_snam/material.py` (`MaterialParams`, `GateParams`) and `inc/cvc/nav/material.h` (`material_config`, `gate_params`) on 2026-08-27. Note these differ from the circulated brief, which was already stale — **and note the two twins differ from each other in two places** (§15.1 R17):
+Verified in GRL-SNAM's `grl_snam/material.py` (`MaterialParams`, `GateParams`) and `inc/cvc/nav/material.h` (`material_config`, `gate_params`) on 2026-08-27. Note these differ from the circulated brief, which was already stale — **and note the two twins differ from each other in two places** (§15.1 R17):
 
 ```
                        Python (MaterialParams)      C++ (material_config)

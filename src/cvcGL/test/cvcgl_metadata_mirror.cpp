@@ -5,7 +5,7 @@
 // The mirror used to be locked against its own owner: after the first write
 // every later setMetadata threw read_only_error, which was swallowed. The tree
 // kept the FIRST value forever, and each setGeometry paid for ~17 exceptions --
-// about 40% of a wall re-mesh in the demo3 wasm profile. This pins:
+// a large share of a mesh rebuild in a wasm profile. This pins:
 //   A. the mirror follows the node: a second setGeometry updates it, and it
 //      stays read-only to everyone else;
 //   B. an unchanged value costs nothing: no state write, no signal;

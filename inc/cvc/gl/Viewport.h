@@ -33,7 +33,7 @@ class ViewportManager;
 //
 // Two flavours (both first-class): a SCENE viewport draws its own distinct
 // SceneGraph (a clean, independent renderer); a MIRROR viewport is an alternate
-// view of a scene another viewport already draws (the DBG-minimap / PiP case).
+// view of a scene another viewport already draws (the minimap / PiP case).
 // This header is the shared surface; the manager's addSceneViewport /
 // addMirrorViewport decide the flavour.
 //
@@ -92,8 +92,8 @@ public:
 
   // Whether this viewport receives routed input (default true). A minimap / HUD
   // inset set false is skipped by ViewportManager::viewportAt, so clicks fall
-  // through to the viewport beneath it — the DBG minimap is non-interactive by
-  // design ("a minimap that pans or dollies stops being a map"). Does not affect
+  // through to the viewport beneath it — an overview minimap is non-interactive
+  // by design ("a minimap that pans or dollies stops being a map"). Does not affect
   // compositing.
   void setInputEnabled(bool on);
   bool inputEnabled() const;

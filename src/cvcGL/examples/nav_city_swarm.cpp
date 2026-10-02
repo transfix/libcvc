@@ -400,9 +400,7 @@ int main(int argc, char **argv) {
   if (bundle.empty()) {
     for (const char *p :
          {"deps/share/cvc-scenes/austin_south", "../deps/share/cvc-scenes/austin_south",
-          "share/cvc-scenes/austin_south", "platoon-sim/scene_viewer/exports/scenes/austin_south",
-          "../platoon-sim/scene_viewer/exports/scenes/austin_south", "scenes/austin_south",
-          "../scenes/austin_south"}) {
+          "share/cvc-scenes/austin_south", "scenes/austin_south", "../scenes/austin_south"}) {
       if (std::filesystem::exists(std::string(p) + "/terrain.json")) {
         bundle = p;
         std::printf("nav_city_swarm: no --bundle given, autodetected %s\n", bundle.c_str());
@@ -818,13 +816,13 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Belief-WALL reveal (the same translucent discovered-wall highlight the cvcdbg convoy demo
-  // draws in red, but coloured by SWARM here): as the agents sense the city, the discovered wall
-  // cells rise as translucent boxes tinted by the belief plane(s) that have seen them, and where
-  // MULTIPLE planes overlap on one wall the tint CYCLES through each seeing swarm's colour with a
-  // gentle pulse. Uniform tall walls, exactly like cvcdbg (0.05*span). The mesh is rebuilt only
-  // when coverage grows; the colours refresh every few frames via updateColors keyed to a
-  // per-vertex cell index — cheap, and it drives the animation without re-meshing.
+  // Belief-WALL reveal (a translucent discovered-wall highlight, coloured by SWARM): as the
+  // agents sense the city, the discovered wall cells rise as translucent boxes tinted by the
+  // belief plane(s) that have seen them, and where MULTIPLE planes overlap on one wall the tint
+  // CYCLES through each seeing swarm's colour with a gentle pulse. Uniform tall walls
+  // (kBeliefWallH). The mesh is rebuilt only when coverage grows; the colours refresh every few
+  // frames via updateColors keyed to a per-vertex cell index — cheap, and it drives the
+  // animation without re-meshing.
   bool beliefWallsOn = true;
   double beliefPhase = 0.0; // 0..1, wraps; colour cycle + brightness pulse
   std::shared_ptr<GeometryNode> beliefNode;
@@ -833,8 +831,7 @@ int main(int argc, char **argv) {
   std::vector<unsigned char> bwRgb; // per-vertex colour scratch
   std::vector<unsigned char> cellRgb(static_cast<std::size_t>(3) * rows * cols, 0);
   long bwLastCells = -1; // re-mesh trigger
-  const double kBeliefWallH =
-      std::min(40.0, 0.013 * span); // EXACTLY cvcdbg demo3s sensed-wall height (~40 m)
+  const double kBeliefWallH = std::min(40.0, 0.013 * span); // sensed-wall height, capped at 40 m
 
   // Per-cell cycling colour into cellRgb (only discovered wall cells; others untouched).
   auto paint_belief_cells = [&](double phase) {
@@ -933,7 +930,7 @@ int main(int argc, char **argv) {
         const double xc = bounds.min_x + c * dx, yc = bounds.min_y + r * dy;
         const double x0 = xc - 0.5 * dx, x1 = xc + 0.5 * dx, y0 = yc - 0.5 * dy, y1 = yc + 0.5 * dy;
         const double z0 = terrain.empty() ? 0.0 : terrain.sample(xc, yc);
-        const double z1 = z0 + kBeliefWallH; // uniform tall wall, cvcdbg-style
+        const double z1 = z0 + kBeliefWallH; // uniform tall wall
         const double t0[3] = {x0, y0, z1}, t1[3] = {x1, y0, z1}, t2[3] = {x1, y1, z1},
                      t3[3] = {x0, y1, z1};
         quad(t0, t1, t2, t3, static_cast<int>(i)); // top face (always exposed)
@@ -964,7 +961,7 @@ int main(int argc, char **argv) {
         beliefNode->setUseSingleColor(false); // per-vertex swarm colour, refreshed each cycle
         beliefNode->setAmbient(0.9);
         beliefNode->setDiffuse(0.2);
-        beliefNode->setOpacity(0.55); // translucent, like cvcdbg — the grey city shows through
+        beliefNode->setOpacity(0.55); // translucent — the grey city shows through
         beliefNode->setDepthOffset(1.0);
       }
     } else {
@@ -998,7 +995,8 @@ int main(int argc, char **argv) {
   bool haveVehicle = false;
   if (vehicle.empty() && !bundle.empty()) {
     // Try inside the bundle first (a scene that ships its own vehicle), then the
-    // sibling shared/ convention (vehicle-humvee cvcpkg + platoon-sim layout).
+    // sibling shared/ convention the vehicle-humvee cvcpkg bundle installs (the wasm preload in
+    // examples/CMakeLists.txt mounts the same layout).
     const std::string candIn = bundle + "/Humvee.glb";
     const std::string candSib = bundle + "/../../shared/Humvee.glb";
     if (std::filesystem::exists(candIn))
@@ -1875,8 +1873,7 @@ int main(int argc, char **argv) {
         return u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0;
       };
       // Draw a grabbable colour-coded dot per target ON the minimap (drawn on top of the PiP,
-      // so they're always visible) — this is what makes the destinations show + be draggable,
-      // like the cvcdbg convoy minimap.
+      // so they're always visible) — this is what makes the destinations show + be draggable.
       ImDrawList *dl = ImGui::GetWindowDrawList();
       for (int t = 0; t < kTargets; ++t) {
         ImVec2 sp;

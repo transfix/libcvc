@@ -2,16 +2,15 @@
 
 Master plan for promoting the formation stats and the sim-intrinsic quantities into the shared
 `cvc::nav` `nav_stats` contract, syncing them live into the `cvc::state` tree, and wiring them into
-training. Specs (design of record) live in **cvcdbg-nativedemo**:
-`docs/nav-stats-design.md` §10 (schema), `docs/sim-intrinsic-stats.md` (catalog), and
-`docs/stats-statetree-and-training.md` (state-tree + training). This doc is the *execution* plan and
-tracks status; the specs are the *what/why*.
+training. This doc is the *execution* plan and tracks status; the schema itself is documented in
+[`docs/NAV_STATS.md`](../NAV_STATS.md) and `inc/cvc/nav/nav_stats.h`.
 
 ## Placement (the load-bearing decision)
-Formation + all **non-RF** sim internals live in the **`cvc::nav` base** (`veh_nav_stats` /
+Formation + all **generic** sim internals live in the **`cvc::nav` base** (`veh_nav_stats` /
 `episode_nav_stats` / `nav_scorecard` + the `grl_snam.metrics` Python twin) — formation is a navigation
-concept (the grl-snam swarm can hold formations too). `cvc::dbg` adds **only RF** fields, joined to the
-base by `(veh_index, convoy_id)`. Every field is **additive / off-by-default** (`formation_tol_m=0`,
+concept (the grl-snam swarm can hold formations too). A downstream extension adds **only its own
+domain-specific** fields, in its own record, joined to the base by `(veh_index, convoy_id)`; nothing
+domain-specific lives in the base. Every field is **additive / off-by-default** (`formation_tol_m=0`,
 null samplers) so no pinned parity number moves until a case exercises it. The C++ and Python corpora
 are held byte-identical by the shared hand-computed fixture (`nav_stats_test.cpp` ⟷ `test_scorecard.py`).
 
@@ -58,62 +57,49 @@ Mirror every Track-1 base field field-for-field in `NavStats`, add the `formatio
 update the shared hand-computed corpus so `test_scorecard.py` matches `nav_stats_test.cpp`. One PR per
 Track-1 sub-PR (or batched), gated on Track-1 landing.
 
-### Track 3 — cvcdbg (RF ext + state bridge + harness re-point)
-- **3a — RF ext fields**: fill the reserved `veh_rf_stats`/`episode_rf_stats` slots
-  (`fjam/fbw/fsw` via a 4-way `comm_accel` split; `eff_rate`, `bandwidth_slack`, `backbone_uptime` via
-  `comm_step_output`; `outage_prob`; `pingpong_rate`) + CoefNet `heads()` + RF-specific formation
-  (per-slot RF exposure, connectivity) joined by `(veh_index, convoy_id)`.
-- **3b — state-tree bridge** (SPEC 1), split three ways:
+### Track 3 — state-tree bridge + the extension seam
+- **3a — extension record (downstream, not in this repo)**: a layer with domain-specific metrics keeps
+  them in its own per-vehicle/per-episode record, joined to the base by `(veh_index, convoy_id)`, and
+  nests it in the episode JSON itself. The base reserves nothing for it.
+- **3b — state-tree bridge**, split three ways:
   - **3b-1** `cvc::gl/nav_stats_publish.{h,cpp}` — base + per-convoy formation scalars on the
     `state_publisher` value lane, keyed `<prefix>.nav_stats.*` (SceneGraph prefix).
   - **3b-2** `publish_nav_rasters` — belief/fog planes as version-gated z=1 `cvc::volume` handles on
     the **data() lane** (VolumeNode-renderable), `sim_world::plane_version(m)` added; efficient
     realtime storage (deep-copy only on a changed plane).
-  - **3b-3** `cvc/dbg/nav_stats_publish.{h,cpp}` (RF sub-record → `<prefix>.nav_stats.rf.*`, joined by
-    `veh_index`) + `dbg_austin_live3` wiring at the `finish()` seam (base + RF + rasters each frame via
-    the scene's auto-started publisher).
+  - **3b-3** (downstream) an extension publishes its own sub-record under its own
+    `<prefix>.nav_stats.<ext>.*` subtree, joined by `veh_index`, from the same `finish()` seam (base +
+    extension + rasters each frame via the scene's auto-started publisher).
   Still to do on top: per-sim `nav_stats.sims` registry; the ImGui stats panel / DSL binding.
-- **3c — harness re-point**: `dbg_arrival_check3` sets `formation_tol_m`, passes `formation_slot`,
-  `set_identity(..., formation_parent)`, and drops the harness-side `FORMSTATS`/`form_*` bookkeeping in
-  favour of the collector's; the scorecard then carries it natively.
+- **3c — harness re-point**: a test harness that kept formation bookkeeping on its own side sets
+  `formation_tol_m`, passes `formation_slot`, calls `set_identity(..., formation_parent)`, and drops its
+  own formation counters in favour of the collector's; the scorecard then carries them natively.
 
-### Track 4 — training (SPEC 2)
-- **4-Phase 0**: scorecard plumbing — a Python reader over C++ `aggregate_nav`/`aggregate_rf` (no
-  trainer consumes them today); guard the C++⟷Python fixture parity gate.
-- **4-Phase 1** (SELECTION): recorded RF into `CommTrainer._composite_score`; formation / belief /
-  grip-margin as `nav_scorecard` selection fields.
-- **4-Phase 2** (LOSS on existing rollouts): RF exposure (`w_exposure>0` + ext-force rollout; re-baseline)
-  and grip anticipation (`train_bicycle` + `material_train.h` forward/vjp), reusing the material CVaR
-  pattern.
+### Track 4 — training
+- **4-Phase 0**: scorecard plumbing — a Python reader over C++ `aggregate_nav` (no trainer consumes it
+  today); guard the C++⟷Python fixture parity gate.
+- **4-Phase 1** (SELECTION): formation / belief / grip-margin as `nav_scorecard` selection fields.
+- **4-Phase 2** (LOSS on existing rollouts): grip anticipation (`train_bicycle` + `material_train.h`
+  forward/vjp), reusing the material CVaR pattern.
 - **4-Phase 3** (new surrogates): coupled multi-agent **formation** surrogate; coverage stays
-  SELECTION-only; RF true-field stays eval-only (the comm-steering-objective-gap).
+  SELECTION-only.
 
 ## Status
-- [x] Specs written & merged (schema §10, catalog, state-tree+training) — cvcdbg #125/#126;
-  raster-storage spec — cvcdbg #127.
-- [x] Formation stats collected harness-side (`FORMSTATS`) — cvcdbg #120–#126.
 - [x] **Track 1a — libcvc formation base fields — MERGED transfix/libcvc#421.**
 - [x] **Track 1b — stall / closest-approach — MERGED transfix/libcvc#422.**
 - [x] **Track 1c — belief-coverage + sense-flips — MERGED transfix/libcvc#423.**
 - [x] **Track 1d — drive telemetry — MERGED transfix/libcvc#424 → completes Track 1.**
 - [x] **Track 2 — grl-snam Python parity (`scorecard.py` + hand-computed corpus) — MERGED GRL-SNAM#96.**
-- [x] **Track 3a — cvcdbg RF ext fields — MERGED: 3a-1 (`outage_prob`, `pingpong_rate`) cvcdbg#128;
-  3a-2 (`fjam/fbw/fsw_mean`, `mean_eff_rate_mbps`, `backbone_connected_uptime`,
-  `mean_bandwidth_slack_mbps`) cvcdbg#129.** Reserved to Track 4: `composite_score`, `cvar_jam_loss`,
-  `worst_jam_loss`.
 - [x] **Track 3b-1 — libcvc base+formation state-tree publisher (`cvc::gl/nav_stats_publish`) —
   MERGED transfix/libcvc#425.**
-- [~] **Track 3b-2 — libcvc belief/fog raster bridge (`publish_nav_rasters`, version-gated cvc::volume
-  data() lane + `sim_world::plane_version`) — PR open transfix/libcvc#426 (CI); 4 review defects fixed
+- [x] **Track 3b-2 — libcvc belief/fog raster bridge (`publish_nav_rasters`, version-gated cvc::volume
+  data() lane + `sim_world::plane_version`) — MERGED transfix/libcvc#426; 4 review defects fixed
   (consumer UAF, LLP64 offset, sentinel/nullptr gating).**
-- [~] **Track 3b-3 — cvcdbg RF publisher (`cvc::dbg::publish_rf_stats`) + demo3 wiring — PR open
-  CVC-DBG/cvcdbg#130 (hermetic CI). Adversarially reviewed; veh_index join pinned.** ImGui stats
-  panel / DSL binding: still to do on top of 3b.
-- [ ] Track 3c (harness re-point: `dbg_arrival_check3` formation_tol/slot/set_identity, drop FORMSTATS);
-  Track 4 (training Phases 0–3, incl. the deferred composite/CVaR/worst-jam RF fields) — pending.
+- [ ] ImGui stats panel / DSL binding on top of 3b; Track 4 (training Phases 0–3) — pending.
 
 ## Invariants for every PR here
 Additive / off-by-default; C++⟷Python fixture parity held; torch ⟷ torch-free (`material_train.h`)
-parity for any differentiable term; base stays RF-free (only `cvc::dbg` links RF). Any threshold that a
-downstream twin must match to reproduce a field bit-for-bit (e.g. `stall_progress_eps_m = 0.05`) is a
-shared cross-repo constant — change it only in lockstep across libcvc + grl_snam.metrics.
+parity for any differentiable term; the base stays domain-neutral (extensions link their own
+domain-specific code, never the base). Any threshold that a downstream twin must match to reproduce a
+field bit-for-bit (e.g. `stall_progress_eps_m = 0.05`) is a shared cross-repo constant — change it only
+in lockstep across libcvc + grl_snam.metrics.

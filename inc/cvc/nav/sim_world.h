@@ -147,8 +147,8 @@ public:
   // (ext.sample != nullptr) step() routes the (non-material) drive through
   // drive_step_ext, summing this force into the SAME accumulator as F_rep/F_goal
   // (and the steering bias when ext.steer) — the sanctioned ext_force port
-  // (drive.h). The core stays physics-agnostic: a private consumer (e.g.
-  // cvc::dbg's RF/comms force) supplies the callback + its state via ext.user,
+  // (drive.h). The core stays physics-agnostic: a downstream consumer (with its
+  // own domain-specific force) supplies the callback + its state via ext.user,
   // which must outlive stepping. A null sample (the default) is byte-identical to
   // the plain drive. No effect on the material path (drive_step_material).
   void set_ext_force(const ext_force &ext) { ext_ = ext; }
@@ -342,7 +342,7 @@ public:
   // (they never enter plane derivation — unlike sigma / hard_margin), so mutating them here takes
   // effect on the next step with no cost, exactly like set_separation. A no-op if material is not
   // attached (mat_on_ false). This is the lever a live "force bias" UI scales — e.g. a caller that
-  // also scales the ext (RF/comm) force can trade material-reroute vs comm-steering during a drive.
+  // also scales the ext force can trade material-reroute vs ext-force steering during a drive.
   void set_material_lam(float lam_soft, float lam_hard) {
     mat_cfg_.lam_soft = lam_soft;
     mat_cfg_.lam_hard = lam_hard;

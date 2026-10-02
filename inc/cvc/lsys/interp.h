@@ -34,7 +34,7 @@
 //
 // Material semantics stay abstract: every primitive carries a generic `role`
 // (trunk/foliage/rock/concrete/…). cvc::world maps role -> its surface_registry
-// class; cvc::lsys never knows the concrete class ids or the DBG RF vocabulary.
+// class; cvc::lsys never knows the concrete class ids or any consumer's material vocabulary.
 
 #ifndef CVC_LSYS_INTERP_H
 #define CVC_LSYS_INTERP_H
@@ -52,7 +52,8 @@ struct vec3 {
 };
 
 // Generic material roles. cvc::world maps these to concrete surface classes and
-// (on the DBG side) to RF material names. NOT DBG-specific.
+// (through each class's rf_material label) to the shared physical-material names.
+// NOT consumer-specific.
 enum class role : std::uint16_t {
   trunk = 0,     // woody stem  -> wood
   branch,        // thin woody  -> wood

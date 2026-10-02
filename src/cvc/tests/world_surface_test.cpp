@@ -66,8 +66,8 @@ TEST(WorldSurface, RoleMapIsCompleteAndSensible) {
 }
 
 TEST(WorldSurface, EveryRfMaterialIsInTheTwelveNameVocabulary) {
-  // The names cvc::world emits must be resolvable by the DBG featurizer (plus the
-  // one new name, "rock", that this work adds on the DBG side).
+  // The names cvc::world emits must be resolvable by a consumer keyed on the shared
+  // physical-material vocabulary (plus the one new name, "rock", this work adds to it).
   const std::set<std::string> vocab = {"open_air",
                                        "brick",
                                        "reinforced_concrete",

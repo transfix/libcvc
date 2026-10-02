@@ -13,7 +13,7 @@
 
 // material_raster.h — pure-C++ (cvc::nav) generator of a scene MATERIAL raster from a scene bundle:
 // classify the bundle's land cover into the 13-class palette (indexed like cvc::nav::kNumMaterials
-// / the cvc::dbg MATERIAL_TABLE) on the terrain grid, and derive per-material grip (mu) + terrain
+// and grl_snam's MATERIALS) on the terrain grid, and derive per-material grip (mu) + terrain
 // risk. This is the pure-libcvc twin of grl-snam's `grl-snam material-raster`
 // (grl_snam.tools.material_raster) — SAME algorithm, SAME material.json output
 // (cvc-scene-material/1) — so a libcvc-only toolchain can produce the material input the nav-stats
@@ -32,8 +32,8 @@
 namespace cvc {
 namespace nav {
 
-// The 13-class palette (index == material id); MUST match cvc::dbg MATERIAL_TABLE / grl_snam
-// MATERIALS. Only the drivable-surface ids are ever emitted by the classifier
+// The 13-class palette (index == material id); MUST match grl_snam MATERIALS and any downstream
+// table keyed by these ids. Only the drivable-surface ids are ever emitted by the classifier
 // (open_air/foliage/soil/water/rock); the building materials are obstacle surfaces tagged from
 // scene metadata, never ground.
 enum material_id : int {

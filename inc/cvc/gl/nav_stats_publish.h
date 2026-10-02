@@ -6,10 +6,10 @@
 */
 
 // nav_stats_publish.h — bridge a base cvc::nav::episode_nav_stats snapshot into the running scene's
-// cvc::state tree, off the render path, for realtime ImGui / the cvcGL UI DSL to read (SPEC 1 in
-// CVC-DBG/cvcdbg docs/stats-statetree-and-training.md). This is the BASE + formation half
-// (RF-free); the cvc::dbg RF sub-record is published by cvc/dbg/nav_stats_publish.h, and the
-// belief/fog RASTERS take a separate data()-lane handle path (the publisher carries only
+// cvc::state tree, off the render path, for realtime ImGui / the cvcGL UI DSL to read (see
+// docs/roadmap/NAV-STATS-INTRINSIC-ROADMAP.md, Track 3b). This is the BASE + formation half
+// (domain-neutral); a downstream extension publishes its own sub-record under its own subtree, and
+// the belief/fog RASTERS take a separate data()-lane handle path (the publisher carries only
 // value()-lane scalars). Keying is by the scene's SceneGraph prefix (getStatePrefix()), so
 // concurrent sims under distinct prefixes never collide.
 #pragma once

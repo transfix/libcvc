@@ -4,7 +4,7 @@
 // tree grammar). Terrain Lab instead drives the real headless generator:
 //   cvc::world::world_model::generate(params) -> heightfield + surface registry +
 //   scattered L-system props; cvc::world::raster() -> the occupancy/material/height
-//   grid the DBG training + gym consumers see. This demo turns that same output into
+//   grid downstream training + gym consumers see. This demo turns that same output into
 //   geometry so we can SEE and TUNE it: the terrain mesh is coloured by the raster's
 //   per-cell MATERIAL (or risk / occupancy / height), the props are grown from the
 //   built-in L-system recipes and tessellated in place, water fills every cell that
@@ -14,7 +14,7 @@
 // The ImGui panel re-generates the world live: seed, per-species counts, tree
 // generations, relief amplitude, sea level, ontology and a preset — so you can tune
 // the generator and watch the scene rebuild. This is the visual QA surface for the
-// L-system terrain source (dbg-technical/21 §5, LSYSTEM-LABORATORY-ROADMAP.md).
+// L-system terrain source (docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md).
 //
 // Run (onscreen, navigable):   terrain_lab
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer.
