@@ -11,15 +11,18 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <iterator>
 #include <set>
 #include <string>
 #include <vtkCamera.h>
 #include <vtkInteractorStyle.h>
 #include <vtkObjectFactory.h>
+#include <vtkPropCollection.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
@@ -259,6 +262,28 @@ struct CameraController::Impl {
   SceneGraph *scene = nullptr;
   vtkSmartPointer<CvcCameraInteractorStyle> style;
 
+  // What applyToCamera() last put on the camera, and everything its clipping
+  // range was derived from. update() re-applies only when one of them moved; see
+  // applyNeeded(). `valid` is false until the first apply.
+  struct Applied {
+    bool valid = false;
+    double eye[3] = {0, 0, 0}, focal[3] = {0, 0, 0}, up[3] = {0, 0, 0};
+    double fieldOfView = 0.0;
+    Mode mode = Mode::Orbit;
+    vtkCamera *camera = nullptr;
+    vtkRenderer *renderer = nullptr;
+    SceneGraph *scene = nullptr;
+    vtkMTimeType cameraMTime = 0; // read AFTER the clipping-range reset
+    vtkMTimeType propsMTime = 0;  // the renderer's view-prop list
+    std::uint64_t content = 0;    // SceneGraph::contentVersion()
+  } applied;
+
+  // The values syncPoseToState() last wrote, so the throttled mirror in update()
+  // can skip 14 state writes (each a path lookup) when nothing moved.
+  static constexpr int kMirrored = 14;
+  bool mirrorValid = false;
+  double mirror[kMirrored] = {};
+
   Basis basis() const { return basisFromUp(up); }
   bool held_has(const std::string &k) const { return !k.empty() && held.count(k) > 0; }
 };
@@ -468,26 +493,60 @@ void CameraController::syncConfigToState() {
   s.selfWrite = false;
 }
 
-void CameraController::syncPoseToState() {
-  Impl &s = *m_impl;
-  s.selfWrite = true;
-  getState("orbit.azimuth").value(s.orbitAzimuth);
-  getState("orbit.elevation").value(s.orbitElevation);
-  getState("orbit.distance").value(s.orbitDistance);
-  getState("fly.position.x").value(s.flyPos.x);
-  getState("fly.position.y").value(s.flyPos.y);
-  getState("fly.position.z").value(s.flyPos.z);
-  getState("fly.yaw").value(s.flyYaw);
-  getState("fly.pitch").value(s.flyPitch);
+// The values syncPoseToState() writes, in its order.
+void CameraController::poseMirrorValues(double out[14]) const {
+  const Impl &s = *m_impl;
   double e[3], f[3], u[3];
   getPose(e, f, u);
-  getState("pose.eye.x").value(e[0]);
-  getState("pose.eye.y").value(e[1]);
-  getState("pose.eye.z").value(e[2]);
-  getState("pose.focal.x").value(f[0]);
-  getState("pose.focal.y").value(f[1]);
-  getState("pose.focal.z").value(f[2]);
+  const double v[] = {s.orbitAzimuth,
+                      s.orbitElevation,
+                      s.orbitDistance,
+                      s.flyPos.x,
+                      s.flyPos.y,
+                      s.flyPos.z,
+                      s.flyYaw,
+                      s.flyPitch,
+                      e[0],
+                      e[1],
+                      e[2],
+                      f[0],
+                      f[1],
+                      f[2]};
+  static_assert(sizeof(v) / sizeof(v[0]) == Impl::kMirrored, "one value per mirrored key");
+  std::copy(std::begin(v), std::end(v), out);
+}
+
+void CameraController::syncPoseToState() {
+  Impl &s = *m_impl;
+  double v[Impl::kMirrored];
+  poseMirrorValues(v);
+  s.selfWrite = true;
+  getState("orbit.azimuth").value(v[0]);
+  getState("orbit.elevation").value(v[1]);
+  getState("orbit.distance").value(v[2]);
+  getState("fly.position.x").value(v[3]);
+  getState("fly.position.y").value(v[4]);
+  getState("fly.position.z").value(v[5]);
+  getState("fly.yaw").value(v[6]);
+  getState("fly.pitch").value(v[7]);
+  getState("pose.eye.x").value(v[8]);
+  getState("pose.eye.y").value(v[9]);
+  getState("pose.eye.z").value(v[10]);
+  getState("pose.focal.x").value(v[11]);
+  getState("pose.focal.y").value(v[12]);
+  getState("pose.focal.z").value(v[13]);
   s.selfWrite = false;
+  std::copy(v, v + Impl::kMirrored, s.mirror);
+  s.mirrorValid = true;
+}
+
+bool CameraController::poseMirrorStale() const {
+  const Impl &s = *m_impl;
+  if (!s.mirrorValid)
+    return true;
+  double v[Impl::kMirrored];
+  poseMirrorValues(v);
+  return !std::equal(v, v + Impl::kMirrored, s.mirror);
 }
 
 void CameraController::handleStateChanged(const std::string &childState) {
@@ -777,16 +836,56 @@ void CameraController::update(double dtSeconds) {
       }
     }
   }
-  applyToCamera();
+  // A still camera over a still scene costs nothing here: re-applying the same
+  // pose is a no-op for vtkCamera, but the clipping-range reset re-derives every
+  // visible prop's bounds (a mapper Update + cell-bounds pass per rewritten mesh)
+  // -- 1-1.5 ms a frame in the demo3 wasm profile, for a range that cannot have
+  // changed. applyNeeded() says when it can have.
+  if (applyNeeded())
+    applyToCamera();
   // Mirror the live pose to state on a throttle (per-frame writes are a known
-  // state-tree perf sink; poseMirrorHz<=0 disables).
+  // state-tree perf sink; poseMirrorHz<=0 disables) -- and not at all while the
+  // pose is the one last mirrored, which would be 14 no-op writes.
   if (s.poseMirrorHz > 0.0) {
     s.poseMirrorAccum += dtSeconds;
     if (s.poseMirrorAccum >= 1.0 / s.poseMirrorHz) {
       s.poseMirrorAccum = 0.0;
-      syncPoseToState();
+      if (poseMirrorStale())
+        syncPoseToState();
     }
   }
+}
+
+bool CameraController::applyNeeded() const {
+  const Impl &s = *m_impl;
+  const Impl::Applied &a = s.applied;
+  if (!s.camera)
+    return false; // applyToCamera() would do nothing
+  // Without a scene nothing tells us the content moved, so keep the old
+  // behaviour: re-apply (and re-fit the clipping range) every frame.
+  if (!s.scene || !a.valid)
+    return true;
+  if (a.camera != s.camera || a.renderer != s.renderer || a.scene != s.scene || a.mode != s.mode ||
+      a.fieldOfView != s.fieldOfView)
+    return true;
+  double e[3], f[3], u[3];
+  getPose(e, f, u);
+  if (!std::equal(e, e + 3, a.eye) || !std::equal(f, f + 3, a.focal) || !std::equal(u, u + 3, a.up))
+    return true;
+  // Someone else moved the camera (another style, a host's setCamera): put ours
+  // back, exactly as the unconditional apply did.
+  if (s.camera->GetMTime() != a.cameraMTime)
+    return true;
+  // A prop added to or removed from the renderer changes what the range must
+  // enclose. (A bare vtkProp::SetVisibility toggle changes only that prop's
+  // MTime, which is not watched: cvcGL nodes that show or hide that way --
+  // SceneNode::setVisible, an LOD rung switch -- bump contentVersion instead.)
+  if (s.renderer && s.renderer->GetViewProps()->GetMTime() != a.propsMTime)
+    return true;
+  // Content added, removed, moved, re-meshed, shown or hidden, or a streaming
+  // node's box grown -- anything that can change the scene's extent while the
+  // camera holds still.
+  return s.scene->contentVersion() != a.content;
 }
 
 // ---- events ----
@@ -1050,8 +1149,25 @@ void CameraController::applyToCamera() {
   // parallel). 0 leaves whatever VTK/app default the camera already carries.
   if (s.mode != Mode::Map && s.fieldOfView > 0.0)
     s.camera->SetViewAngle(s.fieldOfView);
+  // Read the content version BEFORE the reset, so a change racing it (another
+  // thread) is seen again next frame rather than lost.
+  const std::uint64_t content = s.scene ? s.scene->contentVersion() : 0;
   if (s.renderer)
     s.renderer->ResetCameraClippingRange();
+
+  Impl::Applied &a = s.applied;
+  std::copy(e, e + 3, a.eye);
+  std::copy(f, f + 3, a.focal);
+  std::copy(u, u + 3, a.up);
+  a.fieldOfView = s.fieldOfView;
+  a.mode = s.mode;
+  a.camera = s.camera;
+  a.renderer = s.renderer;
+  a.scene = s.scene;
+  a.cameraMTime = s.camera->GetMTime();
+  a.propsMTime = s.renderer ? s.renderer->GetViewProps()->GetMTime() : 0;
+  a.content = content;
+  a.valid = true;
 }
 
 void CameraController::getPose(double eye[3], double focal[3], double up[3]) const {

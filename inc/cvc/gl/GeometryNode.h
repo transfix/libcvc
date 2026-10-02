@@ -165,6 +165,23 @@ public:
   // zero-copy buffer): marks the vtkTexture + its input image data Modified() so
   // the next render re-samples the new bytes WITHOUT any re-copy.
   void texture_modified();
+  // texture_modified() for an edit confined to image rows [row0, row1) (rows of
+  // the cvc::image as stored, top row 0) or to the pixel rectangle
+  // [x0, x1) x [y0, y1). Copies just that part into the live GL texture
+  // (glTexSubImage2D, desktop GL and GLES3/WebGL2 alike) and marks NOTHING
+  // modified: texture_modified() re-uploads the whole texture on the next frame
+  // and, because vtkActor::GetMTime() includes the texture's, makes the shadow
+  // baker re-render the scene -- for a 1024^2 fog layer repainting ~1% of its
+  // texels, a 4 MiB upload plus a bake. Owner thread (marshalled from others,
+  // like every texture call). The range is clamped to the image; an empty one
+  // does nothing. The pixels go up when this is called, so call it after the edit.
+  // Falls back to texture_modified() for a texture that is not zero-copy (its
+  // pixels are a private copy). Before the texture's first draw there is nothing
+  // to patch: that draw uploads every pixel anyway. Use texture_modified() for an
+  // edit that turns an opaque texture translucent (or back): VTK caches that
+  // classification and only re-derives it for a modified texture.
+  void texture_modified_rows(int row0, int row1);
+  void texture_modified_rect(int x0, int y0, int x1, int y1);
 
   // Render mode control
   void setRenderMode(GeometryRenderMode mode);

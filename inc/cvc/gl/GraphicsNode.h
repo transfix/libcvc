@@ -142,6 +142,11 @@ public:
   cvc::bounding_box getWorldBoundingBox() const;
   cvc::bounding_box getCombinedWorldBoundingBox() const;
 
+  // Whether this node counts toward the scene's world bounds
+  // (SceneGraph::computeGraphicsBounds). False for a light: it draws nothing,
+  // yet its box would sit at the light's position and drag the bounds out to it.
+  bool contributesToSceneBounds() const { return m_contributesToSceneBounds; }
+
   // The node's real-world size in the given regime: the extents of its
   // world-space bounding box (this node, or with all descendants when
   // includeChildren) converted through world_units. The three components share
@@ -221,6 +226,24 @@ public:
   std::any getMetadata(const std::string &key) const;
   bool hasMetadata(const std::string &key) const;
   const std::map<std::string, std::any> &getAllMetadata() const { return m_metadata; }
+
+  // Shadow casting. A node that does not cast is left out of the shadow maps --
+  // it is still lit and still RECEIVES shadows -- and, the reason to use it,
+  // changing it (a pose, a colour, a texture) no longer makes the shadow baker
+  // re-render the scene: VTK re-bakes when ANY prop changed, the scene's baker
+  // only when a caster or a light did. Mark what moves every frame and casts
+  // little (vehicles over a city, overlays, a fog layer). Translucent geometry
+  // never casts in VTK, so marking it costs nothing on screen.
+  //
+  // Default true. Applies to this node, its graphics descendants, and those
+  // added later. Any thread: applied on the owner thread (inline there, at the
+  // next processEvents() from another), and castsShadow() reports it from then.
+  void setCastsShadow(bool casts);
+  bool castsShadow() const { return m_castsShadow.load(std::memory_order_relaxed); }
+  // The same flag on a vtkProp a host put in the renderer itself (owner thread).
+  // A prop casts unless marked.
+  static void setPropCastsShadow(vtkProp *prop, bool casts);
+  static bool propCastsShadow(vtkProp *prop);
 
   // Bounding box visibility
   void setShowBBox(bool show);
@@ -323,6 +346,13 @@ protected:
   std::vector<std::shared_ptr<GraphicsNode>> m_graphicsChildren;
   GraphicsNode *m_parent; // Weak pointer to parent for world transform calculation
   std::map<std::string, std::any> m_metadata;
+  std::atomic<bool> m_castsShadow{true}; // see setCastsShadow
+  // Plain flags where the bounds walks used to ask dynamic_cast, once per node
+  // per walk: does this node count toward the scene bounds (not a LightNode),
+  // and does its getCombinedBoundingBox() include its own box (a NullGraphicNode
+  // may frame only its children).
+  bool m_contributesToSceneBounds = true;
+  bool m_combinedIncludesOwnBounds = true;
   bool m_showBBox;
   std::shared_ptr<BBoxNode> m_bboxNode;
 

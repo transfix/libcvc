@@ -257,6 +257,14 @@ add_executable(cvcgl_lod_node test/cvcgl_lod_node.cpp)
 target_link_libraries(cvcgl_lod_node PRIVATE cvcGL)
 add_test(NAME cvcgl_lod_node COMMAND cvcgl_lod_node)
 
+# GraphicsNode::setMetadata's read-only state mirror: it follows the node (it
+# used to keep the first value forever, each later write throwing a swallowed
+# read_only_error), stays locked to other writers, costs nothing for an
+# unchanged value, mirrors Python ints, and asks for no redraw. Headless.
+add_executable(cvcgl_metadata_mirror test/cvcgl_metadata_mirror.cpp)
+target_link_libraries(cvcgl_metadata_mirror PRIVATE cvcGL)
+add_test(NAME cvcgl_metadata_mirror COMMAND cvcgl_metadata_mirror)
+
 # Spectral GPU FFT ocean (the ABYSSAL port used by lsystem_coast). Checks the
 # invariants a broken butterfly IFFT / bit-reversal / conjugate-symmetry would
 # violate: zero-mean height, unit-mean Jacobian, determinism, time evolution and
@@ -295,6 +303,15 @@ add_test(NAME cvcgl_traversal COMMAND cvcgl_traversal)
 add_executable(cvcgl_grid_bounds test/cvcgl_grid_bounds.cpp)
 target_link_libraries(cvcgl_grid_bounds PRIVATE cvcGL)
 add_test(NAME cvcgl_grid_bounds COMMAND cvcgl_grid_bounds)
+
+# The world-bounds walk (computeGraphicsBounds) through cached world matrices and
+# plain flags instead of a matrix copy and two dynamic_casts per child: the same
+# bounds bit for bit over random hierarchies (against the old walk, replicated),
+# no grow-only walk while the grid and axis are hidden, and a catch-up when one
+# is shown. Headless.
+add_executable(cvcgl_bounds_walk test/cvcgl_bounds_walk.cpp)
+target_link_libraries(cvcgl_bounds_walk PRIVATE cvcGL)
+add_test(NAME cvcgl_bounds_walk COMMAND cvcgl_bounds_walk)
 
 # Scene-wide diagnostic chrome: the setters reach every node (not just the root),
 # and the getters are derived from the nodes so a checkbox can show real state.
@@ -373,6 +390,16 @@ add_executable(cvcgl_stream_texture test/cvcgl_stream_texture.cpp)
 target_link_libraries(cvcgl_stream_texture PRIVATE cvcGL)
 add_test(NAME cvcgl_stream_texture COMMAND cvcgl_stream_texture)
 
+# texture_modified_rows / _rect: a zero-copy texture patched on the GPU with
+# glTexSubImage2D and nothing marked modified -- no whole-texture re-upload, no
+# shadow re-bake. Reads the texture back (glGetTexImage), so desktop GL only;
+# skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_texture_rows test/cvcgl_texture_rows.cpp)
+  target_link_libraries(cvcgl_texture_rows PRIVATE cvcGL)
+  add_test(NAME cvcgl_texture_rows COMMAND cvcgl_texture_rows)
+endif()
+
 # SceneRenderer: a render target held open across frames (one GL context for a
 # whole sequence, a camera that survives the next render, live scene updates).
 add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
@@ -425,6 +452,14 @@ target_link_libraries(cvcgl_renderer_bench PRIVATE cvcGL)
 add_executable(cvcgl_camera test/cvcgl_camera.cpp)
 target_link_libraries(cvcgl_camera PRIVATE cvcGL)
 add_test(NAME cvcgl_camera COMMAND cvcgl_camera)
+
+# CameraController::update() on a still camera over a still scene: no clipping-
+# range reset and no pose mirror, yet the range is re-fitted the moment the scene
+# could have grown (node added/moved/re-meshed, prop shown) or the camera moved.
+# Headless, plus a rendered section (shadows on) that skips without GL.
+add_executable(cvcgl_camera_idle test/cvcgl_camera_idle.cpp)
+target_link_libraries(cvcgl_camera_idle PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 
 # Numeric parity: the push-fed Track controller reproduces pymod_gl/camera.py's
 # ChaseCamera (the two-stage EMA follow) to floating point, so the C++ and Python
@@ -479,6 +514,14 @@ add_test(NAME cvcgl_state_binding COMMAND cvcgl_state_binding)
 add_executable(cvcgl_shadow_caster_growth test/cvcgl_shadow_caster_growth.cpp)
 target_link_libraries(cvcgl_shadow_caster_growth PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
+
+# GraphicsNode::setCastsShadow: a non-caster is left out of the shadow maps AND
+# out of the re-bake decision -- moving or restyling one never bakes, while a
+# caster, a light, or a node joining/leaving the casters still does. Checks the
+# picture too (a non-caster throws no shadow). Renders; skips without GL.
+add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
+target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
 
 # The rig used to advertise "2 shadow casters" while VTK baked seven: fill and
 # wash were Spots with cones under 90, which LightCreatesShadow accepts. Pins the
