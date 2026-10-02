@@ -74,6 +74,7 @@ package:
     - lib/libcvcGL*
     - lib/cmake/cvcGL/
     - include/cvc/gl/
+    - share/cvcGL/
   cmake_packages:
     - name: cvcGL
       targets:

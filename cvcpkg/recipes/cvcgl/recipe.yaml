@@ -153,6 +153,10 @@ package:
     - lib/cvcGL*
     - lib/cmake/cvcGL/
     - include/cvc/gl/
+    # The browser-side half of cvcGL: webgl_state_shadow.js, which cvcgl_wasm_app() (from
+    # lib/cmake/cvcGL/cvcGLWasm.cmake) links into a wasm app as a --pre-js. Installed on every
+    # platform so the layout is uniform; only Emscripten consumers use it.
+    - share/cvcGL/
   cmake_packages:
     - name: cvcGL
       targets:

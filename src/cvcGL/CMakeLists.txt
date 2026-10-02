@@ -188,6 +188,36 @@ if(WIN32)
   set_target_properties(cvcGL PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
 
+# ── WebAssembly app support: cvcgl_wasm_app() ──
+# The browser-side half of cvcGL: webgl_state_shadow.js (a --pre-js that answers the GL state
+# queries ImGuiOverlay's imgui_impl_opengl3 and VTK make every frame without a synchronous
+# GPU-process round-trip) and the CMake function that links it, plus mimalloc, into an app. See
+# wasm/cvcGLWasm.cmake and docs/CVCGL_WASM.md. In-tree consumers (examples/) get the function
+# from the include below; installed consumers from cvcGLConfig.cmake. Two GLOBAL properties tell
+# it where the JS is and whether this cvcGL is -pthread (wasm-mt: Emscripten forbids mixing
+# pthread and non-pthread objects, so a consumer of a -pthread libcvcGL.a is -pthread too).
+set(CVCGL_WASM_PTHREADS OFF)
+if(EMSCRIPTEN)
+  if(CVC_WASM_PTHREADS) # in-tree (top-level CMakeLists.txt option)
+    set(CVCGL_WASM_PTHREADS ON)
+  else() # standalone: whatever made this build -pthread
+    get_directory_property(_cvcgl_dir_copts COMPILE_OPTIONS)
+    set(_cvcgl_pt_flags "${_cvcgl_dir_copts};${CMAKE_CXX_FLAGS};${CMAKE_EXE_LINKER_FLAGS}")
+    foreach(_p INTERFACE_COMPILE_OPTIONS INTERFACE_LINK_OPTIONS)
+      get_target_property(_v cvc::cvc ${_p})
+      if(_v)
+        string(APPEND _cvcgl_pt_flags ";${_v}")
+      endif()
+    endforeach()
+    if(_cvcgl_pt_flags MATCHES "(^|[; ])-pthread($|[; ])")
+      set(CVCGL_WASM_PTHREADS ON)
+    endif()
+  endif()
+endif()
+set_property(GLOBAL PROPERTY CVCGL_WASM_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/wasm")
+set_property(GLOBAL PROPERTY CVCGL_WASM_PTHREADS ${CVCGL_WASM_PTHREADS})
+include("${CMAKE_CURRENT_SOURCE_DIR}/wasm/cvcGLWasm.cmake")
+
 # ── Install + export a package config so consumers can find_package(cvcGL) ──
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -223,10 +253,14 @@ endif()
 
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so
 # find_dependency(VTK COMPONENTS ...) re-finds the same modules for consumers.
+# PATH_VARS: @PACKAGE_CVCGL_WASM_DATADIR@ is computed from the INSTALLED config's own location
+# (PACKAGE_PREFIX_DIR) when a consumer configures -- relocatable, no builder path baked in.
+set(CVCGL_WASM_DATADIR share/cvcGL/wasm)
 configure_package_config_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/cvcGLConfig.cmake.in"
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfig.cmake"
   INSTALL_DESTINATION lib/cmake/cvcGL
+  PATH_VARS CVCGL_WASM_DATADIR
 )
 write_basic_package_version_file(
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfigVersion.cmake"
@@ -236,8 +270,13 @@ write_basic_package_version_file(
 install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfig.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/cvcGLConfigVersion.cmake"
+  "${CMAKE_CURRENT_SOURCE_DIR}/wasm/cvcGLWasm.cmake"
   DESTINATION lib/cmake/cvcGL
 )
+# Installed on every platform (the bundle layout stays uniform, and cvcgl_wasm_app is a no-op
+# outside Emscripten): the state shim cvcgl_wasm_app() links.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/wasm/webgl_state_shadow.js"
+        DESTINATION ${CVCGL_WASM_DATADIR})
 
 # ── functional smoke test ──
 enable_testing()
