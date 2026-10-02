@@ -26,14 +26,18 @@ producer_thread::producer_thread(std::function<bool()> tick, double hz)
 producer_thread::~producer_thread() { stop(); }
 
 void producer_thread::start() {
-  if (run_.exchange(true))
-    return; // already running
+  if (thr_.joinable())
+    return; // a thread already exists (running, or self-finished but not yet reaped by stop())
+  run_.store(true);
   thr_ = std::thread(&producer_thread::run, this);
 }
 
 void producer_thread::stop() {
-  if (!run_.exchange(false))
-    return;
+  // Gate the join on the THREAD, not on run_: a source that self-stopped (run() cleared run_ so
+  // running() stays honest) leaves a finished-but-still-joinable thread, and it MUST be joined here
+  // (or ~std::thread on a joinable thread calls std::terminate). Idempotent: after the join thr_ is
+  // no longer joinable, so a second stop()/the dtor is a no-op.
+  run_.store(false);
   if (thr_.joinable())
     thr_.join();
 }
@@ -43,8 +47,10 @@ void producer_thread::set_rate(double hz) { period_.store(1.0 / clamp_hz(hz)); }
 void producer_thread::run() {
   auto next = clock::now();
   while (run_.load()) {
-    if (tick_ && !tick_())
-      break; // producer signalled end-of-stream
+    if (tick_ && !tick_()) {
+      run_.store(false); // producer signalled end-of-stream: keep running() honest for a
+      break;             // self-stopped thread (stop()/dtor still join the finished thread)
+    }
     ticks_.fetch_add(1, std::memory_order_relaxed);
 
     const auto period = std::chrono::duration<double>(period_.load());
