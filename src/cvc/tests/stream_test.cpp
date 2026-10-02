@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// Phase 1 tests for the cvc::stream in-process real-time frame transport
+// Phase 1 tests for the cvc::ariadne::stream in-process real-time frame transport
 // (roadmap docs/roadmap/STATE_BINARY_STREAMING.md). Covers the load-bearing
 // claims: zero-copy pointer identity + slab recycling, non-blocking drop-at-
 // source pool invariant (H3), drop-oldest / latest-wins per-subscriber delivery,
@@ -20,22 +20,22 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cvc/ariadne/stream/frame.h>
+#include <cvc/ariadne/stream/frame_pool.h>
+#include <cvc/ariadne/stream/producer_thread.h>
+#include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_channel.h>
+#include <cvc/ariadne/stream/stream_registry.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/core/state_exec/async_scheduler.h>
 #include <cvc/core/state_exec/types.h>
-#include <cvc/stream/frame.h>
-#include <cvc/stream/frame_pool.h>
-#include <cvc/stream/producer_thread.h>
-#include <cvc/stream/stream.h>
-#include <cvc/stream/stream_channel.h>
-#include <cvc/stream/stream_registry.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
 #include <vector>
 
-using namespace cvc::stream;
+using namespace cvc::ariadne::stream;
 
 namespace {
 
@@ -589,8 +589,8 @@ TEST(Stream, ProducerPublishesAcrossTeardownInHonoredOrder) {
 // --------------------------------------------------------------------------
 
 TEST(StreamScoping, RegistryKeyIsCanonicalScopedPath) {
-  EXPECT_EQ(cvc::stream::stream::registry_key("", "cam0"), "streams.cam0");
-  EXPECT_EQ(cvc::stream::stream::registry_key("doc.a", "cam0"), "doc.a.streams.cam0");
+  EXPECT_EQ(cvc::ariadne::stream::stream::registry_key("", "cam0"), "streams.cam0");
+  EXPECT_EQ(cvc::ariadne::stream::stream::registry_key("doc.a", "cam0"), "doc.a.streams.cam0");
 }
 
 TEST(StreamScoping, SameIdDifferentScopesDoNotCollideAndAreIsolated) {

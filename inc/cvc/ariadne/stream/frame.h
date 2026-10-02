@@ -8,15 +8,15 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#ifndef __CVC_STREAM_FRAME_H__
-#define __CVC_STREAM_FRAME_H__
+#ifndef __CVC_ARIADNE_STREAM_FRAME_H__
+#define __CVC_ARIADNE_STREAM_FRAME_H__
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 
-// cvc::stream — Layer-(b) real-time in-process frame transport
+// cvc::ariadne::stream — Layer-(b) real-time in-process frame transport
 // (roadmap docs/roadmap/STATE_BINARY_STREAMING.md, Phase 1).
 //
 // A `frame` is a single unit of a stream (a video frame, an audio buffer, a
@@ -28,6 +28,7 @@
 // slab out from under it.
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 enum class frame_kind { unknown, video_raw, audio_pcm, sensor };
@@ -78,6 +79,7 @@ struct frame {
 using frame_ptr = std::shared_ptr<const frame>;
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc
 
-#endif // __CVC_STREAM_FRAME_H__
+#endif // __CVC_ARIADNE_STREAM_FRAME_H__

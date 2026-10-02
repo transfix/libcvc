@@ -8,12 +8,12 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// pycvc_stream — Python bindings for the cvc::stream real-time transport
+// pycvc_stream — Python bindings for the cvc::ariadne::stream real-time transport
 // (roadmap STATE_BINARY_STREAMING.md Phase 2). %included from pycvc.i AFTER the
 // ArrayView out-typemap + the pycvc_owner capsule dtor (pycvc.i) and after numpy
 // is imported, so StreamFrame.numpy() reuses that zero-copy machinery.
 //
-// The raw cvc::stream classes (unique_ptr<stream>, shared_ptr<subscription>,
+// The raw cvc::ariadne::stream classes (unique_ptr<stream>, shared_ptr<subscription>,
 // shared_ptr<const frame>, the pool-lease publish) are not SWIG-friendly, so this
 // exposes thin VALUE-HOLDER shims that carry the shared_ptrs internally — SWIG
 // copies the shim (= a refcount bump), never the C++ object. The Python surface:
@@ -26,9 +26,9 @@
 
 %{
 #include <cvc/core/app.h>
-#include <cvc/stream/frame.h>
-#include <cvc/stream/stream.h>
-#include <cvc/stream/stream_channel.h>
+#include <cvc/ariadne/stream/frame.h>
+#include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_channel.h>
 #include "pycvc_buffer.h"
 #include <cstdint>
 #include <memory>
@@ -91,7 +91,7 @@ struct PyArrayKeepalive {
 // A single frame. Immutable; numpy() hands back a READ-ONLY zero-copy view whose
 // numpy base pins this exact frame (and so its slab / producer ndarray) alive.
 struct StreamFrame {
-  cvc::stream::frame_ptr fp;
+  cvc::ariadne::stream::frame_ptr fp;
 
   bool valid() const { return static_cast<bool>(fp); }
   long long seq() const { return fp ? static_cast<long long>(fp->seq) : -1; } // int64 (Windows LLP64)
@@ -130,7 +130,7 @@ struct StreamFrame {
 
 // A consumer's subscription.
 struct StreamSub {
-  std::shared_ptr<cvc::stream::subscription> sub;
+  std::shared_ptr<cvc::ariadne::stream::subscription> sub;
 
   StreamFrame latest() const {
     StreamFrame f;
@@ -140,14 +140,14 @@ struct StreamSub {
   }
   StreamFrame try_pop() {
     StreamFrame f;
-    cvc::stream::frame_ptr out;
+    cvc::ariadne::stream::frame_ptr out;
     if (sub && sub->try_pop(out))
       f.fp = out;
     return f;
   }
   StreamFrame pop() {
     StreamFrame f;
-    cvc::stream::frame_ptr out;
+    cvc::ariadne::stream::frame_ptr out;
     bool ok = false;
     if (sub) {
       // pop() blocks until a frame or close(); release the GIL so other Python
@@ -169,13 +169,13 @@ struct StreamSub {
 
 // A live stream (owns it) with a consumer + a zero-copy producer surface.
 struct Stream {
-  std::shared_ptr<cvc::stream::stream> s;
+  std::shared_ptr<cvc::ariadne::stream::stream> s;
 
   StreamSub subscribe(const std::string &mode = "latest", std::size_t depth = 3) {
     if (!s)
       throw std::runtime_error("Stream.subscribe: closed stream");
-    cvc::stream::deliver_mode m = (mode == "ring") ? cvc::stream::deliver_mode::ring
-                                                    : cvc::stream::deliver_mode::latest;
+    cvc::ariadne::stream::deliver_mode m = (mode == "ring") ? cvc::ariadne::stream::deliver_mode::ring
+                                                    : cvc::ariadne::stream::deliver_mode::latest;
     auto sub = s->channel().subscribe(m, depth);
     if (!sub)
       throw std::runtime_error(
@@ -235,10 +235,10 @@ static Stream stream_open(cvc::app &app, const std::string &id, const std::strin
     throw std::invalid_argument("stream_open: unsupported codec '" + codec + "'");
   if (w <= 0 || h <= 0)
     throw std::invalid_argument("stream_open: non-positive dimensions");
-  cvc::stream::stream_params p;
+  cvc::ariadne::stream::stream_params p;
   p.id = id;
   p.root_path = root_path;
-  p.format.kind = cvc::stream::frame_kind::video_raw;
+  p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
   p.format.codec = codec;
   p.format.w = w;
   p.format.h = h;
@@ -246,11 +246,11 @@ static Stream stream_open(cvc::app &app, const std::string &id, const std::strin
   p.heartbeat_hz = heartbeat_hz;
   p.subscriber_depth = subscriber_depth;
   p.expected_subscribers = expected_subscribers;
-  auto up = cvc::stream::stream::open(app, p);
+  auto up = cvc::ariadne::stream::stream::open(app, p);
   if (!up)
     throw std::runtime_error("stream_open: open failed (bad id/format or token in use)");
   Stream out;
-  out.s = std::shared_ptr<cvc::stream::stream>(std::move(up));
+  out.s = std::shared_ptr<cvc::ariadne::stream::stream>(std::move(up));
   return out;
 }
 
