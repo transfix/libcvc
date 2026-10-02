@@ -18,10 +18,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/stream/stream.h>
@@ -38,6 +34,9 @@
 #include <cvc/gl/ariadne/stream_node.h>        // register_stream_node_type (the viewport quad)
 #include <cvc/gl/ariadne/stream_view_widget.h> // register_stream_view_widget (the ImGui window)
 #include <cvc/volume/bounding_box.h>
+#include <memory>
+#include <string>
+#include <vector>
 
 #if CVC_ENABLE_SDL
 #include <cvc/gl/capture/camera_source.h> // --camera: a real SDL3 camera as the source
@@ -103,8 +102,9 @@ int main(int argc, char **argv) {
   rt.on("quit", [&] { quit = true; });
 
   // The two Phase-3 stream sinks this demo needs, registered once before the scene loads:
-  cvc::gl::ariadne::register_stream_node_type();             // the `type: stream` viewport quad
-  cvc::gl::ariadne::register_stream_view_widget(backend, app); // the `type: stream_view` ImGui widget
+  cvc::gl::ariadne::register_stream_node_type(); // the `type: stream` viewport quad
+  cvc::gl::ariadne::register_stream_view_widget(backend,
+                                                app); // the `type: stream_view` ImGui widget
 
   // Open ONE video stream at the app root; both sinks resolve it by this token. The source is a
   // synthetic moving test pattern (hardware-free) unless --camera opened a real device.
@@ -137,9 +137,9 @@ int main(int argc, char **argv) {
   sp.format.w = fw;
   sp.format.h = fh;
   sp.format.stride = fw * 4;
-  sp.expected_subscribers = 3; // the scene-node quad + the stream_view widget (+ headroom): the pool
-                               // is fixed-size and refuses rather than under-provisions, so BOTH
-                               // sinks must be budgeted here or the second one gets no frames
+  sp.expected_subscribers = 3; // the scene-node quad + the stream_view widget (+ headroom): the
+                               // pool is fixed-size and refuses rather than under-provisions, so
+                               // BOTH sinks must be budgeted here or the second one gets no frames
   std::unique_ptr<sx::stream> stream = sx::stream::open(app, sp);
   if (!stream) {
     std::printf("[ariadne_stream] FATAL: stream::open failed\n");
