@@ -10,6 +10,7 @@
 #ifndef CVC_STATE_EXEC_INTRINSICS_H
 #define CVC_STATE_EXEC_INTRINSICS_H
 
+#include <cstring> // std::strcmp — document_scope's cross-module-stable type tag compare
 #include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <memory>
@@ -82,7 +83,9 @@ public:
     std::lock_guard<std::mutex> lk(mu_);
     auto it = slots_.find(key);
     if (it != slots_.end())
-      return it->second.tag == type_tag<T>() ? static_cast<T *>(it->second.obj.get()) : nullptr;
+      return std::strcmp(it->second.tag, type_tag<T>()) == 0
+                 ? static_cast<T *>(it->second.obj.get())
+                 : nullptr;
     auto obj = std::make_shared<T>(std::forward<Args>(args)...);
     T *raw = obj.get();
     slots_.emplace(key, entry{std::static_pointer_cast<void>(std::move(obj)), type_tag<T>()});
@@ -109,13 +112,24 @@ public:
   } // victims' destructors run here, after the lock is released
 
 private:
-  template <class T> static const void *type_tag() {
-    static const char t = 0; // unique address per instantiated T — an RTTI-free type identity
-    return &t;
+  // An RTTI-free type identity that is STABLE ACROSS MODULE BOUNDARIES. The compiler's
+  // function-signature macro embeds T's name, so the same T yields a byte-identical string in every
+  // translation unit — including ones compiled into different shared libraries. We compare tags by
+  // CONTENT (std::strcmp in slot()), so the per-module address of the string is irrelevant. The old
+  // tag — the address of a function-local `static` — was NOT stable: Windows does not merge such
+  // statics across DLLs (libcvc.dll vs cvcGL.dll), so a slot created in one module read as a
+  // mismatch (nullptr) in another, e.g. a gl-bind-stream sink published and read across the seam.
+  // Distinct types still have distinct signatures, so a key reused with a different T is caught.
+  template <class T> static const char *type_tag() {
+#if defined(_MSC_VER)
+    return __FUNCSIG__;
+#else
+    return __PRETTY_FUNCTION__;
+#endif
   }
   struct entry {
     std::shared_ptr<void> obj;
-    const void *tag;
+    const char *tag;
   };
   std::mutex mu_;
   std::vector<std::string> order_; // creation order, for LIFO teardown
