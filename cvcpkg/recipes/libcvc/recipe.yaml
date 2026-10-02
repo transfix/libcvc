@@ -134,11 +134,12 @@ recipe:
   # caster-aware shadow baking, the cheaper bounds walk). ABI: SceneGraph, GraphicsNode and
   # NullGraphicNode layouts changed (#512 and the frame-cost fixes) with the SOVERSION
   # unchanged, so dependents must rebuild. cvcgl bumps in lockstep (14 -> 15).
-  # Bumped 15 -> 16: lockstep with cvcgl's fast-draw low-memory mapper
+  # Bumped 15 -> 17 (16 went out as a native publish of master without this):
+  # lockstep with cvcgl's fast-draw low-memory mapper
   # (LowMemoryPolyDataMapper, ~2/3 fewer GL calls per frame on WebGL2) and the expanded
   # THIRD_PARTY_NOTICES.md. libcvc's own sources are unchanged by it; the bump keeps the pair's
   # revisions aligned for consumers that pin both.
-  cvc_revision: 16
+  cvc_revision: 17
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

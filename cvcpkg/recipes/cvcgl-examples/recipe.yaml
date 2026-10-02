@@ -17,10 +17,11 @@ recipe:
   # Bumped 2 -> 3: build-wasm.sh no longer forces state_exec OFF (the
   # CVC_STATE_EXEC option is gone; state_exec is always built), so the wasm
   # gallery carries the program lanes that Ariadne apps run on.
-  # Bumped 3 -> 4: ships THIRD_PARTY_NOTICES.md + LICENSE (native share/cvcgl-examples/ and
+  # Bumped 3 -> 16 (above the native 3.4.0+cvc.15 already published; revisions stay monotonic
+  # across platforms): ships THIRD_PARTY_NOTICES.md + LICENSE (native share/cvcgl-examples/ and
   # the wasm web/ payload), declares LGPL-2.1-only AND BSD-3-Clause AND MIT, and rebuilds the
-  # demos against cvcgl 3.4.0+cvc.16 (fast-draw low-memory mapper).
-  cvc_revision: 4
+  # demos against cvcgl 3.4.0+cvc.17 (fast-draw low-memory mapper).
+  cvc_revision: 16
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

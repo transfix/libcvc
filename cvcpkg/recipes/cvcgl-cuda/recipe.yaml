@@ -5,7 +5,7 @@ recipe:
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
   # Bumped 1 -> 2: carries cvcGL's fast-draw low-memory mapper and the BSD-3-Clause license
-  # metadata for its VTK 9.5.0-derived code (same as cvcgl 3.4.0+cvc.16).
+  # metadata for its VTK 9.5.0-derived code (same as cvcgl 3.4.0+cvc.17).
   cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"

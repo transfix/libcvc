@@ -69,12 +69,13 @@ recipe:
   # _rect partial texture uploads, caster-aware shadow baking (setCastsShadow), and the cheaper
   # scene-bounds walk deferred under hidden chrome. ABI-stale: SceneGraph/GraphicsNode/
   # NullGraphicNode layouts changed, so the published +cvc.14 must not be mixed with this build.
-  # Bumped 15 -> 16: the fast-draw low-memory mapper (LowMemoryPolyDataMapper: skips empty
+  # Bumped 15 -> 17 (16 went out as a native publish of master without this):
+  # the fast-draw low-memory mapper (LowMemoryPolyDataMapper: skips empty
   # cell-type agents and re-binds the cached shader program; ~2/3 fewer GL calls per frame on
   # WebGL2 with byte-identical pixels; CVCGL_LOWMEM_DRAW / setDrawPath for A/B), now the base of
   # StreamingLowMemoryPolyDataMapper; late shader replacements reach the GPU on the low-memory
   # path. License metadata now LGPL-2.1-only AND BSD-3-Clause (VTK 9.5.0-derived code).
-  cvc_revision: 16
+  cvc_revision: 17
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
