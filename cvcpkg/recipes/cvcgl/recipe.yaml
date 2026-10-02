@@ -69,7 +69,8 @@ recipe:
   # _rect partial texture uploads, caster-aware shadow baking (setCastsShadow), and the cheaper
   # scene-bounds walk deferred under hidden chrome. ABI-stale: SceneGraph/GraphicsNode/
   # NullGraphicNode layouts changed, so the published +cvc.14 must not be mixed with this build.
-  cvc_revision: 15
+  # Bumped 15 -> 18 (16 published, 17 is #522's): cvcgl_wasm_app(), the WebGL state shim, FrameYield.
+  cvc_revision: 18
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

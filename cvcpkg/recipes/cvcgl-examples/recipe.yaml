@@ -17,7 +17,8 @@ recipe:
   # Bumped 2 -> 3: build-wasm.sh no longer forces state_exec OFF (the
   # CVC_STATE_EXEC option is gone; state_exec is always built), so the wasm
   # gallery carries the program lanes that Ariadne apps run on.
-  cvc_revision: 3
+  # Bumped 3 -> 17 (15 published, 16 is #522's): every wasm demo is a cvcgl_wasm_app; ships glsync.
+  cvc_revision: 17
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
