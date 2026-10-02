@@ -8,8 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#ifndef __CVC_STREAM_STREAM_REGISTRY_H__
-#define __CVC_STREAM_STREAM_REGISTRY_H__
+#ifndef __CVC_ARIADNE_STREAM_STREAM_REGISTRY_H__
+#define __CVC_ARIADNE_STREAM_STREAM_REGISTRY_H__
 
 #include <cstddef>
 #include <mutex>
@@ -33,6 +33,7 @@ namespace cvc {
 
 class app;
 
+namespace ariadne {
 namespace stream {
 
 class stream_channel;
@@ -61,6 +62,7 @@ private:
 };
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc
 
-#endif // __CVC_STREAM_STREAM_REGISTRY_H__
+#endif // __CVC_ARIADNE_STREAM_STREAM_REGISTRY_H__

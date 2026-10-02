@@ -9,9 +9,10 @@
 */
 
 #include <chrono>
-#include <cvc/stream/producer_thread.h>
+#include <cvc/ariadne/stream/producer_thread.h>
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 namespace {
@@ -59,4 +60,5 @@ void producer_thread::run() {
 }
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc

@@ -8,8 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#ifndef __CVC_STREAM_PRODUCER_THREAD_H__
-#define __CVC_STREAM_PRODUCER_THREAD_H__
+#ifndef __CVC_ARIADNE_STREAM_PRODUCER_THREAD_H__
+#define __CVC_ARIADNE_STREAM_PRODUCER_THREAD_H__
 
 #include <atomic>
 #include <cstdint>
@@ -39,6 +39,7 @@
 // destroying those objects.
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 class producer_thread {
@@ -71,6 +72,7 @@ private:
 };
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc
 
-#endif // __CVC_STREAM_PRODUCER_THREAD_H__
+#endif // __CVC_ARIADNE_STREAM_PRODUCER_THREAD_H__

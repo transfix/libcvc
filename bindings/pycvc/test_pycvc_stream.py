@@ -1,4 +1,4 @@
-"""cvc::stream real-time transport bindings (Phase 2).
+"""cvc::ariadne::stream real-time transport bindings (Phase 2).
 
 pycvc.stream_open(app, id, codec, w, h) opens a video stream on `app`; a producer
 publishes numpy uint8 frames ZERO-COPY (the ndarray buffer is aliased, not copied)

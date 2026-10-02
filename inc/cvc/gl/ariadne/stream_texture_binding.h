@@ -15,11 +15,11 @@
 #include <memory>
 #include <string>
 
-// StreamTextureBinding — drives a GeometryNode's texture from a cvc::stream video
+// StreamTextureBinding — drives a GeometryNode's texture from a cvc::ariadne::stream video
 // subscription (roadmap STATE_BINARY_STREAMING.md Phase 2). Once per rendered
 // frame the host calls tick() (on the render/owner thread, e.g. from a
 // RealizedScene custom_tick): on a newer frame seq it aliases the frame into the
-// node's texture zero-copy via cvc::stream::to_image + GeometryNode::setTexture;
+// node's texture zero-copy via cvc::ariadne::stream::to_image + GeometryNode::setTexture;
 // when the node is gone it unsubscribes so the stream's pool slab and the
 // channel's committed slots are released promptly (not held for the whole scene
 // lifetime).
@@ -29,9 +29,11 @@ class app;
 namespace gl {
 class GeometryNode;
 }
+namespace ariadne {
 namespace stream {
 class subscription;
 }
+} // namespace ariadne
 } // namespace cvc
 
 namespace cvc {
@@ -56,7 +58,7 @@ public:
   // unsubscribe at teardown. `node` is held weakly so the binding never keeps a
   // torn-down node alive. `sub` is a latest-mode subscription on the stream's channel.
   StreamTextureBinding(cvc::app &app, std::string token, std::weak_ptr<cvc::gl::GeometryNode> node,
-                       std::shared_ptr<cvc::stream::subscription> sub);
+                       std::shared_ptr<cvc::ariadne::stream::subscription> sub);
   ~StreamTextureBinding();
 
   StreamTextureBinding(const StreamTextureBinding &) = delete;
@@ -76,7 +78,7 @@ private:
   cvc::app &app_;
   std::string token_;
   std::weak_ptr<cvc::gl::GeometryNode> node_;
-  std::shared_ptr<cvc::stream::subscription> sub_;
+  std::shared_ptr<cvc::ariadne::stream::subscription> sub_;
   std::int64_t last_seq_ = -1;
   bool released_ = false;
 };

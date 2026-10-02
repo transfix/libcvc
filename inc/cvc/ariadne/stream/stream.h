@@ -8,16 +8,16 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#ifndef __CVC_STREAM_STREAM_H__
-#define __CVC_STREAM_STREAM_H__
+#ifndef __CVC_ARIADNE_STREAM_STREAM_H__
+#define __CVC_ARIADNE_STREAM_STREAM_H__
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/core/state.h>
-#include <cvc/stream/frame.h>
-#include <cvc/stream/frame_pool.h>
-#include <cvc/stream/stream_channel.h>
+#include <cvc/ariadne/stream/frame.h>
+#include <cvc/ariadne/stream/frame_pool.h>
+#include <cvc/ariadne/stream/stream_channel.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,6 +39,7 @@ namespace cvc {
 
 class app;
 
+namespace ariadne {
 namespace stream {
 
 // A snapshot of a stream's runtime counters, stored on the descriptor's stats
@@ -128,6 +129,7 @@ private:
 };
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc
 
-#endif // __CVC_STREAM_STREAM_H__
+#endif // __CVC_ARIADNE_STREAM_STREAM_H__

@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// Phase-2 PR1: cvc::image zero-copy adopt constructor + the cvc::stream::to_image
+// Phase-2 PR1: cvc::image zero-copy adopt constructor + the cvc::ariadne::stream::to_image
 // bridge (roadmap STATE_BINARY_STREAMING.md §7 H2). Verifies the alias is truly
 // copy-free, that a mutation forks a private copy (adopted buffers are logically
 // read-only), that the keepalive outlives the frame and is released exactly when
@@ -17,15 +17,15 @@
 // non-video kind).
 
 #include <cstdint>
+#include <cvc/ariadne/stream/frame.h>
+#include <cvc/ariadne/stream/to_image.h>
 #include <cvc/image/image.h>
-#include <cvc/stream/frame.h>
-#include <cvc/stream/to_image.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <stdexcept>
 #include <vector>
 
-using namespace cvc::stream;
+using namespace cvc::ariadne::stream;
 
 namespace {
 
@@ -138,7 +138,7 @@ TEST(ImageAdoptCtor, KeepaliveReleasedOnlyWhenLastAliasDrops) {
 }
 
 // --------------------------------------------------------------------------
-// cvc::stream::to_image
+// cvc::ariadne::stream::to_image
 // --------------------------------------------------------------------------
 
 TEST(StreamToImage, AliasesDenseTopLeftRgba8) {

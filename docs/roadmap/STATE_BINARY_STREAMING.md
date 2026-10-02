@@ -8,7 +8,7 @@ every load-bearing claim is grounded in `file:line` against master.*
 Status: **APPROVED (signed off 2026-09-30); Phase 1 LANDED.** The Layer-(b) mechanisms below
 already incorporate the adversarial review's corrections (see §7). All open questions (Q1–Q9)
 are decided — see §5a. Layer (a) Changes 1–4 landed (1–3 in #499, Change 4 transport
-size-limits in #501); **Phase 1 `cvc::stream` in-process core landed in #502.** Q5 scoping is
+size-limits in #501); **Phase 1 `cvc::ariadne::stream` in-process core landed in #502.** Q5 scoping is
 **refined (§4.1)** — streams reuse the Ariadne chroot + `link:`/`channels:` grant model and that
 work moves up to Phase 2 (with the DSL surface). Next: Change 5 (pycvc bytes), Q8 snapshot
 binary-gap (independent PR), Phase 2 sinks + scoping.
@@ -114,7 +114,7 @@ stream. This reinforces the two-layer split.
 
 ## 3. Layer (b) — real-time stream transport
 
-A new `cvc::stream` lane (namespace TBD, Q9). It **never** touches
+A new `cvc::ariadne::stream` lane (Q9 resolved; re-homed under `cvc::ariadne` 2026-10-01). It **never** touches
 `deliver_to_receivers`, `ingress_`, `pending_messages_`, or `state_message_bus::admit`.
 
 ### 3.1 Zero-copy frame (fixes the `bytes_value` inline-copy blocker)
@@ -123,7 +123,7 @@ A new `cvc::stream` lane (namespace TBD, Q9). It **never** touches
 The stream lane uses a shared, ref-counted, frozen-after-publish buffer:
 
 ```cpp
-namespace cvc::stream {
+namespace cvc::ariadne::stream {
 struct format_desc { /* kind, codec, w/h/stride, sample_rate/channels, extra */ };
 struct frame {
   const uint8_t*        data;        // borrowed; owned by keepalive
@@ -313,7 +313,7 @@ only its own streams unless the host grants one.
   `msg-send` bytes round-trip through both buses; IPC + gRPC wire round-trip of
   `bytes_payload` (octet-safety incl. NUL/high bytes); backward-compat (return dict
   unchanged; delivered envelope additive); pycvc bytes.
-- **Phase 1 — `cvc::stream` core (native, in-process) — LANDED (#502):** `frame`/`frame_ptr`,
+- **Phase 1 — `cvc::ariadne::stream` core (native, in-process) — LANDED (#502):** `frame`/`frame_ptr`,
   `frame_pool` (with the §3.2 sizing invariant), `stream_channel` (video = lock-free latest
   register, audio = drop-oldest `state_bounded_queue<frame_ptr>` — the queue has no
   non-destructive read, so the two modes use different primitives), `stream_registry`, event
@@ -380,7 +380,7 @@ glass-to-glass camera→texture latency.
 - **Q8 snapshot binary gap → YES, but separate independent PR.** Extend the initial-sync
   snapshot path (`SnapshotEntry` / IPC snapshot serializer) to carry a bytes field so
   replicated binary node values survive a full-tree resync. Tracked independently of streaming.
-- **Q9 namespace → `cvc::stream`, own `inc/cvc/stream/` + `src/cvc/stream/` area (as built, #502).**
+- **Q9 namespace → `cvc::ariadne::stream`, own `inc/cvc/ariadne/stream/` + `src/cvc/ariadne/stream/` area (built as `cvc::stream` in #502; re-homed under `cvc::ariadne` 2026-10-01).**
   A new C++ namespace with its own header/source directory, **compiled into the single monolithic
   `cvc` target** like `cvc::net`/`cvc::ariadne` — NOT a standalone CMake target. (The verified build
   convention overrode the original "separate library" wording: `install(EXPORT cvcTargets NAMESPACE
@@ -410,7 +410,7 @@ glass-to-glass camera→texture latency.
 8. **Snapshot binary gap (separate scope):** extend the initial-sync snapshot path to carry
    a bytes field (`SnapshotEntry` / IPC snapshot serializer carry `string_value` only) so
    replicated binary node values survive a full-tree resync? Independent of streaming.
-9. **Namespace/library:** `cvc::stream` as a new small library, or under `cvc::media`?
+9. **Namespace/library:** RESOLVED → `cvc::ariadne::stream`, compiled into the `cvc` monolith (not a separate target, not `cvc::media`).
    (CMake/recipe surface.)
 
 ---

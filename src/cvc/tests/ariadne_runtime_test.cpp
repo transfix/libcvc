@@ -2633,7 +2633,7 @@ TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
   EXPECT_EQ(cvc::state::instance(app)("r.a").value(), "20"); // awaited future
 }
 
-// ── Phase-2 PR6: cvc::stream DSL surface (stream-open/stream-info/stream-close) ──
+// ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──
 namespace {
 struct StreamActionGuard {
   ~StreamActionGuard() { clear_action_intrinsics(); } // process-global registry

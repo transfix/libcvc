@@ -8,11 +8,12 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/stream/to_image.h>
+#include <cvc/ariadne/stream/to_image.h>
 #include <stdexcept>
 #include <string>
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 namespace {
@@ -50,26 +51,26 @@ bool codec_to_image_format(const std::string &codec, cvc::image::pixel_format &p
 
 cvc::image to_image(const frame_ptr &fp) {
   if (!fp)
-    throw std::runtime_error("cvc::stream::to_image: null frame");
+    throw std::runtime_error("cvc::ariadne::stream::to_image: null frame");
   if (!fp->data)
-    throw std::runtime_error("cvc::stream::to_image: frame has null data");
+    throw std::runtime_error("cvc::ariadne::stream::to_image: frame has null data");
   if (fp->format.kind != frame_kind::video_raw)
-    throw std::runtime_error("cvc::stream::to_image: frame is not video_raw");
+    throw std::runtime_error("cvc::ariadne::stream::to_image: frame is not video_raw");
 
   cvc::image::pixel_format pf;
   cvc::image::data_type dt;
   if (!codec_to_image_format(fp->format.codec, pf, dt))
-    throw std::runtime_error("cvc::stream::to_image: unsupported or channel-swapped codec '" +
+    throw std::runtime_error("cvc::ariadne::stream::to_image: unsupported or channel-swapped codec '" +
                              fp->format.codec + "'");
 
   if (fp->format.origin != frame_origin::top_left)
     throw std::runtime_error(
-        "cvc::stream::to_image: only top-left origin can be aliased zero-copy");
+        "cvc::ariadne::stream::to_image: only top-left origin can be aliased zero-copy");
 
   const int w = fp->format.w;
   const int h = fp->format.h;
   if (w <= 0 || h <= 0)
-    throw std::runtime_error("cvc::stream::to_image: non-positive dimensions");
+    throw std::runtime_error("cvc::ariadne::stream::to_image: non-positive dimensions");
 
   // Build the aliasing image first (cheap, no copy), then validate against its
   // own derived layout. On a validation failure the image is discarded and its
@@ -80,13 +81,14 @@ cvc::image to_image(const frame_ptr &fp) {
   // stride == 0 means "densely packed" (frame_bytes() derived the size); a
   // positive stride must equal the dense stride (cvc::image has no row padding).
   if (fp->format.stride != 0 && static_cast<std::size_t>(fp->format.stride) != dense_stride)
-    throw std::runtime_error("cvc::stream::to_image: padded row stride cannot be aliased");
+    throw std::runtime_error("cvc::ariadne::stream::to_image: padded row stride cannot be aliased");
 
   if (fp->size < img.size_bytes())
-    throw std::runtime_error("cvc::stream::to_image: frame buffer smaller than w*h*bpp");
+    throw std::runtime_error("cvc::ariadne::stream::to_image: frame buffer smaller than w*h*bpp");
 
   return img;
 }
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc

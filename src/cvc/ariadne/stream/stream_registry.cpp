@@ -8,10 +8,11 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/stream/stream_registry.h>
+#include <cvc/ariadne/stream/stream_registry.h>
 #include <memory>
 
 namespace cvc {
+namespace ariadne {
 namespace stream {
 
 namespace {
@@ -67,4 +68,5 @@ std::size_t stream_registry::size() const {
 }
 
 } // namespace stream
+} // namespace ariadne
 } // namespace cvc
