@@ -390,6 +390,12 @@ add_executable(cvcgl_stream_texture test/cvcgl_stream_texture.cpp)
 target_link_libraries(cvcgl_stream_texture PRIVATE cvcGL)
 add_test(NAME cvcgl_stream_texture COMMAND cvcgl_stream_texture)
 
+# Phase-2 PR7: the "stream" scene-node realizer (register_stream_node_type) builds a UV'd
+# quad, resolves+subscribes the named stream, and wires a per-frame tick into the scene.
+add_executable(cvcgl_stream_node test/cvcgl_stream_node.cpp)
+target_link_libraries(cvcgl_stream_node PRIVATE cvcGL)
+add_test(NAME cvcgl_stream_node COMMAND cvcgl_stream_node)
+
 # texture_modified_rows / _rect: a zero-copy texture patched on the GPU with
 # glTexSubImage2D and nothing marked modified -- no whole-texture re-upload, no
 # shadow re-bake. Reads the texture back (glGetTexImage), so desktop GL only;
