@@ -262,10 +262,15 @@ void clear_action_intrinsics() {
 namespace {
 // Run `script` as a FULL-ENV state_exec program chrooted to `prefix`, bounded by (max_steps,
 // max_seconds, max_bytes). Returns "" on a clean, normal finish, else a human diagnostic (no
-// leading "ari:" — the caller frames it). Shared by the load-time `init:` lane (run_init) and the
-// per-interaction ACTION lane (a program `on:`, drained by Runtime::drain) — same trust model
-// (see the ReactiveEngine note on the full-env init:/action lanes): the full intrinsics env with
-// writes confined to the document prefix, resource-capped, and it never throws.
+// leading "ari:" — the caller frames it). Used by the load-time `init:` lane (run_init) and a
+// mounted fragment's init: — a synchronous run-to-completion in ONE local scope (scheduler, proc,
+// and intrinsics_context all live only for this call). The per-interaction ACTION lane does NOT
+// come through here: a program `on:` is submitted as a persistent process via
+// Runtime::Impl::submit_action, whose ActionContext keeps its intrinsics_context alive across
+// frames (and installs ictx.document for the per-document resource scope — which this local,
+// no-owner init: context deliberately leaves null). Same trust model as the action lane (see the
+// ReactiveEngine note on the full-env lanes): the full intrinsics env with writes confined to the
+// document prefix, resource-capped, and it never throws.
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
                                uint64_t max_steps, double max_seconds, uint64_t max_bytes) {
   namespace se = cvc::state_exec;
@@ -603,6 +608,14 @@ struct Runtime::Impl {
   // lives here in the Impl, which owns the live_actions_ / residents that reference it. Declared
   // before them so it destructs after them.
   cvc::state_exec::channel_policy channel_policy_;
+
+  // Per-document resource owner (Phase-2 streaming PR6): the non-singleton home for resources a DSL
+  // intrinsic opens during this document's life — e.g. a (stream-open) stream. Installed on every
+  // action/resident ictx (ictx.document), so a verb reaches it via ictx, NOT a process-static table
+  // keyed by app*. ~Impl clear()s it FIRST (below), so anything the author left open is torn down
+  // here while the app and its state tree are still alive, never at process exit against a dead
+  // app.
+  cvc::state_exec::document_scope doc_scope_;
 
   Widget root;
   Widget pending;
@@ -1280,7 +1293,7 @@ void Runtime::Impl::render() {
   }
   if (reactive)
     reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
-  frame_instances = 0; // §3: reset the per-frame repeat-expansion budget
+  frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
   backend->begin_frame();
@@ -1293,6 +1306,13 @@ void Runtime::Impl::render() {
 std::atomic<uint64_t> Runtime::Impl::owner_seq{0};
 
 Runtime::Impl::~Impl() {
+  // Close anything the document left open (a (stream-open) with no (stream-close)) BEFORE reaping
+  // the process group, while the app and its state tree are still alive. Each owned resource's
+  // destructor runs here (e.g. ~stream marks its descriptor closed + releases its state pins) — the
+  // non-singleton teardown that a process-static owning table could not give (it would run at
+  // process exit against a dead app and hang). Safe to run before kill_owner: these resources live
+  // on the app scheduler/state, not this Runtime's owner_-tagged process lanes.
+  doc_scope_.clear();
   // Reap this document's whole process group so a parked (await/sleep/msg-recv) action never
   // lingers on the shared app scheduler after its Runtime is gone. Only touch the scheduler if
   // we ever used it (exec_scheduler() lazily builds it — don't force it at teardown otherwise).
@@ -1322,6 +1342,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     ac->ictx.proc = ac->proc;
     se::apply_chroot(ac->ictx, root, action_prefix); // confine writes to the document/mount subtree
     ac->ictx.channels = &channel_policy_; // §12 channel enforcement (no-op unless strict)
+    ac->ictx.document = &doc_scope_;      // per-document owner for (stream-open) & friends
     ac->env = se::builtins::make_default_environment();
     se::register_intrinsics(ac->env, &ac->ictx);
     // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
@@ -1400,6 +1421,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     ac->ictx.proc = ac->proc;
     se::apply_chroot(ac->ictx, root, prefix); // resident writes confined to the document prefix
     ac->ictx.channels = &channel_policy_;     // §12 channel enforcement (no-op unless strict)
+    ac->ictx.document = &doc_scope_;          // per-document owner for (stream-open) & friends
     ac->env = se::builtins::make_default_environment();
     se::register_intrinsics(ac->env, &ac->ictx);
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())

@@ -1136,7 +1136,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/app_runtime.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/app_runtime.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1150,6 +1150,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http.h
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
+  ../../inc/cvc/ariadne/stream_intrinsics.h
   ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
