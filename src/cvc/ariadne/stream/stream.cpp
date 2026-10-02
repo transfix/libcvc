@@ -10,11 +10,11 @@
 
 #include <boost/any.hpp>
 #include <chrono>
+#include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_registry.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/core/state_exec/intrinsics.h>      // resolve_channel_key (§12 channel scoping)
-#include <cvc/ariadne/stream/stream.h>
-#include <cvc/ariadne/stream/stream_registry.h>
 
 namespace cvc {
 namespace ariadne {

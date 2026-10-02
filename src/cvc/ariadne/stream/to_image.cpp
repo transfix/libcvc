@@ -60,8 +60,9 @@ cvc::image to_image(const frame_ptr &fp) {
   cvc::image::pixel_format pf;
   cvc::image::data_type dt;
   if (!codec_to_image_format(fp->format.codec, pf, dt))
-    throw std::runtime_error("cvc::ariadne::stream::to_image: unsupported or channel-swapped codec '" +
-                             fp->format.codec + "'");
+    throw std::runtime_error(
+        "cvc::ariadne::stream::to_image: unsupported or channel-swapped codec '" +
+        fp->format.codec + "'");
 
   if (fp->format.origin != frame_origin::top_left)
     throw std::runtime_error(
