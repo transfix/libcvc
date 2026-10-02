@@ -41,13 +41,13 @@
 #include <string>
 #include <vector>
 
-namespace cvc {
-namespace ariadne {
-namespace stream {
-class frame_source;
-}
-} // namespace ariadne
+// Full definition (NOT a forward declaration): camera_open holds a unique_ptr<frame_source>, so
+// ~camera_open needs the complete type — a bare forward-decl would make any TU that holds a
+// camera_open fail to compile at scope exit. frame_source.h pulls only <cstddef>/<cstdint> (no
+// SDL), so the "SDL stays out of this header" invariant is preserved.
+#include <cvc/ariadne/stream/frame_source.h>
 
+namespace cvc {
 namespace gl {
 namespace capture {
 
@@ -65,13 +65,19 @@ struct camera_open {
 
 // Open camera `device_index` (0 = the first enumerated device) and return a frame_source that
 // yields dense rgba8 frames. Returns an empty result ({nullptr, 0, 0, …}) if SDL is unavailable,
-// the index is out of range, or the open fails. Capture may require a user permission grant on some
-// platforms; until it is granted the source simply produces no frames yet (the producer tick
-// skips).
+// the index is out of range, the open fails, or access is not granted within a short wait (SDL
+// resolves camera permission asynchronously; open_camera pumps events and waits briefly for it).
+//
+// THREAD CONTRACT: open_camera(), list_cameras(), and destruction of the stream/source returned
+// here all touch the SDL camera subsystem (SDL_InitSubSystem/SDL_QuitSubSystem are NOT
+// thread-safe), so call them — and destroy the owning stream — on the SDL MAIN thread (the thread
+// that drives SDL / pumps its events), the same thread stream::close()/~stream run on. Only the
+// per-frame capture inside fill() runs on the producer thread, using SDL calls documented
+// thread-safe.
 camera_open open_camera(int device_index = 0);
 
 // Human-readable names of the available camera devices (index aligns with open_camera). Empty when
-// SDL is unavailable or no camera is present.
+// SDL is unavailable or no camera is present. Call on the SDL main thread (see open_camera).
 std::vector<std::string> list_cameras();
 
 // Pump the SDL event queue once (a no-op when SDL is unavailable). SDL delivers camera device

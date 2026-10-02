@@ -64,6 +64,10 @@ public:
     SDL_Surface *rgba = (raw->format == SDL_PIXELFORMAT_RGBA32)
                             ? raw
                             : SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
+    // Require the converted frame to match the negotiated w/h. A mid-stream resolution change (or a
+    // conversion failure, rgba==null) fails this guard -> a clean skip (bytes=0), never an OOB
+    // copy; the stream then stalls rather than renegotiating (acceptable — reopen to change
+    // resolution).
     if (rgba && rgba->w == w_ && rgba->h == h_ && rgba->pixels) {
       const int row = w_ * 4;
       const auto *src = static_cast<const std::uint8_t *>(rgba->pixels);
@@ -106,13 +110,15 @@ camera_open open_camera(int device_index) {
       // and wait, bounded, for the permission to resolve (approved or denied) so the returned
       // source is ready to capture. A denial leaves a source that simply never produces (fill()
       // skips).
-      for (int i = 0; i < 100 && SDL_GetCameraPermissionState(cam) == 0; ++i) {
+      for (int i = 0;
+           i < 100 && SDL_GetCameraPermissionState(cam) == SDL_CAMERA_PERMISSION_STATE_PENDING;
+           ++i) {
         SDL_PumpEvents();
         SDL_Delay(10); // up to ~1 s
       }
       SDL_CameraSpec spec;
-      if (SDL_GetCameraPermissionState(cam) == 1 && SDL_GetCameraFormat(cam, &spec) &&
-          spec.width > 0 && spec.height > 0) {
+      if (SDL_GetCameraPermissionState(cam) == SDL_CAMERA_PERMISSION_STATE_APPROVED &&
+          SDL_GetCameraFormat(cam, &spec) && spec.width > 0 && spec.height > 0) {
         result.width = spec.width;
         result.height = spec.height;
         result.fps =
