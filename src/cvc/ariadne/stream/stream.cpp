@@ -10,11 +10,14 @@
 
 #include <boost/any.hpp>
 #include <chrono>
+#include <cvc/ariadne/stream/frame_source.h>    // frame_source (start_producer)
+#include <cvc/ariadne/stream/producer_thread.h> // producer_thread (start_producer)
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_registry.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/core/state_exec/intrinsics.h>      // resolve_channel_key (§12 channel scoping)
+#include <utility>
 
 namespace cvc {
 namespace ariadne {
@@ -150,9 +153,45 @@ void stream::update_stats() {
   }
 }
 
+void stream::start_producer(std::unique_ptr<frame_source> source, double hz) {
+  if (closed_.load(std::memory_order_relaxed) || !source || !channel_)
+    return; // a closed (or never-opened) stream takes no producer
+  // Replace any existing producer: stop()+join the old one before dropping its source, so its tick
+  // (which captured the old source) can never run against a freed source.
+  if (producer_)
+    producer_->stop();
+  producer_.reset();
+  source_ = std::move(source);
+
+  // The tick runs on the dedicated producer thread. It is self-contained: acquire a slab
+  // (non-blocking — drop at source when the pool is full, never stall), have the source fill it,
+  // publish on the channel (which stamps the seq), and post the throttled seq heartbeat. It
+  // captures raw `this`/source pointers, all of which outlive the producer (close()/~stream join it
+  // first). Returns false only when the source reports it is spent.
+  frame_source *src = source_.get();
+  producer_ = std::make_unique<producer_thread>(
+      [this, src]() -> bool {
+        auto lease = channel_->pool().acquire();
+        if (!lease.has_value())
+          return true; // pool full: a slow consumer pinned every slab — drop this frame, keep going
+        const produced_frame pf = src->fill(lease->data, lease->cap);
+        if (pf.bytes == 0) {
+          channel_->pool().discard(*lease); // nothing produced this tick (or source spent)
+          return !pf.stop;
+        }
+        const std::int64_t seq = channel_->publish(*lease, pf.bytes, pf.pts_seconds);
+        post_seq(seq); // throttled heartbeat onto the pump (not every frame)
+        return !pf.stop;
+      },
+      hz);
+  producer_->start();
+}
+
 void stream::close() {
   if (closed_.exchange(true))
     return;
+  if (producer_)
+    producer_->stop(); // JOIN the producer before the channel/pool it publishes into are torn down
   if (channel_)
     channel_->close(); // unblock parked ring consumers
   stream_registry::for_app(ctx_).uninstall(token_, channel_ ? channel_.get() : nullptr);

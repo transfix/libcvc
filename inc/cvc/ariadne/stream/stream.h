@@ -42,6 +42,9 @@ class app;
 namespace ariadne {
 namespace stream {
 
+class frame_source;    // a pull source of frames (frame_source.h); the stream drives it
+class producer_thread; // the dedicated worker that drives it (producer_thread.h)
+
 // A snapshot of a stream's runtime counters, stored on the descriptor's stats
 // child node (read back with data<stream_stats>()).
 struct stream_stats {
@@ -98,8 +101,18 @@ public:
   // Owner/pump thread only: refresh the descriptor's stats child node.
   void update_stats();
 
-  // Idempotent. Closes the channel (unblocking consumers), uninstalls the
-  // registry token, and marks the descriptor "closed".
+  // Attach a frame_source and start a DEDICATED producer thread that drives it at `hz` frames/sec
+  // (roadmap §"Phase 3 — producers"). Each tick acquires a pool slab, has the source fill() it,
+  // publishes it on channel(), and posts a throttled seq heartbeat; a tick that cannot get a slab
+  // (pool full under a slow consumer) DROPS that frame rather than stalling the source (§3.2). A
+  // source that returns stop=true ends the producer loop. Replaces any existing producer (the old
+  // one is stopped+joined first). The producer is always stopped (joined) by close()/~stream BEFORE
+  // the channel and pool it publishes into are torn down, so no producer callback races teardown.
+  // Called on the owner thread (not the producer thread).
+  void start_producer(std::unique_ptr<frame_source> source, double hz);
+
+  // Idempotent. Stops (joins) the producer if one is running, then closes the channel (unblocking
+  // consumers), uninstalls the registry token, and marks the descriptor "closed".
   void close();
 
 private:
@@ -126,6 +139,12 @@ private:
   // spurious "closed"/final-seq onto a live stream's channel.
   bool live_ = false;
   std::atomic<bool> closed_{false};
+  // An optional attached producer and its source (Phase 3). Declared LAST so they destruct FIRST:
+  // ~producer_thread stops+joins the worker before source_/channel_/pool_ (which its tick captures)
+  // are destroyed. close() also stops the producer up front, before the channel is closed, so the
+  // join-before-free holds on both the explicit-close and the destructor paths.
+  std::unique_ptr<frame_source> source_;
+  std::unique_ptr<producer_thread> producer_;
 };
 
 } // namespace stream

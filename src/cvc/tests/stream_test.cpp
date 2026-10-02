@@ -26,11 +26,13 @@
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream/stream_registry.h>
+#include <cvc/ariadne/stream/synthetic_source.h>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/core/state_exec/async_scheduler.h>
 #include <cvc/core/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -640,4 +642,79 @@ TEST(StreamScoping, EmptyRootIsBackwardCompatibleIdentity) {
   EXPECT_EQ(s->seq_channel(), "streams.cam0.seq"); // empty root -> identity
   EXPECT_EQ(s->evt_channel(), "streams.cam0.evt");
   EXPECT_EQ(cvc::state::instance(app)("streams.cam0").value(), "live");
+}
+
+// --------------------------------------------------------------------------
+// stream producer (Phase 3): the stream owns + drives a frame_source via a
+// producer_thread, and stops (joins) it before teardown.
+// --------------------------------------------------------------------------
+
+TEST(StreamProducer, SyntheticSourceFeedsFramesAndJoinsOnClose) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam0";
+  p.format = rgba(4, 4);
+  p.subscriber_depth = 2;
+  p.expected_subscribers = 1;
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  auto sub = s->channel().subscribe(deliver_mode::latest, 2);
+  ASSERT_TRUE(sub);
+
+  // The stream owns the producer thread that drives the synthetic source at 200 Hz.
+  s->start_producer(std::make_unique<synthetic_source>(4, 4), /*hz*/ 200.0);
+
+  // Frames flow (bounded wait, no fixed sleep race).
+  for (int i = 0; i < 200 && s->channel().total_published() < 3; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  EXPECT_GE(s->channel().total_published(), 3u) << "producer did not publish frames";
+  EXPECT_GE(s->channel().last_seq(), 2) << "seq did not advance";
+
+  // The subscriber sees a full-size rgba frame the source actually filled (alpha = 0xFF).
+  frame_ptr a = sub->latest();
+  ASSERT_TRUE(a);
+  EXPECT_EQ(a->size, static_cast<std::size_t>(4 * 4 * 4));
+  EXPECT_EQ(a->format.kind, frame_kind::video_raw);
+  ASSERT_NE(a->data, nullptr);
+  EXPECT_EQ(a->data[3], 0xFF) << "synthetic source did not fill the slab";
+
+  // close() stops+joins the producer: publishing stops and there is no hang.
+  s->close();
+  const std::uint64_t after_close = s->channel().total_published();
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  EXPECT_EQ(s->channel().total_published(), after_close) << "producer kept running after close()";
+  // ~stream at end of scope joins again (idempotent) — no hang/crash.
+}
+
+TEST(StreamProducer, StartProducerOnClosedStreamIsIgnored) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam1";
+  p.format = rgba(2, 2);
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  s->close();
+  s->start_producer(std::make_unique<synthetic_source>(2, 2), 60.0); // no-op on a closed stream
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_EQ(s->channel().total_published(), 0u);
+}
+
+TEST(StreamProducer, RestartReplacesThePriorProducer) {
+  cvc::app app;
+  stream_params p;
+  p.id = "cam2";
+  p.format = rgba(4, 4);
+  p.expected_subscribers = 1;
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  s->start_producer(std::make_unique<synthetic_source>(4, 4), 200.0);
+  for (int i = 0; i < 100 && s->channel().total_published() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  // A second start_producer stops+joins the first (no two threads on one pool) and keeps producing.
+  s->start_producer(std::make_unique<synthetic_source>(4, 4), 200.0);
+  const std::uint64_t at_restart = s->channel().total_published();
+  for (int i = 0; i < 100 && s->channel().total_published() < at_restart + 3; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  EXPECT_GT(s->channel().total_published(), at_restart) << "restarted producer did not run";
+  s->close();
 }
