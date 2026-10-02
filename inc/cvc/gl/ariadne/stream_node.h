@@ -33,6 +33,21 @@
 // with a warning; a token that names no live stream still builds the (texture-less) quad
 // with a warning, so the stream must be open before the scene realizes.
 //
+// LIFETIME: the binding (hence its unsubscribe) is owned by the RealizedScene and torn
+// down with it, so — like every StreamTextureBinding and the scene's other render-thread
+// objects — the host MUST destroy/rebuild the RealizedScene (and the Runtime that owns it)
+// on the render thread. Off-thread teardown concurrent with stream close would race the
+// binding's unsubscribe against the channel; the ownership model already serializes both
+// under Runtime teardown, so this adds no new invariant, only stakes.
+//
+// POOL SIZING: each realized stream node is one subscriber on its token's frame pool, which
+// is fixed-size from the (stream-open) expected_subscribers (refuse-rather-than-under-
+// provision). Size it for the number of declarative sinks on that token, plus headroom: a
+// re-realize (hot reload, or a duplicate node id in one scene) subscribes the new sink
+// BEFORE releasing the old, so peak demand is briefly N+1 — a pool sized to exactly N makes
+// the new sink render texture-less with a "frame pool full" warning until a tick frees the
+// old one.
+//
 // Imperative binding of a stream to an existing node at runtime (a (gl-bind-stream …)
 // verb) is a separate follow-up: it needs a cvcGL DSL-verb seam carrying the live
 // SceneGraph + a per-frame tick sink, which the neutral register_action_intrinsics path
