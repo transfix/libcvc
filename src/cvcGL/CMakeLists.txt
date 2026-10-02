@@ -415,6 +415,13 @@ add_executable(cvcgl_camera_source test/cvcgl_camera_source.cpp)
 target_link_libraries(cvcgl_camera_source PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_source COMMAND cvcgl_camera_source)
 
+# Phase-3 audio capture: cvc::gl::capture::audio_source (SDL3 recording device -> stream
+# frame_source). DEVICE-GATED — skips (passes) with no microphone / without CVC_TEST_AUDIO; the
+# transport side and the pure audio sources (tone/gain/mix) are covered hardware-free by stream_test.
+add_executable(cvcgl_audio_source test/cvcgl_audio_source.cpp)
+target_link_libraries(cvcgl_audio_source PRIVATE cvcGL)
+add_test(NAME cvcgl_audio_source COMMAND cvcgl_audio_source)
+
 # texture_modified_rows / _rect: a zero-copy texture patched on the GPU with
 # glTexSubImage2D and nothing marked modified -- no whole-texture re-upload, no
 # shadow re-bake. Reads the texture back (glGetTexImage), so desktop GL only;
