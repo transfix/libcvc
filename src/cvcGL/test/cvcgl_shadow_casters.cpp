@@ -352,12 +352,15 @@ static void rendered(cvc::app &app) {
   // must match `notCasting`, and casting must leave the left half alone.
   //
   // On the macOS runners the first ctest attempt of this test failed in every
-  // Debug job seen (#521 x2, #522, #523) with luma 0.0 in both halves of all
-  // three captures; each retry passed. The leading explanation is contention:
-  // each failing attempt ran while cvcgl_shadow_caster_growth (it grows to six
-  // shadow-casting spots) was rendering, and no passing attempt did -- so the
-  // GL tests now hold one CTest resource lock (src/cvcGL/CMakeLists.txt). No
-  // Mac has reproduced it, so the next log has to tell: every capture must
+  // Debug job seen (#521 x2, #522, #523) with luma 0.0 in every value it
+  // printed (the three footprints and the casting frame's left half); each
+  // retry passed. The leading explanation is contention: each failing attempt
+  // ran while cvcgl_shadow_caster_growth (it grows to six shadow-casting spots)
+  // and cvcgl_stage_caster_truth were rendering, and no passing attempt did --
+  // so the GL tests now hold one CTest resource lock (src/cvcGL/CMakeLists.txt).
+  // In those Debug jobs the first attempt and that overlap always coincided, so
+  // a first-run effect is not ruled out. No Mac has reproduced it, so the next
+  // log has to tell: every capture must
   // show the ground, whole, on its FIRST draw. The background is blue, so a
   // frame that lost the ground counts background pixels, while a ground drawn
   // black (a shadow map read as empty) counts none and reads luma 0. All of it
