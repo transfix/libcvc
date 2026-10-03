@@ -1184,7 +1184,7 @@ Value to_value(const YAML::Node &n) {
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
-         k == "children";
+         k == "volume" || k == "children";
 }
 
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
@@ -1339,6 +1339,15 @@ SceneNode parse_scene_node(const YAML::Node &n) {
     sn.volslice.nearest_filter = (str(vsl, "filter", "linear") == "nearest");
     sn.volslice.opacity_correction = flag(vsl, "opacity_correction", false);
     sn.volslice.tf = parse_scene_tf(vsl["transfer_function"]);
+  }
+  const YAML::Node vol = n["volume"];
+  if (vol && vol.IsMap()) {
+    sn.has_volume = true;
+    if (vol["shaded"]) {
+      sn.volume.has_shaded = true;
+      sn.volume.shaded = flag(vol, "shaded", true);
+    }
+    sn.volume.tf = parse_scene_tf(vol["transfer_function"]);
   }
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
   // custom node type registered on the cvcGL side reads its own config from there.

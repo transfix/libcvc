@@ -287,6 +287,26 @@ cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
   return cvc::volume(sg.appContext(), src.path);
 }
 
+// Feed a SceneTransferFunction to a VolumeNode (the VTK GPU mapper). Point values are ABSOLUTE
+// scalar values — the mapper takes the raw domain directly, so auto_domain/window don't apply (see
+// SceneVolume). VolumeNode::setTransferFunction wants two flat tables: colour [scalar,r,g,b,...]
+// and opacity [scalar,a,...].
+void apply_volume_transfer_function(cvc::gl::VolumeNode &vn,
+                                    const cvc::ariadne::SceneTransferFunction &tf) {
+  std::vector<double> colorTable, opacityTable;
+  colorTable.reserve(tf.points.size() * 4);
+  opacityTable.reserve(tf.points.size() * 2);
+  for (const auto &p : tf.points) {
+    colorTable.push_back(p.value);
+    colorTable.push_back(p.color[0]);
+    colorTable.push_back(p.color[1]);
+    colorTable.push_back(p.color[2]);
+    opacityTable.push_back(p.value);
+    opacityTable.push_back(p.color[3]);
+  }
+  vn.setTransferFunction(colorTable, opacityTable);
+}
+
 // Realize one node under `parent` (null = a top-level node parented to the graphics
 // root). A nested node is created via parent->createChild/addGraphicsChild, which
 // gives it the hierarchical state path `{parent}.children.{id}` AND makes its
@@ -370,13 +390,25 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       return;
     }
     node = vnode;
-    if (vnode && n.has_material) {
-      // A volume's colour comes from a transfer function, not a single actor colour,
-      // so `color[3]` has no analog here (a TF spec is a follow-up); only the lighting
-      // coefficients map. Apply only when the node is styled, so an unstyled volume
-      // keeps VolumeNode's tuned defaults.
-      vnode->setAmbient(n.ambient);
-      vnode->setDiffuse(n.diffuse);
+    if (vnode) {
+      // A volume's colour comes from its transfer function (the `volume:` block), not a single
+      // actor colour, so `color[3]` has no analog here. The lighting coefficients come from the
+      // node `material:` block. Each is applied only when stated, so an unstyled volume keeps
+      // VolumeNode's tuned defaults.
+      if (n.has_material) {
+        vnode->setAmbient(n.ambient);
+        vnode->setDiffuse(n.diffuse);
+        if (n.has_specular) {
+          vnode->setSpecular(n.specular);
+          vnode->setSpecularPower(n.specular_power);
+        }
+      }
+      if (n.has_volume) {
+        if (n.volume.has_shaded)
+          vnode->setShading(n.volume.shaded);
+        if (!n.volume.tf.empty())
+          apply_volume_transfer_function(*vnode, n.volume.tf);
+      }
     }
   } else if (n.type == "volren") {
     if (n.source_file.empty() && n.source_sdf_mesh.empty()) {

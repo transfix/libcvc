@@ -73,6 +73,18 @@ struct SceneVolSlice {
   SceneTransferFunction tf;
 };
 
+// `type: volume` settings — the VTK GPU volume mapper (cvc::gl::VolumeNode), distinct from the
+// SOFTWARE volren/volslice. A volume's colour comes from its transfer function; TF point values are
+// ABSOLUTE scalar values (the VTK mapper takes the raw domain directly, so `auto_domain`/`window`
+// from the shared TF vocabulary do NOT apply to a volume node). The lighting coefficients come from
+// the node `material:` block (ambient/diffuse, plus specular when the material states it). Empty tf
+// ⇒ the node keeps VolumeNode's default grayscale TF.
+struct SceneVolume {
+  bool has_shaded = false; // gate so an unset `shaded` keeps VolumeNode's tuned default
+  bool shaded = true;
+  SceneTransferFunction tf;
+};
+
 // One scene node (§9.2/§9.3). `type` is geometry | volume | volren | volslice |
 // group | light. Fields not meaningful to a type are simply unused.
 struct SceneNode {
@@ -121,6 +133,8 @@ struct SceneNode {
   SceneVolRen volren;
   bool has_volslice = false; // volslice: {...} present (type: volslice)
   SceneVolSlice volslice;
+  bool has_volume = false; // volume: {...} present (type: volume) — TF + shading for the VTK mapper
+  SceneVolume volume;
 
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
