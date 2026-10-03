@@ -13,6 +13,7 @@
 //   lsystem_forest_ari lsystem_forest.ari --offscreen --png forest.png --component-path …
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -40,8 +41,12 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 #include <vtkRenderer.h> // the scene's background gradient reaches the renderer directly (§16.1)
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h> // emscripten_sleep — yield the asyncify main loop to the browser
+#endif
 
 using cvc::gl::CameraController;
 using cvc::gl::GeometryNode;
@@ -1179,6 +1184,14 @@ int main(int argc, char **argv) {
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
   }
+#ifdef CVC_ARIADNE_WASM_DOC
+  // A wasm build bakes in its .ari (CVC_ARIADNE_WASM_DOC) and embeds the component library at
+  // MEMFS /components, so the browser demo runs with no argv.
+  if (docPath.empty()) {
+    docPath = CVC_ARIADNE_WASM_DOC;
+    componentPaths.push_back("/");
+  }
+#endif
   cvc::ariadne::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen || !png.empty();
   if (capturing && frames <= 0)
@@ -1279,6 +1292,14 @@ int main(int argc, char **argv) {
     while (!view.windowClosed() && !quit) {
       frame_body(1.0 / 120.0);
       view.render();
+#ifdef __EMSCRIPTEN__
+#ifndef __EMSCRIPTEN_PTHREADS__
+      sg.publisher().flush(); // no worker thread — drain publishes at frame cadence
+#endif
+      emscripten_sleep(0); // yield to the browser event loop once per frame (Asyncify)
+#else
+      std::this_thread::sleep_for(std::chrono::milliseconds(8));
+#endif
     }
   }
   return 0;
