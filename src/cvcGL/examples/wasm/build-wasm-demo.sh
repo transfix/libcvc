@@ -91,8 +91,15 @@ if [ ! -f "${CVC_WASM_DEPS}/lib/cmake/yaml-cpp/yaml-cpp-config.cmake" ] \
     _yc_tar="${_yc_work}/yaml-cpp-${_yc_ver}.tar.gz"
     mkdir -p "${_yc_work}"
     if [ ! -d "${_yc_src}" ]; then
-        curl -fL "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${_yc_ver}.tar.gz" \
-            -o "${_yc_tar}"
+        # Fetch with python3 (always present — build-pages.py needs it) rather than curl: the deploy
+        # runner prepends a cvcpkg lib dir that shadows the system libcurl with an older one, so the
+        # stock `curl` binary dies at startup ("undefined symbol: curl_easy_header"). urllib uses the
+        # system SSL stack, not libcurl, so it is immune. sha256 still pins the payload.
+        python3 - "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${_yc_ver}.tar.gz" \
+            "${_yc_tar}" <<'PY'
+import sys, urllib.request
+urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+PY
         echo "${_yc_sha}  ${_yc_tar}" | sha256sum -c -
         tar -xzf "${_yc_tar}" -C "${_yc_work}"
     fi
