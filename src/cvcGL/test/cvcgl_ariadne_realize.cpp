@@ -21,6 +21,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
+#include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
@@ -233,6 +234,35 @@ int main() {
     }
     scene.nodes.push_back(vs);
 
+    // A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle —
+    // the `volume:` block, fed to VolumeNode::setTransferFunction/setShading by the realizer.
+    SceneNode vn;
+    vn.id = "vn";
+    vn.type = "volume";
+    vn.source_file = volPath;
+    vn.has_volume = true;
+    vn.volume.has_shaded = true;
+    vn.volume.shaded = false; // VolumeNode defaults shading TRUE -> this asserts a real flip
+    {
+      SceneTFPoint p; // low end: a translucent blue
+      p.value = 0.0;
+      p.color[0] = 0.00f;
+      p.color[1] = 0.42f;
+      p.color[2] = 0.78f;
+      p.color[3] = 0.0f;
+      vn.volume.tf.points.push_back(p);
+    }
+    {
+      SceneTFPoint p; // high end: a darker blue at half opacity
+      p.value = 1.0;
+      p.color[0] = 0.01f;
+      p.color[1] = 0.09f;
+      p.color[2] = 0.22f;
+      p.color[3] = 0.5f;
+      vn.volume.tf.points.push_back(p);
+    }
+    scene.nodes.push_back(vn);
+
     auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "vol");
     std::remove(volPath.c_str()); // the volumes are already read into memory
 
@@ -256,6 +286,21 @@ int main() {
     }
     chk(converged, "volren tick seam -> the raycast produced a frame (converged)");
     chk(vsn && vsn->planesRendered() > 0, "volslice tick seam -> slice planes were built");
+
+    auto vnn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("vn"));
+    chk(vnn != nullptr, "type: volume -> a VolumeNode in the graph");
+    if (vnn) {
+      chk(!vnn->getShading(), "volume: { shaded: false } flips VolumeNode's default-true shading");
+      // 2 TF points -> color table [s,r,g,b, s,r,g,b]; assert OUR colour reached the mapper
+      // (not the default black->white ramp, which would have 0 in the green slot).
+      auto col = vnn->getTransferFunctionColorTable();
+      chk(col.size() == 8, "volume transfer_function -> 2 colour control points applied");
+      chk(col.size() == 8 && std::abs(col[2] - 0.42) < 1e-6,
+          "volume transfer_function -> our green channel (0.42) reached the mapper");
+      auto op = vnn->getTransferFunctionOpacityTable();
+      chk(op.size() == 4 && std::abs(op[3] - 0.5) < 1e-6,
+          "volume transfer_function -> our opacity (0.5) reached the mapper");
+    }
   }
 
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────

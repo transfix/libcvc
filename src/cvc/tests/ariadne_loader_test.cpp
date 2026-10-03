@@ -854,6 +854,62 @@ scene:
   ASSERT_EQ(v->volren.isosurfaces.size(), 1u);
 }
 
+// A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle — the
+// `volume:` block the realizer feeds to VolumeNode::setTransferFunction/setShading.
+TEST(AriadneScene, VolumeTransferFunctionAndShading) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: sea
+      type: volume
+      source: field.vol
+      material: { ambient: 0.3, diffuse: 0.7, specular: 0.4, specular_power: 18 }
+      volume:
+        shaded: true
+        transfer_function:
+          points:
+            - { value: 0.0, color: [0.00, 0.42, 0.78, 0.0] }
+            - { value: 1.0, color: [0.01, 0.09, 0.22, 0.5] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *v = find_scene_node(r.scene.nodes, "sea");
+  ASSERT_NE(v, nullptr);
+  EXPECT_EQ(v->type, "volume");
+  ASSERT_TRUE(v->has_volume);
+  EXPECT_TRUE(v->volume.has_shaded);
+  EXPECT_TRUE(v->volume.shaded);
+  ASSERT_EQ(v->volume.tf.points.size(), 2u);
+  EXPECT_DOUBLE_EQ(v->volume.tf.points[0].value, 0.0);
+  EXPECT_FLOAT_EQ(v->volume.tf.points[1].color[3], 0.5f); // opacity rides the 4th channel
+  // The lighting coefficients come from the node material block (shared with geometry).
+  ASSERT_TRUE(v->has_material);
+  EXPECT_FLOAT_EQ(v->ambient, 0.3f);
+  ASSERT_TRUE(v->has_specular);
+  EXPECT_FLOAT_EQ(v->specular_power, 18.0f);
+}
+
+// An unstyled `type: volume` node: no `volume:` block ⇒ has_volume false, so the realizer leaves
+// VolumeNode's default grayscale TF and tuned shading untouched.
+TEST(AriadneScene, VolumeWithoutSettingsKeepsDefaults) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: plain
+      type: volume
+      source: field.vol
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *v = find_scene_node(r.scene.nodes, "plain");
+  ASSERT_NE(v, nullptr);
+  EXPECT_FALSE(v->has_volume);
+  EXPECT_FALSE(v->volume.has_shaded);
+  EXPECT_TRUE(v->volume.tf.empty());
+}
+
 // §9 enrichments: a tuned StageLighting rig and shadow resolution/update-interval.
 TEST(AriadneScene, RigTuningAndShadowResolution) {
   SKIP_WITHOUT_YAML();

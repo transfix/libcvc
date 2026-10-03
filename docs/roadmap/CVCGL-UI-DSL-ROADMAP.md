@@ -1732,7 +1732,8 @@ of a hand-built C++ escape.
 > `cvc::volume(app, source_file)` and `sg.addGraphics(id, vol)` → `VolumeNode` — which self-applies
 > a default grayscale transfer function, so it renders with no config; being a `GraphicsNode` it
 > reuses the same transform + `visible:` path as geometry (a `color:` has no single-actor analog on
-> a volume, so only `ambient`/`diffuse` map, and only when the node is styled). The `lights:` array
+> a volume, so only `ambient`/`diffuse` map, and only when the node is styled; a `volume:` block now
+> adds a transfer function + shading — see increment 6). The `lights:` array
 > realizes into `cvc::gl::LightNode`s: `spot`/`fill` use position + target + cone, `directional`
 > uses `azimuth`/`elevation` (a compass sun — `SceneLight` gained `color`, `azimuth`, `elevation`),
 > all wrapped in `beginLightBatch`/`endLightBatch` — which is a *correctness* fix, not just perf
@@ -1796,6 +1797,22 @@ of a hand-built C++ escape.
 > converges and a volslice builds slice planes (`planesRendered() > 0`). It runs under the CI
 > `llvmpipe`+`Xvfb` cvcGL harness. The core `AriadneBind.*` + loader gtests still cover the pure-state
 > mirror and all parsing (incl. volren/volslice params) with no VTK.
+>
+> **Status — increment 6 landed (transfer function + shading on `type: volume`).** The VTK GPU-mapper
+> volume node was the one renderer whose colour couldn't be authored (increment 3 mapped only
+> `ambient`/`diffuse`). A `volume:` block closes that: `volume: { shaded: <bool>, transfer_function:
+> { points: [{ value, color: [r,g,b,a] }] } }`, reusing the shared `parse_scene_tf` vocabulary
+> (`SceneVolume` in `scene.h`). The realizer feeds it to `VolumeNode::setTransferFunction` (colour
+> `[s,r,g,b,…]` + opacity `[s,a,…]` tables split from the rgba points) and `setShading`, and now also
+> applies the node `material:`'s `specular`/`specular_power` (not just ambient/diffuse). TF point
+> values are **absolute scalar values** — the VTK mapper takes the raw domain, so `auto_domain`/`window`
+> (which volren/volslice honour) do NOT apply to a volume node; each knob is applied only when stated so
+> an unstyled volume keeps VolumeNode's tuned defaults. Parsing is pinned by two loader gtests
+> (`VolumeTransferFunctionAndShading`, `VolumeWithoutSettingsKeepsDefaults`); the realize path is pinned
+> by `cvcgl_ariadne_realize` (our green channel 0.42 + opacity 0.5 reach the mapper, and `shaded: false`
+> flips VolumeNode's default-true shading). This is the first of the reusable DSL capabilities the
+> `lsystem_forest` port needs (so the sea/cloud volumes' *rendering* half is declarative); the
+> procedural in-memory volume *source* and per-frame field updates are later increments.
 
 ### 9.1 Which scene model
 
