@@ -1,9 +1,10 @@
-# lsystem_forest.ari — the cvcGL lsystem_forest demo, ported to Ariadne. Increment 4a: the
-# declarative ISLAND + environment, authored entirely in the UI DSL on the reusable scene
-# capabilities (a procedural heightfield terrain with height-band colours, a StageLighting rig,
-# shadows, a sky-gradient background) — no demo-specific C++. The procedural L-system trees, the
-# travelling-wave sea and the cloud-volume sky are custom scene-node types added in later increments
-# (a forest host registers them); this document grows those nodes in as their realizers land.
+# lsystem_forest.ari — the cvcGL lsystem_forest demo, ported to Ariadne. The ISLAND and its
+# environment are authored entirely in the UI DSL on the reusable scene capabilities (a procedural
+# heightfield terrain with height-band colours, a StageLighting rig, shadows, a sky-gradient
+# background) — no demo-specific C++. The procedural pieces that aren't declaratively expressible are
+# custom scene-node types the lsystem_forest_ari host registers: the L-system TREES (both the
+# original conifer `pine` and a compact `branchy` species), the travelling-wave SEA (a VolumeNode),
+# and the drifting L-system+fBm cloud SKY (a VolumeNode).
 #
 # Run by the lsystem_forest_ari host (it registers the `forest_trees` custom node; the island itself
 # is pure DSL and also renders under the generic ariadne_hello host, minus the trees). The
@@ -94,3 +95,7 @@ scene:
       half: 120            # world half-extent (matches the terrain size 240)
       sea_level: 0.0
       wave_amp: 2.4
+    # The sky: a drifting cloud slab (a custom VolumeNode) grown by a 3-D L-system + fBm noise, high
+    # above the island. Two cloud maps are crossfaded and scrolled each frame so the sky evolves.
+    - node: sky
+      type: cloud_sky

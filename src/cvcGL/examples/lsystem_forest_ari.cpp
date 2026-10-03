@@ -12,6 +12,7 @@
 //   lsystem_forest_ari lsystem_forest.ari --component-path src/cvc/ariadne/components
 //   lsystem_forest_ari lsystem_forest.ari --offscreen --png forest.png --component-path …
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -34,7 +35,9 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
+#include <deque>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 #include <vtkRenderer.h> // the scene's background gradient reaches the renderer directly (§16.1)
@@ -577,6 +580,307 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
   return gn;
 }
 
+// ───────── the sky: a drifting L-system + fBm cloud volume (ported from the original) ─────────
+constexpr int SKY_N = 60, SKY_NZ = 28;
+constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0, SKY_HALF = 150.0;
+constexpr double CLOUD_DRIFT = 3.0, CLOUD_MORPH_S = 60.0;
+constexpr int CLOUD_MAPS = 2, CLOUD_DEPTH = 6;
+constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 8.1, CLOUD_STEP_DECAY = 0.9;
+constexpr double CLOUD_PUFF0 = 8.8, CLOUD_PUFF_DECAY = 0.88;
+constexpr double CLOUD_FLOOR = 0.10, CLOUD_EMPTY = 0.22;
+constexpr double SUN_AZ = -52.0, SUN_EL = 34.0;
+const char *CLOUD_AXIOM = "[A][+++++A][-----A][++++++++++A][----------A][+++++++++++++++A]";
+const char *cloudRule(char c) {
+  switch (c) {
+  case 'A':
+    return "FF[+<B]^F[-<C]<F[+<C]vFA";
+  case 'B':
+    return "F[+<F]F<[-<F]vB";
+  case 'C':
+    return "^<F[+<F][-<F]^<FC";
+  default:
+    return nullptr;
+  }
+}
+inline size_t skyIdx(int z, int y, int x) {
+  return (static_cast<size_t>(z) * SKY_N + y) * SKY_N + x;
+}
+double percentileSorted(const std::vector<float> &a, double q) {
+  if (a.empty())
+    return 0.0;
+  double rank = (q / 100.0) * (a.size() - 1);
+  size_t lo = static_cast<size_t>(std::floor(rank));
+  if (lo + 1 >= a.size())
+    return a.back();
+  return a[lo] + (rank - lo) * (a[lo + 1] - a[lo]);
+}
+double vhash3(int x, int y, int z) {
+  unsigned h = static_cast<unsigned>(x * 374761393 + y * 668265263 + z * 1274126177);
+  h = (h ^ (h >> 13)) * 1274126177u;
+  return ((h ^ (h >> 16)) & 0xffffffu) / double(0x1000000);
+}
+double vnoise3(double x, double y, double z) {
+  int xi = (int)std::floor(x), yi = (int)std::floor(y), zi = (int)std::floor(z);
+  double fx = x - xi, fy = y - yi, fz = z - zi;
+  auto sm = [](double t) { return t * t * (3.0 - 2.0 * t); };
+  fx = sm(fx);
+  fy = sm(fy);
+  fz = sm(fz);
+  auto L = [](double a, double b, double t) { return a + (b - a) * t; };
+  double x00 = L(vhash3(xi, yi, zi), vhash3(xi + 1, yi, zi), fx);
+  double x10 = L(vhash3(xi, yi + 1, zi), vhash3(xi + 1, yi + 1, zi), fx);
+  double x01 = L(vhash3(xi, yi, zi + 1), vhash3(xi + 1, yi, zi + 1), fx);
+  double x11 = L(vhash3(xi, yi + 1, zi + 1), vhash3(xi + 1, yi + 1, zi + 1), fx);
+  return L(L(x00, x10, fy), L(x01, x11, fy), fz);
+}
+double fbm3(double x, double y, double z, int octaves) {
+  double f = 0.0, amp = 0.5, tot = 0.0, fr = 1.0;
+  for (int i = 0; i < octaves; ++i) {
+    f += amp * vnoise3(x * fr, y * fr, z * fr);
+    tot += amp;
+    amp *= 0.5;
+    fr *= 2.02;
+  }
+  return f / tot;
+}
+V3 sunDir(double azDeg, double elDeg) {
+  double az = azDeg * M_PI / 180.0, el = elDeg * M_PI / 180.0;
+  return {std::cos(el) * std::sin(az), -std::cos(el) * std::cos(az), std::sin(el)};
+}
+std::vector<float> walkClouds(std::mt19937 &rng) {
+  std::uniform_real_distribution<double> U(0.0, 1.0);
+  auto uni = [&](double a, double b) { return a + (b - a) * U(rng); };
+  const int N = SKY_N, NZ = SKY_NZ;
+  std::vector<float> field(static_cast<size_t>(NZ) * N * N, 0.0f);
+  const double zscale = (double(N) / NZ) * ((SKY_TOP - SKY_BASE) / (2.0 * SKY_HALF));
+  double x = uni(0.25, 0.75) * N, y = uni(0.3, 0.7) * N, z = NZ * 0.42;
+  double head = uni(0.0, 360.0);
+  double step = CLOUD_STEP0, puff = CLOUD_PUFF0, climb = 0.0;
+  int depth = 0;
+  struct St {
+    double x, y, z, head, step, puff, climb;
+    int depth;
+  };
+  std::vector<St> stack;
+  std::deque<char> todo(CLOUD_AXIOM, CLOUD_AXIOM + std::strlen(CLOUD_AXIOM));
+  int guard = 0;
+  while (!todo.empty() && guard < 4000) {
+    ++guard;
+    char c = todo.front();
+    todo.pop_front();
+    if (c == 'F') {
+      x = std::fmod(x + step * std::cos(head * M_PI / 180.0), double(N));
+      if (x < 0)
+        x += N;
+      y = std::min(std::max(y + step * std::sin(head * M_PI / 180.0), 0.0), double(N - 1));
+      z = std::min(std::max(z + climb, 1.0), double(NZ - 2));
+      const double p2 = 2.0 * puff * puff;
+      for (int gz = 0; gz < NZ; ++gz) {
+        double dz = (gz - z) * zscale, dz2 = dz * dz;
+        for (int gy = 0; gy < N; ++gy) {
+          double dy = gy - y, dyz2 = dy * dy + dz2;
+          for (int gx = 0; gx < N; ++gx) {
+            double dx = std::fabs(gx - x);
+            dx = std::min(dx, double(N) - dx);
+            field[skyIdx(gz, gy, gx)] += static_cast<float>(std::exp(-(dx * dx + dyz2) / p2));
+          }
+        }
+      }
+    } else if (c == '+') {
+      head += CLOUD_TURN;
+    } else if (c == '-') {
+      head -= CLOUD_TURN;
+    } else if (c == '<') {
+      puff *= CLOUD_PUFF_DECAY;
+    } else if (c == '^') {
+      climb += 0.55;
+    } else if (c == 'v') {
+      climb -= 0.45;
+    } else if (c == '[') {
+      stack.push_back({x, y, z, head, step, puff, climb, depth});
+    } else if (c == ']') {
+      if (!stack.empty()) {
+        St s = stack.back();
+        stack.pop_back();
+        x = s.x;
+        y = s.y;
+        z = s.z;
+        head = s.head;
+        step = s.step;
+        puff = s.puff;
+        climb = s.climb;
+        depth = s.depth;
+      }
+    } else if (cloudRule(c) && depth < CLOUD_DEPTH) {
+      ++depth;
+      step *= CLOUD_STEP_DECAY;
+      const char *r = cloudRule(c);
+      todo.insert(todo.begin(), r, r + std::strlen(r));
+    }
+  }
+  std::vector<float> sorted(field);
+  std::sort(sorted.begin(), sorted.end());
+  double m = percentileSorted(sorted, 99.9);
+  if (m > 0)
+    for (float &v : field)
+      v = std::min(1.0f, std::max(0.0f, v / static_cast<float>(m)));
+  std::vector<double> wf(N), zf(NZ);
+  for (int i = 0; i < N; ++i)
+    wf[i] = std::sqrt(0.5 - 0.5 * std::cos(2.0 * M_PI * i / (N - 1)));
+  for (int k = 0; k < NZ; ++k)
+    zf[k] = std::sin(0.12 + (M_PI - 0.24) * k / (NZ - 1));
+  for (int gz = 0; gz < NZ; ++gz)
+    for (int gy = 0; gy < N; ++gy)
+      for (int gx = 0; gx < N; ++gx) {
+        float &v = field[skyIdx(gz, gy, gx)];
+        v *= static_cast<float>(std::min(wf[gy], wf[gx]) * zf[gz]);
+        if (v > 0.0f) {
+          double d = fbm3(gx * 0.30, gy * 0.30, gz * 0.62, 5);
+          v = static_cast<float>(std::min(1.0, std::max(0.0, v * (0.32 + 1.5 * d))));
+        }
+      }
+  { // cheap baked top-light: thin each voxel by the cloud density toward the sun
+    V3 sd = sunDir(SUN_AZ, SUN_EL);
+    double ux = sd.x * N / (2.0 * SKY_HALF), uy = sd.y * N / (2.0 * SKY_HALF),
+           uz = sd.z * NZ / (SKY_TOP - SKY_BASE);
+    double ul = std::sqrt(ux * ux + uy * uy + uz * uz);
+    ux /= ul;
+    uy /= ul;
+    uz /= ul;
+    auto samp = [&](double cx, double cy, double cz) -> double {
+      if (cx < 0 || cx > N - 1 || cy < 0 || cy > N - 1 || cz < 0 || cz > NZ - 1)
+        return 0.0;
+      int x0 = (int)cx, y0 = (int)cy, z0 = (int)cz;
+      int x1 = std::min(x0 + 1, N - 1), y1 = std::min(y0 + 1, N - 1), z1 = std::min(z0 + 1, NZ - 1);
+      double tx = cx - x0, ty = cy - y0, tz = cz - z0;
+      auto V = [&](int x, int y, int z) { return (double)field[skyIdx(z, y, x)]; };
+      double c00 = V(x0, y0, z0) * (1 - tx) + V(x1, y0, z0) * tx;
+      double c10 = V(x0, y1, z0) * (1 - tx) + V(x1, y1, z0) * tx;
+      double c01 = V(x0, y0, z1) * (1 - tx) + V(x1, y0, z1) * tx;
+      double c11 = V(x0, y1, z1) * (1 - tx) + V(x1, y1, z1) * tx;
+      return (c00 * (1 - ty) + c10 * ty) * (1 - tz) + (c01 * (1 - ty) + c11 * ty) * tz;
+    };
+    const int LSTEPS = 7;
+    const double LK = 0.95, LFLOOR = 0.72, LSTEP = 1.6;
+    std::vector<float> lit(field.size());
+    for (int gz = 0; gz < NZ; ++gz)
+      for (int gy = 0; gy < N; ++gy)
+        for (int gx = 0; gx < N; ++gx) {
+          size_t o = skyIdx(gz, gy, gx);
+          double v = field[o];
+          if (v <= 0.0) {
+            lit[o] = 0.0f;
+            continue;
+          }
+          double tau = 0.0;
+          for (int s = 1; s <= LSTEPS; ++s)
+            tau += samp(gx + ux * s * LSTEP, gy + uy * s * LSTEP, gz + uz * s * LSTEP) * LSTEP;
+          lit[o] = static_cast<float>(v * (LFLOOR + (1.0 - LFLOOR) * std::exp(-LK * tau)));
+        }
+    field.swap(lit);
+  }
+  return field;
+}
+struct SkyModel {
+  std::vector<std::vector<float>> maps;
+  double norm = 1.0;
+  std::vector<float> raw(double shift, double morph) const {
+    const int N = SKY_N, NZ = SKY_NZ;
+    long mi = static_cast<long>(std::floor(morph));
+    int i = static_cast<int>(((mi % CLOUD_MAPS) + CLOUD_MAPS) % CLOUD_MAPS);
+    int j = (i + 1) % CLOUD_MAPS;
+    double u = morph - std::floor(morph);
+    u = u * u * (3.0 - 2.0 * u);
+    long ks = static_cast<long>(std::floor(shift));
+    double f = shift - ks;
+    int k0 = static_cast<int>(((ks % N) + N) % N), k1 = (k0 + 1) % N;
+    const std::vector<float> &A = maps[i], &B = maps[j];
+    std::vector<float> out(static_cast<size_t>(NZ) * N * N);
+    for (int z = 0; z < NZ; ++z)
+      for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x) {
+          int sx0 = ((x - k0) % N + N) % N, sx1 = ((x - k1) % N + N) % N;
+          auto mix = [&](int xx) {
+            return (1.0 - u) * A[skyIdx(z, y, xx)] + u * B[skyIdx(z, y, xx)];
+          };
+          double vol = (1.0 - f) * mix(sx0) + f * mix(sx1);
+          double lump = std::min(1.0, std::max(0.0, (vol - CLOUD_FLOOR) / (1.0 - CLOUD_FLOOR)));
+          out[skyIdx(z, y, x)] = static_cast<float>(lump * lump);
+        }
+    return out;
+  }
+  std::vector<float> field(double shift, double morph) const {
+    std::vector<float> r = raw(shift, morph);
+    double inv = 1.0 / norm;
+    for (float &v : r)
+      v = static_cast<float>(v * inv);
+    return r;
+  }
+};
+SkyModel buildSky() {
+  SkyModel sky;
+  std::mt19937 rng(20u);
+  for (int m = 0; m < CLOUD_MAPS; ++m)
+    sky.maps.push_back(walkClouds(rng));
+  double norm = 0.0;
+  for (int c = 0; c < SKY_N; c += 8)
+    for (double mo : {0.0, 0.5, 1.0}) {
+      std::vector<float> r = sky.raw(double(c), mo);
+      for (float v : r)
+        norm = std::max(norm, double(v));
+    }
+  sky.norm = norm > 0 ? norm : 1.0;
+  return sky;
+}
+void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
+  color = {0.0, 0.80, 0.85, 0.93, 0.45, 0.94, 0.96, 0.98, 1.0, 1.00, 1.00, 1.00};
+  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26, 1.0, 0.54};
+}
+
+// The `type: cloud_sky` realizer: a drifting cloud VolumeNode over the island (two L-system + fBm
+// maps crossfaded and scrolled each frame). No tunable props — the sky is self-contained.
+std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::SceneNode &n,
+                                                GraphicsNode *parent,
+                                                cvc::gl::ariadne::RealizedScene &out,
+                                                std::vector<std::string> *warnings) {
+  auto sky = std::make_shared<SkyModel>(buildSky());
+  cvc::volume vol(sg.appContext(),
+                  reinterpret_cast<const unsigned char *>(sky->field(0.0, 0.0).data()),
+                  cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
+                  cvc::bounding_box(-SKY_HALF, -SKY_HALF, SKY_BASE, SKY_HALF, SKY_HALF, SKY_TOP));
+  std::shared_ptr<GraphicsNode> gn =
+      parent ? parent->createChild<cvc::gl::VolumeNode>(n.id, vol) : sg.addGraphics(n.id, vol);
+  auto vnode = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(gn);
+  if (!vnode) {
+    if (warnings)
+      warnings->push_back("ari: cloud_sky '" + n.id + "': could not create a VolumeNode");
+    return gn;
+  }
+  vnode->setShading(false);
+  vnode->setAmbient(0.95);
+  vnode->setDiffuse(0.35);
+  vnode->setSpecular(0.0);
+  vnode->setVolumetricScattering(0.0);
+  {
+    std::vector<double> col, op;
+    skyTransfer(col, op);
+    vnode->setTransferFunction(col, op);
+  }
+  auto frame = std::make_shared<long>(0);
+  std::weak_ptr<cvc::gl::VolumeNode> wn = vnode;
+  out.custom_ticks.push_back([wn, sky, frame](vtkRenderer *) {
+    auto v = wn.lock();
+    if (!v)
+      return;
+    const double t = static_cast<double>((*frame)++) / 60.0;
+    const double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
+    const double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
+    v->updateScalars(sky->field(shift, morph));
+  });
+  std::printf("[lsystem_forest_ari] sky: %dx%dx%d cloud volume\n", SKY_N, SKY_N, SKY_NZ);
+  return gn;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -628,6 +932,7 @@ int main(int argc, char **argv) {
   // The forest's non-declarative pieces: the procedural L-system trees and the travelling-wave sea.
   cvc::gl::ariadne::register_scene_node_type("forest_trees", realize_forest_trees);
   cvc::gl::ariadne::register_scene_node_type("wave_sea", realize_wave_sea);
+  cvc::gl::ariadne::register_scene_node_type("cloud_sky", realize_cloud_sky);
 
   if (docPath.empty()) {
     std::printf("[lsystem_forest_ari] FATAL: give a .ari document (e.g. lsystem_forest.ari)\n");
