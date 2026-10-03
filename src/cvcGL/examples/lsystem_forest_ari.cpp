@@ -29,9 +29,11 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/volume/bounding_box.h>
+#include <cvc/volume/volume.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -85,6 +87,192 @@ const V3 C_WOOD_LIGHT{0.655, 0.490, 0.239};
 const V3 C_WOOD_DARK{0.361, 0.251, 0.200};
 const V3 C_NEEDLE{0.137, 0.557, 0.137};
 
+// ───────── the ORIGINAL pine-tree L-system (ported from lsystem_forest.cpp) ─────────
+// The demo's own conifer grammar: a turtle grows a module hierarchy (cylinder trunk/branch
+// segments + needle "stars"), merged into a wood (triangles) + needle (lines) mesh. Kept
+// alongside the branchy species above so both tree types appear in the forest.
+struct Mat4 {
+  double m[16];
+  double &at(int r, int c) { return m[r * 4 + c]; }
+  double at(int r, int c) const { return m[r * 4 + c]; }
+};
+Mat4 mIdent() {
+  Mat4 M{};
+  for (int i = 0; i < 4; ++i)
+    M.at(i, i) = 1.0;
+  return M;
+}
+Mat4 mMul(const Mat4 &a, const Mat4 &b) {
+  Mat4 r{};
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j) {
+      double s = 0;
+      for (int k = 0; k < 4; ++k)
+        s += a.at(i, k) * b.at(k, j);
+      r.at(i, j) = s;
+    }
+  return r;
+}
+Mat4 mRot(double ang, double x, double y, double z) {
+  double c = std::cos(ang), s = std::sin(ang), k = 1.0 - c;
+  Mat4 M = mIdent();
+  M.at(0, 0) = c + k * x * x;
+  M.at(0, 1) = k * x * y - s * z;
+  M.at(0, 2) = k * x * z + s * y;
+  M.at(1, 0) = k * x * y + s * z;
+  M.at(1, 1) = c + k * y * y;
+  M.at(1, 2) = k * y * z - s * x;
+  M.at(2, 0) = k * x * z - s * y;
+  M.at(2, 1) = k * y * z + s * x;
+  M.at(2, 2) = c + k * z * z;
+  return M;
+}
+Mat4 mTrans(double x, double y, double z) {
+  Mat4 M = mIdent();
+  M.at(0, 3) = x;
+  M.at(1, 3) = y;
+  M.at(2, 3) = z;
+  return M;
+}
+V3 xform(const Mat4 &M, V3 p) {
+  return {M.at(0, 0) * p.x + M.at(0, 1) * p.y + M.at(0, 2) * p.z + M.at(0, 3),
+          M.at(1, 0) * p.x + M.at(1, 1) * p.y + M.at(1, 2) * p.z + M.at(1, 3),
+          M.at(2, 0) * p.x + M.at(2, 1) * p.y + M.at(2, 2) * p.z + M.at(2, 3)};
+}
+
+const char *TREE_RULES[5] = {"FF[RL1][RR2][RRR3]F[RL3][RR1][RRR2]RFLR0", "FL[T[RF]2]R[TRFL]RTFL4",
+                             "FL[TRF3]RFLRTFL2", "FL[TFL2RFL]R[T[RFLF3]]RTFL2",
+                             "FL[TRFL4]RFLRTFL4"};
+constexpr double YROTATE = 10.0, TILT = 120.0, MICRO_TILT = 1.0e-4;
+constexpr double T_SCALE = 0.9, T_RADSCALE = 0.6, T_LENGTH = 5.0, T_RADIUS = 0.7;
+constexpr int BASE_TRI = 5, NEEDLES = 9;
+constexpr double LEAF_LEN = 4.0, LEAF_RAD = 1.0;
+const int MATURITY[7] = {1, 2, 2, 3, 3, 3, 4};
+
+struct Seg {
+  Mat4 m;
+  double len, rad;
+};
+struct Leaf {
+  Mat4 m;
+  double sc;
+};
+struct Module {
+  int parent;
+  int level;
+  Mat4 hang;
+  std::vector<Seg> segs;
+  std::vector<Leaf> leaves;
+};
+
+int expandTree(const std::string &rule, int depth, double scale, double radscale, int parent,
+               int level, std::vector<Module> &out, const Mat4 &tMicro, const Mat4 &tTilt,
+               const Mat4 &tRoll) {
+  int me = static_cast<int>(out.size());
+  out.push_back(Module{parent, level, mIdent(), {}, {}});
+  Mat4 cur = mIdent();
+  std::vector<Mat4> stack;
+  double segLen = T_LENGTH * scale, segRad = T_RADIUS * radscale;
+  Mat4 step = mTrans(0.0, segLen, 0.0);
+  for (char ch : rule) {
+    if (ch == 'F') {
+      cur = mMul(cur, tMicro);
+      out[me].segs.push_back({cur, segLen, segRad});
+      cur = mMul(cur, step);
+    } else if (ch == '[') {
+      stack.push_back(cur);
+    } else if (ch == ']') {
+      cur = stack.back();
+      stack.pop_back();
+    } else if (ch == 'L') {
+      out[me].leaves.push_back({cur, scale});
+    } else if (ch == 'R') {
+      cur = mMul(cur, tRoll);
+    } else if (ch == 'T') {
+      cur = mMul(cur, tTilt);
+    } else if (std::isdigit(static_cast<unsigned char>(ch)) && depth > 1) {
+      int child = expandTree(TREE_RULES[ch - '0'], depth - 1, scale * T_SCALE,
+                             radscale * T_RADSCALE, me, level + 1, out, tMicro, tTilt, tRoll);
+      out[child].hang = cur;
+    }
+  }
+  return me;
+}
+
+// The unit-cylinder ring topology + per-vertex wood colours (vertex 0 = bottom cap centre,
+// 1..BASE_TRI = bottom ring, BASE_TRI+1 = top cap centre, rest = top ring).
+struct CylTopo {
+  std::vector<V3> ringUnit;
+  std::vector<unsigned> tris;
+  std::vector<V3> colors;
+};
+CylTopo cyl_topo() {
+  CylTopo c;
+  for (int i = 0; i < BASE_TRI; ++i) {
+    double a = i * 2.0 * M_PI / BASE_TRI;
+    c.ringUnit.push_back({std::cos(a), 0.0, std::sin(a)});
+  }
+  for (int i = 0; i < BASE_TRI; ++i) {
+    int b0 = 1 + i, b1 = 1 + (i + 1) % BASE_TRI;
+    int t0 = BASE_TRI + 2 + i, t1 = BASE_TRI + 2 + (i + 1) % BASE_TRI;
+    int idx[12] = {0, b0, b1, BASE_TRI + 1, t1, t0, b0, t1, b1, b0, t0, t1};
+    for (int k = 0; k < 12; ++k)
+      c.tris.push_back(static_cast<unsigned>(idx[k]));
+  }
+  c.colors.push_back(C_WOOD_LIGHT);
+  for (int i = 0; i < BASE_TRI; ++i)
+    c.colors.push_back(C_WOOD_DARK);
+  c.colors.push_back(C_WOOD_LIGHT);
+  for (int i = 0; i < BASE_TRI; ++i)
+    c.colors.push_back(C_WOOD_DARK);
+  return c;
+}
+
+// Grow ONE pine at base (px,py,pz), trunk scale `size`, into the shared wood (tris, per-vertex
+// colour) + needle (lines) meshes — the original demo's conifer, placed on the island.
+void grow_pine(cvc::geometry &wood, cvc::geometry &needle, double px, double py, double pz,
+               double size, int maturity, const CylTopo &cyl, const std::vector<V3> &nring,
+               const Mat4 &tMicro, const Mat4 &tTilt, const Mat4 &tRoll) {
+  std::vector<Module> mods;
+  expandTree(TREE_RULES[0], maturity, size, size, -1, 1, mods, tMicro, tTilt, tRoll);
+  const Mat4 tUp = mRot(M_PI / 2.0, 1.0, 0.0, 0.0); // turtle +Y -> world Z-up
+  std::vector<Mat4> world(mods.size());
+  for (size_t i = 0; i < mods.size(); ++i) {
+    const Module &mod = mods[i];
+    Mat4 hang = (mod.parent < 0) ? mMul(mTrans(px, py, pz), tUp) : mod.hang;
+    world[i] = (mod.parent < 0) ? hang : mMul(world[mod.parent], hang);
+    for (const Seg &s : mod.segs) {
+      V3 loc[2 * BASE_TRI + 2];
+      loc[0] = {0, 0, 0};
+      loc[BASE_TRI + 1] = {0, s.len, 0};
+      for (int r = 0; r < BASE_TRI; ++r) {
+        loc[1 + r] = {cyl.ringUnit[r].x * s.rad, 0.0, cyl.ringUnit[r].z * s.rad};
+        loc[BASE_TRI + 2 + r] = {cyl.ringUnit[r].x * s.rad, s.len, cyl.ringUnit[r].z * s.rad};
+      }
+      const unsigned base = static_cast<unsigned>(wood.points().size());
+      for (int v = 0; v < 2 * BASE_TRI + 2; ++v) {
+        V3 w = xform(world[i], xform(s.m, loc[v]));
+        wood.points().push_back({w.x, w.y, w.z});
+        wood.colors().push_back({cyl.colors[v].x, cyl.colors[v].y, cyl.colors[v].z});
+      }
+      for (size_t k = 0; k < cyl.tris.size(); k += 3)
+        wood.tris().push_back({base + cyl.tris[k], base + cyl.tris[k + 1], base + cyl.tris[k + 2]});
+    }
+    for (const Leaf &lf : mod.leaves) {
+      const unsigned base = static_cast<unsigned>(needle.points().size());
+      V3 wr = xform(world[i], xform(lf.m, {0, 0, 0}));
+      needle.points().push_back({wr.x, wr.y, wr.z});
+      for (int t = 0; t < NEEDLES; ++t) {
+        V3 tip{nring[t].x * LEAF_RAD * lf.sc, LEAF_LEN * lf.sc, nring[t].z * LEAF_RAD * lf.sc};
+        V3 w = xform(world[i], xform(lf.m, tip));
+        needle.points().push_back({w.x, w.y, w.z});
+        needle.lines().push_back(
+            {static_cast<uint64_t>(base), static_cast<uint64_t>(base + 1 + t)});
+      }
+    }
+  }
+}
+
 // Append a tapered cylinder (p0->p1, radii r0->r1) as a RING-sided tube with per-vertex colour.
 void add_cylinder(cvc::geometry &g, V3 p0, V3 p1, double r0, double r1, int ring, V3 col) {
   V3 axis = norm(p1 - p0);
@@ -99,8 +287,9 @@ void add_cylinder(cvc::geometry &g, V3 p0, V3 p1, double r0, double r1, int ring
     const V3 b0 = p0 + dir * r0, b1 = p1 + dir * r1;
     g.points().push_back({b0.x, b0.y, b0.z});
     g.points().push_back({b1.x, b1.y, b1.z});
-    g.normals().push_back({dir.x, dir.y, dir.z});
-    g.normals().push_back({dir.x, dir.y, dir.z});
+    // No normals here: both tree species leave the merged wood mesh normal-less so
+    // GeometryNode::setGeometry runs ONE vtkPolyDataNormals pass over the whole forest
+    // (mixing hand-set and absent normals would be inconsistent).
     g.colors().push_back({col.x, col.y, col.z});
     g.colors().push_back({col.x, col.y, col.z});
   }
@@ -183,9 +372,11 @@ struct TerrainHeights {
   }
 };
 
-// The `type: forest_trees` realizer: scatter `count` L-system trees on dry land of the named ground
-// node, merged into one mesh. props: count, seed, ground (node id), sea_level, scale, radius, span,
-// levels, branches.
+// The `type: forest_trees` realizer: scatter `count` trees on dry land of the named ground node,
+// of two SPECIES — the original demo's conifer `pine` (wood cylinders + needle-line stars) and the
+// compact `branchy` broadleaf — merged into one wood mesh (+ a needle-line mesh for the pines).
+// props: count, seed, ground, sea_level, span, species(mix|pine|branchy), plus the branchy knobs
+// (length, radius, levels, branches, scale) and the pine knob (pine_scale).
 std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::SceneNode &n,
                                                    GraphicsNode *parent,
                                                    cvc::gl::ariadne::RealizedScene &,
@@ -198,12 +389,14 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
   const uint64_t seed = static_cast<uint64_t>(n.props.num("seed", 1337.0));
   const std::string ground = n.props.str("ground").empty() ? "terrain" : n.props.str("ground");
   const double seaLevel = n.props.num("sea_level", 0.5);
+  const double span = n.props.num("span", 100.0); // half-extent to scatter across
+  const std::string species = n.props.str("species").empty() ? "mix" : n.props.str("species");
   const double scale = n.props.num("scale", 1.0);
   const double baseLen = n.props.num("length", 6.0) * scale;
   const double baseRad = n.props.num("radius", 0.7) * scale;
-  const double span = n.props.num("span", 100.0); // half-extent to scatter across
   const int levels = static_cast<int>(n.props.num("levels", 4.0));
   const int branches = static_cast<int>(n.props.num("branches", 3.0));
+  const double pineScale = n.props.num("pine_scale", 1.35);
 
   TerrainHeights heights;
   if (auto gnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground)))
@@ -211,9 +404,19 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
   if (!heights.ok())
     warn("ground node '" + ground + "' is not a realized heightfield — planting on a flat plane");
 
-  cvc::geometry forest;
+  // The pine turtle's rotation matrices + ring topology, built once (verbatim from the original).
+  const CylTopo cyl = cyl_topo();
+  std::vector<V3> nring;
+  for (int t = 0; t < NEEDLES; ++t) {
+    double a = t * 2.0 * M_PI / NEEDLES;
+    nring.push_back({std::cos(a), 0.0, std::sin(a)});
+  }
+  const Mat4 tMicro = mRot(TILT * MICRO_TILT, 0, 0, 1), tTilt = mRot(TILT, 0, 0, 1),
+             tRoll = mRot(YROTATE, 0, 1, 0);
+
+  cvc::geometry wood, needle;
   Rng rng(seed);
-  int planted = 0;
+  int planted = 0, pines = 0;
   for (int attempt = 0; attempt < count * 6 && planted < count; ++attempt) {
     const double x = rng.range(-span, span);
     const double y = rng.range(-span, span);
@@ -222,21 +425,155 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
     const double z = heights.at(x, y);
     if (z < seaLevel + 0.5)
       continue; // only dry land above the waterline
-    grow_tree(forest, rng, V3{x, y, z}, V3{0, 0, 1}, baseLen * rng.range(0.8, 1.25), baseRad, 0,
-              levels, branches);
+    const bool pine = (species == "pine") || (species == "mix" && (planted % 2 == 0));
+    if (pine) {
+      const double size = (0.55 + 0.4 * rng.uniform()) * pineScale;
+      const int maturity = MATURITY[rng.next() % 7];
+      grow_pine(wood, needle, x, y, z, size, maturity, cyl, nring, tMicro, tTilt, tRoll);
+      ++pines;
+    } else {
+      grow_tree(wood, rng, V3{x, y, z}, V3{0, 0, 1}, baseLen * rng.range(0.8, 1.25), baseRad, 0,
+                levels, branches);
+    }
     ++planted;
   }
-  if (forest.points().empty()) {
+  if (wood.points().empty()) {
     warn("no trees planted (no dry land above sea_level in the scatter span)");
     return nullptr;
   }
 
   std::shared_ptr<GraphicsNode> gn =
-      parent ? parent->createChild<GeometryNode>(n.id, forest) : sg.addGraphics(n.id, forest);
+      parent ? parent->createChild<GeometryNode>(n.id, wood) : sg.addGraphics(n.id, wood);
   if (auto geo = std::dynamic_pointer_cast<GeometryNode>(gn))
-    geo->setUseSingleColor(false); // per-vertex wood/needle colour
-  std::printf("[lsystem_forest_ari] planted %d trees (%zu triangles)\n", planted,
-              forest.tris().size());
+    geo->setUseSingleColor(false); // per-vertex wood colour
+  // The pine needles are LINES — their own single-coloured node alongside the wood.
+  if (!needle.points().empty()) {
+    if (auto nn =
+            std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id + "_needles", needle))) {
+      nn->setRenderMode(cvc::gl::GeometryRenderMode::LINES);
+      nn->setUseSingleColor(true);
+      nn->setColor(C_NEEDLE.x, C_NEEDLE.y, C_NEEDLE.z);
+    }
+  }
+  std::printf("[lsystem_forest_ari] planted %d trees (%d pine, %zu wood tris, %zu needle lines)\n",
+              planted, pines, wood.tris().size(), needle.lines().size());
+  return gn;
+}
+
+// ───────────────── the sea: a travelling-wave volume (ported from the original) ─────────────────
+// A choppier sea than one sine: four crested travelling waves at incommensurate speeds/headings.
+double sea_surface(double x, double y, double t, double seaLevel, double waveAmp) {
+  struct Wave {
+    double hx, hy, len, omega, amp;
+  };
+  static const Wave W[] = {{0.86, 0.51, 58.0, 0.52, 1.00},
+                           {-0.30, 0.95, 37.0, 0.93, 0.55},
+                           {0.99, -0.16, 26.0, 1.37, 0.32},
+                           {0.42, 0.91, 71.0, 0.40, 0.62}};
+  double h = 0.0, peak = 0.0;
+  for (const Wave &w : W) {
+    const double k = 2.0 * M_PI / w.len;
+    const double s = 0.5 + 0.5 * std::sin(k * (w.hx * x + w.hy * y) - w.omega * t);
+    h += w.amp * std::pow(s, 2.4); // crest: pinch peaks, broaden troughs
+    peak = w.amp > peak ? w.amp : peak;
+  }
+  double crest = h / (peak > 1e-9 ? peak : 1.0);
+  if (crest > 1.0)
+    crest = 1.0;
+  return seaLevel + waveAmp * (crest - 0.72);
+}
+
+// The `type: wave_sea` realizer: a VolumeNode whose scalar field is the water depth under the
+// travelling-wave surface and above the terrain, re-filled each frame so the sea rolls and crests.
+// props: ground (terrain node), half (world half-extent), sea_level, wave_amp.
+std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneNode &n,
+                                               GraphicsNode *parent,
+                                               cvc::gl::ariadne::RealizedScene &out,
+                                               std::vector<std::string> *warnings) {
+  const auto warn = [&](const std::string &m) {
+    if (warnings)
+      warnings->push_back("ari: wave_sea '" + n.id + "': " + m);
+  };
+  constexpr int SEA_N = 56, SEA_NZ = 18;
+  const std::string ground = n.props.str("ground").empty() ? "terrain" : n.props.str("ground");
+  const double half = n.props.num("half", 120.0);
+  const double seaLevel = n.props.num("sea_level", 0.0);
+  const double waveAmp = n.props.num("wave_amp", 2.40);
+  const double seaFloor = seaLevel - 20.0, seaTop = seaLevel + 5.0;
+
+  // Terrain height at each sea-grid column (constant), sampled from the realized heightfield.
+  TerrainHeights heights;
+  if (auto gnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground)))
+    heights.build(gnode->getGeometry());
+  auto terr = std::make_shared<std::vector<float>>(SEA_N * SEA_N);
+  for (int j = 0; j < SEA_N; ++j)
+    for (int i = 0; i < SEA_N; ++i) {
+      const double x = -half + 2.0 * half * i / (SEA_N - 1);
+      const double y = -half + 2.0 * half * j / (SEA_N - 1);
+      (*terr)[j * SEA_N + i] = static_cast<float>(heights.ok() ? heights.at(x, y) : seaFloor);
+    }
+
+  auto fill = [=](std::vector<float> &f, double t) {
+    f.assign(static_cast<size_t>(SEA_N) * SEA_N * SEA_NZ, 0.0f);
+    for (int k = 0; k < SEA_NZ; ++k) {
+      const double z = seaFloor + (seaTop - seaFloor) * k / (SEA_NZ - 1);
+      for (int j = 0; j < SEA_N; ++j)
+        for (int i = 0; i < SEA_N; ++i) {
+          const double x = -half + 2.0 * half * i / (SEA_N - 1);
+          const double y = -half + 2.0 * half * j / (SEA_N - 1);
+          const double surf = sea_surface(x, y, t, seaLevel, waveAmp);
+          const double below = surf - z, above = z - (*terr)[j * SEA_N + i];
+          f[static_cast<size_t>(k) * SEA_N * SEA_N + j * SEA_N + i] =
+              (below > 0.0 && above > 0.0)
+                  ? static_cast<float>(std::min(1.0, std::max(0.0, below / 6.0)))
+                  : 0.0f;
+        }
+    }
+  };
+  // Time-varying blue-water transfer function (opacity breathes with the crests).
+  auto tf = [](std::vector<double> &color, std::vector<double> &opacity, double t) {
+    const double k = 0.0100 + 0.0015 * std::sin(t * 0.9);
+    color = {0.00, 0.42, 0.78, 0.74, 0.25, 0.14, 0.55, 0.66,
+             0.60, 0.04, 0.26, 0.46, 1.00, 0.01, 0.09, 0.22};
+    opacity = {0.00, 0.0, 0.12, k * 0.45, 0.55, k, 1.00, k * 2.0};
+  };
+
+  auto field = std::make_shared<std::vector<float>>();
+  fill(*field, 0.0);
+  cvc::volume vol(sg.appContext(), reinterpret_cast<const unsigned char *>(field->data()),
+                  cvc::dimension(SEA_N, SEA_N, SEA_NZ), cvc::Float,
+                  cvc::bounding_box(-half, -half, seaFloor, half, half, seaTop));
+  std::shared_ptr<GraphicsNode> gn =
+      parent ? parent->createChild<cvc::gl::VolumeNode>(n.id, vol) : sg.addGraphics(n.id, vol);
+  auto vnode = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(gn);
+  if (!vnode) {
+    warn("could not create a VolumeNode for the sea");
+    return gn;
+  }
+  {
+    std::vector<double> col, op;
+    tf(col, op, 0.0);
+    vnode->setTransferFunction(col, op);
+  }
+  vnode->setShading(true);
+  vnode->setAmbient(0.35);
+  vnode->setDiffuse(0.75);
+
+  // Per-frame: advance time, re-fill the depth field (the wave rolls) and breathe the TF.
+  auto frame = std::make_shared<long>(0);
+  std::weak_ptr<cvc::gl::VolumeNode> wn = vnode;
+  out.custom_ticks.push_back([wn, field, fill, tf, frame](vtkRenderer *) {
+    auto v = wn.lock();
+    if (!v)
+      return;
+    const double t = static_cast<double>((*frame)++) / 60.0;
+    fill(*field, t);
+    v->updateScalars(*field);
+    std::vector<double> col, op;
+    tf(col, op, t);
+    v->setTransferFunction(col, op);
+  });
+  std::printf("[lsystem_forest_ari] sea: %dx%dx%d volume\n", SEA_N, SEA_N, SEA_NZ);
   return gn;
 }
 
@@ -288,8 +625,9 @@ int main(int argc, char **argv) {
   bool quit = false;
   rt.on("quit", [&] { quit = true; });
 
-  // The forest's one non-declarative piece: the procedural L-system trees.
+  // The forest's non-declarative pieces: the procedural L-system trees and the travelling-wave sea.
   cvc::gl::ariadne::register_scene_node_type("forest_trees", realize_forest_trees);
+  cvc::gl::ariadne::register_scene_node_type("wave_sea", realize_wave_sea);
 
   if (docPath.empty()) {
     std::printf("[lsystem_forest_ari] FATAL: give a .ari document (e.g. lsystem_forest.ari)\n");

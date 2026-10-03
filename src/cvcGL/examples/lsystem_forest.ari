@@ -75,12 +75,22 @@ scene:
     - node: trees
       type: forest_trees
       ground: terrain      # the heightfield node to plant on
-      count: 70
+      count: 80
       seed: 1337
       sea_level: 2.5       # only plant above the beach band
       span: 92             # scatter half-extent (the island radius)
+      species: mix         # mix | pine (the original conifer) | branchy
       scale: 1.0
       length: 6.5
       radius: 0.7
       levels: 4
       branches: 3
+      pine_scale: 1.35
+    # The sea: a travelling-wave VolumeNode that fills the water below sea level around the island
+    # (a custom node; the volume's colour comes from its own transfer function). Rolls each frame.
+    - node: sea
+      type: wave_sea
+      ground: terrain
+      half: 120            # world half-extent (matches the terrain size 240)
+      sea_level: 0.0
+      wave_amp: 2.4
