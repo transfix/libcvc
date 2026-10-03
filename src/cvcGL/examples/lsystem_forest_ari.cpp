@@ -90,6 +90,86 @@ const V3 C_WOOD_LIGHT{0.655, 0.490, 0.239};
 const V3 C_WOOD_DARK{0.361, 0.251, 0.200};
 const V3 C_NEEDLE{0.137, 0.557, 0.137};
 
+// ───────── procedural bump shaders (verbatim from lsystem_forest.cpp) ─────────
+// The ground gets value-noise fBm surface detail; the tree bark vertical furrows. Both perturb the
+// fragment normal by the height's surface gradient (Mikkelsen's tangent-free method). The .ari DSL
+// has no shader surface, so the host applies these to the realized geometry nodes after realize.
+#ifdef __EMSCRIPTEN__
+#define CVC_FS_NORMAL "normalizedNormalVCVSOutput"
+#else
+#define CVC_FS_NORMAL "normalVCVSOutput"
+#endif
+const char *GROUND_GLSL =
+    "float ghash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+    "float gnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  float a=ghash(i), b=ghash(i+vec2(1.,0.)), c=ghash(i+vec2(0.,1.)), d=ghash(i+vec2(1.,1.));\n"
+    "  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);\n"
+    "}\n"
+    "float groundH(vec3 p){\n"
+    "  vec2 q = p.xy * 0.35;\n"
+    "  float f = 0.0, a = 0.5, fr = 1.0;\n"
+    "  for (int i = 0; i < 5; i++){ f += a*gnoise(q*fr); a *= 0.5; fr *= 2.03; }\n"
+    "  return f;\n"
+    "}\n";
+void addTerrainBump(GeometryNode &node) {
+  node.disableCoordinateShiftScale(); // vertexMC in the shader becomes world xy
+  node.addVertexShaderReplacement("//VTK::Normal::Dec", "//VTK::Normal::Dec\nout vec3 gCoord;");
+  node.addVertexShaderReplacement("//VTK::PositionVC::Impl",
+                                  "//VTK::PositionVC::Impl\n  gCoord = vertexMC.xyz;");
+  node.addFragmentShaderReplacement(
+      "//VTK::Normal::Dec", std::string("//VTK::Normal::Dec\nin vec3 gCoord;\n") + GROUND_GLSL);
+  node.addFragmentShaderReplacement("//VTK::Normal::Impl",
+                                    "//VTK::Normal::Impl\n"
+                                    "  {\n"
+                                    "    float h = groundH(gCoord);\n"
+                                    "    vec3 sS = dFdx(vertexVC.xyz);\n"
+                                    "    vec3 sT = dFdy(vertexVC.xyz);\n"
+                                    "    vec3 vn = " CVC_FS_NORMAL ";\n"
+                                    "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+                                    "    float det = dot(sS, R1);\n"
+                                    "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+                                    "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.4*sg);\n"
+                                    "  }\n");
+}
+const char *BARK_GLSL =
+    "float bhash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5); }\n"
+    "float bnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  return mix(mix(bhash(i), bhash(i+vec2(1,0)), f.x),\n"
+    "             mix(bhash(i+vec2(0,1)), bhash(i+vec2(1,1)), f.x), f.y);\n"
+    "}\n"
+    "float barkH(vec3 nrm, float z){\n"
+    "  float ang = atan(nrm.y, nrm.x);\n"
+    "  float f = 0.0;\n"
+    "  f += 0.6*sin(ang*10.0 + 1.5*sin(z*0.7));\n"
+    "  f += 0.3*sin(ang*23.0 + z*0.4);\n"
+    "  f += 0.3*bnoise(vec2(ang*4.0, z*1.2));\n"
+    "  return f;\n"
+    "}\n";
+void addBark(GeometryNode &node) {
+  node.disableCoordinateShiftScale();
+  node.addVertexShaderReplacement("//VTK::Normal::Dec",
+                                  "//VTK::Normal::Dec\nout vec3 bNrm;\nout vec3 bPos;");
+  node.addVertexShaderReplacement(
+      "//VTK::PositionVC::Impl",
+      "//VTK::PositionVC::Impl\n  bNrm = normalMC; bPos = vertexMC.xyz;");
+  node.addFragmentShaderReplacement(
+      "//VTK::Normal::Dec",
+      std::string("//VTK::Normal::Dec\nin vec3 bNrm;\nin vec3 bPos;\n") + BARK_GLSL);
+  node.addFragmentShaderReplacement(
+      "//VTK::Normal::Impl",
+      "//VTK::Normal::Impl\n"
+      "  {\n"
+      "    float h = barkH(normalize(bNrm), bPos.z);\n"
+      "    vec3 sS = dFdx(vertexVC.xyz), sT = dFdy(vertexVC.xyz), vn = " CVC_FS_NORMAL ";\n"
+      "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+      "    float det = dot(sS, R1);\n"
+      "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+      "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.2*sg);\n"
+      "  }\n");
+}
+
 // ───────── the ORIGINAL pine-tree L-system (ported from lsystem_forest.cpp) ─────────
 // The demo's own conifer grammar: a turtle grows a module hierarchy (cylinder trunk/branch
 // segments + needle "stars"), merged into a wood (triangles) + needle (lines) mesh. Kept
@@ -976,6 +1056,12 @@ int main(int argc, char **argv) {
         view.setBackground(t[0], t[1], t[2]);
       }
     }
+    // The .ari declares the geometry; the host adds the procedural bump shaders the DSL can't
+    // express — value-noise ground detail on the terrain, furrowed bark on the tree trunks.
+    if (auto t = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain")))
+      addTerrainBump(*t);
+    if (auto w = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("trees")))
+      addBark(*w);
   }
 
   auto frame_body = [&](double dt) {

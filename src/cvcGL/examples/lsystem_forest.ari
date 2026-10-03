@@ -58,16 +58,17 @@ scene:
       source:
         heightfield:
           size: 240
-          resolution: 96
+          resolution: 110
           layers:
-            - { kind: dome, amplitude: 22, radius: 88 }
-            - { kind: wave, amplitude: 4.0, wavelength: 60, direction: [1.0, 0.3] }
-            - { kind: wave, amplitude: 3.0, wavelength: 95, direction: [-0.4, 1.0] }
+            - { kind: dome, amplitude: 36, radius: 72 }    # the island mountain
+            - { kind: dome, amplitude: -15, radius: 260 }  # a wide basin: the edges sink underwater
+            - { kind: wave, amplitude: 3.0, wavelength: 60, direction: [1.0, 0.3] }
+            - { kind: wave, amplitude: 2.5, wavelength: 95, direction: [-0.4, 1.0] }
           colors:
-            - { max_height: 2.5, color: [0.82, 0.76, 0.54] }   # sand / beach (water's edge)
-            - { max_height: 10,  color: [0.33, 0.50, 0.22] }   # lowland grass
-            - { max_height: 19,  color: [0.24, 0.41, 0.18] }   # upland grass (darker)
-            - { max_height: 100, color: [0.46, 0.44, 0.41] }   # rock / peak
+            - { max_height: 1.5, color: [0.80, 0.73, 0.52] }   # sand / beach (water's edge)
+            - { max_height: 9,   color: [0.33, 0.50, 0.22] }   # lowland grass
+            - { max_height: 17,  color: [0.24, 0.41, 0.18] }   # upland grass (darker)
+            - { max_height: 100, color: [0.48, 0.45, 0.42] }   # rock / peak
       material: { single_color: false, ambient: 0.28, diffuse: 0.85 }
     # The forest: procedural L-system trees (a custom scene-node type the lsystem_forest_ari host
     # registers — the one piece not expressible declaratively). They are planted on dry land by
@@ -78,8 +79,8 @@ scene:
       ground: terrain      # the heightfield node to plant on
       count: 80
       seed: 1337
-      sea_level: 2.5       # only plant above the beach band
-      span: 92             # scatter half-extent (the island radius)
+      sea_level: 2.0       # only plant above the beach band
+      span: 62             # scatter half-extent (the island's dry radius)
       species: mix         # mix | pine (the original conifer) | branchy
       scale: 1.0
       length: 6.5
