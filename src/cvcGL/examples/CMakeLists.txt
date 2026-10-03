@@ -27,6 +27,14 @@ add_executable(ariadne_stream ariadne_stream.cpp)
 target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
 
+# lsystem_forest_ari — the lsystem_forest demo ported to Ariadne: the island, sky-gradient, lighting
+# rig and shadows are authored declaratively in lsystem_forest.ari (a procedural `heightfield`
+# terrain on the reusable scene DSL); the host registers only the one non-declarative piece, the
+# procedural L-system trees (`type: forest_trees`), planted by sampling the realized terrain mesh.
+add_executable(lsystem_forest_ari lsystem_forest_ari.cpp)
+target_link_libraries(lsystem_forest_ari PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS lsystem_forest_ari MODULES ${VTK_LIBRARIES})
+
 # nav_convoy — a nav-style demo whose entire UI is the reusable .ari component library, with only
 # the streamed agents + sim/camera verbs + stats readouts in the host (the library-based pattern
 # the real cvc::nav integration follows).
