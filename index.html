@@ -62,6 +62,15 @@
 </div>
 
 <div class="card">
+  <a class="thumb" href="lsystem_forest_ari/"><img src="img/lsystem_forest_ari.jpg" alt="lsystem_forest_ari preview" loading="lazy"></a>
+  <div>
+    <h3><a href="lsystem_forest_ari/">lsystem_forest_ari</a></h3>
+    <p>The lsystem_forest demo reborn in the Ariadne UI DSL: the heightfield island, its sand/grass/rock height bands, the sky-gradient background, the StageLighting rig and shadows are all declared in one .ari document on the reusable scene capabilities — no demo-specific C++. The procedural pieces that aren't declaratively expressible are custom scene-node types the host registers: the L-system trees (both the original conifer pine and a compact branchy species), the travelling-wave sea volume, and the drifting L-system + fBm cloud sky volume. The pines sway in the wind and the cloud casts a soft shadow on the ground. 100% procedural — nothing is downloaded.</p>
+    <a class="btn" href="lsystem_forest_ari/">Run it &rarr;</a>
+  </div>
+</div>
+
+<div class="card">
   <a class="thumb" href="lsystem_coast/"><img src="img/lsystem_coast.jpg" alt="lsystem_coast preview" loading="lazy"></a>
   <div>
     <h3><a href="lsystem_coast/">lsystem_coast</a></h3>
@@ -80,11 +89,29 @@
 </div>
 
 <div class="card">
+  <a class="thumb" href="volren_bunny_ari/"><img src="img/volren_bunny_ari.jpg" alt="volren_bunny_ari preview" loading="lazy"></a>
+  <div>
+    <h3><a href="volren_bunny_ari/">volren_bunny_ari</a></h3>
+    <p>The same CPU-raycast bunny, rebuilt in the Ariadne UI DSL: the scene, lighting rig and raycast control panel are all declared in one .ari document — no demo-specific C++, just the generic host. The volume is computed live as the signed distance field of the embedded Stanford mesh via a single DSL source (source: { sdf: { mesh } }), and the controls are reusable .ari components shared with the other bunny demos.</p>
+    <a class="btn" href="volren_bunny_ari/">Run it &rarr;</a>
+  </div>
+</div>
+
+<div class="card">
   <a class="thumb" href="volslice_bunny/"><img src="img/volslice_bunny.jpg" alt="volslice_bunny preview" loading="lazy"></a>
   <div>
     <h3><a href="volslice_bunny/">volslice_bunny</a></h3>
     <p>The classic view-aligned slice compositor from VolumeRover2, ported to cvc::volslice: the bunny's signed-distance volume windowed into a byte texture and colored by a 256-entry transfer function, hundreds of camera-facing slices blended back to front. Add up to nine bunnies — each is its own scene-graph volume node, depth-sorted per frame — and drive quality, near-plane peel, the value window and spacing-corrected opacity live in the panel.</p>
     <a class="btn" href="volslice_bunny/">Run it &rarr;</a>
+  </div>
+</div>
+
+<div class="card">
+  <a class="thumb" href="volslice_bunny_ari/"><img src="img/volslice_bunny_ari.jpg" alt="volslice_bunny_ari preview" loading="lazy"></a>
+  <div>
+    <h3><a href="volslice_bunny_ari/">volslice_bunny_ari</a></h3>
+    <p>The slice-based bunny, rebuilt in the Ariadne UI DSL: scene, transfer function, lighting and the slice control panel declared in one .ari document, driven by the generic host — no demo-specific C++. The volume is the signed distance field of the embedded Stanford mesh (source: { sdf: { mesh } }), and the controls are reusable .ari components.</p>
+    <a class="btn" href="volslice_bunny_ari/">Run it &rarr;</a>
   </div>
 </div>
 
