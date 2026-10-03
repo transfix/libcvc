@@ -27,6 +27,14 @@ add_executable(ariadne_stream ariadne_stream.cpp)
 target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
 
+# lsystem_forest_ari — the lsystem_forest demo ported to Ariadne: the island, sky-gradient, lighting
+# rig and shadows are authored declaratively in lsystem_forest.ari (a procedural `heightfield`
+# terrain on the reusable scene DSL); the host registers only the one non-declarative piece, the
+# procedural L-system trees (`type: forest_trees`), planted by sampling the realized terrain mesh.
+add_executable(lsystem_forest_ari lsystem_forest_ari.cpp)
+target_link_libraries(lsystem_forest_ari PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS lsystem_forest_ari MODULES ${VTK_LIBRARIES})
+
 # nav_convoy — a nav-style demo whose entire UI is the reusable .ari component library, with only
 # the streamed agents + sim/camera verbs + stats readouts in the host (the library-based pattern
 # the real cvc::nav integration follows).
@@ -142,6 +150,16 @@ if(EMSCRIPTEN)
       "--embed-file=${_CVC_ARIADNE_COMPONENTS}@/components")
     list(APPEND _wasm_demos ${_ari}_ari)
   endforeach()
+
+  # lsystem_forest_ari is a CUSTOM-host .ari demo (its own .cpp registers the forest generators —
+  # trees/sea/sky), so unlike the bunny _ari demos it is NOT built from ariadne_hello. The target
+  # already exists (added above); for wasm it just needs its .ari + the component library embedded,
+  # its default doc baked in, and enrollment in _wasm_demos for the shared asyncify flags.
+  target_compile_definitions(lsystem_forest_ari PRIVATE CVC_ARIADNE_WASM_DOC="/lsystem_forest.ari")
+  target_link_options(lsystem_forest_ari PRIVATE
+    "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/lsystem_forest.ari@/lsystem_forest.ari"
+    "--embed-file=${_CVC_ARIADNE_COMPONENTS}@/components")
+  list(APPEND _wasm_demos lsystem_forest_ari)
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
   # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
   # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb

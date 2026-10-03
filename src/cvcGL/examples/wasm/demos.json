@@ -4,6 +4,7 @@
   "order": [
     "terrain_lab",
     "lsystem_forest",
+    "lsystem_forest_ari",
     "lsystem_coast",
     "volren_bunny",
     "volren_bunny_ari",
@@ -15,6 +16,12 @@
     "bunny_shadow"
   ],
   "demos": {
+    "lsystem_forest_ari": {
+      "desc": "the L-system forest island, rebuilt in the Ariadne UI DSL (.ari)",
+      "blurb":
+          "The lsystem_forest demo reborn in the Ariadne UI DSL: the heightfield island, its sand/grass/rock height bands, the sky-gradient background, the StageLighting rig and shadows are all declared in one .ari document on the reusable scene capabilities — no demo-specific C++. The procedural pieces that aren't declaratively expressible are custom scene-node types the host registers: the L-system trees (both the original conifer pine and a compact branchy species), the travelling-wave sea volume, and the drifting L-system + fBm cloud sky volume. The pines sway in the wind and the cloud casts a soft shadow on the ground. 100% procedural — nothing is downloaded.",
+      "thumb": "img/lsystem_forest_ari.jpg"
+    },
     "terrain_lab": {
       "desc": "a live view of the cvc::world L-system terrain generator",
       "blurb":

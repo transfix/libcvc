@@ -1,0 +1,102 @@
+# lsystem_forest.ari — the cvcGL lsystem_forest demo, ported to Ariadne. The ISLAND and its
+# environment are authored entirely in the UI DSL on the reusable scene capabilities (a procedural
+# heightfield terrain with height-band colours, a StageLighting rig, shadows, a sky-gradient
+# background) — no demo-specific C++. The procedural pieces that aren't declaratively expressible are
+# custom scene-node types the lsystem_forest_ari host registers: the L-system TREES (both the
+# original conifer `pine` and a compact `branchy` species), the travelling-wave SEA (a VolumeNode),
+# and the drifting L-system+fBm cloud SKY (a VolumeNode).
+#
+# Run by the lsystem_forest_ari host (it registers the `forest_trees` custom node; the island itself
+# is pure DSL and also renders under the generic ariadne_hello host, minus the trees). The
+# component path is the directory that CONTAINS components/ (cvc://components/… resolves to
+# <path>/components/…), i.e. src/cvc/ariadne:
+#   lsystem_forest_ari lsystem_forest.ari --component-path src/cvc/ariadne
+#   lsystem_forest_ari lsystem_forest.ari --offscreen --png forest.png --component-path src/cvc/ariadne
+
+meta:
+  name: L-system forest (Ariadne)
+  author: cvc
+  min_libcvc: 3.4.0
+
+# Reusable control components (shared across the ported demos): the lighting rig, camera
+# navigation and the shadow/chrome scene toggles — all declarative, no host C++ panels.
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/scene_controls.ari
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: stage_lighting
+  - include: camera_controls
+  - include: scene_controls
+
+scene:
+  chrome: false
+  # A sky gradient: cool blue at the zenith (screen top) warming to a pale horizon (screen bottom),
+  # matching the C++ demo's GradientBackground (SetBackground2 zenith / SetBackground horizon).
+  background: { top: [0.23, 0.44, 0.80], bottom: [0.66, 0.71, 0.74] }
+  shadows: { enabled: true, resolution: 2048, update_interval: 3 }
+  lights:
+    # The C++ demo's rig: a warm three-point setup aimed at the island, key low on the horizon.
+    - light: sun
+      rig: three_point
+      stage: { center: [0, 0, 0], radius: 120 }
+      key: { intensity: 1.15, azimuth: -52, elevation: 34, cone: 34 }
+      warmth: 0.45
+  nodes:
+    # The island: a procedural heightfield (reusable terrain primitive) — a central Gaussian dome of
+    # land ringed by sea-level shallows, with a couple of long swells for relief, coloured by height
+    # into sand / grass / rock bands. Sea level is z = 0; the sea volume (a later increment) fills it.
+    - node: terrain
+      type: geometry
+      source:
+        heightfield:
+          size: 240
+          resolution: 110
+          layers:
+            - { kind: dome, amplitude: 36, radius: 72 }    # the island mountain
+            - { kind: dome, amplitude: -15, radius: 260 }  # a wide basin: the edges sink underwater
+            - { kind: wave, amplitude: 3.0, wavelength: 60, direction: [1.0, 0.3] }
+            - { kind: wave, amplitude: 2.5, wavelength: 95, direction: [-0.4, 1.0] }
+          colors:
+            - { max_height: 1.5, color: [0.80, 0.73, 0.52] }   # sand / beach (water's edge)
+            - { max_height: 9,   color: [0.33, 0.50, 0.22] }   # lowland grass
+            - { max_height: 17,  color: [0.24, 0.41, 0.18] }   # upland grass (darker)
+            - { max_height: 100, color: [0.48, 0.45, 0.42] }   # rock / peak
+      material: { single_color: false, ambient: 0.28, diffuse: 0.85 }
+    # The forest: procedural L-system trees (a custom scene-node type the lsystem_forest_ari host
+    # registers — the one piece not expressible declaratively). They are planted on dry land by
+    # sampling the terrain heightfield above, so the island owns its own shape and the host only
+    # grows the trees. All tunables are plain node keys (captured into the node's props bag).
+    - node: trees
+      type: forest_trees
+      ground: terrain      # the heightfield node to plant on
+      count: 80
+      seed: 1337
+      sea_level: 2.0       # only plant above the beach band
+      span: 62             # scatter half-extent (the island's dry radius)
+      species: mix         # mix | pine (the original conifer) | branchy
+      scale: 1.0
+      length: 6.5
+      radius: 0.7
+      levels: 4
+      branches: 3
+      pine_scale: 1.35
+    # The sea: a travelling-wave VolumeNode that fills the water below sea level around the island
+    # (a custom node; the volume's colour comes from its own transfer function). Rolls each frame.
+    - node: sea
+      type: wave_sea
+      ground: terrain
+      half: 120            # world half-extent (matches the terrain size 240)
+      sea_level: 0.0
+      wave_amp: 2.4
+    # The sky: a drifting cloud slab (a custom VolumeNode) grown by a 3-D L-system + fBm noise, high
+    # above the island. Two cloud maps are crossfaded and scrolled each frame so the sky evolves.
+    - node: sky
+      type: cloud_sky
