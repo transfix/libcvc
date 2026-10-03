@@ -23,6 +23,7 @@
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/image/image.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
 #include <vtkLight.h>
@@ -353,6 +354,64 @@ int main() {
       chk(std::abs(maxz - 20.0) < 1e-6,
           "heightfield dome -> the centre vertex reaches the amplitude");
     }
+  }
+
+  // ── material: { texture } -> an image is read + applied through the mesh UVs ──
+  {
+    SceneGraph sg(app, "tex");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    const std::string imgPath = "ari_realize_tex.png"; // a tiny RGBA image the realizer reads back
+    {
+      cvc::image img(4, 4); // 4x4 RGBA u8 (ctor defaults)
+      cvc::write_image(img, imgPath);
+    }
+    Scene scene;
+    SceneNode t;
+    t.id = "ground";
+    t.type = "geometry";
+    t.has_heightfield = true; // a heightfield carries UVs, so the texture samples
+    t.heightfield.size = 10.0f;
+    t.heightfield.resolution = 4;
+    t.has_material = true;
+    t.material_texture = imgPath;
+    scene.nodes.push_back(t);
+    std::vector<std::string> warnings;
+    cvc::gl::ariadne::realize_scene(sg, scene, "tex", &warnings);
+    std::remove(imgPath.c_str());
+
+    printf("== material texture ==\n");
+    auto gn = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("ground"));
+    chk(gn != nullptr, "textured geometry -> a GeometryNode in the graph");
+    bool texWarn = false;
+    for (const std::string &w : warnings)
+      if (w.find("texture") != std::string::npos)
+        texWarn = true;
+    chk(!texWarn, "a valid texture URI -> no warning (image read + applied)");
+  }
+
+  // ── a bad texture URI warns but still creates the node (graceful, never throws) ──
+  {
+    SceneGraph sg(app, "texbad");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode t;
+    t.id = "ground";
+    t.type = "geometry";
+    t.has_heightfield = true;
+    t.heightfield.size = 10.0f;
+    t.heightfield.resolution = 4;
+    t.has_material = true;
+    t.material_texture = "ari_realize_nope.png"; // does not exist
+    scene.nodes.push_back(t);
+    std::vector<std::string> warnings;
+    cvc::gl::ariadne::realize_scene(sg, scene, "texbad", &warnings);
+    auto gn = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("ground"));
+    chk(gn != nullptr, "bad texture -> the GeometryNode is still created (graceful)");
+    bool texWarn = false;
+    for (const std::string &w : warnings)
+      if (w.find("texture") != std::string::npos)
+        texWarn = true;
+    chk(texWarn, "a bad texture URI -> a warning (never a throw)");
   }
 
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────

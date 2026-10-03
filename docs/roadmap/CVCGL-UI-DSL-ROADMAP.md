@@ -1829,6 +1829,18 @@ of a hand-built C++ escape.
 > gtest and the offscreen `cvcgl_ariadne_realize` (res²  verts/uvs/colours, 2·(res−1)² tris, and the
 > centre vertex of a dome reaches its amplitude). The reusable terrain primitive the `lsystem_forest`
 > port needs for its island.
+>
+> **Status — increment 8 landed (geometry textures: `material: { texture }`).** A geometry node can
+> now carry an image texture sampled through its UVs: `material: { texture: <uri> }` (or `{ texture: {
+> uri|file: <uri> } }`). The realizer resolves the URI through the shared §13.4 bridge
+> (`resolve_to_file`), reads it with `cvc::read_image`, and applies it via `GeometryNode::setTexture`;
+> an unresolved URI or unreadable image **warns and skips** (never throws), so the rest of the scene
+> still realizes, and a mesh with no UVs is simply unaffected. `SceneNode::material_texture` in
+> scene.h, parsed in the `material:` block. Pinned by the loader `MaterialTexture` gtest (scalar +
+> `{uri}` forms) and the offscreen `cvcgl_ariadne_realize` (a valid texture loads with no warning on a
+> UV-bearing heightfield; a bad URI warns but still creates the node). Pairs with the heightfield
+> (increment 7) for textured terrain; dynamic/per-frame textures (the forest's cloud-shadow bake)
+> remain a custom-node concern via the `custom_ticks` seam.
 
 ### 9.1 Which scene model
 

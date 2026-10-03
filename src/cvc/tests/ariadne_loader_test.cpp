@@ -854,6 +854,32 @@ scene:
   ASSERT_EQ(v->volren.isosurfaces.size(), 1u);
 }
 
+// material: { texture: <uri> } — an image sampled through the mesh UVs.
+TEST(AriadneScene, MaterialTexture) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: ground
+      type: geometry
+      source: { heightfield: { size: 10, resolution: 4 } }
+      material: { texture: forest_floor.png }
+    - node: decal
+      type: geometry
+      source: { plane: { size: 5 } }
+      material: { texture: { uri: "file://logo.png" } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *g = find_scene_node(r.scene.nodes, "ground");
+  ASSERT_NE(g, nullptr);
+  EXPECT_TRUE(g->has_material);
+  EXPECT_EQ(g->material_texture, "forest_floor.png"); // scalar form
+  const SceneNode *d = find_scene_node(r.scene.nodes, "decal");
+  ASSERT_NE(d, nullptr);
+  EXPECT_EQ(d->material_texture, "file://logo.png"); // { uri: } form
+}
+
 // A procedural heightfield geometry source: source: { heightfield: { size, resolution, layers,
 // colors } } — the reusable terrain primitive, authored with no asset.
 TEST(AriadneScene, HeightfieldSource) {

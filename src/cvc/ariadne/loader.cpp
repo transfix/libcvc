@@ -1296,6 +1296,13 @@ SceneNode parse_scene_node(const YAML::Node &n) {
       sn.specular = static_cast<float>(num(mat, "specular", sn.specular));
       sn.specular_power = static_cast<float>(num(mat, "specular_power", sn.specular_power));
     }
+    if (const YAML::Node tex = mat["texture"]) {
+      // material: { texture: <uri> } or { texture: { uri|file: <uri> } }
+      if (tex.IsScalar())
+        sn.material_texture = tex.Scalar();
+      else if (tex.IsMap())
+        sn.material_texture = str(tex, "uri", str(tex, "file"));
+    }
   }
   const YAML::Node tf = n["transform"];
   if (tf && tf.IsMap()) {

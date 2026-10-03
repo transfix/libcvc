@@ -155,6 +155,11 @@ struct SceneNode {
   float specular = 0.25f;       //   defaults; both applied only when the material states specular
   float specular_power = 24.0f;
 
+  // material: { texture: <uri> } — an image sampled through the geometry's UVs (GeometryNode::
+  // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
+  // (e.g. a heightfield, or a loaded mesh with texcoords); a mesh with no UVs is unaffected.
+  std::string material_texture;
+
   // fit: bake a "stand this mesh on the ground" normalization INTO the loaded geometry — center it
   // in XY, sit its base on z=0, and scale its tallest extent to fit_height; optionally first rotate
   // a canonical Y-up mesh to Z-up. Geometry-only (a node transform composes on top). For placing a

@@ -16,6 +16,7 @@
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/image/image.h>       // cvc::read_image — material: { texture: <uri> }
 #include <cvc/utility/algorithm.h> // cvc::sdf — source: { sdf: { mesh:, dim: } } volume source
 #include <cvc/volren/settings.h>
 #include <cvc/volslice/settings.h>
@@ -450,6 +451,22 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     // colour (overriding the material single-colour default) when the field supplied them.
     if (g && n.has_heightfield && !n.heightfield.colors.empty())
       g->setUseSingleColor(false);
+    // material: { texture: <uri> } — resolve the URI, read the image, sample it through the mesh's
+    // UVs. Warn (never throw) on an unresolved URI or an unreadable image so the rest of the scene
+    // still realizes; a mesh with no UVs simply shows the texture's (0,0) texel.
+    if (g && !n.material_texture.empty()) {
+      cvc::ariadne::ResolvedFile tex = cvc::ariadne::resolve_to_file(n.material_texture);
+      if (!tex.ok) {
+        warn(warnings, "ari: scene node '" + n.id + "': texture " + tex.error);
+      } else {
+        try {
+          g->setTexture(cvc::read_image(tex.path));
+        } catch (const std::exception &e) {
+          warn(warnings,
+               "ari: scene node '" + n.id + "': texture '" + n.material_texture + "': " + e.what());
+        }
+      }
+    }
     node = g;
   } else if (n.type == "volume") {
     if (n.source_file.empty()) {
