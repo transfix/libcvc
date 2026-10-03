@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
@@ -63,6 +64,82 @@ cvc::geometry make_plane(float size) {
   }
   g.tris().push_back({0, 1, 2});
   g.tris().push_back({0, 2, 3});
+  return g;
+}
+
+// A procedural heightfield grid mesh (source: { heightfield: {...} }) — the reusable terrain
+// primitive. A res×res grid over [-size/2, size/2]² in XY, displaced in Z by the sum of the
+// dome/wave layers, with world→[0,1]² UVs, height-gradient normals, and optional per-vertex band
+// colours. All CPU, no asset.
+cvc::geometry make_heightfield(const cvc::ariadne::SceneHeightfield &hf) {
+  constexpr double kTwoPi = 6.283185307179586;
+  cvc::geometry g;
+  const int res = std::max(2, hf.resolution);
+  const double half = 0.5 * static_cast<double>(hf.size);
+  const double step = (res > 1) ? (static_cast<double>(hf.size) / (res - 1)) : 0.0;
+
+  const auto height_at = [&](double x, double y) {
+    double h = 0.0;
+    for (const cvc::ariadne::SceneHeightLayer &L : hf.layers) {
+      if (L.kind == "dome") {
+        const double r = std::sqrt(x * x + y * y);
+        const double rr = (L.radius > 0.0f) ? (r / L.radius) : 0.0;
+        h += L.amplitude * std::exp(-rr * rr);
+      } else if (L.kind == "wave") {
+        double dx = L.direction[0], dy = L.direction[1];
+        const double dl = std::sqrt(dx * dx + dy * dy);
+        if (dl > 1e-9) {
+          dx /= dl;
+          dy /= dl;
+        }
+        const double d = x * dx + y * dy;
+        const double wl = (L.wavelength != 0.0f) ? L.wavelength : 1.0;
+        h += L.amplitude * std::sin(kTwoPi * d / wl + L.phase);
+      }
+    }
+    return h;
+  };
+  const auto band_color = [&](double z) -> cvc::geometry::color_t {
+    const float *col =
+        hf.colors.back().color; // bands authored low→high; last = the "above all" cap
+    for (const cvc::ariadne::SceneHeightColorBand &b : hf.colors)
+      if (z <= b.max_height) {
+        col = b.color;
+        break;
+      }
+    return {col[0], col[1], col[2]};
+  };
+
+  const double inv = (res > 1) ? 1.0 / (res - 1) : 0.0;
+  const double e = (step > 0.0) ? step : 1.0; // central-difference step for the normal
+  for (int j = 0; j < res; ++j)
+    for (int i = 0; i < res; ++i) {
+      const double x = -half + i * step;
+      const double y = -half + j * step;
+      const double z = height_at(x, y);
+      g.points().push_back({x, y, z});
+      g.uvs().push_back({i * inv, j * inv});
+      // Normal from the height gradient (central differences): n = normalize(-dz/dx, -dz/dy, 1).
+      const double zx = height_at(x + e, y) - height_at(x - e, y);
+      const double zy = height_at(x, y + e) - height_at(x, y - e);
+      double nx = -zx / (2.0 * e), ny = -zy / (2.0 * e), nz = 1.0;
+      const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+      if (nl > 0.0) {
+        nx /= nl;
+        ny /= nl;
+        nz /= nl;
+      }
+      g.normals().push_back({nx, ny, nz});
+      if (!hf.colors.empty())
+        g.colors().push_back(band_color(z));
+    }
+  for (int j = 0; j < res - 1; ++j)
+    for (int i = 0; i < res - 1; ++i) {
+      const unsigned a = static_cast<unsigned>(j * res + i), b = a + 1,
+                     c = a + static_cast<unsigned>(res), d = c + 1;
+      g.tris().push_back({a, b, d});
+      g.tris().push_back({a, d, c});
+    }
   return g;
 }
 
@@ -320,7 +397,9 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
 
   if (n.type == "geometry") {
     cvc::geometry geom;
-    if (n.source_primitive == "plane") {
+    if (n.has_heightfield) {
+      geom = make_heightfield(n.heightfield); // a procedural displaced grid — no asset
+    } else if (n.source_primitive == "plane") {
       geom = make_plane(n.plane_size); // a procedural ground quad — no asset
     } else {
       if (n.source_file.empty()) {
@@ -342,7 +421,11 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       // `fit:` — bake center/ground/scale (and optional Y-up→Z-up) into a LOADED mesh. A built-in
       // primitive is already canonically placed + sized (source.plane.size), and up:y would rotate
       // the ground quad into a vertical wall — so ignore fit on a primitive and say so.
-      if (n.source_primitive.empty())
+      if (n.has_heightfield)
+        warn(warnings, "ari: scene node '" + n.id +
+                           "': `fit` is ignored on a heightfield (already centered on z=0; size it "
+                           "via source.heightfield.size)");
+      else if (n.source_primitive.empty())
         geom = fit_to_ground(geom, n.fit_up_y, n.fit_height);
       else
         warn(warnings, "ari: scene node '" + n.id + "': `fit` is ignored on the built-in '" +
@@ -363,6 +446,10 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
         g->setSpecularPower(n.specular_power);
       }
     }
+    // A heightfield's per-vertex band colours are there to be shown: switch the node to per-vertex
+    // colour (overriding the material single-colour default) when the field supplied them.
+    if (g && n.has_heightfield && !n.heightfield.colors.empty())
+      g->setUseSingleColor(false);
     node = g;
   } else if (n.type == "volume") {
     if (n.source_file.empty()) {

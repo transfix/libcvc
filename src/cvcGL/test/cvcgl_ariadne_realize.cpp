@@ -30,6 +30,8 @@
 #include <vtkRenderer.h>
 
 using cvc::ariadne::Scene;
+using cvc::ariadne::SceneHeightColorBand;
+using cvc::ariadne::SceneHeightLayer;
 using cvc::ariadne::SceneIsosurface;
 using cvc::ariadne::SceneLight;
 using cvc::ariadne::SceneNode;
@@ -300,6 +302,56 @@ int main() {
       auto op = vnn->getTransferFunctionOpacityTable();
       chk(op.size() == 4 && std::abs(op[3] - 0.5) < 1e-6,
           "volume transfer_function -> our opacity (0.5) reached the mapper");
+    }
+  }
+
+  // ── a procedural heightfield source -> a displaced grid mesh (verts/uvs/colours) ──
+  {
+    SceneGraph sg(app, "hf");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode t;
+    t.id = "terrain";
+    t.type = "geometry";
+    t.has_heightfield = true;
+    t.heightfield.size = 100.0f;
+    t.heightfield.resolution = 25; // ODD -> a vertex lands exactly at the centre (0,0)
+    {
+      SceneHeightLayer d; // a central dome peaking at z = amplitude
+      d.kind = "dome";
+      d.amplitude = 20.0f;
+      d.radius = 30.0f;
+      t.heightfield.layers.push_back(d);
+    }
+    {
+      SceneHeightColorBand b; // low band (green)
+      b.max_height = 5.0f;
+      b.color[1] = 1.0f;
+      t.heightfield.colors.push_back(b);
+    }
+    {
+      SceneHeightColorBand b; // high band (red)
+      b.max_height = 100.0f;
+      b.color[0] = 1.0f;
+      t.heightfield.colors.push_back(b);
+    }
+    scene.nodes.push_back(t);
+    cvc::gl::ariadne::realize_scene(sg, scene, "hf");
+
+    printf("== heightfield geometry source ==\n");
+    auto gn = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("terrain"));
+    chk(gn != nullptr, "type: geometry + heightfield -> a GeometryNode in the graph");
+    if (gn && gn->getGeometry()) {
+      const cvc::geometry &geom = *gn->getGeometry();
+      chk(geom.const_points().size() == 25u * 25u, "heightfield -> res*res vertices");
+      chk(geom.const_tris().size() == 2u * 24u * 24u, "heightfield -> 2*(res-1)^2 triangles");
+      chk(geom.const_uvs().size() == 25u * 25u, "heightfield -> a uv per vertex");
+      chk(geom.const_colors().size() == 25u * 25u, "heightfield colours -> a colour per vertex");
+      double maxz = -1e30;
+      for (const auto &p : geom.const_points())
+        maxz = std::max(maxz, p[2]);
+      chk(std::abs(maxz - 20.0) < 1e-6,
+          "heightfield dome -> the centre vertex reaches the amplitude");
     }
   }
 

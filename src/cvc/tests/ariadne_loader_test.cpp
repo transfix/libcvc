@@ -854,6 +854,49 @@ scene:
   ASSERT_EQ(v->volren.isosurfaces.size(), 1u);
 }
 
+// A procedural heightfield geometry source: source: { heightfield: { size, resolution, layers,
+// colors } } — the reusable terrain primitive, authored with no asset.
+TEST(AriadneScene, HeightfieldSource) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: terrain
+      type: geometry
+      source:
+        heightfield:
+          size: 240
+          resolution: 48
+          layers:
+            - { kind: dome, amplitude: 18, radius: 90 }
+            - { kind: wave, amplitude: 6, wavelength: 70, direction: [1, 0], phase: 0.5 }
+          colors:
+            - { max_height: 2, color: [0.80, 0.75, 0.50] }
+            - { max_height: 30, color: [0.30, 0.50, 0.20] }
+      material: { single_color: false }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *t = find_scene_node(r.scene.nodes, "terrain");
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(t->type, "geometry");
+  ASSERT_TRUE(t->has_heightfield);
+  EXPECT_TRUE(t->source_file.empty()); // a heightfield source is not a file
+  EXPECT_FLOAT_EQ(t->heightfield.size, 240.0f);
+  EXPECT_EQ(t->heightfield.resolution, 48);
+  ASSERT_EQ(t->heightfield.layers.size(), 2u);
+  EXPECT_EQ(t->heightfield.layers[0].kind, "dome");
+  EXPECT_FLOAT_EQ(t->heightfield.layers[0].amplitude, 18.0f);
+  EXPECT_FLOAT_EQ(t->heightfield.layers[0].radius, 90.0f);
+  EXPECT_EQ(t->heightfield.layers[1].kind, "wave");
+  EXPECT_FLOAT_EQ(t->heightfield.layers[1].wavelength, 70.0f);
+  EXPECT_FLOAT_EQ(t->heightfield.layers[1].direction[0], 1.0f);
+  EXPECT_FLOAT_EQ(t->heightfield.layers[1].phase, 0.5f);
+  ASSERT_EQ(t->heightfield.colors.size(), 2u);
+  EXPECT_FLOAT_EQ(t->heightfield.colors[0].max_height, 2.0f);
+  EXPECT_FLOAT_EQ(t->heightfield.colors[1].color[1], 0.50f);
+}
+
 // A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle — the
 // `volume:` block the realizer feeds to VolumeNode::setTransferFunction/setShading.
 TEST(AriadneScene, VolumeTransferFunctionAndShading) {

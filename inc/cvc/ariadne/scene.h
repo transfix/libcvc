@@ -85,6 +85,39 @@ struct SceneVolume {
   SceneTransferFunction tf;
 };
 
+// One additive layer of a procedural heightfield (source: { heightfield: { layers: [...] } }).
+// The surface height at (x,y) is the SUM of its layers' contributions. Two kinds:
+//   dome — a radial Gaussian bump centered on the field: amplitude * exp(-(r/radius)²).
+//   wave — a travelling sine along `direction`: amplitude * sin(2π·(d·dir)/wavelength + phase).
+// (Mesh-level shape only — fine surface detail belongs in a fragment shader, not the grid.)
+struct SceneHeightLayer {
+  std::string kind;                  // "dome" | "wave"
+  float amplitude = 1.0f;            // dome peak height / wave amplitude
+  float radius = 1.0f;               // dome: Gaussian falloff radius (world units)
+  float wavelength = 1.0f;           // wave: crest-to-crest distance (world units)
+  float direction[2] = {1.0f, 0.0f}; // wave: travel direction in XY (normalized on use)
+  float phase = 0.0f;                // wave: phase offset (radians)
+};
+
+// A height band for per-vertex heightfield colouring: the first band whose `max_height` is ≥ the
+// vertex height wins (bands are tested in declared order, so author them low→high). Empty ⇒ no
+// per-vertex colour (the node `material:` single colour applies instead).
+struct SceneHeightColorBand {
+  float max_height = 0.0f;
+  float color[3] = {0.5f, 0.5f, 0.5f};
+};
+
+// A procedural heightfield geometry source (source: { heightfield: {...} }) — a flat grid in XY,
+// centered on the origin, displaced in Z by the sum of `layers`, with world→[0,1]² UVs and (if
+// `colors` is non-empty) per-vertex band colours. Normals are computed from the height gradient.
+// The reusable terrain primitive: no asset, authored entirely in the document.
+struct SceneHeightfield {
+  float size = 1.0f;   // world edge length (the grid spans [-size/2, size/2]² in XY)
+  int resolution = 64; // grid vertices per edge (resolution² points, clamped ≥ 2)
+  std::vector<SceneHeightLayer> layers;
+  std::vector<SceneHeightColorBand> colors;
+};
+
 // One scene node (§9.2/§9.3). `type` is geometry | volume | volren | volslice |
 // group | light. Fields not meaningful to a type are simply unused.
 struct SceneNode {
@@ -97,6 +130,12 @@ struct SceneNode {
   // [-plane_size/2, +plane_size/2]² at z=0 — a ground / shadow receiver that needs no asset.
   std::string source_primitive;
   float plane_size = 1.0f; // "plane": full edge length
+
+  // A procedural HEIGHTFIELD as a geometry node's source: source: { heightfield: {...} }. When
+  // present (has_heightfield), the realizer generates a displaced grid mesh and source_file /
+  // source_primitive are ignored. The reusable terrain primitive (dome/wave layers + band colours).
+  bool has_heightfield = false;
+  SceneHeightfield heightfield;
 
   // A VOLUME computed as a signed distance field from a MESH (for volren/volslice), instead of
   // loading a pre-baked volume with source: { file }. `source: { sdf: { mesh: <uri>, dim: N } }` —

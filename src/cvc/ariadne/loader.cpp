@@ -1156,6 +1156,13 @@ void vec3(const YAML::Node &n, const char *key, float out[3]) {
       out[i] = static_cast<float>(v[i].as<double>());
 }
 
+void vec2(const YAML::Node &n, const char *key, float out[2]) {
+  const YAML::Node v = n[key];
+  if (v && v.IsSequence() && v.size() >= 2)
+    for (int i = 0; i < 2; ++i)
+      out[i] = static_cast<float>(v[i].as<double>());
+}
+
 // Convert a YAML subtree into the backend-neutral Value tree (§ extensibility), so a
 // custom node's props / a custom block's content can be read without yaml-cpp. Keys
 // that are not scalars are skipped (YAML keys are scalars in practice). Never throws.
@@ -1240,6 +1247,35 @@ SceneNode parse_scene_node(const YAML::Node &n) {
         // signed distance field of a mesh (no pre-baked volume asset).
         sn.source_sdf_mesh = str(sdf, "mesh", str(sdf, "file"));
         sn.sdf_dim = static_cast<int>(num(sdf, "dim", sn.sdf_dim));
+      } else if (const YAML::Node hf = src["heightfield"]; hf && hf.IsMap()) {
+        // source: { heightfield: { size, resolution, layers: [...], colors: [...] } } — a
+        // procedural displaced grid mesh (the reusable terrain primitive; no asset).
+        sn.has_heightfield = true;
+        sn.heightfield.size = static_cast<float>(num(hf, "size", sn.heightfield.size));
+        sn.heightfield.resolution =
+            static_cast<int>(num(hf, "resolution", sn.heightfield.resolution));
+        if (const YAML::Node layers = hf["layers"]; layers && layers.IsSequence())
+          for (const YAML::Node &l : layers) {
+            SceneHeightLayer hl;
+            hl.kind = str(l, "kind", str(l, "type", ""));
+            hl.amplitude = static_cast<float>(num(l, "amplitude", hl.amplitude));
+            hl.radius = static_cast<float>(num(l, "radius", hl.radius));
+            hl.wavelength = static_cast<float>(num(l, "wavelength", hl.wavelength));
+            vec2(l, "direction", hl.direction);
+            hl.phase = static_cast<float>(num(l, "phase", hl.phase));
+            sn.heightfield.layers.push_back(hl);
+          }
+        if (const YAML::Node colors = hf["colors"]; colors && colors.IsSequence())
+          for (const YAML::Node &c : colors) {
+            SceneHeightColorBand band;
+            band.max_height =
+                static_cast<float>(num(c, "max_height", num(c, "below", band.max_height)));
+            const YAML::Node cc = c["color"];
+            if (cc && cc.IsSequence() && cc.size() >= 3)
+              for (int i = 0; i < 3; ++i)
+                band.color[i] = static_cast<float>(cc[i].as<double>());
+            sn.heightfield.colors.push_back(band);
+          }
       } else {
         sn.source_file = str(src, "uri", str(src, "file"));
       }
