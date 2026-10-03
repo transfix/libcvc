@@ -856,7 +856,12 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
   cvcgl_streaming_races cvcgl_sdl_input
-  cvcgl_webgl_state_shadow cvcgl_glsync)
+  cvcgl_webgl_state_shadow cvcgl_glsync
+  # Stream channel/widget binding + SDL peripheral I/O: no GL context (the
+  # device paths are skipped without CVC_TEST_AUDIO/CAMERA), so they need no
+  # serialization and run alongside the GL tests.
+  cvcgl_stream_bind cvcgl_stream_view
+  cvcgl_camera_source cvcgl_audio_source cvcgl_audio_output)
 set_tests_properties(${_cvcgl_gl_tests} PROPERTIES RESOURCE_LOCK cvcgl_gl_context)
 
 # ── examples (opt-in, OFF by default) ──
