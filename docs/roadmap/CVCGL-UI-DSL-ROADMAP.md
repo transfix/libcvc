@@ -1813,6 +1813,22 @@ of a hand-built C++ escape.
 > flips VolumeNode's default-true shading). This is the first of the reusable DSL capabilities the
 > `lsystem_forest` port needs (so the sea/cloud volumes' *rendering* half is declarative); the
 > procedural in-memory volume *source* and per-frame field updates are later increments.
+>
+> **Status — increment 7 landed (procedural heightfield geometry source).** A geometry node can now be
+> a displaced grid with no asset: `source: { heightfield: { size, resolution, layers: [...], colors:
+> [...] } }`. The height at each grid point is the SUM of composable `layers` — `dome` (radial
+> Gaussian: `amplitude·exp(-(r/radius)²)`) and `wave` (travelling sine along `direction`:
+> `amplitude·sin(2π·(d·dir)/wavelength + phase)`) — and the realizer (`make_heightfield` in
+> scene_realize.cpp) builds the `cvc::geometry`: a res×res grid over `[-size/2, size/2]²`, world→[0,1]²
+> UVs, height-gradient normals (central differences), grid triangulation, and — when `colors` is given
+> — per-vertex band colours (first band whose `max_height` ≥ the vertex height wins; the node switches
+> to per-vertex colour automatically). `SceneHeightfield`/`SceneHeightLayer`/`SceneHeightColorBand` in
+> scene.h; parsed under `source:` (precedence over a file/primitive), `fit:` is ignored (already
+> centred/sized like a primitive). Mesh-level shape only — fine surface DETAIL (the terrain's
+> value-noise bump) is a fragment shader, a later increment. Pinned by the loader `HeightfieldSource`
+> gtest and the offscreen `cvcgl_ariadne_realize` (res²  verts/uvs/colours, 2·(res−1)² tris, and the
+> centre vertex of a dome reaches its amplitude). The reusable terrain primitive the `lsystem_forest`
+> port needs for its island.
 
 ### 9.1 Which scene model
 
