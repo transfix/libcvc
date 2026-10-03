@@ -33,6 +33,7 @@
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/image/image.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <deque>
@@ -248,6 +249,24 @@ struct Module {
   std::vector<Leaf> leaves;
 };
 
+// Per-pine re-pose record: the module-frame wood/needle verts + their GLOBAL offsets into the
+// merged forest buffers, so the wind cascade can rewrite only this tree's vertices each frame
+// (route C).
+constexpr int SWAY_LEVELS = 2;
+struct ModRec {
+  int parent;
+  Mat4 hang;
+  bool swayer;
+  std::vector<V3> localWood;
+  int wOff;
+  std::vector<V3> localNeedle;
+  int nOff;
+};
+struct Tree {
+  std::vector<ModRec> mods;
+  double phase = 0, sway = 0;
+};
+
 int expandTree(const std::string &rule, int depth, double scale, double radscale, int parent,
                int level, std::vector<Module> &out, const Mat4 &tMicro, const Mat4 &tTilt,
                const Mat4 &tRoll) {
@@ -312,10 +331,12 @@ CylTopo cyl_topo() {
 }
 
 // Grow ONE pine at base (px,py,pz), trunk scale `size`, into the shared wood (tris, per-vertex
-// colour) + needle (lines) meshes — the original demo's conifer, placed on the island.
-void grow_pine(cvc::geometry &wood, cvc::geometry &needle, double px, double py, double pz,
-               double size, int maturity, const CylTopo &cyl, const std::vector<V3> &nring,
-               const Mat4 &tMicro, const Mat4 &tTilt, const Mat4 &tRoll) {
+// colour) + needle (lines) meshes — the original demo's conifer. Records per-module re-pose data
+// into `tree` (module-frame verts + GLOBAL buffer offsets) so the wind cascade can move it later.
+void grow_pine(cvc::geometry &wood, cvc::geometry &needle, Tree &tree, double px, double py,
+               double pz, double size, int maturity, const CylTopo &cyl,
+               const std::vector<V3> &nring, const Mat4 &tMicro, const Mat4 &tTilt,
+               const Mat4 &tRoll) {
   std::vector<Module> mods;
   expandTree(TREE_RULES[0], maturity, size, size, -1, 1, mods, tMicro, tTilt, tRoll);
   const Mat4 tUp = mRot(M_PI / 2.0, 1.0, 0.0, 0.0); // turtle +Y -> world Z-up
@@ -324,6 +345,12 @@ void grow_pine(cvc::geometry &wood, cvc::geometry &needle, double px, double py,
     const Module &mod = mods[i];
     Mat4 hang = (mod.parent < 0) ? mMul(mTrans(px, py, pz), tUp) : mod.hang;
     world[i] = (mod.parent < 0) ? hang : mMul(world[mod.parent], hang);
+    ModRec rec;
+    rec.parent = mod.parent;
+    rec.hang = hang;
+    rec.swayer = mod.level <= SWAY_LEVELS;
+    rec.wOff = static_cast<int>(wood.points().size());
+    rec.nOff = static_cast<int>(needle.points().size());
     for (const Seg &s : mod.segs) {
       V3 loc[2 * BASE_TRI + 2];
       loc[0] = {0, 0, 0};
@@ -334,7 +361,9 @@ void grow_pine(cvc::geometry &wood, cvc::geometry &needle, double px, double py,
       }
       const unsigned base = static_cast<unsigned>(wood.points().size());
       for (int v = 0; v < 2 * BASE_TRI + 2; ++v) {
-        V3 w = xform(world[i], xform(s.m, loc[v]));
+        V3 p = xform(s.m, loc[v]); // module-frame vertex (what the wind cascade re-poses)
+        rec.localWood.push_back(p);
+        V3 w = xform(world[i], p);
         wood.points().push_back({w.x, w.y, w.z});
         wood.colors().push_back({cyl.colors[v].x, cyl.colors[v].y, cyl.colors[v].z});
       }
@@ -343,15 +372,50 @@ void grow_pine(cvc::geometry &wood, cvc::geometry &needle, double px, double py,
     }
     for (const Leaf &lf : mod.leaves) {
       const unsigned base = static_cast<unsigned>(needle.points().size());
-      V3 wr = xform(world[i], xform(lf.m, {0, 0, 0}));
+      V3 root = xform(lf.m, {0, 0, 0});
+      rec.localNeedle.push_back(root);
+      V3 wr = xform(world[i], root);
       needle.points().push_back({wr.x, wr.y, wr.z});
       for (int t = 0; t < NEEDLES; ++t) {
         V3 tip{nring[t].x * LEAF_RAD * lf.sc, LEAF_LEN * lf.sc, nring[t].z * LEAF_RAD * lf.sc};
-        V3 w = xform(world[i], xform(lf.m, tip));
+        V3 pm = xform(lf.m, tip);
+        rec.localNeedle.push_back(pm);
+        V3 w = xform(world[i], pm);
         needle.points().push_back({w.x, w.y, w.z});
         needle.lines().push_back(
             {static_cast<uint64_t>(base), static_cast<uint64_t>(base + 1 + t)});
       }
+    }
+    tree.mods.push_back(std::move(rec));
+  }
+}
+
+// Re-pose ONE pine's vertices into the flat merged buffers for wind time `t` (sway cascade over the
+// swayer modules, verbatim from the original). windScale is one global knob over the forest.
+void reposeTree(const Tree &tree, double t, std::vector<double> &woodBuf,
+                std::vector<double> &needleBuf, double windScale) {
+  double a = tree.sway * windScale * std::sin(1.3 * t + tree.phase);
+  Mat4 sway = mRot(a, 0.0, 1.0, 0.0); // tree-local +Y axis
+  std::vector<Mat4> world(tree.mods.size());
+  for (size_t i = 0; i < tree.mods.size(); ++i) {
+    const ModRec &m = tree.mods[i];
+    Mat4 local = m.swayer ? mMul(m.hang, sway) : m.hang;
+    world[i] = (m.parent < 0) ? local : mMul(world[m.parent], local);
+    int wo = m.wOff;
+    for (const V3 &p : m.localWood) {
+      V3 w = xform(world[i], p);
+      woodBuf[wo * 3] = w.x;
+      woodBuf[wo * 3 + 1] = w.y;
+      woodBuf[wo * 3 + 2] = w.z;
+      ++wo;
+    }
+    int no = m.nOff;
+    for (const V3 &p : m.localNeedle) {
+      V3 w = xform(world[i], p);
+      needleBuf[no * 3] = w.x;
+      needleBuf[no * 3 + 1] = w.y;
+      needleBuf[no * 3 + 2] = w.z;
+      ++no;
     }
   }
 }
@@ -444,14 +508,19 @@ struct TerrainHeights {
     }
     step = (maxx - minx) / (res - 1);
   }
-  double at(double x, double y) const {
-    if (!ok())
-      return 0.0;
-    int i = int(std::lround((x - minx) / step));
-    int j = int(std::lround((y - miny) / step));
-    i = std::max(0, std::min(res - 1, i));
-    j = std::max(0, std::min(res - 1, j));
-    return geom->const_points()[size_t(j) * res + i][2];
+  size_t index(double x, double y) const {
+    int i = std::max(0, std::min(res - 1, int(std::lround((x - minx) / step))));
+    int j = std::max(0, std::min(res - 1, int(std::lround((y - miny) / step))));
+    return size_t(j) * res + i;
+  }
+  double at(double x, double y) const { return ok() ? geom->const_points()[index(x, y)][2] : 0.0; }
+  // The terrain's per-vertex band colour at (x,y) (nearest grid vertex), or white if the mesh has
+  // no colours — so the cloud-shadow texture can carry albedo×shadow and keep the terrain coloured.
+  V3 color(double x, double y) const {
+    if (!ok() || geom->const_colors().size() != geom->const_points().size())
+      return {1.0, 1.0, 1.0};
+    const auto &c = geom->const_colors()[index(x, y)];
+    return {c[0], c[1], c[2]};
   }
 };
 
@@ -462,7 +531,7 @@ struct TerrainHeights {
 // (length, radius, levels, branches, scale) and the pine knob (pine_scale).
 std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::SceneNode &n,
                                                    GraphicsNode *parent,
-                                                   cvc::gl::ariadne::RealizedScene &,
+                                                   cvc::gl::ariadne::RealizedScene &out,
                                                    std::vector<std::string> *warnings) {
   const auto warn = [&](const std::string &m) {
     if (warnings)
@@ -480,6 +549,7 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
   const int levels = static_cast<int>(n.props.num("levels", 4.0));
   const int branches = static_cast<int>(n.props.num("branches", 3.0));
   const double pineScale = n.props.num("pine_scale", 1.35);
+  const double wind = n.props.num("wind", 1.0);
 
   TerrainHeights heights;
   if (auto gnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground)))
@@ -498,6 +568,7 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
              tRoll = mRot(YROTATE, 0, 1, 0);
 
   cvc::geometry wood, needle;
+  std::vector<Tree> forest; // the pines' re-pose records (for wind)
   Rng rng(seed);
   int planted = 0, pines = 0;
   for (int attempt = 0; attempt < count * 6 && planted < count; ++attempt) {
@@ -512,7 +583,11 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
     if (pine) {
       const double size = (0.55 + 0.4 * rng.uniform()) * pineScale;
       const int maturity = MATURITY[rng.next() % 7];
-      grow_pine(wood, needle, x, y, z, size, maturity, cyl, nring, tMicro, tTilt, tRoll);
+      Tree tr;
+      grow_pine(wood, needle, tr, x, y, z, size, maturity, cyl, nring, tMicro, tTilt, tRoll);
+      tr.phase = rng.uniform() * 2.0 * M_PI;
+      tr.sway = 0.020 + 0.016 * rng.uniform();
+      forest.push_back(std::move(tr));
       ++pines;
     } else {
       grow_tree(wood, rng, V3{x, y, z}, V3{0, 0, 1}, baseLen * rng.range(0.8, 1.25), baseRad, 0,
@@ -527,16 +602,53 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
 
   std::shared_ptr<GraphicsNode> gn =
       parent ? parent->createChild<GeometryNode>(n.id, wood) : sg.addGraphics(n.id, wood);
-  if (auto geo = std::dynamic_pointer_cast<GeometryNode>(gn))
-    geo->setUseSingleColor(false); // per-vertex wood colour
+  auto woodNode = std::dynamic_pointer_cast<GeometryNode>(gn);
+  if (woodNode)
+    woodNode->setUseSingleColor(false); // per-vertex wood colour
   // The pine needles are LINES — their own single-coloured node alongside the wood.
+  std::shared_ptr<GeometryNode> needleNode;
   if (!needle.points().empty()) {
-    if (auto nn =
-            std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id + "_needles", needle))) {
-      nn->setRenderMode(cvc::gl::GeometryRenderMode::LINES);
-      nn->setUseSingleColor(true);
-      nn->setColor(C_NEEDLE.x, C_NEEDLE.y, C_NEEDLE.z);
+    needleNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id + "_needles", needle));
+    if (needleNode) {
+      needleNode->setRenderMode(cvc::gl::GeometryRenderMode::LINES);
+      needleNode->setUseSingleColor(true);
+      needleNode->setColor(C_NEEDLE.x, C_NEEDLE.y, C_NEEDLE.z);
     }
+  }
+
+  // Wind: re-pose the pines into the merged buffers each frame (route C — two buffer uploads for
+  // the whole forest, not one per tree). The branchy trees have no sway records, so their vertices
+  // sit untouched at bind pose in the same buffers.
+  auto flatten = [](const cvc::geometry &g) {
+    std::vector<double> b(g.const_points().size() * 3);
+    for (size_t v = 0; v < g.const_points().size(); ++v) {
+      b[v * 3] = g.const_points()[v][0];
+      b[v * 3 + 1] = g.const_points()[v][1];
+      b[v * 3 + 2] = g.const_points()[v][2];
+    }
+    return b;
+  };
+  if (wind != 0.0 && !forest.empty() && woodNode) {
+    auto woodBind = std::make_shared<std::vector<double>>(flatten(wood));
+    auto needleBind = std::make_shared<std::vector<double>>(flatten(needle));
+    auto workW = std::make_shared<std::vector<double>>(*woodBind);
+    auto workN = std::make_shared<std::vector<double>>(*needleBind);
+    auto trees = std::make_shared<std::vector<Tree>>(std::move(forest));
+    auto frame = std::make_shared<long>(0);
+    std::weak_ptr<GeometryNode> ww = woodNode, wn = needleNode;
+    out.custom_ticks.push_back([=](vtkRenderer *) {
+      auto w = ww.lock();
+      if (!w)
+        return;
+      const double t = static_cast<double>((*frame)++) / 60.0;
+      *workW = *woodBind;
+      *workN = *needleBind;
+      for (const Tree &tr : *trees)
+        reposeTree(tr, t, *workW, *workN, wind);
+      w->updateVertices(*workW);
+      if (auto nn = wn.lock())
+        nn->updateVertices(*workN);
+    });
   }
   std::printf("[lsystem_forest_ari] planted %d trees (%d pine, %zu wood tris, %zu needle lines)\n",
               planted, pines, wood.tris().size(), needle.lines().size());
@@ -917,6 +1029,61 @@ void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
   opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26, 1.0, 0.54};
 }
 
+// ── cloud → ground shadow: ray-march the slab toward a steepened pseudo-sun, store transmittance
+// as a GREY texture the terrain modulates onto its band colours (so the ground dapples under the
+// drifting cloud without losing its sand/grass/rock albedo). Ported from the original.
+constexpr int SHADOW_RES = 96;
+constexpr double SHADOW_PROJ_EL = 66.0; // steeper than the 34° sun so the shadow lands on-island
+constexpr double SHADOW_K = 0.13, SHADOW_FLOOR = 0.55;
+float sampleSky(const std::vector<float> &field, double wx, double wy, double wz, double skyHalf) {
+  if (wz < SKY_BASE || wz > SKY_TOP)
+    return 0.0f;
+  double fx = (wx + skyHalf) / (2.0 * skyHalf) * (SKY_N - 1);
+  double fy = (wy + skyHalf) / (2.0 * skyHalf) * (SKY_N - 1);
+  double fz = (wz - SKY_BASE) / (SKY_TOP - SKY_BASE) * (SKY_NZ - 1);
+  if (fx < 0 || fx > SKY_N - 1 || fy < 0 || fy > SKY_N - 1)
+    return 0.0f;
+  int x0 = (int)fx, y0 = (int)fy, z0 = (int)fz;
+  int x1 = std::min(x0 + 1, SKY_N - 1), y1 = std::min(y0 + 1, SKY_N - 1),
+      z1 = std::min(z0 + 1, SKY_NZ - 1);
+  double tx = fx - x0, ty = fy - y0, tz = fz - z0;
+  auto V = [&](int x, int y, int z) { return (double)field[skyIdx(z, y, x)]; };
+  double c00 = V(x0, y0, z0) * (1 - tx) + V(x1, y0, z0) * tx;
+  double c10 = V(x0, y1, z0) * (1 - tx) + V(x1, y1, z0) * tx;
+  double c01 = V(x0, y0, z1) * (1 - tx) + V(x1, y0, z1) * tx;
+  double c11 = V(x0, y1, z1) * (1 - tx) + V(x1, y1, z1) * tx;
+  double c0 = c00 * (1 - ty) + c10 * ty, c1 = c01 * (1 - ty) + c11 * ty;
+  return (float)(c0 * (1 - tz) + c1 * tz);
+}
+// Bake the grey cloud shadow over the terrain footprint [-half,half]² into an RGB texel buffer.
+void bakeCloudShadow(const std::vector<float> &field, V3 sun, double half,
+                     const TerrainHeights &terr, std::vector<unsigned char> &rgb) {
+  V3 L = norm(sun);
+  const int STEPS = 22;
+  rgb.resize(static_cast<size_t>(SHADOW_RES) * SHADOW_RES * 3);
+  for (int ty = 0; ty < SHADOW_RES; ++ty) {
+    double y = -half + 2.0 * half * ty / (SHADOW_RES - 1);
+    for (int tx = 0; tx < SHADOW_RES; ++tx) {
+      double x = -half + 2.0 * half * tx / (SHADOW_RES - 1);
+      double z0 = terr.ok() ? terr.at(x, y) : 0.0;
+      double tEntry = (SKY_BASE - z0) / L.z, tExit = (SKY_TOP - z0) / L.z;
+      double ds = (tExit - tEntry) / STEPS, tau = 0.0;
+      for (int i = 0; i < STEPS; ++i) {
+        double t = tEntry + (i + 0.5) * ds;
+        tau += sampleSky(field, x + t * L.x, y + t * L.y, z0 + t * L.z, half) * ds;
+      }
+      double s = SHADOW_FLOOR + (1.0 - SHADOW_FLOOR) * std::exp(-SHADOW_K * tau);
+      // Carry the terrain's own albedo (its band colour) so the texture keeps the ground coloured
+      // (setTexture REPLACES the vertex colour) while the shadow darkens it.
+      V3 a = terr.color(x, y);
+      size_t o = (static_cast<size_t>(ty) * SHADOW_RES + tx) * 3;
+      rgb[o] = (unsigned char)std::min(255.0, std::max(0.0, a.x * s * 255.0));
+      rgb[o + 1] = (unsigned char)std::min(255.0, std::max(0.0, a.y * s * 255.0));
+      rgb[o + 2] = (unsigned char)std::min(255.0, std::max(0.0, a.z * s * 255.0));
+    }
+  }
+}
+
 // The `type: cloud_sky` realizer: a drifting cloud VolumeNode over the island (two L-system + fBm
 // maps crossfaded and scrolled each frame). No tunable props — the sky is self-contained.
 std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::SceneNode &n,
@@ -946,18 +1113,42 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     skyTransfer(col, op);
     vnode->setTransferFunction(col, op);
   }
+  // Cloud→ground shadow: bake transmittance from the SAME drifting field onto the terrain as a grey
+  // texture it modulates over its band colours (so the ground dapples under the cloud). Needs the
+  // realized terrain mesh for the ground height.
+  const std::string ground = n.props.str("ground").empty() ? "terrain" : n.props.str("ground");
+  const double half = n.props.num("half", 120.0);
+  const bool doShadow = n.props.num("shadow", 1.0) != 0.0;
+  auto terr = std::make_shared<TerrainHeights>();
+  std::weak_ptr<GeometryNode> wterrain;
+  if (doShadow)
+    if (auto tnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground))) {
+      terr->build(tnode->getGeometry());
+      wterrain = tnode;
+    }
+  auto rgb = std::make_shared<std::vector<unsigned char>>();
+
   auto frame = std::make_shared<long>(0);
   std::weak_ptr<cvc::gl::VolumeNode> wn = vnode;
-  out.custom_ticks.push_back([wn, sky, frame](vtkRenderer *) {
+  out.custom_ticks.push_back([wn, sky, frame, terr, wterrain, rgb, half](vtkRenderer *) {
     auto v = wn.lock();
     if (!v)
       return;
-    const double t = static_cast<double>((*frame)++) / 60.0;
+    const long f = (*frame)++;
+    const double t = static_cast<double>(f) / 60.0;
     const double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
     const double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
-    v->updateScalars(sky->field(shift, morph));
+    std::vector<float> field = sky->field(shift, morph);
+    v->updateScalars(field);
+    // Re-bake the soft, low-res cloud shadow every 3rd frame onto the terrain.
+    if (auto tn = wterrain.lock(); tn && terr->ok() && f % 3 == 0) {
+      bakeCloudShadow(field, sunDir(SUN_AZ, SHADOW_PROJ_EL), half, *terr, *rgb);
+      tn->setTexture(cvc::image(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
+                                cvc::image::data_type::u8, rgb->data()));
+    }
   });
-  std::printf("[lsystem_forest_ari] sky: %dx%dx%d cloud volume\n", SKY_N, SKY_N, SKY_NZ);
+  std::printf("[lsystem_forest_ari] sky: %dx%dx%d cloud volume%s\n", SKY_N, SKY_N, SKY_NZ,
+              (doShadow && !wterrain.expired()) ? " + ground shadow" : "");
   return gn;
 }
 
