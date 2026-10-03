@@ -34,6 +34,7 @@
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/state_publisher.h> // sg.publisher().flush() on the single-thread wasm path
 #include <cvc/image/image.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
