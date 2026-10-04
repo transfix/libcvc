@@ -872,6 +872,21 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   substitute_node(inst, args);
   Widget w = parse_widget(ctx, inst);
   ctx.expanding.erase(name);
+  // §12/§3.0.3b geometry override at the include site: a window `include:` may carry its own
+  // pos/size/layout/frame to place and size the shared panel WITHOUT forking the unit — so a demo
+  // arranges reusable panels (e.g. tile stage_lighting / camera_controls / sim_transport) while the
+  // component stays layout-agnostic. Applied only when the instantiated root is a window/overlay
+  // (the panel case); each key overrides only if present, so an unspecified axis keeps the unit's.
+  if (w.kind == Kind::Window) {
+    if (n["pos"])
+      parse_pos(n, w);
+    if (n["size"])
+      w.size = parse_size(n["size"]);
+    if (n["layout"])
+      w.layout = parse_layout(n["layout"]);
+    if (n["frame"])
+      w.frame_border = parse_frame_border(n["frame"]);
+  }
   return w;
 }
 

@@ -1056,7 +1056,18 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // the authority next frame. The backend never touches cvc::state; it only seeds/reports.
     const std::string geo_path = resolve("tree." + id + ".geometry");
     WindowGeom seed;
-    const bool have_seed = parse_geom(read_string(app, geo_path), seed);
+    bool have_seed = parse_geom(read_string(app, geo_path), seed);
+    // §3.0.3b first placement: with no persisted geometry yet, seed the window's INITIAL position
+    // from the authored `pos:` (ImGui otherwise stacks every new window at the same default spot,
+    // so a declared pos would be dead). Seed as FirstUseEver — the user's drag then persists via
+    // tree.<id>.geometry and wins next frame. Authored `size:` already reaches begin_window below;
+    // only pos needs this bridge, so a pos-only seed leaves begin_window to apply the size.
+    if (!have_seed && w.has_pos) {
+      seed.has_pos = true;
+      seed.x = w.pos_x;
+      seed.y = w.pos_y;
+      have_seed = true;
+    }
     if (have_seed)
       b.seed_window_geometry(seed);
     const bool visible = b.begin_window(w.label.c_str(), id.c_str(), w.size, w.frame_border);
