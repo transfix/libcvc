@@ -494,10 +494,28 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
   return {changed, changed, next};
 }
 
+#ifdef CVC_ENABLE_IMGUI
+// Keep a slider/int widget's TRAILING label from clipping in a narrow window. ImGui lays a labeled
+// widget out as [frame of CalcItemWidth()][ItemInnerSpacing][label]; the default item width (~65%
+// of the content region) leaves only the remainder for the label, so a long label ("Bake interval
+// (frames)") runs past the right edge of a slim panel. When that would happen, shrink JUST the next
+// item so [frame][spacing][label] fits the content region — floored so the frame stays grabbable.
+// When the label already fits at the default width (a roomy panel / short label), ImGui's default
+// is left untouched, so this never narrows a slider that was fine.
+void reserve_label_width(const char *label) {
+  const float avail = ImGui::GetContentRegionAvail().x;
+  const float labelW = ImGui::CalcTextSize(label, nullptr, /*hide_text_after_double_hash=*/true).x;
+  const float fit = avail - ImGui::GetStyle().ItemInnerSpacing.x - labelW;
+  if (fit < ImGui::CalcItemWidth()) // only when the default frame width would push the label off
+    ImGui::SetNextItemWidth(ImMax(fit, 48.0f)); // floor: a still-usable slider/drag handle
+}
+#endif
+
 ariadne::IntEdit ImGuiBackend::slider_int(const char *label, const char *key, int current, int lo,
                                           int hi) {
 #ifdef CVC_ENABLE_IMGUI
   int &v = *cache_int(key, current, ImGui::IsAnyItemActive());
+  reserve_label_width(label);
   const bool changed = ImGui::SliderInt(label, &v, lo, hi);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit(); // one write, on release
   return {changed, committed, v};
@@ -514,6 +532,7 @@ ariadne::DoubleEdit ImGuiBackend::slider_double(const char *label, const char *k
                                                 double lo, double hi, const char *fmt) {
 #ifdef CVC_ENABLE_IMGUI
   float &v = *cache_float(key, static_cast<float>(current), ImGui::IsAnyItemActive());
+  reserve_label_width(label);
   const bool changed =
       ImGui::SliderFloat(label, &v, static_cast<float>(lo), static_cast<float>(hi), fmt);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit();

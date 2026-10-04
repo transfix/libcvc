@@ -355,6 +355,59 @@ windows:
   EXPECT_EQ(bt->on, "go");
 }
 
+// §12/§3.0.3b: a window `include:` site may override the instantiated unit's geometry (pos/size/
+// layout/frame) without forking the shared unit — so a demo arranges reusable panels. An override
+// applies only to the keys present; the component stays layout-agnostic.
+TEST(AriadneLoader, IncludeSiteGeometryOverride) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    id: panel
+    children:
+      - text: hi
+windows:
+  - include: panel
+    pos: [16, 234]
+    size: [340, 132]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  EXPECT_EQ(win->id, "panel"); // still the shared unit, not a fork
+  EXPECT_TRUE(win->has_pos);
+  EXPECT_FLOAT_EQ(win->pos_x, 16.0f);
+  EXPECT_FLOAT_EQ(win->pos_y, 234.0f);
+  EXPECT_TRUE(win->size.w.is_set());
+  EXPECT_FLOAT_EQ(win->size.w.value, 340.0f);
+  EXPECT_FLOAT_EQ(win->size.h.value, 132.0f);
+}
+
+// An include with no geometry keys leaves the unit's own geometry untouched (no accidental
+// zeroing).
+TEST(AriadneLoader, IncludeWithoutGeometryKeepsUnitGeometry) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    id: panel
+    pos: [8, 8]
+    children:
+      - text: hi
+windows:
+  - include: panel
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  EXPECT_TRUE(win->has_pos); // the unit's own pos survives an override-free include
+  EXPECT_FLOAT_EQ(win->pos_x, 8.0f);
+}
+
 // §4/§7 action lane: a program-shaped `on:` (an s-expression, like a computed bind:) is captured
 // on Widget::on VERBATIM — quotes and all — so the runtime can run it through state_exec at drain.
 // A bare event name stays a bare name; the runtime tells them apart by the leading '('.
