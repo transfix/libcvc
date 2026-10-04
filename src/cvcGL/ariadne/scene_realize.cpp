@@ -5,6 +5,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/gl/GeometryNode.h>
@@ -678,6 +679,18 @@ void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedSc
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix, std::vector<std::string> *warnings) {
   RealizedScene out;
+  // §9 time: carry the app + the scene's clock declaration so tick_scene can drive
+  // app.world_clock() each frame (a no-op unless the scene declared a `clock:` block).
+  out.app = &sg.appContext();
+  out.clock = scene.clock;
+  // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
+  // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
+  // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-
+  // free. An empty key resolves to empty (stays "not bound").
+  out.clock.speed_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.speed_key);
+  out.clock.paused_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.paused_key);
+  out.clock.time_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.time_key);
+  out.clock.tick_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.tick_key);
   out.created.reserve(scene.nodes.size());
   for (const auto &n : scene.nodes) {
     realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, warnings);
@@ -716,7 +729,47 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   return out;
 }
 
-void tick_scene(RealizedScene &realized, vtkRenderer *renderer) {
+void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt) {
+  // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any
+  // custom_tick reading app.world_clock().t()) sees ONE coherent world time for this frame. Opt-in:
+  // only when the scene declared a `clock:` block, so a scene without one leaves app.world_clock()
+  // entirely untouched (prior behaviour, and no surprise double-advance when several scenes share
+  // an app — the one driver is the host that owns the clock: scene).
+  if (realized.clock.present && realized.app) {
+    cvc::app &app = *realized.app;
+    cvc::world_clock &wc = app.world_clock();
+    const cvc::ariadne::SceneClock &c = realized.clock;
+    // The key paths were resolved to absolute state paths at realize time (realize_scene, with the
+    // host bind prefix), so a sim_transport slider and this clock share one key. Steer the clock
+    // from them, seeding the declared default when a key is still unset so the clock has a defined
+    // rate on frame 0 and the widget shows the right initial value. An empty key means "not bound"
+    // — the initial scale/paused stands, nothing is published.
+    const double scale = c.speed_key.empty()
+                             ? c.scale
+                             : cvc::ariadne::read_or_seed<double>(app, c.speed_key, c.scale);
+    const int paused = c.paused_key.empty()
+                           ? (c.paused ? 1 : 0)
+                           : cvc::ariadne::read_bool_or_seed(app, c.paused_key, c.paused ? 1 : 0);
+    wc.set_scale(scale);
+    wc.set_mode(paused ? cvc::world_clock::mode::paused : cvc::world_clock::mode::live);
+    // Wall delta: a caller-injected fixed dt (deterministic offscreen capture) when non-negative,
+    // else real elapsed since the last tick (real-time animation, no crawl under a slow frame
+    // rate).
+    double dt = wall_dt;
+    if (dt < 0.0) {
+      const auto now = std::chrono::steady_clock::now();
+      dt = realized.clock_primed ? std::chrono::duration<double>(now - realized.clock_last).count()
+                                 : 0.0;
+      realized.clock_last = now;
+      realized.clock_primed = true;
+    }
+    wc.advance(dt);
+    if (!c.time_key.empty())
+      cvc::ariadne::write<double>(app, c.time_key, wc.t());
+    if (!c.tick_key.empty())
+      cvc::ariadne::write<double>(app, c.tick_key, static_cast<double>(wc.tick()));
+  }
+
   for (const std::weak_ptr<VolRenNode> &w : realized.volren_ticks)
     if (std::shared_ptr<VolRenNode> n = w.lock())
       n->tick();

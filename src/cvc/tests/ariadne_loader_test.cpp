@@ -923,6 +923,65 @@ scene:
   EXPECT_FLOAT_EQ(t->heightfield.colors[1].color[1], 0.50f);
 }
 
+// §9 time: a `clock:` block declares the scene's simulation clock. A bare `clock: {}` registers the
+// clock and keeps the sim_transport-wired defaults (bind sim.speed / sim.paused, publish sim.time).
+TEST(AriadneScene, ClockBlockDefaults) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock: {}
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_TRUE(r.scene.any()); // a clock-only scene is non-empty (the host must realize it to drive)
+  EXPECT_TRUE(r.scene.clock.present);
+  EXPECT_DOUBLE_EQ(r.scene.clock.scale, 1.0);
+  EXPECT_FALSE(r.scene.clock.paused);
+  EXPECT_EQ(r.scene.clock.speed_key, "sim.speed");
+  EXPECT_EQ(r.scene.clock.paused_key, "sim.paused");
+  EXPECT_EQ(r.scene.clock.time_key, "sim.time");
+  EXPECT_TRUE(r.scene.clock.tick_key.empty()); // tick not published unless asked
+}
+
+// No `clock:` block → the clock is absent and does not make an otherwise-empty scene realize.
+TEST(AriadneScene, NoClockBlockIsAbsent) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: g
+      type: group
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(r.scene.clock.present);
+}
+
+// All clock fields overridden, including custom key paths and an explicit empty key (disable a
+// lane).
+TEST(AriadneScene, ClockBlockOverrides) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock:
+    scale: 2.5
+    paused: true
+    speed_key: demo.rate
+    paused_key: demo.hold
+    time_key: ""
+    tick_key: demo.tick
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_TRUE(r.scene.clock.present);
+  EXPECT_DOUBLE_EQ(r.scene.clock.scale, 2.5);
+  EXPECT_TRUE(r.scene.clock.paused);
+  EXPECT_EQ(r.scene.clock.speed_key, "demo.rate");
+  EXPECT_EQ(r.scene.clock.paused_key, "demo.hold");
+  EXPECT_TRUE(r.scene.clock.time_key.empty()); // explicit "" disables the publish lane
+  EXPECT_EQ(r.scene.clock.tick_key, "demo.tick");
+}
+
 // A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle — the
 // `volume:` block the realizer feeds to VolumeNode::setTransferFunction/setShading.
 TEST(AriadneScene, VolumeTransferFunctionAndShading) {

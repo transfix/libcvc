@@ -24,6 +24,7 @@ import:
   - cvc://components/stage_lighting.ari
   - cvc://components/camera_controls.ari
   - cvc://components/scene_controls.ari
+  - cvc://components/sim_transport.ari
 
 menubar:
   - menu: Sim
@@ -35,9 +36,15 @@ windows:
   - include: stage_lighting
   - include: camera_controls
   - include: scene_controls
+  - include: sim_transport   # Paused / Speed — bind sim.paused / sim.speed, which drive the clock below
 
 scene:
   chrome: false
+  # The simulation clock. tick_scene drives the app's authoritative cvc::world_clock from these
+  # state keys each frame; the wind, sea and cloud custom nodes read app.world_clock().t(), so
+  # Paused freezes them all and Speed rate-scales them (and an offscreen capture is deterministic).
+  # Defaults already bind sim.paused / sim.speed (the sim_transport panel) and publish sim.time.
+  clock: { scale: 1.0, paused: false }
   # A sky gradient: cool blue at the zenith (screen top) warming to a pale horizon (screen bottom),
   # matching the C++ demo's GradientBackground (SetBackground2 zenith / SetBackground horizon).
   background: { top: [0.23, 0.44, 0.80], bottom: [0.66, 0.71, 0.74] }

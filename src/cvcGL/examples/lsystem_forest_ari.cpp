@@ -24,6 +24,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock.h> // the forest's custom ticks read app.world_clock().t()
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -640,17 +641,18 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
     auto workW = std::make_shared<std::vector<double>>(*woodBind);
     auto workN = std::make_shared<std::vector<double>>(*needleBind);
     auto trees = std::make_shared<std::vector<Tree>>(std::move(forest));
-    auto t0 =
-        std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+    cvc::app *app = &sg.appContext();
     std::weak_ptr<GeometryNode> ww = woodNode, wn = needleNode;
     out.custom_ticks.push_back([=](vtkRenderer *) {
       auto w = ww.lock();
       if (!w)
         return;
-      // REAL elapsed seconds, not a frame count: the browser renders this heavy scene well under
-      // 60 fps, so a frame/60 clock would crawl. Wall-clock keeps the sway at real-time speed.
-      const double t =
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - *t0).count();
+      // World (simulation) time, from the app's authoritative cvc::world_clock — driven once per
+      // frame by tick_scene from the scene's `clock:` block (sim.paused/sim.speed). Pausing the sim
+      // freezes the sway; a speed slider scales it; an offscreen capture advances it by a fixed dt
+      // so the wind is deterministic. tick_scene advances the clock BEFORE the custom ticks, so t()
+      // is this frame's time; it tracks real wall time at scale 1 (no sub-60-fps crawl).
+      const double t = app->world_clock().t();
       *workW = *woodBind;
       *workN = *needleBind;
       for (const Tree &tr : *trees)
@@ -766,20 +768,22 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
 
   // Per-frame: re-fill the depth field (the wave rolls) at real-time; breathe the TF on a stride.
   auto frame = std::make_shared<long>(0);
-  auto t0 =
-      std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+  cvc::app *app = &sg.appContext();
   std::weak_ptr<cvc::gl::VolumeNode> wn = vnode;
-  out.custom_ticks.push_back([wn, field, fill, tf, frame, t0](vtkRenderer *) {
+  out.custom_ticks.push_back([wn, field, fill, tf, frame, app](vtkRenderer *) {
     auto v = wn.lock();
     if (!v)
       return;
     const long f = (*frame)++;
-    // Wall-clock, not frame/60: the wave rolls at real speed even when the browser is well under
-    // 60 fps. Re-fill on every other frame (the 56³ field refill isn't free, and a ~30 Hz wave is
-    // smooth); the sun-glint opacity breathes slowly, so rebuild the TF only every ~16th tick —
-    // every-frame rebuilds spammed VolumeNode's handleStateChanged(transfer_function.opacity) log
-    // and cost a TF rebuild per frame for a change the eye can't follow.
-    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - *t0).count();
+    // World (simulation) time from app.world_clock() (driven by tick_scene from the scene
+    // `clock:`): the wave rolls at real speed, pauses when the sim is paused, and is deterministic
+    // under an offscreen capture. Re-fill on every other frame (the 56³ field refill isn't free,
+    // and a ~30 Hz wave is smooth); the sun-glint opacity breathes slowly, so rebuild the TF only
+    // every ~16th tick — every-frame rebuilds spammed VolumeNode's handleStateChanged(…opacity) log
+    // and cost a TF rebuild per frame for a change the eye can't follow. Frame STRIDES stay
+    // frame-based (they gate work cadence, not animation phase); only the TIME source moved to
+    // world_clock.
+    const double t = app->world_clock().t();
     if (f % 2 == 0) {
       fill(*field, t);
       v->updateScalars(*field);
@@ -1151,21 +1155,22 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   auto rgb = std::make_shared<std::vector<unsigned char>>();
 
   auto frame = std::make_shared<long>(0);
-  auto t0 =
-      std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+  cvc::app *app = &sg.appContext();
   std::weak_ptr<cvc::gl::VolumeNode> wn = vnode;
-  out.custom_ticks.push_back([wn, sky, frame, t0, terr, wterrain, rgb, half](vtkRenderer *) {
+  out.custom_ticks.push_back([wn, sky, frame, app, terr, wterrain, rgb, half](vtkRenderer *) {
     auto v = wn.lock();
     if (!v)
       return;
     const long f = (*frame)++;
     // The cloud (a 60³ field crossfade) + its ground shadow update together on a 3-frame stride —
     // the drift is slow (CLOUD_DRIFT world units/s) so a ~stride cadence is imperceptible and keeps
-    // the two most expensive per-frame volumes off the critical path. TIME is wall-clock (not
-    // frame/60): under the browser's sub-60 fps a frame clock would make the drift crawl.
+    // the two most expensive per-frame volumes off the critical path. TIME is world (simulation)
+    // time from app.world_clock() (driven by tick_scene from the scene `clock:`): the drift runs at
+    // real speed, pauses with the sim, and is deterministic under capture — the 3-frame stride is a
+    // work-cadence gate, not the animation phase.
     if (f % 3 != 0)
       return;
-    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - *t0).count();
+    const double t = app->world_clock().t();
     const double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
     const double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
     std::vector<float> field = sky->field(shift, morph);
@@ -1292,18 +1297,23 @@ int main(int argc, char **argv) {
       addBark(*w);
   }
 
-  auto frame_body = [&](double dt) {
+  // dt drives the camera smoothing (a nominal per-frame step); clockDt drives the scene's
+  // simulation clock through tick_scene. Interactive passes clockDt < 0 so tick_scene advances
+  // app.world_clock() by REAL elapsed time (real-time animation, no crawl under a slow browser);
+  // capture passes a fixed clockDt so the clock steps a fixed quantum per frame and the recording
+  // is deterministic (the frame/fps discipline the original capture used, now on the world clock).
+  auto frame_body = [&](double dt, double clockDt) {
     view.processUIEvents();
     touch.update();
     cam.update(dt);
     rt.drain();
     ari::sync_scene_visibility(app, realized.visibility);
-    cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), clockDt);
   };
 
   if (capturing) {
     for (long f = 0; f < frames; ++f) {
-      frame_body(1.0 / 60.0);
+      frame_body(1.0 / 60.0, 1.0 / 60.0);
       if (f + 1 == frames && !png.empty())
         view.writePNG(png.c_str());
       else
@@ -1314,7 +1324,7 @@ int main(int argc, char **argv) {
   } else {
     std::puts("[lsystem_forest_ari] running — close the window or Sim > Quit to exit.");
     while (!view.windowClosed() && !quit) {
-      frame_body(1.0 / 120.0);
+      frame_body(1.0 / 120.0, -1.0); // clockDt < 0 → world_clock advances by real elapsed time
       view.render();
 #ifdef __EMSCRIPTEN__
 #ifndef __EMSCRIPTEN_PTHREADS__
