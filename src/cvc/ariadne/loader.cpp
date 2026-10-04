@@ -1504,6 +1504,23 @@ Scene parse_scene(const YAML::Node &s) {
           sc.background_bottom[i] = static_cast<float>(bot[i].as<double>());
     }
   }
+  if (const YAML::Node ck = s["clock"]; ck && ck.IsMap()) {
+    // clock: { scale, paused, speed_key, paused_key, time_key, tick_key } — the scene's simulation
+    // clock (SceneClock). All fields optional: a bare `clock: {}` wires to sim_transport.ari with
+    // the defaults. An explicit empty string for a *_key disables that lane (no steer / no
+    // publish).
+    sc.clock.present = true;
+    sc.clock.scale = num(ck, "scale", sc.clock.scale);
+    sc.clock.paused = flag(ck, "paused", sc.clock.paused);
+    if (ck["speed_key"])
+      sc.clock.speed_key = str(ck, "speed_key");
+    if (ck["paused_key"])
+      sc.clock.paused_key = str(ck, "paused_key");
+    if (ck["time_key"])
+      sc.clock.time_key = str(ck, "time_key");
+    if (ck["tick_key"])
+      sc.clock.tick_key = str(ck, "tick_key");
+  }
   return sc;
 }
 
