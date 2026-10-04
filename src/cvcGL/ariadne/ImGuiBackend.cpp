@@ -105,7 +105,7 @@ bool ImGuiBackend::begin_menu(const char *label) { return ui::BeginMenu(label); 
 void ImGuiBackend::end_menu() { ui::EndMenu(); }
 
 bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
-                                float border) {
+                                float border, bool *p_open) {
   int pushes = 0;
 #ifdef CVC_ENABLE_IMGUI
   // Resolve the §3.0.3b size against the main viewport's WORK area (the menu-aware
@@ -156,7 +156,7 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   std::string name = title;
   name += "###";
   name += id;
-  const bool vis = ui::Begin(name.c_str());
+  const bool vis = ui::Begin(name.c_str(), p_open);
   m_windowStylePushes.push_back(pushes);
   // §11.4: snapshot this window's current geometry for the core to persist. Position is always
   // valid; size only when NOT collapsed (a collapsed window reports just its title-bar height,

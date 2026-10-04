@@ -202,6 +202,11 @@ struct Widget {
   Layout layout;              // §3.0.2 / §3.0.3b: container layout + tracks + borders
   float frame_border = -1.0f; // §3.0.3b: widget/window border width in px; <0 = backend default
 
+  // Window `closable: true` — give the window a close (X) button; its open state persists at
+  // tree.<id>.open (default open). Closed → not rendered; a menu_toggle bound to the same key (e.g.
+  // a "Settings" menu) re-opens it. Default false = a window with no X (the historical behaviour).
+  bool closable = false;
+
   bool literal_text = false; // Text: `label` is a literal caption, not a path
 
   // §G? Text COLOUR (severity styling). A Kind::Text (literal OR bound) may carry a fixed RGB

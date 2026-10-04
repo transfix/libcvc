@@ -385,6 +385,40 @@ windows:
   EXPECT_FLOAT_EQ(win->size.h.value, 132.0f);
 }
 
+// §window `closable:` — a close (X) button + tree.<id>.open state, both as a direct window key and
+// as an include-site override.
+TEST(AriadneLoader, ClosableWindowAndIncludeOverride) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    id: panel
+    children: [ { text: hi } ]
+windows:
+  - window: Direct
+    id: direct
+    closable: true
+    children: [ { text: hi } ]
+  - include: panel
+    closable: true
+  - window: Plain
+    id: plain
+    children: [ { text: hi } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *direct = find(r.root, Kind::Window, "Direct");
+  ASSERT_NE(direct, nullptr);
+  EXPECT_TRUE(direct->closable); // direct window key
+  const Widget *panel = find(r.root, Kind::Window, "Panel");
+  ASSERT_NE(panel, nullptr);
+  EXPECT_TRUE(panel->closable); // applied at the include site onto the shared unit
+  const Widget *plain = find(r.root, Kind::Window, "Plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_FALSE(plain->closable); // default: not closable
+}
+
 // An include with no geometry keys leaves the unit's own geometry untouched (no accidental
 // zeroing).
 TEST(AriadneLoader, IncludeWithoutGeometryKeepsUnitGeometry) {
