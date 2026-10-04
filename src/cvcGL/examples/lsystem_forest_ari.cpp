@@ -640,13 +640,17 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
     auto workW = std::make_shared<std::vector<double>>(*woodBind);
     auto workN = std::make_shared<std::vector<double>>(*needleBind);
     auto trees = std::make_shared<std::vector<Tree>>(std::move(forest));
-    auto frame = std::make_shared<long>(0);
+    auto t0 =
+        std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
     std::weak_ptr<GeometryNode> ww = woodNode, wn = needleNode;
     out.custom_ticks.push_back([=](vtkRenderer *) {
       auto w = ww.lock();
       if (!w)
         return;
-      const double t = static_cast<double>((*frame)++) / 60.0;
+      // REAL elapsed seconds, not a frame count: the browser renders this heavy scene well under
+      // 60 fps, so a frame/60 clock would crawl. Wall-clock keeps the sway at real-time speed.
+      const double t =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - *t0).count();
       *workW = *woodBind;
       *workN = *needleBind;
       for (const Tree &tr : *trees)
@@ -760,19 +764,31 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
   vnode->setAmbient(0.35);
   vnode->setDiffuse(0.75);
 
-  // Per-frame: advance time, re-fill the depth field (the wave rolls) and breathe the TF.
+  // Per-frame: re-fill the depth field (the wave rolls) at real-time; breathe the TF on a stride.
   auto frame = std::make_shared<long>(0);
+  auto t0 =
+      std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
   std::weak_ptr<cvc::gl::VolumeNode> wn = vnode;
-  out.custom_ticks.push_back([wn, field, fill, tf, frame](vtkRenderer *) {
+  out.custom_ticks.push_back([wn, field, fill, tf, frame, t0](vtkRenderer *) {
     auto v = wn.lock();
     if (!v)
       return;
-    const double t = static_cast<double>((*frame)++) / 60.0;
-    fill(*field, t);
-    v->updateScalars(*field);
-    std::vector<double> col, op;
-    tf(col, op, t);
-    v->setTransferFunction(col, op);
+    const long f = (*frame)++;
+    // Wall-clock, not frame/60: the wave rolls at real speed even when the browser is well under
+    // 60 fps. Re-fill on every other frame (the 56³ field refill isn't free, and a ~30 Hz wave is
+    // smooth); the sun-glint opacity breathes slowly, so rebuild the TF only every ~16th tick —
+    // every-frame rebuilds spammed VolumeNode's handleStateChanged(transfer_function.opacity) log
+    // and cost a TF rebuild per frame for a change the eye can't follow.
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - *t0).count();
+    if (f % 2 == 0) {
+      fill(*field, t);
+      v->updateScalars(*field);
+    }
+    if (f % 16 == 0) {
+      std::vector<double> col, op;
+      tf(col, op, t);
+      v->setTransferFunction(col, op);
+    }
   });
   std::printf("[lsystem_forest_ari] sea: %dx%dx%d volume\n", SEA_N, SEA_N, SEA_NZ);
   return gn;
@@ -1135,19 +1151,26 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   auto rgb = std::make_shared<std::vector<unsigned char>>();
 
   auto frame = std::make_shared<long>(0);
+  auto t0 =
+      std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
   std::weak_ptr<cvc::gl::VolumeNode> wn = vnode;
-  out.custom_ticks.push_back([wn, sky, frame, terr, wterrain, rgb, half](vtkRenderer *) {
+  out.custom_ticks.push_back([wn, sky, frame, t0, terr, wterrain, rgb, half](vtkRenderer *) {
     auto v = wn.lock();
     if (!v)
       return;
     const long f = (*frame)++;
-    const double t = static_cast<double>(f) / 60.0;
+    // The cloud (a 60³ field crossfade) + its ground shadow update together on a 3-frame stride —
+    // the drift is slow (CLOUD_DRIFT world units/s) so a ~stride cadence is imperceptible and keeps
+    // the two most expensive per-frame volumes off the critical path. TIME is wall-clock (not
+    // frame/60): under the browser's sub-60 fps a frame clock would make the drift crawl.
+    if (f % 3 != 0)
+      return;
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - *t0).count();
     const double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
     const double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
     std::vector<float> field = sky->field(shift, morph);
     v->updateScalars(field);
-    // Re-bake the soft, low-res cloud shadow every 3rd frame onto the terrain.
-    if (auto tn = wterrain.lock(); tn && terr->ok() && f % 3 == 0) {
+    if (auto tn = wterrain.lock(); tn && terr->ok()) {
       bakeCloudShadow(field, sunDir(SUN_AZ, SHADOW_PROJ_EL), half, *terr, *rgb);
       tn->setTexture(cvc::image(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
                                 cvc::image::data_type::u8, rgb->data()));
