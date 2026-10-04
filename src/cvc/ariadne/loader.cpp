@@ -542,6 +542,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.size = parse_size(n["size"]);                  // §3.0.3b window sizing (%/px/auto)
     w.layout = parse_layout(n["layout"]);            // §3.0.3b window-body layout (grid/tracks)
     w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
+    w.closable = flag(n, "closable", false);         // a close (X) button + tree.<id>.open state
     return w;
   }
   if (type == "text") {
@@ -886,6 +887,8 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
       w.layout = parse_layout(n["layout"]);
     if (n["frame"])
       w.frame_border = parse_frame_border(n["frame"]);
+    if (n["closable"])
+      w.closable = flag(n, "closable", false);
   }
   return w;
 }

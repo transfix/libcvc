@@ -45,7 +45,8 @@ public:
   void end_main_menu_bar() override;
   bool begin_menu(const char *label) override;
   void end_menu() override;
-  bool begin_window(const char *title, const char *id, const Size &size, float border) override;
+  bool begin_window(const char *title, const char *id, const Size &size, float border,
+                    bool *p_open = nullptr) override;
   void end_window() override;
   bool begin_grid(const Layout &layout, const char *id) override;
   void grid_next_cell() override;

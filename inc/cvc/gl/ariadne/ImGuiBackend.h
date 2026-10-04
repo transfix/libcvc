@@ -37,8 +37,8 @@ public:
   void end_main_menu_bar() override;
   bool begin_menu(const char *label) override;
   void end_menu() override;
-  bool begin_window(const char *title, const char *id, const cvc::ariadne::Size &size,
-                    float border) override;
+  bool begin_window(const char *title, const char *id, const cvc::ariadne::Size &size, float border,
+                    bool *p_open = nullptr) override;
   void end_window() override;
   void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)

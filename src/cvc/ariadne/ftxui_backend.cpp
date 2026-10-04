@@ -109,7 +109,7 @@ bool FtxuiBackend::begin_menu(const char *label) {
 void FtxuiBackend::end_menu() {}
 
 bool FtxuiBackend::begin_window(const char *title, const char * /*id*/, const Size & /*size*/,
-                                float /*border*/) {
+                                float /*border*/, bool * /*p_open*/) {
   // §3.0.3b pixel sizing / border width don't translate to a terminal — FTXUI
   // auto-sizes the window box to its content (the §16.2 degradation). The size
   // spec is still honoured for TILED/grid tracks via begin_grid below.
@@ -254,7 +254,9 @@ bool FtxuiBackend::begin_main_menu_bar() { return false; }
 void FtxuiBackend::end_main_menu_bar() {}
 bool FtxuiBackend::begin_menu(const char *) { return false; }
 void FtxuiBackend::end_menu() {}
-bool FtxuiBackend::begin_window(const char *, const char *, const Size &, float) { return false; }
+bool FtxuiBackend::begin_window(const char *, const char *, const Size &, float, bool *) {
+  return false;
+}
 void FtxuiBackend::end_window() {}
 bool FtxuiBackend::begin_grid(const Layout &, const char *) { return false; }
 void FtxuiBackend::grid_next_cell() {}
