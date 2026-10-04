@@ -139,6 +139,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/scatter.h
   ../../inc/cvc/world/roads.h
   ../../inc/cvc/world/building_archetypes.h
+  ../../inc/cvc/world/sites.h
   ../../inc/cvc/world/raster.h
   ../../inc/cvc/world/npy.h
   ../../inc/cvc/world/bundle.h
@@ -277,6 +278,7 @@ set(SOURCE_FILES
   world/scatter.cpp
   world/roads.cpp
   world/building_archetypes.cpp
+  world/sites.cpp
   world/raster.cpp
   world/npy.cpp
   world/bundle.cpp
@@ -348,11 +350,11 @@ endif()
 # byte-goldens are therefore intentionally NOT asserted. Same discipline as nav.
 if(NOT MSVC)
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
-                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/raster.cpp world/bundle.cpp
+                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/raster.cpp world/bundle.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
-                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/raster.cpp world/bundle.cpp
+                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/raster.cpp world/bundle.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
