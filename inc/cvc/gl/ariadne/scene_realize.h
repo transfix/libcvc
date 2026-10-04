@@ -43,6 +43,7 @@ struct SceneNode;
 namespace gl {
 class SceneGraph;
 class GraphicsNode;
+class GeometryNode; // ShaderPreset applies to a GeometryNode (forward-decl: used only by reference)
 class VolRenNode;
 class VolSliceNode;
 

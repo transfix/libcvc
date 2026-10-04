@@ -24,6 +24,8 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/gl/ariadne/extensions.h>
+#include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/image/image.h>
 #include <cvc/volume/volume.h>
@@ -457,6 +459,92 @@ int main() {
     }
     chk(unknown_warned, "an unknown shader preset -> a warning");
     chk(!known_warned, "a known shader preset -> no warning");
+  }
+
+  // ── §9 L-system node types + the cvcGL extension bundle ──────────────────────
+  {
+    cvc::gl::ariadne::register_cvcgl_extensions(app);
+    printf("== lsystem node types (forest_trees) + extension bundle ==\n");
+    chk(cvc::gl::ariadne::has_scene_node_type("forest_trees"),
+        "register_cvcgl_extensions installed the forest_trees node type");
+    chk(cvc::gl::ariadne::has_shader_preset("bark"),
+        "register_cvcgl_extensions installed the bark shader preset");
+
+    SceneGraph sg(app, "forest");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode terrain; // a flat heightfield to plant on
+    terrain.id = "terrain";
+    terrain.type = "geometry";
+    terrain.has_heightfield = true;
+    terrain.heightfield.size = 120.0f;
+    terrain.heightfield.resolution = 24;
+    SceneNode trees;
+    trees.id = "trees";
+    trees.type = "forest_trees";
+    trees.props.kind = Value::Kind::Map;
+    auto pnum = [&](const char *k, double v) {
+      Value val;
+      val.kind = Value::Kind::Scalar;
+      val.scalar = std::to_string(v);
+      trees.props.entries.emplace_back(k, val);
+    };
+    auto pstr = [&](const char *k, const char *v) {
+      Value val;
+      val.kind = Value::Kind::Scalar;
+      val.scalar = v;
+      trees.props.entries.emplace_back(k, val);
+    };
+    pstr("species", "pine");
+    pnum("count", 8);
+    pnum("span", 40);
+    pnum("sea_level", -10); // everything is "dry land" so the small forest plants
+    pstr("ground", "terrain");
+    trees.shader.present = true;
+    trees.shader.preset = "bark"; // the bark shader is declared in the scene, not host code
+    chk(cvc::gl::ariadne::has_scene_node_type("wave_sea"), "the wave_sea node type is registered");
+    chk(cvc::gl::ariadne::has_scene_node_type("cloud_sky"),
+        "the cloud_sky node type is registered");
+    // The sea + sky are VolumeNodes sharing the terrain; add them to the same scene.
+    SceneNode sea;
+    sea.id = "sea";
+    sea.type = "wave_sea";
+    sea.props.kind = Value::Kind::Map;
+    {
+      Value v;
+      v.kind = Value::Kind::Scalar;
+      v.scalar = "40";
+      sea.props.entries.emplace_back("half", v);
+    }
+    SceneNode sky;
+    sky.id = "sky";
+    sky.type = "cloud_sky";
+    sky.props.kind = Value::Kind::Map;
+    {
+      Value v;
+      v.kind = Value::Kind::Scalar;
+      v.scalar = "0";
+      sky.props.entries.emplace_back("shadow", v); // skip the shadow bake to keep the test quick
+    }
+    scene.nodes.push_back(terrain);
+    scene.nodes.push_back(trees);
+    scene.nodes.push_back(sea);
+    scene.nodes.push_back(sky);
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "forest", &warnings);
+    chk(sg.getGraphics("trees") != nullptr, "forest_trees realized a wood GeometryNode");
+    chk(sg.getGraphics("trees_needles") != nullptr, "forest_trees realized a needle-LINES node");
+    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sea")) != nullptr,
+        "wave_sea realized a VolumeNode");
+    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky")) != nullptr,
+        "cloud_sky realized a VolumeNode");
+    // forest wind + sea refill + cloud drift each push a tick.
+    chk(realized.custom_ticks.size() >= 3u, "forest/sea/sky each registered a per-frame tick");
+    bool emptyForest = false;
+    for (const std::string &w : warnings)
+      if (w.find("no trees planted") != std::string::npos)
+        emptyForest = true;
+    chk(!emptyForest, "forest_trees planted trees on the heightfield (no empty-forest warning)");
   }
 
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────
