@@ -138,6 +138,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/heightfield.h
   ../../inc/cvc/world/scatter.h
   ../../inc/cvc/world/roads.h
+  ../../inc/cvc/world/building_archetypes.h
   ../../inc/cvc/world/raster.h
   ../../inc/cvc/world/npy.h
   ../../inc/cvc/world/bundle.h
@@ -275,6 +276,7 @@ set(SOURCE_FILES
   world/heightfield.cpp
   world/scatter.cpp
   world/roads.cpp
+  world/building_archetypes.cpp
   world/raster.cpp
   world/npy.cpp
   world/bundle.cpp
