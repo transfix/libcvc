@@ -136,7 +136,8 @@ void VolumeNode::applyClipPlanes(vtkPlaneCollection *planes) {
     if (planes && planes->GetNumberOfItems() > 0) {
       m_mapper->SetClippingPlanes(planes);
     } else {
-      m_mapper->RemoveAllClippingPlanes();
+      // Detach, not RemoveAllClippingPlanes() (see GeometryNode::applyClipPlanes).
+      m_mapper->SetClippingPlanes(static_cast<vtkPlaneCollection *>(nullptr));
     }
   }
 }

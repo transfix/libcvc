@@ -124,12 +124,14 @@ void GridNode::applyClipPlanes(vtkPlaneCollection *planes) {
     if (m_xyMapper)
       m_xyMapper->SetClippingPlanes(planes);
   } else {
+    // Detach, not RemoveAllClippingPlanes() (see GeometryNode::applyClipPlanes).
+    vtkPlaneCollection *none = nullptr;
     if (m_yzMapper)
-      m_yzMapper->RemoveAllClippingPlanes();
+      m_yzMapper->SetClippingPlanes(none);
     if (m_xzMapper)
-      m_xzMapper->RemoveAllClippingPlanes();
+      m_xzMapper->SetClippingPlanes(none);
     if (m_xyMapper)
-      m_xyMapper->RemoveAllClippingPlanes();
+      m_xyMapper->SetClippingPlanes(none);
   }
 }
 
