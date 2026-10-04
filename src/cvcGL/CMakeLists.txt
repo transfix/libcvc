@@ -782,6 +782,20 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_clip_children COMMAND cvcgl_clip_children)
 endif()
 
+# GraphicsNode::setClipPlanes: per-node half-spaces in the local frame, clipping
+# the node and everything below it. Without GL: nearest-first accumulation down
+# the tree, the per-renderer cap (6 poly-data / 8 volume + volren / 0 low-memory
+# or prop-less), planes moving in place with their owner, children added and
+# removed, the "clip_planes" state key, a VolRenNode's quad never clipped.
+# Rendered: x >= 0 on a geometry quad, a VolumeNode, a VolSliceNode and a
+# VolRenNode. Skips the render part where nothing rasterises unless
+# CVC_REQUIRE_RENDER=1. Desktop GL only, like cvcgl_clip_children.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_clip_planes test/cvcgl_clip_planes.cpp)
+  target_link_libraries(cvcgl_clip_planes PRIVATE cvcGL)
+  add_test(NAME cvcgl_clip_planes COMMAND cvcgl_clip_planes)
+endif()
+
 # LowMemoryPolyDataMapper (the GLES3/WebGL2 mapper with empty cell types and the
 # per-draw shader-cache lookup taken out of its draw), forced on natively. Records
 # an ordered trace of every GL call at the driver -- entry point, bound program /

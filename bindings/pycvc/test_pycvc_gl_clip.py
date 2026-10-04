@@ -64,12 +64,15 @@ def scene(name):
     kids = [("inside", quad(C - 40, C + 10, C - 10, C + 40, 0.0), (1.0, 0.1, 0.1)),
             ("straddle", quad(C + 20, C - 40, C + 80, C - 10, 0.0), (0.1, 1.0, 0.1)),
             ("above", quad(C - 40, C - 40, C - 10, C - 10, 30.0), (0.1, 0.1, 1.0))]
+    nodes = {}
     for name_, geom, rgb in kids:
         n = sg.add_child_geometry("box", name_, geom)
         n.setColor(*rgb)
         n.setAmbient(1.0)
         n.setDiffuse(0.0)
         n.setSpecular(0.0)
+        nodes[name_] = n
+    sg._clip_kids = nodes  # the child nodes, for the per-node plane checks
     return sg, box
 
 
@@ -81,6 +84,23 @@ def test_wrapped_surface():
     check("setClipChildren(True)", box.getClipChildren())
     box.setClipChildren(False)
     check("setClipChildren(False)", not box.getClipChildren())
+    # Per-node planes: px,py,pz,nx,ny,nz each, in the node's local frame.
+    kid = sg._clip_kids["inside"]
+    kid.set_clip_planes([C, 0, 0, 1, 0, 0])
+    check("set_clip_planes / get_clip_planes round-trip",
+          list(kid.get_clip_planes()) == [C, 0.0, 0.0, 1.0, 0.0, 0.0], str(list(kid.get_clip_planes())))
+    check("... handed to its renderer", kid.applied_clip_plane_count() == 1 and kid.clipPlaneCount() == 1)
+    box.set_clip_box(*BOX)
+    check("a parent's set_clip_box reaches the child, nearest (its own) first",
+          kid.clipPlaneCount() == 7 and kid.applied_clip_plane_count() == 6 and kid.maxClipPlanes() == 6)
+    box.set_clip_planes([])
+    kid.set_clip_planes([])
+    check("[] clears them", kid.applied_clip_plane_count() == 0 and list(box.get_clip_planes()) == [])
+    try:
+        kid.set_clip_planes([1, 2, 3])
+        check("set_clip_planes needs 6 numbers per plane", False)
+    except Exception:  # noqa: BLE001 -- SWIG maps std::invalid_argument to ValueError
+        check("set_clip_planes needs 6 numbers per plane", True)
 
 
 def hue_areas(frame):
@@ -155,6 +175,17 @@ def test_render():
     print("  added while clipping: late child %d of %d px" % (red_on, red_off))
     check("a child added while clipping is on is cut at the face (about half)",
           red_off > 50 and 0.4 < ratio < 0.6, "%.3f" % ratio)
+
+    # A node's OWN plane: the straddling child keeps x <= C + 50 (normal -x),
+    # with the parent no longer clipping -- about half again.
+    straddle = sg._clip_kids["straddle"]
+    straddle.set_clip_planes([C + 50, 0, 0, -1, 0, 0])
+    g_own = hue_areas(view.frameRGB())[1]
+    straddle.set_clip_planes([])
+    g_none = hue_areas(view.frameRGB())[1]
+    print("  own plane: straddling child %d of %d px" % (g_own, g_none))
+    check("a node's own clip plane cuts it (about half), and [] restores it",
+          g_none > 100 and 0.4 < g_own / float(g_none) < 0.6, "%d / %d" % (g_own, g_none))
     view.close()
 
 
