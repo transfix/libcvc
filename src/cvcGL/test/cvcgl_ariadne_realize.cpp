@@ -502,13 +502,44 @@ int main() {
     pstr("ground", "terrain");
     trees.shader.present = true;
     trees.shader.preset = "bark"; // the bark shader is declared in the scene, not host code
+    chk(cvc::gl::ariadne::has_scene_node_type("wave_sea"), "the wave_sea node type is registered");
+    chk(cvc::gl::ariadne::has_scene_node_type("cloud_sky"),
+        "the cloud_sky node type is registered");
+    // The sea + sky are VolumeNodes sharing the terrain; add them to the same scene.
+    SceneNode sea;
+    sea.id = "sea";
+    sea.type = "wave_sea";
+    sea.props.kind = Value::Kind::Map;
+    {
+      Value v;
+      v.kind = Value::Kind::Scalar;
+      v.scalar = "40";
+      sea.props.entries.emplace_back("half", v);
+    }
+    SceneNode sky;
+    sky.id = "sky";
+    sky.type = "cloud_sky";
+    sky.props.kind = Value::Kind::Map;
+    {
+      Value v;
+      v.kind = Value::Kind::Scalar;
+      v.scalar = "0";
+      sky.props.entries.emplace_back("shadow", v); // skip the shadow bake to keep the test quick
+    }
     scene.nodes.push_back(terrain);
     scene.nodes.push_back(trees);
+    scene.nodes.push_back(sea);
+    scene.nodes.push_back(sky);
     std::vector<std::string> warnings;
     auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "forest", &warnings);
     chk(sg.getGraphics("trees") != nullptr, "forest_trees realized a wood GeometryNode");
     chk(sg.getGraphics("trees_needles") != nullptr, "forest_trees realized a needle-LINES node");
-    chk(!realized.custom_ticks.empty(), "forest_trees registered a per-frame wind tick");
+    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sea")) != nullptr,
+        "wave_sea realized a VolumeNode");
+    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky")) != nullptr,
+        "cloud_sky realized a VolumeNode");
+    // forest wind + sea refill + cloud drift each push a tick.
+    chk(realized.custom_ticks.size() >= 3u, "forest/sea/sky each registered a per-frame tick");
     bool emptyForest = false;
     for (const std::string &w : warnings)
       if (w.find("no trees planted") != std::string::npos)
