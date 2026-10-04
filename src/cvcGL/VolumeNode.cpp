@@ -261,8 +261,8 @@ void VolumeNode::setVolume(const cvc::volume &vol) {
   if (SceneGraph *sg = getSceneGraph())
     sg->markContentChanged();
 
-  // Update bbox to match volume bounds
-  updateBoundingBoxNode();
+  // Update bbox (and any clip planes) to match volume bounds
+  ownBoundsChanged();
 
   // Notify parent to resync bounds if it's a NullGraphicNode with auto-sync enabled
   if (m_parent) {

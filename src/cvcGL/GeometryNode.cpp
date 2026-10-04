@@ -570,7 +570,7 @@ void GeometryNode::setGeometry(const cvc::geometry &geom) {
     m_renderMode = autoMode;
     getState("render_mode").value(renderModeToString(autoMode));
     updateRenderModeVTK(); // This calls updatePolyData() internally
-    updateBoundingBoxNode();
+    ownBoundsChanged();
 
     updateMetadata(geom);
     // The mesh's extent may have changed: cameras re-fit their clipping range.
