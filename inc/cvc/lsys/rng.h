@@ -72,6 +72,7 @@ enum class stream : std::uint32_t {
   props,
   cloud,
   rock,
+  road, // street-network generation (cvc::world::roads) — appended so existing salts never shift
   _count
 };
 
