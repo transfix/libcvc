@@ -89,10 +89,10 @@ scene:
             - { max_height: 17,  color: [0.24, 0.41, 0.18] }   # upland grass (darker)
             - { max_height: 100, color: [0.48, 0.45, 0.42] }   # rock / peak
       material: { single_color: false, ambient: 0.28, diffuse: 0.85 }
-    # The forest: procedural L-system trees (a custom scene-node type the lsystem_forest_ari host
-    # registers — the one piece not expressible declaratively). They are planted on dry land by
-    # sampling the terrain heightfield above, so the island owns its own shape and the host only
-    # grows the trees. All tunables are plain node keys (captured into the node's props bag).
+      shader: { preset: terrain_bump }   # value-noise fBm ground detail (cvcGL preset, was host C++)
+    # The forest: procedural L-system trees, rendered by the cvcGL `forest_trees` node type
+    # (cvc::lsys::grow_forest). They are planted on dry land by sampling the terrain heightfield
+    # above, so the island owns its own shape. All tunables are plain node keys (the node's props).
     - node: trees
       type: forest_trees
       ground: terrain      # the heightfield node to plant on
@@ -107,6 +107,7 @@ scene:
       levels: 4
       branches: 3
       pine_scale: 1.35
+      shader: { preset: bark }           # vertical-furrow bark on the trunks (cvcGL preset)
     # The sea: a travelling-wave VolumeNode that fills the water below sea level around the island
     # (a custom node; the volume's colour comes from its own transfer function). Rolls each frame.
     - node: sea
