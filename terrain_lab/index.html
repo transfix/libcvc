@@ -60,7 +60,7 @@
 <footer><span id="stdout"></span><span id="stderr"></span></footer>
 <script>
   const DEMO = 'terrain_lab';
-  const WASM_MB = 38; // decompressed size shown against a gzip transfer
+  const WASM_MB = 39; // decompressed size shown against a gzip transfer
   // Fullscreen has to be requested from a real user-gesture handler on the
   // DOM side: the wasm app drains its events inside requestAnimationFrame, so
   // calling emscripten_request_fullscreen from there fails the browser's
@@ -110,7 +110,7 @@
   // page-generation time), not document.lastModified: build-pages.py emits
   // byte-identical index.html each deploy, so its mtime never moves and the old
   // value froze -- browsers then served a stale, cached .wasm forever.
-  const V = 'a80e1d5bdb2d';
+  const V = 'dbe36f5fcbc7';
   async function boot() {
     try {
       const resp = await fetch(DEMO + '.wasm?v=' + V, {cache: 'no-cache'});

@@ -110,7 +110,7 @@
   // page-generation time), not document.lastModified: build-pages.py emits
   // byte-identical index.html each deploy, so its mtime never moves and the old
   // value froze -- browsers then served a stale, cached .wasm forever.
-  const V = '1f0de50b82c0';
+  const V = '3db271b8adca';
   async function boot() {
     try {
       const resp = await fetch(DEMO + '.wasm?v=' + V, {cache: 'no-cache'});
