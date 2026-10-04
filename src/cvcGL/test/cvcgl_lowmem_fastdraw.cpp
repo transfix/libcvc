@@ -2055,9 +2055,10 @@ int main() {
 
   LowMemoryPolyDataMapper::setStageObserver(&onStage);
   if (renderAvailable(app)) {
-    // Shadows on and off in separate scenes: SceneGraph::setShadowsEnabled(false)
-    // drops the shadow passes without releasing their GL resources, which VTK
-    // reports as an error when they are destroyed.
+    // Shadows on and off in separate scenes. (They were split because
+    // SceneGraph::setShadowsEnabled(false) dropped the shadow passes without
+    // releasing their GL resources, a VTK error when they were destroyed; it
+    // releases them now -- cvcgl_shadow_pass_reuse.)
     for (bool shadows : {true, false}) {
       Scene s(app);
       buildCity(s);
