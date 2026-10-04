@@ -26,11 +26,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <deque>
-#include <vector>
-
 #include <cvc/lsys/cloud.h>
 #include <cvc/lsys/rng.h>
+#include <deque>
+#include <vector>
 
 namespace cvc {
 namespace lsys {

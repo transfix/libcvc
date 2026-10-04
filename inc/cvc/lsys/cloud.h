@@ -48,16 +48,16 @@ namespace cvc {
 namespace lsys {
 
 struct cloud_params {
-  std::uint64_t seed = 1;  // grammar + placement seed
+  std::uint64_t seed = 1;    // grammar + placement seed
   std::uint32_t variant = 0; // which decorrelated cloud map (element id into stream::cloud)
-  int n = 60;              // XY resolution (the field is n x n x nz)
-  int nz = 28;             // Z resolution
-  double half = 150.0;     // world half-extent in XY (metres), for the turtle's z-aspect scaling
-  double base = 74.0;      // cloud slab base height (metres)
-  double top = 122.0;      // cloud slab top height (metres)
-  double sun_az = -52.0;   // sun azimuth (deg) for the baked top-light
-  double sun_el = 34.0;    // sun elevation (deg)
-  int depth = 6;           // grammar recursion depth cap
+  int n = 60;                // XY resolution (the field is n x n x nz)
+  int nz = 28;               // Z resolution
+  double half = 150.0;       // world half-extent in XY (metres), for the turtle's z-aspect scaling
+  double base = 74.0;        // cloud slab base height (metres)
+  double top = 122.0;        // cloud slab top height (metres)
+  double sun_az = -52.0;     // sun azimuth (deg) for the baked top-light
+  double sun_el = 34.0;      // sun elevation (deg)
+  int depth = 6;             // grammar recursion depth cap
 };
 
 // Generate one cloud density field: n*n*nz floats in [0, 1], indexed

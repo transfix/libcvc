@@ -82,8 +82,8 @@ TEST(LsysForest, SpeciesSelectorsControlTheMix) {
   pine.span = 60.0;
   cvc::geometry pw, pn;
   const forest_result pr = grow_forest(pine, flat100, pw, pn);
-  EXPECT_EQ(pr.pines, pr.planted);         // all conifers
-  EXPECT_GT(pn.const_lines().size(), 0u);  // pines have needle LINES
+  EXPECT_EQ(pr.pines, pr.planted);        // all conifers
+  EXPECT_GT(pn.const_lines().size(), 0u); // pines have needle LINES
 
   forest_params broad;
   broad.species = species_mix::branchy;
@@ -91,8 +91,8 @@ TEST(LsysForest, SpeciesSelectorsControlTheMix) {
   broad.span = 60.0;
   cvc::geometry bw, bn;
   const forest_result br = grow_forest(broad, flat100, bw, bn);
-  EXPECT_EQ(br.pines, 0);                   // no conifers
-  EXPECT_EQ(bn.const_points().size(), 0u);  // branchy has no needle mesh
+  EXPECT_EQ(br.pines, 0);                  // no conifers
+  EXPECT_EQ(bn.const_points().size(), 0u); // branchy has no needle mesh
   EXPECT_GT(bw.const_tris().size(), 0u);
 }
 

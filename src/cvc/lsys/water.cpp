@@ -25,9 +25,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <vector>
-
 #include <cvc/lsys/water.h>
+#include <vector>
 
 namespace cvc {
 namespace lsys {

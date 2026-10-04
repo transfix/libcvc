@@ -50,10 +50,9 @@
 
 #include <array>
 #include <cstdint>
+#include <cvc/lsys/interp.h> // cvc::lsys::vec3
 #include <functional>
 #include <vector>
-
-#include <cvc/lsys/interp.h> // cvc::lsys::vec3
 
 namespace cvc {
 class geometry; // output mesh type (core, GL-free); forward-declared to keep this header light
@@ -70,16 +69,16 @@ enum class species_mix {
 // Parameters for a scattered forest. Geometry units are metres, Z-up, centred on the origin.
 struct forest_params {
   std::uint64_t seed = 1337;
-  int count = 60;            // number of trees to PLANT (attempts are bounded at count*6)
-  double span = 100.0;       // scatter half-extent (a disc of this radius in world XY)
-  double sea_level = 0.5;    // plant only where height_at(x,y) > sea_level + 0.5 (dry land)
+  int count = 60;         // number of trees to PLANT (attempts are bounded at count*6)
+  double span = 100.0;    // scatter half-extent (a disc of this radius in world XY)
+  double sea_level = 0.5; // plant only where height_at(x,y) > sea_level + 0.5 (dry land)
   species_mix species = species_mix::mix;
   // branchy knobs
-  double scale = 1.0;    // overall branchy scale (multiplies length + radius)
-  double length = 6.0;   // branchy trunk length (before scale)
-  double radius = 0.7;   // branchy trunk radius (before scale)
-  int levels = 4;        // branchy recursion depth
-  int branches = 3;      // branchy child limbs per node
+  double scale = 1.0;  // overall branchy scale (multiplies length + radius)
+  double length = 6.0; // branchy trunk length (before scale)
+  double radius = 0.7; // branchy trunk radius (before scale)
+  int levels = 4;      // branchy recursion depth
+  int branches = 3;    // branchy child limbs per node
   // pine knob
   double pine_scale = 1.35; // pine trunk-size multiplier
 };

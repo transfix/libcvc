@@ -43,9 +43,9 @@ namespace lsys {
 double sea_surface(double x, double y, double t, double sea_level, double wave_amp);
 
 struct sea_params {
-  int n = 56;            // XY resolution (the field is n x n x nz)
-  int nz = 18;           // Z resolution
-  double half = 120.0;   // world half-extent in XY (metres)
+  int n = 56;          // XY resolution (the field is n x n x nz)
+  int nz = 18;         // Z resolution
+  double half = 120.0; // world half-extent in XY (metres)
   double sea_level = 0.0;
   double wave_amp = 2.40;
 };

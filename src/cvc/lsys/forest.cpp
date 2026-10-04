@@ -29,7 +29,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
-
 #include <cvc/geometry/geometry.h>
 #include <cvc/lsys/forest.h>
 #include <cvc/lsys/rng.h>
@@ -272,8 +271,8 @@ void grow_pine_impl(cvc::geometry &wood, cvc::geometry &needle, double px, doubl
         push_color(wood, cyl.colors[v]);
       }
       for (std::size_t k = 0; k < cyl.tris.size(); k += 3)
-        wood.tris().push_back(
-            cvc::geometry::tri_t{{base + cyl.tris[k], base + cyl.tris[k + 1], base + cyl.tris[k + 2]}});
+        wood.tris().push_back(cvc::geometry::tri_t{
+            {base + cyl.tris[k], base + cyl.tris[k + 1], base + cyl.tris[k + 2]}});
     }
     for (const Leaf &lf : mod.leaves) {
       const std::uint64_t base = static_cast<std::uint64_t>(needle.points().size());
@@ -282,12 +281,14 @@ void grow_pine_impl(cvc::geometry &wood, cvc::geometry &needle, double px, doubl
         rec.local_needle.push_back(root);
       push_point(needle, xform(world[i], root));
       for (int t = 0; t < NEEDLES; ++t) {
-        const vec3 tip{nring[t].x * LEAF_RAD * lf.sc, LEAF_LEN * lf.sc, nring[t].z * LEAF_RAD * lf.sc};
+        const vec3 tip{nring[t].x * LEAF_RAD * lf.sc, LEAF_LEN * lf.sc,
+                       nring[t].z * LEAF_RAD * lf.sc};
         const vec3 pm = xform(lf.m, tip);
         if (out_tree)
           rec.local_needle.push_back(pm);
         push_point(needle, xform(world[i], pm));
-        needle.lines().push_back(cvc::geometry::line_t{{base, base + 1 + static_cast<std::uint64_t>(t)}});
+        needle.lines().push_back(
+            cvc::geometry::line_t{{base, base + 1 + static_cast<std::uint64_t>(t)}});
       }
     }
     if (out_tree)
@@ -339,8 +340,7 @@ void grow_branchy_rec(cvc::geometry &g, std::uint64_t seed, std::uint64_t node, 
   const int n = branches + (uni(seed, stream::param_jitter, node, 0) < 0.4 ? 1 : 0);
   for (int b = 0; b < n; ++b) {
     const std::uint32_t d = 1u + 3u * static_cast<std::uint32_t>(b);
-    const double az =
-        2.0 * M_PI * (b + uni(seed, stream::param_jitter, node, d, -0.2, 0.2)) / n;
+    const double az = 2.0 * M_PI * (b + uni(seed, stream::param_jitter, node, d, -0.2, 0.2)) / n;
     const double tilt = uni(seed, stream::param_jitter, node, d + 1, 0.45, 0.80);
     const double lenFactor = uni(seed, stream::param_jitter, node, d + 2, 0.62, 0.78);
     const vec3 out = u * std::cos(az) + v * std::sin(az);
@@ -392,8 +392,7 @@ forest_result grow_forest(const forest_params &p, const height_fn &height_at, cv
     const bool pine = (p.species == species_mix::pine) ||
                       (p.species == species_mix::mix && (res.planted % 2 == 0));
     if (pine) {
-      const double size =
-          (0.55 + 0.4 * uni(p.seed, stream::size, el, 0)) * p.pine_scale;
+      const double size = (0.55 + 0.4 * uni(p.seed, stream::size, el, 0)) * p.pine_scale;
       const int maturity = MATURITY[irand(p.seed, stream::maturity, el, 0, 0, 6)];
       const double phase = uni(p.seed, stream::phase, el, 0) * 2.0 * M_PI;
       const double sway = 0.020 + 0.016 * uni(p.seed, stream::sway, el, 0);
