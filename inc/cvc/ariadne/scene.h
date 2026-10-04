@@ -118,6 +118,27 @@ struct SceneHeightfield {
   std::vector<SceneHeightColorBand> colors;
 };
 
+// A GLSL shader surface on a geometry node (§9 — shaders). The DSL face of GeometryNode's shader-
+// replacement API (addVertexShaderReplacement / addFragmentShaderReplacement + the coordinate-
+// shift-scale toggle): a node can either name a host-registered PRESET (an effect like a terrain
+// bump or tree bark, whose GLSL — and any platform gate like the GLES normal-name difference —
+// lives in C++ where it belongs) or splice raw GLSL at named VTK injection markers. Both compose
+// (preset first, then the inline stages). This lets a demo that needed host C++ to shade its mesh
+// be authored entirely in the .ari and run under the generic ariadne_hello host. GL-specific, so
+// the realizer (cvcGL) applies it; the loader only carries it as neutral data.
+struct SceneShaderStage {
+  std::string at;   // the VTK marker to replace (e.g. "//VTK::Normal::Impl")
+  std::string code; // the GLSL spliced in place of (and re-including) that marker
+};
+struct SceneShader {
+  bool present = false;             // was a `shader:` block given?
+  bool disable_coord_shift = false; // call GeometryNode::disableCoordinateShiftScale() first
+                                    // (so vertexMC is world space — the bump/bark shaders need it)
+  std::string preset;                     // a host-registered named effect (empty = none)
+  std::vector<SceneShaderStage> vertex;   // vertex-shader replacements, applied in order
+  std::vector<SceneShaderStage> fragment; // fragment-shader replacements, applied in order
+};
+
 // One scene node (§9.2/§9.3). `type` is geometry | volume | volren | volslice |
 // group | light. Fields not meaningful to a type are simply unused.
 struct SceneNode {
@@ -180,6 +201,8 @@ struct SceneNode {
   bool has_volume = false; // volume: {...} present (type: volume) — TF + shading for the VTK mapper
   SceneVolume volume;
 
+  SceneShader shader; // shader: {...} — GLSL replacements / a named preset (geometry nodes)
+
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
 
@@ -227,9 +250,33 @@ struct SceneLight {
   float rig_ambient = 0.2f; // ambient: <0..1> (shadowed sides readable)
 };
 
+// A simulation clock for the scene (§9 — time). Declares how the authoritative
+// cvc::world_clock (app.world_clock(), inc/cvc/core/world_clock.h — *simulation* time, distinct
+// from wall time and render cadence) is driven each frame and which state keys steer it. This is
+// the declarative face of libcvc's time discipline: a `clock:` block makes the reusable
+// sim_transport.ari (the Paused checkbox + Speed slider, binding sim.paused / sim.speed) actually
+// pause and rate-scale the animation with NO host C++, and publishes the live world seconds to
+// `time_key` (default sim.time) so widgets, Python or another scene can read one coherent clock.
+// The key paths resolve with the SAME rule as widget binds (cvc::ariadne::resolve_bind against the
+// host prefix), so a clock's `sim.speed` and a slider's `bind: sim.speed` are one key. Opt-in:
+// without a `clock:` block the host leaves app.world_clock() untouched (unchanged behaviour).
+struct SceneClock {
+  bool present = false; // was a `clock:` block given? (gates driving — opt-in)
+  double scale = 1.0;   // initial world-sec per wall-sec (seeds speed_key when it is still unset)
+  bool paused = false;  // initial mode (seeds paused_key when it is still unset)
+  // State-key bindings, resolved against the host prefix like widget binds. The defaults wire a
+  // bare `clock: {}` straight to sim_transport.ari. An EMPTY key disables that lane: no steer from
+  // speed_key/paused_key (the initial scale/paused stands), no publish to time_key/tick_key.
+  std::string speed_key = "sim.speed";   // read each frame → world_clock scale (0 pauses)
+  std::string paused_key = "sim.paused"; // read each frame → paused vs live mode
+  std::string time_key = "sim.time";     // published each frame: world seconds (world_clock::t())
+  std::string tick_key;                  // optional: published tick count (empty ⇒ not published)
+};
+
 struct Scene {
   std::vector<SceneNode> nodes;
   std::vector<SceneLight> lights;
+  SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   bool has_shadows = false;
   bool shadows_enabled = false;
   bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map
@@ -245,7 +292,8 @@ struct Scene {
   float background_top[3] = {0.09f, 0.10f, 0.12f};
   float background_bottom[3] = {0.02f, 0.02f, 0.03f};
   bool any() const {
-    return !nodes.empty() || !lights.empty() || has_shadows || has_chrome || has_background;
+    return !nodes.empty() || !lights.empty() || has_shadows || has_chrome || has_background ||
+           clock.present;
   }
 };
 

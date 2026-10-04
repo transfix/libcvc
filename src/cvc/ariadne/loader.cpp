@@ -872,6 +872,21 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   substitute_node(inst, args);
   Widget w = parse_widget(ctx, inst);
   ctx.expanding.erase(name);
+  // §12/§3.0.3b geometry override at the include site: a window `include:` may carry its own
+  // pos/size/layout/frame to place and size the shared panel WITHOUT forking the unit — so a demo
+  // arranges reusable panels (e.g. tile stage_lighting / camera_controls / sim_transport) while the
+  // component stays layout-agnostic. Applied only when the instantiated root is a window/overlay
+  // (the panel case); each key overrides only if present, so an unspecified axis keeps the unit's.
+  if (w.kind == Kind::Window) {
+    if (n["pos"])
+      parse_pos(n, w);
+    if (n["size"])
+      w.size = parse_size(n["size"]);
+    if (n["layout"])
+      w.layout = parse_layout(n["layout"]);
+    if (n["frame"])
+      w.frame_border = parse_frame_border(n["frame"]);
+  }
   return w;
 }
 
@@ -1191,7 +1206,7 @@ Value to_value(const YAML::Node &n) {
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
-         k == "volume" || k == "children";
+         k == "volume" || k == "shader" || k == "children";
 }
 
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
@@ -1223,6 +1238,39 @@ SceneTransferFunction parse_scene_tf(const YAML::Node &t) {
 }
 
 // A scene node (§9.3), recursive over children.
+// A shader surface (§9): `shader: <preset>` (a scalar shorthand) OR a map with an optional
+// `preset`, a `disable_coord_shift` flag, and `vertex`/`fragment` lists of {at, code} GLSL splices.
+SceneShader parse_scene_shader(const YAML::Node &s) {
+  SceneShader sh;
+  if (!s)
+    return sh;
+  sh.present = true;
+  if (s.IsScalar()) { // `shader: terrain_bump` — name a preset
+    sh.preset = s.Scalar();
+    return sh;
+  }
+  if (!s.IsMap())
+    return sh;
+  if (s["preset"])
+    sh.preset = str(s, "preset");
+  sh.disable_coord_shift = flag(s, "disable_coord_shift", false);
+  const auto stages = [](const YAML::Node &seq, std::vector<SceneShaderStage> &out) {
+    if (seq && seq.IsSequence())
+      for (const YAML::Node &st : seq) {
+        if (!st.IsMap())
+          continue;
+        SceneShaderStage stage;
+        stage.at = str(st, "at");
+        stage.code = str(st, "code");
+        if (!stage.at.empty())
+          out.push_back(stage);
+      }
+  };
+  stages(s["vertex"], sh.vertex);
+  stages(s["fragment"], sh.fragment);
+  return sh;
+}
+
 SceneNode parse_scene_node(const YAML::Node &n) {
   SceneNode sn;
   sn.id = str(n, "node", str(n, "id"));
@@ -1392,6 +1440,8 @@ SceneNode parse_scene_node(const YAML::Node &n) {
     }
     sn.volume.tf = parse_scene_tf(vol["transfer_function"]);
   }
+  if (const YAML::Node sh = n["shader"])
+    sn.shader = parse_scene_shader(sh);
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
   // custom node type registered on the cvcGL side reads its own config from there.
   sn.props.kind = Value::Kind::Map;
@@ -1503,6 +1553,23 @@ Scene parse_scene(const YAML::Node &s) {
         for (int i = 0; i < 3; ++i)
           sc.background_bottom[i] = static_cast<float>(bot[i].as<double>());
     }
+  }
+  if (const YAML::Node ck = s["clock"]; ck && ck.IsMap()) {
+    // clock: { scale, paused, speed_key, paused_key, time_key, tick_key } — the scene's simulation
+    // clock (SceneClock). All fields optional: a bare `clock: {}` wires to sim_transport.ari with
+    // the defaults. An explicit empty string for a *_key disables that lane (no steer / no
+    // publish).
+    sc.clock.present = true;
+    sc.clock.scale = num(ck, "scale", sc.clock.scale);
+    sc.clock.paused = flag(ck, "paused", sc.clock.paused);
+    if (ck["speed_key"])
+      sc.clock.speed_key = str(ck, "speed_key");
+    if (ck["paused_key"])
+      sc.clock.paused_key = str(ck, "paused_key");
+    if (ck["time_key"])
+      sc.clock.time_key = str(ck, "time_key");
+    if (ck["tick_key"])
+      sc.clock.tick_key = str(ck, "tick_key");
   }
   return sc;
 }

@@ -19,13 +19,19 @@
 // machinery does the setVisible. The binding holds only state-path strings (no node
 // pointer), so it can never dangle into a torn-down node.
 
+#include <chrono>                 // RealizedScene clock-drive wall-dt timestamp
 #include <cvc/ariadne/bind.h>     // SceneVisibilityBinding
 #include <cvc/ariadne/loader.h>   // LoadResult / CustomRequirement (verify_scene_customs)
+#include <cvc/ariadne/scene.h>    // SceneClock (RealizedScene holds the resolved clock by value)
 #include <cvc/gl/StageLighting.h> // RealizedScene owns any StageLighting rigs
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace cvc {
+class app;
+}
 
 class vtkRenderer;
 
@@ -61,6 +67,20 @@ struct RealizedScene {
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
   // discipline, so a torn-down node's tick is a no-op.
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
+
+  // §9 time. When the scene declared a `clock:` block, tick_scene drives the app's authoritative
+  // cvc::world_clock (app.world_clock()) from these bindings each frame — read sim.speed/sim.paused
+  // (or whatever keys the clock names), set scale/mode, advance by the wall delta, publish the live
+  // world seconds — so a custom_tick can read ONE coherent app.world_clock().t() for the frame and
+  // the reusable sim_transport widget controls it with no host C++. `app` is the owning app (set by
+  // realize_scene); the timestamp/primed pair measures real elapsed between ticks when the caller
+  // does not inject a fixed dt. RealizedScene is MOVED, never copied, so the plain members are
+  // safe; they reset on a scene reload (one dt≈0 frame — app.world_clock() itself persists across
+  // reloads).
+  cvc::ariadne::SceneClock clock; // resolved clock declaration; clock.present gates the drive
+  cvc::app *app = nullptr;        // owning app (world_clock() + state) — set by realize_scene
+  std::chrono::steady_clock::time_point clock_last{}; // last tick_scene time (real-elapsed lane)
+  bool clock_primed = false;                          // false until the first tick seeds clock_last
 };
 
 // Per-frame servicing for realized volren/volslice nodes (§9): each such node needs
@@ -70,7 +90,16 @@ struct RealizedScene {
 // owner/render thread, passing the scene's vtkRenderer (SceneRenderer::renderer()) —
 // the renderer is used only for the multi-slice depth sort. A no-op when there are no
 // volume renderers.
-void tick_scene(RealizedScene &realized, vtkRenderer *renderer);
+//
+// §9 time: when the realized scene declared a `clock:` block, tick_scene ALSO drives the app's
+// authoritative cvc::world_clock here (before the node tickers), so animations read one coherent
+// world time and the sim_transport widget's pause/speed take effect. `wall_dt` is the wall-clock
+// delta to advance by: pass a fixed value (e.g. 1.0/fps) for a DETERMINISTIC offscreen capture;
+// leave it negative (the default) and tick_scene measures real elapsed since the last call — which
+// keeps animation at real-time speed even when the browser renders well under the frame cap (a
+// fixed per-frame dt would make a slow frame rate crawl, the very bug the wall-clock ticks fixed).
+// Scenes without a `clock:` block ignore wall_dt and never touch app.world_clock().
+void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt = -1.0);
 
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME
 // cvc::state prefix the widget Runtime was constructed with (typically
@@ -106,6 +135,19 @@ void register_scene_node_type(const std::string &type, NodeRealizer realizer);
 
 // Whether a custom scene node `type` has a registered realizer (test/introspection).
 bool has_scene_node_type(const std::string &type);
+
+// --- extensibility: named GLSL shader presets (the DSL `shader: { preset: <name> }`) ---------
+//
+// A shader preset is a named effect that configures a GeometryNode's shader (the bump/bark/etc.
+// GLSL + any platform gate living in C++). realize_scene applies the preset named by a node's
+// `shader:` block, then its inline vertex/fragment splices. Registering presets is how cvcGL (and
+// a host) contribute GL effects the pure-data DSL can only name — process-global and thread-safe,
+// register before realize_scene. register_default_shader_presets() installs the built-ins
+// ("terrain_bump", "bark"); it is idempotent and is what the cvcGL extension bundle calls.
+using ShaderPreset = std::function<void(GeometryNode &)>;
+void register_shader_preset(const std::string &name, ShaderPreset preset);
+bool has_shader_preset(const std::string &name);
+void register_default_shader_presets();
 
 // Verify the NODE customs a document declared (`loaded.customs`, from the `customs:`
 // block) against the registered scene node types. The loader already fail-fast-checked

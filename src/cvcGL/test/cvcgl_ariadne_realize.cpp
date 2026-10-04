@@ -13,6 +13,8 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/state.h>       // clock test: read/write the bound sim.* keys
+#include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/gl/GeometryNode.h>
@@ -414,6 +416,49 @@ int main() {
     chk(texWarn, "a bad texture URI -> a warning (never a throw)");
   }
 
+  // ── §9 shaders: a declarative shader: block applies a preset / warns on an unknown one ──
+  {
+    cvc::gl::ariadne::register_default_shader_presets();
+    printf("== shader DSL (presets + inline) ==\n");
+    chk(cvc::gl::ariadne::has_shader_preset("terrain_bump"),
+        "default preset terrain_bump registered");
+    chk(cvc::gl::ariadne::has_shader_preset("bark"), "default preset bark registered");
+
+    SceneGraph sg(app, "shd");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode g; // a known preset applies cleanly
+    g.id = "ground";
+    g.type = "geometry";
+    g.has_heightfield = true;
+    g.heightfield.size = 10.0f;
+    g.heightfield.resolution = 4;
+    g.shader.present = true;
+    g.shader.preset = "terrain_bump";
+    SceneNode bad; // an unknown preset warns but still realizes
+    bad.id = "bad";
+    bad.type = "geometry";
+    bad.source_primitive = "plane";
+    bad.plane_size = 4.0f;
+    bad.shader.present = true;
+    bad.shader.preset = "does_not_exist";
+    scene.nodes.push_back(g);
+    scene.nodes.push_back(bad);
+    std::vector<std::string> warnings;
+    cvc::gl::ariadne::realize_scene(sg, scene, "shd", &warnings);
+    chk(sg.getGraphics("ground") != nullptr, "a node with a known shader preset realizes");
+    chk(sg.getGraphics("bad") != nullptr, "an unknown shader preset still realizes the node");
+    bool known_warned = false, unknown_warned = false;
+    for (const std::string &w : warnings) {
+      if (w.find("unknown shader preset 'does_not_exist'") != std::string::npos)
+        unknown_warned = true;
+      if (w.find("terrain_bump") != std::string::npos)
+        known_warned = true;
+    }
+    chk(unknown_warned, "an unknown shader preset -> a warning");
+    chk(!known_warned, "a known shader preset -> no warning");
+  }
+
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────
   {
     SceneGraph sg(app, "dup");
@@ -524,6 +569,46 @@ int main() {
       chk(approx(world[0], 105),
           "shared tail composes transforms: custom node [100] ∘ child local [5] -> world [105]");
     }
+  }
+
+  // ── §9 time: a `clock:` scene drives app.world_clock() through tick_scene ────
+  {
+    // A clock-only scene (defaults: bind sim.speed / sim.paused, publish sim.time). realize_scene
+    // resolves the key paths with the host prefix; tick_scene then steers app.world_clock() from
+    // them each frame. We inject a fixed wall_dt (the deterministic-capture path) of one quantum,
+    // so the arithmetic is exact: scale 1 → +1 step/quantum, paused → none, scale 2 → +2.
+    SceneGraph sg(app, "clk");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    scene.clock.present = true; // defaults carry sim.speed / sim.paused / sim.time
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "clk");
+
+    printf("== scene clock drives app.world_clock() ==\n");
+    chk(realized.clock.present, "clock declaration carried into the realized scene");
+    chk(realized.clock.speed_key == "clk.sim.speed", "clock speed_key resolved with host prefix");
+    chk(realized.clock.paused_key == "clk.sim.paused",
+        "clock paused_key resolved with host prefix");
+    chk(realized.clock.time_key == "clk.sim.time", "clock time_key resolved with host prefix");
+
+    cvc::world_clock &wc = app.world_clock();
+    wc.reset(); // deterministic start (shared per-app clock; no other section declares one)
+    const double q = wc.fixed_dt();
+    for (int i = 0; i < 4; ++i)
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), q); // 4 quanta of wall time, scale 1
+    chk(approx(wc.t(), 4.0 * q), "scale 1: four injected quanta advance the clock by 4·fixed_dt");
+    chk(approx(cvc::state::instance(app)("clk.sim.time").value<double>(), wc.t()),
+        "sim.time publishes the live world_clock t()");
+
+    cvc::state::instance(app)("clk.sim.paused").value(1); // the sim_transport checkbox 'Paused'
+    const double tp = wc.t();
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), q);
+    chk(approx(wc.t(), tp), "sim.paused freezes the clock (banks no time)");
+
+    cvc::state::instance(app)("clk.sim.paused").value(0);
+    cvc::state::instance(app)("clk.sim.speed").value(2.0); // the Speed slider at 2×
+    const double t2 = wc.t();
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), q); // q wall × 2 = 2 quanta world
+    chk(wc.t() > t2 + 1.5 * q, "sim.speed=2 advances ~two quanta per quantum of wall time");
   }
 
   // ── verify_scene_customs: the customs: gate for NODE types (cvcGL side) ──────

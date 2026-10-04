@@ -355,6 +355,59 @@ windows:
   EXPECT_EQ(bt->on, "go");
 }
 
+// §12/§3.0.3b: a window `include:` site may override the instantiated unit's geometry (pos/size/
+// layout/frame) without forking the shared unit — so a demo arranges reusable panels. An override
+// applies only to the keys present; the component stays layout-agnostic.
+TEST(AriadneLoader, IncludeSiteGeometryOverride) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    id: panel
+    children:
+      - text: hi
+windows:
+  - include: panel
+    pos: [16, 234]
+    size: [340, 132]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  EXPECT_EQ(win->id, "panel"); // still the shared unit, not a fork
+  EXPECT_TRUE(win->has_pos);
+  EXPECT_FLOAT_EQ(win->pos_x, 16.0f);
+  EXPECT_FLOAT_EQ(win->pos_y, 234.0f);
+  EXPECT_TRUE(win->size.w.is_set());
+  EXPECT_FLOAT_EQ(win->size.w.value, 340.0f);
+  EXPECT_FLOAT_EQ(win->size.h.value, 132.0f);
+}
+
+// An include with no geometry keys leaves the unit's own geometry untouched (no accidental
+// zeroing).
+TEST(AriadneLoader, IncludeWithoutGeometryKeepsUnitGeometry) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    id: panel
+    pos: [8, 8]
+    children:
+      - text: hi
+windows:
+  - include: panel
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  EXPECT_TRUE(win->has_pos); // the unit's own pos survives an override-free include
+  EXPECT_FLOAT_EQ(win->pos_x, 8.0f);
+}
+
 // §4/§7 action lane: a program-shaped `on:` (an s-expression, like a computed bind:) is captured
 // on Widget::on VERBATIM — quotes and all — so the runtime can run it through state_exec at drain.
 // A bare event name stays a bare name; the runtime tells them apart by the leading '('.
@@ -880,6 +933,68 @@ scene:
   EXPECT_EQ(d->material_texture, "file://logo.png"); // { uri: } form
 }
 
+// §9 shaders: a `shader:` block — the scalar preset shorthand, and the full map form with a
+// disable_coord_shift flag + ordered vertex/fragment GLSL splices.
+TEST(AriadneScene, ShaderPresetShorthandAndFullBlock) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: terrain
+      type: geometry
+      source: { plane: { size: 10 } }
+      shader: terrain_bump
+    - node: trunk
+      type: geometry
+      source: { plane: { size: 3 } }
+      shader:
+        disable_coord_shift: true
+        vertex:
+          - { at: "//VTK::Normal::Dec", code: "out vec3 c;" }
+        fragment:
+          - { at: "//VTK::Normal::Impl", code: "{ gl_FragData[0]=vec4(1.0); }" }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *t = find_scene_node(r.scene.nodes, "terrain");
+  ASSERT_NE(t, nullptr);
+  EXPECT_TRUE(t->shader.present);
+  EXPECT_EQ(t->shader.preset, "terrain_bump"); // scalar shorthand → a named preset
+  EXPECT_FALSE(t->shader.disable_coord_shift);
+  EXPECT_TRUE(t->shader.vertex.empty());
+
+  const SceneNode *k = find_scene_node(r.scene.nodes, "trunk");
+  ASSERT_NE(k, nullptr);
+  EXPECT_TRUE(k->shader.present);
+  EXPECT_TRUE(k->shader.preset.empty());
+  EXPECT_TRUE(k->shader.disable_coord_shift);
+  ASSERT_EQ(k->shader.vertex.size(), 1u);
+  EXPECT_EQ(k->shader.vertex[0].at, "//VTK::Normal::Dec");
+  EXPECT_EQ(k->shader.vertex[0].code, "out vec3 c;");
+  ASSERT_EQ(k->shader.fragment.size(), 1u);
+  EXPECT_EQ(k->shader.fragment[0].at, "//VTK::Normal::Impl");
+  // A node with no shader: block leaves shader.present false.
+  const SceneNode *none = find_scene_node(r.scene.nodes, "terrain");
+  (void)none;
+}
+
+// A node with no `shader:` block has no shader surface.
+TEST(AriadneScene, NoShaderBlockIsAbsent) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: g
+      type: geometry
+      source: { plane: { size: 2 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *g = find_scene_node(r.scene.nodes, "g");
+  ASSERT_NE(g, nullptr);
+  EXPECT_FALSE(g->shader.present);
+}
+
 // A procedural heightfield geometry source: source: { heightfield: { size, resolution, layers,
 // colors } } — the reusable terrain primitive, authored with no asset.
 TEST(AriadneScene, HeightfieldSource) {
@@ -921,6 +1036,65 @@ scene:
   ASSERT_EQ(t->heightfield.colors.size(), 2u);
   EXPECT_FLOAT_EQ(t->heightfield.colors[0].max_height, 2.0f);
   EXPECT_FLOAT_EQ(t->heightfield.colors[1].color[1], 0.50f);
+}
+
+// §9 time: a `clock:` block declares the scene's simulation clock. A bare `clock: {}` registers the
+// clock and keeps the sim_transport-wired defaults (bind sim.speed / sim.paused, publish sim.time).
+TEST(AriadneScene, ClockBlockDefaults) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock: {}
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_TRUE(r.scene.any()); // a clock-only scene is non-empty (the host must realize it to drive)
+  EXPECT_TRUE(r.scene.clock.present);
+  EXPECT_DOUBLE_EQ(r.scene.clock.scale, 1.0);
+  EXPECT_FALSE(r.scene.clock.paused);
+  EXPECT_EQ(r.scene.clock.speed_key, "sim.speed");
+  EXPECT_EQ(r.scene.clock.paused_key, "sim.paused");
+  EXPECT_EQ(r.scene.clock.time_key, "sim.time");
+  EXPECT_TRUE(r.scene.clock.tick_key.empty()); // tick not published unless asked
+}
+
+// No `clock:` block → the clock is absent and does not make an otherwise-empty scene realize.
+TEST(AriadneScene, NoClockBlockIsAbsent) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: g
+      type: group
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(r.scene.clock.present);
+}
+
+// All clock fields overridden, including custom key paths and an explicit empty key (disable a
+// lane).
+TEST(AriadneScene, ClockBlockOverrides) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock:
+    scale: 2.5
+    paused: true
+    speed_key: demo.rate
+    paused_key: demo.hold
+    time_key: ""
+    tick_key: demo.tick
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_TRUE(r.scene.clock.present);
+  EXPECT_DOUBLE_EQ(r.scene.clock.scale, 2.5);
+  EXPECT_TRUE(r.scene.clock.paused);
+  EXPECT_EQ(r.scene.clock.speed_key, "demo.rate");
+  EXPECT_EQ(r.scene.clock.paused_key, "demo.hold");
+  EXPECT_TRUE(r.scene.clock.time_key.empty()); // explicit "" disables the publish lane
+  EXPECT_EQ(r.scene.clock.tick_key, "demo.tick");
 }
 
 // A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle — the
