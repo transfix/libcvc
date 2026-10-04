@@ -485,4 +485,12 @@ if(CVC_BUILD_PYCVC_GL)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_streaming.py)
   set_tests_properties(pycvc_gl_streaming PROPERTIES ENVIRONMENT
     "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # GraphicsNode.setClipChildren from Python: the wrapped getter/setter and --
+  # with offscreen GL -- children inside / straddling / outside a parent's box
+  # drawn whole / cut / gone, through an off-and-on-again cycle (self-skips
+  # without it; cvcgl_clip_children is the pixel-exact C++ side).
+  add_test(NAME pycvc_gl_clip
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_clip.py)
+  set_tests_properties(pycvc_gl_clip PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL
