@@ -1206,7 +1206,7 @@ Value to_value(const YAML::Node &n) {
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
-         k == "volume" || k == "shader" || k == "children";
+         k == "volume" || k == "shader" || k == "clip" || k == "children";
 }
 
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
@@ -1269,6 +1269,59 @@ SceneShader parse_scene_shader(const YAML::Node &s) {
   stages(s["vertex"], sh.vertex);
   stages(s["fragment"], sh.fragment);
   return sh;
+}
+
+// Clip planes (§9): `clip: { box, planes: [{origin, normal, offset}], children }`, every coordinate
+// in the node's own frame. A non-numeric value leaves that field at its default (the realizer warns
+// about what is left unusable: a zero normal, an inverted box).
+SceneClip parse_scene_clip(const YAML::Node &c) {
+  SceneClip clip;
+  if (!c || !c.IsMap())
+    return clip;
+  clip.present = true;
+  const auto dbl = [](const YAML::Node &v, double &out) {
+    if (v && v.IsScalar())
+      try {
+        out = v.as<double>();
+        return true;
+      } catch (const std::exception &) {
+      }
+    return false;
+  };
+  const auto triple = [&](const YAML::Node &v, double out[3]) {
+    if (v && v.IsSequence() && v.size() >= 3)
+      for (std::size_t i = 0; i < 3; ++i)
+        dbl(v[i], out[i]);
+  };
+  const YAML::Node box = c["box"];
+  if (box && box.IsSequence() && box.size() >= 6) {
+    clip.has_box = true;
+    for (std::size_t i = 0; i < 6; ++i)
+      dbl(box[i], clip.box[i]);
+  } else if (box && box.IsMap() && box["min"] && box["max"]) {
+    clip.has_box = true;
+    triple(box["min"], clip.box);
+    triple(box["max"], clip.box + 3);
+  }
+  const YAML::Node planes = c["planes"];
+  if (planes && planes.IsSequence())
+    for (const YAML::Node &p : planes) {
+      if (!p.IsMap())
+        continue;
+      SceneClipPlane cp;
+      triple(p["origin"], cp.origin);
+      triple(p["normal"], cp.normal);
+      const YAML::Node off = p["offset"];
+      if (off && off.IsMap()) { // { bind: <path>, default: <d> }
+        cp.offset_bind = str(off, "bind");
+        cp.offset = num(off, "default", 0.0);
+      } else if (off && off.IsScalar() && !dbl(off, cp.offset)) {
+        cp.offset_bind = off.Scalar(); // not a number: a state path
+      }
+      clip.planes.push_back(cp);
+    }
+  clip.children = flag(c, "children", false);
+  return clip;
 }
 
 SceneNode parse_scene_node(const YAML::Node &n) {
@@ -1442,6 +1495,7 @@ SceneNode parse_scene_node(const YAML::Node &n) {
   }
   if (const YAML::Node sh = n["shader"])
     sn.shader = parse_scene_shader(sh);
+  sn.clip = parse_scene_clip(n["clip"]);
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
   // custom node type registered on the cvcGL side reads its own config from there.
   sn.props.kind = Value::Kind::Map;

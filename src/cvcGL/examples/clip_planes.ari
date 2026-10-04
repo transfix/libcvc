@@ -1,0 +1,70 @@
+# clip_planes.ari — clip planes declared on scene nodes (roadmap §9.10), with a live cut.
+#
+# A cut-away bunny: a `group` is a clip REGION for everything below it — a section plane whose offset
+# is bound to the "Section x" slider, plus a fixed cap — and a second bunny is cut by a box declared
+# in its OWN coordinates, so the box travels with that node's `transform:`. Every clip coordinate is
+# in the declaring node's own frame (where its geometry is defined, before its transform); a plane
+# keeps the side its normal points into. The host is the generic `ariadne_hello` runner.
+#
+#   ariadne_hello clip_planes.ari                                  # navigable window
+#   ariadne_hello clip_planes.ari --offscreen --png clip.png       # one captured frame
+#
+# Desktop GL only: VTK's low-memory mapper (the WebGL/GLES default) has no clip-plane support, so
+# under it the bunnies draw whole (the realizer warns).
+
+meta:
+  name: Clip planes (Ariadne)
+  author: cvc
+  min_libcvc: 3.4.0
+
+windows:
+  - window: Clip
+    id: clip
+    children:
+      - text: "The left bunny's group clips it: keep x >= Section x, and z <= 60."
+      - slider_float: Section x
+        bind: clip.x
+        lo: -70
+        hi: 70
+        def: -5
+      - text: "The right bunny keeps the inside of a box in its own coordinates (its lower half)."
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # A clip REGION: the planes clip everything below the group, in the group's own frame.
+    - node: cutaway
+      type: group
+      transform: { position: [-75, 0, 0] }
+      clip:
+        planes:
+          - { normal: [1, 0, 0], offset: clip.x }      # keep x >= clip.x (a live section)
+          - { origin: [0, 0, 60], normal: [0, 0, -1] } # keep z <= 60 (a fixed cap)
+      children:
+        - node: bunny
+          type: geometry
+          source: { file: stanford.bunny }
+          fit: { height: 100, up: y }
+          material: { color: [0.85, 0.82, 0.88], ambient: 0.22, diffuse: 0.9, specular: 0.25, specular_power: 24 }
+    # A box in the node's OWN coordinates (the fitted bunny stands on z = 0): it moves with the node.
+    - node: half_bunny
+      type: geometry
+      source: { file: stanford.bunny }
+      fit: { height: 100, up: y }
+      transform: { position: [75, 0, 0] }
+      material: { color: [0.55, 0.75, 0.95], ambient: 0.22, diffuse: 0.9 }
+      clip:
+        box: { min: [-80, -80, 0], max: [80, 80, 50] }
+    - node: ground
+      type: geometry
+      source: { plane: { size: 440 } }
+      material: { color: [0.32, 0.34, 0.38], ambient: 0.35, diffuse: 0.85 }
+  lights:
+    - light: studio
+      rig: three_point
+      stage: { center: [0, 0, 50], radius: 140 }
+      key: { intensity: 1.9, azimuth: -38, elevation: 52, cone: 50 }
+      fill: 0.85
+      back: 0.6
+      ambient: 0.4

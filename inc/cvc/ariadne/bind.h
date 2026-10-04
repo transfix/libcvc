@@ -12,9 +12,12 @@
 
 #include <boost/lexical_cast.hpp>
 #include <cctype>
+#include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <exception>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -182,6 +185,62 @@ inline void sync_scene_visibility(cvc::app &app,
   for (const SceneVisibilityBinding &b : bindings) {
     const int v = read_bool_or(app, b.source_path, b.default_visible ? 1 : 0); // visible = a bool
     write<int>(app, b.target_path, v);
+  }
+}
+
+// A node's clip planes with at least one BOUND offset (§9 clip: `offset: <path>`), e.g. a slider
+// sliding a cut. Like SceneVisibilityBinding it holds absolute state paths only, resolved once at
+// realize time, never a node pointer. `planes` is the node's WHOLE plane list in order (box faces
+// included), in the node's own coordinates with unit normals; each frame sync_scene_clip re-derives
+// it -- a bound plane passes through origin + offset·n̂ -- and writes the node's `clip_planes` key
+// (px,py,pz,nx,ny,nz per plane) when it changed. The node applies a same-count change in place.
+struct SceneClipBinding {
+  struct Plane {
+    double origin[3] = {0.0, 0.0, 0.0};
+    double normal[3] = {0.0, 0.0, 1.0}; // unit
+    double offset = 0.0;       // the literal offset; the fallback while offset_source is unset
+    std::string offset_source; // resolved bind path (read WITHOUT seeding); empty = literal
+  };
+  std::string target_path; // the node's `<node-state-path>.clip_planes` key
+  std::vector<Plane> planes;
+  std::string last; // the planes last written, so an unchanged frame writes nothing
+};
+
+// The `clip_planes` encoding of `planes` with their offsets as given (`offsets[i]` for plane i):
+// each plane through origin + offset·n̂. 17 significant digits round-trip the doubles exactly.
+inline std::string clip_planes_csv(const std::vector<SceneClipBinding::Plane> &planes,
+                                   const std::vector<double> &offsets) {
+  std::ostringstream o;
+  o << std::setprecision(17);
+  for (std::size_t i = 0; i < planes.size(); ++i) {
+    const SceneClipBinding::Plane &p = planes[i];
+    const double d = i < offsets.size() ? offsets[i] : p.offset;
+    for (int k = 0; k < 3; ++k)
+      o << (i || k ? "," : "") << p.origin[k] + d * p.normal[k];
+    for (int k = 0; k < 3; ++k)
+      o << "," << p.normal[k];
+  }
+  return o.str();
+}
+
+// Poll every clip binding once: read the bound offsets (falling back to the literal while a key is
+// unset, a non-number counting as unset), and write the node's planes when they changed. State
+// only (no VTK) — call each frame on the owner/render thread (tick_scene does) so the node moves
+// its planes inline.
+inline void sync_scene_clip(cvc::app &app, std::vector<SceneClipBinding> &bindings) {
+  for (SceneClipBinding &b : bindings) {
+    std::vector<double> offsets(b.planes.size());
+    for (std::size_t i = 0; i < b.planes.size(); ++i) {
+      const SceneClipBinding::Plane &p = b.planes[i];
+      const double v =
+          p.offset_source.empty() ? p.offset : read_or<double>(app, p.offset_source, p.offset);
+      offsets[i] = std::isfinite(v) ? v : p.offset;
+    }
+    std::string csv = clip_planes_csv(b.planes, offsets);
+    if (csv == b.last)
+      continue;
+    write<std::string>(app, b.target_path, csv);
+    b.last = std::move(csv);
   }
 }
 

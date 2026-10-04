@@ -1894,6 +1894,7 @@ scene:
       material: { color: [0.8,0.8,0.9], ambient: 0.2, diffuse: 0.8 }
       transform: { position: [0,0,0], rotation: [0,0,0], scale: 1 }
       visible: sim.show_bunny            # bind visibility to state (or an expression)
+      clip: { planes: [ { normal: [1, 0, 0], offset: sim.cut_x } ] }   # §9.10, the node's own coords
       children: [ ... ]                  # real path <prefix>.graphics.root.children.<name> (see §11)
 ```
 
@@ -1910,7 +1911,7 @@ path or a `state_exec` expression, same binding rules as widgets (§3.5, §4).
 | `volume` | VolumeNode | `source` (volume); `transfer_function` {color:[s,r,g,b,…], opacity:[s,a,…]}; shading/ambient/diffuse/sample_distance |
 | `volren` | VolRenNode | one-or-many volumes via the cvc::volren raycaster + `render_settings` (CUDA/software) |
 | `volslice` | VolSliceNode | one volume as view-aligned composited slices |
-| `group` | empty GraphicsNode | a transform/clip parent for `children` |
+| `group` | empty GraphicsNode | a transform/clip parent for `children` (a `clip:` on a group is a clip region for its subtree, §9.10) |
 | `light` | LightNode | parentable, state-bound spot/directional/fill (or use `scene.lights`) |
 | — | GridNode / AxisNode | auto chrome, toggled via `scene.chrome` |
 
@@ -2582,6 +2583,75 @@ sampling half already exists; only "render a scene into the FBO" (vs OceanFFT's 
 
 ---
 
+### 9.10 Clipping — `clip:`
+
+*Implemented.* Any node may carry a `clip:` block: half-spaces that cut away part of what it draws.
+
+```yaml
+scene:
+  nodes:
+    - node: region                     # a group as a clip REGION for everything below it
+      type: group
+      transform: { position: [10, 0, 0] }
+      clip:
+        box: [-1, -1, -1, 1, 1, 1]     # keep the inside; or box: { min: [..], max: [..] }
+        planes:                         # and/or half-spaces, each keeping the side its normal points into
+          - { origin: [0, 0, 0.5], normal: [0, 0, -1] }          # keep z <= 0.5
+          - { normal: [1, 0, 0], offset: sim.cut_x }             # a live cut: offset bound to state
+          - { normal: [0, 1, 0], offset: { bind: sim.cut_y, default: -0.25 } }
+      children:
+        - node: bunny
+          type: geometry
+          source: { file: bunny.ply }
+          clip: { planes: [ { normal: [0, -1, 0] } ] }           # its own plane, ON TOP of the region's
+    - node: head
+      type: volume
+      source: { file: head.rawiv }
+      clip: { children: true }         # clip everything below `head` to head's own volume box
+```
+
+**Coordinates.** Every clip coordinate is in the **declaring node's own frame**: the frame its geometry or
+volume is defined in, *before* its `transform:`. The clip therefore moves, turns and scales with the node,
+like its geometry (it is applied through `GraphicsNode::setClipPlanes`, which re-poses the planes on every
+transform change, including the per-frame pose path). A plane inherited from an ancestor stays in that
+ancestor's frame.
+
+**Which side is kept.** A plane keeps the side its normal points **into**: with n̂ the unit normal, a point
+x survives where n̂·(x − origin) ≥ `offset`, i.e. the plane passes through origin + offset·n̂. `origin`
+defaults to the node's origin and `offset` to 0, so `{ normal: [1,0,0], offset: 0.3 }` keeps x ≥ 0.3.
+This is VTK's convention and `cvc::volren::cut_plane`'s. A `box:` contributes its six inward faces (keep
+the inside).
+
+**Live cuts.** `offset:` may be a number, a bare state path, or `{ bind, default }`. A bound offset
+resolves with the same rule as widget binds (§3.5), is read without seeding (the widget that owns the key
+seeds it; `default` is only the fallback while it is unset, and a non-number counts as unset), and is
+re-read every frame by `tick_scene`. A slider on the same path drags the cut. Moving a plane is cheap:
+the plane objects are updated in place, with no re-hand and no shader rebuild.
+
+**What it clips.** A node's `clip:` clips the node **and everything below it**, on top of every
+ancestor's: a node is clipped by its own planes first, then its parent's, and so on up.
+`children: true` is the other source: everything below the node is clipped to the node's **own
+bounds** (the extent of its mesh / volume, refitted when its data changes), and the node itself is not.
+Clips are also reactive node state: `<node>.clip_planes` (`px,py,pz,nx,ny,nz` per plane, local frame)
+and `<node>.clip_children` (§11), writable from widgets, actions or Python.
+
+**Per renderer.**
+
+| `type:` | clipped by | at most |
+|---|---|---|
+| `geometry` | VTK's poly-data mapper (shader clip distances) | 6 planes |
+| `volume` | VTK's GPU volume mapper | 8 |
+| `volren` | `cvc::volren` cut planes (the volume, never its billboard quad) | 8 (the CUDA limit; more falls back to the CPU raycaster) |
+| `volslice` | its slice polygons, through the poly-data mapper | 6 |
+| `group` | nothing of its own; passes its planes down | — |
+
+Over the cap, the **nearest** planes apply (the node's own, then its parent's, …) and the realizer warns.
+**VTK 9.5's low-memory mapper honours no clip planes at all**, and it is the WebGL/GLES default (and what
+`CVCGL_LOWMEM_MAPPER=force` selects natively). A clipped node there draws unclipped, and the realizer warns.
+A zero normal or an inverted `box:` is warned about and dropped. Clip and `shader:` coexist: the shader
+presets leave VTK's `//VTK::Clip::Dec/Impl` markers in place, and an inline `shader:` stage must re-include
+any clip marker it replaces.
+
 ## 10. Transfer functions
 
 A transfer function is **structured, typed data**, not a stringified scalar — so it rides the
@@ -2728,7 +2798,7 @@ prefix) is a *direct child* of the app root, and so are `state_exec` and the UI 
 root concretely holds:
 
 ```
-cvcgl.graphics.root.children.<node>.{position,rotation,scale,matrix,show_bbox,children.*}   # scene nodes (CSV keys)
+cvcgl.graphics.root.children.<node>.{position,rotation,scale,matrix,show_bbox,clip_planes,clip_children,children.*}   # scene nodes (CSV keys)
 cvcgl.shadows.{enabled,resolution,interval}
 cvcgl.lighting.{key_intensity,…,stage_x,…,ambient,show_gizmos,…}          # the StageLighting rig
 cvcgl.viewers.<v>.{camera.*, ui.*, hud.*, layout.*}                        # per-viewer objects

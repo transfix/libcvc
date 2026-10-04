@@ -284,6 +284,102 @@ void apply_visibility(GraphicsNode &node, const cvc::ariadne::SceneNode &n, cvc:
   binds.push_back({source, target, n.visible_default});
 }
 
+// Apply a node's `clip:` block (§9 clip). Every plane is in the node's OWN coordinates (where its
+// geometry / volume is defined, before `transform:`): GraphicsNode::setClipPlanes takes them as
+// given and keeps them in that frame, so the clip moves, turns and scales with the node. The box's
+// six faces come first, then `planes:`. A bound `offset:` is read now -- WITHOUT seeding, a
+// follower like `visible:` -- and recorded as a SceneClipBinding that tick_scene re-reads every
+// frame. A plane it cannot use (a zero normal, an inverted box) is warned about and dropped.
+void apply_clip(GraphicsNode &node, const cvc::ariadne::SceneNode &n, cvc::app &app,
+                const std::string &bind_prefix, std::vector<cvc::ariadne::SceneClipBinding> &binds,
+                std::vector<std::string> *warnings) {
+  const cvc::ariadne::SceneClip &c = n.clip;
+  if (!c.present)
+    return;
+  using BoundPlane = cvc::ariadne::SceneClipBinding::Plane;
+  std::vector<BoundPlane> planes;
+  if (c.has_box) {
+    const double *b = c.box;
+    if (b[0] > b[3] || b[1] > b[4] || b[2] > b[5]) {
+      warn(warnings, "ari: scene node '" + n.id + "': clip.box has min > max on an axis — ignored");
+    } else {
+      for (const GraphicsNode::ClipPlane &f :
+           GraphicsNode::boxClipPlanes(cvc::bounding_box(b[0], b[1], b[2], b[3], b[4], b[5]))) {
+        BoundPlane q;
+        for (int k = 0; k < 3; ++k) {
+          q.origin[k] = f.origin[k];
+          q.normal[k] = f.normal[k];
+        }
+        planes.push_back(q);
+      }
+    }
+  }
+  bool bound = false;
+  for (std::size_t i = 0; i < c.planes.size(); ++i) {
+    const cvc::ariadne::SceneClipPlane &p = c.planes[i];
+    const double len = std::sqrt(p.normal[0] * p.normal[0] + p.normal[1] * p.normal[1] +
+                                 p.normal[2] * p.normal[2]);
+    if (!(len > 0.0) || !std::isfinite(len)) {
+      warn(warnings, "ari: scene node '" + n.id + "': clip.planes[" + std::to_string(i) +
+                         "] has a zero normal — ignored");
+      continue;
+    }
+    BoundPlane q;
+    for (int k = 0; k < 3; ++k) {
+      q.origin[k] = p.origin[k];
+      q.normal[k] = p.normal[k] / len;
+    }
+    q.offset = p.offset;
+    if (!p.offset_bind.empty()) {
+      q.offset_source = cvc::ariadne::resolve_bind(bind_prefix, p.offset_bind);
+      bound = true;
+    }
+    planes.push_back(q);
+  }
+  // Apply now, bound offsets at their live value, so the first frame is already right.
+  std::vector<GraphicsNode::ClipPlane> local;
+  for (const BoundPlane &q : planes) {
+    const double d = q.offset_source.empty()
+                         ? q.offset
+                         : cvc::ariadne::read_or<double>(app, q.offset_source, q.offset);
+    GraphicsNode::ClipPlane cp;
+    for (int k = 0; k < 3; ++k) {
+      cp.origin[k] = q.origin[k] + (std::isfinite(d) ? d : q.offset) * q.normal[k];
+      cp.normal[k] = q.normal[k];
+    }
+    local.push_back(cp);
+  }
+  node.setClipPlanes(local);
+  if (bound)
+    binds.push_back({node.stateName("clip_planes"), planes, std::string()});
+  if (c.children)
+    node.setClipChildren(true);
+}
+
+// Say when a node's renderer cannot honour what clips it (its own planes and every ancestor's --
+// the ancestors are realized first, so the count is final here). Only for the built-in types that
+// draw, plus any node that reports a cap: a group clips nothing of its own.
+void warn_clip_capability(GraphicsNode &node, const cvc::ariadne::SceneNode &n,
+                          std::vector<std::string> *warnings) {
+  const int count = node.clipPlaneCount();
+  if (count == 0)
+    return;
+  const int cap = node.maxClipPlanes();
+  const bool draws = n.type == "geometry" || n.type == "volume" || n.type == "volren" ||
+                     n.type == "volslice" || cap > 0;
+  if (!draws)
+    return;
+  if (cap == 0)
+    warn(warnings, "ari: scene node '" + n.id + "' is clipped (" + std::to_string(count) +
+                       " plane(s)) but its renderer has no clip-plane support (VTK's low-memory "
+                       "mapper, the WebGL/GLES default) — it draws unclipped");
+  else if (count > cap)
+    warn(warnings, "ari: scene node '" + n.id + "' is clipped by " + std::to_string(count) +
+                       " planes but its renderer honours " + std::to_string(cap) +
+                       "; the nearest " + std::to_string(cap) +
+                       " apply (its own first, then its parent's, ...)");
+}
+
 // Translate the backend-neutral SceneVolRen into cvc::volren settings + apply them to
 // a freshly created VolRenNode. Warns (never throws) on configs that render blank.
 void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const cvc::volume &vol,
@@ -637,6 +733,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     return;
   apply_transform(*node, n); // the node's LOCAL transform (composed with the parent's)
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
+  apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
+  warn_clip_capability(*node, n, warnings);
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
@@ -814,6 +912,11 @@ void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt) 
     if (!c.tick_key.empty())
       cvc::ariadne::write<double>(app, c.tick_key, static_cast<double>(wc.tick()));
   }
+
+  // §9 clip: bound `offset:`s -> the nodes' clip_planes keys, before the tickers (a volren node
+  // reads its planes in tick()).
+  if (realized.app)
+    cvc::ariadne::sync_scene_clip(*realized.app, realized.clip);
 
   for (const std::weak_ptr<VolRenNode> &w : realized.volren_ticks)
     if (std::shared_ptr<VolRenNode> n = w.lock())
