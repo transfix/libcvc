@@ -604,11 +604,6 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
         }
       }
     }
-    // shader: { preset | vertex | fragment } — the declarative GLSL surface (GeometryNode shader
-    // replacements). Applied last so it can override material defaults; warns (never throws) on an
-    // unknown preset so the rest of the scene still realizes.
-    if (g && n.shader.present)
-      apply_shader(*g, n, warnings);
     node = g;
   } else if (n.type == "volume") {
     if (n.source_file.empty()) {
@@ -733,6 +728,13 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     return;
   apply_transform(*node, n); // the node's LOCAL transform (composed with the parent's)
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
+  // shader: { preset | vertex | fragment } — the declarative GLSL surface. Applied in the shared
+  // tail (not just the built-in geometry branch) so a CUSTOM node type whose realizer returns a
+  // GeometryNode (e.g. an L-system forest wanting `shader: { preset: bark }`) is shaded too. A
+  // non-geometry node (volume/group) silently ignores a shader block.
+  if (n.shader.present)
+    if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
+      apply_shader(*g, n, warnings);
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
 
