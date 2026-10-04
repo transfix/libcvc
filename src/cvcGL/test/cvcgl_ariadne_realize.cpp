@@ -19,6 +19,7 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LowMemoryPolyDataMapper.h> // clip test: the low-memory mapper honours no planes
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/VolRenNode.h>
@@ -30,9 +31,12 @@
 #include <cvc/volume/volume_file_io.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
+#include <vtkPlane.h> // clip test: the planes handed to a node's renderer
+#include <vtkPlaneCollection.h>
 #include <vtkRenderer.h>
 
 using cvc::ariadne::Scene;
+using cvc::ariadne::SceneClipPlane;
 using cvc::ariadne::SceneHeightColorBand;
 using cvc::ariadne::SceneHeightLayer;
 using cvc::ariadne::SceneIsosurface;
@@ -744,6 +748,161 @@ int main() {
     chk(sg.shadowUpdateInterval() == 1, "shadow update interval applied from the DSL");
     chk(survey(view.renderer()).positional + survey(view.renderer()).directional >= 1,
         "tuned rig still adds lights");
+  }
+
+  // ── §9 clip: planes in the node's own coordinates, a group as a clip region, a bound offset ────
+  {
+    SceneGraph sg(app, "clp");
+    SceneRenderer view(sg, 128, 128, /*offscreen=*/true, "main");
+    sg.setDiagnosticChromeVisible(false);
+    Scene scene;
+    SceneNode region; // a group moved to x = 10, clipping its subtree to y >= 0 (its own frame)
+    region.id = "region";
+    region.type = "group";
+    region.has_transform = true;
+    region.position[0] = 10;
+    region.clip.present = true;
+    SceneClipPlane keepUp;
+    keepUp.normal[0] = 0, keepUp.normal[1] = 1, keepUp.normal[2] = 0;
+    region.clip.planes.push_back(keepUp);
+    SceneNode quad; // inside it, at local x = 0.5, its own cut x >= offset (bound to sim.cut)
+    quad.id = "quad";
+    quad.type = "geometry";
+    quad.source_primitive = "plane";
+    quad.plane_size = 4.0f;
+    quad.has_transform = true;
+    quad.position[0] = 0.5;
+    quad.clip.present = true;
+    SceneClipPlane cut;
+    cut.normal[0] = 2, cut.normal[1] = 0, cut.normal[2] = 0; // not unit: normalized on realize
+    cut.offset = 0.25;
+    cut.offset_bind = "sim.cut";
+    quad.clip.planes.push_back(cut);
+    region.children.push_back(quad);
+    SceneNode host; // clip.children: its child is clipped to the host's own (mesh) bounds
+    host.id = "host";
+    host.type = "geometry";
+    host.source_primitive = "plane";
+    host.plane_size = 2.0f;
+    host.clip.present = true;
+    host.clip.children = true;
+    SceneNode guest;
+    guest.id = "guest";
+    guest.type = "geometry";
+    guest.source_primitive = "plane";
+    guest.plane_size = 6.0f;
+    host.children.push_back(guest);
+    SceneNode junk; // a zero normal and an inverted box: warned about and dropped
+    junk.id = "junk";
+    junk.type = "geometry";
+    junk.source_primitive = "plane";
+    junk.clip.present = true;
+    junk.clip.has_box = true;
+    const double inverted[6] = {1, 0, 0, -1, 1, 1};
+    std::copy(inverted, inverted + 6, junk.clip.box);
+    SceneClipPlane zero;
+    zero.normal[0] = zero.normal[1] = zero.normal[2] = 0;
+    junk.clip.planes.push_back(zero);
+    SceneNode many; // a box (6) + one plane on a mesh: over the poly-data mapper's 6
+    many.id = "many";
+    many.type = "geometry";
+    many.source_primitive = "plane";
+    many.clip.present = true;
+    many.clip.has_box = true;
+    const double unit[6] = {-1, -1, -1, 1, 1, 1};
+    std::copy(unit, unit + 6, many.clip.box);
+    many.clip.planes.push_back(keepUp);
+    scene.nodes = {region, host, junk, many};
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "clp", &warnings);
+    sg.processEvents();
+
+    printf("== clip: own coordinates, accumulation, bound offset ==\n");
+    auto rg = sg.getGraphics("region");
+    std::shared_ptr<cvc::gl::GraphicsNode> qd = rg ? rg->findChildByName("quad") : nullptr;
+    chk(qd != nullptr, "clip: the quad realized under the region");
+    vtkPlaneCollection *pc = qd ? qd->getAppliedClipPlanes() : nullptr;
+    chk(pc && pc->GetNumberOfItems() == 2,
+        "clip: the quad is clipped by its own plane + the region's");
+    if (pc && pc->GetNumberOfItems() == 2) {
+      double *o = pc->GetItem(0)->GetOrigin(), *nrm = pc->GetItem(0)->GetNormal();
+      printf("     quad cut: origin (%g,%g,%g) normal (%g,%g,%g)\n", o[0], o[1], o[2], nrm[0],
+             nrm[1], nrm[2]);
+      chk(approx(o[0], 10.75) && approx(nrm[0], 1.0),
+          "clip: the quad's plane is in ITS frame — 10 (region) + 0.5 (quad) + 0.25 (offset)");
+      chk(approx(pc->GetItem(1)->GetNormal()[1], 1.0) &&
+              approx(pc->GetItem(1)->GetOrigin()[0], 10.0),
+          "clip: the region's plane is in the region's frame (through x = 10, keep y >= 0)");
+      chk(realized.clip.size() == 1, "clip: one bound offset -> one SceneClipBinding");
+      cvc::state::instance(app)("clp.sim.cut").value(1.0);
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+      sg.processEvents();
+      chk(qd->getAppliedClipPlanes() == pc && approx(pc->GetItem(0)->GetOrigin()[0], 11.5),
+          "clip: sim.cut = 1 -> tick_scene slides the quad's cut to x = 11.5, in place");
+    }
+    auto hs = sg.getGraphics("host");
+    std::shared_ptr<cvc::gl::GraphicsNode> gs = hs ? hs->findChildByName("guest") : nullptr;
+    chk(hs && gs && hs->getAppliedClipPlanes() == nullptr && gs->getAppliedClipPlanes() &&
+            gs->getAppliedClipPlanes()->GetNumberOfItems() == 6,
+        "clip.children: the child is clipped to the host's box, the host is not");
+    bool zeroWarned = false, boxWarned = false, capWarned = false;
+    for (const std::string &w : warnings) {
+      zeroWarned =
+          zeroWarned || w.find("'junk': clip.planes[0] has a zero normal") != std::string::npos;
+      boxWarned = boxWarned || w.find("'junk': clip.box has min > max") != std::string::npos;
+      capWarned = capWarned || w.find("'many' is clipped by 7 planes but its renderer honours 6") !=
+                                   std::string::npos;
+    }
+    chk(zeroWarned && boxWarned, "clip: a zero normal and an inverted box are warned about");
+    auto jk = sg.getGraphics("junk");
+    chk(jk && jk->clipPlaneCount() == 0, "clip: ... and dropped");
+    chk(capWarned, "clip: 7 planes on a mesh -> a warning that the nearest 6 apply");
+
+    printf("== clip: the cut on screen ==\n");
+    // Just the quad, viewed head-on: x >= 11.5 (and y >= 0) is all that is left of it.
+    for (const char *id : {"host", "junk", "many"})
+      if (auto n = sg.getGraphics(id))
+        n->setVisible(false);
+    view.setBackground(0, 0, 0);
+    view.setCamera(10.5, 0, 12, 10.5, 0, 0, 0, 1, 0, 30.0, 1.0, 100.0);
+    const std::vector<unsigned char> f = view.frameRGB();
+    const int w = view.frameWidth(), h = view.frameHeight();
+    auto litAt = [&](double x, double y) {
+      view.renderer()->SetWorldPoint(x, y, 0, 1);
+      view.renderer()->WorldToDisplay();
+      double d[3];
+      view.renderer()->GetDisplayPoint(d);
+      const int px = std::clamp(int(d[0]), 0, w - 1), py = std::clamp(int(d[1]), 0, h - 1);
+      const unsigned char *c = &f[3 * (std::size_t(py) * w + px)];
+      return c[0] > 40 || c[1] > 40 || c[2] > 40;
+    };
+    if (f.size() == std::size_t(w) * h * 3 && litAt(12.0, 1.0)) {
+      chk(!litAt(11.0, 1.0), "clip: on screen, nothing of the quad left of its cut (x < 11.5)");
+      chk(!litAt(12.0, -1.0), "clip: ... nor below the region's plane (y < 0)");
+    } else {
+      printf("     (skipped: this build did not rasterise)\n");
+    }
+  }
+  {
+    // VTK's low-memory mapper (the WebGL/GLES default) honours no planes: the realizer says so.
+    cvc::gl::setLowMemoryMapperPolicy(cvc::gl::LowMemoryMapperPolicy::Force);
+    SceneGraph sg(app, "clplm");
+    Scene scene;
+    SceneNode q;
+    q.id = "q";
+    q.type = "geometry";
+    q.source_primitive = "plane";
+    q.clip.present = true;
+    q.clip.planes.push_back(SceneClipPlane());
+    scene.nodes.push_back(q);
+    std::vector<std::string> warnings;
+    cvc::gl::ariadne::realize_scene(sg, scene, "clplm", &warnings);
+    bool warned = false;
+    for (const std::string &w : warnings)
+      warned = warned || w.find("'q' is clipped (1 plane(s)) but its renderer has no clip-plane "
+                                "support") != std::string::npos;
+    chk(warned, "clip: under the low-memory mapper -> a warning that the node draws unclipped");
+    cvc::gl::setLowMemoryMapperPolicy(cvc::gl::LowMemoryMapperPolicy::Auto);
   }
 
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");

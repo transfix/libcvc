@@ -995,6 +995,114 @@ scene:
   EXPECT_FALSE(g->shader.present);
 }
 
+// §9 clip: a `clip:` block — box (list or {min,max}), planes with a literal / bound /
+// {bind,default} offset, and `children:` — every coordinate in the node's own frame. `clip` is a
+// known key (it is not swept into a custom node's props), and a node without one has clip.present
+// false.
+TEST(AriadneScene, ClipBoxPlanesOffsetsChildren) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: region
+      type: group
+      clip:
+        box: [-1, -2, -3, 1, 2, 3]
+        planes:
+          - { origin: [0, 0, 0.5], normal: [0, 0, -1] }
+          - { normal: [1, 0, 0], offset: 0.25 }
+          - { normal: [0, 1, 0], offset: sim.cut_y }
+          - { normal: [0, 0, 2], offset: { bind: sim.cut_z, default: -0.5 } }
+        children: true
+      children:
+        - node: mesh
+          type: geometry
+          source: { plane: { size: 2 } }
+          clip: { box: { min: [0, 0, 0], max: [1, 1, 1] } }
+        - node: plain
+          type: geometry
+          source: { plane: { size: 2 } }
+    - node: custom_thing
+      type: my_custom
+      clip: { planes: [ { normal: [1, 0, 0] } ] }
+      size: 3
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *g = find_scene_node(r.scene.nodes, "region");
+  ASSERT_NE(g, nullptr);
+  const SceneClip &c = g->clip;
+  EXPECT_TRUE(c.present);
+  ASSERT_TRUE(c.has_box);
+  EXPECT_DOUBLE_EQ(c.box[0], -1.0);
+  EXPECT_DOUBLE_EQ(c.box[4], 2.0);
+  EXPECT_DOUBLE_EQ(c.box[5], 3.0);
+  ASSERT_EQ(c.planes.size(), 4u);
+  EXPECT_DOUBLE_EQ(c.planes[0].origin[2], 0.5);
+  EXPECT_DOUBLE_EQ(c.planes[0].normal[2], -1.0);
+  EXPECT_DOUBLE_EQ(c.planes[0].offset, 0.0);
+  EXPECT_TRUE(c.planes[0].offset_bind.empty());
+  EXPECT_DOUBLE_EQ(c.planes[1].offset, 0.25); // a literal offset
+  EXPECT_TRUE(c.planes[1].offset_bind.empty());
+  EXPECT_EQ(c.planes[2].offset_bind, "sim.cut_y"); // a bare path binds
+  EXPECT_DOUBLE_EQ(c.planes[2].offset, 0.0);
+  EXPECT_EQ(c.planes[3].offset_bind, "sim.cut_z"); // { bind, default }
+  EXPECT_DOUBLE_EQ(c.planes[3].offset, -0.5);
+  EXPECT_DOUBLE_EQ(c.planes[3].normal[2], 2.0); // as written; the realizer normalizes
+  EXPECT_TRUE(c.children);
+
+  const SceneNode *m = find_scene_node(r.scene.nodes, "mesh");
+  ASSERT_NE(m, nullptr);
+  ASSERT_TRUE(m->clip.has_box); // the { min, max } form
+  EXPECT_DOUBLE_EQ(m->clip.box[0], 0.0);
+  EXPECT_DOUBLE_EQ(m->clip.box[3], 1.0);
+  EXPECT_TRUE(m->clip.planes.empty());
+  EXPECT_FALSE(m->clip.children);
+
+  const SceneNode *p = find_scene_node(r.scene.nodes, "plain");
+  ASSERT_NE(p, nullptr);
+  EXPECT_FALSE(p->clip.present);
+
+  // A custom node keeps its own keys in props, but `clip` is parsed, not swept in there.
+  const SceneNode *cu = find_scene_node(r.scene.nodes, "custom_thing");
+  ASSERT_NE(cu, nullptr);
+  EXPECT_TRUE(cu->clip.present);
+  ASSERT_EQ(cu->clip.planes.size(), 1u);
+  bool sawClip = false, sawSize = false;
+  for (const auto &kv : cu->props.entries) {
+    sawClip = sawClip || kv.first == "clip";
+    sawSize = sawSize || kv.first == "size";
+  }
+  EXPECT_FALSE(sawClip);
+  EXPECT_TRUE(sawSize);
+}
+
+// Malformed clip values leave fields at their defaults rather than failing the load.
+TEST(AriadneScene, ClipMalformedValuesDefault) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: a
+      type: group
+      clip:
+        box: [0, 0, 0]
+        planes:
+          - { normal: [x, 1, 0], origin: [1, 2] }
+          - not-a-map
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *a = find_scene_node(r.scene.nodes, "a");
+  ASSERT_NE(a, nullptr);
+  EXPECT_TRUE(a->clip.present);
+  EXPECT_FALSE(a->clip.has_box);                      // fewer than six numbers
+  ASSERT_EQ(a->clip.planes.size(), 1u);               // the scalar entry is skipped
+  EXPECT_DOUBLE_EQ(a->clip.planes[0].normal[0], 0.0); // "x" is not a number: the default stays
+  EXPECT_DOUBLE_EQ(a->clip.planes[0].normal[1], 1.0);
+  EXPECT_DOUBLE_EQ(a->clip.planes[0].origin[0], 0.0); // a 2-vector is not an origin
+}
+
 // A procedural heightfield geometry source: source: { heightfield: { size, resolution, layers,
 // colors } } — the reusable terrain primitive, authored with no asset.
 TEST(AriadneScene, HeightfieldSource) {
