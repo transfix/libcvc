@@ -545,6 +545,16 @@ int main() {
       if (w.find("no trees planted") != std::string::npos)
         emptyForest = true;
     chk(!emptyForest, "forest_trees planted trees on the heightfield (no empty-forest warning)");
+    // Live controls: the realizers SEED their forest.*/sea.* keys from the node props, so a bound
+    // control panel starts at the authored value. (Prefix "forest" here -> forest.forest.count.)
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "forest.count"))
+                   .value<double>(),
+               8.0),
+        "forest_trees seeded forest.count from its props (live-control binding)");
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "sea.wave_amp"))
+                   .value<double>(),
+               2.4),
+        "wave_sea seeded sea.wave_amp from its props");
   }
 
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────
