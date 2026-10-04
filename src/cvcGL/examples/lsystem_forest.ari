@@ -25,6 +25,11 @@ import:
   - cvc://components/camera_controls.ari
   - cvc://components/scene_controls.ari
   - cvc://components/sim_transport.ari
+  # Live per-node procedural controls — one reusable panel per node type (bind forest.* / sea.* /
+  # sky.*, which the node realizers seed from their props and read each frame).
+  - cvc://components/forest_controls.ari
+  - cvc://components/sea_controls.ari
+  - cvc://components/sky_controls.ari
 
 menubar:
   - menu: Sim
@@ -49,6 +54,16 @@ windows:
   - include: sim_transport   # Paused / Speed — bind sim.paused / sim.speed, which drive the clock below
     pos: [16, 502]
     size: [370, 150]
+  # The per-node procedural panels in a second (right) column, so they sit beside the scene controls.
+  - include: forest_controls
+    pos: [400, 16]
+    size: [360, 252]
+  - include: sea_controls
+    pos: [400, 276]
+    size: [360, 96]
+  - include: sky_controls
+    pos: [400, 380]
+    size: [360, 116]
 
 scene:
   chrome: false

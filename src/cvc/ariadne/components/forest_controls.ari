@@ -1,0 +1,57 @@
+# forest_controls.ari — a REUSABLE Ariadne component: live controls for a `forest_trees` node.
+# The sliders bind the forest.* state keys that the cvcGL forest_trees realizer reads each frame;
+# the realizer SEEDS these keys from the node's authored .ari props, so the controls start at the
+# document's values and then drive the forest live. Structural changes (count / seed / species /
+# span / levels / branches / scale) re-grow the mesh on edit; Wind is applied every frame.
+#
+# Use it:
+#     import: cvc://components/forest_controls.ari
+#     windows:
+#       - include: forest_controls
+
+units:
+  forest_controls:
+    window: Forest
+    id: forest_controls
+    children:
+      - slider_int: Tree count
+        bind: forest.count
+        lo: 1
+        hi: 200
+      - slider_int: Seed
+        bind: forest.seed
+        lo: 0
+        hi: 9999
+      - combo: Species
+        bind: forest.species
+        options: [Mix, Pine, Branchy]
+        values: [0, 1, 2]
+      - slider_float: Scatter span
+        bind: forest.span
+        lo: 10.0
+        hi: 120.0
+        fmt: "%.0f"
+      - slider_float: Sea level
+        bind: forest.sea_level
+        lo: -5.0
+        hi: 20.0
+        fmt: "%.1f"
+      - separator
+      - slider_int: Branchy levels
+        bind: forest.levels
+        lo: 1
+        hi: 6
+      - slider_int: Branchy branches
+        bind: forest.branches
+        lo: 2
+        hi: 5
+      - slider_float: Pine scale
+        bind: forest.pine_scale
+        lo: 0.5
+        hi: 3.0
+        fmt: "%.2f"
+      - slider_float: Wind
+        bind: forest.wind
+        lo: 0.0
+        hi: 3.0
+        fmt: "%.2f"
