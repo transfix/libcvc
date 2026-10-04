@@ -130,6 +130,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/lsys/interp.h
   ../../inc/cvc/lsys/emit.h
   ../../inc/cvc/lsys/recipes.h
+  ../../inc/cvc/lsys/forest.h
+  ../../inc/cvc/lsys/cloud.h
+  ../../inc/cvc/lsys/water.h
   ../../inc/cvc/world/surface.h
   ../../inc/cvc/world/grid.h
   ../../inc/cvc/world/heightfield.h
@@ -264,6 +267,9 @@ set(SOURCE_FILES
   lsys/interp.cpp
   lsys/emit.cpp
   lsys/recipes.cpp
+  lsys/forest.cpp
+  lsys/cloud.cpp
+  lsys/water.cpp
   world/surface.cpp
   world/heightfield.cpp
   world/scatter.cpp
