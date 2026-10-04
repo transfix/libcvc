@@ -1335,15 +1335,20 @@ void GraphicsNode::updateClipPlanes() {
   // Get world transform to transform the planes
   vtkSmartPointer<vtkMatrix4x4> worldTransform = getWorldTransform();
 
-  // Define 6 plane normals in local space
+  // Define 6 plane normals in local space, each pointing INTO the box. VTK keeps
+  // the half-space a clipping plane's normal points into: a point x survives
+  // where n . (x - origin) >= 0 (vtkOpenGLPolyDataMapper discards a fragment
+  // whose clip distance is negative; the GPU volume ray caster clips the same
+  // side). Six inward planes keep the inside of the box; six outward ones would
+  // keep nothing.
   // Order: +X, -X, +Y, -Y, +Z, -Z
   double normals[6][3] = {
-      {1.0, 0.0, 0.0},  // +X face (points inward: -X)
-      {-1.0, 0.0, 0.0}, // -X face (points inward: +X)
-      {0.0, 1.0, 0.0},  // +Y face (points inward: -Y)
-      {0.0, -1.0, 0.0}, // -Y face (points inward: +Y)
-      {0.0, 0.0, 1.0},  // +Z face (points inward: -Z)
-      {0.0, 0.0, -1.0}  // -Z face (points inward: +Z)
+      {-1.0, 0.0, 0.0}, // +X face (points inward: -X)
+      {1.0, 0.0, 0.0},  // -X face (points inward: +X)
+      {0.0, -1.0, 0.0}, // +Y face (points inward: -Y)
+      {0.0, 1.0, 0.0},  // -Y face (points inward: +Y)
+      {0.0, 0.0, -1.0}, // +Z face (points inward: -Z)
+      {0.0, 0.0, 1.0}   // -Z face (points inward: +Z)
   };
 
   // Plane origins in local space (centers of each face)
