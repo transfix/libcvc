@@ -162,6 +162,7 @@ add_executable(world_roads_test world_roads_test.cpp)
 add_executable(world_buildings_test world_buildings_test.cpp)
 add_executable(world_sites_test world_sites_test.cpp)
 add_executable(world_road_mesh_test world_road_mesh_test.cpp)
+add_executable(world_road_raster_test world_road_raster_test.cpp)
 add_executable(world_raster_test world_raster_test.cpp)
 add_executable(world_bundle_test world_bundle_test.cpp)
 
@@ -286,6 +287,7 @@ set(TEST_TARGETS
   world_buildings_test
   world_sites_test
   world_road_mesh_test
+  world_road_raster_test
   world_raster_test
   world_bundle_test
   volren_math_test
@@ -843,7 +845,7 @@ target_link_libraries(vis_tiler_test
 
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
-                   lsys_fields_test world_surface_test world_heightfield_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test
+                   lsys_fields_test world_surface_test world_heightfield_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
                    world_raster_test world_bundle_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
@@ -1701,7 +1703,7 @@ cvc_discover_tests(vis_grid_test)
 cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
-                   lsys_fields_test world_surface_test world_heightfield_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test
+                   lsys_fields_test world_surface_test world_heightfield_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
                    world_raster_test world_bundle_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
