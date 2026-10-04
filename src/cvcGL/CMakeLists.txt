@@ -683,6 +683,19 @@ add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
 
+# Changing the shadow interval or resolution used to rebuild the whole pass chain
+# (the state echo re-ran setShadowsEnabled(true)), dropping the old baker with its
+# FBO and shadow maps still allocated; switching shadows off dropped it the same
+# way. Pins in-place updates, maps re-made at a new resolution, and no VTK leak
+# report and no growth in live GL objects (counted at the driver, so desktop GL
+# only). Renders; skips without GL.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_shadow_pass_reuse test/cvcgl_shadow_pass_reuse.cpp
+                                         test/gl_call_counter.cpp)
+  target_link_libraries(cvcgl_shadow_pass_reuse PRIVATE cvcGL)
+  add_test(NAME cvcgl_shadow_pass_reuse COMMAND cvcgl_shadow_pass_reuse)
+endif()
+
 # The rig used to advertise "2 shadow casters" while VTK baked seven: fill and
 # wash were Spots with cones under 90, which LightCreatesShadow accepts. Pins the
 # advertised count to the real one, and pins which roles may cast.

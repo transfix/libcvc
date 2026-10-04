@@ -35,6 +35,7 @@
 #include <vtkRenderPass.h>
 #include <vtkRenderPassCollection.h>
 #include <vtkRenderState.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkSequencePass.h>
 #include <vtkShadowMapBakerPass.h>
@@ -172,6 +173,13 @@ bool SceneGraph::onOwnerThread() const { return m_events->onOwnerThread(); }
 void SceneGraph::adoptOwnerThread() { m_events->adoptOwnerThread(); }
 
 void SceneGraph::setRenderer(vtkRenderer *renderer) {
+  // The shadow chain belongs to one renderer and its maps to that renderer's
+  // window: take it off the old one while the window is still up (a closing
+  // ViewportManager detaches its scenes before it finalizes the window).
+  const bool moving = renderer != m_renderer;
+  if (moving)
+    removeShadowPasses();
+
   if (m_renderer) {
     for (auto &node : m_rootNodes) {
       node->removeFromRenderer(m_renderer);
@@ -185,6 +193,8 @@ void SceneGraph::setRenderer(vtkRenderer *renderer) {
       node->addToRenderer(m_renderer);
     }
     applyLights(); // the scene's lighting follows it onto the new renderer
+    if (moving && m_shadowsEnabled)
+      installShadowPasses(); // and so do its shadows
   }
 }
 
@@ -1043,6 +1053,22 @@ void SceneGraph::clearLights() {
 
 std::size_t SceneGraph::numLights() const { return m_lights.size(); }
 
+// Free a shadow pass's GL objects against the window they were made in, before
+// the last reference to the pass goes. Only the baker holds any -- its FBO and
+// shadow maps -- and vtkShadowMapBakerPass's destructor frees neither: it logs
+// "FrameBufferObject/ShadowMaps/LightCameras should have been deleted in
+// ReleaseGraphicsResources()" and they leak. GL, so the owner thread only.
+// False when there is no window to free them against.
+static bool releaseShadowGL(vtkRenderer *ren, vtkRenderPass *pass) {
+  vtkRenderWindow *w = ren ? ren->GetRenderWindow() : nullptr;
+  if (!w || !pass)
+    return false;
+  if (!w->IsCurrent())
+    w->MakeCurrent();
+  pass->ReleaseGraphicsResources(w);
+  return true;
+}
+
 // A shadow baker that only re-bakes every Nth frame. The base pass re-renders the
 // whole scene depth from every light whenever geometry has moved; for a scene that
 // deforms every frame (a swaying forest) that is the dominant cost, yet the shadows
@@ -1059,6 +1085,26 @@ public:
   // Set by SceneGraph::invalidateShadowBake(): bake on the next Render() however
   // the interval falls, then clear. The cadence counter is left alone.
   bool ForceNext = false;
+
+  // GL objects made by a bake: the FBO and the shadow maps. None before the
+  // first bake (or after a release), when the window may have no context yet.
+  bool HoldsGLObjects() const {
+    return this->FrameBufferObject != nullptr || this->ShadowMaps != nullptr;
+  }
+
+  // The map size, applied to maps already baked too. VTK reads Resolution only
+  // when it creates a map, so a baker that has baked would go on drawing into
+  // its old maps: free them and the FBO against ren's window, and make the next
+  // Render() bake new ones (VTK's own test then sees every light as changed).
+  void SetMapResolution(unsigned int pixels, vtkRenderer *ren) {
+    if (pixels == this->Resolution)
+      return;
+    this->SetResolution(pixels);
+    if (!HoldsGLObjects() || !releaseShadowGL(ren, this))
+      return;
+    this->LastRenderTime = vtkTimeStamp();
+    ForceNext = true;
+  }
 
   void Render(const vtkRenderState *s) override {
     // Skipping a bake is only safe while the SET OF SHADOW-CASTING LIGHTS is unchanged.
@@ -1300,11 +1346,20 @@ void SceneGraph::syncShadowState() {
     m_shadowSettings = std::make_unique<cvc::gl::ShadowSettings>(
         m_ctx, cvc::gl::ShadowSettings::sceneStatePath(m_statePrefix),
         [this](cvc::gl::ShadowSettings::Values nv) {
-          m_applyingShadowState = true;
-          setShadowsEnabled(nv.enabled);
-          setShadowResolution(nv.resolution);
-          setShadowUpdateInterval(nv.interval);
-          m_applyingShadowState = false;
+          auto apply = [this, nv]() {
+            m_applyingShadowState = true;
+            setShadowsEnabled(nv.enabled);
+            setShadowResolution(nv.resolution);
+            setShadowUpdateInterval(nv.interval);
+            m_applyingShadowState = false;
+          };
+          // The setters build render passes and free GL objects, so they run on
+          // the owner thread; a write from elsewhere (a replicated peer, a script
+          // thread) is applied at the next processEvents().
+          if (onOwnerThread())
+            apply();
+          else
+            postEvent(apply);
         });
     m_applyingShadowState = false;
   }
@@ -1328,23 +1383,40 @@ void SceneGraph::invalidateShadowBake() {
 
 void SceneGraph::setShadowResolution(int pixels) {
   m_shadowResolution = pixels < 64 ? 64 : pixels;
-  if (m_shadowBaker)
-    m_shadowBaker->SetResolution(m_shadowResolution);
+  if (auto *b = StridedShadowBaker::SafeDownCast(m_shadowBaker))
+    b->SetMapResolution(static_cast<unsigned int>(m_shadowResolution), m_renderer);
   syncShadowState();
   requestRender();
 }
 
 bool SceneGraph::setShadowsEnabled(bool enabled) {
-  m_shadowsEnabled = false;
-  if (!m_renderer)
+  if (!m_renderer) {
+    m_shadowsEnabled = false;
     return false;
+  }
+  if (enabled && m_shadowPass && m_renderer->GetPass() == m_shadowPass) {
+    // Already on: keep the chain and its baked maps. Each setter's state echo
+    // lands here, so rebuilding would replace the baker on every interval or
+    // resolution change.
+    m_shadowsEnabled = true;
+    return true;
+  }
+  removeShadowPasses();
+  m_shadowsEnabled = false;
   if (!enabled) {
     m_renderer->SetPass(nullptr);
-    m_shadowBaker = nullptr;
     syncShadowState();
     requestRender();
     return true;
   }
+  installShadowPasses();
+  m_shadowsEnabled = true;
+  syncShadowState();
+  requestRender();
+  return true;
+}
+
+void SceneGraph::installShadowPasses() {
   // VTK's shadow maps are render PASSES, not a renderer flag: the baker renders
   // the scene once per light into a depth map, and the shadow pass consumes
   // those while drawing. They have to sit inside a camera pass, or the light's
@@ -1352,7 +1424,6 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   vtkSmartPointer<StridedShadowBaker> baker = vtkSmartPointer<StridedShadowBaker>::New();
   baker->Interval = m_shadowInterval;
   baker->SetResolution(m_shadowResolution); // crisper than VTK's low 256 default
-  m_shadowBaker = baker;                    // kept so the interval/resolution stay live
   // Bake casters only (GraphicsNode::setCastsShadow): wrap VTK's own depth pass.
   vtkSmartPointer<ShadowCasterFilterPass> casterFilter =
       vtkSmartPointer<ShadowCasterFilterPass>::New();
@@ -1385,10 +1456,20 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   cam->SetDelegatePass(seq);
 
   m_renderer->SetPass(cam);
-  m_shadowsEnabled = true;
-  syncShadowState();
-  requestRender();
-  return true;
+  m_shadowPass = cam;
+  m_shadowBaker = baker;
+}
+
+void SceneGraph::removeShadowPasses() {
+  auto *baker = StridedShadowBaker::SafeDownCast(m_shadowBaker);
+  if (m_renderer && m_shadowPass) {
+    if (baker && baker->HoldsGLObjects())
+      releaseShadowGL(m_renderer, m_shadowPass);
+    if (m_renderer->GetPass() == m_shadowPass)
+      m_renderer->SetPass(nullptr);
+  }
+  m_shadowPass = nullptr;
+  m_shadowBaker = nullptr;
 }
 
 int SceneGraph::selectLOD(const cvc::lod::view_params &view, lod_stats *stats) {

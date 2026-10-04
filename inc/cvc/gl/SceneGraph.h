@@ -21,6 +21,7 @@
 
 class vtkRenderer;
 class vtkMultiVolume;
+class vtkRenderPass;
 class vtkShadowMapBakerPass;
 
 namespace cvc {
@@ -85,6 +86,8 @@ public:
   // has closed it. Nodes reach it through SceneNode::sceneEvents().
   std::shared_ptr<SceneEventSink> eventSink() const { return m_events; }
 
+  // The shadow passes go with the scene: they leave the old renderer (GL objects
+  // freed against its window) and, with shadows on, are rebuilt on the new one.
   void setRenderer(vtkRenderer *renderer);
 
   // ── lighting ──────────────────────────────────────────────────────────────
@@ -185,6 +188,11 @@ public:
   // Shadow settings are ALSO cvc::state, at "<scene prefix>.shadows"
   // (enabled/resolution/interval), so they are scriptable like everything
   // else; these setters and the state stay in sync in both directions.
+  //
+  // Enabling while already on keeps the installed passes. Passes taken down
+  // (off, or a renderer change) have their GL objects freed against their
+  // window first. Call the shadow setters on the owner thread; a state write
+  // from another thread is applied at the next processEvents().
   bool setShadowsEnabled(bool enabled);
   bool shadowsEnabled() const { return m_shadowsEnabled; }
 
@@ -211,7 +219,8 @@ public:
   // Shadow-map texture resolution (pixels per side). VTK defaults to a low 256,
   // which aliases thin casters (a forest of trunks/needles shows torn, "inverted"
   // shadows) and speckles broad surfaces with self-shadow acne. Larger is crisper
-  // but costs VRAM/fill. Takes effect immediately.
+  // but costs VRAM/fill. Takes effect immediately: maps already baked are freed
+  // and re-made at the new size by the next frame's bake.
   void setShadowResolution(int pixels);
   int shadowResolution() const { return m_shadowResolution; }
   void update();
@@ -465,7 +474,9 @@ private:
     double cone = 30.0;            // Spot: half-angle, < 90 or VTK drops the shadow
     double r = 1, g = 1, b = 1, intensity = 1;
   };
-  void syncShadowState(); // mirror the shadow setters into cvc::state
+  void syncShadowState();     // mirror the shadow setters into cvc::state
+  void installShadowPasses(); // build the pass chain on m_renderer
+  void removeShadowPasses();  // free its GL objects, then take it off m_renderer
   std::unique_ptr<cvc::gl::ShadowSettings> m_shadowSettings;
   bool m_applyingShadowState = false; // re-entry guard: state -> setter -> state
   int m_lightBatchDepth = 0;          // >0 defers applyLights()
@@ -475,7 +486,11 @@ private:
   bool m_shadowsEnabled = false;
   int m_shadowInterval = 1;                             // re-bake every N frames
   int m_shadowResolution = 1024;                        // shadow-map pixels per side
-  vtkSmartPointer<vtkShadowMapBakerPass> m_shadowBaker; // held so the interval is live
+  // The installed chain (its root pass) and its baker, held so the interval and
+  // resolution stay live. Only ever a chain on m_renderer, so its GL objects can
+  // be freed against m_renderer's window.
+  vtkSmartPointer<vtkRenderPass> m_shadowPass;
+  vtkSmartPointer<vtkShadowMapBakerPass> m_shadowBaker;
   bool m_lodEnabled = true;                             // see setLODEnabled
   void applyLights();
   cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under
