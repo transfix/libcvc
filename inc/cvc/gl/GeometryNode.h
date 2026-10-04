@@ -211,6 +211,10 @@ public:
   // Check if a metadata key is computed (read-only)
   static bool isComputedMetadata(const std::string &key);
 
+  // Clip planes: 6 (VTK's poly-data mapper), or 0 under the low-memory mapper,
+  // which has no clipping-plane support.
+  int maxClipPlanes() const override;
+
 protected:
   // For subclasses that need a specific vtkPolyDataMapper instead of the
   // factory one the public constructor creates (vtkPolyDataMapper::New(), i.e.

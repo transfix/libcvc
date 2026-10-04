@@ -114,6 +114,12 @@ void GridNode::applyTransformToVTK() {
   applyWorldTransformToProps({m_yzActor, m_xzActor, m_xyActor});
 }
 
+int GridNode::maxClipPlanes() const {
+  if (!m_xyMapper || m_xyMapper->IsA("vtkOpenGLLowMemoryPolyDataMapper"))
+    return 0;
+  return 6;
+}
+
 void GridNode::applyClipPlanes(vtkPlaneCollection *planes) {
   // Apply clip planes to all three grid mappers
   if (planes && planes->GetNumberOfItems() > 0) {

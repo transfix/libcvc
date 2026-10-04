@@ -187,8 +187,6 @@ protected:
   // Re-applies the rung policy when an ancestor's visibility changed but this
   // node's flag did not.
   void ancestorVisibilityChanged() override;
-  // A clipping parent's planes go to the rungs (this node draws nothing itself).
-  void applyClipPlanes(vtkPlaneCollection *planes) override;
 
 private:
   void clearRungs(std::size_t keep = 0); // remove and destroy rungs [keep, n)
@@ -206,7 +204,6 @@ private:
   std::unique_ptr<cvc::geometry> m_base;
   RungStyle m_style;
   int m_current = -1; // no rung selected yet
-  vtkSmartPointer<vtkPlaneCollection> m_inheritedClipPlanes; // a clipping parent's, or null
 };
 
 // A cvc::lod::view_params for what `renderer`'s active camera sees this frame:

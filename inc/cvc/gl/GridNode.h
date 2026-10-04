@@ -71,6 +71,8 @@ public:
 
   cvc::bounding_box getBoundingBox() const override;
 
+  int maxClipPlanes() const override; // clip planes: 6, or 0 under the low-memory mapper
+
 protected:
   vtkProp *getProp() override; // Returns first actor (for compatibility)
   void handleStateChanged(const std::string &childState) override;

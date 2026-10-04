@@ -111,6 +111,10 @@ public:
   // Check if a metadata key is computed (read-only)
   static bool isComputedMetadata(const std::string &key);
 
+  // Clip planes: 8, vtkOpenGLGPUVolumeRayCastMapper's in_clippingPlanes[49] (a
+  // count, then origin + normal per plane).
+  int maxClipPlanes() const override { return 8; }
+
 protected:
   vtkProp *getProp() override;
   void handleStateChanged(const std::string &childState) override;
