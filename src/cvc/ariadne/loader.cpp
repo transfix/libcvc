@@ -1206,7 +1206,7 @@ Value to_value(const YAML::Node &n) {
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
-         k == "volume" || k == "children";
+         k == "volume" || k == "shader" || k == "children";
 }
 
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
@@ -1238,6 +1238,39 @@ SceneTransferFunction parse_scene_tf(const YAML::Node &t) {
 }
 
 // A scene node (§9.3), recursive over children.
+// A shader surface (§9): `shader: <preset>` (a scalar shorthand) OR a map with an optional
+// `preset`, a `disable_coord_shift` flag, and `vertex`/`fragment` lists of {at, code} GLSL splices.
+SceneShader parse_scene_shader(const YAML::Node &s) {
+  SceneShader sh;
+  if (!s)
+    return sh;
+  sh.present = true;
+  if (s.IsScalar()) { // `shader: terrain_bump` — name a preset
+    sh.preset = s.Scalar();
+    return sh;
+  }
+  if (!s.IsMap())
+    return sh;
+  if (s["preset"])
+    sh.preset = str(s, "preset");
+  sh.disable_coord_shift = flag(s, "disable_coord_shift", false);
+  const auto stages = [](const YAML::Node &seq, std::vector<SceneShaderStage> &out) {
+    if (seq && seq.IsSequence())
+      for (const YAML::Node &st : seq) {
+        if (!st.IsMap())
+          continue;
+        SceneShaderStage stage;
+        stage.at = str(st, "at");
+        stage.code = str(st, "code");
+        if (!stage.at.empty())
+          out.push_back(stage);
+      }
+  };
+  stages(s["vertex"], sh.vertex);
+  stages(s["fragment"], sh.fragment);
+  return sh;
+}
+
 SceneNode parse_scene_node(const YAML::Node &n) {
   SceneNode sn;
   sn.id = str(n, "node", str(n, "id"));
@@ -1407,6 +1440,8 @@ SceneNode parse_scene_node(const YAML::Node &n) {
     }
     sn.volume.tf = parse_scene_tf(vol["transfer_function"]);
   }
+  if (const YAML::Node sh = n["shader"])
+    sn.shader = parse_scene_shader(sh);
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
   // custom node type registered on the cvcGL side reads its own config from there.
   sn.props.kind = Value::Kind::Map;

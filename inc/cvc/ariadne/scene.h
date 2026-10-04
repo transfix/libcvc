@@ -118,6 +118,27 @@ struct SceneHeightfield {
   std::vector<SceneHeightColorBand> colors;
 };
 
+// A GLSL shader surface on a geometry node (§9 — shaders). The DSL face of GeometryNode's shader-
+// replacement API (addVertexShaderReplacement / addFragmentShaderReplacement + the coordinate-
+// shift-scale toggle): a node can either name a host-registered PRESET (an effect like a terrain
+// bump or tree bark, whose GLSL — and any platform gate like the GLES normal-name difference —
+// lives in C++ where it belongs) or splice raw GLSL at named VTK injection markers. Both compose
+// (preset first, then the inline stages). This lets a demo that needed host C++ to shade its mesh
+// be authored entirely in the .ari and run under the generic ariadne_hello host. GL-specific, so
+// the realizer (cvcGL) applies it; the loader only carries it as neutral data.
+struct SceneShaderStage {
+  std::string at;   // the VTK marker to replace (e.g. "//VTK::Normal::Impl")
+  std::string code; // the GLSL spliced in place of (and re-including) that marker
+};
+struct SceneShader {
+  bool present = false;             // was a `shader:` block given?
+  bool disable_coord_shift = false; // call GeometryNode::disableCoordinateShiftScale() first
+                                    // (so vertexMC is world space — the bump/bark shaders need it)
+  std::string preset;                     // a host-registered named effect (empty = none)
+  std::vector<SceneShaderStage> vertex;   // vertex-shader replacements, applied in order
+  std::vector<SceneShaderStage> fragment; // fragment-shader replacements, applied in order
+};
+
 // One scene node (§9.2/§9.3). `type` is geometry | volume | volren | volslice |
 // group | light. Fields not meaningful to a type are simply unused.
 struct SceneNode {
@@ -179,6 +200,8 @@ struct SceneNode {
   SceneVolSlice volslice;
   bool has_volume = false; // volume: {...} present (type: volume) — TF + shading for the VTK mapper
   SceneVolume volume;
+
+  SceneShader shader; // shader: {...} — GLSL replacements / a named preset (geometry nodes)
 
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
