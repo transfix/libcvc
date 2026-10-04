@@ -153,6 +153,7 @@ add_executable(lsys_derive_test lsys_derive_test.cpp)
 add_executable(lsys_interp_test lsys_interp_test.cpp)
 add_executable(lsys_recipes_test lsys_recipes_test.cpp)
 add_executable(lsys_svg_test lsys_svg_test.cpp)
+add_executable(lsys_forest_test lsys_forest_test.cpp)
 add_executable(world_surface_test world_surface_test.cpp)
 add_executable(world_heightfield_test world_heightfield_test.cpp)
 add_executable(world_scatter_test world_scatter_test.cpp)
@@ -271,6 +272,7 @@ set(TEST_TARGETS
   lsys_interp_test
   lsys_recipes_test
   lsys_svg_test
+  lsys_forest_test
   world_surface_test
   world_heightfield_test
   world_scatter_test
@@ -830,7 +832,7 @@ target_link_libraries(vis_tiler_test
 )
 
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
-                   lsys_interp_test lsys_recipes_test lsys_svg_test
+                   lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    world_surface_test world_heightfield_test world_scatter_test
                    world_raster_test world_bundle_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
@@ -1688,7 +1690,7 @@ cvc_discover_tests(vis_oracle_test)
 cvc_discover_tests(vis_grid_test)
 cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
-                   lsys_interp_test lsys_recipes_test lsys_svg_test
+                   lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    world_surface_test world_heightfield_test world_scatter_test
                    world_raster_test world_bundle_test)
   cvc_discover_tests(${_lsys_test})
