@@ -136,6 +136,19 @@ void register_scene_node_type(const std::string &type, NodeRealizer realizer);
 // Whether a custom scene node `type` has a registered realizer (test/introspection).
 bool has_scene_node_type(const std::string &type);
 
+// --- extensibility: named GLSL shader presets (the DSL `shader: { preset: <name> }`) ---------
+//
+// A shader preset is a named effect that configures a GeometryNode's shader (the bump/bark/etc.
+// GLSL + any platform gate living in C++). realize_scene applies the preset named by a node's
+// `shader:` block, then its inline vertex/fragment splices. Registering presets is how cvcGL (and
+// a host) contribute GL effects the pure-data DSL can only name — process-global and thread-safe,
+// register before realize_scene. register_default_shader_presets() installs the built-ins
+// ("terrain_bump", "bark"); it is idempotent and is what the cvcGL extension bundle calls.
+using ShaderPreset = std::function<void(GeometryNode &)>;
+void register_shader_preset(const std::string &name, ShaderPreset preset);
+bool has_shader_preset(const std::string &name);
+void register_default_shader_presets();
+
 // Verify the NODE customs a document declared (`loaded.customs`, from the `customs:`
 // block) against the registered scene node types. The loader already fail-fast-checked
 // widget/block customs at LOAD; node types register on THIS (cvcGL) side, so the host

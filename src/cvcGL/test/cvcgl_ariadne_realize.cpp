@@ -416,6 +416,49 @@ int main() {
     chk(texWarn, "a bad texture URI -> a warning (never a throw)");
   }
 
+  // ── §9 shaders: a declarative shader: block applies a preset / warns on an unknown one ──
+  {
+    cvc::gl::ariadne::register_default_shader_presets();
+    printf("== shader DSL (presets + inline) ==\n");
+    chk(cvc::gl::ariadne::has_shader_preset("terrain_bump"),
+        "default preset terrain_bump registered");
+    chk(cvc::gl::ariadne::has_shader_preset("bark"), "default preset bark registered");
+
+    SceneGraph sg(app, "shd");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode g; // a known preset applies cleanly
+    g.id = "ground";
+    g.type = "geometry";
+    g.has_heightfield = true;
+    g.heightfield.size = 10.0f;
+    g.heightfield.resolution = 4;
+    g.shader.present = true;
+    g.shader.preset = "terrain_bump";
+    SceneNode bad; // an unknown preset warns but still realizes
+    bad.id = "bad";
+    bad.type = "geometry";
+    bad.source_primitive = "plane";
+    bad.plane_size = 4.0f;
+    bad.shader.present = true;
+    bad.shader.preset = "does_not_exist";
+    scene.nodes.push_back(g);
+    scene.nodes.push_back(bad);
+    std::vector<std::string> warnings;
+    cvc::gl::ariadne::realize_scene(sg, scene, "shd", &warnings);
+    chk(sg.getGraphics("ground") != nullptr, "a node with a known shader preset realizes");
+    chk(sg.getGraphics("bad") != nullptr, "an unknown shader preset still realizes the node");
+    bool known_warned = false, unknown_warned = false;
+    for (const std::string &w : warnings) {
+      if (w.find("unknown shader preset 'does_not_exist'") != std::string::npos)
+        unknown_warned = true;
+      if (w.find("terrain_bump") != std::string::npos)
+        known_warned = true;
+    }
+    chk(unknown_warned, "an unknown shader preset -> a warning");
+    chk(!known_warned, "a known shader preset -> no warning");
+  }
+
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────
   {
     SceneGraph sg(app, "dup");

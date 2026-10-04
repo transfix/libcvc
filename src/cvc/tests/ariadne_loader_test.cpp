@@ -880,6 +880,68 @@ scene:
   EXPECT_EQ(d->material_texture, "file://logo.png"); // { uri: } form
 }
 
+// §9 shaders: a `shader:` block — the scalar preset shorthand, and the full map form with a
+// disable_coord_shift flag + ordered vertex/fragment GLSL splices.
+TEST(AriadneScene, ShaderPresetShorthandAndFullBlock) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: terrain
+      type: geometry
+      source: { plane: { size: 10 } }
+      shader: terrain_bump
+    - node: trunk
+      type: geometry
+      source: { plane: { size: 3 } }
+      shader:
+        disable_coord_shift: true
+        vertex:
+          - { at: "//VTK::Normal::Dec", code: "out vec3 c;" }
+        fragment:
+          - { at: "//VTK::Normal::Impl", code: "{ gl_FragData[0]=vec4(1.0); }" }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *t = find_scene_node(r.scene.nodes, "terrain");
+  ASSERT_NE(t, nullptr);
+  EXPECT_TRUE(t->shader.present);
+  EXPECT_EQ(t->shader.preset, "terrain_bump"); // scalar shorthand → a named preset
+  EXPECT_FALSE(t->shader.disable_coord_shift);
+  EXPECT_TRUE(t->shader.vertex.empty());
+
+  const SceneNode *k = find_scene_node(r.scene.nodes, "trunk");
+  ASSERT_NE(k, nullptr);
+  EXPECT_TRUE(k->shader.present);
+  EXPECT_TRUE(k->shader.preset.empty());
+  EXPECT_TRUE(k->shader.disable_coord_shift);
+  ASSERT_EQ(k->shader.vertex.size(), 1u);
+  EXPECT_EQ(k->shader.vertex[0].at, "//VTK::Normal::Dec");
+  EXPECT_EQ(k->shader.vertex[0].code, "out vec3 c;");
+  ASSERT_EQ(k->shader.fragment.size(), 1u);
+  EXPECT_EQ(k->shader.fragment[0].at, "//VTK::Normal::Impl");
+  // A node with no shader: block leaves shader.present false.
+  const SceneNode *none = find_scene_node(r.scene.nodes, "terrain");
+  (void)none;
+}
+
+// A node with no `shader:` block has no shader surface.
+TEST(AriadneScene, NoShaderBlockIsAbsent) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: g
+      type: geometry
+      source: { plane: { size: 2 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *g = find_scene_node(r.scene.nodes, "g");
+  ASSERT_NE(g, nullptr);
+  EXPECT_FALSE(g->shader.present);
+}
+
 // A procedural heightfield geometry source: source: { heightfield: { size, resolution, layers,
 // colors } } — the reusable terrain primitive, authored with no asset.
 TEST(AriadneScene, HeightfieldSource) {

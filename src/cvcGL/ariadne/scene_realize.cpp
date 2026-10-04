@@ -209,6 +209,46 @@ bool is_builtin_scene_type(const std::string &t) {
   return t == "geometry" || t == "volume" || t == "volren" || t == "volslice" || t == "group";
 }
 
+// The named GLSL shader-preset registry (the DSL `shader: { preset: <name> }`). Process-global and
+// mutex-guarded, mirroring the node-type registry.
+std::mutex &shader_preset_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::map<std::string, ShaderPreset> &shader_preset_registry() {
+  static std::map<std::string, ShaderPreset> r;
+  return r;
+}
+
+// Apply a node's `shader:` block to a GeometryNode (GL-specific — the loader only carried it as
+// data): the coordinate-shift-scale toggle, then a named preset (warn if unknown), then the inline
+// vertex/fragment splices. A node with no shader is a no-op.
+void apply_shader(GeometryNode &g, const cvc::ariadne::SceneNode &n,
+                  std::vector<std::string> *warnings) {
+  const cvc::ariadne::SceneShader &sh = n.shader;
+  if (!sh.present)
+    return;
+  if (sh.disable_coord_shift)
+    g.disableCoordinateShiftScale();
+  if (!sh.preset.empty()) {
+    ShaderPreset preset;
+    {
+      std::lock_guard<std::mutex> lk(shader_preset_mutex());
+      const auto it = shader_preset_registry().find(sh.preset);
+      if (it != shader_preset_registry().end())
+        preset = it->second;
+    }
+    if (preset)
+      preset(g);
+    else
+      warn(warnings, "ari: scene node '" + n.id + "': unknown shader preset '" + sh.preset + "'");
+  }
+  for (const cvc::ariadne::SceneShaderStage &st : sh.vertex)
+    g.addVertexShaderReplacement(st.at, st.code);
+  for (const cvc::ariadne::SceneShaderStage &st : sh.fragment)
+    g.addFragmentShaderReplacement(st.at, st.code);
+}
+
 // Apply the shared GraphicsNode transform. Material is GeometryNode-only, handled by
 // the caller before this; visibility is handled by apply_visibility below.
 void apply_transform(GraphicsNode &node, const cvc::ariadne::SceneNode &n) {
@@ -468,6 +508,11 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
         }
       }
     }
+    // shader: { preset | vertex | fragment } — the declarative GLSL surface (GeometryNode shader
+    // replacements). Applied last so it can override material defaults; warns (never throws) on an
+    // unknown preset so the rest of the scene still realizes.
+    if (g && n.shader.present)
+      apply_shader(*g, n, warnings);
     node = g;
   } else if (n.type == "volume") {
     if (n.source_file.empty()) {
@@ -804,6 +849,110 @@ void register_scene_node_type(const std::string &type, NodeRealizer realizer) {
 bool has_scene_node_type(const std::string &type) {
   std::lock_guard<std::mutex> lock(node_registry_mutex());
   return node_registry().find(type) != node_registry().end();
+}
+
+void register_shader_preset(const std::string &name, ShaderPreset preset) {
+  if (name.empty() || !preset)
+    return;
+  std::lock_guard<std::mutex> lock(shader_preset_mutex());
+  shader_preset_registry()[name] = std::move(preset);
+}
+
+bool has_shader_preset(const std::string &name) {
+  std::lock_guard<std::mutex> lock(shader_preset_mutex());
+  return shader_preset_registry().find(name) != shader_preset_registry().end();
+}
+
+namespace {
+// The GLES fragment shader spells the view-space normal differently (the WebGL backend
+// renormalizes), so the normal-perturbing bump presets must target the right name per platform.
+#ifdef __EMSCRIPTEN__
+constexpr const char *FS_NORMAL = "normalizedNormalVCVSOutput";
+#else
+constexpr const char *FS_NORMAL = "normalVCVSOutput";
+#endif
+
+// Value-noise fBm ground detail; perturbs the fragment normal by the height gradient (Mikkelsen's
+// tangent-free method). Needs vertexMC in world space (disableCoordinateShiftScale).
+const char *GROUND_GLSL =
+    "float ghash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+    "float gnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  float a=ghash(i), b=ghash(i+vec2(1.,0.)), c=ghash(i+vec2(0.,1.)), d=ghash(i+vec2(1.,1.));\n"
+    "  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);\n"
+    "}\n"
+    "float groundH(vec3 p){\n"
+    "  vec2 q = p.xy * 0.35;\n"
+    "  float f = 0.0, a = 0.5, fr = 1.0;\n"
+    "  for (int i = 0; i < 5; i++){ f += a*gnoise(q*fr); a *= 0.5; fr *= 2.03; }\n"
+    "  return f;\n"
+    "}\n";
+const char *BARK_GLSL =
+    "float bhash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5); }\n"
+    "float bnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  return mix(mix(bhash(i), bhash(i+vec2(1,0)), f.x),\n"
+    "             mix(bhash(i+vec2(0,1)), bhash(i+vec2(1,1)), f.x), f.y);\n"
+    "}\n"
+    "float barkH(vec3 nrm, float z){\n"
+    "  float ang = atan(nrm.y, nrm.x);\n"
+    "  float f = 0.0;\n"
+    "  f += 0.6*sin(ang*10.0 + 1.5*sin(z*0.7));\n"
+    "  f += 0.3*sin(ang*23.0 + z*0.4);\n"
+    "  f += 0.3*bnoise(vec2(ang*4.0, z*1.2));\n"
+    "  return f;\n"
+    "}\n";
+} // namespace
+
+void register_default_shader_presets() {
+  // "terrain_bump": value-noise fBm ground detail (the demo's addTerrainBump).
+  register_shader_preset("terrain_bump", [](GeometryNode &node) {
+    node.disableCoordinateShiftScale(); // vertexMC in the shader becomes world xy
+    node.addVertexShaderReplacement("//VTK::Normal::Dec", "//VTK::Normal::Dec\nout vec3 gCoord;");
+    node.addVertexShaderReplacement("//VTK::PositionVC::Impl",
+                                    "//VTK::PositionVC::Impl\n  gCoord = vertexMC.xyz;");
+    node.addFragmentShaderReplacement(
+        "//VTK::Normal::Dec", std::string("//VTK::Normal::Dec\nin vec3 gCoord;\n") + GROUND_GLSL);
+    node.addFragmentShaderReplacement("//VTK::Normal::Impl",
+                                      std::string("//VTK::Normal::Impl\n"
+                                                  "  {\n"
+                                                  "    float h = groundH(gCoord);\n"
+                                                  "    vec3 sS = dFdx(vertexVC.xyz);\n"
+                                                  "    vec3 sT = dFdy(vertexVC.xyz);\n"
+                                                  "    vec3 vn = ") +
+                                          FS_NORMAL +
+                                          ";\n"
+                                          "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+                                          "    float det = dot(sS, R1);\n"
+                                          "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+                                          "    " +
+                                          FS_NORMAL + " = normalize(abs(det)*vn - 1.4*sg);\n  }\n");
+  });
+  // "bark": vertical-furrow tree bark (the demo's addBark).
+  register_shader_preset("bark", [](GeometryNode &node) {
+    node.disableCoordinateShiftScale();
+    node.addVertexShaderReplacement("//VTK::Normal::Dec",
+                                    "//VTK::Normal::Dec\nout vec3 bNrm;\nout vec3 bPos;");
+    node.addVertexShaderReplacement(
+        "//VTK::PositionVC::Impl",
+        "//VTK::PositionVC::Impl\n  bNrm = normalMC; bPos = vertexMC.xyz;");
+    node.addFragmentShaderReplacement(
+        "//VTK::Normal::Dec",
+        std::string("//VTK::Normal::Dec\nin vec3 bNrm;\nin vec3 bPos;\n") + BARK_GLSL);
+    node.addFragmentShaderReplacement(
+        "//VTK::Normal::Impl",
+        std::string("//VTK::Normal::Impl\n"
+                    "  {\n"
+                    "    float h = barkH(normalize(bNrm), bPos.z);\n"
+                    "    vec3 sS = dFdx(vertexVC.xyz), sT = dFdy(vertexVC.xyz), vn = ") +
+            FS_NORMAL +
+            ";\n"
+            "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+            "    float det = dot(sS, R1);\n"
+            "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+            "    " +
+            FS_NORMAL + " = normalize(abs(det)*vn - 1.2*sg);\n  }\n");
+  });
 }
 
 bool verify_scene_customs(const cvc::ariadne::LoadResult &loaded,
