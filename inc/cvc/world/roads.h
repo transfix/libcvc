@@ -49,8 +49,10 @@
 #ifndef CVC_WORLD_ROADS_H
 #define CVC_WORLD_ROADS_H
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -105,13 +107,23 @@ struct road_network {
   bool empty() const { return segments.empty(); }
 
   // Distance (metres) from world (x, y) to the nearest road CENTERLINE, and — via out-params — the
-  // index of that segment and the parameter t in [0,1] of the closest point along it. A brute-force
-  // scan (fine for the consumer's per-site queries); returns a large value for an empty network.
+  // index of that segment and the parameter t in [0,1] of the closest point along it. Returns a
+  // large value for an empty network. Backed by a lazily-built uniform-grid index (rebuilt when the
+  // segment COUNT changes, e.g. after pruning), so repeated per-site queries are ~O(1) instead of
+  // O(segments) — the result is identical to a brute-force scan (same minimum, same lowest-index
+  // tie-break).
   double distance_to_road(double x, double y, int *seg = nullptr, double *t = nullptr) const;
 
   // True when (x, y) is within `margin` metres of any road surface (its half-width + margin) — the
   // test a road-aware scatter uses to keep trees/props off the pavement.
   bool on_or_near_road(double x, double y, double margin = 0.0) const;
+
+private:
+  // Cached proximity index (opaque; defined in roads.cpp). Mutable so the const query methods can
+  // build it on demand. Invalidated by a change in segment count. If a caller mutates segment
+  // CONTENTS in place without changing the count, it should reset this by reassigning the network.
+  mutable std::shared_ptr<void> idx_cache_;
+  mutable std::size_t idx_nseg_ = static_cast<std::size_t>(-1);
 };
 
 // Generate the street network. Deterministic in p.seed. GL-free.

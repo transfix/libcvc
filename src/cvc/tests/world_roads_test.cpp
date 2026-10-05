@@ -124,3 +124,42 @@ TEST(WorldRoads, DistanceAndNearQueries) {
   // A far corner outside the city extent is not near any road.
   EXPECT_FALSE(n.on_or_near_road(1e5, 1e5, 1.0));
 }
+
+// distance_to_road is backed by a spatial-grid index; it must return exactly what a brute-force
+// scan would, at points NEAR a road (fast path) and FAR from any road (fallback), including the
+// segment index and the lowest-index tie-break.
+TEST(WorldRoads, DistanceMatchesBruteForce) {
+  const road_network n = generate_roads(demo_params());
+  ASSERT_FALSE(n.empty());
+  auto brute = [&](double x, double y, int &bseg) {
+    double best = 1e30;
+    bseg = -1;
+    for (std::size_t i = 0; i < n.segments.size(); ++i) {
+      const road_node &a = n.nodes[n.segments[i].a], &b = n.nodes[n.segments[i].b];
+      const double vx = b.x - a.x, vy = b.y - a.y, L2 = vx * vx + vy * vy;
+      double t = L2 > 1e-12 ? ((x - a.x) * vx + (y - a.y) * vy) / L2 : 0.0;
+      t = t < 0 ? 0 : (t > 1 ? 1 : t);
+      const double dx = a.x + t * vx - x, dy = a.y + t * vy - y;
+      const double d = std::sqrt(dx * dx + dy * dy);
+      if (d < best) { // same lowest-index tie-break as the index
+        best = d;
+        bseg = int(i);
+      }
+    }
+    return best;
+  };
+  const double h = n.half;
+  int checked = 0;
+  for (int i = 0; i < 37; ++i)
+    for (int j = 0; j < 37; ++j) {
+      const double x = -h + 2 * h * i / 36.0, y = -h + 2 * h * j / 36.0;
+      int bseg = -1;
+      const double bd = brute(x, y, bseg);
+      int iseg = -1;
+      const double id = n.distance_to_road(x, y, &iseg);
+      EXPECT_NEAR(id, bd, 1e-9) << "at (" << x << "," << y << ")";
+      EXPECT_EQ(iseg, bseg) << "segment mismatch at (" << x << "," << y << ")";
+      ++checked;
+    }
+  EXPECT_GT(checked, 0);
+}
