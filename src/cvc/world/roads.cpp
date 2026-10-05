@@ -21,9 +21,11 @@
 */
 
 // roads.cpp — the tensor-field street network (see roads.h). Deterministic (hashed RNG,
-// stream::road; no <random>) and GL-free. Proximity is brute-force over the segment list — the
-// network is capped at a few thousand segments, so the O(N^2) accept loop is well under a second; a
-// spatial hash is a follow-up optimisation, not a correctness requirement.
+// stream::road; no <random>) and GL-free. Proximity queries — both the per-candidate local
+// constraints during generation and the public distance_to_road — go through a uniform-grid index
+// (struct Grid), so a city-scale network builds in ~O(segments) rather than O(segments^2). The grid
+// is a candidate filter whose results are byte-identical to a brute-force scan (ascending candidate
+// order gives the same minimum and the same lowest-index tie-break), so the network is unchanged.
 
 #include <algorithm>
 #include <cmath>
@@ -114,22 +116,119 @@ struct CandCmp {
   bool operator()(const Cand &a, const Cand &b) const { return a.t > b.t; } // min-heap on t
 };
 
+// A uniform-grid spatial index of item ids (segment or node indices) over the square
+// [-half,half]^2. It is a candidate FILTER, not an approximation: a query returns a de-duplicated,
+// ASCENDING-sorted superset of the ids that could match, and the caller computes the exact test on
+// each — so results are byte-identical to a brute-force scan (same minimum, same lowest-index
+// tie-break). An item is registered in every cell its bounding box touches, so a long segment is
+// found from any nearby cell.
+struct Grid {
+  double minx = 0, miny = 0, inv_cell = 1.0; // cells per metre
+  int cols = 1, rows = 1;
+  std::vector<std::vector<int>> cells;
+
+  void init(double half, double target_cell) {
+    const int n =
+        std::max(1, std::min(1024, int(std::lround(2.0 * half / std::max(1.0, target_cell)))));
+    minx = miny = -half;
+    cols = rows = n;
+    inv_cell = (n > 0 ? double(n) : 1.0) / (2.0 * half);
+    cells.assign(std::size_t(cols) * rows, {});
+  }
+  int cx(double x) const {
+    int c = int((x - minx) * inv_cell);
+    return c < 0 ? 0 : (c >= cols ? cols - 1 : c);
+  }
+  int cy(double y) const {
+    int r = int((y - miny) * inv_cell);
+    return r < 0 ? 0 : (r >= rows ? rows - 1 : r);
+  }
+  void add_segment(int id, double x0, double y0, double x1, double y1) {
+    const int c0 = cx(std::min(x0, x1)), c1 = cx(std::max(x0, x1));
+    const int r0 = cy(std::min(y0, y1)), r1 = cy(std::max(y0, y1));
+    for (int r = r0; r <= r1; ++r)
+      for (int c = c0; c <= c1; ++c)
+        cells[std::size_t(r) * cols + c].push_back(id);
+  }
+  void add_point(int id, double x, double y) {
+    cells[std::size_t(cy(y)) * cols + cx(x)].push_back(id);
+  }
+  // Gather the de-duplicated, ascending ids whose cell overlaps [x-r,x+r] x [y-r,y+r] into `buf`.
+  void gather(double x, double y, double r, std::vector<int> &buf) const {
+    buf.clear();
+    const int c0 = cx(x - r), c1 = cx(x + r), r0 = cy(y - r), r1 = cy(y + r);
+    for (int rr = r0; rr <= r1; ++rr)
+      for (int cc = c0; cc <= c1; ++cc) {
+        const std::vector<int> &v = cells[std::size_t(rr) * cols + cc];
+        buf.insert(buf.end(), v.begin(), v.end());
+      }
+    std::sort(buf.begin(), buf.end());
+    buf.erase(std::unique(buf.begin(), buf.end()), buf.end());
+  }
+};
+
+// The lazy proximity index cached on a road_network for its public distance/near queries.
+struct road_index {
+  Grid g;
+  explicit road_index(const road_network &net) {
+    // Cell ~ a fraction of the region, bounded, so a typical query touches a handful of cells.
+    g.init(net.half, std::max(6.0, net.half / 128.0));
+    for (std::size_t i = 0; i < net.segments.size(); ++i) {
+      const road_segment &s = net.segments[i];
+      if (s.a < 0 || s.b < 0 || s.a >= int(net.nodes.size()) || s.b >= int(net.nodes.size()))
+        continue;
+      g.add_segment(int(i), net.nodes[s.a].x, net.nodes[s.a].y, net.nodes[s.b].x, net.nodes[s.b].y);
+    }
+  }
+};
+
 } // namespace
 
 double road_network::distance_to_road(double x, double y, int *seg, double *t) const {
+  if (segments.empty()) {
+    if (seg)
+      *seg = -1;
+    if (t)
+      *t = 0;
+    return 1e30;
+  }
+  // Build / refresh the cached grid index when the segment count changes.
+  if (idx_nseg_ != segments.size()) {
+    idx_cache_ = std::make_shared<road_index>(*this);
+    idx_nseg_ = segments.size();
+  }
+  const Grid &g = static_cast<const road_index *>(idx_cache_.get())->g;
+  const double cell = g.inv_cell > 0 ? 1.0 / g.inv_cell : (2.0 * half);
+  const V2 p{x, y};
   double best = 1e30;
   int bi = -1;
   double bt = 0;
-  const V2 p{x, y};
-  for (std::size_t i = 0; i < segments.size(); ++i) {
+  auto consider = [&](int i) {
+    const road_segment &s = segments[i];
     double tt;
-    const double d = point_seg(p, V2{nodes[segments[i].a].x, nodes[segments[i].a].y},
-                               V2{nodes[segments[i].b].x, nodes[segments[i].b].y}, tt);
+    const double d =
+        point_seg(p, V2{nodes[s.a].x, nodes[s.a].y}, V2{nodes[s.b].x, nodes[s.b].y}, tt);
     if (d < best) {
       best = d;
-      bi = int(i);
+      bi = i;
       bt = tt;
     }
+  };
+  // Fast path: scan a local window. If the nearest road found is within the window radius, it is
+  // the global nearest (nothing outside the window can be closer). The window (a few cells, at
+  // least ~30 m) comfortably covers the road-adjacent queries a site layout / scatter makes.
+  const double R0 = std::max(cell * 3.0, 30.0);
+  std::vector<int> buf;
+  g.gather(x, y, R0, buf);
+  for (int i : buf)
+    consider(i);
+  if (bi < 0 || best > R0) {
+    // Slow path (rare: the query is far from every road) — an exact brute scan. Still O(segments),
+    // not O(segments^2), and the ascending order matches the fast path's lowest-index tie-break.
+    best = 1e30;
+    bi = -1;
+    for (std::size_t i = 0; i < segments.size(); ++i)
+      consider(int(i));
   }
   if (seg)
     *seg = bi;
@@ -165,17 +264,40 @@ road_network generate_roads(const road_params &p, const road_height_fn &height) 
     return cvc::lsys::uni(p.seed, cvc::lsys::stream::road, 0, draw++, lo, hi);
   };
 
-  // Add a node (deduped against existing nodes within a tiny epsilon is unnecessary — callers
-  // snap).
+  // Incremental spatial indices over nodes and segments, so the per-candidate proximity tests
+  // (crossing / node snap / segment snap / branch probe / duplicate check) query a handful of
+  // nearby cells instead of scanning the whole network — O(sum of footprints) rather than
+  // O(segments^2). The indices are candidate FILTERS: each query returns an ascending,
+  // de-duplicated superset and the exact test is computed per candidate, so the network produced is
+  // byte-identical to the brute version. A split shortens a segment in place; its (now
+  // over-inclusive) index cell stays — safe, since the exact endpoints are re-read on every test.
+  const double gcell = std::max(6.0, std::max(p.snap_dist, p.segment_len));
+  Grid sg, ng;
+  sg.init(p.half, gcell);
+  ng.init(p.half, gcell);
+  std::vector<int> buf; // reused query scratch
+
   auto add_node = [&](V2 pt) {
+    const int id = int(net.nodes.size());
     net.nodes.push_back(road_node{pt.x, pt.y, 0});
-    return int(net.nodes.size()) - 1;
+    ng.add_point(id, pt.x, pt.y);
+    return id;
   };
   auto node_pos = [&](int i) { return V2{net.nodes[i].x, net.nodes[i].y}; };
+  auto push_seg = [&](int a, int b, double w, bool art) {
+    const int id = int(net.segments.size());
+    net.segments.push_back(road_segment{a, b, w, art});
+    sg.add_segment(id, net.nodes[a].x, net.nodes[a].y, net.nodes[b].x, net.nodes[b].y);
+    return id;
+  };
   auto connected = [&](int a, int b) {
-    for (const road_segment &s : net.segments)
+    const V2 pa = node_pos(a), pb = node_pos(b);
+    sg.gather(0.5 * (pa.x + pb.x), 0.5 * (pa.y + pb.y), 0.5 * len(pb - pa) + gcell, buf);
+    for (int i : buf) {
+      const road_segment &s = net.segments[i];
       if ((s.a == a && s.b == b) || (s.a == b && s.b == a))
         return true;
+    }
     return false;
   };
 
@@ -195,13 +317,14 @@ road_network generate_roads(const road_params &p, const road_height_fn &height) 
     int cut_seg = -1;
     double cut_ta = 2.0;
     V2 cut_pt{};
-    for (std::size_t i = 0; i < net.segments.size(); ++i) {
+    sg.gather(0.5 * (a.x + end.x), 0.5 * (a.y + end.y), 0.5 * len(end - a) + gcell, buf);
+    for (int i : buf) {
       V2 ip;
       double ta, tb;
       if (seg_seg(a, end, node_pos(net.segments[i].a), node_pos(net.segments[i].b), ip, ta, tb)) {
         if (ta < cut_ta) {
           cut_ta = ta;
-          cut_seg = int(i);
+          cut_seg = i;
           cut_pt = ip;
           (void)tb;
         }
@@ -215,19 +338,19 @@ road_network generate_roads(const road_params &p, const road_height_fn &height) 
     int b = -1;
     if (cut_seg >= 0) {
       // split the crossed segment at the crossing point into a shared junction node
-      road_segment &old = net.segments[cut_seg];
-      const int oa = old.a, ob = old.b;
-      const double ow = old.width;
-      const bool oart = old.arterial;
+      const int ob = net.segments[cut_seg].b;
+      const double ow = net.segments[cut_seg].width;
+      const bool oart = net.segments[cut_seg].arterial;
       b = add_node(end);
-      old.b = b;                                             // reuse the slot as oa->b
-      net.segments.push_back(road_segment{b, ob, ow, oart}); // b->ob
+      net.segments[cut_seg].b = b; // reuse the slot as oa->b (its index cell is now over-inclusive)
+      push_seg(b, ob, ow, oart);   // b->ob
       net.nodes[b].degree += 2;
     } else {
       // 2) snap the free end to the nearest existing node within snap_dist
       int best_node = -1;
       double best_nd = p.snap_dist;
-      for (int i = 0; i < int(net.nodes.size()); ++i) {
+      ng.gather(end.x, end.y, p.snap_dist, buf);
+      for (int i : buf) {
         if (i == c.from)
           continue;
         const double d = len(end - node_pos(i));
@@ -242,25 +365,25 @@ road_network generate_roads(const road_params &p, const road_height_fn &height) 
         // 3) else snap/extend onto the nearest existing segment within snap_dist (T-junction)
         int best_seg = -1;
         double best_sd = p.snap_dist, best_t = 0;
-        for (std::size_t i = 0; i < net.segments.size(); ++i) {
+        sg.gather(end.x, end.y, p.snap_dist, buf);
+        for (int i : buf) {
           double tt;
           const double d =
               point_seg(end, node_pos(net.segments[i].a), node_pos(net.segments[i].b), tt);
           if (d < best_sd && tt > 0.05 && tt < 0.95) {
             best_sd = d;
-            best_seg = int(i);
+            best_seg = i;
             best_t = tt;
           }
         }
         if (best_seg >= 0) {
-          road_segment &old = net.segments[best_seg];
-          const int oa = old.a, ob = old.b;
-          const double ow = old.width;
-          const bool oart = old.arterial;
+          const int oa = net.segments[best_seg].a, ob = net.segments[best_seg].b;
+          const double ow = net.segments[best_seg].width;
+          const bool oart = net.segments[best_seg].arterial;
           const V2 sp = node_pos(oa) + (node_pos(ob) - node_pos(oa)) * best_t;
           b = add_node(sp);
-          old.b = b;
-          net.segments.push_back(road_segment{b, ob, ow, oart});
+          net.segments[best_seg].b = b;
+          push_seg(b, ob, ow, oart);
           net.nodes[b].degree += 2;
         } else {
           b = add_node(end); // 4) a fresh endpoint
@@ -271,7 +394,7 @@ road_network generate_roads(const road_params &p, const road_height_fn &height) 
       return -1;
 
     const double width = c.arterial ? p.arterial_width : p.local_width;
-    net.segments.push_back(road_segment{c.from, b, width, c.arterial});
+    push_seg(c.from, b, width, c.arterial);
     net.nodes[c.from].degree += 1;
     net.nodes[b].degree += 1;
     return b;
@@ -313,7 +436,19 @@ road_network generate_roads(const road_params &p, const road_height_fn &height) 
         const V2 probe = bp + d * (spacing * 0.9);
         if (std::fabs(probe.x) > p.half || std::fabs(probe.y) > p.half)
           continue;
-        if (net.distance_to_road(probe.x, probe.y) < spacing * 0.55)
+        // Is a road already within ~half a block of the branch target? (same test as
+        // distance_to_road(probe) < spacing*0.55, via the incremental index.)
+        bool near = false;
+        sg.gather(probe.x, probe.y, spacing * 0.55, buf);
+        for (int i : buf) {
+          double tt;
+          if (point_seg(probe, node_pos(net.segments[i].a), node_pos(net.segments[i].b), tt) <
+              spacing * 0.55) {
+            near = true;
+            break;
+          }
+        }
+        if (near)
           continue; // keep blocks from collapsing together
         // branches off an arterial are local streets; local branches stay local
         Q.push(Cand{c.t + 2.0 + core_t, b, d, p.segment_len, /*arterial=*/false});
