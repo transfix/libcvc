@@ -852,6 +852,7 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
   parallel_for(pool, planes.K, num_threads, [&](int p) {
     const long base = static_cast<long>(p) * rows * cols;
     const std::vector<int> *last_cells = nullptr; // final non-OOB agent's FoV
+    bool seen_grew = false;                       // some ever_seen byte changed (fov_changed)
     for (int i : by_plane[p]) {
       const agent_sense &a = res[i];
       if (a.oob) {
@@ -862,7 +863,10 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
       int flips = 0;
       for (std::size_t t = 0; t < a.cells.size(); ++t) {
         const int k = a.cells[t];
-        planes.ever_seen[base + k] = 1; // FoV, monotonic OR (plane-serial here => race-free)
+        if (planes.ever_seen[base + k] != 1) { // FoV, monotonic OR (plane-serial => race-free)
+          planes.ever_seen[base + k] = 1;
+          seen_grew = true;
+        }
         // Model C: running delta is f32, each add is (float)((double)df + CONST)
         // with the constant kept double — the np.add.at-onto-float32 semantics.
         float df = 0.0f;
@@ -883,12 +887,33 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
       last_cells = &a.cells;
     }
     // last_visible is last-agent-wins (belief.py:162): blank the plane, then
-    // stamp the final non-OOB agent's FoV.
+    // stamp the final non-OOB agent's FoV. When the caller asks for fov_changed,
+    // first test whether that would leave the plane byte-identical: every FoV
+    // cell already 1 and no other nonzero byte (a FoV's cells are distinct, so
+    // the nonzero count must equal its size). Then the rewrite is skipped.
     std::uint8_t *lv = planes.last_visible + base;
-    std::memset(lv, 0, static_cast<std::size_t>(rows) * cols);
-    if (last_cells)
-      for (int k : *last_cells)
-        lv[k] = 1;
+    const std::size_t hw = static_cast<std::size_t>(rows) * cols;
+    bool lv_same = false;
+    if (planes.fov_changed) {
+      const std::size_t n_fov = last_cells ? last_cells->size() : 0;
+      lv_same = true;
+      if (last_cells)
+        for (int k : *last_cells)
+          if (lv[k] != 1) {
+            lv_same = false;
+            break;
+          }
+      if (lv_same)
+        lv_same = static_cast<std::size_t>(
+                      std::count_if(lv, lv + hw, [](std::uint8_t b) { return b != 0; })) == n_fov;
+      planes.fov_changed[p] = (seen_grew || !lv_same) ? 1 : 0;
+    }
+    if (!lv_same) {
+      std::memset(lv, 0, hw);
+      if (last_cells)
+        for (int k : *last_cells)
+          lv[k] = 1;
+    }
   });
 }
 

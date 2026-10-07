@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/gl/nav_stats_publish.h>
+#include <cvc/nav/sim_world.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <limits>
@@ -202,6 +203,27 @@ void publish_nav_rasters(cvc::app &app, cvc::gl::state_publisher &pub,
     pub.publish(pp + ".version", i2s(v));
     st.plane_versions[m] = v;
   }
+}
+
+void publish_nav_rasters(cvc::app &app, cvc::gl::state_publisher &pub,
+                         const std::string &scenePrefix, const cvc::nav::sim_world &world,
+                         nav_raster_pub_state &st) {
+  const cvc::nav::sim_world::config &cfg = world.current_config();
+  nav_raster_dims dims;
+  dims.rows = world.rows();
+  dims.cols = world.cols();
+  dims.planes = world.planes();
+  dims.min_x = cfg.min_x;
+  dims.min_y = cfg.min_y;
+  dims.max_x = cfg.max_x;
+  dims.max_y = cfg.max_y;
+  if (dims.rows <= 0 || dims.cols <= 0 || dims.planes <= 0)
+    return;
+  std::vector<int> versions(static_cast<std::size_t>(dims.planes));
+  for (int m = 0; m < dims.planes; ++m)
+    versions[m] = world.raster_version(m);
+  publish_nav_rasters(app, pub, scenePrefix, dims, world.truth(), world.belief_occ(0),
+                      world.ever_seen(0), world.last_visible(0), versions.data(), st);
 }
 
 } // namespace gl

@@ -205,11 +205,22 @@ public:
   // version. belief_occ(m) can change with no bump: a planning-threshold crossing that is not a
   // sign flip (p_thresh / band / unknown policy), or an add_obstacle() stamp entering or expiring
   // (ttl_s). ever_seen(m) / last_visible(m) change whenever a field of view moves, also with no
-  // bump. A consumer gating raster re-uploads on it can therefore show a stale raster;
-  // field_version() is the exact occupancy/field change signal (world-level, not per plane).
+  // bump. Conversely a flip that crosses no planning threshold bumps it with every raster
+  // unchanged. Gate raster re-uploads on raster_version(m) instead; field_version() is the
+  // world-level occupancy/field change signal. Kept with this meaning for existing callers.
   // Out-of-range m returns -1.
   int plane_version(int m) const {
     return (m >= 0 && m < static_cast<int>(version_.size())) ? version_[m] : -1;
+  }
+  // Per-belief-plane RASTER version: bumps exactly once per sense tick on which any byte of plane
+  // m's published rasters changed — belief_occ(m) (the composited occupancy, so threshold
+  // crossings and add_obstacle() stamps appearing or expiring by ttl_s included), ever_seen(m) or
+  // last_visible(m) — and never otherwise (an unchanged tick, or a version-only belief flip,
+  // leaves it alone). The rasters only change on a sense tick, so this is the exact per-plane
+  // dirty signal for re-publishing them (cvc::gl::publish_nav_rasters). 0 at construction.
+  // Out-of-range m returns -1.
+  int raster_version(int m) const {
+    return (m >= 0 && m < static_cast<int>(raster_version_.size())) ? raster_version_[m] : -1;
   }
 
   // Renderer snapshot into caller buffers (any may be null): pose in WORLD
@@ -400,11 +411,13 @@ private:
   std::vector<int> map_id_; // [n] agent -> belief plane in [0, M)
 
   // M belief planes (contiguous, plane m at offset m*rows*cols) + per-plane
-  // dynamic layer, occupancy raster, and belief version (log-odds flip count).
+  // dynamic layer, occupancy raster, belief version (log-odds flip count) and
+  // raster version (occ/ever_seen/last_visible change count, see raster_version).
   // A plane's field is rebuilt iff its composited occupancy changes (step()).
   std::vector<float> logodds_; // [M*rows*cols]
   std::vector<std::uint8_t> lastvis_, everseen_;
-  std::vector<std::int32_t> version_; // [M]
+  std::vector<std::int32_t> version_;        // [M]
+  std::vector<std::int32_t> raster_version_; // [M]
   std::vector<double> dyn_stamp_;     // [M*rows*cols], -inf where unmarked
   std::vector<std::uint8_t> occ_;     // [M*rows*cols] current planning rasters
 

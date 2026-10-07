@@ -877,6 +877,85 @@ TEST(NavSense, PeerBoxOccludesAndDeposits) {
   EXPECT_EQ(p.es[10 * cols + 16], 0u) << "cell behind the peer must be occluded (unseen)";
 }
 
+// fov_changed is the exact per-plane ever_seen/last_visible dirty flag, and asking for it never
+// changes what sense_batch writes. Each round senses the same agents into a twin pair of belief
+// stacks — one without fov_changed (the reference path), one with it — and requires the two stacks
+// to stay byte-identical while fov_changed[p] equals "plane p's ever_seen or last_visible bytes
+// differ from before the call". The rounds cover: the first sense (every populated plane changes),
+// an identical re-sense (nothing changes), the agents translating in half-cell steps (a plane's
+// last-agent FoV moves to a different cell set, often of the same size — the case the
+// skip-unchanged-last_visible shortcut must not mistake for "unchanged"), one agent leaving the
+// grid (its plane's last-agent FoV moves or blanks), and stray non-canonical bytes. One extra plane
+// has no agents at all.
+TEST(NavSense, FovChangedIsExactAndContentNeutral) {
+  for (unsigned seed : {3u, 19u}) {
+    for (int mode = 0; mode < 3; ++mode) {
+      const int N = 12;
+      const int groups = mode == 0 ? N : (mode == 1 ? 3 : 1); // private / clustered / shared
+      SenseCase sc(20, 24, N, groups, seed);
+      sc.M = groups + 1; // plane `groups` stays empty
+      const int HW = sc.rows * sc.cols;
+      Planes ref(sc.M, HW, N), got(sc.M, HW, N);
+      std::vector<std::uint8_t> fov(sc.M, 0xAB);
+      auto sense_both = [&](const char *what) {
+        SCOPED_TRACE(std::string(what) + " seed " + std::to_string(seed) + " mode " +
+                     std::to_string(mode));
+        const std::vector<std::uint8_t> lv0 = got.lv, es0 = got.es;
+        run_case(sc, ref, 2);
+        belief_planes pl{got.lo.data(), got.lv.data(), got.es.data(), got.ver.data(), sc.M};
+        pl.fov_changed = fov.data();
+        sense_batch(sc.truth.data(), sc.rows, sc.cols, 0.0, 0.0, static_cast<double>(sc.cols - 1),
+                    static_cast<double>(sc.rows - 1), sc.agents(), nullptr, 0, nullptr, 0, pl, 2.2,
+                    -1.4, 8.0, got.flips.data(), 2);
+        EXPECT_EQ(ref.lo, got.lo);
+        EXPECT_EQ(ref.lv, got.lv);
+        EXPECT_EQ(ref.es, got.es);
+        EXPECT_EQ(ref.ver, got.ver);
+        EXPECT_EQ(ref.flips, got.flips);
+        int n_changed = 0;
+        for (int m = 0; m < sc.M; ++m) {
+          const long b = static_cast<long>(m) * HW;
+          const bool differs =
+              !std::equal(lv0.begin() + b, lv0.begin() + b + HW, got.lv.begin() + b) ||
+              !std::equal(es0.begin() + b, es0.begin() + b + HW, got.es.begin() + b);
+          EXPECT_EQ(fov[m], differs ? 1 : 0) << "plane " << m;
+          n_changed += differs;
+        }
+        return n_changed;
+      };
+      EXPECT_EQ(sense_both("first sense"), groups) << "every populated plane gains its first FoV";
+      EXPECT_EQ(sense_both("identical re-sense"), 0) << "same poses, same FoV: nothing changes";
+      // A full-circle FoV is rotation-invariant, so move the agents instead: each half-cell step
+      // shifts some planes' last-agent FoV to a different cell set.
+      int moved = 0;
+      for (int step = 0; step < 20; ++step) {
+        for (int i = 0; i < N; ++i)
+          sc.pos[2 * i] = std::fmod(sc.pos[2 * i] + 0.5, static_cast<double>(sc.cols - 1));
+        moved += sense_both("agents translated");
+      }
+      EXPECT_GT(moved, 0) << "translation must move some plane's FoV";
+      sc.pos[2] = -5.0; // agent 1 leaves the grid
+      sc.pos[3] = -5.0;
+      sense_both("agent 1 off the grid");
+      EXPECT_EQ(sense_both("settled"), 0);
+      // non-canonical bytes: a stray last_visible 2 off every FoV, and an ever_seen 3 on a cell in
+      // a current FoV (a last_visible 1 cell; the poses are settled, so it is sensed again), are
+      // rewritten (to 0 and 1) by both paths, so they count as changes.
+      const long empty = static_cast<long>(groups) * HW;
+      const long seen =
+          static_cast<long>(std::find(got.lv.begin(), got.lv.end(), 1) - got.lv.begin());
+      ASSERT_LT(seen, empty);
+      ref.lv[empty + 5] = got.lv[empty + 5] = 2;
+      ref.es[seen] = got.es[seen] = 3;
+      sense_both("non-canonical bytes");
+      EXPECT_EQ(fov[groups], 1) << "the empty plane's stray last_visible byte is cleared";
+      EXPECT_EQ(got.es[seen], 1) << "the stray ever_seen byte is rewritten";
+      EXPECT_EQ(fov[seen / HW], 1) << "and counts as a change";
+      EXPECT_EQ(sense_both("settled again"), 0);
+    }
+  }
+}
+
 // ─── drive: bilinear SDF sampler ─────────────────────────────────────────────
 
 // A constant field per plane makes the bilinear sample exact and hand-checkable:
@@ -1683,6 +1762,308 @@ TEST(NavSimWorld, VersionOnlyFlipDoesNotRebuildButOccupancyChangeDoes) {
   EXPECT_EQ(clear_step, 6) << "log-odds -0.4 -> -1.8 crosses the pessimistic threshold";
 }
 
+// raster_version(m) is the exact per-plane "published rasters changed" signal: it bumps exactly
+// once on every sense tick that changed a byte of belief_occ(m), ever_seen(m) or last_visible(m),
+// and never otherwise, independently of plane_version(m) (belief sign flips). The stationary
+// one-ray phantom setup of the test above makes every event land on a known tick:
+//   tick 0     first sense: ever_seen / last_visible grow, no flip, occupancy unchanged -> +1
+//   ticks 1-4  log-odds walk down, nothing published changes                               -> 0
+//   tick 5     sign flip on the occupied side of the threshold (plane_version +1)          -> 0
+//   tick 6     threshold crossing without a sign flip (occupancy changes)                  -> +1
+//   then an add_obstacle() blob: its mark appears on the next sense (+1), holds for ttl_s (0),
+//   and expires exactly once (+1); every other tick is unchanged (0).
+TEST(NavSimWorld, RasterVersionBumpsOncePerRasterChange) {
+  const int R = 16, C = 16;
+  std::vector<std::uint8_t> truth((std::size_t)R * C, 0), prior((std::size_t)R * C, 0);
+  const int pr = 8, pc = 10; // the phantom cell
+  prior[pr * C + pc] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = 0;
+  cfg.min_y = 0;
+  cfg.max_x = C - 1; // cell_w = cell_h = 1
+  cfg.max_y = R - 1;
+  cfg.scale = 1.0;
+  cfg.veh.rr = 0.2f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.vmax = 0.0f; // stationary: the field of view never moves after the first sense
+  cfg.range_m = 12.0;
+  cfg.n_rays = 1;
+  cfg.fov_rad = 0.0;
+  cfg.sense_every = 1;
+  cfg.freeze_sense = false;
+  cfg.optimistic = false;
+  cfg.l_free = -1.4;
+  cfg.l_clamp = 8.0;
+  cfg.ttl_s = 0.25; // an add_obstacle mark lives 4 ticks (4 * 0.06 <= 0.25 < 5 * 0.06)
+
+  float o[2] = {4.0f, 8.0f}, goal[2] = {14.0f, 8.0f}, color[3] = {1, 1, 1};
+  cvc::nav::sim_world world(cfg, truth.data(), prior.data(), cvc::nav::coef_mlp::default_biased(),
+                            o, goal, color, 1);
+  const std::size_t hw = (std::size_t)R * C;
+  EXPECT_EQ(world.raster_version(0), 0);
+  EXPECT_EQ(world.raster_version(1), -1); // out of range, like plane_version
+  EXPECT_EQ(world.raster_version(-1), -1);
+
+  struct tick_delta {
+    bool occ, seen, vis, flip;
+    int bumps;
+  };
+  auto step_once = [&] {
+    const std::vector<std::uint8_t> occ0(world.belief_occ(0), world.belief_occ(0) + hw),
+        es0(world.ever_seen(0), world.ever_seen(0) + hw),
+        lv0(world.last_visible(0), world.last_visible(0) + hw);
+    const int pv0 = world.plane_version(0), rv0 = world.raster_version(0);
+    world.step(1);
+    tick_delta d;
+    d.occ = !std::equal(occ0.begin(), occ0.end(), world.belief_occ(0));
+    d.seen = !std::equal(es0.begin(), es0.end(), world.ever_seen(0));
+    d.vis = !std::equal(lv0.begin(), lv0.end(), world.last_visible(0));
+    d.flip = world.plane_version(0) != pv0;
+    d.bumps = world.raster_version(0) - rv0;
+    EXPECT_EQ(d.bumps, (d.occ || d.seen || d.vis) ? 1 : 0)
+        << "raster_version must bump exactly once iff a raster changed (tick " << world.tick() - 1
+        << ")";
+    return d;
+  };
+
+  // Phase 1: the phantom is sensed away.
+  for (int t = 0; t < 10; ++t) {
+    SCOPED_TRACE("phantom tick " + std::to_string(t));
+    const tick_delta d = step_once();
+    if (t == 0) {
+      EXPECT_TRUE(d.seen && d.vis) << "the first sense grows ever_seen";
+      EXPECT_FALSE(d.occ);
+      EXPECT_FALSE(d.flip) << "an ever_seen-only change: plane_version cannot see it";
+      EXPECT_EQ(d.bumps, 1);
+    } else if (t == 5) {
+      EXPECT_TRUE(d.flip) << "log-odds 8 -> -0.4: a sign flip";
+      EXPECT_FALSE(d.occ || d.seen || d.vis) << "...that changes no published raster";
+      EXPECT_EQ(d.bumps, 0);
+    } else if (t == 6) {
+      EXPECT_TRUE(d.occ) << "log-odds -0.4 -> -1.8 crosses the pessimistic threshold";
+      EXPECT_FALSE(d.flip) << "a threshold crossing with no sign flip";
+      EXPECT_EQ(d.bumps, 1);
+    } else {
+      EXPECT_FALSE(d.occ || d.seen || d.vis || d.flip);
+      EXPECT_EQ(d.bumps, 0) << "an unchanged tick must not bump";
+    }
+  }
+  EXPECT_EQ(world.raster_version(0), 2);
+  EXPECT_EQ(world.plane_version(0), 1);
+
+  // Phase 2: an add_obstacle() mark (rows/cols 1..3, off the agent's ray) appears and expires.
+  world.add_obstacle(2, 2, 2, 2);
+  EXPECT_EQ(world.raster_version(0), 2) << "the stamp alone publishes nothing until a sense tick";
+  int appear = -1, expire = -1;
+  for (int k = 0; k < 10; ++k) {
+    SCOPED_TRACE("obstacle tick " + std::to_string(k));
+    const tick_delta d = step_once();
+    EXPECT_FALSE(d.seen || d.vis || d.flip);
+    if (d.occ) {
+      const bool marked = world.belief_occ(0)[2 * C + 2] == 1;
+      (marked ? appear : expire) = k;
+    }
+  }
+  EXPECT_EQ(appear, 0) << "the mark composites in on the first sense after add_obstacle";
+  EXPECT_EQ(expire, 5) << "and drops out once its age exceeds ttl_s";
+  EXPECT_EQ(world.raster_version(0), 4);
+  EXPECT_EQ(world.plane_version(0), 1) << "neither obstacle event is a belief flip";
+}
+
+// An ever_seen-ONLY change: two agents share one plane. Agent 0 drives into new ground while the
+// plane's last agent, agent 1 (whose FoV alone is last_visible), stands still. ever_seen grows on
+// the ticks agent 0 sees new cells while last_visible and the occupancy (an empty, fully-known
+// world) stay byte-identical and no belief flips — each such tick bumps raster_version once.
+TEST(NavSimWorld, RasterVersionEverSeenOnlyGrowth) {
+  const int R = 24, C = 48;
+  std::vector<std::uint8_t> empty((std::size_t)R * C, 0);
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = 0;
+  cfg.min_y = 0;
+  cfg.max_x = C - 1; // cell_w = cell_h = 1
+  cfg.max_y = R - 1;
+  cfg.scale = 1.0;
+  cfg.veh.rr = 0.2f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.25f;
+  cfg.veh.vmax = 4.0f;
+  cfg.range_m = 5.0;
+  cfg.n_rays = 90;
+  cfg.fov_rad = 6.283185307179586;
+  cfg.sense_every = 1;
+  cfg.freeze_sense = false;
+
+  // agent 0 drives east along row 6; agent 1 parks at the far west of row 18 (vmax 0)
+  float o[4] = {3.0f, 6.0f, 3.0f, 18.0f}, goal[4] = {44.0f, 6.0f, 3.5f, 18.0f};
+  float color[6] = {1, 1, 1, 1, 1, 1};
+  cvc::nav::sim_world world(cfg, empty.data(), empty.data(), cvc::nav::coef_mlp::default_biased(),
+                            o, goal, color, 2);
+  ASSERT_EQ(world.planes(), 1);
+  const float vmax[2] = {4.0f, 0.0f};
+  world.set_vehicle_kinematics(vmax, nullptr, nullptr, 2);
+
+  const std::size_t hw = (std::size_t)R * C;
+  int seen_only = 0;
+  world.step(1); // first sense: both FoVs land
+  for (int t = 0; t < 30; ++t) {
+    const std::vector<std::uint8_t> occ0(world.belief_occ(0), world.belief_occ(0) + hw),
+        es0(world.ever_seen(0), world.ever_seen(0) + hw),
+        lv0(world.last_visible(0), world.last_visible(0) + hw);
+    const int pv0 = world.plane_version(0), rv0 = world.raster_version(0);
+    world.step(1);
+    const bool occ = !std::equal(occ0.begin(), occ0.end(), world.belief_occ(0));
+    const bool seen = !std::equal(es0.begin(), es0.end(), world.ever_seen(0));
+    const bool vis = !std::equal(lv0.begin(), lv0.end(), world.last_visible(0));
+    EXPECT_FALSE(occ) << "tick " << t;
+    EXPECT_FALSE(vis) << "the parked last agent's FoV is last_visible (tick " << t << ")";
+    EXPECT_EQ(world.plane_version(0), pv0) << "tick " << t;
+    EXPECT_EQ(world.raster_version(0) - rv0, seen ? 1 : 0) << "tick " << t;
+    seen_only += seen;
+  }
+  EXPECT_GT(seen_only, 3) << "agent 0 must keep uncovering new ground";
+}
+
+// Under freeze_sense nothing is sensed or composited, so the rasters never change and
+// raster_version stays put — even across an add_obstacle() (inert on the static-map path).
+TEST(NavSimWorld, RasterVersionStillUnderFreezeSense) {
+  const int R = 24, C = 24;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -100;
+  cfg.min_y = -100;
+  cfg.max_x = 100;
+  cfg.max_y = 100;
+  cfg.scale = 0.02;
+  cfg.freeze_sense = true;
+  cvc::nav::sim_world world = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), 4, 3);
+  for (int t = 0; t < 6; ++t) {
+    if (t == 2)
+      world.add_obstacle(10, 12, 10, 12);
+    world.step(1);
+    EXPECT_EQ(world.raster_version(0), 0) << "tick " << t;
+  }
+}
+
+// The oracle check over live fog-of-war runs: every tick, every plane's raster_version delta must
+// equal "did any of its belief_occ / ever_seen / last_visible bytes change" — in the private
+// (M == N, pooled), clustered and shared layouts, with sensing on every other tick and add_obstacle
+// marks appearing and expiring mid-run. Also requires the run to have exercised the cases the
+// belief-flip counter misses (an occupancy change with no flip, a FoV-only change).
+TEST(NavSimWorld, RasterVersionMatchesRasterDiffOracle) {
+  const int R = 40, C = 40;
+  std::vector<std::uint8_t> truth((std::size_t)R * C, 0), prior;
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        truth[r * C + c] = 1;
+  for (int r = 12; r < 28; ++r)
+    truth[r * C + 8] = 1; // a real wall the prior does not know about
+  prior = truth;
+  for (int r = 0; r < R; ++r)
+    prior[r * C + 8] = (r == 0 || r == R - 1) ? 1 : 0;
+  for (int r = R / 4; r < 3 * R / 4; ++r)
+    prior[r * C + C / 2] = 1; // a phantom wall in the prior only
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.range_m = 160.0;
+  cfg.n_rays = 120;
+  cfg.sense_every = 2; // odd ticks do not sense: nothing may bump there
+  cfg.freeze_sense = false;
+  cfg.ttl_s = 0.5;
+
+  auto cell_on = [&](int r, int c, float &onx, float &ony) {
+    const double x = cfg.min_x + (double)c / (cfg.cols - 1) * (cfg.max_x - cfg.min_x);
+    const double y = cfg.min_y + (double)r / (cfg.rows - 1) * (cfg.max_y - cfg.min_y);
+    onx = (float)((x - cfg.cx) * cfg.scale);
+    ony = (float)((y - cfg.cy) * cfg.scale);
+  };
+  const int N = 6;
+  std::vector<float> o(2 * N), goal(2 * N), color(3 * N, 0.5f);
+  for (int i = 0; i < N; ++i) {
+    const int row = R / 4 + i * (R / 2) / N;
+    cell_on(row, C / 2 - 6, o[2 * i], o[2 * i + 1]);
+    cell_on(row, C / 2 + 8, goal[2 * i], goal[2 * i + 1]);
+  }
+
+  int occ_no_flip = 0, fov_only = 0, quiet_sense_planes = 0;
+  for (int layout = 0; layout < 3; ++layout) { // private (pooled) / clustered / shared
+    SCOPED_TRACE("layout " + std::to_string(layout));
+    std::vector<int> map_id(N);
+    for (int i = 0; i < N; ++i)
+      map_id[i] = layout == 0 ? i : i % 3;
+    const int M = layout == 0 ? N : 3;
+    cvc::nav::sim_world world =
+        layout == 2 ? cvc::nav::sim_world(cfg, truth.data(), prior.data(),
+                                          cvc::nav::coef_mlp::default_biased(), o.data(),
+                                          goal.data(), color.data(), N)
+                    : cvc::nav::sim_world(cfg, truth.data(), prior.data(),
+                                          cvc::nav::coef_mlp::default_biased(), o.data(),
+                                          goal.data(), color.data(), N, map_id.data(), M);
+    cvc::thread_pool pool(3);
+    if (layout == 0)
+      world.set_thread_pool(&pool);
+    const int P = world.planes();
+    const std::size_t hw = (std::size_t)R * C, all = (std::size_t)P * hw;
+    for (int t = 0; t < 70; ++t) {
+      if (t == 6)
+        world.add_obstacle(30, 32, 30, 32); // appears on tick 6, expires ~8 ticks later
+      if (t == 21)
+        world.add_obstacle(5, 6, 30, 31);
+      const std::vector<std::uint8_t> occ0(world.belief_occ(0), world.belief_occ(0) + all),
+          es0(world.ever_seen(0), world.ever_seen(0) + all),
+          lv0(world.last_visible(0), world.last_visible(0) + all);
+      std::vector<int> pv0(P), rv0(P);
+      for (int m = 0; m < P; ++m) {
+        pv0[m] = world.plane_version(m);
+        rv0[m] = world.raster_version(m);
+      }
+      const bool sensed = t % cfg.sense_every == 0;
+      world.step(0);
+      for (int m = 0; m < P; ++m) {
+        const std::size_t b = (std::size_t)m * hw;
+        const bool occ = !std::equal(occ0.begin() + b, occ0.begin() + b + hw, world.belief_occ(m));
+        const bool fov = !std::equal(es0.begin() + b, es0.begin() + b + hw, world.ever_seen(m)) ||
+                         !std::equal(lv0.begin() + b, lv0.begin() + b + hw, world.last_visible(m));
+        const bool flip = world.plane_version(m) != pv0[m];
+        ASSERT_EQ(world.raster_version(m) - rv0[m], (occ || fov) ? 1 : 0)
+            << "plane " << m << " tick " << t << " occ " << occ << " fov " << fov;
+        if (!sensed)
+          ASSERT_FALSE(occ || fov || flip) << "a non-sense tick changed plane " << m;
+        occ_no_flip += occ && !flip;
+        fov_only += fov && !occ && !flip;
+        quiet_sense_planes += sensed && !occ && !fov;
+      }
+    }
+  }
+  EXPECT_GT(occ_no_flip, 0) << "the run must include occupancy changes plane_version misses";
+  EXPECT_GT(fov_only, 0) << "the run must include FoV-only changes plane_version misses";
+  EXPECT_GT(quiet_sense_planes, 0) << "the run must include sense ticks that change nothing";
+}
+
 // step()'s per-plane field rebuild is fanned out across a borrowed thread_pool when
 // one is injected (pool_ && M_ > 1). Each plane m touches only its own [m*hw] belief/
 // occ/field slice with its own scratch, so the pooled rebuild MUST be bit-identical to
@@ -1754,6 +2135,9 @@ TEST(NavSimWorld, PooledRebuildMatchesSerialBitExact) {
     pooledW.step(0);
     ASSERT_EQ(serialW.field_version(), pooledW.field_version())
         << "field_version diverged at tick " << t;
+    for (int m = 0; m < N; ++m)
+      ASSERT_EQ(serialW.raster_version(m), pooledW.raster_version(m))
+          << "raster_version[" << m << "] diverged at tick " << t;
     if (serialW.field_version() > 0)
       rebuilt = true;
     serialW.snapshot(ps.data(), hs.data(), ss.data(), ms.data(), rs.data());
