@@ -17,10 +17,10 @@
 >
 > **Header location.** The state subsystem lives under `cvc/state/`: include
 > `<cvc/state/state.h>`, `<cvc/state/state_object.h>`,
-> `<cvc/state/state_exec/…>`, etc. The old `<cvc/core/state*.h>`,
-> `<cvc/core/distributed_state_session.h>` and `<cvc/core/state_exec/…>` paths
-> still compile through installed forwarding headers for one release cycle and
-> are then removed — see
+> `<cvc/state/state_exec/…>`, etc. It moved out of `cvc/core/` in libcvc 3.5.0;
+> the old `<cvc/core/state*.h>`, `<cvc/core/distributed_state_session.h>` and
+> `<cvc/core/state_exec/…>` paths no longer exist (a hard cutover — no
+> forwarding headers were shipped) — see
 > [`roadmap/STATE_DIR_LAYOUT_REFACTOR.md`](roadmap/STATE_DIR_LAYOUT_REFACTOR.md).
 
 ## Table of Contents

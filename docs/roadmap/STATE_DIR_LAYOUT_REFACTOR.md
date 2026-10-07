@@ -1,10 +1,13 @@
 # State Directory Layout Refactor — move state code to `src/cvc/state` + `inc/cvc/state`
 
-Status: **PHASE 1 IMPLEMENTED** — the move, include rename, docs and compat shims have
-landed (see [Phase 1 implementation notes](#phase-1-implementation-notes)); Phase 2 (drop
-the shims) is pending. Supersedes nothing — the distributed-state *runtime* work is
-tracked in `DISTRIBUTED_STATE_ROADMAP.md`; this is a pure layout refactor of where the
-state code lives.
+Status: **COMPLETE** (hard cutover, libcvc 3.5.0) — Phase 1
+([#577](https://github.com/transfix/libcvc/pull/577)) moved the code, renamed the includes
+and added forwarding headers for the old paths; Phase 2 removed them before any release
+shipped them, so 3.5.0 is the first release with the new layout and has only
+`<cvc/state/...>` (see the [Phase 1](#phase-1-implementation-notes) and [Phase
+2](#phase-2-implementation-notes) notes). Supersedes nothing — the distributed-state
+*runtime* work is tracked in `DISTRIBUTED_STATE_ROADMAP.md`; this is a pure layout
+refactor of where the state code lives.
 
 ## Purpose
 
@@ -191,3 +194,22 @@ What PR 1 actually did, and where it departs from the plan above:
   `STATE_EXEC_PORTING_PLAN.md` (inline header references and the §5 File Layout tree,
   now rooted at `inc/cvc/state/` and `src/cvc/state/`). `README.md`'s Project Structure
   tree gained a `state/` entry. The `release.yml` comment is left alone, as planned.
+
+## Phase 2 implementation notes
+
+- **Hard cutover.** Rather than ship the forwarding headers for a release (step 6), the
+  team chose the hard cutover that step 6 allows: Phase 2 landed before any release, so no
+  published bundle ever contained the shims. libcvc 3.5.0 is the release that carries the
+  move, and its release notes record the source break.
+- Removed `compat/` (the 57 forwarding headers), its `install(DIRECTORY compat/inc/cvc/ …)`
+  rule in `src/cvc/CMakeLists.txt`, and `state_compat_headers_test` with its five
+  `src/cvc/tests/CMakeLists.txt` entries. Both CMake files are back to their content before
+  the shims were added.
+- Installs no longer contain `<cvc/core/state*.h>`, `<cvc/core/distributed_state_session.h>`
+  or `<cvc/core/state_exec/*.h>`. That is a **source break** for out-of-tree code on the
+  old paths; there is no ABI change. The fix for such code is mechanical: in includes,
+  `cvc/core/state` → `cvc/state/state` and `cvc/core/distributed_state` →
+  `cvc/state/distributed_state`.
+- No separate `cvc_revision` bump: the 3.5.0 version bump restarts every recipe's
+  `cvc_revision` at 1.
+- `docs/STATE_API.md`'s header-location note now says the old paths are gone.
