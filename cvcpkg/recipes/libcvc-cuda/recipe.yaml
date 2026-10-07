@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-cuda
-  upstream_version: "3.4.0"
+  upstream_version: "3.5.0"
   # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
   # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
   # Dropping the binary changes bundle contents, and +cvc.1 was already published

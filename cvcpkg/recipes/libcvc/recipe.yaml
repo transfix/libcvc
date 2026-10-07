@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "3.4.0"
+  upstream_version: "3.5.0"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -139,7 +139,7 @@ recipe:
   # (LowMemoryPolyDataMapper, ~2/3 fewer GL calls per frame on WebGL2) and the expanded
   # THIRD_PARTY_NOTICES.md. libcvc's own sources are unchanged by it; the bump keeps the pair's
   # revisions aligned for consumers that pin both.
-  cvc_revision: 17
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
