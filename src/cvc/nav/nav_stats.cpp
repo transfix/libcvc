@@ -248,15 +248,18 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
   ++step_i_;
 }
 
-episode_nav_stats nav_stats_collector::finish() {
-  ep_.ticks = step_i_;
+episode_nav_stats nav_stats_collector::finish() const {
+  // Non-destructive: reduce a COPY of the accumulators, so finish() is a repeatable running
+  // snapshot (callers poll it every tick) and step() can keep accumulating afterwards.
+  episode_nav_stats ep = ep_;
+  ep.ticks = step_i_;
   const double steps = step_i_ > 0 ? (double)step_i_ : 1.0;
   const double elapsed = step_i_ * dt_;
   int arrived = 0, npen = 0, contacts = 0;
   double ttg_sum = 0, makespan = 0, ratio_sum = 0, turn_sum = 0, fuel_sum = 0;
   int ratio_n = 0;
   for (int i = 0; i < n_; ++i) {
-    auto &v = ep_.per_vehicle[i];
+    auto &v = ep.per_vehicle[i];
     v.convoy_id = conv_[i];
     v.vehicle_class = cls_[i];
     v.robot_radius_m = rr_[i];
@@ -271,10 +274,10 @@ episode_nav_stats nav_stats_collector::finish() {
       v.slot_error_max_m = slot_err_max_[i];
       v.formation_arrived = p_.formation_tol_m > 0 && slot_err_last_[i] < p_.formation_tol_m;
     }
-    // drive telemetry — the *_mean fields accumulated SUMS in step(); divide by the tick count.
-    // Peaks (mu_min, mrisk_max, steer_abs_max) and counts (binding_steps) are already final. No
-    // drive feed => drive_steps 0, means stay 0 and mu_min stays at the 1e30 sentinel (serialized
-    // null).
+    // drive telemetry — the *_mean fields accumulated SUMS in step(); divide the copy by the tick
+    // count. Peaks (mu_min, mrisk_max, steer_abs_max) and counts (binding_steps) are already final.
+    // No drive feed => drive_steps 0, means stay 0 and mu_min stays at the 1e30 sentinel
+    // (serialized null).
     if (v.drive_steps > 0) {
       const double dn = static_cast<double>(v.drive_steps);
       v.alpha_mean /= dn;
@@ -314,20 +317,20 @@ episode_nav_stats nav_stats_collector::finish() {
     turn_sum += v.turn_total_rad;
     fuel_sum += v.fuel_used;
   }
-  ep_.arrived = arrived;
-  ep_.makespan_s = makespan;
-  ep_.mean_ttg_s = arrived > 0 ? ttg_sum / arrived : 0;
-  ep_.penetration_pct = n_ > 0 ? 100.0 * npen / (n_ * steps) : 0;
-  ep_.total_veh_contacts = contacts;
-  ep_.mean_path_ratio = ratio_n > 0 ? ratio_sum / ratio_n : 0;
-  ep_.mean_turn_total_rad = n_ > 0 ? turn_sum / n_ : 0;
-  ep_.total_fuel = fuel_sum;
+  ep.arrived = arrived;
+  ep.makespan_s = makespan;
+  ep.mean_ttg_s = arrived > 0 ? ttg_sum / arrived : 0;
+  ep.penetration_pct = n_ > 0 ? 100.0 * npen / (n_ * steps) : 0;
+  ep.total_veh_contacts = contacts;
+  ep.mean_path_ratio = ratio_n > 0 ? ratio_sum / ratio_n : 0;
+  ep.mean_turn_total_rad = n_ > 0 ? turn_sum / n_ : 0;
+  ep.total_fuel = fuel_sum;
   bool any_over = false;
-  for (const auto &v : ep_.per_vehicle)
+  for (const auto &v : ep.per_vehicle)
     if (v.over_budget)
       any_over = true;
-  ep_.success = (n_ > 0) && (arrived == n_) && !any_over;
-  return ep_;
+  ep.success = (n_ > 0) && (arrived == n_) && !any_over;
+  return ep;
 }
 
 // ── JSON ────────────────────────────────────────────────────────────────────

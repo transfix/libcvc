@@ -265,7 +265,10 @@ public:
   void step(const float *pos, const float *head, const float *spd, const int *mode,
             const std::uint8_t *reached, const nav_samplers &smp = {});
 
-  episode_nav_stats finish();
+  // Reduce the accumulators into an episode record. Non-destructive: the means are computed into
+  // the returned copy, so finish() may be called any number of times (a running snapshot) and
+  // step() may keep accumulating after it; each call reflects every step so far.
+  episode_nav_stats finish() const;
 
   // Optional per-vehicle identity, applied at finish (defaults 0). formation_parent (-1 default) is
   // the formation linkage edge (the vehicle index this one holds station on; -1 =

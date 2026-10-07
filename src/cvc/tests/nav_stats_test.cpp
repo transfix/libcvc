@@ -529,3 +529,197 @@ TEST(NavStats, DriveTelemetryReduction) {
   EXPECT_NE(sj.find("\"mean_alpha\":"), std::string::npos);
   EXPECT_NE(sj.find("\"mean_mu\":"), std::string::npos);
 }
+
+// finish() is a running snapshot (cvcGL publish_nav_stats, sim_world::nav_stats() and downstream
+// sim workers poll it every tick), so it must not mutate the accumulators: it once divided the
+// drive_* sums IN PLACE, so a second call divided again and stepping after a finish() mixed sums
+// with means. Field-by-field EXACT comparison (same arithmetic => bit-identical doubles).
+namespace {
+
+void expect_same_vehicle(const veh_nav_stats &a, const veh_nav_stats &b) {
+  SCOPED_TRACE("veh_index " + std::to_string(a.veh_index));
+  EXPECT_EQ(a.veh_index, b.veh_index);
+  EXPECT_EQ(a.convoy_id, b.convoy_id);
+  EXPECT_EQ(a.vehicle_class, b.vehicle_class);
+  EXPECT_EQ(a.robot_radius_m, b.robot_radius_m);
+  EXPECT_EQ(a.mass_kg, b.mass_kg);
+  EXPECT_EQ(a.formation_parent, b.formation_parent);
+  EXPECT_EQ(a.arrived, b.arrived);
+  EXPECT_EQ(a.time_to_goal_s, b.time_to_goal_s);
+  EXPECT_EQ(a.timed_out, b.timed_out);
+  EXPECT_EQ(a.over_budget, b.over_budget);
+  EXPECT_EQ(a.goals_reached, b.goals_reached);
+  EXPECT_EQ(a.total_path_m, b.total_path_m);
+  EXPECT_EQ(a.straight_m, b.straight_m);
+  EXPECT_EQ(a.turn_total_rad, b.turn_total_rad);
+  EXPECT_EQ(a.turn_events, b.turn_events);
+  EXPECT_EQ(a.time_in_wall_s, b.time_in_wall_s);
+  EXPECT_EQ(a.wall_entries, b.wall_entries);
+  EXPECT_EQ(a.time_moving_s, b.time_moving_s);
+  EXPECT_EQ(a.time_stopped_s, b.time_stopped_s);
+  EXPECT_EQ(a.speed_mean, b.speed_mean);
+  EXPECT_EQ(a.speed_max, b.speed_max);
+  EXPECT_EQ(a.closest_approach_m, b.closest_approach_m);
+  EXPECT_EQ(a.stall_steps, b.stall_steps);
+  EXPECT_EQ(a.min_clearance_m, b.min_clearance_m);
+  EXPECT_EQ(a.time_below_clear_s, b.time_below_clear_s);
+  EXPECT_EQ(a.penetration_steps, b.penetration_steps);
+  EXPECT_EQ(a.veh_contacts, b.veh_contacts);
+  EXPECT_EQ(a.time_over_material_s, b.time_over_material_s);
+  EXPECT_EQ(a.dist_over_material_m, b.dist_over_material_m);
+  EXPECT_EQ(a.accel_integral, b.accel_integral);
+  EXPECT_EQ(a.fuel_used, b.fuel_used);
+  EXPECT_EQ(a.slot_error_mean_m, b.slot_error_mean_m);
+  EXPECT_EQ(a.slot_error_max_m, b.slot_error_max_m);
+  EXPECT_EQ(a.formation_arrived, b.formation_arrived);
+  EXPECT_EQ(a.sense_flips, b.sense_flips);
+  EXPECT_EQ(a.drive_steps, b.drive_steps);
+  EXPECT_EQ(a.alpha_mean, b.alpha_mean);
+  EXPECT_EQ(a.beta_mean, b.beta_mean);
+  EXPECT_EQ(a.gamma_mean, b.gamma_mean);
+  EXPECT_EQ(a.mu_mean, b.mu_mean);
+  EXPECT_EQ(a.mu_min, b.mu_min);
+  EXPECT_EQ(a.mrisk_mean, b.mrisk_mean);
+  EXPECT_EQ(a.mrisk_max, b.mrisk_max);
+  EXPECT_EQ(a.ext_force_mean, b.ext_force_mean);
+  EXPECT_EQ(a.steer_abs_mean, b.steer_abs_mean);
+  EXPECT_EQ(a.steer_abs_max, b.steer_abs_max);
+  EXPECT_EQ(a.binding_steps, b.binding_steps);
+}
+
+void expect_same_episode(const episode_nav_stats &a, const episode_nav_stats &b) {
+  EXPECT_EQ(a.scene_id, b.scene_id);
+  EXPECT_EQ(a.seed, b.seed);
+  EXPECT_EQ(a.checkpoint, b.checkpoint);
+  EXPECT_EQ(a.n_vehicles, b.n_vehicles);
+  EXPECT_EQ(a.ticks, b.ticks);
+  EXPECT_EQ(a.dt_s, b.dt_s);
+  EXPECT_EQ(a.arrived, b.arrived);
+  EXPECT_EQ(a.success, b.success);
+  EXPECT_EQ(a.makespan_s, b.makespan_s);
+  EXPECT_EQ(a.mean_ttg_s, b.mean_ttg_s);
+  EXPECT_EQ(a.penetration_pct, b.penetration_pct);
+  EXPECT_EQ(a.total_veh_contacts, b.total_veh_contacts);
+  EXPECT_EQ(a.min_sep_m, b.min_sep_m);
+  EXPECT_EQ(a.mean_path_ratio, b.mean_path_ratio);
+  EXPECT_EQ(a.mean_turn_total_rad, b.mean_turn_total_rad);
+  EXPECT_EQ(a.total_fuel, b.total_fuel);
+  EXPECT_EQ(a.coverage.explored_frac, b.coverage.explored_frac);
+  EXPECT_EQ(a.coverage.visible_frac, b.coverage.visible_frac);
+  EXPECT_EQ(a.coverage.believed_free_frac, b.coverage.believed_free_frac);
+  EXPECT_EQ(a.coverage.phantom_frac, b.coverage.phantom_frac);
+  ASSERT_EQ(a.per_vehicle.size(), b.per_vehicle.size());
+  for (std::size_t i = 0; i < a.per_vehicle.size(); ++i)
+    expect_same_vehicle(a.per_vehicle[i], b.per_vehicle[i]);
+  EXPECT_EQ(a.to_json(), b.to_json());
+}
+
+// A 2-vehicle scripted episode exercising every sampler (clearance, occupancy, material, formation
+// slot, sense flips, drive telemetry) so every accumulator — sums, peaks, counts — is live. Step s
+// feeds exact binary fractions; alpha cycles 1,3,2 so its mean is 2 over any multiple of 3 steps.
+constexpr int kSnapN = 2;
+
+void begin_snapshot_episode(nav_stats_collector &c) {
+  const float start[2 * kSnapN] = {0, 0, 0, 4};
+  const float goal[2 * kSnapN] = {6, 0, 6, 4};
+  budget_policy b;
+  b.time_budget_s = 4.0;
+  c.begin_episode(kSnapN, 1.0, start, goal, b, "synthetic", 3, "ckpt-snap");
+  c.set_identity(0, 1, 2, 1.5, 1000.0, -1);
+  c.set_identity(1, 1, 2, 1.5, 1000.0, 0);
+}
+
+void step_snapshot_episode(nav_stats_collector &c, int s) {
+  static const float alpha[3] = {1, 3, 2};
+  const float pos[2 * kSnapN] = {(float)(s + 1), 0, (float)s, 4.0f - 0.5f * (s % 2)};
+  const float head[kSnapN] = {0.25f * (s % 2), 0};
+  const float spd[kSnapN] = {1.0f, 0.5f * (s % 3)};
+  const int mode[kSnapN] = {s % 2, 0};
+  const std::uint8_t rch[kSnapN] = {std::uint8_t(s >= 5), 0};
+  const double clr[kSnapN] = {4.0 - 0.5 * s, 3.0};
+  const int flips[kSnapN] = {s, 1};
+  drive_sample ds[kSnapN];
+  for (int i = 0; i < kSnapN; ++i) {
+    ds[i].alpha = alpha[s % 3];
+    ds[i].beta = 4;
+    ds[i].gamma = (float)(i + 1);
+    ds[i].mu = 0.25f * (1 + s % 3);
+    ds[i].mrisk = 0.125f * s;
+    ds[i].ext_mag = 2.0f * i;
+    ds[i].steer = s % 2 ? -0.5f : 0.25f;
+    ds[i].binding = std::uint8_t(s % 2);
+  }
+  nav_samplers smp;
+  smp.min_clearance_m = clr;
+  smp.occupied = [](double x, double) { return x >= 3 && x < 4; };
+  smp.material_id = [](double x, double) { return x < 2 ? 0 : 1; };
+  smp.formation_slot = [s](int i, double &sx, double &sy) {
+    if (i != 1)
+      return false;
+    sx = s;
+    sy = 3.5;
+    return true;
+  };
+  smp.sense_flips = flips;
+  smp.drive = ds;
+  c.step(pos, head, spd, mode, rch, smp);
+}
+
+} // namespace
+
+TEST(NavStats, FinishIsRepeatableSnapshot) {
+  nav_stats_collector c;
+  begin_snapshot_episode(c);
+  for (int s = 0; s < 3; ++s)
+    step_snapshot_episode(c, s);
+
+  const nav_stats_collector &cc = c; // finish() is const: a snapshot never mutates the collector
+  const episode_nav_stats e1 = cc.finish();
+  const episode_nav_stats e2 = cc.finish();
+  const episode_nav_stats e3 = cc.finish();
+  expect_same_episode(e1, e2);
+  expect_same_episode(e1, e3);
+
+  // the drive means are means (not re-divided sums) on every call
+  for (const episode_nav_stats *e : {&e1, &e3}) {
+    const veh_nav_stats &v = e->per_vehicle[0];
+    EXPECT_EQ(v.drive_steps, 3);
+    EXPECT_DOUBLE_EQ(v.alpha_mean, 2.0);   // (1+3+2)/3
+    EXPECT_DOUBLE_EQ(v.beta_mean, 4.0);    // 4,4,4
+    EXPECT_DOUBLE_EQ(v.gamma_mean, 1.0);   // vehicle 0: gamma = 1
+    EXPECT_DOUBLE_EQ(v.mu_mean, 0.5);      // (.25+.5+.75)/3
+    EXPECT_DOUBLE_EQ(v.mrisk_mean, 0.125); // (0+.125+.25)/3
+    EXPECT_DOUBLE_EQ(e->per_vehicle[1].ext_force_mean, 2.0);
+    // (.25+.5+.25)/3
+    EXPECT_DOUBLE_EQ(v.steer_abs_mean, 1.0 / 3.0);
+    EXPECT_EQ(v.binding_steps, 1);
+  }
+}
+
+TEST(NavStats, StepAfterFinishMatchesUninterruptedEpisode) {
+  // Polled: finish() after every step, as a live publisher does.
+  nav_stats_collector polled;
+  begin_snapshot_episode(polled);
+  // Uninterrupted: the same feed, a single finish() at the end.
+  nav_stats_collector once;
+  begin_snapshot_episode(once);
+  const int kSteps = 6;
+  for (int s = 0; s < kSteps; ++s) {
+    step_snapshot_episode(polled, s);
+    (void)polled.finish();
+    step_snapshot_episode(once, s);
+  }
+  const episode_nav_stats ep = polled.finish();
+  const episode_nav_stats eo = once.finish();
+  expect_same_episode(ep, eo);
+
+  const veh_nav_stats &v = ep.per_vehicle[0];
+  EXPECT_EQ(ep.ticks, kSteps);
+  EXPECT_EQ(v.drive_steps, kSteps);
+  EXPECT_DOUBLE_EQ(v.alpha_mean, 2.0);    // (1+3+2)*2/6
+  EXPECT_DOUBLE_EQ(v.mu_mean, 0.5);       // (.25+.5+.75)*2/6
+  EXPECT_DOUBLE_EQ(v.mrisk_mean, 0.3125); // .125*(0+1+...+5)/6
+  EXPECT_DOUBLE_EQ(v.steer_abs_mean, 0.375);
+  EXPECT_EQ(v.binding_steps, 3);
+  EXPECT_TRUE(v.arrived); // reached latched on step 5
+}
