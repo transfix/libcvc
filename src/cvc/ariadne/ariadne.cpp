@@ -1051,15 +1051,38 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // The stable identity is the id (defaults to the label); the backend keeps a
     // window's geometry keyed on it. Begin/End pair unconditionally.
     const std::string &id = w.id.empty() ? w.label : w.id;
+    // `closable:` — the window's open state lives at tree.<id>.open (default open). A closed window
+    // is not rendered at all; its close (X) button (p_open below) and a menu_toggle bound to the
+    // same key (e.g. a "Settings" menu) flip it.
+    bool open = true;
+    std::string open_path;
+    if (w.closable) {
+      open_path = resolve("tree." + id + ".open");
+      open = read_bool_or_seed(app, open_path, 1) != 0;
+      if (!open)
+        break; // closed -> skip the geometry seed + body entirely
+    }
     // §11.4 two-way geometry edge: seed the window from a persisted tree.<id>.geometry (if any)
     // BEFORE opening it, then write the post-interaction geometry back AFTER — so the state node is
     // the authority next frame. The backend never touches cvc::state; it only seeds/reports.
     const std::string geo_path = resolve("tree." + id + ".geometry");
     WindowGeom seed;
-    const bool have_seed = parse_geom(read_string(app, geo_path), seed);
+    bool have_seed = parse_geom(read_string(app, geo_path), seed);
+    // §3.0.3b first placement: with no persisted geometry yet, seed the window's INITIAL position
+    // from the authored `pos:` (ImGui otherwise stacks every new window at the same default spot,
+    // so a declared pos would be dead). Seed as FirstUseEver — the user's drag then persists via
+    // tree.<id>.geometry and wins next frame. Authored `size:` already reaches begin_window below;
+    // only pos needs this bridge, so a pos-only seed leaves begin_window to apply the size.
+    if (!have_seed && w.has_pos) {
+      seed.has_pos = true;
+      seed.x = w.pos_x;
+      seed.y = w.pos_y;
+      have_seed = true;
+    }
     if (have_seed)
       b.seed_window_geometry(seed);
-    const bool visible = b.begin_window(w.label.c_str(), id.c_str(), w.size, w.frame_border);
+    const bool visible = b.begin_window(w.label.c_str(), id.c_str(), w.size, w.frame_border,
+                                        w.closable ? &open : nullptr);
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.
     WindowGeom persist = b.window_geometry();
@@ -1076,6 +1099,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
       b.pop_id();
     }
     b.end_window();
+    if (w.closable)
+      write<int>(app, open_path, open ? 1 : 0); // the close (X) button may have cleared `open`
     break;
   }
 

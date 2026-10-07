@@ -32,6 +32,7 @@
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
+#include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/scene_panels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/state_publisher.h> // sg.publisher().flush() on the single-thread wasm path
@@ -99,6 +100,10 @@ int main(int argc, char **argv) {
 
   cvc::app app;
   SceneGraph sg(app, "hello");
+  // cvcGL's Ariadne extensions: the L-system scene node types (forest_trees, …) + the shader
+  // presets (terrain_bump / bark). This is what lets the generic shell render a pure-.ari L-system
+  // demo with no bespoke host C++.
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
   SceneRenderer view(sg, width, height, offscreen, "main");
   view.setBackground(0.09, 0.10, 0.12);
 

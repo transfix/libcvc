@@ -128,7 +128,10 @@ public:
   // §3.0.3b sizing spec (px | percent-of-parent | auto per axis, with min/max) —
   // the backend resolves any percent against its own surface; `border` is the
   // §3.0.3b window border width in px (<0 = the backend's default).
-  virtual bool begin_window(const char *title, const char *id, const Size &size, float border) = 0;
+  // `p_open` (when non-null) requests a close (X) button; the backend clears *p_open when the user
+  // closes the window (the core then persists it). A backend with no window chrome ignores it.
+  virtual bool begin_window(const char *title, const char *id, const Size &size, float border,
+                            bool *p_open = nullptr) = 0;
   virtual void end_window() = 0;
 
   // §11.4 window-geometry persistence (the two-way edge). seed_window_geometry() is called right

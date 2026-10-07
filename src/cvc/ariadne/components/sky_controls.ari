@@ -1,0 +1,27 @@
+# sky_controls.ari — a REUSABLE Ariadne component: live controls for a `cloud_sky` node. The widgets
+# bind sky.* keys the cloud_sky realizer reads each frame: Drift / Morph scale the cloud scroll and
+# crossfade speed, and Ground shadow toggles the cloud→ground dappling live. (The cloud SHAPE is
+# baked once — regenerating it is seconds of work, not a live slider.) Seeded from the node's props.
+#
+# Use it:
+#     import: cvc://components/sky_controls.ari
+#     windows:
+#       - include: sky_controls
+
+units:
+  sky_controls:
+    window: Sky
+    id: sky_controls
+    children:
+      - checkbox: Ground shadow
+        bind: sky.shadow
+      - slider_float: Drift speed
+        bind: sky.drift
+        lo: 0.0
+        hi: 4.0
+        fmt: "%.2f"
+      - slider_float: Morph speed
+        bind: sky.morph
+        lo: 0.0
+        hi: 4.0
+        fmt: "%.2f"

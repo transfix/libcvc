@@ -139,6 +139,8 @@ void CameraMenuItems(CameraController &cam, double moveSpeedMax = 400.0,
 
 // windows / layout. Begin() must be paired with End() unconditionally.
 bool Begin(const char *name);
+// Overload with a close button: when p_open != null, ImGui draws an X and clears *p_open on close.
+bool Begin(const char *name, bool *p_open);
 void End();
 void SameLine(double offsetX = 0.0, double spacing = -1.0);
 void Separator();

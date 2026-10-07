@@ -5,6 +5,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/gl/GeometryNode.h>
@@ -206,6 +207,46 @@ std::map<std::string, NodeRealizer> &node_registry() {
 }
 bool is_builtin_scene_type(const std::string &t) {
   return t == "geometry" || t == "volume" || t == "volren" || t == "volslice" || t == "group";
+}
+
+// The named GLSL shader-preset registry (the DSL `shader: { preset: <name> }`). Process-global and
+// mutex-guarded, mirroring the node-type registry.
+std::mutex &shader_preset_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::map<std::string, ShaderPreset> &shader_preset_registry() {
+  static std::map<std::string, ShaderPreset> r;
+  return r;
+}
+
+// Apply a node's `shader:` block to a GeometryNode (GL-specific — the loader only carried it as
+// data): the coordinate-shift-scale toggle, then a named preset (warn if unknown), then the inline
+// vertex/fragment splices. A node with no shader is a no-op.
+void apply_shader(GeometryNode &g, const cvc::ariadne::SceneNode &n,
+                  std::vector<std::string> *warnings) {
+  const cvc::ariadne::SceneShader &sh = n.shader;
+  if (!sh.present)
+    return;
+  if (sh.disable_coord_shift)
+    g.disableCoordinateShiftScale();
+  if (!sh.preset.empty()) {
+    ShaderPreset preset;
+    {
+      std::lock_guard<std::mutex> lk(shader_preset_mutex());
+      const auto it = shader_preset_registry().find(sh.preset);
+      if (it != shader_preset_registry().end())
+        preset = it->second;
+    }
+    if (preset)
+      preset(g);
+    else
+      warn(warnings, "ari: scene node '" + n.id + "': unknown shader preset '" + sh.preset + "'");
+  }
+  for (const cvc::ariadne::SceneShaderStage &st : sh.vertex)
+    g.addVertexShaderReplacement(st.at, st.code);
+  for (const cvc::ariadne::SceneShaderStage &st : sh.fragment)
+    g.addFragmentShaderReplacement(st.at, st.code);
 }
 
 // Apply the shared GraphicsNode transform. Material is GeometryNode-only, handled by
@@ -591,6 +632,13 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     return;
   apply_transform(*node, n); // the node's LOCAL transform (composed with the parent's)
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
+  // shader: { preset | vertex | fragment } — the declarative GLSL surface. Applied in the shared
+  // tail (not just the built-in geometry branch) so a CUSTOM node type whose realizer returns a
+  // GeometryNode (e.g. an L-system forest wanting `shader: { preset: bark }`) is shaded too. A
+  // non-geometry node (volume/group) silently ignores a shader block.
+  if (n.shader.present)
+    if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
+      apply_shader(*g, n, warnings);
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
@@ -678,6 +726,18 @@ void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedSc
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix, std::vector<std::string> *warnings) {
   RealizedScene out;
+  // §9 time: carry the app + the scene's clock declaration so tick_scene can drive
+  // app.world_clock() each frame (a no-op unless the scene declared a `clock:` block).
+  out.app = &sg.appContext();
+  out.clock = scene.clock;
+  // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
+  // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
+  // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-
+  // free. An empty key resolves to empty (stays "not bound").
+  out.clock.speed_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.speed_key);
+  out.clock.paused_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.paused_key);
+  out.clock.time_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.time_key);
+  out.clock.tick_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.tick_key);
   out.created.reserve(scene.nodes.size());
   for (const auto &n : scene.nodes) {
     realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, warnings);
@@ -716,7 +776,47 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   return out;
 }
 
-void tick_scene(RealizedScene &realized, vtkRenderer *renderer) {
+void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt) {
+  // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any
+  // custom_tick reading app.world_clock().t()) sees ONE coherent world time for this frame. Opt-in:
+  // only when the scene declared a `clock:` block, so a scene without one leaves app.world_clock()
+  // entirely untouched (prior behaviour, and no surprise double-advance when several scenes share
+  // an app — the one driver is the host that owns the clock: scene).
+  if (realized.clock.present && realized.app) {
+    cvc::app &app = *realized.app;
+    cvc::world_clock &wc = app.world_clock();
+    const cvc::ariadne::SceneClock &c = realized.clock;
+    // The key paths were resolved to absolute state paths at realize time (realize_scene, with the
+    // host bind prefix), so a sim_transport slider and this clock share one key. Steer the clock
+    // from them, seeding the declared default when a key is still unset so the clock has a defined
+    // rate on frame 0 and the widget shows the right initial value. An empty key means "not bound"
+    // — the initial scale/paused stands, nothing is published.
+    const double scale = c.speed_key.empty()
+                             ? c.scale
+                             : cvc::ariadne::read_or_seed<double>(app, c.speed_key, c.scale);
+    const int paused = c.paused_key.empty()
+                           ? (c.paused ? 1 : 0)
+                           : cvc::ariadne::read_bool_or_seed(app, c.paused_key, c.paused ? 1 : 0);
+    wc.set_scale(scale);
+    wc.set_mode(paused ? cvc::world_clock::mode::paused : cvc::world_clock::mode::live);
+    // Wall delta: a caller-injected fixed dt (deterministic offscreen capture) when non-negative,
+    // else real elapsed since the last tick (real-time animation, no crawl under a slow frame
+    // rate).
+    double dt = wall_dt;
+    if (dt < 0.0) {
+      const auto now = std::chrono::steady_clock::now();
+      dt = realized.clock_primed ? std::chrono::duration<double>(now - realized.clock_last).count()
+                                 : 0.0;
+      realized.clock_last = now;
+      realized.clock_primed = true;
+    }
+    wc.advance(dt);
+    if (!c.time_key.empty())
+      cvc::ariadne::write<double>(app, c.time_key, wc.t());
+    if (!c.tick_key.empty())
+      cvc::ariadne::write<double>(app, c.tick_key, static_cast<double>(wc.tick()));
+  }
+
   for (const std::weak_ptr<VolRenNode> &w : realized.volren_ticks)
     if (std::shared_ptr<VolRenNode> n = w.lock())
       n->tick();
@@ -751,6 +851,110 @@ void register_scene_node_type(const std::string &type, NodeRealizer realizer) {
 bool has_scene_node_type(const std::string &type) {
   std::lock_guard<std::mutex> lock(node_registry_mutex());
   return node_registry().find(type) != node_registry().end();
+}
+
+void register_shader_preset(const std::string &name, ShaderPreset preset) {
+  if (name.empty() || !preset)
+    return;
+  std::lock_guard<std::mutex> lock(shader_preset_mutex());
+  shader_preset_registry()[name] = std::move(preset);
+}
+
+bool has_shader_preset(const std::string &name) {
+  std::lock_guard<std::mutex> lock(shader_preset_mutex());
+  return shader_preset_registry().find(name) != shader_preset_registry().end();
+}
+
+namespace {
+// The GLES fragment shader spells the view-space normal differently (the WebGL backend
+// renormalizes), so the normal-perturbing bump presets must target the right name per platform.
+#ifdef __EMSCRIPTEN__
+constexpr const char *FS_NORMAL = "normalizedNormalVCVSOutput";
+#else
+constexpr const char *FS_NORMAL = "normalVCVSOutput";
+#endif
+
+// Value-noise fBm ground detail; perturbs the fragment normal by the height gradient (Mikkelsen's
+// tangent-free method). Needs vertexMC in world space (disableCoordinateShiftScale).
+const char *GROUND_GLSL =
+    "float ghash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+    "float gnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  float a=ghash(i), b=ghash(i+vec2(1.,0.)), c=ghash(i+vec2(0.,1.)), d=ghash(i+vec2(1.,1.));\n"
+    "  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);\n"
+    "}\n"
+    "float groundH(vec3 p){\n"
+    "  vec2 q = p.xy * 0.35;\n"
+    "  float f = 0.0, a = 0.5, fr = 1.0;\n"
+    "  for (int i = 0; i < 5; i++){ f += a*gnoise(q*fr); a *= 0.5; fr *= 2.03; }\n"
+    "  return f;\n"
+    "}\n";
+const char *BARK_GLSL =
+    "float bhash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5); }\n"
+    "float bnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  return mix(mix(bhash(i), bhash(i+vec2(1,0)), f.x),\n"
+    "             mix(bhash(i+vec2(0,1)), bhash(i+vec2(1,1)), f.x), f.y);\n"
+    "}\n"
+    "float barkH(vec3 nrm, float z){\n"
+    "  float ang = atan(nrm.y, nrm.x);\n"
+    "  float f = 0.0;\n"
+    "  f += 0.6*sin(ang*10.0 + 1.5*sin(z*0.7));\n"
+    "  f += 0.3*sin(ang*23.0 + z*0.4);\n"
+    "  f += 0.3*bnoise(vec2(ang*4.0, z*1.2));\n"
+    "  return f;\n"
+    "}\n";
+} // namespace
+
+void register_default_shader_presets() {
+  // "terrain_bump": value-noise fBm ground detail (the demo's addTerrainBump).
+  register_shader_preset("terrain_bump", [](GeometryNode &node) {
+    node.disableCoordinateShiftScale(); // vertexMC in the shader becomes world xy
+    node.addVertexShaderReplacement("//VTK::Normal::Dec", "//VTK::Normal::Dec\nout vec3 gCoord;");
+    node.addVertexShaderReplacement("//VTK::PositionVC::Impl",
+                                    "//VTK::PositionVC::Impl\n  gCoord = vertexMC.xyz;");
+    node.addFragmentShaderReplacement(
+        "//VTK::Normal::Dec", std::string("//VTK::Normal::Dec\nin vec3 gCoord;\n") + GROUND_GLSL);
+    node.addFragmentShaderReplacement("//VTK::Normal::Impl",
+                                      std::string("//VTK::Normal::Impl\n"
+                                                  "  {\n"
+                                                  "    float h = groundH(gCoord);\n"
+                                                  "    vec3 sS = dFdx(vertexVC.xyz);\n"
+                                                  "    vec3 sT = dFdy(vertexVC.xyz);\n"
+                                                  "    vec3 vn = ") +
+                                          FS_NORMAL +
+                                          ";\n"
+                                          "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+                                          "    float det = dot(sS, R1);\n"
+                                          "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+                                          "    " +
+                                          FS_NORMAL + " = normalize(abs(det)*vn - 1.4*sg);\n  }\n");
+  });
+  // "bark": vertical-furrow tree bark (the demo's addBark).
+  register_shader_preset("bark", [](GeometryNode &node) {
+    node.disableCoordinateShiftScale();
+    node.addVertexShaderReplacement("//VTK::Normal::Dec",
+                                    "//VTK::Normal::Dec\nout vec3 bNrm;\nout vec3 bPos;");
+    node.addVertexShaderReplacement(
+        "//VTK::PositionVC::Impl",
+        "//VTK::PositionVC::Impl\n  bNrm = normalMC; bPos = vertexMC.xyz;");
+    node.addFragmentShaderReplacement(
+        "//VTK::Normal::Dec",
+        std::string("//VTK::Normal::Dec\nin vec3 bNrm;\nin vec3 bPos;\n") + BARK_GLSL);
+    node.addFragmentShaderReplacement(
+        "//VTK::Normal::Impl",
+        std::string("//VTK::Normal::Impl\n"
+                    "  {\n"
+                    "    float h = barkH(normalize(bNrm), bPos.z);\n"
+                    "    vec3 sS = dFdx(vertexVC.xyz), sT = dFdy(vertexVC.xyz), vn = ") +
+            FS_NORMAL +
+            ";\n"
+            "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+            "    float det = dot(sS, R1);\n"
+            "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+            "    " +
+            FS_NORMAL + " = normalize(abs(det)*vn - 1.2*sg);\n  }\n");
+  });
 }
 
 bool verify_scene_customs(const cvc::ariadne::LoadResult &loaded,
