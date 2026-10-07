@@ -23,11 +23,15 @@ recipe:
   # ships THIRD_PARTY_NOTICES.md + LICENSE (native share/cvcgl-examples/ and the wasm web/
   # payload), declares LGPL-2.1-only AND BSD-3-Clause AND MIT, and rebuilds the demos against
   # cvcgl 3.4.0+cvc.19 (fast-draw low-memory mapper).
-  cvc_revision: 18
+  # Bumped 18 -> 19: ships the three headless pure-C++ nav CLIs (nav_swarm_demo /
+  # nav_train_demo / nav_material_demo) that moved into the cvcGL examples tree —
+  # native-only, so their package.files entries are platforms-scoped (the wasm
+  # column has no CLIs in the gallery).
+  cvc_revision: 19
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "cvcGL example programs as ready-to-run commands: the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost / nav_finale — the torch-free cvc::nav reactive swarm rendered natively) plus terrain_lab, as native binaries in bin/, AND the full navigation gallery as a threaded (wasm-mt) WebAssembly browser build (share/cvcgl-examples/web/) with a cvcgl-examples-web launcher that serves it cross-origin-isolated (COOP/COEP) and opens a browser."
+  description: "cvcGL example programs as ready-to-run commands: the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost / nav_finale — the torch-free cvc::nav reactive swarm rendered natively), the headless pure-C++ nav CLIs (nav_swarm_demo / nav_train_demo / nav_material_demo), and terrain_lab, as native binaries in bin/, AND the full navigation gallery as a threaded (wasm-mt) WebAssembly browser build (share/cvcgl-examples/web/) with a cvcgl-examples-web launcher that serves it cross-origin-isolated (COOP/COEP) and opens a browser."
   homepage: https://github.com/transfix/libcvc
   # BSD-3-Clause: the demos link cvcGL statically, which carries code derived
   # from VTK 9.5.0. MIT: lsystem_coast's OceanFFT is a port of ABYSSAL. Both
@@ -40,9 +44,10 @@ recipe:
 # cvcgl SDK bundle the same way cvc-cli is packaged separately from libcvc: an
 # SDK consumer should not drag demo binaries in, and a demo user should not
 # need headers. Two kinds of matrix entry:
-#   * native (linux): builds src/cvcGL standalone against the installed libcvc
-#     SDK + VTK with CVC_BUILD_EXAMPLES=ON and installs bin/lsystem_forest,
-#     plus the bin/cvcgl-examples-web launcher.
+#   * native (linux/windows): builds src/cvcGL standalone against the installed
+#     libcvc SDK + VTK with CVC_BUILD_EXAMPLES=ON and installs bin/lsystem_forest
+#     + the headless nav CLIs (nav_swarm_demo / nav_train_demo /
+#     nav_material_demo), plus the bin/cvcgl-examples-web launcher.
 #   * wasm: cross-compiles the whole closure from the repo root with the
 #     Emscripten toolchain (there is no wasm libcvc bundle — the demo statically
 #     embeds the trimmed cvc core) and packages the browser build under
@@ -144,6 +149,16 @@ package:
     - bin/nav_city_drive
     - bin/nav_fog_ghost
     - bin/nav_finale
+    # Headless pure-C++ nav CLIs: native-only targets (if(NOT EMSCRIPTEN) in
+    # src/cvcGL/examples/CMakeLists.txt) — the wasm column never builds them,
+    # so the entries are platforms-scoped; bare strings would fail the
+    # strict-glob declaration check when packing the wasm-mt bundle.
+    - glob: bin/nav_swarm_demo
+      platforms: [linux, windows]
+    - glob: bin/nav_train_demo
+      platforms: [linux, windows]
+    - glob: bin/nav_material_demo
+      platforms: [linux, windows]
     - bin/cvcgl-examples-web
     - share/cvcgl-examples/
 
