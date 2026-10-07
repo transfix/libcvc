@@ -113,7 +113,10 @@ void GeometryNode::applyClipPlanes(vtkPlaneCollection *planes) {
     if (planes && planes->GetNumberOfItems() > 0) {
       m_mapper->SetClippingPlanes(planes);
     } else {
-      m_mapper->RemoveAllClippingPlanes();
+      // Detach, never RemoveAllClippingPlanes(): that empties the collection the
+      // mapper holds -- the parent's own, shared by all its children -- so
+      // clipping could never be switched back on.
+      m_mapper->SetClippingPlanes(static_cast<vtkPlaneCollection *>(nullptr));
     }
   }
 }

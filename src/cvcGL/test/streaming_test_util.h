@@ -8,9 +8,10 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// Shared harness for the cvcgl_streaming_* tests: explicit checks (assert() is
-// a no-op under Release), VTK error capture, a can-this-build-rasterise probe
-// that honours CVC_REQUIRE_RENDER, and pixel helpers. Synthetic data only.
+// Shared harness for the cvcgl_streaming_* tests (and cvcgl_clip_children):
+// explicit checks (assert() is a no-op under Release), VTK error capture, a
+// can-this-build-rasterise probe that honours CVC_REQUIRE_RENDER, and pixel
+// helpers. Synthetic data only.
 #ifndef CVCGL_TEST_STREAMING_TEST_UTIL_H
 #define CVCGL_TEST_STREAMING_TEST_UTIL_H
 

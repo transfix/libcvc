@@ -768,6 +768,20 @@ if(NOT EMSCRIPTEN)
   endif()
 endif()
 
+# GraphicsNode::setClipChildren: the six box planes face INTO the parent's box
+# (checked without GL), and children fully inside / straddling / fully outside
+# it render drawn / cut at the face / clipped -- unclipped first, after clipping
+# is switched off again, and with the parent rotated and moved. Both mapper
+# families, the low-memory one forced (VTK's has no clipping planes, so only
+# "not wrongly clipped" is checked there). Renders for real; skips the render
+# part where nothing rasterises unless CVC_REQUIRE_RENDER=1. Desktop GL only:
+# on GLES/WebGL2 VTK's factory hands out the low-memory mapper for both.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_clip_children test/cvcgl_clip_children.cpp)
+  target_link_libraries(cvcgl_clip_children PRIVATE cvcGL)
+  add_test(NAME cvcgl_clip_children COMMAND cvcgl_clip_children)
+endif()
+
 # LowMemoryPolyDataMapper (the GLES3/WebGL2 mapper with empty cell types and the
 # per-draw shader-cache lookup taken out of its draw), forced on natively. Records
 # an ordered trace of every GL call at the driver -- entry point, bound program /

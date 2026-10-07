@@ -261,7 +261,13 @@ public:
   void setExtentLabelFontSize(int size);
   int getExtentLabelFontSize() const;
 
-  // Clipping plane control
+  // Clipping plane control. setClipChildren(true) clips this node's graphics
+  // children to this node's own getBoundingBox() under its world transform: six
+  // planes, normals pointing INTO the box (VTK keeps the side a plane's normal
+  // points into), which follow the node as it moves. Children drawn by VTK's
+  // low-memory mapper (the GLES3/WebGL2 default, or CVCGL_LOWMEM_MAPPER=force)
+  // are not clipped: VTK 9.5's vtkOpenGLLowMemoryPolyDataMapper has no
+  // clipping-plane support.
   void setClipChildren(bool clip);
   bool getClipChildren() const { return m_clipChildren; }
   vtkPlaneCollection *getClipPlanes() const { return m_clipPlanes; }
