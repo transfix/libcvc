@@ -20,7 +20,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state_object.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
@@ -30,6 +29,7 @@
 #include <cvc/gl/Settings.h>
 #include <cvc/gl/Viewport.h>
 #include <cvc/gl/ViewportManager.h>
+#include <cvc/state/state_object.h>
 #include <stdexcept>
 #include <string>
 #include <vector>

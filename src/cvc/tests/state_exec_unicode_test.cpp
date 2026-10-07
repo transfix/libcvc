@@ -1,5 +1,5 @@
 // SE-0 of the state_exec Unicode roadmap: unit-tests the shared UTF-8 codepoint helper
-// (cvc/core/state_exec/utf8.h) AND pins the paths that are ALREADY Unicode-clean (byte-transparent
+// (cvc/state/state_exec/utf8.h) AND pins the paths that are ALREADY Unicode-clean (byte-transparent
 // storage): parse -> value_t -> to_string round-trip and the cvc::state snapshot codec. Those
 // round-trips PASS today — this locks them so SE-1 (wiring the helper into the byte-oriented string
 // builtins) cannot silently regress the transparent paths.
@@ -8,13 +8,13 @@
 // bytes are exact and portable and MSVC never emits its code-page-1252 C4566 warning.
 
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_exec/builtins.h> // SE-1: builtin_length (A6)
-#include <cvc/core/state_exec/parser.h>
-#include <cvc/core/state_exec/state_value_codec.h>
-#include <cvc/core/state_exec/stdlib.h> // SE-1: string.* module builtins (A1-A5)
-#include <cvc/core/state_exec/types.h>
-#include <cvc/core/state_exec/utf8.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/builtins.h> // SE-1: builtin_length (A6)
+#include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/state_value_codec.h>
+#include <cvc/state/state_exec/stdlib.h> // SE-1: string.* module builtins (A1-A5)
+#include <cvc/state/state_exec/types.h>
+#include <cvc/state/state_exec/utf8.h>
 #include <gtest/gtest.h>
 #include <span>
 #include <string>

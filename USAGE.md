@@ -105,8 +105,8 @@ single config struct.
 
 ```cpp
 #include <cvc/core/app.h>
-#include <cvc/core/distributed_state_session.h>
-#include <cvc/core/state.h>
+#include <cvc/state/distributed_state_session.h>
+#include <cvc/state/state.h>
 
 int main() {
     cvc::app ctx;

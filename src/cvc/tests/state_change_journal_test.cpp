@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <cvc/core/state_change_journal.h>
+#include <cvc/state/state_change_journal.h>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <set>

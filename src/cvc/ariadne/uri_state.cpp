@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_state.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <exception>
 #include <limits>
 #include <string>

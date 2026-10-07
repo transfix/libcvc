@@ -23,13 +23,13 @@
 /* $Id: App.cpp 5881 2012-07-20 19:34:04Z edwardsj $ */
 
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_exec/async_scheduler.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_units.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/dimension.h>

@@ -15,7 +15,7 @@
 
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #define IMGUI_DEFINE_MATH_OPERATORS // must precede imgui.h (imgui_internal.h asserts it)
 #include <imgui.h>
 #include <imgui_internal.h> // ImHashStr: stable per-path key into the context's storage

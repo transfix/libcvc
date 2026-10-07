@@ -11,7 +11,7 @@
 #ifndef __CVC_GL_CAMERA_CONTROLLER_H__
 #define __CVC_GL_CAMERA_CONTROLLER_H__
 
-#include <cvc/core/state_object.h>
+#include <cvc/state/state_object.h>
 #include <memory>
 #include <string>
 

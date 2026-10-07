@@ -3,7 +3,7 @@
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <cvc/utility/utility.h>
 #include <xmlrpc/XmlRpc.h>
 

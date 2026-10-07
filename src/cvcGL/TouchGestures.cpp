@@ -7,11 +7,11 @@
 
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/state/state.h>
 #include <stdexcept>
 
 #ifdef __EMSCRIPTEN__

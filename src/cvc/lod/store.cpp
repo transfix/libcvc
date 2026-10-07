@@ -30,8 +30,8 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
-#include <cvc/core/state_blob_store.h>
 #include <cvc/lod/store.h>
+#include <cvc/state/state_blob_store.h>
 #include <cvc/volume/hdf5_utils.h>
 #include <filesystem>
 #include <limits>

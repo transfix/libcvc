@@ -61,7 +61,7 @@ mistake for finished:
   mutations can currently only be produced by hand-constructing a
   `state_mutation`. Additionally, `apply_remote`'s `set_data` case is an
   explicit no-op pending a codec registry
-  (`src/cvc/core/state_sync_adapter.cpp:293`).
+  (`src/cvc/state/state_sync_adapter.cpp:293`).
 - **`state_data_hydrator` is never driven from the ingest path.** It works and
   is tested, but nothing calls it automatically on receiving a blob reference.
 - **Backpressure and slow-peer isolation are `inproc`-only.** The bounded

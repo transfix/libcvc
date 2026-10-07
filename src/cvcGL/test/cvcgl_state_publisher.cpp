@@ -12,11 +12,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/state_publisher.h>
+#include <cvc/state/state.h>
 #include <sstream>
 #include <string>
 #include <thread>

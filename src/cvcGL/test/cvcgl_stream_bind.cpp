@@ -12,11 +12,11 @@
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
-#include <cvc/ariadne/ariadne.h>            // Runtime, Runtime::document_scope()
-#include <cvc/core/app.h>                   // cvc::app
-#include <cvc/core/state.h>                 // cvc::state::instance
-#include <cvc/core/state_exec/intrinsics.h> // document_scope::slot
-#include <cvc/gl/ariadne/stream_verbs.h>    // StreamBindingSink / GlStreamSinkHandle / register
+#include <cvc/ariadne/ariadne.h>             // Runtime, Runtime::document_scope()
+#include <cvc/core/app.h>                    // cvc::app
+#include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / GlStreamSinkHandle / register
+#include <cvc/state/state.h>                 // cvc::state::instance
+#include <cvc/state/state_exec/intrinsics.h> // document_scope::slot
 #include <string>
 #include <utility>
 #include <vector>

@@ -13,7 +13,7 @@
 #include <boost/lexical_cast.hpp>
 #include <cctype>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <exception>
 #include <string>
 #include <vector>

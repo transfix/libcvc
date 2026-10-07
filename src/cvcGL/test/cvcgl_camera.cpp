@@ -9,10 +9,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/state/state.h>
 #include <string>
 #include <vtkCamera.h>
 #include <vtkNew.h>

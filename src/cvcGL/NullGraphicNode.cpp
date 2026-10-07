@@ -1,9 +1,9 @@
 #include <algorithm>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/AxisNode.h>
 #include <cvc/gl/GridNode.h>
 #include <cvc/gl/NullGraphicNode.h>
+#include <cvc/state/state.h>
 #include <limits>
 #include <sstream>
 #include <vtkActor.h>

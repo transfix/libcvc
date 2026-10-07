@@ -37,7 +37,7 @@
 #ifndef CVC_CORE_ASYNC_TASK_H
 #define CVC_CORE_ASYNC_TASK_H
 
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <string>
 

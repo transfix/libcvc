@@ -4,10 +4,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cvc/core/state_exec/async_scheduler.h>
-#include <cvc/core/state_exec/memory_tracker.h>
-#include <cvc/core/state_exec/process.h>
-#include <cvc/core/state_exec/scheduler.h>
+#include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/memory_tracker.h>
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/scheduler.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>

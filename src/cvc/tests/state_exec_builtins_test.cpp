@@ -1,6 +1,6 @@
-#include <cvc/core/state_exec/builtins.h>
-#include <cvc/core/state_exec/generator.h>
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/generator.h>
+#include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
 
 using namespace cvc::state_exec;

@@ -142,7 +142,7 @@ state::instance(app)("new.path.to.value").value(42);
 ### Creating and Accessing State Nodes
 
 ```cpp
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 
 // Global convenience function creates/accesses nodes
 state s1 = state::instance(app)("app.window.width");
@@ -817,7 +817,7 @@ The `cvc::state_object<T>` template class provides a convenient base class for o
 #### Basic Usage
 
 ```cpp
-#include <cvc/core/state_object.h>
+#include <cvc/state/state_object.h>
 
 // Inherit from state_object<YourClass>
 class Configuration : public state_object<Configuration> {

@@ -4,10 +4,10 @@
 */
 
 #include <cstring>
-#include <cvc/core/state_blob_store.h>
-#include <cvc/core/state_brick_manifest.h>
-#include <cvc/core/state_compression_registry.h>
 #include <cvc/core/types.h>
+#include <cvc/state/state_blob_store.h>
+#include <cvc/state/state_brick_manifest.h>
+#include <cvc/state/state_compression_registry.h>
 #include <gtest/gtest.h>
 
 using namespace cvc;

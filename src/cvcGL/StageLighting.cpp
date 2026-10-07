@@ -5,12 +5,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
+#include <cvc/state/state.h>
 #include <stdexcept>
 #include <vector>
 

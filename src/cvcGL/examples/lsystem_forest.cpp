@@ -32,7 +32,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
@@ -42,6 +41,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/state/state.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif

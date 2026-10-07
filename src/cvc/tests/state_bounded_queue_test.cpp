@@ -4,7 +4,7 @@
 
 #include <atomic>
 #include <chrono>
-#include <cvc/core/state_bounded_queue.h>
+#include <cvc/state/state_bounded_queue.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <thread>

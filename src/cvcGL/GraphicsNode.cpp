@@ -1,12 +1,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/BBoxNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/state_publisher.h>
+#include <cvc/state/state.h>
 #include <iomanip>
 #include <sstream>
 #include <vtkActor2D.h>

@@ -43,9 +43,9 @@
 #include <cvc/ariadne/uri_http.h>
 #include <cvc/ariadne/uri_http_cache.h>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_blob_store.h> // cvc::sha256_hex
 #include <cvc/net/http_client.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_blob_store.h> // cvc::sha256_hex
 #include <memory>
 #include <mutex>
 #include <string>

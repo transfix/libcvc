@@ -6,8 +6,8 @@
 //   * key-sym normalization matches CameraController ("F" == "f").
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/FpsHud.h>
+#include <cvc/state/state.h>
 #include <string>
 
 using cvc::gl::FpsHud;

@@ -24,16 +24,16 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/uri.h> // register_cvc_uri_handler — the cvc:// component-library import path
 #include <cvc/core/app.h>
-#include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
-#include <cvc/core/state_exec/builtins.h>   // register_fn — bind the host verb into the lanes
-#include <cvc/core/state_exec/intrinsics.h> // resolve_channel_key — scope the completion channel
-#include <cvc/core/state_exec/types.h>      // value_t payload
 #include <cvc/core/thread_pool.h>           // compute_async drives computePool().parallel_for
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
+#include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
+#include <cvc/state/state_exec/builtins.h>   // register_fn — bind the host verb into the lanes
+#include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key — scope the completion channel
+#include <cvc/state/state_exec/types.h>      // value_t payload
 #include <memory>
 #include <string>
 #include <thread>

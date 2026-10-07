@@ -35,15 +35,15 @@
 #include <csignal>
 #include <cstdlib>
 #include <cvc/core/app.h>
-#include <cvc/core/distributed_state_session.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_distributed_admin.h>
-#include <cvc/core/state_exec/exec_coordinator.h>
-#include <cvc/core/state_exec/parser.h>
-#include <cvc/core/state_exec/scheduler.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/state/distributed_state_session.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_distributed_admin.h>
+#include <cvc/state/state_exec/exec_coordinator.h>
+#include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/scheduler.h>
 #include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/volume.h>
@@ -1699,7 +1699,7 @@ static int cmd_ps(int argc, char **argv) {
 // ---------------------------------------------------------------------------
 
 #ifdef USING_XMLRPC
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 
 static int cmd_server(int argc, char **argv) {
   po::options_description desc("cvc server - start XMLRPC server");

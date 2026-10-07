@@ -1040,7 +1040,7 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 // path (boost::signals2 signals do not marshal, so Python change-notify rides
 // the director, not the wrapped signal members).
 %{
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 %}
 
 // boost::any <-> Python for the data channel. Marshals the common scalars both
@@ -1134,7 +1134,7 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
 // linkTo(path, mode) / setLinkMode(mode) / linkMode() are callable from Python.
 %feature("flatnested") cvc::state::link_mode;
 
-%include "cvc/core/state.h"
+%include "cvc/state/state.h"
 
 // ── Phase 3: state access + push callbacks ──────────────────────────────
 // state_has/children/remove act on the shared root; state_observer is a

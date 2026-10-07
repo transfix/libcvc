@@ -2,8 +2,8 @@
 // state_objects (see the header).
 
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/Settings.h>
+#include <cvc/state/state.h>
 #include <stdexcept>
 
 namespace cvc {

@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/AxisNode.h>
 #include <cvc/gl/BBoxNode.h>
@@ -17,6 +16,7 @@
 #include <cvc/gl/Settings.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/state_publisher.h>
+#include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <limits>
 #include <unordered_map>

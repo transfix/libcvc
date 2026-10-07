@@ -8,11 +8,11 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/ariadne/ariadne.h>            // register_action_intrinsics
-#include <cvc/core/state_exec/builtins.h>   // register_fn, environment
-#include <cvc/core/state_exec/intrinsics.h> // intrinsics_context, document_scope
-#include <cvc/core/state_exec/types.h>      // value_t, make_dict, dict_ptr
+#include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/gl/ariadne/stream_verbs.h>
+#include <cvc/state/state_exec/builtins.h>   // register_fn, environment
+#include <cvc/state/state_exec/intrinsics.h> // intrinsics_context, document_scope
+#include <cvc/state/state_exec/types.h>      // value_t, make_dict, dict_ptr
 #include <span>
 #include <string>
 #include <utility>

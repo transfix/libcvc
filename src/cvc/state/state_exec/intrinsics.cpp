@@ -1,0 +1,960 @@
+#include <algorithm> // §12 enforce_channel_policy: std::find over the declared/global channel lists
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/lexical_cast.hpp>
+#include <chrono>
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/memory_tracker.h>
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/scheduler.h>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+
+namespace cvc::state_exec {
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+void expect_exact(std::span<const value_t> args, size_t n, const char *name) {
+  if (args.size() != n)
+    throw std::runtime_error(std::string(name) + ": expected " + std::to_string(n) +
+                             " argument(s), got " + std::to_string(args.size()));
+}
+
+void expect_min(std::span<const value_t> args, size_t n, const char *name) {
+  if (args.size() < n)
+    throw std::runtime_error(std::string(name) + ": expected at least " + std::to_string(n) +
+                             " argument(s), got " + std::to_string(args.size()));
+}
+
+const std::string &as_string(const value_t &v, const char *name) {
+  if (auto *s = std::get_if<std::string>(&v.v))
+    return *s;
+  throw std::runtime_error(std::string(name) + ": expected string, got " + v.type_name());
+}
+
+// A message payload may be TEXT (string) or BINARY (bytes); both are std::string byte buffers under
+// the hood. Return the raw bytes of either and reject anything else. `is_bytes_value` distinguishes
+// the two so a caller can tag the content type / route to the bytes wire field.
+const std::string &as_string_or_bytes(const value_t &v, const char *name) {
+  if (auto *s = std::get_if<std::string>(&v.v))
+    return *s;
+  if (auto *b = std::get_if<bytes_value>(&v.v))
+    return b->data;
+  throw std::runtime_error(std::string(name) + ": expected string or bytes, got " + v.type_name());
+}
+bool is_bytes_value(const value_t &v) { return std::get_if<bytes_value>(&v.v) != nullptr; }
+
+int64_t as_int(const value_t &v, const char *name) {
+  if (auto *i = std::get_if<int64_t>(&v.v))
+    return *i;
+  throw std::runtime_error(std::string(name) + ": expected integer, got " + v.type_name());
+}
+
+double as_number(const value_t &v, const char *name) {
+  if (auto *i = std::get_if<int64_t>(&v.v))
+    return static_cast<double>(*i);
+  if (auto *d = std::get_if<double>(&v.v))
+    return *d;
+  throw std::runtime_error(std::string(name) + ": expected number, got " + v.type_name());
+}
+
+// Coerce any DSL value to the string form the (string-typed) state tree stores. A string
+// stores raw (NOT to_string's quoted form); scalars store their natural lexical form
+// (10, 1.5, true/false — not to_string's #t/#f); nil empties the node. Compound values
+// (list/dict) fall back to the readable to_string() — a structured payload should use
+// state-data-set instead. This lets (state-set "n" 10) store "10" instead of throwing on
+// a non-string value.
+std::string coerce_state_string(const value_t &v) {
+  if (auto *s = std::get_if<std::string>(&v.v))
+    return *s;
+  if (auto *i = std::get_if<int64_t>(&v.v))
+    return std::to_string(*i);
+  if (auto *d = std::get_if<double>(&v.v)) {
+    std::ostringstream oss;
+    oss << *d;
+    return oss.str();
+  }
+  if (auto *b = std::get_if<bool>(&v.v))
+    return *b ? "true" : "false";
+  if (v.is_nil())
+    return std::string();
+  return to_string(v); // list/dict/symbol/closure — readable fallback
+}
+
+// Clone a value's compound structure (list/dict) so the caller gets a PRIVATE copy that does
+// not alias node-resident storage. Bounded and cycle-safe, mirroring values_equal / to_string
+// (it is the third structural walker and must not be the weak link): it MEMOIZES on the source
+// node pointer, so a shared-pointer DAG is copied in PHYSICAL time (the copy preserves the same
+// sharing, disjoint from the stored original) and a cycle terminates; it caps recursion depth
+// (stack safety on a deeply-nested value); and it polls the evaluation deadline so a huge
+// payload aborts at the time budget instead of running to completion in one native step.
+constexpr int kDeepCopyMaxDepth = 1000;
+
+value_t deep_copy_impl(const value_t &v, std::unordered_map<const void *, value_t> &memo,
+                       int depth) {
+  if (eval_deadline_expired())
+    throw std::runtime_error("state-data-get: evaluation exceeded time budget");
+  if (depth > kDeepCopyMaxDepth)
+    throw std::runtime_error("state-data-get: value nested too deeply to copy");
+  if (auto *l = std::get_if<list_ptr>(&v.v)) {
+    if (!*l)
+      return v;
+    auto found = memo.find(static_cast<const void *>(l->get()));
+    if (found != memo.end())
+      return found->second; // shared node / cycle already copied -> reuse (bounds the walk)
+    auto out = std::make_shared<std::vector<value_t>>();
+    value_t result{out};
+    memo.emplace(static_cast<const void *>(l->get()), result); // register BEFORE recursing
+    out->reserve((*l)->size());
+    for (const auto &e : **l)
+      out->push_back(deep_copy_impl(e, memo, depth + 1));
+    return result;
+  }
+  if (auto *dp = std::get_if<dict_ptr>(&v.v)) {
+    if (!*dp)
+      return v;
+    auto found = memo.find(static_cast<const void *>(dp->get()));
+    if (found != memo.end())
+      return found->second;
+    auto out = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
+    value_t result{out};
+    memo.emplace(static_cast<const void *>(dp->get()), result);
+    out->reserve((*dp)->size());
+    for (const auto &kv : **dp)
+      out->emplace_back(kv.first, deep_copy_impl(kv.second, memo, depth + 1));
+    return result;
+  }
+  return v; // scalar / symbol (opaque callables are refused at state-data-set)
+}
+
+value_t deep_copy(const value_t &v) {
+  std::unordered_map<const void *, value_t> memo;
+  return deep_copy_impl(v, memo, 0);
+}
+
+void require_root(const intrinsics_context *ctx, const char *name) {
+  if (!ctx->root)
+    throw std::runtime_error(std::string(name) + ": no state root bound");
+}
+
+void require_sched(const intrinsics_context *ctx, const char *name) {
+  if (!ctx->sched)
+    throw std::runtime_error(std::string(name) + ": no scheduler bound");
+}
+
+// ---------------------------------------------------------------------------
+// State tree intrinsics
+// ---------------------------------------------------------------------------
+
+namespace {
+// Follow a TRANSPARENT link to its terminal target for a READ. This is the sanctioned
+// cross-subtree channel (roadmap §7.8.3): a chrooted program cannot NAME anything outside its
+// subtree, but the host may plant a transparent link node inside it whose target lies elsewhere
+// (a "named hole"), and a read of that node should see THROUGH to the target — matching what a
+// write already does (state::value(v) routes through a writable transparent link). A non-link, an
+// opaque link, or a broken / cyclic / budget-exhausted transparent link stays put (the same
+// fallback resolvedValue() documents), so this only changes behaviour for a resolvable
+// transparent link — where pass-through is the whole point. Path traversal itself still does NOT
+// descend through a link (findDescendant stops at the link node), so this reaches the target's
+// value/children/data, not a deeper path spelled through the link.
+cvc::state *read_through_link(cvc::state *node) {
+  if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent) {
+    const cvc::state::link_resolution lr = node->resolveLink();
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
+      return lr.target;
+  }
+  return node;
+}
+} // namespace
+
+value_t intrinsic_state_get(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-get");
+  require_root(ctx, "state-get");
+  auto &path = as_string(args[0], "state-get");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node)
+    return nil_value;
+  return value_t(read_through_link(node)->value());
+}
+
+value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-set");
+  require_root(ctx, "state-set");
+  auto &path = as_string(args[0], "state-set");
+  // Coerce the value to a string (state stores string-typed scalars) rather than
+  // requiring the caller to pre-stringify — (state-set "n" 10) now stores "10". A
+  // structured value should use state-data-set (the typed data() channel).
+  const std::string val = coerce_state_string(args[1]);
+  // operator() creates child nodes as needed
+  (*ctx->root)(path).value(val);
+  return nil_value;
+}
+
+value_t intrinsic_state_children(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-children");
+  require_root(ctx, "state-children");
+  auto &path = as_string(args[0], "state-children");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node)
+    return make_list();
+  auto names = read_through_link(node)->children();
+  std::vector<value_t> result;
+  result.reserve(names.size());
+  for (auto &n : names)
+    result.emplace_back(n);
+  return make_list(std::move(result));
+}
+
+value_t intrinsic_state_exists(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-exists");
+  require_root(ctx, "state-exists");
+  auto &path = as_string(args[0], "state-exists");
+  return value_t(ctx->root->findDescendant(path) != nullptr);
+}
+
+value_t intrinsic_state_delete(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-delete");
+  require_root(ctx, "state-delete");
+  auto &path = as_string(args[0], "state-delete");
+  auto *node = ctx->root->findDescendant(path);
+  if (node) {
+    // Use expiry for immediate deletion
+    node->expireAt(boost::posix_time::microsec_clock::universal_time());
+    ctx->root->sweepExpired();
+  }
+  return nil_value;
+}
+
+value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-data-get");
+  require_root(ctx, "state-data-get");
+  auto &path = as_string(args[0], "state-data-get");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node)
+    return nil_value;
+  auto d = read_through_link(node)->data();
+  if (d.empty())
+    return nil_value;
+  // If the payload is a DSL value_t (the shape state-data-set stores), return a DEEP COPY
+  // so structured data round-trips transparently — (state-data-set "k" (list 1 2 3)) then
+  // (state-data-get "k") yields (1 2 3) — WITHOUT aliasing the node's stored storage (a
+  // returned list_ptr/dict_ptr would otherwise let a caller mutate persistent state in
+  // place via append/set-nth, defeating the read-only contract). Genuine host data (any
+  // other C++ type parked on the node) still comes back as a data_object.
+  if (auto *v = boost::any_cast<value_t>(&d))
+    return deep_copy(*v);
+  // A RAW std::string blob on the data channel reads back as the DSL `bytes` type (opaque octets),
+  // NOT an opaque data_object. That raw representation is what state-data-set stores for a `bytes`
+  // value, what the `?data` URI channel writes (uri_state.cpp), and what the §13.9 HTTP cache parks
+  // on a node — so a byte blob stays coherent across the resolver and state_exec (types.h: `bytes`
+  // is opaque octets backed by std::string, the sanctioned home for HTTP octet-stream bodies).
+  if (const std::string *s = boost::any_cast<std::string>(&d))
+    return make_bytes(*s);
+  auto obj = std::make_shared<data_object>();
+  obj->payload = d;
+  obj->type_name = d.type().name();
+  return value_t(std::move(obj));
+}
+
+value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-data-set");
+  require_root(ctx, "state-data-set");
+  auto &path = as_string(args[0], "state-data-set");
+  // Refuse to store a callable. A native_fn/closure/generator captures an environment or
+  // intrinsics_context that may not outlive this (persistent) node — a use-after-free
+  // waiting to happen — and a stored callable is an invocation channel that would bypass
+  // any environment allowlist a later reader relies on. The data channel is for structured
+  // DATA (scalars/lists/dicts), not code.
+  if (std::holds_alternative<native_fn>(args[1].v) ||
+      std::holds_alternative<closure_ptr>(args[1].v) ||
+      std::holds_alternative<generator_ptr>(args[1].v))
+    throw std::runtime_error(
+        "state-data-set: cannot store a callable (function/closure/generator) as data");
+  // A `bytes` value (opaque octets) is stored as a RAW std::string on the data channel — the SAME
+  // representation the `?data` URI channel (uri_state.cpp) and the §13.9 HTTP cache use — so a byte
+  // blob written from the DSL is readable via state://…?data and a blob parked by the cache reads
+  // back as `bytes` here (state-data-get, above). Every other value_t is stored as-is, so
+  // structured data (lists/dicts/scalars/text strings) round-trips via the value_t path.
+  if (const bytes_value *b = std::get_if<bytes_value>(&args[1].v))
+    (*ctx->root)(path).data(boost::any(b->data));
+  else
+    (*ctx->root)(path).data(boost::any(args[1]));
+  return nil_value;
+}
+
+value_t intrinsic_state_root_path(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "state-root-path");
+  return value_t(ctx->root_path);
+}
+
+value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-watch");
+  require_root(ctx, "state-watch");
+  auto &path = as_string(args[0], "state-watch");
+  // args[1] is the handler expression (lambda or quoted form)
+  value_t handler = args[1];
+
+  // Navigate to the node (create if needed so we can watch it)
+  (void)(*ctx->root)(path);
+
+  // Allocate a watch ID
+  int watch_id = ctx->proc->next_watch_id++;
+
+  // Register the handler.  The scheduler polls watched paths each step
+  // instead of using boost::signals2 (which segfaults on macOS).
+  if (ctx->sched) {
+    ctx->sched->set_watch_root(ctx->root);
+    ctx->sched->register_watch_handler(ctx->pid, watch_id, handler, path);
+  } else {
+    // No-scheduler path (unit tests): record handler + initial value.
+    std::string initial;
+    auto *node = ctx->root->findDescendant(path);
+    if (node)
+      initial = node->value();
+    ctx->proc->watch_handlers[watch_id] = {handler, path, initial};
+  }
+
+  // Keep a local registry for unwatch; no signal connection needed.
+  ctx->watches[watch_id] = {path, handler, []() {}};
+
+  return value_t(static_cast<int64_t>(watch_id));
+}
+
+value_t intrinsic_state_unwatch(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-unwatch");
+  int64_t watch_id = as_int(args[0], "state-unwatch");
+  auto it = ctx->watches.find(static_cast<int>(watch_id));
+  if (it == ctx->watches.end())
+    return value_t(false);
+  ctx->watches.erase(it);
+  // Remove handler from the scheduler's process (or ctx->proc if no scheduler)
+  if (ctx->sched)
+    ctx->sched->unregister_watch_handler(ctx->pid, static_cast<int>(watch_id));
+  else
+    ctx->proc->watch_handlers.erase(static_cast<int>(watch_id));
+  return value_t(true);
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler intrinsics
+// ---------------------------------------------------------------------------
+
+value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_min(args, 1, "spawn");
+  require_sched(ctx, "spawn");
+  auto &script = as_string(args[0], "spawn");
+  execute_options opts;
+  if (args.size() > 1)
+    opts.name = as_string(args[1], "spawn");
+  if (args.size() > 2)
+    opts.priority = static_cast<int>(as_int(args[2], "spawn"));
+  opts.uid = ctx->uid;
+  int pid = ctx->sched->execute(script, opts);
+  return value_t(static_cast<int64_t>(pid));
+}
+
+value_t intrinsic_fork(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "fork");
+  require_sched(ctx, "fork");
+  int child = ctx->sched->fork(ctx->pid);
+  return value_t(static_cast<int64_t>(child));
+}
+
+value_t intrinsic_self_pid(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "self-pid");
+  int pid = (ctx->sched && ctx->sched->current_pid() >= 0) ? ctx->sched->current_pid() : ctx->pid;
+  return value_t(static_cast<int64_t>(pid));
+}
+
+value_t intrinsic_self_uid(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "self-uid");
+  return value_t(ctx->uid);
+}
+
+value_t intrinsic_kill(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "kill");
+  require_sched(ctx, "kill");
+  int pid = static_cast<int>(as_int(args[0], "kill"));
+  return value_t(ctx->sched->kill(pid));
+}
+
+value_t intrinsic_pause(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "pause");
+  require_sched(ctx, "pause");
+  int pid = static_cast<int>(as_int(args[0], "pause"));
+  return value_t(ctx->sched->pause(pid));
+}
+
+value_t intrinsic_resume(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "resume");
+  require_sched(ctx, "resume");
+  int pid = static_cast<int>(as_int(args[0], "resume"));
+  return value_t(ctx->sched->resume(pid));
+}
+
+value_t intrinsic_sleep(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "sleep");
+  require_sched(ctx, "sleep");
+  double seconds = as_number(args[0], "sleep");
+  if (seconds < 0)
+    throw std::runtime_error("sleep: duration must be non-negative");
+  int pid = ctx->sched->current_pid();
+  if (pid < 0)
+    pid = ctx->pid;
+  return value_t(ctx->sched->sleep(pid, seconds));
+}
+
+value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "await");
+  require_sched(ctx, "await");
+  int pid = ctx->sched->current_pid();
+  if (pid < 0)
+    pid = ctx->pid;
+  // A FUTURE handle {"__future__": chan} → value-carrying park (the §13.8 proper await): suspend
+  // until the producer delivers, then resume with the resolved value threaded into the enclosing
+  // expression, exactly as (msg-recv) does — via the shared park_on_channel primitive.
+  if (const std::optional<std::string> fchan = future_channel_of(args[0])) {
+    process *proc = nullptr;
+    if (ctx->sched->current_process())
+      proc = ctx->sched->current_process().get();
+    else if (ctx->proc)
+      proc = ctx->proc.get();
+    return park_on_channel(ctx->sched, proc, pid, *fchan);
+  }
+  // An already-settled value → the cooperative one-frame yield await has always been (a no-op on a
+  // scheduler with no frames, where await is identity), then resume with the value unchanged.
+  ctx->sched->yield_frame(pid);
+  return args[0];
+}
+
+value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "ps");
+  require_sched(ctx, "ps");
+  auto procs = ctx->sched->list_processes();
+  std::vector<value_t> result;
+  result.reserve(procs.size());
+  for (auto &pi : procs) {
+    // Each process → dict with key fields
+    std::vector<std::pair<std::string, value_t>> entries;
+    entries.emplace_back("pid", value_t(static_cast<int64_t>(pi.pid)));
+    entries.emplace_back("name", value_t(pi.name));
+    entries.emplace_back(
+        "status", value_t(std::string(pi.status == process_status::ready        ? "ready"
+                                      : pi.status == process_status::running    ? "running"
+                                      : pi.status == process_status::paused     ? "paused"
+                                      : pi.status == process_status::waiting    ? "waiting"
+                                      : pi.status == process_status::terminated ? "terminated"
+                                      : pi.status == process_status::killed     ? "killed"
+                                                                                : "unknown")));
+    entries.emplace_back("priority", value_t(static_cast<int64_t>(pi.priority)));
+    entries.emplace_back("uid", value_t(pi.uid));
+    entries.emplace_back("steps", value_t(static_cast<int64_t>(pi.step_count)));
+    result.push_back(make_dict(std::move(entries)));
+  }
+  return make_list(std::move(result));
+}
+
+value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "inspect");
+  require_sched(ctx, "inspect");
+  int pid = static_cast<int>(as_int(args[0], "inspect"));
+  auto info = ctx->sched->get_process_info(pid);
+  if (!info)
+    return nil_value;
+  std::vector<std::pair<std::string, value_t>> entries;
+  entries.emplace_back("pid", value_t(static_cast<int64_t>(info->pid)));
+  entries.emplace_back("name", value_t(info->name));
+  entries.emplace_back(
+      "status", value_t(std::string(info->status == process_status::ready        ? "ready"
+                                    : info->status == process_status::running    ? "running"
+                                    : info->status == process_status::paused     ? "paused"
+                                    : info->status == process_status::waiting    ? "waiting"
+                                    : info->status == process_status::terminated ? "terminated"
+                                    : info->status == process_status::killed     ? "killed"
+                                                                                 : "unknown")));
+  entries.emplace_back("priority", value_t(static_cast<int64_t>(info->priority)));
+  entries.emplace_back("uid", value_t(info->uid));
+  entries.emplace_back("gid", value_t(info->gid));
+  entries.emplace_back("steps", value_t(static_cast<int64_t>(info->step_count)));
+  entries.emplace_back("elapsed_time", value_t(info->elapsed_time));
+  entries.emplace_back("memory", value_t(static_cast<int64_t>(info->current_memory)));
+  entries.emplace_back("peak_memory", value_t(static_cast<int64_t>(info->peak_memory)));
+  entries.emplace_back("max_memory", value_t(static_cast<int64_t>(info->max_memory)));
+  entries.emplace_back("max_time", value_t(info->max_time));
+  entries.emplace_back("messages", value_t(static_cast<int64_t>(info->message_count)));
+  entries.emplace_back("max_messages", value_t(static_cast<int64_t>(info->max_messages)));
+  entries.emplace_back("message_bytes", value_t(static_cast<int64_t>(info->message_bytes)));
+  entries.emplace_back("max_message_bytes", value_t(static_cast<int64_t>(info->max_message_bytes)));
+  entries.emplace_back("parent_pid", value_t(static_cast<int64_t>(info->parent_pid)));
+  return make_dict(std::move(entries));
+}
+
+// ---------------------------------------------------------------------------
+// Resource intrinsics
+// ---------------------------------------------------------------------------
+
+value_t intrinsic_memory_usage(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "memory-usage");
+  if (!ctx->tracker)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->tracker->current_bytes(ctx->pid)));
+}
+
+value_t intrinsic_memory_limit(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "memory-limit");
+  if (!ctx->proc)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->proc->max_memory));
+}
+
+value_t intrinsic_time_elapsed(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "time-elapsed");
+  if (!ctx->proc)
+    return value_t(0.0);
+  return value_t(ctx->proc->elapsed_time());
+}
+
+value_t intrinsic_time_limit(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "time-limit");
+  if (!ctx->proc)
+    return value_t(0.0);
+  return value_t(static_cast<double>(ctx->proc->max_time));
+}
+
+value_t intrinsic_message_count(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "message-count");
+  if (!ctx->proc)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->proc->message_count));
+}
+
+value_t intrinsic_message_limit(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "message-limit");
+  if (!ctx->proc)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->proc->max_messages));
+}
+
+value_t intrinsic_message_bytes(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "message-bytes");
+  if (!ctx->proc)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->proc->message_bytes));
+}
+
+value_t intrinsic_message_bytes_limit(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "message-bytes-limit");
+  if (!ctx->proc)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->proc->max_message_bytes));
+}
+
+value_t intrinsic_step_count(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "step-count");
+  if (!ctx->proc)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->proc->step_count()));
+}
+
+// ---------------------------------------------------------------------------
+// System identity intrinsics
+// ---------------------------------------------------------------------------
+
+value_t intrinsic_cluster_id(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "cluster-id");
+  return value_t(ctx->cluster_id);
+}
+
+value_t intrinsic_node_id(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "node-id");
+  return value_t(ctx->node_id);
+}
+
+value_t intrinsic_scheduler_stats(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "scheduler-stats");
+  require_sched(ctx, "scheduler-stats");
+  auto s = ctx->sched->get_stats();
+  std::vector<std::pair<std::string, value_t>> entries;
+  entries.emplace_back("total", value_t(static_cast<int64_t>(s.total_processes)));
+  entries.emplace_back("running", value_t(static_cast<int64_t>(s.running)));
+  entries.emplace_back("ready", value_t(static_cast<int64_t>(s.ready)));
+  entries.emplace_back("paused", value_t(static_cast<int64_t>(s.paused)));
+  entries.emplace_back("terminated", value_t(static_cast<int64_t>(s.terminated)));
+  entries.emplace_back("killed", value_t(static_cast<int64_t>(s.killed)));
+  entries.emplace_back("steps", value_t(static_cast<int64_t>(s.total_steps)));
+  return make_dict(std::move(entries));
+}
+
+// ---------------------------------------------------------------------------
+// Expiry intrinsics
+// ---------------------------------------------------------------------------
+
+value_t intrinsic_state_expire(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-expire");
+  require_root(ctx, "state-expire");
+  auto &path = as_string(args[0], "state-expire");
+  double secs = as_number(args[1], "state-expire");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node)
+    throw std::runtime_error("state-expire: path not found: " + path);
+  node->expireAfter(boost::posix_time::milliseconds(static_cast<int64_t>(secs * 1000.0)));
+  return nil_value;
+}
+
+value_t intrinsic_state_expire_at(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-expire-at");
+  require_root(ctx, "state-expire-at");
+  auto &path = as_string(args[0], "state-expire-at");
+  auto &iso = as_string(args[1], "state-expire-at");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node)
+    throw std::runtime_error("state-expire-at: path not found: " + path);
+  auto pt = boost::posix_time::time_from_string(iso);
+  node->expireAt(pt);
+  return nil_value;
+}
+
+value_t intrinsic_state_has_expiry(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-has-expiry");
+  require_root(ctx, "state-has-expiry");
+  auto &path = as_string(args[0], "state-has-expiry");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node)
+    return false_value;
+  return value_t(node->hasExpiry());
+}
+
+value_t intrinsic_state_is_expired(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-is-expired");
+  require_root(ctx, "state-is-expired");
+  auto &path = as_string(args[0], "state-is-expired");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node)
+    return false_value;
+  return value_t(node->isExpired());
+}
+
+value_t intrinsic_state_clear_expiry(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-clear-expiry");
+  require_root(ctx, "state-clear-expiry");
+  auto &path = as_string(args[0], "state-clear-expiry");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node)
+    throw std::runtime_error("state-clear-expiry: path not found: " + path);
+  node->clearExpiry();
+  return nil_value;
+}
+
+value_t intrinsic_state_sweep(intrinsics_context *ctx, std::span<const value_t> args) {
+  if (args.size() > 1)
+    throw std::runtime_error("state-sweep-expired: expected 0-1 argument(s), got " +
+                             std::to_string(args.size()));
+  require_root(ctx, "state-sweep-expired");
+  cvc::state *target = ctx->root;
+  if (args.size() == 1) {
+    auto &path = as_string(args[0], "state-sweep-expired");
+    target = ctx->root->findDescendant(path);
+    if (!target)
+      return value_t(int64_t(0));
+  }
+  return value_t(static_cast<int64_t>(target->sweepExpired()));
+}
+
+// ---------------------------------------------------------------------------
+// Messaging intrinsics
+// ---------------------------------------------------------------------------
+
+// §12 channel scoping: resolve a message channel to its scheduler key, mirroring how state paths
+// are chrooted. resolve_channel_key (intrinsics.h) does the pure-string rules ('#'-runtime +
+// empty-root identity, '/'-global escape, else "<root_path>.channels.<name>"); this adds grant-link
+// following — a §12 mount plants a transparent link at <root_path>.channels.<name> (wire_holes), so
+// a sender and a granted receiver resolve to ONE absolute key via the SAME resolveLink() state uses
+// (no parallel registry, no async_scheduler change). Every msg-* intrinsic resolves once at entry.
+std::string resolve_channel(const intrinsics_context *ctx, const std::string &channel) {
+  const std::string key = resolve_channel_key(ctx ? ctx->root_path : std::string(), channel);
+  // Only a private-by-prefix channel (not a '#'-runtime channel, not a '/'-global, non-empty root)
+  // can carry a planted grant link; if one is planted, follow it to the granted target's key.
+  if (ctx && ctx->root && !ctx->root_path.empty() && channel.find('#') == std::string::npos &&
+      !(!channel.empty() && channel.front() == '/')) {
+    const std::string rel = std::string("channels") + cvc::state::SEPARATOR + channel;
+    if (cvc::state *n = ctx->root->findDescendant(rel)) {
+      // A grant is a transparent link whose TARGET PATH is the shared channel key. Read the target
+      // string directly (linkTarget), NOT resolveLink: a channel is a scheduler key, not a state
+      // value, so the target node need not exist (resolveLink would report it "broken"). The stored
+      // target is app-root-relative, exactly what the sender's own resolve produces — so a granted
+      // receiver and the sender agree on one key. Single hop (the §12 mount-grant model).
+      if (n->isLink() && n->linkMode() == cvc::state::link_mode::transparent) {
+        const std::string tgt = n->linkTarget();
+        if (!tgt.empty())
+          return tgt; // granted: resolve to the parent/shared channel key
+      }
+    }
+  }
+  return key;
+}
+
+// §12 channel enforcement (runtime backstop). When the host installed a strict channel_policy on
+// this context, a msg-* on an undeclared channel is refused — the completeness layer for DYNAMIC
+// channel names the load-time lint can't see. Allowed: a '#'-runtime channel; a declared channel; a
+// declared app-root-global (for a '/'-ref); or a channel granted via a planted transparent-link
+// (a §12 mount grant). Otherwise throw (the action lane catches it fail-safe and warns once). A
+// no-op unless enforce is set (warn/off leave it false — the load lint handled those at load).
+void enforce_channel_policy(const intrinsics_context *ctx, const std::string &channel) {
+  if (!ctx || !ctx->channels || !ctx->channels->enforce)
+    return;
+  if (channel.find('#') != std::string::npos)
+    return; // runtime-internal channel (tick/key/pointer) — never enforced
+  const channel_policy &p = *ctx->channels;
+  if (!channel.empty() && channel.front() == '/') {
+    const std::string g = channel.substr(1);
+    if (std::find(p.global.begin(), p.global.end(), g) != p.global.end())
+      return; // a declared app-root-global
+    throw std::runtime_error("channel policy: undeclared app-root-global '/" + g +
+                             "' (declare it as a global in the channels: block)");
+  }
+  if (std::find(p.declared.begin(), p.declared.end(), channel) != p.declared.end())
+    return;        // a declared channel
+  if (ctx->root) { // or a channel granted via a planted transparent-link (a §12 mount grant)
+    const std::string rel = std::string("channels") + cvc::state::SEPARATOR + channel;
+    if (cvc::state *n = ctx->root->findDescendant(rel))
+      if (n->isLink() && n->linkMode() == cvc::state::link_mode::transparent &&
+          !n->linkTarget().empty())
+        return;
+  }
+  throw std::runtime_error("channel policy: undeclared channel '" + channel +
+                           "' (add it to the channels: block, or relax lint.channels)");
+}
+
+value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_min(args, 2, "msg-send");
+  require_root(ctx, "msg-send");
+  auto &path = as_string(args[0], "msg-send");
+  enforce_channel_policy(ctx,
+                         path); // §12 runtime enforcement (strict policy → throw if undeclared)
+  auto &payload = as_string_or_bytes(args[1], "msg-send"); // text OR binary
+  const bool binary = is_bytes_value(args[1]);
+  std::string content_type = binary ? "application/octet-stream" : "text/plain";
+  if (args.size() > 2)
+    content_type = as_string(args[2], "msg-send");
+  auto *node = ctx->root->findDescendant(path);
+  if (!node) {
+    // Create the node so we can send to it
+    node = &(*ctx->root)(path);
+  }
+  auto result = node->sendMessage(payload, content_type, /*hop_budget=*/64, /*binary=*/binary);
+  // Update message counters on the currently executing process.
+  process *proc = nullptr;
+  if (ctx->sched && ctx->sched->current_process())
+    proc = ctx->sched->current_process().get();
+  if (proc) {
+    proc->message_count++;
+    proc->message_bytes += payload.size();
+  }
+  // Also update ctx->proc if it's a different object (for test fixtures).
+  if (ctx->proc && ctx->proc.get() != proc) {
+    ctx->proc->message_count++;
+    ctx->proc->message_bytes += payload.size();
+  }
+  const std::string status_str =
+      result.status == cvc::state::send_message_result::status_kind::delivered ? "delivered"
+                                                                               : "error";
+
+  // Return value to the SENDER: {status, path} — unchanged contract (callers/tests rely on this).
+  std::vector<std::pair<std::string, value_t>> ret_entries;
+  ret_entries.emplace_back("status", value_t(status_str));
+  ret_entries.emplace_back("path", value_t(result.resolved_path));
+  auto ret = make_dict(std::move(ret_entries));
+
+  // Deliver an ENVELOPE to receivers on this channel: {status, path, content_type, payload}. The
+  // payload keeps the ORIGINAL value type — a string stays a string, bytes stay bytes — so a
+  // (msg-recv) on this channel gets the actual binary/text data (not just the {status,path} ack it
+  // used to get). The SCHEDULER key is chroot-scoped (resolve_channel); the state-side sendMessage
+  // above stays on the raw path — the two buses are independent, as before.
+  if (ctx->sched) {
+    std::vector<std::pair<std::string, value_t>> env_entries;
+    env_entries.emplace_back("status", value_t(status_str));
+    env_entries.emplace_back("path", value_t(result.resolved_path));
+    env_entries.emplace_back("content_type", value_t(content_type));
+    env_entries.emplace_back("payload", args[1]); // original value_t — binary preserved
+    ctx->sched->deliver_to_receivers(resolve_channel(ctx, path), make_dict(std::move(env_entries)));
+  }
+
+  return ret;
+}
+
+value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "msg-recv");
+  require_sched(ctx, "msg-recv");
+  // Accept a future handle {"__future__": chan} (from an async producer like (http-get-async)) OR a
+  // raw channel string. A future's channel is an already-resolved '#'-channel (policy-exempt); a
+  // raw string goes through §12 policy + chroot-scoping as before.
+  std::string ch;
+  if (const std::optional<std::string> fchan = future_channel_of(args[0])) {
+    ch = *fchan;
+  } else {
+    const std::string &raw = as_string(args[0], "msg-recv");
+    enforce_channel_policy(ctx, raw);
+    ch = resolve_channel(ctx, raw);
+  }
+
+  int pid = ctx->sched->current_pid();
+  if (pid < 0)
+    pid = ctx->pid; // fallback for unit-test contexts
+  process *proc = nullptr;
+  if (ctx->sched->current_process())
+    proc = ctx->sched->current_process().get();
+  else if (ctx->proc)
+    proc = ctx->proc.get();
+
+  return park_on_channel(ctx->sched, proc, pid, ch);
+}
+
+value_t intrinsic_msg_pending(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "msg-pending");
+  require_sched(ctx, "msg-pending");
+  const std::string &raw = as_string(args[0], "msg-pending");
+  enforce_channel_policy(ctx, raw);                 // §12 runtime enforcement (strict → throw)
+  const std::string ch = resolve_channel(ctx, raw); // §12 chroot-scoped scheduler key
+  return value_t(static_cast<int64_t>(ctx->sched->pending_message_count(ch)));
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
+  auto reg = [&](const std::string &name, auto fn) {
+    builtins::register_fn(env, name,
+                          [ctx, fn](std::span<const value_t> args) { return fn(ctx, args); });
+  };
+
+  // State tree
+  reg("state-get", intrinsic_state_get);
+  reg("state-set", intrinsic_state_set);
+  reg("state-children", intrinsic_state_children);
+  reg("state-exists", intrinsic_state_exists);
+  reg("state-delete", intrinsic_state_delete);
+  reg("state-data-get", intrinsic_state_data_get);
+  reg("state-data-set", intrinsic_state_data_set);
+  reg("state-root-path", intrinsic_state_root_path);
+  reg("state-watch", intrinsic_state_watch);
+  reg("state-unwatch", intrinsic_state_unwatch);
+
+  // Scheduler
+  reg("spawn", intrinsic_spawn);
+  reg("fork", intrinsic_fork);
+  reg("self-pid", intrinsic_self_pid);
+  reg("self-uid", intrinsic_self_uid);
+  reg("kill", intrinsic_kill);
+  reg("pause", intrinsic_pause);
+  reg("resume", intrinsic_resume);
+  reg("sleep", intrinsic_sleep);
+  reg("await", intrinsic_await);
+  reg("ps", intrinsic_ps);
+  reg("inspect", intrinsic_inspect);
+
+  // Resource queries
+  reg("memory-usage", intrinsic_memory_usage);
+  reg("memory-limit", intrinsic_memory_limit);
+  reg("time-elapsed", intrinsic_time_elapsed);
+  reg("time-limit", intrinsic_time_limit);
+  reg("message-count", intrinsic_message_count);
+  reg("message-limit", intrinsic_message_limit);
+  reg("message-bytes", intrinsic_message_bytes);
+  reg("message-bytes-limit", intrinsic_message_bytes_limit);
+  reg("step-count", intrinsic_step_count);
+
+  // System identity
+  reg("cluster-id", intrinsic_cluster_id);
+  reg("node-id", intrinsic_node_id);
+  reg("scheduler-stats", intrinsic_scheduler_stats);
+
+  // Expiry
+  reg("state-expire", intrinsic_state_expire);
+  reg("state-expire-at", intrinsic_state_expire_at);
+  reg("state-has-expiry", intrinsic_state_has_expiry);
+  reg("state-is-expired", intrinsic_state_is_expired);
+  reg("state-clear-expiry", intrinsic_state_clear_expiry);
+  reg("state-sweep-expired", intrinsic_state_sweep);
+
+  // Messaging
+  reg("msg-send", intrinsic_msg_send);
+  reg("msg-recv", intrinsic_msg_recv);
+  reg("msg-pending", intrinsic_msg_pending);
+}
+
+void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path) {
+  if (root_path.empty()) {
+    ctx.root = &tree_root;
+    ctx.root_path.clear();
+    return;
+  }
+  // Navigate or create the subtree node
+  ctx.root = &tree_root(root_path);
+  ctx.root_path = root_path;
+}
+
+std::string resolve_channel_key(const std::string &root_path, const std::string &channel) {
+  if (channel.find('#') != std::string::npos)
+    return channel; // runtime-internal channel (tick/key/pointer) — never scoped
+  if (!channel.empty() && channel.front() == '/')
+    return channel.substr(1); // explicit app-root-global (the '/' escape; the loader gates its use)
+  if (root_path.empty())
+    return channel; // root scope: identity — backward-compatible with every raw-key msg-* caller
+  return root_path + cvc::state::SEPARATOR + "channels" + cvc::state::SEPARATOR + channel;
+}
+
+value_t make_future(const std::string &channel) {
+  return make_dict({{"__future__", value_t(channel)}});
+}
+
+std::optional<std::string> future_channel_of(const value_t &v) {
+  const dict_ptr *dp = std::get_if<dict_ptr>(&v.v);
+  if (!dp || !*dp)
+    return std::nullopt;
+  const std::vector<std::pair<std::string, value_t>> &entries = **dp;
+  if (entries.size() != 1 || entries[0].first != "__future__")
+    return std::nullopt;
+  const std::string *chan = std::get_if<std::string>(&entries[0].second.v);
+  if (!chan)
+    return std::nullopt;
+  return *chan;
+}
+
+value_t park_on_channel(scheduler_base *sched, process *proc, int pid, const std::string &ch) {
+  // A message that arrived before the park is returned without suspending: first the process inbox,
+  // then the scheduler's per-channel pending queue.
+  if (proc && !proc->inbox.empty()) {
+    value_t msg = std::move(proc->inbox.front());
+    proc->inbox.pop();
+    return msg;
+  }
+  if (const std::optional<value_t> pending = sched->pop_pending_message(ch))
+    return *pending;
+
+  // A park needs an ENCLOSING frame to receive the value deliver_to_receivers patches in. During
+  // the native call the apply frame is on top of the stack; size 1 means it is the ONLY frame — a
+  // top-level call whose pop would empty the stack (done=true) and skip the patch, leaving a
+  // done-and-waiting zombie. (size 0 == a direct unit-test call with no evaluator frames — allowed;
+  // the test drives delivery itself.)
+  if (proc && proc->state.stack.size() == 1)
+    throw std::runtime_error("cannot suspend a top-level call (no enclosing expression to receive "
+                             "the value); wrap it, e.g. bind the result or use (begin …)");
+
+  if (!sched->receive_message(pid, ch))
+    throw std::runtime_error("cannot suspend process " + std::to_string(pid));
+  // Nil placeholder — deliver_to_receivers overwrites the enclosing frame's results.back() with the
+  // delivered value when the message arrives on `ch`.
+  return nil_value;
+}
+
+} // namespace cvc::state_exec

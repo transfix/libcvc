@@ -34,12 +34,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/Settings.h>
+#include <cvc/state/state.h>
 #include <memory>
 #include <string>
 #include <vector>

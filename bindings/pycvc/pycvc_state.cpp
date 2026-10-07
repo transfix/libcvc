@@ -12,7 +12,7 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/signals2/connection.hpp>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <stdexcept>
 
 namespace pycvc {

@@ -180,7 +180,7 @@ name).  S-expression lists require strict positional ordering.  The approach:
 - A thin **`state_list`** C++ wrapper provides `push_back`, `at(i)`,
   `pop_back`, `size`, iterator, and `insert`/`erase` over this convention.
 - The wrapper will be part of the public `cvc::state` API (new header
-  `cvc/state_list.h`) so other subsystems can use ordered lists in the state
+  `cvc/state/state_list.h`) so other subsystems can use ordered lists in the state
   tree.
 - Padding width is configurable (default 6 digits → up to 999 999 elements),
   but the wrapper validates and can re-index if needed.
@@ -350,7 +350,7 @@ layer beneath it.
 
 ### 4. Component Breakdown
 
-#### 4.1 Core Types (`cvc/state_exec/types.h`)
+#### 4.1 Core Types (`cvc/state/state_exec/types.h`)
 
 ```cpp
 namespace cvc::state_exec {
@@ -401,7 +401,7 @@ struct environment {
 }
 ```
 
-#### 4.2 Parser (`cvc/state_exec/parser.h`)
+#### 4.2 Parser (`cvc/state/state_exec/parser.h`)
 
 Port the `ParserMixin.parse()` logic.  Instead of depending on Python
 `sexpdata`, implement a self-contained S-expression parser in C++.  This is
@@ -419,7 +419,7 @@ The parser produces `value_t` trees (in-memory).  A separate
 `store_to_state(state&, value_t)` function persists a parsed program into the
 state tree.
 
-#### 4.3 Built-in Functions (`cvc/state_exec/builtins.h`)
+#### 4.3 Built-in Functions (`cvc/state/state_exec/builtins.h`)
 
 All 30+ built-in functions from `BUILT_IN_SOURCES` in `script.py`, directly
 implemented as C++ functions (no sandboxed Python compilation needed):
@@ -511,7 +511,7 @@ duplication present in the Python version.
   process with a different evaluator.**  Programs evaluated through any
   other evaluator class are local-only and not managed by the scheduler.
 
-#### 4.5 Scheduler (`cvc/state_exec/scheduler.h`)
+#### 4.5 Scheduler (`cvc/state/state_exec/scheduler.h`)
 
 The scheduler exclusively uses **`async_stackless_evaluator`** for all managed
 processes.  This is not configurable — every process submitted via `execute()`
@@ -561,7 +561,7 @@ Port of `AsyncCFOSScheduler`:
 
 #### 4.6 State Tree Integration
 
-##### 4.6.1 `state_list` (`cvc/state_list.h`)
+##### 4.6.1 `state_list` (`cvc/state/state_list.h`)
 
 New addition to the `cvc::state` public API:
 
@@ -599,7 +599,7 @@ private:
 }
 ```
 
-##### 4.6.2 `state_value_codec` (`cvc/state_exec/state_value_codec.h`)
+##### 4.6.2 `state_value_codec` (`cvc/state/state_exec/state_value_codec.h`)
 
 Converts between in-memory `value_t` and state tree encoding:
 
@@ -1813,7 +1813,7 @@ message, so the migrated process sees `nil` for that binding.
 
 ##### 4.18.3 Data Objects and `state_object<T>`
 
-The `state_object<T>` template (`cvc/state_object.h`) is the primary way
+The `state_object<T>` template (`cvc/state/state_object.h`) is the primary way
 C++ classes expose member data through the state tree.  DSL programs
 interact with state_object instances naturally:
 
@@ -2029,7 +2029,7 @@ has no built-in ACL.
 All new files go under the libcvc repository root:
 
 ```
-inc/cvc/
+inc/cvc/state/
     state_list.h                        # Ordered list abstraction over state
     state_memory_manager.h              # LRU/eviction memory management for state
     state_eviction_store.h              # Abstract + built-in eviction store impls
@@ -2053,7 +2053,7 @@ inc/cvc/
         stdlib_registry.h              # Standard library registration and resolution
         state_batch_guard.h            # RAII batch scope for state_object-unaware code paths
 
-src/cvc/
+src/cvc/state/
     state_list.cpp
     state_memory_manager.cpp
     state_eviction_store.cpp

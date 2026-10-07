@@ -1,7 +1,7 @@
 #ifndef CVC_GL_SCREEN_TEXT_HUD_H
 #define CVC_GL_SCREEN_TEXT_HUD_H
 
-#include <cvc/core/state_object.h>
+#include <cvc/state/state_object.h>
 #include <memory>
 #include <string>
 

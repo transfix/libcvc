@@ -9,11 +9,11 @@
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task — the shared offload-and-park primitive
-#include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
-#include <cvc/core/state_exec/builtins.h>   // register_fn — bind the host verb into the lanes
-#include <cvc/core/state_exec/intrinsics.h> // resolve_channel_key — scope the reply channel
-#include <cvc/core/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
 #include <cvc/net/http_client.h>
+#include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
+#include <cvc/state/state_exec/builtins.h>   // register_fn — bind the host verb into the lanes
+#include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key — scope the reply channel
+#include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
 #include <span>
 #include <stdexcept>
 #include <string>

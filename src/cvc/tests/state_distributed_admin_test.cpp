@@ -10,14 +10,14 @@
 
 #include <cstdint>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_blob_store.h>
-#include <cvc/core/state_cluster_shard.h>
-#include <cvc/core/state_delegation_manager.h>
-#include <cvc/core/state_distributed_admin.h>
-#include <cvc/core/state_message.h>
-#include <cvc/core/state_message_bus.h>
-#include <cvc/core/state_peer_registry.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_blob_store.h>
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_delegation_manager.h>
+#include <cvc/state/state_distributed_admin.h>
+#include <cvc/state/state_message.h>
+#include <cvc/state/state_message_bus.h>
+#include <cvc/state/state_peer_registry.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <unordered_set>

@@ -2,7 +2,6 @@
 #include <cmath>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LowMemoryPolyDataMapper.h>
@@ -10,6 +9,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/line_normals.h>
 #include <cvc/image/image.h>
+#include <cvc/state/state.h>
 #include <limits>
 #include <set>
 #include <sstream>

@@ -17,13 +17,13 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task generalization test
-#include <cvc/core/state.h>
-#include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
-#include <cvc/core/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
-#include <cvc/core/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
-#include <cvc/core/state_exec/types.h>           // value_t
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
+#include <cvc/state/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
+#include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
+#include <cvc/state/state_exec/types.h>           // value_t
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>

@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <cvc/volslice/state_settings.h>
 #include <sstream>
 #include <stdexcept>

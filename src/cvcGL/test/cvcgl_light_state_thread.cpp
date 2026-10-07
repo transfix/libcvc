@@ -26,10 +26,10 @@
 #include <cassert>
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/state_publisher.h>
+#include <cvc/state/state.h>
 #include <functional>
 #include <string>
 #include <thread>

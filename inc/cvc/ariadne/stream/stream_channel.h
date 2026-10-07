@@ -16,7 +16,7 @@
 #include <cstdint>
 #include <cvc/ariadne/stream/frame.h>
 #include <cvc/ariadne/stream/frame_pool.h>
-#include <cvc/core/state_bounded_queue.h>
+#include <cvc/state/state_bounded_queue.h>
 #include <memory>
 #include <mutex>
 #include <string>

@@ -7,10 +7,10 @@
 #include <cvc/ariadne/loader.h>  // load_file / LoadResult / ChannelDecl / sources_changed
 #include <cvc/ariadne/uri.h>     // register_cvc_uri_handler
 #include <cvc/core/app.h>
-#include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
-#include <cvc/core/state_exec/builtins.h>        // register_fn
-#include <cvc/core/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
-#include <cvc/core/state_exec/types.h>           // value_t
+#include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
+#include <cvc/state/state_exec/builtins.h>        // register_fn
+#include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
+#include <cvc/state/state_exec/types.h>           // value_t
 #include <memory>
 #include <span>
 #include <stdexcept>

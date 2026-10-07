@@ -180,7 +180,7 @@ public:
   scene_reader(app &ctx, const unsigned char *bytes, std::size_t n);
 
   // From an AUTHENTICATED blob: copies the n bytes once, hashes that copy
-  // (SHA-256, as sha256_hex in cvc/core/state_blob_store.h) and throws
+  // (SHA-256, as sha256_hex in cvc/state/state_blob_store.h) and throws
   // std::runtime_error, before HDF5 sees a byte, unless the digest equals
   // `expected_sha256_hex` (64 hex digits, either case); then parses that same
   // copy. So the bytes parsed are exactly the bytes hashed, even if the

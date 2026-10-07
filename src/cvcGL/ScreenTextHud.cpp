@@ -6,10 +6,10 @@
 // getters are how that second direction is observed from C++.
 
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#include <cvc/state/state.h>
 #include <stdexcept>
 #include <vtkCoordinate.h>
 #include <vtkRenderer.h>

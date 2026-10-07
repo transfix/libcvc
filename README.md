@@ -605,7 +605,8 @@ libcvc/
 ├── CMakeLists.txt          # Root build configuration
 ├── CMake/                  # CMake helper modules
 ├── inc/cvc/                # Public headers, one directory per module:
-│   ├── core/              #   cvc::app / cvc::state, state_exec DSL, world_clock, world_units, distributed state
+│   ├── core/              #   cvc::app, thread pool, async lanes/tasks, text, world_clock, world_units
+│   ├── state/             #   cvc::state tree, state_exec/ DSL, distributed state + transports
 │   ├── volume/            #   VolMagick voxels/volume + I/O + filters
 │   ├── geometry/          #   triangle/volumetric meshes + I/O
 │   ├── utility/           #   algorithm.h (cvc::sdf, isosurface), CUDA utils

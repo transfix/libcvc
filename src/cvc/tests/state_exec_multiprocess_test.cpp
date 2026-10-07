@@ -14,15 +14,15 @@
 #include <csignal>
 #include <cstdlib>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_cluster_shard.h>
-#include <cvc/core/state_exec/builtins.h>
-#include <cvc/core/state_exec/intrinsics.h>
-#include <cvc/core/state_exec/scheduler.h>
-#include <cvc/core/state_exec/types.h>
-#include <cvc/core/state_message.h>
-#include <cvc/core/state_message_bus.h>
-#include <cvc/core/state_transport_ipc.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/types.h>
+#include <cvc/state/state_message.h>
+#include <cvc/state/state_message_bus.h>
+#include <cvc/state/state_transport_ipc.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
@@ -32,7 +32,7 @@
 #include <unistd.h>
 
 #ifdef CVC_ENABLE_GRPC
-#include <cvc/core/state_transport_grpc.h>
+#include <cvc/state/state_transport_grpc.h>
 #endif
 
 using namespace cvc::state_exec;

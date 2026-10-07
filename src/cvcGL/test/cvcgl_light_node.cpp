@@ -9,12 +9,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_object.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_object.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkRenderer.h>

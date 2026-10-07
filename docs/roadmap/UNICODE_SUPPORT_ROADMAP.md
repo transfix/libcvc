@@ -176,7 +176,7 @@ multibyte text misaligns.
 
 The whole track rests on **one shared UTF-8 codepoint helper**
 (decode/iterate/length/index→byte-offset) — landed in SE-0 as
-`inc/cvc/core/state_exec/utf8.h` (hand-rolled, header-only, no dependency).
+`inc/cvc/state/state_exec/utf8.h` (hand-rolled, header-only, no dependency).
 **No ICU and no Unicode data at all is needed for A1–A11 and A13** — they are
 byte-arithmetic replaced by codepoint-arithmetic against that one helper.
 
@@ -248,7 +248,7 @@ Track B ensures binary data is never *forced* to be text in the first place.
 Namespaced `SE-*` to distinguish from the libcvc-wide `P0–P3` above.
 
 - **SE-0 — Codepoint helper + test corpus + policy note. ✅ LANDED.** The shared
-  UTF-8 helper is `inc/cvc/core/state_exec/utf8.h` (`decode`/`count`/`byte_offset`/
+  UTF-8 helper is `inc/cvc/state/state_exec/utf8.h` (`decode`/`count`/`byte_offset`/
   `encode`/`is_valid`, header-only, no ICU, lenient decode that always progresses on
   malformed input). `state_exec_unicode_test.cpp` unit-tests it (every byte-length
   class + malformed/overlong/surrogate/truncated cases) and pins the transparent
@@ -316,7 +316,7 @@ the prerequisite for trusting any later change.
 - cy-pca/cvcpkg#82 — dual (narrow + Unicode) log4cplus bundle.
 - `docs/WORLD_UNITS_API.md`, `docs/STATE_API.md` — precedent for a documented,
   fail-loud, cross-cutting invariant.
-- `src/cvc/core/state_exec/{parser,stdlib,builtins,types,exec_coordinator}.cpp`
+- `src/cvc/state/state_exec/{parser,stdlib,builtins,types,exec_coordinator}.cpp`
   — the state_exec surfaces enumerated in the gap ledger above.
 - `docs/roadmap/CVCGL-UI-DSL-ROADMAP.md` — the Ariadne DSL roadmap this
   state_exec section backs (all Ariadne text flows through state_exec strings).

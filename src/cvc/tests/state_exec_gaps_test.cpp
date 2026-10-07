@@ -16,16 +16,16 @@
 #include <chrono>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_exec/async_evaluator.h>
-#include <cvc/core/state_exec/async_scheduler.h>
-#include <cvc/core/state_exec/async_stackless_evaluator.h>
-#include <cvc/core/state_exec/builtins.h>
-#include <cvc/core/state_exec/evaluator.h>
-#include <cvc/core/state_exec/parser.h>
-#include <cvc/core/state_exec/scheduler.h>
-#include <cvc/core/state_exec/stackless_evaluator.h>
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_evaluator.h>
+#include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/async_stackless_evaluator.h>
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/stackless_evaluator.h>
+#include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
 #include <thread>
 

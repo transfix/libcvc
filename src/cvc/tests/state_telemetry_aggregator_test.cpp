@@ -9,11 +9,11 @@
 */
 
 #include <cvc/core/app.h>
-#include <cvc/core/state_distributed_admin.h>
-#include <cvc/core/state_message.h>
-#include <cvc/core/state_message_bus.h>
-#include <cvc/core/state_node_telemetry.h>
-#include <cvc/core/state_telemetry_aggregator.h>
+#include <cvc/state/state_distributed_admin.h>
+#include <cvc/state/state_message.h>
+#include <cvc/state/state_message_bus.h>
+#include <cvc/state/state_node_telemetry.h>
+#include <cvc/state/state_telemetry_aggregator.h>
 #include <gtest/gtest.h>
 #include <thread>
 

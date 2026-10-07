@@ -16,7 +16,7 @@
 #include <cvc/ariadne/uri_state.h> // §13.3 state:// handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>   // cvc::app (state:// handler tests build a state tree)
-#include <cvc/core/state.h> // cvc::state
+#include <cvc/state/state.h> // cvc::state
 #include <filesystem>
 #include <fstream>
 #include <functional>
