@@ -54,7 +54,6 @@ add_executable(state_sync_adapter_link_forwarding_test state_sync_adapter_link_f
 add_executable(state_cross_cluster_link_test state_cross_cluster_link_test.cpp)
 add_executable(state_link_bench_test state_link_bench_test.cpp)
 add_executable(state_list_test state_list_test.cpp)
-add_executable(state_compat_headers_test state_compat_headers_test.cpp)
 if(CVC_STATE_MEMORY_MANAGER)
   add_executable(state_memory_manager_test state_memory_manager_test.cpp)
 endif()
@@ -218,7 +217,6 @@ set(TEST_TARGETS
   state_cross_cluster_link_test
   state_link_bench_test
   state_list_test
-  state_compat_headers_test
   state_delta_codec_test
   state_volume_codec_test
   state_brick_manifest_test
@@ -1283,16 +1281,6 @@ target_link_libraries(state_list_test
     GTest::gtest_main
 )
 
-target_link_libraries(state_compat_headers_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
-# The deprecated <cvc/core/state*.h> forwarding headers (installed, one release cycle) live
-# outside libcvc's include path on purpose; only this test sees them.
-target_include_directories(state_compat_headers_test PRIVATE ${PROJECT_SOURCE_DIR}/compat/inc)
-
 target_link_libraries(state_delta_codec_test
   PRIVATE
     cvc
@@ -1510,8 +1498,6 @@ if(CVC_STATE_MEMORY_MANAGER)
   target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
 endif()
 target_compile_features(state_list_test PRIVATE cxx_std_17)
-# cxx_std_20: the shims forward state_exec/task.h (coroutines), like the state_exec_* tests.
-target_compile_features(state_compat_headers_test PRIVATE cxx_std_20)
 target_compile_features(state_delta_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_volume_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_brick_manifest_test PRIVATE cxx_std_17)
@@ -1813,7 +1799,6 @@ if(CVC_STATE_MEMORY_MANAGER)
   cvc_discover_tests(state_memory_manager_test)
 endif()
 cvc_discover_tests(state_list_test)
-cvc_discover_tests(state_compat_headers_test)
 cvc_discover_tests(state_delta_codec_test)
 cvc_discover_tests(state_volume_codec_test)
 cvc_discover_tests(state_brick_manifest_test)

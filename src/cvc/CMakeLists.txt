@@ -1681,18 +1681,6 @@ install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
   FILES_MATCHING PATTERN "*.h"
 )
 
-# Deprecated forwarding headers for the pre-move state paths: <cvc/core/state*.h> and
-# <cvc/core/state_exec/*.h> now live under <cvc/state/...> (docs/roadmap/
-# STATE_DIR_LAYOUT_REFACTOR.md). Installed for one release cycle so out-of-tree code keeps
-# compiling. They sit in compat/inc, NOT inc/, so in-tree code cannot drift back to the old
-# paths (only state_compat_headers_test sees them) and the move stays a pure rename in git.
-# Remove this rule, compat/ and that test in the next minor release.
-install(DIRECTORY ${PROJECT_SOURCE_DIR}/compat/inc/cvc/
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
-  COMPONENT libcvc
-  FILES_MATCHING PATTERN "*.h"
-)
-
 # The vendored XmlRpc++ headers must always ship with the SDK:
 # cvc/utility/utility.h unconditionally does #include <xmlrpc/XmlRpc.h>,
 # so external find_package(cvc) consumers need these headers on the
