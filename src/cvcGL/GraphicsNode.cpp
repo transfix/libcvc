@@ -90,6 +90,7 @@ GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const st
 
     // Clip planes
     getState("clip_children").value(0);
+    getState("clip_planes").value(std::string());
   }
 }
 
@@ -495,7 +496,10 @@ void GraphicsNode::updateTransform(bool isRoot) {
     updateBoundingBoxNode();
   }
 
-  // Update clip planes if clipping is enabled
+  // Planes this node owns move with it, in place (every renderer clipped by them
+  // holds these same objects).
+  if (!m_ownClip.empty())
+    updateOwnClipWorld();
   if (m_clipChildren) {
     updateClipPlanes();
   }
@@ -754,6 +758,31 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
     } else if (childState == "clip_children") {
       int clip = getState("clip_children").value<int>();
       setClipChildren(clip != 0);
+    } else if (childState == "clip_planes") {
+      // px,py,pz,nx,ny,nz per plane; anything malformed (a count not a multiple
+      // of six, a non-number) is ignored and the planes stay as they are.
+      std::vector<double> v;
+      std::istringstream iss(getState("clip_planes").value<std::string>());
+      std::string tok;
+      bool ok = true;
+      while (ok && std::getline(iss, tok, ',')) {
+        try {
+          std::size_t used = 0;
+          v.push_back(std::stod(tok, &used));
+          ok = tok.find_first_not_of(" \t", used) == std::string::npos;
+        } catch (const std::exception &) {
+          ok = false;
+        }
+      }
+      if (ok && v.size() % 6 == 0) {
+        std::vector<ClipPlane> planes(v.size() / 6);
+        for (std::size_t i = 0; i < planes.size(); ++i)
+          for (int k = 0; k < 3; ++k) {
+            planes[i].origin[k] = v[6 * i + k];
+            planes[i].normal[k] = v[6 * i + 3 + k];
+          }
+        applyOwnClip(planes);
+      }
     } else {
       // Delegate to parent for common fields like visible
       // Parent will NOT wrap again - we're already on main thread
@@ -800,9 +829,12 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   // Update child's transform to reflect new parent
   child->updateTransform();
 
-  // A child added under a clipping parent is clipped like its siblings.
-  if (m_clipChildren)
-    child->runOnMainThread([this, child]() { child->applyClipPlanes(m_clipPlanes); });
+  // Clipped by whatever clips everything below this node (if anything does).
+  if (!m_ownClip.empty() || m_clipChildren || !m_inheritedClip.empty())
+    child->runOnMainThread([this, child]() {
+      child->m_inheritedClip = clipPassdown();
+      child->propagateClip();
+    });
 
   // Update this node's bounding box to include the new child
   if (m_showBBox) {
@@ -825,9 +857,13 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child) {
     m_graphicsChildren.erase(it);
     child->m_parent = nullptr;
     child->updateTransform();
-    // Leaving a clipping parent: no longer clipped by its box.
-    if (m_clipChildren)
-      child->runOnMainThread([child]() { child->applyClipPlanes(nullptr); });
+    // Leaving: no longer clipped by this node or its ancestors.
+    child->runOnMainThread([child]() {
+      if (child->m_inheritedClip.empty())
+        return;
+      child->m_inheritedClip.clear();
+      child->propagateClip();
+    });
   }
 
   // Also remove as SceneNode child
@@ -1337,16 +1373,131 @@ void GraphicsNode::setClipChildren(bool clip) {
   // Update state tree
   getState("clip_children").value(clip ? 1 : 0);
 
-  if (m_clipChildren) {
-    // Enable clipping - update and apply planes
-    updateClipPlanes();
-    applyClipPlanesToChildren();
-  } else {
-    // Disable clipping - remove planes from children
-    for (auto &child : m_graphicsChildren) {
-      child->runOnMainThread([child]() { child->applyClipPlanes(nullptr); });
+  runOnMainThread([this]() {
+    if (m_clipChildren)
+      updateClipPlanes();
+    propagateClip(); // everything below gains (or loses) the box planes
+  });
+}
+
+std::vector<GraphicsNode::ClipPlane> GraphicsNode::boxClipPlanes(const cvc::bounding_box &b) {
+  const double cx = (b.minx + b.maxx) / 2, cy = (b.miny + b.maxy) / 2, cz = (b.minz + b.maxz) / 2;
+  // Order: +X, -X, +Y, -Y, +Z, -Z faces, each normal pointing into the box.
+  return {{{b.maxx, cy, cz}, {-1, 0, 0}}, {{b.minx, cy, cz}, {1, 0, 0}},
+          {{cx, b.maxy, cz}, {0, -1, 0}}, {{cx, b.miny, cz}, {0, 1, 0}},
+          {{cx, cy, b.maxz}, {0, 0, -1}}, {{cx, cy, b.minz}, {0, 0, 1}}};
+}
+
+void GraphicsNode::setClipPlanes(const std::vector<ClipPlane> &planes) {
+  // Mirror into the state tree (exactly: 17 significant digits round-trip a
+  // double), then apply. The handler that the write fires parses the same
+  // planes back and finds nothing to do.
+  std::ostringstream oss;
+  oss << std::setprecision(17);
+  for (std::size_t i = 0; i < planes.size(); ++i)
+    for (int k = 0; k < 6; ++k)
+      oss << (i || k ? "," : "") << (k < 3 ? planes[i].origin[k] : planes[i].normal[k - 3]);
+  runOnMainThread([this, planes]() { applyOwnClip(planes); });
+  getState("clip_planes").value(oss.str());
+}
+
+void GraphicsNode::applyOwnClip(const std::vector<ClipPlane> &planes) {
+  if (planes == m_ownClip)
+    return;
+  const bool sameCount = planes.size() == m_ownClip.size();
+  m_ownClip = planes;
+  if (!sameCount) {
+    // A different SET: new plane objects, re-handed to this node and below.
+    m_ownClipWorld.clear();
+    for (std::size_t i = 0; i < planes.size(); ++i)
+      m_ownClipWorld.push_back(vtkSmartPointer<vtkPlane>::New());
+  }
+  updateOwnClipWorld(); // same count: just moved, in place
+  if (!sameCount)
+    propagateClip();
+  if (SceneGraph *sg = getSceneGraph())
+    sg->requestRender();
+}
+
+void GraphicsNode::updateOwnClipWorld() {
+  // Origins by the world matrix; normals by its inverse transpose (correct under
+  // non-uniform scale), normalized.
+  vtkSmartPointer<vtkMatrix4x4> normalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+  normalMatrix->DeepCopy(m_worldMatrix);
+  normalMatrix->Invert();
+  normalMatrix->Transpose();
+  for (std::size_t i = 0; i < m_ownClip.size() && i < m_ownClipWorld.size(); ++i) {
+    const ClipPlane &p = m_ownClip[i];
+    const double o[4] = {p.origin[0], p.origin[1], p.origin[2], 1.0};
+    const double n[4] = {p.normal[0], p.normal[1], p.normal[2], 0.0};
+    double wo[4], wn[4];
+    m_worldMatrix->MultiplyPoint(o, wo);
+    normalMatrix->MultiplyPoint(n, wn);
+    const double len = std::sqrt(wn[0] * wn[0] + wn[1] * wn[1] + wn[2] * wn[2]);
+    if (len > 0.0)
+      for (int k = 0; k < 3; ++k)
+        wn[k] /= len;
+    m_ownClipWorld[i]->SetOrigin(wo[0], wo[1], wo[2]);
+    m_ownClipWorld[i]->SetNormal(wn[0], wn[1], wn[2]);
+  }
+}
+
+std::vector<vtkSmartPointer<vtkPlane>> GraphicsNode::clipPassdown() const {
+  std::vector<vtkSmartPointer<vtkPlane>> down(m_ownClipWorld.begin(), m_ownClipWorld.end());
+  if (m_clipChildren)
+    down.insert(down.end(), m_clipPlaneArray.begin(), m_clipPlaneArray.end());
+  down.insert(down.end(), m_inheritedClip.begin(), m_inheritedClip.end());
+  return down;
+}
+
+void GraphicsNode::propagateClip() {
+  // What this node is clipped by, nearest first, capped by what its renderer
+  // honours.
+  std::vector<vtkPlane *> mine;
+  for (const auto &p : m_ownClipWorld)
+    mine.push_back(p);
+  for (const auto &p : m_inheritedClip)
+    mine.push_back(p);
+  const std::size_t cap = static_cast<std::size_t>(std::max(0, maxClipPlanes()));
+  if (mine.size() > cap) {
+    if (cap > 0 && !m_clipCapWarned) {
+      m_clipCapWarned = true;
+      app().log(1, "GraphicsNode[" + getName() + "]: clipped by " + std::to_string(mine.size()) +
+                       " planes but its renderer honours " + std::to_string(cap) +
+                       "; the nearest " + std::to_string(cap) + " apply");
+    }
+    mine.resize(cap);
+  }
+  if (mine != m_appliedClipList) {
+    m_appliedClipList = mine;
+    if (mine.empty()) {
+      applyClipPlanes(nullptr);
+    } else {
+      // A fresh collection whenever the set changes, so a renderer that
+      // compares the pointer it holds (VTK's setters do) sees the change.
+      m_appliedClip = vtkSmartPointer<vtkPlaneCollection>::New();
+      for (vtkPlane *p : mine)
+        m_appliedClip->AddItem(p);
+      applyClipPlanes(m_appliedClip);
     }
   }
+
+  // Everything below: re-handed only where what it inherits changed.
+  const std::vector<vtkSmartPointer<vtkPlane>> down = clipPassdown();
+  for (auto &child : m_graphicsChildren) {
+    if (!child || child->m_inheritedClip == down)
+      continue;
+    child->m_inheritedClip = down;
+    child->propagateClip();
+  }
+}
+
+int GraphicsNode::clipPlaneCount() const {
+  return static_cast<int>(m_ownClipWorld.size() + m_inheritedClip.size());
+}
+
+vtkPlaneCollection *GraphicsNode::getAppliedClipPlanes() const {
+  return m_appliedClipList.empty() ? nullptr : m_appliedClip.Get();
 }
 
 void GraphicsNode::updateClipPlanes() {
@@ -1419,16 +1570,7 @@ void GraphicsNode::updateClipPlanes() {
                                    transformedNormal[2]);
   }
 
-  // Apply updated planes to children
-  if (m_clipChildren) {
-    applyClipPlanesToChildren();
-  }
-}
-
-void GraphicsNode::applyClipPlanesToChildren() {
-  for (auto &child : m_graphicsChildren) {
-    child->runOnMainThread([this, child]() { child->applyClipPlanes(m_clipPlanes); });
-  }
+  // The children hold these same plane objects: moved in place, nothing to re-hand.
 }
 
 void GraphicsNode::applyClipPlanes(vtkPlaneCollection *planes) {

@@ -295,11 +295,20 @@ public:
   // (this node's own scene transform is applied by the scene graph).
   cvc::bounding_box getBoundingBox() const override;
 
+  // Clip planes: 8, what the CUDA backend takes (cuda_limits::max_cut_planes;
+  // more falls back to the CPU raycaster).
+  int maxClipPlanes() const override { return 8; }
+
 protected:
   // The quad is glued to the raycast camera pose, not the scene transform;
   // the scene transform instead feeds the raycaster's model matrices.
   void applyTransformToVTK() override;
   void handleStateChanged(const std::string &childState) override;
+  // Clip planes clip the VOLUME: they become the raycaster's cut planes (world
+  // space, the same keep side), on top of any in its own render settings. They
+  // never reach the quad's mapper -- the quad is a camera-facing billboard, and
+  // clipping it would cut the picture, not the volume.
+  void applyClipPlanes(vtkPlaneCollection *planes) override;
 
 private:
   struct snapshot; // camera + composed matrix + settings for one raycast
@@ -333,6 +342,9 @@ private:
   std::array<double, 16> m_appliedMatrix{};
   std::array<double, 11> m_appliedCamera{}; // eye3 focal3 up3 fov scale
   int m_appliedW = 0, m_appliedH = 0;
+  std::vector<double> m_appliedClip; // the scene clip planes of the last frame
+
+  vtkSmartPointer<vtkPlaneCollection> m_sceneClip; // from applyClipPlanes (owner thread)
 
   // GL-side resources (owner thread only).
   cvc::image m_colorImage; // persistent aliased texture buffer

@@ -187,3 +187,57 @@ TEST(AriadneBind, WidgetAndSceneBindShareOneKey) {
   sync_scene_visibility(app, binds);
   EXPECT_EQ(sval(app, "mesh.visible"), "0");
 }
+
+// --- sync_scene_clip: bound clip `offset:`s -> the node's `clip_planes` key ----
+
+namespace {
+SceneClipBinding::Plane clipPlane(double ox, double oy, double oz, double nx, double ny, double nz,
+                                  double offset = 0.0, const std::string &source = "") {
+  SceneClipBinding::Plane p;
+  p.origin[0] = ox, p.origin[1] = oy, p.origin[2] = oz;
+  p.normal[0] = nx, p.normal[1] = ny, p.normal[2] = nz;
+  p.offset = offset;
+  p.offset_source = source;
+  return p;
+}
+} // namespace
+
+TEST(AriadneBind, ClipSyncSlidesABoundPlaneAlongItsNormal) {
+  cvc::app app;
+  // A literal plane, then one bound to sim.cut through (1, 0, 0) along +z.
+  std::vector<SceneClipBinding> binds = {
+      {"node.clip_planes",
+       {clipPlane(0, 0, 0, 1, 0, 0), clipPlane(1, 0, 0, 0, 0, 1, 0.5, "sim.cut")},
+       ""}};
+  sync_scene_clip(app, binds);
+  // Unset source: the default offset 0.5, and the source is NOT seeded (a follower).
+  EXPECT_EQ(sval(app, "node.clip_planes"), "0,0,0,1,0,0,1,0,0.5,0,0,1");
+  EXPECT_EQ(sval(app, "sim.cut"), "");
+
+  cvc::state::instance(app)("sim.cut").value(-2.25);
+  sync_scene_clip(app, binds);
+  EXPECT_EQ(sval(app, "node.clip_planes"), "0,0,0,1,0,0,1,0,-2.25,0,0,1");
+
+  // Unchanged: nothing is written (an external write to the key stays until the offset moves).
+  cvc::state::instance(app)("node.clip_planes").value(std::string("external"));
+  sync_scene_clip(app, binds);
+  EXPECT_EQ(sval(app, "node.clip_planes"), "external");
+  cvc::state::instance(app)("sim.cut").value(3);
+  sync_scene_clip(app, binds);
+  EXPECT_EQ(sval(app, "node.clip_planes"), "0,0,0,1,0,0,1,0,3,0,0,1");
+}
+
+TEST(AriadneBind, ClipSyncTreatsANonNumberAsUnset) {
+  cvc::app app;
+  std::vector<SceneClipBinding> binds = {
+      {"n.clip_planes", {clipPlane(0, 0, 0, 0, 1, 0, 0.75, "sim.cut")}, ""}};
+  cvc::state::instance(app)("sim.cut").value(std::string("not a number"));
+  sync_scene_clip(app, binds);
+  EXPECT_EQ(sval(app, "n.clip_planes"), "0,0.75,0,0,1,0"); // the default offset
+}
+
+TEST(AriadneBind, ClipPlanesCsvRoundTripsDoubles) {
+  const std::vector<SceneClipBinding::Plane> planes = {clipPlane(0.1, 0, 0, 1, 0, 0)};
+  EXPECT_EQ(clip_planes_csv(planes, {0.0}), "0.10000000000000001,0,0,1,0,0");
+  EXPECT_EQ(clip_planes_csv(planes, {}), "0.10000000000000001,0,0,1,0,0"); // the plane's own offset
+}

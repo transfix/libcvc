@@ -127,6 +127,7 @@ struct VolRenNode::snapshot {
   std::uint64_t version = 0;
   std::array<double, 11> camera_key{};
   double near_z = 0.1, far_z = 1000.0;
+  std::vector<double> clip_key; // the scene clip planes appended to the cut planes, flat
 };
 
 // The raycast worker: owns the raycaster (and thus its private thread pool)
@@ -536,6 +537,12 @@ float VolRenNode::specularLevel() const {
   return m_snapshotSettings.settings.specular;
 }
 
+void VolRenNode::applyClipPlanes(vtkPlaneCollection *planes) {
+  m_sceneClip = planes; // read into the cut planes at the next tick (buildSnapshot)
+  if (SceneGraph *sg = getSceneGraph())
+    sg->requestRender();
+}
+
 void VolRenNode::invalidateVolumeData() {
   m_worker->invalidate_pending.store(true, std::memory_order_release);
   // The displayed frame is stale by definition, and nothing else changed, so
@@ -706,6 +713,22 @@ bool VolRenNode::buildSnapshot(snapshot &out) {
     out.version = m_settingsVersion;
   }
 
+  // Scene clip planes (this node's and its ancestors') join the cut planes. Both
+  // are world space with the same keep side; read every tick, so a plane moved
+  // in place re-raycasts like a moved camera.
+  out.clip_key.clear();
+  if (m_sceneClip) {
+    m_sceneClip->InitTraversal();
+    while (vtkPlane *p = m_sceneClip->GetNextItem()) {
+      cvc::volren::cut_plane cp;
+      p->GetOrigin(cp.point.data());
+      p->GetNormal(cp.normal.data());
+      out.settings.settings.cut_planes.push_back(cp);
+      out.clip_key.insert(out.clip_key.end(), cp.point.begin(), cp.point.end());
+      out.clip_key.insert(out.clip_key.end(), cp.normal.begin(), cp.normal.end());
+    }
+  }
+
   out.camera_key = {out.cam.eye[0],   out.cam.eye[1],       out.cam.eye[2],        out.cam.focal[0],
                     out.cam.focal[1], out.cam.focal[2],     out.cam.up[0],         out.cam.up[1],
                     out.cam.up[2],    out.cam.vfov_degrees, out.cam.parallel_scale};
@@ -869,6 +892,7 @@ void VolRenNode::applyFrame(const cvc::volren::frame &f, const snapshot &snap) {
 
   m_appliedVersion = snap.version;
   m_appliedMatrix = snap.node_world.m;
+  m_appliedClip = snap.clip_key;
   m_appliedCamera = snap.camera_key;
   m_appliedW = w;
   m_appliedH = h;
@@ -911,7 +935,8 @@ bool VolRenNode::tick() {
                               snap.cam.height != m_appliedH;
   const bool matrix_changed = snap.node_world.m != m_appliedMatrix;
   const bool settings_changed = snap.version != m_appliedVersion;
-  const bool stale = camera_changed || matrix_changed || settings_changed;
+  const bool clip_changed = snap.clip_key != m_appliedClip;
+  const bool stale = camera_changed || matrix_changed || settings_changed || clip_changed;
 
   // Converged == what is ON SCREEN matches the live camera, transform and
   // settings, and nothing is still cooking.  "No new frame arrived" is NOT the

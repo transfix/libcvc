@@ -121,6 +121,15 @@ void GeometryNode::applyClipPlanes(vtkPlaneCollection *planes) {
   }
 }
 
+int GeometryNode::maxClipPlanes() const {
+  // vtkOpenGLPolyDataMapper::ReplaceShaderClip: "OpenGL has a limit of 6
+  // clipping planes". The low-memory mapper (and cvcGL's subclasses of it) emits
+  // no clip code at all.
+  if (!m_mapper || m_mapper->IsA("vtkOpenGLLowMemoryPolyDataMapper"))
+    return 0;
+  return 6;
+}
+
 void GeometryNode::handleStateChanged(const std::string &childState) {
   // Handle geometry-specific state changes
   // All VTK operations MUST be wrapped in runOnMainThread() for thread safety

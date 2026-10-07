@@ -175,6 +175,20 @@ const Sample kSamples[] = {
 // The child's mapper, through its actor (GeometryNode::mapper() is protected).
 vtkMapper *mapperOf(GeometryNode &n) { return vtkActor::SafeDownCast(n.prop())->GetMapper(); }
 
+// The child's mapper holds exactly the parent's six box planes -- the SAME plane
+// objects (a child gets its own collection of them, so moving the parent's
+// planes in place reaches it).
+bool holdsBoxPlanes(GeometryNode &c, cvc::gl::GraphicsNode &parent) {
+  vtkPlaneCollection *mine = vtkActor::SafeDownCast(c.prop())->GetMapper()->GetClippingPlanes();
+  vtkPlaneCollection *box = parent.getClipBoxPlanes();
+  if (!mine || mine->GetNumberOfItems() != 6 || box->GetNumberOfItems() != 6)
+    return false;
+  for (int i = 0; i < 6; ++i)
+    if (!mine->IsItemPresent(box->GetItem(i)))
+      return false;
+  return true;
+}
+
 // Pixels of a clearly dominant channel.
 long huePixels(const Frame &f, int ch) {
   long n = 0;
@@ -214,7 +228,7 @@ vtkSmartPointer<vtkTransform> moved() {
 // ── planes (no GL) ──────────────────────────────────────────────────────────
 // The node's six planes against its expected local box b.
 void checkPlanes(GraphicsNode &box, const cvc::bounding_box &b, const std::string &state) {
-  vtkPlaneCollection *pc = box.getClipPlanes();
+  vtkPlaneCollection *pc = box.getClipBoxPlanes();
   check(pc && pc->GetNumberOfItems() == 6, state + ": six planes");
   if (!pc || pc->GetNumberOfItems() != 6)
     return;
@@ -255,7 +269,7 @@ void testPlanes(cvc::app &app) {
         "setClipChildren(true) is reflected in the getter and the state tree");
   checkPlanes(*s.box, kBox, "axis-aligned");
   for (auto &c : s.children)
-    check(mapperOf(*c)->GetClippingPlanes() == s.box->getClipPlanes(),
+    check(holdsBoxPlanes(*c, *s.box),
           c->getName() + ": the child's mapper holds the parent's planes");
   s.box->setTransform(moved()->GetMatrix());
   checkPlanes(*s.box, kBox, "rotated + moved");
@@ -267,22 +281,19 @@ void testPlanes(cvc::app &app) {
           c->getName() + ": planes removed from the child's mapper");
   // Removing them must not empty the parent's own collection (every child's
   // mapper holds that same collection), or clipping can never come back.
-  check(s.box->getClipPlanes()->GetNumberOfItems() == 6, "... and the parent keeps its six planes",
-        std::to_string(s.box->getClipPlanes()->GetNumberOfItems()));
+  check(s.box->getClipBoxPlanes()->GetNumberOfItems() == 6,
+        "... and the parent keeps its six planes",
+        std::to_string(s.box->getClipBoxPlanes()->GetNumberOfItems()));
   s.box->setClipChildren(true);
   bool again = true;
   for (auto &c : s.children)
-    again = again && mapperOf(*c)->GetClippingPlanes() == s.box->getClipPlanes() &&
-            mapperOf(*c)->GetNumberOfClippingPlanes() == 6;
+    again = again && holdsBoxPlanes(*c, *s.box);
   check(again, "on again: every child's mapper holds the six planes again");
   checkPlanes(*s.box, kBox, "on again");
 }
 
 // The parent's planes in the child's mapper (the one collection, all six).
-bool holdsPlanes(GeometryNode &c, GraphicsNode &parent) {
-  return mapperOf(c)->GetClippingPlanes() == parent.getClipPlanes() &&
-         mapperOf(c)->GetNumberOfClippingPlanes() == 6;
-}
+bool holdsPlanes(GeometryNode &c, GraphicsNode &parent) { return holdsBoxPlanes(c, parent); }
 bool noPlanes(GeometryNode &c) { return mapperOf(c)->GetNumberOfClippingPlanes() == 0; }
 
 std::string csv(const cvc::bounding_box &b) {
@@ -304,7 +315,7 @@ void testFollow(cvc::app &app) {
   // One clipped from the start: removed, it is detached; added back, clipped again.
   std::shared_ptr<GeometryNode> beside = s.children[4];
   s.box->removeGraphicsChild(beside);
-  check(noPlanes(*beside) && s.box->getClipPlanes()->GetNumberOfItems() == 6,
+  check(noPlanes(*beside) && s.box->getClipBoxPlanes()->GetNumberOfItems() == 6,
         "a child removed is detached (and the parent keeps its planes)");
   s.box->addGraphicsChild(std::static_pointer_cast<GraphicsNode>(beside));
   check(holdsPlanes(*beside, *s.box), "... and added back, clipped again");

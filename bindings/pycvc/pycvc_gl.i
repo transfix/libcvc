@@ -329,7 +329,12 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::GraphicsNode::setPoseMatrix(const double[16]); // replaced by the vector<double> %extend
 %ignore cvc::gl::GraphicsNode::getTransform;
 %ignore cvc::gl::GraphicsNode::getWorldTransform;
-%ignore cvc::gl::GraphicsNode::getClipPlanes;
+%ignore cvc::gl::GraphicsNode::getClipBoxPlanes;     // vtkPlaneCollection returns
+%ignore cvc::gl::GraphicsNode::getAppliedClipPlanes;
+%ignore cvc::gl::GraphicsNode::ClipPlane;            // std::array members -> flat lists below
+%ignore cvc::gl::GraphicsNode::setClipPlanes;
+%ignore cvc::gl::GraphicsNode::clipPlanes;
+%ignore cvc::gl::GraphicsNode::boxClipPlanes;
 %ignore cvc::gl::GraphicsNode::setMetadata;
 %ignore cvc::gl::GraphicsNode::getMetadata;
 %ignore cvc::gl::GraphicsNode::hasMetadata;
@@ -355,6 +360,37 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::GraphicsNode::createChild;
 %ignore cvc::gl::GraphicsNode::transformChanged;         // public boost::signals2::signal member
 %extend cvc::gl::GraphicsNode {
+  // Clip this node and everything below it: px,py,pz,nx,ny,nz per plane, in the
+  // node's local frame, keeping the side each normal points into. [] clears.
+  void set_clip_planes(const std::vector<double>& flat) {
+    if (flat.size() % 6 != 0)
+      throw std::invalid_argument("set_clip_planes: need 6 numbers per plane (origin, normal)");
+    std::vector<cvc::gl::GraphicsNode::ClipPlane> planes(flat.size() / 6);
+    for (std::size_t i = 0; i < planes.size(); ++i)
+      for (int k = 0; k < 3; ++k) {
+        planes[i].origin[k] = flat[6 * i + k];
+        planes[i].normal[k] = flat[6 * i + 3 + k];
+      }
+    $self->setClipPlanes(planes);
+  }
+  std::vector<double> get_clip_planes() const {
+    std::vector<double> out;
+    for (const auto &p : $self->clipPlanes()) {
+      out.insert(out.end(), p.origin.begin(), p.origin.end());
+      out.insert(out.end(), p.normal.begin(), p.normal.end());
+    }
+    return out;
+  }
+  // Keep the inside of a box (minx, miny, minz, maxx, maxy, maxz), local frame.
+  void set_clip_box(double minx, double miny, double minz, double maxx, double maxy, double maxz) {
+    $self->setClipPlanes(cvc::gl::GraphicsNode::boxClipPlanes(
+        cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz)));
+  }
+  // How many world-space planes this node's renderer was handed (0 = unclipped).
+  int applied_clip_plane_count() const {
+    vtkPlaneCollection *pc = $self->getAppliedClipPlanes();
+    return pc ? pc->GetNumberOfItems() : 0;
+  }
   // Row-major 4x4 transform from a 16-element list (the vtkMatrix4x4 overload is
   // ignored; this is the Python-friendly path). Full rotate/scale/translate.
   void setTransform(const std::vector<double>& m) {

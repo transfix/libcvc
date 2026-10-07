@@ -60,6 +60,9 @@ namespace ariadne {
 struct RealizedScene {
   std::vector<std::string> created;
   std::vector<cvc::ariadne::SceneVisibilityBinding> visibility;
+  // §9 clip: nodes whose `clip:` has a bound `offset:` — re-read by tick_scene each frame (state
+  // paths only, like `visibility`). Empty when no clip offset is bound.
+  std::vector<cvc::ariadne::SceneClipBinding> clip;
   std::vector<std::unique_ptr<StageLighting>> rigs;
   std::vector<std::weak_ptr<VolRenNode>> volren_ticks;
   std::vector<std::weak_ptr<VolSliceNode>> volslice_ticks;

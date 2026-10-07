@@ -14,6 +14,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 #include <vtkMatrix4x4.h>
 #include <vtkPlaneCollection.h>
 #include <vtkSmartPointer.h>
@@ -261,19 +262,53 @@ public:
   void setExtentLabelFontSize(int size);
   int getExtentLabelFontSize() const;
 
-  // Clipping plane control. setClipChildren(true) clips this node's graphics
-  // children to this node's own getBoundingBox() under its world transform: six
-  // planes, normals pointing INTO the box (VTK keeps the side a plane's normal
-  // points into), which follow the node as it moves and as its box changes
-  // (every node reports that through ownBoundsChanged()). A child added later
-  // is clipped too; a child removed is no longer clipped. A LodGraphicsNode
-  // child passes the planes on to its rungs. Children drawn by VTK's
-  // low-memory mapper (the GLES3/WebGL2 default, or CVCGL_LOWMEM_MAPPER=force)
-  // are not clipped: VTK 9.5's vtkOpenGLLowMemoryPolyDataMapper has no
-  // clipping-plane support.
+  // ── Clipping ──────────────────────────────────────────────────────────────
+  // A node is clipped by its own planes (setClipPlanes) and by every ancestor's:
+  // their setClipPlanes, and the box of an ancestor with setClipChildren. All are
+  // half-spaces that keep the side a plane's normal points INTO,
+  // n . (x - origin) >= 0 (VTK's convention, and cvc::volren::cut_plane's). They
+  // follow each owner as it moves and as its box changes (every node reports that
+  // through ownBoundsChanged()), reach children added later and leave children
+  // removed. A renderer honours at most maxClipPlanes() of them, nearest first:
+  // the node's own, then its parent's, and so on up. VTK 9.5's low-memory mapper
+  // (the GLES3/WebGL2 default, or CVCGL_LOWMEM_MAPPER=force) honours none.
+
+  // One clip half-space in a node's LOCAL frame (origin + normal; the normal
+  // need not be unit length).
+  struct ClipPlane {
+    std::array<double, 3> origin{0.0, 0.0, 0.0};
+    std::array<double, 3> normal{0.0, 0.0, 1.0};
+    bool operator==(const ClipPlane &o) const { return origin == o.origin && normal == o.normal; }
+  };
+  // The six planes that keep the inside of box `b` (normals pointing in).
+  static std::vector<ClipPlane> boxClipPlanes(const cvc::bounding_box &b);
+
+  // Clip this node AND everything below it to the intersection of `planes`, in
+  // this node's local frame (they move with it). Empty clears them. Moving the
+  // same number of planes is cheap (a slider dragging one: updated in place);
+  // changing the number re-hands every node below. Mirrored in the
+  // "clip_planes" state key as px,py,pz,nx,ny,nz per plane.
+  void setClipPlanes(const std::vector<ClipPlane> &planes);
+  const std::vector<ClipPlane> &clipPlanes() const { return m_ownClip; }
+
+  // setClipChildren(true): everything below this node is clipped to this node's
+  // own getBoundingBox() (its six faces, under its world transform). The node
+  // itself is not. Mirrored in the "clip_children" state key.
   void setClipChildren(bool clip);
   bool getClipChildren() const { return m_clipChildren; }
-  vtkPlaneCollection *getClipPlanes() const { return m_clipPlanes; }
+  // The six world-space box planes setClipChildren clips to.
+  vtkPlaneCollection *getClipBoxPlanes() const { return m_clipPlanes; }
+
+  // How many planes clip this node (its own + its ancestors'), before the cap.
+  int clipPlaneCount() const;
+  // The world-space planes handed to this node's renderer (at most
+  // maxClipPlanes()), or null when none are.
+  vtkPlaneCollection *getAppliedClipPlanes() const;
+  // How many clip planes this node's renderer honours: 6 for VTK's poly-data
+  // mapper, 8 for its GPU volume mapper and for cvc::volren, 0 where none (VTK's
+  // low-memory mapper; a node that draws nothing itself, e.g. a group or a
+  // LodGraphicsNode, whose rungs are its children and are clipped as such).
+  virtual int maxClipPlanes() const { return 0; }
 
   // Label control
   void setShowLabel(bool show);
@@ -322,16 +357,15 @@ protected:
   // Apply transform to VTK prop - subclasses should override to apply to their specific prop type
   virtual void applyTransformToVTK();
 
-  // Apply clip planes to children - called when clipChildren changes
-  void applyClipPlanesToChildren();
-
-  // Apply clip planes to this node's mapper/prop - subclasses override if they support clipping
+  // Hand this node's renderer the world-space planes it clips by (at most
+  // maxClipPlanes()), or null for none. Called when that SET changes; a plane
+  // moving in place is not a call (the renderer reads the planes it holds).
+  // Subclasses that draw override it, with maxClipPlanes().
   virtual void applyClipPlanes(vtkPlaneCollection *planes);
-  // applyClipPlanes on another node: for a container whose drawn parts are its
-  // own children (LodGraphicsNode hands its rungs the planes it is given).
-  static void applyClipPlanesTo(GraphicsNode &node, vtkPlaneCollection *planes) {
-    node.applyClipPlanes(planes);
-  }
+
+  // Re-derive what this node is clipped by and hand it to the renderer, then the
+  // same for everything below whose inherited planes changed. Owner thread.
+  void propagateClip();
 
   // Protected members for subclass access
   std::string m_name;
@@ -420,6 +454,21 @@ private:
   // True only while a scene-less node writes its own pose to state directly:
   // the handler that write fires runs inline on this thread and is our echo.
   bool m_writingPose = false;
+
+  // Clip plumbing (owner thread). The vtkPlane objects are SHARED down the tree:
+  // a descendant's renderer holds its ancestors' plane objects, so moving a plane
+  // in place reaches every renderer clipped by it with no re-hand.
+  void applyOwnClip(const std::vector<ClipPlane> &planes); // no state write
+  void updateOwnClipWorld(); // re-pose the own planes from local to world, in place
+  // What everything below this node is clipped by: its own planes, its box under
+  // setClipChildren, then what it inherited -- nearest first.
+  std::vector<vtkSmartPointer<vtkPlane>> clipPassdown() const;
+  std::vector<ClipPlane> m_ownClip;                       // local frame, as set
+  std::vector<vtkSmartPointer<vtkPlane>> m_ownClipWorld;  // the same, world space
+  std::vector<vtkSmartPointer<vtkPlane>> m_inheritedClip; // the parent's clipPassdown()
+  std::vector<vtkPlane *> m_appliedClipList;              // what the renderer was handed
+  vtkSmartPointer<vtkPlaneCollection> m_appliedClip;      // ... as a collection
+  bool m_clipCapWarned = false;                           // logged once that the cap dropped planes
 };
 
 } // namespace gl

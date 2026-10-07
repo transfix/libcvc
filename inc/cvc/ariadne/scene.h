@@ -139,6 +139,33 @@ struct SceneShader {
   std::vector<SceneShaderStage> fragment; // fragment-shader replacements, applied in order
 };
 
+// Clip planes on a scene node (§9 — clip). Every plane is in the node's OWN coordinates: the frame
+// its geometry or volume is defined in, before its `transform:` (so the clip moves, turns and
+// scales with the node). A plane keeps the side its normal points into. It clips the node AND
+// everything below it, on top of any ancestor's clip (a `group` with a `clip:` is a clip region for
+// its subtree). Realized onto cvc::gl::GraphicsNode::setClipPlanes / setClipChildren; each renderer
+// honours at most a few planes (6 for a mesh, 8 for a volume — the nearest win), and VTK's
+// low-memory mapper (the WebGL/GLES default) honours none.
+struct SceneClipPlane {
+  double origin[3] = {0.0, 0.0, 0.0}; // a point the plane passes through (before `offset`)
+  double normal[3] = {0.0, 0.0, 1.0}; // the kept side (need not be unit length)
+  // Slides the plane along its unit normal: it passes through origin + offset·n̂, keeping
+  // n̂·(x − origin) ≥ offset. A literal, or — with offset_bind — the default while that key is
+  // unset.
+  double offset = 0.0;
+  std::string offset_bind; // offset: <state path> | { bind: <path>, default: <d> } — a live cut
+};
+struct SceneClip {
+  bool present = false; // was a `clip:` block given?
+  // box: [minx, miny, minz, maxx, maxy, maxz] | { min: [..], max: [..] } — keep the inside.
+  bool has_box = false;
+  double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  std::vector<SceneClipPlane> planes; // planes: [{ origin, normal, offset }] — after the box's six
+  // children: true — also clip everything below this node to this node's own bounds (the extent of
+  // its mesh / volume; GraphicsNode::setClipChildren). The node itself is not clipped by it.
+  bool children = false;
+};
+
 // One scene node (§9.2/§9.3). `type` is geometry | volume | volren | volslice |
 // group | light. Fields not meaningful to a type are simply unused.
 struct SceneNode {
@@ -202,6 +229,7 @@ struct SceneNode {
   SceneVolume volume;
 
   SceneShader shader; // shader: {...} — GLSL replacements / a named preset (geometry nodes)
+  SceneClip clip;     // clip: {...} — half-spaces in the node's own coordinates (any node type)
 
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
