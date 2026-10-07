@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl-examples
-  upstream_version: "3.4.0"
+  upstream_version: "3.5.0"
   # Bumped 1 -> 2: the GRL-SNAM nav demos (nav_city_swarm / nav_fog_ghost /
   # nav_finale) are now built and packaged alongside lsystem_forest (libcvc #203).
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
@@ -27,7 +27,7 @@ recipe:
   # nav_train_demo / nav_material_demo) that moved into the cvcGL examples tree —
   # native-only, so their package.files entries are platforms-scoped (the wasm
   # column has no CLIs in the gallery).
-  cvc_revision: 19
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
