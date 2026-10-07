@@ -14,7 +14,9 @@
 // fine-tune the policy on the box you deploy on — e.g. on the actual occupancy of
 // your terrain / lsystem_forest scene — without a torch install anywhere.
 //
-// Build: -DCVC_BUILD_NAV_EXAMPLE=ON. Run:
+// Build (inside the tree, the canonical examples tree src/cvcGL/examples):
+//   cmake -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON … && cmake --build build
+//         --target nav_train_demo. Run:
 //   nav_train_demo [out.cvcnav] [steps]
 // Trains on the Python "city" scene by default; swap city_scene() for
 // occupancy_scene(your_grid, ...) to train on any rasterized scene. Uses the

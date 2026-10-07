@@ -16,8 +16,8 @@ surface here.
 - Implementation: `src/cvc/nav/material.cpp` (+ the material coupling in
   `src/cvc/nav/drive.cpp` and `sim_world.cpp`)
 - Tests: `src/cvc/tests/nav_material_test.cpp`
-- Demo: [`examples/nav_material_demo.cpp`](../examples/nav_material_demo.cpp)
-  (`-DCVC_BUILD_NAV_EXAMPLE=ON`)
+- Demo: [`src/cvcGL/examples/nav_material_demo.cpp`](../src/cvcGL/examples/nav_material_demo.cpp)
+  (built with `-DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON`)
 
 ## The executed field
 

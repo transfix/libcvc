@@ -49,7 +49,8 @@ coef_mlp policy = train_coef_mlp_cuda(scene, cfg);   // requires CVC_ENABLE_CUDA
 policy.save("coef_mlp.cvcnav");
 ```
 
-The `nav_train_demo` example (build with `-DCVC_BUILD_NAV_EXAMPLE=ON`) does exactly
+The `nav_train_demo` example (in `src/cvcGL/examples/`, built with
+`-DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON`) does exactly
 this end to end and picks the CUDA path automatically when available.
 
 ## What gets trained

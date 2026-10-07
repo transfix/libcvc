@@ -113,6 +113,25 @@ if(NOT EMSCRIPTEN)
   target_link_libraries(nav_abi_smoke PRIVATE cvc::cvc)
 endif()
 
+# Headless pure-C++ cvc::nav reference demos (moved from the top-level examples/
+# tree, which was consolidated into this one): the swarm template
+# (nav_swarm_demo), the self-supervised CoefMLP trainer CLI (nav_train_demo) and
+# the material-aware A/B run (nav_material_demo, docs/NAV_MATERIAL.md). No GL
+# and no cvcGL — each links only cvc::cvc (the core target cvcGL already pulls
+# in), and each runs headless (stdout stats / PPM output / .cvcnav export), so
+# like nav_abi_smoke they are native-only: the browser gallery is for rendered
+# scenes, not CLIs. nav_train_demo gets the CUDA trainer when the core was
+# built with it (it falls back to the CPU trainer otherwise).
+if(NOT EMSCRIPTEN)
+  foreach(_hd nav_swarm_demo nav_train_demo nav_material_demo)
+    add_executable(${_hd} ${_hd}.cpp)
+    target_link_libraries(${_hd} PRIVATE cvc::cvc)
+  endforeach()
+  if(CVC_ENABLE_CUDA)
+    target_compile_definitions(nav_train_demo PRIVATE CVC_ENABLE_CUDA)
+  endif()
+endif()
+
 # ---- WebAssembly demo builds -------------------------------------------------
 # The browser-capable examples. nav_finale is native-only (it needs assimp +
 # imagemagick + a runtime bundle the wasm toolchain lacks). Add a new browser demo
@@ -228,6 +247,11 @@ endif()
 # $ORIGIN-relative. cvcgl-examples is its own install COMPONENT so the recipe can
 # `cmake --install --component cvcgl-examples` and get only the bins (not the cvcGL SDK).
 set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
+# The three headless nav CLIs exist only in native builds (the wasm column has
+# no CLIs in the gallery), so they join the install list conditionally.
+if(NOT EMSCRIPTEN)
+  list(APPEND _cvcgl_example_bins nav_swarm_demo nav_train_demo nav_material_demo)
+endif()
 set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"
   INSTALL_RPATH_USE_LINK_PATH ON)

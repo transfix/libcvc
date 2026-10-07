@@ -1729,19 +1729,11 @@ if(CVC_NAV_WEIGHTS_FILE)
   message(STATUS "cvc::nav: installing policy ${CVC_NAV_WEIGHTS_FILE} -> share/cvc/nav/coef_mlp.cvcnav")
 endif()
 
-# The pure-C++ nav swarm demo (the template a cvcGL scene copies to add agents).
-option(CVC_BUILD_NAV_EXAMPLE "Build the pure-C++ nav swarm + trainer demos" OFF)
-if(CVC_BUILD_NAV_EXAMPLE)
-  add_executable(nav_swarm_demo ${PROJECT_SOURCE_DIR}/examples/nav_swarm_demo.cpp)
-  target_link_libraries(nav_swarm_demo PRIVATE cvc)
-  add_executable(nav_train_demo ${PROJECT_SOURCE_DIR}/examples/nav_train_demo.cpp)
-  target_link_libraries(nav_train_demo PRIVATE cvc)
-  add_executable(nav_material_demo ${PROJECT_SOURCE_DIR}/examples/nav_material_demo.cpp)
-  target_link_libraries(nav_material_demo PRIVATE cvc)
-  if(CVC_ENABLE_CUDA)
-    target_compile_definitions(nav_train_demo PRIVATE CVC_ENABLE_CUDA)
-  endif()
-endif()
+# The pure-C++ nav swarm / trainer / material demos moved to the canonical
+# examples tree with the rest of the demos: src/cvcGL/examples/ (built with
+# -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON, targets nav_swarm_demo /
+# nav_train_demo / nav_material_demo). The old -DCVC_BUILD_NAV_EXAMPLE switch
+# went with the top-level examples/ directory.
 
 # Headless L-system / world-generation CLIs (GL-free). cvc-lsys derives and
 # renders .lsys recipes to SVG/OFF; cvc-worldgen (added with cvc::world) builds
