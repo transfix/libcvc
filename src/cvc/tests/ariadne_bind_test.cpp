@@ -7,7 +7,7 @@
 
 #include <cvc/ariadne/bind.h>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

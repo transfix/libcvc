@@ -10,9 +10,9 @@
 
 #include <chrono>
 #include <cvc/core/app.h>
-#include <cvc/core/distributed_state_session.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_distributed_metrics.h>
+#include <cvc/state/distributed_state_session.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_distributed_metrics.h>
 #include <gtest/gtest.h>
 #include <thread>
 

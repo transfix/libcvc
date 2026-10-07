@@ -22,66 +22,68 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/voxels.h
   ../../inc/cvc/geometry/geometry.h
   ../../inc/cvc/geometry/simplify.h
-  ../../inc/cvc/core/state.h
-  ../../inc/cvc/core/state_change_journal.h
-  ../../inc/cvc/core/state_subscription_router.h
-  ../../inc/cvc/core/state_sync_adapter.h
-  ../../inc/cvc/core/state_blob_store.h
-  ../../inc/cvc/core/state_chunked_blob.h
-  ../../inc/cvc/core/state_compression_registry.h
-  ../../inc/cvc/core/state_delta_codec.h
-  ../../inc/cvc/core/state_codec_registry.h
-  ../../inc/cvc/core/state_replica.h
-  ../../inc/cvc/core/state_authority_map.h
-  ../../inc/cvc/core/state_cluster_shard.h
-  ../../inc/cvc/core/state_bounded_queue.h
-  ../../inc/cvc/core/state_message.h
-  ../../inc/cvc/core/state_message_bus.h
-  ../../inc/cvc/core/state_peer_registry.h
-  ../../inc/cvc/core/state_write_policy.h
-  ../../inc/cvc/core/state_distributed_metrics.h
-  ../../inc/cvc/core/state_delegation_manager.h
-  ../../inc/cvc/core/state_distributed_admin.h
-  ../../inc/cvc/core/state_volume_codec.h
-  ../../inc/cvc/core/state_brick_manifest.h
-  ../../inc/cvc/core/state_data_hydrator.h
-  ../../inc/cvc/core/state_node_telemetry.h
-  ../../inc/cvc/core/state_telemetry_aggregator.h
-  ../../inc/cvc/core/state_cluster_membership.h
-  ../../inc/cvc/core/state_hybrid_time.h
+  ../../inc/cvc/state/state.h
+  ../../inc/cvc/state/state_change_journal.h
+  ../../inc/cvc/state/state_subscription_router.h
+  ../../inc/cvc/state/state_sync_adapter.h
+  ../../inc/cvc/state/state_blob_store.h
+  ../../inc/cvc/state/state_chunked_blob.h
+  ../../inc/cvc/state/state_compression_registry.h
+  ../../inc/cvc/state/state_delta_codec.h
+  ../../inc/cvc/state/state_codec_registry.h
+  ../../inc/cvc/state/state_replica.h
+  ../../inc/cvc/state/state_authority_map.h
+  ../../inc/cvc/state/state_cluster_shard.h
+  ../../inc/cvc/state/state_bounded_queue.h
+  ../../inc/cvc/state/state_message.h
+  ../../inc/cvc/state/state_message_bus.h
+  ../../inc/cvc/state/state_peer_registry.h
+  ../../inc/cvc/state/state_write_policy.h
+  ../../inc/cvc/state/state_distributed_metrics.h
+  ../../inc/cvc/state/state_delegation_manager.h
+  ../../inc/cvc/state/state_distributed_admin.h
+  ../../inc/cvc/state/state_volume_codec.h
+  ../../inc/cvc/state/state_brick_manifest.h
+  ../../inc/cvc/state/state_data_hydrator.h
+  ../../inc/cvc/state/state_node_telemetry.h
+  ../../inc/cvc/state/state_telemetry_aggregator.h
+  ../../inc/cvc/state/state_cluster_membership.h
+  ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
   ../../inc/cvc/core/world_units.h
-  ../../inc/cvc/core/state_hash_partition.h
-  ../../inc/cvc/core/distributed_state_session.h
-  ../../inc/cvc/core/state_transport.h
-  ../../inc/cvc/core/state_transport_inproc.h
-  ../../inc/cvc/core/state_transport_ipc.h
-  ../../inc/cvc/core/state_transport_grpc.h
+  ../../inc/cvc/state/state_hash_partition.h
+  ../../inc/cvc/state/distributed_state_session.h
+  ../../inc/cvc/state/state_transport.h
+  ../../inc/cvc/state/state_transport_inproc.h
+  ../../inc/cvc/state/state_transport_ipc.h
+  ../../inc/cvc/state/state_transport_grpc.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
-  ../../inc/cvc/core/state_object.h
-  ../../inc/cvc/core/state_list.h
-  ../../inc/cvc/core/state_eviction_store.h
-  ../../inc/cvc/core/state_memory_manager.h
-  ../../inc/cvc/core/state_exec/types.h
-  ../../inc/cvc/core/state_exec/parser.h
-  ../../inc/cvc/core/state_exec/builtins.h
-  ../../inc/cvc/core/state_exec/evaluator.h
-  ../../inc/cvc/core/state_exec/stackless_evaluator.h
-  ../../inc/cvc/core/state_exec/task.h
-  ../../inc/cvc/core/state_exec/async_evaluator.h
-  ../../inc/cvc/core/state_exec/async_stackless_evaluator.h
-  ../../inc/cvc/core/state_exec/state_value_codec.h
-  ../../inc/cvc/core/state_exec/process.h
-  ../../inc/cvc/core/state_exec/memory_tracker.h
-  ../../inc/cvc/core/state_exec/scheduler_base.h
-  ../../inc/cvc/core/state_exec/scheduler.h
-  ../../inc/cvc/core/state_exec/async_scheduler.h
-  ../../inc/cvc/core/state_exec/intrinsics.h
-  ../../inc/cvc/core/state_exec/resource_policy.h
-  ../../inc/cvc/core/state_exec/stdlib.h
-  ../../inc/cvc/core/state_exec/exec_coordinator.h
+  ../../inc/cvc/state/state_object.h
+  ../../inc/cvc/state/state_list.h
+  ../../inc/cvc/state/state_eviction_store.h
+  ../../inc/cvc/state/state_memory_manager.h
+  ../../inc/cvc/state/state_exec/types.h
+  ../../inc/cvc/state/state_exec/parser.h
+  ../../inc/cvc/state/state_exec/builtins.h
+  ../../inc/cvc/state/state_exec/evaluator.h
+  ../../inc/cvc/state/state_exec/stackless_evaluator.h
+  ../../inc/cvc/state/state_exec/task.h
+  ../../inc/cvc/state/state_exec/async_evaluator.h
+  ../../inc/cvc/state/state_exec/async_stackless_evaluator.h
+  ../../inc/cvc/state/state_exec/state_value_codec.h
+  ../../inc/cvc/state/state_exec/process.h
+  ../../inc/cvc/state/state_exec/memory_tracker.h
+  ../../inc/cvc/state/state_exec/scheduler_base.h
+  ../../inc/cvc/state/state_exec/scheduler.h
+  ../../inc/cvc/state/state_exec/async_scheduler.h
+  ../../inc/cvc/state/state_exec/intrinsics.h
+  ../../inc/cvc/state/state_exec/resource_policy.h
+  ../../inc/cvc/state/state_exec/stdlib.h
+  ../../inc/cvc/state/state_exec/exec_coordinator.h
+  ../../inc/cvc/state/state_exec/generator.h
+  ../../inc/cvc/state/state_exec/utf8.h
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
@@ -176,55 +178,55 @@ set(SOURCE_FILES
   volume/rawv_io.cpp
   processing/smoothing.cpp
   volume/spider_io.cpp
-  core/state.cpp
-  core/state_list.cpp
-  core/state_eviction_store.cpp
-  core/state_memory_manager.cpp
-  core/state_exec/types.cpp
-  core/state_exec/parser.cpp
-  core/state_exec/builtins.cpp
-  core/state_exec/evaluator.cpp
-  core/state_exec/stackless_evaluator.cpp
-  core/state_exec/async_evaluator.cpp
-  core/state_exec/async_stackless_evaluator.cpp
-  core/state_exec/state_value_codec.cpp
-  core/state_exec/process.cpp
-  core/state_exec/memory_tracker.cpp
-  core/state_exec/scheduler.cpp
-  core/state_exec/async_scheduler.cpp
-  core/state_exec/intrinsics.cpp
-  core/state_exec/resource_policy.cpp
-  core/state_exec/stdlib.cpp
-  core/state_exec/exec_coordinator.cpp
+  state/state.cpp
+  state/state_list.cpp
+  state/state_eviction_store.cpp
+  state/state_memory_manager.cpp
+  state/state_exec/types.cpp
+  state/state_exec/parser.cpp
+  state/state_exec/builtins.cpp
+  state/state_exec/evaluator.cpp
+  state/state_exec/stackless_evaluator.cpp
+  state/state_exec/async_evaluator.cpp
+  state/state_exec/async_stackless_evaluator.cpp
+  state/state_exec/state_value_codec.cpp
+  state/state_exec/process.cpp
+  state/state_exec/memory_tracker.cpp
+  state/state_exec/scheduler.cpp
+  state/state_exec/async_scheduler.cpp
+  state/state_exec/intrinsics.cpp
+  state/state_exec/resource_policy.cpp
+  state/state_exec/stdlib.cpp
+  state/state_exec/exec_coordinator.cpp
   core/world_clock.cpp
   core/world_units.cpp
-  core/state_change_journal.cpp
-  core/state_subscription_router.cpp
-  core/state_sync_adapter.cpp
-  core/state_blob_store.cpp
-  core/state_chunked_blob.cpp
-  core/state_compression_registry.cpp
-  core/state_delta_codec.cpp
-  core/state_codec_registry.cpp
-  core/state_replica.cpp
-  core/state_authority_map.cpp
-  core/state_cluster_shard.cpp
-  core/state_transport_inproc.cpp
-  core/state_transport_ipc.cpp
-  core/state_message_bus.cpp
-  core/state_peer_registry.cpp
-  core/state_write_policy.cpp
-  core/state_distributed_metrics.cpp
-  core/state_delegation_manager.cpp
-  core/state_distributed_admin.cpp
-  core/state_volume_codec.cpp
-  core/state_brick_manifest.cpp
-  core/state_data_hydrator.cpp
-  core/state_node_telemetry.cpp
-  core/state_telemetry_aggregator.cpp
-  core/state_cluster_membership.cpp
-  core/distributed_state_session.cpp
-  core/state_message.cpp
+  state/state_change_journal.cpp
+  state/state_subscription_router.cpp
+  state/state_sync_adapter.cpp
+  state/state_blob_store.cpp
+  state/state_chunked_blob.cpp
+  state/state_compression_registry.cpp
+  state/state_delta_codec.cpp
+  state/state_codec_registry.cpp
+  state/state_replica.cpp
+  state/state_authority_map.cpp
+  state/state_cluster_shard.cpp
+  state/state_transport_inproc.cpp
+  state/state_transport_ipc.cpp
+  state/state_message_bus.cpp
+  state/state_peer_registry.cpp
+  state/state_write_policy.cpp
+  state/state_distributed_metrics.cpp
+  state/state_delegation_manager.cpp
+  state/state_distributed_admin.cpp
+  state/state_volume_codec.cpp
+  state/state_brick_manifest.cpp
+  state/state_data_hydrator.cpp
+  state/state_node_telemetry.cpp
+  state/state_telemetry_aggregator.cpp
+  state/state_cluster_membership.cpp
+  state/distributed_state_session.cpp
+  state/state_message.cpp
   utility/utility.cpp
   utility/cuda_utils.cpp
   volume/voxels.cpp
@@ -365,14 +367,14 @@ endif()
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
 if(WIN32)
-  list(REMOVE_ITEM SOURCE_FILES core/state_transport_ipc.cpp)
+  list(REMOVE_ITEM SOURCE_FILES state/state_transport_ipc.cpp)
 endif()
 
 # state_memory_manager feature flag
 option(CVC_STATE_MEMORY_MANAGER "Enable state memory manager with LRU/LFU eviction" ON)
 
 if(NOT CVC_STATE_MEMORY_MANAGER)
-  list(REMOVE_ITEM SOURCE_FILES core/state_memory_manager.cpp core/state_eviction_store.cpp)
+  list(REMOVE_ITEM SOURCE_FILES state/state_memory_manager.cpp state/state_eviction_store.cpp)
 endif()
 
 # The libcvc version number, derived from project(libcvc VERSION ...) in the
@@ -1134,7 +1136,7 @@ if(CVC_ENABLE_GRPC)
   )
 
   list(APPEND SOURCE_FILES
-    core/state_transport_grpc.cpp
+    state/state_transport_grpc.cpp
     ${_proto_pb_cc}
     ${_proto_grpc_cc}
   )
@@ -1674,6 +1676,18 @@ install(FILES
 )
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
+  COMPONENT libcvc
+  FILES_MATCHING PATTERN "*.h"
+)
+
+# Deprecated forwarding headers for the pre-move state paths: <cvc/core/state*.h> and
+# <cvc/core/state_exec/*.h> now live under <cvc/state/...> (docs/roadmap/
+# STATE_DIR_LAYOUT_REFACTOR.md). Installed for one release cycle so out-of-tree code keeps
+# compiling. They sit in compat/inc, NOT inc/, so in-tree code cannot drift back to the old
+# paths (only state_compat_headers_test sees them) and the move stays a pure rename in git.
+# Remove this rule, compat/ and that test in the next minor release.
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/compat/inc/cvc/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
   COMPONENT libcvc
   FILES_MATCHING PATTERN "*.h"

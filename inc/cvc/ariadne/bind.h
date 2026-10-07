@@ -14,7 +14,7 @@
 #include <cctype>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <exception>
 #include <iomanip>
 #include <sstream>

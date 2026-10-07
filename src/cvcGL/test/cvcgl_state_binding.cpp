@@ -7,13 +7,13 @@
 #include <cmath> // fabs — used for the numeric (not string) float comparison
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_object.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/Settings.h>
 #include <cvc/gl/StageLighting.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_object.h>
 #include <string>
 
 using cvc::gl::SceneGraph;

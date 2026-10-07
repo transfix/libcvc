@@ -87,7 +87,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cvc/core/async_task.h> // pool_task_work / pool_task_on_error
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state_exec/types.h>
 #include <deque>
 #include <functional>
 #include <initializer_list>

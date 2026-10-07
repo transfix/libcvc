@@ -1,7 +1,7 @@
 #ifndef SCENENODE_H
 #define SCENENODE_H
 
-#include <cvc/core/state_object.h>
+#include <cvc/state/state_object.h>
 #include <functional>
 #include <memory>
 #include <mutex>

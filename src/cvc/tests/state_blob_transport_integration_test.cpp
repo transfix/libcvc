@@ -16,13 +16,13 @@
 
 #include <cstdint>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_blob_store.h>
-#include <cvc/core/state_change_journal.h>
-#include <cvc/core/state_chunked_blob.h>
-#include <cvc/core/state_cluster_shard.h>
-#include <cvc/core/state_compression_registry.h>
-#include <cvc/core/state_transport_inproc.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_blob_store.h>
+#include <cvc/state/state_change_journal.h>
+#include <cvc/state/state_chunked_blob.h>
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_compression_registry.h>
+#include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

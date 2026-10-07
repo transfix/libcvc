@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/state/state.h>
 #include <stdexcept>
 #include <vtkMatrix4x4.h>
 

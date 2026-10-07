@@ -13,7 +13,7 @@
 #include <boost/any.hpp>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <gtest/gtest.h>
 
 TEST(StateWritableLinkTest, DefaultLinkIsNotWritable) {

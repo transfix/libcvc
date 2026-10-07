@@ -22,7 +22,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/AxisNode.h>
 #include <cvc/gl/GeometryNode.h>
@@ -30,6 +29,7 @@
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/state/state.h>
 #include <limits>
 #include <random>
 #include <string>

@@ -16,15 +16,15 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
-#include <cvc/core/state_exec/builtins.h>
-#include <cvc/core/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
-#include <cvc/core/state_exec/intrinsics.h>
-#include <cvc/core/state_exec/parser.h> // parse, parse_error
-#include <cvc/core/state_exec/process.h>
-#include <cvc/core/state_exec/scheduler.h>
-#include <cvc/core/state_exec/stackless_evaluator.h> // §4 read-lane predicate evaluator
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
+#include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/parser.h> // parse, parse_error
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/stackless_evaluator.h> // §4 read-lane predicate evaluator
 #include <exception>
 #include <functional>
 #include <locale> // §11.4 geometry (de)serialize: pin std::locale::classic() so digit grouping

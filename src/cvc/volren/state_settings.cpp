@@ -2,7 +2,7 @@
 #include <cctype>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <cvc/volren/raycaster.h>
 #include <cvc/volren/state_settings.h>
 #include <sstream>

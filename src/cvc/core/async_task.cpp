@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h>
-#include <cvc/core/state_exec/async_scheduler.h> // exec_scheduler().post_message
-#include <cvc/core/state_exec/intrinsics.h> // resolve_channel_key, make_future, park_on_channel
+#include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
+#include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key, make_future, park_on_channel
 #include <exception>
 #include <utility>
 

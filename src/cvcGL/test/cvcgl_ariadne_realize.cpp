@@ -13,7 +13,6 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>       // clock test: read/write the bound sim.* keys
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -29,6 +28,7 @@
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/image/image.h>
+#include <cvc/state/state.h> // clock test: read/write the bound sim.* keys
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
 #include <vtkLight.h>

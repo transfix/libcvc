@@ -10,12 +10,12 @@
 #include <condition_variable>
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // park_on_pool_task — offload an async Python fn to the pool
-#include <cvc/core/state.h>
-#include <cvc/core/state_exec/async_scheduler.h> // Exec drives a private async scheduler
-#include <cvc/core/state_exec/builtins.h>
-#include <cvc/core/state_exec/intrinsics.h>
-#include <cvc/core/state_exec/process.h>
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_scheduler.h> // Exec drives a private async scheduler
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/types.h>
 #include <mutex>
 #include <optional>
 #include <span>

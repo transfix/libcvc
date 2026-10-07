@@ -1,11 +1,11 @@
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_exec/builtins.h>
-#include <cvc/core/state_exec/evaluator.h>
-#include <cvc/core/state_exec/parser.h>
-#include <cvc/core/state_exec/stackless_evaluator.h>
-#include <cvc/core/state_exec/state_value_codec.h>
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/stackless_evaluator.h>
+#include <cvc/state/state_exec/state_value_codec.h>
+#include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
 
 using namespace cvc::state_exec;

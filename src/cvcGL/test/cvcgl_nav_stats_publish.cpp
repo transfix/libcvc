@@ -8,9 +8,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/nav_stats_publish.h>
 #include <cvc/gl/state_publisher.h>
+#include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <string>
 

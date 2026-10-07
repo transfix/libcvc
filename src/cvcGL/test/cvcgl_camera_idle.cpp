@@ -32,7 +32,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/AxisNode.h>
 #include <cvc/gl/CameraController.h>
@@ -45,6 +44,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/lod/pyramid.h>
+#include <cvc/state/state.h>
 #include <string>
 #include <vtkActor.h>
 #include <vtkCallbackCommand.h>

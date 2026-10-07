@@ -65,11 +65,11 @@ the two front doors that coerce to string.
 - **Scheduler bus** (in-process, DSL): `async_scheduler::deliver_to_receivers` /
   `pop_pending_message` / per-channel `pending_messages_` FIFO / cross-thread
   `post_message` carry a `value_t` verbatim, and `value_t` already has a first-class
-  `bytes` alternative (`inc/cvc/core/state_exec/types.h:69-72,93,180`). Binary HTTP bodies
+  `bytes` alternative (`inc/cvc/state/state_exec/types.h:69-72,93,180`). Binary HTTP bodies
   already flow this way to `msg-recv`.
 - **Cluster bus** (out-of-band, cross-node): `state_message` already carries
   `std::vector<unsigned char> bytes` + `content_type` + `make_bytes`/`make_typed`
-  (`inc/cvc/core/state_message.h:62-97`), and all three transports serialize the `bytes`
+  (`inc/cvc/state/state_message.h:62-97`), and all three transports serialize the `bytes`
   field (`state_transport_ipc.cpp:217`, `state_transport_grpc.cpp:161,173`, proto
   `bytes_payload = 8`).
 
@@ -161,7 +161,7 @@ drop-at-source policy (never a hidden stall). The "producer never blocks" and
 ### 3.3 Stream channel — bounded, drop-oldest, per-subscriber
 
 Built on the existing `state_bounded_queue<frame_ptr>` with
-`overflow_policy::drop_oldest` (`inc/cvc/core/state_bounded_queue.h:66-107,90-93` — exactly
+`overflow_policy::drop_oldest` (`inc/cvc/state/state_bounded_queue.h:66-107,90-93` — exactly
 latest-wins, with drop counters `:196-211`). Because the element is a `shared_ptr`,
 push/drop/pop are refcount ops, never buffer copies.
 

@@ -4,8 +4,8 @@
 
 #include <chrono>
 #include <cvc/core/async_lane.h>
-#include <cvc/core/state_exec/async_scheduler.h> // post_message + the pump calls
-#include <cvc/core/state_exec/intrinsics.h> // resolve_channel_key, make_future, park_on_channel
+#include <cvc/state/state_exec/async_scheduler.h> // post_message + the pump calls
+#include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key, make_future, park_on_channel
 #include <exception>
 #include <memory>
 #include <utility>

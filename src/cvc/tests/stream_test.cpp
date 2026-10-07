@@ -29,9 +29,9 @@
 #include <cvc/ariadne/stream/stream_registry.h>
 #include <cvc/ariadne/stream/synthetic_source.h>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_exec/async_scheduler.h>
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>

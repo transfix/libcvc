@@ -9,7 +9,7 @@
   (the volren_state_test conventions).
 */
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <cvc/volslice/state_settings.h>
 #include <gtest/gtest.h>
 #include <string>

@@ -9,7 +9,6 @@
 #include <cvc/ariadne/stream/stream_channel.h>  // subscribe / deliver_mode
 #include <cvc/ariadne/stream/stream_registry.h> // stream_registry::for_app / lookup
 #include <cvc/core/app.h>                       // cvc::app
-#include <cvc/core/state_exec/intrinsics.h>     // document_scope::slot
 #include <cvc/gl/CameraController.h>            // cam.update / frameBounds
 #include <cvc/gl/GeometryNode.h>                // GeometryNode (gl-bind-stream target)
 #include <cvc/gl/ImGuiOverlay.h>                // overlay draw callback
@@ -18,7 +17,8 @@
 #include <cvc/gl/ariadne/AriRuntime.h>
 #include <cvc/gl/ariadne/scene_realize.h>          // realize_scene / RealizedScene / tick_scene
 #include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
-#include <cvc/gl/ariadne/stream_verbs.h> // StreamBindingSink / register_gl_stream_intrinsics
+#include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / register_gl_stream_intrinsics
+#include <cvc/state/state_exec/intrinsics.h> // document_scope::slot
 #include <memory>
 #include <string>
 #include <unordered_map>

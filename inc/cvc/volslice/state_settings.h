@@ -28,7 +28,7 @@
 #ifndef CVC_VOLSLICE_STATE_SETTINGS_H
 #define CVC_VOLSLICE_STATE_SETTINGS_H
 
-#include <cvc/core/state_object.h>
+#include <cvc/state/state_object.h>
 #include <cvc/volslice/settings.h>
 #include <functional>
 #include <mutex>

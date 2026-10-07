@@ -12,10 +12,10 @@
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream_intrinsics.h>
-#include <cvc/core/app.h>                   // exec_scheduler warm
-#include <cvc/core/state_exec/builtins.h>   // register_fn
-#include <cvc/core/state_exec/intrinsics.h> // intrinsics_context
-#include <cvc/core/state_exec/types.h>      // value_t, make_dict
+#include <cvc/core/app.h>                    // exec_scheduler warm
+#include <cvc/state/state_exec/builtins.h>   // register_fn
+#include <cvc/state/state_exec/intrinsics.h> // intrinsics_context
+#include <cvc/state/state_exec/types.h>      // value_t, make_dict
 #include <memory>
 #include <mutex>
 #include <span>

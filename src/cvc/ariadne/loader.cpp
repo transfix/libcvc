@@ -18,8 +18,8 @@
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
 // §12 channel lint: parse a script (parser.h) and walk its value_t / symbol / list_ptr AST
 // (types.h) for the static msg-* channel references.
-#include <cvc/core/state_exec/parser.h>
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/types.h>
 #include <filesystem> // §12 import: dirname of a resolved library for nested bases
 #include <functional>
 #include <iterator>

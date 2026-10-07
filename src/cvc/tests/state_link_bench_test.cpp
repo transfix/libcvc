@@ -21,10 +21,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_cluster_shard.h>
-#include <cvc/core/state_distributed_admin.h>
-#include <cvc/core/state_sync_adapter.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_distributed_admin.h>
+#include <cvc/state/state_sync_adapter.h>
 #include <gtest/gtest.h>
 #include <random>
 #include <string>

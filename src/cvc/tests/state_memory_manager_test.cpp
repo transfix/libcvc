@@ -1,6 +1,6 @@
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_memory_manager.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_memory_manager.h>
 #include <gtest/gtest.h>
 
 class StateMemoryManagerTest : public ::testing::Test {

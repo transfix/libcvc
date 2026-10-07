@@ -18,11 +18,11 @@ Full design: [STATE_EXEC_PORTING_PLAN.md](STATE_EXEC_PORTING_PLAN.md)
 
 | Component | Files | Tests | Status |
 |---|---|---|---|
-| `state_list` | `inc/cvc/state_list.h`, `src/cvc/state_list.cpp` | 20 | ✅ |
-| `state_eviction_store` | `inc/cvc/state_eviction_store.h`, `src/cvc/state_eviction_store.cpp` | (in memory_manager tests) | ✅ |
-| `state_memory_manager` | `inc/cvc/state_memory_manager.h`, `src/cvc/state_memory_manager.cpp` | 20 | ✅ |
-| Core types (`value_t`, `symbol`, `closure`, `environment`) | `inc/cvc/state_exec/types.h`, `src/cvc/state_exec/types.cpp` | 26 | ✅ |
-| S-expression parser | `inc/cvc/state_exec/parser.h`, `src/cvc/state_exec/parser.cpp` | 30 | ✅ |
+| `state_list` | `inc/cvc/state/state_list.h`, `src/cvc/state/state_list.cpp` | 20 | ✅ |
+| `state_eviction_store` | `inc/cvc/state/state_eviction_store.h`, `src/cvc/state/state_eviction_store.cpp` | (in memory_manager tests) | ✅ |
+| `state_memory_manager` | `inc/cvc/state/state_memory_manager.h`, `src/cvc/state/state_memory_manager.cpp` | 20 | ✅ |
+| Core types (`value_t`, `symbol`, `closure`, `environment`) | `inc/cvc/state/state_exec/types.h`, `src/cvc/state/state_exec/types.cpp` | 26 | ✅ |
+| S-expression parser | `inc/cvc/state/state_exec/parser.h`, `src/cvc/state/state_exec/parser.cpp` | 30 | ✅ |
 
 **Total Phase 1 tests: 96**
 

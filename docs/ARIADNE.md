@@ -417,7 +417,7 @@ back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-pr
 
 Message channels (`msg-send` / `msg-recv` / `msg-pending`) are **chrooted per document,
 exactly like state**. The rule is `resolve_channel_key(root_path, channel)`
-([`intrinsics.cpp:884`](../src/cvc/core/state_exec/intrinsics.cpp)):
+([`intrinsics.cpp:884`](../src/cvc/state/state_exec/intrinsics.cpp)):
 
 - channel contains `#` → used verbatim (these are runtime-internal tick/key/pointer
   channels, and are policy-exempt);
@@ -429,7 +429,7 @@ exactly like state**. The rule is `resolve_channel_key(root_path, channel)`
 Cross-scope sharing reuses the §7 hole mechanism: a mount's `channels:` grant lowers into
 a transparent link under the reserved `channels.` subtree, and `resolve_channel` follows
 the link's **target string** — a channel key is a redirect, so the target node need not
-exist ([`intrinsics.cpp:672`](../src/cvc/core/state_exec/intrinsics.cpp)).
+exist ([`intrinsics.cpp:672`](../src/cvc/state/state_exec/intrinsics.cpp)).
 
 ### 8.1 Authoring surface
 

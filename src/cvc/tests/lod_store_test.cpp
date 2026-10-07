@@ -27,12 +27,12 @@
 #include <cstdio>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/core/state_blob_store.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/image/image.h>
 #include <cvc/lod/pyramid.h>
 #include <cvc/lod/store.h>
+#include <cvc/state/state_blob_store.h>
 #include <cvc/volume/hdf5_utils.h>
 #include <fstream>
 #include <functional>

@@ -11,7 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <cvc/core/state_blob_store.h>
+#include <cvc/state/state_blob_store.h>
 #include <gtest/gtest.h>
 #include <random>
 #include <string>

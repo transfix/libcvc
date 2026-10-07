@@ -34,7 +34,7 @@ namespace ariadne {
 class Backend;
 }
 namespace state_exec {
-// Runtime::document_scope() return type; full definition in <cvc/core/state_exec/intrinsics.h>.
+// Runtime::document_scope() return type; full definition in <cvc/state/state_exec/intrinsics.h>.
 // `class` (not struct) to match the real declaration — a tag mismatch is an LNK2019 on MSVC.
 class document_scope;
 } // namespace state_exec

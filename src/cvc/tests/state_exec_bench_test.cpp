@@ -23,11 +23,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cvc/core/state_exec/builtins.h>
-#include <cvc/core/state_exec/parser.h>
-#include <cvc/core/state_exec/scheduler.h>
-#include <cvc/core/state_exec/stackless_evaluator.h>
-#include <cvc/core/state_exec/types.h>
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/stackless_evaluator.h>
+#include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
 #include <string>
 

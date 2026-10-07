@@ -16,9 +16,9 @@
 #include <boost/make_shared.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/thread.hpp>
-#include <cvc/core/state.h>
-#include <cvc/core/state_object.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_object.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/dimension.h>
 #include <cvc/volume/volume.h>

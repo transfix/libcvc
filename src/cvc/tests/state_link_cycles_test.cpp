@@ -23,8 +23,8 @@
 
 #include <algorithm>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_distributed_admin.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_distributed_admin.h>
 #include <gtest/gtest.h>
 
 using cvc::state;

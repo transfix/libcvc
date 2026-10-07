@@ -14,6 +14,14 @@
 > metadata (`comment`, `hidden`, `readOnly`). Only value and child-structure
 > changes are journaled for replication today — see the "Known gaps" section
 > of the distributed roadmap.
+>
+> **Header location.** The state subsystem lives under `cvc/state/`: include
+> `<cvc/state/state.h>`, `<cvc/state/state_object.h>`,
+> `<cvc/state/state_exec/…>`, etc. The old `<cvc/core/state*.h>`,
+> `<cvc/core/distributed_state_session.h>` and `<cvc/core/state_exec/…>` paths
+> still compile through installed forwarding headers for one release cycle and
+> are then removed — see
+> [`roadmap/STATE_DIR_LAYOUT_REFACTOR.md`](roadmap/STATE_DIR_LAYOUT_REFACTOR.md).
 
 ## Table of Contents
 
@@ -142,7 +150,7 @@ state::instance(app)("new.path.to.value").value(42);
 ### Creating and Accessing State Nodes
 
 ```cpp
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 
 // Global convenience function creates/accesses nodes
 state s1 = state::instance(app)("app.window.width");
@@ -817,7 +825,7 @@ The `cvc::state_object<T>` template class provides a convenient base class for o
 #### Basic Usage
 
 ```cpp
-#include <cvc/core/state_object.h>
+#include <cvc/state/state_object.h>
 
 // Inherit from state_object<YourClass>
 class Configuration : public state_object<Configuration> {

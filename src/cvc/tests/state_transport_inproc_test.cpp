@@ -12,9 +12,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
-#include <cvc/core/state_cluster_shard.h>
-#include <cvc/core/state_transport_inproc.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
@@ -329,8 +329,8 @@ TEST(StateTransportInprocPerformanceTest, OptionalFanoutThroughputSmoke) {
 // Phase 4: out-of-band messaging tests.
 // ----------------------------------------------------------------------------
 
-#include <cvc/core/state_message.h>
-#include <cvc/core/state_message_bus.h>
+#include <cvc/state/state_message.h>
+#include <cvc/state/state_message_bus.h>
 
 namespace {
 

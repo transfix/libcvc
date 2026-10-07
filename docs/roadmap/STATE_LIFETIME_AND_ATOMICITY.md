@@ -6,7 +6,7 @@ reinventing its own mutex.*
 
 Status: **design / not yet implemented.** This doc is for review before any code lands.
 Every `file:line` below was verified against the tree at merge of PRs #481/#482
-(`inc/cvc/core/state.h`, `src/cvc/core/state.cpp`, and the cited call sites).
+(`inc/cvc/state/state.h`, `src/cvc/state/state.cpp`, and the cited call sites).
 
 ---
 
@@ -91,7 +91,7 @@ never reachable mid-construction.
 ### 3.2 API
 
 ```cpp
-// inc/cvc/core/state.h
+// inc/cvc/state/state.h
 // MUST be the boost variant: ownership is boost::shared_ptr (state.h:152, state.cpp:154),
 // which only populates a boost::enable_shared_from_this weak backpointer. std:: would
 // leave it empty and shared_from_this() would throw bad_weak_ptr. (Distinct from

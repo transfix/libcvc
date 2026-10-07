@@ -10,11 +10,11 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <cvc/core/state.h> // active_viewport focus, stored in cvc::state
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/Viewport.h>
 #include <cvc/gl/ViewportManager.h>
+#include <cvc/state/state.h> // active_viewport focus, stored in cvc::state
 #include <map>
 #include <set>
 #include <stdexcept>

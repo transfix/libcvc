@@ -12,7 +12,7 @@
 // and resolvedValue() read-through helper.
 
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
+#include <cvc/state/state.h>
 #include <gtest/gtest.h>
 
 TEST(StateLinkModeTest, DefaultsToOpaque) {

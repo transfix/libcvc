@@ -2,10 +2,10 @@
 #include <cmath>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/core/state.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <iomanip>
 #include <set>
