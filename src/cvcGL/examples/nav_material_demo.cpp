@@ -20,7 +20,9 @@
 // Build (standalone, against an installed libcvc):
 //   g++ -std=c++17 nav_material_demo.cpp -o nav_material_demo \
 //       -I$PREFIX/include -L$PREFIX/lib -lcvc && ./nav_material_demo
-// or inside the tree: -DCVC_BUILD_NAV_EXAMPLE=ON.
+// or inside the tree (the canonical examples tree, src/cvcGL/examples):
+//   cmake -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON … && cmake --build build
+//         --target nav_material_demo
 
 #include <algorithm>
 #include <cmath>

@@ -25,30 +25,72 @@ import:
   - cvc://components/camera_controls.ari
   - cvc://components/scene_controls.ari
   - cvc://components/sim_transport.ari
+  # Live per-node procedural controls — one reusable panel per node type (bind forest.* / sea.* /
+  # sky.*, which the node realizers seed from their props and read each frame).
+  - cvc://components/forest_controls.ari
+  - cvc://components/sea_controls.ari
+  - cvc://components/sky_controls.ari
 
 menubar:
   - menu: Sim
     items:
       - menu_item: Quit
         on: quit
+  # Every panel is `closable: true` (an X button), so the user can clear the view. Settings re-opens
+  # them: each menu_item is a checkable toggle bound to that window's tree.<id>.open state key — the
+  # same key its X clears — so toggling shows/hides the panel.
+  - menu: Settings
+    items:
+      - menu_item: Stage lighting
+        bind: tree.stage_lighting.open
+      - menu_item: Camera
+        bind: tree.camera_controls.open
+      - menu_item: Scene
+        bind: tree.scene_controls.open
+      - menu_item: Simulation
+        bind: tree.sim_transport.open
+      - separator
+      - menu_item: Forest
+        bind: tree.forest_controls.open
+      - menu_item: Sea
+        bind: tree.sea_controls.open
+      - menu_item: Sky
+        bind: tree.sky_controls.open
 
 windows:
   # Arrange the reusable panels in a tidy left-hand column via the include-site geometry override
   # (§3.0.3b): the shared components stay layout-agnostic; this demo places + sizes them so they open
   # usable instead of stacked at the origin. pos is the first-placement seed (the user's drag then
-  # persists and wins); size is a fixed hint. Use `auto` for a self-fitting axis.
+  # persists and wins); size is a fixed hint. `closable: true` gives each an X + a Settings toggle.
   - include: stage_lighting
     pos: [16, 16]
     size: [370, 210]
+    closable: true
   - include: camera_controls
     pos: [16, 234]
     size: [370, 132]
+    closable: true
   - include: scene_controls
     pos: [16, 374]
     size: [370, 120]
+    closable: true
   - include: sim_transport   # Paused / Speed — bind sim.paused / sim.speed, which drive the clock below
     pos: [16, 502]
     size: [370, 150]
+    closable: true
+  # The per-node procedural panels in a second (right) column, so they sit beside the scene controls.
+  - include: forest_controls
+    pos: [400, 16]
+    size: [360, 252]
+    closable: true
+  - include: sea_controls
+    pos: [400, 276]
+    size: [360, 96]
+    closable: true
+  - include: sky_controls
+    pos: [400, 380]
+    size: [360, 116]
+    closable: true
 
 scene:
   chrome: false
@@ -89,10 +131,10 @@ scene:
             - { max_height: 17,  color: [0.24, 0.41, 0.18] }   # upland grass (darker)
             - { max_height: 100, color: [0.48, 0.45, 0.42] }   # rock / peak
       material: { single_color: false, ambient: 0.28, diffuse: 0.85 }
-    # The forest: procedural L-system trees (a custom scene-node type the lsystem_forest_ari host
-    # registers — the one piece not expressible declaratively). They are planted on dry land by
-    # sampling the terrain heightfield above, so the island owns its own shape and the host only
-    # grows the trees. All tunables are plain node keys (captured into the node's props bag).
+      shader: { preset: terrain_bump }   # value-noise fBm ground detail (cvcGL preset, was host C++)
+    # The forest: procedural L-system trees, rendered by the cvcGL `forest_trees` node type
+    # (cvc::lsys::grow_forest). They are planted on dry land by sampling the terrain heightfield
+    # above, so the island owns its own shape. All tunables are plain node keys (the node's props).
     - node: trees
       type: forest_trees
       ground: terrain      # the heightfield node to plant on
@@ -107,6 +149,7 @@ scene:
       levels: 4
       branches: 3
       pine_scale: 1.35
+      shader: { preset: bark }           # vertical-furrow bark on the trunks (cvcGL preset)
     # The sea: a travelling-wave VolumeNode that fills the water below sea level around the island
     # (a custom node; the volume's colour comes from its own transfer function). Rolls each frame.
     - node: sea

@@ -17,7 +17,9 @@
 // Build (standalone, against an installed libcvc):
 //   g++ -std=c++17 nav_swarm_demo.cpp -o nav_swarm_demo \
 //       -I$PREFIX/include -L$PREFIX/lib -lcvc && ./nav_swarm_demo
-// or inside the tree: enable -DCVC_BUILD_NAV_EXAMPLE=ON.
+// or inside the tree (the canonical examples tree, src/cvcGL/examples):
+//   cmake -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON … && cmake --build build
+//         --target nav_swarm_demo
 
 #include <cstdint>
 #include <cstdio>

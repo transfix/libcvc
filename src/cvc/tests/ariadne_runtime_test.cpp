@@ -75,8 +75,11 @@ struct MockBackend : Backend {
     return true;
   }
   void end_menu() override { rec("end_menu"); }
-  bool begin_window(const char *t, const char *, const Size &, float) override {
-    rec(std::string("begin_window:") + t);
+  bool close_windows = false; // simulate the user clicking a window's close (X) button
+  bool begin_window(const char *t, const char *, const Size &, float, bool *p_open) override {
+    rec(std::string("begin_window:") + t + (p_open ? "(closable)" : ""));
+    if (p_open && close_windows)
+      *p_open = false; // the X was clicked -> the core should persist tree.<id>.open = 0
     return true;
   }
   void end_window() override { rec("end_window"); }
@@ -2631,6 +2634,42 @@ TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
       << "the offloaded pool task never resumed the action";
   EXPECT_EQ(cvc::state::instance(app)("r.t").value(), "42"); // transparent self-park
   EXPECT_EQ(cvc::state::instance(app)("r.a").value(), "20"); // awaited future
+}
+
+// A `closable: true` window renders with a close button, persists tree.<id>.open, is skipped once
+// closed, and re-renders when the key is set back (what a Settings menu_toggle does).
+TEST(AriadneRuntime, ClosableWindowClosesAndReopens) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = window("Panel", {text("hi")});
+  w.id = "panel";
+  w.closable = true;
+  rt.set_root(group({w}));
+  const auto has = [&](const std::string &s) {
+    return std::find(mb.log.begin(), mb.log.end(), s) != mb.log.end();
+  };
+
+  mb.log.clear();
+  rt.render(); // open: rendered with a close button; the open state seeds to 1
+  EXPECT_TRUE(has("begin_window:Panel(closable)"));
+  EXPECT_EQ(cvc::state::instance(app)("tree.panel.open").value(), "1");
+
+  mb.close_windows = true;
+  mb.log.clear();
+  rt.render(); // the X is clicked -> the core persists open = 0
+  mb.close_windows = false;
+  EXPECT_EQ(cvc::state::instance(app)("tree.panel.open").value(), "0");
+
+  mb.log.clear();
+  rt.render(); // closed -> not rendered at all
+  EXPECT_FALSE(has("begin_window:Panel(closable)"));
+
+  cvc::state::instance(app)("tree.panel.open").value(std::string("1")); // the Settings toggle
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(has("begin_window:Panel(closable)"));
 }
 
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──

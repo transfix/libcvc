@@ -17,6 +17,19 @@ sensor rings, fog tiers, captions — the same visual vocabulary as the original
 | **`nav_fog_ghost`** | the fog-of-war "ghost" story, told on a top-down **map view by default** (`--view 3d` for perspective): the ground shows the agent's honest epistemics — never-seen near-black, remembered dim, in-view lit, belief as an LED grid (WALL red, GHOST amber) — while the phantom stands as a **translucent amber 3-D wall that erodes cell-by-cell** as the sensor clears it. Blue PLAN line (the live carrot) vs yellow TRACK trail, GOAL/start markers, a 4-beat caption arc, 0.5× story pacing. |
 | **`nav_finale`** | the flagship: 8 vehicles that already **hold the city map** converge on a drawn **staging line** (Act 1), then split into hue-matched **pursuit packs** chasing 4 hovering labelled targets (Act 2) — per-vehicle **A\* route spines** on the ground bend in place as routes retarget, engagement lines link pursuer to target, act cards narrate, and the PiP minimap draws true-position dots + route lines. Auto-probes `$CVC_NAV_BUNDLE` / `~/scenes/austin_south` for the real Austin bundle; the synthetic fallback says so on the HUD. `--view map` for a top-down ortho answer. |
 
+## Headless pure-C++ companions
+
+This directory also carries three **headless** CLIs that exercise the same `cvc::nav`
+runtime without any GL: they link only `cvc::cvc` (no cvcGL, no VTK), are built and
+installed with the demos above (`-DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON`), are
+native-only (the browser gallery is for rendered scenes), and each runs in the terminal:
+
+| demo | what it does |
+|------|--------------|
+| **`nav_swarm_demo`** | the pure-C++ swarm template: a synthetic walled grid drives thousands of vehicles through `sim_world` — the template a cvcGL scene copies to add navigating agents. |
+| **`nav_train_demo`** | self-supervised CoefMLP training CLI: differentiable rollout on a scene's SDF, writes the `.cvcnav` the pure-C++ swarm then drives with ([docs/NAV_TRAINING.md](../../docs/NAV_TRAINING.md)). |
+| **`nav_material_demo`** | the material-aware A/B run: the same lane of vehicles with risk/hazard semantics (soft mud, lethal water) off then on, side-by-side stats + PPM trajectories ([docs/NAV_MATERIAL.md](../../docs/NAV_MATERIAL.md)). |
+
 ## How the GRL-SNAM nav model works
 
 All three demos run the **same reactive brain** — the torch-free `cvc::nav` port of the

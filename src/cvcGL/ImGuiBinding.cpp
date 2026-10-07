@@ -505,6 +505,7 @@ void ScenePanel(SceneGraph &sg, bool *open, bool ownWindow) {
 // Bodies compiled inside cvcGL, so ImGui:: binds cvcGL's own context. Legal only
 // inside an ImGuiOverlay draw callback.
 bool Begin(const char *name) { return ImGui::Begin(name); }
+bool Begin(const char *name, bool *p_open) { return ImGui::Begin(name, p_open); }
 void End() { ImGui::End(); }
 void SameLine(double offsetX, double spacing) {
   ImGui::SameLine(static_cast<float>(offsetX), static_cast<float>(spacing));
@@ -590,6 +591,7 @@ void CameraMenuItems(CameraController &, double, double) {}
 
 // curated raw subset — inert (value-out echoes input; predicates false).
 bool Begin(const char *) { return false; }
+bool Begin(const char *, bool *) { return false; }
 void End() {}
 void SameLine(double, double) {}
 void Separator() {}

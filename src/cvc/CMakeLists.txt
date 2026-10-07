@@ -137,6 +137,11 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/grid.h
   ../../inc/cvc/world/heightfield.h
   ../../inc/cvc/world/scatter.h
+  ../../inc/cvc/world/roads.h
+  ../../inc/cvc/world/building_archetypes.h
+  ../../inc/cvc/world/sites.h
+  ../../inc/cvc/world/road_mesh.h
+  ../../inc/cvc/world/road_raster.h
   ../../inc/cvc/world/raster.h
   ../../inc/cvc/world/npy.h
   ../../inc/cvc/world/bundle.h
@@ -273,6 +278,11 @@ set(SOURCE_FILES
   world/surface.cpp
   world/heightfield.cpp
   world/scatter.cpp
+  world/roads.cpp
+  world/building_archetypes.cpp
+  world/sites.cpp
+  world/road_mesh.cpp
+  world/road_raster.cpp
   world/raster.cpp
   world/npy.cpp
   world/bundle.cpp
@@ -344,11 +354,11 @@ endif()
 # byte-goldens are therefore intentionally NOT asserted. Same discipline as nav.
 if(NOT MSVC)
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
-                              world/heightfield.cpp world/scatter.cpp world/raster.cpp world/bundle.cpp
+                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
-                              world/heightfield.cpp world/scatter.cpp world/raster.cpp world/bundle.cpp
+                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -1719,19 +1729,11 @@ if(CVC_NAV_WEIGHTS_FILE)
   message(STATUS "cvc::nav: installing policy ${CVC_NAV_WEIGHTS_FILE} -> share/cvc/nav/coef_mlp.cvcnav")
 endif()
 
-# The pure-C++ nav swarm demo (the template a cvcGL scene copies to add agents).
-option(CVC_BUILD_NAV_EXAMPLE "Build the pure-C++ nav swarm + trainer demos" OFF)
-if(CVC_BUILD_NAV_EXAMPLE)
-  add_executable(nav_swarm_demo ${PROJECT_SOURCE_DIR}/examples/nav_swarm_demo.cpp)
-  target_link_libraries(nav_swarm_demo PRIVATE cvc)
-  add_executable(nav_train_demo ${PROJECT_SOURCE_DIR}/examples/nav_train_demo.cpp)
-  target_link_libraries(nav_train_demo PRIVATE cvc)
-  add_executable(nav_material_demo ${PROJECT_SOURCE_DIR}/examples/nav_material_demo.cpp)
-  target_link_libraries(nav_material_demo PRIVATE cvc)
-  if(CVC_ENABLE_CUDA)
-    target_compile_definitions(nav_train_demo PRIVATE CVC_ENABLE_CUDA)
-  endif()
-endif()
+# The pure-C++ nav swarm / trainer / material demos moved to the canonical
+# examples tree with the rest of the demos: src/cvcGL/examples/ (built with
+# -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON, targets nav_swarm_demo /
+# nav_train_demo / nav_material_demo). The old -DCVC_BUILD_NAV_EXAMPLE switch
+# went with the top-level examples/ directory.
 
 # Headless L-system / world-generation CLIs (GL-free). cvc-lsys derives and
 # renders .lsys recipes to SVG/OFF; cvc-worldgen (added with cvc::world) builds

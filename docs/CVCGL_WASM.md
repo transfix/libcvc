@@ -18,6 +18,7 @@ and what it promises in return. Reference for `cvcgl_wasm_app()`
 - [Measuring: glsync and serve.py](#measuring-glsync-and-servepy)
 - [Testing](#testing)
 - [Checking an app in a browser](#checking-an-app-in-a-browser)
+- [Related](#related)
 
 ## Overview
 
@@ -432,3 +433,13 @@ Check in both Firefox and Chromium:
    must print the `cvcGL: ERROR:` line instead and never trap.
 4. **Memory with mimalloc** (wasm-mt). Run for a few minutes at the app's
    `MAXIMUM_MEMORY` and watch for growth failures.
+
+## Related
+
+This document covers the cvcGL-specific half. The platform-agnostic flow —
+organizing a project to build wasm easily, the cvcpkg requirements-file
+pattern, the generic CMake boilerplate (`cvcpkg_wasm_app()`), and packaging
+any wasm app as a cvcpkg bundle — is in the cvcpkg repo:
+`cvcpkg/docs/wasm-packaging.md` + `cvcpkg/cmake/cvcpkg-wasm-app.cmake`.
+The complete build + package commands with `/tmp` prefixes are in
+`libcvc/docs/FULL_BUILD_CVCPKG.md` → *Building and packaging wasm apps*.
