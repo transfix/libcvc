@@ -14,6 +14,14 @@
 > metadata (`comment`, `hidden`, `readOnly`). Only value and child-structure
 > changes are journaled for replication today — see the "Known gaps" section
 > of the distributed roadmap.
+>
+> **Header location.** The state subsystem lives under `cvc/state/`: include
+> `<cvc/state/state.h>`, `<cvc/state/state_object.h>`,
+> `<cvc/state/state_exec/…>`, etc. The old `<cvc/core/state*.h>`,
+> `<cvc/core/distributed_state_session.h>` and `<cvc/core/state_exec/…>` paths
+> still compile through installed forwarding headers for one release cycle and
+> are then removed — see
+> [`roadmap/STATE_DIR_LAYOUT_REFACTOR.md`](roadmap/STATE_DIR_LAYOUT_REFACTOR.md).
 
 ## Table of Contents
 
