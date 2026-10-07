@@ -1,11 +1,15 @@
-name: deploy gh-pages
+name: deploy pages
 
-# Rebuild the cvcGL wasm demo gallery from libcvc master and push it to the
-# gh-pages branch (https://transfix.github.io/libcvc/). Mirrors the pattern in
-# cy-pca/cyberpcangel-cvcgl's nightly.yml — same self-hosted Linux runner
-# (catx-03) that already holds the emsdk + wasm-mt deps prefix at /opt/cvc-wasm/,
-# just a different deploy target: git push to gh-pages instead of ssh to
-# catx-00.tx.wtf.
+# Rebuild the cvcGL wasm demo gallery from libcvc master and deploy it to GitHub
+# Pages (https://transfix.github.io/libcvc/) as a Pages artifact. Mirrors the
+# pattern in cy-pca/cyberpcangel-cvcgl's nightly.yml — same self-hosted Linux
+# runner (catx-03) that already holds the emsdk + wasm-mt deps prefix at
+# /opt/cvc-wasm/, just a different deploy target: actions/deploy-pages instead of
+# ssh to catx-00.tx.wtf.
+#
+# The gallery is NOT committed to a gh-pages branch: each build was ~500MB of
+# wasm, and committing it on every master push bloated every clone to ~900MB.
+# Requires Settings -> Pages -> Source = "GitHub Actions".
 #
 # Auto-triggers on push to master (so a merged PR lands on pages within minutes)
 # plus workflow_dispatch for a manual re-run and a nightly safety-net cron.
@@ -16,18 +20,15 @@ on:
   schedule:
     - cron: '30 8 * * *' # 08:30 UTC ≈ 03:30 America/Chicago (after cyberpcangel nightly)
   workflow_dispatch:
-    inputs:
-      force:
-        description: 'Rebuild + push even if the gallery bytes are unchanged'
-        type: boolean
-        default: false
 
 concurrency:
   group: deploy-pages
   cancel-in-progress: false
 
 permissions:
-  contents: write # push to gh-pages
+  contents: read
+  pages: write # deploy the Pages artifact
+  id-token: write # OIDC token actions/deploy-pages verifies the deploy with
 
 jobs:
   build-and-deploy:
@@ -35,6 +36,9 @@ jobs:
     # + wasm-deps prefix at /opt/cvc-wasm). Without the label it hits the
     # generic fleet where emsdk_env.sh is missing.
     runs-on: [self-hosted, Linux, X64, cy-pca]
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     env:
       CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk
       CVC_WASM_DEPS: /opt/cvc-wasm/deps-wasm-mt
@@ -82,7 +86,10 @@ jobs:
         run: |
           set -euo pipefail
           bin=build-wasm/bin
-          gallery=$(mktemp -d)
+          # Inside the workspace (not mktemp) so the next checkout's clean wipes
+          # it instead of leaking ~500MB into the runner's /tmp every run.
+          gallery="$GITHUB_WORKSPACE/_site"
+          rm -rf "$gallery" && mkdir -p "$gallery"
           # Landing page + per-demo hosts (already generated next to the binaries
           # by examples/wasm/build-pages.py, invoked from build-wasm-demo.sh).
           if [ -d "build-wasm/gallery" ]; then
@@ -104,45 +111,16 @@ jobs:
           touch "$gallery/.nojekyll"
           echo "gallery=$gallery" >> "$GITHUB_OUTPUT"
 
-      - name: Push to gh-pages
-        id: push
-        run: |
-          set -euo pipefail
-          gallery="${{ steps.assemble.outputs.gallery }}"
-          sha=$(git rev-parse HEAD)
-          short=$(git rev-parse --short HEAD)
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.assemble.outputs.gallery }}
 
-          # Fresh worktree of gh-pages so we don't touch the master checkout.
-          git fetch origin gh-pages:refs/remotes/origin/gh-pages
-          workdir=$(mktemp -d)
-          git worktree add --detach "$workdir" origin/gh-pages
-          # Replace contents wholesale — the gallery is what we ship, not a diff.
-          # Wipe every top-level entry (dotfiles included) EXCEPT the worktree's
-          # own .git pointer file; deleting it detaches the worktree and the
-          # git commands below die with "fatal: not in a git directory".
-          find "$workdir" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          cp -R "$gallery"/. "$workdir"/
-
-          cd "$workdir"
-          git config user.name "libcvc-pages"
-          git config user.email "pages@cyberpcangel.com"
-          git add -A
-          if git diff --cached --quiet; then
-            if [ "${{ inputs.force }}" != "true" ]; then
-              echo "gh-pages: no changes — skipping push."
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            # --force flag: land an empty commit anyway so the deploy time is fresh.
-            git commit --allow-empty -q -m "pages: rebuild from libcvc master ${short} (forced, no content change)"
-          else
-            git commit -q -m "pages: rebuild from libcvc master ${short}"
-          fi
-          git push origin HEAD:gh-pages
-          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
       - name: Verify live
-        if: steps.push.outputs.changed == 'true'
         run: |
           # Curl on this runner has a libcurl symbol mismatch (same as sister
           # workflow); use python's urllib. A newly-added demo's path can take
