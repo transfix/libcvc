@@ -57,6 +57,10 @@ c.step(pos, head, spd, mode, reached, samplers);   // pos/goal/start in WORLD me
 cvc::nav::episode_nav_stats e = c.finish();
 ```
 
+`finish()` is `const` and non-destructive: it reduces a copy of the accumulators, so it can be
+called every tick as a running snapshot (e.g. to feed `cvc::gl::publish_nav_stats`), and `step()`
+can keep accumulating after it.
+
 **2. Via `sim_world`'s opt-in internal collector** (the torch-free native path): arm it before the
 first `step()`, and every `step()` folds a tick in pure C++ (safe on the sim thread):
 

@@ -1098,6 +1098,7 @@ TEST(NavSimWorld, BaseNavStatsArmedCollectsSaneFields) {
   EXPECT_GE(e.penetration_pct, 0.0);
   EXPECT_LE(e.penetration_pct, 100.0);
   EXPECT_TRUE(std::isfinite(e.min_sep_m)); // N > 1 -> lowered from the sentinel
+  EXPECT_EQ(world.nav_stats().to_json(), e.to_json()); // a repeatable running snapshot
 
   // Determinism: an identically-seeded, identically-stepped world -> identical record.
   cvc::nav::sim_world w2 = cvc::nav::sim_world::from_occupancy(
