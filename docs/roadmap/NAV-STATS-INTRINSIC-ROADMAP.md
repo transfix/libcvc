@@ -66,7 +66,11 @@ Track-1 sub-PR (or batched), gated on Track-1 landing.
     `state_publisher` value lane, keyed `<prefix>.nav_stats.*` (SceneGraph prefix).
   - **3b-2** `publish_nav_rasters` — belief/fog planes as version-gated z=1 `cvc::volume` handles on
     the **data() lane** (VolumeNode-renderable), `sim_world::plane_version(m)` added; efficient
-    realtime storage (deep-copy only on a changed plane).
+    realtime storage (deep-copy only on a changed plane). The gate is now
+    `sim_world::raster_version(m)` (bumps once per sense tick that changed a plane's belief_occ /
+    ever_seen / last_visible), with a `publish_nav_rasters(..., sim_world, ...)` overload:
+    `plane_version` counts belief sign flips only, so gating on it left fog/belief stale on
+    threshold crossings, add_obstacle marks and field-of-view moves.
   - **3b-3** (downstream) an extension publishes its own sub-record under its own
     `<prefix>.nav_stats.<ext>.*` subtree, joined by `veh_index`, from the same `finish()` seam (base +
     extension + rasters each frame via the scene's auto-started publisher).

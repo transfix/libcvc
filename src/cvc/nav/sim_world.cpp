@@ -71,6 +71,7 @@ sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::ui
       logodds_[static_cast<long>(m) * hw + i] =
           prior_occ[i] ? static_cast<float>(cfg.l_clamp) : -static_cast<float>(cfg.l_clamp);
   version_.assign(M_, 0);
+  raster_version_.assign(M_, 0);
   dyn_stamp_.assign(Mhw, -std::numeric_limits<double>::infinity());
 
   occ_.resize(Mhw);
@@ -318,6 +319,8 @@ void sim_world::step(int num_threads) {
     pl.ever_seen = everseen_.data();
     pl.version = version_.data();
     pl.K = M_;
+    std::vector<std::uint8_t> fov_changed(static_cast<std::size_t>(M_), 0);
+    pl.fov_changed = fov_changed.data(); // ever_seen / last_visible dirty, per plane
     std::vector<std::int32_t> flips(n_);
     sense_batch(truth_.data(), rows_, cols_, cfg_.min_x, cfg_.min_y, cfg_.max_x, cfg_.max_y, ag,
                 nullptr, 0, nullptr, 0, pl, cfg_.l_occ, cfg_.l_free, cfg_.l_clamp, flips.data(),
@@ -365,8 +368,8 @@ void sim_world::step(int num_threads) {
                             dyn_stamp_.data() + off, t_now, cfg_.ttl_s, occ2.data());
         if (!std::equal(occ2.begin(), occ2.end(), occ_.begin() + off)) {
           std::copy(occ2.begin(), occ2.end(), occ_.begin() + off);
+          changed[m] = 1; // occ_ plane m is written (even if the rebuild below throws)
           rebuild_plane(m);
-          changed[m] = 1;
         }
       } catch (...) {
         failed[m] = 1;
@@ -377,6 +380,12 @@ void sim_world::step(int num_threads) {
     else
       for (int m = 0; m < M_; ++m)
         composite_and_rebuild(m);
+    // One raster-version bump per plane whose published rasters changed this tick: its occupancy
+    // (changed[m]) or its FoV masks (fov_changed[m]). Done before the failure check, so a plane
+    // whose occ_ was written but whose rebuild then threw still reports the raster change.
+    for (int m = 0; m < M_; ++m)
+      if (changed[m] || fov_changed[m])
+        ++raster_version_[m];
     bool any = false;
     for (int m = 0; m < M_; ++m) {
       if (failed[m])

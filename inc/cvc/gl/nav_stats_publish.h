@@ -22,6 +22,9 @@
 
 namespace cvc {
 class app; // fwd (the raster publisher needs it for the cvc::volume ctor + the state root)
+namespace nav {
+class sim_world; // fwd (the live-world raster publisher overload)
+} // namespace nav
 namespace gl {
 
 // "<prefix>.nav_stats" — the per-scene nav-stats subtree root, matching the house sceneStatePath
@@ -69,18 +72,29 @@ struct nav_raster_pub_state {
 // Publish the belief/fog rasters into <prefix>.nav_stats.rasters.* for realtime viz. `truth` is
 // [rows*cols] (one shared plane, published ONCE); `belief`/`everseen`/`lastvis` are
 // [planes*rows*cols] (plane m at m*rows*cols) — the sim_world
-// truth()/belief_occ(m)/ever_seen(m)/last_visible(m) surface. `versions[m]` is
-// sim_world::plane_version(m). Each raster is wrapped as a z=1 cvc::volume and stored on the node's
-// data() lane (a shallow-share handle; VolumeNode renders it), with the paired .version + .dims
-// scalars on the value lane through `pub`. A plane's volumes are re-wrapped only when versions[m]
-// changed vs `st` (the deep copy is version-gated). Same-process only: the data() lane does not
-// cross a process boundary — a remote viewer opts into the brick escalation behind the identical
-// version/dims.
+// truth()/belief_occ(m)/ever_seen(m)/last_visible(m) surface. `versions[m]` must change whenever
+// plane m's rasters do: pass sim_world::raster_version(m), NOT plane_version(m) (a belief-flip
+// count that misses threshold crossings, add_obstacle() stamps and field-of-view moves, so gating
+// on it shows stale fog/belief). Each raster is wrapped as a z=1 cvc::volume and stored on the
+// node's data() lane (a shallow-share handle; VolumeNode renders it), with the paired .version +
+// .dims scalars on the value lane through `pub`. A plane's volumes are re-wrapped only when
+// versions[m] changed vs `st` (the deep copy is version-gated). Same-process only: the data() lane
+// does not cross a process boundary — a remote viewer opts into the brick escalation behind the
+// identical version/dims.
 void publish_nav_rasters(cvc::app &app, cvc::gl::state_publisher &pub,
                          const std::string &scenePrefix, const nav_raster_dims &dims,
                          const std::uint8_t *truth, const std::uint8_t *belief,
                          const std::uint8_t *everseen, const std::uint8_t *lastvis,
                          const int *versions, nav_raster_pub_state &st);
+
+// The same, straight from a live sim_world: dims from its rows/cols/planes and config bounds, the
+// rasters from its truth()/belief_occ/ever_seen/last_visible, gated per plane on
+// world.raster_version(m) — so each plane re-publishes exactly once per sense tick that changed it
+// and never on an unchanged tick. Owner-thread only (reads the world's rasters): never call while
+// a sim-thread worker is stepping it.
+void publish_nav_rasters(cvc::app &app, cvc::gl::state_publisher &pub,
+                         const std::string &scenePrefix, const cvc::nav::sim_world &world,
+                         nav_raster_pub_state &st);
 
 } // namespace gl
 } // namespace cvc

@@ -10,9 +10,12 @@
 #include <cvc/core/app.h>
 #include <cvc/gl/nav_stats_publish.h>
 #include <cvc/gl/state_publisher.h>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/sim_world.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <string>
+#include <vector>
 
 static int failures = 0;
 static void ck(bool ok, const char *w) {
@@ -187,6 +190,91 @@ int main() {
   pub.flush();
   ck((int)st("nver.nav_stats.rasters.plane.0.belief.data").data<cvc::volume>()(0, 0, 0) == 99,
      "nullptr versions: plane0 re-published, not frozen");
+
+  // ── live sim_world overload: gated on raster_version, so each plane re-publishes exactly once
+  // per sense tick that changed its rasters and never on an unchanged tick. A stationary agent with
+  // one ray senses a prior-only phantom cell away (the nav_test scenario
+  // NavSimWorld.RasterVersionBumpsOncePerRasterChange): tick 0 grows ever_seen (no belief flip),
+  // tick 5 is a belief flip that changes no raster, tick 6 crosses the occupancy threshold without
+  // a flip; then an add_obstacle() mark appears (+0) and expires (+5). plane_version would have
+  // missed ticks 0, 6 and both obstacle events, and fired on tick 5.
+  {
+    const int R = 16, C = 16;
+    std::vector<std::uint8_t> truthW((std::size_t)R * C, 0), priorW((std::size_t)R * C, 0);
+    priorW[8 * C + 10] = 1; // the phantom
+    cvc::nav::sim_world::config cfg;
+    cfg.rows = R;
+    cfg.cols = C;
+    cfg.max_x = C - 1;
+    cfg.max_y = R - 1;
+    cfg.scale = 1.0;
+    cfg.veh.rr = 0.2f;
+    cfg.veh.d_hat = 0.5f;
+    cfg.veh.dt = 0.06f;
+    cfg.veh.vmax = 0.0f;
+    cfg.range_m = 12.0;
+    cfg.n_rays = 1;
+    cfg.fov_rad = 0.0;
+    cfg.sense_every = 1;
+    cfg.freeze_sense = false;
+    cfg.optimistic = false;
+    cfg.l_free = -1.4;
+    cfg.l_clamp = 8.0;
+    cfg.ttl_s = 0.25;
+    float o[2] = {4.0f, 8.0f}, goal[2] = {14.0f, 8.0f}, color[3] = {1, 1, 1};
+    cvc::nav::sim_world world(cfg, truthW.data(), priorW.data(),
+                              cvc::nav::coef_mlp::default_biased(), o, goal, color, 1);
+    cvc::gl::nav_raster_pub_state wst;
+    const std::string pp = "live.nav_stats.rasters.plane.0";
+    // Does the stored z=1 volume hold exactly this raster? (i=col, j=row)
+    auto holds = [&](const std::string &leaf, const std::uint8_t *raster) {
+      const cvc::volume vol = st(pp + leaf).data<cvc::volume>();
+      if (vol.XDim() != (unsigned)C || vol.YDim() != (unsigned)R || vol.ZDim() != 1)
+        return false;
+      for (int r = 0; r < R; ++r)
+        for (int c = 0; c < C; ++c)
+          if ((int)vol(c, r, 0) != raster[r * C + c])
+            return false;
+      return true;
+    };
+    cvc::gl::publish_nav_rasters(app, pub, "live", world, wst);
+    pub.flush();
+    ck(st("live.nav_stats.rasters.dims.rows").value<int>() == R, "live dims rows");
+    ck(st("live.nav_stats.rasters.dims.planes").value<int>() == 1, "live dims planes");
+    ck(st("live.nav_stats.rasters.dims.max_x").value<double>() == C - 1, "live dims max_x");
+    ck(st(pp + ".version").value<int>() == 0, "live plane0 first publish at raster_version 0");
+    ck(st("live.nav_stats.rasters.truth.data").isData<cvc::volume>(), "live truth published");
+    // Hold the last-published handle: a re-publish wraps a fresh deep copy, so the stored volume's
+    // data_ptr() changes; while this handle lives, its buffer cannot be reused for the next one.
+    cvc::volume held = st(pp + ".belief.data").data<cvc::volume>();
+    int republishes = 0;
+    auto tick_and_publish = [&](const char *phase, int t, bool expect) {
+      world.step(1);
+      cvc::gl::publish_nav_rasters(app, pub, "live", world, wst);
+      pub.flush();
+      const cvc::volume now = st(pp + ".belief.data").data<cvc::volume>();
+      const bool republished = now.data_ptr() != held.data_ptr();
+      held = now;
+      republishes += republished;
+      char what[96];
+      std::snprintf(what, sizeof what, "%s tick %d: republished == %d", phase, t, (int)expect);
+      ck(republished == expect, what);
+      std::snprintf(what, sizeof what, "%s tick %d: published rasters are current", phase, t);
+      ck(holds(".belief.data", world.belief_occ(0)) &&
+             holds(".ever_seen.data", world.ever_seen(0)) &&
+             holds(".last_visible.data", world.last_visible(0)),
+         what);
+      std::snprintf(what, sizeof what, "%s tick %d: .version tracks raster_version", phase, t);
+      ck(st(pp + ".version").value<int>() == world.raster_version(0), what);
+    };
+    for (int t = 0; t < 10; ++t)
+      tick_and_publish("phantom", t, t == 0 || t == 6);
+    ck(world.plane_version(0) == 1, "the run includes one belief flip (tick 5)");
+    world.add_obstacle(2, 2, 2, 2);
+    for (int k = 0; k < 10; ++k)
+      tick_and_publish("obstacle", k, k == 0 || k == 5);
+    ck(republishes == 4, "exactly four re-publishes: ever_seen, threshold, mark, expiry");
+  }
 
   std::printf(failures ? "cvcgl_nav_stats_publish: %d FAILURES\n" : "cvcgl_nav_stats_publish: OK\n",
               failures);

@@ -212,12 +212,17 @@ std::vector<std::vector<std::uint8_t>> inflate_batch(const std::vector<const std
 // K row-major rows*cols belief planes, all mutated IN PLACE. `logodds` is the
 // log-odds memory; `last_visible`/`ever_seen` are numpy-bool (0/1) FoV masks;
 // `version[k]` bumps once per agent whose sense flips any cell's occupied bit.
+// `fov_changed` (optional, null = not computed) receives, per plane, 1 iff this
+// call changed any byte of plane k's ever_seen or last_visible, else 0 — the
+// exact FoV-raster dirty flag `version` is not (a FoV moving over open ground
+// flips nothing). Requesting it never changes the planes' contents.
 struct belief_planes {
   float *logodds = nullptr;             // [K*rows*cols]
   std::uint8_t *last_visible = nullptr; // [K*rows*cols]
   std::uint8_t *ever_seen = nullptr;    // [K*rows*cols]
   std::int32_t *version = nullptr;      // [K]
   int K = 0;
+  std::uint8_t *fov_changed = nullptr; // [K] out, optional
 };
 
 // Per-agent pose + sensor cone; every array has length n (the adapter broadcasts
