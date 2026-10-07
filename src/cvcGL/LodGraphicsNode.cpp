@@ -74,8 +74,10 @@ void LodGraphicsNode::clearRungs(std::size_t keep) {
   }
   m_worldError.resize(m_rungs.size());
   m_tris.resize(m_rungs.size());
-  if (m_rungs.empty())
+  if (m_rungs.empty()) {
     m_base.reset();
+    ownBoundsChanged(); // no rung 0, no box
+  }
 }
 
 void LodGraphicsNode::addRung(const cvc::geometry &g, double worldError) {
@@ -83,11 +85,28 @@ void LodGraphicsNode::addRung(const cvc::geometry &g, double worldError) {
   child->setGeometry(g);
   if (m_style)
     m_style(*child); // before the rung can draw, so every rung looks the same
-  if (m_rungs.empty())
+  if (m_inheritedClipPlanes)
+    applyClipPlanesTo(*child, m_inheritedClipPlanes); // clipped like the other rungs
+  const bool first = m_rungs.empty();
+  if (first)
     m_base = std::make_unique<cvc::geometry>(g); // shares g's storage
   m_rungs.push_back(child);
   m_worldError.push_back(worldError);
   m_tris.push_back(g.num_tris());
+  if (first)
+    ownBoundsChanged(); // the box is rung 0's
+}
+
+void LodGraphicsNode::applyClipPlanes(vtkPlaneCollection *planes) {
+  // Prop-less: what draws are the rungs, so they take a clipping parent's planes
+  // (addRung hands them to rungs made later). Without any, a rung keeps what
+  // this node's own setClipChildren gives it.
+  m_inheritedClipPlanes = planes && planes->GetNumberOfItems() > 0 ? planes : nullptr;
+  vtkPlaneCollection *rungPlanes = m_inheritedClipPlanes
+                                       ? m_inheritedClipPlanes.Get()
+                                       : (getClipChildren() ? getClipPlanes() : nullptr);
+  for (auto &r : m_rungs)
+    applyClipPlanesTo(*r, rungPlanes);
 }
 
 void LodGraphicsNode::setPyramid(const cvc::lod::mesh_pyramid &pyr) {

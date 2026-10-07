@@ -5,8 +5,10 @@ Headless part: the wrapped getter/setter. With an offscreen GL context it also
 renders a box-outline parent with three flat-coloured children, measured by
 lit area per hue: one fully inside (red: all of it drawn), one straddling the
 +x face (green: about half), one above the +z face (blue: none) -- unclipped
-first, so the checks can fail, then clipped, off again, and on again. The C++
-side, with exact pixel samples on both mapper families, is cvcgl_clip_children.
+first, so the checks can fail, then clipped, off again, and on again -- and a
+fourth child added (sg.add_child_geometry) while clipping is on is cut at the
+-x face like the others. The C++ side, with exact pixel samples on both mapper
+families and every way a parent's box can change, is cvcgl_clip_children.
 The render part skips (exit 0) without offscreen GL unless
 CVC_REQUIRE_RENDER=1. Synthetic data only.
 """
@@ -139,6 +141,20 @@ def test_render():
     r = ratios("clipping on again")
     check("clipping on again: clipped as before",
           r[0] > 0.95 and 0.4 < r[1] < 0.6 and r[2] == 0.0, str(["%.3f" % x for x in r]))
+
+    # Added while clipping is on: a red band across the -x face (half inside).
+    late = sg.add_child_geometry("box", "late", quad(C - 80, C - 5, C - 20, C + 5, 0.0))
+    late.setColor(1.0, 0.1, 0.1)
+    late.setAmbient(1.0)
+    late.setDiffuse(0.0)
+    late.setSpecular(0.0)
+    red_on = hue_areas(view.frameRGB())[0] - full[0]  # less the inside child (drawn whole)
+    box.setClipChildren(False)
+    red_off = hue_areas(view.frameRGB())[0] - full[0]
+    ratio = red_on / float(red_off) if red_off > 0 else -1.0
+    print("  added while clipping: late child %d of %d px" % (red_on, red_off))
+    check("a child added while clipping is on is cut at the face (about half)",
+          red_off > 50 and 0.4 < ratio < 0.6, "%.3f" % ratio)
     view.close()
 
 

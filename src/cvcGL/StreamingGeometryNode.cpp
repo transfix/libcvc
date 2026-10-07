@@ -276,6 +276,7 @@ void StreamingGeometryNode::setDerivedBoundsNow(const cvc::bounding_box &bounds)
   }
   m_appliedBounds = bounds;
   noteExtentChanged();
+  ownBoundsChanged();
 }
 
 void StreamingGeometryNode::noteExtentChanged() {
@@ -507,7 +508,7 @@ void StreamingGeometryNode::applyPending() {
     toArray(bounds, b);
     m_core->setReservedBounds(b);
     m_appliedBounds = bounds;
-    updateBoundingBoxNode();
+    ownBoundsChanged();
   }
   if (rangeChanged)
     m_core->setDrawRange(static_cast<vtkIdType>(std::min<std::size_t>(

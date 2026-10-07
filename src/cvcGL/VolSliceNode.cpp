@@ -127,6 +127,7 @@ void VolSliceNode::setVolume(const cvc::volume &vol) {
     m_volume = vol; // shallow copy (copy-on-write buffers)
     ++m_volumeVersion;
   }
+  ownBoundsChanged(); // the box is the volume's
   if (SceneGraph *sg = getSceneGraph())
     sg->requestRender();
 }

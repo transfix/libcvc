@@ -264,7 +264,10 @@ public:
   // Clipping plane control. setClipChildren(true) clips this node's graphics
   // children to this node's own getBoundingBox() under its world transform: six
   // planes, normals pointing INTO the box (VTK keeps the side a plane's normal
-  // points into), which follow the node as it moves. Children drawn by VTK's
+  // points into), which follow the node as it moves and as its box changes
+  // (every node reports that through ownBoundsChanged()). A child added later
+  // is clipped too; a child removed is no longer clipped. A LodGraphicsNode
+  // child passes the planes on to its rungs. Children drawn by VTK's
   // low-memory mapper (the GLES3/WebGL2 default, or CVCGL_LOWMEM_MAPPER=force)
   // are not clipped: VTK 9.5's vtkOpenGLLowMemoryPolyDataMapper has no
   // clipping-plane support.
@@ -309,6 +312,9 @@ protected:
   void updateBoundingBoxNode(); // Update bbox node with current bounds + transform
   void updateLabel();           // Update label position and properties
   void updateClipPlanes();      // Update clip planes based on bounding box and transform
+  // A subclass calls this when its own getBoundingBox() changed (new data, new
+  // bounds): re-fits the bbox outline and the planes it clips its children to.
+  void ownBoundsChanged();
 
   // Generic helper to apply world transform to a vector of VTK props
   void applyWorldTransformToProps(const std::vector<vtkProp *> &props);
@@ -321,6 +327,11 @@ protected:
 
   // Apply clip planes to this node's mapper/prop - subclasses override if they support clipping
   virtual void applyClipPlanes(vtkPlaneCollection *planes);
+  // applyClipPlanes on another node: for a container whose drawn parts are its
+  // own children (LodGraphicsNode hands its rungs the planes it is given).
+  static void applyClipPlanesTo(GraphicsNode &node, vtkPlaneCollection *planes) {
+    node.applyClipPlanes(planes);
+  }
 
   // Protected members for subclass access
   std::string m_name;

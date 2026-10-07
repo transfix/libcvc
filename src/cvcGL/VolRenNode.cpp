@@ -254,9 +254,14 @@ VolRenNode::VolRenNode(cvc::app &ctx, const std::string &statePath, const std::s
     : GeometryNode(ctx, statePath, name) {
   m_stateSettings = std::make_unique<cvc::volren::state_settings>(
       ctx, stateName("volren"), [this](const cvc::volren::state_settings::snapshot &s) {
-        std::lock_guard<std::mutex> lock(m_configMutex);
-        m_snapshotSettings = s;
-        ++m_settingsVersion;
+        {
+          std::lock_guard<std::mutex> lock(m_configMutex);
+          m_snapshotSettings = s;
+          ++m_settingsVersion;
+        }
+        // A volume's model_transform may have moved the box. After the lock:
+        // getBoundingBox() takes it.
+        ownBoundsChanged();
       });
   {
     std::lock_guard<std::mutex> lock(m_configMutex);
@@ -338,6 +343,7 @@ std::size_t VolRenNode::addVolume(const cvc::volume &vol, cvc::volren::volume_se
     index = m_volumes.size() - 1;
   }
   m_stateSettings->set(next); // mirror to the tree (does not re-fire apply)
+  ownBoundsChanged();
   return index;
 }
 
@@ -351,6 +357,7 @@ void VolRenNode::clearVolumes() {
     next = m_snapshotSettings;
   }
   m_stateSettings->set(next);
+  ownBoundsChanged();
 }
 
 std::size_t VolRenNode::volumeCount() const {
@@ -376,6 +383,7 @@ void VolRenNode::setVolumeConfig(std::size_t index, const cvc::volren::volume_se
     next = m_snapshotSettings;
   }
   m_stateSettings->set(next);
+  ownBoundsChanged(); // the volume's model_transform may have moved the box
 }
 
 cvc::volren::render_settings VolRenNode::renderConfig() const {

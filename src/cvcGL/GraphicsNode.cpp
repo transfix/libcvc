@@ -800,6 +800,10 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   // Update child's transform to reflect new parent
   child->updateTransform();
 
+  // A child added under a clipping parent is clipped like its siblings.
+  if (m_clipChildren)
+    child->runOnMainThread([this, child]() { child->applyClipPlanes(m_clipPlanes); });
+
   // Update this node's bounding box to include the new child
   if (m_showBBox) {
     updateBoundingBoxNode();
@@ -821,6 +825,9 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child) {
     m_graphicsChildren.erase(it);
     child->m_parent = nullptr;
     child->updateTransform();
+    // Leaving a clipping parent: no longer clipped by its box.
+    if (m_clipChildren)
+      child->runOnMainThread([child]() { child->applyClipPlanes(nullptr); });
   }
 
   // Also remove as SceneNode child
@@ -1304,6 +1311,21 @@ void GraphicsNode::removeFromRenderer(vtkRenderer *renderer) {
 
   // Call base implementation to remove the main prop
   SceneNode::removeFromRenderer(renderer);
+}
+
+void GraphicsNode::ownBoundsChanged() {
+  // Nothing to re-fit (a hidden outline is re-fitted when shown, by setShowBBox):
+  // the common case, and some callers report a new box every frame.
+  if (!m_showBBox && !m_clipChildren)
+    return;
+  // On the owner thread: some callers are loader threads (VolSliceNode::setVolume,
+  // VolRenNode's state-settings apply), and both updates walk this node's children.
+  runOnMainThread([this]() {
+    updateBoundingBoxNode();
+    // The planes this node clips its children to are its own box's faces.
+    if (m_clipChildren)
+      updateClipPlanes();
+  });
 }
 
 void GraphicsNode::setClipChildren(bool clip) {

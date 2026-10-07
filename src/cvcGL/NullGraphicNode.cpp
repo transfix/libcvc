@@ -52,7 +52,7 @@ void NullGraphicNode::setBounds(const cvc::bounding_box &bbox) {
       << bbox[5];
   getState("bounds").value(oss.str());
 
-  updateBoundingBoxNode();
+  ownBoundsChanged();
 }
 
 void NullGraphicNode::setBounds(double minX, double minY, double minZ, double maxX, double maxY,
@@ -64,7 +64,7 @@ void NullGraphicNode::setBounds(double minX, double minY, double minZ, double ma
   oss << minX << "," << minY << "," << minZ << "," << maxX << "," << maxY << "," << maxZ;
   getState("bounds").value(oss.str());
 
-  updateBoundingBoxNode();
+  ownBoundsChanged();
 }
 
 cvc::bounding_box NullGraphicNode::getBoundingBox() const {
@@ -187,8 +187,8 @@ void NullGraphicNode::syncBoundsToChildren() {
         << "," << m_bounds.maxy << "," << m_bounds.maxz;
     getState("bounds").value(oss.str());
 
-    // Update visualization
-    updateBoundingBoxNode();
+    // Update visualization (and any clip planes)
+    ownBoundsChanged();
   }
 }
 
