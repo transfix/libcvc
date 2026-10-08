@@ -38,17 +38,46 @@ permissions:
 #   - Windows: libcvc-<ver>-windows-<arch>-<config>.zip           (shared)
 #              libcvc-<ver>-windows-<arch>-<config>-static.zip    (static)
 #
-# Shared and static archives are both fully self-contained: every
-# project-level dependency (Boost, HDF5, FFTW, GSL on all platforms;
-# plus ImageMagick + CGAL/GMP/MPFR on Windows via cvcpkg) is bundled
-# alongside libcvc, so consumers can `find_package(cvc CONFIG)` from
-# the extracted archive without needing apt / Homebrew / cvcpkg on
-# the host. Shared archives ship .so/.dylib/.dll (with rpath fixups
-# on Linux+macOS) plus their import .lib on Windows; static archives
-# ship .a/.lib only. Both flavors include cvc::xmlrpc. VTK is
-# intentionally NOT bundled — downstream consumers (F2Dock, MolSurf,
-# volrover) bring their own VTK with the configuration they need
-# (e.g. Qt-enabled for volrover).
+# Linux and macOS archives are self-contained: a consumer puts the
+# extracted archive on CMAKE_PREFIX_PATH and `find_package(cvc CONFIG)`
+# works with no apt / Homebrew / cvcpkg on the host. Each one is
+# libcvc's install tree plus every cvcpkg bundle libcvc uses, taken
+# whole from the release/shared prefix it was built against: libraries,
+# headers, CMake package configs, pkg-config files, and the tools some
+# of those configs insist on. .github/scripts/sdk-bundle-deps.sh does
+# the copy and says which bundles it leaves out and why. The static
+# flavor is a static libcvc over those same shared deps (see the fetch
+# step), so it ships them too. Shared libcvc gets an $ORIGIN RUNPATH
+# (Linux) or @loader_path rpath (macOS) to find them. Both flavors
+# include cvc::xmlrpc. VTK is intentionally NOT bundled — downstream
+# consumers (F2Dock, MolSurf, volrover) bring their own VTK with the
+# configuration they need (e.g. Qt-enabled for volrover).
+#
+# That is checked, not assumed: the `sdk-smoke` job extracts each
+# Release archive on a fresh runner, builds and runs a find_package(cvc)
+# consumer against it alone, and fails if any package config, linked
+# library or loaded library came from outside the archive. A failure
+# there blocks the release.
+#
+# Host requirements that stay outside the archives: the system C/C++
+# runtimes (glibc, libstdc++, libgomp; libSystem, libc++, libcurl on
+# macOS; the UCRT on Windows) and, for the CUDA-enabled Linux SDK, the
+# CUDA toolkit. libcvc's public headers include <cuda_runtime.h> when
+# built with CUDA (cvc/utility/cuda_utils.h via cvc/volume/voxels.h),
+# and the static flavor links cudart_static. Running a consumer only
+# needs the NVIDIA driver.
+#
+# Windows archives ship the cvcpkg prefix's DLLs, import libraries and
+# headers, but not yet its CMake package configs, so they are not
+# smoke-tested.
+#
+# Everything the jobs build with comes from cvcpkg: the deps (below)
+# and the build tools, i.e. cmake, ninja, pkg-config and patchelf
+# (.github/actions/cvcpkg-build-tools). Nothing comes from apt or
+# Homebrew. Two exceptions remain: the compiler, which is the runner
+# image's GCC / Xcode clang / VS 2022 until a move to cvcpkg's llvm is
+# assessed, and the CUDA toolkit, from NVIDIA's network installer
+# because cvcpkg has no toolkit recipe yet.
 #
 # Third-party deps are always cvcpkg's release/shared bundles, for
 # every lane (Debug and static included). That is the one catalog tuple
@@ -62,9 +91,6 @@ permissions:
 #
 # Release-config archives are required for a release; Debug archives
 # are best-effort and attached when their lane succeeds.
-#
-# System libraries (glibc, libstdc++, libm, Windows UCRT) are
-# intentionally left to the host.
 #
 # (The volrover3 end-user application moved to the volrover repository —
 # https://github.com/transfix/volrover — along with its packaging.)
@@ -126,16 +152,6 @@ jobs:
           echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
           echo "linksfx=$LINKSFX"  >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies (libcvc)
-        if: matrix.kind == 'libcvc'
-        run: |
-          sudo apt-get update
-          # Only build-tooling + AppImage helpers here; Boost/HDF5/FFTW/
-          # GSL/ImageMagick/CGAL/log4cplus come from cvcpkg via
-          # fetch-libcvc-deps below.
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build libzstd-dev
-
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
       # statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below) so users
@@ -170,6 +186,14 @@ jobs:
         with:
           build_type: Release
           link: shared
+
+      # cmake, ninja, pkg-config and patchelf from cvcpkg, like every
+      # library above. Nothing comes from apt; the compiler is the
+      # runner's and CUDA is NVIDIA's (above).
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+        with:
+          tools: cmake ninja pkg-config patchelf
 
       - name: Configure
         run: |
@@ -209,12 +233,9 @@ jobs:
         run: cmake --build build --parallel
 
       # ── libcvc developer tarball (self-contained) ───────────────
-      # Stage libcvc's install tree, then copy the libraries and
-      # headers of every project-level dependency (Boost, HDF5, FFTW,
-      # GSL) into the same tree so the archive is fully self-contained
-      # — consumers should be able to find_package(cvc CONFIG) without
-      # needing apt-installed dev packages on the host. System glibc /
-      # libstdc++ / libm are intentionally left to the host.
+      # libcvc's install tree over the cvcpkg bundles it uses, copied
+      # from the same prefix it was built against (see the header and
+      # .github/scripts/sdk-bundle-deps.sh).
       - name: Stage libcvc + bundle deps
         if: matrix.kind == 'libcvc'
         run: |
@@ -222,67 +243,26 @@ jobs:
           STEM="libcvc-${{ steps.meta.outputs.version }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
           DIST="$PWD/$STEM"
           rm -rf "$DIST"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then
+            DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          .github/scripts/sdk-bundle-deps.sh "$DEPS" "$DIST"
           cmake --install build --prefix "$DIST" --component libcvc
-          mkdir -p "$DIST/lib" "$DIST/include"
 
-          # Suffix pattern decides whether to grab dynamic or archive
-          # flavours of each dep. Both flavours are present in apt's
-          # libfoo-dev packages on Ubuntu.
-          if [ "${{ matrix.link }}" = "static" ]; then
-            patterns=( '*.a' )
-          else
-            patterns=( '*.so' '*.so.*' )
-          fi
-
-          LIBDIRS=( /usr/lib/x86_64-linux-gnu /usr/lib )
-          copy_libs() {
-            local prefix="$1"
-            for d in "${LIBDIRS[@]}"; do
-              for pat in "${patterns[@]}"; do
-                # -P preserves symlinks (libfoo.so → libfoo.so.1 → libfoo.so.1.2)
-                find "$d" -maxdepth 1 -name "${prefix}${pat}" -print0 2>/dev/null \
-                  | xargs -0 -r cp -P -t "$DIST/lib/" 2>/dev/null || true
-              done
-            done
-          }
-          copy_libs 'libboost_'
-          copy_libs 'libhdf5'
-          copy_libs 'libfftw3'
-          copy_libs 'libgsl'
-          copy_libs 'libgslcblas'
-          copy_libs 'liblog4cplus'
-
-          # Headers
-          for src in /usr/include/boost /usr/include/gsl /usr/include/log4cplus; do
-            [ -d "$src" ] && cp -R "$src" "$DIST/include/"
-          done
-          # HDF5 headers live under /usr/include/hdf5/serial on Ubuntu.
-          if [ -d /usr/include/hdf5/serial ]; then
-            mkdir -p "$DIST/include/hdf5"
-            cp -R /usr/include/hdf5/serial/. "$DIST/include/hdf5/"
-          fi
-          for f in /usr/include/fftw3.h /usr/include/fftw3.f /usr/include/fftw3l.h /usr/include/fftw3q.h; do
-            [ -f "$f" ] && cp "$f" "$DIST/include/"
-          done
-
-          # For the shared flavour, rewrite RUNPATH on libcvc.so AND
-          # every bundled dep .so to $ORIGIN so the loader resolves
-          # transitive dependencies within the same lib/ directory
-          # regardless of where the archive is extracted. DT_RUNPATH
-          # (which patchelf sets) does NOT propagate across dlopen()
-          # boundaries the way DT_RPATH would, so we have to stamp
-          # $ORIGIN on each bundled .so individually.
+          # cmake --install strips libcvc.so's build-tree RUNPATH. Give
+          # it $ORIGIN so it finds the bundled deps beside it wherever
+          # the archive is extracted. The cvcpkg libraries already carry
+          # $ORIGIN, and RUNPATH is not inherited, so each one needs its
+          # own; sdk-check-closure.sh verifies that for everything
+          # libcvc loads.
           if [ "${{ matrix.link }}" = "shared" ]; then
-            sudo apt-get install -y --no-install-recommends patchelf
-            for so in "$DIST"/lib/*.so*; do
-              [ -e "$so" ] || continue
+            for so in "$DIST"/lib/libcvc*.so*; do
               [ -L "$so" ] && continue
-              # Strip any pre-existing absolute RPATH first (some apt
-              # packages embed /build/foo/.libs paths), then set ours.
-              patchelf --remove-rpath "$so" 2>/dev/null || true
-              patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true
+              patchelf --set-rpath '$ORIGIN' "$so"
             done
           fi
+          .github/scripts/sdk-check-closure.sh "$DIST"
 
           # ── Bundle VTK (no Qt) ──────────────────────────────────
           # Intentionally not bundled: libcvc's CMake config does not
@@ -353,14 +333,6 @@ jobs:
           echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
           echo "linksfx=$LINKSFX"  >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies (libcvc)
-        if: matrix.kind == 'libcvc'
-        run: |
-          # All C/C++ third-party libs come from cvcpkg via
-          # fetch-libcvc-deps below. Only build tooling here;
-          # dylibbundler is installed later inside the stage step.
-          brew install cmake ninja zstd
-
       # ── Pull deps (incl. libiimod) from cvcpkg ──
       # cvcpkg is the sole third-party provider on macOS.
       # Release + shared for every row, matching ci.yml's package-macos
@@ -373,6 +345,11 @@ jobs:
         with:
           build_type: Release
           link: shared
+
+      # cmake, ninja and pkg-config from cvcpkg; no Homebrew. The
+      # compiler is the runner's Xcode clang.
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
 
       - name: Configure
         run: |
@@ -414,52 +391,31 @@ jobs:
           STEM="libcvc-${{ steps.meta.outputs.version }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
           DIST="$PWD/$STEM"
           rm -rf "$DIST"
-          cmake --install build --prefix "$DIST" --component libcvc
-          mkdir -p "$DIST/lib" "$DIST/include"
-
-          # Third-party prefix populated by cvcpkg.
           DEPS="${{ steps.libcvc-deps.outputs.path }}"
           if [ -z "$DEPS" ]; then
             DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
+          .github/scripts/sdk-bundle-deps.sh "$DEPS" "$DIST"
+          cmake --install build --prefix "$DIST" --component libcvc
 
-          # Headers are always needed for downstream `find_package`
-          # consumers; copy them from the cvcpkg prefix.
-          if [ -d "$DEPS/include" ]; then
-            cp -R "$DEPS/include/." "$DIST/include/" 2>/dev/null || true
-          fi
-
+          # The cvcpkg dylibs are @rpath/<name> and carry an @loader_path
+          # LC_RPATH, so a shared libcvc links them as @rpath/<name> too.
+          # cmake --install strips libcvc's build-tree rpath and leaves
+          # it none, so add @loader_path, then re-sign: install_name_tool
+          # invalidates the ad-hoc signature arm64 will not load without.
+          # No dylibbundler: the deps are already bundled with working
+          # install names.
           if [ "${{ matrix.link }}" = "shared" ]; then
-            # dylibbundler walks libcvc.dylib's transitive deps, copies
-            # any missing dylibs alongside, and rewrites all install_names
-            # to @rpath/<dylib> with rpath @loader_path. Far more reliable
-            # than hand-rolled install_name_tool plumbing across the deep
-            # Boost/HDF5 dependency graph.
-            brew install dylibbundler
-            # Search list: cvcpkg lib dir first (authoritative source of
-            # every third-party dylib), then macOS system dirs as a
-            # last-resort fallback. Without this, dylibbundler hits
-            # unresolved transitive deps and drops into an interactive
-            # "Try again" prompt; with no TTY in CI, that prompt loops
-            # forever. -s adds search paths, and we close stdin so any
-            # remaining unresolved dep aborts cleanly.
-            BUNDLER_SEARCH=( -s "$DEPS/lib" )
-            [ -d /opt/homebrew/lib ] && BUNDLER_SEARCH+=( -s /opt/homebrew/lib )
-            [ -d /usr/local/lib ]    && BUNDLER_SEARCH+=( -s /usr/local/lib )
             for dy in "$DIST"/lib/libcvc*.dylib; do
-              [ -e "$dy" ] || continue
               [ -L "$dy" ] && continue
-              dylibbundler -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd "${BUNDLER_SEARCH[@]}" </dev/null || true
+              rpaths=$(otool -l "$dy" | awk '/cmd LC_RPATH/ { getline; getline; print $2 }')
+              if ! grep -qx '@loader_path' <<<"$rpaths"; then
+                install_name_tool -add_rpath @loader_path "$dy"
+              fi
+              codesign --force --sign - "$dy"
             done
-          else
-            # Static flavour: copy .a archives from the cvcpkg prefix.
-            # No install_name fixup needed — static linkage embeds
-            # object code directly.
-            if [ -d "$DEPS/lib" ]; then
-              find "$DEPS/lib" -maxdepth 1 -name '*.a' -print0 2>/dev/null \
-                | xargs -0 -I {} cp -RP {} "$DIST/lib/" 2>/dev/null || true
-            fi
           fi
+          .github/scripts/sdk-check-closure.sh "$DIST"
 
           # ── Bundle VTK (no Qt) ──────────────────────────────────
           # Intentionally not bundled — see Linux section for rationale.
@@ -552,6 +508,14 @@ jobs:
         with:
           build_type: ${{ matrix.build_type }}
           link: shared
+
+      # cmake and pkg-config from cvcpkg rather than the runner image.
+      # The VS generator needs no ninja; the compiler is the runner's
+      # VS 2022 and CUDA is NVIDIA's (below).
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+        with:
+          tools: cmake pkg-config
 
       # CUDA toolkit so the shipped Windows artifacts can offload to
       # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
@@ -696,12 +660,81 @@ jobs:
             libcvc-*.zip
           if-no-files-found: error
 
+  # ─────────────────────────── SDK smoke ───────────────────────────
+  # Proves each Release SDK archive is self-contained instead of assuming
+  # it: on a fresh runner, with nothing but the extracted archive on
+  # CMAKE_PREFIX_PATH, configure, build and run a find_package(cvc)
+  # consumer, then fail if any package config, linked library or loaded
+  # library came from outside the archive (.github/scripts/
+  # sdk-smoke-test.sh). The runner gets only what consumers are expected
+  # to bring: cvcpkg's cmake/ninja/pkg-config, the image's compiler, and
+  # on Linux the CUDA toolkit (see the header). No deps prefix, no apt,
+  # no Homebrew. Debug archives are the same staging over a Debug build,
+  # so the Release ones stand for them.
+  sdk-smoke:
+    name: sdk-smoke (${{ matrix.artifact }})
+    needs: [linux, macos]
+    # Run when some other lane failed too: these archives may still be
+    # fine, and the release job reports the missing ones itself.
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: linux-libcvc-release-shared
+            os: ubuntu-latest
+          - artifact: linux-libcvc-release-static
+            os: ubuntu-latest
+          - artifact: macos-libcvc-release-shared
+            os: macos-latest
+          - artifact: macos-libcvc-release-static
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Only for the scripts and the build-tools action.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+
+      - name: Download the SDK archive
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: sdk-archive
+
+      # Same toolkit as the build (see its step). Consumers of the Linux
+      # SDK need it: the public headers include <cuda_runtime.h>, and the
+      # static flavor links cudart_static.
+      - name: Install CUDA toolkit (Linux)
+        if: runner.os == 'Linux'
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
+
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      - name: Build and run a find_package(cvc) consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=( sdk-archive/libcvc-*.tar.gz sdk-archive/libcvc-*.zip )
+          if [ ${#archives[@]} -ne 1 ]; then
+            echo "::error::expected one SDK archive in ${{ matrix.artifact }}, found ${#archives[@]}"
+            exit 1
+          fi
+          .github/scripts/sdk-smoke-test.sh "${archives[0]}" Release
+
   # ──────────────────────────── Release ────────────────────────────
   release:
-    needs: [linux, macos, windows]
+    needs: [linux, macos, windows, sdk-smoke]
     # Run even when a build lane failed, so a broken Debug lane cannot
     # hold back a release whose Release-config archives all built. The
-    # "Check artifact set" step below is the actual gate. (With a plain
+    # "Check artifact set" step below is the actual gate, and it also
+    # requires every sdk-smoke leg to have passed. (With a plain
     # `needs`, every Debug lane failing at Configure skipped this job on
     # v3.3.0, v3.4.0 and v3.5.0, and nightly has not published since
     # 2026-05-25.)
@@ -725,17 +758,24 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
-      # Every Release-config archive the matrix builds is required; a
-      # missing one fails the job before any tag or release is touched.
+      # Every Release-config archive the matrix builds is required, and
+      # the Linux/macOS ones must have passed sdk-smoke; either failure
+      # stops the job before any tag or release is touched.
       # Debug archives are best-effort: a missing one is a warning (its
       # own lane is already red) and the release goes out without it.
       # Keep these lists in step with the build matrices above.
       - name: Check artifact set
         shell: bash
+        env:
+          SMOKE_RESULT: ${{ needs.sdk-smoke.result }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           missing=0
+          if [ "$SMOKE_RESULT" != success ]; then
+            echo "::error::sdk-smoke did not pass ($SMOKE_RESULT): at least one Release SDK archive is not self-contained"
+            missing=1
+          fi
           check() {  # $1 = required|optional, $2 = glob under artifacts/
             local hits=( artifacts/$2 )
             if [ ${#hits[@]} -gt 0 ]; then

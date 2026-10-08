@@ -1,0 +1,82 @@
+name: 'cvcpkg build tools'
+description: |
+  Installs build tools (cmake, ninja, pkg-config by default) from cvcpkg and
+  puts them first on PATH for the rest of the job. libcvc builds with cvcpkg's
+  tools, not the runner image's, apt's or Homebrew's.
+
+  Needs the cvcpkg CLI. A job that already ran fetch-libcvc-deps has it; in any
+  other job this action installs it the way that action's cvcpkg-install step
+  does (Python 3.12, pip install of cy-pca/cvcpkg master).
+
+  The tools go in their own prefix ($RUNNER_TEMP/cvcpkg-tools), never in a
+  deps prefix or an SDK tree. See install.sh for the per-platform details.
+
+inputs:
+  tools:
+    description: >
+      Space-separated cvcpkg components to install. Each must provide an
+      executable of the same name; cmake also brings ctest and cpack.
+    required: false
+    default: 'cmake ninja pkg-config'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check for the cvcpkg CLI
+      id: probe
+      shell: bash
+      run: |
+        if command -v cvcpkg >/dev/null 2>&1; then
+          echo "have=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "have=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Check out cvcpkg
+      if: steps.probe.outputs.have != 'true'
+      uses: actions/checkout@v5
+      with:
+        repository: cy-pca/cvcpkg
+        ref: master
+        path: _cvcpkg
+        sparse-checkout: |
+          src
+          pyproject.toml
+          README.md
+          packaging
+          pep517-backend
+        sparse-checkout-cone-mode: false
+
+    - name: Set up Python for cvcpkg
+      if: steps.probe.outputs.have != 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install the cvcpkg CLI
+      if: steps.probe.outputs.have != 'true'
+      shell: bash
+      run: pip install ./_cvcpkg
+
+    - name: Install build tools from cvcpkg
+      shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: bash "${{ github.action_path }}/install.sh"
+
+    # A separate step because GITHUB_PATH only takes effect for later steps.
+    - name: Check the tools resolve to cvcpkg's
+      shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: |
+        set -euo pipefail
+        want="$CVCPKG_TOOLS_PATH"
+        if command -v cygpath >/dev/null 2>&1; then want=$(cygpath -u "$want"); fi
+        for t in $TOOLS; do
+          got=$(command -v "$t" || true)
+          case "$got" in
+            "$want"/*) echo "$t -> $got: $("$t" --version | head -n 1)" ;;
+            *) echo "::error::$t resolves to '${got:-nothing}', not cvcpkg's ($want)"; exit 1 ;;
+          esac
+        done

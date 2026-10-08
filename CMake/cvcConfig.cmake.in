@@ -246,6 +246,16 @@ if(@ZSTD_FOUND@)
   endif()
 endif()
 
+# A STATIC cvc also exports its PRIVATE imported-target links, wrapped in
+# $<LINK_ONLY:...>: yaml-cpp::yaml-cpp, ftxui::*, nlohmann_json_schema_validator::
+# validator, CURL::libcurl (and gRPC/protobuf when built in). A consumer that cannot
+# resolve them stops at generate time with "links to target yaml-cpp::yaml-cpp but
+# the target was not found". The list is whatever src/cvc/CMakeLists.txt actually
+# linked, and it is empty for a SHARED cvc, which absorbed these libraries.
+foreach(_cvc_pkg IN ITEMS @CVC_PRIVATE_LINK_PACKAGES@)
+  find_dependency(${_cvc_pkg})
+endforeach()
+
 include("${CMAKE_CURRENT_LIST_DIR}/cvcTargets.cmake")
 
 check_required_components(cvc)
