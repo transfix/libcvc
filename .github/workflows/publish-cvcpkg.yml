@@ -350,17 +350,30 @@ jobs:
           # same root cause as ci.yml's package-windows failures after the
           # image flip). Revisit when the v180 toolset stabilizes.
           - { os: windows-2022,     platform: windows, arch: x86_64 }
-        # No windows-debug exclusion any more. It used to be unsound because
-        # the catalog had no windows-debug dep bundles, so a Debug libcvc
-        # would have linked Release MSVC deps — a debug/release CRT mismatch
-        # producing a broken artifact. The gap was measured across libcvc's
-        # 34 runtime deps and closed by publishing the ten that were missing:
-        # gmp, mpfr, gsl, tiff, libiimod, assimp, levmar, grpc, cgal and
-        # imagemagick. (fontconfig is scoped linux/macos, so it never
-        # applied.) A windows-debug libcvc bundle is what lets downstream
-        # consumers run a Debug matrix lane at all — transfix/F2Dock builds
-        # Debug and Release on all three platforms and now takes libcvc from
-        # the catalog rather than compiling it.
+        exclude:
+          # Windows debug is unsound to publish: the catalog has windows-debug
+          # bundles for only 15 of libcvc's 34 windows deps (no boost, cgal,
+          # gmp, hdf5, libiimod, yaml-cpp, ... as of catalog rev 5186), so a
+          # Debug libcvc links Release MSVC deps — a debug/release CRT
+          # mismatch producing a broken artifact.
+          #
+          # f37762a3 (2026-09-03) dropped this exclusion on the premise that
+          # the missing windows-debug deps were being published. They never
+          # landed, and the Fetch step below asked for Release deps anyway,
+          # so libcvc 3.3.0+cvc.4 through 3.5.0+cvc.2 went out as
+          # windows/x86_64/debug bundles built that way. 3.5.0+cvc.2's cvc.dll
+          # imports MSVCP140D.dll and ucrtbased.dll yet links
+          # boost_filesystem.dll, hdf5.dll and yaml-cpp.dll built against
+          # MSVCP140.dll — passing std::string across that boundary (e.g.
+          # YAML::Load) is undefined behaviour.
+          #
+          # Restore the row only once `cvcpkg install-deps
+          # cvcpkg/recipes/libcvc --platform windows --config debug` resolves
+          # cleanly. The Fetch step already asks for debug deps on this row,
+          # so re-enabling it early fails loudly at Configure instead of
+          # shipping the mismatch again.
+          - config: debug
+            target: { os: windows-2022, platform: windows, arch: x86_64 }
         include:
           # Extra pycvc-column jobs (linux x86_64, release only): each builds
           # libcvc + cvcgl locally to link against, then packs+publishes ONLY
@@ -406,12 +419,13 @@ jobs:
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
-          # Always fetch RELEASE deps — the catalog's debug coverage is
-          # partial (e.g. no libiimod/hdf5 debug-linux bundles), and a Debug
-          # libcvc links the Release, ABI-stable shared deps perfectly on
-          # Linux/macOS (you debug libcvc's own code, not its dependencies).
-          # This is why Windows debug is excluded above (CRT mismatch).
-          build_type: Release
+          # RELEASE deps on Linux/macOS, even for a debug row — the catalog's
+          # debug coverage is partial, and a Debug libcvc links the Release,
+          # ABI-stable shared deps perfectly there (you debug libcvc's own
+          # code, not its dependencies). Windows debug needs DEBUG deps (CRT
+          # mismatch otherwise); that row is excluded above until they exist,
+          # and asking for them here keeps it honest if it is re-enabled.
+          build_type: ${{ (matrix.config == 'debug' && matrix.target.platform == 'windows') && 'Debug' || 'Release' }}
           link: shared
 
       # cy-pca/cvcpkg#105 moved httpx -- which `cvcpkg publish` needs -- behind
