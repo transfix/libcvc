@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
+  # Manual dry run: builds the full matrix and checks the artifact set on
+  # any ref, but never creates a release or moves a tag (see the
+  # `release` job's PUBLISH). Use it to prove a release.yml change before
+  # the next tag depends on it.
+  workflow_dispatch: {}
   # Reusable: nightly.yml calls this workflow with rolling=true to ship
   # master-HEAD artifacts to the `nightly` rolling GitHub Release.
   workflow_call:
@@ -45,9 +50,18 @@ permissions:
 # volrover) bring their own VTK with the configuration they need
 # (e.g. Qt-enabled for volrover).
 #
-# Debug archives on Windows also include MSVC .pdb files for libcvc
-# itself and every cvcpkg-provided dependency, so symbolicated stack
-# traces work out of the box.
+# Third-party deps are always cvcpkg's release/shared bundles, for
+# every lane (Debug and static included). That is the one catalog tuple
+# that is complete on all three platforms, and the one ci.yml (every PR)
+# and publish-cvcpkg.yml (its Debug bundles too) already build against.
+# Debug libcvc links the Release, ABI-stable shared deps fine on
+# Linux/macOS; static libcvc links them as shared libs, as it always has
+# on macOS/Windows. Windows Debug is not built: there are no
+# windows-debug dep bundles, and a Debug (/MDd) libcvc over Release
+# (/MD) deps is a CRT mismatch.
+#
+# Release-config archives are required for a release; Debug archives
+# are best-effort and attached when their lane succeeds.
 #
 # System libraries (glibc, libstdc++, libm, Windows UCRT) are
 # intentionally left to the host.
@@ -142,11 +156,19 @@ jobs:
       # output; Configure then fails with an explicit "Could not find
       # X" error, which is the correct signal (no in-workflow
       # source-build fallback — cvcpkg is the sole source of truth).
+      #
+      # Release + shared for EVERY row, matching ci.yml's package-linux
+      # Debug lanes. Asking for the row's own tuple is what broke v3.3.0
+      # through v3.5.0: the catalog's linux debug and static tuples lack
+      # deps the recipe has since grown (yaml-cpp, ftxui, nlohmann-json,
+      # json-schema-validator; static also assimp and pocketfft), so the
+      # install fails, `path` comes back empty, and Configure dies at
+      # find_package(libiimod).
       - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
-          build_type: ${{ matrix.build_type }}
+          build_type: Release
           link: shared
 
       - name: Configure
@@ -156,23 +178,25 @@ jobs:
             extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           # link=shared → BUILD_SHARED_LIBS=ON (legacy default).
-          # link=static → BUILD_SHARED_LIBS=OFF plus static dep flags so
-          # the .a flavor of Boost/HDF5/FFTW/GSL ships in libapt's dev
-          # packages is preferred. PIC is always on so the static archive
+          # link=static → BUILD_SHARED_LIBS=OFF: libcvc itself is static,
+          # its deps are the shared cvcpkg prefix, exactly as on macOS and
+          # Windows. No -DBoost_USE_STATIC_LIBS=ON: that was for apt's .a
+          # files, the prefix has only shared Boost, and libcvc links
+          # shared Boost regardless (CMake/SetupBoost.cmake forces it and
+          # exports BOOST_ALL_DYN_LINK). Only src/cvc-cli's own
+          # find_package(Boost COMPONENTS program_options) saw the flag,
+          # and it failed there. PIC is always on so the static archive
           # remains relocatable into shared consumers.
           if [ "${{ matrix.link }}" = "static" ]; then
             shared_libs=OFF
-            static_deps="-DBoost_USE_STATIC_LIBS=ON -DHDF5_USE_STATIC_LIBRARIES=ON"
           else
             shared_libs=ON
-            static_deps=""
           fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DBUILD_SHARED_LIBS=$shared_libs \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            $static_deps \
             -DCVC_BUILD_TESTS=OFF \
             -DCVC_USING_XMLRPC=ON \
             -DCVC_ENABLE_CUDA=ON \
@@ -339,11 +363,15 @@ jobs:
 
       # ── Pull deps (incl. libiimod) from cvcpkg ──
       # cvcpkg is the sole third-party provider on macOS.
+      # Release + shared for every row, matching ci.yml's package-macos
+      # Debug lane: the catalog's macos/arm64 debug tuple lacks assimp,
+      # fontconfig, freetype, libiimod, libxml2, pocketfft and yaml-cpp,
+      # and its static tuple has 3 of the 33 deps. See the Linux note.
       - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
-          build_type: ${{ matrix.build_type }}
+          build_type: Release
           link: shared
 
       - name: Configure
@@ -357,22 +385,18 @@ jobs:
             deps_path="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           export CMAKE_PREFIX_PATH="$deps_path"
+          # link=static → libcvc itself is static over the shared cvcpkg
+          # prefix (see the fetch step), so no find_package hints differ
+          # between the two flavors.
           if [ "${{ matrix.link }}" = "static" ]; then
             shared_libs=OFF
-            # cvcpkg publishes both shared (.dylib) and static (.a)
-            # flavors; the static requirement filter is applied via
-            # link=static in fetch-libcvc-deps, so no extra find_package
-            # hints are needed here.
-            static_deps=""
           else
             shared_libs=ON
-            static_deps=""
           fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DBUILD_SHARED_LIBS=$shared_libs \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            $static_deps \
             -DCVC_BUILD_TESTS=OFF \
             -DCVC_USING_XMLRPC=ON \
             -DCVC_ENABLE_CUDA=OFF \
@@ -469,18 +493,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: libcvc-debug-shared
-            kind: libcvc
-            build_type: Debug
-            link: shared
+          # Release only, as in ci.yml's package-windows. The catalog's
+          # windows/x86_64 debug tuple is missing 19 of libcvc's 34 deps
+          # (boost, cgal, gmp, hdf5, libiimod, ...), so these rows failed
+          # at Configure on every tag since v3.3.0. Fetching Release deps
+          # instead, as Linux/macOS do, is not an option here: a Debug
+          # (/MDd) libcvc over Release (/MD) DLLs is a CRT mismatch and a
+          # broken artifact. Restore libcvc-debug-shared/-static once
+          # windows-debug dep bundles exist; the fetch step already keys on
+          # matrix.build_type and the stage step already ships PDBs.
           - name: libcvc-release-shared
             kind: libcvc
             build_type: Release
             link: shared
-          - name: libcvc-debug-static
-            kind: libcvc
-            build_type: Debug
-            link: static
           - name: libcvc-release-static
             kind: libcvc
             build_type: Release
@@ -674,7 +699,20 @@ jobs:
   # ──────────────────────────── Release ────────────────────────────
   release:
     needs: [linux, macos, windows]
+    # Run even when a build lane failed, so a broken Debug lane cannot
+    # hold back a release whose Release-config archives all built. The
+    # "Check artifact set" step below is the actual gate. (With a plain
+    # `needs`, every Debug lane failing at Configure skipped this job on
+    # v3.3.0, v3.4.0 and v3.5.0, and nightly has not published since
+    # 2026-05-25.)
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    env:
+      # Publish only from a version-tag push or a rolling (nightly) call.
+      # Everything else, i.e. workflow_dispatch on any ref, is a dry run:
+      # it builds, downloads and checks the full artifact set, then stops
+      # before touching a tag or a release.
+      PUBLISH: ${{ inputs.rolling_tag != '' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -687,8 +725,55 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
+      # Every Release-config archive the matrix builds is required; a
+      # missing one fails the job before any tag or release is touched.
+      # Debug archives are best-effort: a missing one is a warning (its
+      # own lane is already red) and the release goes out without it.
+      # Keep these lists in step with the build matrices above.
+      - name: Check artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          missing=0
+          check() {  # $1 = required|optional, $2 = glob under artifacts/
+            local hits=( artifacts/$2 )
+            if [ ${#hits[@]} -gt 0 ]; then
+              echo "ok        ${hits[*]}"
+            elif [ "$1" = required ]; then
+              echo "::error::missing required release archive: $2"
+              missing=1
+            else
+              echo "::warning::missing Debug archive (attaching the rest): $2"
+            fi
+          }
+          for p in linux:tar.gz macos:zip windows:zip; do
+            check required "libcvc-*-${p%%:*}-*-release.${p#*:}"
+            check required "libcvc-*-${p%%:*}-*-release-static.${p#*:}"
+          done
+          for p in linux:tar.gz macos:zip; do
+            check optional "libcvc-*-${p%%:*}-*-debug.${p#*:}"
+            check optional "libcvc-*-${p%%:*}-*-debug-static.${p#*:}"
+          done
+          exit "$missing"
+
+      - name: Dry run summary
+        if: ${{ env.PUBLISH != 'true' }}
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          {
+            echo "### Release dry run ($EVENT on $REF_NAME)"
+            echo
+            echo "No tag moved, no release created. Would attach:"
+            echo
+            find artifacts -type f \( -name 'libcvc-*.tar.gz' -o -name 'libcvc-*.zip' \) \
+              -printf '- `%f` (%s bytes)\n' | sort
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Recreate rolling tag (nightly mode)
-        if: ${{ inputs.rolling_tag != '' }}
+        if: ${{ env.PUBLISH == 'true' && inputs.rolling_tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ROLLING_TAG: ${{ inputs.rolling_tag }}
@@ -701,6 +786,7 @@ jobs:
           git push -f origin "refs/tags/$ROLLING_TAG"
 
       - name: Create GitHub Release
+        if: ${{ env.PUBLISH == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.rolling_tag != '' && inputs.rolling_tag || github.ref_name }}
