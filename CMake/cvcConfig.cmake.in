@@ -115,10 +115,9 @@ if(@CVC_ENABLE_IMAGEMAGICK@)
   # Append the ImageMagick codec delegate closure to the MagickCore target.
   # MagickCore.pc does not list the delegates (they are separate cvcpkg bundles), so a
   # STATIC ImageMagick needs them appended explicitly — the same set
-  # src/cvc/CMakeLists.txt links PRIVATE at build time. Harmless for a SHARED
-  # ImageMagick (its .so already resolves them; the linker dedups). find_library
-  # honours CMAKE_FIND_ROOT_PATH so this works under emcmake, and each missing delegate
-  # is silently skipped. freetype is omitted on purpose (VTK ships vtkfreetype with the
+  # src/cvc/CMakeLists.txt links PRIVATE at build time. find_library honours
+  # CMAKE_FIND_ROOT_PATH so this works under emcmake, and each missing delegate is
+  # silently skipped. freetype is omitted on purpose (VTK ships vtkfreetype with the
   # same symbols -> wasm-ld duplicate-symbol).
   #
   # Gate on the TARGET existing, NOT on _cvc_im_synth: the STOCK FindImageMagick tier
@@ -126,10 +125,21 @@ if(@CVC_ENABLE_IMAGEMAGICK@)
   # find_library, and it wins on a wasm consumer (it finds the static libs in the prefix
   # without pkg-config). Gating on _cvc_im_synth skipped the append for that stock target,
   # so a wasm consumer's link failed with undefined BZ2_*/lzma_*/xml* symbols — which is
-  # what kept a downstream wasm app from linking even after the export was made relocatable. Any
-  # MagickCore that reaches here is either a static one that NEEDS the closure or a shared
-  # one for which the append is a harmless dedup, so run it whenever the target exists.
-  if(TARGET ImageMagick::MagickCore)
+  # what kept a downstream wasm app from linking even after the export was made relocatable.
+  #
+  # But only for a STATIC MagickCore (wasm, or a libMagickCore*.a). A shared one resolves
+  # its own delegates, and the find_library calls below search the whole host, not just
+  # this package's prefix: on a macOS consumer they pulled Homebrew's libbrotlidec onto
+  # the link line and made the program load it at run time (release.yml's sdk-smoke
+  # caught that).
+  set(_cvc_im_static FALSE)
+  foreach(_cvc_im_lib IN LISTS ImageMagick_MagickCore_LIBRARY _CVC_IM_CORE_LINK_LIBRARIES
+                               _CVC_IM_CORE_LIB)
+    if(_cvc_im_lib MATCHES "MagickCore[^/]*\\.a$")
+      set(_cvc_im_static TRUE)
+    endif()
+  endforeach()
+  if(TARGET ImageMagick::MagickCore AND (EMSCRIPTEN OR _cvc_im_static))
     foreach(_cvc_del bz2 jpeg png16 webp webpmux webpdemux webpdecoder sharpyuv
                      tiff xml2 lzma Lerc brotlidec brotlicommon z)
       find_library(_CVC_DEL_${_cvc_del} NAMES ${_cvc_del})

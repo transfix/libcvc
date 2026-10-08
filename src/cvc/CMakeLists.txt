@@ -1669,6 +1669,7 @@ install(EXPORT cvcTargets
 )
 
 get_target_property(_cvc_type cvc TYPE)
+message(STATUS "libcvc: cvc is a ${_cvc_type} (BUILD_SHARED_LIBS=${BUILD_SHARED_LIBS})")
 if(NOT _cvc_type STREQUAL "STATIC_LIBRARY")
   set(CVC_PRIVATE_LINK_PACKAGES "")
 endif()

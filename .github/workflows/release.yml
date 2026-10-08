@@ -38,9 +38,9 @@ permissions:
 #   - Windows: libcvc-<ver>-windows-<arch>-<config>.zip           (shared)
 #              libcvc-<ver>-windows-<arch>-<config>-static.zip    (static)
 #
-# Linux and macOS archives are self-contained: a consumer puts the
-# extracted archive on CMAKE_PREFIX_PATH and `find_package(cvc CONFIG)`
-# works with no apt / Homebrew / cvcpkg on the host. Each one is
+# The archives are self-contained: a consumer puts the extracted
+# archive on CMAKE_PREFIX_PATH and `find_package(cvc CONFIG)` works with
+# no apt / Homebrew / vcpkg / cvcpkg on the host. Each one is
 # libcvc's install tree plus every cvcpkg bundle libcvc uses, taken
 # whole from the release/shared prefix it was built against: libraries,
 # headers, CMake package configs, pkg-config files, and the tools some
@@ -48,7 +48,9 @@ permissions:
 # the copy and says which bundles it leaves out and why. The static
 # flavor is a static libcvc over those same shared deps (see the fetch
 # step), so it ships them too. Shared libcvc gets an $ORIGIN RUNPATH
-# (Linux) or @loader_path rpath (macOS) to find them. Both flavors
+# (Linux) or @loader_path rpath (macOS) to find them; on Windows the
+# DLLs sit beside cvc.dll in bin/, together with the MSVC runtime.
+# Both flavors
 # include cvc::xmlrpc. VTK is intentionally NOT bundled — downstream
 # consumers (F2Dock, MolSurf, volrover) bring their own VTK with the
 # configuration they need (e.g. Qt-enabled for volrover).
@@ -61,15 +63,12 @@ permissions:
 #
 # Host requirements that stay outside the archives: the system C/C++
 # runtimes (glibc, libstdc++, libgomp; libSystem, libc++, libcurl on
-# macOS; the UCRT on Windows) and, for the CUDA-enabled Linux SDK, the
+# macOS; the UCRT on Windows) and, for the CUDA-enabled SDKs, the
 # CUDA toolkit. libcvc's public headers include <cuda_runtime.h> when
 # built with CUDA (cvc/utility/cuda_utils.h via cvc/volume/voxels.h),
 # and the static flavor links cudart_static. Running a consumer only
-# needs the NVIDIA driver.
-#
-# Windows archives ship the cvcpkg prefix's DLLs, import libraries and
-# headers, but not yet its CMake package configs, so they are not
-# smoke-tested.
+# needs the NVIDIA driver. The same holds for the Windows SDK, which is
+# also built with CUDA.
 #
 # Everything the jobs build with comes from cvcpkg: the deps (below)
 # and the build tools, i.e. cmake, ninja, pkg-config and patchelf
@@ -578,7 +577,25 @@ jobs:
           $stem = "libcvc-${{ steps.meta.outputs.version }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
           $dist = Join-Path $env:GITHUB_WORKSPACE $stem
           if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+          # The bundling scripts are bash, shared with Linux/macOS. Name Git
+          # Bash by path: a bare `bash` can resolve to the WSL launcher.
+          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+
+          $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+            if (-not (Test-Path $depsPath)) {
+              throw "cvcpkg prefix not found (checked steps.libcvc-deps-windows.outputs.path and $depsPath)"
+            }
+          }
+
+          # The cvcpkg bundles libcvc uses, then libcvc over them; see the
+          # header. DLLs sit in bin/ beside cvc.dll, which is all Windows
+          # needs to find them.
+          & $bash .github/scripts/sdk-bundle-deps.sh $depsPath $dist
+          if ($LASTEXITCODE) { throw "sdk-bundle-deps.sh failed ($LASTEXITCODE)" }
           cmake --install build --prefix $dist --config ${{ matrix.build_type }} --component libcvc
+          if ($LASTEXITCODE) { throw "cmake --install failed ($LASTEXITCODE)" }
 
           $isDebug = '${{ matrix.build_type }}' -eq 'Debug'
 
@@ -601,49 +618,8 @@ jobs:
                 }
           }
 
-          # ── third-party deps: from cvcpkg (libcvc-deps prefix) ──
-          # The cvcpkg prefix is laid out flat under $depsPath with
-          # include/, lib/, bin/ at the root (shared build, no debug/
-          # subtree). Debug bundles include .pdb files alongside the
-          # DLLs and .lib import libs.
-          $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
-          if (-not $depsPath) {
-            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
-            if (-not (Test-Path $depsPath)) {
-              throw "cvcpkg prefix not found (checked steps.libcvc-deps-windows.outputs.path and $depsPath)"
-            }
-          }
-          $libSrc = Join-Path $depsPath 'lib'
-          $binSrc = Join-Path $depsPath 'bin'
-          $incSrc = Join-Path $depsPath 'include'
-          $havePdbs = $isDebug
-
-          New-Item -ItemType Directory -Force -Path "$dist/lib","$dist/include" | Out-Null
-          if (Test-Path $incSrc) {
-            Copy-Item -Recurse -Force "$incSrc/*" "$dist/include/"
-          }
-          if (Test-Path $libSrc) {
-            $patterns = if ($havePdbs) { @('*.lib','*.pdb') } else { @('*.lib') }
-            foreach ($p in $patterns) {
-              Get-ChildItem -Path $libSrc -Filter $p -File `
-                | Copy-Item -Destination "$dist/lib/" -Force
-            }
-          }
-          # Third-party DLLs always ship because the Windows cvcpkg
-          # prefix is shared-only, even for static matrix entries
-          # (libcvc itself is still .lib; consumers load the shipped
-          # DLLs at runtime).
-          $shipBin = $true
-          if ($shipBin) {
-            New-Item -ItemType Directory -Force -Path "$dist/bin" | Out-Null
-            if (Test-Path $binSrc) {
-              $patterns = if ($havePdbs) { @('*.dll','*.pdb') } else { @('*.dll') }
-              foreach ($p in $patterns) {
-                Get-ChildItem -Path $binSrc -Filter $p -File `
-                  | Copy-Item -Destination "$dist/bin/" -Force
-              }
-            }
-          }
+          & $bash .github/scripts/sdk-check-closure.sh $dist
+          if ($LASTEXITCODE) { throw "sdk-check-closure.sh failed ($LASTEXITCODE)" }
 
           # ── Bundle VTK (no Qt) ──────────────────────────────────
           # Intentionally not bundled — see Linux section for rationale.
@@ -668,12 +644,12 @@ jobs:
   # library came from outside the archive (.github/scripts/
   # sdk-smoke-test.sh). The runner gets only what consumers are expected
   # to bring: cvcpkg's cmake/ninja/pkg-config, the image's compiler, and
-  # on Linux the CUDA toolkit (see the header). No deps prefix, no apt,
-  # no Homebrew. Debug archives are the same staging over a Debug build,
+  # for the CUDA-enabled Linux/Windows SDKs the CUDA toolkit (see the
+  # header). No deps prefix, no apt, no Homebrew. Debug archives are the same staging over a Debug build,
   # so the Release ones stand for them.
   sdk-smoke:
     name: sdk-smoke (${{ matrix.artifact }})
-    needs: [linux, macos]
+    needs: [linux, macos, windows]
     # Run when some other lane failed too: these archives may still be
     # fine, and the release job reports the missing ones itself.
     if: ${{ !cancelled() }}
@@ -689,6 +665,10 @@ jobs:
             os: macos-latest
           - artifact: macos-libcvc-release-static
             os: macos-latest
+          - artifact: windows-libcvc-release-shared
+            os: windows-2022
+          - artifact: windows-libcvc-release-static
+            os: windows-2022
     runs-on: ${{ matrix.os }}
     steps:
       # Only for the scripts and the build-tools action.
@@ -712,6 +692,14 @@ jobs:
           cuda: '12.5.1'
           method: 'network'
           sub-packages: '["nvcc", "cudart", "cudart-dev"]'
+
+      - name: Install CUDA toolkit (Windows)
+        if: runner.os == 'Windows'
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart"]'
 
       - name: Install build tools (cvcpkg)
         uses: ./.github/actions/cvcpkg-build-tools
@@ -759,7 +747,7 @@ jobs:
         run: find artifacts -type f | sort
 
       # Every Release-config archive the matrix builds is required, and
-      # the Linux/macOS ones must have passed sdk-smoke; either failure
+      # each must have passed sdk-smoke; either failure
       # stops the job before any tag or release is touched.
       # Debug archives are best-effort: a missing one is a warning (its
       # own lane is already red) and the release goes out without it.

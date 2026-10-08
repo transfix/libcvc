@@ -8,8 +8,10 @@ description: |
   other job this action installs it the way that action's cvcpkg-install step
   does (Python 3.12, pip install of cy-pca/cvcpkg master).
 
-  The tools go in their own prefix ($RUNNER_TEMP/cvcpkg-tools), never in a
-  deps prefix or an SDK tree. See install.sh for the per-platform details.
+  The tools run from $RUNNER_TEMP/cvcpkg-tools, a tree that holds nothing but
+  them: CMake searches its own install prefix for packages, so cmake must not
+  sit beside the libraries cvcpkg installed with it. See install.sh for the
+  layout and the per-platform details.
 
 inputs:
   tools:
