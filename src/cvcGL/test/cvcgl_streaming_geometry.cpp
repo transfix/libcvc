@@ -687,7 +687,6 @@ void testRibbonGrowth(cvc::app &app, StreamingMapperKind kind) {
 } // namespace
 
 int main() {
-  disableSwapThrottle();
   installErrorCounter();
   cvc::app app;
   testCoalescedEvents(app);

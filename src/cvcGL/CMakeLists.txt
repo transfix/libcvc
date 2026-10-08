@@ -905,6 +905,18 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_camera_source cvcgl_audio_source cvcgl_audio_output)
 set_tests_properties(${_cvcgl_gl_tests} PROPERTIES RESOURCE_LOCK cvcgl_gl_context)
 
+# ── GL tests: sync-to-vblank off ──
+# NVIDIA's GLX driver throttles buffer swaps of an unmapped (offscreen) window to
+# about one per second while sync-to-vblank is on, which turns an offscreen GL
+# test into minutes of wall time for seconds of CPU (cvcgl_streaming_overlays:
+# 4m15s wall for 1.7 s CPU; 4.7 s with it off). Mesa reads vblank_mode; other
+# drivers ignore both. Set on every test here (a headless one ignores it) rather
+# than by each test before its first GL context: no test can miss it and no test
+# needs setenv. ctest's ENVIRONMENT wins over the caller's, so to time a test
+# with vsync on, run its binary directly.
+get_property(_cvcgl_tests DIRECTORY PROPERTY TESTS)
+set_property(TEST ${_cvcgl_tests} APPEND PROPERTY ENVIRONMENT __GL_SYNC_TO_VBLANK=0 vblank_mode=0)
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
