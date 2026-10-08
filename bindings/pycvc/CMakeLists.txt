@@ -414,53 +414,51 @@ if(CVC_BUILD_PYCVC_GL)
   add_custom_target(pycvc_gl_pkg ALL DEPENDS "${_PYCVC_GL_PKGROOT}/pycvc_gl.staged")
   # The package root first (so `pycvc_gl` is the package), then the binary dir (pycvc).
   set(_PYCVC_GL_TEST_PYTHONPATH "${_PYCVC_GL_PKGROOT}:${CMAKE_CURRENT_BINARY_DIR}")
+  # Every test below gets this environment. Sync-to-vblank off as for the cvcgl_* tests (see
+  # src/cvcGL/CMakeLists.txt): NVIDIA throttles an offscreen window's swaps to ~1/s with it on.
+  set(_PYCVC_GL_TEST_ENV
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH}"
+    "LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}"
+    "__GL_SYNC_TO_VBLANK=0" "vblank_mode=0")
   add_test(NAME pycvc_gl_smoke
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
-  set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # AriRuntime: load demo.ari + run the frame loop from Python. Skips (exit 0) without a GL context.
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
-  set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
   # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
   add_test(NAME pycvc_vtk
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_vtk.py)
-  set_tests_properties(pycvc_vtk PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_vtk PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # Phase-5 zero-copy texture: node.set_texture + image.numpy() live edit +
   # texture_modified (the strong VTK-inspection check self-skips without vtkmodules).
   add_test(NAME pycvc_texture
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_texture.py)
-  set_tests_properties(pycvc_texture PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_texture PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # CameraController: navigation + full cvc::state config (both directions),
   # construct from an injected app OR a SceneRenderer, canonical viewer path.
   add_test(NAME pycvc_gl_camera
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_camera.py)
-  set_tests_properties(pycvc_gl_camera PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_camera PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # world_units scene surface: GraphicsNode dimensions through the transform
   # chain, the built-in grid/axis nodes, lights, VolRenNode + volren value types.
   add_test(NAME pycvc_gl_world
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_world.py)
-  set_tests_properties(pycvc_gl_world PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_world PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # Dear ImGui overlay + state-bound ui panels: binding presence + an offscreen
   # overlay round-trip (self-skips without offscreen GL).
   add_test(NAME pycvc_gl_imgui
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_imgui.py)
-  set_tests_properties(pycvc_gl_imgui PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_imgui PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # ViewportManager / Viewport: picture-in-picture from Python — N viewports over
   # separate scenes + a mirror, the input router (viewportAt, focus-follows-click
   # into cvc::state, per-viewport camera), region tuples, frameRGB bytes
   # (self-skips without offscreen GL).
   add_test(NAME pycvc_gl_viewport
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_viewport.py)
-  set_tests_properties(pycvc_gl_viewport PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_viewport PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # LOD from Python: LodGraphicsNode (setPyramid / progressive setBase+appendRungs /
   # a Python rung style), SceneGraph.selectLOD + lod_stats + setLODEnabled, and
   # the examples/lod_city.py feature-on run (loader-thread build, bytes bake,
@@ -468,29 +466,25 @@ if(CVC_BUILD_PYCVC_GL)
   # the make_view_params check self-skips without offscreen GL.
   add_test(NAME pycvc_gl_lod
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_lod.py)
-  set_tests_properties(pycvc_gl_lod PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_lod PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # ChaseCamera parity: the native (C++ Track) chase camera returns the same pose
   # as the pure-Python ChaseCamera on one position stream — the Python side of
   # "the cameras work the same" (its C++ side is cvcgl_track_parity).
   add_test(NAME pycvc_gl_chase_parity
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_chase_parity.py)
-  set_tests_properties(pycvc_gl_chase_parity PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_chase_parity PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # Streaming overlays from Python: the SceneGraph factories (ribbon / draped
   # link / generic streaming mesh), numpy or list point data, the capacity
   # contract, the height field's CPU twin, post_event_coalesced, and -- with
   # offscreen GL -- the upload accounting (self-skips without it).
   add_test(NAME pycvc_gl_streaming
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_streaming.py)
-  set_tests_properties(pycvc_gl_streaming PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_streaming PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # GraphicsNode.setClipChildren from Python: the wrapped getter/setter and --
   # with offscreen GL -- children inside / straddling / outside a parent's box
   # drawn whole / cut / gone, through an off-and-on-again cycle (self-skips
   # without it; cvcgl_clip_children is the pixel-exact C++ side).
   add_test(NAME pycvc_gl_clip
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_clip.py)
-  set_tests_properties(pycvc_gl_clip PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set_tests_properties(pycvc_gl_clip PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
 endif() # CVC_BUILD_PYCVC_GL

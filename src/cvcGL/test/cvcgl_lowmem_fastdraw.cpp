@@ -2028,14 +2028,8 @@ void testLateShaderReplacement(cvc::app &app) {
 int main() {
 #ifdef _WIN32
   _putenv_s("CVCGL_LOWMEM_MAPPER", "force");
-  if (!std::getenv("__GL_SYNC_TO_VBLANK"))
-    _putenv_s("__GL_SYNC_TO_VBLANK", "0");
-  if (!std::getenv("vblank_mode"))
-    _putenv_s("vblank_mode", "0");
 #else
   setenv("CVCGL_LOWMEM_MAPPER", "force", 1);
-  setenv("__GL_SYNC_TO_VBLANK", "0", 0); // NVIDIA throttles offscreen swaps otherwise
-  setenv("vblank_mode", "0", 0);
 #endif
   const char *rep = std::getenv("CVCGL_LOWMEM_REPORT");
   g_report = rep && *rep && std::string(rep) != "0";
