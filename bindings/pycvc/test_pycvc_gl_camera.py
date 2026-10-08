@@ -128,6 +128,61 @@ pc.setWidenTau(1.5)
 check("widen_tau mirrored to state", abs(getf(app, "pa.cam.track.widen_tau") - 1.5) < 1e-9)
 check("widenTau() reads back", abs(pc.widenTau() - 1.5) < 1e-9)
 
+print("H. Map mode holds its own pose (headless)")
+# update() used to re-apply the ORBIT pose in Map mode, so a framed map lasted
+# until the next frame. get_pose() is the pose update() applies.
+
+
+def close3(a, b, tol=1e-9):
+    return all(abs(a[i] - b[i]) < tol for i in range(3))
+
+
+def same_pose(p, q):
+    return all(close3(p[i], q[i]) for i in range(3))
+
+
+mc = CC(app, "map.cam")
+mc.frameBounds(-50, -50, 0, 50, 50, 20)
+orbit = mc.get_pose()
+mc.frameMap(100.0, 200.0, 50.0)
+check("frameMap -> Mode_Map", mc.mode() == CC.Mode_Map)
+mc.update(0.016)
+eye, focal, up = mc.get_pose()
+check(
+    "update() keeps the map pose: straight down at (100, 200), north up",
+    close3(eye, (100, 200, 1000)) and close3(focal, (100, 200, 0)) and close3(up, (0, 1, 0)),
+)
+check(
+    "map pose in state",
+    getf(app, "map.cam.map.center.x") == 100.0
+    and getf(app, "map.cam.map.center.y") == 200.0
+    and getf(app, "map.cam.map.scale") == 50.0,
+)
+mc.beginDrag()
+mc.mouseLook(1, 1)  # no viewport: 1 px spans 2 * scale = 100 world units
+mc.endDrag()
+mc.mouseWheel(1.0)
+mc.update(0.016)
+check("a drag pans against the pointer", close3(mc.get_pose()[0], (0, 100, 1000)))
+check("the wheel zooms the map scale", abs(getf(app, "map.cam.map.scale") - 45.0) < 1e-9)
+map_pose = mc.get_pose()
+mc.setMode(CC.Mode_Orbit)
+check("Map -> Orbit: the orbit pose it had", same_pose(mc.get_pose(), orbit))
+mc.setMode(CC.Mode_Map)
+check("Orbit -> Map: the map pose it had", same_pose(mc.get_pose(), map_pose))
+pycvc.state_set(app, "map.cam.settings.move_speed", "7")
+check("an outside settings write stays in Map", mc.mode() == CC.Mode_Map)
+pycvc.state_set(app, "map.cam.mode", "0")
+check(
+    "state mode=0 -> Orbit, its pose intact",
+    mc.mode() == CC.Mode_Orbit and same_pose(mc.get_pose(), orbit),
+)
+pycvc.state_set(app, "map.cam.mode", "3")
+check(
+    "state mode=3 -> Map, its pose intact",
+    mc.mode() == CC.Mode_Map and same_pose(mc.get_pose(), map_pose),
+)
+
 print("\n%s (%d failures)" % ("ALL PASS" if fails == 0 else "FAILED", fails))
 
 # cvcGL's static GL/state teardown races at interpreter exit (a known, harmless

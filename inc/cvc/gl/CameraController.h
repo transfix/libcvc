@@ -35,12 +35,13 @@ class SceneGraph;
 // Ctrl for world up/down, Shift sprint, wheel = speed), with a runtime toggle.
 //
 // EVERYTHING IS cvc::state. CameraController is a state_object: mode, the up
-// axis, orbit center/distance/azimuth/elevation, fly position/yaw/pitch, the
-// movement/mouse/sprint settings, pointer-capture, AND the key bindings all live
-// in the state tree and are two-way bound — set them from anywhere (a UI, a
-// script, a saved file) and the camera follows; drive the camera and the state
-// reflects it. handleStateChanged runs synchronously (setInstanceThreading
-// false), and config is applied on the render thread via update()/applyToCamera.
+// axis, orbit center/distance/azimuth/elevation, fly position/yaw/pitch, map
+// center/scale, the movement/mouse/sprint settings, pointer-capture, AND the key
+// bindings all live in the state tree and are two-way bound — set them from
+// anywhere (a UI, a script, a saved file) and the camera follows; drive the
+// camera and the state reflects it. handleStateChanged runs synchronously
+// (setInstanceThreading false), and config is applied on the render thread via
+// update()/applyToCamera.
 //
 // CANONICAL, VIEWER-ASSOCIATED LOCATION. Constructed from a SceneRenderer, the
 // state roots at "<scene prefix>.viewers.<viewer name>.camera" — so it is obvious
@@ -60,9 +61,11 @@ class SceneGraph;
 class CameraController : public cvc::state_object<CameraController> {
 public:
   // Orbit (turntable), Fly (Quake), Track (cinematic follow of a scene actor).
-  // Map = a true 2-D map view: parallel projection straight down the up axis,
-  // drag PANS and the wheel ZOOMS, and rotation is impossible. For ortho
-  // "matplotlib" views where tumbling the camera only ever disorients.
+  // Map = a true 2-D map view: parallel projection straight down -z with north
+  // (+y) up (Z-up scenes; Map does not follow setUpAxis), drag PANS -- the
+  // grabbed point stays under the pointer -- and the wheel ZOOMS, and rotation is
+  // impossible. For ortho "matplotlib" views where tumbling the camera only ever
+  // disorients.
   enum class Mode { Orbit = 0, Fly = 1, Track = 2, Map = 3 };
 
   // Canonical: state at "<viewer.scene prefix>.viewers.<viewer.name>.camera",
@@ -89,6 +92,12 @@ public:
 
   // Mode. toggleMode() carries the pose across so the switch is seamless. Written
   // to / read from state "mode".
+  //
+  // Map keeps its OWN pose (state "map.*"): entering it shows the map as it was
+  // last framed, panned or zoomed, and leaving it returns Orbit and Fly to the
+  // poses they had -- a view straight down has no heading to carry across --
+  // with perspective projection restored. So Orbit -> Map -> Orbit comes back
+  // to the same orbit view, and Map -> Orbit -> Map to the same map.
   void setMode(Mode m);
   Mode mode() const;
 
@@ -125,11 +134,14 @@ public:
   void getUpAxis(double &x, double &y, double &z) const;
 
   // Frame the whole scene: orbit center = box center, distance from its diagonal,
-  // a pleasant 3/4 default view, auto move-speed. Seeds the fly pose too.
+  // a pleasant 3/4 default view, auto move-speed. Seeds the fly pose too, and
+  // the map pose (the box's x/y footprint, fitted like frameMap with a width).
   void frameBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
 
   // Map mode framing: look straight down at (cx, cy) with a half-height of
-  // `halfHeight` world units (the parallel scale). Sets Mode::Map.
+  // `halfHeight` world units (the parallel scale). Sets Mode::Map. The result is
+  // the map pose (state "map.center.{x,y}", "map.scale"), which update() holds
+  // and pans / zooms move -- not a one-off camera write the next update() undoes.
   //
   // Pass `halfWidth` > 0 to fit the whole RECT rather than just its height.
   // VTK's parallel scale is a half-HEIGHT, so a plain height fit crops the sides
@@ -220,7 +232,8 @@ public:
   void setKeyBinding(const std::string &action, const std::string &keySym);
   std::string keyBinding(const std::string &action) const;
 
-  // Push the current pose to the vtkCamera and reset the clipping range.
+  // Push the current pose to the vtkCamera (in Map, its parallel projection and
+  // scale too) and reset the clipping range.
   // update() calls it only when something it depends on moved: the pose, the
   // camera (changed by someone else), the renderer's prop list, or -- with a
   // scene -- SceneGraph::contentVersion(). Without a scene it calls it every
@@ -229,6 +242,8 @@ public:
   // SetVisibility, an unregistered node moved), or bump the scene's
   // markContentChanged().
   void applyToCamera();
+  // The pose applyToCamera() applies; `up` is the camera's view-up: the world up
+  // axis, or north (+y) in Map.
   void getPose(double eye[3], double focal[3], double up[3]) const;
 
 protected:
@@ -244,10 +259,11 @@ private:
   bool trackedWorldPos(double out[3]); // world pos of the tracked actor, or false
   double viewportAspect() const;       // renderer width/height, or 0 if unknown
   double mapFitScale(double halfHeight, double halfWidth) const; // parallel scale fitting a rect
+  void fitMap(double cx, double cy, double halfHeight, double halfWidth); // set the map pose
   void refitMapIfResized();     // re-fit the map rect when the viewport changes shape
   bool applyNeeded() const;     // update(): has anything applyToCamera() derives from moved?
   bool poseMirrorStale() const; // does the pose differ from the one last mirrored to state?
-  void poseMirrorValues(double out[14]) const; // what syncPoseToState() writes, in order
+  void poseMirrorValues(double out[17]) const; // what syncPoseToState() writes, in order
 
   struct Impl;
   std::unique_ptr<Impl> m_impl;
