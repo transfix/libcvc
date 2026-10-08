@@ -621,6 +621,15 @@ add_executable(cvcgl_camera_idle test/cvcgl_camera_idle.cpp)
 target_link_libraries(cvcgl_camera_idle PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 
+# CameraController Map mode holds the map pose: frameMap + update() keep the eye
+# straight above the framed point (update() used to re-apply the ORBIT pose),
+# pans/zooms move the map pose, Orbit<->Map/Fly switches keep each mode's pose,
+# and the state tree round-trips "mode" = 3 and "map.*". Bare vtkCamera; the
+# resize re-fit section skips when the renderer reports no size.
+add_executable(cvcgl_camera_map test/cvcgl_camera_map.cpp)
+target_link_libraries(cvcgl_camera_map PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_map COMMAND cvcgl_camera_map)
+
 # Numeric parity: the push-fed Track controller reproduces pymod_gl/camera.py's
 # ChaseCamera (the two-stage EMA follow) to floating point, so the C++ and Python
 # chase cameras genuinely "work the same". Headless (getPose reads trackEye/Focal

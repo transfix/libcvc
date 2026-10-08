@@ -40,6 +40,12 @@ namespace {
 
 constexpr double kDeg2Rad = 3.14159265358979323846 / 180.0;
 
+// Map mode looks straight down -z from this height (parallel projection, so the
+// height only places the eye above the content), and never zooms in past this
+// parallel scale.
+constexpr double kMapEyeHeight = 1000.0;
+constexpr double kMinMapScale = 1e-3;
+
 struct Vec3 {
   double x = 0, y = 0, z = 0;
 };
@@ -223,6 +229,10 @@ struct CameraController::Impl {
   double orbitElevation = 30.0;
   Vec3 flyPos{0, 0, 0};
   double flyYaw = 0.0, flyPitch = 0.0;
+  // Map pose: the point straight below the eye and the parallel scale (half the
+  // view height, in world units). Map's own pose, as orbit and fly have theirs,
+  // so a trip through another mode comes back to the same map.
+  double mapCenterX = 0.0, mapCenterY = 0.0, mapScale = 10.0;
   double moveSpeed = 5.0, sprintMultiplier = 4.0, sensitivity = 0.25;
   bool invertPitch = false, pointerCapture = false;
   double poseMirrorHz = 15.0;
@@ -245,6 +255,7 @@ struct CameraController::Impl {
   // fitted at, and whether the user has since zoomed (which ends auto-fitting).
   double mapFitHalfW = 0.0, mapFitHalfH = 0.0, mapFitAspect = 0.0;
   bool mapFitUserZoomed = false;
+  bool mapProjection = false; // applyToCamera() turned parallel projection on for Map
   std::atomic<bool> selfWrite{false};
   // track smoothing state (harvested from ChaseCamera)
   Vec3 trackP, trackPrev, trackV, trackHead, trackEye, trackFocal;
@@ -269,6 +280,7 @@ struct CameraController::Impl {
     bool valid = false;
     double eye[3] = {0, 0, 0}, focal[3] = {0, 0, 0}, up[3] = {0, 0, 0};
     double fieldOfView = 0.0;
+    double mapScale = 0.0;
     Mode mode = Mode::Orbit;
     vtkCamera *camera = nullptr;
     vtkRenderer *renderer = nullptr;
@@ -279,8 +291,8 @@ struct CameraController::Impl {
   } applied;
 
   // The values syncPoseToState() last wrote, so the throttled mirror in update()
-  // can skip 14 state writes (each a path lookup) when nothing moved.
-  static constexpr int kMirrored = 14;
+  // can skip 17 state writes (each a path lookup) when nothing moved.
+  static constexpr int kMirrored = 17;
   bool mirrorValid = false;
   double mirror[kMirrored] = {};
 
@@ -365,6 +377,9 @@ void CameraController::seedState() {
   getState("fly.position.z").value(s.flyPos.z);
   getState("fly.yaw").value(s.flyYaw);
   getState("fly.pitch").value(s.flyPitch);
+  getState("map.center.x").value(s.mapCenterX);
+  getState("map.center.y").value(s.mapCenterY);
+  getState("map.scale").value(s.mapScale);
   getState("settings.move_speed").value(s.moveSpeed);
   getState("settings.sprint_multiplier").value(s.sprintMultiplier);
   getState("settings.mouse_sensitivity").value(s.sensitivity);
@@ -413,8 +428,19 @@ void CameraController::readAllFromState() {
     std::string v = getState(k).value();
     return v.empty() ? def : v;
   };
-  int mv = i("mode", static_cast<int>(s.mode));
-  s.mode = mv == 2 ? Mode::Track : (mv == 1 ? Mode::Fly : Mode::Orbit);
+  switch (i("mode", static_cast<int>(s.mode))) {
+  case 1:
+    s.mode = Mode::Fly;
+    break;
+  case 2:
+    s.mode = Mode::Track;
+    break;
+  case 3:
+    s.mode = Mode::Map; // not Orbit: an outside write (a settings slider) must not leave the map
+    break;
+  default:
+    s.mode = Mode::Orbit;
+  }
   s.up = {d("up.x", s.up.x), d("up.y", s.up.y), d("up.z", s.up.z)};
   s.orbitCenter = {d("orbit.center.x", s.orbitCenter.x), d("orbit.center.y", s.orbitCenter.y),
                    d("orbit.center.z", s.orbitCenter.z)};
@@ -425,6 +451,9 @@ void CameraController::readAllFromState() {
               d("fly.position.z", s.flyPos.z)};
   s.flyYaw = d("fly.yaw", s.flyYaw);
   s.flyPitch = d("fly.pitch", s.flyPitch);
+  s.mapCenterX = d("map.center.x", s.mapCenterX);
+  s.mapCenterY = d("map.center.y", s.mapCenterY);
+  s.mapScale = std::max(kMinMapScale, d("map.scale", s.mapScale));
   s.moveSpeed = d("settings.move_speed", s.moveSpeed);
   s.sprintMultiplier = d("settings.sprint_multiplier", s.sprintMultiplier);
   s.sensitivity = d("settings.mouse_sensitivity", s.sensitivity);
@@ -494,7 +523,7 @@ void CameraController::syncConfigToState() {
 }
 
 // The values syncPoseToState() writes, in its order.
-void CameraController::poseMirrorValues(double out[14]) const {
+void CameraController::poseMirrorValues(double out[17]) const {
   const Impl &s = *m_impl;
   double e[3], f[3], u[3];
   getPose(e, f, u);
@@ -511,7 +540,10 @@ void CameraController::poseMirrorValues(double out[14]) const {
                       e[2],
                       f[0],
                       f[1],
-                      f[2]};
+                      f[2],
+                      s.mapCenterX,
+                      s.mapCenterY,
+                      s.mapScale};
   static_assert(sizeof(v) / sizeof(v[0]) == Impl::kMirrored, "one value per mirrored key");
   std::copy(std::begin(v), std::end(v), out);
 }
@@ -535,6 +567,9 @@ void CameraController::syncPoseToState() {
   getState("pose.focal.x").value(v[11]);
   getState("pose.focal.y").value(v[12]);
   getState("pose.focal.z").value(v[13]);
+  getState("map.center.x").value(v[14]);
+  getState("map.center.y").value(v[15]);
+  getState("map.scale").value(v[16]);
   s.selfWrite = false;
   std::copy(v, v + Impl::kMirrored, s.mirror);
   s.mirrorValid = true;
@@ -564,7 +599,14 @@ CameraController::Mode CameraController::mode() const { return m_impl->mode; }
 void CameraController::resetTrack() {
   Impl &s = *m_impl;
   s.havP = s.havPrev = s.haveV = s.haveHead = false;
-  if (s.camera) {
+  if (s.mode == Mode::Map) {
+    // The map camera looks straight down, a line of sight no chase view (world up
+    // as its view-up) can start from: ease in from the orbit view instead.
+    s.trackFocal = s.orbitCenter;
+    s.trackEye =
+        s.orbitCenter + orbitOffset(s.basis(), s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
+    s.haveEye = true;
+  } else if (s.camera) {
     double e[3], f[3];
     s.camera->GetPosition(e);
     s.camera->GetFocalPoint(f);
@@ -598,8 +640,10 @@ void CameraController::setMode(Mode m) {
   if (m == s.mode)
     return;
   Basis b = s.basis();
-  // Seed the interactive modes seamlessly from the live camera pose.
-  if (s.camera && (m == Mode::Orbit || m == Mode::Fly)) {
+  // Seed the interactive modes seamlessly from the live camera pose -- unless it
+  // is the map's. A view straight down has no heading to carry over, so leaving
+  // Map returns Orbit and Fly to their own poses, as Map keeps its own.
+  if (s.camera && s.mode != Mode::Map && (m == Mode::Orbit || m == Mode::Fly)) {
     double e[3], f[3];
     s.camera->GetPosition(e);
     s.camera->GetFocalPoint(f);
@@ -691,27 +735,28 @@ double CameraController::mapFitScale(double halfHeight, double halfWidth) const 
   return std::max(halfHeight, halfWidth / aspect);
 }
 
+// The map pose showing the (2*halfWidth x 2*halfHeight) rect centred on (cx, cy),
+// kept fitted across viewport resizes (refitMapIfResized) until the user zooms.
+void CameraController::fitMap(double cx, double cy, double halfHeight, double halfWidth) {
+  Impl &s = *m_impl;
+  s.mapCenterX = cx;
+  s.mapCenterY = cy;
+  s.mapFitHalfH = halfHeight;
+  s.mapFitHalfW = halfWidth;
+  s.mapFitUserZoomed = false;
+  s.mapScale = std::max(kMinMapScale, mapFitScale(halfHeight, halfWidth));
+  s.mapFitAspect = viewportAspect();
+}
+
 void CameraController::frameMap(double cx, double cy, double halfHeight, double halfWidth) {
   Impl &s = *m_impl;
   s.mode = Mode::Map;
   s.held.clear();
   setPointerCapture(false);
-  s.mapFitHalfH = halfHeight;
-  s.mapFitHalfW = halfWidth;
-  s.mapFitUserZoomed = false;
-  if (s.camera) {
-    // Straight down the +z axis, +y up — a north-up map.
-    s.camera->SetPosition(cx, cy, 1000.0);
-    s.camera->SetFocalPoint(cx, cy, 0.0);
-    s.camera->SetViewUp(0.0, 1.0, 0.0);
-    s.camera->ParallelProjectionOn();
-    s.camera->SetParallelScale(std::max(1e-3, mapFitScale(halfHeight, halfWidth)));
-    if (s.renderer)
-      s.renderer->ResetCameraClippingRange();
-  }
-  s.mapFitAspect = viewportAspect();
+  fitMap(cx, cy, halfHeight, halfWidth);
   syncConfigToState();
   syncPoseToState();
+  applyToCamera();
 }
 
 double CameraController::viewportAspect() const {
@@ -737,15 +782,14 @@ double CameraController::viewportAspect() const {
 // aspect narrows. Once the user zooms, the framing is theirs and we stop.
 void CameraController::refitMapIfResized() {
   Impl &s = *m_impl;
-  if (s.mode != Mode::Map || s.mapFitHalfW <= 0.0 || s.mapFitUserZoomed || !s.camera)
+  if (s.mode != Mode::Map || s.mapFitHalfW <= 0.0 || s.mapFitUserZoomed)
     return;
   const double aspect = viewportAspect();
   if (aspect <= 0.0 || std::abs(aspect - s.mapFitAspect) < 1e-4)
     return;
   s.mapFitAspect = aspect;
-  s.camera->SetParallelScale(std::max(1e-3, mapFitScale(s.mapFitHalfH, s.mapFitHalfW)));
-  if (s.renderer)
-    s.renderer->ResetCameraClippingRange();
+  s.mapScale = std::max(kMinMapScale, mapFitScale(s.mapFitHalfH, s.mapFitHalfW));
+  syncPoseToState(); // update() applies it: applyNeeded() sees the new scale
 }
 
 void CameraController::setOrbitCenter(double x, double y, double z) {
@@ -769,6 +813,10 @@ void CameraController::frameBounds(double minX, double minY, double minZ, double
   Basis b = s.basis();
   s.flyPos = s.orbitCenter + orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
   dirToYawPitch(b, s.orbitCenter - s.flyPos, s.flyYaw, s.flyPitch);
+  // ...and the map: the box's footprint from straight above, with the same slack
+  // (and a floor, so a flat sliver of a box still frames).
+  fitMap(s.orbitCenter.x, s.orbitCenter.y, std::max(0.55 * (maxY - minY), 0.05 * diag),
+         std::max(0.55 * (maxX - minX), 0.05 * diag));
   syncConfigToState();
   syncPoseToState();
   applyToCamera();
@@ -866,7 +914,7 @@ bool CameraController::applyNeeded() const {
   if (!s.scene || !a.valid)
     return true;
   if (a.camera != s.camera || a.renderer != s.renderer || a.scene != s.scene || a.mode != s.mode ||
-      a.fieldOfView != s.fieldOfView)
+      a.fieldOfView != s.fieldOfView || (s.mode == Mode::Map && a.mapScale != s.mapScale))
     return true;
   double e[3], f[3], u[3];
   getPose(e, f, u);
@@ -916,7 +964,7 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       recenterPointer();
   } else if (s.mode == Mode::Map) {
     // 2-D map: drag PANS the view; rotation is deliberately unreachable.
-    if (s.dragging && s.camera) {
+    if (s.dragging) {
       // Convert pixel motion to world units through the parallel scale so the
       // grabbed point stays under the cursor at any zoom. Scale by the VIEWPORT's
       // pixel height (the renderer's), not the whole window's, so a PiP inset
@@ -926,20 +974,12 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       if (!sz || sz[1] <= 0)
         sz = s.window ? s.window->GetSize() : nullptr;
       const double vh = (sz && sz[1] > 0) ? sz[1] : 1.0;
-      const double perPx = 2.0 * s.camera->GetParallelScale() / vh;
-      double pos[3], foc[3];
-      s.camera->GetPosition(pos);
-      s.camera->GetFocalPoint(foc);
-      // Screen right/up in world space (Map looks down -z with +y up).
-      const double dx = -dxPixels * perPx, dy = dyPixels * perPx;
-      pos[0] += dx;
-      foc[0] += dx;
-      pos[1] += dy;
-      foc[1] += dy;
-      s.camera->SetPosition(pos);
-      s.camera->SetFocalPoint(foc);
-      if (s.renderer)
-        s.renderer->ResetCameraClippingRange();
+      const double perPx = 2.0 * s.mapScale / vh;
+      // Map looks down -z with +y up, so screen right/up are world +x/+y, and the
+      // view moves against the drag on BOTH axes (VTK display y grows upward).
+      s.mapCenterX -= dxPixels * perPx;
+      s.mapCenterY -= dyPixels * perPx;
+      applyToCamera();
       syncPoseToState();
     }
   } else if (s.dragging && (s.panning || s.primaryDragPans)) {
@@ -980,13 +1020,11 @@ void CameraController::mouseWheel(double steps) {
   if (s.mode == Mode::Fly)
     s.moveSpeed = std::max(1e-4, s.moveSpeed * std::pow(1.25, steps));
   else if (s.mode == Mode::Map) {
-    if (s.camera) {              // zoom = parallel scale, the only 2-D zoom that means anything
-      s.mapFitUserZoomed = true; // their framing now — stop auto-fitting on resize
-      s.camera->SetParallelScale(
-          std::max(1e-3, s.camera->GetParallelScale() * std::pow(0.9, steps)));
-      if (s.renderer)
-        s.renderer->ResetCameraClippingRange();
-    }
+    // Zoom = parallel scale, the only 2-D zoom that means anything.
+    s.mapFitUserZoomed = true; // their framing now — stop auto-fitting on resize
+    s.mapScale = std::max(kMinMapScale, s.mapScale * std::pow(0.9, steps));
+    applyToCamera();
+    syncPoseToState();
   } else {
     s.orbitDistance = std::max(1e-4, s.orbitDistance * std::pow(0.9, steps));
     applyToCamera();
@@ -1145,6 +1183,16 @@ void CameraController::applyToCamera() {
   s.camera->SetPosition(e);
   s.camera->SetFocalPoint(f);
   s.camera->SetViewUp(u);
+  if (s.mode == Mode::Map) {
+    s.camera->ParallelProjectionOn();
+    s.camera->SetParallelScale(s.mapScale);
+    s.mapProjection = true;
+  } else if (s.mapProjection) {
+    // Leaving Map gives the 3-D modes their perspective back. Only a projection
+    // Map turned on: a host's own parallel camera in Orbit is left alone.
+    s.camera->ParallelProjectionOff();
+    s.mapProjection = false;
+  }
   // Per-viewport lens: apply an explicit FoV in perspective modes only (Map is
   // parallel). 0 leaves whatever VTK/app default the camera already carries.
   if (s.mode != Mode::Map && s.fieldOfView > 0.0)
@@ -1160,6 +1208,7 @@ void CameraController::applyToCamera() {
   std::copy(f, f + 3, a.focal);
   std::copy(u, u + 3, a.up);
   a.fieldOfView = s.fieldOfView;
+  a.mapScale = s.mapScale;
   a.mode = s.mode;
   a.camera = s.camera;
   a.renderer = s.renderer;
@@ -1173,13 +1222,18 @@ void CameraController::applyToCamera() {
 void CameraController::getPose(double eye[3], double focal[3], double up[3]) const {
   Impl &s = *m_impl;
   Basis b = s.basis();
-  Vec3 e, f;
+  Vec3 e, f, vu = b.up;
   if (s.mode == Mode::Fly) {
     e = s.flyPos;
     f = s.flyPos + forwardVec(b, s.flyYaw, s.flyPitch);
   } else if (s.mode == Mode::Track) {
     e = s.trackEye;
     f = s.trackFocal;
+  } else if (s.mode == Mode::Map) {
+    // Straight down the +z axis, +y up — a north-up map.
+    e = {s.mapCenterX, s.mapCenterY, kMapEyeHeight};
+    f = {s.mapCenterX, s.mapCenterY, 0.0};
+    vu = {0.0, 1.0, 0.0};
   } else {
     e = s.orbitCenter + orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
     f = s.orbitCenter;
@@ -1190,9 +1244,9 @@ void CameraController::getPose(double eye[3], double focal[3], double up[3]) con
   focal[0] = f.x;
   focal[1] = f.y;
   focal[2] = f.z;
-  up[0] = b.up.x;
-  up[1] = b.up.y;
-  up[2] = b.up.z;
+  up[0] = vu.x;
+  up[1] = vu.y;
+  up[2] = vu.z;
 }
 
 } // namespace gl
