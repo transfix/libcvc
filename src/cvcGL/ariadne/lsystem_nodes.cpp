@@ -479,7 +479,8 @@ struct Vec3 {
   double x, y, z;
 };
 Vec3 sunDir(double azDeg, double elDeg) {
-  const double az = azDeg * M_PI / 180.0, el = elDeg * M_PI / 180.0;
+  constexpr double kPi = 3.14159265358979323846; // not M_PI: MSVC needs _USE_MATH_DEFINES for it
+  const double az = azDeg * kPi / 180.0, el = elDeg * kPi / 180.0;
   return {std::cos(el) * std::sin(az), -std::cos(el) * std::cos(az), std::sin(el)};
 }
 float sampleSky(const std::vector<float> &field, double wx, double wy, double wz, double skyHalf) {
