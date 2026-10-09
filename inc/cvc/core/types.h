@@ -113,8 +113,9 @@ enum thread_priority {
 
 // Enum for selecting SDF algorithm implementation
 enum sdf_algorithm {
-  SDF_V1, // Original SDFLibrary implementation (thread-safe, octree-based)
-  SDF_V2  // Alternative DistanceTransform implementation (brute-force)
+  SDF_V1,     // Original SDFLibrary implementation (thread-safe, octree-based)
+  SDF_V2,     // Alternative DistanceTransform implementation (brute-force)
+  SDF_IGL = 2 // libigl: exact distance, fast-winding-number sign (needs CVC_ENABLE_LIBIGL)
 };
 
 // Enum for selecting isosurface extraction method
