@@ -397,11 +397,15 @@ install(FILES README.md USAGE.md LICENSE THIRD_PARTY_NOTICES.md
 # ************* CPack configuration *************
 include(GNUInstallDirs)
 
-# Ship Microsoft's MSVC CRT redist AND the LLVM OpenMP runtime
-# (libomp140.x86_64.dll) alongside our binaries. Without
-# CMAKE_INSTALL_OPENMP_LIBRARIES the OpenMP DLL is not bundled and
-# cvc.dll / cvc.exe fail to launch on a vanilla Windows machine
-# with "libomp140.x86_64.dll was not found".
+# Ship Microsoft's MSVC CRT redist alongside our binaries, plus the classic
+# OpenMP runtime (vcomp140.dll) via CMAKE_INSTALL_OPENMP_LIBRARIES.
+#
+# This does NOT cover the LLVM OpenMP runtime that MSVC builds of cvc actually
+# import: src/cvc/CMakeLists.txt compiles with -openmp:llvm, so cvc.dll (and any
+# exe linking a static cvc) needs libomp140.<arch>.dll. Microsoft does not ship
+# that DLL in the redist and documents it as not redistributable, so it cannot
+# be installed here, and a cvc.dll built this way only loads where Visual Studio
+# is installed. release.yml's closure check and sdk-smoke job report it.
 set(CMAKE_INSTALL_OPENMP_LIBRARIES TRUE)
 # InstallRequiredSystemLibraries installs into bin/ by default, which
 # is what we want next to cvc.exe / cvc.dll.
