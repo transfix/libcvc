@@ -30,6 +30,8 @@ set -euo pipefail
 temp=$RUNNER_TEMP
 if [ "$RUNNER_OS" = Windows ]; then temp=$(cygpath -u "$RUNNER_TEMP"); fi
 native() { if [ "$RUNNER_OS" = Windows ]; then cygpath -m "$1"; else echo "$1"; fi; }
+# The @rpath/<leaf> load commands of a Mach-O file, as leaf names.
+rpath_leaves() { otool -L "$1" | awk 'NR > 1 && $1 ~ /^@rpath\// { sub(/^@rpath\//, "", $1); print $1 }'; }
 prefix="$temp/cvcpkg-tools-prefix"
 tree="$temp/cvcpkg-tools"
 read -r -a tools <<<"$TOOLS"
@@ -102,27 +104,49 @@ if [ "$RUNNER_OS" != Windows ]; then
   if [ "$RUNNER_OS" = macOS ]; then pattern='lib*.*.dylib'; else pattern='lib*.so.*'; fi
   find "$prefix/lib" -maxdepth 1 -name "$pattern" \( -type f -o -type l \) -exec cp -P {} "$tree/lib/" \;
 
-  # Each library a tool loads that the tree ships must come from the tree, not
-  # from the host: dyld's fallback search, for one, quietly takes the OS's
-  # /usr/lib/libcurl.4.dylib when an @rpath load misses.
+  # What a tool loads from the tree must come from the tree, not the host.
+  #   Linux: every library ldd resolves that the tree ships.
+  #   macOS: every @rpath load of the tool, and of the tree's libraries it pulls
+  #   in, must resolve into the tree. dyld's fallback search quietly takes the
+  #   OS's /usr/lib/libcurl.4.dylib when an @rpath load misses. That same file
+  #   is loaded anyway, by absolute path, by the system frameworks cmake links,
+  #   so a copy outside the tree is only wrong when it is the ONLY copy.
   for t in "${tools[@]}" ctest cpack; do
     f="$tree/bin/$t"
     [ -f "$f" ] || continue
     if [ "$RUNNER_OS" = macOS ]; then
       loaded=$(DYLD_PRINT_LIBRARIES=1 "$f" --version 2>&1 >/dev/null | sed -n 's/^dyld\[[0-9]*\]: <[^>]*> //p')
+      want=$(rpath_leaves "$f" | sort -u)
+      while :; do
+        more=$( (echo "$want"; for leaf in $want; do
+          if [ -f "$tree/lib/$leaf" ]; then rpath_leaves "$tree/lib/$leaf"; fi
+        done) | sed '/^$/d' | sort -u)
+        [ "$more" = "$want" ] && break
+        want=$more
+      done
+      for leaf in $want; do
+        if [ ! -e "$tree/lib/$leaf" ]; then
+          echo "::error::$t loads @rpath/$leaf, which cvcpkg did not install"
+          exit 1
+        fi
+        if ! awk -v t="$tree/" -v n="/$leaf" 'index($0, t) == 1 && substr($0, length($0) - length(n) + 1) == n { found = 1 } END { exit !found }' <<<"$loaded"; then
+          echo "::error::$t's @rpath/$leaf did not load from $tree/lib"
+          exit 1
+        fi
+      done
     else
       loaded=$(ldd "$f" | awk '$2 == "=>" { print $3 }')
+      for lib in "$tree"/lib/*; do
+        [ -e "$lib" ] || continue
+        name=$(basename "$lib")
+        while read -r hit; do
+          case "$hit" in
+            "" | "$tree"/*) ;;
+            *) echo "::error::$t loads $hit, not the tree's lib/$name"; exit 1 ;;
+          esac
+        done <<<"$(awk -v n="/$name" 'substr($0, length($0) - length(n) + 1) == n' <<<"$loaded")"
+      done
     fi
-    for lib in "$tree"/lib/*; do
-      [ -e "$lib" ] || continue
-      name=$(basename "$lib")
-      while read -r hit; do
-        case "$hit" in
-          "" | "$tree"/*) ;;
-          *) echo "::error::$t loads $hit, not the tree's lib/$name"; exit 1 ;;
-        esac
-      done <<<"$(awk -v n="/$name" 'substr($0, length($0) - length(n) + 1) == n' <<<"$loaded")"
-    done
   done
 fi
 
