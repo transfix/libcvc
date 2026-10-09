@@ -13,10 +13,10 @@
 #
 # The walk covers only what libcvc reaches, not the whole SDK. Whole bundles
 # ship (see sdk-bundle-deps.sh), so the SDK also holds libraries libcvc never
-# loads, and some of those have host deps of their own. cvcpkg's
-# libboost_locale, for one, needs the ICU of the machine it was built on. A
-# static SDK has no shared libcvc to start from; there the sdk-smoke job's
-# consumer link and run check the same thing.
+# loads, which this walk does not vouch for. (cvcpkg's boost before
+# 1.86.0+cvc.5, for one, had a libboost_locale that needed the build machine's
+# ICU.) A static SDK has no shared libcvc to start from; there the sdk-smoke
+# job's consumer link and run check the same thing.
 set -euo pipefail
 
 if [ $# -ne 1 ]; then

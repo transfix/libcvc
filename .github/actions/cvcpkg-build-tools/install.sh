@@ -6,15 +6,23 @@
 # Two directories:
 #   $RUNNER_TEMP/cvcpkg-tools-prefix  what `cvcpkg install` produced: the tools
 #                                     plus their dependency closure (curl,
-#                                     openssl, perl, ...) with headers, static
-#                                     libs, pkg-config files and CMake configs.
-#   $RUNNER_TEMP/cvcpkg-tools         bin/ with only the requested tools, and
-#                                     cmake's own share/cmake-X.Y.
+#                                     openssl, ...) with headers, static libs,
+#                                     pkg-config files and CMake configs.
+#   $RUNNER_TEMP/cvcpkg-tools         bin/ with only the requested tools,
+#                                     cmake's own share/cmake-X.Y, and lib/
+#                                     with the shared libraries they load.
 # The second one is what goes on PATH, and cmake is copied into it rather than
 # linked: CMake adds its own install prefix (the parent of share/cmake-X.Y,
 # found through the real executable path) to every find_package/find_library
 # search. Run from the cvcpkg prefix, cmake let libcvc's find_package(CURL)
 # pick up the tools' static libcurl.a and link it without OpenSSL.
+#
+# cvcpkg's tools are relocatable (cmake >= 3.31.7+cvc.8: RUNPATH $ORIGIN/../lib
+# on Linux, LC_RPATH @executable_path/../lib on macOS, curl and openssl declared
+# as runtime deps), so the copies find their libraries in the tree's lib/. Only
+# the versioned runtime names go there (libcurl.so.4.8.0, libssl.3.dylib, ...):
+# find_library() looks for libcurl.so / libcurl.dylib / libcurl.a, so the tree
+# still offers nothing to libcvc's find_* calls.
 set -euo pipefail
 
 # POSIX paths for the shell; native() for cvcpkg and Python, which on Windows
@@ -25,24 +33,11 @@ native() { if [ "$RUNNER_OS" = Windows ]; then cygpath -m "$1"; else echo "$1"; 
 prefix="$temp/cvcpkg-tools-prefix"
 tree="$temp/cvcpkg-tools"
 read -r -a tools <<<"$TOOLS"
-extra=""
 exe=""
 
 case "$RUNNER_OS" in
-  Linux)
-    # Static: cvcpkg's shared cmake (3.31.7+cvc.6) has a builder-absolute
-    # RUNPATH and cannot find its own libcurl outside the builder. The static
-    # build needs nothing beyond the base system's libz, libstdc++ and glibc.
-    link=static
-    ;;
-  macOS)
-    # cmake is only published shared here. It loads @rpath/libcurl.4.dylib, but
-    # its sole LC_RPATH is a path on the builder and the bundle does not
-    # declare curl; libcurl in turn loads @rpath/libssl.3.dylib without
-    # declaring openssl. Install both and point cmake at them below. Drop this
-    # once cvcpkg republishes a relocatable cmake.
+  Linux | macOS)
     link=shared
-    extra="curl openssl"
     ;;
   Windows)
     # The shared builds; pkg-config has no static one. cmake.exe imports only
@@ -57,9 +52,7 @@ case "$RUNNER_OS" in
 esac
 
 rm -rf "$prefix" "$tree"
-# $extra is intentionally unquoted: zero or more component names.
-# shellcheck disable=SC2086
-cvcpkg install "${tools[@]}" $extra --prefix "$(native "$prefix")" --config release --link "$link"
+cvcpkg install "${tools[@]}" --prefix "$(native "$prefix")" --config release --link "$link"
 
 if [ "$RUNNER_OS" = Windows ]; then
   python=$(command -v python || command -v python3)
@@ -102,22 +95,34 @@ for t in "${tools[@]}"; do
   fi
 done
 
-if [ "$RUNNER_OS" = macOS ]; then
-  # cmake's dylibs (libcurl, libssl, libcrypto) go in a directory no find_*
-  # call searches, and the copied binaries get an absolute rpath to it. Keyed
-  # on the rpath, not on whether cmake starts: dyld's fallback search can
-  # quietly load the OS's /usr/lib/libcurl.4.dylib instead.
-  rt="$tree/libexec/cmake-runtime"
-  mkdir -p "$rt"
-  cp -R "$prefix"/lib/*.dylib "$rt/"
-  for b in cmake ctest cpack; do
-    f="$tree/bin/$b"
+if [ "$RUNNER_OS" != Windows ]; then
+  # The runtime libraries the tools load through their relative rpath: the
+  # versioned names only (see the top of this file).
+  mkdir -p "$tree/lib"
+  if [ "$RUNNER_OS" = macOS ]; then pattern='lib*.*.dylib'; else pattern='lib*.so.*'; fi
+  find "$prefix/lib" -maxdepth 1 -name "$pattern" \( -type f -o -type l \) -exec cp -P {} "$tree/lib/" \;
+
+  # Each library a tool loads that the tree ships must come from the tree, not
+  # from the host: dyld's fallback search, for one, quietly takes the OS's
+  # /usr/lib/libcurl.4.dylib when an @rpath load misses.
+  for t in "${tools[@]}" ctest cpack; do
+    f="$tree/bin/$t"
     [ -f "$f" ] || continue
-    rpaths=$(otool -l "$f" | awk '/cmd LC_RPATH/ { getline; getline; print $2 }')
-    if ! grep -qxF "$rt" <<<"$rpaths"; then
-      install_name_tool -add_rpath "$rt" "$f"
-      codesign --force --sign - "$f"
+    if [ "$RUNNER_OS" = macOS ]; then
+      loaded=$(DYLD_PRINT_LIBRARIES=1 "$f" --version 2>&1 >/dev/null | sed -n 's/^dyld\[[0-9]*\]: <[^>]*> //p')
+    else
+      loaded=$(ldd "$f" | awk '$2 == "=>" { print $3 }')
     fi
+    for lib in "$tree"/lib/*; do
+      [ -e "$lib" ] || continue
+      name=$(basename "$lib")
+      while read -r hit; do
+        case "$hit" in
+          "" | "$tree"/*) ;;
+          *) echo "::error::$t loads $hit, not the tree's lib/$name"; exit 1 ;;
+        esac
+      done <<<"$(awk -v n="/$name" 'substr($0, length($0) - length(n) + 1) == n' <<<"$loaded")"
+    done
   done
 fi
 
