@@ -16,10 +16,14 @@ name: publish-cvcgl-wasm
 #
 # Runner-agnostic: runs on GitHub-hosted ubuntu-latest and provisions the emsdk
 # toolchain + cmake/ninja from the cvcpkg catalog, so it is not tied to any one
-# box (it used to require catx-03's pre-installed /opt/cvc-wasm/emsdk). Dry-run by
-# default (builds + packs, no publish); set dry_run=false to publish.
+# box (it used to require catx-03's pre-installed /opt/cvc-wasm/emsdk). A v* tag
+# push builds AND publishes, like publish-cvcpkg.yml; a manual dispatch is a dry run
+# by default (builds + packs, no publish) -- set dry_run=false to publish.
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -42,6 +46,8 @@ jobs:
       EMSDK_DIR: ${{ github.workspace }}/emsdk
       WASM_DEPS: ${{ github.workspace }}/wasm-deps
       INST: ${{ github.workspace }}/wasm-inst
+      # Only a manual dispatch can dry-run; a tag push always publishes.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
       - uses: actions/checkout@v4
 
@@ -147,7 +153,7 @@ jobs:
               --local --output-dir dist
           done
           ls -la dist/
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
             echo "dry-run: built + packed, not publishing"; exit 0
           fi
           [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
@@ -212,7 +218,7 @@ jobs:
             --platform wasm-mt --config release --link static \
             --local --output-dir dist
           ls -la dist/cvcgl-examples-*wasm-mt* || true
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
             echo "dry-run: built + packed cvcgl-examples gallery, not publishing"; exit 0
           fi
           [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }

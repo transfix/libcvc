@@ -6,8 +6,13 @@ name: publish-pycvc-gl-wasm
 # browser. Runner-agnostic (ubuntu-latest), self-provisioning emsdk + cmake/ninja
 # from the cvcpkg catalog, mirroring publish-cvcgl-wasm.yml. The wasm deps are
 # INSTALLED into the build prefix first (cvcpkg build reads them as CVC_DEPS_PREFIX;
-# without them configure fails at find_package(Boost)). dry_run=false to publish.
+# without them configure fails at find_package(Boost)). A v* tag push publishes, like
+# publish-cvcpkg.yml; a manual dispatch publishes only with dry_run=false. It compiles
+# cvc + cvcGL from source, so it does not wait on publish-cvcgl-wasm's bundles.
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -92,7 +97,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish pycvc-gl-cp312 wasm
-        if: ${{ inputs.dry_run == false }}
+        if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
         run: |
           cvcpkg pack cvcpkg/recipes/pycvc-gl-cp312 --from-prefix "$WASM_DEPS" \
             --platform wasm --config release --link static --output-dir dist
