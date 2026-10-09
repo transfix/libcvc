@@ -181,7 +181,12 @@ cmake --build build --target app_test state_test
 
 ### Google Test Integration
 
-The build system automatically fetches Google Test v1.14.0 from GitHub using CMake's FetchContent module. **No manual installation of Google Test is required.**
+The tests use GoogleTest 1.17.0, resolved by `CMake/SetupGTest.cmake`. **No manual installation of Google Test is required.**
+
+1. **An installed package, if there is one.** `find_package(GTest 1.17.0 CONFIG)` searches `CMAKE_PREFIX_PATH`. The cvcpkg catalog's `googletest` is a build dependency of `cvcpkg/recipes/libcvc`, so a prefix made with `cvcpkg install-deps cvcpkg/recipes/libcvc --prefix <p>` already has it, and configuring against `<p>` needs no network.
+2. **Otherwise, built from source.** FetchContent downloads the same release tarball from GitHub (SHA-256 pinned) and builds it in the build tree.
+
+The configure log names the one it used (`-- GoogleTest 1.17.0: installed package (...)` or `... building from source with FetchContent -- <reason>`). Pass `-DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON` to always build from source. With MSVC, an installed GoogleTest is used only when it matches the build's C runtime: a Release-only package is skipped for a Debug build, for instance, rather than mixing `/MD` and `/MDd`.
 
 ## Running Tests
 

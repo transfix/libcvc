@@ -166,6 +166,20 @@ source:
 patches: []
 
 depends:
+  # Build-only: GoogleTest for the test suite (CVC_BUILD_TESTS=ON). Listed so
+  # `cvcpkg install-deps cvcpkg/recipes/libcvc` (ci-recipe.yml, and the
+  # fetch-libcvc-deps action behind ci.yml's package-* jobs) puts the catalog's
+  # googletest in the deps prefix, where CMake/SetupGTest.cmake finds it with
+  # find_package(GTest CONFIG) instead of downloading GoogleTest at configure
+  # time. As a build dep it is never baked into the bundle's required_deps, and
+  # no test is installed, so none of it ships. A dep cannot be gated on
+  # CVC_BUILD_TESTS, so test-less builds fetch the ~1 MB bundle too. Scoped to
+  # the platforms this recipe builds (googletest has no wasm build). The catalog
+  # has no linux/arm64 or macos/x86_64 googletest yet; those experimental publish
+  # lanes' install-deps already fail on other missing packages.
+  build:
+    - name: googletest
+      platforms: [linux, macos, windows]
   # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
   # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:

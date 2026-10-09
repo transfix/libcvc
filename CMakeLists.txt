@@ -349,21 +349,14 @@ endif()
 # Enable testing with Google Test
 if(CVC_BUILD_TESTS)
   enable_testing()
-  
-  # Fetch Google Test
-  include(FetchContent)
-  FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.14.0
-  )
-  
-  # For Windows: Prevent overriding the parent project's compiler/linker settings
-  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-  
-  # Make Google Test available
-  FetchContent_MakeAvailable(googletest)
-  
+
+  # GTest::gtest / GTest::gtest_main: an installed GoogleTest package when
+  # CMAKE_PREFIX_PATH has one (the cvcpkg catalog's googletest, which
+  # `cvcpkg install-deps cvcpkg/recipes/libcvc` installs), else the same release
+  # built from source via FetchContent. See CMake/SetupGTest.cmake.
+  include(SetupGTest)
+  cvc_setup_gtest()
+
   message(STATUS "Google Test enabled - tests will be built")
 endif()
 

@@ -30,8 +30,10 @@ CMAKE_ARGS=(
   -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS"
   # Test gate (default OFF): `CVC_BUILD_TESTS=ON cvcpkg build libcvc ...`
   # builds the Google Test suite (into the build tree) and runs it after the
-  # build. OFF by default so the packaging/release path stays fast and
-  # network-light (Google Test is fetched via FetchContent).
+  # build. OFF by default so the packaging/release path stays fast. GoogleTest
+  # is the recipe's googletest build dep, which `cvcpkg install-deps` puts in
+  # CVC_DEPS_PREFIX for CMake/SetupGTest.cmake to find; only a prefix without
+  # it makes the configure fetch GoogleTest from GitHub.
   -DCVC_BUILD_TESTS="${CVC_BUILD_TESTS:-OFF}"
   # The `cvc` CLI ships as its own package (the cvc-cli / cvc-cli-cuda recipes)
   # so it lands deliberately in a user's PATH instead of riding along with the
