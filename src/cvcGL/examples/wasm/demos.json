@@ -55,7 +55,7 @@
     "nav_fog_ghost": {
       "desc": "one agent detours a phantom wall, then senses it clear",
       "blurb":
-          "Fog of war: a vehicle detours a phantom wall its stale map shows but reality lacks, then erases it cell by cell as its sensor clears the ground. Switch between three limited-belief scenarios — ghost, dynamic and traffic.",
+          "Fog of war: a vehicle detours a phantom wall its stale map shows but reality lacks, then erases it cell by cell as its sensor clears the ground. Switch between two limited-belief scenarios — ghost (a phantom wall) and dynamic (a vehicle crossing its path).",
       "thumb": "img/nav_fog_ghost.jpg"
     },
     "volren_bunny": {

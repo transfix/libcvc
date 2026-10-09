@@ -217,13 +217,13 @@ int main(int argc, char **argv) {
   std::unique_ptr<cvc::nav::sim_world> worldPtr;
   int NA = 1;
 
-  // THREE limited-belief scenarios, all the same machinery, different lies:
+  // TWO limited-belief scenarios, all the same machinery, different lies:
   //
   //   ghost   — the map claims a wall that reality lacks. The agent detours
   //             around nothing, senses the space is clear, and drives through.
-  //   dynamic — the map is RIGHT at first, then the world CHANGES: a blockage
-  //             appears mid-run (stamped into the live planning surface with
-  //             sim_world::add_obstacle) and the agent must notice and re-route.
+  //   dynamic — the map is right but not the whole story: a second vehicle (the
+  //             crosser) drives down through the hero's corridor mid-run, and the
+  //             hero must sense it and loop around.
   // The lie always lives in the BELIEF (prior_occ), never in `truth` — collision
   // is always scored against truth, which is what keeps the demo honest.
   const std::size_t wall_lo = static_cast<std::size_t>(R) / 4;
@@ -543,7 +543,7 @@ int main(int argc, char **argv) {
 
   std::printf("nav_fog_ghost: scenario=%s, %d vehicle%s, %dx%d belief, %s\n", scenario.c_str(), NA,
               NA == 1 ? "" : "s", R, C,
-              scenario == "dynamic" ? "honest map that changes mid-run"
+              scenario == "dynamic" ? "honest map, a vehicle crossing the hero's path"
                                     : "phantom wall in the prior");
 
   // 3. Run the sim on the render thread (single agent — cheap) so field_data() and
@@ -818,15 +818,10 @@ int main(int argc, char **argv) {
 
     const double worldT = worldPtr->tick() * cfg.veh.dt;
 
-    // `dynamic`: the world CHANGES under the agent. A few seconds in, a blockage is
-    // stamped across the corridor ahead of it (sim_world::add_obstacle writes the
-    // live dynamic layer, which is composited into the planning surface on the
-    // next SENSE tick — so the agent only "knows" once it senses, exactly like a
-    // real discovery). The stale-map lie and this are the two halves of limited
-    // belief: believing something that isn't there, and not yet knowing
-    // something that is.
-    // (dynamic scenario now shows a real CROSSING vehicle, not a static blob;
-    //  the hero senses it via inter-agent avoidance and loops around.)
+    // `dynamic` needs nothing per frame: the crosser is a real second agent set up with
+    // the world (scenario setup above), and the hero only "knows" about it once a SENSE
+    // tick sees it. With `ghost` that makes the two halves of limited belief: believing
+    // something that isn't there, and not yet knowing something that is.
 
     // Repaint the fog/belief ground only when a sense tick actually happened —
     // per-frame smoothing of belief would be a lie (and wasted work).
