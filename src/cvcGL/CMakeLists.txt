@@ -10,7 +10,29 @@
 #   cmake -S src/cvcGL -B build \
 #     -DCMAKE_PREFIX_PATH="<cvcpkg-prefix>;<installed-libcvc-sdk>"
 cmake_minimum_required(VERSION 3.16)
-project(cvcGL VERSION 3.0 LANGUAGES CXX)
+
+# cvcGL ships in lockstep with libcvc, so its version IS libcvc's: in-tree it reads the
+# enclosing project(libcvc VERSION ...); standalone (the cvcgl recipe builds -S src/cvcGL
+# from the same source tree) it parses that line out of the top-level CMakeLists.txt,
+# the same single source of truth the cvc package and the recipe-version CI gate use.
+# This used to be hardcoded 3.0, so every bundle's cvcGLConfigVersion.cmake reported
+# 3.0 and a consumer's find_package(cvcGL 3.5) rejected a 3.5 cvcGL. SOVERSION stays 3,
+# so the runtime name (libcvcGL.so.3) is unchanged; only the file suffix and the
+# exported package version move -- as for libcvc itself (src/cvc/CMakeLists.txt).
+if(DEFINED libcvc_VERSION)
+  set(_cvcgl_version "${libcvc_VERSION}")
+else()
+  file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../../CMakeLists.txt" _cvcgl_version
+       REGEX "^[ \t]*VERSION[ \t]+[0-9]+\\.[0-9]+\\.[0-9]+" LIMIT_COUNT 1)
+  string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" _cvcgl_version "${_cvcgl_version}")
+endif()
+if(NOT _cvcgl_version)
+  message(FATAL_ERROR "cvcGL: cannot determine the libcvc version (no project(libcvc VERSION "
+                      "...) in scope and none parsed from ${CMAKE_CURRENT_SOURCE_DIR}/../../"
+                      "CMakeLists.txt)")
+endif()
+project(cvcGL VERSION ${_cvcgl_version} LANGUAGES CXX)
+message(STATUS "cvcGL version: ${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
