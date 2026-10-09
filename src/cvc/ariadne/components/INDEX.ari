@@ -70,3 +70,36 @@ catalog:
     binds: "<prefix>.graphics.root.children.bunny_volume.volslice.*" # cvc::volslice::state_settings
     for: "a `type: volslice` node (quality / near-plane peel / max planes)"
     args: []                               # convention: node id `bunny_volume`; copy + rename for another
+  - component: forest_controls
+    file: forest_controls.ari
+    unit: forest_controls
+    binds: "<prefix>.forest.*"             # read every frame by the cvcGL forest_trees realizer
+    for: "a `type: forest_trees` node (count / seed / species / span / branching / wind)"
+    args: []
+    note: "the realizer seeds forest.* from the node props; structural edits re-grow the mesh"
+  - component: sea_controls
+    file: sea_controls.ari
+    unit: sea_controls
+    binds: "<prefix>.sea.{wave_amp,sea_level}"   # read on every refill by the wave_sea realizer
+    for: "a `type: wave_sea` node"
+    args: []
+  - component: sky_controls
+    file: sky_controls.ari
+    unit: sky_controls
+    binds: "<prefix>.sky.{drift,morph,shadow}"   # read every frame by the cloud_sky realizer
+    for: "a `type: cloud_sky` node"
+    args: []
+  - component: mesh_tools
+    file: mesh_tools.ari
+    unit: mesh_tools
+    binds: "<prefix>.graphics.root.children.mesh.mesh_ops.*"   # the cvcGL mesh_lab realizer
+    for: "a `type: mesh_lab` node (smooth / decimate / repair / orient, colour by curvature or geodesic distance)"
+    args: []                               # convention: node id `mesh`; copy + rename for another
+    note: "needs a CVC_ENABLE_LIBIGL build; commands are written to mesh_ops.request and run off the render thread"
+  - component: fe_controls
+    file: fe_controls.ari
+    unit: fe_controls
+    binds: "<prefix>.graphics.root.children.domain.fe.*"       # the cvcGL fe_lab realizer
+    for: "a `type: fe_lab` node (LBIE tet mesh, P1 Poisson / heat solve, field on the boundary and a cut)"
+    args: []                               # convention: node id `domain`; copy + rename for another
+    note: "needs a CVC_ENABLE_LIBIGL build (and CVC_ENABLE_MESHER to tet-mesh); commands go through fe.request"

@@ -1347,10 +1347,13 @@ SceneNode parse_scene_node(const YAML::Node &n) {
         else if (plane.IsScalar())
           sn.plane_size = static_cast<float>(plane.as<double>());
       } else if (const YAML::Node sdf = src["sdf"]) {
-        // source: { sdf: { mesh: <uri>, dim: N } } — a volren/volslice volume computed as the
-        // signed distance field of a mesh (no pre-baked volume asset).
+        // source: { sdf: { mesh: <uri>, dim: N, algorithm: v1|v2|igl } } — a volren/volslice
+        // volume computed as the signed distance field of a mesh (no pre-baked volume asset).
         sn.source_sdf_mesh = str(sdf, "mesh", str(sdf, "file"));
         sn.sdf_dim = static_cast<int>(num(sdf, "dim", sn.sdf_dim));
+        sn.sdf_algorithm = str(sdf, "algorithm", sn.sdf_algorithm);
+        std::transform(sn.sdf_algorithm.begin(), sn.sdf_algorithm.end(), sn.sdf_algorithm.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
       } else if (const YAML::Node hf = src["heightfield"]; hf && hf.IsMap()) {
         // source: { heightfield: { size, resolution, layers: [...], colors: [...] } } — a
         // procedural displaced grid mesh (the reusable terrain primitive; no asset).

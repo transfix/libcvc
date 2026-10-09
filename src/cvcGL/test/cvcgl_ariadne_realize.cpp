@@ -8,6 +8,7 @@
 //   * a StageLighting rig actually adds lights,
 //   * a nested node's transform is LOCAL (world = parent ∘ local).
 #include <algorithm>
+#include <chrono> // mesh_lab test: bounded waits on the node's worker lane
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/scene.h>
@@ -31,6 +32,7 @@
 #include <cvc/state/state.h> // clock test: read/write the bound sim.* keys
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
+#include <thread>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkPlane.h> // clip test: the planes handed to a node's renderer
@@ -1002,6 +1004,255 @@ int main() {
     chk(warned, "clip: under the low-memory mapper -> a warning that the node draws unclipped");
     cvc::gl::setLowMemoryMapperPolicy(cvc::gl::LowMemoryMapperPolicy::Auto);
   }
+
+#ifdef CVC_ENABLE_LIBIGL
+  // ── mesh_lab / fe_lab: a request key runs a job off the render thread; a tick applies it ──────
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
+  printf("== mesh_lab / fe_lab node types ==\n");
+  chk(cvc::gl::ariadne::has_scene_node_type("mesh_lab") &&
+          cvc::gl::ariadne::has_scene_node_type("fe_lab"),
+      "register_cvcgl_extensions installed mesh_lab + fe_lab (CVC_ENABLE_LIBIGL)");
+  if (cvc::gl::ariadne::has_scene_node_type("mesh_lab")) {
+    using cvc::gl::GeometryNode;
+    cvc::state &st = cvc::state::instance(app);
+    SceneGraph sg(app, "mlab");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode m;
+    m.id = "mesh";
+    m.type = "mesh_lab";
+    m.source_file = "x.bunny"; // the embedded bunny
+    m.has_fit = true;
+    m.fit_up_y = true;
+    m.fit_height = 100.0f;
+    m.props.kind = Value::Kind::Map;
+    {
+      Value v;
+      v.kind = Value::Kind::Scalar;
+      v.scalar = "2";
+      m.props.entries.emplace_back("smooth_iterations", v);
+    }
+    scene.nodes.push_back(m);
+    SceneNode d;
+    d.id = "domain";
+    d.type = "fe_lab";
+    d.source_sdf_mesh = "x.bunny";
+    d.sdf_dim = 16;
+    d.has_fit = true;
+    d.fit_up_y = true;
+    d.fit_height = 100.0f;
+    d.has_transform = true;
+    d.position[0] = 130.0f;
+    d.props.kind = Value::Kind::Map;
+    {
+      Value v; // every successful mesh queues a solve -- unless a request is already waiting
+      v.kind = Value::Kind::Scalar;
+      v.scalar = "true";
+      d.props.entries.emplace_back("auto_solve", v);
+    }
+    scene.nodes.push_back(d);
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "mlab", &warnings);
+    for (const std::string &w : warnings)
+      printf("     warning: %s\n", w.c_str());
+
+    const std::string mb =
+        cvc::ariadne::resolve_bind("mlab", "graphics.root.children.mesh.mesh_ops");
+    const std::string fb = cvc::ariadne::resolve_bind("mlab", "graphics.root.children.domain.fe");
+    auto val = [&](const std::string &path) { return st(path).value(); };
+    auto num = [&](const std::string &path) {
+      try {
+        return st(path).value<double>();
+      } catch (...) {
+        return std::nan("");
+      }
+    };
+    // Tick until the request was taken and its job (if any) applied; bounded at ~2 minutes.
+    auto settle = [&](const std::string &base) {
+      for (int i = 0; i < 12000; ++i) {
+        cvc::gl::ariadne::tick_scene(realized, view.renderer());
+        if (val(base + ".request").empty() && val(base + ".busy") == "0")
+          return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      return false;
+    };
+
+    auto mesh = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("mesh"));
+    chk(mesh != nullptr, "mesh_lab realized a GeometryNode");
+    chk(val(mb + ".smooth.method") == "cotan" && approx(num(mb + ".smooth.iterations"), 2.0) &&
+            val(mb + ".color.mode") == "none" && val(mb + ".status") == "idle",
+        "mesh_lab seeded mesh_ops.* (smooth.iterations from its prop)");
+    chk(num(mb + ".stats.faces") > 60000.0, "mesh_lab published stats.faces for the bunny");
+
+    st(mb + ".decimate.target_faces").value(2000);
+    st(mb + ".request").value(std::string("decimate"));
+    const bool decimated = settle(mb);
+    printf("     status: %s\n", val(mb + ".status").c_str());
+    chk(decimated, "decimate: the request was consumed and the job finished");
+    chk(num(mb + ".stats.faces") <= 2000.0 && num(mb + ".stats.faces") > 0.0,
+        "decimate: stats.faces <= target_faces (2000)");
+    chk(mesh && mesh->getGeometry() && mesh->getGeometry()->num_tris() <= 2000,
+        "decimate: the node shows the decimated mesh");
+
+    st(mb + ".color.mode").value(std::string("gaussian"));
+    chk(settle(mb), "color.mode gaussian: the colour job finished");
+    chk(mesh && mesh->hasScalarField(), "color.mode gaussian -> the node has a scalar field");
+    chk(num(mb + ".color.min") < num(mb + ".color.max"), "... and published its colour range");
+
+    st(mb + ".geodesic.source").value(5);
+    st(mb + ".color.mode").value(std::string("geodesic"));
+    chk(settle(mb) && num(mb + ".color.max") > 0.0,
+        "color.mode geodesic -> distances from vertex 5");
+
+    st(mb + ".request").value(std::string("reset"));
+    chk(settle(mb) && num(mb + ".stats.faces") > 60000.0, "reset restores the source mesh");
+
+    auto domain = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("domain"));
+    if (!domain) {
+      printf("     (fe_lab skipped: no volume — a build without CVC_ENABLE_SDF?)\n");
+    } else {
+      chk(domain->findChildByName("domain_slice") != nullptr, "fe_lab made its <id>_slice child");
+      st(fb + ".request").value(std::string("mesh"));
+      chk(settle(fb), "fe_lab mesh: the request was consumed and the job finished");
+      printf("     status: %s\n", val(fb + ".status").c_str());
+      if (val(fb + ".status") == "mesher unavailable") {
+        printf("     (fe_lab meshing skipped: built without CVC_ENABLE_MESHER)\n");
+      } else {
+        chk(num(fb + ".stats.tets") > 0.0, "fe_lab mesh: stats.tets > 0");
+        st(fb + ".problem").value(std::string("poisson"));
+        st(fb + ".request").value(std::string("solve"));
+        chk(settle(fb), "fe_lab solve: the Poisson job finished");
+        printf("     status: %s  field [%s, %s]\n", val(fb + ".status").c_str(),
+               val(fb + ".field.min").c_str(), val(fb + ".field.max").c_str());
+        const double fmax = num(fb + ".field.max"), fmin = num(fb + ".field.min");
+        chk(fmax > 0.0, "poisson (f = 1): field.max > 0 inside");
+        // The minimum is the u = 0 held on the boundary (a little below it only where obtuse
+        // tets break the discrete maximum principle).
+        chk(fmin <= 1e-9 * fmax && fmin >= -0.05 * fmax, "poisson: field ~0 on the boundary");
+        chk(domain->hasScalarField(), "poisson: the boundary surface is coloured by the field");
+
+        st(fb + ".problem").value(std::string("heat"));
+        st(fb + ".heat.steps").value(5);
+        st(fb + ".request").value(std::string("solve"));
+        chk(settle(fb), "fe_lab solve: the heat job finished");
+        const double hmax = num(fb + ".field.max");
+        chk(hmax >= 1.0 - 1e-9 && hmax <= 1.05, "heat: the hot floor is held at 1");
+
+        auto tick = [&]() { cvc::gl::ariadne::tick_scene(realized, view.renderer()); };
+        auto starts = [&](const std::string &path, const std::string &prefix) {
+          return val(path).compare(0, prefix.size(), prefix) == 0;
+        };
+
+        // State counts are range-checked: NaN is the default, not a wrapped integer (x86 turns
+        // static_cast<int>(NaN) into INT_MIN, which the old lower clamp made 1 step).
+        st(fb + ".heat.steps").value(std::string("nan"));
+        st(fb + ".request").value(std::string("solve"));
+        chk(settle(fb), "heat.steps = nan: the heat job finished");
+        chk(starts(fb + ".status", "heat: 100 steps"),
+            "heat.steps = nan -> the default 100 steps (status '" + val(fb + ".status") + "')");
+
+        // Stop is honest. A Poisson solve cannot be interrupted: fe.stoppable stays 0 (the Stop
+        // button's enabled_when), a stop is consumed without claiming "stopping...", and the
+        // solve completes with its timing.
+        st(fb + ".problem").value(std::string("poisson"));
+        st(fb + ".request").value(std::string("solve"));
+        tick(); // launches it; the job is applied on a later tick at the earliest
+        chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "0",
+            "a running Poisson solve is not stoppable (fe.stoppable 0)");
+        st(fb + ".request").value(std::string("stop"));
+        tick();
+        chk(val(fb + ".request").empty() &&
+                val(fb + ".status").find("stopping") == std::string::npos,
+            "stop during a Poisson solve is consumed, not claimed (status '" + val(fb + ".status") +
+                "')");
+        // Settle before building the message: argument evaluation order is unspecified, and
+        // MSVC would otherwise report the status from before the job finished.
+        const bool poisson_ran = settle(fb) && starts(fb + ".status", "poisson: solved (") &&
+                                 val(fb + ".stoppable") == "0";
+        chk(poisson_ran, "the Poisson solve ran to the end (status '" + val(fb + ".status") + "')");
+
+        // A heat solve is stoppable. heat.steps = 1e30 is clamped to the 1e6 cap -- not wrapped
+        // to one step -- so the solve is still running when stop arrives.
+        st(fb + ".problem").value(std::string("heat"));
+        st(fb + ".heat.steps").value(std::string("1e30"));
+        st(fb + ".request").value(std::string("solve"));
+        tick();
+        chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "1",
+            "a running heat solve is stoppable (fe.stoppable 1)");
+        st(fb + ".request").value(std::string("stop"));
+        tick();
+        const bool heat_stopped = settle(fb) && starts(fb + ".status", "heat: stopped at step") &&
+                                  val(fb + ".stoppable") == "0";
+        chk(heat_stopped, "heat.steps = 1e30 is clamped, and stop interrupts it (status '" +
+                              val(fb + ".status") + "')");
+        st(fb + ".heat.steps").value(5);
+
+        // auto_solve must not overwrite a request queued while the mesh job ran: the waiting
+        // re-mesh (an isovalue edit, say) runs next and auto-solves in its turn.
+        st(fb + ".problem").value(std::string("poisson"));
+        st(fb + ".request").value(std::string("mesh"));
+        tick(); // launches the mesh job
+        chk(val(fb + ".busy") == "1", "re-mesh: the mesh job is running");
+        st(fb + ".request").value(std::string("mesh")); // queued behind it
+        bool applied = false;
+        for (int i = 0; i < 12000 && !applied; ++i) {
+          tick();
+          applied = val(fb + ".busy") == "0";
+          if (!applied)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        chk(applied && val(fb + ".request") == "mesh",
+            "auto_solve left the queued re-mesh waiting (request '" + val(fb + ".request") + "')");
+        const bool remesh_solved =
+            settle(fb) && starts(fb + ".status", "poisson: solved") && num(fb + ".field.max") > 0.0;
+        chk(remesh_solved,
+            "the queued re-mesh ran, then auto-solved (status '" + val(fb + ".status") + "')");
+
+        // The <id>_slice child follows the fe_lab node's own visibility (the only one a document
+        // can bind): hidden with it, never re-shown by a Slice toggle under a hidden parent, and
+        // not brought back by re-showing the parent while the Slice checkbox is off.
+        std::shared_ptr<cvc::gl::GraphicsNode> cut = domain->findChildByName("domain_slice");
+        const std::string dvis = domain->stateName("visible");
+        auto ticks = [&](int n) {
+          for (int i = 0; i < n; ++i)
+            tick();
+        };
+        if (!cut) {
+          chk(false, "fe_lab still has its <id>_slice child");
+        } else {
+          st(fb + ".view.show_slice").value(1);
+          ticks(3);
+          chk(cut->isVisible(), "slice: the cut shows while fe_lab is visible");
+          st(dvis).value(0);
+          ticks(3);
+          chk(!cut->isVisible(), "slice: hiding fe_lab hides its cut");
+          st(fb + ".view.show_slice").value(0);
+          ticks(3);
+          st(fb + ".view.show_slice").value(1);
+          ticks(3);
+          chk(!cut->isVisible(),
+              "slice: Slice off/on under a hidden fe_lab leaves no floating cut");
+          st(dvis).value(1);
+          ticks(3);
+          chk(cut->isVisible(), "slice: showing fe_lab again brings its cut back");
+          st(fb + ".view.show_slice").value(0);
+          ticks(3);
+          chk(!cut->isVisible(), "slice: Slice off hides the cut");
+          st(dvis).value(0);
+          ticks(1);
+          st(dvis).value(1);
+          ticks(3);
+          chk(!cut->isVisible(),
+              "slice: re-showing fe_lab does not bring back a cut Slice turned off");
+          st(fb + ".view.show_slice").value(1);
+          ticks(3);
+          chk(cut->isVisible(), "slice: Slice on again shows it");
+        }
+      }
+    }
+  }
+#endif
 
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
   return fails ? 1 : 0;
