@@ -3,7 +3,9 @@
 
 #include <array>
 #include <boost/shared_array.hpp>
+#include <cvc/geometry/mesh_ops.h> // Eigen-free: colormap_kind and the tet boundary
 #include <cvc/gl/GraphicsNode.h>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -12,6 +14,7 @@
 #include <vtkSmartPointer.h>
 
 class vtkActor;
+class vtkCellArray;
 class vtkPolyDataMapper;
 class vtkPolyData;
 class vtkTexture;
@@ -22,7 +25,6 @@ class vtkObject;
 class vtkShaderProgram;
 
 namespace cvc {
-class geometry;
 class image;
 class state;
 } // namespace cvc
@@ -37,7 +39,7 @@ enum class GeometryRenderMode {
   LINES,  // Render as wireframe
   TRIS,   // Render triangles as solid surface
   QUADS,  // Render quads as solid surface
-  TETS,   // Render tetrahedral mesh (placeholder)
+  TETS,   // Render the tets' boundary surface (needs libigl; else the tet edges)
   HEXS    // Render hexahedral mesh (placeholder)
 };
 
@@ -99,6 +101,47 @@ public:
   // them for any triangle mesh. A point-count/array mismatch logs and no-ops.
   void updateNormals(const std::vector<double> &xyz);
 
+  // ── Scalar-field colouring ───────────────────────────────────────────────────
+  // Colour the mesh by one value per vertex through a colormap. The colours are
+  // baked on the CPU (cvc::colormap_rgb, available with or without libigl) into
+  // the same 3-channel uchar array geom.colors() uses -- no lookup table, so
+  // they look the same on WebGL -- and are re-applied by render-mode and
+  // use_single_color rebuilds. use_single_color still wins while it is on.
+  //
+  // setScalarField: `perVertex` needs one value per point of the current
+  // geometry (anything else logs and no-ops). A NaN lo/hi is auto: min/max of
+  // the finite values. It overrides the color_by state key until
+  // clearScalarField(), and a setGeometry() with a different point count drops
+  // it. Range and colormap changes recolour in place (no mesh rebuild).
+  //
+  // State keys (bindable from Ariadne/ImGui):
+  //   color_by     none | colors | function | k1 | k2 | mean | gaussian. none and
+  //                colors show geom.colors() as before; function reads
+  //                geom.functions(); the curvature kinds read geom.curvatures()
+  //                (mean = (k1+k2)/2, gaussian = k1*k2), computed once with
+  //                cvc::compute_curvature when the geometry has none and libcvc
+  //                has libigl. A tet mesh without triangles is measured on its
+  //                boundary surface (interior points NaN); points or lines give
+  //                no field (hasScalarField() false).
+  //   colormap     a colormap name (cvc::colormap_from_string).
+  //   scalar_min / scalar_max  empty or non-numeric = auto: the 2-98% percentile
+  //                range (cvc::robust_range) for the curvature kinds, min/max
+  //                otherwise.
+  // Like every setter here these run on the owner thread; the two getters
+  // report what the last recolour there used.
+  void setScalarField(const std::vector<double> &perVertex,
+                      cvc::colormap_kind cm = cvc::colormap_kind::VIRIDIS,
+                      double lo = std::numeric_limits<double>::quiet_NaN(),
+                      double hi = std::numeric_limits<double>::quiet_NaN());
+  void setScalarRange(double lo, double hi);
+  void setColorMap(cvc::colormap_kind cm);
+  void clearScalarField();
+  // True while the mesh has a scalar field to colour by (an explicit one, or a
+  // color_by field this geometry carries), shown or hidden by use_single_color.
+  bool hasScalarField() const { return m_scalarActive; }
+  // The [lo, hi] that field is mapped with; (NaN, NaN) without one.
+  std::pair<double, double> scalarRange() const { return m_scalarRangeUsed; }
+
   // Render tuning (direct VTK property/mapper passthroughs, like the shader
   // replacements). Tubes/spheres make line_width / point_size > 1 survive
   // core-profile GL and WebGL, where raw wide lines/points are silently 1px.
@@ -159,6 +202,10 @@ public:
   // copy). When `img` is not RGBA8, or zeroCopy is false, it falls back to the
   // convert-flip-and-copy path. clearTexture() removes the texture and drops the
   // aliased buffer.
+  //
+  // While a texture is set it supplies the surface colour: geom.colors() are not
+  // shown over it (they come back on clearTexture()). A scalar field -- from
+  // setScalarField or color_by -- is an explicit request and still shows.
   void setTexture(const cvc::image &img, bool zeroCopy = true);
   void clearTexture();
   // Signal that the texture's pixels were edited in place (through an aliased
@@ -262,6 +309,31 @@ private:
   std::shared_ptr<cvc::geometry> m_geometry;
   GeometryRenderMode m_renderMode;
   bool m_useSingleColor; // When true, use single color; when false, use per-vertex colors
+
+  // Scalar-field colouring (see setScalarField). Owner thread only.
+  bool m_hasScalarField = false;     // an explicit setScalarField() field is set
+  std::vector<double> m_scalarField; // ... and its values
+  std::string m_colorBy = "none";    // the color_by state key
+  cvc::colormap_kind m_colorMap = cvc::colormap_kind::VIRIDIS;
+  double m_scalarMin, m_scalarMax; // scalar_min / scalar_max; NaN = auto
+  bool m_scalarActive = false;     // the last recolour mapped a field
+  std::pair<double, double> m_scalarRangeUsed;
+  // Per-geometry caches, reset by setGeometry: curvatures computed for color_by
+  // when the geometry carries none, and the TETS-mode boundary surface.
+  cvc::geometry::curvatures_t m_curvatures;
+  bool m_curvaturesTried = false;
+  cvc::geometry::tris_t m_tetSurface;
+  bool m_tetSurfaceTried = false;
+
+  bool readScalarState(const std::string &key);
+  void writeScalarState();
+  void recolor();
+  void applyVertexColors(const cvc::geometry &geom, bool inPlace);
+  bool resolveScalarField(const cvc::geometry &geom, std::vector<double> &values, bool &robust);
+  const cvc::geometry::curvatures_t *vertexCurvatures(const cvc::geometry &geom);
+  const cvc::geometry::tris_t &tetBoundaryTris(const cvc::geometry &geom,
+                                               cvc::geometry::tris_t &scratch);
+  bool tetSurfaceCells(const cvc::geometry &geom, vtkCellArray *cells);
 
   vtkSmartPointer<vtkActor> m_actor;
   vtkSmartPointer<vtkPolyDataMapper> m_mapper;

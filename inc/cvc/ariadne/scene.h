@@ -193,6 +193,10 @@ struct SceneNode {
   // file.
   std::string source_sdf_mesh;
   int sdf_dim = 64;
+  // source: { sdf: { ..., algorithm: v1 | v2 | igl } } — which cvc::sdf implementation computes it
+  // (lower-cased by the loader). v2 is the default; igl (winding-number sign, exact AABB distance)
+  // needs a CVC_ENABLE_LIBIGL build and the realizer falls back to v2 with a warning without one.
+  std::string sdf_algorithm = "v2";
 
   bool has_material = false;
   float color[3] = {0.8f, 0.8f, 0.9f};

@@ -396,6 +396,23 @@ add_executable(cvcgl_update_normals test/cvcgl_update_normals.cpp)
 target_link_libraries(cvcgl_update_normals PRIVATE cvcGL)
 add_test(NAME cvcgl_update_normals COMMAND cvcgl_update_normals)
 
+# GeometryNode scalar-field colouring (setScalarField, the color_by / colormap /
+# scalar_min / scalar_max state keys): the uchar colours equal
+# cvc::colormap_rgb, survive use_single_color and render-mode rebuilds, change
+# in place for a range/colormap change, and a size mismatch no-ops. Headless
+# except a last section that reads a rendered colour back (skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1).
+add_executable(cvcgl_scalar_field test/cvcgl_scalar_field.cpp)
+target_link_libraries(cvcgl_scalar_field PRIVATE cvcGL)
+add_test(NAME cvcgl_scalar_field COMMAND cvcgl_scalar_field)
+
+# GeometryNode TETS mode: the tets' boundary surface (12 n^2 outward triangles on
+# an n^3 tet cube, every point kept so per-vertex fields line up) when libcvc has
+# libigl, the tet edges otherwise or for tets it rejects. Headless.
+add_executable(cvcgl_tet_surface test/cvcgl_tet_surface.cpp)
+target_link_libraries(cvcgl_tet_surface PRIVATE cvcGL)
+add_test(NAME cvcgl_tet_surface COMMAND cvcgl_tet_surface)
+
 # Guards the "solid opaque block" volume bug: a stale cached min/max after an
 # in-place voxel edit, and a degenerate range collapsing the transfer function.
 add_executable(cvcgl_volume_range test/cvcgl_volume_range.cpp)
@@ -905,7 +922,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
-  cvcgl_streaming_races cvcgl_sdl_input
+  cvcgl_streaming_races cvcgl_sdl_input cvcgl_tet_surface
   cvcgl_webgl_state_shadow cvcgl_glsync
   # Stream channel/widget binding + SDL peripheral I/O: no GL context (the
   # device paths are skipped without CVC_TEST_AUDIO/CAMERA), so they need no

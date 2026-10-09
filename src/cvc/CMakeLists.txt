@@ -22,6 +22,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/voxels.h
   ../../inc/cvc/geometry/geometry.h
   ../../inc/cvc/geometry/simplify.h
+  ../../inc/cvc/geometry/mesh_ops.h
+  ../../inc/cvc/geometry/fem.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_change_journal.h
   ../../inc/cvc/state/state_subscription_router.h
@@ -164,6 +166,8 @@ set(SOURCE_FILES
   processing/gdtv_filter.cpp
   geometry/geometry.cpp
   geometry/simplify.cpp
+  geometry/mesh_ops.cpp
+  geometry/fem.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
@@ -408,6 +412,7 @@ option(CVC_GEOMETRY_ENABLE_BUNNY "Enable built-in bunny geometry test tri mesh" 
 option(CVC_GEOMETRY_CORRECT_INDEX_START "Adjust indices if they start from 1 rather than 0" OFF)
 option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
+option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # XMLRPC support
 if(CVC_USING_XMLRPC)
@@ -1196,6 +1201,29 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/audio_sources.h
 )
 
+# libigl + Eigen (header-only; only libigl's MPL-2.0 core module) behind
+# mesh_ops.h / fem.h. Option, find, and switch off when missing (as for Assimp):
+# mesh_ops.cpp / fem.cpp always compile and then throw mesh_ops_unavailable.
+#
+# CMAKE_FIND_PACKAGE_PREFER_CONFIG is required, not cosmetic: CGAL's config
+# (found above) prepends its modules dir, whose FindEigen3.cmake cannot parse
+# Eigen 5's version, and libigl-config.cmake does find_dependency(Eigen3
+# REQUIRED) -- a fatal configure error even under QUIET. No version is asked
+# of Eigen3 either: Eigen 5's version file rejects any 3.x request.
+if(CVC_ENABLE_LIBIGL)
+  set(_cvc_prefer_config "${CMAKE_FIND_PACKAGE_PREFER_CONFIG}")
+  set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)
+  find_package(Eigen3 CONFIG QUIET)
+  find_package(libigl CONFIG QUIET)
+  set(CMAKE_FIND_PACKAGE_PREFER_CONFIG "${_cvc_prefer_config}")
+  if(TARGET Eigen3::Eigen AND TARGET igl::core)
+    message(STATUS "libigl ${libigl_VERSION} + Eigen ${Eigen3_VERSION} found - mesh_ops/fem ENABLED")
+  else()
+    message(STATUS "libigl/Eigen not found - mesh_ops/fem compile to stubs (CVC_ENABLE_LIBIGL OFF)")
+    set(CVC_ENABLE_LIBIGL OFF)
+  endif()
+endif()
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
@@ -1373,6 +1401,95 @@ if(CVC_ENABLE_GRPC)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)
+endif()
+
+# libigl/Eigen. The TUs in geometry/igl/ include no cvc header and implement only
+# internal igl_detail:: functions; every public cvc:: body is in mesh_ops.cpp /
+# fem.cpp, which are cvc's own objects and so are exported like the rest.
+#
+# The TUs always compile as their own target, cvc_igl: PIC, hidden visibility,
+# PRIVATE igl::core + Eigen3::Eigen, and only the directory-scope defaults (C++
+# standard, MSVC runtime, add_compile_definitions) -- never cvc's target include
+# directories or definitions. It is neither installed nor exported. How its code
+# reaches cvc follows cvc's ACTUAL type, not BUILD_SHARED_LIBS: that option
+# defaults ON, no wasm configure turns it off, and Emscripten (no shared-library
+# support) silently makes add_library(cvc ...) STATIC anyway.
+#  - SHARED cvc: cvc_igl is a private STATIC archive linked into the DLL/.so.
+#    WINDOWS_EXPORT_ALL_SYMBOLS scans only cvc's own objects, so the Eigen/libigl
+#    template instantiations stay out of cvc.dll's export table (~34,900 of its
+#    65,535 slots are already taken), and hidden visibility keeps them out of
+#    libcvc.so's dynamic symbols.
+#  - STATIC cvc (wasm, or BUILD_SHARED_LIBS=OFF): an archive cannot carry another
+#    archive, and a BUILD_INTERFACE link to the unexported cvc_igl would ship a
+#    libcvc.a whose mesh_ops.o / fem.o reference igl_detail:: symbols that no
+#    installed file defines. cvc_igl is an OBJECT library instead, and its
+#    objects go into libcvc.a itself.
+# Both packages are header-only, so neither reaches cvcTargets.cmake. The
+# cvc_igl_packaging test (tests/CMakeLists.txt) checks both shapes.
+set(_cvc_igl_pthreads OFF)
+if(CVC_ENABLE_LIBIGL)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_LIBIGL)
+  get_target_property(_cvc_type cvc TYPE)
+  if(_cvc_type STREQUAL "SHARED_LIBRARY")
+    set(_cvc_igl_kind STATIC)
+  else()
+    set(_cvc_igl_kind OBJECT)
+  endif()
+  add_library(cvc_igl ${_cvc_igl_kind}
+    geometry/igl/igl_surface.cpp
+    geometry/igl/igl_locator.cpp
+    geometry/igl/igl_tet.cpp
+    geometry/igl/igl_fem.cpp
+  )
+  set_target_properties(cvc_igl PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  target_link_libraries(cvc_igl PRIVATE igl::core Eigen3::Eigen)
+  # Inert in Eigen 5.x (only its CHANGELOG still names it). It does NOT keep the
+  # Apache-2.0 BFloat16.h out: Eigen/Core always includes it.
+  target_compile_definitions(cvc_igl PRIVATE EIGEN_MPL2_ONLY)
+  if(MSVC)
+    target_compile_options(cvc_igl PRIVATE /bigobj)
+  endif()
+
+  # libigl's parallel_for backend must be the one igl::core hands every other
+  # consumer. parallel_for.h compiles a different body for the same inline
+  # template under IGL_PARALLEL_FOR_FORCE_SERIAL, and the lambdas inside libigl's
+  # templates mangle identically across TUs, so a define added only here is an
+  # ODR violation in any static link that also uses igl::core: the linker keeps
+  # one copy by link order, serializing the app's loops or pooling cvc's.
+  #  - Single-threaded wasm (no -pthread) cannot start std::thread workers, so
+  #    force SERIAL. The cvcpkg wasm libigl bundle's igl::core already exports
+  #    the define, so this agrees with it.
+  #  - wasm-mt (-pthread) keeps igl::core's backend: POOL, as the cvcpkg wasm-mt
+  #    libigl bundle is built. That pool starts igl::default_num_threads()
+  #    workers (ENV.IGL_NUM_THREADS, else navigator.hardwareConcurrency) on the
+  #    first parallel loop, and a pthread beyond the pre-spawned
+  #    -sPTHREAD_POOL_SIZE pool cannot start until the browser main thread
+  #    yields, which a blocked parallel_for never does. So a wasm-mt app must not
+  #    run mesh_ops / fem / SDF_IGL on the browser main thread with more igl
+  #    workers than its pthread pool: run them on a cvc::async_lane (as the
+  #    Ariadne mesh_lab/fe_lab nodes do), or link with -sPTHREAD_POOL_SIZE >= the
+  #    igl worker count and cap that count with IGL_NUM_THREADS.
+  # CVC_WASM_PTHREADS (top-level option) adds -pthread; a configure may carry it
+  # in CMAKE_CXX_FLAGS instead (cvcpkg's env-wasm.sh does under
+  # CVC_WASM_THREADS=1). This mirrors src/cvcGL's CVCGL_WASM_PTHREADS check.
+  if(EMSCRIPTEN)
+    get_directory_property(_cvc_igl_dir_copts COMPILE_OPTIONS)
+    if(CVC_WASM_PTHREADS
+       OR "${_cvc_igl_dir_copts};${CMAKE_CXX_FLAGS}" MATCHES "(^|[; ])-pthread($|[; ])")
+      set(_cvc_igl_pthreads ON)
+    else()
+      target_compile_definitions(cvc_igl PRIVATE IGL_PARALLEL_FOR_FORCE_SERIAL)
+    endif()
+  endif()
+
+  if(_cvc_igl_kind STREQUAL "STATIC")
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_igl>)
+  else()
+    target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_igl>)
+  endif()
 endif()
 
 # Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes

@@ -1,0 +1,110 @@
+# mesh_tools.ari — a REUSABLE Ariadne component: geometry processing for a `type: mesh_lab` node.
+# Binds the mesh_ops.* keys the cvcGL mesh_lab realizer owns (state at
+# "<scene>.graphics.root.children.mesh.mesh_ops.*"): the realizer SEEDS them from the node's .ari
+# props and reads them every frame, so these controls run libigl-backed mesh operations with NO
+# host C++. Parameters are live keys. COMMANDS go through a request key: a button writes
+# mesh_ops.request, the realizer consumes it (writes "" back), runs the operation off the render
+# thread and publishes status / stats. While a job runs mesh_ops.busy is 1 and the command buttons
+# grey out. Colour by / Colormap / Geodesic source are FOLLOWED: changing them recolours the mesh.
+# Needs a libcvc built with CVC_ENABLE_LIBIGL (the mesh_lab node type is registered only there).
+#
+# Convention: it binds a mesh_lab node named `mesh`. To drive a differently-named node, copy this
+# file and change the node id in the bind paths.
+#
+# Use it:
+#     import: cvc://components/mesh_tools.ari
+#     windows:
+#       - include: mesh_tools
+#     scene:
+#       nodes:
+#         - node: mesh
+#           type: mesh_lab
+#           source: { file: stanford.bunny }
+
+units:
+  mesh_tools:
+    window: Mesh tools
+    id: mesh_tools
+    children:
+      - text: "status"
+        bind: graphics.root.children.mesh.mesh_ops.status
+      - text: "vertices"
+        bind: graphics.root.children.mesh.mesh_ops.stats.vertices
+      - text: "faces"
+        bind: graphics.root.children.mesh.mesh_ops.stats.faces
+      - combo: Render
+        bind: graphics.root.children.mesh.render_mode # GeometryNode's own key
+        options: [Points, Wireframe, Surface]
+        values: [0, 1, 2]
+        def: 2
+      - separator
+      - text: "Smooth"
+      - combo: Method
+        bind: graphics.root.children.mesh.mesh_ops.smooth.method
+        options: [Cotangent (implicit), Uniform Laplacian, Taubin]
+        values: [cotan, uniform, taubin]
+      - slider_int: Iterations
+        bind: graphics.root.children.mesh.mesh_ops.smooth.iterations
+        lo: 1
+        hi: 50
+      - slider_float: Step
+        bind: graphics.root.children.mesh.mesh_ops.smooth.lambda
+        lo: 0.0001
+        hi: 1.0
+        fmt: "%.4f"
+        tooltip: "cotangent: time step x bounding-box diagonal^2 (try 0.0005-0.005); uniform / Taubin: explicit step (try 0.3-0.6; uniform accepts up to 1, Taubin up to 0.7, a larger step is rejected)"
+      - checkbox: Fix boundary
+        bind: graphics.root.children.mesh.mesh_ops.smooth.fix_boundary
+      - button: Smooth
+        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "smooth")
+        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+      - separator
+      - text: "Decimate (quadric edge collapse)"
+      - slider_int: Target faces
+        bind: graphics.root.children.mesh.mesh_ops.decimate.target_faces
+        lo: 100
+        hi: 200000
+      - button: Decimate
+        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate")
+        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+      - separator
+      - text: "Repair"
+      - checkbox: Weld duplicate vertices
+        bind: graphics.root.children.mesh.mesh_ops.repair.weld
+      - checkbox: Drop degenerate faces
+        bind: graphics.root.children.mesh.mesh_ops.repair.remove_degenerate
+      - checkbox: Drop unreferenced vertices
+        bind: graphics.root.children.mesh.mesh_ops.repair.remove_unreferenced
+      - checkbox: Orient outward
+        bind: graphics.root.children.mesh.mesh_ops.repair.orient
+      - button: Repair
+        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "repair")
+        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+      - button: Orient only
+        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "orient")
+        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+      - button: Reset to source
+        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "reset")
+        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+      - separator
+      - text: "Colour"
+      - combo: Colour by
+        bind: graphics.root.children.mesh.mesh_ops.color.mode
+        options: [Material, Mean curvature, Gaussian curvature, Max principal (k1), Min principal (k2), Geodesic distance]
+        values: [none, mean, gaussian, k1, k2, geodesic]
+      - combo: Colormap
+        bind: graphics.root.children.mesh.mesh_ops.color.colormap
+        options: [viridis, magma, plasma, inferno, turbo, jet, parula, gray]
+      - slider_int: Geodesic source vertex
+        bind: graphics.root.children.mesh.mesh_ops.geodesic.source
+        lo: 0
+        hi: 100000 # static range; the realizer clamps to #V-1
+        visible_when: (= (state-get "graphics.root.children.mesh.mesh_ops.color.mode") "geodesic")
+      - button: Curvature
+        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "curvature")
+        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        tooltip: "colour by mean curvature (or recompute the curvature shown)"
+      - text: "min"
+        bind: graphics.root.children.mesh.mesh_ops.color.min
+      - text: "max"
+        bind: graphics.root.children.mesh.mesh_ops.color.max

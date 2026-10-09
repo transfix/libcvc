@@ -56,6 +56,16 @@
   - [Writing Geometries](#writing-geometries)
   - [Supported Formats](#supported-formats)
   - [File I/O Extension System](#file-io-extension-system)
+- [Mesh Operations and Finite Elements (libigl)](#mesh-operations-and-finite-elements-libigl)
+  - [Availability and Conventions](#availability-and-conventions)
+  - [Normals, Orientation and Repair](#normals-orientation-and-repair)
+  - [Curvature](#curvature)
+  - [Implicit Smoothing](#implicit-smoothing)
+  - [Spatial Queries: mesh_locator](#spatial-queries-mesh_locator)
+  - [Geodesic Distance](#geodesic-distance)
+  - [Tetrahedral Mesh Operations](#tetrahedral-mesh-operations)
+  - [Scalar Colormaps](#scalar-colormaps)
+  - [Finite Elements: cvc::fem](#finite-elements-cvcfem)
 - [Type Definitions](#type-definitions)
 - [Complete Examples](#complete-examples)
 - [Best Practices](#best-practices)
@@ -82,6 +92,11 @@ The `cvc::geometry` class provides a versatile container for 3D triangle meshes,
 - **Normal computation**: Automatic surface normal calculation
 - **File I/O**: OFF, RAW, RAWN, RAWC, RAWNC, OBJ (via SDF), and extensible I/O system
 - **Mesh processing**: Smoothing, quality improvement, projection
+- **libigl-backed operations** (`cvc/geometry/mesh_ops.h`, `cvc/geometry/fem.h`; built with
+  `CVC_ENABLE_LIBIGL`): outward orientation, repair, curvature, implicit smoothing, exact closest
+  point / ray / signed distance / winding number, heat geodesics, tet boundary and slicing,
+  colormaps, and P1 finite elements (`cvc::fem`); the same build gives `geometry::project()` an
+  exact closest point and `cvc::sdf()` the `SDF_IGL` backend
 
 **Use Cases:**
 - Loading and saving triangle meshes
@@ -113,10 +128,10 @@ std::cout << "Triangles: " << mesh.num_tris() << "\n";
 // Calculate surface normals
 mesh.calculate_surf_normals();
 
-// Access data
-const auto& points = mesh.points();
-const auto& tris = mesh.tris();
-const auto& normals = mesh.normals();
+// Access data (const_*() never triggers copy-on-write)
+const auto& points = mesh.const_points();
+const auto& tris = mesh.const_tris();
+const auto& normals = mesh.const_normals();
 
 // Process mesh
 for (uint64_t i = 0; i < mesh.num_tris(); ++i) {
@@ -135,8 +150,9 @@ mesh.merge(mesh2);  // Indices automatically remapped
 // Extract surface from volumetric mesh
 geometry surface = mesh.tri_surface();
 
-// Smooth mesh
-mesh.smoothing(0.1f, false);  // delta=0.1, don't fix boundary
+// Smooth mesh (the legacy smoother takes an app context)
+cvc::app ctx;
+mesh.smoothing(ctx, 0.1f, false);  // delta=0.1, don't fix boundary
 
 // Save result
 mesh.write("output.raw");
@@ -218,9 +234,13 @@ mesh4.copy(mesh1);            // copy() method - shares data (default)
 // (points, triangles, normals, etc.)
 
 // First modification triggers copy-on-write
-mesh2.points().push_back({{0, 0, 0}});  // Triggers COW
-// Now mesh2 has independent data, others still shared
+mesh2.points().push_back({{0, 0, 0}});  // Triggers COW of the points array
+// mesh2 now owns its own points array; its other twelve arrays are still
+// shared with mesh1/mesh3/mesh4 until they are accessed non-const too.
 ```
+
+Copy-on-write is **per array**: each of the 13 containers (see [Array Types](#array-types)) is
+held in its own `boost::shared_ptr` and detaches independently.
 
 **Deep Copy:**
 
@@ -259,7 +279,9 @@ mesh3.copy(mesh1);  // or mesh3.copy(mesh1, false);
 
 **When COW Triggers:**
 
-Copy-on-write is triggered by the `pre_write()` method, which is called when you access non-const data:
+Copy-on-write is triggered by the `pre_write()` method, which **every non-const accessor calls**
+(`points()`, `tris()`, `tets()`, `functions()`, ...), whether or not the caller then writes.
+`pre_write()` also invalidates the cached extents.
 
 ```cpp
 geometry mesh(bunny);
@@ -270,12 +292,19 @@ mesh.tris().clear();
 mesh.normals()[0] = {{1, 0, 0}};
 mesh.boundary().set(10, true);
 
+// So does merely reading through a non-const accessor on a non-const object:
+const auto& pts0 = mesh.points();       // NOT const access: calls pre_write(POINTS)
+
 // These DO NOT trigger COW (const access):
 uint64_t num = mesh.num_points();
 bounding_box bbox = mesh.extents();
-const auto& pts = mesh.const_points();  // Explicit const access
-const auto& pts2 = mesh.points();       // Implicit const (const context)
+const auto& pts = mesh.const_points();  // Explicit const access (preferred)
+const geometry& cmesh = mesh;
+const auto& pts2 = cmesh.points();      // const overload: binds only on a const object
 ```
+
+Read-only code -- in particular anything that hands geometry to another library -- should use
+the `const_*()` accessors, so a shared geometry is never deep-copied by accident.
 
 **Independent Copies:**
 
@@ -288,9 +317,9 @@ geometry mesh1 = read_geometry("bunny.off");
 geometry mesh2;
 mesh2.copy(mesh1, true);  // Immediately independent
 
-// Method 2: Shallow copy with forced COW
+// Method 2: Shallow copy with forced COW (per array)
 geometry mesh3(mesh1);
-mesh3.points();  // Triggers COW, now independent
+mesh3.points();  // Detaches the points array only; other arrays stay shared
 
 // Method 3: Manual deep copy
 geometry mesh4;
@@ -302,21 +331,29 @@ mesh4.normals() = mesh1.normals();
 
 ### Array Types
 
-The geometry class organizes data into seven array types:
+The geometry class organizes data into thirteen array types:
 
 ```cpp
 enum ARRAY_TYPE {
-    POINTS,    // Vertex coordinates
-    BOUNDARY,  // Boundary vertex flags
-    NORMALS,   // Vertex normals
-    COLORS,    // Vertex colors
-    LINES,     // Line connectivity
-    TRIS,      // Triangle connectivity
-    QUADS      // Quad connectivity
+    POINTS,      // Vertex coordinates
+    BOUNDARY,    // Boundary vertex flags
+    NORMALS,     // Vertex normals
+    COLORS,      // Vertex colors (RGB)
+    CURVATURES,  // Per-vertex principal curvatures (k1, k2)
+    FUNCTIONS,   // One scalar per vertex
+    LINES,       // Line connectivity
+    TRIS,        // Triangle connectivity
+    QUADS,       // Quad connectivity
+    TETS,        // Tetrahedral elements
+    HEXS,        // Hexahedral elements
+    UVS,         // Per-vertex texture coordinates
+    TANGENTS     // Per-vertex tangent basis (xyz + handedness)
 };
 ```
 
-Each array type is managed independently with COW semantics.
+Each array type is managed independently with COW semantics. Non-detaching shared owners
+(`points_ptr()`, `colors_ptr()`, `uvs_ptr()`, `tangents_ptr()`) exist for the arrays the Python
+bindings expose as zero-copy views.
 
 ### Boundary Vertices
 
@@ -883,17 +920,22 @@ Quad (v0, v1, v2, v3) -> Triangle (v0, v1, v2) + Triangle (v0, v2, v3)
 geometry& calculate_surf_normals();
 ```
 
-Computes vertex normals based on adjacent triangle areas and angles. Modifies the geometry in-place.
+Computes vertex normals from the boundary triangle surface (`tri_surface()`). Modifies the geometry in-place.
 
 **Algorithm:**
 
-For each boundary vertex:
-1. Find all adjacent triangles
-2. Compute triangle normals weighted by area
-3. Average normals at shared vertices
-4. Normalize result
+For each vertex:
+1. Find the triangles of `tri_surface()` that touch a vertex at the **same position** (lookup is
+   by coordinates, so coincident seam vertices share their neighbours)
+2. Compute each triangle's unit normal
+3. Average them (sum divided by the count)
 
-For interior vertices (non-boundary), normals are set to (0, 0, 0).
+The result is **not renormalized**, so normals are shorter than unit length wherever adjacent
+faces disagree. A degenerate triangle contributes (1, 0, 0) (`cvc::normalize` of a zero vector),
+biasing the average toward +x. Vertices with no adjacent boundary triangle (interior vertices of
+a volumetric mesh) get (0, 0, 0). For unit, angle- or area-weighted normals use
+`geometry::compute_normals()` (area-weighted) or `cvc::compute_vertex_normals()`
+([mesh_ops.h](#normals-orientation-and-repair)).
 
 ```cpp
 geometry mesh = read_geometry("bunny.off");
@@ -901,12 +943,12 @@ geometry mesh = read_geometry("bunny.off");
 // Calculate normals
 mesh.calculate_surf_normals();
 
-// Verify normals are unit length
-for (const auto& normal : mesh.normals()) {
-    double length = std::sqrt(normal[0]*normal[0] + 
-                              normal[1]*normal[1] + 
+// Normals are averages of unit face normals: length <= 1
+for (const auto& normal : mesh.const_normals()) {
+    double length = std::sqrt(normal[0]*normal[0] +
+                              normal[1]*normal[1] +
                               normal[2]*normal[2]);
-    EXPECT_NEAR(length, 1.0, 1e-6);  // Unit length
+    EXPECT_LE(length, 1.0 + 1e-9);
 }
 
 // Use normals for rendering
@@ -958,9 +1000,13 @@ Normal magnitude is preserved (typically unit length).
 geometry& reorient();
 ```
 
-Makes triangle orientations consistent across the mesh. Ensures all triangles follow a consistent winding order.
+Makes per-vertex **normals** consistent across the mesh.
 
-**Note:** Current implementation makes normals consistent but doesn't actually reorient triangle vertices. Future versions will properly flip triangle winding.
+**Note:** despite the name, `reorient()` never changes the triangle winding: it only flips
+normals (the header still carries "TODO: make this actually re-orient triangles"), its result
+depends on traversal order, and quads are not handled. To actually re-wind a surface so every
+connected component faces outward, use `cvc::orient_outward()` from
+[`cvc/geometry/mesh_ops.h`](#normals-orientation-and-repair).
 
 ```cpp
 geometry mesh = read_geometry("inconsistent.off");
@@ -1034,13 +1080,32 @@ ASSERT_EQ(mesh.num_quads(), 0);
 geometry& project(const geometry& target);
 ```
 
-Projects boundary vertices of this geometry onto the target geometry surface. Useful for fitting meshes or enforcing surface constraints.
+Moves the vertices of this geometry onto the target geometry's triangle surface
+(`target.tri_surface()`). Useful for fitting meshes or enforcing surface constraints. Only
+positions change; normals are not recomputed. Which algorithm runs depends on the build:
 
-**Algorithm:**
+1. **With `CVC_ENABLE_LIBIGL`** (the default when Eigen and libigl are found): every vertex moves
+   to its **exact** closest point on `target.tri_surface()`, found through a `cvc::mesh_locator`
+   (an AABB tree; [mesh_ops.h](#spatial-queries-mesh_locator)). `tri_surface()` already turns
+   the target's quads into triangles and, when its `boundary()` is set, keeps only boundary
+   faces. If that surface has no triangles, nothing moves.
+2. **Without libigl but with CGAL** (`CVC_GEOMETRY_ENABLE_PROJECT`): the older heuristic in
+   `inc/cvc/geometry/project_verts.h`, with the limitations below.
+3. **With neither:** `project()` is a **silent no-op**. That includes wasm builds made without
+   the libigl bundles, since they also set `DISABLE_CGAL=ON`.
 
-For each boundary vertex in this geometry:
-1. Find nearest point on target geometry surface
-2. Move vertex to that location
+**The CGAL heuristic (builds without libigl only).** For each vertex it finds the 10 nearest
+*vertices* of the target (CGAL k-d tree), takes the first that has incident triangles, projects
+onto the plane of one triangle incident to that vertex (falling back to an edge of it), and moves
+the vertex there. Its limitations:
+- It is not an exact closest point: the true closest triangle is often not incident to the
+  nearest vertex (large or anisotropic triangles).
+- The edge fallback clamps its parameter with `max(1.0, min(0.0, r))`, which is always 1.0, so it
+  snaps to the segment end; the parameter formula also uses `P0+PS` where `PS-P0` is meant.
+- It throws when the target has no points (the k-d tree search finds nothing).
+
+To query closest points without moving anything, or to reuse one tree for many queries, use
+`cvc::closest_points()` or a `cvc::mesh_locator` directly.
 
 ```cpp
 geometry coarse = read_geometry("coarse_bunny.off");
@@ -1060,77 +1125,93 @@ coarse.project(fine);
 ### Smoothing
 
 ```cpp
-geometry& smoothing(float delta = 0.1f, bool fix_boundary = false);
+geometry& smoothing(app& ctx, float delta = 0.1f, bool fix_boundary = false,
+                    bool perturb_1 = false, bool geometric_flow = true,
+                    bool smoothing_enabled = true, bool perturb_2 = false);
 ```
 
-Applies Laplacian smoothing to the mesh vertices. Reduces mesh noise and irregularities.
+Sangmin Park's explicit smoother (`src/cvc/processing/smoothing.cpp`). It moves vertex positions
+in place, keeps the topology, and rewrites the normals.
 
 **Parameters:**
-- `delta`: Smoothing strength (0.0 = no smoothing, 1.0 = maximum). Default: 0.1
-- `fix_boundary`: If `true`, boundary vertices remain fixed. Default: `false`
+- `ctx`: App context.
+- `delta`: Step size of the geometric-flow pass. Default: 0.1.
+- `fix_boundary`: Keep boundary vertices in place. Boundary comes from `boundary()` when it is set,
+  otherwise from a 1-ring heuristic. Default: `false`.
+- `perturb_1`, `perturb_2`: Optional vertex-perturbation passes before and after. Default: off.
+- `geometric_flow`: Run the geometric-flow pass. Default: `true`.
+- `smoothing_enabled`: Run the umbrella smoothing pass. Default: `true`.
 
-**Algorithm (Sangmin Park's method):**
-
-For each vertex, move it toward the average position of its neighbors:
-
-```
-new_position = old_position + delta * (neighbor_average - old_position)
-```
+**What it actually does:**
+- Works in **float32** buffers with `int` indices and writes every vertex back from float, so
+  large world-space coordinates lose precision.
+- Each enabled pass runs a **fixed 20 iterations** (`#define maxIndex 20`).
+- The **geometric-flow** pass moves each vertex by `delta` toward the area-weighted centroid of
+  its incident triangles. The tangential projection is commented out, so it also shrinks the mesh
+  along the normal.
+- The **smoothing** pass replaces each vertex with the unweighted mean of its incident triangles'
+  centroids. **It ignores `delta`**, so with the defaults every call applies at least 20 full
+  umbrella steps and shrinks strongly.
+- Known defects: the perturb passes read stale triangle indices, and `perturb_2` calls `rand()`
+  inside an OpenMP loop (racy, non-deterministic). `GeometryTest.SmoothingWithBoundaryFixed`
+  aborts with `free(): invalid pointer` in local Debug builds
+  (`docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md`).
 
 ```cpp
+cvc::app ctx;
 geometry noisy = read_geometry("noisy_mesh.off");
 
-// Light smoothing
-noisy.smoothing(0.05f, false);
+// Geometric flow only, gentle step
+noisy.smoothing(ctx, 0.05f, false, false, /*geometric_flow=*/true, /*smoothing_enabled=*/false);
 
-// Strong smoothing with fixed boundary
+// Default: geometric flow + umbrella pass, boundary fixed
 geometry smooth = read_geometry("mesh.off");
-smooth.smoothing(0.5f, true);
-
-// Iterate for stronger effect
-for (int i = 0; i < 10; ++i) {
-    smooth.smoothing(0.1f, false);
-}
+smooth.smoothing(ctx, 0.1f, true);
 ```
 
-**Trade-offs:**
-- **Low delta (0.01-0.1)**: Gentle smoothing, preserves features
-- **High delta (0.3-0.9)**: Aggressive smoothing, may lose details
-- **fix_boundary=true**: Preserves mesh outline, prevents shrinkage
-- **fix_boundary=false**: Allows full smoothing, may cause shrinkage
+For double-precision, scale-independent smoothing with a choice of operator (implicit cotangent
+flow, uniform Laplacian, Taubin) and optional area preservation, use `cvc::smooth()` from
+[`cvc/geometry/mesh_ops.h`](#implicit-smoothing).
 
 ### Quality Improvement
 
 ```cpp
-geometry& quality_improve(int iterations, 
-                         improvement_method method = IMPROVE_GEO_FLOW);
+#ifdef CVC_ENABLE_MESHER
+geometry& quality_improve(int iterations = 1,
+                          improvement_method method = GEO_FLOW);
+#endif
 ```
 
-Improves mesh quality using LBIE (Level set, B-spline, Implicit surface, Extrapolation) methods.
+Improves mesh quality with the LBIE mesher's improvement passes. Declared only when libcvc is
+built with `CVC_ENABLE_MESHER` (default ON). It uses the geometry's app context, so call it on a
+geometry constructed with one.
 
 **Parameters:**
 - `iterations`: Number of improvement iterations
-- `method`: Quality improvement algorithm enum (default: `IMPROVE_GEO_FLOW`)
+- `method`: `cvc::improvement_method` (`inc/cvc/core/types.h`; default: `GEO_FLOW`)
 
 **Available Methods:**
-- `IMPROVE_NO_IMPROVE`: No improvement (pass-through)
-- `IMPROVE_GEO_FLOW`: Geometric flow-based improvement (default, recommended)
-- `IMPROVE_EDGE_CONTRACT`: Edge contraction
-- `IMPROVE_JOE_LIU`: Joe-Liu algorithm
-- `IMPROVE_MINIMAL_VOL`: Minimal volume optimization
-- `IMPROVE_OPTIMIZATION`: General optimization
+- `NO_IMPROVE`: No improvement (pass-through)
+- `GEO_FLOW`: Geometric flow-based improvement (default)
+- `EDGE_CONTRACT`: Edge contraction
+- `JOE_LIU`: Joe-Liu algorithm
+- `MINIMAL_VOL`: Minimal volume optimization
+- `OPTIMIZATION`: General optimization
+
+`docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md` records segfaults for `OPTIMIZATION` and for
+`JOE_LIU` / `MINIMAL_VOL` on several volumetric mesh types; prefer `GEO_FLOW`.
 
 ```cpp
 #include <cvc/utility/algorithm.h>
 
-geometry poor_quality = read_geometry("poor_mesh.off");
+cvc::app ctx;
+geometry poor_quality(ctx, "poor_mesh.off");
 
 // Improve mesh quality with geometric flow (default)
-poor_quality.quality_improve(10, IMPROVE_GEO_FLOW);
+poor_quality.quality_improve(10, GEO_FLOW);
 
-// Try different methods
-poor_quality.quality_improve(5, IMPROVE_EDGE_CONTRACT);
-poor_quality.quality_improve(10, IMPROVE_OPTIMIZATION);
+// Try a different method
+poor_quality.quality_improve(5, EDGE_CONTRACT);
 
 // Quality metrics should improve:
 // - Better triangle aspect ratios
@@ -1151,25 +1232,44 @@ The geometry API supports creating volumetric meshes (tetrahedral and hexahedral
 ### Signed Distance Function (SDF)
 
 ```cpp
-volume sdf(const geometry& geom,
+#ifdef CVC_ENABLE_SDF
+volume sdf(app& ctx,
+           const geometry& geom,
            const dimension& dim,
-           const bounding_box& bbox,
-           sdf_algorithm algorithm = SDF_V2,
+           const bounding_box& bbox = bounding_box(),  // pass one explicitly; see below
+           sdf_algorithm algorithm = SDF_V1,
            bool flipNormals = false);
+#endif
 ```
 
 Computes the signed distance function for a geometry, creating a volume where each voxel stores the signed distance to the nearest surface point.
 
 **Parameters:**
-- `geom`: Input triangle mesh (must be watertight for correct sign)
+- `ctx`: App context
+- `geom`: Input triangle mesh (`SDF_V1` / `SDF_V2` need it watertight for a reliable sign)
 - `dim`: Volume dimensions (e.g., `dimension(64, 64, 64)`)
-- `bbox`: Bounding box for the volume (use `geom.extents()` to match geometry)
-- `algorithm`: SDF algorithm selection (default: `SDF_V2`)
+- `bbox`: Bounding box of the output volume. **Pass it explicitly** (for example
+  `geom.extents()`). Only `SDF_IGL` treats a default-constructed (all-zero) box as "the
+  geometry's extents". `SDF_V1` and `SDF_V2` need a real box: given the default one they produce
+  a degenerate volume.
+- `algorithm`: SDF algorithm selection (default: `SDF_V1`)
 - `flipNormals`: Invert inside/outside regions (default: `false`)
 
 **Algorithms:**
-- `SDF_V1`: Legacy SDFLibrary (power-of-2 only, slower, single-threaded)
-- `SDF_V2`: Modern DistanceTransform (11x faster, thread-safe, arbitrary dimensions)
+- `SDF_V1`: Legacy SDFLibrary (octree; power-of-2 cubic grids only). Reads `tris()` only, so quads
+  are ignored.
+- `SDF_V2`: DistanceTransform (brute-force near band plus fast marching, arbitrary dimensions;
+  expands and resamples the box if it is tighter than 1.1x the mesh extent)
+- `SDF_IGL`: libigl-backed. It samples the output volume's own nodes (`XMin() + i * XSpan()`, and
+  so on), at any dimensions and with no resampling. The value is the exact distance to the
+  triangle surface (`tris()` plus split quads) from an AABB tree, and the sign comes from the fast
+  generalized winding number, so meshes with holes or self-intersections still get a sensible
+  inside. It needs a libcvc built with `CVC_ENABLE_LIBIGL` and throws
+  `cvc::mesh_ops_unavailable` otherwise. Cost is O(nodes · log F). In cvc-cli: `cvc sdf -a igl`.
+
+`SDF_V1` and `SDF_V2` lose sign accuracy on meshes with holes (`docs/SDF_LIBRARY.md`). To get the
+same exact, winding-number-signed distance as `SDF_IGL` at arbitrary points rather than on a grid,
+query `cvc::mesh_locator::signed_distance()` ([mesh_ops.h](#spatial-queries-mesh_locator)).
 
 **Sign Convention:**
 - **Negative values**: Inside the surface
@@ -1179,16 +1279,17 @@ Computes the signed distance function for a geometry, creating a volume where ea
 ```cpp
 #include <cvc/utility/algorithm.h>
 
+cvc::app ctx;
 geometry bunny = read_geometry("bunny.off");
 
-// Create SDF with v2 algorithm (recommended)
+// Create SDF with the v2 algorithm
 dimension sdf_dim(64, 64, 64);
-volume sdf_vol = sdf(bunny, sdf_dim, bunny.extents(), SDF_V2);
+volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
 std::cout << "SDF range: [" << sdf_vol.min() << ", " << sdf_vol.max() << "]\n";
 
 // Flip normals to invert inside/outside
-volume inverted_sdf = sdf(bunny, sdf_dim, bunny.extents(), SDF_V2, true);
+volume inverted_sdf = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2, true);
 ```
 
 **flipNormals Feature** (New in v2.0):
@@ -1197,13 +1298,13 @@ The `flipNormals` parameter inverts the sign of all SDF values, effectively swap
 
 ```cpp
 // Normal: inside = negative, outside = positive
-volume normal_sdf = sdf(geom, dim, bbox, SDF_V2, false);
+volume normal_sdf = sdf(ctx, geom, dim, bbox, SDF_V2, false);
 
-// Flipped: inside = positive, outside = negative  
-volume flipped_sdf = sdf(geom, dim, bbox, SDF_V2, true);
+// Flipped: inside = positive, outside = negative
+volume flipped_sdf = sdf(ctx, geom, dim, bbox, SDF_V2, true);
 
 // Use case: extracting the "shell" around an object
-volume shell_sdf = sdf(geom, dim, bbox, SDF_V2, true);
+volume shell_sdf = sdf(ctx, geom, dim, bbox, SDF_V2, true);
 geometry shell = tetrahedralize2(shell_sdf, -0.05, 0.05);
 ```
 
@@ -1214,10 +1315,14 @@ geometry shell = tetrahedralize2(shell_sdf, -0.05, 0.05);
 ### Isosurface Extraction
 
 ```cpp
-geometry iso(const volume& vol, 
+#ifdef CVC_ENABLE_MESHER
+geometry iso(const volume& vol,
              double isovalue,
-             extraction_method method = EXTRACT_DUALLIB,
-             int improve_iterations = 1);
+             extraction_method method = DUALLIB,
+             int improve_iterations = 0,
+             normal_type normals = BSPLINE_CONVOLUTION,
+             boost::optional<const volume&> propertyVol = boost::none);
+#endif
 ```
 
 Extracts a triangle mesh representing a specific isovalue from a volume (typically an SDF).
@@ -1225,20 +1330,23 @@ Extracts a triangle mesh representing a specific isovalue from a volume (typical
 **Parameters:**
 - `vol`: Input volume (e.g., from `sdf()`)
 - `isovalue`: Surface value to extract (0.0 for exact surface in SDF)
-- `method`: Extraction algorithm (default: `EXTRACT_DUALLIB`)
-- `improve_iterations`: Number of quality improvement passes (default: 1)
+- `method`: Extraction algorithm (default: `DUALLIB`)
+- `improve_iterations`: Number of quality improvement passes (default: 0)
+- `normals`: Normal estimation (`BSPLINE_CONVOLUTION`, `CENTRAL_DIFFERENCE`, `BSPLINE_INTERPOLATION`)
+- `propertyVol`: Optional volume whose values are interpolated into `functions()`
 
-**Extraction Methods:**
-- `EXTRACT_FASTCONTOURING`: Fast marching cubes variant
-- `EXTRACT_LIBISOCONTOUR`: Library-based isocontour extraction
-- `EXTRACT_DUALLIB`: Dual contouring (better quality, recommended)
+**Extraction Methods** (`cvc::extraction_method`, `inc/cvc/core/types.h`):
+- `FASTCONTOURING`: Fast marching cubes variant
+- `LIBISOCONTOUR`: Library-based isocontour extraction
+- `DUALLIB`: Dual contouring (better quality, default)
 
 ```cpp
+cvc::app ctx;
 geometry bunny = read_geometry("bunny.off");
-volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents());
+volume sdf_vol = sdf(ctx, bunny, dimension(64, 64, 64), bunny.extents());
 
 // Extract surface at isovalue 0.0 (exact surface)
-geometry surface = iso(sdf_vol, 0.0, EXTRACT_DUALLIB, 1);
+geometry surface = iso(sdf_vol, 0.0, DUALLIB, 1);
 
 // Extract slightly inside/outside surface
 geometry inner = iso(sdf_vol, -0.01);  // Inside
@@ -1248,72 +1356,129 @@ geometry outer = iso(sdf_vol, 0.01);   // Outside
 ### Tetrahedral Meshing
 
 ```cpp
+#ifdef CVC_ENABLE_MESHER
 geometry tetrahedralize(const volume& vol,
-                       double isovalue,
-                       extraction_method method = EXTRACT_DUALLIB,
-                       improvement_method improve_method = IMPROVE_GEO_FLOW,
-                       int improve_iterations = 1);
+                        double isovalue,
+                        extraction_method method = DUALLIB,
+                        improvement_method improve_method = NO_IMPROVE,
+                        normal_type normals = BSPLINE_CONVOLUTION,
+                        int improve_iterations = 0,
+                        boost::optional<const volume&> propertyVol = boost::none);
+#endif
 ```
 
-Creates a tetrahedral volumetric mesh from a volume. Useful for finite element analysis and volumetric rendering.
+Creates a tetrahedral volumetric mesh from a volume with the LBIE mesher. The elements land in
+`tets()`.
 
 **Parameters:**
 - `vol`: Input volume (e.g., from `sdf()`)
-- `isovalue`: Boundary isovalue
+- `isovalue`: Boundary isovalue; the mesh fills `{v > isovalue}` (see below)
 - `method`: Extraction algorithm
-- `improve_method`: Quality improvement method
-- `improve_iterations`: Number of improvement passes
+- `improve_method`: Quality improvement method (default: `NO_IMPROVE`)
+- `normals`: Normal estimation
+- `improve_iterations`: Number of improvement passes (default: 0)
+- `propertyVol`: Optional volume interpolated into `functions()`
+
+**Which side is meshed:** LBIE meshes the region where the volume is **above** the isovalue,
+`{v > isovalue}` (it negates the volume and the isovalue internally and fills below). An SDF from
+`cvc::sdf()` is negative inside, so `tetrahedralize(sdf_vol, 0.0)` fills the bounding box
+*outside* the surface, not the object. This was checked with the built cvc-cli on the bunny SDF:
+the raw SDF meshes the box minus the bunny, and the negated SDF meshes the bunny. To mesh
+`{v < isovalue}` (the inside of an SDF), mesh `-v` above `-isovalue`. Ariadne's `fe_lab` node
+does exactly this
+(`src/cvcGL/ariadne/mesh_nodes.cpp`); the examples below use the same helper:
 
 ```cpp
-geometry bunny = read_geometry("bunny.off");
-volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents());
+// -v as a Float volume on the same grid and bounding box.
+cvc::volume negated(const cvc::volume& v) {
+  const std::uint64_t n = v.XDim() * v.YDim() * v.ZDim();
+  std::vector<float> buf(n);
+  for (std::uint64_t i = 0; i < n; ++i)
+    buf[i] = static_cast<float>(-v(i));
+  return cvc::volume(v.ctx(), reinterpret_cast<const unsigned char*>(buf.data()),
+                     v.voxel_dimensions(), cvc::Float, v.boundingBox());
+}
+```
 
-// Create tetrahedral mesh
-geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB, IMPROVE_GEO_FLOW, 3);
+`sdf(..., flipNormals = true)` is documented to produce a positive-inside field directly; the
+negation above is the path that has been checked. `hexahedralize()` goes through the same LBIE
+octree loader, so expect the same side, but only the tetrahedral case has been checked end to
+end. `tetrahedralize2()` meshes the layer between two isovalues, where the question does not
+arise.
+
+**Element orientation:** the tets are decoded from LBIE's four-triangles-per-tet output through
+a sorted vertex set (`decode_tets_from_triangles`), so roughly half of them come out with
+negative signed volume. Anything that needs positive orientation (finite elements, signed
+volumes, gradients) should call `cvc::orient_tets()` first; the `cvc::fem` functions orient an
+internal copy themselves.
+
+```cpp
+cvc::app ctx;
+geometry bunny = read_geometry("bunny.off");
+volume sdf_vol = sdf(ctx, bunny, dimension(64, 64, 64), bunny.extents());
+
+// Tet-mesh the inside of the bunny (LBIE meshes {v > iso}), with 3 geometric-flow passes
+geometry tet_mesh =
+    tetrahedralize(negated(sdf_vol), 0.0, DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 3);
 
 std::cout << "Tetrahedral mesh:\n";
 std::cout << "  Vertices: " << tet_mesh.num_points() << "\n";
-std::cout << "  Triangles: " << tet_mesh.num_tris() << "\n";
+std::cout << "  Tets: " << tet_mesh.num_tets() << "\n";
 
-// Use for FEM analysis, volume rendering, etc.
+// Finite elements on it: see "Finite Elements: cvc::fem"
 ```
 
 ### Hexahedral Meshing
 
 ```cpp
+#ifdef CVC_ENABLE_MESHER
 geometry hexahedralize(const volume& vol,
-                      double isovalue,
-                      extraction_method method = EXTRACT_DUALLIB,
-                      improvement_method improve_method = IMPROVE_GEO_FLOW,
-                      int improve_iterations = 1);
+                       double isovalue,
+                       extraction_method method = DUALLIB,
+                       improvement_method improve_method = NO_IMPROVE,
+                       normal_type normals = BSPLINE_CONVOLUTION,
+                       int improve_iterations = 0,
+                       boost::optional<const volume&> propertyVol = boost::none);
+#endif
 ```
 
-Creates a hexahedral (brick) volumetric mesh from a volume. Hexahedral meshes often perform better in FEM simulations.
+Creates a hexahedral (brick) volumetric mesh from a volume. The elements land in `hexs()`.
+(`cvc::fem` has no hexahedral elements; split hexes into tets for it.)
 
 **Parameters:** Same as `tetrahedralize()`
 
 ```cpp
+cvc::app ctx;
 geometry bunny = read_geometry("bunny.off");
-volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents());
+volume sdf_vol = sdf(ctx, bunny, dimension(64, 64, 64), bunny.extents());
 
-// Create hexahedral mesh
-geometry hex_mesh = hexahedralize(sdf_vol, 0.0);
+// Create a hexahedral mesh of the inside (negated, as for tetrahedralize above)
+geometry hex_mesh = hexahedralize(negated(sdf_vol), 0.0);
 
 std::cout << "Hexahedral mesh:\n";
 std::cout << "  Vertices: " << hex_mesh.num_points() << "\n";
-std::cout << "  Quads: " << hex_mesh.num_quads() << "\n";
+std::cout << "  Hexes: " << hex_mesh.num_hexs() << "\n";
 ```
 
 ### Interval/Layer Meshing (Tet2)
 
 ```cpp
+#ifdef CVC_ENABLE_MESHER
 geometry tetrahedralize2(const volume& vol,
-                        double isovalue_outer,
-                        double isovalue_inner,
-                        extraction_method method = EXTRACT_DUALLIB,
-                        improvement_method improve_method = IMPROVE_GEO_FLOW,
-                        int improve_iterations = 1);
+                         double isovalue_outer,
+                         double isovalue_inner,
+                         extraction_method method = DUALLIB,
+                         improvement_method improve_method = NO_IMPROVE,
+                         normal_type normals = BSPLINE_CONVOLUTION,
+                         int improve_iterations = 0);
+#endif
 ```
+
+(There is also a single-isovalue overload, `tetrahedralize2(vol, isovalue, method,
+improve_method, normals, improve_iterations)`. Both overloads request LBIE's TETRA2 mesh type,
+but the request passes through `geometry_type`, which maps TETRA2 to `VOLUME_TET` and back to
+plain TETRA, with dual contouring forced. See P2.2 of
+[the libigl roadmap](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).)
 
 Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces. This is a dual-isovalue interval meshing technique unique to the LBIE mesher.
 
@@ -1335,8 +1500,9 @@ Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces. This 
 ```cpp
 #include <cvc/utility/algorithm.h>
 
+cvc::app ctx;
 geometry bunny = read_geometry("bunny.off");
-volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents(), SDF_V2);
+volume sdf_vol = sdf(ctx, bunny, dimension(64, 64, 64), bunny.extents(), SDF_V2);
 
 // Create a shell layer between two surfaces
 // Remember: negative = inside, positive = outside in SDF
@@ -1378,47 +1544,51 @@ The tet2 interval meshing implementation had several bugs that were fixed in Dec
 
 using namespace cvc;
 
+// volume negated(const volume& v): the helper from "Tetrahedral Meshing" above.
+
 int main() {
+    cvc::app ctx;
+
     // Load input geometry
     geometry bunny = read_geometry("bunny.off");
     
     // Create signed distance function
     dimension sdf_dim(128, 128, 128);  // Higher resolution = better quality
-    volume sdf_vol = sdf(bunny, sdf_dim, bunny.extents(), SDF_V2);
+    volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
     
     std::cout << "SDF computed. Range: [" 
               << sdf_vol.min() << ", " << sdf_vol.max() << "]\n";
     
     // Extract isosurface at zero level (exact surface)
-    geometry surface = iso(sdf_vol, 0.0, EXTRACT_DUALLIB, 3);
+    geometry surface = iso(sdf_vol, 0.0, DUALLIB, 3);
     surface.write("bunny_surface.raw");
     
-    // Create tetrahedral volumetric mesh
-    geometry tet_vol = tetrahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB, 
-                                     IMPROVE_GEO_FLOW, 3);
-    tet_vol.write("bunny_tets.raw");
+    // Create tetrahedral volumetric mesh of the inside. LBIE meshes {v > iso},
+    // so pass -sdf (negated(), see Tetrahedral Meshing). Note: the .raw writer
+    // does not write tets() (it only understands the legacy encoding), so keep
+    // the geometry in memory or export another way.
+    const volume inside = negated(sdf_vol);
+    geometry tet_vol = tetrahedralize(inside, 0.0, DUALLIB, GEO_FLOW,
+                                      BSPLINE_CONVOLUTION, 3);
     
-    // Create hexahedral mesh
-    geometry hex_vol = hexahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB,
-                                    IMPROVE_GEO_FLOW, 3);
-    hex_vol.write("bunny_hexes.raw");
+    // Create hexahedral mesh of the inside
+    geometry hex_vol = hexahedralize(inside, 0.0, DUALLIB, GEO_FLOW,
+                                     BSPLINE_CONVOLUTION, 3);
     
     // Create a 3mm shell around the bunny
     double shell_thickness = 0.003;
     geometry shell = tetrahedralize2(sdf_vol, 0.0, -shell_thickness,
-                                    EXTRACT_DUALLIB, IMPROVE_GEO_FLOW, 3);
-    shell.write("bunny_shell.raw");
+                                     DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 3);
     
     // Create a hollow layer between 2mm and 5mm from surface
     geometry hollow_layer = tetrahedralize2(sdf_vol, 0.005, 0.002);
-    hollow_layer.write("bunny_hollow_layer.raw");
     
     std::cout << "All meshes generated successfully!\n";
     std::cout << "  Surface: " << surface.num_tris() << " triangles\n";
-    std::cout << "  Tets: " << tet_vol.num_points() << " vertices\n";
-    std::cout << "  Hexes: " << hex_vol.num_quads() << " quads\n";
+    std::cout << "  Tets: " << tet_vol.num_tets() << " tets\n";
+    std::cout << "  Hexes: " << hex_vol.num_hexs() << " hexes\n";
     std::cout << "  Shell: " << shell.num_points() << " vertices, "
-              << shell.num_tris() << " triangles\n";
+              << shell.num_tets() << " tets\n";
     std::cout << "  Hollow: " << hollow_layer.num_points() << " vertices\n";
     
     return 0;
@@ -1444,8 +1614,14 @@ Property interpolation allows you to evaluate scalar or vector fields at arbitra
 
 ```cpp
 double interpolate_in_tet(const geometry::point_t& p,
-                         const geometry::point_t tet_verts[4],
-                         const double tet_values[4]);
+                          const geometry::tet_t& tet,
+                          const geometry::points_t& vertices,
+                          const std::vector<double>& vertex_properties);
+
+// The weights themselves (sum to 1; negative outside the tet)
+std::array<double, 4> tet_barycentric(const geometry::point_t& p,
+                                      const geometry::point_t& v0, const geometry::point_t& v1,
+                                      const geometry::point_t& v2, const geometry::point_t& v3);
 ```
 
 Interpolates using barycentric coordinates within a tetrahedron.
@@ -1454,8 +1630,12 @@ Interpolates using barycentric coordinates within a tetrahedron.
 
 ```cpp
 double interpolate_in_hex(const geometry::point_t& p,
-                         const geometry::point_t hex_verts[8],
-                         const double hex_values[8]);
+                          const geometry::hex_t& hex,
+                          const geometry::points_t& vertices,
+                          const std::vector<double>& vertex_properties);
+
+std::array<double, 8> hex_trilinear(const geometry::point_t& p,
+                                    const geometry::point_t vertices[8]);
 ```
 
 Interpolates using trilinear basis functions within a hexahedron.
@@ -1467,39 +1647,28 @@ Interpolates using trilinear basis functions within a hexahedron.
 
 using namespace cvc;
 
-// Tetrahedral mesh with temperature field
-geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
-
-// Define property values at vertices (e.g., temperature)
+// Tetrahedral mesh with a per-vertex field (a real one would come from
+// cvc::fem, e.g. fem::solve_heat -- see "Finite Elements: cvc::fem")
+geometry tet_mesh = tetrahedralize(negated(sdf_vol), 0.0);  // the inside: see Tetrahedral Meshing
 std::vector<double> temperature(tet_mesh.num_points());
 for(size_t i = 0; i < temperature.size(); ++i) {
-    temperature[i] = 273.15 + i * 0.1;  // Temperature in Kelvin
+    temperature[i] = 273.15 + i * 0.1;  // synthetic
 }
 
 // Interpolate at a specific point
 geometry::point_t query_point = {{0.5, 0.5, 0.5}};
 
 // Find which tet contains the point
-auto containing_tets = find_tets_containing_point(query_point, 
-                                                   tet_mesh.const_tets(),
-                                                   tet_mesh.points());
+auto containing_tets = find_tets_containing_point(query_point,
+                                                  tet_mesh.const_tets(),
+                                                  tet_mesh.const_points());
 
 if(!containing_tets.empty()) {
-    size_t tet_idx = containing_tets[0];
-    const auto& tet = tet_mesh.const_tets()[tet_idx];
-    
-    // Gather vertex coordinates and values
-    geometry::point_t tet_verts[4];
-    double tet_temps[4];
-    for(int i = 0; i < 4; ++i) {
-        tet_verts[i] = tet_mesh.points()[tet[i]];
-        tet_temps[i] = temperature[tet[i]];
-    }
-    
-    // Interpolate temperature at query point
-    double temp_at_point = interpolate_in_tet(query_point, tet_verts, tet_temps);
-    
-    std::cout << "Temperature at (" << query_point[0] << ", " 
+    const auto& tet = tet_mesh.const_tets()[containing_tets[0]];
+    double temp_at_point = interpolate_in_tet(query_point, tet,
+                                              tet_mesh.const_points(), temperature);
+
+    std::cout << "Temperature at (" << query_point[0] << ", "
               << query_point[1] << ", " << query_point[2] << "): "
               << temp_at_point << " K\n";
 }
@@ -1508,82 +1677,58 @@ if(!containing_tets.empty()) {
 **Property Interpolation in Mesh Generation:**
 
 ```cpp
-// Enable property interpolation during meshing
-geometry iso_with_props = iso(sdf_vol, 0.0, EXTRACT_DUALLIB, 1, 
-                              true);  // interpolate_property = true
+// Pass a property volume (const volume& property_vol) as the last argument
+geometry iso_with_props = iso(sdf_vol, 0.0, DUALLIB, 1, BSPLINE_CONVOLUTION, property_vol);
 
-geometry tet_with_props = tetrahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB,
-                                        IMPROVE_GEO_FLOW, 1, 
-                                        true);  // interpolate_property = true
+// The inside of the SDF: LBIE meshes {v > iso} (see Tetrahedral Meshing)
+geometry tet_with_props = tetrahedralize(negated(sdf_vol), 0.0, DUALLIB, GEO_FLOW,
+                                         BSPLINE_CONVOLUTION, 1, property_vol);
 
-geometry hex_with_props = hexahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB,
-                                       IMPROVE_GEO_FLOW, 1,
-                                       true);  // interpolate_property = true
+geometry hex_with_props = hexahedralize(negated(sdf_vol), 0.0, DUALLIB, GEO_FLOW,
+                                        BSPLINE_CONVOLUTION, 1, property_vol);
 ```
 
-When enabled, vertex properties (stored in `geometry.functions()`) are interpolated from the source volume's voxel values using the appropriate basis functions.
+When a property volume is given, its values are interpolated to the mesh vertices and stored in
+`geometry.functions()`.
 
 ### Mesh Encoding and Decoding
 
 Utilities for converting between different representations of volumetric meshes.
 
-**Tetrahedral Mesh Encoding:**
+LBIE (and the legacy `.raw` format) store a tet as its 4 triangles in `tris()` and a hex as its
+6 quads in `quads()`; the modern containers are `tets()` and `hexs()`.
 
 ```cpp
-// Encode tets to quads (3 quads per tet, representing 3 of 4 faces)
-geometry::quads_t encode_tets_to_quads(const geometry::tets_t& tets);
+// tets()/hexs() -> legacy encoding (4 triangles per tet, 6 quads per hex)
+geometry::tris_t  encode_triangles_from_tets(const geometry::tets_t& tets);
+geometry::quads_t encode_quads_from_hexs(const geometry::hexs_t& hexs);
 
-// Encode tets to triangles (4 triangles per tet)
-geometry::tris_t encode_tets_to_tris(const geometry::tets_t& tets);
-
-// Encode single tet
-geometry::quad_t encode_tet_to_quad(const geometry::tet_t& tet, int face_idx);
+// legacy encoding -> tets()/hexs()
+geometry::tets_t decode_tets_from_triangles(const geometry::tris_t& encoded_tris);
+geometry::hexs_t decode_hexs_from_quads(const geometry::quads_t& encoded_quads);
 ```
 
-**Tetrahedral Mesh Decoding:**
-
-```cpp
-// Decode quads back to tets
-geometry::tets_t decode_quads_to_tets(const geometry::quads_t& quads);
-
-// Decode triangles to tets
-geometry::tets_t decode_tris_to_tets(const geometry::tris_t& tris);
-
-// Decode single quad to tet
-geometry::tet_t decode_quad_to_tet(const geometry::quad_t& quad);
-```
-
-**Hexahedral Mesh Encoding:**
-
-```cpp
-// Encode hexs to surface quads (6 quads per hex)
-geometry::quads_t encode_hexs_to_quads(const geometry::hexs_t& hexs);
-
-// Encode hexs to triangulated surface (12 triangles per hex)
-geometry::tris_t encode_hexs_to_tris(const geometry::hexs_t& hexs);
-
-// Encode single hex
-geometry::quad_t encode_hex_to_quad(const geometry::hex_t& hex, int face_idx);
-```
+**Orientation:** `decode_tets_from_triangles` rebuilds each tet from a *sorted* set of its vertex
+indices, so element orientation is lost: about half of the decoded tets have negative signed
+volume. Call `cvc::orient_tets()` ([mesh_ops.h](#tetrahedral-mesh-operations)) before anything
+that needs positive orientation.
 
 **Example:**
 
 ```cpp
 using namespace cvc;
 
-geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
+geometry tet_mesh = tetrahedralize(negated(sdf_vol), 0.0);  // the inside: see Tetrahedral Meshing
 
-// Convert tets to triangular surface for rendering
-geometry::tris_t surface_tris = encode_tets_to_tris(tet_mesh.const_tets());
+// tets() -> legacy 4-triangles-per-tet encoding
+geometry::tris_t encoded = encode_triangles_from_tets(tet_mesh.const_tets());
 
-geometry surface_mesh;
-surface_mesh.points() = tet_mesh.points();
-surface_mesh.tris() = surface_tris;
-surface_mesh.write("tet_surface.raw");
-
-// Convert back if needed
-geometry::tets_t recovered_tets = decode_tris_to_tets(surface_tris);
+// ... and back (orientation is not preserved, see above)
+geometry::tets_t recovered_tets = decode_tets_from_triangles(encoded);
 ```
+
+Note that the legacy encoding repeats every interior face twice; for a renderable boundary
+surface use `extract_surface()` or `cvc::tet_boundary_surface()` instead.
 
 ### Surface Extraction from Volumetric Meshes
 
@@ -1600,13 +1745,19 @@ Creates a new geometry containing only the boundary triangles/quads of a volumet
 - Identifies faces that appear only once (boundary faces)
 - Creates surface mesh with proper vertex mapping
 
+**Known issues** (`tet_faces` / `hex_faces` in `src/cvc/utility/algorithm.cpp`): faces are keyed
+*and returned* as sorted vertex indices. For tets this makes the winding inconsistent (not all
+boundary triangles face outward). For hexes a sorted 4-tuple is generally not a cyclic polygon,
+for example (0,1,5,4) comes back as (0,1,4,5), a self-crossing "bow-tie" quad. For an outward-wound
+tet boundary use `cvc::tet_boundary_surface()` ([mesh_ops.h](#tetrahedral-mesh-operations)).
+
 **Example:**
 
 ```cpp
 using namespace cvc;
 
 // Create volumetric mesh
-geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
+geometry tet_mesh = tetrahedralize(negated(sdf_vol), 0.0);  // the inside: see Tetrahedral Meshing
 
 std::cout << "Volumetric mesh: " << tet_mesh.num_points() << " vertices, "
           << tet_mesh.num_tets() << " tets\n";
@@ -1622,7 +1773,7 @@ surface.calculate_surf_normals();
 surface.write("boundary.raw");
 
 // Works for hexahedral meshes too
-geometry hex_mesh = hexahedralize(sdf_vol, 0.0);
+geometry hex_mesh = hexahedralize(negated(sdf_vol), 0.0);  // the inside, as for tets
 geometry hex_surface = extract_surface(hex_mesh);  // Extracts quad faces
 ```
 
@@ -1692,7 +1843,7 @@ double hex_scaled_jacobian(const geometry::point_t hex_verts[8]);
 ```cpp
 using namespace cvc;
 
-geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
+geometry tet_mesh = tetrahedralize(negated(sdf_vol), 0.0);  // the inside: see Tetrahedral Meshing
 
 // Analyze quality of each tet
 for(const auto& tet : tet_mesh.const_tets()) {
@@ -1712,7 +1863,7 @@ for(const auto& tet : tet_mesh.const_tets()) {
 }
 
 // Analyze hex quality
-geometry hex_mesh = hexahedralize(sdf_vol, 0.0);
+geometry hex_mesh = hexahedralize(negated(sdf_vol), 0.0);  // the inside, as for tets
 for(const auto& hex : hex_mesh.const_hexs()) {
     geometry::point_t verts[8];
     for(int i = 0; i < 8; ++i) {
@@ -1791,7 +1942,7 @@ geometry extract_quality_elements(const geometry& geom,
 ```cpp
 using namespace cvc;
 
-geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
+geometry tet_mesh = tetrahedralize(negated(sdf_vol), 0.0);  // the inside: see Tetrahedral Meshing
 
 // Compute aspect ratio statistics
 auto ar_stats = compute_tet_quality_stats(tet_mesh.const_tets(),
@@ -1820,7 +1971,7 @@ std::cout << "Quality mesh: " << quality_mesh.num_tets() << " tets\n";
 quality_mesh.write("quality_tets.raw");
 
 // Analyze hexahedral mesh
-geometry hex_mesh = hexahedralize(sdf_vol, 0.0);
+geometry hex_mesh = hexahedralize(negated(sdf_vol), 0.0);  // the inside, as for tets
 auto sj_stats = compute_hex_quality_stats(hex_mesh.const_hexs(),
                                           hex_mesh.points(),
                                           HEX_SCALED_JACOBIAN);
@@ -1887,12 +2038,19 @@ Returns indices of all elements that contain the query point.
 - Large (1000-10000): ~64 bytes per element (pre-computed bbox + index)
 - Very large with AABB tree: Surface mesh memory + tree structure (~100-200 bytes/element)
 
+**Known limitations:** nothing is cached between calls. Above 10,000 elements every call
+re-extracts the boundary surface and rebuilds the CGAL tree before the linear bbox scan. The
+tree's `do_intersect(Point_3)` tests whether the point lies *on* the surface, not inside/outside
+parity. Each query is therefore O(n) plus a tree build. A persistent locator built once per mesh
+(`igl::AABB` + `in_element`) is planned; see P2.4 of
+[the libigl roadmap](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).
+
 **Example:**
 
 ```cpp
 using namespace cvc;
 
-geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
+geometry tet_mesh = tetrahedralize(negated(sdf_vol), 0.0);  // the inside: see Tetrahedral Meshing
 
 // Query point
 geometry::point_t query = {{0.25, 0.25, 0.25}};
@@ -1931,7 +2089,7 @@ Returns `{min_x, min_y, min_z, max_x, max_y, max_z}`.
 ```cpp
 using namespace cvc;
 
-geometry mesh = tetrahedralize(sdf_vol, 0.0);
+geometry mesh = tetrahedralize(negated(sdf_vol), 0.0);  // the inside: see Tetrahedral Meshing
 
 auto bounds = compute_mesh_bounds(mesh);
 
@@ -1958,9 +2116,12 @@ using namespace cvc;
 
 int main() {
     // Create volumetric mesh
+    cvc::app ctx;
     geometry input = read_geometry("model.off");
-    volume sdf_vol = sdf(input, dimension(64, 64, 64), input.extents(), SDF_V2);
-    geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB, IMPROVE_GEO_FLOW, 3);
+    volume sdf_vol = sdf(ctx, input, dimension(64, 64, 64), input.extents(), SDF_V2);
+    // The inside: LBIE meshes {v > iso}; negated() is under Tetrahedral Meshing
+    geometry tet_mesh =
+        tetrahedralize(negated(sdf_vol), 0.0, DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 3);
     
     // Analyze mesh quality
     std::cout << "\n=== Quality Analysis ===\n";
@@ -1991,8 +2152,8 @@ int main() {
               << bounds[1] << "," << bounds[4] << "] × ["
               << bounds[2] << "," << bounds[5] << "]\n";
     
-    // Save results
-    quality_mesh.write("output_volume.raw");
+    // Save results. The .raw writer does not write tets()/hexs() (only the
+    // legacy encoding), so only the surface survives a .raw round trip today.
     surface.write("output_surface.raw");
     
     return 0;
@@ -2025,9 +2186,10 @@ geometry mesh;
 mesh.read("bunny.off");
 
 // Chain operations
+cvc::app ctx;
 mesh.read("input.off")
     .calculate_surf_normals()
-    .smoothing(0.1f)
+    .smoothing(ctx, 0.1f)
     .write("output.raw");
 ```
 
@@ -2174,6 +2336,442 @@ The system maintains a map of file extensions to handler objects. When reading/w
 1. Extracts file extension
 2. Looks up handlers for that extension
 3. Tries each handler until one succeeds
+
+## Mesh Operations and Finite Elements (libigl)
+
+```cpp
+#include <cvc/geometry/mesh_ops.h>  // namespace cvc
+#include <cvc/geometry/fem.h>       // namespace cvc::fem
+```
+
+Surface and tetrahedral mesh processing and linear (P1) finite elements, implemented on
+[libigl](https://libigl.github.io) (its MPL-2.0 core module only) and Eigen. Both headers are
+Eigen-free and libigl-free. Those libraries are compiled into libcvc only, so consumers (cvcGL,
+pycvc, cvc-cli) need neither package to build against these headers. The design, the defects in
+the older routines this replaces, and the plan for later phases are in
+[docs/roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).
+
+### Availability and Conventions
+
+**Availability:**
+- Everything is always declared. When libcvc is built without `CVC_ENABLE_LIBIGL` (the option is
+  OFF, or Eigen/libigl were not found at configure time), every function throws
+  `cvc::mesh_ops_unavailable`. The exception is the scalar-colormap functions, which always work.
+- Check at runtime with `cvc::mesh_ops_available()`, or at compile time with the
+  `CVC_ENABLE_LIBIGL` definition that `cvc` exports PUBLIC to its consumers.
+- Invalid input throws `cvc::mesh_ops_error`. That covers an element index `>= num_points()`, an
+  empty mesh, or a mesh too large for libigl's 32-bit `int` indices (more than `INT_MAX`
+  vertices or elements; `mesh_ops.h` and `fem.h` give the exact limits).
+
+**Conventions:**
+- **Surfaces** are `tris()` plus `quads()`. Each quad (a,b,c,d) is split into (a,b,c) and (a,c,d).
+  A "triangle index" counts `tris()` first, then two triangles per quad, in order. Geometry is not
+  re-triangulated in place unless a function says so.
+- **Volumes** are `tets()`. Tets of either orientation are accepted; functions that need positive
+  orientation orient an internal copy.
+- **Per-vertex outputs** are aligned with `points()`. Unreferenced vertices get 0, or NaN where
+  documented.
+- **Lengths** are in the mesh's own unit and nothing is rescaled.
+- **Inputs** are read through the `const_*()` accessors, so a const or shared geometry is never
+  copy-on-write detached.
+
+```cpp
+if (!cvc::mesh_ops_available()) {
+  // built without CVC_ENABLE_LIBIGL: fall back (only the colormap functions work)
+}
+```
+
+### Normals, Orientation and Repair
+
+```cpp
+enum class normal_weighting { UNIFORM, AREA, ANGLE };
+
+geometry& compute_vertex_normals(geometry& g, normal_weighting w = normal_weighting::ANGLE);
+std::size_t orient_outward(geometry& g);
+
+struct repair_params {
+  double weld_epsilon = 0.0;       // merge vertices closer than this; 0: exact duplicates
+                                   // only; < 0: do not weld
+  bool remove_degenerate = true;   // repeated indices or ~zero area
+  bool remove_unreferenced = true;
+  bool orient = true;              // orient_outward() after cleaning
+};
+struct repair_report { std::size_t vertices_removed, faces_removed, faces_flipped; };
+repair_report repair(geometry& g, const repair_params& p = repair_params());
+```
+
+- **`compute_vertex_normals`** replaces `normals()` with unit per-vertex normals. `ANGLE`
+  weighting (the default) is independent of tessellation; `AREA` matches what
+  `geometry::compute_normals()` does. Degenerate or unreferenced vertices get (0,0,0).
+- **`orient_outward`** changes the **winding**, which `geometry::reorient()` never did. It makes
+  each connected component consistent and outward-facing, and returns the number of triangles
+  flipped. Quads are triangulated in place first (`quads()` is cleared and their triangles are
+  appended to `tris()`). Normals aligned with `points()` are recomputed.
+- **`repair`** cleans a triangle surface in place. Per-vertex arrays aligned with `points()`
+  (normals, colors, uvs, tangents, curvatures, functions, boundary) are remapped so every surviving
+  vertex keeps its own values; arrays that were not aligned are cleared. `lines()`, `tets()` and
+  `hexs()` indices are remapped too.
+
+```cpp
+geometry scan = read_geometry("scan.off");
+repair_params rp;
+rp.weld_epsilon = 1e-6;            // weld near-coincident vertices (triangle soup / STL)
+repair_report r = repair(scan, rp);
+std::cout << r.vertices_removed << " vertices welded, " << r.faces_flipped << " faces flipped\n";
+```
+
+### Curvature
+
+```cpp
+enum class curvature_kind { MEAN, GAUSSIAN, MAX_PRINCIPAL, MIN_PRINCIPAL };
+struct curvature_params {
+  unsigned radius = 5;    // neighbourhood of the principal-curvature quadric fit
+  bool use_kring = true;  // radius is a k-ring (true) or a multiple of mean edge length
+};
+
+geometry& compute_curvature(geometry& g, const curvature_params& p = curvature_params());
+std::vector<double> vertex_curvature(const geometry& g, curvature_kind kind,
+                                     const curvature_params& p = curvature_params());
+```
+
+- `compute_curvature` fills `curvatures()` with (k1, k2), k1 >= k2, per vertex. Before this, no
+  compiled code filled that array.
+- `vertex_curvature` returns one scalar per vertex:
+  - `MEAN` is (k1 + k2) / 2, from the cotangent Laplacian normalised by Voronoi area;
+  - `GAUSSIAN` is k1 · k2, from the angle defect over Voronoi area;
+  - `MAX_PRINCIPAL` / `MIN_PRINCIPAL` come from the quadric fit.
+- **Sign convention:** on a closed surface wound so its normals face outward (see
+  `orient_outward`), convex regions are positive. A sphere of radius r gives H ≈ 1/r, K ≈ 1/r²
+  and k1 ≈ k2 ≈ 1/r.
+- **Open surfaces:** `MEAN` and `GAUSSIAN` assume a closed 1-ring, so they are not curvature
+  estimates at boundary vertices. Leave those vertices out when you colour or threshold
+  (`fem::boundary_vertices(g, fem::domain::SURFACE)` lists them).
+
+### Implicit Smoothing
+
+```cpp
+struct smooth_params {
+  enum method_t { COTAN_IMPLICIT, UNIFORM_LAPLACIAN, TAUBIN };
+  method_t method = COTAN_IMPLICIT;
+  int iterations = 1;
+  double lambda = 1e-3;
+  bool fix_boundary = false;   // keep boundary-loop vertices in place
+  bool preserve_area = true;   // COTAN_IMPLICIT only: restore area and centroid each step
+};
+
+geometry& smooth(geometry& g, const smooth_params& p = smooth_params());
+```
+
+Smooths vertex positions in place, in double precision, without touching the topology. Normals
+aligned with `points()` are recomputed (ANGLE).
+
+| Method | Step | Notes |
+|---|---|---|
+| `COTAN_IMPLICIT` | solve `(M - t L) V' = M V`, with `t = lambda · d²` and `d` the bounding-box diagonal | Implicit mean-curvature flow: unconditionally stable and independent of the mesh's scale. `preserve_area` counters flow shrinkage. |
+| `UNIFORM_LAPLACIAN` | `V' = V + lambda (avg(N(V)) - V)`, `lambda` in (0, 1] | The explicit umbrella operator. |
+| `TAUBIN` | a `lambda` / `mu` pair with `mu = -lambda / (1 - 0.1 · lambda)` | Low-pass smoothing without shrinkage (pass band k_PB = 0.1). Explicit, so only small steps are stable (0.3–0.6 is typical). |
+
+The two explicit methods are only conditionally stable: `smooth()` rejects a step outside the
+range `mesh_ops.h` documents for each of them with `cvc::mesh_ops_error`, rather than letting the
+mesh diverge.
+
+Compared with the legacy `geometry::smoothing()`: that one is float32, runs a fixed 20 explicit
+iterations per pass, and one of its passes ignores its step size (see [Smoothing](#smoothing)).
+
+```cpp
+smooth_params sp;
+sp.method = smooth_params::COTAN_IMPLICIT;
+sp.iterations = 5;
+sp.lambda = 1e-3;
+smooth(isosurface, sp);
+```
+
+### Spatial Queries: mesh_locator
+
+```cpp
+struct closest_point_result {
+  std::vector<double> sq_distance;   // squared distance per query
+  std::vector<std::int64_t> face;    // triangle index, -1 if the surface is empty
+  geometry::points_t points;         // closest point on the surface per query
+};
+struct ray_hit {
+  std::int64_t face = -1;            // triangle index
+  double t = 0;                      // hit = origin + t * dir
+  double u = 0, v = 0;               // hit = (1-u-v) A + u B + v C
+  geometry::point_t point;
+};
+
+class mesh_locator {
+public:
+  mesh_locator();
+  explicit mesh_locator(const geometry& surface);
+  void build(const geometry& surface);
+  bool empty() const;
+  std::size_t num_faces() const;
+
+  closest_point_result closest_points(const geometry::points_t& queries) const;
+  bool intersect_ray(const geometry::point_t& origin, const geometry::vector_t& dir,
+                     ray_hit& hit, double min_t = 0.0,
+                     double max_t = std::numeric_limits<double>::infinity()) const;
+  std::vector<double> signed_distance(const geometry::points_t& queries) const;
+  std::vector<double> winding_number(const geometry::points_t& queries) const;
+};
+
+closest_point_result closest_points(const geometry& surface, const geometry::points_t& queries);
+std::vector<double> signed_distance(const geometry& surface, const geometry::points_t& queries);
+```
+
+`mesh_locator` builds an AABB tree over a triangle surface once. The fast-winding-number
+hierarchy is built lazily, on first use. The locator holds a **copy** of the positions, so later
+edits to the source geometry are not seen: build one per mesh version. Copies share the same
+immutable tree, and all queries are `const` and thread-safe.
+
+- **`closest_points`** returns the exact closest point on the surface. It is what
+  [`project()`](#projection) uses in a libigl build (in place of the CGAL heuristic), and it works
+  in every build that has libigl, including wasm.
+- **`intersect_ray`** returns the first hit with `t` in [`min_t`, `max_t`]; `dir` need not be unit
+  length. It returns `false` on a miss and leaves `hit` untouched.
+- **`signed_distance`** is the exact AABB distance, with its sign taken from the fast generalized
+  winding number (negative inside). Unlike a pseudo-normal sign it does not need a watertight
+  surface, so it is robust to holes, overlaps and self-intersections.
+- **`winding_number`** is ≈ 1 inside a closed, outward surface and ≈ 0 outside.
+- The free functions `closest_points()` / `signed_distance()` build a temporary locator, for
+  one-shot use.
+
+```cpp
+mesh_locator loc(surface);                       // build once
+
+geometry::points_t q = { {{0, 0, 0}}, {{1.5, 0.2, -3.0}} };
+std::vector<double> sd = loc.signed_distance(q); // negative inside
+closest_point_result cp = loc.closest_points(q); // cp.points[i], cp.face[i]
+
+ray_hit hit;
+if (loc.intersect_ray({{0, 0, 10}}, {{0, 0, -1}}, hit))
+  std::cout << "hit triangle " << hit.face << " at t=" << hit.t << "\n";
+```
+
+### Geodesic Distance
+
+```cpp
+class geodesic_solver {
+public:
+  geodesic_solver();
+  explicit geodesic_solver(const geometry& surface, double t_scale = 1.0);
+  bool empty() const;
+  std::vector<double> distance(const std::vector<index_t>& sources) const;
+};
+
+std::vector<double> geodesic_distance(const geometry& surface, const std::vector<index_t>& sources);
+```
+
+Approximate geodesic distance on a triangle surface by the heat method (Crane et al. 2013). The
+solver caches its two sparse factorizations, so each `distance()` call is two back-substitutions;
+build one per mesh version. `t_scale` multiplies the default heat time h² (h = mean edge length).
+Distances are 0 at the sources and +infinity on components the sources cannot reach.
+
+```cpp
+geodesic_solver geo(surface);
+surface.functions() = geo.distance({picked_vertex});   // per-vertex field
+```
+
+### Tetrahedral Mesh Operations
+
+```cpp
+std::vector<double> tet_volumes(const geometry& tetmesh);
+std::size_t orient_tets(geometry& tetmesh);
+geometry tet_boundary_surface(const geometry& tetmesh);
+geometry tet_isosurface(const geometry& tetmesh, const std::vector<double>& field, double isovalue);
+geometry slice_tets(const geometry& tetmesh, const geometry::vector_t& normal, double offset);
+```
+
+- **`tet_volumes`** returns the signed volume per tet: positive when (v1-v0, v2-v0, v3-v0) is
+  right-handed.
+- **`orient_tets`** swaps vertices 2 and 3 of every negatively oriented tet, in place, and returns
+  the count. `cvc::tetrahedralize()` output needs it (see
+  [Mesh Encoding and Decoding](#mesh-encoding-and-decoding)).
+- **`tet_boundary_surface`** returns the boundary of `tets()` as an outward-wound `SURFACE_TRI`
+  geometry. It keeps **all** of the tet mesh's points, plus any per-vertex colors, functions and
+  normals aligned with them, so a per-vertex field maps onto it 1:1; interior points are simply
+  unreferenced.
+- **`tet_isosurface`** returns the level set `{field = isovalue}` of a per-vertex scalar as
+  triangles.
+- **`slice_tets`** returns the filled planar cross-section `{x : dot(normal, x) = offset}`. It
+  works where GPU clip planes are unavailable (WebGL).
+- In both `tet_isosurface` and `slice_tets`, the result's `functions()` and `colors()` are
+  interpolated from the tet mesh's own arrays when those are aligned with `points()`.
+
+```cpp
+geometry tets = tetrahedralize(negated(sdf_vol), 0.0);  // the inside: see Tetrahedral Meshing
+std::size_t flipped = orient_tets(tets);            // ~half, for LBIE output today
+geometry skin = tet_boundary_surface(tets);
+geometry cut  = slice_tets(tets, {{0, 0, 1}}, 0.5 * (tets.extents().minz + tets.extents().maxz));
+```
+
+### Scalar Colormaps
+
+```cpp
+enum class colormap_kind { VIRIDIS, MAGMA, PLASMA, INFERNO, TURBO, JET, PARULA, GRAY };
+
+bool colormap_from_string(const std::string& name, colormap_kind& k);  // case-insensitive
+std::string to_string(colormap_kind k);
+std::vector<unsigned char> colormap_rgb(const std::vector<double>& values, colormap_kind k,
+                                        double lo = NaN, double hi = NaN);
+std::pair<double, double> robust_range(const std::vector<double>& values,
+                                       double lo_pct = 0.02, double hi_pct = 0.98);
+```
+
+These are always available, with or without libigl.
+
+- **`colormap_rgb`** maps values linearly from [lo, hi] onto the map and returns packed 8-bit RGB
+  (3 bytes per value). A NaN `lo` or `hi` is replaced by the min/max of the finite values, and
+  non-finite values map to mid-gray. With libigl it reads libigl's 256-entry tables; without it,
+  it interpolates linearly between 17 evenly spaced samples of the same tables. `JET` is the
+  classic MATLAB jet, computed analytically in every build (libigl's own `jet` entry renders
+  turbo). `GRAY` is a plain ramp.
+- **`robust_range`** returns a percentile range that a few outliers cannot dominate (curvature on
+  scanned meshes), or (NaN, NaN) when no value is finite.
+
+`geometry::colors()` holds RGB doubles in [0, 1], so convert when baking a field into a mesh:
+
+```cpp
+std::vector<double> h = vertex_curvature(mesh, curvature_kind::MEAN);
+auto [lo, hi] = robust_range(h);
+std::vector<unsigned char> rgb = colormap_rgb(h, colormap_kind::VIRIDIS, lo, hi);
+
+auto& c = mesh.colors();
+c.resize(mesh.num_points());
+for (std::size_t i = 0; i < c.size(); ++i)
+  c[i] = {{rgb[3 * i] / 255.0, rgb[3 * i + 1] / 255.0, rgb[3 * i + 2] / 255.0}};
+```
+
+### Finite Elements: cvc::fem
+
+```cpp
+namespace cvc::fem {
+enum class domain { AUTO, SURFACE, VOLUME };
+
+struct dirichlet {                      // u[vertices[i]] = values[i]
+  std::vector<index_t> vertices;
+  std::vector<double> values;           // a single value is broadcast
+};
+struct sparse_matrix {                  // triplets, duplicates already summed
+  std::size_t rows = 0, cols = 0;
+  std::vector<std::size_t> row, col;
+  std::vector<double> value;
+};
+
+std::vector<index_t> boundary_vertices(const geometry& mesh, domain d = domain::AUTO);
+sparse_matrix stiffness_matrix(const geometry& mesh, domain d = domain::AUTO);
+sparse_matrix mass_matrix(const geometry& mesh, domain d = domain::AUTO, bool lumped = true);
+std::vector<double> gradient(const geometry& mesh, const std::vector<double>& u,
+                             domain d = domain::AUTO);
+
+std::vector<double> solve_poisson(const geometry& mesh, const std::vector<double>& f,
+                                  const dirichlet& bc, domain d = domain::AUTO);
+std::vector<double> solve_laplace(const geometry& mesh, const dirichlet& bc,
+                                  domain d = domain::AUTO);
+
+struct heat_params { double kappa = 1.0; double dt = 1e-2; int steps = 1; };
+typedef std::function<bool(int, const std::vector<double>&)> heat_progress;
+std::vector<double> solve_heat(const geometry& mesh, const std::vector<double>& u0,
+                               const heat_params& p, const dirichlet& bc = dirichlet(),
+                               domain d = domain::AUTO,
+                               const heat_progress& progress = heat_progress());
+
+struct eigen_result { std::vector<double> values; std::vector<std::vector<double>> vectors; };
+eigen_result laplacian_eigenmodes(const geometry& mesh, int k, domain d = domain::AUTO);
+}
+```
+
+**Elements and units:**
+- **Domain.** With `domain::VOLUME`, or `AUTO` and a non-empty `tets()`, the elements are the
+  tets, of either orientation (an internal copy is oriented). With `domain::SURFACE`, or `AUTO`
+  and no tets, they are the triangle surface, with quads split as above.
+- **Degenerate elements** (near-zero volume or area; `fem.h` states the exact test) are dropped
+  from assembly. A vertex left with no element is held at 0, or at its Dirichlet value.
+- **Fields** are per vertex, aligned with `points()`. In the mesh's length unit, K has units of
+  length^(d-2) and M of length^d (d = 2 on a surface, 3 in a volume).
+
+**Operators:**
+- `stiffness_matrix` is K = −L, with L the cotangent Laplacian. It is symmetric positive
+  semi-definite and its rows sum to zero.
+- `mass_matrix` is lumped (diagonal: Voronoi on triangles, barycentric on tets) or consistent
+  (the full P1 mass matrix).
+- `gradient` returns the piecewise-constant gradient of a P1 field, as 3 values per element in
+  element order.
+- `boundary_vertices` returns the vertices of the boundary facets of a tet mesh, or the vertices
+  on the boundary loops of a surface, sorted and unique.
+
+**Solves:**
+- **`solve_poisson`** solves −Δu = f in its weak form K u = M f. `f` is per vertex, or a single
+  value for a constant source. An empty `bc` throws `cvc::mesh_ops_error`, because the problem
+  would be singular.
+- **`solve_laplace`** is harmonic interpolation, Δu = 0 with Dirichlet conditions.
+- **`solve_heat`** takes backward-Euler steps, `(M + dt·kappa·K) u⁺ = M u`, reusing one
+  factorization. `kappa` is an absolute diffusivity (length²/time in the mesh's units). Vertices
+  listed in `bc` are held at their values every step, and an empty `bc` means insulated
+  (Neumann). The progress callback receives (step 1..steps, field); return `false` to stop early,
+  and the field at that step is returned. (Ariadne's `fe_lab` exposes a *relative* `heat.kappa`
+  and passes κ·extent² here; see [ARIADNE.md](ARIADNE.md).)
+- **`laplacian_eigenmodes`** returns the k smallest eigenpairs of K x = λ M x (lumped M): the
+  Laplace–Beltrami spectrum on a surface, or the free-vibration (Neumann) modes in a volume. The
+  vectors are M-normalized. It is intended for small k (≤ ~20). Up to 400 active vertices it
+  solves the dense problem; above that it runs a shift-invert subspace iteration on a sparse
+  LDLᵀ factorization. It does not use `igl::eigs`, which returned repeated, non-orthogonal modes
+  on a sphere's degenerate spectrum.
+
+**Scope:** scalar PDEs only. Vector-valued linear elasticity and hyperelasticity are not
+provided, because libigl has no such assembly, and neither are hexahedral elements. The options
+are in the roadmap (P4.4).
+
+```cpp
+#include <cvc/geometry/fem.h>
+#include <cvc/geometry/mesh_ops.h>
+#include <cvc/utility/algorithm.h>
+
+using namespace cvc;
+
+cvc::app ctx;
+geometry bunny = read_geometry("bunny.off");
+volume sdf_vol = sdf(ctx, bunny, dimension(48, 48, 48), bunny.extents(), SDF_V2);
+
+// LBIE meshes {v > isovalue} and the SDF is negative inside, so negate it first
+// (negated() is under "Tetrahedral Meshing"). tetrahedralize(sdf_vol, 0.0) would
+// mesh the box around the bunny instead, and everything below would be solved there.
+geometry tets = tetrahedralize(negated(sdf_vol), 0.0);
+
+// Poisson: -lap(u) = 1 inside, u = 0 on the boundary
+fem::dirichlet bc;
+bc.vertices = fem::boundary_vertices(tets);
+bc.values = {0.0};                                   // broadcast
+tets.functions() = fem::solve_poisson(tets, {1.0}, bc);
+
+// Look inside: a mid-height cross-section carries the interpolated field
+const bounding_box box = tets.extents();
+geometry cut = slice_tets(tets, {{0, 0, 1}}, 0.5 * (box.minz + box.maxz));
+std::vector<unsigned char> rgb = colormap_rgb(cut.const_functions(), colormap_kind::INFERNO);
+
+// Heat: the bottom 10% of the skin held at 100, the rest insulated;
+// stop early after 50 of 200 steps
+fem::dirichlet hot;
+for (index_t v : fem::boundary_vertices(tets))
+  if (tets.const_points()[v][2] < box.minz + 0.1 * (box.maxz - box.minz))
+    hot.vertices.push_back(v);
+hot.values = {100.0};
+
+fem::heat_params hp;
+hp.kappa = 1.0;
+hp.dt = 1e-3;
+hp.steps = 200;
+std::vector<double> u0(tets.num_points(), 0.0);
+std::vector<double> u = fem::solve_heat(tets, u0, hp, hot, fem::domain::AUTO,
+                                        [](int step, const std::vector<double>&) {
+                                          return step < 50;
+                                        });
+
+// The first 8 Laplace-Beltrami modes of the input surface
+fem::eigen_result modes = fem::laplacian_eigenmodes(bunny, 8, fem::domain::SURFACE);
+```
 
 ## Type Definitions
 
@@ -2379,7 +2977,8 @@ int main() {
     mesh.calculate_surf_normals();
     
     // Smooth the mesh
-    mesh.smoothing(0.1f, true);  // delta=0.1, fix boundary
+    cvc::app ctx;
+    mesh.smoothing(ctx, 0.1f, true);  // delta=0.1, fix boundary
     
     // Get extents
     bounding_box bbox = mesh.extents();
@@ -2655,17 +3254,18 @@ void analyze_quality(const geometry& mesh, const std::string& label) {
 }
 
 int main() {
-    geometry mesh = read_geometry("poor_quality.off");
+    cvc::app ctx;
+    geometry mesh(ctx, "poor_quality.off");  // quality_improve() uses the app context
     
     analyze_quality(mesh, "Original mesh");
     
     // Improve quality
-    mesh.quality_improve(10, "geo_flow");
+    mesh.quality_improve(10, GEO_FLOW);
     
     analyze_quality(mesh, "After quality improvement");
     
     // Additional smoothing
-    mesh.smoothing(0.05f, true);
+    mesh.smoothing(ctx, 0.05f, true);
     
     analyze_quality(mesh, "After smoothing");
     
@@ -2696,7 +3296,8 @@ geometry original = read_geometry("mesh.off");
 geometry backup = original;  // Share data
 
 // Modify only one
-original.smoothing(0.1f);  // Triggers COW, backup unchanged
+cvc::app ctx;
+original.smoothing(ctx, 0.1f);  // COW-detaches the arrays it writes; backup unchanged
 ```
 
 **2. Avoid Unintended Sharing:**
@@ -2711,8 +3312,9 @@ mesh2.points()[0] = {{1, 1, 1}};  // Triggers another COW
 
 // GOOD: Explicit independent copy
 geometry mesh1 = read_geometry("mesh.off");
-geometry mesh2 = mesh1;
-mesh2.points();  // Force COW immediately
+geometry mesh2;
+mesh2.copy(mesh1, true);  // Deep copy of every array
+// (mesh2.points() alone would detach only the points array)
 ```
 
 ### Performance
@@ -2721,19 +3323,19 @@ mesh2.points();  // Force COW immediately
 
 ```cpp
 // BAD: Unnecessary copies
-geometry process(geometry mesh) {  // Copy on call
-    mesh.smoothing(0.1f);
+geometry process(app& ctx, geometry mesh) {  // Copy on call
+    mesh.smoothing(ctx, 0.1f);
     return mesh;  // Copy on return
 }
 
 // GOOD: Use references
-void process(geometry& mesh) {
-    mesh.smoothing(0.1f);
+void process(app& ctx, geometry& mesh) {
+    mesh.smoothing(ctx, 0.1f);
 }
 
 // OR: Use move semantics (C++11)
-geometry process(geometry&& mesh) {
-    mesh.smoothing(0.1f);
+geometry process(app& ctx, geometry&& mesh) {
+    mesh.smoothing(ctx, 0.1f);
     return std::move(mesh);
 }
 ```
@@ -2942,12 +3544,12 @@ try {
 
 ```cpp
 // RAII ensures cleanup
-void processGeometry(const std::string& input, 
-                    const std::string& output) {
+void processGeometry(app& ctx, const std::string& input,
+                     const std::string& output) {
     geometry mesh = read_geometry(input);  // May throw
     
     mesh.calculate_surf_normals();  // May throw
-    mesh.smoothing(0.1f);           // May throw
+    mesh.smoothing(ctx, 0.1f);      // May throw
     
     mesh.write(output);  // May throw
     

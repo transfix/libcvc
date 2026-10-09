@@ -244,8 +244,9 @@ static int cmd_convert(int argc, char **argv) {
 static int cmd_sdf(int argc, char **argv) {
   po::options_description desc("cvc sdf - compute signed distance field from geometry\n\n"
                                "Algorithms:\n"
-                               "  v1  Original SDFLibrary (octree-based, thread-safe) [default]\n"
-                               "  v2  DistanceTransform (brute-force)\n");
+                               "  v1   Original SDFLibrary (octree-based, thread-safe) [default]\n"
+                               "  v2   DistanceTransform (brute-force)\n"
+                               "  igl  libigl exact distance, winding-number sign (any dims)\n");
   desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
                                             "input geometry file")(
       "output,o", po::value<std::string>()->required(),
@@ -254,7 +255,7 @@ static int cmd_sdf(int argc, char **argv) {
       "bbox,b", po::value<std::string>(),
       "bounding box (minx,miny,minz,maxx,maxy,maxz); defaults to geometry extents")(
       "algorithm,a", po::value<std::string>()->default_value("v1"),
-      "SDF algorithm: v1 or v2")("flip-normals", "flip normals to invert inside/outside");
+      "SDF algorithm: v1, v2 or igl")("flip-normals", "flip normals to invert inside/outside");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
@@ -283,6 +284,8 @@ static int cmd_sdf(int argc, char **argv) {
   std::string algo_str = vm["algorithm"].as<std::string>();
   if (algo_str == "v2" || algo_str == "V2")
     algo = cvc::SDF_V2;
+  else if (algo_str == "igl" || algo_str == "IGL")
+    algo = cvc::SDF_IGL;
 
   bool flip = vm.count("flip-normals") > 0;
 
@@ -1161,7 +1164,8 @@ static int cmd_bunny(int argc, char **argv) {
       "dims,d", po::value<unsigned int>()->default_value(64), "volume dimensions (cube)")(
       "padding,p", po::value<double>()->default_value(0.1),
       "bounding box padding factor")("algorithm,a", po::value<std::string>()->default_value("v1"),
-                                     "SDF algorithm: v1 (octree) or v2 (distance transform)");
+                                     "SDF algorithm: v1 (octree), v2 (distance transform) or "
+                                     "igl (libigl exact distance)");
 
   po::positional_options_description pos;
   pos.add("output", 1);
@@ -1200,6 +1204,8 @@ static int cmd_bunny(int argc, char **argv) {
     std::string algo_str = vm["algorithm"].as<std::string>();
     if (algo_str == "v2" || algo_str == "V2")
       algo = cvc::SDF_V2;
+    else if (algo_str == "igl" || algo_str == "IGL")
+      algo = cvc::SDF_IGL;
     cvc::volume sdf_vol = cvc::sdf(cvc_app(), bunny, cvc::dimension(d, d, d), bbox, algo);
     sdf_vol.write(output);
 #else

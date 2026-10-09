@@ -275,21 +275,129 @@ only *captures*. The host wires them:
 - **`on_tick` / `on_key` / `on_pointer`** become the resident processes of §2.3, fed
   events through `Runtime::post_input`.
 
-A small, complete document (mirroring `nav_compute.ari`):
+A small, complete document (mirroring `nav_compute.ari`). A widget is a map whose
+**first key is its type** and whose value is its label (`slider_int: "N"`), with the
+widget's fields as sibling keys; copy the shipped components (§6.5) for the exact keys
+each type takes:
 
 ```yaml
-meta: { name: hello, version: 0.1.0 }
+meta: { name: hello, version: 0.1.0, min_libcvc: 3.4.0 }
 menubar:
-  - { label: File, items: [ { label: Quit, on: "(quit)" } ] }
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit                          # a bare name: a host Runtime::on handler
 windows:
-  - title: Controls
+  - window: Controls
+    id: controls
     children:
-      - { slider: { label: "N", bind: "demo.n", min: 1, max: 100 } }
-      - { text: { text: "(str \"N = \" (state-get \"demo.n\"))" } }   # computed, read lane
-      - { button: { label: "Bump", on: "(state-set \"demo.n\" (+ (state-get \"demo.n\") 1))" } }
-init: "(state-set \"demo.n\" 10)"
-on_tick: "(state-set \"demo.frames\" (+ (state-get \"demo.frames\") 1))"
+      - slider_int: "N"
+        bind: demo.n
+        lo: 1
+        hi: 100
+      - text: "N x 2"                     # renders "N x 2: <value>"
+        bind: (* 2 (int (state-get "demo.n")))   # a computed bind, read lane
+      - button: Bump
+        on: (state-set "demo.n" (+ (int (state-get "demo.n")) 1))   # a program, action lane
+init: (begin (state-set "demo.n" 10) (state-set "demo.frames" 0))
+on_tick: (state-set "demo.frames" (+ (int (state-get "demo.frames")) 1))
 ```
+
+### 5.4 `scene:` sources and custom node types
+
+A `scene:` node's `type:` is a built-in (`geometry`, `volume`, `volren`, `volslice`,
+`group`) or a custom type a host registered with `register_scene_node_type`
+([`scene_realize.h`](../inc/cvc/gl/ariadne/scene_realize.h)). cvcGL bundles its custom
+types behind one call, `register_cvcgl_extensions`
+([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
+`AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`, and — on a
+libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
+does not know land in the node's `props`, which a custom realizer reads; most realizers
+**seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
+`mesh_lab` / `fe_lab`), so a document's prop is the starting value a bound component then
+edits live. A document that cannot run without a custom type says so
+in `customs:` (`- node: mesh_lab` with `required: true`), and a host that checks
+(`verify_scene_customs`, as `ariadne_hello` does) refuses it up front on a build that
+lacks the type.
+
+**Volume from a mesh.** `source: { sdf: { mesh: <uri>, dim: N, algorithm: v1 | v2 | igl } }`
+computes an N³ signed distance field (negative inside) framed to the mesh, after the
+node's `fit:`. `algorithm` picks the `cvc::sdf` implementation: `v2` (the default), `v1`,
+or `igl` (exact AABB distance signed by the fast winding number, robust to holes); `igl`
+needs a `CVC_ENABLE_LIBIGL` build and falls back to `v2` with a warning without one.
+
+**`type: mesh_lab`** ([`mesh_nodes.h`](../inc/cvc/gl/ariadne/mesh_nodes.h)) reads its
+`source:`/`fit:`/`material:` like a `geometry` node and processes the mesh with
+`cvc::mesh_ops`. Its keys live under the node's own state, `<node>.mesh_ops.*`:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset` (§5.5) | — |
+| `busy`, `status`, `stats.vertices`, `stats.faces` | published | — |
+| `smooth.method` | `cotan` (implicit) / `uniform` / `taubin` | `smooth_method` |
+| `smooth.iterations`, `smooth.lambda`, `smooth.fix_boundary` | `cvc::smooth_params` | `smooth_iterations`, `smooth_lambda`, `fix_boundary` |
+| `decimate.target_faces` | triangle target for `cvc::simplify` | `target_faces` |
+| `repair.weld`, `repair.remove_degenerate`, `repair.remove_unreferenced`, `repair.orient` | `cvc::repair_params` | `weld`, `remove_degenerate`, `remove_unreferenced`, `orient` |
+| `color.mode` | `none`, `mean`, `gaussian`, `k1`, `k2`, `geodesic` — followed live | `color_mode` |
+| `color.colormap` | `viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray` | `colormap` |
+| `geodesic.source` | source vertex for `geodesic` (clamped to #V-1) | `geodesic_source` |
+| `color.min`, `color.max` | the colour range used (2-98% percentiles for curvature) | — |
+
+`curvature` switches a non-curvature `color.mode` to `mean` (or recomputes the one shown).
+A geodesic solver is cached per mesh version, so moving the source is two
+back-substitutions.
+
+**`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`),
+tet-meshes it with the in-tree LBIE mesher (`cvc::tetrahedralize`, `CVC_ENABLE_MESHER`),
+and solves linear (P1) finite-element problems with `cvc::fem`. The node itself shows the
+field on the tet boundary surface; its child `<id>_slice` shows it on an axis-aligned cut.
+Keys under `<node>.fe.*`:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `request` | `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so) | `auto_mesh: true` seeds `mesh` |
+| `busy`, `status`, `progress` (0-100), `stats.tets`, `stats.vertices`, `field.min`, `field.max` | published | — |
+| `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
+| `mesh.isovalue` | the bounding level, in the volume's units | `isovalue` |
+| `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density) | `inside` (default `below` for an `sdf` source, else `above`) |
+| `mesh.improve`, `mesh.improve_iterations` | `cvc::improvement_method` (0-5) and its passes | `improve`, `improve_iterations` |
+| `problem` | `poisson` (-Δu = f, u = 0 on the boundary) or `heat` (hot floor) | `problem` |
+| `poisson.f` | the constant source | `poisson_f` |
+| `heat.kappa`, `heat.dt`, `heat.steps` | backward-Euler heat; κ is relative: the diffusivity used is κ·extent² | `heat_kappa`, `heat_dt`, `heat_steps` |
+| `view.colormap`, `view.show_surface`, `view.show_slice` | display | `colormap`, `show_surface`, `show_slice` |
+| `view.slice_axis`, `view.slice_offset` | 0/1/2 and -1..1 across the mesh bounds | `slice_axis`, `slice_offset` |
+| `view.surface_opacity` | the boundary's opacity while a slice shows | `surface_opacity` |
+
+The heat problem holds the boundary vertices in the lowest 5% of the height at 1 and
+insulates the rest; the body starts at 0. `auto_solve: true` solves after every mesh,
+unless a request written during the mesh job is already waiting: that request runs instead
+(a waiting re-mesh auto-solves in its turn).
+Until the first mesh the node shows the volume's bounds as lines.
+
+Both node types run their kernels on one `cvc::async_lane` per node — off the render
+thread, or deferred onto it in a single-threaded wasm build — and apply results in their
+per-frame tick. A job captures only its own hand-off struct, never the node's runtime
+(which owns the lane), and teardown cancels it; tearing a scene down still waits for a
+running tet-mesh or Poisson solve to finish.
+
+### 5.5 Commands as a request key
+
+A component cannot call a C++ object, but it can write a key the object reads. A
+long-running command is therefore a **request key** the node owns: the button's `on:`
+program writes the operation's name, and the node's tick consumes it (writes `""` back),
+runs it, and publishes `busy` and `status`:
+
+```yaml
+- button: Smooth
+  on: (state-set "graphics.root.children.mesh.mesh_ops.request" "smooth")
+  disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+```
+
+A request written while a job runs waits in the key until the job finishes (the latest
+write wins), so a click is never lost and two jobs never overlap. Parameters stay
+ordinary live keys the job copies when it starts. The FTXUI backend draws such a panel
+read-only: its buttons do not fire yet
+([`ftxui_backend.cpp`](../src/cvc/ariadne/ftxui_backend.cpp)), and it has no scene.
 
 ---
 
@@ -354,6 +462,27 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
 
 The `canonical` field is the identity used for cycle-guarding and for resolving
 relative bases in nested composition.
+
+### 6.5 The shipped component library
+
+`src/cvc/ariadne/components/*.ari` (installed to `<prefix>/share/libcvc/ariadne/components`
+and embedded in the wasm demos) are reusable windows a document imports by `cvc://` and
+includes. Each binds state keys a C++ object owns, so it needs no host code;
+[`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) catalogs them:
+
+| component | drives |
+|---|---|
+| `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, the main camera |
+| `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image |
+| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node named `bunny_volume` |
+| `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
+| `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
+| `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+
+Components that address one node use a fixed node id; copy the file and change the id to
+drive another node. `src/cvcGL/examples/mesh_lab.ari` uses the last two. Run it from the
+repository root, where both paths resolve:
+`ariadne_hello src/cvcGL/examples/mesh_lab.ari --component-path src/cvc/ariadne`.
 
 ---
 

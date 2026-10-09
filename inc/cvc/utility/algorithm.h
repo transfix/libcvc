@@ -59,12 +59,15 @@ volume sdf(app &ctx, const geometry &geom,
            */
            const dimension &dim,
            /*
-             Bounding box of output vol. If default initialized,
-             use extents of geometry.
+             Bounding box of output vol. Only SDF_IGL treats a default
+             initialized (all-zero) box as the extents of geometry;
+             SDF_V1 and SDF_V2 need an explicit box (e.g. geom.extents()).
            */
            const bounding_box &bbox = bounding_box(),
            /*
-             SDF algorithm to use (SDF_V1 or SDF_V2)
+             SDF algorithm to use (SDF_V1, SDF_V2, or SDF_IGL: exact distance with
+             a fast-winding-number sign, sampled at the volume's nodes; needs
+             CVC_ENABLE_LIBIGL, else it throws cvc::mesh_ops_unavailable)
            */
            sdf_algorithm algorithm = SDF_V1,
            /*

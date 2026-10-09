@@ -24,6 +24,7 @@
 
 #include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/lsystem_nodes.h>
+#include <cvc/gl/ariadne/mesh_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h> // register_default_shader_presets
 
 namespace cvc {
@@ -33,6 +34,7 @@ namespace ariadne {
 void register_cvcgl_extensions(cvc::app &app) {
   register_default_shader_presets(); // "terrain_bump", "bark"
   register_lsystem_node_types();     // "forest_trees", …
+  register_mesh_node_types();        // "mesh_lab", "fe_lab" (CVC_ENABLE_LIBIGL builds only)
   // App-scoped extensions (the L-system program intrinsics) will register here against app's
   // runtime; the registrations above are process-global and do not need it.
   (void)app;
