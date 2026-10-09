@@ -1,8 +1,11 @@
 #include <algorithm>
+#include <boost/lexical_cast.hpp>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/geometry/mesh_ops.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LowMemoryPolyDataMapper.h>
 #include <cvc/gl/NullGraphicNode.h>
@@ -55,6 +58,10 @@ GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const st
                            vtkSmartPointer<vtkPolyDataMapper> mapper)
     : GraphicsNode(ctx, statePath, name), m_hasGeometry(false),
       m_renderMode(GeometryRenderMode::TRIS), m_useSingleColor(false),
+      m_scalarMin(std::numeric_limits<double>::quiet_NaN()),
+      m_scalarMax(std::numeric_limits<double>::quiet_NaN()),
+      m_scalarRangeUsed(std::numeric_limits<double>::quiet_NaN(),
+                        std::numeric_limits<double>::quiet_NaN()),
       m_actor(vtkSmartPointer<vtkActor>::New()), m_mapper(mapper ? mapper : newPolyDataMapper()),
       m_polyData(vtkSmartPointer<vtkPolyData>::New()), m_textureFlipV(false) {
   m_mapper->SetInputData(m_polyData);
@@ -90,6 +97,12 @@ GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const st
     // Point/line rendering properties
     getState("point_size").value(3.0);
     getState("line_width").value(1.0);
+
+    // Scalar-field colouring (see setScalarField); empty range = auto
+    getState("color_by").value(m_colorBy);
+    getState("colormap").value(std::string("viridis")); // m_colorMap
+    getState("scalar_min").value(std::string());
+    getState("scalar_max").value(std::string());
   }
 }
 
@@ -220,6 +233,12 @@ void GeometryNode::handleStateChanged(const std::string &childState) {
         // Ignore if state not available
       }
     });
+  } else if (childState == "color_by" || childState == "colormap" || childState == "scalar_min" ||
+             childState == "scalar_max") {
+    runOnMainThread([this, childState]() {
+      if (readScalarState(childState))
+        recolor();
+    });
   } else {
     // Delegate to parent for common graphics fields
     // Parent will handle its own runOnMainThread wrapping
@@ -278,6 +297,11 @@ void GeometryNode::updateRenderModeVTK() {
     break;
 
   case GeometryRenderMode::TETS:
+    // The tet edges until updatePolyData finds the boundary surface (it switches
+    // the representation to surface then).
+    m_actor->GetProperty()->SetRepresentationToWireframe();
+    break;
+
   case GeometryRenderMode::HEXS:
     // Placeholder: For now, render as wireframe
     // TODO: Implement proper volumetric mesh rendering
@@ -427,10 +451,12 @@ void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
     m_texture = tex;
     m_textureImageData = id;
     m_actor->SetTexture(tex);
-    // The texture supplies the surface color; per-vertex color scalars would tint
-    // it. Set this LAST — after updatePolyData, which may re-enable scalar
-    // visibility for a colored mesh — so the texture stands on its own.
-    m_mapper->ScalarVisibilityOff();
+    // The texture supplies the surface color; geom.colors() would tint it. Set this
+    // LAST -- the updatePolyData above ran before m_texture was set, so it may have
+    // enabled scalar visibility for a colored mesh. The rule is applyVertexColors':
+    // only a scalar field (an explicit request) still shows over the texture.
+    m_mapper->SetScalarVisibility(m_scalarActive && !m_useSingleColor && m_polyData &&
+                                  m_polyData->GetPointData()->GetScalars() != nullptr);
     m_actor->Modified();
   });
 }
@@ -439,6 +465,7 @@ void GeometryNode::clearTexture() {
   // Marshaled to the owner thread: mutates shared VTK state (m_actor's texture and,
   // via updatePolyData, the shared m_polyData) that the renderer reads.
   runOnMainThread([this]() {
+    const bool hadTexture = m_texture.Get() != nullptr;
     m_texture = nullptr;
     m_textureImageData = nullptr;
     m_textureStorage.reset();
@@ -446,11 +473,15 @@ void GeometryNode::clearTexture() {
       m_actor->SetTexture(nullptr);
       m_actor->Modified();
     }
-    // Restore un-flipped TCoords now that no top-left texture is active.
-    if (m_textureFlipV) {
-      m_textureFlipV = false;
-      if (m_hasGeometry && m_geometry)
+    // Restore un-flipped TCoords now that no top-left texture is active, and
+    // with them the per-vertex colours the texture was hiding (applyVertexColors).
+    const bool reflip = m_textureFlipV;
+    m_textureFlipV = false;
+    if (m_hasGeometry && m_geometry) {
+      if (reflip)
         updatePolyData(*m_geometry);
+      else if (hadTexture)
+        recolor();
     }
   });
 }
@@ -544,6 +575,20 @@ void GeometryNode::setGeometry(const cvc::geometry &geom) {
     // Store the geometry object
     m_geometry = std::make_shared<cvc::geometry>(geom);
     m_hasGeometry = true; // Set this BEFORE setRenderMode so it can update
+
+    // Derived from the previous geometry: computed curvatures, the tet boundary,
+    // and an explicit scalar field that no longer has one value per point.
+    m_curvatures.clear();
+    m_curvaturesTried = false;
+    m_tetSurface.clear();
+    m_tetSurfaceTried = false;
+    if (m_hasScalarField && m_scalarField.size() != geom.num_points()) {
+      app().log(1, "GeometryNode::setGeometry[" + getName() + "]: the scalar field has " +
+                       std::to_string(m_scalarField.size()) + " values for " +
+                       std::to_string(geom.num_points()) + " points — dropping it");
+      m_hasScalarField = false;
+      m_scalarField.clear();
+    }
 
     // Auto-detect render mode from geometry type
     GeometryRenderMode autoMode = GeometryRenderMode::TRIS; // default
@@ -706,6 +751,338 @@ void GeometryNode::updateNormals(const std::vector<double> &xyz) {
     if (SceneGraph *sg = getSceneGraph())
       sg->requestRender();
   });
+}
+
+// ── Scalar-field colouring ────────────────────────────────────────────────────
+namespace {
+const double kAutoRange = std::numeric_limits<double>::quiet_NaN();
+
+// NaN-aware equality: two "auto" bounds are the same bound.
+bool sameBound(double a, double b) { return a == b || (std::isnan(a) && std::isnan(b)); }
+
+// A range bound as stored in the state tree: empty = auto.
+std::string boundToState(double v) {
+  return std::isfinite(v) ? boost::lexical_cast<std::string>(v) : std::string();
+}
+
+double boundFromState(const std::string &s) {
+  try {
+    const double v = boost::lexical_cast<double>(s);
+    return std::isfinite(v) ? v : kAutoRange;
+  } catch (const boost::bad_lexical_cast &) {
+    return kAutoRange; // empty or non-numeric
+  }
+}
+
+bool isColorBy(const std::string &s) {
+  return s == "none" || s == "colors" || s == "function" || s == "k1" || s == "k2" || s == "mean" ||
+         s == "gaussian";
+}
+} // namespace
+
+void GeometryNode::setScalarField(const std::vector<double> &perVertex, cvc::colormap_kind cm,
+                                  double lo, double hi) {
+  cvc::thread_info ti(app(), BOOST_CURRENT_FUNCTION);
+  runOnMainThread([this, field = perVertex, cm, lo, hi]() mutable {
+    const size_t n = m_geometry ? m_geometry->num_points() : 0;
+    if (!m_hasGeometry || field.size() != n) {
+      app().log(1, "GeometryNode::setScalarField[" + getName() +
+                       "]: " + std::to_string(field.size()) + " values for " + std::to_string(n) +
+                       " points — ignoring; needs one value per point of the current geometry");
+      return;
+    }
+    m_scalarField = std::move(field);
+    m_hasScalarField = true;
+    m_colorMap = cm;
+    m_scalarMin = std::isfinite(lo) ? lo : kAutoRange;
+    m_scalarMax = std::isfinite(hi) ? hi : kAutoRange;
+    writeScalarState();
+    recolor();
+  });
+}
+
+void GeometryNode::setScalarRange(double lo, double hi) {
+  runOnMainThread([this, lo, hi]() {
+    const double a = std::isfinite(lo) ? lo : kAutoRange;
+    const double b = std::isfinite(hi) ? hi : kAutoRange;
+    const bool changed = !sameBound(a, m_scalarMin) || !sameBound(b, m_scalarMax);
+    m_scalarMin = a;
+    m_scalarMax = b;
+    writeScalarState();
+    if (changed)
+      recolor();
+  });
+}
+
+void GeometryNode::setColorMap(cvc::colormap_kind cm) {
+  runOnMainThread([this, cm]() {
+    const bool changed = cm != m_colorMap;
+    m_colorMap = cm;
+    writeScalarState();
+    if (changed)
+      recolor();
+  });
+}
+
+void GeometryNode::clearScalarField() {
+  runOnMainThread([this]() {
+    if (!m_hasScalarField)
+      return;
+    m_hasScalarField = false;
+    std::vector<double>().swap(m_scalarField);
+    recolor();
+  });
+}
+
+// Mirror the members into the state tree. The handlers this fires find nothing
+// changed (readScalarState), so the caller recolours exactly once.
+void GeometryNode::writeScalarState() {
+  getState("colormap").value(cvc::to_string(m_colorMap));
+  getState("scalar_min").value(boundToState(m_scalarMin));
+  getState("scalar_max").value(boundToState(m_scalarMax));
+}
+
+// Take one scalar-colouring state key into its member; true if it changed.
+bool GeometryNode::readScalarState(const std::string &key) {
+  std::string v;
+  try {
+    v = getState(key).value<std::string>();
+  } catch (...) {
+    return false;
+  }
+  if (key == "color_by") {
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (v.empty())
+      v = "none";
+    if (!isColorBy(v)) {
+      app().log(1, "GeometryNode[" + getName() + "]: unknown color_by '" + v +
+                       "' (none, colors, function, k1, k2, mean, gaussian) — ignoring");
+      return false;
+    }
+    if (v == m_colorBy)
+      return false;
+    m_colorBy = v;
+    return true;
+  }
+  if (key == "colormap") {
+    cvc::colormap_kind k;
+    if (v.empty())
+      return false;
+    if (!cvc::colormap_from_string(v, k)) {
+      app().log(1, "GeometryNode[" + getName() + "]: unknown colormap '" + v + "' — ignoring");
+      return false;
+    }
+    if (k == m_colorMap)
+      return false;
+    m_colorMap = k;
+    return true;
+  }
+  double &bound = key == "scalar_min" ? m_scalarMin : m_scalarMax;
+  const double b = boundFromState(v);
+  if (sameBound(b, bound))
+    return false;
+  bound = b;
+  return true;
+}
+
+// Re-colour after a scalar-colouring change: the colour array only, in place
+// when its size allows -- cells, points, normals and tcoords are untouched.
+void GeometryNode::recolor() {
+  if (!m_hasGeometry || !m_geometry || !m_polyData) {
+    m_scalarActive = false;
+    m_scalarRangeUsed = {kAutoRange, kAutoRange};
+    return;
+  }
+  if (static_cast<size_t>(m_polyData->GetNumberOfPoints()) != m_geometry->num_points())
+    updatePolyData(*m_geometry);
+  else
+    applyVertexColors(*m_geometry, /*inPlace=*/true);
+  m_polyData->Modified();
+  if (SceneGraph *sg = getSceneGraph())
+    sg->requestRender();
+}
+
+// The field to colour by, if any: the explicit one, else the color_by
+// selection. `robust` asks for a percentile auto-range (the curvature kinds).
+bool GeometryNode::resolveScalarField(const cvc::geometry &geom, std::vector<double> &values,
+                                      bool &robust) {
+  const size_t n = geom.num_points();
+  robust = false;
+  if (n == 0)
+    return false;
+  if (m_hasScalarField) {
+    if (m_scalarField.size() != n)
+      return false;
+    values = m_scalarField;
+    return true;
+  }
+  if (m_colorBy == "function") {
+    if (geom.functions().size() != n)
+      return false;
+    values.assign(geom.functions().begin(), geom.functions().end());
+    return true;
+  }
+  const bool k1 = m_colorBy == "k1", k2 = m_colorBy == "k2", mean = m_colorBy == "mean";
+  if (!k1 && !k2 && !mean && m_colorBy != "gaussian")
+    return false;
+  const cvc::geometry::curvatures_t *curv = vertexCurvatures(geom);
+  if (!curv)
+    return false;
+  values.resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    const double a = (*curv)[i][0], b = (*curv)[i][1];
+    values[i] = k1 ? a : k2 ? b : mean ? 0.5 * (a + b) : a * b;
+  }
+  robust = true;
+  return true;
+}
+
+// geom.curvatures() when it has one (k1, k2) per point; otherwise, for the
+// stored geometry and with libigl, computed once by cvc::compute_curvature.
+// Without surface triangles there is nothing to fit: a tet mesh is measured on
+// its boundary (what TETS mode draws), with NaN -- grey, and outside the auto
+// range -- for the interior points; points or lines have no curvature field at
+// all, rather than an all-zero one.
+const cvc::geometry::curvatures_t *GeometryNode::vertexCurvatures(const cvc::geometry &geom) {
+  const size_t n = geom.num_points();
+  if (geom.curvatures().size() == n)
+    return &geom.curvatures();
+  if (&geom != m_geometry.get() || !cvc::mesh_ops_available())
+    return nullptr;
+  if (!m_curvaturesTried) {
+    m_curvaturesTried = true;
+    try {
+      cvc::geometry g(geom);        // shares geom's arrays; only what is written detaches
+      std::vector<char> onBoundary; // empty: geom's own triangles are the surface
+      if (geom.num_tris() + geom.num_quads() == 0) {
+        cvc::geometry::tris_t scratch;
+        const cvc::geometry::tris_t &boundary = tetBoundaryTris(geom, scratch);
+        if (boundary.empty()) {
+          app().log(1, "GeometryNode[" + getName() +
+                           "]: no surface triangles — no curvature to colour by");
+          return nullptr;
+        }
+        onBoundary.assign(n, 0);
+        for (const auto &t : boundary)
+          for (int c = 0; c < 3; ++c)
+            if (static_cast<size_t>(t[c]) < n)
+              onBoundary[static_cast<size_t>(t[c])] = 1;
+        g.tris() = boundary;
+      }
+      cvc::compute_curvature(g);
+      if (g.const_curvatures().size() == n) {
+        m_curvatures = g.const_curvatures();
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        for (size_t i = 0; i < onBoundary.size(); ++i)
+          if (!onBoundary[i])
+            m_curvatures[i] = cvc::geometry::curvature_t{{nan, nan}};
+      }
+    } catch (const std::exception &e) {
+      app().log(1, "GeometryNode[" + getName() + "]: curvature failed (" + e.what() +
+                       ") — not colouring by curvature");
+    } catch (...) {
+      app().log(1,
+                "GeometryNode[" + getName() + "]: curvature failed — not colouring by curvature");
+    }
+  }
+  return m_curvatures.size() == n ? &m_curvatures : nullptr;
+}
+
+// The per-vertex colour array: a scalar field through its colormap, else
+// geom.colors(), else none (the actor's single colour). Also records what
+// hasScalarField()/scalarRange() report. `inPlace` overwrites an existing
+// colour array of the right size instead of replacing it (one re-upload).
+//
+// The colours are an UNSIGNED CHAR (0..255) array: VTK treats a 3-component
+// uchar scalar array as LITERAL colors — never routed through the mapper's
+// lookup table — so the direct-color behavior is intrinsic to the data type
+// and can't be re-broken by a stray SetColorMode* elsewhere (or by a fresh
+// mapper). A vtkFloatArray, by contrast, renders through the LUT unless
+// SetColorModeToDirectScalars() is ALSO set — the omission that turned red
+// meshes blue. This uchar path is also texture-ready: when UVs land later they
+// go in the dedicated SetTCoords slot and never collide with these colors.
+// geom.colors() are RGB doubles in [0,1] (geometry.h color_t).
+void GeometryNode::applyVertexColors(const cvc::geometry &geom, bool inPlace) {
+  const size_t n = geom.num_points();
+  std::vector<double> field;
+  bool robust = false;
+  std::vector<unsigned char> rgb;
+  m_scalarActive = resolveScalarField(geom, field, robust);
+  m_scalarRangeUsed = {kAutoRange, kAutoRange};
+  if (m_scalarActive) {
+    double lo = m_scalarMin, hi = m_scalarMax;
+    if (std::isnan(lo) || std::isnan(hi)) {
+      std::pair<double, double> autoRange(kAutoRange, kAutoRange);
+      if (robust) {
+        autoRange = cvc::robust_range(field);
+      } else {
+        for (double v : field)
+          if (std::isfinite(v)) {
+            autoRange.first = std::isnan(autoRange.first) ? v : std::min(autoRange.first, v);
+            autoRange.second = std::isnan(autoRange.second) ? v : std::max(autoRange.second, v);
+          }
+      }
+      if (std::isnan(lo))
+        lo = autoRange.first;
+      if (std::isnan(hi))
+        hi = autoRange.second;
+    }
+    if (lo == hi) { // a constant field: centre it rather than divide by zero
+      lo -= 0.5;
+      hi += 0.5;
+    }
+    m_scalarRangeUsed = {lo, hi};
+    if (!m_useSingleColor) {
+      rgb = cvc::colormap_rgb(field, m_colorMap, lo, hi);
+      if (rgb.size() != 3 * n)
+        rgb.clear();
+    }
+  }
+
+  if (m_useSingleColor || (rgb.empty() && geom.colors().size() != n)) {
+    // Use single color from actor property - clear per-vertex colors
+    m_polyData->GetPointData()->SetScalars(nullptr);
+    m_mapper->ScalarVisibilityOff();
+    return;
+  }
+
+  vtkUnsignedCharArray *colors =
+      inPlace ? vtkUnsignedCharArray::SafeDownCast(m_polyData->GetPointData()->GetScalars())
+              : nullptr;
+  vtkSmartPointer<vtkUnsignedCharArray> fresh;
+  if (!colors || colors->GetNumberOfComponents() != 3 ||
+      static_cast<size_t>(colors->GetNumberOfTuples()) != n) {
+    fresh = vtkSmartPointer<vtkUnsignedCharArray>::New();
+    fresh->SetNumberOfComponents(3);
+    fresh->SetNumberOfTuples(n);
+    fresh->SetName("Colors");
+    colors = fresh;
+  }
+
+  if (!rgb.empty()) {
+    std::memcpy(colors->GetPointer(0), rgb.data(), rgb.size());
+  } else {
+    for (size_t i = 0; i < n; ++i) {
+      const auto &c = geom.colors()[i];
+      unsigned char px[3] = {
+          static_cast<unsigned char>(std::lround(std::clamp(c[0], 0.0, 1.0) * 255.0)),
+          static_cast<unsigned char>(std::lround(std::clamp(c[1], 0.0, 1.0) * 255.0)),
+          static_cast<unsigned char>(std::lround(std::clamp(c[2], 0.0, 1.0) * 255.0))};
+      colors->SetTypedTuple(i, px);
+    }
+  }
+
+  if (fresh)
+    m_polyData->GetPointData()->SetScalars(fresh);
+  else
+    colors->Modified();
+  // uchar scalars are used directly as colors; select point-data + enable.
+  m_mapper->SetScalarModeToUsePointData();
+  // A texture supplies the surface colour (setTexture): geom.colors() must not
+  // tint it. A scalar field (explicit or color_by) is an explicit request and
+  // still shows. The array stays in place either way, ready for clearTexture.
+  m_mapper->SetScalarVisibility(!m_texture || !rgb.empty());
 }
 
 void GeometryNode::setRenderLinesAsTubes(bool on) {
@@ -958,6 +1335,54 @@ void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *t
   });
 }
 
+// The boundary triangles of geom's tets (cvc::tet_boundary_surface, which keeps
+// every point), or none without libigl or when it rejects the mesh. Cached for
+// the stored geometry (until the next setGeometry); any other geometry's are
+// computed into `scratch`.
+const cvc::geometry::tris_t &GeometryNode::tetBoundaryTris(const cvc::geometry &geom,
+                                                           cvc::geometry::tris_t &scratch) {
+  scratch.clear();
+  if (geom.num_tets() == 0 || !cvc::mesh_ops_available())
+    return scratch;
+  const bool cached = &geom == m_geometry.get();
+  if (cached && m_tetSurfaceTried)
+    return m_tetSurface;
+  try {
+    const cvc::geometry surface = cvc::tet_boundary_surface(geom);
+    if (surface.num_points() == geom.num_points())
+      scratch = surface.const_tris();
+  } catch (const std::exception &e) {
+    app().log(1, "GeometryNode[" + getName() + "]: no tet boundary surface (" + e.what() +
+                     ") — TETS draws the tet edges, and there is no boundary curvature");
+  } catch (...) {
+    app().log(1, "GeometryNode[" + getName() +
+                     "]: no tet boundary surface — TETS draws the tet edges, and there is no "
+                     "boundary curvature");
+  }
+  if (!cached)
+    return scratch;
+  m_tetSurface = std::move(scratch);
+  m_tetSurfaceTried = true;
+  return m_tetSurface;
+}
+
+// TETS mode: append the boundary triangles of geom's tets to `cells`. False --
+// draw the tet edges instead -- without libigl or when cvc::tet_boundary_surface
+// rejects the mesh.
+bool GeometryNode::tetSurfaceCells(const cvc::geometry &geom, vtkCellArray *cells) {
+  cvc::geometry::tris_t scratch;
+  const cvc::geometry::tris_t &tris = tetBoundaryTris(geom, scratch);
+  if (tris.empty())
+    return false;
+  for (const auto &tri : tris) {
+    cells->InsertNextCell(3);
+    cells->InsertCellPoint(tri[0]);
+    cells->InsertCellPoint(tri[1]);
+    cells->InsertCellPoint(tri[2]);
+  }
+  return true;
+}
+
 void GeometryNode::updatePolyData(const cvc::geometry &geom) {
   // Create VTK points from geometry
   vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
@@ -1074,8 +1499,18 @@ void GeometryNode::updatePolyData(const cvc::geometry &geom) {
   }
 
   case GeometryRenderMode::TETS: {
-    // TODO: Implement tetrahedral mesh rendering
-    // For now, render as wireframe edges
+    // The tets' boundary as an outward-wound surface (cvc::tet_boundary_surface,
+    // libigl). It keeps every point, so per-vertex colours, scalars and normals
+    // still line up; interior points are simply unreferenced.
+    vtkSmartPointer<vtkCellArray> boundary = vtkSmartPointer<vtkCellArray>::New();
+    if (tetSurfaceCells(geom, boundary)) {
+      m_polyData->SetPolys(boundary);
+      m_actor->GetProperty()->SetRepresentationToSurface();
+      break;
+    }
+
+    // Without libigl, or for tets it rejects: the wireframe edges
+    m_actor->GetProperty()->SetRepresentationToWireframe();
     vtkSmartPointer<vtkCellArray> lines = vtkSmartPointer<vtkCellArray>::New();
 
     for (size_t i = 0; i < geom.num_tets(); ++i) {
@@ -1138,40 +1573,9 @@ void GeometryNode::updatePolyData(const cvc::geometry &geom) {
     m_polyData->GetPointData()->SetNormals(nullptr);
   }
 
-  // Add per-vertex colors if available AND single color mode is disabled.
-  // Store them as an UNSIGNED CHAR (0..255) array: VTK treats a 3-component
-  // uchar scalar array as LITERAL colors — never routed through the mapper's
-  // lookup table — so the direct-color behavior is intrinsic to the data type
-  // and can't be re-broken by a stray SetColorMode* elsewhere (or by a fresh
-  // mapper). A vtkFloatArray, by contrast, renders through the LUT unless
-  // SetColorModeToDirectScalars() is ALSO set — the omission that turned red
-  // meshes blue. This uchar path is also texture-ready: when UVs land later they
-  // go in the dedicated SetTCoords slot and never collide with these colors.
-  // geom.colors() are RGB doubles in [0,1] (geometry.h color_t).
-  if (!m_useSingleColor && geom.colors().size() == geom.num_points()) {
-    vtkSmartPointer<vtkUnsignedCharArray> colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
-    colors->SetNumberOfComponents(3);
-    colors->SetNumberOfTuples(geom.num_points());
-    colors->SetName("Colors");
-
-    for (size_t i = 0; i < geom.num_points(); ++i) {
-      const auto &c = geom.colors()[i];
-      unsigned char rgb[3] = {
-          static_cast<unsigned char>(std::lround(std::clamp(c[0], 0.0, 1.0) * 255.0)),
-          static_cast<unsigned char>(std::lround(std::clamp(c[1], 0.0, 1.0) * 255.0)),
-          static_cast<unsigned char>(std::lround(std::clamp(c[2], 0.0, 1.0) * 255.0))};
-      colors->SetTypedTuple(i, rgb);
-    }
-
-    m_polyData->GetPointData()->SetScalars(colors);
-    // uchar scalars are used directly as colors; select point-data + enable.
-    m_mapper->SetScalarModeToUsePointData();
-    m_mapper->ScalarVisibilityOn();
-  } else {
-    // Use single color from actor property - clear per-vertex colors
-    m_polyData->GetPointData()->SetScalars(nullptr);
-    m_mapper->ScalarVisibilityOff();
-  }
+  // Per-vertex colors (a scalar field or geom.colors()) unless single color
+  // mode is on -- see applyVertexColors.
+  applyVertexColors(geom, /*inPlace=*/false);
 
   // Texture coordinates (UVs) — the dedicated SetTCoords slot, orthogonal to the
   // color scalars above. A textured mesh (glTF/OBJ carrying cvc::geometry uvs)
