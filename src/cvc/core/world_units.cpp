@@ -163,13 +163,13 @@ double world_units::metres_to_world(double metres) const {
   return metres / scale;
 }
 
-double world_units::to_display(double si_value, dimension d) const {
+double world_units::to_display(double canonical_value, dimension d) const {
   system regime;
   {
     std::lock_guard<std::mutex> lk(_mutex);
     regime = _cfg.regime;
   }
-  return si_value / si_per_display_unit(d, regime);
+  return canonical_value / si_per_display_unit(d, regime);
 }
 
 double world_units::from_display(double display_value, dimension d) const {
@@ -190,7 +190,7 @@ std::string world_units::unit_symbol(dimension d) const {
   return base_unit_symbol(d, regime);
 }
 
-world_units::measurement world_units::format(double si_value, dimension d) const {
+world_units::measurement world_units::format(double canonical_value, dimension d) const {
   system regime;
   {
     std::lock_guard<std::mutex> lk(_mutex);
@@ -198,11 +198,11 @@ world_units::measurement world_units::format(double si_value, dimension d) const
   }
   measurement m;
   if (d == dimension::length) {
-    const length_tier tier = pick_length_tier(si_value, regime);
-    m.value = si_value / tier.metres_per_unit;
+    const length_tier tier = pick_length_tier(canonical_value, regime);
+    m.value = canonical_value / tier.metres_per_unit;
     m.unit = tier.unit;
   } else {
-    m.value = si_value / si_per_display_unit(d, regime);
+    m.value = canonical_value / si_per_display_unit(d, regime);
     m.unit = base_unit_symbol(d, regime);
   }
   return m;

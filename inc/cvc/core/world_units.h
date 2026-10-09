@@ -144,7 +144,7 @@ public:
   // of the active regime expects, in that regime's BASE unit (metre/foot,
   // kilogram/pound, second, m/s / mph, ...), and back. No magnitude-based
   // promotion happens here; use format() for that.
-  double to_display(double si_value, dimension d) const;
+  double to_display(double canonical_value, dimension d) const;
   double from_display(double display_value, dimension d) const;
 
   // The base unit label for a dimension in the active regime, e.g. "m"/"ft",
@@ -160,7 +160,7 @@ public:
     double value = 0.0;
     std::string unit;
   };
-  measurement format(double si_value, dimension d) const;
+  measurement format(double canonical_value, dimension d) const;
 
   // --- coordinate mapping ------------------------------------------------
 
