@@ -22,8 +22,11 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Optional test gate (default OFF). `CVC_BUILD_TESTS=ON cvcpkg build libcvc ...`
 # builds the Google Test suite into the BUILD tree and runs it below. It is OFF
-# by default so the packaging/release path stays fast and network-light (Google
-# Test is fetched via FetchContent). No test target has an install() rule and
+# by default so the packaging/release path stays fast. GoogleTest is the
+# recipe's googletest build dep, which `cvcpkg install-deps` puts in
+# CVC_DEPS_PREFIX (gtest*.dll in its bin, which goes on PATH below) for
+# CMake/SetupGTest.cmake to find; only a prefix without it makes the configure
+# fetch GoogleTest from GitHub. No test target has an install() rule and
 # package.files selects only lib/ and include/, so the tests are never copied
 # into CVC_INSTALL_DIR or the published bundle -- build-and-run only.
 $cvcTests = if ($env:CVC_BUILD_TESTS) { $env:CVC_BUILD_TESTS } else { 'OFF' }
