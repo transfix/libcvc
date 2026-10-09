@@ -80,7 +80,9 @@ struct Track {
 };
 
 enum class LayoutKind { Vertical, Horizontal, Grid };
-enum class BorderShow { None, Inner, Outer, All };
+// `Off`, not `None`: X11 <X11/X.h> defines `None` as a macro, which would break this
+// declaration in any translation unit that includes an X11 header first.
+enum class BorderShow { Off, Inner, Outer, All };
 
 // A container's layout (§3.0.2 / §3.0.3b). `col_widths` sizes the tracks of a
 // Grid/Horizontal layout; `resizable` lets the user drag the column seams (native
@@ -90,12 +92,12 @@ struct Layout {
   std::vector<Track> col_widths;  // Grid/Horizontal column tracks
   std::vector<Track> row_heights; // Grid row tracks (§3.0.3b increment 2)
   bool resizable = false;
-  BorderShow borders = BorderShow::None;
+  BorderShow borders = BorderShow::Off;
   bool has_border_color = false;
   float border_color[4] = {0.3f, 0.3f, 0.35f, 1.0f};
   bool is_set() const {
     return kind != LayoutKind::Vertical || !col_widths.empty() || !row_heights.empty() ||
-           resizable || borders != BorderShow::None;
+           resizable || borders != BorderShow::Off;
   }
   // A resizable grid with sized rows is realized as a vertical split-pane stack
   // with draggable seams (§3.0.3b: "rows are a manual splitter"); anything else

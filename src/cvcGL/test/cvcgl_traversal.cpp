@@ -197,7 +197,7 @@ static void test_switch() {
     return a.visitedShapes();
   };
   CHECK(count(Switch::All) == 2);
-  CHECK(count(Switch::None) == 0);
+  CHECK(count(Switch::Off) == 0);
   CHECK(count(0) == 1);
   CHECK(count(1) == 1);
   CHECK(count(99) == 0); // out of range is not a crash
