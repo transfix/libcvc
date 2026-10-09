@@ -147,9 +147,9 @@ double metres_to_world(double metres) const;        // metres / scale (scale > 0
 ### Canonical SI ↔ the display regime
 
 ```cpp
-double to_display(double si_value, dimension d) const;    // SI -> regime base unit
+double to_display(double canonical_value, dimension d) const; // SI -> regime base unit
 double from_display(double display_value, dimension d) const; // regime base unit -> SI
-std::string unit_symbol(dimension d) const;               // "m"/"ft", "kg"/"lb", ...
+std::string unit_symbol(dimension d) const;                   // "m"/"ft", "kg"/"lb", ...
 ```
 
 `to_display`/`from_display` use the regime's **base** unit (metre/foot,
@@ -161,7 +161,7 @@ kilogram/pound, m/s / mph, …). They do **not** promote by magnitude — use
 
 ```cpp
 struct measurement { double value; std::string unit; };
-measurement format(double si_value, dimension d) const;
+measurement format(double canonical_value, dimension d) const;
 
 struct coordinate { double x, y, z; std::string unit; };
 coordinate world_point_to_real(double wx, double wy, double wz) const;
@@ -245,7 +245,7 @@ package). `world_units` is what a future Jolt bridge reads:
   velocities and forces cross the engine boundary in canonical SI with **no
   scaling**. Only `metres_per_world_unit` is applied when importing world-space
   geometry into the physics world.
-- Report engine outputs to the user with `format(si_value, dimension::force)`
+- Report engine outputs to the user with `format(canonical_value, dimension::force)`
   etc., so a change of regime converts every reported quantity through the same
   table.
 - Keep conversions **out** of the bit-identical nav kernels (they are compiled
