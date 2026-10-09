@@ -3,12 +3,16 @@
 // in a translation unit that includes an X11 header first. This TU includes <X11/X.h>
 // FIRST (where X11 is available) and then the ariadne widget header, whose BorderShow enum
 // used to have a `None` enumerator. Platforms without X11 build it without the macro.
+//
+// gtest comes BEFORE X11: googletest itself declares `struct None` (gtest-type-util.h), so
+// the macro would break gtest, not just libcvc. This test is about libcvc's headers.
+#include <gtest/gtest.h>
+
 #if __has_include(<X11/X.h>)
 #include <X11/X.h>
 #endif
 
 #include <cvc/ariadne/widget.h>
-#include <gtest/gtest.h>
 
 TEST(X11MacroHeaders, BorderShowDefaultsToOff) {
 #ifdef None
