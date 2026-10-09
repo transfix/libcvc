@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl-examples
-  upstream_version: "3.5.0"
+  upstream_version: "3.5.1"
   # Bumped 1 -> 2: the GRL-SNAM nav demos (nav_city_swarm / nav_fog_ghost /
   # nav_finale) are now built and packaged alongside lsystem_forest (libcvc #203).
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
