@@ -70,6 +70,14 @@ permissions:
 # needs the NVIDIA driver. The same holds for the Windows SDK, which is
 # also built with CUDA.
 #
+# One temporary Windows exception: MSVC builds of cvc compile with
+# -openmp:llvm, whose runtime (libomp140.x86_64.dll) Microsoft does not
+# allow redistributing, so for now any machine that loads the Windows
+# SDK's cvc needs Visual Studio's copy. The closure check and sdk-smoke
+# report it as a warning and accept nothing else from outside the
+# archive. It goes away once cvc links cvcpkg's LLVM libomp, which
+# needs a Windows build of cvcpkg's openmp recipe.
+#
 # Everything the jobs build with comes from cvcpkg: the deps (below)
 # and the build tools, i.e. cmake, ninja, pkg-config and patchelf
 # (.github/actions/cvcpkg-build-tools). Nothing comes from apt or

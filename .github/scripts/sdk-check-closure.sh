@@ -51,6 +51,12 @@ linux_system='^(libc|libm|libdl|libpthread|librt|libutil|libresolv|libstdc\+\+|l
 # CMakeLists.txt), so a copy that only exists in a build machine's System32 does
 # not count.
 msvc_runtime='^(vcruntime140|msvcp140|vcomp140|concrt140|vccorlib140|libomp140)'
+# TEMPORARY exception, the one dependency the Windows SDK knowingly lacks:
+# MSVC builds of cvc use -openmp:llvm, whose runtime (libomp140.<arch>.dll)
+# Microsoft does not allow redistributing. Reported as a warning until cvc links
+# cvcpkg's LLVM libomp instead, which needs a Windows build of cvcpkg's openmp
+# recipe. Remove this then.
+interim_windows='^libomp140\.'
 
 errors=0
 fail() { echo "::error::$*"; errors=$((errors + 1)); }
@@ -139,6 +145,8 @@ while [ ${#queue[@]} -gt 0 ]; do
         hit=$(ls "$dir" | grep -ixF "$dep" | head -n 1 || true)
         if [ -n "$hit" ]; then
           queue+=("$hit")
+        elif [[ $lc =~ $interim_windows ]]; then
+          echo "::warning::$name needs $dep, MSVC's LLVM OpenMP runtime, which is not redistributable; until cvc links cvcpkg's libomp, the SDK cannot ship it and consumers need Visual Studio"
         elif [[ $lc =~ $msvc_runtime ]]; then
           fail "$name needs the MSVC runtime's $dep, which bin/ does not ship"
         elif [[ $lc == api-ms-win-* || $lc == ext-ms-* ]] || [ -e "$system32/$dep" ]; then

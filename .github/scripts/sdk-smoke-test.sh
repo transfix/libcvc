@@ -183,9 +183,19 @@ done <<<"$toks"
 
 echo "== 3. run"
 unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH
+interim=""
 if [ $os = windows ]; then
   win=$(cygpath -u "${SYSTEMROOT:-C:\\Windows}")
-  out=$(cd "$work/build" && PATH="$sdk/bin:$win/System32:$win" "$exe")
+  # TEMPORARY, the one exception (see sdk-check-closure.sh): MSVC's LLVM OpenMP
+  # runtime, which cvc built with -openmp:llvm needs and Microsoft does not let
+  # the SDK ship. Take Visual Studio's copy, and accept nothing else from
+  # outside the SDK. Remove once cvc links cvcpkg's libomp.
+  vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+  vs=$(cygpath -u "$("$vswhere" -latest -property installationPath | tr -d '\r')")
+  interim=$(find "$vs/VC" -iname 'libomp140.x86_64.dll' 2>/dev/null | sort | sed -n 1p)
+  [ -n "$interim" ] || { echo "::error::no libomp140.x86_64.dll under $vs/VC"; exit 1; }
+  echo "::warning::loading MSVC's non-redistributable $interim; the Windows SDK cannot ship it yet"
+  out=$(cd "$work/build" && PATH="$sdk/bin:$win/System32:$win:$(dirname "$interim")" "$exe")
 else
   # No loader path: RUNPATH/@rpath alone has to find libcvc and every dependency.
   out=$(cd "$work/build" && "$exe")
@@ -221,6 +231,10 @@ while IFS= read -r p; do
     macos)   [[ $p == /usr/lib/* || $p == /System/* ]] ;;
     windows) [[ $(norm "$p") == "$(norm "$win")"/* ]] ;;
   esac && { echo "os   $p"; continue; }
+  if [ -n "$interim" ] && [ "$(norm "$p")" = "$(norm "$interim")" ]; then
+    echo "TEMP $p"
+    continue
+  fi
   fail "loaded $p, outside the SDK and the base system"
 done <<<"$paths"
 
