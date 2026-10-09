@@ -431,6 +431,12 @@ add_executable(cvcgl_traversal test/cvcgl_traversal.cpp)
 target_link_libraries(cvcgl_traversal PRIVATE cvcGL)
 add_test(NAME cvcgl_traversal COMMAND cvcgl_traversal)
 
+# X11 <X11/X.h> macros (None, Success, ...) vs the cvc/gl headers, in the order VTK's X11
+# render window produces (VTK first, then X11, then cvc/gl). Compile-time check; headless.
+add_executable(cvcgl_x11_macros test/cvcgl_x11_macros.cpp)
+target_link_libraries(cvcgl_x11_macros PRIVATE cvcGL)
+add_test(NAME cvcgl_x11_macros COMMAND cvcgl_x11_macros)
+
 # The world grid must enclose the geometry actually in the scene. It was sized
 # only from GraphicsNode::transformChanged, so it tracked geometry that MOVED
 # and ignored geometry that was merely ADDED — every static scene drew a
@@ -921,7 +927,7 @@ endif()
 # locked unless it is listed here as headless.
 get_property(_cvcgl_gl_tests DIRECTORY PROPERTY TESTS)
 list(REMOVE_ITEM _cvcgl_gl_tests
-  cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal
+  cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy

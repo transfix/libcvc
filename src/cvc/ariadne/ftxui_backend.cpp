@@ -156,7 +156,7 @@ void FtxuiBackend::end_grid() {
   fx::Element box = cells.empty()
                         ? fx::text("")
                         : (vertical ? fx::vbox(std::move(cells)) : fx::hbox(std::move(cells)));
-  if (layout.borders != BorderShow::None)
+  if (layout.borders != BorderShow::Off)
     box = fx::border(box);
   m_->add(box);
 }

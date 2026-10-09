@@ -86,7 +86,7 @@ void Separator::traverse(Action &action) {
 
 // ── Switch ─────────────────────────────────────────────────────────────────
 void Switch::traverse(Action &action) {
-  if (m_which == None)
+  if (m_which == Off)
     return;
   if (m_which == All) {
     traverseChildren(action);
