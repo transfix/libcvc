@@ -551,15 +551,20 @@ jobs:
           # cvcpkg is the sole third-party prefix. No vcpkg toolchain
           # file, no aqt Qt6, no VTK source cache.
           $qtPrefix = if ($depsPath) { $depsPath } else { '' }
+          # Quote every -DNAME="$var". PowerShell does not expand a variable
+          # inside an unquoted -DNAME=$var argument; cmake used to receive the
+          # literal text $shared, which CMake reads as true, so the "static"
+          # lane built a shared cvc.dll (configure printed
+          # BUILD_SHARED_LIBS=$shared).
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
-            -DBUILD_SHARED_LIBS=$shared `
+            -DBUILD_SHARED_LIBS="$shared" `
             -DCMAKE_MSVC_RUNTIME_LIBRARY="$msvcrt" `
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON `
             -DCVC_BUILD_TESTS=OFF `
-            -DCVC_USING_XMLRPC=$xmlrpc `
+            -DCVC_USING_XMLRPC="$xmlrpc" `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DDISABLE_CGAL=OFF `

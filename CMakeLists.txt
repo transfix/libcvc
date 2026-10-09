@@ -397,32 +397,20 @@ install(FILES README.md USAGE.md LICENSE THIRD_PARTY_NOTICES.md
 # ************* CPack configuration *************
 include(GNUInstallDirs)
 
-# Ship Microsoft's MSVC CRT redist AND the LLVM OpenMP runtime
-# (libomp140.x86_64.dll) alongside our binaries. Without
-# CMAKE_INSTALL_OPENMP_LIBRARIES the OpenMP DLL is not bundled and
-# cvc.dll / cvc.exe fail to launch on a vanilla Windows machine
-# with "libomp140.x86_64.dll was not found".
+# Ship Microsoft's MSVC CRT redist alongside our binaries, plus the classic
+# OpenMP runtime (vcomp140.dll) via CMAKE_INSTALL_OPENMP_LIBRARIES.
+#
+# This does NOT cover the LLVM OpenMP runtime that MSVC builds of cvc actually
+# import: src/cvc/CMakeLists.txt compiles with -openmp:llvm, so cvc.dll (and any
+# exe linking a static cvc) needs libomp140.<arch>.dll. Microsoft does not ship
+# that DLL in the redist and documents it as not redistributable, so it cannot
+# be installed here, and a cvc.dll built this way only loads where Visual Studio
+# is installed. release.yml's closure check and sdk-smoke job report it.
 set(CMAKE_INSTALL_OPENMP_LIBRARIES TRUE)
 # InstallRequiredSystemLibraries installs into bin/ by default, which
 # is what we want next to cvc.exe / cvc.dll.
 set(CMAKE_INSTALL_SYSTEM_RUNTIME_COMPONENT libcvc)
 include(InstallRequiredSystemLibraries)
-# InstallRequiredSystemLibraries only knows the classic OpenMP runtime
-# (vcomp140.dll). MSVC builds of cvc compile with -openmp:llvm (see
-# src/cvc/CMakeLists.txt), so cvc.dll -- and any exe linking a static cvc
-# -- imports libomp140.<arch>.dll instead, which the module never
-# installed. Without this the SDK's cvc.dll fails to load on any machine
-# without Visual Studio; release.yml's sdk-smoke job checks for exactly that.
-if(MSVC AND CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
-  file(GLOB _cvc_libomp
-    "${MSVC_REDIST_DIR}/${CMAKE_MSVC_ARCH}/Microsoft.VC*.OpenMP.LLVM/libomp140.*.dll")
-  if(_cvc_libomp)
-    install(FILES ${_cvc_libomp} DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT libcvc)
-  else()
-    message(WARNING "libomp140 not found under ${MSVC_REDIST_DIR}/${CMAKE_MSVC_ARCH}: "
-                    "the installed cvc will not load where Visual Studio is absent")
-  endif()
-endif()
 
 # Compute architecture tag for archive file names.
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
