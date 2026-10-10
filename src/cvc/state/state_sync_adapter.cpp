@@ -164,10 +164,8 @@ void state_sync_adapter::detach() {
     _attached = false;
     taken.swap(_connections);
   }
-  for (auto &kv : taken) {
-    kv.second.value_changed.disconnect();
-    kv.second.child_changed.disconnect();
-  }
+  for (auto &kv : taken)
+    kv.second.disconnect_all();
 }
 
 void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
@@ -175,17 +173,35 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
   if (_connections.find(full_path) != _connections.end())
     return;
 
+  _connections.emplace(full_path, connect_node(s, full_path));
+
+  // state::children() returns full dotted paths for ALL descendants
+  // recursively. Attach to each once; the recursion-via-attach_node
+  // path is reserved for newly created descendants observed lazily
+  // through childChanged.
+  std::vector<std::string> kids = s.children();
+  for (const std::string &child_full : kids) {
+    if (_connections.find(child_full) != _connections.end())
+      continue;
+    state &child = state::instance(_ctx)(child_full);
+    _connections.emplace(child_full, connect_node(child, child_full));
+  }
+}
+
+state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
+                                                                    const std::string &full_path) {
   connection_set cs;
   std::string path_copy = full_path;
-  cs.value_changed = s.valueChanged.connect([this, path_copy]() {
+
+  cs.value_changed = node.valueChanged.connect([this, path_copy]() {
     if (!_attached || current_thread_suppressed())
       return;
-    state &node = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
+    state &n = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
     state_mutation m;
     m.path = path_copy;
     m.op = state_mutation_op::set_value;
-    m.string_value = node.value();
-    m.type_name = node.valueTypeName();
+    m.string_value = n.value();
+    m.type_name = n.valueTypeName();
     state_mutation appended = _journal.append(m);
     _local_count.fetch_add(1, std::memory_order_relaxed);
     dispatch_local(appended);
@@ -194,11 +210,11 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
   // data() changes replicate as a set_data mutation carrying the codec-encoded payload. Skipped
   // silently when no codec registry is set or no codec is registered for the node's data() type
   // (value() + structure still replicate). Suppressed while applying a remote mutation.
-  cs.data_changed = s.dataChanged.connect([this, path_copy]() {
+  cs.data_changed = node.dataChanged.connect([this, path_copy]() {
     if (!_attached || current_thread_suppressed() || !_codecs)
       return;
-    state &node = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
-    const std::string tn = node.dataTypeName();
+    state &n = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
+    const std::string tn = n.dataTypeName();
     if (tn.empty())
       return;
     state_mutation m;
@@ -206,7 +222,7 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
     m.op = state_mutation_op::set_data;
     m.type_name = tn;
     try {
-      m.payload = state_payload::inline_data(_codecs->encode(tn, node.data()));
+      m.payload = state_payload::inline_data(_codecs->encode(tn, n.data()));
     } catch (const std::exception &) {
       return; // no codec registered for this data() type, or encode failed -> not replicated
     }
@@ -215,9 +231,52 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
     dispatch_local(appended);
   });
 
-  // childChanged fires on the PARENT with the child's local name
-  // (not full name). Resolve to full path and attach lazily.
-  cs.child_changed = s.childChanged.connect([this, path_copy](const std::string &child_name) {
+  // Node metadata (comment / hidden / readOnly) replicates as dedicated mutations; apply_remote
+  // mirrors each onto the peer node. No codec is involved. Suppressed while applying a remote
+  // mutation so an applied change does not loop back into the journal. hidden/readOnly carry
+  // "1"/"0" to match apply_remote's boolean decode.
+  cs.comment_changed = node.commentChanged.connect([this, path_copy]() {
+    if (!_attached || current_thread_suppressed())
+      return;
+    state &n = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
+    state_mutation m;
+    m.path = path_copy;
+    m.op = state_mutation_op::set_comment;
+    m.string_value = n.comment();
+    state_mutation appended = _journal.append(m);
+    _local_count.fetch_add(1, std::memory_order_relaxed);
+    dispatch_local(appended);
+  });
+
+  cs.hidden_changed = node.hiddenChanged.connect([this, path_copy]() {
+    if (!_attached || current_thread_suppressed())
+      return;
+    state &n = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
+    state_mutation m;
+    m.path = path_copy;
+    m.op = state_mutation_op::set_hidden;
+    m.string_value = n.hidden() ? "1" : "0";
+    state_mutation appended = _journal.append(m);
+    _local_count.fetch_add(1, std::memory_order_relaxed);
+    dispatch_local(appended);
+  });
+
+  cs.read_only_changed = node.readOnlyChanged.connect([this, path_copy]() {
+    if (!_attached || current_thread_suppressed())
+      return;
+    state &n = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
+    state_mutation m;
+    m.path = path_copy;
+    m.op = state_mutation_op::set_read_only;
+    m.string_value = n.readOnly() ? "1" : "0";
+    state_mutation appended = _journal.append(m);
+    _local_count.fetch_add(1, std::memory_order_relaxed);
+    dispatch_local(appended);
+  });
+
+  // childChanged fires on the PARENT with the child's local name (not full name). Resolve to full
+  // path and attach lazily. Takes _mutex because it mutates _connections from a signal thread.
+  cs.child_changed = node.childChanged.connect([this, path_copy](const std::string &child_name) {
     if (!_attached)
       return;
     std::string child_full = join_path(path_copy, child_name);
@@ -230,66 +289,7 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
     attach_node(child, child_full);
   });
 
-  _connections.emplace(full_path, std::move(cs));
-
-  // state::children() returns full dotted paths for ALL descendants
-  // recursively. Attach to each once; the recursion-via-attach_node
-  // path is reserved for newly created descendants observed lazily
-  // through childChanged.
-  std::vector<std::string> kids = s.children();
-  for (const std::string &child_full : kids) {
-    if (_connections.find(child_full) != _connections.end())
-      continue;
-    state &child = state::instance(_ctx)(child_full);
-    connection_set ccs;
-    std::string cpath = child_full;
-    ccs.value_changed = child.valueChanged.connect([this, cpath]() {
-      if (!_attached || current_thread_suppressed())
-        return;
-      state &node = state::instance(_ctx)(cpath);
-      state_mutation m;
-      m.path = cpath;
-      m.op = state_mutation_op::set_value;
-      m.string_value = node.value();
-      m.type_name = node.valueTypeName();
-      state_mutation appended = _journal.append(m);
-      _local_count.fetch_add(1, std::memory_order_relaxed);
-      dispatch_local(appended);
-    });
-    ccs.data_changed = child.dataChanged.connect([this, cpath]() {
-      if (!_attached || current_thread_suppressed() || !_codecs)
-        return;
-      state &node = state::instance(_ctx)(cpath);
-      const std::string tn = node.dataTypeName();
-      if (tn.empty())
-        return;
-      state_mutation m;
-      m.path = cpath;
-      m.op = state_mutation_op::set_data;
-      m.type_name = tn;
-      try {
-        m.payload = state_payload::inline_data(_codecs->encode(tn, node.data()));
-      } catch (const std::exception &) {
-        return; // no codec for this data() type, or encode failed -> not replicated
-      }
-      state_mutation appended = _journal.append(m);
-      _local_count.fetch_add(1, std::memory_order_relaxed);
-      dispatch_local(appended);
-    });
-    ccs.child_changed = child.childChanged.connect([this, cpath](const std::string &child_name) {
-      if (!_attached)
-        return;
-      std::string nf = join_path(cpath, child_name);
-      std::lock_guard<std::mutex> lk(_mutex);
-      if (!_attached)
-        return;
-      if (_connections.find(nf) != _connections.end())
-        return;
-      state &nc = state::instance(_ctx)(nf);
-      attach_node(nc, nf);
-    });
-    _connections.emplace(child_full, std::move(ccs));
-  }
+  return cs;
 }
 
 void state_sync_adapter::dispatch_local(const state_mutation &m) {
