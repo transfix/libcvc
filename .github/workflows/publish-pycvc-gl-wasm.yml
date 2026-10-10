@@ -36,11 +36,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # cvcpkg from pip (cy-pca/cvcpkg master, as publish-cvcpkg.yml does), NOT the
+      # install.sh standalone binary. That binary is a PyInstaller bundle whose
+      # LD_LIBRARY_PATH (its own older libssl, in /tmp/_MEI*) leaks into the cmake
+      # `cvcpkg build` spawns below; the catalog cmake's libcurl needs OpenSSL 3.2, so
+      # the build died with "libssl.so.3: version `OPENSSL_3.2.0' not found" (v3.5.1
+      # tag run). publish-cvcgl-wasm.yml is unaffected: it runs cmake itself, not as a
+      # child of cvcpkg.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install cvcpkg + cmake/ninja from the catalog
         run: |
-          curl -fsSL https://cvcpkg.org/install.sh | sh
-          export PATH="$HOME/.local/bin:$PATH"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
+          cvcpkg --version
           cvcpkg install cmake ninja --prefix "${{ github.workspace }}/tools" \
             --config release --link shared
           echo "${{ github.workspace }}/tools/bin" >> "$GITHUB_PATH"
