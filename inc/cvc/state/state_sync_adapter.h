@@ -33,6 +33,7 @@ namespace cvc {
 
 class app;
 class state;
+class state_data_hydrator;
 
 // ----------------
 // cvc::state_sync_adapter
@@ -107,6 +108,12 @@ public:
   // and child structure still are). Set before attach().
   void set_codec_registry(const state_codec_registry *codecs) noexcept { _codecs = codecs; }
 
+  // The hydrator used to resolve blob-ref data() payloads that were offloaded to the blob store
+  // because they exceeded the inline threshold. Not owned; typically the owning session's hydrator.
+  // When null, a set_data mutation carrying a blob_ref is skipped (value()/structure still flow).
+  // Set before attach(). An inline set_data payload never consults the hydrator.
+  void set_data_hydrator(state_data_hydrator *hydrator) noexcept { _hydrator = hydrator; }
+
   // Apply a mutation received from a remote peer. Marks the calling
   // thread as "applying remote" for the duration so that the
   // resulting state signal does NOT loop back into the journal.
@@ -173,6 +180,8 @@ private:
   state_subscription_router _router;
   const state_codec_registry *_codecs =
       nullptr; // not owned; data() replication codecs (may be null)
+  state_data_hydrator *_hydrator =
+      nullptr; // not owned; resolves blob-ref data() payloads (may be null)
 
   mutable std::mutex _mutex;
   bool _attached;

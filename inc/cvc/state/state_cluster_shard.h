@@ -36,6 +36,7 @@ namespace cvc {
 
 class app;
 class state_transport;
+class state_data_hydrator;
 
 // ----------------
 // cvc::state_cluster_shard
@@ -110,6 +111,12 @@ public:
   state_blob_store *blob_store() const noexcept;
   void set_max_inline_payload_bytes(std::uint32_t bytes) noexcept;
   std::uint32_t max_inline_payload_bytes() const noexcept;
+
+  // Hydrator used by the sync adapter to resolve inbound blob-ref data() payloads (the receive
+  // side of the large-payload offload performed by drain_local()). Not owned; forwarded to the
+  // adapter. Typically the owning session's hydrator, which shares this shard's blob store and
+  // codec registry. Set before attach().
+  void set_data_hydrator(state_data_hydrator *hydrator) noexcept;
 
   // When true and the partition map is non-empty, ingest_remote()
   // rejects mutations whose path hashes to a different node_id.

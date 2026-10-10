@@ -4,13 +4,18 @@
 */
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_blob_store.h>
+#include <cvc/state/state_compression_registry.h>
+#include <cvc/state/state_data_hydrator.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace cvc;
 
@@ -174,6 +179,123 @@ TEST(DistributedStateSession, TwoNodeInprocDataReplication) {
   state::instance(a1)("plain.value").value(std::string("v2"));
   shared_transport.pump_all();
   EXPECT_EQ(state::instance(a2)("plain.value").value(), "v2");
+
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
+  s1.detach();
+  s2.detach();
+}
+
+namespace {
+// A larger descriptor: a small header plus a variable-length lookup table. Encoded, it exceeds
+// the inline threshold, so it exercises the blob-offload + hydrator path rather than inline bytes.
+struct TestLut {
+  int w = 0, h = 0;
+  std::vector<unsigned char> lut;
+};
+
+std::vector<unsigned char> encode_test_lut(const boost::any &v) {
+  const TestLut d = boost::any_cast<TestLut>(v);
+  std::vector<unsigned char> b;
+  const auto push_u32 = [&b](std::uint32_t x) {
+    for (int i = 0; i < 4; ++i)
+      b.push_back(static_cast<unsigned char>((x >> (i * 8)) & 0xff));
+  };
+  push_u32(static_cast<std::uint32_t>(d.w));
+  push_u32(static_cast<std::uint32_t>(d.h));
+  push_u32(static_cast<std::uint32_t>(d.lut.size()));
+  b.insert(b.end(), d.lut.begin(), d.lut.end());
+  return b;
+}
+
+boost::any decode_test_lut(const std::vector<unsigned char> &b) {
+  TestLut d{};
+  if (b.size() < 12)
+    return boost::any(d);
+  const auto rd_u32 = [&b](std::size_t off) -> std::uint32_t {
+    std::uint32_t x = 0;
+    for (int i = 0; i < 4; ++i)
+      x |= static_cast<std::uint32_t>(b[off + i]) << (i * 8);
+    return x;
+  };
+  d.w = static_cast<int>(rd_u32(0));
+  d.h = static_cast<int>(rd_u32(4));
+  const std::uint32_t n = rd_u32(8);
+  if (b.size() >= 12u + n)
+    d.lut.assign(b.begin() + 12, b.begin() + 12 + n);
+  return boost::any(d);
+}
+} // namespace
+
+// data() blob offload + hydration (Phase 10, PR2): a data() payload larger than the shard's inline
+// threshold is offloaded to the blob store as a chunked-blob manifest, replicates as a blob_ref,
+// and is reassembled + decoded + installed on the peer by the state_data_hydrator — the receive
+// side of the large-payload path (stream frame descriptors, LUTs, volume bricks).
+TEST(DistributedStateSession, TwoNodeInprocDataBlobReplication) {
+  app a1, a2;
+  a1.registerDataType<TestLut>("test_lut");
+  a2.registerDataType<TestLut>("test_lut");
+
+  // Isolated per-node blob stores. The transport serves chunk fetches from node 1's store (the
+  // producer), modelling a consumer that pulls blob chunks it does not yet hold.
+  memory_state_blob_store store1, store2;
+  state_transport_inproc shared_transport;
+  shared_transport.set_blob_store(&store1);
+
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+  s1.set_blob_store(&store1);
+  s2.set_blob_store(&store2);
+  s1.set_max_inline_payload_bytes(256);
+  s2.set_max_inline_payload_bytes(256);
+
+  s1.codecs().register_codec("test_lut", encode_test_lut, decode_test_lut);
+  s2.codecs().register_codec("test_lut", encode_test_lut, decode_test_lut);
+
+  // Node 2's hydrator resolves inbound blob-ref data() payloads from its own store, fetching any
+  // missing chunks over the transport.
+  state_data_hydrator hydrator2(store2, s2.codecs(), &state_compression_registry::shared());
+  hydrator2.set_transport(&shared_transport);
+  s2.set_data_hydrator(&hydrator2);
+
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  // Build a payload that exceeds the 256-byte inline threshold once codec-encoded (12 + 4096).
+  TestLut desc;
+  desc.w = 1920;
+  desc.h = 1080;
+  desc.lut.resize(4096);
+  for (std::size_t i = 0; i < desc.lut.size(); ++i)
+    desc.lut[i] = static_cast<unsigned char>(i % 251);
+
+  state &node1 = state::instance(a1)("streams.cam0.lut");
+  node1.value(std::string("probe1"));
+  node1.value(std::string("probe2"));
+  node1.data(boost::any(desc));
+  node1.data(boost::any(desc)); // set twice (creation-consume guard)
+
+  shared_transport.pump_all();
+
+  // The payload must have been offloaded to node 1's blob store (chunk manifest + chunk blobs),
+  // not sent inline.
+  EXPECT_GT(store1.size(), 0u) << "large data() payload was not offloaded to the blob store";
+
+  // Node 2 took the blob path (hydrator), not an inline decode, and the blob hydrated to ready.
+  EXPECT_EQ(hydrator2.status("streams.cam0.lut"), state_data_hydrator::hydration_status::ready)
+      << "blob payload did not hydrate on the peer";
+  EXPECT_GT(hydrator2.total_hydrated(), 0u);
+
+  // Node 2 must see the SAME descriptor in data(), byte-identical LUT included.
+  const boost::any got = state::instance(a2)("streams.cam0.lut").data();
+  ASSERT_FALSE(got.empty());
+  const TestLut d = boost::any_cast<TestLut>(got);
+  EXPECT_EQ(d.w, 1920);
+  EXPECT_EQ(d.h, 1080);
+  ASSERT_EQ(d.lut.size(), desc.lut.size());
+  EXPECT_EQ(d.lut, desc.lut) << "hydrated LUT must be byte-identical to the source payload";
 
   shared_transport.unregister_shard(&s1);
   shared_transport.unregister_shard(&s2);
