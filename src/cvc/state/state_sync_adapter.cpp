@@ -15,6 +15,7 @@
 
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_data_hydrator.h>
 #include <cvc/state/state_distributed_admin.h>
 #include <cvc/state/state_sync_adapter.h>
 #include <thread>
@@ -338,13 +339,24 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
     // Decode the inline payload with the registered codec for its type and set node.data().
     // (We are inside the thread_suppression_guard above, so the resulting dataChanged does not
     // loop back into the journal.) A missing codec or a decode failure leaves data() untouched and
-    // is swallowed — value() and child structure still converge. PR2 adds blob-ref payloads.
+    // is swallowed — value() and child structure still converge.
     if (_codecs && m.payload.kind == state_payload_kind::inline_bytes && !m.type_name.empty()) {
       try {
         node.data(_codecs->decode(m.type_name, m.payload.inline_bytes));
       } catch (const std::exception &) {
         // no codec for this type on this build, or decode failed: diagnostic hook goes here.
       }
+    } else if (_hydrator && m.payload.kind == state_payload_kind::blob && !m.type_name.empty()) {
+      // Large payload offloaded to the blob store on the sender. Hand the blob ref to the
+      // hydrator, which loads/fetches the chunk manifest, decodes via the codec registry, and
+      // installs the result on this node via node.data(). When the blob store already holds the
+      // chunks (shared store, or an inproc/ipc fetch that completes inline) this runs to
+      // completion synchronously on THIS thread, so the install stays inside the
+      // thread_suppression_guard above and does not re-enter the journal. When chunks must be
+      // pulled asynchronously the hydrator returns `pending` and installs later off this thread;
+      // re-checking shard conflict order on that late install is a follow-up for the async
+      // (gRPC) transport path and is not yet exercised by the inproc/ipc transports.
+      _hydrator->request(m.path, m.payload.blob.digest, m.type_name, &node);
     }
     break;
   case state_mutation_op::delete_subtree:

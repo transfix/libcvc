@@ -14,7 +14,10 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_chunked_blob.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_compression_registry.h>
+#include <cvc/state/state_data_hydrator.h>
 #include <cvc/state/state_transport.h>
 #include <cvc/state/state_volume_codec.h>
 #include <mutex>
@@ -26,6 +29,11 @@
 namespace cvc {
 
 namespace {
+
+// Chunk size used when a large data() payload is offloaded to the blob store as a chunked-blob
+// manifest. Fixed so the content-addressed manifest digest is deterministic for a given payload
+// (a prerequisite for the snapshot/live digest agreement planned in the snapshot work).
+constexpr std::uint32_t kDataBlobChunkBytes = 64u * 1024u;
 
 // Wire format for op=delegate_subtree / revoke_delegation:
 //   path         = path_prefix
@@ -368,14 +376,28 @@ std::vector<state_mutation> state_cluster_shard::collect_local(std::uint64_t aft
     // causal ordering via their own hybrid_clock::update().
     if (m.hlc_time == 0)
       m.hlc_time = _clock.now().packed();
-    // Offload large values to the blob store when a threshold is set.
-    if (_blob_store && _max_inline_payload_bytes > 0 && m.op == state_mutation_op::set_value &&
-        m.payload.kind == state_payload_kind::none &&
-        m.string_value.size() > _max_inline_payload_bytes) {
-      std::vector<unsigned char> bytes(m.string_value.begin(), m.string_value.end());
-      state_blob_ref ref = _blob_store->put(bytes, m.type_name);
-      m.string_value.clear();
-      m.payload = state_payload::blob_ref(ref);
+    // Offload large payloads to the blob store when a threshold is set.
+    if (_blob_store && _max_inline_payload_bytes > 0) {
+      if (m.op == state_mutation_op::set_value && m.payload.kind == state_payload_kind::none &&
+          m.string_value.size() > _max_inline_payload_bytes) {
+        // Legacy value offload: a single plain blob keyed by content digest. (No receive-side
+        // resolver is wired for this path yet; see the data() path below for the hydrator form.)
+        std::vector<unsigned char> bytes(m.string_value.begin(), m.string_value.end());
+        state_blob_ref ref = _blob_store->put(bytes, m.type_name);
+        m.string_value.clear();
+        m.payload = state_payload::blob_ref(ref);
+      } else if (m.op == state_mutation_op::set_data &&
+                 m.payload.kind == state_payload_kind::inline_bytes &&
+                 m.payload.inline_bytes.size() > _max_inline_payload_bytes) {
+        // data() offload: write the codec-encoded payload as a chunked-blob manifest so the peer's
+        // state_data_hydrator (state_chunked_blob_reader) can load/fetch and reassemble it. The
+        // type_name stays on the mutation for the hydrator's codec lookup; only the inline bytes
+        // are replaced by the manifest's blob_ref.
+        state_chunked_blob_writer writer(*_blob_store, kDataBlobChunkBytes,
+                                         &state_compression_registry::shared());
+        state_blob_ref ref = writer.put(m.payload.inline_bytes);
+        m.payload = state_payload::blob_ref(ref);
+      }
     }
     out.push_back(std::move(m));
     if (max_count != 0 && out.size() >= max_count)
@@ -557,6 +579,10 @@ void state_cluster_shard::set_blob_store(state_blob_store *store) noexcept {
 }
 
 state_blob_store *state_cluster_shard::blob_store() const noexcept { return _blob_store; }
+
+void state_cluster_shard::set_data_hydrator(state_data_hydrator *hydrator) noexcept {
+  _adapter->set_data_hydrator(hydrator);
+}
 
 void state_cluster_shard::set_max_inline_payload_bytes(std::uint32_t bytes) noexcept {
   _max_inline_payload_bytes = bytes;
