@@ -103,6 +103,21 @@ rm -f "$sdk"/bin/activate "$sdk"/bin/activate.*
 rm -rf "$sdk/lib/cmake/cvcpkg" "$sdk/lib/cmake/libcvc-deps"
 find "$sdk/share/libcvc-deps" -mindepth 1 -maxdepth 1 ! -name lockfile.yaml -exec rm -rf {} +
 
+# No vcpkg in an SDK. libcvc builds nothing with vcpkg, but cvcpkg's Windows
+# gmp 6.3.0+cvc.1 is a repackaged vcpkg build: it carries vcpkg's port helpers
+# (share/vcpkg-cmake, share/vcpkg-cmake-get-vars, share/vcpkg-make) and its SBOM
+# files (share/gmp/vcpkg.spdx.json, vcpkg_abi_info.txt). Remove them, then fail
+# on any vcpkg file left, so the next such bundle cannot slip in unnoticed. The
+# real fix is a native Windows gmp from cvcpkg's current recipe.
+# -mindepth 1: never test the SDK directory itself.
+find "$sdk" -mindepth 1 -iname 'vcpkg*' -prune -exec rm -rf {} +
+leftover=$(find "$sdk" -mindepth 1 -iname '*vcpkg*' ! -iname '*cvcpkg*')
+if [ -n "$leftover" ]; then
+  echo "::error::vcpkg files in the SDK:"
+  echo "$leftover"
+  exit 1
+fi
+
 kept=$(bundles "$sdk_lock" | cut -d' ' -f1)
 echo "Bundled $(echo "$kept" | wc -l | tr -d ' ') cvcpkg bundles into $sdk:"
 echo "$kept" | tr '\n' ' '
