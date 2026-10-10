@@ -23,9 +23,9 @@
       "thumb": "img/lsystem_forest_ari.jpg"
     },
     "terrain_lab": {
-      "desc": "a live view of the cvc::world L-system terrain generator",
+      "desc": "a procedural city on generated terrain — real buildings along tensor-field streets",
       "blurb":
-          "See what the L-system world generator produces: terrain coloured by its own per-cell MATERIAL (or risk / occupancy / height), trees, rocks and buildings grown from the built-in L-system recipes and placed on the surface, volumetric water filling the valleys and coast, and a drifting cloud slab. Tune the generator live — seed, species counts, tree generations, relief and water level — and watch the world rebuild. 100% procedural, nothing is downloaded.",
+          "A procedural city built from the cvc::world generator: a tensor-field street network traced over terrain-following ground, with real building shapes placed along the road-side lots and drawn as lit 3D geometry, roads extruded as asphalt ribbons with rounded junction pads, conical pine and broadleaf trees from the L-system forest, and volumetric water flooding the valleys — with road and building placement kept on dry land above the water line. Tune it live — world size (metres to kilometres, for large-terrain / LOD stress), seed, relief and water level — and watch the city rebuild, measured in real metres. The building shapes stream from the published Austin city bundle; without it, the demo falls back to procedural box massing.",
       "thumb": "img/terrain_lab.jpg"
     },
     "lsystem_forest": {
