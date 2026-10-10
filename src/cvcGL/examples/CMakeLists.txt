@@ -179,9 +179,11 @@ if(EMSCRIPTEN)
   # If CVC_WASM_BUNDLE is empty (the default), the demo falls back to the
   # synthetic city.
   set(_nav_swarm_bundle_flags "")
+  set(_city_bundle_flag "") # just the Austin scene dir @ /bundle — shared by terrain_lab
   if(CVC_WASM_BUNDLE AND EXISTS "${CVC_WASM_BUNDLE}")
     message(STATUS "cvcGL nav_city_swarm wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
     list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
+    set(_city_bundle_flag "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
     get_filename_component(_parent "${CVC_WASM_BUNDLE}" DIRECTORY)
     if(_parent AND EXISTS "${_parent}/shared/Humvee.glb")
       message(STATUS "cvcGL nav_city_swarm wasm: preloading shared vehicle from ${_parent}/shared")
@@ -224,6 +226,11 @@ if(EMSCRIPTEN)
     # nav_city_swarm and nav_city_drive share the Austin bundle + trained weights.
     if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
       target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
+    endif()
+    # terrain_lab draws the Austin building shapes from the same bundle (mounted at /bundle), and
+    # falls back to box massing when it is not preloaded.
+    if(_city_bundle_flag AND ("${_wt}" STREQUAL "terrain_lab"))
+      target_link_options(${_wt} PRIVATE ${_city_bundle_flag})
     endif()
     # The browser-side speedups: state shim (--pre-js) + mimalloc on wasm-mt.
     cvcgl_wasm_app(${_wt})
