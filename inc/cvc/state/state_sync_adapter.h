@@ -157,10 +157,29 @@ private:
     boost::signals2::connection value_changed;
     boost::signals2::connection child_changed;
     boost::signals2::connection data_changed;
+    boost::signals2::connection comment_changed;
+    boost::signals2::connection hidden_changed;
+    boost::signals2::connection read_only_changed;
+
+    void disconnect_all() {
+      value_changed.disconnect();
+      child_changed.disconnect();
+      data_changed.disconnect();
+      comment_changed.disconnect();
+      hidden_changed.disconnect();
+      read_only_changed.disconnect();
+    }
   };
 
   // Attach observers to `s` whose full path is `full_path`.
   void attach_node(state &s, const std::string &full_path);
+
+  // Connect all per-node change signals (value/data/comment/hidden/readOnly/child) for `node`,
+  // whose full dotted path is `full_path`, and return the resulting connection set. Does not touch
+  // _connections; the caller emplaces the result. Each slot re-resolves the node by path (never
+  // captures `node`), early-returns while applying a remote mutation, and journals + dispatches the
+  // corresponding mutation.
+  connection_set connect_node(state &node, const std::string &full_path);
 
   // Compose a full dot-path for a given child of `parent_full_path`.
   static std::string join_path(const std::string &parent_full_path, const std::string &child);

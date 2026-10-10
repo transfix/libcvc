@@ -303,6 +303,52 @@ TEST(DistributedStateSession, TwoNodeInprocDataBlobReplication) {
   s2.detach();
 }
 
+// Node metadata replication (Phase 10, PR3): a node's comment / hidden / readOnly flags replicate
+// to a peer as their own mutations, not just value() + data() + child structure. apply_remote
+// already mirrors these ops; this exercises the matching local emit side added in PR3.
+TEST(DistributedStateSession, TwoNodeInprocMetadataReplication) {
+  app a1, a2;
+
+  state_transport_inproc shared_transport;
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  // Establish the node first (the first value on a new node is consumed by creation) so the later
+  // metadata changes fire on an already-replicated node.
+  state &node1 = state::instance(a1)("ui.panel");
+  node1.value(std::string("v1"));
+  node1.value(std::string("v2"));
+  shared_transport.pump_all();
+  ASSERT_EQ(state::instance(a2)("ui.panel").value(), "v2") << "node did not replicate";
+
+  // Mutate each piece of metadata; each replicates via its own set_comment/set_hidden/
+  // set_read_only mutation.
+  node1.comment(std::string("a helpful tooltip"));
+  node1.hidden(true);
+  node1.readOnly(true);
+  shared_transport.pump_all();
+
+  EXPECT_EQ(state::instance(a2)("ui.panel").comment(), "a helpful tooltip");
+  EXPECT_TRUE(state::instance(a2)("ui.panel").hidden());
+  EXPECT_TRUE(state::instance(a2)("ui.panel").readOnly());
+
+  // Clearing the flags replicates too (proves the boolean round-trips both ways).
+  node1.hidden(false);
+  node1.readOnly(false);
+  shared_transport.pump_all();
+  EXPECT_FALSE(state::instance(a2)("ui.panel").hidden());
+  EXPECT_FALSE(state::instance(a2)("ui.panel").readOnly());
+
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
+  s1.detach();
+  s2.detach();
+}
+
 // ---- pump thread ----
 
 TEST(DistributedStateSession, PumpThreadRuns) {
