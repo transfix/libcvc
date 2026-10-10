@@ -20,6 +20,7 @@
 #include <boost/signals2/connection.hpp>
 #include <cvc/core/namespace.h>
 #include <cvc/state/state_change_journal.h>
+#include <cvc/state/state_codec_registry.h>
 #include <cvc/state/state_subscription_router.h>
 #include <functional>
 #include <memory>
@@ -101,6 +102,11 @@ public:
   void set_on_local_mutation(on_local_mutation_func cb);
   void set_on_remote_applied(on_remote_applied_func cb);
 
+  // The codec registry used to (de)serialize node data() payloads for replication. Not owned;
+  // typically the owning shard's registry. When null, data() changes are not replicated (value()
+  // and child structure still are). Set before attach().
+  void set_codec_registry(const state_codec_registry *codecs) noexcept { _codecs = codecs; }
+
   // Apply a mutation received from a remote peer. Marks the calling
   // thread as "applying remote" for the duration so that the
   // resulting state signal does NOT loop back into the journal.
@@ -143,6 +149,7 @@ private:
   struct connection_set {
     boost::signals2::connection value_changed;
     boost::signals2::connection child_changed;
+    boost::signals2::connection data_changed;
   };
 
   // Attach observers to `s` whose full path is `full_path`.
@@ -164,6 +171,8 @@ private:
 
   state_change_journal _journal;
   state_subscription_router _router;
+  const state_codec_registry *_codecs =
+      nullptr; // not owned; data() replication codecs (may be null)
 
   mutable std::mutex _mutex;
   bool _attached;

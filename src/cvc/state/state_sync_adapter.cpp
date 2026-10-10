@@ -190,6 +190,30 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
     dispatch_local(appended);
   });
 
+  // data() changes replicate as a set_data mutation carrying the codec-encoded payload. Skipped
+  // silently when no codec registry is set or no codec is registered for the node's data() type
+  // (value() + structure still replicate). Suppressed while applying a remote mutation.
+  cs.data_changed = s.dataChanged.connect([this, path_copy]() {
+    if (!_attached || current_thread_suppressed() || !_codecs)
+      return;
+    state &node = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
+    const std::string tn = node.dataTypeName();
+    if (tn.empty())
+      return;
+    state_mutation m;
+    m.path = path_copy;
+    m.op = state_mutation_op::set_data;
+    m.type_name = tn;
+    try {
+      m.payload = state_payload::inline_data(_codecs->encode(tn, node.data()));
+    } catch (const std::exception &) {
+      return; // no codec registered for this data() type, or encode failed -> not replicated
+    }
+    state_mutation appended = _journal.append(m);
+    _local_count.fetch_add(1, std::memory_order_relaxed);
+    dispatch_local(appended);
+  });
+
   // childChanged fires on the PARENT with the child's local name
   // (not full name). Resolve to full path and attach lazily.
   cs.child_changed = s.childChanged.connect([this, path_copy](const std::string &child_name) {
@@ -227,6 +251,26 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
       m.op = state_mutation_op::set_value;
       m.string_value = node.value();
       m.type_name = node.valueTypeName();
+      state_mutation appended = _journal.append(m);
+      _local_count.fetch_add(1, std::memory_order_relaxed);
+      dispatch_local(appended);
+    });
+    ccs.data_changed = child.dataChanged.connect([this, cpath]() {
+      if (!_attached || current_thread_suppressed() || !_codecs)
+        return;
+      state &node = state::instance(_ctx)(cpath);
+      const std::string tn = node.dataTypeName();
+      if (tn.empty())
+        return;
+      state_mutation m;
+      m.path = cpath;
+      m.op = state_mutation_op::set_data;
+      m.type_name = tn;
+      try {
+        m.payload = state_payload::inline_data(_codecs->encode(tn, node.data()));
+      } catch (const std::exception &) {
+        return; // no codec for this data() type, or encode failed -> not replicated
+      }
       state_mutation appended = _journal.append(m);
       _local_count.fetch_add(1, std::memory_order_relaxed);
       dispatch_local(appended);
@@ -291,8 +335,17 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
     node.reset();
     break;
   case state_mutation_op::set_data:
-    // Inline byte payloads are codec-dependent; phase 2 will provide
-    // a codec registry. For now we accept it but do not decode.
+    // Decode the inline payload with the registered codec for its type and set node.data().
+    // (We are inside the thread_suppression_guard above, so the resulting dataChanged does not
+    // loop back into the journal.) A missing codec or a decode failure leaves data() untouched and
+    // is swallowed — value() and child structure still converge. PR2 adds blob-ref payloads.
+    if (_codecs && m.payload.kind == state_payload_kind::inline_bytes && !m.type_name.empty()) {
+      try {
+        node.data(_codecs->decode(m.type_name, m.payload.inline_bytes));
+      } catch (const std::exception &) {
+        // no codec for this type on this build, or decode failed: diagnostic hook goes here.
+      }
+    }
     break;
   case state_mutation_op::delete_subtree:
   case state_mutation_op::delegate_subtree:

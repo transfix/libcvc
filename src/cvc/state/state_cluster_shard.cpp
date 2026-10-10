@@ -90,6 +90,7 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
   _codecs = std::make_unique<state_codec_registry>();
   _codecs->register_builtin_codecs();
   register_volume_geometry_codecs(*_codecs);
+  _adapter->set_codec_registry(_codecs.get()); // so node data() payloads replicate
   _message_bus = std::make_unique<state_message_bus>();
   _write_policy = std::make_unique<state_write_policy>();
 }
