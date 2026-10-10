@@ -1513,13 +1513,24 @@ if(CVC_ENABLE_IMAGEMAGICK)
       if(PkgConfig_FOUND)
         pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_pcmod})
         if(${_im_var}_FOUND)
-          # PRIVATE (like PkgConfig::ZSTD below): these are ImageMagick codec
-          # delegates baked into the shared cvc.dll — implementation only. Linking
-          # them PUBLIC leaked the build-local PkgConfig::_im_dep_* imported targets
-          # into the exported cvcTargets.cmake, where downstream find_package(cvc)
-          # fails ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
-          # never recreates them.
-          target_link_libraries(cvc PRIVATE PkgConfig::${_im_var})
+          # Never let the build-local PkgConfig::_im_dep_* imported targets reach
+          # the exported cvcTargets.cmake: downstream find_package(cvc) fails
+          # ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
+          # never recreates them. Linking them PUBLIC did that; so does PRIVATE
+          # for a STATIC cvc, which exports private links as $<LINK_ONLY:...>
+          # (release.yml's Windows -static smoke leg). Hang them off the
+          # synthesised ImageMagick::MagickCore instead, exactly like the
+          # find_library fallback below: it is an imported target, so it is
+          # build-local, cvc's export names only ImageMagick::MagickCore, and
+          # cvcConfig.cmake.in rebuilds that (plus its own delegate closure)
+          # for the consumer. The target is missing only in the last-ditch case
+          # above (no MagickCore library found); keep the plain PRIVATE link there.
+          if(TARGET ImageMagick::MagickCore)
+            set_property(TARGET ImageMagick::MagickCore APPEND PROPERTY
+              INTERFACE_LINK_LIBRARIES PkgConfig::${_im_var})
+          else()
+            target_link_libraries(cvc PRIVATE PkgConfig::${_im_var})
+          endif()
           set(_pc_found TRUE)
         endif()
       endif()
