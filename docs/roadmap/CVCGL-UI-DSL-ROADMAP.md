@@ -169,7 +169,7 @@ those as Ariadne / the `ari` loader.)*
 | 3 | Expression / action grammar | **`state_exec`** — expressions are `state_exec` programs; per-frame predicates run sync, actions run on the **async schedulable** executor; authorable as **s-expr *or* nested YAML** |
 | 4 | Window-geometry persistence | **Runtime tree persistence LANDED (v0.2 override).** Window pos/size **and** resizable split-pane track sizes persist to `ui.docs.<doc>.tree.<id>.{geometry,tracks}` as a **two-way edge** — the walk seeds `SetNextWindowPos/Size` / pane heights from state before the backend opens the surface (`FirstUseEver`, never re-forced — §16.2) and writes the post-interaction values back after, so the state node is the authority next frame and the sizes survive a reconcile/reload (id-keyed, §11.5.3 rule 5; §11.4). The core owns all of it; the backend only seeds/reports (never touches `cvc::state`). **Still out of scope:** *cross-run* durable persistence (an explicit `save()` codec of `ui.docs.<doc>` — a `json()` dump captures only the `value()` channel, §13 `?data` caveat) |
 | 5 | Escape hatches | **`custom:` opaque host nodes** |
-| 6 | keyboard | **✅ LANDED on master** — `ImGuiOverlay::intercept()` now translates VTK-interactor key events to ImGui (text entry, editing keys, Ctrl-shortcuts), native **and** wasm (`vtkWebAssemblyRenderWindowInteractor` → ImGui). Text-entry widgets (`input_text`, `input_int`) are first-class. Only residual: the browser canvas must hold focus (`tabindex`) — a deploy detail, verify per deploy |
+| 6 | keyboard | **✅ Event path LANDED on master** — `ImGuiOverlay::intercept()` now translates VTK-interactor key events to ImGui (text entry, editing keys, Ctrl-shortcuts), native **and** wasm (`vtkWebAssemblyRenderWindowInteractor` → ImGui; `io.AddInputCharacter`). **⚠️ Correction (2026-10-10): this is the event _plumbing_ only — the `input_text`/`input_int` _widgets_ are NOT yet implemented** (there is no `ImGui::InputText`/`InputInt` call anywhere in `ImGuiBackend` or the tree). Keyboard events reach `on_key` handlers (§4.6), but no text-field widget consumes them yet. Residual once the widgets exist: the browser canvas must hold focus (`tabindex`) — a deploy detail, verify per deploy |
 
 ---
 
@@ -246,7 +246,7 @@ Two more constraints on the widget set:
 
 **Leaf widgets (21).** `text` (formatted / caption / disabled header), `separator`
 (+ `separator_text`), `checkbox`, `slider_int`, `slider_float`, `drag_float`,
-`input_int`, `input_text` *(now first-class — keyboard landed, native + wasm)*, `combo` (enum-as-text), `radio_row`, `button`, `small_button`,
+`input_int`, `input_text` *(⚠️ not yet implemented as of 2026-10-10 — keyboard event plumbing landed native + wasm, but no `InputText` widget in the backend)*, `combo` (enum-as-text), `radio_row`, `button`, `small_button`,
 `menu_item` (toggle / fire-once / radio), `collapsing_header`, `tree_node`,
 `color_edit3`, `invisible_button` *(C++ escape)*, `custom_drawlist` *(C++ escape)*.
 Plus three **modifiers that are attributes, not children**: `tooltip`, `same_line`,
