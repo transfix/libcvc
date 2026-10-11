@@ -103,14 +103,18 @@ rm -f "$sdk"/bin/activate "$sdk"/bin/activate.*
 rm -rf "$sdk/lib/cmake/cvcpkg" "$sdk/lib/cmake/libcvc-deps"
 find "$sdk/share/libcvc-deps" -mindepth 1 -maxdepth 1 ! -name lockfile.yaml -exec rm -rf {} +
 
-# No vcpkg in an SDK. libcvc builds nothing with vcpkg, but cvcpkg's Windows
-# gmp 6.3.0+cvc.1 is a repackaged vcpkg build: it carries vcpkg's port helpers
-# (share/vcpkg-cmake, share/vcpkg-cmake-get-vars, share/vcpkg-make) and its SBOM
-# files (share/gmp/vcpkg.spdx.json, vcpkg_abi_info.txt). Remove them, then fail
-# on any vcpkg file left, so the next such bundle cannot slip in unnoticed. The
-# real fix is a native Windows gmp from cvcpkg's current recipe.
+# No vcpkg in an SDK. libcvc builds nothing with vcpkg, but two bundles in its
+# Windows closure are repackaged vcpkg builds: cvcpkg's gmp 6.3.0+cvc.1 and
+# mpfr 4.2.1+cvc.1 for windows. They carry vcpkg's port helpers
+# (share/vcpkg-cmake, share/vcpkg-cmake-get-vars, share/vcpkg-make), its SBOM
+# files (share/<port>/vcpkg.spdx.json, vcpkg_abi_info.txt) and vcpkg's debug/
+# tree (debug/bin, debug/lib with debug DLLs and .pc files), which a Release SDK
+# has no use for. Remove them, then fail on any vcpkg file left, so the next such
+# bundle cannot slip in unnoticed. The real fix is native Windows gmp and mpfr
+# from cvcpkg's current recipes.
 # -mindepth 1: never test the SDK directory itself.
 find "$sdk" -mindepth 1 -iname 'vcpkg*' -prune -exec rm -rf {} +
+rm -rf "$sdk/debug"
 leftover=$(find "$sdk" -mindepth 1 -iname '*vcpkg*' ! -iname '*cvcpkg*')
 if [ -n "$leftover" ]; then
   echo "::error::vcpkg files in the SDK:"
