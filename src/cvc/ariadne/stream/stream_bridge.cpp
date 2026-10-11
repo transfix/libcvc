@@ -17,6 +17,11 @@
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_bridge.h>
 #include <cvc/ariadne/stream/stream_channel.h>
+#include <cvc/core/app.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_message.h>
+#include <cvc/state/state_message_bus.h>
 #include <cvc/state/state_stream_transport_grpc.h>
 #include <utility>
 #include <vector>
@@ -71,6 +76,43 @@ void stream_bridge::receive_into(const std::string &stream_id, stream &proxy) {
   _router->routes[stream_id] = &proxy;
 }
 
+const char *const stream_bridge::kOfferContentType = "application/x-cvc-stream-offer";
+
+void stream_bridge::auto_serve(stream &local, std::chrono::milliseconds timeout) {
+  state_cluster_shard *shard = state_cluster_shard::default_for(_ctx);
+  if (!shard)
+    return; // no default shard installed → no bus to hear offers on
+  const std::string token = local.token();
+  state_message_bus &bus = shard->message_bus();
+  // On an offer at this stream's path, connect to the consumer and push.
+  // NB: the bus dispatches under its own lock, so serve()'s connect runs there
+  // synchronously — fine for a reachable consumer; a slow/unreachable one would
+  // briefly stall offer dispatch (a future refinement can offload the connect).
+  state_message_bus::subscription_id id =
+      bus.subscribe(token, [this, &local, timeout](const state_message &m) {
+        if (m.content_type != kOfferContentType)
+          return;
+        const std::string endpoint = m.string_value;
+        if (!endpoint.empty())
+          serve(local, endpoint, timeout);
+      });
+  std::lock_guard<std::mutex> lk(_mu);
+  _offer_unsubs.push_back([&bus, id]() { bus.unsubscribe(id); });
+}
+
+std::unique_ptr<stream> stream_bridge::request_remote(const stream_params &params) {
+  std::unique_ptr<stream> proxy = stream::open(_ctx, params);
+  if (!proxy)
+    return nullptr;
+  receive_into(proxy->token(), *proxy);
+  // Offer this bridge's transport endpoint at the stream's path; the producer's
+  // auto_serve() subscriber picks it up and starts pushing frames here.
+  state::instance(_ctx)(proxy->token())
+      .sendMessage(_transport.listen_address(), kOfferContentType, /*hop_budget=*/64,
+                   /*binary=*/false);
+  return proxy;
+}
+
 bool stream_bridge::serve(stream &local, const std::string &consumer_endpoint,
                           std::chrono::milliseconds timeout) {
   std::unique_ptr<cvc::stream_transport_grpc::channel> ch =
@@ -117,13 +159,18 @@ bool stream_bridge::serve(stream &local, const std::string &consumer_endpoint,
 
 void stream_bridge::stop() {
   std::vector<std::unique_ptr<serving>> servings;
+  std::vector<std::function<void()>> offer_unsubs;
   {
     std::lock_guard<std::mutex> lk(_mu);
     if (_stopped)
       return;
     _stopped = true;
     servings.swap(_servings);
+    offer_unsubs.swap(_offer_unsubs);
   }
+  // Stop hearing new offers first (no new servings appear during teardown).
+  for (auto &unsub : offer_unsubs)
+    unsub();
   // Stop routing first (post-stop deliveries find no proxy).
   {
     std::lock_guard<std::mutex> lk(_router->mu);
