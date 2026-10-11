@@ -103,6 +103,12 @@ message SnapshotEntry {
   string type_name = 6;
   string origin_node_id = 7;
   uint64 sequence = 8;
+  // data() payload (Phase 10 follow-up): the node's data() encoded via the codec
+  // registry, so a gRPC late-joiner reconstructs data() + metadata, not just
+  // value(). Empty data_type_name = the node has no replicable data(). Mirrors
+  // the in-process snapshot_entry the shard already produces (PR4).
+  string data_type_name = 9;
+  Payload data_payload = 10;
 }
 
 // Snapshot response: sent in response to SnapshotRequest.

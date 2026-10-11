@@ -9,19 +9,24 @@
 */
 
 #include <atomic>
+#include <boost/any.hpp>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_transport.h>
 #include <cvc/state/state_transport_grpc.h>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -146,6 +151,90 @@ TEST(StateTransportGrpcTest, LateJoinerBackfilledWhenLocalNodeDials) {
                          std::chrono::milliseconds(3000)));
   EXPECT_EQ(cvc::state::instance(aB)("dial.k").value(), "v1");
   EXPECT_GT(tA.total_backfilled(), 0u);
+
+  tA.stop();
+  tB.stop();
+}
+
+namespace {
+struct GrpcSnapDesc {
+  int w = 0, h = 0;
+};
+std::vector<unsigned char> enc_grpc_snap(const boost::any &v) {
+  const GrpcSnapDesc d = boost::any_cast<GrpcSnapDesc>(v);
+  std::vector<unsigned char> b(sizeof(GrpcSnapDesc));
+  std::memcpy(b.data(), &d, sizeof(GrpcSnapDesc));
+  return b;
+}
+boost::any dec_grpc_snap(const std::vector<unsigned char> &b) {
+  GrpcSnapDesc d{};
+  if (b.size() == sizeof(GrpcSnapDesc))
+    std::memcpy(&d, b.data(), sizeof(GrpcSnapDesc));
+  return boost::any(d);
+}
+} // namespace
+
+// A node's data() (not just value() + metadata) now crosses in a gRPC snapshot:
+// B requests a snapshot from A and the entry carries the codec-encoded data().
+// (Closes the PR4-deferred gap where the gRPC SnapshotEntry dropped data().)
+TEST(StateTransportGrpcTest, SnapshotCarriesData) {
+  cvc::app aA, aB;
+  aA.registerDataType<GrpcSnapDesc>("grpc.snap.desc");
+  aB.registerDataType<GrpcSnapDesc>("grpc.snap.desc");
+
+  cvc::state_transport_grpc tA, tB;
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.codecs().register_codec("grpc.snap.desc", enc_grpc_snap, dec_grpc_snap);
+  sB.codecs().register_codec("grpc.snap.desc", enc_grpc_snap, dec_grpc_snap);
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  // A holds a node with value + data(); snapshot reads the tree directly, so a
+  // single set suffices (no live-replication first-write quirk here).
+  cvc::state::instance(aA)("snap.cam").value(std::string("live"));
+  cvc::state::instance(aA)("snap.cam").data(boost::any(GrpcSnapDesc{1920, 1080}));
+
+  ASSERT_TRUE(tB.connect_to_peer(tA.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  std::mutex mu;
+  std::vector<cvc::state_transport::snapshot_entry> got;
+  tB.request_snapshot("C", "",
+                      [&](const std::vector<cvc::state_transport::snapshot_entry> &entries, bool) {
+                        std::lock_guard<std::mutex> lk(mu);
+                        for (const auto &e : entries)
+                          got.push_back(e);
+                      });
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        for (const auto &e : got)
+          if (e.path == "snap.cam" && !e.data_type_name.empty())
+            return true;
+        return false;
+      },
+      std::chrono::milliseconds(3000)));
+
+  std::lock_guard<std::mutex> lk(mu);
+  const cvc::state_transport::snapshot_entry *cam = nullptr;
+  for (const auto &e : got)
+    if (e.path == "snap.cam")
+      cam = &e;
+  ASSERT_NE(cam, nullptr);
+  EXPECT_EQ(cam->string_value, "live");
+  EXPECT_EQ(cam->data_type_name, "grpc.snap.desc");
+  ASSERT_EQ(cam->data_payload.kind, cvc::state_payload_kind::inline_bytes);
+  const GrpcSnapDesc d = boost::any_cast<GrpcSnapDesc>(
+      sB.codecs().decode("grpc.snap.desc", cam->data_payload.inline_bytes));
+  EXPECT_EQ(d.w, 1920);
+  EXPECT_EQ(d.h, 1080);
 
   tA.stop();
   tB.stop();
