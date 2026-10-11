@@ -1525,6 +1525,7 @@ if(CVC_ENABLE_CUDA)
   SetupCUDA(cvc)
 endif()
 
+set(CVC_USES_LLVM_OPENMP FALSE) # cvcConfig.cmake.in: recreate LLVMOpenMP::omp
 if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_link_libraries(cvc PUBLIC OpenMP::OpenMP_CXX)
   target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
@@ -1536,6 +1537,33 @@ if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   # walks cvc's INTERFACE_COMPILE_OPTIONS for .cu sources.
   if(MSVC)
     target_compile_options(cvc PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-openmp:llvm>)
+    # -openmp:llvm objects ask for MSVC's import library libomp.lib (libompd.lib
+    # under /MDd) through /DEFAULTLIB, which binds libomp140.<arch>.dll, a DLL
+    # Microsoft does not allow redistributing. Link LLVM's own libomp from
+    # cvcpkg's `openmp` bundle instead: libomp-llvm.lib by full path (the bundle
+    # ships it under that name because libomp.lib is also MSVC's file on every
+    # LIB path), plus /NODEFAULTLIB for MSVC's pair. cvc.dll then imports
+    # libomp.dll, which the SDK ships from the same bundle. The imported target is
+    # build-local; a STATIC cvc exports it as $<LINK_ONLY:LLVMOpenMP::omp> and
+    # cvcConfig.cmake.in recreates it in the consumer.
+    find_library(CVC_LLVM_LIBOMP_LIBRARY NAMES libomp-llvm)
+    if(CVC_LLVM_LIBOMP_LIBRARY)
+      if(NOT TARGET LLVMOpenMP::omp)
+        add_library(LLVMOpenMP::omp INTERFACE IMPORTED)
+        set_target_properties(LLVMOpenMP::omp PROPERTIES
+          INTERFACE_LINK_LIBRARIES "${CVC_LLVM_LIBOMP_LIBRARY}"
+          INTERFACE_LINK_OPTIONS "/NODEFAULTLIB:libomp.lib;/NODEFAULTLIB:libompd.lib")
+      endif()
+      target_link_libraries(cvc PRIVATE LLVMOpenMP::omp)
+      set(CVC_USES_LLVM_OPENMP TRUE)
+    else()
+      # Still builds (e.g. a from-source build with its own deps), but the result
+      # needs Visual Studio's libomp140 at run time; release.yml's closure check
+      # rejects such an SDK.
+      message(WARNING "libomp-llvm.lib (cvcpkg's openmp bundle) not found: cvc will "
+                      "import MSVC's non-redistributable libomp140. Add `openmp` to the "
+                      "prefix to link LLVM's redistributable libomp instead.")
+    endif()
   endif()
 endif()
 
