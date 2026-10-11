@@ -6,6 +6,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <cvc/ariadne/stream/frame.h>
+#include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_codec.h>
 #include <cvc/core/app.h>
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
@@ -430,6 +433,59 @@ TEST(DistributedStateSession, TwoNodeSnapshotDataMetadataReassembly) {
   const TestLut rs = boost::any_cast<TestLut>(got_small);
   EXPECT_EQ(rs.lut, tiny.lut);
 
+  s1.detach();
+  s2.detach();
+}
+
+// Cross-node stream DISCOVERY (Phase 10, PR5 — the control-plane payoff): a real stream opened on
+// one node publishes its format_desc into the /streams/<id> descriptor node's data(); with the
+// stream codec registered on both shards, that descriptor replicates so a remote node discovers the
+// stream (lifecycle + full format) without any data-plane transport.
+TEST(DistributedStateSession, TwoNodeStreamDescriptorDiscovery) {
+  namespace cs = cvc::ariadne::stream;
+  app a1, a2;
+
+  state_transport_inproc shared_transport;
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+  cs::register_stream_codecs(s1.codecs());
+  cs::register_stream_codecs(s2.codecs());
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  // Open a real stream on node 1 — stream::open writes the /streams/cam0 descriptor (format_desc in
+  // data(), "live" in value()) and registers the stable descriptor type name on a1.
+  cs::stream_params p;
+  p.id = "cam0";
+  p.format.kind = cs::frame_kind::video_raw;
+  p.format.codec = "rgba8";
+  p.format.w = 1920;
+  p.format.h = 1080;
+  p.format.stride = 1920 * 4;
+  p.format.bytes = static_cast<std::size_t>(1920) * 1080 * 4;
+  std::unique_ptr<cs::stream> strm = cs::stream::open(a1, p);
+  ASSERT_NE(strm, nullptr);
+
+  shared_transport.pump_all();
+
+  // Node 2 discovers the stream: lifecycle in value(), the full format_desc in data().
+  EXPECT_EQ(state::instance(a2)("streams.cam0").value(), "live")
+      << "stream lifecycle did not replicate";
+  const boost::any got = state::instance(a2)("streams.cam0").data();
+  ASSERT_FALSE(got.empty()) << "stream descriptor did not replicate to the peer";
+  const cs::format_desc fd = boost::any_cast<cs::format_desc>(got);
+  EXPECT_EQ(static_cast<int>(fd.kind), static_cast<int>(cs::frame_kind::video_raw));
+  EXPECT_EQ(fd.codec, "rgba8");
+  EXPECT_EQ(fd.w, 1920);
+  EXPECT_EQ(fd.h, 1080);
+  EXPECT_EQ(fd.stride, 1920 * 4);
+  EXPECT_EQ(fd.bytes, static_cast<std::size_t>(1920) * 1080 * 4);
+
+  strm.reset(); // close the stream
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
   s1.detach();
   s2.detach();
 }

@@ -13,6 +13,7 @@
 #include <cvc/ariadne/stream/frame_source.h>    // frame_source (start_producer)
 #include <cvc/ariadne/stream/producer_thread.h> // producer_thread (start_producer)
 #include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_codec.h> // register_stream_data_types (stable descriptor type name)
 #include <cvc/ariadne/stream/stream_registry.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
@@ -92,9 +93,22 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
   // EVERY ancestor hop (root_path's segments + streams + id), because value()/data()
   // walk _parent via fullName()/childChanged (H1); a leaf-only pin would leave a
   // chrooted stream's ancestors exposed to a concurrent sweep.
+  // Ensure format_desc has its stable, cross-ABI data-type name registered on this app before the
+  // descriptor is written, so the descriptor node's data() replicates under a name peers agree on
+  // (an unregistered type would fall back to the compiler-mangled typeid name). Idempotent.
+  register_stream_data_types(ctx);
+
   try {
     state &root = state::instance(ctx);
     state::state_ptr node = root.sharedChild(s->token_, &s->descriptor_pins_);
+    // Materialize the freshly created descriptor node so a distributed-state observer attaches to
+    // it BEFORE the first real write. A state setter emits its value/dataChanged signal before the
+    // childChanged that makes the node observable (state.cpp), so without this the first write
+    // (data() below) would land unobserved and never replicate — a remote peer would see the
+    // lifecycle but not the format_desc. touch() fires childChanged with no content of its own, so
+    // the descriptor writes that follow are all captured. (A node a peer only learns about via a
+    // later snapshot still gets the descriptor through PR4's snapshot data() path.)
+    node->touch();
     node->data(boost::any(p.format));
     node->value("live");
     state::state_ptr stats = node->sharedChild("stats", &s->descriptor_pins_);
