@@ -37,14 +37,17 @@ namespace ariadne {
 namespace stream {
 
 class stream;
+class subscription;
 struct stream_params;
 
 // ----------------
 // cvc::ariadne::stream::stream_bridge  (Phase 10, PR9 — the cross-node capstone)
 // ----------------
 // Ties the local stream subsystem to the gRPC data plane so a stream produced
-// on one node is consumed on another — the moment frames actually cross.
+// on one node is consumed on another — the moment frames actually cross. Two
+// transport roles are supported; a given stream uses one or the other.
 //
+//   ── Consumer-serves-a-port (client push) ──
 //   PRODUCER  serve(local, consumer_endpoint): opens a StreamChannel to the
 //     consumer's StreamTransport and pushes `local`'s frames — a pusher
 //     subscribes to local.channel() (ring) and send()s each frame (chunked by
@@ -54,22 +57,35 @@ struct stream_params;
 //     (from the replicated descriptor). Frames arrive via publish_external, so
 //     local consumers of `proxy` observe them like any local stream.
 //
+//   ── Producer-serves-a-port (server push, the conventional model) ──
+//   PRODUCER  serve_port(local): publishes `local` on THIS bridge's (server)
+//     StreamTransport. When a consumer opens a channel naming `local`'s id, the
+//     transport's open-handler subscribes to local.channel() (ring) and pushes
+//     each frame back down that channel until the stream closes or the consumer
+//     disconnects. One started server serves any number of serve_port streams.
+//   CONSUMER  pull_from(producer_endpoint, proxy): opens a StreamChannel to the
+//     producer's StreamTransport, names the stream (proxy's id) with an open
+//     handshake, and injects the frames the producer pushes back into `proxy`.
+//
 // This bridge maps a cvc::ariadne::stream::frame to/from the transport's
 // envelope: the payload is the frame bytes; seq and pts ride along; the FORMAT
 // is not re-sent per frame — the consumer already has it from the descriptor.
 //
-// Roles vs the original plan: to reuse the PR7/PR8 transport unchanged (client
-// send + server sink + chunking), the CONSUMER runs the gRPC server and the
-// PRODUCER is the client that pushes. The endpoint the producer connects to is
-// the consumer's; wiring it via a sendMessage offer/answer handshake (so a
-// consumer that merely discovers the descriptor is auto-served) is the thin
-// next layer on top of this bridge. The conventional producer-serves-a-port
-// model is a later refinement that needs a transport server-push path.
+// Roles: serve()/receive_into() reuse the PR7/PR8 transport unchanged (client
+// send + server sink), so the CONSUMER runs the gRPC server and the PRODUCER
+// pushes to it; auto_serve()/request_remote() wire that endpoint via a
+// sendMessage offer/answer handshake. serve_port()/pull_from() use the PR-follow-up
+// server-push path instead, so the PRODUCER runs the server and consumers pull
+// — the conventional model, useful when one producer serves many consumers from
+// a stable port.
 //
 // Threading:
-//   serve() spawns one pusher thread per call; stop()/the destructor close the
-//   subscriptions (unblocking pop()) and join them. The consumer router runs on
-//   the transport's server threads and is guarded by an internal mutex.
+//   serve() spawns one pusher thread per call and pull_from() one puller thread;
+//   stop()/the destructor unblock them (closing the subscription for a pusher,
+//   closing the channel for a puller) and join them. serve_port() adds no bridge
+//   thread — its pushes run on the transport's own server threads, draining
+//   subscriptions that stop() closes. The consumer router and the served-stream
+//   table run on transport server threads and are each guarded by a mutex.
 //
 // Availability:
 //   Uses cvc::stream_transport_grpc, so it is built only under CVC_ENABLE_GRPC.
@@ -91,10 +107,26 @@ public:
   bool serve(stream &local, const std::string &consumer_endpoint,
              std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
 
+  // PRODUCER (server push): publish `local` on THIS bridge's StreamTransport,
+  // which must be a started server. A consumer that opens a channel naming
+  // `local`'s id (see pull_from) is then pushed `local`'s frames on the
+  // transport's own server thread. Registers a route only; the push starts when
+  // a consumer connects and ends when `local` closes or the consumer drops.
+  // `local` must outlive the bridge (or until stop()). Idempotent per id.
+  void serve_port(stream &local);
+
   // CONSUMER: route inbound frames tagged `stream_id` into `proxy`. `proxy` must
   // outlive the bridge (or until stop()). Safe to call after the transport has
   // started.
   void receive_into(const std::string &stream_id, stream &proxy);
+
+  // CONSUMER (server push): open a StreamChannel to a producer's StreamTransport
+  // at `producer_endpoint`, name the stream (proxy's id) with an open handshake,
+  // and inject the frames the producer pushes back into `proxy`. The counterpart
+  // to a producer's serve_port(). `proxy` must outlive the bridge (or until
+  // stop()). Returns false if the channel cannot connect in time.
+  bool pull_from(const std::string &producer_endpoint, stream &proxy,
+                 std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
 
   // The content_type marking a stream-subscription offer message (an out-of-band
   // state message whose string_value is the consumer's StreamTransport endpoint).
@@ -120,8 +152,12 @@ public:
   // channels, clear routes. Idempotent; also run by the destructor.
   void stop();
 
-  // Diagnostics.
-  std::uint64_t frames_pushed() const noexcept { return _frames_pushed.load(); }
+  // Diagnostics. frames_pushed counts frames this bridge sent to a peer, whether
+  // via serve() (client push) or serve_port() (server push); frames_injected
+  // counts frames delivered into a local proxy, via receive_into() or pull_from().
+  std::uint64_t frames_pushed() const noexcept {
+    return _frames_pushed.load() + (_served ? _served->pushed.load() : 0);
+  }
   std::uint64_t frames_injected() const noexcept { return _router ? _router->injected.load() : 0; }
 
 private:
@@ -137,9 +173,24 @@ private:
     std::atomic<std::uint64_t> injected{0};
   };
 
+  // Producer-side server-push state. Co-owned (shared_ptr) by the transport's
+  // open-handler lambda so a consumer that connects after the bridge is
+  // destroyed routes against a still-live object (stopped==true → declines)
+  // rather than a dangling `this`. `subs` holds every per-consumer subscription
+  // the open-handler created, so stop() can close them to unblock the server
+  // threads draining them.
+  struct served_state {
+    std::mutex mu;
+    std::map<std::string, stream *> served;          // stream_id -> local stream
+    std::vector<std::shared_ptr<subscription>> subs; // per-consumer drains to close
+    std::atomic<std::uint64_t> pushed{0};
+    bool stopped = false;
+  };
+
   app &_ctx;
   stream_transport_grpc &_transport;
   std::shared_ptr<router_state> _router;
+  std::shared_ptr<served_state> _served;
 
   std::mutex _mu;                                   // guards _servings + _stopped + _offer_unsubs
   std::vector<std::unique_ptr<serving>> _servings;  // producer pushers

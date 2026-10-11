@@ -204,3 +204,93 @@ TEST(StreamBridge, OfferAnswerAutoNegotiation) {
   sA.detach();
   sB.detach();
 }
+
+// Producer-serves-a-port (server push): producer A publishes a stream on its OWN
+// StreamTransport (serve_port); consumer B opens a channel naming that stream
+// (pull_from) and the frames A produces are pushed back into B's proxy,
+// byte-identical and in order. The inverse transport topology of
+// FramesCrossNodeToNode — here the PRODUCER runs the gRPC server.
+TEST(StreamBridge, ServerPushPortCrossNode) {
+  cvc::app aA, aB;
+  const cs::format_desc fmt = rgba4x4();
+
+  // ── Producer A: a StreamTransport SERVER + a bridge that serve_port()s a local
+  // stream (the bridge is constructed before the transport starts so its
+  // open-handler is installed). ──
+  cvc::stream_transport_grpc transportA;
+  cs::stream_bridge bridgeA(aA, transportA);
+  transportA.start("127.0.0.1:0");
+  ASSERT_TRUE(transportA.is_running());
+
+  cs::stream_params pA;
+  pA.id = "cam0";
+  pA.format = fmt;
+  pA.subscriber_depth = 8; // room for the server-push ring subscription
+  std::unique_ptr<cs::stream> streamA = cs::stream::open(aA, pA);
+  ASSERT_NE(streamA, nullptr);
+  bridgeA.serve_port(*streamA);
+
+  // ── Consumer B: a client-only transport + bridge + a local proxy it pulls into. ──
+  cvc::stream_transport_grpc transportB;
+  cs::stream_bridge bridgeB(aB, transportB);
+  cs::stream_params pB;
+  pB.id = "cam0";
+  pB.format = fmt;
+  pB.subscriber_depth = 8;
+  std::unique_ptr<cs::stream> proxyB = cs::stream::open(aB, pB);
+  ASSERT_NE(proxyB, nullptr);
+  std::shared_ptr<cs::subscription> subB = proxyB->channel().subscribe(cs::deliver_mode::ring, 8);
+  ASSERT_NE(subB, nullptr);
+
+  // Wire B → A: pull A's served stream into B's proxy.
+  ASSERT_TRUE(
+      bridgeB.pull_from(transportA.listen_address(), *proxyB, std::chrono::milliseconds(3000)));
+
+  // The server-push subscription is created asynchronously on A's server thread
+  // when the open handshake arrives; wait for it so no early frame is missed.
+  auto sub_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (streamA->channel().subscriber_count() == 0 &&
+         std::chrono::steady_clock::now() < sub_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ASSERT_GE(streamA->channel().subscriber_count(), 1u) << "consumer's pull never subscribed";
+
+  // Produce N frames into A.
+  const int N = 5;
+  std::vector<std::vector<unsigned char>> sent;
+  for (int i = 0; i < N; ++i) {
+    std::vector<unsigned char> payload(64);
+    for (int j = 0; j < 64; ++j)
+      payload[j] = static_cast<unsigned char>((i * 64 + j) & 0xff);
+    auto buf = std::make_shared<std::vector<unsigned char>>(payload);
+    streamA->channel().publish_external(buf->data(), buf->size(), 0.1 * i, buf);
+    sent.push_back(std::move(payload));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  // Consume them from B's proxy (poll — the push path is async).
+  std::vector<std::vector<unsigned char>> got;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (static_cast<int>(got.size()) < N && std::chrono::steady_clock::now() < deadline) {
+    cs::frame_ptr f;
+    if (subB->try_pop(f) && f)
+      got.emplace_back(f->data, f->data + f->size);
+    else
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  ASSERT_EQ(static_cast<int>(got.size()), N) << "server-pushed frames did not cross";
+  for (int i = 0; i < N; ++i)
+    EXPECT_EQ(got[i], sent[i]) << "frame " << i << " differs across the node boundary";
+
+  EXPECT_GE(bridgeA.frames_pushed(), static_cast<std::uint64_t>(N));
+  EXPECT_GE(bridgeB.frames_injected(), static_cast<std::uint64_t>(N));
+
+  // Teardown: stop the bridges (close the server-push subscription + join the
+  // puller) BEFORE stopping the transports, so no server thread is left parked.
+  bridgeA.stop();
+  bridgeB.stop();
+  streamA.reset();
+  proxyB.reset();
+  transportA.stop();
+  transportB.stop();
+}
