@@ -263,10 +263,10 @@ jobs:
           if [ "${{ matrix.build_type }}" = "Debug" ]; then
             sudo apt-get install -y --no-install-recommends lcov
           fi
-          if [ "${{ matrix.enable_grpc }}" = "true" ]; then
-            sudo apt-get install -y --no-install-recommends \
-              libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
-          fi
+          # gRPC/protobuf are NOT installed via apt. They are provisioned
+          # hermetically from the published cvcpkg bundle in a dedicated step
+          # below ("Provision gRPC via cvcpkg"), per the toolchain rule: no
+          # apt/brew for build dependencies.
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -293,6 +293,30 @@ jobs:
         with:
           build_type: Release
           link: shared
+
+      # ── gRPC, hermetically via cvcpkg (NOT apt) ──
+      # The distributed-state gRPC transport (CVC_ENABLE_GRPC) needs grpc +
+      # protobuf + grpc_cpp_plugin + protoc. Pull them from the published cvcpkg
+      # bundle (a ~10 MB shared/release download whose closure includes
+      # protobuf/abseil/openssl) into a dedicated prefix that the configure step
+      # appends to CMAKE_PREFIX_PATH, so find_package(gRPC CONFIG)/
+      # find_package(Protobuf CONFIG) and the grpc_cpp_plugin/protoc executables
+      # resolve there. cvcpkg is on PATH because fetch-libcvc-deps pip-installed
+      # it. This replaces the former `apt-get install libgrpc++-dev …`, which
+      # violated the hermetic toolchain rule. Only the enable_grpc lane runs it.
+      - name: Provision gRPC via cvcpkg
+        if: ${{ matrix.enable_grpc == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A DEDICATED prefix (not the libcvc-deps bundle prefix): grpc's
+          # closure includes zlib/openssl/protobuf, which could collide with
+          # the libcvc-deps bundle's own copies if co-installed. Keeping it
+          # separate and adding it to CMAKE_PREFIX_PATH (below) is conflict-free
+          # — CMake searches both.
+          grpc_prefix="$RUNNER_TEMP/grpc-prefix"
+          cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link shared
+          echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
 
       # ── VTK, for cvcGL ──
       # cvcGL's tests are the only coverage the scene graph gets, and until this
@@ -381,6 +405,11 @@ jobs:
             extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
           else
             extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          # The gRPC lane provisions grpc into its own prefix (see "Provision
+          # gRPC via cvcpkg"); add it so find_package(gRPC/Protobuf) resolves.
+          if [ -n "${GRPC_PREFIX:-}" ]; then
+            extra_prefix="$extra_prefix;$GRPC_PREFIX"
           fi
           # Enable tests so the same artifacts we ship get exercised
           # by ctest.
