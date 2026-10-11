@@ -237,6 +237,13 @@ void stream_transport_grpc::set_server_echo(bool on) noexcept {
   _server_echo.store(on, std::memory_order_relaxed);
 }
 
+void stream_transport_grpc::set_tls_config(tls_config cfg) {
+  if (_running.load())
+    throw std::runtime_error("stream_transport_grpc::set_tls_config: already running");
+  _tls = std::move(cfg);
+  _tls_set = true;
+}
+
 void stream_transport_grpc::set_on_frame(on_frame_func cb) { _impl->on_frame = std::move(cb); }
 
 void stream_transport_grpc::start(const std::string &listen_addr) {
@@ -250,7 +257,21 @@ void stream_transport_grpc::start(const std::string &listen_addr) {
   int bound_port = 0;
   builder.SetMaxReceiveMessageSize(kStreamMaxMessageBytes);
   builder.SetMaxSendMessageSize(kStreamMaxMessageBytes);
-  builder.AddListeningPort(listen_addr, grpc::InsecureServerCredentials(), &bound_port);
+  std::shared_ptr<grpc::ServerCredentials> server_creds;
+  if (_tls_set && !_tls.server_cert_pem.empty() && !_tls.server_key_pem.empty()) {
+    grpc::SslServerCredentialsOptions opts(
+        _tls.require_client_auth ? GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY
+                                 : GRPC_SSL_DONT_REQUEST_CLIENT_CERTIFICATE);
+    grpc::SslServerCredentialsOptions::PemKeyCertPair pkcp{_tls.server_key_pem,
+                                                           _tls.server_cert_pem};
+    opts.pem_key_cert_pairs.push_back(pkcp);
+    if (!_tls.root_ca_pem.empty())
+      opts.pem_root_certs = _tls.root_ca_pem;
+    server_creds = grpc::SslServerCredentials(opts);
+  } else {
+    server_creds = grpc::InsecureServerCredentials();
+  }
+  builder.AddListeningPort(listen_addr, server_creds, &bound_port);
   builder.RegisterService(_impl->service.get());
   _impl->server = builder.BuildAndStart();
   if (!_impl->server)
@@ -284,7 +305,19 @@ stream_transport_grpc::open_channel(const std::string &target, std::chrono::mill
   grpc::ChannelArguments args;
   args.SetMaxReceiveMessageSize(kStreamMaxMessageBytes);
   args.SetMaxSendMessageSize(kStreamMaxMessageBytes);
-  auto chan = grpc::CreateCustomChannel(target, grpc::InsecureChannelCredentials(), args);
+  std::shared_ptr<grpc::ChannelCredentials> chan_creds;
+  if (_tls_set && !_tls.root_ca_pem.empty()) {
+    grpc::SslCredentialsOptions opts;
+    opts.pem_root_certs = _tls.root_ca_pem;
+    if (!_tls.server_cert_pem.empty() && !_tls.server_key_pem.empty() && _tls.require_client_auth) {
+      opts.pem_cert_chain = _tls.server_cert_pem;
+      opts.pem_private_key = _tls.server_key_pem;
+    }
+    chan_creds = grpc::SslCredentials(opts);
+  } else {
+    chan_creds = grpc::InsecureChannelCredentials();
+  }
+  auto chan = grpc::CreateCustomChannel(target, chan_creds, args);
   auto deadline = std::chrono::system_clock::now() + timeout;
   if (!chan->WaitForConnected(deadline))
     return nullptr;
