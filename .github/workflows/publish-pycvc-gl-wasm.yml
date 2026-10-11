@@ -74,14 +74,26 @@ jobs:
         # Drives the recipe's build-wasm.sh against the pre-installed deps. It
         # compiles cvc+cvcGL+pycvc+pycvc_gl, then link-host.sh embeds vtk-python
         # cvc.6 and runs the node smoke (prints PYCVC_VTK_BRIDGE_OK / PYCVC_WASM_OK).
-        # `cvcpkg pack` (not build + `pack --from-prefix "$WASM_DEPS"`): it builds into an
-        # isolated install dir, archives ONLY that, then merges it into $WASM_DEPS as
-        # `build` did. $WASM_DEPS holds the whole dep closure, so packing it shipped every
-        # dep with its manifest, and `cvcpkg publish` -- which reads the first
-        # manifest.yaml in the archive -- took this bundle for cvc/assimp==6.0.5+cvc.6.
+        #
+        # Pack ONLY what this build installed. $WASM_DEPS holds the whole dep closure, so
+        # `pack --from-prefix "$WASM_DEPS"` shipped every dep with its manifest, and
+        # `cvcpkg publish` -- which reads the first manifest.yaml in the archive -- took the
+        # bundle for cvc/assimp==6.0.5+cvc.6. `cvcpkg build` installs into an isolated
+        # $TMPDIR/cvcpkg-pycvc-gl-cp312-*/install, merges that into $WASM_DEPS and keeps it;
+        # a dedicated TMPDIR makes it findable, and it is what gets packed. (Plain
+        # `cvcpkg pack` would isolate too, but cvcpkg 2.4.0 tags its wasm bundle with the
+        # HOST arch, x86_64; --from-prefix derives wasm32 from the platform.)
         run: |
-          cvcpkg pack cvcpkg/recipes/pycvc-gl-cp312 --local --platform wasm --host-platform linux \
-            --prefix "$WASM_DEPS" --config release --link static --output-dir dist
+          export TMPDIR="$RUNNER_TEMP/pycvc-gl-work"
+          mkdir -p "$TMPDIR"
+          cvcpkg build pycvc-gl-cp312 --platform wasm --host-platform linux \
+            --recipes-dir cvcpkg/recipes --prefix "$WASM_DEPS"
+          shopt -s nullglob
+          inst=("$TMPDIR"/cvcpkg-pycvc-gl-cp312-*/install)
+          [ ${#inst[@]} -eq 1 ] \
+            || { echo "::error::expected one isolated pycvc-gl install dir, found ${#inst[@]}"; ls -la "$TMPDIR"; exit 1; }
+          cvcpkg pack cvcpkg/recipes/pycvc-gl-cp312 --local --from-prefix "${inst[0]}" \
+            --platform wasm --config release --link static --output-dir dist
 
       - name: Verify the bridge host + archives
         run: |
@@ -92,10 +104,14 @@ jobs:
             || { echo "::error::_pycvc_gl.a not produced"; exit 1; }
           echo "=== bundle ==="
           shopt -s nullglob
-          archives=(dist/pycvc-gl-cp312-*-wasm-*.tar.gz)
+          archives=(dist/pycvc-gl-cp312-*.tar.gz)
           [ ${#archives[@]} -eq 1 ] \
-            || { echo "::error::expected one pycvc-gl-cp312 wasm archive, found ${#archives[@]}"; exit 1; }
+            || { echo "::error::expected one pycvc-gl-cp312 archive, found ${#archives[@]}"; exit 1; }
           ls -la "${archives[0]}"
+          case "${archives[0]}" in
+            *-wasm-wasm32-release-static.tar.gz) ;;
+            *) echo "::error::bundle is not tagged wasm/wasm32/release/static"; exit 1 ;;
+          esac
           tar -tzf "${archives[0]}" | sed 's|^\./||' > "$RUNNER_TEMP/members.txt"
           # Exactly one cvcpkg manifest, and it is this bundle's: `cvcpkg publish` names an
           # archive after the first manifest.yaml in it, so a dep's would mislabel the bundle.
