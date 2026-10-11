@@ -8,9 +8,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cvc/state/state_stream_transport_grpc.h>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,6 +27,37 @@ std::vector<unsigned char> bytes(std::initializer_list<int> v) {
   for (int x : v)
     b.push_back(static_cast<unsigned char>(x));
   return b;
+}
+
+bool tls_tests_enabled() {
+  const char *e = std::getenv("CVC_DISTRIBUTED_STATE_TLS_TESTS");
+  return e != nullptr && std::string(e) == "1";
+}
+
+// Mint a throwaway self-signed cert (CN/SAN localhost) via openssl, same as the
+// control-plane TLS test. Returns false if openssl is unavailable.
+bool generate_self_signed(std::string &cert_pem, std::string &key_pem) {
+  char tmpl[] = "/tmp/cvc_stream_tls_XXXXXX";
+  if (!mkdtemp(tmpl))
+    return false;
+  std::string dir = tmpl;
+  std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + dir + "/k.pem -out " + dir +
+                    "/c.pem -days 1 -nodes -subj '/CN=localhost' "
+                    "-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' >/dev/null 2>&1";
+  if (std::system(cmd.c_str()) != 0)
+    return false;
+  auto slurp = [](const std::string &p, std::string &out) -> bool {
+    std::ifstream f(p);
+    if (!f)
+      return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return !out.empty();
+  };
+  bool ok = slurp(dir + "/c.pem", cert_pem) && slurp(dir + "/k.pem", key_pem);
+  std::system(("rm -rf " + dir).c_str());
+  return ok;
 }
 
 } // namespace
@@ -189,4 +223,48 @@ TEST(StreamTransportGrpc, OpenChannelToDeadAddressReturnsNull) {
   stream_transport_grpc client;
   auto ch = client.open_channel("127.0.0.1:1", std::chrono::milliseconds(500));
   EXPECT_EQ(ch, nullptr);
+}
+
+// A frame round-trips over a TLS-encrypted StreamChannel. Opt-in (needs openssl
+// + CVC_DISTRIBUTED_STATE_TLS_TESTS=1), mirroring the control-plane TLS test.
+TEST(StreamTransportGrpc, TlsRoundTrip) {
+  if (!tls_tests_enabled())
+    GTEST_SKIP() << "set CVC_DISTRIBUTED_STATE_TLS_TESTS=1 to run TLS tests";
+  std::string cert, key;
+  if (!generate_self_signed(cert, key))
+    GTEST_SKIP() << "openssl not available; cannot generate a self-signed cert";
+
+  stream_transport_grpc::tls_config tls;
+  tls.server_cert_pem = cert;
+  tls.server_key_pem = key;
+  tls.root_ca_pem = cert; // self-signed: the cert is its own CA
+
+  stream_transport_grpc server;
+  server.set_tls_config(tls);
+  server.start("127.0.0.1:0");
+  ASSERT_TRUE(server.is_running());
+  const std::string addr = server.listen_address();
+  const auto colon = addr.find_last_of(':');
+  ASSERT_NE(colon, std::string::npos);
+  // Connect by name so the cert's localhost SAN validates.
+  const std::string target = "localhost:" + addr.substr(colon + 1);
+
+  stream_transport_grpc client;
+  client.set_tls_config(tls); // root_ca for the client side
+  std::unique_ptr<stream_transport_grpc::channel> ch =
+      client.open_channel(target, std::chrono::milliseconds(3000));
+  ASSERT_NE(ch, nullptr);
+
+  stream_transport_grpc::frame f;
+  f.stream_id = "streams.tls";
+  f.seq = 7;
+  f.payload = bytes({9, 8, 7, 6});
+  ASSERT_TRUE(ch->send(f));
+  stream_transport_grpc::frame echo;
+  ASSERT_TRUE(ch->recv(echo));
+  EXPECT_EQ(echo.stream_id, "streams.tls");
+  EXPECT_EQ(echo.payload, bytes({9, 8, 7, 6}));
+
+  ch->close();
+  server.stop();
 }

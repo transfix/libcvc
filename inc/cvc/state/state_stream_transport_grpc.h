@@ -97,6 +97,20 @@ public:
   // observe a round-trip; the echo is independent of this callback.
   void set_on_frame(on_frame_func cb);
 
+  // TLS configuration (parallels state_transport_grpc::tls_config). PEM bytes
+  // are passed verbatim to gRPC. An empty server_cert_pem + server_key_pem
+  // leaves the server insecure even if the struct is installed;
+  // require_client_auth=true makes the server require a client certificate that
+  // chains to root_ca_pem (mutual TLS). A client (open_channel) uses TLS when
+  // root_ca_pem is set. Set before start(); the server captures it there.
+  struct tls_config {
+    std::string server_cert_pem;
+    std::string server_key_pem;
+    std::string root_ca_pem;
+    bool require_client_auth = false;
+  };
+  void set_tls_config(tls_config cfg);
+
   // Start the dedicated StreamTransport server listening on `listen_addr`
   // (host:port; port 0 picks a free port, read back via listen_address()).
   void start(const std::string &listen_addr);
@@ -150,6 +164,9 @@ private:
   std::atomic<std::uint64_t> _frames_echoed{0};
   std::atomic<std::size_t> _chunk_bytes{1u << 20}; // 1 MiB
   std::atomic<bool> _server_echo{true};
+
+  tls_config _tls;
+  bool _tls_set = false;
 };
 
 } // namespace cvc
