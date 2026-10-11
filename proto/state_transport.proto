@@ -140,3 +140,23 @@ message Frame {
 // frame each side sends is a Hello so the remote can record the
 // peer's node_id / cluster_id for diagnostics.
 service StateTransport { rpc Channel(stream Frame) returns (stream Frame); }
+
+// ───────────────────────── Data plane (Phase 10, PR7) ─────────────────────────
+// The control plane above replicates the /streams/<id> DESCRIPTOR so peers can
+// discover a stream. The actual frame bytes travel here, on a DEDICATED service
+// served from its own port/listener (not a second service on the StateTransport
+// server) so high-bandwidth frame traffic cannot head-of-line-block control
+// traffic. Frame semantics (cvc::ariadne::stream::frame) live a layer above;
+// this envelope is transport-level bytes + routing/timing.
+message StreamFrame {
+  string stream_id = 1;   // the /streams/<id> token this channel/frame serves
+  int64 seq = 2;          // monotonic per stream (producer-assigned)
+  double pts_seconds = 3; // producer presentation timestamp
+  uint32 flags = 4;       // bit0 = keyframe, bit1 = open handshake (names the stream)
+  bytes payload = 5;      // one whole frame's bytes (PR8 adds chunking for oversized frames)
+}
+
+// One bidirectional stream-channel per consumer↔producer pair. Both sides may
+// write (e.g. the consumer sends backpressure/keyframe-request frames); PR7
+// ships the skeleton that round-trips frames.
+service StreamTransport { rpc StreamChannel(stream StreamFrame) returns (stream StreamFrame); }

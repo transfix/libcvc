@@ -57,6 +57,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_transport_inproc.h
   ../../inc/cvc/state/state_transport_ipc.h
   ../../inc/cvc/state/state_transport_grpc.h
+  ../../inc/cvc/state/state_stream_transport_grpc.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
@@ -1137,6 +1138,7 @@ if(CVC_ENABLE_GRPC)
 
   list(APPEND SOURCE_FILES
     state/state_transport_grpc.cpp
+    state/state_stream_transport_grpc.cpp
     ${_proto_pb_cc}
     ${_proto_grpc_cc}
   )
