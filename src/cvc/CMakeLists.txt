@@ -1201,6 +1201,13 @@ list(APPEND INCLUDE_FILES
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
 
+# Packages behind cvc's PRIVATE imported-target links. A STATIC cvc exports those
+# links as $<LINK_ONLY:yaml-cpp::yaml-cpp> etc., so cvcConfig.cmake.in has to
+# find_dependency() each of them for the consumer; a SHARED cvc absorbs them and
+# the list is dropped before the config is generated. Append the package name
+# wherever such a link is added below.
+set(CVC_PRIVATE_LINK_PACKAGES "")
+
 # Ariadne .ari YAML loader — OPTIONAL. yaml-cpp is a light, header+lib dependency;
 # when present, ariadne/loader.cpp compiles the real parser (CVC_ARIADNE_HAVE_YAML);
 # when absent, it compiles a stub (load_* return an error) so libcvc still builds.
@@ -1213,6 +1220,7 @@ if(TARGET yaml-cpp::yaml-cpp OR TARGET yaml-cpp)
   endif()
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_YAML)
   target_link_libraries(cvc PRIVATE ${_cvc_yamlcpp})
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES yaml-cpp)
   message(STATUS "Ariadne: .ari YAML loader ENABLED (yaml-cpp)")
 else()
   message(STATUS "Ariadne: yaml-cpp not found - .ari loader compiles to a stub")
@@ -1248,6 +1256,7 @@ else()
     target_compile_definitions(cvc PRIVATE CVC_NET_HAVE_CURL CVC_ARIADNE_HAVE_HTTP)
     if(TARGET CURL::libcurl)
       target_link_libraries(cvc PRIVATE CURL::libcurl)
+      list(APPEND CVC_PRIVATE_LINK_PACKAGES CURL)
     else()
       target_include_directories(cvc PRIVATE ${CURL_INCLUDE_DIRS})
       target_link_libraries(cvc PRIVATE ${CURL_LIBRARIES})
@@ -1267,6 +1276,7 @@ find_package(ftxui CONFIG QUIET)
 if(TARGET ftxui::component)
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_FTXUI)
   target_link_libraries(cvc PRIVATE ftxui::component ftxui::dom ftxui::screen)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES ftxui)
   message(STATUS "Ariadne: FTXUI terminal backend ENABLED (ftxui)")
 else()
   message(STATUS "Ariadne: FTXUI not found - terminal backend compiles to a stub")
@@ -1282,6 +1292,7 @@ find_package(nlohmann_json_schema_validator CONFIG QUIET)
 if(TARGET nlohmann_json_schema_validator::validator)
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_JSONSCHEMA)
   target_link_libraries(cvc PRIVATE nlohmann_json_schema_validator::validator)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES nlohmann_json_schema_validator)
   message(STATUS "Ariadne: .ari Layer-2 JSON-Schema validation ENABLED (json-schema-validator)")
 else()
   message(STATUS "Ariadne: json-schema-validator not found - Layer-2 validation off")
@@ -1371,6 +1382,7 @@ if(CVC_ENABLE_GRPC)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
   target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES Protobuf gRPC)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)
@@ -1502,13 +1514,24 @@ if(CVC_ENABLE_IMAGEMAGICK)
       if(PkgConfig_FOUND)
         pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_pcmod})
         if(${_im_var}_FOUND)
-          # PRIVATE (like PkgConfig::ZSTD below): these are ImageMagick codec
-          # delegates baked into the shared cvc.dll — implementation only. Linking
-          # them PUBLIC leaked the build-local PkgConfig::_im_dep_* imported targets
-          # into the exported cvcTargets.cmake, where downstream find_package(cvc)
-          # fails ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
-          # never recreates them.
-          target_link_libraries(cvc PRIVATE PkgConfig::${_im_var})
+          # Never let the build-local PkgConfig::_im_dep_* imported targets reach
+          # the exported cvcTargets.cmake: downstream find_package(cvc) fails
+          # ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
+          # never recreates them. Linking them PUBLIC did that; so does PRIVATE
+          # for a STATIC cvc, which exports private links as $<LINK_ONLY:...>
+          # (release.yml's Windows -static smoke leg). Hang them off the
+          # synthesised ImageMagick::MagickCore instead, exactly like the
+          # find_library fallback below: it is an imported target, so it is
+          # build-local, cvc's export names only ImageMagick::MagickCore, and
+          # cvcConfig.cmake.in rebuilds that (plus its own delegate closure)
+          # for the consumer. The target is missing only in the last-ditch case
+          # above (no MagickCore library found); keep the plain PRIVATE link there.
+          if(TARGET ImageMagick::MagickCore)
+            set_property(TARGET ImageMagick::MagickCore APPEND PROPERTY
+              INTERFACE_LINK_LIBRARIES PkgConfig::${_im_var})
+          else()
+            target_link_libraries(cvc PRIVATE PkgConfig::${_im_var})
+          endif()
           set(_pc_found TRUE)
         endif()
       endif()
@@ -1656,6 +1679,13 @@ install(EXPORT cvcTargets
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cvc
   COMPONENT libcvc
 )
+
+get_target_property(_cvc_type cvc TYPE)
+message(STATUS "libcvc: cvc is a ${_cvc_type} (BUILD_SHARED_LIBS=${BUILD_SHARED_LIBS})")
+if(NOT _cvc_type STREQUAL "STATIC_LIBRARY")
+  set(CVC_PRIVATE_LINK_PACKAGES "")
+endif()
+list(REMOVE_DUPLICATES CVC_PRIVATE_LINK_PACKAGES)
 
 configure_package_config_file(
   "${PROJECT_SOURCE_DIR}/CMake/cvcConfig.cmake.in"

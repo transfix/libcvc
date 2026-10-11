@@ -31,6 +31,13 @@ target_link_libraries(cvc-cli PRIVATE Boost::program_options)
 # CLI (it is CVC_BUILD_CLI=OFF there); the cvc-cli recipe installs this
 # component into a user's PATH deliberately.
 set_target_properties(cvc-cli PROPERTIES OUTPUT_NAME cvc)
+# MSVC writes an import library for an executable that exports symbols, named
+# after OUTPUT_NAME and placed in CMAKE_ARCHIVE_OUTPUT_DIRECTORY. Linked against a
+# STATIC libcvc the executable does export some, so it tried to write
+# build/lib/<config>/cvc.lib, which is the static library it was linking:
+# "LNK1149: output filename matches input filename" (release.yml's Windows
+# -static lane). Give the executable's import library its own name.
+set_target_properties(cvc-cli PROPERTIES ARCHIVE_OUTPUT_NAME cvc-cli)
 install(TARGETS cvc-cli RUNTIME DESTINATION bin COMPONENT cvc-cli)
 
 # ---------------------------------------------------------------------------
