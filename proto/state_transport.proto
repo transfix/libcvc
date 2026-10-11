@@ -153,7 +153,14 @@ message StreamFrame {
   int64 seq = 2;          // monotonic per stream (producer-assigned)
   double pts_seconds = 3; // producer presentation timestamp
   uint32 flags = 4;       // bit0 = keyframe, bit1 = open handshake (names the stream)
-  bytes payload = 5;      // one whole frame's bytes (PR8 adds chunking for oversized frames)
+  bytes payload = 5;      // this message's bytes: a whole frame, or one chunk of one (PR8)
+  // PR8 chunking: a frame larger than the stream-tuned chunk size is split into
+  // chunk_count StreamFrames, chunk_index 0..chunk_count-1, all sharing the same
+  // (stream_id, seq, pts_seconds, flags). The receiver reassembles by
+  // (stream_id, seq) in index order; a gap or a new seq drops the incomplete
+  // frame. chunk_count 0 or 1 is an unchunked whole frame.
+  uint32 chunk_index = 6;
+  uint32 chunk_count = 7;
 }
 
 // One bidirectional stream-channel per consumer↔producer pair. Both sides may
