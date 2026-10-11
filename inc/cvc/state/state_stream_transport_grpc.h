@@ -133,6 +133,14 @@ public:
   void set_chunk_bytes(std::size_t bytes) noexcept;
   std::size_t chunk_bytes() const noexcept;
 
+  // Whether the server echoes each inbound frame back on its channel. Default
+  // ON (lets a client observe a round-trip — the PR7/8 test shape). Turn OFF
+  // for one-way push (a producer that only send()s and never recv()s): an
+  // unread echo would fill gRPC flow control and deadlock the push. Captured at
+  // start(); set before starting the server.
+  void set_server_echo(bool on) noexcept;
+  bool server_echo() const noexcept { return _server_echo.load(); }
+
 private:
   struct impl;
   std::unique_ptr<impl> _impl;
@@ -141,6 +149,7 @@ private:
   std::atomic<std::uint64_t> _frames_received{0};
   std::atomic<std::uint64_t> _frames_echoed{0};
   std::atomic<std::size_t> _chunk_bytes{1u << 20}; // 1 MiB
+  std::atomic<bool> _server_echo{true};
 };
 
 } // namespace cvc

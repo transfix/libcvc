@@ -124,8 +124,9 @@ private:
 class StreamTransportServiceImpl final : public pb::StreamTransport::Service {
 public:
   StreamTransportServiceImpl(stream_transport_grpc::on_frame_func on_frame,
-                             std::atomic<std::uint64_t> *recv, std::atomic<std::uint64_t> *echoed)
-      : _on_frame(std::move(on_frame)), _recv(recv), _echoed(echoed) {}
+                             std::atomic<std::uint64_t> *recv, std::atomic<std::uint64_t> *echoed,
+                             bool echo)
+      : _on_frame(std::move(on_frame)), _recv(recv), _echoed(echoed), _echo(echo) {}
 
   grpc::Status
   StreamChannel(grpc::ServerContext *ctx,
@@ -133,10 +134,10 @@ public:
     frame_reassembler reasm;
     pb::StreamFrame in;
     while (!ctx->IsCancelled() && stream->Read(&in)) {
-      // Echo the raw chunk straight back, so a client observes the round-trip
-      // (and exercises its own reassembler). PR9 replaces the echo with real
-      // producer→consumer fan-out.
-      if (stream->Write(in))
+      // Optionally echo the raw chunk back so a client observes a round-trip
+      // (the PR7/8 test shape). OFF for one-way push (the bridge): an unread
+      // echo would fill gRPC flow control and deadlock the sender.
+      if (_echo && stream->Write(in))
         _echoed->fetch_add(1, std::memory_order_relaxed);
       // Reassemble chunks into whole frames for the sink.
       stream_transport_grpc::frame whole;
@@ -153,6 +154,7 @@ private:
   stream_transport_grpc::on_frame_func _on_frame;
   std::atomic<std::uint64_t> *_recv;
   std::atomic<std::uint64_t> *_echoed;
+  bool _echo;
 };
 
 // Client side of an open StreamChannel.
@@ -231,14 +233,18 @@ std::size_t stream_transport_grpc::chunk_bytes() const noexcept {
   return _chunk_bytes.load(std::memory_order_relaxed);
 }
 
+void stream_transport_grpc::set_server_echo(bool on) noexcept {
+  _server_echo.store(on, std::memory_order_relaxed);
+}
+
 void stream_transport_grpc::set_on_frame(on_frame_func cb) { _impl->on_frame = std::move(cb); }
 
 void stream_transport_grpc::start(const std::string &listen_addr) {
   if (_running.load())
     throw std::runtime_error("stream_transport_grpc::start: already running");
 
-  _impl->service.reset(
-      new StreamTransportServiceImpl(_impl->on_frame, &_frames_received, &_frames_echoed));
+  _impl->service.reset(new StreamTransportServiceImpl(_impl->on_frame, &_frames_received,
+                                                      &_frames_echoed, _server_echo.load()));
 
   grpc::ServerBuilder builder;
   int bound_port = 0;
