@@ -70,13 +70,18 @@ jobs:
               || { echo "::error::failed to install wasm dep $p"; exit 1; }
           done
 
-      - name: Build pycvc-gl-cp312 (wasm) — compiles the closure + links the host
+      - name: Build + pack pycvc-gl-cp312 (wasm) — compiles the closure + links the host
         # Drives the recipe's build-wasm.sh against the pre-installed deps. It
         # compiles cvc+cvcGL+pycvc+pycvc_gl, then link-host.sh embeds vtk-python
         # cvc.6 and runs the node smoke (prints PYCVC_VTK_BRIDGE_OK / PYCVC_WASM_OK).
+        # `cvcpkg pack` (not build + `pack --from-prefix "$WASM_DEPS"`): it builds into an
+        # isolated install dir, archives ONLY that, then merges it into $WASM_DEPS as
+        # `build` did. $WASM_DEPS holds the whole dep closure, so packing it shipped every
+        # dep with its manifest, and `cvcpkg publish` -- which reads the first
+        # manifest.yaml in the archive -- took this bundle for cvc/assimp==6.0.5+cvc.6.
         run: |
-          cvcpkg build pycvc-gl-cp312 --platform wasm --host-platform linux \
-            --recipes-dir cvcpkg/recipes --prefix "$WASM_DEPS"
+          cvcpkg pack cvcpkg/recipes/pycvc-gl-cp312 --local --platform wasm --host-platform linux \
+            --prefix "$WASM_DEPS" --config release --link static --output-dir dist
 
       - name: Verify the bridge host + archives
         run: |
@@ -85,6 +90,23 @@ jobs:
             -o -name '_pycvc_gl.a' \) -print | sed "s|$WASM_DEPS/||"
           find "$WASM_DEPS" -name '_pycvc_gl.a' | grep -q . \
             || { echo "::error::_pycvc_gl.a not produced"; exit 1; }
+          echo "=== bundle ==="
+          shopt -s nullglob
+          archives=(dist/pycvc-gl-cp312-*-wasm-*.tar.gz)
+          [ ${#archives[@]} -eq 1 ] \
+            || { echo "::error::expected one pycvc-gl-cp312 wasm archive, found ${#archives[@]}"; exit 1; }
+          ls -la "${archives[0]}"
+          tar -tzf "${archives[0]}" | sed 's|^\./||' > "$RUNNER_TEMP/members.txt"
+          # Exactly one cvcpkg manifest, and it is this bundle's: `cvcpkg publish` names an
+          # archive after the first manifest.yaml in it, so a dep's would mislabel the bundle.
+          mans=$(grep -E '^share/libcvc-deps/[^/]+/manifest\.yaml$' "$RUNNER_TEMP/members.txt" || true)
+          echo "manifests: ${mans:-<none>}"
+          [ "$mans" = "share/libcvc-deps/pycvc-gl-cp312/manifest.yaml" ] \
+            || { echo "::error::bundle must carry only pycvc-gl-cp312's manifest"; exit 1; }
+          grep -q '/_pycvc_gl\.a$' "$RUNNER_TEMP/members.txt" \
+            || { echo "::error::bundle has no _pycvc_gl.a"; exit 1; }
+          grep -q '^share/pycvc-gl-wasm/pycvc_host\.wasm$' "$RUNNER_TEMP/members.txt" \
+            || echo "::warning::bundle has no pycvc_host.wasm (host link is non-fatal in build-wasm.sh)"
 
       - name: Upload pycvc_host.wasm
         if: always()
@@ -102,14 +124,13 @@ jobs:
         # with no server, org or token and swallow the failure with `|| echo ::warning`, so
         # it never published anything -- the catalog has no pycvc-gl-cp312 wasm build at
         # all; cvcpkg 2.4.0 even says why ("provide --server ... or --dest"). Now it fails
-        # loudly, and skips only an exact name+version already on the catalog.
+        # loudly, and skips only an exact name+version already on the catalog. The bundle
+        # was packed (and its manifest checked) by the build + verify steps above.
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
         run: |
           set -euo pipefail
           [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
-          cvcpkg pack cvcpkg/recipes/pycvc-gl-cp312 --from-prefix "$WASM_DEPS" \
-            --platform wasm --config release --link static --output-dir dist
           for a in dist/pycvc-gl-cp312-*-wasm-*.tar.gz; do
             base=$(basename "$a" .tar.gz)
             name=$(echo "$base" | sed -E 's/-[0-9].*$//')
