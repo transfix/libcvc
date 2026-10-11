@@ -8,6 +8,11 @@ control/command path pumped on a single scheduler thread, which is the wrong sha
 camera or a 48 kHz microphone. Streams borrow `cvc::state` only for *control and metadata* (a
 descriptor node, lifecycle events), never for the frame payloads themselves.
 
+Producer and consumers may live in one process **or on different nodes**. Across a node boundary the
+frame bytes travel over a dedicated gRPC **data plane** ([§6](#6-cross-node-streaming--a-stream-on-one-node-consumed-on-another)),
+while `cvc::state` replication carries only the descriptor so the far node can discover the stream —
+the two planes run on separate ports so high-bandwidth frames never block control traffic.
+
 Design/roadmap rationale lives in [`roadmap/STATE_BINARY_STREAMING.md`](roadmap/STATE_BINARY_STREAMING.md);
 this guide is the developer's view: how it works, how it plugs into a host, and how peripherals feed
 it, with examples.
@@ -15,7 +20,10 @@ it, with examples.
 > **Status.** Phases 1–2 (core, sinks, DSL verbs, pycvc, gl-bind) and the Phase-3 producer
 > *foundation* (`frame_source`, `synthetic_source`, `stream::start_producer`) are implemented. The
 > Phase-3 **device** sources (SDL3 camera, the composable audio-source family) and the decoded-file
-> source are in progress; they are marked 🔜 below and the interface they implement is final.
+> source are in progress; they are marked 🔜 below and the interface they implement is final. The
+> Phase-10 **cross-node** data plane — `cvc::stream_transport_grpc` + `cvc::ariadne::stream::stream_bridge`
+> ([§6](#6-cross-node-streaming--a-stream-on-one-node-consumed-on-another)) — is implemented and built
+> under `CVC_ENABLE_GRPC`.
 
 ---
 
@@ -287,7 +295,204 @@ even GPL decoders don't taint the library), feeding video and/or audio streams.
 
 ---
 
-## 6. End-to-end examples
+## 6. Cross-node streaming — a stream on one node, consumed on another
+
+When producer and consumer are on **different nodes** (processes, containers, machines) the frame
+bytes leave the in-process `stream_channel` and cross the network over a dedicated gRPC **data
+plane**, while `cvc::state` replication carries only the lightweight *control* path — the
+`/streams/<id>` descriptor, so the far node can discover the stream and read its `format_desc`. The
+two planes run on **separate gRPC servers / ports** so a 1080p60 feed on the data plane can never
+head-of-line-block control traffic.
+
+```
+     node A (producer)                                    node B (consumer)
+  ┌────────────────────┐        cvc::state repl         ┌────────────────────┐
+  │ stream "cam0"       │ ── /streams/cam0 descriptor ──▶│ proxy "cam0"        │
+  │   stream_channel    │        (control plane)         │   stream_channel    │
+  │        │            │                                │        ▲            │
+  │   stream_bridge ────┼──────  StreamTransport  ───────┼──▶ stream_bridge    │
+  │   (subscribe+push)  │      gRPC data plane (frames)   │   (inject)          │
+  └────────────────────┘                                 └────────────────────┘
+```
+
+Two types do the work:
+
+| Type | Header | Role |
+|---|---|---|
+| `cvc::stream_transport_grpc` | `cvc/state/state_stream_transport_grpc.h` | The gRPC data plane: its own server/port, one bidi `StreamChannel` per peer, frames chunked on the wire and reassembled by `(stream_id, seq)`. |
+| `cvc::ariadne::stream::stream_bridge` | `cvc/ariadne/stream/stream_bridge.h` | Maps a stream's `frame`s to/from that transport — subscribes a local stream and pushes, or injects received frames into a local **proxy** stream via `publish_external()`. |
+
+> **Build.** Both compile only when **`CVC_ENABLE_GRPC`** is on, and the gRPC toolchain comes
+> hermetically from cvcpkg (`cvcpkg install grpc protobuf --prefix … --link shared`), never the
+> system package manager. The headers are plain (no gRPC types leak), so they may be included
+> unconditionally; the symbols link only in a gRPC-enabled build.
+
+A **proxy stream** is just an ordinary local `stream` that node B opens with the **same `id` (and
+`root_path`)** as the producer's — so `token()` matches on both ends — and whose frames the bridge
+fills from the network. Local consumers on B (a GL sink, pycvc, a bare `subscribe()`) drain the proxy
+exactly like any local stream; they never know the frames crossed a node boundary.
+
+### 6.1 Topology A — producer serves a port (the conventional model)
+
+One producer listens on a stable port; any number of consumers connect and pull. `serve_port()`
+publishes the stream on the producer's own `StreamTransport`; `pull_from()` opens a channel from the
+consumer and injects the pushed frames into its proxy.
+
+```cpp
+#include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_bridge.h>
+#include <cvc/state/state_stream_transport_grpc.h>
+namespace st = cvc::ariadne::stream;
+
+// ── Producer (node A): run a StreamTransport server and serve the stream on it ──
+cvc::stream_transport_grpc transportA;
+st::stream_bridge bridgeA(appA, transportA);      // construct the bridge BEFORE start()
+transportA.start("0.0.0.0:9100");                 // the stable, advertised data port
+
+st::stream_params pA;
+pA.id = "cam0";
+pA.format.kind = st::frame_kind::video_raw;
+pA.format.codec = "rgba8";
+pA.format.w = 1280; pA.format.h = 720; pA.format.stride = 1280 * 4;
+std::unique_ptr<st::stream> streamA = st::stream::open(appA, pA);
+bridgeA.serve_port(*streamA);                     // consumers naming "cam0" are now pushed its frames
+
+// ... drive streamA however you like — start_producer(synthetic_source/camera), or publish_external():
+//     streamA->channel().publish_external(bytes, n, pts_seconds, keepalive);
+
+// ── Consumer (node B): open a matching proxy and pull from A's port ──
+cvc::stream_transport_grpc transportB;            // client only — never started
+st::stream_bridge bridgeB(appB, transportB);
+
+st::stream_params pB;
+pB.id = "cam0";                                   // SAME id → token() matches A's
+pB.format = pA.format;                            // from the discovered descriptor (see 6.4)
+pB.subscriber_depth = 8;
+std::unique_ptr<st::stream> proxyB = st::stream::open(appB, pB);
+std::shared_ptr<st::subscription> sub = proxyB->channel().subscribe(st::deliver_mode::ring, 8);
+
+bridgeB.pull_from("a.internal:9100", *proxyB);    // A pushes cam0's frames into proxyB
+
+// Local consumers on B drain the proxy like any local stream:
+st::frame_ptr f;
+while (sub->try_pop(f) && f) {
+  // f->data, f->size, f->seq, f->pts_seconds, f->format … (bytes identical to what A produced)
+}
+
+// Teardown: stop the bridges (join workers, close the server-push subs) BEFORE the transports.
+bridgeB.stop();
+bridgeA.stop();
+transportB.stop();
+transportA.stop();
+```
+
+### 6.2 Topology B — consumer serves a port (push)
+
+The inverse wiring: the **consumer** runs the server and the **producer** pushes to it.
+`receive_into()` routes inbound frames tagged with a stream id into a proxy; `serve()` on the
+producer connects to the consumer's endpoint and pushes a subscription of the local stream.
+
+```cpp
+// ── Consumer (node B): run the server, route "cam0" into a proxy ──
+cvc::stream_transport_grpc transportB;
+st::stream_bridge bridgeB(appB, transportB);      // before start()
+transportB.start("0.0.0.0:9200");
+
+std::unique_ptr<st::stream> proxyB = st::stream::open(appB, pB);  // same id/format as the producer
+auto sub = proxyB->channel().subscribe(st::deliver_mode::ring, 8);
+bridgeB.receive_into(proxyB->token(), *proxyB);
+
+// ── Producer (node A): push the local stream to B's endpoint ──
+cvc::stream_transport_grpc transportA;            // client only
+st::stream_bridge bridgeA(appA, transportA);
+std::unique_ptr<st::stream> streamA = st::stream::open(appA, pA);
+bridgeA.serve(*streamA, "b.internal:9200");       // starts the A→B pusher thread
+// ... fill streamA; frames arrive in proxyB, in order, byte-identical ...
+```
+
+### 6.3 Auto-negotiation — discover and connect with no hand-wired endpoints
+
+`request_remote()` / `auto_serve()` layer an **offer/answer** handshake over the `cvc::state` message
+bus (Topology-A style: the consumer offers *its* data endpoint, the producer `serve()`s back to it),
+so a consumer that merely **discovers** the descriptor is auto-served without anyone passing
+endpoints around. This needs the two apps' state shards connected by a replication transport — across
+machines the gRPC **control-plane** `state_transport_grpc`; in the unit tests, the in-process
+transport shown here.
+
+```cpp
+// Producer A offers the stream and waits for consumers:
+std::unique_ptr<st::stream> streamA = st::stream::open(appA, pA);
+bridgeA.auto_serve(*streamA);                     // subscribes the shard's message bus at streamA->token()
+
+// Consumer B requests it — request_remote() opens a proxy AND offers B's data endpoint on the bus.
+// bridgeB's transport must already be a started server (its listen_address() is what gets offered).
+st::stream_params pB;
+pB.id = "cam0";
+pB.format = /* discovered */ pA.format;
+pB.subscriber_depth = 8;
+std::unique_ptr<st::stream> proxyB = bridgeB.request_remote(pB);
+auto sub = proxyB->channel().subscribe(st::deliver_mode::ring, 8);
+
+// Once the offer replicates to A, A auto-serve()s to B and frames flow into proxyB —
+// no endpoints wired by hand. (In-process tests drive replication with state_tp.pump_all().)
+```
+
+### 6.4 Discovering the descriptor
+
+For node B to read the producer's `format_desc` off the replicated `/streams/<id>` descriptor, B's
+state shard must have the stream codecs registered (a node's `data()` replicates only for a type with
+a registered name **and** codec). Register once per participating node, alongside the shard's built-in
+codecs:
+
+```cpp
+#include <cvc/ariadne/stream/stream_codec.h>
+st::register_stream_data_types(appB);                       // stable type name for format_desc
+st::register_stream_codecs(shardB.codecs());                // (de)serialization into the shard
+```
+
+The producing side does this inside `stream::open()`, so A always emits the stable, ABI-independent
+type name. With the codec in place, B reads the descriptor node's `data<st::format_desc>()` and opens
+its proxy with that format.
+
+### 6.5 Encryption (TLS) and large frames (chunking)
+
+The data plane takes the same TLS config shape as the control plane; set it on **both** ends before
+`start()` / the first channel open:
+
+```cpp
+cvc::stream_transport_grpc::tls_config tls;
+tls.server_cert_pem = cert_pem;    // server identity (PEM)
+tls.server_key_pem  = key_pem;
+tls.root_ca_pem     = ca_pem;      // the client validates the server against this
+tls.require_client_auth = true;    // optional: mutual TLS
+transport.set_tls_config(tls);     // server end; the client end sets at least root_ca_pem
+```
+
+A frame larger than the per-chunk cap is split on the wire and reassembled by `(stream_id, seq)` on
+the peer, so no single gRPC message is unbounded. The default cap is 1 MiB; tune it per transport
+before opening channels:
+
+```cpp
+transport.set_chunk_bytes(256 * 1024);   // 256 KiB chunks; 0 disables splitting (one message per frame)
+```
+
+### 6.6 Diagnostics & the two hard rules
+
+`bridge.frames_pushed()` counts frames sent to a peer (either push path); `bridge.frames_injected()`
+counts frames delivered into a local proxy. Two lifetime rules keep the server threads safe:
+
+* **Construct a server-side bridge _before_ `transport.start()`** — the ctor installs the transport's
+  frame router and server-push open-handler, which the transport captures at `start()`.
+* **Call `bridge.stop()` _before_ `transport.stop()`** — `stop()` closes the per-consumer
+  subscriptions the transport's server threads are draining, so no server thread is left parked in a
+  blocking pop.
+
+The bridge never stalls a producer: like any local consumer its subscriptions are drop-oldest, so a
+slow or disconnected peer sheds frames at the source rather than back-pressuring the stream.
+
+---
+
+## 7. End-to-end examples
 
 ### A document that shows a camera on a quad (DSL)
 
@@ -325,7 +530,7 @@ if f.valid():
 
 ---
 
-## 7. Where things live
+## 8. Where things live
 
 | Area | Header(s) | Target |
 |---|---|---|
@@ -336,3 +541,6 @@ if f.valid():
 | GL sinks (`StreamTextureBinding`, `"stream"` node, `gl-bind-stream`) | `cvc/gl/ariadne/{stream_texture_binding,stream_node,stream_verbs}.h` | `cvcGL` |
 | 🔜 Device capture (camera, audio devices) | `cvc/gl/capture/…` | `cvcGL` (SDL-gated) |
 | pycvc bindings | `bindings/pycvc/pycvc_stream.i` | `pycvc` |
+| Cross-node data plane (§6) | `cvc/state/state_stream_transport_grpc.h` | `cvc` (`CVC_ENABLE_GRPC`) |
+| Cross-node bridge (`serve`/`receive_into`, `serve_port`/`pull_from`, auto-negotiation) | `cvc/ariadne/stream/stream_bridge.h` | `cvc` (`CVC_ENABLE_GRPC`) |
+| Descriptor replication codec | `cvc/ariadne/stream/stream_codec.h` | `cvc` |
