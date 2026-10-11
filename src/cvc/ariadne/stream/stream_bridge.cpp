@@ -30,16 +30,23 @@ namespace cvc {
 namespace ariadne {
 namespace stream {
 
-// One active producer→consumer push: the client channel, the subscription it
-// drains, and the pusher thread.
+// One active bridge-owned transfer: the client channel plus the worker thread
+// that drives it. For a producer push (serve()), `sub` is the local
+// subscription the worker drains and `reader` is false; the worker is unblocked
+// at teardown by closing `sub`. For a consumer pull (pull_from()), `sub` is null
+// and `reader` is true; the worker blocks in the channel's recv() and is
+// unblocked by closing the channel. (serve_port() uses no serving — its pushes
+// run on transport server threads; see served_state.)
 struct stream_bridge::serving {
   std::unique_ptr<cvc::stream_transport_grpc::channel> channel;
   std::shared_ptr<subscription> sub;
-  std::thread pusher;
+  std::thread worker;
+  bool reader = false;
 };
 
 stream_bridge::stream_bridge(app &ctx, stream_transport_grpc &transport)
-    : _ctx(ctx), _transport(transport), _router(std::make_shared<router_state>()) {
+    : _ctx(ctx), _transport(transport), _router(std::make_shared<router_state>()),
+      _served(std::make_shared<served_state>()) {
   // A bridge does one-way push (producer send → consumer sink); it never reads
   // echoes. Disable the server echo so an unread echo cannot fill flow control
   // and deadlock a producer's push. (Both must be set before the transport
@@ -67,6 +74,56 @@ stream_bridge::stream_bridge(app &ctx, stream_transport_grpc &transport)
     proxy->channel().publish_external(buf->data(), buf->size(), wf.pts_seconds, buf);
     r->injected.fetch_add(1, std::memory_order_relaxed);
   });
+
+  // Install the server-push open-handler (the serve_port side). It is invoked on
+  // a transport server thread when a consumer opens a channel naming a stream;
+  // it returns a frame_producer that drains that stream's subscription. Captures
+  // only the shared served_state (never `this`), so a late connect after the
+  // bridge is destroyed finds stopped==true and declines. Must be set before the
+  // transport start()s — same bridge-before-start contract as the sink above.
+  std::shared_ptr<served_state> sv = _served;
+  _transport.set_open_handler(
+      [sv](const std::string &sid) -> cvc::stream_transport_grpc::frame_producer {
+        stream *local = nullptr;
+        {
+          std::lock_guard<std::mutex> lk(sv->mu);
+          if (sv->stopped)
+            return {};
+          auto it = sv->served.find(sid);
+          if (it != sv->served.end())
+            local = it->second;
+        }
+        if (!local)
+          return {}; // not served here → decline (transport falls back to sink)
+        // One ring subscription per consumer; depth 3 matches the default pool
+        // and drops oldest under backpressure (drop-at-source) rather than
+        // stalling the producer.
+        std::shared_ptr<subscription> sub = local->channel().subscribe(deliver_mode::ring, 3);
+        if (!sub)
+          return {};
+        {
+          std::lock_guard<std::mutex> lk(sv->mu);
+          if (sv->stopped) {
+            sub->close(); // raced with stop(): don't start a push that won't be joined
+            return {};
+          }
+          sv->subs.push_back(sub);
+        }
+        return [sv, sub, sid](cvc::stream_transport_grpc::frame &out) -> bool {
+          frame_ptr f;
+          while (sub->pop(f)) { // blocks; false when the stream (or sub) closes
+            if (!f)
+              continue;
+            out.stream_id = sid;
+            out.seq = f->seq;
+            out.pts_seconds = f->pts_seconds;
+            out.payload.assign(f->data, f->data + f->size);
+            sv->pushed.fetch_add(1, std::memory_order_relaxed);
+            return true;
+          }
+          return false; // exhausted → server ends this channel
+        };
+      });
 }
 
 stream_bridge::~stream_bridge() { stop(); }
@@ -136,7 +193,7 @@ bool stream_bridge::serve(stream &local, const std::string &consumer_endpoint,
   subscription *raw_sub = sub.get();
   s->channel = std::move(ch);
   s->sub = sub;
-  s->pusher = std::thread([this, raw_ch, raw_sub, stream_id]() {
+  s->worker = std::thread([this, raw_ch, raw_sub, stream_id]() {
     frame_ptr f;
     while (raw_sub->pop(f)) {
       if (!f)
@@ -149,6 +206,55 @@ bool stream_bridge::serve(stream &local, const std::string &consumer_endpoint,
       if (!raw_ch->send(wf))
         break; // consumer disconnected
       _frames_pushed.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+
+  std::lock_guard<std::mutex> lk(_mu);
+  _servings.push_back(std::move(s));
+  return true;
+}
+
+void stream_bridge::serve_port(stream &local) {
+  // Register the stream; the open-handler installed in the ctor does the actual
+  // push when a consumer connects naming this id. No bridge thread is spawned.
+  std::lock_guard<std::mutex> lk(_served->mu);
+  if (_served->stopped)
+    return;
+  _served->served[local.token()] = &local;
+}
+
+bool stream_bridge::pull_from(const std::string &producer_endpoint, stream &proxy,
+                              std::chrono::milliseconds timeout) {
+  std::unique_ptr<cvc::stream_transport_grpc::channel> ch =
+      _transport.open_channel(producer_endpoint, timeout);
+  if (!ch)
+    return false;
+
+  // Open handshake: name the stream we want pushed. The producer's open-handler
+  // (serve_port) matches this id and pushes that stream's frames back on this
+  // same channel. The open frame carries no payload of its own.
+  cvc::stream_transport_grpc::frame open;
+  open.stream_id = proxy.token();
+  open.flags = cvc::stream_transport_grpc::flag_open;
+  if (!ch->send(open)) {
+    ch->close();
+    return false;
+  }
+
+  auto s = std::unique_ptr<serving>(new serving());
+  s->reader = true;
+  cvc::stream_transport_grpc::channel *raw_ch = ch.get();
+  s->channel = std::move(ch);
+  stream *proxy_ptr = &proxy;
+  // Puller thread: drain pushed frames and inject them into the proxy, exactly as
+  // the consumer router does for the client-push path. recv() returns false when
+  // the producer ends the stream or stop() closes the channel.
+  s->worker = std::thread([this, raw_ch, proxy_ptr]() {
+    cvc::stream_transport_grpc::frame wf;
+    while (raw_ch->recv(wf)) {
+      auto buf = std::make_shared<std::vector<std::uint8_t>>(wf.payload.begin(), wf.payload.end());
+      proxy_ptr->channel().publish_external(buf->data(), buf->size(), wf.pts_seconds, buf);
+      _router->injected.fetch_add(1, std::memory_order_relaxed);
     }
   });
 
@@ -176,15 +282,37 @@ void stream_bridge::stop() {
     std::lock_guard<std::mutex> lk(_router->mu);
     _router->routes.clear();
   }
-  // Close each subscription to unblock its pusher's pop(), join, then close the
-  // channel (the joined thread no longer touches it).
+  // Stop server-push: decline new connects and close every per-consumer
+  // subscription so the transport server threads draining them unblock and end
+  // their channels. Those threads belong to the transport and are joined by its
+  // own stop() (call bridge.stop() before transport.stop()).
+  {
+    std::lock_guard<std::mutex> lk(_served->mu);
+    _served->stopped = true;
+    _served->served.clear();
+    for (auto &sub : _served->subs)
+      if (sub)
+        sub->close();
+    _served->subs.clear();
+  }
+  // Join bridge-owned workers. A pusher (serve()) is unblocked by closing its
+  // subscription, then its channel is closed after the join (the joined thread
+  // no longer touches it). A puller (pull_from()) blocks in recv(), so its
+  // channel must be closed BEFORE the join to unblock it.
   for (auto &s : servings) {
-    if (s->sub)
-      s->sub->close();
-    if (s->pusher.joinable())
-      s->pusher.join();
-    if (s->channel)
-      s->channel->close();
+    if (s->reader) {
+      if (s->channel)
+        s->channel->close();
+      if (s->worker.joinable())
+        s->worker.join();
+    } else {
+      if (s->sub)
+        s->sub->close();
+      if (s->worker.joinable())
+        s->worker.join();
+      if (s->channel)
+        s->channel->close();
+    }
   }
 }
 
