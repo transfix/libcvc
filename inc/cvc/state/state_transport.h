@@ -155,6 +155,11 @@ public:
     std::string type_name;
     std::string origin_node_id;
     std::uint64_t sequence = 0;
+    // data() payload (Phase 10, PR4): the node's data() encoded exactly as the live set_data path
+    // (codec-encoded, offloaded to a blob_ref when large). Empty data_type_name = the node has no
+    // replicable data(). Lets a late joiner reconstruct data(), not just value() + metadata.
+    std::string data_type_name;
+    state_payload data_payload;
   };
 
   // Callback invoked with batches of snapshot entries. `final` is

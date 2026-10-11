@@ -349,6 +349,91 @@ TEST(DistributedStateSession, TwoNodeInprocMetadataReplication) {
   s2.detach();
 }
 
+// Snapshot carries data() + metadata (Phase 10, PR4): a late joiner reconstructs each node's
+// value, metadata (comment/hidden/readOnly) AND data() from the snapshot, not just value(). Large
+// data() offloads to a blob in the snapshot exactly like the live path and hydrates on the joiner.
+// Exercises shard::snapshot (producer) + shard::ingest_snapshot_entry (the dedup-safe join apply)
+// directly — the two ends of the join path, without a transport round-trip.
+TEST(DistributedStateSession, TwoNodeSnapshotDataMetadataReassembly) {
+  app a1, a2;
+  a1.registerDataType<TestLut>("test_lut");
+  a2.registerDataType<TestLut>("test_lut");
+
+  memory_state_blob_store store; // shared content-addressed namespace (producer + joiner hydrator)
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+  s1.set_blob_store(&store);
+  s2.set_blob_store(&store);
+  s1.set_max_inline_payload_bytes(256);
+  s2.set_max_inline_payload_bytes(256);
+  s1.codecs().register_codec("test_lut", encode_test_lut, decode_test_lut);
+  s2.codecs().register_codec("test_lut", encode_test_lut, decode_test_lut);
+
+  // The joiner hydrates blob-ref data() payloads out of the shared store.
+  state_data_hydrator hydrator2(store, s2.codecs(), &state_compression_registry::shared());
+  s2.set_data_hydrator(&hydrator2);
+
+  s1.attach();
+  s2.attach();
+
+  // Build node 1's tree: a camera node (value + metadata + a LARGE data() that offloads to a blob)
+  // and a child meta node (a SMALL data() that stays inline).
+  TestLut big;
+  big.w = 1920;
+  big.h = 1080;
+  big.lut.resize(4096);
+  for (std::size_t i = 0; i < big.lut.size(); ++i)
+    big.lut[i] = static_cast<unsigned char>(i % 251);
+  state &cam = state::instance(a1)("streams.cam0");
+  cam.value(std::string("v1"));
+  cam.value(std::string("live"));
+  cam.comment(std::string("primary camera"));
+  cam.hidden(true);
+  cam.data(boost::any(big));
+
+  // NB: not named `small` — the Windows SDK defines `#define small char`, which turns a
+  // `TestLut small;` declaration into `TestLut char;` under MSVC (see windows-macro collisions).
+  TestLut tiny;
+  tiny.w = 2;
+  tiny.h = 2;
+  tiny.lut = {1, 2, 3, 4};
+  state &meta = state::instance(a1)("streams.cam0.meta");
+  meta.value(std::string("m1"));
+  meta.value(std::string("m2"));
+  meta.data(boost::any(tiny));
+
+  // Snapshot node 1's tree and reassemble each entry onto node 2 (the join path, sans transport).
+  const std::vector<state_cluster_shard::snapshot_entry> snap = s1.snapshot(std::string());
+  ASSERT_FALSE(snap.empty());
+  for (const auto &e : snap)
+    s2.ingest_snapshot_entry(e);
+
+  // The large payload must have been offloaded to the blob store during snapshot.
+  EXPECT_GT(store.size(), 0u) << "large data() was not offloaded to a blob in the snapshot";
+
+  // Node 2 mirrors value + metadata.
+  EXPECT_EQ(state::instance(a2)("streams.cam0").value(), "live");
+  EXPECT_EQ(state::instance(a2)("streams.cam0").comment(), "primary camera");
+  EXPECT_TRUE(state::instance(a2)("streams.cam0").hidden());
+
+  // Node 2 mirrors the large (blob-hydrated) data(), byte-identical.
+  const boost::any got_big = state::instance(a2)("streams.cam0").data();
+  ASSERT_FALSE(got_big.empty()) << "blob data() did not reconstruct on the joiner";
+  const TestLut rb = boost::any_cast<TestLut>(got_big);
+  EXPECT_EQ(rb.w, 1920);
+  EXPECT_EQ(rb.h, 1080);
+  EXPECT_EQ(rb.lut, big.lut);
+
+  // Node 2 mirrors the small (inline) data().
+  const boost::any got_small = state::instance(a2)("streams.cam0.meta").data();
+  ASSERT_FALSE(got_small.empty()) << "inline data() did not reconstruct on the joiner";
+  const TestLut rs = boost::any_cast<TestLut>(got_small);
+  EXPECT_EQ(rs.lut, tiny.lut);
+
+  s1.detach();
+  s2.detach();
+}
+
 // ---- pump thread ----
 
 TEST(DistributedStateSession, PumpThreadRuns) {
