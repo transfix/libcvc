@@ -1,23 +1,30 @@
 # Ariadne Conference — flagship multi-party video conferencing app
 
-**North star.** A multi-party video conferencing application, written as an **Ariadne `.ari` document**,
-hostable by the **`ariadne_hello`** shell on the desktop **and** in the browser (wasm), talking to a
-**native (optionally WASI) server** that acts as the room authority and media relay. Camera + mic go
-out, every other participant's video + audio comes in, and the whole call — tiles, roster, mute /
-camera / leave controls — is expressed in the DSL, not in C++.
+**North star.** A multi-party video conferencing application, written as an **Ariadne `.ari` document** —
+and, through building it, an **end-to-end `.ari` SDK** that end users can use to build their *own* apps,
+to run on our hosted surface **or** self-host. The client is hostable by the **`ariadne_hello`** shell on
+the desktop **and in the browser (wasm)**; the **server is itself as `.ari`-scriptable as possible** (a
+thin native media core driven by a server-side `.ari` room-controller). Camera + mic go out, every other
+participant's video + audio comes in, and the whole call — tiles, roster, mute / camera / leave — is
+expressed in the DSL, not in C++.
 
-Two connection topologies are **first-class** and chosen at runtime per room:
+**MVP.** A user opens **cyberpcangel.com**, the page loads the wasm client, and they join a **default
+room** and video-conference with whoever else is there, backend (native server/SFU) running. **Target 8
+participants** to start; architecture aimed at **~200** (SFU with simulcast / active-speaker selection).
 
-* **Central server / SFU** — clients connect *out* to a relay that fans each publisher's frames to the
-  other participants. The default for browser clients and for calls of more than a few people.
-* **Peer-to-peer mesh** — native clients connect directly to each other. For small native-only calls
-  with no server in the path.
+Two connection topologies are **first-class**, chosen per room:
 
-> **Status: SPEC / not started.** This document scopes the work. The realtime substrate it builds on
-> (capture, audio, local streaming, the gRPC data plane, the bridge, and most of the UI DSL) is
-> already merged — see §1. Nothing in §4–§10 is implemented yet. Sections §5 (server state tree +
-> access control) and §6 (transport) are being cross-checked against the live grant/cluster model and
-> the wasm networking posture; specifics there may tighten.
+* **Central server / SFU** — clients connect *out* to a relay that forwards each publisher to the others.
+  Required for browser clients and for anything past a handful of people — **the MVP path**.
+* **Peer-to-peer mesh** — clients connect directly (WebRTC peer connections / native `serve`+`pull`). For
+  small calls with no server in the path. Get it working first; **authorization hardens later** (§5, §11).
+
+> **Status: SPEC / iterating.** The realtime substrate (capture, audio, local streaming, the gRPC data
+> plane, the bridge, most of the UI DSL) is merged (§1); nothing in §4 onward is built. §5 (access) and
+> §6 (transport) are grounded against the live code. Decisions baked in this iteration: **WebRTC** is the
+> production browser media plane (WebSocket is bring-up/debug + signaling); **raw and H.264/Opus** codecs;
+> **WASI server** is a committed goal (fill cvcpkg gaps); mesh works first, auth hardens later; identity
+> (OIDC/JWT) is a later version.
 
 ---
 
@@ -44,38 +51,42 @@ UI DSL work). The realtime hard part is **done**; the gaps are glue.
    `CVC_ENABLE_GRPC` OFF).
 3. **No room / roster / signaling layer**, no SFU relay class, and **no client-safe authz** — only
    pairwise offer/answer over trust-all-peers replication with self-asserted writer identity (§5c).
-4. **No browser data plane** (native gRPC can't run in a browser), and two UI holes: no `input_text`
-   widget (chat) and the audio sink isn't auto-pumped.
+4. **No browser media plane** — native gRPC can't run in a browser; the production path is **WebRTC**
+   (none in-tree today), with a WebSocket fallback for bring-up/signaling. Plus two UI holes: no
+   `input_text` widget (chat) and the audio sink isn't auto-pumped.
 
 ---
 
 ## 2. Architecture
 
 ```
-            ┌──────────────────────────── SERVER (native, maybe WASI) ───────────────────────────┐
-            │  room authority: owns conf/rooms/<room> state tree + roster + admission             │
-            │  SFU relay: ingests each publisher's stream, fans out to subscribers                │
-            │  transport: native gRPC StreamTransport  +  browser-leg terminator (WS/WebTransport) │
-            └───────▲───────────────────────▲──────────────────────────────▲─────────────────────┘
-       control+data │ gRPC          control+data │ gRPC           browser leg │ (WS/WebTransport)
-          ┌─────────┴─────────┐     ┌───────────┴────────┐          ┌─────────┴──────────┐
-          │ NATIVE client     │     │ NATIVE client      │          │ BROWSER client     │
-          │ ariadne_hello     │ ... │ ariadne_hello      │          │ ariadne_hello.wasm │
-          │ .ari conference   │     │ .ari conference    │          │ .ari conference    │
-          └───────────────────┘     └────────────────────┘          └────────────────────┘
-                     │  P2P mesh mode (native only): clients also serve/pull each other directly
-                     └───────────────────────────────────────────────────────────────────────
+        ┌─────────── SERVER (native now; WASI target) — as .ari-scriptable as possible ───────────┐
+        │  room authority: owns conf/rooms/<room> tree + roster + admission   (server-side .ari)    │
+        │  SFU: ingests each publisher ONCE, forwards per-subscriber; simulcast/active-speaker @ scale│
+        │  media legs:  WebRTC (browsers + native)   ·   gRPC StreamTransport (native)              │
+        │  signaling/control:  cvc::state over a WebSocket transport_kind (+ native gRPC/ipc)       │
+        └──────▲──────────────────────────▲───────────────────────────────▲────────────────────────┘
+      WebRTC+WS │                  gRPC+ctl│                        WebRTC+WS│      ← MVP clients served
+        ┌───────┴──────────┐     ┌─────────┴────────┐          ┌────────────┴──────┐   from cyberpcangel.com
+        │ BROWSER client   │ ... │ NATIVE client    │   ...    │ BROWSER client    │
+        │ariadne_hello.wasm│     │ ariadne_hello    │          │ariadne_hello.wasm │
+        │ .ari conference  │     │ .ari conference  │          │ .ari conference   │
+        └──────────────────┘     └──────────────────┘          └───────────────────┘
+                   P2P mesh (small calls): peers connect directly — WebRTC / native serve+pull
 ```
 
-* **Two planes, as today.** *Control* = `cvc::state` replication of the room tree + the message bus
-  (join/leave, offer/answer, roster, flags, chat). *Data* = frame bytes over `StreamTransport`.
-* **Roles.** A *client* publishes its camera/mic and subscribes to others. A *server* is the room
-  authority (owns the roster, admits participants) and, in SFU mode, the media relay. A room runs in
-  **SFU** or **mesh** mode; the server advertises the mode, and the same client verb layer drives both
-  (in mesh mode, "subscribe participant P" resolves to a direct `pull`/`serve` with P instead of with
-  the relay).
-* **Browser clients are SFU-only** — they cannot host a server, so they always connect out to the
-  relay over the browser transport leg (§6). Native clients can do either.
+* **Two planes.** *Control / signaling* = `cvc::state` (room tree + message bus: join/leave, **SDP/ICE**
+  offer/answer, roster, flags, chat) — low-bandwidth, fine over WebSocket to the browser. *Media* =
+  audio/video over **WebRTC** (browser: hardware H.264/Opus, congestion-controlled) or the gRPC
+  `StreamTransport` (native).
+* **SFU, not fan-out-at-source.** The server receives each publisher **once** and forwards to
+  subscribers. MVP = full fan-out for 8. Toward ~200 the SFU selects what each subscriber gets (simulcast
+  layer / active-speaker / paused off-screen tiles) — never 200 streams to everyone. The forwarding is
+  native; the *policy* (who sees whom) is server-side `.ari`.
+* **Server is an `.ari` app too.** A thin native core (WebRTC/RTP + gRPC legs + frame fabric) driven by a
+  server-side `.ari` room-controller using the DSL verbs (§4) — same language both ends. That symmetry
+  *is* the SDK story.
+* **Browser = SFU-only** (can't host a server); native can do SFU or mesh.
 
 ---
 
@@ -275,69 +286,84 @@ the per-connection `pid` binding (§5d). Richer identity (OIDC via the existing 
 
 ## 6. Data plane & transport
 
-### 6a. Native ↔ native / native ↔ server
-Use the merged gRPC `StreamTransport` directly: SFU = clients `serve`/`pull` to the relay; mesh =
-clients `serve_port`/`pull_from` each other. TLS and chunking already exist. **No new transport work.**
-(For same-host native multi-process, `cvc::state`'s `ipc`/UNIX-socket transport is also available, but
-that's not relevant to the browser.)
+### 6a. Media transports
+* **Native ↔ native / native ↔ server:** the merged gRPC `StreamTransport` (serve/receive,
+  serve_port/pull_from), TLS + chunking already done. **No new work.**
+* **Browser:** **WebRTC is the production media plane** (§6b). The browser captures via `getUserMedia`
+  (hardware **H.264/Opus**, echo-cancel / noise-suppress / AGC built in) and the SFU forwards its RTP. A
+  **WebSocket** path — raw frames over our existing chunked envelope — is kept as a bring-up/debug
+  loopback and is the natural **signaling** carrier.
 
-### 6b. What a wasm client already has — and the one thing it lacks
-**The good news (verified):** the `cvc::state` replication **engine** (shards, journal, subscription
-router, replica, authority map, message bus, snapshot) **and** the in-process **stream core** (frame
-pool, channel, registry, producer, codecs, sources) are **unconditionally compiled — not gRPC-gated**,
-so they are *already present in a wasm build*. A browser client does **not** need the stack ported; it
-needs a **browser-capable transport** plus a server to terminate it. Two legs:
+### 6b. WebSocket vs WebRTC — why WebRTC (answering the obvious question)
+WebSocket is tempting: it reuses our `StreamTransport` envelope verbatim (trivial server bridge), needs no
+ICE/SDP/SRTP, and raw frames are easy to inspect — genuinely useful for **bring-up and debugging**. But it
+runs over **TCP** (head-of-line blocking collapses video under loss), has **no congestion control**, and
+forces raw or wasm-encoded frames. **WebRTC** gives UDP/SRTP, congestion control, jitter buffering, **NAT
+traversal** (ICE/STUN/TURN), and **hardware H.264/Opus + audio processing** from the browser for free, and
+is the only realistic browser path to 8→200 via an SFU. **Decision: WebRTC for production media; WebSocket
+for bring-up/debug + signaling.**
 
-* **Control plane.** `cvc::state` replicates over an **abstract `state_transport`** with pluggable
-  `transport_kind ∈ {inproc, ipc, grpc}` — none browser-reachable (`inproc` = same process, `ipc` =
-  same-host UNIX sockets, `grpc` = HTTP/2 the browser sandbox can't open). So the browser control leg
-  is a **new `state_transport` implementation / `transport_kind`** (WebSocket) carrying the existing
-  `Frame`/`Mutation`/`Message`/`Snapshot` schema. The message bus rides the same transport, so this one
-  leg also carries join/leave/offer/answer/chat.
-* **Data plane.** The frame transport (`stream_transport_grpc`) is **concrete** (not abstracted like
-  the control transport) and the bridge is bound to it. So the browser data leg is, for v1, a
-  **server-side WS↔gRPC bridge**: the browser speaks WS to the server; the server re-injects frames
-  into the native `StreamTransport` + SFU. (Later option: abstract the stream transport the way the
-  control transport already is, and add a WS impl client-side.)
-* **`cvc::net` can't carry realtime.** It is **request/response-only** (one-shot buffered `send()`),
-  native *and* wasm (emscripten-fetch) — it cannot carry a bidirectional frame stream, and its wasm
-  HTTP DSL verbs aren't even wired yet. Realtime needs a real bidirectional carrier.
+### 6c. The wasm client already has the engine — it needs transport + a WebRTC leg
+Verified: the `cvc::state` **engine** and the **stream core** are **unconditionally compiled** (not
+gRPC-gated), so a wasm build already contains them. The browser gaps are purely transport:
 
-Browser carrier options (used by both legs over one connection):
+* **Signaling/control:** a new **WebSocket `state_transport` / `transport_kind`** carrying the existing
+  `Frame`/`Mutation`/`Message`/`Snapshot` schema (the control transport is already an abstract, pluggable
+  interface; `{inproc, ipc, grpc}` are all non-browser). The message bus rides it (join/leave, SDP/ICE,
+  roster, chat). WebSocket is fine here — control is low-bandwidth.
+* **Media:** a **WebRTC leg** in the client ↔ the SFU (§6d). `cvc::net` is request/response-only and
+  cannot carry realtime, so it is not the carrier.
 
-| Option | Pros | Cons |
-|---|---|---|
-| **WebSocket** (recommended v1) | universal, trivial client, easy server bridge, reuses our chunking | TCP head-of-line, no congestion control |
-| **WebTransport** (HTTP/3 / QUIC) | datagrams + streams, low latency | newer server stack; browser support maturing |
-| **WebRTC** | NAT traversal + congestion control, true media | heavy; ICE/STUN/TURN; large surface |
+### 6d. WebRTC stack — integrate, don't build
+SRTP/ICE/DTLS/RTP is far too much to write; integrate a C++ WebRTC library through **cvcpkg** (hermetic).
+**Recommended: [libdatachannel](https://github.com/paullouisageneau/libdatachannel)** — C++17, MPL-2.0,
+lightweight (media + datachannels, embeddable, *not* full libwebrtc) — with a custom SFU forwarder built
+on it and wired to the room tree. Alternatives: **libwebrtc** (complete but huge and hard to build
+hermetically), **mediasoup** (C++ core but a Node controller), **Pion** (Go — off our C++/cvcpkg path).
+Needs a **STUN/TURN** server (e.g. coturn) for NAT traversal. The **browser** side uses the native
+`RTCPeerConnection` API through an Emscripten/JS seam (no wasm RTC library needed). **This library/SFU
+choice is the top open decision — §11.**
 
-**Plan:** v1 = one **WebSocket carrier terminated at the server**, multiplexing the control leg (new
-`transport_kind`) and the data leg (WS↔gRPC bridge), reusing the existing chunking + `format_desc`.
-WebTransport/WebRTC are later upgrades behind the same room verbs — the `.ari` doesn't change.
+### 6e. Media codecs
+* **Raw (rgba8 / f32 PCM)** — debugging + the WS loopback; trivially inspectable; what the merged stream
+  core already carries.
+* **H.264 / Opus** — production. In the browser: free via WebRTC/`getUserMedia`. On native: encode/decode
+  via the **ffmpeg** path (existing `ffmpeg-lgpl` recipe / process-pipe plan) so the native leg and the
+  SFU interoperate with browser codecs. `format_desc.codec` already tags each stream, so raw and encoded
+  coexist per stream.
 
-### 6c. Server runtime
-Native is the committed target. **WASI** is exploratory (the WASI cross-toolchain is currently noted as
-broken; revisit). The server is a new target (§8) built from the low-level transport verbs + an SFU
-relay helper (§7) — it can be a C++ host or itself scripted in `.ari` (open question, §11).
+### 6f. Server runtime & WASI
+Native is the first target. **WASI is a committed goal** — run the server under WASI and **fill the cvcpkg
+WASI cross-toolchain gaps** (currently broken). Caveat:
+UDP/WebRTC under WASI is immature, so the WASI server likely lands after the native one and may first
+cover only the control + SFU-*policy* core with the media forwarding staying native. The server is a
+native media core + a server-side `.ari` controller (§8).
 
 ---
 
-## 7. SFU relay helper (new C++)
+## 7. The SFU (server media forwarder, new C++)
 
-No relay/SFU class exists; the forwarding mechanism does (a proxy filled by `receive_into`/`pull_from`
-re-exposes a normal `channel()` that can be `serve`d onward — proven in `stream_bridge_test`). The
-helper packages that pattern:
+Two ingress/egress legs over one internal frame fabric:
 
-* Hold one **ingest proxy per publisher** (sized for N subscribers via `subscriber_depth` /
-  `expected_subscribers`).
-* On each subscriber, `serve`/`serve_port` the matching proxy to it (one pusher per downstream).
-* Manage **globally-unique ids** (`<pid>/<kind>`) so the token = `(root_path,id)` scheme never collides
-  (the mesh gotcha from the topology analysis).
-* Drive add/remove from the roster (join publishes → relay ingests; subscribe → relay serves).
-* Drop-at-source throughout (inherited from the channel), so a slow subscriber never back-pressures a
-  publisher.
+* **gRPC leg (native):** reuse the merged bridge — a proxy per publisher (`receive_into`/`pull_from`)
+  re-exposes a normal `channel()` that is `serve`/`serve_port`'d to each subscriber (proven in
+  `stream_bridge_test`). No relay class exists yet; package the proven proxy→serve pattern as a helper
+  (size pools for N via `subscriber_depth`/`expected_subscribers`; unique `<pid>/<kind>` ids so the
+  `(root_path,id)` token never collides; drop-at-source so a slow subscriber never back-pressures).
+* **WebRTC leg (browser + native):** a forwarder built on the WebRTC stack (§6d) — terminate each peer's
+  RTP and forward to subscribers; the browser's simulcast layers let the SFU choose a resolution per
+  subscriber.
+* **Internal fabric:** both legs normalize to the same `frame` / `format_desc`, so a native publisher can
+  be seen by a browser subscriber and vice-versa.
 
-Exposed to the DSL via the low-level verbs so the relay node can also be scripted.
+**Scaling 8 → ~200.** MVP = full fan-out for 8 (every publisher to every subscriber). Past a handful you
+do **not** forward all N to everyone — the SFU selects per subscriber: **active-speaker** switching,
+**simulcast/SVC** layer by tile size, and pausing off-screen/backgrounded tiles. That selection *policy*
+is server-side `.ari`; the packet forwarding is native. At 200, thread/pool/bandwidth budgets dominate (a
+later hardening workstream, possibly cascaded SFUs — §11).
+
+The forwarding primitives are exposed to the DSL (§4c + room-control verbs) so the room controller can be
+scripted.
 
 ---
 
@@ -355,10 +381,14 @@ A reusable registration bundle in cvcGL, called by `ariadne_hello` (native) and 
   `Runtime`); **enable `CVC_ENABLE_GRPC`** on its native conference build. Keep the generic/core/wasm
   builds green via the guards (no-op when a capability is missing) so `ariadne_hello` stays the generic
   `.ari` host it is today.
-* **wasm build:** the bundle registers the room verbs over the **browser transport leg** instead of
-  native gRPC; capture/playback use the browser's getUserMedia/WebAudio seam (new, §10) rather than SDL.
-* **Server target:** a new native `ariadne_conference_server` (room authority + SFU relay + WS
-  terminator). Reuses the low-level transport verbs and the relay helper.
+* **wasm build:** the bundle registers the room verbs over the **WebSocket control transport** + a
+  **WebRTC media leg**; capture/playback use the browser's `getUserMedia`/WebAudio + `RTCPeerConnection`
+  seam (new, §10) rather than SDL.
+* **Server target:** a new `ariadne_conference_server` = a **thin native media core** (the SFU's WebRTC +
+  gRPC legs, §7) driven by a **server-side `.ari` room-controller** that runs admission, roster, and
+  forwarding policy through the DSL verbs (§4c + room-control verbs). Same headless host pattern as
+  `ariadne_hello`; **WASI build** is a goal (§6f). "The server is also an `.ari` app" is the SDK proof —
+  users self-host by running the server `.ari` on our surface or their own.
 
 ---
 
@@ -380,55 +410,63 @@ Registration of `type: stream` / `type: stream_view` is host opt-in — included
 
 ---
 
-## 10. Build phases (each a PR / small stack, each testable)
+## 10. Build phases (each testable; the arc converges on the browser MVP)
 
-Ordered so something runs end-to-end as early as possible and each phase is independently verifiable.
+Ordered to de-risk inner-to-outer: prove the room + SFU with native clients first, then WebRTC off the
+browser, then the browser itself, then the MVP.
 
-* **Phase 0 — prerequisites.** (a) `input_text`/`input_int` widget; (b) stream→`audio_output` auto-pump
-  (`stream-play-audio` core); (c) **SFU relay helper** (§7) as a C++ class with a unit test (N
-  publishers × M subscribers, synthetic sources). *Headless.*
-* **Phase 1 — media DSL verbs.** `stream-capture-camera`, `stream-capture-audio`, `stream-play-audio`,
-  `stream-audio-graph` (§4a), document-scoped. Tested headless with synthetic sources (camera/mic gated
-  + device-skipped on CI).
-* **Phase 2 — room state tree + server-mediated access (§5).** The `conf/rooms/<room>` schema;
-  admission (connection↔`pid` binding + token check); the **intent channel + server validator** as the
-  sole writer of authority state; read-only replication to clients; a roster primitive
-  (immediate-children + presence reaping). Tested with the in-process state transport (two apps, one
-  room) **plus an adversarial test**: a client intent targeting another `pid` is rejected.
-* **Phase 3 — room DSL verbs (§4b) over native gRPC + SFU relay.** `room-join/leave/publish/subscribe/
-  roster/flags`. Two-native-client integration test: A publishes, B subscribes via the relay, frames
-  cross; roster reactive.
-* **Phase 4 — host + server (§8).** Extend `ariadne_hello` (bundle + gRPC on) and ship
-  `ariadne_conference_server`. A runnable **native** multi-party call from a single `.ari` (synthetic or
-  camera) end-to-end.
-* **Phase 5 — browser/wasm client (§6b).** WebSocket browser leg terminated at the server; wasm
-  `ariadne_hello` joins a room, sends + receives frames, renders tiles. getUserMedia/WebAudio capture
-  seam.
-* **Phase 6 — P2P mesh mode (§2).** `mode: mesh` rooms: `room-subscribe` resolves to direct peer
-  `pull`/`serve`; unique-id scheme; native-only.
-* **Phase 7 — polish.** TLS end-to-end, reconnection/presence/heartbeat, chat, bandwidth/drop tuning,
-  encoded media (H.264/Opus via the ffmpeg process-pipe path) to replace raw rgba8/pcm.
+* **Phase 0 — prerequisites (headless).** `input_text` widget; stream→`audio_output` auto-pump
+  (`stream-play-audio`); the **gRPC SFU relay helper** (§7) with an N×M fan-out unit test (synthetic
+  sources).
+* **Phase 1 — media DSL verbs (§4a).** `stream-capture-camera/-audio`, `stream-play-audio`,
+  `stream-audio-graph`, document-scoped. Headless with synthetic sources (device capture gated/skipped
+  on CI).
+* **Phase 2 — room control plane (§5).** `conf/rooms/<room>` schema; admission (connection↔`pid`); the
+  **intent channel + server validator** (sole writer of authority state); read-only replication; roster
+  primitive (immediate-children + presence reaping). Inproc two-app test **+ adversarial test** (an
+  intent targeting another `pid` is rejected).
+* **Phase 3 — room verbs + gRPC SFU; native proof (§4b).** `room-join/publish/subscribe/roster/flags/
+  leave` over gRPC. Two **native** clients conference end-to-end from one `.ari`. Proves the room model
+  + SFU before any browser work.
+* **Phase 4 — WebRTC leg, native first (§6d).** Integrate the WebRTC stack via **cvcpkg**; SDP/ICE
+  signaling over the state message bus; a native peer ↔ server SFU over WebRTC. De-risks WebRTC away
+  from the browser.
+* **Phase 5 — browser bring-up: control + WS loopback (§6c).** New **WebSocket `transport_kind`**; the
+  wasm client joins the room **control plane** and renders a tile over a raw-frame WS loopback. Browser
+  without WebRTC yet.
+* **Phase 6 — browser WebRTC + MVP (§6a).** `getUserMedia` + `RTCPeerConnection` ↔ SFU, **H.264/Opus**;
+  render remote tiles. **★ MVP:** deploy the server, serve the wasm client from **cyberpcangel.com**,
+  **default room, 8-way** browser video conference.
+* **Phase 7 — scale & robustness (§7).** Toward ~200: simulcast/active-speaker selection, off-screen
+  pause, pool/thread/bandwidth budgets; reconnection/presence/heartbeat; chat; TLS end-to-end.
+* **Phase 8 — mesh + auth hardening + WASI.** `mode: mesh` (WebRTC peer / native serve+pull);
+  connection-bound identity + distributed `write_policy` for mesh authz; identity (OIDC via SSO /
+  revocable txwtf-style JWT); the **WASI server** build (fill cvcpkg gaps, §6f).
 
 ---
 
 ## 11. Open questions / decisions
 
-1. **Browser transport** — WebSocket for v1 (recommended) → WebTransport/WebRTC later? WebRTC would
-   give real NAT traversal + congestion control but is a large surface.
-2. **Mesh authorization.** Confirmed: replication is trust-all-peers with self-asserted
-   `origin_node_id`. The server-mediated model (§5d) secures the *central-server* case without a
-   forgeable-identity fix. The **mesh** case still rides trust-all gossip — do we invest in
-   connection-bound identity + distributed `write_policy` to make peer-to-peer rooms safe against a
-   dishonest peer, or restrict mesh to trusted/native deployments?
-3. **WASI server** — worth pursuing given the WASI toolchain is currently broken, or stay native?
-4. **Media codecs** — raw rgba8/pcm for v1 (simple, bandwidth-heavy) vs encoded (H.264/Opus) from the
-   start. Raw v1, encode in Phase 7 via the existing ffmpeg-process-pipe plan.
-5. **Server scriptability** — is `ariadne_conference_server` a C++ host, or itself an `.ari` document
-   driving the low-level transport verbs + relay helper?
-6. **Identity/auth** — room password/bearer for v1; OIDC (existing SSO) later. Roles
-   (host/moderator/guest) in the roster?
-7. **Participant ceiling** — target N for the SFU (tile layout, pool sizing, pusher-thread count all
-   scale with N).
+**Decided (this iteration):** WebRTC = production media, WebSocket = bring-up/debug + signaling (§6b);
+raw **and** H.264/Opus (§6e); mesh works first, auth hardens later (§5, Phase 8); identity later via OIDC
+SSO or a revocable txwtf-style JWT (§5f); **WASI server is a committed goal** (§6f); server as
+`.ari`-scriptable as possible (§8); **MVP 8 participants**, architecture toward **~200** (§7).
+
+**Still open:**
+1. **WebRTC stack / SFU implementation** — libdatachannel (recommended) vs libwebrtc vs mediasoup vs
+   Pion (§6d), and whether we build the SFU forwarder on it or adopt an existing one. The biggest
+   build-vs-integrate call; gates Phase 4.
+2. **Scaling to ~200** — simulcast vs SVC; the active-speaker + tile-size selection policy; where
+   thread/pool/bandwidth ceilings land; whether cascaded SFUs are needed.
+3. **TURN/STUN hosting** — coturn (or a hosted service) for NAT traversal: where it runs, and whether
+   the MVP's network even needs it.
+4. **WASI + WebRTC** — UDP/WebRTC under WASI is immature: does the WASI server cover only
+   control/SFU-policy first (media leg native), and which cvcpkg toolchain gaps block it?
+5. **Serving the wasm client from cyberpcangel.com** — it's a WordPress site: embed the Emscripten
+   bundle how (plugin / page / subdomain), and set COOP/COEP headers if we use `-pthread`
+   (`SharedArrayBuffer`).
+6. **Identity model (when we get there)** — OIDC-via-SSO vs revocable JWT (txwtf-style), plus roles
+   (host/moderator/guest), capacity, bans in the roster.
 
 ---
 
