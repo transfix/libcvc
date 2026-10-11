@@ -700,9 +700,70 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
     e.comment = node.comment();
     e.hidden = node.hidden();
     e.read_only = node.readOnly();
+    // data() payload: encode via the codec registry and offload large payloads to a chunked-blob
+    // manifest, exactly as the live set_data path (adapter encode + collect_local offload), so a
+    // joiner decodes/hydrates identically and the content-addressed blob digest matches byte-for-
+    // byte. No codec / encode failure → data() is simply omitted (value + metadata still ship).
+    const std::string dtn = node.dataTypeName();
+    if (!dtn.empty() && _codecs && _codecs->has(dtn)) {
+      try {
+        std::vector<unsigned char> bytes = _codecs->encode(dtn, node.data());
+        e.data_type_name = dtn;
+        if (_blob_store && _max_inline_payload_bytes > 0 &&
+            bytes.size() > _max_inline_payload_bytes) {
+          state_chunked_blob_writer writer(*_blob_store, kDataBlobChunkBytes,
+                                           &state_compression_registry::shared());
+          e.data_payload = state_payload::blob_ref(writer.put(bytes));
+        } else {
+          e.data_payload = state_payload::inline_data(bytes);
+        }
+      } catch (const std::exception &) {
+        e.data_type_name.clear();
+        e.data_payload = state_payload{};
+      }
+    }
     result.push_back(std::move(e));
   });
   return result;
+}
+
+void state_cluster_shard::ingest_snapshot_entry(const snapshot_entry &e) {
+  // Apply directly through the adapter. apply_remote() runs under the adapter's
+  // thread_suppression_guard (so these do not re-enter the journal) and already resolves inline
+  // AND blob-ref set_data (the latter via the data hydrator). We deliberately bypass ingest_remote:
+  // snapshot entries share no meaningful (origin, sequence), so the seen-set would drop all but the
+  // first; a bootstrap is idempotent per path, applied before live traffic.
+  const auto apply_scalar = [&](state_mutation_op op, const std::string &sv) {
+    state_mutation m;
+    m.cluster_id = _cluster_id;
+    m.path = e.path;
+    m.op = op;
+    m.string_value = sv;
+    _adapter->apply_remote(m);
+  };
+
+  // value() always (also creates the node on the joiner, matching the source even when empty).
+  apply_scalar(state_mutation_op::set_value, e.string_value);
+
+  // Metadata: apply only the non-default flags (a fresh joiner's nodes start at the defaults).
+  if (!e.comment.empty())
+    apply_scalar(state_mutation_op::set_comment, e.comment);
+  if (e.hidden)
+    apply_scalar(state_mutation_op::set_hidden, "1");
+  if (e.read_only)
+    apply_scalar(state_mutation_op::set_read_only, "1");
+
+  // data(): inline decodes immediately; a blob_ref is fetched + decoded + installed by the
+  // hydrator.
+  if (!e.data_type_name.empty() && e.data_payload.kind != state_payload_kind::none) {
+    state_mutation m;
+    m.cluster_id = _cluster_id;
+    m.path = e.path;
+    m.op = state_mutation_op::set_data;
+    m.type_name = e.data_type_name;
+    m.payload = e.data_payload;
+    _adapter->apply_remote(m);
+  }
 }
 
 } // namespace cvc
