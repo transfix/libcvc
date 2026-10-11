@@ -112,13 +112,26 @@ public:
   std::unique_ptr<channel> open_channel(const std::string &target,
                                         std::chrono::milliseconds timeout);
 
-  // Diagnostics (cumulative since start()).
+  // Diagnostics (cumulative since start()). frames_received counts WHOLE frames
+  // reassembled and delivered to the sink; frames_echoed counts wire messages
+  // (chunks) echoed back — so frames_echoed > frames_received means frames were
+  // split into multiple chunks.
   std::uint64_t frames_received() const noexcept { return _frames_received.load(); }
   std::uint64_t frames_echoed() const noexcept { return _frames_echoed.load(); }
 
-  // Max gRPC message size this transport negotiates (server + client), so large
-  // single-frame payloads round-trip above the ~4 MiB gRPC default.
+  // Max gRPC message size this transport negotiates (server + client), so even a
+  // single chunk round-trips comfortably above the ~4 MiB gRPC default.
   static std::size_t max_message_bytes() noexcept;
+
+  // Stream-tuned per-chunk payload cap (PR8), independent of the gRPC message
+  // cap: a frame whose payload exceeds this is split into that-many-byte chunks
+  // on send() and reassembled by (stream_id, seq) on the peer. This bounds the
+  // size of any single wire message for frame traffic without touching the
+  // control plane's 64 MiB limit. Applies to channels opened AFTER it is set
+  // (open_channel captures the current value). 0 disables splitting (one
+  // message per frame). Default: 1 MiB.
+  void set_chunk_bytes(std::size_t bytes) noexcept;
+  std::size_t chunk_bytes() const noexcept;
 
 private:
   struct impl;
@@ -127,6 +140,7 @@ private:
   std::atomic<bool> _running{false};
   std::atomic<std::uint64_t> _frames_received{0};
   std::atomic<std::uint64_t> _frames_echoed{0};
+  std::atomic<std::size_t> _chunk_bytes{1u << 20}; // 1 MiB
 };
 
 } // namespace cvc

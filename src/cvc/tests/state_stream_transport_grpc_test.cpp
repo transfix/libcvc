@@ -121,6 +121,68 @@ TEST(StreamTransportGrpc, LargePayloadRoundTrip) {
   server.stop();
 }
 
+// A frame larger than the configured chunk size is split into multiple
+// StreamFrames on the wire and reassembled byte-identical on the peer.
+TEST(StreamTransportGrpc, ChunkedFrameRoundTrip) {
+  stream_transport_grpc server;
+  std::mutex mu;
+  std::vector<stream_transport_grpc::frame> sink;
+  server.set_on_frame([&](const stream_transport_grpc::frame &f) {
+    std::lock_guard<std::mutex> lk(mu);
+    sink.push_back(f);
+  });
+  server.start("127.0.0.1:0");
+  const std::string addr = server.listen_address();
+  ASSERT_FALSE(addr.empty());
+
+  stream_transport_grpc client;
+  client.set_chunk_bytes(4096); // force a multi-chunk split
+  EXPECT_EQ(client.chunk_bytes(), 4096u);
+  auto ch = client.open_channel(addr, std::chrono::milliseconds(3000));
+  ASSERT_NE(ch, nullptr);
+
+  stream_transport_grpc::frame f;
+  f.stream_id = "streams.cam0";
+  f.seq = 100;
+  f.pts_seconds = 2.0;
+  f.payload.resize(40000); // ~10 chunks at 4096 B
+  for (std::size_t i = 0; i < f.payload.size(); ++i)
+    f.payload[i] = static_cast<unsigned char>((i * 31u + 7u) & 0xff);
+  ASSERT_TRUE(ch->send(f));
+
+  // recv() reassembles the echoed chunks back into the whole frame.
+  stream_transport_grpc::frame echo;
+  ASSERT_TRUE(ch->recv(echo));
+  EXPECT_EQ(echo.stream_id, "streams.cam0");
+  EXPECT_EQ(echo.seq, 100);
+  EXPECT_DOUBLE_EQ(echo.pts_seconds, 2.0);
+  ASSERT_EQ(echo.payload.size(), f.payload.size());
+  EXPECT_EQ(echo.payload, f.payload);
+
+  // The server delivered exactly ONE reassembled frame to the sink.
+  bool got = false;
+  for (int i = 0; i < 400 && !got; ++i) {
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      got = !sink.empty();
+    }
+    if (!got)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_TRUE(got);
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_EQ(sink.size(), 1u) << "server must see exactly one reassembled frame";
+    EXPECT_EQ(sink.front().payload, f.payload);
+  }
+  EXPECT_EQ(server.frames_received(), 1u);
+  EXPECT_GT(server.frames_echoed(), server.frames_received())
+      << "a split frame must produce more wire chunks than whole frames";
+
+  ch->close();
+  server.stop();
+}
+
 // Opening a channel to an address with no StreamTransport server fails cleanly
 // (null) within the timeout rather than hanging or crashing.
 TEST(StreamTransportGrpc, OpenChannelToDeadAddressReturnsNull) {

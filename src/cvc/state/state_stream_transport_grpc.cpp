@@ -16,11 +16,14 @@
 #include "proto/state_transport.grpc.pb.h"
 #include "proto/state_transport.pb.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cvc/state/state_stream_transport_grpc.h>
 #include <grpcpp/grpcpp.h>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace cvc {
 
@@ -32,24 +35,87 @@ namespace pb = ::cvc::transport::v1;
 // ~4 MiB gRPC default (PR8 chunks frames larger than this).
 constexpr int kStreamMaxMessageBytes = 64 * 1024 * 1024;
 
-stream_transport_grpc::frame from_pb(const pb::StreamFrame &m) {
-  stream_transport_grpc::frame f;
-  f.stream_id = m.stream_id();
-  f.seq = m.seq();
-  f.pts_seconds = m.pts_seconds();
-  f.flags = m.flags();
-  const std::string &p = m.payload();
-  f.payload.assign(p.begin(), p.end());
-  return f;
+// Split a frame into `chunk_bytes`-sized StreamFrames and write them in index
+// order over an ordered gRPC stream. chunk_bytes == 0 sends the whole payload
+// as one message. Every chunk repeats (stream_id, seq, pts, flags) so each is
+// self-describing. Returns false if a Write fails (the stream is down).
+template <class Writer>
+bool write_chunked(Writer *w, const stream_transport_grpc::frame &f, std::size_t chunk_bytes) {
+  const std::size_t total = f.payload.size();
+  const std::size_t step = (chunk_bytes == 0) ? (total == 0 ? std::size_t{1} : total) : chunk_bytes;
+  const std::uint32_t count =
+      (total == 0) ? 1u : static_cast<std::uint32_t>((total + step - 1) / step);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    pb::StreamFrame m;
+    m.set_stream_id(f.stream_id);
+    m.set_seq(f.seq);
+    m.set_pts_seconds(f.pts_seconds);
+    m.set_flags(f.flags);
+    m.set_chunk_index(i);
+    m.set_chunk_count(count);
+    const std::size_t off = static_cast<std::size_t>(i) * step;
+    const std::size_t len = (off < total) ? std::min(step, total - off) : 0;
+    if (len > 0)
+      m.set_payload(std::string(reinterpret_cast<const char *>(f.payload.data() + off), len));
+    if (!w->Write(m))
+      return false;
+  }
+  return true;
 }
 
-void to_pb(const stream_transport_grpc::frame &f, pb::StreamFrame &m) {
-  m.set_stream_id(f.stream_id);
-  m.set_seq(f.seq);
-  m.set_pts_seconds(f.pts_seconds);
-  m.set_flags(f.flags);
-  m.set_payload(std::string(f.payload.begin(), f.payload.end()));
-}
+// Reassembles chunked frames arriving on one ordered stream. offer() returns
+// true and fills `out` when a chunk completes a frame. In-order delivery is
+// assumed (the gRPC stream is ordered and write_chunked emits chunks in index
+// order); a gap, an out-of-order index, or an unexpected (stream_id, seq) drops
+// the in-progress frame rather than mis-stitching it.
+class frame_reassembler {
+public:
+  bool offer(const pb::StreamFrame &c, stream_transport_grpc::frame &out) {
+    const std::uint32_t count = (c.chunk_count() == 0) ? 1u : c.chunk_count();
+    const std::uint32_t idx = c.chunk_index();
+    if (idx == 0 || !_active || c.stream_id() != _sid || c.seq() != _seq) {
+      if (idx != 0) {
+        _active = false; // a non-initial chunk with no matching in-progress frame
+        return false;
+      }
+      _active = true; // (re)start on the first chunk
+      _sid = c.stream_id();
+      _seq = c.seq();
+      _pts = c.pts_seconds();
+      _flags = c.flags();
+      _count = count;
+      _next = 0;
+      _buf.clear();
+    }
+    if (idx != _next) { // gap / out of order
+      _active = false;
+      return false;
+    }
+    const std::string &p = c.payload();
+    _buf.insert(_buf.end(), p.begin(), p.end());
+    ++_next;
+    if (_next >= _count) {
+      out.stream_id = _sid;
+      out.seq = _seq;
+      out.pts_seconds = _pts;
+      out.flags = _flags;
+      out.payload = _buf;
+      _active = false;
+      return true;
+    }
+    return false;
+  }
+
+private:
+  bool _active = false;
+  std::string _sid;
+  std::int64_t _seq = 0;
+  double _pts = 0.0;
+  std::uint32_t _flags = 0;
+  std::uint32_t _count = 1;
+  std::uint32_t _next = 0;
+  std::vector<unsigned char> _buf;
+};
 
 // Server side of StreamTransport. Each inbound StreamChannel runs here on its
 // own gRPC thread: deliver every frame to the sink, then echo it back so a
@@ -64,13 +130,21 @@ public:
   grpc::Status
   StreamChannel(grpc::ServerContext *ctx,
                 grpc::ServerReaderWriter<pb::StreamFrame, pb::StreamFrame> *stream) override {
+    frame_reassembler reasm;
     pb::StreamFrame in;
     while (!ctx->IsCancelled() && stream->Read(&in)) {
-      _recv->fetch_add(1, std::memory_order_relaxed);
-      if (_on_frame)
-        _on_frame(from_pb(in));
+      // Echo the raw chunk straight back, so a client observes the round-trip
+      // (and exercises its own reassembler). PR9 replaces the echo with real
+      // producer→consumer fan-out.
       if (stream->Write(in))
         _echoed->fetch_add(1, std::memory_order_relaxed);
+      // Reassemble chunks into whole frames for the sink.
+      stream_transport_grpc::frame whole;
+      if (reasm.offer(in, whole)) {
+        _recv->fetch_add(1, std::memory_order_relaxed);
+        if (_on_frame)
+          _on_frame(whole);
+      }
     }
     return grpc::Status::OK;
   }
@@ -87,28 +161,29 @@ public:
   client_channel(std::shared_ptr<grpc::Channel> chan,
                  std::unique_ptr<pb::StreamTransport::Stub> stub,
                  std::shared_ptr<grpc::ClientContext> ctx,
-                 std::unique_ptr<grpc::ClientReaderWriter<pb::StreamFrame, pb::StreamFrame>> stream)
+                 std::unique_ptr<grpc::ClientReaderWriter<pb::StreamFrame, pb::StreamFrame>> stream,
+                 std::size_t chunk_bytes)
       : _chan(std::move(chan)), _stub(std::move(stub)), _ctx(std::move(ctx)),
-        _stream(std::move(stream)) {}
+        _stream(std::move(stream)), _chunk_bytes(chunk_bytes) {}
 
   ~client_channel() override { close(); }
 
   bool send(const stream_transport_grpc::frame &f) override {
     if (!_stream || _closed)
       return false;
-    pb::StreamFrame m;
-    to_pb(f, m);
-    return _stream->Write(m);
+    return write_chunked(_stream.get(), f, _chunk_bytes);
   }
 
   bool recv(stream_transport_grpc::frame &out) override {
     if (!_stream || _closed)
       return false;
     pb::StreamFrame m;
-    if (!_stream->Read(&m))
-      return false;
-    out = from_pb(m);
-    return true;
+    // Read chunks until one completes a whole frame (or the stream ends).
+    while (_stream->Read(&m)) {
+      if (_reasm.offer(m, out))
+        return true;
+    }
+    return false;
   }
 
   void close() override {
@@ -126,6 +201,8 @@ private:
   std::unique_ptr<pb::StreamTransport::Stub> _stub;
   std::shared_ptr<grpc::ClientContext> _ctx;
   std::unique_ptr<grpc::ClientReaderWriter<pb::StreamFrame, pb::StreamFrame>> _stream;
+  std::size_t _chunk_bytes = 0;
+  frame_reassembler _reasm;
   bool _closed = false;
 };
 
@@ -144,6 +221,14 @@ stream_transport_grpc::~stream_transport_grpc() { stop(); }
 
 std::size_t stream_transport_grpc::max_message_bytes() noexcept {
   return static_cast<std::size_t>(kStreamMaxMessageBytes);
+}
+
+void stream_transport_grpc::set_chunk_bytes(std::size_t bytes) noexcept {
+  _chunk_bytes.store(bytes, std::memory_order_relaxed);
+}
+
+std::size_t stream_transport_grpc::chunk_bytes() const noexcept {
+  return _chunk_bytes.load(std::memory_order_relaxed);
 }
 
 void stream_transport_grpc::set_on_frame(on_frame_func cb) { _impl->on_frame = std::move(cb); }
@@ -205,7 +290,7 @@ stream_transport_grpc::open_channel(const std::string &target, std::chrono::mill
     return nullptr;
 
   return std::unique_ptr<channel>(
-      new client_channel(chan, std::move(stub), ctx, std::move(stream)));
+      new client_channel(chan, std::move(stub), ctx, std::move(stream), _chunk_bytes.load()));
 }
 
 } // namespace cvc
