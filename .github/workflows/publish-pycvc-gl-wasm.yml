@@ -98,9 +98,26 @@ jobs:
 
       - name: Publish pycvc-gl-cp312 wasm
         if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+        # Mirrors publish-cvcgl-wasm.yml. This step used to run a bare `cvcpkg publish "$a"`
+        # with no server, org or token and swallow the failure with `|| echo ::warning`, so
+        # it never published anything -- the catalog has no pycvc-gl-cp312 wasm build at
+        # all; cvcpkg 2.4.0 even says why ("provide --server ... or --dest"). Now it fails
+        # loudly, and skips only an exact name+version already on the catalog.
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
         run: |
+          set -euo pipefail
+          [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
           cvcpkg pack cvcpkg/recipes/pycvc-gl-cp312 --from-prefix "$WASM_DEPS" \
             --platform wasm --config release --link static --output-dir dist
           for a in dist/pycvc-gl-cp312-*-wasm-*.tar.gz; do
-            cvcpkg publish "$a" || echo "::warning::publish of $a failed (may already exist)"
+            base=$(basename "$a" .tar.gz)
+            name=$(echo "$base" | sed -E 's/-[0-9].*$//')
+            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-wasm-.*$//")
+            if cvcpkg search "$name" --platform wasm 2>/dev/null \
+                 | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
+              echo "=== skip $name $ver (already on catalog) ==="; continue
+            fi
+            echo "=== publish $a ==="
+            cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
           done
