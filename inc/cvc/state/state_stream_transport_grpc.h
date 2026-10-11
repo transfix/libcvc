@@ -75,6 +75,18 @@ public:
   // StreamChannel. Must be thread-safe.
   using on_frame_func = std::function<void(const frame &)>;
 
+  // Server-PUSH (the conventional producer-serves-a-port model). A per-channel
+  // frame source: fill `out` with the next frame to push and return true, or
+  // return false when the stream is exhausted. It MAY block waiting for the next
+  // frame; the server pushes whatever it returns and stops on false or when the
+  // client disconnects.
+  using frame_producer = std::function<bool(frame &out)>;
+  // Called (on the server channel thread) when a client opens a StreamChannel
+  // whose first frame carries flag_open, naming the stream it wants. Return a
+  // frame_producer to push that stream to the client, or an empty producer to
+  // decline (the channel then falls back to the sink/echo behavior).
+  using open_handler_func = std::function<frame_producer(const std::string &stream_id)>;
+
   // A client-side open StreamChannel. send() writes a frame to the peer; recv()
   // blocks for the next frame from the peer (false when the stream ends).
   // Destroying or close()ing the channel half-closes and finishes the RPC.
@@ -110,6 +122,11 @@ public:
     bool require_client_auth = false;
   };
   void set_tls_config(tls_config cfg);
+
+  // Server-push handler (see open_handler_func). Set before start(). When set,
+  // a client channel whose first frame has flag_open switches that channel to
+  // push mode for the named stream; otherwise the channel behaves as the sink.
+  void set_open_handler(open_handler_func h);
 
   // Start the dedicated StreamTransport server listening on `listen_addr`
   // (host:port; port 0 picks a free port, read back via listen_address()).

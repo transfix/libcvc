@@ -268,3 +268,54 @@ TEST(StreamTransportGrpc, TlsRoundTrip) {
   ch->close();
   server.stop();
 }
+
+// Server-push: a client opens a channel with a flag_open frame naming a stream,
+// and the server's open handler pushes that stream's frames back (the
+// conventional producer-serves-a-port model).
+TEST(StreamTransportGrpc, ServerPush) {
+  stream_transport_grpc server;
+  server.set_open_handler([](const std::string &sid) -> stream_transport_grpc::frame_producer {
+    if (sid != "streams.push")
+      return {}; // decline unknown streams
+    auto counter = std::make_shared<int>(0);
+    return [counter](stream_transport_grpc::frame &out) -> bool {
+      if (*counter >= 3)
+        return false; // exhausted after 3 frames
+      out.stream_id = "streams.push";
+      out.seq = *counter;
+      out.payload = bytes({*counter, *counter + 10});
+      ++(*counter);
+      return true;
+    };
+  });
+  server.start("127.0.0.1:0");
+  ASSERT_TRUE(server.is_running());
+
+  stream_transport_grpc client;
+  std::unique_ptr<stream_transport_grpc::channel> ch =
+      client.open_channel(server.listen_address(), std::chrono::milliseconds(3000));
+  ASSERT_NE(ch, nullptr);
+
+  // Open-handshake frame: name the stream we want pushed.
+  stream_transport_grpc::frame open;
+  open.stream_id = "streams.push";
+  open.flags = stream_transport_grpc::flag_open;
+  ASSERT_TRUE(ch->send(open));
+
+  std::vector<stream_transport_grpc::frame> got;
+  for (int i = 0; i < 3; ++i) {
+    stream_transport_grpc::frame f;
+    if (!ch->recv(f))
+      break;
+    got.push_back(f);
+  }
+  ASSERT_EQ(got.size(), 3u) << "server did not push all frames";
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(got[i].stream_id, "streams.push");
+    EXPECT_EQ(got[i].seq, i);
+    EXPECT_EQ(got[i].payload, bytes({i, i + 10}));
+  }
+
+  ch->close();
+  server.stop();
+}

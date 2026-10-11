@@ -124,22 +124,45 @@ private:
 class StreamTransportServiceImpl final : public pb::StreamTransport::Service {
 public:
   StreamTransportServiceImpl(stream_transport_grpc::on_frame_func on_frame,
+                             stream_transport_grpc::open_handler_func open_handler,
                              std::atomic<std::uint64_t> *recv, std::atomic<std::uint64_t> *echoed,
-                             bool echo)
-      : _on_frame(std::move(on_frame)), _recv(recv), _echoed(echoed), _echo(echo) {}
+                             bool echo, std::size_t chunk_bytes)
+      : _on_frame(std::move(on_frame)), _open_handler(std::move(open_handler)), _recv(recv),
+        _echoed(echoed), _echo(echo), _chunk_bytes(chunk_bytes) {}
 
   grpc::Status
   StreamChannel(grpc::ServerContext *ctx,
                 grpc::ServerReaderWriter<pb::StreamFrame, pb::StreamFrame> *stream) override {
     frame_reassembler reasm;
     pb::StreamFrame in;
+    bool first = true;
     while (!ctx->IsCancelled() && stream->Read(&in)) {
-      // Optionally echo the raw chunk back so a client observes a round-trip
-      // (the PR7/8 test shape). OFF for one-way push (the bridge): an unread
-      // echo would fill gRPC flow control and deadlock the sender.
+      if (first) {
+        first = false;
+        // Server-push: a flag_open first frame switches this channel to pushing
+        // the named stream's frames (the conventional producer-serves-a-port
+        // model). The open frame carries no data of its own.
+        if (_open_handler && (in.flags() & stream_transport_grpc::flag_open)) {
+          stream_transport_grpc::frame_producer producer = _open_handler(in.stream_id());
+          if (producer) {
+            for (;;) {
+              if (ctx->IsCancelled())
+                break;
+              stream_transport_grpc::frame f; // fresh each push
+              if (!producer(f))
+                break; // stream exhausted
+              if (!write_chunked(stream, f, _chunk_bytes))
+                break; // client disconnected
+            }
+            return grpc::Status::OK;
+          }
+        }
+      }
+      // Sink path (non-push clients): reassemble into whole frames, optionally
+      // echoing the raw chunk back (the PR7/8 round-trip shape; OFF for the
+      // bridge's one-way push, where an unread echo would deadlock the sender).
       if (_echo && stream->Write(in))
         _echoed->fetch_add(1, std::memory_order_relaxed);
-      // Reassemble chunks into whole frames for the sink.
       stream_transport_grpc::frame whole;
       if (reasm.offer(in, whole)) {
         _recv->fetch_add(1, std::memory_order_relaxed);
@@ -152,9 +175,11 @@ public:
 
 private:
   stream_transport_grpc::on_frame_func _on_frame;
+  stream_transport_grpc::open_handler_func _open_handler;
   std::atomic<std::uint64_t> *_recv;
   std::atomic<std::uint64_t> *_echoed;
   bool _echo;
+  std::size_t _chunk_bytes;
 };
 
 // Client side of an open StreamChannel.
@@ -213,6 +238,7 @@ private:
 struct stream_transport_grpc::impl {
   std::string listen_addr_resolved;
   on_frame_func on_frame;
+  open_handler_func open_handler;
   std::unique_ptr<StreamTransportServiceImpl> service;
   std::unique_ptr<grpc::Server> server;
 };
@@ -246,12 +272,17 @@ void stream_transport_grpc::set_tls_config(tls_config cfg) {
 
 void stream_transport_grpc::set_on_frame(on_frame_func cb) { _impl->on_frame = std::move(cb); }
 
+void stream_transport_grpc::set_open_handler(open_handler_func h) {
+  _impl->open_handler = std::move(h);
+}
+
 void stream_transport_grpc::start(const std::string &listen_addr) {
   if (_running.load())
     throw std::runtime_error("stream_transport_grpc::start: already running");
 
-  _impl->service.reset(new StreamTransportServiceImpl(_impl->on_frame, &_frames_received,
-                                                      &_frames_echoed, _server_echo.load()));
+  _impl->service.reset(new StreamTransportServiceImpl(_impl->on_frame, _impl->open_handler,
+                                                      &_frames_received, &_frames_echoed,
+                                                      _server_echo.load(), _chunk_bytes.load()));
 
   grpc::ServerBuilder builder;
   int bound_port = 0;
