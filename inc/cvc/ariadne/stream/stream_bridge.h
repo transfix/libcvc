@@ -37,6 +37,7 @@ namespace ariadne {
 namespace stream {
 
 class stream;
+struct stream_params;
 
 // ----------------
 // cvc::ariadne::stream::stream_bridge  (Phase 10, PR9 — the cross-node capstone)
@@ -95,6 +96,26 @@ public:
   // started.
   void receive_into(const std::string &stream_id, stream &proxy);
 
+  // The content_type marking a stream-subscription offer message (an out-of-band
+  // state message whose string_value is the consumer's StreamTransport endpoint).
+  static const char *const kOfferContentType;
+
+  // PRODUCER (auto-negotiation): offer `local` for cross-node consumers without
+  // naming them. Subscribes to the app's default-shard message bus at
+  // local.token(); when a consumer sends an offer there (see request_remote),
+  // serve()s `local` to that consumer's endpoint. `local` must outlive the
+  // bridge (or until stop()). Requires a default shard installed for the app.
+  void auto_serve(stream &local,
+                  std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
+
+  // CONSUMER (auto-negotiation): open a local proxy stream for a remote stream
+  // described by `params` (its id/root/format, from the discovered descriptor),
+  // route inbound frames into it, and sendMessage an offer carrying THIS bridge's
+  // transport endpoint to the stream's path so the producer starts pushing.
+  // Returns the proxy (local consumers subscribe to it), or null on failure. The
+  // bridge's transport must be a started server (its listen_address() is offered).
+  std::unique_ptr<stream> request_remote(const stream_params &params);
+
   // Stop pushing and routing: close subscriptions, join pusher threads, close
   // channels, clear routes. Idempotent; also run by the destructor.
   void stop();
@@ -120,8 +141,9 @@ private:
   stream_transport_grpc &_transport;
   std::shared_ptr<router_state> _router;
 
-  std::mutex _mu;                                  // guards _servings + _stopped
-  std::vector<std::unique_ptr<serving>> _servings; // producer pushers
+  std::mutex _mu;                                   // guards _servings + _stopped + _offer_unsubs
+  std::vector<std::unique_ptr<serving>> _servings;  // producer pushers
+  std::vector<std::function<void()>> _offer_unsubs; // auto_serve bus unsubscribes
   bool _stopped = false;
 
   std::atomic<std::uint64_t> _frames_pushed{0};

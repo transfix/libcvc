@@ -12,7 +12,10 @@
 #include <cvc/ariadne/stream/stream_bridge.h>
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/core/app.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_stream_transport_grpc.h>
+#include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <thread>
@@ -109,4 +112,95 @@ TEST(StreamBridge, FramesCrossNodeToNode) {
   proxyB.reset();
   transportA.stop();
   transportB.stop();
+}
+
+// Auto-negotiation: the consumer discovers the stream and offers its endpoint
+// via a state message; the producer (auto_serve) hears the offer and starts
+// pushing — no manual endpoint wiring. Frames then cross as in the direct case.
+TEST(StreamBridge, OfferAnswerAutoNegotiation) {
+  cvc::app aA, aB;
+  const cs::format_desc fmt = rgba4x4();
+
+  // State plane: an inproc transport carries the offer A<->B, and each shard is
+  // its app's default (needed by sendMessage routing + the message bus).
+  cvc::state_transport_inproc state_tp;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  sA.install_as_default();
+  sB.install_as_default();
+  state_tp.register_shard(&sA);
+  state_tp.register_shard(&sB);
+  // send_message() publishes through the shard's OWN transport, so each shard
+  // needs it set (register_shard alone is not enough) for the offer to reach A.
+  sA.set_transport(&state_tp);
+  sB.set_transport(&state_tp);
+
+  // Data plane: B runs a gRPC server (frames land here); A is a client (pushes).
+  cvc::stream_transport_grpc tB;
+  cs::stream_bridge bridgeB(aB, tB);
+  tB.start("127.0.0.1:0");
+  ASSERT_TRUE(tB.is_running());
+
+  cvc::stream_transport_grpc tA;
+  cs::stream_bridge bridgeA(aA, tA);
+
+  // Producer A opens the stream and auto-serves (waits for offers).
+  cs::stream_params pA;
+  pA.id = "cam0";
+  pA.format = fmt;
+  std::unique_ptr<cs::stream> streamA = cs::stream::open(aA, pA);
+  ASSERT_NE(streamA, nullptr);
+  bridgeA.auto_serve(*streamA);
+
+  // Consumer B requests the remote stream: opens a proxy and offers its endpoint.
+  cs::stream_params pB;
+  pB.id = "cam0";
+  pB.format = fmt;
+  pB.subscriber_depth = 8;
+  std::unique_ptr<cs::stream> proxyB = bridgeB.request_remote(pB);
+  ASSERT_NE(proxyB, nullptr);
+  std::shared_ptr<cs::subscription> subB = proxyB->channel().subscribe(cs::deliver_mode::ring, 8);
+  ASSERT_NE(subB, nullptr);
+
+  // Deliver the offer to A's bus → auto_serve → A connects to B and pushes.
+  state_tp.pump_all();
+
+  // Produce frames into A; they should reach B's proxy with no manual wiring.
+  const int N = 4;
+  std::vector<std::vector<unsigned char>> sent;
+  for (int i = 0; i < N; ++i) {
+    std::vector<unsigned char> payload(64, static_cast<unsigned char>(0x40 + i));
+    auto buf = std::make_shared<std::vector<unsigned char>>(payload);
+    streamA->channel().publish_external(buf->data(), buf->size(), 0.1 * i, buf);
+    sent.push_back(std::move(payload));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  std::vector<std::vector<unsigned char>> got;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (static_cast<int>(got.size()) < N && std::chrono::steady_clock::now() < deadline) {
+    cs::frame_ptr f;
+    if (subB->try_pop(f) && f)
+      got.emplace_back(f->data, f->data + f->size);
+    else
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  ASSERT_EQ(static_cast<int>(got.size()), N) << "auto-negotiated frames did not cross";
+  for (int i = 0; i < N; ++i)
+    EXPECT_EQ(got[i], sent[i]);
+  EXPECT_GE(bridgeA.frames_pushed(), static_cast<std::uint64_t>(N));
+
+  bridgeA.stop();
+  bridgeB.stop();
+  streamA.reset();
+  proxyB.reset();
+  tA.stop();
+  tB.stop();
+  state_tp.unregister_shard(&sA);
+  state_tp.unregister_shard(&sB);
+  sA.detach();
+  sB.detach();
 }
