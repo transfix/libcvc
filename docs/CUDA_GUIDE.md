@@ -11,6 +11,29 @@ libcvc now uses modern CMake 3.17+ native CUDA language support instead of the l
 - **Compatible GPU** (see supported architectures below)
 - **Compatible C++ compiler** for host code
 
+### The CUDA Toolkit from cvcpkg
+
+CI and the release builds take the toolkit from cvcpkg
+(`.github/actions/cvcpkg-cuda-toolkit`), like every other dependency. Its
+`cuda-toolkit` recipe (CUDA 12.5.1, Linux and Windows x86_64) downloads
+NVIDIA's official redist archives onto your machine and checks them against
+pinned sha256s; cvcpkg.org never hosts the toolkit, because NVIDIA's EULA does
+not allow republishing it.
+
+```bash
+cvcpkg install cuda-toolkit --prefix ./cuda
+# Linux: the prefix alone is enough (a bin/nvcc wrapper lets CMake find it)
+cmake -B build -G Ninja -DCMAKE_PREFIX_PATH="$PWD/cuda;$PWD/deps" -DCVC_ENABLE_CUDA=ON
+# Or name the toolkit (any generator that runs nvcc directly, e.g. Ninja)
+cmake -B build -G Ninja -DCUDAToolkit_ROOT="$PWD/cuda/cuda" \
+  -DCMAKE_CUDA_COMPILER="$PWD/cuda/cuda/bin/nvcc" -DCVC_ENABLE_CUDA=ON
+```
+
+With a Visual Studio generator, pass `-T cuda=<prefix>\cuda` instead: CMake then
+takes the CUDA MSBuild integration from the toolkit rather than from a Visual
+Studio install of it. Keep the toolkit in its own prefix, not the deps prefix
+an SDK is staged from: the SDK must not carry it.
+
 ## Enabling CUDA Support
 
 ### Build Configuration
