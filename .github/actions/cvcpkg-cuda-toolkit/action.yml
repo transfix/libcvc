@@ -46,8 +46,7 @@ runs:
       uses: actions/checkout@v5
       with:
         repository: cy-pca/cvcpkg
-        # TEMPORARY (pre-merge CI): cy-pca/cvcpkg#169's branch; back to master before merge.
-        ref: recipe/cuda-toolkit
+        ref: master
         path: _cvcpkg-cuda
         sparse-checkout: |
           src
@@ -60,13 +59,13 @@ runs:
         sparse-checkout-cone-mode: false
 
     - name: Set up Python for cvcpkg
-      if: true  # TEMPORARY: always use #169's CLI
+      if: steps.probe.outputs.have != 'true'
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
 
     - name: Install the cvcpkg CLI
-      if: true  # TEMPORARY: always use #169's CLI
+      if: steps.probe.outputs.have != 'true'
       shell: bash
       run: pip install ./_cvcpkg-cuda
 
