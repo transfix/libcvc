@@ -252,26 +252,15 @@ jobs:
           echo "arch=$ARCH"        >> "$GITHUB_OUTPUT"
           echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies (libcvc)
-        if: matrix.kind == 'libcvc'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build \
-            libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev libcgal-dev liblog4cplus-dev
-          if [ "${{ matrix.build_type }}" = "Debug" ]; then
-            sudo apt-get install -y --no-install-recommends lcov
-          fi
-          # gRPC/protobuf are NOT installed via apt. They are provisioned
-          # hermetically from the published cvcpkg bundle in a dedicated step
-          # below ("Provision gRPC via cvcpkg"), per the toolchain rule: no
-          # apt/brew for build dependencies.
+      # Everything this job builds with comes from cvcpkg, as in release.yml:
+      # the third-party libraries (next step), cmake/ninja/pkg-config, the
+      # CUDA toolkit, gRPC, VTK, the software GL stack and lcov. Nothing comes
+      # from apt; the compiler is the runner image's GCC.
 
       # ── Pull dep bundle from libcvc-deps (via cvcpkg) ──
       # The bundle provides the `libiimod` CMake package (no longer
-      # vendored in this tree) plus Boost/HDF5/FFTW/GSL/ImageMagick/
-      # CGAL/log4cplus prebuilt. There is no fallback build path — if
+      # vendored in this tree) plus Boost/HDF5/GSL/ImageMagick/CGAL/
+      # log4cplus prebuilt. There is no fallback build path — if
       # cvcpkg cannot fetch the components, CMake configure will fail
       # with an explicit "Could not find X", which is the right signal.
       - name: Fetch libcvc-deps
@@ -280,6 +269,17 @@ jobs:
         with:
           build_type: Release
           link: shared
+
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      # TEMPORARY, draft only: lcov from apt until cvcpkg publishes its lcov
+      # recipe. Replaced by `cvcpkg install lcov` before this PR is ready.
+      - name: Install lcov (apt, temporary)
+        if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends lcov
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -352,45 +352,6 @@ jobs:
           cvcpkg install yaml-cpp nlohmann-json json-schema-validator ftxui \
             --prefix "$prefix" --config release --link shared
 
-      # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
-      # 11 of the 13 cvcgl_* tests only inspect scene/state and need no GL at
-      # all. cvcgl_renderer and cvcgl_shadow_volume actually call render() and
-      # frameRGB(), and on a bare runner they SEGFAULT: the vtk bundle ships
-      # libglvnd, so GL *dispatch* resolves and the offscreen window constructs
-      # happily, but there is no *driver* behind it and the first real draw
-      # walks off a null vendor table. (cvcgl_shadow_volume's own header comment
-      # assumed a headless render would be a harmless no-op. It is not.)
-      #
-      # Mesa's llvmpipe is the driver; Xvfb is there because VTK probes GLX
-      # before EGL, so a display saves it from falling through a failing path
-      # first. Verified locally: both tests pass under LIBGL_ALWAYS_SOFTWARE=1
-      # with llvmpipe.
-      #
-      # Skipping the two instead would leave cvcGL's rendering permanently
-      # untested in CI, which is a smaller version of the problem this whole
-      # change exists to fix.
-      - name: Software OpenGL for the cvcGL render tests
-        if: matrix.kind == 'libcvc' && matrix.build_type != 'Debug'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            xvfb libgl1-mesa-dri libglx-mesa0
-          Xvfb :99 -screen 0 1280x1024x24 &
-          for _ in $(seq 1 30); do
-            [ -e /tmp/.X11-unix/X99 ] && break
-            sleep 0.2
-          done
-          # CVC_REQUIRE_RENDER: this job CAN rasterise, so a render test that
-          # finds it cannot (cvcgl_lod_node) fails instead of skipping.
-          {
-            echo "DISPLAY=:99"
-            echo "LIBGL_ALWAYS_SOFTWARE=1"
-            echo "GALLIUM_DRIVER=llvmpipe"
-            echo "CVC_REQUIRE_RENDER=1"
-          } >> "$GITHUB_ENV"
-
       - name: Configure
         run: |
           # libcvc needs libiimod from the libcvc-deps bundle. Fall
@@ -448,6 +409,62 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel
+
+      # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
+      # 11 of the 13 cvcgl_* tests only inspect scene/state and need no GL at
+      # all. cvcgl_renderer and cvcgl_shadow_volume actually call render() and
+      # frameRGB(), and on a bare runner they SEGFAULT: the vtk bundle ships
+      # libglvnd, so GL *dispatch* resolves and the offscreen window constructs
+      # happily, but there is no *driver* behind it and the first real draw
+      # walks off a null vendor table. (cvcgl_shadow_volume's own header comment
+      # assumed a headless render would be a harmless no-op. It is not.)
+      #
+      # Mesa's llvmpipe is the driver; Xvfb is there because VTK probes GLX
+      # before EGL, so a display saves it from falling through a failing path
+      # first. Verified locally: both tests pass under LIBGL_ALWAYS_SOFTWARE=1
+      # with llvmpipe.
+      #
+      # Both are cvcpkg bundles (`mesa`, `xvfb`), installed into the deps
+      # prefix next to the vtk bundle's libglvnd: libGLX.so.0 finds
+      # libGLX_mesa.so.0 through its $ORIGIN RUNPATH, and Xvfb finds
+      # lib/dri/swrast_dri.so, xkbcomp and the XKB data relative to itself.
+      # They are installed after the build, so neither the GL stack nor the
+      # llvm20 runtime mesa brings along can reach libcvc's configure or link.
+      #
+      # Skipping the two instead would leave cvcGL's rendering permanently
+      # untested in CI, which is a smaller version of the problem this whole
+      # change exists to fix.
+      - name: Software OpenGL for the cvcGL render tests
+        if: matrix.kind == 'libcvc' && matrix.build_type != 'Debug'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            prefix="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          cvcpkg install xvfb mesa --prefix "$prefix" --config release --link shared
+          log="$RUNNER_TEMP/xvfb.log"
+          "$prefix/bin/Xvfb" :99 -screen 0 1280x1024x24 >"$log" 2>&1 &
+          for _ in $(seq 1 50); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          if [ ! -e /tmp/.X11-unix/X99 ]; then
+            echo "::error::cvcpkg's Xvfb did not come up on :99"
+            cat "$log"
+            exit 1
+          fi
+          grep -i glx "$log" || true
+          # CVC_REQUIRE_RENDER: this job CAN rasterise, so a render test that
+          # finds it cannot (cvcgl_lod_node) fails instead of skipping.
+          {
+            echo "DISPLAY=:99"
+            echo "LIBGL_ALWAYS_SOFTWARE=1"
+            echo "GALLIUM_DRIVER=llvmpipe"
+            echo "CVC_REQUIRE_RENDER=1"
+          } >> "$GITHUB_ENV"
 
       # Run the test suite against the exact artifacts we are about to
       # package. Stress / convergence / benchmark / perf-hierarchy tests
@@ -674,23 +691,20 @@ jobs:
           echo "arch=$ARCH"        >> "$GITHUB_OUTPUT"
           echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies (libcvc)
-        if: matrix.kind == 'libcvc'
-        run: |
-          # All C/C++ third-party libs (Boost/HDF5/FFTW/GSL/ImageMagick/
-          # CGAL/log4cplus/libiimod) come from cvcpkg via
-          # fetch-libcvc-deps below. Only build tooling here.
-          brew install cmake ninja zstd
-
       # ── Pull dep prefix via cvcpkg ──
       # Provides the libiimod CMake package and all third-party C/C++
-      # deps for libcvc.
+      # deps for libcvc (zstd included). Nothing comes from Homebrew.
       - name: Fetch libcvc-deps
         id: libcvc-deps-macos
         uses: ./.github/actions/fetch-libcvc-deps
         with:
           build_type: Release
           link: shared
+
+      # cmake, ninja and pkg-config from cvcpkg, as in release.yml. The
+      # compiler is the runner's Xcode clang.
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
 
       # VTK for cvcGL — see the long note in package-linux. No xorgproto here:
       # there is no X11 on macOS, so VTK's FindX11 is not in the picture.
@@ -876,6 +890,11 @@ jobs:
         with:
           build_type: ${{ matrix.build_type }}
           link: shared
+
+      # cmake, ninja and pkg-config from cvcpkg, as in release.yml, instead
+      # of the runner image's cmake. The compiler is the image's VS 2022.
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
 
       # CUDA toolkit so the shipped Windows artifacts can offload to
       # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
