@@ -197,6 +197,22 @@ if(@OpenMP_CXX_FOUND@)
   find_dependency(OpenMP)
 endif()
 
+# MSVC builds link LLVM's libomp from cvcpkg's `openmp` bundle instead of MSVC's
+# non-redistributable libomp140 (see src/cvc/CMakeLists.txt). A STATIC cvc exports
+# that as $<LINK_ONLY:LLVMOpenMP::omp>, so recreate the target from this package's
+# own lib/libomp-llvm.lib, with the same /NODEFAULTLIB so the consumer's link never
+# binds MSVC's libomp.lib either. Harmless for a SHARED cvc, whose export does not
+# name it.
+if(@CVC_USES_LLVM_OPENMP@ AND NOT TARGET LLVMOpenMP::omp)
+  find_library(_CVC_LLVM_LIBOMP NAMES libomp-llvm HINTS "${PACKAGE_PREFIX_DIR}/lib")
+  if(_CVC_LLVM_LIBOMP)
+    add_library(LLVMOpenMP::omp INTERFACE IMPORTED)
+    set_target_properties(LLVMOpenMP::omp PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${_CVC_LLVM_LIBOMP}"
+      INTERFACE_LINK_OPTIONS "/NODEFAULTLIB:libomp.lib;/NODEFAULTLIB:libompd.lib")
+  endif()
+endif()
+
 if(@CVC_ENABLE_FFTW@)
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
