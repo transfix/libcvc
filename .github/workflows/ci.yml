@@ -285,6 +285,23 @@ jobs:
       - name: Install build tools (cvcpkg)
         uses: ./.github/actions/cvcpkg-build-tools
 
+      # libcurl for cvc::net's HTTP backend: src/cvc/CMakeLists.txt finds it
+      # with find_package(CURL), and without it http(s):// compiles to a stub
+      # that the tests cannot exercise. The libcvc recipe declares no curl on
+      # Linux, so the deps prefix has none; this job used to find the copy the
+      # apt -dev packages dragged in. cvcpkg's curl bundle instead, in every
+      # lane, the coverage lane included.
+      - name: Install libcurl (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            prefix="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          cvcpkg install curl --prefix "$prefix" --config release --link shared
+
       # lcov for the coverage lanes: cvcpkg's lcov 2.0 (the release Ubuntu
       # 24.04's apt package was, so capture and --ignore-errors behave the
       # same), with the cvcpkg perl it runs on. Its own prefix, and not on
