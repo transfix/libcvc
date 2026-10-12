@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/state_io.h>  // §13.10 save_state / restore_state
@@ -243,6 +244,38 @@ struct HttpProviderGuard {
 struct SchemeGuard {
   std::string scheme;
   ~SchemeGuard() { unregister_uri_handler(scheme); }
+};
+
+// Set (or, with nullptr, unset) an environment variable for a scope and restore the caller's value
+// after it, even on an ASSERT. register_cvc_uri_handler snapshots CVC_ARIADNE_PATH when it is
+// called, so a guard around that call is enough to make a test's cvc:// search path hermetic.
+class ScopedEnv {
+public:
+  ScopedEnv(const char *name, const char *value) : name_(name) {
+    if (const char *old = std::getenv(name)) {
+      had_ = true;
+      old_ = old;
+    }
+    put(value);
+  }
+  ~ScopedEnv() { put(had_ ? old_.c_str() : nullptr); }
+  ScopedEnv(const ScopedEnv &) = delete;
+  ScopedEnv &operator=(const ScopedEnv &) = delete;
+
+private:
+  void put(const char *value) {
+#ifdef _WIN32
+    _putenv_s(name_.c_str(), value ? value : ""); // "" removes it on Windows
+#else
+    if (value)
+      setenv(name_.c_str(), value, 1);
+    else
+      unsetenv(name_.c_str());
+#endif
+  }
+  std::string name_;
+  bool had_ = false;
+  std::string old_;
 };
 
 // Snapshot + restore the process-global file byte caps, so a test that lowers a cap cannot leak
@@ -939,6 +972,40 @@ scene:
   EXPECT_FLOAT_EQ(v->fit_height, 100.0f);
   ASSERT_TRUE(v->has_volren);
   ASSERT_EQ(v->volren.isosurfaces.size(), 1u);
+  EXPECT_EQ(v->sdf_algorithm, "v2"); // the default
+}
+
+// source: { sdf: { ..., algorithm: v1|v2|igl } } picks the cvc::sdf implementation; the loader
+// keeps it lower-cased and leaves validation (and the igl -> v2 fallback) to the realizer.
+TEST(AriadneScene, VolumeSdfAlgorithm) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: a
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 16, algorithm: IGL } }
+    - node: b
+      type: volslice
+      source: { sdf: { mesh: stanford.bunny, algorithm: v1 } }
+    - node: c
+      type: fe_lab
+      source: { sdf: { mesh: stanford.bunny } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *a = find_scene_node(r.scene.nodes, "a");
+  const SceneNode *b = find_scene_node(r.scene.nodes, "b");
+  const SceneNode *c = find_scene_node(r.scene.nodes, "c");
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(a->sdf_algorithm, "igl");
+  EXPECT_EQ(a->sdf_dim, 16);
+  EXPECT_EQ(b->sdf_algorithm, "v1");
+  EXPECT_EQ(c->sdf_algorithm, "v2");
+  EXPECT_EQ(c->source_sdf_mesh, "stanford.bunny"); // a custom node type reads the same source
+  EXPECT_FALSE(c->props.has("source"));            // ... which the built-in parser consumed
 }
 
 // material: { texture: <uri> } — an image sampled through the mesh UVs.
@@ -2448,7 +2515,10 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
     std::ofstream o(comps / "panel.ari");
     o << "units:\n  panel:\n    window: P\n    children:\n      - text: FromComponent\n";
   }
-  register_cvc_uri_handler({root.string()});
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // only `root`, whatever the shell has set
+    register_cvc_uri_handler({root.string()});
+  }
   SchemeGuard g{"cvc"};
   LoadResult r = load_string("import: cvc://components/panel.ari\nwindows:\n  - include: panel\n");
   ASSERT_TRUE(r.ok) << r.error;
@@ -2458,6 +2528,70 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
   EXPECT_NE(find(r.root, Kind::Text, "FromComponent"), nullptr);
   std::error_code ec;
   fs::remove_all(root, ec);
+}
+
+// Every SHIPPED component (src/cvc/ariadne/components/*.ari, found from this file's location) is
+// imported through cvc:// and included the way a document does: it must expand to a window whose
+// widgets all parse and bind, and INDEX.ari must catalog it. A component's unit is named after
+// its file. The cvc:// search path is the SOURCE tree only: CVC_ARIADNE_PATH (searched first)
+// would otherwise serve, say, a stale installed copy of each component -- the test plants such a
+// decoy library on it to prove the source file is the one validated.
+TEST(AriadneComponents, ShippedComponentsLoadClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  const fs::path comps = ariadne_dir / "components";
+  if (!fs::is_directory(comps))
+    GTEST_SKIP() << "component sources not found at " << comps.string();
+  std::ifstream idx(comps / "INDEX.ari", std::ios::binary);
+  ASSERT_TRUE(idx.good()) << "INDEX.ari is missing";
+  const std::string index((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
+
+  // A dev shell pointing CVC_ARIADNE_PATH at another component library (an installed
+  // share/libcvc/ariadne): its copy of every shipped file is broken.
+  const fs::path decoy = fs::temp_directory_path() / "ariadne_shipped_components_decoy";
+  fs::create_directories(decoy / "components");
+  for (const fs::directory_entry &e : fs::directory_iterator(comps)) {
+    if (!e.is_regular_file())
+      continue;
+    std::ofstream o(decoy / "components" / e.path().filename(), std::ios::binary);
+    o << "units:\n  not_the_source: { text: Decoy }\n";
+  }
+  {
+    ScopedEnv dev_shell("CVC_ARIADNE_PATH", decoy.string().c_str());
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // the source tree only
+    register_cvc_uri_handler({ariadne_dir.string()});
+  }
+  SchemeGuard g{"cvc"};
+  int checked = 0;
+  for (const fs::directory_entry &e : fs::directory_iterator(comps)) {
+    const std::string file = e.path().filename().string();
+    if (!e.is_regular_file() || e.path().extension() != ".ari" || file == "INDEX.ari")
+      continue;
+    const std::string unit = e.path().stem().string();
+    SCOPED_TRACE(file);
+    const UriResult src = resolve("cvc://components/" + file);
+    std::error_code eq_ec;
+    EXPECT_TRUE(src.ok && fs::equivalent(fs::path(src.canonical), e.path(), eq_ec))
+        << "cvc://components/" << file << " resolved to '" << src.canonical
+        << "', not the source file " << e.path().string();
+    LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + file +
+                               "\nwindows:\n  - include: " + unit + "\n");
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_NE(find(r.root, Kind::Window), nullptr) << "unit '" << unit << "' is not a window";
+    for (const std::string &w : r.warnings) {
+      EXPECT_EQ(w.find("unrecognized widget key"), std::string::npos) << w;
+      EXPECT_EQ(w.find("has no bind"), std::string::npos) << w;
+      EXPECT_EQ(w.find("unknown unit"), std::string::npos) << w;
+      EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
+      EXPECT_EQ(w.find("parse error"), std::string::npos) << w;
+    }
+    EXPECT_NE(index.find("file: " + file), std::string::npos) << "INDEX.ari does not list " << file;
+    ++checked;
+  }
+  EXPECT_GE(checked, 13); // the 13 components shipped with mesh_tools / fe_controls
+  std::error_code ec;
+  fs::remove_all(decoy, ec);
 }
 
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {

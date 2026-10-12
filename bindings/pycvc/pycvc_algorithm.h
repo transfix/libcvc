@@ -32,7 +32,7 @@ namespace pycvc {
 // int) works from Python; the .cpp casts to the matching cvc enum.
 
 // cvc::sdf_algorithm
-enum sdf_algorithm { SDF_V1 = 0, SDF_V2 = 1 };
+enum sdf_algorithm { SDF_V1 = 0, SDF_V2 = 1, SDF_IGL = 2 };
 
 // cvc::extraction_method
 enum extraction_method { DUALLIB = 0, FASTCONTOURING = 1, LIBISOCONTOUR = 2 };

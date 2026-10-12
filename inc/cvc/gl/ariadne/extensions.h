@@ -29,9 +29,11 @@
 // shader effects with no bespoke host C++ — which is exactly what lets a demo collapse into a
 // self-contained `.ari`.
 //
-// Today it installs the default shader presets (terrain_bump / bark) and the L-system scene node
-// types (forest_trees / …). It takes the app because app-scoped extensions (the L-system program
-// intrinsics) register against the app's runtime; the process-global ones ignore it.
+// Today it installs the default shader presets (terrain_bump / bark), the L-system scene node
+// types (forest_trees / …) and, on a CVC_ENABLE_LIBIGL build, the geometry-processing and
+// finite-element node types (mesh_lab / fe_lab, mesh_nodes.h). It takes the app because app-scoped
+// extensions (the L-system program intrinsics) register against the app's runtime; the
+// process-global ones ignore it. ariadne_hello and AriRuntime (so pycvc hosts) both call it.
 
 #ifndef CVC_GL_ARIADNE_EXTENSIONS_H
 #define CVC_GL_ARIADNE_EXTENSIONS_H
@@ -43,7 +45,8 @@ namespace ariadne {
 
 // Register all of cvcGL's Ariadne extensions for `app`. Idempotent; call once at host setup, before
 // loading/realizing a document. A host that wants only a subset can call the individual registrars
-// (register_default_shader_presets / register_lsystem_node_types) instead.
+// (register_default_shader_presets / register_lsystem_node_types / register_mesh_node_types)
+// instead.
 void register_cvcgl_extensions(cvc::app &app);
 
 } // namespace ariadne

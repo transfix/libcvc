@@ -1,0 +1,72 @@
+# mesh_lab.ari — geometry processing and finite elements, declared in Ariadne and run by libigl.
+#
+# Two custom scene nodes from cvcGL's extension bundle (src/cvcGL/ariadne/mesh_nodes.cpp):
+#   - `mesh` (type: mesh_lab): the Stanford bunny, driven by the mesh_tools component — smooth,
+#     decimate, repair, reset, and colour by curvature or geodesic distance;
+#   - `domain` (type: fe_lab): the signed distance field of the same bunny, tet-meshed with the LBIE
+#     mesher and solved as a Poisson or heat problem from the fe_controls component; the field shows
+#     on the boundary (translucent while a slice is on) and on a movable cut.
+# Every control is a reusable component bound to the nodes' own state keys: no host C++. Both node
+# types exist only in a libcvc built with CVC_ENABLE_LIBIGL, so `customs:` makes a build without it
+# refuse the document up front instead of showing an empty scene.
+#
+# Run from the repository root:
+#   ariadne_hello src/cvcGL/examples/mesh_lab.ari --component-path src/cvc/ariadne
+
+meta:
+  name: Mesh lab (Ariadne + libigl)
+  author: cvc
+  min_libcvc: 3.4.0
+
+customs:
+  - node: mesh_lab
+    required: true
+  - node: fe_lab
+    required: true
+
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/mesh_tools.ari
+  - cvc://components/fe_controls.ari
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: mesh_tools
+  - include: fe_controls
+  - include: stage_lighting
+  - include: camera_controls
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The mesh: props seed mesh_ops.* (they win over the components' widget defaults).
+    - node: mesh
+      type: mesh_lab
+      source: { file: stanford.bunny }
+      fit: { height: 100, up: y }
+      material: { color: [0.85, 0.82, 0.88], ambient: 0.22, diffuse: 0.9 }
+      smooth_iterations: 3
+      target_faces: 5000
+      color_mode: mean
+      colormap: viridis
+    # The FE domain: a coarse SDF of the bunny beside it, meshed and solved as soon as it loads.
+    - node: domain
+      type: fe_lab
+      source: { sdf: { mesh: stanford.bunny, dim: 32 } }
+      fit: { height: 100, up: y }
+      transform: { position: [130, 0, 0] }
+      material: { color: [0.75, 0.78, 0.85], ambient: 0.25, diffuse: 0.85 }
+      problem: poisson
+      auto_mesh: true
+      auto_solve: true
+      slice_axis: 0
+  lights:
+    - light: studio
+      rig: three_point

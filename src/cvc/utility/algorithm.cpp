@@ -21,6 +21,7 @@
 */
 
 #include <cvc/core/app.h>
+#include <cvc/geometry/mesh_ops.h>
 #include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
 
@@ -349,6 +350,43 @@ cvc::volume sdf_library_v2(cvc::app &ctx, const cvc::geometry &geom, const cvc::
 
   ctx.threadProgress(1.0); // Complete
 
+  return cv;
+}
+
+// -------
+// sdf_igl
+// -------
+// Purpose:
+//   Signed distance sampled at the output volume's nodes (XMin() + i * XSpan(),
+//   ...), any dimensions, no resampling: exact distance to the triangle surface
+//   (tris and split quads) from libigl's AABB tree, negative inside by the fast
+//   generalized winding number, so open or self-intersecting meshes still get a
+//   sensible inside. Throws mesh_ops_unavailable without CVC_ENABLE_LIBIGL.
+// ---- Change History ----
+// 10/08/2026 -- Joe R. -- Creation.
+cvc::volume sdf_igl(cvc::app &ctx, const cvc::geometry &geom, const cvc::dimension &dim,
+                    const cvc::bounding_box &bbox, bool flipNormals) {
+  using namespace cvc;
+  const mesh_locator locator(geom);
+  ctx.threadProgress(0.10); // AABB tree built
+
+  volume cv(ctx, dim, Float, bbox);
+  float *values = reinterpret_cast<float *>(*cv);
+  const uint64 nx = cv.XDim(), ny = cv.YDim(), nz = cv.ZDim();
+  // One z-slab of nodes per query batch keeps the query buffer small.
+  geometry::points_t slab(nx * ny);
+  for (uint64 k = 0; k < nz; k++) {
+    for (uint64 j = 0; j < ny; j++)
+      for (uint64 i = 0; i < nx; i++)
+        slab[i + j * nx] = {{cv.XMin() + double(i) * cv.XSpan(), cv.YMin() + double(j) * cv.YSpan(),
+                             cv.ZMin() + double(k) * cv.ZSpan()}};
+    const std::vector<double> d = locator.signed_distance(slab);
+    for (uint64 q = 0; q < nx * ny; q++)
+      values[q + k * nx * ny] = float(flipNormals ? -d[q] : d[q]);
+    ctx.threadProgress(0.10 + 0.89 * double(k + 1) / double(nz));
+  }
+
+  ctx.threadProgress(1.0); // Complete
   return cv;
 }
 #endif // CVC_ENABLE_SDF
@@ -703,6 +741,17 @@ volume sdf(app &ctx, const geometry &geom, const dimension &dim, const bounding_
     }
 
     vol.desc("Signed Distance Function - DistanceTransform v2");
+  } break;
+
+  case SDF_IGL: {
+    // The documented default: an unset (default-constructed, all-zero) bounding
+    // box means the geometry's extents. Not bbox.isNull(), which is true for
+    // any zero-volume box -- e.g. the planar z0 == z1 box of a 2-D slice, a
+    // request SDF_IGL serves exactly.
+    const bool unset = bbox.minx == 0 && bbox.miny == 0 && bbox.minz == 0 && bbox.maxx == 0 &&
+                       bbox.maxy == 0 && bbox.maxz == 0;
+    vol = sdf_igl(ctx, geom, dim, unset ? geom.extents() : bbox, flipNormals);
+    vol.desc("Signed Distance Function - libigl (exact distance, winding-number sign)");
   } break;
 
   default:

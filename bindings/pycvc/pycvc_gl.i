@@ -537,6 +537,13 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // Replace the std::vector<double> updateVertices with a numpy-direct one (below) so
 // the per-frame deform path reads the buffer directly instead of via .tolist().
 %ignore cvc::gl::GeometryNode::updateVertices(const std::vector<double> &);
+// Scalar-field colouring: the colormap crosses by NAME ("viridis", "turbo", ...)
+// and the range as a tuple -- cvc::colormap_kind and std::pair are not wrapped
+// here. The replacements below are snake_case so these %ignores cannot eat them;
+// setScalarRange / clearScalarField / hasScalarField wrap as they are.
+%ignore cvc::gl::GeometryNode::setScalarField;
+%ignore cvc::gl::GeometryNode::setColorMap;
+%ignore cvc::gl::GeometryNode::scalarRange;
 %extend cvc::gl::GeometryNode {
   // Zero-copy texture (default): the vtkTexture aliases img's RGBA8 buffer, so a
   // later img.numpy() pixel edit + texture_modified() shows live with no re-copy.
@@ -566,6 +573,33 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
     std::vector<double> xyz(data, data + view.len / sizeof(double));
     PyBuffer_Release(&view);
     $self->updateVertices(xyz);
+  }
+
+  // setScalarField: one value per point, auto range (min/max), or [lo, hi].
+  void set_scalar_field(const std::vector<double>& values,
+                        const std::string& colormap = "viridis") {
+    cvc::colormap_kind k;
+    if (!cvc::colormap_from_string(colormap, k))
+      throw std::invalid_argument("set_scalar_field: unknown colormap '" + colormap + "'");
+    $self->setScalarField(values, k);
+  }
+  void set_scalar_field(const std::vector<double>& values, const std::string& colormap, double lo,
+                        double hi) {
+    cvc::colormap_kind k;
+    if (!cvc::colormap_from_string(colormap, k))
+      throw std::invalid_argument("set_scalar_field: unknown colormap '" + colormap + "'");
+    $self->setScalarField(values, k, lo, hi);
+  }
+  void set_color_map(const std::string& colormap) {
+    cvc::colormap_kind k;
+    if (!cvc::colormap_from_string(colormap, k))
+      throw std::invalid_argument("set_color_map: unknown colormap '" + colormap + "'");
+    $self->setColorMap(k);
+  }
+  // (lo, hi) the field is mapped with; (nan, nan) without one.
+  PyObject* scalar_range() {
+    const std::pair<double, double> r = $self->scalarRange();
+    return Py_BuildValue("(dd)", r.first, r.second);
   }
 }
 %include "cvc/gl/GeometryNode.h"

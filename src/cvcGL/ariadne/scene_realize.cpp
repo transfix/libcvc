@@ -8,6 +8,7 @@
 #include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/mesh_ops.h> // mesh_ops_available() — source.sdf.algorithm: igl
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LightNode.h>
@@ -28,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <vtkRenderer.h>
 
 namespace cvc {
@@ -142,57 +144,6 @@ cvc::geometry make_heightfield(const cvc::ariadne::SceneHeightfield &hf) {
       g.tris().push_back({a, b, d});
       g.tris().push_back({a, d, c});
     }
-  return g;
-}
-
-// `fit:` — bake a "stand this mesh on the ground" normalization into `raw`: optionally rotate a
-// canonical Y-up mesh +90° about X to Z-up ((x,y,z)->(x,-z,y), a proper rotation so winding and
-// normals stay valid), centre it in XY, sit its base on z=0, and scale its tallest extent to
-// `height`. Returns a fresh geometry (points/normals/tris/colours), leaving `raw` untouched. This
-// is the general form of bunny_shadow.cpp's stand_bunny — placing an arbitrarily-authored mesh
-// predictably on a ground plane.
-cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height) {
-  const auto &P = raw.points();
-  const auto &N = raw.normals();
-  const auto &C = raw.colors();
-  const auto rot = [up_y](double x, double y, double z, double o[3]) {
-    if (up_y) {
-      o[0] = x;
-      o[1] = -z;
-      o[2] = y;
-    } else {
-      o[0] = x;
-      o[1] = y;
-      o[2] = z;
-    }
-  };
-  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
-  for (const auto &p : P) {
-    double w[3];
-    rot(p[0], p[1], p[2], w);
-    for (int k = 0; k < 3; ++k) {
-      lo[k] = std::min(lo[k], w[k]);
-      hi[k] = std::max(hi[k], w[k]);
-    }
-  }
-  const double ext = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
-  const double s = ext > 0 ? static_cast<double>(height) / ext : 1.0;
-  const double cx = 0.5 * (lo[0] + hi[0]), cy = 0.5 * (lo[1] + hi[1]);
-  cvc::geometry g;
-  for (std::size_t i = 0; i < P.size(); ++i) {
-    double w[3];
-    rot(P[i][0], P[i][1], P[i][2], w);
-    g.points().push_back({(w[0] - cx) * s, (w[1] - cy) * s, (w[2] - lo[2]) * s});
-    if (i < N.size()) {
-      double nn[3];
-      rot(N[i][0], N[i][1], N[i][2], nn); // a proper rotation preserves unit length
-      g.normals().push_back({nn[0], nn[1], nn[2]});
-    }
-    if (i < C.size())
-      g.colors().push_back(C[i]);
-  }
-  for (const auto &t : raw.tris())
-    g.tris().push_back(t);
   return g;
 }
 
@@ -461,47 +412,6 @@ void configure_volslice(VolSliceNode &vn, const cvc::ariadne::SceneVolSlice &v,
   vn.setConfig(s);
 }
 
-#if CVC_ENABLE_SDF
-// A dim³ signed-distance-field volume of a mesh, framed like the volume demos' bunny_sdf: the grid
-// spans the mesh extents padded 10% (cubic), SDF_V2. Lets a volren/volslice node declare
-// `source: { sdf: { mesh:, dim: } }` instead of a pre-baked volume file.
-cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
-                                 bool apply_fit, bool fit_up_y, float fit_height) {
-  cvc::geometry mesh = cvc::read_geometry(mesh_uri);
-  if (apply_fit)
-    mesh = fit_to_ground(mesh, fit_up_y, fit_height); // stand/centre/scale the mesh before the SDF,
-                                                      // so the volume is framed like the geometry
-  const cvc::bounding_box e = mesh.extents();
-  const double ext = std::max({e.maxx - e.minx, e.maxy - e.miny, e.maxz - e.minz});
-  const double half = ext * 1.1 * 0.5;
-  const double cx = 0.5 * (e.minx + e.maxx), cy = 0.5 * (e.miny + e.maxy),
-               cz = 0.5 * (e.minz + e.maxz);
-  const cvc::bounding_box bbox(cx - half, cy - half, cz - half, cx + half, cy + half, cz + half);
-  const int d = dim > 0 ? dim : 64;
-  return cvc::sdf(app, mesh, cvc::dimension(d, d, d), bbox, cvc::SDF_V2);
-}
-#endif
-
-// The volume a volren/volslice node draws: loaded from `source: { file }`, or computed as the SDF
-// of a mesh (`source: { sdf: { mesh:, dim: } }`). Throws on failure — the caller's try/catch warns
-// and skips the node.
-cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
-                             std::vector<std::string> *warnings) {
-  if (!n.source_sdf_mesh.empty()) {
-#if CVC_ENABLE_SDF
-    return sdf_volume_from_mesh(sg.appContext(), n.source_sdf_mesh, n.sdf_dim, n.has_fit,
-                                n.fit_up_y, n.fit_height);
-#else
-    (void)warnings;
-    throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
-#endif
-  }
-  cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
-  if (!src.ok)
-    throw std::runtime_error("unresolved source");
-  return cvc::volume(sg.appContext(), src.path);
-}
-
 // Feed a SceneTransferFunction to a VolumeNode (the VTK GPU mapper). Point values are ABSOLUTE
 // scalar values — the mapper takes the raw domain directly, so auto_domain/window don't apply (see
 // SceneVolume). VolumeNode::setTransferFunction wants two flat tables: colour [scalar,r,g,b,...]
@@ -535,42 +445,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
 
   if (n.type == "geometry") {
     cvc::geometry geom;
-    if (n.has_heightfield) {
-      geom = make_heightfield(n.heightfield); // a procedural displaced grid — no asset
-    } else if (n.source_primitive == "plane") {
-      geom = make_plane(n.plane_size); // a procedural ground quad — no asset
-    } else {
-      if (n.source_file.empty()) {
-        warn(warnings, "ari: scene node '" + n.id +
-                           "' (geometry) has no source (a file/URI or a { plane } primitive)");
-        return;
-      }
-      cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
-      if (!src.ok)
-        return;
-      try {
-        geom = cvc::read_geometry(src.path);
-      } catch (const std::exception &e) {
-        warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
-        return;
-      }
-    }
-    if (n.has_fit) {
-      // `fit:` — bake center/ground/scale (and optional Y-up→Z-up) into a LOADED mesh. A built-in
-      // primitive is already canonically placed + sized (source.plane.size), and up:y would rotate
-      // the ground quad into a vertical wall — so ignore fit on a primitive and say so.
-      if (n.has_heightfield)
-        warn(warnings, "ari: scene node '" + n.id +
-                           "': `fit` is ignored on a heightfield (already centered on z=0; size it "
-                           "via source.heightfield.size)");
-      else if (n.source_primitive.empty())
-        geom = fit_to_ground(geom, n.fit_up_y, n.fit_height);
-      else
-        warn(warnings, "ari: scene node '" + n.id + "': `fit` is ignored on the built-in '" +
-                           n.source_primitive +
-                           "' primitive (already centered on z=0; size it via "
-                           "source.plane.size)");
-    }
+    if (!read_node_geometry(sg, n, geom, warnings))
+      return;
     std::shared_ptr<GeometryNode> g =
         parent ? parent->createChild<GeometryNode>(n.id, geom)
                : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id, geom));
@@ -820,6 +696,164 @@ void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedSc
 }
 
 } // namespace
+
+// --- helpers shared with custom node realizers (scene_realize.h) -------------
+
+// `fit:` — bake a "stand this mesh on the ground" normalization into `raw`: optionally rotate a
+// canonical Y-up mesh +90° about X to Z-up ((x,y,z)->(x,-z,y), a proper rotation so winding and
+// normals stay valid), centre it in XY, sit its base on z=0, and scale its tallest extent to
+// `height`. Returns a fresh geometry (points/normals/tris/colours), leaving `raw` untouched. This
+// is the general form of bunny_shadow.cpp's stand_bunny — placing an arbitrarily-authored mesh
+// predictably on a ground plane.
+cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height) {
+  const auto &P = raw.points();
+  const auto &N = raw.normals();
+  const auto &C = raw.colors();
+  const auto rot = [up_y](double x, double y, double z, double o[3]) {
+    if (up_y) {
+      o[0] = x;
+      o[1] = -z;
+      o[2] = y;
+    } else {
+      o[0] = x;
+      o[1] = y;
+      o[2] = z;
+    }
+  };
+  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &p : P) {
+    double w[3];
+    rot(p[0], p[1], p[2], w);
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], w[k]);
+      hi[k] = std::max(hi[k], w[k]);
+    }
+  }
+  const double ext = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
+  const double s = ext > 0 ? static_cast<double>(height) / ext : 1.0;
+  const double cx = 0.5 * (lo[0] + hi[0]), cy = 0.5 * (lo[1] + hi[1]);
+  cvc::geometry g;
+  for (std::size_t i = 0; i < P.size(); ++i) {
+    double w[3];
+    rot(P[i][0], P[i][1], P[i][2], w);
+    g.points().push_back({(w[0] - cx) * s, (w[1] - cy) * s, (w[2] - lo[2]) * s});
+    if (i < N.size()) {
+      double nn[3];
+      rot(N[i][0], N[i][1], N[i][2], nn); // a proper rotation preserves unit length
+      g.normals().push_back({nn[0], nn[1], nn[2]});
+    }
+    if (i < C.size())
+      g.colors().push_back(C[i]);
+  }
+  for (const auto &t : raw.tris())
+    g.tris().push_back(t);
+  return g;
+}
+
+// The mesh a `type: geometry` node declares: a procedural heightfield or plane, or a file/URI
+// read and then `fit:`ted. Warns and returns false when there is nothing to show.
+bool read_node_geometry(SceneGraph &, const cvc::ariadne::SceneNode &n, cvc::geometry &geom,
+                        std::vector<std::string> *warnings) {
+  if (n.has_heightfield) {
+    geom = make_heightfield(n.heightfield); // a procedural displaced grid — no asset
+  } else if (n.source_primitive == "plane") {
+    geom = make_plane(n.plane_size); // a procedural ground quad — no asset
+  } else {
+    if (n.source_file.empty()) {
+      warn(warnings, "ari: scene node '" + n.id + "' (" + n.type +
+                         ") has no source (a file/URI or a { plane } primitive)");
+      return false;
+    }
+    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+    if (!src.ok)
+      return false;
+    try {
+      geom = cvc::read_geometry(src.path);
+    } catch (const std::exception &e) {
+      warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
+      return false;
+    }
+  }
+  if (n.has_fit) {
+    // `fit:` — bake center/ground/scale (and optional Y-up→Z-up) into a LOADED mesh. A built-in
+    // primitive is already canonically placed + sized (source.plane.size), and up:y would rotate
+    // the ground quad into a vertical wall — so ignore fit on a primitive and say so.
+    if (n.has_heightfield)
+      warn(warnings, "ari: scene node '" + n.id +
+                         "': `fit` is ignored on a heightfield (already centered on z=0; size it "
+                         "via source.heightfield.size)");
+    else if (n.source_primitive.empty())
+      geom = fit_to_ground(geom, n.fit_up_y, n.fit_height);
+    else
+      warn(warnings, "ari: scene node '" + n.id + "': `fit` is ignored on the built-in '" +
+                         n.source_primitive +
+                         "' primitive (already centered on z=0; size it via "
+                         "source.plane.size)");
+  }
+  return true;
+}
+
+// A dim³ signed-distance-field volume of a mesh, framed like the volume demos' bunny_sdf: the grid
+// spans the mesh extents padded 10% (cubic). Lets a volren/volslice node declare
+// `source: { sdf: { mesh:, dim: } }` instead of a pre-baked volume file.
+cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
+                                 bool apply_fit, bool fit_up_y, float fit_height,
+                                 cvc::sdf_algorithm algorithm) {
+#if CVC_ENABLE_SDF
+  cvc::geometry mesh = cvc::read_geometry(mesh_uri);
+  if (apply_fit)
+    mesh = fit_to_ground(mesh, fit_up_y, fit_height); // stand/centre/scale the mesh before the SDF,
+                                                      // so the volume is framed like the geometry
+  const cvc::bounding_box e = mesh.extents();
+  const double ext = std::max({e.maxx - e.minx, e.maxy - e.miny, e.maxz - e.minz});
+  const double half = ext * 1.1 * 0.5;
+  const double cx = 0.5 * (e.minx + e.maxx), cy = 0.5 * (e.miny + e.maxy),
+               cz = 0.5 * (e.minz + e.maxz);
+  const cvc::bounding_box bbox(cx - half, cy - half, cz - half, cx + half, cy + half, cz + half);
+  const int d = dim > 0 ? dim : 64;
+  return cvc::sdf(app, mesh, cvc::dimension(d, d, d), bbox, algorithm);
+#else
+  (void)app;
+  (void)mesh_uri;
+  (void)dim;
+  (void)apply_fit;
+  (void)fit_up_y;
+  (void)fit_height;
+  (void)algorithm;
+  throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
+#endif
+}
+
+// The volume a volren/volslice (or custom) node draws: loaded from `source: { file }`, or computed
+// as the SDF of a mesh (`source: { sdf: { mesh:, dim:, algorithm: } }`). Throws on failure — the
+// caller's try/catch warns and skips the node.
+cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+                             std::vector<std::string> *warnings) {
+  if (!n.source_sdf_mesh.empty()) {
+    // algorithm: v1 | v2 (the default) | igl. igl (fast winding-number sign + exact AABB distance)
+    // needs a CVC_ENABLE_LIBIGL build; without one it falls back to v2 and says so.
+    cvc::sdf_algorithm alg = cvc::SDF_V2;
+    if (n.sdf_algorithm == "v1") {
+      alg = cvc::SDF_V1;
+    } else if (n.sdf_algorithm == "igl") {
+      if (cvc::mesh_ops_available())
+        alg = cvc::SDF_IGL;
+      else
+        warn(warnings, "ari: scene node '" + n.id +
+                           "': source.sdf.algorithm 'igl' needs a CVC_ENABLE_LIBIGL build — using "
+                           "v2");
+    } else if (!n.sdf_algorithm.empty() && n.sdf_algorithm != "v2") {
+      warn(warnings, "ari: scene node '" + n.id + "': source.sdf.algorithm '" + n.sdf_algorithm +
+                         "' is not v1, v2 or igl — using v2");
+    }
+    return sdf_volume_from_mesh(sg.appContext(), n.source_sdf_mesh, n.sdf_dim, n.has_fit,
+                                n.fit_up_y, n.fit_height, alg);
+  }
+  cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+  if (!src.ok)
+    throw std::runtime_error("unresolved source");
+  return cvc::volume(sg.appContext(), src.path);
+}
 
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix, std::vector<std::string> *warnings) {

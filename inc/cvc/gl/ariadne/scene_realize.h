@@ -23,6 +23,7 @@
 #include <cvc/ariadne/bind.h>     // SceneVisibilityBinding
 #include <cvc/ariadne/loader.h>   // LoadResult / CustomRequirement (verify_scene_customs)
 #include <cvc/ariadne/scene.h>    // SceneClock (RealizedScene holds the resolved clock by value)
+#include <cvc/core/types.h>       // cvc::sdf_algorithm (sdf_volume_from_mesh)
 #include <cvc/gl/StageLighting.h> // RealizedScene owns any StageLighting rigs
 #include <functional>
 #include <memory>
@@ -31,7 +32,9 @@
 
 namespace cvc {
 class app;
-}
+class geometry;
+class volume;
+} // namespace cvc
 
 class vtkRenderer;
 
@@ -139,6 +142,35 @@ void register_scene_node_type(const std::string &type, NodeRealizer realizer);
 
 // Whether a custom scene node `type` has a registered realizer (test/introspection).
 bool has_scene_node_type(const std::string &type);
+
+// --- the built-in source readers, for custom realizers -----------------------
+//
+// A custom node type that shows a mesh or a volume reads its `source:` exactly like the built-in
+// geometry / volren nodes do, so a document can swap `type: geometry` for a custom type without
+// changing anything else. Render/owner thread (they may read files and compute an SDF).
+
+// `fit:` — stand a mesh on the ground: optionally rotate a Y-up mesh to Z-up, centre it in XY, sit
+// its base on z = 0 and scale its tallest extent to `height`. Returns a fresh geometry (points,
+// normals, colours, tris).
+cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height);
+
+// The mesh a node's `source:` declares — a heightfield or plane primitive, or a file / URI — with
+// its `fit:` applied. Warns (naming the node) and returns false when there is no usable source.
+bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &node, cvc::geometry &geom,
+                        std::vector<std::string> *warnings);
+
+// A dim³ signed distance field of the mesh at `mesh_uri` (fit applied first when `apply_fit`),
+// framed to the mesh extents padded 10% and cubic. Negative inside. Throws on a build without
+// CVC_ENABLE_SDF or on an unreadable mesh.
+cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
+                                 bool apply_fit, bool fit_up_y, float fit_height,
+                                 cvc::sdf_algorithm algorithm = cvc::SDF_V2);
+
+// The volume a node's `source:` declares: `{ file }`, or `{ sdf: { mesh, dim, algorithm } }`
+// (algorithm v1 | v2 | igl; igl falls back to v2 with a warning when cvc::mesh_ops_available() is
+// false). Throws on failure.
+cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &node,
+                             std::vector<std::string> *warnings);
 
 // --- extensibility: named GLSL shader presets (the DSL `shader: { preset: <name> }`) ---------
 //

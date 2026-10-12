@@ -26,7 +26,9 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/utility/utility.h>
 
-#ifdef CVC_GEOMETRY_ENABLE_PROJECT
+#if defined(CVC_ENABLE_LIBIGL)
+#include <cvc/geometry/mesh_ops.h>
+#elif defined(CVC_GEOMETRY_ENABLE_PROJECT)
 // Requires CGAL
 #include <cvc/geometry/project_verts.h>
 #endif
@@ -521,7 +523,15 @@ geometry &geometry::reorient() {
 geometry &geometry::clear() { return (*this = geometry()); }
 
 geometry &geometry::project(const geometry &input) {
-#ifdef CVC_GEOMETRY_ENABLE_PROJECT
+#if defined(CVC_ENABLE_LIBIGL)
+  // Every point moves to its exact closest point on input's triangle surface
+  // (libigl AABB tree). With no triangles to project onto, nothing moves -- as
+  // the CGAL path below leaves points it finds no triangle for.
+  const geometry ref = input.tri_surface();
+  const mesh_locator locator(ref);
+  if (!locator.empty() && !const_points().empty())
+    points() = locator.closest_points(const_points()).points;
+#elif defined(CVC_GEOMETRY_ENABLE_PROJECT)
   geometry ref = input.tri_surface();
   project_verts::project(points().begin(), points().end(), ref.const_points().begin(),
                          ref.const_points().end(), ref.const_tris().begin(),
