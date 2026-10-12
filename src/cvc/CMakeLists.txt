@@ -1815,6 +1815,10 @@ target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+# Installed libcvc finds its dependencies beside it in lib/ (CMake/CvcInstallRpath.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
+cvc_set_install_rpath(cvc "${CMAKE_INSTALL_LIBDIR}")
+
 install(TARGETS cvc
   EXPORT cvcTargets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT libcvc

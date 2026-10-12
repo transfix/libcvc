@@ -219,6 +219,10 @@ if(NOT _pycvc_sitedir_rc EQUAL 0 OR _PYCVC_SITEDIR STREQUAL "" OR _PYCVC_SITEDIR
   endif()
 endif()
 message(STATUS "pycvc: installing python modules to \${CMAKE_INSTALL_PREFIX}/${_PYCVC_SITEDIR}")
+# The installed extension modules find libcvc, VTK and the rest of the prefix's
+# lib/ through a RUNPATH relative to their site-packages directory, so `import
+# pycvc` works without LD_LIBRARY_PATH (CMake/CvcInstallRpath.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 # libcvc.so must be on the loader path for the tests; the dual-mode cvc target's
 # output dir works both in-tree (built target) and standalone (imported target).
 set(_PYCVC_TEST_LIBPATH "$<TARGET_FILE_DIR:${_PYCVC_CVC_TARGET}>")
@@ -248,6 +252,7 @@ if(CVC_BUILD_PYCVC_CORE)
     SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
   )
+  cvc_set_install_rpath(pycvc "${_PYCVC_SITEDIR}")
   # LIBRARY covers the shared (native) module; ARCHIVE the static wasm archive.
   install(TARGETS pycvc
     LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc
@@ -384,6 +389,7 @@ if(CVC_BUILD_PYCVC_GL)
   # consumer gets BOTH the bindings (pycvc_gl.SceneGraph) and the reusable scene
   # utilities (pycvc_gl.camera.ChaseCamera, pycvc_gl.vehicle.VehiclePose,
   # pycvc_gl.lab.Lab, pycvc_gl.scenes.*) from one import, with no external package.
+  cvc_set_install_rpath(pycvc_gl "${_PYCVC_SITEDIR}/pycvc_gl")
   install(TARGETS pycvc_gl
     LIBRARY DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl
     ARCHIVE DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl)

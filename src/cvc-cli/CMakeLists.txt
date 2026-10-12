@@ -38,6 +38,9 @@ set_target_properties(cvc-cli PROPERTIES OUTPUT_NAME cvc)
 # "LNK1149: output filename matches input filename" (release.yml's Windows
 # -static lane). Give the executable's import library its own name.
 set_target_properties(cvc-cli PROPERTIES ARCHIVE_OUTPUT_NAME cvc-cli)
+# Installed bin/cvc finds libcvc and its dependencies in ../lib (CMake/CvcInstallRpath.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
+cvc_set_install_rpath(cvc-cli bin)
 install(TARGETS cvc-cli RUNTIME DESTINATION bin COMPONENT cvc-cli)
 
 # ---------------------------------------------------------------------------
