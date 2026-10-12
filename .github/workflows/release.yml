@@ -75,7 +75,10 @@ permissions:
 # compile with -openmp:llvm and link LLVM's redistributable libomp.dll
 # (cvcpkg's openmp bundle), not MSVC's libomp140, which Microsoft does
 # not allow redistributing. The closure check rejects any SDK whose cvc
-# still imports libomp140.
+# still imports libomp140. On macOS, where Xcode clang has no OpenMP
+# runtime at all, the same bundle supplies lib/libomp.dylib and
+# include/omp.h; without them CMake builds a serial libcvc, so sdk-smoke
+# fails a macOS archive whose consumer does not load the SDK's libomp.
 #
 # Everything the jobs build with comes from cvcpkg: the deps (below),
 # the build tools, i.e. cmake, ninja, pkg-config and patchelf

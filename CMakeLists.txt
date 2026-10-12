@@ -225,11 +225,23 @@ endif()
 
 # Setup OpenMP if enabled
 if(CVC_ENABLE_OPENMP)
+  # AppleClang has no OpenMP runtime of its own. FindOpenMP then looks for a
+  # libomp and omp.h on CMAKE_PREFIX_PATH (or OpenMP_ROOT), which cvcpkg's
+  # `openmp` bundle provides; the libcvc recipe lists it for macOS.
   find_package(OpenMP)
   if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP support enabled")
     message(STATUS "OpenMP version: ${OpenMP_CXX_VERSION}")
     message(STATUS "OpenMP flags: ${OpenMP_CXX_FLAGS}")
+    if(OpenMP_CXX_LIBRARIES)
+      message(STATUS "OpenMP libraries: ${OpenMP_CXX_LIBRARIES}")
+    endif()
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    message(WARNING "OpenMP not found - disabling OpenMP support. AppleClang ships "
+                    "no OpenMP runtime: put cvcpkg's `openmp` bundle (lib/libomp.dylib, "
+                    "include/omp.h) on CMAKE_PREFIX_PATH, or set OpenMP_ROOT, to build "
+                    "libcvc's parallel loops.")
+    set(CVC_ENABLE_OPENMP OFF)
   else()
     message(STATUS "OpenMP not found - disabling OpenMP support")
     set(CVC_ENABLE_OPENMP OFF)

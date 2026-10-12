@@ -343,11 +343,20 @@ depends:
       platforms: [linux, macos, windows]
     - name: pthreads4w
       platforms: [windows]
-    # LLVM's OpenMP runtime (libomp.dll), redistributable. MSVC builds of cvc
-    # use -openmp:llvm, and cvc links this instead of MSVC's libomp140, which
-    # Microsoft does not allow redistributing (src/cvc/CMakeLists.txt).
+    # LLVM's OpenMP runtime (libomp), redistributable.
+    #  - macOS: AppleClang ships no OpenMP runtime, so without this bundle
+    #    find_package(OpenMP) fails ("Could NOT find OpenMP_CXX"), the top-level
+    #    CMakeLists.txt turns CVC_ENABLE_OPENMP OFF, and the voxels / filtering /
+    #    smoothing loops build serially. With lib/libomp.dylib and include/omp.h
+    #    on CMAKE_PREFIX_PATH, FindOpenMP uses them with '-Xclang -fopenmp'. The
+    #    dylib's install name is @rpath/libomp.dylib, so it ships in the SDK and
+    #    loads beside libcvc like every other bundle.
+    #  - Windows: MSVC builds of cvc use -openmp:llvm, and cvc links this instead
+    #    of MSVC's libomp140, which Microsoft does not allow redistributing
+    #    (src/cvc/CMakeLists.txt).
+    # Not Linux: GCC finds its own libgomp, and no Linux lane builds with clang.
     - name: openmp
-      platforms: [windows]
+      platforms: [macos, windows]
     # libmcfgthread-2.dll: cvcpkg's native Windows mpfr is built by MinGW gcc and
     # needs it for thread-local state. cvc does not link it directly.
     - name: mingw-w64-runtime

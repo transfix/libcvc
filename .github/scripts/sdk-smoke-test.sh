@@ -18,7 +18,8 @@
 #   2. every library on its link line is in the archive or the toolchain
 #      (compiler, platform SDK, CUDA),
 #   3. every shared library the loader mapped is in the archive or the base
-#      system.
+#      system,
+#   4. on macOS, one of them is the archive's libomp.dylib.
 set -euo pipefail
 
 if [ $# -ne 2 ]; then
@@ -235,6 +236,19 @@ while IFS= read -r p; do
   esac && { echo "os   $p"; continue; }
   fail "loaded $p, outside the SDK and the base system"
 done <<<"$paths"
+
+# AppleClang has no OpenMP runtime of its own, so a macOS libcvc built with
+# OpenMP loads the archive's libomp.dylib (cvcpkg's `openmp` bundle), shared and
+# static flavor alike. Without it, CMake fell back to CVC_ENABLE_OPENMP=OFF and
+# libcvc's parallel loops are serial, which nothing else here would notice.
+if [ $os = macos ]; then
+  omp=$(grep '/libomp\.dylib$' <<<"$paths" | head -n 1 || true)
+  if [ -n "$omp" ] && inside_sdk "$omp"; then
+    echo "omp  $omp"
+  else
+    fail "the consumer did not load the SDK's lib/libomp.dylib; a libcvc built without OpenMP loads none (see the top-level CMakeLists.txt)"
+  fi
+fi
 
 if [ "$errors" -gt 0 ]; then
   echo "::error::$errors self-containment violations for $(basename "$archive")"
