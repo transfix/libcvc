@@ -2525,7 +2525,21 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
                                       double lam_hard_max = 10.0, double margin_factor = 0.5,
                                       double mass = 1.0, double d_hat_sdf = 3.0,
                                       double k_sharp = 5.0, double tau = 0.05, int ms_h = 3,
-                                      double ms_dt_mult = 4.0, int use_cuda = 0) {
+                                      double ms_dt_mult = 4.0, int use_cuda = 0,
+                                      int ms_count = 1, double frac_lo = 0.9,
+                                      double frac_hi = 0.9, unsigned long long seed = 0,
+                                      int ms_semi_implicit = 0) {
+  // L_multi start sampling (multi_start_params): the defaults are the legacy single
+  // start. Validated here, before any step releases the GIL — a throw from inside
+  // the GIL-free step would leave it unrestored. Only the low 32 bits of `seed`
+  // matter, as for torch.Generator.manual_seed.
+  cvc::nav::multi_start_params ms;
+  ms.ms_count = ms_count;
+  ms.frac_lo = frac_lo;
+  ms.frac_hi = frac_hi;
+  ms.seed = static_cast<std::uint32_t>(seed);
+  ms.semi_implicit = ms_semi_implicit != 0;
+  cvc::nav::multi_start_fracs(ms, 0, nullptr); // range check only (B = 0 draws nothing)
   cvc::nav::coef_energy_net model = cvc::nav::coef_energy_net::load(cvcnm_path); // throws on bad
   auto *t = new MaterialTrainer(std::move(model), static_cast<float>(grad_clip));
   t->use_cuda = use_cuda != 0;
@@ -2550,6 +2564,11 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
   c.multi.tau = (float)tau;
   c.multi.ms_h = ms_h;
   c.multi.ms_dt_mult = (float)ms_dt_mult;
+  c.multi.ms_count = ms.ms_count;
+  c.multi.frac_lo = ms.frac_lo;
+  c.multi.frac_hi = ms.frac_hi;
+  c.multi.seed = ms.seed;
+  c.multi.semi_implicit = ms.semi_implicit;
   return PyCapsule_New(t, kMaterialTrainerCapsule, material_trainer_capsule_dtor);
 }
 
@@ -2572,6 +2591,11 @@ PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObj
   // would make one threaded call change the default for every later step.
   cvc::nav::material_loss_config cfg = t->cfg;
   cfg.num_threads = num_threads;
+  // Fresh multi-start draws each step: this handle's step k samples with seed + k
+  // (mod 2^32), so a run is reproducible from (seed, step). A resumed run
+  // continues the stream by creating its handle with seed + steps_done. (A
+  // degenerate frac range draws nothing, so the seed is moot.)
+  cfg.multi.seed = t->cfg.multi.seed + static_cast<std::uint32_t>(t->opt.steps());
 
   double L = 0.0;
   float eta = 0.0f;
@@ -2587,7 +2611,9 @@ PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObj
 // Forward-only loss over a batch — the VALIDATION entry point. Scores a held-out
 // split without running the backward or touching the optimizer, so the weights and
 // the Adam moments are unchanged. `frozen_eta` pins the detached CVaR quantile
-// (pass NaN, the default, to compute it from this batch's own costs).
+// (pass NaN, the default, to compute it from this batch's own costs). The
+// multi-start draw uses the handle's base seed, not the step's, so the same
+// weights score the same batch identically at every point in a run.
 PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObject *obs_mask,
                                     PyObject *goal_feats, PyObject *risk_patch, PyObject *o0,
                                     PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,

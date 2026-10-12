@@ -31,8 +31,11 @@
 // is identically zero, so it shifts J's value but seeds nothing.
 //
 // L_multi (multi_start_penalty, geom_rollout.h) is a SEPARATE geometry rollout
-// (EXPLICIT Euler, no material) that backprops only into alphas/beta/gamma; its
-// grads sum into those seeds before backward_one. Set w_multi = 0 to drop it.
+// (EXPLICIT Euler by default, no material) that backprops only into
+// alphas/beta/gamma; its grads sum into those seeds before backward_one. Set
+// w_multi = 0 to drop it. cfg.multi.seed is used as-is by both the loss and the
+// gradient, so they score the same sampled starts; a training loop varies it per
+// step (the pycvc trainer uses seed + step) to draw fresh ones.
 
 #ifndef CVC_NAV_MATERIAL_TRAIN_H
 #define CVC_NAV_MATERIAL_TRAIN_H
@@ -74,7 +77,7 @@ struct material_loss_config {
   float w_multi = 0.5f;                            // multi-start robustness (L_multi)
   float lam_soft_max = 5.0f, lam_hard_max = 10.0f; // for the lreg normalization
   surrogate_material_params rollout;               // margin_factor/mass/d_hat_sdf/k_sharp
-  multi_start_params multi;                        // ms_h/ms_dt_mult/tau (margin/mass synced)
+  multi_start_params multi; // ms_h/ms_dt_mult/tau + start sampling (margin/mass synced)
   int num_threads = 0;
 };
 
