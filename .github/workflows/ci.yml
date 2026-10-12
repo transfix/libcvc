@@ -115,10 +115,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install clang-format
+      # clang-format 18 (the major the tree is formatted with) and the Python
+      # that runs git-clang-format, both from cvcpkg: nothing from apt.
+      # python311 names its interpreter python3.11, so the check below calls
+      # it explicitly rather than through git-clang-format's
+      # #!/usr/bin/env python3, which would find the runner's.
+      - name: Install clang-format (cvcpkg)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-format
+          set -euo pipefail
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          fmt="$RUNNER_TEMP/clang-format"
+          cvcpkg install clang-format python311 --prefix "$fmt" \
+            --config release --link shared --no-fallback-to-source
+          "$fmt/bin/clang-format" --version
+          echo "CVC_FMT=$fmt" >> "$GITHUB_ENV"
 
       - name: Determine merge base
         id: base
@@ -139,7 +150,8 @@ jobs:
         run: |
           set -euo pipefail
           base="${{ steps.base.outputs.base }}"
-          out=$(git clang-format --diff "$base" -- \
+          out=$("$CVC_FMT/bin/python3.11" "$CVC_FMT/bin/git-clang-format" \
+                  --binary "$CVC_FMT/bin/clang-format" --diff "$base" -- \
                   '*.c' '*.cc' '*.cpp' '*.cxx' '*.m' '*.mm' \
                   '*.h' '*.hh' '*.hpp' '*.hxx' || true)
           if [ -z "$out" ] \
