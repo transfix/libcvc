@@ -58,13 +58,20 @@ fi
 # OFF; nothing in libcvc's CMake finds GSL, levmar, OpenBLAS or libyaml).
 # Together they are about half the prefix. cmake and ninja are build tools that
 # the Windows closure carries along; an SDK has no use for them.
-unused=" abseil c-ares grpc protobuf re2 openssl openblas gsl levmar log4cplus yaml cmake ninja "
+unused=" abseil c-ares grpc protobuf re2 openblas gsl levmar log4cplus yaml cmake ninja "
 
 # "name version" per bundle, and one header field, from a cvcpkg lockfile.
 bundles() {
   tr -d '\r' <"$1" | awk '/^- name: /{n=$3} /^  version: /{print n, $2}'
 }
 field() { tr -d '\r' <"$1" | sed -n "s/^$2: //p"; }
+
+# openssl ships on Linux and Windows, where cvc::net links cvcpkg's libcurl and
+# libcurl links openssl. On macOS libcvc uses the system libcurl, so nothing in
+# the SDK links openssl there.
+if [ "$(field "$lock" platform)" = macos ]; then
+  unused="$unused openssl "
+fi
 
 pins=()
 while read -r name version; do
