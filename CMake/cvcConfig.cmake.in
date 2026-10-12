@@ -193,6 +193,10 @@ endif()
 # Gated on OpenMP_CXX_FOUND (the actual build outcome), not the request flag: if
 # OpenMP was requested but not found, cvc::cvc carries no OpenMP::OpenMP_CXX, and
 # a consumer on a no-OpenMP toolchain must NOT be forced to find it.
+# On macOS (AppleClang, no OpenMP runtime of its own) FindOpenMP resolves the
+# target to lib/libomp.dylib + include/omp.h from cvcpkg's `openmp` bundle, which
+# the SDK archive and a cvcpkg prefix both carry next to libcvc, so the prefix on
+# CMAKE_PREFIX_PATH is all a consumer needs.
 if(@OpenMP_CXX_FOUND@)
   find_dependency(OpenMP)
 endif()
