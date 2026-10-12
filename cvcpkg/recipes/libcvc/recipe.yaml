@@ -323,6 +323,17 @@ depends:
     # falls back to `find_dependency(LAPACK)` — which resolves to Accelerate.
     - name: openblas
       platforms: [linux, freebsd, openbsd, netbsd, windows]
+    # libcurl, for cvc::net's HTTP backend (Ariadne's http(s):// URIs): the
+    # find_package(CURL) in src/cvc/CMakeLists.txt, without which http(s)://
+    # compiles to a stub. Nothing declared it on Linux, so the Linux bundle and
+    # SDK always shipped the stub ("cvc::net: no HTTP backend" in release.yml's
+    # linux configure), and ci.yml only tested the backend against a libcurl
+    # that apt -dev packages happened to pull in. Windows already got curl
+    # through cmake's closure; declared here so it no longer depends on that.
+    # Not macOS: libcvc links the system libcurl there, which is part of the OS.
+    # curl's own closure is openssl (declared below) and zlib.
+    - name: curl
+      platforms: [linux, windows]
     # The gRPC/xmlrpc network state-transport stack (CVC_USING_XMLRPC + CVC_ENABLE_GRPC).
     # Scoped to the platforms this recipe actually BUILDS the transport on (the build matrix
     # below: linux/macos/windows). The wasm-mt bundle (built separately by publish-cvcgl-wasm.yml,

@@ -350,7 +350,9 @@ if(CVC_ENABLE_COVERAGE)
       )
       
     else()
-      message(WARNING "lcov or genhtml not found. Install with: sudo apt-get install lcov")
+      message(WARNING "lcov or genhtml not found. Install cvcpkg's lcov "
+                      "(cvcpkg install lcov --prefix <dir>) and put <dir>/bin on PATH, "
+                      "or pass -DLCOV_PATH=<dir>/bin/lcov -DGENHTML_PATH=<dir>/bin/genhtml")
       message(WARNING "Coverage target will not be available")
     endif()
   else()
