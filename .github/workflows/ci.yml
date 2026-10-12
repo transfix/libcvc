@@ -268,19 +268,6 @@ jobs:
           # below ("Provision gRPC via cvcpkg"), per the toolchain rule: no
           # apt/brew for build dependencies.
 
-      # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
-      # at runtime when an NVIDIA driver is present. cudart is linked
-      # statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below) so users
-      # only need the NVIDIA driver, not a CUDA install. CMake's
-      # check_language(CUDA) auto-disables CUDA gracefully if this step
-      # ever fails.
-      - name: Install CUDA toolkit (Linux)
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: '12.5.1'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
-
       # ── Pull dep bundle from libcvc-deps (via cvcpkg) ──
       # The bundle provides the `libiimod` CMake package (no longer
       # vendored in this tree) plus Boost/HDF5/FFTW/GSL/ImageMagick/
@@ -293,6 +280,15 @@ jobs:
         with:
           build_type: Release
           link: shared
+
+      # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
+      # at runtime when an NVIDIA driver is present. cudart is linked
+      # statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below) so users
+      # only need the NVIDIA driver, not a CUDA install. cvcpkg's
+      # cuda-toolkit recipe, in a prefix of its own; the action exports
+      # CUDACXX, which Configure's Ninja build picks up.
+      - name: Install CUDA toolkit (cvcpkg)
+        uses: ./.github/actions/cvcpkg-cuda-toolkit
 
       # ── gRPC, hermetically via cvcpkg (NOT apt) ──
       # The distributed-state gRPC transport (CVC_ENABLE_GRPC) needs grpc +
@@ -885,12 +881,10 @@ jobs:
       # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
       # is linked statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below)
       # so users only need the NVIDIA driver, not a CUDA install.
-      - name: Install CUDA toolkit (Windows)
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: '12.5.1'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+      # Configure points the VS generator at it with -T cuda=.
+      - name: Install CUDA toolkit (cvcpkg)
+        id: cuda
+        uses: ./.github/actions/cvcpkg-cuda-toolkit
 
       # VTK for cvcGL — see the long note in package-linux. No xorgproto: no X11
       # on Windows, so VTK's FindX11 never runs.
@@ -919,7 +913,11 @@ jobs:
           # file, no aqt Qt6, no VTK source cache.
           $qtPrefix = if ($depsPath) { $depsPath } else { '' }
           # No coverage gate on Windows, so cvcGL is on.
-          cmake -B build `
+          # -T cuda=<toolkit>: the VS generator takes the CUDA MSBuild
+          # integration from the cvcpkg toolkit's extras\ instead of from
+          # a Visual Studio install of it.
+          $cuda = '${{ steps.cuda.outputs.root }}' -replace '/', '\'
+          cmake -B build -T "cuda=$cuda" `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `

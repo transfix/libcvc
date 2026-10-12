@@ -68,7 +68,8 @@ permissions:
 # built with CUDA (cvc/utility/cuda_utils.h via cvc/volume/voxels.h),
 # and the static flavor links cudart_static. Running a consumer only
 # needs the NVIDIA driver. The same holds for the Windows SDK, which is
-# also built with CUDA.
+# also built with CUDA. The archives cannot carry the toolkit: NVIDIA's
+# EULA lets nobody redistribute nvcc or the headers.
 #
 # On Windows the OpenMP runtime comes from cvcpkg too: MSVC builds of cvc
 # compile with -openmp:llvm and link LLVM's redistributable libomp.dll
@@ -76,13 +77,15 @@ permissions:
 # not allow redistributing. The closure check rejects any SDK whose cvc
 # still imports libomp140.
 #
-# Everything the jobs build with comes from cvcpkg: the deps (below)
-# and the build tools, i.e. cmake, ninja, pkg-config and patchelf
-# (.github/actions/cvcpkg-build-tools). Nothing comes from apt or
-# Homebrew. Two exceptions remain: the compiler, which is the runner
-# image's GCC / Xcode clang / VS 2022 until a move to cvcpkg's llvm is
-# assessed, and the CUDA toolkit, from NVIDIA's network installer
-# because cvcpkg has no toolkit recipe yet.
+# Everything the jobs build with comes from cvcpkg: the deps (below),
+# the build tools, i.e. cmake, ninja, pkg-config and patchelf
+# (.github/actions/cvcpkg-build-tools), and the CUDA toolkit
+# (.github/actions/cvcpkg-cuda-toolkit: cvcpkg's cuda-toolkit recipe,
+# which downloads NVIDIA's redist archives onto the runner, since
+# cvcpkg.org may not host them). Nothing comes from apt or Homebrew.
+# One exception remains: the compiler, which is the runner image's
+# GCC / Xcode clang / VS 2022 until a move to cvcpkg's llvm is
+# assessed.
 #
 # Third-party deps are always cvcpkg's release/shared bundles, for
 # every lane (Debug and static included). That is the one catalog tuple
@@ -157,19 +160,6 @@ jobs:
           echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
           echo "linksfx=$LINKSFX"  >> "$GITHUB_OUTPUT"
 
-      # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
-      # at runtime when an NVIDIA driver is present. cudart is linked
-      # statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below) so users
-      # only need the NVIDIA driver, not a CUDA install. CMake's
-      # check_language(CUDA) auto-disables CUDA gracefully if this step
-      # ever fails.
-      - name: Install CUDA toolkit (Linux)
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: '12.5.1'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
-
       # ── Pull deps from cvcpkg (via libcvc-deps composite action) ──
       # Required for libiimod (no longer vendored, see PR #63), in
       # addition to providing Boost/HDF5/FFTW/GSL/CGAL/log4cplus/
@@ -194,11 +184,19 @@ jobs:
 
       # cmake, ninja, pkg-config and patchelf from cvcpkg, like every
       # library above. Nothing comes from apt; the compiler is the
-      # runner's and CUDA is NVIDIA's (above).
+      # runner's.
       - name: Install build tools (cvcpkg)
         uses: ./.github/actions/cvcpkg-build-tools
         with:
           tools: cmake ninja pkg-config patchelf
+
+      # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
+      # at runtime when an NVIDIA driver is present. cudart is linked
+      # statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below) so users
+      # only need the NVIDIA driver, not a CUDA install. The action
+      # exports CUDACXX, which Configure's Ninja build picks up.
+      - name: Install CUDA toolkit (cvcpkg)
+        uses: ./.github/actions/cvcpkg-cuda-toolkit
 
       - name: Configure
         run: |
@@ -278,11 +276,11 @@ jobs:
           # Archive already lives in $GITHUB_WORKSPACE ($PWD); no copy needed.
           du -sh "$DIST" "$STEM.tar.gz" || true
 
-      # Explicit libcvc- prefix instead of bare *.tar.gz globs. The
-      # Jimver/cuda-toolkit action drops cuda_keyring.deb into
-      # $GITHUB_WORKSPACE while installing the toolkit, and a permissive
-      # glob sweeps stray files into the release. See v3.1.1 release
-      # where cuda_keyring.deb had to be manually removed.
+      # Explicit libcvc- prefix instead of bare *.tar.gz globs: a
+      # permissive glob sweeps stray files into the release. See the
+      # v3.1.1 release, where the cuda_keyring.deb that the former
+      # Jimver/cuda-toolkit step dropped into $GITHUB_WORKSPACE had to be
+      # removed by hand.
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -516,7 +514,7 @@ jobs:
 
       # cmake and pkg-config from cvcpkg rather than the runner image.
       # The VS generator needs no ninja; the compiler is the runner's
-      # VS 2022 and CUDA is NVIDIA's (below).
+      # VS 2022.
       - name: Install build tools (cvcpkg)
         uses: ./.github/actions/cvcpkg-build-tools
         with:
@@ -526,12 +524,10 @@ jobs:
       # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
       # is linked statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below)
       # so users only need the NVIDIA driver, not a CUDA install.
-      - name: Install CUDA toolkit (Windows)
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: '12.5.1'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+      # Configure points the VS generator at it with -T cuda=.
+      - name: Install CUDA toolkit (cvcpkg)
+        id: cuda
+        uses: ./.github/actions/cvcpkg-cuda-toolkit
 
       - name: Configure
         shell: pwsh
@@ -562,7 +558,11 @@ jobs:
           # literal text $shared, which CMake reads as true, so the "static"
           # lane built a shared cvc.dll (configure printed
           # BUILD_SHARED_LIBS=$shared).
-          cmake -B build `
+          # -T cuda=<toolkit>: the VS generator takes the CUDA MSBuild
+          # integration from the cvcpkg toolkit's extras\ instead of from
+          # a Visual Studio install of it.
+          $cuda = '${{ steps.cuda.outputs.root }}' -replace '/', '\'
+          cmake -B build -T "cuda=$cuda" `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
@@ -693,27 +693,18 @@ jobs:
           name: ${{ matrix.artifact }}
           path: sdk-archive
 
-      # Same toolkit as the build (see its step). Consumers of the Linux
-      # SDK need it: the public headers include <cuda_runtime.h>, and the
-      # static flavor links cudart_static.
-      - name: Install CUDA toolkit (Linux)
-        if: runner.os == 'Linux'
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: '12.5.1'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
-
-      - name: Install CUDA toolkit (Windows)
-        if: runner.os == 'Windows'
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: '12.5.1'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart"]'
-
       - name: Install build tools (cvcpkg)
         uses: ./.github/actions/cvcpkg-build-tools
+
+      # Same toolkit as the build (see its step). Consumers of the Linux
+      # and Windows SDKs need it: the public headers include
+      # <cuda_runtime.h>, and the static flavor links cudart_static. The
+      # action exports CUDAToolkit_ROOT, which the consumer's
+      # find_package(CUDAToolkit) reads and sdk-smoke-test.sh accepts on
+      # the link line.
+      - name: Install CUDA toolkit (cvcpkg)
+        if: runner.os != 'macOS'
+        uses: ./.github/actions/cvcpkg-cuda-toolkit
 
       - name: Build and run a find_package(cvc) consumer
         shell: bash
@@ -840,8 +831,8 @@ jobs:
           # notes.
           generate_release_notes: false
           # Explicit prefixes so stray files from third-party actions
-          # (e.g. cuda_keyring.deb from Jimver/cuda-toolkit) can never
-          # ride along into a release attachment list.
+          # (e.g. the cuda_keyring.deb the former Jimver/cuda-toolkit step
+          # left behind) can never ride along into a release attachment list.
           files: |
             artifacts/libcvc-*.tar.gz
             artifacts/libcvc-*.zip
