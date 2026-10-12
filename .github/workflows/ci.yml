@@ -273,13 +273,20 @@ jobs:
       - name: Install build tools (cvcpkg)
         uses: ./.github/actions/cvcpkg-build-tools
 
-      # TEMPORARY, draft only: lcov from apt until cvcpkg publishes its lcov
-      # recipe. Replaced by `cvcpkg install lcov` before this PR is ready.
-      - name: Install lcov (apt, temporary)
+      # lcov for the coverage lanes: cvcpkg's lcov 2.0 (the release Ubuntu
+      # 24.04's apt package was, so capture and --ignore-errors behave the
+      # same), with the cvcpkg perl it runs on. Its own prefix, and not on
+      # PATH: that prefix's bin/ holds a perl, which the build has no business
+      # finding. Configure hands the paths to the `coverage` target and the
+      # report step calls them directly.
+      - name: Install lcov (cvcpkg)
         if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends lcov
+          set -euo pipefail
+          lcov_prefix="$RUNNER_TEMP/lcov"
+          cvcpkg install lcov --prefix "$lcov_prefix" --config release --link shared
+          "$lcov_prefix/bin/lcov" --version
+          echo "LCOV_PREFIX=$lcov_prefix" >> "$GITHUB_ENV"
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -394,12 +401,20 @@ jobs:
           if [ "${{ matrix.enable_grpc }}" = "true" ]; then
             grpc=ON
           fi
+          # The coverage lanes' lcov is not on PATH (see "Install lcov"); hand
+          # it to the `coverage` target directly.
+          cov_tools=()
+          if [ "$coverage" = "ON" ]; then
+            cov_tools=(-DLCOV_PATH="$LCOV_PREFIX/bin/lcov"
+                       -DGENHTML_PATH="$LCOV_PREFIX/bin/genhtml")
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCVC_BUILD_TESTS=$tests \
             -DCVC_BUILD_CVCGL=$cvcgl \
             -DCVC_ENABLE_COVERAGE=$coverage \
+            "${cov_tools[@]}" \
             -DCVC_ENABLE_CUDA=ON \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
             -DDISABLE_CGAL=OFF \
@@ -563,14 +578,15 @@ jobs:
           # a capture-time gcov artifact can't red-flag a PR. These only affect
           # capture; the line-coverage gate is enforced separately below
           # ("Enforce coverage gate") and is unaffected.
-          lcov --directory build --capture --output-file build/coverage.info \
+          lcov="$LCOV_PREFIX/bin/lcov"
+          "$lcov" --directory build --capture --output-file build/coverage.info \
             --ignore-errors negative,gcov,mismatch
           # Allowlist, not blocklist: --extract to workspace src/ + inc/.
           # The old --remove of '/usr/*' still counted Boost/CGAL/HDF5
           # headers from the libcvc-deps prefix ($HOME/libcvc-deps),
           # which are inlined into instrumented TUs and diluted the
           # numbers with third-party header coverage.
-          lcov --extract build/coverage.info \
+          "$lcov" --extract build/coverage.info \
             "$GITHUB_WORKSPACE/src/*" "$GITHUB_WORKSPACE/inc/*" \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
@@ -579,7 +595,7 @@ jobs:
           # UT-Austin contour-spectrum code
           # (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A),
           # and the stb single-file headers (src/cvc/image/third_party).
-          lcov --remove build/coverage_filtered.info \
+          "$lcov" --remove build/coverage_filtered.info \
             '*/test/*' '*/tests/*' '*_test.cpp' \
             "$GITHUB_WORKSPACE/src/xmlrpc/*" \
             '*/geometry/cvc-mesher/contour/*' \
@@ -587,7 +603,7 @@ jobs:
             "$GITHUB_WORKSPACE/src/cvc/tools/*" \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
-          genhtml build/coverage_filtered.info \
+          "$LCOV_PREFIX/bin/genhtml" build/coverage_filtered.info \
             --output-directory build/coverage_html \
             --title "libcvc Code Coverage" \
             --legend --demangle-cpp --ignore-errors source
@@ -642,7 +658,7 @@ jobs:
         if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug' && matrix.enable_grpc != true
         run: |
           set -euo pipefail
-          summary=$(lcov --summary build/coverage_filtered.info)
+          summary=$("$LCOV_PREFIX/bin/lcov" --summary build/coverage_filtered.info)
           echo "$summary"
           pct=$(echo "$summary" | awk '/lines/ { sub(/%.*/, "", $2); print $2; exit }')
           if [ -z "$pct" ]; then

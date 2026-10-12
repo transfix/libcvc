@@ -836,10 +836,12 @@ The report will be in `build-coverage/coverage_html/index.html`.
 
 ### Prerequisites
 
-Install coverage tools (Ubuntu/Debian):
+lcov comes from cvcpkg, like everything else libcvc builds with: lcov 2.0 on
+cvcpkg's perl, with the Perl modules it needs. gcov comes with the compiler.
 
 ```bash
-sudo apt-get install lcov
+cvcpkg install lcov --prefix ~/cvc-tools --config release --link shared
+export PATH="$HOME/cvc-tools/bin:$PATH"   # or pass -DLCOV_PATH/-DGENHTML_PATH
 ```
 
 ### Manual Coverage Generation
