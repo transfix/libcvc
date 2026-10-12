@@ -248,11 +248,22 @@ if(EMSCRIPTEN)
 endif()
 
 # Install rules so the cvcgl-examples recipe packages the example binaries with no
-# hand-staging. $ORIGIN/../lib lets them find libcvcGL / libcvc / VTK / Boost in the
-# same cvcpkg prefix with NO LD_LIBRARY_PATH; INSTALL_RPATH_USE_LINK_PATH adds the
-# deps-prefix link dirs too, which cvcpkg's rewrite-install-paths relocates to
-# $ORIGIN-relative. cvcgl-examples is its own install COMPONENT so the recipe can
-# `cmake --install --component cvcgl-examples` and get only the bins (not the cvcGL SDK).
+# hand-staging. $ORIGIN/../lib lets them find libcvc / VTK / Boost / imgui in the
+# same cvcpkg prefix with NO LD_LIBRARY_PATH. cvcgl-examples is its own install
+# COMPONENT so the recipe can `cmake --install --component cvcgl-examples` and get
+# only the bins (not the cvcGL SDK).
+#
+# INSTALL_RPATH_USE_LINK_PATH also writes every link directory into the installed
+# RUNPATH, which is what a local `cmake --install` wants: the installed examples then
+# still find deps that live in other prefixes. A packaged bundle must not have it.
+# There every dependency is installed into the same prefix, so $ORIGIN/../lib is
+# complete, and the link directories are the build machine's prefixes. When
+# publish-cvcpkg.yml builds through build.sh and packs with --from-prefix, cvcpkg
+# never learns those prefixes and cannot rewrite them; its pack-time gate rejects
+# the bundle ("RUNPATH .../stage/lib (a temporary or CI-workspace directory)"). So
+# the recipe's build.sh turns this OFF.
+option(CVCGL_EXAMPLES_RPATH_USE_LINK_PATH
+       "Add the link directories to the installed examples' RUNPATH (OFF for packaging)" ON)
 set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
 # The three headless nav CLIs exist only in native builds (the wasm column has
 # no CLIs in the gallery), so they join the install list conditionally.
@@ -261,7 +272,7 @@ if(NOT EMSCRIPTEN)
 endif()
 set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"
-  INSTALL_RPATH_USE_LINK_PATH ON)
+  INSTALL_RPATH_USE_LINK_PATH ${CVCGL_EXAMPLES_RPATH_USE_LINK_PATH})
 install(TARGETS ${_cvcgl_example_bins}
         RUNTIME DESTINATION bin COMPONENT cvcgl-examples)
 # The bins carry third-party code whose notices a binary redistribution must
