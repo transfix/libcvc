@@ -127,14 +127,22 @@ sdk_n=$(norm "$sdk")
 inside_sdk() { case "$(norm "$1")" in "$sdk_n"/*) return 0 ;; esac; return 1; }
 
 # Toolchain paths a link line may use: the compiler, the platform SDK and, for
-# the CUDA-enabled Linux/Windows SDKs, the CUDA toolkit. No library directory of
-# the host (/usr/lib, /usr/local/lib, /opt/homebrew, ...): a dependency found
-# there is one the archive is missing.
+# the CUDA-enabled Linux/Windows SDKs, the CUDA toolkit -- cvcpkg's, under
+# $CUDAToolkit_ROOT (.github/actions/cvcpkg-cuda-toolkit), never a system one.
+# No library directory of the host (/usr/lib, /usr/local/lib, /opt/homebrew,
+# ...): a dependency found there is one the archive is missing.
 case $os in
-  linux)   link_ok='^(/usr/bin/|/usr/lib/gcc/|/usr/local/cuda[^/]*/)' ;;
+  linux)   link_ok='^(/usr/bin/|/usr/lib/gcc/)' ;;
   macos)   link_ok='^(/usr/bin/|/library/developer/|/applications/xcode[^/]*\.app/)' ;;
-  windows) link_ok='^(c:/program files( \(x86\))?/(microsoft visual studio|windows kits|nvidia gpu computing toolkit)/)' ;;
+  windows) link_ok='^(c:/program files( \(x86\))?/(microsoft visual studio|windows kits)/)' ;;
 esac
+cuda_n=""
+if [ -n "${CUDAToolkit_ROOT:-}" ]; then cuda_n=$(norm "$CUDAToolkit_ROOT"); fi
+inside_cuda() {
+  [ -n "$cuda_n" ] || return 1
+  case "$(norm "$1")" in "$cuda_n"/*) return 0 ;; esac
+  return 1
+}
 # Linux base-system libraries by name: glibc, the GCC runtimes and the loader.
 # They may appear on the link line by absolute path too (FindOpenMP and
 # FindCUDAToolkit name libpthread / librt that way), and they are all the loader
@@ -172,6 +180,8 @@ while IFS= read -r tok; do
   [ -n "$tok" ] || continue
   if inside_sdk "$tok"; then
     echo "ok   $tok"
+  elif inside_cuda "$tok"; then
+    echo "cuda $tok"
   elif [[ $(norm "$tok" | tr '[:upper:]' '[:lower:]') =~ $link_ok ]]; then
     echo "tool $tok"
   elif [ $os = linux ] && [[ $(basename "$tok") =~ $linux_base ]]; then
