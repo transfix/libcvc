@@ -712,32 +712,53 @@ jobs:
           # the imgui note above). Own prefix, joined only here.
           SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           cvcpkg install sdl3 --prefix "$SDL3"
-          cmake -S src/cvcGL -B build-cvcgl -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-cvcgl" \
-            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS"
-          cmake --build build-cvcgl --parallel
-          cmake --install build-cvcgl
+          # Two link variants. --link shared is libcvcGL.so.3 (one in-process copy
+          # for every consumer, the build pycvc-gl links below); --link static is
+          # the libcvcGL.a archive. Each is its own build and stage: cvcGL's type
+          # follows BUILD_SHARED_LIBS. Every column builds the shared one (pycvc-gl
+          # links it); only the packing job builds the static one.
+          build_cvcgl() {  # build_cvcgl <build-dir> <stage-dir> <ON|OFF>
+            cmake -S src/cvcGL -B "$1" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS="$3" \
+              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/$2" \
+              -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS"
+            cmake --build "$1" --parallel
+            cmake --install "$1"
+          }
+          build_cvcgl build-cvcgl stage-cvcgl ON
           if [ "$PACK_CVCGL" != "1" ]; then
             echo "pyver ${{ matrix.pyver }} column job: cvcgl built for linking only (packed/published by the 311 job)"
             exit 0
           fi
+          build_cvcgl build-cvcgl-static stage-cvcgl-static OFF
+          # The variants have to differ in what they carry, or the link label is a lie.
+          ls stage-cvcgl/lib/libcvcGL.so.* >/dev/null
+          ls stage-cvcgl-static/lib/libcvcGL.a >/dev/null
+          if ls stage-cvcgl-static/lib/libcvcGL.so* >/dev/null 2>&1; then
+            echo "::error::the static cvcgl stage carries a shared libcvcGL"; exit 1
+          fi
           mkdir -p dist
-          cvcpkg pack cvcpkg/recipes/cvcgl \
-            --from-prefix stage-cvcgl \
-            --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local \
-            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} \
-            --output-dir dist
+          for link in shared static; do
+            stage=stage-cvcgl; [ "$link" = static ] && stage=stage-cvcgl-static
+            cvcpkg pack cvcpkg/recipes/cvcgl \
+              --from-prefix "$stage" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link "$link" --local \
+              --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} \
+              --output-dir dist
+          done
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
             fi
-            cvcpkg publish cvcgl \
-              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
-              --platform "${{ matrix.target.platform }}" \
-              --config release --link shared --output-dir dist \
-              --token "$CVCPKG_TOKEN"
+            for link in shared static; do
+              cvcpkg publish cvcgl \
+                --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+                --platform "${{ matrix.target.platform }}" \
+                --config release --link "$link" --output-dir dist \
+                --token "$CVCPKG_TOKEN"
+            done
           else
             echo "dry-run: skipping cvcgl publish"
           fi
@@ -957,26 +978,49 @@ jobs:
           # SDL3::SDL3 link + find_dependency(SDL3) are relocatable (see Linux note).
           $sdl3 = "$env:GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           cvcpkg install sdl3 --prefix "$sdl3" --config release --link shared
-          cmake -B build-cvcgl -S src/cvcGL `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_CONFIGURATION_TYPES=Release `
-            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-cvcgl" `
-            -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath"
-          cmake --build build-cvcgl --config Release
-          cmake --install build-cvcgl --config Release
+          # Two link variants, as on Linux: --link shared is cvcGL.dll (+ its
+          # cvcGL.lib import library; WINDOWS_EXPORT_ALL_SYMBOLS gives it an export
+          # table), --link static the cvcGL.lib archive. cvcGL's type follows
+          # BUILD_SHARED_LIBS, so each variant is its own build and stage.
+          $variants = @(
+            @{ link = 'shared'; build = 'build-cvcgl';        stageDir = 'stage-cvcgl';        bsl = 'ON'  },
+            @{ link = 'static'; build = 'build-cvcgl-static'; stageDir = 'stage-cvcgl-static'; bsl = 'OFF' }
+          )
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          cvcpkg pack cvcpkg/recipes/cvcgl `
-            --from-prefix stage-cvcgl `
-            --platform windows --config release --link shared --local `
-            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} `
-            --output-dir dist
+          foreach ($v in $variants) {
+            cmake -B $v.build -S src/cvcGL `
+              -DCMAKE_BUILD_TYPE=Release `
+              -DCMAKE_CONFIGURATION_TYPES=Release `
+              -DBUILD_SHARED_LIBS="$($v.bsl)" `
+              -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/$($v.stageDir)" `
+              -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath"
+            if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) configure failed" }
+            cmake --build $v.build --config Release
+            if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) build failed" }
+            cmake --install $v.build --config Release
+            if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) install failed" }
+          }
+          # The variants have to differ in what they carry, or the link label is a lie.
+          if (-not (Test-Path "stage-cvcgl/bin/cvcGL.dll")) { throw 'shared cvcgl stage has no bin/cvcGL.dll' }
+          if (Test-Path "stage-cvcgl-static/bin/cvcGL.dll") { throw 'static cvcgl stage carries cvcGL.dll' }
+          foreach ($v in $variants) {
+            cvcpkg pack cvcpkg/recipes/cvcgl `
+              --from-prefix $v.stageDir `
+              --platform windows --config release --link $v.link --local `
+              --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} `
+              --output-dir dist
+            if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) pack failed" }
+          }
           $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
           if ($doPublish) {
             if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
-            cvcpkg publish cvcgl `
-              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
-              --platform windows --config release --link shared --output-dir dist `
-              --token "$env:CVCPKG_TOKEN"
+            foreach ($v in $variants) {
+              cvcpkg publish cvcgl `
+                --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+                --platform windows --config release --link $v.link --output-dir dist `
+                --token "$env:CVCPKG_TOKEN"
+              if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) publish failed" }
+            }
           } else {
             Write-Host 'dry-run: skipping cvcgl publish'
           }
