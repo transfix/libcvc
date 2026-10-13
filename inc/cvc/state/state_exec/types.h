@@ -198,17 +198,83 @@ std::string to_string(const value_t &val);
 /// pairs), never its exponential logical unfolding.
 bool values_equal(const value_t &a, const value_t &b);
 
+// -- time budgets -------------------------------------------------------------
+//
+// The step caps bound a program's work deterministically; the time budgets -- a process's
+// max_time and max_step_time, a scheduler run's max_time, and the evaluation deadline below --
+// bound what a step cap cannot see, a slow native step. They are charged with time_budget, so
+// that time the thread spends not running (the OS or a hypervisor running something else: a
+// loaded machine, a CI runner running tests in parallel) cannot use them up: a program that
+// does next to no work is never cut off because its thread waited for a core.
+
+/// Seconds of CPU time the calling thread has used: time it ran, not time it waited to run
+/// (though in a virtual machine whose kernel does not account steal time, time the hypervisor
+/// takes from the virtual CPU the thread is on still counts). CLOCK_THREAD_CPUTIME_ID where
+/// POSIX has it (Linux, macOS), a system call, so it is read sparingly. Elsewhere it is the
+/// steady clock -- on Windows too, whose per-thread CPU times advance only at the ~15.6 ms
+/// scheduler tick, too coarse for millisecond budgets.
+double thread_cpu_seconds();
+
+/// A time budget charged to work the OS may deschedule. Its first half is charged on the
+/// steady clock, the rest on the running thread's CPU clock (thread_cpu_seconds) -- but never
+/// more of it than the steady clock measured between the work's checks (its steps, or a
+/// polling loop's iterations) with each gap between two checks counted up to a sixteenth of
+/// it. So a stall between two checks, however long (the OS running other threads, or a
+/// hypervisor whose stolen time the CPU clock counts), can use up the first half but at most a
+/// sixteenth of the second: the budget runs out only once its owner has itself run for half
+/// of it, while an owner that runs straight through runs out on the steady clock's schedule,
+/// as with a plain deadline. The CPU clock is read only once the first half is spent, so a
+/// budget nowhere near running out costs a steady-clock read per check, as a plain deadline
+/// does.
+///
+/// Charge it over intervals of work, start() to stop(): one (a scheduler run, checked with
+/// spent() at each step) or many (a frame's predicate evaluations, each stop() given the steps
+/// it took), each interval on one thread.
+class time_budget {
+public:
+  using clock = std::chrono::steady_clock;
+
+  /// A budget of `seconds`; zero or less is spent from the start.
+  explicit time_budget(double seconds);
+
+  void start();
+  /// End the interval. Since its last check (spent(), or start()) it took `checks` steps,
+  /// whose gaps the budget did not see: they count as that many gaps.
+  void stop(std::uint64_t checks = 1);
+  /// A check: whether the budget has run out, by `now` during an interval (counting as a
+  /// check), or as of the last stop() between intervals.
+  bool spent(clock::time_point now = clock::now());
+  /// Seconds left as of the last stop(): the first half's unspent steady-clock time plus the
+  /// second half, then the second half's unspent CPU time; 0 once spent.
+  double remaining() const;
+
+private:
+  void gap(clock::time_point now, std::uint64_t gaps = 1); // the second half: a check at `now`
+  void charge(double cpu_now); // the second half: the CPU time since c0_, capped by the gaps
+
+  double half_;                 // half the budget, seconds (0: spent from the start)
+  double wall_ = 0.0;           // the first half: steady-clock seconds finished intervals used
+  double cpu_ = 0.0;            // the second half: CPU seconds charged so far
+  bool on_cpu_ = false;         // the first half is spent; charging the CPU clock
+  bool running_ = false;        // in an interval
+  clock::time_point t0_{};      // the interval's start
+  clock::time_point last_{};    // the interval's last check
+  double c0_ = 0.0;             // the thread's CPU time when cpu_ was last charged
+  double gaps_ = 0.0;           // the capped steady-clock gaps between checks since then
+  clock::time_point next_ = {}; // during an interval: spent() reads no CPU clock before this
+};
+
 // -- cooperative evaluation deadline ----------------------------------------
 //
-// A per-thread wall-clock deadline for the current synchronous evaluation. It lets a single
+// A per-thread time budget for the current synchronous evaluation. It lets a single
 // long-running native step — an uncapped nested evaluator (a defclass method body), a big
 // generator/collect/range loop, a deep structural walk — abort AT the time budget instead of
 // running to completion, closing the gap that the evaluator's between-steps caps cannot see.
-// A nested evaluator INHERITS the deadline automatically (it lives on the thread), and the
-// guard only ever TIGHTENS it (never relaxes an outer, tighter deadline).
+// A nested evaluator INHERITS the deadline automatically (it lives on the thread), and a
+// nested guard only ever TIGHTENS it: every armed guard's budget is checked.
 
-/// RAII: arm a deadline `seconds` from now for the current thread (no-op if nullopt); a
-/// tighter outer deadline wins. Restores the previous deadline on destruction. run() arms one.
+/// RAII: arm a time_budget of `seconds` from now for the current thread (no-op if nullopt);
+/// the outer ones stay armed. Disarms it on destruction. run() arms one.
 class eval_deadline_guard {
 public:
   explicit eval_deadline_guard(std::optional<double> seconds);
@@ -217,11 +283,14 @@ public:
   eval_deadline_guard &operator=(const eval_deadline_guard &) = delete;
 
 private:
-  std::optional<std::chrono::steady_clock::time_point> prev_;
+  friend bool eval_deadline_expired();
+  std::optional<time_budget> budget_;
+  eval_deadline_guard *outer_ = nullptr; // the next armed guard out
 };
 
-/// True iff a deadline is armed on this thread and has already passed. Cheap (one clock
-/// read); long-running builtins call this in their loops so they too honour the budget.
+/// True iff a deadline is armed on this thread and its budget is spent; each call is a check
+/// of every armed budget. Cheap (one steady-clock read until a budget is half spent);
+/// long-running builtins call this in their loops so they too honour the budget.
 bool eval_deadline_expired();
 
 } // namespace cvc::state_exec

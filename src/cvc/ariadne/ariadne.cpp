@@ -357,8 +357,10 @@ namespace se = cvc::state_exec;
 // true/false/nil literals are parser/evaluator-intrinsic, so an empty base still runs them.
 //
 // Each distinct expression is parsed ONCE and cached. Every eval is bounded three ways:
-// a per-eval step cap, a per-eval wall-time cap, and a per-FRAME aggregate wall-time
-// budget (so many reactive widgets cannot together stall a frame). It never throws out.
+// a per-eval step cap, a per-eval time cap, and a per-FRAME aggregate time budget (so many
+// reactive widgets cannot together stall a frame). The time caps are se::time_budgets, which
+// time the thread spends not running cannot use up: a predicate that does next to no work
+// never fails, however loaded the machine. It never throws out.
 //
 // state-get keys are prefix-relative (the context is chroot'd to the document prefix),
 // so `(state-get "demo.n")` reads the SAME key a widget `bind: demo.n` resolves to.
@@ -421,7 +423,7 @@ public:
   // before the walk. Once the frame's cumulative predicate-eval time is spent, the
   // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
   // one-time warning, so N reactive widgets cannot together stall the frame.
-  void begin_frame() { frame_spent_ = 0.0; }
+  void begin_frame() { frame_ = se::time_budget(kFrameBudgetSeconds); }
 
   // §12: re-chroot the read-lane to `path` so a mounted fragment's predicates read state
   // relative to its own sub-prefix, exactly as its widget binds resolve there. The evaluator,
@@ -530,19 +532,23 @@ private:
     const se::value_t *expr = compile(src);
     if (!expr)
       return {{}, "ari: reactive expr parse error in \"" + src + "\""};
-    const double remaining = kFrameBudgetSeconds - frame_spent_;
+    const double remaining = frame_.remaining();
     if (remaining <= 0.0)
       return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted"};
+    struct charge_frame { // charges the eval, and its steps, to the frame however run() ends
+      se::time_budget &frame;
+      const se::evaluator_state &st;
+      ~charge_frame() { frame.stop(st.stats.get_step_count()); }
+    };
     try {
       se::evaluator_state st = ev_->create_state(*expr);
-      const auto t0 = std::chrono::steady_clock::now();
+      frame_.start();
+      const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
-      frame_spent_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       if (!st.done) // step cap: run() returns nil with done==false
         return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (step cap)"};
       return {std::move(r), std::string()};
     } catch (const se::evaluation_timeout &) {
-      frame_spent_ += std::min(kMaxSeconds, remaining); // run() threw before the post-run charge
       return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (time cap)"};
     } catch (const se::evaluation_interrupted &) {
       return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (interrupted)"};
@@ -581,12 +587,12 @@ private:
   }
 
   static constexpr uint64_t kMaxSteps = 100'000;       // per-eval step cap (a predicate is tiny)
-  static constexpr double kMaxSeconds = 0.005;         // per-eval wall-time cap (5 ms)
+  static constexpr double kMaxSeconds = 0.005;         // per-eval time cap (5 ms)
   static constexpr double kFrameBudgetSeconds = 0.010; // aggregate across all predicates/frame
   static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
-  double frame_spent_ = 0.0; // wall-time spent on predicate evals in the current frame
-  std::string root_path_;    // §12: the scope the ctx_ is currently chrooted to (set_root_path)
+  se::time_budget frame_{kFrameBudgetSeconds}; // the current frame's predicate evals' time
+  std::string root_path_; // §12: the scope the ctx_ is currently chrooted to (set_root_path)
   se::scheduler sched_;
   se::memory_tracker tracker_;
   std::shared_ptr<se::process> proc_;
@@ -1350,8 +1356,9 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   const std::string &action_prefix = action.prefix;
   const std::string &script = action.event;
   // §7.4 per-activation caps (same as the old synchronous action lane): the STEP cap is the
-  // deterministic guard on an action's real work; wall-time is a generous anti-hang backstop;
-  // memory the §7.4 cap. Full env, writes chrooted to the action's mount prefix.
+  // deterministic guard on an action's real work; time (a se::time_budget, which time the
+  // thread spends descheduled cannot use up) is a generous anti-hang backstop; memory the §7.4
+  // cap. Full env, writes chrooted to the action's mount prefix.
   static constexpr uint64_t kActionMaxSteps = 5000;
   static constexpr double kActionMaxSeconds = 0.1;
   static constexpr uint64_t kActionMaxBytes = 262144;
@@ -1410,8 +1417,10 @@ void Runtime::Impl::pump_and_sweep_actions() {
   sched.wake_awaiting();
   // Pump a bounded slice: a quick (non-suspending) action completes within THIS drain (so a
   // fire-then-check interaction still sees its effect immediately), while an action that parks
-  // on await/sleep/msg-recv yields and resumes on a later frame. Global step + wall-time
-  // backstops bound the pump; per-process step caps kill runaways.
+  // on await/sleep/msg-recv yields and resumes on a later frame. Global step + time backstops
+  // bound the pump -- se::time_budgets, so on a loaded machine, where the OS deschedules this
+  // thread, a quick action still completes within this drain; per-process step caps kill
+  // runaways.
   static constexpr uint64_t kPumpMaxSteps = 200000;
   static constexpr double kPumpMaxSeconds = 0.1;
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
@@ -1464,7 +1473,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
     opts.max_steps = 0;  // unlimited total — a resident loops forever (see above)
     opts.max_time = 0.0; // unlimited TOTAL run-time; the per-STEP cap below is the hang backstop
-    // §13.8 resident per-STEP wall-clock cap: a resident has no total budget, so give it a per-step
+    // §13.8 resident per-STEP time cap: a resident has no total budget, so give it a per-step
     // deadline (fresh each step) so a single step that loops in-place (a runaway native builtin)
     // can't HANG the host's per-frame drain — it is aborted + the resident killed. A healthy
     // on:tick/on_key body is far under this, and a per-node DSL loop is bounded by the pump's own
