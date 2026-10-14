@@ -1892,7 +1892,7 @@ TEST_F(AppTest, ClockBindingSpeedPauseAndModeComeFromTheTree) {
   b.drive(0.0);
 
   set_key(ctx, "simtest.speed", "2");
-  EXPECT_EQ(b.drive(0.05).steps, 12);
+  EXPECT_EQ(b.drive(0.025).steps, 6) << "25 ms of wall at 2x is 6 quanta at 120 Hz";
   EXPECT_DOUBLE_EQ(c.scale(), 2.0);
 
   set_key(ctx, "simtest.paused", "true"); // state_exec's spelling of a bool
