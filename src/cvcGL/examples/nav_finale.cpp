@@ -30,6 +30,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/core/clock_follower.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -39,6 +42,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/state/state.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -202,7 +206,9 @@ int main(int argc, char **argv) {
       "no-minimap", po::bool_switch(&no_minimap),
       "hide the 2-D PiP minimap")("frames", po::value<long>(&frames)->default_value(0))(
       "fps", po::value<double>(&fps)->default_value(30.0))(
-      "hz", po::value<double>(&hz)->default_value(60.0))(
+      "hz", po::value<double>(&hz)->default_value(60.0),
+      "initial world speed, in navigator steps per second of capture time "
+      "(speed = hz x veh.dt; sim.speed changes it live)")(
       "view", po::value<std::string>(&viewMode)->default_value("3d"),
       "3d (perspective, default) | map (fixed top-down ortho — the honest 2-D answer)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
@@ -616,7 +622,31 @@ int main(int argc, char **argv) {
   // 4. Run: sim on the render thread (only 8 agents). Act split at 45% of the run.
   const long total = frames > 0 ? frames : 600;
   const long act2 = static_cast<long>(0.45 * total);
-  const int sub = std::max(1, static_cast<int>(hz / std::max(1.0, fps)));
+  // World time is the app's world clock at the suite quantum (0.01 s), driven once per frame
+  // through a binding (sim.speed / sim.paused / sim.mode / sim.step); the navigator follows it,
+  // one step every veh.dt / fixed_dt quanta. The initial speed keeps the old pace, --hz steps per
+  // second of capture time (60 Hz at 0.06 s is 3.6x), which is the same hz / fps steps per
+  // captured frame as before.
+  cvc::world_clock &clock = app.world_clock();
+  {
+    cvc::world_clock::config cc;
+    cc.fixed_dt = 0.01;
+    cc.scale = hz * cfg.veh.dt;
+    cc.max_steps_per_advance = 8 * static_cast<int>(cvc::ticks_per_step(cfg.veh.dt, cc.fixed_dt));
+    cc.cap_scales_with_rate = true;
+    clock.configure(cc);
+  }
+  cvc::world_clock_binding simKeys(app, clock);
+  cvc::clock_follower navFollow = cvc::clock_follower::for_step(clock, cfg.veh.dt);
+  // The two acts are scripted in world time: Act 2 opens at the world time a capture reaches at
+  // 45% of its frames, the targets orbit at 0.25 rad per wall second at the initial speed, and
+  // the pursuers replan every 30 navigator steps.
+  const double speed0 = clock.scale();
+  const double act2T = static_cast<double>(act2) / fps * speed0;
+  const double tgtOmega = 0.25 / speed0;
+  const long replanSteps = 30;
+  double actT0 = 0.0; // world time the arc (re)started
+  long navSteps = 0, nextReplan = 0;
   std::vector<float> pos(2 * N), head(N), spd(N);
   std::vector<int> md(N);
   std::vector<std::uint8_t> rch(N);
@@ -630,7 +660,7 @@ int main(int argc, char **argv) {
   cvc::gl::TouchGestures touch(view, cam);
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing);
-  bool uiPaused = false, ui2D = false, uiSpines = true, uiMinimap = minimap, uiCards = true;
+  bool ui2D = false, uiSpines = true, uiMinimap = minimap, uiCards = true;
   bool uiForceAct2 = false, uiRestartActs = false;
   bool uiScene = false; // the library's ScenePanel window
 #ifdef CVC_ENABLE_IMGUI
@@ -641,7 +671,11 @@ int main(int argc, char **argv) {
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Sim")) {
-        ImGui::MenuItem("Paused", nullptr, &uiPaused);
+        // Pause is the clock's control (sim.paused): world time, the vehicles and the
+        // targets all stop together.
+        bool paused = clock.current_mode() == cvc::world_clock::mode::paused;
+        if (ImGui::MenuItem("Paused", nullptr, &paused))
+          cvc::state::instance(app)(simKeys.key("paused")).value(paused ? 1 : 0);
         if (ImGui::MenuItem("Jump to Act 2 (pursuit)"))
           uiForceAct2 = true;
         if (ImGui::MenuItem("Replay from Act 1"))
@@ -715,11 +749,12 @@ int main(int argc, char **argv) {
 #ifdef CVC_ENABLE_IMGUI
     if (uiForceAct2) { // jump straight to the pursuit act
       uiForceAct2 = false;
-      if (frame < act2)
-        frame = act2;
+      if (clock.t() - actT0 < act2T)
+        actT0 = clock.t() - act2T;
     }
     if (uiRestartActs) { // replay the two-act arc from the top
       uiRestartActs = false;
+      actT0 = clock.t();
       frame = 0;
       targetsShown = false;
       for (auto &n : targetNodes)
@@ -744,20 +779,17 @@ int main(int argc, char **argv) {
     }
     actCard.setVisible(uiCards);
     minimap = uiMinimap;
-    if (uiPaused) {
-      view.processUIEvents();
-      touch.update(); // apply any pinch/two-finger gesture from this frame
-      view.render();
-      continue;
-    }
 #endif
-    act2now = frame >= act2;
+    // The one drive of world time this frame (a capture passes its fixed 1/fps).
+    simKeys.drive(dt);
+    const double worldT = clock.t() - actT0; // world seconds into the two-act arc
+    act2now = worldT >= act2T;
 
     // Act 2: 4 targets orbit the map centre; each pair of vehicles chases one, with
     // its A* route replanned to the moving target periodically.
     if (act2now) {
       for (int k = 0; k < NT; ++k) {
-        const double a = 2 * PI * k / NT + 0.25 * (t - act2 / fps);
+        const double a = 2 * PI * k / NT + tgtOmega * (worldT - act2T);
         const double rad = 0.30 * span;
         tgt[2 * k] = static_cast<float>(cfg.cx + rad * std::cos(a));
         tgt[2 * k + 1] = static_cast<float>(cfg.cy + rad * std::sin(a));
@@ -772,6 +804,7 @@ int main(int argc, char **argv) {
           engageNode->setVisible(true);
         actFlipT = t;
         targetsShown = true;
+        nextReplan = navSteps; // the pursuers plan onto their targets at once
       }
       for (int k = 0; k < NT; ++k)
         if (targetNodes[k])
@@ -789,12 +822,14 @@ int main(int argc, char **argv) {
         }
         engageNode->updateVertices(engageXyz);
       }
-      if ((frame - act2) % 15 == 0)
+      if (navSteps >= nextReplan) {
+        nextReplan = navSteps + replanSteps;
         for (int i = 0; i < N; ++i) {
           routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1],
                                  tgt[2 * (i % NT)], tgt[2 * (i % NT) + 1], standoffCells);
           curWp[i] = static_cast<std::size_t>(-1); // force a retarget onto the new route
         }
+      }
     }
 
     // Follow the route: aim each vehicle at its current waypoint, advancing on arrival.
@@ -818,8 +853,10 @@ int main(int argc, char **argv) {
       }
     }
 
-    for (int s = 0; s < sub; ++s)
+    for (std::uint64_t s = navFollow.take(clock); s > 0; --s) { // the steps that fell due
       world.step();
+      ++navSteps;
+    }
     world.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());
     if (std::getenv("NAV_DBG") && frame % 20 == 0)
       std::printf("[dbg] f%ld act2=%d a0=(%.0f,%.0f)->wp%zu/%zu a4=(%.0f,%.0f) spd0=%.3f\n", frame,
@@ -937,6 +974,7 @@ int main(int argc, char **argv) {
       cvc::write_image(frameImg, path);
     } else {
       view.processUIEvents();
+      touch.update(); // apply any pinch/two-finger gesture from this frame
       view.render();
     }
 
