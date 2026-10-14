@@ -30,6 +30,9 @@
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_NAV_BUNDLE)
 #include <cvc/core/app.h>
+#include <cvc/core/clock_follower.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -40,7 +43,7 @@
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
-#include <cvc/lod/select.h> // agent distance-LOD selection (--lod)
+#include <cvc/lod/select.h>  // agent distance-LOD selection (--lod)
 #include <cvc/state/state.h> // write Track params (back/height/look_ahead) to camera state
 #include <future>
 #include <utility> // std::pair (lod score list)
@@ -324,7 +327,9 @@ int main(int argc, char **argv) {
                                                          po::value<long>(&frames)->default_value(0),
                                                          "stop after N frames (0 = until closed)")(
       "fps", po::value<double>(&fps)->default_value(30.0),
-      "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0), "sim tick rate")(
+      "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0),
+                            "initial world speed, in navigator steps per wall second "
+                            "(speed = hz x veh.dt; sim.speed changes it live)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
       "none (interactive window) | orbit | fly | follow (chase --follow N)")(
       "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
@@ -824,7 +829,7 @@ int main(int argc, char **argv) {
   std::vector<int> bwVertCell;      // per-vertex cell index (exact, set on emit)
   std::vector<unsigned char> bwRgb; // per-vertex colour scratch
   std::vector<unsigned char> cellRgb(static_cast<std::size_t>(3) * rows * cols, 0);
-  long bwLastCells = -1;                   // re-mesh trigger
+  long bwLastCells = -1;                                    // re-mesh trigger
   const double kBeliefWallH = std::min(40.0, 0.013 * span); // sensed-wall height, capped at 40 m
 
   // Per-cell cycling colour into cellRgb (only discovered wall cells; others untouched).
@@ -1643,8 +1648,27 @@ int main(int argc, char **argv) {
   // persistent workers instead of spawning threads per call — and, sized to leave
   // the render thread a core, stop the sim from starving it.
   world.set_thread_pool(&app.computePool());
+  // World time is the app's world clock at the suite quantum (0.01 s). The frame loop is its one
+  // driver, through a binding, so sim.speed / sim.paused / sim.mode / sim.step steer it from this
+  // window, a remote panel or a script alike; the navigator follows it, one step every
+  // veh.dt / fixed_dt quanta. The initial speed keeps the old pace: --hz navigator steps per wall
+  // second, i.e. hz * veh.dt world seconds per second (60 Hz at 0.06 s is 3.6x real time).
+  cvc::world_clock &clock = app.world_clock();
+  const std::uint64_t navQuanta = cvc::ticks_per_step(cfg.veh.dt, 0.01);
+  {
+    cvc::world_clock::config cc;
+    cc.fixed_dt = 0.01;
+    cc.scale = hz * cfg.veh.dt;
+    cc.max_steps_per_advance = 8 * static_cast<int>(navQuanta); // a stall drops past 8 steps
+    cc.cap_scales_with_rate = true;
+    clock.configure(cc);
+  }
+  cvc::world_clock_binding simKeys(app, clock);
+  std::printf("nav_city_drive: world speed %.2fx real time (--hz %.0f x veh.dt %.3f s); "
+              "sim.speed changes it\n",
+              clock.scale(), hz, static_cast<double>(cfg.veh.dt));
 #if CVC_NAV_DEMO_SIM_WORKER
-  auto sim = std::make_unique<cvc::nav::sim_thread>(world, hz);
+  auto sim = std::make_unique<cvc::nav::sim_thread>(world, clock);
   sim->start();
 #else
   // Non-threaded browser build: no worker available, because a wasm thread needs
@@ -1654,10 +1678,9 @@ int main(int argc, char **argv) {
   // the same call sim_thread makes. Build with -DCVC_WASM_PTHREADS=ON, and serve
   // the page cross-origin isolated, to get the worker branch above instead.
   std::vector<float> emPos(static_cast<std::size_t>(N) * 2), emHead(N);
-  bool simPausedEm = false;
   std::vector<int> emMd(N);
   std::vector<std::uint8_t> emRch(N);
-  (void)hz;
+  cvc::clock_follower navFollow = cvc::clock_follower::for_step(clock, cfg.veh.dt);
 #endif
 
   std::vector<unsigned char> rgbBuf; // agent state-restyle scratch
@@ -1673,11 +1696,10 @@ int main(int argc, char **argv) {
   cvc::gl::TouchGestures touch(view, cam);
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing);
-  bool uiPaused = false, uiStep = false, uiRestart = false, ui2D = ortho;
+  bool uiRestart = false, ui2D = ortho;
   int uiAgents = N;
   std::string uiBelief = belief;
   bool uiFog = fogOn, uiTrails = true, uiGoals = true, uiFlags = true;
-  double uiHz = hz;
   float uiTrailW = 1.5f;                              // live path (trail) line width
   bool uiSeparate = true;                             // inter-agent avoidance on/off (live)
   float uiSepGain = 1.5f * static_cast<float>(ts.rr); // avoidance strength (live)
@@ -1691,9 +1713,13 @@ int main(int argc, char **argv) {
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Sim")) {
-        ImGui::MenuItem("Paused", "Space", &uiPaused);
-        if (ImGui::MenuItem("Step one frame", nullptr, false, uiPaused))
-          uiStep = true;
+        // Pause and Step are the clock's controls (sim.paused, a step request), so they act
+        // on world time itself: Step runs exactly one navigator step and stays paused.
+        bool paused = clock.current_mode() == cvc::world_clock::mode::paused;
+        if (ImGui::MenuItem("Paused", "Space", &paused))
+          cvc::state::instance(app)(simKeys.key("paused")).value(paused ? 1 : 0);
+        if (ImGui::MenuItem("Step one navigator step", nullptr, false, paused))
+          simKeys.request_steps(navQuanta);
         ImGui::Separator();
         if (ImGui::MenuItem("Restart"))
           uiRestart = true;
@@ -1751,9 +1777,11 @@ int main(int argc, char **argv) {
       ImGui::SetTooltip(
           "Off = every belief plane equals the known map, so belief modes only recolour.");
     {
-      float hzf = static_cast<float>(uiHz);
-      if (ImGui::SliderFloat("sim Hz", &hzf, 10.0f, 240.0f, "%.0f"))
-        uiHz = hzf;
+      // World seconds per wall second, written to sim.speed (the clock reads it next frame).
+      float sp = static_cast<float>(clock.scale());
+      if (ImGui::SliderFloat("world speed", &sp, 0.25f, 16.0f, "%.2fx",
+                             ImGuiSliderFlags_Logarithmic))
+        cvc::state::instance(app)(simKeys.key("speed")).value(static_cast<double>(sp));
     }
     // ---- Display (all live, no restart) -------------------------------------
     ImGui::Separator();
@@ -2177,20 +2205,25 @@ int main(int argc, char **argv) {
       }
       arrived = 0;
       frame = 0;
+      clock.reset(); // the fresh world starts at t = 0, and so does world time
 #if CVC_NAV_DEMO_SIM_WORKER
-      sim = std::make_unique<cvc::nav::sim_thread>(world, uiHz);
+      sim = std::make_unique<cvc::nav::sim_thread>(world, clock);
       sim->start();
+#else
+      navFollow.reset(clock.tick());
 #endif
       std::printf("nav_city_drive: restarted (%d agents, belief=%s, fog=%s, seed=%u)\n", N,
                   belief.c_str(), fogOn ? "on" : "off", simSeed);
     }
-#if CVC_NAV_DEMO_SIM_WORKER
-    if (sim)
-      sim->set_paused(uiPaused && !uiStep);
-#else
-    simPausedEm = uiPaused && !uiStep; // browser build steps the world inline
 #endif
-    uiStep = false;
+
+    // The one drive of world time this frame (a capture passes its fixed 1/fps). The worker
+    // follows on its own thread; a capture waits for it, so every frame shows exactly the steps
+    // its quanta hold and a rerun reproduces it.
+    simKeys.drive(dt);
+#if CVC_NAV_DEMO_SIM_WORKER
+    if (capturing && sim && !sim->wait_caught_up(10.0))
+      std::fprintf(stderr, "nav_city_drive: the sim worker fell 10 s behind the capture\n");
 #endif
 
     // Trails: append a ring-buffer segment per agent that moved (every 3rd frame,
@@ -2319,7 +2352,8 @@ int main(int argc, char **argv) {
       }
     }
 #else
-    if (!simPausedEm)
+    // No worker: run the navigator steps that fell due on this thread.
+    for (std::uint64_t s = navFollow.take(clock); s > 0; --s)
       world.step(0);
     world.snapshot(emPos.data(), emHead.data(), nullptr, emMd.data(), emRch.data());
     {

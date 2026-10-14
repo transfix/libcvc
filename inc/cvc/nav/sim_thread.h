@@ -132,6 +132,13 @@ public:
   // clock_follower::alpha(clock().tick(), clock_alpha) interpolates from it.
   std::uint64_t last_step_tick() const { return last_step_tick_.load(std::memory_order_relaxed); }
 
+  // Block until the worker has run every step due up to the clock's current
+  // tick and published the result, or until timeout_s passes. A deterministic
+  // capture calls this after driving the clock and before read(), so each frame
+  // shows exactly the steps its quanta hold. Returns false on timeout or if the
+  // thread is not running.
+  bool wait_caught_up(double timeout_s) const;
+
 private:
   sim_world &world_;
   std::unique_ptr<cvc::world_clock> own_clock_; // the hz form's private clock
@@ -143,7 +150,8 @@ private:
   std::atomic<long> ticks_{0};
   std::atomic<long> behind_{0};
   std::atomic<std::uint64_t> last_step_tick_{0};
-  std::shared_ptr<const snapshot> latest_; // published via std::atomic_store
+  std::atomic<std::uint64_t> seen_tick_{0}; // the clock tick the worker has caught up to
+  std::shared_ptr<const snapshot> latest_;  // published via std::atomic_store
   std::mutex cmd_mtx_;
   std::deque<std::function<void()>> cmds_;
   std::thread thr_;

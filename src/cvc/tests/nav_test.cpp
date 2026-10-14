@@ -1178,7 +1178,7 @@ TEST(NavSimWorld, BaseNavStatsArmedCollectsSaneFields) {
   EXPECT_GT(measured_clr, 0); // the drive measured clearance for someone
   EXPECT_GE(e.penetration_pct, 0.0);
   EXPECT_LE(e.penetration_pct, 100.0);
-  EXPECT_TRUE(std::isfinite(e.min_sep_m)); // N > 1 -> lowered from the sentinel
+  EXPECT_TRUE(std::isfinite(e.min_sep_m));             // N > 1 -> lowered from the sentinel
   EXPECT_EQ(world.nav_stats().to_json(), e.to_json()); // a repeatable running snapshot
 
   // Determinism: an identically-seeded, identically-stepped world -> identical record.
@@ -2564,6 +2564,30 @@ TEST(NavSimThread, AFollowerMatchesDirectSteppingExactly) {
   EXPECT_EQ(pa, pb);
   EXPECT_EQ(ha, hb);
   EXPECT_EQ(sa, sb);
+}
+
+TEST(NavSimThread, WaitCaughtUpCoversEveryDueStep) {
+  // A capture drives the clock, waits, then reads: after wait_caught_up the
+  // published snapshot holds exactly the steps the clock's quanta made due,
+  // every frame, however the worker happens to be scheduled.
+  cvc::nav::sim_world followed = clock_test_world();
+  cvc::world_clock::config cc;
+  cc.fixed_dt = 0.01;
+  cvc::world_clock clock(cc);
+  clock.set_mode(cvc::world_clock::mode::lockstep);
+  clock.set_lockstep_steps(4); // 4 quanta per frame: a step (6 quanta) every 1.5 frames
+  cvc::nav::sim_thread sim(followed, clock);
+  sim.start();
+  for (int frame = 1; frame <= 15; ++frame) {
+    clock.advance(0.0);
+    ASSERT_TRUE(sim.wait_caught_up(5.0)) << "frame " << frame;
+    const long due = static_cast<long>(clock.tick() / 6);
+    EXPECT_EQ(sim.ticks(), due) << "frame " << frame;
+    EXPECT_EQ(sim.read()->tick, due) << "frame " << frame;
+  }
+  sim.stop();
+  clock.advance_ticks(6);
+  EXPECT_FALSE(sim.wait_caught_up(0.01)) << "a stopped thread cannot catch up to a new tick";
 }
 
 #ifdef CVC_ENABLE_CUDA
