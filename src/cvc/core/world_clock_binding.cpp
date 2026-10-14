@@ -172,7 +172,7 @@ void world_clock_binding::pull() {
   if (parse_bool(read_raw(_ctx, key("paused")), paused))
     _paused = paused;
 
-  cvc::world_clock::mode requested;
+  cvc::world_clock::mode requested = _requested;
   if (parse_mode(read_raw(_ctx, key("mode")), requested))
     _requested = requested;
 

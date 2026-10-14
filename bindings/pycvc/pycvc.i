@@ -333,13 +333,23 @@ namespace cvc {
 // The real ctor takes app& (not the shared_ptr<app> Python holds): ignore it
 // and re-expose ONLY the shared_ptr factory below, the volume ctor's pattern (a
 // blanket %ignore of the ctor would also suppress the same-named %extend).
+// The factory ctors take no default argument: SWIG would emit the defaulted
+// form as a second declaration that the blanket %ignore then suppresses, so the
+// two arities are spelled out instead.
 %ignore cvc::world_clock_binding::world_clock_binding;
+%rename("%s") cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
+                                                           cvc::world_clock &);
 %rename("%s") cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
                                                            cvc::world_clock &,
                                                            const std::string &);
 %ignore cvc::world_clock_binding::mode_name;
 %ignore cvc::world_clock_binding::parse_mode;
 // Keep the app and the clock alive while the binding refers to them.
+%pythonappend cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
+                                                           cvc::world_clock &) %{
+  self._pycvc_app = app
+  self._pycvc_clock = clock
+%}
 %pythonappend cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
                                                            cvc::world_clock &,
                                                            const std::string &) %{
@@ -348,8 +358,13 @@ namespace cvc {
 %}
 %include "cvc/core/world_clock_binding.h"
 %extend cvc::world_clock_binding {
+  world_clock_binding(std::shared_ptr<cvc::app> app, cvc::world_clock &clock) {
+    if (!app)
+      throw std::invalid_argument("world_clock_binding: app is None");
+    return new cvc::world_clock_binding(*app, clock, "sim");
+  }
   world_clock_binding(std::shared_ptr<cvc::app> app, cvc::world_clock &clock,
-                      const std::string &prefix = "sim") {
+                      const std::string &prefix) {
     if (!app)
       throw std::invalid_argument("world_clock_binding: app is None");
     return new cvc::world_clock_binding(*app, clock, prefix);
