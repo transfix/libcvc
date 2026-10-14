@@ -715,8 +715,8 @@ TEST(ClockFollowerTest, TheTrajectoryIsTheSameUnderEveryPacingMode) {
 
 TEST(ClockFollowerTest, AlphaIsTheFractionIntoTheFollowersOwnStep) {
   cvc::clock_follower nav(4);
-  EXPECT_DOUBLE_EQ(nav.alpha(8, 0.0), 0.0);   // a step just ran
-  EXPECT_DOUBLE_EQ(nav.alpha(10, 0.0), 0.5);  // two of four quanta in
+  EXPECT_DOUBLE_EQ(nav.alpha(8, 0.0), 0.0);  // a step just ran
+  EXPECT_DOUBLE_EQ(nav.alpha(10, 0.0), 0.5); // two of four quanta in
   EXPECT_DOUBLE_EQ(nav.alpha(10, 0.5), 0.625);
   EXPECT_LT(nav.alpha(11, 0.999999), 1.0);
   cvc::clock_follower shifted(4, 1);

@@ -48,8 +48,8 @@ inline std::uint64_t ticks_per_step(double dt, double fixed_dt) {
 // How many steps of a simulation with this period and phase fall among the
 // quanta first_tick + 1 .. first_tick + steps, i.e. the ticks t in that range
 // with t % period == phase % period.
-inline std::uint64_t steps_due(std::uint64_t first_tick, std::uint64_t steps,
-                               std::uint64_t period, std::uint64_t phase = 0) {
+inline std::uint64_t steps_due(std::uint64_t first_tick, std::uint64_t steps, std::uint64_t period,
+                               std::uint64_t phase = 0) {
   if (period == 0 || steps == 0)
     return 0;
   const std::uint64_t r = phase % period;
@@ -100,7 +100,8 @@ public:
   // not the clock's alpha: with a step of 4 quanta, two quanta past a step is
   // halfway, whatever the clock's own alpha says. In [0, 1).
   double alpha(std::uint64_t tick, double clock_alpha) const {
-    const std::uint64_t since = (tick + _period - _phase) % _period; // quanta since the last due tick
+    const std::uint64_t since =
+        (tick + _period - _phase) % _period; // quanta since the last due tick
     double a = (static_cast<double>(since) + clock_alpha) / static_cast<double>(_period);
     if (!(a >= 0.0))
       a = 0.0;

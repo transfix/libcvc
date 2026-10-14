@@ -45,11 +45,11 @@
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
 #include <cvc/core/async_task.h>
+#include <cvc/core/clock_follower.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/text.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
-#include <cvc/core/clock_follower.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>

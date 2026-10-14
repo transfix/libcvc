@@ -1865,7 +1865,9 @@ TEST_F(AppTest, WorldBasesAreNotGlobalSingletons) {
 // ===========================
 
 namespace {
-std::string key_value(app &ctx, const std::string &path) { return cvc::state::instance(ctx)(path).value(); }
+std::string key_value(app &ctx, const std::string &path) {
+  return cvc::state::instance(ctx)(path).value();
+}
 void set_key(app &ctx, const std::string &path, const std::string &v) {
   cvc::state::instance(ctx)(path).value(v);
 }

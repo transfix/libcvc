@@ -94,8 +94,7 @@ bool parse_bool(const std::string &s, bool &out) {
 
 } // namespace
 
-world_clock_binding::world_clock_binding(cvc::app &ctx, cvc::world_clock &clock,
-                                         std::string prefix)
+world_clock_binding::world_clock_binding(cvc::app &ctx, cvc::world_clock &clock, std::string prefix)
     : _ctx(ctx), _clock(clock), _prefix(std::move(prefix)) {}
 
 std::string world_clock_binding::key(const std::string &name) const {
