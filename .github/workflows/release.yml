@@ -256,12 +256,12 @@ jobs:
           .github/scripts/sdk-bundle-deps.sh "$DEPS" "$DIST"
           cmake --install build --prefix "$DIST" --component libcvc
 
-          # cmake --install strips libcvc.so's build-tree RUNPATH. Give
-          # it $ORIGIN so it finds the bundled deps beside it wherever
-          # the archive is extracted. The cvcpkg libraries already carry
-          # $ORIGIN, and RUNPATH is not inherited, so each one needs its
-          # own; sdk-check-closure.sh verifies that for everything
-          # libcvc loads.
+          # libcvc.so needs RUNPATH $ORIGIN to find the bundled deps
+          # beside it wherever the archive is extracted. cmake --install
+          # now writes it (CMake/CvcInstallRpath.cmake), so this only
+          # re-asserts it. The cvcpkg libraries already carry $ORIGIN, and
+          # RUNPATH is not inherited, so each one needs its own;
+          # sdk-check-closure.sh verifies that for everything libcvc loads.
           if [ "${{ matrix.link }}" = "shared" ]; then
             for so in "$DIST"/lib/libcvc*.so*; do
               [ -L "$so" ] && continue
@@ -406,9 +406,10 @@ jobs:
 
           # The cvcpkg dylibs are @rpath/<name> and carry an @loader_path
           # LC_RPATH, so a shared libcvc links them as @rpath/<name> too.
-          # cmake --install strips libcvc's build-tree rpath and leaves
-          # it none, so add @loader_path, then re-sign: install_name_tool
-          # invalidates the ad-hoc signature arm64 will not load without.
+          # cmake --install now gives libcvc @loader_path itself
+          # (CMake/CvcInstallRpath.cmake); this adds it only if missing,
+          # then re-signs: install_name_tool invalidates the ad-hoc
+          # signature arm64 will not load without.
           # No dylibbundler: the deps are already bundled with working
           # install names.
           if [ "${{ matrix.link }}" = "shared" ]; then
