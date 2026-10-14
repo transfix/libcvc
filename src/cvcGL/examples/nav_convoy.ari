@@ -59,6 +59,9 @@ windows:
         on: camera.recenter
 
 scene:
+  # The app's world clock, driven by the host's tick_scene each frame and steered by
+  # sim_transport's sim.speed / sim.paused. The convoy is drawn at the clock's time.
+  clock: {}
   chrome: false
   background: { top: [0.10, 0.13, 0.18], bottom: [0.01, 0.02, 0.04] }
   nodes:

@@ -908,29 +908,53 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   return out;
 }
 
-void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt) {
+cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock) {
+  cvc::world_clock_keys k;
+  const std::pair<const std::string *, std::string> named[] = {{&clock.speed_key, ".speed"},
+                                                               {&clock.paused_key, ".paused"},
+                                                               {&clock.time_key, ".time"},
+                                                               {&clock.tick_key, ".tick"}};
+  for (const auto &n : named) {
+    const std::string &key = *n.first;
+    const std::string &leaf = n.second;
+    if (key.size() > leaf.size() && key.compare(key.size() - leaf.size(), leaf.size(), leaf) == 0) {
+      k = cvc::world_clock_keys::under(key.substr(0, key.size() - leaf.size()));
+      break;
+    }
+  }
+  k.speed = clock.speed_key;
+  k.paused = clock.paused_key;
+  k.time = clock.time_key;
+  k.tick = clock.tick_key;
+  return k;
+}
+
+cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
+                                         double wall_dt) {
+  cvc::world_clock::step_result clock_step;
   // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any
   // custom_tick reading app.world_clock().t()) sees ONE coherent world time for this frame. Opt-in:
   // only when the scene declared a `clock:` block, so a scene without one leaves app.world_clock()
   // entirely untouched (prior behaviour, and no surprise double-advance when several scenes share
   // an app — the one driver is the host that owns the clock: scene).
   if (realized.clock.present && realized.app) {
-    cvc::app &app = *realized.app;
-    cvc::world_clock &wc = app.world_clock();
-    const cvc::ariadne::SceneClock &c = realized.clock;
-    // The key paths were resolved to absolute state paths at realize time (realize_scene, with the
-    // host bind prefix), so a sim_transport slider and this clock share one key. Steer the clock
-    // from them, seeding the declared default when a key is still unset so the clock has a defined
-    // rate on frame 0 and the widget shows the right initial value. An empty key means "not bound"
-    // — the initial scale/paused stands, nothing is published.
-    const double scale = c.speed_key.empty()
-                             ? c.scale
-                             : cvc::ariadne::read_or_seed<double>(app, c.speed_key, c.scale);
-    const int paused = c.paused_key.empty()
-                           ? (c.paused ? 1 : 0)
-                           : cvc::ariadne::read_bool_or_seed(app, c.paused_key, c.paused ? 1 : 0);
-    wc.set_scale(scale);
-    wc.set_mode(paused ? cvc::world_clock::mode::paused : cvc::world_clock::mode::live);
+    if (!realized.clock_binding) {
+      cvc::app &app = *realized.app;
+      cvc::world_clock &wc = app.world_clock();
+      const cvc::ariadne::SceneClock &c = realized.clock;
+      // The declared initial rate and pause go on the clock before the binding exists: the binding
+      // seeds every still-unset key from the clock, so the sim_transport widget shows them on frame
+      // 0, and they stand for good on a lane the scene left unbound (an empty key). The key paths
+      // were resolved at realize time with the host bind prefix, so a sim_transport slider and this
+      // clock share one key.
+      wc.set_scale(c.scale);
+      if (c.paused)
+        wc.set_mode(cvc::world_clock::mode::paused);
+      else if (wc.current_mode() == cvc::world_clock::mode::paused)
+        wc.set_mode(cvc::world_clock::mode::live);
+      realized.clock_binding =
+          std::make_unique<cvc::world_clock_binding>(app, wc, scene_clock_keys(c));
+    }
     // Wall delta: a caller-injected fixed dt (deterministic offscreen capture) when non-negative,
     // else real elapsed since the last tick (real-time animation, no crawl under a slow frame
     // rate).
@@ -942,11 +966,8 @@ void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt) 
       realized.clock_last = now;
       realized.clock_primed = true;
     }
-    wc.advance(dt);
-    if (!c.time_key.empty())
-      cvc::ariadne::write<double>(app, c.time_key, wc.t());
-    if (!c.tick_key.empty())
-      cvc::ariadne::write<double>(app, c.tick_key, static_cast<double>(wc.tick()));
+    // pull (speed / paused / mode / lockstep / step requests), advance, push (time, tick, ...).
+    clock_step = realized.clock_binding->drive(dt);
   }
 
   // §9 clip: bound `offset:`s -> the nodes' clip_planes keys, before the tickers (a volren node
@@ -976,6 +997,7 @@ void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt) 
   for (const std::function<void(vtkRenderer *)> &t : realized.custom_ticks)
     if (t)
       t(renderer);
+  return clock_step;
 }
 
 void register_scene_node_type(const std::string &type, NodeRealizer realizer) {

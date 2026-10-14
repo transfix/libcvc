@@ -1951,3 +1951,50 @@ TEST_F(AppTest, ClockBindingSharesAriadnesTransportKeys) {
   EXPECT_EQ(b.drive(0.1).steps, 6);
   EXPECT_EQ(key_value(ctx, "sim.tick"), "6");
 }
+
+TEST_F(AppTest, ClockBindingTakesExplicitKeysAndSkipsEmptyOnes) {
+  // A scene's `clock:` block names its keys one by one; a lane with no key is
+  // neither seeded, read nor written.
+  cvc::world_clock_keys k;
+  k.speed = "scn.rate";
+  k.time = "scn.now";
+  k.step = "scn.step";
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, k);
+  EXPECT_EQ(b.key("speed"), "scn.rate");
+  EXPECT_EQ(b.key("paused"), "");
+  EXPECT_EQ(b.drive(0.05).steps, 6);
+  EXPECT_EQ(key_value(ctx, "scn.rate"), "1");
+  EXPECT_DOUBLE_EQ(std::stod(key_value(ctx, "scn.now")), c.t());
+  const std::vector<std::string> scn = cvc::state::instance(ctx)("scn").children();
+  EXPECT_EQ(scn.size(), 3u) << "only the three named keys exist under scn";
+
+  set_key(ctx, "scn.rate", "2");
+  EXPECT_EQ(b.drive(0.025).steps, 6);
+  set_key(ctx, "scn.step", "1");
+  EXPECT_EQ(b.drive(0.0).steps, 1) << "a step request through an explicit key";
+}
+
+TEST_F(AppTest, ClockBindingRunsStepsAHostVerbRequests) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  set_key(ctx, "simtest.paused", "1");
+  b.drive(0.0);
+  const std::uint64_t t0 = c.tick();
+  b.request_steps(2);
+  EXPECT_EQ(b.pending_steps(), 2u);
+  EXPECT_EQ(b.drive(1.0).steps, 2) << "a step request runs while paused";
+  EXPECT_EQ(c.tick(), t0 + 2);
+  EXPECT_EQ(b.drive(1.0).steps, 0);
+}
+
+TEST_F(AppTest, ClockKeysUnderAPrefixMatchThePrefixConstructor) {
+  const cvc::world_clock_keys k = cvc::world_clock_keys::under("a.sim");
+  EXPECT_EQ(k.speed, "a.sim.speed");
+  EXPECT_EQ(k.lockstep_steps, "a.sim.lockstep_steps");
+  EXPECT_EQ(k.dropped, "a.sim.dropped");
+  EXPECT_EQ(cvc::world_clock_keys::under("").time, "time");
+  cvc::world_clock_binding b(ctx, ctx.world_clock(), "a.sim");
+  EXPECT_EQ(b.keys().realized_speed, "a.sim.realized_speed");
+  EXPECT_EQ(b.key("custom"), "a.sim.custom");
+}

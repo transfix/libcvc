@@ -319,7 +319,9 @@ int main(int argc, char **argv) {
       rt.post_input(to_ari(e));
     rt.drain(); // run queued Ariadne action events (incl. program on:) on the host thread
     ari::sync_scene_visibility(app, realized.visibility); // §9 bound `visible:` -> node .visible
-    cvc::gl::ariadne::tick_scene(realized, view.renderer()); // §9 volren/volslice per-frame service
+    // §9 volren/volslice per-frame service, and the scene clock: a capture advances it by the fixed
+    // frame dt so the frames are reproducible; a live window measures wall time.
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), capturing ? dt : -1.0);
     for (const std::string &w : rt.take_reactive_warnings())
       std::fprintf(stderr, "%s\n", w.c_str());
   };

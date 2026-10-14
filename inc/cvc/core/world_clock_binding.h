@@ -20,6 +20,32 @@ namespace cvc {
 class app;
 
 // ---------------
+// cvc::world_clock_keys
+// ---------------
+// The state paths a world_clock_binding reads and writes, one per key in the
+// table below. An empty path turns that lane off: it is never seeded, read or
+// written. under("sim") gives the standard layout (sim.speed, sim.paused, ...);
+// a host whose keys were declared one by one (an Ariadne scene's `clock:`
+// block) fills them in directly.
+struct world_clock_keys {
+  // control
+  std::string speed;
+  std::string paused;
+  std::string mode;
+  std::string lockstep_steps;
+  std::string step;
+  // telemetry
+  std::string time;
+  std::string tick;
+  std::string fixed_dt;
+  std::string realized_speed;
+  std::string dropped;
+
+  // Every key under `prefix`; an empty prefix gives the bare names.
+  static world_clock_keys under(const std::string &prefix);
+};
+
+// ---------------
 // cvc::world_clock_binding
 // ---------------
 // The state-tree face of a world_clock: the one place where speed, pause, mode
@@ -29,7 +55,8 @@ class app;
 // once per frame.
 //
 // Keys are relative to `prefix` (default "sim", so a default binding speaks the
-// keys Ariadne's sim_transport.ari binds: sim.speed, sim.paused, sim.time).
+// keys Ariadne's sim_transport.ari binds: sim.speed, sim.paused, sim.time), or
+// given one by one as a world_clock_keys, where an empty path turns a lane off.
 //
 //   control, read by pull() and seeded from the clock when unset:
 //     <prefix>.speed           double  world seconds per wall second; 0 pauses
@@ -52,6 +79,8 @@ class app;
 class world_clock_binding {
 public:
   world_clock_binding(cvc::app &ctx, cvc::world_clock &clock, std::string prefix = "sim");
+  // Explicit paths, e.g. a scene's resolved `clock:` keys. Empty ones are off.
+  world_clock_binding(cvc::app &ctx, cvc::world_clock &clock, world_clock_keys keys);
 
   // Control keys -> clock. Seeds any unset key from the clock first.
   void pull();
@@ -67,8 +96,15 @@ public:
   // Single steps requested through <prefix>.step and not yet run.
   std::uint64_t pending_steps() const { return _pending_steps; }
 
-  // Absolute state path of a key under this binding's prefix.
+  // Queue n single steps, as n increments of <prefix>.step would, for a host
+  // verb (sim_transport.ari's Step button is `on: sim.step`). The next drive()
+  // runs them.
+  void request_steps(std::uint64_t n = 1) { _pending_steps += n; }
+
+  // Absolute state path of a key: the configured path for a name in the table
+  // ("" when that lane is off), else `name` under the prefix.
   std::string key(const std::string &name) const;
+  const world_clock_keys &keys() const { return _keys; }
 
   static const char *mode_name(cvc::world_clock::mode m);
   // false if `name` is not a mode.
@@ -78,6 +114,7 @@ private:
   cvc::app &_ctx;
   cvc::world_clock &_clock;
   std::string _prefix;
+  world_clock_keys _keys;
   bool _seeded = false;
   bool _paused = false;
   long long _step_seen = 0;

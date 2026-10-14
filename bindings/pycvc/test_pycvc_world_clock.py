@@ -211,6 +211,21 @@ def test_binding():
     print("  ok: world_clock_binding drives the clock from sim.* keys")
 
 
+def test_binding_explicit_keys():
+    app = pycvc.App()
+    keys = pycvc.world_clock_keys()
+    keys.speed = "scn.rate"
+    keys.time = "scn.now"
+    b = pycvc.world_clock_binding(app, app.world_clock(), keys)
+    assert b.key("paused") == ""
+    pycvc.state_set(app, "scn.rate", "2")
+    r = b.drive(0.025)
+    assert r.steps == 6, r.steps
+    assert float(pycvc.state_get(app, "scn.now")) == app.world_clock().t()
+    assert pycvc.world_clock_keys.under("x").step == "x.step"
+    print("  ok: world_clock_binding takes explicit keys")
+
+
 if __name__ == "__main__":
     test_defaults()
     test_scalar_ctor_and_validation()
@@ -226,4 +241,5 @@ if __name__ == "__main__":
     test_realized_scale()
     test_followers()
     test_binding()
+    test_binding_explicit_keys()
     print("pycvc world_clock tests: OK")

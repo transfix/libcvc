@@ -713,6 +713,32 @@ int main() {
     const double t2 = wc.t();
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), q); // q wall × 2 = 2 quanta world
     chk(wc.t() > t2 + 1.5 * q, "sim.speed=2 advances ~two quanta per quantum of wall time");
+
+    // The drive goes through a world_clock_binding: the keys beside sim.speed (mode,
+    // lockstep_steps, step) steer it too, and tick_scene returns the quanta it ran.
+    const cvc::world_clock_keys k = cvc::gl::ariadne::scene_clock_keys(realized.clock);
+    chk(k.mode == "clk.sim.mode" && k.step == "clk.sim.step" && k.tick.empty(),
+        "scene_clock_keys: the rest of the binding sits beside sim.speed; tick stays off");
+    chk(cvc::state::instance(app)("clk.sim.mode").value() == "live",
+        "the binding seeded clk.sim.mode for the transport widget");
+
+    cvc::state::instance(app)("clk.sim.speed").value(1.0);
+    cvc::state::instance(app)("clk.sim.mode").value(std::string("lockstep"));
+    cvc::state::instance(app)("clk.sim.lockstep_steps").value(3);
+    const std::uint64_t k0 = wc.tick();
+    const cvc::world_clock::step_result ls =
+        cvc::gl::ariadne::tick_scene(realized, view.renderer(), 10.0);
+    chk(ls.steps == 3 && wc.tick() == k0 + 3,
+        "sim.mode=lockstep: 3 quanta per frame, wall ignored");
+    chk(ls.first_tick == k0, "tick_scene returns the frame's step_result (first_tick)");
+
+    cvc::state::instance(app)("clk.sim.mode").value(std::string("stepping"));
+    chk(cvc::gl::ariadne::tick_scene(realized, view.renderer(), 1.0).steps == 0,
+        "sim.mode=stepping: wall time runs nothing");
+    cvc::state::instance(app)("clk.sim.step").value(2);
+    chk(cvc::gl::ariadne::tick_scene(realized, view.renderer(), 1.0).steps == 2,
+        "sim.step: each increment runs one quantum");
+    cvc::state::instance(app)("clk.sim.mode").value(std::string("live"));
   }
 
   // ── verify_scene_customs: the customs: gate for NODE types (cvcGL side) ──────
