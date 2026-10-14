@@ -1670,6 +1670,9 @@ int main(int argc, char **argv) {
     clock.configure(cc);
   }
   cvc::world_clock_binding simKeys(app, clock);
+  const double speed0 = clock.scale(); // the initial speed: presentation rates are set against it
+  const long kSenseRepaint = 15;       // navigator steps between fog / belief-wall repaints
+  long lastSenseRepaint = -kSenseRepaint;
   std::printf("nav_city_swarm: world speed %.2fx real time (--hz %.0f x veh.dt %.3f s); "
               "sim.speed changes it\n",
               clock.scale(), hz, static_cast<double>(cfg.veh.dt));
@@ -2261,22 +2264,35 @@ int main(int argc, char **argv) {
       trailNode->updateVertices(trailXyz);
     };
 
-    // Fleet fog coverage repaint (sense cadence, not per frame). Skipped when the
-    // ground is the satellite photo — the fog belief still shows in the minimap.
-    if (fogOn && !haveSat && groundNode && frame % 15 == 0) {
+    // Sense-cadence work runs on navigator steps, not render frames: the fog coverage
+    // repaint and the belief-wall rebuild come every kSenseRepaint steps (the old 15
+    // frames at the default pace), so a pause stops them and a capture repaints at the
+    // same world time on every run.
+#if CVC_NAV_DEMO_SIM_WORKER
+    const long navTicks = sim ? sim->ticks() : 0;
+#else
+    const long navTicks = static_cast<long>(world.tick());
+#endif
+    const bool senseRepaint =
+        navTicks < lastSenseRepaint || navTicks - lastSenseRepaint >= kSenseRepaint;
+    if (senseRepaint)
+      lastSenseRepaint = navTicks;
+
+    // Fleet fog coverage repaint. Skipped when the ground is the satellite photo — the
+    // fog belief still shows in the minimap.
+    if (fogOn && !haveSat && groundNode && senseRepaint) {
       fill_fleet_fog(fogTex.data(), world, rows, cols);
       groundNode->texture_modified();
     }
 
     // Belief-wall reveal: grow the mesh as coverage grows (sense cadence), and animate the
-    // swarm-colour cycle every few frames. Phase advances each frame (a full sweep ≈ 5 s at
-    // 60 fps); overlapped walls cycle through each seeing swarm's colour with a pulse.
+    // swarm-colour cycle every few frames. The phase follows world time (a full sweep is
+    // 5 s at the initial speed), so it pauses with the sim; overlapped walls cycle through
+    // each seeing swarm's colour with a pulse.
     if (beliefWallsOn) {
-      if (frame % 15 == 0)
+      if (senseRepaint)
         rebuild_belief_walls();
-      beliefPhase += 1.0 / 300.0;
-      if (beliefPhase >= 1.0)
-        beliefPhase -= 1.0;
+      beliefPhase = std::fmod(clock.t() / (5.0 * speed0), 1.0);
       if (beliefNode && frame % 3 == 0)
         recolor_belief_walls(beliefPhase);
     }
