@@ -1,5 +1,7 @@
+#include <chrono>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <thread>
 
 using namespace cvc::state_exec;
 
@@ -244,4 +246,56 @@ TEST(StateExecTypesTest, WalksTerminateOnCyclicStructure) {
   EXPECT_FALSE(s.empty());
   EXPECT_LT(s.size(), std::size_t{1} << 17);
   EXPECT_TRUE(values_equal(cyc, cyc)); // must terminate, not overflow the stack
+}
+
+// A time_budget charges its first half on the steady clock and its second on the thread's CPU
+// clock. A sleeping thread stands in for one the OS has descheduled on a loaded machine (neither
+// runs): three times the budget passes without spending it, and only running -- spinning here --
+// spends the second half.
+TEST(StateExecTypesTest, TimeBudgetSecondHalfIsTheThreadsOwnRunningTime) {
+  time_budget b(0.02);
+  b.start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  const double c0 = thread_cpu_seconds();
+  EXPECT_FALSE(b.spent());
+  while (!b.spent()) {
+  }
+  EXPECT_GE(thread_cpu_seconds() - c0, 0.01);
+  b.stop();
+  EXPECT_TRUE(b.spent());
+  EXPECT_EQ(b.remaining(), 0.0);
+  EXPECT_TRUE(time_budget(0.0).spent()); // an empty budget is spent from the start
+}
+
+// In that second half a check charges at most a sixteenth of it, so a stall between two checks
+// -- here the thread runs for twice the half without one, as a virtual machine's CPU clock can
+// count time its hypervisor stole -- cannot spend the budget: only running, check by check, can.
+TEST(StateExecTypesTest, TimeBudgetChargesAStallAtMostASixteenthOfTheSecondHalf) {
+  time_budget b(0.02);
+  b.start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  EXPECT_FALSE(b.spent()); // the first half is spent: the second is charged on the CPU clock
+  const double c0 = thread_cpu_seconds();
+  while (thread_cpu_seconds() - c0 < 0.02) {
+  }
+  EXPECT_FALSE(b.spent()); // one check: a sixteenth
+  const double c1 = thread_cpu_seconds();
+  while (!b.spent()) {
+  }
+  EXPECT_GE(thread_cpu_seconds() - c1, 0.009); // the other fifteen sixteenths
+}
+
+// The evaluation deadline is such a budget, and a nested guard tightens it.
+TEST(StateExecTypesTest, EvalDeadlineIsSpentOnlyByRunning) {
+  EXPECT_FALSE(eval_deadline_expired()); // none armed
+  eval_deadline_guard guard(0.02);
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  EXPECT_FALSE(eval_deadline_expired());
+  {
+    eval_deadline_guard none(std::nullopt); // arms nothing
+    eval_deadline_guard spent(0.0);
+    EXPECT_TRUE(eval_deadline_expired());
+  }
+  while (!eval_deadline_expired()) {
+  }
 }

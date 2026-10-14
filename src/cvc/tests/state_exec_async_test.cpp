@@ -550,6 +550,29 @@ TEST(AsyncSchedulerTest, SleepSetsWaitingThenWakesAfterDeadline) {
   EXPECT_EQ(sched.get_process_info(pid)->status, process_status::terminated);
 }
 
+// A process's max_time and a run's max_time are time_budgets: time the thread does not run --
+// descheduled on a loaded machine, as a native step that sleeps stands in for here -- cannot
+// spend their second halves. The Ariadne action lane caps both at 0.1 s and relies on that to
+// finish a quick action within its drain: a process whose thread waited 150 ms is neither
+// killed nor left for a later run. ((nap) is called in the program's last step, so nothing
+// runs after the wait. A program that runs past its limit is still killed:
+// AsyncSchedGapsTest.TimeLimitKillsProcess.)
+TEST(AsyncSchedulerTest, TimeLimitsAreNotSpentWhileTheThreadDoesNotRun) {
+  async_scheduler sched;
+  auto env = builtins::make_default_environment();
+  builtins::register_fn(env, "nap", [](std::span<const value_t>) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    return value_t(int64_t{7});
+  });
+  execute_options opts;
+  opts.env = env;
+  opts.max_time = 0.1;
+  const int pid = sched.execute(std::string("(nap)"), opts);
+  auto results = sched.sync_run(200000, 0.1);
+  ASSERT_TRUE(results.count(pid)) << "killed: " << sched.get_exit_error(pid).value_or("no");
+  EXPECT_EQ(std::get<int64_t>(results[pid].v), 7);
+}
+
 class AsyncSchedulerIntrinsicsTest : public ::testing::Test {
 protected:
   cvc::app app_ctx;

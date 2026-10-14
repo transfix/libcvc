@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/parser.h>
@@ -6,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <set>
+#include <thread>
 
 using namespace cvc::state_exec;
 
@@ -398,4 +400,19 @@ TEST_F(StacklessEvaluatorTest, DeadlineAbortsUncappedNestedMethodEval) {
   // at the time budget instead of hanging inside a single outer step.
   auto st = ev->create_state(parse("(begin (defclass B (init (self) (while 1 1))) (B))"));
   EXPECT_THROW(ev->run(st, std::nullopt, /*timeout_sec=*/0.05), evaluation_timeout);
+}
+
+TEST_F(StacklessEvaluatorTest, DeadlineIsNotSpentWhileTheThreadDoesNotRun) {
+  // The deadline is a time_budget: time the thread does not run -- descheduled on a loaded
+  // machine, as a native step that sleeps stands in for here -- cannot spend its second half,
+  // so an evaluation that does next to no work completes however long it waits. (One that
+  // runs past the budget still aborts: DeadlineAbortsUncappedNestedMethodEval.)
+  auto env = builtins::make_default_environment();
+  builtins::register_fn(env, "nap", [](std::span<const value_t>) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    return value_t(int64_t{7});
+  });
+  stackless_evaluator napper(env);
+  auto st = napper.create_state(parse("(nap)"));
+  EXPECT_EQ(std::get<int64_t>(napper.run(st, std::nullopt, /*timeout_sec=*/0.02).v), 7);
 }

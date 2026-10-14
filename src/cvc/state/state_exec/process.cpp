@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cvc/state/state_exec/process.h>
 
@@ -44,6 +45,14 @@ double process::elapsed_time() const {
     t += std::chrono::duration<double>(now - last_run_start).count();
   }
   return t;
+}
+
+std::optional<double> process::time_left() const {
+  if (max_time <= 0.0)
+    return std::nullopt;
+  const double left =
+      charges_cpu_time() ? 0.5 * max_time - cpu_time_charged : max_time - elapsed_time();
+  return std::max(0.0, left);
 }
 
 } // namespace cvc::state_exec

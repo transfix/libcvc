@@ -512,14 +512,16 @@ public:
   // a query that only has to prove "within stop2" often ends in that leaf, or
   // in the small subtree a few levels above it, without a descent from the
   // root. The hint never changes an exact distance returned above stop2: it
-  // only seeds the search with real triangle distances.
-  double nearest2(const Vec3 &p, double stop2, u32 &hint) const {
+  // only seeds the search with real triangle distances. Adds the query's work
+  // -- nodes visited plus triangle distances computed -- to `steps`.
+  double nearest2(const Vec3 &p, double stop2, u32 &hint, u64 &steps) const {
     double best = kInf;
     if (_nodes.empty())
       return best;
     if (hint != kNone) {
       const Node &nd = _nodes[hint];
       for (u32 k = nd.first; k < nd.first + nd.count; ++k) {
+        ++steps;
         best = std::min(best, tri_dist2(p, _tri[k][0], _tri[k][1], _tri[k][2]));
         if (best <= stop2)
           return best;
@@ -527,10 +529,10 @@ public:
       u32 start = hint;
       for (int k = 0; k < kClimb && _parent[start] != kNone; ++k)
         start = _parent[start];
-      if (search(start, p, stop2, best, hint))
+      if (search(start, p, stop2, best, hint, steps))
         return best;
     }
-    search(0, p, stop2, best, hint);
+    search(0, p, stop2, best, hint, steps);
     return best;
   }
 
@@ -560,7 +562,7 @@ private:
 
   // Best-first search of the subtree at `root`, lowering best (and moving the
   // hint to the leaf that holds it); true as soon as best <= stop2.
-  bool search(u32 root, const Vec3 &p, double stop2, double &best, u32 &hint) const {
+  bool search(u32 root, const Vec3 &p, double stop2, double &best, u32 &hint, u64 &steps) const {
     struct Entry {
       double d2;
       u32 node;
@@ -572,11 +574,13 @@ private:
     stack[sp++] = Entry{box_dist2(_nodes[root], p), root};
     while (sp > 0) {
       const Entry e = stack[--sp];
+      ++steps;
       if (e.d2 >= best)
         continue;
       const Node &nd = _nodes[e.node];
       if (nd.count > 0) {
         for (u32 k = nd.first; k < nd.first + nd.count; ++k) {
+          ++steps;
           const double d = tri_dist2(p, _tri[k][0], _tri[k][1], _tri[k][2]);
           if (d < best) {
             best = d;
@@ -720,8 +724,10 @@ std::vector<u64> morton_order(const sample_set &s, const tri_bvh &g, thread_pool
 // fixed-size blocks that fan over the pool; each block keeps its own running
 // max, which lets a query stop as soon as it cannot raise it (or is already
 // known to be under floor2), and the block maxima reduce in order: the sample
-// achieving the max is never cut short, so pooled == serial bit for bit.
-double max_dist2(const sample_set &s, const tri_bvh &g, double floor2, thread_pool *pool) {
+// achieving the max is never cut short, so pooled == serial bit for bit -- and
+// so is the queries' work, which is added to `steps`.
+double max_dist2(const sample_set &s, const tri_bvh &g, double floor2, thread_pool *pool,
+                 u64 &steps) {
   const std::size_t block = 2048, stride = 61;
   const std::size_t n = s.size();
   const std::vector<u64> order = morton_order(s, g, pool);
@@ -730,18 +736,22 @@ double max_dist2(const sample_set &s, const tri_bvh &g, double floor2, thread_po
   double seed = 0.0;
   u32 hint = kNone;
   for (std::size_t j = 0; j < n; j += stride)
-    seed = std::max(seed, g.nearest2(sample(j), std::max(seed, floor2), hint));
+    seed = std::max(seed, g.nearest2(sample(j), std::max(seed, floor2), hint, steps));
   std::vector<double> bmax((n + block - 1) / block, 0.0);
+  std::vector<u64> bsteps(bmax.size(), 0);
   pfor_blocks(pool, n, block, [&](std::size_t lo, std::size_t hi) {
     double m = seed;
     u32 last = kNone; // each block threads its own hint through its samples
+    u64 work = 0;
     for (std::size_t j = lo; j < hi; ++j)
-      m = std::max(m, g.nearest2(sample(j), std::max(m, floor2), last));
+      m = std::max(m, g.nearest2(sample(j), std::max(m, floor2), last, work));
     bmax[lo / block] = m;
+    bsteps[lo / block] = work;
   });
   double m = seed;
   for (double b : bmax)
     m = std::max(m, b);
+  steps = std::accumulate(bsteps.begin(), bsteps.end(), steps);
   return m;
 }
 
@@ -751,17 +761,18 @@ double max_dist2(const sample_set &s, const tri_bvh &g, double floor2, thread_po
 // result that lost no geometry reports exactly 0 wherever it sits, and every
 // sample that lands on the other surface stops at the first triangle that
 // proves it. A surface the arithmetic cannot measure (a non-finite corner, or
-// an extent whose square overflows) is +infinity away.
+// an extent whose square overflows) is +infinity away. The queries' work is
+// added to `steps`.
 double hausdorff(const sample_set &sa, const tri_bvh &ga, const sample_set &sb, const tri_bvh &gb,
-                 thread_pool *pool) {
+                 thread_pool *pool, u64 &steps) {
   if (ga.empty() && gb.empty())
     return 0.0;
   if (ga.empty() || gb.empty() || !ga.finite() || !gb.finite())
     return kInf;
   const double floor = std::max(1e-9 * std::max(ga.diagonal(), gb.diagonal()),
                                 kCoordRoundoff * std::max(ga.magnitude(), gb.magnitude()));
-  const double d2 =
-      std::max(max_dist2(sa, gb, floor * floor, pool), max_dist2(sb, ga, floor * floor, pool));
+  const double d2 = std::max(max_dist2(sa, gb, floor * floor, pool, steps),
+                             max_dist2(sb, ga, floor * floor, pool, steps));
   return d2 <= floor * floor ? 0.0 : std::sqrt(d2);
 }
 
@@ -850,6 +861,7 @@ struct weld_classes {
   std::vector<char> multi; // class -> holds more than one wedge (a seam runs through it)
   u64 seam = 0;            // used input vertices that share their class with another
   u64 pairs_held = 0;      // the most pairs a block of the near search held at once
+  u64 search_steps = 0;    // the near search's tree nodes visited plus pairs measured
 };
 
 // Keep only a spanning forest of `pr`: the pairs that join two sets the pairs
@@ -901,11 +913,15 @@ void spanning_pairs(std::vector<std::pair<u32, u32>> &pr) {
 // The queries run in fixed blocks over the pool; each block keeps only a
 // spanning forest of the pairs it finds -- fewer pairs than the positions they
 // touch -- so memory does not grow with the number of pairs, and the forests
-// are united in block order. The union is a function of the positions alone.
-// Returns the most pairs any block held at once.
-std::size_t weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
-                      const std::vector<u32> &gcomp, const std::vector<double> &tol,
-                      std::vector<u32> &cls, thread_pool *pool) {
+// are united in block order. The union is a function of the positions alone,
+// and so is the search's cost, which it returns.
+struct near_search_cost {
+  u64 pairs_held = 0; // the most pairs any block held at once
+  u64 steps = 0;      // the tree nodes the queries visited plus the position pairs they measured
+};
+near_search_cost weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
+                           const std::vector<u32> &gcomp, const std::vector<double> &tol,
+                           std::vector<u32> &cls, thread_pool *pool) {
   std::vector<split_item> items;
   for (u32 g = 0; g < u32(gmin.size()); ++g)
     if (tol[g] > 0.0) {
@@ -914,7 +930,7 @@ std::size_t weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
     }
   const u32 n = u32(items.size());
   if (n < 2)
-    return 0;
+    return near_search_cost();
   const u32 kLeaf = 8;
   const u32 kVarious = u32(-3); // a node holding more than one component
   struct Rec {                  // a position, in tree order
@@ -1004,8 +1020,10 @@ std::size_t weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
   const std::size_t block = 1024;
   std::vector<std::vector<std::pair<u32, u32>>> found((n + block - 1) / block);
   std::vector<std::size_t> held(found.size(), 0); // per block: the most pairs held at once
+  std::vector<u64> steps(found.size(), 0);        // per block: nodes visited + pairs measured
   pfor_blocks(pool, n, block, [&](std::size_t b, std::size_t e) {
     std::vector<std::pair<u32, u32>> &out = found[b / block];
+    u64 step = 0;
     std::size_t limit = 4 * block;
     // The members of a clique are one set and sit side by side in the tree's
     // order, so what one of them has paired with -- a clique (by node) or a
@@ -1022,6 +1040,7 @@ std::size_t weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
       // false if my clique has already paired with `key`; else note it
       auto fresh = [&](u64 key) { return clique == kNone || linked.insert(key).second; };
       auto pairs_with = [&](u32 j) {
+        ++step;
         const Rec &o = rec[j];
         if (o.comp == me.comp && !mixed)
           return false; // one component: never welded to itself
@@ -1035,6 +1054,7 @@ std::size_t weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
       stack[sp++] = 0;
       while (sp > 0) {
         const u32 node = stack[--sp];
+        ++step;
         const Node &nd = nodes[node];
         if (nd.b >= s)
           continue; // its pairs with me are sought from their other end
@@ -1070,11 +1090,15 @@ std::size_t weld_near(const std::vector<Vec3> &P, const std::vector<u32> &gmin,
       }
     }
     spanning_pairs(out);
+    steps[b / block] = step;
   });
   for (const auto &blk : found)
     for (const auto &pr : blk)
       unite(cls, gmin[pr.first], gmin[pr.second]);
-  return *std::max_element(held.begin(), held.end());
+  near_search_cost cost;
+  cost.pairs_held = *std::max_element(held.begin(), held.end());
+  cost.steps = std::accumulate(steps.begin(), steps.end(), u64(0));
+  return cost;
 }
 
 // Without welding every used vertex is its own wedge, position and class. With
@@ -1221,7 +1245,9 @@ weld_classes weld(const std::vector<Vec3> &P, const std::vector<Tri> &T, const c
                                           4.0 * std::numeric_limits<float>::epsilon() * mag));
         }
       }
-      wc.pairs_held = weld_near(P, gmin, gcomp, tol, cls, pool);
+      const near_search_cost cost = weld_near(P, gmin, gcomp, tol, cls, pool);
+      wc.pairs_held = cost.pairs_held;
+      wc.search_steps = cost.steps;
     }
   }
 
@@ -1674,7 +1700,7 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
   std::unique_ptr<tri_bvh> src_tree;
   std::vector<u32> src_verts;
   std::vector<u64> src_edges;
-  auto measure = [&]() {
+  auto measure = [&](u64 &steps) {
     if (!src_tree) {
       src_tree.reset(new tri_bvh(Pin, S0, pool));
       src_verts = used_vertices(Pin.size(), S0);
@@ -1713,7 +1739,7 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
     sample_set lv{&Pin, &live, {}, {}, changed};
     std::set_difference(live_edges.begin(), live_edges.end(), src_edges.begin(), src_edges.end(),
                         std::back_inserter(lv.edges));
-    return hausdorff(src, *src_tree, lv, tree, pool);
+    return hausdorff(src, *src_tree, lv, tree, pool, steps);
   };
 
   std::size_t last = K; // most recent snapshot, reused while no collapse happened since
@@ -1732,10 +1758,12 @@ std::vector<geometry> simplify_progressive(const geometry &mesh,
       simplify_result &r = (*out)[k];
       r.out_tris = ntris;
       r.collapses = ncollapse;
-      r.world_error = ncollapse > 0 || welded_away > 0 ? measure() : 0.0;
+      r.measure_steps = 0;
+      r.world_error = ncollapse > 0 || welded_away > 0 ? measure(r.measure_steps) : 0.0;
       r.hit_error_limit = hit_limit;
       r.seam_vertices = wc.seam;
       r.weld_pairs_held = wc.pairs_held;
+      r.weld_steps = wc.search_steps;
     }
     last = k;
     last_collapses = ncollapse;
@@ -1850,7 +1878,8 @@ double sampled_hausdorff(const geometry &a, const geometry &b, thread_pool *pool
   gather(a, PA, TA);
   gather(b, PB, TB);
   const tri_bvh ga(PA, TA, pool), gb(PB, TB, pool);
-  return hausdorff(all_samples(PA, TA), ga, all_samples(PB, TB), gb, pool);
+  u64 steps = 0;
+  return hausdorff(all_samples(PA, TA), ga, all_samples(PB, TB), gb, pool, steps);
 }
 
 } // namespace cvc

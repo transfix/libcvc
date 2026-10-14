@@ -9,6 +9,7 @@
 #ifndef CVC_STATE_EXEC_PROCESS_H
 #define CVC_STATE_EXEC_PROCESS_H
 
+#include <algorithm>
 #include <chrono>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
@@ -56,11 +57,11 @@ struct process {
 
   // Resource limits (0 = unlimited)
   uint64_t max_steps = 0;
-  double max_time = 0.0;          // Wall-clock seconds (TOTAL run-time, across all activations)
+  double max_time = 0.0;          // Seconds (TOTAL run-time, all activations): see time_left()
   uint64_t max_memory = 0;        // Bytes
   uint64_t max_messages = 0;      // Outbound message count
   uint64_t max_message_bytes = 0; // Total outbound message bytes
-  // §13.8 per-STEP wall-clock cap (0 = unlimited): the deadline armed for a SINGLE evaluator step,
+  // §13.8 per-STEP time cap (0 = unlimited): the deadline armed for a SINGLE evaluator step,
   // fresh each step (never accumulates), so a long-lived resident with total max_time == 0 still
   // can never HANG the host's per-frame drain — a single step that loops in-place (e.g. a runaway
   // native builtin) is aborted at the cap and the process killed, while a healthy step (far under
@@ -75,6 +76,8 @@ struct process {
   // Timing
   std::chrono::steady_clock::time_point create_time;
   double accumulated_time = 0.0; // Seconds running so far (TOTAL run-time; parked time uncounted)
+  // The second half of max_time used so far: see charge_cpu_time().
+  double cpu_time_charged = 0.0;
   std::chrono::steady_clock::time_point last_run_start;
 
   // Sleep support: process is in `waiting` status until this deadline.
@@ -126,6 +129,18 @@ struct process {
 
   /// Elapsed running time (only while status == running).
   double elapsed_time() const;
+
+  /// max_time is charged like a time_budget: elapsed_time() up to half of it, then the CPU
+  /// time of the steps run from there (cpu_time_charged) for the other half, each step charging
+  /// at most a sixteenth of it -- so a stall in a step, however long (descheduled on a loaded
+  /// machine), never runs a process out of time. Whether the next step's CPU time is charged:
+  bool charges_cpu_time() const { return max_time > 0.0 && elapsed_time() >= 0.5 * max_time; }
+  /// Charge a step's CPU time.
+  void charge_cpu_time(double seconds) { cpu_time_charged += std::min(seconds, max_time / 32.0); }
+  /// Whether max_time is used up (never, when it is 0: unlimited).
+  bool over_time_limit() const { return charges_cpu_time() && cpu_time_charged >= 0.5 * max_time; }
+  /// Seconds of max_time left (nullopt when unlimited): the budget of the next step's deadline.
+  std::optional<double> time_left() const;
 
   /// Step count from evaluator stats.
   uint64_t step_count() const { return state.stats.get_step_count(); }

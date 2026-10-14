@@ -213,17 +213,16 @@ void scheduler::execute_process_step(process &proc) {
   // between-steps max_time check (checked only after step() returns) cannot see. Arming the
   // cooperative deadline for this step lets that inner work abort at the budget too — the
   // same guarantee the read-lane's run() already has. max_time <= 0 means unlimited (nullopt).
-  std::optional<double> step_budget;
-  if (proc.max_time > 0.0) {
-    const double remaining = proc.max_time - proc.elapsed_time();
-    step_budget = remaining > 0.0 ? remaining : 0.0;
-  }
-  eval_deadline_guard step_deadline(step_budget);
+  eval_deadline_guard step_deadline(proc.time_left());
+  const bool charge_cpu = proc.charges_cpu_time();
+  const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   bool done = evaluator_.step(proc.state);
 
   // 4. Accumulate running time
   auto now = std::chrono::steady_clock::now();
   proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  if (charge_cpu)
+    proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
 
   // 5. Check if signal/watch handler just finished
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
@@ -269,17 +268,18 @@ std::unordered_map<int, value_t> scheduler::run(std::optional<uint64_t> max_step
   running_ = true;
   stop_requested_ = false;
   uint64_t steps = 0;
-  auto start = std::chrono::steady_clock::now();
+  // max_time is a time_budget: the run's own time, not time its thread spent descheduled.
+  std::optional<time_budget> budget;
+  if (max_time) {
+    budget.emplace(*max_time);
+    budget->start();
+  }
 
   while (!stop_requested_ && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
-    if (max_time) {
-      auto elapsed =
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-      if (elapsed >= *max_time)
-        break;
-    }
+    if (budget && budget->spent())
+      break;
     step();
     ++steps;
   }
@@ -489,7 +489,7 @@ void scheduler::check_limits(process &proc) {
     return;
   }
   // max_time
-  if (proc.max_time > 0.0 && proc.elapsed_time() >= proc.max_time) {
+  if (proc.over_time_limit()) {
     kill_process(proc, "time_limit_exceeded");
     return;
   }

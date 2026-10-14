@@ -1,31 +1,138 @@
+#include <algorithm>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/types.h>
 #include <sstream>
+#include <time.h>
 #include <unordered_set>
 #include <utility>
 
 namespace cvc::state_exec {
 
-// -- cooperative evaluation deadline ----------------------------------------
+// -- time budgets -------------------------------------------------------------
+
+double thread_cpu_seconds() {
+#if defined(CLOCK_THREAD_CPUTIME_ID) && !defined(_WIN32)
+  static const bool has_cpu_clock = [] {
+    timespec ts;
+    return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0;
+  }();
+  if (has_cpu_clock) {
+    timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return double(ts.tv_sec) + 1e-9 * double(ts.tv_nsec);
+  }
+#endif
+  return std::chrono::duration<double>(time_budget::clock::now().time_since_epoch()).count();
+}
 
 namespace {
-thread_local std::optional<std::chrono::steady_clock::time_point> t_eval_deadline;
+time_budget::clock::time_point after(time_budget::clock::time_point t, double seconds) {
+  return t + std::chrono::duration_cast<time_budget::clock::duration>(
+                 std::chrono::duration<double>(seconds));
+}
 } // namespace
 
-eval_deadline_guard::eval_deadline_guard(std::optional<double> seconds) : prev_(t_eval_deadline) {
-  if (seconds) {
-    const auto d = std::chrono::steady_clock::now() +
-                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                       std::chrono::duration<double>(*seconds));
-    if (!t_eval_deadline || d < *t_eval_deadline) // tighten only; a nested run never relaxes
-      t_eval_deadline = d;
+time_budget::time_budget(double seconds) : half_(seconds > 0.0 ? 0.5 * seconds : 0.0) {}
+
+void time_budget::start() {
+  running_ = true;
+  t0_ = last_ = clock::now();
+  gaps_ = 0.0;
+  if (on_cpu_)
+    c0_ = thread_cpu_seconds();
+  next_ = after(t0_, on_cpu_ ? half_ - cpu_ : half_ - wall_);
+}
+
+void time_budget::gap(clock::time_point now, std::uint64_t gaps) {
+  gaps_ +=
+      std::min(std::chrono::duration<double>(now - last_).count(), double(gaps) * half_ / 16.0);
+  last_ = now;
+}
+
+void time_budget::charge(double cpu_now) {
+  cpu_ += std::min(cpu_now - c0_, gaps_);
+  c0_ = cpu_now;
+  gaps_ = 0.0;
+}
+
+void time_budget::stop(std::uint64_t checks) {
+  if (!running_)
+    return;
+  running_ = false;
+  const clock::time_point now = clock::now();
+  if (on_cpu_) {
+    gap(now, checks);
+    charge(thread_cpu_seconds());
+    return;
+  }
+  wall_ += std::chrono::duration<double>(now - t0_).count();
+  if (wall_ >= half_) { // the first half is spent; what ran past it, unmeasured, is forgiven
+    wall_ = half_;
+    on_cpu_ = true;
   }
 }
 
-eval_deadline_guard::~eval_deadline_guard() { t_eval_deadline = prev_; }
+bool time_budget::spent(clock::time_point now) {
+  if (half_ <= 0.0 || (on_cpu_ && cpu_ >= half_))
+    return true;
+  if (!running_)
+    return false;
+  if (on_cpu_)
+    gap(now);
+  if (now < next_)
+    return false;
+  const double c = thread_cpu_seconds();
+  if (on_cpu_) {
+    charge(c);
+  } else { // the first half is spent: charge the second on the CPU clock, from now
+    wall_ = half_;
+    on_cpu_ = true;
+    c0_ = c;
+    gaps_ = 0.0;
+    last_ = now;
+  }
+  if (cpu_ >= half_)
+    return true;
+  // What is charged never outruns the steady clock, so the rest of the second half cannot be
+  // spent sooner than this.
+  next_ = after(now, half_ - cpu_);
+  return false;
+}
+
+double time_budget::remaining() const {
+  if (half_ <= 0.0)
+    return 0.0;
+  return on_cpu_ ? std::max(0.0, half_ - cpu_) : (half_ - wall_) + half_;
+}
+
+// -- cooperative evaluation deadline ----------------------------------------
+
+namespace {
+thread_local eval_deadline_guard *t_innermost = nullptr; // the guards armed on this thread
+} // namespace
+
+eval_deadline_guard::eval_deadline_guard(std::optional<double> seconds) {
+  if (!seconds)
+    return;
+  budget_.emplace(*seconds);
+  budget_->start();
+  outer_ = t_innermost;
+  t_innermost = this;
+}
+
+eval_deadline_guard::~eval_deadline_guard() {
+  if (budget_)
+    t_innermost = outer_;
+}
 
 bool eval_deadline_expired() {
-  return t_eval_deadline && std::chrono::steady_clock::now() >= *t_eval_deadline;
+  if (!t_innermost)
+    return false;
+  const time_budget::clock::time_point now = time_budget::clock::now();
+  bool spent = false;
+  for (eval_deadline_guard *g = t_innermost; g; g = g->outer_)
+    spent = g->budget_->spent(now) || spent;
+  return spent;
 }
 
 // -- value_tag ---------------------------------------------------------------

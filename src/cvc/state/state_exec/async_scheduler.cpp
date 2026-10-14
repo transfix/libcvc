@@ -152,18 +152,16 @@ void async_scheduler::execute_process_step(process &proc) {
   // Arm the cooperative deadline for this step so an uncapped nested evaluator or a
   // long-running builtin aborts at the process's remaining time budget too — the same
   // guarantee the sync scheduler has (scheduler.cpp). max_time <= 0 means unlimited.
-  std::optional<double> step_budget;
-  if (proc.max_time > 0.0) {
-    const double remaining = proc.max_time - proc.elapsed_time();
-    step_budget = remaining > 0.0 ? remaining : 0.0;
-  }
-  // §13.8 per-STEP cap: bound a SINGLE step's wall time too (fresh each step, never accumulates),
+  std::optional<double> step_budget = proc.time_left();
+  // §13.8 per-STEP cap: bound a SINGLE step's time too (fresh each step, never accumulates),
   // so a resident with total max_time == 0 still can't HANG the host's drain on an in-step loop. A
   // healthy step is far under the cap; a per-node DSL loop yields per step and is bounded by the
   // pump's own per-drain cap instead. Take the tighter of the two.
   if (proc.max_step_time > 0.0)
     step_budget = step_budget ? std::min(*step_budget, proc.max_step_time) : proc.max_step_time;
   eval_deadline_guard step_deadline(step_budget);
+  const bool charge_cpu = proc.charges_cpu_time();
+  const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   // Drive one async_stackless_evaluator step to completion at the leaf. The evaluator's step()
   // is a coroutine that runs one inner stackless step then yields a suspend_point; sync_wait
   // consumes that yield here. (Propagating the suspend_point up into step()/run() as a true
@@ -193,6 +191,8 @@ void async_scheduler::execute_process_step(process &proc) {
   // status guard — previously the unconditional add booked the pre-park slice twice).
   if (proc.status == process_status::running)
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  if (charge_cpu)
+    proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
 
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
     restore_from_signal(proc);
@@ -236,17 +236,19 @@ task<std::unordered_map<int, value_t>> async_scheduler::run(std::optional<uint64
   running_ = true;
   stop_requested_ = false;
   uint64_t steps = 0;
-  auto start = std::chrono::steady_clock::now();
+  // max_time is a time_budget: the run's own time, not time its thread spent descheduled (a
+  // per-frame pump on a loaded machine still finishes a quick action within its frame).
+  std::optional<time_budget> budget;
+  if (max_time) {
+    budget.emplace(*max_time);
+    budget->start();
+  }
 
   while (!stop_requested_ && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
-    if (max_time) {
-      auto elapsed =
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-      if (elapsed >= *max_time)
-        break;
-    }
+    if (budget && budget->spent())
+      break;
     co_await step();
     ++steps;
   }
@@ -577,7 +579,7 @@ void async_scheduler::check_limits(process &proc) {
     kill_process(proc, "max_steps_exceeded");
     return;
   }
-  if (proc.max_time > 0.0 && proc.elapsed_time() >= proc.max_time) {
+  if (proc.over_time_limit()) {
     kill_process(proc, "time_limit_exceeded");
     return;
   }

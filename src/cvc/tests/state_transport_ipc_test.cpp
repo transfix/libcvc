@@ -111,9 +111,15 @@ TEST(StateTransportIpcTest, TwoEndpointConvergence) {
   std::size_t pumped = tA.pump_all();
   EXPECT_GE(pumped, 1u);
   tA.flush();
-  // Receive is async on B.
-  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("k").value() == "v1"; },
-                         std::chrono::milliseconds(2000)));
+  // Receive is async on B, and B's reader thread writes the tree (apply_remote) before it
+  // records the sequence (set_last_applied, state_cluster_shard::ingest_remote), so wait for
+  // both: a check of the replica the moment the value lands can catch it in between.
+  EXPECT_TRUE(wait_until(
+      [&] {
+        return cvc::state::instance(aB)("k").value() == "v1" &&
+               sB.replica().last_applied("A") >= 1u;
+      },
+      std::chrono::milliseconds(2000)));
 
   EXPECT_EQ(cvc::state::instance(aB)("k").value(), "v1");
   EXPECT_GE(sB.replica().last_applied("A"), 1u);

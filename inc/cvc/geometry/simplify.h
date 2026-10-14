@@ -165,6 +165,16 @@ struct simplify_result {
   // tolerance (0 when nothing was searched, or the input is returned
   // unchanged).
   std::uint64_t weld_pairs_held = 0;
+  // The seam search's work: the k-d tree nodes its per-position queries
+  // visited plus the position pairs they measured, summed over every position
+  // it searched. A function of the input positions and tolerances alone, like
+  // weld_pairs_held -- a cost to compare that no machine load perturbs (0 when
+  // nothing was searched, or the input is returned unchanged).
+  std::uint64_t weld_steps = 0;
+  // The work of measuring world_error, likewise: the bounding-volume hierarchy
+  // nodes its sample queries visited plus the point-to-triangle distances they
+  // computed (0 when world_error was not measured).
+  std::uint64_t measure_steps = 0;
 };
 
 // Returns a simplified copy of `mesh`. `mesh` is not modified. The input is
