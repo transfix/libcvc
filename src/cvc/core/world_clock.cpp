@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <cmath>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
@@ -31,6 +32,12 @@ constexpr double kMaxWorldDt = 1.0e15; // ~31 million years
 // it stopped counting.
 constexpr double kMaxCount = 9.0e18;
 
+// Wall seconds per realized-speed window. Long enough that whole-quantum
+// granularity does not dominate the ratio (at 60 fps and a 0.015 s quantum a
+// single frame's ratio swings between 0 and 2x), short enough to show a change
+// of speed within a second.
+constexpr double kRealizedWindow = 0.5;
+
 // A quantum of zero or less has no meaning and would divide by zero below; a
 // non-finite one poisons every subsequent tick. Reject at construction rather
 // than produce a clock that silently never advances. Same for a non-finite
@@ -43,6 +50,8 @@ void validate(const world_clock::config &c) {
     throw cvc::unsupported_exception("world_clock: scale must be finite");
   if (c.max_steps_per_advance < 1)
     throw cvc::unsupported_exception("world_clock: max_steps_per_advance must be >= 1");
+  if (c.lockstep_steps < 1)
+    throw cvc::unsupported_exception("world_clock: lockstep_steps must be >= 1");
 }
 
 // Non-finite deltas (a NaN from an uninitialised timer, an inf from a divide)
@@ -76,8 +85,54 @@ world_clock::world_clock(config cfg) : _cfg(cfg) {
     _cfg.scale = 0.0;
 }
 
+void world_clock::configure(config cfg) {
+  validate(cfg); // throws before anything changes
+  if (cfg.scale < 0.0)
+    cfg.scale = 0.0;
+  std::lock_guard<std::mutex> lk(_mutex);
+  _cfg = cfg;
+  _tick = 0;
+  _accumulator = 0.0;
+  _dropped = 0;
+  clear_measurement_locked();
+}
+
+world_clock::config world_clock::current_config() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _cfg;
+}
+
+void world_clock::clear_measurement_locked() {
+  _win_wall = 0.0;
+  _win_world = 0.0;
+  _realized = 0.0;
+}
+
+void world_clock::note_wall_locked(double wall_dt) {
+  _win_wall += wall_dt;
+  if (_win_wall >= kRealizedWindow) {
+    _realized = _win_world / _win_wall;
+    _win_wall = 0.0;
+    _win_world = 0.0;
+  }
+}
+
+world_clock::step_result world_clock::run_locked(std::uint64_t n) {
+  step_result r;
+  r.first_tick = _tick;
+  _tick += n;
+  r.steps = static_cast<int>(n); // callers pass n <= INT_MAX
+  _win_world += static_cast<double>(n) * _cfg.fixed_dt;
+  // Report the banked fraction, not 0: a caller that steps while a remainder
+  // is banked would otherwise present a backwards jump in alpha and then jump
+  // forward again on the next advance(). The bank itself is untouched.
+  r.alpha = clamp_alpha(_accumulator / _cfg.fixed_dt);
+  return r;
+}
+
 world_clock::step_result world_clock::advance_locked(double world_dt) {
   step_result r;
+  r.first_tick = _tick;
 
   // sanitize_dt bounds the delta, so the accumulator stays finite and below
   // kMaxWorldDt + fixed_dt for every reachable input.
@@ -102,15 +157,24 @@ world_clock::step_result world_clock::advance_locked(double world_dt) {
     whole = kMaxCount;
   const std::uint64_t demanded = static_cast<std::uint64_t>(std::llround(whole));
 
-  // Spiral-of-death guard: run at most max_steps_per_advance, report the rest.
-  const std::uint64_t cap = static_cast<std::uint64_t>(_cfg.max_steps_per_advance);
+  // Spiral-of-death guard: run at most the cap, report the rest. With
+  // cap_scales_with_rate the cap is sized for the requested rate, so asking
+  // for 2x is not quietly answered with whatever a 1x-sized cap allows.
+  std::uint64_t cap = static_cast<std::uint64_t>(_cfg.max_steps_per_advance);
+  if (_cfg.cap_scales_with_rate && _cfg.scale > 1.0) {
+    // scale is finite here; bound the multiplier so the product stays an int.
+    const double mult = std::min(std::ceil(_cfg.scale), 1.0e6);
+    const double scaled = static_cast<double>(cap) * mult;
+    cap = static_cast<std::uint64_t>(std::min(scaled, 2147483647.0));
+  }
   const std::uint64_t run = demanded < cap ? demanded : cap;
   const std::uint64_t discarded = demanded - run;
 
   _tick += run;
   _accumulator = remainder;
-  r.steps = static_cast<int>(run); // <= max_steps_per_advance, an int by config
+  r.steps = static_cast<int>(run); // <= cap <= INT_MAX
   r.dropped_steps = discarded;
+  _win_world += static_cast<double>(run) * _cfg.fixed_dt;
   _dropped = (_dropped > UINT64_MAX - discarded) ? UINT64_MAX : _dropped + discarded;
 
   // Interpolation into the quantum we have not simulated yet.
@@ -121,32 +185,38 @@ world_clock::step_result world_clock::advance_locked(double world_dt) {
 
 world_clock::step_result world_clock::advance(double wall_dt) {
   std::lock_guard<std::mutex> lk(_mutex);
+  const double wall = sanitize_dt(wall_dt);
 
-  // paused banks nothing: resuming must not release a flood of stored time.
-  // replay is driven by seek_tick, and stepping only by step_once.
+  step_result r;
   if (_mode == mode::paused || _mode == mode::replay || _mode == mode::stepping) {
-    step_result r;
+    // paused banks nothing: resuming must not release a flood of stored time.
+    // replay is driven by seek_tick, and stepping only by step_once.
+    r.first_tick = _tick;
     r.alpha = clamp_alpha(_accumulator / _cfg.fixed_dt);
-    return r;
+  } else if (_mode == mode::lockstep) {
+    // Frame by frame: exactly lockstep_steps quanta, whatever the wall says.
+    r = run_locked(static_cast<std::uint64_t>(_cfg.lockstep_steps));
+  } else {
+    // Sanitized on both sides of the multiply: two individually finite values
+    // (a big dt, a big scale) can round to +inf, and inf must never reach the
+    // accumulator.
+    r = advance_locked(sanitize_dt(wall * _cfg.scale));
   }
-
-  // Sanitized on both sides of the multiply: two individually finite values
-  // (a big dt, a big scale) can round to +inf, and inf must never reach the
-  // accumulator.
-  return advance_locked(sanitize_dt(sanitize_dt(wall_dt) * _cfg.scale));
+  // After the steps are counted, so a window that closes on this call
+  // includes them.
+  note_wall_locked(wall);
+  return r;
 }
 
 world_clock::step_result world_clock::step_once() {
   std::lock_guard<std::mutex> lk(_mutex);
-  ++_tick;
-  step_result r;
-  r.steps = 1;
-  // Report the banked fraction, not 0: a caller that steps while a remainder
-  // is banked would otherwise present a backwards jump in alpha and then jump
-  // forward again on the next advance(). The bank itself is untouched --
   // step_once adds a quantum, it does not consume pending wall time.
-  r.alpha = clamp_alpha(_accumulator / _cfg.fixed_dt);
-  return r;
+  return run_locked(1);
+}
+
+world_clock::step_result world_clock::advance_ticks(int n) {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return run_locked(n > 0 ? static_cast<std::uint64_t>(n) : 0);
 }
 
 std::uint64_t world_clock::tick() const {
@@ -178,8 +248,10 @@ world_clock::mode world_clock::current_mode() const {
 void world_clock::set_mode(mode m) {
   std::lock_guard<std::mutex> lk(_mutex);
   // Leaving a non-live mode drops banked time rather than releasing it as a
-  // burst of steps on the first live frame.
-  if (_mode != m && m == mode::live)
+  // burst of steps on the first live frame. Lockstep never banks, so entering
+  // it drops the bank too: a stale remainder would otherwise show up as a
+  // non-zero alpha on every lockstep frame.
+  if (_mode != m && (m == mode::live || m == mode::lockstep))
     _accumulator = 0.0;
   _mode = m;
 }
@@ -196,6 +268,26 @@ void world_clock::set_scale(double s) {
   _cfg.scale = s;
 }
 
+int world_clock::lockstep_steps() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _cfg.lockstep_steps;
+}
+
+void world_clock::set_lockstep_steps(int n) {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _cfg.lockstep_steps = n < 1 ? 1 : n;
+}
+
+bool world_clock::cap_scales_with_rate() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _cfg.cap_scales_with_rate;
+}
+
+void world_clock::set_cap_scales_with_rate(bool on) {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _cfg.cap_scales_with_rate = on;
+}
+
 std::uint64_t world_clock::total_dropped() const {
   std::lock_guard<std::mutex> lk(_mutex);
   return _dropped;
@@ -206,11 +298,17 @@ double world_clock::pending_seconds() const {
   return _accumulator;
 }
 
+double world_clock::realized_scale() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _realized;
+}
+
 void world_clock::reset() {
   std::lock_guard<std::mutex> lk(_mutex);
   _tick = 0;
   _accumulator = 0.0;
   _dropped = 0;
+  clear_measurement_locked();
 }
 
 } // namespace cvc
