@@ -24,6 +24,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/core/app.h>
+#include <cvc/core/clock_follower.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -39,6 +42,7 @@
 #include <cvc/image/image.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/state/state.h>
 #ifdef __EMSCRIPTEN__
 #include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
 #include <emscripten.h>
@@ -634,7 +638,20 @@ int main(int argc, char **argv) {
   });
 #endif
 
-  navdemo::SimPacer pacer;
+  // World time is the app's world clock at the suite quantum (0.01 s), driven once per frame
+  // through a binding, so sim.speed / sim.paused / sim.mode / sim.step (the keys Ariadne's
+  // sim_transport binds) steer it from a remote panel or a script too. The navigator follows it,
+  // one step every veh.dt / fixed_dt = 6 quanta; the stall cap is 8 navigator steps per frame.
+  cvc::world_clock &clock = app.world_clock();
+  {
+    cvc::world_clock::config cc;
+    cc.fixed_dt = 0.01;
+    cc.scale = speed;
+    cc.max_steps_per_advance = 8 * static_cast<int>(cvc::ticks_per_step(cfg.veh.dt, cc.fixed_dt));
+    clock.configure(cc);
+  }
+  cvc::world_clock_binding simKeys(app, clock);
+  cvc::clock_follower nav = cvc::clock_follower::for_step(clock, cfg.veh.dt);
   std::vector<float> cwv(2 * NA, 0.0f); // live carrots (world); [0] = hero
   double ghostGoneT = -1.0;             // world time the last phantom cell cleared
 
@@ -687,7 +704,8 @@ int main(int argc, char **argv) {
       trailNode->updateVertices(trailXyz);
     ghostGoneT = -1.0;
     reached_note = false;
-    pacer = navdemo::SimPacer{};
+    clock.reset(); // the fresh world starts at t = 0, and so does world time
+    nav.reset(clock.tick());
     replan(sx, sy); // plan the belief route over the fresh world's belief plane
     std::printf("nav_fog_ghost: restarted — scenario=%s, %d vehicle%s, range %.0fm\n", scen.c_str(),
                 NA, NA == 1 ? "" : "s", range);
@@ -710,7 +728,10 @@ int main(int argc, char **argv) {
 
 #ifdef CVC_ENABLE_IMGUI
     // ---- apply UI actions ---------------------------------------------------
-    speed = uiSpeed; // world pace: live
+    if (uiSpeed != speed) { // the slider moved: steer the clock through its key
+      speed = uiSpeed;
+      cvc::state::instance(app)(simKeys.key("speed")).value(speed);
+    }
     caption.setVisible(uiCaptions);
     if (ui2D != ortho) { // 2-D map <-> 3-D perspective, live
       ortho = ui2D;
@@ -739,11 +760,12 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    // World time runs at `speed` x real time on ANY display rate (fixed-dt
-    // accumulator); a capture uses the same pacer with a synthetic 1/fps wall
-    // clock, so captured world pacing matches the live window deterministically.
-    const int nticks = pacer.ticks(dt, cfg.veh.dt, speed);
-    for (int s = 0; s < nticks; ++s)
+    // World time runs at sim.speed x real time on ANY display rate; a capture drives
+    // the clock with a synthetic 1/fps wall delta, so captured world pacing matches
+    // the live window and reproduces exactly. The navigator runs the steps that fell
+    // due.
+    simKeys.drive(dt);
+    for (std::uint64_t s = nav.take(clock); s > 0; --s)
       worldPtr->step();
 
     worldPtr->snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());

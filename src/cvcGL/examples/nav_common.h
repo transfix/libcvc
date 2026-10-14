@@ -174,27 +174,6 @@ cvc::geometry pyramid_marker(double half, double h, const double rgb[3]);
 // A flat disc (triangle fan) of `radius` at height z — start pads, arrival pads.
 cvc::geometry disc_marker(double radius, double z, const double rgb[3], int seg = 40);
 
-// Wall-clock -> fixed-dt sim pacing. Accumulate real seconds * speed and hand
-// back whole sim ticks to run this frame (capped so a hitch can't spiral).
-// Keeps world time honest on ANY display rate — fixed steps-per-frame made the
-// same story run twice as fast on a 60 Hz display as on a 30 fps capture.
-struct SimPacer {
-  double carry = 0.0;
-  int ticks(double wall_dt, double sim_dt, double speed, int cap = 8) {
-    if (!(wall_dt > 0.0) || !(sim_dt > 0.0))
-      return 0;
-    carry += wall_dt * speed;
-    int n = static_cast<int>(carry / sim_dt);
-    if (n > cap) {
-      n = cap; // dropped time, not a tick burst — a stall must not fast-forward
-      carry = 0.0;
-    } else {
-      carry -= n * sim_dt;
-    }
-    return n;
-  }
-};
-
 // Scripted capture camera: orbit an eye around the bbox centre (at world-z `zc`) at
 // `azimuth` + `elevation` (radians), distance = bbox.radius() * dist_scale. Z-up.
 // Writes eye[3] and focal[3] (the centre) for SceneRenderer::setCamera.
