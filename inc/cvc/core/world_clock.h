@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cvc/core/namespace.h>
+#include <condition_variable>
 #include <mutex>
 
 namespace cvc {
@@ -166,6 +167,12 @@ public:
   // Reposition in replay. Does not touch the accumulator's remainder.
   void seek_tick(std::uint64_t tick);
 
+  // Block until the tick differs from `tick` (it advanced, or a reset, seek or
+  // configure moved it), or until `timeout_seconds` of wall time pass. Returns
+  // the tick it saw. A follower thread waits here for its driver instead of
+  // polling.
+  std::uint64_t wait_for_tick_change(std::uint64_t tick, double timeout_seconds) const;
+
   // --- mode and rate ------------------------------------------------------
 
   mode current_mode() const;
@@ -203,6 +210,7 @@ public:
 
 private:
   mutable std::mutex _mutex;
+  mutable std::condition_variable _tick_changed;
   config _cfg;
   mode _mode = mode::live;
   std::uint64_t _tick = 0;

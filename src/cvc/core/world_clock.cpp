@@ -9,6 +9,7 @@
 */
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
@@ -92,6 +93,7 @@ void world_clock::configure(config cfg) {
   std::lock_guard<std::mutex> lk(_mutex);
   _cfg = cfg;
   _tick = 0;
+  _tick_changed.notify_all();
   _accumulator = 0.0;
   _dropped = 0;
   clear_measurement_locked();
@@ -121,6 +123,8 @@ world_clock::step_result world_clock::run_locked(std::uint64_t n) {
   step_result r;
   r.first_tick = _tick;
   _tick += n;
+  if (n > 0)
+    _tick_changed.notify_all();
   r.steps = static_cast<int>(n); // callers pass n <= INT_MAX
   _win_world += static_cast<double>(n) * _cfg.fixed_dt;
   // Report the banked fraction, not 0: a caller that steps while a remainder
@@ -171,6 +175,8 @@ world_clock::step_result world_clock::advance_locked(double world_dt) {
   const std::uint64_t discarded = demanded - run;
 
   _tick += run;
+  if (run > 0)
+    _tick_changed.notify_all();
   _accumulator = remainder;
   r.steps = static_cast<int>(run); // <= cap <= INT_MAX
   r.dropped_steps = discarded;
@@ -238,6 +244,17 @@ double world_clock::fixed_dt() const {
 void world_clock::seek_tick(std::uint64_t tick) {
   std::lock_guard<std::mutex> lk(_mutex);
   _tick = tick;
+  _tick_changed.notify_all();
+}
+
+std::uint64_t world_clock::wait_for_tick_change(std::uint64_t tick, double timeout_seconds) const {
+  std::unique_lock<std::mutex> lk(_mutex);
+  if (!(timeout_seconds > 0.0)) // also false for NaN: do not wait at all
+    return _tick;
+  // Bounded so the duration cast cannot overflow; a day is "forever" here.
+  const double secs = std::min(timeout_seconds, 86400.0);
+  _tick_changed.wait_for(lk, std::chrono::duration<double>(secs), [&] { return _tick != tick; });
+  return _tick;
 }
 
 world_clock::mode world_clock::current_mode() const {
@@ -306,6 +323,7 @@ double world_clock::realized_scale() const {
 void world_clock::reset() {
   std::lock_guard<std::mutex> lk(_mutex);
   _tick = 0;
+  _tick_changed.notify_all();
   _accumulator = 0.0;
   _dropped = 0;
   clear_measurement_locked();

@@ -15,6 +15,7 @@
 // stall, alpha leaving [0,1), and a paused clock releasing a burst on resume.
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cvc/core/clock_follower.h>
@@ -722,4 +723,18 @@ TEST(ClockFollowerTest, AlphaIsTheFractionIntoTheFollowersOwnStep) {
   cvc::clock_follower shifted(4, 1);
   EXPECT_DOUBLE_EQ(shifted.alpha(9, 0.0), 0.0);
   EXPECT_DOUBLE_EQ(shifted.alpha(8, 0.0), 0.75);
+}
+
+TEST(WorldClockTest, WaitForTickChangeWakesOnAdvanceAndTimesOut) {
+  world_clock c;
+  EXPECT_EQ(c.wait_for_tick_change(0, 0.01), 0u) << "nothing moved: timed out";
+  std::thread driver([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    c.advance_ticks(3);
+  });
+  EXPECT_EQ(c.wait_for_tick_change(0, 5.0), 3u);
+  driver.join();
+  EXPECT_EQ(c.wait_for_tick_change(3, 0.0), 3u) << "a zero timeout does not wait";
+  c.reset();
+  EXPECT_EQ(c.wait_for_tick_change(3, 0.01), 0u) << "a reset is a change too";
 }
