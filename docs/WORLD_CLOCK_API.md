@@ -120,6 +120,37 @@ Keys are relative to a prefix, default `sim`. These are the keys Ariadne's
 - `paused` wins over `live` and `lockstep`.
 - An unknown or unreadable control value is ignored, never thrown into a frame.
 
+**Keys named one by one.** `cvc::world_clock_keys` holds one path per key, and
+an empty path turns that lane off: it is never seeded, read or written.
+`world_clock_keys::under("sim")` is the table above. A host with its own
+names passes the struct instead of a prefix:
+
+```cpp
+cvc::world_clock_keys keys = cvc::world_clock_keys::under("coast.clock");
+keys.speed = "coast.clock.scale";   // the demo's existing knob
+keys.time = "coast.clock.t";
+cvc::world_clock_binding binding(app, app.world_clock(), keys);
+```
+
+**Host verbs.** `binding.request_steps(n)` queues `n` single steps, the same as
+`n` increments of `sim.step`; the next `drive()` runs them in any mode. A Step
+button wired as a verb (`sim_transport.ari`'s `on: sim.step`) calls it with the
+navigator's quanta, `ticks_per_step(veh.dt, fixed_dt)`, to run one navigator
+step.
+
+**Ariadne scenes.** A scene with a `clock:` block has `tick_scene` drive
+`app.world_clock()` through a binding it makes on the first tick. The keys
+come from `scene_clock_keys(scene.clock)`: the scene's own speed, paused, time
+and tick keys, with mode, lockstep_steps, step and the remaining telemetry
+beside them (`clk.sim.speed` gives `clk.sim.mode`, `clk.sim.step`, ...).
+`tick_scene` returns the frame's `step_result`. A capture passes its fixed
+frame dt; a live window passes nothing, and the elapsed wall time is measured.
+
+**Threaded followers in a capture.** `sim_thread::wait_caught_up(timeout)`
+blocks until the worker has run and published every step due up to the
+clock's current tick. A capture calls it after `drive()` and before `read()`, so
+each frame shows exactly the steps its quanta hold and a rerun reproduces it.
+
 ## The determinism contract
 
 Pacing decides *when* quanta run, never *which* quanta run. A follower's

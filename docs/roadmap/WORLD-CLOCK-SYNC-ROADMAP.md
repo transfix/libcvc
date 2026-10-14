@@ -56,21 +56,25 @@ Three problems follow from that:
   controller (5), and 0.1 s and 0.05 s rollouts. Ariadne and L-system scenes without a navigator keep
   1/120 s.
 
-## Migration checklist (libcvc)
+## Migration checklist (libcvc) — step C2, done
 
-| Loop | Today | Change |
+Every row was migrated on branch `feat/world-clock-demos` (2026-10-14). Each demo was verified on
+Windows by two identical offscreen captures, frame for frame.
+
+| Loop | Before | Now |
 |---|---|---|
-| Ariadne `tick_scene` (`src/cvcGL/ariadne/scene_realize.cpp`) | Drives `app.world_clock()` from wall time even in capture loops; drops `steps`/`alpha`; ignores `sim.step` | Drive through `world_clock_binding`, so lockstep and single-step work; capture callers pass a fixed `wall_dt` |
-| `navdemo::SimPacer` (`src/cvcGL/examples/nav_common.h`) | A duplicate accumulator that drops time silently; used by `nav_fog_ghost` | Delete it; `nav_fog_ghost` follows the app clock |
-| `nav_city_swarm`, `nav_city_drive` | `sim_thread` at a fixed Hz; per-frame stepping without pthreads; "step one frame" un-pauses for a render frame | `sim_thread(world, app.world_clock())`, with the frame loop as the driver; the speed slider writes `sim.speed`; the initial speed keeps today's pace (3.6×) and says so |
-| `nav_finale` | A fixed `hz/fps` steps per frame; targets move on a separate `t` | A navigator follower on the app clock; targets on `clock.t()` |
-| `nav_convoy` | Its own `simT += wall_dt × sim.speed` | `simT = clock.t()` through the binding |
-| `lsystem_coast` | A private clock for the ocean only; trees and clouds stay on wall time | The app clock for every animated layer |
+| Ariadne `tick_scene` (`src/cvcGL/ariadne/scene_realize.cpp`) | Drove `app.world_clock()` from wall time even in capture loops; dropped `steps`/`alpha`; ignored `sim.step` | Drives through a `world_clock_binding` keyed by `scene_clock_keys()`, so lockstep, single-step and mode work; returns the frame's `step_result` |
+| `navdemo::SimPacer` (`src/cvcGL/examples/nav_common.h`) | A duplicate accumulator that dropped time silently; used by `nav_fog_ghost` | Deleted; `nav_fog_ghost` follows the app clock at 0.01 s through a binding |
+| `nav_city_swarm`, `nav_city_drive` | `sim_thread` at a fixed Hz; per-frame stepping without pthreads; "step one frame" un-paused for a render frame | `sim_thread(world, app.world_clock())` with the frame loop as the driver. The "world speed" slider writes `sim.speed`; Step runs one navigator step. The initial speed is `--hz × veh.dt` (3.6×), printed at start-up. A capture waits on `sim_thread::wait_caught_up` |
+| `nav_finale` | A fixed `hz/fps` steps per frame; targets moved on a separate `t` | A navigator follower on the app clock. The acts, the targets and the replans run in world time |
+| `nav_convoy` | Its own `simT += wall_dt × sim.speed` | The scene declares `clock: {}`; the convoy is drawn at `clock.t()`; Step is `request_steps` and Restart is `reset()` |
+| `lsystem_coast` | A private clock for the ocean only; trees and clouds on wall time | The app clock for every animated layer, keyed by the demo's own `coast.clock.*` knobs |
 | `lsystem_forest.cpp`, `terrain_lab` | `t` from wall time or `frame/fps` | `t` from the app clock |
 | `ariadne_hello`, `ariadne_stream` | `tick_scene` on wall time in capture | Pass the capture dt |
-| Frame-counted cadences (belief pulse, fog repaint) | Advance per render frame | Tick periods |
+| Frame-counted cadences (belief pulse, fog repaint) | Advanced per render frame | Fog and belief-wall repaints every 15 navigator steps; the belief pulse is a function of `clock.t()` |
 
-Camera smoothing in the bunny and volume demos is presentation only and may stay on wall time.
+Camera smoothing in the bunny and volume demos is presentation only and stays on wall time, as do
+pure render throttles: recolour, restyle and HUD every few frames.
 
 ## Downstream applications
 
