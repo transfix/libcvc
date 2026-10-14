@@ -313,6 +313,12 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/wasm/cvcGLWasm.cmake")
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+# A shared libcvcGL finds libcvc, VTK, imgui and SDL3 beside it in lib/ through
+# its own RUNPATH ($ORIGIN, or @loader_path on macOS): CMake/CvcInstallRpath.cmake.
+# No effect on the static archive.
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
+cvc_set_install_rpath(cvcGL lib)
+
 install(TARGETS cvcGL EXPORT cvcGLTargets
   ARCHIVE DESTINATION lib   # static libcvcGL.a
   LIBRARY DESTINATION lib   # shared libcvcGL.so
