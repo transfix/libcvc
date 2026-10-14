@@ -2485,8 +2485,8 @@ cvc::nav::sim_world clock_test_world() {
   cfg.veh.dt = 0.06f;
   cfg.veh.nsub = 1;
   cfg.freeze_sense = true;
-  return cvc::nav::sim_world::from_occupancy(cfg, occ.data(),
-                                             cvc::nav::coef_mlp::default_biased(), 32, 3);
+  return cvc::nav::sim_world::from_occupancy(cfg, occ.data(), cvc::nav::coef_mlp::default_biased(),
+                                             32, 3);
 }
 
 bool wait_for_ticks(const cvc::nav::sim_thread &sim, long n) {

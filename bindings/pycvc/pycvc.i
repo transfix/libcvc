@@ -344,17 +344,13 @@ namespace cvc {
                                                            const std::string &);
 %ignore cvc::world_clock_binding::mode_name;
 %ignore cvc::world_clock_binding::parse_mode;
-// Keep the app and the clock alive while the binding refers to them.
-%pythonappend cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
-                                                           cvc::world_clock &) %{
-  self._pycvc_app = app
-  self._pycvc_clock = clock
-%}
-%pythonappend cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
-                                                           cvc::world_clock &,
-                                                           const std::string &) %{
-  self._pycvc_app = app
-  self._pycvc_clock = clock
+// Keep the app and the clock alive while the binding refers to them. With two
+// overloads SWIG emits one __init__(self, *args), so the arguments are
+// positional here, and the append is attached by name so the merged __init__
+// carries it (a signature-specific append is dropped when overloads merge).
+%pythonappend cvc::world_clock_binding::world_clock_binding %{
+  self._pycvc_app = args[0]
+  self._pycvc_clock = args[1]
 %}
 %include "cvc/core/world_clock_binding.h"
 %extend cvc::world_clock_binding {

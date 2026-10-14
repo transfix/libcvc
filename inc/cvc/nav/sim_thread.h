@@ -44,9 +44,9 @@
 #define __CVC_NAV_SIM_THREAD_H__
 
 #include <atomic>
+#include <cstdint>
 #include <cvc/core/clock_follower.h>
 #include <cvc/core/world_clock.h>
-#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>

@@ -64,6 +64,11 @@ sim_thread::~sim_thread() { stop(); }
 void sim_thread::start() {
   if (run_.exchange(true))
     return; // already running
+  // Anchor on the caller's thread, before the worker exists: steps that fall
+  // due from here on are run (none from before start() is replayed as a
+  // burst), and a driver advancing the clock right after start() cannot race
+  // the worker's first look at it.
+  follower_.reset(clock_->tick());
   thr_ = std::thread(&sim_thread::run, this);
 }
 
@@ -122,8 +127,6 @@ void sim_thread::run() {
 
   // Publish an initial frame so a reader has something before the first step.
   std::atomic_store(&latest_, std::shared_ptr<const snapshot>(make_snapshot()));
-  // Steps due before the worker started are not replayed as a burst.
-  follower_.reset(clock_->tick());
   const std::uint64_t k = follower_.period();
   auto last = steady::now();
 

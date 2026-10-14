@@ -11,9 +11,9 @@
 #ifndef __CVC_WORLD_CLOCK_H__
 #define __CVC_WORLD_CLOCK_H__
 
+#include <condition_variable>
 #include <cstdint>
 #include <cvc/core/namespace.h>
-#include <condition_variable>
 #include <mutex>
 
 namespace cvc {
