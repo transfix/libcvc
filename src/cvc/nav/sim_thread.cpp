@@ -69,6 +69,7 @@ void sim_thread::start() {
   // burst), and a driver advancing the clock right after start() cannot race
   // the worker's first look at it.
   follower_.reset(clock_->tick());
+  seen_tick_.store(clock_->tick(), std::memory_order_release);
   thr_ = std::thread(&sim_thread::run, this);
 }
 
@@ -93,6 +94,18 @@ void sim_thread::set_paused(bool paused) {
 void sim_thread::set_rate(double hz) {
   if (own_clock_)
     own_clock_->set_scale((hz > 0.0 ? hz : 60.0) * own_clock_->fixed_dt());
+}
+
+bool sim_thread::wait_caught_up(double timeout_s) const {
+  const std::uint64_t target = clock_->tick();
+  const auto deadline = steady::now() + std::chrono::duration_cast<steady::duration>(
+                                            std::chrono::duration<double>(timeout_s));
+  while (seen_tick_.load(std::memory_order_acquire) < target) {
+    if (!run_.load() || steady::now() >= deadline)
+      return false;
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+  return true;
 }
 
 std::shared_ptr<const sim_thread::snapshot> sim_thread::read() const {
@@ -150,7 +163,11 @@ void sim_thread::run() {
     std::uint64_t due = follower_.take(now_tick);
     if (paused_.load())
       due = 0; // this simulation alone is paused: its due steps are skipped, not banked
-    for (std::uint64_t i = 0; i < due && run_.load(); ++i) {
+    // Re-check the pause before every step: a pass can hold up to a cap's worth of due
+    // steps, and a pause that let them all finish (slow steps, a Debug build) would keep
+    // the sim moving for several steps after set_paused(true). Steps cut off here are
+    // skipped, like any due step while paused.
+    for (std::uint64_t i = 0; i < due && run_.load() && !paused_.load(); ++i) {
       drain();
       world_.step(0);
       std::atomic_store(&latest_, std::shared_ptr<const snapshot>(make_snapshot()));
@@ -160,6 +177,8 @@ void sim_thread::run() {
       const std::uint64_t since = (now_tick + k - follower_.phase()) % k;
       last_step_tick_.store(now_tick - since, std::memory_order_relaxed);
     }
+    // Everything due up to now_tick has run and been published (wait_caught_up).
+    seen_tick_.store(now_tick, std::memory_order_release);
 
     if (drive_) {
       // Sleep until about when the next step falls due in wall time, so the

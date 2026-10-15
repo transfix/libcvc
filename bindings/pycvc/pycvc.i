@@ -342,6 +342,9 @@ namespace cvc {
 %rename("%s") cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
                                                            cvc::world_clock &,
                                                            const std::string &);
+%rename("%s") cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
+                                                           cvc::world_clock &,
+                                                           const cvc::world_clock_keys &);
 %ignore cvc::world_clock_binding::mode_name;
 %ignore cvc::world_clock_binding::parse_mode;
 // Keep the app and the clock alive while the binding refers to them. With two
@@ -364,6 +367,12 @@ namespace cvc {
     if (!app)
       throw std::invalid_argument("world_clock_binding: app is None");
     return new cvc::world_clock_binding(*app, clock, prefix);
+  }
+  world_clock_binding(std::shared_ptr<cvc::app> app, cvc::world_clock &clock,
+                      const cvc::world_clock_keys &keys) {
+    if (!app)
+      throw std::invalid_argument("world_clock_binding: app is None");
+    return new cvc::world_clock_binding(*app, clock, keys);
   }
 }
 

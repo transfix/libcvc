@@ -1229,6 +1229,33 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     return cap;
   }
 
+  // Follow a shared clock (usually app.world_clock()): one navigator step every
+  // veh.dt / clock.fixed_dt quanta, run as the caller's driver advances the clock
+  // (pycvc.world_clock_binding.drive). The thread borrows the clock: the caller
+  // keeps it (and the app that owns it) alive while the thread exists.
+  PyObject *nav_sim_thread_create_on_clock(PyObject *world_handle, cvc::world_clock &clock) {
+    cvc::nav::sim_world *sw = sim_world_from(world_handle); // validates the handle
+    auto *st = new cvc::nav::sim_thread(*sw, clock); // throws if veh.dt is not whole quanta
+    PyObject *cap = PyCapsule_New(st, kSimThreadCapsule, sim_thread_capsule_dtor);
+    if (!cap) {
+      delete st;
+      throw std::runtime_error("pycvc.nav_sim_thread_create_on_clock: capsule alloc failed");
+    }
+    PyCapsule_SetContext(cap, world_handle); // keep the world alive under us
+    Py_INCREF(world_handle);
+    return cap;
+  }
+
+  // Block (GIL released) until the worker has run and published every step due
+  // up to the clock's current tick, or timeout_s passes; True if caught up. A
+  // capture calls it after driving the clock and before reading.
+  PyObject *nav_sim_thread_wait_caught_up(PyObject *cap, double timeout_s) {
+    cvc::nav::sim_thread *st = sim_thread_from(cap);
+    bool ok = false;
+    Py_BEGIN_ALLOW_THREADS ok = st->wait_caught_up(timeout_s);
+    Py_END_ALLOW_THREADS return PyBool_FromLong(ok ? 1 : 0);
+  }
+
   PyObject *nav_sim_thread_start(PyObject *cap) {
     sim_thread_from(cap)->start();
     Py_RETURN_NONE;

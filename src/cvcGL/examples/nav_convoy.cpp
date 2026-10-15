@@ -146,13 +146,21 @@ int main(int argc, char **argv) {
         return std::static_pointer_cast<cvc::gl::GraphicsNode>(node);
       });
 
-  // Capability verbs (the host seam a bare-name on: routes to). sim.step advances one tick while
-  // paused; sim.restart resets the clock; camera.recenter reframes the scene.
-  double simT = 0.0;
-  bool stepOnce = false;
+  // Capability verbs (the host seam a bare-name on: routes to). sim.step runs one clock quantum
+  // (it is enabled while paused); sim.restart rewinds the clock to 0; camera.recenter reframes the
+  // scene. The clock is the app's world clock, which the scene's `clock:` block has tick_scene
+  // drive.
+  cvc::gl::ariadne::RealizedScene realized;
+  bool redraw = true; // build the convoy on the first frame and after a restart
   cvc::bounding_box sceneBounds;
-  rt.on("sim.restart", [&] { simT = 0.0; });
-  rt.on("sim.step", [&] { stepOnce = true; });
+  rt.on("sim.restart", [&] {
+    app.world_clock().reset();
+    redraw = true;
+  });
+  rt.on("sim.step", [&] {
+    if (realized.clock_binding)
+      realized.clock_binding->request_steps(1);
+  });
   rt.on("camera.recenter", [&] {
     if (!sceneBounds.isNull())
       cam.frameBounds(sceneBounds.minx, sceneBounds.miny, sceneBounds.minz, sceneBounds.maxx,
@@ -160,7 +168,6 @@ int main(int argc, char **argv) {
   });
   rt.on("quit", [] {});
 
-  cvc::gl::ariadne::RealizedScene realized;
   ari::LoadResult lr = ari::load_file(docPath.c_str());
   if (!lr.ok) {
     std::fprintf(stderr, "nav_convoy: %s\n", lr.error.c_str());
@@ -189,10 +196,8 @@ int main(int argc, char **argv) {
   }
   rt.set_root(std::move(lr.root));
 
-  // The live "agents" geometry node (host-updated) and the sim-control keys the .ari binds.
+  // The live "agents" geometry node (host-updated) and the readout keys the .ari binds.
   auto agents = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("agents"));
-  const std::string kPaused = ari::resolve_bind(prefix, "sim.paused");
-  const std::string kSpeed = ari::resolve_bind(prefix, "sim.speed");
   const std::string kStatAgents = ari::resolve_bind(prefix, "stats.agents");
   const std::string kStatFps = ari::resolve_bind(prefix, "stats.fps");
   ari::write<int>(app, kStatAgents,
@@ -203,17 +208,15 @@ int main(int argc, char **argv) {
     touch.update();
     cam.update(wall_dt);
     rt.drain();
-    // Advance the convoy unless paused (Step nudges one frame while paused). Speed scales sim time.
-    const bool paused = ari::read_bool_or(app, kPaused, 0) != 0;
-    const double speed = ari::read_or<double>(app, kSpeed, 1.0);
-    if (!paused || stepOnce) {
-      simT += wall_dt * (speed > 0 ? speed : 0.0);
-      stepOnce = false;
-      if (agents)
-        agents->setGeometry(build_agents(agentCount, simT));
-    }
     ari::sync_scene_visibility(app, realized.visibility);
-    cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    // tick_scene is the one driver of the world clock: it reads sim.speed / sim.paused and runs
+    // Step requests. The convoy follows the clock and is rebuilt only when it moved.
+    const cvc::world_clock::step_result r =
+        cvc::gl::ariadne::tick_scene(realized, view.renderer(), wall_dt);
+    if (agents && (r.steps > 0 || redraw)) {
+      agents->setGeometry(build_agents(agentCount, app.world_clock().t()));
+      redraw = false;
+    }
     ari::write<int>(app, kStatFps, static_cast<int>(wall_dt > 0 ? 1.0 / wall_dt : 0));
     for (const std::string &w : rt.take_reactive_warnings())
       std::fprintf(stderr, "%s\n", w.c_str());

@@ -183,7 +183,8 @@ int main(int argc, char **argv) {
     cam.update(dt);
     rt.drain();
     ari::sync_scene_visibility(app, realized.visibility);
-    cvc::gl::ariadne::tick_scene(realized, view.renderer()); // services the stream node's texture
+    // Services the stream node's texture; a capture steps the scene clock by the fixed frame dt.
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), capturing ? dt : -1.0);
   };
 
   if (capturing) {

@@ -24,7 +24,9 @@
 #include <cvc/ariadne/loader.h>   // LoadResult / CustomRequirement (verify_scene_customs)
 #include <cvc/ariadne/scene.h>    // SceneClock (RealizedScene holds the resolved clock by value)
 #include <cvc/core/types.h>       // cvc::sdf_algorithm (sdf_volume_from_mesh)
-#include <cvc/gl/StageLighting.h> // RealizedScene owns any StageLighting rigs
+#include <cvc/core/world_clock.h> // tick_scene returns the frame's world_clock::step_result
+#include <cvc/core/world_clock_binding.h> // RealizedScene drives the clock through a binding
+#include <cvc/gl/StageLighting.h>         // RealizedScene owns any StageLighting rigs
 #include <functional>
 #include <memory>
 #include <string>
@@ -76,19 +78,28 @@ struct RealizedScene {
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
 
   // §9 time. When the scene declared a `clock:` block, tick_scene drives the app's authoritative
-  // cvc::world_clock (app.world_clock()) from these bindings each frame — read sim.speed/sim.paused
-  // (or whatever keys the clock names), set scale/mode, advance by the wall delta, publish the live
-  // world seconds — so a custom_tick can read ONE coherent app.world_clock().t() for the frame and
-  // the reusable sim_transport widget controls it with no host C++. `app` is the owning app (set by
-  // realize_scene); the timestamp/primed pair measures real elapsed between ticks when the caller
-  // does not inject a fixed dt. RealizedScene is MOVED, never copied, so the plain members are
-  // safe; they reset on a scene reload (one dt≈0 frame — app.world_clock() itself persists across
-  // reloads).
+  // cvc::world_clock (app.world_clock()) through a cvc::world_clock_binding each frame: it reads
+  // sim.speed / sim.paused / sim.mode / sim.lockstep_steps / sim.step (or whatever keys the clock
+  // names), advances by the wall delta, and publishes the world time. So a custom_tick reads ONE
+  // coherent app.world_clock().t() for the frame, and the reusable sim_transport widget controls
+  // it, lockstep and single-step included, with no host C++. `app` is the owning app (set by
+  // realize_scene); the binding is made on the first tick; the timestamp/primed pair measures real
+  // elapsed between ticks when the caller does not inject a fixed dt. RealizedScene is MOVED,
+  // never copied; these members reset on a scene reload (one dt≈0 frame — app.world_clock() itself
+  // persists across reloads).
   cvc::ariadne::SceneClock clock; // resolved clock declaration; clock.present gates the drive
   cvc::app *app = nullptr;        // owning app (world_clock() + state) — set by realize_scene
+  std::unique_ptr<cvc::world_clock_binding> clock_binding; // made by the first tick_scene
   std::chrono::steady_clock::time_point clock_last{}; // last tick_scene time (real-elapsed lane)
   bool clock_primed = false;                          // false until the first tick seeds clock_last
 };
+
+// The binding keys for a scene clock. The scene names speed, paused, time and tick one by one
+// (empty = that lane is off); the binding's other keys (mode, lockstep_steps, step, fixed_dt,
+// realized_speed, dropped) sit beside them, under the parent of the first named key that keeps its
+// standard leaf: clk.sim.speed gives clk.sim.mode, clk.sim.step, ... With no such key those lanes
+// are off too.
+cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock);
 
 // Per-frame servicing for realized volren/volslice nodes (§9): each such node needs
 // a tick() every frame or it renders nothing, and multiple volslice nodes need a
@@ -100,13 +111,16 @@ struct RealizedScene {
 //
 // §9 time: when the realized scene declared a `clock:` block, tick_scene ALSO drives the app's
 // authoritative cvc::world_clock here (before the node tickers), so animations read one coherent
-// world time and the sim_transport widget's pause/speed take effect. `wall_dt` is the wall-clock
-// delta to advance by: pass a fixed value (e.g. 1.0/fps) for a DETERMINISTIC offscreen capture;
-// leave it negative (the default) and tick_scene measures real elapsed since the last call — which
-// keeps animation at real-time speed even when the browser renders well under the frame cap (a
-// fixed per-frame dt would make a slow frame rate crawl, the very bug the wall-clock ticks fixed).
-// Scenes without a `clock:` block ignore wall_dt and never touch app.world_clock().
-void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt = -1.0);
+// world time and the sim_transport widget's pause/speed/mode/step take effect. `wall_dt` is the
+// wall-clock delta to advance by: pass a fixed value (e.g. 1.0/fps) for a DETERMINISTIC offscreen
+// capture; leave it negative (the default) and tick_scene measures real elapsed since the last
+// call — which keeps animation at real-time speed even when the browser renders well under the
+// frame cap (a fixed per-frame dt would make a slow frame rate crawl, the very bug the wall-clock
+// ticks fixed). Returns the quanta this frame ran (steps, first_tick, alpha), so a host can step
+// its own followers by them. Scenes without a `clock:` block ignore wall_dt, never touch
+// app.world_clock(), and return an empty result.
+cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
+                                         double wall_dt = -1.0);
 
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME
 // cvc::state prefix the widget Runtime was constructed with (typically

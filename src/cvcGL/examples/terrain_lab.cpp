@@ -32,6 +32,8 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/text.h>        // display-width-aware column padding (§17.3)
+#include <cvc/core/world_clock.h> // the sea and cloud animate on the app's world clock
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h> // realistic world dimensions (metres/km) — §space units
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
@@ -1711,6 +1713,11 @@ int main(int argc, char **argv) {
   long frame = 0;
   int n = 0;
   const int SEA_STRIDE = 4, CLOUD_STRIDE = 8;
+  // The sea and the cloud run on the app's world clock, driven once per frame through a
+  // binding (sim.speed / sim.paused, ...): one speed and pause for both, and a capture's
+  // fixed 1/fps makes the frames reproducible.
+  cvc::world_clock &clock = app.world_clock();
+  cvc::world_clock_binding clockDrive(app, clock);
   while (!view.windowClosed()) {
     double t, dt;
     if (capturing) {
@@ -1723,6 +1730,8 @@ int main(int argc, char **argv) {
     }
     view.processUIEvents();
     touch.update();
+    clockDrive.drive(dt);
+    const double wt = clock.t(); // world time for the sea and the cloud
     if (wantRegen) {
       wantRegen = false;
       rebuild(false);
@@ -1731,14 +1740,14 @@ int main(int argc, char **argv) {
     const bool cloudDue = capturing || frame % CLOUD_STRIDE == 1;
     if (seaDue && sg.hasGraphics("water")) {
       auto w = std::dynamic_pointer_cast<VolumeNode>(sg.getGraphics("water"));
-      w->updateScalars(seaField(t));
+      w->updateScalars(seaField(wt));
       std::vector<double> col, op;
-      seaTransfer(col, op, t);
+      seaTransfer(col, op, wt);
       w->setTransferFunction(col, op);
     }
     if (cloudDue) {
-      double shift = t * (gHalf * 0.010) * SKY_N / (2.0 * gSkyHalf);
-      double morph = t / 60.0 * CLOUD_MAPS;
+      double shift = wt * (gHalf * 0.010) * SKY_N / (2.0 * gSkyHalf);
+      double morph = wt / 60.0 * CLOUD_MAPS;
       skyNode->updateScalars(sky.field(shift, morph));
     }
     if (capture == Capture::Fly) {
