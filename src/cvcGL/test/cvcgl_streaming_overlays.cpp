@@ -687,7 +687,6 @@ void testShadows(cvc::app &app, StreamingMapperKind kind) {
 } // namespace
 
 int main() {
-  disableSwapThrottle();
   installErrorCounter();
   cvc::app app;
   if (renderAvailable(app)) {
