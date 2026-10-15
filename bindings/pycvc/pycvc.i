@@ -41,7 +41,9 @@ if _sys.platform == "win32":
 %{
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
+#include <cvc/core/clock_follower.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
 #include <cvc/volume/dimension.h>
 #include <cvc/volume/bounding_box.h>
@@ -279,32 +281,89 @@ namespace cvc {
 %ignore cvc::world_clock::world_clock(cvc::world_clock::config);
 %ignore cvc::world_clock::current_mode;
 %ignore cvc::world_clock::set_mode;
+%ignore cvc::world_clock::configure;
+%ignore cvc::world_clock::current_config;
 %include "cvc/core/world_clock.h"
 %extend cvc::world_clock {
   // Build with an explicit quantum instead of the nested config struct.
-  world_clock(double fixed_dt, double scale = 1.0, int max_steps_per_advance = 8) {
+  world_clock(double fixed_dt, double scale = 1.0, int max_steps_per_advance = 8,
+              int lockstep_steps = 1, bool cap_scales_with_rate = false) {
     cvc::world_clock::config c;
     c.fixed_dt = fixed_dt;
     c.scale = scale;
     c.max_steps_per_advance = max_steps_per_advance;
+    c.lockstep_steps = lockstep_steps;
+    c.cap_scales_with_rate = cap_scales_with_rate;
     return new cvc::world_clock(c);
   }
+  // configure() with scalars: replace the quantum (and the rest) and restart at
+  // tick 0, the way a host picks a quantum every simulation divides. Named
+  // differently from the %ignore'd configure(config), which would suppress it.
+  void set_config(double fixed_dt, double scale = 1.0, int max_steps_per_advance = 8,
+                  int lockstep_steps = 1, bool cap_scales_with_rate = false) {
+    cvc::world_clock::config c;
+    c.fixed_dt = fixed_dt;
+    c.scale = scale;
+    c.max_steps_per_advance = max_steps_per_advance;
+    c.lockstep_steps = lockstep_steps;
+    c.cap_scales_with_rate = cap_scales_with_rate;
+    $self->configure(c);
+  }
   std::string mode_name() const {
-    switch ($self->current_mode()) {
-    case cvc::world_clock::mode::live: return "live";
-    case cvc::world_clock::mode::replay: return "replay";
-    case cvc::world_clock::mode::paused: return "paused";
-    case cvc::world_clock::mode::stepping: return "stepping";
-    }
-    return "live";
+    return cvc::world_clock_binding::mode_name($self->current_mode());
   }
   void set_mode_name(const std::string& m) {
-    if (m == "live") $self->set_mode(cvc::world_clock::mode::live);
-    else if (m == "replay") $self->set_mode(cvc::world_clock::mode::replay);
-    else if (m == "paused") $self->set_mode(cvc::world_clock::mode::paused);
-    else if (m == "stepping") $self->set_mode(cvc::world_clock::mode::stepping);
-    else throw std::invalid_argument(
-        "world_clock.set_mode_name: expected 'live', 'replay', 'paused' or 'stepping'");
+    cvc::world_clock::mode mode;
+    if (!cvc::world_clock_binding::parse_mode(m, mode))
+      throw std::invalid_argument("world_clock.set_mode_name: expected 'live', 'replay', "
+                                  "'paused', 'stepping' or 'lockstep'");
+    $self->set_mode(mode);
+  }
+}
+
+// ── Following one clock at several rates (cvc/core/clock_follower.h) ──
+// ticks_per_step / steps_due / clock_follower: a Python simulation whose step is
+// k quanta follows the shared clock the same way a C++ one does.
+%include "cvc/core/clock_follower.h"
+
+// ── cvc::world_clock_binding — the clock on the state tree ──────────
+// Speed / pause / mode / single-step come from <prefix>.* keys and the shared
+// time is published there (see the header for the key table). Built from the
+// app handle and a clock (usually app.world_clock()); keeps the app alive.
+// The real ctor takes app& (not the shared_ptr<app> Python holds): ignore it
+// and re-expose ONLY the shared_ptr factory below, the volume ctor's pattern (a
+// blanket %ignore of the ctor would also suppress the same-named %extend).
+// The factory ctors take no default argument: SWIG would emit the defaulted
+// form as a second declaration that the blanket %ignore then suppresses, so the
+// two arities are spelled out instead.
+%ignore cvc::world_clock_binding::world_clock_binding;
+%rename("%s") cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
+                                                           cvc::world_clock &);
+%rename("%s") cvc::world_clock_binding::world_clock_binding(std::shared_ptr<cvc::app>,
+                                                           cvc::world_clock &,
+                                                           const std::string &);
+%ignore cvc::world_clock_binding::mode_name;
+%ignore cvc::world_clock_binding::parse_mode;
+// Keep the app and the clock alive while the binding refers to them. With two
+// overloads SWIG emits one __init__(self, *args), so the arguments are
+// positional here, and the append is attached by name so the merged __init__
+// carries it (a signature-specific append is dropped when overloads merge).
+%pythonappend cvc::world_clock_binding::world_clock_binding %{
+  self._pycvc_app = args[0]
+  self._pycvc_clock = args[1]
+%}
+%include "cvc/core/world_clock_binding.h"
+%extend cvc::world_clock_binding {
+  world_clock_binding(std::shared_ptr<cvc::app> app, cvc::world_clock &clock) {
+    if (!app)
+      throw std::invalid_argument("world_clock_binding: app is None");
+    return new cvc::world_clock_binding(*app, clock, "sim");
+  }
+  world_clock_binding(std::shared_ptr<cvc::app> app, cvc::world_clock &clock,
+                      const std::string &prefix) {
+    if (!app)
+      throw std::invalid_argument("world_clock_binding: app is None");
+    return new cvc::world_clock_binding(*app, clock, prefix);
   }
 }
 

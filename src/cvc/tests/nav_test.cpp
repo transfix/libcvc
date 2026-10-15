@@ -16,7 +16,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cvc/core/exception.h>
 #include <cvc/core/thread_pool.h>
+#include <cvc/core/world_clock.h>
 #include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/grid_math.h>
@@ -2457,6 +2459,111 @@ TEST(NavSimThread, RunsLockFreeAndTakesCommands) {
 
   sim.stop();
   sim.stop(); // idempotent
+}
+
+// sim_thread on a shared world_clock: the frame loop (here, the test) drives
+// the clock and the worker follows it, one navigator step every
+// veh.dt / fixed_dt quanta.
+namespace {
+cvc::nav::sim_world clock_test_world() {
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  return cvc::nav::sim_world::from_occupancy(cfg, occ.data(), cvc::nav::coef_mlp::default_biased(),
+                                             32, 3);
+}
+
+bool wait_for_ticks(const cvc::nav::sim_thread &sim, long n) {
+  for (int i = 0; i < 5000 && sim.ticks() < n; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  return sim.ticks() >= n;
+}
+} // namespace
+
+TEST(NavSimThread, FollowsASharedClockAtItsOwnPeriod) {
+  cvc::nav::sim_world world = clock_test_world();
+  cvc::world_clock::config cc;
+  cc.fixed_dt = 0.01; // the suite quantum: 0.06 s is 6 quanta
+  cvc::world_clock clock(cc);
+  clock.set_mode(cvc::world_clock::mode::stepping); // only the test moves time
+
+  cvc::nav::sim_thread sim(world, clock);
+  sim.start();
+  clock.advance_ticks(5); // not yet a whole navigator step
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(sim.ticks(), 0);
+  clock.advance_ticks(1); // tick 6: one step due
+  ASSERT_TRUE(wait_for_ticks(sim, 1));
+  clock.advance_ticks(60); // ten more
+  ASSERT_TRUE(wait_for_ticks(sim, 11));
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(sim.ticks(), 11) << "a follower runs exactly the steps the clock made due";
+  EXPECT_EQ(sim.last_step_tick(), 66u);
+  EXPECT_EQ(sim.behind(), 0) << "a follower does not drive, so it drops nothing";
+
+  // Pausing this simulation skips its due steps instead of banking them.
+  sim.set_paused(true);
+  clock.advance_ticks(60);
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  sim.set_paused(false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(sim.ticks(), 11) << "no burst on resume";
+  EXPECT_EQ(clock.current_mode(), cvc::world_clock::mode::stepping)
+      << "pausing one simulation leaves the shared clock alone";
+  sim.stop();
+}
+
+TEST(NavSimThread, RefusesAStepThatIsNotAWholeNumberOfQuanta) {
+  cvc::nav::sim_world world = clock_test_world();
+  cvc::world_clock clock; // 1/120: 0.06 s would be 7.2 quanta
+  EXPECT_THROW(cvc::nav::sim_thread(world, clock), cvc::unsupported_exception);
+}
+
+TEST(NavSimThread, AFollowerMatchesDirectSteppingExactly) {
+  // The same world stepped 20 times directly, and through a sim_thread whose
+  // clock is driven in uneven batches: identical poses, bit for bit.
+  cvc::nav::sim_world direct = clock_test_world();
+  for (int i = 0; i < 20; ++i)
+    direct.step(0);
+  std::vector<float> pa(2 * direct.size()), ha(direct.size()), sa(direct.size());
+  std::vector<int> ma(direct.size());
+  std::vector<std::uint8_t> ra(direct.size());
+  direct.snapshot(pa.data(), ha.data(), sa.data(), ma.data(), ra.data());
+
+  cvc::nav::sim_world followed = clock_test_world();
+  cvc::world_clock::config cc;
+  cc.fixed_dt = 0.01;
+  cvc::world_clock clock(cc);
+  clock.set_mode(cvc::world_clock::mode::stepping);
+  cvc::nav::sim_thread sim(followed, clock);
+  sim.start();
+  for (int batch : {7, 1, 30, 0, 50, 2, 30}) // 120 quanta = 20 steps
+    clock.advance_ticks(batch);
+  ASSERT_TRUE(wait_for_ticks(sim, 20));
+  sim.stop();
+  std::vector<float> pb(2 * followed.size()), hb(followed.size()), sb(followed.size());
+  std::vector<int> mb(followed.size());
+  std::vector<std::uint8_t> rb(followed.size());
+  followed.snapshot(pb.data(), hb.data(), sb.data(), mb.data(), rb.data());
+  EXPECT_EQ(pa, pb);
+  EXPECT_EQ(ha, hb);
+  EXPECT_EQ(sa, sb);
 }
 
 #ifdef CVC_ENABLE_CUDA

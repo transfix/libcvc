@@ -70,6 +70,14 @@ so "m/s" is only honest by assertion.
 
 **Bind nav's tick to `world_clock`:**
 
+> **Update (2026-10-14, [`WORLD-CLOCK-SYNC-ROADMAP.md`](WORLD-CLOCK-SYNC-ROADMAP.md)):**
+> - **The binding.** One nav step is a whole number **k** of `world_clock` quanta, k = `veh.dt / fixed_dt`
+>   (`cvc::ticks_per_step`). `nav::sim_thread` follows a shared clock that way.
+> - **The quantum.** Simulation hosts use 0.01 s (k = 6 at the trained 0.06 s), so a physics world and
+>   other controllers share the clock.
+> - **The special case.** k = 1, which the bullets below describe, is the case `fixed_dt == veh.dt`.
+> - **Unchanged.** The trained dt still flows into the choice of quantum, never the reverse.
+
 - One nav step is **one `world_clock` quantum**; `veh_params.dt` is sourced from
   `world_clock::fixed_dt()` at config construction, so "one tick = `fixed_dt`
   real seconds" is explicit and authoritative rather than conventional.

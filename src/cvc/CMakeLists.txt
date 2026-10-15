@@ -204,6 +204,7 @@ set(SOURCE_FILES
   state/state_exec/stdlib.cpp
   state/state_exec/exec_coordinator.cpp
   core/world_clock.cpp
+  core/world_clock_binding.cpp
   core/world_units.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp

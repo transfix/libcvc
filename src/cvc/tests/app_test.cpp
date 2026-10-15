@@ -14,7 +14,9 @@
 #include <chrono> // compute_async: bounded wait for the completion callback
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
+#include <cvc/state/state.h>
 #include <filesystem>
 #include <future> // compute_async: deterministic wait on on_done via a promise
 #include <gtest/gtest.h>
@@ -1857,3 +1859,95 @@ TEST_F(AppTest, WorldBasesAreNotGlobalSingletons) {
 }
 
 // Main function is provided by gtest_main library
+
+// ===========================
+// world_clock_binding — one clock, controlled and published on the state tree
+// ===========================
+
+namespace {
+std::string key_value(app &ctx, const std::string &path) {
+  return cvc::state::instance(ctx)(path).value();
+}
+void set_key(app &ctx, const std::string &path, const std::string &v) {
+  cvc::state::instance(ctx)(path).value(v);
+}
+} // namespace
+
+TEST_F(AppTest, ClockBindingSeedsControlsAndPublishesTime) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  const auto r = b.drive(0.05); // 6 quanta at 120 Hz
+  EXPECT_EQ(r.steps, 6);
+  EXPECT_EQ(key_value(ctx, "simtest.speed"), "1");
+  EXPECT_EQ(key_value(ctx, "simtest.paused"), "0");
+  EXPECT_EQ(key_value(ctx, "simtest.mode"), "live");
+  EXPECT_EQ(key_value(ctx, "simtest.lockstep_steps"), "1");
+  EXPECT_EQ(key_value(ctx, "simtest.step"), "0");
+  EXPECT_EQ(key_value(ctx, "simtest.tick"), "6");
+  EXPECT_DOUBLE_EQ(std::stod(key_value(ctx, "simtest.time")), c.t());
+  EXPECT_DOUBLE_EQ(std::stod(key_value(ctx, "simtest.fixed_dt")), c.fixed_dt());
+}
+
+TEST_F(AppTest, ClockBindingSpeedPauseAndModeComeFromTheTree) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  b.drive(0.0);
+
+  set_key(ctx, "simtest.speed", "2");
+  EXPECT_EQ(b.drive(0.025).steps, 6) << "25 ms of wall at 2x is 6 quanta at 120 Hz";
+  EXPECT_DOUBLE_EQ(c.scale(), 2.0);
+
+  set_key(ctx, "simtest.paused", "true"); // state_exec's spelling of a bool
+  EXPECT_EQ(b.drive(0.05).steps, 0);
+  EXPECT_EQ(c.current_mode(), cvc::world_clock::mode::paused);
+
+  set_key(ctx, "simtest.paused", "0");
+  set_key(ctx, "simtest.mode", "lockstep");
+  set_key(ctx, "simtest.lockstep_steps", "3");
+  EXPECT_EQ(b.drive(10.0).steps, 3) << "lockstep ignores the wall";
+  EXPECT_EQ(c.current_mode(), cvc::world_clock::mode::lockstep);
+
+  set_key(ctx, "simtest.paused", "1");
+  EXPECT_EQ(b.drive(10.0).steps, 0) << "paused wins over lockstep";
+
+  set_key(ctx, "simtest.mode", "no-such-mode");
+  set_key(ctx, "simtest.paused", "0");
+  EXPECT_EQ(b.drive(0.0).steps, 3) << "an unknown mode is ignored, not thrown";
+}
+
+TEST_F(AppTest, ClockBindingStepRequestsRunOneQuantumEach) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  set_key(ctx, "simtest.mode", "stepping");
+  b.drive(0.0);
+  const std::uint64_t t0 = c.tick();
+  EXPECT_EQ(b.drive(1.0).steps, 0) << "stepping ignores the wall";
+
+  set_key(ctx, "simtest.step", "2");
+  const auto r = b.drive(1.0);
+  EXPECT_EQ(r.steps, 2);
+  EXPECT_EQ(r.first_tick, t0);
+  EXPECT_EQ(c.tick(), t0 + 2);
+
+  set_key(ctx, "simtest.step", "0"); // a counter reset requests nothing
+  EXPECT_EQ(b.drive(1.0).steps, 0);
+  EXPECT_EQ(b.pending_steps(), 0u);
+}
+
+TEST_F(AppTest, ClockBindingDoesNotReplayRequestsMadeBeforeItExisted) {
+  set_key(ctx, "simtest.step", "40");
+  set_key(ctx, "simtest.mode", "stepping");
+  cvc::world_clock_binding b(ctx, ctx.world_clock(), "simtest");
+  EXPECT_EQ(b.drive(0.0).steps, 0);
+}
+
+TEST_F(AppTest, ClockBindingSharesAriadnesTransportKeys) {
+  // A default binding speaks sim.speed / sim.paused / sim.time, the keys Ariadne's
+  // sim_transport.ari binds, so a scene's Speed slider steers any simulation
+  // driven through a binding.
+  cvc::world_clock_binding b(ctx, ctx.world_clock());
+  EXPECT_EQ(b.key("speed"), "sim.speed");
+  set_key(ctx, "sim.speed", "0.5");
+  EXPECT_EQ(b.drive(0.1).steps, 6);
+  EXPECT_EQ(key_value(ctx, "sim.tick"), "6");
+}
