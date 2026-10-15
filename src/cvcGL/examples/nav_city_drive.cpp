@@ -43,7 +43,7 @@
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
-#include <cvc/lod/select.h>  // agent distance-LOD selection (--lod)
+#include <cvc/lod/select.h> // agent distance-LOD selection (--lod)
 #include <cvc/state/state.h> // write Track params (back/height/look_ahead) to camera state
 #include <future>
 #include <utility> // std::pair (lod score list)

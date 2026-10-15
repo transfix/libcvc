@@ -163,7 +163,11 @@ void sim_thread::run() {
     std::uint64_t due = follower_.take(now_tick);
     if (paused_.load())
       due = 0; // this simulation alone is paused: its due steps are skipped, not banked
-    for (std::uint64_t i = 0; i < due && run_.load(); ++i) {
+    // Re-check the pause before every step: a pass can hold up to a cap's worth of due
+    // steps, and a pause that let them all finish (slow steps, a Debug build) would keep
+    // the sim moving for several steps after set_paused(true). Steps cut off here are
+    // skipped, like any due step while paused.
+    for (std::uint64_t i = 0; i < due && run_.load() && !paused_.load(); ++i) {
       drain();
       world_.step(0);
       std::atomic_store(&latest_, std::shared_ptr<const snapshot>(make_snapshot()));
