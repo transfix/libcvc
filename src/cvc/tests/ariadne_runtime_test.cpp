@@ -185,6 +185,13 @@ struct MockBackend : Backend {
     rec(std::string("combo:") + l + "=" + std::to_string(idx));
     return combo_ret;
   }
+  StringEdit string_ret{};     // programmable return for the next input_text()
+  std::string last_input_text; // the `current` text the core handed input_text() (read side)
+  StringEdit input_text(const char *l, const char *, const std::string &current) override {
+    last_input_text = current;
+    rec(std::string("input_text:") + l + "=" + current);
+    return string_ret;
+  }
   ColorEdit color_ret{};           // programmable return for the next color()
   float last_color[3] = {0, 0, 0}; // the rgb the core handed color() (read side)
   ColorEdit color(const char *l, const float rgb[3]) override {
@@ -278,6 +285,62 @@ TEST(AriadneRuntime, ActionsDrainOffTheWalk) {
   EXPECT_EQ(fired, 1); // runs on drain
   rt.drain();
   EXPECT_EQ(fired, 1); // queue cleared — no double-fire
+}
+
+// Phase 0a: Kind::InputText dispatch — the core hands the backend the current text (read lane),
+// writes the committed value to the bound key, and fires the optional `on` AFTER the write (so a
+// send-on-enter handler sees the new value), queued off the walk like a Button's on.
+TEST(AriadneRuntime, InputTextCommitsValueAndFiresOn) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int sent = 0;
+  rt.on("send", [&] { ++sent; });
+  rt.set_root(group({input_text("Message", "chat.draft", "send")}));
+
+  // No committed edit -> no write, no fire; the (empty, seeded) current text reaches the backend.
+  mb.string_ret = {};
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(mb.last_input_text, "");
+  EXPECT_EQ(sent, 0);
+
+  // A committed edit writes the value and queues the on: (which runs on drain, not inside render).
+  mb.string_ret = {true, true, std::string("hello")};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("chat.draft").value(), "hello");
+  EXPECT_EQ(sent, 0);
+  rt.drain();
+  EXPECT_EQ(sent, 1);
+}
+
+// Phase 0a: Kind::InputInt reuses the text primitive — the core seeds + stringifies the int on the
+// read lane, and on commit parses it back (fail-safe: garbage keeps the current value) and clamps
+// to [lo, hi].
+TEST(AriadneRuntime, InputIntCoercesClampsAndIsFailSafe) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({input_int("Port", "net.port", 1, 65535, 8080)}));
+
+  mb.string_ret = {};
+  rt.render();
+  EXPECT_EQ(mb.last_input_text, "8080"); // read lane: def seeded, int -> text
+  EXPECT_EQ(cvc::state::instance(app)("net.port").value(), "8080"); // seeded into the key
+
+  mb.string_ret = {true, true, std::string("443")}; // in range
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("net.port").value(), "443");
+
+  mb.string_ret = {true, true, std::string("70000")}; // over range -> clamp to hi
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("net.port").value(), "65535");
+
+  mb.string_ret = {true, true, std::string("abc")}; // non-numeric -> keep current
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("net.port").value(), "65535");
 }
 
 // §4/§7 action lane: an `on:` that is a state_exec PROGRAM (starts with '(', like a computed

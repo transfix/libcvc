@@ -62,6 +62,21 @@ int *cache_int(const char *key, int seed, bool active) {
   return slot;
 }
 
+// InputText writing straight into a std::string — what imgui_stdlib's std::string overload does,
+// inlined so this TU need not depend on that optional vendored file. CallbackResize grows the
+// string to fit as the user types; the buffer handed to ImGui is the string's own storage.
+struct InputTextStr {
+  std::string *str;
+};
+int input_text_resize(ImGuiInputTextCallbackData *data) {
+  if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
+    std::string *s = static_cast<InputTextStr *>(data->UserData)->str;
+    s->resize(static_cast<std::size_t>(data->BufTextLen));
+    data->Buf = s->data();
+  }
+  return 0;
+}
+
 // Resolve a §3.0.3b track to pixels: px verbatim, percent as a fraction of the
 // parent extent, auto -> 0 (fit / default).
 float resolve_track(const ariadne::Track &t, float parent) {
@@ -573,6 +588,31 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
   (void)label;
 #endif
   return e;
+}
+
+ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
+                                             const std::string &current) {
+#ifdef CVC_ENABLE_IMGUI
+  // Hold the in-progress text across frames keyed by `key`; follow external writes (script / config
+  // / replicated peer) while no field is being edited, exactly like cache_int/cache_float.
+  std::string &buf = m_textEdits[key];
+  if (!ImGui::IsAnyItemActive())
+    buf = current;
+  InputTextStr ud{&buf};
+  reserve_label_width(label);
+  // EnterReturnsTrue commits on Enter (a chat box's send); IsItemDeactivatedAfterEdit commits on
+  // focus-leave; CallbackResize lets the std::string grow past its initial capacity as typed.
+  const bool entered =
+      ImGui::InputText(label, buf.data(), buf.capacity() + 1,
+                       ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize,
+                       input_text_resize, &ud);
+  const bool committed = entered || ImGui::IsItemDeactivatedAfterEdit();
+  return {buf != current, committed, buf};
+#else
+  (void)label;
+  (void)key;
+  return {false, false, current};
+#endif
 }
 
 ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {

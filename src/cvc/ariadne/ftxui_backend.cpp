@@ -215,6 +215,14 @@ IndexEdit FtxuiBackend::combo(const char *label, int current_index,
   return {};
 }
 
+StringEdit FtxuiBackend::input_text(const char *label, const char * /*key*/,
+                                    const std::string &current) {
+  // Like the other bound widgets here, FTXUI is a display surface: show the field and its current
+  // text ("label: [text]"); no interactive edit, so report no change.
+  m_->add(fx::text(std::string(label) + ": [" + current + "]"));
+  return {};
+}
+
 std::string FtxuiBackend::render_to_string(Runtime &rt, int width) {
   rt.render(); // walk the tree → (re)builds m_->root through the methods above
   fx::Screen screen = fx::Screen::Create(fx::Dimension::Fixed(width), fx::Dimension::Fit(m_->root));
@@ -276,6 +284,7 @@ DoubleEdit FtxuiBackend::slider_double(const char *, const char *, double, doubl
   return {};
 }
 IndexEdit FtxuiBackend::combo(const char *, int, const std::vector<std::string> &) { return {}; }
+StringEdit FtxuiBackend::input_text(const char *, const char *, const std::string &) { return {}; }
 std::string FtxuiBackend::render_to_string(Runtime &, int) {
   return "ari: libcvc was built without FTXUI (terminal backend unavailable)\n";
 }

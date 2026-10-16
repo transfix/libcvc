@@ -1195,6 +1195,41 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::InputText: {
+    const std::string path = resolve(w.bind);
+    const std::string cur = read_or_seed<std::string>(app, path, w.sdef);
+    const StringEdit e = b.input_text(label, path.c_str(), cur);
+    if (e.committed) {
+      write<std::string>(app, path, e.value);
+      if (!w.on.empty()) // send-on-commit (e.g. a chat box's Enter) — fire AFTER the write so the
+        enqueue(w.on);   // handler sees the committed value in state
+    }
+    break;
+  }
+
+  case Kind::InputInt: {
+    const std::string path = resolve(w.bind);
+    const int cur = read_or_seed<int>(app, path, w.idef);
+    const StringEdit e = b.input_text(label, path.c_str(), std::to_string(cur));
+    if (e.committed) {
+      int next = cur; // fail-safe: a non-numeric entry keeps the current value
+      try {
+        next = std::stoi(e.value);
+      } catch (const std::exception &) {
+      }
+      if (w.ilo != w.ihi) { // clamp only when a real range was authored
+        if (next < w.ilo)
+          next = w.ilo;
+        if (next > w.ihi)
+          next = w.ihi;
+      }
+      write<int>(app, path, next);
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
+    break;
+  }
+
   case Kind::Color: {
     const std::string path = resolve(w.bind);
     const std::string dflt = w.sdef.empty() ? std::string("1,1,1") : w.sdef;
