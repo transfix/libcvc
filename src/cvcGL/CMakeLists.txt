@@ -588,6 +588,12 @@ add_executable(cvcgl_audio_output test/cvcgl_audio_output.cpp)
 target_link_libraries(cvcgl_audio_output PRIVATE cvcGL)
 add_test(NAME cvcgl_audio_output COMMAND cvcgl_audio_output)
 
+# Phase-0 (conference): cvc::gl::playback::audio_stream_player auto-pumps an f32 PCM stream into an
+# audio_output sink on its own thread. Hardware-free via a FakeSink (no SDL / no device needed).
+add_executable(cvcgl_audio_player test/cvcgl_audio_player.cpp)
+target_link_libraries(cvcgl_audio_player PRIVATE cvcGL)
+add_test(NAME cvcgl_audio_player COMMAND cvcgl_audio_player)
+
 # Phase-3 Ariadne stream WIDGET: cvc::gl::ariadne stream_view — its render-thread stream->image
 # pull step (next_stream_frame_image), exercised hardware-free with synthetic_source (no GL/ImGui).
 add_executable(cvcgl_stream_view test/cvcgl_stream_view.cpp)
