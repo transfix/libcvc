@@ -258,5 +258,14 @@ void register_stream_intrinsics(cvc::app &app) {
   });
 }
 
+// Cross-module accessor onto the document-owned stream table (declared in the header). Reuses the
+// same private doc_streams()/stream_table::find() the (stream-*) verbs use, so a companion module
+// (e.g. the cvcGL media verbs) can resolve a document's open stream by token to attach a producer,
+// without the table type leaking out of this TU.
+stream::stream *document_stream(se::document_scope *doc, const std::string &token) {
+  stream_table *tbl = doc_streams(doc);
+  return tbl ? tbl->find(token) : nullptr;
+}
+
 } // namespace ariadne
 } // namespace cvc

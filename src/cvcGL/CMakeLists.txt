@@ -594,6 +594,13 @@ add_executable(cvcgl_audio_player test/cvcgl_audio_player.cpp)
 target_link_libraries(cvcgl_audio_player PRIVATE cvcGL)
 add_test(NAME cvcgl_audio_player COMMAND cvcgl_audio_player)
 
+# Conference roadmap §4a media verb: (stream-capture-camera) attaches a producer to an open stream.
+# Driven hardware-free through the Ariadne Runtime with a synthetic source (no camera, no GL), so it
+# runs on CI; the SDL device path is compiled in (CVC_ENABLE_SDL) but not exercised here.
+add_executable(cvcgl_media_capture test/cvcgl_media_capture.cpp)
+target_link_libraries(cvcgl_media_capture PRIVATE cvcGL)
+add_test(NAME cvcgl_media_capture COMMAND cvcgl_media_capture)
+
 # Phase-3 Ariadne stream WIDGET: cvc::gl::ariadne stream_view — its render-thread stream->image
 # pull step (next_stream_frame_image), exercised hardware-free with synthetic_source (no GL/ImGui).
 add_executable(cvcgl_stream_view test/cvcgl_stream_view.cpp)
