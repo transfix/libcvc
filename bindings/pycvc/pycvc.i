@@ -376,48 +376,147 @@ namespace cvc {
   }
 }
 
+// ── cvc::unit_registry — named units and the conversions between them ──
+// The table world_units converts through (cvc/core/unit_registry.h): the
+// built-in SI + imperial units, plus whatever an application drops in. Wrapped
+// directly; the two nested info structs are flatnested like world_units'. The
+// unit_kind enum class is replaced by unit_info.kind_name() ("linear" |
+// "affine" | "function"). add_function takes two Python callables
+// (float -> float) in place of std::function: each call re-acquires the GIL, so
+// a function unit works from any thread that converts through the registry, and
+// an exception raised by the callable surfaces as a RuntimeError naming it.
+%{
+#include <cvc/core/unit_registry.h>
+
+// A Python callable as a unit_registry::conversion. Holds a strong reference,
+// taken and dropped under the GIL; after interpreter shutdown the reference is
+// leaked rather than touched.
+struct pycvc_py_conversion {
+  PyObject *fn;
+  explicit pycvc_py_conversion(PyObject *f) : fn(f) {
+    PyGILState_STATE g = PyGILState_Ensure();
+    Py_XINCREF(fn);
+    PyGILState_Release(g);
+  }
+  pycvc_py_conversion(const pycvc_py_conversion &o) : pycvc_py_conversion(o.fn) {}
+  pycvc_py_conversion &operator=(const pycvc_py_conversion &) = delete;
+  ~pycvc_py_conversion() {
+    if (!Py_IsInitialized())
+      return;
+    PyGILState_STATE g = PyGILState_Ensure();
+    Py_XDECREF(fn);
+    PyGILState_Release(g);
+  }
+  double operator()(double v) const {
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject *r = PyObject_CallFunction(fn, "d", v);
+    double out = 0.0;
+    std::string err;
+    if (r) {
+      out = PyFloat_AsDouble(r);
+      Py_DECREF(r);
+    }
+    if (PyErr_Occurred()) {
+      PyObject *type = nullptr, *value = nullptr, *tb = nullptr;
+      PyErr_Fetch(&type, &value, &tb);
+      PyObject *s = value ? PyObject_Str(value) : nullptr;
+      const char *msg = s ? PyUnicode_AsUTF8(s) : nullptr;
+      err = std::string("unit_registry: a Python conversion raised ") +
+            (type ? reinterpret_cast<PyTypeObject *>(type)->tp_name : "an error") + ": " +
+            (msg ? msg : "");
+      Py_XDECREF(s);
+      Py_XDECREF(type);
+      Py_XDECREF(value);
+      Py_XDECREF(tb);
+      PyErr_Clear();
+    }
+    PyGILState_Release(g);
+    if (!err.empty())
+      throw std::runtime_error(err);
+    return out;
+  }
+};
+%}
+%feature("flatnested") cvc::unit_registry::dimension_info;
+%feature("flatnested") cvc::unit_registry::unit_info;
+%rename(unit_registry_dimension_info) cvc::unit_registry::dimension_info;
+%rename(unit_registry_unit_info) cvc::unit_registry::unit_info;
+%ignore cvc::unit_registry::unit_kind;
+%ignore cvc::unit_registry::unit_info::kind;
+%ignore cvc::unit_registry::conversion;
+%ignore cvc::unit_registry::operator=;
+%ignore cvc::unit_registry::add_function;
+%rename(add_function) cvc::unit_registry::pycvc_add_function;
+%include "cvc/core/unit_registry.h"
+%extend cvc::unit_registry::unit_info {
+  std::string kind_name() const {
+    switch ($self->kind) {
+    case cvc::unit_registry::unit_kind::affine:
+      return "affine";
+    case cvc::unit_registry::unit_kind::function:
+      return "function";
+    default:
+      return "linear";
+    }
+  }
+}
+%extend cvc::unit_registry {
+  // si = to_si(value), value = from_si(si), both Python callables.
+  void pycvc_add_function(const std::string &symbol, const std::string &dimension,
+                          PyObject *to_si, PyObject *from_si,
+                          const std::string &name = std::string()) {
+    if (!PyCallable_Check(to_si) || !PyCallable_Check(from_si))
+      throw std::invalid_argument("unit_registry.add_function: to_si and from_si must be callable");
+    $self->add_function(symbol, dimension, pycvc_py_conversion(to_si),
+                        pycvc_py_conversion(from_si), name);
+  }
+}
+
 // ── cvc::world_units — the SI unit base + display regime ────────────
 // The spatial counterpart to world_clock (cvc/core/world_units.h): a canonical
 // SI store with a display regime (SI/imperial) and metres_per_world_unit pinning
-// world-space to metres. Reshaped for Python exactly like world_clock: the two
-// nested value structs (measurement{value,unit}, coordinate{x,y,z,unit}) are
-// flatnested to top-level proxies so their fields marshal (SWIG Warning 325
-// otherwise leaks them opaque); the two enum classes (system, dimension) and the
-// nested config are %ignore'd in favour of a scalar ctor and string-keyed
-// helpers. As with world_clock, a name-wide %ignore also suppresses a same-named
-// %extend, so the dimension-keyed replacements take a `_d` suffix and the regime
-// ones a `_name` suffix rather than shadowing the originals. The plain-double
-// methods (metres_per_world_unit, world_to_metres, metres_to_world) and
-// world_point_to_real (returns the coordinate proxy) wrap as-is.
-%{
-static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
-  if (d == "length") return cvc::world_units::dimension::length;
-  if (d == "mass") return cvc::world_units::dimension::mass;
-  if (d == "time") return cvc::world_units::dimension::time;
-  if (d == "velocity") return cvc::world_units::dimension::velocity;
-  if (d == "acceleration") return cvc::world_units::dimension::acceleration;
-  if (d == "force") return cvc::world_units::dimension::force;
-  if (d == "energy") return cvc::world_units::dimension::energy;
-  if (d == "angle") return cvc::world_units::dimension::angle;
-  throw std::invalid_argument(
-      "world_units: unknown dimension '" + d +
-      "' (length/mass/time/velocity/acceleration/force/energy/angle)");
-}
-%}
+// world-space to metres. Reshaped for Python exactly like world_clock: the
+// nested value structs (measurement{value,unit}, coordinate{x,y,z,unit},
+// normalized_frame{scale,cx,cy,cz}, xyz{x,y,z}) are flatnested to top-level
+// proxies so their fields marshal (SWIG Warning 325 otherwise leaks them
+// opaque); the two enum classes (system, dimension) and the nested config are
+// %ignore'd in favour of a scalar ctor and string-keyed helpers. As with
+// world_clock, a name-wide %ignore also suppresses a same-named %extend, so the
+// dimension-keyed replacements take a `_d` suffix and the regime ones a `_name`
+// suffix rather than shadowing the originals. A dimension is its registry name
+// ("length", "velocity", "energy_per_length", or one the application added), so
+// the `_d` helpers reach custom dimensions too. The plain-double and
+// unit-symbol methods (metres_per_world_unit, world_to_metres, to_si, convert,
+// world_point_to_real, si_point_to_normalized, ...) wrap as-is; registry()
+// returns the instance's own unit_registry and keeps the world_units alive.
 %feature("flatnested") cvc::world_units::measurement;
 %feature("flatnested") cvc::world_units::coordinate;
+%feature("flatnested") cvc::world_units::normalized_frame;
+%feature("flatnested") cvc::world_units::xyz;
 %rename(world_units_measurement) cvc::world_units::measurement;
 %rename(world_units_coordinate) cvc::world_units::coordinate;
+%rename(world_units_normalized_frame) cvc::world_units::normalized_frame;
+%rename(world_units_xyz) cvc::world_units::xyz;
 %ignore cvc::world_units::system;
 %ignore cvc::world_units::dimension;
 %ignore cvc::world_units::config;
 %ignore cvc::world_units::world_units(cvc::world_units::config);
+%ignore cvc::world_units::dimension_name;
 %ignore cvc::world_units::regime;
 %ignore cvc::world_units::set_regime;
 %ignore cvc::world_units::to_display;
 %ignore cvc::world_units::from_display;
 %ignore cvc::world_units::unit_symbol;
 %ignore cvc::world_units::format;
+%ignore cvc::world_units::set_display_unit;
+%ignore cvc::world_units::clear_display_unit;
+%ignore cvc::world_units::display_unit;
+%ignore cvc::world_units::to_normalized;
+%ignore cvc::world_units::from_normalized;
+%ignore cvc::world_units::registry() const;
+%pythonappend cvc::world_units::registry %{
+  val._pycvc_owner = self
+%}
 %include "cvc/core/world_units.h"
 %extend cvc::world_units {
   // Build with an explicit scale + string regime instead of the nested config.
@@ -437,16 +536,33 @@ static cvc::world_units::dimension pycvc_wu_dim(const std::string &d) {
     else throw std::invalid_argument("world_units.set_regime_name: expected 'si' or 'imperial'");
   }
   double to_display_d(double v, const std::string &dim) const {
-    return $self->to_display(v, pycvc_wu_dim(dim));
+    return $self->to_display(v, dim);
   }
   double from_display_d(double v, const std::string &dim) const {
-    return $self->from_display(v, pycvc_wu_dim(dim));
+    return $self->from_display(v, dim);
   }
   std::string unit_symbol_d(const std::string &dim) const {
-    return $self->unit_symbol(pycvc_wu_dim(dim));
+    return $self->unit_symbol(dim);
   }
   cvc::world_units::measurement format_d(double v, const std::string &dim) const {
-    return $self->format(v, pycvc_wu_dim(dim));
+    return $self->format(v, dim);
+  }
+  void set_display_unit_d(const std::string &dim, const std::string &symbol) {
+    $self->set_display_unit(dim, symbol);
+  }
+  void clear_display_unit_d(const std::string &dim) {
+    $self->clear_display_unit(dim);
+  }
+  std::string display_unit_d(const std::string &dim) const {
+    return $self->display_unit(dim);
+  }
+  double to_normalized_d(double v, const std::string &dim,
+                         const cvc::world_units::normalized_frame &f) const {
+    return $self->to_normalized(v, dim, f);
+  }
+  double from_normalized_d(double v, const std::string &dim,
+                           const cvc::world_units::normalized_frame &f) const {
+    return $self->from_normalized(v, dim, f);
   }
 }
 

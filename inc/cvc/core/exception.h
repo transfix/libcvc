@@ -75,6 +75,9 @@ CVC_DEF_EXCEPTION(command_line_error);
 CVC_DEF_EXCEPTION(timeout_error);
 CVC_DEF_EXCEPTION(type_conversion_error);
 CVC_DEF_EXCEPTION(read_only_error);
+// An unknown unit or dimension, a conversion across dimensions, or an invalid
+// unit definition (cvc/core/unit_registry.h).
+CVC_DEF_EXCEPTION(unit_error);
 }; // namespace cvc
 
 // Legacy PascalCase aliases for case-insensitive filesystems (macOS).

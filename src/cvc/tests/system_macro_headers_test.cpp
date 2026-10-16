@@ -50,6 +50,7 @@
 #include <cvc/core/text.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
+#include <cvc/core/unit_registry.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
@@ -60,6 +61,7 @@
 #include <cvc/lsys/grammar.h>
 #include <cvc/model/model.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/nav_units.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/state/state.h>
 #include <cvc/utility/utility.h>
@@ -86,4 +88,13 @@ TEST(SystemMacroHeaders, UtilityMinMaxUsableAfterSysParam) {
   // the cvc templates the macro-proof way.
   EXPECT_EQ((cvc::MIN)(3, 5), 3);
   EXPECT_EQ((cvc::MAX)(3, 5), 5);
+}
+
+TEST(SystemMacroHeaders, UnitRegistryUsableAfterSystemHeaders) {
+  cvc::unit_registry r;
+  EXPECT_DOUBLE_EQ(r.convert(1.0, "mi", "ft"), 5280.0);
+  cvc::world_units u;
+  cvc::world_units::normalized_frame f;
+  f.scale = 0.5;
+  EXPECT_DOUBLE_EQ(u.to_normalized(4.0, cvc::world_units::dimension::length, f), 2.0);
 }
