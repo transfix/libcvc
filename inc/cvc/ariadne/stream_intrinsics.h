@@ -35,11 +35,28 @@
 // init: lane (which fails cleanly). A stream opened here has NO producer (device capture
 // is Phase 3); a producer is attached separately and must be stopped before (stream-close).
 
+#include <string>
+
 namespace cvc {
 class app;
+namespace state_exec {
+class document_scope;
+}
 namespace ariadne {
+namespace stream {
+class stream;
+}
 
 void register_stream_intrinsics(cvc::app &app);
+
+// Look up a stream opened by (stream-open) in this document's scope, by its canonical token (the
+// value (stream-open) returns as "token"; a handle dict's "token" field). Returns nullptr when the
+// document holds no such open stream (or `doc` is null). This is the cross-module accessor onto the
+// document-owned stream table that the (stream-open) verbs keep private: it lets a companion module
+// — e.g. the cvcGL media verbs (stream-capture-*) — attach a producer to a document-owned stream
+// without owning, or even seeing the type of, that table. The returned stream stays owned by the
+// document scope; the caller borrows it (e.g. to call start_producer) and must not delete it.
+stream::stream *document_stream(cvc::state_exec::document_scope *doc, const std::string &token);
 
 } // namespace ariadne
 } // namespace cvc
