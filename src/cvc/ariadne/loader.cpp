@@ -346,10 +346,10 @@ std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
 }
 
 std::string widget_type(const YAML::Node &n, std::string &label) {
-  static const char *kKeys[] = {"group",    "menubar",    "menu",         "menu_item",
-                                "window",   "overlay",    "panel",        "text",
-                                "checkbox", "slider_int", "slider_float", "combo",
-                                "color",    "image",      "button",       "separator"};
+  static const char *kKeys[] = {"group",        "menubar", "menu",       "menu_item", "window",
+                                "overlay",      "panel",   "text",       "checkbox",  "slider_int",
+                                "slider_float", "combo",   "input_text", "input_int", "color",
+                                "image",        "button",  "separator"};
   for (const char *k : kKeys) {
     const YAML::Node v = n[k];
     if (v.IsDefined()) {
@@ -611,6 +611,20 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     else
       w.values = std::move(values);
     return w;
+  }
+  if (type == "input_text") {
+    const std::string bind = str(n, "bind");
+    check_bind(ctx, "input_text", label, bind);
+    // on: is optional (send-on-commit), so unlike button we do not warn when it is absent.
+    return input_text(label, bind, action(n), str(n, "default", str(n, "def")));
+  }
+  if (type == "input_int") {
+    const std::string bind = str(n, "bind");
+    check_bind(ctx, "input_int", label, bind);
+    const int lo = static_cast<int>(num(n, "lo", 0)), hi = static_cast<int>(num(n, "hi", 0));
+    if (lo > hi)
+      ctx.warn("ari: input_int '" + label + "' has lo > hi");
+    return input_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)), action(n));
   }
   if (type == "color") { // §G7 an RGB picker bound to an "r,g,b" key
     const std::string bind = str(n, "bind");

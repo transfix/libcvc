@@ -388,6 +388,53 @@ windows:
   EXPECT_EQ(bt->on, "go");
 }
 
+// Phase 0a: input_text / input_int parse — both the shorthand `input_text:` key and the generic
+// `type: input_text` form — carrying bind, the optional `on` (send-on-commit), `def`, and the int
+// range lo/hi. These are the conference app's chat / display-name / room-id fields.
+TEST(AriadneLoader, InputTextAndInputInt) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: Chat
+    children:
+      - input_text: Message
+        bind: chat.draft
+        on: send
+        def: "hi"
+      - input_int: Port
+        bind: net.port
+        lo: 1
+        hi: 65535
+        def: 8080
+      - type: input_text
+        label: Room
+        bind: room.name
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::InputText), 2);
+  EXPECT_EQ(count(r.root, Kind::InputInt), 1);
+
+  const Widget *msg = find(r.root, Kind::InputText, "Message");
+  ASSERT_NE(msg, nullptr);
+  EXPECT_EQ(msg->bind, "chat.draft");
+  EXPECT_EQ(msg->on, "send"); // fires on commit (Enter / focus-leave)
+  EXPECT_EQ(msg->sdef, "hi");
+
+  const Widget *port = find(r.root, Kind::InputInt);
+  ASSERT_NE(port, nullptr);
+  EXPECT_EQ(port->bind, "net.port");
+  EXPECT_EQ(port->ilo, 1);
+  EXPECT_EQ(port->ihi, 65535);
+  EXPECT_EQ(port->idef, 8080);
+
+  const Widget *room = find(r.root, Kind::InputText, "Room");
+  ASSERT_NE(room, nullptr);
+  EXPECT_EQ(room->bind, "room.name");
+  EXPECT_TRUE(room->on.empty()); // on: is optional for input_text (no warning, unlike button)
+}
+
 // §12/§3.0.3b: a window `include:` site may override the instantiated unit's geometry (pos/size/
 // layout/frame) without forking the shared unit — so a demo arranges reusable panels. An override
 // applies only to the keys present; the component stays layout-agnostic.

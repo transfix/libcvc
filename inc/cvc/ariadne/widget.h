@@ -37,6 +37,8 @@ enum class Kind {
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
   Combo,          // bound enum-as-text state
+  InputText,      // bound string state (a single-line text field)
+  InputInt,       // bound int state (a single-line numeric field)
   Color,          // bound "r,g,b" state (an RGB picker; §G7)
   Image,          // a host-published image viewer (a live raster); src / bound name
   Button,         // a fire-once button -> raises `on` event
@@ -381,6 +383,36 @@ inline Widget combo(std::string label, std::string bind, std::vector<std::string
   w.bind = std::move(bind);
   w.options = std::move(options);
   w.sdef = std::move(def);
+  return w;
+}
+
+// A single-line text field bound to a string state key (chat input, display name, room id). `on`
+// (optional) is an event raised when the edit commits (Enter / focus-leave) — e.g. send-on-enter
+// for a chat box. `def` seeds the key when it is unset.
+inline Widget input_text(std::string label, std::string bind, std::string on = std::string(),
+                         std::string def = std::string()) {
+  Widget w;
+  w.kind = Kind::InputText;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.on = std::move(on);
+  w.sdef = std::move(def);
+  return w;
+}
+
+// A single-line numeric field bound to an int state key. Reuses the text primitive; the core parses
+// the field to an int on commit (fail-safe: a non-numeric entry keeps the current value) and clamps
+// to [lo, hi] when they differ (lo == hi = no clamp). `def` seeds the key when it is unset.
+inline Widget input_int(std::string label, std::string bind, int lo = 0, int hi = 0, int def = 0,
+                        std::string on = std::string()) {
+  Widget w;
+  w.kind = Kind::InputInt;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.ilo = lo;
+  w.ihi = hi;
+  w.idef = def;
+  w.on = std::move(on);
   return w;
 }
 

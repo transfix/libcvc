@@ -67,6 +67,7 @@ public:
                            const char *fmt) override;
   IndexEdit combo(const char *label, int current_index,
                   const std::vector<std::string> &options) override;
+  StringEdit input_text(const char *label, const char *key, const std::string &current) override;
 
   // Render the current tree to a plain string (headless — for tests / capture /
   // an SSH log). Calls rt.render() to (re)build the frame, then rasterizes it at
