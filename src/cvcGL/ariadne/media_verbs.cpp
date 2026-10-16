@@ -9,7 +9,8 @@
 */
 
 #include <cstdint>
-#include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cvc/ariadne/ariadne.h>              // register_action_intrinsics
+#include <cvc/ariadne/stream/audio_sources.h> // tone_source / gain_source / mix_source (the pure graph)
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/synthetic_source.h>
 #include <cvc/ariadne/stream_intrinsics.h> // cvc::ariadne::document_stream (the doc stream table)
@@ -24,7 +25,8 @@
 #include <vector>
 
 #ifdef CVC_ENABLE_SDL
-#include <cvc/gl/capture/camera_source.h> // open_camera (SDL3; the device path)
+#include <cvc/gl/capture/audio_source.h>  // open_audio_capture (SDL3; the mic device path)
+#include <cvc/gl/capture/camera_source.h> // open_camera (SDL3; the camera device path)
 #endif
 
 namespace se = cvc::state_exec;
@@ -89,6 +91,44 @@ bool as_bool(const se::value_t *v, bool def) {
     if (const bool *b = std::get_if<bool>(&v->v))
       return *b;
   return def;
+}
+
+// Recursively build a PURE (SDL-free) audio frame_source from a graph SPEC dict — the composable
+// audio family (roadmap §4a "a composable graph (mix/gain/tone)"):
+//   { "mix"  [ SUB … ] }               -> mix_source  (sum of sub-graphs, clamped to [-1,1])
+//   { "gain" { "gain" G "in" SUB } }   -> gain_source (scale a sub-graph by G)
+//   { "tone" { "hz" F "amp" A } }      -> tone_source (a sine; the hardware-free reference)
+//   anything else / nil                -> a default 440 Hz tone
+// rate/ch/frames come from the caller (matched to the stream's open); every source here produces
+// frames*ch*4 bytes. A device microphone is NOT built here — it is SDL/cvcGL and is handled at the
+// top level of stream-capture-audio.
+std::unique_ptr<sx::frame_source> build_audio_source(const se::value_t &spec, int rate, int ch,
+                                                     int frames) {
+  if (const se::value_t *m = dict_get(spec, "mix")) {
+    std::vector<std::unique_ptr<sx::frame_source>> ins;
+    if (const se::list_ptr *lp = std::get_if<se::list_ptr>(&m->v))
+      if (*lp)
+        for (const se::value_t &e : **lp)
+          if (std::unique_ptr<sx::frame_source> in = build_audio_source(e, rate, ch, frames))
+            ins.push_back(std::move(in));
+    if (ins.empty())
+      return nullptr;
+    return std::make_unique<sx::mix_source>(std::move(ins), rate, ch, frames);
+  }
+  if (const se::value_t *g = dict_get(spec, "gain")) {
+    const se::value_t *in = dict_get(*g, "in");
+    std::unique_ptr<sx::frame_source> inner =
+        in ? build_audio_source(*in, rate, ch, frames) : nullptr;
+    if (!inner)
+      return nullptr;
+    return std::make_unique<sx::gain_source>(std::move(inner), ch, frames,
+                                             static_cast<float>(as_num(dict_get(*g, "gain"), 1.0)));
+  }
+  // {tone {hz amp}}, or any other / nil spec -> a sine (the hardware-free default).
+  const se::value_t *t = dict_get(spec, "tone");
+  const double hz = as_num(t ? dict_get(*t, "hz") : nullptr, 440.0);
+  const double amp = as_num(t ? dict_get(*t, "amp") : nullptr, 0.25);
+  return std::make_unique<sx::tone_source>(rate, ch, frames, hz, amp);
 }
 
 } // namespace
@@ -167,6 +207,81 @@ void register_media_intrinsics() {
                                 {"token", se::value_t(token)},
                                 {"synthetic", se::value_t(is_synth)},
                                 {"hz", se::value_t(used_hz)}});
+        });
+
+    se::builtins::register_fn(
+        env, "stream-capture-audio", [doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("stream-capture-audio: no document scope (call from an action or resident "
+                       "lane, not the load-time init: lane)");
+          if (args.empty())
+            return err("stream-capture-audio: expects (stream-capture-audio TOKEN [SPEC])");
+          const std::string token = handle_token(args[0]);
+          if (token.empty())
+            return err("stream-capture-audio: TOKEN (a stream handle dict or token string) is "
+                       "required");
+          sx::stream *s = cvc::ariadne::document_stream(doc, token);
+          if (!s)
+            return err("stream-capture-audio: no open stream named '" + token +
+                       "' in this document — call (stream-open) first");
+
+          // SPEC (optional dict): the audio format rate/ch/frames (match the stream's open) plus a
+          // SOURCE selector — a top-level device index (an SDL mic), else a pure tone/gain/mix
+          // graph (build_audio_source). A nil / sourceless SPEC yields a 440 Hz tone (headless
+          // default).
+          const se::value_t *spec = args.size() >= 2 ? &args[1] : nullptr;
+          long rate = 48000, chn = 1, frames = 1024, device = -1;
+          if (spec) {
+            rate = as_int(dict_get(*spec, "rate"), 48000);
+            chn = as_int(dict_get(*spec, "ch"), 1);
+            frames = as_int(dict_get(*spec, "frames"), 1024);
+            device = as_int(dict_get(*spec, "device"), -1);
+          }
+          if (rate < 1 || chn < 1 || frames < 1)
+            return err("stream-capture-audio: 'rate', 'ch' and 'frames' must be positive");
+
+          std::unique_ptr<sx::frame_source> source;
+          bool is_device = false;
+          if (device >= 0) {
+#ifdef CVC_ENABLE_SDL
+            // Device path: an SDL recording device. open_audio_capture()/teardown touch the SDL
+            // audio subsystem on this (owner/action) thread — the thread stream::close() runs on.
+            cvc::gl::capture::audio_capture_spec req;
+            req.sample_rate = static_cast<int>(rate);
+            req.channels = static_cast<int>(chn);
+            req.frames_per_chunk = static_cast<int>(frames);
+            req.device_index = static_cast<int>(device);
+            cvc::gl::capture::audio_capture_open mic = cvc::gl::capture::open_audio_capture(req);
+            if (!mic.source)
+              return err("stream-capture-audio: could not open audio device " +
+                         std::to_string(device) + " (no such device, or open failed)");
+            source = std::move(mic.source);
+            rate = mic.sample_rate; // adopt the device's actual format for the cadence
+            chn = mic.channels;
+            frames = mic.frames_per_chunk;
+            is_device = true;
+#else
+            return err("stream-capture-audio: device capture needs CVC_ENABLE_SDL in this build — "
+                       "pass a tone/gain/mix graph for a hardware-free source");
+#endif
+          } else {
+            source = build_audio_source(spec ? *spec : se::value_t(), static_cast<int>(rate),
+                                        static_cast<int>(chn), static_cast<int>(frames));
+          }
+          if (!source)
+            return err("stream-capture-audio: empty or invalid audio graph");
+
+          // Chunk cadence: sample_rate / frames_per_chunk pulls per second (the natural audio
+          // rate). The source's frame_bytes (frames*ch*4) MUST match the stream's open bytes, else
+          // start_producer rejects it (the frames then never flow).
+          const double hz = static_cast<double>(rate) / static_cast<double>(frames);
+          s->start_producer(std::move(source), hz);
+          return se::make_dict({{"ok", se::value_t(true)},
+                                {"token", se::value_t(token)},
+                                {"device", se::value_t(is_device)},
+                                {"rate", se::value_t(static_cast<std::int64_t>(rate))},
+                                {"ch", se::value_t(static_cast<std::int64_t>(chn))},
+                                {"frames", se::value_t(static_cast<std::int64_t>(frames))}});
         });
   });
 }
