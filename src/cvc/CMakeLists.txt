@@ -53,6 +53,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
   ../../inc/cvc/core/world_units.h
+  ../../inc/cvc/core/unit_registry.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -206,6 +207,7 @@ set(SOURCE_FILES
   core/world_clock.cpp
   core/world_clock_binding.cpp
   core/world_units.cpp
+  core/unit_registry.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp

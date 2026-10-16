@@ -156,6 +156,17 @@ normalized kernel math:
 
 Each phase is independently shippable and needs **zero kernel edits**.
 
+> **Update (2026-10-15): the conversion primitives Phases 1–2 build on have landed** in `world_units`
+> ([`WORLD_UNITS_API.md`](../WORLD_UNITS_API.md#si--the-normalized-frame-cvcnav)).
+> - **Quantities.** `world_units::to_normalized` / `from_normalized` convert any dimension by its length
+>   exponent: velocity × S / mpwu, curvature × mpwu / S, time, angle and mass unchanged.
+> - **Points.** `si_point_to_normalized` / `normalized_point_to_si` apply the centre in the snapshot's
+>   order (`o / S + center`).
+> - **The frame.** `cvc::nav::frame_of(sim_world::config)` (`inc/cvc/nav/nav_units.h`) names S and the
+>   centre for a world.
+> - **Still open.** Phases 0–3 themselves: `veh_params_from_si`, `snapshot_si` and the demo helper are
+>   still to be written on top of these, and no kernel calls them.
+
 - **Phase 0 — Document, assert, verify (zero risk).** Annotate every nav field
   with its frame + `world_units::dimension`; document the three scales, the
   `world_clock` time binding, and the two conventions; fix `range_m` naming/docs;

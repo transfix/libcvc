@@ -6,8 +6,8 @@ imperial) and a `metres_per_world_unit` factor that pins the app's world-space
 doubles to real metres. The binding reshapes the C++ surface (see pycvc.i):
 
   * the `system`/`dimension`/`config` enums+struct become STRINGS — regime is
-    "si"|"imperial"; a dimension is "length"|"mass"|"time"|"velocity"|
-    "acceleration"|"force"|"energy"|"angle";
+    "si"|"imperial"; a dimension is its registry name ("length", "velocity",
+    "temperature", "energy_per_length", ... or one the application added);
   * the scalar ctor is world_units(metres_per_world_unit, regime="si");
   * to_display/from_display/unit_symbol/format take the dimension string
     (…_d suffix), and format()/world_point_to_real() return the flatnested
@@ -201,6 +201,151 @@ def test_world_bases_are_not_global_singletons():
     assert a.world_clock().tick() > 0
     assert b.world_clock().tick() == 0, "b's clock untouched by a"
     print("  ok: world_clock/world_units are per-app, not process singletons")
+
+
+# ── the unit registry: built-ins, custom units, Python function units ────────
+
+
+def test_registry_builtins_and_exact_anchors():
+    r = pycvc.unit_registry()
+    assert r.to_si(1.0, "nmi") == 1852.0
+    assert r.to_si(1.0, "kWh") == 3.6e6
+    assert math.isclose(r.convert(60.0, "mph", "km/h"), 96.56064, rel_tol=1e-12)
+    assert math.isclose(r.convert(100.0, "degC", "degF"), 212.0, rel_tol=1e-12)
+    assert math.isclose(r.to_si(30.0, "dBm"), 1.0, rel_tol=1e-12)  # 30 dBm = 1 W
+    assert r.unit("degF").kind_name() == "affine"
+    assert r.unit("dBm").kind_name() == "function"
+    assert r.unit("ft").kind_name() == "linear"
+    assert r.dimension("velocity").si_symbol == "m/s"
+    assert r.dimension("curvature").length_exponent == -1
+    assert "nmi" in list(r.units("length"))
+    assert r.dimension_of("psi") == "pressure"
+    print("  ok: registry built-ins convert with exact anchors (nmi, kWh, degF, dBm)")
+
+
+def test_registry_custom_linear_and_dimension():
+    r = pycvc.unit_registry()
+    r.add_dimension("data_rate", "bit/s")
+    r.add_linear("Mbit/s", "data_rate", 1.0e6, "megabit per second")
+    assert r.convert(54.0, "Mbit/s", "bit/s") == 54.0e6
+    assert r.unit("Mbit/s").name == "megabit per second"
+    assert list(r.units("data_rate")) == ["Mbit/s", "bit/s"]
+    for bad in (
+        lambda: r.add_linear("ft", "length", 0.3048),  # duplicate symbol
+        lambda: r.add_linear("x", "nosuchdim", 1.0),
+        lambda: r.add_linear("zero", "length", 0.0),
+        lambda: r.convert(1.0, "ft", "kg"),  # across dimensions
+        lambda: r.to_si(1.0, "furlongs"),
+    ):
+        try:
+            bad()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("expected RuntimeError")
+    print("  ok: custom dimensions and linear units drop in; bad ones raise")
+
+
+def test_registry_python_function_unit():
+    r = pycvc.unit_registry()
+    # A nonlinear unit defined in Python: decibel-watts.
+    r.add_function("dBW", "power", lambda v: 10.0 ** (v / 10.0), lambda w: 10.0 * math.log10(w))
+    assert r.unit("dBW").kind_name() == "function"
+    assert math.isclose(r.to_si(10.0, "dBW"), 10.0, rel_tol=1e-12)
+    assert math.isclose(r.convert(0.0, "dBW", "dBm"), 30.0, rel_tol=1e-12)
+    # An exception in the callable surfaces as a RuntimeError naming it.
+    r.add_function("broken", "power", lambda v: 1.0 / 0.0, lambda w: w)
+    try:
+        r.to_si(1.0, "broken")
+    except RuntimeError as e:
+        assert "ZeroDivisionError" in str(e), str(e)
+    else:
+        raise AssertionError("a raising conversion should raise")
+    try:
+        r.add_function("nope", "power", 3, lambda w: w)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a non-callable conversion should raise")
+    print("  ok: Python callables register as function units; their errors surface")
+
+
+def test_registry_empty_and_copies_are_independent():
+    e = pycvc.unit_registry.empty()
+    assert len(e.dimensions()) == 0 and not e.has_unit("m")
+    a = pycvc.unit_registry()
+    b = pycvc.unit_registry(a)
+    b.add_linear("furlong", "length", 201.168)
+    assert b.has_unit("furlong") and not a.has_unit("furlong")
+    print("  ok: empty() is empty; a copied registry is independent")
+
+
+# ── world_units on the registry: per-dimension display, custom dimensions ────
+
+
+def test_display_unit_override_and_new_dimensions():
+    u = pycvc.world_units()
+    assert u.display_unit_d("velocity") == "m/s"
+    u.set_display_unit_d("velocity", "kn")
+    assert u.unit_symbol_d("velocity") == "kn"
+    assert math.isclose(u.to_display_d(1852.0 / 3600.0, "velocity"), 1.0, rel_tol=1e-12)
+    u.set_display_unit_d("length", "nmi")  # a length override turns off promotion
+    m = u.format_d(3704.0, "length")
+    assert m.unit == "nmi" and math.isclose(m.value, 2.0, rel_tol=1e-12)
+    u.clear_display_unit_d("length")
+    assert u.format_d(3704.0, "length").unit == "km"
+    imp = pycvc.world_units(1.0, "imperial")
+    assert imp.unit_symbol_d("temperature") == "degF"
+    assert math.isclose(imp.to_display_d(373.15, "temperature"), 212.0, rel_tol=1e-12)
+    assert imp.unit_symbol_d("energy_per_length") == "Wh/mi"
+    print("  ok: per-dimension display overrides; new dimensions have regime defaults")
+
+
+def test_world_units_registry_is_per_instance():
+    u = pycvc.world_units()
+    reg = u.registry()
+    reg.add_dimension("data_rate", "bit/s")
+    reg.add_linear("Mbit/s", "data_rate", 1.0e6)
+    u.set_display_unit_d("data_rate", "Mbit/s")
+    m = u.format_d(2.5e6, "data_rate")
+    assert m.unit == "Mbit/s" and math.isclose(m.value, 2.5)
+    assert math.isclose(u.convert(1.0, "Mbit/s", "bit/s"), 1.0e6)
+    assert not pycvc.world_units().registry().has_dimension("data_rate")
+    # The registry proxy keeps its world_units alive.
+    reg2 = pycvc.world_units().registry()
+    assert reg2.has_unit("m")
+    print("  ok: each world_units owns its registry; custom dimensions work by name")
+
+
+# ── SI <-> nav's normalized frame ─────────────────────────────────────────────
+
+
+def test_normalized_frame_conversions():
+    u = pycvc.world_units()
+    f = pycvc.world_units_normalized_frame()
+    f.scale = 0.05
+    assert math.isclose(u.to_normalized_d(2.0, "velocity", f), 0.1, rel_tol=1e-15)
+    assert math.isclose(u.from_normalized_d(0.1, "velocity", f), 2.0, rel_tol=1e-15)
+    assert math.isclose(u.to_normalized_d(0.5, "curvature", f), 10.0, rel_tol=1e-15)
+    assert u.to_normalized_d(0.4, "angle", f) == 0.4
+    km = pycvc.world_units(1000.0)
+    g = pycvc.world_units_normalized_frame()
+    g.scale = 2.0
+    assert math.isclose(km.to_normalized_d(500.0, "length", g), 1.0, rel_tol=1e-15)
+    # Points: m = n / S + centre at one metre per world unit (nav's snapshot).
+    f.cx, f.cy = 37.5, -12.0
+    p = u.normalized_point_to_si(0.3125, -0.75, 0.0, f)
+    assert p.x == 0.3125 / 0.05 + 37.5 and p.y == -0.75 / 0.05 + -12.0
+    n = u.si_point_to_normalized(p.x, p.y, 0.0, f)
+    assert math.isclose(n.x, 0.3125, rel_tol=1e-14) and math.isclose(n.y, -0.75, rel_tol=1e-14)
+    f.scale = 0.0
+    try:
+        u.to_normalized_d(1.0, "length", f)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a zero frame scale should raise")
+    print("  ok: SI <-> normalized frame by length exponent; points match nav's o/S + c")
 
 
 if __name__ == "__main__":
