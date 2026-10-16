@@ -351,7 +351,7 @@ jobs:
       # unfound. Everything else (libx11/libxext/libxt/libglvnd/glu) rides along
       # hermetically with the vtk bundle; there is nothing to apt-get.
       - name: Install VTK for cvcGL
-        if: matrix.kind == 'libcvc' && matrix.build_type != 'Debug'
+        if: matrix.kind == 'libcvc'
         shell: bash
         run: |
           set -euo pipefail
@@ -394,21 +394,16 @@ jobs:
           if [ "${{ matrix.build_type }}" = "Debug" ]; then
             coverage=ON
           fi
-          # Build cvcGL (and so run its 18 cvcgl_* tests) exactly where we are
-          # NOT measuring coverage. The gate extracts src/* against
-          # COVERAGE_MIN, so pulling src/cvcGL/*.cpp into a coverage job would
-          # add thousands of lines to the denominator that only the cvcgl_*
-          # tests exercise, and drag the percentage down for reasons that have
-          # nothing to do with the change under test. Keeping the two apart
-          # means the lcov filter, the local `coverage` target and
-          # docs/TESTING.md all stay as they are — three places that have to
-          # agree, and would otherwise have to be edited in lockstep.
-          # package-linux / libcvc-release is a gating job, so the tests still
-          # block a bad PR.
+          # Build cvcGL (and run its cvcgl_* tests) in EVERY libcvc job, the
+          # coverage lanes included: src/cvcGL/*.cpp is part of the coverage
+          # denominator. Measured 2026-10-16 (Debug, CUDA-off): cvcGL's own line
+          # coverage is ~74%, so folding its ~13k instrumented lines into the
+          # gate drops the blended number ~2 points and it stays above
+          # COVERAGE_MIN. (cvcGL used to be kept OFF on the coverage lanes to
+          # avoid the denominator hit; that was overcautious.) The lcov filter
+          # extracts src/* and the local `coverage` target does the same, so both
+          # already include cvcGL once it is built — no lockstep edit needed.
           cvcgl=ON
-          if [ "$coverage" = "ON" ]; then
-            cvcgl=OFF
-          fi
           grpc=OFF
           if [ "${{ matrix.enable_grpc }}" = "true" ]; then
             grpc=ON
@@ -462,7 +457,7 @@ jobs:
       # untested in CI, which is a smaller version of the problem this whole
       # change exists to fix.
       - name: Software OpenGL for the cvcGL render tests
-        if: matrix.kind == 'libcvc' && matrix.build_type != 'Debug'
+        if: matrix.kind == 'libcvc'
         shell: bash
         run: |
           set -euo pipefail
@@ -507,15 +502,13 @@ jobs:
           # never being configured at all, and nothing said so — the suite just
           # silently did not contain them. Assert they are present rather than
           # trusting that a flag took effect, so the same failure cannot recur
-          # quietly. (Skipped where cvcGL is deliberately off: the coverage
-          # jobs.)
-          if [ "${{ matrix.build_type }}" != "Debug" ]; then
-            n_cvcgl=$(ctest --test-dir build -N 2>/dev/null | grep -c 'Test *#[0-9]*: cvcgl_' || true)
-            echo "cvcgl_* tests registered with ctest: $n_cvcgl"
-            if [ "$n_cvcgl" -eq 0 ]; then
-              echo "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
-              exit 1
-            fi
+          # quietly. cvcGL now builds on every libcvc lane (coverage included),
+          # so this runs everywhere.
+          n_cvcgl=$(ctest --test-dir build -N 2>/dev/null | grep -c 'Test *#[0-9]*: cvcgl_' || true)
+          echo "cvcgl_* tests registered with ctest: $n_cvcgl"
+          if [ "$n_cvcgl" -eq 0 ]; then
+            echo "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
+            exit 1
           fi
           # Heavy suites:
           #   Stress|Convergence|Benchmark            : long-running suites

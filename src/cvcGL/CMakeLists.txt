@@ -632,6 +632,17 @@ add_test(NAME cvcgl_frame_yield COMMAND cvcgl_frame_yield)
 add_executable(cvcgl_volren_node test/cvcgl_volren_node.cpp)
 target_link_libraries(cvcgl_volren_node PRIVATE cvcGL)
 add_test(NAME cvcgl_volren_node COMMAND cvcgl_volren_node)
+# cvcgl_volren_node ray-marches a volume through the fragment shader -- the one
+# genuinely heavy cvcGL render test. Under software GL (llvmpipe, the CI render
+# path) it is ~31s in Release, but on the Debug+coverage lane it blew past the
+# 300s PR ctest budget: the build is unoptimized AND gcov-instrumented, and it
+# is starved for CPU because --parallel packs several llvmpipe renders at once
+# and llvmpipe IS the CPU. RUN_SERIAL hands it the whole box (so it lands near a
+# clean ~10x of Release instead of the contention-inflated >300s), and the
+# explicit TIMEOUT overrides the lane's --timeout 300 with generous headroom.
+# Every other cvcgl_* test finishes under 14s even in Debug -- this is the only
+# outlier, so scope the override to it rather than loosening the lane budget.
+set_tests_properties(cvcgl_volren_node PROPERTIES TIMEOUT 1200 RUN_SERIAL TRUE)
 
 add_executable(cvcgl_volslice_node test/cvcgl_volslice_node.cpp)
 target_link_libraries(cvcgl_volslice_node PRIVATE cvcGL)
