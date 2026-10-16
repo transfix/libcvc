@@ -1146,6 +1146,7 @@ if(CVC_ENABLE_GRPC)
     state/state_transport_grpc.cpp
     state/state_stream_transport_grpc.cpp
     ariadne/stream/stream_bridge.cpp
+    ariadne/stream/stream_relay.cpp
     ${_proto_pb_cc}
     ${_proto_grpc_cc}
   )
@@ -1201,6 +1202,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/producer_thread.h
   ../../inc/cvc/ariadne/stream/stream.h
   ../../inc/cvc/ariadne/stream/stream_bridge.h
+  ../../inc/cvc/ariadne/stream/stream_relay.h
   ../../inc/cvc/ariadne/stream/to_image.h
   ../../inc/cvc/ariadne/stream/frame_source.h
   ../../inc/cvc/ariadne/stream/synthetic_source.h

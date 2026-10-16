@@ -217,10 +217,15 @@ public:
     if (_closed)
       return;
     _closed = true;
-    if (_stream) {
-      _stream->WritesDone();
-      _stream->Finish();
-    }
+    // Abort the RPC. TryCancel() is thread-safe and unblocks a reader thread
+    // parked in recv()'s Read() on a LONG-LIVED server stream — one that never
+    // finishes on its own (e.g. a serve_port push that is idle in its producer).
+    // WritesDone()+Finish() do NOT: Finish() blocks until the server finishes
+    // (which such a stream never does) and may not run concurrently with a
+    // reader's Read(). After TryCancel the stream/context clean up on
+    // destruction, so no Finish() is needed here.
+    if (_ctx)
+      _ctx->TryCancel();
   }
 
 private:

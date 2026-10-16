@@ -319,3 +319,47 @@ TEST(StreamTransportGrpc, ServerPush) {
   ch->close();
   server.stop();
 }
+
+// close() must unblock a recv() parked on a LONG-LIVED server stream that never
+// finishes on its own. Regression: close() did WritesDone()+Finish(), and
+// Finish() blocks until the server completes — which an idle push stream never
+// does — so close() (and the parked recv()) hung forever. Now close() TryCancel()s.
+TEST(StreamTransportGrpc, CloseUnblocksBlockedRecv) {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  stream_transport_grpc server;
+  server.set_open_handler([done](const std::string &) -> stream_transport_grpc::frame_producer {
+    return [done](stream_transport_grpc::frame &) -> bool {
+      // Idle producer: yields no frame until teardown, so the server stream
+      // stays open and the client's recv() blocks in Read().
+      while (!done->load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      return false; // exhausted → lets the server finish for a clean stop()
+    };
+  });
+  server.start("127.0.0.1:0");
+  ASSERT_TRUE(server.is_running());
+
+  stream_transport_grpc client;
+  std::unique_ptr<stream_transport_grpc::channel> ch =
+      client.open_channel(server.listen_address(), std::chrono::milliseconds(3000));
+  ASSERT_NE(ch, nullptr);
+  stream_transport_grpc::frame open;
+  open.stream_id = "streams.idle";
+  open.flags = stream_transport_grpc::flag_open;
+  ASSERT_TRUE(ch->send(open));
+
+  std::atomic<bool> recv_returned{false};
+  std::thread reader([&]() {
+    stream_transport_grpc::frame f;
+    ch->recv(f); // parks in Read() until close() cancels the RPC
+    recv_returned.store(true);
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(150)); // let recv() park
+  ch->close();   // must return promptly (regression: hung in Finish())
+  reader.join(); // must not hang (recv() returned false on cancel)
+  EXPECT_TRUE(recv_returned.load());
+
+  *done = true; // release the server producer for a clean shutdown
+  server.stop();
+}
