@@ -65,6 +65,7 @@ add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
 add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
 add_executable(state_exec_codec_test state_exec_codec_test.cpp)
 add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
+add_executable(state_exec_pegtl_test state_exec_pegtl_test.cpp)
 add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
@@ -334,6 +335,7 @@ list(APPEND TEST_TARGETS
   state_exec_stackless_evaluator_test
   state_exec_codec_test
   state_exec_unicode_test
+  state_exec_pegtl_test
   state_exec_async_test
   async_lane_test
   state_exec_scheduler_test
@@ -1251,6 +1253,15 @@ target_link_libraries(state_exec_unicode_test
     GTest::gtest_main
 )
 
+# PEGTL is cvc's build-only dependency (not in cvc's exported interface), so the
+# check links it directly; taocpp::pegtl comes from src/cvc/CMakeLists.txt.
+target_link_libraries(state_exec_pegtl_test
+  PRIVATE
+    taocpp::pegtl
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_async_test
   PRIVATE
     cvc
@@ -1595,6 +1606,7 @@ target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_pegtl_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
 target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
@@ -2007,6 +2019,7 @@ cvc_discover_tests(state_exec_evaluator_test)
 cvc_discover_tests(state_exec_stackless_evaluator_test)
 cvc_discover_tests(state_exec_codec_test)
 cvc_discover_tests(state_exec_unicode_test)
+cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)

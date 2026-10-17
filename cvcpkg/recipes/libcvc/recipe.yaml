@@ -180,6 +180,13 @@ depends:
   build:
     - name: googletest
       platforms: [linux, macos, windows]
+    # taocpp/PEGTL 3.x (header-only, MIT), the grammar engine of the state_exec
+    # s-expression reader. Build-only: cvc links it as
+    # $<BUILD_INTERFACE:taocpp::pegtl>, and no installed header includes it
+    # (src/cvc/CMakeLists.txt checks). So it is never baked into required_deps,
+    # and consumers of the bundle do not install it. Unscoped: state_exec builds
+    # on every platform, wasm included, and find_package(pegtl) is REQUIRED.
+    - name: pegtl
   # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
   # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:

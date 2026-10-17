@@ -1285,6 +1285,27 @@ add_library(cvc::cvc ALIAS cvc)
 # wherever such a link is added below.
 set(CVC_PRIVATE_LINK_PACKAGES "")
 
+# taocpp/PEGTL 3.x (header-only, MIT): the grammar engine for the state_exec
+# s-expression reader. Its rules go in the private
+# src/cvc/state/state_exec/grammar.h, so PEGTL is needed only to compile cvc.
+# Linked as $<BUILD_INTERFACE:...>, it adds an include path to cvc's own build
+# and nothing to the exported target, SHARED or STATIC: it is not in
+# CVC_PRIVATE_LINK_PACKAGES, and consumers never need PEGTL. "3.2" also refuses
+# PEGTL 4 (its version file is SameMajorVersion), whose API differs.
+find_package(pegtl 3.2 CONFIG REQUIRED)
+target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:taocpp::pegtl>)
+# That only holds while no installed header includes PEGTL, so check it here.
+file(GLOB_RECURSE _cvc_installed_headers "${PROJECT_SOURCE_DIR}/inc/*")
+foreach(_cvc_h IN LISTS _cvc_installed_headers)
+  file(STRINGS "${_cvc_h}" _cvc_pegtl_include REGEX "^[ \t]*#[ \t]*include[ \t]*[<\"]tao/pegtl")
+  if(_cvc_pegtl_include)
+    message(FATAL_ERROR
+      "${_cvc_h} includes PEGTL, but inc/ is installed and PEGTL is a build-only "
+      "dependency of libcvc. Keep PEGTL in private headers under src/ "
+      "(src/cvc/state/state_exec/grammar.h).")
+  endif()
+endforeach()
+
 # Ariadne .ari YAML loader — OPTIONAL. yaml-cpp is a light, header+lib dependency;
 # when present, ariadne/loader.cpp compiles the real parser (CVC_ARIADNE_HAVE_YAML);
 # when absent, it compiles a stub (load_* return an error) so libcvc still builds.
