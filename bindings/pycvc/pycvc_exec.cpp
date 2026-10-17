@@ -648,4 +648,20 @@ std::string Exec::run(const std::string &src) {
   return render_result(*result);
 }
 
+cvc::state_exec::parse_options Exec::parser_defaults() const {
+  return impl_->sched.parser_defaults();
+}
+
+void Exec::set_parser_defaults(const cvc::state_exec::parse_options &defaults) {
+  impl_->sched.set_parser_defaults(defaults);
+}
+
+cvc::state_exec::parse_options
+parse_options_from_state(const std::shared_ptr<cvc::app> &app, const std::string &scheduler_id,
+                         const cvc::state_exec::parse_options &base) {
+  if (!app)
+    throw std::invalid_argument("pycvc.parse_options_from_state: null app handle");
+  return cvc::state_exec::parse_options_from_state(cvc::state::instance(*app), scheduler_id, base);
+}
+
 } // namespace pycvc

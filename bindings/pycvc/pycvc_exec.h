@@ -7,6 +7,7 @@
 // registered here becomes callable from DSL source like any builtin.
 #pragma once
 
+#include <cvc/state/state_exec/parser.h> // parse_options
 #include <memory>
 #include <string>
 
@@ -19,6 +20,13 @@ struct _object;
 typedef _object PyObject;
 
 namespace pycvc {
+
+// cvc::state_exec::parse_options_from_state on `app`'s state root (pycvc passes the app where
+// C++ passes the root): per key, state_exec.schedulers.<scheduler_id>.parser.<key> (when
+// scheduler_id is not empty), then state_exec.defaults.parser.<key>, then `base`.
+cvc::state_exec::parse_options parse_options_from_state(
+    const std::shared_ptr<cvc::app> &app, const std::string &scheduler_id = "",
+    const cvc::state_exec::parse_options &base = cvc::state_exec::parse_options());
 
 class Exec {
 public:
@@ -85,6 +93,13 @@ public:
   // register*) concurrently on the same Exec; use a separate Exec per thread
   // (each owns its own scheduler, so they do not interfere).
   std::string run(const std::string &src);
+
+  // The parser settings this Exec's scheduler parses programs with when the app tree's
+  // state_exec.defaults.parser.* keys don't say otherwise; the same calls as
+  // async_scheduler::parser_defaults() / set_parser_defaults(). They start as
+  // async_scheduler::host_parser_defaults(), as the app's exec scheduler's do.
+  cvc::state_exec::parse_options parser_defaults() const;
+  void set_parser_defaults(const cvc::state_exec::parse_options &defaults);
 
 private:
   struct ExecImpl;

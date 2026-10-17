@@ -78,6 +78,55 @@ def test_parser_settings_come_from_the_app_tree():
     assert ex.run(deep) == "15"
 
 
+# ── state_exec parser settings: the C++ surface, under the C++ names ────
+
+
+def test_parse_options_is_the_cpp_struct():
+    o = pycvc.parse_options()
+    assert (o.max_depth, o.step_tokens) == (256, 0)  # C++ defaults
+    o.max_depth = 32
+    o.step_tokens = 8
+    assert (o.max_depth, o.step_tokens) == (32, 8)
+
+
+def test_exec_starts_from_the_host_parser_defaults():
+    # The same defaults as the app's exec scheduler:
+    # async_scheduler::host_parser_defaults().
+    host = pycvc.async_scheduler.host_parser_defaults()
+    assert (host.max_depth, host.step_tokens) == (256, 1024)
+    ex = pycvc.Exec(pycvc.make_app())
+    d = ex.parser_defaults()
+    assert (d.max_depth, d.step_tokens) == (host.max_depth, host.step_tokens)
+
+
+def test_parse_options_from_state_resolves_like_cpp():
+    app = pycvc.make_app()
+    # Nothing set: the C++ default.
+    assert pycvc.parse_options_from_state(app).step_tokens == 0
+    # What Exec reads with: its own defaults under the tree.
+    ex = pycvc.Exec(app)
+    effective = pycvc.parse_options_from_state(app, "", ex.parser_defaults())
+    assert effective.step_tokens == 1024
+
+    pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "40")
+    pycvc.state_set(app, "state_exec.schedulers.s1.parser.max_depth", "50")
+    assert pycvc.parse_options_from_state(app).max_depth == 40
+    assert pycvc.parse_options_from_state(app, "s1").max_depth == 50
+    pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "nope")  # bad: skipped
+    assert pycvc.parse_options_from_state(app).max_depth == 256
+
+
+def test_set_parser_defaults_changes_how_exec_parses():
+    ex = pycvc.Exec(pycvc.make_app())
+    o = pycvc.parse_options()
+    o.max_depth = 2
+    ex.set_parser_defaults(o)
+    assert ex.parser_defaults().max_depth == 2
+    assert ex.parser_defaults().step_tokens == 0
+    assert "nesting deeper than 2" in _run_error(ex, "(+ 1 (+ 2 (+ 3 4)))")
+    assert ex.run("(+ 1 (+ 2 3))") == "6"
+
+
 # ── DSL <-> state <-> Python round trips (one shared app) ───────────────
 
 

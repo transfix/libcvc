@@ -1437,6 +1437,32 @@ class AsyncStateObserver(state_observer):
         self._workers = []
 %}
 
+// ── state_exec parser settings (docs/STATE_EXEC_GRAMMAR.md, "Parser settings") ──
+// DIRECT WRAP, under the C++ names: the real cvc::state_exec::parse_options
+// struct and async_scheduler::host_parser_defaults(). Only these members are
+// declared to SWIG; the rest of parser.h / async_scheduler.h (value_t, the
+// parser, the scheduler itself) is not wrapped yet, so async_scheduler has no
+// Python constructor. parse_options_from_state and Exec's parser_defaults /
+// set_parser_defaults are in pycvc_exec.h.
+%{
+#include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/parser.h>
+%}
+namespace cvc {
+namespace state_exec {
+struct parse_options {
+  size_t max_depth;   // lists and quotes that may nest (default 256)
+  size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
+};
+%nodefaultctor async_scheduler;
+%nodefaultdtor async_scheduler;
+class async_scheduler {
+public:
+  static parse_options host_parser_defaults();
+};
+}
+}
+
 // ── Phase 4: DSL execution + Python-authored DSL functions ──────────────
 // pycvc.Exec(app) runs state_exec DSL programs over app's state root and lets a
 // Python callable be registered as a DSL function (register_fn). PyObject* is
