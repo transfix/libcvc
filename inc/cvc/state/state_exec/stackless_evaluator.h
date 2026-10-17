@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/parser.h> // parse_options
 #include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <memory>
@@ -92,8 +93,10 @@ public:
   /// Create a fresh evaluator_state from a parsed expression.
   evaluator_state create_state(const value_t &expr, environment_ptr env = nullptr);
 
-  /// Create a fresh evaluator_state from a script string.
-  evaluator_state create_state(const std::string &script, environment_ptr env = nullptr);
+  /// Create a fresh evaluator_state from a script string, parsed with `popts` (a scheduler passes
+  /// the parser settings it resolved from the state tree).
+  evaluator_state create_state(const std::string &script, environment_ptr env = nullptr,
+                               const parse_options &popts = {});
 
   /// Execute one evaluation step.  Returns true when done.
   bool step(evaluator_state &state);

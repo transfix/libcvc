@@ -1,22 +1,25 @@
 #include <cctype>
 #include <charconv>
 #include <cstring>
+#include <cvc/state/state.h>
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/scheduler.h> // defaults_prefix / sched_prefix
 #include <cvc/state/state_exec/utf8.h> // SE-2: \u/\x escapes -> UTF-8, and UTF-8 identifier bytes
+#include <optional>
 #include <sstream>
 
 namespace cvc::state_exec {
 
 // -- Free functions ----------------------------------------------------------
 
-value_t parse(const std::string &input) {
-  parser p(input);
+value_t parse(const std::string &input, const parse_options &opts) {
+  parser p(input, opts);
   auto result = p.parse_expr();
   return result;
 }
 
-std::vector<value_t> parse_all(const std::string &input) {
-  parser p(input);
+std::vector<value_t> parse_all(const std::string &input, const parse_options &opts) {
+  parser p(input, opts);
   std::vector<value_t> results;
   while (!p.at_end()) {
     results.push_back(p.parse_expr());
@@ -24,9 +27,53 @@ std::vector<value_t> parse_all(const std::string &input) {
   return results;
 }
 
+// A positive integer setting at `path`, or nullopt when it is missing, empty, malformed, zero or
+// out of range (so the caller falls through to the next place in the resolution order).
+static std::optional<std::size_t> read_positive_setting(cvc::state &root, const std::string &path) {
+  cvc::state *node = root.findDescendant(path);
+  if (!node)
+    return std::nullopt;
+  const std::string v = node->value();
+  std::size_t n = 0;
+  const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+  if (ec != std::errc{} || end != v.data() + v.size() || n == 0)
+    return std::nullopt;
+  return n;
+}
+
+parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id) {
+  parse_options opts;
+  const std::string key = ".parser.max_depth";
+  if (auto v = read_positive_setting(root, std::string(scheduler::defaults_prefix) + key))
+    opts.max_depth = *v;
+  if (!scheduler_id.empty())
+    if (auto v = read_positive_setting(root, std::string(scheduler::sched_prefix) + "." +
+                                                 scheduler_id + key))
+      opts.max_depth = *v;
+  return opts;
+}
+
 // -- parser ------------------------------------------------------------------
 
-parser::parser(std::string_view input) : _input(input) {}
+parser::parser(std::string_view input, const parse_options &opts) : _input(input), _opts(opts) {}
+
+// One level of list/quote nesting for the lifetime of the guard. The check comes before the
+// increment, so a guard that throws leaves the depth unchanged.
+class parser::depth_guard {
+public:
+  explicit depth_guard(parser &p) : _p(p) {
+    if (_p._depth >= _p._opts.max_depth)
+      _p.error("nesting deeper than " + std::to_string(_p._opts.max_depth) +
+               " levels (state_exec setting parser.max_depth)");
+    ++_p._depth;
+  }
+  ~depth_guard() { --_p._depth; }
+  depth_guard(const depth_guard &) = delete;
+  depth_guard &operator=(const depth_guard &) = delete;
+
+private:
+  parser &_p;
+};
 
 bool parser::at_end() const {
   // Skip whitespace conceptually
@@ -88,10 +135,13 @@ value_t parser::parse_expr() {
 
   char c = peek();
 
-  if (c == '(')
+  if (c == '(') {
+    depth_guard level(*this);
     return parse_list();
+  }
   if (c == '\'') {
     // Quote: 'expr → (quote expr)
+    depth_guard level(*this);
     advance();
     auto quoted = parse_expr();
     return make_list({value_t(symbol{"quote"}), quoted});

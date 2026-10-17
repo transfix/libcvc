@@ -238,3 +238,51 @@ TEST(StateExecParserTest, FullProgram) {
   EXPECT_EQ(std::get<symbol>((**call)[0].v).name, "fib");
   EXPECT_EQ(std::get<int64_t>((**call)[1].v), 10);
 }
+
+// -- Nesting limit (parse_options::max_depth; state-tree key parser.max_depth) --
+
+static std::string nested(std::size_t depth) {
+  return std::string(depth, '(') + std::string(depth, ')');
+}
+
+TEST(StateExecParserTest, NestingLimitDefaultsTo256) {
+  EXPECT_EQ(parse_options{}.max_depth, 256u);
+  EXPECT_NO_THROW(parse(nested(256)));
+  EXPECT_THROW(parse(nested(257)), parse_error);
+}
+
+TEST(StateExecParserTest, NestingLimitIsConfigurable) {
+  parse_options opts;
+  opts.max_depth = 3;
+  EXPECT_NO_THROW(parse("(((1)))", opts));
+  EXPECT_THROW(parse("((((1))))", opts), parse_error);
+  EXPECT_NO_THROW(parse("'''x", opts)); // each quote is one level: (quote (quote (quote x)))
+  EXPECT_THROW(parse("''''x", opts), parse_error);
+  EXPECT_THROW(parse_all("(a) ((((b))))", opts), parse_error);
+
+  opts.max_depth = 1000;
+  EXPECT_NO_THROW(parse(nested(1000), opts));
+}
+
+TEST(StateExecParserTest, NestingLimitStopsRunawayInputBeforeTheStackDoes) {
+  // A hundred thousand open parens would recurse that deep; the limit stops it at 257.
+  EXPECT_THROW(parse(std::string(100000, '(')), parse_error);
+}
+
+TEST(StateExecParserTest, NestingErrorPointsAtTheParenThatGoesTooDeep) {
+  parse_options opts;
+  opts.max_depth = 2;
+  try {
+    parse("(a\n  ((b)))", opts);
+    FAIL() << "expected a parse_error";
+  } catch (const parse_error &e) {
+    EXPECT_EQ(e.line(), 2u);
+    EXPECT_EQ(e.col(), 4u);
+  }
+}
+
+TEST(StateExecParserTest, NestingDepthResetsBetweenTopLevelForms) {
+  parse_options opts;
+  opts.max_depth = 2;
+  EXPECT_EQ(parse_all("((a)) ((b)) ((c))", opts).size(), 3u);
+}
