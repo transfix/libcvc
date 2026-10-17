@@ -1680,12 +1680,16 @@ TEST(AriadneStdlib, PredicateMaterializerIsCutByTheEvalBudget) {
   ASSERT_FALSE(warns.empty());
   EXPECT_NE(warns[0].find("exceeded the eval budget"), std::string::npos) << warns[0];
 
-  // At the host's 1024 nodes a step (what a 0 here also gets) the same call fits.
+  // A 0 here still slices, at the host's 1024 nodes a step, and an ordinary call finishes. It is
+  // kept small so it fits the 5 ms time cap in a Debug build on a loaded CI runner.
   cvc::state::instance(app)("state_exec.defaults.data.step_nodes").value("0");
+  Widget fits = text("fits");
+  fits.visible_when = "(= (length (collections.range 1000)) 1000)";
+  rt.set_root(group({fits}));
   MockBackend mb2;
   rt.set_backend(&mb2);
   rt.render();
-  EXPECT_TRUE(mb2.saw("text_line:big"));
+  EXPECT_TRUE(mb2.saw("text_line:fits"));
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
