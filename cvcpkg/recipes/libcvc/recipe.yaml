@@ -405,13 +405,20 @@ package:
     # lib/libxmlrpc.a — it does not match lib/libcvc*/lib/cvc*, so it must be
     # listed explicitly or downstream links to cvc::xmlrpc fail with a missing
     # archive.
-    - lib/libxmlrpc*
+    #
+    # Native platforms only: the wasm-mt build (publish-cvcgl-wasm.yml) leaves
+    # CVC_USING_XMLRPC OFF, so it has no xmlrpc archive, and cvcpkg's strict
+    # package.files check refused the v3.6.0 wasm-mt bundle for declaring one
+    # ("2 entries that match nothing in the staged tree").
+    - glob: lib/libxmlrpc*
+      platforms: [linux, macos, windows, freebsd, netbsd]
     # ...and the MSVC spelling. add_library(xmlrpc STATIC) yields libxmlrpc.a on
     # Unix but xmlrpc.lib on MSVC, which matches neither lib/libcvc* nor
     # lib/cvc* nor the glob above -- the same reason lib/cvc* sits beside
     # lib/libcvc* here. Without it the Windows bundle exports cvc::xmlrpc while
     # shipping no archive for it.
-    - lib/xmlrpc*
+    - glob: lib/xmlrpc*
+      platforms: [linux, macos, windows, freebsd, netbsd]
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
