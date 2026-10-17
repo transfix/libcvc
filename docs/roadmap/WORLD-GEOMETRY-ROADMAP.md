@@ -118,9 +118,9 @@ Loaders produce it. Consumers take the same objects:
 - `terrain` holds a `shared_ptr<const cvc::height_field>`.
 
 `physics::triangle_mesh` and `physics::heightfield` go away. This changes the physics API that
-shipped in 3.6.0 days ago and has no consumers outside libcvc yet. The engine headers stay hidden;
-physics' public headers then include `cvc/geometry`, giving up the "std only" rule for one source
-of truth.
+shipped in 3.6.0 days ago and has no consumers outside libcvc yet. The physics headers stay
+standard-library only by forward-declaring the two types, and the facade flattens them for the
+engine, so no backend sees `cvc::geometry`.
 
 ## Phases
 

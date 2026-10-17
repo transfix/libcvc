@@ -23,7 +23,7 @@ namespace physics {
 struct body_desc {
   physics::shape shape;
   motion_type motion = motion_type::dynamic;
-  vec3 position; // world metres (ignored for a height field, which is placed by its origin)
+  vec3 position; // world metres (ignored for terrain, which is placed by its own grid)
   quat rotation;
   vec3 linear_velocity;  // m/s
   vec3 angular_velocity; // rad/s
