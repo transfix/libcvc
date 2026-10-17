@@ -92,6 +92,7 @@ add_executable(world_clock_test world_clock_test.cpp)
 add_executable(world_units_test world_units_test.cpp)
 add_executable(physics_world_test physics_world_test.cpp)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
+add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(system_macro_headers_test system_macro_headers_test.cpp)
 add_executable(state_brick_frustum_test state_brick_frustum_test.cpp)
 add_executable(state_conflict_ring_test state_conflict_ring_test.cpp)
@@ -233,6 +234,7 @@ set(TEST_TARGETS
   world_units_test
   physics_world_test
   physics_pose_tracker_test
+  geometry_height_field_test
   system_macro_headers_test
   state_data_hydrator_test
   state_node_telemetry_test
@@ -1399,6 +1401,13 @@ target_link_libraries(physics_pose_tracker_test
     GTest::gtest_main
 )
 
+target_link_libraries(geometry_height_field_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(system_macro_headers_test
   PRIVATE
     cvc
@@ -1616,6 +1625,7 @@ target_compile_features(world_clock_test PRIVATE cxx_std_17)
 target_compile_features(world_units_test PRIVATE cxx_std_17)
 target_compile_features(physics_world_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
+target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(system_macro_headers_test PRIVATE cxx_std_20)
 target_compile_features(state_brick_frustum_test PRIVATE cxx_std_17)
 target_compile_features(state_conflict_ring_test PRIVATE cxx_std_17)
@@ -2032,6 +2042,7 @@ cvc_discover_tests(world_clock_test)
 cvc_discover_tests(world_units_test)
 cvc_discover_tests(physics_world_test)
 cvc_discover_tests(physics_pose_tracker_test)
+cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(system_macro_headers_test)
 cvc_discover_tests(state_brick_frustum_test)
 cvc_discover_tests(state_conflict_ring_test)
