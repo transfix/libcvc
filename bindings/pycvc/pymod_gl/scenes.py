@@ -7,8 +7,11 @@ OpenStreetMap + SRTM scene generator (e.g. the Austin scene bundle the nav demos
 load, ``scene-austin-south-small`` on cvcpkg). The glTF is loaded
 NATIVELY via libcvc (``pycvc.load_model`` → ``cvc::model``, the Assimp-backed
 mesh loader — no ``vtkGLTFReader``, no trimesh/pygltflib) and added as a single
-native geometry node; the terrain becomes a draped surface mesh; a bilinear
-``sampler`` lets you drape an agent onto the terrain. (``building_occupancy``
+native geometry node; the terrain becomes a draped surface mesh; a
+``sampler`` lets you drape an agent onto the terrain. The terrain (and, in
+``load_geometry_bundle``, the buildings) come from the C++ loader
+``pycvc.load_city_bundle``, so Python draws and samples the same height field the
+physics world collides with and the navigator plans over. (``building_occupancy``
 below still rasterizes the mesh through VTK offscreen — a separate concern.)
 
 ATTRIBUTION: bundles generated from OpenStreetMap are © OpenStreetMap
@@ -20,61 +23,55 @@ overlay some bundles carry — it is proprietary; these loaders never touch it.
 
 from __future__ import annotations
 
-import json
 import os
 
 
-def terrain_grid(path: str):
-    """Read a ``terrain.json`` heightfield: returns ``(grid, bounds2d, rows,
-    cols)`` where ``grid[row][col]`` is height (row -> y, col -> x) and
-    ``bounds2d`` = ``(min_x, min_y, max_x, max_y)``.
-
-    The stored grid is TOP-DOWN (row 0 = north = ``max_y``, the raster/SRTM/GeoTIFF
-    convention the scene generator inherits). Our mesh + sampler use the
-    opposite, bottom-up convention (row 0 -> ``min_y``, so a rising world ``y``
-    walks up the row index). We normalize here by reversing the rows so BOTH the
-    terrain mesh and the drape sampler agree with the glTF's world frame — without
-    this flip the terrain is mirrored along Y and the ``buildings.glb`` (which is
-    baked in true world coordinates) sinks into / floats above it.
-    """
-    d = json.load(open(path))
-    b = d["bounds"]
-    grid = list(reversed(d["grid"]))  # top-down raster -> bottom-up (row 0 = min_y)
-    return grid, (b["min_x"], b["min_y"], b["max_x"], b["max_y"]), d["rows"], d["cols"]
+def _bundle_dir(path: str) -> str:
+    """A bundle directory from either the directory or its ``terrain.json``."""
+    return os.path.dirname(path) if os.path.basename(path) == "terrain.json" else path
 
 
-def terrain_sampler(path: str):
-    """A bilinear height function ``h(x, y)`` over a ``terrain.json`` grid — use
-    it to DRAPE an agent/path onto the real terrain (clamped at the edges)."""
-    grid, (min_x, min_y, max_x, max_y), rows, cols = terrain_grid(path)
-    sx = (cols - 1) / (max_x - min_x) if max_x > min_x else 0.0
-    sy = (rows - 1) / (max_y - min_y) if max_y > min_y else 0.0
+def load_terrain(path: str):
+    """The bundle's terrain as a ``pycvc.height_field``, read by the C++ loader
+    (``cvc::world::load_city_bundle``) that the renderer, the physics world and the
+    navigator use, so Python sees the same samples and the same triangles.
+
+    ``path`` is the bundle directory or its ``terrain.json``. The stored grid runs
+    north first; the field has row 0 at ``min_y`` (flipped once, in C++), so
+    ``field.height(x, y)`` agrees with the glTF's world frame. Replaces the old
+    ``terrain_grid``, which parsed ``terrain.json`` in Python."""
+    import pycvc
+
+    return pycvc.load_city_bundle(_bundle_dir(path), buildings=False).terrain()
+
+
+def terrain_sampler(path: str = "", field=None):
+    """A height function ``h(x, y)`` over the bundle's terrain, for DRAPING an
+    agent or path onto it. Clamped to the grid at the edges.
+
+    It samples ``pycvc.height_field.height``: the plane of the mesh triangle under
+    the point, the surface the renderer draws and the physics engine collides with
+    (the old sampler was bilinear, which differs inside a cell). Pass ``field`` to
+    sample a height field already loaded."""
+    if field is None:
+        field = load_terrain(path)
+    min_x, min_y, max_x, max_y = field.bounds2d()
 
     def h(x: float, y: float) -> float:
-        fx = (x - min_x) * sx
-        fy = (y - min_y) * sy
-        fx = 0.0 if fx < 0 else (cols - 1 if fx > cols - 1 else fx)
-        fy = 0.0 if fy < 0 else (rows - 1 if fy > rows - 1 else fy)
-        c0, r0 = int(fx), int(fy)
-        c1 = c0 + 1 if c0 < cols - 1 else c0
-        r1 = r0 + 1 if r0 < rows - 1 else r0
-        tx, ty = fx - c0, fy - r0
-        top = grid[r0][c0] * (1 - tx) + grid[r0][c1] * tx
-        bot = grid[r1][c0] * (1 - tx) + grid[r1][c1] * tx
-        return top * (1 - ty) + bot * ty
+        x = min_x if x < min_x else (max_x if x > max_x else x)
+        y = min_y if y < min_y else (max_y if y > max_y else y)
+        return field.height(x, y)
 
     return h
 
 
 def add_terrain_json(lab, path: str, name: str = "terrain", color=(0.34, 0.40, 0.28)):
-    """Add a ``terrain.json`` heightfield to ``lab`` as a draped surface; returns
-    a ``sampler`` ``h(x, y)`` for the SAME field (so agents can drape onto it).
-
-    NOTE: uses the Lab's terrain mesh, which names the node ``"terrain"``.
-    """
-    grid, bounds2d, _rows, _cols = terrain_grid(path)
-    lab.add_terrain(grid, bounds=bounds2d, color=color)
-    return terrain_sampler(path)
+    """Add a bundle's terrain to ``lab`` as a draped surface (the height field's own
+    mesh); returns a ``sampler`` ``h(x, y)`` for the SAME field (so agents drape onto
+    it). ``path`` is the bundle directory or its ``terrain.json``."""
+    field = load_terrain(path)
+    lab.add_height_field(name, field, color=color)
+    return terrain_sampler(field=field)
 
 
 def add_gltf(
@@ -91,10 +88,15 @@ def add_gltf(
     per-glTF materials — matching the previous VTK path's look (ambient 0.45 /
     diffuse 0.7 / specular 0.05). Imports NO VTK glTF reader; the scene node itself
     still renders through cvcGL/VTK as usual."""
-    pycvc = lab._pycvc
     # Native load: one flattened geometry (single-color, one-node city mesh).
-    g = pycvc.load_model(path).merged()
+    return _add_geometry_node(
+        lab, name, lab._pycvc.load_model(path).merged(), color, opacity, parent
+    )
 
+
+def _add_geometry_node(lab, name: str, g, color, opacity: float = 1.0, parent: str = ""):
+    """Add geometry ``g`` as one uniformly coloured ``GeometryNode`` (see
+    :func:`add_gltf`), a child of ``parent`` when given."""
     # Add via the native scene path, honoring parent (child inherits its transform).
     scene = lab._scene
     if parent:
@@ -406,12 +408,21 @@ def load_geometry_bundle(
     ``buildings=False`` loads only the terrain (much lighter). The Esri
     ``satellite.png`` some bundles carry is intentionally NOT loaded (proprietary).
     """
-    terrain_path = os.path.join(bundle_dir, "terrain.json")
-    sampler = add_terrain_json(lab, terrain_path, color=terrain_color)
-    if buildings:
-        glb = os.path.join(bundle_dir, "buildings.glb")
-        if os.path.exists(glb):
-            # buildings are CHILDREN of the terrain node so they stay aligned to it
-            # (same world frame) and move with any terrain transform.
-            add_gltf(lab, glb, "buildings", color=building_color, parent="terrain")
-    return sampler
+    import pycvc
+
+    # One load through the C++ loader: the terrain and the buildings exactly as
+    # the physics world and the navigator read them (z up, not lifted).
+    city = pycvc.load_city_bundle(bundle_dir, buildings=buildings)
+    field = city.terrain()
+    lab.add_height_field("terrain", field, color=terrain_color)
+    if buildings and city.buildings_loaded:
+        # buildings are CHILDREN of the terrain node so they stay aligned to it
+        # (same world frame) and move with any terrain transform.
+        _add_geometry_node(
+            lab,
+            "buildings",
+            city.world().item_geometry("buildings"),
+            building_color,
+            parent="terrain",
+        )
+    return terrain_sampler(field=field)
