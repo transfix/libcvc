@@ -3,7 +3,6 @@
 #include "nav_common.h"
 
 #include <algorithm>
-#include <cctype> // std::isspace in parse_terrain_grid
 #include <cmath>
 #include <cstdlib>
 #include <cvc/core/app.h>
@@ -14,6 +13,7 @@
 #include <cvc/gl/StageLighting.h>
 #include <cvc/model/model_file_io.h> // read_model (buildings.glb -> mesh)
 #include <cvc/nav/grid_nav.h>        // astar / simplify / inflate — the shared route planner
+#include <cvc/world/city_bundle.h>   // the library's one reader of city bundles
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -542,6 +542,13 @@ bool load_vehicle_template(const std::string &path, double target_len, std::vect
 double Terrain::sample(double x, double y) const {
   if (empty())
     return 0.0;
+  if (field) {
+    const double cx = std::clamp(x, bounds.min_x, bounds.max_x);
+    const double cy = std::clamp(y, bounds.min_y, bounds.max_y);
+    const double z = field->height(cx, cy);
+    if (!std::isnan(z))
+      return z;
+  }
   // Bilinear interpolation over the [rows x cols] elevation grid mapped onto
   // bounds. grid[0] is the SW corner (min_x, min_y); rows step +y, cols step +x.
   const double u = (x - bounds.min_x) / (bounds.max_x - bounds.min_x);
@@ -563,6 +570,12 @@ double Terrain::sample(double x, double y) const {
 cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]) {
   if (t.empty())
     return ground_quad(t.bounds, 0.0, rgb);
+  if (t.field) {
+    // The world's own terrain mesh (shared arrays, plus a colour per vertex).
+    cvc::geometry g = *t.field;
+    g.colors().assign(g.num_points(), cvc::geometry::color_t{{rgb[0], rgb[1], rgb[2]}});
+    return g;
+  }
   cvc::geometry g;
   auto &pts = g.points();
   auto &cols = g.colors();
@@ -597,113 +610,54 @@ cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]) {
   return g;
 }
 
-// Parse the row-major "grid": [[...],[...],...] block from terrain.json into a
-// flat vector. Returns false if the block is missing/malformed — the caller
-// falls back to a flat ground plane.
-static bool parse_terrain_grid(const std::string &s, int rows, int cols, std::vector<double> &out) {
-  const auto gk = s.find("\"grid\"");
-  if (gk == std::string::npos)
-    return false;
-  const auto lb = s.find('[', gk);
-  if (lb == std::string::npos)
-    return false;
-  out.clear();
-  out.reserve(static_cast<std::size_t>(rows) * cols);
-  const char *p = s.c_str() + lb + 1;
-  const char *end = s.c_str() + s.size();
-  int depth = 1;
-  while (p < end && depth > 0) {
-    while (p < end && (std::isspace(static_cast<unsigned char>(*p)) || *p == ',' || *p == '['))
-      if (*p++ == '[')
-        ++depth;
-    if (p >= end || *p == ']') {
-      if (p < end)
-        --depth, ++p;
-      continue;
-    }
-    char *ep = nullptr;
-    const double v = std::strtod(p, &ep);
-    if (ep == p)
-      break;
-    out.push_back(v);
-    p = ep;
-  }
-  return out.size() == static_cast<std::size_t>(rows) * cols;
-}
-
 bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
                       std::vector<std::uint8_t> &occ, cvc::geometry *mesh, Terrain *terrain,
-                      bool prefer_flat) {
-  namespace fs = std::filesystem;
-  const std::string tj = dir + "/terrain.json";
+                      bool prefer_flat, cvc::world::world_geometry *world) {
   // Real Austin bundles ship a low-poly buildings_flat.glb (~6 MB, flat-shaded
   // extrusions from the footprint polygons) alongside the full detail
   // buildings.glb (~26 MB, per-vertex normals + smoothed corners). The full
   // mesh is ~500k tris on Austin south — enough to drop VTK's shadow-map pass
   // to 15-20 fps on a laptop GPU. Callers pass prefer_flat=true (--lite on the
   // demos) to load the lower-poly variant when present.
-  std::string glb = dir + "/buildings.glb";
-  if (prefer_flat) {
-    const std::string flat = dir + "/buildings_flat.glb";
-    if (fs::exists(flat))
-      glb = flat;
-  }
-  std::ifstream f(tj);
-  if (!f)
+  cvc::world::city_bundle_options opt;
+  opt.prefer_flat = prefer_flat;
+  cvc::world::city_bundle city;
+  try {
+    city = cvc::world::load_city_bundle(dir, opt);
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "  %s\n", e.what());
     return false;
-  const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  auto num = [&](const char *key, double &v) -> bool {
-    const auto k = s.find(key);
-    if (k == std::string::npos)
-      return false;
-    const auto colon = s.find(':', k);
-    if (colon == std::string::npos)
-      return false;
-    v = std::atof(s.c_str() + colon + 1);
+  }
+  bounds = {city.min_x, city.min_y, city.max_x, city.max_y};
+  const auto field = city.geometry.terrain();
+  if (terrain && field) {
+    terrain->rows = field->rows();
+    terrain->cols = field->cols();
+    terrain->bounds = bounds;
+    terrain->grid.assign(field->heights().begin(), field->heights().end());
+    terrain->field = field;
+  }
+  if (world)
+    *world = city.geometry;
+  // buildings.glb -> occupancy + optional wall mesh. A missing or unreadable glb
+  // (or a wasm assimp-side glTF version rejection) still returns true: the demo
+  // renders real terrain + satellite with a synthetic occupancy fallback rather
+  // than dropping the whole bundle.
+  const cvc::world::geometry_item *b = city.geometry.find("buildings");
+  if (b && b->geometry->num_tris() > 0) {
+    occ = occupancy_from_model(*b->geometry, bounds, nx, ny, /*inflate=*/0);
+    if (mesh)
+      *mesh = *b->geometry;
     return true;
-  };
-  if (!(num("\"min_x\"", bounds.min_x) && num("\"min_y\"", bounds.min_y) &&
-        num("\"max_x\"", bounds.max_x) && num("\"max_y\"", bounds.max_y)))
-    return false;
-  if (terrain) {
-    // Optional elevation grid — makes agents, walls, and beacons rest on real
-    // terrain instead of a flat plane. Missing/malformed grid is not fatal
-    // (bundle without elevation still works, just flat).
-    double rr = 0, cc = 0;
-    if (num("\"rows\"", rr) && num("\"cols\"", cc) && rr > 1 && cc > 1) {
-      terrain->rows = static_cast<int>(rr);
-      terrain->cols = static_cast<int>(cc);
-      terrain->bounds = bounds;
-      if (!parse_terrain_grid(s, terrain->rows, terrain->cols, terrain->grid))
-        *terrain = Terrain{}; // wipe partial parse
-    }
   }
-  // buildings.glb -> occupancy + optional wall mesh. Failure here (missing file
-  // OR a wasm assimp-side glTF version rejection) still returns true when
-  // terrain was parsed: the demo renders real terrain + satellite with a
-  // synthetic occupancy fallback rather than dropping the whole bundle.
-  if (fs::exists(glb)) {
-    try {
-      cvc::model m = cvc::read_model(glb);
-      cvc::geometry city = m.merged();
-      if (city.num_tris() > 0) {
-        occ = occupancy_from_model(city, bounds, nx, ny, /*inflate=*/0);
-        if (mesh)
-          *mesh = std::move(city);
-        return true;
-      }
-    } catch (const std::exception &e) {
-      std::fprintf(stderr, "  buildings.glb load failed: %s (continuing without wall mesh)\n",
-                   e.what());
-    } catch (...) {
-      std::fprintf(stderr, "  buildings.glb load raised unknown (continuing without wall mesh)\n");
-    }
-  }
+  if (!city.buildings_error.empty())
+    std::fprintf(stderr, "  buildings: %s (continuing without wall mesh)\n",
+                 city.buildings_error.c_str());
   // No mesh -> mark occ empty; the caller falls back to city_scene occupancy.
-  // Terrain (parsed above from terrain.json) is still returned to *terrain, so
-  // even without the buildings mesh the demo gets the real Austin ground.
+  // The terrain is still returned to *terrain, so even without the buildings
+  // mesh the demo gets the real Austin ground.
   occ.clear();
-  return terrain && !terrain->empty(); // true if we at least have real terrain
+  return true;
 }
 
 std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bounds &b,

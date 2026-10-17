@@ -200,3 +200,27 @@ TEST(NavCommonRoute, StandoffRoutesAGapThatDilationWouldSeal) {
   // More than the bare goal fallback means A* actually found a way through.
   EXPECT_GT(stand.wp.size(), 1u) << "the surcharge must not strand a sub-standoff corridor";
 }
+
+// --- Terrain on the world's height field ------------------------------------------
+
+// A Terrain from load_city_bundle holds the world's cvc::height_field, and then
+// sample() is that field's own surface (what the ground mesh draws and physics
+// collides with), clamped to the bounds; terrain_mesh() is the field's mesh.
+TEST(NavCommonTerrain, SamplesTheWorldsHeightField) {
+  std::vector<float> h = {0, 1, 2, 4, 3, 5, 1, 2, 6}; // 3 x 3, row 0 at min_y
+  auto field = std::make_shared<cvc::height_field>(3, 3, -1.0, -1.0, 1.0, 1.0, h);
+  navdemo::Terrain t;
+  t.rows = t.cols = 3;
+  t.bounds = {-1.0, -1.0, 1.0, 1.0};
+  t.grid.assign(h.begin(), h.end());
+  t.field = field;
+  for (double x = -1.0; x <= 1.0; x += 0.125)
+    for (double y = -1.0; y <= 1.0; y += 0.125)
+      EXPECT_DOUBLE_EQ(t.sample(x, y), field->height(x, y)) << x << ", " << y;
+  EXPECT_DOUBLE_EQ(t.sample(-5.0, -5.0), field->height(-1.0, -1.0)); // clamped
+  EXPECT_DOUBLE_EQ(t.sample(5.0, 0.0), field->height(1.0, 0.0));
+  const double rgb[3] = {0.2, 0.4, 0.6};
+  const cvc::geometry g = navdemo::terrain_mesh(t, rgb);
+  EXPECT_EQ(&g.const_points(), &field->const_points()) << "the field's mesh, not a copy";
+  EXPECT_EQ(g.const_colors().size(), g.num_points());
+}
