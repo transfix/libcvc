@@ -5,7 +5,8 @@ This is the formal grammar of the state_exec s-expression language: the text tha
 `.ari` documents embed it in `init`, `on`, `bind` and `*_when` fields.
 
 **Status: target grammar.** The parser in `src/cvc/state/state_exec/parser.cpp` is still the
-hand-written one. It moves onto this grammar in phases (P2 to P4, see
+hand-written one, now with the nesting limit and its [settings](#parser-settings) (P1b). It
+moves onto this grammar in phases (P2 to P4, see
 [Changes from the pre-grammar parser](#changes-from-the-pre-grammar-parser)). Until then it differs
 from this document exactly where that table says. `state_exec_grammar_test` checks both sides:
 cases for landed phases must hold, and cases for pending phases must still differ.
@@ -137,8 +138,6 @@ raw_bytes      ::= 'br' raw_body
 
 ## Parser settings
 
-**Status:** not implemented yet. Today's parser has no nesting limit and reads no settings.
-
 The parser's settings live on the state tree, next to the scheduler's (`state_exec.defaults.*`
 and `state_exec.schedulers.<id>.*`, see `scheduler::load_settings()`). Each setting resolves in
 this order:
@@ -258,7 +257,8 @@ hashes and `"`, it is a string literal, and leaving it unterminated is an error.
 
 ## Changes from the pre-grammar parser
 
-Phase P2 replaces the hand-written lexer with the grammar, including the number syntax. P3 adds
+Phase P1b adds the nesting limit and the parser settings to the hand-written parser. Phase P2
+replaces the hand-written lexer with the grammar, including the number syntax. P3 adds
 the Unicode source rules and strict escapes. P4 adds octal escapes, the extra C escapes and raw
 strings. Every row is a case in `state_exec_grammar_test`.
 
@@ -268,7 +268,7 @@ strings. Every row is a case in `state_exec_grammar_test`.
 | `[a]`, `a,b`, `` `a ``, `{}`, `a\|b`, `a\b` | odd one-character or glued symbols | error (reserved) | P2 |
 | `parse("1 2")` | `1`; the rest is ignored | error | P2 |
 | `'` at end of input | `(quote nil)` | error | P2 |
-| 257 nested lists | parsed (no limit) | error at the default `max_depth` | P2 |
+| 257 nested lists | parsed (no limit) | error at the default `max_depth` | P1b |
 | `; c` CR `1` | comment runs to LF, so no datum | `1` | P2 |
 | `0x1F` | `31.0`, a double (via `strtod`) | `31` | P2 |
 | `#x1F`, `0o17`, `0b101`, `1_000` | symbols | integers | P2 |
@@ -316,7 +316,7 @@ These were considered and left out. Each would need its own decision:
     `single_datum` is used;
   - every production has at least one accept or reject case;
   - each case holds once its phase has landed, and still differs while its phase is pending.
-    `kLandedPhase` in the test says which phases have landed.
+    `kLanded` in the test lists the phases that have landed.
 - `src/cvc/tests/state_exec_corpus_test.cpp` parses the corpus: every DSL script the repo carries,
   drawn from the `.ari` files, the docs' `lisp` blocks, the C++ test sources and the pycvc tests.
   It compares each parse with `state_exec_corpus/expected.txt`, so a parser change cannot alter

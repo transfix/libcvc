@@ -28,8 +28,9 @@ evaluator_state async_stackless_evaluator::create_state(const value_t &expr, env
 }
 
 evaluator_state async_stackless_evaluator::create_state(const std::string &script,
-                                                        environment_ptr env) {
-  return inner_.create_state(script, env);
+                                                        environment_ptr env,
+                                                        const parse_options &popts) {
+  return inner_.create_state(script, env, popts);
 }
 
 // ---------------------------------------------------------------------------
