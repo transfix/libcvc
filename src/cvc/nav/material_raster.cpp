@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cvc/image/image.h>
 #include <cvc/nav/material_raster.h>
+#include <cvc/world/city_bundle.h>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -221,37 +222,25 @@ bool masks_pixels(const std::string &dir, std::vector<int> &pix, int &W, int &H)
   return true;
 }
 
-// Parse rows/cols/bounds from a bundle's terrain.json (hand-rolled, no JSON dep — like nav_common).
-bool parse_terrain(const std::string &path, int &rows, int &cols, double &min_x, double &min_y,
-                   double &max_x, double &max_y) {
-  std::ifstream f(path);
-  if (!f)
-    return false;
-  const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  auto num = [&](const char *k, double &v) -> bool {
-    const auto p = s.find(k);
-    if (p == std::string::npos)
-      return false;
-    const auto c = s.find(':', p);
-    if (c == std::string::npos)
-      return false;
-    v = std::atof(s.c_str() + c + 1);
-    return true;
-  };
-  double rr = 0, cc = 0;
-  return num("\"rows\"", rr) && num("\"cols\"", cc) && num("\"min_x\"", min_x) &&
-         num("\"min_y\"", min_y) && num("\"max_x\"", max_x) && num("\"max_y\"", max_y) &&
-         (rows = static_cast<int>(rr)) > 1 && (cols = static_cast<int>(cc)) > 1;
-}
-
 } // namespace
 
 material_raster segment_scene_material(const std::string &bundle_dir) {
+  // The grid and extent from terrain.json, through the library's one reader of
+  // city bundles (the extent alone: a masks-only bundle need not carry heights).
   int rows = 0, cols = 0;
   double min_x = 0, min_y = 0, max_x = 0, max_y = 0;
-  if (!parse_terrain(bundle_dir + "/terrain.json", rows, cols, min_x, min_y, max_x, max_y))
+  try {
+    const cvc::world::terrain_extent e = cvc::world::read_terrain_extent(bundle_dir);
+    rows = e.rows;
+    cols = e.cols;
+    min_x = e.min_x;
+    min_y = e.min_y;
+    max_x = e.max_x;
+    max_y = e.max_y;
+  } catch (const std::exception &e) {
     throw std::runtime_error("cvc::nav::segment_scene_material: bad/missing terrain.json in " +
-                             bundle_dir);
+                             bundle_dir + " (" + e.what() + ")");
+  }
 
   // Prefer the authoritative land-cover masks.
   std::vector<int> pix;

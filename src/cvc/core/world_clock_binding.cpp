@@ -205,7 +205,22 @@ void world_clock_binding::seed() {
     _step_seen = seen;
 }
 
+std::uint64_t world_clock_binding::pending_steps() const {
+  std::lock_guard<std::mutex> lock(_mutex);
+  return _pending_steps;
+}
+
+void world_clock_binding::request_steps(std::uint64_t n) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  _pending_steps += n;
+}
+
 void world_clock_binding::pull() {
+  std::lock_guard<std::mutex> lock(_mutex);
+  pull_locked();
+}
+
+void world_clock_binding::pull_locked() {
   if (!_seeded)
     seed();
 
@@ -240,6 +255,11 @@ void world_clock_binding::pull() {
 }
 
 void world_clock_binding::push() {
+  std::lock_guard<std::mutex> lock(_mutex);
+  push_locked();
+}
+
+void world_clock_binding::push_locked() {
   write_val(_ctx, _keys.time, _clock.t());
   write_val(_ctx, _keys.tick, _clock.tick());
   write_val(_ctx, _keys.fixed_dt, _clock.fixed_dt());
@@ -248,19 +268,20 @@ void world_clock_binding::push() {
 }
 
 cvc::world_clock::step_result world_clock_binding::drive(double wall_dt) {
-  pull();
+  std::lock_guard<std::mutex> lock(_mutex); // one drive at a time: the result splices two advances
+  pull_locked();
   cvc::world_clock::step_result r = _clock.advance(wall_dt);
   if (_pending_steps > 0) {
     const int n = static_cast<int>(std::min<std::uint64_t>(_pending_steps, INT_MAX));
     const cvc::world_clock::step_result s = _clock.advance_ticks(n);
     _pending_steps -= static_cast<std::uint64_t>(n);
-    // One driver, so the requested steps directly follow the advanced ones.
+    // drive() holds the lock, so the requested steps directly follow the advanced ones.
     if (r.steps == 0)
       r.first_tick = s.first_tick;
     r.steps += s.steps;
     r.alpha = s.alpha;
   }
-  push();
+  push_locked();
   return r;
 }
 

@@ -69,6 +69,10 @@ public:
   typedef boost::array<index_t, 4> quad_t;
   typedef boost::array<index_t, 4> tet_t; // Tetrahedral element (4 vertices)
   typedef boost::array<index_t, 8> hex_t; // Hexahedral element (8 vertices)
+  // A face's surface material: an id in the world's surface table
+  // (cvc::world::surface_registry), so the renderer, physics and nav read one
+  // material per face. 0 is the default material.
+  typedef boost::uint16_t face_material_t;
 
   typedef std::vector<point_t> points_t;
   typedef boost::dynamic_bitset<> boundary_t;
@@ -83,6 +87,7 @@ public:
   typedef std::vector<quad_t> quads_t;
   typedef std::vector<tet_t> tets_t;
   typedef std::vector<hex_t> hexs_t;
+  typedef std::vector<face_material_t> face_materials_t;
 
   typedef boost::shared_ptr<points_t> points_ptr_t;
   typedef boost::shared_ptr<boundary_t> boundary_ptr_t;
@@ -97,6 +102,7 @@ public:
   typedef boost::shared_ptr<quads_t> quads_ptr_t;
   typedef boost::shared_ptr<tets_t> tets_ptr_t;
   typedef boost::shared_ptr<hexs_t> hexs_ptr_t;
+  typedef boost::shared_ptr<face_materials_t> face_materials_ptr_t;
 
   enum geometry_type {
     SURFACE_TRI = 0,  // Triangle surface mesh
@@ -118,8 +124,9 @@ public:
     QUADS,
     TETS,
     HEXS,
-    UVS,     // per-vertex texture coordinates (appended to keep prior enum values stable)
-    TANGENTS // per-vertex tangent basis
+    UVS,           // per-vertex texture coordinates (appended to keep prior enum values stable)
+    TANGENTS,      // per-vertex tangent basis
+    FACE_MATERIALS // per-face surface material (triangles, then quads)
   };
 
   geometry();
@@ -130,7 +137,9 @@ public:
   explicit geometry(app &ctx);
   geometry(app &ctx, const std::string &filename);
 
-  ~geometry();
+  // Virtual: subtypes (cvc::height_field) are held and destroyed through a
+  // geometry pointer.
+  virtual ~geometry();
 
   void copy(const geometry &geom, bool deepCopy = false);
   geometry &operator=(const geometry &geom);
@@ -187,6 +196,14 @@ public:
     pre_write(HEXS);
     return *_hexs;
   }
+  // One surface material per face: the triangles in order, then the quads.
+  // Empty means every face is material 0. An array whose length is not the face
+  // count is stale (an operation changed the faces and did not carry it) and
+  // reads as absent: see has_face_materials() and face_material().
+  face_materials_t &face_materials() {
+    pre_write(FACE_MATERIALS);
+    return *_face_materials;
+  }
 
   const points_t &const_points() const { return *_points; }
   const boundary_t &const_boundary() const { return *_boundary; }
@@ -201,6 +218,7 @@ public:
   const quads_t &const_quads() const { return *_quads; }
   const tets_t &const_tets() const { return *_tets; }
   const hexs_t &const_hexs() const { return *_hexs; }
+  const face_materials_t &const_face_materials() const { return *_face_materials; }
 
   const points_t &points() const { return const_points(); }
   const boundary_t &boundary() const { return const_boundary(); }
@@ -215,6 +233,7 @@ public:
   const quads_t &quads() const { return const_quads(); }
   const tets_t &tets() const { return const_tets(); }
   const hexs_t &hexs() const { return const_hexs(); }
+  const face_materials_t &face_materials() const { return const_face_materials(); }
 
   // Non-detaching shared owners of the points/colors containers. Unlike
   // points()/colors(), these do NOT pre_write() (no copy-on-write detach), so
@@ -241,6 +260,16 @@ public:
   uint64_t num_quads() const;
   uint64_t num_tets() const;
   uint64_t num_hexs() const;
+  // Triangles plus quads: the faces face_materials() indexes.
+  uint64_t num_faces() const { return num_tris() + num_quads(); }
+  // True when face_materials() holds one entry per face.
+  bool has_face_materials() const {
+    return num_faces() != 0 && _face_materials->size() == num_faces();
+  }
+  // Face i's material (triangles first, then quads); 0 without valid materials.
+  face_material_t face_material(uint64_t i) const {
+    return has_face_materials() && i < _face_materials->size() ? (*_face_materials)[i] : 0;
+  }
 
   geometry_type get_geometry_type() const { return _geom_type; }
   void set_geometry_type(geometry_type type) { _geom_type = type; }
@@ -319,6 +348,7 @@ protected:
   quads_ptr_t _quads;
   tets_ptr_t _tets;
   hexs_ptr_t _hexs;
+  face_materials_ptr_t _face_materials;
 
   geometry_type _geom_type;
 
@@ -358,6 +388,8 @@ typedef geometry::tris_t tris_t;
 typedef geometry::quads_t quads_t;
 typedef geometry::tets_t tets_t;
 typedef geometry::hexs_t hexs_t;
+typedef geometry::face_material_t face_material_t;
+typedef geometry::face_materials_t face_materials_t;
 } // namespace cvc
 
 #endif

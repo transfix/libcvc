@@ -5,12 +5,16 @@
                       cvc::state subtrees.
 */
 
+#include <charconv>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_list.h>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace cvc::state_exec {
 
@@ -94,13 +98,113 @@ std::string b64_decode(const std::string &in) {
   return out;
 }
 
+// Nested lists and dicts are written and read with explicit stacks, not native recursion, and
+// the state subtree they make is kept shallow too: cvc::state recurses once per TREE level on
+// every write (fullName() builds the path parent by parent, childChanged() climbs to the root),
+// so a list nested 100000 deep must not become a subtree 200000 deep. A list or dict
+// kSpillDepth levels below where its stretch of nesting began is written into the __spill__
+// table under the node encode_value was called on, as an entry of its own, and the place it
+// would have gone holds a reference: __type__ "spill_ref", value the entry's index. Its own
+// nesting starts again from that entry. Values at most kSpillDepth levels deep are written
+// exactly as before, with no table.
+//
+// 8 levels make at most ~30 tree levels per stretch (a dict level is 3: __entries__, the
+// index, __val__). A write that deep, under a snapshot root ~5 levels down, fits a 64 KiB
+// stack (wasm's); with 16, the dicts' ~55 did not.
+constexpr std::size_t kSpillDepth = 8;
+const char *SPILL_KEY = "__spill__";
+
+// The non-null list or dict a value holds, or null.
+const void *container_of(const value_t &v) {
+  if (auto *l = std::get_if<list_ptr>(&v.v))
+    return l->get();
+  if (auto *d = std::get_if<dict_ptr>(&v.v))
+    return d->get();
+  return nullptr;
+}
+
+// Write a value that is not a non-null list or dict.
+void encode_leaf(cvc::state &node, const value_t &val);
+
+// Read a value whose __type__ is `type`, which is not "list", "dict" or "spill_ref".
+value_t decode_leaf(cvc::state &node, const std::string &type);
+
 } // namespace
 
 // ---------------------------------------------------------------------------
 // encode_value
 // ---------------------------------------------------------------------------
 
-void encode_value(cvc::state &node, const value_t &val) {
+void encode_value(cvc::state &root, const value_t &val) {
+  // A list or dict whose elements are being written.
+  struct frame {
+    const value_t *val;
+    cvc::state *items; // its __elems__ or __entries__ node
+    std::size_t next;  // the next element to write
+    std::size_t size;  // its length, as written to __len__
+    std::size_t nest;  // how many levels below its stretch's start it is
+  };
+  std::vector<frame> stack;
+  std::unordered_set<const void *> open; // the lists and dicts on `stack`
+  std::optional<state_list> spill;
+
+  // Write `v` into `node`: a leaf now, a list or dict by its type and a frame for its elements.
+  auto begin = [&](cvc::state &node, const value_t &v, std::size_t nest) {
+    const void *c = container_of(v);
+    if (!c) {
+      encode_leaf(node, v);
+      return;
+    }
+    if (!open.insert(c).second)
+      throw std::runtime_error("encode_value: the value contains itself");
+    cvc::state *target = &node;
+    if (nest >= kSpillDepth) {
+      if (!spill)
+        spill.emplace(root(SPILL_KEY));
+      set_type(node, "spill_ref");
+      node.value(std::to_string(spill->size()));
+      target = &spill->push_back();
+      nest = 0;
+    }
+    const bool is_list = std::holds_alternative<list_ptr>(v.v);
+    set_type(*target, is_list ? "list" : "dict");
+    cvc::state &items = (*target)(is_list ? "__elems__" : "__entries__");
+    // The length is known up front, so it is written once, not once per element as
+    // state_list::push_back would (every write signals each ancestor). An empty list or dict
+    // gets the "0" that state_list's constructor writes, as before.
+    const std::size_t size =
+        is_list ? std::get<list_ptr>(v.v)->size() : std::get<dict_ptr>(v.v)->size();
+    if (size > 0)
+      items("__len__").value(size);
+    else
+      (void)state_list(items);
+    stack.push_back({&v, &items, 0, size, nest});
+  };
+
+  begin(root, val, 0);
+  while (!stack.empty()) {
+    frame &f = stack.back();
+    if (f.next == f.size) {
+      open.erase(container_of(*f.val));
+      stack.pop_back();
+      continue;
+    }
+    const std::size_t i = f.next++;
+    const std::size_t nest = f.nest + 1;
+    cvc::state &slot = state_list(*f.items).at(i);
+    if (auto *l = std::get_if<list_ptr>(&f.val->v)) {
+      begin(slot, (**l)[i], nest); // may push, invalidating f
+    } else {
+      const auto &[k, v] = (*std::get<dict_ptr>(f.val->v))[i];
+      slot("__key__").value(k);
+      begin(slot("__val__"), v, nest); // may push, invalidating f
+    }
+  }
+}
+
+namespace {
+
+void encode_leaf(cvc::state &node, const value_t &val) {
   std::visit(
       [&](auto &&arg) {
         using T = std::decay_t<decltype(arg)>;
@@ -126,25 +230,9 @@ void encode_value(cvc::state &node, const value_t &val) {
           set_type(node, "symbol");
           node.value(arg.name);
         } else if constexpr (std::is_same_v<T, list_ptr>) {
-          set_type(node, "list");
-          if (arg) {
-            state_list sl(node("__elems__"));
-            for (auto &e : *arg) {
-              auto &elem = sl.push_back();
-              encode_value(elem, e);
-            }
-          }
+          set_type(node, "list"); // null: a non-null list is encode_value's
         } else if constexpr (std::is_same_v<T, dict_ptr>) {
-          set_type(node, "dict");
-          if (arg) {
-            auto &entries_node = node("__entries__");
-            state_list sl(entries_node);
-            for (auto &[k, v] : *arg) {
-              auto &entry = sl.push_back();
-              entry("__key__").value(k);
-              encode_value(entry("__val__"), v);
-            }
-          }
+          set_type(node, "dict"); // null: a non-null dict is encode_value's
         } else if constexpr (std::is_same_v<T, closure_ptr>) {
           set_type(node, "closure");
           if (arg) {
@@ -186,13 +274,96 @@ void encode_value(cvc::state &node, const value_t &val) {
       val.v);
 }
 
+} // namespace
+
 // ---------------------------------------------------------------------------
 // decode_value
 // ---------------------------------------------------------------------------
 
-value_t decode_value(cvc::state &node) {
-  std::string type = get_type(node);
+value_t decode_value(cvc::state &root) {
+  // A list or dict whose elements are being read.
+  struct frame {
+    cvc::state *items; // its __elems__ or __entries__ node
+    std::size_t next;  // the next element to read
+    std::size_t size;
+    std::vector<value_t> *list;
+    ordered_map *dict;
+  };
+  std::vector<frame> stack;
+  std::optional<state_list> spill;
+  std::vector<bool> spill_used; // each entry is referenced once; a second reference is corrupt
 
+  // Read the value at `node` into `out`: a leaf now, a list or dict as an empty container that
+  // a frame fills.
+  auto begin = [&](cvc::state &node, value_t &out) {
+    cvc::state *src = &node;
+    std::string type = get_type(node);
+    if (type == "spill_ref") {
+      if (!spill) {
+        if (!has_child(root, SPILL_KEY))
+          throw std::runtime_error("decode_value: spill_ref without a spill table");
+        spill.emplace(root(SPILL_KEY));
+        spill_used.assign(spill->size(), false);
+      }
+      const std::string ref = node.value();
+      std::size_t i = 0;
+      const auto [end, ec] = std::from_chars(ref.data(), ref.data() + ref.size(), i);
+      if (ec != std::errc{} || end != ref.data() + ref.size() || i >= spill_used.size() ||
+          spill_used[i])
+        throw std::runtime_error("decode_value: bad spill_ref: " + ref);
+      spill_used[i] = true;
+      src = &spill->at(i);
+      type = get_type(*src);
+      if (type != "list" && type != "dict")
+        throw std::runtime_error("decode_value: spill entry " + ref + " is not a list or dict");
+    }
+    if (type == "list") {
+      auto elems = std::make_shared<std::vector<value_t>>();
+      out = value_t(elems);
+      if (has_child(*src, "__elems__")) {
+        cvc::state &items = (*src)("__elems__");
+        const std::size_t n = state_list(items).size();
+        elems->reserve(n);
+        stack.push_back({&items, 0, n, elems.get(), nullptr});
+      }
+    } else if (type == "dict") {
+      auto entries = std::make_shared<ordered_map>();
+      out = value_t(entries);
+      if (has_child(*src, "__entries__")) {
+        cvc::state &items = (*src)("__entries__");
+        const std::size_t n = state_list(items).size();
+        entries->reserve(n);
+        stack.push_back({&items, 0, n, nullptr, entries.get()});
+      }
+    } else {
+      out = decode_leaf(*src, type);
+    }
+  };
+
+  value_t result;
+  begin(root, result);
+  while (!stack.empty()) {
+    frame &f = stack.back();
+    if (f.next == f.size) {
+      stack.pop_back();
+      continue;
+    }
+    cvc::state &item = state_list(*f.items).at(f.next++);
+    if (f.list) {
+      value_t &slot = f.list->emplace_back();
+      begin(item, slot); // may push, invalidating f
+    } else {
+      std::string key = item("__key__").value();
+      value_t &slot = f.dict->emplace_back(std::move(key), value_t{}).second;
+      begin(item("__val__"), slot); // may push, invalidating f
+    }
+  }
+  return result;
+}
+
+namespace {
+
+value_t decode_leaf(cvc::state &node, const std::string &type) {
   if (type.empty() || type == "nil")
     return nil_value;
 
@@ -213,32 +384,6 @@ value_t decode_value(cvc::state &node) {
 
   if (type == "symbol")
     return value_t(symbol{node.value()});
-
-  if (type == "list") {
-    auto elems = std::make_shared<std::vector<value_t>>();
-    if (has_child(node, "__elems__")) {
-      state_list sl(node("__elems__"));
-      elems->reserve(sl.size());
-      for (size_t i = 0; i < sl.size(); ++i)
-        elems->push_back(decode_value(sl.at(i)));
-    }
-    return value_t(std::move(elems));
-  }
-
-  if (type == "dict") {
-    auto entries = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-    if (has_child(node, "__entries__")) {
-      state_list sl(node("__entries__"));
-      entries->reserve(sl.size());
-      for (size_t i = 0; i < sl.size(); ++i) {
-        auto &entry = sl.at(i);
-        std::string key = entry("__key__").value();
-        value_t val = decode_value(entry("__val__"));
-        entries->emplace_back(std::move(key), std::move(val));
-      }
-    }
-    return value_t(std::move(entries));
-  }
 
   if (type == "closure") {
     auto cls = std::make_shared<closure>();
@@ -278,6 +423,8 @@ value_t decode_value(cvc::state &node) {
 
   throw std::runtime_error("decode_value: unknown type: " + type);
 }
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // encode_environment
