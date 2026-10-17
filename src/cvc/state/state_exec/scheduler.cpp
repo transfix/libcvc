@@ -211,7 +211,8 @@ process_ptr scheduler::select_process() {
 
 void scheduler::execute_process_step(process &proc) {
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
-  if (cycle_collection_due())
+  // Checked every 64 steps: the check reads thread-local state.
+  if ((++cycle_check_ & 63) == 0 && cycle_collection_due())
     collect_cycles();
 
   // Track which process is currently executing so intrinsics can query it.
@@ -267,8 +268,12 @@ void scheduler::execute_process_step(process &proc) {
   eval_deadline_guard step_deadline(proc.time_left());
   // Bound what one native call in this step may allocate: limits.max_alloc_bytes, tightened to
   // what is left of max_memory (its state-tree writes plus its measured heap share).
-  eval_alloc_guard step_alloc(
-      proc.alloc_limit(mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes));
+  // With no budget and the default cap, an armed guard would change nothing (the default applies
+  // unarmed), so it is armed only when it does: it costs thread-local writes every step.
+  std::optional<eval_alloc_guard> step_alloc;
+  if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
+    step_alloc.emplace(proc.alloc_limit(
+        proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   bool done = evaluator_.step(proc.state);
@@ -281,7 +286,9 @@ void scheduler::execute_process_step(process &proc) {
   if (charge_cpu)
     proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
-  heap_after_step(proc, step_alloc.allocated(), mem_tracker_.current_bytes(proc.pid));
+  if (proc.max_memory > 0 || proc.state.heap_measured)
+    heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
+                    mem_tracker_.current_bytes(proc.pid));
 
   // 5. Check if signal/watch handler just finished
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {

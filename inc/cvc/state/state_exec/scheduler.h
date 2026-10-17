@@ -212,6 +212,7 @@ private:
   parse_options parse_options_;
   data_options data_options_;
   heap_options heap_options_;
+  uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   int next_pid_ = 1;
   int rr_index_ = 0;
   bool running_ = false;

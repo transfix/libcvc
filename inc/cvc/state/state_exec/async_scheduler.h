@@ -215,6 +215,7 @@ private:
   uint64_t total_steps_ = 0;
 
   int current_pid_ = -1;
+  uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   process_ptr current_proc_;
 
   // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12): a coroutine

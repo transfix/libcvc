@@ -378,15 +378,23 @@ private:
 struct tracked_object {
   node_kind kind;
   std::weak_ptr<void> ptr;
-  const void *raw; // to skip the same object tracked twice in a row
+  const void *raw;
 };
 
 struct cycle_registry {
   std::vector<tracked_object> objects;
-  std::size_t since_last = 0; // tracked since the last collection
-  std::size_t survivors = 0;  // tracked objects alive after the last collection
-  bool exit_pending = false;  // a process ended since the last collection
+  std::unordered_map<const void *, std::size_t> index; // object -> its entry in `objects`
+  std::size_t since_last = 0;                          // newly tracked since the last collection
+  std::size_t survivors = 0;     // tracked objects alive after the last collection
+  std::size_t last_examined = 0; // objects the last collection walked
+  bool exit_pending = false;     // a process ended since the last collection
   std::chrono::steady_clock::time_point last_collection{};
+
+  void reindex() {
+    index.clear();
+    for (std::size_t i = 0; i < objects.size(); ++i)
+      index.emplace(objects[i].raw, i);
+  }
 };
 
 cycle_registry &registry() {
@@ -400,12 +408,20 @@ template <class T> void track(node_kind k, const std::shared_ptr<T> &p) {
   if (!p)
     return;
   cycle_registry &r = registry();
-  if (!r.objects.empty() && r.objects.back().raw == p.get() && !r.objects.back().ptr.expired())
-    return; // the same object again (a closure made in a loop over one scope)
+  if (auto it = r.index.find(p.get()); it != r.index.end()) {
+    tracked_object &t = r.objects[it->second];
+    if (!t.ptr.owner_before(p) && !p.owner_before(t.ptr))
+      return; // already tracked (a closure made in a loop over one scope, a list appended to)
+    t = tracked_object{k, std::weak_ptr<void>(p), p.get()}; // a dead object's address, reused
+    ++r.since_last;
+    return;
+  }
   if (r.objects.size() >= 2 * (r.survivors + r.since_last) + 1024) {
     // Most entries died young: drop them before their (weak) control blocks pile up.
     std::erase_if(r.objects, [](const tracked_object &t) { return t.ptr.expired(); });
+    r.reindex();
   }
+  r.index.emplace(p.get(), r.objects.size());
   r.objects.push_back(tracked_object{k, std::weak_ptr<void>(p), p.get()});
   ++r.since_last;
 }
@@ -604,13 +620,17 @@ cycle_stats collect_cycles() {
   nodes.clear();
 
   std::erase_if(r.objects, [](const tracked_object &t) { return t.ptr.expired(); });
+  r.reindex();
   r.survivors = r.objects.size();
+  r.last_examined = stats.examined;
   return stats;
 }
 
 bool cycle_collection_due() {
   const cycle_registry &r = registry();
-  if (r.since_last >= std::max(kMinCollectionGrowth, r.survivors))
+  // As many new objects as survived, and at least an eighth of what the last collection walked,
+  // so a collection's walk costs a bounded amount per object tracked since the one before.
+  if (r.since_last >= std::max({kMinCollectionGrowth, r.survivors, r.last_examined / 8}))
     return true;
   return r.exit_pending && r.since_last > 0 &&
          std::chrono::steady_clock::now() - r.last_collection >= std::chrono::seconds(1);

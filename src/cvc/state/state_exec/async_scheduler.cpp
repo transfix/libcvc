@@ -142,7 +142,8 @@ process_ptr async_scheduler::select_process() {
 
 void async_scheduler::execute_process_step(process &proc) {
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
-  if (cycle_collection_due())
+  // Checked every 64 steps: the check reads thread-local state.
+  if ((++cycle_check_ & 63) == 0 && cycle_collection_due())
     collect_cycles();
 
   // Track which process is currently executing so intrinsics can query it (self/ps).
@@ -198,8 +199,11 @@ void async_scheduler::execute_process_step(process &proc) {
     step_budget = step_budget ? std::min(*step_budget, proc.max_step_time) : proc.max_step_time;
   eval_deadline_guard step_deadline(step_budget);
   // Bound what one native call in this step may allocate (see scheduler.cpp).
-  eval_alloc_guard step_alloc(
-      proc.alloc_limit(mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes));
+  // Armed only when it changes something (see scheduler.cpp).
+  std::optional<eval_alloc_guard> step_alloc;
+  if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
+    step_alloc.emplace(proc.alloc_limit(
+        proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   // Drive one async_stackless_evaluator step to completion at the leaf. The evaluator's step()
@@ -236,7 +240,9 @@ void async_scheduler::execute_process_step(process &proc) {
   // Charge the step's time to what it was spent on (eval, read or data).
   proc.state.stats.add_step_time(std::chrono::duration<double>(now - step_start).count());
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
-  heap_after_step(proc, step_alloc.allocated(), mem_tracker_.current_bytes(proc.pid));
+  if (proc.max_memory > 0 || proc.state.heap_measured)
+    heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
+                    mem_tracker_.current_bytes(proc.pid));
 
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
     restore_from_signal(proc);

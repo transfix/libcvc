@@ -875,7 +875,9 @@ whole scope, with everything in it, before the collector existed:
 - What is left is garbage. Clearing it lets it free.
 
 Both schedulers collect between steps once a thread has tracked as many new objects as survived
-the last collection (at least 256), and at most a second after a process ended. A finished
+the last collection, and at least an eighth as many as it walked (at least 256). That keeps a
+collection's cost proportional to what was tracked since the last one. They also collect at most
+a second after a process ended. A finished
 process also releases its evaluation state right away (`process::release_state`; result, error
 and statistics stay), so what it leaked can be collected before the process is reaped. Tracking
 is per thread. A host that runs evaluators without a scheduler calls `collect_cycles()` itself,

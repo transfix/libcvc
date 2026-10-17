@@ -94,7 +94,8 @@ struct cycle_stats {
 cycle_stats collect_cycles();
 
 /// Whether this thread has tracked enough since its last collection for one to be due: as many
-/// new objects as survived the last one, and at least 256.
+/// new objects as survived the last one, at least an eighth of the objects it walked (so a walk
+/// costs a bounded amount per newly tracked object), and at least 256.
 bool cycle_collection_due();
 
 /// Note that a process ended on this thread: what it leaked is garbage now, so a collection is
