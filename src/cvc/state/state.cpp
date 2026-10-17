@@ -24,6 +24,7 @@
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
+#include <boost/container/small_vector.hpp>
 #include <boost/current_function.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/foreach.hpp>
@@ -91,19 +92,117 @@ std::size_t next_startup_id() {
 state::state(app &ctx, const std::string &n, const state *p)
     : _ctx(ctx), _name(n), _parent(p), _lastMod(boost::posix_time::min_date_time), _hidden(false),
       _readOnly(false), _initialized(false) {
-  // This slot propagates child changes up to parents
-  childChanged.connect(
-      map_change_signal::slot_type(&state::notifyParent, this, boost::placeholders::_1));
+  // Child changes reach the ancestors through emitChildChanged(), not a slot per node.
 }
 
 // -------------
 // state::~state
 // -------------
 // Purpose:
-//   Destructor.  Just signals that this object has been destroyed.
+//   Destructor.  Signals that this object has been destroyed, then destroys
+//   its subtree.
 // ---- Change History ----
 // 02/18/2012 -- Joe R. -- Creation.
-state::~state() { destroyed(); }
+state::~state() {
+  destroyed();
+  // Destroy the subtree without recursing once per level (~state -> child map -> ~state would
+  // overflow the stack on a deep tree). A child this node was the last owner of is taken out of
+  // its map onto a heap stack, depth first, and released only once its own children are gone, so
+  // every node still has its ancestors (its _parent chain, which a destroyed slot may walk) when it
+  // dies. A child someone else still owns (a pin) keeps its subtree.
+  struct pending {
+    state_ptr node;
+    bool opened;
+  };
+  std::vector<pending> stack;
+  for (child_map::value_type &kv : _children)
+    if (kv.second)
+      stack.push_back({std::move(kv.second), false});
+  _children.clear();
+  while (!stack.empty()) {
+    pending &top = stack.back();
+    if (!top.opened && top.node.use_count() == 1) {
+      top.opened = true;
+      child_map kids;
+      {
+        boost::mutex::scoped_lock lock(top.node->_mutex);
+        kids.swap(top.node->_children);
+      }
+      for (child_map::value_type &kv : kids) // may grow `stack`: `top` is not used after this
+        if (kv.second)
+          stack.push_back({std::move(kv.second), false});
+      continue;
+    }
+    stack.pop_back(); // its children are gone (or someone else owns it): let it go
+  }
+}
+
+// ------------------------------
+// state::parentName / fullName
+// ------------------------------
+// One pass up the _parent chain, building the path once: not a call per level, each rebuilding
+// the path above it (O(depth^2) characters, and a native frame per level).
+std::string state::parentName() const {
+  boost::container::small_vector<const std::string *, 32> names; // nearest first
+  std::size_t len = 0;
+  for (const state *p = _parent; p && !p->_name.empty(); p = p->_parent) {
+    names.push_back(&p->_name);
+    len += p->_name.size() + 1;
+  }
+  std::string out;
+  out.reserve(len);
+  for (std::size_t i = names.size(); i-- > 0;) {
+    out += *names[i];
+    if (i > 0)
+      out += SEPARATOR;
+  }
+  return out;
+}
+
+std::string state::fullName() const {
+  std::string out = parentName();
+  if (!out.empty())
+    out += SEPARATOR;
+  out += _name;
+  return out;
+}
+
+// -------------------------
+// state::emitChildChanged
+// -------------------------
+// Each ancestor's path is a suffix of the one the highest ancestor with slots receives, so that
+// one is built once and the others are cut from it. Ancestors without slots cost a pointer.
+void state::emitChildChanged(const std::string &childname) const {
+  boost::this_thread::interruption_point();
+  boost::container::small_vector<const state *, 32> chain; // this node, then its ancestors
+  std::size_t top = 0; // 1 + the index in `chain` of the highest node with slots; 0 if none
+  for (const state *n = this; n; n = n->_parent) {
+    chain.push_back(n);
+    if (!n->childChanged.empty())
+      top = chain.size();
+  }
+  if (top == 0)
+    return;
+  std::string path; // relative to chain[top - 1]
+  {
+    std::size_t len = childname.size();
+    for (std::size_t j = 0; j + 1 < top; ++j)
+      len += chain[j]->_name.size() + 1;
+    path.reserve(len);
+    for (std::size_t j = top - 1; j-- > 0;) {
+      path += chain[j]->_name;
+      path += SEPARATOR;
+    }
+    path += childname;
+  }
+  std::size_t offset = 0; // where chain[j]'s relative path starts in `path`
+  for (std::size_t j = top; j-- > 0;) {
+    if (!chain[j]->childChanged.empty())
+      chain[j]->childChanged(offset == 0 ? path : path.substr(offset));
+    if (j > 0)
+      offset += chain[j - 1]->_name.size() + 1;
+  }
+}
 
 // ------------------
 // state::instancePtr
@@ -268,7 +367,7 @@ state &state::comment(const std::string &c) {
 
   commentChanged();
   if (parent())
-    parent()->childChanged(name());
+    parent()->emitChildChanged(name());
   return *this;
 }
 
@@ -307,7 +406,7 @@ state &state::hidden(bool h) {
 
   hiddenChanged();
   if (parent())
-    parent()->childChanged(name());
+    parent()->emitChildChanged(name());
   return *this;
 }
 
@@ -346,7 +445,7 @@ state &state::readOnly(bool ro) {
 
   readOnlyChanged();
   if (parent())
-    parent()->childChanged(name());
+    parent()->emitChildChanged(name());
   return *this;
 }
 
@@ -395,9 +494,6 @@ std::vector<std::string> state::values(bool unique) {
 state &state::value(const std::string &v, bool setValueType) {
   boost::this_thread::interruption_point();
 
-  // Get fullName before locking
-  std::string full_name = fullName();
-
   // Phase 8: writes through a writable transparent link route to the
   // resolved target. Opaque links and non-writable transparent links
   // accept writes on the link node itself (the historical default).
@@ -418,7 +514,7 @@ state &state::value(const std::string &v, bool setValueType) {
         return *this;
       }
       throw read_only_error(boost::str(
-          boost::format("Cannot write through unresolvable transparent link: %1%") % full_name));
+          boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
     }
   }
 
@@ -427,7 +523,7 @@ state &state::value(const std::string &v, bool setValueType) {
     boost::mutex::scoped_lock lock(_mutex);
     if (_readOnly) {
       throw read_only_error(
-          boost::str(boost::format("Cannot modify read-only state: %1%") % full_name));
+          boost::str(boost::format("Cannot modify read-only state: %1%") % fullName()));
     }
   }
 
@@ -449,7 +545,7 @@ state &state::value(const std::string &v, bool setValueType) {
 
   valueChanged();
   if (parent())
-    parent()->childChanged(name());
+    parent()->emitChildChanged(name());
   return *this;
 }
 
@@ -469,7 +565,7 @@ void state::touch() {
   valueChanged();
   dataChanged();
   if (parent())
-    parent()->childChanged(name());
+    parent()->emitChildChanged(name());
 }
 
 // ------------
@@ -665,9 +761,6 @@ boost::any state::data() {
 state &state::data(const boost::any &d) {
   boost::this_thread::interruption_point();
 
-  // Get fullName before locking
-  std::string full_name = fullName();
-
   // Phase 8: writes through a writable transparent link route to the
   // resolved target, mirroring state::value(const std::string&, bool).
   // Opaque links and non-writable transparent links accept writes on the
@@ -691,7 +784,7 @@ state &state::data(const boost::any &d) {
         return *this;
       }
       throw read_only_error(boost::str(
-          boost::format("Cannot write through unresolvable transparent link: %1%") % full_name));
+          boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
     }
   }
 
@@ -700,7 +793,7 @@ state &state::data(const boost::any &d) {
     boost::mutex::scoped_lock lock(_mutex);
     if (_readOnly) {
       throw read_only_error(
-          boost::str(boost::format("Cannot modify read-only state: %1%") % full_name));
+          boost::str(boost::format("Cannot modify read-only state: %1%") % fullName()));
     }
   }
 
@@ -715,7 +808,7 @@ state &state::data(const boost::any &d) {
   }
   dataChanged();
   if (parent())
-    parent()->childChanged(name());
+    parent()->emitChildChanged(name());
   return *this;
 }
 
@@ -737,51 +830,42 @@ std::string state::dataTypeName() { return _ctx.dataTypeName(data()); }
 // 02/18/2012 -- Joe R. -- Creation.
 // 03/15/2012 -- Joe R. -- Added initialized flag.
 state &state::operator()(const std::string &childname) {
-  using namespace std;
   using namespace boost::algorithm;
 
   boost::this_thread::interruption_point();
 
-  vector<string> keys;
+  std::vector<std::string> keys;
   split(keys, childname, is_any_of(SEPARATOR));
-  if (keys.empty())
-    return *this;
-  BOOST_FOREACH (string &key, keys)
+  // One hop per key, creating what is missing. Each create-or-get is atomic under that node's
+  // own lock, released before the next hop (holding it for the whole descent once serialized
+  // every lookup on the root's mutex), and each hop is held as a state_ptr, so a concurrent
+  // reset(false) dropping it from its parent's map cannot pull it out from under the walk. A loop:
+  // this was a call per hop that re-joined the rest of the path each time (per-level recursion,
+  // quadratic in the path's length). Empty segments are skipped.
+  state *cur = this;
+  state_ptr held; // keeps `cur` alive from the first hop on
+  for (std::string &key : keys) {
     trim(key);
-  // Ignore beginning empty keys
-  while (!keys.empty() && keys.front().empty())
-    keys.erase(keys.begin());
-  if (keys.empty())
-    return *this;
-
-  string nearest = keys.front();
-  keys.erase(keys.begin());
-  // Resolve (or create) the immediate child under our own lock, then
-  // RELEASE that lock before recursing into it.
-  //
-  // The recursive call used to be made with _mutex still held, so walking
-  // "a.b.c" from the root kept the root's lock for the entire descent.
-  // Every path lookup in the app therefore serialized on the root mutex,
-  // and a 100-deep path held 100 locks at once. Only the create-or-get on
-  // this node's map has to be atomic, and it still is.
-  //
-  // Holding the child as a state_ptr across the recursion also keeps it
-  // alive for the duration, so a concurrent reset(false) dropping it from
-  // this node's map can no longer pull it out from under the descent.
-  state_ptr child;
-  {
-    boost::mutex::scoped_lock lock(_mutex);
-    auto it = _children.find(nearest);
-    if (it != _children.end() && it->second) {
-      child = it->second;
-    } else {
-      child.reset(new state(_ctx, nearest, this));
-      _children[nearest] = child;
-      _lastMod = boost::posix_time::microsec_clock::universal_time();
-      _initialized = true;
+    if (key.empty())
+      continue;
+    boost::this_thread::interruption_point();
+    state_ptr child;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      auto it = cur->_children.find(key);
+      if (it != cur->_children.end() && it->second) {
+        child = it->second;
+      } else {
+        child.reset(new state(cur->_ctx, key, cur));
+        cur->_children[key] = child;
+        cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
+        cur->_initialized = true;
+      }
     }
+    held = std::move(child);
+    cur = held.get();
   }
-  return (*child)(join(keys, SEPARATOR));
+  return *cur;
 }
 
 // state::sharedChild
@@ -886,7 +970,7 @@ state &state::linkTo(const std::string &target_path) {
   if (changed) {
     linkChanged();
     if (parent())
-      parent()->childChanged(name());
+      parent()->emitChildChanged(name());
   }
   return *this;
 }
@@ -906,7 +990,7 @@ bool state::clearLink() {
   if (was_link) {
     linkChanged();
     if (parent())
-      parent()->childChanged(name());
+      parent()->emitChildChanged(name());
   }
   return was_link;
 }
@@ -932,7 +1016,7 @@ state &state::linkTo(const std::string &target_path, link_mode mode) {
   if (changed) {
     linkChanged();
     if (parent())
-      parent()->childChanged(name());
+      parent()->emitChildChanged(name());
   }
   return *this;
 }
@@ -955,7 +1039,7 @@ state &state::setLinkMode(link_mode mode) {
   if (changed) {
     linkChanged();
     if (parent())
-      parent()->childChanged(name());
+      parent()->emitChildChanged(name());
   }
   return *this;
 }
@@ -978,7 +1062,7 @@ state &state::setLinkWritable(bool writable) {
   if (changed) {
     linkChanged();
     if (parent())
-      parent()->childChanged(name());
+      parent()->emitChildChanged(name());
   }
   return *this;
 }
@@ -1348,34 +1432,59 @@ state::send_message_result state::sendMessage(const std::string &payload,
 // 01/12/2014 -- Joe R. -- Returning empty vector if invalid regex.
 std::vector<std::string> state::children(const std::string &re) {
   boost::this_thread::interruption_point();
-  boost::mutex::scoped_lock lock(_mutex);
   std::vector<std::string> ret;
-  BOOST_FOREACH (child_map::value_type val, _children) {
-    if (!re.empty()) {
-      try {
-        boost::regex expression(re.c_str());
-        boost::cmatch what;
+  boost::regex expression;
+  if (!re.empty()) {
+    try {
+      expression = boost::regex(re.c_str());
+    } catch (boost::bad_expression &) {
+      _ctx.log(
+          2, boost::str(boost::format("%s :: invalid regex '%s'\n") % BOOST_CURRENT_FUNCTION % re));
+      return ret;
+    }
+  }
 
-        _ctx.log(6, boost::str(boost::format("%s :: check match %s\n") % BOOST_CURRENT_FUNCTION %
-                               val.second->fullName()));
-
-        if (boost::regex_match(val.second->fullName().c_str(), what, expression)) {
-          _ctx.log(6, boost::str(boost::format("%s :: matched! %s\n") % BOOST_CURRENT_FUNCTION %
-                                 val.second->fullName()));
-
-          ret.push_back(val.second->fullName());
-        }
-      } catch (boost::bad_expression &) {
-        _ctx.log(2, boost::str(boost::format("%s :: invalid regex '%s'\n") %
-                               BOOST_CURRENT_FUNCTION % re));
-        return ret;
+  // Pre-order over the subtree, with a heap stack of levels instead of a call per level (which
+  // also held every ancestor's lock while the subtree below it was listed). Each node's children
+  // are snapshotted under its own lock. A child's full name is its parent's, a separator and its
+  // own name -- or just its own name under a parent with an empty name -- which is fullName()'s
+  // rule, carried down instead of rebuilt from the root for every node.
+  struct level {
+    std::vector<std::pair<state_ptr, std::string>> kids; // with their full names
+    std::size_t next = 0;
+  };
+  const auto open = [](state &n, const std::string &n_full) {
+    level l;
+    const std::string &base = n._name.empty() ? std::string() : n_full;
+    boost::mutex::scoped_lock lock(n._mutex);
+    l.kids.reserve(n._children.size());
+    for (const child_map::value_type &kv : n._children)
+      if (kv.second)
+        l.kids.emplace_back(kv.second, base.empty() ? kv.first : base + SEPARATOR + kv.first);
+    return l;
+  };
+  std::vector<level> stack;
+  stack.push_back(open(*this, fullName()));
+  while (!stack.empty()) {
+    level &l = stack.back();
+    if (l.next == l.kids.size()) {
+      stack.pop_back();
+      continue;
+    }
+    std::pair<state_ptr, std::string> kid = std::move(l.kids[l.next++]);
+    boost::this_thread::interruption_point();
+    if (re.empty()) {
+      ret.push_back(kid.second);
+    } else {
+      _ctx.log(6, boost::str(boost::format("%s :: check match %s\n") % BOOST_CURRENT_FUNCTION %
+                             kid.second));
+      if (boost::regex_match(kid.second, expression)) {
+        _ctx.log(6, boost::str(boost::format("%s :: matched! %s\n") % BOOST_CURRENT_FUNCTION %
+                               kid.second));
+        ret.push_back(kid.second);
       }
-    } else
-      ret.push_back(val.second->fullName());
-
-    // Get any matches from this state's children if any.
-    std::vector<std::string> childret = val.second->children(re);
-    ret.insert(ret.end(), childret.begin(), childret.end());
+    }
+    stack.push_back(open(*kid.first, kid.second)); // invalidates `l`
   }
   return ret;
 }
@@ -1440,49 +1549,66 @@ bool state::isExpired() const {
 std::size_t state::sweepExpired() {
   boost::this_thread::interruption_point();
 
-  // Snapshot direct children under our mutex so recursion happens
-  // without holding the parent lock (avoids deadlock if subscribers
-  // re-enter via signals).
-  std::vector<state_ptr> snapshot;
-  {
-    boost::mutex::scoped_lock lock(_mutex);
-    snapshot.reserve(_children.size());
-    BOOST_FOREACH (child_map::value_type &val, _children) {
-      snapshot.push_back(val.second);
+  // Post-order over the subtree, with a heap stack instead of a call per level: a node's
+  // children are swept (their own subtrees first), then the node removes its expired children.
+  // Each node's children are snapshotted under its mutex and walked without it (avoids deadlock
+  // if subscribers re-enter via signals); the snapshot keeps them alive.
+  struct level {
+    state *node;
+    std::vector<state_ptr> kids;
+    std::size_t next = 0;
+  };
+  const auto open = [](state &n) {
+    level l{&n, {}, 0};
+    boost::mutex::scoped_lock lock(n._mutex);
+    l.kids.reserve(n._children.size());
+    BOOST_FOREACH (child_map::value_type &val, n._children) {
+      l.kids.push_back(val.second);
     }
-  }
+    return l;
+  };
 
   std::size_t removed = 0;
-  BOOST_FOREACH (state_ptr &c, snapshot) {
-    removed += c->sweepExpired();
-  }
-
-  // Now collect direct children that are themselves expired and
-  // erase them from our child map. Holding shared_ptrs in
-  // to_remove keeps them alive long enough to fire `expiring`.
-  std::vector<std::pair<std::string, state_ptr>> to_remove;
-  {
-    boost::mutex::scoped_lock lock(_mutex);
-    for (child_map::iterator it = _children.begin(); it != _children.end();) {
-      if (it->second->isExpired()) {
-        to_remove.push_back(std::make_pair(it->first, it->second));
-        _children.erase(it++);
-      } else {
-        ++it;
+  // Remove `n`'s direct children that are themselves expired.
+  const auto remove_expired_children = [&removed](state &n) {
+    // Collect them and erase them from the child map. Holding shared_ptrs in to_remove keeps them
+    // alive long enough to fire `expiring`.
+    std::vector<std::pair<std::string, state_ptr>> to_remove;
+    {
+      boost::mutex::scoped_lock lock(n._mutex);
+      for (child_map::iterator it = n._children.begin(); it != n._children.end();) {
+        if (it->second->isExpired()) {
+          to_remove.push_back(std::make_pair(it->first, it->second));
+          n._children.erase(it++);
+        } else {
+          ++it;
+        }
       }
     }
-  }
 
-  // Fire `expiring` while the node is still alive, then drop our
-  // reference so the dtor (and `destroyed`) fires next, then
-  // notify our own parent chain that our child set changed.
-  for (std::size_t i = 0; i < to_remove.size(); ++i) {
-    to_remove[i].second->expiring();
-    childChanged(to_remove[i].first);
-    to_remove[i].second.reset();
-    ++removed;
-  }
+    // Fire `expiring` while the node is still alive, then drop our reference so the dtor (and
+    // `destroyed`) fires next, then notify the parent chain that the child set changed.
+    for (std::size_t i = 0; i < to_remove.size(); ++i) {
+      to_remove[i].second->expiring();
+      n.emitChildChanged(to_remove[i].first);
+      to_remove[i].second.reset();
+      ++removed;
+    }
+  };
 
+  std::vector<level> stack;
+  stack.push_back(open(*this));
+  while (!stack.empty()) {
+    level &l = stack.back();
+    if (l.next < l.kids.size()) {
+      state &kid = *l.kids[l.next++];
+      stack.push_back(open(kid)); // invalidates `l`
+      continue;
+    }
+    state &n = *l.node;
+    remove_expired_children(n);
+    stack.pop_back();
+  }
   return removed;
 }
 
@@ -1559,21 +1685,6 @@ bool state::startup_connection::disconnect() {
   boost::mutex::scoped_lock lock(startup_registry_mutex());
   return _kind == registry_kind::nullary ? erase_startup_entry(_startup, _id)
                                          : erase_startup_entry(_appStartup, _id);
-}
-
-// -------------------
-// state::notifyParent
-// -------------------
-// Purpose:
-//   Used to propagate child change signals up the tree to the root node.
-//   Because of this, every change to the entire tree will trigger the root node's
-//   childChanged signal.
-// ---- Change History ----
-// 02/18/2012 -- Joe R. -- Creation.
-void state::notifyParent(const std::string &childname) {
-  boost::this_thread::interruption_point();
-  if (parent())
-    parent()->childChanged(name() + SEPARATOR + childname);
 }
 
 // ------------------

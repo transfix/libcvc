@@ -155,7 +155,9 @@ leaf-pin does not keep alive:
 - `state_resolve` computes `"state://" + eff->fullName() + …` on **every** resolve
   (`uri_state.cpp:64`; `state_store` at `:97`). `fullName()` → `parentName()`
   (`state.h:227-239`) dereferences `_parent` (a raw `const state*`, `state.h:747`),
-  recursing up the chain.
+  recursing up the chain. (They are loops up the chain now, and so is the
+  `childChanged` notification of the ancestors, `state::emitChildChanged()`; the
+  `_parent` dereferences, and this hazard, are unchanged.)
 - `effective_node`/`resolveLink` also call `fullName()` on the start and target
   nodes (`state.cpp:1016,1047`).
 
