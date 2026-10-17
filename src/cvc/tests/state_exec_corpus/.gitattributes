@@ -1,0 +1,2 @@
+# Corpus files are compared byte for byte; keep them LF on every checkout.
+* text eol=lf

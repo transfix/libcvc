@@ -81,6 +81,9 @@ auto results = sched.run();
 
 ## 2. The DSL Language
 
+The full syntax (literals, escapes, Unicode rules) is specified in
+[STATE_EXEC_GRAMMAR.md](STATE_EXEC_GRAMMAR.md).
+
 ### Types
 
 | Type | Literal examples | C++ variant tag |
@@ -88,9 +91,10 @@ auto results = sched.run();
 | Integer | `42`, `-7` | `int64_t` |
 | Float | `3.14`, `1e-5` | `double` |
 | String | `"hello"` | `std::string` |
-| Boolean | `true`, `false` | `bool` |
+| Bytes | `b"\x00\xff"` | `bytes_value` |
+| Boolean | `true`, `#t` (`false` and `#f` read as nil) | `bool` |
 | Symbol | `x`, `my-func` | `symbol` |
-| Nil | `nil` | `std::monostate` |
+| Nil | `nil`, `false`, `#f` | `std::monostate` |
 | List | `(1 2 3)` | `list_ptr` |
 
 ### Special Forms
