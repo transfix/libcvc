@@ -19,9 +19,10 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
 | `cvc/physics/pose_tracker.h` | `pose_tracker`, `pose`, `interpolate()`, `pose_matrix()`: the last two states, for a view |
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
+| `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 
 The physics headers include only the standard library, except `world_binding.h`, which needs
-`cvc::app`. No header names an engine.
+`cvc::app`, and `world_geometry.h`, which reads `cvc::world`. No header names an engine.
 
 ## Units and frame
 
@@ -135,6 +136,26 @@ running world from many threads without waiting, read the telemetry a `world_bin
 Jolt's process globals (allocator hooks, factory, type registry) exist while at least one Jolt
 world does. The first world sets them up and the last one tears them down. If the application set
 up Jolt itself, that setup is used and left in place. libcvc keeps no singleton of its own.
+
+## Static world geometry: `add_world_geometry`
+
+```cpp
+#include <cvc/physics/world_geometry.h>
+#include <cvc/world/city_bundle.h>
+
+const auto city = cvc::world::load_city_bundle(dir);         // terrain + buildings
+const auto bodies = cvc::physics::add_world_geometry(w, city.geometry);
+const body_id ground = bodies.find("terrain");
+```
+
+- **One static body per item with `role_collide`:** a height field as `terrain`, and a mesh as a
+  `mesh` at its item's placement. These are the same objects `gl::add_world_geometry` draws, never
+  a copy.
+- **One world material per surface the items use**, named after the surface, with its `mu`,
+  `restitution` and `rolling_resistance` from `world::surface_registry`. A material of that name
+  already in the world is reused. `bodies.materials[surface id]` is the world material id.
+- **Not standard-library only**, unlike the rest of `cvc/physics`: it reads
+  `cvc::world::world_geometry`.
 
 ## Drawing a world: `pose_tracker` and `physics_scene_binding`
 

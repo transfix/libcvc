@@ -535,6 +535,11 @@ add_executable(cvcgl_physics_scene_binding test/cvcgl_physics_scene_binding.cpp)
 target_link_libraries(cvcgl_physics_scene_binding PRIVATE cvcGL)
 add_test(NAME cvcgl_physics_scene_binding COMMAND cvcgl_physics_scene_binding)
 
+# add_world_geometry: the world's geometry as nodes, sharing the items' arrays. Headless.
+add_executable(cvcgl_world_geometry_nodes test/cvcgl_world_geometry_nodes.cpp)
+target_link_libraries(cvcgl_world_geometry_nodes PRIVATE cvcGL)
+add_test(NAME cvcgl_world_geometry_nodes COMMAND cvcgl_world_geometry_nodes)
+
 # A node can outlive the scene that made it (removeGraphics hands it back; a
 # Python proxy or a viewer keeps holding it). Guards the raw back-pointers that
 # used to dangle in that window -- SceneGraph* (a pose write locked the freed
@@ -996,6 +1001,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo cvcgl_physics_scene_binding
+  cvcgl_world_geometry_nodes
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
