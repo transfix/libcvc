@@ -15,12 +15,15 @@
 #include <cvc/ariadne/stream/synthetic_source.h>
 #include <cvc/ariadne/stream_intrinsics.h> // cvc::ariadne::document_stream (the doc stream table)
 #include <cvc/gl/ariadne/media_verbs.h>
+#include <cvc/gl/playback/audio_output.h> // audio_output_spec (the owning player's sink spec)
+#include <cvc/gl/playback/audio_stream_player.h> // the C++ core behind (stream-play-audio)
 #include <cvc/state/state_exec/builtins.h>   // register_fn, environment
 #include <cvc/state/state_exec/intrinsics.h> // intrinsics_context, document_scope
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict, dict_ptr
 #include <memory>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -130,6 +133,17 @@ std::unique_ptr<sx::frame_source> build_audio_source(const se::value_t &spec, in
   const double amp = as_num(t ? dict_get(*t, "amp") : nullptr, 0.25);
   return std::make_unique<sx::tone_source>(rate, ch, frames, hz, amp);
 }
+
+// Per-document OWNED audio-player table (model B, like the core stream table): each
+// (stream-play-audio) player lives in the calling document's se::document_scope and is torn down
+// with it. Its slot is created on the first (stream-play-audio) — necessarily AFTER the stream
+// table's slot, since a stream must be open first — so document_scope's LIFO teardown destroys the
+// players BEFORE the streams: each player's dtor stops+joins its pump thread before the
+// stream/channel it drains is closed, the one ordering audio_stream_player's threading needs.
+constexpr const char *kAudioPlayerSlot = "cvc.gl.ariadne.audio-players";
+struct audio_player_table {
+  std::unordered_map<std::string, std::unique_ptr<cvc::gl::playback::audio_stream_player>> by_token;
+};
 
 } // namespace
 
@@ -282,6 +296,49 @@ void register_media_intrinsics() {
                                 {"rate", se::value_t(static_cast<std::int64_t>(rate))},
                                 {"ch", se::value_t(static_cast<std::int64_t>(chn))},
                                 {"frames", se::value_t(static_cast<std::int64_t>(frames))}});
+        });
+
+    se::builtins::register_fn(
+        env, "stream-play-audio", [doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err(
+                "stream-play-audio: no document scope (call from an action or resident lane, "
+                "not the load-time init: lane)");
+          if (args.empty())
+            return err("stream-play-audio: expects (stream-play-audio TOKEN [OPTS])");
+          const std::string token = handle_token(args[0]);
+          if (token.empty())
+            return err(
+                "stream-play-audio: TOKEN (a stream handle dict or token string) is required");
+          sx::stream *s = cvc::ariadne::document_stream(doc, token);
+          if (!s)
+            return err("stream-play-audio: no open stream named '" + token +
+                       "' in this document — call (stream-open) first");
+
+          // OPTS (optional dict): the playback device format. Defaults 48 kHz stereo; SDL converts
+          // the stream's f32 chunks to the device. `device` selects a non-default output endpoint.
+          // (The player subscribes a depth-8 ring, so the stream wants subscriber_depth >= 8 for
+          // playback to attach — otherwise the pool cannot cover it and nothing is pumped.)
+          cvc::gl::playback::audio_output_spec spec;
+          if (args.size() >= 2) {
+            spec.sample_rate =
+                static_cast<int>(as_int(dict_get(args[1], "rate"), spec.sample_rate));
+            spec.channels = static_cast<int>(as_int(dict_get(args[1], "ch"), spec.channels));
+            spec.device_index = static_cast<int>(as_int(dict_get(args[1], "device"), -1));
+          }
+
+          // Own the player in THIS document's player table. Stop+drop any existing player for this
+          // token FIRST so the new one never briefly double-subscribes the stream.
+          audio_player_table *pt = doc->slot<audio_player_table>(kAudioPlayerSlot);
+          if (!pt)
+            return err("stream-play-audio: internal: audio-player slot unavailable");
+          pt->by_token.erase(token);
+          auto player = std::make_unique<cvc::gl::playback::audio_stream_player>(*s, spec);
+          const bool playing = player->playing(); // false with no SDL / no device (drains silently)
+          pt->by_token[token] = std::move(player);
+          return se::make_dict({{"ok", se::value_t(true)},
+                                {"token", se::value_t(token)},
+                                {"playing", se::value_t(playing)}});
         });
   });
 }

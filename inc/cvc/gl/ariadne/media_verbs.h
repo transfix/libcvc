@@ -38,6 +38,16 @@
 //     Attach an audio producer to TOKEN's open AUDIO stream (codec "f32"). The chunk cadence is the
 //     stream's rate/frames; rate/ch/frames MUST match the open or start_producer rejects it.
 //
+//   (stream-play-audio TOKEN [OPTS]) -> { "ok" #t "token" "playing" }
+//       OPTS = dict { "rate" "ch" (the playback device format, default 48 kHz stereo), "device" int
+//       }
+//     Subscribe TOKEN's open AUDIO stream and pump its f32 chunks to a speaker sink on a pump
+//     thread (audio_stream_player, #634). With no SDL / no device the player is a graceful no-op —
+//     it still DRAINS the stream so it never backs up, and "playing" is #f. The player subscribes a
+//     depth-8 ring, so open the stream with subscriber_depth >= 8 for playback to attach. Owned by
+//     the document and torn down (pump stopped + joined) before the stream, via document_scope's
+//     LIFO.
+//
 // TOKEN is the handle (stream-open) returned (a dict carrying "token", or the bare token string).
 // The verb NEVER opens a stream ((stream-open) does) and owns no producer beyond the stream's own
 // (start_producer's thread is joined by stream::close()/teardown). It runs on the action/resident

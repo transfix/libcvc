@@ -607,6 +607,13 @@ add_executable(cvcgl_media_audio test/cvcgl_media_audio.cpp)
 target_link_libraries(cvcgl_media_audio PRIVATE cvcGL)
 add_test(NAME cvcgl_media_audio COMMAND cvcgl_media_audio)
 
+# §4a playback: (stream-play-audio) wires an audio_stream_player (#634) onto an open f32 stream.
+# Headless (no SDL device): the player plays nothing but still drains the stream — asserted as a
+# live subscriber on the channel. The play()-to-a-sink mechanics are covered by cvcgl_audio_player.
+add_executable(cvcgl_media_play test/cvcgl_media_play.cpp)
+target_link_libraries(cvcgl_media_play PRIVATE cvcGL)
+add_test(NAME cvcgl_media_play COMMAND cvcgl_media_play)
+
 # Phase-3 Ariadne stream WIDGET: cvc::gl::ariadne stream_view — its render-thread stream->image
 # pull step (next_stream_frame_image), exercised hardware-free with synthetic_source (no GL/ImGui).
 add_executable(cvcgl_stream_view test/cvcgl_stream_view.cpp)
