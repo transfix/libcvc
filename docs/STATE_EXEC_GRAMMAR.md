@@ -123,9 +123,20 @@ raw_bytes      ::= 'br' raw_body
 - **Positions.** `parse_error::line()` and `col()` are 1-based, and point at the character where
   the error was found, such as the non-hex character in `"\x4"`. A new line starts after LF,
   after CR, and once after CRLF. Columns count code points, not bytes.
-- **Nesting.** At most 256 lists and quotes may be nested. Deeper input is an error, not a stack
-  overflow. The limit is sized for the 64 KiB default stack of a wasm build; real scripts nest far
-  less.
+- **Nesting.** Lists and quotes may nest at most `max_depth` levels, 256 by default.
+  - `(a (b (c)))` is three levels, and `'x` counts as one, since it reads as `(quote x)`.
+  - The parser recurses on the native stack once per level. So deeper input is a `parse_error`,
+    not a stack overflow, even when the script comes from an untrusted source (a message, an HTTP
+    body, the multiprocess wire). The evaluators are stackless, so this limit is only about
+    reading.
+  - The default fits the 64 KiB default stack of a wasm build. Real scripts nest far less: the
+    deepest in the corpus is 13 levels, and the median is 2.
+  - The limit is configurable, from P2 on:
+    - `parse_options::max_depth`, an optional argument to `parse()`, `parse_all()` and `parser`;
+    - `execute_options::max_parse_depth`, for scripts submitted to a scheduler or coordinator,
+      next to `max_steps` and `max_memory`. 0 means the default.
+
+    A host that raises it must give the parsing thread a big enough stack.
 
 ## Data
 
@@ -228,7 +239,7 @@ strings. Every row is a case in `state_exec_grammar_test`.
 | `[a]`, `a,b`, `` `a ``, `{}`, `a\|b`, `a\b` | odd one-character or glued symbols | error (reserved) | P2 |
 | `parse("1 2")` | `1`; the rest is ignored | error | P2 |
 | `'` at end of input | `(quote nil)` | error | P2 |
-| 257 nested lists | parsed | error | P2 |
+| 257 nested lists | parsed (no limit) | error at the default `max_depth` | P2 |
 | `; c` CR `1` | comment runs to LF, so no datum | `1` | P2 |
 | `0x1F` | `31.0`, a double (via `strtod`) | `31` | P2 |
 | `#x1F`, `0o17`, `0b101`, `1_000` | symbols | integers | P2 |
