@@ -148,12 +148,13 @@ this order:
 2. `state_exec.defaults.parser.<key>`, for everything on that tree;
 3. the built-in default.
 
-A value that is missing, empty, not a positive integer or out of range is skipped, and the next
-one in the order applies.
+A value that is missing, empty, not a non-negative integer or out of range is skipped, and the
+next one in the order applies. `max_depth` must also be positive.
 
 | Key | Meaning | Default |
 |---|---|---|
 | `max_depth` | how many lists and quotes may nest | 256 |
+| `step_tokens` | 0: a scheduler parses a submitted script all at once, when it is submitted. N: it parses the script inside the new process, N tokens per step (see [Reading inside the scheduler](#reading-inside-the-scheduler)) | 0 |
 
 Who reads them:
 
@@ -167,6 +168,28 @@ Who reads them:
 - **Code without a state tree** (a standalone evaluator, the `.ari` channel lint) uses the
   built-in defaults, or passes `parse_options` to `parse()` and `parse_all()` explicitly.
   `parse_options_from_state()` does the resolution above for any host that has a tree.
+
+### Reading inside the scheduler
+
+The parser is stackless and resumable. Its whole state is an input position plus a heap stack
+of open lists and quotes, and `parser::read(out, budget)` stops after `budget` tokens. So a
+scheduler can parse a script the same way it evaluates one: a slice per step. With
+`parser.step_tokens` = N:
+
+- **Submitting.** `execute(script)` returns at once. The new process starts in a reading phase.
+  Each of its scheduler steps reads N more tokens (parens, quotes, atoms, strings). The step
+  after the last token sets up evaluation, exactly as parsing at submit would have, and
+  evaluation steps follow.
+- **Budgets.** Reading steps are process steps. They count against `max_steps` and `max_time`,
+  and they interleave with other processes. A huge script costs its own process's budget instead
+  of stalling the scheduler before the process exists.
+- **Errors.** A syntax error surfaces where a runtime error would. The async scheduler kills the
+  process, with the parse error as its exit error. The sync scheduler throws it from `step()` or
+  `run()`. With step_tokens = 0, `execute()` throws it, as before.
+- **Signals and watch events** wait until the script is read, because their handlers run on the
+  evaluation stack.
+- **Snapshots.** A process snapshotted while reading stores its source and parser settings. After
+  a restore it reads the script again from the start.
 
 ## Data
 

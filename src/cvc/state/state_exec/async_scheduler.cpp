@@ -139,12 +139,17 @@ void async_scheduler::execute_process_step(process &proc) {
     }
   } reset_guard{current_pid_, current_proc_};
 
-  if (!proc.pending_signals.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
+  // A process still reading its script (parser.step_tokens) takes signals and watch events once
+  // the script is read: their handlers run on the evaluation stack, which doesn't exist yet.
+  const bool can_interrupt =
+      !proc.in_signal_handler && !proc.in_watch_handler && !proc.state.reading;
+
+  if (!proc.pending_signals.empty() && can_interrupt) {
     handle_signal(proc);
     return;
   }
 
-  if (!proc.pending_watch_events.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
+  if (!proc.pending_watch_events.empty() && can_interrupt) {
     handle_watch_event(proc);
     return;
   }

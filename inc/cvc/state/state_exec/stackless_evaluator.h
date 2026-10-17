@@ -74,6 +74,9 @@ struct evaluator_state {
   evaluator::macro_map user_macros;
   evaluation_stats stats;
   bool yielded = false; // Set by (yield val) — signals generator_next to stop
+  /// Set while the script is still being read, a slice per step (parse_options::step_tokens);
+  /// step() reads instead of evaluating until the whole script is read.
+  std::shared_ptr<script_reader> reading;
 };
 
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
@@ -94,7 +97,9 @@ public:
   evaluator_state create_state(const value_t &expr, environment_ptr env = nullptr);
 
   /// Create a fresh evaluator_state from a script string, parsed with `popts` (a scheduler passes
-  /// the parser settings it resolved from the state tree).
+  /// the parser settings it resolved from the state tree). With popts.step_tokens > 0 nothing is
+  /// parsed yet: the state reads the script popts.step_tokens tokens per step() first, and a
+  /// syntax error is thrown from step() rather than from here.
   evaluator_state create_state(const std::string &script, environment_ptr env = nullptr,
                                const parse_options &popts = {});
 
@@ -136,6 +141,12 @@ public:
 
 private:
   void check_interrupted();
+
+  // A state that evaluates `forms` as a script: done when empty, the form itself when one, a
+  // (begin ...) of them otherwise.
+  evaluator_state create_program_state(std::vector<value_t> forms, environment_ptr env);
+  // One step of a state that is still reading its script (evaluator_state::reading).
+  bool step_read(evaluator_state &state);
 
   // Frame management
   void pop_frame(evaluator_state &state, value_t result);

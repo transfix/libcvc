@@ -328,6 +328,35 @@ TEST(StateExecParserTest, ReadResumesAcrossTokenBudgets) {
   EXPECT_GT(pauses, 5); // the lists really were read across several calls
 }
 
+TEST(StateExecParserTest, ScriptReaderReadsAWholeScriptInSlices) {
+  const std::string src = "(define x 1) ; a comment\n(+ x '(2 3)) \"s\"";
+  std::vector<std::string> whole;
+  for (const value_t &v : parse_all(src))
+    whole.push_back(to_string(v));
+
+  script_reader reader(src, parse_options{});
+  int slices = 1;
+  while (!reader.step(2)) // two tokens per slice
+    ++slices;
+  std::vector<std::string> sliced;
+  for (const value_t &v : reader.forms())
+    sliced.push_back(to_string(v));
+  EXPECT_EQ(sliced, whole);
+  EXPECT_GT(slices, 5);
+  EXPECT_EQ(reader.source(), src); // owns its copy
+}
+
+TEST(StateExecParserTest, ScriptReaderReportsSyntaxErrorsWhenItReachesThem) {
+  script_reader reader("(a) (b", parse_options{});
+  EXPECT_FALSE(reader.step(2)); // '(' 'a'
+  EXPECT_THROW(
+      {
+        while (!reader.step(2)) {
+        }
+      },
+      parse_error);
+}
+
 TEST(StateExecParserTest, ReadCountsTokensAgainstTheBudget) {
   parser p("(a b) c");
   std::size_t budget = 3; // '(' 'a' 'b'

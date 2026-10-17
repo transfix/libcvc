@@ -63,6 +63,7 @@ void scheduler::load_settings() {
     std::string base = std::string(sched_prefix) + "." + id_;
     (*watch_root_)(base + ".max_pending_messages").value(std::to_string(max_pending_messages));
     (*watch_root_)(base + ".parser.max_depth").value(std::to_string(parse_options_.max_depth));
+    (*watch_root_)(base + ".parser.step_tokens").value(std::to_string(parse_options_.step_tokens));
     (*watch_root_)(base + ".policy")
         .value(policy_ == scheduling_policy::round_robin ? "round_robin"
                : policy_ == scheduling_policy::priority  ? "priority"
@@ -195,14 +196,19 @@ void scheduler::execute_process_step(process &proc) {
     }
   } reset_guard{current_pid_, current_proc_};
 
+  // A process still reading its script (parser.step_tokens) takes signals and watch events once
+  // the script is read: their handlers run on the evaluation stack, which doesn't exist yet.
+  const bool can_interrupt =
+      !proc.in_signal_handler && !proc.in_watch_handler && !proc.state.reading;
+
   // 1. Handle pending signals first
-  if (!proc.pending_signals.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
+  if (!proc.pending_signals.empty() && can_interrupt) {
     handle_signal(proc);
     return; // Signal setup counts as a step
   }
 
   // 1b. Handle pending watch events
-  if (!proc.pending_watch_events.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
+  if (!proc.pending_watch_events.empty() && can_interrupt) {
     handle_watch_event(proc);
     return;
   }

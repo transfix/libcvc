@@ -3,6 +3,7 @@
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
+#include <iterator>
 #include <set>
 
 namespace cvc::state_exec {
@@ -41,23 +42,52 @@ evaluator_state stackless_evaluator::create_state(const value_t &expr, environme
 
 evaluator_state stackless_evaluator::create_state(const std::string &script, environment_ptr env,
                                                   const parse_options &popts) {
-  auto exprs = parse_all(script, popts);
-  if (exprs.empty()) {
+  if (popts.step_tokens > 0) {
+    // Read inside the process: step_read() parses a slice per step, then sets up evaluation.
+    evaluator_state st;
+    st.global_env = env ? env : environment::extend(global_env_);
+    st.reading = std::make_shared<script_reader>(script, popts);
+    return st;
+  }
+  return create_program_state(parse_all(script, popts), env);
+}
+
+evaluator_state stackless_evaluator::create_program_state(std::vector<value_t> forms,
+                                                          environment_ptr env) {
+  if (forms.empty()) {
     evaluator_state st;
     st.done = true;
     return st;
   }
-  if (exprs.size() == 1)
-    return create_state(exprs[0], env);
+  if (forms.size() == 1)
+    return create_state(forms[0], env);
   std::vector<value_t> begin_exprs;
-  begin_exprs.reserve(1 + exprs.size());
+  begin_exprs.reserve(1 + forms.size());
   begin_exprs.push_back(value_t{symbol{"begin"}});
-  begin_exprs.insert(begin_exprs.end(), exprs.begin(), exprs.end());
+  begin_exprs.insert(begin_exprs.end(), std::make_move_iterator(forms.begin()),
+                     std::make_move_iterator(forms.end()));
   return create_state(make_list(std::move(begin_exprs)), env);
+}
+
+// Read the next slice of the script. Once all of it is read, the state becomes exactly what
+// create_state(script) would have built, keeping the step count and timing of the reading. A
+// parse_error propagates like any error from step(): the sync scheduler rethrows it to its
+// caller, and the async scheduler kills the process with it.
+bool stackless_evaluator::step_read(evaluator_state &state) {
+  state.stats.increment_step();
+  script_reader &reader = *state.reading;
+  if (!reader.step(reader.options().step_tokens))
+    return false;
+  evaluator_state program = create_program_state(std::move(reader.forms()), state.global_env);
+  program.stats = std::move(state.stats);
+  state = std::move(program); // also releases the reader
+  return state.done;
 }
 
 bool stackless_evaluator::step(evaluator_state &state) {
   check_interrupted();
+  if (state.reading)
+    return step_read(state);
   if (state.done || state.stack.empty()) {
     state.done = true;
     return true;
