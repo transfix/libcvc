@@ -122,11 +122,15 @@ A fire-once handler is *submitted* (`submit_action`,
 plus host intrinsics, its writes chrooted to the action's mount prefix (§7), under
 per-activation caps ([`ariadne.cpp:1382`](../src/cvc/ariadne/ariadne.cpp)):
 
-| bound | constant | value |
-|-------|----------|-------|
+| bound | source | value |
+|-------|--------|-------|
 | step cap | `kActionMaxSteps` | `5000` |
 | wall-time cap | `kActionMaxSeconds` | `0.1 s` |
-| write budget | `kActionMaxBytes` | `256 KiB` |
+| memory budget | tree setting `ariadne.limits.action_max_memory` | `4 MiB` by default; `0` = no limit |
+
+The memory budget is read on every submission. It bounds the action's state-tree writes and
+also each native call's allocations: state_exec's per-step allocation limit takes what is left
+of `max_memory` (developer guide §11, "Allocation limit").
 
 A quick action completes within that drain. An action that `await`s, `sleep`s, or
 `msg-recv`s **parks** and resumes on a later frame — this is what makes the async arc
