@@ -439,7 +439,7 @@ struct shape_builder {
     return {create(settings, "convex_hull"), false};
   }
 
-  built_shape operator()(const triangle_mesh &m) const {
+  built_shape operator()(const mesh_data &m) const {
     JPH::VertexList vertices;
     vertices.reserve(m.vertices.size());
     for (const vec3 &v : m.vertices)
@@ -466,10 +466,10 @@ struct shape_builder {
                                                m.indices[3 * t + 2], slot_of(id)));
     }
     JPH::MeshShapeSettings settings(std::move(vertices), std::move(triangles), std::move(palette));
-    return {create(settings, "triangle_mesh"), false};
+    return {create(settings, "mesh"), false};
   }
 
-  built_shape operator()(const heightfield &h) const {
+  built_shape operator()(const terrain_data &h) const {
     // Jolt wants a square grid whose side is a multiple of the block size (and at
     // least two blocks). Pad with holes.
     const JPH::uint block = 2;
@@ -486,17 +486,14 @@ struct shape_builder {
           samples[static_cast<size_t>(c) * n + r] = z;
       }
     std::vector<JPH::uint8> cells(static_cast<size_t>(n - 1) * (n - 1), 0);
-    if (!h.cell_materials.empty())
+    if (!h.cells.empty())
       for (int r = 0; r + 1 < h.rows; ++r)
         for (int c = 0; c + 1 < h.cols; ++c)
           cells[static_cast<size_t>(c) * (n - 1) + r] =
-              h.cell_materials[static_cast<size_t>(r) * (h.cols - 1) + c];
+              h.cells[static_cast<size_t>(r) * (h.cols - 1) + c];
     JPH::PhysicsMaterialList palette;
-    if (h.materials.empty())
-      palette.push_back(mat(body_material));
-    else
-      for (material_id id : h.materials)
-        palette.push_back(mat(id));
+    for (material_id id : h.palette)
+      palette.push_back(mat(id));
     JPH::HeightFieldShapeSettings settings(
         samples.data(), JPH::Vec3::sZero(),
         JPH::Vec3(static_cast<float>(h.dy), 1.0f, static_cast<float>(h.dx)), n, cells.data(),
@@ -505,7 +502,7 @@ struct shape_builder {
     settings.mBitsPerSample = std::min<JPH::uint32>(
         JPH::HeightFieldShapeConstants::cMaxBitsPerSample,
         settings.CalculateBitsPerSampleForError(static_cast<float>(h.max_error)));
-    JPH::ShapeRefC shape = create(settings, "heightfield");
+    JPH::ShapeRefC shape = create(settings, "terrain");
 
     // The compression is lossy: check every sample against max_error rather than
     // trusting the bit count, and refuse a field Jolt cannot hold that closely.
@@ -517,13 +514,13 @@ struct shape_builder {
         if (std::isnan(z))
           continue;
         if (hf->IsNoCollision(static_cast<JPH::uint>(r), static_cast<JPH::uint>(c)))
-          throw std::invalid_argument("heightfield: a sample became a hole in the engine");
+          throw std::invalid_argument("terrain: a sample became a hole in the engine");
         const double got =
             hf->GetPosition(static_cast<JPH::uint>(r), static_cast<JPH::uint>(c)).GetY();
         worst = std::max(worst, std::fabs(got - static_cast<double>(z)));
       }
     if (worst > h.max_error)
-      throw std::invalid_argument("heightfield: the engine stores heights within " +
+      throw std::invalid_argument("terrain: the engine stores heights within " +
                                   std::to_string(worst) + " m here, more than max_error (" +
                                   std::to_string(h.max_error) +
                                   " m); raise max_error or smooth the terrain");
@@ -606,12 +603,12 @@ public:
     _mats.at(id)->restitution = m.restitution;
   }
 
-  body_id add_body(const body_desc &d) override {
-    const built_shape s = std::visit(shape_builder{_mats, d.material, d.density}, d.shape);
+  body_id add_body(const body_desc &d, const engine_shape &shape) override {
+    const built_shape s = std::visit(shape_builder{_mats, d.material, d.density}, shape);
     vec3 position = d.position;
     JPH::Quat rotation = to_jolt(d.rotation);
     if (s.heightfield) {
-      position = std::get<heightfield>(d.shape).origin;
+      position = std::get<terrain_data>(shape).origin;
       rotation = kHeightfieldRotation;
     }
     const JPH::EMotionType motion = d.motion == motion_type::static_ ? JPH::EMotionType::Static

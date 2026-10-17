@@ -17,7 +17,9 @@
 #include <cvc/core/clock_follower.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/geometry/height_field.h>
 #include <cvc/physics/world.h>
+#include <map>
 #include <mutex>
 #include <string>
 #include <tuple>
@@ -332,7 +334,10 @@ std::size_t world::material_count() const {
 
 namespace {
 
-struct shape_check {
+// Checks a body's shape and flattens it for the backend (backend_impl.h): the
+// primitives as they are, meshes and terrain read out of the world's geometry with
+// every face's or cell's material resolved to a world material id.
+struct shape_prep {
   const std::vector<material> &materials;
   const body_desc &d;
 
@@ -344,64 +349,118 @@ struct shape_check {
     if (!(v > 0.0) || !std::isfinite(v))
       throw cvc::physics_error(std::string(what) + " must be finite and > 0");
   }
+  // A surface id (a face or cell material) as this world's material id.
+  material_id resolve(cvc::face_material_t surface, const std::vector<material_id> &table,
+                      const char *what) const {
+    material_id id = surface;
+    if (!table.empty()) {
+      if (surface >= table.size())
+        throw cvc::physics_error(std::string(what) + ": surface id " + std::to_string(surface) +
+                                 " is outside the materials table");
+      id = table[surface];
+    }
+    need_material(id, what);
+    return id;
+  }
 
-  void operator()(const sphere &s) const { positive(s.radius, "sphere radius"); }
-  void operator()(const box &b) const {
+  detail::engine_shape operator()(const sphere &s) const {
+    positive(s.radius, "sphere radius");
+    return s;
+  }
+  detail::engine_shape operator()(const box &b) const {
     positive(b.half_extents.x, "box half extent");
     positive(b.half_extents.y, "box half extent");
     positive(b.half_extents.z, "box half extent");
+    return b;
   }
-  void operator()(const convex_hull &h) const {
+  detail::engine_shape operator()(const convex_hull &h) const {
     if (h.points.size() < 4)
       throw cvc::physics_error("convex_hull needs at least 4 points");
     for (const vec3 &p : h.points)
       if (!finite(p))
         throw cvc::physics_error("convex_hull: a point is not finite");
+    return h;
   }
-  void operator()(const triangle_mesh &m) const {
+
+  detail::engine_shape operator()(const mesh &m) const {
     if (d.motion != motion_type::static_)
-      throw cvc::physics_error("triangle_mesh bodies must be static");
-    if (m.indices.empty() || m.indices.size() % 3 != 0)
-      throw cvc::physics_error("triangle_mesh: indices must be a non-empty multiple of 3");
-    for (std::uint32_t i : m.indices)
-      if (i >= m.vertices.size())
-        throw cvc::physics_error("triangle_mesh: an index is out of range");
-    for (const vec3 &v : m.vertices)
+      throw cvc::physics_error("mesh bodies must be static");
+    if (!m.geometry)
+      throw cvc::physics_error("mesh: no geometry");
+    const cvc::geometry &g = *m.geometry;
+    const auto &pts = g.const_points();
+    if (pts.size() > 0xffffffffu)
+      throw cvc::physics_error("mesh: more vertices than an engine mesh can index");
+    detail::mesh_data out;
+    out.vertices.reserve(pts.size());
+    for (const auto &p : pts) {
+      const vec3 v{p[0], p[1], p[2]};
       if (!finite(v))
-        throw cvc::physics_error("triangle_mesh: a vertex is not finite");
-    if (!m.triangle_materials.empty() && m.triangle_materials.size() != m.indices.size() / 3)
-      throw cvc::physics_error(
-          "triangle_mesh: triangle_materials must have one entry per triangle");
-    for (material_id id : m.triangle_materials)
-      need_material(id, "triangle_mesh");
+        throw cvc::physics_error("mesh: a vertex is not finite");
+      out.vertices.push_back(v);
+    }
+    const bool per_face = g.has_face_materials();
+    const material_id body = d.material;
+    auto face = [&](std::uint64_t f, cvc::index_t a, cvc::index_t b, cvc::index_t c) {
+      if (a >= pts.size() || b >= pts.size() || c >= pts.size())
+        throw cvc::physics_error("mesh: an index is out of range");
+      out.indices.push_back(static_cast<std::uint32_t>(a));
+      out.indices.push_back(static_cast<std::uint32_t>(b));
+      out.indices.push_back(static_cast<std::uint32_t>(c));
+      out.triangle_materials.push_back(per_face ? resolve(g.face_material(f), m.materials, "mesh")
+                                                : body);
+    };
+    const auto &tris = g.const_tris();
+    for (std::size_t i = 0; i < tris.size(); ++i)
+      face(i, tris[i][0], tris[i][1], tris[i][2]);
+    const auto &quads = g.const_quads();
+    for (std::size_t i = 0; i < quads.size(); ++i) {
+      // Split as cvc::geometry::tri_surface does: (0, 1, 3) and (1, 2, 3).
+      face(tris.size() + i, quads[i][0], quads[i][1], quads[i][3]);
+      face(tris.size() + i, quads[i][1], quads[i][2], quads[i][3]);
+    }
+    if (out.indices.empty())
+      throw cvc::physics_error("mesh: the geometry has no triangles or quads");
+    return out;
   }
-  void operator()(const heightfield &h) const {
+
+  detail::engine_shape operator()(const terrain &t) const {
     if (d.motion != motion_type::static_)
-      throw cvc::physics_error("heightfield bodies must be static");
-    if (h.rows < 2 || h.cols < 2)
-      throw cvc::physics_error("heightfield: needs at least 2 rows and 2 columns");
-    positive(h.dx, "heightfield dx");
-    positive(h.dy, "heightfield dy");
-    positive(h.max_error, "heightfield max_error");
-    if (!finite(h.origin))
-      throw cvc::physics_error("heightfield: origin must be finite");
-    const size_t n = static_cast<size_t>(h.rows) * h.cols;
-    if (h.heights.size() != n)
-      throw cvc::physics_error("heightfield: heights must hold rows * cols samples");
-    for (float z : h.heights)
-      if (std::isinf(z))
-        throw cvc::physics_error("heightfield: a height is infinite (use NaN for a hole)");
-    const size_t cells = static_cast<size_t>(h.rows - 1) * (h.cols - 1);
-    if (!h.cell_materials.empty() && h.cell_materials.size() != cells)
-      throw cvc::physics_error("heightfield: cell_materials must hold (rows-1) * (cols-1) entries");
-    if (h.materials.size() > 256)
-      throw cvc::physics_error("heightfield: at most 256 palette materials");
-    const size_t palette = h.materials.empty() ? 1 : h.materials.size();
-    for (std::uint8_t c : h.cell_materials)
-      if (c >= palette)
-        throw cvc::physics_error("heightfield: a cell material is outside the palette");
-    for (material_id id : h.materials)
-      need_material(id, "heightfield");
+      throw cvc::physics_error("terrain bodies must be static");
+    if (!t.field)
+      throw cvc::physics_error("terrain: no height field");
+    positive(t.max_error, "terrain max_error");
+    const cvc::height_field &h = *t.field;
+    if (h.rows() < 2 || h.cols() < 2)
+      throw cvc::physics_error("terrain: the height field is empty");
+    detail::terrain_data out;
+    out.rows = h.rows();
+    out.cols = h.cols();
+    out.dx = h.dx();
+    out.dy = h.dy();
+    out.origin = {h.x0(), h.y0(), 0.0};
+    out.heights = h.heights().data();
+    out.max_error = t.max_error;
+    const auto &cells = h.cell_materials();
+    if (cells.empty()) {
+      out.palette.push_back(d.material);
+      return out;
+    }
+    // A palette of the world materials the cells use, in order of first use.
+    std::map<material_id, std::uint8_t> slot;
+    out.cells.reserve(cells.size());
+    for (const cvc::face_material_t surface : cells) {
+      const material_id id = resolve(surface, t.materials, "terrain");
+      auto it = slot.find(id);
+      if (it == slot.end()) {
+        if (out.palette.size() == 256)
+          throw cvc::physics_error("terrain: more than 256 distinct materials");
+        it = slot.emplace(id, static_cast<std::uint8_t>(out.palette.size())).first;
+        out.palette.push_back(id);
+      }
+      out.cells.push_back(it->second);
+    }
+    return out;
   }
 };
 
@@ -422,8 +481,8 @@ body_id world::add_body(const body_desc &d) {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   if (d.material >= _impl->materials.size())
     throw cvc::physics_error("add_body: unknown material id " + std::to_string(d.material));
-  std::visit(shape_check{_impl->materials, d}, d.shape);
-  return guarded([&] { return _impl->be->add_body(d); });
+  const detail::engine_shape shape = std::visit(shape_prep{_impl->materials, d}, d.shape);
+  return guarded([&] { return _impl->be->add_body(d, shape); });
 }
 
 void world::remove_body(body_id id) {

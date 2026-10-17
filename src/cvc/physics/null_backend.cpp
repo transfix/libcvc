@@ -97,7 +97,7 @@ public:
   void set_material(material_id, const material &) override {}
   void reconfigure(const world_config &) override {}
 
-  body_id add_body(const body_desc &d) override {
+  body_id add_body(const body_desc &d, const engine_shape &) override {
     size_t index = _slots.size();
     for (size_t i = 0; i < _slots.size(); ++i)
       if (!_slots[i].used) {
