@@ -27,10 +27,14 @@
 // pushes things; don't bind it as well, or two writers fight over the node.
 // Static bodies (terrain, buildings) never move and need no binding.
 //
-// Frames: present() sets each node's LOCAL transform (GraphicsNode::
-// setPoseMatrix), so a bound node's parent frame is the physics world frame
-// (metres, z up). Put the nodes under a parent that carries any scene
-// transform, such as a scale or a floating origin.
+// Frames: the physics world (metres, z up) sits in the scene at the frame node
+// set_frame() names, or at the scene root without one. present() puts each bound
+// node's WORLD matrix at frame-world x body pose (GraphicsNode::
+// setWorldPoseMatrix), composing with the node's own ancestors on the owner
+// thread, so a body's node may sit anywhere in the hierarchy and still be drawn
+// where physics has it. Give the frame node a render-origin offset or a scale and
+// every body follows; draw the static world under the same node so the world and
+// the bodies share one frame.
 //
 // Threads: thread-safe. present() may run on any thread: setPoseMatrix applies
 // at once on the scene's owner thread and is posted to it from any other, latest
@@ -86,6 +90,11 @@ public:
   using group_id = std::uint32_t;
   group_id bind_group(const std::vector<physics::body_id> &ids, pose_sink sink);
   void unbind_group(group_id g);
+
+  // The scene node that stands for the physics world's frame: null (the default)
+  // for the scene root. Held weakly; while a frame is set but destroyed, nothing
+  // is posed.
+  void set_frame(const std::shared_ptr<const GraphicsNode> &frame);
 
   // The tracker behind the binding: snap() a teleported body here, or capture()
   // after stepping the world yourself instead of calling follow().

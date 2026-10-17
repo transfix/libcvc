@@ -11,7 +11,10 @@
 //      is unbound and the rest keep drawing;
 //   5. present(clock, alpha) draws at the world's fraction, not the clock's,
 //      for a world that steps once every several quanta;
-//   6. a Jolt crate falls in the scene as it falls in the world.
+//   6. a Jolt crate falls in the scene as it falls in the world;
+//   7. the hierarchy is respected: a bound node under a transformed parent is
+//      DRAWN at the body's pose (its world matrix), on and off the owner thread,
+//      and a frame node places the whole physics world in the scene.
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
 #include <array>
@@ -21,6 +24,7 @@
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/physics_scene_binding.h>
@@ -31,6 +35,7 @@
 #include <vector>
 #include <vtkMatrix4x4.h>
 
+using cvc::gl::GeometryNode;
 using cvc::gl::GraphicsNode;
 using cvc::gl::physics_scene_binding;
 using cvc::gl::SceneGraph;
@@ -353,6 +358,90 @@ void test_jolt_crate_falls_in_the_scene() {
   CHECK(std::fabs(node->getTransform()->GetElement(2, 3) - w.state(id).position.z) < 1e-3);
 }
 
+// A rigid transform with awkward numbers: rotate z by deg, then translate.
+Mat rigid(double deg, double tx, double ty, double tz) {
+  const double a = deg * 3.14159265358979323846 / 180.0, c = std::cos(a), s = std::sin(a);
+  return {c, -s, 0, tx, s, c, 0, ty, 0, 0, 1, tz, 0, 0, 0, 1};
+}
+
+void test_nodes_anywhere_in_the_hierarchy_are_drawn_at_the_body() {
+  std::printf("test_nodes_anywhere_in_the_hierarchy_are_drawn_at_the_body\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  phys::world w(null_config());
+  auto clock = clock_at();
+  const phys::body_id a = mover(w, 2.0, 1.0, 0.3);
+  // A group carrying its own transform, and the body's node two levels below it.
+  auto group = sg.addGraphics("group");
+  const Mat g = rigid(30.0, 10.0, -4.0, 1.5);
+  group->setTransform(g.data());
+  auto mid = group->addGraphicsChild<GeometryNode>("mid");
+  const Mat m = rigid(-12.0, 0.5, 0.25, 0.0);
+  mid->setTransform(m.data());
+  auto na = mid->addGraphicsChild<GeometryNode>("a");
+  sg.processEvents();
+  CHECK(na->getParentNode() == mid.get());
+  CHECK(mid->getParentNode() == group.get());
+
+  physics_scene_binding view(w);
+  view.bind(a, na);
+  view.follow(clock);
+  clock.advance_ticks(3);
+  view.follow(clock);
+  view.present(0.5);
+  // The node's WORLD matrix is the body's pose, whatever its ancestors do.
+  CHECK(near(na->getWorldTransform(), expected(view.tracker(), a, 0.5), 1e-9));
+
+  // Off the owner thread the composition happens at the apply, against the
+  // hierarchy as it is then: move the group after the present and before the pump.
+  clock.advance_ticks(1);
+  view.follow(clock);
+  std::thread t([&] { view.present(0.25); });
+  t.join();
+  const Mat g2 = rigid(75.0, -3.0, 8.0, 0.0);
+  group->setTransform(g2.data());
+  sg.processEvents();
+  CHECK(near(na->getWorldTransform(), expected(view.tracker(), a, 0.25), 1e-9));
+}
+
+void test_a_frame_node_places_the_physics_world() {
+  std::printf("test_a_frame_node_places_the_physics_world\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  phys::world w(null_config());
+  auto clock = clock_at();
+  const phys::body_id a = mover(w, 0.0, 1.0);
+  // A render origin: the physics world drawn 1000 m west, under a frame node.
+  auto origin = sg.addGraphics("origin");
+  const Mat f = rigid(0.0, -1000.0, 0.0, 0.0);
+  origin->setTransform(f.data());
+  auto na = origin->addGraphicsChild<GeometryNode>("a");
+  auto loose = sg.addGraphics("loose"); // a top-level node, also in the frame
+  sg.processEvents();
+  physics_scene_binding view(w);
+  view.set_frame(origin);
+  view.bind(a, na);
+  const phys::body_id b = mover(w, 5.0, 0.0);
+  view.bind(b, loose);
+  view.follow(clock);
+  clock.advance_ticks(2);
+  view.follow(clock);
+  view.present(0.5);
+  CHECK(near(na->getWorldTransform(), times(f, expected(view.tracker(), a, 0.5)), 1e-9));
+  CHECK(near(loose->getWorldTransform(), times(f, expected(view.tracker(), b, 0.5)), 1e-9));
+  // Under its frame, the child's local transform is the plain body pose.
+  CHECK(near(na->getTransform(), expected(view.tracker(), a, 0.5), 1e-9));
+
+  // A frame that is destroyed poses nothing (it stays held only weakly).
+  view.set_frame(std::make_shared<GeometryNode>(app, "scratch.frame"));
+  const Mat before = expected(view.tracker(), a, 0.5);
+  clock.advance_ticks(1);
+  view.follow(clock);
+  view.present(0.5);
+  CHECK(view.last_posed() == 0);
+  CHECK(near(na->getTransform(), before, 1e-12));
+}
+
 } // namespace
 
 int main() {
@@ -362,6 +451,8 @@ int main() {
   test_destroyed_node_is_unbound();
   test_clock_alpha_is_the_worlds_fraction();
   test_jolt_crate_falls_in_the_scene();
+  test_nodes_anywhere_in_the_hierarchy_are_drawn_at_the_body();
+  test_a_frame_node_places_the_physics_world();
 
   if (g_failures) {
     std::printf("cvcgl_physics_scene_binding: %d FAILURE(S)\n", g_failures);
