@@ -71,6 +71,24 @@ struct bytes_value {
   bool operator==(const bytes_value &o) const { return data == o.data; }
 };
 
+namespace detail {
+/// Drop one owner of a nested value's storage (a list, dict, closure, generator or
+/// environment) without recursing once per nesting level. Freeing a 100000-deep list through
+/// plain shared_ptr destructors takes a native stack frame per level and overflows the stack.
+/// Here the first release on a thread runs a loop: owners dropped while it frees something
+/// (that thing's elements, bindings, enclosing scope) are queued and freed one at a time by the
+/// loop, so the stack stays a few frames deep whatever the depth.
+void release_nested(std::shared_ptr<void> owner) noexcept;
+
+/// Drop `owner` through release_nested when it is the last one; dropping any other owner only
+/// decrements a count. (Should another thread drop the last but one meanwhile, this drop frees
+/// the storage inline, and its elements start releases of their own: a few frames, still.)
+template <class T> void drop_owner(std::shared_ptr<T> &owner) noexcept {
+  if (owner && owner.use_count() == 1)
+    release_nested(std::move(owner));
+}
+} // namespace detail
+
 /// The DSL value variant.  All runtime values are represented as value_t.
 ///
 /// Variants:
@@ -114,6 +132,23 @@ struct value_tag {
   value_tag(generator_ptr g) : v(std::move(g)) {}
   value_tag(bytes_value b) : v(std::move(b)) {}
 
+  value_tag(const value_tag &) = default;
+  value_tag(value_tag &&) = default;
+  value_tag &operator=(const value_tag &) = default;
+  value_tag &operator=(value_tag &&) = default;
+
+  /// Nested storage is freed through detail::drop_owner, never recursively.
+  ~value_tag() {
+    if (auto *l = std::get_if<list_ptr>(&v))
+      detail::drop_owner(*l);
+    else if (auto *d = std::get_if<dict_ptr>(&v))
+      detail::drop_owner(*d);
+    else if (auto *c = std::get_if<closure_ptr>(&v))
+      detail::drop_owner(*c);
+    else if (auto *g = std::get_if<generator_ptr>(&v))
+      detail::drop_owner(*g);
+  }
+
   /// Check if the value is nil (monostate).
   bool is_nil() const { return std::holds_alternative<std::monostate>(v); }
 
@@ -144,6 +179,9 @@ struct closure {
 struct environment {
   std::unordered_map<std::string, value_t> bindings;
   std::shared_ptr<environment> outer;
+
+  /// Drops `outer` through detail::drop_owner, so a long scope chain is not freed recursively.
+  ~environment();
 
   /// Look up a name, walking the scope chain.
   value_t *lookup(const std::string &name);
@@ -189,13 +227,15 @@ inline const value_t true_value{true};
 inline const value_t false_value{false};
 
 /// Convert a value_t to a human-readable string representation. Bounded and cycle-safe:
-/// output is length- and depth-capped (a shared/deep/cyclic structure is truncated with an
-/// ellipsis rather than expanding exponentially or overflowing the stack).
+/// output is length-capped (a shared/cyclic structure is truncated with an ellipsis rather
+/// than expanding exponentially), and the walk is iterative, so depth alone neither truncates
+/// it nor overflows the stack.
 std::string to_string(const value_t &val);
 
 /// Check structural equality of two values. Memoized on pointer-pairs, so a shared or
 /// cyclic structure is compared in time proportional to its PHYSICAL size (distinct node
-/// pairs), never its exponential logical unfolding.
+/// pairs), never its exponential logical unfolding. Iterative, so any depth compares; it polls
+/// the evaluation deadline and throws std::runtime_error once that is spent.
 bool values_equal(const value_t &a, const value_t &b);
 
 // -- time budgets -------------------------------------------------------------
