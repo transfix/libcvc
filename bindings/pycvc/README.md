@@ -12,20 +12,24 @@ Python package that imports `pycvc`.
 
 ## Status
 
-- **v0 (this): `Geometry`** — build meshes/polylines incrementally or in
-  bulk, set per-vertex colors, compute normals, and read/write files
-  (`.off`, CVC-raw, …) via libcvc's `geometry_file_io`.
-- Planned: `Volume` (cvc::volume + SDF), `State` (cvc::state tree), and
-  numpy fast-paths; then a `vr3` module (exposed by VolumeRover3's embedded
-  interpreter) that turns a `pycvc.Geometry` into a live scene node.
+pycvc covers geometry and volumes (with numpy views), the state tree (`State`),
+images, models, world units and clocks, LOD, state_exec (below), and, in the
+`pycvc_gl` module, cvcGL scenes, Ariadne and Dear ImGui HUDs. Each area has a
+contract test (`test_pycvc_*.py`).
 
 ## Design
 
-`pycvc_geometry.h` is a SWIG-safe facade: it *forward-declares*
-`cvc::geometry` behind a `shared_ptr`, so SWIG only ever parses
-`std::string`/`std::vector`/primitive signatures — never libcvc's heavy
-headers. Only the `.cpp` includes libcvc. C++ host apps reach the wrapped
-`cvc::geometry` via `native()` (which is `%ignore`d on the Python side).
+pycvc wraps the **real** libcvc types under their C++ names; there is no
+parallel facade layer (`pycvc.i`). `pycvc.volume` is a `cvc::volume`, `pycvc.State`
+is a `cvc::state`, `pycvc.parse` is `cvc::state_exec::parse`. The libcvc headers
+are `%include`d and curated with `%ignore` for members that can't cross. A thin
+`%extend` layer adds Python conveniences such as numpy views.
+
+Every constructor or operation that needs an app takes it explicitly
+(`pycvc.volume(app)`, `pycvc.State.instance(app)`). There is no module-global
+"current app". Where C++ takes a `cvc::state&`, Python passes a `pycvc.State`.
+The goal is for the Python API to match the C++ API. For state_exec the audit
+and plan are in `docs/PYCVC_STATE_EXEC_PARITY.md`.
 
 ## Build
 
@@ -207,5 +211,22 @@ pycvc.parse_options_from_state(root, "", ex.parser_defaults())      # what Exec 
 
 `Exec` starts from the same defaults as the app's exec scheduler (Ariadne), and
 the same `state_exec.defaults.parser.*` keys override both. A syntax error
-raises a `RuntimeError` with the parse error's message. Contract test:
-`test_pycvc_exec.py`.
+raises `pycvc.parse_error`, a `RuntimeError` with `.line` and `.col`.
+
+The rest of state_exec is the C++ API under the C++ names
+(`docs/PYCVC_STATE_EXEC_PARITY.md` lists what is wrapped and what comes next):
+
+```python
+from pycvc import symbol
+pycvc.parse("(f 'x \"s\")")      # [symbol('f'), [symbol('quote'), symbol('x')], 's']
+pycvc.parse_all("1 2")           # [1, 2]
+pycvc.to_string([symbol("a"), 1])                  # '(a 1)'
+pycvc.encode_value(root.child("snap"), {"k": [1, 2]})
+pycvc.decode_value(root.child("snap"))             # {'k': [1, 2]}
+```
+
+Values convert to native Python types, with `pycvc.symbol` for symbols and
+`pycvc.value` as an opaque handle for closures and other non-data values. Such
+a handle converts back to the same value when passed into the DSL. Conversion
+is strict: non-`str` dict keys, ints outside 64 bits and unsupported types
+raise. Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`.

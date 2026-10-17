@@ -1437,20 +1437,368 @@ class AsyncStateObserver(state_observer):
         self._workers = []
 %}
 
-// ── state_exec parser settings (docs/STATE_EXEC_GRAMMAR.md, "Parser settings") ──
-// DIRECT WRAP, under the C++ names: the real cvc::state_exec::parse_options
-// struct, parse_options_from_state (which takes a State, the tree root, as in
-// C++: pycvc.State.instance(app)) and async_scheduler::host_parser_defaults().
-// Only these members are declared to SWIG; the rest of parser.h /
-// async_scheduler.h (value_t, the parser, the scheduler itself) is not wrapped
-// yet, so async_scheduler has no Python constructor. Exec's parser_defaults /
-// set_parser_defaults are in pycvc_exec.h.
+// ── state_exec (docs/PYCVC_STATE_EXEC_PARITY.md) ─────────────────────────
+// DIRECT WRAP of cvc::state_exec under the C++ names. Where C++ takes a
+// cvc::state&, Python passes a State (State.instance(app) is the root). Only
+// the declarations below are visible to SWIG; the parity doc lists what is
+// wrapped, what comes next, and what is deliberately not wrapped (the
+// coroutine API, the string_view-based parser class, ...).
 %{
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/state_value_codec.h>
+#include <cvc/state/state_exec/types.h>
+#include "pycvc_value.h"
+#include <memory>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
 %}
+
+// ── values: the one value_t <-> Python conversion (pycvc_value.h) ──────
+// Defined here because it creates and recognises the pycvc.symbol and
+// pycvc.value proxies, which need the SWIG runtime; pycvc_exec.cpp calls it
+// through pycvc_value.h.
+%{
+namespace pycvc {
+namespace {
+using cvc::state_exec::value_t;
+constexpr int kMaxValueDepth = 1000;
+
+swig_type_info *symbol_swig_type() {
+  static swig_type_info *t = SWIG_TypeQuery("cvc::state_exec::symbol *");
+  return t;
+}
+swig_type_info *value_swig_type() {
+  static swig_type_info *t = SWIG_TypeQuery("cvc::state_exec::value_tag *");
+  return t;
+}
+
+bool too_deep(int depth) {
+  if (depth <= kMaxValueDepth)
+    return false;
+  PyErr_SetString(PyExc_ValueError,
+                  "pycvc: value nests deeper than 1000 levels (or contains itself)");
+  return true;
+}
+
+PyObject *text_to_py(const std::string &s) {
+  return PyUnicode_DecodeUTF8(s.data(), static_cast<Py_ssize_t>(s.size()), "strict");
+}
+
+PyObject *to_py(const value_t &v, int depth) {
+  using namespace cvc::state_exec;
+  if (too_deep(depth))
+    return nullptr;
+  if (v.is_nil())
+    Py_RETURN_NONE;
+  if (const auto *b = std::get_if<bool>(&v.v))
+    return PyBool_FromLong(*b);
+  if (const auto *i = std::get_if<int64_t>(&v.v))
+    return PyLong_FromLongLong(static_cast<long long>(*i));
+  if (const auto *d = std::get_if<double>(&v.v))
+    return PyFloat_FromDouble(*d);
+  if (const auto *s = std::get_if<std::string>(&v.v))
+    return text_to_py(*s);
+  if (const auto *by = std::get_if<bytes_value>(&v.v))
+    return PyBytes_FromStringAndSize(by->data.data(), static_cast<Py_ssize_t>(by->data.size()));
+  if (const auto *sym = std::get_if<symbol>(&v.v))
+    return SWIG_NewPointerObj(new symbol(*sym), symbol_swig_type(), SWIG_POINTER_OWN);
+  if (const auto *l = std::get_if<list_ptr>(&v.v)) {
+    const Py_ssize_t n = *l ? static_cast<Py_ssize_t>((*l)->size()) : 0;
+    PyObject *out = PyList_New(n);
+    if (out == nullptr)
+      return nullptr;
+    for (Py_ssize_t k = 0; k < n; ++k) {
+      PyObject *item = to_py((**l)[static_cast<size_t>(k)], depth + 1);
+      if (item == nullptr) {
+        Py_DECREF(out);
+        return nullptr;
+      }
+      PyList_SET_ITEM(out, k, item); // steals the new reference
+    }
+    return out;
+  }
+  if (const auto *dd = std::get_if<dict_ptr>(&v.v)) {
+    PyObject *out = PyDict_New();
+    if (out == nullptr)
+      return nullptr;
+    if (*dd) {
+      for (const auto &kv : **dd) {
+        PyObject *key = text_to_py(kv.first);
+        PyObject *val = key ? to_py(kv.second, depth + 1) : nullptr;
+        const int rc = val ? PyDict_SetItem(out, key, val) : -1;
+        Py_XDECREF(key);
+        Py_XDECREF(val);
+        if (rc < 0) {
+          Py_DECREF(out);
+          return nullptr;
+        }
+      }
+    }
+    return out;
+  }
+  // closure / native_fn / data_object / generator: an opaque handle that converts back to the
+  // same value, so Python can hold it and pass it into the DSL again.
+  return SWIG_NewPointerObj(new value_t(v), value_swig_type(), SWIG_POINTER_OWN);
+}
+
+bool from_py(PyObject *o, value_t &out, int depth) {
+  using namespace cvc::state_exec;
+  if (too_deep(depth))
+    return false;
+  if (o == nullptr || o == Py_None) {
+    out = value_t();
+    return true;
+  }
+  if (PyBool_Check(o)) { // before int: bool is an int subclass
+    out = value_t(o == Py_True);
+    return true;
+  }
+  if (PyLong_Check(o)) {
+    int overflow = 0;
+    const long long x = PyLong_AsLongLongAndOverflow(o, &overflow);
+    if (overflow != 0) {
+      PyErr_SetString(PyExc_OverflowError, "pycvc: int does not fit in 64 bits");
+      return false;
+    }
+    if (x == -1 && PyErr_Occurred())
+      return false;
+    out = value_t(static_cast<int64_t>(x));
+    return true;
+  }
+  if (PyFloat_Check(o)) {
+    const double d = PyFloat_AsDouble(o);
+    if (d == -1.0 && PyErr_Occurred())
+      return false;
+    out = value_t(d);
+    return true;
+  }
+  if (PyUnicode_Check(o)) {
+    Py_ssize_t n = 0;
+    const char *s = PyUnicode_AsUTF8AndSize(o, &n); // fails (and raises) on lone surrogates
+    if (s == nullptr)
+      return false;
+    out = value_t(std::string(s, static_cast<size_t>(n)));
+    return true;
+  }
+  if (PyBytes_Check(o)) {
+    out = make_bytes(std::string(PyBytes_AS_STRING(o), static_cast<size_t>(PyBytes_GET_SIZE(o))));
+    return true;
+  }
+  if (PyByteArray_Check(o)) {
+    out = make_bytes(
+        std::string(PyByteArray_AS_STRING(o), static_cast<size_t>(PyByteArray_GET_SIZE(o))));
+    return true;
+  }
+  if (PyList_Check(o) || PyTuple_Check(o)) {
+    const bool tup = PyTuple_Check(o);
+    const Py_ssize_t n = tup ? PyTuple_GET_SIZE(o) : PyList_GET_SIZE(o);
+    std::vector<value_t> elems;
+    elems.reserve(static_cast<size_t>(n));
+    for (Py_ssize_t k = 0; k < n; ++k) {
+      value_t e;
+      if (!from_py(tup ? PyTuple_GET_ITEM(o, k) : PyList_GET_ITEM(o, k), e, depth + 1))
+        return false;
+      elems.push_back(std::move(e));
+    }
+    out = make_list(std::move(elems));
+    return true;
+  }
+  if (PyDict_Check(o)) {
+    std::vector<std::pair<std::string, value_t>> entries;
+    PyObject *k = nullptr, *v = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(o, &pos, &k, &v)) {
+      if (!PyUnicode_Check(k)) {
+        PyErr_Format(PyExc_TypeError, "pycvc: dict keys must be str, not %.200s",
+                     Py_TYPE(k)->tp_name);
+        return false;
+      }
+      Py_ssize_t n = 0;
+      const char *ks = PyUnicode_AsUTF8AndSize(k, &n);
+      if (ks == nullptr)
+        return false;
+      value_t e;
+      if (!from_py(v, e, depth + 1))
+        return false;
+      entries.emplace_back(std::string(ks, static_cast<size_t>(n)), std::move(e));
+    }
+    out = make_dict(std::move(entries));
+    return true;
+  }
+  void *p = nullptr;
+  if (SWIG_IsOK(SWIG_ConvertPtr(o, &p, symbol_swig_type(), 0)) && p != nullptr) {
+    out = value_t(*static_cast<symbol *>(p));
+    return true;
+  }
+  if (SWIG_IsOK(SWIG_ConvertPtr(o, &p, value_swig_type(), 0)) && p != nullptr) {
+    out = *static_cast<value_t *>(p);
+    return true;
+  }
+  PyErr_Clear(); // a failed proxy lookup above may leave an attribute error behind
+  PyErr_Format(PyExc_TypeError, "pycvc: cannot convert %.200s to a state_exec value",
+               Py_TYPE(o)->tp_name);
+  return false;
+}
+} // namespace
+
+PyObject *value_to_py(const cvc::state_exec::value_t &v) { return to_py(v, 0); }
+
+PyObject *values_to_py_tuple(std::span<const cvc::state_exec::value_t> values) {
+  PyObject *t = PyTuple_New(static_cast<Py_ssize_t>(values.size()));
+  if (t == nullptr)
+    return nullptr;
+  for (size_t i = 0; i < values.size(); ++i) {
+    PyObject *item = to_py(values[i], 0);
+    if (item == nullptr) {
+      Py_DECREF(t);
+      return nullptr;
+    }
+    PyTuple_SET_ITEM(t, static_cast<Py_ssize_t>(i), item);
+  }
+  return t;
+}
+
+bool py_to_value(PyObject *o, cvc::state_exec::value_t &out) { return from_py(o, out, 0); }
+} // namespace pycvc
+%}
+
+%typemap(in) cvc::state_exec::value_tag (cvc::state_exec::value_tag temp) %{
+  if (!pycvc::py_to_value($input, temp))
+    SWIG_fail;
+  $1 = temp;
+%}
+%typemap(in) const cvc::state_exec::value_tag & (cvc::state_exec::value_tag temp) %{
+  if (!pycvc::py_to_value($input, temp))
+    SWIG_fail;
+  $1 = &temp;
+%}
+%typemap(typecheck, precedence=SWIG_TYPECHECK_POINTER) cvc::state_exec::value_tag,
+    const cvc::state_exec::value_tag & "$1 = 1;"
+%typemap(out) cvc::state_exec::value_tag %{
+  $result = pycvc::value_to_py(static_cast<const cvc::state_exec::value_tag &>($1));
+  if (!$result)
+    SWIG_fail;
+%}
+%typemap(out) std::vector<cvc::state_exec::value_tag> %{
+  { // a block, so the wrapper's later `goto fail` doesn't jump over this initialization
+    const std::vector<cvc::state_exec::value_tag> &pycvc_vals = $1;
+    $result = PyList_New(static_cast<Py_ssize_t>(pycvc_vals.size()));
+    if (!$result)
+      SWIG_fail;
+    for (size_t i = 0; i < pycvc_vals.size(); ++i) {
+      PyObject *item = pycvc::value_to_py(pycvc_vals[i]);
+      if (!item) {
+        Py_DECREF($result);
+        $result = nullptr;
+        SWIG_fail;
+      }
+      PyList_SET_ITEM($result, static_cast<Py_ssize_t>(i), item);
+    }
+  }
+%}
+
+// ── parse_error: pycvc.parse_error, a RuntimeError with .line and .col ──
+%{
+static PyObject *pycvc_parse_error_type = nullptr;
+
+static void pycvc_raise_parse_error(const cvc::state_exec::parse_error &e) {
+  PyObject *inst = PyObject_CallFunction(pycvc_parse_error_type, "s", e.what());
+  if (inst == nullptr)
+    return;
+  PyObject *line = PyLong_FromSize_t(e.line());
+  PyObject *col = PyLong_FromSize_t(e.col());
+  if (line != nullptr)
+    PyObject_SetAttrString(inst, "line", line);
+  if (col != nullptr)
+    PyObject_SetAttrString(inst, "col", col);
+  Py_XDECREF(line);
+  Py_XDECREF(col);
+  PyErr_SetObject(pycvc_parse_error_type, inst);
+  Py_DECREF(inst);
+}
+%}
+%init %{
+  pycvc_parse_error_type = PyErr_NewException("pycvc.parse_error", PyExc_RuntimeError, NULL);
+  if (pycvc_parse_error_type != NULL)
+    PyDict_SetItemString(d, "parse_error", pycvc_parse_error_type);
+%}
+%pythoncode %{
+parse_error = _pycvc.parse_error
+%}
+
+// For the state_exec declarations (and Exec, below): the default mapping, with
+// parse_error first so it raises pycvc.parse_error. Scoped to this section, so
+// the modules that %import pycvc.i keep PYCVC_DEFAULT_EXCEPTION.
+%exception {
+  try {
+    $action
+  } catch (const cvc::state_exec::parse_error &e) {
+    pycvc_raise_parse_error(e);
+    SWIG_fail;
+  } catch (const cvc::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  } catch (...) {
+    SWIG_exception(SWIG_RuntimeError, "pycvc: C++ exception (see libcvc)");
+  }
+}
+
 namespace cvc {
 namespace state_exec {
+
+// symbol: the real struct (name), so a symbol stays a symbol in Python.
+struct symbol {
+  std::string name;
+};
+%extend symbol {
+  symbol(const std::string &name) { return new cvc::state_exec::symbol{name}; }
+  %pythoncode %{
+    def __eq__(self, other):
+        return isinstance(other, symbol) and self.name == other.name
+    def __ne__(self, other):
+        return not self.__eq__(other)
+    def __hash__(self):
+        return hash(("pycvc.symbol", self.name))
+    def __repr__(self):
+        return "symbol(%r)" % (self.name,)
+  %}
+}
+
+// value: the real value_t, as an opaque handle. Plain data converts to native
+// Python types; a closure, native fn, data object or generator arrives as one of
+// these and converts back to the same value. Not constructible from Python.
+%rename(value) value_tag;
+%nodefaultctor value_tag;
+struct value_tag {
+  bool is_nil() const;
+  bool is_truthy() const;
+  std::string type_name() const;
+};
+%extend value_tag {
+  %pythoncode %{
+    def __repr__(self):
+        return "<pycvc.value %s: %s>" % (self.type_name(), to_string(self))
+    def __eq__(self, other):
+        try:
+            return values_equal(self, other)
+        except (TypeError, ValueError, OverflowError):
+            return NotImplemented
+    def __ne__(self, other):
+        r = self.__eq__(other)
+        return r if r is NotImplemented else not r
+    __hash__ = None
+  %}
+}
+typedef value_tag value_t;
+
+std::string to_string(const value_t &val);
+bool values_equal(const value_t &a, const value_t &b);
+
+// Parser (docs/STATE_EXEC_GRAMMAR.md).
 struct parse_options {
   size_t max_depth;   // lists and quotes that may nest (default 256)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
@@ -1458,6 +1806,26 @@ struct parse_options {
 parse_options parse_options_from_state(cvc::state &root,
                                        const std::string &scheduler_id = std::string(),
                                        const parse_options &base = parse_options());
+value_t parse(const std::string &input, const parse_options &opts = parse_options());
+std::vector<value_t> parse_all(const std::string &input,
+                               const parse_options &opts = parse_options());
+
+// script_reader owns its source, so it is the Python way to read a script a
+// slice at a time (parser views a string_view and isn't wrapped). forms(),
+// source() and options() return copies here; C++ returns references.
+class script_reader {
+public:
+  script_reader(std::string source, const parse_options &opts);
+  bool step(size_t budget);
+  std::vector<value_t> forms();
+  std::string source() const;
+  parse_options options() const;
+};
+
+// Snapshot codec for one value: write it under a State node, read it back.
+void encode_value(cvc::state &node, const value_t &val);
+value_t decode_value(cvc::state &node);
+
 %nodefaultctor async_scheduler;
 %nodefaultdtor async_scheduler;
 class async_scheduler {
@@ -1473,3 +1841,5 @@ public:
 // SWIG's raw-passthrough type (the callable crosses uninspected; the .cpp
 // INCREFs and manages its lifetime).
 %include "pycvc_exec.h"
+
+PYCVC_DEFAULT_EXCEPTION
