@@ -12,10 +12,17 @@
 #include <cmath>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
+#include <cvc/geometry/height_field.h>
 #include <cvc/image/image.h> // vehicle template's base-color texture
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace cvc {
+namespace world {
+class world_geometry;
+}
+} // namespace cvc
 
 namespace cvc {
 class app;
@@ -78,20 +85,20 @@ cvc::geometry occupancy_to_walls(const std::uint8_t *occ, int rows, int cols, co
 // terrain the agents drive on. (Textured later for the fog belief map.)
 cvc::geometry ground_quad(const Bounds &b, double z, const double rgb[3]);
 
-// Heightmap from a bundle's terrain.json: row-major elevation samples over the
-// bundle's bounds. sample(x, y) bilinearly interpolates the elevation at any
-// world (x, y), so vehicles + goal beacons + city walls can rest on the ground
-// instead of at z = 0.
+// The ground under the demos: the world's own cvc::height_field (from
+// load_city_bundle), not a copy of it. sample(x, y) is the field's surface (the
+// triangles the ground mesh draws and the physics world collides with), clamped
+// to the bounds, so vehicles + goal beacons + city walls rest exactly on what is
+// drawn; 0 without a field.
 struct Terrain {
-  int rows = 0, cols = 0;
+  std::shared_ptr<const cvc::height_field> field;
   Bounds bounds;
-  std::vector<double> grid; // rows*cols, elevation in world units (z metres)
-  bool empty() const { return rows <= 0 || cols <= 0 || grid.empty(); }
+  bool empty() const { return !field; }
   double sample(double x, double y) const;
 };
 
-// A tessellated ground mesh from a Terrain (rows*cols verts, 2*(rows-1)*(cols-1)
-// triangles, flat-shaded). If the terrain is empty, falls back to ground_quad.
+// The ground mesh of a Terrain: the field's own mesh (shared arrays), coloured
+// rgb. If the terrain is empty, falls back to ground_quad.
 cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]);
 
 // One merged flat-arrow glyph per agent (points +x at heading 0, length `size`,
@@ -194,14 +201,6 @@ void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin = 6.0
 // reactive agents can't drive off the open edge (and it renders as an outer wall).
 void add_border(std::uint8_t *occ, int rows, int cols);
 
-// Rasterize a mesh's XY footprint into a rows*cols (ny*nx) uint8 occupancy grid
-// (occupied where any triangle projects onto the ground), over the [min,max] world
-// rect — the C++ analog of GRL-SNAM's building_occupancy. CPU scan-conversion of
-// every triangle projected to XY, then `inflate` passes of 4-connected dilation.
-// Grid convention: r->y (row 0 = min_y, bottom-up), c->x; index [r*nx + c].
-std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
-                                               int ny, int inflate = 0);
-
 // Load a city bundle (a directory with terrain.json for the world bounds +
 // buildings.glb for the geometry) into a nx*ny occupancy grid + bounds — the way
 // nav_finale drives a REAL Austin scene, generalized so nav_city_swarm can too.
@@ -212,9 +211,17 @@ std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const 
 // prefer_flat=true tries buildings_flat.glb (the low-poly extrusion) first and
 // falls back to buildings.glb — 4x fewer tris, keeps VTK's shadow pass fast on
 // laptop GPUs.
+//
+// Built on cvc::world::load_city_bundle, the library's one reader of these
+// bundles, so the terrain is read north first and flipped once (it was mirrored
+// in y here before), and the buildings arrive already standing on it: their
+// bases are at terrain height in buildings.glb, so they must NOT be lifted again.
+// `world`, if non-null, receives the world_geometry itself, for
+// cvc::gl::add_world_geometry / cvc::physics::add_world_geometry.
 bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
                       std::vector<std::uint8_t> &occ, cvc::geometry *mesh = nullptr,
-                      Terrain *terrain = nullptr, bool prefer_flat = false);
+                      Terrain *terrain = nullptr, bool prefer_flat = false,
+                      cvc::world::world_geometry *world = nullptr);
 
 // Load a mesh (.glb/.obj/...) as a canonical per-agent VEHICLE template for
 // AgentGlyphs::build_template: forward -> +x, width -> +y, height -> +z, centred

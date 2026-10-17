@@ -11,7 +11,7 @@
 // map_id[i]=i gives per-vehicle belief planes, but with no sensing they stay identical
 // copies of the known map (structure for future fog, behaviourally inert here). The city
 // occupancy is rasterized in C++ straight from the bundle's buildings.glb
-// (occupancy_from_model, the C++ building_occupancy). A 2-D picture-in-picture minimap in
+// (cvc::nav::mesh_footprint, the C++ building_occupancy). A 2-D picture-in-picture minimap in
 // the corner shows every agent's position and the line to the target it is chasing.
 //
 // The bundle (terrain.json + buildings.glb) is passed at runtime and never vendored:
@@ -69,27 +69,6 @@ using cvc::gl::SceneRenderer;
 
 namespace {
 const double PI = std::acos(-1.0);
-
-// Scan terrain.json for the world bounds (min_x/min_y/max_x/max_y). Tiny targeted
-// parse — we only need the 4 numbers, not the height grid.
-bool read_bounds(const std::string &path, navdemo::Bounds &b) {
-  std::ifstream f(path);
-  if (!f)
-    return false;
-  const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  auto num = [&](const char *key, double &v) -> bool {
-    const auto k = s.find(key);
-    if (k == std::string::npos)
-      return false;
-    const auto colon = s.find(':', k);
-    if (colon == std::string::npos)
-      return false;
-    v = std::atof(s.c_str() + colon + 1);
-    return true;
-  };
-  return num("\"min_x\"", b.min_x) && num("\"min_y\"", b.min_y) && num("\"max_x\"", b.max_x) &&
-         num("\"max_y\"", b.max_y);
-}
 
 // Load a raw uint8 .npy (Python's cached occupancy) for IoU validation; returns
 // empty on any mismatch. Assumes '|u1' C-order, square.
@@ -267,12 +246,12 @@ int main(int argc, char **argv) {
   bool usedBundle = false;
 
   if (!bundle.empty()) {
-    const std::string tj = bundle + "/terrain.json", glb = bundle + "/buildings.glb";
-    if (read_bounds(tj, bounds) && std::filesystem::exists(glb)) {
+    // The library's one reader of city bundles: bounds from terrain.json, the
+    // buildings as one mesh, and their footprints on the nx*ny grid.
+    std::vector<std::uint8_t> bocc;
+    if (navdemo::load_city_bundle(bundle, nx, ny, bounds, bocc, &cityMesh) && !bocc.empty()) {
       std::printf("nav_finale: loading bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
-      cvc::model m = cvc::read_model(glb);
-      cityMesh = m.merged();
       haveMesh = cityMesh.num_tris() > 0;
       {
         const auto &p = cityMesh.points();
@@ -282,14 +261,14 @@ int main(int argc, char **argv) {
             lo[k] = std::min(lo[k], v[k]);
             hi[k] = std::max(hi[k], v[k]);
           }
-        std::printf("nav_finale: buildings.glb -> %llu meshes, %llu tris, bbox "
+        std::printf("nav_finale: buildings -> %llu tris, bbox "
                     "x[%.0f,%.0f] y[%.0f,%.0f] z[%.0f,%.0f]\n",
-                    (unsigned long long)m.num_meshes(), (unsigned long long)cityMesh.num_tris(),
-                    lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+                    (unsigned long long)cityMesh.num_tris(), lo[0], hi[0], lo[1], hi[1], lo[2],
+                    hi[2]);
       }
       // Raw building footprints for the sim (the reactive d_hat gives clearance); the
       // A* planOcc below adds a light inflation of its own.
-      occ = navdemo::occupancy_from_model(cityMesh, bounds, nx, ny, /*inflate=*/0);
+      occ = std::move(bocc);
       usedBundle = true;
       // Validate against Python's cached occupancy if present (IoU).
       char npy[1024];

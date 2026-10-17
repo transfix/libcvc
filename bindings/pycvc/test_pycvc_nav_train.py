@@ -228,8 +228,43 @@ def test_sampled_multi_start_args():
         print(f"  multi-start sampling: legacy {legacy:.6f}, sampled {loss(sampled):.6f}, per-step seed OK")
 
 
+def test_bicycle_integrator():
+    """P8b: the loss taken through the kinematic bicycle instead of the point mass."""
+    if not hasattr(pycvc, "nav_material_trainer_set_bicycle"):
+        print("  (no nav_material_trainer_set_bicycle -- skipping the bicycle integrator)")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        init = os.path.join(d, "init.cvcnm")
+        _write_random_cvcnm(init, patch_size=16, seed=7)
+        h = pycvc.nav_material_trainer_create(init)
+        args = _packed(_synthetic_batch())
+        assert pycvc.nav_material_trainer_integrator(h) == "surrogate"
+        point_mass = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        # Vehicle limits for the synthetic batch's scale (positions within a few units).
+        pycvc.nav_material_trainer_set_bicycle(h, 1, 0.3, 0.6, 2.0, 1.5, 0.8, 1.5, 1)
+        assert pycvc.nav_material_trainer_integrator(h) == "bicycle"
+        bike = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        assert np.isfinite(bike) and bike != point_mass, "the bicycle did not change the loss"
+        l0 = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0)
+        last = l0
+        for _ in range(20):
+            last = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0)
+        assert np.isfinite(last) and last < l0, f"bicycle training did not descend ({l0} -> {last})"
+        try:
+            pycvc.nav_material_trainer_set_bicycle(h, 1, 0.0)  # a zero wheelbase is refused
+        except Exception:
+            pass
+        else:
+            raise AssertionError("a zero wheelbase was accepted")
+        pycvc.nav_material_trainer_set_bicycle(h, 0)
+        assert pycvc.nav_material_trainer_integrator(h) == "surrogate"
+        print(f"  bicycle integrator: point-mass loss {point_mass:.4f}, bicycle {bike:.4f}, "
+              f"20 steps {l0:.4f} -> {last:.4f}")
+
+
 if __name__ == "__main__":
     test_trainer_reduces_loss_and_round_trips()
     test_forward_only_loss_does_not_train()
     test_sampled_multi_start_args()
+    test_bicycle_integrator()
     print("pycvc nav material-trainer integration: OK")

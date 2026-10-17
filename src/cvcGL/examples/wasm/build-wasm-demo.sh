@@ -8,11 +8,11 @@
 #   1. The activated Emscripten SDK bundle:
 #        cvcpkg install emsdk --platform linux --prefix <emsdk-dir>
 #      and export CVC_EMSDK_DIR=<emsdk-dir>.
-#   2. A wasm deps prefix holding boost/zstd/zlib plus a VTK built WITH the
+#   2. A wasm deps prefix holding boost/zstd/zlib/pegtl plus a VTK built WITH the
 #      rendering modules (recipes/vtk/build-wasm.sh on the feat/vtk-wasm-rendering
 #      branch of libcvc-deps — the published compute-only vtk-wasm bundle will
 #      NOT link this demo):
-#        cvcpkg install boost zstd --platform wasm --arch wasm32 --link static \
+#        cvcpkg install boost zstd pegtl --platform wasm --arch wasm32 --link static \
 #            --prefix <deps>
 #        CVC_EMSDK_DIR=<emsdk-dir> cvcpkg build vtk --platform wasm --local \
 #            --prefix <deps>          # from the libcvc-deps checkout root
