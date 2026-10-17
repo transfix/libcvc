@@ -131,12 +131,41 @@ raw_bytes      ::= 'br' raw_body
     reading.
   - The default fits the 64 KiB default stack of a wasm build. Real scripts nest far less: the
     deepest in the corpus is 13 levels, and the median is 2.
-  - The limit is configurable, from P2 on:
-    - `parse_options::max_depth`, an optional argument to `parse()`, `parse_all()` and `parser`;
-    - `execute_options::max_parse_depth`, for scripts submitted to a scheduler or coordinator,
-      next to `max_steps` and `max_memory`. 0 means the default.
+  - The limit is a parser setting. Like state_exec's other settings, it lives on the state tree;
+    see [Parser settings](#parser-settings). A host that raises it must give the parsing thread a
+    big enough stack.
 
-    A host that raises it must give the parsing thread a big enough stack.
+## Parser settings
+
+**Status:** not implemented yet. Today's parser has no nesting limit and reads no settings.
+
+The parser's settings live on the state tree, next to the scheduler's (`state_exec.defaults.*`
+and `state_exec.schedulers.<id>.*`, see `scheduler::load_settings()`). Each setting resolves in
+this order:
+
+1. `state_exec.schedulers.<id>.parser.<key>`, for a scheduler that has an id;
+2. `state_exec.defaults.parser.<key>`, for everything on that tree;
+3. the built-in default.
+
+A value that is missing, empty, not a positive integer or out of range is skipped, and the next
+one in the order applies.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `max_depth` | how many lists and quotes may nest | 256 |
+
+Who reads them:
+
+- **`scheduler`** resolves them in `load_settings()`, like `max_pending_messages`. It publishes
+  the effective values under `state_exec.schedulers.<id>.parser.*` and uses them for every
+  script submitted to it afterwards.
+- **`async_scheduler`** has no settings loader. It reads `state_exec.defaults.parser.*` from its
+  watch root each time a script is submitted.
+- **Ariadne** reads `state_exec.defaults.parser.*` from the app's tree when it compiles a
+  predicate.
+- **Code without a state tree** (a standalone evaluator, the `.ari` channel lint) uses the
+  built-in defaults, or passes `parse_options` to `parse()` and `parse_all()` explicitly.
+  `parse_options_from_state()` does the resolution above for any host that has a tree.
 
 ## Data
 
