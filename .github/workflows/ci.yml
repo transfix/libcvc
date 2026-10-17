@@ -239,6 +239,13 @@ jobs:
             kind: libcvc
             build_type: Debug
             enable_grpc: true
+          # Release gRPC: the config publish-cvcpkg.yml ships on Linux (CVC_ENABLE_GRPC=ON). The
+          # debug-grpc lane proves the surface compiles+tests with asserts; this proves it in the
+          # OPTIMIZED build we actually ship, so a Release-only grpc break is caught before publish.
+          - name: libcvc-release-grpc
+            kind: libcvc
+            build_type: Release
+            enable_grpc: true
     name: package-linux / ${{ matrix.name }}
     # Heavy job (VTK from-source build): do NOT cancel in-progress runs.
     # Cancellation strands the cache and forces every subsequent run
@@ -680,6 +687,9 @@ jobs:
   # ──────────────────────────── macOS packaging ────────────────────────────
   package-macos:
     runs-on: macos-latest
+    # Non-blocking for experimental matrix entries (the gRPC probe below): a macOS grpc build
+    # failure reports red but does not block the PR's required checks while we find out if it works.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -690,6 +700,13 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
+          # gRPC probe (non-blocking): does libcvc build with CVC_ENABLE_GRPC on macOS? Never
+          # attempted. Uses the shared grpc published for macos. experimental -> continue-on-error.
+          - name: libcvc-release-grpc
+            kind: libcvc
+            build_type: Release
+            enable_grpc: true
+            experimental: true
     name: package-macos / ${{ matrix.name }}
     # Heavy job: do not cancel in-progress runs (mirrors package-linux).
     concurrency:
@@ -740,6 +757,16 @@ jobs:
           fi
           cvcpkg install vtk --prefix "$prefix" --config release --link shared
 
+      # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
+      - name: Provision gRPC via cvcpkg
+        if: matrix.enable_grpc == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          grpc_prefix="$RUNNER_TEMP/grpc-prefix"
+          cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link shared
+          echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           # cvcpkg is the sole third-party prefix on macOS.
@@ -747,7 +774,9 @@ jobs:
           if [ -z "$deps_path" ]; then
             deps_path="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
-          export CMAKE_PREFIX_PATH="$deps_path"
+          # Append the grpc prefix (set by Provision gRPC on the enable_grpc entry) so
+          # find_package(gRPC/Protobuf) + grpc_cpp_plugin/protoc resolve; empty on other entries.
+          export CMAKE_PREFIX_PATH="$deps_path${GRPC_PREFIX:+:$GRPC_PREFIX}"
           # No coverage gate on macOS, so cvcGL is on for both build types.
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
@@ -756,7 +785,8 @@ jobs:
             -DCVC_ENABLE_CUDA=OFF \
             -DDISABLE_CGAL=OFF \
             -DCVC_ENABLE_MESHER=ON \
-            -DCVC_ENABLE_SDF=ON
+            -DCVC_ENABLE_SDF=ON \
+            -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }}
 
       - name: Build
         run: cmake --build build --parallel
@@ -860,6 +890,9 @@ jobs:
     # This mirrors the pin already applied to publish-cvcpkg.yml (which noted the
     # same root cause here); ci.yml was missed. Revisit when v180 stabilizes.
     runs-on: windows-2022
+    # Non-blocking for experimental matrix entries (the gRPC probe below): a Windows grpc build
+    # failure reports red but does not block the PR's required checks while we find out if it works.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -876,6 +909,13 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
+          # gRPC probe (non-blocking): does libcvc build with CVC_ENABLE_GRPC on Windows (MSVC)?
+          # Never attempted. Uses the shared grpc published for windows. experimental -> continue-on-error.
+          - name: libcvc-release-grpc
+            kind: libcvc
+            build_type: Release
+            enable_grpc: true
+            experimental: true
     name: package-windows / ${{ matrix.name }}
     # Do NOT cancel in-progress runs; see package-linux for rationale.
     concurrency:
@@ -939,6 +979,16 @@ jobs:
           cvcpkg install vtk --prefix "$prefix" --config release --link shared
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install vtk failed ($LASTEXITCODE)" }
 
+      # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
+      - name: Provision gRPC via cvcpkg (Windows)
+        if: matrix.enable_grpc == true
+        shell: pwsh
+        run: |
+          $grpcPrefix = "$env:RUNNER_TEMP\grpc-prefix"
+          cvcpkg install grpc protobuf --prefix "$grpcPrefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install grpc failed ($LASTEXITCODE)" }
+          "GRPC_PREFIX=$grpcPrefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Configure
         shell: pwsh
         run: |
@@ -952,6 +1002,9 @@ jobs:
           # cvcpkg is the sole third-party prefix. No vcpkg toolchain
           # file, no aqt Qt6, no VTK source cache.
           $qtPrefix = if ($depsPath) { $depsPath } else { '' }
+          # Fold in the grpc prefix (set by Provision gRPC on the enable_grpc entry); Windows uses
+          # ';' as the CMAKE_PREFIX_PATH separator.
+          $prefixPath = if ($env:GRPC_PREFIX) { "$qtPrefix;$env:GRPC_PREFIX" } else { $qtPrefix }
           # No coverage gate on Windows, so cvcGL is on.
           # -T cuda=<toolkit>: the VS generator takes the CUDA MSBuild
           # integration from the cvcpkg toolkit's extras\ instead of from
@@ -960,14 +1013,15 @@ jobs:
           cmake -B build -T "cuda=$cuda" `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
-            -DCMAKE_PREFIX_PATH="$qtPrefix" `
+            -DCMAKE_PREFIX_PATH="$prefixPath" `
             -DCVC_BUILD_TESTS=ON `
             -DCVC_BUILD_CVCGL=ON `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DDISABLE_CGAL=OFF `
             -DCVC_ENABLE_MESHER=ON `
-            -DCVC_ENABLE_SDF=ON
+            -DCVC_ENABLE_SDF=ON `
+            -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }}
 
       - name: Build
         shell: pwsh
