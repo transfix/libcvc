@@ -41,9 +41,10 @@ private:
 /// Parser settings ("Parser settings" in docs/STATE_EXEC_GRAMMAR.md). Hosts keep them on the
 /// state tree under `parser.*`; parse_options_from_state() reads them from there.
 struct parse_options {
-  /// How many lists and quotes may nest (`'x` reads as `(quote x)`, one level). The parser
-  /// recurses on the native stack once per level, so deeper input is a parse_error rather than a
-  /// stack overflow. State-tree key: `parser.max_depth`.
+  /// How many lists and quotes may nest (`'x` reads as `(quote x)`, one level); deeper input is
+  /// a parse_error. The parser itself is stackless, but code downstream still walks values
+  /// recursively (destroying a nested list, the snapshot codec, to_string), so this keeps parsed
+  /// data within what they can handle. State-tree key: `parser.max_depth`.
   std::size_t max_depth = 256;
 };
 
@@ -64,12 +65,30 @@ value_t parse(const std::string &input, const parse_options &opts = {});
 std::vector<value_t> parse_all(const std::string &input, const parse_options &opts = {});
 
 /// Internal tokenizer/parser — exposed for testing.
+///
+/// Stackless: lists and quotes are tracked on a heap stack of open frames, not by native
+/// recursion, so the native stack depth is constant however deeply the input nests. Reading is
+/// also resumable (read() with a token budget), which lets a scheduler parse a script a slice at
+/// a time inside a process's steps.
 class parser {
 public:
   explicit parser(std::string_view input, const parse_options &opts = {});
 
   /// Parse one expression.  Returns nil if at end-of-input.
   value_t parse_expr();
+
+  /// What read() stopped at.
+  enum class read_status {
+    datum, ///< a top-level datum is complete; it is in `out`
+    end,   ///< only whitespace and comments remain; nothing is open
+    more,  ///< the token budget ran out; call read() again to continue
+  };
+
+  /// Read until a top-level datum completes, the input ends, or `budget` tokens (parens, quotes,
+  /// atoms, strings) have been read; `budget` is decremented by the tokens read. Open lists and
+  /// quotes carry over between calls.
+  /// @throws parse_error on syntax errors, including nesting past parse_options::max_depth.
+  read_status read(value_t &out, std::size_t &budget);
 
   /// True if all input has been consumed.
   bool at_end() const;
@@ -78,22 +97,26 @@ public:
   std::size_t col() const { return _col; }
 
 private:
-  class depth_guard;
+  /// An open list (`(` read, `)` not yet) or quote (`'` read, its datum not yet complete).
+  struct frame {
+    bool quote = false;
+    std::vector<value_t> elements; // a list's elements so far
+  };
 
   std::string_view _input;
   parse_options _opts;
   std::size_t _pos = 0;
   std::size_t _line = 1;
   std::size_t _col = 1;
-  std::size_t _depth = 0; // lists and quotes open around the current position
+  std::vector<frame> _frames; // innermost last; its size is the current nesting depth
 
   char peek() const;
   char advance();
   void skip_whitespace_and_comments();
   [[noreturn]] void error(const std::string &msg);
+  void open_frame(bool quote);
 
   value_t parse_atom();
-  value_t parse_list();
   value_t parse_string();
   value_t parse_bytes_string(); // SE-3: b"..." byte-string literal (\xNN = a raw byte, no \u)
   value_t parse_number_or_symbol(char first);

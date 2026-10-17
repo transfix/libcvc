@@ -286,3 +286,59 @@ TEST(StateExecParserTest, NestingDepthResetsBetweenTopLevelForms) {
   opts.max_depth = 2;
   EXPECT_EQ(parse_all("((a)) ((b)) ((c))", opts).size(), 3u);
 }
+
+// -- Stackless, resumable reading --
+
+TEST(StateExecParserTest, ParserIsStacklessAtAnyDepth) {
+  // A million open parens with the limit out of the way: a recursive parser would overflow the
+  // native stack long before reaching the end. This one reads them all and reports the unclosed
+  // list. (The input never closes, so no deeply nested value is built and later destroyed.)
+  parse_options opts;
+  opts.max_depth = 2'000'000;
+  try {
+    parse(std::string(1'000'000, '('), opts);
+    FAIL() << "expected a parse_error";
+  } catch (const parse_error &e) {
+    EXPECT_STREQ(e.what(), "unclosed parenthesis");
+  }
+}
+
+TEST(StateExecParserTest, ReadResumesAcrossTokenBudgets) {
+  const std::string src = "(a (b c)) 'd \"e\" (f '(g))";
+  std::vector<std::string> whole;
+  for (const value_t &v : parse_all(src))
+    whole.push_back(to_string(v));
+
+  parser p(src);
+  std::vector<std::string> sliced;
+  int pauses = 0;
+  for (;;) {
+    std::size_t budget = 1; // one token per call
+    value_t v;
+    const auto status = p.read(v, budget);
+    if (status == parser::read_status::end)
+      break;
+    if (status == parser::read_status::more) {
+      ++pauses;
+      continue;
+    }
+    sliced.push_back(to_string(v));
+  }
+  EXPECT_EQ(sliced, whole);
+  EXPECT_GT(pauses, 5); // the lists really were read across several calls
+}
+
+TEST(StateExecParserTest, ReadCountsTokensAgainstTheBudget) {
+  parser p("(a b) c");
+  std::size_t budget = 3; // '(' 'a' 'b'
+  value_t v;
+  EXPECT_EQ(p.read(v, budget), parser::read_status::more);
+  EXPECT_EQ(budget, 0u);
+  budget = 10;
+  EXPECT_EQ(p.read(v, budget), parser::read_status::datum); // ')' closes the list
+  EXPECT_EQ(to_string(v), "(a b)");
+  EXPECT_EQ(budget, 9u);
+  EXPECT_EQ(p.read(v, budget), parser::read_status::datum);
+  EXPECT_EQ(to_string(v), "c");
+  EXPECT_EQ(p.read(v, budget), parser::read_status::end);
+}

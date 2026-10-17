@@ -126,15 +126,17 @@ raw_bytes      ::= 'br' raw_body
   after CR, and once after CRLF. Columns count code points, not bytes.
 - **Nesting.** Lists and quotes may nest at most `max_depth` levels, 256 by default.
   - `(a (b (c)))` is three levels, and `'x` counts as one, since it reads as `(quote x)`.
-  - The parser recurses on the native stack once per level. So deeper input is a `parse_error`,
-    not a stack overflow, even when the script comes from an untrusted source (a message, an HTTP
-    body, the multiprocess wire). The evaluators are stackless, so this limit is only about
-    reading.
+  - The parser is stackless. Open lists and quotes live on a heap stack, not on the native
+    stack, so no input depth can overflow it.
+  - The limit is for what happens to the data afterwards. Some code still walks values on the
+    native stack: destroying a nested list, the snapshot codec, `to_string`. Deeper input is a
+    `parse_error`, so a script from an untrusted source (a message, an HTTP body, the
+    multiprocess wire) can't produce data those would crash on.
   - The default fits the 64 KiB default stack of a wasm build. Real scripts nest far less: the
-    deepest in the corpus is 13 levels, and the median is 2.
+    deepest in the corpus is 13 levels, and the median is 2. Once that downstream code is
+    iterative too, the default can rise.
   - The limit is a parser setting. Like state_exec's other settings, it lives on the state tree;
-    see [Parser settings](#parser-settings). A host that raises it must give the parsing thread a
-    big enough stack.
+    see [Parser settings](#parser-settings).
 
 ## Parser settings
 

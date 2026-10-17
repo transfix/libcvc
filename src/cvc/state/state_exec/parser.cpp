@@ -55,25 +55,9 @@ parse_options parse_options_from_state(cvc::state &root, const std::string &sche
 
 // -- parser ------------------------------------------------------------------
 
-parser::parser(std::string_view input, const parse_options &opts) : _input(input), _opts(opts) {}
-
-// One level of list/quote nesting for the lifetime of the guard. The check comes before the
-// increment, so a guard that throws leaves the depth unchanged.
-class parser::depth_guard {
-public:
-  explicit depth_guard(parser &p) : _p(p) {
-    if (_p._depth >= _p._opts.max_depth)
-      _p.error("nesting deeper than " + std::to_string(_p._opts.max_depth) +
-               " levels (state_exec setting parser.max_depth)");
-    ++_p._depth;
-  }
-  ~depth_guard() { --_p._depth; }
-  depth_guard(const depth_guard &) = delete;
-  depth_guard &operator=(const depth_guard &) = delete;
-
-private:
-  parser &_p;
-};
+parser::parser(std::string_view input, const parse_options &opts) : _input(input), _opts(opts) {
+  _frames.reserve(32); // one allocation covers real scripts (the corpus nests at most 13 deep)
+}
 
 bool parser::at_end() const {
   // Skip whitespace conceptually
@@ -129,49 +113,75 @@ void parser::skip_whitespace_and_comments() {
 void parser::error(const std::string &msg) { throw parse_error(msg, _line, _col); }
 
 value_t parser::parse_expr() {
-  skip_whitespace_and_comments();
-  if (_pos >= _input.size())
-    return nil_value;
-
-  char c = peek();
-
-  if (c == '(') {
-    depth_guard level(*this);
-    return parse_list();
-  }
-  if (c == '\'') {
-    // Quote: 'expr → (quote expr)
-    depth_guard level(*this);
-    advance();
-    auto quoted = parse_expr();
-    return make_list({value_t(symbol{"quote"}), quoted});
-  }
-  if (c == '"')
-    return parse_string();
-  // SE-3: a `b` immediately followed by `"` (no space) is a bytes literal b"...". A lone `b`, or
-  // `b` followed by anything else, stays an ordinary symbol.
-  if (c == 'b' && _pos + 1 < _input.size() && _input[_pos + 1] == '"') {
-    advance(); // consume the 'b' prefix
-    return parse_bytes_string();
-  }
-
-  return parse_atom();
+  _frames.clear(); // a datum left half-read by an earlier parse_error is abandoned
+  std::size_t unlimited = static_cast<std::size_t>(-1);
+  value_t out;
+  return read(out, unlimited) == read_status::datum ? out : nil_value;
 }
 
-value_t parser::parse_list() {
-  advance(); // consume '('
-  std::vector<value_t> elements;
+// Push an open list or quote. The depth check comes first, so the error points at the `(` or `'`
+// that would go one level too deep.
+void parser::open_frame(bool quote) {
+  if (_frames.size() >= _opts.max_depth)
+    error("nesting deeper than " + std::to_string(_opts.max_depth) +
+          " levels (state_exec setting parser.max_depth)");
+  _frames.push_back(frame{quote, {}});
+}
 
-  skip_whitespace_and_comments();
-  while (peek() != ')') {
-    if (_pos >= _input.size())
-      error("unclosed parenthesis");
-    elements.push_back(parse_expr());
+parser::read_status parser::read(value_t &out, std::size_t &budget) {
+  while (budget > 0) {
     skip_whitespace_and_comments();
-  }
-  advance(); // consume ')'
+    value_t datum;
+    if (_pos >= _input.size()) {
+      if (_frames.empty())
+        return read_status::end;
+      if (!_frames.back().quote)
+        error("unclosed parenthesis");
+      datum = nil_value; // a quote at end of input quotes nil (the pre-grammar behavior)
+    } else {
+      --budget;
+      const char c = peek();
+      if (c == '(') {
+        open_frame(false);
+        advance();
+        continue;
+      }
+      if (c == '\'') { // 'expr -> (quote expr)
+        open_frame(true);
+        advance();
+        continue;
+      }
+      if (c == ')' && !_frames.empty() && !_frames.back().quote) {
+        advance();
+        datum = make_list(std::move(_frames.back().elements));
+        _frames.pop_back();
+      } else if (c == '"') {
+        datum = parse_string();
+      } else if (c == 'b' && _pos + 1 < _input.size() && _input[_pos + 1] == '"') {
+        // SE-3: a `b` immediately followed by `"` (no space) is a bytes literal b"...". A lone
+        // `b`, or `b` followed by anything else, stays an ordinary symbol.
+        advance(); // consume the 'b' prefix
+        datum = parse_bytes_string();
+      } else {
+        // Everything else is an atom, including a `)` with no open list around it (it reads as
+        // a symbol until the grammar's P2 makes it an error).
+        datum = parse_atom();
+      }
+    }
 
-  return make_list(std::move(elements));
+    // A complete datum closes every quote waiting on it, then joins the innermost open list, or
+    // is the result when nothing is open.
+    while (!_frames.empty() && _frames.back().quote) {
+      _frames.pop_back();
+      datum = make_list({value_t(symbol{"quote"}), std::move(datum)});
+    }
+    if (_frames.empty()) {
+      out = std::move(datum);
+      return read_status::datum;
+    }
+    _frames.back().elements.push_back(std::move(datum));
+  }
+  return read_status::more;
 }
 
 value_t parser::parse_string() {
