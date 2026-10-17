@@ -200,8 +200,13 @@ public:
   static constexpr const char *defaults_prefix = "state_exec.defaults";
   static constexpr const char *sched_prefix = "state_exec.schedulers";
 
+  /// The effective limits.max_alloc_bytes (kDefaultMaxAllocBytes until load_settings() reads
+  /// the tree); each process submitted afterwards takes it as its max_alloc_bytes.
+  uint64_t max_alloc_bytes() const { return max_alloc_bytes_; }
+
 private:
   std::string id_;
+  uint64_t max_alloc_bytes_ = kDefaultMaxAllocBytes;
   scheduling_policy policy_;
   parse_options parse_options_;
   data_options data_options_;
@@ -255,6 +260,14 @@ private:
   /// Build process_info from a process.
   process_info make_info(const process &proc) const;
 };
+
+/// limits.max_alloc_bytes from the state tree under `root`:
+/// `state_exec.schedulers.<scheduler_id>.limits.max_alloc_bytes` (when scheduler_id is not
+/// empty), then `state_exec.defaults.limits.max_alloc_bytes`, then `base`. A missing or
+/// unparsable value is skipped. 0 means no limit of its own; the process's max_memory still
+/// bounds each allocation.
+uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &scheduler_id,
+                                    uint64_t base = kDefaultMaxAllocBytes);
 
 } // namespace cvc::state_exec
 
