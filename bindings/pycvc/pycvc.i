@@ -1439,12 +1439,14 @@ class AsyncStateObserver(state_observer):
 
 // ── state_exec parser settings (docs/STATE_EXEC_GRAMMAR.md, "Parser settings") ──
 // DIRECT WRAP, under the C++ names: the real cvc::state_exec::parse_options
-// struct and async_scheduler::host_parser_defaults(). Only these members are
-// declared to SWIG; the rest of parser.h / async_scheduler.h (value_t, the
-// parser, the scheduler itself) is not wrapped yet, so async_scheduler has no
-// Python constructor. parse_options_from_state and Exec's parser_defaults /
+// struct, parse_options_from_state (which takes a State, the tree root, as in
+// C++: pycvc.State.instance(app)) and async_scheduler::host_parser_defaults().
+// Only these members are declared to SWIG; the rest of parser.h /
+// async_scheduler.h (value_t, the parser, the scheduler itself) is not wrapped
+// yet, so async_scheduler has no Python constructor. Exec's parser_defaults /
 // set_parser_defaults are in pycvc_exec.h.
-// The deep-data settings (data_options, "Deep data on the executor") are wrapped the same way.
+// The deep-data settings (data_options, data_options_from_state, "Deep data on the
+// executor") are wrapped the same way.
 %{
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/data_job.h>
@@ -1459,6 +1461,12 @@ struct parse_options {
 struct data_options {
   size_t step_nodes; // 0: deep-data work in the step that needs it; N: N nodes per step
 };
+parse_options parse_options_from_state(cvc::state &root,
+                                       const std::string &scheduler_id = std::string(),
+                                       const parse_options &base = parse_options());
+data_options data_options_from_state(cvc::state &root,
+                                      const std::string &scheduler_id = std::string(),
+                                      const data_options &base = data_options());
 %nodefaultctor async_scheduler;
 %nodefaultdtor async_scheduler;
 class async_scheduler {

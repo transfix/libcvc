@@ -100,20 +100,22 @@ def test_exec_starts_from_the_host_parser_defaults():
 
 
 def test_parse_options_from_state_resolves_like_cpp():
+    # The real C++ function: it takes the tree root, a State, as in C++.
     app = pycvc.make_app()
+    root = pycvc.State.instance(app)
     # Nothing set: the C++ default.
-    assert pycvc.parse_options_from_state(app).step_tokens == 0
+    assert pycvc.parse_options_from_state(root).step_tokens == 0
     # What Exec reads with: its own defaults under the tree.
     ex = pycvc.Exec(app)
-    effective = pycvc.parse_options_from_state(app, "", ex.parser_defaults())
+    effective = pycvc.parse_options_from_state(root, "", ex.parser_defaults())
     assert effective.step_tokens == 1024
 
-    pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "40")
-    pycvc.state_set(app, "state_exec.schedulers.s1.parser.max_depth", "50")
-    assert pycvc.parse_options_from_state(app).max_depth == 40
-    assert pycvc.parse_options_from_state(app, "s1").max_depth == 50
-    pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "nope")  # bad: skipped
-    assert pycvc.parse_options_from_state(app).max_depth == 256
+    root.child("state_exec.defaults.parser.max_depth").value("40")
+    root.child("state_exec.schedulers.s1.parser.max_depth").value("50")
+    assert pycvc.parse_options_from_state(root).max_depth == 40
+    assert pycvc.parse_options_from_state(root, "s1").max_depth == 50
+    root.child("state_exec.defaults.parser.max_depth").value("nope")  # bad: skipped
+    assert pycvc.parse_options_from_state(root).max_depth == 256
 
 
 def test_set_parser_defaults_changes_how_exec_parses():
@@ -148,14 +150,18 @@ def test_exec_starts_from_the_host_data_defaults():
 
 
 def test_data_options_from_state_resolves_like_cpp():
+    # The real C++ function: it takes the tree root, a State, as in C++.
     app = pycvc.make_app()
-    assert pycvc.data_options_from_state(app).step_nodes == 0
+    root = pycvc.State.instance(app)
+    assert pycvc.data_options_from_state(root).step_nodes == 0
     ex = pycvc.Exec(app)
-    assert pycvc.data_options_from_state(app, "", ex.data_defaults()).step_nodes == 1024
-    pycvc.state_set(app, "state_exec.defaults.data.step_nodes", "16")
-    pycvc.state_set(app, "state_exec.schedulers.s1.data.step_nodes", "8")
-    assert pycvc.data_options_from_state(app).step_nodes == 16
-    assert pycvc.data_options_from_state(app, "s1").step_nodes == 8
+    assert pycvc.data_options_from_state(root, "", ex.data_defaults()).step_nodes == 1024
+    root.child("state_exec.defaults.data.step_nodes").value("16")
+    root.child("state_exec.schedulers.s1.data.step_nodes").value("8")
+    assert pycvc.data_options_from_state(root).step_nodes == 16
+    assert pycvc.data_options_from_state(root, "s1").step_nodes == 8
+    root.child("state_exec.defaults.data.step_nodes").value("lots")  # bad: skipped
+    assert pycvc.data_options_from_state(root).step_nodes == 0
     o = pycvc.data_options()
     o.step_nodes = 0
     ex.set_data_defaults(o)
