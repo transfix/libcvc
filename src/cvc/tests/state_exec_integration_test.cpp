@@ -2512,7 +2512,10 @@ TEST_F(SchedulerSettingsTest, AsyncSchedulerParserDefaultsSitUnderTheTree) {
 
 TEST_F(SchedulerSettingsTest, AppExecSchedulerReadsScriptsInSteps) {
   auto &sched = app_ctx.exec_scheduler();
-  EXPECT_EQ(sched.parser_defaults().step_tokens, 1024u);
+  EXPECT_EQ(async_scheduler::host_parser_defaults().step_tokens, 1024u);
+  EXPECT_EQ(sched.parser_defaults().step_tokens,
+            async_scheduler::host_parser_defaults().step_tokens); // shared with pycvc's Exec
+  EXPECT_EQ(sched.parser_defaults().max_depth, async_scheduler::host_parser_defaults().max_depth);
   int pid = -1;
   ASSERT_NO_THROW(pid = sched.execute(std::string("(+ 1 (+ 2")));
   sched.sync_run(1000, 1.0);

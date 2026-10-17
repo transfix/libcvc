@@ -378,6 +378,10 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecIm
   // only the scheduler is private.
   app->computePool();
   impl_->sched.set_watch_root(impl_->root);
+  // The same state_exec defaults as the app's exec scheduler, so a program behaves the same from
+  // Python as from Ariadne: scripts are read inside the process (host_parser_defaults), and the
+  // app tree's state_exec.defaults.parser.* keys override them for both.
+  impl_->sched.set_parser_defaults(async_scheduler::host_parser_defaults());
 
   impl_->host_proc = make_process();
   impl_->host_proc->pid = 0;
@@ -554,7 +558,10 @@ std::string Exec::run(const std::string &src) {
   execute_options opts;
   opts.name = "pycvc";
   opts.env = impl_->env;
-  const int pid = sched.execute(src, opts); // may throw on parse error (nothing to clean up yet)
+  // A syntax error is read inside the process (parser.step_tokens) and surfaces below as the
+  // killed process's exit error; with step_tokens = 0 on the tree, execute() throws it here
+  // instead (nothing to clean up yet). Either way run() raises with the parse error's message.
+  const int pid = sched.execute(src, opts);
 
   // Drive the private scheduler to completion. A purely synchronous program finishes in the first
   // slice; a program that parks (await / an async fn) yields, and the pump waits for a compute-pool

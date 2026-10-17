@@ -1022,15 +1022,9 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
     // Wire it to this app's state root so state-watches (state-watch/on_change:)
     // resolve against the app tree. Processes are chrooted per-owner on submit.
     _execScheduler->set_watch_root(&root());
-    // Read submitted scripts inside their processes, 1024 tokens per step (docs/
-    // STATE_EXEC_GRAMMAR.md, "Reading inside the scheduler"). Every script the repo carries fits
-    // in one slice (the largest is 159 tokens; .ari scripts are at most 24), so a normal
-    // action costs one extra step out of its 5000. A slice costs about 80 us at the parser's
-    // measured ~80 ns per token, so a pathologically large script is spread over steps and frames
-    // instead of stalling a drain. state_exec.defaults.parser.step_tokens overrides it.
-    cvc::state_exec::parse_options parser_defaults;
-    parser_defaults.step_tokens = 1024;
-    _execScheduler->set_parser_defaults(parser_defaults);
+    // Read submitted scripts inside their processes, like pycvc's Exec (see host_parser_defaults
+    // for why 1024 tokens a step). state_exec.defaults.parser.* on this tree overrides it.
+    _execScheduler->set_parser_defaults(cvc::state_exec::async_scheduler::host_parser_defaults());
   }
   return *_execScheduler;
 }

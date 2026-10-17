@@ -154,7 +154,7 @@ next one in the order applies. `max_depth` must also be positive.
 | Key | Meaning | Default |
 |---|---|---|
 | `max_depth` | how many lists and quotes may nest | 256 |
-| `step_tokens` | 0: a scheduler parses a submitted script all at once, when it is submitted. N: it parses the script inside the new process, N tokens per step (see [Reading inside the scheduler](#reading-inside-the-scheduler)) | 0; **1024** for the app's exec scheduler |
+| `step_tokens` | 0: a scheduler parses a submitted script all at once, when it is submitted. N: it parses the script inside the new process, N tokens per step (see [Reading inside the scheduler](#reading-inside-the-scheduler)) | 0; **1024** for the app's exec scheduler and pycvc's `Exec` |
 
 Who reads them:
 
@@ -165,14 +165,19 @@ Who reads them:
   watch root each time a script is submitted. Keys that aren't set fall back to the scheduler's
   own defaults (`set_parser_defaults()`), which are the built-in ones unless the host changes
   them.
-  - **The app's exec scheduler** (`app::exec_scheduler()`, which runs Ariadne's actions and
-    residents) sets `step_tokens` = 1024, so it reads scripts inside their processes.
+  - **libcvc's own hosts all use `async_scheduler::host_parser_defaults()`** (`step_tokens` =
+    1024), so a script behaves the same in each:
+    - the app's exec scheduler (`app::exec_scheduler()`, which runs Ariadne's actions and
+      residents);
+    - pycvc's `Exec`, on its private scheduler. That scheduler watches the same app tree, so the
+      same keys override both.
   - **Why 1024:** every script in the corpus fits in one slice (the largest is 159 tokens, and
     `.ari` scripts are at most 24). So a normal action pays one extra step out of its 5000. A
     slice costs about 80 µs at the parser's measured ~80 ns per token, so a pathologically large
     script is spread over steps and frames instead of stalling a drain.
-  - pycvc's `Exec` keeps a private `async_scheduler` and stays at 0, so its `run()` still raises
-    on a syntax error straight away.
+  - pycvc's `Exec.run()` raises a `RuntimeError` carrying the parse error either way: from the
+    killed process's exit error, or straight from `execute()` when the tree sets
+    `step_tokens` = 0.
 - **Ariadne** reads `state_exec.defaults.parser.*` from the app's tree when it compiles a
   predicate.
 - **Code without a state tree** (a standalone evaluator, the `.ari` channel lint) uses the

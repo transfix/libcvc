@@ -36,6 +36,48 @@ def test_parse_error_raises():
         raise AssertionError("a parse error must raise")
 
 
+def _run_error(ex, src):
+    """run(src) must raise; return the message."""
+    try:
+        ex.run(src)
+    except Exception as e:  # noqa: BLE001 - pycvc surfaces C++ errors as RuntimeError
+        return str(e)
+    raise AssertionError(f"{src!r} must raise")
+
+
+def test_parse_error_names_the_problem():
+    # Exec uses the same state_exec defaults as the app's exec scheduler: the script
+    # is read inside its process, so a syntax error comes back as the process's exit
+    # error. run() raises with the parse error's own message, as it did when the
+    # script was parsed at submit.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    assert "unclosed parenthesis" in _run_error(ex, "(begin (set x")
+
+
+def test_parser_settings_come_from_the_app_tree():
+    # Exec's scheduler watches the app's state tree, so state_exec.defaults.parser.*
+    # configures it exactly as it configures the app's exec scheduler
+    # (docs/STATE_EXEC_GRAMMAR.md).
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    deep = "(+ 1 (+ 2 (+ 3 (+ 4 5))))"  # four levels of nesting
+    assert ex.run(deep) == "15"
+
+    pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "3")
+    assert "nesting deeper than 3" in _run_error(ex, deep)
+    assert ex.run("(+ 1 (+ 2 3))") == "6"  # three levels still parse
+
+    # Parsing at submit (step_tokens 0) gives the same results and the same errors.
+    pycvc.state_set(app, "state_exec.defaults.parser.step_tokens", "0")
+    assert "nesting deeper than 3" in _run_error(ex, deep)
+    assert "unclosed parenthesis" in _run_error(ex, "(begin (set x")
+    assert ex.run("(+ 1 (+ 2 3))") == "6"
+
+    pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "256")
+    assert ex.run(deep) == "15"
+
+
 # ── DSL <-> state <-> Python round trips (one shared app) ───────────────
 
 
