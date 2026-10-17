@@ -1669,6 +1669,38 @@ TEST(AriadneStdlib, ActionHitsTheAllocationLimitAndIsReported) {
   EXPECT_EQ(cvc::state::instance(app)("n").value(), "1000");
 }
 
+// An action's memory budget is the tree setting ariadne.limits.action_max_memory (default
+// 4 MiB, 0 = none), read on every submission; it also bounds each native call's allocations.
+TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &root = cvc::state::instance(app);
+  // 10000 elements are well over the old fixed 256 KiB and well under 4 MiB.
+  rt.set_root(group({button("Big", "(state-set \"n\" (length (collections.range 10000)))")}));
+  const auto click = [&] {
+    root("n").value(std::string("-"));
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+    return root("n").value();
+  };
+  EXPECT_EQ(click(), "10000"); // the 4 MiB default
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+
+  root("ariadne.limits.action_max_memory").value(std::string("65536"));
+  EXPECT_EQ(click(), "-"); // over the budget: killed before the write
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+
+  root("ariadne.limits.action_max_memory").value(std::string("0")); // no limit
+  EXPECT_EQ(click(), "10000");
+  root("ariadne.limits.action_max_memory").value(std::string("lots")); // unparsable: default
+  EXPECT_EQ(click(), "10000");
+}
+
 TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {
   cvc::app app;
   Runtime rt(app, "");
