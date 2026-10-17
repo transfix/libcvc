@@ -15,8 +15,11 @@
 #include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -27,6 +30,10 @@ namespace cvc::state_exec {
 
 struct evaluation_stats;
 
+/// Byte work (scanning, copying) counts one node per this many bytes, so a slice of a string
+/// function costs about what a slice of a walk does.
+inline constexpr std::size_t kDataNodeBytes = 256;
+
 /// A walk over a nested value, done a slice at a time. A job holds what it walks (the shared
 /// lists and dicts, by owning pointer) and reads them by index, checking bounds at every node,
 /// so a value changed between two slices (by another process) cannot leave it dangling; the
@@ -36,6 +43,9 @@ public:
   virtual ~data_job() = default;
 
   /// Visit at most `nodes` more nodes; 0 visits all that remain. True once the walk is done.
+  /// A job that applies a function (collections.map and friends) also stops when it needs a
+  /// call made: step() returns false with a call pending (take_call()). Whoever runs the job
+  /// makes the call, passes its value to call_returned() and steps the job again.
   virtual bool step(std::size_t nodes) = 0;
 
   /// The walk's result, once step() has returned true. Call it once.
@@ -44,8 +54,28 @@ public:
   /// Nodes visited so far.
   std::size_t nodes() const { return nodes_; }
 
+  /// A function application a job waits for. `fn` and `args` belong to the job and stay valid
+  /// until it is stepped again.
+  struct call_request {
+    const value_t *fn;
+    std::span<const value_t> args;
+    const char *who; // the stdlib function making the call, for errors
+  };
+
+  /// The call the job stopped for, if any (taking it clears it).
+  std::optional<call_request> take_call() { return std::exchange(call_, std::nullopt); }
+  const call_request *pending_call() const { return call_ ? &*call_ : nullptr; }
+
+  /// The value of the call the job stopped for.
+  virtual void call_returned(value_t value) { (void)value; }
+
+  /// Called once the job outlives the native call that made it: copy what it only borrowed
+  /// from that call's arguments.
+  virtual void own_inputs() {}
+
 protected:
   std::size_t nodes_ = 0;
+  std::optional<call_request> call_;
 };
 
 /// Whether walking `v` visits any nodes: it is a non-empty list or dict.
@@ -70,7 +100,9 @@ std::unique_ptr<data_job> make_copy_job(value_t v);
 std::unique_ptr<data_job> make_substitute_job(value_t tmpl,
                                               std::unordered_map<std::string, value_t> subst);
 
-/// Run a job to completion and return its result.
+/// Run a job to completion and return its result. The calls it makes are made here: a native
+/// function's own deep-data work then runs here too, and a DSL function (a closure) throws,
+/// since only an evaluator can run one.
 value_t run_to_completion(data_job &job);
 
 /// Deep-data settings ("Deep data on the executor" in docs/STATE_EXEC_GRAMMAR.md). Hosts keep them
@@ -90,13 +122,15 @@ struct data_options {
 data_options data_options_from_state(cvc::state &root, const std::string &scheduler_id = {},
                                      const data_options &base = {});
 
-/// Do a native function's deep-data work. Inside a stackless evaluator step that slices
-/// (data.step_nodes > 0), called from the native function that step is applying, `job` does one
-/// slice here; if that finishes it, `then(result)` is returned. If not, the job and `then` pass
-/// to the evaluator, which runs a slice per step and completes the call with then's value once
-/// the job is done; what this returns is then ignored, so the native function should return it
-/// at once. Anywhere else the job runs to completion here. Without `then`, the job's result is
-/// the call's.
+/// Do a native function's deep-data work. Inside a stackless evaluator step, called from the
+/// native function that step is applying, `job` does one slice here (all of it when the step
+/// does not slice, data.step_nodes = 0); if that finishes it, `then(result)` is returned. If not
+/// (the slice ran out, or the job needs a function called), the job and `then` pass to the
+/// evaluator: it runs a slice per step, makes the job's calls (a DSL function as ordinary
+/// frames of the same process) and completes the call with then's value once the job is done;
+/// what this returns is then ignored, so the native function should return it at once.
+/// Anywhere else the job runs to completion here (see run_to_completion). Without `then`, the
+/// job's result is the call's.
 value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_t)> then = {});
 
 /// Count `nodes` units of deep-data work done in the current evaluator step (a walk run to
@@ -109,6 +143,9 @@ namespace detail {
 struct deferred_data_job {
   std::unique_ptr<data_job> job;
   std::function<value_t(value_t)> then;
+  /// Set when the job waits on work a native function it called left: that runs first, and
+  /// its result is the call's value.
+  std::unique_ptr<deferred_data_job> waits_on;
 };
 
 /// The data side of one stackless evaluator step, armed for the step's duration (nested evaluator
@@ -130,6 +167,7 @@ public:
 
   /// Let run_data_job() defer a job while `allowed` (around the native call being applied).
   void allow_defer(bool allowed) { may_defer_ = allowed; }
+  bool defer_allowed() const { return may_defer_; }
   /// The job a native call deferred, if any.
   std::unique_ptr<deferred_data_job> take_deferred() { return std::move(deferred_); }
 

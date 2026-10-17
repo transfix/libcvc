@@ -535,11 +535,44 @@ std::unique_ptr<data_job> make_substitute_job(value_t tmpl,
   return std::make_unique<substitute_walk>(std::move(tmpl), std::move(subst));
 }
 
+namespace {
+// Make a call a job running here (not on an evaluator) waits for. A native function's own
+// deep-data work must run here too, or its result would be lost: deferral is off for the call.
+value_t call_here(const data_job::call_request &call) {
+  if (const auto *fn = std::get_if<native_fn>(&call.fn->v)) {
+    struct no_defer {
+      detail::data_step_scope *scope = detail::data_step_scope::current();
+      bool was = scope && scope->defer_allowed();
+      no_defer() {
+        if (was)
+          scope->allow_defer(false);
+      }
+      ~no_defer() {
+        if (was)
+          scope->allow_defer(true);
+      }
+    } guard;
+    return (*fn)(call.args);
+  }
+  if (std::holds_alternative<closure_ptr>(call.fn->v))
+    throw std::runtime_error(std::string(call.who) +
+                             ": calling a DSL function needs a running program (an evaluator)");
+  throw std::runtime_error(std::string(call.who) + ": not a function: " + call.fn->type_name());
+}
+} // namespace
+
 value_t run_to_completion(data_job &job) {
-  const std::size_t before = job.nodes();
-  job.step(0);
-  count_data_nodes(job.nodes() - before);
-  return job.result();
+  for (;;) {
+    const std::size_t before = job.nodes();
+    const bool done = job.step(0);
+    count_data_nodes(job.nodes() - before);
+    if (done)
+      return job.result();
+    std::optional<data_job::call_request> call = job.take_call();
+    if (!call)
+      throw std::logic_error("data_job: stopped with neither a result nor a call");
+    job.call_returned(call_here(*call));
+  }
 }
 
 // -- settings ------------------------------------------------------------------
@@ -564,17 +597,39 @@ data_options data_options_from_state(cvc::state &root, const std::string &schedu
 
 value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_t)> then) {
   detail::data_step_scope *scope = t_scope;
-  const bool may_defer = scope && scope->step_nodes_ > 0 && scope->may_defer_ && !scope->deferred_;
-  const std::size_t before = job->nodes();
-  const bool done = job->step(may_defer ? scope->remaining() : 0);
-  count_data_nodes(job->nodes() - before);
-  if (!done) {
-    scope->deferred_ = std::make_unique<detail::deferred_data_job>(
-        detail::deferred_data_job{std::move(job), std::move(then)});
-    return nil_value;
+  if (!scope || !scope->may_defer_ || scope->deferred_) {
+    value_t r = run_to_completion(*job);
+    return then ? then(std::move(r)) : r;
   }
-  value_t r = job->result();
-  return then ? then(std::move(r)) : r;
+  // One slice here (without slicing, all of it), making the native calls the job needs on the
+  // way. It waits for the evaluator when the slice runs out, for a DSL function, and for the work
+  // a native function it called left of its own.
+  const bool slicing = scope->step_nodes_ > 0;
+  std::unique_ptr<detail::deferred_data_job> waits_on;
+  for (;;) {
+    const std::size_t before = job->nodes();
+    const bool done = job->step(slicing ? scope->remaining() : 0);
+    count_data_nodes(job->nodes() - before);
+    if (done) {
+      value_t r = job->result();
+      return then ? then(std::move(r)) : r;
+    }
+    const data_job::call_request *pending = job->pending_call();
+    const native_fn *fn = pending ? std::get_if<native_fn>(&pending->fn->v) : nullptr;
+    if (!fn || (slicing && scope->nodes_ >= scope->step_nodes_))
+      break;
+    const data_job::call_request call = *job->take_call();
+    value_t value = (*fn)(call.args);
+    if (scope->deferred_) {
+      waits_on = std::move(scope->deferred_);
+      break;
+    }
+    job->call_returned(std::move(value));
+  }
+  job->own_inputs();
+  scope->deferred_ = std::make_unique<detail::deferred_data_job>(
+      detail::deferred_data_job{std::move(job), std::move(then), std::move(waits_on)});
+  return nil_value;
 }
 
 void count_data_nodes(std::size_t nodes) {
