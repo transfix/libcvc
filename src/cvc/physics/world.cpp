@@ -446,6 +446,22 @@ body_state world::state(body_id id) const {
   return guarded([&] { return _impl->be->state(id); });
 }
 
+state_batch world::states(const std::vector<body_id> &ids) const {
+  state_batch out;
+  out.states.reserve(ids.size());
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  out.tick = _impl->tick;
+  guarded([&] {
+    for (const body_id id : ids) {
+      if (_impl->be->contains(id))
+        out.states.emplace_back(_impl->be->state(id));
+      else
+        out.states.emplace_back();
+    }
+  });
+  return out;
+}
+
 void world::set_state(body_id id, const body_state &s) {
   if (!finite(s.position) || !finite(s.rotation) || !finite(s.linear_velocity) ||
       !finite(s.angular_velocity) || !unit_length(s.rotation))

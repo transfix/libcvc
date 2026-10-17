@@ -60,6 +60,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
   ../../inc/cvc/physics/world_binding.h
+  ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -217,6 +218,7 @@ set(SOURCE_FILES
   physics/world.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
+  physics/pose_tracker.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
