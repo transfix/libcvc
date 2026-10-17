@@ -22,19 +22,6 @@ typedef _object PyObject;
 
 namespace pycvc {
 
-// cvc::state_exec::parse_options_from_state on `app`'s state root (pycvc passes the app where
-// C++ passes the root): per key, state_exec.schedulers.<scheduler_id>.parser.<key> (when
-// scheduler_id is not empty), then state_exec.defaults.parser.<key>, then `base`.
-cvc::state_exec::parse_options parse_options_from_state(
-    const std::shared_ptr<cvc::app> &app, const std::string &scheduler_id = "",
-    const cvc::state_exec::parse_options &base = cvc::state_exec::parse_options());
-
-// cvc::state_exec::data_options_from_state on `app`'s state root, resolved like
-// parse_options_from_state under state_exec.*.data.<key>.
-cvc::state_exec::data_options data_options_from_state(
-    const std::shared_ptr<cvc::app> &app, const std::string &scheduler_id = "",
-    const cvc::state_exec::data_options &base = cvc::state_exec::data_options());
-
 class Exec {
 public:
   // Build a DSL environment + scheduler over `app`'s state root.
