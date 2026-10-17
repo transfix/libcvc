@@ -711,5 +711,83 @@ void integrate_bicycle_material_vjp(
   });
 }
 
+double multi_start_penalty_bicycle(const float *alphas, const float *beta, const float *gamma,
+                                   const float *o0, const float *th0, const float *sp0,
+                                   const float *goal, const float *C, const float *R,
+                                   const std::uint8_t *mask, const float *rr, const float *d_hat,
+                                   const float *dt, int B, int N, const multi_start_params &p,
+                                   const surrogate_material_params &sp,
+                                   const bicycle_material_params &v, float *g_alphas, float *g_beta,
+                                   float *g_gamma, int num_threads) {
+  std::vector<float> o_ms;
+  const int K = multi_start_origins(p, o0, C, R, mask, rr, B, N, o_ms);
+  if (K == 0)
+    return 0.0;
+  const int KB = K * B;
+  // Tile the per-agent inputs so all K*B short rollouts run as one batch. The
+  // material forces are off (lam = 0), so a 2x2 zero patch stands in for one.
+  auto tile = [&](const float *x, int per) {
+    std::vector<float> t(static_cast<size_t>(KB) * per);
+    for (int k = 0; k < K; ++k)
+      std::copy(x, x + static_cast<size_t>(B) * per, t.begin() + static_cast<size_t>(k) * B * per);
+    return t;
+  };
+  const std::vector<float> goal_k = tile(goal, 2), C_k = tile(C, 2 * N), R_k = tile(R, N),
+                           al_k = tile(alphas, N), be_k = tile(beta, 1), ga_k = tile(gamma, 1),
+                           rr_k = tile(rr, 1), dh_k = tile(d_hat, 1), th_k = tile(th0, 1),
+                           sp_k = tile(sp0, 1);
+  std::vector<std::uint8_t> mask_k(static_cast<size_t>(KB) * N);
+  for (int k = 0; k < K; ++k)
+    std::copy(mask, mask + static_cast<size_t>(B) * N,
+              mask_k.begin() + static_cast<size_t>(k) * B * N);
+  std::vector<float> dt_k(KB);
+  for (int i = 0; i < KB; ++i)
+    dt_k[i] = p.ms_dt_mult * dt[i % B];
+  const std::vector<int> H_k(KB, p.ms_h);
+  const std::vector<float> zeros(KB, 0.0f), patch(static_cast<size_t>(KB) * 6 * 2 * 2, 0.0f);
+
+  std::vector<float> o_run(o_ms), th_run(th_k), sp_run(sp_k), min_clear(KB), cum(KB), hard(KB),
+      arc(KB);
+  integrate_bicycle_material(o_run.data(), th_run.data(), sp_run.data(), goal_k.data(), C_k.data(),
+                             R_k.data(), mask_k.data(), al_k.data(), be_k.data(), ga_k.data(),
+                             zeros.data(), zeros.data(), patch.data(), rr_k.data(), dh_k.data(),
+                             dt_k.data(), H_k.data(), KB, N, 2, 2, sp, v, min_clear.data(),
+                             cum.data(), hard.data(), arc.data(), num_threads);
+  double L = 0.0;
+  for (int i = 0; i < KB; ++i) {
+    const float x = -min_clear[i] / p.tau;
+    L += (x > 20.0f) ? x : std::log1p(std::exp(x)); // softplus(-clr/tau)
+  }
+  L /= (double)KB;
+
+  if (g_alphas || g_beta || g_gamma) {
+    std::vector<float> g_clr(KB);
+    for (int i = 0; i < KB; ++i) {
+      const float s = 1.0f / (1.0f + std::exp(-(-min_clear[i] / p.tau))); // sigmoid(-clr/tau)
+      g_clr[i] = -s / (p.tau * (float)KB);                                // d L / d clr
+    }
+    std::vector<float> s_al(static_cast<size_t>(KB) * N, 0.0f), s_be(KB, 0.0f), s_ga(KB, 0.0f),
+        s_ls(KB, 0.0f), s_lh(KB, 0.0f);
+    integrate_bicycle_material_vjp(
+        o_ms.data(), th_k.data(), sp_k.data(), goal_k.data(), C_k.data(), R_k.data(), mask_k.data(),
+        al_k.data(), be_k.data(), ga_k.data(), zeros.data(), zeros.data(), patch.data(),
+        rr_k.data(), dh_k.data(), dt_k.data(), H_k.data(), KB, N, 2, 2, sp, v, nullptr, nullptr,
+        nullptr, g_clr.data(), nullptr, nullptr, s_al.data(), s_be.data(), s_ga.data(), s_ls.data(),
+        s_lh.data(), num_threads);
+    for (int k = 0; k < K; ++k)
+      for (int b = 0; b < B; ++b) {
+        const int i = k * B + b;
+        if (g_alphas)
+          for (int j = 0; j < N; ++j)
+            g_alphas[b * N + j] += s_al[static_cast<size_t>(i) * N + j];
+        if (g_beta)
+          g_beta[b] += s_be[i];
+        if (g_gamma)
+          g_gamma[b] += s_ga[i];
+      }
+  }
+  return L;
+}
+
 } // namespace nav
 } // namespace cvc

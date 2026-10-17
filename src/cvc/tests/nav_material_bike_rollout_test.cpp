@@ -393,3 +393,61 @@ TEST(NavMaterialBikeRollout, SoftMaterialForceSteersOffRisk) {
   }
   EXPECT_LT(c1, 0.95 * c0) << "the soft material force did not reduce the risk collected";
 }
+
+// L_multi on the bicycle: its gradient w.r.t. alphas, beta and gamma against finite
+// differences (kink-aware, as above), over three sampled starts.
+TEST(NavMaterialBikeRollout, MultiStartPenaltyGradcheck) {
+  Batch b = make_batch(13, 6, 3);
+  cvc::nav::multi_start_params mp;
+  mp.ms_count = 3;
+  mp.frac_lo = 0.6;
+  mp.frac_hi = 0.8;
+  mp.seed = 4;
+  mp.ms_h = 3;
+  mp.tau = 0.5f;
+  const int B = b.B, N = b.N;
+  auto pen = [&](const std::vector<float> &al, const std::vector<float> &be,
+                 const std::vector<float> &ga, float *gal, float *gbe, float *gga) {
+    return cvc::nav::multi_start_penalty_bicycle(
+        al.data(), be.data(), ga.data(), b.o0.data(), b.th0.data(), b.sp0.data(), b.goal.data(),
+        b.C.data(), b.R.data(), b.mask.data(), b.rr.data(), b.d_hat.data(), b.dt.data(), B, N, mp,
+        b.p, b.v, gal, gbe, gga);
+  };
+  std::vector<float> gal(B * N, 0.0f), gbe(B, 0.0f), gga(B, 0.0f);
+  const double L0 = pen(b.alphas, b.beta, b.gamma, gal.data(), gbe.data(), gga.data());
+  ASSERT_TRUE(std::isfinite(L0));
+  ASSERT_GT(L0, 0.0);
+  std::vector<float> p = b.alphas, g = gal;
+  p.insert(p.end(), b.beta.begin(), b.beta.end());
+  p.insert(p.end(), b.gamma.begin(), b.gamma.end());
+  g.insert(g.end(), gbe.begin(), gbe.end());
+  g.insert(g.end(), gga.begin(), gga.end());
+  auto at = [&](const std::vector<float> &q) {
+    const std::vector<float> al(q.begin(), q.begin() + B * N),
+        be(q.begin() + B * N, q.begin() + B * N + B), ga(q.begin() + B * N + B, q.end());
+    return pen(al, be, ga, nullptr, nullptr, nullptr);
+  };
+  const float e = 1e-3f;
+  int checked = 0, kinked = 0;
+  double worst = 0.0;
+  for (size_t i = 0; i < p.size(); ++i) {
+    if (std::fabs(g[i]) < 1e-3)
+      continue;
+    std::vector<float> plus = p, minus = p;
+    plus[i] += e;
+    minus[i] -= e;
+    const double fwd = (at(plus) - L0) / e, bwd = (L0 - at(minus)) / e;
+    if (std::fabs(fwd - bwd) > 0.1 * (std::fabs(fwd) + std::fabs(bwd)) + 1e-4) {
+      ++kinked;
+      continue;
+    }
+    const double fd = 0.5 * (fwd + bwd);
+    worst = std::max(worst, std::fabs(fd - g[i]) / (std::fabs(fd) + std::fabs(g[i]) + 1e-6));
+    ++checked;
+  }
+  std::printf("[mat-bike-lmulti] L=%.4f checked=%d kinked=%d worst_rel=%.3e\n", L0, checked, kinked,
+              worst);
+  EXPECT_GE(checked, 6);
+  EXPECT_LT(worst, 5e-2);
+  EXPECT_LE(kinked, checked / 4);
+}

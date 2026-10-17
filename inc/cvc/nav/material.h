@@ -56,6 +56,7 @@
 
 #include <cstdint>
 #include <cvc/nav/drive.h>
+#include <cvc/nav/geom_rollout.h>
 #include <vector>
 
 namespace cvc {
@@ -334,6 +335,22 @@ void integrate_bicycle_material_vjp(
     const float *g_thT, const float *g_spT, const float *g_min_clear, const float *g_cum_risk,
     const float *g_arc_length, float *g_alphas, float *g_beta, float *g_gamma, float *g_lam_soft,
     float *g_lam_hard, int num_threads = 0);
+
+// L_multi on the bicycle: multi_start_penalty (geom_rollout.h) with its short rollouts
+// driven through integrate_bicycle_material instead of a point mass.
+//   - Same starts (multi_start_origins), each agent keeping its heading th0 and speed sp0.
+//   - Same score: mean softplus(-min_clear / tau) over ms_h steps of ms_dt_mult * dt.
+//   - Geometry only, as the original: the material forces are off.
+// Returns the penalty and ADDS its grads w.r.t. alphas, beta and gamma into whichever
+// g_* are non-null.
+double multi_start_penalty_bicycle(const float *alphas, const float *beta, const float *gamma,
+                                   const float *o0, const float *th0, const float *sp0,
+                                   const float *goal, const float *C, const float *R,
+                                   const std::uint8_t *mask, const float *rr, const float *d_hat,
+                                   const float *dt, int B, int N, const multi_start_params &p,
+                                   const surrogate_material_params &sp,
+                                   const bicycle_material_params &v, float *g_alphas, float *g_beta,
+                                   float *g_gamma, int num_threads = 0);
 
 // ── CUDA twins (defined in material_rollout.cu; CVC_ENABLE_CUDA only) ─────────
 // The GPU transcription of the two rollout functions above: one thread per

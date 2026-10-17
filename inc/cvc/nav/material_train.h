@@ -42,7 +42,9 @@
 //
 // L_multi (multi_start_penalty, geom_rollout.h) is a SEPARATE geometry rollout
 // (EXPLICIT Euler by default, no material) that backprops only into
-// alphas/beta/gamma; its grads sum into those seeds before backward_one. Set
+// alphas/beta/gamma; its grads sum into those seeds before backward_one. With the
+// bicycle integrator its short rollouts run on the bicycle too
+// (multi_start_penalty_bicycle, material.h), from the same starts. Set
 // w_multi = 0 to drop it. cfg.multi.seed is used as-is by both the loss and the
 // gradient, so they score the same sampled starts; a training loop varies it per
 // step (the pycvc trainer uses seed + step) to draw fresh ones.
@@ -97,9 +99,10 @@ struct material_loss_config {
   float w_multi = 0.5f;                            // multi-start robustness (L_multi)
   float lam_soft_max = 5.0f, lam_hard_max = 10.0f; // for the lreg normalization
   surrogate_material_params rollout;               // margin_factor/mass/d_hat_sdf/k_sharp
-  // Which rollout L_traj, L_vel, L_clear and L_nav score. On the bicycle, the vT that
-  // L_vel compares is sp * (cos th, sin th), and use_cuda runs the rollout on the CPU
-  // (it has no device twin yet). L_multi stays a point-mass geometry rollout.
+  // Which rollout every term scores, L_multi's short rollouts included
+  // (multi_start_penalty_bicycle). On the bicycle, the vT that L_vel compares is
+  // sp * (cos th, sin th), and use_cuda runs the rollouts on the CPU (no device twin
+  // yet).
   material_integrator integrator = material_integrator::surrogate;
   bicycle_material_params bicycle; // vehicle limits, in the batch's length units
   multi_start_params multi; // ms_h/ms_dt_mult/tau + start sampling (margin/mass synced)

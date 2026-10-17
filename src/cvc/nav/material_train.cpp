@@ -179,9 +179,15 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
     multi_start_params mp = cfg.multi;
     mp.margin_factor = cfg.rollout.margin_factor;
     mp.mass = cfg.rollout.mass;
-    const double L_multi = multi_start_penalty(
-        alphas.data(), beta.data(), gamma.data(), b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, b.rr,
-        b.d_hat, b.dt, b.H, B, N, mp, nullptr, nullptr, nullptr, cfg.num_threads);
+    const double L_multi =
+        cfg.integrator == material_integrator::bicycle
+            ? multi_start_penalty_bicycle(alphas.data(), beta.data(), gamma.data(), b.o0,
+                                          th0.data(), sp0.data(), b.goal, b.C, b.R, b.obs_mask,
+                                          b.rr, b.d_hat, b.dt, B, N, mp, cfg.rollout, cfg.bicycle,
+                                          nullptr, nullptr, nullptr, cfg.num_threads)
+            : multi_start_penalty(alphas.data(), beta.data(), gamma.data(), b.o0, b.v0, b.goal, b.C,
+                                  b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, nullptr,
+                                  nullptr, nullptr, cfg.num_threads);
     L += (double)cfg.w_multi * L_multi;
   }
 
@@ -314,9 +320,15 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
     mp.margin_factor = cfg.rollout.margin_factor;
     mp.mass = cfg.rollout.mass;
     std::vector<float> gm_al(static_cast<std::size_t>(B) * N, 0.0f), gm_be(B, 0.0f), gm_ga(B, 0.0f);
-    multi_start_penalty(c.alphas.data(), c.beta.data(), c.gamma.data(), b.o0, b.v0, b.goal, b.C,
-                        b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, gm_al.data(),
-                        gm_be.data(), gm_ga.data(), cfg.num_threads);
+    if (cfg.integrator == material_integrator::bicycle)
+      multi_start_penalty_bicycle(c.alphas.data(), c.beta.data(), c.gamma.data(), b.o0,
+                                  c.th0.data(), c.sp0.data(), b.goal, b.C, b.R, b.obs_mask, b.rr,
+                                  b.d_hat, b.dt, B, N, mp, cfg.rollout, cfg.bicycle, gm_al.data(),
+                                  gm_be.data(), gm_ga.data(), cfg.num_threads);
+    else
+      multi_start_penalty(c.alphas.data(), c.beta.data(), c.gamma.data(), b.o0, b.v0, b.goal, b.C,
+                          b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, gm_al.data(),
+                          gm_be.data(), gm_ga.data(), cfg.num_threads);
     for (std::size_t i = 0; i < gm_al.size(); ++i)
       g_alphas[i] += cfg.w_multi * gm_al[i];
     for (int i = 0; i < B; ++i) {
