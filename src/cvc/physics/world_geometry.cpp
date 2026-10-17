@@ -20,7 +20,8 @@ body_id world_bodies::find(const std::string &name) const {
   return body_id{};
 }
 
-world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g, double max_error) {
+world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g, double max_error,
+                                const std::vector<int> &nav_materials) {
   world_bodies out;
   const cvc::world::surface_registry &surfaces = g.surfaces();
   out.materials.assign(surfaces.size(), 0);
@@ -36,7 +37,8 @@ world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g, d
         found = true;
       }
     if (!found)
-      id = w.add_material({c.name, c.mu, c.restitution, c.rolling_resistance, -1});
+      id = w.add_material({c.name, c.mu, c.restitution, c.rolling_resistance,
+                           s < nav_materials.size() ? nav_materials[s] : -1});
     out.materials[s] = id;
   }
 

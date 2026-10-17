@@ -39,7 +39,7 @@ struct terrain_grid {
   std::vector<float> heights; // row-major as stored in the file
 };
 
-terrain_grid read_terrain_json(const fs::path &path) {
+boost::property_tree::ptree read_json_file(const fs::path &path) {
   if (!fs::exists(path))
     throw std::runtime_error("load_city_bundle: no terrain.json in " + path.parent_path().string());
   boost::property_tree::ptree pt;
@@ -48,7 +48,11 @@ terrain_grid read_terrain_json(const fs::path &path) {
   } catch (const std::exception &e) {
     throw std::runtime_error("load_city_bundle: " + path.string() + " is not JSON: " + e.what());
   }
-  terrain_grid t;
+  return pt;
+}
+
+// The fields every terrain.json has, grid or not: the one place they are read.
+void read_extent(const boost::property_tree::ptree &pt, const fs::path &path, terrain_grid &t) {
   try {
     t.min_x = pt.get<double>("bounds.min_x");
     t.min_y = pt.get<double>("bounds.min_y");
@@ -62,6 +66,12 @@ terrain_grid read_terrain_json(const fs::path &path) {
   if (t.rows < 2 || t.cols < 2 || !(t.max_x > t.min_x) || !(t.max_y > t.min_y))
     throw std::runtime_error("load_city_bundle: " + path.string() +
                              ": needs at least 2 x 2 samples over a non-empty extent");
+}
+
+terrain_grid read_terrain_json(const fs::path &path) {
+  const boost::property_tree::ptree pt = read_json_file(path);
+  terrain_grid t;
+  read_extent(pt, path, t);
   const auto grid = pt.get_child_optional("grid");
   if (!grid || grid->size() != static_cast<std::size_t>(t.rows))
     throw std::runtime_error("load_city_bundle: " + path.string() +
@@ -107,6 +117,13 @@ std::vector<cvc::face_material_t> cell_surfaces(const std::vector<std::uint16_t>
       cells.push_back(best);
     }
   return cells;
+}
+
+terrain_extent read_terrain_extent(const std::string &dir) {
+  const fs::path path = fs::path(dir) / "terrain.json";
+  terrain_grid t;
+  read_extent(read_json_file(path), path, t);
+  return {t.rows, t.cols, t.min_x, t.min_y, t.max_x, t.max_y};
 }
 
 city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &options) {

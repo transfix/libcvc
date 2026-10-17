@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/world_geometry_nodes.h>
@@ -57,7 +58,8 @@ cvc::geometry::colors_t surface_colors(const cvc::geometry &geom,
 }
 
 std::vector<std::shared_ptr<GraphicsNode>>
-add_world_geometry(SceneGraph &sg, const cvc::world::world_geometry &g, const std::string &prefix) {
+add_world_geometry(SceneGraph &sg, const cvc::world::world_geometry &g, const std::string &prefix,
+                   const std::shared_ptr<GraphicsNode> &parent) {
   std::vector<std::shared_ptr<GraphicsNode>> nodes;
   for (const cvc::world::geometry_item &item : g.items()) {
     if (!item.has(cvc::world::role_render))
@@ -66,7 +68,10 @@ add_world_geometry(SceneGraph &sg, const cvc::world::world_geometry &g, const st
     cvc::geometry geom = *item.geometry;
     if (geom.const_colors().size() != geom.num_points())
       geom.colors() = surface_colors(geom, g.surfaces(), item.surface);
-    std::shared_ptr<GraphicsNode> node = sg.addGraphics(prefix + item.name, geom);
+    std::shared_ptr<GraphicsNode> node =
+        parent ? std::static_pointer_cast<GraphicsNode>(
+                     parent->createChild<GeometryNode>(prefix + item.name, geom))
+               : sg.addGraphics(prefix + item.name, geom);
     const bool placed =
         !item.height_field() && (item.position[0] != 0.0 || item.position[1] != 0.0 ||
                                  item.position[2] != 0.0 || item.rotation[0] != 1.0);

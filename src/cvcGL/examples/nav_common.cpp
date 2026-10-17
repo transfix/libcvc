@@ -13,6 +13,8 @@
 #include <cvc/gl/StageLighting.h>
 #include <cvc/model/model_file_io.h> // read_model (buildings.glb -> mesh)
 #include <cvc/nav/grid_nav.h>        // astar / simplify / inflate — the shared route planner
+#include <cvc/nav/land_cover.h>      // land cover as world surfaces
+#include <cvc/nav/world_planes.h>    // the navigator's planes from the world
 #include <cvc/world/city_bundle.h>   // the library's one reader of city bundles
 #include <filesystem>
 #include <fstream>
@@ -384,54 +386,6 @@ void add_border(std::uint8_t *occ, int rows, int cols) {
   }
 }
 
-static std::vector<std::uint8_t> occ_dilated(std::vector<std::uint8_t> occ, int nx, int ny,
-                                             int inflate); // defined below
-
-std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
-                                               int ny, int inflate) {
-  std::vector<std::uint8_t> occ(static_cast<std::size_t>(nx) * ny, 0);
-  if (nx < 2 || ny < 2 || b.max_x <= b.min_x || b.max_y <= b.min_y)
-    return occ;
-  const auto &pts = mesh.points();
-  const auto &tris = mesh.tris();
-  // world -> continuous cell coords (cell centres span [min,max]).
-  const double sx = (nx - 1) / (b.max_x - b.min_x), sy = (ny - 1) / (b.max_y - b.min_y);
-  for (const auto &tri : tris) {
-    double px[3], py[3];
-    for (int k = 0; k < 3; ++k) {
-      const auto &p = pts[tri[k]];
-      px[k] = (p[0] - b.min_x) * sx; // -> column
-      py[k] = (p[1] - b.min_y) * sy; // -> row
-    }
-    int c0 = static_cast<int>(std::floor(std::min({px[0], px[1], px[2]})));
-    int c1 = static_cast<int>(std::ceil(std::max({px[0], px[1], px[2]})));
-    int r0 = static_cast<int>(std::floor(std::min({py[0], py[1], py[2]})));
-    int r1 = static_cast<int>(std::ceil(std::max({py[0], py[1], py[2]})));
-    c0 = std::max(0, c0);
-    r0 = std::max(0, r0);
-    c1 = std::min(nx - 1, c1);
-    r1 = std::min(ny - 1, r1);
-    // Edge functions; fill any cell centre inside the projected triangle (either
-    // winding), so a solid roof/wall soup rasterizes to a filled footprint.
-    const double d = (py[1] - py[2]) * (px[0] - px[2]) + (px[2] - px[1]) * (py[0] - py[2]);
-    if (std::fabs(d) < 1e-12)
-      continue;
-    const double inv = 1.0 / d;
-    // Mark a node when its cell centre is inside the triangle. A tight test (not a
-    // conservative fatten) keeps the street gaps open — an over-filled occupancy seals
-    // dense downtown so A* can't route and the reactive drive is repelled everywhere.
-    for (int r = r0; r <= r1; ++r)
-      for (int c = c0; c <= c1; ++c) {
-        const double x = c, y = r;
-        const double a = ((py[1] - py[2]) * (x - px[2]) + (px[2] - px[1]) * (y - py[2])) * inv;
-        const double be = ((py[2] - py[0]) * (x - px[2]) + (px[0] - px[2]) * (y - py[2])) * inv;
-        if (a >= 0.0 && be >= 0.0 && 1.0 - a - be >= 0.0)
-          occ[static_cast<std::size_t>(r) * nx + c] = 1;
-      }
-  }
-  return occ_dilated(occ, nx, ny, inflate);
-}
-
 bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
                            std::vector<std::uint32_t> &tris, std::vector<float> *out_uvs,
                            cvc::image *out_texture) {
@@ -540,73 +494,19 @@ bool load_vehicle_template(const std::string &path, double target_len, std::vect
 }
 
 double Terrain::sample(double x, double y) const {
-  if (empty())
+  if (!field)
     return 0.0;
-  if (field) {
-    const double cx = std::clamp(x, bounds.min_x, bounds.max_x);
-    const double cy = std::clamp(y, bounds.min_y, bounds.max_y);
-    const double z = field->height(cx, cy);
-    if (!std::isnan(z))
-      return z;
-  }
-  // Bilinear interpolation over the [rows x cols] elevation grid mapped onto
-  // bounds. grid[0] is the SW corner (min_x, min_y); rows step +y, cols step +x.
-  const double u = (x - bounds.min_x) / (bounds.max_x - bounds.min_x);
-  const double v = (y - bounds.min_y) / (bounds.max_y - bounds.min_y);
-  const double fx = std::clamp(u, 0.0, 1.0) * (cols - 1);
-  const double fy = std::clamp(v, 0.0, 1.0) * (rows - 1);
-  const int i0 = static_cast<int>(std::floor(fx));
-  const int j0 = static_cast<int>(std::floor(fy));
-  const int i1 = std::min(i0 + 1, cols - 1);
-  const int j1 = std::min(j0 + 1, rows - 1);
-  const double tx = fx - i0, ty = fy - j0;
-  const double z00 = grid[j0 * cols + i0], z10 = grid[j0 * cols + i1];
-  const double z01 = grid[j1 * cols + i0], z11 = grid[j1 * cols + i1];
-  const double a = z00 * (1 - tx) + z10 * tx;
-  const double b = z01 * (1 - tx) + z11 * tx;
-  return a * (1 - ty) + b * ty;
+  const double h = field->height(std::clamp(x, bounds.min_x, bounds.max_x),
+                                 std::clamp(y, bounds.min_y, bounds.max_y));
+  return std::isnan(h) ? 0.0 : h; // a hole in the terrain reads as sea level
 }
 
 cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]) {
   if (t.empty())
     return ground_quad(t.bounds, 0.0, rgb);
-  if (t.field) {
-    // The world's own terrain mesh (shared arrays, plus a colour per vertex).
-    cvc::geometry g = *t.field;
-    g.colors().assign(g.num_points(), cvc::geometry::color_t{{rgb[0], rgb[1], rgb[2]}});
-    return g;
-  }
-  cvc::geometry g;
-  auto &pts = g.points();
-  auto &cols = g.colors();
-  auto &uvs = g.uvs(); // UVs so a satellite texture drapes over the terrain
-  auto &tris = g.tris();
-  pts.reserve(static_cast<std::size_t>(t.rows) * t.cols);
-  cols.reserve(pts.capacity());
-  uvs.reserve(pts.capacity());
-  const double dx = (t.bounds.max_x - t.bounds.min_x) / (t.cols - 1);
-  const double dy = (t.bounds.max_y - t.bounds.min_y) / (t.rows - 1);
-  for (int j = 0; j < t.rows; ++j) {
-    const double y = t.bounds.min_y + j * dy;
-    const double v = static_cast<double>(j) / (t.rows - 1);
-    for (int i = 0; i < t.cols; ++i) {
-      const double x = t.bounds.min_x + i * dx;
-      const double u = static_cast<double>(i) / (t.cols - 1);
-      pts.push_back({x, y, t.grid[j * t.cols + i]});
-      cols.push_back({rgb[0], rgb[1], rgb[2]});
-      uvs.push_back({static_cast<float>(u), static_cast<float>(v)});
-    }
-  }
-  tris.reserve(static_cast<std::size_t>(2) * (t.rows - 1) * (t.cols - 1));
-  for (int j = 0; j + 1 < t.rows; ++j)
-    for (int i = 0; i + 1 < t.cols; ++i) {
-      const auto a = static_cast<cvc::geometry::index_t>(j * t.cols + i);
-      const auto b = static_cast<cvc::geometry::index_t>(a + 1);
-      const auto c = static_cast<cvc::geometry::index_t>(a + t.cols);
-      const auto d = static_cast<cvc::geometry::index_t>(c + 1);
-      tris.push_back({a, b, d});
-      tris.push_back({a, d, c});
-    }
+  // The world's own terrain mesh (shared arrays, plus a colour per vertex).
+  cvc::geometry g = *t.field;
+  g.colors().assign(g.num_points(), cvc::geometry::color_t{{rgb[0], rgb[1], rgb[2]}});
   return g;
 }
 
@@ -621,6 +521,8 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
   // demos) to load the lower-poly variant when present.
   cvc::world::city_bundle_options opt;
   opt.prefer_flat = prefer_flat;
+  // Terrain cells carry the land cover of the bundle's masks or satellite image.
+  opt.land_cover = cvc::nav::land_cover_provider(cvc::world::surface_registry::builtin());
   cvc::world::city_bundle city;
   try {
     city = cvc::world::load_city_bundle(dir, opt);
@@ -631,10 +533,7 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
   bounds = {city.min_x, city.min_y, city.max_x, city.max_y};
   const auto field = city.geometry.terrain();
   if (terrain && field) {
-    terrain->rows = field->rows();
-    terrain->cols = field->cols();
     terrain->bounds = bounds;
-    terrain->grid.assign(field->heights().begin(), field->heights().end());
     terrain->field = field;
   }
   if (world)
@@ -645,7 +544,11 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
   // than dropping the whole bundle.
   const cvc::world::geometry_item *b = city.geometry.find("buildings");
   if (b && b->geometry->num_tris() > 0) {
-    occ = occupancy_from_model(*b->geometry, bounds, nx, ny, /*inflate=*/0);
+    // The navigator's occupancy from the same world the renderer draws: the
+    // buildings' footprints (and any hard terrain surface) on the nx*ny grid.
+    occ = cvc::nav::rasterize(city.geometry, ny, nx, bounds.min_x, bounds.min_y, bounds.max_x,
+                              bounds.max_y)
+              .occupancy;
     if (mesh)
       *mesh = *b->geometry;
     return true;
@@ -855,25 +758,5 @@ void plot_line(unsigned char *dst, int dw, int dh, int x0, int y0, int x1, int y
 }
 
 // 4-connected dilation of a rows*cols (ny*nx) occupancy `it` times.
-static std::vector<std::uint8_t> occ_dilated(std::vector<std::uint8_t> occ, int nx, int ny,
-                                             int inflate) {
-  for (int it = 0; it < inflate; ++it) {
-    std::vector<std::uint8_t> next = occ;
-    for (int r = 0; r < ny; ++r)
-      for (int c = 0; c < nx; ++c)
-        if (occ[static_cast<std::size_t>(r) * nx + c]) {
-          if (r > 0)
-            next[static_cast<std::size_t>(r - 1) * nx + c] = 1;
-          if (r < ny - 1)
-            next[static_cast<std::size_t>(r + 1) * nx + c] = 1;
-          if (c > 0)
-            next[static_cast<std::size_t>(r) * nx + (c - 1)] = 1;
-          if (c < nx - 1)
-            next[static_cast<std::size_t>(r) * nx + (c + 1)] = 1;
-        }
-    occ.swap(next);
-  }
-  return occ;
-}
 
 } // namespace navdemo

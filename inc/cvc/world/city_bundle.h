@@ -78,6 +78,15 @@ struct city_bundle {
 // false and say why in buildings_error (the terrain alone is still a world).
 city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &options = {});
 
+// terrain.json's grid size and extent alone: what a reader of the bundle's other
+// rasters (land-cover masks, imagery) lays them over. The height grid may be
+// absent. Throws std::runtime_error like load_city_bundle.
+struct terrain_extent {
+  int rows = 0, cols = 0;
+  double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0;
+};
+terrain_extent read_terrain_extent(const std::string &dir);
+
 // One surface per cell from per-sample surfaces (rows x cols): the most common of
 // its four corners, the south-west corner's on a tie.
 std::vector<cvc::face_material_t> cell_surfaces(const std::vector<std::uint16_t> &samples, int rows,

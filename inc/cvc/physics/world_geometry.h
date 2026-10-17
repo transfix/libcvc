@@ -45,13 +45,16 @@ struct world_bodies {
 // Add a static body for every collide item of `g`: a height field as terrain, a
 // mesh at its item's placement. Each surface the items use becomes a world
 // material named after the surface, with its mu, restitution and rolling
-// resistance (nav_material stays -1 until the navigator reads the surface table
-// itself). A material of that name already in the world is reused, so a
-// second world_geometry sharing surfaces adds no duplicates. `max_error` is the
+// resistance, and nav_material from `nav_materials` (indexed by surface id; -1
+// for a surface it does not cover, or when it is empty). cvc::nav::palette_ids()
+// makes that table; physics does not link the navigator, so it is passed in. A
+// material of that name already in the world is reused, so a second
+// world_geometry sharing surfaces adds no duplicates. `max_error` is the
 // terrain's height tolerance (physics::terrain). Throws cvc::physics_error as
 // world::add_body does; bodies added before a failure stay.
 world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g,
-                                double max_error = 0.005);
+                                double max_error = 0.005,
+                                const std::vector<int> &nav_materials = {});
 
 } // namespace physics
 } // namespace cvc
