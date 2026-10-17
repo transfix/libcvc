@@ -16,7 +16,7 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // launch_pool_task generalization test
+#include <cvc/core/async_task.h>  // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/state/state.h>
@@ -518,6 +518,27 @@ TEST(AriadneResident, TickProgramRunsOncePerDrain) {
   rt.drain(); // and again — it is resident, not one-shot
   EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "1");
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The app's exec scheduler reads a submitted script inside its process (parser.step_tokens), so a
+// resident whose body doesn't parse is killed by the syntax error once it is read, and the sweep
+// reports it with the parse error rather than letting it vanish.
+TEST(AriadneResident, ResidentWithASyntaxErrorIsReported) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program("(state-set \"tick.flag\" \"1\""); // unclosed
+  rt.render();
+  rt.drain();
+  rt.drain();
+  const std::vector<std::string> warns = rt.take_reactive_warnings();
+  bool reported = false;
+  for (const std::string &w : warns)
+    reported = reported || (w.find("stopped") != std::string::npos &&
+                            w.find("unclosed parenthesis") != std::string::npos);
+  EXPECT_TRUE(reported) << "warnings: " << ::testing::PrintToString(warns);
+  EXPECT_NE(cvc::state::instance(app)("tick.flag").value(), "1"); // the body never ran
 }
 
 // set_tick_program("") clears the resident: after clearing, a drain no longer re-fires the body.

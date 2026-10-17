@@ -163,6 +163,13 @@ public:
 
   void set_watch_root(cvc::state *root) override { watch_root_ = root; }
 
+  /// This scheduler's built-in parser settings: what a submitted script is parsed with when the
+  /// watch root's `state_exec.defaults.parser.*` keys don't say otherwise. parse_options{} (parse
+  /// at submit) unless the host sets it; the app's exec scheduler reads in steps
+  /// (app::exec_scheduler()).
+  void set_parser_defaults(const parse_options &defaults) { parser_defaults_ = defaults; }
+  const parse_options &parser_defaults() const { return parser_defaults_; }
+
 private:
   scheduling_policy policy_;
   int next_pid_ = 1;
@@ -180,6 +187,7 @@ private:
   async_stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
+  parse_options parser_defaults_;
 
   std::unordered_map<int, process_ptr> processes_;
 

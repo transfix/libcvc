@@ -43,8 +43,9 @@ static std::optional<std::size_t> read_size_setting(cvc::state &root, const std:
   return n;
 }
 
-parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id) {
-  parse_options opts;
+parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id,
+                                       const parse_options &base) {
+  parse_options opts = base;
   const auto resolve = [&](const char *key, bool allow_zero, std::size_t &out) {
     const std::string suffix = std::string(".parser.") + key;
     if (auto v =

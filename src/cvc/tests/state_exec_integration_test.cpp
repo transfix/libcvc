@@ -2491,6 +2491,37 @@ TEST_F(SchedulerSettingsTest, AsyncSchedulerKillsAProcessWhoseScriptDoesNotParse
   EXPECT_NE(err->find("unclosed parenthesis"), std::string::npos) << *err;
 }
 
+TEST_F(SchedulerSettingsTest, AsyncSchedulerParserDefaultsSitUnderTheTree) {
+  auto &root = cvc::state::instance(app_ctx);
+  async_scheduler sched;
+  sched.set_watch_root(&root);
+  EXPECT_EQ(sched.parser_defaults().step_tokens, 0u); // a plain async_scheduler parses at submit
+  EXPECT_THROW(sched.execute(std::string("(+ 1")), parse_error);
+
+  parse_options defaults;
+  defaults.step_tokens = 1024;
+  sched.set_parser_defaults(defaults);
+  int pid = -1;
+  ASSERT_NO_THROW(pid = sched.execute(std::string("(+ 1"))); // now read inside the process
+  sched.sync_run(1000, 1.0);
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+
+  root("state_exec.defaults.parser.step_tokens").value("0"); // the tree overrides the defaults
+  EXPECT_THROW(sched.execute(std::string("(+ 1")), parse_error);
+}
+
+TEST_F(SchedulerSettingsTest, AppExecSchedulerReadsScriptsInSteps) {
+  auto &sched = app_ctx.exec_scheduler();
+  EXPECT_EQ(sched.parser_defaults().step_tokens, 1024u);
+  int pid = -1;
+  ASSERT_NO_THROW(pid = sched.execute(std::string("(+ 1 (+ 2")));
+  sched.sync_run(1000, 1.0);
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+  const auto err = sched.get_exit_error(pid);
+  ASSERT_TRUE(err);
+  EXPECT_NE(err->find("unclosed parenthesis"), std::string::npos) << *err;
+}
+
 TEST_F(SchedulerSettingsTest, AsyncSchedulerEvaluatesAScriptReadInSlices) {
   auto &root = cvc::state::instance(app_ctx);
   root("state_exec.defaults.parser.step_tokens").value("3");

@@ -154,7 +154,7 @@ next one in the order applies. `max_depth` must also be positive.
 | Key | Meaning | Default |
 |---|---|---|
 | `max_depth` | how many lists and quotes may nest | 256 |
-| `step_tokens` | 0: a scheduler parses a submitted script all at once, when it is submitted. N: it parses the script inside the new process, N tokens per step (see [Reading inside the scheduler](#reading-inside-the-scheduler)) | 0 |
+| `step_tokens` | 0: a scheduler parses a submitted script all at once, when it is submitted. N: it parses the script inside the new process, N tokens per step (see [Reading inside the scheduler](#reading-inside-the-scheduler)) | 0; **1024** for the app's exec scheduler |
 
 Who reads them:
 
@@ -162,7 +162,17 @@ Who reads them:
   the effective values under `state_exec.schedulers.<id>.parser.*` and uses them for every
   script submitted to it afterwards.
 - **`async_scheduler`** has no settings loader. It reads `state_exec.defaults.parser.*` from its
-  watch root each time a script is submitted.
+  watch root each time a script is submitted. Keys that aren't set fall back to the scheduler's
+  own defaults (`set_parser_defaults()`), which are the built-in ones unless the host changes
+  them.
+  - **The app's exec scheduler** (`app::exec_scheduler()`, which runs Ariadne's actions and
+    residents) sets `step_tokens` = 1024, so it reads scripts inside their processes.
+  - **Why 1024:** every script in the corpus fits in one slice (the largest is 159 tokens, and
+    `.ari` scripts are at most 24). So a normal action pays one extra step out of its 5000. A
+    slice costs about 80 µs at the parser's measured ~80 ns per token, so a pathologically large
+    script is spread over steps and frames instead of stalling a drain.
+  - pycvc's `Exec` keeps a private `async_scheduler` and stays at 0, so its `run()` still raises
+    on a syntax error straight away.
 - **Ariadne** reads `state_exec.defaults.parser.*` from the app's tree when it compiles a
   predicate.
 - **Code without a state tree** (a standalone evaluator, the `.ari` channel lint) uses the
@@ -185,7 +195,9 @@ scheduler can parse a script the same way it evaluates one: a slice per step. Wi
   of stalling the scheduler before the process exists.
 - **Errors.** A syntax error surfaces where a runtime error would. The async scheduler kills the
   process, with the parse error as its exit error. The sync scheduler throws it from `step()` or
-  `run()`. With step_tokens = 0, `execute()` throws it, as before.
+  `run()`. With step_tokens = 0, `execute()` throws it, as before. Ariadne reports a killed
+  action or resident with its exit error ("ari: on: action program did not complete: …",
+  "ari: resident [...] stopped: …").
 - **Signals and watch events** wait until the script is read, because their handlers run on the
   evaluation stack.
 - **Snapshots.** A process snapshotted while reading stores its source and parser settings. After

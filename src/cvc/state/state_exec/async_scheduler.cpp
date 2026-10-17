@@ -37,9 +37,10 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
-  // No load_settings() here: read the parser settings from the tree on every submission.
+  // No load_settings() here: read the parser settings from the tree on every submission, over
+  // this scheduler's own defaults (set_parser_defaults).
   const parse_options popts =
-      watch_root_ ? parse_options_from_state(*watch_root_) : parse_options{};
+      watch_root_ ? parse_options_from_state(*watch_root_, {}, parser_defaults_) : parser_defaults_;
   proc.state = evaluator_.create_state(script, opts.env, popts);
   proc.state.stats.start();
   processes_.emplace(pid, std::make_shared<process>(std::move(proc)));

@@ -1467,12 +1467,28 @@ void Runtime::Impl::pump_and_sweep_actions() {
     if (!info || info->status == se::process_status::terminated) {
       it = live_actions_.erase(it); // normal completion (or already reaped from the process map)
     } else if (info->status == se::process_status::killed) {
-      warn_once("ari: on: action program did not complete (a runtime error or resource limit)");
+      // The exit error says why: a syntax error (scripts are read inside the process), a runtime
+      // error or a resource limit.
+      warn_once("ari: on: action program did not complete: " +
+                sched.get_exit_error(it->first).value_or("killed"));
       it = live_actions_.erase(it);
     } else {
       ++it; // ready/running/waiting — still in flight (e.g. suspended on await/msg-recv/sleep)
     }
   }
+  // A resident never finishes on its own, so one that was killed (a syntax error in its body,
+  // read inside the process; a runtime error; its per-step cap) is reported, once per reason.
+  const auto report_killed_resident = [&](int pid, const std::string &channel) {
+    if (pid < 0)
+      return;
+    auto info = sched.get_process_info(pid);
+    if (info && info->status == se::process_status::killed)
+      warn_once("ari: resident [" + channel +
+                "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
+  };
+  report_killed_resident(tick_resident_pid_, tick_channel());
+  report_killed_resident(key_resident_pid_, key_channel());
+  report_killed_resident(pointer_resident_pid_, pointer_channel());
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,

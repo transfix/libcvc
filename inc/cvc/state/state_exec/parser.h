@@ -57,9 +57,10 @@ struct parse_options {
 
 /// Resolve parser settings from a state tree, per key: `state_exec.schedulers.<scheduler_id>.
 /// parser.<key>` (when scheduler_id is not empty), then `state_exec.defaults.parser.<key>`, then
-/// the parse_options default. A value that is missing, empty, not a positive integer or out of
-/// range is skipped.
-parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id = {});
+/// `base` (a host's built-in defaults; parse_options{} unless it has its own). A value that is
+/// missing, empty, malformed or out of range is skipped; max_depth must also be positive.
+parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id = {},
+                                       const parse_options &base = {});
 
 /// Parse a single S-expression from the input string.
 /// Returns the parsed value_t.
