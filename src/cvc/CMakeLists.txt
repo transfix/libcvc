@@ -21,6 +21,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/dimension.h
   ../../inc/cvc/volume/voxels.h
   ../../inc/cvc/geometry/geometry.h
+  ../../inc/cvc/geometry/height_field.h
   ../../inc/cvc/geometry/simplify.h
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
@@ -174,6 +175,7 @@ set(SOURCE_FILES
   volume/cvcraw_io.cpp
   processing/gdtv_filter.cpp
   geometry/geometry.cpp
+  geometry/height_field.cpp
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
   geometry/fem.cpp
