@@ -251,14 +251,19 @@ TEST(PhysicsPose, SamplersNeverSeeHalfACapture) {
       samples.fetch_add(1);
     }
   });
-  for (int f = 0; f < 2000; ++f) {
+  // Step until both sides have done real work: a fast machine can finish 2000
+  // frames before the viewer thread is first scheduled. The cap only stops a
+  // viewer that never runs from hanging the test.
+  while (samples.load() == 0)
+    std::this_thread::yield();
+  for (int f = 0; (f < 2000 || samples.load() < 200) && f < 2000000; ++f) {
     clock.advance_ticks(1 + f % 3);
     t.follow(clock);
   }
   done.store(true);
   viewer.join();
   EXPECT_EQ(torn.load(), 0);
-  EXPECT_GT(samples.load(), 0);
+  EXPECT_GE(samples.load(), 200);
   EXPECT_EQ(w.tick(), t.tick());
 }
 
