@@ -454,10 +454,11 @@ int main(int argc, char **argv) {
       std::printf("nav_city_swarm: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris%s\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
                   (unsigned long long)cityMesh.num_tris(),
-                  terrain.empty() ? ""
-                                  : (std::string(" (terrain ") + std::to_string(terrain.rows) +
-                                     "x" + std::to_string(terrain.cols) + ")")
-                                        .c_str());
+                  terrain.empty()
+                      ? ""
+                      : (std::string(" (terrain ") + std::to_string(terrain.field->rows()) + "x" +
+                         std::to_string(terrain.field->cols()) + ")")
+                            .c_str());
     } else {
       std::printf("nav_city_swarm: bundle '%s' incomplete; using the synthetic city\n",
                   bundle.c_str());

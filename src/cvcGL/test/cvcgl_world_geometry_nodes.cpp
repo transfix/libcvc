@@ -4,7 +4,9 @@
 //   2. a node's geometry IS the item's (the arrays are shared, not copied: the
 //      same points buffer), plus colours where the item had none;
 //   3. colours come from the surfaces: a terrain cell's albedo, a mesh's surface;
-//   4. a mesh's placement becomes the node's pose; a height field is never moved.
+//   4. a mesh's placement becomes the node's pose; a height field is never moved;
+//   5. under a frame node, the nodes are its children, so its transform moves the
+//      whole world (world = frame x placement).
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
 #include <cmath>
@@ -117,12 +119,32 @@ void test_placement_becomes_the_pose() {
   CHECK(terrain && near(terrain->GetElement(0, 3), 0.0) && near(terrain->GetElement(2, 3), 0.0));
 }
 
+void test_a_frame_node_carries_the_world() {
+  std::printf("test_a_frame_node_carries_the_world\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  auto frame = sg.addGraphics("origin");
+  const double shift[16] = {1, 0, 0, -1000, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  frame->setTransform(shift);
+  const auto nodes = cvc::gl::add_world_geometry(sg, sample_world(), "", frame);
+  sg.processEvents();
+  CHECK(nodes.size() == 2);
+  CHECK(frame->findChildByName("terrain") == nodes[0]); // a child of the frame
+  CHECK(sg.getGraphics("terrain") == nullptr);          // not top-level
+  const vtkMatrix4x4 *roof = nodes[1]->getTransform();  // local: the placement
+  CHECK(roof && near(roof->GetElement(0, 3), 5.0));
+  const auto world = nodes[1]->getWorldTransform(); // world: frame x placement
+  CHECK(near(world->GetElement(0, 3), -995.0) && near(world->GetElement(2, 3), 3.0));
+  CHECK(near(nodes[0]->getWorldTransform()->GetElement(0, 3), -1000.0));
+}
+
 } // namespace
 
 int main() {
   test_one_node_per_render_item();
   test_nodes_share_the_items_arrays_and_take_surface_colours();
   test_placement_becomes_the_pose();
+  test_a_frame_node_carries_the_world();
   if (g_failures) {
     std::printf("cvcgl_world_geometry_nodes: %d FAILURE(S)\n", g_failures);
     return 1;

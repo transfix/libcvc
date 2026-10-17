@@ -21,6 +21,11 @@
 // mean albedo of the faces around it, so a terrain shows its land cover and a
 // building its shell. A mesh item's placement becomes the node's pose.
 //
+// `parent` is the node that stands for the world's frame: the nodes are made its
+// children (top-level nodes without one), so a transform on it (a render origin,
+// a scale) moves the whole world. Give the same node to
+// cvc::gl::physics_scene_binding::set_frame and the bodies share that frame.
+//
 // Call it on the scene's owner thread, like SceneGraph::addGraphics.
 
 #ifndef __CVC_GL_WORLD_GEOMETRY_NODES_H__
@@ -39,7 +44,8 @@ class SceneGraph;
 
 std::vector<std::shared_ptr<GraphicsNode>>
 add_world_geometry(SceneGraph &sg, const cvc::world::world_geometry &g,
-                   const std::string &prefix = std::string());
+                   const std::string &prefix = std::string(),
+                   const std::shared_ptr<GraphicsNode> &parent = nullptr);
 
 // The colours add_world_geometry gives a geometry without its own: per vertex, the
 // mean albedo of its faces' surfaces (`surface` for faces without one).

@@ -11,7 +11,9 @@
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/world_planes.h>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -95,7 +97,8 @@ TEST(NavCommonBlit, PlotLineClipsAndWritesInBounds) {
   EXPECT_EQ(f.dst()[(static_cast<std::size_t>(2) * f.dw + 20) * 3], 9);
 }
 
-// occupancy_from_model must always produce an nx*ny grid and never index out of it.
+// cvc::nav::mesh_footprint (the demos' old occupancy_from_model, now in the library) must
+// always produce an nx*ny grid and never index out of it.
 TEST(NavCommonOccupancy, RasterizesTriangleWithinGrid) {
   navdemo::Bounds b{0, 0, 100, 100};
   cvc::geometry g;
@@ -104,7 +107,7 @@ TEST(NavCommonOccupancy, RasterizesTriangleWithinGrid) {
   g.points().push_back({50, 90, 0});
   g.tris().push_back({0, 1, 2});
   const int nx = 64, ny = 64;
-  const auto occ = navdemo::occupancy_from_model(g, b, nx, ny, 0);
+  const auto occ = cvc::nav::mesh_footprint(g, ny, nx, b.min_x, b.min_y, b.max_x, b.max_y);
   ASSERT_EQ(occ.size(), static_cast<std::size_t>(nx) * ny);
   long n = 0;
   for (auto v : occ)
@@ -113,7 +116,7 @@ TEST(NavCommonOccupancy, RasterizesTriangleWithinGrid) {
   EXPECT_LT(n, nx * ny); // but not the whole grid
   EXPECT_EQ(occ[0], 0);  // the (0,0) corner is outside the triangle
   // Dilation only grows the footprint.
-  const auto occ1 = navdemo::occupancy_from_model(g, b, nx, ny, 1);
+  const auto occ1 = cvc::nav::inflate(occ.data(), ny, nx, 1);
   ASSERT_EQ(occ1.size(), occ.size());
   long n1 = 0;
   for (auto v : occ1)
@@ -124,9 +127,12 @@ TEST(NavCommonOccupancy, RasterizesTriangleWithinGrid) {
 TEST(NavCommonOccupancy, EmptyMeshAndDegenerateBoundsAreSafe) {
   cvc::geometry g; // no triangles
   navdemo::Bounds ok{0, 0, 10, 10}, bad{0, 0, 0, 0};
-  EXPECT_EQ(navdemo::occupancy_from_model(g, ok, 8, 8, 0).size(), 64u);
-  EXPECT_EQ(navdemo::occupancy_from_model(g, bad, 8, 8, 0).size(), 64u); // degenerate -> all free
-  EXPECT_EQ(navdemo::occupancy_from_model(g, ok, 1, 1, 0).size(), 1u);   // too small -> no crash
+  EXPECT_EQ(cvc::nav::mesh_footprint(g, 8, 8, ok.min_x, ok.min_y, ok.max_x, ok.max_y).size(), 64u);
+  // A degenerate extent or a grid too small to have cells is refused, not guessed at.
+  EXPECT_THROW(cvc::nav::mesh_footprint(g, 8, 8, bad.min_x, bad.min_y, bad.max_x, bad.max_y),
+               std::invalid_argument);
+  EXPECT_THROW(cvc::nav::mesh_footprint(g, 1, 1, ok.min_x, ok.min_y, ok.max_x, ok.max_y),
+               std::invalid_argument);
 }
 
 // ── plan_route standoff ──────────────────────────────────────────────────────
@@ -210,9 +216,7 @@ TEST(NavCommonTerrain, SamplesTheWorldsHeightField) {
   std::vector<float> h = {0, 1, 2, 4, 3, 5, 1, 2, 6}; // 3 x 3, row 0 at min_y
   auto field = std::make_shared<cvc::height_field>(3, 3, -1.0, -1.0, 1.0, 1.0, h);
   navdemo::Terrain t;
-  t.rows = t.cols = 3;
   t.bounds = {-1.0, -1.0, 1.0, 1.0};
-  t.grid.assign(h.begin(), h.end());
   t.field = field;
   for (double x = -1.0; x <= 1.0; x += 0.125)
     for (double y = -1.0; y <= 1.0; y += 0.125)

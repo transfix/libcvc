@@ -134,6 +134,55 @@ engine, so no backend sees `cvc::geometry`.
 - **`cvc::bounding_box` treats a zero-volume box as empty**, and a flat terrain has zero volume, so
   `world_geometry::bounds()` returns its own min/max pair.
 
+### Frames in the scene graph
+
+The renderer keeps a retained-mode hierarchy. Each `GraphicsNode` caches world = parent world ×
+local, cascades it top-down when a transform changes, and hands it to its VTK props. Every node
+type (geometry, volumes, LOD) respects its local transform and its ancestors'.
+
+The physics world's frame is a node: the scene root by default, or any frame node, such as a
+render-origin offset that keeps city-scale coordinates out of float precision.
+
+- `gl::add_world_geometry(sg, g, prefix, parent)` makes the static world's nodes children of the
+  frame node.
+- `gl::physics_scene_binding::set_frame(parent)` poses each body's node so that its *world* matrix
+  is frame × body pose, at any depth (`GraphicsNode::setWorldPoseMatrix`, composed on the owner
+  thread).
+- Static and dynamic geometry therefore share one frame.
+
+### Fields (G6): volumes as physics media
+
+`cvc::volume` is already the scene's voxel object (`VolumeNode` draws it). It is a scalar grid with
+a bounding box and trilinear `interpolate()`. G6 makes the same volumes physics media:
+
+- **Field items in `world_geometry`**, beside the surface items:
+  - a name;
+  - a `std::shared_ptr<const cvc::volume>`, placed by its bounding box in world coordinates (plus
+    an optional rigid placement, like a mesh's);
+  - a kind and its parameters.
+
+  A vector field (wind) is three co-registered volumes, checked for equal dimensions and bounds.
+  The renderer draws the same objects, so what a viewer sees is what a body feels.
+- **Kinds:**
+  - **fluid**: density, plus optional velocity, for buoyancy and drag (a water body, a river's
+    current);
+  - **deformable medium**: depth or density, plus bearing strength, for sinkage and rolling
+    resistance (snow over terrain, mud, sand);
+  - **flow**: air velocity, for aerodynamic drag on a body's velocity relative to the air.
+- **Where the physics happens.** Jolt knows contacts, not fields, so the facade runs a **field
+  step** before each engine step. For each dynamic body overlapping a field's bounds, it samples
+  the field at points on the body's shape (box corners and centre, sphere samples), in double
+  precision, bodies in sorted order, and applies the forces through the next step:
+  - buoyancy ρ g V_submerged at the centre of buoyancy;
+  - drag ½ ρ C_d A |v_rel| v_rel;
+  - a Bekker-style pressure–sinkage resistance in a medium.
+
+  The fixed order and double-precision sampling keep `state_hash` reproducible across platforms.
+- **The vehicle (P2).** Its tire model reads the medium under each wheel (sinkage, rolling
+  resistance) and the flow around the body. The energy ledger (P3) books the work each field does.
+- **Time-varying fields** (gusts, a rising river) are new volumes swapped in between steps:
+  copy-on-write, so readers never see half an update.
+
 ## Phases
 
 | Phase | What | Gate |
@@ -142,8 +191,10 @@ engine, so no backend sees `cvc::geometry`.
 | **G2** | Physics consumes canonical geometry: the `mesh` and `terrain` shapes, with the Jolt backend building from them | P1's gates unchanged; a box on a `height_field` rests at `height(x, y)` ±1 cm; per-face materials reach contacts |
 | **G3a** | `world_geometry` and the surface table; the city bundle loader (one `terrain.json` parser, the measured row order, glTF frame options); `gl::add_world_geometry` and `physics::add_world_geometry` | Building bases on the terrain, RMS ≤ 0.5 m on the Austin bundle (measured 0.465 m over 5636 buildings by `CityBundle.RealBundleBuildingsSitOnTheTerrain`); render, physics and nav heights agree at every grid sample |
 | **G3b** | The city demos (`nav_city_swarm`, `nav_city_drive`) draw and collide with `load_city_bundle`'s `world_geometry` | The buildings stand on the ground on screen; no demo flips rows or lifts buildings |
-| **G4** | Nav planes from `world_geometry`; land cover as surfaces (a `city_bundle_options::land_cover` provider over `segment_scene_material`, from outside `cvc::world`); physics materials get their `nav_material`; `navdemo::Terrain`, `material_raster`'s parser, pycvc's `terrain_grid` and Ariadne's `TerrainHeights` retire | Nav goldens unchanged where the old path was right; the y-mirror and the double lift fixed |
-| **G5** | Ariadne `physics:` and `body:` specs; Ariadne height fields are `cvc::height_field` | A scene spec puts a crate on a height field and it lands where the renderer draws the ground |
+| **G4a** | `nav::rasterize` (occupancy, height, surface, rho, hard and mu planes from `world_geometry`) and `nav::mesh_footprint` (the demos' `occupancy_from_model`, moved into the library unchanged); land cover as surfaces (`nav::land_cover_provider` over `segment_scene_material`); `nav::palette_ids` for physics materials' `nav_material`; `world::read_terrain_extent`, so `material_raster` and `nav_finale` drop their own `terrain.json` parsers; `navdemo::Terrain` becomes a view of the shared `height_field`; `gl::add_world_geometry(parent)` | The footprint is the old occupancy bit for bit (`NavWorldPlanes.FootprintIsTheOldOccupancyBitForBit`); land cover reaches the Austin terrain's cells |
+| **G4b** | pycvc: `load_city_bundle`, `height_field` and `world_geometry`, so `pymod_gl/scenes.py`'s `terrain_grid` retires | Python reads the same terrain as C++ |
+| **G5** | Ariadne `physics:` and `body:` specs; Ariadne height fields are `cvc::height_field` (and `TerrainHeights` reads them instead of guessing a grid from a vertex count) | A scene spec puts a crate on a height field and it lands where the renderer draws the ground |
+| **G6** | Fields: `cvc::volume`s as physics media (below) | A box floats at the waterline its density predicts; a vehicle sinks into a snow field to the depth its load predicts; a body in a wind field drifts at the drag-balance speed |
 
 P6a's pose binding (`pose_tracker`, `physics_scene_binding`) moves dynamic bodies. This plan covers
 everything static. A dynamic body's visual and collision geometry can be one `cvc::geometry` too,

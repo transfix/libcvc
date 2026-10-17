@@ -265,6 +265,8 @@ set(SOURCE_FILES
   nav/drive.cpp
   nav/material.cpp
   nav/material_raster.cpp
+  nav/world_planes.cpp
+  nav/land_cover.cpp
   nav/coef_energy_net.cpp
   nav/coef_energy_net_backward.cpp
   nav/coef_energy_net_io.cpp
