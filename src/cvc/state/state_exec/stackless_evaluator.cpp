@@ -1081,22 +1081,27 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
 
 value_t stackless_evaluator::substitute(const value_t &tmpl,
                                         const std::unordered_map<std::string, value_t> &subst) {
-  if (auto *sym = std::get_if<symbol>(&tmpl.v)) {
-    auto it = subst.find(sym->name);
-    if (it != subst.end())
-      return it->second;
-    return tmpl;
+  // Like the evaluator, the copy keeps its work on the heap, not the native stack, so a
+  // template of any depth expands. (source, destination) pairs: each destination is a slot of
+  // a list copy allocated at its final size, so it stays put while the copy fills in.
+  value_t result;
+  std::vector<std::pair<const value_t *, value_t *>> pending{{&tmpl, &result}};
+  while (!pending.empty()) {
+    auto [src, dst] = pending.back();
+    pending.pop_back();
+    if (auto *sym = std::get_if<symbol>(&src->v)) {
+      auto it = subst.find(sym->name);
+      *dst = it != subst.end() ? it->second : *src;
+    } else if (auto *lp = std::get_if<list_ptr>(&src->v); lp && *lp) {
+      auto copy = std::make_shared<std::vector<value_t>>((*lp)->size());
+      *dst = value_t{copy};
+      for (std::size_t i = (*lp)->size(); i-- > 0;)
+        pending.emplace_back(&(**lp)[i], &(*copy)[i]);
+    } else {
+      *dst = *src;
+    }
   }
-  if (auto *lp = std::get_if<list_ptr>(&tmpl.v)) {
-    if (!*lp)
-      return tmpl;
-    auto result = std::make_shared<std::vector<value_t>>();
-    result->reserve((*lp)->size());
-    for (auto &e : **lp)
-      result->push_back(substitute(e, subst));
-    return value_t{std::move(result)};
-  }
-  return tmpl;
+  return result;
 }
 
 } // namespace cvc::state_exec
