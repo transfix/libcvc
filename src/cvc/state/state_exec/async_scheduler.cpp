@@ -3,6 +3,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/scheduler.h> // max_alloc_bytes_from_state
 
 namespace cvc::state_exec {
 
@@ -34,6 +35,9 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
+  // No load_settings() here: read the allocation limit from the tree on every submission.
+  proc.max_alloc_bytes =
+      watch_root_ ? max_alloc_bytes_from_state(*watch_root_, {}) : kDefaultMaxAllocBytes;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -65,6 +69,9 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
+  // No load_settings() here: read the allocation limit from the tree on every submission.
+  proc.max_alloc_bytes =
+      watch_root_ ? max_alloc_bytes_from_state(*watch_root_, {}) : kDefaultMaxAllocBytes;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -174,6 +181,8 @@ void async_scheduler::execute_process_step(process &proc) {
   if (proc.max_step_time > 0.0)
     step_budget = step_budget ? std::min(*step_budget, proc.max_step_time) : proc.max_step_time;
   eval_deadline_guard step_deadline(step_budget);
+  // Bound what one native call in this step may allocate (see scheduler.cpp).
+  eval_alloc_guard step_alloc(proc.alloc_limit(mem_tracker_.current_bytes(proc.pid)));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   // Drive one async_stackless_evaluator step to completion at the leaf. The evaluator's step()
@@ -702,6 +711,7 @@ int async_scheduler::fork(int pid) {
   child->max_time = parent.max_time;
   child->max_step_time = parent.max_step_time;
   child->max_memory = parent.max_memory;
+  child->max_alloc_bytes = parent.max_alloc_bytes;
   child->max_messages = parent.max_messages;
   child->max_message_bytes = parent.max_message_bytes;
   child->signal_handlers = parent.signal_handlers;

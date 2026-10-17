@@ -132,6 +132,7 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 **I/O:** `print`
 **Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
+**Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
 #### Type Conversion
 
@@ -888,6 +889,7 @@ sched.load_settings();         // read and apply settings
 | Setting | Per-scheduler path | Global path | Default |
 |---------|-------------------|-------------|---------|
 | `max_pending_messages` | `state_exec.schedulers.<id>.max_pending_messages` | `state_exec.defaults.max_pending_messages` | `1024` |
+| `limits.max_alloc_bytes` | `state_exec.schedulers.<id>.limits.max_alloc_bytes` | `state_exec.defaults.limits.max_alloc_bytes` | `16777216` ([§11](#allocation-limit)) |
 
 ```cpp
 // Set a global default for all schedulers
@@ -907,6 +909,7 @@ After `load_settings()`, the scheduler publishes its effective
 configuration back to the state tree:
 
 - `state_exec.schedulers.<id>.max_pending_messages` — the resolved cap
+- `state_exec.schedulers.<id>.limits.max_alloc_bytes` — the resolved per-call allocation limit
 - `state_exec.schedulers.<id>.policy` — `"round_robin"`, `"priority"`, or `"priority_rr"`
 
 ---
@@ -1290,75 +1293,181 @@ coord.set_resource_policy(policy);
 
 ## 11. Standard Library
 
-The `stdlib_registry` provides additional functions organized into modules.
-Import a module into a process's environment to make its functions available:
+Four modules of native functions sit beside the builtins: `string`, `bytes`, `math` and
+`collections`. Every environment made by `builtins::make_default_environment()` reaches them,
+so every host does without an import step:
+
+- the sync and async schedulers' default environment (`cvc exec`, `app::exec_scheduler()`);
+- Ariadne's `init:`, action (`on:`) and resident lanes;
+- pycvc's `Exec`.
+
+```lisp
+(string.length "café")        ;; => 4
+(math.sqrt 16)                ;; => 4
+(collections.reverse (list 1 2 3)) ;; => (3 2 1)
+```
+
+Every name carries its module prefix, so none clashes with a builtin: `length`, `range` and
+`slice` are still the builtins, and `string.length` or `collections.range` are the stdlib.
+
+### How the modules are loaded
+
+`stdlib_registry::shared_scope()` builds one scope holding every function of
+`stdlib_registry::standard()`, once per process. `make_default_environment()` links it as its
+outer scope, so a lookup that misses the builtins falls through to it. Nothing is copied into
+each environment.
+
+The shared scope is frozen. `set`, `defun` and `environment::set_existing()` never write into
+it: a program that rebinds a stdlib name shadows it in its own scope, and other programs keep
+the real function.
+
+```lisp
+(set string.length 42)
+string.length                 ;; => 42 in this program only
+```
+
+Downstream C++ code can build its own `stdlib_registry`, add modules with
+`register_function()`, and import them into an environment it owns:
 
 ```cpp
 #include <cvc/state/state_exec/stdlib.h>
 
-stdlib_registry stdlib;
-
-// Import all functions from a module
-stdlib.import_module("string", env);
-stdlib.import_module("math", env);
-stdlib.import_module("collections", env);
-
-// Import specific functions
-stdlib.import_module("math", env, {"math.sqrt", "math.abs"});
+stdlib_registry mine;
+mine.register_function("geo", "geo.area", area_fn);
+mine.import_module("geo", env);                       // every function of the module
+mine.import_module("geo", env, {"geo.area"});         // or a subset
 ```
 
-### Module: `string` (12 functions)
+### Allocation limit
+
+A native call builds its whole result inside one evaluator step. The per-process
+`max_memory` check runs between steps and counts only state-tree writes, so it cannot see
+`(collections.range 1000000000)`. Each function whose result can be larger than all of its
+arguments therefore estimates the result's size and fails before allocating when it is over
+the limit:
+
+- `string.split`, `string.join`, `string.replace`, `bytes.concat`;
+- `collections.range`, `collections.zip`, `collections.flatten`, `collections.dict-merge`;
+- the builtins `str-concat` and `collect`.
+
+The limit for a step is the tighter of two values:
+
+1. the tree setting `limits.max_alloc_bytes` (table below; `0` means no limit of its own);
+2. what is left of the process's `max_memory`, when it has one.
+
+| Setting | Per-scheduler path | Global path | Default |
+|---------|-------------------|-------------|---------|
+| `limits.max_alloc_bytes` | `state_exec.schedulers.<id>.limits.max_alloc_bytes` | `state_exec.defaults.limits.max_alloc_bytes` | `16777216` (16 MiB) |
+
+The sync scheduler resolves it in `load_settings()` and publishes the effective value under
+`state_exec.schedulers.<id>.limits.max_alloc_bytes`. The async scheduler (the app's exec
+scheduler, and the one inside pycvc's `Exec`) reads the global path on every submission. A
+bare evaluator, or a native called directly from C++, gets the 16 MiB default.
+
+A call over the limit is a runtime error naming the function. The async scheduler kills the
+process with it as the exit error; the sync scheduler's `run()` throws it:
 
 ```lisp
-(string.split "a,b,c" ",")         ;; => ("a" "b" "c")
+(collections.range 1000000000)
+;; error: collections.range: the result needs <n> bytes, over the allocation limit of
+;;        16777216 bytes (limits.max_alloc_bytes, or what is left of max_memory)
+```
+
+`collections.unique` and `collections.dict-merge` are quadratic, so they also poll the
+evaluation deadline (`max_time`) as they go.
+
+### In Ariadne predicates
+
+A per-frame predicate (`visible_when`, `bind`, `fmt`, …) runs in a reduced environment. It
+gets the stdlib functions whose result is a scalar or no bigger than their argument:
+
+- `string.length`, `string.byte-length`, `string.char-at`, `string.substring`,
+  `string.upper`, `string.lower`, `string.trim`, `string.starts-with`, `string.ends-with`,
+  `string.contains`;
+- `bytes.length`, `bytes.byte-at`;
+- every `math.*` function except `math.random`, which would make a predicate
+  nondeterministic.
+
+The rest (`string.join`/`replace`/`split`/`encode`, `bytes.slice`/`concat`/`decode` and all of
+`collections.*`) are unbound in a predicate until they run as scheduled work, a slice per
+step. The `init:` and action lanes get every function.
+
+### Module: `string` (14 functions)
+
+Indices and lengths count code points, not bytes (`UNICODE_SUPPORT_ROADMAP.md` SE-1).
+
+```lisp
+(string.split "a,b,c" ",")           ;; => ("a" "b" "c")
+(string.split "né" "")               ;; => ("n" "é")   one element per code point
 (string.join (list "a" "b" "c") ",") ;; => "a,b,c"
-(string.replace "hello" "l" "r")    ;; => "herro"
-(string.trim "  hello  ")           ;; => "hello"
-(string.upper "hello")              ;; => "HELLO"
-(string.lower "HELLO")              ;; => "hello"
-(string.starts-with "hello" "he")   ;; => true
-(string.ends-with "hello" "lo")     ;; => true
-(string.contains "hello" "ell")     ;; => true
-(string.substring "hello" 1 3)      ;; => "el"
-(string.char-at "hello" 0)          ;; => "h"
-(string.length "hello")             ;; => 5
+(string.replace "hello" "l" "r")     ;; => "herro"
+(string.trim "  hello  ")            ;; => "hello"
+(string.upper "hello")               ;; => "HELLO"   ASCII letters only
+(string.lower "HELLO")               ;; => "hello"
+(string.starts-with "hello" "he")    ;; => #t
+(string.ends-with "hello" "lo")      ;; => #t
+(string.contains "hello" "ell")      ;; => #t
+(string.substring "hello" 1 3)       ;; => "ell"   (start, length)
+(string.char-at "café" 3)            ;; => "é"
+(string.length "café")               ;; => 4
+(string.byte-length "café")          ;; => 5
+(string.encode "café")               ;; => b"caf\xc3\xa9"   utf-8 only
+```
+
+### Module: `bytes` (5 functions)
+
+Byte semantics throughout; `string.encode` and `bytes.decode` are the only crossings between
+text and bytes.
+
+```lisp
+(bytes.length b"\x01\x02")           ;; => 2
+(bytes.byte-at b"\x01\xff" 1)        ;; => 255
+(bytes.slice b"abcd" 1 2)            ;; => b"bc"   (start, length)
+(bytes.concat b"ab" b"cd")           ;; => b"abcd"
+(bytes.decode b"caf\xc3\xa9")        ;; => "café"  invalid UTF-8 is an error
 ```
 
 ### Module: `math` (16 functions)
 
 ```lisp
-(math.sqrt 16)       ;; => 4.0
+(math.sqrt 16)       ;; => 4
 (math.abs -5)        ;; => 5
-(math.floor 3.7)     ;; => 3.0
-(math.ceil 3.2)      ;; => 4.0
-(math.round 3.5)     ;; => 4.0
-(math.pow 2 10)      ;; => 1024.0
-(math.log 2.718)     ;; => ~1.0
-(math.sin 0)         ;; => 0.0
-(math.cos 0)         ;; => 1.0
-(math.min 3 7 1 5)   ;; => 1
-(math.max 3 7 1 5)   ;; => 7
-(math.clamp 15 0 10) ;; => 10
-(math.pi)            ;; => 3.14159...
-(math.e)             ;; => 2.71828...
-(math.random)        ;; => random double in [0,1)
+(math.floor 3.7)     ;; => 3       an integer
+(math.ceil 3.2)      ;; => 4       an integer
+(math.round 3.5)     ;; => 4       an integer
+(math.pow 2 10)      ;; => 1024
+(math.log 1)         ;; => 0
+(math.sin 0)         ;; => 0
+(math.cos 0)         ;; => 1
+(math.tan 0)         ;; => 0
+(math.min 3 7 1 5)   ;; => 1       a float
+(math.max 3 7 1 5)   ;; => 7       a float
+(math.clamp 15 0 10) ;; => 10      a float
+(math.pi)            ;; => 3.14159
+(math.e)             ;; => 2.71828
+(math.random)        ;; => a float in [0, 1)
 ```
 
 ### Module: `collections` (12 functions)
 
+`collections.map`, `filter` and `reduce` take the list first, then a native function: a
+builtin or a stdlib function. A DSL `lambda` is not accepted yet; it needs the scheduled-work
+mechanism above.
+
 ```lisp
-(collections.map (lambda (x) (* x x)) (list 1 2 3))     ;; => (1 4 9)
-(collections.filter (lambda (x) (> x 2)) (list 1 2 3 4)) ;; => (3 4)
-(collections.reduce (lambda (a b) (+ a b)) (list 1 2 3) 0) ;; => 6
-(collections.zip (list 1 2) (list "a" "b"))               ;; => ((1 "a") (2 "b"))
-(collections.flatten (list (list 1 2) (list 3 4)))         ;; => (1 2 3 4)
-(collections.sort (list 3 1 2))                            ;; => (1 2 3)
-(collections.reverse (list 1 2 3))                         ;; => (3 2 1)
-(collections.range 1 5)                                    ;; => (1 2 3 4)
-(collections.unique (list 1 2 2 3 3))                      ;; => (1 2 3)
-(collections.dict-keys (dict "a" 1 "b" 2))                 ;; => ("a" "b")
-(collections.dict-values (dict "a" 1 "b" 2))               ;; => (1 2)
-(collections.dict-merge (dict "a" 1) (dict "b" 2))         ;; => {a: 1, b: 2}
+(collections.map (list 1 4 9) math.sqrt)          ;; => (1 2 3)
+(collections.filter (list 1 "a" 2) is-int)        ;; => (1 2)
+(collections.reduce (list 1 2 3) + 0)             ;; => 6
+(collections.zip (list 1 2) (list "a" "b"))       ;; => ((1 "a") (2 "b"))
+(collections.flatten (list (list 1 2) 3 (list 4))) ;; => (1 2 3 4)   one level
+(collections.sort (list 3 1 2))                   ;; => (1 2 3)
+(collections.reverse (list 1 2 3))                ;; => (3 2 1)
+(collections.range 1 5)                           ;; => (1 2 3 4)
+(collections.range 5 0 -2)                        ;; => (5 3 1)
+(collections.unique (list 1 2 2 3 3))             ;; => (1 2 3)
+(collections.dict-keys (dict "a" 1 "b" 2))        ;; => ("a" "b")
+(collections.dict-values (dict "a" 1 "b" 2))      ;; => (1 2)
+(collections.dict-merge (dict "a" 1) (dict "b" 2)) ;; => {"a": 1, "b": 2}
 ```
 
 ---
@@ -1556,7 +1665,7 @@ unique socket paths (incorporating PID or a UUID) and
 ├─────────────────────────────────────────────────────────────────┤
 │  parser.h        → value_t AST                                 │
 │  builtins.h      → +,-,*,/,list,dict,str,...                   │
-│  stdlib.h        → string.*,math.*,collections.*               │
+│  stdlib.h        → string.*,bytes.*,math.*,collections.*       │
 ├─────────────────────────────────────────────────────────────────┤
 │  evaluator.h              → sync recursive (local only)        │
 │  stackless_evaluator.h    → sync stackless (serializable)      │
@@ -1606,6 +1715,6 @@ types.h ← parser.h ← builtins.h ← evaluator.h
               task.h ← async_evaluator.h
                      ← async_stackless_evaluator.h
          resource_policy.h ← exec_coordinator.h
-              stdlib.h (standalone)
+              stdlib.h ← builtins.cpp (the shared stdlib scope)
          memory_tracker.h ← scheduler.h
 ```
