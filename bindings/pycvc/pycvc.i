@@ -1439,10 +1439,11 @@ class AsyncStateObserver(state_observer):
 
 // ── state_exec parser settings (docs/STATE_EXEC_GRAMMAR.md, "Parser settings") ──
 // DIRECT WRAP, under the C++ names: the real cvc::state_exec::parse_options
-// struct and async_scheduler::host_parser_defaults(). Only these members are
-// declared to SWIG; the rest of parser.h / async_scheduler.h (value_t, the
-// parser, the scheduler itself) is not wrapped yet, so async_scheduler has no
-// Python constructor. parse_options_from_state and Exec's parser_defaults /
+// struct, parse_options_from_state (which takes a State, the tree root, as in
+// C++: pycvc.State.instance(app)) and async_scheduler::host_parser_defaults().
+// Only these members are declared to SWIG; the rest of parser.h /
+// async_scheduler.h (value_t, the parser, the scheduler itself) is not wrapped
+// yet, so async_scheduler has no Python constructor. Exec's parser_defaults /
 // set_parser_defaults are in pycvc_exec.h.
 %{
 #include <cvc/state/state_exec/async_scheduler.h>
@@ -1454,6 +1455,9 @@ struct parse_options {
   size_t max_depth;   // lists and quotes that may nest (default 256)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
 };
+parse_options parse_options_from_state(cvc::state &root,
+                                       const std::string &scheduler_id = std::string(),
+                                       const parse_options &base = parse_options());
 %nodefaultctor async_scheduler;
 %nodefaultdtor async_scheduler;
 class async_scheduler {

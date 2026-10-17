@@ -201,7 +201,8 @@ pycvc.parse_options()                                 # max_depth 256, step_toke
 pycvc.async_scheduler.host_parser_defaults()          # step_tokens 1024
 ex.parser_defaults()                                  # == host_parser_defaults()
 pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "64")  # tree overrides
-pycvc.parse_options_from_state(app, "", ex.parser_defaults())       # what Exec uses
+root = pycvc.State.instance(app)                      # the tree root, as in C++
+pycvc.parse_options_from_state(root, "", ex.parser_defaults())      # what Exec uses
 ```
 
 `Exec` starts from the same defaults as the app's exec scheduler (Ariadne), and
