@@ -168,7 +168,11 @@ void async_scheduler::execute_process_step(process &proc) {
     step_budget = step_budget ? std::min(*step_budget, proc.max_step_time) : proc.max_step_time;
   eval_deadline_guard step_deadline(step_budget);
   // Bound what one native call in this step may allocate (see scheduler.cpp).
-  eval_alloc_guard step_alloc(proc.alloc_limit(mem_tracker_.current_bytes(proc.pid)));
+  // Armed only when it changes something (see scheduler.cpp).
+  std::optional<eval_alloc_guard> step_alloc;
+  if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
+    step_alloc.emplace(
+        proc.alloc_limit(proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) : 0));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   // Drive one async_stackless_evaluator step to completion at the leaf. The evaluator's step()
