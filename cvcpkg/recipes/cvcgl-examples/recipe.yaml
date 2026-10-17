@@ -93,6 +93,10 @@ depends:
       platforms: [wasm-mt]
     - name: zlib
       platforms: [wasm-mt]
+    # The wasm build compiles cvc from this tree, so it needs cvc's build-only
+    # PEGTL (the state_exec grammar engine) too.
+    - name: pegtl
+      platforms: [wasm-mt]
     # cgal is intentionally NOT a dependency: build-wasm.sh passes
     # -DDISABLE_CGAL=ON so it is never linked, and there is no wasm-mt cgal
     # bundle on the catalog anyway.
