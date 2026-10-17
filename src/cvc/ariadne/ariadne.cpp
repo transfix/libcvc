@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cvc/ariadne/ariadne.h>
@@ -260,6 +261,23 @@ void clear_action_intrinsics() {
 }
 
 namespace {
+// §7.4 an action's memory budget: the tree setting ariadne.limits.action_max_memory (bytes;
+// 0 = no limit), read on every submission so a host can tune it live. It also bounds each
+// native call's allocations in the action (state_exec's per-step allocation limit takes what
+// is left of max_memory). A missing or unparsable value keeps the 4 MiB default.
+uint64_t action_max_memory(cvc::state &root) {
+  constexpr uint64_t kDefault = uint64_t{4} << 20;
+  cvc::state *node = root.findDescendant("ariadne.limits.action_max_memory");
+  if (!node)
+    return kDefault;
+  const std::string v = node->value();
+  uint64_t bytes = 0;
+  const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), bytes);
+  return !v.empty() && ec == std::errc() && end == v.data() + v.size() ? bytes : kDefault;
+}
+} // namespace
+
+namespace {
 // Run `script` as a FULL-ENV state_exec program chrooted to `prefix`, bounded by (max_steps,
 // max_seconds, max_bytes). Returns "" on a clean, normal finish, else a human diagnostic (no
 // leading "ari:" — the caller frames it). Used by the load-time `init:` lane (run_init) and a
@@ -404,7 +422,16 @@ public:
         "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
         // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables)
         "state-get", "state-exists", "state-children", "state-data-get", "state-root-path",
-        "state-has-expiry", "state-is-expired"};
+        "state-has-expiry", "state-is-expired",
+        // the pure, bounded stdlib: a scalar, or a result no bigger than its argument. The
+        // materializers (string.join/replace/split/encode, bytes.slice/concat/decode,
+        // collections.*) stay out until they run as scheduled, sliced work; math.random stays
+        // out because a predicate must be deterministic.
+        "string.length", "string.byte-length", "string.char-at", "string.substring", "string.upper",
+        "string.lower", "string.trim", "string.starts-with", "string.ends-with", "string.contains",
+        "bytes.length", "bytes.byte-at", "math.sqrt", "math.abs", "math.floor", "math.ceil",
+        "math.round", "math.pow", "math.log", "math.sin", "math.cos", "math.tan", "math.min",
+        "math.max", "math.clamp", "math.pi", "math.e"};
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
@@ -1396,7 +1423,6 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   // cap. Full env, writes chrooted to the action's mount prefix.
   static constexpr uint64_t kActionMaxSteps = 5000;
   static constexpr double kActionMaxSeconds = 0.1;
-  static constexpr uint64_t kActionMaxBytes = 262144;
   try {
     auto &sched = app.exec_scheduler();
     used_scheduler_ = true;
@@ -1404,6 +1430,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     ac->proc = se::make_process(); // placeholder for ictx.proc; the RUNNING process is the
     ac->proc->status = se::process_status::ready; // scheduler's own, reached via current_process()
     cvc::state &root = cvc::state::instance(app);
+    const uint64_t max_bytes = action_max_memory(root);
     ac->ictx.sched = &sched;
     ac->ictx.tracker = &ac->tracker;
     ac->ictx.proc = ac->proc;
@@ -1432,7 +1459,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
     opts.max_steps = kActionMaxSteps;
     opts.max_time = kActionMaxSeconds;
-    opts.max_memory = kActionMaxBytes;
+    opts.max_memory = max_bytes;
     const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
     live_actions_[pid] = std::move(ac);          // keep the context alive until the process ends
   } catch (const std::exception &e) {

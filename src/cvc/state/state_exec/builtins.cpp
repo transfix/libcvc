@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/generator.h>
+#include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: (length "...") counts codepoints for a string
 #include <iostream>
 #include <sstream>
@@ -287,12 +288,20 @@ value_t builtin_ne(std::span<const value_t> args) {
 // ---------------------------------------------------------------------------
 
 value_t builtin_str_concat(std::span<const value_t> args) {
+  // The same string may be passed many times, so the result can outgrow every argument: check
+  // each part against the allocation limit before appending it.
   std::string result;
+  const auto add = [&result](const std::string &part) {
+    eval_alloc_check(result.size() > SIZE_MAX - part.size() ? SIZE_MAX
+                                                            : result.size() + part.size(),
+                     "str-concat");
+    result += part;
+  };
   for (auto &a : args) {
     if (auto *s = std::get_if<std::string>(&a.v))
-      result += *s; // raw string, no quoting
+      add(*s); // raw string, no quoting
     else
-      result += to_string(a);
+      add(to_string(a));
   }
   return value_t{std::move(result)};
 }
@@ -741,6 +750,7 @@ value_t builtin_collect(std::span<const value_t> args) {
     // budget instead of hanging/OOMing (a no-op when no deadline is armed).
     if (eval_deadline_expired())
       throw std::runtime_error("collect: evaluation exceeded time budget");
+    eval_alloc_check(alloc_bytes(result.size() + 1, sizeof(value_t)), "collect");
     result.push_back(std::move(*next));
   }
   return make_list(std::move(result));
@@ -779,6 +789,9 @@ void builtins::register_fn(environment_ptr env, const std::string &name, native_
 
 environment_ptr builtins::make_default_environment() {
   auto env = std::make_shared<environment>();
+  // The stdlib modules (string.*, bytes.*, math.*, collections.*) are reached through the
+  // shared, frozen stdlib scope rather than copied into every environment.
+  env->outer = stdlib_registry::shared_scope();
 
   // Arithmetic
   register_fn(env, "+", builtin_add);
