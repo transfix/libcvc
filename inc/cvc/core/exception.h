@@ -78,6 +78,9 @@ CVC_DEF_EXCEPTION(read_only_error);
 // An unknown unit or dimension, a conversion across dimensions, or an invalid
 // unit definition (cvc/core/unit_registry.h).
 CVC_DEF_EXCEPTION(unit_error);
+// A bad argument, an unknown or stale body id, or an engine failure in
+// cvc::physics (cvc/physics/world.h).
+CVC_DEF_EXCEPTION(physics_error);
 }; // namespace cvc
 
 // Legacy PascalCase aliases for case-insensitive filesystems (macOS).

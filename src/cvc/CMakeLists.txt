@@ -54,6 +54,12 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/world_clock.h
   ../../inc/cvc/core/world_units.h
   ../../inc/cvc/core/unit_registry.h
+  ../../inc/cvc/physics/types.h
+  ../../inc/cvc/physics/shape.h
+  ../../inc/cvc/physics/body.h
+  ../../inc/cvc/physics/backend.h
+  ../../inc/cvc/physics/world.h
+  ../../inc/cvc/physics/world_binding.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -208,6 +214,9 @@ set(SOURCE_FILES
   core/world_clock_binding.cpp
   core/world_units.cpp
   core/unit_registry.cpp
+  physics/world.cpp
+  physics/null_backend.cpp
+  physics/world_binding.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -372,6 +381,18 @@ else()
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
+# cvc::physics is deterministic by contract: a run's state_hash must reproduce on
+# every target when the backend is cross-platform deterministic. No FMA
+# contraction in the facade and the null backend, as for nav and world above; the
+# Jolt backend TU gets the same flag on its own target (below).
+if(NOT MSVC)
+  set_source_files_properties(physics/world.cpp physics/null_backend.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(physics/world.cpp physics/null_backend.cpp
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
 if(WIN32)
@@ -417,6 +438,7 @@ option(CVC_GEOMETRY_CORRECT_INDEX_START "Adjust indices if they start from 1 rat
 option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
+option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # XMLRPC support
 if(CVC_USING_XMLRPC)
@@ -1234,6 +1256,19 @@ if(CVC_ENABLE_LIBIGL)
   endif()
 endif()
 
+# Jolt Physics behind cvc::physics (docs/roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md).
+# Found as a CMake package; without it the facade builds with the null backend
+# only, and a world asking for Jolt throws cvc::unsupported_exception.
+if(CVC_WITH_JOLT)
+  find_package(Jolt CONFIG QUIET)
+  if(TARGET Jolt::Jolt)
+    message(STATUS "Jolt ${Jolt_VERSION} found - cvc::physics Jolt backend ENABLED")
+  else()
+    message(STATUS "Jolt not found - cvc::physics has the null backend only (CVC_WITH_JOLT OFF)")
+    set(CVC_WITH_JOLT OFF)
+  endif()
+endif()
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
@@ -1511,6 +1546,53 @@ if(CVC_ENABLE_LIBIGL)
     target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_igl>)
   else()
     target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_igl>)
+  endif()
+endif()
+
+# Jolt behind cvc::physics, in the same shape as cvc_igl above and for the same
+# reasons. physics/jolt/jolt_backend.cpp is its own target, cvc_physics_jolt, with
+# Jolt::Jolt linked PRIVATE. Jolt's JPH_* compile definitions (determinism, the
+# debug renderer, the DLL import macro) therefore reach that one TU only: never
+# cvc's other sources, and never a consumer. No public header names Jolt, and
+# CVC_WITH_JOLT is a PRIVATE definition; a program asks available_backends() at
+# run time. Hidden visibility keeps the JPH template instantiations out of
+# cvc.dll's export table and libcvc.so's dynamic symbols.
+#  - SHARED cvc: cvc_physics_jolt is a private STATIC archive linked into cvc, and
+#    Jolt is a link dependency of cvc alone.
+#  - STATIC cvc (wasm, or BUILD_SHARED_LIBS=OFF): an OBJECT library whose objects
+#    go into libcvc.a. A consumer then links libJolt too, so Jolt joins
+#    CVC_PRIVATE_LINK_PACKAGES and cvcConfig.cmake finds it.
+# The TU sees only the std-only cvc/physics headers (and backend_impl.h). It gets
+# the deterministic modules' floating-point flag, so the facade's double <-> float
+# conversions round alike on every target.
+if(CVC_WITH_JOLT)
+  target_compile_definitions(cvc PRIVATE CVC_WITH_JOLT)
+  get_target_property(_cvc_type cvc TYPE)
+  if(_cvc_type STREQUAL "SHARED_LIBRARY")
+    set(_cvc_jolt_kind STATIC)
+  else()
+    set(_cvc_jolt_kind OBJECT)
+  endif()
+  add_library(cvc_physics_jolt ${_cvc_jolt_kind} physics/jolt/jolt_backend.cpp)
+  set_target_properties(cvc_physics_jolt PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  target_include_directories(cvc_physics_jolt PRIVATE ${PROJECT_SOURCE_DIR}/inc)
+  target_compile_definitions(cvc_physics_jolt PRIVATE CVC_WITH_JOLT)
+  target_compile_features(cvc_physics_jolt PRIVATE cxx_std_17)
+  target_link_libraries(cvc_physics_jolt PRIVATE Jolt::Jolt)
+  if(MSVC)
+    target_compile_options(cvc_physics_jolt PRIVATE /fp:precise)
+  else()
+    target_compile_options(cvc_physics_jolt PRIVATE -ffp-contract=off)
+  endif()
+  if(_cvc_jolt_kind STREQUAL "STATIC")
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_physics_jolt>)
+  else()
+    target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_physics_jolt>)
+    target_link_libraries(cvc PRIVATE $<LINK_ONLY:Jolt::Jolt>)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES Jolt)
   endif()
 endif()
 
