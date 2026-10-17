@@ -134,6 +134,14 @@ struct step_report {
                           // max_body_pairs / max_contact_constraints
 };
 
+// Several bodies' states and the tick they belong to, read under one lock, so a
+// batch never mixes two steps (world::states).
+struct state_batch {
+  std::uint64_t tick = 0;                        // the world's tick when read
+  std::vector<std::optional<body_state>> states; // one per id, in order; empty for an
+                                                 // unknown or removed id
+};
+
 class world {
 public:
   explicit world(const world_config &cfg = world_config());
@@ -176,6 +184,10 @@ public:
   std::size_t body_count() const;
 
   body_state state(body_id id) const;
+  // The states of `ids` and the tick, under one lock: what a renderer samples
+  // (pose_tracker.h). An unknown or removed id reads as empty instead of
+  // throwing, since a body can be removed between two frames.
+  state_batch states(const std::vector<body_id> &ids) const;
   // Teleport a body and set its velocities. Activates it.
   void set_state(body_id id, const body_state &s);
   // A force (N) applied at the centre of mass through the next step only.

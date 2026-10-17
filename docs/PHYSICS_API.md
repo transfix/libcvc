@@ -17,6 +17,8 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
+| `cvc/physics/pose_tracker.h` | `pose_tracker`, `pose`, `interpolate()`, `pose_matrix()`: the last two states, for a view |
+| `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 
 The physics headers include only the standard library, except `world_binding.h`, which needs
 `cvc::app`. No header names an engine.
@@ -102,6 +104,8 @@ const body_state s = w.state(c);
 
 - **Body operations:** `add_body`, `remove_body`, `contains`, `state`, `set_state`, `add_force`
   (applied through the next step), `add_impulse` and `move_kinematic`.
+- **Batch reads:** `states(ids)` returns several bodies' states and the tick under one lock, so a
+  batch never mixes two steps. An unknown or removed id reads as empty instead of throwing.
 - **Generation-checked ids.** Body ids carry a generation, so a stale id is refused and never
   aliases a newer body.
 - **Stepping:** `step()` advances `fixed_dt`, and `step(n)` runs n steps under one lock.
@@ -130,6 +134,60 @@ running world from many threads without waiting, read the telemetry a `world_bin
 Jolt's process globals (allocator hooks, factory, type registry) exist while at least one Jolt
 world does. The first world sets them up and the last one tears them down. If the application set
 up Jolt itself, that setup is used and left in place. libcvc keeps no singleton of its own.
+
+## Drawing a world: `pose_tracker` and `physics_scene_binding`
+
+A world steps in fixed quanta and a display runs at its own rate. Drawing each body at its newest
+state judders whenever the two rates beat. Instead, a view draws between the world's last two
+states, at the fraction of a step the clock reports, as `world_clock.h` describes. The view lags
+the world by one step and never extrapolates.
+
+```cpp
+#include <cvc/gl/physics_scene_binding.h>
+
+cvc::gl::physics_scene_binding view(w);                 // per world and scene; no globals
+view.bind(crate, sg.addGraphics("crate", crate_mesh));   // a dynamic body
+view.bind_group(swarm, [&](const auto &poses) { pack(poses); });  // one merged mesh
+... per frame, before rendering:
+const auto s = app.world_clock().advance(wall_dt);
+view.follow(app.world_clock());                          // steps the world
+view.present(app.world_clock(), s.alpha);                // poses the nodes
+```
+
+- **`pose_tracker` (core)** keeps the last two states of the bodies it tracks.
+  - `follow(clock)` steps the world itself, in two parts when several steps are due, so the two
+    samples are the last two ticks. Use it instead of `world::follow`, never both: each keeps its
+    own cursor, and the world would take every step twice.
+  - A world stepped some other way (on a simulation thread) calls `capture()` after each step.
+  - `alpha(clock, clock_alpha)` turns the clock's fraction of a quantum into the world's fraction
+    of a step, for a world that steps once every several quanta.
+  - `sample_all(alpha)` / `sample_one(id, alpha)` lerp the position and blend the rotation along
+    the shorter arc. A body without a previous sample exactly one step before its newest is drawn
+    at its newest: just tracked, after a gap, or after `snap(id)` for a teleport.
+  - A body removed from the world drops out at the next capture.
+- **`physics_scene_binding` (cvcGL)** owns a tracker and writes the scene.
+  - `bind(id, node, body_from_visual)` sets the node's local transform with
+    `GraphicsNode::setPoseMatrix` every `present()`. The node's parent frame is the world frame, so
+    a scene transform (a scale, a floating origin) belongs on a parent node. The optional row-major
+    offset places geometry not modelled about the body's origin.
+  - `bind_group(ids, sink)` calls the sink once per `present()` with those bodies' poses in group
+    order, so a swarm is one merged mesh (`GeometryNode::updateVertices`,
+    `StreamingGeometryNode::writePoints`), not one node per body.
+  - Nodes are held weakly. A node that is destroyed, or a body removed from the world, is unbound
+    at the next `present()`, and the node keeps its last pose.
+- **One writer per actor.** Bind a body when physics decides where it is: a dynamic body. A
+  kinematic actor driven by its own source (a nav agent on the kinematic plant, a tracked person, a
+  scripted mover) is drawn by that source, which also moves its body with `move_kinematic` so it
+  pushes things. Binding it too would make two writers fight over the node. Static bodies need no
+  binding.
+- **Threads.** Both are thread-safe. `present()` may run on any thread, since `setPoseMatrix`
+  applies on the scene's owner thread and is posted to it from any other. Group sinks run on the
+  thread that calls `present()`.
+- **With a `world_binding`.** Its `follow()` steps the world too. Keep the state tree in step
+  around the scene binding instead: `bind.pull(); view.follow(clock); bind.push();`.
+- **Clock quanta.** `cvc::app`'s clock defaults to 1/120 s and a world to 0.01 s. That is not a
+  whole number of quanta, so `follow` and `alpha` throw. Set one of them: the nav demos run the
+  clock at 0.01 s.
 
 ## The state tree: `world_binding`
 
