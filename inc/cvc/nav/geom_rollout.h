@@ -31,6 +31,7 @@
 #define CVC_NAV_GEOM_ROLLOUT_H
 
 #include <cstdint>
+#include <vector>
 
 namespace cvc {
 namespace nav {
@@ -93,6 +94,16 @@ struct multi_start_params {
 // std::invalid_argument unless 0 <= frac_lo <= frac_hi < 1. Writes nothing when
 // ms_count <= 0.
 void multi_start_fracs(const multi_start_params &p, int B, float *fracs);
+
+// The starts multi_start_penalty rolls out from, as data: K = ms_count starts (1 when
+// the frac range is degenerate), each moving every agent frac of its clearance toward
+// its nearest valid obstacle, or half a step AWAY if that would penetrate one. An agent
+// with no valid obstacle stays at o0. Fills o_ms with K*B (x, y) pairs, start-major
+// (o_ms[2*(k*B + b)]), and returns K. Throws std::invalid_argument on a bad frac
+// range; returns 0 (o_ms empty) when N == 0, B == 0 or ms_count <= 0.
+int multi_start_origins(const multi_start_params &p, const float *o0, const float *C,
+                        const float *R, const std::uint8_t *mask, const float *rr, int B, int N,
+                        std::vector<float> &o_ms);
 
 // L_multi = multi_start_penalty (surrogate_robust.py). For each of the ms_count
 // starts (multi_start_fracs), move each agent frac of its clearance toward the

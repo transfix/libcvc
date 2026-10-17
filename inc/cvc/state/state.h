@@ -232,20 +232,13 @@ public:
   const std::string &name() const { return _name; }
   const state *parent() const { return _parent; }
 
-  // return's the parent's fullName
-  std::string parentName() const {
-    std::string tmp;
-    return parent() ? (!parent()->name().empty() ? ((tmp = parent()->parentName()).empty()
-                                                        ? parent()->name()
-                                                        : tmp + SEPARATOR + parent()->name())
-                                                 : "")
-                    : "";
-  }
+  // The parent's full name: the names of the ancestors from just below the first one with an
+  // empty name (normally the root) down to the parent, joined with SEPARATOR; "" when there are
+  // none. Built in one pass over the _parent chain, not once per level.
+  std::string parentName() const;
 
-  std::string fullName() const {
-    std::string pn = parentName();
-    return pn.empty() ? name() : pn + SEPARATOR + name();
-  }
+  // This node's path from the root: parentName(), then its own name.
+  std::string fullName() const;
 
   boost::posix_time::ptime lastMod();
 
@@ -275,9 +268,6 @@ public:
   template <class T> state &value(const T &v) {
     std::string str_value = boost::lexical_cast<std::string>(v);
 
-    // Check if read-only before acquiring lock
-    std::string full_name = fullName();
-
     // Phase 8: writes through a writable transparent link route to the
     // resolved target, mirroring the string overload
     // (state::value(const std::string&, bool) in state.cpp). Routing to the
@@ -305,7 +295,7 @@ public:
           return *this;
         }
         throw read_only_error(boost::str(
-            boost::format("Cannot write through unresolvable transparent link: %1%") % full_name));
+            boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
       }
     }
 
@@ -315,7 +305,7 @@ public:
       // Check if this state is read-only
       if (_readOnly) {
         throw read_only_error(
-            boost::str(boost::format("Cannot modify read-only state: %1%") % full_name));
+            boost::str(boost::format("Cannot modify read-only state: %1%") % fullName()));
       }
 
       if (_value == str_value)
@@ -331,7 +321,7 @@ public:
 
     valueChanged();
     if (parent())
-      parent()->childChanged(name());
+      parent()->emitChildChanged(name());
     return *this;
   }
 
@@ -422,9 +412,23 @@ public:
   signal dataChanged;
 
   state &operator()(const std::string &childname = std::string());
+  // The full names of every node under this one (its descendants, in pre-order: each child, then
+  // its own descendants, children in name order), those matching `re` when it is not empty.
   std::vector<std::string> children(const std::string &re = std::string());
   size_t numChildren();
+
+  // Fired on a node when something under it changes, with that thing's path relative to the
+  // node. A change signals the changed node's parent and every ancestor above it, the root's
+  // slots first (emitChildChanged()). Emitting childChanged directly fires only that node's
+  // slots.
   map_change_signal childChanged;
+
+  // Fire childChanged for `childname` (a path relative to this node) on this node and on each
+  // ancestor, with the path relative to that ancestor: the root's slots first, this node's last.
+  // That is the order the old relay (each node's first childChanged slot re-firing its parent's)
+  // produced, but this is a loop, so a deep tree costs no stack per level, and a path is built
+  // only for a node that has slots.
+  void emitChildChanged(const std::string &childname) const;
   operator std::string() { return value(); }
 
   signal destroyed;
@@ -804,8 +808,6 @@ public:
 
 protected:
   state(app &ctx, const std::string &n = std::string(), const state *p = NULL);
-
-  void notifyParent(const std::string &childname);
 
   app &_ctx;
   boost::mutex _mutex;

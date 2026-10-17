@@ -44,6 +44,7 @@ inline float softplusf(float x) { return x > 20.0f ? x : std::log1p(std::exp(x))
 struct fwd_cache {
   std::vector<float> alphas, beta, gamma, lam_soft, lam_hard, mu_lat; // model outputs
   std::vector<float> oT, vT, min_clear, cum_risk, hard_count, arc;    // rollout outputs
+  std::vector<float> th0, sp0, thT, spT;                              // bicycle start and end
   std::vector<double> J;
   double eta = 0.0;
 };
@@ -54,6 +55,24 @@ int max_horizon(const material_batch &b) {
   for (int i = 0; i < b.B; ++i)
     m = std::max(m, b.H[i]);
   return m;
+}
+
+// The bicycle's start state: the batch's th0/sp0, else derived from v0 (speed |v0|,
+// heading along v0, or toward the goal when v0 is zero).
+void bicycle_start(const material_batch &b, std::vector<float> &th, std::vector<float> &sp) {
+  th.resize(b.B);
+  sp.resize(b.B);
+  for (int i = 0; i < b.B; ++i) {
+    const float vx = b.v0[2 * i], vy = b.v0[2 * i + 1];
+    const float speed = std::sqrt(vx * vx + vy * vy);
+    if (b.th0)
+      th[i] = b.th0[i];
+    else if (speed > 1e-6f)
+      th[i] = std::atan2(vy, vx);
+    else
+      th[i] = std::atan2(b.goal[2 * i + 1] - b.o0[2 * i + 1], b.goal[2 * i] - b.o0[2 * i]);
+    sp[i] = b.sp0 ? b.sp0[i] : speed;
+  }
 }
 
 // Run the model + rollout + loss; if `cache` non-null, fill it. `frozen_eta`
@@ -88,8 +107,23 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
   // rollout forward (o/v are updated in place from o0/v0)
   std::vector<float> oT(b.o0, b.o0 + 2 * B), vT(b.v0, b.v0 + 2 * B);
   std::vector<float> min_clear(B), cum_risk(B), hard_count(B), arc(B);
+  std::vector<float> th0, sp0, thT, spT;
+  if (cfg.integrator == material_integrator::bicycle) {
+    bicycle_start(b, th0, sp0);
+    thT = th0;
+    spT = sp0;
+    integrate_bicycle_material(oT.data(), thT.data(), spT.data(), b.goal, b.C, b.R, b.obs_mask,
+                               alphas.data(), beta.data(), gamma.data(), lam_soft.data(),
+                               lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N,
+                               b.Hp, b.Wp, cfg.rollout, cfg.bicycle, min_clear.data(),
+                               cum_risk.data(), hard_count.data(), arc.data(), cfg.num_threads);
+    for (int i = 0; i < B; ++i) {
+      vT[2 * i] = spT[i] * std::cos(thT[i]);
+      vT[2 * i + 1] = spT[i] * std::sin(thT[i]);
+    }
+  } else
 #ifdef CVC_USING_CUDA
-  if (use_cuda && material_rollout_cuda_available())
+      if (use_cuda && material_rollout_cuda_available())
     integrate_surrogate_material_cuda(oT.data(), vT.data(), b.goal, b.C, b.R, b.obs_mask,
                                       alphas.data(), beta.data(), gamma.data(), lam_soft.data(),
                                       lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B,
@@ -145,9 +179,15 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
     multi_start_params mp = cfg.multi;
     mp.margin_factor = cfg.rollout.margin_factor;
     mp.mass = cfg.rollout.mass;
-    const double L_multi = multi_start_penalty(
-        alphas.data(), beta.data(), gamma.data(), b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, b.rr,
-        b.d_hat, b.dt, b.H, B, N, mp, nullptr, nullptr, nullptr, cfg.num_threads);
+    const double L_multi =
+        cfg.integrator == material_integrator::bicycle
+            ? multi_start_penalty_bicycle(alphas.data(), beta.data(), gamma.data(), b.o0,
+                                          th0.data(), sp0.data(), b.goal, b.C, b.R, b.obs_mask,
+                                          b.rr, b.d_hat, b.dt, B, N, mp, cfg.rollout, cfg.bicycle,
+                                          nullptr, nullptr, nullptr, cfg.num_threads)
+            : multi_start_penalty(alphas.data(), beta.data(), gamma.data(), b.o0, b.v0, b.goal, b.C,
+                                  b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, nullptr,
+                                  nullptr, nullptr, cfg.num_threads);
     L += (double)cfg.w_multi * L_multi;
   }
 
@@ -166,6 +206,10 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
     cache->arc = std::move(arc);
     cache->J = std::move(J);
     cache->eta = eta;
+    cache->th0 = std::move(th0);
+    cache->sp0 = std::move(sp0);
+    cache->thT = std::move(thT);
+    cache->spT = std::move(spT);
   }
   return L;
 }
@@ -224,6 +268,21 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
   // ── rollout backward -> grads on the model outputs ──
   std::vector<float> g_alphas(static_cast<std::size_t>(B) * N, 0.0f), g_beta(B, 0.0f),
       g_gamma(B, 0.0f), g_lam_soft(B, 0.0f), g_lam_hard(B, 0.0f);
+  if (cfg.integrator == material_integrator::bicycle) {
+    // vT = sp * (cos th, sin th): carry L_vel's seed back onto the bicycle's state.
+    std::vector<float> g_thT(B), g_spT(B);
+    for (int i = 0; i < B; ++i) {
+      const float cth = std::cos(c.thT[i]), sth = std::sin(c.thT[i]);
+      g_spT[i] = g_vT[2 * i] * cth + g_vT[2 * i + 1] * sth;
+      g_thT[i] = c.spT[i] * (-g_vT[2 * i] * sth + g_vT[2 * i + 1] * cth);
+    }
+    integrate_bicycle_material_vjp(
+        b.o0, c.th0.data(), c.sp0.data(), b.goal, b.C, b.R, b.obs_mask, c.alphas.data(),
+        c.beta.data(), c.gamma.data(), c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr,
+        b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, g_oT.data(), g_thT.data(),
+        g_spT.data(), g_min_clear.data(), g_cum_risk.data(), g_arc.data(), g_alphas.data(),
+        g_beta.data(), g_gamma.data(), g_lam_soft.data(), g_lam_hard.data(), cfg.num_threads);
+  } else
 #ifdef CVC_USING_CUDA
   // The device VJP stores each agent's whole trajectory in per-thread local
   // memory, so it only accepts max(H) <= material_rollout_cuda_max_horizon() and
@@ -261,9 +320,15 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
     mp.margin_factor = cfg.rollout.margin_factor;
     mp.mass = cfg.rollout.mass;
     std::vector<float> gm_al(static_cast<std::size_t>(B) * N, 0.0f), gm_be(B, 0.0f), gm_ga(B, 0.0f);
-    multi_start_penalty(c.alphas.data(), c.beta.data(), c.gamma.data(), b.o0, b.v0, b.goal, b.C,
-                        b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, gm_al.data(),
-                        gm_be.data(), gm_ga.data(), cfg.num_threads);
+    if (cfg.integrator == material_integrator::bicycle)
+      multi_start_penalty_bicycle(c.alphas.data(), c.beta.data(), c.gamma.data(), b.o0,
+                                  c.th0.data(), c.sp0.data(), b.goal, b.C, b.R, b.obs_mask, b.rr,
+                                  b.d_hat, b.dt, B, N, mp, cfg.rollout, cfg.bicycle, gm_al.data(),
+                                  gm_be.data(), gm_ga.data(), cfg.num_threads);
+    else
+      multi_start_penalty(c.alphas.data(), c.beta.data(), c.gamma.data(), b.o0, b.v0, b.goal, b.C,
+                          b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, gm_al.data(),
+                          gm_be.data(), gm_ga.data(), cfg.num_threads);
     for (std::size_t i = 0; i < gm_al.size(); ++i)
       g_alphas[i] += cfg.w_multi * gm_al[i];
     for (int i = 0; i < B; ++i) {

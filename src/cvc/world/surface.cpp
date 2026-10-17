@@ -177,6 +177,62 @@ std::vector<surface_class> base_classes() {
   };
 }
 
+// Contact physics per class: dry tire-on-surface friction mu and rolling
+// resistance C_rr, from the usual vehicle-dynamics tables (asphalt 0.9 / 0.010,
+// gravel 0.55 / 0.03, sand 0.45 / 0.2, snow 0.25 / 0.05, ...). Obstacles and walls
+// are never driven on; their mu is what a box sliding along them meets.
+void apply_contact_physics(std::vector<surface_class> &classes) {
+  struct row {
+    std::uint16_t id;
+    float mu, crr, restitution;
+  };
+  static const row kRows[] = {
+      {0, 0.60f, 0.020f, 0.0f},  // void_unknown: a middling ground
+      {1, 0.90f, 0.010f, 0.0f},  // asphalt
+      {2, 0.85f, 0.011f, 0.0f},  // concrete_ext
+      {3, 0.60f, 0.040f, 0.0f},  // dirt
+      {4, 0.55f, 0.030f, 0.0f},  // gravel
+      {5, 0.45f, 0.200f, 0.0f},  // sand
+      {6, 0.50f, 0.060f, 0.0f},  // grass
+      {7, 0.45f, 0.080f, 0.0f},  // tall_grass
+      {8, 0.40f, 0.120f, 0.0f},  // bush_cover
+      {9, 0.70f, 0.020f, 0.1f},  // bare_rock
+      {10, 0.45f, 0.080f, 0.0f}, // scree
+      {11, 0.25f, 0.050f, 0.0f}, // snow
+      {12, 0.50f, 0.100f, 0.0f}, // rubble
+      {13, 0.30f, 0.150f, 0.0f}, // mud
+      {14, 0.50f, 0.015f, 0.0f}, // puddle (wet pavement)
+      {15, 0.30f, 0.050f, 0.0f}, // water_shallow
+      {16, 0.10f, 0.050f, 0.0f}, // water_deep
+      {17, 0.70f, 0.020f, 0.1f}, // cliff_rock
+      {18, 0.60f, 0.010f, 0.1f}, // tree_trunk
+      {19, 0.70f, 0.010f, 0.1f}, // boulder
+      {20, 0.40f, 0.010f, 0.2f}, // fence_pole
+      {21, 0.80f, 0.010f, 0.0f}, // concrete_floor
+      {22, 0.60f, 0.010f, 0.0f}, // tile
+      {23, 0.60f, 0.012f, 0.0f}, // linoleum
+      {24, 0.55f, 0.012f, 0.0f}, // wood_floor
+      {25, 0.70f, 0.030f, 0.0f}, // carpet
+      {26, 0.60f, 0.015f, 0.0f}, // metal_grating
+      {27, 0.30f, 0.012f, 0.0f}, // wet_floor
+      {28, 0.50f, 0.050f, 0.0f}, // debris_indoor
+      {29, 0.60f, 0.010f, 0.0f}, // wall_interior
+      {30, 0.30f, 0.010f, 0.1f}, // glass_pane
+      {31, 0.00f, 0.000f, 0.0f}, // void_fall: nothing to stand on
+      {32, 0.70f, 0.010f, 0.0f}, // building_concrete
+      {33, 0.70f, 0.010f, 0.0f}, // building_brick
+      {34, 0.50f, 0.010f, 0.0f}, // building_drywall
+      {35, 0.30f, 0.010f, 0.1f}, // building_glass
+      {36, 0.40f, 0.010f, 0.2f}, // building_metal
+  };
+  for (const row &r : kRows)
+    if (r.id < classes.size()) {
+      classes[r.id].mu = r.mu;
+      classes[r.id].rolling_resistance = r.crr;
+      classes[r.id].restitution = r.restitution;
+    }
+}
+
 void apply_variant(std::vector<surface_class> &c, const std::string &v) {
   auto set = [&](std::uint16_t id, float rho) {
     if (id < c.size())
@@ -201,6 +257,7 @@ surface_registry surface_registry::make(const std::string &ontology) {
   surface_registry r;
   r.classes_ = base_classes();
   r.ontology_ = ontology;
+  apply_contact_physics(r.classes_);
   apply_variant(r.classes_, ontology);
 
   // Role -> class id (the ONLY place lsys roles meet concrete classes).
@@ -307,11 +364,12 @@ std::string surface_registry::to_json() const {
                   "    {\"id\": %u, \"name\": \"%s\", \"tier\": \"%s\", \"rho\": %.3f, "
                   "\"hard\": %s, \"nav\": \"%s\", \"albedo\": [%.3f, %.3f, %.3f], "
                   "\"veg_density\": %.3f, \"rf_material\": \"%s\", "
-                  "\"penetration_db_per_m\": [%.1f, %.1f, %.1f]}%s\n",
+                  "\"penetration_db_per_m\": [%.1f, %.1f, %.1f], \"mu\": %.3f, "
+                  "\"restitution\": %.3f, \"rolling_resistance\": %.3f}%s\n",
                   c.id, c.name, tier_name(c.t), c.rho, c.hard ? "true" : "false", nav_name(c.nav),
                   c.albedo[0], c.albedo[1], c.albedo[2], c.veg_density, c.rf_material,
                   c.penetration_db_per_m[0], c.penetration_db_per_m[1], c.penetration_db_per_m[2],
-                  i + 1 < classes_.size() ? "," : "");
+                  c.mu, c.restitution, c.rolling_resistance, i + 1 < classes_.size() ? "," : "");
     o << buf;
   }
   o << "  ]\n}\n";
