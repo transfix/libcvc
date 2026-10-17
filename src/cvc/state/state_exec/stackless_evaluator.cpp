@@ -74,25 +74,110 @@ evaluator_state stackless_evaluator::create_program_state(std::vector<value_t> f
 // parse_error propagates like any error from step(): the sync scheduler rethrows it to its
 // caller, and the async scheduler kills the process with it.
 bool stackless_evaluator::step_read(evaluator_state &state) {
-  state.stats.increment_step();
+  state.stats.increment_step(step_kind::read);
   script_reader &reader = *state.reading;
   if (!reader.step(reader.options().step_tokens))
     return false;
   evaluator_state program = create_program_state(std::move(reader.forms()), state.global_env);
   program.stats = std::move(state.stats);
+  program.data_step_nodes = state.data_step_nodes;
+  program.backlog = std::move(state.backlog);
   state = std::move(program); // also releases the reader
   return state.done;
 }
 
+namespace {
+// RAII: while alive, the native call a step applies may leave deep-data work behind
+// (run_data_job), in the step's data scope.
+struct native_call_scope {
+  explicit native_call_scope(detail::data_step_scope *data) : data(data) {
+    if (data)
+      data->allow_defer(true);
+  }
+  ~native_call_scope() {
+    if (data)
+      data->allow_defer(false);
+  }
+  native_call_scope(const native_call_scope &) = delete;
+  native_call_scope &operator=(const native_call_scope &) = delete;
+  detail::data_step_scope *data;
+};
+} // namespace
+
+// Run a slice of the deep-data work a step left; once it is done, finish the native call or macro
+// expansion that started it.
+bool stackless_evaluator::step_data(evaluator_state &state) {
+  state.stats.increment_step(step_kind::data);
+  detail::data_step_scope *data = detail::data_step_scope::current();
+  const std::shared_ptr<pending_data_work> work = state.data_work;
+  const std::size_t before = work->job->nodes();
+  const bool finished = work->job->step(data ? data->remaining() : 0);
+  count_data_nodes(work->job->nodes() - before);
+  if (!finished)
+    return false;
+  state.data_work.reset();
+  value_t result = work->job->result();
+  if (work->what == pending_data_work::kind::macro_expansion) {
+    begin_expansion(state, std::move(result));
+    return false;
+  }
+  if (work->then) {
+    native_call_scope call(data); // `then` may end in another job
+    result = work->then(std::move(result));
+    if (auto deferred = data ? data->take_deferred() : nullptr) {
+      state.data_work = std::make_shared<pending_data_work>(
+          pending_data_work{std::move(deferred->job), std::move(deferred->then),
+                            pending_data_work::kind::native_call});
+      return false;
+    }
+  }
+  pop_frame(state, std::move(result));
+  return state.done;
+}
+
+void stackless_evaluator::begin_expansion(evaluator_state &state, value_t expansion) {
+  eval_frame &frame = state.stack.back();
+  frame.expr = std::move(expansion);
+  frame.phase = eval_phase::init;
+  frame.index = 0;
+  frame.results.clear();
+  frame.extra_vals.clear();
+  frame.extra_strs.clear();
+  frame.extra_lists.clear();
+  frame.extra_env = nullptr;
+}
+
 bool stackless_evaluator::step(evaluator_state &state) {
   check_interrupted();
-  if (state.reading)
-    return step_read(state);
-  if (state.done || state.stack.empty()) {
+  if (state.data_step_nodes > 0 && !state.backlog)
+    state.backlog = std::make_shared<detail::release_backlog>();
+  // Held here so the backlog outlives this step's scope even if the step replaces the state.
+  const std::shared_ptr<detail::release_backlog> backlog = state.backlog;
+  detail::data_step_scope data(state.data_step_nodes, state.stats, backlog.get());
+  bool done;
+  if (state.reading) {
+    done = step_read(state);
+  } else if (state.data_work) {
+    done = step_data(state);
+  } else if (backlog && !backlog->empty()) {
+    // A step that only frees what earlier steps dropped.
+    state.stats.increment_step(step_kind::data);
+    data.drain_backlog();
+    return false;
+  } else if (state.done || state.stack.empty()) {
     state.done = true;
     return true;
+  } else {
+    state.stats.increment_step();
+    step_frame(state);
+    done = state.done;
   }
-  state.stats.increment_step();
+  data.drain_backlog();
+  // Done only once what it dropped is freed too: the steps that free the rest come first.
+  return done && !(backlog && !backlog->empty());
+}
+
+void stackless_evaluator::step_frame(evaluator_state &state) {
   auto &frame = state.stack.back();
 
   switch (frame.phase) {
@@ -150,7 +235,6 @@ bool stackless_evaluator::step(evaluator_state &state) {
     step_break_unwind(state, frame);
     break;
   }
-  return state.done;
 }
 
 value_t stackless_evaluator::run(evaluator_state &state, std::optional<uint64_t> max_steps,
@@ -524,15 +608,18 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     std::unordered_map<std::string, value_t> subst;
     for (size_t i = 0; i < macro_params.size(); ++i)
       subst[macro_params[i].name] = (i < args.size()) ? args[i] : nil_value;
-    // Re-init current frame with expanded form for evaluation
-    frame.expr = substitute(body, subst);
-    frame.phase = eval_phase::init;
-    frame.index = 0;
-    frame.results.clear();
-    frame.extra_vals.clear();
-    frame.extra_strs.clear();
-    frame.extra_lists.clear();
-    frame.extra_env = nullptr;
+    // Re-init current frame with expanded form for evaluation. The expansion is deep-data work:
+    // a step that slices does one slice of it here and leaves the rest to step_data().
+    auto job = make_substitute_job(body, std::move(subst));
+    detail::data_step_scope *data = detail::data_step_scope::current();
+    const bool finished = job->step(data && data->step_nodes() > 0 ? data->remaining() : 0);
+    count_data_nodes(job->nodes());
+    if (!finished) {
+      state.data_work = std::make_shared<pending_data_work>(
+          pending_data_work{std::move(job), {}, pending_data_work::kind::macro_expansion});
+      return;
+    }
+    begin_expansion(state, job->result());
     return;
   }
 
@@ -581,7 +668,20 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
     throw std::runtime_error("apply: undefined function: " + head_sym->name);
 
   if (auto *fn = std::get_if<native_fn>(&func_val->v)) {
-    pop_frame(state, (*fn)(evaled));
+    detail::data_step_scope *data = detail::data_step_scope::current();
+    value_t result;
+    {
+      native_call_scope call(data);
+      result = (*fn)(evaled);
+    }
+    if (auto deferred = data ? data->take_deferred() : nullptr) {
+      // The call left deep-data work: this frame waits while step_data() runs it.
+      state.data_work = std::make_shared<pending_data_work>(
+          pending_data_work{std::move(deferred->job), std::move(deferred->then),
+                            pending_data_work::kind::native_call});
+      return;
+    }
+    pop_frame(state, std::move(result));
     return;
   }
   if (auto *cp = std::get_if<closure_ptr>(&func_val->v)) {
@@ -1104,35 +1204,6 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
   env->set(cls_name, value_t{std::move(constructor)});
   env->set(cls_name + ".__cls_dict__", cls_dict_val);
   pop_frame(state, *env->lookup(cls_name));
-}
-
-// ---------------------------------------------------------------------------
-// macro substitution
-// ---------------------------------------------------------------------------
-
-value_t stackless_evaluator::substitute(const value_t &tmpl,
-                                        const std::unordered_map<std::string, value_t> &subst) {
-  // Like the evaluator, the copy keeps its work on the heap, not the native stack, so a
-  // template of any depth expands. (source, destination) pairs: each destination is a slot of
-  // a list copy allocated at its final size, so it stays put while the copy fills in.
-  value_t result;
-  std::vector<std::pair<const value_t *, value_t *>> pending{{&tmpl, &result}};
-  while (!pending.empty()) {
-    auto [src, dst] = pending.back();
-    pending.pop_back();
-    if (auto *sym = std::get_if<symbol>(&src->v)) {
-      auto it = subst.find(sym->name);
-      *dst = it != subst.end() ? it->second : *src;
-    } else if (auto *lp = std::get_if<list_ptr>(&src->v); lp && *lp) {
-      auto copy = std::make_shared<std::vector<value_t>>((*lp)->size());
-      *dst = value_t{copy};
-      for (std::size_t i = (*lp)->size(); i-- > 0;)
-        pending.emplace_back(&(**lp)[i], &(*copy)[i]);
-    } else {
-      *dst = *src;
-    }
-  }
-  return result;
 }
 
 } // namespace cvc::state_exec

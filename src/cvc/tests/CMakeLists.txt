@@ -77,6 +77,7 @@ add_executable(state_exec_integration_test state_exec_integration_test.cpp)
 add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
 add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
 add_executable(state_exec_deep_data_test state_exec_deep_data_test.cpp)
+add_executable(state_exec_data_steps_test state_exec_data_steps_test.cpp)
 if(NOT WIN32)
   add_executable(state_exec_multiprocess_test state_exec_multiprocess_test.cpp)
 endif()
@@ -341,6 +342,7 @@ list(APPEND TEST_TARGETS
   state_exec_advanced_integration_test
   state_exec_gaps_test
   state_exec_deep_data_test
+  state_exec_data_steps_test
 )
 if(NOT WIN32)
   list(APPEND TEST_TARGETS state_exec_multiprocess_test)
@@ -1215,6 +1217,13 @@ target_link_libraries(state_exec_deep_data_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_data_steps_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_builtins_test
   PRIVATE
     cvc
@@ -1579,6 +1588,7 @@ target_compile_features(state_link_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_deep_data_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_data_steps_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
@@ -1990,6 +2000,7 @@ cvc_discover_tests(state_link_bench_test)
 cvc_discover_tests(state_exec_parser_test)
 cvc_discover_tests(state_exec_types_test)
 cvc_discover_tests(state_exec_deep_data_test)
+cvc_discover_tests(state_exec_data_steps_test)
 cvc_discover_tests(state_exec_builtins_test)
 cvc_discover_tests(state_exec_evaluator_test)
 cvc_discover_tests(state_exec_stackless_evaluator_test)

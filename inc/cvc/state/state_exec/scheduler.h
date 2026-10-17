@@ -181,14 +181,19 @@ public:
   /// per-scheduler subtree so they are visible in the state tree.
   /// Requires set_watch_root() and (for per-scheduler) set_id() first.
   ///
-  /// Settings: `max_pending_messages`, and the parser's `parser.*`
-  /// (parse_options_from_state), which apply to every script submitted
+  /// Settings: `max_pending_messages`, the parser's `parser.*`
+  /// (parse_options_from_state) and the deep-data `data.*`
+  /// (data_options_from_state), which apply to every process submitted
   /// afterwards.
   void load_settings();
 
   /// The parser settings execute() parses scripts with (defaults until
   /// load_settings() runs).
   const parse_options &parser_settings() const { return parse_options_; }
+
+  /// The deep-data settings execute() gives processes (defaults until
+  /// load_settings() runs).
+  const data_options &data_settings() const { return data_options_; }
 
   /// Well-known state tree paths for scheduler configuration.
   static constexpr const char *settings_root = "state_exec";
@@ -199,6 +204,7 @@ private:
   std::string id_;
   scheduling_policy policy_;
   parse_options parse_options_;
+  data_options data_options_;
   int next_pid_ = 1;
   int rr_index_ = 0;
   bool running_ = false;

@@ -1444,8 +1444,10 @@ class AsyncStateObserver(state_observer):
 // parser, the scheduler itself) is not wrapped yet, so async_scheduler has no
 // Python constructor. parse_options_from_state and Exec's parser_defaults /
 // set_parser_defaults are in pycvc_exec.h.
+// The deep-data settings (data_options, "Deep data on the executor") are wrapped the same way.
 %{
 #include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/parser.h>
 %}
 namespace cvc {
@@ -1454,11 +1456,15 @@ struct parse_options {
   size_t max_depth;   // lists and quotes that may nest (default 256)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
 };
+struct data_options {
+  size_t step_nodes; // 0: deep-data work in the step that needs it; N: N nodes per step
+};
 %nodefaultctor async_scheduler;
 %nodefaultdtor async_scheduler;
 class async_scheduler {
 public:
   static parse_options host_parser_defaults();
+  static data_options host_data_defaults();
 };
 }
 }
