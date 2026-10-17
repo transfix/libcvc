@@ -759,3 +759,61 @@ TEST(PhysicsJolt, ConcurrentCallsAreSafe) {
   EXPECT_EQ(w.tick(), 300u);
   EXPECT_EQ(w.body_count(), 1u + scene.movers.size() + static_cast<size_t>(added.load()));
 }
+
+// --- cross-platform determinism -------------------------------------------------
+
+namespace {
+
+// A scene built from exactly representable numbers only: no sin/cos (libm differs by
+// an ULP across platforms), and no product that rounds (so an FMA-contracting
+// compiler cannot change a value). Whatever differs between platforms after that is
+// the engine's, which is what the golden below pins.
+std::uint64_t exact_scene_hash(int steps) {
+  world w(jolt_config());
+  heightfield h;
+  h.rows = h.cols = 17;
+  h.dx = h.dy = 0.5;
+  h.origin = {-4.0, -4.0, 0.0};
+  h.heights.resize(17 * 17);
+  for (int r = 0; r < 17; ++r)
+    for (int c = 0; c < 17; ++c)
+      h.heights[r * 17 + c] = static_cast<float>((r % 5) * 0.125 + (c % 3) * 0.25);
+  w.add_body({h, motion_type::static_});
+  std::vector<body_id> bodies;
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j) {
+      body_desc d;
+      if ((i + j) % 2)
+        d.shape = sphere{0.25};
+      else
+        d.shape = box{{0.25, 0.125, 0.25}};
+      d.position = {i * 1.5 - 1.5, j * 1.5 - 1.5, 2.0 + 0.5 * (i + j)};
+      d.linear_velocity = {0.25 * (i - 1), -0.25 * (j - 1), 0.0};
+      bodies.push_back(w.add_body(d));
+    }
+  for (int s = 0; s < steps; ++s) {
+    const body_id b = bodies[static_cast<size_t>(s) % bodies.size()];
+    w.add_force(b, {(s % 7 - 3) * 2.0, (s % 5 - 2) * 4.0, 0.0});
+    w.step();
+  }
+  return w.state_hash();
+}
+
+} // namespace
+
+// P7's replay gate in miniature. With a cross-platform-deterministic Jolt
+// (CROSS_PLATFORM_DETERMINISTIC, from joltphysics 5.6.0+cvc.5) the same calls must
+// give the same state on every platform the build targets: Windows, Linux and macOS,
+// x86_64 and arm64, and wasm. The constant was measured on Windows (MSVC, x86_64);
+// a platform that disagrees has found a determinism leak, in the engine or in the
+// facade's float conversions, and must be fixed, never re-baselined per platform.
+TEST(PhysicsJolt, CrossPlatformGoldenHash) {
+  REQUIRE_JOLT();
+  if (!(backend_capabilities(backend::jolt) & cap_determinism_cross_platform))
+    GTEST_SKIP() << "this Jolt is not cross-platform deterministic";
+  const std::uint64_t h = exact_scene_hash(240);
+  std::printf("[physics-golden] exact scene after 240 steps: %016llx\n",
+              static_cast<unsigned long long>(h));
+  EXPECT_EQ(h, exact_scene_hash(240)) << "the scene is not even deterministic in-process";
+  EXPECT_EQ(h, 0x70b2cc0bd34ea4beull) << std::hex << "state hash " << h;
+}
