@@ -404,7 +404,16 @@ public:
         "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
         // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables)
         "state-get", "state-exists", "state-children", "state-data-get", "state-root-path",
-        "state-has-expiry", "state-is-expired"};
+        "state-has-expiry", "state-is-expired",
+        // the pure, bounded stdlib: a scalar, or a result no bigger than its argument. The
+        // materializers (string.join/replace/split/encode, bytes.slice/concat/decode,
+        // collections.*) stay out until they run as scheduled, sliced work; math.random stays
+        // out because a predicate must be deterministic.
+        "string.length", "string.byte-length", "string.char-at", "string.substring", "string.upper",
+        "string.lower", "string.trim", "string.starts-with", "string.ends-with", "string.contains",
+        "bytes.length", "bytes.byte-at", "math.sqrt", "math.abs", "math.floor", "math.ceil",
+        "math.round", "math.pow", "math.log", "math.sin", "math.cos", "math.tan", "math.min",
+        "math.max", "math.clamp", "math.pi", "math.e"};
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);

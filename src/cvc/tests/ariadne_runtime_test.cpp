@@ -16,7 +16,7 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // launch_pool_task generalization test
+#include <cvc/core/async_task.h>  // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/state/state.h>
@@ -1573,6 +1573,100 @@ TEST(AriadneReactive, CompoundsAndAllowedFormsNowWork) {
   EXPECT_FALSE(mb.saw("text_line:ne"));
   EXPECT_TRUE(mb.saw("text_line:lst"));
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The stdlib is in every program lane's environment, and a predicate gets its pure, bounded
+// subset (a scalar, or a result no bigger than its argument).
+TEST(AriadneStdlib, PredicateGetsThePureBoundedSubset) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"name\" \"caf\xC3\xA9\")", nullptr));
+  Widget len = text("len");
+  len.visible_when = "(= (string.length (state-get \"name\")) 4)"; // codepoints -> shown
+  Widget up = text("up");
+  up.visible_when = "(string.starts-with (string.upper (state-get \"name\")) \"CAF\")";
+  Widget math = text("math");
+  math.visible_when = "(= (math.floor (math.sqrt 17)) 4)";
+  Widget bytes = text("bytes");
+  bytes.visible_when = "(= (bytes.byte-at b\"\\x01\\xff\" 1) 255)";
+  rt.set_root(group({len, up, math, bytes}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:len"));
+  EXPECT_TRUE(mb.saw("text_line:up"));
+  EXPECT_TRUE(mb.saw("text_line:math"));
+  EXPECT_TRUE(mb.saw("text_line:bytes"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneStdlib, PredicateExcludesStdlibMaterializersAndRandom) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // Results that can outgrow their arguments wait for scheduled, sliced versions; math.random
+  // would make a predicate nondeterministic. Each is an unbound symbol -> fail-safe hidden.
+  Widget join = text("join");
+  join.visible_when = "(is-string (string.join (list \"a\") \",\"))";
+  Widget rep = text("rep");
+  rep.visible_when = "(is-string (string.replace \"a\" \"a\" \"aa\"))";
+  Widget range = text("range");
+  range.visible_when = "(is-list (collections.range 3))";
+  Widget rnd = text("rnd");
+  rnd.visible_when = "(< (math.random) 2)";
+  rt.set_root(group({join, rep, range, rnd}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:join"));
+  EXPECT_FALSE(mb.saw("text_line:rep"));
+  EXPECT_FALSE(mb.saw("text_line:range"));
+  EXPECT_FALSE(mb.saw("text_line:rnd"));
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneStdlib, InitAndActionLanesReachTheWholeStdlib) {
+  cvc::app app;
+  std::vector<std::string> errs;
+  ASSERT_TRUE(run_init(app, "ui",
+                       "(state-set \"words\" (string.join (collections.reverse "
+                       "(string.split \"a b c\" \" \")) \",\"))",
+                       &errs))
+      << (errs.empty() ? std::string("(no error)") : errs[0]);
+  EXPECT_EQ(cvc::state::instance(app)("ui.words").value(), "c,b,a");
+
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(state-set \"shout\" (string.upper (state-get \"words\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.shout").value(), "C,B,A");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneStdlib, ActionHitsTheAllocationLimitAndIsReported) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The app's exec scheduler reads limits.max_alloc_bytes on every submission.
+  cvc::state::instance(app)("state_exec.defaults.limits.max_alloc_bytes").value("1024");
+  rt.set_root(group({button("Big", "(state-set \"n\" (length (collections.range 1000)))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_FALSE(cvc::state::instance(app)("n").value() == "1000"); // killed before the write
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+
+  // A limit that fits lets the same action finish.
+  cvc::state::instance(app)("state_exec.defaults.limits.max_alloc_bytes").value("1048576");
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "1000");
 }
 
 TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {

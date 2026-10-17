@@ -2,6 +2,7 @@
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/types.h>
 #include <sstream>
+#include <stdexcept>
 #include <time.h>
 #include <unordered_set>
 #include <utility>
@@ -135,6 +136,35 @@ bool eval_deadline_expired() {
   return spent;
 }
 
+// -- per-call allocation limit ----------------------------------------------
+
+namespace {
+thread_local eval_alloc_guard *t_alloc_innermost = nullptr;
+} // namespace
+
+eval_alloc_guard::eval_alloc_guard(std::optional<std::size_t> max_bytes)
+    : limit_(max_bytes), outer_(t_alloc_innermost) {
+  if (outer_ && outer_->limit_)
+    limit_ = limit_ ? std::min(*limit_, *outer_->limit_) : outer_->limit_;
+  t_alloc_innermost = this;
+}
+
+eval_alloc_guard::~eval_alloc_guard() { t_alloc_innermost = outer_; }
+
+std::optional<std::size_t> eval_alloc_limit() {
+  if (!t_alloc_innermost)
+    return kDefaultMaxAllocBytes;
+  return t_alloc_innermost->limit_;
+}
+
+void eval_alloc_check(std::size_t bytes, const char *who) {
+  const std::optional<std::size_t> limit = eval_alloc_limit();
+  if (limit && bytes > *limit)
+    throw std::runtime_error(std::string(who) + ": the result needs " + std::to_string(bytes) +
+                             " bytes, over the allocation limit of " + std::to_string(*limit) +
+                             " bytes (limits.max_alloc_bytes, or what is left of max_memory)");
+}
+
 // -- value_tag ---------------------------------------------------------------
 
 std::string value_tag::type_name() const {
@@ -193,20 +223,27 @@ const value_t *environment::lookup(const std::string &name) const {
   return nullptr;
 }
 
-void environment::set(const std::string &name, value_t val) { bindings[name] = std::move(val); }
+void environment::set(const std::string &name, value_t val) {
+  if (frozen)
+    throw std::logic_error("set: '" + name + "' in a frozen scope");
+  bindings[name] = std::move(val);
+}
 
 void environment::set_existing(const std::string &name, value_t val) {
-  auto it = bindings.find(name);
-  if (it != bindings.end()) {
-    it->second = std::move(val);
-    return;
+  if (frozen)
+    throw std::logic_error("set_existing: '" + name + "' in a frozen scope");
+  environment *outermost = this; // the outermost unfrozen scope walked so far
+  for (environment *e = this; e && !e->frozen; e = e->outer.get()) {
+    auto it = e->bindings.find(name);
+    if (it != e->bindings.end()) {
+      it->second = std::move(val);
+      return;
+    }
+    outermost = e;
   }
-  if (outer) {
-    outer->set_existing(name, std::move(val));
-    return;
-  }
-  // Not found anywhere — set in this scope
-  bindings[name] = std::move(val);
+  // Not bound in an unfrozen scope: bind it in the outermost one, which shadows a frozen
+  // scope's binding of the same name rather than writing into the shared scope.
+  outermost->bindings[name] = std::move(val);
 }
 
 environment_ptr environment::extend(environment_ptr parent) {
