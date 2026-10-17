@@ -31,8 +31,8 @@ enum class backend : std::uint8_t {
 enum capability : std::uint32_t {
   cap_dynamics = 1u << 0,                   // gravity, forces and a constraint solver
   cap_collision = 1u << 1,                  // contacts and contact events
-  cap_heightfield = 1u << 2,                // heightfield shapes
-  cap_mesh = 1u << 3,                       // triangle_mesh shapes
+  cap_heightfield = 1u << 2,                // terrain shapes (cvc::height_field)
+  cap_mesh = 1u << 3,                       // mesh shapes (cvc::geometry)
   cap_raycast = 1u << 4,                    // world::raycast
   cap_threads = 1u << 5,                    // world_config::threads > 0
   cap_determinism_same_binary = 1u << 6,    // same build, same inputs -> same state

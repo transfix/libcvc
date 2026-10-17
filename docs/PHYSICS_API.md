@@ -12,7 +12,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | Header | What |
 |---|---|
 | `cvc/physics/types.h` | `vec3`, `quat`, `motion_type`, `body_id`, `material` |
-| `cvc/physics/shape.h` | `sphere`, `box`, `convex_hull`, `triangle_mesh`, `heightfield`, `bilinear_height()` |
+| `cvc/physics/shape.h` | `sphere`, `box`, `convex_hull`, `mesh` (a `cvc::geometry`), `terrain` (a `cvc::height_field`) |
 | `cvc/physics/body.h` | `body_desc`, `body_state` |
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
@@ -40,14 +40,10 @@ using namespace cvc::physics;
 world w;                                            // Jolt, 0.01 s steps, standard gravity
 const material_id ice = w.add_material({"ice", 0.1f});
 
-heightfield terrain;                                // from a raster
-terrain.rows = terrain.cols = 257;
-terrain.dx = terrain.dy = 1.0;
-terrain.origin = {x0, y0, 0.0};
-terrain.heights = ...;                              // rows * cols, row-major; NaN = hole
-terrain.materials = {0, ice};                       // a palette of world materials
-terrain.cell_materials = ...;                       // (rows-1) * (cols-1) palette indices
-w.add_body({terrain, motion_type::static_});
+// The world's terrain: the same cvc::height_field the renderer draws.
+auto ground = std::make_shared<cvc::height_field>(257, 257, x0, y0, 1.0, 1.0, heights);
+ground->set_cell_materials(surfaces);               // one surface id per cell
+w.add_body({terrain{ground, {0, ice}}, motion_type::static_});  // surface id -> world material
 
 body_desc crate{box{{0.2, 0.2, 0.2}}};
 crate.position = {x0 + 10.0, y0 + 10.0, 5.0};
@@ -94,9 +90,14 @@ const body_state s = w.state(c);
 
 | Shape | Notes |
 |---|---|
-| `sphere`, `box`, `convex_hull` | body-local; any motion type |
-| `triangle_mesh` | static only; optional per-triangle materials (buildings) |
-| `heightfield` | static only. It is placed by its own origin and cell size, not the body's pose. Rows run along +y. The engine stores heights compressed and checks every sample against `max_error` (default 5 mm), refusing a field it cannot hold that closely. Jolt splits each cell into two triangles, so its surface differs from `bilinear_height()` by at most the terrain's curvature times cell²/8. |
+| `sphere`, `box`, `convex_hull` | Body-local; any motion type. |
+| `mesh{geometry, materials}` | Static only (buildings). A `std::shared_ptr<const cvc::geometry>`: its triangles, and its quads split as `tri_surface` splits them. Each face's surface material (`face_materials`) is looked up in `materials`, and an empty table uses the surface id as the world material id. A geometry without face materials takes the body's material. |
+| `terrain{field, materials, max_error}` | Static only. A `std::shared_ptr<const cvc::height_field>`, placed by its own grid rather than the body's pose. Rows run along +y. The engine collides with the field's own triangles, the diagonal split `height_field::height()` describes, so a body rests where `field->height(x, y)` says. Cell materials map like a mesh's, with at most 256 distinct world materials. The engine stores heights compressed and checks every sample against `max_error` (default 5 mm), refusing a field it cannot hold that closely. |
+
+Meshes and terrain are the world's one representation (`docs/roadmap/WORLD-GEOMETRY-ROADMAP.md`):
+the renderer and the navigator share the same objects, and physics never keeps a copy of its own.
+The physics headers stay standard-library only by forward-declaring the two types; include
+`cvc/geometry/height_field.h` to build them.
 
 ### Bodies and time
 

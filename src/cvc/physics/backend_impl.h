@@ -24,11 +24,36 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace cvc {
 namespace physics {
 namespace detail {
+
+// A shape as an engine takes it. world.cpp checks the public shapes and flattens
+// the ones that reference the world's geometry (physics::mesh, physics::terrain)
+// into these, with every material resolved to a world material id, so a backend
+// never sees cvc::geometry and stays standard-library only.
+struct mesh_data {
+  std::vector<vec3> vertices;
+  std::vector<std::uint32_t> indices;          // three per triangle
+  std::vector<material_id> triangle_materials; // one per triangle
+};
+
+// Sample (r, c) at origin + (c * dx, r * dy, heights[r * cols + c]); NaN is a hole.
+// Each cell's material is palette[cells[r * (cols - 1) + c]] (cells empty: entry 0).
+struct terrain_data {
+  int rows = 0, cols = 0;
+  double dx = 1.0, dy = 1.0;
+  vec3 origin;
+  const float *heights = nullptr; // rows * cols; borrowed for the add_body call only
+  std::vector<std::uint8_t> cells;
+  std::vector<material_id> palette; // 1..256 world materials
+  double max_error = 0.005;
+};
+
+using engine_shape = std::variant<sphere, box, convex_hull, mesh_data, terrain_data>;
 
 class world_backend {
 public:
@@ -45,7 +70,8 @@ public:
   // rest are unchanged).
   virtual void reconfigure(const world_config &cfg) = 0;
 
-  virtual body_id add_body(const body_desc &d) = 0;
+  // `shape` is d.shape checked and flattened (d.shape itself is not read).
+  virtual body_id add_body(const body_desc &d, const engine_shape &shape) = 0;
   virtual void remove_body(body_id id) = 0;
   virtual bool contains(body_id id) const = 0;
   virtual std::size_t body_count() const = 0;

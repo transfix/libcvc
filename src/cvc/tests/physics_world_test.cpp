@@ -24,10 +24,13 @@
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/height_field.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_binding.h>
 #include <cvc/state/state.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -55,31 +58,25 @@ world_config null_config() {
   return c;
 }
 
-// Gentle rolling terrain, centred on the origin: slopes under 7 degrees, so a box
-// with friction 1 never slides.
-heightfield rolling_terrain(int n = 33, double cell = 0.5, vec3 origin = {}) {
-  heightfield h;
-  h.rows = h.cols = n;
-  h.dx = h.dy = cell;
+// Gentle rolling terrain, centred on (origin.x, origin.y) at elevation origin.z:
+// slopes under 7 degrees, so a box with friction 1 never slides. The world's own
+// cvc::height_field, as a renderer and the navigator would share it.
+std::shared_ptr<cvc::height_field> rolling_terrain(int n = 33, double cell = 0.5,
+                                                   vec3 origin = {}) {
   const double half = 0.5 * (n - 1) * cell;
-  h.origin = {origin.x - half, origin.y - half, origin.z};
-  h.heights.resize(static_cast<size_t>(n) * n);
+  std::vector<float> h(static_cast<size_t>(n) * n);
   for (int r = 0; r < n; ++r)
     for (int c = 0; c < n; ++c) {
       const double x = c * cell - half, y = r * cell - half;
-      h.heights[static_cast<size_t>(r) * n + c] =
-          static_cast<float>(0.3 * std::sin(x / 3.0) + 0.2 * std::cos(y / 4.0) + 0.02 * x);
+      h[static_cast<size_t>(r) * n + c] = static_cast<float>(origin.z + 0.3 * std::sin(x / 3.0) +
+                                                             0.2 * std::cos(y / 4.0) + 0.02 * x);
     }
-  return h;
+  return std::make_shared<cvc::height_field>(n, n, origin.x - half, origin.y - half, cell, cell,
+                                             std::move(h));
 }
 
-// The cosine of the terrain's slope at (x, y), from the bilinear gradient.
-double slope_cos(const heightfield &h, double x, double y) {
-  const double e = 1e-3;
-  const double hx = (bilinear_height(h, x + e, y) - bilinear_height(h, x - e, y)) / (2 * e);
-  const double hy = (bilinear_height(h, x, y + e) - bilinear_height(h, x, y - e)) / (2 * e);
-  return 1.0 / std::sqrt(1.0 + hx * hx + hy * hy);
-}
+// The cosine of the terrain's slope at (x, y): the facet's normal.
+double slope_cos(const cvc::height_field &h, double x, double y) { return h.normal(x, y)[2]; }
 
 double speed(const body_state &s) { return std::sqrt(dot(s.linear_velocity, s.linear_velocity)); }
 
@@ -89,7 +86,7 @@ struct busy_scene {
   std::vector<body_id> movers;
 
   explicit busy_scene(world &w) {
-    w.add_body({rolling_terrain(), motion_type::static_});
+    w.add_body({terrain{rolling_terrain()}, motion_type::static_});
     for (int i = 0; i < 4; ++i)
       for (int j = 0; j < 4; ++j) {
         body_desc d;
@@ -212,17 +209,27 @@ TEST(PhysicsWorld, BadBodiesAreRefused) {
   d = body_desc{box{}};
   d.material = 42;
   EXPECT_THROW(w.add_body(d), cvc::physics_error);
-  heightfield h = rolling_terrain(5);
-  EXPECT_THROW(w.add_body({h, motion_type::dynamic}), cvc::physics_error); // must be static
-  h.heights.pop_back();
-  EXPECT_THROW(w.add_body({h, motion_type::static_}), cvc::physics_error);
-  h = rolling_terrain(5);
-  h.cell_materials.assign(16, 3); // palette has one entry
-  EXPECT_THROW(w.add_body({h, motion_type::static_}), cvc::physics_error);
-  triangle_mesh m;
-  m.vertices = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
-  m.indices = {0, 1, 5};
-  EXPECT_THROW(w.add_body({m, motion_type::static_}), cvc::physics_error);
+  const auto field = rolling_terrain(5);
+  EXPECT_THROW(w.add_body({terrain{field}, motion_type::dynamic}), cvc::physics_error); // static
+  EXPECT_THROW(w.add_body({terrain{}, motion_type::static_}), cvc::physics_error);      // no field
+  EXPECT_THROW(w.add_body({terrain{field, {}, 0.0}, motion_type::static_}), cvc::physics_error);
+  // Cell surface 3 with no table means world material 3, which does not exist; a
+  // table maps it, and a table too short for it is refused.
+  auto marked = std::make_shared<cvc::height_field>(*field);
+  marked->set_cell_materials(std::vector<cvc::face_material_t>(16, 3));
+  EXPECT_THROW(w.add_body({terrain{marked}, motion_type::static_}), cvc::physics_error);
+  EXPECT_THROW(w.add_body({terrain{marked, {0, 0}}, motion_type::static_}), cvc::physics_error);
+  EXPECT_NO_THROW(w.add_body({terrain{marked, {0, 0, 0, 0}}, motion_type::static_}));
+  auto g = std::make_shared<cvc::geometry>();
+  g->points() = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}};
+  g->tris().push_back({{0, 1, 5}});
+  EXPECT_THROW(w.add_body({mesh{g}, motion_type::static_}), cvc::physics_error); // bad index
+  EXPECT_THROW(w.add_body({mesh{}, motion_type::static_}), cvc::physics_error);  // no geometry
+  g->tris().back() = {{0, 1, 2}};
+  EXPECT_THROW(w.add_body({mesh{g}, motion_type::dynamic}), cvc::physics_error); // static
+  EXPECT_NO_THROW(w.add_body({mesh{g}, motion_type::static_}));
+  auto empty = std::make_shared<cvc::geometry>();
+  EXPECT_THROW(w.add_body({mesh{empty}, motion_type::static_}), cvc::physics_error); // no faces
 }
 
 TEST(PhysicsWorld, NullSaveRestoreReproducesTheRun) {
@@ -276,19 +283,6 @@ TEST(PhysicsWorld, FollowTakesTheStepsDueOnTheClock) {
   EXPECT_THROW(w2.follow(clock), cvc::unsupported_exception);
 }
 
-TEST(PhysicsWorld, BilinearHeightMatchesTheGrid) {
-  heightfield h;
-  h.rows = h.cols = 2;
-  h.dx = 2.0;
-  h.dy = 1.0;
-  h.origin = {10.0, 20.0, 1.0};
-  h.heights = {0.0f, 2.0f, 4.0f, 6.0f}; // row 0: 0, 2; row 1: 4, 6
-  EXPECT_DOUBLE_EQ(bilinear_height(h, 10.0, 20.0), 1.0);
-  EXPECT_DOUBLE_EQ(bilinear_height(h, 12.0, 21.0), 7.0);
-  EXPECT_DOUBLE_EQ(bilinear_height(h, 11.0, 20.5), 1.0 + 3.0);
-  EXPECT_TRUE(std::isnan(bilinear_height(h, 9.0, 20.0)));
-}
-
 // --- Jolt ---------------------------------------------------------------------
 
 TEST(PhysicsJolt, ReportsItsCapabilities) {
@@ -304,31 +298,85 @@ TEST(PhysicsJolt, ReportsItsCapabilities) {
 TEST(PhysicsJolt, BoxRestsOnTheHeightfieldAtTheSampledHeight) {
   REQUIRE_JOLT();
   world w(jolt_config());
-  const heightfield terrain = rolling_terrain();
-  w.add_body({terrain, motion_type::static_});
+  const auto field = rolling_terrain();
+  w.add_body({terrain{field}, motion_type::static_});
   const double half = 0.1;
   std::vector<body_id> boxes;
   for (const auto &xy :
        std::vector<std::pair<double, double>>{{-2, -3}, {2, -3}, {-2, 3}, {3, 1}}) {
     body_desc d{box{{half, half, half}}};
-    d.position = {xy.first, xy.second, bilinear_height(terrain, xy.first, xy.second) + 0.5};
+    d.position = {xy.first, xy.second, field->height(xy.first, xy.second) + 0.5};
     boxes.push_back(w.add_body(d));
   }
   w.step(500); // 5 s
   for (const body_id b : boxes) {
     const body_state s = w.state(b);
     EXPECT_LT(speed(s), 0.01) << "box " << b.value << " did not come to rest";
-    const double ground = bilinear_height(terrain, s.position.x, s.position.y);
-    const double expect = ground + half / slope_cos(terrain, s.position.x, s.position.y);
+    const double ground = field->height(s.position.x, s.position.y);
+    const double expect = ground + half / slope_cos(*field, s.position.x, s.position.y);
     EXPECT_NEAR(s.position.z, expect, 0.01) << "box " << b.value;
   }
-  // The engine's surface agrees with the raster where nothing rests on it, too.
+  // The engine's surface is the field's where nothing rests on it, too.
   for (double x = -6.0; x <= 6.0; x += 1.5) {
     const auto hit = w.raycast({x, 0.37, 5.0}, {x, 0.37, -5.0});
     ASSERT_TRUE(hit.has_value());
-    EXPECT_NEAR(hit->point.z, bilinear_height(terrain, x, 0.37), 0.005);
+    EXPECT_NEAR(hit->point.z, field->height(x, 0.37), 0.005);
     EXPECT_GT(hit->normal.z, 0.9);
   }
+}
+
+// The engine collides with the height field's own triangles: the same diagonal
+// split cvc::height_field::height() and the renderer's mesh use. A rough field
+// makes the two possible diagonals differ by up to decimetres inside a cell, far
+// more than the engine's height compression (max_error).
+TEST(PhysicsJolt, TerrainCollidesWithTheFieldsOwnTriangles) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  const int n = 12;
+  std::vector<float> h(n * n);
+  for (int r = 0; r < n; ++r)
+    for (int c = 0; c < n; ++c)
+      h[r * n + c] = static_cast<float>(((r * 7 + c * 13) % 11) * 0.1); // 0 .. 1 m, rough
+  const auto field = std::make_shared<cvc::height_field>(n, n, -3.0, 2.0, 0.5, 0.75, h);
+  w.add_body({terrain{field}, motion_type::static_});
+  double worst = 0.0;
+  for (int i = 0; i < 200; ++i) {
+    const double x = -3.0 + 5.5 * ((i * 37) % 200) / 200.0 + 0.0013;
+    const double y = 2.0 + 8.25 * ((i * 91) % 200) / 200.0 + 0.0017;
+    const auto hit = w.raycast({x, y, 5.0}, {x, y, -5.0});
+    ASSERT_TRUE(hit.has_value()) << x << ", " << y;
+    worst = std::max(worst, std::fabs(hit->point.z - field->height(x, y)));
+  }
+  EXPECT_LT(worst, 0.006) << "the engine's triangles are not the field's";
+}
+
+// A mesh is the world's cvc::geometry: its triangles and split quads, each face
+// with its own surface material through the terrain-style materials table.
+TEST(PhysicsJolt, MeshFacesCarryTheirSurfaceMaterials) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  const material_id asphalt = w.add_material({"asphalt", 0.9f});
+  const material_id ice = w.add_material({"ice", 0.2f});
+  // Two quads side by side: x in [0, 2] is surface 0, x in [2, 4] surface 1.
+  auto floor = std::make_shared<cvc::geometry>();
+  for (int i = 0; i < 3; ++i) {
+    floor->points().push_back({{2.0 * i, 0.0, 0.0}});
+    floor->points().push_back({{2.0 * i, 2.0, 0.0}});
+  }
+  floor->quads().push_back({{0, 2, 3, 1}});
+  floor->quads().push_back({{2, 4, 5, 3}});
+  floor->face_materials() = {0, 1};
+  const body_id slab = w.add_body({mesh{floor, {asphalt, ice}}, motion_type::static_});
+  EXPECT_EQ(w.raycast({1.0, 1.0, 1.0}, {1.0, 1.0, -1.0})->material, asphalt);
+  EXPECT_EQ(w.raycast({3.0, 1.0, 1.0}, {3.0, 1.0, -1.0})->material, ice);
+  EXPECT_EQ(w.raycast({3.0, 1.0, 1.0}, {3.0, 1.0, -1.0})->body, slab);
+  // Without face materials the whole mesh is the body's material.
+  auto plain = std::make_shared<cvc::geometry>(*floor);
+  plain->face_materials().clear();
+  body_desc d{mesh{plain}, motion_type::static_, {0.0, 10.0, 0.0}};
+  d.material = ice;
+  w.add_body(d);
+  EXPECT_EQ(w.raycast({1.0, 11.0, 1.0}, {1.0, 11.0, -1.0})->material, ice);
 }
 
 // Gate 2, part one: the contact carries the cell's material, and the solver used
@@ -338,15 +386,13 @@ TEST(PhysicsJolt, ContactReportsTheCellMaterial) {
   world w(jolt_config());
   const material_id asphalt = w.add_material({"asphalt", 0.9f, 0.0f, 0.01f, 1});
   const material_id ice = w.add_material({"ice", 0.3f, 0.0f, 0.005f, 2});
-  heightfield h;
-  h.rows = h.cols = 9;
-  h.heights.assign(81, 0.0f);
-  h.materials = {asphalt, ice};
-  h.cell_materials.assign(64, 0);
+  std::vector<cvc::face_material_t> cells(64, 0); // surface 0 is asphalt, 1 ice
   for (int r = 0; r < 8; ++r)
     for (int c = 4; c < 8; ++c)
-      h.cell_materials[static_cast<size_t>(r) * 8 + c] = 1; // x >= 4 m is ice
-  const body_id ground = w.add_body({h, motion_type::static_});
+      cells[static_cast<size_t>(r) * 8 + c] = 1; // x >= 4 m is ice
+  const auto field = std::make_shared<cvc::height_field>(9, 9, 0.0, 0.0, 1.0, 1.0,
+                                                         std::vector<float>(81, 0.0f), cells);
+  const body_id ground = w.add_body({terrain{field, {asphalt, ice}}, motion_type::static_});
   const body_id on_ice = w.add_body({box{{0.2, 0.2, 0.2}}, motion_type::dynamic, {6.0, 4.0, 0.5}});
   const body_id on_asphalt =
       w.add_body({box{{0.2, 0.2, 0.2}}, motion_type::dynamic, {2.0, 4.0, 0.5}});
@@ -386,22 +432,19 @@ TEST(PhysicsJolt, FrictionDecidesStickOrSlide) {
   const material_id asphalt = w.add_material({"asphalt", 0.9f});
   const material_id ice = w.add_material({"ice", 0.2f});
   const double theta = 20.0 * 3.14159265358979323846 / 180.0, t = std::tan(theta);
-  heightfield h;
-  h.cols = 41;
-  h.rows = 9;
-  h.dx = 0.5;
-  h.dy = 1.0;
-  h.heights.resize(static_cast<size_t>(h.rows) * h.cols);
-  for (int r = 0; r < h.rows; ++r)
-    for (int c = 0; c < h.cols; ++c)
-      h.heights[static_cast<size_t>(r) * h.cols + c] = static_cast<float>(t * c * h.dx);
-  h.max_error = 0.01;
-  h.materials = {asphalt, ice};
-  h.cell_materials.assign(static_cast<size_t>(h.rows - 1) * (h.cols - 1), 0);
-  for (int r = 4; r < h.rows - 1; ++r)
-    for (int c = 0; c < h.cols - 1; ++c)
-      h.cell_materials[static_cast<size_t>(r) * (h.cols - 1) + c] = 1; // y >= 4 m is ice
-  w.add_body({h, motion_type::static_});
+  const int rows = 9, cols = 41;
+  const double dx = 0.5, dy = 1.0;
+  std::vector<float> heights(static_cast<size_t>(rows) * cols);
+  for (int r = 0; r < rows; ++r)
+    for (int c = 0; c < cols; ++c)
+      heights[static_cast<size_t>(r) * cols + c] = static_cast<float>(t * c * dx);
+  std::vector<cvc::face_material_t> cells(static_cast<size_t>(rows - 1) * (cols - 1), 0);
+  for (int r = 4; r < rows - 1; ++r)
+    for (int c = 0; c < cols - 1; ++c)
+      cells[static_cast<size_t>(r) * (cols - 1) + c] = 1; // y >= 4 m is ice
+  const auto field =
+      std::make_shared<cvc::height_field>(rows, cols, 0.0, 0.0, dx, dy, heights, cells);
+  w.add_body({terrain{field, {asphalt, ice}, 0.01}, motion_type::static_});
   // Each box starts resting flat on the slope: rotated by -theta about y, its
   // centre half a side out along the surface normal.
   const double half = 0.2;
@@ -494,16 +537,16 @@ TEST(PhysicsJolt, FloatingOriginHoldsCityScaleCoordinates) {
   world_config c = jolt_config();
   c.origin = site;
   world w(c);
-  const heightfield terrain = rolling_terrain(33, 0.5, site);
-  w.add_body({terrain, motion_type::static_});
+  const auto field = rolling_terrain(33, 0.5, site);
+  w.add_body({terrain{field}, motion_type::static_});
   const double half = 0.1;
   body_desc d{box{{half, half, half}}};
   d.position = site + vec3{1.0, -2.0, 1.0};
   const body_id b = w.add_body(d);
   w.step(400);
   const body_state rest = w.state(b);
-  const double ground = bilinear_height(terrain, rest.position.x, rest.position.y);
-  EXPECT_NEAR(rest.position.z, ground + half / slope_cos(terrain, rest.position.x, rest.position.y),
+  const double ground = field->height(rest.position.x, rest.position.y);
+  EXPECT_NEAR(rest.position.z, ground + half / slope_cos(*field, rest.position.x, rest.position.y),
               0.01);
   w.rebase(site + vec3{100.0, -50.0, 0.0});
   const body_state moved = w.state(b);
@@ -537,10 +580,9 @@ TEST(PhysicsJolt, DeterminismModeTheBuildCannotDeliverIsRefused) {
 TEST(PhysicsJolt, HeightfieldTooRoughForMaxErrorIsRefused) {
   REQUIRE_JOLT();
   world w(jolt_config());
-  heightfield h = rolling_terrain(9);
-  h.heights[40] = 900.0f; // a 900 m spike in a field of decimetres
-  h.max_error = 1e-6;
-  EXPECT_THROW(w.add_body({h, motion_type::static_}), cvc::physics_error);
+  auto field = rolling_terrain(9);
+  field->set_height(4, 4, 900.0f); // a 900 m spike in a field of decimetres
+  EXPECT_THROW(w.add_body({terrain{field, {}, 1e-6}, motion_type::static_}), cvc::physics_error);
 }
 
 // --- reconfigure and set_material ------------------------------------------------
@@ -770,15 +812,12 @@ namespace {
 // the engine's, which is what the golden below pins.
 std::uint64_t exact_scene_hash(int steps) {
   world w(jolt_config());
-  heightfield h;
-  h.rows = h.cols = 17;
-  h.dx = h.dy = 0.5;
-  h.origin = {-4.0, -4.0, 0.0};
-  h.heights.resize(17 * 17);
+  std::vector<float> heights(17 * 17);
   for (int r = 0; r < 17; ++r)
     for (int c = 0; c < 17; ++c)
-      h.heights[r * 17 + c] = static_cast<float>((r % 5) * 0.125 + (c % 3) * 0.25);
-  w.add_body({h, motion_type::static_});
+      heights[r * 17 + c] = static_cast<float>((r % 5) * 0.125 + (c % 3) * 0.25);
+  w.add_body({terrain{std::make_shared<cvc::height_field>(17, 17, -4.0, -4.0, 0.5, 0.5, heights)},
+              motion_type::static_});
   std::vector<body_id> bodies;
   for (int i = 0; i < 3; ++i)
     for (int j = 0; j < 3; ++j) {

@@ -12,8 +12,8 @@
 //
 //   cvc::physics::world w;                       // Jolt if the build has it, else throws
 //   const auto ice = w.add_material({"ice", 0.1f});
-//   cvc::physics::heightfield terrain = ...;     // from a raster
-//   w.add_body({terrain, cvc::physics::motion_type::static_});
+//   auto ground = std::make_shared<cvc::height_field>(...);  // the world's own terrain
+//   w.add_body({cvc::physics::terrain{ground}, cvc::physics::motion_type::static_});
 //   const auto box = w.add_body({cvc::physics::box{{0.2, 0.2, 0.2}}});
 //   for (int i = 0; i < 100; ++i) w.step();      // 1 s at the default 0.01 s quantum
 //
