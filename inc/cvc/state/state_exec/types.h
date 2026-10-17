@@ -406,17 +406,30 @@ public:
   eval_alloc_guard(const eval_alloc_guard &) = delete;
   eval_alloc_guard &operator=(const eval_alloc_guard &) = delete;
 
+  /// Bytes natives allocated while this guard was the innermost one: every eval_alloc_check()
+  /// that passed, and every eval_alloc_note(). A scheduler adds them to the process's heap
+  /// accounting (heap.h), which uses them to decide when to re-measure.
+  std::size_t allocated() const { return allocated_; }
+
 private:
   friend std::optional<std::size_t> eval_alloc_limit();
+  friend void eval_alloc_check(std::size_t, const char *);
+  friend void eval_alloc_note(std::size_t);
   std::optional<std::size_t> limit_; // the effective limit: this guard's, tightened by outer ones
   eval_alloc_guard *outer_ = nullptr;
+  std::size_t allocated_ = 0;
 };
 
 /// The allocation limit in force on this thread (std::nullopt: unbounded).
 std::optional<std::size_t> eval_alloc_limit();
 
-/// Throw std::runtime_error naming `who` when `bytes` is over eval_alloc_limit().
+/// Throw std::runtime_error naming `who` when `bytes` is over eval_alloc_limit(); otherwise
+/// report the bytes as allocated (eval_alloc_guard::allocated()).
 void eval_alloc_check(std::size_t bytes, const char *who);
+
+/// Report `bytes` a native allocated without a limit check (a copy no bigger than an argument,
+/// such as cons or slice), for heap accounting only.
+void eval_alloc_note(std::size_t bytes);
 
 /// `count * each`, saturating at SIZE_MAX, for size estimates that must not wrap.
 inline std::size_t alloc_bytes(std::size_t count, std::size_t each) {

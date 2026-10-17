@@ -58,8 +58,9 @@ void scheduler::load_settings() {
   // --- parser.* and data.* (same resolution order; see parse_options_from_state) ---
   parse_options_ = parse_options_from_state(*watch_root_, id_);
   data_options_ = data_options_from_state(*watch_root_, id_);
-  // --- limits.max_alloc_bytes (same resolution order; see max_alloc_bytes_from_state) ---
+  // --- limits.max_alloc_bytes and limits.heap_check_steps (same resolution order) ---
   max_alloc_bytes_ = max_alloc_bytes_from_state(*watch_root_, id_);
+  heap_options_ = heap_options_from_state(*watch_root_, id_);
 
   // Publish effective values to per-scheduler subtree
   if (!id_.empty()) {
@@ -69,6 +70,8 @@ void scheduler::load_settings() {
     (*watch_root_)(base + ".parser.step_tokens").value(std::to_string(parse_options_.step_tokens));
     (*watch_root_)(base + ".data.step_nodes").value(std::to_string(data_options_.step_nodes));
     (*watch_root_)(base + ".limits.max_alloc_bytes").value(std::to_string(max_alloc_bytes_));
+    (*watch_root_)(base + ".limits.heap_check_steps")
+        .value(std::to_string(heap_options_.check_steps));
     (*watch_root_)(base + ".policy")
         .value(policy_ == scheduling_policy::round_robin ? "round_robin"
                : policy_ == scheduling_policy::priority  ? "priority"
@@ -110,6 +113,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
   proc.max_alloc_bytes = max_alloc_bytes_;
+  proc.heap_check_steps = heap_options_.check_steps;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -137,6 +141,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
   proc.max_alloc_bytes = max_alloc_bytes_;
+  proc.heap_check_steps = heap_options_.check_steps;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -205,6 +210,10 @@ process_ptr scheduler::select_process() {
 // ---------------------------------------------------------------------------
 
 void scheduler::execute_process_step(process &proc) {
+  // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
+  if (cycle_collection_due())
+    collect_cycles();
+
   // Track which process is currently executing so intrinsics can query it.
   current_pid_ = proc.pid;
   current_proc_ = processes_[proc.pid];
@@ -217,6 +226,14 @@ void scheduler::execute_process_step(process &proc) {
       pp.reset();
     }
   } reset_guard{current_pid_, current_proc_};
+  // Once this step is over, a process it finished lets go of what it evaluated with.
+  struct release_guard {
+    process &p;
+    ~release_guard() {
+      if (p.status == process_status::terminated || p.status == process_status::killed)
+        p.release_state();
+    }
+  } release_dead{proc};
 
   // A process still reading its script (parser.step_tokens) takes signals and watch events once
   // the script is read: their handlers run on the evaluation stack, which doesn't exist yet. One
@@ -249,8 +266,9 @@ void scheduler::execute_process_step(process &proc) {
   // same guarantee the read-lane's run() already has. max_time <= 0 means unlimited (nullopt).
   eval_deadline_guard step_deadline(proc.time_left());
   // Bound what one native call in this step may allocate: limits.max_alloc_bytes, tightened to
-  // what is left of max_memory (which, between steps, only sees state-tree writes).
-  eval_alloc_guard step_alloc(proc.alloc_limit(mem_tracker_.current_bytes(proc.pid)));
+  // what is left of max_memory (its state-tree writes plus its measured heap share).
+  eval_alloc_guard step_alloc(
+      proc.alloc_limit(mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   bool done = evaluator_.step(proc.state);
@@ -262,6 +280,8 @@ void scheduler::execute_process_step(process &proc) {
   proc.state.stats.add_step_time(step_seconds);
   if (charge_cpu)
     proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
+  // Heap accounting: take a finished measurement, start the next when due (heap.h).
+  heap_after_step(proc, step_alloc.allocated(), mem_tracker_.current_bytes(proc.pid));
 
   // 5. Check if signal/watch handler just finished
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
@@ -532,8 +552,9 @@ void scheduler::check_limits(process &proc) {
     kill_process(proc, "time_limit_exceeded");
     return;
   }
-  // max_memory
-  if (proc.max_memory > 0 && mem_tracker_.current_bytes(proc.pid) >= proc.max_memory) {
+  // max_memory: state-tree writes plus the measured heap share (heap.h)
+  if (proc.max_memory > 0 &&
+      mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes >= proc.max_memory) {
     kill_process(proc, "memory_limit_exceeded");
     return;
   }
@@ -560,12 +581,21 @@ void scheduler::terminate_process(process &proc, value_t result) {
   if (proc.on_complete) {
     proc.on_complete(proc.exit_code);
   }
+  release_if_idle(proc);
 }
 
 void scheduler::kill_process(process &proc, const std::string &reason) {
   proc.status = process_status::killed;
   proc.exit_error = reason;
   proc.state.stats.mark_complete();
+  release_if_idle(proc);
+}
+
+void scheduler::release_if_idle(process &proc) {
+  note_process_exit(); // what it leaked is garbage now (heap.h)
+  // A process stepping right now (one that killed itself) is released once its step is over.
+  if (proc.pid != current_pid_)
+    proc.release_state();
 }
 
 bool scheduler::pause(int pid) {
@@ -714,6 +744,7 @@ int scheduler::fork(int pid) {
   child->max_time = parent.max_time;
   child->max_memory = parent.max_memory;
   child->max_alloc_bytes = parent.max_alloc_bytes;
+  child->heap_check_steps = parent.heap_check_steps;
   child->max_messages = parent.max_messages;
   child->max_message_bytes = parent.max_message_bytes;
   child->signal_handlers = parent.signal_handlers;
@@ -814,6 +845,8 @@ process_info scheduler::make_info(const process &proc) const {
   info.elapsed_time = proc.elapsed_time();
   info.current_memory = mem_tracker_.current_bytes(proc.pid);
   info.peak_memory = mem_tracker_.peak_bytes(proc.pid);
+  info.heap_memory = proc.heap_bytes;
+  info.heap_measurements = proc.heap_measurements;
   info.max_memory = proc.max_memory;
   info.max_time = proc.max_time;
   info.message_count = proc.message_count;

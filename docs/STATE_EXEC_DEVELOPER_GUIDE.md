@@ -819,12 +819,67 @@ Set via `execute_options` at submission time or adjusted at runtime:
 execute_options opts;
 opts.max_steps         = 10000;     // evaluator steps
 opts.max_time          = 5.0;       // wall time in seconds
-opts.max_memory        = 1048576;   // bytes (tracked by memory_tracker)
+opts.max_memory        = 1048576;   // bytes: state-tree writes + the measured heap share
 opts.max_messages      = 100;       // outbound msg-send calls
 opts.max_message_bytes = 65536;     // total outbound payload bytes
 ```
 
 When a limit is exceeded, the process is killed (status becomes `killed`).
+
+### Memory: state-tree writes and the measured heap
+
+`max_memory` covers two things:
+- what the process wrote to the state tree, counted by the scheduler's `memory_tracker`;
+- its share of the values it holds in memory (lists, dicts, strings, closures, environments),
+  measured by walking what it can reach (`heap.h`).
+
+A value can be shared between processes. A broadcast message is one dict held by every
+receiver, and a forked child shares its parent's lists. So a process pays its **share** of each
+node it reaches: the node's size × (its references ÷ the node's owner count), and a node passes
+its share on to the nodes it holds. Summed over all holders, a node's shares come to its size: a
+1 MB message held by 50 residents costs each about 20 KB, and as holders drop it, those left pay
+more at their next measurement.
+
+A measurement is the process's own deep-data work, run a slice per step like other data work
+(`data.step_nodes`) and counted against its steps and time. One starts after a step when any of
+these holds:
+
+- natives have reported allocating 64 KiB, or half the last measurement if that is more, since
+  the last one (the functions with an allocation check, §11, plus copies like `cons` and
+  `slice`);
+- what they reported could cross the remaining budget;
+- `limits.heap_check_steps` steps have passed (default 4096; `0` = only the two above).
+
+The kill decision always uses an actual measurement, never the reported bytes, so temporaries a
+program drops don't count. Only a process with `max_memory > 0` is measured.
+`process_info::heap_memory` and `heap_measurements` report the last measurement. The per-step
+allocation limit (§11) takes what is left after state-tree writes and the measured heap.
+
+### Reference cycles
+
+Values are reference counted, and reference counting can't free a cycle. These all leaked their
+whole scope, with everything in it, before the collector existed:
+- a closure bound in the scope it captured: every `defun`, `(set f (lambda …))`, a `let`-local
+  recursive lambda;
+- a class, whose methods capture the scope the class is bound in;
+- a container that holds itself, as after `(append l l)`.
+
+`collect_cycles()` (`heap.h`) finds the cycles nothing outside them holds, the way CPython does:
+- It tracks the environments that closures, generators and class methods capture, and the
+  containers changed in place to hold another container (`append`, `set-nth`, `set-attr`). Only
+  those can close a cycle.
+- It counts the references these objects (and everything they reach) make to each other. Anything
+  with more owners than that is held from outside: by a live process, a host (pycvc's `Exec`, an
+  Ariadne action context), or anything else. Such an object stays, along with everything it
+  reaches.
+- What is left is garbage. Clearing it lets it free.
+
+Both schedulers collect between steps once a thread has tracked as many new objects as survived
+the last collection (at least 256), and at most a second after a process ended. A finished
+process also releases its evaluation state right away (`process::release_state`; result, error
+and statistics stay), so what it leaked can be collected before the process is reaped. Tracking
+is per thread. A host that runs evaluators without a scheduler calls `collect_cycles()` itself,
+between steps; inside a step it does nothing.
 
 ### Cluster-Level Resource Policy
 
@@ -890,6 +945,7 @@ sched.load_settings();         // read and apply settings
 |---------|-------------------|-------------|---------|
 | `max_pending_messages` | `state_exec.schedulers.<id>.max_pending_messages` | `state_exec.defaults.max_pending_messages` | `1024` |
 | `limits.max_alloc_bytes` | `state_exec.schedulers.<id>.limits.max_alloc_bytes` | `state_exec.defaults.limits.max_alloc_bytes` | `16777216` ([§11](#allocation-limit)) |
+| `limits.heap_check_steps` | `state_exec.schedulers.<id>.limits.heap_check_steps` | `state_exec.defaults.limits.heap_check_steps` | `4096` ([heap](#memory-state-tree-writes-and-the-measured-heap)) |
 
 ```cpp
 // Set a global default for all schedulers
@@ -910,6 +966,7 @@ configuration back to the state tree:
 
 - `state_exec.schedulers.<id>.max_pending_messages` — the resolved cap
 - `state_exec.schedulers.<id>.limits.max_alloc_bytes` — the resolved per-call allocation limit
+- `state_exec.schedulers.<id>.limits.heap_check_steps` — the resolved heap re-measure interval
 - `state_exec.schedulers.<id>.policy` — `"round_robin"`, `"priority"`, or `"priority_rr"`
 
 ---
@@ -1341,8 +1398,8 @@ mine.import_module("geo", env, {"geo.area"});         // or a subset
 ### Allocation limit
 
 A native call builds its whole result inside one evaluator step. The per-process
-`max_memory` check runs between steps and counts only state-tree writes, so it cannot see
-`(collections.range 1000000000)`. Each function whose result can be larger than all of its
+`max_memory` check runs between steps, and the heap it counts is measured after the fact (§7), so
+neither can stop `(collections.range 1000000000)` from allocating. Each function whose result can be larger than all of its
 arguments therefore estimates the result's size and fails before allocating when it is over
 the limit:
 
@@ -1353,7 +1410,8 @@ the limit:
 The limit for a step is the tighter of two values:
 
 1. the tree setting `limits.max_alloc_bytes` (table below; `0` means no limit of its own);
-2. what is left of the process's `max_memory`, when it has one.
+2. what is left of the process's `max_memory`, when it has one: after its state-tree writes and
+   its last measured heap share (§7).
 
 | Setting | Per-scheduler path | Global path | Default |
 |---------|-------------------|-------------|---------|

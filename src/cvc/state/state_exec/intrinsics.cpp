@@ -448,6 +448,7 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   append_budget_usage(entries, *info);
   entries.emplace_back("elapsed_time", value_t(info->elapsed_time));
   entries.emplace_back("memory", value_t(static_cast<int64_t>(info->current_memory)));
+  entries.emplace_back("heap_memory", value_t(static_cast<int64_t>(info->heap_memory)));
   entries.emplace_back("peak_memory", value_t(static_cast<int64_t>(info->peak_memory)));
   entries.emplace_back("max_memory", value_t(static_cast<int64_t>(info->max_memory)));
   entries.emplace_back("max_time", value_t(info->max_time));

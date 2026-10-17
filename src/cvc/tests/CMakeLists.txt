@@ -66,6 +66,7 @@ add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluato
 add_executable(state_exec_codec_test state_exec_codec_test.cpp)
 add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
 add_executable(state_exec_stdlib_test state_exec_stdlib_test.cpp)
+add_executable(state_exec_heap_test state_exec_heap_test.cpp)
 add_executable(state_exec_grammar_test state_exec_grammar_test.cpp)
 add_executable(state_exec_corpus_test state_exec_corpus_test.cpp)
 add_executable(state_exec_async_test state_exec_async_test.cpp)
@@ -332,6 +333,7 @@ list(APPEND TEST_TARGETS
   state_exec_codec_test
   state_exec_unicode_test
   state_exec_stdlib_test
+  state_exec_heap_test
   state_exec_grammar_test
   state_exec_corpus_test
   state_exec_async_test
@@ -1265,6 +1267,12 @@ target_link_libraries(state_exec_stdlib_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(state_exec_heap_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 target_link_libraries(state_exec_grammar_test
   PRIVATE
     cvc
@@ -1603,6 +1611,7 @@ target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stdlib_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_heap_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_grammar_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_corpus_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
@@ -2016,6 +2025,7 @@ cvc_discover_tests(state_exec_stackless_evaluator_test)
 cvc_discover_tests(state_exec_codec_test)
 cvc_discover_tests(state_exec_unicode_test)
 cvc_discover_tests(state_exec_stdlib_test)
+cvc_discover_tests(state_exec_heap_test)
 cvc_discover_tests(state_exec_grammar_test)
 cvc_discover_tests(state_exec_corpus_test)
 cvc_discover_tests(state_exec_async_test)

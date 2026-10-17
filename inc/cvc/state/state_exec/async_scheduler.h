@@ -246,6 +246,9 @@ private:
   void check_limits(process &proc);
   void terminate_process(process &proc, value_t result);
   void kill_process(process &proc, const std::string &reason);
+  /// After a process ended: note it for the cycle collector and, unless it is the one stepping
+  /// now, release its evaluation state (process::release_state).
+  void release_if_idle(process &proc);
   process_info make_info(const process &proc) const;
 };
 

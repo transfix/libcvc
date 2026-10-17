@@ -11,6 +11,7 @@
 #define CVC_STATE_EXEC_SCHEDULER_H
 
 #include <chrono>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler_base.h>
@@ -210,6 +211,7 @@ private:
   scheduling_policy policy_;
   parse_options parse_options_;
   data_options data_options_;
+  heap_options heap_options_;
   int next_pid_ = 1;
   int rr_index_ = 0;
   bool running_ = false;
@@ -256,6 +258,10 @@ private:
 
   /// Mark a process as killed with an error.
   void kill_process(process &proc, const std::string &reason);
+
+  /// After a process ended: note it for the cycle collector and, unless it is the one stepping
+  /// now, release its evaluation state (process::release_state).
+  void release_if_idle(process &proc);
 
   /// Build process_info from a process.
   process_info make_info(const process &proc) const;
