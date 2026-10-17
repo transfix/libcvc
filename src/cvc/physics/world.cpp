@@ -28,6 +28,8 @@ namespace physics {
 
 // --- backends ---------------------------------------------------------------
 
+detail::world_backend::~world_backend() = default;
+
 const char *backend_name(backend b) {
   switch (b) {
   case backend::null:

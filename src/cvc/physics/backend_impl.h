@@ -32,7 +32,9 @@ namespace detail {
 
 class world_backend {
 public:
-  virtual ~world_backend() = default;
+  // Defined in world.cpp: the key function, so this interface's vtable and RTTI are
+  // emitted there and never in the Jolt backend's TU, which is built without RTTI.
+  virtual ~world_backend();
 
   // A material is registered before any body uses it. set_material changes its
   // values between steps.

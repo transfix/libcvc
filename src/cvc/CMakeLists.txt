@@ -1582,10 +1582,17 @@ if(CVC_WITH_JOLT)
   target_compile_definitions(cvc_physics_jolt PRIVATE CVC_WITH_JOLT)
   target_compile_features(cvc_physics_jolt PRIVATE cxx_std_17)
   target_link_libraries(cvc_physics_jolt PRIVATE Jolt::Jolt)
+  # Jolt is built without RTTI. This TU subclasses Jolt's polymorphic classes
+  # (PhysicsMaterial, ContactListener, the layer filters, StateRecorder), and with
+  # RTTI on, GCC and Clang emit typeinfo for those subclasses that references the
+  # bases' typeinfo, which libJolt never defined ("undefined reference to typeinfo
+  # for JPH::PhysicsMaterial" at link). Matching Jolt's -fno-rtti removes the
+  # references; exceptions still work without RTTI. MSVC emits its RTTI records in
+  # the referencing TU, so it needs no switch.
   if(MSVC)
     target_compile_options(cvc_physics_jolt PRIVATE /fp:precise)
   else()
-    target_compile_options(cvc_physics_jolt PRIVATE -ffp-contract=off)
+    target_compile_options(cvc_physics_jolt PRIVATE -ffp-contract=off -fno-rtti)
   endif()
   if(_cvc_jolt_kind STREQUAL "STATIC")
     target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_physics_jolt>)
