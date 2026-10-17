@@ -10,9 +10,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <cvc/state/state_stream_transport_grpc.h>
+#include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -34,13 +36,28 @@ bool tls_tests_enabled() {
   return e != nullptr && std::string(e) == "1";
 }
 
+// mkdtemp(3) is POSIX-only; create a unique temp dir portably so this file
+// compiles on MSVC (the TLS tests stay gated off on Windows via the env check).
+std::string make_temp_dir(const char *prefix) {
+  std::error_code ec;
+  std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+  if (ec)
+    return {};
+  std::random_device rd;
+  for (int i = 0; i < 100; ++i) {
+    std::filesystem::path cand = base / (std::string(prefix) + std::to_string(rd()));
+    if (std::filesystem::create_directory(cand, ec) && !ec)
+      return cand.string();
+  }
+  return {};
+}
+
 // Mint a throwaway self-signed cert (CN/SAN localhost) via openssl, same as the
 // control-plane TLS test. Returns false if openssl is unavailable.
 bool generate_self_signed(std::string &cert_pem, std::string &key_pem) {
-  char tmpl[] = "/tmp/cvc_stream_tls_XXXXXX";
-  if (!mkdtemp(tmpl))
+  std::string dir = make_temp_dir("cvc_stream_tls_");
+  if (dir.empty())
     return false;
-  std::string dir = tmpl;
   std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + dir + "/k.pem -out " + dir +
                     "/c.pem -days 1 -nodes -subj '/CN=localhost' "
                     "-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' >/dev/null 2>&1";
