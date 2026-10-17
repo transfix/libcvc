@@ -304,6 +304,14 @@ depends:
     # nav_finale / nav_city_swarm --bundle load a real Austin city on Windows.
     - name: assimp
       platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
+    # Jolt Physics, the cvc::physics backend (src/cvc/physics/jolt). Without it
+    # find_package(Jolt CONFIG) misses, CVC_WITH_JOLT turns OFF and libcvc builds
+    # with the null backend only. Linked PRIVATE into the cvc target: a shared
+    # libcvc absorbs it, a static (wasm-mt) libcvc names it in cvcConfig.cmake.
+    # joltphysics 5.6.0+cvc.5 is cross-platform deterministic and published for
+    # these platforms (macOS: arm64 only so far, like the rest of this list).
+    - name: joltphysics
+      platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
     # Scoped for the same reason as assimp above, but the other way round:
     # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
     # Accelerate framework, so libcvc-deps uses the system libraries there —
