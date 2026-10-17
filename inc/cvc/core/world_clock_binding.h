@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cvc/core/world_clock.h>
+#include <mutex>
 #include <string>
 
 namespace cvc {
@@ -72,6 +73,10 @@ struct world_clock_keys {
 //     <prefix>.realized_speed  double  world seconds per wall second achieved
 //     <prefix>.dropped         uint64  quanta discarded by the stall guard
 //
+// Thread-safe: every call locks the binding, so a UI thread may request_steps()
+// or pull() while the frame thread drive()s; the clock locks itself, and any
+// thread may write the control keys in the state tree.
+//
 // `paused` wins over `mode`: paused with mode live or lockstep runs nothing,
 // and stepping and replay never advance from wall time anyway. A step request
 // runs in any mode. An unreadable or unknown control value is ignored, never
@@ -94,12 +99,12 @@ public:
   cvc::world_clock::step_result drive(double wall_dt);
 
   // Single steps requested through <prefix>.step and not yet run.
-  std::uint64_t pending_steps() const { return _pending_steps; }
+  std::uint64_t pending_steps() const;
 
   // Queue n single steps, as n increments of <prefix>.step would, for a host
   // verb (sim_transport.ari's Step button is `on: sim.step`). The next drive()
   // runs them.
-  void request_steps(std::uint64_t n = 1) { _pending_steps += n; }
+  void request_steps(std::uint64_t n = 1);
 
   // Absolute state path of a key: the configured path for a name in the table
   // ("" when that lane is off), else `name` under the prefix.
@@ -111,6 +116,7 @@ public:
   static bool parse_mode(const std::string &name, cvc::world_clock::mode &out);
 
 private:
+  mutable std::mutex _mutex;
   cvc::app &_ctx;
   cvc::world_clock &_clock;
   std::string _prefix;
@@ -122,6 +128,8 @@ private:
   cvc::world_clock::mode _requested = cvc::world_clock::mode::live;
 
   void seed();
+  void pull_locked();
+  void push_locked();
 };
 
 } // namespace cvc
