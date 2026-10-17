@@ -276,6 +276,65 @@ void integrate_surrogate_material_vjp(
     const float *g_min_clear, const float *g_cum_risk, const float *g_arc_length, float *g_alphas,
     float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0);
 
+// ── the material rollout on the kinematic bicycle ────────────────────────────
+// The same force law as integrate_surrogate_material, driven through the deployed
+// kinematic bicycle instead of a point mass. The force law is the per-obstacle IPC
+// barriers on the discs (C, R), the goal spring, damping, and the soft/hard material
+// forces from the 6-channel patch. The bicycle is drive.cpp's controller and
+// integrator, one substep per step:
+//   - the longitudinal command is a = (F . heading - gamma * sp) / mass, clamped;
+//   - pure pursuit toward the goal, plus a steering bias k_steer * tanh((F_rep + F_mat) . left);
+//   - the corner, stop, creep and reverse governors;
+//   - the d_cap steering limit and the kinematic update.
+// The governor's clearance and normal are the nearest disc's: the role the SDF
+// sample plays in the deployed drive. Training through it removes the point-mass
+// gap between training and deployment (P8b).
+//
+// State per agent: position o (B,2), heading th (B) and signed speed sp (B), updated
+// IN PLACE (start -> end). Lengths are in the batch's units (the vehicle params
+// below included); dt[b] is the step. Like the surrogate, the loop runs to max(H)
+// with a per-agent active gate, and min_clear is ungated. A step past H[b] leaves the
+// state frozen.
+struct bicycle_material_params {
+  float L = 0.035f;       // wheelbase
+  float delta_max = 0.6f; // steering lock, rad
+  float a_max = 1.5f;     // longitudinal acceleration limit
+  float a_lat_max = 1.0f; // lateral acceleration limit (corner governor, d_cap)
+  float k_steer = 0.8f;   // steering-bias gain
+  float vmax = 0.9f;      // speed limit
+  bool allow_reverse = true;
+};
+
+// Throws std::invalid_argument unless L, a_max, a_lat_max and vmax are finite and
+// > 0, delta_max is in (0, pi/2) and k_steer is finite and >= 0. Both bicycle
+// rollouts call it first.
+void validate(const bicycle_material_params &v);
+
+void integrate_bicycle_material(float *o, float *th, float *sp, const float *goal, const float *C,
+                                const float *R, const std::uint8_t *mask, const float *alphas,
+                                const float *beta, const float *gamma, const float *lam_soft,
+                                const float *lam_hard, const float *rollout_patch, const float *rr,
+                                const float *d_hat, const float *dt, const int *H, int B, int N,
+                                int Hp, int Wp, const surrogate_material_params &p,
+                                const bicycle_material_params &v, float *min_clear, float *cum_risk,
+                                float *hard_count, float *arc_length, int num_threads = 0);
+
+// VJP of integrate_bicycle_material: upstream grads on the differentiable outputs
+// (oT, thT, spT, min_clear, cum_risk, arc_length; any may be null) -> grads w.r.t.
+// the learned coefficients (alphas, beta, gamma, lam_soft, lam_hard), ADDED into the
+// g_* buffers. The start state, goal, discs and patch are data. Grad flows through
+// the branch and clamp each step TOOK, as autograd treats min/max/where. Validated by
+// finite differences (nav_material_bike_rollout_test).
+void integrate_bicycle_material_vjp(
+    const float *o0, const float *th0, const float *sp0, const float *goal, const float *C,
+    const float *R, const std::uint8_t *mask, const float *alphas, const float *beta,
+    const float *gamma, const float *lam_soft, const float *lam_hard, const float *rollout_patch,
+    const float *rr, const float *d_hat, const float *dt, const int *H, int B, int N, int Hp,
+    int Wp, const surrogate_material_params &p, const bicycle_material_params &v, const float *g_oT,
+    const float *g_thT, const float *g_spT, const float *g_min_clear, const float *g_cum_risk,
+    const float *g_arc_length, float *g_alphas, float *g_beta, float *g_gamma, float *g_lam_soft,
+    float *g_lam_hard, int num_threads = 0);
+
 // ── CUDA twins (defined in material_rollout.cu; CVC_ENABLE_CUDA only) ─────────
 // The GPU transcription of the two rollout functions above: one thread per
 // agent, reusing the SAME detail/material_rollout.h CVC_HD primitives, so the
