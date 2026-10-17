@@ -71,6 +71,13 @@ jobs:
               --platform wasm --arch x86_64 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3 || echo "  (skipped: $p)"
           done
+          # pegtl (header-only) is cvc's build-only state_exec grammar engine, and
+          # cvc's configure REQUIRES it, so it may not be skipped. Its wasm bundle
+          # is tagged wasm32, not x86_64 like the older bundles above.
+          echo "=== pegtl ==="
+          cvcpkg install pegtl --prefix "$CVC_WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static \
+            --no-fallback-to-source
           cvcpkg install scene-austin-south-small vehicle-humvee grl-snam-weights \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \

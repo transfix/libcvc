@@ -67,6 +67,7 @@ add_executable(state_exec_codec_test state_exec_codec_test.cpp)
 add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
 add_executable(state_exec_grammar_test state_exec_grammar_test.cpp)
 add_executable(state_exec_corpus_test state_exec_corpus_test.cpp)
+add_executable(state_exec_pegtl_test state_exec_pegtl_test.cpp)
 add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
@@ -92,6 +93,9 @@ add_executable(state_hash_partition_test state_hash_partition_test.cpp)
 add_executable(state_hybrid_time_test state_hybrid_time_test.cpp)
 add_executable(world_clock_test world_clock_test.cpp)
 add_executable(world_units_test world_units_test.cpp)
+add_executable(physics_world_test physics_world_test.cpp)
+add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
+add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(system_macro_headers_test system_macro_headers_test.cpp)
 add_executable(state_brick_frustum_test state_brick_frustum_test.cpp)
 add_executable(state_conflict_ring_test state_conflict_ring_test.cpp)
@@ -136,6 +140,7 @@ add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
+add_executable(nav_material_bike_rollout_test nav_material_bike_rollout_test.cpp)
 add_executable(nav_coef_energy_grad_test nav_coef_energy_grad_test.cpp)
 add_executable(nav_material_rollout_cuda_test nav_material_rollout_cuda_test.cpp)
 add_executable(nav_coef_energy_cuda_test nav_coef_energy_cuda_test.cpp)
@@ -230,6 +235,9 @@ set(TEST_TARGETS
   state_brick_manifest_test
   world_clock_test
   world_units_test
+  physics_world_test
+  physics_pose_tracker_test
+  geometry_height_field_test
   system_macro_headers_test
   state_data_hydrator_test
   state_node_telemetry_test
@@ -263,6 +271,7 @@ set(TEST_TARGETS
   nav_material_raster_test
   nav_coef_energy_test
   nav_material_rollout_grad_test
+  nav_material_bike_rollout_test
   nav_coef_energy_grad_test
   nav_material_train_test
   nav_material_optim_test
@@ -330,6 +339,7 @@ list(APPEND TEST_TARGETS
   state_exec_unicode_test
   state_exec_grammar_test
   state_exec_corpus_test
+  state_exec_pegtl_test
   state_exec_async_test
   async_lane_test
   state_exec_scheduler_test
@@ -757,6 +767,13 @@ target_link_libraries(nav_coef_energy_test
 )
 
 target_link_libraries(nav_material_rollout_grad_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_material_bike_rollout_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1252,6 +1269,15 @@ target_link_libraries(state_exec_corpus_test
     GTest::gtest_main
 )
 
+# PEGTL is cvc's build-only dependency (not in cvc's exported interface), so the
+# check links it directly; taocpp::pegtl comes from src/cvc/CMakeLists.txt.
+target_link_libraries(state_exec_pegtl_test
+  PRIVATE
+    taocpp::pegtl
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_async_test
   PRIVATE
     cvc
@@ -1388,6 +1414,27 @@ target_link_libraries(world_units_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_world_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_pose_tracker_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(geometry_height_field_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(system_macro_headers_test
   PRIVATE
     cvc
@@ -1503,6 +1550,7 @@ target_compile_features(nav_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
+target_compile_features(nav_material_bike_rollout_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_cuda_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_cuda_test PRIVATE cxx_std_17)
@@ -1576,6 +1624,7 @@ target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_grammar_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_corpus_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_pegtl_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
 target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
@@ -1604,6 +1653,9 @@ target_compile_features(state_hash_partition_test PRIVATE cxx_std_17)
 target_compile_features(state_hybrid_time_test PRIVATE cxx_std_17)
 target_compile_features(world_clock_test PRIVATE cxx_std_17)
 target_compile_features(world_units_test PRIVATE cxx_std_17)
+target_compile_features(physics_world_test PRIVATE cxx_std_17)
+target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
+target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(system_macro_headers_test PRIVATE cxx_std_20)
 target_compile_features(state_brick_frustum_test PRIVATE cxx_std_17)
 target_compile_features(state_conflict_ring_test PRIVATE cxx_std_17)
@@ -1779,6 +1831,7 @@ cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
 cvc_discover_tests(nav_material_rollout_grad_test)
+cvc_discover_tests(nav_material_bike_rollout_test)
 cvc_discover_tests(nav_coef_energy_grad_test)
 cvc_discover_tests(nav_material_rollout_cuda_test)
 cvc_discover_tests(nav_coef_energy_cuda_test)
@@ -1986,6 +2039,7 @@ cvc_discover_tests(state_exec_codec_test)
 cvc_discover_tests(state_exec_unicode_test)
 cvc_discover_tests(state_exec_grammar_test)
 cvc_discover_tests(state_exec_corpus_test)
+cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
@@ -2019,6 +2073,9 @@ cvc_discover_tests(state_hash_partition_test)
 cvc_discover_tests(state_hybrid_time_test)
 cvc_discover_tests(world_clock_test)
 cvc_discover_tests(world_units_test)
+cvc_discover_tests(physics_world_test)
+cvc_discover_tests(physics_pose_tracker_test)
+cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(system_macro_headers_test)
 cvc_discover_tests(state_brick_frustum_test)
 cvc_discover_tests(state_conflict_ring_test)
