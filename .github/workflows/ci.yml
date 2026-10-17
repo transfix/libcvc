@@ -225,6 +225,10 @@ jobs:
   # GitHub artifact so the format/extension is visible in the UI.
   package-linux:
     runs-on: ubuntu-latest
+    # Non-blocking for experimental matrix entries (the static-grpc probe below),
+    # mirroring package-macos/package-windows: a new static-link grpc probe must
+    # not fail the required Linux check while it is being proven out.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -246,6 +250,15 @@ jobs:
             kind: libcvc
             build_type: Release
             enable_grpc: true
+          # Static-link gRPC probe: same as release-grpc but installs the static
+          # grpc closure (cvcpkg --link static) and links it into libcvc, catching
+          # a static-only grpc break. experimental -> continue-on-error for now.
+          - name: libcvc-release-grpc-static
+            kind: libcvc
+            build_type: Release
+            enable_grpc: true
+            grpc_link: static
+            experimental: true
     name: package-linux / ${{ matrix.name }}
     # Heavy job (VTK from-source build): do NOT cancel in-progress runs.
     # Cancellation strands the cache and forces every subsequent run
@@ -337,7 +350,7 @@ jobs:
           # separate and adding it to CMAKE_PREFIX_PATH (below) is conflict-free
           # — CMake searches both.
           grpc_prefix="$RUNNER_TEMP/grpc-prefix"
-          cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link shared
+          cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link ${{ matrix.grpc_link || 'shared' }}
           echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
 
       # ── VTK, for cvcGL ──
@@ -764,7 +777,7 @@ jobs:
         run: |
           set -euo pipefail
           grpc_prefix="$RUNNER_TEMP/grpc-prefix"
-          cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link shared
+          cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link ${{ matrix.grpc_link || 'shared' }}
           echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
 
       - name: Configure
@@ -920,6 +933,14 @@ jobs:
             build_type: Release
             enable_grpc: true
             experimental: true
+          # Static-link gRPC probe: installs the static grpc closure (cvcpkg
+          # --link static, now published for windows) and links it into libcvc.
+          - name: libcvc-release-grpc-static
+            kind: libcvc
+            build_type: Release
+            enable_grpc: true
+            grpc_link: static
+            experimental: true
     name: package-windows / ${{ matrix.name }}
     # Do NOT cancel in-progress runs; see package-linux for rationale.
     concurrency:
@@ -989,7 +1010,7 @@ jobs:
         shell: pwsh
         run: |
           $grpcPrefix = "$env:RUNNER_TEMP\grpc-prefix"
-          cvcpkg install grpc protobuf --prefix "$grpcPrefix" --config release --link shared
+          cvcpkg install grpc protobuf --prefix "$grpcPrefix" --config release --link ${{ matrix.grpc_link || 'shared' }}
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install grpc failed ($LASTEXITCODE)" }
           "GRPC_PREFIX=$grpcPrefix" | Out-File -FilePath $env:GITHUB_ENV -Append
 
