@@ -61,6 +61,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
   ../../inc/cvc/physics/world_binding.h
+  ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
@@ -148,6 +149,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/lsys/cloud.h
   ../../inc/cvc/lsys/water.h
   ../../inc/cvc/world/surface.h
+  ../../inc/cvc/world/world_geometry.h
+  ../../inc/cvc/world/city_bundle.h
   ../../inc/cvc/world/grid.h
   ../../inc/cvc/world/heightfield.h
   ../../inc/cvc/world/scatter.h
@@ -220,6 +223,7 @@ set(SOURCE_FILES
   physics/world.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
+  physics/world_geometry.cpp
   physics/pose_tracker.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
@@ -300,6 +304,8 @@ set(SOURCE_FILES
   lsys/cloud.cpp
   lsys/water.cpp
   world/surface.cpp
+  world/world_geometry.cpp
+  world/city_bundle.cpp
   world/heightfield.cpp
   world/scatter.cpp
   world/roads.cpp
