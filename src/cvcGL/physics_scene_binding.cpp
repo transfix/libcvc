@@ -43,6 +43,8 @@ struct physics_scene_binding::impl {
   std::unordered_map<std::uint32_t, int> uses; // per body: its node binding + its group memberships
   group_id next_group = 1;
   std::size_t last_posed = 0;
+  std::weak_ptr<const GraphicsNode> frame; // the physics frame's node (none: the root)
+  bool has_frame = false;
 
   std::mutex present_m; // one present() at a time; guards the scratch
   std::vector<pose_tracker::sample> samples;
@@ -145,6 +147,12 @@ void physics_scene_binding::unbind_group(group_id g) {
   _impl->groups.erase(it);
 }
 
+void physics_scene_binding::set_frame(const std::shared_ptr<const GraphicsNode> &frame) {
+  std::lock_guard<std::mutex> lock(_impl->m);
+  _impl->frame = frame;
+  _impl->has_frame = static_cast<bool>(frame);
+}
+
 physics::pose_tracker &physics_scene_binding::tracker() { return _impl->tracker; }
 
 std::uint64_t physics_scene_binding::follow(const cvc::world_clock &clock) {
@@ -166,8 +174,14 @@ void physics_scene_binding::present(double alpha) {
   // listeners on this thread, and one of them may bind or unbind.
   std::vector<std::pair<std::uint32_t, impl::node_binding>> nodes;
   std::vector<impl::group> groups;
+  std::shared_ptr<const GraphicsNode> frame;
+  bool frame_gone = false;
   {
     std::lock_guard<std::mutex> lock(_impl->m);
+    if (_impl->has_frame) {
+      frame = _impl->frame.lock();
+      frame_gone = !frame;
+    }
     nodes.assign(_impl->nodes.begin(), _impl->nodes.end());
     groups.reserve(_impl->groups.size());
     for (const auto &g : _impl->groups)
@@ -176,6 +190,8 @@ void physics_scene_binding::present(double alpha) {
 
   std::vector<std::uint32_t> expired, vanished;
   std::size_t posed = 0;
+  if (frame_gone)
+    nodes.clear(); // no world to draw the bodies in; groups still get their poses
   for (const auto &[id, b] : nodes) {
     const std::shared_ptr<GraphicsNode> node = b.node.lock();
     if (!node) {
@@ -193,9 +209,9 @@ void physics_scene_binding::present(double alpha) {
     if (b.has_offset) {
       double mo[16];
       multiply(m, b.offset.data(), mo);
-      node->setPoseMatrix(mo);
+      node->setWorldPoseMatrix(mo, frame);
     } else {
-      node->setPoseMatrix(m);
+      node->setWorldPoseMatrix(m, frame);
     }
     ++posed;
   }
