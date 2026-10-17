@@ -134,6 +134,7 @@ add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
+add_executable(nav_material_bike_rollout_test nav_material_bike_rollout_test.cpp)
 add_executable(nav_coef_energy_grad_test nav_coef_energy_grad_test.cpp)
 add_executable(nav_material_rollout_cuda_test nav_material_rollout_cuda_test.cpp)
 add_executable(nav_coef_energy_cuda_test nav_coef_energy_cuda_test.cpp)
@@ -261,6 +262,7 @@ set(TEST_TARGETS
   nav_material_raster_test
   nav_coef_energy_test
   nav_material_rollout_grad_test
+  nav_material_bike_rollout_test
   nav_coef_energy_grad_test
   nav_material_train_test
   nav_material_optim_test
@@ -753,6 +755,13 @@ target_link_libraries(nav_coef_energy_test
 )
 
 target_link_libraries(nav_material_rollout_grad_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_material_bike_rollout_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1487,6 +1496,7 @@ target_compile_features(nav_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
+target_compile_features(nav_material_bike_rollout_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_cuda_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_cuda_test PRIVATE cxx_std_17)
@@ -1761,6 +1771,7 @@ cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
 cvc_discover_tests(nav_material_rollout_grad_test)
+cvc_discover_tests(nav_material_bike_rollout_test)
 cvc_discover_tests(nav_coef_energy_grad_test)
 cvc_discover_tests(nav_material_rollout_cuda_test)
 cvc_discover_tests(nav_coef_energy_cuda_test)
