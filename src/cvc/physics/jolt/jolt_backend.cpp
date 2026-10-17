@@ -29,6 +29,7 @@
 // clang-format on
 
 #include "../backend_impl.h"
+#include "jolt_material.h"
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/IssueReporting.h>
@@ -189,17 +190,9 @@ public:
 
 // --- materials ------------------------------------------------------------------
 
-// A cvc material as Jolt sees it. Every shape and height-field cell this backend
-// creates carries one, so the combine functions below find a cvc material on both
-// sides of every contact.
-class cvc_material final : public JPH::PhysicsMaterial {
-public:
-  cvc_material(material_id id, float friction, float restitution)
-      : id(id), friction(friction), restitution(restitution) {}
-  material_id id;
-  float friction;
-  float restitution;
-};
+// cvc_material (jolt_material.h) is a cvc material as Jolt sees it. Every shape
+// and height-field cell this backend creates carries one, so the combine functions
+// below find a cvc material on both sides of every contact.
 
 const cvc_material *as_cvc(const JPH::PhysicsMaterial *m) {
   if (m == nullptr || m == JPH::PhysicsMaterial::sDefault.GetPtr())
