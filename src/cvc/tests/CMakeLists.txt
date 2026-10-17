@@ -66,6 +66,7 @@ add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluato
 add_executable(state_exec_codec_test state_exec_codec_test.cpp)
 add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
 add_executable(state_exec_stdlib_test state_exec_stdlib_test.cpp)
+add_executable(state_exec_pegtl_test state_exec_pegtl_test.cpp)
 add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
@@ -94,6 +95,7 @@ add_executable(world_units_test world_units_test.cpp)
 add_executable(physics_world_test physics_world_test.cpp)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
+add_executable(world_geometry_test world_geometry_test.cpp)
 add_executable(system_macro_headers_test system_macro_headers_test.cpp)
 add_executable(state_brick_frustum_test state_brick_frustum_test.cpp)
 add_executable(state_conflict_ring_test state_conflict_ring_test.cpp)
@@ -236,6 +238,7 @@ set(TEST_TARGETS
   physics_world_test
   physics_pose_tracker_test
   geometry_height_field_test
+  world_geometry_test
   system_macro_headers_test
   state_data_hydrator_test
   state_node_telemetry_test
@@ -336,6 +339,7 @@ list(APPEND TEST_TARGETS
   state_exec_codec_test
   state_exec_unicode_test
   state_exec_stdlib_test
+  state_exec_pegtl_test
   state_exec_async_test
   async_lane_test
   state_exec_scheduler_test
@@ -1259,6 +1263,15 @@ target_link_libraries(state_exec_stdlib_test
     GTest::gtest_main
 )
 
+# PEGTL is cvc's build-only dependency (not in cvc's exported interface), so the
+# check links it directly; taocpp::pegtl comes from src/cvc/CMakeLists.txt.
+target_link_libraries(state_exec_pegtl_test
+  PRIVATE
+    taocpp::pegtl
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_async_test
   PRIVATE
     cvc
@@ -1410,6 +1423,13 @@ target_link_libraries(physics_pose_tracker_test
 )
 
 target_link_libraries(geometry_height_field_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(world_geometry_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1604,6 +1624,7 @@ target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stdlib_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_pegtl_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
 target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
@@ -1635,6 +1656,7 @@ target_compile_features(world_units_test PRIVATE cxx_std_17)
 target_compile_features(physics_world_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
+target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(system_macro_headers_test PRIVATE cxx_std_20)
 target_compile_features(state_brick_frustum_test PRIVATE cxx_std_17)
 target_compile_features(state_conflict_ring_test PRIVATE cxx_std_17)
@@ -2017,6 +2039,7 @@ cvc_discover_tests(state_exec_stackless_evaluator_test)
 cvc_discover_tests(state_exec_codec_test)
 cvc_discover_tests(state_exec_unicode_test)
 cvc_discover_tests(state_exec_stdlib_test)
+cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
@@ -2053,6 +2076,7 @@ cvc_discover_tests(world_units_test)
 cvc_discover_tests(physics_world_test)
 cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(geometry_height_field_test)
+cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(system_macro_headers_test)
 cvc_discover_tests(state_brick_frustum_test)
 cvc_discover_tests(state_conflict_ring_test)

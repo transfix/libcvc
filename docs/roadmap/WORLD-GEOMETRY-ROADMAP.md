@@ -122,14 +122,27 @@ shipped in 3.6.0 days ago and has no consumers outside libcvc yet. The physics h
 standard-library only by forward-declaring the two types, and the facade flattens them for the
 engine, so no backend sees `cvc::geometry`.
 
+### What G3a found
+
+- **`cvc::world` never links `cvc::nav`** (roadmap §14.4 of the L-system roadmap, checked at
+  configure time), so a world bundle stays a file format. The land-cover classifier
+  (`segment_scene_material`) lives in nav, so the loader cannot call it. Instead it takes a
+  `land_cover` provider that returns per-sample surface ids, which it reduces to cell surfaces
+  itself. Without one, every terrain cell is `terrain_surface`. The provider that classifies a
+  bundle's masks and imagery comes with G4. Until then the physics adapter leaves
+  `nav_material` at -1 rather than add a physics→nav edge before P4's plant seam.
+- **`cvc::bounding_box` treats a zero-volume box as empty**, and a flat terrain has zero volume, so
+  `world_geometry::bounds()` returns its own min/max pair.
+
 ## Phases
 
 | Phase | What | Gate |
 |---|---|---|
 | **G1** | `cvc::geometry`: virtual destructor and `face_materials`. `cvc::height_field` with the grid, the mesh view, queries and the write guard. | Face materials survive copy, merge, tri_surface and the codecs. A height field's mesh matches its grid (vertex count, holes skipped, per-face materials, bilinear `height` equals the mesh's height at any point). Copying gives an editable plain mesh. |
 | **G2** | Physics consumes canonical geometry: the `mesh` and `terrain` shapes, with the Jolt backend building from them | P1's gates unchanged; a box on a `height_field` rests at `height(x, y)` ±1 cm; per-face materials reach contacts |
-| **G3** | `world_geometry` and the surface table; the city bundle loader (one `terrain.json` parser, the measured row order, glTF frame options); `gl::add_world_geometry` and `physics::add_world_geometry`; the city demos switch over | Building bases on the terrain, RMS ≤ 0.5 m on the Austin bundle (as measured above); render, physics and nav heights agree at every grid sample |
-| **G4** | Nav planes from `world_geometry`; `navdemo::Terrain`, `material_raster`'s parser, pycvc's `terrain_grid` and Ariadne's `TerrainHeights` retire | Nav goldens unchanged where the old path was right; the y-mirror and the double lift fixed |
+| **G3a** | `world_geometry` and the surface table; the city bundle loader (one `terrain.json` parser, the measured row order, glTF frame options); `gl::add_world_geometry` and `physics::add_world_geometry` | Building bases on the terrain, RMS ≤ 0.5 m on the Austin bundle (measured 0.465 m over 5636 buildings by `CityBundle.RealBundleBuildingsSitOnTheTerrain`); render, physics and nav heights agree at every grid sample |
+| **G3b** | The city demos (`nav_city_swarm`, `nav_city_drive`) draw and collide with `load_city_bundle`'s `world_geometry` | The buildings stand on the ground on screen; no demo flips rows or lifts buildings |
+| **G4** | Nav planes from `world_geometry`; land cover as surfaces (a `city_bundle_options::land_cover` provider over `segment_scene_material`, from outside `cvc::world`); physics materials get their `nav_material`; `navdemo::Terrain`, `material_raster`'s parser, pycvc's `terrain_grid` and Ariadne's `TerrainHeights` retire | Nav goldens unchanged where the old path was right; the y-mirror and the double lift fixed |
 | **G5** | Ariadne `physics:` and `body:` specs; Ariadne height fields are `cvc::height_field` | A scene spec puts a crate on a height field and it lands where the renderer draws the ground |
 
 P6a's pose binding (`pose_tracker`, `physics_scene_binding`) moves dynamic bodies. This plan covers

@@ -72,6 +72,9 @@ depends:
       platforms: [wasm, wasm-mt]
     - name: zlib
       platforms: [wasm, wasm-mt]
+    # cvc's build-only PEGTL (the state_exec grammar engine).
+    - name: pegtl
+      platforms: [wasm, wasm-mt]
   runtime:
     # pycvc-cp312 supplies the core `import pycvc` module this scene module bridges
     # to (same interpreter column). On wasm the core is embedded into the host

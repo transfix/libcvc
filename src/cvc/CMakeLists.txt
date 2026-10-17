@@ -61,6 +61,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
   ../../inc/cvc/physics/world_binding.h
+  ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
@@ -148,6 +149,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/lsys/cloud.h
   ../../inc/cvc/lsys/water.h
   ../../inc/cvc/world/surface.h
+  ../../inc/cvc/world/world_geometry.h
+  ../../inc/cvc/world/city_bundle.h
   ../../inc/cvc/world/grid.h
   ../../inc/cvc/world/heightfield.h
   ../../inc/cvc/world/scatter.h
@@ -220,6 +223,7 @@ set(SOURCE_FILES
   physics/world.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
+  physics/world_geometry.cpp
   physics/pose_tracker.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
@@ -300,6 +304,8 @@ set(SOURCE_FILES
   lsys/cloud.cpp
   lsys/water.cpp
   world/surface.cpp
+  world/world_geometry.cpp
+  world/city_bundle.cpp
   world/heightfield.cpp
   world/scatter.cpp
   world/roads.cpp
@@ -1284,6 +1290,27 @@ add_library(cvc::cvc ALIAS cvc)
 # the list is dropped before the config is generated. Append the package name
 # wherever such a link is added below.
 set(CVC_PRIVATE_LINK_PACKAGES "")
+
+# taocpp/PEGTL 3.x (header-only, MIT): the grammar engine for the state_exec
+# s-expression reader. Its rules go in the private
+# src/cvc/state/state_exec/grammar.h, so PEGTL is needed only to compile cvc.
+# Linked as $<BUILD_INTERFACE:...>, it adds an include path to cvc's own build
+# and nothing to the exported target, SHARED or STATIC: it is not in
+# CVC_PRIVATE_LINK_PACKAGES, and consumers never need PEGTL. "3.2" also refuses
+# PEGTL 4 (its version file is SameMajorVersion), whose API differs.
+find_package(pegtl 3.2 CONFIG REQUIRED)
+target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:taocpp::pegtl>)
+# That only holds while no installed header includes PEGTL, so check it here.
+file(GLOB_RECURSE _cvc_installed_headers "${PROJECT_SOURCE_DIR}/inc/*")
+foreach(_cvc_h IN LISTS _cvc_installed_headers)
+  file(STRINGS "${_cvc_h}" _cvc_pegtl_include REGEX "^[ \t]*#[ \t]*include[ \t]*[<\"]tao/pegtl")
+  if(_cvc_pegtl_include)
+    message(FATAL_ERROR
+      "${_cvc_h} includes PEGTL, but inc/ is installed and PEGTL is a build-only "
+      "dependency of libcvc. Keep PEGTL in private headers under src/ "
+      "(src/cvc/state/state_exec/grammar.h).")
+  endif()
+endforeach()
 
 # Ariadne .ari YAML loader — OPTIONAL. yaml-cpp is a light, header+lib dependency;
 # when present, ariadne/loader.cpp compiles the real parser (CVC_ARIADNE_HAVE_YAML);
