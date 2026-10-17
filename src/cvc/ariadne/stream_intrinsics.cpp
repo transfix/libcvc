@@ -9,6 +9,7 @@
 */
 
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cvc/ariadne/stream/audio_sources.h> // audio_f32_bytes (size an audio_pcm frame)
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream_intrinsics.h>
@@ -161,21 +162,15 @@ void register_stream_intrinsics(cvc::app &app) {
           if (id.empty())
             return err("stream-open: 'id' is required");
           const std::string codec = get_str(dict_get(d, "codec"), "rgba8");
-          const int ch = codec_channels(codec);
-          if (ch == 0)
-            return err("stream-open: unsupported codec '" + codec + "'");
-          // Bound the sizing knobs. w/h feed static_cast<int> (and w*ch -> stride), and
-          // subscriber_depth/expected_subscribers feed frame_pool slab-count math
-          // (count = subscribers*(depth+in_flight)+working_set). A negative or absurd value would
-          // truncate/overflow or wrap size_t and attempt a wild allocation. The DSL is trusted, but
-          // a bad dict must fail cleanly (like a missing w/h) rather than OOM-kill the action.
+
+          // Bound the sizing knobs (both kinds). w/h/rate/ch feed static_cast<int> (and w*ch ->
+          // stride, fpc*ch*4 -> bytes), and subscriber_depth/expected_subscribers feed frame_pool
+          // slab-count math (count = subscribers*(depth+in_flight)+working_set). A negative or
+          // absurd value would truncate/overflow or wrap size_t and attempt a wild allocation. The
+          // DSL is trusted, but a bad dict must fail cleanly rather than OOM-kill the action.
           constexpr long kMaxDim = 65536;  // a raw video frame dimension; w*ch stays within int
           constexpr long kMaxDepth = 1024; // per-subscriber ring/latest depth
           constexpr long kMaxSubs = 4096;  // expected concurrent subscribers (pool pre-size)
-          const long w = get_int(dict_get(d, "w"), 0);
-          const long h = get_int(dict_get(d, "h"), 0);
-          if (w <= 0 || h <= 0 || w > kMaxDim || h > kMaxDim)
-            return err("stream-open: 'w' and 'h' are required and must be in [1, 65536]");
           const long sub_depth = get_int(dict_get(d, "subscriber_depth"), 3);
           const long exp_subs = get_int(dict_get(d, "expected_subscribers"), 1);
           if (sub_depth < 1 || sub_depth > kMaxDepth)
@@ -186,14 +181,44 @@ void register_stream_intrinsics(cvc::app &app) {
           cvc::ariadne::stream::stream_params p;
           p.id = id;
           p.root_path = root;
-          p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
-          p.format.codec = codec;
-          p.format.w = static_cast<int>(w);
-          p.format.h = static_cast<int>(h);
-          p.format.stride = static_cast<int>(w * ch); // dense
           p.subscriber_depth = static_cast<std::size_t>(sub_depth);
           p.expected_subscribers = static_cast<std::size_t>(exp_subs);
           p.heartbeat_hz = get_num(dict_get(d, "heartbeat_hz"), 10.0);
+
+          // The codec selects the kind: "f32" (interleaved float PCM) opens an AUDIO stream —
+          // rate/ch and a per-chunk frame size instead of w/h; every other codec opens a raw VIDEO
+          // stream (the original rgba8/rgb8/graya8/gray8 path).
+          if (codec == "f32") {
+            constexpr long kMaxRate = 768000, kMaxCh = 64, kMaxChunk = 65536;
+            const long rate = get_int(dict_get(d, "rate"), 48000);
+            const long chn = get_int(dict_get(d, "ch"), 1);
+            const long fpc = get_int(dict_get(d, "frames_per_chunk"), 1024);
+            if (rate < 1 || rate > kMaxRate)
+              return err("stream-open: audio 'rate' must be in [1, 768000]");
+            if (chn < 1 || chn > kMaxCh)
+              return err("stream-open: audio 'ch' must be in [1, 64]");
+            if (fpc < 1 || fpc > kMaxChunk)
+              return err("stream-open: audio 'frames_per_chunk' must be in [1, 65536]");
+            p.format.kind = cvc::ariadne::stream::frame_kind::audio_pcm;
+            p.format.codec = "f32";
+            p.format.sample_rate = static_cast<int>(rate);
+            p.format.channels = static_cast<int>(chn);
+            p.format.bytes =
+                cvc::ariadne::stream::audio_f32_bytes(static_cast<int>(fpc), static_cast<int>(chn));
+          } else {
+            const int ch = codec_channels(codec);
+            if (ch == 0)
+              return err("stream-open: unsupported codec '" + codec + "'");
+            const long w = get_int(dict_get(d, "w"), 0);
+            const long h = get_int(dict_get(d, "h"), 0);
+            if (w <= 0 || h <= 0 || w > kMaxDim || h > kMaxDim)
+              return err("stream-open: 'w' and 'h' are required and must be in [1, 65536]");
+            p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
+            p.format.codec = codec;
+            p.format.w = static_cast<int>(w);
+            p.format.h = static_cast<int>(h);
+            p.format.stride = static_cast<int>(w * ch); // dense
+          }
 
           auto s = cvc::ariadne::stream::stream::open(app, p);
           if (!s)

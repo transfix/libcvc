@@ -30,6 +30,14 @@
 //     to it) — a mismatch is rejected by stream::start_producer (the frame then never flows). `hz`
 //     is the producer cadence (default 30; a camera's own fps is used when `hz` is omitted).
 //
+//   (stream-capture-audio TOKEN [SPEC]) -> { "ok" #t "token" "device" "rate" "ch" "frames" }
+//       SPEC = dict { "rate" "ch" "frames" (match the stream's open) + a SOURCE: "device" int (an
+//       SDL recording device / mic, CVC_ENABLE_SDL), OR a pure, hardware-free graph of
+//       "tone" {hz amp} / "gain" {gain in} / "mix" [SUB …]; a nil / sourceless SPEC = a 440 Hz
+//       tone (the headless/CI default) }
+//     Attach an audio producer to TOKEN's open AUDIO stream (codec "f32"). The chunk cadence is the
+//     stream's rate/frames; rate/ch/frames MUST match the open or start_producer rejects it.
+//
 // TOKEN is the handle (stream-open) returned (a dict carrying "token", or the bare token string).
 // The verb NEVER opens a stream ((stream-open) does) and owns no producer beyond the stream's own
 // (start_producer's thread is joined by stream::close()/teardown). It runs on the action/resident

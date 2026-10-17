@@ -601,6 +601,12 @@ add_executable(cvcgl_media_capture test/cvcgl_media_capture.cpp)
 target_link_libraries(cvcgl_media_capture PRIVATE cvcGL)
 add_test(NAME cvcgl_media_capture COMMAND cvcgl_media_capture)
 
+# §4a audio: (stream-open) extended for f32 audio streams + the (stream-capture-audio) verb with its
+# composable tone/gain/mix graph. Headless (no SDL device, no GL) via a mix of synthetic tones.
+add_executable(cvcgl_media_audio test/cvcgl_media_audio.cpp)
+target_link_libraries(cvcgl_media_audio PRIVATE cvcGL)
+add_test(NAME cvcgl_media_audio COMMAND cvcgl_media_audio)
+
 # Phase-3 Ariadne stream WIDGET: cvc::gl::ariadne stream_view — its render-thread stream->image
 # pull step (next_stream_frame_image), exercised hardware-free with synthetic_source (no GL/ImGui).
 add_executable(cvcgl_stream_view test/cvcgl_stream_view.cpp)

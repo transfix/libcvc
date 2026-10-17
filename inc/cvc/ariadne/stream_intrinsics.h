@@ -15,9 +15,11 @@
 // PR6 core). Opt-in, exactly like register_net_intrinsics: a host/test calls
 // register_stream_intrinsics(app) to add the program-lane verbs:
 //
-//   (stream-open OPTS)   OPTS = dict { "id" "codec" "w" "h" [sizing/heartbeat] }
-//                        Opens a video stream scoped to the calling document
-//                        (ictx.root_path), returns a handle dict
+//   (stream-open OPTS)   OPTS = dict { "id" "codec" … [sizing/heartbeat] }. A VIDEO stream for a
+//                        raster codec ("rgba8"/"rgb8"/"graya8"/"gray8") takes "w"/"h"; an AUDIO
+//                        stream (codec "f32", interleaved float PCM) takes "rate"/"ch" and an
+//                        optional "frames_per_chunk" (default 1024) instead. Scoped to the calling
+//                        document (ictx.root_path), returns a handle dict
 //                        { "ok" "id" "token" "seq_channel" "evt_channel" } (or
 //                        { "ok" #f "error" } on failure).
 //   (stream-info H)      H = the handle dict or its "token" string. Returns a dict
