@@ -92,51 +92,51 @@ std::string coerce_state_string(const value_t &v) {
 // not alias node-resident storage. Bounded and cycle-safe, mirroring values_equal / to_string
 // (it is the third structural walker and must not be the weak link): it MEMOIZES on the source
 // node pointer, so a shared-pointer DAG is copied in PHYSICAL time (the copy preserves the same
-// sharing, disjoint from the stored original) and a cycle terminates; it caps recursion depth
-// (stack safety on a deeply-nested value); and it polls the evaluation deadline so a huge
-// payload aborts at the time budget instead of running to completion in one native step.
-constexpr int kDeepCopyMaxDepth = 1000;
-
-value_t deep_copy_impl(const value_t &v, std::unordered_map<const void *, value_t> &memo,
-                       int depth) {
-  if (eval_deadline_expired())
-    throw std::runtime_error("state-data-get: evaluation exceeded time budget");
-  if (depth > kDeepCopyMaxDepth)
-    throw std::runtime_error("state-data-get: value nested too deeply to copy");
-  if (auto *l = std::get_if<list_ptr>(&v.v)) {
-    if (!*l)
-      return v;
-    auto found = memo.find(static_cast<const void *>(l->get()));
-    if (found != memo.end())
-      return found->second; // shared node / cycle already copied -> reuse (bounds the walk)
-    auto out = std::make_shared<std::vector<value_t>>();
-    value_t result{out};
-    memo.emplace(static_cast<const void *>(l->get()), result); // register BEFORE recursing
-    out->reserve((*l)->size());
-    for (const auto &e : **l)
-      out->push_back(deep_copy_impl(e, memo, depth + 1));
-    return result;
-  }
-  if (auto *dp = std::get_if<dict_ptr>(&v.v)) {
-    if (!*dp)
-      return v;
-    auto found = memo.find(static_cast<const void *>(dp->get()));
-    if (found != memo.end())
-      return found->second;
-    auto out = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-    value_t result{out};
-    memo.emplace(static_cast<const void *>(dp->get()), result);
-    out->reserve((*dp)->size());
-    for (const auto &kv : **dp)
-      out->emplace_back(kv.first, deep_copy_impl(kv.second, memo, depth + 1));
-    return result;
-  }
-  return v; // scalar / symbol (opaque callables are refused at state-data-set)
-}
-
+// sharing, disjoint from the stored original) and a cycle terminates; it keeps the elements
+// still to copy on a heap stack, so any depth copies without native recursion; and it polls
+// the evaluation deadline so a huge payload aborts at the time budget instead of running to
+// completion in one native step.
 value_t deep_copy(const value_t &v) {
   std::unordered_map<const void *, value_t> memo;
-  return deep_copy_impl(v, memo, 0);
+  value_t result;
+  // (source, destination) pairs: each destination is a slot of a copy already allocated at its
+  // final size, so it stays put while the copy fills in.
+  std::vector<std::pair<const value_t *, value_t *>> pending{{&v, &result}};
+  while (!pending.empty()) {
+    if (eval_deadline_expired())
+      throw std::runtime_error("state-data-get: evaluation exceeded time budget");
+    auto [src, dst] = pending.back();
+    pending.pop_back();
+    if (auto *l = std::get_if<list_ptr>(&src->v); l && *l) {
+      auto found = memo.find(static_cast<const void *>(l->get()));
+      if (found != memo.end()) {
+        *dst = found->second; // shared node / cycle already copied -> reuse (bounds the walk)
+        continue;
+      }
+      auto out = std::make_shared<std::vector<value_t>>((*l)->size());
+      *dst = value_t{out};
+      memo.emplace(static_cast<const void *>(l->get()), *dst); // register BEFORE descending
+      for (std::size_t i = (*l)->size(); i-- > 0;)
+        pending.emplace_back(&(**l)[i], &(*out)[i]);
+    } else if (auto *dp = std::get_if<dict_ptr>(&src->v); dp && *dp) {
+      auto found = memo.find(static_cast<const void *>(dp->get()));
+      if (found != memo.end()) {
+        *dst = found->second;
+        continue;
+      }
+      auto out = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
+      out->reserve((*dp)->size());
+      for (const auto &kv : **dp)
+        out->emplace_back(kv.first, value_t{});
+      *dst = value_t{out};
+      memo.emplace(static_cast<const void *>(dp->get()), *dst);
+      for (std::size_t i = (*dp)->size(); i-- > 0;)
+        pending.emplace_back(&(**dp)[i].second, &(*out)[i].second);
+    } else {
+      *dst = *src; // scalar / symbol / null (opaque callables are refused at state-data-set)
+    }
+  }
+  return result;
 }
 
 void require_root(const intrinsics_context *ctx, const char *name) {

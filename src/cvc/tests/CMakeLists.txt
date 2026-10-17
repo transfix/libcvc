@@ -55,6 +55,7 @@ add_executable(state_sync_adapter_link_forwarding_test state_sync_adapter_link_f
 add_executable(state_cross_cluster_link_test state_cross_cluster_link_test.cpp)
 add_executable(state_link_bench_test state_link_bench_test.cpp)
 add_executable(state_list_test state_list_test.cpp)
+add_executable(state_deep_tree_test state_deep_tree_test.cpp)
 if(CVC_STATE_MEMORY_MANAGER)
   add_executable(state_memory_manager_test state_memory_manager_test.cpp)
 endif()
@@ -66,6 +67,8 @@ add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluato
 add_executable(state_exec_codec_test state_exec_codec_test.cpp)
 add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
 add_executable(state_exec_stdlib_test state_exec_stdlib_test.cpp)
+add_executable(state_exec_grammar_test state_exec_grammar_test.cpp)
+add_executable(state_exec_corpus_test state_exec_corpus_test.cpp)
 add_executable(state_exec_pegtl_test state_exec_pegtl_test.cpp)
 add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
@@ -76,6 +79,7 @@ add_executable(state_exec_bench_test state_exec_bench_test.cpp)
 add_executable(state_exec_integration_test state_exec_integration_test.cpp)
 add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
 add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
+add_executable(state_exec_deep_data_test state_exec_deep_data_test.cpp)
 if(NOT WIN32)
   add_executable(state_exec_multiprocess_test state_exec_multiprocess_test.cpp)
 endif()
@@ -96,6 +100,7 @@ add_executable(physics_world_test physics_world_test.cpp)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
+add_executable(nav_world_planes_test nav_world_planes_test.cpp)
 add_executable(system_macro_headers_test system_macro_headers_test.cpp)
 add_executable(state_brick_frustum_test state_brick_frustum_test.cpp)
 add_executable(state_conflict_ring_test state_conflict_ring_test.cpp)
@@ -230,6 +235,7 @@ set(TEST_TARGETS
   state_cross_cluster_link_test
   state_link_bench_test
   state_list_test
+  state_deep_tree_test
   state_delta_codec_test
   state_volume_codec_test
   state_brick_manifest_test
@@ -239,6 +245,7 @@ set(TEST_TARGETS
   physics_pose_tracker_test
   geometry_height_field_test
   world_geometry_test
+  nav_world_planes_test
   system_macro_headers_test
   state_data_hydrator_test
   state_node_telemetry_test
@@ -339,6 +346,8 @@ list(APPEND TEST_TARGETS
   state_exec_codec_test
   state_exec_unicode_test
   state_exec_stdlib_test
+  state_exec_grammar_test
+  state_exec_corpus_test
   state_exec_pegtl_test
   state_exec_async_test
   async_lane_test
@@ -349,6 +358,7 @@ list(APPEND TEST_TARGETS
   state_exec_integration_test
   state_exec_advanced_integration_test
   state_exec_gaps_test
+  state_exec_deep_data_test
 )
 if(NOT WIN32)
   list(APPEND TEST_TARGETS state_exec_multiprocess_test)
@@ -1223,6 +1233,13 @@ target_link_libraries(state_exec_types_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_deep_data_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_builtins_test
   PRIVATE
     cvc
@@ -1257,6 +1274,18 @@ target_link_libraries(state_exec_unicode_test
     GTest::gtest_main
 )
 target_link_libraries(state_exec_stdlib_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_exec_grammar_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_exec_corpus_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1352,6 +1381,13 @@ target_link_libraries(state_list_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_deep_tree_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_delta_codec_test
   PRIVATE
     cvc
@@ -1430,6 +1466,13 @@ target_link_libraries(geometry_height_field_test
 )
 
 target_link_libraries(world_geometry_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_world_planes_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1618,12 +1661,15 @@ target_compile_features(state_cross_cluster_link_test PRIVATE cxx_std_17)
 target_compile_features(state_link_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_deep_data_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stdlib_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_grammar_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_corpus_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_pegtl_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
 target_compile_features(async_lane_test PRIVATE cxx_std_20)
@@ -1640,6 +1686,7 @@ if(CVC_STATE_MEMORY_MANAGER)
   target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
 endif()
 target_compile_features(state_list_test PRIVATE cxx_std_17)
+target_compile_features(state_deep_tree_test PRIVATE cxx_std_17)
 target_compile_features(state_delta_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_volume_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_brick_manifest_test PRIVATE cxx_std_17)
@@ -1657,6 +1704,7 @@ target_compile_features(physics_world_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
+target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
 target_compile_features(system_macro_headers_test PRIVATE cxx_std_20)
 target_compile_features(state_brick_frustum_test PRIVATE cxx_std_17)
 target_compile_features(state_conflict_ring_test PRIVATE cxx_std_17)
@@ -2033,12 +2081,15 @@ cvc_discover_tests(state_cross_cluster_link_test)
 cvc_discover_tests(state_link_bench_test)
 cvc_discover_tests(state_exec_parser_test)
 cvc_discover_tests(state_exec_types_test)
+cvc_discover_tests(state_exec_deep_data_test)
 cvc_discover_tests(state_exec_builtins_test)
 cvc_discover_tests(state_exec_evaluator_test)
 cvc_discover_tests(state_exec_stackless_evaluator_test)
 cvc_discover_tests(state_exec_codec_test)
 cvc_discover_tests(state_exec_unicode_test)
 cvc_discover_tests(state_exec_stdlib_test)
+cvc_discover_tests(state_exec_grammar_test)
+cvc_discover_tests(state_exec_corpus_test)
 cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
 cvc_discover_tests(async_lane_test)
@@ -2060,6 +2111,7 @@ if(CVC_STATE_MEMORY_MANAGER)
   cvc_discover_tests(state_memory_manager_test)
 endif()
 cvc_discover_tests(state_list_test)
+cvc_discover_tests(state_deep_tree_test)
 cvc_discover_tests(state_delta_codec_test)
 cvc_discover_tests(state_volume_codec_test)
 cvc_discover_tests(state_brick_manifest_test)
@@ -2077,6 +2129,7 @@ cvc_discover_tests(physics_world_test)
 cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
+cvc_discover_tests(nav_world_planes_test)
 cvc_discover_tests(system_macro_headers_test)
 cvc_discover_tests(state_brick_frustum_test)
 cvc_discover_tests(state_conflict_ring_test)

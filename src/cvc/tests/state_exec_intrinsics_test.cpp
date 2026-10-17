@@ -2,6 +2,7 @@
 /// @brief Tests for Phase 5: Intrinsics, Resource Policy, Stdlib.
 
 #include <boost/any.hpp>
+#include <boost/thread/thread.hpp>
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -227,12 +228,29 @@ TEST_F(StateTreeIntrinsicsTest, StateDataGetOfSharedDagIsBoundedAndPreservesShar
   EXPECT_EQ(c0->get(), c1->get()); // sharing preserved -> the copy is a DAG, not a 2^40 tree
 }
 
-TEST_F(StateTreeIntrinsicsTest, StateDataGetOfTooDeepValueThrows) {
+TEST_F(StateTreeIntrinsicsTest, StateDataGetOfDeepValueCopies) {
+  // The deep copy keeps its work on the heap, so depth has no cap: a value 100000 levels deep
+  // copies on a 256 KiB stack, into a private copy equal to the original.
   value_t d{int64_t{0}};
-  for (int i = 0; i < 2000; ++i)
-    d = make_list({d}); // depth 2000 > the deep-copy depth cap
+  for (int i = 0; i < 100000; ++i)
+    d = make_list({d});
   call("state-data-set", {std::string("deep"), d});
-  EXPECT_THROW(call("state-data-get", {std::string("deep")}), std::runtime_error); // stack-safe
+  value_t got;
+  std::string error;
+  boost::thread::attributes small_stack;
+  small_stack.set_stack_size(256 * 1024);
+  boost::thread t(small_stack, [&] {
+    try {
+      got = call("state-data-get", {std::string("deep")});
+    } catch (const std::exception &e) {
+      error = e.what();
+    }
+  });
+  t.join();
+  EXPECT_EQ(error, "");
+  ASSERT_TRUE(std::holds_alternative<list_ptr>(got.v));
+  EXPECT_NE(std::get<list_ptr>(got.v).get(), std::get<list_ptr>(d.v).get());
+  EXPECT_TRUE(values_equal(got, d));
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateSetCoercesScalarsToString) {

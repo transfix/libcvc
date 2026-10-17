@@ -3,8 +3,10 @@
  * @brief S-expression parser for the state_exec DSL.
  *
  * Converts source text into a tree of value_t nodes.  Supports atoms
- * (integers, floats, strings, symbols), lists, quote/quasiquote/unquote,
- * and line comments.  Reports parse errors with line/column information.
+ * (integers, floats, strings, byte strings, symbols), lists, quote ('x), and
+ * line comments.  Reports parse errors with line/column information.  The
+ * syntax is specified in docs/STATE_EXEC_GRAMMAR.md, which also lists where
+ * this parser still differs from it.
  */
 #ifndef CVC_STATE_EXEC_PARSER_H
 #define CVC_STATE_EXEC_PARSER_H

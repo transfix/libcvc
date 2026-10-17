@@ -452,10 +452,11 @@ int main(int argc, char **argv) {
       std::printf("nav_city_drive: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris%s\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
                   (unsigned long long)cityMesh.num_tris(),
-                  terrain.empty() ? ""
-                                  : (std::string(" (terrain ") + std::to_string(terrain.rows) +
-                                     "x" + std::to_string(terrain.cols) + ")")
-                                        .c_str());
+                  terrain.empty()
+                      ? ""
+                      : (std::string(" (terrain ") + std::to_string(terrain.field->rows()) + "x" +
+                         std::to_string(terrain.field->cols()) + ")")
+                            .c_str());
     } else {
       std::printf("nav_city_drive: bundle '%s' incomplete; using the synthetic city\n",
                   bundle.c_str());
@@ -690,15 +691,13 @@ int main(int argc, char **argv) {
   // from altitude for free.
   std::shared_ptr<GeometryNode> fullBuildings, farBuildings;
   if (haveMesh) {
-    // Real building geometry from buildings.glb (true heights + shapes). glb bakes
-    // bases at z=0, so lift every vertex by terrain.sample() to sit them on the
-    // ground; and when we have the satellite, tint each vertex by the aerial photo
-    // at its footprint so the city reads as real Austin instead of a flat grey
-    // block model. One sample per vertex, once at load.
+    // Real building geometry from buildings.glb (true heights + shapes). The bundle
+    // already stands every building on the terrain (its base is at terrain height;
+    // measured on austin_south, cvc::world::load_city_bundle), so it is NOT lifted.
+    // When we have the satellite, tint each vertex by the aerial photo at its
+    // footprint so the city reads as real Austin instead of a flat grey block
+    // model. One sample per vertex, once at load.
     auto &pts = cityMesh.points();
-    if (!terrain.empty())
-      for (auto &p : pts)
-        p[2] += terrain.sample(p[0], p[1]);
     if (haveSat) {
       auto &cols = cityMesh.colors();
       cols.resize(pts.size());
@@ -722,8 +721,8 @@ int main(int argc, char **argv) {
 
     // Far-LOD twin: cluster the ~1M-tri mesh down to a coarse skyline for distant
     // views, re-tinted from the satellite (exact, not the clustering's averaged
-    // scalars) so it never reverts to the grey block model. cityMesh is already
-    // terrain-lifted here, so the far mesh sits on the ground too. Hidden until the
+    // scalars) so it never reverts to the grey block model. cityMesh already stands
+    // on the terrain, so the far mesh sits on the ground too. Hidden until the
     // loop raises the camera. Opt-in (--building-lod): the full mesh is GPU-cheap
     // and looks better, so the default demo keeps it.
     if (buildingLod) {
