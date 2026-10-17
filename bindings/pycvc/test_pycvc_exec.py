@@ -347,6 +347,16 @@ def test_stdlib_collections_take_dsl_and_python_functions():
     assert ex.run("(collections.reduce (list 1 2 3 4) (lambda (acc x) (+ acc (* x x))) 0)") == "30"
     ex.register_fn("twice", lambda x: x * 2)
     assert ex.run("(collections.map (list 1 2) twice)") == "(2 4)"
+    # The builtins that call a function, apply and send, take a DSL function too.
+    assert ex.run("(apply (lambda (a b) (* a b)) (list 6 7))") == "42"
+    assert ex.run("(apply twice (list 21))") == "42"
+    assert (
+        ex.run(
+            '(begin (set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))'
+            ' (send o "inc" 41))'
+        )
+        == "42"
+    )
 
 
 def test_stdlib_materializers_run_as_data_steps():

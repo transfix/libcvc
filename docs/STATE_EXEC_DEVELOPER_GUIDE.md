@@ -134,6 +134,16 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 **OOP:** `send` (method dispatch), `apply`
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
+`apply`, `send` and `collections.map`/`filter`/`reduce` call a native function or a DSL
+function alike. A DSL function runs as the program's own frames on the same evaluator
+(`call_function()` in `data_job.h`; see §11, "Sliced work"):
+
+```lisp
+(apply (lambda (a b) (* a b)) (list 6 7))        ;; => 42
+(set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))
+(send o "inc" 41)                                ;; => 42
+```
+
 #### Type Conversion
 
 ```lisp
@@ -1390,9 +1400,11 @@ function.
   nodes a step (`async_scheduler::host_data_defaults()`). With 0, the sync scheduler's default,
   the work runs whole in the call's step.
 - **Calls.** `collections.map`, `filter` and `reduce` hand each call of their function to the
-  evaluator running the program. A native function is called inside the data step. A DSL
-  function runs as the process's own frames, so its body's steps are eval steps. The job goes
-  on in the data step after it returns, even with `data.step_nodes` = 0.
+  evaluator running the program, and so do the builtins `apply` and `send`. A native function
+  is called inside the data step. A DSL function runs as the process's own frames, so its
+  body's steps are eval steps. The job goes on in the data step after it returns, even with
+  `data.step_nodes` = 0. Another native function can do the same with
+  `call_function(fn, args, who)`.
 - **Cost.** `collections.sort` is a stable merge sort, n log n nodes.
   `collections.unique` costs a node per comparison, and compares lists and dicts with a sliced
   equality walk. `collections.dict-merge` keeps a key index, so it is linear. Every job polls the

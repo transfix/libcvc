@@ -1723,17 +1723,20 @@ TEST(AriadneStdlib, PredicateLambdasStayInsideThePredicateRules) {
   EXPECT_NE(warns[0].find("exceeded the eval budget"), std::string::npos) << warns[0];
 }
 
-TEST(AriadneStdlib, ActionLaneMapsWithALambda) {
+TEST(AriadneStdlib, ActionLaneCallsLambdasThroughMapAndApply) {
   cvc::app app;
   Runtime rt(app, "ui");
   MockBackend mb;
   rt.set_backend(&mb);
-  rt.set_root(group({button("Go", "(state-set \"out\" (string.join (collections.map (string.split "
-                                  "\"a b c\" \" \") (lambda (w) (string.upper w))) \"-\"))")}));
+  rt.set_root(group({button("Go", "(begin (state-set \"out\" (string.join (collections.map "
+                                  "(string.split \"a b c\" \" \") (lambda (w) (string.upper w))) "
+                                  "\"-\")) (state-set \"sum\" (apply (lambda (a b) (+ a b)) "
+                                  "(list 2 3))))")}));
   mb.button_click = true;
   rt.render();
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("ui.out").value(), "A-B-C");
+  EXPECT_EQ(cvc::state::instance(app)("ui.sum").value(), "5");
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 

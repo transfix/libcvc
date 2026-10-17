@@ -133,6 +133,13 @@ data_options data_options_from_state(cvc::state &root, const std::string &schedu
 /// job's result is the call's.
 value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_t)> then = {});
 
+/// Apply `fn`, a native function or a DSL closure, to `args` from inside a native function.
+/// A native function is called here. A closure runs through the evaluator, as a one-call job
+/// (run_data_job): inside a stackless evaluator step its body becomes the process's own frames,
+/// and the native function should return what this returns at once; anywhere else a closure
+/// throws. `who` names the caller in errors.
+value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who);
+
 /// Count `nodes` units of deep-data work done in the current evaluator step (a walk run to
 /// completion counts itself; the release backlog counts what it frees).
 void count_data_nodes(std::size_t nodes);

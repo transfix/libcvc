@@ -241,7 +241,7 @@ A node is an element visited: a list element or a dict entry walked, or an eleme
 - **Signals and watch events** wait while a walk is pending, because the walk's call frame is
   on top of the evaluation stack.
 - **Function calls.** A job can stop for a call of a function (`collections.map`, `filter`,
-  `reduce`), and the evaluator makes it. A native function is called inside the data step. A
+  `reduce`, and `apply`/`send` through `call_function()`), and the evaluator makes it. A native function is called inside the data step. A
   DSL function runs as frames above the waiting call, in eval steps; `return` and `break` in it
   unwind no further than that call. The job goes on in the data step after the function
   returns. Such a job waits on the evaluator even with `step_nodes` = 0.

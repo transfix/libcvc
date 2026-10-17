@@ -7,6 +7,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
@@ -432,6 +433,13 @@ const char *const kSlicedScripts[] = {
     "(collections.dict-keys (dict \"a\" 1 \"b\" 2))",
     "(collections.dict-values (dict \"a\" 1 \"b\" 2))",
     "(collections.dict-merge (dict \"a\" 1 \"b\" 2 \"a\" 9) (dict \"b\" 3 \"c\" 4 \"c\" 5))",
+    // The builtins that call a function take a DSL function too.
+    "(apply (lambda (a b) (+ a b)) (list 1 2))",
+    "(apply (lambda (x) (return (* x 2))) (list 21))",
+    "(apply collections.map (list (list 1 2) (lambda (x) (* x 3))))",
+    "(collections.map (list (list 1 2) (list 3 4 5)) (lambda (xs) (apply + xs)))",
+    "(begin (set o (dict \"__class__\" (dict \"inc\" (lambda (self x) (+ x 1))))) (send o \"inc\" "
+    "41))",
 };
 
 } // namespace
@@ -480,6 +488,14 @@ TEST(StdlibSlicedTest, SameResultsHoweverTheWorkIsSliced) {
   EXPECT_EQ(r("(collections.unique (list (list 1 2) (list 1 2) (list 1 (list 2)) (list 1 (list "
               "2))))"),
             "((1 2) (1 (2)))");
+  EXPECT_EQ(r("(apply (lambda (a b) (+ a b)) (list 1 2))"), "3");
+  EXPECT_EQ(r("(apply (lambda (x) (return (* x 2))) (list 21))"), "42");
+  EXPECT_EQ(r("(apply collections.map (list (list 1 2) (lambda (x) (* x 3))))"), "(3 6)");
+  EXPECT_EQ(r("(collections.map (list (list 1 2) (list 3 4 5)) (lambda (xs) (apply + xs)))"),
+            "(3 12)");
+  EXPECT_EQ(r("(begin (set o (dict \"__class__\" (dict \"inc\" (lambda (self x) (+ x 1))))) "
+              "(send o \"inc\" 41))"),
+            "42");
   EXPECT_EQ(r("(collections.dict-merge (dict \"a\" 1 \"b\" 2 \"a\" 9) (dict \"b\" 3 \"c\" 4 "
               "\"c\" 5))"),
             "{\"a\": 1, \"b\": 3, \"a\": 9, \"c\": 5}");
@@ -600,4 +616,17 @@ TEST(StdlibSlicedTest, ADslFunctionNeedsARunningProgram) {
   const native_fn *abs = stdlib_registry::standard().lookup_qualified("math.abs");
   ASSERT_NE(abs, nullptr);
   EXPECT_EQ(show(call("collections.map", {one_item, value_t{*abs}})), "(1)");
+
+  // The same for apply, and for call_function() from any native function.
+  const std::vector<value_t> apply_args = {value_t{cls}, one_item};
+  EXPECT_NE(thrown([&] {
+              builtin_apply(std::span<const value_t>(apply_args.data(), apply_args.size()));
+            }).find("apply: calling a DSL function needs a running program"),
+            std::string::npos);
+  const value_t arg(int64_t(7));
+  EXPECT_EQ(show(call_function(value_t{*abs}, std::span(&arg, 1), "test")), "7");
+  EXPECT_NE(thrown([&] {
+              call_function(value_t{int64_t(1)}, std::span(&arg, 1), "test");
+            }).find("test: not a function"),
+            std::string::npos);
 }

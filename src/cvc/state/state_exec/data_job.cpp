@@ -468,6 +468,39 @@ private:
   std::vector<std::pair<cursor, list_ptr>> open_;
 };
 
+// -- call ----------------------------------------------------------------------
+
+// One application of a function, as a job, so a native function can have a closure called
+// through the evaluator (call_function).
+class call_walk final : public data_job {
+public:
+  call_walk(value_t fn, std::vector<value_t> args, const char *who)
+      : fn_(std::move(fn)), args_(std::move(args)), who_(who) {}
+
+  bool step(std::size_t) override {
+    if (!asked_) {
+      asked_ = true;
+      ++nodes_;
+      call_ = call_request{&fn_, args_, who_};
+    }
+    return returned_;
+  }
+
+  void call_returned(value_t value) override {
+    result_ = std::move(value);
+    returned_ = true;
+  }
+
+  value_t result() override { return std::move(result_); }
+
+private:
+  value_t fn_;
+  std::vector<value_t> args_;
+  const char *who_;
+  bool asked_ = false, returned_ = false;
+  value_t result_;
+};
+
 // The data side of the evaluator step running on this thread, if any.
 thread_local detail::data_step_scope *t_scope = nullptr;
 
@@ -630,6 +663,15 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
   scope->deferred_ = std::make_unique<detail::deferred_data_job>(
       detail::deferred_data_job{std::move(job), std::move(then), std::move(waits_on)});
   return nil_value;
+}
+
+value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who) {
+  if (const auto *native = std::get_if<native_fn>(&fn.v))
+    return (*native)(args);
+  if (const auto *cls = std::get_if<closure_ptr>(&fn.v); cls && *cls)
+    return run_data_job(
+        std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who));
+  throw std::runtime_error(std::string(who) + ": not a function: " + fn.type_name());
 }
 
 void count_data_nodes(std::size_t nodes) {
