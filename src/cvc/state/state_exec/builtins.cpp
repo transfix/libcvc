@@ -3,6 +3,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/generator.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: (length "...") counts codepoints for a string
 #include <iostream>
@@ -28,6 +29,14 @@ double as_double(const value_t &v) {
 
 /// True when the value is an integer.
 bool is_int(const value_t &v) { return std::holds_alternative<int64_t>(v.v); }
+
+/// True when the value can hold other values, so storing it in a container in place may close a
+/// reference cycle (heap.h): the cycle collector then tracks that container.
+bool can_close_cycle(const value_t &v) {
+  return std::holds_alternative<list_ptr>(v.v) || std::holds_alternative<dict_ptr>(v.v) ||
+         std::holds_alternative<closure_ptr>(v.v) || std::holds_alternative<generator_ptr>(v.v) ||
+         std::holds_alternative<native_fn>(v.v);
+}
 
 /// True when every arg in [first, last) is integral (recurses into lists).
 bool all_int(std::span<const value_t> args) {
@@ -461,6 +470,7 @@ value_t builtin_cdr(std::span<const value_t> args) {
 value_t builtin_cons(std::span<const value_t> args) {
   expect_exact(args, 2, "cons");
   auto &lst = as_list(args[1], "cons");
+  eval_alloc_note(alloc_bytes(lst.size() + 1, sizeof(value_t))); // a copy: heap accounting
   std::vector<value_t> result;
   result.reserve(1 + lst.size());
   result.push_back(args[0]);
@@ -484,6 +494,8 @@ value_t builtin_set_nth(std::span<const value_t> args) {
   if (idx < 0 || static_cast<size_t>(idx) >= lst.size())
     throw std::runtime_error("set-nth: index out of range");
   lst[static_cast<size_t>(idx)] = args[2];
+  if (can_close_cycle(args[2]))
+    track_mutated(std::get<list_ptr>(args[0].v));
   return args[2];
 }
 
@@ -502,6 +514,8 @@ value_t builtin_append(std::span<const value_t> args) {
   expect_exact(args, 2, "append");
   auto &lst = as_list_mut(args[0], "append");
   lst.push_back(args[1]);
+  if (can_close_cycle(args[1]))
+    track_mutated(std::get<list_ptr>(args[0].v));
   return args[0];
 }
 
@@ -521,6 +535,7 @@ value_t builtin_slice(std::span<const value_t> args) {
     end = static_cast<int64_t>(lst.size());
   if (start >= end)
     return make_list();
+  eval_alloc_note(alloc_bytes(static_cast<size_t>(end - start), sizeof(value_t))); // a copy
   return make_list(std::vector<value_t>(lst.begin() + start, lst.begin() + end));
 }
 
@@ -569,6 +584,8 @@ value_t builtin_set_attr(std::span<const value_t> args) {
   expect_exact(args, 3, "set-attr");
   auto &d = as_dict_mut(args[0], "set-attr");
   const std::string &key = as_string(args[1], "set-attr");
+  if (can_close_cycle(args[2]))
+    track_mutated(std::get<dict_ptr>(args[0].v));
   for (auto &[k, v] : d) {
     if (k == key) {
       v = args[2];
@@ -688,6 +705,7 @@ value_t builtin_generator(std::span<const value_t> args) {
   }
   gen->state = gen->evaluator.create_state(body_expr, env);
   gen->state.stats.start();
+  track_captured_env(env); // bound back where the closure can reach, it is a cycle
 
   return value_t{std::move(gen)};
 }

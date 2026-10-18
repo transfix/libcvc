@@ -1514,12 +1514,14 @@ void Runtime::Impl::pump_and_sweep_actions() {
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     auto info = sched.get_process_info(it->first);
     if (!info || info->status == se::process_status::terminated) {
+      sched.reap(it->first);        // nothing reads a finished action's result: free its process
       it = live_actions_.erase(it); // normal completion (or already reaped from the process map)
     } else if (info->status == se::process_status::killed) {
       // The exit error says why: a syntax error (scripts are read inside the process), a runtime
       // error or a resource limit.
       warn_once("ari: on: action program did not complete: " +
                 sched.get_exit_error(it->first).value_or("killed"));
+      sched.reap(it->first);
       it = live_actions_.erase(it);
     } else {
       ++it; // ready/running/waiting — still in flight (e.g. suspended on await/msg-recv/sleep)

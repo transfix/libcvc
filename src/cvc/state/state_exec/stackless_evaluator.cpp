@@ -1,6 +1,9 @@
+#include "closure_natives.h"
+
 #include <chrono>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/generator.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <iterator>
@@ -220,6 +223,12 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
   }
   state.data_work = work->outer;
   value_t result = job.result();
+  if (work->what == pending_data_work::kind::heap_measure) {
+    // Record the measurement for the scheduler; evaluation resumes where it was.
+    if (const auto *bytes = std::get_if<int64_t>(&result.v))
+      state.heap_measured = static_cast<uint64_t>(*bytes);
+    return state.done;
+  }
   if (work->what == pending_data_work::kind::macro_expansion) {
     begin_expansion(state, std::move(result));
     return false;
@@ -567,6 +576,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     cls->variadic = variadic;
     cls->body = std::vector<value_t>(args.begin() + 1, args.end());
     cls->env_snapshot = env;
+    track_captured_env(env); // bound back into env (or anything it holds), it is a cycle
     pop_frame(state, value_t{std::move(cls)});
     return;
   }
@@ -653,6 +663,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     cls->variadic = variadic;
     cls->body = std::vector<value_t>(args.begin() + 2, args.end());
     cls->env_snapshot = env;
+    track_captured_env(env); // bound in the env it captured: a cycle
     env->set(name_sym->name, value_t{cls});
     pop_frame(state, value_t{std::move(cls)});
     return;
@@ -1190,44 +1201,16 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
     return false;
   };
 
-  // Default init
-  if (!has_method("init")) {
-    auto sc = super_cls_dict;
-    native_fn default_init = [sc](std::span<const value_t> a) -> value_t {
-      if (sc) {
-        for (auto &[k, v] : *sc) {
-          if (k == "init") {
-            if (auto *fn = std::get_if<native_fn>(&v.v))
-              return (*fn)(a);
-            break;
-          }
-        }
-      }
-      return a.empty() ? nil_value : a[0];
-    };
-    cls_dict->emplace_back("init", value_t{std::move(default_init)});
-  }
-
-  // Default finalize
-  if (!has_method("finalize")) {
-    auto sc = super_cls_dict;
-    native_fn default_finalize = [sc](std::span<const value_t> a) -> value_t {
-      if (sc) {
-        for (auto &[k, v] : *sc) {
-          if (k == "finalize") {
-            if (auto *fn = std::get_if<native_fn>(&v.v))
-              return (*fn)(a);
-            break;
-          }
-        }
-      }
-      return nil_value;
-    };
-    cls_dict->emplace_back("finalize", value_t{std::move(default_finalize)});
-  }
+  // Default init and finalize: the superclass's, else init returns self and finalize nil. The
+  // natives are named types (closure_natives.h) so the cycle collector sees what they hold.
+  if (!has_method("init"))
+    cls_dict->emplace_back(
+        "init", value_t{native_fn{detail::class_inherited_method{super_cls_dict, "init"}}});
+  if (!has_method("finalize"))
+    cls_dict->emplace_back(
+        "finalize", value_t{native_fn{detail::class_inherited_method{super_cls_dict, "finalize"}}});
 
   // Process methods
-  stackless_evaluator *self = this;
   for (size_t i = methods_start; i < args.size(); ++i) {
     auto *ml = std::get_if<list_ptr>(&args[i].v);
     if (!ml || !*ml || (**ml).empty())
@@ -1257,55 +1240,68 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
     mcls->variadic = variadic;
     mcls->body = std::vector<value_t>(mlist.begin() + 2, mlist.end());
     mcls->env_snapshot = env;
+    track_captured_env(env); // the class is bound in env: a cycle candidate
 
-    auto genv = global_env_;
-    native_fn wrapper = [self, mcls, genv](std::span<const value_t> call_args) -> value_t {
-      // Create a temp state and run to completion
-      std::vector<value_t> all_args(call_args.begin(), call_args.end());
-      auto local = environment::extend(mcls->env_snapshot);
-      if (mcls->variadic) {
-        local->set(mcls->params.back().name, make_list(all_args));
-      } else {
-        for (size_t j = 0; j < mcls->params.size(); ++j)
-          local->set(mcls->params[j].name, all_args[j]);
-      }
-      if (mcls->body.size() == 1) {
-        // Need a recursive evaluation — use a temporary evaluator
-        stackless_evaluator temp(genv);
-        return temp.evaluate(mcls->body[0], local);
-      }
-      std::vector<value_t> be;
-      be.reserve(1 + mcls->body.size());
-      be.push_back(value_t{symbol{"begin"}});
-      be.insert(be.end(), mcls->body.begin(), mcls->body.end());
-      stackless_evaluator temp(genv);
-      return temp.evaluate(make_list(std::move(be)), local);
-    };
-    cls_dict->emplace_back(msym->name, value_t{std::move(wrapper)});
+    cls_dict->emplace_back(msym->name,
+                           value_t{native_fn{detail::class_method{std::move(mcls), global_env_}}});
   }
 
   // Constructor
-  auto cls_dict_val = value_t{cls_dict};
-  native_fn constructor = [cls_dict, cls_dict_val](std::span<const value_t> init_args) -> value_t {
-    auto inst = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-    inst->emplace_back("__class__", cls_dict_val);
-    value_t inst_val{inst};
-    for (auto &[k, v] : *cls_dict) {
-      if (k == "init") {
-        std::vector<value_t> a;
-        a.push_back(inst_val);
-        a.insert(a.end(), init_args.begin(), init_args.end());
+  env->set(cls_name, value_t{native_fn{detail::class_constructor{cls_dict}}});
+  env->set(cls_name + ".__cls_dict__", value_t{cls_dict});
+  pop_frame(state, *env->lookup(cls_name));
+}
+
+value_t detail::class_method::operator()(std::span<const value_t> call_args) const {
+  // Run the method to completion on a temporary evaluator.
+  std::vector<value_t> all_args(call_args.begin(), call_args.end());
+  auto local = environment::extend(method->env_snapshot);
+  if (method->variadic) {
+    local->set(method->params.back().name, make_list(all_args));
+  } else {
+    for (size_t j = 0; j < method->params.size(); ++j)
+      local->set(method->params[j].name, all_args[j]);
+  }
+  stackless_evaluator temp(global_env);
+  if (method->body.size() == 1)
+    return temp.evaluate(method->body[0], local);
+  std::vector<value_t> be;
+  be.reserve(1 + method->body.size());
+  be.push_back(value_t{symbol{"begin"}});
+  be.insert(be.end(), method->body.begin(), method->body.end());
+  return temp.evaluate(make_list(std::move(be)), local);
+}
+
+value_t detail::class_constructor::operator()(std::span<const value_t> init_args) const {
+  auto inst = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
+  inst->emplace_back("__class__", value_t{cls_dict});
+  value_t inst_val{inst};
+  for (auto &[k, v] : *cls_dict) {
+    if (k == "init") {
+      std::vector<value_t> a;
+      a.push_back(inst_val);
+      a.insert(a.end(), init_args.begin(), init_args.end());
+      if (auto *fn = std::get_if<native_fn>(&v.v))
+        (*fn)(a);
+      break;
+    }
+  }
+  return inst_val;
+}
+
+value_t detail::class_inherited_method::operator()(std::span<const value_t> args) const {
+  if (super_cls) {
+    for (auto &[k, v] : *super_cls) {
+      if (k == name) {
         if (auto *fn = std::get_if<native_fn>(&v.v))
-          (*fn)(a);
+          return (*fn)(args);
         break;
       }
     }
-    return inst_val;
-  };
-
-  env->set(cls_name, value_t{std::move(constructor)});
-  env->set(cls_name + ".__cls_dict__", cls_dict_val);
-  pop_frame(state, *env->lookup(cls_name));
+  }
+  if (name == "init")
+    return args.empty() ? nil_value : args[0];
+  return nil_value;
 }
 
 } // namespace cvc::state_exec

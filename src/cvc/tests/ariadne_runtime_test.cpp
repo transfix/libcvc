@@ -22,6 +22,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
 #include <cvc/state/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
+#include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <filesystem>
@@ -1819,6 +1820,55 @@ TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
   EXPECT_EQ(click(), "10000");
   root("ariadne.limits.action_max_memory").value(std::string("lots")); // unparsable: default
   EXPECT_EQ(click(), "10000");
+}
+
+// A finished action's process is reaped from the app scheduler, and a function it defined (bound
+// in the scope it captured: a reference cycle) is freed by the cycle collector.
+TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (defun helper (x) x) (state-set \"n\" (helper 7)))")}));
+  cvc::state_exec::collect_cycles(); // earlier tests' leftovers
+  const std::size_t before = cvc::state_exec::tracked_objects();
+  for (int i = 0; i < 20; ++i) {
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "7");
+  EXPECT_EQ(app.exec_scheduler().process_count(), 0); // every finished action was reaped
+  cvc::state_exec::collect_cycles();
+  EXPECT_LE(cvc::state_exec::tracked_objects(), before); // the 20 action scopes are gone
+}
+
+// An action's live values count against its memory budget, not only its state-tree writes.
+TEST(AriadneHeap, AnActionsLiveValuesCountAgainstItsBudget) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &root = cvc::state::instance(app);
+  rt.set_root(group({button("Keep", "(begin (set keep (list)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(state-set \"n\" \"kept\"))")}));
+  const auto click = [&] {
+    root("n").value(std::string("-"));
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+    return root("n").value();
+  };
+  EXPECT_EQ(click(), "kept"); // well under the 4 MiB default
+  root("ariadne.limits.action_max_memory").value(std::string("200000"));
+  EXPECT_EQ(click(), "-"); // 6000 live elements are over 200 KB: killed before the write
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
 }
 
 TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {

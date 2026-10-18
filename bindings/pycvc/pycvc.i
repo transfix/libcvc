@@ -1208,6 +1208,12 @@ struct pycvc_py_conversion {
 // PYCVC_DEFAULT_EXCEPTION at its end.
 %include "pycvc_lod.i"
 
+// ── The world's one representation: height_field, world_geometry, city bundles ─
+// The same terrain, buildings and surface table the renderer, the physics world
+// and the navigator read in C++ (WORLD-GEOMETRY-ROADMAP.md, G4b). After geometry
+// (height_field derives from it) and pycvc_nav.i (land cover is cvc::nav's).
+%include "pycvc_world.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This

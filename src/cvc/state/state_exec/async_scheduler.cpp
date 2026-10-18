@@ -38,6 +38,8 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   // No load_settings() here: read the allocation limit from the tree on every submission.
   proc.max_alloc_bytes =
       watch_root_ ? max_alloc_bytes_from_state(*watch_root_, {}) : kDefaultMaxAllocBytes;
+  proc.heap_check_steps =
+      (watch_root_ ? heap_options_from_state(*watch_root_) : heap_options{}).check_steps;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -72,6 +74,8 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   // No load_settings() here: read the allocation limit from the tree on every submission.
   proc.max_alloc_bytes =
       watch_root_ ? max_alloc_bytes_from_state(*watch_root_, {}) : kDefaultMaxAllocBytes;
+  proc.heap_check_steps =
+      (watch_root_ ? heap_options_from_state(*watch_root_) : heap_options{}).check_steps;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -137,6 +141,11 @@ process_ptr async_scheduler::select_process() {
 // ---------------------------------------------------------------------------
 
 void async_scheduler::execute_process_step(process &proc) {
+  // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
+  // Checked every 64 steps: the check reads thread-local state.
+  if ((++cycle_check_ & 63) == 0 && cycle_collection_due())
+    collect_cycles();
+
   // Track which process is currently executing so intrinsics can query it (self/ps).
   current_pid_ = proc.pid;
   current_proc_ = processes_[proc.pid];
@@ -148,6 +157,14 @@ void async_scheduler::execute_process_step(process &proc) {
       pp.reset();
     }
   } reset_guard{current_pid_, current_proc_};
+  // Once this step is over, a process it finished lets go of what it evaluated with.
+  struct release_guard {
+    process &p;
+    ~release_guard() {
+      if (p.status == process_status::terminated || p.status == process_status::killed)
+        p.release_state();
+    }
+  } release_dead{proc};
 
   // A process still reading its script (parser.step_tokens) takes signals and watch events once
   // the script is read: their handlers run on the evaluation stack, which doesn't exist yet. One
@@ -185,8 +202,8 @@ void async_scheduler::execute_process_step(process &proc) {
   // Armed only when it changes something (see scheduler.cpp).
   std::optional<eval_alloc_guard> step_alloc;
   if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
-    step_alloc.emplace(
-        proc.alloc_limit(proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) : 0));
+    step_alloc.emplace(proc.alloc_limit(
+        proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   // Drive one async_stackless_evaluator step to completion at the leaf. The evaluator's step()
@@ -222,6 +239,10 @@ void async_scheduler::execute_process_step(process &proc) {
     proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
   // Charge the step's time to what it was spent on (eval, read or data).
   proc.state.stats.add_step_time(std::chrono::duration<double>(now - step_start).count());
+  // Heap accounting: take a finished measurement, start the next when due (heap.h).
+  if (proc.max_memory > 0 || proc.state.heap_measured)
+    heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
+                    mem_tracker_.current_bytes(proc.pid));
 
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
     restore_from_signal(proc);
@@ -612,7 +633,9 @@ void async_scheduler::check_limits(process &proc) {
     kill_process(proc, "time_limit_exceeded");
     return;
   }
-  if (proc.max_memory > 0 && mem_tracker_.current_bytes(proc.pid) >= proc.max_memory) {
+  // max_memory: state-tree writes plus the measured heap share (heap.h)
+  if (proc.max_memory > 0 &&
+      mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes >= proc.max_memory) {
     kill_process(proc, "memory_limit_exceeded");
     return;
   }
@@ -637,12 +660,21 @@ void async_scheduler::terminate_process(process &proc, value_t result) {
   if (proc.on_complete) {
     proc.on_complete(proc.exit_code);
   }
+  release_if_idle(proc);
 }
 
 void async_scheduler::kill_process(process &proc, const std::string &reason) {
   proc.status = process_status::killed;
   proc.exit_error = reason;
   proc.state.stats.mark_complete();
+  release_if_idle(proc);
+}
+
+void async_scheduler::release_if_idle(process &proc) {
+  note_process_exit(); // what it leaked is garbage now (heap.h)
+  // A process stepping right now (one that killed itself) is released once its step is over.
+  if (proc.pid != current_pid_)
+    proc.release_state();
 }
 
 bool async_scheduler::pause(int pid) {
@@ -702,8 +734,10 @@ int async_scheduler::fork(int pid) {
   if (parent.status != process_status::ready && parent.status != process_status::running)
     return -1;
   // Deep-data work in flight (a function collections.map calls, say) is not copied: a child
-  // could not finish the call its stack waits on.
-  if (parent.state.data_work)
+  // could not finish the call its stack waits on. A heap measurement waits on no frame, so a
+  // child without it is whole.
+  if (parent.state.data_work &&
+      parent.state.data_work->what != pending_data_work::kind::heap_measure)
     return -1;
 
   int child_pid = next_pid_++;
@@ -720,6 +754,7 @@ int async_scheduler::fork(int pid) {
   child->max_step_time = parent.max_step_time;
   child->max_memory = parent.max_memory;
   child->max_alloc_bytes = parent.max_alloc_bytes;
+  child->heap_check_steps = parent.heap_check_steps;
   child->max_messages = parent.max_messages;
   child->max_message_bytes = parent.max_message_bytes;
   child->signal_handlers = parent.signal_handlers;
@@ -816,6 +851,8 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.elapsed_time = proc.elapsed_time();
   info.current_memory = mem_tracker_.current_bytes(proc.pid);
   info.peak_memory = mem_tracker_.peak_bytes(proc.pid);
+  info.heap_memory = proc.heap_bytes;
+  info.heap_measurements = proc.heap_measurements;
   info.max_memory = proc.max_memory;
   info.max_time = proc.max_time;
   info.message_count = proc.message_count;

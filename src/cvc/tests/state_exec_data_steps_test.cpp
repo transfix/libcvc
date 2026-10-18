@@ -374,6 +374,31 @@ TEST_F(DataStepsEvaluator, SnapshotWhileAJobsLambdaRunsRunsTheCallAgain) {
   EXPECT_EQ(std::get<int64_t>(st.result.v), 41);
 }
 
+// A native function a job calls may leave deep-data work of its own (str of a value bigger than
+// the slice): its result is that call's value, not the whole job's. Before jobs made their calls
+// through the evaluator, (collections.map (list a b) str) came back as one string.
+TEST_F(DataStepsEvaluator, ANativeFunctionsOwnWorkIsItsCallsValue) {
+  const std::string expected =
+      "(\"" + to_string(nested_list(1000)) + "\" \"" + to_string(nested_list(1000)) + "\")";
+  for (const char *script :
+       {"(collections.map (list a b) str)", "(collections.filter (list a b) (lambda (x) (= x b)))",
+        "(collections.reduce (list a b) (lambda (acc x) (cons (str x) acc)) "
+        "(list))"}) {
+    SCOPED_TRACE(script);
+    evaluator_state whole = state(script, 0);
+    step_to_done(ev, whole);
+    evaluator_state sliced = state(script, 16);
+    step_to_done(ev, sliced);
+    EXPECT_EQ(to_string(sliced.result), to_string(whole.result));
+    EXPECT_GT(sliced.stats.steps(step_kind::data), 10u);
+  }
+  evaluator_state mapped = state("(collections.map (list a b) str)", 16);
+  step_to_done(ev, mapped);
+  ASSERT_TRUE(std::holds_alternative<list_ptr>(mapped.result.v));
+  EXPECT_EQ(std::get<list_ptr>(mapped.result.v)->size(), 2u);
+  EXPECT_EQ(to_string(mapped.result), expected);
+}
+
 TEST_F(DataStepsEvaluator, ALambdaAJobCallsIsGatedLikeTheProgram) {
   // The special-form gate of a restricted evaluator (Ariadne's predicates) covers the body of a
   // function a job calls, since that body runs on the same evaluator.
