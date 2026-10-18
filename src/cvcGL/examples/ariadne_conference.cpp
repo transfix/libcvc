@@ -24,8 +24,9 @@
 #include <cstring>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/stream/stream.h> // --camera: open the video stream sized to the device
 #include <cvc/ariadne/stream/stream_registry.h> // post-run verification: lookup the opened tokens
-#include <cvc/ariadne/stream_intrinsics.h>       // register_stream_intrinsics (stream-open/info/close)
+#include <cvc/ariadne/stream_intrinsics.h> // register_stream_intrinsics (stream-open/info/close)
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
@@ -34,14 +35,19 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
-#include <cvc/gl/ariadne/media_verbs.h>  // register_media_intrinsics (capture-camera/-audio, play-audio)
+#include <cvc/gl/ariadne/media_verbs.h> // register_media_intrinsics (capture-camera/-audio, play-audio)
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/stream_node.h>        // register_stream_node_type (type: stream)
 #include <cvc/gl/ariadne/stream_verbs.h>       // register_gl_stream_intrinsics (gl-bind-stream)
 #include <cvc/gl/ariadne/stream_view_widget.h> // register_stream_view_widget (type: stream_view)
 #include <cvc/volume/bounding_box.h>
+#include <memory>
 #include <string>
 #include <vector>
+
+#if CVC_ENABLE_SDL
+#include <cvc/gl/capture/camera_source.h> // --camera: a real SDL3 camera as the self-view source
+#endif
 
 using cvc::gl::CameraController;
 using cvc::gl::ImGuiBackend;
@@ -54,7 +60,7 @@ namespace sx = cvc::ariadne::stream;
 
 int main(int argc, char **argv) {
   std::string docPath, png;
-  bool offscreen = false;
+  bool offscreen = false, useCamera = false;
   long frames = 0;
   int width = 1024, height = 768;
   std::vector<std::string> componentPaths;
@@ -66,7 +72,9 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(a, "--png")) {
       png = next("");
       offscreen = true;
-    } else if (!std::strcmp(a, "--frames"))
+    } else if (!std::strcmp(a, "--camera"))
+      useCamera = true;
+    else if (!std::strcmp(a, "--frames"))
       frames = std::atol(next("0"));
     else if (!std::strcmp(a, "--width"))
       width = std::atoi(next("1024"));
@@ -107,7 +115,7 @@ int main(int argc, char **argv) {
 
   // ── The conference host bundle (§8): five registrations, once, before the scene loads ──
   // These are the only C++ a conference .ari needs; everything else is DSL.
-  ari::register_stream_intrinsics(app);          // (stream-open/info/close) — core
+  ari::register_stream_intrinsics(app);              // (stream-open/info/close) — core
   cvc::gl::ariadne::register_gl_stream_intrinsics(); // (gl-bind-stream)
   cvc::gl::ariadne::register_media_intrinsics(); // (stream-capture-camera / -audio / play-audio)
   cvc::gl::ariadne::register_stream_node_type(); // type: stream (video-on-quad scene node)
@@ -127,6 +135,55 @@ int main(int argc, char **argv) {
   ari::run_init(app, sg.getStatePrefix(), lr.init_script, &init_errs);
   for (const std::string &e : init_errs)
     std::printf("[ariadne_conference] init: %s\n", e.c_str());
+
+  // ── --camera: open a REAL camera in C++ (roadmap §8 live path) ──
+  // A camera dictates its own resolution, so the DSL cannot pre-size a stream to it (the stream w/h
+  // MUST equal the device's, as the source converts pixel format but does not rescale). So the host
+  // opens the self-view camera here, sizes the video stream to the device, and sets cam_live=1 +
+  // cam_token in state so the .ari SKIPS its synthetic open and binds the stream_view widget to
+  // this token. Audio stays DSL-driven (the 440 Hz tone). Opened on this (the SDL main) thread per
+  // the camera_source.h thread contract; closed below before teardown. Hardware-free without
+  // --camera (or without SDL / a device): the .ari opens its own synthetic self-view, exactly as
+  // before.
+  std::unique_ptr<sx::stream> live_cam;
+#if CVC_ENABLE_SDL
+  if (useCamera) {
+    cvc::gl::capture::camera_open camo = cvc::gl::capture::open_camera(0);
+    if (camo.source) {
+      sx::stream_params sp;
+      sp.id = "selfcam";
+      sp.root_path =
+          sg.getStatePrefix(); // same scope the DSL opens under -> conference.streams.selfcam
+      sp.format.kind = sx::frame_kind::video_raw;
+      sp.format.codec = "rgba8";
+      sp.format.w = camo.width;
+      sp.format.h = camo.height;
+      sp.format.stride = camo.width * 4;
+      sp.expected_subscribers = 3; // the stream_view widget (+ headroom); cf. ariadne_stream
+      live_cam = sx::stream::open(app, sp);
+      if (live_cam) {
+        live_cam->start_producer(std::move(camo.source), camo.fps > 0 ? camo.fps : 30.0);
+        std::vector<std::string> ce;
+        ari::run_init(app, sg.getStatePrefix(),
+                      "(state-set \"cam_live\" \"1\") (state-set \"cam_token\" \"" +
+                          live_cam->token() + "\")",
+                      &ce);
+        for (const std::string &e : ce)
+          std::printf("[ariadne_conference] camera init: %s\n", e.c_str());
+        std::printf("[ariadne_conference] live camera: %s %dx%d -> %s\n", camo.name.c_str(),
+                    camo.width, camo.height, live_cam->token().c_str());
+      } else {
+        std::printf(
+            "[ariadne_conference] --camera: stream::open failed; the .ari uses synthetic.\n");
+      }
+    } else {
+      std::printf("[ariadne_conference] --camera: no camera opened; the .ari uses synthetic.\n");
+    }
+  }
+#else
+  (void)useCamera;
+#endif
+
   rt.set_tick_program(lr.on_tick_script);
   rt.set_root(std::move(lr.root));
 
@@ -145,7 +202,8 @@ int main(int argc, char **argv) {
     view.processUIEvents();
     touch.update();
     cam.update(dt);
-    rt.drain(); // runs the on_tick program lane: (stream-open) + (stream-capture-*) + (stream-play-audio)
+    rt.drain(); // runs the on_tick program lane: (stream-open) + (stream-capture-*) +
+                // (stream-play-audio)
     ari::sync_scene_visibility(app, realized.visibility);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), capturing ? dt : -1.0);
   };
@@ -180,5 +238,7 @@ int main(int argc, char **argv) {
     opened += live ? 1 : 0;
   }
   std::printf("[ariadne_conference] %d/2 streams opened from the .ari program lane\n", opened);
+  if (live_cam)
+    live_cam->close(); // join the camera producer before teardown (render-thread contract)
   return opened == 2 ? 0 : 2;
 }
