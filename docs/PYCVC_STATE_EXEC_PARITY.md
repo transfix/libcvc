@@ -110,7 +110,7 @@ are listed too. Status after PR 3:
 | | 38 `builtin_*` functions | none | exception: DSL builtins, called from DSL source |
 | | `percent_encode`, `percent_decode` | `pycvc.percent_encode`, `pycvc.percent_decode` | wrapped (PR 2) |
 | stackless_evaluator.h, evaluator.h | `stackless_evaluator`, `evaluator`, `evaluator_state`, `eval_frame`, `eval_phase`, `evaluation_stats`, `step_kind` (#658), `evaluation_interrupted`, `evaluation_timeout` | the same names under `pycvc.` | wrapped (PR 3). `eval_phase` and `step_kind` are `IntEnum`s, and `evaluation_stats` has #658's counts by kind (`steps`, `step_time`, `data_nodes`, ...); the two exceptions are `RuntimeError` subclasses. `on_complete` is a Python callable. `evaluator.user_macros()` returns a copy, a dict of name -> (params, body). `restrict_special_forms` takes any iterable of str, or None |
-| | `evaluator_state.data_work`, `evaluator_state.backlog`, `pending_data_work` (#658) | none | exception: deep-data work in flight between steps, internal to the evaluator; `data_step_nodes` is wrapped |
+| | `evaluator_state.data_work`, `evaluator_state.backlog`, `pending_data_work` (#658), `waits_on_data_work` | none | exception: deep-data work in flight between steps, internal to the evaluator; `data_step_nodes` is wrapped |
 | | `return_exception` | none | exception: the internal unwinding of `(return ...)`, never seen outside an evaluation |
 | async_evaluator.h, async_stackless_evaluator.h | the async evaluators | none | exception: coroutine API |
 | resource_policy.h | `resource_policy`, `process_limits`, `validate_limits` | `pycvc.resource_policy` (its `mode` is `pycvc.resource_policy.mode`, an `IntEnum`), `pycvc.process_limits`, `pycvc.validate_limits` | wrapped (PR 3) |

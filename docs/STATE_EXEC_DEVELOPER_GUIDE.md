@@ -867,9 +867,15 @@ these holds:
 
 - natives have reported allocating 64 KiB, or half the last measurement if that is more, since
   the last one (the functions with an allocation check, §11, plus copies like `cons` and
-  `slice`);
+  `slice`, and the jobs of calls left waiting on the evaluator);
 - what they reported could cross the remaining budget;
 - `limits.heap_check_steps` steps have passed (default 4096; `0` = only the two above).
+
+A measurement can start while the process waits on other deep-data work, such as a call the
+evaluator makes for a native function: it runs first, and the work goes on after it. It counts
+that work too, with what the work's jobs hold (a waiting call's function and arguments, the
+values `collect` has gathered). So a process that never stops waiting, like a class whose `init`
+constructs again, is still held to `max_memory`.
 
 The kill decision always uses an actual measurement, never the reported bytes, so temporaries a
 program drops don't count. Only a process with `max_memory > 0` is measured.

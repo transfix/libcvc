@@ -127,6 +127,10 @@ struct evaluator_state {
   std::optional<uint64_t> heap_measured;
 };
 
+/// Whether a frame of `st` waits on deep-data work: any work but a heap measurement, which waits
+/// on no frame. A process cannot fork while one does (the child could not finish the call).
+bool waits_on_data_work(const evaluator_state &st);
+
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
 ///
 /// Uses an explicit stack of eval_frame objects instead of the C++ call stack.

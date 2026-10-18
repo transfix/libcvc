@@ -266,6 +266,18 @@ public:
     // The roots, whole: the references the process holds directly.
     auto root = [this](node_kind k, const auto &sp) { add(k, sp, /*from_root=*/true); };
     process_edges(p, root);
+    // And the deep-data work it waits on, with what that work's jobs hold: a call that waits on
+    // a call like it (a constructor whose init constructs again) piles them up.
+    for (const pending_data_work *w = p.state.data_work.get(); w; w = w->outer.get()) {
+      own_ += static_cast<double>(sizeof(pending_data_work) + kControlBlock);
+      if (!w->job)
+        continue;
+      own_ += static_cast<double>(w->job->held_bytes());
+      w->job->held_values([&](const value_t &v) {
+        own_ += static_cast<double>(inline_heap(v));
+        value_edges(v, root);
+      });
+    }
   }
 
   bool step(std::size_t budget) override {
@@ -517,21 +529,26 @@ void heap_after_step(process &proc, std::size_t allocated, uint64_t state_bytes_
   proc.heap_alloc_bytes += allocated;
   ++proc.heap_steps;
   if (proc.heap_measuring) {
-    if (!st.data_work)
-      proc.heap_measuring = false; // dropped with the state it ran in (a signal, a restore)
+    // Until it finishes, a measurement is the innermost work: if not, it was dropped with the
+    // state it ran in (a signal, a restore).
+    if (!st.data_work || st.data_work->what != pending_data_work::kind::heap_measure)
+      proc.heap_measuring = false;
     return;
   }
-  if (st.done || st.reading || st.data_work || st.stack.empty())
+  if (st.done || st.reading || st.stack.empty())
     return;
   if (!proc.heap_measure_due(state_bytes_used))
     return;
   // It waits on no frame: evaluation resumes at the top of the stack, as it was, so `base` and
   // `frame_args` are the whole stack and the top frame's values (a snapshot keeps all of them).
+  // Started in the middle of other deep-data work (a call in flight, which a process can wait on
+  // for as long as its budget lasts), it runs first, and that work goes on after it.
   auto work = std::make_shared<pending_data_work>();
   work->job = make_heap_share_job(proc);
   work->what = pending_data_work::kind::heap_measure;
   work->base = st.stack.size();
   work->frame_args = st.stack.back().results.size();
+  work->outer = std::move(st.data_work);
   st.data_work = std::move(work);
   proc.heap_measuring = true;
 }
