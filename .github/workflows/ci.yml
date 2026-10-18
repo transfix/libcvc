@@ -678,6 +678,91 @@ jobs:
           echo "Line coverage ${pct}% meets the ${COVERAGE_MIN}% gate."
 
   # ──────────────────────────── macOS packaging ────────────────────────────
+  # ── pycvc, built and tested on every PR ──
+  # The libcvc recipe builds with CVC_BUILD_PYCVC=OFF (the C++ SDK carries no
+  # Python, numpy or SWIG), and the pycvc-cp3XX recipes are built only by
+  # publish-cvcpkg.yml at release time, with no test step. So until this job,
+  # the bindings were compiled by no PR and the test_pycvc_*.py scripts that
+  # bindings/pycvc/CMakeLists.txt registers with ctest ran nowhere in CI: a
+  # binding that no longer compiled, or a Python value that drifted from C++,
+  # first showed at release (or never). One interpreter column (cp312), the core
+  # module (no cvcGL/VTK), Release. Everything comes from cvcpkg: the libcvc
+  # deps closure (Jolt included), and python312 + numpy-cp312 + swig, the
+  # pycvc-cp312 recipe's own build deps.
+  pycvc-linux:
+    runs-on: ubuntu-latest
+    name: pycvc-linux / cp312
+    concurrency:
+      group: ci-${{ github.ref }}-pycvc-linux
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch libcvc-deps
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      # Its own prefix: the interpreter bundle carries its own copies of zlib,
+      # openssl and friends, which must not shadow the deps bundle's.
+      - name: Install Python, numpy and SWIG (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          py_prefix="$RUNNER_TEMP/py312"
+          cvcpkg install python312 numpy-cp312 swig --prefix "$py_prefix" --config release --link shared
+          "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
+          "$py_prefix/bin/swig" -version | head -3
+          echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            deps="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          echo "DEPS_PREFIX=$deps" >> "$GITHUB_ENV"
+          # The pycvc tests capture LD_LIBRARY_PATH when they are configured, and
+          # the prefix interpreter needs its own lib/ (it is not run through an
+          # activate script), so set it before cmake runs.
+          export LD_LIBRARY_PATH="$deps/lib:$PY_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX" \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_BUILD_CVCGL=OFF \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_BUILD_PYCVC=ON \
+            -DCVC_BUILD_PYCVC_GL=OFF \
+            -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
+            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
+
+      # The module, and the C++ reference test_pycvc_physics.py compares against
+      # (physics_parity_test, which ctest hands it in CVC_PHYSICS_PARITY_EXE).
+      - name: Build
+        run: cmake --build build --parallel --target pycvc physics_parity_test
+
+      - name: Run the pycvc tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          n=$(ctest --test-dir build -N -R '^pycvc_' | grep -c 'Test *#[0-9]*: pycvc_' || true)
+          echo "pycvc tests registered with ctest: $n"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::pycvc was built but no pycvc_* test reached CTestTestfile.cmake."
+            exit 1
+          fi
+          ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
+
   package-macos:
     runs-on: macos-latest
     strategy:
