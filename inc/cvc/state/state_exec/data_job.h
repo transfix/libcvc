@@ -58,8 +58,11 @@ std::unique_ptr<data_job> make_equal_job(value_t a, value_t b);
 std::unique_ptr<data_job> make_print_job(value_t v);
 
 /// `parts` printed one after another with `sep` between them, as a string value: a string as its
-/// raw text, anything else as to_string() prints it.
-std::unique_ptr<data_job> make_concat_job(std::vector<value_t> parts, std::string sep);
+/// raw text, anything else as to_string() prints it. The same string may be passed many times, so
+/// the result can outgrow every part: each append is checked against the allocation limit
+/// (eval_alloc_check), naming `who` (a string literal: the builtin) when it is over.
+std::unique_ptr<data_job> make_concat_job(std::vector<value_t> parts, std::string sep,
+                                          const char *who);
 
 /// A private copy of v's lists and dicts, keeping their sharing (a node reached twice is copied
 /// once; a cycle is copied as a cycle). Anything else is shared, not copied.
