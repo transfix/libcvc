@@ -1612,7 +1612,7 @@ if(CVC_WITH_JOLT)
     set(_cvc_jolt_kind OBJECT)
   endif()
   add_library(cvc_physics_jolt ${_cvc_jolt_kind} physics/jolt/jolt_backend.cpp
-    physics/jolt/jolt_material.cpp)
+    physics/jolt/jolt_material.cpp physics/jolt/jolt_vehicle_controller.cpp)
   set_target_properties(cvc_physics_jolt PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
@@ -1621,11 +1621,12 @@ if(CVC_WITH_JOLT)
   target_compile_definitions(cvc_physics_jolt PRIVATE CVC_WITH_JOLT)
   target_compile_features(cvc_physics_jolt PRIVATE cxx_std_17)
   target_link_libraries(cvc_physics_jolt PRIVATE Jolt::Jolt)
-  # Jolt is built without RTTI, and JPH::PhysicsMaterial's key function is in
-  # libJolt, so its typeinfo exists nowhere. cvc_material subclasses it; its vtable
-  # is emitted in jolt_material.cpp, the one file built with -fno-rtti, so nothing
-  # references the missing typeinfo ("undefined reference to typeinfo for
-  # JPH::PhysicsMaterial" otherwise). Only that file: a no-RTTI file that throws
+  # Jolt is built without RTTI, and the key functions of JPH::PhysicsMaterial and
+  # JPH::WheeledVehicleController(Settings) are in libJolt, so their typeinfo exists
+  # nowhere. cvc_material and the Ackermann controller subclass them; their vtables
+  # are emitted in jolt_material.cpp and jolt_vehicle_controller.cpp, the files built
+  # with -fno-rtti, so nothing references the missing typeinfo ("undefined reference
+  # to typeinfo for JPH::PhysicsMaterial" otherwise). Only those: a no-RTTI file that throws
   # std exceptions emits weak copies of their typeinfo, which on macOS bind every
   # reference in libcvc.dylib and break exception and boost::any matching across
   # the library boundary (see jolt_material.h). Jolt's other bases here have only
@@ -1635,8 +1636,8 @@ if(CVC_WITH_JOLT)
     target_compile_options(cvc_physics_jolt PRIVATE /fp:precise)
   else()
     target_compile_options(cvc_physics_jolt PRIVATE -ffp-contract=off)
-    set_source_files_properties(physics/jolt/jolt_material.cpp PROPERTIES
-      COMPILE_OPTIONS -fno-rtti)
+    set_source_files_properties(physics/jolt/jolt_material.cpp
+      physics/jolt/jolt_vehicle_controller.cpp PROPERTIES COMPILE_OPTIONS -fno-rtti)
   endif()
   if(_cvc_jolt_kind STREQUAL "STATIC")
     target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_physics_jolt>)

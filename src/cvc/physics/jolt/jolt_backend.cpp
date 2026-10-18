@@ -30,6 +30,7 @@
 
 #include "../backend_impl.h"
 #include "jolt_material.h"
+#include "jolt_vehicle_controller.h"
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/IssueReporting.h>
@@ -555,32 +556,6 @@ struct jolt_vehicle {
   std::vector<double> width, diameter;
   std::vector<float> steer; // rad, per wheel, set by the facade
   bool neutral = false;
-};
-
-// Jolt steers every wheel from one input; per-wheel Ackermann needs each wheel's own angle,
-// so they are set after the base controller's own pass.
-class ackermann_controller final : public JPH::WheeledVehicleController {
-public:
-  ackermann_controller(const JPH::WheeledVehicleControllerSettings &s, JPH::VehicleConstraint &c)
-      : JPH::WheeledVehicleController(s, c) {}
-  const std::vector<float> *steer = nullptr;
-
-protected:
-  void PreCollide(float dt, JPH::PhysicsSystem &ps) override {
-    JPH::WheeledVehicleController::PreCollide(dt, ps);
-    if (!steer)
-      return;
-    JPH::Wheels &wheels = mConstraint.GetWheels();
-    for (size_t i = 0; i < wheels.size() && i < steer->size(); ++i)
-      wheels[i]->SetSteerAngle((*steer)[i]);
-  }
-};
-
-class ackermann_settings final : public JPH::WheeledVehicleControllerSettings {
-public:
-  JPH::VehicleController *ConstructController(JPH::VehicleConstraint &c) const override {
-    return new ackermann_controller(*this, c);
-  }
 };
 
 // The wheels' ground test: a ray down the suspension, long enough to find the ground under a
