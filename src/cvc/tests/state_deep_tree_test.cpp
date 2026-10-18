@@ -275,9 +275,9 @@ std::vector<std::pair<std::string, std::string>> json_entries(const std::string 
 } // namespace
 
 TEST_F(StateDeepTree, JsonRoundTripsADeepTree) {
-  // Every node is keyed by its full path, so the document is quadratic in depth, and loading it
-  // resolves each key from the root: a shorter chain. json() and save() write it, json(j) and
-  // restore() read it into a fresh app.
+  // Every node is keyed by its whole path from the saved node, so the document is quadratic in
+  // depth, and loading it resolves each key from that node: a shorter chain. json() and save()
+  // write it, json(j) and restore() read it into the same node of a fresh app.
   const std::size_t n = std::min<std::size_t>(depth(), 1000);
   cvc::state *node = &root("saved");
   node->value("0");
@@ -298,8 +298,8 @@ TEST_F(StateDeepTree, JsonRoundTripsADeepTree) {
   cvc::state &r1 = cvc::state::instance(from_json);
   cvc::state &r2 = cvc::state::instance(from_file);
   on_small_stack([&] {
-    r1.json(j);
-    r2.restore(file);
+    r1("saved").json(j);
+    r2("saved").restore(file);
   });
   std::error_code ec;
   std::filesystem::remove(file, ec);
@@ -307,33 +307,51 @@ TEST_F(StateDeepTree, JsonRoundTripsADeepTree) {
   EXPECT_EQ(chain_values(r2("saved")), expected);
 }
 
-TEST_F(StateDeepTree, JsonIsOneLevelOfFullPaths) {
-  // One entry per node, keyed by its full path, in pre-order (children in name order): the
-  // node's value, or "" for a node with neither a value nor children. Those are the leaves of
-  // the nested document json() used to write, which still loads.
+TEST_F(StateDeepTree, JsonIsOneLevelOfRelativePaths) {
+  // One entry per node, keyed by its path relative to the node json() was called on ("" for
+  // that node), in pre-order (children in name order): the node's value, or "" for a node with
+  // neither a value nor children. json(j) reads keys relative to its node too, so a document
+  // goes back into the node it came from, or into another node as a copy.
   root("j").value("1");
   root("j.b.c").value("3");
   root("j.b.e").value("5");
   root("j.d");
   const std::vector<std::pair<std::string, std::string>> expected{
-      {"j", "1"}, {"j.b.c", "3"}, {"j.b.e", "5"}, {"j.d", ""}};
-  EXPECT_EQ(json_entries(root("j").json()), expected);
+      {"", "1"}, {"b.c", "3"}, {"b.e", "5"}, {"d", ""}};
+  const std::string doc = root("j").json();
+  EXPECT_EQ(json_entries(doc), expected);
   boost::property_tree::ptree pt = root("j").ptree();
   ASSERT_EQ(pt.size(), expected.size());
   for (const boost::property_tree::ptree::value_type &kv : pt)
     EXPECT_TRUE(kv.second.empty()) << kv.first << " nests";
 
-  const std::string nested =
-      R"({"j": "1", "j.b": {"j.b.c": {"j.b.c": "3"}, "j.b.e": {"j.b.e": "5"}}, "j.d": ""})";
+  // The root's document is keyed by full names.
+  std::vector<std::pair<std::string, std::string>> under_j;
+  for (const auto &kv : json_entries(root.json()))
+    if (kv.first == "j" || kv.first.rfind("j.", 0) == 0)
+      under_j.push_back(kv);
+  EXPECT_EQ(under_j, (std::vector<std::pair<std::string, std::string>>{
+                         {"j", "1"}, {"j.b.c", "3"}, {"j.b.e", "5"}, {"j.d", ""}}));
+
+  // Back into the same node of another app, and into a different node as a copy. The loader
+  // skips empty values, so d is not recreated.
+  const std::vector<std::pair<std::string, std::string>> loaded{
+      {"", "1"}, {"b.c", "3"}, {"b.e", "5"}};
   cvc::app other;
   cvc::state &r = cvc::state::instance(other);
-  r.json(nested);
-  EXPECT_EQ(r("j").value(), "1");
-  EXPECT_EQ(r("j.b.c").value(), "3");
-  EXPECT_EQ(r("j.b.e").value(), "5");
-  // The loader skips empty values, so j.d is not recreated.
-  EXPECT_EQ(json_entries(r("j").json()), (std::vector<std::pair<std::string, std::string>>{
-                                             {"j", "1"}, {"j.b.c", "3"}, {"j.b.e", "5"}}));
+  r("j").json(doc);
+  EXPECT_EQ(json_entries(r("j").json()), loaded);
+  root("k").json(doc);
+  EXPECT_EQ(json_entries(root("k").json()), loaded);
+  EXPECT_EQ(root("k.b.c").value(), "3");
+
+  // A nested document, as older versions wrote for the root, still loads into the root.
+  const std::string nested =
+      R"({"j": "1", "j.b": {"j.b.c": {"j.b.c": "3"}, "j.b.e": {"j.b.e": "5"}}, "j.d": ""})";
+  cvc::app legacy;
+  cvc::state &l = cvc::state::instance(legacy);
+  l.json(nested);
+  EXPECT_EQ(json_entries(l("j").json()), loaded);
 }
 
 // ---- traverse ------------------------------------------------------------------
