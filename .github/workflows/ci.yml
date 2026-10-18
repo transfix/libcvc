@@ -250,15 +250,14 @@ jobs:
             kind: libcvc
             build_type: Release
             enable_grpc: true
-          # Static-link gRPC probe: same as release-grpc but installs the static
+          # Static-link gRPC lane: same as release-grpc but installs the static
           # grpc closure (cvcpkg --link static) and links it into libcvc, catching
-          # a static-only grpc break. experimental -> continue-on-error for now.
+          # a static-only grpc break. BLOCKING (promoted from probe): green on every run.
           - name: libcvc-release-grpc-static
             kind: libcvc
             build_type: Release
             enable_grpc: true
             grpc_link: static
-            experimental: true
     name: package-linux / ${{ matrix.name }}
     # Heavy job (VTK from-source build): do NOT cancel in-progress runs.
     # Cancellation strands the cache and forces every subsequent run
@@ -713,8 +712,11 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
-          # gRPC probe (non-blocking): does libcvc build with CVC_ENABLE_GRPC on macOS? Never
-          # attempted. Uses the shared grpc published for macos. experimental -> continue-on-error.
+          # gRPC probe: does libcvc build+link with CVC_ENABLE_GRPC on macOS?
+          # Uses the shared grpc published for macos. Kept experimental (non-blocking)
+          # unlike Linux/Windows: the hosted macOS runners are too scarce to make a
+          # grpc lane blocking (whole macOS job set has queued hours), and these have
+          # not yet run green since the dylib fix. Promote once that is confirmed.
           - name: libcvc-release-grpc
             kind: libcvc
             build_type: Release
@@ -722,6 +724,7 @@ jobs:
             experimental: true
           # Static-link gRPC probe: installs the static grpc closure (cvcpkg
           # --link static, now published for macos) and links it into libcvc.
+          # Experimental for the same macOS-runner reason as the shared lane above.
           - name: libcvc-release-grpc-static
             kind: libcvc
             build_type: Release
@@ -944,21 +947,21 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
-          # gRPC probe (non-blocking): does libcvc build with CVC_ENABLE_GRPC on Windows (MSVC)?
-          # Never attempted. Uses the shared grpc published for windows. experimental -> continue-on-error.
+          # gRPC lane: does libcvc build+link with CVC_ENABLE_GRPC on Windows (MSVC)?
+          # Uses the shared grpc published for windows. BLOCKING (promoted from probe):
+          # green since the MSVC-skew bundle rebuild + the mkdtemp test fix.
           - name: libcvc-release-grpc
             kind: libcvc
             build_type: Release
             enable_grpc: true
-            experimental: true
-          # Static-link gRPC probe: installs the static grpc closure (cvcpkg
+          # Static-link gRPC lane: installs the static grpc closure (cvcpkg
           # --link static, now published for windows) and links it into libcvc.
+          # BLOCKING (promoted from probe): green on every run.
           - name: libcvc-release-grpc-static
             kind: libcvc
             build_type: Release
             enable_grpc: true
             grpc_link: static
-            experimental: true
     name: package-windows / ${{ matrix.name }}
     # Do NOT cancel in-progress runs; see package-linux for rationale.
     concurrency:
