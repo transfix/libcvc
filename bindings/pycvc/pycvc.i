@@ -1445,14 +1445,24 @@ class AsyncStateObserver(state_observer):
 // coroutine API, the string_view-based parser class, ...).
 %{
 #include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>
 #include "pycvc_value.h"
+#include <algorithm>
+#include <initializer_list>
 #include <memory>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 %}
 
@@ -1675,7 +1685,10 @@ bool py_to_value(PyObject *o, cvc::state_exec::value_t &out) { return from_py(o,
     SWIG_fail;
   $1 = &temp;
 %}
-%typemap(typecheck, precedence=SWIG_TYPECHECK_POINTER) cvc::state_exec::value_tag,
+// Any Python object may be a value, so the value overload is tried last (SWIG tries the lowest
+// precedence first): a str goes to execute(script) and a process_status to
+// to_string(process_status), not to their value_t overloads.
+%typemap(typecheck, precedence=10000) cvc::state_exec::value_tag,
     const cvc::state_exec::value_tag & "$1 = 1;"
 %typemap(out) cvc::state_exec::value_tag %{
   $result = pycvc::value_to_py(static_cast<const cvc::state_exec::value_tag &>($1));
@@ -1698,6 +1711,276 @@ bool py_to_value(PyObject *o, cvc::state_exec::value_t &out) { return from_py(o,
       PyList_SET_ITEM($result, static_cast<Py_ssize_t>(i), item);
     }
   }
+%}
+
+// ── maps and optionals (the scheduler surface) ──────────────────────────
+// A name -> value map (environment::bindings, execute_options::signal_handlers) is a dict with str
+// keys, in key order. A pid -> value map (run()'s results) is a dict with int keys.
+%{
+namespace pycvc {
+namespace {
+using value_map = std::unordered_map<std::string, cvc::state_exec::value_t>;
+
+PyObject *value_map_to_py(const value_map &m) {
+  std::vector<const value_map::value_type *> entries;
+  entries.reserve(m.size());
+  for (const auto &kv : m)
+    entries.push_back(&kv);
+  std::sort(entries.begin(), entries.end(),
+            [](const auto *a, const auto *b) { return a->first < b->first; });
+  PyObject *dict = PyDict_New();
+  if (dict == nullptr)
+    return nullptr;
+  for (const auto *kv : entries) {
+    PyObject *key = text_to_py(kv->first);
+    PyObject *val = key != nullptr ? value_to_py(kv->second) : nullptr;
+    const int rc = val != nullptr ? PyDict_SetItem(dict, key, val) : -1;
+    Py_XDECREF(key);
+    Py_XDECREF(val);
+    if (rc != 0) {
+      Py_DECREF(dict);
+      return nullptr;
+    }
+  }
+  return dict;
+}
+
+bool py_to_value_map(PyObject *o, value_map &out) {
+  if (!PyDict_Check(o)) {
+    PyErr_Format(PyExc_TypeError, "pycvc: expected a dict of str to values, got %.200s",
+                 Py_TYPE(o)->tp_name);
+    return false;
+  }
+  value_map m;
+  PyObject *key = nullptr;
+  PyObject *val = nullptr;
+  Py_ssize_t pos = 0;
+  while (PyDict_Next(o, &pos, &key, &val)) {
+    if (!PyUnicode_Check(key)) {
+      PyErr_Format(PyExc_TypeError, "pycvc: dict keys must be str, got %.200s",
+                   Py_TYPE(key)->tp_name);
+      return false;
+    }
+    Py_ssize_t n = 0;
+    const char *s = PyUnicode_AsUTF8AndSize(key, &n);
+    cvc::state_exec::value_t v;
+    if (s == nullptr || !py_to_value(val, v))
+      return false;
+    m[std::string(s, static_cast<size_t>(n))] = std::move(v);
+  }
+  out = std::move(m);
+  return true;
+}
+} // namespace
+} // namespace pycvc
+%}
+
+%typemap(in) const std::unordered_map<std::string, cvc::state_exec::value_tag> &
+    (std::unordered_map<std::string, cvc::state_exec::value_tag> temp) %{
+  if (!pycvc::py_to_value_map($input, temp))
+    SWIG_fail;
+  $1 = &temp;
+%}
+%typemap(out) const std::unordered_map<std::string, cvc::state_exec::value_tag> & %{
+  $result = pycvc::value_map_to_py(*$1);
+  if (!$result)
+    SWIG_fail;
+%}
+%typemap(out) std::unordered_map<int, cvc::state_exec::value_tag> %{
+  { // a block, so the wrapper's later `goto fail` doesn't jump over these initializations
+    const std::unordered_map<int, cvc::state_exec::value_tag> &pycvc_map = $1;
+    $result = PyDict_New();
+    if (!$result)
+      SWIG_fail;
+    for (const auto &kv : pycvc_map) {
+      PyObject *k = PyLong_FromLong(kv.first);
+      PyObject *v = k ? pycvc::value_to_py(kv.second) : nullptr;
+      const int rc = v ? PyDict_SetItem($result, k, v) : -1;
+      Py_XDECREF(k);
+      Py_XDECREF(v);
+      if (rc != 0) {
+        Py_DECREF($result);
+        $result = nullptr;
+        SWIG_fail;
+      }
+    }
+  }
+%}
+
+// Limits passed as std::optional: None is std::nullopt.
+%typemap(in) std::optional<unsigned long long> %{
+  if ($input != Py_None) {
+    const unsigned long long pycvc_v = PyLong_AsUnsignedLongLong($input);
+    if (pycvc_v == static_cast<unsigned long long>(-1) && PyErr_Occurred())
+      SWIG_fail;
+    $1 = pycvc_v;
+  }
+%}
+%typemap(typecheck, precedence=SWIG_TYPECHECK_UINT64) std::optional<unsigned long long>
+    "$1 = ($input == Py_None || PyLong_Check($input)) ? 1 : 0;"
+%typemap(in) std::optional<double> %{
+  if ($input != Py_None) {
+    const double pycvc_v = PyFloat_AsDouble($input);
+    if (pycvc_v == -1.0 && PyErr_Occurred())
+      SWIG_fail;
+    $1 = pycvc_v;
+  }
+%}
+%typemap(typecheck, precedence=SWIG_TYPECHECK_DOUBLE) std::optional<double>
+    "$1 = ($input == Py_None || PyFloat_Check($input) || PyLong_Check($input)) ? 1 : 0;"
+
+// Optional results other than values are None when empty (a value can be nil, so get_result and
+// pop_pending_message raise KeyError instead; see their %extend below).
+%typemap(out) std::optional<std::string> %{
+  { // a block, so the wrapper's later `goto fail` doesn't jump over this initialization
+    const std::optional<std::string> &pycvc_opt = $1;
+    if (pycvc_opt) {
+      $result = PyUnicode_DecodeUTF8(pycvc_opt->data(), static_cast<Py_ssize_t>(pycvc_opt->size()),
+                                     "surrogateescape");
+      if (!$result)
+        SWIG_fail;
+    } else {
+      $result = Py_None;
+      Py_INCREF(Py_None);
+    }
+  }
+%}
+%typemap(out) std::optional<cvc::state_exec::process_info> %{
+  { // a block, so the wrapper's later `goto fail` doesn't jump over this initialization
+    const std::optional<cvc::state_exec::process_info> &pycvc_opt = $1;
+    if (pycvc_opt) {
+      $result = SWIG_NewPointerObj(new cvc::state_exec::process_info(*pycvc_opt),
+                                   $descriptor(cvc::state_exec::process_info *), SWIG_POINTER_OWN);
+      if (!$result)
+        SWIG_fail;
+    } else {
+      $result = Py_None;
+      Py_INCREF(Py_None);
+    }
+  }
+%}
+%typemap(out) std::vector<cvc::state_exec::process_info> %{
+  { // a block, so the wrapper's later `goto fail` doesn't jump over this initialization
+    const std::vector<cvc::state_exec::process_info> &pycvc_infos = $1;
+    $result = PyList_New(static_cast<Py_ssize_t>(pycvc_infos.size()));
+    if (!$result)
+      SWIG_fail;
+    for (size_t i = 0; i < pycvc_infos.size(); ++i) {
+      PyObject *item = SWIG_NewPointerObj(new cvc::state_exec::process_info(pycvc_infos[i]),
+                                          $descriptor(cvc::state_exec::process_info *),
+                                          SWIG_POINTER_OWN);
+      if (!item) {
+        Py_DECREF($result);
+        $result = nullptr;
+        SWIG_fail;
+      }
+      PyList_SET_ITEM($result, static_cast<Py_ssize_t>(i), item);
+    }
+  }
+%}
+
+// ── enums: pycvc.process_status and pycvc.scheduling_policy are enum.IntEnum classes ──
+// pycvc.process_status.killed is process_status::killed. An enum argument must be a member of its
+// IntEnum (strict, like values), which is also what lets to_string(process_status) and
+// to_string(value) share their C++ name.
+%{
+static PyObject *pycvc_enum_process_status = nullptr;
+static PyObject *pycvc_enum_scheduling_policy = nullptr;
+
+// enum.IntEnum(name, members) in module pycvc, or nullptr with a Python error set.
+static PyObject *pycvc_make_int_enum(const char *name,
+                                     std::initializer_list<std::pair<const char *, int>> members) {
+  PyObject *enum_mod = PyImport_ImportModule("enum");
+  PyObject *int_enum = enum_mod ? PyObject_GetAttrString(enum_mod, "IntEnum") : nullptr;
+  Py_XDECREF(enum_mod);
+  PyObject *pairs = int_enum ? PyList_New(0) : nullptr;
+  if (pairs == nullptr) {
+    Py_XDECREF(int_enum);
+    return nullptr;
+  }
+  for (const auto &m : members) {
+    PyObject *pair = Py_BuildValue("(si)", m.first, m.second);
+    if (pair == nullptr || PyList_Append(pairs, pair) != 0) {
+      Py_XDECREF(pair);
+      Py_DECREF(pairs);
+      Py_DECREF(int_enum);
+      return nullptr;
+    }
+    Py_DECREF(pair);
+  }
+  PyObject *args = Py_BuildValue("(sO)", name, pairs);
+  PyObject *kwargs = Py_BuildValue("{s:s}", "module", "pycvc");
+  PyObject *cls = args && kwargs ? PyObject_Call(int_enum, args, kwargs) : nullptr;
+  Py_XDECREF(args);
+  Py_XDECREF(kwargs);
+  Py_DECREF(pairs);
+  Py_DECREF(int_enum);
+  return cls;
+}
+
+static bool pycvc_is_enum(PyObject *o, PyObject *type) {
+  const int is = type != nullptr ? PyObject_IsInstance(o, type) : 0;
+  if (is < 0)
+    PyErr_Clear();
+  return is == 1;
+}
+
+// An enum argument's value: `o` must be a member of `type`. False, with a TypeError set, otherwise.
+static bool pycvc_enum_from_py(PyObject *o, PyObject *type, const char *name, int &out) {
+  if (!pycvc_is_enum(o, type)) {
+    PyErr_Format(PyExc_TypeError, "pycvc: expected a pycvc.%s member, got %.200s", name,
+                 Py_TYPE(o)->tp_name);
+    return false;
+  }
+  const long v = PyLong_AsLong(o);
+  if (v == -1 && PyErr_Occurred())
+    return false;
+  out = static_cast<int>(v);
+  return true;
+}
+%}
+
+%define PYCVC_STATE_EXEC_ENUM(TYPE, PYTYPE, NAME)
+%typemap(in) TYPE (int pycvc_ev) {
+  if (!pycvc_enum_from_py($input, PYTYPE, NAME, pycvc_ev))
+    SWIG_fail;
+  $1 = static_cast<TYPE>(pycvc_ev);
+}
+%typemap(out) TYPE {
+  $result = PyObject_CallFunction(PYTYPE, "i", static_cast<int>($1));
+  if (!$result)
+    SWIG_fail;
+}
+%typemap(typecheck, precedence=SWIG_TYPECHECK_INT32) TYPE {
+  $1 = pycvc_is_enum($input, PYTYPE) ? 1 : 0;
+}
+%enddef
+PYCVC_STATE_EXEC_ENUM(cvc::state_exec::process_status, pycvc_enum_process_status, "process_status")
+PYCVC_STATE_EXEC_ENUM(cvc::state_exec::scheduling_policy, pycvc_enum_scheduling_policy,
+                      "scheduling_policy")
+
+%init %{
+  pycvc_enum_process_status = pycvc_make_int_enum(
+      "process_status",
+      {{"ready", static_cast<int>(cvc::state_exec::process_status::ready)},
+       {"running", static_cast<int>(cvc::state_exec::process_status::running)},
+       {"paused", static_cast<int>(cvc::state_exec::process_status::paused)},
+       {"waiting", static_cast<int>(cvc::state_exec::process_status::waiting)},
+       {"terminated", static_cast<int>(cvc::state_exec::process_status::terminated)},
+       {"killed", static_cast<int>(cvc::state_exec::process_status::killed)}});
+  if (pycvc_enum_process_status != NULL)
+    PyDict_SetItemString(d, "process_status", pycvc_enum_process_status);
+  pycvc_enum_scheduling_policy = pycvc_make_int_enum(
+      "scheduling_policy",
+      {{"round_robin", static_cast<int>(cvc::state_exec::scheduling_policy::round_robin)},
+       {"priority", static_cast<int>(cvc::state_exec::scheduling_policy::priority)},
+       {"priority_rr", static_cast<int>(cvc::state_exec::scheduling_policy::priority_rr)}});
+  if (pycvc_enum_scheduling_policy != NULL)
+    PyDict_SetItemString(d, "scheduling_policy", pycvc_enum_scheduling_policy);
+%}
+%pythoncode %{
+process_status = _pycvc.process_status
+scheduling_policy = _pycvc.scheduling_policy
 %}
 
 // ── parse_error: pycvc.parse_error, a RuntimeError with .line and .col ──
@@ -1729,12 +2012,39 @@ static void pycvc_raise_parse_error(const cvc::state_exec::parse_error &e) {
 parse_error = _pycvc.parse_error
 %}
 
+// ── no value: KeyError ──
+// Where C++ returns an empty std::optional<value_t> or a null value_t* (an unbound name, a pid with
+// no result, an empty message queue), the wrapper throws pycvc::no_value and Python gets
+// KeyError(key). It can't return None: None is the nil value.
+%{
+namespace pycvc {
+struct no_value {
+  std::variant<int, std::string> key;
+};
+} // namespace pycvc
+
+static void pycvc_raise_no_value(const pycvc::no_value &e) {
+  PyObject *key = nullptr;
+  if (const int *pid = std::get_if<int>(&e.key)) {
+    key = PyLong_FromLong(*pid);
+  } else {
+    const std::string &s = std::get<std::string>(e.key);
+    key = PyUnicode_DecodeUTF8(s.data(), static_cast<Py_ssize_t>(s.size()), "surrogateescape");
+  }
+  if (key != nullptr) {
+    PyErr_SetObject(PyExc_KeyError, key);
+    Py_DECREF(key);
+  }
+}
+%}
+
 // For the state_exec declarations (and Exec, below): the default mapping, with
 // parse_error first so it raises pycvc.parse_error. Scoped to this section, so
 // the modules that %import pycvc.i keep PYCVC_DEFAULT_EXCEPTION.
-%exception {
-  try {
-    $action
+%define PYCVC_STATE_EXEC_CATCH
+  catch (const pycvc::no_value &e) {
+    pycvc_raise_no_value(e);
+    SWIG_fail;
   } catch (const cvc::state_exec::parse_error &e) {
     pycvc_raise_parse_error(e);
     SWIG_fail;
@@ -1745,7 +2055,35 @@ parse_error = _pycvc.parse_error
   } catch (...) {
     SWIG_exception(SWIG_RuntimeError, "pycvc: C++ exception (see libcvc)");
   }
+%enddef
+%exception {
+  try {
+    $action
+  }
+  PYCVC_STATE_EXEC_CATCH
 }
+
+// Stepping and running a scheduler release the GIL around the C++ call (pycvc::gil_release, from
+// pycvc_lod.i; a throw restores it before the catch arms run), so other Python threads keep going
+// while DSL programs run. A Python function a program calls takes the GIL back for its call.
+%define PYCVC_STATE_EXEC_NOGIL(NAME)
+%exception NAME {
+  try {
+    pycvc::gil_release pycvc_nogil;
+    $action
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%enddef
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::step)
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::run)
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_step)
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_run)
+
+// environment is shared (environment_ptr), as in C++. The map members read and write as dicts.
+%shared_ptr(cvc::state_exec::environment)
+%naturalvar cvc::state_exec::environment::bindings;
+%naturalvar cvc::state_exec::execute_options::signal_handlers;
 
 namespace cvc {
 namespace state_exec {
@@ -1826,14 +2164,254 @@ public:
 void encode_value(cvc::state &node, const value_t &val);
 value_t decode_value(cvc::state &node);
 
-%nodefaultctor async_scheduler;
-%nodefaultdtor async_scheduler;
+// ── environment and builtins ──
+// lookup() returns the bound value, or raises KeyError (C++ returns nullptr). bindings is the
+// scope's own map, read and written as a dict (a copy: change bindings with set()).
+struct environment {
+  std::unordered_map<std::string, value_t> bindings;
+  std::shared_ptr<environment> outer;
+  void set(const std::string &name, value_t val);
+  void set_existing(const std::string &name, value_t val);
+  static std::shared_ptr<environment> extend(std::shared_ptr<environment> parent);
+};
+%extend environment {
+  value_t lookup(const std::string &name) {
+    if (const cvc::state_exec::value_t *v = $self->lookup(name))
+      return *v;
+    throw pycvc::no_value{name};
+  }
+}
+typedef std::shared_ptr<environment> environment_ptr;
+
+// register_fn takes a Python callable (or a pycvc.value holding a native fn) where C++ takes a
+// native_fn. The callable runs when a program calls it, on the thread stepping the scheduler; it
+// gets the arguments as Python values and its result converts back, as for Exec.register_fn.
+%nodefaultctor builtins;
+%nodefaultdtor builtins;
+class builtins {
+public:
+  static environment_ptr make_default_environment();
+};
+%extend builtins {
+  static void register_fn(environment_ptr env, const std::string &name, PyObject *fn) {
+    if (!env)
+      throw std::invalid_argument("pycvc.builtins.register_fn: env is None");
+    cvc::state_exec::value_t held;
+    void *p = nullptr;
+    if (SWIG_IsOK(SWIG_ConvertPtr(fn, &p, pycvc::value_swig_type(), 0)) && p != nullptr)
+      held = *static_cast<cvc::state_exec::value_t *>(p);
+    if (const auto *native = std::get_if<cvc::state_exec::native_fn>(&held.v)) {
+      cvc::state_exec::builtins::register_fn(env, name, *native);
+      return;
+    }
+    cvc::state_exec::builtins::register_fn(
+        env, name, pycvc::python_native_fn("pycvc.builtins.register_fn", name, fn));
+  }
+}
+
+std::string percent_encode(const std::string &s);
+std::string percent_decode(const std::string &s);
+
+// ── processes and schedulers ──
+// process_status and scheduling_policy are the IntEnums above; declared opaque here so SWIG adds
+// no flat constants of its own.
+enum class process_status;
+enum class scheduling_policy;
+const char *to_string(process_status s);
+process_status parse_process_status(const std::string &s);
+
+// on_complete is a Python callable (or None) called with the process's result when it terminates,
+// on the thread stepping the scheduler. Its return value is ignored; an exception it raises is
+// raised from that step()/run() call. The uint64_t limits are Python ints.
+struct execute_options {
+  std::string name;
+  int priority;
+  std::string uid;
+  std::string gid;
+  std::string root_path;
+  std::string owner;
+  unsigned long long max_steps;
+  double max_time;
+  double max_step_time;
+  unsigned long long max_memory;
+  unsigned long long max_messages;
+  unsigned long long max_message_bytes;
+  std::unordered_map<std::string, value_t> signal_handlers;
+  environment_ptr env;
+};
+%extend execute_options {
+  PyObject *_on_complete_get() const {
+    if (!$self->on_complete) {
+      Py_INCREF(Py_None);
+      return Py_None;
+    }
+    if (const auto *f = $self->on_complete.target<pycvc::python_on_complete>()) {
+      Py_INCREF(f->callable.get());
+      return f->callable.get();
+    }
+    throw std::runtime_error("pycvc.execute_options.on_complete: holds a C++ callback");
+  }
+  void _on_complete_set(PyObject *fn) {
+    if (fn == Py_None)
+      $self->on_complete = nullptr;
+    else
+      $self->on_complete = pycvc::make_python_on_complete(fn);
+  }
+  %pythoncode %{
+    on_complete = property(_on_complete_get, _on_complete_set)
+  %}
+}
+
+struct process_info {
+  int pid;
+  std::string name;
+  process_status status;
+  int priority;
+  std::string uid;
+  std::string gid;
+  unsigned long long step_count;
+  double elapsed_time;
+  unsigned long long current_memory;
+  unsigned long long peak_memory;
+  unsigned long long max_memory;
+  double max_time;
+  unsigned long long message_count;
+  unsigned long long max_messages;
+  unsigned long long message_bytes;
+  unsigned long long max_message_bytes;
+  int parent_pid;
+};
+%extend process_info {
+  %pythoncode %{
+    def __repr__(self):
+        return "<pycvc.process_info pid=%d name=%r status=%s>" % (
+            self.pid, self.name, self.status.name)
+  %}
+}
+
+struct scheduler_stats {
+  int total_processes;
+  int running;
+  int ready;
+  int paused;
+  int terminated;
+  int killed;
+  unsigned long long total_steps;
+};
+%extend scheduler_stats {
+  %pythoncode %{
+    def __repr__(self):
+        return ("<pycvc.scheduler_stats total_processes=%d running=%d ready=%d paused=%d "
+                "terminated=%d killed=%d total_steps=%d>" % (
+                    self.total_processes, self.running, self.ready, self.paused,
+                    self.terminated, self.killed, self.total_steps))
+  %}
+}
+
+// The members scheduler and async_scheduler share (scheduler_base plus their common extras).
+// Returns of a C++ reference come back as copies. Not wrapped: mem_tracker(), and
+// current_process() / queue_watch_event(), which take the process struct (PR 3).
+%define PYCVC_STATE_EXEC_SCHEDULER_MEMBERS
+  int execute(const std::string &script, const execute_options &opts = execute_options());
+  int execute(const value_t &expr, const execute_options &opts = execute_options());
+  void stop();
+  bool is_running() const;
+  bool pause(int pid);
+  bool resume(int pid);
+  bool kill(int pid);
+  int fork(int pid);
+  bool sleep(int pid, double seconds);
+  bool yield_frame(int pid);
+  bool receive_message(int pid, const std::string &path);
+  int deliver_to_receivers(const std::string &path, const value_t &msg);
+  size_t pending_message_count(const std::string &path) const;
+  size_t total_pending_messages() const;
+  size_t max_pending_messages;
+  bool set_priority(int pid, int priority);
+  bool set_max_steps(int pid, unsigned long long max_steps);
+  bool set_max_time(int pid, double seconds);
+  bool set_max_memory(int pid, unsigned long long bytes);
+  bool set_max_messages(int pid, unsigned long long count);
+  bool set_max_message_bytes(int pid, unsigned long long bytes);
+  bool send_signal(int pid, const std::string &signal);
+  std::vector<process_info> list_processes() const;
+  std::optional<process_info> get_process_info(int pid) const;
+  std::unordered_map<int, value_t> get_results() const;
+  scheduler_stats get_stats() const;
+  scheduling_policy policy() const;
+  int process_count() const;
+  bool has_runnable() const;
+  int current_pid() const;
+  void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path);
+  void unregister_watch_handler(int pid, int watch_id);
+  void set_watch_root(cvc::state *root);
+%enddef
+
+// get_result and pop_pending_message raise KeyError(pid / path) where C++ returns std::nullopt.
+%define PYCVC_STATE_EXEC_SCHEDULER_EXTEND(CLASS)
+%extend CLASS {
+  value_t get_result(int pid) const {
+    if (std::optional<cvc::state_exec::value_t> r = $self->get_result(pid))
+      return *r;
+    throw pycvc::no_value{pid};
+  }
+  value_t pop_pending_message(const std::string &path) {
+    if (std::optional<cvc::state_exec::value_t> m = $self->pop_pending_message(path))
+      return *m;
+    throw pycvc::no_value{path};
+  }
+}
+%enddef
+
+// The synchronous scheduler. run() and step() release the GIL while programs run.
+class scheduler {
+public:
+  scheduler();
+  scheduler(scheduling_policy policy);
+  PYCVC_STATE_EXEC_SCHEDULER_MEMBERS
+  int step();
+  std::unordered_map<int, value_t> run(std::optional<unsigned long long> max_steps = std::nullopt,
+                                       std::optional<double> max_time = std::nullopt);
+  void set_id(const std::string &id);
+  std::string id() const;
+  void load_settings();
+  parse_options parser_settings() const;
+  static constexpr const char *settings_root = "state_exec";
+  static constexpr const char *defaults_prefix = "state_exec.defaults";
+  static constexpr const char *sched_prefix = "state_exec.schedulers";
+};
+PYCVC_STATE_EXEC_SCHEDULER_EXTEND(scheduler)
+
+// The scheduler libcvc's hosts use (app::exec_scheduler(), Exec). The coroutine step()/run() aren't
+// wrapped; Python drives it with sync_step()/sync_run(), which release the GIL while programs run.
+// post_message() is the one thread-safe call.
 class async_scheduler {
 public:
+  async_scheduler();
+  async_scheduler(scheduling_policy policy);
+  PYCVC_STATE_EXEC_SCHEDULER_MEMBERS
+  int sync_step();
+  std::unordered_map<int, value_t> sync_run(
+      std::optional<unsigned long long> max_steps = std::nullopt,
+      std::optional<double> max_time = std::nullopt);
+  int kill_owner(const std::string &owner);
+  int wake_awaiting();
+  void post_message(const std::string &path, const value_t &msg);
+  void drain_ingress();
+  std::optional<std::string> get_exit_error(int pid) const;
+  bool reap(int pid);
+  void set_parser_defaults(const parse_options &defaults);
+  parse_options parser_defaults() const;
   static parse_options host_parser_defaults();
 };
+PYCVC_STATE_EXEC_SCHEDULER_EXTEND(async_scheduler)
 }
 }
+
+// Exec.scheduler() returns a reference into the Exec, so the scheduler keeps the Exec alive.
+%pythonappend pycvc::Exec::scheduler %{
+  val._pycvc_exec = self
+%}
 
 // ── Phase 4: DSL execution + Python-authored DSL functions ──────────────
 // pycvc.Exec(app) runs state_exec DSL programs over app's state root and lets a

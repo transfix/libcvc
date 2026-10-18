@@ -92,9 +92,10 @@ std::shared_ptr<PyObject> own_callable(PyObject *callable) {
 // async fn): PyGILState_Ensure creates/binds a thread state and blocks until the
 // GIL is free, so the only rule is that whoever is idle-waiting for this worker
 // must have released the GIL (run()'s pump does). Contains a Python exception as
-// a C++ error carrying the message.
+// a C++ error carrying the message, prefixed with `what`. With `want_result`
+// false the return value is ignored (an on_complete callback) and nil returned.
 value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const value_t> args,
-                    const std::string &name) {
+                    const std::string &what, bool want_result = true) {
   PyGILState_STATE gil = PyGILState_Ensure();
   PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) if an arg can't convert
   PyObject *res = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
@@ -102,28 +103,19 @@ value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const val
   if (res == nullptr) {
     std::string msg = fetch_py_error();
     PyGILState_Release(gil);
-    throw std::runtime_error("python DSL fn '" + name + "': " + msg);
+    throw std::runtime_error(what + ": " + msg);
   }
   value_t out;
-  const bool converted = py_to_value(res, out); // strict: e.g. a set or non-str dict key fails
+  // strict: e.g. a set or non-str dict key fails
+  const bool converted = !want_result || py_to_value(res, out);
   Py_DECREF(res);
   if (!converted) {
     std::string msg = fetch_py_error();
     PyGILState_Release(gil);
-    throw std::runtime_error("python DSL fn '" + name +
-                             "' returned an unconvertible value: " + msg);
+    throw std::runtime_error(what + " returned an unconvertible value: " + msg);
   }
   PyGILState_Release(gil);
   return out;
-}
-
-// Wrap a Python callable as a SYNCHRONOUS DSL native_fn: it runs inline on the
-// scheduler thread (GIL held by run()).
-native_fn make_python_native_fn(const std::string &name, PyObject *callable) {
-  std::shared_ptr<PyObject> holder = own_callable(callable);
-  return [name, holder](std::span<const value_t> args) -> value_t {
-    return call_python(holder, args, name);
-  };
 }
 
 std::string render_result(const value_t &v) {
@@ -260,6 +252,32 @@ struct EndGuard {
 };
 } // namespace
 
+// A SYNCHRONOUS DSL native_fn: it runs inline on the thread stepping the scheduler (Exec::run's,
+// or the caller of a wrapped scheduler's run/step, which release the GIL; call_python retakes it).
+native_fn python_native_fn(const std::string &who, const std::string &name, PyObject *callable) {
+  if (callable == nullptr || !PyCallable_Check(callable))
+    throw std::invalid_argument(who + ": '" + name + "' is not callable");
+  if (is_coroutine_function(callable))
+    throw std::invalid_argument(who + ": '" + name +
+                                "' is an async def — use Exec.register_async_coro");
+  std::shared_ptr<PyObject> holder = own_callable(callable);
+  const std::string what = "python DSL fn '" + name + "'";
+  return [what, holder](std::span<const value_t> args) -> value_t {
+    return call_python(holder, args, what);
+  };
+}
+
+void python_on_complete::operator()(value_t result) const {
+  call_python(callable, std::span<const value_t>(&result, 1), "python on_complete",
+              /*want_result=*/false);
+}
+
+python_on_complete make_python_on_complete(PyObject *callable) {
+  if (callable == nullptr || !PyCallable_Check(callable))
+    throw std::invalid_argument("pycvc.execute_options.on_complete: not callable");
+  return python_on_complete{own_callable(callable)};
+}
+
 // Owns everything an evaluation needs. The intrinsics capture &ictx (a raw
 // pointer), so ictx must outlive any run — holding it here (Exec-lifetime)
 // satisfies that. Mirrors the C++ tests' make_exec_env().
@@ -339,12 +357,8 @@ Exec::~Exec() {
 }
 
 void Exec::register_fn(const std::string &name, PyObject *callable) {
-  if (callable == nullptr || !PyCallable_Check(callable))
-    throw std::invalid_argument("pycvc.Exec.register_fn: '" + name + "' is not callable");
-  if (is_coroutine_function(callable))
-    throw std::invalid_argument("pycvc.Exec.register_fn: '" + name +
-                                "' is an async def — use register_async_coro");
-  builtins::register_fn(impl_->env, name, make_python_native_fn(name, callable));
+  builtins::register_fn(impl_->env, name,
+                        python_native_fn("pycvc.Exec.register_fn", name, callable));
 }
 
 void Exec::register_async_fn(const std::string &name, PyObject *callable) {
@@ -377,7 +391,7 @@ void Exec::register_async_fn(const std::string &name, PyObject *callable) {
             [holder, argv, name, inflight]() -> value_t {
               EndGuard guard{
                   inflight}; // --in-flight when this body returns/throws, before the post
-              return call_python(holder, *argv, name);
+              return call_python(holder, *argv, "python DSL fn '" + name + "'");
             },
             [name](const std::string &e) -> value_t {
               return async_error_dict("python async fn '" + name + "': " + e);
@@ -576,5 +590,7 @@ cvc::state_exec::parse_options Exec::parser_defaults() const {
 void Exec::set_parser_defaults(const cvc::state_exec::parse_options &defaults) {
   impl_->sched.set_parser_defaults(defaults);
 }
+
+cvc::state_exec::async_scheduler &Exec::scheduler() { return impl_->sched; }
 
 } // namespace pycvc
