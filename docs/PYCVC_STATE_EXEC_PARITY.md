@@ -98,7 +98,8 @@ are listed too. Status after PR 4:
 | | `make_list`, `make_dict`, `make_bytes`, `nil_value`, `true_value`, `false_value` | `list`, `dict`, `bytes`, `None`, `True`, `False` | exception: the native Python values are the equivalents |
 | | `environment` (`bindings`, `outer`, `frozen`, `lookup`, `set`, `set_existing`, `extend`) | `pycvc.environment` | wrapped (PR 2), shared like `environment_ptr`. `bindings` reads and writes as a dict (a copy); `lookup` raises `KeyError` where C++ returns nullptr; `set` on a frozen scope (#660) raises `RuntimeError` |
 | | `closure`, `data_object`, `generator` | `pycvc.value` (opaque) | wrapped as opaque handles; no member access |
-| | `time_budget`, `eval_deadline_guard`, `eval_deadline_expired`, `thread_cpu_seconds` | none | exception: thread-local evaluator internals |
+| | `time_budget`, `eval_deadline_guard`, `eval_deadline_expired`, `eval_deadline_check`, `thread_cpu_seconds` | none | exception: thread-local evaluator internals |
+| | `evaluation_interrupted`, `evaluation_timeout` (in types.h since 2026-10) | listed with evaluator.h below | |
 | | `kDefaultMaxAllocBytes`, `eval_alloc_limit`, `eval_alloc_check`, `alloc_bytes` (#660) | the same names under `pycvc.` | wrapped (PR 3). A Python function a program calls runs on the stepping thread, where the step's limit is armed, so it can check the limit as a builtin does |
 | | `eval_alloc_guard` (#660) | none | exception: RAII that must nest last-in first-out, which a Python object's lifetime doesn't promise |
 | | `detail::release_nested`, `detail::drop_owner` (#657) | none | exception: internals of `value_t`'s destructor |

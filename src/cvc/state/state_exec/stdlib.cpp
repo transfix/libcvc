@@ -70,10 +70,7 @@ std::size_t list_bytes(std::size_t n) {
 }
 
 // Long loops inside one native call honour the evaluation deadline (see collect in builtins.cpp).
-void poll_deadline(const char *name) {
-  if (eval_deadline_expired())
-    throw std::runtime_error(std::string(name) + ": evaluation exceeded time budget");
-}
+void poll_deadline(const char *name) { eval_deadline_check(name); }
 
 // A list argument by owning pointer (a null one reads as empty).
 list_ptr as_list_ptr(const value_t &v, const char *name) {

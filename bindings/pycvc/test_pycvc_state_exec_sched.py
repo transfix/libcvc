@@ -136,6 +136,20 @@ def test_a_python_fn_error_surfaces_as_each_scheduler_reports_it():
     assert a.get_exit_error(999) is None
 
 
+def test_a_time_budget_cut_inside_a_step_is_the_time_limit():
+    # A generator body that never yields loops inside one step until the step's deadline cuts
+    # it. Each scheduler reports that as it reports running out of time between steps.
+    never_yields = "(next (generator (lambda () (while t 1))))"
+    s = pycvc.scheduler()
+    pid = s.execute(never_yields, _opts(max_time=0.05))
+    s.run()  # no error out of run()
+    assert s.get_process_info(pid).status is process_status.killed
+    a = pycvc.async_scheduler()
+    pid = a.execute(never_yields, _opts(max_time=0.05))
+    a.sync_run()
+    assert a.get_exit_error(pid) == "time_limit_exceeded"
+
+
 def test_percent_encode_and_decode():
     assert pycvc.percent_encode("a b/é~") == "a%20b%2F%C3%A9~"
     assert pycvc.percent_decode("a%20b%2F%C3%A9~") == "a b/é~"

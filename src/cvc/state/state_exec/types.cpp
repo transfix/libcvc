@@ -124,6 +124,8 @@ eval_deadline_guard::~eval_deadline_guard() {
     t_innermost = outer_;
 }
 
+bool eval_deadline_guard::expired() { return budget_ && budget_->spent(); }
+
 bool eval_deadline_expired() {
   if (!t_innermost)
     return false;
@@ -132,6 +134,11 @@ bool eval_deadline_expired() {
   for (eval_deadline_guard *g = t_innermost; g; g = g->outer_)
     spent = g->budget_->spent(now) || spent;
   return spent;
+}
+
+void eval_deadline_check(const char *what) {
+  if (eval_deadline_expired())
+    throw evaluation_timeout(std::string(what) + ": evaluation exceeded timeout");
 }
 
 // -- releasing nested values -------------------------------------------------

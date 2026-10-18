@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -368,6 +369,9 @@ public:
   ~eval_deadline_guard();
   eval_deadline_guard(const eval_deadline_guard &) = delete;
   eval_deadline_guard &operator=(const eval_deadline_guard &) = delete;
+  /// Whether this guard's own budget is spent (a check, like eval_deadline_expired()). Tells a
+  /// scheduler's step deadline from one armed outside it, both of which throw evaluation_timeout.
+  bool expired();
 
 private:
   friend bool eval_deadline_expired();
@@ -375,10 +379,28 @@ private:
   eval_deadline_guard *outer_ = nullptr; // the next armed guard out
 };
 
+/// Exception thrown when evaluation is interrupted.
+class evaluation_interrupted : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
+
+/// Exception thrown when evaluation times out: by the evaluator between steps, or by a long
+/// loop inside one native step (eval_deadline_check). The schedulers kill a process whose step
+/// throws it with time_limit_exceeded, as when the time runs out between steps.
+class evaluation_timeout : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
+
 /// True iff a deadline is armed on this thread and its budget is spent; each call is a check
-/// of every armed budget. Cheap (one steady-clock read until a budget is half spent);
-/// long-running builtins call this in their loops so they too honour the budget.
+/// of every armed budget. Cheap (one steady-clock read until a budget is half spent).
 bool eval_deadline_expired();
+
+/// Throws evaluation_timeout ("<what>: evaluation exceeded timeout") when eval_deadline_expired().
+/// Long-running builtins and data jobs call this in their loops, so the budget cuts them the
+/// same way it cuts a program.
+void eval_deadline_check(const char *what);
 
 // -- per-call allocation limit ----------------------------------------------
 //

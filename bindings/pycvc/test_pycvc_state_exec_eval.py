@@ -152,6 +152,15 @@ def test_timeout_and_pause():
     for ev in (pycvc.stackless_evaluator(_builtins()), pycvc.evaluator(_builtins())):
         e = _raises(pycvc.evaluation_timeout, ev.evaluate_script, "(while 1 1)", None, 0.05)
         assert isinstance(e, RuntimeError)
+        # A loop inside one step (a generator body that never yields) is cut the same way.
+        e = _raises(
+            pycvc.evaluation_timeout,
+            ev.evaluate_script,
+            "(next (generator (lambda () (while t 1))))",
+            None,
+            0.05,
+        )
+        assert "evaluation exceeded timeout" in str(e)
         ev.pause()
         assert ev.is_paused()
         t = threading.Timer(0.1, ev.resume)

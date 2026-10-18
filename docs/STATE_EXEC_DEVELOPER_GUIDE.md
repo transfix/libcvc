@@ -850,7 +850,19 @@ opts.max_messages      = 100;       // outbound msg-send calls
 opts.max_message_bytes = 65536;     // total outbound payload bytes
 ```
 
-When a limit is exceeded, the process is killed (status becomes `killed`).
+When a limit is exceeded, the process is killed (status becomes `killed`). The async scheduler
+keeps the reason as its exit error: `max_steps_exceeded`, `time_limit_exceeded`,
+`memory_limit_exceeded`, and so on.
+
+`max_time` is checked between steps, and inside a step by the step's deadline. A long loop
+inside one native call polls that deadline with `eval_deadline_check()`, which throws
+`evaluation_timeout`. Examples are an unsliced data job, a generator body that never yields, and
+a stdlib materializer. Either way the process is killed with `time_limit_exceeded`. On the sync
+scheduler, a deadline armed outside it (its caller's) propagates out of `run()` instead.
+
+Outside a scheduler, every evaluator's timeout arms the same deadline. A loop inside a step
+throws `evaluation_timeout` (in pycvc, `pycvc.evaluation_timeout`), as the evaluator's own
+check between steps does. An Ariadne predicate reports either one as the eval budget's time cap.
 
 ### Memory: state-tree writes and the measured heap
 
@@ -1491,7 +1503,8 @@ read. The document is held to the allocation limit as it grows.
 - **Cost.** `collections.sort` is a stable merge sort, n log n nodes.
   `collections.unique` costs a node per comparison, and compares lists and dicts with a sliced
   equality walk. `collections.dict-merge` keeps a key index, so it is linear. Every job polls the
-  evaluation deadline (`max_time`) about every 64 nodes.
+  evaluation deadline (`max_time`) about every 64 nodes, and throws `evaluation_timeout` once it
+  has passed.
 - **While a call runs.** Signals and watch events wait until the call is done, and `fork`
   returns -1. A snapshot taken during it restores to the call's start: the call runs again, and
   calls its function again from the first element.
