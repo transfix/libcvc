@@ -81,6 +81,8 @@ const leaf_meta kMeta[] = {
     {"episode.total_energy_J", "J", "The fleet's energy drawn from its sources (a physics plant)."},
     {"episode.total_building_contacts", "",
      "The fleet's contacts with static geometry (a physics plant)."},
+    {"episode.total_infeasible_slope_steps", "",
+     "The fleet's vehicle-ticks with a footprint on infeasible slope (a terrain)."},
     {"coverage.explored_frac", "1", "Belief cells ever seen."},
     {"coverage.visible_frac", "1", "Belief cells in view on the last frame."},
     {"coverage.believed_free_frac", "1", "Belief cells read as free."},
@@ -109,6 +111,8 @@ const leaf_meta kVehicle[] = {
     {"energy_J", "J", "The energy it drew from its source, net of regeneration (a physics plant)."},
     {"energy_per_km", "J/km", "energy_J per kilometre of its path."},
     {"building_contacts", "", "Contacts its body started with static geometry (a physics plant)."},
+    {"infeasible_slope_steps", "",
+     "Ticks its footprint touched slope steeper than it can climb or cross (a terrain)."},
 };
 
 void describe_leaf(cvc::app &ctx, const std::string &path, const leaf_meta &m) {
@@ -146,6 +150,8 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
       const std::string k = m.key;
       if (!energy && (k == "episode.total_energy_J" || k == "episode.total_building_contacts"))
         continue;
+      if (!e.terrain_tracked && k == "episode.total_infeasible_slope_steps")
+        continue;
       if (!coverage && k.compare(0, 9, "coverage.") == 0)
         continue;
       describe_leaf(pub.ctx(), root + "." + k, m);
@@ -178,6 +184,8 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     pub.publish(ep + ".total_energy_J", d2s(e.total_energy_J));
     pub.publish(ep + ".total_building_contacts", i2s(e.total_building_contacts));
   }
+  if (e.terrain_tracked) // a terrain was set (nav_stats.h terrain_tracked)
+    pub.publish(ep + ".total_infeasible_slope_steps", i2s(e.total_infeasible_slope_steps));
 
   // ── coverage (episode belief-coverage fractions) ──
   if (p.emit_coverage) {
@@ -232,6 +240,8 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
       if (!v.energy_tracked &&
           (k == "energy_J" || k == "energy_per_km" || k == "building_contacts"))
         continue;
+      if (!v.terrain_tracked && k == "infeasible_slope_steps")
+        continue;
       describe_leaf(pub.ctx(), vp + "." + k, m);
     }
     pub.publish(vp + ".arrived", b2s(v.arrived));
@@ -251,6 +261,8 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
       pub.publish(vp + ".energy_per_km", d2s(v.energy_per_km));
       pub.publish(vp + ".building_contacts", i2s(v.building_contacts));
     }
+    if (v.terrain_tracked)
+      pub.publish(vp + ".infeasible_slope_steps", i2s(v.infeasible_slope_steps));
   }
 }
 

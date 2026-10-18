@@ -71,6 +71,16 @@ const detail::key_meta kPlantKeys[] = {
     {"drift_nsub", "knob", "", 0, 64,
      "Substeps of the kinematic bicycle the drift is measured against; 0 = the physics steps a "
      "tick (doc 31 D14's nsub = k)."},
+    {"modulation.tire_onset", "knob", "1", 0.3, 1.2,
+     "The tire use (combined slip over its peak) past which the drive slows (H4)."},
+    {"modulation.tire_gain", "knob", "1", 0, 10,
+     "How fast the drive's speed damping grows per unit of tire use past its onset; 0 = off."},
+    {"modulation.tip_onset", "knob", "1", 0.1, 0.9,
+     "The load transfer (|left - right| over the total wheel load) past which the drive slows and "
+     "its barriers stiffen (H4)."},
+    {"modulation.tip_gain", "knob", "1", 0, 10,
+     "How fast the speed damping and the barriers' weight grow per unit of load transfer past "
+     "its onset; 0 = off."},
     {"settings.step_world", "build", "", kNone, kNone,
      "1: advance() steps the world; 0: the world steps itself on a shared clock."},
     {"settings.ground_z", "build", "m", kNone, kNone,
@@ -116,6 +126,12 @@ const detail::key_meta kAgentKeys[] = {
      "The bicycle's lateral acceleration this tick."},
     {"drift.stop_speed_mps", "telemetry", "m/s", kNone, kNone,
      "The stopping speed the tick's command respected (latency-aware v_stop)."},
+    {"tire_use", "telemetry", "1", kNone, kNone,
+     "The most used tire's combined slip over its peak: 1 = at the grip limit (0 below 2 m/s)."},
+    {"load_transfer", "telemetry", "1", kNone, kNone,
+     "|left - right| wheel load over the total: 1 = one side's wheels unloaded."},
+    {"pitch_rad", "telemetry", "rad", kNone, kNone, "The chassis' pitch, nose up."},
+    {"roll_rad", "telemetry", "rad", kNone, kNone, "The chassis' roll, left side up."},
 };
 
 template <std::size_t K>
@@ -205,7 +221,52 @@ cvc::nav::plant_state nav_plant::state(int i) const {
   s.heading = static_cast<float>(std::atan2(fwd.y, fwd.x));
   s.speed = static_cast<float>(_units.to_normalized(dot(v_rear, fwd), dim::velocity, _frame));
   s.steer = static_cast<float>(vs.steer);
+  // Measured, for the drive's modulators (H4).
+  const vec3 left = rotate(b.rotation, {0.0, 1.0, 0.0});
+  s.pitch = static_cast<float>(std::asin(std::max(-1.0, std::min(1.0, fwd.z))));
+  s.roll = static_cast<float>(std::asin(std::max(-1.0, std::min(1.0, left.z))));
+  double use = 0.0, l_load = 0.0, r_load = 0.0;
+  const double ks = std::max(1e-6, a.desc.tire_peak_slip);
+  const double as = std::max(1e-6, a.desc.tire_peak_slip_angle);
+  for (std::size_t w = 0; w < vs.wheels.size(); ++w) {
+    const wheel_state &ws = vs.wheels[w];
+    if (!ws.contact)
+      continue;
+    const double k = ws.longitudinal_slip / ks, al = ws.lateral_slip / as;
+    use = std::max(use, std::sqrt(k * k + al * al));
+    (w % 2 == 0 ? l_load : r_load) += std::max(0.0, ws.load); // wheel 2a is the left one
+  }
+  // A slip ratio at a crawl (a launch, settling) is no cornering hazard: below 2 m/s it reads 0.
+  s.tire_use = std::fabs(dot(v_rear, fwd)) < 2.0 ? 0.0f : static_cast<float>(use);
+  const double total = l_load + r_load;
+  s.load_transfer = static_cast<float>(total > 0.0 ? std::fabs(l_load - r_load) / total : 0.0);
   return s;
+}
+
+cvc::nav::terrain_config nav_plant::terrain_config_of(const vehicle_desc &d, double mu,
+                                                      double gravity) {
+  cvc::nav::terrain_config c;
+  c.gravity = gravity;
+  // First gear's pull: the peak torque through the driveline, a converter's stall
+  // multiplication, the gearing and the wheels.
+  double ratio = d.gear_ratios.empty() ? 1.0 : d.gear_ratios.front();
+  double radius = 0.0, z = 0.0, travel = 0.0, half_track = 0.0;
+  for (const axle_desc &a : d.axles) {
+    radius = std::max(radius, a.wheel_radius);
+    z = std::min(z, a.z);
+    travel = std::max(travel, 0.5 * (a.suspension_min + a.suspension_max));
+    half_track = std::max(half_track, a.half_track);
+  }
+  const double stall = d.converter_k > 0.0 ? d.converter_stall : 1.0;
+  const double pull = d.engine_max_torque * d.driveline_efficiency * stall * ratio *
+                      d.differential_ratio / std::max(radius, 1e-6);
+  const double power_limit = pull / (d.mass * gravity);
+  c.max_grade = std::max(0.05, std::min(mu, power_limit));
+  // The centre of gravity's height: the axle's attachment below the chassis origin, the
+  // suspension's mid travel and the wheel, plus the centre of mass's offset.
+  const double cg = -z + travel + radius + d.center_of_mass.z;
+  c.tip_ratio = cg > 0.0 ? half_track / cg : 0.0;
+  return c;
 }
 
 cvc::nav::plant_limits nav_plant::limits(int i) const {
@@ -318,6 +379,13 @@ void nav_plant::set_drift_nsub(int n) {
   _o.drift_nsub = n;
 }
 
+void nav_plant::set_modulation(const cvc::nav::plant_modulation &m) {
+  const auto ok = [](float v) { return std::isfinite(v) && v >= 0.0f; };
+  if (!(ok(m.tire_onset) && ok(m.tire_gain) && ok(m.tip_onset) && ok(m.tip_gain)))
+    throw cvc::physics_error("nav_plant: modulation onsets and gains must be finite and >= 0");
+  _o.modulation = m;
+}
+
 void nav_plant::pull(cvc::app &ctx, const std::string &prefix) {
   const std::string k = (prefix.empty() ? std::string() : prefix + ".") + "nav_plant.";
   if (_described.insert(k).second)
@@ -346,6 +414,17 @@ void nav_plant::pull(cvc::app &ctx, const std::string &prefix) {
     if (v == std::floor(v))
       set_drift_nsub(static_cast<int>(v));
   });
+  const auto mod = [&](const char *name, float cvc::nav::plant_modulation::*f) {
+    read(std::string("modulation.") + name, static_cast<double>(_o.modulation.*f), [&](double v) {
+      cvc::nav::plant_modulation m = _o.modulation;
+      m.*f = static_cast<float>(v);
+      set_modulation(m);
+    });
+  };
+  mod("tire_onset", &cvc::nav::plant_modulation::tire_onset);
+  mod("tire_gain", &cvc::nav::plant_modulation::tire_gain);
+  mod("tip_onset", &cvc::nav::plant_modulation::tip_onset);
+  mod("tip_gain", &cvc::nav::plant_modulation::tip_gain);
 }
 
 double nav_plant::energy_step(int i) const {
@@ -427,6 +506,11 @@ void nav_plant::publish(cvc::app &ctx, const std::string &prefix,
     write_val(ctx, k + "drift.speed_mps", a.drift.speed_mps);
     write_val(ctx, k + "drift.lateral_g", a.drift.lateral_g);
     write_val(ctx, k + "drift.stop_speed_mps", a.drift.stop_speed_mps);
+    const cvc::nav::plant_state s = state(static_cast<int>(i));
+    write_val(ctx, k + "tire_use", static_cast<double>(s.tire_use));
+    write_val(ctx, k + "load_transfer", static_cast<double>(s.load_transfer));
+    write_val(ctx, k + "pitch_rad", static_cast<double>(s.pitch));
+    write_val(ctx, k + "roll_rad", static_cast<double>(s.roll));
   }
   const std::string k = root + "nav_plant.";
   if (_described.insert(k).second)

@@ -35,6 +35,22 @@ struct plant_state {
   float heading = 0.0f;     // rad, counter-clockwise from +x
   float speed = 0.0f;       // normalized / s along the heading (< 0 backing up)
   float steer = 0.0f;       // rad, the steering actuator's bicycle angle now
+  // Measured, for the drive's detached modulators (doc 31 D9 H4); 0 from a plant that does not
+  // know. tire_use is the most used tire's combined slip over its peak (1 = at the grip limit);
+  // load_transfer is |left - right| / total wheel load (1 = one side's wheels unloaded).
+  float tire_use = 0.0f;
+  float load_transfer = 0.0f;
+  float pitch = 0.0f, roll = 0.0f; // rad: nose up, and left side up
+};
+
+// How measured plant state modulates the drive (H4; vehicle_plant::modulation), all off at 0
+// gain. Past their onsets, an
+// agent's gamma (its speed damping) grows by tire_gain per unit of tire_use and by tip_gain
+// per unit of load_transfer, so it slows near tire saturation and near tipping; its hard
+// barriers' weight grows by tip_gain per unit of load_transfer too.
+struct plant_modulation {
+  float tire_onset = 0.7f, tire_gain = 0.0f;
+  float tip_onset = 0.4f, tip_gain = 0.0f;
 };
 
 // What the drive respects in a plant's arm (doc 31 D14's plant-aware governors). A zero

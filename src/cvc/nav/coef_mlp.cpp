@@ -128,9 +128,11 @@ void coef_mlp::build_from_bytes(const std::uint8_t *p, std::size_t n) {
   // Accept {1, 2}: a v1 file still loads and forwards identically; a v2 file (two-head
   // sigmoid) is read below via kFlagLamSigmoid. A newer version hard-fails here rather
   // than silently misreading a trailer this build does not know.
-  if (fmt_ != kFormatVersionLegacy && fmt_ != kFormatVersion)
+  if (fmt_ != kFormatVersionLegacy && fmt_ != kFormatVersion && fmt_ != kFormatVersionSlope)
     throw std::runtime_error("cvc::nav::coef_mlp: unsupported .cvcnav format version");
   flags_ = take<std::uint32_t>(p, end);
+  if ((flags_ & kFlagFeatSlope) != 0 && fmt_ != kFormatVersionSlope)
+    throw std::runtime_error("cvc::nav::coef_mlp: kFlagFeatSlope requires .cvcnav format v3");
   in_ = static_cast<int>(take<std::uint32_t>(p, end));
   out_ = static_cast<int>(take<std::uint32_t>(p, end));
   const int num_layers = static_cast<int>(take<std::uint32_t>(p, end));
@@ -169,7 +171,7 @@ void coef_mlp::build_from_bytes(const std::uint8_t *p, std::size_t n) {
     // v2 two-head sigmoid: out_bias covers ONLY the 3 abg columns (softplus fold); the lam
     // columns (>= 3) get a zero offset (their bias is in the last layer) and are read as
     // lam_max*sigmoid(raw). The two ceilings follow the out_bias block.
-    if (fmt_ != kFormatVersion)
+    if (fmt_ < kFormatVersion)
       throw std::runtime_error("cvc::nav::coef_mlp: kFlagLamSigmoid requires .cvcnav format v2");
     if (out_ < 4)
       throw std::runtime_error("cvc::nav::coef_mlp: sigmoid-lam net needs out_features >= 4");
@@ -240,7 +242,9 @@ coef_mlp coef_mlp::from_layers(int in, int out, const std::vector<int> &rows,
   const bool sigmoid_lam = (extra_flags & kFlagLamSigmoid) != 0;
   coef_mlp m;
   // A sigmoid-lam net is the v2 format; a plain net stays v1 so it loads on a pre-v2 host.
-  m.fmt_ = sigmoid_lam ? kFormatVersion : kFormatVersionLegacy;
+  m.fmt_ = (extra_flags & kFlagFeatSlope) != 0 ? kFormatVersionSlope
+           : sigmoid_lam                       ? kFormatVersion
+                                               : kFormatVersionLegacy;
   m.flags_ = kFlagSoftplusLogExpm1 | extra_flags;
   m.in_ = in;
   m.out_ = out;

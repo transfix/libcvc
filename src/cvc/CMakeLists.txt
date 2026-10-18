@@ -67,6 +67,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/physics/nav_plant.h
+  ../../inc/cvc/physics/nav_terrain_binding.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -116,6 +117,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/nav/grid_nav.h
   ../../inc/cvc/nav/plant_types.h
+  ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/lod/select.h
   ../../inc/cvc/lod/pyramid.h
@@ -245,6 +247,7 @@ set(SOURCE_FILES
   physics/pose_tracker.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
+  physics/nav_terrain_binding.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -284,6 +287,7 @@ set(SOURCE_FILES
   nav/spatial.cpp
   nav/drive.cpp
   nav/material.cpp
+  nav/terrain.cpp
   nav/material_raster.cpp
   nav/world_planes.cpp
   nav/land_cover.cpp
@@ -398,10 +402,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 

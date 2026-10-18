@@ -647,7 +647,29 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
         v.accel_trim = 0.0;
         v.trim_sign = want > 0.0 ? 1.0 : -1.0;
       }
-      const double u = want + kGain * (want - got) + v.accel_trim;
+      // Gravity along the direction of travel (P5 H2): uphill needs that much more pull,
+      // downhill that much less, so the feed-forward asks for it rather than waiting for the
+      // trim to learn it. The grade is the ground's, under the wheels in contact (their mean
+      // contact normal), not the chassis's own pitch on its springs.
+      double grade = 0.0;
+      {
+        vec3 n;
+        int touching = 0;
+        for (const vehicle_readback::wheel &w : v.readback.wheels)
+          if (w.state.contact) {
+            n = n + w.state.contact_normal;
+            ++touching;
+          }
+        const double nn = std::sqrt(dot(n, n));
+        if (touching > 0 && nn > 0.0) {
+          n = n * (1.0 / nn);
+          vec3 t = fwd - n * dot(fwd, n); // forward, along the ground
+          const double tn = std::sqrt(dot(t, t));
+          if (tn > 0.0)
+            grade = -dir * dot(cfg.gravity, t * (1.0 / tn));
+        }
+      }
+      const double u = want + grade + kGain * (want - got) + v.accel_trim;
       if (along < -kHoldSpeed) {
         brake = 1.0; // moving the wrong way: stop first
         v.accel_trim = 0.0;
@@ -907,6 +929,7 @@ void vehicle_set::save(const world_backend &be, std::string &out) const {
       put(out, s.load);
       put_flag(out, s.contact);
       put_vec(out, s.contact_point);
+      put_vec(out, s.contact_normal);
       put_vec(out, w.longitudinal);
       put(out, s.contact_material);
       put(out, s.sinkage);
@@ -960,6 +983,7 @@ void vehicle_set::restore(world_backend &be, const std::string &in, std::size_t 
       get(in, pos, s.load);
       s.contact = get_flag(in, pos);
       get_vec(in, pos, s.contact_point);
+      get_vec(in, pos, s.contact_normal);
       get_vec(in, pos, w.longitudinal);
       get(in, pos, s.contact_material);
       get(in, pos, s.sinkage);

@@ -23,6 +23,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 | `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
+| `cvc/physics/nav_terrain_binding.h` | A `sim_world`'s terrain (P5) in the state tree |
 
 The physics headers include only the standard library, except:
 
@@ -548,6 +549,127 @@ Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 uni
 | (5) The adapter residual at nsub = k | An instant steering actuator on mu 1.2: at most 7 mm, 0.009 rad and 0.1 m/s a tick |
 | (6) The drift published, binned by lateral g | Per vehicle and per bin, under `vehicles.<name>.nav.drift` and `nav_plant.drift`, with the plant's knobs and settings under `nav_plant` |
 | (7) The speed never above the latency-aware v_stop | Driving at a wall at up to 11.5 m/s: at most 0.04 m/s above it at a tick; no contact with the wall |
+
+## Terrain in the navigator's energy (P5)
+
+```cpp
+#include <cvc/nav/sim_world.h>
+#include <cvc/nav/terrain.h>
+#include <cvc/physics/nav_plant.h>
+#include <cvc/physics/nav_terrain_binding.h>
+
+// heights: the sim grid's rows x cols in metres, row 0 at min_y
+cvc::nav::terrain_config tc = cvc::physics::nav_plant::terrain_config_of(desc); // its limits
+tc.lam_grade = 2.0f;           // the soft grade force (H1); 0 = off
+sim.set_terrain(heights.data(), tc);
+cvc::physics::nav_plant plant(w, {desc});
+cvc::nav::plant_modulation m;  // H4, off by default
+m.tire_gain = 3.0f;
+plant.set_modulation(m);
+sim.set_plant(&plant);
+```
+
+`cvc/nav/terrain.h` turns a height raster and a vehicle's limits into three planes
+(`terrain_build`):
+
+- **the slope**, dz/dx and dz/dy, for the governors;
+- **the grade cost** r̃_g in [0, 1]: sin θ over the sine of the steepest feasible slope, so 1 is
+  the vehicle's limit;
+- **the infeasible cells**: steeper than `max_grade`, or, with a `tip_ratio`, than
+  `tip_margin` × the static stability factor.
+
+The steepest feasible slope is `terrain_limit(tc)`. Everything is per unit mass, so the trained
+coefficients keep their meaning. Without a terrain every tick is byte-identical to before.
+
+`nav_plant::terrain_config_of(desc, mu, gravity)` gives a vehicle's limits:
+
+- its steepest climb is the lesser of what its tires hold on `mu` and what its first gear pulls
+  at its mass, with the torque converter's stall multiplication;
+- its static stability factor is the track over twice the centre of gravity's height above the
+  ground.
+
+For the M1097A2 that is a 0.68 climb and an SSF of 1.23 (CG 0.74 m).
+
+The five terms (doc 31 D9):
+
+- **H1, the grade force and the hard barrier.** The grade cost goes through the material
+  pipeline (`material_build`): `F = -lam_grade ∇r̃_g` leans the drive toward gentler ground,
+  and the infeasible cells are its hard plane (`lam_grade_hard`, with the material channel's
+  `k_sharp` and `d_hat_m`). With `block_infeasible` (the default) the infeasible cells also join
+  every belief plane's occupancy, so the SDF's barrier and the governors keep the agents out.
+- **H2, gravity in the governors.** With `governors` (the default) the drive samples the slope
+  under each agent:
+  - the stopping governor plans with `a_stop = max(min(a_max, a_max + g_along), 0.1 a_max)`, so
+    with less braking downhill. It never counts on gravity's help uphill, because the command
+    never brakes harder than `a_max`;
+  - the corner cap loses gravity's pull across the slope;
+  - the plant arm's achievable braking is adjusted the same way.
+
+  On the Jolt plant the driver model also feeds gravity along the ground forward. It takes the
+  grade from its wheels' contact normals, not the chassis' pitch.
+- **H3, the slope look-ahead feature.** `coef_feats(..., slope)` appends the worst grade cost
+  between the agent and its carrot, after grip and risk. A coefficient net that takes it sets
+  `kFlagFeatSlope` and needs format v3, which an older host refuses rather than reading it as a
+  grip net. The CUDA drive does not run slope nets yet.
+- **H4, measured slip and load as modulators.** `plant_state` carries `tire_use` (the most used
+  tire's combined slip over its peak; 0 below 2 m/s), `load_transfer` (|left − right| over the
+  total wheel load), `pitch` and `roll`. Past their onsets they scale each agent's gamma (its
+  speed damping) and, for load transfer, its hard barriers' weight. The gains are the plant's
+  (`vehicle_plant::modulation()`, `nav_plant::set_modulation`); all are 0 by default.
+- **H5, an energy route cost.** `astar(..., cost, climb)` and `astar_query::climb` charge each
+  move `per_metre` × its rise. With `climb_weight(c_rr, cell_w)` a metre of climb costs what
+  rolling 1 / C_rr metres on the flat does: the energy at the wheels. Downhill costs nothing
+  more, since brakes do not give the energy back.
+
+`sim_world::infeasible_entries()` counts each agent's ticks with its footprint on an infeasible
+cell (the rear axle, or each body disc). `nav_stats` carries the count as
+`infeasible_slope_steps` per vehicle and `total_infeasible_slope_steps` per episode, only when
+a terrain is set. `set_terrain_config(tc)` rebuilds the planes from the same heights, keeping
+the counts.
+
+**The state tree.** nav itself does not touch the state tree. Its terrain binds from the physics
+side, as the plant does:
+
+- `pull_nav_terrain(ctx, prefix, sim)` reads the knobs:
+  - `<prefix>.nav_terrain.{max_grade, tip_ratio, tip_margin, sigma}`;
+  - `<prefix>.nav_terrain.{lam_grade, lam_grade_hard, k_sharp, d_hat_m}`;
+  - `<prefix>.nav_terrain.{block_infeasible, governors}`.
+
+  They are seeded with the world's values. A change rebuilds the planes, and an invalid value
+  is ignored.
+- `publish_nav_terrain(ctx, prefix, sim)` writes `<prefix>.nav_terrain.{active, gravity, limit,
+  infeasible_cells}`.
+- `nav_plant::pull` reads `<prefix>.nav_plant.modulation.{tire_onset, tire_gain, tip_onset,
+  tip_gain}`.
+- `nav_plant::publish` adds each vehicle's `nav.{tire_use, load_transfer, pitch_rad, roll_rad}`.
+- cvcGL's `publish_nav_stats` writes `veh.<i>.infeasible_slope_steps` and
+  `episode.total_infeasible_slope_steps` when a terrain is tracked.
+
+Every one of these keys has a comment, `access` and `unit`, and every knob has a recommended
+`min` and `max`.
+
+Gates (`nav_plant_test` on the Jolt plant, `nav_terrain_test` on the kinematic one; Windows
+MSVC, the Humvee):
+
+| Gate | Measured |
+|---|---|
+| (1) Parity goldens | Without a terrain and without modulation gains the drive is untouched; the nav suites pass as before |
+| (2) Energy per km drops on a hilly route, the path growing under a fixed bound | A 12 m hill between start and goal. The plain run drives 135 m over it: 2081 kJ, 15403 kJ/km. With H1, H2 and H5 it drives 194 m round it: 1518 kJ, 7826 kJ/km. The bound is 1.5 × the path |
+| (3) Zero entries into infeasible slope | A ridge with slopes of 1.2 (past the Humvee's 0.68 climb and its tip limit) across the way: 0 ticks on it, Jolt and kinematic |
+
+Also measured:
+
+- **H2.** Driving at a wall, 15 m out the agent does 6.39 m/s on the flat and 3.37 down a 15%
+  grade, and 6.39 up it. It stops 4.45-4.50 m short in every case.
+- **H1.** Past a hill, the steepest grade cost driven is 0.727 without the soft force and 0.228
+  with it.
+- **H5.** Over a 12 m hill the plain route is 140 m and climbs 11.99 m. The energy route is
+  194 m and climbs 0.24 m. For a Humvee the climb is about 315 kJ and the detour about 30 kJ.
+- **H4.** Round a 30 m circle on μ 0.7, under a 0.9 g corner cap, mean tire use is 1.36 at
+  15.1 m/s without the modulator. With `tire_gain` 3 it is 0.79 at 11.9 m/s.
+
+Open: GRL-SNAM's Python twin of H1 and H5, a coefficient net retrained on the slope feature (H3),
+and H3 in the CUDA drive.
 
 ## Static world geometry: `add_world_geometry`
 

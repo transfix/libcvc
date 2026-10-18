@@ -24,12 +24,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/grid_nav.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/nav_plant.h>
+#include <cvc/physics/nav_terrain_binding.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <functional>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -438,19 +443,26 @@ TEST(NavPlant, PublishesTheDriftBinnedByLateralG) {
   st("physics.nav_plant.latency").value(std::string("0.25"));
   st("physics.nav_plant.brake_margin").value(std::string("2"));
   st("physics.nav_plant.drift_nsub").value(std::string("12"));
+  st("physics.nav_plant.modulation.tire_gain").value(std::string("3"));
+  st("physics.nav_plant.modulation.tip_onset").value(std::string("-1"));
   plant.pull(app, "physics");
+  EXPECT_EQ(plant.modulation().tire_gain, 3.0f);
+  EXPECT_EQ(plant.modulation().tip_onset, 0.4f) << "an onset is >= 0";
   EXPECT_EQ(plant.options().latency, 0.25);
   EXPECT_EQ(plant.limits(0).latency, 0.25f);
   EXPECT_EQ(plant.options().brake_margin, 0.8) << "2 is not a share";
   EXPECT_EQ(plant.reference_substeps(), 12);
-  sim.step(); // the drive takes the new latency from the plant's limits
+  sim.step(); // the drive takes the new latency from the plant's limits, and its modulation
+  EXPECT_EQ(sim.current_plant_modulation().tire_gain, 3.0f);
+  plant.publish(app, "physics", {"lead"});
   // Every key says what it is.
   for (const char *key :
        {"physics.nav_plant.latency", "physics.nav_plant.drift_nsub",
         "physics.nav_plant.settings.physics_steps", "physics.nav_plant.advance_us_per_vehicle",
         "physics.nav_plant.drift.2.position_rms_m",
-        "physics.vehicles.lead.nav.drift.stop_speed_mps",
-        "physics.vehicles.lead.nav.accel_command"}) {
+        "physics.vehicles.lead.nav.drift.stop_speed_mps", "physics.vehicles.lead.nav.accel_command",
+        "physics.nav_plant.modulation.tire_gain", "physics.vehicles.lead.nav.tire_use",
+        "physics.vehicles.lead.nav.roll_rad"}) {
     EXPECT_FALSE(st(key).comment().empty()) << key;
     EXPECT_TRUE(st(key).has_property("access")) << key;
   }
@@ -458,6 +470,8 @@ TEST(NavPlant, PublishesTheDriftBinnedByLateralG) {
   EXPECT_EQ(st("physics.nav_plant.latency").property("max"), "0.5");
   EXPECT_EQ(st("physics.nav_plant.brake_margin").property("min"), "0.3");
   EXPECT_EQ(st("physics.nav_plant.settings.step_world").property("access"), "build");
+  EXPECT_EQ(st("physics.nav_plant.modulation.tire_gain").property("max"), "10");
+  EXPECT_FALSE(st("physics.vehicles.lead.nav.tire_use").value().empty());
 }
 
 // Gate 7: driving at a wall, the Jolt arm never goes faster than the stopping speed that allows
@@ -522,4 +536,244 @@ TEST(NavPlant, NavStatsCarriesThePlantsEnergy) {
   EXPECT_NEAR(v.energy_per_km, v.energy_J / (v.total_path_m / 1000.0), 1e-6 * v.energy_per_km);
   EXPECT_NE(e.to_json().find("\"energy_per_km\""), std::string::npos);
   EXPECT_EQ(kin.nav_stats().to_json().find("energy"), std::string::npos);
+}
+
+// --- P5: terrain in the navigator's energy, on the Jolt plant ---------------------------------
+
+namespace {
+
+std::vector<float> terrain_heights(const std::function<double(double, double)> &h) {
+  std::vector<float> z(static_cast<std::size_t>(scene::R) * scene::C);
+  for (int r = 0; r < scene::R; ++r)
+    for (int c = 0; c < scene::C; ++c)
+      z[static_cast<std::size_t>(r) * scene::C + c] =
+          static_cast<float>(h(scene::lo + c, scene::lo + r));
+  return z;
+}
+
+// The same heights as the physics world's ground, a height field over +-100 m.
+void hilly_ground(world &w, const std::vector<float> &z, double mu) {
+  const material_id m = w.add_material({"ground", static_cast<float>(mu), 0.0f, 0.015f});
+  auto field =
+      std::make_shared<cvc::height_field>(scene::R, scene::C, scene::lo, scene::lo, 1.0, 1.0, z);
+  body_desc g;
+  g.shape = terrain{field};
+  g.motion = motion_type::static_;
+  g.material = m;
+  w.add_body(g);
+}
+
+std::vector<double> astar_route(const std::vector<std::uint8_t> &occ, double sx, double sy,
+                                double gx, double gy, const cvc::nav::climb_cost &climb = {}) {
+  const std::vector<int> p =
+      cvc::nav::astar(occ.data(), scene::R, scene::C, static_cast<int>(sy - scene::lo),
+                      static_cast<int>(sx - scene::lo), static_cast<int>(gy - scene::lo),
+                      static_cast<int>(gx - scene::lo), nullptr, climb);
+  std::vector<double> xy;
+  for (std::size_t k = 0; k + 1 < p.size(); k += 2) {
+    xy.push_back(scene::lo + p[k + 1]);
+    xy.push_back(scene::lo + p[k]);
+  }
+  return xy;
+}
+
+// Retarget the agent to the first route point `ahead` metres away, past the last reached.
+struct route_follower {
+  std::vector<double> xy;
+  std::size_t next = 0;
+  void steer(sim_world &w, double ahead = 15.0) {
+    const pose p = pose_of(w);
+    const std::size_t n = xy.size() / 2;
+    while (next + 1 < n && std::hypot(xy[2 * next] - p.x, xy[2 * next + 1] - p.y) < ahead)
+      ++next;
+    w.retarget(0, static_cast<float>(xy[2 * next] * kS), static_cast<float>(xy[2 * next + 1] * kS));
+  }
+  bool done(const sim_world &w) const {
+    const pose p = pose_of(w);
+    return std::hypot(xy[xy.size() - 2] - p.x, xy.back() - p.y) < 5.0;
+  }
+};
+
+} // namespace
+
+// P5 gate 2: on a hilly route the navigator's physics lowers the energy per km, for a path at
+// most half again as long. A 12 m hill stands between start and goal. The plain run takes the
+// shortest route over it. The physics run takes the route that weighs the climbing energy (H5),
+// with the grade force (H1) and gravity in the governors (H2). The Humvee drives both, and its
+// energy ledger (nav_stats energy_J, energy_per_km) is the measure.
+TEST(NavPlant, EnergyPerKmDropsOnAHillyRoute) {
+  REQUIRE_JOLT();
+  const auto hill = [](double x, double y) {
+    return 12.0 * std::exp(-(x * x + y * y) / (2.0 * 18.0 * 18.0));
+  };
+  const std::vector<float> z = terrain_heights(hill);
+  const vehicle_desc d = vehicle_desc::humvee();
+  scene sc;
+  double energy[2], per_km[2], path[2];
+  for (int k = 0; k < 2; ++k) {
+    const bool physics = k == 1;
+    sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -70, 0, 70, 0);
+    world w(jolt_config());
+    hilly_ground(w, z, 0.9);
+    nav_plant plant(w, {d});
+    sim.set_plant(&plant);
+    cvc::nav::terrain_config tc = nav_plant::terrain_config_of(d);
+    tc.lam_grade = physics ? 2.0f : 0.0f;
+    tc.governors = physics;
+    sim.set_terrain(z.data(), tc);
+    cvc::nav::climb_cost cc;
+    if (physics) {
+      cc.height = z.data();
+      cc.per_metre = cvc::nav::climb_weight(0.015, 1.0);
+    }
+    route_follower f{astar_route(sc.occ, -70, 0, 70, 0, cc)};
+    ASSERT_FALSE(f.xy.empty());
+    sim.begin_nav_stats();
+    int t = 0;
+    for (; t < 1500 && !f.done(sim); ++t) {
+      f.steer(sim);
+      sim.step();
+    }
+    const cvc::nav::veh_nav_stats v = sim.nav_stats().per_vehicle[0];
+    energy[k] = v.energy_J;
+    per_km[k] = v.energy_per_km;
+    path[k] = v.total_path_m;
+    std::printf("  %s: %.1f m in %.1f s, %.0f kJ, %.0f kJ/km; %d ticks on infeasible slope\n",
+                physics ? "with the navigator's physics" : "plain", path[k], 0.06 * t,
+                energy[k] / 1e3, per_km[k] / 1e3, sim.infeasible_entries()[0]);
+    EXPECT_TRUE(f.done(sim)) << "it arrived";
+  }
+  EXPECT_LT(per_km[1], per_km[0]) << "less energy per km";
+  EXPECT_LT(energy[1], energy[0]) << "less energy in all";
+  EXPECT_LT(path[1], 1.5 * path[0]) << "for a bounded detour";
+}
+
+// P5 gate 3: zero entries into infeasible slope, on the Jolt plant. A ridge with slopes of 1.2
+// (50 degrees, past the Humvee's climb and its tip limit) lies across the way; its cells plan as
+// obstacles and the route goes round its end.
+TEST(NavPlant, NeverEntersInfeasibleSlope) {
+  REQUIRE_JOLT();
+  const auto ridge = [](double x, double y) {
+    return y > 40.0 ? 0.0 : std::max(0.0, 6.0 - 1.2 * std::fabs(x));
+  };
+  const std::vector<float> z = terrain_heights(ridge);
+  const vehicle_desc d = vehicle_desc::humvee();
+  scene sc;
+  sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -40, -20, 40, -20);
+  world w(jolt_config());
+  hilly_ground(w, z, 0.9);
+  nav_plant plant(w, {d});
+  sim.set_plant(&plant);
+  const cvc::nav::terrain_config tc = nav_plant::terrain_config_of(d);
+  sim.set_terrain(z.data(), tc);
+  std::vector<std::uint8_t> blocked(sc.occ);
+  for (std::size_t k = 0; k < blocked.size(); ++k)
+    blocked[k] = static_cast<std::uint8_t>(blocked[k] | sim.terrain().infeasible[k]);
+  route_follower f{astar_route(blocked, -40, -20, 40, -20)};
+  ASSERT_FALSE(f.xy.empty());
+  int t = 0;
+  for (; t < 2500 && !f.done(sim); ++t) {
+    f.steer(sim);
+    sim.step();
+  }
+  std::printf("  the Humvee's limits: climbs %.2f, tips past %.2f (static stability factor); "
+              "%d ticks on infeasible slope; arrived after %.1f s\n",
+              tc.max_grade, tc.tip_ratio, sim.infeasible_entries()[0], 0.06 * t);
+  EXPECT_NEAR(tc.tip_ratio, 0.91 / 0.74, 0.05) << "the M1097A2's CG height is 0.742 m";
+  EXPECT_EQ(sim.infeasible_entries()[0], 0);
+  EXPECT_TRUE(f.done(sim));
+}
+
+// P5's terrain settings live in the state tree: pull_nav_terrain seeds them and applies a change
+// (rebuilding the planes), an invalid value is ignored, publish_nav_terrain says what the terrain
+// is, and every key says what it is.
+TEST(NavPlant, TerrainSettingsLiveInTheTree) {
+  const auto ridge = [](double x, double y) {
+    return y > 40.0 ? 0.0 : std::max(0.0, 6.0 - 1.2 * std::fabs(x));
+  };
+  const std::vector<float> z = terrain_heights(ridge);
+  const vehicle_desc d = vehicle_desc::humvee();
+  scene sc;
+  sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -40, -20, 40, -20);
+  cvc::app app;
+  cvc::state &st = cvc::state::instance(app);
+  cvc::physics::publish_nav_terrain(app, "scene", sim);
+  EXPECT_EQ(st("scene.nav_terrain.active").value(), "0");
+  sim.set_terrain(z.data(), nav_plant::terrain_config_of(d));
+  cvc::physics::pull_nav_terrain(app, "scene", sim);
+  cvc::physics::publish_nav_terrain(app, "scene", sim);
+  EXPECT_EQ(st("scene.nav_terrain.active").value(), "1");
+  const long blocked = std::stol(st("scene.nav_terrain.infeasible_cells").value());
+  EXPECT_GT(blocked, 0) << "the ridge";
+  EXPECT_NEAR(std::stod(st("scene.nav_terrain.max_grade").value()),
+              sim.terrain_settings().max_grade, 1e-9);
+  // A vehicle that climbs 1.5 and does not tip finds the ridge's flanks (slopes of 1.2) feasible;
+  // only its cliff end stays infeasible.
+  st("scene.nav_terrain.max_grade").value(std::string("1.5"));
+  st("scene.nav_terrain.tip_ratio").value(std::string("0"));
+  st("scene.nav_terrain.tip_margin").value(std::string("3"));
+  st("scene.nav_terrain.lam_grade").value(std::string("2"));
+  cvc::physics::pull_nav_terrain(app, "scene", sim);
+  cvc::physics::publish_nav_terrain(app, "scene", sim);
+  EXPECT_EQ(sim.terrain_settings().max_grade, 1.5);
+  EXPECT_EQ(sim.terrain_settings().tip_margin, 0.8) << "3 is not a share";
+  EXPECT_EQ(sim.terrain_settings().lam_grade, 2.0f);
+  EXPECT_LT(std::stol(st("scene.nav_terrain.infeasible_cells").value()), blocked / 4);
+  EXPECT_NEAR(std::stod(st("scene.nav_terrain.limit").value()), 1.5, 1e-9);
+  sim.step();
+  for (const char *key : {"scene.nav_terrain.max_grade", "scene.nav_terrain.governors",
+                          "scene.nav_terrain.limit", "scene.nav_terrain.infeasible_cells",
+                          "scene.nav_terrain.gravity", "scene.nav_terrain.active"}) {
+    EXPECT_FALSE(st(key).comment().empty()) << key;
+    EXPECT_TRUE(st(key).has_property("access")) << key;
+  }
+  EXPECT_EQ(st("scene.nav_terrain.max_grade").property("max"), "1.5");
+  EXPECT_EQ(st("scene.nav_terrain.d_hat_m").property("unit"), "m");
+  EXPECT_EQ(st("scene.nav_terrain.lam_grade").property("access"), "knob");
+}
+
+// H4: measured tire saturation as a detached modulator. Round a 30 m circle on mu 0.7 the drive's
+// corner cap (0.9 g) asks more of the tires than they hold, so they saturate. With the modulator
+// the drive slows as they near their limit, and they work less hard.
+TEST(NavPlant, MeasuredSlipTightensTheDrive) {
+  REQUIRE_JOLT();
+  const vehicle_desc d = vehicle_desc::humvee();
+  const double cx = 0.0, cy = -40.0, radius = 30.0;
+  double worst[2], mean[2], fastest[2];
+  for (int k = 0; k < 2; ++k) {
+    scene sc;
+    sim_world sim = make_sim(nav_config(d, 16.0, 0.9), sc, cx, cy - radius, cx + radius, cy);
+    world w(jolt_config());
+    sc.build(w, 0.7);
+    nav_plant plant(w, {d});
+    cvc::nav::plant_modulation m;
+    m.tire_gain = k == 0 ? 0.0f : 3.0f;
+    plant.set_modulation(m);
+    sim.set_plant(&plant);
+    worst[k] = mean[k] = fastest[k] = 0.0;
+    int counted = 0;
+    for (int t = 0; t < 500; ++t) {
+      // The goal leads the vehicle round the circle by 40 degrees.
+      const pose p = pose_of(sim);
+      const double a = std::atan2(p.y - cy, p.x - cx) + 0.7;
+      sim.retarget(0, static_cast<float>((cx + radius * std::cos(a)) * kS),
+                   static_cast<float>((cy + radius * std::sin(a)) * kS));
+      sim.step();
+      const cvc::nav::plant_state ps = plant.state(0);
+      if (t >= 200) { // round the circle at speed
+        worst[k] = std::max(worst[k], static_cast<double>(ps.tire_use));
+        mean[k] += ps.tire_use;
+        ++counted;
+      }
+      fastest[k] = std::max(fastest[k], static_cast<double>(ps.speed / kS));
+    }
+    mean[k] /= std::max(1, counted);
+  }
+  std::printf(
+      "  tire use (combined slip over its peak) round the circle: mean %.2f, peak %.2f "
+      "without the modulator (top speed %.1f m/s); mean %.2f, peak %.2f with it (%.1f m/s)\n",
+      mean[0], worst[0], fastest[0], mean[1], worst[1], fastest[1]);
+  EXPECT_GT(worst[0], 0.7) << "the run worked the tires to their limit";
+  EXPECT_LT(mean[1], mean[0]);
+  EXPECT_LT(worst[1], worst[0]);
 }

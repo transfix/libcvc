@@ -114,11 +114,14 @@ struct material_stack; // defined in material.h; coef_feats takes it by pointer 
 // ``risk`` (a material_stack; channel 0 = terrain risk r~) appends the WORST-risk-ahead
 // column — the deployment twin of grl_snam coef_feats(material=). Order matches the net's
 // input layout: base 5, then grip (if ``grip``), then risk (if ``risk``). Null risk => the
-// column is not written and the stride is unchanged.
+// column is not written and the stride is unchanged. ``slope`` (terrain's grade-cost plane,
+// P5 H3) appends the worst grade cost ahead, the same probe on channel 0, after risk.
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
                 float *feat_out, int num_threads = 0, const friction_field *grip = nullptr,
                 float mu_lookahead = 0.3f, int mu_probes = 3, const material_stack *risk = nullptr,
-                float risk_lookahead = 0.3f, int risk_probes = 3, thread_pool *pool = nullptr);
+                float risk_lookahead = 0.3f, int risk_probes = 3, thread_pool *pool = nullptr,
+                const material_stack *slope = nullptr, float slope_lookahead = 0.3f,
+                int slope_probes = 3);
 
 // The drive's PLANT ARM (P4, cvc/nav/vehicle_plant.h). With veh_params::plant set, the drive
 // computes each agent's command for the tick and writes it here instead of integrating: o, th
@@ -138,9 +141,24 @@ struct plant_drive {
   const float *steer_now = nullptr;  // rad
   const float *steer_rate = nullptr; // rad/s
   float max_steer = 0.0f;            // rad; 0 = the drive's delta_max alone
-  float *steer_cmd = nullptr;        // out: delta_cmd (rad)
-  float *accel_cmd = nullptr;        // out: a_cmd (normalized / s^2)
-  float *v_stop = nullptr;           // out: the stopping speed the command respects
+  // Measured plant state as detached modulators (doc 31 D9 H4), [n], either may be null: the
+  // agent's gamma (its speed damping) and its hard barriers' weight are multiplied by these,
+  // so the drive slows near tire saturation and keeps further from hazards near tipping.
+  const float *gamma_scale = nullptr;
+  const float *hard_scale = nullptr;
+  float *steer_cmd = nullptr; // out: delta_cmd (rad)
+  float *accel_cmd = nullptr; // out: a_cmd (normalized / s^2)
+  float *v_stop = nullptr;    // out: the stopping speed the command respects
+};
+
+// Terrain's soft grade force and hard barrier (P5 H1, cvc/nav/terrain.h): a material_stack
+// built from the grade cost (channel 0) and the infeasible cells (the phi channel), applied as
+// the material force is: F = -lam_soft grad r~_g - lam_hard db grad phi, and into the steer bias.
+struct terrain_drive {
+  const material_stack *stack = nullptr; // one shared plane
+  float lam_soft = 0.0f, lam_hard = 0.0f;
+  float k_sharp = 1.25f; // 1/m
+  float d_hat_m = 12.0f; // m
 };
 
 // Fixed vehicle + integration parameters for the bicycle rollout (the SdfNavigator
@@ -242,6 +260,16 @@ struct veh_params {
 
   // THE PLANT ARM (see plant_drive above). Null (default) = the kinematic bicycle integrates.
   const plant_drive *plant = nullptr;
+
+  // TERRAIN (P5, cvc/nav/terrain.h). Null (default) = flat, byte-identical.
+  // `slope`: two planes, dz/dx then dz/dy (m/m), sampled as grip is. With it the governors
+  // take gravity along the path (H2): v_stop plans with less braking downhill (and never counts
+  // on gravity's help uphill), and the corner cap loses gravity's cross-slope pull. `gravity` is in
+  // normalized units per s^2 (g x scale).
+  const friction_field *slope = nullptr;
+  float gravity = 0.0f;
+  // `terrain`: the grade force and the hard barrier (H1).
+  const terrain_drive *terrain = nullptr;
 };
 
 // Kinematic-bicycle rollout — one drive tick of `v.nsub` substeps per agent,

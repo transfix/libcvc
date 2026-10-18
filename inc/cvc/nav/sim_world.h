@@ -44,6 +44,7 @@
 #include <cvc/nav/material.h>
 #include <cvc/nav/nav_stats.h>
 #include <cvc/nav/plant_types.h>
+#include <cvc/nav/terrain.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -405,6 +406,32 @@ public:
     return plant_ && gstep_ > 0 && !pl_drift_.empty() ? pl_drift_.data() : nullptr;
   }
 
+  // How measured plant state modulates the drive (H4, plant_types.h): the plant's
+  // vehicle_plant::modulation(), as of the last tick; off without a plant.
+  const plant_modulation &current_plant_modulation() const { return pl_mod_; }
+
+  // ── terrain (P5, cvc/nav/terrain.h) ───────────────────────────────────────
+  // `height_m` is the sim grid's rows x cols (row 0 at min_y), copied in. Builds the slope, the
+  // grade cost and the infeasible cells; then, per the config:
+  //   - infeasible cells plan as obstacles: they join every belief plane's occupancy, so the
+  //     SDF's barrier and the governors keep the agents out (block_infeasible);
+  //   - the governors take gravity along the path (governors, H2);
+  //   - the grade cost's soft force and a material-style barrier join the drive (lam_grade,
+  //     lam_grade_hard, H1).
+  // Default off: without terrain every tick is byte-identical. The tree's terrain does not move.
+  void set_terrain(const float *height_m, const terrain_config &tc);
+  // A new config for the terrain set last (no-op without one): rebuilds its planes from the same
+  // heights and keeps the entry counts. Cells it newly makes infeasible join the occupancy at
+  // once; cells it frees leave it at the next recomposite (a frozen map keeps them).
+  void set_terrain_config(const terrain_config &tc);
+  void clear_terrain();
+  bool has_terrain() const { return terrain_on_; }
+  const terrain_planes &terrain() const { return ter_; }
+  const terrain_config &terrain_settings() const { return ter_cfg_; }
+  // Ticks each agent's footprint (the rear axle, or each body disc) touched an infeasible cell,
+  // since set_terrain; [size()], or null without terrain.
+  const int *infeasible_entries() const { return terrain_on_ ? ter_entries_.data() : nullptr; }
+
   // ── base nav_stats (opt-in internal collector, cvc/nav/nav_stats.h) ───────
   // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as
   // the episode start (so call this BEFORE the first step()) and goals_world() as
@@ -504,7 +531,22 @@ private:
   const float *ptr(const std::vector<float> &v) const {
     return plant_ && gstep_ > 0 && !v.empty() ? v.data() : nullptr;
   }
+  plant_modulation pl_mod_;
+  std::vector<float> pl_gamma_scale_, pl_hard_scale_; // [n], H4
   void plant_read(); // the plant's state and limits into o_, th_, sp_ and the pl_ columns
+
+  // terrain (set_terrain; inert while terrain_on_ is false)
+  bool terrain_on_ = false;
+  terrain_config ter_cfg_;
+  std::vector<float> ter_height_; // the heights set_terrain was given, for set_terrain_config
+  terrain_planes ter_;
+  std::vector<float> ter_stack_; // [1,6,H,W] the grade cost's material planes
+  material_stack ter_view_{};
+  terrain_drive ter_drive_;
+  friction_field ter_slope_; // the slope planes, as a two-plane field
+  std::vector<int> ter_entries_;
+  std::vector<int> st_entries_; // [n], this tick's, for nav_stats
+  bool infeasible_at(float onx, float ony) const;
 
   field_stack field_view() const;
   material_stack material_view() const;

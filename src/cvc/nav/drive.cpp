@@ -233,10 +233,13 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
                 float *feat_out, int num_threads, const friction_field *grip, float mu_lookahead,
                 int mu_probes, const material_stack *risk, float risk_lookahead, int risk_probes,
-                thread_pool *pool) {
+                thread_pool *pool, const material_stack *slope, float slope_lookahead,
+                int slope_probes) {
   const bool has_grip = grip != nullptr && grip->data != nullptr;
   const bool has_risk = risk != nullptr && risk->data != nullptr;
-  const std::size_t stride = 5u + (has_grip ? 1u : 0u) + (has_risk ? 1u : 0u);
+  const bool has_slope = slope != nullptr && slope->data != nullptr;
+  const std::size_t stride =
+      5u + (has_grip ? 1u : 0u) + (has_risk ? 1u : 0u) + (has_slope ? 1u : 0u);
   drive_parallel_for(pool, n, num_threads, [&](int i) {
     const int plane = map_id ? map_id[i] : 0;
     float phi, nx, ny;
@@ -282,6 +285,19 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
       }
       fo[has_grip ? 6 : 5] = worst;
     }
+    if (has_slope) {
+      // The WORST grade cost from here to the carrot (P5 H3), the risk probe on the terrain's
+      // plane. Appended after grip and risk.
+      const float reach = gd < slope_lookahead ? gd : slope_lookahead;
+      float worst = sample_risk(*slope, 0, on[2 * i], on[2 * i + 1]);
+      const int P = slope_probes < 1 ? 1 : slope_probes;
+      for (int k = 1; k <= P; ++k) {
+        const float t = (static_cast<float>(k) / static_cast<float>(P)) * reach;
+        const float m = sample_risk(*slope, 0, on[2 * i] + t * gdx, on[2 * i + 1] + t * gdy);
+        worst = m > worst ? m : worst;
+      }
+      fo[5 + (has_grip ? 1 : 0) + (has_risk ? 1 : 0)] = worst;
+    }
   });
 }
 
@@ -316,7 +332,10 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     float ox = o[2 * i], oy = o[2 * i + 1];
     float thi = th[i], spi = sp[i];
     const float gx = goal[2 * i], gy = goal[2 * i + 1];
-    const float ali = al[i], bei = be[i], gai = ga[i];
+    const float ali = al[i], bei = be[i];
+    float gai = ga[i];
+    if (pd && pd->gamma_scale)
+      gai = gai * pd->gamma_scale[i]; // H4: slower near tire saturation
     // Per-agent footprint override (heterogeneous fleet); null column => the scalar,
     // so the homogeneous path is byte-identical.
     const float rr_i = v.rr_col ? v.rr_col[i] : rr;
@@ -409,6 +428,24 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         creep_cap = 0.5f * std::sqrt(a_lat_e * (L / tan_dmax));
         tel_mu = mu;
       }
+      // Gravity along the path (P5 H2). `a_stop_g` is the deceleration the governor plans with.
+      // Moving downhill, gravity takes some of it away; moving uphill it would add some, but the
+      // command never brakes harder than a_max (and the kinematic bicycle has no gravity at
+      // all), so the plan does not count on it. The corner cap loses gravity's pull across the
+      // slope. Without a slope field nothing here runs.
+      float a_stop_g = a_max_e;
+      float g_along = 0.0f; // gravity along the direction of travel (+ helps braking)
+      if (v.slope) {
+        const float gxs = sample_grip(*v.slope, 0, ox, oy), gys = sample_grip(*v.slope, 1, ox, oy);
+        const float inv = 1.0f / std::sqrt(1.0f + gxs * gxs + gys * gys);
+        const float along = (gxs * ch + gys * sh) * inv;   // sin of the grade along the heading
+        const float across = (-gxs * sh + gys * ch) * inv; // sin of the cross slope
+        const float dir = spi >= 0.0f ? 1.0f : -1.0f;
+        g_along = dir * v.gravity * along;
+        a_stop_g = std::max(std::min(a_max_e, a_max_e + g_along), 0.1f * a_max_e);
+        a_lat_e = std::max(a_lat_e - v.gravity * std::fabs(across), 0.1f * a_lat_e);
+        creep_cap = 0.5f * std::sqrt(a_lat_e * (L / tan_dmax));
+      }
       const float Fgoal_x = -bei * (ox - gx);
       const float Fgoal_y = -bei * (oy - gy);
       float Fx = Fbar_x + Fgoal_x;
@@ -425,7 +462,10 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         tel_mrisk = mrisk;
         // db = -sigmoid(k * (d_hat_m - phi_m)); F_hard = ((-lam)*db)*grad.
         const float db = -(1.0f / (1.0f + std::exp(-(mat->k_sharp * (mat->d_hat_m - mphi)))));
-        const float ls = mat->lam_soft[i], lh = mat->lam_hard[i];
+        const float ls = mat->lam_soft[i];
+        float lh = mat->lam_hard[i];
+        if (pd && pd->hard_scale)
+          lh = lh * pd->hard_scale[i]; // H4: further from hazards near tipping
         tel_lam = ls;
         tel_lam_hard = lh;
         const float fsx = -ls * mgrx;
@@ -436,6 +476,27 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         Fmat_y = fsy + fhy;
         Fx = Fx + Fmat_x;
         Fy = Fy + Fmat_y;
+      }
+
+      // Terrain (P5 H1): the grade cost's soft force and the infeasible slope's barrier, the
+      // material force's form on the terrain's own plane.
+      float Fter_x = 0.0f, Fter_y = 0.0f;
+      const terrain_drive *ter =
+          v.terrain && v.terrain->stack &&
+                  (v.terrain->lam_soft != 0.0f || v.terrain->lam_hard != 0.0f)
+              ? v.terrain
+              : nullptr;
+      if (ter) {
+        float trisk, tphi, tgrx, tgry, tgpx, tgpy;
+        detail::material_sample_point(*ter->stack, 0, ox, oy, trisk, tphi, tgrx, tgry, tgpx, tgpy);
+        const float db = -(1.0f / (1.0f + std::exp(-(ter->k_sharp * (ter->d_hat_m - tphi)))));
+        float lh = ter->lam_hard;
+        if (pd && pd->hard_scale)
+          lh = lh * pd->hard_scale[i];
+        Fter_x = -ter->lam_soft * tgrx + (-lh * db) * tgpx;
+        Fter_y = -ter->lam_soft * tgry + (-lh * db) * tgpy;
+        Fx = Fx + Fter_x;
+        Fy = Fy + Fter_y;
       }
 
       // Generic external force (e.g. a downstream layer's own force). Sampled at the
@@ -477,13 +538,17 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       // ext->steer; with ext null the sx/sy below are EXACTLY the pre-ext values
       // (no `+ 0.0f` is introduced), so the plain and _material steer terms are
       // byte-identical.
-      if (mat || (ext && ext->sample)) {
-        // ((F_rep + F_mat [+ F_ext]) . left) — these forces steer, not only brake.
+      if (mat || (ext && ext->sample) || ter) {
+        // ((F_rep + F_mat [+ F_ext] [+ F_terrain]) . left) — these forces steer, not only brake.
         float sx = Frep_x + Fmat_x; // Fmat_* == 0 when !mat
         float sy = Frep_y + Fmat_y;
         if (ext && ext->sample && ext->steer) {
           sx += Fext_x;
           sy += Fext_y;
+        }
+        if (ter) {
+          sx += Fter_x;
+          sy += Fter_y;
         }
         delta = delta + k_steer * std::tanh(sx * (-sh) + sy * ch);
       } else {
@@ -508,12 +573,19 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       // ~1e-12 at the stop margin; the legacy branch keeps its exact form.
       float v_stop = (has_fp || has_grip) ? std::sqrt(2.0f * a_max_e * ds + 1e-24f)
                                           : std::sqrt(2.0f * a_max * ds);
+      if (v.slope)
+        v_stop = std::sqrt(2.0f * a_stop_g * ds + 1e-24f); // H2: gravity's help or hindrance
       if (pd) {
         // The plant arm: the speed from which the vehicle, covering |v| latency before it
         // responds and then braking at a_brake, stops within ds: v tau + v^2 / 2a = ds.
         const float tau = pd->latency ? pd->latency[i] : 0.0f;
-        const float ab =
+        float ab =
             (pd->a_brake && pd->a_brake[i] > 0.0f) ? std::min(pd->a_brake[i], a_max_e) : a_max_e;
+        if (v.slope) // H2, as above
+          ab = std::max(
+              std::min(ab,
+                       (pd->a_brake && pd->a_brake[i] > 0.0f ? pd->a_brake[i] : a_max_e) + g_along),
+              0.1f * ab);
         v_stop = std::sqrt(ab * ab * tau * tau + 2.0f * ab * ds + 1e-24f) - ab * tau;
       }
       const float motion_sign = spi >= 0.0f ? 1.0f : -1.0f;
@@ -738,17 +810,22 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
   // than a short buffer quietly feeding garbage into the first layer.
   const int in_w = model.in_features();
   const bool want_grip = model.has_mu();
+  const bool want_slope = model.has_slope();
   if (model.has_risk())
     throw std::runtime_error("cvc::nav::drive_step: a terrain-risk model needs the material drive "
                              "(drive_step_material)");
-  if (in_w != 5 + (want_grip ? 1 : 0))
+  if (in_w != 5 + (want_grip ? 1 : 0) + (want_slope ? 1 : 0))
     throw std::runtime_error("cvc::nav::drive_step: coef_mlp in_features does not match its flags");
   if (want_grip && !(v.grip && v.grip->data))
     throw std::runtime_error(
         "cvc::nav::drive_step: model takes the grip feature but veh_params.grip is null");
+  if (want_slope && !(v.terrain && v.terrain->stack))
+    throw std::runtime_error("cvc::nav: the model takes the slope feature but veh_params.terrain "
+                             "is null (sim_world::set_terrain)");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
-             v.mu_lookahead, v.mu_probes, nullptr, 0.3f, 3, pool);
+             v.mu_lookahead, v.mu_probes, nullptr, 0.3f, 3, pool,
+             want_slope ? v.terrain->stack : nullptr);
   const int out_w = model.out_features();
   std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads, pool);
@@ -772,9 +849,10 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
   // in_features() guess. A mismatch is a hard error rather than a short buffer quietly feeding
   // garbage into the first layer.
   const bool want_grip = model.has_mu();
+  const bool want_slope = model.has_slope();
   const bool want_risk = model.has_risk();
   const int in_w = model.in_features();
-  const int expect = 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0);
+  const int expect = 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0) + (want_slope ? 1 : 0);
   if (in_w != expect)
     throw std::runtime_error(
         "cvc::nav::drive_step_material: coef_mlp in_features does not match its feature flags");
@@ -788,9 +866,13 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
   // net sees and reroutes around one terrain. Lookahead/probes match the grl_snam training
   // default (coef_feats risk_lookahead=0.3, risk_probes=3).
   const material_stack *risk_src = want_risk ? mat.stack : nullptr;
+  if (want_slope && !(v.terrain && v.terrain->stack))
+    throw std::runtime_error("cvc::nav: the model takes the slope feature but veh_params.terrain "
+                             "is null (sim_world::set_terrain)");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
-             v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3);
+             v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3, nullptr,
+             want_slope ? v.terrain->stack : nullptr);
   const int out_w = model.out_features();
   std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads);
@@ -834,18 +916,23 @@ void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const 
   // this byte-identical to drive_step.
   const int in_w = model.in_features();
   const bool want_grip = model.has_mu();
+  const bool want_slope = model.has_slope();
   if (model.has_risk())
     throw std::runtime_error("cvc::nav::drive_step_ext: a terrain-risk model needs the material "
                              "drive (drive_step_material)");
-  if (in_w != 5 + (want_grip ? 1 : 0))
+  if (in_w != 5 + (want_grip ? 1 : 0) + (want_slope ? 1 : 0))
     throw std::runtime_error(
         "cvc::nav::drive_step_ext: coef_mlp in_features does not match its flags");
   if (want_grip && !(v.grip && v.grip->data))
     throw std::runtime_error(
         "cvc::nav::drive_step_ext: model takes the grip feature but veh_params.grip is null");
+  if (want_slope && !(v.terrain && v.terrain->stack))
+    throw std::runtime_error("cvc::nav: the model takes the slope feature but veh_params.terrain "
+                             "is null (sim_world::set_terrain)");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
-             v.mu_lookahead, v.mu_probes, nullptr, 0.3f, 3);
+             v.mu_lookahead, v.mu_probes, nullptr, 0.3f, 3, nullptr,
+             want_slope ? v.terrain->stack : nullptr);
   const int out_w = model.out_features();
   std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads);
@@ -879,9 +966,10 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
   // force drive the SAME tick — summed into one force accumulator and one steering bias. A null
   // ext.sample reproduces drive_step_material exactly.
   const bool want_grip = model.has_mu();
+  const bool want_slope = model.has_slope();
   const bool want_risk = model.has_risk();
   const int in_w = model.in_features();
-  const int expect = 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0);
+  const int expect = 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0) + (want_slope ? 1 : 0);
   if (in_w != expect)
     throw std::runtime_error(
         "cvc::nav::drive_step_material_ext: coef_mlp in_features does not match its feature flags");
@@ -892,9 +980,13 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
     throw std::runtime_error("cvc::nav::drive_step_material_ext: model takes the risk feature but "
                              "the material stack is null");
   const material_stack *risk_src = want_risk ? mat.stack : nullptr;
+  if (want_slope && !(v.terrain && v.terrain->stack))
+    throw std::runtime_error("cvc::nav: the model takes the slope feature but veh_params.terrain "
+                             "is null (sim_world::set_terrain)");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
-             v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3);
+             v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3, nullptr,
+             want_slope ? v.terrain->stack : nullptr);
   const int out_w = model.out_features();
   std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads);

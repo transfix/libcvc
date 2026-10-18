@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <cvc/core/world_units.h>
+#include <cvc/nav/terrain.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/world.h>
 #include <set>
@@ -66,6 +67,8 @@ struct nav_plant_options {
   std::vector<double> drift_bins_g{0.1, 0.2, 0.3, 0.5};
   // The kinematic reference's substeps a tick; 0: the physics steps a tick (D14's nsub = k).
   int drift_nsub = 0;
+  // How the measured tire use and load transfer modulate the drive (H4); off by default.
+  cvc::nav::plant_modulation modulation;
 };
 
 class nav_plant final : public cvc::nav::vehicle_plant {
@@ -91,6 +94,14 @@ public:
   double energy_step(int i) const override;
   int static_contacts_step(int i) const override;
   bool tracks_energy() const override { return true; }
+  cvc::nav::plant_modulation modulation() const override { return _o.modulation; }
+
+  // The terrain limits of a vehicle, for sim_world::set_terrain (P5): its steepest climb, the
+  // lesser of what its tires hold on `mu` and what its first gear (with a converter's stall
+  // multiplication) pulls at its mass; and its static stability factor, the track over twice the
+  // centre of gravity's height above the ground.
+  static cvc::nav::terrain_config terrain_config_of(const vehicle_desc &d, double mu = 0.9,
+                                                    double gravity = 9.80665);
 
   // ── the vehicles ──
   int size() const { return static_cast<int>(_agents.size()); }
@@ -130,11 +141,14 @@ public:
   void set_latency(double s);          // >= 0
   void set_brake_margin(double share); // (0, 1]
   void set_drift_nsub(int n);          // >= 0
+  // Onsets >= 0, gains >= 0.
+  void set_modulation(const cvc::nav::plant_modulation &m);
 
   // ── the state tree ──
   // The live settings, read by pull() and seeded with the plant's values when unset (an
   // invalid value is ignored):
   //   <prefix>.nav_plant.{latency, brake_margin, drift_nsub}
+  //   <prefix>.nav_plant.modulation.{tire_onset, tire_gain, tip_onset, tip_gain}
   // and the rest, which are fixed, written by publish():
   //   <prefix>.nav_plant.settings.{step_world, ground_z, spawn_height, metres_per_world_unit,
   //     physics_steps, drift_bins_g}
@@ -142,6 +156,7 @@ public:
   // Agent i's nav keys beside the physics binding's vehicles.<name>.* (world_binding:
   // publish_vehicle(names[i], vehicle(i))), and the drift summary and cost:
   //   <prefix>.vehicles.<names[i]>.nav.{steer_command, accel_command}   rad, m/s^2
+  //   <prefix>.vehicles.<names[i]>.nav.{tire_use, load_transfer, pitch_rad, roll_rad}
   //   <prefix>.vehicles.<names[i]>.nav.drift.{position_m, heading_rad, speed_mps, lateral_g,
   //     stop_speed_mps}
   //   <prefix>.nav_plant.drift.<b>.{lo_g, hi_g, ticks, position_rms_m, position_max_m,

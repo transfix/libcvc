@@ -242,4 +242,25 @@ P4 adds three things to measure and contain the drift:
     - a step change of goal or a swerve at 0.25 g leaves the Humvee 0.6-1.2 m off the
       bicycle's path, from its 0.35 rad/s steering. That is reported, not gated;
     - the lag-aware governors could also take the steering rate into the corner speed.
-- **P5–P8** are not started.
+- **P5** is done: `nav_terrain_test` (kinematic) and `nav_plant_test` (Jolt), every gate met on
+  Windows (PHYSICS_API.md, "Terrain in the navigator's energy").
+  - `cvc/nav/terrain.h`: the slope, the grade cost and the infeasible cells from a height raster
+    and the vehicle's limits; `sim_world::set_terrain`; `nav_plant::terrain_config_of`.
+  - H1: the grade cost through the material pipeline, a soft force and a hard barrier; the
+    infeasible cells plan as obstacles.
+  - H2: gravity along the path in the stopping governor (never counting on its help uphill)
+    and across it in the corner cap; on the Jolt plant the driver model feeds the contact
+    normals' grade forward.
+  - H3: the slope look-ahead feature and coefficient-net format v3.
+  - H4: `plant_state` gains tire use, load transfer, pitch and roll; `plant_modulation` scales
+    gamma and the hard barriers; the gains are the plant's.
+  - H5: `astar`'s climb cost, a metre of rise weighed as 1 / C_rr metres of flat.
+  - Measured on the Jolt plant:
+    - over a 12 m hill, 7826 kJ/km against 15403 for a path 1.44 × as long;
+    - 0 ticks on a 1.2 ridge;
+    - round a 30 m circle on μ 0.7, mean tire use 0.79 against 1.36 with the modulator.
+  - The terrain and modulation knobs, the per-vehicle measured state and the infeasible-slope
+    counts are in the state tree (`nav_terrain.*`, `nav_plant.modulation.*`, `nav_stats`).
+  - Open: GRL-SNAM's Python twin of H1/H5; a net retrained on the slope feature; H3 in the CUDA
+    drive.
+- **P6–P8** are not started.
