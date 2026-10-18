@@ -261,6 +261,25 @@ Measured per node (MSVC Release, `state_exec_bench_test` `DataWalkThroughput`): 
 The stdlib jobs (`StdlibJobThroughput`) cost 5-20 ns a node for elements and 200-370 ns for a
 256-byte copy.
 
+**Snapshots of closures.** The codec writes each scope a value's closures capture once, in an
+`__envs__` table under the snapshot node, and a closure refers to its scope's entry. A function
+that `defun` bound in the scope it captures is no cycle, and closures that share a scope share
+it again when decoded. Older snapshots, with each closure's scope chain written inside it, still
+decode.
+
+### Native call nesting
+
+Some native functions call other functions themselves: `apply`, `send`, a class constructor
+running `init`, an inherited `init` running its superclass's. Some run a nested evaluator: a class
+method, a generator advancing. Each of these nests on the native stack, so a value or class that
+refers to itself could ask for unbounded nesting: `(apply apply L)` with `L` containing itself, or
+a class whose `init` is its own constructor. A level is refused with an error ("native calls nested
+too deeply") past 256 levels (`kMaxNativeNesting`), or when less of the thread's native stack is
+left than `kNativeStackReserve`: 128 KiB on Windows, where a catch block runs before the frames
+above it unwind, and 32 KiB elsewhere. Levels cost from about 0.5 KiB (`apply`) to over 10 KiB (a
+class method) in a release build. DSL functions calling DSL functions are not levels: they are
+evaluator frames on the heap.
+
 ### Budget by kind
 
 Each process's steps are split by what they were spent on (`step_kind`):

@@ -348,6 +348,31 @@ TEST_F(StateExecDeepDataCodec, CyclicValueThrows) {
   l->clear(); // break the cycle so the list is freed
 }
 
+TEST_F(StateExecDeepDataCodec, ClosureChainRoundTrip) {
+  // Each closure's scope binds the closure made before it: the codec used to recurse twice per
+  // closure (into its scope, and from the binding into the next closure).
+  const std::size_t n = codec_depth();
+  value_t chain = nil_value;
+  for (std::size_t i = 0; i < n; ++i) {
+    auto scope = std::make_shared<environment>();
+    scope->set("prev", chain);
+    auto c = std::make_shared<closure>();
+    c->body = {value_t{symbol{"prev"}}};
+    c->env_snapshot = scope;
+    chain = value_t{c};
+  }
+  cvc::state &node = snapshot_node("closures");
+  on_small_stack([&] {
+    encode_value(node, chain);
+    value_t back = decode_value(node);
+    std::size_t depth = 0;
+    for (const value_t *v = &back; std::holds_alternative<closure_ptr>(v->v); ++depth)
+      v = std::get<closure_ptr>(v->v)->env_snapshot->lookup("prev");
+    EXPECT_EQ(depth, n);
+  });
+  EXPECT_LE(state_depth(node), 32u);
+}
+
 TEST_F(StateExecDeepDataCodec, SharedValueEncodesTwice) {
   // A DAG (the same list reached twice) is not a cycle: it encodes, and decodes as two copies.
   value_t inner = make_list({value_t{int64_t{3}}});
