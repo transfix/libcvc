@@ -1105,6 +1105,11 @@ public:
     for (size_t i = 0; i < v.loads.size() && i < load.size(); ++i)
       v.loads[i] = load[i];
     auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
+    // Any change of input wakes a sleeping vehicle: a released brake on a grade must roll.
+    const bool changed = turned || neutral != v.neutral ||
+                         static_cast<float>(forward) != ctl->GetForwardInput() ||
+                         static_cast<float>(brake) != ctl->GetBrakeInput() ||
+                         static_cast<float>(hand_brake) != ctl->GetHandBrakeInput();
     ctl->SetDriverInput(static_cast<float>(forward), 0.0f, static_cast<float>(brake),
                         static_cast<float>(hand_brake));
     JPH::VehicleTransmission &tr = ctl->GetTransmission();
@@ -1115,7 +1120,7 @@ public:
       tr.mMode = JPH::ETransmissionMode::Auto;
     }
     v.neutral = neutral;
-    if (forward != 0.0 || turned)
+    if (forward != 0.0 || changed)
       _ps->GetBodyInterface().ActivateBody(v.body);
   }
 

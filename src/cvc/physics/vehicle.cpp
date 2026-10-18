@@ -378,15 +378,19 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
       const double along = dir * speed;    // speed along the commanded direction
       const double want = v.command.accel; // a_cmd is already along it
       const double got = dir * a_meas;
-      constexpr double kDeadband = 0.05, kGain = 0.5;
-      if (along < -0.3) {
+      // One controller: the wanted acceleration, corrected by how far the measured one
+      // misses it, is a throttle when positive and a brake when negative. So a_cmd = 0 keeps
+      // the speed on a grade (braking against gravity downhill, pulling against it uphill).
+      constexpr double kDeadband = 0.05, kGain = 0.5, kHoldSpeed = 0.3;
+      const double u = want + kGain * (want - got);
+      if (along < -kHoldSpeed) {
         brake = 1.0; // moving the wrong way: stop first
-      } else if (want > kDeadband) {
-        throttle = clamp((want + kGain * (want - got)) / d.max_accel, 0.0, 1.0);
-      } else if (want < -kDeadband) {
-        brake = clamp((-want + kGain * (got - want)) / d.max_decel, 0.0, 1.0);
-      } else if (std::fabs(along) < 0.05) {
-        brake = 1.0; // at rest with nothing asked: hold
+      } else if (std::fabs(want) <= kDeadband && std::fabs(along) < kHoldSpeed) {
+        brake = 1.0; // slow, with nothing asked: hold on the brakes (a grade included)
+      } else if (u > kDeadband) {
+        throttle = clamp(u / d.max_accel, 0.0, 1.0);
+      } else if (u < -kDeadband) {
+        brake = clamp(-u / d.max_decel, 0.0, 1.0);
       }
     }
     v.throttle = throttle;

@@ -463,3 +463,119 @@ TEST(PhysicsVehicle, TheRoboRacerDrives) {
       1.0 - 2.0 * (s.body.rotation.x * s.body.rotation.x + s.body.rotation.y * s.body.rotation.y),
       0.95); // upright
 }
+
+// --- grades ----------------------------------------------------------------------------------
+
+namespace {
+
+// A ground tilted about y so the chassis's forward axis points uphill at `grade` (rise / run),
+// and a Humvee settled on it facing uphill.
+struct hill {
+  world w{jolt_config()};
+  vehicle_id v;
+  double theta = 0.0;
+  quat q;
+  hill(double grade, double mu, double x = 0.0) {
+    theta = std::atan(grade);
+    q = {std::cos(-theta / 2), 0.0, std::sin(-theta / 2), 0.0}; // +x tilted up
+    const material_id m = w.add_material({"ground", static_cast<float>(mu)});
+    body_desc g;
+    g.shape = box{{400.0, 60.0, 0.5}};
+    g.motion = motion_type::static_;
+    g.rotation = q;
+    g.position = {0.5 * std::sin(theta), 0.0, -0.5 * std::cos(theta)}; // top through the origin
+    g.material = m;
+    w.add_body(g);
+    const vec3 up{-std::sin(theta), 0.0, std::cos(theta)};
+    v = w.add_vehicle(vehicle_desc::humvee(), {x * std::cos(theta) + 1.2 * up.x, 0.0,
+                                               x * std::sin(theta) + 1.2 * up.z},
+                      q);
+  }
+  // Distance along the slope (uphill +) of the chassis from the origin.
+  double along() const {
+    const vec3 p = w.vehicle_state(v).body.position;
+    return p.x * std::cos(theta) + p.z * std::sin(theta);
+  }
+};
+
+} // namespace
+
+// On a 15% grade the driver, asked for nothing, holds on its brakes.
+TEST(PhysicsVehicle, TheDriverHoldsOnAGrade) {
+  REQUIRE_JOLT();
+  hill h(0.15, 0.9);
+  h.w.drive(h.v, {});
+  h.w.step(300);
+  const double x0 = h.along();
+  double moved = 0.0;
+  for (int i = 0; i < 1000; ++i) {
+    h.w.step();
+    moved = std::max(moved, std::fabs(h.along() - x0));
+  }
+  std::printf("  held on 15%%: drifted %.4f m in 10 s, brake %.2f\n", moved,
+              h.w.vehicle_state(h.v).brake);
+  EXPECT_LT(moved, 0.02);
+  EXPECT_EQ(h.w.vehicle_state(h.v).brake, 1.0);
+}
+
+// The hand brake alone (the rear axle) holds it there too.
+TEST(PhysicsVehicle, TheHandBrakeHoldsOnAGrade) {
+  REQUIRE_JOLT();
+  hill h(0.15, 0.9);
+  h.w.drive(h.v, {});
+  h.w.step(300);
+  vehicle_controls park;
+  park.hand_brake = 1.0;
+  h.w.set_controls(h.v, park);
+  h.w.step(50);
+  const double x0 = h.along();
+  h.w.step(1000);
+  std::printf("  hand brake on 15%%: drifted %.4f m in 10 s\n", std::fabs(h.along() - x0));
+  EXPECT_LT(std::fabs(h.along() - x0), 0.02);
+}
+
+// Released in neutral it rolls back down at g (sin(theta) - C_rr cos(theta)), slowed by the wheels'
+// rotational inertia.
+TEST(PhysicsVehicle, ReleasedOnAGradeItRollsAtTheGradeLimit) {
+  REQUIRE_JOLT();
+  hill h(0.15, 0.9);
+  h.w.drive(h.v, {});
+  h.w.step(300);
+  vehicle_controls loose;
+  loose.neutral = true;
+  h.w.set_controls(h.v, loose);
+  const double x0 = h.along();
+  h.w.step(300); // 3 s
+  const vehicle_desc d = vehicle_desc::humvee();
+  double m_eff = d.mass;
+  for (const axle_desc &a : d.axles)
+    m_eff += 2.0 * a.wheel_inertia / (a.wheel_radius * a.wheel_radius);
+  const double a_model =
+      kG * (std::sin(h.theta) - d.rolling_resistance * std::cos(h.theta)) * d.mass / m_eff;
+  const double t = 3.0;
+  const double want = 0.5 * a_model * t * t; // aero is under 0.1% at these speeds
+  const double got = x0 - h.along();
+  std::printf("  rolled %.3f m down in 3 s (model %.3f m)\n", got, want);
+  EXPECT_NEAR(got, want, 0.05 * want);
+}
+
+// A hill start: from holding, a_cmd uphill moves it uphill, never rolling back past 0.3 m.
+TEST(PhysicsVehicle, AHillStartDrivesUphill) {
+  REQUIRE_JOLT();
+  hill h(0.15, 0.9);
+  h.w.drive(h.v, {});
+  h.w.step(300);
+  const double x0 = h.along();
+  h.w.drive(h.v, {0.0, 1.0});
+  double worst = 0.0;
+  for (int i = 0; i < 600; ++i) {
+    h.w.step();
+    worst = std::min(worst, h.along() - x0);
+  }
+  const vehicle_state s = h.w.vehicle_state(h.v);
+  std::printf("  hill start: %.2f m/s uphill after 6 s, rolled back at most %.3f m\n", s.speed,
+              -worst);
+  EXPECT_GT(s.speed, 1.0);
+  EXPECT_GT(h.along() - x0, 3.0);
+  EXPECT_GT(worst, -0.3);
+}
