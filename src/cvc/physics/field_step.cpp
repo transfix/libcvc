@@ -267,6 +267,9 @@ void field_set::snapshot(std::vector<field_snapshot> &out) const {
     s.desc = fe.second.desc;
     s.rut_cells = fe.second.rut_cells;
     s.rut_deepest = fe.second.rut_deepest;
+    const field_grid &g = fe.second.scalar;
+    s.lo = {g.lo[0], g.lo[1], g.lo[2]};
+    s.hi = {g.hi[0], g.hi[1], g.hi[2]};
     out.push_back(std::move(s));
   }
 }

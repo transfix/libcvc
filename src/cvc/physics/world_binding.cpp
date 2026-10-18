@@ -9,17 +9,22 @@
 */
 
 #include <algorithm>
+#include <atomic>
 #include <boost/any.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/signals2.hpp>
 #include <cctype>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/physics/snapshot_json.h>
 #include <cvc/physics/world_binding.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -27,6 +32,19 @@ namespace cvc {
 namespace physics {
 
 namespace {
+
+// Set while this thread writes the binding's own keys, so the tree watch does not take
+// them for changes to pull.
+thread_local int t_own_writes = 0;
+// Counts the keys this thread read through a transparent link.
+thread_local int t_links = 0;
+
+struct own_writes {
+  own_writes() { ++t_own_writes; }
+  ~own_writes() { --t_own_writes; }
+  own_writes(const own_writes &) = delete;
+  own_writes &operator=(const own_writes &) = delete;
+};
 
 std::string trim_lower(const std::string &s) {
   std::string t;
@@ -46,6 +64,7 @@ std::string read_raw(cvc::app &ctx, const std::string &path) {
   try {
     cvc::state &s = cvc::state::instance(ctx)(path);
     if (s.isLink() && s.linkMode() == cvc::state::link_mode::transparent) {
+      ++t_links;
       const cvc::state::link_resolution lr = s.resolveLink();
       if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
         return lr.target->value();
@@ -76,6 +95,19 @@ template <class T> bool parse_num(const std::string &s, T &out) {
   }
 }
 
+bool parse_flag(const std::string &s, bool &out) {
+  const std::string t = trim_lower(s);
+  if (t == "1" || t == "true" || t == "yes" || t == "on") {
+    out = true;
+    return true;
+  }
+  if (t == "0" || t == "false" || t == "no" || t == "off") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
 // Seed an unset key, then read it back. The value stays `v` when the key holds
 // something unreadable.
 template <class T> void knob(cvc::app &ctx, const std::string &path, T &v) {
@@ -87,6 +119,15 @@ template <class T> void knob(cvc::app &ctx, const std::string &path, T &v) {
   T parsed;
   if (parse_num(raw, parsed))
     v = parsed;
+}
+
+void knob_flag(cvc::app &ctx, const std::string &path, bool &v) {
+  const std::string raw = read_raw(ctx, path);
+  if (raw.empty()) {
+    write_val(ctx, path, v);
+    return;
+  }
+  parse_flag(raw, v);
 }
 
 // The same for a named choice: `names` lists (name, value) pairs.
@@ -165,19 +206,6 @@ bool same_material(const material &a, const material &b) {
          a.rolling_resistance == b.rolling_resistance && a.nav_material == b.nav_material;
 }
 
-bool parse_flag(const std::string &s, bool &out) {
-  const std::string t = trim_lower(s);
-  if (t == "1" || t == "true" || t == "yes" || t == "on") {
-    out = true;
-    return true;
-  }
-  if (t == "0" || t == "false" || t == "no" || t == "off") {
-    out = false;
-    return true;
-  }
-  return false;
-}
-
 void put_vec(cvc::app &ctx, const std::string &base, const vec3 &v) {
   write_val(ctx, at(base, "x"), v.x);
   write_val(ctx, at(base, "y"), v.y);
@@ -243,6 +271,10 @@ const std::pair<const char *, double field::*> kFieldKnobs[] = {
     {"drag_coefficient", &field::drag_coefficient},
     {"damping", &field::damping},
     {"traction", &field::traction}};
+const std::pair<const char *, double body_settings::*> kBodyKnobs[] = {
+    {"mass", &body_settings::mass},
+    {"linear_damping", &body_settings::linear_damping},
+    {"angular_damping", &body_settings::angular_damping}};
 
 const char *const kCommandKeys[] = {"steer", "accel", "reverse"};
 const char *const kControlKeys[] = {"steer",      "throttle", "brake",
@@ -268,6 +300,13 @@ void copy_tuning(const vehicle_desc &from, vehicle_desc &to) {
   for (std::size_t i = 0; i < from.axles.size() && i < to.axles.size(); ++i)
     for (const auto &k : kAxleKnobs)
       to.axles[i].*k.second = from.axles[i].*k.second;
+}
+
+bool same_settings(const body_settings &a, const body_settings &b) {
+  for (const auto &k : kBodyKnobs)
+    if (!same_value(a.*k.second, b.*k.second))
+      return false;
+  return a.material == b.material && a.allow_sleeping == b.allow_sleeping;
 }
 
 // Command keys as a slot first sees them: unset ones are seeded with 0. If the tree held any
@@ -306,6 +345,12 @@ template <class T, class Id> const T *find_id(const std::vector<T> &v, Id id) {
   return it != v.end() && it->id.value == id.value ? &*it : nullptr;
 }
 
+const body_snapshot *find_body(const world_snapshot &s, body_id id) {
+  if (const body_snapshot *b = find_id(s.bodies, id))
+    return b;
+  return s.static_bodies ? find_id(*s.static_bodies, id) : nullptr;
+}
+
 std::string dotless(std::string s) {
   for (char &c : s)
     if (c == '.')
@@ -313,7 +358,73 @@ std::string dotless(std::string s) {
   return s;
 }
 
+// A multiple of `every` steps lies in (last, now]: the first publication is always due.
+bool due(int every, bool published, std::uint64_t last, std::uint64_t now) {
+  if (every <= 0)
+    return false;
+  const std::uint64_t n = static_cast<std::uint64_t>(every);
+  return !published || now / n != last / n;
+}
+
 } // namespace
+
+// What one push writes: gathered under the binding's lock on the stepping thread, written
+// there or on the publish thread.
+struct world_binding::publication {
+  std::uint64_t tick = 0;
+  double time = 0.0;
+  step_report report;
+  std::uint64_t bodies = 0;
+  std::string version;
+  bool restart_required = false;
+  bool have_hash = false;
+  std::uint64_t hash = 0;
+  std::shared_ptr<const world_snapshot> snapshot; // when anything below needs it
+  bool data = false;                              // snapshot as data
+  bool json = false;                              // snapshot_json
+  bool json_static = false;                       // snapshot_json_static
+  std::vector<std::pair<std::string, body_id>> bodies_named;
+  std::vector<std::pair<std::string, vehicle_id>> vehicles_named;
+  std::vector<std::pair<std::string, field_id>> fields_named;
+  std::uint64_t dropped = 0;
+  bool threaded = false;
+
+  // A newer publication replacing this one before it was written keeps what only this one
+  // carried: its snapshot and named keys when the newer has none, and a due static list.
+  void absorb(publication &&older) {
+    if (!snapshot && older.snapshot) {
+      snapshot = std::move(older.snapshot);
+      data = older.data;
+      json = older.json;
+      json_static = older.json_static;
+      bodies_named = std::move(older.bodies_named);
+      vehicles_named = std::move(older.vehicles_named);
+      fields_named = std::move(older.fields_named);
+    } else if (snapshot) {
+      json_static = json_static || older.json_static;
+    }
+    if (!have_hash && older.have_hash) {
+      have_hash = true;
+      hash = older.hash;
+    }
+  }
+};
+
+// The publish thread, and the watch that tells pull() whether the tree changed.
+struct world_binding::background {
+  // Set by any write under the prefix except the binding's own; shared with the slot, which
+  // may outlive the binding by a moment on another thread.
+  std::shared_ptr<std::atomic<bool>> dirty = std::make_shared<std::atomic<bool>>(true);
+  boost::signals2::scoped_connection watch;
+
+  std::thread thread;
+  std::mutex mutex;
+  std::condition_variable cv;
+  std::unique_ptr<publication> pending;
+  bool busy = false;
+  bool stop = false;
+  std::uint64_t dropped = 0;
+};
 
 world_config world_binding::config_from_state(cvc::app &ctx, const std::string &prefix) {
   world_config c;
@@ -323,7 +434,20 @@ world_config world_binding::config_from_state(cvc::app &ctx, const std::string &
 }
 
 world_binding::world_binding(cvc::app &ctx, physics::world &w, std::string prefix)
-    : _ctx(ctx), _w(w), _prefix(std::move(prefix)) {}
+    : _ctx(ctx), _w(w), _prefix(std::move(prefix)), _bg(new background) {
+  std::shared_ptr<std::atomic<bool>> dirty = _bg->dirty;
+  try {
+    _bg->watch =
+        cvc::state::instance(_ctx)(_prefix).childChanged.connect([dirty](const std::string &) {
+          if (t_own_writes == 0)
+            dirty->store(true);
+        });
+  } catch (const std::exception &) {
+    _links = true; // no watch: read the tree on every pull
+  }
+}
+
+world_binding::~world_binding() { stop_publisher(); }
 
 std::string world_binding::key(const std::string &name) const { return at(_prefix, name); }
 
@@ -394,8 +518,15 @@ void world_binding::pull() {
 }
 
 void world_binding::pull_locked() {
-  if (!_seeded)
+  const own_writes mine; // seeding a key is not a change to pull next time
+  const bool first = !_seeded;
+  if (first)
     seed();
+  const bool dirty = _bg->dirty->exchange(false);
+  if (!first && !dirty && !_links)
+    return; // nothing under the prefix changed
+  const int links = t_links;
+
   world_config build = _w.config();
   read_build_keys(_ctx, _prefix, build);
   _restart_required = !same_build(build, _w.config());
@@ -410,11 +541,25 @@ void world_binding::pull_locked() {
   knob(_ctx, key("publish_every"), _publish_every);
   knob(_ctx, key("hash_every"), _hash_every);
   knob(_ctx, key("snapshot_every"), _snapshot_every);
+  knob(_ctx, key("snapshot_json_every"), _snapshot_json_every);
+  int thread = _publish_thread;
+  knob(_ctx, key("publish_thread"), thread);
   pull_materials();
+  for (auto &b : _bodies)
+    pull_body(b.first, b.second);
   for (auto &v : _vehicles)
     pull_vehicle(v.first, v.second);
   for (auto &f : _fields)
     pull_field(f.first, f.second);
+  _links = t_links != links;
+
+  if ((thread != 0) != (_publish_thread != 0)) {
+    if (thread != 0)
+      start_publisher();
+    else
+      stop_publisher();
+  }
+  _publish_thread = thread;
 }
 
 void world_binding::push() {
@@ -422,43 +567,238 @@ void world_binding::push() {
   push_locked();
 }
 
-void world_binding::push_locked() {
-  const step_report r = _w.last_report();
-  write_val(_ctx, key("tick"), _w.tick());
-  write_val(_ctx, key("time"), _w.time());
-  write_val(_ctx, key("step_ms"), r.step_ms);
-  write_val(_ctx, key("bodies"), static_cast<std::uint64_t>(_w.body_count()));
-  write_val(_ctx, key("active_bodies"), static_cast<std::uint64_t>(r.active_bodies));
-  write_val(_ctx, key("contact_events"), static_cast<std::uint64_t>(r.contacts));
-  write_val(_ctx, key("saturated"), r.saturated);
-  write_val(_ctx, key("version"), backend_version(_w.backend()));
-  write_val(_ctx, key("restart_required"), _restart_required);
-  if (_hash_every > 0 && _w.tick() % static_cast<std::uint64_t>(_hash_every) == 0) {
-    char hex[17];
-    std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(_w.state_hash()));
-    write_val(_ctx, key("state_hash"), std::string(hex));
+void world_binding::gather(publication &p) {
+  p.tick = _w.tick();
+  p.time = _w.time();
+  p.report = _w.last_report();
+  p.bodies = static_cast<std::uint64_t>(_w.body_count());
+  p.version = backend_version(_w.backend());
+  p.restart_required = _restart_required;
+  if (_hash_every > 0 && p.tick % static_cast<std::uint64_t>(_hash_every) == 0) {
+    p.have_hash = true;
+    p.hash = _w.state_hash();
   }
-  // The snapshot every snapshot_every steps (a multiple crossed since the last one), and
-  // the named actors' keys from the same snapshot, so they agree on a tick.
-  const std::uint64_t t = _w.tick();
-  const std::uint64_t every = _snapshot_every > 0 ? static_cast<std::uint64_t>(_snapshot_every) : 0;
-  const bool due = every > 0 && (!_snapshot || t / every != _snapshot->tick / every);
-  if (!due && _bodies.empty() && _vehicles.empty() && _fields.empty())
+  const bool data =
+      due(_snapshot_every, _snapshot != nullptr, _snapshot ? _snapshot->tick : 0, p.tick);
+  const bool json = due(_snapshot_json_every, _json_published, _json_tick, p.tick);
+  const bool named = !_bodies.empty() || !_vehicles.empty() || !_fields.empty();
+  if (!data && !json && !named)
     return;
-  std::shared_ptr<const world_snapshot> snap;
   try {
-    snap = std::make_shared<const world_snapshot>(_w.snapshot());
+    if (data || json) {
+      p.snapshot = std::make_shared<const world_snapshot>(_w.snapshot());
+    } else {
+      // Only the named actors are due: read just them.
+      std::vector<body_id> bodies;
+      std::vector<vehicle_id> vehicles;
+      std::vector<field_id> fields;
+      for (const auto &b : _bodies)
+        bodies.push_back(b.second.id);
+      for (const auto &v : _vehicles)
+        vehicles.push_back(v.second.id);
+      for (const auto &f : _fields)
+        fields.push_back(f.second.id);
+      p.snapshot = std::make_shared<const world_snapshot>(_w.snapshot(bodies, vehicles, fields));
+    }
   } catch (const cvc::exception &) {
     return;
   }
-  if (due) {
-    _snapshot = snap;
-    try {
-      cvc::state::instance(_ctx)(key("snapshot")).data(boost::any(snap));
-    } catch (const std::exception &) {
+  const world_snapshot &s = *p.snapshot;
+  if (data) {
+    _snapshot = p.snapshot;
+    p.data = true;
+  }
+  if (json) {
+    _json_published = true;
+    _json_tick = p.tick;
+    p.json = true;
+    if (!_json_static_published || s.static_version != _json_static_version) {
+      _json_static_published = true;
+      _json_static_version = s.static_version;
+      p.json_static = true;
     }
   }
-  push_named(*snap);
+  // The named actors the world still holds; the rest stop being published.
+  for (auto it = _bodies.begin(); it != _bodies.end();)
+    if (find_body(s, it->second.id)) {
+      p.bodies_named.emplace_back(it->first, it->second.id);
+      ++it;
+    } else {
+      it = _bodies.erase(it);
+    }
+  for (auto it = _vehicles.begin(); it != _vehicles.end();)
+    if (find_id(s.vehicles, it->second.id)) {
+      p.vehicles_named.emplace_back(it->first, it->second.id);
+      ++it;
+    } else {
+      it = _vehicles.erase(it);
+    }
+  for (auto it = _fields.begin(); it != _fields.end();)
+    if (find_id(s.fields, it->second.id)) {
+      p.fields_named.emplace_back(it->first, it->second.id);
+      ++it;
+    } else {
+      it = _fields.erase(it);
+    }
+}
+
+void world_binding::push_locked() {
+  std::unique_ptr<publication> p(new publication);
+  gather(*p);
+  if (!_publish_thread || !_bg->thread.joinable()) {
+    write(*p);
+    return;
+  }
+  p->threaded = true;
+  {
+    std::lock_guard<std::mutex> lock(_bg->mutex);
+    if (_bg->pending) { // the publisher has not started the last one: this one replaces it
+      p->absorb(std::move(*_bg->pending));
+      ++_bg->dropped;
+    }
+    p->dropped = _bg->dropped;
+    _bg->pending = std::move(p);
+  }
+  _bg->cv.notify_all();
+}
+
+void world_binding::write(const publication &p) const {
+  const own_writes mine;
+  write_val(_ctx, key("tick"), p.tick);
+  write_val(_ctx, key("time"), p.time);
+  write_val(_ctx, key("step_ms"), p.report.step_ms);
+  write_val(_ctx, key("bodies"), p.bodies);
+  write_val(_ctx, key("active_bodies"), static_cast<std::uint64_t>(p.report.active_bodies));
+  write_val(_ctx, key("contact_events"), static_cast<std::uint64_t>(p.report.contacts));
+  write_val(_ctx, key("saturated"), p.report.saturated);
+  write_val(_ctx, key("version"), p.version);
+  write_val(_ctx, key("restart_required"), p.restart_required);
+  if (p.threaded)
+    write_val(_ctx, key("publish_dropped"), p.dropped);
+  if (p.have_hash) {
+    char hex[17];
+    std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(p.hash));
+    write_val(_ctx, key("state_hash"), std::string(hex));
+  }
+  if (!p.snapshot)
+    return;
+  const world_snapshot &s = *p.snapshot;
+  if (p.data)
+    try {
+      cvc::state::instance(_ctx)(key("snapshot")).data(boost::any(p.snapshot));
+    } catch (const std::exception &) {
+    }
+  if (p.json_static)
+    write_val(_ctx, key("snapshot_json_static"), to_json(s, json_bodies::static_only));
+  if (p.json)
+    write_val(_ctx, key("snapshot_json"), to_json(s, json_bodies::moving));
+
+  for (const auto &named : p.bodies_named) {
+    const body_snapshot *b = find_body(s, named.second);
+    if (!b)
+      continue;
+    const std::string base = key("bodies." + named.first);
+    write_val(_ctx, at(base, "id"), b->id.value);
+    write_val(_ctx, at(base, "motion"), std::string(motion_name(b->motion)));
+    put_vec(_ctx, at(base, "position"), b->state.position);
+    put_quat(_ctx, at(base, "rotation"), b->state.rotation);
+    put_vec(_ctx, at(base, "velocity"), b->state.linear_velocity);
+    put_vec(_ctx, at(base, "angular_velocity"), b->state.angular_velocity);
+    write_val(_ctx, at(base, "active"), b->state.active);
+    put_vec(_ctx, at(base, "field_force"), b->fields.force);
+    write_val(_ctx, at(base, "immersed_volume"), b->fields.immersed_volume);
+  }
+  for (const auto &named : p.vehicles_named) {
+    const vehicle_snapshot *v = find_id(s.vehicles, named.second);
+    if (!v)
+      continue;
+    const std::string base = key("vehicles." + named.first);
+    const vehicle_state &vs = v->state;
+    write_val(_ctx, at(base, "chassis"), vs.chassis.value);
+    write_val(_ctx, at(base, "speed"), vs.speed);
+    write_val(_ctx, at(base, "steer"), vs.steer);
+    write_val(_ctx, at(base, "steer_command"), vs.steer_command);
+    write_val(_ctx, at(base, "throttle"), vs.throttle);
+    write_val(_ctx, at(base, "brake"), vs.brake);
+    write_val(_ctx, at(base, "hand_brake"), vs.hand_brake);
+    write_val(_ctx, at(base, "gear"), vs.gear);
+    write_val(_ctx, at(base, "engine_rpm"), vs.engine_rpm);
+    put_vec(_ctx, at(base, "position"), vs.body.position);
+    put_quat(_ctx, at(base, "rotation"), vs.body.rotation);
+    put_vec(_ctx, at(base, "velocity"), vs.body.linear_velocity);
+    put_vec(_ctx, at(base, "angular_velocity"), vs.body.angular_velocity);
+    put_vec(_ctx, at(base, "aero_force"), vs.aero_force);
+    put_vec(_ctx, at(base, "air_velocity"), vs.air_velocity);
+    for (std::size_t i = 0; i < vs.wheels.size(); ++i) {
+      const wheel_state &w = vs.wheels[i];
+      const std::string wb = at(base, "wheels." + std::to_string(i));
+      write_val(_ctx, at(wb, "steer"), w.steer);
+      write_val(_ctx, at(wb, "angular_velocity"), w.angular_velocity);
+      write_val(_ctx, at(wb, "suspension_length"), w.suspension_length);
+      write_val(_ctx, at(wb, "contact"), w.contact);
+      put_vec(_ctx, at(wb, "contact_point"), w.contact_point);
+      write_val(_ctx, at(wb, "load"), w.load);
+      write_val(_ctx, at(wb, "longitudinal_slip"), w.longitudinal_slip);
+      write_val(_ctx, at(wb, "lateral_slip"), w.lateral_slip);
+      write_val(_ctx, at(wb, "friction"), w.friction);
+      write_val(_ctx, at(wb, "rolling_resistance"), w.rolling_resistance);
+      write_val(_ctx, at(wb, "medium_depth"), w.medium_depth);
+      write_val(_ctx, at(wb, "sinkage"), w.sinkage);
+      write_val(_ctx, at(wb, "rut"), w.rut);
+      write_val(_ctx, at(wb, "medium_resistance"), w.medium_resistance);
+    }
+  }
+  for (const auto &named : p.fields_named) {
+    const field_snapshot *f = find_id(s.fields, named.second);
+    if (!f)
+      continue;
+    const std::string base = key("fields." + named.first);
+    write_val(_ctx, at(base, "kind"), std::string(kind_name(f->desc.kind)));
+    write_val(_ctx, at(base, "ruts.cells"), static_cast<std::uint64_t>(f->rut_cells));
+    write_val(_ctx, at(base, "ruts.deepest"), f->rut_deepest);
+  }
+}
+
+void world_binding::start_publisher() {
+  if (_bg->thread.joinable())
+    return;
+  {
+    std::lock_guard<std::mutex> lock(_bg->mutex);
+    _bg->stop = false;
+  }
+  background *bg = _bg.get();
+  _bg->thread = std::thread([this, bg] {
+    std::unique_lock<std::mutex> lock(bg->mutex);
+    for (;;) {
+      bg->cv.wait(lock, [bg] { return bg->pending || bg->stop; });
+      if (!bg->pending)
+        return; // stopping, with nothing left to write
+      std::unique_ptr<publication> p = std::move(bg->pending);
+      bg->busy = true;
+      lock.unlock();
+      write(*p);
+      p.reset(); // let go of the snapshot here, not under the lock
+      lock.lock();
+      bg->busy = false;
+      bg->cv.notify_all();
+    }
+  });
+}
+
+void world_binding::stop_publisher() {
+  if (!_bg->thread.joinable())
+    return;
+  {
+    std::lock_guard<std::mutex> lock(_bg->mutex);
+    _bg->stop = true;
+  }
+  _bg->cv.notify_all();
+  _bg->thread.join(); // after it writes what it holds
+}
+
+void world_binding::flush() {
+  std::unique_lock<std::mutex> lock(_bg->mutex);
+  _bg->cv.wait(lock, [this] { return !_bg->pending && !_bg->busy; });
 }
 
 step_report world_binding::step() {
@@ -486,11 +826,19 @@ std::uint64_t world_binding::follow(const cvc::world_clock &clock) {
 
 void world_binding::publish_body(const std::string &name, body_id id) {
   need_name(name);
-  if (!_w.contains(id))
+  body_slot b;
+  b.id = id;
+  try {
+    b.tuned = _w.get_body(id);
+  } catch (const cvc::exception &) {
     throw cvc::physics_error("world_binding: no body " + std::to_string(id.value) +
                              " to publish as '" + name + "'");
+  }
+  b.material = _w.get_material(b.tuned.material).name;
   std::lock_guard<std::mutex> lock(_mutex);
-  _bodies[name] = id;
+  const own_writes mine;
+  pull_body(name, b); // seeds the knobs, and applies what the tree already holds
+  _bodies[name] = std::move(b);
 }
 
 void world_binding::publish_vehicle(const std::string &name, vehicle_id id) {
@@ -499,6 +847,7 @@ void world_binding::publish_vehicle(const std::string &name, vehicle_id id) {
   v.id = id;
   v.tuned = _w.get_vehicle(id); // throws for an id the world does not hold
   std::lock_guard<std::mutex> lock(_mutex);
+  const own_writes mine;
   const std::string base = key("vehicles." + name);
   v.command = first_seen(_ctx, at(base, "command"), kCommandKeys);
   v.controls = first_seen(_ctx, at(base, "controls"), kControlKeys);
@@ -514,6 +863,7 @@ void world_binding::publish_field(const std::string &name, field_id id) {
   for (int i = 0; i < 3; ++i)
     f.tuned[i] = d.*kFieldKnobs[i].second;
   std::lock_guard<std::mutex> lock(_mutex);
+  const own_writes mine;
   pull_field(name, f);
   _fields[name] = f;
 }
@@ -556,6 +906,35 @@ world_binding::snapshot_from_state(cvc::app &ctx, const std::string &prefix) {
 std::shared_ptr<const world_snapshot> world_binding::last_snapshot() const {
   std::lock_guard<std::mutex> lock(_mutex);
   return _snapshot;
+}
+
+void world_binding::pull_body(const std::string &name, body_slot &b) {
+  const std::string base = key("bodies." + name);
+  body_settings t = b.tuned;
+  for (const auto &k : kBodyKnobs)
+    knob(_ctx, at(base, k.first), t.*k.second);
+  knob_flag(_ctx, at(base, "allow_sleeping"), t.allow_sleeping);
+  // The material by name, as the tree names materials.
+  const std::string path = at(base, "material");
+  const std::string raw = read_raw(_ctx, path);
+  if (raw.empty()) {
+    write_val(_ctx, path, b.material);
+  } else if (raw != b.material) {
+    for (std::size_t i = 0; i < _w.material_count(); ++i)
+      if (_w.get_material(static_cast<material_id>(i)).name == raw) {
+        t.material = static_cast<material_id>(i);
+        break;
+      }
+    b.material = raw; // an unknown name is ignored until the key changes again
+  }
+  if (!same_settings(t, b.tuned)) {
+    try {
+      _w.set_body(b.id, t);
+    } catch (const cvc::exception &) {
+      // A change set_body refuses is ignored: the body keeps its settings.
+    }
+    b.tuned = t;
+  }
 }
 
 void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
@@ -629,82 +1008,6 @@ void world_binding::pull_field(const std::string &name, field_slot &f) {
   }
   for (int i = 0; i < 3; ++i)
     f.tuned[i] = t[i];
-}
-
-void world_binding::push_named(const world_snapshot &s) {
-  for (auto it = _bodies.begin(); it != _bodies.end();) {
-    const body_snapshot *b = find_id(s.bodies, it->second);
-    if (!b) {
-      it = _bodies.erase(it);
-      continue;
-    }
-    const std::string base = key("bodies." + it->first);
-    write_val(_ctx, at(base, "id"), b->id.value);
-    write_val(_ctx, at(base, "motion"), std::string(motion_name(b->motion)));
-    put_vec(_ctx, at(base, "position"), b->state.position);
-    put_quat(_ctx, at(base, "rotation"), b->state.rotation);
-    put_vec(_ctx, at(base, "velocity"), b->state.linear_velocity);
-    put_vec(_ctx, at(base, "angular_velocity"), b->state.angular_velocity);
-    write_val(_ctx, at(base, "active"), b->state.active);
-    put_vec(_ctx, at(base, "field_force"), b->fields.force);
-    write_val(_ctx, at(base, "immersed_volume"), b->fields.immersed_volume);
-    ++it;
-  }
-  for (auto it = _vehicles.begin(); it != _vehicles.end();) {
-    const vehicle_snapshot *v = find_id(s.vehicles, it->second.id);
-    if (!v) {
-      it = _vehicles.erase(it);
-      continue;
-    }
-    const std::string base = key("vehicles." + it->first);
-    const vehicle_state &vs = v->state;
-    write_val(_ctx, at(base, "chassis"), vs.chassis.value);
-    write_val(_ctx, at(base, "speed"), vs.speed);
-    write_val(_ctx, at(base, "steer"), vs.steer);
-    write_val(_ctx, at(base, "steer_command"), vs.steer_command);
-    write_val(_ctx, at(base, "throttle"), vs.throttle);
-    write_val(_ctx, at(base, "brake"), vs.brake);
-    write_val(_ctx, at(base, "hand_brake"), vs.hand_brake);
-    write_val(_ctx, at(base, "gear"), vs.gear);
-    write_val(_ctx, at(base, "engine_rpm"), vs.engine_rpm);
-    put_vec(_ctx, at(base, "position"), vs.body.position);
-    put_quat(_ctx, at(base, "rotation"), vs.body.rotation);
-    put_vec(_ctx, at(base, "velocity"), vs.body.linear_velocity);
-    put_vec(_ctx, at(base, "angular_velocity"), vs.body.angular_velocity);
-    put_vec(_ctx, at(base, "aero_force"), vs.aero_force);
-    put_vec(_ctx, at(base, "air_velocity"), vs.air_velocity);
-    for (std::size_t i = 0; i < vs.wheels.size(); ++i) {
-      const wheel_state &w = vs.wheels[i];
-      const std::string wb = at(base, "wheels." + std::to_string(i));
-      write_val(_ctx, at(wb, "steer"), w.steer);
-      write_val(_ctx, at(wb, "angular_velocity"), w.angular_velocity);
-      write_val(_ctx, at(wb, "suspension_length"), w.suspension_length);
-      write_val(_ctx, at(wb, "contact"), w.contact);
-      put_vec(_ctx, at(wb, "contact_point"), w.contact_point);
-      write_val(_ctx, at(wb, "load"), w.load);
-      write_val(_ctx, at(wb, "longitudinal_slip"), w.longitudinal_slip);
-      write_val(_ctx, at(wb, "lateral_slip"), w.lateral_slip);
-      write_val(_ctx, at(wb, "friction"), w.friction);
-      write_val(_ctx, at(wb, "rolling_resistance"), w.rolling_resistance);
-      write_val(_ctx, at(wb, "medium_depth"), w.medium_depth);
-      write_val(_ctx, at(wb, "sinkage"), w.sinkage);
-      write_val(_ctx, at(wb, "rut"), w.rut);
-      write_val(_ctx, at(wb, "medium_resistance"), w.medium_resistance);
-    }
-    ++it;
-  }
-  for (auto it = _fields.begin(); it != _fields.end();) {
-    const field_snapshot *f = find_id(s.fields, it->second.id);
-    if (!f) {
-      it = _fields.erase(it);
-      continue;
-    }
-    const std::string base = key("fields." + it->first);
-    write_val(_ctx, at(base, "kind"), std::string(kind_name(f->desc.kind)));
-    write_val(_ctx, at(base, "ruts.cells"), static_cast<std::uint64_t>(f->rut_cells));
-    write_val(_ctx, at(base, "ruts.deepest"), f->rut_deepest);
-    ++it;
-  }
 }
 
 material_id world_binding::material(const std::string &name) const {

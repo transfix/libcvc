@@ -49,6 +49,7 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
@@ -804,6 +805,45 @@ public:
     return out;
   }
 
+  double body_mass(body_id id) const override {
+    JPH::BodyLockRead lock(_ps->GetBodyLockInterface(), checked(id));
+    if (!lock.Succeeded())
+      throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+    const JPH::Body &b = lock.GetBody();
+    if (!b.IsDynamic())
+      return 0.0;
+    const float inverse = b.GetMotionProperties()->GetInverseMass();
+    return inverse > 0.0f ? 1.0 / static_cast<double>(inverse) : 0.0;
+  }
+
+  // Between steps only, like set_material: the friction combine reads a convex shape's
+  // material from the next step on.
+  void set_body_settings(body_id id, const body_settings &s, bool new_mass) override {
+    const JPH::BodyID jid = alive(id);
+    bool moving = false;
+    {
+      JPH::BodyLockWrite lock(_ps->GetBodyLockInterface(), jid);
+      if (!lock.Succeeded())
+        throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+      JPH::Body &b = lock.GetBody();
+      // Each body has its own shape (add_body builds one per body), so this changes no other.
+      if (b.GetShape()->GetType() == JPH::EShapeType::Convex)
+        const_cast<JPH::ConvexShape *>(static_cast<const JPH::ConvexShape *>(b.GetShape()))
+            ->SetMaterial(_mats.at(s.material).GetPtr());
+      if (!b.IsStatic()) {
+        JPH::MotionProperties *mp = b.GetMotionProperties();
+        mp->SetLinearDamping(static_cast<float>(s.linear_damping));
+        mp->SetAngularDamping(static_cast<float>(s.angular_damping));
+        b.SetAllowSleeping(s.allow_sleeping);
+        if (new_mass && b.IsDynamic())
+          mp->ScaleToMass(static_cast<float>(s.mass));
+        moving = true;
+      }
+    }
+    if (moving)
+      _ps->GetBodyInterface().ActivateBody(jid);
+  }
+
   void remove_body(body_id id) override {
     const JPH::BodyID jid = alive(id);
     JPH::BodyInterface &bi = _ps->GetBodyInterface();
@@ -834,6 +874,26 @@ public:
     s.angular_velocity = from_jolt(b.GetAngularVelocity());
     s.active = b.IsActive();
     return s;
+  }
+
+  // One pass without per-body locks: the facade calls it under the world's lock, so no
+  // step or other call changes a body meanwhile.
+  void states(const std::vector<body_id> &ids, std::vector<body_state> &out) const override {
+    const JPH::BodyLockInterfaceNoLock &bodies = _ps->GetBodyLockInterfaceNoLock();
+    out.clear();
+    out.reserve(ids.size());
+    for (const body_id id : ids) {
+      const JPH::Body *b = bodies.TryGetBody(checked(id));
+      if (b == nullptr)
+        throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+      body_state s;
+      s.position = from_engine(b->GetPosition());
+      s.rotation = is_heightfield(*b) ? quat{} : from_jolt(b->GetRotation());
+      s.linear_velocity = from_jolt(b->GetLinearVelocity());
+      s.angular_velocity = from_jolt(b->GetAngularVelocity());
+      s.active = b->IsActive();
+      out.push_back(s);
+    }
   }
 
   void set_state(body_id id, const body_state &s) override {

@@ -24,6 +24,8 @@
 // Jolt only; the refusals run on the null backend too.
 
 #include <algorithm>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -35,6 +37,7 @@
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -807,19 +810,22 @@ TEST(PhysicsVehicle, TheSnapshotHoldsEveryBodyAndVehicleAtOneTick) {
   EXPECT_DOUBLE_EQ(s.time, w.time());
   EXPECT_EQ(s.materials.size(), w.material_count());
   EXPECT_EQ(s.contacts.size(), w.contacts().size());
-  ASSERT_EQ(s.bodies.size(), w.body_count());
+  ASSERT_NE(s.static_bodies, nullptr);
+  ASSERT_EQ(s.bodies.size() + s.static_bodies->size(), w.body_count());
+  ASSERT_EQ(s.static_bodies->size(), 1u); // the ground
   for (std::size_t i = 1; i < s.bodies.size(); ++i)
     EXPECT_LT(s.bodies[i - 1].id.value, s.bodies[i].id.value);
-  int statics = 0;
-  for (const body_snapshot &b : s.bodies) {
+  std::vector<body_snapshot> every = s.bodies;
+  every.insert(every.end(), s.static_bodies->begin(), s.static_bodies->end());
+  for (const body_snapshot &b : every) {
     const body_state now = w.state(b.id);
     EXPECT_EQ(b.state.position.x, now.position.x);
     EXPECT_EQ(b.state.position.z, now.position.z);
     EXPECT_EQ(b.state.linear_velocity.x, now.linear_velocity.x);
     EXPECT_EQ(b.state.active, now.active);
-    statics += b.motion == motion_type::static_;
+    EXPECT_EQ(b.settings.material, w.get_body(b.id).material);
   }
-  EXPECT_EQ(statics, 1);
+  EXPECT_EQ((*s.static_bodies)[0].motion, motion_type::static_);
   ASSERT_EQ(s.vehicles.size(), 1u);
   const vehicle_state now = w.vehicle_state(v);
   EXPECT_EQ(s.vehicles[0].id, v);
@@ -831,6 +837,23 @@ TEST(PhysicsVehicle, TheSnapshotHoldsEveryBodyAndVehicleAtOneTick) {
   for (const body_snapshot &b : s.bodies)
     chassis = chassis || (b.id == now.chassis && b.motion == motion_type::dynamic);
   EXPECT_TRUE(chassis);
+  // The static list is shared until a static body changes.
+  w.step();
+  const world_snapshot later = w.snapshot();
+  EXPECT_EQ(later.static_bodies, s.static_bodies);
+  EXPECT_EQ(later.static_version, s.static_version);
+  w.add_body({box{{1.0, 1.0, 1.0}}, motion_type::static_, {40.0, 40.0, 1.0}});
+  const world_snapshot after = w.snapshot();
+  EXPECT_NE(after.static_version, s.static_version);
+  EXPECT_EQ(after.static_bodies->size(), 2u);
+  EXPECT_EQ(s.static_bodies->size(), 1u) << "an earlier snapshot keeps its own list";
+  // A partial snapshot: just the vehicle and the ground.
+  const world_snapshot part = w.snapshot({(*s.static_bodies)[0].id}, {v}, {});
+  EXPECT_EQ(part.bodies.size(), 0u);
+  ASSERT_EQ(part.static_bodies->size(), 1u);
+  ASSERT_EQ(part.vehicles.size(), 1u);
+  EXPECT_EQ(part.vehicles[0].state.speed, w.vehicle_state(v).speed);
+  EXPECT_TRUE(part.contacts.empty());
 }
 
 // A vehicle published to the tree is driven, tuned and read there.
@@ -869,6 +892,28 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
             s.wheels[0].contact_point.z);
   EXPECT_EQ(tree(a, "physics.vehicles.truck.gear"), std::to_string(s.gear));
   EXPECT_EQ(tree(a, "physics.vehicles.truck.chassis"), std::to_string(s.chassis.value));
+  {
+    // The same tick as JSON, for Python and remote readers.
+    set_tree(a, "physics.snapshot_json_every", "1");
+    b.step();
+    std::istringstream in(tree(a, "physics.snapshot_json"));
+    boost::property_tree::ptree doc;
+    boost::property_tree::read_json(in, doc);
+    EXPECT_EQ(doc.get<std::uint64_t>("tick"), w.tick());
+    const vehicle_state now = w.vehicle_state(v);
+    int vehicles = 0;
+    for (const auto &e : doc.get_child("vehicles")) {
+      if (e.second.get<std::uint32_t>("id") != v.value)
+        continue;
+      ++vehicles;
+      EXPECT_EQ(std::stod(e.second.get<std::string>("state.speed")), now.speed);
+      EXPECT_EQ(e.second.get_child("state.wheels").size(), now.wheels.size());
+      EXPECT_EQ(std::stod(e.second.get<std::string>("desc.max_steer")),
+                vehicle_desc::humvee().max_steer);
+    }
+    EXPECT_EQ(vehicles, 1);
+    set_tree(a, "physics.snapshot_json_every", "0");
+  }
   {
     const auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < 100; ++i)

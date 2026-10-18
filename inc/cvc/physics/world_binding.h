@@ -28,10 +28,13 @@
 //   bind.publish_vehicle("truck", truck);                               // its keys, below
 //   ... per frame: bind.follow(app.world_clock());                    // pull, step, push
 //   ... any thread: auto s = world_binding::snapshot_from_state(app);  // the whole world
+//   ... Python:     json.loads(pycvc.state_get(app, "physics.snapshot_json"))
 //
 // Keys, relative to the prefix. A key that is unset is seeded with the world's
 // value (the knob idiom: whatever set it first, a scene or a script, wins). An
-// unreadable value is ignored, never thrown into a frame.
+// unreadable value is ignored, never thrown into a frame. pull() reads the tree only
+// when something under the prefix changed since the last pull (every time if a key
+// is a link into another scope), so an unchanged tree costs a pull nothing.
 //
 //   built with the world (config_from_state reads them; changing one later sets
 //   restart_required instead of touching the running world):
@@ -53,12 +56,20 @@
 //     materials.<name>.restitution         double  a material, a changed value updates it from
 //     materials.<name>.rolling_resistance  double  the next step. "default" is material 0.
 //     materials.<name>.nav_material        int     Names must not contain '.'.
-//     publish_every                        int     step()/follow() push every N steps (1)
-//     hash_every                           int     push() publishes state_hash every N
-//                                                  steps; 0 = never (it digests the whole
-//                                                  state, so it is off by default)
-//     snapshot_every                       int     push() publishes the snapshot every N
-//                                                  steps (1); 0 = never
+//   how often push() publishes, in steps (with fixed_dt = 0.01, 10 is 10 Hz):
+//     publish_every                        int     step()/follow() push every N steps (1):
+//                                                  the telemetry and the named actors' keys
+//     snapshot_every                       int     the snapshot data, at most every push,
+//                                                  every N steps (1); 0 = never
+//     snapshot_json_every                  int     the snapshot as JSON every N steps; 0 =
+//                                                  never, the default (JSON costs the most)
+//     hash_every                           int     state_hash every N steps; 0 = never, the
+//                                                  default (it digests the whole state)
+//     publish_thread                       int     1: a background thread writes what a push
+//                                                  publishes, so a step pays only for copying
+//                                                  the snapshot; a newer publication replaces
+//                                                  one it has not started. 0, the default:
+//                                                  push() writes before it returns.
 //
 //   written by push():
 //     tick, time, step_ms, bodies, active_bodies, contact_events, saturated
@@ -68,6 +79,13 @@
 //     snapshot                 data    std::shared_ptr<const world_snapshot> in the
 //                                      node's data(): every body, field, vehicle and
 //                                      contact at one tick (snapshot_from_state reads it)
+//     snapshot_json            string  that snapshot as JSON (snapshot_json.h) without the
+//                                      static bodies
+//     snapshot_json_static     string  the static bodies as JSON, rewritten only when one
+//                                      is added, removed, moved or given a material (its
+//                                      static_version matches snapshot_json's then)
+//     publish_dropped          int     publications publish_thread skipped because a newer
+//                                      one replaced them
 //
 //   named actors (publish_body, publish_vehicle, publish_field, publish): every push()
 //   writes their telemetry from that one snapshot, so the keys of a push agree on a tick.
@@ -82,6 +100,8 @@
 //       rolling_resistance, medium_depth, sinkage, rut, medium_resistance}
 //     fields.<name>.kind, ruts.cells, ruts.deepest
 //   and read by every pull():
+//     bodies.<name>.{material, mass, linear_damping, angular_damping, allow_sleeping}
+//                                                         world::set_body; material by name
 //     vehicles.<name>.command.{steer, accel, reverse}     a change drives it
 //                                                         (world::drive)
 //     vehicles.<name>.controls.{steer, throttle, brake, hand_brake, reverse, neutral}
@@ -127,15 +147,22 @@ public:
   static world_config config_from_state(cvc::app &ctx, const std::string &prefix = "physics");
 
   world_binding(cvc::app &ctx, physics::world &w, std::string prefix = "physics");
+  // Joins the publish thread after it writes what it holds.
+  ~world_binding();
+  world_binding(const world_binding &) = delete;
+  world_binding &operator=(const world_binding &) = delete;
 
-  // Tree -> world: the runtime settings, then the material table.
+  // Tree -> world: the runtime settings, then the material table and the named actors.
   void pull();
-  // World -> tree: the telemetry keys.
+  // World -> tree: the telemetry keys, and what is due of the snapshot.
   void push();
   // pull(), one step, push() (every publish_every steps).
   step_report step();
   // pull(), world().follow(clock), push() if any step ran and one is due.
   std::uint64_t follow(const cvc::world_clock &clock);
+  // Wait until the publish thread has written every publication handed to it; at once
+  // without one.
+  void flush();
 
   // The id of a material declared under <prefix>.materials (as of the last pull).
   // Throws cvc::physics_error for a name the tree does not declare.
@@ -176,6 +203,11 @@ private:
   };
 
   // The command and control keys as last seen, and the knobs as last applied.
+  struct body_slot {
+    body_id id;
+    body_settings tuned;
+    std::string material; // the material key as last seen
+  };
   struct vehicle_slot {
     vehicle_id id;
     std::vector<std::string> command, controls;
@@ -186,29 +218,44 @@ private:
     double tuned[3] = {0.0, 0.0, 0.0}; // drag_coefficient, damping, traction
   };
 
+  struct publication; // what one push writes (world_binding.cpp)
+  struct background;  // the publish thread and the tree watch (world_binding.cpp)
+
   void seed();
   void pull_locked();
   void push_locked();
   void pull_materials();
+  void pull_body(const std::string &name, body_slot &b);
   void pull_vehicle(const std::string &name, vehicle_slot &v);
   void pull_field(const std::string &name, field_slot &f);
-  void push_named(const world_snapshot &s);
+  void gather(publication &p);
+  void write(const publication &p) const;
+  void start_publisher();
+  void stop_publisher();
 
   mutable std::mutex _mutex;
   cvc::app &_ctx;
   physics::world &_w;
   std::string _prefix;
   bool _seeded = false;
+  bool _links = false; // a key read through a link: pull() reads every time
   int _publish_every = 1;
   int _hash_every = 0;
   int _snapshot_every = 1;
+  int _snapshot_json_every = 0;
+  int _publish_thread = 0;
   std::shared_ptr<const world_snapshot> _snapshot;
+  bool _json_published = false;
+  std::uint64_t _json_tick = 0;
+  bool _json_static_published = false;
+  std::uint64_t _json_static_version = 0;
   bool _restart_required = false;
   step_report _last;
   std::map<std::string, material_slot> _materials;
-  std::map<std::string, body_id> _bodies;
+  std::map<std::string, body_slot> _bodies;
   std::map<std::string, vehicle_slot> _vehicles;
   std::map<std::string, field_slot> _fields;
+  std::unique_ptr<background> _bg;
 };
 
 } // namespace physics

@@ -42,6 +42,7 @@ public:
   // Whether `id` is a vehicle's chassis (world::remove_body refuses it).
   bool is_chassis(body_id id) const;
   body_id chassis(vehicle_id id) const { return at(id).chassis; }
+  bool contains(vehicle_id id) const { return _v.count(id.value) != 0; }
   const vehicle_desc &desc(vehicle_id id) const { return at(id).desc; }
   // world::set_vehicle: throws cvc::physics_error for a value add_vehicle refuses or a
   // change to one fixed when the vehicle was added, and changes nothing then.

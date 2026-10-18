@@ -63,6 +63,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
   ../../inc/cvc/physics/world_binding.h
+  ../../inc/cvc/physics/snapshot_json.h
   ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/state/state_hash_partition.h
@@ -234,6 +235,7 @@ set(SOURCE_FILES
   physics/vehicle.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
+  physics/snapshot_json.cpp
   physics/world_geometry.cpp
   physics/pose_tracker.cpp
   state/state_change_journal.cpp

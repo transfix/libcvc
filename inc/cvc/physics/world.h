@@ -153,7 +153,7 @@ struct state_batch {
 struct body_snapshot {
   body_id id;
   motion_type motion = motion_type::dynamic;
-  material_id material = 0;
+  body_settings settings; // as added, then as set_body changed them
   std::uint64_t user_data = 0;
   body_state state;
   field_load fields; // what the fields did to it in the last step
@@ -165,6 +165,7 @@ struct field_snapshot {
   physics::field desc;       // as given (world::set_field)
   std::size_t rut_cells = 0; // rut cells a wheel has pressed (field::ruts)
   double rut_deepest = 0.0;  // m, the deepest rut
+  vec3 lo, hi;               // its box, world metres
 };
 
 // One vehicle in a world_snapshot.
@@ -181,7 +182,12 @@ struct world_snapshot {
   world_config config;
   step_report report;                // the last step's
   std::vector<material> materials;   // by id
-  std::vector<body_snapshot> bodies; // every body, vehicle chassis included
+  std::vector<body_snapshot> bodies; // the dynamic and kinematic ones, chassis included
+  // The static bodies, never null. They change only when one is added, removed, moved
+  // or given a new material, so successive snapshots share one list until then, and
+  // static_version tells when it changed.
+  std::shared_ptr<const std::vector<body_snapshot>> static_bodies;
+  std::uint64_t static_version = 0;
   std::vector<field_snapshot> fields;
   std::vector<vehicle_snapshot> vehicles;
   std::vector<contact_event> contacts; // the last step's, sorted as contacts() sorts them
@@ -241,6 +247,16 @@ public:
   void add_impulse(body_id id, const vec3 &impulse);
   // Drive a kinematic body so it reaches this pose at the end of the next step.
   void move_kinematic(body_id id, const vec3 &position, const quat &rotation);
+
+  // A body's settings: as added, then as set_body changed them.
+  body_settings get_body(body_id id) const;
+  // Change a running body's settings from the next step on, and wake it. A static
+  // body takes only a new material; a mesh or terrain body keeps its materials (they
+  // are its triangles' or cells'; set_material changes those); only a dynamic body has
+  // a mass. Throws cvc::physics_error for those changes, for values add_body refuses,
+  // and for a vehicle's chassis (set_vehicle tunes a vehicle), changing nothing. Like
+  // materials, the settings are not part of save().
+  void set_body(body_id id, const body_settings &s);
 
   // --- fields (field.h) -----------------------------------------------------
 
@@ -328,10 +344,16 @@ public:
   void restore(const std::vector<std::uint8_t> &state);
   // A 64-bit digest of save()'s content.
   std::uint64_t state_hash() const;
-  // Everything at this tick, under one lock (world_snapshot). It reads each body, so it
-  // costs a pass over the dynamic and kinematic ones; static bodies are read when they
-  // are added (or moved).
+  // Everything at this tick, under one lock (world_snapshot). It reads each dynamic and
+  // kinematic body; the static ones are shared with the last snapshot unless one changed.
   world_snapshot snapshot() const;
+  // The same for just these bodies, vehicles and fields, under one lock: `bodies` and
+  // `static_bodies` hold the requested ones, an unknown id is left out, and the contacts
+  // are not copied. What a world_binding reads for its named actors when no whole
+  // snapshot is due, at a cost of those actors only.
+  world_snapshot snapshot(const std::vector<body_id> &bodies,
+                          const std::vector<vehicle_id> &vehicles,
+                          const std::vector<field_id> &fields) const;
 
   // --- floating origin ------------------------------------------------------
 

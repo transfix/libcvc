@@ -108,6 +108,16 @@ The physics headers stay standard-library only by forward-declaring the two type
 
 - **Body operations:** `add_body`, `remove_body`, `contains`, `state`, `set_state`, `add_force`
   (applied through the next step), `add_impulse` and `move_kinematic`.
+- **Body settings:** `get_body(id)` and `set_body(id, s)` read and change a running body's
+  `body_settings` (its material, mass, linear and angular damping, and whether it may sleep)
+  from the next step on, and wake it.
+  - A static body takes only a new material.
+  - A mesh or terrain body keeps its materials: they are its triangles' or cells', and
+    `set_material` changes those.
+  - Only a dynamic body has a mass; `get_body` reports the engine's, computed from the density
+    when the description gave none.
+  - A vehicle's chassis is refused (`set_vehicle` tunes a vehicle).
+  - Like materials, the settings are not part of `save()`.
 - **Batch reads:** `states(ids)` returns several bodies' states and the tick under one lock, so a
   batch never mixes two steps. An unknown or removed id reads as empty instead of throwing.
 - **Generation-checked ids.** Body ids carry a generation, so a stale id is refused and never
@@ -139,17 +149,34 @@ running world from many threads without waiting, read the telemetry a `world_bin
 
 `world::snapshot()` copies everything at one tick under one lock into a `world_snapshot`:
 
-- the model: the config, the materials, every field as given (with its rut count and deepest
-  rut), and every vehicle's description as tuned;
-- the state: every body (id, motion type, material, user data, pose, velocities, awake, and
+- the model: the config, the materials, every field as given (with its box, rut count and
+  deepest rut), and every vehicle's description as tuned;
+- the state: every body (id, motion type, settings, user data, pose, velocities, awake, and
   what the fields did to it), every vehicle's `vehicle_state` with its wheels, and the last
   step's contacts.
 
-Every list is in ascending id order. It costs one pass over the moving bodies: static bodies are
-read when they are added or moved. With 1001 moving bodies on Windows (MSVC), a snapshot takes
-about 0.18 ms against a 2.1 ms step (`physics_world_test`). A `world_binding` publishes one to
-the state tree as it steps (below), so any thread can read the latest without taking the
-world's lock.
+Every list is in ascending id order.
+
+- **Moving and static bodies.** `bodies` holds the dynamic and kinematic bodies, read in one
+  batch. `static_bodies` holds the static ones in a list that successive snapshots share until
+  a static body is added, removed, moved or given a material; `static_version` changes then.
+  So a city of static buildings costs a snapshot nothing.
+- **A partial snapshot.** `snapshot(bodies, vehicles, fields)` reads just those, under one lock,
+  without the contacts. This is what a `world_binding` reads for its named actors when no whole
+  snapshot is due.
+- **Cost.** With 1000 moving bodies on Windows (MSVC), a snapshot took about 0.18 ms against a
+  2.1 ms step on an idle machine (`physics_world_test`: `WhatPublishingCostsAStep`).
+- **JSON.** `to_json(snapshot)` (`cvc/physics/snapshot_json.h`) writes it as JSON, format
+  `cvc.physics.snapshot/1`, for readers outside C++.
+  - A vector is `[x, y, z]` and a rotation `[w, x, y, z]`, and enums are their names.
+  - A double is written in its shortest exact form (`std::to_chars`), always with a `.` or an
+    exponent, so it reads back as the same double. NaN and infinities are written as `null`.
+  - `json_bodies::moving` and `json_bodies::static_only` split the moving and the static
+    bodies, as the binding publishes them.
+  - It costs about 4 µs a body (1000 bodies are about 560 KB).
+
+A `world_binding` publishes snapshots to the state tree as it steps (below), so any thread,
+any Python script and any remote peer can read the latest without taking the world's lock.
 
 Jolt's process globals (allocator hooks, factory, type registry) exist while at least one Jolt
 world does. The first world sets them up and the last one tears them down. If the application set
@@ -314,18 +341,52 @@ const auto ice = bind.material("ice");                             // after the 
 ```
 
 Keys, relative to the prefix. An unset key is seeded with the world's value. An unreadable or
-invalid value is ignored and never thrown into a frame.
+invalid value is ignored and never thrown into a frame. `pull()` reads the tree only when
+something under the prefix changed since the last pull, so an unchanged tree costs a pull about
+2 µs. If a key is a link into another scope, it reads every time. A program's own `reconfigure`
+or `set_material` stands until the tree's value changes.
 
 | Keys | Read | Notes |
 |---|---|---|
 | `backend`, `fixed_dt`, `threads`, `determinism`, `max_bodies`, `max_body_pairs`, `max_contact_constraints`, `origin.{x,y,z}` | `config_from_state` | A later change sets `restart_required` and leaves the running world alone |
 | `gravity.{x,y,z}`, `collision_steps`, `velocity_steps`, `position_steps`, `penetration_slop`, `friction_combine`, `restitution_combine`, `contacts` | every `pull()` | Applied with `reconfigure` |
 | `materials.<name>.{friction, restitution, rolling_resistance, nav_material}` | every `pull()` | A new child adds a material, and a changed value updates it. `default` is material 0. |
-| `publish_every` | every `pull()` | `step()`/`follow()` push every N steps (default 1) |
-| `hash_every` | every `pull()` | Publish `state_hash` every N steps; 0, the default, means never |
-| `snapshot_every` | every `pull()` | Publish the snapshot every N steps (default 1); 0 means never |
+| `publish_every`, `snapshot_every`, `snapshot_json_every`, `hash_every`, `publish_thread` | every `pull()` | How often and where publishing happens (below) |
 | `tick`, `time`, `step_ms`, `bodies`, `active_bodies`, `contact_events`, `saturated`, `version`, `restart_required`, `state_hash` | written by `push()` | Telemetry |
 | `snapshot` | written by `push()` | The `world_snapshot` as `std::shared_ptr<const world_snapshot>` in the node's `data()`. `world_binding::snapshot_from_state(app)` reads it from any thread |
+| `snapshot_json` | written by `push()` | That snapshot as JSON without the static bodies: Python reads it as `json.loads(pycvc.state_get(app, "physics.snapshot_json"))`, and a remote peer of the tree receives it like any value |
+| `snapshot_json_static` | written by `push()` | The static bodies as JSON, rewritten only when one is added, removed, moved or given a material. Its `static_version` matches `snapshot_json`'s then |
+| `publish_dropped` | written by `push()` | Publications the publish thread skipped because a newer one replaced them |
+
+### How often, and on which thread
+
+Publishing runs on the thread that steps, after the step, every `publish_every` steps. Each
+kind of output has its own rate, counted in steps, so with `fixed_dt = 0.01` a value of 10 means
+10 Hz:
+
+| Key | Default | What it publishes |
+|---|---|---|
+| `publish_every` | 1 (every step) | Each push: the telemetry and the named actors' keys |
+| `snapshot_every` | 1 (every push) | The `snapshot` data. 0 turns it off |
+| `snapshot_json_every` | 0 (off) | `snapshot_json`, and `snapshot_json_static` when the static bodies changed |
+| `hash_every` | 0 (off) | `state_hash`, which digests the whole state |
+| `publish_thread` | 0 | 1: a background thread writes what each push publishes, so the step pays only for copying the snapshot. A newer publication replaces one the thread has not started; `flush()` waits for it to catch up. 0: `push()` writes before it returns |
+
+Measured on Windows (MSVC) with 1000 moving bodies and four named bodies, on a loaded machine
+(a step took about 3 ms). These are medians of the time on the stepping thread
+(`WhatPublishingCostsAStep`):
+
+| What a push does | Time on the step |
+|---|---|
+| `snapshot()` alone | ~0.3 ms |
+| `pull()` with nothing changed | ~1.5 µs |
+| Telemetry and 4 named bodies (about 80 keys) | ~0.4 ms |
+| That and the snapshot data | ~0.6 ms |
+| That and the JSON (560 KB) | ~4.5 ms |
+| All of it, with `publish_thread` = 1 | ~0.2 ms |
+
+So: keep the snapshot every step if in-process readers want it; publish JSON at the rate its
+readers need (10–30 Hz); and set `publish_thread` when publishing must stay off the step.
 
 ### Named bodies, vehicles and fields
 
@@ -343,6 +404,7 @@ a key reads back exactly as the world held it.
 | Keys, under `bodies.<name>`, `vehicles.<name>`, `fields.<name>` | Read | Notes |
 |---|---|---|
 | `bodies.<name>.{id, motion, position.*, rotation.*, velocity.*, angular_velocity.*, active, field_force.*, immersed_volume}` | written by `push()` | `motion` is `static`, `kinematic` or `dynamic` |
+| `bodies.<name>.{material, mass, linear_damping, angular_damping, allow_sleeping}` | every `pull()` | `world::set_body`; the material by name |
 | `vehicles.<name>.{chassis, speed, steer, steer_command, throttle, brake, hand_brake, gear, engine_rpm, position.*, rotation.*, velocity.*, angular_velocity.*, aero_force.*, air_velocity.*}` | written by `push()` | The `vehicle_state` |
 | `vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact, contact_point.*, load, longitudinal_slip, lateral_slip, friction, rolling_resistance, medium_depth, sinkage, rut, medium_resistance}` | written by `push()` | Each `wheel_state` |
 | `vehicles.<name>.command.{steer, accel, reverse}` | every `pull()` | A change calls `world::drive` |
@@ -359,8 +421,9 @@ a key reads back exactly as the world held it.
   value.
 - **Removed actors** are no longer published once the world drops them; their keys keep their
   last values.
-- **Cost.** A key write costs a few microseconds, so a published vehicle (about 90 keys) adds
-  about 0.34 ms to a push. `publish_every` throttles it. In-process readers can use the
-  snapshot instead.
+- **Cost.** A key write costs about 5 µs, so a published vehicle (about 90 keys) adds about
+  0.34 ms to a push. `publish_every` throttles it, `publish_thread` moves it off the step, and
+  in-process readers can use the snapshot instead. When no whole snapshot is due, a push reads
+  only the named actors.
 
 Each binding belongs to one app and one world, so two apps configure two worlds independently.

@@ -44,6 +44,17 @@ struct body_state {
   bool active = false; // false while asleep, and always for static bodies
 };
 
+// What may change on a running body (world::set_body); world::get_body reads it back.
+struct body_settings {
+  material_id material = 0; // a sphere, box or hull's; a mesh or terrain's are its triangles'
+                            // or cells' (world::set_material changes those)
+  double mass = 0.0;        // kg, a dynamic body's (as the engine computed it when the
+                            // description gave 0); 0 for static and kinematic bodies
+  double linear_damping = 0.05;
+  double angular_damping = 0.05;
+  bool allow_sleeping = true;
+};
+
 } // namespace physics
 } // namespace cvc
 

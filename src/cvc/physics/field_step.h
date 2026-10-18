@@ -80,6 +80,12 @@ public:
   // spheres, boxes and convex hulls are recorded.
   void body_added(const world_backend &be, body_id id, const body_desc &d);
   void body_removed(body_id id) { _bodies.erase(id.value); }
+  // A new mass for a dynamic body (world::set_body).
+  void set_mass(body_id id, double mass) {
+    const auto it = _bodies.find(id.value);
+    if (it != _bodies.end() && mass > 0.0)
+      it->second.mass = mass;
+  }
 
   // A vehicle's chassis (body_added first): its centre of mass, and no flow drag.
   void mark_vehicle(body_id id, const vec3 &center_of_mass);

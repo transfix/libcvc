@@ -120,6 +120,14 @@ public:
   virtual std::size_t body_count() const = 0;
 
   virtual body_state state(body_id id) const = 0;
+  // The states of `ids`, all known, in order: world::snapshot's batch read. The world
+  // holds its lock, so no step runs meanwhile.
+  virtual void states(const std::vector<body_id> &ids, std::vector<body_state> &out) const {
+    out.clear();
+    out.reserve(ids.size());
+    for (const body_id id : ids)
+      out.push_back(state(id));
+  }
   virtual void set_state(body_id id, const body_state &s) = 0;
   virtual void add_force(body_id id, const vec3 &f) = 0;
   virtual void add_impulse(body_id id, const vec3 &j) = 0;
@@ -140,6 +148,16 @@ public:
   virtual void add_field_load(body_id id, const vec3 &force, const vec3 &torque) = 0;
   // Wake a sleeping dynamic body.
   virtual void wake(body_id id) = 0;
+  // A dynamic body's mass as the engine holds it (0 if it does not say).
+  virtual double body_mass(body_id id) const {
+    (void)id;
+    return 0.0;
+  }
+  // world::set_body, checked by the facade: the material (a convex body's), and for a
+  // moving body its damping, sleeping, and with `new_mass` its mass.
+  virtual void set_body_settings(body_id id, const body_settings &s, bool new_mass) {
+    (void)id, (void)s, (void)new_mass;
+  }
 
   // Vehicles (vehicle.h). add_vehicle builds the chassis body and its wheels, returning the
   // chassis and a handle; false if the backend has no vehicles (cap_vehicles).

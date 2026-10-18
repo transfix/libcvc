@@ -183,24 +183,50 @@ struct world::impl {
   std::optional<cvc::clock_follower> follower;
   detail::field_set fields;
   detail::vehicle_set vehicles;
-  // Every body, for snapshot(): what it was added as, and a static body's state, which
-  // only set_state, restore and rebase change.
+  // Every body, for get_body, set_body and snapshot(): what it was added as, its settings,
+  // and a static body's state, which only set_state, restore and rebase change.
   struct body_info {
     motion_type motion = motion_type::dynamic;
-    material_id material = 0;
+    bool convex = false; // a sphere, box or hull: one material for the whole body
     std::uint64_t user_data = 0;
+    body_settings settings;
     body_state fixed;
   };
   std::map<std::uint32_t, body_info> bodies;
+  // Bumped whenever a static body is added, removed, moved or given a material, so
+  // snapshot() rebuilds its shared list of them only then.
+  std::uint64_t static_version = 0;
+  std::shared_ptr<const std::vector<body_snapshot>> static_list;
+  std::uint64_t static_list_version = 0;
 
-  void note_body(body_id id, motion_type motion, material_id material, std::uint64_t user) {
+  void note_body(body_id id, const body_desc &d) {
     body_info b;
-    b.motion = motion;
-    b.material = material;
-    b.user_data = user;
-    if (motion == motion_type::static_)
+    b.motion = d.motion;
+    b.convex = std::holds_alternative<sphere>(d.shape) || std::holds_alternative<box>(d.shape) ||
+               std::holds_alternative<convex_hull>(d.shape);
+    b.user_data = d.user_data;
+    b.settings.material = d.material;
+    if (d.motion == motion_type::dynamic) {
+      const double m = be->body_mass(id); // the engine's, from the density when d.mass is 0
+      b.settings.mass = m > 0.0 ? m : d.mass;
+    }
+    b.settings.linear_damping = d.linear_damping;
+    b.settings.angular_damping = d.angular_damping;
+    b.settings.allow_sleeping = d.allow_sleeping;
+    if (d.motion == motion_type::static_) {
       b.fixed = be->state(id);
+      ++static_version;
+    }
     bodies[id.value] = b;
+  }
+
+  void forget_body(body_id id) {
+    const auto it = bodies.find(id.value);
+    if (it == bodies.end())
+      return;
+    if (it->second.motion == motion_type::static_)
+      ++static_version;
+    bodies.erase(it);
   }
 
   void reread_static() {
@@ -210,6 +236,18 @@ struct world::impl {
         id.value = e.first;
         e.second.fixed = be->state(id);
       }
+    ++static_version;
+  }
+
+  body_snapshot snapshot_of(std::uint32_t id, const body_info &b) const {
+    body_snapshot s;
+    s.id.value = id;
+    s.motion = b.motion;
+    s.settings = b.settings;
+    s.user_data = b.user_data;
+    s.state = b.motion == motion_type::static_ ? b.fixed : be->state(s.id);
+    s.fields = fields.load(s.id);
+    return s;
   }
 
   material_id add_material(const material &m) {
@@ -544,7 +582,7 @@ body_id world::add_body(const body_desc &d) {
     const body_id id = _impl->be->add_body(d, shape);
     try {
       _impl->fields.body_added(*_impl->be, id, d);
-      _impl->note_body(id, d.motion, d.material, d.user_data);
+      _impl->note_body(id, d);
     } catch (...) {
       _impl->fields.body_removed(id);
       _impl->be->remove_body(id);
@@ -561,7 +599,7 @@ void world::remove_body(body_id id) {
                              " is a vehicle's chassis; remove the vehicle");
   guarded([&] { _impl->be->remove_body(id); });
   _impl->fields.body_removed(id);
-  _impl->bodies.erase(id.value);
+  _impl->forget_body(id);
 }
 
 bool world::contains(body_id id) const {
@@ -603,9 +641,57 @@ void world::set_state(body_id id, const body_state &s) {
   guarded([&] {
     _impl->be->set_state(id, s);
     const auto it = _impl->bodies.find(id.value);
-    if (it != _impl->bodies.end() && it->second.motion == motion_type::static_)
+    if (it != _impl->bodies.end() && it->second.motion == motion_type::static_) {
       it->second.fixed = _impl->be->state(id);
+      ++_impl->static_version;
+    }
   });
+}
+
+body_settings world::get_body(body_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  const auto it = _impl->bodies.find(id.value);
+  if (it == _impl->bodies.end())
+    throw cvc::physics_error("get_body: unknown or removed body id " + std::to_string(id.value));
+  return it->second.settings;
+}
+
+void world::set_body(body_id id, const body_settings &s) {
+  if (!std::isfinite(s.mass) || !(s.mass >= 0.0) || !std::isfinite(s.linear_damping) ||
+      !(s.linear_damping >= 0.0) || !std::isfinite(s.angular_damping) ||
+      !(s.angular_damping >= 0.0))
+    throw cvc::physics_error("set_body: mass and damping must be finite and >= 0");
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  const auto it = _impl->bodies.find(id.value);
+  const std::string which = "set_body: body " + std::to_string(id.value);
+  if (it == _impl->bodies.end())
+    throw cvc::physics_error("set_body: unknown or removed body id " + std::to_string(id.value));
+  if (_impl->vehicles.is_chassis(id))
+    throw cvc::physics_error(which + " is a vehicle's chassis; tune the vehicle with set_vehicle");
+  impl::body_info &b = it->second;
+  if (s.material >= _impl->materials.size())
+    throw cvc::physics_error("set_body: unknown material id " + std::to_string(s.material));
+  if (s.material != b.settings.material && !b.convex)
+    throw cvc::physics_error(which + " is a mesh or terrain: its materials are its triangles' or "
+                                     "cells' (set_material changes those)");
+  const bool moved = s.mass != b.settings.mass || s.linear_damping != b.settings.linear_damping ||
+                     s.angular_damping != b.settings.angular_damping ||
+                     s.allow_sleeping != b.settings.allow_sleeping;
+  if (b.motion == motion_type::static_ && moved)
+    throw cvc::physics_error(which + " is static: only its material may change");
+  const bool new_mass = s.mass != b.settings.mass;
+  if (new_mass && b.motion != motion_type::dynamic)
+    throw cvc::physics_error(which + " is not dynamic: it has no mass");
+  if (new_mass && !(s.mass > 0.0))
+    throw cvc::physics_error(which + ": a dynamic body's mass must be > 0");
+  guarded([&] {
+    _impl->be->set_body_settings(id, s, new_mass);
+    if (new_mass)
+      _impl->fields.set_mass(id, s.mass);
+  });
+  if (b.motion == motion_type::static_ && s.material != b.settings.material)
+    ++_impl->static_version;
+  b.settings = s;
 }
 
 void world::add_force(body_id id, const vec3 &f) {
@@ -665,7 +751,11 @@ vehicle_id world::add_vehicle(const vehicle_desc &d, const vec3 &position, const
   std::lock_guard<std::mutex> lock(_impl->mutex);
   return guarded([&] {
     const vehicle_id id = _impl->vehicles.add(*_impl->be, _impl->fields, d, position, rotation);
-    _impl->note_body(_impl->vehicles.chassis(id), motion_type::dynamic, 0, 0);
+    body_desc chassis; // as vehicle_set::add built it
+    chassis.shape = box{d.half_extents};
+    chassis.mass = d.mass;
+    chassis.linear_damping = 0.0;
+    _impl->note_body(_impl->vehicles.chassis(id), chassis);
     return id;
   });
 }
@@ -675,7 +765,7 @@ void world::remove_vehicle(vehicle_id id) {
   guarded([&] {
     const body_id chassis = _impl->vehicles.chassis(id);
     _impl->vehicles.remove(*_impl->be, _impl->fields, id);
-    _impl->bodies.erase(chassis.value);
+    _impl->forget_body(chassis);
   });
 }
 
@@ -835,20 +925,95 @@ world_snapshot world::snapshot() const {
   out.materials = _impl->materials;
   out.contacts = _impl->contacts;
   guarded([&] {
-    out.bodies.reserve(_impl->bodies.size());
-    for (const auto &e : _impl->bodies) {
-      body_snapshot b;
-      b.id.value = e.first;
-      b.motion = e.second.motion;
-      b.material = e.second.material;
-      b.user_data = e.second.user_data;
-      b.state = e.second.motion == motion_type::static_ ? e.second.fixed : _impl->be->state(b.id);
-      b.fields = _impl->fields.load(b.id);
-      out.bodies.push_back(b);
+    // The moving bodies' states in one batch read.
+    std::vector<body_id> ids;
+    std::vector<const impl::body_info *> infos;
+    ids.reserve(_impl->bodies.size());
+    infos.reserve(_impl->bodies.size());
+    for (const auto &e : _impl->bodies)
+      if (e.second.motion != motion_type::static_) {
+        body_id id;
+        id.value = e.first;
+        ids.push_back(id);
+        infos.push_back(&e.second);
+      }
+    std::vector<body_state> states;
+    _impl->be->states(ids, states);
+    out.bodies.resize(ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      body_snapshot &b = out.bodies[i];
+      b.id = ids[i];
+      b.motion = infos[i]->motion;
+      b.settings = infos[i]->settings;
+      b.user_data = infos[i]->user_data;
+      b.state = states[i];
+      b.fields = _impl->fields.load(ids[i]);
     }
+    if (!_impl->static_list || _impl->static_list_version != _impl->static_version) {
+      auto statics = std::make_shared<std::vector<body_snapshot>>();
+      for (const auto &e : _impl->bodies)
+        if (e.second.motion == motion_type::static_)
+          statics->push_back(_impl->snapshot_of(e.first, e.second));
+      _impl->static_list = std::move(statics);
+      _impl->static_list_version = _impl->static_version;
+    }
+    out.static_bodies = _impl->static_list;
+    out.static_version = _impl->static_version;
     _impl->fields.snapshot(out.fields);
     _impl->vehicles.snapshot(*_impl->be, out.vehicles);
   });
+  return out;
+}
+
+world_snapshot world::snapshot(const std::vector<body_id> &bodies,
+                               const std::vector<vehicle_id> &vehicles,
+                               const std::vector<field_id> &fields) const {
+  world_snapshot out;
+  auto statics = std::make_shared<std::vector<body_snapshot>>();
+  std::vector<std::uint32_t> body_ids, vehicle_ids, field_ids;
+  for (const body_id id : bodies)
+    body_ids.push_back(id.value);
+  for (const vehicle_id id : vehicles)
+    vehicle_ids.push_back(id.value);
+  for (const field_id id : fields)
+    field_ids.push_back(id.value);
+  for (std::vector<std::uint32_t> *ids : {&body_ids, &vehicle_ids, &field_ids}) {
+    std::sort(ids->begin(), ids->end());
+    ids->erase(std::unique(ids->begin(), ids->end()), ids->end());
+  }
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  out.tick = _impl->tick;
+  out.time = static_cast<double>(_impl->tick) * _impl->cfg.fixed_dt;
+  out.config = _impl->cfg;
+  out.report = _impl->last;
+  out.materials = _impl->materials;
+  out.static_version = _impl->static_version;
+  guarded([&] {
+    for (const std::uint32_t id : body_ids) {
+      const auto it = _impl->bodies.find(id);
+      if (it == _impl->bodies.end())
+        continue;
+      (it->second.motion == motion_type::static_ ? *statics : out.bodies)
+          .push_back(_impl->snapshot_of(id, it->second));
+    }
+    for (const std::uint32_t id : vehicle_ids) {
+      vehicle_snapshot v;
+      v.id.value = id;
+      if (!_impl->vehicles.contains(v.id))
+        continue;
+      v.desc = _impl->vehicles.desc(v.id);
+      v.state = _impl->vehicles.state(*_impl->be, v.id);
+      out.vehicles.push_back(std::move(v));
+    }
+    if (!field_ids.empty()) {
+      std::vector<field_snapshot> every;
+      _impl->fields.snapshot(every);
+      for (field_snapshot &f : every)
+        if (std::binary_search(field_ids.begin(), field_ids.end(), f.id.value))
+          out.fields.push_back(std::move(f));
+    }
+  });
+  out.static_bodies = std::move(statics);
   return out;
 }
 

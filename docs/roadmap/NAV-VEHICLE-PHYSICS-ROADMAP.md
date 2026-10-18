@@ -171,6 +171,19 @@ P4 adds three things to measure and contain the drift:
       snapshot; vehicle commands, pedals and tuning (`world::set_vehicle`) read from the tree;
       field drag, damping and traction knobs.
     - `set_field` keeps a medium's ruts.
+    - The snapshot as JSON (`to_json`, `physics.snapshot_json` every `snapshot_json_every`
+      steps) for Python and remote readers. The static bodies are a separate document,
+      rewritten only when they change.
+    - Per-body settings: `world::get_body` / `set_body` (material, mass, damping, sleeping)
+      and `bodies.<name>.*` knobs.
+    - Publishing cost:
+      - `publish_thread` moves every key write and the JSON off the step;
+      - `pull()` skips the tree when nothing under the prefix changed (about 2 µs);
+      - static bodies are shared between snapshots;
+      - named actors alone take a partial snapshot.
+      - Measured medians at 1000 moving bodies on a loaded machine (step about 3 ms): JSON
+        costs about 4 ms on the step, and with the publish thread everything costs about
+        0.2 ms.
     - The binding no longer took a material's own keys (`friction`, ...) for four more
       materials on every pull. That cost about 0.45 ms a pull.
   - **Ruts** (follow-up): a medium with `ruts = true` keeps a rut map that the wheels press their contact patches into. A Humvee in 0.4 m of snow leaves tracks 0.0945 m deep (it sinks 0.0952 m) and 0.30 m wide (tire 0.31 m), with nothing between them. A second Humvee in those tracks sinks to the same depth and meets 0 N of compaction resistance, against 2690 N for the leader's front axle; the leader's rear axle, in its own front wheels' ruts, meets 97 N. The rut maps are saved, hashed and replayed.
