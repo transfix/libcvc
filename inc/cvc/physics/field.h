@@ -97,6 +97,10 @@ struct field {
   std::array<std::shared_ptr<const cvc::volume>, 3> velocity;
   double drag_coefficient = 1.0; // fluid, flow: C_d
   double damping = 0.0;          // every kind: c, N s/m^4
+  // medium: the friction a vehicle's tire finds in it (snow ~0.3, mud ~0.4), in place of the
+  // ground's; 0 keeps the ground's. A vehicle's wheels also sink into a medium and ride on it
+  // (vehicle.h).
+  double traction = 0.0;
 };
 
 // A field handle. Never reused: a removed field's id stays invalid.

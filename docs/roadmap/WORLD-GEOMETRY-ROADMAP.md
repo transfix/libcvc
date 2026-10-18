@@ -192,9 +192,10 @@ bounding box and trilinear sampling. G6 makes the same volumes physics media
   - **Sleep.** Sleeping bodies are skipped; `add_field` and `set_field` wake the bodies in the box.
 - **Values are read at add/set**, into the field's own sampler. A gust or a rising river is a
   `set_field` with new volumes between steps.
-- **Next.** The vehicle (P2) reads the medium under each wheel (sinkage, rolling resistance) and
-  the flow around the body, and the energy ledger (P3) books the work each field does. A medium that
-  keeps ruts needs mutable medium state, which is later work.
+- **The vehicle (P2, done)** reads the medium under each wheel (its sinkage, the compacted
+  surface it rides on, the compaction resistance and the traction) and the flow around the
+  chassis (`vehicle.h`). Next, the energy ledger (P3) books the work each field does. A medium
+  that keeps ruts needs mutable medium state, which is later work.
 
 ## Phases
 
