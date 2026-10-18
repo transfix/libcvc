@@ -18,7 +18,9 @@
 #pragma once
 
 #include <cvc/state/state_exec/types.h>
+#include <memory>
 #include <span>
+#include <string>
 
 struct _object;
 typedef _object PyObject;
@@ -34,5 +36,25 @@ PyObject *values_to_py_tuple(std::span<const cvc::state_exec::value_t> values);
 
 /// Convert `o` into `out`. Returns false, with a Python exception set, when it can't.
 bool py_to_value(PyObject *o, cvc::state_exec::value_t &out);
+
+// Python callables as state_exec callbacks. These are defined in pycvc_exec.cpp. Each one owns a
+// reference to its callable and takes the GIL for the call, so it can run on any thread.
+
+/// A DSL native function that calls `callable`: its arguments convert to Python and its return
+/// value converts back, and a Python exception becomes a C++ error naming `name`. Throws
+/// std::invalid_argument, prefixed with `who`, when `callable` isn't callable or is an async def.
+cvc::state_exec::native_fn python_native_fn(const std::string &who, const std::string &name,
+                                            PyObject *callable);
+
+/// An execute_options::on_complete that calls `callable` with the process's result and ignores
+/// what it returns. A Python exception becomes a C++ error, thrown from the scheduler call that
+/// finished the process. It keeps the callable, so pycvc can hand it back.
+struct python_on_complete {
+  std::shared_ptr<PyObject> callable;
+  void operator()(cvc::state_exec::value_t result) const;
+};
+
+/// The python_on_complete for `callable`. Throws std::invalid_argument when it isn't callable.
+python_on_complete make_python_on_complete(PyObject *callable);
 
 } // namespace pycvc

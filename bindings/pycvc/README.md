@@ -236,4 +236,28 @@ Values convert to native Python types, with `pycvc.symbol` for symbols and
 `pycvc.value` as an opaque handle for closures and other non-data values. Such
 a handle converts back to the same value when passed into the DSL. Conversion
 is strict: non-`str` dict keys, ints outside 64 bits and unsupported types
-raise. Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`.
+raise.
+
+The schedulers are the real classes too, with environments, builtins and the
+process types:
+
+```python
+from pycvc import process_status, scheduling_policy
+env = pycvc.builtins.make_default_environment()
+pycvc.builtins.register_fn(env, "greet", lambda n: "hi " + n)  # a Python callable
+opts = pycvc.execute_options()
+opts.env = env
+opts.on_complete = print                    # called with the result
+sched = pycvc.scheduler(scheduling_policy.round_robin)  # or pycvc.async_scheduler()
+pid = sched.execute('(greet "ann")', opts)
+sched.run()                                 # {pid: 'hi ann'}; releases the GIL
+sched.get_process_info(pid).status          # process_status.terminated
+ex.scheduler().list_processes()             # Exec's own async_scheduler
+```
+
+The enums are `enum.IntEnum` classes, and an enum argument must be one of their
+members. Where C++ returns an empty `std::optional` or a null pointer, Python gets
+`None`, except for a value: `get_result`, `pop_pending_message` and
+`environment.lookup` raise `KeyError` instead, because `None` is the nil value.
+Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,
+`test_pycvc_state_exec_sched.py`.
