@@ -242,6 +242,42 @@ def test_bytes_marshaling_round_trip():
     assert seen["val"] == blob, seen["val"]
 
 
+# ── the stdlib modules (string, bytes, math, collections) ───────────────
+
+
+def test_stdlib_modules_are_always_loaded():
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    assert ex.run('(string.length "café")') == "4"  # codepoints, not bytes
+    assert ex.run('(string.upper "go")') == "GO"
+    assert ex.run('(bytes.length (string.encode "café"))') == "5"
+    assert ex.run("(math.floor 3.7)") == "3"
+    assert ex.run("(collections.reduce (list 1 2 3) + 0)") == "6"
+    # A program's own binding shadows a stdlib name without touching other programs.
+    assert ex.run("(begin (set string.length 7) string.length)") == "7"
+    assert pycvc.Exec(app).run('(string.length "ab")') == "2"
+
+
+def test_stdlib_allocation_limit_comes_from_the_app_tree():
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+
+    def run_error(src):
+        try:
+            ex.run(src)
+        except Exception as e:  # noqa: BLE001 - any surfaced DSL error
+            return str(e)
+        return ""
+
+    # The 16 MiB default stops a huge one-call allocation.
+    assert "allocation limit" in run_error("(collections.range 1000000000)")
+    # limits.max_alloc_bytes on the app tree is read on every run.
+    pycvc.state_set(app, "state_exec.defaults.limits.max_alloc_bytes", "1024")
+    assert "collections.range" in run_error("(collections.range 1000)")
+    pycvc.state_set(app, "state_exec.defaults.limits.max_alloc_bytes", "1048576")
+    assert ex.run("(length (collections.range 1000))") == "1000"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

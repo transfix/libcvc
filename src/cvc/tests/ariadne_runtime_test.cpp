@@ -1596,6 +1596,132 @@ TEST(AriadneReactive, CompoundsAndAllowedFormsNowWork) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
+// The stdlib is in every program lane's environment, and a predicate gets its pure, bounded
+// subset (a scalar, or a result no bigger than its argument).
+TEST(AriadneStdlib, PredicateGetsThePureBoundedSubset) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"name\" \"caf\xC3\xA9\")", nullptr));
+  Widget len = text("len");
+  len.visible_when = "(= (string.length (state-get \"name\")) 4)"; // codepoints -> shown
+  Widget up = text("up");
+  up.visible_when = "(string.starts-with (string.upper (state-get \"name\")) \"CAF\")";
+  Widget math = text("math");
+  math.visible_when = "(= (math.floor (math.sqrt 17)) 4)";
+  Widget bytes = text("bytes");
+  bytes.visible_when = "(= (bytes.byte-at b\"\\x01\\xff\" 1) 255)";
+  rt.set_root(group({len, up, math, bytes}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:len"));
+  EXPECT_TRUE(mb.saw("text_line:up"));
+  EXPECT_TRUE(mb.saw("text_line:math"));
+  EXPECT_TRUE(mb.saw("text_line:bytes"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneStdlib, PredicateExcludesStdlibMaterializersAndRandom) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // Results that can outgrow their arguments wait for scheduled, sliced versions; math.random
+  // would make a predicate nondeterministic. Each is an unbound symbol -> fail-safe hidden.
+  Widget join = text("join");
+  join.visible_when = "(is-string (string.join (list \"a\") \",\"))";
+  Widget rep = text("rep");
+  rep.visible_when = "(is-string (string.replace \"a\" \"a\" \"aa\"))";
+  Widget range = text("range");
+  range.visible_when = "(is-list (collections.range 3))";
+  Widget rnd = text("rnd");
+  rnd.visible_when = "(< (math.random) 2)";
+  rt.set_root(group({join, rep, range, rnd}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:join"));
+  EXPECT_FALSE(mb.saw("text_line:rep"));
+  EXPECT_FALSE(mb.saw("text_line:range"));
+  EXPECT_FALSE(mb.saw("text_line:rnd"));
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneStdlib, InitAndActionLanesReachTheWholeStdlib) {
+  cvc::app app;
+  std::vector<std::string> errs;
+  ASSERT_TRUE(run_init(app, "ui",
+                       "(state-set \"words\" (string.join (collections.reverse "
+                       "(string.split \"a b c\" \" \")) \",\"))",
+                       &errs))
+      << (errs.empty() ? std::string("(no error)") : errs[0]);
+  EXPECT_EQ(cvc::state::instance(app)("ui.words").value(), "c,b,a");
+
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(state-set \"shout\" (string.upper (state-get \"words\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.shout").value(), "C,B,A");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneStdlib, ActionHitsTheAllocationLimitAndIsReported) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The app's exec scheduler reads limits.max_alloc_bytes on every submission.
+  cvc::state::instance(app)("state_exec.defaults.limits.max_alloc_bytes").value("1024");
+  rt.set_root(group({button("Big", "(state-set \"n\" (length (collections.range 1000)))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_FALSE(cvc::state::instance(app)("n").value() == "1000"); // killed before the write
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+
+  // A limit that fits lets the same action finish.
+  cvc::state::instance(app)("state_exec.defaults.limits.max_alloc_bytes").value("1048576");
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "1000");
+}
+
+// An action's memory budget is the tree setting ariadne.limits.action_max_memory (default
+// 4 MiB, 0 = none), read on every submission; it also bounds each native call's allocations.
+TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &root = cvc::state::instance(app);
+  // 10000 elements are well over the old fixed 256 KiB and well under 4 MiB.
+  rt.set_root(group({button("Big", "(state-set \"n\" (length (collections.range 10000)))")}));
+  const auto click = [&] {
+    root("n").value(std::string("-"));
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+    return root("n").value();
+  };
+  EXPECT_EQ(click(), "10000"); // the 4 MiB default
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+
+  root("ariadne.limits.action_max_memory").value(std::string("65536"));
+  EXPECT_EQ(click(), "-"); // over the budget: killed before the write
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+
+  root("ariadne.limits.action_max_memory").value(std::string("0")); // no limit
+  EXPECT_EQ(click(), "10000");
+  root("ariadne.limits.action_max_memory").value(std::string("lots")); // unparsable: default
+  EXPECT_EQ(click(), "10000");
+}
+
 TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {
   cvc::app app;
   Runtime rt(app, "");

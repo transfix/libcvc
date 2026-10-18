@@ -57,6 +57,8 @@ void scheduler::load_settings() {
 
   // --- parser.* (same resolution order; see parse_options_from_state) ---
   parse_options_ = parse_options_from_state(*watch_root_, id_);
+  // --- limits.max_alloc_bytes (same resolution order; see max_alloc_bytes_from_state) ---
+  max_alloc_bytes_ = max_alloc_bytes_from_state(*watch_root_, id_);
 
   // Publish effective values to per-scheduler subtree
   if (!id_.empty()) {
@@ -64,11 +66,25 @@ void scheduler::load_settings() {
     (*watch_root_)(base + ".max_pending_messages").value(std::to_string(max_pending_messages));
     (*watch_root_)(base + ".parser.max_depth").value(std::to_string(parse_options_.max_depth));
     (*watch_root_)(base + ".parser.step_tokens").value(std::to_string(parse_options_.step_tokens));
+    (*watch_root_)(base + ".limits.max_alloc_bytes").value(std::to_string(max_alloc_bytes_));
     (*watch_root_)(base + ".policy")
         .value(policy_ == scheduling_policy::round_robin ? "round_robin"
                : policy_ == scheduling_policy::priority  ? "priority"
                                                          : "priority_rr");
   }
+}
+
+uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &scheduler_id,
+                                    uint64_t base) {
+  constexpr const char *suffix = ".limits.max_alloc_bytes";
+  uint64_t effective = base;
+  if (auto v = read_size_setting(&root, std::string(scheduler::defaults_prefix) + suffix))
+    effective = *v;
+  if (!scheduler_id.empty())
+    if (auto v = read_size_setting(&root, std::string(scheduler::sched_prefix) + "." +
+                                              scheduler_id + suffix))
+      effective = *v;
+  return effective;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +107,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
+  proc.max_alloc_bytes = max_alloc_bytes_;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -116,6 +133,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
+  proc.max_alloc_bytes = max_alloc_bytes_;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -224,6 +242,14 @@ void scheduler::execute_process_step(process &proc) {
   // cooperative deadline for this step lets that inner work abort at the budget too — the
   // same guarantee the read-lane's run() already has. max_time <= 0 means unlimited (nullopt).
   eval_deadline_guard step_deadline(proc.time_left());
+  // Bound what one native call in this step may allocate: limits.max_alloc_bytes, tightened to
+  // what is left of max_memory (which, between steps, only sees state-tree writes).
+  // With no budget and the default cap, an armed guard would change nothing (the default applies
+  // unarmed), so it is armed only when it does: it costs thread-local writes every step.
+  std::optional<eval_alloc_guard> step_alloc;
+  if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
+    step_alloc.emplace(
+        proc.alloc_limit(proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) : 0));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   bool done = evaluator_.step(proc.state);
@@ -684,6 +710,7 @@ int scheduler::fork(int pid) {
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
   child->max_memory = parent.max_memory;
+  child->max_alloc_bytes = parent.max_alloc_bytes;
   child->max_messages = parent.max_messages;
   child->max_message_bytes = parent.max_message_bytes;
   child->signal_handlers = parent.signal_handlers;
