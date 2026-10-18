@@ -61,7 +61,7 @@ app world_clock        fixed_dt = 0.01 s (100 Hz)
 | **P3 — The energy ledger** (done) | `vehicle_energy` per vehicle per engine sub-step: supplied, idle, brake, tire, aero, rolling, medium, drivetrain, suspension, chassis damping, field work, stored (kinetic, potential, spring), the drivetrain step's split error, and the residual; a battery (regen with a cap) or fuel source; Wh/km; in the snapshot, its JSON and the `vehicles.<name>.energy.*` keys. Measured by copies of Jolt's PostCollide and friction solve that change no bit of the run | All met in `physics_energy_test`: a closed cycle over rolling hills, residual + drivetrain split +4.4 kJ of 640 kJ supplied at 8 collision steps (0.69%); coasting supplies 0 and its stored energy falls by what it dissipates (residual +52 J of 211 kJ); coasting downhill gains -dPE - dissipated (residual +46 J of 62 kJ); regeneration returns at most 70% of the brakes' own energy, and never above its cap |
 | **P4 — The plant seam in `cvc::nav`** | `vehicle_plant`, `plant_kind {kinematic, jolt}`, readback across the boundary, the drift tooling below | Every nav golden and parity test unchanged; below 0.3 g the Jolt plant tracks the kinematic trajectory within 0.5 m over 200 ticks; the adapter test leaves a near-zero residual; the per-tick drift is published |
 | **P5 — Physics in the navigator's energy** | Grade cost and tip-over margin (H1), gravity in the governors (H2), slope look-ahead features (H3), measured slip and load as modulators (H4), an energy route cost (H5) | Parity goldens; energy per km drops on a hilly route with path-length growth under a fixed bound; zero entries into infeasible slope |
-| **P6 — Bindings and harnesses** | pycvc for the physics world, the vehicle and plant selection | Python reads the same values as C++ |
+| **P6 — Bindings and harnesses** (libcvc part done) | pycvc for the physics world, the vehicle and plant selection; then GRL-SNAM, grl-snam-dbg and cvcdbg on the plant | Python reads the same values as C++ |
 | **P6a — The scene binding** (started) | `world::states`, `pose_tracker` (the last two states, interpolated at the clock's fraction), cvcGL `physics_scene_binding` (nodes and merged-mesh groups); then the city bundle loader in the library (one source for the scene's and the world's static geometry) and Ariadne `physics:` / `body:` specs | A bound node's transform is exactly the interpolated pose; off-thread presents reach the owner thread; removed bodies and destroyed nodes unbind; one writer per actor |
 | **P7 — wasm-mt replay** | The libcvc recipe declares Jolt for wasm-mt; a native trace replayed under node | The same `state_hash` native and in wasm |
 | **P8 — The differentiable vehicle** | See below | See below |
@@ -268,4 +268,19 @@ P4 adds three things to measure and contain the drift:
     - Key metadata is one shared form, `cvc/state/state_key_meta.h`.
   - Open: GRL-SNAM's Python twin of H1/H5; a net retrained on the slope feature; H3 in the CUDA
     drive.
-- **P6–P8** are not started.
+- **P6, the libcvc part, is done:** pycvc for the physics world, the vehicle and plant
+  selection (PHYSICS_API.md, "Python: pycvc").
+  - `bindings/pycvc/pycvc_physics.i`: `physics_world`, `vehicle_desc`, `physics_binding`
+    (world_binding), `nav_plant`, and the sim_world's plant, terrain and tree functions.
+    pycvc's state helpers read a key's comment and properties.
+  - The gate, in `test_pycvc_physics.py` against `physics_parity_test`:
+    - Python rebuilds the cross-platform golden scene and gets `70b2cc0bd34ea4be`;
+    - a Humvee through the driver model and an agent on the Jolt plant match their C++ twins
+      bit for bit (3 state hashes, 22 values);
+    - a vehicle's state, the snapshot JSON and the tree agree.
+  - Left of P6, downstream once a libcvc release carries P4–P6:
+    - GRL-SNAM `Squad(plant=…)` and the `nav_native` plant option;
+    - grl-snam-dbg `gen-episodes` / `eval` on Jolt, a `KinematicsRecord` schema bump and
+      energy in the scorecards;
+    - cvcdbg `--plant` / `--vehicle` / `--clock` and the HUD.
+- **P7–P8** are not started.

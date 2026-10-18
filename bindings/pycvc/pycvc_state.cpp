@@ -45,6 +45,29 @@ bool state_has(const std::shared_ptr<cvc::app> &app, const std::string &path) {
   return root_of(app).findDescendant(path) != nullptr;
 }
 
+namespace {
+cvc::state &node_at(const std::shared_ptr<cvc::app> &app, const std::string &path, const char *op) {
+  cvc::state *node = root_of(app).findDescendant(path);
+  if (!node)
+    throw std::out_of_range(std::string("pycvc.") + op + ": no node at path: " + path);
+  return *node;
+}
+} // namespace
+
+std::string state_comment(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  return node_at(app, path, "state_comment").comment();
+}
+
+std::string state_property(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                           const std::string &key) {
+  return node_at(app, path, "state_property").property(key);
+}
+
+std::vector<std::string> state_property_keys(const std::shared_ptr<cvc::app> &app,
+                                             const std::string &path) {
+  return node_at(app, path, "state_property_keys").property_keys();
+}
+
 std::vector<std::string> state_children(const std::shared_ptr<cvc::app> &app,
                                         const std::string &path) {
   cvc::state &root = root_of(app);

@@ -1214,6 +1214,12 @@ struct pycvc_py_conversion {
 // (height_field derives from it) and pycvc_nav.i (land cover is cvc::nav's).
 %include "pycvc_world.i"
 
+// ── cvc::physics and the navigator's plant (P6) ────────────────────────────────
+// The physics world, its vehicles and the nav_plant that drives a sim_world's agents
+// as those vehicles (NAV-VEHICLE-PHYSICS-ROADMAP.md, P6). After pycvc_nav.i (the
+// sim_world handles) and pycvc_world.i (height_field, for terrain bodies).
+%include "pycvc_physics.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This

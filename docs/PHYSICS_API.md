@@ -709,6 +709,79 @@ Every key says what it is in `cvc/state/state_key_meta.h`'s form, the one `world
 a recommended `min` and `max`. `describe_state_keys(ctx, base, table)` describes a table of keys
 for any binding.
 
+## Python: pycvc (P6)
+
+pycvc wraps the world, its vehicles, the state-tree binding and the navigator's plant
+(`bindings/pycvc/pycvc_physics.i`). Python drives the same calls as C++ and reads the same
+values:
+
+```python
+import pycvc
+
+w = pycvc.physics_world(backend="jolt", fixed_dt=0.01)    # world_config's fields as keywords
+ground = w.add_material("ground", friction=0.9, rolling_resistance=0.015)
+w.add_box((150, 150, 0.5), position=(0, 0, -0.5), motion="static", material=ground)
+car = w.add_vehicle(pycvc.vehicle_desc.humvee(), position=(0, 0, 1.2))
+w.drive(car, steer=0.05, accel=1.5)                       # or set_controls(throttle=..., ...)
+w.step(100)
+w.vehicle_state(car)["energy"]["source"]                  # J drawn from the fuel
+w.state_hash(), w.save(), w.snapshot_json()
+
+app = pycvc.make_app()
+binding = pycvc.physics_binding(app, w, "physics")       # world_binding
+binding.publish_vehicle("car", car)
+binding.push()
+pycvc.state_get(app, "physics.vehicles.car.speed")
+pycvc.state_property(app, "physics.vehicles.car.speed", "unit")   # "m/s"
+
+plant = pycvc.nav_plant(w, [pycvc.vehicle_desc.humvee()])
+pycvc.nav_sim_world_set_plant(sim, plant)                # the agents drive Humvees
+pycvc.nav_sim_world_set_plant(sim, None)                 # back to nav's bicycle
+pycvc.nav_sim_world_set_terrain(sim, heights, pycvc.nav_plant.terrain_config_of(desc))
+pycvc.nav_sim_world_pull(sim, app, "scene")              # sim_world's settings in the tree
+```
+
+The parts:
+
+- **The world.** Bodies come from `add_box`, `add_sphere`, `add_hull`, `add_mesh` (a
+  `pycvc.geometry`) and `add_terrain` (a `pycvc.height_field`). Bodies and vehicles are ints,
+  and a stale id raises as it does in C++. Vectors are 3-sequences and rotations `(w, x, y, z)`.
+  A body's or vehicle's state comes back as a dict of floats and tuples, wheels and energy
+  ledger included. `contacts()`, `raycast()`, `save()` / `restore()` and `state_hash()` work as
+  in C++. `snapshot_json()` is C++'s own serializer (`snapshot_json.h`).
+- **Vehicle presets.** `vehicle_desc.humvee()` and `roboracer()`, with the scalar fields
+  readable and writable, and `axle(i)`, `gear_ratios()`, `half_extents()` and
+  `center_of_mass()`.
+- **The plant.** `nav_plant(world, descs, ...)` takes `nav_plant_options` as keywords. It has
+  `state(i)` (the measured tire use, load transfer, pitch and roll included), `vehicle(i)`,
+  `last_drift(i)`, `drift_summary()`, `set_modulation()`, `pull()` / `publish()`, and the
+  static `terrain_config_of(desc, mu)`.
+- **The sim_world.** `nav_sim_world_set_plant` selects the plant and `nav_sim_world_plant_kind`
+  reports it. `nav_sim_world_set_terrain` and `set_terrain_config` set the terrain;
+  `terrain_settings` and `infeasible_entries` read it back. `nav_sim_world_pull` / `publish`
+  bind its settings, and `nav_sim_world_tick` counts its ticks.
+  `nav_sim_world_create` takes `""` for the built-in policy (`coef_mlp::default_biased`).
+- **Key metadata.** `state_comment`, `state_property` and `state_property_keys` read what a
+  key says it is.
+- **Lifetimes.** A `nav_plant` keeps its world alive, a `physics_binding` its app and world, and
+  a sim_world handle the plant set on it, so dropping the Python names never leaves a dangling
+  pointer.
+
+**The gate: Python reads the same values as C++.** `test_pycvc_physics.py` checks it three
+ways:
+
+- It rebuilds the cross-platform golden scene (`PhysicsJolt.CrossPlatformGoldenHash`) through
+  pycvc and gets C++'s pinned `70b2cc0bd34ea4be`.
+- It runs `physics_parity_test` (the ctest entry passes its path in `CVC_PHYSICS_PARITY_EXE`),
+  whose scenarios it rebuilds call for call. It then requires their state hashes and values
+  bit for bit: a Humvee through the driver model (ending at 10.06 m) and a sim_world's agent on
+  the Jolt plant (42.9 m), 3 hashes and 22 values.
+- In one process, a vehicle's state, the snapshot JSON and the `physics.vehicles.<name>.*`
+  keys carry the same numbers.
+
+It also checks save / restore, plant selection (the plant outlives its Python names while
+set), the sim_world's and plant's keys with their metadata, and the terrain: 59 checks in all.
+
 ## Static world geometry: `add_world_geometry`
 
 ```cpp

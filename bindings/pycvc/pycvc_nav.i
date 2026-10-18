@@ -907,6 +907,9 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   static void sim_world_capsule_dtor(PyObject *cap) {
     auto *sw = static_cast<cvc::nav::sim_world *>(PyCapsule_GetPointer(cap, kSimWorldCapsule));
     delete sw;
+    // The plant set on it (pycvc_physics.i's nav_sim_world_set_plant), released after the
+    // world that borrowed it.
+    Py_XDECREF(static_cast<PyObject *>(PyCapsule_GetContext(cap)));
   }
 
   static cvc::nav::sim_world *sim_world_from(PyObject *cap) {
@@ -952,7 +955,11 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
         PyArray_DIM(pr, 1) != cols || PyArray_DIM(ga, 0) != N || PyArray_DIM(ca, 0) != N)
       fail("pycvc.nav_sim_world_create: truth/prior (rows,cols), on/goal/color (N,.) mismatch");
 
-    cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(weights_path); // throws on bad/stale
+    // An empty path: the built-in default policy (coef_mlp::default_biased), as the C++ tests
+    // and from_occupancy use.
+    cvc::nav::coef_mlp model = (weights_path && *weights_path)
+                                   ? cvc::nav::coef_mlp::load(weights_path) // throws on bad/stale
+                                   : cvc::nav::coef_mlp::default_biased();
 
     cvc::nav::sim_world::config cfg;
     cfg.rows = rows;
