@@ -160,6 +160,7 @@ private:
     boost::signals2::connection comment_changed;
     boost::signals2::connection hidden_changed;
     boost::signals2::connection read_only_changed;
+    boost::signals2::connection property_changed;
 
     void disconnect_all() {
       value_changed.disconnect();
@@ -168,6 +169,7 @@ private:
       comment_changed.disconnect();
       hidden_changed.disconnect();
       read_only_changed.disconnect();
+      property_changed.disconnect();
     }
   };
 

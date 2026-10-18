@@ -1301,6 +1301,8 @@ struct pycvc_py_conversion {
 %ignore cvc::state::commentChanged;
 %ignore cvc::state::hiddenChanged;
 %ignore cvc::state::readOnlyChanged;
+%ignore cvc::state::propertyChanged;
+%ignore cvc::state::properties; // property_keys() + property(key) cover it
 %ignore cvc::state::linkChanged;
 %ignore cvc::state::traverseEnter;
 %ignore cvc::state::traverseExit;

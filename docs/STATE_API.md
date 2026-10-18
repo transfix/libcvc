@@ -230,6 +230,19 @@ if (state::instance(app)("value").has_property("units")) {
 std::vector<std::string> keys = state::instance(app)("value").property_keys();
 ```
 
+Properties are named metadata strings beside the comment, for other applications to read: a
+recommended `min` and `max`, a `unit`, and so on. They are not the value and do not constrain it.
+
+- `property(key)` of a key that is not set is `""`.
+- Setting a property to `""` removes it.
+- `propertyChanged` fires with the key.
+- Setting a property does not initialize the node.
+- `reset()` clears a node's properties.
+- They replicate like the comment, as a `set_property` mutation (the key in `type_name`, the
+  value in `string_value`), and they travel in snapshots: in-process, over IPC (in a trailer
+  that older peers skip) and over gRPC (`SnapshotEntry.properties`).
+- Python reaches them on `State` as `property`, `has_property` and `property_keys`.
+
 ## Advanced Features
 
 ### Futures API
