@@ -386,6 +386,27 @@ TEST_F(LbieMesherTest, HexaDoMeshAdaptiveErrSweep) {
   expect_geoframe_valid(coarse);
 }
 
+// Octree::get_vtx_new moves each hexa vertex onto the surface by walking across the finest cells.
+// Where the surface meets the volume's boundary the walk stepped off the grid: xyz2octcell()
+// returned -1 and getCellValues(-1) read orig_vol out of bounds. cvc hexahedralize crashed about
+// one run in fifteen (AddressSanitizer flags the read every run), and the vertex landed outside the
+// volume. The walk now stops at the grid's edge.
+TEST_F(LbieMesherTest, HexaVerticesStayInsideAVolumeTheSurfaceLeaves) {
+  for (double r : {1.2, 1.5}) { // spheres bigger than their [-1,1]^3 box
+    volume v = make_sphere_volume(ctx, 17, r);
+    LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
+    ASSERT_GT(g.numquads, 0) << "r=" << r;
+    expect_geoframe_valid(g);
+    const float lim = 1.0f + 1e-5f;
+    int outside = 0;
+    for (int i = 0; i < g.numverts; ++i)
+      for (int j = 0; j < 3; ++j)
+        if (!(g.verts[i][j] >= -lim && g.verts[i][j] <= lim))
+          ++outside;
+    EXPECT_EQ(outside, 0) << "r=" << r << ": vertex coordinates outside the volume";
+  }
+}
+
 TEST_F(LbieMesherTest, HexaDoMeshGeoFlow) {
   volume v = make_sphere_volume(ctx, 17, 0.5);
   LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA,

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/image/image.h>
 #include <cvc/volume/volume_ops.h>
 #include <limits>
 #include <numeric>
@@ -609,6 +610,7 @@ volume vol_back_project(const volume &projections, const std::vector<double> &an
 
 void vol_to_slices(const volume &vol, const std::string &directory, const std::string &format) {
 #ifdef CVC_ENABLE_IMAGEMAGICK
+  init_imagemagick();
   // Normalise to [0,255] UChar for image output
   volume norm = vol_normalize(vol, 0.0, 255.0);
 
@@ -641,6 +643,7 @@ volume slices_to_volume(app &ctx, const std::vector<std::string> &paths, const b
 #ifdef CVC_ENABLE_IMAGEMAGICK
   if (paths.empty())
     throw std::invalid_argument("slices_to_volume: empty path list");
+  init_imagemagick();
 
   // Read first image for dimensions
   Magick::Image first(paths[0]);

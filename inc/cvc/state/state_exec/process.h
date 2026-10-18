@@ -73,6 +73,17 @@ struct process {
   // limits.max_alloc_bytes, resolved when the process is submitted. See alloc_limit().
   uint64_t max_alloc_bytes = kDefaultMaxAllocBytes;
 
+  // Heap accounting (heap.h), for a process with max_memory > 0: max_memory covers its state-tree
+  // writes plus heap_bytes, its measured share of the values it can reach. A measurement runs as
+  // the process's own data steps; heap_alloc_bytes (what natives reported allocating) and
+  // heap_steps since the last one decide when the next is due.
+  uint64_t heap_bytes = 0;
+  uint64_t heap_alloc_bytes = 0;
+  uint64_t heap_steps = 0;
+  uint64_t heap_measurements = 0;
+  std::size_t heap_check_steps = 4096; // limits.heap_check_steps, resolved at submission
+  bool heap_measuring = false;         // a measurement is in proc.state.data_work
+
   // Evaluator state (stackless — serializable)
   evaluator_state state;
 
@@ -147,11 +158,23 @@ struct process {
 
   /// The allocation limit for the next step's eval_alloc_guard (nullopt when unlimited): the
   /// tighter of max_alloc_bytes and what is left of max_memory once `used_bytes` (the memory
-  /// tracker's count for this process) is taken out.
+  /// tracker's count for this process plus heap_bytes) is taken out.
   std::optional<std::size_t> alloc_limit(std::size_t used_bytes) const;
+
+  /// Whether to start a heap measurement after this step: the process has a memory budget, none
+  /// is running, and natives reported enough allocation (heap_remeasure_bytes), or the next
+  /// allocation could cross the budget, or limits.heap_check_steps steps passed.
+  /// `state_bytes` is the memory tracker's count for this process.
+  bool heap_measure_due(uint64_t state_bytes) const;
 
   /// Step count from evaluator stats.
   uint64_t step_count() const { return state.stats.get_step_count(); }
+
+  /// Drop what a finished process evaluated with (its stack, environment, program, handlers and
+  /// inbox), keeping its result, error and statistics. A scheduler calls it once the process is
+  /// terminated or killed and not running, so what the program left in reference cycles becomes
+  /// garbage the cycle collector can free (heap.h), even before the process is reaped.
+  void release_state();
 };
 
 /// Shared ownership alias for process.

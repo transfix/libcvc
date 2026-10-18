@@ -22,6 +22,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
 #include <cvc/state/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
+#include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <filesystem>
@@ -1621,28 +1622,127 @@ TEST(AriadneStdlib, PredicateGetsThePureBoundedSubset) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
-TEST(AriadneStdlib, PredicateExcludesStdlibMaterializersAndRandom) {
+// The materializers run in a predicate as sliced data steps, and collections.map/filter/reduce
+// take a lambda there; math.random stays out (a predicate must be deterministic).
+TEST(AriadneStdlib, PredicateRunsTheMaterializersButNotRandom) {
   cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  // Results that can outgrow their arguments wait for scheduled, sliced versions; math.random
-  // would make a predicate nondeterministic. Each is an unbound symbol -> fail-safe hidden.
-  Widget join = text("join");
-  join.visible_when = "(is-string (string.join (list \"a\") \",\"))";
-  Widget rep = text("rep");
-  rep.visible_when = "(is-string (string.replace \"a\" \"a\" \"aa\"))";
-  Widget range = text("range");
-  range.visible_when = "(is-list (collections.range 3))";
+  ASSERT_TRUE(run_init(app, "", "(state-set \"csv\" \"b,a,c,a\")", nullptr));
+  const std::vector<std::pair<const char *, const char *>> shown = {
+      {"split", "(= (length (string.split (state-get \"csv\") \",\")) 4)"},
+      {"join", "(= (string.join (collections.sort (string.split (state-get \"csv\") \",\")) \"\") "
+               "\"aabc\")"},
+      {"replace", "(= (string.replace (state-get \"csv\") \",\" \"\") \"baca\")"},
+      {"bytes", "(= (bytes.decode (bytes.concat (bytes.slice (string.encode \"xab\") 1) "
+                "(string.encode \"!\"))) \"ab!\")"},
+      {"map", "(= (collections.map (list 1 2 3) (lambda (x) (* x x))) (list 1 4 9))"},
+      {"filter", "(= (length (collections.filter (collections.range 10) (lambda (x) (> x 6)))) 3)"},
+      {"reduce", "(= (collections.reduce (collections.range 5) (lambda (a x) (+ a x)) 0) 10)"},
+      {"unique", "(= (collections.unique (string.split (state-get \"csv\") \",\")) "
+                 "(list \"b\" \"a\" \"c\"))"},
+      {"dicts", "(= (collections.dict-keys (collections.dict-merge (dict \"a\" 1) (dict \"b\" 2))) "
+                "(list \"a\" \"b\"))"},
+      {"shape", "(= (collections.flatten (collections.zip (list 1 2) (collections.reverse (list 3 "
+                "4)))) (list 1 4 2 3))"}};
+  std::vector<Widget> widgets;
+  for (const auto &[name, pred] : shown) {
+    widgets.push_back(text(name));
+    widgets.back().visible_when = pred;
+  }
   Widget rnd = text("rnd");
-  rnd.visible_when = "(< (math.random) 2)";
-  rt.set_root(group({join, rep, range, rnd}));
+  rnd.visible_when = "(< (math.random) 2)"; // unbound -> fail-safe hidden
+  widgets.push_back(rnd);
+  rt.set_root(group(widgets));
   rt.render();
-  EXPECT_FALSE(mb.saw("text_line:join"));
-  EXPECT_FALSE(mb.saw("text_line:rep"));
-  EXPECT_FALSE(mb.saw("text_line:range"));
+  for (const auto &[name, pred] : shown)
+    EXPECT_TRUE(mb.saw(std::string("text_line:") + name)) << pred;
   EXPECT_FALSE(mb.saw("text_line:rnd"));
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_EQ(warns.size(), 1u) << (warns.empty() ? "" : warns[0]);
+  EXPECT_NE(warns[0].find("math.random"), std::string::npos) << warns[0];
+}
+
+// A predicate's deep-data work runs a slice per step, so its step and time caps cut a huge
+// materializer instead of the frame waiting for it. data.step_nodes comes from the app tree.
+TEST(AriadneStdlib, PredicateMaterializerIsCutByTheEvalBudget) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("state_exec.defaults.data.step_nodes").value("1");
+  Widget big = text("big");
+  big.visible_when = "(> (length (collections.range 120000)) 0)"; // > 100000 one-node steps
+  rt.set_root(group({big}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:big"));
+  auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("exceeded the eval budget"), std::string::npos) << warns[0];
+
+  // A 0 here still slices, at the host's 1024 nodes a step, and an ordinary call finishes. It is
+  // kept small so it fits the 5 ms time cap in a Debug build on a loaded CI runner.
+  cvc::state::instance(app)("state_exec.defaults.data.step_nodes").value("0");
+  Widget fits = text("fits");
+  fits.visible_when = "(= (length (collections.range 1000)) 1000)";
+  rt.set_root(group({fits}));
+  MockBackend mb2;
+  rt.set_backend(&mb2);
+  rt.render();
+  EXPECT_TRUE(mb2.saw("text_line:fits"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// A lambda a predicate passes to collections.map runs on the predicate's own evaluator: the
+// special-form gate, the reduced environment and the caps all hold inside it.
+TEST(AriadneStdlib, PredicateLambdasStayInsideThePredicateRules) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget macro = text("macro");
+  macro.visible_when = "(collections.map (list 1) (lambda (x) (defmacro m () 1)))";
+  rt.set_root(group({macro}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:macro"));
+  auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("not permitted"), std::string::npos) << warns[0];
+
+  Widget write = text("write");
+  write.visible_when = "(collections.map (list 1) (lambda (x) (state-set \"leak\" \"1\")))";
+  rt.set_root(group({write}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:write"));
   EXPECT_FALSE(rt.take_reactive_warnings().empty());
+  EXPECT_NE(cvc::state::instance(app)("leak").value(), "1");
+
+  Widget spin = text("spin");
+  spin.visible_when = "(collections.map (list 1) (lambda (x) (while t 1)))";
+  rt.set_root(group({spin}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:spin"));
+  warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("exceeded the eval budget"), std::string::npos) << warns[0];
+}
+
+TEST(AriadneStdlib, ActionLaneCallsLambdasThroughMapAndApply) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (state-set \"out\" (string.join (collections.map "
+                                  "(string.split \"a b c\" \" \") (lambda (w) (string.upper w))) "
+                                  "\"-\")) (state-set \"sum\" (apply (lambda (a b) (+ a b)) "
+                                  "(list 2 3))))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.out").value(), "A-B-C");
+  EXPECT_EQ(cvc::state::instance(app)("ui.sum").value(), "5");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
 TEST(AriadneStdlib, InitAndActionLanesReachTheWholeStdlib) {
@@ -1720,6 +1820,55 @@ TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
   EXPECT_EQ(click(), "10000");
   root("ariadne.limits.action_max_memory").value(std::string("lots")); // unparsable: default
   EXPECT_EQ(click(), "10000");
+}
+
+// A finished action's process is reaped from the app scheduler, and a function it defined (bound
+// in the scope it captured: a reference cycle) is freed by the cycle collector.
+TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (defun helper (x) x) (state-set \"n\" (helper 7)))")}));
+  cvc::state_exec::collect_cycles(); // earlier tests' leftovers
+  const std::size_t before = cvc::state_exec::tracked_objects();
+  for (int i = 0; i < 20; ++i) {
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "7");
+  EXPECT_EQ(app.exec_scheduler().process_count(), 0); // every finished action was reaped
+  cvc::state_exec::collect_cycles();
+  EXPECT_LE(cvc::state_exec::tracked_objects(), before); // the 20 action scopes are gone
+}
+
+// An action's live values count against its memory budget, not only its state-tree writes.
+TEST(AriadneHeap, AnActionsLiveValuesCountAgainstItsBudget) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &root = cvc::state::instance(app);
+  rt.set_root(group({button("Keep", "(begin (set keep (list)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(state-set \"n\" \"kept\"))")}));
+  const auto click = [&] {
+    root("n").value(std::string("-"));
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+    return root("n").value();
+  };
+  EXPECT_EQ(click(), "kept"); // well under the 4 MiB default
+  root("ariadne.limits.action_max_memory").value(std::string("200000"));
+  EXPECT_EQ(click(), "-"); // 6000 live elements are over 200 KB: killed before the write
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
 }
 
 TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {

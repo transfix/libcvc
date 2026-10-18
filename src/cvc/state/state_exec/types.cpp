@@ -270,6 +270,12 @@ void eval_alloc_check(std::size_t bytes, const char *who) {
     throw std::runtime_error(std::string(who) + ": the result needs " + std::to_string(bytes) +
                              " bytes, over the allocation limit of " + std::to_string(*limit) +
                              " bytes (limits.max_alloc_bytes, or what is left of max_memory)");
+  eval_alloc_note(bytes);
+}
+
+void eval_alloc_note(std::size_t bytes) {
+  if (eval_alloc_guard *g = t_alloc_innermost)
+    g->allocated_ = g->allocated_ > SIZE_MAX - bytes ? SIZE_MAX : g->allocated_ + bytes;
 }
 
 // -- value_tag ---------------------------------------------------------------

@@ -435,7 +435,9 @@ TEST(ImageTest, ReadMissingFileThrows) { EXPECT_ANY_THROW(image::load("/no/such/
 // normalization the raw C,M,Y,K quantums land in R,G,B,A — a pure-cyan CMYK pixel
 // came back bright RED. Synthesize a genuine CMYK file and assert read() -> cyan.
 TEST(ImageTest, ReadsCmykInputAsRgb) {
-  Magick::InitializeMagick(nullptr); // idempotent; the test uses Magick++ directly
+  // The test uses Magick++ directly, so it initializes Magick as libcvc does: on Windows,
+  // InitializeMagick alone leaves a cvcpkg ImageMagick without coders (not even xc:).
+  cvc::init_imagemagick();
   // A 4x4 pure-cyan image transformed into the CMYK colorspace, so the file on
   // disk is genuinely CMYK (not an RGB image merely tagged CMYK).
   Magick::Image cyan(Magick::Geometry(4, 4), Magick::ColorRGB(0.0, 1.0, 1.0));

@@ -215,6 +215,7 @@ private:
   uint64_t total_steps_ = 0;
 
   int current_pid_ = -1;
+  uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   process_ptr current_proc_;
 
   // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12): a coroutine
@@ -246,6 +247,9 @@ private:
   void check_limits(process &proc);
   void terminate_process(process &proc, value_t result);
   void kill_process(process &proc, const std::string &reason);
+  /// After a process ended: note it for the cycle collector and, unless it is the one stepping
+  /// now, release its evaluation state (process::release_state).
+  void release_if_idle(process &proc);
   process_info make_info(const process &proc) const;
 };
 

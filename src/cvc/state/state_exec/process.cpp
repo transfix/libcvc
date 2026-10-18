@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/process.h>
 
 namespace cvc::state_exec {
@@ -53,6 +54,29 @@ std::optional<double> process::time_left() const {
   const double left =
       charges_cpu_time() ? 0.5 * max_time - cpu_time_charged : max_time - elapsed_time();
   return std::max(0.0, left);
+}
+
+void process::release_state() {
+  evaluation_stats stats = std::move(state.stats);
+  state = evaluator_state{};
+  state.stats = std::move(stats);
+  state.done = true;
+  saved_stack.clear();
+  saved_result = value_t{};
+  signal_handlers.clear();
+  watch_handlers.clear();
+  inbox = {};
+  heap_measuring = false;
+}
+
+bool process::heap_measure_due(uint64_t state_bytes) const {
+  if (max_memory == 0 || heap_measuring)
+    return false;
+  if (heap_alloc_bytes >= heap_remeasure_bytes(static_cast<std::size_t>(heap_bytes)))
+    return true;
+  if (state_bytes + heap_bytes + heap_alloc_bytes >= max_memory)
+    return heap_alloc_bytes > 0; // what natives allocated since may have crossed the budget
+  return heap_check_steps > 0 && heap_steps >= heap_check_steps;
 }
 
 std::optional<std::size_t> process::alloc_limit(std::size_t used_bytes) const {

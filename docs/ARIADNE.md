@@ -128,9 +128,12 @@ per-activation caps ([`ariadne.cpp:1382`](../src/cvc/ariadne/ariadne.cpp)):
 | wall-time cap | `kActionMaxSeconds` | `0.1 s` |
 | memory budget | tree setting `ariadne.limits.action_max_memory` | `4 MiB` by default; `0` = no limit |
 
-The memory budget is read on every submission. It bounds the action's state-tree writes and
-also each native call's allocations: state_exec's per-step allocation limit takes what is left
-of `max_memory` (developer guide §11, "Allocation limit").
+The memory budget is read on every submission. It covers the action's state-tree writes and its
+measured share of the values it holds (developer guide §7), and it bounds each native call's
+allocations: state_exec's per-step allocation limit takes what is left of `max_memory`
+(developer guide §11, "Allocation limit"). A finished action's process is reaped from the app
+scheduler when the drain sweeps it, and what it left in reference cycles (a function it defined,
+say) is freed by the cycle collector.
 
 A quick action completes within that drain. An action that `await`s, `sleep`s, or
 `msg-recv`s **parks** and resumes on a later frame — this is what makes the async arc
