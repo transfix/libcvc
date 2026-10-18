@@ -335,6 +335,23 @@ def test_stdlib_allocation_limit_comes_from_the_app_tree():
     assert ex.run("(length (collections.range 1000))") == "1000"
 
 
+# ── reference cycles ────────────────────────────────────────────────────
+
+
+def test_exec_functions_survive_cycle_collection():
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    ex.run("(defun twice (x) (* 2 x))")
+    # Each iteration leaks a let scope (a closure bound in the scope it captured). That many make
+    # the scheduler collect cycles between steps, and Exec's own environment, held by Exec, must
+    # come through intact.
+    ex.run(
+        "(begin (set i 0) (while (< i 1000) (begin (let ((h nil)) (set h (lambda () h))) "
+        "(set i (+ i 1)))) i)"
+    )
+    assert ex.run("(twice 21)") == "42"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

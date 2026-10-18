@@ -66,10 +66,12 @@ struct eval_frame {
 };
 
 /// Deep-data work a step left unfinished (data_options::step_nodes): a native call's job (its
-/// frame waits in the apply phase) or the expansion of a macro call (its frame waits to be
-/// re-initialized with it).
+/// frame waits in the apply phase), the expansion of a macro call (its frame waits to be
+/// re-initialized with it), or a measurement of the process's heap that its scheduler started
+/// between two steps (heap.h; its result goes to evaluator_state::heap_measured, and evaluation
+/// resumes where it was).
 struct pending_data_work {
-  enum class kind { native_call, macro_expansion };
+  enum class kind { native_call, macro_expansion, heap_measure };
   std::unique_ptr<data_job> job;
   std::function<value_t(value_t)> then; // native_call: turns the job's result into the call's
   kind what = kind::native_call;
@@ -99,6 +101,9 @@ struct evaluator_state {
   /// step frees them with what is left of its slice, and steps that only free them follow
   /// while any are left.
   std::shared_ptr<detail::release_backlog> backlog;
+  /// A heap measurement's result in bytes, once its data steps finish; the scheduler that started
+  /// it takes it from here. Not serialized.
+  std::optional<uint64_t> heap_measured;
 };
 
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
@@ -114,6 +119,9 @@ struct evaluator_state {
 class stackless_evaluator {
 public:
   explicit stackless_evaluator(environment_ptr global_env);
+
+  /// The global environment new states extend (the cycle collector walks it from a generator).
+  const environment_ptr &global_env() const { return global_env_; }
 
   /// Create a fresh evaluator_state from a parsed expression.
   evaluator_state create_state(const value_t &expr, environment_ptr env = nullptr);
