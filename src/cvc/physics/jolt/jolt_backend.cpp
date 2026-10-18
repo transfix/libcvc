@@ -49,6 +49,7 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
@@ -542,7 +543,8 @@ struct shape_builder {
 // read by the friction combine and the readback.
 struct wheel_medium_state {
   bool active = false;
-  double depth = 0.0, sinkage = 0.0, modulus = 0.0, traction = 0.0;
+  double depth = 0.0, sinkage = 0.0, modulus = 0.0, traction = 0.0, rut = 0.0;
+  std::uint32_t field = 0xffffffffu;
 };
 
 // One vehicle's runtime beside Jolt's constraint. Held by pointer, so the collision tester
@@ -556,6 +558,10 @@ struct jolt_vehicle {
   std::vector<double> width, diameter;
   std::vector<float> steer; // rad, per wheel, set by the facade
   bool neutral = false;
+  // The wheels' settings, which the constraint's wheels point at, and each axle's anti-roll
+  // bar (-1 for none): tune_vehicle changes them in place.
+  std::vector<JPH::Ref<JPH::WheelSettingsWV>> wheel_settings;
+  std::vector<int> bar_of_axle;
 };
 
 // The wheels' ground test: a ray down the suspension, long enough to find the ground under a
@@ -635,8 +641,10 @@ public:
                    _origin->y + static_cast<double>(contact.GetY()),
                    _origin->z + static_cast<double>(contact.GetZ())};
       if ((*_probe)(p, {up.GetX(), up.GetY(), up.GetZ()}, m) && m.depth > 0.0) {
-        const double z = std::min(m.depth, bekker_sinkage(_v->loads[wheel], _v->width[wheel],
-                                                          _v->diameter[wheel], m.modulus));
+        // At least as deep as the rut it finds (field::ruts): pressed snow stays pressed.
+        const double z =
+            std::min(m.depth, std::max(m.rut, bekker_sinkage(_v->loads[wheel], _v->width[wheel],
+                                                             _v->diameter[wheel], m.modulus)));
         const double rise = m.depth - z;
         distance -= rise;
         contact += JPH::RVec3(up) * static_cast<JPH::Real>(rise);
@@ -646,6 +654,8 @@ public:
         s.sinkage = z;
         s.modulus = m.modulus;
         s.traction = m.traction;
+        s.rut = m.rut;
+        s.field = m.field;
       }
     }
     const double travel = distance - radius;
@@ -795,6 +805,45 @@ public:
     return out;
   }
 
+  double body_mass(body_id id) const override {
+    JPH::BodyLockRead lock(_ps->GetBodyLockInterface(), checked(id));
+    if (!lock.Succeeded())
+      throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+    const JPH::Body &b = lock.GetBody();
+    if (!b.IsDynamic())
+      return 0.0;
+    const float inverse = b.GetMotionProperties()->GetInverseMass();
+    return inverse > 0.0f ? 1.0 / static_cast<double>(inverse) : 0.0;
+  }
+
+  // Between steps only, like set_material: the friction combine reads a convex shape's
+  // material from the next step on.
+  void set_body_settings(body_id id, const body_settings &s, bool new_mass) override {
+    const JPH::BodyID jid = alive(id);
+    bool moving = false;
+    {
+      JPH::BodyLockWrite lock(_ps->GetBodyLockInterface(), jid);
+      if (!lock.Succeeded())
+        throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+      JPH::Body &b = lock.GetBody();
+      // Each body has its own shape (add_body builds one per body), so this changes no other.
+      if (b.GetShape()->GetType() == JPH::EShapeType::Convex)
+        const_cast<JPH::ConvexShape *>(static_cast<const JPH::ConvexShape *>(b.GetShape()))
+            ->SetMaterial(_mats.at(s.material).GetPtr());
+      if (!b.IsStatic()) {
+        JPH::MotionProperties *mp = b.GetMotionProperties();
+        mp->SetLinearDamping(static_cast<float>(s.linear_damping));
+        mp->SetAngularDamping(static_cast<float>(s.angular_damping));
+        b.SetAllowSleeping(s.allow_sleeping);
+        if (new_mass && b.IsDynamic())
+          mp->ScaleToMass(static_cast<float>(s.mass));
+        moving = true;
+      }
+    }
+    if (moving)
+      _ps->GetBodyInterface().ActivateBody(jid);
+  }
+
   void remove_body(body_id id) override {
     const JPH::BodyID jid = alive(id);
     JPH::BodyInterface &bi = _ps->GetBodyInterface();
@@ -825,6 +874,26 @@ public:
     s.angular_velocity = from_jolt(b.GetAngularVelocity());
     s.active = b.IsActive();
     return s;
+  }
+
+  // One pass without per-body locks: the facade calls it under the world's lock, so no
+  // step or other call changes a body meanwhile.
+  void states(const std::vector<body_id> &ids, std::vector<body_state> &out) const override {
+    const JPH::BodyLockInterfaceNoLock &bodies = _ps->GetBodyLockInterfaceNoLock();
+    out.clear();
+    out.reserve(ids.size());
+    for (const body_id id : ids) {
+      const JPH::Body *b = bodies.TryGetBody(checked(id));
+      if (b == nullptr)
+        throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+      body_state s;
+      s.position = from_engine(b->GetPosition());
+      s.rotation = is_heightfield(*b) ? quat{} : from_jolt(b->GetRotation());
+      s.linear_velocity = from_jolt(b->GetLinearVelocity());
+      s.angular_velocity = from_jolt(b->GetAngularVelocity());
+      s.active = b->IsActive();
+      out.push_back(s);
+    }
   }
 
   void set_state(body_id id, const body_state &s) override {
@@ -1033,9 +1102,12 @@ public:
             1.0f);
         w->mLateralFriction.AddPoint(90.0f, static_cast<float>(d.tire_sliding));
         vs.mWheels.push_back(w);
+        v->wheel_settings.push_back(w);
         v->width.push_back(a.wheel_width);
         v->diameter.push_back(2.0 * a.wheel_radius);
       }
+      v->bar_of_axle.push_back(
+          a.anti_roll_stiffness > 0.0 ? static_cast<int>(vs.mAntiRollBars.size()) : -1);
       if (a.anti_roll_stiffness > 0.0) {
         JPH::VehicleAntiRollBar bar;
         bar.mLeftWheel = static_cast<int>(2 * ai);
@@ -1084,6 +1156,34 @@ public:
     return true;
   }
 
+  void tune_vehicle(std::uint32_t handle, const vehicle_desc &d) override {
+    jolt_vehicle &v = *_vehicles.at(handle);
+    auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
+    JPH::VehicleEngine &engine = ctl->GetEngine();
+    engine.mMaxTorque = static_cast<float>(d.engine_max_torque);
+    engine.mMinRPM = static_cast<float>(d.engine_min_rpm);
+    engine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
+    JPH::VehicleTransmission &gearbox = ctl->GetTransmission();
+    gearbox.mShiftUpRPM = static_cast<float>(d.shift_up_rpm);
+    gearbox.mShiftDownRPM = static_cast<float>(d.shift_down_rpm);
+    JPH::VehicleAntiRollBars &bars = v.constraint->GetAntiRollBars();
+    for (size_t ai = 0; ai < d.axles.size() && 2 * ai + 1 < v.wheel_settings.size(); ++ai) {
+      const axle_desc &a = d.axles[ai];
+      for (size_t w = 2 * ai; w < 2 * ai + 2; ++w) {
+        JPH::WheelSettingsWV &ws = *v.wheel_settings[w];
+        ws.mMaxBrakeTorque = static_cast<float>(a.max_brake_torque);
+        ws.mMaxHandBrakeTorque = static_cast<float>(a.max_hand_brake_torque);
+        ws.mSuspensionSpring.mFrequency = static_cast<float>(a.suspension_frequency);
+        ws.mSuspensionSpring.mDamping = static_cast<float>(a.suspension_damping);
+      }
+      if (ai < v.bar_of_axle.size() && v.bar_of_axle[ai] >= 0)
+        bars[static_cast<size_t>(v.bar_of_axle[ai])].mStiffness =
+            static_cast<float>(a.anti_roll_stiffness);
+    }
+    // A sleeping vehicle wakes to its new settings.
+    _ps->GetBodyInterface().ActivateBody(v.body);
+  }
+
   void remove_vehicle(std::uint32_t handle) override {
     auto it = _vehicles.find(handle);
     if (it == _vehicles.end())
@@ -1105,6 +1205,11 @@ public:
     for (size_t i = 0; i < v.loads.size() && i < load.size(); ++i)
       v.loads[i] = load[i];
     auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
+    // Any change of input wakes a sleeping vehicle: a released brake on a grade must roll.
+    const bool changed = turned || neutral != v.neutral ||
+                         static_cast<float>(forward) != ctl->GetForwardInput() ||
+                         static_cast<float>(brake) != ctl->GetBrakeInput() ||
+                         static_cast<float>(hand_brake) != ctl->GetHandBrakeInput();
     ctl->SetDriverInput(static_cast<float>(forward), 0.0f, static_cast<float>(brake),
                         static_cast<float>(hand_brake));
     JPH::VehicleTransmission &tr = ctl->GetTransmission();
@@ -1115,7 +1220,7 @@ public:
       tr.mMode = JPH::ETransmissionMode::Auto;
     }
     v.neutral = neutral;
-    if (forward != 0.0 || turned)
+    if (forward != 0.0 || changed)
       _ps->GetBodyInterface().ActivateBody(v.body);
   }
 
@@ -1135,6 +1240,7 @@ public:
       ws = wheel_state{};
       o.longitudinal = vec3{};
       o.medium_modulus = 0.0;
+      o.medium_field = 0xffffffffu;
       ws.steer = w->GetSteerAngle();
       ws.angular_velocity = w->GetAngularVelocity();
       ws.rotation = w->GetRotationAngle();
@@ -1156,6 +1262,8 @@ public:
         ws.medium_depth = m.depth;
         ws.sinkage = m.sinkage;
         o.medium_modulus = m.modulus;
+        o.medium_field = m.field;
+        ws.rut = m.rut;
       }
     }
   }

@@ -73,6 +73,7 @@ struct vehicle_readback {
     wheel_state state;           // the engine's view; the facade fills in the resistances
     vec3 longitudinal;           // the tire's forward direction on the ground (world, unit)
     double medium_modulus = 0.0; // k of the medium under it, N/m^3 (0: none)
+    std::uint32_t medium_field = 0xffffffffu; // which medium field
   };
   std::vector<wheel> wheels;
 };
@@ -83,6 +84,8 @@ struct wheel_medium {
   double depth = 0.0;
   double modulus = 0.0;
   double traction = 0.0;
+  double rut = 0.0;                  // m already pressed down there (field::ruts)
+  std::uint32_t field = 0xffffffffu; // the medium field's id
 };
 // Asked during the step, possibly on worker threads: it must only read.
 using medium_probe = std::function<bool(const vec3 &contact, const vec3 &up, wheel_medium &out)>;
@@ -117,6 +120,14 @@ public:
   virtual std::size_t body_count() const = 0;
 
   virtual body_state state(body_id id) const = 0;
+  // The states of `ids`, all known, in order: world::snapshot's batch read. The world
+  // holds its lock, so no step runs meanwhile.
+  virtual void states(const std::vector<body_id> &ids, std::vector<body_state> &out) const {
+    out.clear();
+    out.reserve(ids.size());
+    for (const body_id id : ids)
+      out.push_back(state(id));
+  }
   virtual void set_state(body_id id, const body_state &s) = 0;
   virtual void add_force(body_id id, const vec3 &f) = 0;
   virtual void add_impulse(body_id id, const vec3 &j) = 0;
@@ -137,6 +148,16 @@ public:
   virtual void add_field_load(body_id id, const vec3 &force, const vec3 &torque) = 0;
   // Wake a sleeping dynamic body.
   virtual void wake(body_id id) = 0;
+  // A dynamic body's mass as the engine holds it (0 if it does not say).
+  virtual double body_mass(body_id id) const {
+    (void)id;
+    return 0.0;
+  }
+  // world::set_body, checked by the facade: the material (a convex body's), and for a
+  // moving body its damping, sleeping, and with `new_mass` its mass.
+  virtual void set_body_settings(body_id id, const body_settings &s, bool new_mass) {
+    (void)id, (void)s, (void)new_mass;
+  }
 
   // Vehicles (vehicle.h). add_vehicle builds the chassis body and its wheels, returning the
   // chassis and a handle; false if the backend has no vehicles (cap_vehicles).
@@ -157,6 +178,9 @@ public:
   virtual void read_vehicle(std::uint32_t handle, vehicle_readback &out) const {
     (void)handle, (void)out;
   }
+  // The engine's share of world::set_vehicle: the powertrain, and each wheel's brakes,
+  // suspension spring and anti-roll bar, from `d` (checked by the facade).
+  virtual void tune_vehicle(std::uint32_t handle, const vehicle_desc &d) { (void)handle, (void)d; }
   // The media the wheels sink into, and how deep the deepest is: a wheel looks that much
   // further for the ground under one.
   virtual void set_medium_probe(medium_probe probe) { (void)probe; }

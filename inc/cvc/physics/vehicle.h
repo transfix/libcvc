@@ -185,7 +185,8 @@ struct wheel_state {
   double friction = 0.0;           // the ground's mu the tire used (material or medium)
   double rolling_resistance = 0.0; // N, applied against the wheel's rolling
   double medium_depth = 0.0;       // m of medium over the ground under the wheel
-  double sinkage = 0.0;            // m the wheel has sunk into it
+  double sinkage = 0.0;            // m the wheel has sunk into it (below the fresh surface)
+  double rut = 0.0;                // m of rut it found there (field::ruts), before this pass
   double medium_resistance = 0.0;  // N, its compaction resistance
 };
 

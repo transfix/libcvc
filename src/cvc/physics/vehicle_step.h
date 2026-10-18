@@ -41,14 +41,23 @@ public:
   std::size_t size() const { return _v.size(); }
   // Whether `id` is a vehicle's chassis (world::remove_body refuses it).
   bool is_chassis(body_id id) const;
+  body_id chassis(vehicle_id id) const { return at(id).chassis; }
+  bool contains(vehicle_id id) const { return _v.count(id.value) != 0; }
+  const vehicle_desc &desc(vehicle_id id) const { return at(id).desc; }
+  // world::set_vehicle: throws cvc::physics_error for a value add_vehicle refuses or a
+  // change to one fixed when the vehicle was added, and changes nothing then.
+  void tune(world_backend &be, vehicle_id id, const vehicle_desc &d);
 
   void drive(vehicle_id id, const drive_command &c);
   void set_controls(vehicle_id id, const vehicle_controls &c);
 
   void pre_step(world_backend &be, const field_set &fields, const world_config &cfg,
                 const std::vector<material> &materials);
-  void post_step(world_backend &be, const world_config &cfg);
+  // After it: read the vehicles back, and press their ruts into rutted media.
+  void post_step(world_backend &be, field_set &fields, const world_config &cfg);
   vehicle_state state(const world_backend &be, vehicle_id id) const;
+  // Every vehicle, for world::snapshot.
+  void snapshot(const world_backend &be, std::vector<vehicle_snapshot> &out) const;
 
   // The facade's vehicle state (actuators, driver memory, the last readback), for
   // world::save / restore. restore() needs the same vehicles, added in the same order.
