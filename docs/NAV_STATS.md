@@ -21,7 +21,12 @@ downstream app or test harness, and `sim_world` itself all drive it identically.
   `goals_reached`), motion (`total_path_m`/`straight_m`/`turn_total_rad`/`turn_events`/`time_in_wall_s`/
   speeds), clearance/collisions (`min_clearance_m`/`time_below_clear_s`/`penetration_steps`/
   `veh_contacts`), per-material dwell (`time_over_material_s`/`dist_over_material_m`, `kNumMaterials`
-  buckets), effort (`accel_integral`/`fuel_used`), and **drive telemetry** — the reduced per-tick
+  buckets), effort (`accel_integral`/`fuel_used`), **energy** measured by a physics plant
+  (`energy_J`/`energy_per_km`/`building_contacts`, present only when `energy_tracked`: a
+  `sim_world` with a plant that tracks energy feeds `nav_samplers::energy_step_J` and
+  `static_contacts`; PHYSICS_API.md "cvc::nav's plant"; `publish_nav_stats` writes them as
+  `veh.<i>.{energy_J, energy_per_km, building_contacts}` and
+  `episode.{total_energy_J, total_building_contacts}`), and **drive telemetry** — the reduced per-tick
   `drive_telemetry` (`drive_sample`): policy coefficients (`alpha_mean`/`beta_mean`/`gamma_mean`),
   grip (`mu_mean`/`mu_min`), material risk (`mrisk_mean`/`mrisk_max`), external-force magnitude
   (`ext_force_mean`), steering (`steer_abs_mean`/`steer_abs_max`), and `binding_steps`. These are

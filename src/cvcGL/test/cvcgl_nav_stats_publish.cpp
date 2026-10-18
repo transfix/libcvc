@@ -79,6 +79,10 @@ int main() {
   ck(std::fabs(st("scene.nav_stats.veh.1.closest_approach_m").value<double>() - 3.0) < 1e-6,
      "veh1 closest");
   ck(st("scene.nav_stats.veh.0.formation_parent").value<int>() == -1, "veh0 anchor parent -1");
+  // no plant measured energy: its leaves are not written
+  ck(!st("scene.nav_stats.veh.0.energy_J").initialized(), "no energy without a plant");
+  ck(!st("scene.nav_stats.episode.total_energy_J").initialized(),
+     "no fleet energy without a plant");
   // per-convoy formation: convoy 0 has 1 follower, in-slot, anchor arrived -> form_arrival 1.
   ck(st("scene.nav_stats.formation.0.followers").value<int>() == 1, "convoy0 followers");
   ck(std::fabs(st("scene.nav_stats.formation.0.slot_error_mean_m").value<double>() - 1.5) < 1e-6,
@@ -93,6 +97,30 @@ int main() {
   ck(st("scene.nav_stats.meta.complete").value<int>() == 1, "meta complete=1");
   ck(st("scene.nav_stats.meta.tick").value<int>() == 43,
      "meta tick advanced (coalesced last value)");
+
+  // a physics plant's energy and building contacts, per vehicle and for the fleet
+  cvc::nav::episode_nav_stats en = e;
+  en.energy_tracked = true;
+  en.total_energy_J = 9.0e5;
+  en.total_building_contacts = 1;
+  en.per_vehicle[1].energy_tracked = true;
+  en.per_vehicle[1].energy_J = 9.0e5;
+  en.per_vehicle[1].energy_per_km = 1.1e7;
+  en.per_vehicle[1].building_contacts = 1;
+  cvc::gl::publish_nav_stats(pub, "nrg", en, 1);
+  pub.flush();
+  ck(std::fabs(st("nrg.nav_stats.veh.1.energy_J").value<double>() - 9.0e5) < 1e-3, "veh1 energy");
+  ck(std::fabs(st("nrg.nav_stats.veh.1.energy_per_km").value<double>() - 1.1e7) < 1e-1,
+     "veh1 energy per km");
+  ck(st("nrg.nav_stats.veh.1.building_contacts").value<int>() == 1, "veh1 building contacts");
+  ck(std::fabs(st("nrg.nav_stats.episode.total_energy_J").value<double>() - 9.0e5) < 1e-3,
+     "fleet energy");
+  ck(st("nrg.nav_stats.episode.total_building_contacts").value<int>() == 1, "fleet contacts");
+  // every leaf says what it is
+  ck(!st("nrg.nav_stats.veh.1.energy_J").comment().empty(), "energy_J has a comment");
+  ck(st("nrg.nav_stats.veh.1.energy_per_km").property("unit") == "J/km", "energy_per_km unit");
+  ck(st("nrg.nav_stats.episode.makespan_s").property("access") == "telemetry", "makespan access");
+  ck(!st("scene.nav_stats.meta.tick").comment().empty(), "meta.tick has a comment");
 
   // per_vehicle_every stride: over 3 vehicles, stride 2 publishes veh 0 and 2, skips 1 (fresh
   // prefix).

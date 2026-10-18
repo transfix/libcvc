@@ -48,10 +48,109 @@ struct convoy_acc {
 };
 } // namespace
 
+namespace {
+
+// What a nav_stats leaf is, for other applications: its comment and its "access" (all of these
+// are telemetry) and "unit" properties. A leaf is described when it is first written, so a strided
+// or untracked one stays unset.
+struct leaf_meta {
+  const char *key;
+  const char *unit;
+  const char *comment;
+};
+
+const leaf_meta kMeta[] = {
+    {"meta.alive", "", "1 while this episode's stats are published."},
+    {"meta.scene_id", nullptr, "The scene the episode runs in."},
+    {"meta.checkpoint", nullptr, "The policy checkpoint driving the vehicles."},
+    {"meta.seed", "", "The episode's seed."},
+    {"meta.n_vehicles", "", "Vehicles in the episode."},
+    {"meta.tick", "", "The sim tick these stats are as of."},
+    {"meta.dt_s", "s", "Seconds per sim tick."},
+    {"meta.complete", "", "1 on the final record of an episode."},
+    {"episode.arrived", "", "Vehicles that reached their goal."},
+    {"episode.success", "", "1 when every vehicle arrived within budget."},
+    {"episode.makespan_s", "s", "When the last arriving vehicle arrived."},
+    {"episode.mean_ttg_s", "s", "The arrivers' mean time to goal."},
+    {"episode.penetration_pct", "%", "Vehicle-ticks with the vehicle centre in an occupied cell."},
+    {"episode.total_veh_contacts", "", "Vehicle-ticks within min_gap of another vehicle."},
+    {"episode.min_sep_m", "m", "The closest two vehicles came; >= 1e29 = unmeasured."},
+    {"episode.mean_path_ratio", "1", "Mean path length over the straight-line distance."},
+    {"episode.mean_turn_total_rad", "rad", "Mean total heading change per vehicle."},
+    {"episode.total_fuel", "m/s", "The fleet's sum of |change of speed|: a fuel proxy, not fuel."},
+    {"episode.total_energy_J", "J", "The fleet's energy drawn from its sources (a physics plant)."},
+    {"episode.total_building_contacts", "",
+     "The fleet's contacts with static geometry (a physics plant)."},
+    {"coverage.explored_frac", "1", "Belief cells ever seen."},
+    {"coverage.visible_frac", "1", "Belief cells in view on the last frame."},
+    {"coverage.believed_free_frac", "1", "Belief cells read as free."},
+    {"coverage.phantom_frac", "1", "Belief cells read as occupied where the truth is free."},
+};
+
+const leaf_meta kFormation[] = {
+    {"followers", "", "Vehicles holding station in this convoy."},
+    {"slot_error_mean_m", "m", "The followers' mean distance from their formation slots."},
+    {"form_arrival", "", "1 when every follower ended in its slot and the anchor arrived."},
+};
+
+const leaf_meta kVehicle[] = {
+    {"arrived", "", "1 once the vehicle reached its goal."},
+    {"time_to_goal_s", "s", "When it first reached its goal; < 0 = not yet."},
+    {"closest_approach_m", "m", "The nearest it came to its goal."},
+    {"stall_steps", "", "Ticks that failed to beat its closest approach."},
+    {"min_clearance_m", "m", "Its least clearance to a wall; >= 1e29 = unmeasured."},
+    {"penetration_steps", "", "Ticks with its centre in an occupied cell."},
+    {"veh_contacts", "", "Ticks within min_gap of another vehicle."},
+    {"fuel_used", "m/s", "Its sum of |change of speed|: a fuel proxy, not fuel."},
+    {"sense_flips", "", "Belief cells its sensing flipped."},
+    {"formation_parent", "", "The vehicle it holds station on; -1 = none (the anchor)."},
+    {"slot_error_mean_m", "m", "Its mean distance from its formation slot."},
+    {"formation_arrived", "", "1 when it ended in its formation slot."},
+    {"energy_J", "J", "The energy it drew from its source, net of regeneration (a physics plant)."},
+    {"energy_per_km", "J/km", "energy_J per kilometre of its path."},
+    {"building_contacts", "", "Contacts its body started with static geometry (a physics plant)."},
+};
+
+void describe_leaf(cvc::app &ctx, const std::string &path, const leaf_meta &m) {
+  try {
+    cvc::state &s = cvc::state::instance(ctx)(path);
+    if (!s.comment().empty())
+      return; // described already
+    s.comment(m.comment);
+    s.property("access", "telemetry");
+    if (m.unit)
+      s.property("unit", m.unit);
+  } catch (const std::exception &) {
+  }
+}
+
+template <std::size_t K>
+void describe_leaves(cvc::app &ctx, const std::string &base, const leaf_meta (&t)[K],
+                     bool (*keep)(const char *) = nullptr) {
+  for (const leaf_meta &m : t)
+    if (!keep || keep(m.key))
+      describe_leaf(ctx, base + "." + m.key, m);
+}
+
+} // namespace
+
 void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePrefix,
                        const cvc::nav::episode_nav_stats &e, long tick,
                        const nav_stats_publish_params &p) {
   const std::string root = navStatsStatePath(scenePrefix);
+  // Describe the leaves this call writes (each once): the energy ones only when tracked, the
+  // coverage ones only when emitted.
+  {
+    const bool energy = e.energy_tracked, coverage = p.emit_coverage;
+    for (const leaf_meta &m : kMeta) {
+      const std::string k = m.key;
+      if (!energy && (k == "episode.total_energy_J" || k == "episode.total_building_contacts"))
+        continue;
+      if (!coverage && k.compare(0, 9, "coverage.") == 0)
+        continue;
+      describe_leaf(pub.ctx(), root + "." + k, m);
+    }
+  }
 
   // ── meta ──
   pub.publish(root + ".meta.alive", "1");
@@ -75,6 +174,10 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
   pub.publish(ep + ".mean_path_ratio", d2s(e.mean_path_ratio));
   pub.publish(ep + ".mean_turn_total_rad", d2s(e.mean_turn_total_rad));
   pub.publish(ep + ".total_fuel", d2s(e.total_fuel));
+  if (e.energy_tracked) { // a physics plant measured them (nav_stats.h energy_tracked)
+    pub.publish(ep + ".total_energy_J", d2s(e.total_energy_J));
+    pub.publish(ep + ".total_building_contacts", i2s(e.total_building_contacts));
+  }
 
   // ── coverage (episode belief-coverage fractions) ──
   if (p.emit_coverage) {
@@ -104,6 +207,7 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
       if (kv.second.followers == 0)
         continue; // no followers -> not a formation
       const std::string fp = root + ".formation." + std::to_string(kv.first);
+      describe_leaves(pub.ctx(), fp, kFormation);
       pub.publish(fp + ".followers", i2s(kv.second.followers));
       pub.publish(fp + ".slot_error_mean_m", d2s(kv.second.slot_err_sum / kv.second.followers));
       // form_arrival: every follower in-slot AND the anchor arrived (the honest "formation
@@ -123,6 +227,13 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     // collector-produced record (position == veh_index) but self-consistent with an extension's
     // publisher for reordered/sparse ones.
     const std::string vp = root + ".veh." + std::to_string(v.veh_index);
+    for (const leaf_meta &m : kVehicle) {
+      const std::string k = m.key;
+      if (!v.energy_tracked &&
+          (k == "energy_J" || k == "energy_per_km" || k == "building_contacts"))
+        continue;
+      describe_leaf(pub.ctx(), vp + "." + k, m);
+    }
     pub.publish(vp + ".arrived", b2s(v.arrived));
     pub.publish(vp + ".time_to_goal_s", d2s(v.time_to_goal_s));
     pub.publish(vp + ".closest_approach_m", d2s(v.closest_approach_m));
@@ -135,6 +246,11 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     pub.publish(vp + ".formation_parent", i2s(v.formation_parent));
     pub.publish(vp + ".slot_error_mean_m", d2s(v.slot_error_mean_m));
     pub.publish(vp + ".formation_arrived", b2s(v.formation_arrived));
+    if (v.energy_tracked) {
+      pub.publish(vp + ".energy_J", d2s(v.energy_J));
+      pub.publish(vp + ".energy_per_km", d2s(v.energy_per_km));
+      pub.publish(vp + ".building_contacts", i2s(v.building_contacts));
+    }
   }
 }
 

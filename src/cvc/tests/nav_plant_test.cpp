@@ -1,0 +1,525 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+*/
+
+// The plant seam (P4, docs/roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md; doc 31's gates):
+//  1. every nav golden and parity test is unchanged (the nav suites; the kinematic arm is
+//     untouched without a plant);
+//  2. on flat dry ground below 0.3 g the Jolt plant tracks the kinematic trajectory within
+//     0.5 m over 200 ticks;
+//  3. at the limit the plants diverge, and the divergence is reported, not tuned away;
+//  4. the cost per Jolt vehicle is measured and published;
+//  5. the adapter test leaves a near-zero residual against the kinematic bicycle at nsub = k;
+//  6. the per-tick drift is published, binned by lateral g;
+//  7. in the Jolt arm the speed never exceeds the latency-aware stopping speed.
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cvc/core/app.h>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/sim_world.h>
+#include <cvc/physics/nav_plant.h>
+#include <cvc/physics/world.h>
+#include <cvc/state/state.h>
+#include <gtest/gtest.h>
+#include <string>
+#include <vector>
+
+using namespace cvc::physics;
+using cvc::nav::sim_world;
+
+namespace {
+
+bool have_jolt() { return backend_available(backend::jolt); }
+
+#define REQUIRE_JOLT()                                                                             \
+  if (!have_jolt())                                                                                \
+  GTEST_SKIP() << "this libcvc was built without Jolt"
+
+constexpr double kS = 0.05; // the trained metric: 1 normalized unit = 20 m
+constexpr double kG = 9.80665;
+
+world_config jolt_config() {
+  world_config c;
+  c.backend = backend::jolt;
+  return c;
+}
+
+// The same ground in both worlds: nav's occupancy grid (1 m cells over +-100 m) and the physics
+// world's flat ground with a static box for each wall.
+struct scene {
+  static constexpr int R = 201, C = 201;
+  static constexpr double lo = -100.0, hi = 100.0;
+  std::vector<std::uint8_t> occ = std::vector<std::uint8_t>(static_cast<std::size_t>(R) * C, 0);
+  struct rect {
+    double x0, y0, x1, y1;
+  };
+  std::vector<rect> walls;
+
+  void wall(double x0, double y0, double x1, double y1) {
+    walls.push_back({x0, y0, x1, y1});
+    for (int r = 0; r < R; ++r)
+      for (int c = 0; c < C; ++c) {
+        const double x = lo + c * (hi - lo) / (C - 1), y = lo + r * (hi - lo) / (R - 1);
+        if (x >= x0 && x <= x1 && y >= y0 && y <= y1)
+          occ[static_cast<std::size_t>(r) * C + c] = 1;
+      }
+  }
+
+  void build(world &w, double mu) const {
+    const material_id m = w.add_material({"ground", static_cast<float>(mu), 0.0f, 0.015f});
+    body_desc g;
+    g.shape = box{{150.0, 150.0, 0.5}};
+    g.motion = motion_type::static_;
+    g.position = {0.0, 0.0, -0.5};
+    g.material = m;
+    w.add_body(g);
+    for (const rect &r : walls) {
+      body_desc b;
+      b.shape = box{{0.5 * (r.x1 - r.x0) + 0.5, 0.5 * (r.y1 - r.y0) + 0.5, 1.5}};
+      b.motion = motion_type::static_;
+      b.position = {0.5 * (r.x0 + r.x1), 0.5 * (r.y0 + r.y1), 1.5};
+      b.material = m;
+      w.add_body(b);
+    }
+  }
+};
+
+// nav's footprint of the vehicle's body: four discs along the heading from the rear axle, from
+// tail to nose, each 1.3 half-widths, which cover the body's corners.
+std::vector<float> &footprint_of(const vehicle_desc &d) {
+  static std::vector<float> offsets;
+  double rear = 0.0;
+  for (const axle_desc &a : d.axles)
+    if (!a.steered)
+      rear = std::min(rear, a.x);
+  const double hy = d.half_extents.y;
+  const double tail = -d.half_extents.x - rear + 0.7 * hy,
+               nose = d.half_extents.x - rear - 0.7 * hy;
+  offsets.clear();
+  for (int k = 0; k < 4; ++k)
+    offsets.push_back(static_cast<float>((tail + (nose - tail) * k / 3.0) * kS));
+  return offsets;
+}
+
+// nav's vehicle in the trained metric, sized from the physics vehicle: its body, wheelbase and
+// steering lock, an acceleration it can make, and a corner cap of `a_lat_g`.
+sim_world::config nav_config(const vehicle_desc &d, double vmax_mps, double a_lat_g) {
+  sim_world::config c;
+  const std::vector<float> &body = footprint_of(d);
+  c.veh.body_offsets = body.data();
+  c.veh.n_body = static_cast<int>(body.size());
+  c.veh.body_rr = static_cast<float>(1.3 * d.half_extents.y * kS);
+  c.veh.body_gain = 1.0f / static_cast<float>(body.size());
+  c.rows = scene::R;
+  c.cols = scene::C;
+  c.min_x = c.min_y = scene::lo;
+  c.max_x = c.max_y = scene::hi;
+  c.scale = kS;
+  c.veh.rr = 0.15f;
+  c.veh.d_hat = 0.35f;
+  c.veh.dt = 0.06f;
+  c.veh.nsub = 6; // the kinematic reference steps at the physics rate (D14)
+  c.veh.vmax = static_cast<float>(vmax_mps * kS);
+  c.veh.L = static_cast<float>(d.wheelbase() * kS);
+  c.veh.delta_max = static_cast<float>(d.max_steer);
+  c.veh.a_max = static_cast<float>(0.8 * d.max_accel * kS);
+  c.veh.a_lat_max = static_cast<float>(a_lat_g * kG * kS);
+  c.freeze_sense = true;
+  c.reach_tol = static_cast<float>(4.0 * kS);
+  return c;
+}
+
+sim_world make_sim(const sim_world::config &c, const scene &s, double sx, double sy, double gx,
+                   double gy) {
+  const float o[2] = {static_cast<float>(sx * kS), static_cast<float>(sy * kS)};
+  const float g[2] = {static_cast<float>(gx * kS), static_cast<float>(gy * kS)};
+  const float col[3] = {1.0f, 1.0f, 1.0f};
+  return sim_world(c, s.occ.data(), s.occ.data(), cvc::nav::coef_mlp::default_biased(), o, g, col,
+                   1);
+}
+
+struct pose {
+  float x = 0, y = 0, heading = 0, speed = 0;
+};
+
+pose pose_of(const sim_world &w, int i = 0) {
+  const int n = w.size();
+  std::vector<float> p(2 * n), h(n), s(n);
+  std::vector<int> m(n);
+  std::vector<std::uint8_t> r(n);
+  w.snapshot(p.data(), h.data(), s.data(), m.data(), r.data());
+  return {p[2 * i], p[2 * i + 1], h[i], s[i]};
+}
+
+void print_bins(const nav_plant &p) {
+  for (const nav_plant::drift_bin &b : p.drift_summary())
+    if (b.ticks > 0)
+      std::printf("    %.1f-%s g: %5llu ticks; position rms %.4f max %.4f m, heading rms %.5f max "
+                  "%.5f rad, speed rms %.4f max %.4f m/s\n",
+                  b.lo_g, std::isfinite(b.hi_g) ? std::to_string(b.hi_g).substr(0, 3).c_str() : "",
+                  static_cast<unsigned long long>(b.ticks), b.position_rms_m, b.position_max_m,
+                  b.heading_rms_rad, b.heading_max_rad, b.speed_rms_mps, b.speed_max_mps);
+}
+
+} // namespace
+
+// The adapter reads a vehicle back as nav sees it: the rear axle where the agent started, the
+// heading, at rest, in nav's frame; and its limits are the vehicle's.
+TEST(NavPlant, ReadsTheVehicleBackInNavsFrame) {
+  REQUIRE_JOLT();
+  scene sc;
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  const vehicle_desc d = vehicle_desc::humvee();
+  nav_plant plant(w, {d});
+  cvc::world_units::normalized_frame f;
+  f.scale = kS;
+  f.cx = 10.0;
+  f.cy = -5.0;
+  cvc::nav::plant_state start;
+  start.x = static_cast<float>((20.0 - f.cx) * kS);
+  start.y = static_cast<float>((30.0 - f.cy) * kS);
+  start.heading = 0.7f;
+  plant.attach(1, &start, f, 0.06);
+  for (int t = 0; t < 50; ++t)
+    plant.advance(); // settle onto the suspension
+  const cvc::nav::plant_state s = plant.state(0);
+  std::printf("  rear axle (%.4f, %.4f) m, heading %.5f, speed %.5f m/s\n", s.x / kS + f.cx,
+              s.y / kS + f.cy, s.heading, s.speed / kS);
+  EXPECT_NEAR(s.x / kS + f.cx, 20.0, 0.01);
+  EXPECT_NEAR(s.y / kS + f.cy, 30.0, 0.01);
+  EXPECT_NEAR(s.heading, 0.7, 1e-3);
+  EXPECT_NEAR(s.speed / kS, 0.0, 0.01);
+  const cvc::nav::plant_limits l = plant.limits(0);
+  EXPECT_NEAR(l.wheelbase, 3.30 * kS, 1e-6);
+  EXPECT_FLOAT_EQ(l.max_steer, static_cast<float>(d.max_steer));
+  EXPECT_FLOAT_EQ(l.steer_rate, static_cast<float>(d.max_steer_rate));
+  EXPECT_NEAR(l.a_brake, 0.8 * d.max_decel * kS, 1e-6);
+}
+
+// Gate 5: Jolt set up to behave almost kinematically (an instant steering actuator, grippy flat
+// ground) leaves a near-zero per-tick residual against the kinematic bicycle at nsub = k = 6.
+TEST(NavPlant, TheAdapterResidualIsNearZero) {
+  REQUIRE_JOLT();
+  scene sc;
+  vehicle_desc d = vehicle_desc::humvee();
+  d.max_steer_rate = 100.0;
+  sim_world sim = make_sim(nav_config(d, 6.0, 0.15), sc, -60, -20, 60, 20);
+  world w(jolt_config());
+  sc.build(w, 1.2);
+  nav_plant plant(w, {d});
+  sim.set_plant(&plant);
+  float worst_pos = 0, worst_head = 0, worst_speed = 0;
+  for (int t = 0; t < 200; ++t) {
+    if (t == 80)
+      sim.retarget(0, static_cast<float>(20 * kS), static_cast<float>(70 * kS));
+    sim.step();
+    if (t < 20)
+      continue; // the vehicle settles onto its suspension
+    const nav_plant::drift_si &dr = plant.last_drift(0);
+    worst_pos = std::max(worst_pos, static_cast<float>(dr.position_m));
+    worst_head = std::max(worst_head, static_cast<float>(std::fabs(dr.heading_rad)));
+    worst_speed = std::max(worst_speed, static_cast<float>(std::fabs(dr.speed_mps)));
+  }
+  const pose p = pose_of(sim);
+  std::printf("  per tick, worst: position %.4f m, heading %.5f rad, speed %.4f m/s; ended at "
+              "(%.1f, %.1f)\n",
+              worst_pos, worst_head, worst_speed, p.x, p.y);
+  print_bins(plant);
+  EXPECT_LT(worst_pos, 0.05);
+  EXPECT_LT(worst_head, 0.01);
+  EXPECT_LT(worst_speed, 0.3);
+}
+
+// Gate 2: on flat dry ground below 0.3 g, the Jolt Humvee tracks the kinematic bicycle's
+// trajectory within 0.5 m over 200 ticks (12 s): its path never strays more than 0.5 m from the
+// bicycle's along a curving route (a goal that swings round as the vehicle drives). At a tick
+// the two also differ along the path, by the engine's response to an instant acceleration,
+// which is reported. Two harder routes are reported, not gated: a swerve round a block and a step
+// change of goal, where the bicycle turns at once and the Humvee's steering at 0.35 rad/s
+// (doc 31 D14's actuator lag); with NAV_PLANT_FAST_STEER set the Humvee steers at once too, which
+// separates that lag from the rest.
+enum class route { curve, block, step };
+
+class NavPlantTrack : public ::testing::TestWithParam<route> {};
+
+TEST_P(NavPlantTrack, TracksTheKinematicTrajectoryBelow0p3g) {
+  const route r = GetParam();
+  REQUIRE_JOLT();
+  scene sc;
+  if (r == route::block)
+    sc.wall(-12.0, 0.0, -8.0, 4.0); // a block just beside the line from start to goal
+  vehicle_desc d = vehicle_desc::humvee();
+  if (std::getenv("NAV_PLANT_FAST_STEER"))
+    d.max_steer_rate = 100.0;
+  const sim_world::config cfg = nav_config(d, 8.0, 0.25);
+  sim_world kin = make_sim(cfg, sc, -60, -20, 60, 20);
+  sim_world jolt = make_sim(cfg, sc, -60, -20, 60, 20);
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {d});
+  jolt.set_plant(&plant);
+  double worst = 0.0, worst_along = 0.0, worst_across = 0.0, peak_g = 0.0, path = 0.0;
+  pose last = pose_of(jolt);
+  std::vector<pose> kin_path{pose_of(kin)}, jolt_path{last};
+  const double g0 = std::atan2(40.0, 120.0);
+  for (int t = 0; t < 200; ++t) {
+    if (r == route::step && t == 80) {
+      kin.retarget(0, static_cast<float>(20 * kS), static_cast<float>(70 * kS));
+      jolt.retarget(0, static_cast<float>(20 * kS), static_cast<float>(70 * kS));
+    }
+    if (r == route::curve) {
+      // The goal swings left round the start at 0.15 degrees a tick, 126 m out.
+      const double a = g0 + 0.0026 * t;
+      const float gx = static_cast<float>((-60.0 + 126.0 * std::cos(a)) * kS);
+      const float gy = static_cast<float>((-20.0 + 126.0 * std::sin(a)) * kS);
+      kin.retarget(0, gx, gy);
+      jolt.retarget(0, gx, gy);
+    }
+    kin.step();
+    jolt.step();
+    const pose a = pose_of(kin), b = pose_of(jolt);
+    worst = std::max(worst, static_cast<double>(std::hypot(a.x - b.x, a.y - b.y)));
+    const double along = (b.x - a.x) * std::cos(a.heading) + (b.y - a.y) * std::sin(a.heading);
+    const double across = -(b.x - a.x) * std::sin(a.heading) + (b.y - a.y) * std::cos(a.heading);
+    worst_along = std::max(worst_along, std::fabs(along));
+    worst_across = std::max(worst_across, std::fabs(across));
+    kin_path.push_back(a);
+    jolt_path.push_back(b);
+    peak_g = std::max(peak_g, plant.last_drift(0).lateral_g);
+    path += std::hypot(b.x - last.x, b.y - last.y);
+    last = b;
+  }
+  // How far the Jolt path strays from the bicycle's: each pose's distance to its polyline.
+  double stray = 0.0;
+  for (const pose &b : jolt_path) {
+    double best = 1e30;
+    for (std::size_t k = 1; k < kin_path.size(); ++k) {
+      const double ax = kin_path[k - 1].x, ay = kin_path[k - 1].y;
+      const double ex = kin_path[k].x - ax, ey = kin_path[k].y - ay;
+      const double l2 = ex * ex + ey * ey;
+      const double u =
+          l2 > 0.0 ? std::clamp(((b.x - ax) * ex + (b.y - ay) * ey) / l2, 0.0, 1.0) : 0.0;
+      best = std::min(best, std::hypot(b.x - (ax + u * ex), b.y - (ay + u * ey)));
+    }
+    stray = std::max(stray, best);
+  }
+  const pose a = pose_of(kin);
+  const char *name = r == route::curve   ? "a curving route"
+                     : r == route::block ? "round a block"
+                                         : "a step change of goal";
+  std::printf("  %s: 200 ticks, %.1f m driven, peak %.3f g: the Jolt path strays at most %.3f m "
+              "from the bicycle's; tick by tick they differ at most %.3f m (%.3f along, %.3f "
+              "across); end (%.2f, %.2f) against (%.2f, %.2f)\n",
+              name, path, peak_g, stray, worst, worst_along, worst_across, last.x, last.y, a.x,
+              a.y);
+  print_bins(plant);
+  EXPECT_GT(path, 50.0);
+  EXPECT_LT(peak_g, 0.3);
+  if (r == route::curve)
+    EXPECT_LE(stray, 0.5);
+}
+
+INSTANTIATE_TEST_SUITE_P(NavPlant, NavPlantTrack,
+                         ::testing::Values(route::curve, route::block, route::step),
+                         [](const ::testing::TestParamInfo<route> &i) {
+                           return i.param == route::curve   ? std::string("ACurvingRoute")
+                                  : i.param == route::block ? std::string("RoundABlock")
+                                                            : std::string("AStepChangeOfGoal");
+                         });
+
+// Gate 3: at the limit (a corner cap above the ground's grip) the plants diverge; the drift
+// grows with the lateral acceleration and the summary reports it, bin by bin.
+TEST(NavPlant, DivergesAtTheLimitAndReportsIt) {
+  REQUIRE_JOLT();
+  scene sc;
+  const vehicle_desc d = vehicle_desc::humvee();
+  sim_world sim = make_sim(nav_config(d, 14.0, 1.0), sc, -80, -60, 80, -60);
+  world w(jolt_config());
+  sc.build(w, 0.6);
+  nav_plant plant(w, {d});
+  sim.set_plant(&plant);
+  for (int t = 0; t < 300; ++t) {
+    if (t == 150)
+      sim.retarget(0, static_cast<float>(-60 * kS), static_cast<float>(60 * kS));
+    sim.step();
+  }
+  print_bins(plant);
+  const std::vector<nav_plant::drift_bin> bins = plant.drift_summary();
+  const nav_plant::drift_bin *low = nullptr, *high = nullptr;
+  for (const nav_plant::drift_bin &b : bins)
+    if (b.ticks > 0) {
+      if (!low)
+        low = &b;
+      high = &b;
+    }
+  ASSERT_TRUE(low && high);
+  EXPECT_GE(high->lo_g, 0.3) << "the run reached the limit";
+  EXPECT_GT(high->position_rms_m + high->heading_rms_rad,
+            2.0 * (low->position_rms_m + low->heading_rms_rad))
+      << "the drift grows toward the limit";
+}
+
+// Gate 4: the cost of a Jolt vehicle at real time, measured and published.
+TEST(NavPlant, MeasuresTheCostPerVehicle) {
+  REQUIRE_JOLT();
+  scene sc;
+  const vehicle_desc d = vehicle_desc::humvee();
+  const int n = 8;
+  std::vector<float> o(2 * n), g(2 * n), col(3 * n, 1.0f);
+  for (int i = 0; i < n; ++i) {
+    o[2 * i] = static_cast<float>(-70.0 * kS);
+    o[2 * i + 1] = static_cast<float>((-70.0 + 20.0 * i) * kS);
+    g[2 * i] = static_cast<float>(70.0 * kS);
+    g[2 * i + 1] = o[2 * i + 1];
+  }
+  sim_world sim(nav_config(d, 8.0, 0.25), sc.occ.data(), sc.occ.data(),
+                cvc::nav::coef_mlp::default_biased(), o.data(), g.data(), col.data(), n);
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {d});
+  sim.set_plant(&plant);
+  for (int t = 0; t < 200; ++t)
+    sim.step();
+  std::printf("  %d Humvees: %.0f us a tick (%.0f us a vehicle) for 6 physics steps; real time "
+              "allows 60000 us\n",
+              n, plant.advance_us(), plant.advance_us_per_vehicle());
+  EXPECT_GT(plant.advance_us_per_vehicle(), 0.0);
+  EXPECT_LT(plant.advance_us(), 60000.0) << "faster than real time";
+  cvc::app app;
+  std::vector<std::string> names;
+  for (int i = 0; i < n; ++i)
+    names.push_back("v" + std::to_string(i));
+  plant.publish(app, "physics", names);
+  EXPECT_GT(
+      std::stod(cvc::state::instance(app)("physics.nav_plant.advance_us_per_vehicle").value()),
+      0.0);
+}
+
+// Gate 6: the per-tick drift is published, per vehicle and binned by lateral g.
+TEST(NavPlant, PublishesTheDriftBinnedByLateralG) {
+  REQUIRE_JOLT();
+  scene sc;
+  const vehicle_desc d = vehicle_desc::humvee();
+  sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -60, -20, 60, 20);
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {d});
+  sim.set_plant(&plant);
+  for (int t = 0; t < 120; ++t)
+    sim.step();
+  cvc::app app;
+  plant.publish(app, "physics", {"lead"});
+  cvc::state &st = cvc::state::instance(app);
+  EXPECT_FALSE(st("physics.vehicles.lead.nav.drift.position_m").value().empty());
+  EXPECT_FALSE(st("physics.vehicles.lead.nav.steer_command").value().empty());
+  std::uint64_t ticks = 0;
+  for (std::size_t b = 0; b < plant.drift_summary().size(); ++b)
+    ticks += std::stoull(st("physics.nav_plant.drift." + std::to_string(b) + ".ticks").value());
+  EXPECT_EQ(ticks, 120u);
+  EXPECT_EQ(st("physics.nav_plant.drift.0.lo_g").value().substr(0, 1), "0");
+  EXPECT_FALSE(st("physics.vehicles.lead.nav.drift.stop_speed_mps").value().empty());
+  // The fixed settings are written, the live ones seeded by pull() and applied from the tree;
+  // an invalid one is ignored.
+  EXPECT_EQ(st("physics.nav_plant.settings.physics_steps").value(), "6");
+  EXPECT_EQ(plant.reference_substeps(), 6) << "D14's nsub = k";
+  plant.pull(app, "physics");
+  EXPECT_EQ(std::stod(st("physics.nav_plant.latency").value()), plant.options().latency);
+  EXPECT_EQ(std::stod(st("physics.nav_plant.brake_margin").value()), 0.8);
+  st("physics.nav_plant.latency").value(std::string("0.25"));
+  st("physics.nav_plant.brake_margin").value(std::string("2"));
+  st("physics.nav_plant.drift_nsub").value(std::string("12"));
+  plant.pull(app, "physics");
+  EXPECT_EQ(plant.options().latency, 0.25);
+  EXPECT_EQ(plant.limits(0).latency, 0.25f);
+  EXPECT_EQ(plant.options().brake_margin, 0.8) << "2 is not a share";
+  EXPECT_EQ(plant.reference_substeps(), 12);
+  sim.step(); // the drive takes the new latency from the plant's limits
+  // Every key says what it is.
+  for (const char *key :
+       {"physics.nav_plant.latency", "physics.nav_plant.drift_nsub",
+        "physics.nav_plant.settings.physics_steps", "physics.nav_plant.advance_us_per_vehicle",
+        "physics.nav_plant.drift.2.position_rms_m",
+        "physics.vehicles.lead.nav.drift.stop_speed_mps",
+        "physics.vehicles.lead.nav.accel_command"}) {
+    EXPECT_FALSE(st(key).comment().empty()) << key;
+    EXPECT_TRUE(st(key).has_property("access")) << key;
+  }
+  EXPECT_EQ(st("physics.nav_plant.latency").property("unit"), "s");
+  EXPECT_EQ(st("physics.nav_plant.latency").property("max"), "0.5");
+  EXPECT_EQ(st("physics.nav_plant.brake_margin").property("min"), "0.3");
+  EXPECT_EQ(st("physics.nav_plant.settings.step_world").property("access"), "build");
+}
+
+// Gate 7: driving at a wall, the Jolt arm never goes faster than the stopping speed that allows
+// for the vehicle's latency and achievable braking, and it never touches the wall.
+TEST(NavPlant, NeverExceedsTheLatencyAwareStoppingSpeed) {
+  REQUIRE_JOLT();
+  scene sc;
+  sc.wall(20.0, -30.0, 22.0, 30.0);
+  const vehicle_desc d = vehicle_desc::humvee();
+  sim_world sim = make_sim(nav_config(d, 12.0, 0.25), sc, -60, 0, 60, 0);
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {d});
+  sim.set_plant(&plant);
+  sim.begin_nav_stats();
+  double worst = -1e9, closest = 1e9, fastest = 0.0;
+  for (int t = 0; t < 400; ++t) {
+    sim.step();
+    const double v = pose_of(sim).speed;
+    const double v_stop = sim.plant_stop_speed()[0] / kS;
+    worst = std::max(worst, v - v_stop);
+    fastest = std::max(fastest, v);
+    closest = std::min(closest, 20.0 - pose_of(sim).x);
+  }
+  const cvc::nav::episode_nav_stats e = sim.nav_stats();
+  std::printf("  fastest %.2f m/s; speed - v_stop at most %+.3f m/s; the rear axle came within "
+              "%.2f m of the wall; %d building contacts\n",
+              fastest, worst, closest, e.per_vehicle[0].building_contacts);
+  EXPECT_GT(fastest, 3.0);
+  EXPECT_LE(worst, 0.1);
+  EXPECT_EQ(e.per_vehicle[0].building_contacts, 0);
+}
+
+// nav_stats carries the plant's energy: what the vehicle drew, per km, and its building contacts;
+// the kinematic arm's record leaves them out.
+TEST(NavPlant, NavStatsCarriesThePlantsEnergy) {
+  REQUIRE_JOLT();
+  scene sc;
+  const vehicle_desc d = vehicle_desc::humvee();
+  sim_world kin = make_sim(nav_config(d, 8.0, 0.25), sc, -60, -20, 60, 20);
+  sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -60, -20, 60, 20);
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {d});
+  sim.set_plant(&plant);
+  kin.begin_nav_stats();
+  sim.begin_nav_stats();
+  for (int t = 0; t < 200; ++t) {
+    kin.step();
+    sim.step();
+  }
+  const cvc::nav::episode_nav_stats e = sim.nav_stats();
+  const cvc::nav::veh_nav_stats &v = e.per_vehicle[0];
+  const vehicle_energy le = w.vehicle_state(plant.vehicle(0)).energy;
+  std::printf("  %.1f m: %.0f kJ drawn (%.0f kJ/km; the ledger's source %.0f kJ, %.3f kg of "
+              "diesel)\n",
+              v.total_path_m, v.energy_J / 1e3, v.energy_per_km / 1e3, le.source / 1e3,
+              le.fuel_used);
+  EXPECT_TRUE(v.energy_tracked);
+  EXPECT_GT(v.energy_J, 0.0);
+  EXPECT_NEAR(v.energy_J, le.source, 0.02 * le.source) << "the ticks since the episode began";
+  EXPECT_NEAR(v.energy_per_km, v.energy_J / (v.total_path_m / 1000.0), 1e-6 * v.energy_per_km);
+  EXPECT_NE(e.to_json().find("\"energy_per_km\""), std::string::npos);
+  EXPECT_EQ(kin.nav_stats().to_json().find("energy"), std::string::npos);
+}

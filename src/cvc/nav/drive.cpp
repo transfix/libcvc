@@ -297,7 +297,11 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
                   const veh_params &v, const material_drive *mat, const ext_force *ext,
                   float *minclr_out, int num_threads, thread_pool *pool = nullptr,
                   drive_telemetry *tel = nullptr) {
-  const float hdt = v.dt / static_cast<float>(v.nsub);
+  // The plant arm (veh_params::plant) evaluates the controller once and holds its command
+  // through the tick; the kinematic arm takes nsub substeps of dt / nsub, as it always has.
+  const plant_drive *pd = v.plant;
+  const int nsub = pd ? 1 : v.nsub;
+  const float hdt = pd ? v.dt : v.dt / static_cast<float>(v.nsub);
   const float rr = v.rr, d_hat = v.d_hat;
   // vmax / a_max / L (and the L-derived dmax / tan_dmax / v_creep_cap and the vmax-derived
   // sp_min) are computed PER AGENT inside the lambda below so a heterogeneous fleet can
@@ -323,8 +327,16 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     const float vmax = v.vmax_col ? v.vmax_col[i] : v.vmax;
     const float a_max = v.a_max_col ? v.a_max_col[i] : v.a_max;
     const float L = v.L_col ? v.L_col[i] : v.L;
-    const float dmax = locked_delta_max(L, v.delta_max, v.track_width);
+    float dmax = locked_delta_max(L, v.delta_max, v.track_width);
+    if (pd && pd->max_steer > 0.0f && pd->max_steer < dmax)
+      dmax = pd->max_steer; // the plant's steering lock
     const float tan_dmax = std::tan(dmax);
+    // The plant arm's steering command stays within the actuator's reach this tick.
+    const bool rate_limited = pd && pd->steer_rate && pd->steer_now && pd->steer_rate[i] > 0.0f;
+    const auto within_reach = [&](float d) {
+      const float reach = pd->steer_rate[i] * v.dt, now = pd->steer_now[i];
+      return std::min(std::max(d, now - reach), now + reach);
+    };
     const float sp_min = v.allow_reverse ? -0.25f * vmax : 0.0f;
     const float v_creep_cap = 0.5f * std::sqrt(a_lat_max * L / tan_dmax);
     float minclr = 9.9f;
@@ -335,7 +347,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
           tel_ext_y = 0.0f;
     float tel_steer = 0.0f, tel_curv = 0.0f;
 
-    for (int s = 0; s < v.nsub; ++s) {
+    for (int s = 0; s < nsub; ++s) {
       // Hoisted above the sample because the footprint places its discs along
       // the heading. A value-identical move: cos/sin of the same thi.
       const float ch = std::cos(thi), sh = std::sin(thi);
@@ -478,6 +490,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         delta = delta + k_steer * std::tanh(Frep_x * (-sh) + Frep_y * ch); // F_rep . left
       }
       delta = std::min(std::max(delta, -dmax), dmax);
+      if (rate_limited)
+        delta = within_reach(delta);
 
       float kappa = std::fabs(std::tan(delta)) / L;
       const float kfloor = tan_dmax / (L * 400.0f);
@@ -492,8 +506,16 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       // sqrt'(0) x clamp'(0) = 0 x inf = NaN poisons its backward pass. There is
       // no autograd here, but matching keeps the residual at zero rather than
       // ~1e-12 at the stop margin; the legacy branch keeps its exact form.
-      const float v_stop = (has_fp || has_grip) ? std::sqrt(2.0f * a_max_e * ds + 1e-24f)
-                                                : std::sqrt(2.0f * a_max * ds);
+      float v_stop = (has_fp || has_grip) ? std::sqrt(2.0f * a_max_e * ds + 1e-24f)
+                                          : std::sqrt(2.0f * a_max * ds);
+      if (pd) {
+        // The plant arm: the speed from which the vehicle, covering |v| latency before it
+        // responds and then braking at a_brake, stops within ds: v tau + v^2 / 2a = ds.
+        const float tau = pd->latency ? pd->latency[i] : 0.0f;
+        const float ab =
+            (pd->a_brake && pd->a_brake[i] > 0.0f) ? std::min(pd->a_brake[i], a_max_e) : a_max_e;
+        v_stop = std::sqrt(ab * ab * tau * tau + 2.0f * ab * ds + 1e-24f) - ab * tau;
+      }
       const float motion_sign = spi >= 0.0f ? 1.0f : -1.0f;
       float approach = -(nx * ch + ny * sh) * motion_sign;
       approach = std::min(std::max(approach, 0.0f), 1.0f);
@@ -502,7 +524,9 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
 
       const bool hard_steer = std::fabs(delta) >= 0.7f * dmax;
       const bool can_move = d > 0.25f * gov_rr;
-      const float v_floor = (hard_steer && can_move) ? 0.08f : 0.0f;
+      float v_floor = (hard_steer && can_move) ? 0.08f : 0.0f;
+      if (pd)
+        v_floor = std::min(v_floor, v_stop_dir); // the plant arm creeps only as fast as it can stop
       v_lim = std::max(v_lim, v_floor);
 
       const float v_creep = std::min(0.5f * v_corner, creep_cap);
@@ -525,7 +549,28 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       }
       a_long = std::min(std::max(a_long, -a_max_e), a_max_e);
       a_long = std::min(a_long, (v_lim - spi) / hdt);
-      a_long = std::min(std::max(a_long, -a_max_e), a_max_e);
+      // The plant arm may brake as hard as the vehicle can to keep under v_lim (its stopping
+      // speed plans with the gentler of the two, so this is the margin).
+      const float a_stop =
+          (pd && pd->a_brake && pd->a_brake[i] > a_max_e) ? pd->a_brake[i] : a_max_e;
+      a_long = std::min(std::max(a_long, -a_stop), a_max_e);
+
+      if (pd) {
+        // The plant arm: the command as the integration below would apply it, with the
+        // corner cap at the speed it asks for, but not integrated: the plant moves the agent.
+        const float sp_next = std::min(std::max(spi + hdt * a_long, sp_min), vmax);
+        const float sp2n = std::max(sp_next * sp_next, 1e-9f);
+        const float d_capn = std::atan(a_lat_e * L / sp2n);
+        delta = std::min(std::max(delta, -d_capn), d_capn);
+        if (rate_limited)
+          delta = within_reach(delta);
+        tel_steer = delta;
+        tel_curv = std::fabs(std::tan(delta)) / L;
+        pd->steer_cmd[i] = delta;
+        pd->accel_cmd[i] = a_long;
+        pd->v_stop[i] = std::min(vmax, v_stop_dir); // the stopping speed the command respects
+        break;
+      }
 
       spi = spi + hdt * a_long;
       spi = std::min(std::max(spi, sp_min), vmax);

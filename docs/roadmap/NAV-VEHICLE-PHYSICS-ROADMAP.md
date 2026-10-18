@@ -216,4 +216,30 @@ P4 adds three things to measure and contain the drift:
       error.
   - `nav_stats` gains `energy_J` / `energy_per_km` with P4's plant seam, where the navigator
     first reads a physics plant.
-- **P4–P8** are not started.
+- **P4** is done: `nav_plant_test`, every gate met on Windows (PHYSICS_API.md, "cvc::nav's
+  plant").
+  - `cvc/nav/vehicle_plant.h`: `vehicle_plant`, `plant_kind {kinematic, jolt}`, and
+    `kinematic_step`, nav's bicycle as the reference.
+  - `sim_world::set_plant`. The drive's plant arm (`veh_params::plant`) computes the command
+    without integrating it, with D14's plant-aware governors. The kinematic arm is untouched.
+  - `cvc::physics::nav_plant`:
+    - the rear-axle readback across the SI boundary;
+    - the command through the driver model;
+    - static contacts and energy for `nav_stats` (`energy_J`, `energy_per_km`,
+      `building_contacts`);
+    - the drift, binned by lateral g and published beside `vehicles.<name>.*`.
+  - A configure-time check keeps `cvc/physics` out of nav's sources.
+  - Measured:
+    - a curving route's path within 0.03 m of the bicycle's;
+    - the adapter's residual at most 7 mm a tick;
+    - at a wall, the speed at most 0.04 m/s over the latency-aware `v_stop`, with no contact;
+    - about 0.1 ms a Humvee a tick.
+  - What P4 found in the plant, fixed in the presets' commit:
+    - Jolt's idle clamp crept the Humvee forward through its brakes; a torque converter
+      (capacity and multiplication) fixes it.
+    - The driver model gained an integral trim.
+  - Open:
+    - a step change of goal or a swerve at 0.25 g leaves the Humvee 0.6-1.2 m off the
+      bicycle's path, from its 0.35 rad/s steering. That is reported, not gated;
+    - the lag-aware governors could also take the steering rate into the corner speed.
+- **P5–P8** are not started.

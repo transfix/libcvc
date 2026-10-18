@@ -22,9 +22,16 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/pose_tracker.h` | `pose_tracker`, `pose`, `interpolate()`, `pose_matrix()`: the last two states, for a view |
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
+| `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
 
-The physics headers include only the standard library, except `world_binding.h`, which needs
-`cvc::app`, and `world_geometry.h`, which reads `cvc::world`. No header names an engine.
+The physics headers include only the standard library, except:
+
+- `world_binding.h`, which needs `cvc::app`;
+- `world_geometry.h`, which reads `cvc::world`;
+- `nav_plant.h`, which implements `cvc::nav`'s plant interface.
+
+No header names an engine. `cvc::nav` never includes `cvc::physics`; a configure-time check in
+`src/cvc/CMakeLists.txt` enforces it.
 
 ## Units and frame
 
@@ -448,6 +455,99 @@ What the ledger showed about the first presets, and what became of it:
   - So a Humvee at a few m/s, throttle shut and brakes at half, sped up at 3.4 m/s^2.
   - The converter's capacity now limits the creep to about 53 N m at the engine (doubled at
     stall), and its torque multiplication gives back the launch the clamp had faked.
+
+## cvc::nav's plant: `nav_plant` (P4)
+
+```cpp
+#include <cvc/nav/sim_world.h>
+#include <cvc/physics/nav_plant.h>
+
+cvc::physics::world w(cfg);          // the ground, the buildings: the same map as nav's
+cvc::physics::nav_plant plant(w, {cvc::physics::vehicle_desc::humvee()});
+sim.set_plant(&plant);               // sim: a cvc::nav::sim_world; its agents now drive Humvees
+for (;;)
+  sim.step();                        // nav's command, six physics steps, the readback
+```
+
+A `sim_world` integrates its agents with its fused kinematic bicycle unless it has a plant.
+Without one (the default) nothing changes, bit for bit.
+
+With a plant, every `sim_world::step()` does this:
+
+- It reads each agent back at the tick's start. The adapter reads three things: the rear
+  axle's position, the body's heading, and the signed forward speed at the rear axle. The rear
+  axle is the point nav's bicycle tracks, and it has the least sideslip. The speed is the
+  centre of mass's velocity carried to the rear axle by the body's rotation.
+- Nav's controller computes the command (`delta_cmd`, `a_cmd`) without integrating it. This
+  plant arm (`veh_params::plant`, `cvc/nav/drive.h`) holds the command through the tick, and
+  its governors respect the plant (doc 31 D14):
+  - the wheelbase and steering lock are the vehicle's;
+  - the steering command stays within `max_steer_rate x dt` of the actuator's angle;
+  - `v_stop` allows for the distance the vehicle covers before it responds (`latency`) and
+    plans with the deceleration it can make (`brake_margin x max_decel`); to keep under it
+    the command may brake that hard;
+  - the creep floor never exceeds the stopping speed.
+- `nav_plant` maps the command to `world::drive`. The acceleration goes along the direction
+  the agent is to move at the tick's end, with `reverse` when that is backwards.
+- It steps the world `dt / fixed_dt` times (or, with `step_world = false`, leaves the stepping
+  to a clock both follow).
+- It reads every agent back again.
+- It measures the tick's drift: nav's bicycle, run from the plant's own start state with the
+  same command, against where the plant is. The bicycle takes the plant's
+  `reference_substeps()`, its physics steps a tick (D14's `nsub = k`, 6 at 100 Hz) unless
+  `drift_nsub` says otherwise.
+
+The hard de-overlap is skipped with a plant, because the bodies collide instead.
+
+Positions, speeds and accelerations cross nav's normalized frame and SI only here, through
+`world_units` with the sim_world's `nav::frame_of(cfg)`.
+
+**The drift** is published per vehicle and binned by the bicycle's lateral acceleration
+(`drift_bins_g`, default 0.1, 0.2, 0.3 and 0.5 g):
+
+- `last_drift(i)` and `drift_summary()`, in SI;
+- with `publish(ctx, prefix, names)`, `<prefix>.vehicles.<name>.nav.{steer_command,
+  accel_command, drift.{position_m, heading_rad, speed_mps, lateral_g, stop_speed_mps}}`, next
+  to the physics binding's `vehicles.<name>.*` and its energy keys;
+- `<prefix>.nav_plant.drift.<b>.{lo_g, hi_g, ticks, position_rms_m, position_max_m,
+  heading_rms_rad, heading_max_rad, speed_rms_mps, speed_max_mps}`;
+- `<prefix>.nav_plant.{vehicles, advance_us, advance_us_per_vehicle}`, the cost;
+- `<prefix>.nav_plant.settings.{step_world, ground_z, spawn_height, metres_per_world_unit,
+  physics_steps, drift_bins_g}`, the settings fixed at construction.
+
+**Knobs.** `pull(ctx, prefix)` reads `<prefix>.nav_plant.{latency, brake_margin, drift_nsub}`.
+These are seeded with the plant's values, applied when they change, and an invalid one is
+ignored. They are also `set_latency`, `set_brake_margin` and `set_drift_nsub`. The drive reads
+the latency and the braking from `limits()` every tick, so a change takes effect on the next
+one.
+
+Like the physics binding's, every one of these keys says what it is: a comment, `access`, `unit`
+and, on a knob, a recommended `min` and `max`. So do the `nav_stats` leaves that
+`publish_nav_stats` writes.
+
+**nav_stats** gains `energy_J`, `energy_per_km` (J per km of path) and `building_contacts`
+per vehicle, and `total_energy_J` and `total_building_contacts` per episode. `energy_J` is
+what the vehicle drew from its source, net of regeneration.
+
+These fields, and their JSON, appear only when a plant measures energy. The kinematic record
+is unchanged, and `fuel_used` keeps its proxy meaning.
+
+cvcGL's `publish_nav_stats` writes them too, again only when tracked:
+
+- `<prefix>.nav_stats.veh.<i>.{energy_J, energy_per_km, building_contacts}`;
+- `<prefix>.nav_stats.episode.{total_energy_J, total_building_contacts}`.
+
+Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 unit = 20 m):
+
+| Gate | Measured |
+|---|---|
+| (1) Every nav golden and parity test unchanged | The kinematic arm is untouched without a plant; the nav suites pass as before |
+| (2) Below 0.3 g on flat dry ground, within 0.5 m of the kinematic trajectory over 200 ticks | A curving route, 79 m at up to 0.09 g: the Jolt path strays at most 0.03 m from the bicycle's. At a tick the two differ by up to 0.9 m along the path (the powertrain's response to an instant acceleration). Reported, not gated: a swerve round a block at 0.25 g strays 1.2 m, and a step change of goal 0.58 m, from the Humvee's 0.35 rad/s steering (0.73 and 0.46 m with an instant actuator) |
+| (3) At the limit the plants diverge, reported | A 1 g corner cap on mu 0.6: position rms 3 mm below 0.1 g, 0.1 m above 0.5 g, binned in the summary |
+| (4) Cost per Jolt vehicle | About 0.1 ms a Humvee a tick (six physics steps) with eight, against 60 ms of real time |
+| (5) The adapter residual at nsub = k | An instant steering actuator on mu 1.2: at most 7 mm, 0.009 rad and 0.1 m/s a tick |
+| (6) The drift published, binned by lateral g | Per vehicle and per bin, under `vehicles.<name>.nav.drift` and `nav_plant.drift`, with the plant's knobs and settings under `nav_plant` |
+| (7) The speed never above the latency-aware v_stop | Driving at a wall at up to 11.5 m/s: at most 0.04 m/s above it at a tick; no contact with the wall |
 
 ## Static world geometry: `add_world_geometry`
 

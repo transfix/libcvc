@@ -62,6 +62,8 @@ public:
   // instance() — a node reaches its publisher through its SceneGraph, so scene
   // state stays in the app the scene actually runs under, not a global.
   explicit state_publisher(cvc::app &ctx);
+  // The app whose tree this publishes into.
+  cvc::app &ctx() const { return m_ctx; }
   ~state_publisher();
 
   state_publisher(const state_publisher &) = delete;
