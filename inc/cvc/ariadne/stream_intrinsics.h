@@ -37,6 +37,7 @@
 // init: lane (which fails cleanly). A stream opened here has NO producer (device capture
 // is Phase 3); a producer is attached separately and must be stopped before (stream-close).
 
+#include <memory>
 #include <string>
 
 namespace cvc {
@@ -59,6 +60,15 @@ void register_stream_intrinsics(cvc::app &app);
 // without owning, or even seeing the type of, that table. The returned stream stays owned by the
 // document scope; the caller borrows it (e.g. to call start_producer) and must not delete it.
 stream::stream *document_stream(cvc::state_exec::document_scope *doc, const std::string &token);
+
+// Transfer ownership of an already-open stream S into DOC's document-scoped stream table (the same
+// table (stream-open) fills), so it lives until (stream-close) or document teardown and is
+// reachable by document_stream() and the (stream-info/-close/-capture/-play) verbs. Returns S's
+// token, or "" when DOC is null / its table is unavailable (S is then destroyed). Used e.g. by
+// (room-subscribe) to hand a pulled proxy stream to the document so the usual playback/render verbs
+// can consume it.
+std::string own_document_stream(cvc::state_exec::document_scope *doc,
+                                std::unique_ptr<cvc::ariadne::stream::stream> s);
 
 } // namespace ariadne
 } // namespace cvc

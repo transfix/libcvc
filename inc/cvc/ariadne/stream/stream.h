@@ -89,6 +89,8 @@ public:
   const std::shared_ptr<frame_pool> &pool() const noexcept { return pool_; }
   const std::string &id() const noexcept { return id_; }
   const std::string &token() const noexcept { return token_; }
+  const std::string &scope() const noexcept { return scope_; } // the root_path it was opened under
+  const format_desc &format() const noexcept { return format_; } // the frame format it carries
   const std::string &seq_channel() const noexcept { return seq_channel_; }
   const std::string &evt_channel() const noexcept { return evt_channel_; }
 
@@ -123,8 +125,9 @@ private:
 
   app &ctx_;
   std::string id_;
-  std::string scope_; // root_path this stream was opened under
-  std::string token_; // == registry_key(scope_, id_): canonical descriptor path + registry key
+  std::string scope_;  // root_path this stream was opened under
+  std::string token_;  // == registry_key(scope_, id_): canonical descriptor path + registry key
+  format_desc format_; // the frame format (as passed to open()), exposed via format()
   std::string seq_channel_;
   std::string evt_channel_;
   std::int64_t heartbeat_ns_ = 0;
