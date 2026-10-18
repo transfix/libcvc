@@ -55,4 +55,16 @@ std::optional<double> process::time_left() const {
   return std::max(0.0, left);
 }
 
+std::optional<std::size_t> process::alloc_limit(std::size_t used_bytes) const {
+  std::optional<std::size_t> limit;
+  if (max_alloc_bytes > 0)
+    limit = static_cast<std::size_t>(std::min<uint64_t>(max_alloc_bytes, SIZE_MAX));
+  if (max_memory > 0) {
+    const uint64_t left = max_memory > used_bytes ? max_memory - used_bytes : 0;
+    const std::size_t left_bytes = static_cast<std::size_t>(std::min<uint64_t>(left, SIZE_MAX));
+    limit = limit ? std::min(*limit, left_bytes) : left_bytes;
+  }
+  return limit;
+}
+
 } // namespace cvc::state_exec

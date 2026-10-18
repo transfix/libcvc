@@ -1057,8 +1057,10 @@ TEST_F(StdlibRegistryTest, ListEmpty) {
   EXPECT_TRUE(fns.empty());
 }
 
+// A bare environment: a default one already reaches every stdlib function through the shared
+// stdlib scope, so it can't show what import_module() adds.
 TEST_F(StdlibRegistryTest, ImportAll) {
-  auto env = builtins::make_default_environment();
+  auto env = std::make_shared<environment>();
   registry.import_module("string", env);
   EXPECT_NE(env->lookup("string.split"), nullptr);
   EXPECT_NE(env->lookup("string.join"), nullptr);
@@ -1066,7 +1068,7 @@ TEST_F(StdlibRegistryTest, ImportAll) {
 }
 
 TEST_F(StdlibRegistryTest, ImportSpecific) {
-  auto env = builtins::make_default_environment();
+  auto env = std::make_shared<environment>();
   registry.import_module("math", env, {"math.sqrt", "math.abs"});
   EXPECT_NE(env->lookup("math.sqrt"), nullptr);
   EXPECT_NE(env->lookup("math.abs"), nullptr);
