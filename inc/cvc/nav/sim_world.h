@@ -43,6 +43,7 @@
 #include <cvc/nav/drive.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/nav_stats.h>
+#include <cvc/nav/plant_types.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -377,6 +378,33 @@ public:
   // while material is set.
   const std::uint8_t *material_gate_active() const { return mat_gate_active_.data(); }
 
+  // ── the plant (P4, cvc/nav/vehicle_plant.h) ────────────────────────────────
+  // Borrowed, and it must outlive its use; null (the default) = the fused kinematic bicycle,
+  // byte-identical. set_plant attaches the plant at the agents' current poses, at rest. With a
+  // plant, every step():
+  //   - reads each agent back from it at the tick's start (o, th, sp);
+  //   - drives with the plant arm (veh_params::plant): the controller's command, delta_cmd and
+  //     a_cmd, held through the tick, with the plant-aware governors (the plant's wheelbase,
+  //     steering lock and rate, latency and achievable braking, from plant_limits). A parked
+  //     agent is commanded to brake at a_max;
+  //   - advances the plant one tick and reads every agent back again;
+  //   - measures each agent's drift: the kinematic bicycle (the plant's
+  //     reference_substeps()) from the tick's start state with the same command, against the
+  //     plant (report_drift);
+  //   - skips the hard de-overlap (min_gap): the plant's bodies collide instead.
+  // nav_stats then carries the plant's energy and building contacts when it tracks them.
+  void set_plant(vehicle_plant *p);
+  vehicle_plant *plant() const { return plant_; }
+  plant_kind plant_type() const;
+  // The last tick's plant-arm commands, the stopping speed each respected (normalized), and
+  // each agent's drift, [size()]; null without a plant or before the first step().
+  const float *plant_steer_command() const { return ptr(pl_steer_cmd_); }
+  const float *plant_accel_command() const { return ptr(pl_accel_cmd_); }
+  const float *plant_stop_speed() const { return ptr(pl_v_stop_); }
+  const drift_sample *plant_drift() const {
+    return plant_ && gstep_ > 0 && !pl_drift_.empty() ? pl_drift_.data() : nullptr;
+  }
+
   // ── base nav_stats (opt-in internal collector, cvc/nav/nav_stats.h) ───────
   // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as
   // the episode start (so call this BEFORE the first step()) and goals_world() as
@@ -418,8 +446,8 @@ private:
   std::vector<std::uint8_t> lastvis_, everseen_;
   std::vector<std::int32_t> version_;        // [M]
   std::vector<std::int32_t> raster_version_; // [M]
-  std::vector<double> dyn_stamp_;     // [M*rows*cols], -inf where unmarked
-  std::vector<std::uint8_t> occ_;     // [M*rows*cols] current planning rasters
+  std::vector<double> dyn_stamp_;            // [M*rows*cols], -inf where unmarked
+  std::vector<std::uint8_t> occ_;            // [M*rows*cols] current planning rasters
 
   // M SDF fields [M,3,H,W] (plane m at m*3*rows*cols).
   std::vector<float> field_;
@@ -463,6 +491,20 @@ private:
   std::vector<float> mat_lam_soft_, mat_lam_hard_; // [n] per-tick columns
   std::vector<std::uint8_t> mat_gate_active_;      // [n]
   double mat_hard_margin_m_ = 0.0;
+
+  // the plant (set_plant; inert while plant_ is null)
+  vehicle_plant *plant_ = nullptr;
+  std::vector<float> pl_latency_, pl_a_brake_, pl_steer_now_, pl_steer_rate_, pl_L_;
+  float pl_max_steer_ = 0.0f;
+  std::vector<float> pl_steer_cmd_, pl_accel_cmd_, pl_v_stop_; // [n], the last tick's
+  std::vector<plant_state> pl_start_;                          // [n], the tick's start
+  std::vector<drift_sample> pl_drift_;                         // [n], the last tick's
+  std::vector<double> st_energy_;                              // [n], nav_stats feed
+  std::vector<int> st_contacts_;                               // [n], nav_stats feed
+  const float *ptr(const std::vector<float> &v) const {
+    return plant_ && gstep_ > 0 && !v.empty() ? v.data() : nullptr;
+  }
+  void plant_read(); // the plant's state and limits into o_, th_, sp_ and the pl_ columns
 
   field_stack field_view() const;
   material_stack material_view() const;

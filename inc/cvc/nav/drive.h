@@ -120,6 +120,29 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
                 float mu_lookahead = 0.3f, int mu_probes = 3, const material_stack *risk = nullptr,
                 float risk_lookahead = 0.3f, int risk_probes = 3, thread_pool *pool = nullptr);
 
+// The drive's PLANT ARM (P4, cvc/nav/vehicle_plant.h). With veh_params::plant set, the drive
+// computes each agent's command for the tick and writes it here instead of integrating: o, th
+// and sp are left as they are, for the plant to move. The command is held through the whole
+// tick, so the governors plan with dt rather than dt / nsub, and three of them take the plant
+// into account (doc 31 D14):
+//   - v_stop takes off the distance the vehicle covers before it responds, |sp| x latency, and
+//     plans with the vehicle's achievable deceleration a_brake when that is below the drive's
+//     a_max; and to keep under it the command may brake down to -a_brake when that is above;
+//   - the steering command stays within steer_rate x dt of the actuator's angle now;
+//   - it stays within the plant's steering lock.
+// The in-columns are borrowed [n], any may be null (none of that limit); the out-columns are
+// [n] and must be set. The kinematic arm (plant null, the default) is byte-identical.
+struct plant_drive {
+  const float *latency = nullptr;    // s
+  const float *a_brake = nullptr;    // normalized / s^2
+  const float *steer_now = nullptr;  // rad
+  const float *steer_rate = nullptr; // rad/s
+  float max_steer = 0.0f;            // rad; 0 = the drive's delta_max alone
+  float *steer_cmd = nullptr;        // out: delta_cmd (rad)
+  float *accel_cmd = nullptr;        // out: a_cmd (normalized / s^2)
+  float *v_stop = nullptr;           // out: the stopping speed the command respects
+};
+
 // Fixed vehicle + integration parameters for the bicycle rollout (the SdfNavigator
 // VEHICLE_DEFAULTS + meta): all float32 to match torch. `nsub` substeps per tick.
 //
@@ -216,6 +239,9 @@ struct veh_params {
   // sdf_nav.coef_feats's defaults or native and torch see different features.
   float mu_lookahead = 0.3f;
   int mu_probes = 3;
+
+  // THE PLANT ARM (see plant_drive above). Null (default) = the kinematic bicycle integrates.
+  const plant_drive *plant = nullptr;
 };
 
 // Kinematic-bicycle rollout — one drive tick of `v.nsub` substeps per agent,

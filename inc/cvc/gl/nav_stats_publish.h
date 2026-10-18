@@ -46,6 +46,9 @@ struct nav_stats_publish_params {
 // snapshot), so call this every tick with the current snapshot; the publisher coalesces to the last
 // value per path. `tick` stamps meta.tick. Sentinel doubles (min_sep_m / min_clearance_m == 1e30)
 // are published as-is; a reader treats >= 1e29 as "unmeasured" (the value lane has no null).
+// With a physics plant that measures energy (energy_tracked), the episode also gets
+// .episode.{total_energy_J, total_building_contacts} and each vehicle .veh.<i>.{energy_J,
+// energy_per_km, building_contacts}; without one those leaves are not written.
 void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePrefix,
                        const cvc::nav::episode_nav_stats &e, long tick,
                        const nav_stats_publish_params &p = {});

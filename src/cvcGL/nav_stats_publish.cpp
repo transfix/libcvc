@@ -75,6 +75,10 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
   pub.publish(ep + ".mean_path_ratio", d2s(e.mean_path_ratio));
   pub.publish(ep + ".mean_turn_total_rad", d2s(e.mean_turn_total_rad));
   pub.publish(ep + ".total_fuel", d2s(e.total_fuel));
+  if (e.energy_tracked) { // a physics plant measured them (nav_stats.h energy_tracked)
+    pub.publish(ep + ".total_energy_J", d2s(e.total_energy_J));
+    pub.publish(ep + ".total_building_contacts", i2s(e.total_building_contacts));
+  }
 
   // ── coverage (episode belief-coverage fractions) ──
   if (p.emit_coverage) {
@@ -135,6 +139,11 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     pub.publish(vp + ".formation_parent", i2s(v.formation_parent));
     pub.publish(vp + ".slot_error_mean_m", d2s(v.slot_error_mean_m));
     pub.publish(vp + ".formation_arrived", b2s(v.formation_arrived));
+    if (v.energy_tracked) {
+      pub.publish(vp + ".energy_J", d2s(v.energy_J));
+      pub.publish(vp + ".energy_per_km", d2s(v.energy_per_km));
+      pub.publish(vp + ".building_contacts", i2s(v.building_contacts));
+    }
   }
 }
 

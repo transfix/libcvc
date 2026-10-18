@@ -35,7 +35,9 @@
 #include <cvc/core/thread_pool.h>
 #include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/nav_units.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_plant.h>
 #include <limits>
 #include <new>
 #include <random>
@@ -44,6 +46,19 @@
 
 namespace cvc {
 namespace nav {
+
+namespace {
+
+// An angle into (-pi, pi].
+float wrap_angle(float a) {
+  constexpr float kPi = 3.14159265358979f;
+  a = std::fmod(a + kPi, 2.0f * kPi);
+  if (a <= 0.0f)
+    a += 2.0f * kPi;
+  return a - kPi;
+}
+
+} // namespace
 
 sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::uint8_t *prior_occ,
                      coef_mlp model, const float *o, const float *goal, const float *color, int n,
@@ -293,6 +308,10 @@ void sim_world::step(int num_threads) {
     tphase = n;
   };
 
+  // ── THE PLANT (P4): each agent where the plant has it at the tick's start ──
+  if (plant_)
+    plant_read();
+
   if (!cfg_.freeze_sense && (gstep_ % cfg_.sense_every == 0)) {
     // ── SENSE (each agent into its own plane map_id[i]) ──
     std::vector<double> pos(2 * n_), head(n_), rng(n_), fov(n_);
@@ -534,6 +553,24 @@ void sim_world::step(int num_threads) {
       tel_.assign(n_, {});
     telp = tel_.data();
   }
+  // The plant arm: the same controller, writing its command for the plant instead of
+  // integrating (veh_params::plant). Without a plant the drive reads cfg_.veh itself.
+  veh_params vplant;
+  plant_drive pdrive;
+  if (plant_) {
+    vplant = cfg_.veh;
+    pdrive.latency = pl_latency_.data();
+    pdrive.a_brake = pl_a_brake_.data();
+    pdrive.steer_now = pl_steer_now_.data();
+    pdrive.steer_rate = pl_steer_rate_.data();
+    pdrive.max_steer = pl_max_steer_;
+    pdrive.steer_cmd = pl_steer_cmd_.data();
+    pdrive.accel_cmd = pl_accel_cmd_.data();
+    pdrive.v_stop = pl_v_stop_.data();
+    vplant.plant = &pdrive;
+    vplant.L_col = pl_L_.data();
+  }
+  const veh_params &vv = plant_ ? vplant : cfg_.veh;
   if (mat_on_) {
     const material_stack ms = material_view();
     material_drive md;
@@ -554,21 +591,58 @@ void sim_world::step(int num_threads) {
       // silently overriding ext. drive_step_material_ext == drive_step_material with the ext force
       // also summed into the accumulator + steering bias.
       drive_step_material_ext(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                              map_id_.data(), cfg_.veh, md, ext_, minclr_.data(), num_threads,
-                              telp);
+                              map_id_.data(), vv, md, ext_, minclr_.data(), num_threads, telp);
     } else {
       drive_step_material(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                          map_id_.data(), cfg_.veh, md, minclr_.data(), num_threads, telp);
+                          map_id_.data(), vv, md, minclr_.data(), num_threads, telp);
     }
   } else if (ext_.sample) {
     // External force channel (e.g. a downstream layer's own force) summed into the
     // drive via the sanctioned ext_force port. Byte-identical to drive_step when
     // ext_.sample is null (so this branch is only taken when a force is set).
     drive_step_ext(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                   map_id_.data(), cfg_.veh, ext_, minclr_.data(), num_threads, telp);
+                   map_id_.data(), vv, ext_, minclr_.data(), num_threads, telp);
   } else {
     drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
-               cfg_.veh, minclr_.data(), num_threads, pool_, telp);
+               vv, minclr_.data(), num_threads, pool_, telp);
+  }
+
+  // ── THE PLANT: command, advance one tick, read back, and measure the drift ──
+  if (plant_) {
+    const float dt = cfg_.veh.dt;
+    for (int i = 0; i < n_; ++i) {
+      if (parked_[i]) {
+        // Parked: brake to a stop within the tick, at most at a_max, then hold.
+        const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
+        const float sp0 = pl_start_[i].speed;
+        pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_max_i), a_max_i);
+      }
+      plant_->command(i, pl_steer_cmd_[i], pl_accel_cmd_[i]);
+    }
+    plant_->advance();
+    const int ref_nsub = std::max(1, plant_->reference_substeps());
+    for (int i = 0; i < n_; ++i) {
+      const plant_state s1 = plant_->state(i);
+      const plant_state &s0 = pl_start_[i];
+      const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+      const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
+      const plant_state ref = kinematic_step(s0, pl_steer_cmd_[i], pl_accel_cmd_[i], pl_L_[i], dt,
+                                             ref_nsub, sp_min, vmax_i);
+      const float th1 = s0.heading + wrap_angle(s1.heading - s0.heading);
+      drift_sample d;
+      d.position = std::hypot(s1.x - ref.x, s1.y - ref.y);
+      d.heading = wrap_angle(th1 - ref.heading);
+      d.speed = s1.speed - ref.speed;
+      d.a_lateral = std::fabs(ref.speed * ref.speed * std::tan(pl_steer_cmd_[i]) / pl_L_[i]);
+      d.stop_speed = pl_v_stop_[i];
+      pl_drift_[i] = d;
+      plant_->report_drift(i, d);
+      o_[2 * i] = s1.x;
+      o_[2 * i + 1] = s1.y;
+      th_[i] = th1;
+      sp_[i] = s1.speed;
+      pl_steer_now_[i] = s1.steer;
+    }
   }
 
   lap(accDrive);
@@ -580,7 +654,7 @@ void sim_world::step(int num_threads) {
   // active agents whose centres are within min_gap apart to exactly min_gap. It is pairwise and
   // self-excluding; a push that would land an agent in a truth-occupied cell is skipped, so a
   // vehicle is never shoved into a building. A few sweeps converge a short column.
-  if (cfg_.min_gap > 0.0f && n_ > 1) {
+  if (!plant_ && cfg_.min_gap > 0.0f && n_ > 1) { // a plant's bodies collide instead
     const double mind = cfg_.min_gap, mind2 = mind * mind;
     const double invsx = (cfg_.max_x > cfg_.min_x) ? (cols_ - 1) / (cfg_.max_x - cfg_.min_x) : 0.0;
     const double invsy = (cfg_.max_y > cfg_.min_y) ? (rows_ - 1) / (cfg_.max_y - cfg_.min_y) : 0.0;
@@ -667,6 +741,19 @@ void sim_world::step(int num_threads) {
     min_clearance_world(st_clr_.data()); // world metres, 1e29 sentinel preserved
     for (int i = 0; i < n_; ++i)
       st_clr_d_[i] = static_cast<double>(st_clr_[i]);
+    // A plant that measures energy feeds it (and its static contacts) to the collector.
+    st_smp_.energy_step_J = nullptr;
+    st_smp_.static_contacts = nullptr;
+    if (plant_ && plant_->tracks_energy()) {
+      st_energy_.resize(n_);
+      st_contacts_.resize(n_);
+      for (int i = 0; i < n_; ++i) {
+        st_energy_[i] = plant_->energy_step(i);
+        st_contacts_[i] = plant_->static_contacts_step(i);
+      }
+      st_smp_.energy_step_J = st_energy_.data();
+      st_smp_.static_contacts = st_contacts_.data();
+    }
     stats_->step(st_pos_.data(), st_head_.data(), st_spd_.data(), st_mode_.data(),
                  st_reached_.data(), st_smp_);
   }
@@ -818,6 +905,59 @@ void sim_world::set_capture_drive_telemetry(bool on) {
     tel_.assign(n_, {}); // size to the current agent count; step() keeps it in sync
   else
     tel_.clear(); // drop the buffer so drive_telemetry_data() returns null and step() passes null
+}
+
+plant_kind sim_world::plant_type() const { return plant_ ? plant_->kind() : plant_kind::kinematic; }
+
+void sim_world::set_plant(vehicle_plant *p) {
+  plant_ = p;
+  if (!p) {
+    for (std::vector<float> *v : {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_,
+                                  &pl_L_, &pl_steer_cmd_, &pl_accel_cmd_, &pl_v_stop_})
+      v->clear();
+    pl_start_.clear();
+    pl_drift_.clear();
+    pl_max_steer_ = 0.0f;
+    return;
+  }
+  const std::size_t n = static_cast<std::size_t>(n_);
+  for (std::vector<float> *v : {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_, &pl_L_,
+                                &pl_steer_cmd_, &pl_accel_cmd_, &pl_v_stop_})
+    v->assign(n, 0.0f);
+  pl_start_.assign(n, plant_state{});
+  pl_drift_.assign(n, drift_sample{});
+  // The plant takes the agents where they are, at rest.
+  std::vector<plant_state> start(n);
+  for (int i = 0; i < n_; ++i) {
+    start[i].x = o_[2 * i];
+    start[i].y = o_[2 * i + 1];
+    start[i].heading = th_[i];
+    sp_[i] = 0.0f;
+  }
+  p->attach(n_, start.data(), frame_of(cfg_), cfg_.veh.dt);
+  plant_read();
+}
+
+void sim_world::plant_read() {
+  float max_steer = 0.0f;
+  for (int i = 0; i < n_; ++i) {
+    const plant_state s = plant_->state(i);
+    o_[2 * i] = s.x;
+    o_[2 * i + 1] = s.y;
+    th_[i] = th_[i] + wrap_angle(s.heading - th_[i]); // nav's heading stays continuous
+    sp_[i] = s.speed;
+    pl_steer_now_[i] = s.steer;
+    pl_start_[i] = s;
+    pl_start_[i].heading = th_[i];
+    const plant_limits l = plant_->limits(i);
+    pl_L_[i] = l.wheelbase > 0.0f ? l.wheelbase : (cfg_.veh.L_col ? cfg_.veh.L_col[i] : cfg_.veh.L);
+    pl_latency_[i] = l.latency;
+    pl_a_brake_[i] = l.a_brake;
+    pl_steer_rate_[i] = l.steer_rate;
+    if (l.max_steer > 0.0f && (max_steer == 0.0f || l.max_steer < max_steer))
+      max_steer = l.max_steer;
+  }
+  pl_max_steer_ = max_steer;
 }
 
 void sim_world::begin_nav_stats(const nav_stats_params &p, const budget_policy &b,
