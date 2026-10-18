@@ -1227,6 +1227,7 @@ if(CVC_ENABLE_GRPC)
     state/state_stream_transport_grpc.cpp
     ariadne/stream/stream_bridge.cpp
     ariadne/stream/stream_relay.cpp
+    ariadne/conference/room_media_intrinsics.cpp
     ${_proto_pb_cc}
     ${_proto_grpc_cc}
   )
@@ -1260,6 +1261,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/net_intrinsics.h
   ../../inc/cvc/ariadne/stream_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_intrinsics.h
+  ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
   ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
