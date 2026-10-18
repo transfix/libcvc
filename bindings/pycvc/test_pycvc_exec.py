@@ -83,7 +83,7 @@ def test_parser_settings_come_from_the_app_tree():
 
 def test_parse_options_is_the_cpp_struct():
     o = pycvc.parse_options()
-    assert (o.max_depth, o.step_tokens) == (256, 0)  # C++ defaults
+    assert (o.max_depth, o.step_tokens) == (100000, 0)  # C++ defaults
     o.max_depth = 32
     o.step_tokens = 8
     assert (o.max_depth, o.step_tokens) == (32, 8)
@@ -93,7 +93,7 @@ def test_exec_starts_from_the_host_parser_defaults():
     # The same defaults as the app's exec scheduler:
     # async_scheduler::host_parser_defaults().
     host = pycvc.async_scheduler.host_parser_defaults()
-    assert (host.max_depth, host.step_tokens) == (256, 1024)
+    assert (host.max_depth, host.step_tokens) == (100000, 1024)
     ex = pycvc.Exec(pycvc.make_app())
     d = ex.parser_defaults()
     assert (d.max_depth, d.step_tokens) == (host.max_depth, host.step_tokens)
@@ -115,7 +115,7 @@ def test_parse_options_from_state_resolves_like_cpp():
     assert pycvc.parse_options_from_state(root).max_depth == 40
     assert pycvc.parse_options_from_state(root, "s1").max_depth == 50
     root.child("state_exec.defaults.parser.max_depth").value("nope")  # bad: skipped
-    assert pycvc.parse_options_from_state(root).max_depth == 256
+    assert pycvc.parse_options_from_state(root).max_depth == 100000
 
 
 def test_set_parser_defaults_changes_how_exec_parses():

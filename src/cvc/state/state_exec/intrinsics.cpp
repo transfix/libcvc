@@ -141,9 +141,17 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
   // Coerce the value to a string (state stores string-typed scalars) rather than
   // requiring the caller to pre-stringify — (state-set "n" 10) now stores "10". A
   // structured value should use state-data-set (the typed data() channel).
-  const std::string val = coerce_state_string(args[1]);
+  if (is_compound(args[1])) {
+    // A list or dict prints as a walk, a slice per step when the process slices deep data
+    // ("Deep data on the executor"); the node is written once the whole string is ready.
+    cvc::state *root = ctx->root;
+    return run_data_job(make_print_job(args[1]), [root, path = path](value_t printed) {
+      (*root)(path).value(std::get<std::string>(printed.v));
+      return nil_value;
+    });
+  }
   // operator() creates child nodes as needed
-  (*ctx->root)(path).value(val);
+  (*ctx->root)(path).value(coerce_state_string(args[1]));
   return nil_value;
 }
 

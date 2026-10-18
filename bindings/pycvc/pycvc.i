@@ -1461,7 +1461,7 @@ class AsyncStateObserver(state_observer):
 namespace cvc {
 namespace state_exec {
 struct parse_options {
-  size_t max_depth;   // lists and quotes that may nest (default 256)
+  size_t max_depth;   // lists and quotes that may nest (default 100000)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
 };
 struct data_options {

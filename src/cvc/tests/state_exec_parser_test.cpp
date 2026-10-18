@@ -245,10 +245,10 @@ static std::string nested(std::size_t depth) {
   return std::string(depth, '(') + std::string(depth, ')');
 }
 
-TEST(StateExecParserTest, NestingLimitDefaultsTo256) {
-  EXPECT_EQ(parse_options{}.max_depth, 256u);
-  EXPECT_NO_THROW(parse(nested(256)));
-  EXPECT_THROW(parse(nested(257)), parse_error);
+TEST(StateExecParserTest, NestingLimitDefaultsTo100000) {
+  EXPECT_EQ(parse_options{}.max_depth, 100000u);
+  EXPECT_NO_THROW(parse(nested(100000)));
+  EXPECT_THROW(parse(nested(100001)), parse_error);
 }
 
 TEST(StateExecParserTest, NestingLimitIsConfigurable) {
@@ -265,8 +265,15 @@ TEST(StateExecParserTest, NestingLimitIsConfigurable) {
 }
 
 TEST(StateExecParserTest, NestingLimitStopsRunawayInputBeforeTheStackDoes) {
-  // A hundred thousand open parens would recurse that deep; the limit stops it at 257.
-  EXPECT_THROW(parse(std::string(100000, '(')), parse_error);
+  // Runaway input: the limit stops a million open parens at the 100001st.
+  try {
+    parse(std::string(1000000, '('));
+    FAIL() << "expected a parse_error";
+  } catch (const parse_error &e) {
+    EXPECT_NE(std::string(e.what()).find("nesting deeper than 100000"), std::string::npos)
+        << e.what();
+    EXPECT_EQ(e.col(), 100001u);
+  }
 }
 
 TEST(StateExecParserTest, NestingErrorPointsAtTheParenThatGoesTooDeep) {

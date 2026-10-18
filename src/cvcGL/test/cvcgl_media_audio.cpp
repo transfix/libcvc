@@ -91,6 +91,39 @@ int main() {
   const long long published = static_cast<long long>(ch->total_published());
 
   sub.reset(); // drop before teardown; the Runtime then closes the stream (joins the producer)
+
+  // A graph nesting mix/gain more than 64 levels deep is refused, not built: a built graph pulls
+  // each chunk through one native call per level on the producer thread. 64 levels still play.
+  rt.set_tick_program(
+      "(if (= (state-get \"deep.done\") \"1\") #f"
+      "  (begin"
+      "    (set g (dict \"tone\" (dict \"hz\" 440)))"
+      "    (set i 0)"
+      "    (while (< i 63)"
+      "      (begin (set g (dict \"gain\" (dict \"gain\" 1 \"in\" g))) (set i (+ i 1))))"
+      "    (set ok (stream-capture-audio"
+      "      (get-attr (stream-open (dict \"id\" \"deep64\" \"codec\" \"f32\""
+      "                                   \"rate\" 48000 \"ch\" 1 \"frames_per_chunk\" 256))"
+      "                \"token\")"
+      "      (dict \"rate\" 48000 \"ch\" 1 \"frames\" 256 \"gain\" (dict \"gain\" 1 \"in\" g))))"
+      "    (set g (dict \"gain\" (dict \"gain\" 1 \"in\" g)))"
+      "    (set no (stream-capture-audio"
+      "      (get-attr (stream-open (dict \"id\" \"deep65\" \"codec\" \"f32\""
+      "                                   \"rate\" 48000 \"ch\" 1 \"frames_per_chunk\" 256))"
+      "                \"token\")"
+      "      (dict \"rate\" 48000 \"ch\" 1 \"frames\" 256 \"gain\" (dict \"gain\" 1 \"in\" g))))"
+      "    (state-set \"deep.ok\" (get-attr ok \"ok\"))"
+      "    (state-set \"deep.error\" (get-attr no \"error\"))"
+      "    (state-set \"deep.done\" \"1\")))");
+  rt.drain();
+  for (const std::string &w : rt.take_reactive_warnings())
+    std::printf("warn: %s\n", w.c_str());
+  cvc::state &root = cvc::state::instance(app);
+  assert(root("deep.done").value() == "1" && "the deep-graph program ran");
+  assert(root("deep.ok").value() == "true" && "a 64-level graph is built");
+  assert(root("deep.error").value().find("more than 64 levels deep") != std::string::npos &&
+         "a 65-level graph is refused with the depth cap's error");
+
   std::printf("cvcgl_media_audio: OK (mix(tone,tone) via DSL -> %lld chunks of %zu-byte f32)\n",
               published, f->size);
   return 0;

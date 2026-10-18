@@ -2338,7 +2338,7 @@ TEST_F(SchedulerSettingsTest, TwoSchedulersWithDifferentOverrides) {
 
 TEST_F(SchedulerSettingsTest, ParserSettingsResolveFromTree) {
   auto &root = cvc::state::instance(app_ctx);
-  EXPECT_EQ(parse_options_from_state(root).max_depth, 256u); // nothing set: built-in default
+  EXPECT_EQ(parse_options_from_state(root).max_depth, 100000u); // nothing set: built-in default
 
   root("state_exec.defaults.parser.max_depth").value("64");
   EXPECT_EQ(parse_options_from_state(root).max_depth, 64u);
@@ -2354,7 +2354,7 @@ TEST_F(SchedulerSettingsTest, BadParserSettingsAreSkipped) {
   auto &root = cvc::state::instance(app_ctx);
   for (const char *bad : {"", "abc", "0", "-5", "12x", "99999999999999999999999"}) {
     root("state_exec.defaults.parser.max_depth").value(bad);
-    EXPECT_EQ(parse_options_from_state(root).max_depth, 256u) << "value: " << bad;
+    EXPECT_EQ(parse_options_from_state(root).max_depth, 100000u) << "value: " << bad;
   }
   // A bad per-scheduler value falls through to the defaults key, not to the built-in default.
   root("state_exec.defaults.parser.max_depth").value("32");
@@ -2370,7 +2370,7 @@ TEST_F(SchedulerSettingsTest, SchedulerParsesWithTreeDepthAndPublishesIt) {
   scheduler sched;
   sched.set_watch_root(&root);
   sched.set_id("strict");
-  EXPECT_EQ(sched.parser_settings().max_depth, 256u); // until load_settings()
+  EXPECT_EQ(sched.parser_settings().max_depth, 100000u); // until load_settings()
   sched.load_settings();
   EXPECT_EQ(sched.parser_settings().max_depth, 3u);
   EXPECT_EQ(root("state_exec.schedulers.strict.parser.max_depth").value(), "3");
