@@ -58,6 +58,11 @@ namespace cvc {
 //     tets[num_tets]        — 4 x uint64 each
 //     hexs[num_hexs]        — 8 x uint64 each
 //     lines[num_lines]      — 2 x uint64 each
+//   Optional trailer (when the geometry has one face material per face):
+//     tag[4]        = 'F','M','0','1'
+//     count         = uint64 (num_tris + num_quads)
+//     materials[count] — uint16 each, triangles first, then quads
+//   A reader that predates the trailer stops after the lines, so the id stays v1.
 //
 
 // Register volume and geometry codecs on `registry`. Idempotent.

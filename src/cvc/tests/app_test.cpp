@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 #include <memory> // compute_async: shared accumulator captured by fn + on_done
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc;
@@ -1986,6 +1987,39 @@ TEST_F(AppTest, ClockBindingRunsStepsAHostVerbRequests) {
   EXPECT_EQ(b.drive(1.0).steps, 2) << "a step request runs while paused";
   EXPECT_EQ(c.tick(), t0 + 2);
   EXPECT_EQ(b.drive(1.0).steps, 0);
+}
+
+// Step requests from several threads while another thread drives: none is lost
+// or run twice (the binding's own counters are behind its lock).
+TEST_F(AppTest, ClockBindingTakesStepRequestsFromAnyThread) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  set_key(ctx, "simtest.paused", "1");
+  b.drive(0.0);
+  const std::uint64_t t0 = c.tick();
+  constexpr int kThreads = 4, kEach = 250;
+  std::atomic<bool> done{false};
+  std::uint64_t driven = 0;
+  std::thread driver([&] {
+    while (!done)
+      driven += static_cast<std::uint64_t>(b.drive(0.0).steps);
+  });
+  std::vector<std::thread> requesters;
+  for (int t = 0; t < kThreads; ++t)
+    requesters.emplace_back([&] {
+      for (int i = 0; i < kEach; ++i) {
+        b.request_steps(1);
+        (void)b.pending_steps();
+      }
+    });
+  for (std::thread &t : requesters)
+    t.join();
+  done = true;
+  driver.join();
+  driven += static_cast<std::uint64_t>(b.drive(0.0).steps); // whatever arrived last
+  EXPECT_EQ(driven, static_cast<std::uint64_t>(kThreads * kEach));
+  EXPECT_EQ(c.tick(), t0 + kThreads * kEach);
+  EXPECT_EQ(b.pending_steps(), 0u);
 }
 
 TEST_F(AppTest, ClockKeysUnderAPrefixMatchThePrefixConstructor) {

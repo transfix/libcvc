@@ -184,3 +184,16 @@ TEST(NavMaterialTrain, SampledMultiStartReachesTheLoss) {
 }
 
 } // namespace
+
+// The full loss -> weights gradient with the loss taken through the kinematic
+// bicycle (P8b) instead of the point-mass surrogate. Vehicle limits sized for the
+// fixture's scale (positions within a few units, dt = 0.1).
+TEST(NavMaterialTrain, FullChainGradcheckBicycle) {
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::bicycle;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+  full_chain_gradcheck(cfg, "bicycle");
+}

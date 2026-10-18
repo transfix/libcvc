@@ -93,7 +93,7 @@ TEST(DataJob, SlicedWalksMatchWholeOnes) {
     EXPECT_TRUE(values_equal(c, a));
     EXPECT_NE(std::get<dict_ptr>(c.v).get(), std::get<dict_ptr>(a.v).get()); // 300 levels: a dict
 
-    auto concat = make_concat_job({value_t{std::string("<")}, a, value_t{int64_t{3}}}, " ");
+    auto concat = make_concat_job({value_t{std::string("<")}, a, value_t{int64_t{3}}}, " ", "test");
     EXPECT_EQ(std::get<std::string>(run_sliced(*concat, slice).first.v),
               "< " + to_string(a) + " 3");
 
@@ -103,6 +103,20 @@ TEST(DataJob, SlicedWalksMatchWholeOnes) {
     EXPECT_TRUE(values_equal(
         run_sliced(*sub, slice).first,
         make_list({value_t{int64_t{1}}, nested_list(50, value_t{std::string("Y")}), sym("z")})));
+  }
+}
+
+TEST(DataJob, ConcatChecksTheAllocationLimit) {
+  // str-concat's sliced path (a list or dict among its parts) is held to the same allocation
+  // limit as its fast path: the same string passed many times can outgrow every part.
+  eval_alloc_guard limit(std::size_t{100});
+  const value_t big{std::string(60, 'x')};
+  auto job = make_concat_job({big, make_list({value_t{int64_t{1}}}), big}, "", "str-concat");
+  try {
+    run_sliced(*job, 1);
+    FAIL() << "expected the allocation limit to stop it";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("str-concat"), std::string::npos) << e.what();
   }
 }
 

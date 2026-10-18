@@ -68,8 +68,8 @@ geometry::geometry(const geometry &geom)
       _colors(geom._colors), _uvs(geom._uvs), _tangents(geom._tangents),
       _curvatures(geom._curvatures), _functions(geom._functions), _lines(geom._lines),
       _tris(geom._tris), _quads(geom._quads), _tets(geom._tets), _hexs(geom._hexs),
-      _geom_type(geom._geom_type), _extents_set(geom._extents_set), _min(geom._min),
-      _max(geom._max), _ctx(geom._ctx) {
+      _face_materials(geom._face_materials), _geom_type(geom._geom_type),
+      _extents_set(geom._extents_set), _min(geom._min), _max(geom._max), _ctx(geom._ctx) {
   // make sure all our pointers are valid
   init_ptrs();
 }
@@ -92,6 +92,7 @@ void geometry::copy(const geometry &geom, bool deepCopy) {
     _quads = quads_ptr_t(new quads_t(*geom._quads));
     _tets = tets_ptr_t(new tets_t(*geom._tets));
     _hexs = hexs_ptr_t(new hexs_t(*geom._hexs));
+    _face_materials = face_materials_ptr_t(new face_materials_t(*geom._face_materials));
   } else {
     // Shallow copy: copy-on-write via shared_ptr
     _points = geom._points;
@@ -107,6 +108,7 @@ void geometry::copy(const geometry &geom, bool deepCopy) {
     _quads = geom._quads;
     _tets = geom._tets;
     _hexs = geom._hexs;
+    _face_materials = geom._face_materials;
   }
 
   _geom_type = geom._geom_type;
@@ -167,6 +169,25 @@ bool geometry::empty() const {
 geometry &geometry::merge(const geometry &geom) {
   using namespace std;
 
+  // The merged faces are [our tris, its tris, our quads, its quads]. If either
+  // side carries face materials, rebuild them in that order before the face
+  // arrays grow; a side without them contributes material 0.
+  const bool merge_materials = has_face_materials() || geom.has_face_materials();
+  face_materials_t merged_materials;
+  if (merge_materials) {
+    const uint64_t at = num_tris(), aq = num_quads();
+    const uint64_t bt = geom.num_tris(), bq = geom.num_quads();
+    merged_materials.reserve(at + aq + bt + bq);
+    for (uint64_t i = 0; i < at; ++i)
+      merged_materials.push_back(face_material(i));
+    for (uint64_t i = 0; i < bt; ++i)
+      merged_materials.push_back(geom.face_material(i));
+    for (uint64_t i = 0; i < aq; ++i)
+      merged_materials.push_back(face_material(at + i));
+    for (uint64_t i = 0; i < bq; ++i)
+      merged_materials.push_back(geom.face_material(bt + i));
+  }
+
   // append vertex info
   points().insert(points().end(), geom.points().begin(), geom.points().end());
   normals().insert(normals().end(), geom.normals().begin(), geom.normals().end());
@@ -214,6 +235,11 @@ geometry &geometry::merge(const geometry &geom) {
     }
   }
 
+  if (merge_materials)
+    face_materials().swap(merged_materials);
+  else if (!_face_materials->empty())
+    face_materials().clear(); // stale on our side and absent on theirs: drop, never misalign
+
   return *this;
 }
 
@@ -223,9 +249,17 @@ geometry geometry::tri_surface() const {
   new_geom._points = _points;
   new_geom._colors = _colors;
 
+  // Face materials follow their faces: a kept triangle keeps its material and a
+  // split quad gives it to both of its triangles.
+  const bool carry = has_face_materials();
+  const uint64_t nt = num_tris();
+  face_materials_t fm;
+
   // if we don't have boundary info, just insert the tris directly
   if (boundary().size() != points().size()) {
     new_geom._tris = _tris;
+    if (carry)
+      fm.assign(_face_materials->begin(), _face_materials->begin() + nt);
 
     for (quads_t::const_iterator i = quads().begin(); i != quads().end(); i++) {
       tri_t quad_tris[2];
@@ -239,11 +273,19 @@ geometry geometry::tri_surface() const {
 
       new_geom.tris().push_back(quad_tris[0]);
       new_geom.tris().push_back(quad_tris[1]);
+      if (carry) {
+        const face_material_t m = face_material(nt + (i - quads().begin()));
+        fm.push_back(m);
+        fm.push_back(m);
+      }
     }
   } else {
     for (tris_t::const_iterator i = tris().begin(); i != tris().end(); i++)
-      if (boundary()[(*i)[0]] && boundary()[(*i)[1]] && boundary()[(*i)[2]])
+      if (boundary()[(*i)[0]] && boundary()[(*i)[1]] && boundary()[(*i)[2]]) {
         new_geom.tris().push_back(*i);
+        if (carry)
+          fm.push_back(face_material(i - tris().begin()));
+      }
 
     for (quads_t::const_iterator i = quads().begin(); i != quads().end(); i++)
       if (boundary()[(*i)[0]] && boundary()[(*i)[1]] && boundary()[(*i)[2]] &&
@@ -259,9 +301,16 @@ geometry geometry::tri_surface() const {
 
         new_geom.tris().push_back(quad_tris[0]);
         new_geom.tris().push_back(quad_tris[1]);
+        if (carry) {
+          const face_material_t m = face_material(nt + (i - quads().begin()));
+          fm.push_back(m);
+          fm.push_back(m);
+        }
       }
   }
 
+  if (carry)
+    new_geom.face_materials().swap(fm);
   return new_geom;
 }
 
@@ -567,6 +616,8 @@ void geometry::init_ptrs() {
     _tets.reset(new tets_t);
   if (!_hexs)
     _hexs.reset(new hexs_t);
+  if (!_face_materials)
+    _face_materials.reset(new face_materials_t);
 }
 
 void geometry::calc_extents() const {
@@ -650,6 +701,9 @@ void geometry::pre_write(ARRAY_TYPE at) {
     break;
   case HEXS:
     make_unique(_hexs);
+    break;
+  case FACE_MATERIALS:
+    make_unique(_face_materials);
     break;
   }
 }

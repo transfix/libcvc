@@ -64,6 +64,14 @@ struct surface_class {
   float veg_density = 0.0f;
   const char *rf_material = "open_air";      // generic 12-name-vocab material label
   float penetration_db_per_m[3] = {0, 0, 0}; // sub6 (low,mid,high) PROVENANCE only
+  // Contact physics, for the physics world (cvc::physics::add_world_geometry): dry
+  // tire-on-surface Coulomb friction, restitution, and the rolling-resistance
+  // coefficient C_rr the vehicle and its energy ledger read. One table for every
+  // plant, so a vehicle and a box see the same mu. Not part of ontology_hash():
+  // that digest covers the fields the navigator's rasters depend on.
+  float mu = 1.0f;
+  float restitution = 0.0f;
+  float rolling_resistance = 0.01f;
 };
 
 // A registry is one ontology: the ordered class table + name lookup. Variants

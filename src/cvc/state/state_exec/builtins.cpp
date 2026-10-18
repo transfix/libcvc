@@ -305,7 +305,7 @@ value_t builtin_ne(std::span<const value_t> args) {
 
 value_t builtin_str_concat(std::span<const value_t> args) {
   if (std::any_of(args.begin(), args.end(), is_compound))
-    return run_data_job(make_concat_job({args.begin(), args.end()}, ""));
+    return run_data_job(make_concat_job({args.begin(), args.end()}, "", "str-concat"));
   // The same string may be passed many times, so the result can outgrow every argument: check
   // each part against the allocation limit before appending it.
   std::string result;
@@ -669,7 +669,7 @@ value_t builtin_print(std::span<const value_t> args) {
     parts.reserve(args.size());
     for (auto &a : args)
       parts.push_back(std::holds_alternative<std::string>(a.v) ? value_t{to_string(a)} : a);
-    return run_data_job(make_concat_job(std::move(parts), " "), [](value_t line) {
+    return run_data_job(make_concat_job(std::move(parts), " ", "print"), [](value_t line) {
       std::cout << std::get<std::string>(line.v) << '\n';
       return nil_value;
     });

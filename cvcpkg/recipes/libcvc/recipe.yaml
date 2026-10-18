@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "3.5.1"
+  upstream_version: "3.6.0"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -180,6 +180,13 @@ depends:
   build:
     - name: googletest
       platforms: [linux, macos, windows]
+    # taocpp/PEGTL 3.x (header-only, MIT), the grammar engine of the state_exec
+    # s-expression reader. Build-only: cvc links it as
+    # $<BUILD_INTERFACE:taocpp::pegtl>, and no installed header includes it
+    # (src/cvc/CMakeLists.txt checks). So it is never baked into required_deps,
+    # and consumers of the bundle do not install it. Unscoped: state_exec builds
+    # on every platform, wasm included, and find_package(pegtl) is REQUIRED.
+    - name: pegtl
   # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
   # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:
@@ -304,6 +311,14 @@ depends:
     # nav_finale / nav_city_swarm --bundle load a real Austin city on Windows.
     - name: assimp
       platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
+    # Jolt Physics, the cvc::physics backend (src/cvc/physics/jolt). Without it
+    # find_package(Jolt CONFIG) misses, CVC_WITH_JOLT turns OFF and libcvc builds
+    # with the null backend only. Linked PRIVATE into the cvc target: a shared
+    # libcvc absorbs it, a static (wasm-mt) libcvc names it in cvcConfig.cmake.
+    # joltphysics 5.6.0+cvc.5 is cross-platform deterministic and published for
+    # these platforms (macOS: arm64 only so far, like the rest of this list).
+    - name: joltphysics
+      platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
     # Scoped for the same reason as assimp above, but the other way round:
     # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
     # Accelerate framework, so libcvc-deps uses the system libraries there —
@@ -397,13 +412,20 @@ package:
     # lib/libxmlrpc.a — it does not match lib/libcvc*/lib/cvc*, so it must be
     # listed explicitly or downstream links to cvc::xmlrpc fail with a missing
     # archive.
-    - lib/libxmlrpc*
+    #
+    # Native platforms only: the wasm-mt build (publish-cvcgl-wasm.yml) leaves
+    # CVC_USING_XMLRPC OFF, so it has no xmlrpc archive, and cvcpkg's strict
+    # package.files check refused the v3.6.0 wasm-mt bundle for declaring one
+    # ("2 entries that match nothing in the staged tree").
+    - glob: lib/libxmlrpc*
+      platforms: [linux, macos, windows, freebsd, netbsd]
     # ...and the MSVC spelling. add_library(xmlrpc STATIC) yields libxmlrpc.a on
     # Unix but xmlrpc.lib on MSVC, which matches neither lib/libcvc* nor
     # lib/cvc* nor the glob above -- the same reason lib/cvc* sits beside
     # lib/libcvc* here. Without it the Windows bundle exports cvc::xmlrpc while
     # shipping no archive for it.
-    - lib/xmlrpc*
+    - glob: lib/xmlrpc*
+      platforms: [linux, macos, windows, freebsd, netbsd]
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
