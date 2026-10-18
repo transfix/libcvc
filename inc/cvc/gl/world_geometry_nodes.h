@@ -9,8 +9,9 @@
 */
 
 // cvc::gl::add_world_geometry — the world's geometry as scene-graph nodes: the
-// same height fields and meshes the physics world collides with
-// (docs/roadmap/WORLD-GEOMETRY-ROADMAP.md, G3).
+// same height fields and meshes the physics world collides with, and the same
+// volumes its fields push with (docs/roadmap/WORLD-GEOMETRY-ROADMAP.md, G3 and
+// G6).
 //
 //   const auto city = cvc::world::load_city_bundle(dir);
 //   const auto nodes = cvc::gl::add_world_geometry(sg, city.geometry);
@@ -19,7 +20,10 @@
 // shares the item's arrays (cvc::geometry is copy-on-write). A geometry with no
 // vertex colours of its own is coloured by its surfaces: each vertex takes the
 // mean albedo of the faces around it, so a terrain shows its land cover and a
-// building its shell. A mesh item's placement becomes the node's pose.
+// building its shell. A mesh item's placement becomes the node's pose. After the
+// geometry nodes, one VolumeNode per volume with role_render, named prefix +
+// volume name: it shares the volume's voxels and sits at the volume's bounding
+// box. The nodes come back in that order: items, then volumes.
 //
 // `parent` is the node that stands for the world's frame: the nodes are made its
 // children (top-level nodes without one), so a transform on it (a render origin,
