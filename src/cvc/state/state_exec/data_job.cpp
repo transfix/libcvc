@@ -5,6 +5,8 @@
              work on the heap and run a slice at a time.
 */
 
+#include "native_stack.h"
+
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
@@ -512,6 +514,9 @@ private:
 // The data side of the evaluator step running on this thread, if any.
 thread_local detail::data_step_scope *t_scope = nullptr;
 
+// Levels of native nesting on this thread (detail::native_nesting).
+thread_local std::size_t t_native_depth = 0;
+
 // Run `walk` to completion and count its nodes into the current step.
 template <class Walk> Walk &finish_walk(Walk &walk) {
   walk.step(0);
@@ -594,6 +599,7 @@ value_t call_here(const data_job::call_request &call) {
           scope->allow_defer(true);
       }
     } guard;
+    detail::native_nesting level(call.who);
     return (*fn)(call.args);
   }
   if (std::holds_alternative<closure_ptr>(call.fn->v))
@@ -661,7 +667,11 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
     if (!fn || (slicing && scope->nodes_ >= scope->step_nodes_))
       break;
     const data_job::call_request call = *job->take_call();
-    value_t value = (*fn)(call.args);
+    value_t value;
+    {
+      detail::native_nesting level(call.who);
+      value = (*fn)(call.args);
+    }
     if (scope->deferred_) {
       waits_on = std::move(scope->deferred_);
       break;
@@ -675,8 +685,10 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
 }
 
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who) {
-  if (const auto *native = std::get_if<native_fn>(&fn.v))
+  if (const auto *native = std::get_if<native_fn>(&fn.v)) {
+    detail::native_nesting level(who);
     return (*native)(args);
+  }
   if (const auto *cls = std::get_if<closure_ptr>(&fn.v); cls && *cls)
     return run_data_job(
         std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who));
@@ -691,6 +703,20 @@ void count_data_nodes(std::size_t nodes) {
     scope->stats_.add_data_nodes(nodes);
   }
 }
+
+// -- native_nesting --------------------------------------------------------------
+
+detail::native_nesting::native_nesting(const char *who) {
+  if (t_native_depth >= kMaxNativeNesting || native_stack_left() < kNativeStackReserve)
+    throw std::runtime_error(std::string(who) + ": native calls nested too deeply (" +
+                             std::to_string(t_native_depth) +
+                             " levels; a value or class that refers to itself?)");
+  ++t_native_depth;
+}
+
+detail::native_nesting::~native_nesting() { --t_native_depth; }
+
+std::size_t detail::native_nesting::depth() { return t_native_depth; }
 
 // -- data_step_scope -------------------------------------------------------------
 

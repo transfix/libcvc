@@ -1262,6 +1262,7 @@ value_t detail::class_method::operator()(std::span<const value_t> call_args) con
     for (size_t j = 0; j < method->params.size(); ++j)
       local->set(method->params[j].name, all_args[j]);
   }
+  detail::native_nesting level("method"); // a nested evaluator
   stackless_evaluator temp(global_env);
   if (method->body.size() == 1)
     return temp.evaluate(method->body[0], local);
@@ -1281,8 +1282,11 @@ value_t detail::class_constructor::operator()(std::span<const value_t> init_args
       std::vector<value_t> a;
       a.push_back(inst_val);
       a.insert(a.end(), init_args.begin(), init_args.end());
-      if (auto *fn = std::get_if<native_fn>(&v.v))
-        (*fn)(a);
+      if (auto *fn = std::get_if<native_fn>(&v.v)) {
+        const native_fn init = *fn; // init may change the class dict under `v`
+        detail::native_nesting level("constructor");
+        init(a);
+      }
       break;
     }
   }
@@ -1293,8 +1297,11 @@ value_t detail::class_inherited_method::operator()(std::span<const value_t> args
   if (super_cls) {
     for (auto &[k, v] : *super_cls) {
       if (k == name) {
-        if (auto *fn = std::get_if<native_fn>(&v.v))
-          return (*fn)(args);
+        if (auto *fn = std::get_if<native_fn>(&v.v)) {
+          const native_fn inherited = *fn; // it may change the class dict under `v`
+          detail::native_nesting level(name.c_str());
+          return inherited(args);
+        }
         break;
       }
     }

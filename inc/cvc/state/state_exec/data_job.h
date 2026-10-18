@@ -143,11 +143,45 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
 /// throws. `who` names the caller in errors.
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who);
 
+/// How native calls may nest on one thread's native stack. A level is a native function calling
+/// another function itself (apply, send, a class constructor running init, an inherited init
+/// running its superclass's, a job's call made where the job runs) or running a nested evaluator
+/// (a class method, a generator advancing). The evaluator applying a native function is not a
+/// level. A self-containing argument list, a class whose init is its own constructor, or a long
+/// enough chain of such calls asks for unbounded nesting, so a level is refused (it throws) past
+/// kMaxNativeNesting levels, or when less than kNativeStackReserve bytes of the thread's native
+/// stack are left (where the platform says where its stack ends). Levels cost from about 0.5 KiB
+/// (apply) to over 10 KiB (a class method's nested evaluator) in a release build.
+constexpr std::size_t kMaxNativeNesting = 256;
+
+/// The native stack a level leaves for the error it may throw. MSVC runs a catch block before
+/// unwinding the frames above it, so on Windows whatever catches the error (a scheduler killing
+/// the process, say) runs at the depth it was thrown from and needs this room; elsewhere a throw
+/// unwinds first and needs little.
+#ifdef _WIN32
+constexpr std::size_t kNativeStackReserve = 128 * 1024;
+#else
+constexpr std::size_t kNativeStackReserve = 32 * 1024;
+#endif
+
 /// Count `nodes` units of deep-data work done in the current evaluator step (a walk run to
 /// completion counts itself; the release backlog counts what it frees).
 void count_data_nodes(std::size_t nodes);
 
 namespace detail {
+
+/// RAII: one level of native nesting on this thread (see kNativeStackReserve). Throws, naming
+/// `who`, when the stack is too close to its end for another.
+class native_nesting {
+public:
+  explicit native_nesting(const char *who);
+  ~native_nesting();
+  native_nesting(const native_nesting &) = delete;
+  native_nesting &operator=(const native_nesting &) = delete;
+
+  /// Levels this thread is nested now.
+  static std::size_t depth();
+};
 
 /// A native call's deep-data job left to run after the call returned (see run_data_job).
 struct deferred_data_job {

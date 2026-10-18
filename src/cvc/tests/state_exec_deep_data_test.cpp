@@ -16,6 +16,8 @@
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>
@@ -346,6 +348,31 @@ TEST_F(StateExecDeepDataCodec, CyclicValueThrows) {
   l->clear(); // break the cycle so the list is freed
 }
 
+TEST_F(StateExecDeepDataCodec, ClosureChainRoundTrip) {
+  // Each closure's scope binds the closure made before it: the codec used to recurse twice per
+  // closure (into its scope, and from the binding into the next closure).
+  const std::size_t n = codec_depth();
+  value_t chain = nil_value;
+  for (std::size_t i = 0; i < n; ++i) {
+    auto scope = std::make_shared<environment>();
+    scope->set("prev", chain);
+    auto c = std::make_shared<closure>();
+    c->body = {value_t{symbol{"prev"}}};
+    c->env_snapshot = scope;
+    chain = value_t{c};
+  }
+  cvc::state &node = snapshot_node("closures");
+  on_small_stack([&] {
+    encode_value(node, chain);
+    value_t back = decode_value(node);
+    std::size_t depth = 0;
+    for (const value_t *v = &back; std::holds_alternative<closure_ptr>(v->v); ++depth)
+      v = std::get<closure_ptr>(v->v)->env_snapshot->lookup("prev");
+    EXPECT_EQ(depth, n);
+  });
+  EXPECT_LE(state_depth(node), 32u);
+}
+
 TEST_F(StateExecDeepDataCodec, SharedValueEncodesTwice) {
   // A DAG (the same list reached twice) is not a cycle: it encodes, and decodes as two copies.
   value_t inner = make_list({value_t{int64_t{3}}});
@@ -385,6 +412,131 @@ TEST_F(StateExecDeepDataCodec, BadSpillReferenceThrows) {
     refs[i]->value(saved[i]);
   refs[0]->value(first);
   EXPECT_TRUE(values_equal(decode_value(node), nested_list(200)));
+}
+
+// ---- native nesting ----------------------------------------------------------
+//
+// A native function that calls another function (apply, send, a class constructor running init,
+// an inherited init running its superclass's) or runs a nested evaluator (a class method, a
+// generator) nests on the native stack. detail::native_nesting refuses a level past
+// kMaxNativeNesting levels or with less than kNativeStackReserve bytes of stack left, so a value or
+// class that refers to itself throws instead of overflowing. The runaway cases run on a 64 KiB
+// stack (wasm's default) and must throw, not crash; the legitimate ones run on 1 MiB, where the
+// heaviest levels (a class method's evaluator, over 10 KiB each) still fit.
+
+constexpr std::size_t kWasmStackKiB = 64;
+constexpr std::size_t kThreadStackKiB = 1024;
+
+// Run `body` on a thread with a `kib` stack.
+void on_stack(std::size_t kib, const std::function<void()> &body) {
+  std::exception_ptr error;
+  boost::thread::attributes attrs;
+  attrs.set_stack_size(kib * 1024);
+  boost::thread t(attrs, [&] {
+    try {
+      body();
+    } catch (...) {
+      error = std::current_exception();
+    }
+  });
+  t.join();
+  if (error)
+    std::rethrow_exception(error);
+}
+
+value_t run_script(const std::string &script) {
+  stackless_evaluator ev(builtins::make_default_environment());
+  return ev.evaluate(parse(script));
+}
+
+// Run `script` on a `kib` stack, expecting the nesting limit's error; returns the levels it
+// reports. Afterwards no level is left counted.
+std::size_t expect_nesting_limit(const std::string &script, std::size_t kib = kWasmStackKiB) {
+  std::size_t levels = 0;
+  on_stack(kib, [&] {
+    try {
+      run_script(script);
+      ADD_FAILURE() << "expected the native nesting limit: " << script;
+    } catch (const std::runtime_error &e) {
+      const std::string what = e.what();
+      const std::size_t at = what.find("nested too deeply (");
+      EXPECT_NE(at, std::string::npos) << what;
+      if (at != std::string::npos)
+        levels = std::strtoull(what.c_str() + at + 19, nullptr, 10);
+    }
+    EXPECT_EQ(detail::native_nesting::depth(), 0u);
+  });
+  return levels;
+}
+
+TEST(StateExecNativeNesting, ApplyOnASelfContainingList) {
+  // (apply apply L) with L = (apply L): apply calls itself once per trip around the cycle.
+  const std::string loop = "(begin (set L (list apply nil)) (set-nth L 1 L) (apply apply L))";
+  // On a small stack the stack left decides; on a big one, the level count.
+  EXPECT_LT(expect_nesting_limit(loop), kMaxNativeNesting);
+  EXPECT_EQ(expect_nesting_limit(loop, 4096), kMaxNativeNesting);
+}
+
+TEST(StateExecNativeNesting, SendThroughItself) {
+  // A class whose method "m" is `send` itself: (send o "m" "m" ...) re-sends once per "m".
+  std::string ms;
+  for (int i = 0; i < 5000; ++i)
+    ms += " \"m\"";
+  expect_nesting_limit("(begin (defclass C) (set-attr C.__cls_dict__ \"m\" send) (set o (C))"
+                       " (send o" +
+                       ms + "))");
+}
+
+TEST(StateExecNativeNesting, ConstructorThatIsItsOwnInit) {
+  expect_nesting_limit("(begin (defclass P) (set-attr P.__cls_dict__ \"init\" P) (P))");
+}
+
+// A chain of `n` classes, each the superclass of the next, defining no init of their own, so
+// constructing the last runs every inherited init up the chain. Leaves `begin` open.
+std::string class_chain(std::size_t n) {
+  return "(begin (defclass P) (set i 0)"
+         " (while (< i " +
+         std::to_string(n) +
+         ") (begin (defclass K P) (set P.__cls_dict__ K.__cls_dict__) (set i (+ i 1))))";
+}
+
+TEST(StateExecNativeNesting, InheritedInitUpALongChain) {
+  on_stack(kThreadStackKiB, [] {
+    value_t obj = run_script(class_chain(100) + " (K))");
+    EXPECT_TRUE(std::holds_alternative<dict_ptr>(obj.v));
+  });
+  expect_nesting_limit(class_chain(10000) + " (K))");
+}
+
+TEST(StateExecNativeNesting, MethodsCallingMethods) {
+  // Each call of `down` runs on a nested evaluator and sends `down` again: the heaviest level.
+  const std::string cls = "(begin (defclass C (down (self n) (if (= n 0) 0 (+ 1 (send self "
+                          "\"down\" (- n 1)))))) (set o (C)) ";
+  on_stack(kThreadStackKiB, [&] {
+    value_t r = run_script(cls + "(send o \"down\" 20))");
+    EXPECT_EQ(std::get<int64_t>(r.v), 20);
+  });
+  expect_nesting_limit(cls + "(send o \"down\" 100000))");
+}
+
+TEST(StateExecNativeNesting, GeneratorsOfGenerators) {
+  // (mk n) yields from (mk (- n 1)): advancing it advances n nested generators.
+  const std::string mk = "(begin (set mk nil) (set mk (lambda (n) (generator (lambda ()"
+                         " (if (= n 0) (yield 7) (for x (mk (- n 1)) (yield x))))))) ";
+  on_stack(kThreadStackKiB, [&] {
+    value_t r = run_script(mk + "(next (mk 50)))");
+    EXPECT_EQ(std::get<int64_t>(r.v), 7);
+  });
+  expect_nesting_limit(mk + "(next (mk 10000)))");
+}
+
+TEST(StateExecNativeNesting, FreeingALongClassChain) {
+  // Each class holds its superclass's dict inside its inherited init and finalize (native
+  // functions, not values): freeing the chain must not take a native frame per class.
+  on_stack(kWasmStackKiB, [] {
+    stackless_evaluator ev(builtins::make_default_environment());
+    ev.evaluate(parse(class_chain(depth() / 10) + ")"));
+  });
 }
 
 } // namespace
