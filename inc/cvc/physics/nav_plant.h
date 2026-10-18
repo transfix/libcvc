@@ -36,6 +36,7 @@
 #include <cvc/core/world_units.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/world.h>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -146,7 +147,8 @@ public:
   //   <prefix>.nav_plant.drift.<b>.{lo_g, hi_g, ticks, position_rms_m, position_max_m,
   //     heading_rms_rad, heading_max_rad, speed_rms_mps, speed_max_mps}
   //   <prefix>.nav_plant.{vehicles, advance_us, advance_us_per_vehicle}
-  // A name may be empty to leave that agent out.
+  // A name may be empty to leave that agent out. Every key says what it is, as world_binding's
+  // do: a comment and the properties access, unit and (on a knob) a recommended min and max.
   void publish(cvc::app &ctx, const std::string &prefix,
                const std::vector<std::string> &names) const;
 
@@ -182,6 +184,8 @@ private:
   std::vector<bin_sums> _bins;
   std::uint64_t _ticks = 0;
   double _advance_us = 0.0; // summed
+  // The keys described so far (prefix-qualified), so each is described once.
+  mutable std::set<std::string> _described;
 };
 
 } // namespace physics

@@ -116,6 +116,11 @@ int main() {
   ck(std::fabs(st("nrg.nav_stats.episode.total_energy_J").value<double>() - 9.0e5) < 1e-3,
      "fleet energy");
   ck(st("nrg.nav_stats.episode.total_building_contacts").value<int>() == 1, "fleet contacts");
+  // every leaf says what it is
+  ck(!st("nrg.nav_stats.veh.1.energy_J").comment().empty(), "energy_J has a comment");
+  ck(st("nrg.nav_stats.veh.1.energy_per_km").property("unit") == "J/km", "energy_per_km unit");
+  ck(st("nrg.nav_stats.episode.makespan_s").property("access") == "telemetry", "makespan access");
+  ck(!st("scene.nav_stats.meta.tick").comment().empty(), "meta.tick has a comment");
 
   // per_vehicle_every stride: over 3 vehicles, stride 2 publishes veh 0 and 2, skips 1 (fresh
   // prefix).

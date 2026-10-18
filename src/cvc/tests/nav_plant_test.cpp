@@ -444,6 +444,20 @@ TEST(NavPlant, PublishesTheDriftBinnedByLateralG) {
   EXPECT_EQ(plant.options().brake_margin, 0.8) << "2 is not a share";
   EXPECT_EQ(plant.reference_substeps(), 12);
   sim.step(); // the drive takes the new latency from the plant's limits
+  // Every key says what it is.
+  for (const char *key :
+       {"physics.nav_plant.latency", "physics.nav_plant.drift_nsub",
+        "physics.nav_plant.settings.physics_steps", "physics.nav_plant.advance_us_per_vehicle",
+        "physics.nav_plant.drift.2.position_rms_m",
+        "physics.vehicles.lead.nav.drift.stop_speed_mps",
+        "physics.vehicles.lead.nav.accel_command"}) {
+    EXPECT_FALSE(st(key).comment().empty()) << key;
+    EXPECT_TRUE(st(key).has_property("access")) << key;
+  }
+  EXPECT_EQ(st("physics.nav_plant.latency").property("unit"), "s");
+  EXPECT_EQ(st("physics.nav_plant.latency").property("max"), "0.5");
+  EXPECT_EQ(st("physics.nav_plant.brake_margin").property("min"), "0.3");
+  EXPECT_EQ(st("physics.nav_plant.settings.step_world").property("access"), "build");
 }
 
 // Gate 7: driving at a wall, the Jolt arm never goes faster than the stopping speed that allows

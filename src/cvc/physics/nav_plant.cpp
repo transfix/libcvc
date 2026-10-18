@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "binding_meta.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -55,6 +57,71 @@ double resting_height(const vehicle_desc &d) {
   for (const axle_desc &a : d.axles)
     h = std::max(h, -a.z + a.suspension_max + a.wheel_radius);
   return h + 0.03;
+}
+
+constexpr double kNone = std::numeric_limits<double>::quiet_NaN();
+
+// What nav_plant's keys are (binding_meta.h's form), relative to <prefix>.nav_plant.
+const detail::key_meta kPlantKeys[] = {
+    {"latency", "knob", "s", 0, 0.5,
+     "The vehicle's response lag beyond the tick it holds a command (driver, pedals, engine). The "
+     "stopping governor takes the distance it covers off the distance to a wall."},
+    {"brake_margin", "knob", "1", 0.3, 1,
+     "The share of the vehicle's max_decel the stopping governor plans with."},
+    {"drift_nsub", "knob", "", 0, 64,
+     "Substeps of the kinematic bicycle the drift is measured against; 0 = the physics steps a "
+     "tick (doc 31 D14's nsub = k)."},
+    {"settings.step_world", "build", "", kNone, kNone,
+     "1: advance() steps the world; 0: the world steps itself on a shared clock."},
+    {"settings.ground_z", "build", "m", kNone, kNone,
+     "The ground's height under the agents' starts."},
+    {"settings.spawn_height", "build", "m", kNone, kNone,
+     "How high above the ground a vehicle is added; < 0 = just above its wheels' full reach."},
+    {"settings.metres_per_world_unit", "build", "m", kNone, kNone, "Nav's world frame in metres."},
+    {"settings.physics_steps", "build", "", kNone, kNone, "Physics steps per nav tick."},
+    {"settings.drift_bins_g", "build", "g", kNone, kNone,
+     "The drift summary's lateral-acceleration bins: their upper edges."},
+    {"vehicles", "telemetry", "", kNone, kNone, "Vehicles the plant drives."},
+    {"advance_us", "telemetry", "us", kNone, kNone,
+     "advance()'s mean wall time a tick, all vehicles."},
+    {"advance_us_per_vehicle", "telemetry", "us", kNone, kNone,
+     "advance()'s mean wall time a tick, per vehicle."},
+};
+
+// A drift bin's keys, relative to <prefix>.nav_plant.drift.<b>.
+const detail::key_meta kBinKeys[] = {
+    {"lo_g", "telemetry", "g", kNone, kNone, "The bin's lower edge of lateral acceleration."},
+    {"hi_g", "telemetry", "g", kNone, kNone, "The bin's upper edge; -1 for the open last bin."},
+    {"ticks", "telemetry", "", kNone, kNone, "Agent ticks in the bin."},
+    {"position_rms_m", "telemetry", "m", kNone, kNone,
+     "RMS of the tick's position drift: the plant against nav's kinematic bicycle."},
+    {"position_max_m", "telemetry", "m", kNone, kNone, "The largest position drift."},
+    {"heading_rms_rad", "telemetry", "rad", kNone, kNone, "RMS of the tick's heading drift."},
+    {"heading_max_rad", "telemetry", "rad", kNone, kNone, "The largest heading drift."},
+    {"speed_rms_mps", "telemetry", "m/s", kNone, kNone, "RMS of the tick's speed drift."},
+    {"speed_max_mps", "telemetry", "m/s", kNone, kNone, "The largest speed drift."},
+};
+
+// A vehicle's nav keys, relative to <prefix>.vehicles.<name>.nav.
+const detail::key_meta kAgentKeys[] = {
+    {"steer_command", "telemetry", "rad", kNone, kNone,
+     "Nav's steering command this tick (+ left)."},
+    {"accel_command", "telemetry", "m/s^2", kNone, kNone,
+     "Nav's acceleration command this tick, along the heading."},
+    {"drift.position_m", "telemetry", "m", kNone, kNone,
+     "This tick: where the vehicle is against where nav's kinematic bicycle puts it."},
+    {"drift.heading_rad", "telemetry", "rad", kNone, kNone, "This tick's heading drift."},
+    {"drift.speed_mps", "telemetry", "m/s", kNone, kNone, "This tick's speed drift."},
+    {"drift.lateral_g", "telemetry", "g", kNone, kNone,
+     "The bicycle's lateral acceleration this tick."},
+    {"drift.stop_speed_mps", "telemetry", "m/s", kNone, kNone,
+     "The stopping speed the tick's command respected (latency-aware v_stop)."},
+};
+
+template <std::size_t K>
+void describe_keys(cvc::app &ctx, const std::string &base, const detail::key_meta (&t)[K]) {
+  for (const detail::key_meta &m : t)
+    detail::describe(ctx, base + m.key, m);
 }
 
 template <class T> void write_val(cvc::app &ctx, const std::string &path, const T &v) {
@@ -253,6 +320,8 @@ void nav_plant::set_drift_nsub(int n) {
 
 void nav_plant::pull(cvc::app &ctx, const std::string &prefix) {
   const std::string k = (prefix.empty() ? std::string() : prefix + ".") + "nav_plant.";
+  if (_described.insert(k).second)
+    describe_keys(ctx, k, kPlantKeys);
   const auto read = [&](const std::string &name, double now, auto apply) {
     std::string raw;
     try {
@@ -349,6 +418,8 @@ void nav_plant::publish(cvc::app &ctx, const std::string &prefix,
       continue;
     const agent &a = _agents[i];
     const std::string k = root + "vehicles." + names[i] + ".nav.";
+    if (_described.insert(k).second)
+      describe_keys(ctx, k, kAgentKeys);
     write_val(ctx, k + "steer_command", a.steer_command);
     write_val(ctx, k + "accel_command", a.accel_command);
     write_val(ctx, k + "drift.position_m", a.drift.position_m);
@@ -358,10 +429,14 @@ void nav_plant::publish(cvc::app &ctx, const std::string &prefix,
     write_val(ctx, k + "drift.stop_speed_mps", a.drift.stop_speed_mps);
   }
   const std::string k = root + "nav_plant.";
+  if (_described.insert(k).second)
+    describe_keys(ctx, k, kPlantKeys);
   const std::vector<drift_bin> bins = drift_summary();
   for (std::size_t b = 0; b < bins.size(); ++b) {
     const drift_bin &d = bins[b];
     const std::string kb = k + "drift." + std::to_string(b) + ".";
+    if (_described.insert(kb).second)
+      describe_keys(ctx, kb, kBinKeys);
     write_val(ctx, kb + "lo_g", d.lo_g);
     write_val(ctx, kb + "hi_g", std::isfinite(d.hi_g) ? d.hi_g : -1.0);
     write_val(ctx, kb + "ticks", static_cast<std::int64_t>(d.ticks));

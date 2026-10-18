@@ -521,6 +521,10 @@ ignored. They are also `set_latency`, `set_brake_margin` and `set_drift_nsub`. T
 the latency and the braking from `limits()` every tick, so a change takes effect on the next
 one.
 
+Like the physics binding's, every one of these keys says what it is: a comment, `access`, `unit`
+and, on a knob, a recommended `min` and `max`. So do the `nav_stats` leaves that
+`publish_nav_stats` writes.
+
 **nav_stats** gains `energy_J`, `energy_per_km` (J per km of path) and `building_contacts`
 per vehicle, and `total_energy_J` and `total_building_contacts` per episode. `energy_J` is
 what the vehicle drew from its source, net of regeneration.
