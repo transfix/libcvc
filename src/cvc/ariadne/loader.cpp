@@ -1939,26 +1939,39 @@ std::vector<CustomRequirement> parse_customs(Ctx &ctx, const YAML::Node &c) {
 // references, gated on the document declaring a `channels:` block. Only literal channel names are
 // visible here; a dynamic `(msg-recv (expr))` name is the runtime policy's job (a follow-up).
 // Walk a parsed script's value_t tree, collecting the string-literal FIRST arg of every
-// (msg-send|msg-recv|msg-pending …) call — the static channel references. Depth-bounded.
-void collect_channel_refs(const cvc::state_exec::value_t &v, std::vector<std::string> &out,
-                          int depth) {
+// (msg-send|msg-recv|msg-pending …) call — the static channel references — in source order.
+// The walk keeps its open lists on a heap stack, so any depth the parser accepts is linted.
+void collect_channel_refs(const cvc::state_exec::value_t &v, std::vector<std::string> &out) {
   using namespace cvc::state_exec;
-  if (depth > 256)
-    return;
-  const auto *lp = std::get_if<list_ptr>(&v.v);
-  if (!lp || !*lp)
-    return;
-  const std::vector<value_t> &lst = **lp;
-  if (!lst.empty()) {
-    if (const auto *head = std::get_if<symbol>(&lst[0].v)) {
-      if ((head->name == "msg-send" || head->name == "msg-recv" || head->name == "msg-pending") &&
-          lst.size() >= 2)
-        if (const auto *s = std::get_if<std::string>(&lst[1].v))
-          out.push_back(*s);
+  struct open_list {
+    const std::vector<value_t> *elems;
+    std::size_t next;
+  };
+  std::vector<open_list> stack;
+  auto enter = [&](const value_t &e) {
+    const auto *lp = std::get_if<list_ptr>(&e.v);
+    if (!lp || !*lp)
+      return;
+    const std::vector<value_t> &lst = **lp;
+    if (!lst.empty()) {
+      if (const auto *head = std::get_if<symbol>(&lst[0].v)) {
+        if ((head->name == "msg-send" || head->name == "msg-recv" || head->name == "msg-pending") &&
+            lst.size() >= 2)
+          if (const auto *s = std::get_if<std::string>(&lst[1].v))
+            out.push_back(*s);
+      }
     }
+    stack.push_back({&lst, 0});
+  };
+  enter(v);
+  while (!stack.empty()) {
+    open_list &top = stack.back();
+    if (top.next == top.elems->size()) {
+      stack.pop_back();
+      continue;
+    }
+    enter((*top.elems)[top.next++]); // may push, invalidating top
   }
-  for (const value_t &e : lst)
-    collect_channel_refs(e, out, depth + 1);
 }
 // Collect static channel refs from one script string. Only an s-expr (a program, first non-space
 // '(') can hold a msg-* call; a bare event name or empty script has none. A syntactically-invalid
@@ -1968,7 +1981,7 @@ void refs_from_script(const std::string &script, std::vector<std::string> &out) 
   if (i == std::string::npos || script[i] != '(')
     return;
   try {
-    collect_channel_refs(cvc::state_exec::parse(script), out, 0);
+    collect_channel_refs(cvc::state_exec::parse(script), out);
   } catch (...) {
   }
 }

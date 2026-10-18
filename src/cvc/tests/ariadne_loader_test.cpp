@@ -3973,6 +3973,23 @@ windows:
   EXPECT_NE(r.error.find("other.chan"), std::string::npos);
 }
 
+TEST(AriadneChannelLint, SeesChannelsNestedAnyDepth) {
+  // The lint walks a script on a heap stack, so a reference 1000 levels down is still checked
+  // (it used to stop at 256).
+  SKIP_WITHOUT_YAML();
+  const int n = 1000;
+  std::string on;
+  for (int i = 0; i < n; ++i)
+    on += "(begin ";
+  on += "(msg-send \"deep.chan\" \"x\")";
+  on += std::string(n, ')');
+  LoadResult r = load_string("channels:\n  - nav.done\nwindows:\n  - window: W\n    children:\n"
+                             "      - button: Go\n        on: '" +
+                             on + "'\n");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("deep.chan"), std::string::npos) << r.error;
+}
+
 TEST(AriadneChannelLint, DeclaredChannelPasses) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

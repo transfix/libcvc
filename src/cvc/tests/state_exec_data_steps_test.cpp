@@ -573,6 +573,40 @@ TEST_F(DataStepsScheduler, BudgetUsageAndInspectReportTheKinds) {
   EXPECT_GT(info->data_time, 0.0);
 }
 
+TEST_F(DataStepsScheduler, StateSetOfADeepValueSlices) {
+  async_scheduler sched;
+  sched.set_watch_root(&root);
+  root("state_exec.defaults.data.step_nodes").value("16");
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  ictx.sched = &sched;
+  ictx.root = &root;
+  ictx.tracker = &tracker;
+  auto env = builtins::make_default_environment();
+  register_intrinsics(env, &ictx);
+  execute_options opts;
+  opts.env = env;
+  const int pid =
+      sched.execute(std::string("(begin (set a 1) (set i 0)"
+                                " (while (< i 300) (begin (set a (list a)) (set i (+ i 1))))"
+                                " (state-set \"deep.text\" a) (state-set \"deep.n\" 7)"
+                                " (state-get \"deep.text\"))"),
+                    opts);
+  // The list prints a slice per step, and the node is written once the whole string is ready.
+  while (sched.get_process_info(pid)->data_steps == 0)
+    sched.sync_step();
+  EXPECT_EQ(root.findDescendant("deep.text"), nullptr);
+  sched.sync_run();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info);
+  EXPECT_EQ(info->status, process_status::terminated);
+  EXPECT_EQ(root("deep.text").value(), to_string(nested_list(300)));
+  EXPECT_EQ(root("deep.n").value(), "7");
+  EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v), root("deep.text").value());
+  EXPECT_GE(info->data_steps, 300u / 16 - 1);
+  EXPECT_GE(info->data_nodes, 300u);
+}
+
 // ---- state-json / state-from-json ------------------------------------------------------
 //
 // cvc::state::json() and json(j) as data jobs: the same writer and reader (state_json.h), a

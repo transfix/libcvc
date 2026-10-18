@@ -201,7 +201,7 @@ app = pycvc.make_app()
 ex = pycvc.Exec(app)
 ex.run("(+ 1 2)")                                     # "3"
 
-pycvc.parse_options()                                 # max_depth 256, step_tokens 0
+pycvc.parse_options()                                 # max_depth 100000, step_tokens 0
 pycvc.async_scheduler.host_parser_defaults()          # step_tokens 1024
 ex.parser_defaults()                                  # == host_parser_defaults()
 pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "64")  # tree overrides

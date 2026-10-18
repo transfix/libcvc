@@ -96,7 +96,7 @@ const std::vector<grammar_case> &cases() {
       {"P2", "reserved", mode::all, "a\\b", "!error"},
       {"P2", "single_datum", mode::one, "1 2", "!error"},
       {"P2", "quoted", mode::all, "'", "!error"},
-      {"P1b", "list", mode::all, nest(257), "!error"},
+      {"P1b", "list", mode::all, nest(100001), "!error"},
       {"P2", "line_end line_comment", mode::all, "; c\r1", "1"},
       {"P2", "radix_integer hex_digits", mode::all, "0x1F 0X1f #x1F #X1f 0xFF_FF",
        "31\n31\n31\n31\n65535"},

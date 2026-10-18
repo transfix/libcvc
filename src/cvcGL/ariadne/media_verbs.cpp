@@ -105,23 +105,34 @@ bool as_bool(const se::value_t *v, bool def) {
 // rate/ch/frames come from the caller (matched to the stream's open); every source here produces
 // frames*ch*4 bytes. A device microphone is NOT built here — it is SDL/cvcGL and is handled at the
 // top level of stream-capture-audio.
+//
+// A built graph pulls each chunk through one native call per mix/gain level on the producer
+// thread (fill() calls its inputs' fill()), and frees itself the same way, so at most
+// kMaxAudioGraphDepth mix/gain levels may nest. A deeper SPEC builds nothing and sets `too_deep`.
+// `depth` is how many mix/gain levels are above `spec`.
+constexpr int kMaxAudioGraphDepth = 64;
 std::unique_ptr<sx::frame_source> build_audio_source(const se::value_t &spec, int rate, int ch,
-                                                     int frames) {
+                                                     int frames, bool &too_deep, int depth = 0) {
+  if (depth > kMaxAudioGraphDepth) {
+    too_deep = true;
+    return nullptr;
+  }
   if (const se::value_t *m = dict_get(spec, "mix")) {
     std::vector<std::unique_ptr<sx::frame_source>> ins;
     if (const se::list_ptr *lp = std::get_if<se::list_ptr>(&m->v))
       if (*lp)
         for (const se::value_t &e : **lp)
-          if (std::unique_ptr<sx::frame_source> in = build_audio_source(e, rate, ch, frames))
+          if (std::unique_ptr<sx::frame_source> in =
+                  build_audio_source(e, rate, ch, frames, too_deep, depth + 1))
             ins.push_back(std::move(in));
-    if (ins.empty())
+    if (ins.empty() || too_deep)
       return nullptr;
     return std::make_unique<sx::mix_source>(std::move(ins), rate, ch, frames);
   }
   if (const se::value_t *g = dict_get(spec, "gain")) {
     const se::value_t *in = dict_get(*g, "in");
     std::unique_ptr<sx::frame_source> inner =
-        in ? build_audio_source(*in, rate, ch, frames) : nullptr;
+        in ? build_audio_source(*in, rate, ch, frames, too_deep, depth + 1) : nullptr;
     if (!inner)
       return nullptr;
     return std::make_unique<sx::gain_source>(std::move(inner), ch, frames,
@@ -279,8 +290,12 @@ void register_media_intrinsics() {
                        "pass a tone/gain/mix graph for a hardware-free source");
 #endif
           } else {
+            bool too_deep = false;
             source = build_audio_source(spec ? *spec : se::value_t(), static_cast<int>(rate),
-                                        static_cast<int>(chn), static_cast<int>(frames));
+                                        static_cast<int>(chn), static_cast<int>(frames), too_deep);
+            if (too_deep)
+              return err("stream-capture-audio: the audio graph nests mix/gain more than " +
+                         std::to_string(kMaxAudioGraphDepth) + " levels deep");
           }
           if (!source)
             return err("stream-capture-audio: empty or invalid audio graph");
