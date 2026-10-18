@@ -104,13 +104,31 @@ def test_conversion_is_strict():
     _raises(TypeError, pycvc.to_string, {1: 2})  # dict keys must be str
     _raises(OverflowError, pycvc.to_string, 2**70)
     _raises(TypeError, pycvc.to_string, {1, 2})  # a set has no state_exec equivalent
-    deep = []
-    for _ in range(1100):
-        deep = [deep]
-    _raises(ValueError, pycvc.to_string, deep)
     loop = []
     loop.append(loop)
-    _raises(ValueError, pycvc.to_string, loop)
+    _raises(ValueError, pycvc.to_string, loop)  # only the evaluator's own cycles are collected
+
+
+def test_conversion_takes_any_depth_and_keeps_sharing():
+    # The conversion walks with an explicit stack, so a value nests any depth, both ways: here
+    # Python -> C++ (the quoted argument) -> Python (the result), 200000 deep.
+    deep = []
+    for _ in range(200000):
+        deep = [deep]
+    ev = pycvc.stackless_evaluator(pycvc.builtins.make_default_environment())
+    back = ev.evaluate([symbol("quote"), deep])
+    depth = 0
+    while back:
+        (back,) = back
+        depth += 1
+    assert depth == 200000
+    # A list shared within a value stays one object, both ways.
+    shared = [1, 2]
+    pair = ev.evaluate([symbol("quote"), [shared, shared]])
+    assert pair[0] is pair[1] and pair[0] == [1, 2]
+    # A DSL list that holds itself comes out as a Python list that holds itself.
+    looped = ev.evaluate_script("(begin (set l (list 1)) (set-nth l 0 l) l)")
+    assert looped[0] is looped
 
 
 def test_registered_fns_get_symbols_and_strict_returns():
