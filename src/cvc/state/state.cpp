@@ -414,6 +414,63 @@ state &state::hidden(bool h) {
 }
 
 // ---------------
+// state::property
+// ---------------
+// Purpose:
+//   Named metadata on this node (see state.h): a key's value, "" when unset; and setting it,
+//   "" removing it. Unlike the comment, a property does not initialize the node.
+std::string state::property(const std::string &key) {
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_mutex);
+  const auto it = _properties.find(key);
+  return it == _properties.end() ? std::string() : it->second;
+}
+
+state &state::property(const std::string &key, const std::string &value) {
+  boost::this_thread::interruption_point();
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    const auto it = _properties.find(key);
+    if (value.empty()) {
+      if (it == _properties.end())
+        return *this; // nothing to remove
+      _properties.erase(it);
+    } else {
+      if (it != _properties.end() && it->second == value)
+        return *this; // do nothing if equal
+      _properties[key] = value;
+    }
+    _lastMod = boost::posix_time::microsec_clock::universal_time();
+  }
+  propertyChanged(key);
+  if (parent())
+    parent()->emitChildChanged(name());
+  return *this;
+}
+
+bool state::has_property(const std::string &key) {
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_mutex);
+  return _properties.count(key) > 0;
+}
+
+std::vector<std::string> state::property_keys() {
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_mutex);
+  std::vector<std::string> keys;
+  keys.reserve(_properties.size());
+  for (const auto &p : _properties)
+    keys.push_back(p.first);
+  return keys;
+}
+
+std::map<std::string, std::string> state::properties() {
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_mutex);
+  return _properties;
+}
+
+// ---------------
 // state::readOnly
 // ---------------
 // Purpose:
@@ -588,6 +645,7 @@ void state::reset(bool resetChildren, bool fireCallbacks) {
     n._valueTypeName = std::string();
     n._data = boost::any();
     n._comment = std::string();
+    n._properties.clear();
     n._hidden = false;
     n._initialized = false;
   };

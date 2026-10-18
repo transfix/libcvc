@@ -40,6 +40,7 @@
 #include <cvc/core/exception.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/types.h>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -519,6 +520,18 @@ public:
   state &readOnly(bool ro);
   signal readOnlyChanged;
 
+  // Named metadata beside the comment: strings keyed by name, such as a recommended "min" and
+  // "max" or a "unit", for other applications to read (a UI's slider, a validator). They are not
+  // the value and do not constrain it. property() of a key that is not set is "". Setting a
+  // property to "" removes it. propertyChanged fires with the key. Like the comment, properties
+  // replicate (state_mutation_op::set_property) and travel in snapshots, and reset() clears them.
+  std::string property(const std::string &key);
+  state &property(const std::string &key, const std::string &value);
+  bool has_property(const std::string &key);
+  std::vector<std::string> property_keys();
+  std::map<std::string, std::string> properties();
+  map_change_signal propertyChanged;
+
   // State name validation and sanitization
   static bool isValidStateName(const std::string &name);
   static std::string sanitizeStateName(const std::string &name);
@@ -844,6 +857,7 @@ protected:
   std::string _valueTypeName;
   boost::any _data;
   std::string _comment;
+  std::map<std::string, std::string> _properties;
   bool _hidden;
   bool _readOnly;
   child_map _children;

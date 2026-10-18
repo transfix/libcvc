@@ -19,7 +19,8 @@ enum class state_mutation_op {
   reset_node,
   delete_subtree,
   delegate_subtree,
-  revoke_delegation
+  revoke_delegation,
+  set_property // type_name is the property's key, string_value its value ("" removes it)
 };
 
 enum class state_payload_kind { none, inline_bytes, blob };
