@@ -65,14 +65,30 @@ struct eval_frame {
   environment_ptr extra_env;
 };
 
-/// Deep-data work a step left unfinished (data_options::step_nodes): a native call's job (its
-/// frame waits in the apply phase) or the expansion of a macro call (its frame waits to be
-/// re-initialized with it).
+/// Deep-data work a step left unfinished (data_options::step_nodes, or a job waiting on a call):
+/// a native call's job (its frame waits in the apply phase), the expansion of a macro call (its
+/// frame waits to be re-initialized with it), or a measurement of the process's heap that its
+/// scheduler started between two steps (heap.h; its result goes to
+/// evaluator_state::heap_measured, and evaluation resumes where it was).
 struct pending_data_work {
-  enum class kind { native_call, macro_expansion };
+  enum class kind { native_call, macro_expansion, heap_measure };
   std::unique_ptr<data_job> job;
   std::function<value_t(value_t)> then; // native_call: turns the job's result into the call's
   kind what = kind::native_call;
+  /// The stack size when the work began. The frame waiting on it is stack[base - 1]; a DSL
+  /// function the job calls runs in the frames above it.
+  std::size_t base = 0;
+  /// How many values the waiting frame held then: the call's arguments, which a restore runs
+  /// the call with again.
+  std::size_t frame_args = 0;
+  /// Set while a DSL function the job called runs; its value arrives on the waiting frame, and
+  /// `return`/`break` in it unwind no further than that frame.
+  bool calling = false;
+  /// The work this work runs inside of, if any: the job of a call that was waiting on a DSL
+  /// function when this work began, or (feeds_outer) the job whose native call left this work.
+  std::shared_ptr<pending_data_work> outer;
+  /// The result is the value of a call outer's job made, not the waiting frame's.
+  bool feeds_outer = false;
 };
 
 /// Serializable evaluator state — the entire execution snapshot.
@@ -92,13 +108,17 @@ struct evaluator_state {
   /// it). 0 does all of it in the step that needs it.
   std::size_t data_step_nodes = 0;
   /// Set while deep-data work runs a slice per step; step() runs it instead of evaluating until
-  /// it is done, then completes what started it. Not serialized: after a restore the waiting
-  /// call or macro expansion simply runs again.
+  /// it is done (except while a DSL function it called runs), then completes what started it.
+  /// The innermost work; pending_data_work::outer chains the rest. Not serialized: after a
+  /// restore the call or macro expansion waiting on the outermost work simply runs again.
   std::shared_ptr<pending_data_work> data_work;
   /// Last owners this state's steps dropped and have not freed yet (data_step_nodes > 0); each
   /// step frees them with what is left of its slice, and steps that only free them follow
   /// while any are left.
   std::shared_ptr<detail::release_backlog> backlog;
+  /// A heap measurement's result in bytes, once its data steps finish; the scheduler that started
+  /// it takes it from here. Not serialized.
+  std::optional<uint64_t> heap_measured;
 };
 
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
@@ -114,6 +134,9 @@ struct evaluator_state {
 class stackless_evaluator {
 public:
   explicit stackless_evaluator(environment_ptr global_env);
+
+  /// The global environment new states extend (the cycle collector walks it from a generator).
+  const environment_ptr &global_env() const { return global_env_; }
 
   /// Create a fresh evaluator_state from a parsed expression.
   evaluator_state create_state(const value_t &expr, environment_ptr env = nullptr);
@@ -202,6 +225,8 @@ private:
   // Helpers
   void call_closure(evaluator_state &state, eval_frame &frame, const closure_ptr &cls,
                     const std::vector<value_t> &args);
+  // Push the frame that evaluates `cls`'s body in `local` (its parameters already bound).
+  void push_closure_body(evaluator_state &state, const closure_ptr &cls, environment_ptr local);
   void handle_defclass(evaluator_state &state, eval_frame &frame, const std::vector<value_t> &args);
 
   environment_ptr global_env_;

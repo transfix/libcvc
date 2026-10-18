@@ -134,6 +134,16 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 **OOP:** `send` (method dispatch), `apply`
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
+`apply`, `send` and `collections.map`/`filter`/`reduce` call a native function or a DSL
+function alike. A DSL function runs as the program's own frames on the same evaluator
+(`call_function()` in `data_job.h`; see §11, "Sliced work"):
+
+```lisp
+(apply (lambda (a b) (* a b)) (list 6 7))        ;; => 42
+(set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))
+(send o "inc" 41)                                ;; => 42
+```
+
 #### Type Conversion
 
 ```lisp
@@ -819,12 +829,69 @@ Set via `execute_options` at submission time or adjusted at runtime:
 execute_options opts;
 opts.max_steps         = 10000;     // evaluator steps
 opts.max_time          = 5.0;       // wall time in seconds
-opts.max_memory        = 1048576;   // bytes (tracked by memory_tracker)
+opts.max_memory        = 1048576;   // bytes: state-tree writes + the measured heap share
 opts.max_messages      = 100;       // outbound msg-send calls
 opts.max_message_bytes = 65536;     // total outbound payload bytes
 ```
 
 When a limit is exceeded, the process is killed (status becomes `killed`).
+
+### Memory: state-tree writes and the measured heap
+
+`max_memory` covers two things:
+- what the process wrote to the state tree, counted by the scheduler's `memory_tracker`;
+- its share of the values it holds in memory (lists, dicts, strings, closures, environments),
+  measured by walking what it can reach (`heap.h`).
+
+A value can be shared between processes. A broadcast message is one dict held by every
+receiver, and a forked child shares its parent's lists. So a process pays its **share** of each
+node it reaches: the node's size × (its references ÷ the node's owner count), and a node passes
+its share on to the nodes it holds. Summed over all holders, a node's shares come to its size: a
+1 MB message held by 50 residents costs each about 20 KB, and as holders drop it, those left pay
+more at their next measurement.
+
+A measurement is the process's own deep-data work, run a slice per step like other data work
+(`data.step_nodes`) and counted against its steps and time. One starts after a step when any of
+these holds:
+
+- natives have reported allocating 64 KiB, or half the last measurement if that is more, since
+  the last one (the functions with an allocation check, §11, plus copies like `cons` and
+  `slice`);
+- what they reported could cross the remaining budget;
+- `limits.heap_check_steps` steps have passed (default 4096; `0` = only the two above).
+
+The kill decision always uses an actual measurement, never the reported bytes, so temporaries a
+program drops don't count. Only a process with `max_memory > 0` is measured.
+`process_info::heap_memory` and `heap_measurements` report the last measurement. The per-step
+allocation limit (§11) takes what is left after state-tree writes and the measured heap.
+
+### Reference cycles
+
+Values are reference counted, and reference counting can't free a cycle. These all leaked their
+whole scope, with everything in it, before the collector existed:
+- a closure bound in the scope it captured: every `defun`, `(set f (lambda …))`, a `let`-local
+  recursive lambda;
+- a class, whose methods capture the scope the class is bound in;
+- a container that holds itself, as after `(append l l)`.
+
+`collect_cycles()` (`heap.h`) finds the cycles nothing outside them holds, the way CPython does:
+- It tracks the environments that closures, generators and class methods capture, and the
+  containers changed in place to hold another container (`append`, `set-nth`, `set-attr`). Only
+  those can close a cycle.
+- It counts the references these objects (and everything they reach) make to each other. Anything
+  with more owners than that is held from outside: by a live process, a host (pycvc's `Exec`, an
+  Ariadne action context), or anything else. Such an object stays, along with everything it
+  reaches.
+- What is left is garbage. Clearing it lets it free.
+
+Both schedulers collect between steps once a thread has tracked as many new objects as survived
+the last collection, and at least an eighth as many as it walked (at least 256). That keeps a
+collection's cost proportional to what was tracked since the last one. They also collect at most
+a second after a process ended. A finished
+process also releases its evaluation state right away (`process::release_state`; result, error
+and statistics stay), so what it leaked can be collected before the process is reaped. Tracking
+is per thread. A host that runs evaluators without a scheduler calls `collect_cycles()` itself,
+between steps; inside a step it does nothing.
 
 ### Cluster-Level Resource Policy
 
@@ -890,6 +957,7 @@ sched.load_settings();         // read and apply settings
 |---------|-------------------|-------------|---------|
 | `max_pending_messages` | `state_exec.schedulers.<id>.max_pending_messages` | `state_exec.defaults.max_pending_messages` | `1024` |
 | `limits.max_alloc_bytes` | `state_exec.schedulers.<id>.limits.max_alloc_bytes` | `state_exec.defaults.limits.max_alloc_bytes` | `16777216` ([§11](#allocation-limit)) |
+| `limits.heap_check_steps` | `state_exec.schedulers.<id>.limits.heap_check_steps` | `state_exec.defaults.limits.heap_check_steps` | `4096` ([heap](#memory-state-tree-writes-and-the-measured-heap)) |
 
 ```cpp
 // Set a global default for all schedulers
@@ -910,6 +978,7 @@ configuration back to the state tree:
 
 - `state_exec.schedulers.<id>.max_pending_messages` — the resolved cap
 - `state_exec.schedulers.<id>.limits.max_alloc_bytes` — the resolved per-call allocation limit
+- `state_exec.schedulers.<id>.limits.heap_check_steps` — the resolved heap re-measure interval
 - `state_exec.schedulers.<id>.policy` — `"round_robin"`, `"priority"`, or `"priority_rr"`
 
 ---
@@ -1340,11 +1409,11 @@ mine.import_module("geo", env, {"geo.area"});         // or a subset
 
 ### Allocation limit
 
-A native call builds its whole result inside one evaluator step. The per-process
-`max_memory` check runs between steps and counts only state-tree writes, so it cannot see
-`(collections.range 1000000000)`. Each function whose result can be larger than all of its
-arguments therefore estimates the result's size and fails before allocating when it is over
-the limit:
+The per-process `max_memory` check runs between steps, and the heap it counts is measured after
+the fact (§7), so neither can stop `(collections.range 1000000000)` from allocating. Each
+function whose result can be larger than all of its arguments therefore works out the result's
+size and fails before building it when it is over the limit. A sliced function (next section)
+checks as soon as it has counted, before it builds anything. The checked functions are:
 
 - `string.split`, `string.join`, `string.replace`, `bytes.concat`;
 - `collections.range`, `collections.zip`, `collections.flatten`, `collections.dict-merge`;
@@ -1353,7 +1422,8 @@ the limit:
 The limit for a step is the tighter of two values:
 
 1. the tree setting `limits.max_alloc_bytes` (table below; `0` means no limit of its own);
-2. what is left of the process's `max_memory`, when it has one.
+2. what is left of the process's `max_memory`, when it has one: after its state-tree writes and
+   its last measured heap share (§7).
 
 | Setting | Per-scheduler path | Global path | Default |
 |---------|-------------------|-------------|---------|
@@ -1373,24 +1443,56 @@ process with it as the exit error; the sync scheduler's `run()` throws it:
 ;;        16777216 bytes (limits.max_alloc_bytes, or what is left of max_memory)
 ```
 
-`collections.unique` and `collections.dict-merge` are quadratic, so they also poll the
-evaluation deadline (`max_time`) as they go.
+### Sliced work
+
+These functions do their work as a data job (`data_job.h`; "Deep data on the executor" in
+`docs/STATE_EXEC_GRAMMAR.md`): `string.split`, `string.join`, `string.replace`,
+`string.encode`, `bytes.slice`, `bytes.concat`, `bytes.decode` and every `collections.*`
+function.
+
+- **Slices.** A slice is `data.step_nodes` nodes: one per element visited, and one per 256
+  bytes (`kDataNodeBytes`) scanned or copied. With `data.step_nodes` = N the call does one
+  slice in its own step. The rest runs N nodes per **data step** while the call waits. Data
+  steps count against `max_steps` and `max_time`, and other processes run between them. A call
+  that fits in one slice takes no extra step.
+- **Defaults.** The app's exec scheduler, pycvc's `Exec` and Ariadne predicates slice 1024
+  nodes a step (`async_scheduler::host_data_defaults()`). With 0, the sync scheduler's default,
+  the work runs whole in the call's step.
+- **Calls.** `collections.map`, `filter` and `reduce` hand each call of their function to the
+  evaluator running the program, and so do the builtins `apply` and `send`. A native function
+  is called inside the data step. A DSL function runs as the process's own frames, so its
+  body's steps are eval steps. The job goes on in the data step after it returns, even with
+  `data.step_nodes` = 0. Another native function can do the same with
+  `call_function(fn, args, who)`.
+- **Cost.** `collections.sort` is a stable merge sort, n log n nodes.
+  `collections.unique` costs a node per comparison, and compares lists and dicts with a sliced
+  equality walk. `collections.dict-merge` keeps a key index, so it is linear. Every job polls the
+  evaluation deadline (`max_time`) about every 64 nodes.
+- **While a call runs.** Signals and watch events wait until the call is done, and `fork`
+  returns -1. A snapshot taken during it restores to the call's start: the call runs again, and
+  calls its function again from the first element.
+- **Measured** (`state_exec_bench_test` `StdlibJobThroughput`, 1024-node steps, MSVC Release):
+  - about 5-20 ns a node for split, join, replace and sort;
+  - about 200-370 ns a node for a 256-byte copy such as `string.encode`, including first-touch
+    page faults;
+  - about 60 ns an element for `collections.map` with a native function, and about 400 ns with
+    `(lambda (x) x)`, whose body's eval steps are included.
 
 ### In Ariadne predicates
 
 A per-frame predicate (`visible_when`, `bind`, `fmt`, …) runs in a reduced environment. It
-gets the stdlib functions whose result is a scalar or no bigger than their argument:
+gets every stdlib function except `math.random`, which would make a predicate
+nondeterministic.
 
-- `string.length`, `string.byte-length`, `string.char-at`, `string.substring`,
-  `string.upper`, `string.lower`, `string.trim`, `string.starts-with`, `string.ends-with`,
-  `string.contains`;
-- `bytes.length`, `bytes.byte-at`;
-- every `math.*` function except `math.random`, which would make a predicate
-  nondeterministic.
+The materializers are safe there because their work is sliced. The step and time caps are
+checked between steps, and a predicate always slices: it uses the app tree's
+`state_exec.defaults.data.step_nodes`, with 1024 for 0 or unset. A huge call is cut by the caps
+(fail-safe, with a warning) instead of stalling the frame, and each call stays under the 16 MiB
+allocation limit.
 
-The rest (`string.join`/`replace`/`split`/`encode`, `bytes.slice`/`concat`/`decode` and all of
-`collections.*`) are unbound in a predicate until they run as scheduled work, a slice per
-step. The `init:` and action lanes get every function.
+A function a predicate passes to `collections.map`, `filter` or `reduce` runs on the
+predicate's own evaluator. The special-form gate, the reduced environment and the caps cover
+its body too. The `init:` and action lanes get every function.
 
 ### Module: `string` (14 functions)
 
@@ -1450,17 +1552,22 @@ text and bytes.
 
 ### Module: `collections` (12 functions)
 
-`collections.map`, `filter` and `reduce` take the list first, then a native function: a
-builtin or a stdlib function. A DSL `lambda` is not accepted yet; it needs the scheduled-work
-mechanism above.
+`collections.map`, `filter` and `reduce` take the list first, then a function. It can be a
+builtin, a stdlib function, a host function (pycvc's `register_fn`) or a DSL function
+(`lambda`, `defun`). A DSL function runs as the program's own steps (see Sliced work), and
+`return` in it returns from it. C++ that calls the registry's function directly, with no
+running program, can pass only a native function.
 
 ```lisp
 (collections.map (list 1 4 9) math.sqrt)          ;; => (1 2 3)
+(collections.map (list 1 2 3) (lambda (x) (* x x))) ;; => (1 4 9)
 (collections.filter (list 1 "a" 2) is-int)        ;; => (1 2)
+(collections.filter (list 1 2 3 4) (lambda (x) (= (% x 2) 0))) ;; => (2 4)
 (collections.reduce (list 1 2 3) + 0)             ;; => 6
+(collections.reduce (list 1 2 3) (lambda (acc x) (+ acc (* x x))) 0) ;; => 14
 (collections.zip (list 1 2) (list "a" "b"))       ;; => ((1 "a") (2 "b"))
 (collections.flatten (list (list 1 2) 3 (list 4))) ;; => (1 2 3 4)   one level
-(collections.sort (list 3 1 2))                   ;; => (1 2 3)
+(collections.sort (list 3 1 2))                   ;; => (1 2 3)   numbers by value, strings by bytes; stable
 (collections.reverse (list 1 2 3))                ;; => (3 2 1)
 (collections.range 1 5)                           ;; => (1 2 3 4)
 (collections.range 5 0 -2)                        ;; => (5 3 1)

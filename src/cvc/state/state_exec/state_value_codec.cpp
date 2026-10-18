@@ -5,6 +5,7 @@
                       cvc::state subtrees.
 */
 
+#include <algorithm>
 #include <charconv>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/parser.h>
@@ -673,11 +674,31 @@ void encode_evaluator_state(cvc::state &node, const evaluator_state &es) {
   // Done flag
   node("done").value(std::string(es.done ? "1" : "0"));
 
-  // Frame stack
+  // Frame stack. Deep-data work in flight is not kept (see data_step_nodes below), and the frame
+  // waiting on the outermost work runs its call again after a restore: the frames of DSL
+  // functions that work called are left out, and the frame keeps only its arguments.
   {
+    // A heap measurement waits on no frame, so it never shortens the stack.
+    std::size_t keep = es.stack.size();
+    std::size_t frame_args = 0;
+    bool trims = false;
+    for (const pending_data_work *w = es.data_work.get(); w; w = w->outer.get()) {
+      if (w->what == pending_data_work::kind::heap_measure)
+        continue;
+      keep = std::min(w->base, es.stack.size());
+      frame_args = w->frame_args;
+      trims = true;
+    }
     state_list sl(node("stack"));
-    for (auto &f : es.stack)
-      encode_frame(sl.push_back(), f);
+    for (std::size_t i = 0; i < keep; ++i) {
+      if (i + 1 == keep && trims && es.stack[i].results.size() > frame_args) {
+        eval_frame waiting = es.stack[i];
+        waiting.results.resize(frame_args);
+        encode_frame(sl.push_back(), waiting);
+      } else {
+        encode_frame(sl.push_back(), es.stack[i]);
+      }
+    }
   }
 
   // Global environment

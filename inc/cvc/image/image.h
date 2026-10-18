@@ -139,6 +139,12 @@ void write_image(const image &img, const std::string &path, int quality = 90);
 // lower-cased file extension without the dot ("" if none).
 std::string image_file_extension(const std::string &path);
 
+// Initialize ImageMagick, once, after pointing it at its coder modules and config. On Windows a
+// cvcpkg ImageMagick is extracted rather than installed, so until then it has no coders at all,
+// not even xc:. read_image/write_image call this themselves; code that uses Magick++ directly
+// calls it first. A no-op in a build without ImageMagick.
+void init_imagemagick();
+
 } // namespace cvc
 
 #endif // __CVC_IMAGE_H__

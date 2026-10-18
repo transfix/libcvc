@@ -674,41 +674,41 @@ boost::property_tree::ptree state::ptree() {
 
   boost::this_thread::interruption_point();
 
-  // One level: an entry per node, keyed by its full name, in pre-order (children in name order),
+  // One level: an entry per node, keyed by its path relative to this node ("" for this node
+  // itself), the paths operator() and ptree(pt) take, so ptree(ptree()) on any node gives back
+  // its subtree and another node's ptree(pt) copies it there. Pre-order (children in name order),
   // holding the node's value -- or "" for a node other than this one with neither a value nor
-  // children. Those are exactly the leaves, in order, of the nested tree this used to build (each
-  // child's subtree under its full name, a node's value first), and the loader below reads both
-  // the same way. boost's ptree and its JSON writer and parser recurse once per nesting level, so
-  // with one level, building this, writing it as JSON, reading it back, copying and destroying it
-  // no longer recurse once per state level. A heap stack of levels; each node's value and
-  // children are snapshotted under its own lock, released before going down, and a child's full
-  // name is carried down as in children().
+  // children. For the root, relative paths are full names, as they always were. boost's ptree and
+  // its JSON writer and parser recurse once per nesting level, so with one level, building this,
+  // writing it as JSON, reading it back, copying and destroying it don't recurse once per state
+  // level. A heap stack of levels; each node's value and children are snapshotted under its own
+  // lock, released before going down, and a child's path is its parent's, a separator and its
+  // name, carried down.
   struct level {
-    std::vector<std::pair<state_ptr, std::string>> kids; // with their full names
+    std::vector<std::pair<state_ptr, std::string>> kids; // with their relative paths
     std::size_t next = 0;
   };
   const char *const fn = BOOST_CURRENT_FUNCTION;
-  const auto open = [&pt, fn, this](state &n, const std::string &n_full, bool top) {
+  const auto open = [&pt, fn, this](state &n, const std::string &n_rel, bool top) {
     level l;
     std::string v;
-    const std::string &base = n._name.empty() ? std::string() : n_full;
     {
       boost::mutex::scoped_lock lock(n._mutex);
       v = n._value;
       l.kids.reserve(n._children.size());
       for (const child_map::value_type &kv : n._children)
         if (kv.second)
-          l.kids.emplace_back(kv.second, base.empty() ? kv.first : base + SEPARATOR + kv.first);
+          l.kids.emplace_back(kv.second, n_rel.empty() ? kv.first : n_rel + SEPARATOR + kv.first);
     }
-    _ctx.log(6, boost::str(boost::format("%s :: %s = %s\n") % fn % n_full % v));
+    _ctx.log(6, boost::str(boost::format("%s :: %s = %s\n") % fn % n_rel % v));
     if (!v.empty())
-      pt.push_back(property_tree::ptree::value_type(n_full, property_tree::ptree(v)));
+      pt.push_back(property_tree::ptree::value_type(n_rel, property_tree::ptree(v)));
     else if (!top && l.kids.empty())
-      pt.push_back(property_tree::ptree::value_type(n_full, property_tree::ptree()));
+      pt.push_back(property_tree::ptree::value_type(n_rel, property_tree::ptree()));
     return l;
   };
   std::vector<level> stack;
-  stack.push_back(open(*this, fullName(), true));
+  stack.push_back(open(*this, std::string(), true));
   while (!stack.empty()) {
     level &l = stack.back();
     if (l.next == l.kids.size()) {
@@ -732,14 +732,16 @@ boost::property_tree::ptree state::ptree() {
 // 03/16/2012 -- Joe R. -- Creation.
 namespace {
 // Deserialize helper. state::ptree() (the serializer above) keys every node by
-// its FULL dotted path from the root. It writes one level now, but it used to
-// NEST the subtrees, so in documents written before, a node's value and its
-// descendants live one or more levels deep. An older loop here set only the
-// top-level entries and dropped every nested child, so json()/restore()/from_json
-// round-trips silently lost the whole subtree (only the shallowest nodes
-// survived). Because every key is a full path from the root, one walk over every
-// entry at every level restores either form: for each entry that carries a scalar
-// value, set it at its full-path key from `root`. Pre-order, with a heap stack of
+// its dotted path relative to the node it was called on, and this sets each value
+// at its key relative to `root`, the node it is called on, so the two round-trip
+// on any node. Older versions keyed by the FULL path from the root (the same keys,
+// for a document of the root) and NESTED the subtrees, so in documents written
+// before, a node's value and its descendants live one or more levels deep. An
+// older loop here set only the top-level entries and dropped every nested child,
+// so json()/restore()/from_json round-trips silently lost the whole subtree (only
+// the shallowest nodes survived). Because every key is a whole path, one walk over
+// every entry at every level restores either form: for each entry that carries a
+// scalar value, set it at its key from `root`. Pre-order, with a heap stack of
 // positions rather than a call per nesting level.
 void apply_state_ptree(cvc::state &root, const boost::property_tree::ptree &pt) {
   using ptree = boost::property_tree::ptree;

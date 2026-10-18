@@ -1,12 +1,17 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h> // the sliced work of the materializers
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: codepoint-correct length/index/slice
+#include <memory>
 #include <numeric>
 #include <random>
+#include <span>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
+#include <unordered_map>
 
 namespace cvc::state_exec {
 
@@ -55,12 +60,6 @@ double as_number(const value_t &v, const char *name) {
   throw std::runtime_error(std::string(name) + ": expected number, got " + v.type_name());
 }
 
-const std::vector<value_t> &as_list(const value_t &v, const char *name) {
-  if (auto *p = std::get_if<list_ptr>(&v.v))
-    return **p;
-  throw std::runtime_error(std::string(name) + ": expected list, got " + v.type_name());
-}
-
 // Allocation estimates for eval_alloc_check(), saturating so a huge count never wraps small.
 std::size_t sat_add(std::size_t a, std::size_t b) { return a > SIZE_MAX - b ? SIZE_MAX : a + b; }
 
@@ -76,6 +75,895 @@ void poll_deadline(const char *name) {
     throw std::runtime_error(std::string(name) + ": evaluation exceeded time budget");
 }
 
+// A list argument by owning pointer (a null one reads as empty).
+list_ptr as_list_ptr(const value_t &v, const char *name) {
+  if (auto *p = std::get_if<list_ptr>(&v.v))
+    return *p ? *p : std::make_shared<std::vector<value_t>>();
+  throw std::runtime_error(std::string(name) + ": expected list, got " + v.type_name());
+}
+
+dict_ptr as_dict_ptr(const value_t &v, const char *name, const char *what) {
+  if (auto *p = std::get_if<dict_ptr>(&v.v))
+    return *p ? *p : std::make_shared<ordered_map>();
+  throw std::runtime_error(std::string(name) + ": " + what);
+}
+
+// A function argument: a native function or a DSL closure.
+const value_t &as_function(const value_t &v, const char *name, const char *which) {
+  if (std::holds_alternative<native_fn>(v.v) ||
+      (std::holds_alternative<closure_ptr>(v.v) && std::get<closure_ptr>(v.v)))
+    return v;
+  throw std::runtime_error(std::string(name) + ": " + which + " argument must be a function");
+}
+
+// The order collections.sort sorts by: numbers by value, strings by bytes; anything else is
+// unordered (a merge sort keeps such elements stable, whatever the comparison says).
+bool sort_less(const value_t &a, const value_t &b) {
+  if (auto *ai = std::get_if<int64_t>(&a.v)) {
+    if (auto *bi = std::get_if<int64_t>(&b.v))
+      return *ai < *bi;
+    if (auto *bd = std::get_if<double>(&b.v))
+      return static_cast<double>(*ai) < *bd;
+  }
+  if (auto *ad = std::get_if<double>(&a.v)) {
+    if (auto *bi = std::get_if<int64_t>(&b.v))
+      return *ad < static_cast<double>(*bi);
+    if (auto *bd = std::get_if<double>(&b.v))
+      return *ad < *bd;
+  }
+  if (auto *as = std::get_if<std::string>(&a.v)) {
+    if (auto *bs = std::get_if<std::string>(&b.v))
+      return *as < *bs;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Sliced work. The functions that build a result, scan a string or call a function do it as a
+// data_job (data_job.h), a slice at a time: on an evaluator that slices (data.step_nodes > 0) a
+// call spreads over as many steps as it needs, each counted against max_steps and max_time, and
+// the functions a job calls (collections.map/filter/reduce) run as the evaluator's own frames.
+// A slice is so many nodes: one per element visited, one per kDataNodeBytes bytes scanned or
+// copied. The allocation check comes first, once the result's size is known. A job reads its
+// string arguments in place during the call's own slice and copies them only if it outlives the
+// call (own_inputs); lists and dicts it holds by owning pointer and reads by index, so one
+// changed between two slices changes the answer, never memory safety.
+// ---------------------------------------------------------------------------
+
+constexpr std::size_t npos = std::string_view::npos;
+
+// One step() call's share of the work: `budget` nodes (0 = no limit), counted into the job.
+class slice {
+public:
+  slice(std::size_t &nodes, const char *who, std::size_t budget)
+      : nodes_(nodes), who_(who), budget_(budget) {}
+
+  bool spent() const { return budget_ != 0 && used_ >= budget_; }
+  // What is left for a nested walk (0 = no limit; never 0 while limited).
+  std::size_t left() const { return budget_ == 0 ? 0 : budget_ > used_ ? budget_ - used_ : 1; }
+  // How many of the next `n` bytes it covers: all without a limit, else at least one node's worth.
+  std::size_t bytes(std::size_t n) const {
+    const std::size_t nodes = left();
+    return nodes == 0 || nodes > n / kDataNodeBytes ? n : nodes * kDataNodeBytes;
+  }
+  void count(std::size_t nodes) {
+    const std::size_t before = nodes_;
+    nodes_ += nodes;
+    used_ += nodes;
+    if ((before >> 6) != (nodes_ >> 6))
+      poll_deadline(who_); // about every 64 nodes
+  }
+  void count_bytes(std::size_t n) { count((n + kDataNodeBytes - 1) / kDataNodeBytes); }
+
+private:
+  std::size_t &nodes_;
+  const char *who_;
+  std::size_t budget_;
+  std::size_t used_ = 0;
+};
+
+class stdlib_job : public data_job {
+protected:
+  explicit stdlib_job(const char *who) : who_(who) {}
+
+  slice begin(std::size_t budget) { return slice(nodes_, who_, budget); }
+
+  // Stop for `fn` applied to `args`, both the job's own (see data_job::call_request).
+  bool call(const value_t &fn, std::span<const value_t> args) {
+    call_ = call_request{&fn, args, who_};
+    return false;
+  }
+
+  // Copy what `view` still has from `from` into `store` and point it there (own_inputs).
+  static void own(std::string_view &view, std::string &store, std::size_t from = 0) {
+    store.assign(view.substr(std::min(from, view.size())));
+    view = store;
+  }
+
+  // Append `part` from `off` to `out`, a slice's worth at a time. True once all of it is in.
+  static bool append_part(std::string &out, std::string_view part, std::size_t &off, slice &sl) {
+    off = std::min(off, part.size()); // the part changed between slices
+    while (off < part.size()) {
+      if (sl.spent())
+        return false;
+      const std::size_t n = sl.bytes(part.size() - off);
+      out.append(part.substr(off, n));
+      off += n;
+      sl.count_bytes(n);
+    }
+    return true;
+  }
+
+  const char *who_;
+};
+
+// The first match of `needle` (not empty) in `hay` that starts in [pos, pos + window).
+std::size_t find_from(std::string_view hay, std::string_view needle, std::size_t pos,
+                      std::size_t window) {
+  if (pos >= hay.size())
+    return npos;
+  const std::size_t end = std::min(hay.size(), sat_add(sat_add(pos, window), needle.size() - 1));
+  const std::size_t at = hay.substr(pos, end - pos).find(needle);
+  return at == npos ? npos : pos + at;
+}
+
+// Counts the non-overlapping matches of `needle` (not empty) in `hay`, left to right.
+struct match_counter {
+  std::size_t pos = 0;
+  std::size_t count = 0;
+
+  bool run(std::string_view hay, std::string_view needle, slice &sl) {
+    while (pos < hay.size()) {
+      if (sl.spent())
+        return false;
+      const std::size_t window = sl.bytes(hay.size() - pos);
+      const std::size_t at = find_from(hay, needle, pos, window);
+      if (at == npos) {
+        pos += window;
+        sl.count_bytes(window);
+        continue;
+      }
+      sl.count_bytes(at + needle.size() - pos);
+      ++count;
+      pos = at + needle.size();
+    }
+    return true;
+  }
+};
+
+class split_job final : public stdlib_job {
+public:
+  split_job(std::string_view s, std::string_view delim)
+      : stdlib_job("string.split"), s_(s), delim_(delim) {}
+
+  void own_inputs() override {
+    own(s_, s_store_);
+    own(delim_, delim_store_);
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    if (!sized_) {
+      // Every part costs a list element, so many short parts outgrow the string: count first.
+      if (!(delim_.empty() ? count_codepoints(sl) : matches_.run(s_, delim_, sl)))
+        return false;
+      sized_ = true;
+      const std::size_t count = delim_.empty() ? codepoints_ : matches_.count + 1;
+      eval_alloc_check(sat_add(list_bytes(count), s_.size()), "string.split");
+      parts_.reserve(count);
+    }
+    return delim_.empty() ? split_codepoints(sl) : split_at_delim(sl);
+  }
+
+  value_t result() override { return make_list(std::move(parts_)); }
+
+private:
+  bool count_codepoints(slice &sl) {
+    while (pos_ < s_.size()) {
+      if (sl.spent())
+        return false;
+      const std::size_t start = pos_, end = pos_ + sl.bytes(s_.size() - pos_);
+      while (pos_ < end) {
+        char32_t cp;
+        std::size_t len;
+        utf8::decode(s_, pos_, cp, len);
+        pos_ += len;
+        ++codepoints_;
+      }
+      sl.count_bytes(pos_ - start);
+    }
+    pos_ = 0;
+    return true;
+  }
+
+  // SE-1 (A3): split into CODEPOINTS, not bytes — each element is one whole UTF-8 codepoint, so
+  // a multibyte character is never shredded into invalid fragments.
+  bool split_codepoints(slice &sl) {
+    while (pos_ < s_.size()) {
+      if (sl.spent())
+        return false;
+      char32_t cp;
+      std::size_t len;
+      utf8::decode(s_, pos_, cp, len);
+      parts_.emplace_back(std::string(s_.substr(pos_, len)));
+      pos_ += len;
+      sl.count(1);
+    }
+    return true;
+  }
+
+  bool split_at_delim(slice &sl) {
+    for (;;) {
+      if (sl.spent())
+        return false;
+      std::size_t at = npos;
+      if (scan_ < s_.size()) {
+        const std::size_t window = sl.bytes(s_.size() - scan_);
+        at = find_from(s_, delim_, scan_, window);
+        if (at == npos) {
+          scan_ += window;
+          sl.count_bytes(window);
+          if (scan_ < s_.size())
+            continue;
+        }
+      }
+      if (at == npos) {
+        parts_.emplace_back(std::string(s_.substr(start_)));
+        sl.count(1);
+        return true;
+      }
+      parts_.emplace_back(std::string(s_.substr(start_, at - start_)));
+      sl.count_bytes(at + delim_.size() - scan_);
+      sl.count(1);
+      start_ = scan_ = at + delim_.size();
+    }
+  }
+
+  std::string_view s_, delim_;
+  std::string s_store_, delim_store_;
+  bool sized_ = false;
+  match_counter matches_;
+  std::size_t codepoints_ = 0;
+  std::size_t pos_ = 0;   // codepoint splitting
+  std::size_t start_ = 0; // the part being found
+  std::size_t scan_ = 0;  // where the search for its end goes on
+  std::vector<value_t> parts_;
+};
+
+class join_job final : public stdlib_job {
+public:
+  join_job(list_ptr list, std::string_view sep)
+      : stdlib_job("string.join"), list_(std::move(list)), sep_(sep) {}
+
+  void own_inputs() override { own(sep_, sep_store_); }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    if (!sized_) {
+      for (; i_ < list_->size(); ++i_) {
+        if (sl.spent())
+          return false;
+        total_ = sat_add(total_, as_string((*list_)[i_], "string.join").size());
+        sl.count(1);
+      }
+      if (i_ > 0)
+        total_ = sat_add(total_, alloc_bytes(i_ - 1, sep_.size()));
+      eval_alloc_check(total_, "string.join");
+      out_.reserve(total_);
+      sized_ = true;
+      i_ = 0;
+    }
+    while (i_ < list_->size()) {
+      if (sl.spent())
+        return false;
+      if (i_ > 0 && !sep_done_) {
+        if (!append_part(out_, sep_, off_, sl))
+          return false;
+        sep_done_ = true;
+        off_ = 0;
+      }
+      const std::string &part = as_string((*list_)[i_], "string.join");
+      if (const std::size_t need = sat_add(out_.size(), part.size()); need > total_) {
+        eval_alloc_check(need, "string.join"); // the list grew between slices
+        total_ = need;
+      }
+      if (!append_part(out_, part, off_, sl))
+        return false;
+      sl.count(1);
+      ++i_;
+      off_ = 0;
+      sep_done_ = false;
+    }
+    return true;
+  }
+
+  value_t result() override { return value_t(std::move(out_)); }
+
+private:
+  list_ptr list_;
+  std::string_view sep_;
+  std::string sep_store_;
+  bool sized_ = false;
+  std::size_t total_ = 0;
+  std::size_t i_ = 0;
+  std::size_t off_ = 0;
+  bool sep_done_ = false;
+  std::string out_;
+};
+
+class replace_job final : public stdlib_job {
+public:
+  replace_job(std::string_view s, std::string_view from, std::string_view to)
+      : stdlib_job("string.replace"), s_(s), from_(from), to_(to) {}
+
+  void own_inputs() override {
+    own(s_, s_store_);
+    own(from_, from_store_);
+    own(to_, to_store_);
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    if (!sized_) {
+      // Non-overlapping matches, left to right. A longer `to` multiplies the size: count first.
+      if (!matches_.run(s_, from_, sl))
+        return false;
+      sized_ = true;
+      const std::size_t count = matches_.count;
+      if (count > 0) {
+        const std::size_t size =
+            sat_add(s_.size() - count * from_.size(), alloc_bytes(count, to_.size()));
+        eval_alloc_check(size, "string.replace");
+        out_.reserve(size);
+      } else {
+        out_.reserve(s_.size());
+      }
+    }
+    for (;;) {
+      if (sl.spent())
+        return false;
+      if (in_to_) {
+        if (!append_part(out_, to_, off_, sl))
+          return false;
+        in_to_ = false;
+        off_ = 0;
+        continue;
+      }
+      std::size_t at = npos;
+      if (scan_ < s_.size()) {
+        const std::size_t window = sl.bytes(s_.size() - scan_);
+        at = find_from(s_, from_, scan_, window);
+        if (at == npos) {
+          // No match starts before scan_ + window, so up to there `s` goes out as it is.
+          const std::size_t upto = std::min(s_.size(), scan_ + window);
+          out_.append(s_.substr(start_, upto - start_));
+          sl.count_bytes(upto - scan_);
+          start_ = scan_ = upto;
+          continue;
+        }
+      }
+      if (at == npos) {
+        out_.append(s_.substr(start_));
+        return true;
+      }
+      out_.append(s_.substr(start_, at - start_));
+      sl.count_bytes(at + from_.size() - scan_);
+      start_ = scan_ = at + from_.size();
+      in_to_ = true;
+    }
+  }
+
+  value_t result() override { return value_t(std::move(out_)); }
+
+private:
+  std::string_view s_, from_, to_;
+  std::string s_store_, from_store_, to_store_;
+  bool sized_ = false;
+  match_counter matches_;
+  std::size_t start_ = 0, scan_ = 0; // what of `s` is out, and where the search goes on
+  bool in_to_ = false;               // appending `to` for the match just found
+  std::size_t off_ = 0;
+  std::string out_;
+};
+
+// Copies a byte range (string.encode, bytes.slice) into a bytes value.
+class copy_job final : public stdlib_job {
+public:
+  copy_job(const char *who, std::string_view from) : stdlib_job(who), from_(from) {
+    out_.reserve(from.size());
+  }
+
+  void own_inputs() override {
+    own(from_, store_, off_);
+    off_ = 0;
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    return append_part(out_, from_, off_, sl);
+  }
+
+  value_t result() override { return make_bytes(std::move(out_)); }
+
+private:
+  std::string_view from_;
+  std::string store_;
+  std::size_t off_ = 0;
+  std::string out_;
+};
+
+class concat_job final : public stdlib_job {
+public:
+  concat_job(std::vector<std::string_view> parts, std::size_t total)
+      : stdlib_job("bytes.concat"), parts_(std::move(parts)) {
+    out_.reserve(total);
+  }
+
+  void own_inputs() override {
+    // What is still to be appended: the rest of the current part and the parts after it.
+    for (std::size_t i = next_; i < parts_.size(); ++i)
+      store_.emplace_back(parts_[i].substr(i == next_ ? std::min(off_, parts_[i].size()) : 0));
+    parts_.assign(store_.begin(), store_.end());
+    next_ = 0;
+    off_ = 0;
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    for (; next_ < parts_.size(); ++next_, off_ = 0)
+      if (!append_part(out_, parts_[next_], off_, sl))
+        return false;
+    return true;
+  }
+
+  value_t result() override { return make_bytes(std::move(out_)); }
+
+private:
+  std::vector<std::string_view> parts_;
+  std::vector<std::string> store_;
+  std::size_t next_ = 0;
+  std::size_t off_ = 0;
+  std::string out_;
+};
+
+// bytes.decode: checks the bytes are well-formed UTF-8 as it copies them.
+class decode_job final : public stdlib_job {
+public:
+  explicit decode_job(std::string_view bytes) : stdlib_job("bytes.decode"), b_(bytes) {
+    out_.reserve(bytes.size());
+  }
+
+  void own_inputs() override {
+    own(b_, store_, pos_);
+    pos_ = 0;
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    while (pos_ < b_.size()) {
+      if (sl.spent())
+        return false;
+      const std::size_t start = pos_, end = pos_ + sl.bytes(b_.size() - pos_);
+      while (pos_ < end) {
+        char32_t cp;
+        std::size_t len;
+        if (!utf8::decode(b_, pos_, cp, len))
+          throw std::runtime_error("bytes.decode: invalid UTF-8");
+        pos_ += len;
+      }
+      out_.append(b_.substr(start, pos_ - start));
+      sl.count_bytes(pos_ - start);
+    }
+    return true;
+  }
+
+  value_t result() override { return value_t(std::move(out_)); }
+
+private:
+  std::string_view b_;
+  std::string store_;
+  std::size_t pos_ = 0;
+  std::string out_;
+};
+
+// collections.map / filter: one call of `fn` per element.
+class map_job final : public stdlib_job {
+public:
+  map_job(const char *who, list_ptr list, value_t fn, bool filter)
+      : stdlib_job(who), list_(std::move(list)), fn_(std::move(fn)), filter_(filter) {
+    if (!filter_)
+      out_.reserve(list_->size());
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    if (i_ >= list_->size())
+      return true;
+    if (sl.spent())
+      return false;
+    arg_ = (*list_)[i_++];
+    sl.count(1);
+    return call(fn_, {&arg_, 1});
+  }
+
+  void call_returned(value_t value) override {
+    if (!filter_)
+      out_.push_back(std::move(value));
+    else if (value.is_truthy())
+      out_.push_back(std::move(arg_));
+  }
+
+  value_t result() override { return make_list(std::move(out_)); }
+
+private:
+  list_ptr list_;
+  value_t fn_;
+  bool filter_;
+  std::size_t i_ = 0;
+  value_t arg_;
+  std::vector<value_t> out_;
+};
+
+class reduce_job final : public stdlib_job {
+public:
+  reduce_job(list_ptr list, value_t fn, value_t init)
+      : stdlib_job("collections.reduce"), list_(std::move(list)), fn_(std::move(fn)),
+        acc_(std::move(init)) {}
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    if (i_ >= list_->size())
+      return true;
+    if (sl.spent())
+      return false;
+    args_[0] = std::move(acc_);
+    args_[1] = (*list_)[i_++];
+    sl.count(1);
+    return call(fn_, {args_, 2});
+  }
+
+  void call_returned(value_t value) override { acc_ = std::move(value); }
+
+  value_t result() override { return std::move(acc_); }
+
+private:
+  list_ptr list_;
+  value_t fn_;
+  value_t acc_;
+  std::size_t i_ = 0;
+  value_t args_[2];
+};
+
+class zip_job final : public stdlib_job {
+public:
+  zip_job(list_ptr a, list_ptr b, std::size_t n)
+      : stdlib_job("collections.zip"), a_(std::move(a)), b_(std::move(b)), n_(n) {
+    out_.reserve(n);
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    for (; i_ < n_ && i_ < a_->size() && i_ < b_->size(); ++i_) {
+      if (sl.spent())
+        return false;
+      out_.push_back(make_list({(*a_)[i_], (*b_)[i_]}));
+      sl.count(1);
+    }
+    return true;
+  }
+
+  value_t result() override { return make_list(std::move(out_)); }
+
+private:
+  list_ptr a_, b_;
+  std::size_t n_;
+  std::size_t i_ = 0;
+  std::vector<value_t> out_;
+};
+
+class flatten_job final : public stdlib_job {
+public:
+  explicit flatten_job(list_ptr list) : stdlib_job("collections.flatten"), list_(std::move(list)) {}
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    if (!sized_) {
+      // The same sublist may appear many times, so the result can outgrow the argument: count
+      // the elements first.
+      for (; i_ < list_->size(); ++i_) {
+        if (sl.spent())
+          return false;
+        const auto *sub = std::get_if<list_ptr>(&(*list_)[i_].v);
+        total_ = sat_add(total_, sub ? (*sub ? (*sub)->size() : 0) : 1);
+        sl.count(1);
+      }
+      eval_alloc_check(list_bytes(total_), "collections.flatten");
+      out_.reserve(total_);
+      sized_ = true;
+      i_ = 0;
+    }
+    for (; i_ < list_->size(); ++i_, j_ = 0) {
+      const value_t &item = (*list_)[i_];
+      if (const auto *sub = std::get_if<list_ptr>(&item.v)) {
+        const list_ptr &elems = *sub;
+        for (; elems && j_ < elems->size(); ++j_) {
+          if (sl.spent())
+            return false;
+          add((*elems)[j_]);
+          sl.count(1);
+        }
+      } else {
+        if (sl.spent())
+          return false;
+        add(item);
+        sl.count(1);
+      }
+    }
+    return true;
+  }
+
+  value_t result() override { return make_list(std::move(out_)); }
+
+private:
+  void add(const value_t &v) {
+    if (out_.size() >= total_) { // the list grew between slices
+      eval_alloc_check(list_bytes(out_.size() + 1), "collections.flatten");
+      total_ = out_.size() + 1;
+    }
+    out_.push_back(v);
+  }
+
+  list_ptr list_;
+  bool sized_ = false;
+  std::size_t total_ = 0;
+  std::size_t i_ = 0, j_ = 0;
+  std::vector<value_t> out_;
+};
+
+// A bottom-up merge sort, one node per element moved: n log n nodes, and stable.
+class sort_job final : public stdlib_job {
+public:
+  explicit sort_job(list_ptr list) : stdlib_job("collections.sort"), list_(std::move(list)) {}
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    if (!copied_) {
+      for (; next_ < list_->size(); ++next_) {
+        if (sl.spent())
+          return false;
+        a_.push_back((*list_)[next_]);
+        sl.count(1);
+      }
+      copied_ = true;
+      n_ = a_.size();
+      if (n_ > 1) {
+        b_.resize(n_);
+        start_run();
+      }
+    }
+    while (width_ < n_) {
+      if (k_ == hi_) { // this pair of runs is merged
+        lo_ = hi_;
+        if (lo_ >= n_) { // and so is this pass
+          std::swap(a_, b_);
+          width_ *= 2;
+          lo_ = 0;
+          if (width_ >= n_)
+            break;
+        }
+        start_run();
+        continue;
+      }
+      if (sl.spent())
+        return false;
+      if (i_ < mid_ && (j_ >= hi_ || !sort_less(a_[j_], a_[i_])))
+        b_[k_++] = std::move(a_[i_++]);
+      else
+        b_[k_++] = std::move(a_[j_++]);
+      sl.count(1);
+    }
+    return true;
+  }
+
+  value_t result() override { return make_list(std::move(a_)); }
+
+private:
+  void start_run() {
+    mid_ = std::min(lo_ + width_, n_);
+    hi_ = std::min(lo_ + 2 * width_, n_);
+    i_ = lo_;
+    j_ = mid_;
+    k_ = lo_;
+  }
+
+  list_ptr list_;
+  bool copied_ = false;
+  std::size_t next_ = 0;
+  std::size_t n_ = 0;
+  std::vector<value_t> a_, b_; // a_ is sorted in runs of width_; a pass merges them into b_
+  std::size_t width_ = 1, lo_ = 0, mid_ = 0, hi_ = 0, i_ = 0, j_ = 0, k_ = 0;
+};
+
+class reverse_job final : public stdlib_job {
+public:
+  explicit reverse_job(list_ptr list)
+      : stdlib_job("collections.reverse"), list_(std::move(list)), n_(list_->size()) {
+    out_.reserve(n_);
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    for (; k_ < n_; ++k_) {
+      if (sl.spent())
+        return false;
+      if (const std::size_t i = n_ - 1 - k_; i < list_->size())
+        out_.push_back((*list_)[i]);
+      sl.count(1);
+    }
+    return true;
+  }
+
+  value_t result() override { return make_list(std::move(out_)); }
+
+private:
+  list_ptr list_;
+  std::size_t n_;
+  std::size_t k_ = 0;
+  std::vector<value_t> out_;
+};
+
+class range_job final : public stdlib_job {
+public:
+  // Element k is start + k*step, in unsigned arithmetic (no signed overflow at the int64 ends).
+  range_job(uint64_t start, uint64_t step, std::size_t count)
+      : stdlib_job("collections.range"), start_(start), step_(step), count_(count) {
+    out_.reserve(count);
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    for (; k_ < count_; ++k_) {
+      if (sl.spent())
+        return false;
+      out_.emplace_back(static_cast<int64_t>(start_ + k_ * step_));
+      sl.count(1);
+    }
+    return true;
+  }
+
+  value_t result() override { return make_list(std::move(out_)); }
+
+private:
+  uint64_t start_, step_;
+  std::size_t count_;
+  std::size_t k_ = 0;
+  std::vector<value_t> out_;
+};
+
+// Quadratic in the list length: one node per comparison, and a comparison of two lists or dicts
+// runs as an equality walk sliced with the rest.
+class unique_job final : public stdlib_job {
+public:
+  explicit unique_job(list_ptr list) : stdlib_job("collections.unique"), list_(std::move(list)) {}
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    for (; i_ < list_->size(); ++i_, j_ = 0) {
+      const value_t &item = (*list_)[i_];
+      bool found = false;
+      while (j_ < out_.size()) {
+        if (sl.spent())
+          return false;
+        bool equal;
+        if (cmp_) {
+          const std::size_t before = cmp_->nodes();
+          const bool done = cmp_->step(sl.left());
+          sl.count(std::max<std::size_t>(1, cmp_->nodes() - before));
+          if (!done)
+            return false;
+          equal = std::get<bool>(cmp_->result().v);
+          cmp_.reset();
+        } else if (is_compound(out_[j_]) && is_compound(item)) {
+          cmp_ = make_equal_job(out_[j_], item);
+          continue;
+        } else {
+          equal = values_equal(out_[j_], item);
+          sl.count(1);
+        }
+        if (equal) {
+          found = true;
+          break;
+        }
+        ++j_;
+      }
+      if (!found)
+        out_.push_back(item);
+    }
+    return true;
+  }
+
+  value_t result() override { return make_list(std::move(out_)); }
+
+private:
+  list_ptr list_;
+  std::size_t i_ = 0, j_ = 0;
+  std::unique_ptr<data_job> cmp_; // comparing out_[j_] with the element at i_
+  std::vector<value_t> out_;
+};
+
+// collections.dict-keys / dict-values.
+class dict_items_job final : public stdlib_job {
+public:
+  dict_items_job(const char *who, dict_ptr dict, bool keys)
+      : stdlib_job(who), dict_(std::move(dict)), keys_(keys) {
+    out_.reserve(dict_->size());
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    for (; i_ < dict_->size(); ++i_) {
+      if (sl.spent())
+        return false;
+      const auto &[k, v] = (*dict_)[i_];
+      if (keys_)
+        out_.emplace_back(k);
+      else
+        out_.push_back(v);
+      sl.count(1);
+    }
+    return true;
+  }
+
+  value_t result() override { return make_list(std::move(out_)); }
+
+private:
+  dict_ptr dict_;
+  bool keys_;
+  std::size_t i_ = 0;
+  std::vector<value_t> out_;
+};
+
+// A copy of d1, then d2's entries: a key already there (its first entry) is updated in place, a
+// new one appended. A key index makes it linear rather than quadratic.
+class dict_merge_job final : public stdlib_job {
+public:
+  dict_merge_job(dict_ptr d1, dict_ptr d2)
+      : stdlib_job("collections.dict-merge"), d1_(std::move(d1)), d2_(std::move(d2)),
+        out_(std::make_shared<ordered_map>()) {
+    out_->reserve(d1_->size() + d2_->size());
+  }
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    for (; i_ < d1_->size(); ++i_) {
+      if (sl.spent())
+        return false;
+      index_.try_emplace((*d1_)[i_].first, out_->size());
+      out_->push_back((*d1_)[i_]);
+      sl.count(1);
+    }
+    for (; j_ < d2_->size(); ++j_) {
+      if (sl.spent())
+        return false;
+      const auto &[key, value] = (*d2_)[j_];
+      if (auto [at, fresh] = index_.try_emplace(key, out_->size()); fresh)
+        out_->emplace_back(key, value);
+      else
+        (*out_)[at->second].second = value;
+      sl.count(1);
+    }
+    return true;
+  }
+
+  value_t result() override { return value_t(std::move(out_)); }
+
+private:
+  dict_ptr d1_, d2_;
+  dict_ptr out_;
+  std::unordered_map<std::string, std::size_t> index_; // key -> its entry in out_
+  std::size_t i_ = 0, j_ = 0;
+};
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -86,62 +974,17 @@ void stdlib_registry::register_string_module() {
   register_function("string", "string.split", [](std::span<const value_t> args) -> value_t {
     expect_min(args, 1, "string.split");
     auto &s = as_string(args[0], "string.split");
-    std::string delim = " ";
+    std::string_view delim = " ";
     if (args.size() > 1)
       delim = as_string(args[1], "string.split");
-    // Every part costs a list element, so many short parts outgrow the string: count first.
-    std::size_t count = 1;
-    if (delim.empty())
-      count = utf8::count(s);
-    else
-      for (auto pos = s.find(delim); pos != std::string::npos;
-           pos = s.find(delim, pos + delim.size()))
-        ++count;
-    eval_alloc_check(sat_add(list_bytes(count), s.size()), "string.split");
-    std::vector<value_t> parts;
-    parts.reserve(count);
-    if (delim.empty()) {
-      // SE-1 (A3): split into CODEPOINTS, not bytes — each element is one whole UTF-8 codepoint,
-      // so a multibyte character is never shredded into invalid fragments.
-      std::size_t pos = 0;
-      while (pos < s.size()) {
-        char32_t cp;
-        std::size_t len;
-        utf8::decode(s, pos, cp, len);
-        parts.emplace_back(s.substr(pos, len));
-        pos += len;
-      }
-    } else {
-      size_t start = 0;
-      while (start <= s.size()) {
-        auto pos = s.find(delim, start);
-        if (pos == std::string::npos) {
-          parts.emplace_back(s.substr(start));
-          break;
-        }
-        parts.emplace_back(s.substr(start, pos - start));
-        start = pos + delim.size();
-      }
-    }
-    return make_list(std::move(parts));
+    return run_data_job(std::make_unique<split_job>(s, delim));
   });
 
   register_function("string", "string.join", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 2, "string.join");
-    auto &lst = as_list(args[0], "string.join");
+    list_ptr lst = as_list_ptr(args[0], "string.join");
     auto &sep = as_string(args[1], "string.join");
-    std::size_t total = lst.empty() ? 0 : alloc_bytes(lst.size() - 1, sep.size());
-    for (const value_t &item : lst)
-      total = sat_add(total, as_string(item, "string.join").size());
-    eval_alloc_check(total, "string.join");
-    std::string result;
-    result.reserve(total);
-    for (size_t i = 0; i < lst.size(); ++i) {
-      if (i > 0)
-        result += sep;
-      result += as_string(lst[i], "string.join");
-    }
-    return value_t(std::move(result));
+    return run_data_job(std::make_unique<join_job>(std::move(lst), sep));
   });
 
   register_function("string", "string.replace", [](std::span<const value_t> args) -> value_t {
@@ -151,24 +994,7 @@ void stdlib_registry::register_string_module() {
     auto &to = as_string(args[2], "string.replace");
     if (from.empty())
       return value_t(s);
-    // Non-overlapping matches, left to right. A longer `to` multiplies the size: count first.
-    std::size_t count = 0;
-    for (auto pos = s.find(from); pos != std::string::npos; pos = s.find(from, pos + from.size()))
-      ++count;
-    if (count == 0)
-      return value_t(s);
-    const std::size_t size = sat_add(s.size() - count * from.size(), alloc_bytes(count, to.size()));
-    eval_alloc_check(size, "string.replace");
-    std::string out;
-    out.reserve(size);
-    std::size_t start = 0;
-    for (auto pos = s.find(from); pos != std::string::npos; pos = s.find(from, start)) {
-      out.append(s, start, pos - start);
-      out += to;
-      start = pos + from.size();
-    }
-    out.append(s, start);
-    return value_t(std::move(out));
+    return run_data_job(std::make_unique<replace_job>(s, from, to));
   });
 
   register_function("string", "string.trim", [](std::span<const value_t> args) -> value_t {
@@ -293,7 +1119,7 @@ void stdlib_registry::register_string_module() {
       if (enc != "utf-8" && enc != "utf8" && enc != "UTF-8")
         throw std::runtime_error("string.encode: unsupported encoding '" + enc + "' (only utf-8)");
     }
-    return make_bytes(s);
+    return run_data_job(std::make_unique<copy_job>("string.encode", s));
   });
 }
 
@@ -326,25 +1152,23 @@ void stdlib_registry::register_bytes_module() {
       pos = 0;
     if (static_cast<size_t>(pos) >= b.size())
       return make_bytes(std::string());
-    if (args.size() > 2) {
-      int64_t len = as_int(args[2], "bytes.slice");
-      if (len < 0)
-        len = 0;
-      return make_bytes(b.substr(static_cast<size_t>(pos), static_cast<size_t>(len)));
-    }
-    return make_bytes(b.substr(static_cast<size_t>(pos)));
+    std::size_t len = npos;
+    if (args.size() > 2)
+      len = static_cast<std::size_t>(std::max<int64_t>(0, as_int(args[2], "bytes.slice")));
+    return run_data_job(std::make_unique<copy_job>(
+        "bytes.slice", std::string_view(b).substr(static_cast<size_t>(pos), len)));
   });
 
   register_function("bytes", "bytes.concat", [](std::span<const value_t> args) -> value_t {
     std::size_t total = 0;
-    for (const value_t &a : args)
-      total = sat_add(total, as_bytes(a, "bytes.concat").size());
+    std::vector<std::string_view> parts;
+    parts.reserve(args.size());
+    for (const value_t &a : args) {
+      parts.emplace_back(as_bytes(a, "bytes.concat"));
+      total = sat_add(total, parts.back().size());
+    }
     eval_alloc_check(total, "bytes.concat");
-    std::string out;
-    out.reserve(total);
-    for (const value_t &a : args)
-      out += as_bytes(a, "bytes.concat");
-    return make_bytes(std::move(out));
+    return run_data_job(std::make_unique<concat_job>(std::move(parts), total));
   });
 
   // bytes.decode — binary->text. Only utf-8; the bytes MUST be valid UTF-8 (strict, like Python's
@@ -357,9 +1181,8 @@ void stdlib_registry::register_bytes_module() {
       if (enc != "utf-8" && enc != "utf8" && enc != "UTF-8")
         throw std::runtime_error("bytes.decode: unsupported encoding '" + enc + "' (only utf-8)");
     }
-    if (!utf8::is_valid(b))
-      throw std::runtime_error("bytes.decode: invalid UTF-8");
-    return value_t(b); // a string holding the validated UTF-8 bytes
+    // A string holding the validated UTF-8 bytes.
+    return run_data_job(std::make_unique<decode_job>(b));
   });
 }
 
@@ -467,123 +1290,60 @@ void stdlib_registry::register_math_module() {
 // ---------------------------------------------------------------------------
 
 void stdlib_registry::register_collections_module() {
+  // map, filter and reduce take a native function or a DSL function (a lambda, a defun): the
+  // evaluator running the program makes each call, a DSL one as its own frames.
   register_function("collections", "collections.map", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 2, "collections.map");
-    auto &lst = as_list(args[0], "collections.map");
-    auto *fn = std::get_if<native_fn>(&args[1].v);
-    if (!fn)
-      throw std::runtime_error("collections.map: second argument must be a function");
-    std::vector<value_t> result;
-    result.reserve(lst.size());
-    for (auto &item : lst) {
-      result.push_back((*fn)(std::span<const value_t>(&item, 1)));
-    }
-    return make_list(std::move(result));
+    list_ptr lst = as_list_ptr(args[0], "collections.map");
+    const value_t &fn = as_function(args[1], "collections.map", "second");
+    return run_data_job(std::make_unique<map_job>("collections.map", std::move(lst), fn, false));
   });
 
   register_function(
       "collections", "collections.filter", [](std::span<const value_t> args) -> value_t {
         expect_exact(args, 2, "collections.filter");
-        auto &lst = as_list(args[0], "collections.filter");
-        auto *fn = std::get_if<native_fn>(&args[1].v);
-        if (!fn)
-          throw std::runtime_error("collections.filter: second argument must be a function");
-        std::vector<value_t> result;
-        for (auto &item : lst) {
-          auto v = (*fn)(std::span<const value_t>(&item, 1));
-          if (v.is_truthy())
-            result.push_back(item);
-        }
-        return make_list(std::move(result));
+        list_ptr lst = as_list_ptr(args[0], "collections.filter");
+        const value_t &fn = as_function(args[1], "collections.filter", "second");
+        return run_data_job(
+            std::make_unique<map_job>("collections.filter", std::move(lst), fn, true));
       });
 
   register_function(
       "collections", "collections.reduce", [](std::span<const value_t> args) -> value_t {
         expect_exact(args, 3, "collections.reduce");
-        auto &lst = as_list(args[0], "collections.reduce");
-        auto *fn = std::get_if<native_fn>(&args[1].v);
-        if (!fn)
-          throw std::runtime_error("collections.reduce: second argument must be a function");
-        value_t acc = args[2];
-        for (auto &item : lst) {
-          value_t pair[2] = {acc, item};
-          acc = (*fn)(std::span<const value_t>(pair, 2));
-        }
-        return acc;
+        list_ptr lst = as_list_ptr(args[0], "collections.reduce");
+        const value_t &fn = as_function(args[1], "collections.reduce", "second");
+        return run_data_job(std::make_unique<reduce_job>(std::move(lst), fn, args[2]));
       });
 
   register_function("collections", "collections.zip", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 2, "collections.zip");
-    auto &a = as_list(args[0], "collections.zip");
-    auto &b = as_list(args[1], "collections.zip");
-    size_t n = std::min(a.size(), b.size());
+    list_ptr a = as_list_ptr(args[0], "collections.zip");
+    list_ptr b = as_list_ptr(args[1], "collections.zip");
+    const std::size_t n = std::min(a->size(), b->size());
     eval_alloc_check(sat_add(list_bytes(n), alloc_bytes(n, list_bytes(2))), "collections.zip");
-    std::vector<value_t> result;
-    result.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-      result.push_back(make_list({a[i], b[i]}));
-    }
-    return make_list(std::move(result));
+    return run_data_job(std::make_unique<zip_job>(std::move(a), std::move(b), n));
   });
 
   register_function("collections", "collections.flatten",
                     [](std::span<const value_t> args) -> value_t {
                       expect_exact(args, 1, "collections.flatten");
-                      auto &lst = as_list(args[0], "collections.flatten");
-                      // The same sublist may appear many times, so the result can outgrow the
-                      // argument: count the elements first.
-                      std::size_t total = 0;
-                      for (auto &item : lst) {
-                        auto *sub = std::get_if<list_ptr>(&item.v);
-                        total = sat_add(total, sub ? (**sub).size() : 1);
-                      }
-                      eval_alloc_check(list_bytes(total), "collections.flatten");
-                      std::vector<value_t> result;
-                      result.reserve(total);
-                      for (auto &item : lst) {
-                        if (auto *sub = std::get_if<list_ptr>(&item.v)) {
-                          for (auto &x : **sub)
-                            result.push_back(x);
-                        } else {
-                          result.push_back(item);
-                        }
-                      }
-                      return make_list(std::move(result));
+                      return run_data_job(std::make_unique<flatten_job>(
+                          as_list_ptr(args[0], "collections.flatten")));
                     });
 
   register_function("collections", "collections.sort",
                     [](std::span<const value_t> args) -> value_t {
                       expect_exact(args, 1, "collections.sort");
-                      auto elems = as_list(args[0], "collections.sort"); // copy
-                      std::sort(elems.begin(), elems.end(), [](const value_t &a, const value_t &b) {
-                        // Sort by numeric value or string comparison
-                        if (auto *ai = std::get_if<int64_t>(&a.v)) {
-                          if (auto *bi = std::get_if<int64_t>(&b.v))
-                            return *ai < *bi;
-                          if (auto *bd = std::get_if<double>(&b.v))
-                            return static_cast<double>(*ai) < *bd;
-                        }
-                        if (auto *ad = std::get_if<double>(&a.v)) {
-                          if (auto *bi = std::get_if<int64_t>(&b.v))
-                            return *ad < static_cast<double>(*bi);
-                          if (auto *bd = std::get_if<double>(&b.v))
-                            return *ad < *bd;
-                        }
-                        if (auto *as = std::get_if<std::string>(&a.v)) {
-                          if (auto *bs = std::get_if<std::string>(&b.v))
-                            return *as < *bs;
-                        }
-                        return false;
-                      });
-                      return make_list(std::move(elems));
+                      return run_data_job(
+                          std::make_unique<sort_job>(as_list_ptr(args[0], "collections.sort")));
                     });
 
   register_function("collections", "collections.reverse",
                     [](std::span<const value_t> args) -> value_t {
                       expect_exact(args, 1, "collections.reverse");
-                      auto elems = as_list(args[0], "collections.reverse"); // copy
-                      std::reverse(elems.begin(), elems.end());
-                      return make_list(std::move(elems));
+                      return run_data_job(std::make_unique<reverse_job>(
+                          as_list_ptr(args[0], "collections.reverse")));
                     });
 
   register_function(
@@ -612,86 +1372,42 @@ void stdlib_registry::register_collections_module() {
           count = (ustart - ustop - 1) / (0 - ustep) + 1;
         eval_alloc_check(count > SIZE_MAX ? SIZE_MAX : list_bytes(static_cast<size_t>(count)),
                          "collections.range");
-        std::vector<value_t> result;
-        result.reserve(static_cast<size_t>(count));
-        for (uint64_t k = 0; k < count; ++k)
-          result.emplace_back(static_cast<int64_t>(ustart + k * ustep));
-        return make_list(std::move(result));
+        return run_data_job(
+            std::make_unique<range_job>(ustart, ustep, static_cast<std::size_t>(count)));
       });
 
   register_function("collections", "collections.unique",
                     [](std::span<const value_t> args) -> value_t {
                       expect_exact(args, 1, "collections.unique");
-                      auto &lst = as_list(args[0], "collections.unique");
-                      std::vector<value_t> result;
-                      for (auto &item : lst) {
-                        poll_deadline("collections.unique"); // quadratic in the list length
-                        bool found = false;
-                        for (auto &r : result) {
-                          if (values_equal(r, item)) {
-                            found = true;
-                            break;
-                          }
-                        }
-                        if (!found)
-                          result.push_back(item);
-                      }
-                      return make_list(std::move(result));
+                      return run_data_job(
+                          std::make_unique<unique_job>(as_list_ptr(args[0], "collections.unique")));
                     });
 
   register_function("collections", "collections.dict-keys",
                     [](std::span<const value_t> args) -> value_t {
                       expect_exact(args, 1, "collections.dict-keys");
-                      auto *d = std::get_if<dict_ptr>(&args[0].v);
-                      if (!d)
-                        throw std::runtime_error("collections.dict-keys: expected dict");
-                      std::vector<value_t> keys;
-                      keys.reserve((**d).size());
-                      for (auto &[k, _] : **d)
-                        keys.emplace_back(k);
-                      return make_list(std::move(keys));
+                      dict_ptr d = as_dict_ptr(args[0], "collections.dict-keys", "expected dict");
+                      return run_data_job(std::make_unique<dict_items_job>("collections.dict-keys",
+                                                                           std::move(d), true));
                     });
 
   register_function("collections", "collections.dict-values",
                     [](std::span<const value_t> args) -> value_t {
                       expect_exact(args, 1, "collections.dict-values");
-                      auto *d = std::get_if<dict_ptr>(&args[0].v);
-                      if (!d)
-                        throw std::runtime_error("collections.dict-values: expected dict");
-                      std::vector<value_t> vals;
-                      vals.reserve((**d).size());
-                      for (auto &[_, v] : **d)
-                        vals.push_back(v);
-                      return make_list(std::move(vals));
+                      dict_ptr d = as_dict_ptr(args[0], "collections.dict-values", "expected dict");
+                      return run_data_job(std::make_unique<dict_items_job>(
+                          "collections.dict-values", std::move(d), false));
                     });
 
   register_function(
       "collections", "collections.dict-merge", [](std::span<const value_t> args) -> value_t {
         expect_exact(args, 2, "collections.dict-merge");
-        auto *d1 = std::get_if<dict_ptr>(&args[0].v);
-        auto *d2 = std::get_if<dict_ptr>(&args[1].v);
-        if (!d1 || !d2)
-          throw std::runtime_error("collections.dict-merge: expected two dicts");
+        dict_ptr d1 = as_dict_ptr(args[0], "collections.dict-merge", "expected two dicts");
+        dict_ptr d2 = as_dict_ptr(args[1], "collections.dict-merge", "expected two dicts");
         eval_alloc_check(
-            alloc_bytes((**d1).size() + (**d2).size(), sizeof(std::pair<std::string, value_t>)),
+            alloc_bytes(d1->size() + d2->size(), sizeof(std::pair<std::string, value_t>)),
             "collections.dict-merge");
-        // Start with copy of d1
-        auto result = std::make_shared<std::vector<std::pair<std::string, value_t>>>(**d1);
-        // Merge d2: update existing keys, append new ones
-        for (auto &[k, v] : **d2) {
-          poll_deadline("collections.dict-merge"); // quadratic in the dict sizes
-          bool found = false;
-          for (auto &[rk, rv] : *result) {
-            if (rk == k) {
-              rv = v;
-              found = true;
-              break;
-            }
-          }
-          if (!found)
-            result->emplace_back(k, v);
-        }
-        return value_t(std::move(result));
+        return run_data_job(std::make_unique<dict_merge_job>(std::move(d1), std::move(d2)));
       });
 }
 

@@ -16,7 +16,7 @@
 #include <cvc/ariadne/uri_http.h>  // §13.6 http:// handler
 #include <cvc/ariadne/uri_state.h> // §13.3 state:// handler
 #include <cvc/ariadne/widget.h>
-#include <cvc/core/app.h>   // cvc::app (state:// handler tests build a state tree)
+#include <cvc/core/app.h>    // cvc::app (state:// handler tests build a state tree)
 #include <cvc/state/state.h> // cvc::state
 #include <filesystem>
 #include <fstream>
@@ -3141,12 +3141,12 @@ TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
   root("doc.n").value(std::string("42"));
   const std::string path = (fs::temp_directory_path() / "ariadne_state_io.json").string();
   std::string err;
-  ASSERT_TRUE(save_state(root("doc"), path, &err)) << err; // serializes keys "doc.title"/"doc.n"
-  // Restore into a FRESH app's ROOT — the absolute paths reconstruct there (nested children survive
-  // the round-trip, exercising the #430 ptree deserialize fix).
+  ASSERT_TRUE(save_state(root("doc"), path, &err)) << err; // serializes keys "title"/"n"
+  // Restore into the same node of a FRESH app — the relative paths reconstruct there (nested
+  // children survive the round-trip, exercising the #430 ptree deserialize fix).
   cvc::app app2;
   cvc::state &root2 = cvc::state::instance(app2);
-  ASSERT_TRUE(restore_state(root2, path, &err)) << err;
+  ASSERT_TRUE(restore_state(root2("doc"), path, &err)) << err;
   EXPECT_EQ(root2("doc.title").value(), "Hello");
   EXPECT_EQ(root2("doc.n").value(), "42");
   std::error_code ec;
@@ -3163,9 +3163,12 @@ TEST(AriadneStateIo, SaveRestoreRoundTripsViaStateScheme) {
   // Snapshot the cfg subtree onto a state node (its JSON text lives on backup's value channel).
   ASSERT_TRUE(save_state(root("cfg"), "state://backup?value", &err)) << err;
   root("cfg.color").value(std::string("green")); // mutate after the snapshot
-  // Restore into the app root reverts cfg.color — a full round-trip through state:// store+resolve.
-  ASSERT_TRUE(restore_state(root, "state://backup?value", &err)) << err;
+  // Restore into cfg reverts cfg.color — a full round-trip through state:// store+resolve.
+  ASSERT_TRUE(restore_state(root("cfg"), "state://backup?value", &err)) << err;
   EXPECT_EQ(root("cfg.color").value(), "red");
+  // Restoring into another node copies the saved subtree there.
+  ASSERT_TRUE(restore_state(root("cfg_copy"), "state://backup?value", &err)) << err;
+  EXPECT_EQ(root("cfg_copy.color").value(), "red");
 }
 
 TEST(AriadneModularity, ImportUnitsFromAnotherFile) {

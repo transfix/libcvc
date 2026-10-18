@@ -406,7 +406,7 @@ cvc state list scene.camera
 # Export the entire tree as JSON
 cvc state json
 
-# Export a subtree as JSON
+# Export a subtree as JSON (keys are paths relative to it: "camera.x", not "scene.camera.x")
 cvc state json scene
 
 # Delete a value

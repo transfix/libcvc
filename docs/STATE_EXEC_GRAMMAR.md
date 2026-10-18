@@ -227,9 +227,9 @@ A node is an element visited: a list element or a dict entry walked, or an eleme
 `step_nodes` = N:
 
 - **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `state-data-get` and `state-set` of
-  a list or dict (printed into the node) hand their walk to the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
-  done, the call's frame waits and the following steps are **data steps** that each run N more
-  nodes. The step that finishes it completes the call. A walk under N nodes finishes in the
+  a list or dict (printed into the node) hand their walk to the evaluator (`run_data_job`). It
+  does one slice inside the call's step; if the walk isn't done, the call's frame waits and the
+  following steps are **data steps** that each run N more nodes. The step that finishes it completes the call. A walk under N nodes finishes in the
   call's own step, so ordinary programs take no extra steps.
 - **Macro expansion** works the same way, before the expansion is evaluated.
 - **Freeing.** Last owners dropped during a step (a list, dict, closure, generator or scope)
@@ -240,17 +240,25 @@ A node is an element visited: a list element or a dict entry walked, or an eleme
   other processes run between them.
 - **Signals and watch events** wait while a walk is pending, because the walk's call frame is
   on top of the evaluation stack.
+- **Function calls.** A job can stop for a call of a function (`collections.map`, `filter`,
+  `reduce`, and `apply`/`send` through `call_function()`), and the evaluator makes it. A native function is called inside the data step. A
+  DSL function runs as frames above the waiting call, in eval steps; `return` and `break` in it
+  unwind no further than that call. The job goes on in the data step after the function
+  returns. Such a job waits on the evaluator even with `step_nodes` = 0.
 - **Snapshots** keep `step_nodes` but not a walk in flight: after a restore, the waiting call
-  or macro expansion runs again.
+  or macro expansion runs again. The frames of a DSL function it was calling are left out.
 - **Values changed between slices.** A walk holds the lists and dicts it walks by owning
   pointer and reads them by index, checking bounds at every node. A change between two slices
   (by another process) changes the answer, never memory safety.
 
-Other deep walks run whole inside one step, as before, but count their nodes. These are the
-`collections.*` helpers.
+The stdlib's materializers are jobs too: `string.split`/`join`/`replace`/`encode`,
+`bytes.slice`/`concat`/`decode` and all of `collections.*`. A string function counts a node per
+256 bytes it scans or copies (developer guide §11, "Sliced work").
 
 Measured per node (MSVC Release, `state_exec_bench_test` `DataWalkThroughput`): ~45 ns to free,
 ~70 ns to print, ~250 ns to compare and ~380 ns to copy. So a 1024-node slice costs 0.05-0.4 ms.
+The stdlib jobs (`StdlibJobThroughput`) cost 5-20 ns a node for elements and 200-370 ns for a
+256-byte copy.
 
 ### Budget by kind
 

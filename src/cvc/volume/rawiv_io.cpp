@@ -876,8 +876,16 @@ struct rawiv_io : public volume_file_io {
 	  std::cout<<"rawiv_io 820: min max" << realminmax[0] <<" " << realminmax[1] << std::endl;
 
 	}
-      fclose(output);
 #endif
+
+    // Close (and so flush) the file. This close used to sit inside the #if 0 block above, so a
+    // successful write never closed it: the last scanline stayed in the stdio buffer (a read in the
+    // same process saw zeros there) and Windows kept the file locked until the process exited.
+    if (fclose(output) != 0) {
+      geterrstr(errno, buf, 256);
+      std::string errStr = "Error closing file '" + filename + "': " + buf;
+      throw write_error(errStr);
+    }
   }
 
 protected:

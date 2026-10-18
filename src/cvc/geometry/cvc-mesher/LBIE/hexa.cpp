@@ -1591,6 +1591,16 @@ void Octree::get_vtx_new(geoframe& geofrm, int oc_id, unsigned int vtx)
 	ty = cell_size*yy + (int)(my*cell_size);
 	tz = cell_size*zz + (int)(mz*cell_size);
 
+	// The walk below runs over the finest cells, which exist only for 0 <= t < 2^oct_depth. A
+	// vertex on the volume's far face gives t == 2^oct_depth, for which xyz2octcell() returns -1,
+	// and getCellValues(-1) read orig_vol out of bounds (an intermittent crash in hexahedralize).
+	// Start in the nearest real cell, and stop the walk where it would leave the grid.
+	const int fine_res = 1 << oct_depth;
+	const auto clamp_cell = [fine_res](int t) { return t < 0 ? 0 : (t >= fine_res ? fine_res - 1 : t); };
+	tx = clamp_cell(tx);
+	ty = clamp_cell(ty);
+	tz = clamp_cell(tz);
+
 	my_id = xyz2octcell(tx, ty, tz, oct_depth);
 	getCellValues(my_id, oct_depth, val);
 
@@ -1633,10 +1643,20 @@ void Octree::get_vtx_new(geoframe& geofrm, int oc_id, unsigned int vtx)
 			if(func*func0 <= 0.0f && my_bool) break;
 			func0 = func;
 			if(my_bool == 0) {
+				const int px = tx, py = ty, pz = tz;
+				const float qx = x, qy = y, qz = z;
 				if(x < 0.0f) {tx--;	x = x + 1.0f;}	else {tx++;	x = x - 1.0f;}
 				if(y < 0.0f) {ty--;	y = y + 1.0f;}	else {ty++; y = y - 1.0f;}
 				if(z < 0.0f) {tz--;	z = z + 1.0f;}	else {tz++; z = z - 1.0f;}
 				my_id = xyz2octcell(tx, ty, tz, oct_depth);
+				if(my_id < 0) {
+					// The next cell is outside the grid: stop on the last cell's boundary.
+					tx = px;	ty = py;	tz = pz;
+					x = qx < 0.0f ? 0.0f : (qx > 1.0f ? 1.0f : qx);
+					y = qy < 0.0f ? 0.0f : (qy > 1.0f ? 1.0f : qy);
+					z = qz < 0.0f ? 0.0f : (qz > 1.0f ? 1.0f : qz);
+					break;
+				}
 				getCellValues(my_id, oct_depth, val);
 			}
 		}
