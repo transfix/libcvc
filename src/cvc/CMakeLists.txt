@@ -1624,7 +1624,8 @@ if(CVC_WITH_JOLT)
     set(_cvc_jolt_kind OBJECT)
   endif()
   add_library(cvc_physics_jolt ${_cvc_jolt_kind} physics/jolt/jolt_backend.cpp
-    physics/jolt/jolt_material.cpp physics/jolt/jolt_vehicle_controller.cpp)
+    physics/jolt/jolt_material.cpp physics/jolt/jolt_vehicle_controller.cpp
+    physics/jolt/jolt_vehicle_energy.cpp)
   set_target_properties(cvc_physics_jolt PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
@@ -1638,12 +1639,13 @@ if(CVC_WITH_JOLT)
   # nowhere. cvc_material and the Ackermann controller subclass them; their vtables
   # are emitted in jolt_material.cpp and jolt_vehicle_controller.cpp, the files built
   # with -fno-rtti, so nothing references the missing typeinfo ("undefined reference
-  # to typeinfo for JPH::PhysicsMaterial" otherwise). Only those: a no-RTTI file that throws
-  # std exceptions emits weak copies of their typeinfo, which on macOS bind every
-  # reference in libcvc.dylib and break exception and boost::any matching across
-  # the library boundary (see jolt_material.h). Jolt's other bases here have only
-  # inline virtuals, so their typeinfo is emitted where it is used. MSVC emits its
-  # RTTI records in the referencing file and needs neither switch.
+  # to typeinfo for JPH::PhysicsMaterial" otherwise). Only those, and only the vtable owners
+  # in them (the controller's other members are in jolt_vehicle_energy.cpp, with RTTI): a
+  # no-RTTI file that throws std exceptions, or calls anything inline that can, emits weak
+  # copies of their typeinfo, which on macOS bind every reference in libcvc.dylib and break
+  # exception and boost::any matching across the library boundary (see jolt_material.h).
+  # Jolt's other bases here have only inline virtuals, so their typeinfo is emitted where it
+  # is used. MSVC emits its RTTI records in the referencing file and needs neither switch.
   if(MSVC)
     target_compile_options(cvc_physics_jolt PRIVATE /fp:precise)
   else()

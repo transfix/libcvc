@@ -25,7 +25,8 @@
 // JPH::WheeledVehicleController and its settings are in libJolt, built without RTTI, so their
 // typeinfo exists nowhere, and a vtable emitted with RTTI on would reference it. The same rules
 // hold: jolt_vehicle_controller.cpp must not throw, catch or call anything inline that can
-// throw.
+// throw, so it holds only the constructors, the destructors and ConstructController. The other
+// members are in jolt_vehicle_energy.cpp, built with RTTI.
 
 #ifndef CVC_PHYSICS_JOLT_VEHICLE_CONTROLLER_H
 #define CVC_PHYSICS_JOLT_VEHICLE_CONTROLLER_H
