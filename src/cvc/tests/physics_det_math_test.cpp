@@ -8,12 +8,14 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// cvc::physics::det (src/cvc/physics/det_math.h), the libm-free tan, atan, tanh, expm1 and
-// x^(2/3) a physics step calls: within a few ULP of libm over the ranges the step uses, libm's
-// answers at the edges (NaN, infinities, zeros, the limits), and the same bits on every
-// platform. libm is not correctly rounded either and misses in its own places, so a bound is the
-// most measured against MSVC's and glibc's libm, plus one ULP for the next libm's own error. The last is what they are for, so the Bits test pins a few outputs measured on
-// Windows (MSVC, x86_64); a platform that disagrees must fix det_math, never re-baseline.
+// cvc::physics::det (src/cvc/physics/det_math.h), the libm-free functions a physics step calls:
+//   - within a few ULP of libm over the ranges the step uses. libm is not correctly rounded
+//     either and misses in its own places, so a bound is the most measured against MSVC's and
+//     glibc's libm, plus one ULP for the next libm's own error;
+//   - libm's answers at the edges (NaN, infinities, zeros, the limits);
+//   - the same bits on every platform, which is what they are for: the Bits test pins outputs
+//     measured on Windows (MSVC, x86_64), and a platform that disagrees must fix det_math, never
+//     re-baseline.
 // det_math.cpp is compiled into this test (it is internal to libcvc).
 
 #include "det_math.h"
