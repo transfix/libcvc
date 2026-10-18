@@ -1533,7 +1533,8 @@ created (e.g. via `state-set` or `cvc::state::operator()(path).value(v)`),
 the internal sequence is:
 
 1. `valueChanged()` fires on the new node — **no observer yet**.
-2. `childChanged()` propagates up from parent to root.
+2. `childChanged()` fires on the parent and on every ancestor above it,
+   the root's slots first (`state::emitChildChanged()`).
 3. The adapter's `childChanged` handler attaches an observer on the
    new node.
 

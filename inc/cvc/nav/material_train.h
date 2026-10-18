@@ -30,9 +30,21 @@
 // mask 1{J>eta}/((1-alpha)B). hard_count is a step-function count: its gradient
 // is identically zero, so it shifts J's value but seeds nothing.
 //
+// The rollout is the point-mass surrogate by default (the reference trainer's).
+// material_loss_config::integrator = bicycle takes the same loss through the deployed
+// kinematic bicycle instead (integrate_bicycle_material, P8b): the controller turns
+// the coefficients' forces into steering and acceleration, so training sees the
+// vehicle it deploys on. Expect sparser gradients there. A saturated clamp (the
+// acceleration limit, the steering tanh, the speed limit) passes none, as autograd
+// would, so the learning rate and the force scales matter more than on the point
+// mass. Measured on the test fixture: |g| 2.8 against 242, and loss -5% against
+// -74% over 70 Adam steps.
+//
 // L_multi (multi_start_penalty, geom_rollout.h) is a SEPARATE geometry rollout
 // (EXPLICIT Euler by default, no material) that backprops only into
-// alphas/beta/gamma; its grads sum into those seeds before backward_one. Set
+// alphas/beta/gamma; its grads sum into those seeds before backward_one. With the
+// bicycle integrator its short rollouts run on the bicycle too
+// (multi_start_penalty_bicycle, material.h), from the same starts. Set
 // w_multi = 0 to drop it. cfg.multi.seed is used as-is by both the loss and the
 // gradient, so they score the same sampled starts; a training loop varies it per
 // step (the pycvc trainer uses seed + step) to draw fresh ones.
@@ -68,6 +80,16 @@ struct material_batch {
   // targets
   const float *o_tgt = nullptr, *v_tgt = nullptr; // [B*2]
   const float *gamma_o = nullptr;                 // [B]
+  // The bicycle rollout's start heading and signed speed [B]. Null derives them
+  // from v0: the speed is |v0|, the heading v0's direction (toward the goal when
+  // v0 is zero). The surrogate ignores them.
+  const float *th0 = nullptr, *sp0 = nullptr;
+};
+
+// The rollout the material loss is taken through.
+enum class material_integrator {
+  surrogate, // the point-mass surrogate (integrate_surrogate_material), the reference trainer's
+  bicycle,   // the deployed kinematic bicycle (integrate_bicycle_material), P8b
 };
 
 struct material_loss_config {
@@ -77,6 +99,12 @@ struct material_loss_config {
   float w_multi = 0.5f;                            // multi-start robustness (L_multi)
   float lam_soft_max = 5.0f, lam_hard_max = 10.0f; // for the lreg normalization
   surrogate_material_params rollout;               // margin_factor/mass/d_hat_sdf/k_sharp
+  // Which rollout every term scores, L_multi's short rollouts included
+  // (multi_start_penalty_bicycle). On the bicycle, the vT that L_vel compares is
+  // sp * (cos th, sin th), and use_cuda runs the rollouts on the CPU (no device twin
+  // yet).
+  material_integrator integrator = material_integrator::surrogate;
+  bicycle_material_params bicycle; // vehicle limits, in the batch's length units
   multi_start_params multi; // ms_h/ms_dt_mult/tau + start sampling (margin/mass synced)
   int num_threads = 0;
 };

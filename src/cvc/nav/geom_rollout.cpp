@@ -262,15 +262,13 @@ void multi_start_fracs(const multi_start_params &p, int B, float *fracs) {
   }
 }
 
-double multi_start_penalty(const float *alphas, const float *beta, const float *gamma,
-                           const float *o0, const float *v0, const float *goal, const float *C,
-                           const float *R, const std::uint8_t *mask, const float *rr,
-                           const float *d_hat, const float *dt, const int *H, int B, int N,
-                           const multi_start_params &p, float *g_alphas, float *g_beta,
-                           float *g_gamma, int num_threads) {
+int multi_start_origins(const multi_start_params &p, const float *o0, const float *C,
+                        const float *R, const std::uint8_t *mask, const float *rr, int B, int N,
+                        std::vector<float> &o_ms) {
   check_frac_range(p);
+  o_ms.clear();
   if (N == 0 || B == 0 || p.ms_count <= 0)
-    return 0.0;
+    return 0;
   // A degenerate range makes all ms_count starts the same start, and the mean of
   // identical rollouts is that rollout: evaluate it once.
   const int K = (p.frac_hi > p.frac_lo) ? p.ms_count : 1;
@@ -302,9 +300,8 @@ double multi_start_penalty(const float *alphas, const float *beta, const float *
   }
 
   // The (data) start of rollout k, agent b: frac of the clearance toward the
-  // nearest obstacle, with the feasibility fallback. v_ms = v0.
-  std::vector<float> o_ms(2 * static_cast<std::size_t>(KB)), dt_ms(KB);
-  std::vector<int> H_ms(KB, p.ms_h);
+  // nearest obstacle, with the feasibility fallback.
+  o_ms.assign(2 * static_cast<std::size_t>(KB), 0.0f);
   for (int k = 0; k < K; ++k) {
     for (int b = 0; b < B; ++b) {
       const int i = k * B + b;
@@ -339,9 +336,28 @@ double multi_start_penalty(const float *alphas, const float *beta, const float *
       }
       o_ms[2 * i] = omsx;
       o_ms[2 * i + 1] = omsy;
-      dt_ms[i] = p.ms_dt_mult * dt[b];
     }
   }
+  return K;
+}
+
+double multi_start_penalty(const float *alphas, const float *beta, const float *gamma,
+                           const float *o0, const float *v0, const float *goal, const float *C,
+                           const float *R, const std::uint8_t *mask, const float *rr,
+                           const float *d_hat, const float *dt, const int *H, int B, int N,
+                           const multi_start_params &p, float *g_alphas, float *g_beta,
+                           float *g_gamma, int num_threads) {
+  std::vector<float> o_ms;
+  const int K = multi_start_origins(p, o0, C, R, mask, rr, B, N, o_ms);
+  if (K == 0)
+    return 0.0;
+  const int KB = K * B;
+  // v_ms = v0; each start rolls out ms_h steps of ms_dt_mult * dt.
+  std::vector<float> dt_ms(KB);
+  std::vector<int> H_ms(KB, p.ms_h);
+  for (int k = 0; k < K; ++k)
+    for (int b = 0; b < B; ++b)
+      dt_ms[k * B + b] = p.ms_dt_mult * dt[b];
 
   // K > 1: tile the per-agent inputs so all K*B rollouts run as one batch.
   const float *v0_k = v0, *goal_k = goal, *C_k = C, *R_k = R, *al_k = alphas, *be_k = beta,

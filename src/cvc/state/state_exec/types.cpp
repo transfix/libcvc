@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cvc/state/state_exec/types.h>
 #include <new>
-#include <sstream>
 #include <stdexcept>
 #include <time.h>
 #include <utility>

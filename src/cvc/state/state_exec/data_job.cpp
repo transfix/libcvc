@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdint>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h> // evaluation_stats
@@ -178,17 +179,17 @@ private:
 
 class concat_walk final : public data_job {
 public:
-  concat_walk(std::vector<value_t> parts, std::string sep)
-      : parts_(std::move(parts)), sep_(std::move(sep)) {}
+  concat_walk(std::vector<value_t> parts, std::string sep, const char *who)
+      : parts_(std::move(parts)), sep_(std::move(sep)), who_(who) {}
 
   bool step(std::size_t budget) override {
     std::size_t used = 0;
     while (next_ < parts_.size()) {
       if (!part_) {
         if (next_ > 0)
-          out_ += sep_;
+          append(sep_);
         if (auto *s = std::get_if<std::string>(&parts_[next_].v)) {
-          out_ += *s;
+          append(*s);
           ++next_;
           continue;
         }
@@ -202,7 +203,7 @@ public:
       nodes_ += part_->nodes() - before;
       if (!done)
         return false;
-      out_ += part_->take_string();
+      append(part_->take_string());
       part_.reset();
       ++next_;
     }
@@ -212,8 +213,15 @@ public:
   value_t result() override { return value_t{std::move(out_)}; }
 
 private:
+  void append(const std::string &part) {
+    eval_alloc_check(out_.size() > SIZE_MAX - part.size() ? SIZE_MAX : out_.size() + part.size(),
+                     who_);
+    out_ += part;
+  }
+
   std::vector<value_t> parts_;
   std::string sep_;
+  const char *who_;
   std::size_t next_ = 0;
   std::unique_ptr<print_walk> part_; // the part being printed
   std::string out_;
@@ -547,8 +555,9 @@ bool is_compound(const value_t &v) {
   return false;
 }
 
-std::unique_ptr<data_job> make_concat_job(std::vector<value_t> parts, std::string sep) {
-  return std::make_unique<concat_walk>(std::move(parts), std::move(sep));
+std::unique_ptr<data_job> make_concat_job(std::vector<value_t> parts, std::string sep,
+                                          const char *who) {
+  return std::make_unique<concat_walk>(std::move(parts), std::move(sep), who);
 }
 
 std::unique_ptr<data_job> make_equal_job(value_t a, value_t b) {

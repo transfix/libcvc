@@ -250,7 +250,12 @@ void scheduler::execute_process_step(process &proc) {
   eval_deadline_guard step_deadline(proc.time_left());
   // Bound what one native call in this step may allocate: limits.max_alloc_bytes, tightened to
   // what is left of max_memory (which, between steps, only sees state-tree writes).
-  eval_alloc_guard step_alloc(proc.alloc_limit(mem_tracker_.current_bytes(proc.pid)));
+  // With no budget and the default cap, an armed guard would change nothing (the default applies
+  // unarmed), so it is armed only when it does: it costs thread-local writes every step.
+  std::optional<eval_alloc_guard> step_alloc;
+  if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
+    step_alloc.emplace(
+        proc.alloc_limit(proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) : 0));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   bool done = evaluator_.step(proc.state);

@@ -326,4 +326,38 @@ TEST_F(HttpCacheTest, SingleFlightCoalescesConcurrentResolves) {
     EXPECT_EQ(bodies[i], "C") << "follower " << i << " got the wrong body";
 }
 
+// The late arrival: a resolve that read the cache (a miss) before the leader stored, but reached
+// single-flight after the leader left, saw neither the in-flight marker nor, from its old read, the
+// entry, and became a second leader. The new leader now re-reads the entry. An instant transport
+// and a start gate make that window common; every round is one key and must be one transfer.
+TEST_F(HttpCacheTest, LateArrivalAfterTheLeaderLeftIsServedFromTheCache) {
+  auto *fake = install();
+  fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=300"}, "L")); // repeats
+  constexpr int kRounds = 1000, kThreads = 8;
+  int bad_bodies = 0;
+  for (int round = 0; round < kRounds; ++round) {
+    const std::string url = "http://ex/late/" + std::to_string(round);
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::string> bodies(kThreads);
+    std::vector<std::thread> ts;
+    for (int i = 0; i < kThreads; ++i)
+      ts.emplace_back([&, i] {
+        ready.fetch_add(1);
+        while (!go.load())
+          std::this_thread::yield();
+        bodies[i] = cvc::ariadne::resolve(url).content;
+      });
+    while (ready.load() < kThreads)
+      std::this_thread::yield();
+    go.store(true);
+    for (auto &t : ts)
+      t.join();
+    for (const std::string &b : bodies)
+      bad_bodies += b == "L" ? 0 : 1;
+  }
+  EXPECT_EQ(fake->calls, kRounds) << "a resolve of an already-cached key made a second transfer";
+  EXPECT_EQ(bad_bodies, 0);
+}
+
 } // namespace

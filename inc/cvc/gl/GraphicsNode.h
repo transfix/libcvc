@@ -106,6 +106,23 @@ public:
   // exactly what setTransform produces for the same matrix.
   void setPoseMatrix(const double matrix[16]);
 
+  // The same per-frame pose path, given as a WORLD pose: the node's world matrix
+  // becomes frame's world matrix times `pose` (just `pose` with no frame, i.e. in
+  // the scene root's frame), whatever its ancestors' transforms are. The local
+  // transform that achieves it (inverse parent world times that) is composed on
+  // the owner thread when the pose is applied, so it is right even if an ancestor
+  // moved in the same frame. For a simulation whose frame is not the node's
+  // parent's: physics bodies drawn under a group node, or a world drawn under a
+  // render-origin node that keeps city-scale coordinates out of float precision.
+  // Thread-safe, latest wins and change-detected exactly like setPoseMatrix (the
+  // two share one mailbox). A frame destroyed before the apply drops the pose.
+  void setWorldPoseMatrix(const double pose[16],
+                          const std::shared_ptr<const GraphicsNode> &frame = nullptr);
+
+  // This node's parent in the graphics hierarchy, or null at the top. Owner
+  // thread only, like the hierarchy itself.
+  const GraphicsNode *getParentNode() const { return m_parent; }
+
   // Convenience transform methods
   void setPosition(double x, double y, double z);
   void setRotation(double x, double y, double z); // Euler angles in degrees
@@ -427,6 +444,10 @@ private:
   // mailbox below hands a pose made on another thread to it.
   void applyPoseMatrix(const double matrix[16]);
   void applyParkedPose();
+  // The local transform that puts this node's world matrix at frame-world x pose
+  // (pose alone with no frame). False when the frame has been destroyed.
+  bool localFromWorldPose(const double pose[16], const std::weak_ptr<const GraphicsNode> &frame,
+                          bool hasFrame, double local[16]) const;
   void publishPoseMatrix(const double matrix[16]);
   // Called after any OTHER path puts a new matrix on this node and writes it to
   // state directly (setTransform, resetTransform, an external "matrix" write).
@@ -446,8 +467,11 @@ private:
   // have shed our pose, so an unchanged pose is published again instead of
   // being skipped as a no-op. See applyPoseMatrix.
   std::uint64_t m_poseDropMark = 0;
-  std::mutex m_poseMutex;                // guards m_parkedPose + m_posePending writes
-  std::array<double, 16> m_parkedPose{}; // the latest off-thread pose, not yet applied
+  std::mutex m_poseMutex;                          // guards the parked pose + m_posePending writes
+  std::array<double, 16> m_parkedPose{};           // the latest off-thread pose, not yet applied
+  bool m_parkedIsWorld = false;                    // it came from setWorldPoseMatrix ...
+  bool m_parkedHasFrame = false;                   // ... with a frame node,
+  std::weak_ptr<const GraphicsNode> m_parkedFrame; // this one
   // A parked pose is waiting (and one apply is queued for it). Atomic so the
   // owner-thread fast path can see "nothing parked" without taking the lock.
   std::atomic<bool> m_posePending{false};

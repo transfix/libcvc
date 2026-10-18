@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl-examples
-  upstream_version: "3.5.1"
+  upstream_version: "3.6.0"
   # Bumped 1 -> 2: the GRL-SNAM nav demos (nav_city_swarm / nav_fog_ghost /
   # nav_finale) are now built and packaged alongside lsystem_forest (libcvc #203).
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
@@ -92,6 +92,10 @@ depends:
     - name: zstd
       platforms: [wasm-mt]
     - name: zlib
+      platforms: [wasm-mt]
+    # The wasm build compiles cvc from this tree, so it needs cvc's build-only
+    # PEGTL (the state_exec grammar engine) too.
+    - name: pegtl
       platforms: [wasm-mt]
     # cgal is intentionally NOT a dependency: build-wasm.sh passes
     # -DDISABLE_CGAL=ON so it is never linked, and there is no wasm-mt cgal
