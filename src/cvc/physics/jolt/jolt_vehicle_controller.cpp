@@ -8,12 +8,14 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// Built with -fno-rtti on GCC/Clang (see jolt_vehicle_controller.h): no throw, no catch,
-// nothing that can throw.
+// Built with -fno-rtti on GCC/Clang (see jolt_vehicle_controller.h). It holds only what must
+// own a vtable over a Jolt base: the constructors, the destructors (the key functions) and
+// ConstructController. Everything else is in jolt_vehicle_energy.cpp, built with RTTI: a
+// no-RTTI file that instantiates anything that can throw a std exception emits weak copies of
+// its typeinfo, and on macOS those break exception and boost::any matching in all of libcvc
+// (jolt_material.h). The energy ledger's first version here did, and failed 1082 tests there.
 
 #include "jolt_vehicle_controller.h"
-
-#include <Jolt/Physics/Vehicle/VehicleConstraint.h>
 
 namespace cvc {
 namespace physics {
@@ -24,15 +26,6 @@ ackermann_controller::ackermann_controller(const JPH::WheeledVehicleControllerSe
     : JPH::WheeledVehicleController(s, c) {}
 
 ackermann_controller::~ackermann_controller() = default;
-
-void ackermann_controller::PreCollide(float dt, JPH::PhysicsSystem &ps) {
-  JPH::WheeledVehicleController::PreCollide(dt, ps);
-  if (!steer)
-    return;
-  JPH::Wheels &wheels = mConstraint.GetWheels();
-  for (size_t i = 0; i < wheels.size() && i < steer->size(); ++i)
-    wheels[i]->SetSteerAngle((*steer)[i]);
-}
 
 ackermann_settings::ackermann_settings() = default;
 

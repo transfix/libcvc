@@ -284,6 +284,27 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("engine_min_rpm").number(d.engine_min_rpm);
   w.key("engine_max_rpm").number(d.engine_max_rpm);
   w.key("engine_inertia").number(d.engine_inertia);
+  w.key("engine_friction_curve").begin_array();
+  for (const auto &p : d.engine_friction_curve) {
+    w.begin_array();
+    w.number(p.first);
+    w.number(p.second);
+    w.end_array();
+  }
+  w.end_array();
+  w.key("clutch_strength").number(d.clutch_strength);
+  w.key("converter_k").number(d.converter_k);
+  w.key("converter_stall").number(d.converter_stall);
+  w.key("converter_coupling").number(d.converter_coupling);
+  w.key("driveline_efficiency").number(d.driveline_efficiency);
+  w.key("torque_curve").begin_array();
+  for (const auto &p : d.torque_curve) {
+    w.begin_array();
+    w.number(p.first);
+    w.number(p.second);
+    w.end_array();
+  }
+  w.end_array();
   w.key("gear_ratios").begin_array();
   for (const double g : d.gear_ratios)
     w.number(g);
@@ -292,6 +313,8 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("differential_ratio").number(d.differential_ratio);
   w.key("shift_up_rpm").number(d.shift_up_rpm);
   w.key("shift_down_rpm").number(d.shift_down_rpm);
+  w.key("shift_up_rpm_light").number(d.shift_up_rpm_light);
+  w.key("shift_down_rpm_light").number(d.shift_down_rpm_light);
   w.key("max_accel").number(d.max_accel);
   w.key("max_decel").number(d.max_decel);
   w.key("drag_coefficient").number(d.drag_coefficient);
@@ -301,6 +324,24 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("tire_peak_slip").number(d.tire_peak_slip);
   w.key("tire_peak_slip_angle").number(d.tire_peak_slip_angle);
   w.key("tire_sliding").number(d.tire_sliding);
+  {
+    const energy_source &e = d.energy;
+    w.key("energy_source").begin_object();
+    w.key("type").string(e.type == energy_source::kind::battery ? "battery"
+                         : e.type == energy_source::kind::fuel  ? "fuel"
+                                                                : "none");
+    w.key("capacity").number(e.capacity);
+    w.key("initial_charge").number(e.initial_charge);
+    w.key("motor_efficiency").number(e.motor_efficiency);
+    w.key("regen_efficiency").number(e.regen_efficiency);
+    w.key("max_regen_power").number(e.max_regen_power);
+    w.key("tank").number(e.tank);
+    w.key("indicated_efficiency").number(e.indicated_efficiency);
+    w.key("heating_value").number(e.heating_value);
+    w.key("accessory_power").number(e.accessory_power);
+    w.end_object();
+  }
+  w.key("energy_ledger").boolean(d.energy_ledger);
   w.key("axles").begin_array();
   for (const axle_desc &a : d.axles) {
     w.begin_object();
@@ -336,6 +377,7 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("speed").number(s.speed);
   w.key("steer").number(s.steer);
   w.key("steer_command").number(s.steer_command);
+  w.key("accel_trim").number(s.accel_trim);
   w.key("throttle").number(s.throttle);
   w.key("brake").number(s.brake);
   w.key("hand_brake").number(s.hand_brake);
@@ -343,6 +385,37 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("engine_rpm").number(s.engine_rpm);
   w.key("aero_force").vec(s.aero_force);
   w.key("air_velocity").vec(s.air_velocity);
+  {
+    const vehicle_energy &e = s.energy;
+    w.key("energy").begin_object();
+    w.key("supplied").number(e.supplied);
+    w.key("idle").number(e.idle);
+    w.key("brake").number(e.brake);
+    w.key("tire").number(e.tire);
+    w.key("aero").number(e.aero);
+    w.key("rolling").number(e.rolling);
+    w.key("medium").number(e.medium);
+    w.key("drivetrain").number(e.drivetrain);
+    w.key("drivetrain_split").number(e.drivetrain_split);
+    w.key("suspension").number(e.suspension);
+    w.key("chassis_damping").number(e.chassis_damping);
+    w.key("fields").number(e.fields);
+    w.key("stored").number(e.stored);
+    w.key("residual").number(e.residual);
+    w.key("kinetic").number(e.kinetic);
+    w.key("potential").number(e.potential);
+    w.key("spring").number(e.spring);
+    w.key("engine").number(e.engine);
+    w.key("regen").number(e.regen);
+    w.key("source").number(e.source);
+    w.key("charge").number(e.charge);
+    w.key("fuel_used").number(e.fuel_used);
+    w.key("fuel_left").number(e.fuel_left);
+    w.key("distance").number(e.distance);
+    w.key("power").number(e.power);
+    w.key("wh_per_km").number(e.wh_per_km());
+    w.end_object();
+  }
   w.key("wheels").begin_array();
   for (const wheel_state &h : s.wheels) {
     w.begin_object();

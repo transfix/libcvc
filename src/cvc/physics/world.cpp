@@ -310,7 +310,7 @@ struct world::impl {
     std::string trailer;
     if (vehicles.size() > 0) {
       trailer.assign(kVehicleMagic, sizeof(kVehicleMagic));
-      vehicles.save(trailer);
+      vehicles.save(*be, trailer);
     }
     // Then the ruts of rutted media (field::ruts): world state like the bodies'.
     if (fields.has_ruts()) {
@@ -893,7 +893,7 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   std::size_t pos = 0;
   if (want_vehicles) {
     pos = sizeof(kVehicleMagic);
-    _impl->vehicles.restore(rest, pos);
+    _impl->vehicles.restore(*_impl->be, rest, pos);
   }
   if (want_ruts) {
     if (!section(pos, kRutMagic))

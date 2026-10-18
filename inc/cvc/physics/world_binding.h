@@ -31,7 +31,11 @@
 //   ... Python:     json.loads(pycvc.state_get(app, "physics.snapshot_json"))
 //
 // Keys, relative to the prefix. A key that is unset is seeded with the world's
-// value (the knob idiom: whatever set it first, a scene or a script, wins). An
+// value (the knob idiom: whatever set it first, a scene or a script, wins). Every key the
+// binding owns says what it is, for other applications: its comment (cvc::state::comment) and
+// its properties (cvc::state::property). Each has "access" (build | knob | command |
+// telemetry); a number has "unit" (SI; "1" for a ratio); and a knob or command has a recommended
+// "min" and "max", for a UI or a validator. The world validates on its own. An
 // unreadable value is ignored, never thrown into a frame. pull() reads the tree only
 // when something under the prefix changed since the last pull (every time if a key
 // is a link into another scope), so an unchanged tree costs a pull nothing.
@@ -93,11 +97,15 @@
 //     bodies.<name>.position.{x,y,z}, rotation.{w,x,y,z}, velocity.{x,y,z},
 //       angular_velocity.{x,y,z}, active, field_force.{x,y,z}, immersed_volume
 //     vehicles.<name>.chassis, speed, steer, steer_command, throttle, brake,
-//       hand_brake, gear, engine_rpm, position.*, rotation.*, velocity.*,
+//       hand_brake, gear, engine_rpm, accel_trim, position.*, rotation.*, velocity.*,
 //       angular_velocity.*, aero_force.{x,y,z}, air_velocity.{x,y,z}
 //     vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact,
 //       contact_point.{x,y,z}, load, longitudinal_slip, lateral_slip, friction,
 //       rolling_resistance, medium_depth, sinkage, rut, medium_resistance}
+//     vehicles.<name>.energy.{P_W, supplied_J, idle_J, brake_J, tire_J, aero_J, roll_J,
+//       medium_J, drivetrain_J, drivetrain_split_J, suspension_J, chassis_damping_J, fields_J,
+//       stored_J, residual_J, regen_J, source_J, soc, fuel_kg, fuel_left_kg, distance_m,
+//       Wh_per_km}                         the energy ledger (vehicle.h's vehicle_energy)
 //     fields.<name>.kind, ruts.cells, ruts.deepest
 //   and read by every pull():
 //     bodies.<name>.{material, mass, linear_damping, angular_damping, allow_sleeping}
@@ -109,7 +117,11 @@
 //                                                         (world::set_controls)
 //     vehicles.<name>.tuning.{max_steer, max_steer_rate, max_accel, max_decel,
 //       drag_coefficient, frontal_area, air_density, rolling_resistance,
-//       engine_max_torque, engine_min_rpm, engine_max_rpm, shift_up_rpm, shift_down_rpm}
+//       engine_max_torque, engine_min_rpm, engine_max_rpm, shift_up_rpm, shift_down_rpm,
+//       shift_up_rpm_light, shift_down_rpm_light, clutch_strength, converter_k,
+//       converter_stall, converter_coupling, driveline_efficiency, engine_friction_curve}
+//                                          engine_friction_curve is "rpm:N m" points,
+//                                          "700:78, 2040:87, 3400:128" ("none": none)
 //     vehicles.<name>.tuning.axles.<i>.{max_brake_torque, max_hand_brake_torque,
 //       suspension_frequency, suspension_damping, anti_roll_stiffness}
 //                                                         world::set_vehicle

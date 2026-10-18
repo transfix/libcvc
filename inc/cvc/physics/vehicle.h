@@ -65,6 +65,7 @@
 #include <cstdint>
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -91,6 +92,30 @@ struct axle_desc {
   double anti_roll_stiffness = 0.0;   // N/m between the two wheels; 0 = none
 };
 
+// Where a vehicle's energy comes from (the energy ledger, vehicle_energy). The source is
+// bookkeeping on the engine's shaft work: it does not change the dynamics, except that an
+// empty battery or tank gives no more throttle.
+struct energy_source {
+  enum class kind : std::uint8_t { none, battery, fuel };
+  kind type = kind::none;
+  // A battery: the motor draws shaft work / motor_efficiency, and braking returns
+  // regen_efficiency of the braking energy, at most max_regen_power.
+  double capacity = 0.0;         // J (Wh x 3600)
+  double initial_charge = 1.0;   // state of charge when added, in [0, 1]
+  double motor_efficiency = 0.9; // shaft work per electrical energy, (0, 1]
+  double regen_efficiency = 0.0; // [0, 1]
+  double max_regen_power = 0.0;  // W
+  // Fuel, on a Willans line: the engine burns (shaft work + its friction + the accessories)
+  // / indicated_efficiency of chemical energy while fuelled, that is under throttle or at
+  // idle; on the overrun (throttle shut above idle) a diesel cuts its fuel and burns none.
+  // The friction is vehicle_desc::engine_friction_curve's torque x w. tank > 0 tracks what
+  // is left.
+  double tank = 0.0;                 // kg when added; 0 = not tracked
+  double indicated_efficiency = 0.4; // indicated work per chemical energy, (0, 1]
+  double heating_value = 42.6e6;     // J/kg, the lower heating value (diesel)
+  double accessory_power = 0.0;      // W the engine drives besides the vehicle
+};
+
 struct vehicle_desc {
   vec3 half_extents{2.25, 1.0, 0.5};   // the chassis box
   vec3 center_of_mass{0.0, 0.0, -0.3}; // body-local
@@ -109,8 +134,40 @@ struct vehicle_desc {
   std::vector<double> gear_ratios{2.66, 1.78, 1.3, 1.0, 0.74};
   double reverse_ratio = -2.9;
   double differential_ratio = 3.42;
-  double shift_up_rpm = 3200.0;
-  double shift_down_rpm = 1600.0;
+  double shift_up_rpm = 3200.0;   // at full throttle
+  double shift_down_rpm = 1600.0; // at full throttle
+  // The shift points with the throttle shut, between which the automatic interpolates with
+  // the throttle, as a real one shifts early when driven gently. 0: the full-throttle ones.
+  double shift_up_rpm_light = 0.0;
+  double shift_down_rpm_light = 0.0;
+  // The engine's (motor's) net torque at the flywheel (shaft) against its speed: (rpm,
+  // fraction of engine_max_torque) points in ascending rpm, linear between them, up to
+  // engine_max_rpm. Empty, Jolt's default: 0.8 at rest, 1.0 at two thirds of max rpm, 0.8 at
+  // max.
+  std::vector<std::pair<double, double>> torque_curve;
+  // The engine's motoring friction (with its pumping and its own pumps) against its speed:
+  // (rpm, N m) points in ascending rpm, linear between them and flat beyond; empty, none.
+  // It brakes the vehicle when the throttle is shut. Under throttle the torque curve is
+  // already net of it, so none applies, but the fuel's Willans line burns for it.
+  std::vector<std::pair<double, double>> engine_friction_curve;
+  // The coupling between engine and gearbox (Jolt's clutch): its torque is
+  // clutch_strength x the slip speed, N m s/rad: a torque converter's coupling, which
+  // converter_k below limits and multiplies.
+  double clutch_strength = 10.0;
+  // A torque converter's capacity (rpm per sqrt(N m), its K-factor; 0 = none, the clutch
+  // alone). With its output held, a converter carries (engine rpm / converter_k)^2 of torque,
+  // which is what an idling engine creeps the vehicle with; the clutch's linear coupling
+  // applies only below that. Without it, Jolt's idle-speed clamp drives the wheels through the
+  // clutch with clutch_strength x the slip, far more than the brakes hold.
+  double converter_k = 0.0;
+  // The converter's torque ratio: converter_stall at stall (the gearbox input still), falling
+  // linearly to 1 at the speed ratio converter_coupling, where it couples. Used with
+  // converter_k > 0.
+  double converter_stall = 2.0;
+  double converter_coupling = 0.85;
+  // The fraction of the engine's torque the driveline (gearbox, transfer case, axles,
+  // hubs) delivers to the wheels. The rest its gears lose (the ledger's drivetrain).
+  double driveline_efficiency = 1.0;
 
   // The driver model's scale: the acceleration at full throttle and the deceleration
   // at full brake it plans with (m/s^2). The measured response corrects them.
@@ -129,16 +186,23 @@ struct vehicle_desc {
   double tire_peak_slip_angle = 0.087; // 5 degrees
   double tire_sliding = 0.95;
 
+  energy_source energy;
+  // Measure the energy ledger (vehicle_state::energy). Off, the engine steps unmeasured
+  // through Jolt's own controller, which the measured step reproduces exactly.
+  bool energy_ledger = true;
+
   // The distance from the rear axle (the rearmost unsteered one) to the frontmost
   // steered one, and the steered axle's track; 0 when the axles do not define them.
   double wheelbase() const;
   double track() const;
 
-  // A HMMWV (M998): 2340 kg, 3.30 m wheelbase, 1.82 m track, 0.47 m wheels, four-wheel
-  // drive, a 0.35 rad/s steering rate.
+  // An M1097A2 HMMWV, from AM General's specification sheet and TM 9-2320-280-10
+  // (vehicle.cpp cites each value): 2676 kg at curb, 3.30 m wheelbase, 1.82 m track,
+  // 37 x 12.5R16.5 tires, a 6.5 L diesel through a four-speed automatic, four-wheel drive.
   static vehicle_desc humvee();
-  // A 1/10-scale racer (RoboRacer / F1TENTH): 3.5 kg, 0.33 m wheelbase, rear drive,
-  // a fast steering servo.
+  // The UT-AV lab's RoboRacer: a Traxxas Ford Fiesta ST Rally chassis (1/10 scale, 4WD) with
+  // an ARRMA 3800 Kv motor behind a VESC and a 3S LiPo, from the lab's configuration
+  // (vehicle.cpp cites each value): 0.324 m wheelbase, 108 mm tires, a 10 m/s speed cap.
   static vehicle_desc roboracer();
 };
 
@@ -190,6 +254,59 @@ struct wheel_state {
   double medium_resistance = 0.0;  // N, its compaction resistance
 };
 
+// A vehicle's energy ledger, in joules since it was added (P3; docs/PHYSICS_API.md).
+//
+// The vehicle is the chassis, its wheels and its drivetrain, engine included: `supplied` is
+// the engine's (motor's) shaft work, the integral of T w, and `idle` what holding the engine at
+// its idle speed added. Every term is measured each engine sub-step:
+//   supplied + idle + fields + drivetrain_split
+//     = brake + tire + aero + rolling + medium + drivetrain + suspension + chassis_damping
+//       + stored + residual
+// drivetrain_split and the residual are the simulation's own energy errors: the first one
+// it is known to make (Jolt's drivetrain step), measured exactly; the second, the rest.
+struct vehicle_energy {
+  double supplied = 0.0;        // the engine's shaft work
+  double idle = 0.0;            // what holding the engine at idle speed added (< 0: the rev limit)
+  double brake = 0.0;           // the brakes, a locked wheel's sliding included
+  double tire = 0.0;            // tire slip, longitudinal and lateral
+  double aero = 0.0;            // aerodynamic drag (< 0 when a tailwind pushed)
+  double rolling = 0.0;         // rolling resistance
+  double medium = 0.0;          // compacting snow, mud or sand
+  double drivetrain = 0.0;      // engine and wheel damping, clutch slip, engine braking
+  double suspension = 0.0;      // the suspension dampers
+  double chassis_damping = 0.0; // the chassis body's own damping
+  double fields = 0.0;          // work fields did on the chassis (buoyancy, a current)
+  // What Jolt's drivetrain step adds: it solves engine, clutch and wheels with its estimate of
+  // the brake and ground torques, then undoes the estimate before the friction solve, which
+  // leaves each driven wheel dL tau / I more energy (dL the clutch's angular impulse, tau the
+  // estimate's). A numerical error, measured exactly; > 0 adds energy.
+  double drivetrain_split = 0.0;
+  double stored = 0.0;   // the change in kinetic + potential + spring energy
+  double residual = 0.0; // supplied + idle + fields + drivetrain_split - dissipated - stored
+  // Stored now: the kinetic energy of the chassis, wheels and engine, the potential energy
+  // above where it was first sampled, and the suspension springs'. As of the ledger's last
+  // sample, at most one engine sub-step before the step's end.
+  double kinetic = 0.0, potential = 0.0, spring = 0.0;
+  // The source's side.
+  double engine = 0.0;    // the engine's shaft work again: what the source paid for
+  double regen = 0.0;     // braking energy returned to a battery
+  double source = 0.0;    // drawn from the battery (electrical) or the fuel (chemical)
+  double charge = 0.0;    // a battery's state of charge, [0, 1]
+  double fuel_used = 0.0; // kg
+  double fuel_left = 0.0; // kg, with a tank
+  double distance = 0.0;  // m the chassis travelled
+  double power = 0.0;     // W supplied in the last step
+  // Source energy per kilometre (the shaft work without a source), Wh/km; 0 before it has
+  // moved.
+  double wh_per_km() const {
+    const double e = source > 0.0 ? source : engine;
+    return distance > 0.0 ? e / 3600.0 / (distance / 1000.0) : 0.0;
+  }
+  double dissipated() const {
+    return brake + tire + aero + rolling + medium + drivetrain + suspension + chassis_damping;
+  }
+};
+
 struct vehicle_state {
   body_id chassis;
   body_state body;
@@ -199,9 +316,11 @@ struct vehicle_state {
   double throttle = 0.0, brake = 0.0, hand_brake = 0.0; // applied this step
   int gear = 0;                                         // -1 reverse, 0 neutral, 1.. forward
   double engine_rpm = 0.0;
-  vec3 aero_force;   // N, the drag applied
-  vec3 air_velocity; // m/s, the air's (a flow field's wind, or still)
+  double accel_trim = 0.0; // m/s^2, the driver model's integral trim (vehicle_set's driver)
+  vec3 aero_force;         // N, the drag applied
+  vec3 air_velocity;       // m/s, the air's (a flow field's wind, or still)
   std::vector<wheel_state> wheels;
+  vehicle_energy energy; // its ledger since it was added
 };
 
 } // namespace physics

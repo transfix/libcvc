@@ -61,8 +61,8 @@ public:
 
   // The facade's vehicle state (actuators, driver memory, the last readback), for
   // world::save / restore. restore() needs the same vehicles, added in the same order.
-  void save(std::string &out) const;
-  void restore(const std::string &in, std::size_t &pos);
+  void save(const world_backend &be, std::string &out) const;
+  void restore(world_backend &be, const std::string &in, std::size_t &pos);
 
 private:
   struct rt {
@@ -77,13 +77,19 @@ private:
     vehicle_controls controls;
     double last_speed = 0.0;
     bool have_last_speed = false;
+    double accel_trim = 0.0; // the driver's integral correction (m/s^2)
+    double trim_sign = 1.0;  // the sign of the command the trim learnt
     // Applied this step.
     double throttle = 0.0, brake = 0.0, hand_brake = 0.0;
     vec3 aero_force, air_velocity;
     std::vector<double> rolling, medium; // per wheel, N
     std::vector<double> medium_load;     // per wheel, N: the load the medium has felt
     vehicle_readback readback;           // the last step's wheels
+    vehicle_energy energy;               // the ledger since added
+    double potential0 = 0.0;             // the potential energy at the first sample
+    bool have_potential0 = false;
   };
+  static void account(rt &v, double dt);
   rt &at(vehicle_id id);
   const rt &at(vehicle_id id) const;
 

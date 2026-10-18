@@ -562,6 +562,16 @@ struct jolt_vehicle {
   // bar (-1 for none): tune_vehicle changes them in place.
   std::vector<JPH::Ref<JPH::WheelSettingsWV>> wheel_settings;
   std::vector<int> bar_of_axle;
+  energy_tally tally; // the energy ledger's measurements (with a ledger)
+  // The shift points with the throttle shut and wide open (rpm).
+  std::pair<float, float> shift_up{0.0f, 0.0f}, shift_down{0.0f, 0.0f};
+  // The clutch's strength and the converter's K-factor (vehicle_desc), for the converter's
+  // capacity each step.
+  float clutch_strength = 10.0f, converter_k = 0.0f;
+  float converter_stall = 1.0f, converter_coupling = 0.85f; // the converter's torque ratio
+  std::vector<float> gears;                                 // the gearbox's own ratios
+  float reverse_gear = 0.0f;
+  bool ledger = false;
 };
 
 // The wheels' ground test: a ray down the suspension, long enough to find the ground under a
@@ -966,6 +976,15 @@ public:
       _added_since_step = false;
     }
     _contacts.begin(_origin);
+    for (auto &entry : _vehicles) {
+      energy_tally &t = entry.second->tally;
+      t.gravity[0] = _cfg.gravity.x;
+      t.gravity[1] = _cfg.gravity.y;
+      t.gravity[2] = _cfg.gravity.z;
+      t.origin[0] = _origin.x;
+      t.origin[1] = _origin.y;
+      t.origin[2] = _origin.z;
+    }
     const JPH::EPhysicsUpdateError err = _ps->Update(
         static_cast<float>(_cfg.fixed_dt), _cfg.collision_steps, _temp.get(), _jobs.get());
     report.saturated = err != JPH::EPhysicsUpdateError::None || _contacts.overflow;
@@ -1056,10 +1075,22 @@ public:
     for (const axle_desc &a : d.axles)
       driven += a.driven ? 1 : 0;
     auto controller = new ackermann_settings;
-    controller->mEngine.mMaxTorque = static_cast<float>(d.engine_max_torque);
+    // The driveline's losses are the engine torque it does not deliver: Jolt gets the
+    // delivered share, and the ledger counts the rest.
+    controller->mEngine.mMaxTorque =
+        static_cast<float>(d.engine_max_torque * d.driveline_efficiency);
     controller->mEngine.mMinRPM = static_cast<float>(d.engine_min_rpm);
     controller->mEngine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
     controller->mEngine.mInertia = static_cast<float>(d.engine_inertia);
+    if (!d.torque_curve.empty()) {
+      controller->mEngine.mNormalizedTorque.Clear();
+      for (const auto &p : d.torque_curve)
+        controller->mEngine.mNormalizedTorque.AddPoint(
+            static_cast<float>(p.first / d.engine_max_rpm), static_cast<float>(p.second));
+    }
+    // Closed-throttle friction is Jolt's engine damping, which set_vehicle_inputs sets.
+    controller->mEngine.mAngularDamping = 0.0f;
+    controller->mTransmission.mClutchStrength = static_cast<float>(d.clutch_strength);
     controller->mTransmission.mMode = JPH::ETransmissionMode::Auto;
     controller->mTransmission.mGearRatios.clear();
     for (const double g : d.gear_ratios)
@@ -1132,6 +1163,29 @@ public:
     }
     auto *ctl = static_cast<ackermann_controller *>(v->constraint->GetController());
     ctl->steer = &v->steer;
+    ctl->driveline_efficiency = d.driveline_efficiency;
+    ctl->engine_friction = d.engine_friction_curve;
+    ctl->accessory_power = d.energy.accessory_power;
+    v->clutch_strength = static_cast<float>(d.clutch_strength);
+    v->converter_k = static_cast<float>(d.converter_k);
+    v->converter_stall = static_cast<float>(d.converter_stall);
+    v->converter_coupling = static_cast<float>(d.converter_coupling);
+    for (const double g : d.gear_ratios)
+      v->gears.push_back(static_cast<float>(g));
+    v->reverse_gear = static_cast<float>(d.reverse_ratio);
+    v->shift_up = {
+        static_cast<float>(d.shift_up_rpm_light > 0.0 ? d.shift_up_rpm_light : d.shift_up_rpm),
+        static_cast<float>(d.shift_up_rpm)};
+    v->shift_down = {static_cast<float>(d.shift_down_rpm_light > 0.0 ? d.shift_down_rpm_light
+                                                                     : d.shift_down_rpm),
+                     static_cast<float>(d.shift_down_rpm)};
+    for (const axle_desc &a : d.axles)
+      ctl->anti_roll.push_back(std::max(0.0, a.anti_roll_stiffness));
+    if (d.energy_ledger) {
+      v->tally.resize(n);
+      v->ledger = true;
+      ctl->tally = &v->tally;
+    }
     v->constraint->SetVehicleCollisionTester(
         new medium_tester(layers::moving, &_probe, &_medium_reach, &_origin, v.get()));
     jolt_vehicle *vp = v.get();
@@ -1160,7 +1214,20 @@ public:
     jolt_vehicle &v = *_vehicles.at(handle);
     auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
     JPH::VehicleEngine &engine = ctl->GetEngine();
-    engine.mMaxTorque = static_cast<float>(d.engine_max_torque);
+    engine.mMaxTorque = static_cast<float>(d.engine_max_torque * d.driveline_efficiency);
+    ctl->driveline_efficiency = d.driveline_efficiency;
+    ctl->engine_friction = d.engine_friction_curve;
+    v.clutch_strength = static_cast<float>(d.clutch_strength);
+    v.converter_k = static_cast<float>(d.converter_k);
+    v.converter_stall = static_cast<float>(d.converter_stall);
+    v.converter_coupling = static_cast<float>(d.converter_coupling);
+    v.shift_up = {
+        static_cast<float>(d.shift_up_rpm_light > 0.0 ? d.shift_up_rpm_light : d.shift_up_rpm),
+        static_cast<float>(d.shift_up_rpm)};
+    v.shift_down = {static_cast<float>(d.shift_down_rpm_light > 0.0 ? d.shift_down_rpm_light
+                                                                    : d.shift_down_rpm),
+                    static_cast<float>(d.shift_down_rpm)};
+    ctl->GetTransmission().mClutchStrength = static_cast<float>(d.clutch_strength);
     engine.mMinRPM = static_cast<float>(d.engine_min_rpm);
     engine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
     JPH::VehicleTransmission &gearbox = ctl->GetTransmission();
@@ -1180,6 +1247,8 @@ public:
         bars[static_cast<size_t>(v.bar_of_axle[ai])].mStiffness =
             static_cast<float>(a.anti_roll_stiffness);
     }
+    for (size_t ai = 0; ai < d.axles.size() && ai < ctl->anti_roll.size(); ++ai)
+      ctl->anti_roll[ai] = std::max(0.0, d.axles[ai].anti_roll_stiffness);
     // A sleeping vehicle wakes to its new settings.
     _ps->GetBodyInterface().ActivateBody(v.body);
   }
@@ -1212,6 +1281,81 @@ public:
                          static_cast<float>(hand_brake) != ctl->GetHandBrakeInput();
     ctl->SetDriverInput(static_cast<float>(forward), 0.0f, static_cast<float>(brake),
                         static_cast<float>(hand_brake));
+    // The torque curve is net: the engine's friction shows only with the throttle shut, as
+    // Jolt's damping w *= 1 - c dt, with c = friction / (I w) at the speed now.
+    {
+      JPH::VehicleEngine &engine = ctl->GetEngine();
+      const float rpm = std::max(engine.GetCurrentRPM(), std::max(engine.mMinRPM, 1.0f));
+      const float w = rpm / JPH::VehicleEngine::cAngularVelocityToRPM;
+      engine.mAngularDamping =
+          forward != 0.0
+              ? 0.0f
+              : static_cast<float>(ctl->friction_torque(rpm) / (double(engine.mInertia) * w));
+    }
+    // The torque converter (vehicle_desc::converter_k > 0). With the engine at w_e and the
+    // gearbox input at w_t (the wheels through the gearing), the speed ratio is w_t / w_e:
+    //  - below the coupling point it multiplies the engine's torque, from converter_stall at
+    //    stall to 1 at the coupling point. Scaling the gear ratios by that torque ratio does it
+    //    without making energy: Jolt's clutch then slips against TR x w_t, and its loss is
+    //    T (w_e - TR w_t), which a converter's efficiency TR x SR <= 1 keeps >= 0;
+    //  - it carries at most (rpm / K)^2: the clutch's linear coupling, at the slip it has now,
+    //    is cut to that, so an idling engine creeps the vehicle as a converter does rather than
+    //    with Jolt's idle clamp behind the whole clutch.
+    // slip_rpm is how far the slip lifts the engine above the gearbox input, for the shifts.
+    float slip_rpm = 0.0f;
+    if (v.converter_k > 0.0f) {
+      JPH::VehicleTransmission &tr = ctl->GetTransmission();
+      const JPH::VehicleEngine &engine = ctl->GetEngine();
+      const int gear = tr.GetCurrentGear();
+      const float base = gear > 0 && gear <= static_cast<int>(v.gears.size())
+                             ? v.gears[static_cast<std::size_t>(gear - 1)]
+                             : (gear < 0 ? v.reverse_gear : 0.0f);
+      float strength = v.clutch_strength, torque_ratio = 1.0f;
+      if (base != 0.0f) {
+        float out = 0.0f, share = 0.0f;
+        for (const JPH::VehicleDifferentialSettings &d : ctl->GetDifferentials()) {
+          float w = 0.0f;
+          int k = 0;
+          for (const int idx : {d.mLeftWheel, d.mRightWheel})
+            if (idx >= 0) {
+              w += v.constraint->GetWheel(static_cast<JPH::uint>(idx))->GetAngularVelocity();
+              ++k;
+            }
+          if (k > 0) {
+            out += d.mEngineTorqueRatio * d.mDifferentialRatio * w / static_cast<float>(k);
+            share += d.mEngineTorqueRatio;
+          }
+        }
+        if (share > 0.0f) {
+          const float w_t = base * out / share, w_e = engine.GetAngularVelocity();
+          const float sr = w_e > 0.0f ? std::min(std::max(w_t / w_e, 0.0f), 1.0f) : 1.0f;
+          if (sr < v.converter_coupling)
+            torque_ratio =
+                v.converter_stall - (v.converter_stall - 1.0f) * sr / v.converter_coupling;
+          slip_rpm = std::max(0.0f, engine.GetCurrentRPM() -
+                                        std::fabs(w_t) * JPH::VehicleEngine::cAngularVelocityToRPM);
+          const float slip = std::fabs(w_e - torque_ratio * w_t);
+          const float r = engine.GetCurrentRPM() / v.converter_k;
+          if (slip * strength > r * r)
+            strength = r * r / slip;
+        }
+      }
+      for (std::size_t g = 0; g < v.gears.size() && g < tr.mGearRatios.size(); ++g)
+        tr.mGearRatios[g] = v.gears[g] * torque_ratio;
+      if (!tr.mReverseGearRatios.empty())
+        tr.mReverseGearRatios[0] = v.reverse_gear * torque_ratio;
+      tr.mClutchStrength = strength;
+    }
+    // The automatic shifts early when driven gently, late at full throttle, on its output's
+    // speed as a real one does: Jolt shifts on the engine's, which a slipping converter lifts,
+    // so the converter's slip is added to the shift points.
+    {
+      const float th = std::min(1.0f, std::fabs(static_cast<float>(forward)));
+      JPH::VehicleTransmission &gears = ctl->GetTransmission();
+      gears.mShiftUpRPM = v.shift_up.first + (v.shift_up.second - v.shift_up.first) * th + slip_rpm;
+      gears.mShiftDownRPM =
+          v.shift_down.first + (v.shift_down.second - v.shift_down.first) * th + slip_rpm;
+    }
     JPH::VehicleTransmission &tr = ctl->GetTransmission();
     if (neutral) {
       tr.mMode = JPH::ETransmissionMode::Manual;
@@ -1224,8 +1368,103 @@ public:
       _ps->GetBodyInterface().ActivateBody(v.body);
   }
 
+  void set_vehicle_loads(std::uint32_t handle, const vehicle_loads &l) override {
+    energy_tally &t = _vehicles.at(handle)->tally;
+    for (int k = 0; k < 4; ++k) {
+      t.loads[k][0] = l.force[k].x;
+      t.loads[k][1] = l.force[k].y;
+      t.loads[k][2] = l.force[k].z;
+      t.loads[k][3] = l.torque[k].x;
+      t.loads[k][4] = l.torque[k].y;
+      t.loads[k][5] = l.torque[k].z;
+    }
+  }
+
+  // The ledger's last sample, field by field (no padding in the bytes).
+  void save_vehicle(std::uint32_t handle, std::string &out) const override {
+    const energy_tally &t = _vehicles.at(handle)->tally;
+    const auto put = [&out](double x) { out.append(reinterpret_cast<const char *>(&x), sizeof x); };
+    put(t.sampled ? 1.0 : 0.0);
+    put(t.h);
+    put(t.kinetic);
+    put(t.potential);
+    put(t.spring);
+    put(t.rot_kinetic);
+    for (int k = 0; k < 3; ++k) {
+      put(t.v[k]);
+      put(t.w[k]);
+    }
+    for (int k = 0; k < 4; ++k)
+      for (int j = 0; j < 6; ++j)
+        put(t.interval_loads[k][j]);
+    put(static_cast<double>(t.compression.size()));
+    for (std::size_t i = 0; i < t.compression.size(); ++i) {
+      put(t.compression[i]);
+      put(t.damping[i]);
+    }
+  }
+
+  void restore_vehicle(std::uint32_t handle, const std::string &in, std::size_t &pos) override {
+    energy_tally &t = _vehicles.at(handle)->tally;
+    const auto get = [&in, &pos]() {
+      double x = 0.0;
+      if (pos + sizeof x > in.size())
+        throw std::invalid_argument("the vehicle state is truncated");
+      std::memcpy(&x, in.data() + pos, sizeof x);
+      pos += sizeof x;
+      return x;
+    };
+    t.sampled = get() != 0.0;
+    t.h = get();
+    t.kinetic = get();
+    t.potential = get();
+    t.spring = get();
+    t.rot_kinetic = get();
+    for (int k = 0; k < 3; ++k) {
+      t.v[k] = get();
+      t.w[k] = get();
+    }
+    for (int k = 0; k < 4; ++k)
+      for (int j = 0; j < 6; ++j)
+        t.interval_loads[k][j] = get();
+    const double n = get();
+    if (n != static_cast<double>(t.compression.size()))
+      throw std::invalid_argument("the vehicle state has a different number of wheels");
+    for (std::size_t i = 0; i < t.compression.size(); ++i) {
+      t.compression[i] = get();
+      t.damping[i] = get();
+    }
+    t.clear_sums();
+  }
+
   void read_vehicle(std::uint32_t handle, vehicle_readback &out) const override {
-    const jolt_vehicle &v = *_vehicles.at(handle);
+    jolt_vehicle &v = *_vehicles.at(handle);
+    // The ledger's sums over the step, which it starts again from zero.
+    {
+      energy_tally &t = v.tally;
+      vehicle_readback::energy_step &e = out.energy;
+      e.measured = v.ledger;
+      e.sampled = t.sampled;
+      e.engine = t.engine;
+      e.idle = t.idle;
+      e.supplied = t.supplied;
+      e.drivetrain = t.drivetrain;
+      e.split = t.split;
+      e.split_braked = t.split_braked;
+      e.indicated = t.indicated;
+      e.brake = t.brake;
+      e.tire = t.tire;
+      for (int k = 0; k < 4; ++k)
+        e.work[k] = t.work[k];
+      e.suspension = t.suspension;
+      e.chassis_damping = t.chassis_damping;
+      e.stored = t.stored;
+      e.distance = t.distance;
+      e.kinetic = t.kinetic;
+      e.potential = t.potential;
+      e.spring = t.spring;
+      t.clear_sums();
+    }
     const auto *ctl = static_cast<const ackermann_controller *>(v.constraint->GetController());
     out.gear = ctl->GetTransmission().GetCurrentGear();
     out.engine_rpm = ctl->GetEngine().GetCurrentRPM();

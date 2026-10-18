@@ -26,10 +26,12 @@
 //                   angular_velocity, active, field_force, field_torque, immersed_volume}],
 //    "fields":    [{id, kind, lo, hi, moving, drag_coefficient, damping, traction, ruts,
 //                   rut_cell, rut_cells, rut_deepest}],
-//    "vehicles":  [{id, desc: {... every vehicle_desc value, axles: [...]},
+//    "vehicles":  [{id, desc: {... every vehicle_desc value, axles: [...], energy_source},
 //                   state: {chassis, position, rotation, velocity, angular_velocity, active,
 //                           speed, steer, steer_command, throttle, brake, hand_brake, gear,
-//                           engine_rpm, aero_force, air_velocity, wheels: [...]}}],
+//                           engine_rpm, aero_force, air_velocity,
+//                           energy: {... every vehicle_energy value, wh_per_km},
+//                           wheels: [...]}}],
 //    "contacts":  [{type, body_a, body_b, sub_shape_a, sub_shape_b, material_a, material_b,
 //                   friction, restitution, point, normal, depth}]}
 // Units are the facade's (SI, world metres). A vector is [x, y, z] and a rotation is

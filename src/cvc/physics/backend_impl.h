@@ -76,6 +76,25 @@ struct vehicle_readback {
     std::uint32_t medium_field = 0xffffffffu; // which medium field
   };
   std::vector<wheel> wheels;
+  // The energy ledger's measurements over the step (J; vehicle.h), and what is stored as of
+  // its last sample. `measured` is false for a vehicle without a ledger.
+  struct energy_step {
+    bool measured = false, sampled = false;
+    double engine = 0.0, idle = 0.0, supplied = 0.0, drivetrain = 0.0, split = 0.0, brake = 0.0,
+           tire = 0.0;
+    double split_braked = 0.0; // the part of split in braked wheels
+    double indicated = 0.0;    // the fuelled engine's work: shaft, friction, accessories
+    double work[4] = {0.0, 0.0, 0.0, 0.0}; // aero, rolling, medium, fields on the chassis
+    double suspension = 0.0, chassis_damping = 0.0, stored = 0.0, distance = 0.0;
+    double kinetic = 0.0, potential = 0.0, spring = 0.0;
+  } energy;
+};
+
+// The loads the facade puts on a vehicle's chassis in a step, at its centre of mass: aero,
+// rolling, medium and fields, in that order.
+struct vehicle_loads {
+  vec3 force[4];
+  vec3 torque[4];
 };
 
 // The medium under a wheel's ground contact (field.h): how deep it lies above the contact
@@ -177,6 +196,18 @@ public:
   }
   virtual void read_vehicle(std::uint32_t handle, vehicle_readback &out) const {
     (void)handle, (void)out;
+  }
+  // The step's chassis loads, for the energy ledger to charge to their causes.
+  virtual void set_vehicle_loads(std::uint32_t handle, const vehicle_loads &l) {
+    (void)handle, (void)l;
+  }
+  // A vehicle's state the engine's own save does not hold (the ledger's last sample), for
+  // world::save / restore.
+  virtual void save_vehicle(std::uint32_t handle, std::string &out) const {
+    (void)handle, (void)out;
+  }
+  virtual void restore_vehicle(std::uint32_t handle, const std::string &in, std::size_t &pos) {
+    (void)handle, (void)in, (void)pos;
   }
   // The engine's share of world::set_vehicle: the powertrain, and each wheel's brakes,
   // suspension spring and anti-roll bar, from `d` (checked by the facade).

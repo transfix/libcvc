@@ -877,6 +877,22 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
             vehicle_desc::humvee().max_steer);
   EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.axles.1.suspension_frequency"),
             vehicle_desc::humvee().axles[1].suspension_frequency);
+  // The powertrain's knobs, seeded too: the converter, the driveline, the light shift points
+  // and the friction curve.
+  {
+    const vehicle_desc h = vehicle_desc::humvee();
+    for (const auto &k : std::vector<std::pair<std::string, double>>{
+             {"clutch_strength", h.clutch_strength},
+             {"converter_k", h.converter_k},
+             {"converter_stall", h.converter_stall},
+             {"converter_coupling", h.converter_coupling},
+             {"driveline_efficiency", h.driveline_efficiency},
+             {"shift_up_rpm_light", h.shift_up_rpm_light},
+             {"shift_down_rpm_light", h.shift_down_rpm_light}})
+      EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning." + k.first), k.second) << k.first;
+    EXPECT_EQ(tree(a, "physics.vehicles.truck.tuning.engine_friction_curve"),
+              "700:78, 2040:87, 3400:128");
+  }
   set_tree(a, "physics.vehicles.truck.command.accel", "2");
   for (int i = 0; i < 200; ++i)
     b.step();
@@ -891,6 +907,7 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   EXPECT_EQ(tree_num(a, "physics.vehicles.truck.wheels.0.contact_point.z"),
             s.wheels[0].contact_point.z);
   EXPECT_EQ(tree(a, "physics.vehicles.truck.gear"), std::to_string(s.gear));
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.accel_trim"), s.accel_trim);
   EXPECT_EQ(tree(a, "physics.vehicles.truck.chassis"), std::to_string(s.chassis.value));
   {
     // The same tick as JSON, for Python and remote readers.
@@ -939,6 +956,20 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   set_tree(a, "physics.vehicles.truck.tuning.max_steer", "7");
   EXPECT_NO_THROW(b.step());
   EXPECT_EQ(w.get_vehicle(v).max_steer, 0.2);
+  // The converter and the friction curve from the tree; a curve that does not parse is
+  // ignored.
+  set_tree(a, "physics.vehicles.truck.tuning.converter_stall", "1.5");
+  set_tree(a, "physics.vehicles.truck.tuning.engine_friction_curve", "800:60; 3000:100");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).converter_stall, 1.5);
+  EXPECT_EQ(w.get_vehicle(v).engine_friction_curve,
+            (std::vector<std::pair<double, double>>{{800.0, 60.0}, {3000.0, 100.0}}));
+  set_tree(a, "physics.vehicles.truck.tuning.engine_friction_curve", "800:sixty");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).engine_friction_curve.size(), 2u);
+  set_tree(a, "physics.vehicles.truck.tuning.engine_friction_curve", "none");
+  b.step();
+  EXPECT_TRUE(w.get_vehicle(v).engine_friction_curve.empty());
   // Pedals.
   set_tree(a, "physics.vehicles.truck.controls.hand_brake", "1");
   b.step();
@@ -948,6 +979,48 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   w.remove_vehicle(v);
   EXPECT_NO_THROW(b.step());
   EXPECT_NO_THROW(b.step());
+}
+
+// Every key the binding owns says what it is: a comment and an access, a unit on a number, and a
+// recommended range on a knob or a command.
+TEST(PhysicsVehicle, EveryPublishedKeySaysWhatItIs) {
+  REQUIRE_JOLT();
+  cvc::app a;
+  world w(jolt_config());
+  world_binding b(a, w);
+  flat_ground(w, 0.9);
+  const vehicle_id v = settled_humvee(w);
+  b.publish_vehicle("truck", v);
+  set_tree(a, "physics.materials.mud.friction", "0.4");
+  for (int i = 0; i < 5; ++i)
+    b.step();
+  cvc::state &root = cvc::state::instance(a)("physics");
+  int leaves = 0;
+  for (const std::string &full : root.children()) {
+    cvc::state &n = cvc::state::instance(a)(full);
+    if (!n.children().empty())
+      continue; // a group, not a key
+    ++leaves;
+    EXPECT_FALSE(n.comment().empty()) << full << " has no comment";
+    EXPECT_TRUE(n.has_property("access")) << full << " has no access";
+  }
+  EXPECT_GT(leaves, 150);
+  const auto prop = [&](const std::string &k, const std::string &p) {
+    return cvc::state::instance(a)("physics." + k).property(p);
+  };
+  EXPECT_EQ(prop("vehicles.truck.tuning.converter_k", "access"), "knob");
+  EXPECT_EQ(prop("vehicles.truck.tuning.converter_k", "unit"), "rpm/sqrt(N m)");
+  EXPECT_EQ(prop("vehicles.truck.tuning.converter_k", "min"), "0");
+  EXPECT_EQ(prop("vehicles.truck.tuning.converter_k", "max"), "300");
+  EXPECT_EQ(prop("vehicles.truck.tuning.axles.1.suspension_frequency", "unit"), "Hz");
+  EXPECT_EQ(prop("vehicles.truck.speed", "access"), "telemetry");
+  EXPECT_EQ(prop("vehicles.truck.speed", "unit"), "m/s");
+  EXPECT_FALSE(cvc::state::instance(a)("physics.vehicles.truck.speed").has_property("min"));
+  EXPECT_EQ(prop("vehicles.truck.command.accel", "access"), "command");
+  EXPECT_EQ(prop("collision_steps", "max"), "32");
+  EXPECT_EQ(prop("fixed_dt", "access"), "build");
+  EXPECT_EQ(prop("materials.mud.friction", "max"), "2");
+  EXPECT_EQ(prop("vehicles.truck.energy.Wh_per_km", "unit"), "Wh/km");
 }
 
 // A field published to the tree is tuned there, and reports its ruts.
