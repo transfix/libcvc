@@ -252,5 +252,22 @@ The enums are `enum.IntEnum` classes, and an enum argument must be one of their
 members. Where C++ returns an empty `std::optional` or a null pointer, Python gets
 `None`, except for a value: `get_result`, `pop_pending_message` and
 `environment.lookup` raise `KeyError` instead, because `None` is the nil value.
+
+The evaluators, their state, and the intrinsics are wrapped the same way:
+
+```python
+ev = pycvc.stackless_evaluator(pycvc.builtins.make_default_environment())
+st = ev.create_state("(begin (set x 1) (+ x 41))")
+while not ev.step(st):                      # releases the GIL; ev.interrupt() from
+    pass                                    # another thread raises evaluation_interrupted
+st.result, st.stats.get_step_count()        # 42, the step count
+pycvc.encode_evaluator_state(root.child("snap"), st)     # snapshot, decode_... to restore
+
+ctx = pycvc.intrinsics_context()            # state-get, msg-send, spawn, ... over a tree
+ctx.sched, ctx.root = sched, root
+env = pycvc.builtins.make_default_environment()
+pycvc.register_intrinsics(env, ctx)         # each function keeps ctx alive
+```
+
 Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,
-`test_pycvc_state_exec_sched.py`.
+`test_pycvc_state_exec_sched.py`, `test_pycvc_state_exec_eval.py`.
