@@ -185,7 +185,7 @@ def test_script_reader_reads_in_slices():
     assert r.forms() == [[symbol("a"), 1], [symbol("b"), "two"]]
     assert steps > 3
     assert r.source() == '(a 1) (b "two")'
-    assert r.options().max_depth == 256
+    assert r.options().max_depth == pycvc.parse_options().max_depth  # the C++ default
 
 
 def test_script_reader_raises_parse_error():

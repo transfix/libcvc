@@ -25,7 +25,9 @@ namespace cvc::state_exec {
 
 /// Encode a value_t into a state subtree.
 /// native_fn values are stored as a marker ("__native__") since functions
-/// cannot be serialized.
+/// cannot be serialized. The scopes the value's closures capture are written once each,
+/// in an `__envs__` table under `node` that the closures refer to, so closures that share a
+/// scope share it again when decoded, and a closure its own scope binds is no cycle.
 void encode_value(cvc::state &node, const value_t &val);
 
 /// Decode a value_t from a state subtree previously written by encode_value.
@@ -36,12 +38,14 @@ value_t decode_value(cvc::state &node);
 // Environment codec
 // ---------------------------------------------------------------------------
 
-/// Encode an environment chain into a state subtree.
-/// Flattens the scope chain into an indexed list of scope nodes, each
-/// containing its bindings.  native_fn bindings are skipped.
+/// Encode an environment chain into a state subtree: `node` refers to an entry of an
+/// `__envs__` table under it, and each scope in the chain (and each scope a closure bound
+/// in one captures) is an entry with its bindings and a reference to its enclosing scope.
+/// native_fn bindings are skipped.
 void encode_environment(cvc::state &node, const environment_ptr &env);
 
-/// Decode an environment chain from a state subtree.
+/// Decode an environment chain from a state subtree, written by encode_environment (or, in
+/// an older snapshot, as an inline list of scopes).
 environment_ptr decode_environment(cvc::state &node);
 
 // ---------------------------------------------------------------------------

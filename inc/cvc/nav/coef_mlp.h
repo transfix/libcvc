@@ -57,6 +57,10 @@ public:
   // old hosts; only a sigmoid-lam net bumps the version.
   static constexpr std::uint32_t kFormatVersion = 2;
   static constexpr std::uint32_t kFormatVersionLegacy = 1; // pre-sigmoid, all-softplus
+  // v3: a net that takes the slope look-ahead (kFlagFeatSlope). A pre-v3 host would read a
+  // 6-input slope net as a grip net (has_mu's back-compat clause), so the version refuses it
+  // there instead.
+  static constexpr std::uint32_t kFormatVersionSlope = 3;
   // flags bit 0: the output is softplus(net + log(expm1(out_bias))) — the
   // CoefMLP bias-toward-a-known-good-basin trick; the raw out_bias is stored and
   // log(expm1(.)) is folded once at load.
@@ -76,6 +80,10 @@ public:
   // columns carry NO out_bias offset (their bias lives in the last Linear layer), and
   // the file stores lam_soft_max / lam_hard_max as a v2 trailer after the out_bias block.
   static constexpr std::uint32_t kFlagLamSigmoid = 1u << 3;
+  // flags bit 4: the slope look-ahead column (P5 H3): the worst terrain grade cost (r~_g, 1 at
+  // the vehicle's limit) from the agent to its carrot, on veh_params::terrain's plane. Appended
+  // after grip and risk. Needs format v3.
+  static constexpr std::uint32_t kFlagFeatSlope = 1u << 4;
   // Max layer dimension the CPU forward() supports (its stack activation arrays).
   // load()/from_layers reject a wider net at the boundary rather than overflowing.
   // The CUDA drive (drive.cu d_mlp) has a tighter cap (64) it guards separately.
@@ -140,7 +148,10 @@ public:
   // Feature-layout queries the drive builds the input vector from. has_mu: a 6-input net
   // with no risk flag is grip (the historical widen_coef_mlp output), so mu is implied there.
   bool has_risk() const { return (flags_ & kFlagFeatRisk) != 0; }
-  bool has_mu() const { return (flags_ & kFlagFeatMu) != 0 || (in_ == 6 && !has_risk()); }
+  bool has_slope() const { return (flags_ & kFlagFeatSlope) != 0; }
+  bool has_mu() const {
+    return (flags_ & kFlagFeatMu) != 0 || (in_ == 6 && !has_risk() && !has_slope());
+  }
   bool has_lam() const { return out_ >= 4; }      // 4th output (col 3) = learned reroute lam_soft
   bool has_lam_hard() const { return out_ >= 5; } // 5th output (col 4) = learned lam_hard
   // True when the lam columns are lam_max*sigmoid(raw) (paper two-head form), not softplus.

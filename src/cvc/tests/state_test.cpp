@@ -333,6 +333,34 @@ TEST_F(StateTestFixture, ChildrenWithRegex) {
 // State Metadata Tests
 // ===========================
 
+// Properties: named metadata strings beside the comment, such as a recommended range.
+TEST_F(StateTestFixture, PropertiesSetGetRemoveAndReset) {
+  cvc::state &k = cvc::state::instance(ctx)("test.props.max_steer");
+  std::vector<std::string> fired;
+  k.propertyChanged.connect([&](const std::string &key) { fired.push_back(key); });
+  k.property("min", "0.05").property("max", "0.8").property("unit", "rad");
+  EXPECT_EQ(k.property("min"), "0.05");
+  EXPECT_EQ(k.property("max"), "0.8");
+  EXPECT_TRUE(k.has_property("unit"));
+  EXPECT_FALSE(k.has_property("step"));
+  EXPECT_EQ(k.property("step"), "");
+  EXPECT_EQ(k.property_keys(), (std::vector<std::string>{"max", "min", "unit"}));
+  EXPECT_EQ(fired, (std::vector<std::string>{"min", "max", "unit"}));
+  // The same value again changes nothing; "" removes the key.
+  k.property("min", "0.05");
+  EXPECT_EQ(fired.size(), 3u);
+  k.property("unit", "");
+  EXPECT_FALSE(k.has_property("unit"));
+  EXPECT_EQ(fired.back(), "unit");
+  // Metadata does not set the node.
+  EXPECT_FALSE(k.initialized());
+  EXPECT_EQ(k.value(), "");
+  // reset() clears them.
+  k.reset();
+  EXPECT_TRUE(k.property_keys().empty());
+  cvc::state::instance(ctx)("test").reset();
+}
+
 TEST_F(StateTestFixture, CommentSetAndGet) {
   std::string comment = "This is a test comment";
   cvc::state::instance(ctx)("test.comment").comment(comment);

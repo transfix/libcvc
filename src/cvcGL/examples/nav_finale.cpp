@@ -13,6 +13,9 @@
 // occupancy is rasterized in C++ straight from the bundle's buildings.glb
 // (cvc::nav::mesh_footprint, the C++ building_occupancy). A 2-D picture-in-picture minimap in
 // the corner shows every agent's position and the line to the target it is chasing.
+// The ground is the bundle's terrain, the cvc::height_field the buildings were placed on
+// (the satellite aerial draped over it), and the vehicles, routes, staging line and targets
+// ride on its heights, so nothing floats over or sinks into the city.
 //
 // The bundle (terrain.json + buildings.glb) is passed at runtime and never vendored:
 //   nav_finale --bundle /path/to/scenes/austin_south --capture fly --offscreen \
@@ -242,6 +245,7 @@ int main(int argc, char **argv) {
   int ny = nx;
   std::vector<std::uint8_t> occ;
   cvc::geometry cityMesh;
+  navdemo::Terrain terrain; // the bundle's height field (empty for the synthetic city)
   bool haveMesh = false;
   bool usedBundle = false;
 
@@ -249,7 +253,8 @@ int main(int argc, char **argv) {
     // The library's one reader of city bundles: bounds from terrain.json, the
     // buildings as one mesh, and their footprints on the nx*ny grid.
     std::vector<std::uint8_t> bocc;
-    if (navdemo::load_city_bundle(bundle, nx, ny, bounds, bocc, &cityMesh) && !bocc.empty()) {
+    if (navdemo::load_city_bundle(bundle, nx, ny, bounds, bocc, &cityMesh, &terrain) &&
+        !bocc.empty()) {
       std::printf("nav_finale: loading bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
       haveMesh = cityMesh.num_tris() > 0;
@@ -303,6 +308,24 @@ int main(int argc, char **argv) {
   }
   navdemo::add_border(occ.data(), ny, nx);
   const double span = std::max(bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y);
+  // The ground height at (x, y): the terrain the buildings stand on (0 for the synthetic city).
+  // Everything drawn over the ground rides on it.
+  const auto ground = [&](double x, double y) {
+    return terrain.empty() ? 0.0 : terrain.sample(x, y);
+  };
+  double zlo = 0.0, zhi = 0.0; // the terrain's height range, for framing the camera
+  if (!terrain.empty()) {
+    zlo = 1e30;
+    zhi = -1e30;
+    for (const float z : terrain.field->heights())
+      if (!std::isnan(z)) {
+        zlo = std::min(zlo, static_cast<double>(z));
+        zhi = std::max(zhi, static_cast<double>(z));
+      }
+    std::printf("nav_finale: terrain %dx%d, heights %.1f..%.1f m\n", terrain.field->rows(),
+                terrain.field->cols(), zlo, zhi);
+  }
+  const double zmid = 0.5 * (zlo + zhi);
 
   // 2. Eight vehicles. Act 1: enter from the west edge (spread in y), rendezvous on
   //    an eastern staging line. Act 2: pursue 4 moving targets (2 chasers each).
@@ -384,10 +407,13 @@ int main(int argc, char **argv) {
                                                /*vary=*/0.45));
   }
   const double ground_rgb[3] = {0.18, 0.21, 0.25};
+  // The terrain's own mesh (its UVs map [min,max] -> [0,1] like the flat quad's), or a flat
+  // quad for the synthetic city.
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
-  // Drape the bundle's real satellite aerial over the ground (the ground_quad's UVs
-  // map [min,max] -> [0,1]; setTexture handles the top-left/bottom-left V flip).
+      sg.addGraphics("ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
+                                               : navdemo::terrain_mesh(terrain, ground_rgb)));
+  // Drape the bundle's real satellite aerial over the ground (setTexture handles the
+  // top-left/bottom-left V flip).
   cvc::image sat;
   bool haveSat = false;
   if (usedBundle) {
@@ -457,7 +483,7 @@ int main(int argc, char **argv) {
       node->setLabelText(lb);
       node->setShowLabel(true);
       node->setVisible(false); // targets exist only in Act 2
-      node->setPosition(cfg.cx, cfg.cy, tgtHover);
+      node->setPosition(cfg.cx, cfg.cy, ground(cfg.cx, cfg.cy) + tgtHover);
     }
     targetNodes[k] = node;
   }
@@ -505,18 +531,23 @@ int main(int argc, char **argv) {
 
   // The Act-1 STAGING LINE, drawn: a glowing north-south line at the rendezvous
   // x — the previously invisible thing eight vehicles were converging on.
+  // Draped: many short segments, each end 3 m above the terrain, so the line follows the
+  // ground instead of cutting through a hill.
   const double stage_rgb[3] = {0.95, 0.88, 0.45};
-  auto stagingNode = make_lines_node("staging", 1, stage_rgb, 4.0, 3.0);
+  const int STAGE_SEGS = 48;
+  auto stagingNode = make_lines_node("staging", STAGE_SEGS, stage_rgb, 4.0, 3.0);
   if (stagingNode) {
-    std::vector<double> sx(12, 0.0);
-    sx[0] = stageX;
-    sx[1] = bounds.min_y + 0.15 * (bounds.max_y - bounds.min_y);
-    sx[2] = 3.0;
-    sx[3] = stageX;
-    sx[4] = bounds.max_y - 0.15 * (bounds.max_y - bounds.min_y);
-    sx[5] = 3.0;
-    // one segment -> 2 points; buffer is [3*2] but assign(12) covers reuse
-    sx.resize(6);
+    const double y0 = bounds.min_y + 0.15 * (bounds.max_y - bounds.min_y);
+    const double y1 = bounds.max_y - 0.15 * (bounds.max_y - bounds.min_y);
+    std::vector<double> sx(static_cast<std::size_t>(6) * STAGE_SEGS);
+    for (int k = 0; k < STAGE_SEGS; ++k)
+      for (int e = 0; e < 2; ++e) {
+        const double y = y0 + (y1 - y0) * (k + e) / STAGE_SEGS;
+        const std::size_t b = static_cast<std::size_t>(6) * k + 3 * e;
+        sx[b] = stageX;
+        sx[b + 1] = y;
+        sx[b + 2] = ground(stageX, y) + 3.0;
+      }
     stagingNode->updateVertices(sx);
   }
 
@@ -558,7 +589,7 @@ int main(int argc, char **argv) {
   }
 
   CameraController cam(view);
-  cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 0.05 * span);
+  cam.frameBounds(bounds.min_x, bounds.min_y, zlo, bounds.max_x, bounds.max_y, zhi + 0.05 * span);
   cam.setMouseSensitivity(mouseSens); // --mouse-sensitivity / state settings.mouse_sensitivity
   if (moveSpeed > 0.0)
     cam.setMoveSpeed(moveSpeed);
@@ -627,6 +658,7 @@ int main(int argc, char **argv) {
   double actT0 = 0.0; // world time the arc (re)started
   long navSteps = 0, nextReplan = 0;
   std::vector<float> pos(2 * N), head(N), spd(N);
+  std::vector<double> zoff(N, 0.0); // the ground height under each vehicle
   std::vector<int> md(N);
   std::vector<std::uint8_t> rch(N);
   std::vector<float> tgt(2 * NT); // current target world positions (Act 2)
@@ -753,7 +785,8 @@ int main(int argc, char **argv) {
         navdemo::set_ortho_topdown(view, bounds, 10.0, &cam);
       else {
         cam.setMode(CameraController::Mode::Orbit);
-        cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 0.05 * span);
+        cam.frameBounds(bounds.min_x, bounds.min_y, zlo, bounds.max_x, bounds.max_y,
+                        zhi + 0.05 * span);
       }
     }
     actCard.setVisible(uiCards);
@@ -787,17 +820,19 @@ int main(int argc, char **argv) {
       }
       for (int k = 0; k < NT; ++k)
         if (targetNodes[k])
-          targetNodes[k]->setPosition(tgt[2 * k], tgt[2 * k + 1], tgtHover);
+          targetNodes[k]->setPosition(tgt[2 * k], tgt[2 * k + 1],
+                                      ground(tgt[2 * k], tgt[2 * k + 1]) + tgtHover);
       if (engageNode) { // pursuer -> target, streamed
         for (int i = 0; i < N; ++i) {
           const double wx = pos[2 * i], wy = pos[2 * i + 1]; // snapshot pos IS world
           const std::size_t b6 = static_cast<std::size_t>(6) * i;
+          const double tx = tgt[2 * (i % NT)], ty = tgt[2 * (i % NT) + 1];
           engageXyz[b6] = wx;
           engageXyz[b6 + 1] = wy;
-          engageXyz[b6 + 2] = 6.0;
-          engageXyz[b6 + 3] = tgt[2 * (i % NT)];
-          engageXyz[b6 + 4] = tgt[2 * (i % NT) + 1];
-          engageXyz[b6 + 5] = tgtHover * 0.8;
+          engageXyz[b6 + 2] = ground(wx, wy) + 6.0;
+          engageXyz[b6 + 3] = tx;
+          engageXyz[b6 + 4] = ty;
+          engageXyz[b6 + 5] = ground(tx, ty) + tgtHover * 0.8;
         }
         engageNode->updateVertices(engageXyz);
       }
@@ -841,7 +876,9 @@ int main(int argc, char **argv) {
       std::printf("[dbg] f%ld act2=%d a0=(%.0f,%.0f)->wp%zu/%zu a4=(%.0f,%.0f) spd0=%.3f\n", frame,
                   static_cast<int>(act2now), pos[0], pos[1], routes[0].idx, routes[0].wp.size(),
                   pos[8], pos[9], spd[0]);
-    const auto &xyz = glyphs.pack(pos.data(), head.data());
+    for (int i = 0; i < N; ++i) // each vehicle on the ground under it
+      zoff[i] = ground(pos[2 * i], pos[2 * i + 1]);
+    const auto &xyz = glyphs.pack_z(pos.data(), head.data(), zoff.data());
     if (agentNode)
       agentNode->updateVertices(xyz);
 
@@ -857,10 +894,10 @@ int main(int argc, char **argv) {
           const std::size_t b6 = 6 * sseg;
           X[b6] = ax;
           X[b6 + 1] = ay;
-          X[b6 + 2] = 3.0;
+          X[b6 + 2] = ground(ax, ay) + 3.0;
           X[b6 + 3] = rt.wp[w][0];
           X[b6 + 4] = rt.wp[w][1];
-          X[b6 + 5] = 3.0;
+          X[b6 + 5] = ground(rt.wp[w][0], rt.wp[w][1]) + 3.0;
           ax = rt.wp[w][0];
           ay = rt.wp[w][1];
         }
@@ -868,7 +905,7 @@ int main(int argc, char **argv) {
           const std::size_t b6 = 6 * sseg;
           X[b6] = X[b6 + 3] = ax;
           X[b6 + 1] = X[b6 + 4] = ay;
-          X[b6 + 2] = X[b6 + 5] = 3.0;
+          X[b6 + 2] = X[b6 + 5] = ground(ax, ay) + 3.0;
         }
         spineNodes[i]->updateVertices(X);
       }
@@ -884,7 +921,7 @@ int main(int argc, char **argv) {
     if (capturing) {
       // Scripted capture camera: a slow high fly that drifts across the map.
       const double az = 0.4 + 0.25 * std::sin(0.12 * t);
-      navdemo::orbit_camera(bounds, 0.05 * span, az, 42.0 * PI / 180.0, 1.9, eye, focal);
+      navdemo::orbit_camera(bounds, zmid + 0.05 * span, az, 42.0 * PI / 180.0, 1.9, eye, focal);
       view.setCamera(eye[0], eye[1], eye[2], focal[0], focal[1], focal[2], 0, 0, 1, 30);
     } else {
       // Interactive: the CameraController owns the camera (Tab orbit/fly, WASD +

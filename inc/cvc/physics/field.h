@@ -68,9 +68,11 @@
 #define __CVC_PHYSICS_FIELD_H__
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cvc/physics/types.h>
 #include <memory>
+#include <vector>
 
 namespace cvc {
 
@@ -97,6 +99,35 @@ struct field {
   std::array<std::shared_ptr<const cvc::volume>, 3> velocity;
   double drag_coefficient = 1.0; // fluid, flow: C_d
   double damping = 0.0;          // every kind: c, N s/m^4
+  // medium: the friction a vehicle's tire finds in it (snow ~0.3, mud ~0.4), in place of the
+  // ground's; 0 keeps the ground's. A vehicle's wheels also sink into a medium and ride on it
+  // (vehicle.h).
+  double traction = 0.0;
+  // medium: whether it keeps the ruts wheels press into it (plastic snow, mud). A wheel then
+  // leaves its sinkage behind it, a rut map at rut_cell (m) resolution over the field's box; a
+  // wheel in a rut sits at least as deep, and the compaction resistance counts only snow
+  // compacted further (b k (z^2 - rut^2) / 2), so a second pass in the tracks sinks no deeper and
+  // rolls with less drag. The ruts are world state: saved, restored and hashed. set_field
+  // starts the medium fresh.
+  bool ruts = false;
+  double rut_cell = 0.05;
+};
+
+// A medium's ruts (world::field_ruts): the depth (m) the surface has been pressed down, per cell
+// of rut_cell over the field's box in x and y, row-major from (x0, y0), row 0 at min y.
+struct rut_map {
+  double x0 = 0.0, y0 = 0.0, cell = 0.0;
+  int cols = 0, rows = 0;
+  std::vector<float> depth;
+  // The depth at (x, y), or 0 outside the map.
+  double at(double x, double y) const {
+    if (cols <= 0 || rows <= 0 || !(cell > 0.0))
+      return 0.0;
+    const double fc = (x - x0) / cell, fr = (y - y0) / cell;
+    if (!(fc >= 0.0 && fr >= 0.0 && fc < cols && fr < rows))
+      return 0.0;
+    return depth[static_cast<std::size_t>(static_cast<int>(fr)) * cols + static_cast<int>(fc)];
+  }
 };
 
 // A field handle. Never reused: a removed field's id stays invalid.

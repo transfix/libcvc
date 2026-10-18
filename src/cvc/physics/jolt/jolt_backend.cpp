@@ -30,6 +30,7 @@
 
 #include "../backend_impl.h"
 #include "jolt_material.h"
+#include "jolt_vehicle_controller.h"
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/IssueReporting.h>
@@ -37,6 +38,7 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/CastResult.h>
@@ -47,12 +49,17 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/StateRecorder.h>
+#include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
+#include <Jolt/Physics/Vehicle/VehicleConstraint.h>
+#include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 #include <Jolt/RegisterTypes.h>
 #include <algorithm>
 #include <cmath>
@@ -530,6 +537,166 @@ struct shape_builder {
   }
 };
 
+// --- vehicles ---------------------------------------------------------------------
+
+// What the medium under one wheel did this step: written by the wheel's collision test,
+// read by the friction combine and the readback.
+struct wheel_medium_state {
+  bool active = false;
+  double depth = 0.0, sinkage = 0.0, modulus = 0.0, traction = 0.0, rut = 0.0;
+  std::uint32_t field = 0xffffffffu;
+};
+
+// One vehicle's runtime beside Jolt's constraint. Held by pointer, so the collision tester
+// and the friction combine can keep pointers into it.
+struct jolt_vehicle {
+  JPH::Ref<JPH::VehicleConstraint> constraint;
+  JPH::BodyID body;
+  std::vector<wheel_medium_state> media;
+  std::vector<double> loads;    // N, the last step's, for the sinkage
+  std::vector<double> friction; // the ground mu each tire used this step
+  std::vector<double> width, diameter;
+  std::vector<float> steer; // rad, per wheel, set by the facade
+  bool neutral = false;
+  // The wheels' settings, which the constraint's wheels point at, and each axle's anti-roll
+  // bar (-1 for none): tune_vehicle changes them in place.
+  std::vector<JPH::Ref<JPH::WheelSettingsWV>> wheel_settings;
+  std::vector<int> bar_of_axle;
+  energy_tally tally; // the energy ledger's measurements (with a ledger)
+  // The shift points with the throttle shut and wide open (rpm).
+  std::pair<float, float> shift_up{0.0f, 0.0f}, shift_down{0.0f, 0.0f};
+  // The clutch's strength and the converter's K-factor (vehicle_desc), for the converter's
+  // capacity each step.
+  float clutch_strength = 10.0f, converter_k = 0.0f;
+  float converter_stall = 1.0f, converter_coupling = 0.85f; // the converter's torque ratio
+  std::vector<float> gears;                                 // the gearbox's own ratios
+  float reverse_gear = 0.0f;
+  bool ledger = false;
+};
+
+// The wheels' ground test: a ray down the suspension, long enough to find the ground under a
+// medium too (the facade's reach: its deepest medium). Where a medium lies over the ground hit
+// (field.h), the contact is lifted to the medium's compacted surface, depth - sinkage above
+// the ground, the sinkage from the wheel's last load (vehicle.h); the wheel touches it only
+// within its suspension's travel. So a wheel rides on snow, sinks as far as its load drives
+// it, and a vehicle dropped onto deep snow lands on the snow, not on the ground under it.
+// A wheel touches surfaces no steeper than 80 degrees.
+constexpr float kCosMaxSlope = 0.17364818f; // cos 80 degrees
+
+class medium_tester final : public JPH::VehicleCollisionTester {
+public:
+  medium_tester(JPH::ObjectLayer layer, const medium_probe *probe, const double *reach,
+                const vec3 *origin, jolt_vehicle *v)
+      : JPH::VehicleCollisionTester(layer), _probe(probe), _reach(reach), _origin(origin), _v(v) {}
+
+  bool Collide(JPH::PhysicsSystem &ps, const JPH::VehicleConstraint &c, JPH::uint wheel,
+               JPH::RVec3Arg origin, JPH::Vec3Arg direction, const JPH::BodyID &vehicle,
+               JPH::Body *&body, JPH::SubShapeID &sub_shape, JPH::RVec3 &position,
+               JPH::Vec3 &normal, float &length) const override {
+    _v->media[wheel] = wheel_medium_state{};
+    const JPH::WheelSettings *ws = c.GetWheel(wheel)->GetSettings();
+    const float radius = ws->mRadius, max_length = ws->mSuspensionMaxLength;
+    const float reach = static_cast<float>(std::max(0.0, *_reach));
+    const float ray_length = max_length + radius + reach;
+    const JPH::RRayCast ray{origin, ray_length * direction};
+    const JPH::Vec3 up = -direction;
+
+    // The closest hit on a surface no steeper than 80 degrees.
+    class closest final : public JPH::CastRayCollector {
+    public:
+      closest(const JPH::PhysicsSystem &ps, const JPH::RRayCast &ray, JPH::Vec3Arg up)
+          : _ps(ps), _ray(ray), _up(up) {}
+      void AddHit(const JPH::RayCastResult &hit) override {
+        if (hit.mFraction >= GetEarlyOutFraction())
+          return;
+        JPH::Body *b = _ps.GetBodyLockInterfaceNoLock().TryGetBody(hit.mBodyID);
+        if (b == nullptr)
+          return;
+        const JPH::RVec3 p = _ray.GetPointOnRay(hit.mFraction);
+        const JPH::Vec3 n = b->GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, p);
+        if (n.Dot(_up) < kCosMaxSlope)
+          return;
+        body = b;
+        sub_shape = hit.mSubShapeID2;
+        position = p;
+        normal = n;
+        fraction = hit.mFraction;
+        UpdateEarlyOutFraction(hit.mFraction);
+      }
+      JPH::Body *body = nullptr;
+      JPH::SubShapeID sub_shape;
+      JPH::RVec3 position;
+      JPH::Vec3 normal;
+      float fraction = 1.0f;
+
+    private:
+      const JPH::PhysicsSystem &_ps;
+      const JPH::RRayCast &_ray;
+      JPH::Vec3 _up;
+    };
+    const JPH::DefaultBroadPhaseLayerFilter bp = ps.GetDefaultBroadPhaseLayerFilter(mObjectLayer);
+    const JPH::DefaultObjectLayerFilter layers = ps.GetDefaultLayerFilter(mObjectLayer);
+    const JPH::IgnoreSingleBodyFilter self(vehicle);
+    closest hit(ps, ray, up);
+    // Inside the step the bodies are locked already: the no-lock query, as Jolt's testers use.
+    ps.GetNarrowPhaseQueryNoLock().CastRay(ray, JPH::RayCastSettings(), hit, bp, layers, self);
+    if (hit.body == nullptr)
+      return false;
+
+    double distance = static_cast<double>(hit.fraction) * ray_length; // attachment to ground
+    JPH::RVec3 contact = hit.position;
+    wheel_medium m;
+    if (_probe && *_probe) {
+      const vec3 p{_origin->x + static_cast<double>(contact.GetX()),
+                   _origin->y + static_cast<double>(contact.GetY()),
+                   _origin->z + static_cast<double>(contact.GetZ())};
+      if ((*_probe)(p, {up.GetX(), up.GetY(), up.GetZ()}, m) && m.depth > 0.0) {
+        // At least as deep as the rut it finds (field::ruts): pressed snow stays pressed.
+        const double z =
+            std::min(m.depth, std::max(m.rut, bekker_sinkage(_v->loads[wheel], _v->width[wheel],
+                                                             _v->diameter[wheel], m.modulus)));
+        const double rise = m.depth - z;
+        distance -= rise;
+        contact += JPH::RVec3(up) * static_cast<JPH::Real>(rise);
+        wheel_medium_state &s = _v->media[wheel];
+        s.active = true;
+        s.depth = m.depth;
+        s.sinkage = z;
+        s.modulus = m.modulus;
+        s.traction = m.traction;
+        s.rut = m.rut;
+        s.field = m.field;
+      }
+    }
+    const double travel = distance - radius;
+    if (travel > max_length) { // the ground (or the medium on it) is out of the wheel's reach
+      _v->media[wheel] = wheel_medium_state{};
+      return false;
+    }
+    body = hit.body;
+    sub_shape = hit.sub_shape;
+    position = contact;
+    normal = hit.normal;
+    length = static_cast<float>(std::max(0.0, travel));
+    return true;
+  }
+
+  // Between collision tests (world steps that skip them): test again.
+  void PredictContactProperties(JPH::PhysicsSystem &ps, const JPH::VehicleConstraint &c,
+                                JPH::uint wheel, JPH::RVec3Arg origin, JPH::Vec3Arg direction,
+                                const JPH::BodyID &vehicle, JPH::Body *&body,
+                                JPH::SubShapeID &sub_shape, JPH::RVec3 &position, JPH::Vec3 &normal,
+                                float &length) const override {
+    Collide(ps, c, wheel, origin, direction, vehicle, body, sub_shape, position, normal, length);
+  }
+
+private:
+  const medium_probe *_probe;
+  const double *_reach;
+  const vec3 *_origin;
+  jolt_vehicle *_v;
+};
+
 // --- the backend ----------------------------------------------------------------
 
 class jolt_backend final : public world_backend {
@@ -581,7 +748,11 @@ public:
   }
 
   ~jolt_backend() override {
-    // Bodies go before the system; materials (refcounted) after both.
+    // Vehicles before their bodies, bodies before the system; materials (refcounted) after
+    // all of them.
+    for (auto &v : _vehicles)
+      drop_vehicle(*v.second);
+    _vehicles.clear();
     JPH::BodyIDVector ids;
     _ps->GetBodies(ids);
     JPH::BodyInterface &bi = _ps->GetBodyInterface();
@@ -644,6 +815,45 @@ public:
     return out;
   }
 
+  double body_mass(body_id id) const override {
+    JPH::BodyLockRead lock(_ps->GetBodyLockInterface(), checked(id));
+    if (!lock.Succeeded())
+      throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+    const JPH::Body &b = lock.GetBody();
+    if (!b.IsDynamic())
+      return 0.0;
+    const float inverse = b.GetMotionProperties()->GetInverseMass();
+    return inverse > 0.0f ? 1.0 / static_cast<double>(inverse) : 0.0;
+  }
+
+  // Between steps only, like set_material: the friction combine reads a convex shape's
+  // material from the next step on.
+  void set_body_settings(body_id id, const body_settings &s, bool new_mass) override {
+    const JPH::BodyID jid = alive(id);
+    bool moving = false;
+    {
+      JPH::BodyLockWrite lock(_ps->GetBodyLockInterface(), jid);
+      if (!lock.Succeeded())
+        throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+      JPH::Body &b = lock.GetBody();
+      // Each body has its own shape (add_body builds one per body), so this changes no other.
+      if (b.GetShape()->GetType() == JPH::EShapeType::Convex)
+        const_cast<JPH::ConvexShape *>(static_cast<const JPH::ConvexShape *>(b.GetShape()))
+            ->SetMaterial(_mats.at(s.material).GetPtr());
+      if (!b.IsStatic()) {
+        JPH::MotionProperties *mp = b.GetMotionProperties();
+        mp->SetLinearDamping(static_cast<float>(s.linear_damping));
+        mp->SetAngularDamping(static_cast<float>(s.angular_damping));
+        b.SetAllowSleeping(s.allow_sleeping);
+        if (new_mass && b.IsDynamic())
+          mp->ScaleToMass(static_cast<float>(s.mass));
+        moving = true;
+      }
+    }
+    if (moving)
+      _ps->GetBodyInterface().ActivateBody(jid);
+  }
+
   void remove_body(body_id id) override {
     const JPH::BodyID jid = alive(id);
     JPH::BodyInterface &bi = _ps->GetBodyInterface();
@@ -674,6 +884,26 @@ public:
     s.angular_velocity = from_jolt(b.GetAngularVelocity());
     s.active = b.IsActive();
     return s;
+  }
+
+  // One pass without per-body locks: the facade calls it under the world's lock, so no
+  // step or other call changes a body meanwhile.
+  void states(const std::vector<body_id> &ids, std::vector<body_state> &out) const override {
+    const JPH::BodyLockInterfaceNoLock &bodies = _ps->GetBodyLockInterfaceNoLock();
+    out.clear();
+    out.reserve(ids.size());
+    for (const body_id id : ids) {
+      const JPH::Body *b = bodies.TryGetBody(checked(id));
+      if (b == nullptr)
+        throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+      body_state s;
+      s.position = from_engine(b->GetPosition());
+      s.rotation = is_heightfield(*b) ? quat{} : from_jolt(b->GetRotation());
+      s.linear_velocity = from_jolt(b->GetLinearVelocity());
+      s.angular_velocity = from_jolt(b->GetAngularVelocity());
+      s.active = b->IsActive();
+      out.push_back(s);
+    }
   }
 
   void set_state(body_id id, const body_state &s) override {
@@ -746,6 +976,15 @@ public:
       _added_since_step = false;
     }
     _contacts.begin(_origin);
+    for (auto &entry : _vehicles) {
+      energy_tally &t = entry.second->tally;
+      t.gravity[0] = _cfg.gravity.x;
+      t.gravity[1] = _cfg.gravity.y;
+      t.gravity[2] = _cfg.gravity.z;
+      t.origin[0] = _origin.x;
+      t.origin[1] = _origin.y;
+      t.origin[2] = _origin.z;
+    }
     const JPH::EPhysicsUpdateError err = _ps->Update(
         static_cast<float>(_cfg.fixed_dt), _cfg.collision_steps, _temp.get(), _jobs.get());
     report.saturated = err != JPH::EPhysicsUpdateError::None || _contacts.overflow;
@@ -789,6 +1028,483 @@ public:
     h.material = material_of(b, hit.mSubShapeID2);
     h.sub_shape = hit.mSubShapeID2.GetValue();
     return h;
+  }
+
+  // --- vehicles ---------------------------------------------------------------------
+
+  void set_medium_probe(medium_probe probe) override { _probe = std::move(probe); }
+  void set_medium_reach(double reach) override { _medium_reach = reach; }
+
+  bool add_vehicle(const vehicle_setup &s, body_id &chassis, std::uint32_t &handle) override {
+    const vehicle_desc &d = *s.desc;
+    // The chassis: a box about the body origin, its mass at center_of_mass.
+    const JPH::Vec3 half = to_jolt(d.half_extents);
+    const float radius = std::min(JPH::cDefaultConvexRadius, 0.5f * half.ReduceMin());
+    // Settings are reference counted: the box must live on the heap.
+    JPH::Ref<JPH::BoxShapeSettings> box =
+        new JPH::BoxShapeSettings(half, radius, _mats.at(0).GetPtr());
+    JPH::OffsetCenterOfMassShapeSettings shifted(to_jolt(d.center_of_mass), box);
+    const JPH::ShapeSettings::ShapeResult shape = shifted.Create();
+    if (shape.HasError())
+      throw std::invalid_argument(jolt_error(shape, "vehicle chassis"));
+    JPH::BodyCreationSettings bcs(shape.Get(), to_engine(s.position), to_jolt(s.rotation),
+                                  JPH::EMotionType::Dynamic, layers::moving);
+    bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+    bcs.mMassPropertiesOverride.mMass = static_cast<float>(d.mass);
+    bcs.mLinearDamping = 0.0f; // its resistance is the vehicle model's
+    bcs.mAngularDamping = 0.05f;
+    JPH::BodyInterface &bi = _ps->GetBodyInterface();
+    const JPH::BodyID id = bi.CreateAndAddBody(bcs, JPH::EActivation::Activate);
+    if (id.IsInvalid())
+      throw std::length_error("the engine is out of bodies (world_config::max_bodies)");
+    _added_since_step = true;
+
+    auto v = std::make_unique<jolt_vehicle>();
+    v->body = id;
+    const size_t n = 2 * d.axles.size();
+    v->media.resize(n);
+    v->loads.assign(n, 0.0);
+    v->friction.assign(n, 0.0);
+    v->steer.assign(n, 0.0f);
+
+    JPH::VehicleConstraintSettings vs;
+    vs.mUp = JPH::Vec3(0, 0, 1);
+    vs.mForward = JPH::Vec3(1, 0, 0);
+    vs.mMaxPitchRollAngle = JPH::JPH_PI;
+    int driven = 0;
+    for (const axle_desc &a : d.axles)
+      driven += a.driven ? 1 : 0;
+    auto controller = new ackermann_settings;
+    // The driveline's losses are the engine torque it does not deliver: Jolt gets the
+    // delivered share, and the ledger counts the rest.
+    controller->mEngine.mMaxTorque =
+        static_cast<float>(d.engine_max_torque * d.driveline_efficiency);
+    controller->mEngine.mMinRPM = static_cast<float>(d.engine_min_rpm);
+    controller->mEngine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
+    controller->mEngine.mInertia = static_cast<float>(d.engine_inertia);
+    if (!d.torque_curve.empty()) {
+      controller->mEngine.mNormalizedTorque.Clear();
+      for (const auto &p : d.torque_curve)
+        controller->mEngine.mNormalizedTorque.AddPoint(
+            static_cast<float>(p.first / d.engine_max_rpm), static_cast<float>(p.second));
+    }
+    // Closed-throttle friction is Jolt's engine damping, which set_vehicle_inputs sets.
+    controller->mEngine.mAngularDamping = 0.0f;
+    controller->mTransmission.mClutchStrength = static_cast<float>(d.clutch_strength);
+    controller->mTransmission.mMode = JPH::ETransmissionMode::Auto;
+    controller->mTransmission.mGearRatios.clear();
+    for (const double g : d.gear_ratios)
+      controller->mTransmission.mGearRatios.push_back(static_cast<float>(g));
+    controller->mTransmission.mReverseGearRatios = {static_cast<float>(d.reverse_ratio)};
+    controller->mTransmission.mShiftUpRPM = static_cast<float>(d.shift_up_rpm);
+    controller->mTransmission.mShiftDownRPM = static_cast<float>(d.shift_down_rpm);
+    controller->mDifferentials.clear();
+    for (size_t ai = 0; ai < d.axles.size(); ++ai) {
+      const axle_desc &a = d.axles[ai];
+      for (int side = 0; side < 2; ++side) {
+        auto w = new JPH::WheelSettingsWV;
+        w->mPosition = JPH::Vec3(static_cast<float>(a.x),
+                                 static_cast<float>(side == 0 ? a.half_track : -a.half_track),
+                                 static_cast<float>(a.z));
+        w->mSuspensionDirection = JPH::Vec3(0, 0, -1);
+        w->mSteeringAxis = JPH::Vec3(0, 0, 1);
+        w->mWheelUp = JPH::Vec3(0, 0, 1);
+        w->mWheelForward = JPH::Vec3(1, 0, 0);
+        w->mSuspensionMinLength = static_cast<float>(a.suspension_min);
+        w->mSuspensionMaxLength = static_cast<float>(a.suspension_max);
+        w->mSuspensionSpring.mFrequency = static_cast<float>(a.suspension_frequency);
+        w->mSuspensionSpring.mDamping = static_cast<float>(a.suspension_damping);
+        w->mRadius = static_cast<float>(a.wheel_radius);
+        w->mWidth = static_cast<float>(a.wheel_width);
+        w->mInertia = static_cast<float>(a.wheel_inertia);
+        w->mAngularDamping = static_cast<float>(a.wheel_angular_damping);
+        w->mMaxSteerAngle = 0.5f * JPH::JPH_PI; // the facade sets each wheel's angle
+        w->mMaxBrakeTorque = static_cast<float>(a.max_brake_torque);
+        w->mMaxHandBrakeTorque = static_cast<float>(a.max_hand_brake_torque);
+        // Peak 1.0 at the peak slip, tire_sliding at full slide: times the ground's mu.
+        w->mLongitudinalFriction.Clear();
+        w->mLongitudinalFriction.AddPoint(0.0f, 0.0f);
+        w->mLongitudinalFriction.AddPoint(static_cast<float>(d.tire_peak_slip), 1.0f);
+        w->mLongitudinalFriction.AddPoint(1.0f, static_cast<float>(d.tire_sliding));
+        w->mLateralFriction.Clear();
+        w->mLateralFriction.AddPoint(0.0f, 0.0f);
+        w->mLateralFriction.AddPoint(
+            static_cast<float>(JPH::RadiansToDegrees(static_cast<float>(d.tire_peak_slip_angle))),
+            1.0f);
+        w->mLateralFriction.AddPoint(90.0f, static_cast<float>(d.tire_sliding));
+        vs.mWheels.push_back(w);
+        v->wheel_settings.push_back(w);
+        v->width.push_back(a.wheel_width);
+        v->diameter.push_back(2.0 * a.wheel_radius);
+      }
+      v->bar_of_axle.push_back(
+          a.anti_roll_stiffness > 0.0 ? static_cast<int>(vs.mAntiRollBars.size()) : -1);
+      if (a.anti_roll_stiffness > 0.0) {
+        JPH::VehicleAntiRollBar bar;
+        bar.mLeftWheel = static_cast<int>(2 * ai);
+        bar.mRightWheel = static_cast<int>(2 * ai + 1);
+        bar.mStiffness = static_cast<float>(a.anti_roll_stiffness);
+        vs.mAntiRollBars.push_back(bar);
+      }
+      if (a.driven) {
+        JPH::VehicleDifferentialSettings diff;
+        diff.mLeftWheel = static_cast<int>(2 * ai);
+        diff.mRightWheel = static_cast<int>(2 * ai + 1);
+        diff.mDifferentialRatio = static_cast<float>(d.differential_ratio);
+        diff.mEngineTorqueRatio = 1.0f / static_cast<float>(driven);
+        controller->mDifferentials.push_back(diff);
+      }
+    }
+    vs.mController = controller;
+
+    {
+      JPH::BodyLockWrite lock(_ps->GetBodyLockInterface(), id);
+      v->constraint = new JPH::VehicleConstraint(lock.GetBody(), vs);
+    }
+    auto *ctl = static_cast<ackermann_controller *>(v->constraint->GetController());
+    ctl->steer = &v->steer;
+    ctl->driveline_efficiency = d.driveline_efficiency;
+    ctl->engine_friction = d.engine_friction_curve;
+    ctl->accessory_power = d.energy.accessory_power;
+    v->clutch_strength = static_cast<float>(d.clutch_strength);
+    v->converter_k = static_cast<float>(d.converter_k);
+    v->converter_stall = static_cast<float>(d.converter_stall);
+    v->converter_coupling = static_cast<float>(d.converter_coupling);
+    for (const double g : d.gear_ratios)
+      v->gears.push_back(static_cast<float>(g));
+    v->reverse_gear = static_cast<float>(d.reverse_ratio);
+    v->shift_up = {
+        static_cast<float>(d.shift_up_rpm_light > 0.0 ? d.shift_up_rpm_light : d.shift_up_rpm),
+        static_cast<float>(d.shift_up_rpm)};
+    v->shift_down = {static_cast<float>(d.shift_down_rpm_light > 0.0 ? d.shift_down_rpm_light
+                                                                     : d.shift_down_rpm),
+                     static_cast<float>(d.shift_down_rpm)};
+    for (const axle_desc &a : d.axles)
+      ctl->anti_roll.push_back(std::max(0.0, a.anti_roll_stiffness));
+    if (d.energy_ledger) {
+      v->tally.resize(n);
+      v->ledger = true;
+      ctl->tally = &v->tally;
+    }
+    v->constraint->SetVehicleCollisionTester(
+        new medium_tester(layers::moving, &_probe, &_medium_reach, &_origin, v.get()));
+    jolt_vehicle *vp = v.get();
+    v->constraint->SetCombineFriction([vp](JPH::uint wheel, float &lon, float &lat,
+                                           const JPH::Body &ground, const JPH::SubShapeID &sub) {
+      // The ground's mu (its cell's or face's material), or a medium's own traction.
+      float mu = ground.GetFriction();
+      if (const cvc_material *m = as_cvc(ground.GetShape()->GetMaterial(sub)))
+        mu = m->friction;
+      const wheel_medium_state &ms = vp->media[wheel];
+      if (ms.active && ms.traction > 0.0)
+        mu = static_cast<float>(ms.traction);
+      vp->friction[wheel] = mu;
+      lon *= mu;
+      lat *= mu;
+    });
+    _ps->AddConstraint(v->constraint);
+    _ps->AddStepListener(v->constraint);
+    handle = _next_vehicle++;
+    chassis.value = id.GetIndexAndSequenceNumber();
+    _vehicles.emplace(handle, std::move(v));
+    return true;
+  }
+
+  void tune_vehicle(std::uint32_t handle, const vehicle_desc &d) override {
+    jolt_vehicle &v = *_vehicles.at(handle);
+    auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
+    JPH::VehicleEngine &engine = ctl->GetEngine();
+    engine.mMaxTorque = static_cast<float>(d.engine_max_torque * d.driveline_efficiency);
+    ctl->driveline_efficiency = d.driveline_efficiency;
+    ctl->engine_friction = d.engine_friction_curve;
+    v.clutch_strength = static_cast<float>(d.clutch_strength);
+    v.converter_k = static_cast<float>(d.converter_k);
+    v.converter_stall = static_cast<float>(d.converter_stall);
+    v.converter_coupling = static_cast<float>(d.converter_coupling);
+    v.shift_up = {
+        static_cast<float>(d.shift_up_rpm_light > 0.0 ? d.shift_up_rpm_light : d.shift_up_rpm),
+        static_cast<float>(d.shift_up_rpm)};
+    v.shift_down = {static_cast<float>(d.shift_down_rpm_light > 0.0 ? d.shift_down_rpm_light
+                                                                    : d.shift_down_rpm),
+                    static_cast<float>(d.shift_down_rpm)};
+    ctl->GetTransmission().mClutchStrength = static_cast<float>(d.clutch_strength);
+    engine.mMinRPM = static_cast<float>(d.engine_min_rpm);
+    engine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
+    JPH::VehicleTransmission &gearbox = ctl->GetTransmission();
+    gearbox.mShiftUpRPM = static_cast<float>(d.shift_up_rpm);
+    gearbox.mShiftDownRPM = static_cast<float>(d.shift_down_rpm);
+    JPH::VehicleAntiRollBars &bars = v.constraint->GetAntiRollBars();
+    for (size_t ai = 0; ai < d.axles.size() && 2 * ai + 1 < v.wheel_settings.size(); ++ai) {
+      const axle_desc &a = d.axles[ai];
+      for (size_t w = 2 * ai; w < 2 * ai + 2; ++w) {
+        JPH::WheelSettingsWV &ws = *v.wheel_settings[w];
+        ws.mMaxBrakeTorque = static_cast<float>(a.max_brake_torque);
+        ws.mMaxHandBrakeTorque = static_cast<float>(a.max_hand_brake_torque);
+        ws.mSuspensionSpring.mFrequency = static_cast<float>(a.suspension_frequency);
+        ws.mSuspensionSpring.mDamping = static_cast<float>(a.suspension_damping);
+      }
+      if (ai < v.bar_of_axle.size() && v.bar_of_axle[ai] >= 0)
+        bars[static_cast<size_t>(v.bar_of_axle[ai])].mStiffness =
+            static_cast<float>(a.anti_roll_stiffness);
+    }
+    for (size_t ai = 0; ai < d.axles.size() && ai < ctl->anti_roll.size(); ++ai)
+      ctl->anti_roll[ai] = std::max(0.0, d.axles[ai].anti_roll_stiffness);
+    // A sleeping vehicle wakes to its new settings.
+    _ps->GetBodyInterface().ActivateBody(v.body);
+  }
+
+  void remove_vehicle(std::uint32_t handle) override {
+    auto it = _vehicles.find(handle);
+    if (it == _vehicles.end())
+      throw std::invalid_argument("unknown vehicle");
+    drop_vehicle(*it->second);
+    _vehicles.erase(it);
+  }
+
+  void set_vehicle_inputs(std::uint32_t handle, const std::vector<double> &steer,
+                          const std::vector<double> &load, double forward, double brake,
+                          double hand_brake, bool neutral) override {
+    jolt_vehicle &v = *_vehicles.at(handle);
+    bool turned = false;
+    for (size_t i = 0; i < v.steer.size() && i < steer.size(); ++i) {
+      const float a = static_cast<float>(steer[i]);
+      turned = turned || a != v.steer[i];
+      v.steer[i] = a;
+    }
+    for (size_t i = 0; i < v.loads.size() && i < load.size(); ++i)
+      v.loads[i] = load[i];
+    auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
+    // Any change of input wakes a sleeping vehicle: a released brake on a grade must roll.
+    const bool changed = turned || neutral != v.neutral ||
+                         static_cast<float>(forward) != ctl->GetForwardInput() ||
+                         static_cast<float>(brake) != ctl->GetBrakeInput() ||
+                         static_cast<float>(hand_brake) != ctl->GetHandBrakeInput();
+    ctl->SetDriverInput(static_cast<float>(forward), 0.0f, static_cast<float>(brake),
+                        static_cast<float>(hand_brake));
+    // The torque curve is net: the engine's friction shows only with the throttle shut, as
+    // Jolt's damping w *= 1 - c dt, with c = friction / (I w) at the speed now.
+    {
+      JPH::VehicleEngine &engine = ctl->GetEngine();
+      const float rpm = std::max(engine.GetCurrentRPM(), std::max(engine.mMinRPM, 1.0f));
+      const float w = rpm / JPH::VehicleEngine::cAngularVelocityToRPM;
+      engine.mAngularDamping =
+          forward != 0.0
+              ? 0.0f
+              : static_cast<float>(ctl->friction_torque(rpm) / (double(engine.mInertia) * w));
+    }
+    // The torque converter (vehicle_desc::converter_k > 0). With the engine at w_e and the
+    // gearbox input at w_t (the wheels through the gearing), the speed ratio is w_t / w_e:
+    //  - below the coupling point it multiplies the engine's torque, from converter_stall at
+    //    stall to 1 at the coupling point. Scaling the gear ratios by that torque ratio does it
+    //    without making energy: Jolt's clutch then slips against TR x w_t, and its loss is
+    //    T (w_e - TR w_t), which a converter's efficiency TR x SR <= 1 keeps >= 0;
+    //  - it carries at most (rpm / K)^2: the clutch's linear coupling, at the slip it has now,
+    //    is cut to that, so an idling engine creeps the vehicle as a converter does rather than
+    //    with Jolt's idle clamp behind the whole clutch.
+    // slip_rpm is how far the slip lifts the engine above the gearbox input, for the shifts.
+    float slip_rpm = 0.0f;
+    if (v.converter_k > 0.0f) {
+      JPH::VehicleTransmission &tr = ctl->GetTransmission();
+      const JPH::VehicleEngine &engine = ctl->GetEngine();
+      const int gear = tr.GetCurrentGear();
+      const float base = gear > 0 && gear <= static_cast<int>(v.gears.size())
+                             ? v.gears[static_cast<std::size_t>(gear - 1)]
+                             : (gear < 0 ? v.reverse_gear : 0.0f);
+      float strength = v.clutch_strength, torque_ratio = 1.0f;
+      if (base != 0.0f) {
+        float out = 0.0f, share = 0.0f;
+        for (const JPH::VehicleDifferentialSettings &d : ctl->GetDifferentials()) {
+          float w = 0.0f;
+          int k = 0;
+          for (const int idx : {d.mLeftWheel, d.mRightWheel})
+            if (idx >= 0) {
+              w += v.constraint->GetWheel(static_cast<JPH::uint>(idx))->GetAngularVelocity();
+              ++k;
+            }
+          if (k > 0) {
+            out += d.mEngineTorqueRatio * d.mDifferentialRatio * w / static_cast<float>(k);
+            share += d.mEngineTorqueRatio;
+          }
+        }
+        if (share > 0.0f) {
+          const float w_t = base * out / share, w_e = engine.GetAngularVelocity();
+          const float sr = w_e > 0.0f ? std::min(std::max(w_t / w_e, 0.0f), 1.0f) : 1.0f;
+          if (sr < v.converter_coupling)
+            torque_ratio =
+                v.converter_stall - (v.converter_stall - 1.0f) * sr / v.converter_coupling;
+          slip_rpm = std::max(0.0f, engine.GetCurrentRPM() -
+                                        std::fabs(w_t) * JPH::VehicleEngine::cAngularVelocityToRPM);
+          const float slip = std::fabs(w_e - torque_ratio * w_t);
+          const float r = engine.GetCurrentRPM() / v.converter_k;
+          if (slip * strength > r * r)
+            strength = r * r / slip;
+        }
+      }
+      for (std::size_t g = 0; g < v.gears.size() && g < tr.mGearRatios.size(); ++g)
+        tr.mGearRatios[g] = v.gears[g] * torque_ratio;
+      if (!tr.mReverseGearRatios.empty())
+        tr.mReverseGearRatios[0] = v.reverse_gear * torque_ratio;
+      tr.mClutchStrength = strength;
+    }
+    // The automatic shifts early when driven gently, late at full throttle, on its output's
+    // speed as a real one does: Jolt shifts on the engine's, which a slipping converter lifts,
+    // so the converter's slip is added to the shift points.
+    {
+      const float th = std::min(1.0f, std::fabs(static_cast<float>(forward)));
+      JPH::VehicleTransmission &gears = ctl->GetTransmission();
+      gears.mShiftUpRPM = v.shift_up.first + (v.shift_up.second - v.shift_up.first) * th + slip_rpm;
+      gears.mShiftDownRPM =
+          v.shift_down.first + (v.shift_down.second - v.shift_down.first) * th + slip_rpm;
+    }
+    JPH::VehicleTransmission &tr = ctl->GetTransmission();
+    if (neutral) {
+      tr.mMode = JPH::ETransmissionMode::Manual;
+      tr.Set(0, 0.0f);
+    } else if (v.neutral) {
+      tr.mMode = JPH::ETransmissionMode::Auto;
+    }
+    v.neutral = neutral;
+    if (forward != 0.0 || changed)
+      _ps->GetBodyInterface().ActivateBody(v.body);
+  }
+
+  void set_vehicle_loads(std::uint32_t handle, const vehicle_loads &l) override {
+    energy_tally &t = _vehicles.at(handle)->tally;
+    for (int k = 0; k < 4; ++k) {
+      t.loads[k][0] = l.force[k].x;
+      t.loads[k][1] = l.force[k].y;
+      t.loads[k][2] = l.force[k].z;
+      t.loads[k][3] = l.torque[k].x;
+      t.loads[k][4] = l.torque[k].y;
+      t.loads[k][5] = l.torque[k].z;
+    }
+  }
+
+  // The ledger's last sample, field by field (no padding in the bytes).
+  void save_vehicle(std::uint32_t handle, std::string &out) const override {
+    const energy_tally &t = _vehicles.at(handle)->tally;
+    const auto put = [&out](double x) { out.append(reinterpret_cast<const char *>(&x), sizeof x); };
+    put(t.sampled ? 1.0 : 0.0);
+    put(t.h);
+    put(t.kinetic);
+    put(t.potential);
+    put(t.spring);
+    put(t.rot_kinetic);
+    for (int k = 0; k < 3; ++k) {
+      put(t.v[k]);
+      put(t.w[k]);
+    }
+    for (int k = 0; k < 4; ++k)
+      for (int j = 0; j < 6; ++j)
+        put(t.interval_loads[k][j]);
+    put(static_cast<double>(t.compression.size()));
+    for (std::size_t i = 0; i < t.compression.size(); ++i) {
+      put(t.compression[i]);
+      put(t.damping[i]);
+    }
+  }
+
+  void restore_vehicle(std::uint32_t handle, const std::string &in, std::size_t &pos) override {
+    energy_tally &t = _vehicles.at(handle)->tally;
+    const auto get = [&in, &pos]() {
+      double x = 0.0;
+      if (pos + sizeof x > in.size())
+        throw std::invalid_argument("the vehicle state is truncated");
+      std::memcpy(&x, in.data() + pos, sizeof x);
+      pos += sizeof x;
+      return x;
+    };
+    t.sampled = get() != 0.0;
+    t.h = get();
+    t.kinetic = get();
+    t.potential = get();
+    t.spring = get();
+    t.rot_kinetic = get();
+    for (int k = 0; k < 3; ++k) {
+      t.v[k] = get();
+      t.w[k] = get();
+    }
+    for (int k = 0; k < 4; ++k)
+      for (int j = 0; j < 6; ++j)
+        t.interval_loads[k][j] = get();
+    const double n = get();
+    if (n != static_cast<double>(t.compression.size()))
+      throw std::invalid_argument("the vehicle state has a different number of wheels");
+    for (std::size_t i = 0; i < t.compression.size(); ++i) {
+      t.compression[i] = get();
+      t.damping[i] = get();
+    }
+    t.clear_sums();
+  }
+
+  void read_vehicle(std::uint32_t handle, vehicle_readback &out) const override {
+    jolt_vehicle &v = *_vehicles.at(handle);
+    // The ledger's sums over the step, which it starts again from zero.
+    {
+      energy_tally &t = v.tally;
+      vehicle_readback::energy_step &e = out.energy;
+      e.measured = v.ledger;
+      e.sampled = t.sampled;
+      e.engine = t.engine;
+      e.idle = t.idle;
+      e.supplied = t.supplied;
+      e.drivetrain = t.drivetrain;
+      e.split = t.split;
+      e.split_braked = t.split_braked;
+      e.indicated = t.indicated;
+      e.brake = t.brake;
+      e.tire = t.tire;
+      for (int k = 0; k < 4; ++k)
+        e.work[k] = t.work[k];
+      e.suspension = t.suspension;
+      e.chassis_damping = t.chassis_damping;
+      e.stored = t.stored;
+      e.distance = t.distance;
+      e.kinetic = t.kinetic;
+      e.potential = t.potential;
+      e.spring = t.spring;
+      t.clear_sums();
+    }
+    const auto *ctl = static_cast<const ackermann_controller *>(v.constraint->GetController());
+    out.gear = ctl->GetTransmission().GetCurrentGear();
+    out.engine_rpm = ctl->GetEngine().GetCurrentRPM();
+    // The suspension's impulse is over the last collision sub-step.
+    const double dt = _cfg.fixed_dt / std::max(1, _cfg.collision_steps);
+    const JPH::Wheels &wheels = v.constraint->GetWheels();
+    out.wheels.resize(wheels.size());
+    for (size_t i = 0; i < wheels.size(); ++i) {
+      const auto *w = static_cast<const JPH::WheelWV *>(wheels[i]);
+      vehicle_readback::wheel &o = out.wheels[i];
+      wheel_state &ws = o.state;
+      ws = wheel_state{};
+      o.longitudinal = vec3{};
+      o.medium_modulus = 0.0;
+      o.medium_field = 0xffffffffu;
+      ws.steer = w->GetSteerAngle();
+      ws.angular_velocity = w->GetAngularVelocity();
+      ws.rotation = w->GetRotationAngle();
+      ws.suspension_length = w->GetSuspensionLength();
+      ws.contact = w->HasContact();
+      if (ws.contact) {
+        ws.contact_point = from_engine(w->GetContactPosition());
+        ws.contact_normal = from_jolt(w->GetContactNormal());
+        ws.contact_body.value = w->GetContactBodyID().GetIndexAndSequenceNumber();
+        ws.contact_material = material_or_zero(w->GetContactBodyID(), w->GetContactSubShapeID());
+        o.longitudinal = from_jolt(w->GetContactLongitudinal());
+        ws.load = std::max(0.0, static_cast<double>(w->GetSuspensionLambda()) / dt);
+        ws.longitudinal_slip = w->mLongitudinalSlip;
+        ws.lateral_slip = w->mLateralSlip;
+        ws.friction = v.friction[i];
+      }
+      const wheel_medium_state &m = v.media[i];
+      if (m.active) {
+        ws.medium_depth = m.depth;
+        ws.sinkage = m.sinkage;
+        o.medium_modulus = m.modulus;
+        o.medium_field = m.field;
+        ws.rut = m.rut;
+      }
+    }
   }
 
   std::string save_engine() const override {
@@ -848,6 +1564,15 @@ private:
     return jid;
   }
 
+  // A vehicle's constraint off the system, then its chassis.
+  void drop_vehicle(jolt_vehicle &v) {
+    _ps->RemoveStepListener(v.constraint);
+    _ps->RemoveConstraint(v.constraint);
+    JPH::BodyInterface &bi = _ps->GetBodyInterface();
+    bi.RemoveBody(v.body);
+    bi.DestroyBody(v.body);
+  }
+
   material_id material_or_zero(const JPH::BodyID &id, const JPH::SubShapeID &s) const {
     JPH::BodyLockRead lock(_ps->GetBodyLockInterface(), id);
     return lock.Succeeded() ? material_of(lock.GetBody(), s) : material_id(0);
@@ -865,6 +1590,10 @@ private:
   contact_collector _contacts;
   std::unique_ptr<JPH::PhysicsSystem> _ps;
   bool _added_since_step = false;
+  medium_probe _probe;        // the media vehicles' wheels sink into (the facade's fields)
+  double _medium_reach = 0.0; // how far below a wheel's reach the ground may lie under one
+  std::map<std::uint32_t, std::unique_ptr<jolt_vehicle>> _vehicles;
+  std::uint32_t _next_vehicle = 0;
 };
 
 } // namespace
@@ -875,7 +1604,7 @@ std::unique_ptr<world_backend> make_jolt_backend(const world_config &cfg) {
 
 std::uint32_t jolt_capabilities() {
   std::uint32_t caps = cap_dynamics | cap_collision | cap_heightfield | cap_mesh | cap_raycast |
-                       cap_determinism_same_binary | cap_exact_save_restore;
+                       cap_determinism_same_binary | cap_exact_save_restore | cap_vehicles;
 #ifdef JPH_CROSS_PLATFORM_DETERMINISTIC
   caps |= cap_determinism_cross_platform;
 #endif

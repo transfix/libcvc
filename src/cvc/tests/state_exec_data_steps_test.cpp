@@ -572,3 +572,274 @@ TEST_F(DataStepsScheduler, BudgetUsageAndInspectReportTheKinds) {
   ASSERT_TRUE(info);
   EXPECT_GT(info->data_time, 0.0);
 }
+
+TEST_F(DataStepsScheduler, StateSetOfADeepValueSlices) {
+  async_scheduler sched;
+  sched.set_watch_root(&root);
+  root("state_exec.defaults.data.step_nodes").value("16");
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  ictx.sched = &sched;
+  ictx.root = &root;
+  ictx.tracker = &tracker;
+  auto env = builtins::make_default_environment();
+  register_intrinsics(env, &ictx);
+  execute_options opts;
+  opts.env = env;
+  const int pid =
+      sched.execute(std::string("(begin (set a 1) (set i 0)"
+                                " (while (< i 300) (begin (set a (list a)) (set i (+ i 1))))"
+                                " (state-set \"deep.text\" a) (state-set \"deep.n\" 7)"
+                                " (state-get \"deep.text\"))"),
+                    opts);
+  // The list prints a slice per step, and the node is written once the whole string is ready.
+  while (sched.get_process_info(pid)->data_steps == 0)
+    sched.sync_step();
+  EXPECT_EQ(root.findDescendant("deep.text"), nullptr);
+  sched.sync_run();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info);
+  EXPECT_EQ(info->status, process_status::terminated);
+  EXPECT_EQ(root("deep.text").value(), to_string(nested_list(300)));
+  EXPECT_EQ(root("deep.n").value(), "7");
+  EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v), root("deep.text").value());
+  EXPECT_GE(info->data_steps, 300u / 16 - 1);
+  EXPECT_GE(info->data_nodes, 300u);
+}
+
+// ---- state-json / state-from-json ------------------------------------------------------
+//
+// cvc::state::json() and json(j) as data jobs: the same writer and reader (state_json.h), a
+// slice of data.step_nodes units per step.
+
+class DataStepsStateJson : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  cvc::state &root = cvc::state::instance(app_ctx);
+  async_scheduler sched;
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+
+  void SetUp() override {
+    root("state_exec.defaults.data.step_nodes").value("64");
+    sched.set_watch_root(&root);
+    ictx.sched = &sched;
+    ictx.root = &root;
+    ictx.tracker = &tracker;
+    register_intrinsics(env, &ictx);
+    // deep: a 1000-level chain with a value on every node; wide: 20000 children.
+    cvc::state *node = &root("deep");
+    node->value("0");
+    for (int i = 1; i <= 1000; ++i) {
+      node = &(*node)("n");
+      node->value(std::to_string(i));
+    }
+    cvc::state &wide = root("wide");
+    for (int i = 0; i < 20000; ++i)
+      wide("k" + std::to_string(i)).value("v" + std::to_string(i));
+  }
+
+  int submit(const std::string &script, execute_options opts = {}) {
+    opts.env = environment::extend(env);
+    return sched.execute(script, opts);
+  }
+
+  std::string error(int pid) const { return sched.get_exit_error(pid).value_or(""); }
+};
+
+TEST_F(DataStepsStateJson, StateJsonWritesWhatJsonWritesASliceAStep) {
+  for (const char *path : {"deep", "wide"}) {
+    SCOPED_TRACE(path);
+    const int pid = submit(std::string("(state-json \"") + path + "\")");
+    sched.sync_run();
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    ASSERT_EQ(info->status, process_status::terminated) << error(pid);
+    const std::string doc = root(path).json();
+    EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v), doc);
+    // A unit per node and per 256 bytes of text, 64 units a step (a slice overruns by at most its
+    // last node's bytes: deep's longest key is ~2 KB, 8 units).
+    const std::size_t units = root(path).children().size() + 1 + doc.size() / kDataNodeBytes;
+    EXPECT_GE(info->data_nodes, units);
+    EXPECT_GE(info->data_steps, units / (64 + 8) - 1);
+    EXPECT_GT(info->data_steps, 50u);
+  }
+  // A missing node is nil, like state-get.
+  const int missing = submit("(state-json \"no.such.node\")");
+  sched.sync_run();
+  EXPECT_TRUE(sched.get_result(missing)->is_nil());
+}
+
+TEST_F(DataStepsStateJson, StateFromJsonLoadsWhatJsonLoadsASliceAStep) {
+  const int pid = submit("(state-from-json \"copy\" (state-json \"wide\"))");
+  sched.sync_run();
+  const auto info = sched.get_process_info(pid);
+  ASSERT_EQ(info->status, process_status::terminated) << error(pid);
+  EXPECT_EQ(root("copy").json(), root("wide").json());
+  EXPECT_GT(info->data_steps, 200u);
+
+  // Keys are relative to the node, so a document goes back into the node it came from.
+  const std::string doc = root("deep").json();
+  root("saved").value(doc);
+  root("deep").reset(false); // its value and the whole chain
+  const int restore = submit("(state-from-json \"deep\" (state-get \"saved\"))");
+  sched.sync_run();
+  ASSERT_EQ(sched.get_process_info(restore)->status, process_status::terminated) << error(restore);
+  EXPECT_EQ(root("deep").json(), doc);
+}
+
+TEST_F(DataStepsStateJson, OtherProcessesRunBetweenSlices) {
+  root("state_exec.defaults.data.step_nodes").value("4");
+  const int slow = submit("(state-json \"wide\")");
+  while (sched.get_process_info(slow)->data_steps == 0)
+    sched.sync_step();
+  const int quick = submit("(begin 1 2 3)");
+  while (sched.get_process_info(quick)->status != process_status::terminated)
+    sched.sync_step();
+  EXPECT_NE(sched.get_process_info(slow)->status, process_status::terminated);
+  sched.sync_run();
+  EXPECT_EQ(std::get<std::string>(sched.get_result(slow)->v), root("wide").json());
+}
+
+TEST_F(DataStepsStateJson, TheWorkCountsAgainstMaxSteps) {
+  execute_options opts;
+  opts.max_steps = 20;
+  const int pid = submit("(state-json \"wide\")", opts);
+  sched.sync_run();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+}
+
+TEST_F(DataStepsStateJson, AMalformedDocumentSetsNothingThoughItsCheckSpansSteps) {
+  // Thousands of good entries, then an error: the first pass finds it before any is set.
+  std::string doc = "{";
+  for (int i = 0; i < 5000; ++i)
+    doc += "\"k" + std::to_string(i) + "\": \"v\", ";
+  doc += "\"bad\": }";
+  root("doc").value(doc);
+  const int pid = submit("(state-from-json \"target\" (state-get \"doc\"))");
+  sched.sync_run();
+  const auto info = sched.get_process_info(pid);
+  EXPECT_EQ(info->status, process_status::killed);
+  EXPECT_NE(error(pid).find("state-from-json: line 1: expected value"), std::string::npos)
+      << error(pid);
+  EXPECT_GT(info->data_steps, 10u);
+  EXPECT_EQ(root.findDescendant("target.k0"), nullptr);
+}
+
+TEST_F(DataStepsStateJson, TheDocumentIsHeldToTheAllocationLimit) {
+  root("state_exec.defaults.limits.max_alloc_bytes").value("4096");
+  const int pid = submit("(state-json \"wide\")");
+  sched.sync_run();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+  EXPECT_NE(error(pid).find("state-json"), std::string::npos) << error(pid);
+}
+
+TEST_F(DataStepsStateJson, NodesRemovedBetweenSlicesAreStillWritten) {
+  // The walk holds the children it has yet to visit, so dropping them from the tree mid-walk
+  // neither crashes it nor loses them: they are written as they were.
+  root("state_exec.defaults.data.step_nodes").value("16");
+  const std::string before = root("wide").json();
+  const int pid = submit("(state-json \"wide\")");
+  while (sched.get_process_info(pid)->data_steps < 3)
+    sched.sync_step();
+  root("wide").reset(false); // destroys the children the tree owned
+  sched.sync_run();
+  ASSERT_EQ(sched.get_process_info(pid)->status, process_status::terminated) << error(pid);
+  EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v), before);
+  EXPECT_EQ(root("wide").numChildren(), 0u);
+}
+
+// ---- methods and generators inside the process ----------------------------------
+//
+// A class method is a closure run as frames of the process that sends to it, and a DSL
+// generator's body is advanced as a job (make_generator_job): both are the process's own steps,
+// counted against its budget, where each used to run to completion on an evaluator of its own
+// inside one step.
+
+TEST_F(DataStepsScheduler, MethodStepsCountAgainstMaxSteps) {
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  const std::string script = "(begin (defclass C (spin (self n) (begin (set i 0)"
+                             " (while (< i n) (set i (+ i 1))) i))) (set o (C))"
+                             " (send o \"spin\" 2000))";
+  const int done = sched.execute(script);
+  sched.run();
+  auto info = sched.get_process_info(done);
+  ASSERT_TRUE(info);
+  EXPECT_EQ(info->status, process_status::terminated);
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(done)->v), 2000);
+  EXPECT_GT(info->eval_steps, 2000u); // the method's loop, step by step
+
+  execute_options opts;
+  opts.max_steps = 500;
+  const int killed = sched.execute(script, opts);
+  sched.run();
+  EXPECT_EQ(sched.get_process_info(killed)->status, process_status::killed);
+}
+
+TEST_F(DataStepsScheduler, GeneratorBodiesRunASlicePerStep) {
+  root("state_exec.defaults.data.step_nodes").value("16");
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  const std::string script = "(begin (set g (generator (lambda () (begin (set k 0)"
+                             " (while (< k 500) (set k (+ k 1))) (yield k) (yield 7)))))"
+                             " (list (next g) (next g) (next g) (length (collect (range 0 100)))))";
+  const int done = sched.execute(script);
+  sched.run();
+  auto info = sched.get_process_info(done);
+  ASSERT_TRUE(info);
+  ASSERT_EQ(info->status, process_status::terminated);
+  const auto &r = *std::get<list_ptr>(sched.get_result(done)->v);
+  ASSERT_EQ(r.size(), 4u);
+  EXPECT_EQ(std::get<int64_t>(r[0].v), 500);
+  EXPECT_EQ(std::get<int64_t>(r[1].v), 7);
+  EXPECT_TRUE(r[2].is_nil()); // exhausted
+  EXPECT_EQ(std::get<int64_t>(r[3].v), 100);
+  EXPECT_GT(info->data_nodes, 2000u); // the body's steps, and range's values
+  EXPECT_GT(info->data_steps, 100u);
+
+  execute_options opts;
+  opts.max_steps = info->eval_steps + 20; // room for the program, not the generator's body
+  const int killed = sched.execute(script, opts);
+  sched.run();
+  EXPECT_EQ(sched.get_process_info(killed)->status, process_status::killed);
+}
+
+TEST_F(DataStepsScheduler, ForOverAGeneratorGivesTheSameSlicedOrNot) {
+  const std::string script = "(begin (set g (generator (lambda () (begin (set j 0)"
+                             " (while (< j 50) (begin (yield j) (set j (+ j 1))))))))"
+                             " (set s 0) (for x g (set s (+ s x))) s)";
+  for (const char *slice : {"0", "4"}) {
+    root("state_exec.defaults.data.step_nodes").value(slice);
+    scheduler sched;
+    sched.set_watch_root(&root);
+    sched.load_settings();
+    const int pid = sched.execute(script);
+    sched.run();
+    ASSERT_EQ(sched.get_process_info(pid)->status, process_status::terminated) << slice;
+    EXPECT_EQ(std::get<int64_t>(sched.get_result(pid)->v), 49 * 50 / 2) << slice;
+  }
+}
+
+TEST_F(DataStepsScheduler, ConstructorReturnsTheInstanceAfterInitDefers) {
+  // K inherits P's init, a closure that compares two deep lists: the comparison runs as data
+  // steps inside init's frames, and the constructor's value is still the instance, not init's.
+  root("state_exec.defaults.data.step_nodes").value("16");
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  const int pid = sched.execute(
+      std::string("(begin (set a 1) (set b 1) (set i 0)"
+                  " (while (< i 300) (begin (set a (list a)) (set b (list b)) (set i (+ i 1))))"
+                  " (defclass P (init (self x) (begin (set-attr self \"same\" (= a b)) 42)))"
+                  " (defclass K P) (set o (K 1)) (get-attr o \"same\"))"));
+  sched.run();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info);
+  ASSERT_EQ(info->status, process_status::terminated);
+  EXPECT_TRUE(std::get<bool>(sched.get_result(pid)->v));
+  EXPECT_GT(info->data_steps, 0u);
+}

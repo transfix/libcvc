@@ -124,17 +124,17 @@ raw_bytes      ::= 'br' raw_body
 - **Positions.** `parse_error::line()` and `col()` are 1-based, and point at the character where
   the error was found, such as the non-hex character in `"\x4"`. A new line starts after LF,
   after CR, and once after CRLF. Columns count code points, not bytes.
-- **Nesting.** Lists and quotes may nest at most `max_depth` levels, 256 by default.
+- **Nesting.** Lists and quotes may nest at most `max_depth` levels, 100000 by default.
   - `(a (b (c)))` is three levels, and `'x` counts as one, since it reads as `(quote x)`.
   - The parser is stackless. Open lists and quotes live on a heap stack, not on the native
     stack, so no input depth can overflow it.
-  - The limit is for what happens to the data afterwards. Some code still walks values on the
-    native stack: destroying a nested list, the snapshot codec, `to_string`. Deeper input is a
-    `parse_error`, so a script from an untrusted source (a message, an HTTP body, the
-    multiprocess wire) can't produce data those would crash on.
-  - The default fits the 64 KiB default stack of a wasm build. Real scripts nest far less: the
-    deepest in the corpus is 13 levels, and the median is 2. Once that downstream code is
-    iterative too, the default can rise.
+  - So is the code that walks the data afterwards: freeing, printing, comparing, copying, macro
+    expansion, the snapshot codec and the Ariadne channel lint. Each is tested 100000 levels
+    deep on a 64 KiB stack (the default stack of a wasm build). Values crossing into Python go
+    through pycvc's converter, which has its own depth limit.
+  - The default was 256 while some of that code still recursed. It is now a bound on runaway
+    input, not a guard for the native stack. Real scripts nest far less: the deepest in the
+    corpus is 13 levels, and the median is 2.
   - The limit is a parser setting. Like state_exec's other settings, it lives on the state tree;
     see [Parser settings](#parser-settings).
 
@@ -153,7 +153,7 @@ next one in the order applies. `max_depth` must also be positive.
 
 | Key | Meaning | Default |
 |---|---|---|
-| `max_depth` | how many lists and quotes may nest | 256 |
+| `max_depth` | how many lists and quotes may nest | 100000 |
 | `step_tokens` | 0: a scheduler parses a submitted script all at once, when it is submitted. N: it parses the script inside the new process, N tokens per step (see [Reading inside the scheduler](#reading-inside-the-scheduler)) | 0; **1024** for the app's exec scheduler and pycvc's `Exec` |
 
 Who reads them:
@@ -226,8 +226,9 @@ then `state_exec.defaults.data.step_nodes`, then the scheduler's built-in defaul
 A node is an element visited: a list element or a dict entry walked, or an element freed. With
 `step_nodes` = N:
 
-- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print` and `state-data-get` hand their walk
-  to the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
+- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `state-data-get`, `state-json`,
+  `state-from-json` and `state-set` of a list or dict (printed into the node) hand their walk to
+  the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
   done, the call's frame waits and the following steps are **data steps** that each run N more
   nodes. The step that finishes it completes the call. A walk under N nodes finishes in the
   call's own step, so ordinary programs take no extra steps.
@@ -253,13 +254,41 @@ A node is an element visited: a list element or a dict entry walked, or an eleme
 
 The stdlib's materializers are jobs too: `string.split`/`join`/`replace`/`encode`,
 `bytes.slice`/`concat`/`decode` and all of `collections.*`. A string function counts a node per
-256 bytes it scans or copies (developer guide §11, "Sliced work"). String coercion for
-`state-set` still runs whole inside one step, but counts its nodes.
+256 bytes it scans or copies (developer guide §11, "Sliced work").
 
 Measured per node (MSVC Release, `state_exec_bench_test` `DataWalkThroughput`): ~45 ns to free,
 ~70 ns to print, ~250 ns to compare and ~380 ns to copy. So a 1024-node slice costs 0.05-0.4 ms.
 The stdlib jobs (`StdlibJobThroughput`) cost 5-20 ns a node for elements and 200-370 ns for a
 256-byte copy.
+
+**Snapshots of closures.** The codec writes each scope a value's closures capture once, in an
+`__envs__` table under the snapshot node, and a closure refers to its scope's entry. A function
+that `defun` bound in the scope it captures is no cycle, and closures that share a scope share
+it again when decoded. Older snapshots, with each closure's scope chain written inside it, still
+decode.
+
+### Native call nesting
+
+Some native functions call other functions themselves: `apply`, `send`, a class constructor
+running `init`, an inherited `init` running its superclass's. A generator advancing steps an
+evaluator of its own. Each of these nests on the native stack, so a value or class that refers to
+itself could ask for unbounded nesting: `(apply apply L)` with `L` containing itself, or a class
+whose `init` is its own constructor. A level is refused with an error ("native calls nested too
+deeply") past 256 levels (`kMaxNativeNesting`), or when less of the thread's native stack is left
+than `kNativeStackReserve`: 128 KiB on Windows, where a catch block runs before the frames above
+it unwind, and 32 KiB elsewhere. Levels cost from about 0.5 KiB (`apply`) to a few KiB (a
+generator) in a release build.
+
+DSL functions are not levels, and neither are class methods. A method is a closure in its class's
+dict, taking `self` first. `send`, `super` and a constructor's `init` call it through the
+evaluator (`call_function`), so its body runs as frames of the calling process: on the heap, a
+step at a time, against the process's budget.
+
+**Generators.** A DSL generator's body runs on an evaluator of its own, but `next`, `collect` and
+`for` advance it as a job (`make_generator_job`). Each step of its body, or each value of a native
+generator like `range`, is a deep-data node. So with `data.step_nodes` = N, the body runs N
+steps per process step, in data steps, against `max_steps` and `max_time`. A generator's own
+deep-data work slices the same way.
 
 ### Budget by kind
 
@@ -377,7 +406,7 @@ strings. Every row is a case in `state_exec_grammar_test`.
 | `[a]`, `a,b`, `` `a ``, `{}`, `a\|b`, `a\b` | odd one-character or glued symbols | error (reserved) | P2 |
 | `parse("1 2")` | `1`; the rest is ignored | error | P2 |
 | `'` at end of input | `(quote nil)` | error | P2 |
-| 257 nested lists | parsed (no limit) | error at the default `max_depth` | P1b |
+| 100001 nested lists | parsed (no limit) | error at the default `max_depth` | P1b |
 | `; c` CR `1` | comment runs to LF, so no datum | `1` | P2 |
 | `0x1F` | `31.0`, a double (via `strtod`) | `31` | P2 |
 | `#x1F`, `0o17`, `0b101`, `1_000` | symbols | integers | P2 |

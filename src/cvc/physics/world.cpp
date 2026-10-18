@@ -10,6 +10,7 @@
 
 #include "backend_impl.h"
 #include "field_step.h"
+#include "vehicle_step.h"
 
 #include <algorithm>
 #include <chrono>
@@ -148,6 +149,8 @@ std::uint64_t fnv1a(const void *data, size_t n, std::uint64_t h = 14695981039346
 // save() layout: a fixed header, then the engine's bytes.
 constexpr char kMagic[8] = {'C', 'V', 'C', 'P', 'H', 'Y', 'S', '1'};
 constexpr std::uint32_t kFormat = 1;
+constexpr char kVehicleMagic[8] = {'C', 'V', 'C', 'V', 'E', 'H', 'S', '1'};
+constexpr char kRutMagic[8] = {'C', 'V', 'C', 'R', 'U', 'T', 'S', '1'};
 
 struct state_header {
   char magic[8];
@@ -179,6 +182,73 @@ struct world::impl {
   step_report last;
   std::optional<cvc::clock_follower> follower;
   detail::field_set fields;
+  detail::vehicle_set vehicles;
+  // Every body, for get_body, set_body and snapshot(): what it was added as, its settings,
+  // and a static body's state, which only set_state, restore and rebase change.
+  struct body_info {
+    motion_type motion = motion_type::dynamic;
+    bool convex = false; // a sphere, box or hull: one material for the whole body
+    std::uint64_t user_data = 0;
+    body_settings settings;
+    body_state fixed;
+  };
+  std::map<std::uint32_t, body_info> bodies;
+  // Bumped whenever a static body is added, removed, moved or given a material, so
+  // snapshot() rebuilds its shared list of them only then.
+  std::uint64_t static_version = 0;
+  std::shared_ptr<const std::vector<body_snapshot>> static_list;
+  std::uint64_t static_list_version = 0;
+
+  void note_body(body_id id, const body_desc &d) {
+    body_info b;
+    b.motion = d.motion;
+    b.convex = std::holds_alternative<sphere>(d.shape) || std::holds_alternative<box>(d.shape) ||
+               std::holds_alternative<convex_hull>(d.shape);
+    b.user_data = d.user_data;
+    b.settings.material = d.material;
+    if (d.motion == motion_type::dynamic) {
+      const double m = be->body_mass(id); // the engine's, from the density when d.mass is 0
+      b.settings.mass = m > 0.0 ? m : d.mass;
+    }
+    b.settings.linear_damping = d.linear_damping;
+    b.settings.angular_damping = d.angular_damping;
+    b.settings.allow_sleeping = d.allow_sleeping;
+    if (d.motion == motion_type::static_) {
+      b.fixed = be->state(id);
+      ++static_version;
+    }
+    bodies[id.value] = b;
+  }
+
+  void forget_body(body_id id) {
+    const auto it = bodies.find(id.value);
+    if (it == bodies.end())
+      return;
+    if (it->second.motion == motion_type::static_)
+      ++static_version;
+    bodies.erase(it);
+  }
+
+  void reread_static() {
+    for (auto &e : bodies)
+      if (e.second.motion == motion_type::static_) {
+        body_id id;
+        id.value = e.first;
+        e.second.fixed = be->state(id);
+      }
+    ++static_version;
+  }
+
+  body_snapshot snapshot_of(std::uint32_t id, const body_info &b) const {
+    body_snapshot s;
+    s.id.value = id;
+    s.motion = b.motion;
+    s.settings = b.settings;
+    s.user_data = b.user_data;
+    s.state = b.motion == motion_type::static_ ? b.fixed : be->state(s.id);
+    s.fields = fields.load(s.id);
+    return s;
+  }
 
   material_id add_material(const material &m) {
     validate(m);
@@ -196,7 +266,9 @@ struct world::impl {
     const auto t0 = std::chrono::steady_clock::now();
     guarded([&] {
       fields.apply(*be, cfg);
+      vehicles.pre_step(*be, fields, cfg, materials);
       be->step(contacts, r);
+      vehicles.post_step(*be, fields, cfg);
     });
     const auto t1 = std::chrono::steady_clock::now();
     std::sort(contacts.begin(), contacts.end(), [](const contact_event &a, const contact_event &b) {
@@ -233,10 +305,24 @@ struct world::impl {
     h.bodies = be->body_count();
     h.materials = materials.size();
     h.engine_bytes = engine.size();
-    std::vector<std::uint8_t> out(sizeof(h) + engine.size());
+    // The facade's vehicle state (actuators, driver memory, the last wheels) follows the
+    // engine's bytes, only when there are vehicles, so a world without them saves as before.
+    std::string trailer;
+    if (vehicles.size() > 0) {
+      trailer.assign(kVehicleMagic, sizeof(kVehicleMagic));
+      vehicles.save(*be, trailer);
+    }
+    // Then the ruts of rutted media (field::ruts): world state like the bodies'.
+    if (fields.has_ruts()) {
+      trailer.append(kRutMagic, sizeof(kRutMagic));
+      fields.save_ruts(trailer);
+    }
+    std::vector<std::uint8_t> out(sizeof(h) + engine.size() + trailer.size());
     std::memcpy(out.data(), &h, sizeof(h));
     if (!engine.empty())
       std::memcpy(out.data() + sizeof(h), engine.data(), engine.size());
+    if (!trailer.empty())
+      std::memcpy(out.data() + sizeof(h) + engine.size(), trailer.data(), trailer.size());
     return out;
   }
 };
@@ -270,6 +356,11 @@ world::world(const world_config &cfg) : _impl(std::make_unique<impl>()) {
                                      " backend in this build cannot use worker threads "
                                      "(world_config::threads must be 0)");
   _impl->add_material(material{"default"});
+  // The media vehicles' wheels sink into: the fields' own sampler, read-only during a step.
+  _impl->be->set_medium_probe(
+      [fields = &_impl->fields](const vec3 &p, const vec3 &, detail::wheel_medium &out) {
+        return fields->medium_under(p, out);
+      });
 }
 
 world::~world() = default;
@@ -491,7 +582,9 @@ body_id world::add_body(const body_desc &d) {
     const body_id id = _impl->be->add_body(d, shape);
     try {
       _impl->fields.body_added(*_impl->be, id, d);
+      _impl->note_body(id, d);
     } catch (...) {
+      _impl->fields.body_removed(id);
       _impl->be->remove_body(id);
       throw;
     }
@@ -501,8 +594,12 @@ body_id world::add_body(const body_desc &d) {
 
 void world::remove_body(body_id id) {
   std::lock_guard<std::mutex> lock(_impl->mutex);
+  if (_impl->vehicles.is_chassis(id))
+    throw cvc::physics_error("remove_body: body " + std::to_string(id.value) +
+                             " is a vehicle's chassis; remove the vehicle");
   guarded([&] { _impl->be->remove_body(id); });
   _impl->fields.body_removed(id);
+  _impl->forget_body(id);
 }
 
 bool world::contains(body_id id) const {
@@ -541,7 +638,60 @@ void world::set_state(body_id id, const body_state &s) {
       !finite(s.angular_velocity) || !unit_length(s.rotation))
     throw cvc::physics_error("set_state: finite values and a unit rotation are required");
   std::lock_guard<std::mutex> lock(_impl->mutex);
-  guarded([&] { _impl->be->set_state(id, s); });
+  guarded([&] {
+    _impl->be->set_state(id, s);
+    const auto it = _impl->bodies.find(id.value);
+    if (it != _impl->bodies.end() && it->second.motion == motion_type::static_) {
+      it->second.fixed = _impl->be->state(id);
+      ++_impl->static_version;
+    }
+  });
+}
+
+body_settings world::get_body(body_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  const auto it = _impl->bodies.find(id.value);
+  if (it == _impl->bodies.end())
+    throw cvc::physics_error("get_body: unknown or removed body id " + std::to_string(id.value));
+  return it->second.settings;
+}
+
+void world::set_body(body_id id, const body_settings &s) {
+  if (!std::isfinite(s.mass) || !(s.mass >= 0.0) || !std::isfinite(s.linear_damping) ||
+      !(s.linear_damping >= 0.0) || !std::isfinite(s.angular_damping) ||
+      !(s.angular_damping >= 0.0))
+    throw cvc::physics_error("set_body: mass and damping must be finite and >= 0");
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  const auto it = _impl->bodies.find(id.value);
+  const std::string which = "set_body: body " + std::to_string(id.value);
+  if (it == _impl->bodies.end())
+    throw cvc::physics_error("set_body: unknown or removed body id " + std::to_string(id.value));
+  if (_impl->vehicles.is_chassis(id))
+    throw cvc::physics_error(which + " is a vehicle's chassis; tune the vehicle with set_vehicle");
+  impl::body_info &b = it->second;
+  if (s.material >= _impl->materials.size())
+    throw cvc::physics_error("set_body: unknown material id " + std::to_string(s.material));
+  if (s.material != b.settings.material && !b.convex)
+    throw cvc::physics_error(which + " is a mesh or terrain: its materials are its triangles' or "
+                                     "cells' (set_material changes those)");
+  const bool moved = s.mass != b.settings.mass || s.linear_damping != b.settings.linear_damping ||
+                     s.angular_damping != b.settings.angular_damping ||
+                     s.allow_sleeping != b.settings.allow_sleeping;
+  if (b.motion == motion_type::static_ && moved)
+    throw cvc::physics_error(which + " is static: only its material may change");
+  const bool new_mass = s.mass != b.settings.mass;
+  if (new_mass && b.motion != motion_type::dynamic)
+    throw cvc::physics_error(which + " is not dynamic: it has no mass");
+  if (new_mass && !(s.mass > 0.0))
+    throw cvc::physics_error(which + ": a dynamic body's mass must be > 0");
+  guarded([&] {
+    _impl->be->set_body_settings(id, s, new_mass);
+    if (new_mass)
+      _impl->fields.set_mass(id, s.mass);
+  });
+  if (b.motion == motion_type::static_ && s.material != b.settings.material)
+    ++_impl->static_version;
+  b.settings = s;
 }
 
 void world::add_force(body_id id, const vec3 &f) {
@@ -575,6 +725,11 @@ void world::set_field(field_id id, const field &f) {
   guarded([&] { _impl->fields.set(*_impl->be, id, f); });
 }
 
+field world::get_field(field_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->fields.get(id); });
+}
+
 void world::remove_field(field_id id) {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   _impl->fields.remove(id);
@@ -583,6 +738,65 @@ void world::remove_field(field_id id) {
 std::size_t world::field_count() const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   return _impl->fields.size();
+}
+
+rut_map world::field_ruts(field_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->fields.ruts(id); });
+}
+
+vehicle_id world::add_vehicle(const vehicle_desc &d, const vec3 &position, const quat &rotation) {
+  if (!finite(position) || !finite(rotation) || !unit_length(rotation))
+    throw cvc::physics_error("add_vehicle: a finite position and a unit rotation are required");
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] {
+    const vehicle_id id = _impl->vehicles.add(*_impl->be, _impl->fields, d, position, rotation);
+    body_desc chassis; // as vehicle_set::add built it
+    chassis.shape = box{d.half_extents};
+    chassis.mass = d.mass;
+    chassis.linear_damping = 0.0;
+    _impl->note_body(_impl->vehicles.chassis(id), chassis);
+    return id;
+  });
+}
+
+void world::remove_vehicle(vehicle_id id) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  guarded([&] {
+    const body_id chassis = _impl->vehicles.chassis(id);
+    _impl->vehicles.remove(*_impl->be, _impl->fields, id);
+    _impl->forget_body(chassis);
+  });
+}
+
+std::size_t world::vehicle_count() const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->vehicles.size();
+}
+
+void world::drive(vehicle_id id, const drive_command &c) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  _impl->vehicles.drive(id, c);
+}
+
+void world::set_controls(vehicle_id id, const vehicle_controls &c) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  _impl->vehicles.set_controls(id, c);
+}
+
+physics::vehicle_state world::vehicle_state(vehicle_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->vehicles.state(*_impl->be, id); });
+}
+
+vehicle_desc world::get_vehicle(vehicle_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->vehicles.desc(id);
+}
+
+void world::set_vehicle(vehicle_id id, const vehicle_desc &d) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  guarded([&] { _impl->vehicles.tune(*_impl->be, id, d); });
 }
 
 field_load world::field_load_on(body_id id) const {
@@ -650,7 +864,7 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   std::memcpy(&h, state.data(), sizeof(h));
   if (std::memcmp(h.magic, kMagic, sizeof(kMagic)) != 0 || h.format != kFormat)
     throw cvc::physics_error("restore: not a cvc::physics state, or an unknown format");
-  if (h.engine_bytes != state.size() - sizeof(h))
+  if (h.engine_bytes > state.size() - sizeof(h))
     throw cvc::physics_error("restore: the state's length does not match its header");
   std::lock_guard<std::mutex> lock(_impl->mutex);
   if (h.backend != static_cast<std::uint32_t>(_impl->cfg.backend))
@@ -661,16 +875,146 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   const std::string engine(reinterpret_cast<const char *>(state.data()) + sizeof(h),
                            static_cast<size_t>(h.engine_bytes));
   const vec3 origin{h.origin[0], h.origin[1], h.origin[2]};
+  // After the engine's bytes: the vehicles' section exactly when the world has vehicles, then
+  // the ruts' exactly when it has rutted media.
+  const std::string rest(reinterpret_cast<const char *>(state.data()) + sizeof(h) +
+                             static_cast<size_t>(h.engine_bytes),
+                         state.size() - sizeof(h) - static_cast<size_t>(h.engine_bytes));
+  const auto section = [&](std::size_t at, const char(&magic)[8]) {
+    return rest.size() >= at + sizeof(magic) &&
+           std::memcmp(rest.data() + at, magic, sizeof(magic)) == 0;
+  };
+  const bool want_vehicles = _impl->vehicles.size() > 0;
+  const bool want_ruts = _impl->fields.has_ruts();
+  if (want_vehicles != section(0, kVehicleMagic) || (!want_vehicles && !want_ruts && !rest.empty()))
+    throw cvc::physics_error("restore: this world does not hold the vehicles the state was "
+                             "saved with");
   guarded([&] { _impl->be->restore_engine(engine, origin); });
+  std::size_t pos = 0;
+  if (want_vehicles) {
+    pos = sizeof(kVehicleMagic);
+    _impl->vehicles.restore(*_impl->be, rest, pos);
+  }
+  if (want_ruts) {
+    if (!section(pos, kRutMagic))
+      throw cvc::physics_error("restore: this world's rutted media differ from the state's");
+    pos += sizeof(kRutMagic);
+    _impl->fields.restore_ruts(rest, pos);
+  }
+  if (pos != rest.size())
+    throw cvc::physics_error("restore: the state's length does not match its sections");
   _impl->cfg.origin = origin;
   _impl->tick = h.tick;
   _impl->contacts.clear();
+  guarded([&] { _impl->reread_static(); });
 }
 
 std::uint64_t world::state_hash() const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   const std::vector<std::uint8_t> s = _impl->save();
   return fnv1a(s.data(), s.size());
+}
+
+world_snapshot world::snapshot() const {
+  world_snapshot out;
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  out.tick = _impl->tick;
+  out.time = static_cast<double>(_impl->tick) * _impl->cfg.fixed_dt;
+  out.config = _impl->cfg;
+  out.report = _impl->last;
+  out.materials = _impl->materials;
+  out.contacts = _impl->contacts;
+  guarded([&] {
+    // The moving bodies' states in one batch read.
+    std::vector<body_id> ids;
+    std::vector<const impl::body_info *> infos;
+    ids.reserve(_impl->bodies.size());
+    infos.reserve(_impl->bodies.size());
+    for (const auto &e : _impl->bodies)
+      if (e.second.motion != motion_type::static_) {
+        body_id id;
+        id.value = e.first;
+        ids.push_back(id);
+        infos.push_back(&e.second);
+      }
+    std::vector<body_state> states;
+    _impl->be->states(ids, states);
+    out.bodies.resize(ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      body_snapshot &b = out.bodies[i];
+      b.id = ids[i];
+      b.motion = infos[i]->motion;
+      b.settings = infos[i]->settings;
+      b.user_data = infos[i]->user_data;
+      b.state = states[i];
+      b.fields = _impl->fields.load(ids[i]);
+    }
+    if (!_impl->static_list || _impl->static_list_version != _impl->static_version) {
+      auto statics = std::make_shared<std::vector<body_snapshot>>();
+      for (const auto &e : _impl->bodies)
+        if (e.second.motion == motion_type::static_)
+          statics->push_back(_impl->snapshot_of(e.first, e.second));
+      _impl->static_list = std::move(statics);
+      _impl->static_list_version = _impl->static_version;
+    }
+    out.static_bodies = _impl->static_list;
+    out.static_version = _impl->static_version;
+    _impl->fields.snapshot(out.fields);
+    _impl->vehicles.snapshot(*_impl->be, out.vehicles);
+  });
+  return out;
+}
+
+world_snapshot world::snapshot(const std::vector<body_id> &bodies,
+                               const std::vector<vehicle_id> &vehicles,
+                               const std::vector<field_id> &fields) const {
+  world_snapshot out;
+  auto statics = std::make_shared<std::vector<body_snapshot>>();
+  std::vector<std::uint32_t> body_ids, vehicle_ids, field_ids;
+  for (const body_id id : bodies)
+    body_ids.push_back(id.value);
+  for (const vehicle_id id : vehicles)
+    vehicle_ids.push_back(id.value);
+  for (const field_id id : fields)
+    field_ids.push_back(id.value);
+  for (std::vector<std::uint32_t> *ids : {&body_ids, &vehicle_ids, &field_ids}) {
+    std::sort(ids->begin(), ids->end());
+    ids->erase(std::unique(ids->begin(), ids->end()), ids->end());
+  }
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  out.tick = _impl->tick;
+  out.time = static_cast<double>(_impl->tick) * _impl->cfg.fixed_dt;
+  out.config = _impl->cfg;
+  out.report = _impl->last;
+  out.materials = _impl->materials;
+  out.static_version = _impl->static_version;
+  guarded([&] {
+    for (const std::uint32_t id : body_ids) {
+      const auto it = _impl->bodies.find(id);
+      if (it == _impl->bodies.end())
+        continue;
+      (it->second.motion == motion_type::static_ ? *statics : out.bodies)
+          .push_back(_impl->snapshot_of(id, it->second));
+    }
+    for (const std::uint32_t id : vehicle_ids) {
+      vehicle_snapshot v;
+      v.id.value = id;
+      if (!_impl->vehicles.contains(v.id))
+        continue;
+      v.desc = _impl->vehicles.desc(v.id);
+      v.state = _impl->vehicles.state(*_impl->be, v.id);
+      out.vehicles.push_back(std::move(v));
+    }
+    if (!field_ids.empty()) {
+      std::vector<field_snapshot> every;
+      _impl->fields.snapshot(every);
+      for (field_snapshot &f : every)
+        if (std::binary_search(field_ids.begin(), field_ids.end(), f.id.value))
+          out.fields.push_back(std::move(f));
+    }
+  });
+  out.static_bodies = std::move(statics);
+  return out;
 }
 
 vec3 world::origin() const {
@@ -682,7 +1026,10 @@ void world::rebase(const vec3 &new_origin) {
   if (!finite(new_origin))
     throw cvc::physics_error("rebase: the origin must be finite");
   std::lock_guard<std::mutex> lock(_impl->mutex);
-  guarded([&] { _impl->be->rebase(new_origin); });
+  guarded([&] {
+    _impl->be->rebase(new_origin);
+    _impl->reread_static();
+  });
   _impl->cfg.origin = new_origin;
 }
 

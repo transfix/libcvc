@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -223,6 +224,12 @@ private:
   void step_break_unwind(evaluator_state &state, eval_frame &frame);
 
   // Helpers
+  // A for loop over a DSL generator: push the call that advances it as a job.
+  void advance_generator(evaluator_state &state, eval_frame &frame);
+  // Apply native `fn` to `args` as the top frame's call: its value pops the frame, or, if it
+  // left deep-data work (a job, or a DSL function to call), the frame waits for that.
+  void apply_native(evaluator_state &state, eval_frame &frame, const native_fn &fn,
+                    std::span<const value_t> args);
   void call_closure(evaluator_state &state, eval_frame &frame, const closure_ptr &cls,
                     const std::vector<value_t> &args);
   // Push the frame that evaluates `cls`'s body in `local` (its parameters already bound).

@@ -700,6 +700,7 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
     e.comment = node.comment();
     e.hidden = node.hidden();
     e.read_only = node.readOnly();
+    e.properties = node.properties();
     // data() payload: encode via the codec registry and offload large payloads to a chunked-blob
     // manifest, exactly as the live set_data path (adapter encode + collect_local offload), so a
     // joiner decodes/hydrates identically and the content-addressed blob digest matches byte-for-
@@ -752,6 +753,15 @@ void state_cluster_shard::ingest_snapshot_entry(const snapshot_entry &e) {
     apply_scalar(state_mutation_op::set_hidden, "1");
   if (e.read_only)
     apply_scalar(state_mutation_op::set_read_only, "1");
+  for (const auto &p : e.properties) {
+    state_mutation m;
+    m.cluster_id = _cluster_id;
+    m.path = e.path;
+    m.op = state_mutation_op::set_property;
+    m.type_name = p.first;
+    m.string_value = p.second;
+    _adapter->apply_remote(m);
+  }
 
   // data(): inline decodes immediately; a blob_ref is fetched + decoded + installed by the
   // hydrator.

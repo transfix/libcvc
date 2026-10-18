@@ -5,6 +5,8 @@
              work on the heap and run a slice at a time.
 */
 
+#include "native_stack.h"
+
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
@@ -509,8 +511,88 @@ private:
   value_t result_;
 };
 
+// A generator advanced a node at a time (make_generator_job).
+class generator_walk final : public data_job {
+public:
+  generator_walk(generator_ptr gen, bool collect) : gen_(std::move(gen)), collect_(collect) {}
+
+  bool step(std::size_t nodes) override;
+
+  value_t result() override { return make_list(std::move(values_)); }
+
+private:
+  // Keep a value it yielded. True when the walk goes on (collect).
+  bool keep(value_t v) {
+    if (collect_)
+      eval_alloc_check(alloc_bytes(values_.size() + 1, sizeof(value_t)), "collect");
+    values_.push_back(std::move(v));
+    return collect_;
+  }
+
+  generator_ptr gen_;
+  bool collect_;
+  bool advancing_ = false; // a DSL generator is part way to its next yield
+  std::vector<value_t> values_;
+};
+
 // The data side of the evaluator step running on this thread, if any.
 thread_local detail::data_step_scope *t_scope = nullptr;
+
+bool generator_walk::step(std::size_t nodes) {
+  generator &g = *gen_;
+  const std::size_t start = nodes_;
+  auto spent = [&] { return nodes > 0 && nodes_ - start >= nodes; };
+  for (;;) {
+    if (g.exhausted)
+      return true;
+    if (g.native_step) { // range and friends: a value is a node
+      if (spent())
+        return false;
+      if (eval_deadline_expired()) // (collect (range 0 1e11)) when nothing slices
+        throw std::runtime_error(std::string(collect_ ? "collect" : "next") +
+                                 ": evaluation exceeded time budget");
+      std::optional<value_t> v = g.native_step();
+      ++nodes_;
+      if (!v) {
+        g.exhausted = true;
+        return true;
+      }
+      if (!keep(std::move(*v)))
+        return true;
+      continue;
+    }
+    if (!advancing_) {
+      g.state.yielded = false;
+      advancing_ = true;
+      // Deep-data work in the body slices like the process's own.
+      if (detail::data_step_scope *scope = t_scope)
+        g.state.data_step_nodes = scope->step_nodes();
+    }
+    while (!g.state.done && !g.state.yielded) {
+      if (spent())
+        return false;
+      if (eval_deadline_expired())
+        throw std::runtime_error("generator: evaluation exceeded time budget");
+      {
+        detail::native_nesting level("generator"); // its own evaluator, on this stack
+        g.evaluator.step(g.state);
+      }
+      ++nodes_;
+    }
+    advancing_ = false;
+    if (g.state.yielded) {
+      // A yield that was also the body's last expression counts; the next advance ends it.
+      if (!keep(g.state.result))
+        return true;
+      continue;
+    }
+    g.exhausted = true;
+    return true;
+  }
+}
+
+// Levels of native nesting on this thread (detail::native_nesting).
+thread_local std::size_t t_native_depth = 0;
 
 // Run `walk` to completion and count its nodes into the current step.
 template <class Walk> Walk &finish_walk(Walk &walk) {
@@ -577,6 +659,12 @@ std::unique_ptr<data_job> make_substitute_job(value_t tmpl,
   return std::make_unique<substitute_walk>(std::move(tmpl), std::move(subst));
 }
 
+std::unique_ptr<data_job> make_generator_job(generator_ptr gen, bool collect) {
+  if (!gen)
+    throw std::runtime_error(collect ? "collect: expected generator" : "next: expected generator");
+  return std::make_unique<generator_walk>(std::move(gen), collect);
+}
+
 namespace {
 // Make a call a job running here (not on an evaluator) waits for. A native function's own
 // deep-data work must run here too, or its result would be lost: deferral is off for the call.
@@ -594,6 +682,7 @@ value_t call_here(const data_job::call_request &call) {
           scope->allow_defer(true);
       }
     } guard;
+    detail::native_nesting level(call.who);
     return (*fn)(call.args);
   }
   if (std::holds_alternative<closure_ptr>(call.fn->v))
@@ -661,7 +750,11 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
     if (!fn || (slicing && scope->nodes_ >= scope->step_nodes_))
       break;
     const data_job::call_request call = *job->take_call();
-    value_t value = (*fn)(call.args);
+    value_t value;
+    {
+      detail::native_nesting level(call.who);
+      value = (*fn)(call.args);
+    }
     if (scope->deferred_) {
       waits_on = std::move(scope->deferred_);
       break;
@@ -675,12 +768,24 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
 }
 
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who) {
-  if (const auto *native = std::get_if<native_fn>(&fn.v))
+  if (const auto *native = std::get_if<native_fn>(&fn.v)) {
+    detail::native_nesting level(who);
     return (*native)(args);
+  }
   if (const auto *cls = std::get_if<closure_ptr>(&fn.v); cls && *cls)
     return run_data_job(
         std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who));
   throw std::runtime_error(std::string(who) + ": not a function: " + fn.type_name());
+}
+
+value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who,
+                      std::function<value_t(value_t)> then) {
+  const auto *cls = std::get_if<closure_ptr>(&fn.v);
+  if (!std::holds_alternative<native_fn>(fn.v) && !(cls && *cls))
+    throw std::runtime_error(std::string(who) + ": not a function: " + fn.type_name());
+  return run_data_job(
+      std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who),
+      std::move(then));
 }
 
 void count_data_nodes(std::size_t nodes) {
@@ -691,6 +796,20 @@ void count_data_nodes(std::size_t nodes) {
     scope->stats_.add_data_nodes(nodes);
   }
 }
+
+// -- native_nesting --------------------------------------------------------------
+
+detail::native_nesting::native_nesting(const char *who) {
+  if (t_native_depth >= kMaxNativeNesting || native_stack_left() < kNativeStackReserve)
+    throw std::runtime_error(std::string(who) + ": native calls nested too deeply (" +
+                             std::to_string(t_native_depth) +
+                             " levels; a value or class that refers to itself?)");
+  ++t_native_depth;
+}
+
+detail::native_nesting::~native_nesting() { --t_native_depth; }
+
+std::size_t detail::native_nesting::depth() { return t_native_depth; }
 
 // -- data_step_scope -------------------------------------------------------------
 

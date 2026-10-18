@@ -1294,6 +1294,120 @@ scene:
   EXPECT_FLOAT_EQ(t->heightfield.colors[1].color[1], 0.50f);
 }
 
+// physics: and body: (WORLD-GEOMETRY-ROADMAP.md, G5) — the scene's rigid-body world and each node's
+// body, plus the box and sphere primitives a crate or a ball is drawn with. Values are lower-cased;
+// the realizer checks them. `body:` never lands in props.
+TEST(AriadneScene, PhysicsAndBodies) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics:
+    gravity: [0, 0, -3.7]
+    fixed_dt: 0.02
+    backend: Jolt
+    materials:
+      ice: { friction: 0.05, restitution: 0.1 }
+      rubber: { friction: 1.2 }
+  nodes:
+    - node: ground
+      source: { heightfield: { size: 10, resolution: 11 } }
+      body: static
+    - node: crate
+      source: { box: { size: [1, 2, 0.5] } }
+      body:
+        mass: 12
+        material: ice
+        velocity: [1, 0, 0]
+        linear_damping: 0.2
+    - node: ball
+      source: { sphere: 0.25 }
+      body: { motion: Kinematic, shape: SPHERE, density: 300 }
+    - node: deco
+      source: { box: 2 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const ScenePhysics &ph = r.scene.physics;
+  ASSERT_TRUE(ph.present);
+  EXPECT_DOUBLE_EQ(ph.gravity[2], -3.7);
+  EXPECT_DOUBLE_EQ(ph.fixed_dt, 0.02);
+  EXPECT_EQ(ph.backend, "jolt");
+  ASSERT_EQ(ph.materials.size(), 2u);
+  EXPECT_EQ(ph.materials[0].name, "ice");
+  EXPECT_DOUBLE_EQ(ph.materials[0].friction, 0.05);
+  EXPECT_DOUBLE_EQ(ph.materials[0].restitution, 0.1);
+  EXPECT_DOUBLE_EQ(ph.materials[1].friction, 1.2);
+  EXPECT_DOUBLE_EQ(ph.materials[1].restitution, 0.0);
+
+  const SceneNode *ground = find_scene_node(r.scene.nodes, "ground");
+  ASSERT_NE(ground, nullptr);
+  EXPECT_TRUE(ground->body.present);
+  EXPECT_EQ(ground->body.motion, "static");
+  EXPECT_EQ(ground->body.shape, "auto");
+
+  const SceneNode *crate = find_scene_node(r.scene.nodes, "crate");
+  ASSERT_NE(crate, nullptr);
+  EXPECT_EQ(crate->source_primitive, "box");
+  EXPECT_FLOAT_EQ(crate->box_size[1], 2.0f);
+  EXPECT_FLOAT_EQ(crate->box_size[2], 0.5f);
+  EXPECT_TRUE(crate->body.present);
+  EXPECT_TRUE(crate->body.motion.empty()); // the realizer picks: dynamic for a mesh
+  EXPECT_DOUBLE_EQ(crate->body.mass, 12.0);
+  EXPECT_EQ(crate->body.material, "ice");
+  EXPECT_DOUBLE_EQ(crate->body.velocity[0], 1.0);
+  EXPECT_TRUE(crate->body.has_linear_damping);
+  EXPECT_DOUBLE_EQ(crate->body.linear_damping, 0.2);
+  EXPECT_FALSE(crate->body.has_angular_damping);
+  for (const auto &kv : crate->props.entries)
+    EXPECT_NE(kv.first, "body") << "body: is a built-in key";
+
+  const SceneNode *ball = find_scene_node(r.scene.nodes, "ball");
+  ASSERT_NE(ball, nullptr);
+  EXPECT_EQ(ball->source_primitive, "sphere");
+  EXPECT_FLOAT_EQ(ball->sphere_radius, 0.25f);
+  EXPECT_EQ(ball->body.motion, "kinematic");
+  EXPECT_EQ(ball->body.shape, "sphere");
+  EXPECT_DOUBLE_EQ(ball->body.density, 300.0);
+
+  const SceneNode *deco = find_scene_node(r.scene.nodes, "deco");
+  ASSERT_NE(deco, nullptr);
+  EXPECT_FLOAT_EQ(deco->box_size[0], 2.0f);
+  EXPECT_FLOAT_EQ(deco->box_size[2], 2.0f);
+  EXPECT_FALSE(deco->body.present);
+}
+
+// `physics: {}` alone declares a world with the defaults (and makes the scene non-empty);
+// `physics: false` declares none.
+TEST(AriadneScene, PhysicsDefaultsAndOff) {
+  SKIP_WITHOUT_YAML();
+  LoadResult on = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+)");
+  ASSERT_TRUE(on.ok) << on.error;
+  EXPECT_TRUE(on.scene.physics.present);
+  EXPECT_TRUE(on.scene.any());
+  EXPECT_DOUBLE_EQ(on.scene.physics.gravity[2], -9.80665);
+  EXPECT_DOUBLE_EQ(on.scene.physics.fixed_dt, 0.0); // one clock quantum
+  EXPECT_EQ(on.scene.physics.backend, "auto");
+  LoadResult off = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: false
+)");
+  ASSERT_TRUE(off.ok) << off.error;
+  EXPECT_FALSE(off.scene.physics.present);
+  // `backend: null` is YAML's null literal: it still names the null backend (so does `none`).
+  for (const char *b : {"null", "none", "Null"}) {
+    LoadResult nb = load_string(std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  physics: "
+                                            "{ backend: ") +
+                                b + " }\n");
+    ASSERT_TRUE(nb.ok) << nb.error;
+    EXPECT_EQ(nb.scene.physics.backend, "null") << b;
+  }
+}
+
 // §9 time: a `clock:` block declares the scene's simulation clock. A bare `clock: {}` registers the
 // clock and keeps the sim_transport-wired defaults (bind sim.speed / sim.paused, publish sim.time).
 TEST(AriadneScene, ClockBlockDefaults) {
@@ -3857,6 +3971,23 @@ windows:
 )");
   EXPECT_FALSE(r.ok); // strict (default): the undeclared "other.chan" fails the load
   EXPECT_NE(r.error.find("other.chan"), std::string::npos);
+}
+
+TEST(AriadneChannelLint, SeesChannelsNestedAnyDepth) {
+  // The lint walks a script on a heap stack, so a reference 1000 levels down is still checked
+  // (it used to stop at 256).
+  SKIP_WITHOUT_YAML();
+  const int n = 1000;
+  std::string on;
+  for (int i = 0; i < n; ++i)
+    on += "(begin ";
+  on += "(msg-send \"deep.chan\" \"x\")";
+  on += std::string(n, ')');
+  LoadResult r = load_string("channels:\n  - nav.done\nwindows:\n  - window: W\n    children:\n"
+                             "      - button: Go\n        on: '" +
+                             on + "'\n");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("deep.chan"), std::string::npos) << r.error;
 }
 
 TEST(AriadneChannelLint, DeclaredChannelPasses) {

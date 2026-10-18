@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/parser.h>
 #include <thread>
@@ -220,8 +221,10 @@ value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
 
 value_t evaluator::do_if(const std::vector<value_t> &args, environment_ptr env) {
   check_interrupted();
-  if (args.size() < 2)
-    throw std::runtime_error("if: expected at least 2 arguments");
+  if (args.size() < 2 || args.size() > 3)
+    throw std::runtime_error("if: expected a condition, a then branch and an optional else "
+                             "branch, got " +
+                             std::to_string(args.size()) + " arguments");
   if (eval_internal(args[0], env).is_truthy())
     return eval_internal(args[1], env);
   if (args.size() > 2)
@@ -242,17 +245,18 @@ value_t evaluator::do_begin(const std::vector<value_t> &args, environment_ptr en
 
 value_t evaluator::do_while(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 2)
-    throw std::runtime_error("while: expected 2 arguments");
+    throw std::runtime_error("while: expected a condition and a body");
   while (eval_internal(args[0], env).is_truthy()) {
     check_interrupted();
-    eval_internal(args[1], env);
+    for (std::size_t i = 1; i < args.size(); ++i) // several body forms run in order
+      eval_internal(args[i], env);
   }
   return nil_value;
 }
 
 value_t evaluator::do_for(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 3)
-    throw std::runtime_error("for: expected 3 arguments");
+    throw std::runtime_error("for: expected a variable, a collection and a body");
   auto *var_sym = std::get_if<symbol>(&args[0].v);
   if (!var_sym)
     throw std::runtime_error("for: first arg must be symbol");
@@ -263,7 +267,8 @@ value_t evaluator::do_for(const std::vector<value_t> &args, environment_ptr env)
   for (auto &item : **lp) {
     check_interrupted();
     env->set(var_sym->name, item);
-    eval_internal(args[2], env);
+    for (std::size_t i = 2; i < args.size(); ++i) // several body forms run in order
+      eval_internal(args[i], env);
   }
   return nil_value;
 }
@@ -320,6 +325,9 @@ value_t evaluator::do_lambda(const std::vector<value_t> &args, environment_ptr e
 }
 
 value_t evaluator::do_return(const std::vector<value_t> &args, environment_ptr env) {
+  if (args.size() > 1)
+    throw std::runtime_error("return: expected at most 1 argument, got " +
+                             std::to_string(args.size()));
   if (args.empty())
     throw return_exception(nil_value);
   throw return_exception(eval_internal(args[0], env));
@@ -688,22 +696,8 @@ value_t evaluator::apply_closure(const closure_ptr &cls, const std::vector<value
 
 value_t evaluator::substitute(const value_t &tmpl,
                               const std::unordered_map<std::string, value_t> &subst) {
-  if (auto *sym = std::get_if<symbol>(&tmpl.v)) {
-    auto it = subst.find(sym->name);
-    if (it != subst.end())
-      return it->second;
-    return tmpl;
-  }
-  if (auto *lp = std::get_if<list_ptr>(&tmpl.v)) {
-    if (!*lp)
-      return tmpl;
-    auto result = std::make_shared<std::vector<value_t>>();
-    result->reserve((*lp)->size());
-    for (auto &e : **lp)
-      result->push_back(substitute(e, subst));
-    return value_t{std::move(result)};
-  }
-  return tmpl;
+  // The stackless evaluator's walk, run whole: no native recursion per template level.
+  return run_to_completion(*make_substitute_job(tmpl, subst));
 }
 
 } // namespace cvc::state_exec

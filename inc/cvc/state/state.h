@@ -40,6 +40,7 @@
 #include <cvc/core/exception.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/types.h>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -485,6 +486,12 @@ public:
   void ptree(const boost::property_tree::ptree &);
 
   // returns a json version of the property map
+  //
+  // The document is written and read by state_json_writer / state_json_reader
+  // (cvc/state/state_json.h), whose walks state_exec's state-json and state-from-json run a
+  // slice per scheduler step. The text is what write_json(ptree()) writes, and the reader keeps
+  // read_json()'s grammar, but its container stack is on the heap, so a deeply nested document
+  // costs no native stack. A malformed document sets nothing.
   std::string json();
 
   // sets this property tree based on a json
@@ -512,6 +519,18 @@ public:
   bool readOnly();
   state &readOnly(bool ro);
   signal readOnlyChanged;
+
+  // Named metadata beside the comment: strings keyed by name, such as a recommended "min" and
+  // "max" or a "unit", for other applications to read (a UI's slider, a validator). They are not
+  // the value and do not constrain it. property() of a key that is not set is "". Setting a
+  // property to "" removes it. propertyChanged fires with the key. Like the comment, properties
+  // replicate (state_mutation_op::set_property) and travel in snapshots, and reset() clears them.
+  std::string property(const std::string &key);
+  state &property(const std::string &key, const std::string &value);
+  bool has_property(const std::string &key);
+  std::vector<std::string> property_keys();
+  std::map<std::string, std::string> properties();
+  map_change_signal propertyChanged;
 
   // State name validation and sanitization
   static bool isValidStateName(const std::string &name);
@@ -838,6 +857,7 @@ protected:
   std::string _valueTypeName;
   boost::any _data;
   std::string _comment;
+  std::map<std::string, std::string> _properties;
   bool _hidden;
   bool _readOnly;
   child_map _children;
@@ -859,6 +879,8 @@ protected:
   static state_ptr instancePtr(app &ctx);
 
 private:
+  friend class state_subtree_cursor; // snapshots a node's value and children under its lock
+
   state(const state &);
 };
 

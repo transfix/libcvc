@@ -93,6 +93,23 @@ TEST_F(EvaluatorTest, For) {
             10);
 }
 
+// A loop body of several forms runs them all, in order (they used to be dropped after the first).
+TEST_F(EvaluatorTest, LoopBodiesRunEveryForm) {
+  EXPECT_EQ(eval_int("(begin (set i 0) (set sum 0) "
+                     "  (while (< i 5) (set sum (+ sum i)) (set i (+ i 1))) "
+                     "  sum)"),
+            10);
+  EXPECT_EQ(eval_int("(begin (set sum 0) (set n 0) "
+                     "  (for x (list 1 2 3 4) (set sum (+ sum x)) (set n (+ n 1))) "
+                     "  (+ (* 100 n) sum))"),
+            410);
+}
+
+TEST_F(EvaluatorTest, IfAndReturnRejectExtraArguments) {
+  EXPECT_THROW(eval("(if t 1 2 3)"), std::runtime_error);
+  EXPECT_THROW(eval("(begin (defun f () (return 1 2)) (f))"), std::runtime_error);
+}
+
 // ─── Lambda / Closures ────────────────────────────────────────────────────
 
 TEST_F(EvaluatorTest, LambdaBasic) {

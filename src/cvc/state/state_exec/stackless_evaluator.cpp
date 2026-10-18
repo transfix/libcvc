@@ -90,6 +90,18 @@ bool stackless_evaluator::step_read(evaluator_state &state) {
 }
 
 namespace {
+// A loop's body: the form at args[first], or, when there are several, all of them in order as a
+// (begin ...). A single-form body stays as it is, so its frames are what they always were.
+value_t loop_body(const std::vector<value_t> &args, std::size_t first) {
+  if (args.size() == first + 1)
+    return args[first];
+  std::vector<value_t> forms;
+  forms.reserve(1 + args.size() - first);
+  forms.emplace_back(symbol{"begin"});
+  forms.insert(forms.end(), args.begin() + static_cast<std::ptrdiff_t>(first), args.end());
+  return make_list(std::move(forms));
+}
+
 // RAII: while alive, the native call a step applies may leave deep-data work behind
 // (run_data_job), in the step's data scope.
 struct native_call_scope {
@@ -497,8 +509,10 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
 
   // --- Special forms ---
   if (name == "if") {
-    if (args.size() < 2)
-      throw std::runtime_error("if: expected at least 2 args");
+    if (args.size() < 2 || args.size() > 3)
+      throw std::runtime_error("if: expected a condition, a then branch and an optional else "
+                               "branch, got " +
+                               std::to_string(args.size()) + " args");
     frame.phase = eval_phase::if_cond;
     frame.extra_vals = std::move(args);
     push_frame(state, frame.extra_vals[0], env);
@@ -517,21 +531,21 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "while") {
     if (args.size() < 2)
-      throw std::runtime_error("while: expected 2 args");
+      throw std::runtime_error("while: expected a condition and a body");
     frame.phase = eval_phase::while_cond;
-    frame.extra_vals = std::move(args); // [0]=cond, [1]=body
+    frame.extra_vals = {args[0], loop_body(args, 1)}; // [0]=cond, [1]=body
     push_frame(state, frame.extra_vals[0], env);
     return;
   }
   if (name == "for") {
     if (args.size() < 3)
-      throw std::runtime_error("for: expected 3 args");
+      throw std::runtime_error("for: expected a variable, a collection and a body");
     auto *var_sym = std::get_if<symbol>(&args[0].v);
     if (!var_sym)
       throw std::runtime_error("for: first arg must be symbol");
     frame.phase = eval_phase::for_body;
     frame.extra_strs = {var_sym->name};
-    frame.extra_vals = {args[2]};    // body expression
+    frame.extra_vals = {loop_body(args, 2)}; // body expression
     frame.extra_lists = {};          // will hold iterator
     frame.index = -1;                // -1 = still evaluating collection
     push_frame(state, args[1], env); // evaluate collection
@@ -581,20 +595,22 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     return;
   }
   if (name == "return") {
-    if (args.empty())
-      throw std::runtime_error("return: expected 1 arg");
+    if (args.size() != 1)
+      throw std::runtime_error("return: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::return_value;
     push_frame(state, args[0], env);
     return;
   }
   if (name == "yield") {
-    if (args.empty())
-      throw std::runtime_error("yield: expected 1 arg");
+    if (args.size() != 1)
+      throw std::runtime_error("yield: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::yield_value;
     push_frame(state, args[0], env);
     return;
   }
   if (name == "break") {
+    if (args.size() > 1)
+      throw std::runtime_error("break: expected at most 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::break_unwind;
     if (args.empty()) {
       // (break) — no value, use nil
@@ -785,19 +801,7 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
     throw std::runtime_error("apply: undefined function: " + head_sym->name);
 
   if (auto *fn = std::get_if<native_fn>(&func_val->v)) {
-    detail::data_step_scope *data = detail::data_step_scope::current();
-    value_t result;
-    {
-      native_call_scope call(data);
-      result = (*fn)(evaled);
-    }
-    if (auto deferred = data ? data->take_deferred() : nullptr) {
-      // The call left deep-data work: this frame waits while step_data() runs it.
-      await_deferred(state, std::move(*deferred), state.stack.size(), frame.results.size(),
-                     state.data_work, false);
-      return;
-    }
-    pop_frame(state, std::move(result));
+    apply_native(state, frame, *fn, evaled);
     return;
   }
   if (auto *cp = std::get_if<closure_ptr>(&func_val->v)) {
@@ -805,6 +809,23 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
     return;
   }
   throw std::runtime_error("apply: not callable: " + head_sym->name);
+}
+
+void stackless_evaluator::apply_native(evaluator_state &state, eval_frame &frame,
+                                       const native_fn &fn, std::span<const value_t> args) {
+  detail::data_step_scope *data = detail::data_step_scope::current();
+  value_t result;
+  {
+    native_call_scope call(data);
+    result = fn(args);
+  }
+  if (auto deferred = data ? data->take_deferred() : nullptr) {
+    // The call left deep-data work: this frame waits while step_data() runs it.
+    await_deferred(state, std::move(*deferred), state.stack.size(), frame.results.size(),
+                   state.data_work, false);
+    return;
+  }
+  pop_frame(state, std::move(result));
 }
 
 // ---------------------------------------------------------------------------
@@ -866,31 +887,45 @@ void stackless_evaluator::step_while_body(evaluator_state &state, eval_frame &fr
 // step: for
 // ---------------------------------------------------------------------------
 
+// The names a for frame's generator call (advance_generator) binds in its extra_env. A user's
+// script cannot reach that scope: it is the call's own.
+const char *const kForGenerator = "%generator";
+const char *const kForGeneratorNext = "%generator-next";
+
 void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &frame) {
+  // A DSL generator's next value came back from the call advance_generator() pushed: a list of
+  // the value, or empty once the generator is exhausted. extra_strs[1] marks the wait.
+  if (frame.extra_strs.size() > 1) {
+    frame.extra_strs.pop_back();
+    const value_t got = std::move(frame.results.back());
+    frame.results.clear();
+    const auto &l = *std::get<list_ptr>(got.v);
+    if (l.empty()) {
+      pop_frame(state, nil_value);
+      return;
+    }
+    frame.env->set(frame.extra_strs[0], l.front());
+    push_frame(state, frame.extra_vals[0], frame.env);
+    return;
+  }
+
   if (frame.index == -1) {
     // Collection was just evaluated
     auto collection = frame.results.back();
-    if (auto *gp = std::get_if<generator_ptr>(&collection.v)) {
+    if (std::holds_alternative<generator_ptr>(collection.v)) {
       // Generator: store in extra_vals[1] for lazy iteration
       frame.extra_vals.push_back(collection);
       frame.extra_lists = {{}}; // placeholder
-      auto next = generator_next(**gp);
-      if (!next) {
-        pop_frame(state, nil_value);
-        return;
-      }
       frame.index = 0;
       frame.results.clear();
-      frame.env->set(frame.extra_strs[0], *next);
-      push_frame(state, frame.extra_vals[0], frame.env);
-      return;
+    } else {
+      auto *lp = std::get_if<list_ptr>(&collection.v);
+      if (!lp)
+        throw std::runtime_error("for: collection must be a list or generator");
+      frame.extra_lists = {std::vector<value_t>((*lp)->begin(), (*lp)->end())};
+      frame.index = 0;
+      frame.results.clear();
     }
-    auto *lp = std::get_if<list_ptr>(&collection.v);
-    if (!lp)
-      throw std::runtime_error("for: collection must be a list or generator");
-    frame.extra_lists = {std::vector<value_t>((*lp)->begin(), (*lp)->end())};
-    frame.index = 0;
-    frame.results.clear();
   } else {
     frame.index++;
     frame.results.clear();
@@ -899,8 +934,12 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
   // Generator path: extra_vals has size > 1 when a generator is stored
   if (frame.extra_vals.size() > 1) {
     auto *gp = std::get_if<generator_ptr>(&frame.extra_vals[1].v);
-    if (gp) {
-      auto next = generator_next(**gp);
+    if (gp && *gp && !(*gp)->native_step) {
+      advance_generator(state, frame);
+      return;
+    }
+    if (gp) { // range and friends: one cheap value, here
+      auto next = *gp ? generator_next(**gp) : std::nullopt;
       if (!next) {
         pop_frame(state, nil_value);
         return;
@@ -919,6 +958,24 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
   } else {
     pop_frame(state, nil_value);
   }
+}
+
+void stackless_evaluator::advance_generator(evaluator_state &state, eval_frame &frame) {
+  // The call (%generator-next %generator), in a scope of the frame's own: an ordinary native
+  // call, so the job it runs (make_generator_job) slices and waits like any other, and its
+  // value comes back to this frame.
+  if (!frame.extra_env) {
+    frame.extra_env = environment::extend(frame.env);
+    frame.extra_env->set(kForGenerator, frame.extra_vals[1]);
+    frame.extra_env->set(
+        kForGeneratorNext, value_t{native_fn{[](std::span<const value_t> args) -> value_t {
+          return run_data_job(make_generator_job(std::get<generator_ptr>(args[0].v)));
+        }}});
+  }
+  frame.extra_strs.push_back(kForGeneratorNext); // waiting for the value
+  environment_ptr scope = frame.extra_env;
+  push_frame(state, make_list({value_t{symbol{kForGeneratorNext}}, value_t{symbol{kForGenerator}}}),
+             std::move(scope)); // last: it may move `frame`
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,7 +1145,8 @@ void stackless_evaluator::step_super_args(evaluator_state &state, eval_frame &fr
             call_args.push_back(self_val);
             for (size_t i = 1; i < frame.results.size(); ++i)
               call_args.push_back(frame.results[i]);
-            pop_frame(state, (*fn)(call_args));
+            const native_fn method = *fn; // it may change the class dict under `v`
+            apply_native(state, frame, method, call_args);
             return;
           }
           if (auto *cp = std::get_if<closure_ptr>(&v.v)) {
@@ -1242,8 +1300,10 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
     mcls->env_snapshot = env;
     track_captured_env(env); // the class is bound in env: a cycle candidate
 
-    cls_dict->emplace_back(msym->name,
-                           value_t{native_fn{detail::class_method{std::move(mcls), global_env_}}});
+    // A method is a closure taking self first: send and super call it like any function, its
+    // body running as frames of the calling process (call_function), not on an evaluator of
+    // its own.
+    cls_dict->emplace_back(msym->name, value_t{std::move(mcls)});
   }
 
   // Constructor
@@ -1252,25 +1312,12 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
   pop_frame(state, *env->lookup(cls_name));
 }
 
-value_t detail::class_method::operator()(std::span<const value_t> call_args) const {
-  // Run the method to completion on a temporary evaluator.
-  std::vector<value_t> all_args(call_args.begin(), call_args.end());
-  auto local = environment::extend(method->env_snapshot);
-  if (method->variadic) {
-    local->set(method->params.back().name, make_list(all_args));
-  } else {
-    for (size_t j = 0; j < method->params.size(); ++j)
-      local->set(method->params[j].name, all_args[j]);
-  }
-  stackless_evaluator temp(global_env);
-  if (method->body.size() == 1)
-    return temp.evaluate(method->body[0], local);
-  std::vector<value_t> be;
-  be.reserve(1 + method->body.size());
-  be.push_back(value_t{symbol{"begin"}});
-  be.insert(be.end(), method->body.begin(), method->body.end());
-  return temp.evaluate(make_list(std::move(be)), local);
+namespace {
+bool is_callable(const value_t &v) {
+  const auto *cls = std::get_if<closure_ptr>(&v.v);
+  return std::holds_alternative<native_fn>(v.v) || (cls && *cls);
 }
+} // namespace
 
 value_t detail::class_constructor::operator()(std::span<const value_t> init_args) const {
   auto inst = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
@@ -1278,12 +1325,14 @@ value_t detail::class_constructor::operator()(std::span<const value_t> init_args
   value_t inst_val{inst};
   for (auto &[k, v] : *cls_dict) {
     if (k == "init") {
+      if (!is_callable(v))
+        break;
       std::vector<value_t> a;
       a.push_back(inst_val);
       a.insert(a.end(), init_args.begin(), init_args.end());
-      if (auto *fn = std::get_if<native_fn>(&v.v))
-        (*fn)(a);
-      break;
+      const value_t init = v; // init may change the class dict under `v`
+      // Whatever init returns, the call's value is the instance, once init has run.
+      return call_function(init, a, "constructor", [inst_val](value_t) { return inst_val; });
     }
   }
   return inst_val;
@@ -1293,9 +1342,10 @@ value_t detail::class_inherited_method::operator()(std::span<const value_t> args
   if (super_cls) {
     for (auto &[k, v] : *super_cls) {
       if (k == name) {
-        if (auto *fn = std::get_if<native_fn>(&v.v))
-          return (*fn)(args);
-        break;
+        if (!is_callable(v))
+          break;
+        const value_t inherited = v; // it may change the class dict under `v`
+        return call_function(inherited, args, name == "init" ? "init" : "finalize");
       }
     }
   }

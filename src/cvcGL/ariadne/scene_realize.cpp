@@ -8,7 +8,8 @@
 #include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
-#include <cvc/geometry/mesh_ops.h> // mesh_ops_available() — source.sdf.algorithm: igl
+#include <cvc/geometry/height_field.h> // a heightfield source is the world's own cvc::height_field
+#include <cvc/geometry/mesh_ops.h>     // mesh_ops_available() — source.sdf.algorithm: igl
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LightNode.h>
@@ -18,7 +19,9 @@
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
-#include <cvc/image/image.h>       // cvc::read_image — material: { texture: <uri> }
+#include <cvc/gl/physics_scene_binding.h> // body: the nodes physics moves
+#include <cvc/image/image.h>              // cvc::read_image — material: { texture: <uri> }
+#include <cvc/physics/world.h>            // physics: the scene's rigid-body world
 #include <cvc/utility/algorithm.h> // cvc::sdf — source: { sdf: { mesh:, dim: } } volume source
 #include <cvc/volren/settings.h>
 #include <cvc/volslice/settings.h>
@@ -30,7 +33,9 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <vtkMatrix4x4.h>
 #include <vtkRenderer.h>
+#include <vtkSmartPointer.h>
 
 namespace cvc {
 namespace gl {
@@ -71,16 +76,74 @@ cvc::geometry make_plane(float size) {
   return g;
 }
 
-// A procedural heightfield grid mesh (source: { heightfield: {...} }) — the reusable terrain
-// primitive. A res×res grid over [-size/2, size/2]² in XY, displaced in Z by the sum of the
-// dome/wave layers, with world→[0,1]² UVs, height-gradient normals, and optional per-vertex band
-// colours. All CPU, no asset.
-cvc::geometry make_heightfield(const cvc::ariadne::SceneHeightfield &hf) {
-  constexpr double kTwoPi = 6.283185307179586;
+// A box centred on the origin with edge lengths `size` (source: { box: { size } }): 24 vertices so
+// each face keeps its own outward normal, 12 triangles wound counter-clockwise seen from outside.
+cvc::geometry make_box(const float size[3]) {
   cvc::geometry g;
+  const double h[3] = {0.5 * size[0], 0.5 * size[1], 0.5 * size[2]};
+  // Per face: the outward axis, its sign, and two in-face axes u, v with u x v outward, so the
+  // corners (-,-), (+,-), (+,+), (-,+) in (u, v) run counter-clockwise seen from outside.
+  const int faces[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}, {1, 0, 2}, {2, 0, 1}, {2, 1, 0}};
+  const double corners[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+  for (int f = 0; f < 6; ++f) {
+    const int a = faces[f][0], u = faces[f][1], v = faces[f][2];
+    const double sign = (f % 2 == 0) ? 1.0 : -1.0;
+    const auto base = static_cast<unsigned>(g.points().size());
+    for (const auto &c : corners) {
+      double p[3], n[3] = {0, 0, 0};
+      p[a] = sign * h[a];
+      p[u] = c[0] * h[u];
+      p[v] = c[1] * h[v];
+      n[a] = sign;
+      g.points().push_back({p[0], p[1], p[2]});
+      g.normals().push_back({n[0], n[1], n[2]});
+    }
+    g.tris().push_back({base, base + 1, base + 2});
+    g.tris().push_back({base, base + 2, base + 3});
+  }
+  return g;
+}
+
+// A UV sphere of `radius` about the origin (source: { sphere: { radius } }), outward normals,
+// counter-clockwise seen from outside, no degenerate triangles at the poles.
+cvc::geometry make_sphere(float radius) {
+  constexpr double kPi = 3.141592653589793;
+  constexpr unsigned kRings = 16, kSegments = 24;
+  cvc::geometry g;
+  const double r = static_cast<double>(radius);
+  for (unsigned i = 0; i <= kRings; ++i) {
+    const double th = kPi * i / kRings; // from the north pole
+    for (unsigned j = 0; j <= kSegments; ++j) {
+      const double ph = 2.0 * kPi * j / kSegments;
+      const double n[3] = {std::sin(th) * std::cos(ph), std::sin(th) * std::sin(ph), std::cos(th)};
+      g.points().push_back({r * n[0], r * n[1], r * n[2]});
+      g.normals().push_back({n[0], n[1], n[2]});
+    }
+  }
+  const unsigned row = kSegments + 1;
+  for (unsigned i = 0; i < kRings; ++i)
+    for (unsigned j = 0; j < kSegments; ++j) {
+      const unsigned a = i * row + j, b = a + row; // b: the same longitude, one ring south
+      if (i != 0)
+        g.tris().push_back({a, b, a + 1});
+      if (i + 1 != kRings)
+        g.tris().push_back({a + 1, b, b + 1});
+    }
+  return g;
+}
+
+// A procedural heightfield (source: { heightfield: {...} }), the reusable terrain primitive, as
+// the world's own cvc::height_field: a res x res grid over [-size/2, size/2]^2 in XY (row 0 at -y),
+// displaced in Z by the sum of the dome/wave layers. The field's mesh is what the node draws, so
+// the renderer, a body resting on it and a forest planted on it see one surface: each cell split
+// south-west to north-east, normals from the grid. World->[0,1]^2 UVs and optional per-vertex
+// band colours ride on the mesh. All CPU, no asset. Throws cvc::geometry_error for a size that is
+// not > 0.
+std::shared_ptr<cvc::height_field> make_height_field(const cvc::ariadne::SceneHeightfield &hf) {
+  constexpr double kTwoPi = 6.283185307179586;
   const int res = std::max(2, hf.resolution);
   const double half = 0.5 * static_cast<double>(hf.size);
-  const double step = (res > 1) ? (static_cast<double>(hf.size) / (res - 1)) : 0.0;
+  const double step = static_cast<double>(hf.size) / (res - 1);
 
   const auto height_at = [&](double x, double y) {
     double h = 0.0;
@@ -105,7 +168,7 @@ cvc::geometry make_heightfield(const cvc::ariadne::SceneHeightfield &hf) {
   };
   const auto band_color = [&](double z) -> cvc::geometry::color_t {
     const float *col =
-        hf.colors.back().color; // bands authored low→high; last = the "above all" cap
+        hf.colors.back().color; // bands authored low->high; last = the "above all" cap
     for (const cvc::ariadne::SceneHeightColorBand &b : hf.colors)
       if (z <= b.max_height) {
         col = b.color;
@@ -114,38 +177,38 @@ cvc::geometry make_heightfield(const cvc::ariadne::SceneHeightfield &hf) {
     return {col[0], col[1], col[2]};
   };
 
-  const double inv = (res > 1) ? 1.0 / (res - 1) : 0.0;
-  const double e = (step > 0.0) ? step : 1.0; // central-difference step for the normal
+  std::vector<float> heights(static_cast<std::size_t>(res) * res);
   for (int j = 0; j < res; ++j)
-    for (int i = 0; i < res; ++i) {
-      const double x = -half + i * step;
-      const double y = -half + j * step;
-      const double z = height_at(x, y);
-      g.points().push_back({x, y, z});
-      g.uvs().push_back({i * inv, j * inv});
-      // Normal from the height gradient (central differences): n = normalize(-dz/dx, -dz/dy, 1).
-      const double zx = height_at(x + e, y) - height_at(x - e, y);
-      const double zy = height_at(x, y + e) - height_at(x, y - e);
-      double nx = -zx / (2.0 * e), ny = -zy / (2.0 * e), nz = 1.0;
-      const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
-      if (nl > 0.0) {
-        nx /= nl;
-        ny /= nl;
-        nz /= nl;
-      }
-      g.normals().push_back({nx, ny, nz});
-      if (!hf.colors.empty())
-        g.colors().push_back(band_color(z));
-    }
-  for (int j = 0; j < res - 1; ++j)
-    for (int i = 0; i < res - 1; ++i) {
-      const unsigned a = static_cast<unsigned>(j * res + i), b = a + 1,
-                     c = a + static_cast<unsigned>(res), d = c + 1;
-      g.tris().push_back({a, b, d});
-      g.tris().push_back({a, d, c});
-    }
-  return g;
+    for (int i = 0; i < res; ++i)
+      heights[static_cast<std::size_t>(j) * res + i] =
+          static_cast<float>(height_at(-half + i * step, -half + j * step));
+  auto field =
+      std::make_shared<cvc::height_field>(res, res, -half, -half, step, step, std::move(heights));
+  // UVs and band colours, one per vertex. The mesh's points and triangles follow the grid; these
+  // attributes are the node's to set.
+  const double inv = 1.0 / (res - 1);
+  auto &uvs = field->uvs();
+  uvs.resize(field->num_points());
+  for (int j = 0; j < res; ++j)
+    for (int i = 0; i < res; ++i)
+      uvs[static_cast<std::size_t>(field->vertex_of(j, i))] = {i * inv, j * inv};
+  if (!hf.colors.empty()) {
+    auto &colors = field->colors();
+    colors.resize(field->num_points());
+    for (int j = 0; j < res; ++j)
+      for (int i = 0; i < res; ++i)
+        colors[static_cast<std::size_t>(field->vertex_of(j, i))] =
+            band_color(field->height_at(j, i));
+  }
+  return field;
 }
+
+// A body a node declared (`body:`), recorded while the nodes are realized and added once they all
+// are (a body on a terrain needs the terrain's field).
+struct pending_body {
+  const cvc::ariadne::SceneNode *spec = nullptr; // into the Scene realize_scene was given
+  std::shared_ptr<GraphicsNode> node;
+};
 
 // --- custom scene node type registry (§ extensibility) -----------------------
 std::mutex &node_registry_mutex() {
@@ -439,14 +502,23 @@ void apply_volume_transfer_function(cvc::gl::VolumeNode &vn,
 // child moves/rotates/scales relative to its parent (§9 local transforms). Top-level
 // nodes go through sg.addGraphics (registered in the name map + null-graphic removal
 // + the volume-rendering hookup).
+bool read_node_geometry_and_field(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+                                  cvc::geometry &geom,
+                                  std::shared_ptr<const cvc::height_field> &field,
+                                  std::vector<std::string> *warnings);
+
 void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::string &bind_prefix,
-                  RealizedScene &out, GraphicsNode *parent, std::vector<std::string> *warnings) {
+                  RealizedScene &out, GraphicsNode *parent, std::vector<pending_body> &bodies,
+                  std::vector<std::string> *warnings) {
   std::shared_ptr<GraphicsNode> node;
 
   if (n.type == "geometry") {
     cvc::geometry geom;
-    if (!read_node_geometry(sg, n, geom, warnings))
+    std::shared_ptr<const cvc::height_field> field;
+    if (!read_node_geometry_and_field(sg, n, geom, field, warnings))
       return;
+    if (field)
+      out.height_fields[n.id] = field; // the grid this node draws, for bodies and custom nodes
     std::shared_ptr<GeometryNode> g =
         parent ? parent->createChild<GeometryNode>(n.id, geom)
                : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id, geom));
@@ -613,10 +685,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       apply_shader(*g, n, warnings);
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
+  if (n.body.present)
+    bodies.push_back({&n, node}); // added once every node exists (realize_physics)
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
-    realize_node(sg, c, bind_prefix, out, node.get(), warnings);
+    realize_node(sg, c, bind_prefix, out, node.get(), bodies, warnings);
 }
 
 LightNode::Kind light_kind(const std::string &k) {
@@ -752,12 +826,28 @@ cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height) {
 
 // The mesh a `type: geometry` node declares: a procedural heightfield or plane, or a file/URI
 // read and then `fit:`ted. Warns and returns false when there is nothing to show.
-bool read_node_geometry(SceneGraph &, const cvc::ariadne::SceneNode &n, cvc::geometry &geom,
-                        std::vector<std::string> *warnings) {
+namespace {
+
+bool read_node_geometry_and_field(SceneGraph &, const cvc::ariadne::SceneNode &n,
+                                  cvc::geometry &geom,
+                                  std::shared_ptr<const cvc::height_field> &field,
+                                  std::vector<std::string> *warnings) {
   if (n.has_heightfield) {
-    geom = make_heightfield(n.heightfield); // a procedural displaced grid — no asset
+    // A procedural displaced grid, no asset: the world's own height field, drawn as its mesh.
+    try {
+      std::shared_ptr<cvc::height_field> f = make_height_field(n.heightfield);
+      geom = *f;
+      field = f;
+    } catch (const std::exception &e) {
+      warn(warnings, "ari: scene node '" + n.id + "': heightfield: " + e.what());
+      return false;
+    }
   } else if (n.source_primitive == "plane") {
     geom = make_plane(n.plane_size); // a procedural ground quad — no asset
+  } else if (n.source_primitive == "box") {
+    geom = make_box(n.box_size);
+  } else if (n.source_primitive == "sphere") {
+    geom = make_sphere(n.sphere_radius);
   } else {
     if (n.source_file.empty()) {
       warn(warnings, "ari: scene node '" + n.id + "' (" + n.type +
@@ -787,10 +877,18 @@ bool read_node_geometry(SceneGraph &, const cvc::ariadne::SceneNode &n, cvc::geo
     else
       warn(warnings, "ari: scene node '" + n.id + "': `fit` is ignored on the built-in '" +
                          n.source_primitive +
-                         "' primitive (already centered on z=0; size it via "
-                         "source.plane.size)");
+                         "' primitive (already placed and sized; size it via source." +
+                         n.source_primitive + ")");
   }
   return true;
+}
+
+} // namespace
+
+bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &n, cvc::geometry &geom,
+                        std::vector<std::string> *warnings) {
+  std::shared_ptr<const cvc::height_field> field;
+  return read_node_geometry_and_field(sg, n, geom, field, warnings);
 }
 
 // A dim³ signed-distance-field volume of a mesh, framed like the volume demos' bunny_sdf: the grid
@@ -855,6 +953,279 @@ cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
   return cvc::volume(sg.appContext(), src.path);
 }
 
+namespace {
+
+// A rigid pose and per-axis scale from a node's world matrix (row-major 4x4): the translation, the
+// rotation with each column's length divided out, and those lengths. `skewed` is set when the
+// columns are not orthogonal (a non-uniform scale under a rotated parent), which a rigid body
+// cannot follow.
+void decompose(const double m[16], cvc::physics::vec3 &t, cvc::physics::quat &q, double scale[3],
+               bool &skewed, bool &mirrored) {
+  t = {m[3], m[7], m[11]};
+  double r[3][3];
+  for (int c = 0; c < 3; ++c) {
+    const double s = std::sqrt(m[c] * m[c] + m[4 + c] * m[4 + c] + m[8 + c] * m[8 + c]);
+    scale[c] = s;
+    for (int k = 0; k < 3; ++k)
+      r[k][c] = s > 0.0 ? m[4 * k + c] / s : (k == c ? 1.0 : 0.0);
+  }
+  const auto col_dot = [&](int a, int b) {
+    return r[0][a] * r[0][b] + r[1][a] * r[1][b] + r[2][a] * r[2][b];
+  };
+  skewed = std::fabs(col_dot(0, 1)) > 1e-6 || std::fabs(col_dot(0, 2)) > 1e-6 ||
+           std::fabs(col_dot(1, 2)) > 1e-6;
+  const double det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1]) -
+                     r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0]) +
+                     r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+  mirrored = det < 0.0;
+  // Shepperd's method.
+  const double tr = r[0][0] + r[1][1] + r[2][2];
+  if (tr > 0.0) {
+    const double s = std::sqrt(tr + 1.0) * 2.0;
+    q = {0.25 * s, (r[2][1] - r[1][2]) / s, (r[0][2] - r[2][0]) / s, (r[1][0] - r[0][1]) / s};
+  } else if (r[0][0] > r[1][1] && r[0][0] > r[2][2]) {
+    const double s = std::sqrt(1.0 + r[0][0] - r[1][1] - r[2][2]) * 2.0;
+    q = {(r[2][1] - r[1][2]) / s, 0.25 * s, (r[0][1] + r[1][0]) / s, (r[0][2] + r[2][0]) / s};
+  } else if (r[1][1] > r[2][2]) {
+    const double s = std::sqrt(1.0 + r[1][1] - r[0][0] - r[2][2]) * 2.0;
+    q = {(r[0][2] - r[2][0]) / s, (r[0][1] + r[1][0]) / s, 0.25 * s, (r[1][2] + r[2][1]) / s};
+  } else {
+    const double s = std::sqrt(1.0 + r[2][2] - r[0][0] - r[1][1]) * 2.0;
+    q = {(r[1][0] - r[0][1]) / s, (r[0][2] + r[2][0]) / s, (r[1][2] + r[2][1]) / s, 0.25 * s};
+  }
+  const double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+  q = {q.w / n, q.x / n, q.y / n, q.z / n};
+}
+
+cvc::physics::vec3 rotate(const cvc::physics::quat &q, const cvc::physics::vec3 &v) {
+  // v' = q v q*
+  const double tx = 2 * (q.y * v.z - q.z * v.y), ty = 2 * (q.z * v.x - q.x * v.z),
+               tz = 2 * (q.x * v.y - q.y * v.x);
+  return {v.x + q.w * tx + (q.y * tz - q.z * ty), v.y + q.w * ty + (q.z * tx - q.x * tz),
+          v.z + q.w * tz + (q.x * ty - q.y * tx)};
+}
+
+bool near_one(double s) { return std::fabs(s - 1.0) < 1e-6; }
+
+// The physics world a scene declares (`physics:`, or the defaults when only nodes declare `body:`),
+// and a body for every recorded node. Each body starts at its node's realized world pose; the
+// moving ones are bound to their nodes so tick_scene draws them where physics has them. Problems
+// warn (naming the node) and leave that body out; nothing here throws.
+void realize_physics(SceneGraph &sg, const cvc::ariadne::ScenePhysics &spec,
+                     const std::vector<pending_body> &pending, RealizedScene &out,
+                     std::vector<std::string> *warnings) {
+  namespace ph = cvc::physics;
+  cvc::app &app = sg.appContext();
+
+  ph::world_config cfg;
+  cfg.gravity = {spec.gravity[0], spec.gravity[1], spec.gravity[2]};
+  const bool have_jolt = ph::backend_available(ph::backend::jolt);
+  if (spec.backend == "null") {
+    cfg.backend = ph::backend::null;
+  } else if (spec.backend == "jolt" || spec.backend == "auto" || spec.backend.empty()) {
+    cfg.backend = have_jolt ? ph::backend::jolt : ph::backend::null;
+    if (!have_jolt)
+      warn(warnings, "ari: physics: this build has no Jolt; bodies are placed but never move "
+                     "(the null backend)");
+  } else {
+    cfg.backend = have_jolt ? ph::backend::jolt : ph::backend::null;
+    warn(warnings, "ari: physics: backend '" + spec.backend +
+                       "' is not auto, jolt or null; using " + ph::backend_name(cfg.backend));
+  }
+  // One physics step is a whole number of the clock's quanta (pose_tracker::follow needs that).
+  const double quantum = app.world_clock().fixed_dt();
+  double steps = 1.0;
+  if (spec.fixed_dt > 0.0) {
+    steps = std::max(1.0, std::round(spec.fixed_dt / quantum));
+    if (std::fabs(steps * quantum - spec.fixed_dt) > 1e-9)
+      warn(warnings, "ari: physics: fixed_dt " + std::to_string(spec.fixed_dt) +
+                         " s is not a whole number of the clock's " + std::to_string(quantum) +
+                         " s quanta; using " + std::to_string(steps * quantum) + " s");
+  }
+  cfg.fixed_dt = steps * quantum;
+  try {
+    out.physics = std::make_unique<ph::world>(cfg);
+  } catch (const std::exception &e) {
+    warn(warnings, std::string("ari: physics: ") + e.what());
+    return;
+  }
+  ph::world &w = *out.physics;
+  out.physics_binding = std::make_unique<physics_scene_binding>(w);
+
+  std::map<std::string, ph::material_id> materials;
+  for (const cvc::ariadne::ScenePhysicsMaterial &m : spec.materials) {
+    try {
+      materials[m.name] = w.add_material(
+          {m.name, static_cast<float>(m.friction), static_cast<float>(m.restitution)});
+    } catch (const std::exception &e) {
+      warn(warnings, "ari: physics: material '" + m.name + "': " + e.what());
+    }
+  }
+
+  for (const pending_body &p : pending) {
+    const cvc::ariadne::SceneNode &n = *p.spec;
+    const cvc::ariadne::SceneBody &b = n.body;
+    const auto bad = [&](const std::string &m) {
+      warn(warnings, "ari: scene node '" + n.id + "': body: " + m);
+    };
+    auto gnode = std::dynamic_pointer_cast<GeometryNode>(p.node);
+    if (!gnode || !gnode->getGeometry()) {
+      bad("needs a geometry node; skipped");
+      continue;
+    }
+    const cvc::geometry &geom = *gnode->getGeometry();
+
+    // The node's realized world pose (its transform composed with every ancestor's).
+    double m[16];
+    const vtkSmartPointer<vtkMatrix4x4> wm = p.node->getWorldTransform(); // a copy, held here
+    for (int k = 0; k < 16; ++k)
+      m[k] = wm ? wm->GetElement(k / 4, k % 4) : (k % 5 == 0 ? 1.0 : 0.0);
+    ph::vec3 t;
+    ph::quat q;
+    double s[3];
+    bool skewed = false, mirrored = false;
+    decompose(m, t, q, s, skewed, mirrored);
+    if (skewed || mirrored)
+      bad(std::string("the node's world transform is ") + (skewed ? "skewed" : "mirrored") +
+          "; the body follows its rotation and per-axis scale only");
+
+    std::string motion = b.motion.empty() ? (n.has_heightfield ? "static" : "dynamic") : b.motion;
+    if (motion != "dynamic" && motion != "kinematic" && motion != "static") {
+      bad("motion '" + motion + "' is not dynamic, kinematic or static; using dynamic");
+      motion = "dynamic";
+    }
+    std::string shape = b.shape.empty() ? "auto" : b.shape;
+    if (shape == "auto")
+      shape = n.has_heightfield                ? "terrain"
+              : n.source_primitive == "box"    ? "box"
+              : n.source_primitive == "sphere" ? "sphere"
+              : n.source_primitive == "plane"  ? "plane"
+              : motion == "static"             ? "mesh"
+                                               : "hull";
+
+    ph::body_desc d;
+    d.motion = motion == "static"      ? ph::motion_type::static_
+               : motion == "kinematic" ? ph::motion_type::kinematic
+                                       : ph::motion_type::dynamic;
+    // The shape's centre in the node's (scaled) frame: the body sits there, and the node is drawn
+    // at body pose x translate(-centre) x scale.
+    ph::vec3 centre;
+    const cvc::bounding_box e = geom.extents();
+    const double half[3] = {0.5 * (e.maxx - e.minx) * s[0], 0.5 * (e.maxy - e.miny) * s[1],
+                            0.5 * (e.maxz - e.minz) * s[2]};
+    const ph::vec3 mid{0.5 * (e.minx + e.maxx) * s[0], 0.5 * (e.miny + e.maxy) * s[1],
+                       0.5 * (e.minz + e.maxz) * s[2]};
+    bool placed_by_grid = false;
+    if (shape == "terrain") {
+      auto it = out.height_fields.find(n.id);
+      if (it == out.height_fields.end()) {
+        bad("shape 'terrain' needs a heightfield source; skipped");
+        continue;
+      }
+      if (d.motion != ph::motion_type::static_)
+        bad("a terrain is static; making it static");
+      d.motion = ph::motion_type::static_;
+      const bool rotated = std::fabs(std::fabs(q.w) - 1.0) > 1e-9;
+      if (rotated || !near_one(s[0]) || !near_one(s[1]) || !near_one(s[2]))
+        bad("a terrain collides unrotated and unscaled, at the node's position; draw it without "
+            "rotation or scale so the ground you see is the ground bodies rest on");
+      std::shared_ptr<const cvc::height_field> field = it->second;
+      if (t.x != 0.0 || t.y != 0.0 || t.z != 0.0) {
+        // The same grid moved to the node's position (the field itself stays the node's own).
+        std::vector<float> h = field->heights();
+        for (float &z : h)
+          z += static_cast<float>(t.z);
+        field = std::make_shared<cvc::height_field>(field->rows(), field->cols(), field->x0() + t.x,
+                                                    field->y0() + t.y, field->dx(), field->dy(),
+                                                    std::move(h), field->cell_materials());
+      }
+      d.shape = ph::terrain{field};
+      placed_by_grid = true;
+    } else if (shape == "box") {
+      if (n.source_primitive == "box")
+        d.shape = ph::box{
+            {0.5 * n.box_size[0] * s[0], 0.5 * n.box_size[1] * s[1], 0.5 * n.box_size[2] * s[2]}};
+      else {
+        d.shape =
+            ph::box{{std::max(half[0], 1e-3), std::max(half[1], 1e-3), std::max(half[2], 1e-3)}};
+        centre = mid;
+      }
+    } else if (shape == "sphere") {
+      if (!near_one(s[1] / s[0]) || !near_one(s[2] / s[0]))
+        bad("a sphere scales uniformly; using the largest scale");
+      const double smax = std::max(s[0], std::max(s[1], s[2]));
+      if (n.source_primitive == "sphere") {
+        d.shape = ph::sphere{n.sphere_radius * smax};
+      } else {
+        d.shape = ph::sphere{std::max({half[0], half[1], half[2], 1e-3})};
+        centre = mid;
+      }
+    } else if (shape == "plane") {
+      // A thin slab under the plane, its top face on the plane.
+      const double thick = 0.05;
+      d.shape = ph::box{{0.5 * n.plane_size * s[0], 0.5 * n.plane_size * s[1], thick}};
+      centre = {0.0, 0.0, -thick};
+    } else if (shape == "hull" || shape == "mesh") {
+      if (shape == "mesh" && d.motion != ph::motion_type::static_) {
+        bad("a mesh body is static; using its convex hull");
+        shape = "hull";
+      }
+      if (shape == "hull") {
+        ph::convex_hull h;
+        for (const auto &pt : geom.const_points())
+          h.points.push_back({pt[0] * s[0], pt[1] * s[1], pt[2] * s[2]});
+        d.shape = std::move(h);
+      } else {
+        auto scaled = std::make_shared<cvc::geometry>(geom);
+        if (!near_one(s[0]) || !near_one(s[1]) || !near_one(s[2]))
+          for (auto &pt : scaled->points())
+            pt = {pt[0] * s[0], pt[1] * s[1], pt[2] * s[2]};
+        d.shape = ph::mesh{scaled};
+      }
+    } else {
+      bad("shape '" + shape + "' is not auto, box, sphere, hull, mesh or terrain; skipped");
+      continue;
+    }
+
+    if (!placed_by_grid) {
+      d.position = t + rotate(q, centre);
+      d.rotation = q;
+    }
+    d.mass = b.mass;
+    d.density = b.density;
+    if (!b.material.empty()) {
+      auto mt = materials.find(b.material);
+      if (mt != materials.end())
+        d.material = mt->second;
+      else
+        bad("no physics material called '" + b.material + "'; using the default");
+    }
+    d.linear_velocity = {b.velocity[0], b.velocity[1], b.velocity[2]};
+    d.angular_velocity = {b.angular_velocity[0], b.angular_velocity[1], b.angular_velocity[2]};
+    if (b.has_linear_damping)
+      d.linear_damping = b.linear_damping;
+    if (b.has_angular_damping)
+      d.angular_damping = b.angular_damping;
+
+    ph::body_id id;
+    try {
+      id = w.add_body(d);
+    } catch (const std::exception &ex) {
+      bad(ex.what());
+      continue;
+    }
+    out.bodies.emplace_back(n.id, id);
+    if (d.motion == ph::motion_type::static_)
+      continue; // never moves: the node stays as realized
+    // body_from_visual = translate(-centre) x scale, row-major.
+    const double v[16] = {s[0], 0, 0,    -centre.x, 0, s[1], 0, -centre.y,
+                          0,    0, s[2], -centre.z, 0, 0,    0, 1};
+    out.physics_binding->bind(id, p.node, v);
+  }
+}
+
+} // namespace
+
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix, std::vector<std::string> *warnings) {
   RealizedScene out;
@@ -871,9 +1242,17 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.clock.time_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.time_key);
   out.clock.tick_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.tick_key);
   out.created.reserve(scene.nodes.size());
+  std::vector<pending_body> bodies;
   for (const auto &n : scene.nodes) {
-    realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, warnings);
+    realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, bodies, warnings);
     out.created.push_back(n.id);
+  }
+  // physics: and the nodes' body:s, once every node (and every terrain field) exists. A physics
+  // scene runs on the scene clock, so it drives app.world_clock() as `clock: {}` would.
+  if (scene.physics.present || !bodies.empty()) {
+    realize_physics(sg, scene.physics, bodies, out, warnings);
+    if (out.physics)
+      out.clock.present = true;
   }
   // Lights run AFTER the nodes so a StageLighting rig can frame the realized geometry.
   // Batch the whole loop: setPosition fires transformChanged, not lightsChanged, and
@@ -968,6 +1347,21 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
     }
     // pull (speed / paused / mode / lockstep / step requests), advance, push (time, tick, ...).
     clock_step = realized.clock_binding->drive(dt);
+  }
+
+  // physics: step the world by the quanta the clock just ran, then pose the moving bodies' nodes
+  // between the last two states, before the tickers (a custom tick may read a body's node).
+  if (realized.physics_binding && realized.app) {
+    cvc::world_clock &wc = realized.app->world_clock();
+    try {
+      realized.physics_binding->follow(wc);
+      realized.physics_binding->present(wc, clock_step.alpha);
+    } catch (const std::exception &e) {
+      // A clock whose quantum changed under the world (pose_tracker::follow refuses it): stop
+      // stepping rather than throw out of every frame.
+      realized.app->log(1, std::string("ari: physics stopped: ") + e.what() + "\n");
+      realized.physics_binding.reset();
+    }
   }
 
   // §9 clip: bound `offset:`s -> the nodes' clip_planes keys, before the tickers (a volren node

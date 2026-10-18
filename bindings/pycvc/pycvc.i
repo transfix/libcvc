@@ -1214,6 +1214,12 @@ struct pycvc_py_conversion {
 // (height_field derives from it) and pycvc_nav.i (land cover is cvc::nav's).
 %include "pycvc_world.i"
 
+// ── cvc::physics and the navigator's plant (P6) ────────────────────────────────
+// The physics world, its vehicles and the nav_plant that drives a sim_world's agents
+// as those vehicles (NAV-VEHICLE-PHYSICS-ROADMAP.md, P6). After pycvc_nav.i (the
+// sim_world handles) and pycvc_world.i (height_field, for terrain bodies).
+%include "pycvc_physics.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -1301,6 +1307,8 @@ struct pycvc_py_conversion {
 %ignore cvc::state::commentChanged;
 %ignore cvc::state::hiddenChanged;
 %ignore cvc::state::readOnlyChanged;
+%ignore cvc::state::propertyChanged;
+%ignore cvc::state::properties; // property_keys() + property(key) cover it
 %ignore cvc::state::linkChanged;
 %ignore cvc::state::traverseEnter;
 %ignore cvc::state::traverseExit;
@@ -2800,7 +2808,7 @@ bool values_equal(const value_t &a, const value_t &b);
 
 // Parser (docs/STATE_EXEC_GRAMMAR.md).
 struct parse_options {
-  size_t max_depth;   // lists and quotes that may nest (default 256)
+  size_t max_depth;   // lists and quotes that may nest (default 100000)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
 };
 struct data_options {
