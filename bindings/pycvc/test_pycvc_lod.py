@@ -535,13 +535,23 @@ def test_store_calls_release_the_gil():
     if not pycvc.HAVE_LOD_STORE:
         print("  skip: libcvc built without HDF5 (no scene.cvch5 store)")
         return
-    # Three full-size rungs of a 524288-triangle mesh (the store does not care
-    # how a ladder was made): a ~57 MB container, so each call below runs for
-    # 50 ms or more.
+    # Full-size rungs of a 524288-triangle mesh (the store does not care how a
+    # ladder was made), as many as it takes for each call below to run well past
+    # the 20 ms _assert_releases_gil needs to judge, on this machine: one untimed
+    # write of three rungs (~57 MB) sets the scale for about 0.15 s. Three rungs
+    # took over 50 ms on a dev box but 15 ms on a CI runner.
     big = _terrain(512)
+    probe = pycvc.mesh_pyramid()
+    probe.rungs = [big, big, big]
+    probe.world_error_m = [0.0, 1.0, 2.0]
+    t = time.perf_counter()
+    pycvc.scene_writer(app).write_mesh_pyramid("probe", probe)
+    took = time.perf_counter() - t
+    n = max(3, min(48, int(math.ceil(3 * 0.15 / max(took, 1e-3)))))
     pyr = pycvc.mesh_pyramid()
-    pyr.rungs = [big, big, big]
-    pyr.world_error_m = [0.0, 1.0, 2.0]
+    pyr.rungs = [big] * n
+    pyr.world_error_m = [float(i) for i in range(n)]
+    print("  store calls on %d rungs (three were written in %.3fs)" % (n, took))
     w = pycvc.scene_writer(app)
     _assert_releases_gil("write_mesh_pyramid", lambda: w.write_mesh_pyramid("p", pyr))
     blob = _assert_releases_gil("to_blob", w.to_blob)
@@ -549,7 +559,7 @@ def test_store_calls_release_the_gil():
     sha = hashlib.sha256(blob).hexdigest()
     _assert_releases_gil("open_verified", lambda: pycvc.scene_reader.open_verified(app, blob, sha))
     back = _assert_releases_gil("read_mesh_pyramid", lambda: r.read_mesh_pyramid("p"))
-    assert back.rung_triangles() == [524288] * 3
+    assert back.rung_triangles() == [524288] * n
     src = _terrain(80)
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "bake.cvch5")
