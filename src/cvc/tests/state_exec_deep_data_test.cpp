@@ -1,7 +1,7 @@
 // Deeply nested state_exec values must not overflow the native stack.
 //
-// The parser's nesting limit (parser.max_depth on the state tree) exists because the reader
-// recurses; it can rise only once nothing else does either. These tests build values 100000
+// The parser's nesting limit (parser.max_depth on the state tree) defaults to the depth these
+// tests prove: nothing that walks a value recurses once per level. These tests build values 100000
 // levels deep at runtime (not through the parser) and drop, print, compare and snapshot them
 // (the deep copy behind state-data-get is in state_exec_intrinsics_test). Each body runs on a
 // thread with a small fixed stack (kStackKiB), so a walker that recurses once per level fails
@@ -284,6 +284,26 @@ TEST(StateExecDeepData, MacroExpandsDeepTemplate) {
     value_t r = ev.evaluate(expr);
     EXPECT_EQ(list_depth(r), n);
     EXPECT_TRUE(values_equal(r, nested_list(n, value_t{int64_t{7}})));
+  });
+}
+
+// ---- parsed data -------------------------------------------------------------
+
+TEST(StateExecDeepData, ParsedDataAtTheDefaultDepthLimit) {
+  // A script nesting its data as deeply as parser.max_depth allows by default parses, evaluates,
+  // compares, prints and frees on the small stack. (= 'X 'X) quotes X twice, so X nests one
+  // level less than the limit.
+  on_small_stack([] {
+    const std::size_t n = parse_options{}.max_depth - 2;
+    const std::string x = std::string(n, '(') + "1" + std::string(n, ')');
+    stackless_evaluator ev(builtins::make_default_environment());
+    value_t same = ev.evaluate(parse("(= '" + x + " '" + x + ")"));
+    EXPECT_TRUE(std::get<bool>(same.v));
+    value_t printed = ev.evaluate(parse("(str '" + x + ")"));
+    const std::string &s = std::get<std::string>(printed.v);
+    EXPECT_EQ(s.rfind("(((", 0), 0u);
+    EXPECT_LE(s.size(), std::size_t{2} * 65536 + 16); // to_string's length cap
+    EXPECT_THROW(parse(std::string(n + 3, '(') + std::string(n + 3, ')')), parse_error);
   });
 }
 

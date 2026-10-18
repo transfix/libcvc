@@ -2650,7 +2650,7 @@ bool values_equal(const value_t &a, const value_t &b);
 
 // Parser (docs/STATE_EXEC_GRAMMAR.md).
 struct parse_options {
-  size_t max_depth;   // lists and quotes that may nest (default 256)
+  size_t max_depth;   // lists and quotes that may nest (default 100000)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
 };
 struct data_options {

@@ -10,6 +10,7 @@
 
 #include <cvc/state/state_exec/async_evaluator.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/parser.h>
 #include <thread>
 
@@ -679,22 +680,8 @@ task<value_t> async_evaluator::apply_closure(const closure_ptr &cls,
 
 value_t async_evaluator::substitute(const value_t &tmpl,
                                     const std::unordered_map<std::string, value_t> &subst) {
-  if (auto *sym = std::get_if<symbol>(&tmpl.v)) {
-    auto it = subst.find(sym->name);
-    if (it != subst.end())
-      return it->second;
-    return tmpl;
-  }
-  if (auto *lp = std::get_if<list_ptr>(&tmpl.v)) {
-    if (!*lp)
-      return tmpl;
-    auto result = std::make_shared<std::vector<value_t>>();
-    result->reserve((*lp)->size());
-    for (auto &e : **lp)
-      result->push_back(substitute(e, subst));
-    return value_t{std::move(result)};
-  }
-  return tmpl;
+  // The stackless evaluator's walk, run whole: no native recursion per template level.
+  return run_to_completion(*make_substitute_job(tmpl, subst));
 }
 
 } // namespace cvc::state_exec

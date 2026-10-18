@@ -377,7 +377,7 @@ def test_scheduler_settings_come_from_the_tree():
     root.child("state_exec.schedulers.py-sched.max_pending_messages").value("2048")
     root.child("state_exec.schedulers.py-sched.parser.max_depth").value("12")
     s = pycvc.scheduler()
-    assert s.parser_settings().max_depth == 256
+    assert s.parser_settings().max_depth == pycvc.parse_options().max_depth  # the default
     s.set_watch_root(root)
     s.set_id("py-sched")
     assert s.id() == "py-sched"
