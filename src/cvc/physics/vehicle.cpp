@@ -44,101 +44,145 @@ double vehicle_desc::track() const {
   return 0.0;
 }
 
+// An M1097A2 HMMWV (the heavy variant). Values marked [AMG] are from AM General's M1097A2
+// specification sheet (www.amgeneral.com, M1097A2R, AMP05072018DOM); [TM] from TM 9-2320-280-10,
+// table 1-15; [DTIC] from the Army's dynamometer tests of its 6.5 L engine (TARDEC TFLRF,
+// Frame and Blanks, DTIC ADA449196); [derived] follow from those; [est] are engineering
+// estimates, to be replaced by measurements. physics_vehicle_test and physics_energy_test check
+// the result against the field figures (acceleration, cruising range).
 vehicle_desc vehicle_desc::humvee() {
   vehicle_desc d;
-  d.half_extents = {2.285, 1.08, 0.45};
-  d.center_of_mass = {0.0, 0.0, -0.25};
-  d.mass = 2340.0;
+  d.half_extents = {2.42, 1.09, 0.45}; // [AMG] 4.84 m x 2.18 m overall (the body box)
+  // [AMG] the centre of gravity at curb: 0.742 m above the ground, 1.537 m behind the front
+  // axle, so 0.113 m ahead of the wheelbase's middle; the chassis origin rides about 1.02 m up.
+  d.center_of_mass = {0.113, 0.0, -0.28};
+  d.mass = 2676.0; // [AMG] curb weight; the GVW is 4672 kg (1996 kg payload)
   axle_desc a;
-  a.half_track = 0.91;
+  a.half_track = 0.91; // [AMG] 1.82 m track
   a.z = -0.2;
-  a.wheel_radius = 0.47;
-  a.wheel_width = 0.31;
-  a.wheel_inertia = 6.0;
-  a.driven = true;
-  a.max_brake_torque = 4000.0;
+  a.wheel_radius = 0.47;  // [AMG] 37 x 12.5R-16.5 tires: 0.94 m across
+  a.wheel_width = 0.3175; // [AMG] 12.5 in
+  a.wheel_inertia = 6.0;  // [est] a 36 kg tire and 20 kg two-piece wheel
+  a.driven = true;        // [AMG] full-time four-wheel drive
+  // [derived] Front-biased, as the dual-circuit system's proportioning is: at 0.8 g the [AMG]
+  // centre of gravity puts 71% of the load on the front axle, so each axle's brakes reach the
+  // friction limit together (about 3.5 and 1.4 kN m a wheel; the inboard discs act through the
+  // 1.92 hubs).
   a.suspension_min = 0.2;
   a.suspension_max = 0.5;
-  a.suspension_frequency = 1.3;
-  a.suspension_damping = 0.5;
-  a.anti_roll_stiffness = 15000.0;
+  a.suspension_frequency = 1.3;    // [est]
+  a.suspension_damping = 0.5;      // [est]
+  a.anti_roll_stiffness = 15000.0; // [est]
   axle_desc front = a, rear = a;
-  front.x = 1.65;
+  front.x = 1.65; // [AMG] 3.30 m wheelbase
   front.steered = true;
+  front.max_brake_torque = 3600.0;
   rear.x = -1.65;
-  rear.max_hand_brake_torque = 3000.0;
+  rear.max_brake_torque = 1500.0;
+  rear.max_hand_brake_torque = 3000.0; // [AMG] parking brake on the rear service brakes; [est]
   d.axles = {front, rear};
-  d.max_steer = 0.45;          // a 15 m turning circle
-  d.max_steer_rate = 0.35;     // rad/s
-  d.engine_max_torque = 515.0; // 6.5 L diesel
-  d.engine_min_rpm = 700.0;
-  d.engine_max_rpm = 3400.0;
-  d.engine_inertia = 0.6;
-  d.gear_ratios = {2.48, 1.48, 1.0, 0.75}; // 4L80-E
-  d.reverse_ratio = -2.08;
-  d.differential_ratio = 4.92; // 2.56 axle x 1.92 geared hubs
-  d.shift_up_rpm = 2800.0;
-  d.shift_down_rpm = 1400.0;
+  d.max_steer = 0.457;     // [derived] the 7.62 m turning radius [AMG]: atan(3.30 / (7.62 - 0.91))
+  d.max_steer_rate = 0.35; // [est] geometry-scene-gen's VehicleProfile("humvee")
+  // [AMG] GEP 6.5 L V8, naturally aspirated: 119 kW at 3400 rpm, 393 N m at 1700 rpm.
+  d.engine_max_torque = 393.0;
+  d.engine_min_rpm = 700.0;  // [est] idle
+  d.engine_max_rpm = 3600.0; // [est] the governor's no-load speed, above the 3400 rpm rating
+  // [AMG] the two rated points; [est] the curve's shape between them, and the governor's
+  // cut-off. 334 N m at 3400 rpm is the 119 kW rating.
+  d.torque_curve = {{0.0, 0.70},    {700.0, 0.76},  {1000.0, 0.87}, {1700.0, 1.0},
+                    {2500.0, 0.95}, {3400.0, 0.85}, {3600.0, 0.0}};
+  d.engine_inertia = 0.6; // [est] crank, flexplate and converter impeller
+  // [derived] Motoring friction, from the 6.5 L's ISO 8178 dynamometer modes [DTIC]: at
+  // rated speed its fuel flow is a Willans line, 0.331 lb/hp-h over 20.3 lb/h at no load,
+  // which is an indicated efficiency of 0.42 and 128 N m of friction; the intermediate
+  // speed's 10% mode leaves 8.2 lb/h at no load (87 N m), and idle burns 2.6 lb/h (78 N m).
+  // [est] the modes' speeds, which the table does not give: 3400 rpm rated, 2040 rpm
+  // intermediate (ISO 8178's 60% of rated), 700 rpm idle.
+  d.engine_friction_curve = {{700.0, 78.0}, {2040.0, 87.0}, {3400.0, 128.0}};
+  d.clutch_strength = 40.0; // [est] a converter coupling that slips ~5% at peak torque
+  // [est] gearbox 0.90, transfer case 0.98, two hypoid axles 0.96, geared hubs 0.97
+  d.driveline_efficiency = 0.82;
+  d.gear_ratios = {2.48, 1.48, 1.0, 0.75}; // [AMG] four-speed automatic
+  d.reverse_ratio = -2.08;                 // [AMG]
+  d.differential_ratio = 2.73 * 1.92;      // [AMG] hypoid 2.73 x geared hubs 1.92; transfer 1:1
+  d.shift_up_rpm = 3200.0;                 // [est] at full throttle
+  d.shift_down_rpm = 1400.0;               // [est]
+  d.shift_up_rpm_light = 1600.0;           // [est] gently: early upshifts
+  d.shift_down_rpm_light = 900.0;
   d.max_accel = 2.5;
   d.max_decel = 7.5;
-  d.drag_coefficient = 0.7;
-  d.frontal_area = 3.8;
-  d.rolling_resistance = 0.015;
-  // Diesel. Estimates: about 240 g/kWh at best (35%), a 25 gal (95 L) tank, about
-  // 1.5 L/h at idle.
+  d.drag_coefficient = 0.7;     // [est] a box with an open bed; with 3.5 m^2, the 2.45 m^2 drag
+  d.frontal_area = 3.5;         // area the Hummer H2's published 2.46 m^2 suggests
+  d.rolling_resistance = 0.015; // [est] radial cross-country tires on a hard surface
+  // [AMG] a 95 L (25 gal) tank of diesel (0.85 kg/L), burnt on the [DTIC] Willans line above;
+  // physics_energy_test checks the cruising range against [TM]'s.
   d.energy.type = energy_source::kind::fuel;
-  d.energy.tank = 80.0;
-  d.energy.thermal_efficiency = 0.35;
+  d.energy.tank = 95.0 * 0.85;
+  d.energy.indicated_efficiency = 0.42; // [derived] the [DTIC] Willans line's slope
   d.energy.heating_value = 42.6e6;
-  d.energy.idle_flow = 3.5e-4;
+  d.energy.accessory_power = 2500.0; // [est] the fan, alternator and steering pump
   return d;
 }
 
+// The UT-AV lab's RoboRacer. Values marked [lab] are from the lab's configuration
+// (ut-av.pages.dev hardware/vesc_motor_driver; ut-amrl/ut_automata config/vesc.lua); [trx] from
+// Traxxas' listing for the Ford Fiesta ST Rally (74154-4); [doc31] from the scope's spec table
+// (cvc-engagement-docs dbg-technical/31, D5), which read the lab's URDF and nav2 config;
+// [derived] follow from those; [est] are estimates to replace with measurements of the car.
 vehicle_desc vehicle_desc::roboracer() {
   vehicle_desc d;
-  d.half_extents = {0.27, 0.10, 0.05};
-  d.center_of_mass = {0.0, 0.0, -0.02};
-  d.mass = 3.5;
+  d.half_extents = {0.2675, 0.1405, 0.05}; // [trx] 535 mm long, 281 mm wide
+  d.center_of_mass = {0.0, 0.0, -0.02};    // [doc31] a centre of gravity about 0.08 m up
+  d.mass = 3.5; // [doc31] 3.3-3.8 kg as built ([trx] 2.63-2.77 kg stock); [est] weigh it
   axle_desc a;
-  a.half_track = 0.14;
+  a.half_track = 0.119; // [doc31] 0.238 m between wheel centres (281 mm less a tire)
   a.z = 0.0;
-  a.wheel_radius = 0.055;
-  a.wheel_width = 0.045;
-  a.wheel_inertia = 2.0e-4;
-  a.driven = true;
-  a.max_brake_torque = 1.0;
+  a.wheel_radius = 0.054; // [doc31] 108 x 43 mm rally tires (the URDF suggests 90 mm: measure)
+  a.wheel_width = 0.043;
+  a.wheel_inertia = 1.4e-4;  // [est] a 70 g wheel and tire
+  a.driven = true;           // [doc31] shaft-driven 4WD
+  a.max_brake_torque = 0.57; // [est] the VESC's motor braking, ~60 A through the 15.15:1
   a.suspension_min = 0.01;
   a.suspension_max = 0.04;
-  a.suspension_frequency = 4.0;
-  a.suspension_damping = 0.6;
-  a.anti_roll_stiffness = 50.0;
+  a.suspension_frequency = 4.0; // [est]
+  a.suspension_damping = 0.6;   // [est]
+  a.anti_roll_stiffness = 50.0; // [est]
   axle_desc front = a, rear = a;
-  front.x = 0.165;
+  front.x = 0.162; // [lab] 0.324 m wheelbase ([trx] 12.8 in)
   front.steered = true;
-  rear.x = -0.165;
+  rear.x = -0.162;
   d.axles = {front, rear};
-  d.max_steer = 0.4189; // 24 degrees
-  d.max_steer_rate = 3.2;
-  d.engine_max_torque = 0.2; // brushless motor, at the motor
-  d.engine_min_rpm = 300.0;
-  d.engine_max_rpm = 20000.0;
-  d.engine_inertia = 1.0e-4;
+  d.max_steer = 0.425;    // [lab] max_steering_angle
+  d.max_steer_rate = 3.0; // [doc31] the Traxxas 2056 servo, 0.23 s/60 deg at 6 V, slower at ~5 V
+  // [lab] an ARRMA 3800 Kv brushless motor (4-pole). [est] the VESC's motor current limit,
+  // ~60 A: 60 x 9.549 / 3800 = 0.15 N m.
+  d.engine_max_torque = 0.15;
+  d.engine_min_rpm = 0.0; // a motor does not idle
+  // [lab] erpm_speed_limit 53740 (10 m/s): 26870 rpm on a 4-pole motor. Flat torque to the
+  // VESC's speed limit.
+  d.engine_max_rpm = 26870.0;
+  d.torque_curve = {{0.0, 1.0}, {25500.0, 1.0}, {26870.0, 0.0}};
+  d.engine_inertia = 2.0e-6;    // [est] a 540-size inrunner's rotor and the pinion
+  d.clutch_strength = 10.0;     // direct drive: stiff for the motor's inertia
+  d.driveline_efficiency = 0.9; // [est] spur and pinion, the gearbox and two diffs
   d.gear_ratios = {1.0};
   d.reverse_ratio = -1.0;
-  d.differential_ratio = 12.0;
-  d.shift_up_rpm = 19000.0;
-  d.shift_down_rpm = 200.0;
-  d.max_accel = 7.0;
-  d.max_decel = 8.0;
-  d.drag_coefficient = 0.8;
-  d.frontal_area = 0.03;
-  d.rolling_resistance = 0.02;
-  // A 3S LiPo behind a VESC that brakes by regeneration. Estimates until measured on the car:
-  // 5000 mAh at 11.1 V (55 Wh), 80% from pack to shaft, 60% of braking returned, at most 150 W.
+  // [derived] speed_to_erpm_gain 5356 [lab] is 2678 motor rpm per m/s; on 0.054 m tires that is
+  // 15.15 motor turns per wheel turn (17T pinion, 83T spur [lab], and the Traxxas gearbox).
+  d.differential_ratio = 15.15;
+  d.shift_up_rpm = 26000.0;
+  d.shift_down_rpm = 1.0;
+  d.max_accel = 6.0;           // [lab] max_acceleration
+  d.max_decel = 6.0;           // [lab] max_deceleration
+  d.drag_coefficient = 0.5;    // [est]
+  d.frontal_area = 0.035;      // [est] the body's 281 mm x ~125 mm
+  d.rolling_resistance = 0.02; // [est] foam-insert rally tires on a lab floor
+  // [doc31] a 3S LiPo (9.6-12.6 V [lab]); [est] 5000 mAh (55.5 Wh: read the pack's label), 85%
+  // from pack to shaft, and the VESC's regenerative braking at 70% up to 150 W.
   d.energy.type = energy_source::kind::battery;
-  d.energy.capacity = 55.0 * 3600.0;
-  d.energy.motor_efficiency = 0.8;
-  d.energy.regen_efficiency = 0.6;
+  d.energy.capacity = 55.5 * 3600.0;
+  d.energy.motor_efficiency = 0.85;
+  d.energy.regen_efficiency = 0.7;
   d.energy.max_regen_power = 150.0;
   return d;
 }
@@ -206,6 +250,23 @@ void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
            d.engine_min_rpm < d.engine_max_rpm && positive(d.engine_inertia),
        "the engine needs a torque, an inertia and 0 <= min rpm < max rpm");
   need(!d.gear_ratios.empty(), "the transmission needs at least one gear");
+  for (std::size_t i = 0; i < d.torque_curve.size(); ++i) {
+    const auto &p = d.torque_curve[i];
+    need(std::isfinite(p.first) && p.first >= 0.0 && p.first <= d.engine_max_rpm &&
+             std::isfinite(p.second) && p.second >= 0.0 &&
+             (i == 0 || p.first > d.torque_curve[i - 1].first),
+         "torque_curve needs (rpm, fraction) points in ascending rpm within engine_max_rpm, "
+         "fractions >= 0");
+  }
+  for (std::size_t i = 0; i < d.engine_friction_curve.size(); ++i) {
+    const auto &p = d.engine_friction_curve[i];
+    need(std::isfinite(p.first) && p.first >= 0.0 && std::isfinite(p.second) && p.second >= 0.0 &&
+             (i == 0 || p.first > d.engine_friction_curve[i - 1].first),
+         "engine_friction_curve needs (rpm, N m) points in ascending rpm, torques >= 0");
+  }
+  need(positive(d.clutch_strength), "clutch_strength must be finite and > 0");
+  need(d.driveline_efficiency > 0.0 && d.driveline_efficiency <= 1.0,
+       "driveline_efficiency must be in (0, 1]");
   for (const double g : d.gear_ratios)
     need(positive(g), "gear ratios must be > 0");
   need(d.reverse_ratio < 0.0 && std::isfinite(d.reverse_ratio), "reverse_ratio must be < 0");
@@ -226,10 +287,14 @@ void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
        "a battery needs capacity > 0, initial_charge in [0, 1], motor_efficiency in (0, 1], "
        "regen_efficiency in [0, 1] and max_regen_power >= 0");
   need(e.type != energy_source::kind::fuel ||
-           (std::isfinite(e.tank) && e.tank >= 0.0 && fraction(e.thermal_efficiency, false) &&
-            positive(e.heating_value) && std::isfinite(e.idle_flow) && e.idle_flow >= 0.0),
-       "fuel needs tank >= 0, thermal_efficiency in (0, 1], heating_value > 0 and "
-       "idle_flow >= 0");
+           (std::isfinite(e.tank) && e.tank >= 0.0 && fraction(e.indicated_efficiency, false) &&
+            positive(e.heating_value) && std::isfinite(e.accessory_power) &&
+            e.accessory_power >= 0.0),
+       "fuel needs tank >= 0, indicated_efficiency in (0, 1], heating_value > 0 and "
+       "accessory_power >= 0");
+  need(std::isfinite(d.shift_up_rpm_light) && d.shift_up_rpm_light >= 0.0 &&
+           std::isfinite(d.shift_down_rpm_light) && d.shift_down_rpm_light >= 0.0,
+       "the light-throttle shift points must be finite and >= 0");
   need(positive(d.tire_peak_slip) && positive(d.tire_peak_slip_angle) && d.tire_sliding > 0.0 &&
            d.tire_sliding <= 1.0,
        "the tire needs peak slips > 0 and 0 < tire_sliding <= 1");
@@ -279,6 +344,8 @@ std::string fixed_change(const vehicle_desc &a, const vehicle_desc &b) {
   }
   if (a.engine_inertia != b.engine_inertia)
     return "engine_inertia";
+  if (a.torque_curve != b.torque_curve)
+    return "torque_curve";
   if (a.gear_ratios != b.gear_ratios)
     return "gear_ratios";
   if (a.reverse_ratio != b.reverse_ratio)
@@ -295,8 +362,8 @@ std::string fixed_change(const vehicle_desc &a, const vehicle_desc &b) {
   if (p.type != q.type || p.capacity != q.capacity || p.initial_charge != q.initial_charge ||
       p.motor_efficiency != q.motor_efficiency || p.regen_efficiency != q.regen_efficiency ||
       p.max_regen_power != q.max_regen_power || p.tank != q.tank ||
-      p.thermal_efficiency != q.thermal_efficiency || p.heating_value != q.heating_value ||
-      p.idle_flow != q.idle_flow)
+      p.indicated_efficiency != q.indicated_efficiency || p.heating_value != q.heating_value ||
+      p.accessory_power != q.accessory_power)
     return "energy";
   if (a.energy_ledger != b.energy_ledger)
     return "energy_ledger";
@@ -740,10 +807,9 @@ void vehicle_set::account(rt &v, double dt) {
     n.source += draw;
     n.regen += credit;
   } else if (src.type == energy_source::kind::fuel) {
-    // Shaft work over thermal_efficiency x the heating value, and the idle flow; the idle
-    // flow pays for the engine's idling.
-    const double kg =
-        std::max(0.0, e.engine) / (src.thermal_efficiency * src.heating_value) + src.idle_flow * dt;
+    // The Willans line: what the engine did while fuelled (its shaft work, friction and
+    // accessories, measured each sub-step) over its indicated efficiency.
+    const double kg = std::max(0.0, e.indicated) / (src.indicated_efficiency * src.heating_value);
     n.fuel_used += kg;
     n.source += kg * src.heating_value;
     if (src.tank > 0.0)

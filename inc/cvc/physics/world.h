@@ -304,7 +304,8 @@ public:
   //   the driver       max_accel, max_decel
   //   resistance       drag_coefficient, frontal_area, air_density, rolling_resistance
   //   the powertrain   engine_max_torque, engine_min_rpm, engine_max_rpm, shift_up_rpm,
-  //                    shift_down_rpm
+  //                    shift_down_rpm, shift_up_rpm_light, shift_down_rpm_light,
+  //                    engine_friction_curve, clutch_strength, driveline_efficiency
   //   each axle        max_brake_torque, max_hand_brake_torque, suspension_frequency,
   //                    suspension_damping, anti_roll_stiffness (on an axle added with a
   //                    bar: one added without stays without)

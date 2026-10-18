@@ -61,6 +61,7 @@ struct energy_tally {
   double drivetrain = 0.0;   // engine and wheel damping, clutch slip, engine braking
   double split = 0.0;        // what the split drivetrain step adds (vehicle_energy)
   double split_braked = 0.0; // the part of it in braked wheels
+  double indicated = 0.0;    // the fuelled engine's work (energy_source's Willans line)
   double brake = 0.0;
   double tire = 0.0;
   double work[4] = {};     // the loads' work on the chassis (aero, rolling, medium, fields)
@@ -92,8 +93,8 @@ struct energy_tally {
     omega.assign(wheels, 0.0f);
   }
   void clear_sums() {
-    engine = idle = supplied = drivetrain = split = split_braked = brake = tire = suspension =
-        chassis_damping = stored = distance = 0.0;
+    engine = idle = supplied = drivetrain = split = split_braked = indicated = brake = tire =
+        suspension = chassis_damping = stored = distance = 0.0;
     for (double &x : work)
       x = 0.0;
   }
@@ -105,6 +106,14 @@ public:
   ~ackermann_controller() override;          // the key function: jolt_vehicle_controller.cpp
   const std::vector<float> *steer = nullptr; // rad, per wheel; the facade's, when set
   energy_tally *tally = nullptr;             // measure the energy ledger, when set
+  // The share of the engine's torque Jolt is given (vehicle_desc::driveline_efficiency):
+  // the engine supplies 1 / this of the work Jolt's torque does, its gears lose the rest.
+  double driveline_efficiency = 1.0;
+  // The engine's motoring friction (vehicle_desc::engine_friction_curve, (rpm, N m)) and
+  // accessory power (W): the closed-throttle drag, and the fuel's Willans line.
+  std::vector<std::pair<double, double>> engine_friction;
+  double accessory_power = 0.0;
+  double friction_torque(double rpm) const; // N m, flat beyond the curve; 0 with none
   // The anti-roll bars' stiffness, N/m per axle (0 for none), for their spring energy.
   std::vector<double> anti_roll;
 

@@ -260,7 +260,11 @@ const std::pair<const char *, double vehicle_desc::*> kVehicleKnobs[] = {
     {"engine_min_rpm", &vehicle_desc::engine_min_rpm},
     {"engine_max_rpm", &vehicle_desc::engine_max_rpm},
     {"shift_up_rpm", &vehicle_desc::shift_up_rpm},
-    {"shift_down_rpm", &vehicle_desc::shift_down_rpm}};
+    {"shift_down_rpm", &vehicle_desc::shift_down_rpm},
+    {"clutch_strength", &vehicle_desc::clutch_strength},
+    {"driveline_efficiency", &vehicle_desc::driveline_efficiency},
+    {"shift_up_rpm_light", &vehicle_desc::shift_up_rpm_light},
+    {"shift_down_rpm_light", &vehicle_desc::shift_down_rpm_light}};
 const std::pair<const char *, double axle_desc::*> kAxleKnobs[] = {
     {"max_brake_torque", &axle_desc::max_brake_torque},
     {"max_hand_brake_torque", &axle_desc::max_hand_brake_torque},

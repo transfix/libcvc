@@ -161,7 +161,7 @@ P4 adds three things to measure and contain the drift:
   - Each wheel hangs on its own spring-damper suspension (Jolt's vehicle model), with an anti-roll bar per axle.
   - The wheels probe the ground with a ray of their own (`medium_tester` in the Jolt backend), which also finds the ground under a medium.
   - A medium answers a wheel's load over 0.1 s: without that lag, sinkage computed from the last step's raw load made a vehicle bounce on the snow.
-  - **Hills** (follow-up): the driver holds a vehicle with no command on the full brake below 0.3 m/s. On a 15% grade (μ = 0.9) it drifts 0.0000 m in 10 s, and the hand brake alone 0.6 mm. Released in neutral it rolls 5.652 m in 3 s against the model's g (sin θ − C_rr cos θ) 5.630 m. A hill start reaches 4.66 m/s uphill in 6 s and rolls back at most 4 mm. Any change of input wakes a sleeping vehicle; before that, a released vehicle stayed asleep on the grade.
+  - **Hills** (follow-up): the driver holds a vehicle with no command on the full brake below 0.3 m/s. On a 15% grade (μ = 0.9) it drifts 0.0000 m in 10 s, and the hand brake alone 0.6 mm. Released in neutral it rolls 5.685 m in 3 s against the model's g (sin θ − C_rr cos θ) 5.662 m. A hill start reaches 2.38 m/s uphill in 6 s and rolls back at most 1 mm (the field presets' figures). Any change of input wakes a sleeping vehicle; before that, a released vehicle stayed asleep on the grade.
   - **The whole state, in real time** (follow-up):
     - `world::snapshot()` copies every body, field, vehicle (description and state, wheels
       included) and contact at one tick, under one lock: 0.18 ms for 1001 moving bodies
@@ -186,19 +186,30 @@ P4 adds three things to measure and contain the drift:
         0.2 ms.
     - The binding no longer took a material's own keys (`friction`, ...) for four more
       materials on every pull. That cost about 0.45 ms a pull.
-  - **Ruts** (follow-up): a medium with `ruts = true` keeps a rut map that the wheels press their contact patches into. A Humvee in 0.4 m of snow leaves tracks 0.0945 m deep (it sinks 0.0952 m) and 0.30 m wide (tire 0.31 m), with nothing between them. A second Humvee in those tracks sinks to the same depth and meets 0 N of compaction resistance, against 2690 N for the leader's front axle; the leader's rear axle, in its own front wheels' ruts, meets 97 N. The rut maps are saved, hashed and replayed.
+  - **Ruts** (follow-up): a medium with `ruts = true` keeps a rut map that the wheels press their contact patches into. A Humvee in 0.4 m of snow leaves tracks 0.1052 m deep (it sinks 0.1050 m) and 0.30 m wide (tire 0.32 m), with nothing between them. A second Humvee in those tracks sinks to the same depth and meets 24 N of compaction resistance, against 3498 N for the leader's front axle; the leader's rear axle, in its own front wheels' ruts, meets 0 N (the field presets' figures). The rut maps are saved, hashed and replayed.
 - **P3** is done (above): `physics_energy_test`, every gate met on Windows.
   - The vehicle includes its engine (D8): `supplied` is the engine torque's work, and the idle
     speed's clamp is its own input. So coasting with no input supplies exactly nothing.
   - Jolt's drivetrain step is implicit and split from the friction solve: it solves engine,
     clutch and wheels with an estimate of the brake and ground torques, then undoes the
     estimate. Every flow is charged at the step's end speed, so clutch slip is never negative,
-    and the energy the split makes (dL tau / I a wheel) is its own term, `drivetrain_split`:
-    +2.7% of supplied on the closed cycle, against a residual of 0.05%.
-  - What the ledger shows: the Humvee's drivetrain loses about half the engine's work to Jolt's
-    defaults (engine damping 0.2/s, viscous clutch strength 10). The RoboRacer's split error
-    exceeds its supplied energy while braking, from a motor inertia of 1e-4 kg m^2 behind 12:1
-    gearing. Both are P2 preset questions, left as they are.
+    and the energy the split makes (dL tau / I a wheel) is its own term, `drivetrain_split`.
+    It is proportional to the collision step. The gate is on residual + split at the step a
+    twin runs at: 0.97% for the Humvee at 8 steps (the residual alone is 0.02%).
+  - **The presets against the field** (follow-up): every value in `vehicle.cpp` names its
+    source (AM General's sheet, the TM, the Army's dynamometer tests of the 6.5 L, the lab's
+    configuration).
+    - New powertrain terms: a net torque curve, a motoring-friction curve that acts only with
+      the throttle shut, the converter's coupling, the driveline's efficiency, and a
+      throttle-dependent shift schedule.
+    - Fuel burns on the dynamometer's Willans line, and none on the overrun.
+    - The M1097A2 at GVW makes 0-30 / 0-50 mph in 10.1 / 25.1 s, against the Army's 9.4 /
+      26.1 s.
+    - Its range comes out 602-613 km against the TM's 442 km (bias-ply; about 490 km on
+      radials). This gap is open, and needs a coast-down and fuel-flow measurement.
+    - The drivetrain's share of the engine's work at cruise fell from about half to 19%.
+    - The RoboRacer, with the lab's 15.15:1 gearing, needs 32 collision steps for a 1% energy
+      error.
   - `nav_stats` gains `energy_J` / `energy_per_km` with P4's plant seam, where the navigator
     first reads a physics plant.
 - **P4–P8** are not started.

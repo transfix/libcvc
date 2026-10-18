@@ -284,6 +284,24 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("engine_min_rpm").number(d.engine_min_rpm);
   w.key("engine_max_rpm").number(d.engine_max_rpm);
   w.key("engine_inertia").number(d.engine_inertia);
+  w.key("engine_friction_curve").begin_array();
+  for (const auto &p : d.engine_friction_curve) {
+    w.begin_array();
+    w.number(p.first);
+    w.number(p.second);
+    w.end_array();
+  }
+  w.end_array();
+  w.key("clutch_strength").number(d.clutch_strength);
+  w.key("driveline_efficiency").number(d.driveline_efficiency);
+  w.key("torque_curve").begin_array();
+  for (const auto &p : d.torque_curve) {
+    w.begin_array();
+    w.number(p.first);
+    w.number(p.second);
+    w.end_array();
+  }
+  w.end_array();
   w.key("gear_ratios").begin_array();
   for (const double g : d.gear_ratios)
     w.number(g);
@@ -292,6 +310,8 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("differential_ratio").number(d.differential_ratio);
   w.key("shift_up_rpm").number(d.shift_up_rpm);
   w.key("shift_down_rpm").number(d.shift_down_rpm);
+  w.key("shift_up_rpm_light").number(d.shift_up_rpm_light);
+  w.key("shift_down_rpm_light").number(d.shift_down_rpm_light);
   w.key("max_accel").number(d.max_accel);
   w.key("max_decel").number(d.max_decel);
   w.key("drag_coefficient").number(d.drag_coefficient);
@@ -313,9 +333,9 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
     w.key("regen_efficiency").number(e.regen_efficiency);
     w.key("max_regen_power").number(e.max_regen_power);
     w.key("tank").number(e.tank);
-    w.key("thermal_efficiency").number(e.thermal_efficiency);
+    w.key("indicated_efficiency").number(e.indicated_efficiency);
     w.key("heating_value").number(e.heating_value);
-    w.key("idle_flow").number(e.idle_flow);
+    w.key("accessory_power").number(e.accessory_power);
     w.end_object();
   }
   w.key("energy_ledger").boolean(d.energy_ledger);

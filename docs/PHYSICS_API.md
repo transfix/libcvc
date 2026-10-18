@@ -78,6 +78,10 @@ const body_state s = w.state(c);
 | `origin` | (0, 0, 0) | via `rebase()` |
 | `max_bodies`, `max_body_pairs`, `max_contact_constraints`, `temp_allocator_bytes` | 65536, 65536, 65536, 32 MiB | no |
 
+A vehicle's drivetrain runs once per collision step, so energy-accurate vehicle runs want more
+of them than the default: the energy ledger's drivetrain error is about 1% at 8 for the Humvee
+and at 32 for the RoboRacer (see [the energy ledger](#the-energy-ledger-p3)).
+
 `world::reconfigure(cfg)` applies the changeable fields. A different value for a fixed one throws
 `cvc::physics_error` naming it and changes nothing.
 
@@ -216,6 +220,17 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     brake, so it stands on a grade its tires can hold; released (`neutral`, no brake) it
     rolls down at g (sin θ − C_rr cos θ). A change of input wakes a sleeping vehicle.
   - `set_controls` takes pedals directly (and `neutral`).
+- **The powertrain.** The engine (motor) drives the wheels through Jolt's clutch, an automatic
+  transmission and the axles' differentials.
+  - `torque_curve` is the engine's net torque at the flywheel against its speed, as a
+    manufacturer publishes it.
+  - `engine_friction_curve` is its motoring friction against its speed. It brakes the
+    vehicle with the throttle shut; under throttle the torque curve is already net of it.
+  - `clutch_strength` couples engine and gearbox (N m per rad/s of slip), standing for a
+    torque converter without its torque multiplication.
+  - `driveline_efficiency` is the share of the engine's torque the gears deliver.
+  - The automatic shifts at `shift_up_rpm` / `shift_down_rpm` at full throttle and at the
+    `_light` points with it shut, between them with the throttle.
 - **Tires.** Slip curves peak at 1.0 times the μ of what the tire touches: the material of the
   terrain cell or mesh face under it, the table every plant reads.
 - **Resistance**, applied to the chassis each step from the last step's wheels:
@@ -246,13 +261,82 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
   - the driver: `max_accel`, `max_decel`;
   - the resistance: `drag_coefficient`, `frontal_area`, `air_density`, `rolling_resistance`;
   - the powertrain: `engine_max_torque`, `engine_min_rpm`, `engine_max_rpm`, `shift_up_rpm`,
-    `shift_down_rpm`;
+    `shift_down_rpm`, `shift_up_rpm_light`, `shift_down_rpm_light`, `engine_friction_curve`,
+    `clutch_strength`, `driveline_efficiency`;
   - each axle: `max_brake_torque`, `max_hand_brake_torque`, `suspension_frequency`,
     `suspension_damping`, and `anti_roll_stiffness` on an axle that was added with a bar.
 
   A change to anything else (the chassis, the mass, the wheels' geometry, the gearing, the
-  tire curves, the energy source) throws `cvc::physics_error` naming it and changes nothing.
-  Like materials, a tuning is not part of `save()`.
+  torque and tire curves, the energy source) throws `cvc::physics_error` naming it and changes
+  nothing. Like materials, a tuning is not part of `save()`.
+
+### The presets
+
+`vehicle_desc::humvee()` is an M1097A2 HMMWV and `vehicle_desc::roboracer()` the UT-AV lab's
+RoboRacer. In `vehicle.cpp` every value names its source:
+
+- [AMG], AM General's M1097A2 specification sheet;
+- [TM], TM 9-2320-280-10;
+- [DTIC], the Army's dynamometer tests of the 6.5 L engine (TARDEC TFLRF, DTIC ADA449196);
+- [lab], the lab's configuration (ut-av.pages.dev, ut_automata's `vesc.lua`);
+- [trx], Traxxas's listing for the chassis;
+- [doc31], the scope's spec table;
+- [derived], a value that follows from those;
+- [est], an estimate to replace with a measurement.
+
+The two presets:
+
+- **The M1097A2.**
+  - The vehicle: 2676 kg at curb (4672 kg GVW), a 3.30 m wheelbase, a 1.82 m track and
+    37 x 12.5R16.5 tires.
+  - The engine: the naturally aspirated 6.5 L V8 diesel, 119 kW at 3400 rpm and 393 N m at
+    1700 rpm.
+  - The driveline: the four-speed automatic (2.48, 1.48, 1.0, 0.75), 2.73 axles and 1.92
+    geared hubs, in full-time four-wheel drive.
+  - The brakes are proportioned to the axle loads at 0.8 g. The tank holds 95 L.
+  - **Friction and fuel, from the dynamometer modes [DTIC].** At rated speed the fuel flow
+    is a Willans line: 0.331 lb/hp-h over 20.3 lb/h at no load. That is an indicated
+    efficiency of 0.42 and 128 N m of friction. The intermediate-speed and idle modes leave
+    87 and 78 N m. The table gives power and flow, not speed, so the modes' speeds (3400,
+    2040 and 700 rpm) are assumed.
+  - **Estimates:**
+    - the driveline's 82% (gearbox, transfer case, axles, hubs);
+    - the converter's coupling;
+    - 2.5 kW of accessories;
+    - C_d A of 2.45 m^2;
+    - C_rr of 0.015.
+- **The RoboRacer.**
+  - The car: 3.5 kg, a 0.324 m wheelbase, 108 mm tires and shaft-driven 4WD.
+  - The motor: an ARRMA 3800 Kv motor at the VESC's current limit (an estimated 60 A, so
+    0.15 N m), flat to the VESC's 10 m/s speed limit, geared 15.15:1 to the wheels
+    ([derived] from `speed_to_erpm_gain`).
+  - The battery: a 3S LiPo. Its 55.5 Wh is an estimate: read the pack.
+  - Braking is the VESC's, an estimated 0.57 N m a wheel, 70% of it regenerated up to 150 W.
+
+Against the field (`physics_energy_test`, `physics_vehicle_test`, Windows MSVC, the default 2
+collision steps):
+
+| Check | Published | The twin |
+|---|---|---|
+| M1097A2 at GVW, full throttle, 0-30 mph | 9.4 s, the Army's requirement [AMG] | 10.1 s |
+| M1097A2 at GVW, 0-50 mph | 26.1 s [AMG] | 25.1 s |
+| Idle fuel | 2.6 lb/h (1.4 L/h) on the dynamometer, without the vehicle's accessories [DTIC] | 1.95 L/h, with 2.5 kW of them |
+| Range at GVW, 30-40 mph, hard surface, hilly | 442 km on bias-ply tires, about 490 km on radials [TM] | At 35 mph on radials: 602 km level, 613 km over 3 m hills 400 m apart (15.5-15.8 L/100 km) |
+
+The acceleration matches; the twin is 7% slow to 30 mph, where a converter's torque
+multiplication, which it does not model, does the most.
+
+The range does not match yet. The twin goes about 23% further on a tank than the TM says, and
+its losses so far are only the documented ones. Still to model or measure:
+
+- an unlocked converter's slip at cruise;
+- the cross-country tread's rolling resistance on a real road;
+- steeper hills and the braking they take;
+- the fan's duty.
+
+A coast-down test gives C_rr and C_d A, and a logged fuel flow gives the rest. DTIC ADA259919
+measured an M998's steady-speed fuel consumption on a level road and is the next published
+check. The range test pins the present calibration until then.
 
 ### The energy ledger (P3)
 
@@ -285,23 +369,32 @@ supplied + idle + fields + drivetrain_split
 So `drivetrain_split` and `residual` together are the simulation's own energy error: the first,
 the part it is known to make, itemized; the second, the rest.
 
+- The split stays its own term, not part of the residual. It is the drivetrain step's known
+  error, and it is proportional to the collision step: it halves when the step does.
+- The residual is small at any step.
+- So the gate is on their sum, at the step a twin runs at.
+
 - **Measured, not modelled.** With a ledger, the backend's Jolt controller runs copies of Jolt
   5.6.0's `PostCollide` and friction solve with measurements between their steps. A measured
   run is bit for bit an unmeasured one (`vehicle_desc::energy_ledger = false`;
-  `physics_energy_test`), and the P2 measurements are unchanged.
+  `physics_energy_test`): measuring changes none of the P2 measurements.
 - **The source.** `vehicle_desc::energy` (`energy_source`) is bookkeeping on the shaft work,
   and an empty battery or tank gives no more throttle:
   - a battery draws `(supplied + idle) / motor_efficiency`, and braking returns
     `regen_efficiency` of the braking energy, at most `max_regen_power`, while there is room.
     That never includes what the drivetrain step made in a braked wheel. `charge` is the state
     of charge;
-  - fuel burns `supplied / (thermal_efficiency x heating_value)`, plus `idle_flow` while the
-    engine runs. `fuel_used` is the total, and `fuel_left` what is left of a `tank`;
+  - fuel burns on a Willans line: `(supplied + friction + accessory_power) /
+    (indicated_efficiency x heating_value)` while the engine is fuelled, which is under
+    throttle or at idle. The friction is `engine_friction_curve`'s torque times the engine's
+    speed. On the overrun (throttle shut, above idle) a diesel cuts its fuel and burns none.
+    `fuel_used` is the total, and `fuel_left` what is left of a `tank`;
   - `source` is the electrical or chemical energy drawn, and `wh_per_km()` is that per
     kilometre of `distance`. `power` is the last step's supplied power.
-- **Presets.** The Humvee burns diesel: 35%, a 95 L (80 kg) tank, about 1.5 L/h at idle. The
-  RoboRacer has a 55 Wh battery, with 80% from pack to shaft and 60% regeneration up to 150 W.
-  These are estimates until measured.
+- **Presets.** The Humvee burns diesel on the 6.5 L's dynamometer Willans line from a 95 L
+  (80 kg) tank, about 1.95 L/h at idle. The RoboRacer has a 55.5 Wh battery, with 85% from
+  pack to shaft and 70% regeneration up to 150 W (estimates until measured). See
+  [the presets](#the-presets).
 - **State.** The ledger is in `save()`, so a replay reproduces it, and in the snapshot, its
   JSON (`state.energy`) and the published keys (`vehicles.<name>.energy.*`).
 
@@ -309,19 +402,31 @@ Gates (`physics_energy_test`, Windows MSVC):
 
 | Gate | Measured |
 |---|---|
-| A closed cycle over five 1 m hills: accelerate to 10 m/s, hold it (throttle up, brake down), stop and stand. \|residual\| <= 2% of supplied | 593 kJ supplied; residual -308 J (0.05%); drivetrain_split +16.3 kJ (2.7%) |
-| Coasting with no input from 15 m/s: supplied = 0, and dKE + dPE = -dissipated within 2% | supplied 0; 132 kJ stored lost against 132 kJ dissipated, residual +35 J |
-| Coasting down a 6 degree ramp in neutral: the kinetic energy gained = -dPE - dissipated within 2% | +54.1 kJ kinetic, -64.2 kJ potential; residual +38 J |
-| Regeneration never credits more than the brakes take | RoboRacer, three 5 m/s stops: 176.5 J returned of 294 J of its own braking (60%); at a 2 W cap, 9.4 J |
+| A closed cycle over five 1 m hills: accelerate to 10 m/s, hold it (throttle up, brake down), stop and stand. \|residual\| <= 2% of supplied at any collision step, \|residual + drivetrain_split\| <= 2% at 8 | At 8: 494 kJ supplied; residual -76 J (0.02%), drivetrain_split +4.9 kJ (0.99%). The split is 4.9% at 2 steps and 2.3% at 4 |
+| Coasting with no input from 15 m/s: supplied = 0, and dKE + dPE = -dissipated within 2% | supplied 0; 222 kJ stored lost against 222 kJ dissipated, residual +83 J |
+| Coasting down a 6 degree ramp in neutral: the kinetic energy gained = -dPE - dissipated within 2% | +62.4 kJ kinetic, -73.9 kJ potential; residual +46 J |
+| Regeneration never credits more than the brakes take | RoboRacer, three 5 m/s stops: 79.6 J returned of 117.7 J of braking (68%); at a 2 W cap, 2.7 J |
+| The RoboRacer's split shrinks with the step: \|residual + drivetrain_split\| <= 2% at 32 | The split is 20.6%, 11.4%, 5.35%, 2.41% and 1.14% of supplied at 2, 4, 8, 16 and 32 steps; the residual is at most 0.07% |
+| Fuel follows the Willans line | Idle in neutral: 1.653 kg/h, the line's 1.653 kg/h; none on the overrun |
 
-What the ledger shows about the presets:
+What the ledger showed about the first presets, and what became of it:
 
-- **The Humvee's drivetrain loses about half the engine's work** on that cycle (284 of 593 kJ).
-  The causes are Jolt's defaults: engine damping of 0.2/s is about 7.5 kW at 2400 rpm, and the
-  viscous clutch of strength 10 N m s/rad slips about 51 rad/s at full torque.
-- **The RoboRacer's split error exceeds its supplied energy while braking** (+490 J against
-  443 J). Its motor inertia (1e-4 kg m^2, 70 times its wheels' as seen through the 12:1
-  gearing) and that clutch make its drivetrain stiff for the step.
+- **The Humvee's drivetrain lost about half the engine's work** to Jolt's defaults: engine
+  damping of 0.2/s at every throttle, and a clutch of strength 10 slipping 51 rad/s at full
+  torque.
+  - Now the engine's friction is the dynamometer's, and it acts only with the throttle shut.
+  - The clutch is 40, and the gears deliver 82%.
+  - At a steady 35 mph the drivetrain takes 19% of the engine's work. On a hilly cycle it
+    takes more, because it includes the engine braking down the hills.
+- **The RoboRacer's split error exceeded its supplied energy while braking.** Its motor
+  inertia was 1e-4 kg m^2, behind 12:1 gearing.
+  - With the lab's gearing (15.15:1) and an estimated 2e-6 kg m^2 rotor, the split is 21% at
+    2 collision steps and halves with each halving of the step.
+  - Energy-accurate runs of the RoboRacer want 32 collision steps (1.1%), the Humvee's 8
+    (1.0%).
+  - Most of the RoboRacer's split comes from braking its wheels while the motor stays
+    coupled. The real car brakes through its motor, so modelling the VESC's braking as
+    motor torque would remove most of it.
 
 ## Static world geometry: `add_world_geometry`
 
@@ -479,7 +584,7 @@ a key reads back exactly as the world held it.
 | `vehicles.<name>.energy.{P_W, supplied_J, idle_J, brake_J, tire_J, aero_J, roll_J, medium_J, drivetrain_J, drivetrain_split_J, suspension_J, chassis_damping_J, fields_J, stored_J, residual_J, regen_J, source_J, soc, fuel_kg, fuel_left_kg, distance_m, Wh_per_km}` | written by `push()` | The energy ledger, in doc 31's D11 names |
 | `vehicles.<name>.command.{steer, accel, reverse}` | every `pull()` | A change calls `world::drive` |
 | `vehicles.<name>.controls.{steer, throttle, brake, hand_brake, reverse, neutral}` | every `pull()` | A change calls `world::set_controls` |
-| `vehicles.<name>.tuning.<value>`, `tuning.axles.<i>.<value>` | every `pull()` | `world::set_vehicle`, with the values above |
+| `vehicles.<name>.tuning.<value>`, `tuning.axles.<i>.<value>` | every `pull()` | `world::set_vehicle`, with the scalar values above (not `engine_friction_curve`) |
 | `fields.<name>.{drag_coefficient, damping, traction}` | every `pull()` | `world::set_field`, which keeps a medium's ruts |
 | `fields.<name>.{kind, ruts.cells, ruts.deepest}` | written by `push()` | Telemetry |
 

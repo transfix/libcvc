@@ -70,6 +70,19 @@ ackermann_controller::ackermann_controller(const JPH::WheeledVehicleControllerSe
 
 ackermann_controller::~ackermann_controller() = default;
 
+double ackermann_controller::friction_torque(double rpm) const {
+  const std::vector<std::pair<double, double>> &c = engine_friction;
+  if (c.empty())
+    return 0.0;
+  if (rpm <= c.front().first)
+    return c.front().second;
+  for (std::size_t i = 1; i < c.size(); ++i)
+    if (rpm <= c[i].first)
+      return c[i - 1].second + (c[i].second - c[i - 1].second) * (rpm - c[i - 1].first) /
+                                   (c[i].first - c[i - 1].first);
+  return c.back().second;
+}
+
 void ackermann_controller::PreCollide(float dt, JPH::PhysicsSystem &ps) {
   JPH::WheeledVehicleController::PreCollide(dt, ps);
   if (!steer)
@@ -568,8 +581,20 @@ void ackermann_controller::measured_post_collide(float inDeltaTime) {
         double(engine_torque) * inDeltaTime - engine_inertia * (engine_solved - engine_damped);
     const double torque_work = double(engine_torque) * inDeltaTime * engine_solved;
     const double engine_now = mEngine.GetAngularVelocity();
-    t.engine += torque_work;
-    t.supplied += torque_work;
+    // The engine's own work is Jolt's over the driveline's efficiency; the gears lose the
+    // difference before the clutch's work is counted.
+    const double engine_work = torque_work / driveline_efficiency;
+    t.engine += engine_work;
+    t.supplied += engine_work;
+    t.drivetrain += engine_work - torque_work;
+    // Fuelled while the driver asks for torque (through a shift too) and at idle; cut on
+    // the overrun.
+    if (mForwardInput != 0.0f || mEngine.GetCurrentRPM() <= 1.1f * mEngine.mMinRPM)
+      t.indicated +=
+          engine_work +
+          (friction_torque(engine_damped * VehicleEngine::cAngularVelocityToRPM) * engine_damped +
+           accessory_power) *
+              inDeltaTime;
     t.drivetrain +=
         0.5 * engine_inertia * (engine_solved - engine_damped) * (engine_solved - engine_damped) +
         (clutch_impulse * engine_solved - clutch_work) + wheel_damping;

@@ -65,6 +65,7 @@
 #include <cstdint>
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -104,12 +105,15 @@ struct energy_source {
   double motor_efficiency = 0.9; // shaft work per electrical energy, (0, 1]
   double regen_efficiency = 0.0; // [0, 1]
   double max_regen_power = 0.0;  // W
-  // Fuel: shaft work / (thermal_efficiency x heating_value) kg, plus idle_flow while the
-  // engine runs. tank > 0 tracks what is left.
-  double tank = 0.0;                // kg when added; 0 = not tracked
-  double thermal_efficiency = 0.35; // shaft work per chemical energy, (0, 1]
-  double heating_value = 42.6e6;    // J/kg, the lower heating value (diesel)
-  double idle_flow = 0.0;           // kg/s
+  // Fuel, on a Willans line: the engine burns (shaft work + its friction + the accessories)
+  // / indicated_efficiency of chemical energy while fuelled, that is under throttle or at
+  // idle; on the overrun (throttle shut above idle) a diesel cuts its fuel and burns none.
+  // The friction is vehicle_desc::engine_friction_curve's torque x w. tank > 0 tracks what
+  // is left.
+  double tank = 0.0;                 // kg when added; 0 = not tracked
+  double indicated_efficiency = 0.4; // indicated work per chemical energy, (0, 1]
+  double heating_value = 42.6e6;     // J/kg, the lower heating value (diesel)
+  double accessory_power = 0.0;      // W the engine drives besides the vehicle
 };
 
 struct vehicle_desc {
@@ -130,8 +134,29 @@ struct vehicle_desc {
   std::vector<double> gear_ratios{2.66, 1.78, 1.3, 1.0, 0.74};
   double reverse_ratio = -2.9;
   double differential_ratio = 3.42;
-  double shift_up_rpm = 3200.0;
-  double shift_down_rpm = 1600.0;
+  double shift_up_rpm = 3200.0;   // at full throttle
+  double shift_down_rpm = 1600.0; // at full throttle
+  // The shift points with the throttle shut, between which the automatic interpolates with
+  // the throttle, as a real one shifts early when driven gently. 0: the full-throttle ones.
+  double shift_up_rpm_light = 0.0;
+  double shift_down_rpm_light = 0.0;
+  // The engine's (motor's) net torque at the flywheel (shaft) against its speed: (rpm,
+  // fraction of engine_max_torque) points in ascending rpm, linear between them, up to
+  // engine_max_rpm. Empty, Jolt's default: 0.8 at rest, 1.0 at two thirds of max rpm, 0.8 at
+  // max.
+  std::vector<std::pair<double, double>> torque_curve;
+  // The engine's motoring friction (with its pumping and its own pumps) against its speed:
+  // (rpm, N m) points in ascending rpm, linear between them and flat beyond; empty, none.
+  // It brakes the vehicle when the throttle is shut. Under throttle the torque curve is
+  // already net of it, so none applies, but the fuel's Willans line burns for it.
+  std::vector<std::pair<double, double>> engine_friction_curve;
+  // The coupling between engine and gearbox (Jolt's clutch): its torque is
+  // clutch_strength x the slip speed, N m s/rad. It stands for a torque converter's
+  // coupling, without the converter's torque multiplication.
+  double clutch_strength = 10.0;
+  // The fraction of the engine's torque the driveline (gearbox, transfer case, axles,
+  // hubs) delivers to the wheels. The rest its gears lose (the ledger's drivetrain).
+  double driveline_efficiency = 1.0;
 
   // The driver model's scale: the acceleration at full throttle and the deceleration
   // at full brake it plans with (m/s^2). The measured response corrects them.
@@ -160,11 +185,13 @@ struct vehicle_desc {
   double wheelbase() const;
   double track() const;
 
-  // A HMMWV (M998): 2340 kg, 3.30 m wheelbase, 1.82 m track, 0.47 m wheels, four-wheel
-  // drive, a 0.35 rad/s steering rate.
+  // An M1097A2 HMMWV, from AM General's specification sheet and TM 9-2320-280-10
+  // (vehicle.cpp cites each value): 2676 kg at curb, 3.30 m wheelbase, 1.82 m track,
+  // 37 x 12.5R16.5 tires, a 6.5 L diesel through a four-speed automatic, four-wheel drive.
   static vehicle_desc humvee();
-  // A 1/10-scale racer (RoboRacer / F1TENTH): 3.5 kg, 0.33 m wheelbase, rear drive,
-  // a fast steering servo.
+  // The UT-AV lab's RoboRacer: a Traxxas Ford Fiesta ST Rally chassis (1/10 scale, 4WD) with
+  // an ARRMA 3800 Kv motor behind a VESC and a 3S LiPo, from the lab's configuration
+  // (vehicle.cpp cites each value): 0.324 m wheelbase, 108 mm tires, a 10 m/s speed cap.
   static vehicle_desc roboracer();
 };
 

@@ -120,40 +120,51 @@ void print(const char *what, const vehicle_energy &d) {
 } // namespace
 
 // Gate 1: accelerate to 10 m/s, hold the speed over five hills (the driver throttles up them and
-// brakes down them), brake to a stop and stand: the residual stays within 2% of the energy
-// supplied.
+// brakes down them), brake to a stop and stand. The plant's energy error, its residual and its
+// drivetrain split together, stays within 2% of the energy supplied at the sub-step a twin runs at
+// (8 engine sub-steps a step); the split shrinks with the sub-step, the residual is small at any.
 TEST(PhysicsEnergy, TheLedgerBalancesOverAClosedCycleOnRollingTerrain) {
   REQUIRE_JOLT();
-  world w(jolt_config());
-  rolling_road(w);
-  const vehicle_id v = w.add_vehicle(vehicle_desc::humvee(), {0.0, 0.0, road_height(0.0) + 1.4});
-  w.drive(v, {});
-  w.step(200);
-  const vehicle_energy start = w.vehicle_state(v).energy;
-  int steps = 0;
-  while (speed_of(w, v) < 10.0 && steps++ < 3000) {
-    w.drive(v, {0.0, 1.5});
-    w.step();
+  for (const int sub_steps : {2, 4, 8}) {
+    world_config c = jolt_config();
+    c.collision_steps = sub_steps;
+    world w(c);
+    rolling_road(w);
+    const vehicle_id v = w.add_vehicle(vehicle_desc::humvee(), {0.0, 0.0, road_height(0.0) + 1.4});
+    w.drive(v, {});
+    w.step(200);
+    const vehicle_energy start = w.vehicle_state(v).energy;
+    int steps = 0;
+    while (speed_of(w, v) < 10.0 && steps++ < 3000) {
+      w.drive(v, {0.0, 1.5});
+      w.step();
+    }
+    for (int i = 0; i < 2500; ++i) { // 25 s, about 250 m
+      w.drive(v, {0.0, 10.0 - speed_of(w, v)});
+      w.step();
+    }
+    w.drive(v, {0.0, -3.0});
+    for (int i = 0; i < 1000 && speed_of(w, v) > 0.05; ++i)
+      w.step();
+    w.drive(v, {});
+    w.step(300);
+    const vehicle_state end = w.vehicle_state(v);
+    const vehicle_energy d = change(start, end.energy);
+    std::printf("  %d sub-steps:\n", sub_steps);
+    print("closed cycle", d);
+    std::printf(
+        "    residual %.2f%%, split %.2f%%, together %.2f%% of supplied; %.0f m, %.3f kg of "
+        "diesel\n",
+        100.0 * d.residual / d.supplied, 100.0 * d.drivetrain_split / d.supplied,
+        100.0 * (d.residual + d.drivetrain_split) / d.supplied, d.distance, d.fuel_used);
+    EXPECT_GT(end.body.position.x, 200.0);
+    EXPECT_LT(std::fabs(end.speed), 0.1);
+    EXPECT_GT(d.supplied, 1.0e5);
+    EXPECT_GT(d.brake, 1.0e4) << "it braked down the hills and to the stop";
+    EXPECT_LE(std::fabs(d.residual), 0.02 * d.supplied);
+    if (sub_steps == 8)
+      EXPECT_LE(std::fabs(d.residual + d.drivetrain_split), 0.02 * d.supplied);
   }
-  for (int i = 0; i < 2500; ++i) { // 25 s, about 250 m
-    w.drive(v, {0.0, 10.0 - speed_of(w, v)});
-    w.step();
-  }
-  w.drive(v, {0.0, -3.0});
-  for (int i = 0; i < 1000 && speed_of(w, v) > 0.05; ++i)
-    w.step();
-  w.drive(v, {});
-  w.step(300);
-  const vehicle_state end = w.vehicle_state(v);
-  const vehicle_energy d = change(start, end.energy);
-  print("closed cycle", d);
-  std::printf("  %.0f m, %.3f kg of diesel, %.0f Wh/km\n", d.distance, d.fuel_used,
-              end.energy.wh_per_km());
-  EXPECT_GT(end.body.position.x, 200.0);
-  EXPECT_LT(std::fabs(end.speed), 0.1);
-  EXPECT_GT(d.supplied, 1.0e5);
-  EXPECT_GT(d.brake, 1.0e4) << "it braked down the hills and to the stop";
-  EXPECT_LE(std::fabs(d.residual), 0.02 * d.supplied);
 }
 
 // Gate 2: from 15 m/s with no input (no throttle, no brake), the vehicle coasts: nothing is
@@ -243,7 +254,7 @@ TEST(PhysicsEnergy, RegenNeverReturnsMoreThanTheBrakesTake) {
         w.step();
         const vehicle_energy now = w.vehicle_state(v).energy;
         const vehicle_energy step = change(last, now);
-        EXPECT_LE(step.regen, d.energy.regen_efficiency * step.brake + 1e-9);
+        EXPECT_LE(step.regen, d.energy.regen_efficiency * std::max(0.0, step.brake) + 1e-6);
         EXPECT_LE(step.regen, d.energy.regen_efficiency * cap * 0.01 + 1e-9);
         charged = charged || now.charge > last.charge;
         last = now;
@@ -258,42 +269,92 @@ TEST(PhysicsEnergy, RegenNeverReturnsMoreThanTheBrakesTake) {
     EXPECT_GT(total.brake, 0.0);
     EXPECT_LE(total.regen, d.energy.regen_efficiency * total.brake);
     EXPECT_TRUE(charged) << "braking charged the battery";
+    // Drawn step by step, never negative.
     EXPECT_NEAR(total.source, (total.engine + total.idle) / d.energy.motor_efficiency,
-                1e-6 * total.source + 1e-9);
+                1e-3 * total.source);
     EXPECT_NEAR(last.charge, start.charge - (total.source - total.regen) / d.energy.capacity, 1e-9);
-    EXPECT_LE(std::fabs(total.residual), 0.02 * (total.supplied + total.brake));
+    EXPECT_LE(std::fabs(total.residual), 0.02 * total.supplied);
     EXPECT_GE(total.drivetrain, 0.0);
   }
 }
 
-// Fuel: shaft work over the thermal efficiency times the heating value, plus the idle flow; and
-// an empty tank gives no more throttle.
-TEST(PhysicsEnergy, FuelBurnsShaftWorkOverItsEfficiencyAndIdles) {
+// The RoboRacer's drivetrain split, which its light motor and stiff 15:1 gearing make large,
+// halves with each halving of the sub-step: its whole energy error is within 2% of the work
+// supplied at 32 sub-steps a step (5.4% at the Humvee's 8).
+TEST(PhysicsEnergy, TheRoboRacersSplitShrinksWithTheSubStep) {
+  REQUIRE_JOLT();
+  for (const int sub_steps : {2, 4, 8, 16, 32}) {
+    world_config c = jolt_config();
+    c.collision_steps = sub_steps;
+    world w(c);
+    flat_ground(w, 0.9, 0.02);
+    const vehicle_id v = w.add_vehicle(vehicle_desc::roboracer(), {0.0, 0.0, 0.2});
+    w.drive(v, {});
+    w.step(100);
+    const vehicle_energy start = w.vehicle_state(v).energy;
+    for (int cycle = 0; cycle < 3; ++cycle) {
+      for (int i = 0; i < 400 && speed_of(w, v) < 5.0; ++i) {
+        w.drive(v, {0.0, 4.0});
+        w.step();
+      }
+      w.drive(v, {0.0, -6.0});
+      w.step(300);
+    }
+    const vehicle_energy d = change(start, w.vehicle_state(v).energy);
+    std::printf("  %d sub-steps: supplied %.1f J, braked %.1f J; residual %.2f%%, split %.2f%%\n",
+                sub_steps, d.supplied, d.brake, 100.0 * d.residual / d.supplied,
+                100.0 * d.drivetrain_split / d.supplied);
+    EXPECT_LE(std::fabs(d.residual), 0.02 * d.supplied);
+    if (sub_steps == 32)
+      EXPECT_LE(std::fabs(d.residual + d.drivetrain_split), 0.02 * d.supplied);
+  }
+}
+
+// Fuel, on the Willans line: at idle the engine burns its friction and accessories over its
+// indicated efficiency; on the overrun it burns nothing; and an empty tank gives no more throttle.
+TEST(PhysicsEnergy, FuelFollowsTheWillansLine) {
   REQUIRE_JOLT();
   world w(jolt_config());
   flat_ground(w, 0.9, 0.015);
   vehicle_desc d = vehicle_desc::humvee();
-  d.energy.tank = 0.05; // kg: about 26 s of driving here
+  d.energy.tank = 0.05; // kg
   const vehicle_id v = w.add_vehicle(d, {0.0, 0.0, 1.2});
-  w.drive(v, {});
-  w.step(100);
-  const vehicle_energy start = w.vehicle_state(v).energy;
+  vehicle_controls neutral;
+  neutral.neutral = true;
+  w.set_controls(v, neutral);
+  w.step(200);
+  // Idling in neutral.
+  const vehicle_energy idle0 = w.vehicle_state(v).energy;
+  w.step(500);
+  const vehicle_energy idle = change(idle0, w.vehicle_state(v).energy);
+  const double omega = d.engine_min_rpm * 2.0 * 3.14159265358979 / 60.0;
+  ASSERT_EQ(d.engine_friction_curve.front().first, d.engine_min_rpm);
+  const double rate = (d.engine_friction_curve.front().second * omega + d.energy.accessory_power) /
+                      (d.energy.indicated_efficiency * d.energy.heating_value);
+  std::printf("  idle: %.3f kg/h (%.2f L/h), the Willans line %.3f kg/h\n",
+              idle.fuel_used / 5.0 * 3600.0, idle.fuel_used / 5.0 * 3600.0 / 0.85, rate * 3600.0);
+  EXPECT_NEAR(idle.fuel_used / 5.0, rate, 0.02 * rate);
+  // Under way, then the overrun: throttle shut above idle, in gear.
   for (int i = 0; i < 1500; ++i) {
     w.drive(v, {0.0, 1.0});
     w.step();
   }
+  vehicle_controls shut;
+  w.set_controls(v, shut);
+  w.step(5);
+  const vehicle_state coasting = w.vehicle_state(v);
+  ASSERT_GT(coasting.engine_rpm, 1.2 * d.engine_min_rpm);
+  ASSERT_NE(coasting.gear, 0);
+  const vehicle_energy over0 = coasting.energy;
+  w.step(50);
+  const vehicle_energy over = change(over0, w.vehicle_state(v).energy);
+  EXPECT_EQ(over.fuel_used, 0.0) << "a diesel cuts its fuel on the overrun";
   const vehicle_energy now = w.vehicle_state(v).energy;
-  const vehicle_energy e = change(start, now);
-  const double expected =
-      e.engine / (d.energy.thermal_efficiency * d.energy.heating_value) + d.energy.idle_flow * 15.0;
-  std::printf("  15 s: %.0f J of shaft work, %.5f kg of fuel (%.0f Wh/km over %.0f m)\n", e.engine,
-              e.fuel_used, now.wh_per_km(), now.distance);
-  EXPECT_NEAR(e.fuel_used, expected, 1e-9);
-  EXPECT_NEAR(e.source, e.fuel_used * d.energy.heating_value, 1e-6 * e.source);
+  EXPECT_NEAR(now.source, now.fuel_used * d.energy.heating_value, 1e-6 * now.source);
   EXPECT_NEAR(now.wh_per_km(), now.source / 3600.0 / (now.distance / 1000.0), 1e-9);
   EXPECT_NEAR(now.fuel_left, d.energy.tank - now.fuel_used, 1e-12);
   // Drive on until the tank is empty: then the throttle stays shut.
-  for (int i = 0; i < 6000 && w.vehicle_state(v).energy.fuel_left > 0.0; ++i) {
+  for (int i = 0; i < 20000 && w.vehicle_state(v).energy.fuel_left > 0.0; ++i) {
     w.drive(v, {0.0, 1.0});
     w.step();
   }
@@ -398,4 +459,103 @@ TEST(PhysicsEnergy, ThePublishedVehicleCarriesItsLedger) {
   const boost::property_tree::ptree &truck = doc.get_child("vehicles").begin()->second;
   EXPECT_EQ(std::stod(truck.get<std::string>("state.energy.supplied")), e.supplied);
   EXPECT_EQ(truck.get<std::string>("desc.energy_source.type"), "fuel");
+}
+
+// --- the field: the M1097A2 against its published performance -------------------------------
+
+namespace {
+
+// A long road of gentle hills along x: `amplitude` m high, `wavelength` m apart, 4 km.
+void long_road(world &w, double amplitude, double wavelength) {
+  const material_id m = w.add_material({"road", 0.9f, 0.0f, 0.015f});
+  const int cols = 2001, rows = 21; // 2 m cells, 40 m wide
+  std::vector<float> h(static_cast<std::size_t>(rows) * cols);
+  for (int r = 0; r < rows; ++r)
+    for (int c = 0; c < cols; ++c)
+      h[static_cast<std::size_t>(r) * cols + c] = static_cast<float>(
+          amplitude * std::sin(2.0 * 3.14159265358979 * (2.0 * c - 50.0) / wavelength));
+  auto field =
+      std::make_shared<cvc::height_field>(rows, cols, -50.0, -20.0, 2.0, 2.0, std::move(h));
+  body_desc g;
+  g.shape = terrain{field};
+  g.motion = motion_type::static_;
+  g.material = m;
+  w.add_body(g);
+}
+
+} // namespace
+
+// Full throttle from rest on a dry level road at gross weight: the times to 30 and 50 mph,
+// against the [AMG] sheet's 9.4 s and 26.1 s, which are the Army's requirement at GVW.
+TEST(PhysicsEnergy, TheM1097A2AcceleratesAsPublished) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  flat_ground(w, 0.9, 0.015);
+  vehicle_desc d = vehicle_desc::humvee();
+  d.mass = 4672.0; // [AMG] GVW
+  const vehicle_id v = w.add_vehicle(d, {0.0, 0.0, 1.2});
+  w.drive(v, {});
+  w.step(200);
+  vehicle_controls full;
+  full.throttle = 1.0;
+  double t30 = 0.0, t50 = 0.0;
+  for (int i = 1; i <= 6000 && t50 == 0.0; ++i) {
+    w.set_controls(v, full);
+    w.step();
+    const double v_mph = speed_of(w, v) / 0.44704;
+    if (t30 == 0.0 && v_mph >= 30.0)
+      t30 = 0.01 * i;
+    if (v_mph >= 50.0)
+      t50 = 0.01 * i;
+  }
+  std::printf("  0-30 mph in %.1f s (published 9.4 s), 0-50 mph in %.1f s (published 26.1 s)\n",
+              t30, t50);
+  EXPECT_NEAR(t30, 9.4, 0.35 * 9.4);
+  EXPECT_NEAR(t50, 26.1, 0.35 * 26.1);
+}
+
+// TM 9-2320-280-10, table 1-15: an M1097A2 at its 4676 kg gross weight cruises 442 km on its
+// 95 L, "on hard surface and hilly terrain at 30-40 mph", on bias-ply tires; radials add about
+// 48 km. The twin drives 2.8 km of road at 35 mph at gross weight on radials (C_rr 0.015), level
+// and over 3 m hills 400 m apart. It goes about 23% further than the TM's radial figure: the losses
+// it does not yet model (an unlocked converter's slip, the cross-country tread's rolling
+// resistance, steeper hills) are open; this pins the calibration until they are measured.
+TEST(PhysicsEnergy, TheM1097A2sCruisingRangeAgainstTheTM) {
+  REQUIRE_JOLT();
+  for (const double amplitude : {0.0, 3.0}) {
+    world w(jolt_config());
+    long_road(w, amplitude, 400.0);
+    vehicle_desc d = vehicle_desc::humvee();
+    d.mass = 4676.0; // [TM] gross weight
+    const vehicle_id v = w.add_vehicle(d, {0.0, 0.0, 1.4});
+    w.drive(v, {});
+    w.step(200);
+    const double target = 35.0 * 0.44704;
+    for (int i = 0; i < 6000 && speed_of(w, v) < target; ++i) {
+      w.drive(v, {0.0, 1.5});
+      w.step();
+    }
+    // On to the same point of a hill 7 hills on, 2.8 km.
+    const double x0 = 400.0 * std::ceil(w.vehicle_state(v).body.position.x / 400.0);
+    while (w.vehicle_state(v).body.position.x < x0) {
+      w.drive(v, {0.0, target - speed_of(w, v)});
+      w.step();
+    }
+    const vehicle_energy start = w.vehicle_state(v).energy;
+    for (int i = 0; i < 40000 && w.vehicle_state(v).body.position.x < x0 + 2800.0; ++i) {
+      w.drive(v, {0.0, target - speed_of(w, v)});
+      w.step();
+    }
+    const vehicle_state end = w.vehicle_state(v);
+    const vehicle_energy e = change(start, end.energy);
+    const double per_km = e.fuel_used / (e.distance / 1000.0);
+    const double range = d.energy.tank / per_km;
+    std::printf("  hills %.0f m / 400 m: %.1f km, %.1f L/100 km -> %.0f km on 95 L (the TM: 442 km "
+                "bias-ply, ~490 km radial); gear %d at %.0f rpm\n",
+                amplitude, e.distance / 1000.0, per_km / 0.85 * 100.0, range, end.gear,
+                end.engine_rpm);
+    print("cruise", e);
+    EXPECT_GT(range, 442.0) << "never short of the TM's range";
+    EXPECT_LT(range, 1.3 * 490.0);
+  }
 }

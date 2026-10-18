@@ -563,6 +563,8 @@ struct jolt_vehicle {
   std::vector<JPH::Ref<JPH::WheelSettingsWV>> wheel_settings;
   std::vector<int> bar_of_axle;
   energy_tally tally; // the energy ledger's measurements (with a ledger)
+  // The shift points with the throttle shut and wide open (rpm).
+  std::pair<float, float> shift_up{0.0f, 0.0f}, shift_down{0.0f, 0.0f};
   bool ledger = false;
 };
 
@@ -1067,10 +1069,22 @@ public:
     for (const axle_desc &a : d.axles)
       driven += a.driven ? 1 : 0;
     auto controller = new ackermann_settings;
-    controller->mEngine.mMaxTorque = static_cast<float>(d.engine_max_torque);
+    // The driveline's losses are the engine torque it does not deliver: Jolt gets the
+    // delivered share, and the ledger counts the rest.
+    controller->mEngine.mMaxTorque =
+        static_cast<float>(d.engine_max_torque * d.driveline_efficiency);
     controller->mEngine.mMinRPM = static_cast<float>(d.engine_min_rpm);
     controller->mEngine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
     controller->mEngine.mInertia = static_cast<float>(d.engine_inertia);
+    if (!d.torque_curve.empty()) {
+      controller->mEngine.mNormalizedTorque.Clear();
+      for (const auto &p : d.torque_curve)
+        controller->mEngine.mNormalizedTorque.AddPoint(
+            static_cast<float>(p.first / d.engine_max_rpm), static_cast<float>(p.second));
+    }
+    // Closed-throttle friction is Jolt's engine damping, which set_vehicle_inputs sets.
+    controller->mEngine.mAngularDamping = 0.0f;
+    controller->mTransmission.mClutchStrength = static_cast<float>(d.clutch_strength);
     controller->mTransmission.mMode = JPH::ETransmissionMode::Auto;
     controller->mTransmission.mGearRatios.clear();
     for (const double g : d.gear_ratios)
@@ -1143,6 +1157,15 @@ public:
     }
     auto *ctl = static_cast<ackermann_controller *>(v->constraint->GetController());
     ctl->steer = &v->steer;
+    ctl->driveline_efficiency = d.driveline_efficiency;
+    ctl->engine_friction = d.engine_friction_curve;
+    ctl->accessory_power = d.energy.accessory_power;
+    v->shift_up = {
+        static_cast<float>(d.shift_up_rpm_light > 0.0 ? d.shift_up_rpm_light : d.shift_up_rpm),
+        static_cast<float>(d.shift_up_rpm)};
+    v->shift_down = {static_cast<float>(d.shift_down_rpm_light > 0.0 ? d.shift_down_rpm_light
+                                                                     : d.shift_down_rpm),
+                     static_cast<float>(d.shift_down_rpm)};
     for (const axle_desc &a : d.axles)
       ctl->anti_roll.push_back(std::max(0.0, a.anti_roll_stiffness));
     if (d.energy_ledger) {
@@ -1178,7 +1201,16 @@ public:
     jolt_vehicle &v = *_vehicles.at(handle);
     auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
     JPH::VehicleEngine &engine = ctl->GetEngine();
-    engine.mMaxTorque = static_cast<float>(d.engine_max_torque);
+    engine.mMaxTorque = static_cast<float>(d.engine_max_torque * d.driveline_efficiency);
+    ctl->driveline_efficiency = d.driveline_efficiency;
+    ctl->engine_friction = d.engine_friction_curve;
+    v.shift_up = {
+        static_cast<float>(d.shift_up_rpm_light > 0.0 ? d.shift_up_rpm_light : d.shift_up_rpm),
+        static_cast<float>(d.shift_up_rpm)};
+    v.shift_down = {static_cast<float>(d.shift_down_rpm_light > 0.0 ? d.shift_down_rpm_light
+                                                                    : d.shift_down_rpm),
+                    static_cast<float>(d.shift_down_rpm)};
+    ctl->GetTransmission().mClutchStrength = static_cast<float>(d.clutch_strength);
     engine.mMinRPM = static_cast<float>(d.engine_min_rpm);
     engine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
     JPH::VehicleTransmission &gearbox = ctl->GetTransmission();
@@ -1232,6 +1264,24 @@ public:
                          static_cast<float>(hand_brake) != ctl->GetHandBrakeInput();
     ctl->SetDriverInput(static_cast<float>(forward), 0.0f, static_cast<float>(brake),
                         static_cast<float>(hand_brake));
+    // The torque curve is net: the engine's friction shows only with the throttle shut, as
+    // Jolt's damping w *= 1 - c dt, with c = friction / (I w) at the speed now.
+    {
+      JPH::VehicleEngine &engine = ctl->GetEngine();
+      const float rpm = std::max(engine.GetCurrentRPM(), std::max(engine.mMinRPM, 1.0f));
+      const float w = rpm / JPH::VehicleEngine::cAngularVelocityToRPM;
+      engine.mAngularDamping =
+          forward != 0.0
+              ? 0.0f
+              : static_cast<float>(ctl->friction_torque(rpm) / (double(engine.mInertia) * w));
+    }
+    // The automatic shifts early when driven gently, late at full throttle.
+    {
+      const float th = std::min(1.0f, std::fabs(static_cast<float>(forward)));
+      JPH::VehicleTransmission &gears = ctl->GetTransmission();
+      gears.mShiftUpRPM = v.shift_up.first + (v.shift_up.second - v.shift_up.first) * th;
+      gears.mShiftDownRPM = v.shift_down.first + (v.shift_down.second - v.shift_down.first) * th;
+    }
     JPH::VehicleTransmission &tr = ctl->GetTransmission();
     if (neutral) {
       tr.mMode = JPH::ETransmissionMode::Manual;
@@ -1327,6 +1377,7 @@ public:
       e.drivetrain = t.drivetrain;
       e.split = t.split;
       e.split_braked = t.split_braked;
+      e.indicated = t.indicated;
       e.brake = t.brake;
       e.tire = t.tire;
       for (int k = 0; k < 4; ++k)

@@ -82,7 +82,8 @@ struct vehicle_readback {
     bool measured = false, sampled = false;
     double engine = 0.0, idle = 0.0, supplied = 0.0, drivetrain = 0.0, split = 0.0, brake = 0.0,
            tire = 0.0;
-    double split_braked = 0.0;             // the part of split in braked wheels
+    double split_braked = 0.0; // the part of split in braked wheels
+    double indicated = 0.0;    // the fuelled engine's work: shaft, friction, accessories
     double work[4] = {0.0, 0.0, 0.0, 0.0}; // aero, rolling, medium, fields on the chassis
     double suspension = 0.0, chassis_damping = 0.0, stored = 0.0, distance = 0.0;
     double kinetic = 0.0, potential = 0.0, spring = 0.0;
