@@ -541,6 +541,18 @@ something under the prefix changed since the last pull, so an unchanged tree cos
 2 µs. If a key is a link into another scope, it reads every time. A program's own `reconfigure`
 or `set_material` stands until the tree's value changes.
 
+**What each key is.** Every key the binding owns describes itself, for other applications.
+Each has a comment (`cvc::state::comment`) and properties (`cvc::state::property`):
+
+- `access`: `build` (read when the world is built), `knob` (applied when it changes), `command`
+  (an input the world acts on) or `telemetry` (written by `push()`);
+- `unit` on a number: SI, `1` for a ratio, empty for a count or a flag;
+- a recommended `min` and `max` on a knob or a command, for a UI's slider or a validator.
+
+The ranges are recommendations; the world validates on its own. The table is
+`src/cvc/physics/binding_meta.cpp`, and `physics_vehicle_test` checks that every published key
+has a comment and an access.
+
 | Keys | Read | Notes |
 |---|---|---|
 | `backend`, `fixed_dt`, `threads`, `determinism`, `max_bodies`, `max_body_pairs`, `max_contact_constraints`, `origin.{x,y,z}` | `config_from_state` | A later change sets `restart_required` and leaves the running world alone |

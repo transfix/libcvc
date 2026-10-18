@@ -981,6 +981,48 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   EXPECT_NO_THROW(b.step());
 }
 
+// Every key the binding owns says what it is: a comment and an access, a unit on a number, and a
+// recommended range on a knob or a command.
+TEST(PhysicsVehicle, EveryPublishedKeySaysWhatItIs) {
+  REQUIRE_JOLT();
+  cvc::app a;
+  world w(jolt_config());
+  world_binding b(a, w);
+  flat_ground(w, 0.9);
+  const vehicle_id v = settled_humvee(w);
+  b.publish_vehicle("truck", v);
+  set_tree(a, "physics.materials.mud.friction", "0.4");
+  for (int i = 0; i < 5; ++i)
+    b.step();
+  cvc::state &root = cvc::state::instance(a)("physics");
+  int leaves = 0;
+  for (const std::string &full : root.children()) {
+    cvc::state &n = cvc::state::instance(a)(full);
+    if (!n.children().empty())
+      continue; // a group, not a key
+    ++leaves;
+    EXPECT_FALSE(n.comment().empty()) << full << " has no comment";
+    EXPECT_TRUE(n.has_property("access")) << full << " has no access";
+  }
+  EXPECT_GT(leaves, 150);
+  const auto prop = [&](const std::string &k, const std::string &p) {
+    return cvc::state::instance(a)("physics." + k).property(p);
+  };
+  EXPECT_EQ(prop("vehicles.truck.tuning.converter_k", "access"), "knob");
+  EXPECT_EQ(prop("vehicles.truck.tuning.converter_k", "unit"), "rpm/sqrt(N m)");
+  EXPECT_EQ(prop("vehicles.truck.tuning.converter_k", "min"), "0");
+  EXPECT_EQ(prop("vehicles.truck.tuning.converter_k", "max"), "300");
+  EXPECT_EQ(prop("vehicles.truck.tuning.axles.1.suspension_frequency", "unit"), "Hz");
+  EXPECT_EQ(prop("vehicles.truck.speed", "access"), "telemetry");
+  EXPECT_EQ(prop("vehicles.truck.speed", "unit"), "m/s");
+  EXPECT_FALSE(cvc::state::instance(a)("physics.vehicles.truck.speed").has_property("min"));
+  EXPECT_EQ(prop("vehicles.truck.command.accel", "access"), "command");
+  EXPECT_EQ(prop("collision_steps", "max"), "32");
+  EXPECT_EQ(prop("fixed_dt", "access"), "build");
+  EXPECT_EQ(prop("materials.mud.friction", "max"), "2");
+  EXPECT_EQ(prop("vehicles.truck.energy.Wh_per_km", "unit"), "Wh/km");
+}
+
 // A field published to the tree is tuned there, and reports its ruts.
 TEST(PhysicsVehicle, TheTreeTunesAFieldAndReadsItsRuts) {
   REQUIRE_JOLT();

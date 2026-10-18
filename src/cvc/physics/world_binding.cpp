@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "binding_meta.h"
+
 #include <algorithm>
 #include <atomic>
 #include <boost/any.hpp>
@@ -506,6 +508,9 @@ world_binding::world_binding(cvc::app &ctx, physics::world &w, std::string prefi
   } catch (const std::exception &) {
     _links = true; // no watch: read the tree on every pull
   }
+  // What each key is, for other applications: comments, units, recommended ranges.
+  const own_writes mine;
+  detail::describe_world(_ctx, _prefix);
 }
 
 world_binding::~world_binding() { stop_publisher(); }
@@ -519,6 +524,7 @@ void world_binding::seed() {
   def.applied = _w.get_material(0);
   _materials["default"] = def;
   const std::string m = key("materials.default");
+  detail::describe_material(_ctx, m);
   write_val(_ctx, at(m, "friction"), static_cast<double>(def.applied.friction));
   write_val(_ctx, at(m, "restitution"), static_cast<double>(def.applied.restitution));
   write_val(_ctx, at(m, "rolling_resistance"), static_cast<double>(def.applied.rolling_resistance));
@@ -543,6 +549,8 @@ void world_binding::pull_materials() {
     if (name.empty() || name.find('.') != std::string::npos)
       continue;
     auto it = _materials.find(name);
+    if (it == _materials.end())
+      detail::describe_material(_ctx, key("materials." + name));
     physics::material m = it != _materials.end() ? it->second.applied : physics::material{};
     m.name = name;
     double friction = m.friction, restitution = m.restitution, rolling = m.rolling_resistance;
@@ -926,6 +934,7 @@ void world_binding::publish_body(const std::string &name, body_id id) {
   b.material = _w.get_material(b.tuned.material).name;
   std::lock_guard<std::mutex> lock(_mutex);
   const own_writes mine;
+  detail::describe_body(_ctx, key("bodies." + name));
   pull_body(name, b); // seeds the knobs, and applies what the tree already holds
   _bodies[name] = std::move(b);
 }
@@ -938,6 +947,8 @@ void world_binding::publish_vehicle(const std::string &name, vehicle_id id) {
   std::lock_guard<std::mutex> lock(_mutex);
   const own_writes mine;
   const std::string base = key("vehicles." + name);
+  const int axles = static_cast<int>(v.tuned.axles.size());
+  detail::describe_vehicle(_ctx, base, 2 * axles, axles);
   v.command = first_seen(_ctx, at(base, "command"), kCommandKeys);
   v.controls = first_seen(_ctx, at(base, "controls"), kControlKeys);
   pull_vehicle(name, v); // seeds the knobs, and applies what the tree already holds
@@ -953,6 +964,7 @@ void world_binding::publish_field(const std::string &name, field_id id) {
     f.tuned[i] = d.*kFieldKnobs[i].second;
   std::lock_guard<std::mutex> lock(_mutex);
   const own_writes mine;
+  detail::describe_field(_ctx, key("fields." + name));
   pull_field(name, f);
   _fields[name] = f;
 }

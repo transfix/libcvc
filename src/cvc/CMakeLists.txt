@@ -240,6 +240,7 @@ set(SOURCE_FILES
   physics/snapshot_json.cpp
   physics/world_geometry.cpp
   physics/pose_tracker.cpp
+  physics/binding_meta.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp

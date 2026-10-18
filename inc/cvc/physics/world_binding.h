@@ -31,7 +31,11 @@
 //   ... Python:     json.loads(pycvc.state_get(app, "physics.snapshot_json"))
 //
 // Keys, relative to the prefix. A key that is unset is seeded with the world's
-// value (the knob idiom: whatever set it first, a scene or a script, wins). An
+// value (the knob idiom: whatever set it first, a scene or a script, wins). Every key the
+// binding owns says what it is, for other applications: its comment (cvc::state::comment) and
+// its properties (cvc::state::property). Each has "access" (build | knob | command |
+// telemetry); a number has "unit" (SI; "1" for a ratio); and a knob or command has a recommended
+// "min" and "max", for a UI or a validator. The world validates on its own. An
 // unreadable value is ignored, never thrown into a frame. pull() reads the tree only
 // when something under the prefix changed since the last pull (every time if a key
 // is a link into another scope), so an unchanged tree costs a pull nothing.
