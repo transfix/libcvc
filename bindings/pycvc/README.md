@@ -131,6 +131,21 @@ The `cvc::state`-driven viewer/scene controllers are wrapped too, mirroring
 Contract tests: `test_pycvc_world_units.py`, `test_pycvc_gl_world.py`, and the
 `extents_metres` case in `test_pycvc_model.py`.
 
+## Physics: the world, vehicles and the navigator's plant
+
+`pycvc_physics.i` wraps `cvc::physics`. `physics_world` gives bodies, materials, vehicles,
+`step`, `state_hash`, `save` / `restore` and `snapshot_json`. `vehicle_desc` has the
+`humvee()` and `roboracer()` presets, and `physics_binding` is the world's state-tree
+binding. `nav_plant` makes a world's vehicles a sim_world's plant
+(`nav_sim_world_set_plant(sim, plant)`; `None` selects nav's bicycle). Terrain and the
+sim_world's settings are reached through `nav_sim_world_set_terrain` and
+`nav_sim_world_pull` / `publish`. `state_comment` / `state_property` read what a key says it
+is.
+
+Python reads the same values as C++: `test_pycvc_physics.py` rebuilds the cross-platform golden
+scene and `physics_parity_test`'s scenarios through pycvc, and requires C++'s state hashes and
+values bit for bit. See `docs/PHYSICS_API.md`, "Python: pycvc".
+
 ## Level of detail (cvc::simplify + cvc::lod)
 
 The whole LOD family is wrapped directly (`pycvc_lod.i`, `LodGraphicsNode` in
@@ -277,4 +292,5 @@ pycvc.register_intrinsics(env, ctx)         # each function keeps ctx alive
 ```
 
 Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,
-`test_pycvc_state_exec_sched.py`, `test_pycvc_state_exec_eval.py`.
+`test_pycvc_state_exec_sched.py`, `test_pycvc_state_exec_eval.py`,
+`test_pycvc_state_exec_data.py`.

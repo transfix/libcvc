@@ -26,6 +26,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
   ../../inc/cvc/state/state.h
+  ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
   ../../inc/cvc/state/state_subscription_router.h
   ../../inc/cvc/state/state_sync_adapter.h
@@ -63,8 +64,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
   ../../inc/cvc/physics/world_binding.h
+  ../../inc/cvc/physics/snapshot_json.h
   ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/pose_tracker.h
+  ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -113,6 +116,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/nav/grid_nav.h
+  ../../inc/cvc/nav/plant_types.h
+  ../../inc/cvc/nav/terrain.h
+  ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/lod/select.h
   ../../inc/cvc/lod/pyramid.h
   ../../inc/cvc/lod/tiles.h
@@ -203,6 +209,7 @@ set(SOURCE_FILES
   volume/spider_io.cpp
   state/state.cpp
   state/state_json.cpp
+  state/state_key_meta.cpp
   state/state_list.cpp
   state/state_eviction_store.cpp
   state/state_memory_manager.cpp
@@ -236,8 +243,11 @@ set(SOURCE_FILES
   physics/vehicle.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
+  physics/snapshot_json.cpp
   physics/world_geometry.cpp
   physics/pose_tracker.cpp
+  physics/binding_meta.cpp
+  physics/nav_plant.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -277,6 +287,7 @@ set(SOURCE_FILES
   nav/spatial.cpp
   nav/drive.cpp
   nav/material.cpp
+  nav/terrain.cpp
   nav/material_raster.cpp
   nav/world_planes.cpp
   nav/land_cover.cpp
@@ -291,6 +302,7 @@ set(SOURCE_FILES
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
   nav/sim_world.cpp
+  nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   lod/select.cpp
@@ -349,6 +361,19 @@ foreach(_wsrc ${_cvc_world_srcs})
   endif()
 endforeach()
 
+# cvc::nav must not depend on cvc::physics (the nav vehicle physics roadmap, P4): nav knows only
+# its vehicle_plant interface, and the physics plant (cvc/physics/nav_plant.h) depends on it, not
+# the other way round. Both are in this one library, so the seam is enforced on the sources.
+file(GLOB _cvc_nav_srcs "${CMAKE_CURRENT_SOURCE_DIR}/nav/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/nav/*.h"
+                        "${PROJECT_SOURCE_DIR}/inc/cvc/nav/*.h" "${PROJECT_SOURCE_DIR}/inc/cvc/nav/detail/*.h")
+foreach(_nsrc ${_cvc_nav_srcs})
+  file(READ "${_nsrc}" _ntext)
+  if(_ntext MATCHES "#[ \t]*include[ \t]*[<\"]cvc/physics/")
+    message(FATAL_ERROR "cvc::nav must not depend on cvc::physics (found a cvc/physics include in ${_nsrc}); "
+                        "nav reaches a physics plant through cvc/nav/vehicle_plant.h only.")
+  endif()
+endforeach()
+
 # Determinism guard (roadmap §5.2): every random draw in cvc::lsys / cvc::world
 # must go through the hashed RNG (rng::hash4). Fail the configure if any source
 # reaches for a stateful/stream generator or wall-clock seed, which would make
@@ -378,10 +403,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -412,10 +437,10 @@ endif()
 # contraction in the facade and the null backend, as for nav and world above; the
 # Jolt backend TU gets the same flag on its own target (below).
 if(NOT MSVC)
-  set_source_files_properties(physics/world.cpp physics/null_backend.cpp
+  set_source_files_properties(physics/world.cpp physics/null_backend.cpp physics/nav_plant.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(physics/world.cpp physics/null_backend.cpp
+  set_source_files_properties(physics/world.cpp physics/null_backend.cpp physics/nav_plant.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -1621,7 +1646,8 @@ if(CVC_WITH_JOLT)
     set(_cvc_jolt_kind OBJECT)
   endif()
   add_library(cvc_physics_jolt ${_cvc_jolt_kind} physics/jolt/jolt_backend.cpp
-    physics/jolt/jolt_material.cpp physics/jolt/jolt_vehicle_controller.cpp)
+    physics/jolt/jolt_material.cpp physics/jolt/jolt_vehicle_controller.cpp
+    physics/jolt/jolt_vehicle_energy.cpp)
   set_target_properties(cvc_physics_jolt PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
@@ -1635,12 +1661,13 @@ if(CVC_WITH_JOLT)
   # nowhere. cvc_material and the Ackermann controller subclass them; their vtables
   # are emitted in jolt_material.cpp and jolt_vehicle_controller.cpp, the files built
   # with -fno-rtti, so nothing references the missing typeinfo ("undefined reference
-  # to typeinfo for JPH::PhysicsMaterial" otherwise). Only those: a no-RTTI file that throws
-  # std exceptions emits weak copies of their typeinfo, which on macOS bind every
-  # reference in libcvc.dylib and break exception and boost::any matching across
-  # the library boundary (see jolt_material.h). Jolt's other bases here have only
-  # inline virtuals, so their typeinfo is emitted where it is used. MSVC emits its
-  # RTTI records in the referencing file and needs neither switch.
+  # to typeinfo for JPH::PhysicsMaterial" otherwise). Only those, and only the vtable owners
+  # in them (the controller's other members are in jolt_vehicle_energy.cpp, with RTTI): a
+  # no-RTTI file that throws std exceptions, or calls anything inline that can, emits weak
+  # copies of their typeinfo, which on macOS bind every reference in libcvc.dylib and break
+  # exception and boost::any matching across the library boundary (see jolt_material.h).
+  # Jolt's other bases here have only inline virtuals, so their typeinfo is emitted where it
+  # is used. MSVC emits its RTTI records in the referencing file and needs neither switch.
   if(MSVC)
     target_compile_options(cvc_physics_jolt PRIVATE /fp:precise)
   else()

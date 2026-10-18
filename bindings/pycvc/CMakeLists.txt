@@ -274,6 +274,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
+             pycvc_state_exec_data:test_pycvc_state_exec_data.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
@@ -291,6 +292,17 @@ if(CVC_BUILD_PYCVC_CORE)
     set_tests_properties(${_name} PROPERTIES ENVIRONMENT
       "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   endforeach()
+  # The physics world, its vehicles and the navigator's plant (NAV-VEHICLE-PHYSICS-ROADMAP.md,
+  # P6). With the tests built, physics_parity_test is the C++ reference Python must match bit
+  # for bit; without it the test checks the cross-platform golden hash alone.
+  set(_pycvc_physics_env
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  if(TARGET physics_parity_test)
+    list(APPEND _pycvc_physics_env "CVC_PHYSICS_PARITY_EXE=$<TARGET_FILE:physics_parity_test>")
+  endif()
+  add_test(NAME pycvc_physics
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_physics.py)
+  set_tests_properties(pycvc_physics PROPERTIES ENVIRONMENT "${_pycvc_physics_env}")
 endif() # CVC_BUILD_PYCVC_CORE
 
 # ── pycvc_gl — direct wrap of the cvcGL scene graph (scriptable; needs VTK) ──

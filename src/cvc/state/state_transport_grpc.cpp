@@ -54,6 +54,8 @@ pb::MutationOp encode_op(state_mutation_op op) {
     return pb::MUTATION_OP_DELEGATE_SUBTREE;
   case state_mutation_op::revoke_delegation:
     return pb::MUTATION_OP_REVOKE_DELEGATION;
+  case state_mutation_op::set_property:
+    return pb::MUTATION_OP_SET_PROPERTY;
   }
   return pb::MUTATION_OP_UNSPECIFIED;
 }
@@ -80,6 +82,8 @@ state_mutation_op decode_op(pb::MutationOp op) {
     return state_mutation_op::delegate_subtree;
   case pb::MUTATION_OP_REVOKE_DELEGATION:
     return state_mutation_op::revoke_delegation;
+  case pb::MUTATION_OP_SET_PROPERTY:
+    return state_mutation_op::set_property;
   default:
     return state_mutation_op::set_value;
   }
@@ -292,6 +296,8 @@ public:
           se.comment = e.comment();
           se.hidden = e.hidden();
           se.read_only = e.read_only();
+          for (const auto &p : e.properties())
+            se.properties[p.first] = p.second;
           se.type_name = e.type_name();
           se.origin_node_id = e.origin_node_id();
           se.sequence = e.sequence();
@@ -485,6 +491,8 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
           se.comment = e.comment();
           se.hidden = e.hidden();
           se.read_only = e.read_only();
+          for (const auto &p : e.properties())
+            se.properties[p.first] = p.second;
           se.type_name = e.type_name();
           se.origin_node_id = e.origin_node_id();
           se.sequence = e.sequence();
@@ -969,6 +977,7 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
       te.comment = std::move(se.comment);
       te.hidden = se.hidden;
       te.read_only = se.read_only;
+      te.properties = std::move(se.properties);
       te.type_name = std::move(se.type_name);
       te.origin_node_id = std::move(se.origin_node_id);
       te.sequence = se.sequence;
@@ -990,6 +999,8 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
     pe->set_comment(e.comment);
     pe->set_hidden(e.hidden);
     pe->set_read_only(e.read_only);
+    for (const auto &p : e.properties)
+      (*pe->mutable_properties())[p.first] = p.second;
     pe->set_type_name(e.type_name);
     pe->set_origin_node_id(e.origin_node_id);
     pe->set_sequence(e.sequence);

@@ -274,6 +274,22 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
     dispatch_local(appended);
   });
 
+  // A property replicates as set_property: its key in type_name, its value in string_value
+  // ("" removes it on the peer, as it did here).
+  cs.property_changed = node.propertyChanged.connect([this, path_copy](const std::string &key) {
+    if (!_attached || current_thread_suppressed())
+      return;
+    state &n = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
+    state_mutation m;
+    m.path = path_copy;
+    m.op = state_mutation_op::set_property;
+    m.type_name = key;
+    m.string_value = n.property(key);
+    state_mutation appended = _journal.append(m);
+    _local_count.fetch_add(1, std::memory_order_relaxed);
+    dispatch_local(appended);
+  });
+
   // childChanged fires on the PARENT with the child's local name (not full name). Resolve to full
   // path and attach lazily. Takes _mutex because it mutates _connections from a signal thread.
   cs.child_changed = node.childChanged.connect([this, path_copy](const std::string &child_name) {
@@ -328,6 +344,9 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
     break;
   case state_mutation_op::set_read_only:
     node.readOnly(m.string_value == "1" || m.string_value == "true");
+    break;
+  case state_mutation_op::set_property:
+    node.property(m.type_name, m.string_value);
     break;
   case state_mutation_op::touch:
     node.touch();

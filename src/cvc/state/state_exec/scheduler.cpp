@@ -276,7 +276,21 @@ void scheduler::execute_process_step(process &proc) {
         proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
   const bool charge_cpu = proc.charges_cpu_time();
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
-  bool done = evaluator_.step(proc.state);
+  bool done = false;
+  try {
+    done = evaluator_.step(proc.state);
+  } catch (const evaluation_timeout &) {
+    // The step's deadline cut a long loop inside it (a data job, a generator, a stdlib call):
+    // the process ran out of time, as the between-steps check below would find. A deadline
+    // armed outside this scheduler is its caller's, so that one propagates like other errors.
+    if (!step_deadline.expired())
+      throw;
+    proc.accumulated_time +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
+            .count();
+    kill_process(proc, "time_limit_exceeded");
+    return;
+  }
 
   // 4. Accumulate running time, and charge it to what the step was spent on
   auto now = std::chrono::steady_clock::now();

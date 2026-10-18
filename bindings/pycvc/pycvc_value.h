@@ -12,8 +12,10 @@
 // - closure, native_fn, data_object, generator -> pycvc.value, an opaque handle that converts
 //   back to the same value, so it can be passed into the DSL again.
 //
-// Strict: an int outside 64 bits raises OverflowError, any other Python type raises TypeError, and
-// a value nested deeper than 1000 levels (or a cyclic one) raises ValueError. Defined in the SWIG
+// Strict: an int outside 64 bits raises OverflowError, and any other Python type raises TypeError.
+// Any depth converts (the conversion doesn't recurse). A list or dict shared within a value
+// converts to one shared object, both ways, so a DSL value that holds itself becomes a Python value
+// that holds itself; a Python value that holds itself raises ValueError. Defined in the SWIG
 // wrapper (pycvc.i), which owns the pycvc.symbol / pycvc.value types. Call with the GIL held.
 #pragma once
 

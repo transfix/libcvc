@@ -339,6 +339,16 @@ TEST(DistributedStateSession, TwoNodeInprocMetadataReplication) {
   EXPECT_TRUE(state::instance(a2)("ui.panel").hidden());
   EXPECT_TRUE(state::instance(a2)("ui.panel").readOnly());
 
+  // Properties replicate as set_property, and so does removing one.
+  node1.property("min", "0").property("max", "10");
+  shared_transport.pump_all();
+  EXPECT_EQ(state::instance(a2)("ui.panel").property("min"), "0");
+  EXPECT_EQ(state::instance(a2)("ui.panel").property("max"), "10");
+  node1.property("min", "");
+  shared_transport.pump_all();
+  EXPECT_FALSE(state::instance(a2)("ui.panel").has_property("min"));
+  EXPECT_EQ(state::instance(a2)("ui.panel").property("max"), "10");
+
   // Clearing the flags replicates too (proves the boolean round-trips both ways).
   node1.hidden(false);
   node1.readOnly(false);
@@ -392,6 +402,7 @@ TEST(DistributedStateSession, TwoNodeSnapshotDataMetadataReassembly) {
   cam.value(std::string("live"));
   cam.comment(std::string("primary camera"));
   cam.hidden(true);
+  cam.property("unit", "fps").property("max", "120");
   cam.data(boost::any(big));
 
   // NB: not named `small` — the Windows SDK defines `#define small char`, which turns a
@@ -418,6 +429,8 @@ TEST(DistributedStateSession, TwoNodeSnapshotDataMetadataReassembly) {
   EXPECT_EQ(state::instance(a2)("streams.cam0").value(), "live");
   EXPECT_EQ(state::instance(a2)("streams.cam0").comment(), "primary camera");
   EXPECT_TRUE(state::instance(a2)("streams.cam0").hidden());
+  EXPECT_EQ(state::instance(a2)("streams.cam0").property("unit"), "fps");
+  EXPECT_EQ(state::instance(a2)("streams.cam0").property("max"), "120");
 
   // Node 2 mirrors the large (blob-hydrated) data(), byte-identical.
   const boost::any got_big = state::instance(a2)("streams.cam0").data();

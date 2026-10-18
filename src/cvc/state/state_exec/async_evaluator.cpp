@@ -83,6 +83,9 @@ value_t async_evaluator::sync_evaluate(const value_t &expr, environment_ptr env,
     std::optional<std::chrono::steady_clock::time_point> prev;
     ~deadline_restore() { self->deadline_ = prev; }
   } restore{this, saved_deadline};
+  // The thread's evaluation deadline cuts a loop inside one native call, which never reaches
+  // check_interrupted_async (as stackless_evaluator::run arms it).
+  eval_deadline_guard deadline_guard(timeout_sec);
 
   auto t = evaluate(expr, env);
   // sync_wait drives the coroutine on both the trampoline (GCC/Clang) and the
@@ -246,8 +249,10 @@ task<value_t> async_evaluator::eval_internal(const value_t &expr, environment_pt
 // ---------------------------------------------------------------------------
 
 task<value_t> async_evaluator::do_if(const std::vector<value_t> &args, environment_ptr env) {
-  if (args.size() < 2)
-    throw std::runtime_error("if: expected at least 2 arguments");
+  if (args.size() < 2 || args.size() > 3)
+    throw std::runtime_error("if: expected a condition, a then branch and an optional else "
+                             "branch, got " +
+                             std::to_string(args.size()) + " arguments");
   auto cond = co_await eval_internal(args[0], env);
   if (cond.is_truthy())
     co_return co_await eval_internal(args[1], env);
@@ -269,17 +274,18 @@ task<value_t> async_evaluator::do_begin(const std::vector<value_t> &args, enviro
 
 task<value_t> async_evaluator::do_while(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 2)
-    throw std::runtime_error("while: expected 2 arguments");
+    throw std::runtime_error("while: expected a condition and a body");
   while ((co_await eval_internal(args[0], env)).is_truthy()) {
     co_await check_interrupted_async();
-    co_await eval_internal(args[1], env);
+    for (std::size_t i = 1; i < args.size(); ++i) // several body forms run in order
+      co_await eval_internal(args[i], env);
   }
   co_return nil_value;
 }
 
 task<value_t> async_evaluator::do_for(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 3)
-    throw std::runtime_error("for: expected 3 arguments");
+    throw std::runtime_error("for: expected a variable, a collection and a body");
   auto *var_sym = std::get_if<symbol>(&args[0].v);
   if (!var_sym)
     throw std::runtime_error("for: first arg must be symbol");
@@ -290,7 +296,8 @@ task<value_t> async_evaluator::do_for(const std::vector<value_t> &args, environm
   for (auto &item : **lp) {
     co_await check_interrupted_async();
     env->set(var_sym->name, item);
-    co_await eval_internal(args[2], env);
+    for (std::size_t i = 2; i < args.size(); ++i) // several body forms run in order
+      co_await eval_internal(args[i], env);
   }
   co_return nil_value;
 }
@@ -345,6 +352,9 @@ task<value_t> async_evaluator::do_lambda(const std::vector<value_t> &args, envir
 }
 
 task<value_t> async_evaluator::do_return(const std::vector<value_t> &args, environment_ptr env) {
+  if (args.size() > 1)
+    throw std::runtime_error("return: expected at most 1 argument, got " +
+                             std::to_string(args.size()));
   if (args.empty())
     throw return_exception(nil_value);
   auto val = co_await eval_internal(args[0], env);

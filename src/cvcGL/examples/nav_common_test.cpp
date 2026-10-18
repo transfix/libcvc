@@ -227,4 +227,10 @@ TEST(NavCommonTerrain, SamplesTheWorldsHeightField) {
   const cvc::geometry g = navdemo::terrain_mesh(t, rgb);
   EXPECT_EQ(&g.const_points(), &field->const_points()) << "the field's mesh, not a copy";
   EXPECT_EQ(g.const_colors().size(), g.num_points());
+  // Planar UVs over the bounds, as ground_quad has: an aerial drapes the same way.
+  ASSERT_EQ(g.const_uvs().size(), g.num_points());
+  for (std::size_t v = 0; v < g.num_points(); ++v) {
+    EXPECT_DOUBLE_EQ(g.const_uvs()[v][0], (g.const_points()[v][0] + 1.0) / 2.0);
+    EXPECT_DOUBLE_EQ(g.const_uvs()[v][1], (g.const_points()[v][1] + 1.0) / 2.0);
+  }
 }

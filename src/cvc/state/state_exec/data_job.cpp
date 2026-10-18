@@ -269,8 +269,7 @@ public:
         continue;
       }
       ++nodes_;
-      if (eval_deadline_expired())
-        throw std::runtime_error("values_equal: structure too large to compare");
+      eval_deadline_check("values_equal");
       bool equal;
       // Element references stay valid through visit(), which only pushes onto open_.
       if (ca.list) {
@@ -371,8 +370,7 @@ public:
         continue;
       }
       ++nodes_;
-      if (eval_deadline_expired())
-        throw std::runtime_error("state-data-get: evaluation exceeded time budget");
+      eval_deadline_check("state-data-get");
       if (src.list) {
         list_ptr out = std::get<list_ptr>(dst.v);
         const value_t &e = (*src.list)[i];
@@ -571,9 +569,7 @@ bool generator_walk::step(std::size_t nodes) {
     if (g.native_step) { // range and friends: a value is a node
       if (spent())
         return false;
-      if (eval_deadline_expired()) // (collect (range 0 1e11)) when nothing slices
-        throw std::runtime_error(std::string(collect_ ? "collect" : "next") +
-                                 ": evaluation exceeded time budget");
+      eval_deadline_check(collect_ ? "collect" : "next"); // (collect (range 0 1e11)) unsliced
       std::optional<value_t> v = g.native_step();
       ++nodes_;
       if (!v) {
@@ -594,8 +590,7 @@ bool generator_walk::step(std::size_t nodes) {
     while (!g.state.done && !g.state.yielded) {
       if (spent())
         return false;
-      if (eval_deadline_expired())
-        throw std::runtime_error("generator: evaluation exceeded time budget");
+      eval_deadline_check("generator");
       {
         detail::native_nesting level("generator"); // its own evaluator, on this stack
         g.evaluator.step(g.state);

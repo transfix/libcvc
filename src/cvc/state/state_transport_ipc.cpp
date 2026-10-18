@@ -658,6 +658,9 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       std::uint32_t entry_count = 0;
       std::size_t count_offset = rsp.size();
       put_u32(rsp, 0); // placeholder
+      // Entries' properties go in a trailer after the entries, so a reader that predates them
+      // stops before it and a newer one reads it only when it is there.
+      std::vector<std::pair<std::uint32_t, std::map<std::string, std::string>>> props;
 
       {
         std::lock_guard<std::mutex> slk(_shards_mu);
@@ -665,7 +668,9 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
           if (shard->cluster_id() != cid)
             continue;
           auto snap = shard->snapshot(prefix);
-          for (const auto &e : snap) {
+          for (auto &e : snap) {
+            if (!e.properties.empty())
+              props.emplace_back(entry_count, std::move(e.properties));
             put_string(rsp, e.path);
             put_string(rsp, e.string_value);
             put_string(rsp, e.comment);
@@ -683,6 +688,15 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       // Patch entry count.
       for (int i = 0; i < 4; ++i)
         rsp[count_offset + i] = static_cast<unsigned char>((entry_count >> (8 * i)) & 0xFF);
+      put_u32(rsp, static_cast<std::uint32_t>(props.size()));
+      for (const auto &ep : props) {
+        put_u32(rsp, ep.first);
+        put_u32(rsp, static_cast<std::uint32_t>(ep.second.size()));
+        for (const auto &kv : ep.second) {
+          put_string(rsp, kv.first);
+          put_string(rsp, kv.second);
+        }
+      }
 
       std::lock_guard<std::mutex> wlk(conn->write_mu);
       write_frame_locked(*conn, kMsgSnapRsp, rsp);
@@ -707,6 +721,19 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
         e.data_type_name = br.str();
         read_payload(br, e.data_payload);
         entries.push_back(std::move(e));
+      }
+      if (br.ok() && br.remaining() >= 4) { // the properties trailer (absent from older peers)
+        const std::uint32_t with = br.u32();
+        for (std::uint32_t k = 0; k < with && br.ok(); ++k) {
+          const std::uint32_t index = br.u32();
+          const std::uint32_t n = br.u32();
+          for (std::uint32_t j = 0; j < n && br.ok(); ++j) {
+            std::string key = br.str();
+            std::string value = br.str();
+            if (index < entries.size())
+              entries[index].properties[key] = std::move(value);
+          }
+        }
       }
       {
         std::lock_guard<std::mutex> lk(_snap_waiters_mu);

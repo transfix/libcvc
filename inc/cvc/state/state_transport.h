@@ -18,6 +18,7 @@
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_peer_registry.h>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -152,6 +153,7 @@ public:
     std::string comment;
     bool hidden = false;
     bool read_only = false;
+    std::map<std::string, std::string> properties; // state::properties()
     std::string type_name;
     std::string origin_node_id;
     std::uint64_t sequence = 0;

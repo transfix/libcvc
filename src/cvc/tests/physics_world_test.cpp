@@ -18,7 +18,11 @@
 //   (4) one thread and several give the same state hash;
 //   (5) save at tick n, restore, re-run: the same state hash.
 
+#include <algorithm>
 #include <atomic>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
@@ -26,11 +30,13 @@
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/physics/snapshot_json.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_binding.h>
 #include <cvc/state/state.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <sstream>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -677,6 +683,10 @@ TEST(PhysicsBinding, MaterialsAreDeclaredInTheTree) {
   set_key(ctx, "phys.materials.ice.nav_material", "4");
   b.pull();
   const material_id ice = b.material("ice");
+  // A material's own keys are not materials: default and ice, and no more, however many pulls.
+  b.pull();
+  EXPECT_EQ(w.material_count(), 2u);
+  EXPECT_THROW(b.material("friction"), cvc::physics_error);
   EXPECT_FLOAT_EQ(w.get_material(ice).friction, 0.1f);
   EXPECT_EQ(w.get_material(ice).nav_material, 4);
   EXPECT_EQ(key_value(ctx, "phys.materials.ice.restitution"), "0"); // seeded
@@ -721,6 +731,140 @@ TEST(PhysicsBinding, JoltWorldFallsUnderTheTreesGravity) {
   std::snprintf(expect, sizeof(expect), "%016llx", static_cast<unsigned long long>(w.state_hash()));
   EXPECT_EQ(h, std::string(expect));
   EXPECT_NE(key_value(ctx, "physics.version").find("Jolt"), std::string::npos);
+}
+
+// push() publishes the whole world as one snapshot, and writes the named bodies' keys from it.
+TEST(PhysicsBinding, PushPublishesTheWorldAndItsNamedBodies) {
+  REQUIRE_JOLT();
+  cvc::app ctx;
+  world w(jolt_config());
+  world_binding b(ctx, w);
+  w.add_body({box{{50.0, 50.0, 0.5}}, motion_type::static_, {0.0, 0.0, -0.5}});
+  const body_id ball = w.add_body({sphere{0.2}, motion_type::dynamic, {0.0, 0.0, 2.0}});
+  EXPECT_EQ(world_binding::snapshot_from_state(ctx), nullptr);
+  b.publish_body("ball", ball);
+  EXPECT_THROW(b.publish_body("a.b", ball), cvc::physics_error);
+  EXPECT_THROW(b.publish_body("", ball), cvc::physics_error);
+  body_id nobody;
+  nobody.value = 12345;
+  EXPECT_THROW(b.publish_body("ghost", nobody), cvc::physics_error);
+  for (int i = 0; i < 30; ++i)
+    b.step();
+  const auto s = world_binding::snapshot_from_state(ctx);
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(s, b.last_snapshot());
+  EXPECT_EQ(s->tick, w.tick());
+  ASSERT_EQ(s->bodies.size(), 1u);
+  ASSERT_EQ(s->static_bodies->size(), 1u);
+  EXPECT_EQ((*s->static_bodies)[0].motion, motion_type::static_);
+  const body_state now = w.state(ball);
+  EXPECT_EQ(s->bodies[0].state.position.z, now.position.z);
+  // The keys hold that tick's values to the last digit.
+  EXPECT_EQ(std::stod(key_value(ctx, "physics.bodies.ball.position.z")), now.position.z);
+  EXPECT_EQ(std::stod(key_value(ctx, "physics.bodies.ball.velocity.z")), now.linear_velocity.z);
+  EXPECT_EQ(key_value(ctx, "physics.bodies.ball.motion"), "dynamic");
+  EXPECT_EQ(key_value(ctx, "physics.bodies.ball.active"), "1");
+  EXPECT_EQ(key_value(ctx, "physics.bodies.ball.id"), std::to_string(ball.value));
+  // snapshot_every = 0: no new snapshot, while the named keys keep up.
+  set_key(ctx, "physics.snapshot_every", "0");
+  for (int i = 0; i < 5; ++i)
+    b.step();
+  EXPECT_EQ(world_binding::snapshot_from_state(ctx)->tick, s->tick);
+  EXPECT_EQ(std::stod(key_value(ctx, "physics.bodies.ball.position.z")), w.state(ball).position.z);
+  // Every 4 steps: from tick 35, at 36 and 40.
+  set_key(ctx, "physics.snapshot_every", "4");
+  for (int i = 0; i < 6; ++i)
+    b.step();
+  EXPECT_EQ(world_binding::snapshot_from_state(ctx)->tick, 40u);
+  // A body the world no longer has stops being published.
+  w.remove_body(ball);
+  for (int i = 0; i < 4; ++i) // to tick 44, the next snapshot
+    EXPECT_NO_THROW(b.step());
+  EXPECT_EQ(b.last_snapshot()->tick, 44u);
+  EXPECT_EQ(b.last_snapshot()->bodies.size(), 0u);
+  EXPECT_EQ(b.last_snapshot()->static_bodies->size(), 1u);
+}
+
+// What publishing costs, each part timed right after a step, on the stepping thread: a
+// snapshot is one pass over the moving bodies, and the publish thread takes the key writes
+// and the JSON off the step. The bodies never sleep here, so every step does the same work.
+TEST(PhysicsBinding, WhatPublishingCostsAStep) {
+  REQUIRE_JOLT();
+  cvc::app ctx;
+  world w(jolt_config());
+  w.add_body({box{{50.0, 50.0, 0.5}}, motion_type::static_, {0.0, 0.0, -0.5}});
+  std::vector<body_id> balls;
+  for (int i = 0; i < 1000; ++i) {
+    body_desc d{sphere{0.1},
+                motion_type::dynamic,
+                {-15.0 + 1.0 * (i % 32), -15.0 + 1.0 * (i / 32), 0.1 + 0.01 * (i % 7)}};
+    d.allow_sleeping = false;
+    balls.push_back(w.add_body(d));
+  }
+  world_binding b(ctx, w);
+  for (int i = 0; i < 4; ++i)
+    b.publish_body("ball" + std::to_string(i), balls[static_cast<std::size_t>(i)]);
+  b.step(); // seeds the keys
+  using clock = std::chrono::steady_clock;
+  const auto us = [](clock::time_point a, clock::time_point z) {
+    return std::chrono::duration<double, std::micro>(z - a).count();
+  };
+  const auto set = [&](const char *k, const char *v) {
+    cvc::state::instance(ctx)(std::string("physics.") + k).value(std::string(v));
+  };
+  const int n = 100;
+  // Medians, which a busy machine disturbs less than means.
+  const auto median = [](std::vector<double> v) {
+    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(v.size() / 2), v.end());
+    return v[v.size() / 2];
+  };
+  // Step, snapshot(), pull() with nothing changed, and push() as configured.
+  const auto run = [&](double &step_us, double &snap_us, double &pull_us, double &push_us) {
+    std::vector<double> steps, snaps, pulls, pushes;
+    for (int i = 0; i < n; ++i) {
+      const clock::time_point t0 = clock::now();
+      w.step();
+      const clock::time_point t1 = clock::now();
+      const world_snapshot s = w.snapshot();
+      const clock::time_point t2 = clock::now();
+      b.pull();
+      const clock::time_point t3 = clock::now();
+      b.push();
+      const clock::time_point t4 = clock::now();
+      b.flush(); // not timed: the publish thread catches up
+      steps.push_back(us(t0, t1));
+      snaps.push_back(us(t1, t2));
+      pulls.push_back(us(t2, t3));
+      pushes.push_back(us(t3, t4));
+      EXPECT_EQ(s.bodies.size(), 1000u);
+    }
+    step_us = median(steps);
+    snap_us = median(snaps);
+    pull_us = median(pulls);
+    push_us = median(pushes);
+  };
+  double step_us, snap_us, pull_us, keys_us, data_us, json_us, thread_us;
+  set("snapshot_every", "0");
+  b.pull();
+  run(step_us, snap_us, pull_us, keys_us); // the telemetry and four named bodies
+  set("snapshot_every", "1");
+  b.pull();
+  run(step_us, snap_us, pull_us, data_us); // and the snapshot as data
+  set("snapshot_json_every", "1");
+  b.pull();
+  run(step_us, snap_us, pull_us, json_us); // and as JSON
+  set("publish_thread", "1");
+  b.pull();
+  run(step_us, snap_us, pull_us, thread_us); // all of it, written by the publish thread
+  const std::string json = to_json(w.snapshot(), json_bodies::moving);
+  std::printf("  1000 moving bodies: a step %.0f us; snapshot() %.0f us; pull() %.1f us with "
+              "nothing changed\n",
+              step_us, snap_us, pull_us);
+  std::printf("  push() on the step: %.0f us telemetry and 4 named bodies, %.0f us with the "
+              "snapshot, %.0f us with its JSON (%zu bytes), %.0f us with the publish thread\n",
+              keys_us, data_us, json_us, json.size(), thread_us);
+  EXPECT_LT(snap_us, 20000.0);
+  EXPECT_LT(thread_us, json_us) << "the publish thread takes the JSON off the step";
 }
 
 TEST(PhysicsJolt, WorldsComeAndGoWithoutAProcessWideSetup) {
@@ -855,4 +999,250 @@ TEST(PhysicsJolt, CrossPlatformGoldenHash) {
               static_cast<unsigned long long>(h));
   EXPECT_EQ(h, exact_scene_hash(240)) << "the scene is not even deterministic in-process";
   EXPECT_EQ(h, 0x70b2cc0bd34ea4beull) << std::hex << "state hash " << h;
+}
+
+// --- per-body settings, JSON, the publish thread -------------------------------------------
+
+namespace {
+
+boost::property_tree::ptree parse_json(const std::string &text) {
+  std::istringstream in(text);
+  boost::property_tree::ptree doc;
+  boost::property_tree::read_json(in, doc);
+  return doc;
+}
+
+double element(const boost::property_tree::ptree &array, int i) {
+  auto it = array.begin();
+  std::advance(it, i);
+  return std::stod(it->second.get_value<std::string>());
+}
+
+// How far a box sliding at 4 m/s goes on default-material ground before it stops.
+double slide(world &w, body_id box_id) {
+  const vec3 from = w.state(box_id).position;
+  w.add_impulse(box_id, {4.0 * w.get_body(box_id).mass, 0.0, 0.0});
+  w.step(300);
+  return w.state(box_id).position.x - from.x;
+}
+
+} // namespace
+
+// set_body changes a running body: its material, mass, damping and sleeping.
+TEST(PhysicsWorld, SetBodyChangesARunningBody) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  const material_id sticky = w.add_material({"sticky", 0.8f});
+  const material_id slick = w.add_material({"slick", 0.2f});
+  const body_id ground = w.add_body({box{{50.0, 50.0, 0.5}}, motion_type::static_, {0, 0, -0.5}});
+  body_desc d{box{{0.25, 0.25, 0.25}}, motion_type::dynamic, {0.0, 0.0, 0.25}};
+  d.material = sticky;
+  d.linear_damping = 0.0;
+  const body_id crate = w.add_body(d);
+  w.step(50);
+  body_settings s = w.get_body(crate);
+  EXPECT_EQ(s.material, sticky);
+  EXPECT_NEAR(s.mass, 1000.0 * 0.5 * 0.5 * 0.5, 1e-3) << "density times volume";
+  const double sticky_m = slide(w, crate);
+  s.material = slick;
+  w.set_body(crate, s);
+  const double slick_m = slide(w, crate);
+  // v^2 / (2 mu g): 1.02 m at mu 0.8, 4.08 m at mu 0.2.
+  std::printf("  slid %.3f m on mu 0.8, %.3f m after set_body gave it mu 0.2\n", sticky_m, slick_m);
+  EXPECT_NEAR(slick_m / sticky_m, 4.0, 0.4);
+  // Twice the mass: an impulse changes its velocity half as much.
+  s.mass *= 2.0;
+  w.set_body(crate, s);
+  EXPECT_EQ(w.get_body(crate).mass, s.mass);
+  const double v0 = w.state(crate).linear_velocity.z;
+  w.add_impulse(crate, {0.0, 0.0, 250.0});
+  EXPECT_NEAR(w.state(crate).linear_velocity.z - v0, 250.0 / s.mass, 1e-4);
+  w.step(200);
+  // Not allowed to sleep, it stays awake at rest.
+  s.allow_sleeping = false;
+  w.set_body(crate, s);
+  w.step(300);
+  EXPECT_TRUE(w.state(crate).active);
+  EXPECT_EQ(w.snapshot().bodies[0].settings.allow_sleeping, false);
+  // Refused, and nothing changes.
+  body_settings g = w.get_body(ground);
+  g.linear_damping = 1.0;
+  EXPECT_THROW(w.set_body(ground, g), cvc::physics_error); // static: only its material
+  g = w.get_body(ground);
+  g.mass = 5.0;
+  EXPECT_THROW(w.set_body(ground, g), cvc::physics_error);
+  const std::uint64_t version = w.snapshot().static_version;
+  g = w.get_body(ground);
+  g.material = slick; // a static box's material may change
+  w.set_body(ground, g);
+  EXPECT_EQ(w.get_body(ground).material, slick);
+  EXPECT_NE(w.snapshot().static_version, version);
+  s = w.get_body(crate);
+  s.material = 99;
+  EXPECT_THROW(w.set_body(crate, s), cvc::physics_error);
+  s = w.get_body(crate);
+  s.mass = -1.0;
+  EXPECT_THROW(w.set_body(crate, s), cvc::physics_error);
+  EXPECT_EQ(w.get_body(crate).material, slick);
+  body_id nobody;
+  nobody.value = 777;
+  EXPECT_THROW(w.get_body(nobody), cvc::physics_error);
+  EXPECT_THROW(w.set_body(nobody, s), cvc::physics_error);
+}
+
+// A mesh's materials are its triangles': set_body leaves them alone.
+TEST(PhysicsWorld, SetBodyRefusesAMeshsMaterial) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  const material_id m = w.add_material({"m", 0.5f});
+  auto g = std::make_shared<cvc::geometry>();
+  g->points() = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}};
+  g->tris().push_back({{0, 1, 2}});
+  const body_id id = w.add_body({mesh{g}, motion_type::static_});
+  body_settings s = w.get_body(id);
+  s.material = m;
+  EXPECT_THROW(w.set_body(id, s), cvc::physics_error);
+}
+
+// The snapshot as JSON: snapshot_json without the static bodies, snapshot_json_static with
+// them, rewritten only when they change.
+TEST(PhysicsBinding, TheSnapshotIsPublishedAsJson) {
+  REQUIRE_JOLT();
+  cvc::app ctx;
+  world w(jolt_config());
+  world_binding b(ctx, w);
+  w.add_material({"ice \"black\"\n", 0.1f}); // a name JSON must escape
+  w.add_body({box{{50.0, 50.0, 0.5}}, motion_type::static_, {0.0, 0.0, -0.5}});
+  const body_id ball = w.add_body({sphere{0.2}, motion_type::dynamic, {0.0, 0.0, 2.0}});
+  set_key(ctx, "physics.snapshot_json_every", "2");
+  for (int i = 0; i < 8; ++i)
+    b.step();
+  const world_snapshot at8 = w.snapshot();
+  b.step(); // tick 9: no JSON
+  const std::string text = key_value(ctx, "physics.snapshot_json");
+  const boost::property_tree::ptree doc = parse_json(text);
+  EXPECT_EQ(doc.get<std::string>("format"), "cvc.physics.snapshot/1");
+  EXPECT_EQ(doc.get<std::uint64_t>("tick"), 8u) << "every 2 steps";
+  EXPECT_EQ(doc.get<std::string>("config.backend"), "jolt");
+  ASSERT_EQ(doc.get_child("bodies").size(), 1u) << "the moving bodies only";
+  const boost::property_tree::ptree &body = doc.get_child("bodies").begin()->second;
+  EXPECT_EQ(body.get<std::uint32_t>("id"), ball.value);
+  EXPECT_EQ(body.get<std::string>("motion"), "dynamic");
+  // A double reads back exactly: the ball's height at tick 8.
+  EXPECT_EQ(element(body.get_child("position"), 2), at8.bodies[0].state.position.z);
+  EXPECT_EQ(element(body.get_child("rotation"), 0), at8.bodies[0].state.rotation.w);
+  EXPECT_NE(text.find("\"friction\":1.0,"), std::string::npos) << "a double keeps its point";
+  std::vector<std::string> names;
+  for (const auto &m : doc.get_child("materials"))
+    names.push_back(m.second.get<std::string>("name"));
+  ASSERT_EQ(names.size(), 2u);
+  EXPECT_EQ(names[1], "ice \"black\"\n");
+  // The static bodies, in their own document.
+  const boost::property_tree::ptree statics =
+      parse_json(key_value(ctx, "physics.snapshot_json_static"));
+  ASSERT_EQ(statics.get_child("bodies").size(), 1u);
+  EXPECT_EQ(statics.get_child("bodies").begin()->second.get<std::string>("motion"), "static");
+  EXPECT_EQ(statics.get<std::uint64_t>("static_version"), doc.get<std::uint64_t>("static_version"));
+  const std::uint64_t written = statics.get<std::uint64_t>("tick");
+  for (int i = 0; i < 4; ++i)
+    b.step();
+  EXPECT_EQ(parse_json(key_value(ctx, "physics.snapshot_json_static")).get<std::uint64_t>("tick"),
+            written)
+      << "unchanged static bodies are not rewritten";
+  w.add_body({box{{1.0, 1.0, 1.0}}, motion_type::static_, {10.0, 0.0, 1.0}});
+  b.step();
+  b.step();
+  const boost::property_tree::ptree changed =
+      parse_json(key_value(ctx, "physics.snapshot_json_static"));
+  EXPECT_EQ(changed.get_child("bodies").size(), 2u);
+  EXPECT_GT(changed.get<std::uint64_t>("tick"), written);
+  EXPECT_EQ(
+      changed.get<std::uint64_t>("static_version"),
+      parse_json(key_value(ctx, "physics.snapshot_json")).get<std::uint64_t>("static_version"));
+  // to_json(all) lists every body.
+  EXPECT_EQ(parse_json(to_json(w.snapshot())).get_child("bodies").size(), 3u);
+}
+
+// publish_thread: a background thread writes what each push publishes; flush() waits for it.
+TEST(PhysicsBinding, APublishThreadWritesWhatAStepPublishes) {
+  REQUIRE_JOLT();
+  cvc::app ctx;
+  world w(jolt_config());
+  {
+    world_binding b(ctx, w);
+    w.add_body({box{{50.0, 50.0, 0.5}}, motion_type::static_, {0.0, 0.0, -0.5}});
+    const body_id ball = w.add_body({sphere{0.2}, motion_type::dynamic, {0.0, 0.0, 2.0}});
+    b.publish_body("ball", ball);
+    set_key(ctx, "physics.publish_thread", "1");
+    set_key(ctx, "physics.snapshot_json_every", "1");
+    for (int i = 0; i < 50; ++i)
+      b.step();
+    b.flush();
+    // The last publication is written: this tick's.
+    EXPECT_EQ(key_value(ctx, "physics.tick"), std::to_string(w.tick()));
+    EXPECT_EQ(world_binding::snapshot_from_state(ctx)->tick, w.tick());
+    EXPECT_EQ(std::stod(key_value(ctx, "physics.bodies.ball.position.z")),
+              w.state(ball).position.z);
+    EXPECT_EQ(parse_json(key_value(ctx, "physics.snapshot_json")).get<std::uint64_t>("tick"),
+              w.tick());
+    EXPECT_FALSE(key_value(ctx, "physics.publish_dropped").empty());
+    // Back to writing on the step.
+    set_key(ctx, "physics.publish_thread", "0");
+    b.step();
+    EXPECT_EQ(key_value(ctx, "physics.tick"), std::to_string(w.tick()));
+    set_key(ctx, "physics.publish_thread", "1");
+    for (int i = 0; i < 20; ++i)
+      b.step();
+  } // the binding joins its thread, which writes what it holds
+  EXPECT_EQ(key_value(ctx, "physics.tick"), std::to_string(w.tick()));
+}
+
+// pull() reads the tree only after something under the prefix changed: a program's own
+// reconfigure stands until the tree's gravity changes.
+TEST(PhysicsBinding, PullReadsTheTreeOnlyWhenItChanged) {
+  cvc::app ctx;
+  world w(null_config());
+  world_binding b(ctx, w);
+  b.step();
+  world_config c = w.config();
+  c.gravity.z = -1.0;
+  w.reconfigure(c);
+  for (int i = 0; i < 3; ++i)
+    b.step(); // the binding's own writes are not changes
+  EXPECT_EQ(w.config().gravity.z, -1.0);
+  set_key(ctx, "physics.gravity.z", "-3.71");
+  b.step();
+  EXPECT_EQ(w.config().gravity.z, -3.71);
+}
+
+// A published body's settings are knobs: the material by name, the mass, damping, sleeping.
+TEST(PhysicsBinding, APublishedBodysSettingsAreKnobs) {
+  REQUIRE_JOLT();
+  cvc::app ctx;
+  world w(jolt_config());
+  world_binding b(ctx, w);
+  set_key(ctx, "physics.materials.ice.friction", "0.05");
+  b.pull();
+  const body_id crate = w.add_body({box{{0.5, 0.5, 0.5}}, motion_type::dynamic, {0, 0, 2}});
+  b.publish_body("crate", crate);
+  EXPECT_EQ(key_value(ctx, "physics.bodies.crate.material"), "default");
+  // The engine's mass, from the density in float: 1000 kg within its rounding.
+  EXPECT_EQ(std::stod(key_value(ctx, "physics.bodies.crate.mass")), w.get_body(crate).mass);
+  EXPECT_NEAR(w.get_body(crate).mass, 1000.0, 1e-3);
+  EXPECT_EQ(key_value(ctx, "physics.bodies.crate.allow_sleeping"), "1");
+  set_key(ctx, "physics.bodies.crate.material", "ice");
+  set_key(ctx, "physics.bodies.crate.mass", "250");
+  set_key(ctx, "physics.bodies.crate.linear_damping", "0.5");
+  set_key(ctx, "physics.bodies.crate.allow_sleeping", "false");
+  b.step();
+  const body_settings s = w.get_body(crate);
+  EXPECT_EQ(s.material, b.material("ice"));
+  EXPECT_EQ(s.mass, 250.0);
+  EXPECT_EQ(s.linear_damping, 0.5);
+  EXPECT_FALSE(s.allow_sleeping);
+  set_key(ctx, "physics.bodies.crate.material", "lava"); // no such material: ignored
+  set_key(ctx, "physics.bodies.crate.mass", "-3");       // refused: ignored
+  EXPECT_NO_THROW(b.step());
+  EXPECT_EQ(w.get_body(crate).material, b.material("ice"));
+  EXPECT_EQ(w.get_body(crate).mass, 250.0);
 }

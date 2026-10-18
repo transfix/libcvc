@@ -224,7 +224,11 @@ void async_scheduler::execute_process_step(process &proc) {
     proc.accumulated_time +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
             .count();
-    kill_process(proc, e.what());
+    // The step's deadline (max_time, or the per-step cap) cutting a long loop inside the step is
+    // the process running out of time, reported as check_limits() reports it between steps.
+    const bool out_of_time =
+        dynamic_cast<const evaluation_timeout *>(&e) != nullptr && step_deadline.expired();
+    kill_process(proc, out_of_time ? "time_limit_exceeded" : e.what());
     return;
   }
 
