@@ -274,9 +274,11 @@ void python_on_complete::operator()(value_t result) const {
 
 python_on_complete make_python_on_complete(PyObject *callable) {
   if (callable == nullptr || !PyCallable_Check(callable))
-    throw std::invalid_argument("pycvc.execute_options.on_complete: not callable");
+    throw std::invalid_argument("pycvc: on_complete is not callable");
   return python_on_complete{own_callable(callable)};
 }
+
+std::shared_ptr<PyObject> python_ref(PyObject *o) { return own_callable(o); }
 
 // Owns everything an evaluation needs. The intrinsics capture &ictx (a raw
 // pointer), so ictx must outlive any run — holding it here (Exec-lifetime)

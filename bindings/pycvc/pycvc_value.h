@@ -57,4 +57,8 @@ struct python_on_complete {
 /// The python_on_complete for `callable`. Throws std::invalid_argument when it isn't callable.
 python_on_complete make_python_on_complete(PyObject *callable);
 
+/// A shared owner of a new reference to `o`. The last owner to let go drops the reference under
+/// the GIL, so C++ can keep a Python object alive from any thread.
+std::shared_ptr<PyObject> python_ref(PyObject *o);
+
 } // namespace pycvc
