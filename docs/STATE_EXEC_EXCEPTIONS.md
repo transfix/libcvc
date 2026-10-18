@@ -1,8 +1,8 @@
 # state_exec: exceptions and long-running native calls
 
 Status: P0 specification (2026-10-18). The decisions below are the recommended defaults, agreed
-before this was written; section 7 lists the questions still open. Tracked in the
-`state-exec-exceptions` workstream.
+before this was written; section 7 records how the five questions P0 left open were settled.
+Tracked in the `state-exec-exceptions` workstream.
 
 Two related pieces of the state_exec DSL:
 
@@ -57,7 +57,8 @@ What it lacks:
 - **Errors** come back as the `__async_error__` dict.
 - **No cancellation or timeout:** killing a parked process doesn't cancel its kernel, which
   runs to completion while its result is dropped, and a call can't have a timeout.
-- **One pool:** CPU work and blocking I/O share the compute pool.
+- **Executors:** a kernel runs on the app's background task pool (`compute_async` starts it
+  there), with no choice of priority or lane through the common helpers.
 
 ## 2. Exceptions
 
@@ -273,9 +274,10 @@ using async_kernel = std::function<value_t(async_call &call)>;
 using async_marshal = std::function<async_kernel(std::span<const value_t> args)>;
 
 struct async_options {
-  executor where = executor::compute;  // compute, io, or a named lane
-  std::optional<double> timeout;       // seconds; past it the call raises TimeoutError
-  bool future_variant = true;          // also register "<name>-async", which returns a future
+  executor where = executor::background;     // the app's background task pool, or a named lane
+  thread_priority priority = PRIORITY_NORMAL; // its place in the background pool's queue
+  std::optional<double> timeout;             // seconds; past it the call raises TimeoutError
+  bool future_variant = true;                // also register "<name>-async", which returns a future
 };
 
 void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
@@ -325,10 +327,29 @@ with `ok: #f`, still returns that as a value; only a thrown error is an exceptio
 
 ### 3.5 Where the work runs
 
-- **`executor::compute`:** the app's compute pool, for CPU-bound work (volume and mesh
-  kernels). This is the default.
-- **`executor::io`:** a separate bounded pool for blocking I/O (files, network), so a slow
-  request can't starve the compute pool (new in P3).
+The app has two pools, and an async kernel uses the first:
+
+- **The background task pool** (`app::startThreadPooled`, which `compute_async` uses today):
+  - a queue of whole tasks, with priorities, bounded to `setThreadPoolSize` threads (the core
+    count by default);
+  - every async kernel runs here, CPU-bound or blocking (`executor::background`, the default);
+  - a blocking request holds one of its threads while it waits, and nothing else.
+- **The fork-join compute pool** (`app::computePool()`):
+  - render, simulation and nav fan-outs share it through `parallel_for`;
+  - a CPU-heavy kernel fans out through it the same way (a volume filter splitting its
+    slabs), so a kernel's parallelism comes from the same workers as everyone else's;
+  - a kernel never runs on its workers as a whole task, so a slow kernel can't stall a frame's
+    `parallel_for`.
+
+So blocking I/O doesn't get a pool of its own:
+- the compute pool never sees it;
+- in the background pool it only takes a thread out of the rotation.
+
+The cost is that enough slow requests in flight at once can delay other async kernels until a
+thread frees. If that shows up in practice, the fix is a cap on how many blocking kernels run at
+once, in the same pool (a registration option), or a larger pool. A second pool isn't needed.
+
+Other places a kernel can run:
 - **A named `async_lane`:** for work that must stay on one thread.
 - **No executor** (the sync scheduler, a bare evaluator, a unit test's inline executor): the
   kernel runs inline in the step. The value or exception is the same, and the step blocks.
@@ -379,7 +400,7 @@ it; a full queue drops progress values first.
 | P0 | This spec and the test list (section 6) | merged |
 | P1 | The forms (`raise`, `error`, `try`/`catch`/`finally`, `isinstance`), `__name__` on classes, the built-in classes, the evaluator's and builtins' errors thrown with their class, C++ exception mapping, `cause`/`origin`/`traceback`, all of 2.4 in the stackless evaluator, the same in the recursive evaluator, codec support | EX and UN cases pass in both evaluators |
 | P2 | Leaving the program: `failed`, `exit_exception`, `dsl_exception`, both schedulers, Ariadne reporting; `PythonError` from registered Python functions, pycvc `dsl_error` and `dsl_class`, the round trip | CX and PY cases pass |
-| P3 | Async: `async_host`, `register_async_fn` (C++ and pycvc), the `await_call` frame, futures with timeouts and `await-all`, errors as exceptions, executors (with the new I/O pool), cancellation, progress, `Exec` and Ariadne moved onto it | AS cases pass |
+| P3 | Async: `async_host`, `register_async_fn` (C++ and pycvc), the `await_call` frame, futures with timeouts and `await-all`, errors as exceptions, executors (the background pool with priorities, lanes, inline), cancellation, progress, `Exec` and Ariadne moved onto it | AS cases pass |
 | P4 | pycvc parity for the new API, `docs/STATE_EXEC_DEVELOPER_GUIDE.md` and `ARIADNE.md` | the parity doc lists every new item |
 
 ## 5. Compatibility
@@ -494,7 +515,7 @@ them into gtest and pytest cases with these IDs.
 | AS-8 | registration timeout 0.05 s on a 1 s kernel | `TimeoutError` at the call site; the kernel sees `cancelled()` |
 | AS-9 | the process killed while parked | `killed`; the kernel sees `cancelled()`; its result is dropped |
 | AS-10 | host teardown with a kernel in flight | teardown waits; no use after free (run under the sanitizers) |
-| AS-11 | an `executor::io` kernel blocked on a sleep while compute kernels run | compute kernels aren't delayed |
+| AS-11 | a kernel blocked on a sleep while another thread runs `computePool().parallel_for` | the fan-out isn't delayed (kernels never occupy compute workers) |
 | AS-12 | on the sync scheduler and a bare evaluator | the kernel runs inline; the same value and exceptions |
 | AS-13 | progress posted by the kernel | `msg-recv` on `<name>.progress` receives it |
 | AS-14 | a list argument changed by the program after the call starts | the kernel saw the copy |
@@ -502,14 +523,37 @@ them into gtest and pytest cases with these IDs.
 | AS-16 | `Exec.register_async_fn` raising | raises at the call site, no `__async_error__` dict (the compatibility change) |
 | AS-17 | an async function called from Ariadne's reactive lane | not reachable (action seam only); if called, `RuntimeError` |
 
-## 7. Open questions
+## 7. Settled questions
 
-These have proposed answers above; confirm or change them before P1/P3 build on them:
+P0 opened with five open questions. They are settled as follows (2026-10-18):
 
-1. `failed` as a new `process_status` (2.6), rather than `killed` with an exception attached.
-2. Signal handlers raising into the interrupted program (2.4), the way Python's do. The
-   alternative is ending the process.
-3. The sync scheduler no longer throwing a program's error out of `run()` (5.1).
-4. The I/O pool as a new executor (3.5), rather than reusing a named lane.
-5. `await-all` waiting for every future before raising (3.3), rather than cancelling the rest
-   at the first failure.
+1. **`failed` is a new `process_status`** (2.6).
+   - Alternative: `killed` with an exception attached.
+   - Why: an error in the program and a stop by the host or a budget are different outcomes.
+     A host restarts or reports the first and accepts the second, and `get_stats` and
+     `list_processes` should count them apart. One enum value is cheaper than every host
+     checking whether `exit_exception` is set.
+2. **A signal handler's uncaught exception is raised in the interrupted program** (2.4), at
+   the point it was interrupted, as Python does with signals.
+   - Alternative: end the process.
+   - Why: a handler runs as if called at that point, so its errors belong there. It lets a
+     program turn a signal into a catchable exception (an interrupt it cleans up after) instead
+     of losing the process. Watch handlers follow the same rule.
+3. **The sync scheduler no longer throws a program's error out of `run()`/`step()`** (5.1).
+   The process ends `failed` with `exit_exception`, as on the async scheduler.
+   - Why: today it throws and leaves the process `running`, so the next `run()` throws again.
+     The two schedulers should agree.
+   - C++ that wants an exception can call `evaluate`, which throws `dsl_exception`, or read
+     `get_exit_exception`.
+4. **There's no separate I/O pool** (3.5).
+   - Async kernels run on the app's background task pool, which is already separate from the
+     fork-join compute pool frames use, bounded, and prioritized.
+   - A blocking request only takes a background thread out of the rotation; the compute pool
+     never sees it.
+   - If slow requests are found to starve other kernels, a cap on concurrent blocking kernels
+     in that pool comes first.
+5. **`await-all` waits for every future, then raises the first failure in list order** (3.3).
+   It doesn't cancel the rest or raise at the first failure in time.
+   - Why: the error reported is then the same however the timing falls, which keeps programs
+     and their tests deterministic, and no work is left running unseen.
+   - A program that wants to stop early awaits the futures one by one.
