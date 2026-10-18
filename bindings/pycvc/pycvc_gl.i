@@ -66,6 +66,11 @@ if _sys.platform == "win32":
 #include <cvc/gl/StageLighting.h>  // cinematic lighting rig (state_object)
 #include <cvc/gl/ScreenTextHud.h>  // screen-space text overlay (state_object)
 #include <cvc/image/image.h> // GeometryNode::setTexture(const cvc::image&) — image %import'd from pycvc.i
+// pycvc_world.i's types, %import'd from pycvc.i: SWIG's type table casts a
+// height_field to its geometry base here too, so the class must be declared.
+#include <cvc/geometry/height_field.h>
+#include <cvc/world/city_bundle.h>
+#include <cvc/world/world_geometry.h>
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
 // vtkmodules objects. From the vtk-python cvcpkg package (vtkPythonUtil.h lands

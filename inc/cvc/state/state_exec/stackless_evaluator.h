@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/parser.h> // parse_options
 #include <cvc/state/state_exec/types.h>
@@ -64,6 +65,16 @@ struct eval_frame {
   environment_ptr extra_env;
 };
 
+/// Deep-data work a step left unfinished (data_options::step_nodes): a native call's job (its
+/// frame waits in the apply phase) or the expansion of a macro call (its frame waits to be
+/// re-initialized with it).
+struct pending_data_work {
+  enum class kind { native_call, macro_expansion };
+  std::unique_ptr<data_job> job;
+  std::function<value_t(value_t)> then; // native_call: turns the job's result into the call's
+  kind what = kind::native_call;
+};
+
 /// Serializable evaluator state — the entire execution snapshot.
 struct evaluator_state {
   std::vector<eval_frame> stack;
@@ -77,6 +88,17 @@ struct evaluator_state {
   /// Set while the script is still being read, a slice per step (parse_options::step_tokens);
   /// step() reads instead of evaluating until the whole script is read.
   std::shared_ptr<script_reader> reading;
+  /// How many nodes of deep-data work a step may do (data_options::step_nodes; a scheduler sets
+  /// it). 0 does all of it in the step that needs it.
+  std::size_t data_step_nodes = 0;
+  /// Set while deep-data work runs a slice per step; step() runs it instead of evaluating until
+  /// it is done, then completes what started it. Not serialized: after a restore the waiting
+  /// call or macro expansion simply runs again.
+  std::shared_ptr<pending_data_work> data_work;
+  /// Last owners this state's steps dropped and have not freed yet (data_step_nodes > 0); each
+  /// step frees them with what is left of its slice, and steps that only free them follow
+  /// while any are left.
+  std::shared_ptr<detail::release_backlog> backlog;
 };
 
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
@@ -147,6 +169,12 @@ private:
   evaluator_state create_program_state(std::vector<value_t> forms, environment_ptr env);
   // One step of a state that is still reading its script (evaluator_state::reading).
   bool step_read(evaluator_state &state);
+  // One step of deep-data work left unfinished (evaluator_state::data_work).
+  bool step_data(evaluator_state &state);
+  // Re-initialize the top frame to evaluate a macro call's expansion.
+  void begin_expansion(evaluator_state &state, value_t expansion);
+  // One evaluation step of the top frame.
+  void step_frame(evaluator_state &state);
 
   // Frame management
   void pop_frame(evaluator_state &state, value_t result);
@@ -175,7 +203,6 @@ private:
   void call_closure(evaluator_state &state, eval_frame &frame, const closure_ptr &cls,
                     const std::vector<value_t> &args);
   void handle_defclass(evaluator_state &state, eval_frame &frame, const std::vector<value_t> &args);
-  value_t substitute(const value_t &tmpl, const std::unordered_map<std::string, value_t> &subst);
 
   environment_ptr global_env_;
   std::shared_ptr<const std::set<std::string>>

@@ -77,16 +77,59 @@ namespace detail {
 /// plain shared_ptr destructors takes a native stack frame per level and overflows the stack.
 /// Here the first release on a thread runs a loop: owners dropped while it frees something
 /// (that thing's elements, bindings, enclosing scope) are queued and freed one at a time by the
-/// loop, so the stack stays a few frames deep whatever the depth.
-void release_nested(std::shared_ptr<void> owner) noexcept;
+/// loop, so the stack stays a few frames deep whatever the depth. `nodes` is what freeing it
+/// costs as deep-data work: 1, plus a list's or dict's elements.
+void release_nested(std::shared_ptr<void> owner, std::size_t nodes = 1) noexcept;
 
 /// Drop `owner` through release_nested when it is the last one; dropping any other owner only
 /// decrements a count. (Should another thread drop the last but one meanwhile, this drop frees
 /// the storage inline, and its elements start releases of their own: a few frames, still.)
 template <class T> void drop_owner(std::shared_ptr<T> &owner) noexcept {
-  if (owner && owner.use_count() == 1)
-    release_nested(std::move(owner));
+  if (!owner || owner.use_count() != 1)
+    return;
+  std::size_t nodes = 1;
+  if constexpr (std::is_same_v<T, std::vector<value_tag>> ||
+                std::is_same_v<T, std::vector<std::pair<std::string, value_tag>>>)
+    nodes += owner->size();
+  release_nested(std::move(owner), nodes);
 }
+
+/// Last owners dropped while a slicing process step runs (data.step_nodes > 0) and not freed
+/// yet. While a backlog_scope routes drops here, release_nested() queues a last owner instead of
+/// freeing it, and the step frees them a slice at a time: freeing a huge value then counts
+/// against the process's budget and spreads over its steps instead of stalling one. (A single
+/// owner is freed whole: a flat list of a million numbers is one free.)
+class release_backlog {
+public:
+  release_backlog() = default;
+  ~release_backlog(); // frees what is left, iteratively like any release
+  release_backlog(const release_backlog &) = delete;
+  release_backlog &operator=(const release_backlog &) = delete;
+
+  bool empty() const { return owners_.empty(); }
+
+  /// Free owners until their nodes reach `budget` (0: until none are left). Owners dropped by
+  /// that freeing join the backlog. Returns the nodes freed.
+  std::size_t drain(std::size_t budget);
+
+private:
+  friend void release_nested(std::shared_ptr<void>, std::size_t) noexcept;
+  std::vector<std::pair<std::shared_ptr<void>, std::size_t>> owners_;
+};
+
+/// RAII: while alive, last owners this thread drops join `backlog` instead of being freed on the
+/// spot. A null backlog changes nothing (an outer scope, if any, keeps routing). Scopes nest.
+class backlog_scope {
+public:
+  explicit backlog_scope(release_backlog *backlog);
+  ~backlog_scope();
+  backlog_scope(const backlog_scope &) = delete;
+  backlog_scope &operator=(const backlog_scope &) = delete;
+
+private:
+  release_backlog *outer_;
+  bool armed_;
+};
 } // namespace detail
 
 /// The DSL value variant.  All runtime values are represented as value_t.

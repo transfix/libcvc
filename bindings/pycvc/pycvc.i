@@ -1208,6 +1208,12 @@ struct pycvc_py_conversion {
 // PYCVC_DEFAULT_EXCEPTION at its end.
 %include "pycvc_lod.i"
 
+// ── The world's one representation: height_field, world_geometry, city bundles ─
+// The same terrain, buildings and surface table the renderer, the physics world
+// and the navigator read in C++ (WORLD-GEOMETRY-ROADMAP.md, G4b). After geometry
+// (height_field derives from it) and pycvc_nav.i (land cover is cvc::nav's).
+%include "pycvc_world.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -1442,9 +1448,12 @@ class AsyncStateObserver(state_observer):
 // cvc::state&, Python passes a State (State.instance(app) is the root). Only
 // the declarations below are visible to SWIG; the parity doc lists what is
 // wrapped, what comes next, and what is deliberately not wrapped (the
-// coroutine API, the string_view-based parser class, ...).
+// coroutine API, the string_view-based parser class, ...). The deep-data
+// settings (data_options, data_options_from_state, "Deep data on the
+// executor") are wrapped the same way as the parser settings.
 %{
 #include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>
@@ -1803,9 +1812,15 @@ struct parse_options {
   size_t max_depth;   // lists and quotes that may nest (default 256)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
 };
+struct data_options {
+  size_t step_nodes; // 0: deep-data work in the step that needs it; N: N nodes per step
+};
 parse_options parse_options_from_state(cvc::state &root,
                                        const std::string &scheduler_id = std::string(),
                                        const parse_options &base = parse_options());
+data_options data_options_from_state(cvc::state &root,
+                                      const std::string &scheduler_id = std::string(),
+                                      const data_options &base = data_options());
 value_t parse(const std::string &input, const parse_options &opts = parse_options());
 std::vector<value_t> parse_all(const std::string &input,
                                const parse_options &opts = parse_options());
@@ -1831,6 +1846,7 @@ value_t decode_value(cvc::state &node);
 class async_scheduler {
 public:
   static parse_options host_parser_defaults();
+  static data_options host_data_defaults();
 };
 }
 }

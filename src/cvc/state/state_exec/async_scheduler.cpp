@@ -46,6 +46,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   const parse_options popts =
       watch_root_ ? parse_options_from_state(*watch_root_, {}, parser_defaults_) : parser_defaults_;
   proc.state = evaluator_.create_state(script, opts.env, popts);
+  proc.state.data_step_nodes = data_settings().step_nodes;
   proc.state.stats.start();
   processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
   return pid;
@@ -75,6 +76,7 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
   proc.state = evaluator_.create_state(expr, opts.env);
+  proc.state.data_step_nodes = data_settings().step_nodes;
   proc.state.stats.start();
   processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
   return pid;
@@ -148,9 +150,11 @@ void async_scheduler::execute_process_step(process &proc) {
   } reset_guard{current_pid_, current_proc_};
 
   // A process still reading its script (parser.step_tokens) takes signals and watch events once
-  // the script is read: their handlers run on the evaluation stack, which doesn't exist yet.
-  const bool can_interrupt =
-      !proc.in_signal_handler && !proc.in_watch_handler && !proc.state.reading;
+  // the script is read: their handlers run on the evaluation stack, which doesn't exist yet. One
+  // in the middle of deep-data work (data.step_nodes) takes them once that is done: the work's
+  // call frame waits on top of the stack.
+  const bool can_interrupt = !proc.in_signal_handler && !proc.in_watch_handler &&
+                             !proc.state.reading && !proc.state.data_work;
 
   if (!proc.pending_signals.empty() && can_interrupt) {
     handle_signal(proc);
@@ -164,6 +168,7 @@ void async_scheduler::execute_process_step(process &proc) {
 
   proc.status = process_status::running;
   proc.last_run_start = std::chrono::steady_clock::now();
+  const auto step_start = proc.last_run_start;
 
   // Arm the cooperative deadline for this step so an uncapped nested evaluator or a
   // long-running builtin aborts at the process's remaining time budget too — the same
@@ -215,6 +220,8 @@ void async_scheduler::execute_process_step(process &proc) {
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
   if (charge_cpu)
     proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
+  // Charge the step's time to what it was spent on (eval, read or data).
+  proc.state.stats.add_step_time(std::chrono::duration<double>(now - step_start).count());
 
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
     restore_from_signal(proc);
@@ -720,6 +727,7 @@ int async_scheduler::fork(int pid) {
   child->state.done = parent.state.done;
   child->state.stack = parent.state.stack;
   child->state.user_macros = parent.state.user_macros;
+  child->state.data_step_nodes = parent.state.data_step_nodes;
   auto child_env = std::make_shared<environment>();
   if (parent.state.global_env) {
     child_env->bindings = parent.state.global_env->bindings;
@@ -800,6 +808,7 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.uid = proc.uid;
   info.gid = proc.gid;
   info.step_count = proc.step_count();
+  fill_budget_usage(info, proc.state.stats);
   info.elapsed_time = proc.elapsed_time();
   info.current_memory = mem_tracker_.current_bytes(proc.pid);
   info.peak_memory = mem_tracker_.peak_bytes(proc.pid);
