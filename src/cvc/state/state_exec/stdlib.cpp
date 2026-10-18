@@ -61,6 +61,21 @@ const std::vector<value_t> &as_list(const value_t &v, const char *name) {
   throw std::runtime_error(std::string(name) + ": expected list, got " + v.type_name());
 }
 
+// Allocation estimates for eval_alloc_check(), saturating so a huge count never wraps small.
+std::size_t sat_add(std::size_t a, std::size_t b) { return a > SIZE_MAX - b ? SIZE_MAX : a + b; }
+
+// One list of n elements: the vector, make_list's shared control block, and the elements.
+std::size_t list_bytes(std::size_t n) {
+  return sat_add(sizeof(std::vector<value_t>) + 2 * sizeof(void *),
+                 alloc_bytes(n, sizeof(value_t)));
+}
+
+// Long loops inside one native call honour the evaluation deadline (see collect in builtins.cpp).
+void poll_deadline(const char *name) {
+  if (eval_deadline_expired())
+    throw std::runtime_error(std::string(name) + ": evaluation exceeded time budget");
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -74,7 +89,17 @@ void stdlib_registry::register_string_module() {
     std::string delim = " ";
     if (args.size() > 1)
       delim = as_string(args[1], "string.split");
+    // Every part costs a list element, so many short parts outgrow the string: count first.
+    std::size_t count = 1;
+    if (delim.empty())
+      count = utf8::count(s);
+    else
+      for (auto pos = s.find(delim); pos != std::string::npos;
+           pos = s.find(delim, pos + delim.size()))
+        ++count;
+    eval_alloc_check(sat_add(list_bytes(count), s.size()), "string.split");
     std::vector<value_t> parts;
+    parts.reserve(count);
     if (delim.empty()) {
       // SE-1 (A3): split into CODEPOINTS, not bytes — each element is one whole UTF-8 codepoint,
       // so a multibyte character is never shredded into invalid fragments.
@@ -105,7 +130,12 @@ void stdlib_registry::register_string_module() {
     expect_exact(args, 2, "string.join");
     auto &lst = as_list(args[0], "string.join");
     auto &sep = as_string(args[1], "string.join");
+    std::size_t total = lst.empty() ? 0 : alloc_bytes(lst.size() - 1, sep.size());
+    for (const value_t &item : lst)
+      total = sat_add(total, as_string(item, "string.join").size());
+    eval_alloc_check(total, "string.join");
     std::string result;
+    result.reserve(total);
     for (size_t i = 0; i < lst.size(); ++i) {
       if (i > 0)
         result += sep;
@@ -116,17 +146,29 @@ void stdlib_registry::register_string_module() {
 
   register_function("string", "string.replace", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 3, "string.replace");
-    auto s = as_string(args[0], "string.replace");
+    auto &s = as_string(args[0], "string.replace");
     auto &from = as_string(args[1], "string.replace");
     auto &to = as_string(args[2], "string.replace");
     if (from.empty())
-      return value_t(std::move(s));
-    size_t pos = 0;
-    while ((pos = s.find(from, pos)) != std::string::npos) {
-      s.replace(pos, from.size(), to);
-      pos += to.size();
+      return value_t(s);
+    // Non-overlapping matches, left to right. A longer `to` multiplies the size: count first.
+    std::size_t count = 0;
+    for (auto pos = s.find(from); pos != std::string::npos; pos = s.find(from, pos + from.size()))
+      ++count;
+    if (count == 0)
+      return value_t(s);
+    const std::size_t size = sat_add(s.size() - count * from.size(), alloc_bytes(count, to.size()));
+    eval_alloc_check(size, "string.replace");
+    std::string out;
+    out.reserve(size);
+    std::size_t start = 0;
+    for (auto pos = s.find(from); pos != std::string::npos; pos = s.find(from, start)) {
+      out.append(s, start, pos - start);
+      out += to;
+      start = pos + from.size();
     }
-    return value_t(std::move(s));
+    out.append(s, start);
+    return value_t(std::move(out));
   });
 
   register_function("string", "string.trim", [](std::span<const value_t> args) -> value_t {
@@ -294,7 +336,12 @@ void stdlib_registry::register_bytes_module() {
   });
 
   register_function("bytes", "bytes.concat", [](std::span<const value_t> args) -> value_t {
+    std::size_t total = 0;
+    for (const value_t &a : args)
+      total = sat_add(total, as_bytes(a, "bytes.concat").size());
+    eval_alloc_check(total, "bytes.concat");
     std::string out;
+    out.reserve(total);
     for (const value_t &a : args)
       out += as_bytes(a, "bytes.concat");
     return make_bytes(std::move(out));
@@ -470,6 +517,7 @@ void stdlib_registry::register_collections_module() {
     auto &a = as_list(args[0], "collections.zip");
     auto &b = as_list(args[1], "collections.zip");
     size_t n = std::min(a.size(), b.size());
+    eval_alloc_check(sat_add(list_bytes(n), alloc_bytes(n, list_bytes(2))), "collections.zip");
     std::vector<value_t> result;
     result.reserve(n);
     for (size_t i = 0; i < n; ++i) {
@@ -482,7 +530,16 @@ void stdlib_registry::register_collections_module() {
                     [](std::span<const value_t> args) -> value_t {
                       expect_exact(args, 1, "collections.flatten");
                       auto &lst = as_list(args[0], "collections.flatten");
+                      // The same sublist may appear many times, so the result can outgrow the
+                      // argument: count the elements first.
+                      std::size_t total = 0;
+                      for (auto &item : lst) {
+                        auto *sub = std::get_if<list_ptr>(&item.v);
+                        total = sat_add(total, sub ? (**sub).size() : 1);
+                      }
+                      eval_alloc_check(list_bytes(total), "collections.flatten");
                       std::vector<value_t> result;
+                      result.reserve(total);
                       for (auto &item : lst) {
                         if (auto *sub = std::get_if<list_ptr>(&item.v)) {
                           for (auto &x : **sub)
@@ -529,30 +586,38 @@ void stdlib_registry::register_collections_module() {
                       return make_list(std::move(elems));
                     });
 
-  register_function("collections", "collections.range",
-                    [](std::span<const value_t> args) -> value_t {
-                      expect_min(args, 1, "collections.range");
-                      int64_t start = 0, stop, step = 1;
-                      if (args.size() == 1) {
-                        stop = as_int(args[0], "collections.range");
-                      } else {
-                        start = as_int(args[0], "collections.range");
-                        stop = as_int(args[1], "collections.range");
-                        if (args.size() > 2)
-                          step = as_int(args[2], "collections.range");
-                      }
-                      if (step == 0)
-                        throw std::runtime_error("collections.range: step cannot be zero");
-                      std::vector<value_t> result;
-                      if (step > 0) {
-                        for (int64_t i = start; i < stop; i += step)
-                          result.emplace_back(i);
-                      } else {
-                        for (int64_t i = start; i > stop; i += step)
-                          result.emplace_back(i);
-                      }
-                      return make_list(std::move(result));
-                    });
+  register_function(
+      "collections", "collections.range", [](std::span<const value_t> args) -> value_t {
+        expect_min(args, 1, "collections.range");
+        int64_t start = 0, stop, step = 1;
+        if (args.size() == 1) {
+          stop = as_int(args[0], "collections.range");
+        } else {
+          start = as_int(args[0], "collections.range");
+          stop = as_int(args[1], "collections.range");
+          if (args.size() > 2)
+            step = as_int(args[2], "collections.range");
+        }
+        if (step == 0)
+          throw std::runtime_error("collections.range: step cannot be zero");
+        // Count the elements in unsigned arithmetic (no signed overflow at the
+        // int64 ends), check the size, then build: element k is start + k*step.
+        const uint64_t ustart = static_cast<uint64_t>(start);
+        const uint64_t ustop = static_cast<uint64_t>(stop);
+        const uint64_t ustep = static_cast<uint64_t>(step);
+        uint64_t count = 0;
+        if (step > 0 && start < stop)
+          count = (ustop - ustart - 1) / ustep + 1;
+        else if (step < 0 && start > stop)
+          count = (ustart - ustop - 1) / (0 - ustep) + 1;
+        eval_alloc_check(count > SIZE_MAX ? SIZE_MAX : list_bytes(static_cast<size_t>(count)),
+                         "collections.range");
+        std::vector<value_t> result;
+        result.reserve(static_cast<size_t>(count));
+        for (uint64_t k = 0; k < count; ++k)
+          result.emplace_back(static_cast<int64_t>(ustart + k * ustep));
+        return make_list(std::move(result));
+      });
 
   register_function("collections", "collections.unique",
                     [](std::span<const value_t> args) -> value_t {
@@ -560,6 +625,7 @@ void stdlib_registry::register_collections_module() {
                       auto &lst = as_list(args[0], "collections.unique");
                       std::vector<value_t> result;
                       for (auto &item : lst) {
+                        poll_deadline("collections.unique"); // quadratic in the list length
                         bool found = false;
                         for (auto &r : result) {
                           if (values_equal(r, item)) {
@@ -606,10 +672,14 @@ void stdlib_registry::register_collections_module() {
         auto *d2 = std::get_if<dict_ptr>(&args[1].v);
         if (!d1 || !d2)
           throw std::runtime_error("collections.dict-merge: expected two dicts");
+        eval_alloc_check(
+            alloc_bytes((**d1).size() + (**d2).size(), sizeof(std::pair<std::string, value_t>)),
+            "collections.dict-merge");
         // Start with copy of d1
         auto result = std::make_shared<std::vector<std::pair<std::string, value_t>>>(**d1);
         // Merge d2: update existing keys, append new ones
         for (auto &[k, v] : **d2) {
+          poll_deadline("collections.dict-merge"); // quadratic in the dict sizes
           bool found = false;
           for (auto &[rk, rv] : *result) {
             if (rk == k) {
@@ -634,6 +704,25 @@ stdlib_registry::stdlib_registry() {
   register_bytes_module();
   register_math_module();
   register_collections_module();
+}
+
+const stdlib_registry &stdlib_registry::standard() {
+  static const stdlib_registry registry;
+  return registry;
+}
+
+environment_ptr stdlib_registry::shared_scope() {
+  // Built once (thread-safe static init) and never written again: frozen, so set_existing()
+  // shadows a stdlib name in the caller's scope instead of writing here.
+  static const environment_ptr scope = [] {
+    auto env = std::make_shared<environment>();
+    const stdlib_registry &reg = standard();
+    for (const std::string &module : reg.list_modules())
+      reg.import_module(module, env);
+    env->frozen = true;
+    return env;
+  }();
+  return scope;
 }
 
 void stdlib_registry::register_function(const std::string &module, const std::string &func_name,

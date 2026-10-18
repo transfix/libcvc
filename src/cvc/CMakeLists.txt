@@ -21,6 +21,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/dimension.h
   ../../inc/cvc/volume/voxels.h
   ../../inc/cvc/geometry/geometry.h
+  ../../inc/cvc/geometry/height_field.h
   ../../inc/cvc/geometry/simplify.h
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
@@ -54,6 +55,15 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/world_clock.h
   ../../inc/cvc/core/world_units.h
   ../../inc/cvc/core/unit_registry.h
+  ../../inc/cvc/physics/types.h
+  ../../inc/cvc/physics/shape.h
+  ../../inc/cvc/physics/field.h
+  ../../inc/cvc/physics/body.h
+  ../../inc/cvc/physics/backend.h
+  ../../inc/cvc/physics/world.h
+  ../../inc/cvc/physics/world_binding.h
+  ../../inc/cvc/physics/world_geometry.h
+  ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -140,6 +150,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/lsys/cloud.h
   ../../inc/cvc/lsys/water.h
   ../../inc/cvc/world/surface.h
+  ../../inc/cvc/world/world_geometry.h
+  ../../inc/cvc/world/city_bundle.h
   ../../inc/cvc/world/grid.h
   ../../inc/cvc/world/heightfield.h
   ../../inc/cvc/world/scatter.h
@@ -167,6 +179,7 @@ set(SOURCE_FILES
   volume/cvcraw_io.cpp
   processing/gdtv_filter.cpp
   geometry/geometry.cpp
+  geometry/height_field.cpp
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
   geometry/fem.cpp
@@ -208,6 +221,12 @@ set(SOURCE_FILES
   core/world_clock_binding.cpp
   core/world_units.cpp
   core/unit_registry.cpp
+  physics/world.cpp
+  physics/field_step.cpp
+  physics/null_backend.cpp
+  physics/world_binding.cpp
+  physics/world_geometry.cpp
+  physics/pose_tracker.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -248,10 +267,13 @@ set(SOURCE_FILES
   nav/drive.cpp
   nav/material.cpp
   nav/material_raster.cpp
+  nav/world_planes.cpp
+  nav/land_cover.cpp
   nav/coef_energy_net.cpp
   nav/coef_energy_net_backward.cpp
   nav/coef_energy_net_io.cpp
   nav/material_rollout.cpp
+  nav/material_bike_rollout.cpp
   nav/material_train.cpp
   nav/geom_rollout.cpp
   nav/coef_mlp.cpp
@@ -286,6 +308,8 @@ set(SOURCE_FILES
   lsys/cloud.cpp
   lsys/water.cpp
   world/surface.cpp
+  world/world_geometry.cpp
+  world/city_bundle.cpp
   world/heightfield.cpp
   world/scatter.cpp
   world/roads.cpp
@@ -343,10 +367,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -369,6 +393,18 @@ if(NOT MSVC)
 else()
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
                               world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
+# cvc::physics is deterministic by contract: a run's state_hash must reproduce on
+# every target when the backend is cross-platform deterministic. No FMA
+# contraction in the facade and the null backend, as for nav and world above; the
+# Jolt backend TU gets the same flag on its own target (below).
+if(NOT MSVC)
+  set_source_files_properties(physics/world.cpp physics/null_backend.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(physics/world.cpp physics/null_backend.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -417,6 +453,7 @@ option(CVC_GEOMETRY_CORRECT_INDEX_START "Adjust indices if they start from 1 rat
 option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
+option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # XMLRPC support
 if(CVC_USING_XMLRPC)
@@ -1234,6 +1271,19 @@ if(CVC_ENABLE_LIBIGL)
   endif()
 endif()
 
+# Jolt Physics behind cvc::physics (docs/roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md).
+# Found as a CMake package; without it the facade builds with the null backend
+# only, and a world asking for Jolt throws cvc::unsupported_exception.
+if(CVC_WITH_JOLT)
+  find_package(Jolt CONFIG QUIET)
+  if(TARGET Jolt::Jolt)
+    message(STATUS "Jolt ${Jolt_VERSION} found - cvc::physics Jolt backend ENABLED")
+  else()
+    message(STATUS "Jolt not found - cvc::physics has the null backend only (CVC_WITH_JOLT OFF)")
+    set(CVC_WITH_JOLT OFF)
+  endif()
+endif()
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
@@ -1244,6 +1294,27 @@ add_library(cvc::cvc ALIAS cvc)
 # the list is dropped before the config is generated. Append the package name
 # wherever such a link is added below.
 set(CVC_PRIVATE_LINK_PACKAGES "")
+
+# taocpp/PEGTL 3.x (header-only, MIT): the grammar engine for the state_exec
+# s-expression reader. Its rules go in the private
+# src/cvc/state/state_exec/grammar.h, so PEGTL is needed only to compile cvc.
+# Linked as $<BUILD_INTERFACE:...>, it adds an include path to cvc's own build
+# and nothing to the exported target, SHARED or STATIC: it is not in
+# CVC_PRIVATE_LINK_PACKAGES, and consumers never need PEGTL. "3.2" also refuses
+# PEGTL 4 (its version file is SameMajorVersion), whose API differs.
+find_package(pegtl 3.2 CONFIG REQUIRED)
+target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:taocpp::pegtl>)
+# That only holds while no installed header includes PEGTL, so check it here.
+file(GLOB_RECURSE _cvc_installed_headers "${PROJECT_SOURCE_DIR}/inc/*")
+foreach(_cvc_h IN LISTS _cvc_installed_headers)
+  file(STRINGS "${_cvc_h}" _cvc_pegtl_include REGEX "^[ \t]*#[ \t]*include[ \t]*[<\"]tao/pegtl")
+  if(_cvc_pegtl_include)
+    message(FATAL_ERROR
+      "${_cvc_h} includes PEGTL, but inc/ is installed and PEGTL is a build-only "
+      "dependency of libcvc. Keep PEGTL in private headers under src/ "
+      "(src/cvc/state/state_exec/grammar.h).")
+  endif()
+endforeach()
 
 # Ariadne .ari YAML loader — OPTIONAL. yaml-cpp is a light, header+lib dependency;
 # when present, ariadne/loader.cpp compiles the real parser (CVC_ARIADNE_HAVE_YAML);
@@ -1511,6 +1582,66 @@ if(CVC_ENABLE_LIBIGL)
     target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_igl>)
   else()
     target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_igl>)
+  endif()
+endif()
+
+# Jolt behind cvc::physics, in the same shape as cvc_igl above and for the same
+# reasons. physics/jolt/jolt_backend.cpp is its own target, cvc_physics_jolt, with
+# Jolt::Jolt linked PRIVATE. Jolt's JPH_* compile definitions (determinism, the
+# debug renderer, the DLL import macro) therefore reach that one TU only: never
+# cvc's other sources, and never a consumer. No public header names Jolt, and
+# CVC_WITH_JOLT is a PRIVATE definition; a program asks available_backends() at
+# run time. Hidden visibility keeps the JPH template instantiations out of
+# cvc.dll's export table and libcvc.so's dynamic symbols.
+#  - SHARED cvc: cvc_physics_jolt is a private STATIC archive linked into cvc, and
+#    Jolt is a link dependency of cvc alone.
+#  - STATIC cvc (wasm, or BUILD_SHARED_LIBS=OFF): an OBJECT library whose objects
+#    go into libcvc.a. A consumer then links libJolt too, so Jolt joins
+#    CVC_PRIVATE_LINK_PACKAGES and cvcConfig.cmake finds it.
+# The TU sees only the std-only cvc/physics headers (and backend_impl.h). It gets
+# the deterministic modules' floating-point flag, so the facade's double <-> float
+# conversions round alike on every target.
+if(CVC_WITH_JOLT)
+  target_compile_definitions(cvc PRIVATE CVC_WITH_JOLT)
+  get_target_property(_cvc_type cvc TYPE)
+  if(_cvc_type STREQUAL "SHARED_LIBRARY")
+    set(_cvc_jolt_kind STATIC)
+  else()
+    set(_cvc_jolt_kind OBJECT)
+  endif()
+  add_library(cvc_physics_jolt ${_cvc_jolt_kind} physics/jolt/jolt_backend.cpp
+    physics/jolt/jolt_material.cpp)
+  set_target_properties(cvc_physics_jolt PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  target_include_directories(cvc_physics_jolt PRIVATE ${PROJECT_SOURCE_DIR}/inc)
+  target_compile_definitions(cvc_physics_jolt PRIVATE CVC_WITH_JOLT)
+  target_compile_features(cvc_physics_jolt PRIVATE cxx_std_17)
+  target_link_libraries(cvc_physics_jolt PRIVATE Jolt::Jolt)
+  # Jolt is built without RTTI, and JPH::PhysicsMaterial's key function is in
+  # libJolt, so its typeinfo exists nowhere. cvc_material subclasses it; its vtable
+  # is emitted in jolt_material.cpp, the one file built with -fno-rtti, so nothing
+  # references the missing typeinfo ("undefined reference to typeinfo for
+  # JPH::PhysicsMaterial" otherwise). Only that file: a no-RTTI file that throws
+  # std exceptions emits weak copies of their typeinfo, which on macOS bind every
+  # reference in libcvc.dylib and break exception and boost::any matching across
+  # the library boundary (see jolt_material.h). Jolt's other bases here have only
+  # inline virtuals, so their typeinfo is emitted where it is used. MSVC emits its
+  # RTTI records in the referencing file and needs neither switch.
+  if(MSVC)
+    target_compile_options(cvc_physics_jolt PRIVATE /fp:precise)
+  else()
+    target_compile_options(cvc_physics_jolt PRIVATE -ffp-contract=off)
+    set_source_files_properties(physics/jolt/jolt_material.cpp PROPERTIES
+      COMPILE_OPTIONS -fno-rtti)
+  endif()
+  if(_cvc_jolt_kind STREQUAL "STATIC")
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_physics_jolt>)
+  else()
+    target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_physics_jolt>)
+    target_link_libraries(cvc PRIVATE $<LINK_ONLY:Jolt::Jolt>)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES Jolt)
   endif()
 endif()
 

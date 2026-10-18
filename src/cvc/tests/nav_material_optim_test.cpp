@@ -179,4 +179,37 @@ TEST(NavMaterialOptim, TrainingReducesLoss) {
   EXPECT_LT(L_last, 0.8 * L_first) << "loss did not decrease substantially over training";
 }
 
+// The same overfit, with the loss taken through the kinematic bicycle (P8b):
+// training descends through the deployed controller, not only the point mass.
+TEST(NavMaterialOptim, TrainingReducesLossOnTheBicycle) {
+  std::mt19937 rng(202);
+  const int P = 16;
+  coef_energy_net m = cvc_test::build_test_model(rng, P);
+  const Batch b = make_batch(rng, 16, 3, P, 13, 13);
+  const material_batch mb = b.view();
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::bicycle;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+
+  material_adam opt(m, /*grad_clip=*/5.0f);
+  const int steps = 70;
+  const float lr0 = 1e-3f, lr_min = lr0 * 0.1f;
+  double L_first = 0.0, L_last = 0.0;
+  for (int s = 0; s < steps; ++s) {
+    coef_energy_net::param_grads g = m.zero_grads();
+    const double L = material_loss_and_grad(m, mb, cfg, g, nullptr);
+    if (s == 0)
+      L_first = L;
+    L_last = L;
+    opt.step(m, g, cosine_lr(lr0, lr_min, s, steps));
+  }
+  std::printf("[material-optim bicycle] L_first=%.4f L_last=%.4f ratio=%.3f\n", L_first, L_last,
+              L_last / L_first);
+  EXPECT_TRUE(std::isfinite(L_last));
+  EXPECT_LT(L_last, L_first) << "Adam did not reduce the bicycle loss";
+}
+
 } // namespace

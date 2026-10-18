@@ -62,7 +62,7 @@ jobs:
           mkdir -p "$WASM_DEPS"
           for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp \
                    libxml2 lerc assimp imgui boost vtk python312 numpy-cp312 \
-                   vtk-python-cp312; do
+                   vtk-python-cp312 pegtl; do
             echo "=== install $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \

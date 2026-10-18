@@ -429,8 +429,8 @@ other value.
 
 ## Feeding the physics engine
 
-libcvc has no physics engine wired in today (Jolt lives in a separate cvcpkg
-package). `world_units` is what a future Jolt bridge reads:
+`cvc::physics` ([`PHYSICS_API.md`](PHYSICS_API.md)) wraps Jolt behind an
+engine-agnostic world, and `world_units` is what its plant adapter reads:
 
 - Jolt is SI/MKS (metres, kilograms, seconds; force in newtons), so positions,
   velocities and forces cross the engine boundary in canonical SI with **no

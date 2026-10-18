@@ -209,33 +209,52 @@ struct tarjan_ctx {
   int next_index = 0;
   std::vector<std::vector<int>> sccs;
 
-  void strongconnect(int v) {
-    index_of[v] = next_index;
-    lowlink[v] = next_index;
-    ++next_index;
-    stack.push_back(v);
-    on_stack[v] = true;
-
-    for (int w : adj[v]) {
-      if (index_of[w] < 0) {
-        strongconnect(w);
-        lowlink[v] = std::min(lowlink[v], lowlink[w]);
-      } else if (on_stack[w]) {
-        lowlink[v] = std::min(lowlink[v], index_of[w]);
+  // Tarjan's strongconnect(v), with its recursion on an explicit stack of frames (vertex, next
+  // successor), so a chain of a million links costs heap, not a native frame per link.
+  void strongconnect(int root_v) {
+    struct frame {
+      int v;
+      std::size_t next;
+    };
+    std::vector<frame> calls;
+    const auto enter = [&](int v) {
+      index_of[v] = next_index;
+      lowlink[v] = next_index;
+      ++next_index;
+      stack.push_back(v);
+      on_stack[v] = true;
+      calls.push_back({v, 0});
+    };
+    enter(root_v);
+    while (!calls.empty()) {
+      frame &f = calls.back();
+      const int v = f.v;
+      if (f.next < adj[v].size()) {
+        const int w = adj[v][f.next++];
+        if (index_of[w] < 0)
+          enter(w); // invalidates `f`; on return, lowlink[v] takes lowlink[w] (below)
+        else if (on_stack[w])
+          lowlink[v] = std::min(lowlink[v], index_of[w]);
+        continue;
       }
-    }
 
-    if (lowlink[v] == index_of[v]) {
-      std::vector<int> comp;
-      while (true) {
-        int w = stack.back();
-        stack.pop_back();
-        on_stack[w] = false;
-        comp.push_back(w);
-        if (w == v)
-          break;
+      if (lowlink[v] == index_of[v]) {
+        std::vector<int> comp;
+        while (true) {
+          int w = stack.back();
+          stack.pop_back();
+          on_stack[w] = false;
+          comp.push_back(w);
+          if (w == v)
+            break;
+        }
+        sccs.push_back(std::move(comp));
       }
-      sccs.push_back(std::move(comp));
+      calls.pop_back();
+      if (!calls.empty()) {
+        const int u = calls.back().v;
+        lowlink[u] = std::min(lowlink[u], lowlink[v]);
+      }
     }
   }
 };

@@ -71,6 +71,24 @@ struct bytes_value {
   bool operator==(const bytes_value &o) const { return data == o.data; }
 };
 
+namespace detail {
+/// Drop one owner of a nested value's storage (a list, dict, closure, generator or
+/// environment) without recursing once per nesting level. Freeing a 100000-deep list through
+/// plain shared_ptr destructors takes a native stack frame per level and overflows the stack.
+/// Here the first release on a thread runs a loop: owners dropped while it frees something
+/// (that thing's elements, bindings, enclosing scope) are queued and freed one at a time by the
+/// loop, so the stack stays a few frames deep whatever the depth.
+void release_nested(std::shared_ptr<void> owner) noexcept;
+
+/// Drop `owner` through release_nested when it is the last one; dropping any other owner only
+/// decrements a count. (Should another thread drop the last but one meanwhile, this drop frees
+/// the storage inline, and its elements start releases of their own: a few frames, still.)
+template <class T> void drop_owner(std::shared_ptr<T> &owner) noexcept {
+  if (owner && owner.use_count() == 1)
+    release_nested(std::move(owner));
+}
+} // namespace detail
+
 /// The DSL value variant.  All runtime values are represented as value_t.
 ///
 /// Variants:
@@ -114,6 +132,23 @@ struct value_tag {
   value_tag(generator_ptr g) : v(std::move(g)) {}
   value_tag(bytes_value b) : v(std::move(b)) {}
 
+  value_tag(const value_tag &) = default;
+  value_tag(value_tag &&) = default;
+  value_tag &operator=(const value_tag &) = default;
+  value_tag &operator=(value_tag &&) = default;
+
+  /// Nested storage is freed through detail::drop_owner, never recursively.
+  ~value_tag() {
+    if (auto *l = std::get_if<list_ptr>(&v))
+      detail::drop_owner(*l);
+    else if (auto *d = std::get_if<dict_ptr>(&v))
+      detail::drop_owner(*d);
+    else if (auto *c = std::get_if<closure_ptr>(&v))
+      detail::drop_owner(*c);
+    else if (auto *g = std::get_if<generator_ptr>(&v))
+      detail::drop_owner(*g);
+  }
+
   /// Check if the value is nil (monostate).
   bool is_nil() const { return std::holds_alternative<std::monostate>(v); }
 
@@ -144,16 +179,23 @@ struct closure {
 struct environment {
   std::unordered_map<std::string, value_t> bindings;
   std::shared_ptr<environment> outer;
+  /// A frozen scope is shared read-only, possibly across threads (the stdlib scope that every
+  /// default environment links to). set() refuses it, and set_existing() never writes into it: a
+  /// name bound there is shadowed in the outermost unfrozen scope instead.
+  bool frozen = false;
+
+  /// Drops `outer` through detail::drop_owner, so a long scope chain is not freed recursively.
+  ~environment();
 
   /// Look up a name, walking the scope chain.
   value_t *lookup(const std::string &name);
   const value_t *lookup(const std::string &name) const;
 
-  /// Set a binding in this scope.
+  /// Set a binding in this scope. Throws std::logic_error when this scope is frozen.
   void set(const std::string &name, value_t val);
 
-  /// Set a binding in the nearest enclosing scope that has it,
-  /// or in this scope if not found.
+  /// Set a binding in the nearest enclosing unfrozen scope that has it, or in the outermost
+  /// unfrozen scope if none has it. Throws std::logic_error when called on a frozen scope.
   void set_existing(const std::string &name, value_t val);
 
   /// Create a new child scope.
@@ -189,13 +231,15 @@ inline const value_t true_value{true};
 inline const value_t false_value{false};
 
 /// Convert a value_t to a human-readable string representation. Bounded and cycle-safe:
-/// output is length- and depth-capped (a shared/deep/cyclic structure is truncated with an
-/// ellipsis rather than expanding exponentially or overflowing the stack).
+/// output is length-capped (a shared/cyclic structure is truncated with an ellipsis rather
+/// than expanding exponentially), and the walk is iterative, so depth alone neither truncates
+/// it nor overflows the stack.
 std::string to_string(const value_t &val);
 
 /// Check structural equality of two values. Memoized on pointer-pairs, so a shared or
 /// cyclic structure is compared in time proportional to its PHYSICAL size (distinct node
-/// pairs), never its exponential logical unfolding.
+/// pairs), never its exponential logical unfolding. Iterative, so any depth compares; it polls
+/// the evaluation deadline and throws std::runtime_error once that is spent.
 bool values_equal(const value_t &a, const value_t &b);
 
 // -- time budgets -------------------------------------------------------------
@@ -292,6 +336,49 @@ private:
 /// of every armed budget. Cheap (one steady-clock read until a budget is half spent);
 /// long-running builtins call this in their loops so they too honour the budget.
 bool eval_deadline_expired();
+
+// -- per-call allocation limit ----------------------------------------------
+//
+// A native call builds its whole result inside one evaluator step, where the per-process
+// memory limit (checked between steps, and counting only state-tree writes) cannot see it:
+// (collections.range 1000000000) would allocate tens of GB in one call. Every builtin or
+// stdlib function whose result can be larger than all of its arguments estimates the result's
+// size first and calls eval_alloc_check() before allocating.
+//
+// The schedulers arm a guard around each step with the tighter of the tree setting
+// limits.max_alloc_bytes (state_exec.schedulers.<id>, then state_exec.defaults) and what is
+// left of the process's max_memory. With no guard armed (a bare evaluator, a direct native
+// call) the limit is kDefaultMaxAllocBytes.
+
+/// The limit when no guard is armed, and the default of limits.max_alloc_bytes: 16 MiB.
+inline constexpr std::size_t kDefaultMaxAllocBytes = std::size_t{16} << 20;
+
+/// RAII: bound what a single native call may allocate on this thread while the guard lives
+/// (std::nullopt: no bound). A guard nested inside another only tightens it. The schedulers
+/// arm one per step.
+class eval_alloc_guard {
+public:
+  explicit eval_alloc_guard(std::optional<std::size_t> max_bytes);
+  ~eval_alloc_guard();
+  eval_alloc_guard(const eval_alloc_guard &) = delete;
+  eval_alloc_guard &operator=(const eval_alloc_guard &) = delete;
+
+private:
+  friend std::optional<std::size_t> eval_alloc_limit();
+  std::optional<std::size_t> limit_; // the effective limit: this guard's, tightened by outer ones
+  eval_alloc_guard *outer_ = nullptr;
+};
+
+/// The allocation limit in force on this thread (std::nullopt: unbounded).
+std::optional<std::size_t> eval_alloc_limit();
+
+/// Throw std::runtime_error naming `who` when `bytes` is over eval_alloc_limit().
+void eval_alloc_check(std::size_t bytes, const char *who);
+
+/// `count * each`, saturating at SIZE_MAX, for size estimates that must not wrap.
+inline std::size_t alloc_bytes(std::size_t count, std::size_t each) {
+  return each != 0 && count > SIZE_MAX / each ? SIZE_MAX : count * each;
+}
 
 } // namespace cvc::state_exec
 

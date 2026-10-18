@@ -131,6 +131,60 @@ TEST_F(ExecBenchTest, EvalFibonacci) {
   report("eval_fib15", N, std::chrono::duration_cast<ns>(t1 - t0));
 }
 
+TEST_F(ExecBenchTest, ValueDropThroughput) {
+  if (!bench_enabled()) {
+    SUCCEED();
+    return;
+  }
+
+  // Building and dropping values: the release path every list/dict/closure takes.
+  constexpr int64_t N = 1000000;
+  auto t0 = hrclock::now();
+  for (int64_t i = 0; i < N; ++i) {
+    value_t v = make_list({value_t{i}, make_list({value_t{i}}), make_dict({{"k", value_t{i}}})});
+    (void)v;
+  }
+  auto t1 = hrclock::now();
+  report("value_drop_small", N, std::chrono::duration_cast<ns>(t1 - t0));
+
+  // Copies dropped while another owner lives.
+  const value_t shared = make_list({value_t{int64_t{1}}, value_t{int64_t{2}}});
+  std::vector<value_t> copies(64);
+  t0 = hrclock::now();
+  for (int64_t i = 0; i < N; ++i)
+    copies[static_cast<std::size_t>(i % 64)] = shared;
+  t1 = hrclock::now();
+  report("value_drop_shared_copy", N, std::chrono::duration_cast<ns>(t1 - t0));
+
+  // 1000-level lists, built and dropped.
+  constexpr int64_t kDepth = 1000, kReps = 1000;
+  t0 = hrclock::now();
+  for (int64_t r = 0; r < kReps; ++r) {
+    value_t v = make_list({value_t{r}});
+    for (int64_t i = 1; i < kDepth; ++i)
+      v = make_list({std::move(v)});
+  }
+  t1 = hrclock::now();
+  report("value_drop_deep1000", kDepth * kReps, std::chrono::duration_cast<ns>(t1 - t0));
+
+  // The same from the DSL: a list nested 2000 deep, dropped when the evaluator is.
+  const std::string src = "(begin "
+                          "  (set acc (list)) "
+                          "  (set i 0) "
+                          "  (while (< i 2000) "
+                          "    (begin (set acc (list i acc)) (set i (+ i 1)))) "
+                          "  i)";
+  auto env = builtins::make_default_environment();
+  constexpr int M = 50;
+  t0 = hrclock::now();
+  for (int i = 0; i < M; ++i) {
+    stackless_evaluator ev(env);
+    ev.evaluate_script(src);
+  }
+  t1 = hrclock::now();
+  report("eval_nest_list_2000", M, std::chrono::duration_cast<ns>(t1 - t0));
+}
+
 TEST_F(ExecBenchTest, SchedulerThroughput) {
   if (!bench_enabled()) {
     SUCCEED();

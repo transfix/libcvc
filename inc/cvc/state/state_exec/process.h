@@ -69,6 +69,9 @@ struct process {
   // pump's own per-drain cap bounds it; this cap is the backstop for an in-STEP loop the pump can't
   // interrupt.)
   double max_step_time = 0.0;
+  // The most a single native call may allocate (0 = no limit of its own): the tree setting
+  // limits.max_alloc_bytes, resolved when the process is submitted. See alloc_limit().
+  uint64_t max_alloc_bytes = kDefaultMaxAllocBytes;
 
   // Evaluator state (stackless — serializable)
   evaluator_state state;
@@ -141,6 +144,11 @@ struct process {
   bool over_time_limit() const { return charges_cpu_time() && cpu_time_charged >= 0.5 * max_time; }
   /// Seconds of max_time left (nullopt when unlimited): the budget of the next step's deadline.
   std::optional<double> time_left() const;
+
+  /// The allocation limit for the next step's eval_alloc_guard (nullopt when unlimited): the
+  /// tighter of max_alloc_bytes and what is left of max_memory once `used_bytes` (the memory
+  /// tracker's count for this process) is taken out.
+  std::optional<std::size_t> alloc_limit(std::size_t used_bytes) const;
 
   /// Step count from evaluator stats.
   uint64_t step_count() const { return state.stats.get_step_count(); }
