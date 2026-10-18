@@ -504,9 +504,17 @@ double Terrain::sample(double x, double y) const {
 cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]) {
   if (t.empty())
     return ground_quad(t.bounds, 0.0, rgb);
-  // The world's own terrain mesh (shared arrays, plus a colour per vertex).
+  // The world's own terrain mesh (shared arrays, plus a colour per vertex), with
+  // planar UVs over the bounds as ground_quad has, so an aerial drapes the same way.
   cvc::geometry g = *t.field;
   g.colors().assign(g.num_points(), cvc::geometry::color_t{{rgb[0], rgb[1], rgb[2]}});
+  const double su = t.bounds.max_x > t.bounds.min_x ? 1.0 / (t.bounds.max_x - t.bounds.min_x) : 0.0;
+  const double sv = t.bounds.max_y > t.bounds.min_y ? 1.0 / (t.bounds.max_y - t.bounds.min_y) : 0.0;
+  auto &uvs = g.uvs();
+  uvs.clear();
+  uvs.reserve(g.num_points());
+  for (const auto &p : g.const_points())
+    uvs.push_back({(p[0] - t.bounds.min_x) * su, (p[1] - t.bounds.min_y) * sv});
   return g;
 }
 
