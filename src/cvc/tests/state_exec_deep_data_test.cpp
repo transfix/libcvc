@@ -493,8 +493,10 @@ std::size_t expect_nesting_limit(const std::string &script, std::size_t kib = kS
 TEST(StateExecNativeNesting, ApplyOnASelfContainingList) {
   // (apply apply L) with L = (apply L): apply calls itself once per trip around the cycle.
   const std::string loop = "(begin (set L (list apply nil)) (set-nth L 1 L) (apply apply L))";
-  // On a small stack the stack left decides; on a big one, the level count.
-  EXPECT_LT(expect_nesting_limit(loop), kMaxNativeNesting);
+  // On a stack with only 16 KiB above the reserve the stack left decides, however small an apply
+  // level is (about 0.5 KiB with MSVC, under 0.25 KiB with Apple clang, where 64 KiB of room
+  // already held all 256 levels); on a big one, the level count.
+  EXPECT_LT(expect_nesting_limit(loop, kNativeStackReserve / 1024 + 16), kMaxNativeNesting);
   EXPECT_EQ(expect_nesting_limit(loop, 4096), kMaxNativeNesting);
 }
 
