@@ -31,6 +31,7 @@
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -228,6 +229,65 @@ TEST_F(ExecBenchTest, DataWalkThroughput) {
   auto t1 = hrclock::now();
   report("data_free_per_node", static_cast<int64_t>(freed),
          std::chrono::duration_cast<ns>(t1 - t0));
+}
+
+TEST_F(ExecBenchTest, StdlibJobThroughput) {
+  if (!bench_enabled()) {
+    SUCCEED();
+    return;
+  }
+
+  // The stdlib materializers' work per node (one per element, one per kDataNodeBytes bytes
+  // scanned or copied), run in 1024-node data steps on a stackless evaluator: a node's cost
+  // includes the stepping, and freeing the result.
+  constexpr int64_t kN = 200000;
+  auto env = builtins::make_default_environment();
+  auto run_env = environment::extend(env);
+  std::string csv;
+  std::vector<value_t> nums, parts, rev;
+  for (int64_t i = 0; i < kN; ++i) {
+    csv += (i ? "," : "") + std::to_string(i);
+    nums.emplace_back(i);
+    parts.emplace_back(std::to_string(i));
+    rev.emplace_back(kN - i);
+  }
+  run_env->set("csv", value_t{csv});
+  run_env->set("nums", make_list(std::move(nums)));
+  run_env->set("parts", make_list(std::move(parts)));
+  run_env->set("rev", make_list(std::move(rev)));
+  const auto per_node = [&](const char *name, const char *script) {
+    stackless_evaluator ev(env);
+    evaluator_state st = ev.create_state(parse(script), run_env);
+    st.data_step_nodes = 1024;
+    auto t0 = hrclock::now();
+    while (!ev.step(st)) {
+    }
+    auto t1 = hrclock::now();
+    report(name, static_cast<int64_t>(st.stats.data_nodes()),
+           std::chrono::duration_cast<ns>(t1 - t0));
+  };
+  per_node("stdlib_split_per_node", "(string.split csv \",\")");
+  per_node("stdlib_join_per_node", "(string.join parts \",\")");
+  per_node("stdlib_replace_per_node", "(string.replace csv \",\" \";\")");
+  per_node("stdlib_encode_per_node", "(string.encode csv)");
+  per_node("stdlib_sort_per_node", "(collections.sort rev)");
+  per_node("stdlib_map_native_per_node", "(collections.map nums math.abs)");
+  per_node("stdlib_map_lambda_per_node", "(collections.map nums (lambda (x) x))");
+  per_node("stdlib_dict_merge_per_node",
+           "(collections.dict-merge (dict \"a\" 1 \"b\" 2) (dict \"b\" 3 \"c\" 4))");
+
+  // Small calls, where a job's setup is most of the cost.
+  const std::string loop = "(begin (set i 0) (while (< i 10000) (begin"
+                           " (string.split \"a,b,c\" \",\") (collections.reverse (list 1 2 3))"
+                           " (set i (+ i 1)))) i)";
+  constexpr int M = 20;
+  auto t0 = hrclock::now();
+  for (int i = 0; i < M; ++i) {
+    stackless_evaluator ev(env);
+    ev.evaluate_script(loop);
+  }
+  auto t1 = hrclock::now();
+  report("stdlib_small_calls_10000", M, std::chrono::duration_cast<ns>(t1 - t0));
 }
 
 TEST_F(ExecBenchTest, SchedulerThroughput) {

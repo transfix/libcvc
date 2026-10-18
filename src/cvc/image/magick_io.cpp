@@ -51,27 +51,41 @@ namespace {
 // modules FLAT — a coder resolves its own CORE_RL_* deps in its directory, so the
 // modules must sit beside them — and <prefix>\share\imagemagick holds the .xml
 // config. Only set what the environment has not already overridden (a user wins).
-void set_magick_paths_win() {
-  HMODULE h = nullptr;
-  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                     reinterpret_cast<LPCSTR>(&set_magick_paths_win), &h);
+// The directory a loaded module's file is in; empty if it cannot be found.
+std::string module_dir(HMODULE h) {
   if (!h)
-    return;
+    return std::string();
   char buf[MAX_PATH];
   const DWORD n = GetModuleFileNameA(h, buf, MAX_PATH);
   if (n == 0 || n >= MAX_PATH)
-    return;
+    return std::string();
   std::string p(buf, n);
   const auto slash = p.find_last_of("\\/");
-  if (slash == std::string::npos)
+  return slash == std::string::npos ? std::string() : p.substr(0, slash);
+}
+
+// The module holding `addr`.
+HMODULE module_at(const void *addr) {
+  HMODULE h = nullptr;
+  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCSTR>(addr), &h);
+  return h;
+}
+
+void set_magick_paths_win() {
+  const std::string dllDir =
+      module_dir(module_at(reinterpret_cast<const void *>(&set_magick_paths_win)));
+  if (dllDir.empty())
     return;
-  // Search order: DLL's own directory (normal case: <prefix>\bin), then
-  // <prefix>\bin from the DLL's parent (in case cvc.dll got copied to
-  // build\bin\Release\ for CTest while the real coders live in deps\bin), then
-  // any CVC_DEPS_PREFIX\bin the environment names. Pick the first that contains
-  // at least one IM_MOD_RL_*.dll — an empty dir here becomes a MIFF-only Magick.
-  const std::string dllDir = p.substr(0, slash);
+  // Search order: DLL's own directory (normal case: <prefix>\bin); then the
+  // directory the ImageMagick DLL itself was loaded from, since the coders sit
+  // beside it (a dev build's cvc.dll is in build\bin while ImageMagick comes
+  // from the deps prefix on PATH); then <prefix>\bin from the DLL's parent (in
+  // case cvc.dll got copied to build\bin\Release\ for CTest while the real
+  // coders live in deps\bin); then any CVC_DEPS_PREFIX\bin the environment
+  // names. Pick the first that contains at least one IM_MOD_RL_*.dll — an empty
+  // dir here becomes a Magick with no coders, not even xc: or MIFF.
   auto has_coder = [](const std::string &dir) -> bool {
     WIN32_FIND_DATAA d;
     HANDLE h = FindFirstFileA((dir + "\\IM_MOD_RL_*.dll").c_str(), &d);
@@ -81,6 +95,14 @@ void set_magick_paths_win() {
     return true;
   };
   std::vector<std::string> cand{dllDir};
+  // The ImageMagick DLL by its name in the cvcpkg bundle (the official Windows
+  // build's), then by the address of one of its functions, for other builds.
+  // When that address is an import thunk in cvc.dll it names dllDir again.
+  for (const std::string &d :
+       {module_dir(GetModuleHandleA("CORE_RL_MagickCore_.dll")),
+        module_dir(module_at(reinterpret_cast<const void *>(&MagickCore::GetMagickVersion)))})
+    if (!d.empty())
+      cand.push_back(d);
   // If dllDir is <something>\build\bin\Release, walk up to try <something>\bin.
   cand.push_back(dllDir + "\\..\\..\\..\\..\\deps\\bin");
   for (const char *var : {"CVC_DEPS_PREFIX", "LIBCVC_DEPS_PREFIX", "CVCPKG_PREFIX"})
@@ -262,6 +284,12 @@ private:
 #endif // CVC_ENABLE_IMAGEMAGICK
 
 namespace cvc {
+void init_imagemagick() {
+#ifdef CVC_ENABLE_IMAGEMAGICK
+  init_magick_once();
+#endif
+}
+
 void register_stb_image_handler(); // stb_io.cpp — no dependencies at all.
 
 // Register the built-in image handlers. Called once (lazily) from image.cpp.
