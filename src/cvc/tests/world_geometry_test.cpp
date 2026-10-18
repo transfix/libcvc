@@ -19,10 +19,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
 #include <cvc/physics/world_geometry.h>
+#include <cvc/volume/volume.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
 #include <filesystem>
@@ -173,6 +175,25 @@ fs::path make_bundle(const std::string &tag, bool north_first = true, bool with_
 
 bool have_jolt() { return cvc::physics::backend_available(cvc::physics::backend::jolt); }
 
+// A uniform volume over [lo, hi]: water, snow or wind for the volume tests.
+std::shared_ptr<cvc::volume> uniform_volume(double value, std::array<double, 3> lo,
+                                            std::array<double, 3> hi) {
+  static cvc::app app;
+  auto v =
+      std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                    cvc::bounding_box(lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]));
+  v->fill(value);
+  return v;
+}
+
+cvc::physics::field lake_field() {
+  cvc::physics::field f;
+  f.kind = cvc::physics::field_kind::fluid;
+  f.volume = uniform_volume(1000.0, {{-5, -5, -3}}, {{5, 5, 0}});
+  f.damping = 1.0e4;
+  return f;
+}
+
 } // namespace
 
 // --- the surface table ------------------------------------------------------
@@ -226,6 +247,27 @@ TEST(WorldGeometry, ItemsShareTheirGeometry) {
   geometry_item tilted{"tilted", mesh};
   tilted.rotation = {{2.0, 0.0, 0.0, 0.0}};
   EXPECT_THROW(w.add(tilted), std::invalid_argument); // not a unit rotation
+}
+
+TEST(WorldGeometry, VolumesShareTheItemsNamesAndBounds) {
+  world_geometry w;
+  w.add({"terrain", std::make_shared<cvc::height_field>(3, 3, 0, 0, 1, 1)});
+  const cvc::physics::field lake = lake_field();
+  w.add_volume({"lake", lake});
+  ASSERT_NE(w.find_volume("lake"), nullptr);
+  EXPECT_EQ(w.find_volume("lake")->field.volume, lake.volume) << "the same volume, not a copy";
+  EXPECT_EQ(w.find_volume("terrain"), nullptr);
+  EXPECT_EQ(w.find("lake"), nullptr);
+  const world_bounds b = w.bounds();
+  EXPECT_DOUBLE_EQ(b.min[0], -5.0);
+  EXPECT_DOUBLE_EQ(b.max[0], 5.0);
+  EXPECT_DOUBLE_EQ(b.min[2], -3.0);
+
+  EXPECT_THROW(w.add_volume({"lake", lake}), std::invalid_argument);    // the name is taken
+  EXPECT_THROW(w.add_volume({"terrain", lake}), std::invalid_argument); // by an item
+  EXPECT_THROW(w.add({"lake", std::make_shared<cvc::geometry>()}), std::invalid_argument);
+  EXPECT_THROW(w.add_volume({"", lake}), std::invalid_argument);                     // no name
+  EXPECT_THROW(w.add_volume({"dry", cvc::physics::field{}}), std::invalid_argument); // no volume
 }
 
 // --- the city bundle loader --------------------------------------------------
@@ -451,4 +493,38 @@ TEST(PhysicsWorldGeometry, OnlyCollideItemsBecomeBodies) {
   EXPECT_FALSE(bodies.find("decoration").valid());
   EXPECT_EQ(w.body_count(), 1u);
   EXPECT_EQ(w.get_material(bodies.materials[0]).name, "void_unknown");
+}
+
+TEST(PhysicsWorldGeometry, CollideVolumesBecomeFields) {
+  world_geometry g;
+  g.add_volume({"lake", lake_field()});
+  volume_item mist{"mist", lake_field()};
+  mist.roles = role_render;
+  g.add_volume(mist);
+  cvc::physics::world_config c;
+  c.backend = cvc::physics::backend::null;
+  cvc::physics::world w(c);
+  const auto out = cvc::physics::add_world_geometry(w, g);
+  EXPECT_EQ(out.fields.size(), 1u);
+  EXPECT_TRUE(out.find_field("lake").valid());
+  EXPECT_FALSE(out.find_field("mist").valid());
+  EXPECT_EQ(w.field_count(), 1u);
+}
+
+// The world's lake, through the adapter: a slab of 500 kg/m^3 floats half sunk on
+// the same volume the renderer draws.
+TEST(PhysicsWorldGeometry, ASlabFloatsOnTheWorldsLake) {
+  if (!have_jolt())
+    GTEST_SKIP() << "this libcvc was built without Jolt";
+  world_geometry g;
+  g.add_volume({"lake", lake_field()});
+  cvc::physics::world w;
+  cvc::physics::add_world_geometry(w, g);
+  cvc::physics::body_desc d;
+  d.shape = cvc::physics::box{{0.5, 0.5, 0.2}};
+  d.density = 500.0;
+  d.position = {0.0, 0.0, 0.3};
+  const auto b = w.add_body(d);
+  w.step(500);
+  EXPECT_NEAR(0.0 - (w.state(b).position.z - 0.2), 0.2, 0.002);
 }

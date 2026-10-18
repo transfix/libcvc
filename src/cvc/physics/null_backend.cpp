@@ -156,6 +156,8 @@ public:
 
   void add_force(body_id id, const vec3 &) override { at(id); }
   void add_impulse(body_id id, const vec3 &) override { at(id); }
+  void add_field_load(body_id id, const vec3 &, const vec3 &) override { at(id); }
+  void wake(body_id id) override { at(id); }
 
   void move_kinematic(body_id id, const vec3 &p, const quat &q) override {
     slot &s = at(id);

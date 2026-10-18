@@ -454,10 +454,13 @@ public:
 
   // Clear this node's value, data, comment and hidden flag.
   //
-  // resetChildren = true (the default) recurses, resetting the subtree in
-  // place and keeping every node.
+  // resetChildren = true (the default) resets the subtree in place and keeps
+  // every node: a node is cleared before the nodes under it and, with
+  // fireCallbacks, touched after them, a child's whole subtree before the next
+  // child's. A loop, not a call per level, and no lock is held while a touch
+  // signals.
   //
-  // resetChildren = false DESTROYS the children instead of recursing.
+  // resetChildren = false DESTROYS the children instead.
   // Beware: operator() returns state&, never the owning state_ptr, so the
   // parent's child map holds the only reference and dropping it deletes the
   // whole subtree. Any state& a caller still holds into that subtree
@@ -466,6 +469,12 @@ public:
   void reset(bool resetChildren = true, bool fireCallbacks = true);
 
   // converting to and from a boost property tree.  Useful for saving and restoring state.
+  //
+  // ptree() is one level: an entry per node of this subtree, keyed by its full name from the
+  // root, in pre-order (children in name order), holding its value, or "" for a node below this
+  // one with neither a value nor children. Values only, not data(). ptree(pt) sets each
+  // non-empty value at its key, relative to this node, at every nesting level, so it also loads
+  // the nested trees older versions wrote. json(), save() and restore() are the same as JSON.
   boost::property_tree::ptree ptree();
   operator boost::property_tree::ptree() { return ptree(); }
   void ptree(const boost::property_tree::ptree &);
@@ -479,6 +488,10 @@ public:
   void save(const std::string &filename);
   void restore(const std::string &filename);
 
+  // Call func with the full name of this node, then of each descendant whose full name matches
+  // `re` (all of them when it is empty), each once, in pre-order, children in name order. A
+  // visited node's traverseEnter fires before func sees it and its traverseExit after the nodes
+  // under it are visited. Descendants under a node that does not match are still visited.
   void traverse(traversal_unary_func func, const std::string &re = std::string());
   signal traverseEnter;
   signal traverseExit;
