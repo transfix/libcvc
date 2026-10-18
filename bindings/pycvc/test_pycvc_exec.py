@@ -335,6 +335,54 @@ def test_stdlib_allocation_limit_comes_from_the_app_tree():
     assert ex.run("(length (collections.range 1000))") == "1000"
 
 
+def test_stdlib_collections_take_dsl_and_python_functions():
+    # map/filter/reduce call a lambda as the program's own steps, and a registered Python
+    # function like any native one. The list comes first, then the function.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    assert ex.run("(collections.map (list 1 2 3) (lambda (x) (* x x)))") == "(1 4 9)"
+    assert ex.run("(collections.filter (collections.range 10) (lambda (x) (= (% x 3) 0)))") == (
+        "(0 3 6 9)"
+    )
+    assert ex.run("(collections.reduce (list 1 2 3 4) (lambda (acc x) (+ acc (* x x))) 0)") == "30"
+    ex.register_fn("twice", lambda x: x * 2)
+    assert ex.run("(collections.map (list 1 2) twice)") == "(2 4)"
+    # The builtins that call a function, apply and send, take a DSL function too.
+    assert ex.run("(apply (lambda (a b) (* a b)) (list 6 7))") == "42"
+    assert ex.run("(apply twice (list 21))") == "42"
+    assert (
+        ex.run(
+            '(begin (set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))'
+            ' (send o "inc" 41))'
+        )
+        == "42"
+    )
+
+
+def test_stdlib_materializers_run_as_data_steps():
+    # Exec slices deep-data work 1024 nodes a step (the host default): a big join and split
+    # spread over data steps, and the answer is the same however the work is sliced.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    prog = (
+        '(begin (set parts (string.split (string.join (collections.map (collections.range 20000)'
+        ' str) ",") ","))'
+        " (list (length parts) (nth parts 12345) (get-attr (budget-usage) \"data_steps\")))"
+    )
+
+    def data_steps(step_nodes=None):
+        if step_nodes is not None:
+            pycvc.state_set(app, "state_exec.defaults.data.step_nodes", str(step_nodes))
+        out = ex.run(prog)
+        assert out.startswith('(20000 "12345" '), out
+        return int(out.rsplit(" ", 1)[1].rstrip(")"))
+
+    host = data_steps()
+    assert host > 100  # map, join and split, a slice a step
+    assert data_steps(16) > host
+    assert data_steps(0) < 10  # whole, in the steps that need it
+
+
 # ── reference cycles ────────────────────────────────────────────────────
 
 

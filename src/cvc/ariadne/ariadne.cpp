@@ -424,15 +424,21 @@ public:
         // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables)
         "state-get", "state-exists", "state-children", "state-data-get", "state-root-path",
         "state-has-expiry", "state-is-expired",
-        // the pure, bounded stdlib: a scalar, or a result no bigger than its argument. The
-        // materializers (string.join/replace/split/encode, bytes.slice/concat/decode,
-        // collections.*) stay out until they run as scheduled, sliced work; math.random stays
-        // out because a predicate must be deterministic.
+        // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
+        // argument), and the materializers, which do their work as sliced data steps (each
+        // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
+        // collections.map/filter/reduce call runs as this evaluator's own frames, so the
+        // special-form gate and the caps cover it too. math.random stays out because a
+        // predicate must be deterministic.
         "string.length", "string.byte-length", "string.char-at", "string.substring", "string.upper",
         "string.lower", "string.trim", "string.starts-with", "string.ends-with", "string.contains",
-        "bytes.length", "bytes.byte-at", "math.sqrt", "math.abs", "math.floor", "math.ceil",
-        "math.round", "math.pow", "math.log", "math.sin", "math.cos", "math.tan", "math.min",
-        "math.max", "math.clamp", "math.pi", "math.e"};
+        "string.split", "string.join", "string.replace", "string.encode", "bytes.length",
+        "bytes.byte-at", "bytes.slice", "bytes.concat", "bytes.decode", "math.sqrt", "math.abs",
+        "math.floor", "math.ceil", "math.round", "math.pow", "math.log", "math.sin", "math.cos",
+        "math.tan", "math.min", "math.max", "math.clamp", "math.pi", "math.e", "collections.map",
+        "collections.filter", "collections.reduce", "collections.zip", "collections.flatten",
+        "collections.sort", "collections.reverse", "collections.range", "collections.unique",
+        "collections.dict-keys", "collections.dict-values", "collections.dict-merge"};
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
@@ -445,13 +451,17 @@ public:
             std::set<std::string>{"if", "begin", "let", "while", "for", "lambda", "defun", "set",
                                   "return", "quote", "yield", "break"});
     ev_->restrict_special_forms(kAllowedForms);
+    resolve_data_settings();
   }
 
   // Reset the per-FRAME aggregate budget — call once at the top of each render frame,
   // before the walk. Once the frame's cumulative predicate-eval time is spent, the
   // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
   // one-time warning, so N reactive widgets cannot together stall the frame.
-  void begin_frame() { frame_ = se::time_budget(kFrameBudgetSeconds); }
+  void begin_frame() {
+    frame_ = se::time_budget(kFrameBudgetSeconds);
+    resolve_data_settings();
+  }
 
   // §12: re-chroot the read-lane to `path` so a mounted fragment's predicates read state
   // relative to its own sub-prefix, exactly as its widget binds resolve there. The evaluator,
@@ -570,6 +580,7 @@ private:
     };
     try {
       se::evaluator_state st = ev_->create_state(*expr);
+      st.data_step_nodes = data_step_nodes_;
       frame_.start();
       const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
@@ -614,11 +625,22 @@ private:
     }
   }
 
+  // The deep-data slice (data.step_nodes) every eval runs with: the tree's state_exec.defaults
+  // over the host default. The caps are checked only between steps, so a predicate always
+  // slices: a 0 there (no slicing) gets the host default here.
+  void resolve_data_settings() {
+    const se::data_options host = se::async_scheduler::host_data_defaults();
+    data_step_nodes_ = se::data_options_from_state(*tree_, {}, host).step_nodes;
+    if (data_step_nodes_ == 0)
+      data_step_nodes_ = host.step_nodes;
+  }
+
   static constexpr uint64_t kMaxSteps = 100'000;       // per-eval step cap (a predicate is tiny)
   static constexpr double kMaxSeconds = 0.005;         // per-eval time cap (5 ms)
   static constexpr double kFrameBudgetSeconds = 0.010; // aggregate across all predicates/frame
   static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
+  std::size_t data_step_nodes_ = 0;            // see resolve_data_settings()
   se::time_budget frame_{kFrameBudgetSeconds}; // the current frame's predicate evals' time
   std::string root_path_;      // §12: the scope the ctx_ is currently chrooted to (set_root_path)
   cvc::state *tree_ = nullptr; // the app's state tree, for state_exec.defaults.parser.*

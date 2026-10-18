@@ -105,21 +105,124 @@ struct native_call_scope {
   native_call_scope &operator=(const native_call_scope &) = delete;
   detail::data_step_scope *data;
 };
+
+// New innermost deep-data work, waiting on stack[base - 1].
+std::shared_ptr<pending_data_work>
+make_work(std::unique_ptr<data_job> job, std::function<value_t(value_t)> then,
+          pending_data_work::kind what, std::size_t base, std::size_t frame_args,
+          std::shared_ptr<pending_data_work> outer, bool feeds_outer) {
+  auto work = std::make_shared<pending_data_work>();
+  work->job = std::move(job);
+  work->then = std::move(then);
+  work->what = what;
+  work->base = base;
+  work->frame_args = frame_args;
+  work->outer = std::move(outer);
+  work->feeds_outer = feeds_outer;
+  return work;
+}
+
+// Make the job a native call left the innermost work: waiting on stack[base - 1] or, with
+// feeds_outer, for the call outer's job made. Work the job's own pending call left
+// (deferred_data_job::waits_on) goes inside it, its result being that call's value.
+void await_deferred(evaluator_state &state, detail::deferred_data_job &&deferred, std::size_t base,
+                    std::size_t frame_args, std::shared_ptr<pending_data_work> outer,
+                    bool feeds_outer) {
+  for (detail::deferred_data_job *d = &deferred; d; d = d->waits_on.get()) {
+    state.data_work =
+        make_work(std::move(d->job), std::move(d->then), pending_data_work::kind::native_call, base,
+                  frame_args, std::move(outer), feeds_outer);
+    outer = state.data_work;
+    feeds_outer = true;
+  }
+}
+
+// Whether the innermost work waits on a DSL function it called that is still running.
+bool calling_out(const evaluator_state &state) {
+  const pending_data_work *work = state.data_work.get();
+  return work && work->calling && state.stack.size() > work->base;
+}
+
+// How far down a `return` or `break` may unwind: to the frame waiting on a DSL function a job
+// called, whose value that is (0 = no such call).
+std::size_t unwind_floor(const evaluator_state &state) {
+  const pending_data_work *work = state.data_work.get();
+  return work && work->calling ? work->base : 0;
+}
+
+// A scope for a call of `cls` with `args`: its parameters bound, extending the closure's own.
+environment_ptr bind_closure_args(const closure_ptr &cls, std::span<const value_t> args) {
+  auto local = environment::extend(cls->env_snapshot);
+  if (cls->variadic) {
+    if (cls->params.empty())
+      throw std::runtime_error("closure: variadic but no param name");
+    local->set(cls->params.back().name, make_list(std::vector<value_t>(args.begin(), args.end())));
+  } else {
+    if (args.size() != cls->params.size())
+      throw std::runtime_error("closure: expected " + std::to_string(cls->params.size()) +
+                               " args, got " + std::to_string(args.size()));
+    for (size_t i = 0; i < cls->params.size(); ++i)
+      local->set(cls->params[i].name, args[i]);
+  }
+  return local;
+}
 } // namespace
 
-// Run a slice of the deep-data work a step left; once it is done, finish the native call or macro
-// expansion that started it.
+// Run a slice of the deep-data work a step left, making the calls its job needs: a native
+// function here, a DSL function as frames on the stack (the job resumes in the step after it
+// returns). Once the work is done, finish the native call or macro expansion that started it.
 bool stackless_evaluator::step_data(evaluator_state &state) {
   state.stats.increment_step(step_kind::data);
   detail::data_step_scope *data = detail::data_step_scope::current();
+  const bool slicing = data && data->step_nodes() > 0;
   const std::shared_ptr<pending_data_work> work = state.data_work;
-  const std::size_t before = work->job->nodes();
-  const bool finished = work->job->step(data ? data->remaining() : 0);
-  count_data_nodes(work->job->nodes() - before);
-  if (!finished)
-    return false;
-  state.data_work.reset();
-  value_t result = work->job->result();
+  data_job &job = *work->job;
+  if (work->calling) {
+    // The DSL function the job called has returned: its value is the waiting frame's last.
+    work->calling = false;
+    std::vector<value_t> &results = state.stack.back().results;
+    value_t value = std::move(results.back());
+    results.pop_back();
+    job.call_returned(std::move(value));
+  }
+  for (;;) {
+    std::optional<data_job::call_request> call = job.take_call(); // one it stopped for before
+    if (!call) {
+      const std::size_t before = job.nodes();
+      const bool finished = job.step(slicing ? data->remaining() : 0);
+      count_data_nodes(job.nodes() - before);
+      if (finished)
+        break;
+      call = job.take_call();
+      if (!call)
+        return false; // the slice is spent
+    }
+    if (auto *cp = std::get_if<closure_ptr>(&call->fn->v)) {
+      environment_ptr local = bind_closure_args(*cp, call->args);
+      work->calling = true;
+      push_closure_body(state, *cp, std::move(local));
+      return false;
+    }
+    auto *fn = std::get_if<native_fn>(&call->fn->v);
+    if (!fn)
+      throw std::runtime_error(std::string(call->who) +
+                               ": not a function: " + call->fn->type_name());
+    value_t value;
+    {
+      native_call_scope scope(data);
+      value = (*fn)(call->args);
+    }
+    if (auto deferred = data ? data->take_deferred() : nullptr) {
+      // The function left deep-data work of its own: it runs first, and its result is the call's.
+      await_deferred(state, std::move(*deferred), work->base, work->frame_args, work, true);
+      return false;
+    }
+    job.call_returned(std::move(value));
+    if (slicing && data->nodes() >= data->step_nodes())
+      return false;
+  }
+  state.data_work = work->outer;
+  value_t result = job.result();
   if (work->what == pending_data_work::kind::heap_measure) {
     // Record the measurement for the scheduler; evaluation resumes where it was.
     if (const auto *bytes = std::get_if<int64_t>(&result.v))
@@ -134,11 +237,14 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
     native_call_scope call(data); // `then` may end in another job
     result = work->then(std::move(result));
     if (auto deferred = data ? data->take_deferred() : nullptr) {
-      state.data_work = std::make_shared<pending_data_work>(
-          pending_data_work{std::move(deferred->job), std::move(deferred->then),
-                            pending_data_work::kind::native_call});
+      await_deferred(state, std::move(*deferred), work->base, work->frame_args, work->outer,
+                     work->feeds_outer);
       return false;
     }
+  }
+  if (work->feeds_outer) {
+    work->outer->job->call_returned(std::move(result));
+    return false;
   }
   pop_frame(state, std::move(result));
   return state.done;
@@ -166,7 +272,7 @@ bool stackless_evaluator::step(evaluator_state &state) {
   bool done;
   if (state.reading) {
     done = step_read(state);
-  } else if (state.data_work) {
+  } else if (state.data_work && !calling_out(state)) {
     done = step_data(state);
   } else if (backlog && !backlog->empty()) {
     // A step that only frees what earlier steps dropped.
@@ -626,8 +732,8 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     const bool finished = job->step(data && data->step_nodes() > 0 ? data->remaining() : 0);
     count_data_nodes(job->nodes());
     if (!finished) {
-      state.data_work = std::make_shared<pending_data_work>(
-          pending_data_work{std::move(job), {}, pending_data_work::kind::macro_expansion});
+      state.data_work = make_work(std::move(job), {}, pending_data_work::kind::macro_expansion,
+                                  state.stack.size(), frame.results.size(), state.data_work, false);
       return;
     }
     begin_expansion(state, job->result());
@@ -687,9 +793,8 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
     }
     if (auto deferred = data ? data->take_deferred() : nullptr) {
       // The call left deep-data work: this frame waits while step_data() runs it.
-      state.data_work = std::make_shared<pending_data_work>(
-          pending_data_work{std::move(deferred->job), std::move(deferred->then),
-                            pending_data_work::kind::native_call});
+      await_deferred(state, std::move(*deferred), state.stack.size(), frame.results.size(),
+                     state.data_work, false);
       return;
     }
     pop_frame(state, std::move(result));
@@ -875,8 +980,9 @@ void stackless_evaluator::step_let_body(evaluator_state &state, eval_frame &fram
 void stackless_evaluator::step_return_value(evaluator_state &state, eval_frame &frame) {
   auto val = frame.results.back();
   state.stack.pop_back();
-  // Unwind to function boundary
-  while (!state.stack.empty()) {
+  // Unwind to function boundary; a DSL function a deep-data job called returns to the job.
+  const std::size_t floor = unwind_floor(state);
+  while (state.stack.size() > floor) {
     auto &top = state.stack.back();
     if (top.phase == eval_phase::apply) {
       state.stack.pop_back();
@@ -910,8 +1016,10 @@ void stackless_evaluator::step_yield_value(evaluator_state &state, eval_frame &f
 void stackless_evaluator::step_break_unwind(evaluator_state &state, eval_frame &frame) {
   auto val = frame.results.back();
   state.stack.pop_back(); // Remove the break frame
-  // Unwind to loop boundary
-  while (!state.stack.empty()) {
+  // Unwind to loop boundary, but not out of a DSL function a deep-data job called: there the
+  // value is the function's.
+  const std::size_t floor = unwind_floor(state);
+  while (state.stack.size() > floor) {
     auto &top = state.stack.back();
     if (top.phase == eval_phase::while_cond || top.phase == eval_phase::while_body ||
         top.phase == eval_phase::for_body) {
@@ -1013,21 +1121,15 @@ void stackless_evaluator::step_super_args(evaluator_state &state, eval_frame &fr
 
 void stackless_evaluator::call_closure(evaluator_state &state, eval_frame & /*frame*/,
                                        const closure_ptr &cls, const std::vector<value_t> &args) {
-  auto local = environment::extend(cls->env_snapshot);
-  if (cls->variadic) {
-    if (cls->params.empty())
-      throw std::runtime_error("closure: variadic but no param name");
-    local->set(cls->params.back().name, make_list(std::vector<value_t>(args.begin(), args.end())));
-  } else {
-    if (args.size() != cls->params.size())
-      throw std::runtime_error("closure: expected " + std::to_string(cls->params.size()) +
-                               " args, got " + std::to_string(args.size()));
-    for (size_t i = 0; i < cls->params.size(); ++i)
-      local->set(cls->params[i].name, args[i]);
-  }
+  environment_ptr local = bind_closure_args(cls, args); // before the pop: args are the frame's
 
   // Replace current frame with body evaluation
   state.stack.pop_back();
+  push_closure_body(state, cls, std::move(local));
+}
+
+void stackless_evaluator::push_closure_body(evaluator_state &state, const closure_ptr &cls,
+                                            environment_ptr local) {
   if (cls->body.size() == 1) {
     push_frame(state, cls->body[0], local);
   } else {

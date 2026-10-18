@@ -733,6 +733,12 @@ int async_scheduler::fork(int pid) {
   auto &parent = *it->second;
   if (parent.status != process_status::ready && parent.status != process_status::running)
     return -1;
+  // Deep-data work in flight (a function collections.map calls, say) is not copied: a child
+  // could not finish the call its stack waits on. A heap measurement waits on no frame, so a
+  // child without it is whole.
+  if (parent.state.data_work &&
+      parent.state.data_work->what != pending_data_work::kind::heap_measure)
+    return -1;
 
   int child_pid = next_pid_++;
   auto child = make_process();

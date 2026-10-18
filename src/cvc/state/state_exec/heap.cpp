@@ -529,8 +529,14 @@ void heap_after_step(process &proc, std::size_t allocated, uint64_t state_bytes_
     return;
   if (!proc.heap_measure_due(state_bytes_used))
     return;
-  st.data_work = std::make_shared<pending_data_work>(
-      pending_data_work{make_heap_share_job(proc), {}, pending_data_work::kind::heap_measure});
+  // It waits on no frame: evaluation resumes at the top of the stack, as it was, so `base` and
+  // `frame_args` are the whole stack and the top frame's values (a snapshot keeps all of them).
+  auto work = std::make_shared<pending_data_work>();
+  work->job = make_heap_share_job(proc);
+  work->what = pending_data_work::kind::heap_measure;
+  work->base = st.stack.size();
+  work->frame_args = st.stack.back().results.size();
+  st.data_work = std::move(work);
   proc.heap_measuring = true;
 }
 

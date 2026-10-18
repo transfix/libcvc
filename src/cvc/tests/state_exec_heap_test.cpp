@@ -8,8 +8,11 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/stackless_evaluator.h>
+#include <cvc/state/state_exec/state_value_codec.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -362,4 +365,92 @@ TEST(HeapBudgetTest, AsyncSchedulerCountsTheHeapToo) {
   EXPECT_TRUE(error == "memory_limit_exceeded" ||
               error.find("allocation limit") != std::string::npos)
       << error;
+}
+
+// --- a measurement next to the evaluator's other deep-data work ------------------------------
+
+// A measurement starts between two steps and waits on no frame: it records the whole stack as
+// its base, so a snapshot taken while it runs keeps every frame, and evaluation resumes where it
+// was. (The other deep-data work, a native call's job, waits on its call's frame instead.)
+TEST(HeapBudgetTest, AMeasurementWaitsOnNoFrame) {
+  cvc::app app;
+  auto env = builtins::make_default_environment();
+  env->set("keep", value_t{int_list(2000)});
+  stackless_evaluator ev(env);
+  process p;
+  p.max_memory = std::size_t{64} << 20;
+  p.state = ev.create_state(parse("(+ 1 (length keep) (length keep))"));
+  p.state.global_env = env;
+  p.state.data_step_nodes = 8;
+  p.state.stats.start();
+  for (int i = 0; i < 4; ++i)
+    ASSERT_FALSE(ev.step(p.state));
+  const std::size_t frames = p.state.stack.size();
+  ASSERT_GT(frames, 1u);
+  for (int i = 0; i < 64 && !p.state.data_work; ++i)
+    heap_after_step(p, std::size_t{1} << 20, 0); // allocations call for a measurement
+  ASSERT_TRUE(p.state.data_work);
+  ASSERT_EQ(p.state.data_work->what, pending_data_work::kind::heap_measure);
+  EXPECT_EQ(p.state.data_work->base, frames);
+  EXPECT_EQ(p.state.data_work->frame_args, p.state.stack.back().results.size());
+
+  auto &node = cvc::state::instance(app)("snapshot");
+  encode_evaluator_state(node, p.state);
+  EXPECT_EQ(decode_evaluator_state(node).stack.size(), frames);
+  // Even a measurement made without a base (0) never shortens a snapshot's stack.
+  p.state.data_work->base = 0;
+  auto &again = cvc::state::instance(app)("snapshot2");
+  encode_evaluator_state(again, p.state);
+  EXPECT_EQ(decode_evaluator_state(again).stack.size(), frames);
+  p.state.data_work->base = frames;
+
+  const int steps = [&] {
+    int n = 0;
+    while (!ev.step(p.state))
+      ++n;
+    return n;
+  }();
+  EXPECT_GT(steps, 0);
+  ASSERT_TRUE(p.state.heap_measured);
+  EXPECT_EQ(std::get<int64_t>(p.state.result.v), 4001);
+}
+
+// fork refuses while deep-data work a call waits on is in flight, but a measurement holds no
+// frame, so a process can fork in the middle of one.
+TEST(HeapBudgetTest, AProcessForksDuringAMeasurement) {
+  cvc::app app;
+  auto &root = cvc::state::instance(app);
+  // Small slices, so a measurement spans many steps; a measurement every 100 steps.
+  root("state_exec.defaults.data.step_nodes").value(std::string("4"));
+  root("state_exec.defaults.limits.heap_check_steps").value(std::string("100"));
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  execute_options opts;
+  opts.max_memory = std::size_t{64} << 20;
+  const int pid =
+      sched.execute(std::string("(begin (set keep (list)) (set i 0) (while (< i 400) "
+                                "(begin (append keep (list i i)) (set i (+ i 1)))) (length keep))"),
+                    opts);
+  // The program has no other deep-data work, so a data step that does not finish a measurement
+  // is one in progress (or, rarely, freeing). Fork there, three times.
+  process_info before = *sched.get_process_info(pid);
+  int forks = 0;
+  while (forks < 3 && before.status != process_status::terminated) {
+    sched.step();
+    const process_info now = *sched.get_process_info(pid);
+    if (now.data_steps > before.data_steps && now.heap_measurements == before.heap_measurements &&
+        now.status != process_status::terminated) {
+      const int child = sched.fork(pid);
+      EXPECT_GE(child, 0);
+      ++forks;
+      if (child >= 0)
+        sched.kill(child);
+    }
+    before = now;
+  }
+  EXPECT_EQ(forks, 3);
+  sched.run();
+  EXPECT_GT(sched.get_process_info(pid)->heap_measurements, 0u);
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(pid)->v), 400);
 }

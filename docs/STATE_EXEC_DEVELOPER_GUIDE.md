@@ -134,6 +134,16 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 **OOP:** `send` (method dispatch), `apply`
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
+`apply`, `send` and `collections.map`/`filter`/`reduce` call a native function or a DSL
+function alike. A DSL function runs as the program's own frames on the same evaluator
+(`call_function()` in `data_job.h`; see §11, "Sliced work"):
+
+```lisp
+(apply (lambda (a b) (* a b)) (list 6 7))        ;; => 42
+(set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))
+(send o "inc" 41)                                ;; => 42
+```
+
 #### Type Conversion
 
 ```lisp
@@ -1399,11 +1409,11 @@ mine.import_module("geo", env, {"geo.area"});         // or a subset
 
 ### Allocation limit
 
-A native call builds its whole result inside one evaluator step. The per-process
-`max_memory` check runs between steps, and the heap it counts is measured after the fact (§7), so
-neither can stop `(collections.range 1000000000)` from allocating. Each function whose result can be larger than all of its
-arguments therefore estimates the result's size and fails before allocating when it is over
-the limit:
+The per-process `max_memory` check runs between steps, and the heap it counts is measured after
+the fact (§7), so neither can stop `(collections.range 1000000000)` from allocating. Each
+function whose result can be larger than all of its arguments therefore works out the result's
+size and fails before building it when it is over the limit. A sliced function (next section)
+checks as soon as it has counted, before it builds anything. The checked functions are:
 
 - `string.split`, `string.join`, `string.replace`, `bytes.concat`;
 - `collections.range`, `collections.zip`, `collections.flatten`, `collections.dict-merge`;
@@ -1433,24 +1443,56 @@ process with it as the exit error; the sync scheduler's `run()` throws it:
 ;;        16777216 bytes (limits.max_alloc_bytes, or what is left of max_memory)
 ```
 
-`collections.unique` and `collections.dict-merge` are quadratic, so they also poll the
-evaluation deadline (`max_time`) as they go.
+### Sliced work
+
+These functions do their work as a data job (`data_job.h`; "Deep data on the executor" in
+`docs/STATE_EXEC_GRAMMAR.md`): `string.split`, `string.join`, `string.replace`,
+`string.encode`, `bytes.slice`, `bytes.concat`, `bytes.decode` and every `collections.*`
+function.
+
+- **Slices.** A slice is `data.step_nodes` nodes: one per element visited, and one per 256
+  bytes (`kDataNodeBytes`) scanned or copied. With `data.step_nodes` = N the call does one
+  slice in its own step. The rest runs N nodes per **data step** while the call waits. Data
+  steps count against `max_steps` and `max_time`, and other processes run between them. A call
+  that fits in one slice takes no extra step.
+- **Defaults.** The app's exec scheduler, pycvc's `Exec` and Ariadne predicates slice 1024
+  nodes a step (`async_scheduler::host_data_defaults()`). With 0, the sync scheduler's default,
+  the work runs whole in the call's step.
+- **Calls.** `collections.map`, `filter` and `reduce` hand each call of their function to the
+  evaluator running the program, and so do the builtins `apply` and `send`. A native function
+  is called inside the data step. A DSL function runs as the process's own frames, so its
+  body's steps are eval steps. The job goes on in the data step after it returns, even with
+  `data.step_nodes` = 0. Another native function can do the same with
+  `call_function(fn, args, who)`.
+- **Cost.** `collections.sort` is a stable merge sort, n log n nodes.
+  `collections.unique` costs a node per comparison, and compares lists and dicts with a sliced
+  equality walk. `collections.dict-merge` keeps a key index, so it is linear. Every job polls the
+  evaluation deadline (`max_time`) about every 64 nodes.
+- **While a call runs.** Signals and watch events wait until the call is done, and `fork`
+  returns -1. A snapshot taken during it restores to the call's start: the call runs again, and
+  calls its function again from the first element.
+- **Measured** (`state_exec_bench_test` `StdlibJobThroughput`, 1024-node steps, MSVC Release):
+  - about 5-20 ns a node for split, join, replace and sort;
+  - about 200-370 ns a node for a 256-byte copy such as `string.encode`, including first-touch
+    page faults;
+  - about 60 ns an element for `collections.map` with a native function, and about 400 ns with
+    `(lambda (x) x)`, whose body's eval steps are included.
 
 ### In Ariadne predicates
 
 A per-frame predicate (`visible_when`, `bind`, `fmt`, …) runs in a reduced environment. It
-gets the stdlib functions whose result is a scalar or no bigger than their argument:
+gets every stdlib function except `math.random`, which would make a predicate
+nondeterministic.
 
-- `string.length`, `string.byte-length`, `string.char-at`, `string.substring`,
-  `string.upper`, `string.lower`, `string.trim`, `string.starts-with`, `string.ends-with`,
-  `string.contains`;
-- `bytes.length`, `bytes.byte-at`;
-- every `math.*` function except `math.random`, which would make a predicate
-  nondeterministic.
+The materializers are safe there because their work is sliced. The step and time caps are
+checked between steps, and a predicate always slices: it uses the app tree's
+`state_exec.defaults.data.step_nodes`, with 1024 for 0 or unset. A huge call is cut by the caps
+(fail-safe, with a warning) instead of stalling the frame, and each call stays under the 16 MiB
+allocation limit.
 
-The rest (`string.join`/`replace`/`split`/`encode`, `bytes.slice`/`concat`/`decode` and all of
-`collections.*`) are unbound in a predicate until they run as scheduled work, a slice per
-step. The `init:` and action lanes get every function.
+A function a predicate passes to `collections.map`, `filter` or `reduce` runs on the
+predicate's own evaluator. The special-form gate, the reduced environment and the caps cover
+its body too. The `init:` and action lanes get every function.
 
 ### Module: `string` (14 functions)
 
@@ -1510,17 +1552,22 @@ text and bytes.
 
 ### Module: `collections` (12 functions)
 
-`collections.map`, `filter` and `reduce` take the list first, then a native function: a
-builtin or a stdlib function. A DSL `lambda` is not accepted yet; it needs the scheduled-work
-mechanism above.
+`collections.map`, `filter` and `reduce` take the list first, then a function. It can be a
+builtin, a stdlib function, a host function (pycvc's `register_fn`) or a DSL function
+(`lambda`, `defun`). A DSL function runs as the program's own steps (see Sliced work), and
+`return` in it returns from it. C++ that calls the registry's function directly, with no
+running program, can pass only a native function.
 
 ```lisp
 (collections.map (list 1 4 9) math.sqrt)          ;; => (1 2 3)
+(collections.map (list 1 2 3) (lambda (x) (* x x))) ;; => (1 4 9)
 (collections.filter (list 1 "a" 2) is-int)        ;; => (1 2)
+(collections.filter (list 1 2 3 4) (lambda (x) (= (% x 2) 0))) ;; => (2 4)
 (collections.reduce (list 1 2 3) + 0)             ;; => 6
+(collections.reduce (list 1 2 3) (lambda (acc x) (+ acc (* x x))) 0) ;; => 14
 (collections.zip (list 1 2) (list "a" "b"))       ;; => ((1 "a") (2 "b"))
 (collections.flatten (list (list 1 2) 3 (list 4))) ;; => (1 2 3 4)   one level
-(collections.sort (list 3 1 2))                   ;; => (1 2 3)
+(collections.sort (list 3 1 2))                   ;; => (1 2 3)   numbers by value, strings by bytes; stable
 (collections.reverse (list 1 2 3))                ;; => (3 2 1)
 (collections.range 1 5)                           ;; => (1 2 3 4)
 (collections.range 5 0 -2)                        ;; => (5 3 1)
