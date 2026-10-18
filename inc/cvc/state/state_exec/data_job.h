@@ -78,6 +78,17 @@ public:
   /// work take the job's place, so a chain of such calls runs in constant space.
   virtual bool forwards_call() const { return false; }
 
+  /// For measuring the heap of a process whose work waits on the job (heap.h), which happens
+  /// between its slices: `visit` is called with each value the job owns a copy of (what it was
+  /// given, what it has built so far). A job that only borrows its caller's arguments, or whose
+  /// results are held to the allocation limit as they grow, need not report them.
+  virtual void held_values(const std::function<void(const value_t &)> &visit) const { (void)visit; }
+
+  /// The heap bytes the job takes itself, its object and its own buffers, besides what the
+  /// values it reports hold. A job left to run after its call reports these as allocated
+  /// (eval_alloc_note), so a heap measurement comes due as such jobs pile up.
+  virtual std::size_t held_bytes() const { return 0; }
+
 protected:
   std::size_t nodes_ = 0;
   std::optional<call_request> call_;

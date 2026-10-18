@@ -64,8 +64,9 @@ std::size_t heap_remeasure_bytes(std::size_t last_measured);
 /// The heap accounting a scheduler does after each step of `proc`: take a measurement that just
 /// finished (proc.heap_bytes), add `allocated` (the step guard's eval_alloc_guard::allocated()),
 /// and start the next measurement as the process's data work when one is due
-/// (process::heap_measure_due). `state_bytes` is the memory tracker's count for the process.
-/// Nothing is measured for a process without a memory budget.
+/// (process::heap_measure_due), on top of any deep-data work in flight. The measurement counts
+/// that work too, with what its jobs hold (data_job::held_values). `state_bytes` is the memory
+/// tracker's count for the process. Nothing is measured for a process without a memory budget.
 void heap_after_step(process &proc, std::size_t allocated, uint64_t state_bytes);
 
 // ---------------------------------------------------------------------------

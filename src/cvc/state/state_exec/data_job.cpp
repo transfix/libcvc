@@ -503,6 +503,17 @@ public:
 
   bool forwards_call() const override { return true; }
 
+  void held_values(const std::function<void(const value_t &)> &visit) const override {
+    visit(fn_);
+    for (const value_t &a : args_)
+      visit(a);
+    visit(result_);
+  }
+
+  std::size_t held_bytes() const override {
+    return sizeof(*this) + args_.capacity() * sizeof(value_t);
+  }
+
 private:
   value_t fn_;
   std::vector<value_t> args_;
@@ -519,6 +530,16 @@ public:
   bool step(std::size_t nodes) override;
 
   value_t result() override { return make_list(std::move(values_)); }
+
+  // The generator itself is the waiting call's argument, which its frame holds.
+  void held_values(const std::function<void(const value_t &)> &visit) const override {
+    for (const value_t &v : values_)
+      visit(v);
+  }
+
+  std::size_t held_bytes() const override {
+    return sizeof(*this) + values_.capacity() * sizeof(value_t);
+  }
 
 private:
   // Keep a value it yielded. True when the walk goes on (collect).
@@ -760,6 +781,7 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
     job->call_returned(std::move(value));
   }
   job->own_inputs();
+  eval_alloc_note(job->held_bytes()); // it outlives the call (heap.h)
   scope->deferred_ = std::make_unique<detail::deferred_data_job>(
       detail::deferred_data_job{std::move(job), std::move(then), std::move(waits_on)});
   return nil_value;

@@ -739,9 +739,8 @@ int async_scheduler::fork(int pid) {
     return -1;
   // Deep-data work in flight (a function collections.map calls, say) is not copied: a child
   // could not finish the call its stack waits on. A heap measurement waits on no frame, so a
-  // child without it is whole.
-  if (parent.state.data_work &&
-      parent.state.data_work->what != pending_data_work::kind::heap_measure)
+  // child without it is whole, unless the measurement runs on top of such work.
+  if (waits_on_data_work(parent.state))
     return -1;
 
   int child_pid = next_pid_++;
