@@ -77,6 +77,8 @@ private:
     vehicle_controls controls;
     double last_speed = 0.0;
     bool have_last_speed = false;
+    double accel_trim = 0.0; // the driver's integral correction (m/s^2)
+    double trim_sign = 1.0;  // the sign of the command the trim learnt
     // Applied this step.
     double throttle = 0.0, brake = 0.0, hand_brake = 0.0;
     vec3 aero_force, air_velocity;

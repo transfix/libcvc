@@ -293,6 +293,9 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   }
   w.end_array();
   w.key("clutch_strength").number(d.clutch_strength);
+  w.key("converter_k").number(d.converter_k);
+  w.key("converter_stall").number(d.converter_stall);
+  w.key("converter_coupling").number(d.converter_coupling);
   w.key("driveline_efficiency").number(d.driveline_efficiency);
   w.key("torque_curve").begin_array();
   for (const auto &p : d.torque_curve) {

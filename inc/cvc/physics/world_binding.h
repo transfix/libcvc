@@ -114,7 +114,8 @@
 //     vehicles.<name>.tuning.{max_steer, max_steer_rate, max_accel, max_decel,
 //       drag_coefficient, frontal_area, air_density, rolling_resistance,
 //       engine_max_torque, engine_min_rpm, engine_max_rpm, shift_up_rpm, shift_down_rpm,
-//       shift_up_rpm_light, shift_down_rpm_light, clutch_strength, driveline_efficiency}
+//       shift_up_rpm_light, shift_down_rpm_light, clutch_strength, converter_k,
+//       converter_stall, converter_coupling, driveline_efficiency}
 //     vehicles.<name>.tuning.axles.<i>.{max_brake_torque, max_hand_brake_torque,
 //       suspension_frequency, suspension_damping, anti_roll_stiffness}
 //                                                         world::set_vehicle

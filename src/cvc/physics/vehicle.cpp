@@ -100,6 +100,11 @@ vehicle_desc vehicle_desc::humvee() {
   // intermediate (ISO 8178's 60% of rated), 700 rpm idle.
   d.engine_friction_curve = {{700.0, 78.0}, {2040.0, 87.0}, {3400.0, 128.0}};
   d.clutch_strength = 40.0; // [est] a converter coupling that slips ~5% at peak torque
+  // [est] the 4L80-E's converter stalling near 1900 rpm against the 393 N m peak: 53 N m of
+  // creep at idle
+  d.converter_k = 95.8;
+  d.converter_stall = 2.0;     // [est] the converter's torque ratio at stall
+  d.converter_coupling = 0.85; // [est] its coupling point
   // [est] gearbox 0.90, transfer case 0.98, two hypoid axles 0.96, geared hubs 0.97
   d.driveline_efficiency = 0.82;
   d.gear_ratios = {2.48, 1.48, 1.0, 0.75}; // [AMG] four-speed automatic
@@ -265,6 +270,10 @@ void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
          "engine_friction_curve needs (rpm, N m) points in ascending rpm, torques >= 0");
   }
   need(positive(d.clutch_strength), "clutch_strength must be finite and > 0");
+  need(std::isfinite(d.converter_k) && d.converter_k >= 0.0, "converter_k must be finite and >= 0");
+  need(std::isfinite(d.converter_stall) && d.converter_stall >= 1.0 && d.converter_coupling > 0.0 &&
+           d.converter_coupling <= 1.0,
+       "converter_stall must be >= 1 and converter_coupling in (0, 1]");
   need(d.driveline_efficiency > 0.0 && d.driveline_efficiency <= 1.0,
        "driveline_efficiency must be in (0, 1]");
   for (const double g : d.gear_ratios)
@@ -629,16 +638,30 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
       // One controller: the wanted acceleration, corrected by how far the measured one
       // misses it, is a throttle when positive and a brake when negative. So a_cmd = 0 keeps
       // the speed on a grade (braking against gravity downhill, pulling against it uphill).
-      constexpr double kDeadband = 0.05, kGain = 0.5, kHoldSpeed = 0.3;
-      const double u = want + kGain * (want - got);
+      // The correction is proportional plus an integral trim, which learns what the
+      // feed-forward on max_accel / max_decel gets wrong (a converter's launch, a grade, a
+      // load); the trim restarts when the command turns from speeding up to slowing down, and
+      // holds while the pedal it drives is saturated.
+      constexpr double kDeadband = 0.05, kGain = 0.5, kHoldSpeed = 0.3, kTrim = 2.0; // 1/s
+      if ((want > 0.0) != (v.trim_sign > 0.0)) {
+        v.accel_trim = 0.0;
+        v.trim_sign = want > 0.0 ? 1.0 : -1.0;
+      }
+      const double u = want + kGain * (want - got) + v.accel_trim;
       if (along < -kHoldSpeed) {
         brake = 1.0; // moving the wrong way: stop first
+        v.accel_trim = 0.0;
       } else if (std::fabs(want) <= kDeadband && std::fabs(along) < kHoldSpeed) {
         brake = 1.0; // slow, with nothing asked: hold on the brakes (a grade included)
-      } else if (u > kDeadband) {
-        throttle = clamp(u / d.max_accel, 0.0, 1.0);
-      } else if (u < -kDeadband) {
-        brake = clamp(-u / d.max_decel, 0.0, 1.0);
+        v.accel_trim = 0.0;
+      } else {
+        if (u > kDeadband)
+          throttle = clamp(u / d.max_accel, 0.0, 1.0);
+        else if (u < -kDeadband)
+          brake = clamp(-u / d.max_decel, 0.0, 1.0);
+        const double e = want - got;
+        if (!((throttle >= 1.0 && e > 0.0) || (brake >= 1.0 && e < 0.0)))
+          v.accel_trim = clamp(v.accel_trim + kTrim * e * dt, -d.max_decel, d.max_accel);
       }
     }
     // An empty battery or tank gives no throttle.
@@ -873,6 +896,8 @@ void vehicle_set::save(const world_backend &be, std::string &out) const {
     put_flag(out, v.controls.neutral);
     put(out, v.last_speed);
     put_flag(out, v.have_last_speed);
+    put(out, v.accel_trim);
+    put(out, v.trim_sign);
     put(out, static_cast<std::uint64_t>(v.readback.wheels.size()));
     for (const double l : v.medium_load)
       put(out, l);
@@ -921,6 +946,8 @@ void vehicle_set::restore(world_backend &be, const std::string &in, std::size_t 
     v.controls.neutral = get_flag(in, pos);
     get(in, pos, v.last_speed);
     v.have_last_speed = get_flag(in, pos);
+    get(in, pos, v.accel_trim);
+    get(in, pos, v.trim_sign);
     std::uint64_t wheels = 0;
     get(in, pos, wheels);
     if (wheels != v.readback.wheels.size())

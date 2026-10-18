@@ -262,6 +262,9 @@ const std::pair<const char *, double vehicle_desc::*> kVehicleKnobs[] = {
     {"shift_up_rpm", &vehicle_desc::shift_up_rpm},
     {"shift_down_rpm", &vehicle_desc::shift_down_rpm},
     {"clutch_strength", &vehicle_desc::clutch_strength},
+    {"converter_k", &vehicle_desc::converter_k},
+    {"converter_stall", &vehicle_desc::converter_stall},
+    {"converter_coupling", &vehicle_desc::converter_coupling},
     {"driveline_efficiency", &vehicle_desc::driveline_efficiency},
     {"shift_up_rpm_light", &vehicle_desc::shift_up_rpm_light},
     {"shift_down_rpm_light", &vehicle_desc::shift_down_rpm_light}};

@@ -151,9 +151,20 @@ struct vehicle_desc {
   // already net of it, so none applies, but the fuel's Willans line burns for it.
   std::vector<std::pair<double, double>> engine_friction_curve;
   // The coupling between engine and gearbox (Jolt's clutch): its torque is
-  // clutch_strength x the slip speed, N m s/rad. It stands for a torque converter's
-  // coupling, without the converter's torque multiplication.
+  // clutch_strength x the slip speed, N m s/rad: a torque converter's coupling, which
+  // converter_k below limits and multiplies.
   double clutch_strength = 10.0;
+  // A torque converter's capacity (rpm per sqrt(N m), its K-factor; 0 = none, the clutch
+  // alone). With its output held, a converter carries (engine rpm / converter_k)^2 of torque,
+  // which is what an idling engine creeps the vehicle with; the clutch's linear coupling
+  // applies only below that. Without it, Jolt's idle-speed clamp drives the wheels through the
+  // clutch with clutch_strength x the slip, far more than the brakes hold.
+  double converter_k = 0.0;
+  // The converter's torque ratio: converter_stall at stall (the gearbox input still), falling
+  // linearly to 1 at the speed ratio converter_coupling, where it couples. Used with
+  // converter_k > 0.
+  double converter_stall = 2.0;
+  double converter_coupling = 0.85;
   // The fraction of the engine's torque the driveline (gearbox, transfer case, axles,
   // hubs) delivers to the wheels. The rest its gears lose (the ledger's drivetrain).
   double driveline_efficiency = 1.0;

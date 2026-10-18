@@ -565,6 +565,12 @@ struct jolt_vehicle {
   energy_tally tally; // the energy ledger's measurements (with a ledger)
   // The shift points with the throttle shut and wide open (rpm).
   std::pair<float, float> shift_up{0.0f, 0.0f}, shift_down{0.0f, 0.0f};
+  // The clutch's strength and the converter's K-factor (vehicle_desc), for the converter's
+  // capacity each step.
+  float clutch_strength = 10.0f, converter_k = 0.0f;
+  float converter_stall = 1.0f, converter_coupling = 0.85f; // the converter's torque ratio
+  std::vector<float> gears;                                 // the gearbox's own ratios
+  float reverse_gear = 0.0f;
   bool ledger = false;
 };
 
@@ -1160,6 +1166,13 @@ public:
     ctl->driveline_efficiency = d.driveline_efficiency;
     ctl->engine_friction = d.engine_friction_curve;
     ctl->accessory_power = d.energy.accessory_power;
+    v->clutch_strength = static_cast<float>(d.clutch_strength);
+    v->converter_k = static_cast<float>(d.converter_k);
+    v->converter_stall = static_cast<float>(d.converter_stall);
+    v->converter_coupling = static_cast<float>(d.converter_coupling);
+    for (const double g : d.gear_ratios)
+      v->gears.push_back(static_cast<float>(g));
+    v->reverse_gear = static_cast<float>(d.reverse_ratio);
     v->shift_up = {
         static_cast<float>(d.shift_up_rpm_light > 0.0 ? d.shift_up_rpm_light : d.shift_up_rpm),
         static_cast<float>(d.shift_up_rpm)};
@@ -1204,6 +1217,10 @@ public:
     engine.mMaxTorque = static_cast<float>(d.engine_max_torque * d.driveline_efficiency);
     ctl->driveline_efficiency = d.driveline_efficiency;
     ctl->engine_friction = d.engine_friction_curve;
+    v.clutch_strength = static_cast<float>(d.clutch_strength);
+    v.converter_k = static_cast<float>(d.converter_k);
+    v.converter_stall = static_cast<float>(d.converter_stall);
+    v.converter_coupling = static_cast<float>(d.converter_coupling);
     v.shift_up = {
         static_cast<float>(d.shift_up_rpm_light > 0.0 ? d.shift_up_rpm_light : d.shift_up_rpm),
         static_cast<float>(d.shift_up_rpm)};
@@ -1275,12 +1292,69 @@ public:
               ? 0.0f
               : static_cast<float>(ctl->friction_torque(rpm) / (double(engine.mInertia) * w));
     }
-    // The automatic shifts early when driven gently, late at full throttle.
+    // The torque converter (vehicle_desc::converter_k > 0). With the engine at w_e and the
+    // gearbox input at w_t (the wheels through the gearing), the speed ratio is w_t / w_e:
+    //  - below the coupling point it multiplies the engine's torque, from converter_stall at
+    //    stall to 1 at the coupling point. Scaling the gear ratios by that torque ratio does it
+    //    without making energy: Jolt's clutch then slips against TR x w_t, and its loss is
+    //    T (w_e - TR w_t), which a converter's efficiency TR x SR <= 1 keeps >= 0;
+    //  - it carries at most (rpm / K)^2: the clutch's linear coupling, at the slip it has now,
+    //    is cut to that, so an idling engine creeps the vehicle as a converter does rather than
+    //    with Jolt's idle clamp behind the whole clutch.
+    // slip_rpm is how far the slip lifts the engine above the gearbox input, for the shifts.
+    float slip_rpm = 0.0f;
+    if (v.converter_k > 0.0f) {
+      JPH::VehicleTransmission &tr = ctl->GetTransmission();
+      const JPH::VehicleEngine &engine = ctl->GetEngine();
+      const int gear = tr.GetCurrentGear();
+      const float base = gear > 0 && gear <= static_cast<int>(v.gears.size())
+                             ? v.gears[static_cast<std::size_t>(gear - 1)]
+                             : (gear < 0 ? v.reverse_gear : 0.0f);
+      float strength = v.clutch_strength, torque_ratio = 1.0f;
+      if (base != 0.0f) {
+        float out = 0.0f, share = 0.0f;
+        for (const JPH::VehicleDifferentialSettings &d : ctl->GetDifferentials()) {
+          float w = 0.0f;
+          int k = 0;
+          for (const int idx : {d.mLeftWheel, d.mRightWheel})
+            if (idx >= 0) {
+              w += v.constraint->GetWheel(static_cast<JPH::uint>(idx))->GetAngularVelocity();
+              ++k;
+            }
+          if (k > 0) {
+            out += d.mEngineTorqueRatio * d.mDifferentialRatio * w / static_cast<float>(k);
+            share += d.mEngineTorqueRatio;
+          }
+        }
+        if (share > 0.0f) {
+          const float w_t = base * out / share, w_e = engine.GetAngularVelocity();
+          const float sr = w_e > 0.0f ? std::min(std::max(w_t / w_e, 0.0f), 1.0f) : 1.0f;
+          if (sr < v.converter_coupling)
+            torque_ratio =
+                v.converter_stall - (v.converter_stall - 1.0f) * sr / v.converter_coupling;
+          slip_rpm = std::max(0.0f, engine.GetCurrentRPM() -
+                                        std::fabs(w_t) * JPH::VehicleEngine::cAngularVelocityToRPM);
+          const float slip = std::fabs(w_e - torque_ratio * w_t);
+          const float r = engine.GetCurrentRPM() / v.converter_k;
+          if (slip * strength > r * r)
+            strength = r * r / slip;
+        }
+      }
+      for (std::size_t g = 0; g < v.gears.size() && g < tr.mGearRatios.size(); ++g)
+        tr.mGearRatios[g] = v.gears[g] * torque_ratio;
+      if (!tr.mReverseGearRatios.empty())
+        tr.mReverseGearRatios[0] = v.reverse_gear * torque_ratio;
+      tr.mClutchStrength = strength;
+    }
+    // The automatic shifts early when driven gently, late at full throttle, on its output's
+    // speed as a real one does: Jolt shifts on the engine's, which a slipping converter lifts,
+    // so the converter's slip is added to the shift points.
     {
       const float th = std::min(1.0f, std::fabs(static_cast<float>(forward)));
       JPH::VehicleTransmission &gears = ctl->GetTransmission();
-      gears.mShiftUpRPM = v.shift_up.first + (v.shift_up.second - v.shift_up.first) * th;
-      gears.mShiftDownRPM = v.shift_down.first + (v.shift_down.second - v.shift_down.first) * th;
+      gears.mShiftUpRPM = v.shift_up.first + (v.shift_up.second - v.shift_up.first) * th + slip_rpm;
+      gears.mShiftDownRPM =
+          v.shift_down.first + (v.shift_down.second - v.shift_down.first) * th + slip_rpm;
     }
     JPH::VehicleTransmission &tr = ctl->GetTransmission();
     if (neutral) {

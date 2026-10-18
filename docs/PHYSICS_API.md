@@ -214,6 +214,10 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     `cot(δ_out) − cot(δ_in) = track / wheelbase`.
 - **The driver model.** `drive` turns `a_cmd` into throttle or brake, never both: a
   feed-forward on `max_accel` / `max_decel`, corrected by the measured acceleration.
+  - The correction is proportional, plus an integral trim (2/s). The trim learns what the
+    feed-forward gets wrong: a converter's launch, a grade, a load.
+  - The trim restarts when the command turns from speeding up to slowing down, and holds
+    while its pedal is saturated.
   - The transmission shifts on its own; `reverse` backs up.
   - A vehicle moving the wrong way brakes first.
   - One with no command (|a_cmd| at most 0.05) and slower than 0.3 m/s holds on the full
@@ -226,11 +230,19 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     manufacturer publishes it.
   - `engine_friction_curve` is its motoring friction against its speed. It brakes the
     vehicle with the throttle shut; under throttle the torque curve is already net of it.
-  - `clutch_strength` couples engine and gearbox (N m per rad/s of slip), standing for a
-    torque converter without its torque multiplication.
+  - `clutch_strength` couples engine and gearbox (N m per rad/s of slip).
+  - With `converter_k` > 0, that coupling is a torque converter's:
+    - it multiplies the engine's torque, from `converter_stall` with the gearbox input still
+      to 1 at the speed ratio `converter_coupling`. The gear ratios are scaled by that torque
+      ratio, so Jolt's clutch slips against it and books the converter's loss, and no
+      energy is made;
+    - it carries at most (rpm / `converter_k`)² of torque, so an idling engine creeps the
+      vehicle as a converter does. Without it, Jolt's idle-speed clamp drives the wheels with
+      the whole clutch, more than half the brakes hold.
   - `driveline_efficiency` is the share of the engine's torque the gears deliver.
   - The automatic shifts at `shift_up_rpm` / `shift_down_rpm` at full throttle and at the
-    `_light` points with it shut, between them with the throttle.
+    `_light` points with it shut, between them with the throttle. It shifts on its input's
+    speed, not the engine's that a slipping converter lifts.
 - **Tires.** Slip curves peak at 1.0 times the μ of what the tire touches: the material of the
   terrain cell or mesh face under it, the table every plant reads.
 - **Resistance**, applied to the chassis each step from the last step's wheels:
@@ -301,7 +313,8 @@ The two presets:
     2040 and 700 rpm) are assumed.
   - **Estimates:**
     - the driveline's 82% (gearbox, transfer case, axles, hubs);
-    - the converter's coupling;
+    - the 4L80-E's converter: stalling near 1900 rpm against the peak torque (K = 95.8, 53 N m
+      of creep at idle), 2:1 at stall, coupling at 0.85;
     - 2.5 kW of accessories;
     - C_d A of 2.45 m^2;
     - C_rr of 0.015.
@@ -318,15 +331,14 @@ collision steps):
 
 | Check | Published | The twin |
 |---|---|---|
-| M1097A2 at GVW, full throttle, 0-30 mph | 9.4 s, the Army's requirement [AMG] | 10.1 s |
-| M1097A2 at GVW, 0-50 mph | 26.1 s [AMG] | 25.1 s |
+| M1097A2 at GVW, full throttle, 0-30 mph | 9.4 s, the Army's requirement [AMG] | 8.9 s |
+| M1097A2 at GVW, 0-50 mph | 26.1 s [AMG] | 23.6 s |
 | Idle fuel | 2.6 lb/h (1.4 L/h) on the dynamometer, without the vehicle's accessories [DTIC] | 1.95 L/h, with 2.5 kW of them |
-| Range at GVW, 30-40 mph, hard surface, hilly | 442 km on bias-ply tires, about 490 km on radials [TM] | At 35 mph on radials: 602 km level, 613 km over 3 m hills 400 m apart (15.5-15.8 L/100 km) |
+| Range at GVW, 30-40 mph, hard surface, hilly | 442 km on bias-ply tires, about 490 km on radials [TM] | At 35 mph on radials: 596 km level, 600 km over 3 m hills 400 m apart (15.8-15.9 L/100 km) |
 
-The acceleration matches; the twin is 7% slow to 30 mph, where a converter's torque
-multiplication, which it does not model, does the most.
+The acceleration meets the requirement. The converter's torque multiplication gives the launch.
 
-The range does not match yet. The twin goes about 23% further on a tank than the TM says, and
+The range does not match yet. The twin goes about 22% further on a tank than the TM says, and
 its losses so far are only the documented ones. Still to model or measure:
 
 - an unlocked converter's slip at cruise;
@@ -402,11 +414,11 @@ Gates (`physics_energy_test`, Windows MSVC):
 
 | Gate | Measured |
 |---|---|
-| A closed cycle over five 1 m hills: accelerate to 10 m/s, hold it (throttle up, brake down), stop and stand. \|residual\| <= 2% of supplied at any collision step, \|residual + drivetrain_split\| <= 2% at 8 | At 8: 494 kJ supplied; residual -76 J (0.02%), drivetrain_split +4.9 kJ (0.99%). The split is 4.9% at 2 steps and 2.3% at 4 |
-| Coasting with no input from 15 m/s: supplied = 0, and dKE + dPE = -dissipated within 2% | supplied 0; 222 kJ stored lost against 222 kJ dissipated, residual +83 J |
+| A closed cycle over five 1 m hills: accelerate to 10 m/s, hold it (throttle up, brake down), stop and stand. \|residual\| <= 2% of supplied at any collision step, \|residual + drivetrain_split\| <= 2% at 8 | At 8: 640 kJ supplied; residual -64 J (0.01%), drivetrain_split +4.5 kJ (0.70%). The split is 3.9% at 2 steps and 1.4% at 4 |
+| Coasting with no input from 15 m/s: supplied = 0, and dKE + dPE = -dissipated within 2% | supplied 0; 211 kJ stored lost against 211 kJ dissipated, residual +52 J |
 | Coasting down a 6 degree ramp in neutral: the kinetic energy gained = -dPE - dissipated within 2% | +62.4 kJ kinetic, -73.9 kJ potential; residual +46 J |
-| Regeneration never credits more than the brakes take | RoboRacer, three 5 m/s stops: 79.6 J returned of 117.7 J of braking (68%); at a 2 W cap, 2.7 J |
-| The RoboRacer's split shrinks with the step: \|residual + drivetrain_split\| <= 2% at 32 | The split is 20.6%, 11.4%, 5.35%, 2.41% and 1.14% of supplied at 2, 4, 8, 16 and 32 steps; the residual is at most 0.07% |
+| Regeneration never credits more than the brakes take | RoboRacer, three 5 m/s stops: 79.4 J returned of 117.9 J of braking (67%); at a 2 W cap, 2.9 J |
+| The RoboRacer's split shrinks with the step: \|residual + drivetrain_split\| <= 2% at 32 | The split is 20.8%, 11.5%, 5.2%, 2.2% and 1.1% of supplied at 2, 4, 8, 16 and 32 steps; the residual is at most 0.06% |
 | Fuel follows the Willans line | Idle in neutral: 1.653 kg/h, the line's 1.653 kg/h; none on the overrun |
 
 What the ledger showed about the first presets, and what became of it:
@@ -415,9 +427,10 @@ What the ledger showed about the first presets, and what became of it:
   damping of 0.2/s at every throttle, and a clutch of strength 10 slipping 51 rad/s at full
   torque.
   - Now the engine's friction is the dynamometer's, and it acts only with the throttle shut.
-  - The clutch is 40, and the gears deliver 82%.
-  - At a steady 35 mph the drivetrain takes 19% of the engine's work. On a hilly cycle it
-    takes more, because it includes the engine braking down the hills.
+  - The clutch is 40, a converter's, and the gears deliver 82%.
+  - At a steady 35 mph the drivetrain takes 20% of the engine's work. On the hilly cycle it
+    takes about half, because it also holds the converter's slip at the launches and the
+    engine braking down the hills.
 - **The RoboRacer's split error exceeded its supplied energy while braking.** Its motor
   inertia was 1e-4 kg m^2, behind 12:1 gearing.
   - With the lab's gearing (15.15:1) and an estimated 2e-6 kg m^2 rotor, the split is 21% at
@@ -427,6 +440,12 @@ What the ledger showed about the first presets, and what became of it:
   - Most of the RoboRacer's split comes from braking its wheels while the motor stays
     coupled. The real car brakes through its motor, so modelling the VESC's braking as
     motor torque would remove most of it.
+- **The converter's creep** (found by P4's plant):
+  - Jolt holds an idling engine at its idle speed, and with a stiff clutch that clamp drove
+    the wheels with about 2.9 kN m of creep.
+  - So a Humvee at a few m/s, throttle shut and brakes at half, sped up at 3.4 m/s^2.
+  - The converter's capacity now limits the creep to about 53 N m at the engine (doubled at
+    stall), and its torque multiplication gives back the launch the clamp had faked.
 
 ## Static world geometry: `add_world_geometry`
 
