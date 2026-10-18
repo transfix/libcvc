@@ -749,3 +749,97 @@ TEST_F(DataStepsStateJson, NodesRemovedBetweenSlicesAreStillWritten) {
   EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v), before);
   EXPECT_EQ(root("wide").numChildren(), 0u);
 }
+
+// ---- methods and generators inside the process ----------------------------------
+//
+// A class method is a closure run as frames of the process that sends to it, and a DSL
+// generator's body is advanced as a job (make_generator_job): both are the process's own steps,
+// counted against its budget, where each used to run to completion on an evaluator of its own
+// inside one step.
+
+TEST_F(DataStepsScheduler, MethodStepsCountAgainstMaxSteps) {
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  const std::string script = "(begin (defclass C (spin (self n) (begin (set i 0)"
+                             " (while (< i n) (set i (+ i 1))) i))) (set o (C))"
+                             " (send o \"spin\" 2000))";
+  const int done = sched.execute(script);
+  sched.run();
+  auto info = sched.get_process_info(done);
+  ASSERT_TRUE(info);
+  EXPECT_EQ(info->status, process_status::terminated);
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(done)->v), 2000);
+  EXPECT_GT(info->eval_steps, 2000u); // the method's loop, step by step
+
+  execute_options opts;
+  opts.max_steps = 500;
+  const int killed = sched.execute(script, opts);
+  sched.run();
+  EXPECT_EQ(sched.get_process_info(killed)->status, process_status::killed);
+}
+
+TEST_F(DataStepsScheduler, GeneratorBodiesRunASlicePerStep) {
+  root("state_exec.defaults.data.step_nodes").value("16");
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  const std::string script = "(begin (set g (generator (lambda () (begin (set k 0)"
+                             " (while (< k 500) (set k (+ k 1))) (yield k) (yield 7)))))"
+                             " (list (next g) (next g) (next g) (length (collect (range 0 100)))))";
+  const int done = sched.execute(script);
+  sched.run();
+  auto info = sched.get_process_info(done);
+  ASSERT_TRUE(info);
+  ASSERT_EQ(info->status, process_status::terminated);
+  const auto &r = *std::get<list_ptr>(sched.get_result(done)->v);
+  ASSERT_EQ(r.size(), 4u);
+  EXPECT_EQ(std::get<int64_t>(r[0].v), 500);
+  EXPECT_EQ(std::get<int64_t>(r[1].v), 7);
+  EXPECT_TRUE(r[2].is_nil()); // exhausted
+  EXPECT_EQ(std::get<int64_t>(r[3].v), 100);
+  EXPECT_GT(info->data_nodes, 2000u); // the body's steps, and range's values
+  EXPECT_GT(info->data_steps, 100u);
+
+  execute_options opts;
+  opts.max_steps = info->eval_steps + 20; // room for the program, not the generator's body
+  const int killed = sched.execute(script, opts);
+  sched.run();
+  EXPECT_EQ(sched.get_process_info(killed)->status, process_status::killed);
+}
+
+TEST_F(DataStepsScheduler, ForOverAGeneratorGivesTheSameSlicedOrNot) {
+  const std::string script = "(begin (set g (generator (lambda () (begin (set j 0)"
+                             " (while (< j 50) (begin (yield j) (set j (+ j 1))))))))"
+                             " (set s 0) (for x g (set s (+ s x))) s)";
+  for (const char *slice : {"0", "4"}) {
+    root("state_exec.defaults.data.step_nodes").value(slice);
+    scheduler sched;
+    sched.set_watch_root(&root);
+    sched.load_settings();
+    const int pid = sched.execute(script);
+    sched.run();
+    ASSERT_EQ(sched.get_process_info(pid)->status, process_status::terminated) << slice;
+    EXPECT_EQ(std::get<int64_t>(sched.get_result(pid)->v), 49 * 50 / 2) << slice;
+  }
+}
+
+TEST_F(DataStepsScheduler, ConstructorReturnsTheInstanceAfterInitDefers) {
+  // K inherits P's init, a closure that compares two deep lists: the comparison runs as data
+  // steps inside init's frames, and the constructor's value is still the instance, not init's.
+  root("state_exec.defaults.data.step_nodes").value("16");
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  const int pid = sched.execute(
+      std::string("(begin (set a 1) (set b 1) (set i 0)"
+                  " (while (< i 300) (begin (set a (list a)) (set b (list b)) (set i (+ i 1))))"
+                  " (defclass P (init (self x) (begin (set-attr self \"same\" (= a b)) 42)))"
+                  " (defclass K P) (set o (K 1)) (get-attr o \"same\"))"));
+  sched.run();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info);
+  ASSERT_EQ(info->status, process_status::terminated);
+  EXPECT_TRUE(std::get<bool>(sched.get_result(pid)->v));
+  EXPECT_GT(info->data_steps, 0u);
+}

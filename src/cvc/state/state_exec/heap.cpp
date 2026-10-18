@@ -58,11 +58,7 @@ template <class F> void value_edges(const value_t &v, F &f) {
           if (x)
             f(node_kind::data, x);
         } else if constexpr (std::is_same_v<T, native_fn>) {
-          if (const auto *m = x.template target<detail::class_method>()) {
-            if (m->method)
-              f(node_kind::closure, m->method);
-            env_edge(m->global_env, f);
-          } else if (const auto *c = x.template target<detail::class_constructor>()) {
+          if (const auto *c = x.template target<detail::class_constructor>()) {
             if (c->cls_dict)
               f(node_kind::dict, c->cls_dict);
           } else if (const auto *i = x.template target<detail::class_inherited_method>()) {
