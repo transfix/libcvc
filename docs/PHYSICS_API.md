@@ -760,7 +760,8 @@ The parts:
   reports it. `nav_sim_world_set_terrain` and `set_terrain_config` set the terrain;
   `terrain_settings` and `infeasible_entries` read it back. `nav_sim_world_pull` / `publish`
   bind its settings, and `nav_sim_world_tick` counts its ticks.
-  `nav_sim_world_create` takes `""` for the built-in policy (`coef_mlp::default_biased`).
+  `nav_sim_world_create` takes `""` for the built-in policy (`coef_mlp::default_biased`), and
+  an optional `map_id` / `n_planes` that puts agents in their own belief planes.
 - **Key metadata.** `state_comment`, `state_property` and `state_property_keys` read what a
   key says it is.
 - **Lifetimes.** A `nav_plant` keeps its world alive, a `physics_binding` its app and world, and

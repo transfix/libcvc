@@ -930,7 +930,10 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
                                  double k_steer, int nsub, int allow_reverse, double reach_tol,
                                  int sense_every, int freeze_sense, double l_occ, double l_free,
                                  double l_clamp, int optimistic, double p_thresh, double band,
-                                 double ttl_s) {
+                                 double ttl_s, PyObject *map_id = nullptr, int n_planes = 1) {
+    // map_id (optional, (N,) ints each in [0, n_planes)) puts each agent in its own belief
+    // plane: one per agent is the fog-of-war twin, one per group a clustered fleet. Omitted:
+    // one shared plane.
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -996,12 +999,36 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     cfg.band = band;
     cfg.ttl_s = ttl_s;
 
+    const int *mid = nullptr;
+    if (map_id && map_id != Py_None) {
+      PyArrayObject *ma = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(map_id, NPY_INT32, 1, 1, NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_FORCECAST));
+      if (!ma) {
+        PyErr_Clear();
+        fail("pycvc.nav_sim_world_create: map_id is an (N,) array of plane ids");
+      }
+      hold.push_back(ma);
+      if (PyArray_DIM(ma, 0) != N || n_planes < 1)
+        fail("pycvc.nav_sim_world_create: map_id must hold N ids, and n_planes be >= 1");
+      mid = static_cast<const int *>(PyArray_DATA(ma));
+      for (int i = 0; i < N; ++i)
+        if (mid[i] < 0 || mid[i] >= n_planes)
+          fail("pycvc.nav_sim_world_create: a map_id is outside [0, n_planes)");
+    }
+
     cvc::nav::sim_world *sw = nullptr;
-    sw = new cvc::nav::sim_world(cfg, static_cast<const std::uint8_t *>(PyArray_DATA(tr)),
-                                 static_cast<const std::uint8_t *>(PyArray_DATA(pr)),
-                                 std::move(model), static_cast<const float *>(PyArray_DATA(oa)),
-                                 static_cast<const float *>(PyArray_DATA(ga)),
-                                 static_cast<const float *>(PyArray_DATA(ca)), N);
+    try {
+      sw = new cvc::nav::sim_world(cfg, static_cast<const std::uint8_t *>(PyArray_DATA(tr)),
+                                   static_cast<const std::uint8_t *>(PyArray_DATA(pr)),
+                                   std::move(model), static_cast<const float *>(PyArray_DATA(oa)),
+                                   static_cast<const float *>(PyArray_DATA(ga)),
+                                   static_cast<const float *>(PyArray_DATA(ca)), N, mid,
+                                   mid ? n_planes : 1);
+    } catch (...) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw;
+    }
     for (PyArrayObject *h : hold)
       Py_DECREF(h);
     return PyCapsule_New(sw, kSimWorldCapsule, sim_world_capsule_dtor);

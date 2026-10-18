@@ -257,6 +257,26 @@ def test_plant_selection():
     expect_raises(lambda: pycvc.nav_sim_world_set_plant(sim, 42), "a plant that is not one")
 
 
+def test_private_belief_planes():
+    """nav_sim_world_create's map_id puts each agent in its own belief plane (the fog-of-war
+    twin), as sim_world's constructor does."""
+    occ = np.zeros((81, 81), np.uint8)
+    on = np.array([[-1.0, 0.0], [1.0, 0.0]], np.float32)
+    goal = np.array([[1.0, 0.0], [-1.0, 0.0]], np.float32)
+    color = np.ones((2, 3), np.float32)
+    args = [occ, occ, "", on, goal, color, 81, 81, -40.0, -40.0, 40.0, 40.0, 0.0, 0.0, 0.05,
+            60.0, 240, 6.283185307179586, 0.15, 0.35, 0.06, 0.4, 0.165, 0.6, 0.12, 0.12, 0.8,
+            6, 1, 0.2, 4, 0, 2.2, -1.4, 8.0, 1, 0.5, 0.15, 4.0]
+    shared = pycvc.nav_sim_world_create(*args)
+    check(pycvc.nav_sim_world_planes(shared) == 1, "one shared plane by default")
+    private = pycvc.nav_sim_world_create(*args, np.array([0, 1], np.int32), 2)
+    check(pycvc.nav_sim_world_planes(private) == 2, "one plane per agent with map_id")
+    check(list(pycvc.nav_sim_world_agent_planes(private)) == [0, 1], "each agent in its own")
+    pycvc.nav_sim_world_step(private)
+    expect_raises(lambda: pycvc.nav_sim_world_create(*args, np.array([0, 2], np.int32), 2),
+                  "a plane id past n_planes")
+
+
 def test_settings_in_the_tree():
     sim = make_sim()
     w = pycvc.physics_world()
@@ -324,7 +344,8 @@ def test_terrain():
 
 def main():
     for t in (test_golden_and_reference, test_the_same_numbers_three_ways, test_save_restore,
-              test_plant_selection, test_settings_in_the_tree, test_terrain):
+              test_plant_selection, test_private_belief_planes, test_settings_in_the_tree,
+              test_terrain):
         t()
         print("ok  " + t.__name__)
     print("test_pycvc_physics: %d checks passed" % checks)
