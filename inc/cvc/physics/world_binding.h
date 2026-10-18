@@ -93,7 +93,7 @@
 //     bodies.<name>.position.{x,y,z}, rotation.{w,x,y,z}, velocity.{x,y,z},
 //       angular_velocity.{x,y,z}, active, field_force.{x,y,z}, immersed_volume
 //     vehicles.<name>.chassis, speed, steer, steer_command, throttle, brake,
-//       hand_brake, gear, engine_rpm, position.*, rotation.*, velocity.*,
+//       hand_brake, gear, engine_rpm, accel_trim, position.*, rotation.*, velocity.*,
 //       angular_velocity.*, aero_force.{x,y,z}, air_velocity.{x,y,z}
 //     vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact,
 //       contact_point.{x,y,z}, load, longitudinal_slip, lateral_slip, friction,
@@ -115,7 +115,9 @@
 //       drag_coefficient, frontal_area, air_density, rolling_resistance,
 //       engine_max_torque, engine_min_rpm, engine_max_rpm, shift_up_rpm, shift_down_rpm,
 //       shift_up_rpm_light, shift_down_rpm_light, clutch_strength, converter_k,
-//       converter_stall, converter_coupling, driveline_efficiency}
+//       converter_stall, converter_coupling, driveline_efficiency, engine_friction_curve}
+//                                          engine_friction_curve is "rpm:N m" points,
+//                                          "700:78, 2040:87, 3400:128" ("none": none)
 //     vehicles.<name>.tuning.axles.<i>.{max_brake_torque, max_hand_brake_torque,
 //       suspension_frequency, suspension_damping, anti_roll_stiffness}
 //                                                         world::set_vehicle

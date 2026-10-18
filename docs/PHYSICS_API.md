@@ -282,6 +282,8 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
   torque and tire curves, the energy source) throws `cvc::physics_error` naming it and changes
   nothing. Like materials, a tuning is not part of `save()`.
 
+  Through the tree an invalid tuning value is ignored on its own; the other knobs still apply.
+
 ### The presets
 
 `vehicle_desc::humvee()` is an M1097A2 HMMWV and `vehicle_desc::roboracer()` the UT-AV lab's
@@ -598,12 +600,12 @@ a key reads back exactly as the world held it.
 |---|---|---|
 | `bodies.<name>.{id, motion, position.*, rotation.*, velocity.*, angular_velocity.*, active, field_force.*, immersed_volume}` | written by `push()` | `motion` is `static`, `kinematic` or `dynamic` |
 | `bodies.<name>.{material, mass, linear_damping, angular_damping, allow_sleeping}` | every `pull()` | `world::set_body`; the material by name |
-| `vehicles.<name>.{chassis, speed, steer, steer_command, throttle, brake, hand_brake, gear, engine_rpm, position.*, rotation.*, velocity.*, angular_velocity.*, aero_force.*, air_velocity.*}` | written by `push()` | The `vehicle_state` |
+| `vehicles.<name>.{chassis, speed, steer, steer_command, throttle, brake, hand_brake, gear, engine_rpm, accel_trim, position.*, rotation.*, velocity.*, angular_velocity.*, aero_force.*, air_velocity.*}` | written by `push()` | The `vehicle_state` |
 | `vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact, contact_point.*, load, longitudinal_slip, lateral_slip, friction, rolling_resistance, medium_depth, sinkage, rut, medium_resistance}` | written by `push()` | Each `wheel_state` |
 | `vehicles.<name>.energy.{P_W, supplied_J, idle_J, brake_J, tire_J, aero_J, roll_J, medium_J, drivetrain_J, drivetrain_split_J, suspension_J, chassis_damping_J, fields_J, stored_J, residual_J, regen_J, source_J, soc, fuel_kg, fuel_left_kg, distance_m, Wh_per_km}` | written by `push()` | The energy ledger, in doc 31's D11 names |
 | `vehicles.<name>.command.{steer, accel, reverse}` | every `pull()` | A change calls `world::drive` |
 | `vehicles.<name>.controls.{steer, throttle, brake, hand_brake, reverse, neutral}` | every `pull()` | A change calls `world::set_controls` |
-| `vehicles.<name>.tuning.<value>`, `tuning.axles.<i>.<value>` | every `pull()` | `world::set_vehicle`, with the scalar values above (not `engine_friction_curve`) |
+| `vehicles.<name>.tuning.<value>`, `tuning.axles.<i>.<value>` | every `pull()` | `world::set_vehicle`, with the values above; `engine_friction_curve` is a string of `rpm:N m` points, `"700:78, 2040:87, 3400:128"`, or `"none"` |
 | `fields.<name>.{drag_coefficient, damping, traction}` | every `pull()` | `world::set_field`, which keeps a medium's ruts |
 | `fields.<name>.{kind, ruts.cells, ruts.deepest}` | written by `push()` | Telemetry |
 

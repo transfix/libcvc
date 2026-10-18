@@ -377,6 +377,7 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("speed").number(s.speed);
   w.key("steer").number(s.steer);
   w.key("steer_command").number(s.steer_command);
+  w.key("accel_trim").number(s.accel_trim);
   w.key("throttle").number(s.throttle);
   w.key("brake").number(s.brake);
   w.key("hand_brake").number(s.hand_brake);

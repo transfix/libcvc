@@ -877,6 +877,22 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
             vehicle_desc::humvee().max_steer);
   EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.axles.1.suspension_frequency"),
             vehicle_desc::humvee().axles[1].suspension_frequency);
+  // The powertrain's knobs, seeded too: the converter, the driveline, the light shift points
+  // and the friction curve.
+  {
+    const vehicle_desc h = vehicle_desc::humvee();
+    for (const auto &k : std::vector<std::pair<std::string, double>>{
+             {"clutch_strength", h.clutch_strength},
+             {"converter_k", h.converter_k},
+             {"converter_stall", h.converter_stall},
+             {"converter_coupling", h.converter_coupling},
+             {"driveline_efficiency", h.driveline_efficiency},
+             {"shift_up_rpm_light", h.shift_up_rpm_light},
+             {"shift_down_rpm_light", h.shift_down_rpm_light}})
+      EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning." + k.first), k.second) << k.first;
+    EXPECT_EQ(tree(a, "physics.vehicles.truck.tuning.engine_friction_curve"),
+              "700:78, 2040:87, 3400:128");
+  }
   set_tree(a, "physics.vehicles.truck.command.accel", "2");
   for (int i = 0; i < 200; ++i)
     b.step();
@@ -891,6 +907,7 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   EXPECT_EQ(tree_num(a, "physics.vehicles.truck.wheels.0.contact_point.z"),
             s.wheels[0].contact_point.z);
   EXPECT_EQ(tree(a, "physics.vehicles.truck.gear"), std::to_string(s.gear));
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.accel_trim"), s.accel_trim);
   EXPECT_EQ(tree(a, "physics.vehicles.truck.chassis"), std::to_string(s.chassis.value));
   {
     // The same tick as JSON, for Python and remote readers.
@@ -939,6 +956,20 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   set_tree(a, "physics.vehicles.truck.tuning.max_steer", "7");
   EXPECT_NO_THROW(b.step());
   EXPECT_EQ(w.get_vehicle(v).max_steer, 0.2);
+  // The converter and the friction curve from the tree; a curve that does not parse is
+  // ignored.
+  set_tree(a, "physics.vehicles.truck.tuning.converter_stall", "1.5");
+  set_tree(a, "physics.vehicles.truck.tuning.engine_friction_curve", "800:60; 3000:100");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).converter_stall, 1.5);
+  EXPECT_EQ(w.get_vehicle(v).engine_friction_curve,
+            (std::vector<std::pair<double, double>>{{800.0, 60.0}, {3000.0, 100.0}}));
+  set_tree(a, "physics.vehicles.truck.tuning.engine_friction_curve", "800:sixty");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).engine_friction_curve.size(), 2u);
+  set_tree(a, "physics.vehicles.truck.tuning.engine_friction_curve", "none");
+  b.step();
+  EXPECT_TRUE(w.get_vehicle(v).engine_friction_curve.empty());
   // Pedals.
   set_tree(a, "physics.vehicles.truck.controls.hand_brake", "1");
   b.step();

@@ -316,8 +316,9 @@ struct vehicle_state {
   double throttle = 0.0, brake = 0.0, hand_brake = 0.0; // applied this step
   int gear = 0;                                         // -1 reverse, 0 neutral, 1.. forward
   double engine_rpm = 0.0;
-  vec3 aero_force;   // N, the drag applied
-  vec3 air_velocity; // m/s, the air's (a flow field's wind, or still)
+  double accel_trim = 0.0; // m/s^2, the driver model's integral trim (vehicle_set's driver)
+  vec3 aero_force;         // N, the drag applied
+  vec3 air_velocity;       // m/s, the air's (a flow field's wind, or still)
   std::vector<wheel_state> wheels;
   vehicle_energy energy; // its ledger since it was added
 };

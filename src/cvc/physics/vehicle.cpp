@@ -848,6 +848,7 @@ vehicle_state vehicle_set::state(const world_backend &be, vehicle_id id) const {
   out.speed = dot(out.body.linear_velocity, rotate(out.body.rotation, {1.0, 0.0, 0.0}));
   out.steer = v.steer;
   out.steer_command = v.steer_command;
+  out.accel_trim = v.accel_trim;
   out.throttle = v.throttle;
   out.brake = v.brake;
   out.hand_brake = v.hand_brake;

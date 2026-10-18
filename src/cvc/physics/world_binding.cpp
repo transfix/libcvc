@@ -24,6 +24,7 @@
 #include <cvc/physics/world_binding.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
+#include <sstream>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -290,7 +291,59 @@ const char *const kControlKeys[] = {"steer",      "throttle", "brake",
 // Equal, or both NaN: a knob that holds "nan" is not a change on every pull.
 bool same_value(double a, double b) { return a == b || (std::isnan(a) && std::isnan(b)); }
 
+// The engine's friction curve as a knob: "rpm:N m" points, separated by commas, spaces or
+// semicolons ("700:78, 2040:87, 3400:128"); "" or "none" is no friction.
+std::string curve_text(const std::vector<std::pair<double, double>> &c) {
+  std::ostringstream o;
+  o.precision(10);
+  for (std::size_t i = 0; i < c.size(); ++i)
+    o << (i ? ", " : "") << c[i].first << ':' << c[i].second;
+  return o.str();
+}
+
+bool parse_curve(const std::string &raw, std::vector<std::pair<double, double>> &out) {
+  std::vector<std::pair<double, double>> c;
+  std::string item;
+  const auto take = [&](const std::string &t) {
+    const std::string s = trim_lower(t);
+    if (s.empty())
+      return true;
+    const std::size_t colon = s.find(':');
+    double a = 0.0, b = 0.0;
+    if (colon == std::string::npos || !parse_num(s.substr(0, colon), a) ||
+        !parse_num(s.substr(colon + 1), b))
+      return false;
+    c.emplace_back(a, b);
+    return true;
+  };
+  if (trim_lower(raw) != "none")
+    for (const char ch : raw + ",") {
+      if (ch == ',' || ch == ';' || ch == ' ' || ch == '\t') {
+        if (!take(item))
+          return false;
+        item.clear();
+      } else {
+        item += ch;
+      }
+    }
+  out = std::move(c);
+  return true;
+}
+
+void knob_curve(cvc::app &ctx, const std::string &path, std::vector<std::pair<double, double>> &v) {
+  const std::string raw = read_raw(ctx, path);
+  if (raw.empty()) {
+    write_val(ctx, path, v.empty() ? std::string("none") : curve_text(v));
+    return;
+  }
+  std::vector<std::pair<double, double>> parsed;
+  if (parse_curve(raw, parsed))
+    v = std::move(parsed);
+}
+
 bool same_tuning(const vehicle_desc &a, const vehicle_desc &b) {
+  if (a.engine_friction_curve != b.engine_friction_curve)
+    return false;
   for (const auto &k : kVehicleKnobs)
     if (!same_value(a.*k.second, b.*k.second))
       return false;
@@ -302,6 +355,7 @@ bool same_tuning(const vehicle_desc &a, const vehicle_desc &b) {
 }
 
 void copy_tuning(const vehicle_desc &from, vehicle_desc &to) {
+  to.engine_friction_curve = from.engine_friction_curve;
   for (const auto &k : kVehicleKnobs)
     to.*k.second = from.*k.second;
   for (std::size_t i = 0; i < from.axles.size() && i < to.axles.size(); ++i)
@@ -730,6 +784,7 @@ void world_binding::write(const publication &p) const {
     write_val(_ctx, at(base, "hand_brake"), vs.hand_brake);
     write_val(_ctx, at(base, "gear"), vs.gear);
     write_val(_ctx, at(base, "engine_rpm"), vs.engine_rpm);
+    write_val(_ctx, at(base, "accel_trim"), vs.accel_trim);
     put_vec(_ctx, at(base, "position"), vs.body.position);
     put_quat(_ctx, at(base, "rotation"), vs.body.rotation);
     put_vec(_ctx, at(base, "velocity"), vs.body.linear_velocity);
@@ -1006,6 +1061,7 @@ void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
   const std::string tuning = at(base, "tuning");
   for (const auto &k : kVehicleKnobs)
     knob(_ctx, at(tuning, k.first), t.*k.second);
+  knob_curve(_ctx, at(tuning, "engine_friction_curve"), t.engine_friction_curve);
   for (std::size_t i = 0; i < t.axles.size(); ++i)
     for (const auto &k : kAxleKnobs)
       knob(_ctx, at(tuning, "axles." + std::to_string(i) + "." + k.first), t.axles[i].*k.second);
@@ -1013,9 +1069,32 @@ void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
     try {
       vehicle_desc d = _w.get_vehicle(v.id);
       copy_tuning(t, d);
-      _w.set_vehicle(v.id, d);
+      try {
+        _w.set_vehicle(v.id, d);
+      } catch (const cvc::exception &) {
+        // An invalid value is ignored, the rest apply: the changed knobs one at a time, each
+        // kept when the vehicle takes it.
+        vehicle_desc good = _w.get_vehicle(v.id);
+        const auto attempt = [&](const auto &change) {
+          vehicle_desc trial = good;
+          change(trial);
+          try {
+            _w.set_vehicle(v.id, trial);
+            good = trial;
+          } catch (const cvc::exception &) {
+          }
+        };
+        for (const auto &k : kVehicleKnobs)
+          if (!same_value(t.*k.second, v.tuned.*k.second))
+            attempt([&](vehicle_desc &x) { x.*k.second = t.*k.second; });
+        for (std::size_t i = 0; i < t.axles.size() && i < v.tuned.axles.size(); ++i)
+          for (const auto &k : kAxleKnobs)
+            if (!same_value(t.axles[i].*k.second, v.tuned.axles[i].*k.second))
+              attempt([&](vehicle_desc &x) { x.axles[i].*k.second = t.axles[i].*k.second; });
+        if (t.engine_friction_curve != v.tuned.engine_friction_curve)
+          attempt([&](vehicle_desc &x) { x.engine_friction_curve = t.engine_friction_curve; });
+      }
     } catch (const cvc::exception &) {
-      // An invalid value is ignored: the vehicle keeps its last good tuning.
     }
     v.tuned = t;
   }
