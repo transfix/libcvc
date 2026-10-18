@@ -73,6 +73,11 @@ public:
   /// from that call's arguments.
   virtual void own_inputs() {}
 
+  /// True for a job whose result is the value of the one call it makes, unchanged (a call
+  /// call_function() made a job). When that call leaves work of its own, the evaluator lets the
+  /// work take the job's place, so a chain of such calls runs in constant space.
+  virtual bool forwards_call() const { return false; }
+
 protected:
   std::size_t nodes_ = 0;
   std::optional<call_request> call_;
@@ -132,15 +137,19 @@ data_options data_options_from_state(cvc::state &root, const std::string &schedu
 /// evaluator: it runs a slice per step, makes the job's calls (a DSL function as ordinary
 /// frames of the same process) and completes the call with then's value once the job is done;
 /// what this returns is then ignored, so the native function should return it at once.
-/// Anywhere else the job runs to completion here (see run_to_completion). Without `then`, the
-/// job's result is the call's.
+/// A native function the job calls is called here only from the step's own native call
+/// (data_step_scope::calls_here); deeper, the evaluator calls it. Anywhere else the job runs to
+/// completion here (see run_to_completion). Without `then`, the job's result is the call's.
 value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_t)> then = {});
 
 /// Apply `fn`, a native function or a DSL closure, to `args` from inside a native function.
-/// A native function is called here. A closure runs through the evaluator, as a one-call job
-/// (run_data_job): inside a stackless evaluator step its body becomes the process's own frames,
-/// and the native function should return what this returns at once; anywhere else a closure
-/// throws. `who` names the caller in errors.
+/// Inside a stackless evaluator step the call is the evaluator's, as a one-call job
+/// (run_data_job): a closure's body becomes the process's own frames, and a native function is
+/// called by the evaluator at its own level, in a data step, unless this is the step's own native
+/// call, which calls it here (data_step_scope::calls_here). The native function should return
+/// what this returns at once. Anywhere else a native function is called here, one level of
+/// native nesting (detail::native_nesting), and a closure throws. `who` names the caller in
+/// errors.
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who);
 
 /// As call_function, with `then` applied to the call's value: for a native function that has
@@ -150,16 +159,18 @@ value_t call_function(const value_t &fn, std::span<const value_t> args, const ch
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who,
                       std::function<value_t(value_t)> then);
 
-/// How native calls may nest on one thread's native stack. A level is a native function calling
-/// another function itself (apply, send, a class constructor running init, an inherited init
-/// running its superclass's, a job's call made where the job runs) or stepping a generator's own
-/// evaluator. The evaluator applying a native function is not a level, and neither is a DSL
-/// function or class method: those run as evaluator frames, on the heap. A self-containing
-/// argument list, a class whose init is its own constructor, or a long enough chain of such calls
-/// asks for unbounded nesting, so a level is refused (it throws) past kMaxNativeNesting levels, or
-/// when less than kNativeStackReserve bytes of the thread's native stack are left (where the
-/// platform says where its stack ends). Levels cost from about 0.5 KiB (apply) to a few KiB (a
-/// generator's evaluator) in a release build.
+/// How native calls may nest on one thread's native stack. Inside an evaluator step they barely
+/// do: when a native function (apply, send, a class constructor running init, an inherited init
+/// running its superclass's, a job) calls a native function, the call is made here only from the
+/// native function the step applies, and any call deeper than that is the evaluator's, made in a
+/// data step (data_step_scope::calls_here). So a self-containing argument list, a class whose init
+/// is its own constructor, or a long chain of inits is a sequence of steps, stopped by max_steps
+/// and max_time like a loop. What still nests is a level: that one call, a generator stepping its
+/// own evaluator, and a native function calling another from C++ with no evaluator step running
+/// (or one that cannot wait for it, see run_to_completion). A level is refused (it throws) past
+/// kMaxNativeNesting levels, or when less than kNativeStackReserve bytes of the thread's native
+/// stack are left (where the platform says where its stack ends). Levels cost from about 0.5 KiB
+/// (apply) to a few KiB (a generator's evaluator) in a release build.
 constexpr std::size_t kMaxNativeNesting = 256;
 
 /// The native stack a level leaves for the error it may throw. MSVC runs a catch block before
@@ -232,6 +243,12 @@ public:
   /// The job a native call deferred, if any.
   std::unique_ptr<deferred_data_job> take_deferred() { return std::move(deferred_); }
 
+  /// Whether a native function that the native call being applied wants called (call_function,
+  /// a job's call) is called right here, on the native stack: only from that native call itself,
+  /// one level down, and while the slice has room. A call from deeper goes to the evaluator,
+  /// which makes it at its own level, so native calls nest at most one level in a step.
+  bool calls_here() const;
+
   /// Free backlog owners with what is left of the slice (all of them when not slicing).
   void drain_backlog();
 
@@ -241,11 +258,14 @@ public:
 private:
   friend value_t cvc::state_exec::run_data_job(std::unique_ptr<data_job>,
                                                std::function<value_t(value_t)>);
+  friend value_t cvc::state_exec::call_function(const value_t &, std::span<const value_t>,
+                                                const char *);
   friend void cvc::state_exec::count_data_nodes(std::size_t);
 
   std::size_t step_nodes_;
   evaluation_stats &stats_;
   release_backlog *backlog_;
+  std::size_t native_depth_; // native_nesting::depth() when the step began
   std::size_t nodes_ = 0;
   bool may_defer_ = false;
   std::unique_ptr<deferred_data_job> deferred_;

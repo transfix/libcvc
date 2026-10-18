@@ -30,8 +30,17 @@ struct class_inherited_method {
   dict_ptr super_cls; // may be null: no superclass
   std::string name;   // "init" or "finalize"
   value_t operator()(std::span<const value_t> args) const;
+  /// The method a call of this one comes to: up the chain of classes that inherit it too, the
+  /// first class's own `name` method, or nullptr when no class defines one (the default). A
+  /// chain longer than kInheritedHops classes (or one that loops) stops at the inherited method
+  /// it reached, whose call goes on from there.
+  const value_t *resolve() const;
   ~class_inherited_method() { drop_owner(super_cls); }
 };
+
+/// How many classes up one call of an inherited method looks itself (class_inherited_method::
+/// resolve) before it leaves the rest of the chain to a call.
+constexpr int kInheritedHops = 64;
 
 } // namespace cvc::state_exec::detail
 

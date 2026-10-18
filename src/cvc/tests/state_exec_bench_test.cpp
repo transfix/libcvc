@@ -290,6 +290,39 @@ TEST_F(ExecBenchTest, StdlibJobThroughput) {
   report("stdlib_small_calls_10000", M, std::chrono::duration_cast<ns>(t1 - t0));
 }
 
+TEST_F(ExecBenchTest, NativeCallThroughput) {
+  if (!bench_enabled()) {
+    SUCCEED();
+    return;
+  }
+
+  // Native functions calling native functions (apply, send to a native method, a constructor
+  // running inherited inits), 10000 calls a loop; native_call_plain is the loop with a direct
+  // call, for comparison.
+  constexpr int64_t kCalls = 10000;
+  constexpr int M = 20;
+  auto env = builtins::make_default_environment();
+  const auto loop = [&](const char *name, const std::string &setup, const std::string &call) {
+    const std::string src = "(begin " + setup + " (set i 0) (while (< i " + std::to_string(kCalls) +
+                            ") (begin " + call + " (set i (+ i 1)))) i)";
+    auto t0 = hrclock::now();
+    for (int r = 0; r < M; ++r) {
+      stackless_evaluator ev(env);
+      ev.evaluate_script(src);
+    }
+    auto t1 = hrclock::now();
+    report(name, M * kCalls, std::chrono::duration_cast<ns>(t1 - t0));
+  };
+  loop("native_call_plain", "", "(list i 1)");
+  loop("native_call_apply", "", "(apply list (list i 1))");
+  loop("native_call_apply_apply", "", "(apply apply (list list (list i 1)))");
+  loop("native_call_send_native", "(defclass C) (set-attr C.__cls_dict__ \"m\" list) (set o (C))",
+       "(send o \"m\" i)");
+  loop("native_call_construct_inherited", "(defclass P) (defclass K P)", "(K)");
+  loop("native_call_construct_chain4", "(defclass A) (defclass B A) (defclass C B) (defclass D C)",
+       "(D)");
+}
+
 TEST_F(ExecBenchTest, SchedulerThroughput) {
   if (!bench_enabled()) {
     SUCCEED();
