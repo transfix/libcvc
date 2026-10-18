@@ -8,12 +8,15 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#ifndef __CVC_ARIADNE_ROOM_INTRINSICS_H__
-#define __CVC_ARIADNE_ROOM_INTRINSICS_H__
+#ifndef __CVC_ARIADNE_CONFERENCE_ROOM_INTRINSICS_H__
+#define __CVC_ARIADNE_CONFERENCE_ROOM_INTRINSICS_H__
 
 // Ariadne DSL surface for the conference ROOM control plane (roadmap
-// ARIADNE_CONFERENCE_ROADMAP.md §4b). Opt-in, exactly like register_stream_intrinsics: a host/test
-// calls register_room_intrinsics(app) to add the program-lane verbs:
+// ARIADNE_CONFERENCE_ROADMAP.md §4b), namespace cvc::ariadne::conference. The conference is a LAYER
+// on top of the general streaming substrate (cvc::ariadne::stream / cvc::gl::ariadne), which stays
+// task-neutral; only the room/authority model is conference-specific and lives here. Opt-in,
+// exactly like register_stream_intrinsics: a host/test calls register_room_intrinsics(app) to add
+// the program-lane verbs:
 //
 //   (room-join ENDPOINT ROOM-ID [PROFILE])  Join ROOM-ID (PROFILE is a dict, e.g. {"name" …}).
 //                                           Publishes my participant subtree into the shared room
@@ -21,9 +24,9 @@
 //                                           { "ok" "room" "pid" "token" "endpoint" } (or
 //                                           { "ok" #f "error" }).
 //   (room-roster ROOM)                      ROOM = the handle from (room-join). Returns a list of
-//                                           participant dicts { "pid" "name" "present" }, in pid
-//                                           order — every participant currently in the room tree,
-//                                           local and (once replicated) remote.
+//                                           participant dicts { "pid" "name" }, in pid order —
+//                                           every PRESENT participant in the room tree, local and
+//                                           (once replicated) remote.
 //   (room-leave ROOM)                       Remove my participant subtree + drop the handle.
 //                                           Returns { "ok" #t/#f }.
 //
@@ -52,6 +55,7 @@ namespace cvc {
 class app;
 
 namespace ariadne {
+namespace conference {
 
 void register_room_intrinsics(cvc::app &app);
 
@@ -89,7 +93,8 @@ void room_leave(cvc::app &app, const std::string &room_id, const std::string &pi
 // has no present participants or does not exist in this app's tree yet.
 std::vector<room_participant> room_roster(cvc::app &app, const std::string &room_id);
 
+} // namespace conference
 } // namespace ariadne
 } // namespace cvc
 
-#endif // __CVC_ARIADNE_ROOM_INTRINSICS_H__
+#endif // __CVC_ARIADNE_CONFERENCE_ROOM_INTRINSICS_H__

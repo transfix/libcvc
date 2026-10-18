@@ -14,7 +14,7 @@
 // harness from state_transport_inproc_test (two apps + two shards + an inproc transport +
 // pump_all); no gRPC and no Runtime/backend are needed because the model is pure replicated state.
 
-#include <cvc/ariadne/room_intrinsics.h>
+#include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -23,13 +23,13 @@
 #include <string>
 #include <vector>
 
-namespace ar = cvc::ariadne;
+namespace conf = cvc::ariadne::conference;
 
 namespace {
 
-const ar::room_participant *by_pid(const std::vector<ar::room_participant> &r,
-                                   const std::string &pid) {
-  for (const ar::room_participant &p : r)
+const conf::room_participant *by_pid(const std::vector<conf::room_participant> &r,
+                                     const std::string &pid) {
+  for (const conf::room_participant &p : r)
     if (p.pid == pid)
       return &p;
   return nullptr;
@@ -41,10 +41,10 @@ const ar::room_participant *by_pid(const std::vector<ar::room_participant> &r,
 // reads back in pid order, and a leave retracts it.
 TEST(RoomIntrinsics, RosterReadsLocalJoinsAndLeaves) {
   cvc::app app;
-  ar::room_join(app, "standup", "A", "Alice");
-  ar::room_join(app, "standup", "B", "Bob");
+  conf::room_join(app, "standup", "A", "Alice");
+  conf::room_join(app, "standup", "B", "Bob");
 
-  std::vector<ar::room_participant> r = ar::room_roster(app, "standup");
+  std::vector<conf::room_participant> r = conf::room_roster(app, "standup");
   ASSERT_EQ(r.size(), 2u);
   EXPECT_EQ(r[0].pid, "A"); // children() returns names in order, so the roster is pid-ordered
   EXPECT_EQ(r[0].name, "Alice");
@@ -52,11 +52,11 @@ TEST(RoomIntrinsics, RosterReadsLocalJoinsAndLeaves) {
   EXPECT_EQ(r[1].name, "Bob");
 
   // An unknown room is simply empty, never an error.
-  EXPECT_TRUE(ar::room_roster(app, "no-such-room").empty());
+  EXPECT_TRUE(conf::room_roster(app, "no-such-room").empty());
 
   // A (soft) leave drops the participant from the present roster.
-  ar::room_leave(app, "standup", "A");
-  std::vector<ar::room_participant> r2 = ar::room_roster(app, "standup");
+  conf::room_leave(app, "standup", "A");
+  std::vector<conf::room_participant> r2 = conf::room_roster(app, "standup");
   ASSERT_EQ(r2.size(), 1u);
   EXPECT_EQ(r2[0].pid, "B");
 }
@@ -74,12 +74,12 @@ TEST(RoomIntrinsics, JoinReplicatesAcrossNodes) {
   tp.register_shard(&sA);
   tp.register_shard(&sB);
 
-  ar::room_join(aA, "standup", sA.local_node_id(), "Alice");
-  ar::room_join(aB, "standup", sB.local_node_id(), "Bob");
+  conf::room_join(aA, "standup", sA.local_node_id(), "Alice");
+  conf::room_join(aB, "standup", sB.local_node_id(), "Bob");
   tp.pump_all();
 
-  std::vector<ar::room_participant> ra = ar::room_roster(aA, "standup");
-  std::vector<ar::room_participant> rb = ar::room_roster(aB, "standup");
+  std::vector<conf::room_participant> ra = conf::room_roster(aA, "standup");
+  std::vector<conf::room_participant> rb = conf::room_roster(aB, "standup");
   EXPECT_EQ(ra.size(), 2u) << "A should see both participants after replication";
   EXPECT_EQ(rb.size(), 2u) << "B should see both participants after replication";
 
@@ -107,19 +107,19 @@ TEST(RoomIntrinsics, LeaveRetractsParticipantAcrossNodes) {
   tp.register_shard(&sA);
   tp.register_shard(&sB);
 
-  ar::room_join(aA, "standup", "A", "Alice");
-  ar::room_join(aB, "standup", "B", "Bob");
+  conf::room_join(aA, "standup", "A", "Alice");
+  conf::room_join(aB, "standup", "B", "Bob");
   tp.pump_all();
-  ASSERT_EQ(ar::room_roster(aB, "standup").size(), 2u);
+  ASSERT_EQ(conf::room_roster(aB, "standup").size(), 2u);
 
-  ar::room_leave(aA, "standup", "A");
+  conf::room_leave(aA, "standup", "A");
   tp.pump_all();
 
-  std::vector<ar::room_participant> ra = ar::room_roster(aA, "standup");
+  std::vector<conf::room_participant> ra = conf::room_roster(aA, "standup");
   ASSERT_EQ(ra.size(), 1u) << "A retracted its own participant";
   EXPECT_EQ(ra[0].pid, "B");
 
-  std::vector<ar::room_participant> rb = ar::room_roster(aB, "standup");
+  std::vector<conf::room_participant> rb = conf::room_roster(aB, "standup");
   ASSERT_EQ(rb.size(), 1u) << "A's leave replicated to B";
   EXPECT_EQ(rb[0].pid, "B");
 
