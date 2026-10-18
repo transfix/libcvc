@@ -48,7 +48,9 @@ struct nav_stats_publish_params {
 // are published as-is; a reader treats >= 1e29 as "unmeasured" (the value lane has no null).
 // With a physics plant that measures energy (energy_tracked), the episode also gets
 // .episode.{total_energy_J, total_building_contacts} and each vehicle .veh.<i>.{energy_J,
-// energy_per_km, building_contacts}; without one those leaves are not written.
+// energy_per_km, building_contacts}; without one those leaves are not written. Likewise with a
+// terrain (terrain_tracked): .episode.total_infeasible_slope_steps and each vehicle
+// .veh.<i>.infeasible_slope_steps.
 void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePrefix,
                        const cvc::nav::episode_nav_stats &e, long tick,
                        const nav_stats_publish_params &p = {});

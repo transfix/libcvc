@@ -107,6 +107,9 @@ int main() {
   en.per_vehicle[1].energy_J = 9.0e5;
   en.per_vehicle[1].energy_per_km = 1.1e7;
   en.per_vehicle[1].building_contacts = 1;
+  en.terrain_tracked = true;
+  en.total_infeasible_slope_steps = 0;
+  en.per_vehicle[1].terrain_tracked = true;
   cvc::gl::publish_nav_stats(pub, "nrg", en, 1);
   pub.flush();
   ck(std::fabs(st("nrg.nav_stats.veh.1.energy_J").value<double>() - 9.0e5) < 1e-3, "veh1 energy");
@@ -116,6 +119,11 @@ int main() {
   ck(std::fabs(st("nrg.nav_stats.episode.total_energy_J").value<double>() - 9.0e5) < 1e-3,
      "fleet energy");
   ck(st("nrg.nav_stats.episode.total_building_contacts").value<int>() == 1, "fleet contacts");
+  ck(st("nrg.nav_stats.veh.1.infeasible_slope_steps").value<int>() == 0, "veh1 slope entries");
+  ck(st("nrg.nav_stats.episode.total_infeasible_slope_steps").value<int>() == 0,
+     "fleet slope entries");
+  ck(!st("nrg.nav_stats.veh.1.infeasible_slope_steps").comment().empty(),
+     "infeasible_slope_steps has a comment");
   // every leaf says what it is
   ck(!st("nrg.nav_stats.veh.1.energy_J").comment().empty(), "energy_J has a comment");
   ck(st("nrg.nav_stats.veh.1.energy_per_km").property("unit") == "J/km", "energy_per_km unit");

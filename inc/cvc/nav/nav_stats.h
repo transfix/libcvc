@@ -127,6 +127,9 @@ struct nav_samplers {
   // and the record and its JSON carry neither, byte-unchanged.
   const double *energy_step_J = nullptr;
   const int *static_contacts = nullptr;
+  // Terrain (sim_world::set_terrain): 1 for each vehicle whose footprint touched an infeasible
+  // slope cell THIS step ([n]); null ⇒ untracked, and neither the record nor its JSON carries it.
+  const int *slope_entries = nullptr;
   // Per-agent drive diagnostics for THIS step (drive_sample[n]); null ⇒ the drive-telemetry stats
   // stay at their defaults (feature off). The collector reduces these per vehicle into means/peaks.
   // The caller maps its drive_telemetry -> drive_sample (see drive_sample) once per tick.
@@ -196,6 +199,9 @@ struct veh_nav_stats {
   double energy_J = 0;
   double energy_per_km = 0;
   int building_contacts = 0;
+  // ticks its footprint touched an infeasible slope (terrain_tracked: a terrain was set)
+  bool terrain_tracked = false;
+  int infeasible_slope_steps = 0;
   // formation holding (0 unless a formation_slot sampler is provided) — distance to this vehicle's
   // slot, and whether it ended in it. The continuous formation-holding measure, distinct from the
   // mission-arrival latch above (a deep-formation slot is legitimately far from the objective
@@ -261,6 +267,10 @@ struct episode_nav_stats {
   bool energy_tracked = false;
   double total_energy_J = 0;
   int total_building_contacts = 0;
+  // the fleet's ticks on infeasible slope, when a terrain was set (veh_nav_stats::terrain_tracked;
+  // otherwise 0 and left out of the JSON)
+  bool terrain_tracked = false;
+  int total_infeasible_slope_steps = 0;
   // fleet belief coverage (all zero unless the caller fills it via compute_coverage). Episode-level
   // because the belief rasters are shared across the fleet; per-plane detail lives in the rasters
   // themselves (published for visualization), not here.

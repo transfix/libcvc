@@ -8,19 +8,14 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// What world_binding's keys are, for other applications: each key's comment and its properties
-// (cvc::state::property). Every key gets a comment and an "access" property:
-//   build      read when the world is built; a later change sets restart_required
-//   knob       read by every pull(), applied when it changes
-//   command    an input the world acts on when it changes (a drive command, pedals)
-//   telemetry  written by push()
-// Numeric keys get a "unit" (SI; "1" for a ratio, "" for a count or a flag), and knobs and
-// commands a recommended "min" and "max": what a UI's slider or a validator should offer. They
-// are recommendations, not limits the world enforces (it validates on its own).
+// What world_binding's keys are, for other applications, in cvc/state/state_key_meta.h's form:
+// each key's comment and its properties access, unit and recommended min and max. A build key
+// changed after the world is built sets restart_required.
 
 #ifndef __CVC_PHYSICS_BINDING_META_H__
 #define __CVC_PHYSICS_BINDING_META_H__
 
+#include <cvc/state/state_key_meta.h>
 #include <string>
 
 namespace cvc {
@@ -30,13 +25,7 @@ class app;
 namespace physics {
 namespace detail {
 
-struct key_meta {
-  const char *key;    // relative to the group's base
-  const char *access; // build | knob | command | telemetry
-  const char *unit;   // nullptr: not a number
-  double min, max;    // NaN: no recommendation
-  const char *comment;
-};
+using key_meta = cvc::state_key_meta;
 
 // Describe each key of a group under `base` (an absolute state path). Idempotent.
 void describe_world(cvc::app &ctx, const std::string &base);    // the prefix's own keys

@@ -193,6 +193,10 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
     }
     if (smp.sense_flips) // epistemic churn: sum the caller's per-step flipped-cell delta
       v.sense_flips += smp.sense_flips[i];
+    if (smp.slope_entries) { // terrain: entries into infeasible slope
+      v.terrain_tracked = true;
+      v.infeasible_slope_steps += smp.slope_entries[i];
+    }
     if (smp.energy_step_J) { // a physics plant's measured energy and static contacts
       v.energy_tracked = true;
       v.energy_J += smp.energy_step_J[i];
@@ -328,6 +332,10 @@ episode_nav_stats nav_stats_collector::finish() const {
       ep.total_energy_J += v.energy_J;
       ep.total_building_contacts += v.building_contacts;
     }
+    if (v.terrain_tracked) {
+      ep.terrain_tracked = true;
+      ep.total_infeasible_slope_steps += v.infeasible_slope_steps;
+    }
   }
   ep.arrived = arrived;
   ep.makespan_s = makespan;
@@ -385,6 +393,8 @@ std::string episode_nav_stats::to_json() const {
     num(o, total_energy_J);
     o << ",\"total_building_contacts\":" << total_building_contacts;
   }
+  if (terrain_tracked)
+    o << ",\"total_infeasible_slope_steps\":" << total_infeasible_slope_steps;
   o << ",\"coverage\":{\"explored_frac\":";
   num(o, coverage.explored_frac);
   o << ",\"visible_frac\":";
@@ -473,6 +483,8 @@ std::string episode_nav_stats::to_json() const {
       num(o, v.energy_per_km);
       o << ",\"building_contacts\":" << v.building_contacts;
     }
+    if (v.terrain_tracked)
+      o << ",\"infeasible_slope_steps\":" << v.infeasible_slope_steps;
     o << '}';
   }
   o << "]}";

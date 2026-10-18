@@ -555,8 +555,28 @@ std::vector<double> clearance_cost(const std::uint8_t *occ, int rows, int cols, 
   return out;
 }
 
+namespace {
+
+std::vector<int> astar_impl(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
+                            int goal_r, int goal_c, const double *cost, const climb_cost *climb);
+
+} // namespace
+
 std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
                        int goal_r, int goal_c, const double *cost) {
+  return astar_impl(occ, rows, cols, start_r, start_c, goal_r, goal_c, cost, nullptr);
+}
+
+std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
+                       int goal_r, int goal_c, const double *cost, const climb_cost &climb) {
+  return astar_impl(occ, rows, cols, start_r, start_c, goal_r, goal_c, cost,
+                    climb.height && climb.per_metre > 0.0 ? &climb : nullptr);
+}
+
+namespace {
+
+std::vector<int> astar_impl(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
+                            int goal_r, int goal_c, const double *cost, const climb_cost *climb) {
   const std::pair<int, int> start = nearest_free(occ, rows, cols, start_r, start_c);
   const std::pair<int, int> goal = nearest_free(occ, rows, cols, goal_r, goal_c);
   if (start.first < 0 || goal.first < 0)
@@ -620,6 +640,12 @@ std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r,
         double ng = cur.g + ((dr && dc) ? SQRT2 : 1.0);
         if (cost)
           ng += cost[nr * cols + nc];
+        if (climb) {
+          const double rise = static_cast<double>(climb->height[nr * cols + nc]) -
+                              static_cast<double>(climb->height[r * cols + c]);
+          if (rise > 0.0)
+            ng += climb->per_metre * rise;
+        }
         const int nkey = nr * cols + nc;
         const double gb =
             (S.g_gen[nkey] == GEN) ? S.g_val[nkey] : std::numeric_limits<double>::infinity();
@@ -632,6 +658,8 @@ std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r,
   }
   return {};
 }
+
+} // namespace
 
 std::vector<int> simplify(const std::uint8_t *occ, int rows, int cols, const int *path, int n) {
   if (n < 3)
@@ -665,7 +693,7 @@ std::vector<std::vector<int>> astar_batch(const std::vector<astar_query> &querie
   std::vector<std::vector<int>> out(queries.size());
   parallel_for(static_cast<int>(queries.size()), num_threads, [&](int i) {
     const astar_query &q = queries[i];
-    out[i] = astar(q.occ, rows, cols, q.start_r, q.start_c, q.goal_r, q.goal_c, q.cost);
+    out[i] = astar(q.occ, rows, cols, q.start_r, q.start_c, q.goal_r, q.goal_c, q.cost, q.climb);
   });
   return out;
 }
