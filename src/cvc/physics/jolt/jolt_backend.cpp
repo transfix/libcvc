@@ -562,6 +562,8 @@ struct jolt_vehicle {
   // bar (-1 for none): tune_vehicle changes them in place.
   std::vector<JPH::Ref<JPH::WheelSettingsWV>> wheel_settings;
   std::vector<int> bar_of_axle;
+  energy_tally tally; // the energy ledger's measurements (with a ledger)
+  bool ledger = false;
 };
 
 // The wheels' ground test: a ray down the suspension, long enough to find the ground under a
@@ -966,6 +968,15 @@ public:
       _added_since_step = false;
     }
     _contacts.begin(_origin);
+    for (auto &entry : _vehicles) {
+      energy_tally &t = entry.second->tally;
+      t.gravity[0] = _cfg.gravity.x;
+      t.gravity[1] = _cfg.gravity.y;
+      t.gravity[2] = _cfg.gravity.z;
+      t.origin[0] = _origin.x;
+      t.origin[1] = _origin.y;
+      t.origin[2] = _origin.z;
+    }
     const JPH::EPhysicsUpdateError err = _ps->Update(
         static_cast<float>(_cfg.fixed_dt), _cfg.collision_steps, _temp.get(), _jobs.get());
     report.saturated = err != JPH::EPhysicsUpdateError::None || _contacts.overflow;
@@ -1132,6 +1143,13 @@ public:
     }
     auto *ctl = static_cast<ackermann_controller *>(v->constraint->GetController());
     ctl->steer = &v->steer;
+    for (const axle_desc &a : d.axles)
+      ctl->anti_roll.push_back(std::max(0.0, a.anti_roll_stiffness));
+    if (d.energy_ledger) {
+      v->tally.resize(n);
+      v->ledger = true;
+      ctl->tally = &v->tally;
+    }
     v->constraint->SetVehicleCollisionTester(
         new medium_tester(layers::moving, &_probe, &_medium_reach, &_origin, v.get()));
     jolt_vehicle *vp = v.get();
@@ -1180,6 +1198,8 @@ public:
         bars[static_cast<size_t>(v.bar_of_axle[ai])].mStiffness =
             static_cast<float>(a.anti_roll_stiffness);
     }
+    for (size_t ai = 0; ai < d.axles.size() && ai < ctl->anti_roll.size(); ++ai)
+      ctl->anti_roll[ai] = std::max(0.0, d.axles[ai].anti_roll_stiffness);
     // A sleeping vehicle wakes to its new settings.
     _ps->GetBodyInterface().ActivateBody(v.body);
   }
@@ -1224,8 +1244,102 @@ public:
       _ps->GetBodyInterface().ActivateBody(v.body);
   }
 
+  void set_vehicle_loads(std::uint32_t handle, const vehicle_loads &l) override {
+    energy_tally &t = _vehicles.at(handle)->tally;
+    for (int k = 0; k < 4; ++k) {
+      t.loads[k][0] = l.force[k].x;
+      t.loads[k][1] = l.force[k].y;
+      t.loads[k][2] = l.force[k].z;
+      t.loads[k][3] = l.torque[k].x;
+      t.loads[k][4] = l.torque[k].y;
+      t.loads[k][5] = l.torque[k].z;
+    }
+  }
+
+  // The ledger's last sample, field by field (no padding in the bytes).
+  void save_vehicle(std::uint32_t handle, std::string &out) const override {
+    const energy_tally &t = _vehicles.at(handle)->tally;
+    const auto put = [&out](double x) { out.append(reinterpret_cast<const char *>(&x), sizeof x); };
+    put(t.sampled ? 1.0 : 0.0);
+    put(t.h);
+    put(t.kinetic);
+    put(t.potential);
+    put(t.spring);
+    put(t.rot_kinetic);
+    for (int k = 0; k < 3; ++k) {
+      put(t.v[k]);
+      put(t.w[k]);
+    }
+    for (int k = 0; k < 4; ++k)
+      for (int j = 0; j < 6; ++j)
+        put(t.interval_loads[k][j]);
+    put(static_cast<double>(t.compression.size()));
+    for (std::size_t i = 0; i < t.compression.size(); ++i) {
+      put(t.compression[i]);
+      put(t.damping[i]);
+    }
+  }
+
+  void restore_vehicle(std::uint32_t handle, const std::string &in, std::size_t &pos) override {
+    energy_tally &t = _vehicles.at(handle)->tally;
+    const auto get = [&in, &pos]() {
+      double x = 0.0;
+      if (pos + sizeof x > in.size())
+        throw std::invalid_argument("the vehicle state is truncated");
+      std::memcpy(&x, in.data() + pos, sizeof x);
+      pos += sizeof x;
+      return x;
+    };
+    t.sampled = get() != 0.0;
+    t.h = get();
+    t.kinetic = get();
+    t.potential = get();
+    t.spring = get();
+    t.rot_kinetic = get();
+    for (int k = 0; k < 3; ++k) {
+      t.v[k] = get();
+      t.w[k] = get();
+    }
+    for (int k = 0; k < 4; ++k)
+      for (int j = 0; j < 6; ++j)
+        t.interval_loads[k][j] = get();
+    const double n = get();
+    if (n != static_cast<double>(t.compression.size()))
+      throw std::invalid_argument("the vehicle state has a different number of wheels");
+    for (std::size_t i = 0; i < t.compression.size(); ++i) {
+      t.compression[i] = get();
+      t.damping[i] = get();
+    }
+    t.clear_sums();
+  }
+
   void read_vehicle(std::uint32_t handle, vehicle_readback &out) const override {
-    const jolt_vehicle &v = *_vehicles.at(handle);
+    jolt_vehicle &v = *_vehicles.at(handle);
+    // The ledger's sums over the step, which it starts again from zero.
+    {
+      energy_tally &t = v.tally;
+      vehicle_readback::energy_step &e = out.energy;
+      e.measured = v.ledger;
+      e.sampled = t.sampled;
+      e.engine = t.engine;
+      e.idle = t.idle;
+      e.supplied = t.supplied;
+      e.drivetrain = t.drivetrain;
+      e.split = t.split;
+      e.split_braked = t.split_braked;
+      e.brake = t.brake;
+      e.tire = t.tire;
+      for (int k = 0; k < 4; ++k)
+        e.work[k] = t.work[k];
+      e.suspension = t.suspension;
+      e.chassis_damping = t.chassis_damping;
+      e.stored = t.stored;
+      e.distance = t.distance;
+      e.kinetic = t.kinetic;
+      e.potential = t.potential;
+      e.spring = t.spring;
+      t.clear_sums();
+    }
     const auto *ctl = static_cast<const ackermann_controller *>(v.constraint->GetController());
     out.gear = ctl->GetTransmission().GetCurrentGear();
     out.engine_rpm = ctl->GetEngine().GetCurrentRPM();

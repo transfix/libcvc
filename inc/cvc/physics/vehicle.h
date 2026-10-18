@@ -91,6 +91,27 @@ struct axle_desc {
   double anti_roll_stiffness = 0.0;   // N/m between the two wheels; 0 = none
 };
 
+// Where a vehicle's energy comes from (the energy ledger, vehicle_energy). The source is
+// bookkeeping on the engine's shaft work: it does not change the dynamics, except that an
+// empty battery or tank gives no more throttle.
+struct energy_source {
+  enum class kind : std::uint8_t { none, battery, fuel };
+  kind type = kind::none;
+  // A battery: the motor draws shaft work / motor_efficiency, and braking returns
+  // regen_efficiency of the braking energy, at most max_regen_power.
+  double capacity = 0.0;         // J (Wh x 3600)
+  double initial_charge = 1.0;   // state of charge when added, in [0, 1]
+  double motor_efficiency = 0.9; // shaft work per electrical energy, (0, 1]
+  double regen_efficiency = 0.0; // [0, 1]
+  double max_regen_power = 0.0;  // W
+  // Fuel: shaft work / (thermal_efficiency x heating_value) kg, plus idle_flow while the
+  // engine runs. tank > 0 tracks what is left.
+  double tank = 0.0;                // kg when added; 0 = not tracked
+  double thermal_efficiency = 0.35; // shaft work per chemical energy, (0, 1]
+  double heating_value = 42.6e6;    // J/kg, the lower heating value (diesel)
+  double idle_flow = 0.0;           // kg/s
+};
+
 struct vehicle_desc {
   vec3 half_extents{2.25, 1.0, 0.5};   // the chassis box
   vec3 center_of_mass{0.0, 0.0, -0.3}; // body-local
@@ -128,6 +149,11 @@ struct vehicle_desc {
   double tire_peak_slip = 0.08;
   double tire_peak_slip_angle = 0.087; // 5 degrees
   double tire_sliding = 0.95;
+
+  energy_source energy;
+  // Measure the energy ledger (vehicle_state::energy). Off, the engine steps unmeasured
+  // through Jolt's own controller, which the measured step reproduces exactly.
+  bool energy_ledger = true;
 
   // The distance from the rear axle (the rearmost unsteered one) to the frontmost
   // steered one, and the steered axle's track; 0 when the axles do not define them.
@@ -190,6 +216,59 @@ struct wheel_state {
   double medium_resistance = 0.0;  // N, its compaction resistance
 };
 
+// A vehicle's energy ledger, in joules since it was added (P3; docs/PHYSICS_API.md).
+//
+// The vehicle is the chassis, its wheels and its drivetrain, engine included: `supplied` is
+// the engine's (motor's) shaft work, the integral of T w, and `idle` what holding the engine at
+// its idle speed added. Every term is measured each engine sub-step:
+//   supplied + idle + fields + drivetrain_split
+//     = brake + tire + aero + rolling + medium + drivetrain + suspension + chassis_damping
+//       + stored + residual
+// drivetrain_split and the residual are the simulation's own energy errors: the first one
+// it is known to make (Jolt's drivetrain step), measured exactly; the second, the rest.
+struct vehicle_energy {
+  double supplied = 0.0;        // the engine's shaft work
+  double idle = 0.0;            // what holding the engine at idle speed added (< 0: the rev limit)
+  double brake = 0.0;           // the brakes, a locked wheel's sliding included
+  double tire = 0.0;            // tire slip, longitudinal and lateral
+  double aero = 0.0;            // aerodynamic drag (< 0 when a tailwind pushed)
+  double rolling = 0.0;         // rolling resistance
+  double medium = 0.0;          // compacting snow, mud or sand
+  double drivetrain = 0.0;      // engine and wheel damping, clutch slip, engine braking
+  double suspension = 0.0;      // the suspension dampers
+  double chassis_damping = 0.0; // the chassis body's own damping
+  double fields = 0.0;          // work fields did on the chassis (buoyancy, a current)
+  // What Jolt's drivetrain step adds: it solves engine, clutch and wheels with its estimate of
+  // the brake and ground torques, then undoes the estimate before the friction solve, which
+  // leaves each driven wheel dL tau / I more energy (dL the clutch's angular impulse, tau the
+  // estimate's). A numerical error, measured exactly; > 0 adds energy.
+  double drivetrain_split = 0.0;
+  double stored = 0.0;   // the change in kinetic + potential + spring energy
+  double residual = 0.0; // supplied + idle + fields + drivetrain_split - dissipated - stored
+  // Stored now: the kinetic energy of the chassis, wheels and engine, the potential energy
+  // above where it was first sampled, and the suspension springs'. As of the ledger's last
+  // sample, at most one engine sub-step before the step's end.
+  double kinetic = 0.0, potential = 0.0, spring = 0.0;
+  // The source's side.
+  double engine = 0.0;    // the engine's shaft work again: what the source paid for
+  double regen = 0.0;     // braking energy returned to a battery
+  double source = 0.0;    // drawn from the battery (electrical) or the fuel (chemical)
+  double charge = 0.0;    // a battery's state of charge, [0, 1]
+  double fuel_used = 0.0; // kg
+  double fuel_left = 0.0; // kg, with a tank
+  double distance = 0.0;  // m the chassis travelled
+  double power = 0.0;     // W supplied in the last step
+  // Source energy per kilometre (the shaft work without a source), Wh/km; 0 before it has
+  // moved.
+  double wh_per_km() const {
+    const double e = source > 0.0 ? source : engine;
+    return distance > 0.0 ? e / 3600.0 / (distance / 1000.0) : 0.0;
+  }
+  double dissipated() const {
+    return brake + tire + aero + rolling + medium + drivetrain + suspension + chassis_damping;
+  }
+};
+
 struct vehicle_state {
   body_id chassis;
   body_state body;
@@ -202,6 +281,7 @@ struct vehicle_state {
   vec3 aero_force;   // N, the drag applied
   vec3 air_velocity; // m/s, the air's (a flow field's wind, or still)
   std::vector<wheel_state> wheels;
+  vehicle_energy energy; // its ledger since it was added
 };
 
 } // namespace physics

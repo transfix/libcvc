@@ -729,6 +729,33 @@ void world_binding::write(const publication &p) const {
     put_vec(_ctx, at(base, "angular_velocity"), vs.body.angular_velocity);
     put_vec(_ctx, at(base, "aero_force"), vs.aero_force);
     put_vec(_ctx, at(base, "air_velocity"), vs.air_velocity);
+    {
+      // The energy ledger, in doc 31's names (D11): joules since added, P_W the last step's.
+      const vehicle_energy &e = vs.energy;
+      const std::string eb = at(base, "energy");
+      write_val(_ctx, at(eb, "P_W"), e.power);
+      write_val(_ctx, at(eb, "supplied_J"), e.supplied);
+      write_val(_ctx, at(eb, "idle_J"), e.idle);
+      write_val(_ctx, at(eb, "brake_J"), e.brake);
+      write_val(_ctx, at(eb, "tire_J"), e.tire);
+      write_val(_ctx, at(eb, "aero_J"), e.aero);
+      write_val(_ctx, at(eb, "roll_J"), e.rolling);
+      write_val(_ctx, at(eb, "medium_J"), e.medium);
+      write_val(_ctx, at(eb, "drivetrain_J"), e.drivetrain);
+      write_val(_ctx, at(eb, "drivetrain_split_J"), e.drivetrain_split);
+      write_val(_ctx, at(eb, "suspension_J"), e.suspension);
+      write_val(_ctx, at(eb, "chassis_damping_J"), e.chassis_damping);
+      write_val(_ctx, at(eb, "fields_J"), e.fields);
+      write_val(_ctx, at(eb, "stored_J"), e.stored);
+      write_val(_ctx, at(eb, "residual_J"), e.residual);
+      write_val(_ctx, at(eb, "regen_J"), e.regen);
+      write_val(_ctx, at(eb, "source_J"), e.source);
+      write_val(_ctx, at(eb, "soc"), e.charge);
+      write_val(_ctx, at(eb, "fuel_kg"), e.fuel_used);
+      write_val(_ctx, at(eb, "fuel_left_kg"), e.fuel_left);
+      write_val(_ctx, at(eb, "distance_m"), e.distance);
+      write_val(_ctx, at(eb, "Wh_per_km"), e.wh_per_km());
+    }
     for (std::size_t i = 0; i < vs.wheels.size(); ++i) {
       const wheel_state &w = vs.wheels[i];
       const std::string wb = at(base, "wheels." + std::to_string(i));

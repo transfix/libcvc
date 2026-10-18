@@ -84,6 +84,13 @@ vehicle_desc vehicle_desc::humvee() {
   d.drag_coefficient = 0.7;
   d.frontal_area = 3.8;
   d.rolling_resistance = 0.015;
+  // Diesel. Estimates: about 240 g/kWh at best (35%), a 25 gal (95 L) tank, about
+  // 1.5 L/h at idle.
+  d.energy.type = energy_source::kind::fuel;
+  d.energy.tank = 80.0;
+  d.energy.thermal_efficiency = 0.35;
+  d.energy.heating_value = 42.6e6;
+  d.energy.idle_flow = 3.5e-4;
   return d;
 }
 
@@ -126,6 +133,13 @@ vehicle_desc vehicle_desc::roboracer() {
   d.drag_coefficient = 0.8;
   d.frontal_area = 0.03;
   d.rolling_resistance = 0.02;
+  // A 3S LiPo behind a VESC that brakes by regeneration. Estimates until measured on the car:
+  // 5000 mAh at 11.1 V (55 Wh), 80% from pack to shaft, 60% of braking returned, at most 150 W.
+  d.energy.type = energy_source::kind::battery;
+  d.energy.capacity = 55.0 * 3600.0;
+  d.energy.motor_efficiency = 0.8;
+  d.energy.regen_efficiency = 0.6;
+  d.energy.max_regen_power = 150.0;
   return d;
 }
 
@@ -200,6 +214,22 @@ void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
   need(d.drag_coefficient >= 0.0 && d.frontal_area >= 0.0 && d.air_density >= 0.0 &&
            d.rolling_resistance >= 0.0,
        "drag, area, air density and rolling resistance must be >= 0");
+  const energy_source &e = d.energy;
+  const auto fraction = [](double x, bool zero_ok) {
+    return std::isfinite(x) && x <= 1.0 && (zero_ok ? x >= 0.0 : x > 0.0);
+  };
+  need(e.type <= energy_source::kind::fuel, "energy.type is not a kind of source");
+  need(e.type != energy_source::kind::battery ||
+           (positive(e.capacity) && fraction(e.initial_charge, true) &&
+            fraction(e.motor_efficiency, false) && fraction(e.regen_efficiency, true) &&
+            std::isfinite(e.max_regen_power) && e.max_regen_power >= 0.0),
+       "a battery needs capacity > 0, initial_charge in [0, 1], motor_efficiency in (0, 1], "
+       "regen_efficiency in [0, 1] and max_regen_power >= 0");
+  need(e.type != energy_source::kind::fuel ||
+           (std::isfinite(e.tank) && e.tank >= 0.0 && fraction(e.thermal_efficiency, false) &&
+            positive(e.heating_value) && std::isfinite(e.idle_flow) && e.idle_flow >= 0.0),
+       "fuel needs tank >= 0, thermal_efficiency in (0, 1], heating_value > 0 and "
+       "idle_flow >= 0");
   need(positive(d.tire_peak_slip) && positive(d.tire_peak_slip_angle) && d.tire_sliding > 0.0 &&
            d.tire_sliding <= 1.0,
        "the tire needs peak slips > 0 and 0 < tire_sliding <= 1");
@@ -261,6 +291,15 @@ std::string fixed_change(const vehicle_desc &a, const vehicle_desc &b) {
     return "tire_peak_slip_angle";
   if (a.tire_sliding != b.tire_sliding)
     return "tire_sliding";
+  const energy_source &p = a.energy, &q = b.energy;
+  if (p.type != q.type || p.capacity != q.capacity || p.initial_charge != q.initial_charge ||
+      p.motor_efficiency != q.motor_efficiency || p.regen_efficiency != q.regen_efficiency ||
+      p.max_regen_power != q.max_regen_power || p.tank != q.tank ||
+      p.thermal_efficiency != q.thermal_efficiency || p.heating_value != q.heating_value ||
+      p.idle_flow != q.idle_flow)
+    return "energy";
+  if (a.energy_ledger != b.energy_ledger)
+    return "energy_ledger";
   return std::string();
 }
 
@@ -305,6 +344,65 @@ bool get_flag(const std::string &in, std::size_t &pos) {
 
 } // namespace
 
+// A vehicle_energy's values in a fixed order, for save and restore.
+std::vector<double> energy_fields(const vehicle_energy &e) {
+  return {e.supplied,
+          e.brake,
+          e.tire,
+          e.aero,
+          e.rolling,
+          e.medium,
+          e.drivetrain,
+          e.suspension,
+          e.chassis_damping,
+          e.fields,
+          e.stored,
+          e.residual,
+          e.kinetic,
+          e.potential,
+          e.spring,
+          e.engine,
+          e.idle,
+          e.regen,
+          e.source,
+          e.charge,
+          e.fuel_used,
+          e.fuel_left,
+          e.distance,
+          e.power,
+          e.drivetrain_split};
+}
+
+void set_energy_fields(vehicle_energy &e, const std::vector<double> &x) {
+  double *const out[] = {&e.supplied,
+                         &e.brake,
+                         &e.tire,
+                         &e.aero,
+                         &e.rolling,
+                         &e.medium,
+                         &e.drivetrain,
+                         &e.suspension,
+                         &e.chassis_damping,
+                         &e.fields,
+                         &e.stored,
+                         &e.residual,
+                         &e.kinetic,
+                         &e.potential,
+                         &e.spring,
+                         &e.engine,
+                         &e.idle,
+                         &e.regen,
+                         &e.source,
+                         &e.charge,
+                         &e.fuel_used,
+                         &e.fuel_left,
+                         &e.distance,
+                         &e.power,
+                         &e.drivetrain_split};
+  for (std::size_t i = 0; i < x.size() && i < sizeof(out) / sizeof(out[0]); ++i)
+    *out[i] = x[i];
+}
+
 vehicle_set::rt &vehicle_set::at(vehicle_id id) {
   auto it = _v.find(id.value);
   if (it == _v.end())
@@ -348,6 +446,10 @@ vehicle_id vehicle_set::add(world_backend &be, field_set &fields, const vehicle_
   v.medium.assign(n, 0.0);
   v.medium_load.assign(n, 0.0);
   v.readback.wheels.resize(n);
+  if (d.energy.type == energy_source::kind::battery)
+    v.energy.charge = d.energy.initial_charge;
+  if (d.energy.type == energy_source::kind::fuel)
+    v.energy.fuel_left = d.energy.tank;
   vehicle_id id;
   id.value = _next++;
   _v.emplace(id.value, std::move(v));
@@ -472,6 +574,11 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
         brake = clamp(-u / d.max_decel, 0.0, 1.0);
       }
     }
+    // An empty battery or tank gives no throttle.
+    const energy_source &src = d.energy;
+    if ((src.type == energy_source::kind::battery && !(v.energy.charge > 0.0)) ||
+        (src.type == energy_source::kind::fuel && src.tank > 0.0 && !(v.energy.fuel_left > 0.0)))
+      throttle = 0.0;
     v.throttle = throttle;
     v.brake = brake;
     v.hand_brake = hand_brake;
@@ -487,6 +594,7 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
     const double un = norm(u);
     const vec3 aero = u * (-0.5 * rho * d.drag_coefficient * d.frontal_area * un);
     vec3 force = aero, torque;
+    vec3 rolling_force, rolling_torque, medium_force, medium_torque; // for the ledger
     v.aero_force = aero;
     v.air_velocity = wind;
     for (std::size_t w = 0; w < v.readback.wheels.size(); ++w) {
@@ -517,17 +625,38 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
       const vec3 f = rw.longitudinal * (-(v.rolling[w] + v.medium[w]) * sign);
       force = force + f;
       torque = torque + cross(arm, f);
+      const vec3 fr = rw.longitudinal * (-v.rolling[w] * sign);
+      const vec3 fm = rw.longitudinal * (-v.medium[w] * sign);
+      rolling_force = rolling_force + fr;
+      rolling_torque = rolling_torque + cross(arm, fr);
+      medium_force = medium_force + fm;
+      medium_torque = medium_torque + cross(arm, fm);
     }
     if (s.active)
       be.add_field_load(v.chassis, force, torque);
+    // What the ledger charges each cause with: the loads acting through this step (none on
+    // a sleeping chassis, which the fields and this step leave alone).
+    vehicle_loads loads;
+    if (s.active) {
+      loads.force[0] = aero;
+      loads.force[1] = rolling_force;
+      loads.torque[1] = rolling_torque;
+      loads.force[2] = medium_force;
+      loads.torque[2] = medium_torque;
+      const field_load fl = fields.load(v.chassis);
+      loads.force[3] = fl.force;
+      loads.torque[3] = fl.torque;
+    }
+    be.set_vehicle_loads(v.handle, loads);
   }
 }
 
-void vehicle_set::post_step(world_backend &be, field_set &fields, const world_config &) {
+void vehicle_set::post_step(world_backend &be, field_set &fields, const world_config &cfg) {
   const bool ruts = fields.has_ruts();
   for (auto &entry : _v) {
     rt &v = entry.second;
     be.read_vehicle(v.handle, v.readback);
+    account(v, cfg.fixed_dt);
     if (!ruts)
       continue;
     // Each wheel in a rutted medium presses its footprint into it: the half behind it as
@@ -560,6 +689,68 @@ void vehicle_set::post_step(world_backend &be, field_set &fields, const world_co
   }
 }
 
+// The step's measurements into the ledger's totals, and the source's side.
+void vehicle_set::account(rt &v, double dt) {
+  const vehicle_readback::energy_step &e = v.readback.energy;
+  if (!e.measured)
+    return;
+  vehicle_energy &n = v.energy;
+  n.engine += e.engine;
+  n.idle += e.idle;
+  n.supplied += e.supplied;
+  n.drivetrain += e.drivetrain;
+  n.drivetrain_split += e.split;
+  n.brake += e.brake;
+  n.tire += e.tire;
+  n.aero -= e.work[0];
+  n.rolling -= e.work[1];
+  n.medium -= e.work[2];
+  n.fields += e.work[3];
+  n.suspension += e.suspension;
+  n.chassis_damping += e.chassis_damping;
+  n.stored += e.stored;
+  n.distance += e.distance;
+  n.residual = n.supplied + n.idle + n.fields + n.drivetrain_split - n.dissipated() - n.stored;
+  if (e.sampled) {
+    if (!v.have_potential0) {
+      v.potential0 = e.potential;
+      v.have_potential0 = true;
+    }
+    n.kinetic = e.kinetic;
+    n.potential = e.potential - v.potential0;
+    n.spring = e.spring;
+  }
+  n.power = dt > 0.0 ? e.supplied / dt : 0.0;
+
+  const energy_source &src = v.desc.energy;
+  if (src.type == energy_source::kind::battery) {
+    // The motor draws its shaft work over its efficiency; braking returns
+    // regen_efficiency of the braking energy, at most max_regen_power, while there is room.
+    // The braking energy is the vehicle's own: not what the drivetrain step made in a braked
+    // wheel (drivetrain_split), which the brakes take straight back.
+    const double draw = std::max(0.0, e.engine + e.idle) / src.motor_efficiency;
+    const double braking = std::max(0.0, e.brake - std::max(0.0, e.split_braked));
+    double credit = src.regen_efficiency * std::min(braking, src.max_regen_power * dt);
+    double next = n.charge - (draw - credit) / src.capacity;
+    if (next > 1.0) {
+      credit = std::max(0.0, credit - (next - 1.0) * src.capacity);
+      next = 1.0;
+    }
+    n.charge = std::max(0.0, next);
+    n.source += draw;
+    n.regen += credit;
+  } else if (src.type == energy_source::kind::fuel) {
+    // Shaft work over thermal_efficiency x the heating value, and the idle flow; the idle
+    // flow pays for the engine's idling.
+    const double kg =
+        std::max(0.0, e.engine) / (src.thermal_efficiency * src.heating_value) + src.idle_flow * dt;
+    n.fuel_used += kg;
+    n.source += kg * src.heating_value;
+    if (src.tank > 0.0)
+      n.fuel_left = std::max(0.0, src.tank - n.fuel_used);
+  }
+}
+
 vehicle_state vehicle_set::state(const world_backend &be, vehicle_id id) const {
   const rt &v = at(id);
   vehicle_state out;
@@ -582,6 +773,7 @@ vehicle_state vehicle_set::state(const world_backend &be, vehicle_id id) const {
     ws.medium_resistance = v.medium[w];
     out.wheels.push_back(ws);
   }
+  out.energy = v.energy;
   return out;
 }
 
@@ -596,7 +788,7 @@ void vehicle_set::snapshot(const world_backend &be, std::vector<vehicle_snapshot
   }
 }
 
-void vehicle_set::save(std::string &out) const {
+void vehicle_set::save(const world_backend &be, std::string &out) const {
   put(out, static_cast<std::uint64_t>(_v.size()));
   for (const auto &e : _v) {
     const rt &v = e.second;
@@ -629,10 +821,15 @@ void vehicle_set::save(std::string &out) const {
       put(out, s.medium_depth);
       put(out, w.medium_modulus);
     }
+    for (const double x : energy_fields(v.energy))
+      put(out, x);
+    put(out, v.potential0);
+    put_flag(out, v.have_potential0);
+    be.save_vehicle(v.handle, out);
   }
 }
 
-void vehicle_set::restore(const std::string &in, std::size_t &pos) {
+void vehicle_set::restore(world_backend &be, const std::string &in, std::size_t &pos) {
   std::uint64_t n = 0;
   get(in, pos, n);
   if (n != _v.size())
@@ -675,6 +872,13 @@ void vehicle_set::restore(const std::string &in, std::size_t &pos) {
       get(in, pos, s.medium_depth);
       get(in, pos, w.medium_modulus);
     }
+    std::vector<double> energy = energy_fields(v.energy);
+    for (double &x : energy)
+      get(in, pos, x);
+    set_energy_fields(v.energy, energy);
+    get(in, pos, v.potential0);
+    v.have_potential0 = get_flag(in, pos);
+    be.restore_vehicle(v.handle, in, pos);
   }
 }
 

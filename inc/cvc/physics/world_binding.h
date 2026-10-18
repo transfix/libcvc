@@ -98,6 +98,10 @@
 //     vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact,
 //       contact_point.{x,y,z}, load, longitudinal_slip, lateral_slip, friction,
 //       rolling_resistance, medium_depth, sinkage, rut, medium_resistance}
+//     vehicles.<name>.energy.{P_W, supplied_J, idle_J, brake_J, tire_J, aero_J, roll_J,
+//       medium_J, drivetrain_J, drivetrain_split_J, suspension_J, chassis_damping_J, fields_J,
+//       stored_J, residual_J, regen_J, source_J, soc, fuel_kg, fuel_left_kg, distance_m,
+//       Wh_per_km}                         the energy ledger (vehicle.h's vehicle_energy)
 //     fields.<name>.kind, ruts.cells, ruts.deepest
 //   and read by every pull():
 //     bodies.<name>.{material, mass, linear_damping, angular_damping, allow_sleeping}

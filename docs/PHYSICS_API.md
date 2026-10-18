@@ -251,8 +251,77 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     `suspension_damping`, and `anti_roll_stiffness` on an axle that was added with a bar.
 
   A change to anything else (the chassis, the mass, the wheels' geometry, the gearing, the
-  tire curves) throws `cvc::physics_error` naming it and changes nothing. Like materials, a
-  tuning is not part of `save()`.
+  tire curves, the energy source) throws `cvc::physics_error` naming it and changes nothing.
+  Like materials, a tuning is not part of `save()`.
+
+### The energy ledger (P3)
+
+`vehicle_state::energy` is a `vehicle_energy`: the vehicle's energy since it was added, in
+joules, term by term. The vehicle is the chassis, its wheels and its drivetrain, engine
+included (doc 31's D8). Each engine sub-step the ledger samples the vehicle and charges every
+flow to its cause:
+
+```
+supplied + idle + fields + drivetrain_split
+  = brake + tire + aero + rolling + medium + drivetrain + suspension + chassis_damping
+    + stored + residual
+```
+
+| Term | What it is | How it is measured |
+|---|---|---|
+| `supplied` | The engine's (motor's) shaft work, the integral of T w | Exactly, from Jolt's engine torque and the speed its implicit drivetrain step leaves |
+| `idle` | What Jolt's idle-speed clamp adds to keep the engine at `engine_min_rpm` (< 0 when the rev limit holds it down) | Exactly |
+| `brake` | The brakes: a wheel's spin they take, and a locked wheel's sliding | Exactly |
+| `tire` | Tire slip, longitudinal and lateral | Exactly, impulse by impulse in the friction solve; the lateral warm start from the impulse and the velocities it left |
+| `aero`, `rolling`, `medium` | The facade's drag, rolling resistance and compaction forces | Their work, at the mean of the sub-step's velocities |
+| `drivetrain` | Engine and wheel damping, clutch slip, engine braking, and the drivetrain step's own damping | Exactly, from Jolt's implicit engine / clutch / wheel step |
+| `suspension` | The dampers | c v^2 on each wheel's compression rate, c as Jolt sets it |
+| `chassis_damping` | The chassis body's own damping | As Jolt applies it |
+| `fields` | Work the fields did on the chassis (buoyancy, a current) | At the mean velocity |
+| `stored` | The change in kinetic (chassis, wheels, engine), potential and spring energy | From the samples; `kinetic`, `potential`, `spring` are the values now |
+| `drivetrain_split` | Energy Jolt's drivetrain step makes. It solves engine, clutch and wheels with its estimate of the brake and ground torques, then undoes the estimate before the friction solve, which leaves each driven wheel dL tau / I more (dL the clutch's angular impulse, tau the estimate's) | Exactly |
+| `residual` | Everything else the simulation does not conserve | The balance |
+
+So `drivetrain_split` and `residual` together are the simulation's own energy error: the first,
+the part it is known to make, itemized; the second, the rest.
+
+- **Measured, not modelled.** With a ledger, the backend's Jolt controller runs copies of Jolt
+  5.6.0's `PostCollide` and friction solve with measurements between their steps. A measured
+  run is bit for bit an unmeasured one (`vehicle_desc::energy_ledger = false`;
+  `physics_energy_test`), and the P2 measurements are unchanged.
+- **The source.** `vehicle_desc::energy` (`energy_source`) is bookkeeping on the shaft work,
+  and an empty battery or tank gives no more throttle:
+  - a battery draws `(supplied + idle) / motor_efficiency`, and braking returns
+    `regen_efficiency` of the braking energy, at most `max_regen_power`, while there is room.
+    That never includes what the drivetrain step made in a braked wheel. `charge` is the state
+    of charge;
+  - fuel burns `supplied / (thermal_efficiency x heating_value)`, plus `idle_flow` while the
+    engine runs. `fuel_used` is the total, and `fuel_left` what is left of a `tank`;
+  - `source` is the electrical or chemical energy drawn, and `wh_per_km()` is that per
+    kilometre of `distance`. `power` is the last step's supplied power.
+- **Presets.** The Humvee burns diesel: 35%, a 95 L (80 kg) tank, about 1.5 L/h at idle. The
+  RoboRacer has a 55 Wh battery, with 80% from pack to shaft and 60% regeneration up to 150 W.
+  These are estimates until measured.
+- **State.** The ledger is in `save()`, so a replay reproduces it, and in the snapshot, its
+  JSON (`state.energy`) and the published keys (`vehicles.<name>.energy.*`).
+
+Gates (`physics_energy_test`, Windows MSVC):
+
+| Gate | Measured |
+|---|---|
+| A closed cycle over five 1 m hills: accelerate to 10 m/s, hold it (throttle up, brake down), stop and stand. \|residual\| <= 2% of supplied | 593 kJ supplied; residual -308 J (0.05%); drivetrain_split +16.3 kJ (2.7%) |
+| Coasting with no input from 15 m/s: supplied = 0, and dKE + dPE = -dissipated within 2% | supplied 0; 132 kJ stored lost against 132 kJ dissipated, residual +35 J |
+| Coasting down a 6 degree ramp in neutral: the kinetic energy gained = -dPE - dissipated within 2% | +54.1 kJ kinetic, -64.2 kJ potential; residual +38 J |
+| Regeneration never credits more than the brakes take | RoboRacer, three 5 m/s stops: 176.5 J returned of 294 J of its own braking (60%); at a 2 W cap, 9.4 J |
+
+What the ledger shows about the presets:
+
+- **The Humvee's drivetrain loses about half the engine's work** on that cycle (284 of 593 kJ).
+  The causes are Jolt's defaults: engine damping of 0.2/s is about 7.5 kW at 2400 rpm, and the
+  viscous clutch of strength 10 N m s/rad slips about 51 rad/s at full torque.
+- **The RoboRacer's split error exceeds its supplied energy while braking** (+490 J against
+  443 J). Its motor inertia (1e-4 kg m^2, 70 times its wheels' as seen through the 12:1
+  gearing) and that clutch make its drivetrain stiff for the step.
 
 ## Static world geometry: `add_world_geometry`
 
@@ -407,6 +476,7 @@ a key reads back exactly as the world held it.
 | `bodies.<name>.{material, mass, linear_damping, angular_damping, allow_sleeping}` | every `pull()` | `world::set_body`; the material by name |
 | `vehicles.<name>.{chassis, speed, steer, steer_command, throttle, brake, hand_brake, gear, engine_rpm, position.*, rotation.*, velocity.*, angular_velocity.*, aero_force.*, air_velocity.*}` | written by `push()` | The `vehicle_state` |
 | `vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact, contact_point.*, load, longitudinal_slip, lateral_slip, friction, rolling_resistance, medium_depth, sinkage, rut, medium_resistance}` | written by `push()` | Each `wheel_state` |
+| `vehicles.<name>.energy.{P_W, supplied_J, idle_J, brake_J, tire_J, aero_J, roll_J, medium_J, drivetrain_J, drivetrain_split_J, suspension_J, chassis_damping_J, fields_J, stored_J, residual_J, regen_J, source_J, soc, fuel_kg, fuel_left_kg, distance_m, Wh_per_km}` | written by `push()` | The energy ledger, in doc 31's D11 names |
 | `vehicles.<name>.command.{steer, accel, reverse}` | every `pull()` | A change calls `world::drive` |
 | `vehicles.<name>.controls.{steer, throttle, brake, hand_brake, reverse, neutral}` | every `pull()` | A change calls `world::set_controls` |
 | `vehicles.<name>.tuning.<value>`, `tuning.axles.<i>.<value>` | every `pull()` | `world::set_vehicle`, with the values above |
