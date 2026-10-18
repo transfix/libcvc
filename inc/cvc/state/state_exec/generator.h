@@ -65,6 +65,7 @@ inline std::optional<value_t> generator_next(generator &gen) {
   // (generator (lambda () (while t 1)))) would spin here inside one native step, so honour
   // the evaluation deadline (a no-op when none is armed) rather than looping forever.
   gen.state.yielded = false;
+  detail::native_nesting level("generator"); // a nested evaluator
   while (!gen.state.done && !gen.state.yielded) {
     if (eval_deadline_expired())
       throw std::runtime_error("generator: evaluation exceeded time budget");

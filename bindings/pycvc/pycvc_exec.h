@@ -14,7 +14,10 @@
 
 namespace cvc {
 class app;
+namespace state_exec {
+class async_scheduler;
 }
+} // namespace cvc
 
 // Forward-declare PyObject so this SWIG-visible header needs no <Python.h>.
 struct _object;
@@ -99,6 +102,11 @@ public:
   // starting as async_scheduler::host_data_defaults().
   cvc::state_exec::data_options data_defaults() const;
   void set_data_defaults(const cvc::state_exec::data_options &defaults);
+
+  // This Exec's private scheduler, the one run() drives. A program submitted to it directly
+  // (scheduler().execute(...)) runs alongside run()'s programs, and run() steps it too. In Python
+  // the returned scheduler keeps this Exec alive.
+  cvc::state_exec::async_scheduler &scheduler();
 
 private:
   struct ExecImpl;

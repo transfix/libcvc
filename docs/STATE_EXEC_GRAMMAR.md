@@ -226,10 +226,11 @@ then `state_exec.defaults.data.step_nodes`, then the scheduler's built-in defaul
 A node is an element visited: a list element or a dict entry walked, or an element freed. With
 `step_nodes` = N:
 
-- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `state-data-get` and `state-set` of
-  a list or dict (printed into the node) hand their walk to the evaluator (`run_data_job`). It
-  does one slice inside the call's step; if the walk isn't done, the call's frame waits and the
-  following steps are **data steps** that each run N more nodes. The step that finishes it completes the call. A walk under N nodes finishes in the
+- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `state-data-get`, `state-json`,
+  `state-from-json` and `state-set` of a list or dict (printed into the node) hand their walk to
+  the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
+  done, the call's frame waits and the following steps are **data steps** that each run N more
+  nodes. The step that finishes it completes the call. A walk under N nodes finishes in the
   call's own step, so ordinary programs take no extra steps.
 - **Macro expansion** works the same way, before the expansion is evaluated.
 - **Freeing.** Last owners dropped during a step (a list, dict, closure, generator or scope)
@@ -259,6 +260,25 @@ Measured per node (MSVC Release, `state_exec_bench_test` `DataWalkThroughput`): 
 ~70 ns to print, ~250 ns to compare and ~380 ns to copy. So a 1024-node slice costs 0.05-0.4 ms.
 The stdlib jobs (`StdlibJobThroughput`) cost 5-20 ns a node for elements and 200-370 ns for a
 256-byte copy.
+
+**Snapshots of closures.** The codec writes each scope a value's closures capture once, in an
+`__envs__` table under the snapshot node, and a closure refers to its scope's entry. A function
+that `defun` bound in the scope it captures is no cycle, and closures that share a scope share
+it again when decoded. Older snapshots, with each closure's scope chain written inside it, still
+decode.
+
+### Native call nesting
+
+Some native functions call other functions themselves: `apply`, `send`, a class constructor
+running `init`, an inherited `init` running its superclass's. Some run a nested evaluator: a class
+method, a generator advancing. Each of these nests on the native stack, so a value or class that
+refers to itself could ask for unbounded nesting: `(apply apply L)` with `L` containing itself, or
+a class whose `init` is its own constructor. A level is refused with an error ("native calls nested
+too deeply") past 256 levels (`kMaxNativeNesting`), or when less of the thread's native stack is
+left than `kNativeStackReserve`: 128 KiB on Windows, where a catch block runs before the frames
+above it unwind, and 32 KiB elsewhere. Levels cost from about 0.5 KiB (`apply`) to over 10 KiB (a
+class method) in a release build. DSL functions calling DSL functions are not levels: they are
+evaluator frames on the heap.
 
 ### Budget by kind
 

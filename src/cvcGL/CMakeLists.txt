@@ -768,6 +768,12 @@ add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
+# Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
+# heightfield node draws the ground. Headless; the dynamics need Jolt.
+add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
+target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
+
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
 # silently flattening every state_object key in cvcGL — so it stays a gate.
@@ -1001,7 +1007,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo cvcgl_physics_scene_binding
-  cvcgl_world_geometry_nodes
+  cvcgl_world_geometry_nodes cvcgl_ariadne_physics
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters

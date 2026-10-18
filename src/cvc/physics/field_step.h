@@ -58,7 +58,8 @@ struct field_body {
   outline shape = outline::other;
   double radius = 0.0; // sphere
   vec3 half;           // box
-  field_load load;     // the last step's
+  bool vehicle = false; // a vehicle's chassis: no flow drag (vehicle.h's aero is its drag)
+  field_load load;      // the last step's
 };
 
 class field_set {
@@ -74,9 +75,22 @@ public:
   void body_added(const world_backend &be, body_id id, const body_desc &d);
   void body_removed(body_id id) { _bodies.erase(id.value); }
 
+  // A vehicle's chassis (body_added first): its centre of mass, and no flow drag.
+  void mark_vehicle(body_id id, const vec3 &center_of_mass);
+
   // Push every awake body the fields reach, for the step about to run.
   void apply(world_backend &be, const world_config &cfg);
   field_load load(body_id id) const;
+
+  // The air at `p` for a vehicle's aero: a flow field's density and wind where one covers
+  // `p` (the first, in id order), true; else false, `rho` and `wind` untouched.
+  bool air_at(const vec3 &p, double &rho, vec3 &wind) const;
+  // The medium over a wheel's ground contact `p`: the deepest medium field above it along
+  // +z, its bearing modulus at mid-depth and its traction. False if none lies over `p`.
+  // Read-only: safe from the engine's worker threads during a step.
+  bool medium_under(const vec3 &p, wheel_medium &out) const;
+  // The height of the tallest medium field (0 with none).
+  double medium_reach() const;
 
 private:
   void wake_in(world_backend &be, const field_grid &box);

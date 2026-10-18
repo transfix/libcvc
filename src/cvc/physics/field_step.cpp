@@ -98,6 +98,7 @@ compiled_field compile(const field &f) {
   need(std::isfinite(f.drag_coefficient) && f.drag_coefficient >= 0.0,
        "drag_coefficient must be finite and >= 0");
   need(std::isfinite(f.damping) && f.damping >= 0.0, "damping must be finite and >= 0");
+  need(std::isfinite(f.traction) && f.traction >= 0.0, "traction must be finite and >= 0");
   const int components =
       (f.velocity[0] ? 1 : 0) + (f.velocity[1] ? 1 : 0) + (f.velocity[2] ? 1 : 0);
   need(components == 0 || components == 3, "give all three velocity components or none");
@@ -294,6 +295,84 @@ void field_set::wake_in(world_backend &be, const field_grid &box) {
   }
 }
 
+void field_set::mark_vehicle(body_id id, const vec3 &center_of_mass) {
+  auto it = _bodies.find(id.value);
+  if (it == _bodies.end())
+    return;
+  it->second.vehicle = true;
+  it->second.center_of_mass = center_of_mass;
+}
+
+bool field_set::air_at(const vec3 &p, double &rho, vec3 &wind) const {
+  const double q[3] = {p.x, p.y, p.z};
+  for (const auto &fe : _fields) {
+    const compiled_field &cf = fe.second;
+    if (cf.desc.kind != field_kind::flow || !cf.scalar.contains(q))
+      continue;
+    rho = cf.scalar.at(q);
+    wind = vec3{};
+    if (cf.moving)
+      wind = {cf.velocity[0].contains(q) ? cf.velocity[0].at(q) : 0.0,
+              cf.velocity[1].contains(q) ? cf.velocity[1].at(q) : 0.0,
+              cf.velocity[2].contains(q) ? cf.velocity[2].at(q) : 0.0};
+    return true;
+  }
+  return false;
+}
+
+double field_set::medium_reach() const {
+  double reach = 0.0;
+  for (const auto &fe : _fields)
+    if (fe.second.desc.kind == field_kind::medium)
+      reach = std::max(reach, fe.second.scalar.hi[2] - fe.second.scalar.lo[2]);
+  return reach;
+}
+
+bool field_set::medium_under(const vec3 &p, wheel_medium &out) const {
+  bool found = false;
+  for (const auto &fe : _fields) {
+    const compiled_field &cf = fe.second;
+    if (cf.desc.kind != field_kind::medium)
+      continue;
+    const field_grid &g = cf.scalar;
+    if (p.x < g.lo[0] || p.x > g.hi[0] || p.y < g.lo[1] || p.y > g.hi[1] || p.z >= g.hi[2])
+      continue;
+    // The medium's top over (x, y): down from the box's top to the contact, then bisected to
+    // where the modulus falls to zero. A uniform medium's top is its box's.
+    const double bottom = std::max(p.z, g.lo[2]);
+    double dz = g.span[2] > 0.0 ? g.span[2] : g.hi[2] - g.lo[2];
+    dz = std::max(1e-3, std::min(dz, (g.hi[2] - bottom) / 8.0));
+    double q[3] = {p.x, p.y, g.hi[2]};
+    double surface = std::nan("");
+    for (double z = g.hi[2]; z >= bottom; z -= dz) {
+      q[2] = z;
+      if (g.at(q) > 0.0) {
+        surface = z;
+        break;
+      }
+    }
+    if (std::isnan(surface))
+      continue;
+    if (surface < g.hi[2]) {
+      double below = surface, above = std::min(surface + dz, g.hi[2]);
+      for (int i = 0; i < 24; ++i) {
+        q[2] = 0.5 * (below + above);
+        (g.at(q) > 0.0 ? below : above) = q[2];
+      }
+      surface = below;
+    }
+    const double depth = surface - p.z;
+    if (!(depth > 0.0) || (found && depth <= out.depth))
+      continue;
+    q[2] = std::max(g.lo[2], p.z + 0.5 * depth);
+    out.depth = depth;
+    out.modulus = g.at(q);
+    out.traction = cf.desc.traction;
+    found = true;
+  }
+  return found;
+}
+
 field_load field_set::load(body_id id) const {
   const auto it = _bodies.find(id.value);
   return it == _bodies.end() ? field_load{} : it->second.load;
@@ -329,6 +408,8 @@ void field_set::apply(world_backend &be, const world_config &cfg) {
     double rate = 0.0, immersed = 0.0;
     for (const auto &fe : _fields) {
       const compiled_field &cf = fe.second;
+      if (fb.vehicle && cf.desc.kind == field_kind::flow)
+        continue; // a vehicle's aero is its drag (vehicle.h)
       if (!overlaps(blo, bhi, cf.scalar))
         continue;
       for (const vec3 &local : fb.cells) {

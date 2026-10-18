@@ -1,6 +1,7 @@
 #include <algorithm> // §12 enforce_channel_policy: std::find over the declared/global channel lists
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/property_tree/json_parser/error.hpp>
 #include <chrono>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
@@ -9,6 +10,7 @@
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_json.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -245,6 +247,116 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   else
     (*ctx->root)(path).data(boost::any(args[1]));
   return nil_value;
+}
+
+// ---------------------------------------------------------------------------
+// A subtree as JSON, a slice at a time
+// ---------------------------------------------------------------------------
+//
+// state-json and state-from-json are cvc::state::json() and json(j) run as data jobs: the walk
+// over the subtree (state_json_writer) and the scan of the document (state_json_reader) do
+// data.step_nodes units per scheduler step, counted against max_steps and max_time, and other
+// processes run between the slices. Same code as cvc::state's, so the same document. A unit is
+// a node visited or a value scanned, and one per 256 bytes (kDataNodeBytes) written or scanned.
+
+namespace {
+
+// A writable transparent link routes a write to its target, as state-set's value() does.
+cvc::state *write_through_link(cvc::state *node) {
+  if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent &&
+      node->linkWritable()) {
+    const cvc::state::link_resolution lr = node->resolveLink();
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
+      return lr.target;
+  }
+  return node;
+}
+
+// The writer holds the nodes it has yet to visit by owning pointer: a node another process
+// removes between slices is still written, as it was when its parent was snapshotted. A slice
+// ends when its units are spent, a long value counting for its bytes. The text is held to the
+// allocation limit as it grows.
+class state_json_job final : public data_job {
+public:
+  explicit state_json_job(cvc::state &node) : writer_(node) {}
+
+  bool step(std::size_t budget) override {
+    const std::size_t start = nodes_;
+    const std::optional<std::size_t> limit = eval_alloc_limit();
+    bool done = false;
+    while (!done && (budget == 0 || nodes_ - start < budget)) {
+      done = writer_.step(budget == 0 ? 0 : 1);
+      const std::size_t size = writer_.text().size();
+      nodes_ = writer_.nodes() + size / kDataNodeBytes;
+      if (limit && size > *limit)
+        eval_alloc_check(size, "state-json"); // throws
+    }
+    eval_alloc_note(writer_.text().size() - noted_);
+    noted_ = writer_.text().size();
+    return done;
+  }
+
+  value_t result() override { return value_t(writer_.take()); }
+
+private:
+  cvc::state_json_writer writer_;
+  std::size_t noted_ = 0; // text bytes reported to heap accounting so far
+};
+
+// The reader checks the whole document before it sets anything, so a malformed one changes
+// nothing even when the check spans many steps. A slice ends when its units are spent, a long
+// string counting for its bytes.
+class state_from_json_job final : public data_job {
+public:
+  state_from_json_job(cvc::state &node, std::string_view doc) : reader_(node, doc) {}
+
+  bool step(std::size_t budget) override {
+    const std::size_t start = nodes_;
+    bool done = false;
+    try {
+      while (!done && (budget == 0 || nodes_ - start < budget)) {
+        done = reader_.step(budget == 0 ? 0 : 1);
+        nodes_ = reader_.values() + reader_.bytes() / kDataNodeBytes;
+      }
+    } catch (const boost::property_tree::json_parser::json_parser_error &e) {
+      throw std::runtime_error("state-from-json: line " + std::to_string(e.line()) + ": " +
+                               e.message());
+    }
+    return done;
+  }
+
+  value_t result() override { return nil_value; }
+
+  // The document was the call's argument: keep a copy once the job outlives the call.
+  void own_inputs() override {
+    doc_ = std::string(reader_.doc());
+    reader_.rebind(doc_);
+  }
+
+private:
+  std::string doc_;
+  cvc::state_json_reader reader_;
+};
+
+} // namespace
+
+value_t intrinsic_state_json(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-json");
+  require_root(ctx, "state-json");
+  auto &path = as_string(args[0], "state-json");
+  cvc::state *node = ctx->root->findDescendant(path);
+  if (!node)
+    return nil_value;
+  return run_data_job(std::make_unique<state_json_job>(*read_through_link(node)));
+}
+
+value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-from-json");
+  require_root(ctx, "state-from-json");
+  auto &path = as_string(args[0], "state-from-json");
+  auto &doc = as_string(args[1], "state-from-json");
+  cvc::state *node = write_through_link(&(*ctx->root)(path));
+  return run_data_job(std::make_unique<state_from_json_job>(*node, doc));
 }
 
 value_t intrinsic_state_root_path(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -836,6 +948,8 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("state-delete", intrinsic_state_delete);
   reg("state-data-get", intrinsic_state_data_get);
   reg("state-data-set", intrinsic_state_data_set);
+  reg("state-json", intrinsic_state_json);
+  reg("state-from-json", intrinsic_state_from_json);
   reg("state-root-path", intrinsic_state_root_path);
   reg("state-watch", intrinsic_state_watch);
   reg("state-unwatch", intrinsic_state_unwatch);

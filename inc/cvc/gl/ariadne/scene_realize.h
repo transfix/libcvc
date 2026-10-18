@@ -27,14 +27,19 @@
 #include <cvc/core/world_clock.h> // tick_scene returns the frame's world_clock::step_result
 #include <cvc/core/world_clock_binding.h> // RealizedScene drives the clock through a binding
 #include <cvc/gl/StageLighting.h>         // RealizedScene owns any StageLighting rigs
+#include <cvc/gl/physics_scene_binding.h> // RealizedScene draws its bodies through one
+#include <cvc/physics/world.h>            // RealizedScene owns the scene's physics world
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cvc {
 class app;
 class geometry;
+class height_field;
 class volume;
 } // namespace cvc
 
@@ -92,6 +97,26 @@ struct RealizedScene {
   std::unique_ptr<cvc::world_clock_binding> clock_binding; // made by the first tick_scene
   std::chrono::steady_clock::time_point clock_last{}; // last tick_scene time (real-elapsed lane)
   bool clock_primed = false;                          // false until the first tick seeds clock_last
+
+  // The heightfield nodes' own cvc::height_field, by node id: the grid the node draws, the terrain
+  // its body collides with, and what a custom node standing on it (forest_trees, wave_sea,
+  // cloud_sky: their `ground:`) samples. The node's GeometryNode holds a plain copy of the mesh.
+  std::map<std::string, std::shared_ptr<const cvc::height_field>> height_fields;
+
+  // The scene's physics world (`physics:`, or the nodes' `body:`s), null without one. Its bodies
+  // are placed at their nodes' realized world poses; tick_scene steps it on app.world_clock()
+  // and draws the moving bodies through `physics_binding` (declared after the world, so it goes
+  // first). `bodies` maps node ids to their bodies.
+  std::unique_ptr<cvc::physics::world> physics;
+  std::unique_ptr<cvc::gl::physics_scene_binding> physics_binding;
+  std::vector<std::pair<std::string, cvc::physics::body_id>> bodies;
+  // The body of node `id`, or an invalid id.
+  cvc::physics::body_id body(const std::string &id) const {
+    for (const auto &b : bodies)
+      if (b.first == id)
+        return b.second;
+    return cvc::physics::body_id{};
+  }
 };
 
 // The binding keys for a scene clock. The scene names speed, paused, time and tick one by one
@@ -119,6 +144,10 @@ cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock);
 // ticks fixed). Returns the quanta this frame ran (steps, first_tick, alpha), so a host can step
 // its own followers by them. Scenes without a `clock:` block ignore wall_dt, never touch
 // app.world_clock(), and return an empty result.
+//
+// A physics scene (`physics:`, or any node `body:`) drives the clock as if it declared `clock: {}`,
+// then steps its world by the quanta due and poses the moving bodies' nodes between the last two
+// states (physics_scene_binding::follow + present).
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt = -1.0);
 
@@ -168,8 +197,9 @@ bool has_scene_node_type(const std::string &type);
 // normals, colours, tris).
 cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height);
 
-// The mesh a node's `source:` declares — a heightfield or plane primitive, or a file / URI — with
-// its `fit:` applied. Warns (naming the node) and returns false when there is no usable source.
+// The mesh a node's `source:` declares — a heightfield (its cvc::height_field's mesh), a plane, box
+// or sphere primitive, or a file / URI — with its `fit:` applied. Warns (naming the node) and
+// returns false when there is no usable source.
 bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &node, cvc::geometry &geom,
                         std::vector<std::string> *warnings);
 

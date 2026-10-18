@@ -36,8 +36,11 @@
 #include <cvc/core/exception.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_json.h>
 #include <cvc/state/state_message.h>
 #include <cvc/utility/utility.h>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
@@ -680,44 +683,16 @@ boost::property_tree::ptree state::ptree() {
   // holding the node's value -- or "" for a node other than this one with neither a value nor
   // children. For the root, relative paths are full names, as they always were. boost's ptree and
   // its JSON writer and parser recurse once per nesting level, so with one level, building this,
-  // writing it as JSON, reading it back, copying and destroying it don't recurse once per state
-  // level. A heap stack of levels; each node's value and children are snapshotted under its own
-  // lock, released before going down, and a child's path is its parent's, a separator and its
-  // name, carried down.
-  struct level {
-    std::vector<std::pair<state_ptr, std::string>> kids; // with their relative paths
-    std::size_t next = 0;
-  };
-  const char *const fn = BOOST_CURRENT_FUNCTION;
-  const auto open = [&pt, fn, this](state &n, const std::string &n_rel, bool top) {
-    level l;
-    std::string v;
-    {
-      boost::mutex::scoped_lock lock(n._mutex);
-      v = n._value;
-      l.kids.reserve(n._children.size());
-      for (const child_map::value_type &kv : n._children)
-        if (kv.second)
-          l.kids.emplace_back(kv.second, n_rel.empty() ? kv.first : n_rel + SEPARATOR + kv.first);
-    }
-    _ctx.log(6, boost::str(boost::format("%s :: %s = %s\n") % fn % n_rel % v));
-    if (!v.empty())
-      pt.push_back(property_tree::ptree::value_type(n_rel, property_tree::ptree(v)));
-    else if (!top && l.kids.empty())
-      pt.push_back(property_tree::ptree::value_type(n_rel, property_tree::ptree()));
-    return l;
-  };
-  std::vector<level> stack;
-  stack.push_back(open(*this, std::string(), true));
-  while (!stack.empty()) {
-    level &l = stack.back();
-    if (l.next == l.kids.size()) {
-      stack.pop_back();
-      continue;
-    }
-    std::pair<state_ptr, std::string> kid = std::move(l.kids[l.next++]);
-    boost::this_thread::interruption_point();
-    stack.push_back(open(*kid.first, kid.second, false)); // invalidates `l`
+  // copying and destroying it don't recurse once per state level. The walk is
+  // state_subtree_cursor's, which json() and state_exec's state-json share.
+  state_subtree_cursor cursor(*this);
+  std::string path, value;
+  for (;;) {
+    const state_subtree_cursor::visit v = cursor.next(path, value);
+    if (v == state_subtree_cursor::visit::done)
+      break;
+    if (v == state_subtree_cursor::visit::listed)
+      pt.push_back(property_tree::ptree::value_type(path, property_tree::ptree(value)));
   }
   return pt;
 }
@@ -772,7 +747,13 @@ void state::ptree(const boost::property_tree::ptree &pt) { apply_state_ptree(*th
 //  Returns a json string version of the property map.
 // ---- Change History ----
 // 01/12/2014 -- Joe R. -- Creation.
-std::string state::json() { return cvc::json(ptree()); }
+// The text write_json(ptree()) writes, from state_json_writer (state_exec's state-json runs the
+// same writer a slice at a time).
+std::string state::json() {
+  state_json_writer w(*this);
+  w.step(0);
+  return w.take();
+}
 
 // -----------
 // state::json
@@ -781,7 +762,13 @@ std::string state::json() { return cvc::json(ptree()); }
 //  Sets this state object and its children based on an incoming json.
 // ---- Change History ----
 // 01/13/2014 -- Joe R. -- Creation.
-void state::json(const std::string &j) { ptree(cvc::json(j)); }
+// What read_json() and ptree(pt) did, from state_json_reader (state_exec's state-from-json runs
+// the same reader a slice at a time): the document is checked whole first, so a malformed one
+// sets nothing, and its nesting costs no native stack.
+void state::json(const std::string &j) {
+  state_json_reader r(*this, j);
+  r.step(0);
+}
 
 // -----------
 // state::save
@@ -791,7 +778,19 @@ void state::json(const std::string &j) { ptree(cvc::json(j)); }
 // ---- Change History ----
 // 03/16/2012 -- Joe R. -- Creation.
 // 01/12/2014 -- Joe R. -- Forcing json.
-void state::save(const std::string &filename) { write_json(filename, ptree()); }
+// The file write_json(filename, ptree()) wrote: the same text, through a text-mode stream, and
+// the same errors.
+void state::save(const std::string &filename) {
+  using boost::property_tree::json_parser::json_parser_error;
+  state_json_writer w(*this);
+  w.step(0);
+  std::ofstream out(filename.c_str());
+  if (!out)
+    BOOST_PROPERTY_TREE_THROW(json_parser_error("cannot open file", filename, 0));
+  out << w.text() << std::flush;
+  if (!out.good())
+    BOOST_PROPERTY_TREE_THROW(json_parser_error("write error", filename, 0));
+}
 
 // --------------
 // state::restore
@@ -801,11 +800,16 @@ void state::save(const std::string &filename) { write_json(filename, ptree()); }
 // ---- Change History ----
 // 03/16/2012 -- Joe R. -- Creation.
 // 01/12/2014 -- Joe R. -- Forcing json.
+// read_json(filename, pt) then ptree(pt): a text-mode stream, the same errors, and the reader
+// json(j) uses.
 void state::restore(const std::string &filename) {
-  using namespace boost;
-  property_tree::ptree pt;
-  read_json(filename, pt);
-  ptree(pt);
+  using boost::property_tree::json_parser::json_parser_error;
+  std::ifstream in(filename.c_str());
+  if (!in)
+    BOOST_PROPERTY_TREE_THROW(json_parser_error("cannot open file", filename, 0));
+  const std::string doc((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  state_json_reader r(*this, doc, filename);
+  r.step(0);
 }
 
 // ---------------

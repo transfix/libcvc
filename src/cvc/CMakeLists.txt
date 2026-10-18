@@ -58,6 +58,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/types.h
   ../../inc/cvc/physics/shape.h
   ../../inc/cvc/physics/field.h
+  ../../inc/cvc/physics/vehicle.h
   ../../inc/cvc/physics/body.h
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
@@ -76,6 +77,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/utility/utility.h
   ../../inc/cvc/state/state_object.h
   ../../inc/cvc/state/state_list.h
+  ../../inc/cvc/state/state_json.h
   ../../inc/cvc/state/state_eviction_store.h
   ../../inc/cvc/state/state_memory_manager.h
   ../../inc/cvc/state/state_exec/types.h
@@ -200,6 +202,7 @@ set(SOURCE_FILES
   processing/smoothing.cpp
   volume/spider_io.cpp
   state/state.cpp
+  state/state_json.cpp
   state/state_list.cpp
   state/state_eviction_store.cpp
   state/state_memory_manager.cpp
@@ -212,6 +215,8 @@ set(SOURCE_FILES
   state/state_exec/async_stackless_evaluator.cpp
   state/state_exec/state_value_codec.cpp
   state/state_exec/data_job.cpp
+  state/state_exec/native_stack.cpp
+  state/state_exec/native_stack.h
   state/state_exec/heap.cpp
   state/state_exec/closure_natives.h
   state/state_exec/process.cpp
@@ -228,6 +233,7 @@ set(SOURCE_FILES
   core/unit_registry.cpp
   physics/world.cpp
   physics/field_step.cpp
+  physics/vehicle.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
   physics/world_geometry.cpp
@@ -1615,7 +1621,7 @@ if(CVC_WITH_JOLT)
     set(_cvc_jolt_kind OBJECT)
   endif()
   add_library(cvc_physics_jolt ${_cvc_jolt_kind} physics/jolt/jolt_backend.cpp
-    physics/jolt/jolt_material.cpp)
+    physics/jolt/jolt_material.cpp physics/jolt/jolt_vehicle_controller.cpp)
   set_target_properties(cvc_physics_jolt PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
@@ -1624,11 +1630,12 @@ if(CVC_WITH_JOLT)
   target_compile_definitions(cvc_physics_jolt PRIVATE CVC_WITH_JOLT)
   target_compile_features(cvc_physics_jolt PRIVATE cxx_std_17)
   target_link_libraries(cvc_physics_jolt PRIVATE Jolt::Jolt)
-  # Jolt is built without RTTI, and JPH::PhysicsMaterial's key function is in
-  # libJolt, so its typeinfo exists nowhere. cvc_material subclasses it; its vtable
-  # is emitted in jolt_material.cpp, the one file built with -fno-rtti, so nothing
-  # references the missing typeinfo ("undefined reference to typeinfo for
-  # JPH::PhysicsMaterial" otherwise). Only that file: a no-RTTI file that throws
+  # Jolt is built without RTTI, and the key functions of JPH::PhysicsMaterial and
+  # JPH::WheeledVehicleController(Settings) are in libJolt, so their typeinfo exists
+  # nowhere. cvc_material and the Ackermann controller subclass them; their vtables
+  # are emitted in jolt_material.cpp and jolt_vehicle_controller.cpp, the files built
+  # with -fno-rtti, so nothing references the missing typeinfo ("undefined reference
+  # to typeinfo for JPH::PhysicsMaterial" otherwise). Only those: a no-RTTI file that throws
   # std exceptions emits weak copies of their typeinfo, which on macOS bind every
   # reference in libcvc.dylib and break exception and boost::any matching across
   # the library boundary (see jolt_material.h). Jolt's other bases here have only
@@ -1638,8 +1645,8 @@ if(CVC_WITH_JOLT)
     target_compile_options(cvc_physics_jolt PRIVATE /fp:precise)
   else()
     target_compile_options(cvc_physics_jolt PRIVATE -ffp-contract=off)
-    set_source_files_properties(physics/jolt/jolt_material.cpp PROPERTIES
-      COMPILE_OPTIONS -fno-rtti)
+    set_source_files_properties(physics/jolt/jolt_material.cpp
+      physics/jolt/jolt_vehicle_controller.cpp PROPERTIES COMPILE_OPTIONS -fno-rtti)
   endif()
   if(_cvc_jolt_kind STREQUAL "STATIC")
     target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_physics_jolt>)

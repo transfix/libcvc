@@ -118,6 +118,49 @@ struct SceneHeightfield {
   std::vector<SceneHeightColorBand> colors;
 };
 
+// A node's rigid body (`body:`), in the scene's physics world (ScenePhysics). The node's realized
+// world pose places the body; physics then moves the node (a dynamic or kinematic body) or leaves
+// it alone (static). `body: dynamic` / `body: static` is the scalar shorthand for the motion.
+// The shape defaults to what the node draws: a heightfield collides as terrain (its own
+// cvc::height_field, the triangles the renderer draws), a box or sphere primitive as that
+// primitive, a plane as a thin slab under it, and any other mesh as its convex hull (dynamic) or
+// itself (static). A non-unit node scale is baked into the shape.
+struct SceneBody {
+  bool present = false; // was a `body:` given?
+  std::string
+      motion; // dynamic | kinematic | static; empty = static for a heightfield, else dynamic
+  std::string shape = "auto";             // auto | box | sphere | hull | mesh | terrain
+  double mass = 0.0;                      // kg; 0 = density x the shape's volume
+  double density = 1000.0;                // kg/m^3, when mass is 0
+  std::string material;                   // a physics: material's name; empty = the default
+  double velocity[3] = {0, 0, 0};         // m/s at the start
+  double angular_velocity[3] = {0, 0, 0}; // rad/s at the start
+  bool has_linear_damping = false;
+  double linear_damping = 0.05;
+  bool has_angular_damping = false;
+  double angular_damping = 0.05;
+};
+
+// A named contact material in the scene's physics world (`physics: { materials: { ice: {...} } }`).
+struct ScenePhysicsMaterial {
+  std::string name;
+  double friction = 1.0;    // Coulomb mu (combined with the other surface's by product)
+  double restitution = 0.0; // 0 = no bounce, 1 = elastic
+};
+
+// The scene's physics world (`physics:`): a cvc::physics::world the bodies (SceneBody) live in,
+// stepped on the scene clock. A scene with bodies and no `physics:` block gets the defaults; a
+// physics scene drives app.world_clock() as if it declared `clock: {}`.
+struct ScenePhysics {
+  bool present = false;                     // was a `physics:` block given?
+  double gravity[3] = {0.0, 0.0, -9.80665}; // m/s^2
+  // Seconds per physics step. It is a whole number of the clock's quanta (1/120 s by default); 0 =
+  // one quantum. Another value is rounded to the nearest whole number of quanta, with a warning.
+  double fixed_dt = 0.0;
+  std::string backend = "auto"; // auto (Jolt when built, else null) | jolt | null
+  std::vector<ScenePhysicsMaterial> materials;
+};
+
 // A GLSL shader surface on a geometry node (§9 — shaders). The DSL face of GeometryNode's shader-
 // replacement API (addVertexShaderReplacement / addFragmentShaderReplacement + the coordinate-
 // shift-scale toggle): a node can either name a host-registered PRESET (an effect like a terrain
@@ -176,8 +219,13 @@ struct SceneNode {
   // A built-in PROCEDURAL primitive as a geometry node's source, instead of source: { file }.
   // Empty = use source_file. "plane" = a flat quad with UP normals, spanning
   // [-plane_size/2, +plane_size/2]² at z=0 — a ground / shadow receiver that needs no asset.
+  // "box" = a box centred on the origin, `box_size` its edge lengths (source: { box: { size: [x,
+  // y, z] } } or { box: <edge> }). "sphere" = a UV sphere of `sphere_radius` about the origin
+  // (source: { sphere: { radius } } or { sphere: <radius> }). Both carry outward normals.
   std::string source_primitive;
-  float plane_size = 1.0f; // "plane": full edge length
+  float plane_size = 1.0f;                // "plane": full edge length
+  float box_size[3] = {1.0f, 1.0f, 1.0f}; // "box": edge lengths
+  float sphere_radius = 0.5f;             // "sphere": radius
 
   // A procedural HEIGHTFIELD as a geometry node's source: source: { heightfield: {...} }. When
   // present (has_heightfield), the realizer generates a displaced grid mesh and source_file /
@@ -234,6 +282,7 @@ struct SceneNode {
 
   SceneShader shader; // shader: {...} — GLSL replacements / a named preset (geometry nodes)
   SceneClip clip;     // clip: {...} — half-spaces in the node's own coordinates (any node type)
+  SceneBody body;     // body: {...} — a rigid body in the scene's physics world (geometry nodes)
 
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
@@ -309,6 +358,7 @@ struct Scene {
   std::vector<SceneNode> nodes;
   std::vector<SceneLight> lights;
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
+  ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   bool has_shadows = false;
   bool shadows_enabled = false;
   bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map
@@ -325,7 +375,7 @@ struct Scene {
   float background_bottom[3] = {0.02f, 0.02f, 0.03f};
   bool any() const {
     return !nodes.empty() || !lights.empty() || has_shadows || has_chrome || has_background ||
-           clock.present;
+           clock.present || physics.present;
   }
 };
 

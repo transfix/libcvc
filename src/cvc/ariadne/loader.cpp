@@ -1223,7 +1223,96 @@ Value to_value(const YAML::Node &n) {
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
-         k == "volume" || k == "shader" || k == "clip" || k == "children";
+         k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children";
+}
+
+std::string lowered(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return s;
+}
+
+// Three numbers into out[3]; a missing or short list, or a non-number, leaves the defaults.
+void triple_into(const YAML::Node &v, double out[3]) {
+  if (!v || !v.IsSequence() || v.size() < 3)
+    return;
+  for (std::size_t i = 0; i < 3; ++i)
+    try {
+      out[i] = v[i].as<double>();
+    } catch (const std::exception &) {
+    }
+}
+
+// body: dynamic | kinematic | static (the motion alone), or { motion, shape, mass, density,
+// material, velocity, angular_velocity, linear_damping, angular_damping }: the node's rigid body in
+// the scene's physics world (SceneBody). Values are lower-cased; the realizer checks them.
+SceneBody parse_scene_body(const YAML::Node &b) {
+  SceneBody body;
+  if (!b)
+    return body;
+  body.present = true;
+  if (b.IsScalar()) {
+    body.motion = lowered(b.Scalar());
+    return body;
+  }
+  if (!b.IsMap())
+    return body;
+  body.motion = lowered(str(b, "motion"));
+  body.shape = lowered(str(b, "shape", body.shape));
+  body.mass = num(b, "mass", body.mass);
+  body.density = num(b, "density", body.density);
+  body.material = str(b, "material");
+  triple_into(b["velocity"], body.velocity);
+  triple_into(b["angular_velocity"], body.angular_velocity);
+  if (b["linear_damping"]) {
+    body.has_linear_damping = true;
+    body.linear_damping = num(b, "linear_damping", body.linear_damping);
+  }
+  if (b["angular_damping"]) {
+    body.has_angular_damping = true;
+    body.angular_damping = num(b, "angular_damping", body.angular_damping);
+  }
+  return body;
+}
+
+// physics: { gravity: [x, y, z], fixed_dt, backend: auto|jolt|null, materials: { <name>: {
+// friction, restitution } } } — the scene's physics world (ScenePhysics). `physics: {}` (or
+// `physics: true`) takes the defaults; `physics: false` declares none.
+ScenePhysics parse_scene_physics(const YAML::Node &p) {
+  ScenePhysics ph;
+  if (!p)
+    return ph;
+  if (p.IsScalar()) {
+    ph.present = lowered(p.Scalar()) != "false";
+    return ph;
+  }
+  ph.present = true;
+  if (!p.IsMap())
+    return ph;
+  triple_into(p["gravity"], ph.gravity);
+  ph.fixed_dt = num(p, "fixed_dt", ph.fixed_dt);
+  // `backend: null` is YAML's null literal, not a missing key: it means the null backend, as
+  // does `none`.
+  const YAML::Node be = p["backend"];
+  if (be && be.IsNull())
+    ph.backend = "null";
+  else
+    ph.backend = lowered(str(p, "backend", ph.backend));
+  if (ph.backend == "none")
+    ph.backend = "null";
+  if (const YAML::Node mats = p["materials"]; mats && mats.IsMap())
+    for (const auto &kv : mats) {
+      if (!kv.first.IsScalar())
+        continue;
+      ScenePhysicsMaterial m;
+      m.name = kv.first.Scalar();
+      if (kv.second.IsMap()) {
+        m.friction = num(kv.second, "friction", m.friction);
+        m.restitution = num(kv.second, "restitution", m.restitution);
+      }
+      ph.materials.push_back(m);
+    }
+  return ph;
 }
 
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
@@ -1360,6 +1449,23 @@ SceneNode parse_scene_node(const YAML::Node &n) {
           sn.plane_size = static_cast<float>(num(plane, "size", sn.plane_size));
         else if (plane.IsScalar())
           sn.plane_size = static_cast<float>(plane.as<double>());
+      } else if (const YAML::Node box = src["box"]) {
+        // source: { box: { size: [x, y, z] } } or { box: <edge> } — a box centred on the origin.
+        sn.source_primitive = "box";
+        const YAML::Node size = box.IsMap() ? box["size"] : box;
+        if (size && size.IsSequence() && size.size() >= 3) {
+          for (std::size_t i = 0; i < 3; ++i)
+            sn.box_size[i] = static_cast<float>(size[i].as<double>());
+        } else if (size && size.IsScalar()) {
+          sn.box_size[0] = sn.box_size[1] = sn.box_size[2] = static_cast<float>(size.as<double>());
+        }
+      } else if (const YAML::Node sphere = src["sphere"]) {
+        // source: { sphere: { radius } } or { sphere: <radius> } — a sphere about the origin.
+        sn.source_primitive = "sphere";
+        if (sphere.IsMap())
+          sn.sphere_radius = static_cast<float>(num(sphere, "radius", sn.sphere_radius));
+        else if (sphere.IsScalar())
+          sn.sphere_radius = static_cast<float>(sphere.as<double>());
       } else if (const YAML::Node sdf = src["sdf"]) {
         // source: { sdf: { mesh: <uri>, dim: N, algorithm: v1|v2|igl } } — a volren/volslice
         // volume computed as the signed distance field of a mesh (no pre-baked volume asset).
@@ -1516,6 +1622,7 @@ SceneNode parse_scene_node(const YAML::Node &n) {
   if (const YAML::Node sh = n["shader"])
     sn.shader = parse_scene_shader(sh);
   sn.clip = parse_scene_clip(n["clip"]);
+  sn.body = parse_scene_body(n["body"]);
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
   // custom node type registered on the cvcGL side reads its own config from there.
   sn.props.kind = Value::Kind::Map;
@@ -1645,6 +1752,7 @@ Scene parse_scene(const YAML::Node &s) {
     if (ck["tick_key"])
       sc.clock.tick_key = str(ck, "tick_key");
   }
+  sc.physics = parse_scene_physics(s["physics"]);
   return sc;
 }
 

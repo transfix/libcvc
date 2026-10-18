@@ -1679,7 +1679,12 @@ TEST(AriadneStdlib, PredicateMaterializerIsCutByTheEvalBudget) {
   EXPECT_FALSE(mb.saw("text_line:big"));
   auto warns = rt.take_reactive_warnings();
   ASSERT_FALSE(warns.empty());
-  EXPECT_NE(warns[0].find("exceeded the eval budget"), std::string::npos) << warns[0];
+  // Cut by the step cap or the time cap, whichever comes first. The time cap is reported as the
+  // eval budget when it expires between steps, and through the job's own error ("evaluation
+  // exceeded time budget") when the job's deadline poll sees it first, as on a slow Debug build.
+  EXPECT_TRUE(warns[0].find("exceeded the eval budget") != std::string::npos ||
+              warns[0].find("evaluation exceeded time budget") != std::string::npos)
+      << warns[0];
 
   // A 0 here still slices, at the host's 1024 nodes a step, and an ordinary call finishes. It is
   // kept small so it fits the 5 ms time cap in a Debug build on a loaded CI runner.
