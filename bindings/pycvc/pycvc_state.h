@@ -25,6 +25,14 @@ void state_set(const std::shared_ptr<cvc::app> &app, const std::string &path,
                const std::string &value);
 std::string state_get(const std::shared_ptr<cvc::app> &app, const std::string &path);
 bool state_has(const std::shared_ptr<cvc::app> &app, const std::string &path);
+// What a node says it is (cvc/state/state_key_meta.h): its comment, and its named
+// properties beside the value ("access", "unit", "min", "max", ...). A property that is
+// not set is "". All three throw on a missing path, as state_get does.
+std::string state_comment(const std::shared_ptr<cvc::app> &app, const std::string &path);
+std::string state_property(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                           const std::string &key);
+std::vector<std::string> state_property_keys(const std::shared_ptr<cvc::app> &app,
+                                             const std::string &path);
 // Immediate child leaf-names of `path` ("" = the root).
 std::vector<std::string> state_children(const std::shared_ptr<cvc::app> &app,
                                         const std::string &path);
