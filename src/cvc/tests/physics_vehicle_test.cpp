@@ -24,14 +24,19 @@
 // Jolt only; the refusals run on the null backend too.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/physics/world.h>
+#include <cvc/physics/world_binding.h>
+#include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <string>
+#include <tuple>
 #include <vector>
 
 using namespace cvc::physics;
@@ -639,6 +644,28 @@ TEST(PhysicsVehicle, RutsStayBehindAVehicle) {
               mean, z, across * ruts.cell, vehicle_desc::humvee().axles[0].wheel_width, x_now);
   EXPECT_NEAR(mean, z, 0.10 * z);
   EXPECT_NEAR(across * ruts.cell, vehicle_desc::humvee().axles[0].wheel_width, 2.5 * ruts.cell);
+  // The snapshot counts the ruts as the map holds them.
+  std::size_t cells = 0;
+  float deepest = 0.0f;
+  for (const float d : ruts.depth)
+    if (d > 0.0f) {
+      ++cells;
+      deepest = std::max(deepest, d);
+    }
+  const world_snapshot snap = w.snapshot();
+  ASSERT_EQ(snap.fields.size(), 1u);
+  EXPECT_EQ(snap.fields[0].rut_cells, cells);
+  EXPECT_EQ(snap.fields[0].rut_deepest, static_cast<double>(deepest));
+  // New traction keeps the ruts; a new rut_cell starts them over.
+  field f = w.get_field(snow);
+  f.traction = 0.25;
+  w.set_field(snow, f);
+  EXPECT_EQ(w.field_ruts(snow).depth, ruts.depth);
+  EXPECT_EQ(w.snapshot().fields[0].rut_cells, cells);
+  f.rut_cell = 0.1;
+  w.set_field(snow, f);
+  EXPECT_EQ(w.snapshot().fields[0].rut_cells, 0u);
+  EXPECT_EQ(w.field_ruts(snow).at(x_now - 15.0, 0.91), 0.0);
 }
 
 // A second vehicle in the first one's ruts sinks no deeper and is barely held back: the snow
@@ -669,4 +696,243 @@ TEST(PhysicsVehicle, ASecondPassInTheRutsSinksNoFurtherAndRollsEasier) {
   EXPECT_LT(lead_rear, 0.10 * lead_front); // in its own front wheels' ruts
   EXPECT_NEAR(b.wheels[0].sinkage, a.wheels[0].sinkage, 0.05 * a.wheels[0].sinkage);
   EXPECT_NEAR(b.wheels[0].rut, a.wheels[0].sinkage, 0.10 * a.wheels[0].sinkage);
+}
+
+// --- tuning, the snapshot and the state tree ---------------------------------------------------
+
+namespace {
+
+std::string tree(cvc::app &a, const std::string &path) {
+  return cvc::state::instance(a)(path).value();
+}
+double tree_num(cvc::app &a, const std::string &path) { return std::stod(tree(a, path)); }
+void set_tree(cvc::app &a, const std::string &path, const std::string &v) {
+  cvc::state::instance(a)(path).value(v);
+}
+
+} // namespace
+
+// set_vehicle tunes a running vehicle: the facade's knobs (the steering limit) and the engine's
+// (torque, the suspension's springs) both take effect.
+TEST(PhysicsVehicle, SetVehicleTunesARunningVehicle) {
+  REQUIRE_JOLT();
+  // Ride height, then steer and speed after 2 s at full lock and full throttle.
+  const auto run = [](bool tuned) {
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    const vehicle_id v = settled_humvee(w);
+    if (tuned) {
+      vehicle_desc d = w.get_vehicle(v);
+      d.max_steer = 0.2;
+      d.engine_max_torque *= 0.5;
+      for (axle_desc &a : d.axles)
+        a.suspension_frequency *= 2.0;
+      w.set_vehicle(v, d);
+      EXPECT_EQ(w.get_vehicle(v).max_steer, 0.2);
+    }
+    w.drive(v, {});
+    w.step(200);
+    const double ride = w.vehicle_state(v).body.position.z;
+    vehicle_controls c;
+    c.steer = 0.6;
+    c.throttle = 1.0;
+    w.set_controls(v, c);
+    w.step(200);
+    const vehicle_state s = w.vehicle_state(v);
+    return std::make_tuple(ride, s.steer, s.speed);
+  };
+  const auto [ride0, steer0, speed0] = run(false);
+  const auto [ride1, steer1, speed1] = run(true);
+  std::printf("  ride %.4f -> %.4f m (springs x2), steer %.3f -> %.3f rad, speed %.2f -> %.2f m/s "
+              "(torque x0.5)\n",
+              ride0, ride1, steer0, steer1, speed0, speed1);
+  // The sag is g / (2 pi f)^2: 0.147 m at 1.3 Hz, 0.037 m at 2.6 Hz.
+  EXPECT_NEAR(ride1 - ride0, 0.147 - 0.037, 0.02);
+  EXPECT_NEAR(steer0, vehicle_desc::humvee().max_steer, 1e-9);
+  EXPECT_NEAR(steer1, 0.2, 1e-9);
+  EXPECT_LT(speed1, 0.75 * speed0);
+}
+
+// What is fixed when a vehicle is added cannot change, and a refused tuning changes nothing.
+TEST(PhysicsVehicle, SetVehicleRefusesWhatIsFixed) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  const vehicle_id v = settled_humvee(w);
+  const vehicle_desc before = w.get_vehicle(v);
+  const auto refused = [&](vehicle_desc d, const char *named) {
+    d.max_steer = 0.3; // a change that would be allowed, refused with the rest
+    try {
+      w.set_vehicle(v, d);
+      ADD_FAILURE() << "accepted a change to " << named;
+    } catch (const cvc::physics_error &e) {
+      EXPECT_NE(std::string(e.what()).find(named), std::string::npos) << e.what();
+    }
+    EXPECT_EQ(w.get_vehicle(v).max_steer, before.max_steer);
+  };
+  vehicle_desc d = before;
+  d.mass += 100.0;
+  refused(d, "mass");
+  d = before;
+  d.axles[1].wheel_radius *= 1.1;
+  refused(d, "axles[1].wheel_radius");
+  d = before;
+  d.gear_ratios.push_back(0.6);
+  refused(d, "gear_ratios");
+  d = before;
+  d.axles[0].anti_roll_stiffness = 0.0; // the axle has a bar: it keeps one
+  refused(d, "anti_roll_stiffness");
+  d = before;
+  d.max_steer = 2.0; // out of range, as add_vehicle would say
+  EXPECT_THROW(w.set_vehicle(v, d), cvc::physics_error);
+  EXPECT_THROW(w.set_vehicle(vehicle_id{}, before), cvc::physics_error);
+  d = before;
+  d.axles[0].anti_roll_stiffness = 30000.0; // a stiffer bar is a tuning
+  EXPECT_NO_THROW(w.set_vehicle(v, d));
+}
+
+// snapshot() is the whole world at one tick: every body (the chassis too), every vehicle with
+// its wheels, the materials and the contacts, equal to what the accessors read at that tick.
+TEST(PhysicsVehicle, TheSnapshotHoldsEveryBodyAndVehicleAtOneTick) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  const vehicle_id v = settled_humvee(w);
+  for (int i = 0; i < 3; ++i)
+    w.add_body({box{{0.2, 0.2, 0.2}}, motion_type::dynamic, {5.0 + i, 4.0, 0.5 + i}});
+  w.drive(v, {0.1, 1.0});
+  w.step(50);
+  const world_snapshot s = w.snapshot();
+  EXPECT_EQ(s.tick, w.tick());
+  EXPECT_DOUBLE_EQ(s.time, w.time());
+  EXPECT_EQ(s.materials.size(), w.material_count());
+  EXPECT_EQ(s.contacts.size(), w.contacts().size());
+  ASSERT_EQ(s.bodies.size(), w.body_count());
+  for (std::size_t i = 1; i < s.bodies.size(); ++i)
+    EXPECT_LT(s.bodies[i - 1].id.value, s.bodies[i].id.value);
+  int statics = 0;
+  for (const body_snapshot &b : s.bodies) {
+    const body_state now = w.state(b.id);
+    EXPECT_EQ(b.state.position.x, now.position.x);
+    EXPECT_EQ(b.state.position.z, now.position.z);
+    EXPECT_EQ(b.state.linear_velocity.x, now.linear_velocity.x);
+    EXPECT_EQ(b.state.active, now.active);
+    statics += b.motion == motion_type::static_;
+  }
+  EXPECT_EQ(statics, 1);
+  ASSERT_EQ(s.vehicles.size(), 1u);
+  const vehicle_state now = w.vehicle_state(v);
+  EXPECT_EQ(s.vehicles[0].id, v);
+  EXPECT_EQ(s.vehicles[0].desc.mass, vehicle_desc::humvee().mass);
+  EXPECT_EQ(s.vehicles[0].state.speed, now.speed);
+  ASSERT_EQ(s.vehicles[0].state.wheels.size(), now.wheels.size());
+  EXPECT_EQ(s.vehicles[0].state.wheels[3].load, now.wheels[3].load);
+  bool chassis = false;
+  for (const body_snapshot &b : s.bodies)
+    chassis = chassis || (b.id == now.chassis && b.motion == motion_type::dynamic);
+  EXPECT_TRUE(chassis);
+}
+
+// A vehicle published to the tree is driven, tuned and read there.
+TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
+  REQUIRE_JOLT();
+  cvc::app a;
+  world w(jolt_config());
+  world_binding b(a, w);
+  flat_ground(w, 0.9);
+  const vehicle_id v = settled_humvee(w);
+  const vehicle_id car = settled_humvee(w, 0.0, 10.0);
+  EXPECT_THROW(b.publish_vehicle("truck.1", v), cvc::physics_error);
+  EXPECT_THROW(b.publish_vehicle("ghost", vehicle_id{}), cvc::physics_error);
+  b.publish_vehicle("truck", v);
+  // A command the tree holds before the vehicle is published drives it.
+  set_tree(a, "physics.vehicles.car.command.accel", "1.5");
+  b.publish_vehicle("car", car);
+  // Seeded: the commands at 0, the knobs at the vehicle's values.
+  EXPECT_EQ(tree(a, "physics.vehicles.truck.command.accel"), "0");
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.max_steer"),
+            vehicle_desc::humvee().max_steer);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.axles.1.suspension_frequency"),
+            vehicle_desc::humvee().axles[1].suspension_frequency);
+  set_tree(a, "physics.vehicles.truck.command.accel", "2");
+  for (int i = 0; i < 200; ++i)
+    b.step();
+  const vehicle_state s = w.vehicle_state(v);
+  EXPECT_GT(s.speed, 2.0);
+  EXPECT_GT(speed_of(w, car), 1.5);
+  // The keys are that tick's state, to the last digit.
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.speed"), s.speed);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.position.x"), s.body.position.x);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.rotation.w"), s.body.rotation.w);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.wheels.2.load"), s.wheels[2].load);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.wheels.0.contact_point.z"),
+            s.wheels[0].contact_point.z);
+  EXPECT_EQ(tree(a, "physics.vehicles.truck.gear"), std::to_string(s.gear));
+  EXPECT_EQ(tree(a, "physics.vehicles.truck.chassis"), std::to_string(s.chassis.value));
+  {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 100; ++i)
+      b.push();
+    std::printf(
+        "  push() with two published vehicles: %.0f us\n",
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() /
+            100);
+  }
+  // A program's own command stands until the tree's changes.
+  w.drive(v, {0.0, -3.0});
+  for (int i = 0; i < 100; ++i)
+    b.step();
+  EXPECT_LT(speed_of(w, v), s.speed - 1.0);
+  // A tighter steering limit, then full lock, from the tree.
+  set_tree(a, "physics.vehicles.truck.tuning.max_steer", "0.2");
+  set_tree(a, "physics.vehicles.truck.command.steer", "0.5");
+  for (int i = 0; i < 300; ++i)
+    b.step();
+  EXPECT_EQ(w.get_vehicle(v).max_steer, 0.2);
+  EXPECT_NEAR(tree_num(a, "physics.vehicles.truck.steer"), 0.2, 1e-9);
+  // An invalid knob is ignored, and so is one fixed at add_vehicle.
+  set_tree(a, "physics.vehicles.truck.tuning.max_steer", "7");
+  EXPECT_NO_THROW(b.step());
+  EXPECT_EQ(w.get_vehicle(v).max_steer, 0.2);
+  // Pedals.
+  set_tree(a, "physics.vehicles.truck.controls.hand_brake", "1");
+  b.step();
+  b.step();
+  EXPECT_EQ(w.vehicle_state(v).hand_brake, 1.0);
+  // A vehicle the world no longer has stops being published.
+  w.remove_vehicle(v);
+  EXPECT_NO_THROW(b.step());
+  EXPECT_NO_THROW(b.step());
+}
+
+// A field published to the tree is tuned there, and reports its ruts.
+TEST(PhysicsVehicle, TheTreeTunesAFieldAndReadsItsRuts) {
+  REQUIRE_JOLT();
+  cvc::app a;
+  world w(jolt_config());
+  world_binding b(a, w);
+  flat_ground(w, 0.9);
+  const field_id snow = w.add_field(rutted_snow());
+  const vehicle_id v = w.add_vehicle(vehicle_desc::humvee(), {-250, 0, 1.6});
+  b.publish_field("snow", snow);
+  b.publish_vehicle("truck", v);
+  EXPECT_EQ(tree(a, "physics.fields.snow.traction"), "0"); // seeded
+  set_tree(a, "physics.fields.snow.traction", "0.3");
+  set_tree(a, "physics.vehicles.truck.command.accel", "1");
+  for (int i = 0; i < 800; ++i)
+    b.step();
+  EXPECT_EQ(w.get_field(snow).traction, 0.3);
+  EXPECT_NEAR(w.vehicle_state(v).wheels[0].friction, 0.3, 1e-6) << "the tires use the traction";
+  const world_snapshot s = w.snapshot();
+  ASSERT_EQ(s.fields.size(), 1u);
+  EXPECT_GT(s.fields[0].rut_cells, 1000u);
+  EXPECT_EQ(tree(a, "physics.fields.snow.kind"), "medium");
+  EXPECT_EQ(std::stoull(tree(a, "physics.fields.snow.ruts.cells")), s.fields[0].rut_cells);
+  EXPECT_EQ(tree_num(a, "physics.fields.snow.ruts.deepest"), s.fields[0].rut_deepest);
+  EXPECT_GT(tree_num(a, "physics.vehicles.truck.wheels.0.sinkage"), 0.05);
+  std::printf("  %zu rut cells, deepest %.4f m, after %.1f m\n", s.fields[0].rut_cells,
+              s.fields[0].rut_deepest, w.vehicle_state(v).body.position.x + 250.0);
+  set_tree(a, "physics.fields.snow.traction", "-1"); // invalid: ignored
+  EXPECT_NO_THROW(b.step());
+  EXPECT_EQ(w.get_field(snow).traction, 0.3);
 }

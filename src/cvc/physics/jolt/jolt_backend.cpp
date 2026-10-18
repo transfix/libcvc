@@ -557,6 +557,10 @@ struct jolt_vehicle {
   std::vector<double> width, diameter;
   std::vector<float> steer; // rad, per wheel, set by the facade
   bool neutral = false;
+  // The wheels' settings, which the constraint's wheels point at, and each axle's anti-roll
+  // bar (-1 for none): tune_vehicle changes them in place.
+  std::vector<JPH::Ref<JPH::WheelSettingsWV>> wheel_settings;
+  std::vector<int> bar_of_axle;
 };
 
 // The wheels' ground test: a ray down the suspension, long enough to find the ground under a
@@ -1038,9 +1042,12 @@ public:
             1.0f);
         w->mLateralFriction.AddPoint(90.0f, static_cast<float>(d.tire_sliding));
         vs.mWheels.push_back(w);
+        v->wheel_settings.push_back(w);
         v->width.push_back(a.wheel_width);
         v->diameter.push_back(2.0 * a.wheel_radius);
       }
+      v->bar_of_axle.push_back(
+          a.anti_roll_stiffness > 0.0 ? static_cast<int>(vs.mAntiRollBars.size()) : -1);
       if (a.anti_roll_stiffness > 0.0) {
         JPH::VehicleAntiRollBar bar;
         bar.mLeftWheel = static_cast<int>(2 * ai);
@@ -1087,6 +1094,34 @@ public:
     chassis.value = id.GetIndexAndSequenceNumber();
     _vehicles.emplace(handle, std::move(v));
     return true;
+  }
+
+  void tune_vehicle(std::uint32_t handle, const vehicle_desc &d) override {
+    jolt_vehicle &v = *_vehicles.at(handle);
+    auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
+    JPH::VehicleEngine &engine = ctl->GetEngine();
+    engine.mMaxTorque = static_cast<float>(d.engine_max_torque);
+    engine.mMinRPM = static_cast<float>(d.engine_min_rpm);
+    engine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
+    JPH::VehicleTransmission &gearbox = ctl->GetTransmission();
+    gearbox.mShiftUpRPM = static_cast<float>(d.shift_up_rpm);
+    gearbox.mShiftDownRPM = static_cast<float>(d.shift_down_rpm);
+    JPH::VehicleAntiRollBars &bars = v.constraint->GetAntiRollBars();
+    for (size_t ai = 0; ai < d.axles.size() && 2 * ai + 1 < v.wheel_settings.size(); ++ai) {
+      const axle_desc &a = d.axles[ai];
+      for (size_t w = 2 * ai; w < 2 * ai + 2; ++w) {
+        JPH::WheelSettingsWV &ws = *v.wheel_settings[w];
+        ws.mMaxBrakeTorque = static_cast<float>(a.max_brake_torque);
+        ws.mMaxHandBrakeTorque = static_cast<float>(a.max_hand_brake_torque);
+        ws.mSuspensionSpring.mFrequency = static_cast<float>(a.suspension_frequency);
+        ws.mSuspensionSpring.mDamping = static_cast<float>(a.suspension_damping);
+      }
+      if (ai < v.bar_of_axle.size() && v.bar_of_axle[ai] >= 0)
+        bars[static_cast<size_t>(v.bar_of_axle[ai])].mStiffness =
+            static_cast<float>(a.anti_roll_stiffness);
+    }
+    // A sleeping vehicle wakes to its new settings.
+    _ps->GetBodyInterface().ActivateBody(v.body);
   }
 
   void remove_vehicle(std::uint32_t handle) override {

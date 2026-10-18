@@ -135,6 +135,22 @@ The world is thread-safe. Every call locks it, and `step()` holds the lock for t
 step, so a call from another thread waits at most one step. Accessors return copies. To read a
 running world from many threads without waiting, read the telemetry a `world_binding` publishes.
 
+### The whole world at once: `snapshot()`
+
+`world::snapshot()` copies everything at one tick under one lock into a `world_snapshot`:
+
+- the model: the config, the materials, every field as given (with its rut count and deepest
+  rut), and every vehicle's description as tuned;
+- the state: every body (id, motion type, material, user data, pose, velocities, awake, and
+  what the fields did to it), every vehicle's `vehicle_state` with its wheels, and the last
+  step's contacts.
+
+Every list is in ascending id order. It costs one pass over the moving bodies: static bodies are
+read when they are added or moved. With 1001 moving bodies on Windows (MSVC), a snapshot takes
+about 0.18 ms against a 2.1 ms step (`physics_world_test`). A `world_binding` publishes one to
+the state tree as it steps (below), so any thread can read the latest without taking the
+world's lock.
+
 Jolt's process globals (allocator hooks, factory, type registry) exist while at least one Jolt
 world does. The first world sets them up and the last one tears them down. If the application set
 up Jolt itself, that setup is used and left in place. libcvc keeps no singleton of its own.
@@ -197,6 +213,19 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
   - The maps are state: `save()` carries them and `state_hash()` covers them.
 - **Save and restore** carry the actuators and the driver's memory, so a replay reproduces a
   drive (`physics_vehicle_test`).
+- **Tuning a running vehicle.** `get_vehicle(id)` returns its description and `set_vehicle(id, d)`
+  changes it from the next step on. These values may change:
+  - the steering: `max_steer`, `max_steer_rate`;
+  - the driver: `max_accel`, `max_decel`;
+  - the resistance: `drag_coefficient`, `frontal_area`, `air_density`, `rolling_resistance`;
+  - the powertrain: `engine_max_torque`, `engine_min_rpm`, `engine_max_rpm`, `shift_up_rpm`,
+    `shift_down_rpm`;
+  - each axle: `max_brake_torque`, `max_hand_brake_torque`, `suspension_frequency`,
+    `suspension_damping`, and `anti_roll_stiffness` on an axle that was added with a bar.
+
+  A change to anything else (the chassis, the mass, the wheels' geometry, the gearing, the
+  tire curves) throws `cvc::physics_error` naming it and changes nothing. Like materials, a
+  tuning is not part of `save()`.
 
 ## Static world geometry: `add_world_geometry`
 
@@ -294,6 +323,44 @@ invalid value is ignored and never thrown into a frame.
 | `materials.<name>.{friction, restitution, rolling_resistance, nav_material}` | every `pull()` | A new child adds a material, and a changed value updates it. `default` is material 0. |
 | `publish_every` | every `pull()` | `step()`/`follow()` push every N steps (default 1) |
 | `hash_every` | every `pull()` | Publish `state_hash` every N steps; 0, the default, means never |
+| `snapshot_every` | every `pull()` | Publish the snapshot every N steps (default 1); 0 means never |
 | `tick`, `time`, `step_ms`, `bodies`, `active_bodies`, `contact_events`, `saturated`, `version`, `restart_required`, `state_hash` | written by `push()` | Telemetry |
+| `snapshot` | written by `push()` | The `world_snapshot` as `std::shared_ptr<const world_snapshot>` in the node's `data()`. `world_binding::snapshot_from_state(app)` reads it from any thread |
+
+### Named bodies, vehicles and fields
+
+```cpp
+bind.publish_vehicle("truck", truck);   // physics.vehicles.truck.*
+bind.publish_body("crate", crate);      // physics.bodies.crate.*
+bind.publish_field("snow", snow);       // physics.fields.snow.*
+bind.publish(add_world_geometry(w, g)); // every collide item and volume, by name
+```
+
+A published actor gets its own keys. `push()` writes its telemetry from the same snapshot it
+publishes, so all of a push's keys agree on one tick. Doubles are written to full precision, so
+a key reads back exactly as the world held it.
+
+| Keys, under `bodies.<name>`, `vehicles.<name>`, `fields.<name>` | Read | Notes |
+|---|---|---|
+| `bodies.<name>.{id, motion, position.*, rotation.*, velocity.*, angular_velocity.*, active, field_force.*, immersed_volume}` | written by `push()` | `motion` is `static`, `kinematic` or `dynamic` |
+| `vehicles.<name>.{chassis, speed, steer, steer_command, throttle, brake, hand_brake, gear, engine_rpm, position.*, rotation.*, velocity.*, angular_velocity.*, aero_force.*, air_velocity.*}` | written by `push()` | The `vehicle_state` |
+| `vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact, contact_point.*, load, longitudinal_slip, lateral_slip, friction, rolling_resistance, medium_depth, sinkage, rut, medium_resistance}` | written by `push()` | Each `wheel_state` |
+| `vehicles.<name>.command.{steer, accel, reverse}` | every `pull()` | A change calls `world::drive` |
+| `vehicles.<name>.controls.{steer, throttle, brake, hand_brake, reverse, neutral}` | every `pull()` | A change calls `world::set_controls` |
+| `vehicles.<name>.tuning.<value>`, `tuning.axles.<i>.<value>` | every `pull()` | `world::set_vehicle`, with the values above |
+| `fields.<name>.{drag_coefficient, damping, traction}` | every `pull()` | `world::set_field`, which keeps a medium's ruts |
+| `fields.<name>.{kind, ruts.cells, ruts.deepest}` | written by `push()` | Telemetry |
+
+- **Commands** act only when they change, so a program can still drive the vehicle through the
+  world between changes. A command already in the tree when the vehicle is published is
+  applied at once.
+- **Knobs** follow the material idiom: they are seeded with the world's values and applied when
+  the tree's value changes. An invalid value is ignored, and the world keeps its last good
+  value.
+- **Removed actors** are no longer published once the world drops them; their keys keep their
+  last values.
+- **Cost.** A key write costs a few microseconds, so a published vehicle (about 90 keys) adds
+  about 0.34 ms to a push. `publish_every` throttles it. In-process readers can use the
+  snapshot instead.
 
 Each binding belongs to one app and one world, so two apps configure two worlds independently.

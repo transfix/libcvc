@@ -8,13 +8,17 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
+#include <boost/any.hpp>
 #include <boost/lexical_cast.hpp>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/physics/world_binding.h>
+#include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
 #include <utility>
 #include <vector>
@@ -161,6 +165,154 @@ bool same_material(const material &a, const material &b) {
          a.rolling_resistance == b.rolling_resistance && a.nav_material == b.nav_material;
 }
 
+bool parse_flag(const std::string &s, bool &out) {
+  const std::string t = trim_lower(s);
+  if (t == "1" || t == "true" || t == "yes" || t == "on") {
+    out = true;
+    return true;
+  }
+  if (t == "0" || t == "false" || t == "no" || t == "off") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
+void put_vec(cvc::app &ctx, const std::string &base, const vec3 &v) {
+  write_val(ctx, at(base, "x"), v.x);
+  write_val(ctx, at(base, "y"), v.y);
+  write_val(ctx, at(base, "z"), v.z);
+}
+
+void put_quat(cvc::app &ctx, const std::string &base, const quat &q) {
+  write_val(ctx, at(base, "w"), q.w);
+  write_val(ctx, at(base, "x"), q.x);
+  write_val(ctx, at(base, "y"), q.y);
+  write_val(ctx, at(base, "z"), q.z);
+}
+
+const char *motion_name(motion_type m) {
+  switch (m) {
+  case motion_type::static_:
+    return "static";
+  case motion_type::kinematic:
+    return "kinematic";
+  default:
+    return "dynamic";
+  }
+}
+
+const char *kind_name(field_kind k) {
+  switch (k) {
+  case field_kind::fluid:
+    return "fluid";
+  case field_kind::medium:
+    return "medium";
+  default:
+    return "flow";
+  }
+}
+
+void need_name(const std::string &name) {
+  if (name.empty() || name.find('.') != std::string::npos)
+    throw cvc::physics_error("world_binding: '" + name + "' is not a name (empty, or with a '.')");
+}
+
+// The tuning world::set_vehicle accepts, as knobs.
+const std::pair<const char *, double vehicle_desc::*> kVehicleKnobs[] = {
+    {"max_steer", &vehicle_desc::max_steer},
+    {"max_steer_rate", &vehicle_desc::max_steer_rate},
+    {"max_accel", &vehicle_desc::max_accel},
+    {"max_decel", &vehicle_desc::max_decel},
+    {"drag_coefficient", &vehicle_desc::drag_coefficient},
+    {"frontal_area", &vehicle_desc::frontal_area},
+    {"air_density", &vehicle_desc::air_density},
+    {"rolling_resistance", &vehicle_desc::rolling_resistance},
+    {"engine_max_torque", &vehicle_desc::engine_max_torque},
+    {"engine_min_rpm", &vehicle_desc::engine_min_rpm},
+    {"engine_max_rpm", &vehicle_desc::engine_max_rpm},
+    {"shift_up_rpm", &vehicle_desc::shift_up_rpm},
+    {"shift_down_rpm", &vehicle_desc::shift_down_rpm}};
+const std::pair<const char *, double axle_desc::*> kAxleKnobs[] = {
+    {"max_brake_torque", &axle_desc::max_brake_torque},
+    {"max_hand_brake_torque", &axle_desc::max_hand_brake_torque},
+    {"suspension_frequency", &axle_desc::suspension_frequency},
+    {"suspension_damping", &axle_desc::suspension_damping},
+    {"anti_roll_stiffness", &axle_desc::anti_roll_stiffness}};
+const std::pair<const char *, double field::*> kFieldKnobs[] = {
+    {"drag_coefficient", &field::drag_coefficient},
+    {"damping", &field::damping},
+    {"traction", &field::traction}};
+
+const char *const kCommandKeys[] = {"steer", "accel", "reverse"};
+const char *const kControlKeys[] = {"steer",      "throttle", "brake",
+                                    "hand_brake", "reverse",  "neutral"};
+
+// Equal, or both NaN: a knob that holds "nan" is not a change on every pull.
+bool same_value(double a, double b) { return a == b || (std::isnan(a) && std::isnan(b)); }
+
+bool same_tuning(const vehicle_desc &a, const vehicle_desc &b) {
+  for (const auto &k : kVehicleKnobs)
+    if (!same_value(a.*k.second, b.*k.second))
+      return false;
+  for (std::size_t i = 0; i < a.axles.size() && i < b.axles.size(); ++i)
+    for (const auto &k : kAxleKnobs)
+      if (!same_value(a.axles[i].*k.second, b.axles[i].*k.second))
+        return false;
+  return true;
+}
+
+void copy_tuning(const vehicle_desc &from, vehicle_desc &to) {
+  for (const auto &k : kVehicleKnobs)
+    to.*k.second = from.*k.second;
+  for (std::size_t i = 0; i < from.axles.size() && i < to.axles.size(); ++i)
+    for (const auto &k : kAxleKnobs)
+      to.axles[i].*k.second = from.axles[i].*k.second;
+}
+
+// Command keys as a slot first sees them: unset ones are seeded with 0. If the tree held any
+// before, the slot has seen none of them, so the first pull applies what the tree holds.
+template <size_t N>
+std::vector<std::string> first_seen(cvc::app &ctx, const std::string &base,
+                                    const char *const (&names)[N]) {
+  bool preset = false;
+  std::vector<std::string> seen;
+  for (const char *n : names) {
+    const std::string path = at(base, n);
+    std::string raw = read_raw(ctx, path);
+    if (raw.empty()) {
+      write_val(ctx, path, 0);
+      raw = read_raw(ctx, path);
+    } else {
+      preset = true;
+    }
+    seen.push_back(raw);
+  }
+  return preset ? std::vector<std::string>(N) : seen;
+}
+
+template <size_t N>
+std::vector<std::string> read_keys(cvc::app &ctx, const std::string &base,
+                                   const char *const (&names)[N]) {
+  std::vector<std::string> now;
+  for (const char *n : names)
+    now.push_back(read_raw(ctx, at(base, n)));
+  return now;
+}
+
+template <class T, class Id> const T *find_id(const std::vector<T> &v, Id id) {
+  const auto it = std::lower_bound(v.begin(), v.end(), id,
+                                   [](const T &x, Id i) { return x.id.value < i.value; });
+  return it != v.end() && it->id.value == id.value ? &*it : nullptr;
+}
+
+std::string dotless(std::string s) {
+  for (char &c : s)
+    if (c == '.')
+      c = '_';
+  return s;
+}
+
 } // namespace
 
 world_config world_binding::config_from_state(cvc::app &ctx, const std::string &prefix) {
@@ -196,10 +348,14 @@ void world_binding::pull_materials() {
   } catch (const std::exception &) {
     return;
   }
+  // children() lists every node below, the materials' own keys too: a material is a direct
+  // child, <prefix>.materials.<name>.
+  const std::string under = key("materials") + ".";
   for (const std::string &full : children) {
-    const size_t dot = full.find_last_of('.');
-    const std::string name = dot == std::string::npos ? full : full.substr(dot + 1);
-    if (name.empty())
+    if (full.compare(0, under.size(), under) != 0)
+      continue;
+    const std::string name = full.substr(under.size());
+    if (name.empty() || name.find('.') != std::string::npos)
       continue;
     auto it = _materials.find(name);
     physics::material m = it != _materials.end() ? it->second.applied : physics::material{};
@@ -253,7 +409,12 @@ void world_binding::pull_locked() {
   }
   knob(_ctx, key("publish_every"), _publish_every);
   knob(_ctx, key("hash_every"), _hash_every);
+  knob(_ctx, key("snapshot_every"), _snapshot_every);
   pull_materials();
+  for (auto &v : _vehicles)
+    pull_vehicle(v.first, v.second);
+  for (auto &f : _fields)
+    pull_field(f.first, f.second);
 }
 
 void world_binding::push() {
@@ -277,6 +438,27 @@ void world_binding::push_locked() {
     std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(_w.state_hash()));
     write_val(_ctx, key("state_hash"), std::string(hex));
   }
+  // The snapshot every snapshot_every steps (a multiple crossed since the last one), and
+  // the named actors' keys from the same snapshot, so they agree on a tick.
+  const std::uint64_t t = _w.tick();
+  const std::uint64_t every = _snapshot_every > 0 ? static_cast<std::uint64_t>(_snapshot_every) : 0;
+  const bool due = every > 0 && (!_snapshot || t / every != _snapshot->tick / every);
+  if (!due && _bodies.empty() && _vehicles.empty() && _fields.empty())
+    return;
+  std::shared_ptr<const world_snapshot> snap;
+  try {
+    snap = std::make_shared<const world_snapshot>(_w.snapshot());
+  } catch (const cvc::exception &) {
+    return;
+  }
+  if (due) {
+    _snapshot = snap;
+    try {
+      cvc::state::instance(_ctx)(key("snapshot")).data(boost::any(snap));
+    } catch (const std::exception &) {
+    }
+  }
+  push_named(*snap);
 }
 
 step_report world_binding::step() {
@@ -300,6 +482,229 @@ std::uint64_t world_binding::follow(const cvc::world_clock &clock) {
       push_locked();
   }
   return n;
+}
+
+void world_binding::publish_body(const std::string &name, body_id id) {
+  need_name(name);
+  if (!_w.contains(id))
+    throw cvc::physics_error("world_binding: no body " + std::to_string(id.value) +
+                             " to publish as '" + name + "'");
+  std::lock_guard<std::mutex> lock(_mutex);
+  _bodies[name] = id;
+}
+
+void world_binding::publish_vehicle(const std::string &name, vehicle_id id) {
+  need_name(name);
+  vehicle_slot v;
+  v.id = id;
+  v.tuned = _w.get_vehicle(id); // throws for an id the world does not hold
+  std::lock_guard<std::mutex> lock(_mutex);
+  const std::string base = key("vehicles." + name);
+  v.command = first_seen(_ctx, at(base, "command"), kCommandKeys);
+  v.controls = first_seen(_ctx, at(base, "controls"), kControlKeys);
+  pull_vehicle(name, v); // seeds the knobs, and applies what the tree already holds
+  _vehicles[name] = std::move(v);
+}
+
+void world_binding::publish_field(const std::string &name, field_id id) {
+  need_name(name);
+  field_slot f;
+  f.id = id;
+  const field d = _w.get_field(id); // throws for an id the world does not hold
+  for (int i = 0; i < 3; ++i)
+    f.tuned[i] = d.*kFieldKnobs[i].second;
+  std::lock_guard<std::mutex> lock(_mutex);
+  pull_field(name, f);
+  _fields[name] = f;
+}
+
+void world_binding::publish(const world_bodies &added) {
+  for (const auto &b : added.bodies)
+    if (!b.first.empty())
+      publish_body(dotless(b.first), b.second);
+  for (const auto &f : added.fields)
+    if (!f.first.empty())
+      publish_field(dotless(f.first), f.second);
+}
+
+void world_binding::unpublish_body(const std::string &name) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  _bodies.erase(name);
+}
+
+void world_binding::unpublish_vehicle(const std::string &name) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  _vehicles.erase(name);
+}
+
+void world_binding::unpublish_field(const std::string &name) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  _fields.erase(name);
+}
+
+std::shared_ptr<const world_snapshot>
+world_binding::snapshot_from_state(cvc::app &ctx, const std::string &prefix) {
+  try {
+    const boost::any d = cvc::state::instance(ctx)(at(prefix, "snapshot")).resolvedData();
+    if (const auto *p = boost::any_cast<std::shared_ptr<const world_snapshot>>(&d))
+      return *p;
+  } catch (const std::exception &) {
+  }
+  return nullptr;
+}
+
+std::shared_ptr<const world_snapshot> world_binding::last_snapshot() const {
+  std::lock_guard<std::mutex> lock(_mutex);
+  return _snapshot;
+}
+
+void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
+  const std::string base = key("vehicles." + name);
+  // Commands, on a change: the navigator's, then pedals (which win if both changed).
+  const std::vector<std::string> command = read_keys(_ctx, at(base, "command"), kCommandKeys);
+  if (command != v.command) {
+    drive_command c;
+    parse_num(command[0], c.steer);
+    parse_num(command[1], c.accel);
+    parse_flag(command[2], c.reverse);
+    try {
+      _w.drive(v.id, c);
+    } catch (const cvc::exception &) {
+    }
+    v.command = command;
+  }
+  const std::vector<std::string> controls = read_keys(_ctx, at(base, "controls"), kControlKeys);
+  if (controls != v.controls) {
+    vehicle_controls c;
+    parse_num(controls[0], c.steer);
+    parse_num(controls[1], c.throttle);
+    parse_num(controls[2], c.brake);
+    parse_num(controls[3], c.hand_brake);
+    parse_flag(controls[4], c.reverse);
+    parse_flag(controls[5], c.neutral);
+    try {
+      _w.set_controls(v.id, c);
+    } catch (const cvc::exception &) {
+    }
+    v.controls = controls;
+  }
+  // Knobs.
+  vehicle_desc t = v.tuned;
+  const std::string tuning = at(base, "tuning");
+  for (const auto &k : kVehicleKnobs)
+    knob(_ctx, at(tuning, k.first), t.*k.second);
+  for (std::size_t i = 0; i < t.axles.size(); ++i)
+    for (const auto &k : kAxleKnobs)
+      knob(_ctx, at(tuning, "axles." + std::to_string(i) + "." + k.first), t.axles[i].*k.second);
+  if (!same_tuning(t, v.tuned)) {
+    try {
+      vehicle_desc d = _w.get_vehicle(v.id);
+      copy_tuning(t, d);
+      _w.set_vehicle(v.id, d);
+    } catch (const cvc::exception &) {
+      // An invalid value is ignored: the vehicle keeps its last good tuning.
+    }
+    v.tuned = t;
+  }
+}
+
+void world_binding::pull_field(const std::string &name, field_slot &f) {
+  const std::string base = key("fields." + name);
+  double t[3];
+  bool changed = false;
+  for (int i = 0; i < 3; ++i) {
+    t[i] = f.tuned[i];
+    knob(_ctx, at(base, kFieldKnobs[i].first), t[i]);
+    changed = changed || !same_value(t[i], f.tuned[i]);
+  }
+  if (!changed)
+    return;
+  try {
+    field d = _w.get_field(f.id);
+    for (int i = 0; i < 3; ++i)
+      d.*kFieldKnobs[i].second = t[i];
+    _w.set_field(f.id, d);
+  } catch (const cvc::exception &) {
+    // An invalid value is ignored: the field keeps its last good values.
+  }
+  for (int i = 0; i < 3; ++i)
+    f.tuned[i] = t[i];
+}
+
+void world_binding::push_named(const world_snapshot &s) {
+  for (auto it = _bodies.begin(); it != _bodies.end();) {
+    const body_snapshot *b = find_id(s.bodies, it->second);
+    if (!b) {
+      it = _bodies.erase(it);
+      continue;
+    }
+    const std::string base = key("bodies." + it->first);
+    write_val(_ctx, at(base, "id"), b->id.value);
+    write_val(_ctx, at(base, "motion"), std::string(motion_name(b->motion)));
+    put_vec(_ctx, at(base, "position"), b->state.position);
+    put_quat(_ctx, at(base, "rotation"), b->state.rotation);
+    put_vec(_ctx, at(base, "velocity"), b->state.linear_velocity);
+    put_vec(_ctx, at(base, "angular_velocity"), b->state.angular_velocity);
+    write_val(_ctx, at(base, "active"), b->state.active);
+    put_vec(_ctx, at(base, "field_force"), b->fields.force);
+    write_val(_ctx, at(base, "immersed_volume"), b->fields.immersed_volume);
+    ++it;
+  }
+  for (auto it = _vehicles.begin(); it != _vehicles.end();) {
+    const vehicle_snapshot *v = find_id(s.vehicles, it->second.id);
+    if (!v) {
+      it = _vehicles.erase(it);
+      continue;
+    }
+    const std::string base = key("vehicles." + it->first);
+    const vehicle_state &vs = v->state;
+    write_val(_ctx, at(base, "chassis"), vs.chassis.value);
+    write_val(_ctx, at(base, "speed"), vs.speed);
+    write_val(_ctx, at(base, "steer"), vs.steer);
+    write_val(_ctx, at(base, "steer_command"), vs.steer_command);
+    write_val(_ctx, at(base, "throttle"), vs.throttle);
+    write_val(_ctx, at(base, "brake"), vs.brake);
+    write_val(_ctx, at(base, "hand_brake"), vs.hand_brake);
+    write_val(_ctx, at(base, "gear"), vs.gear);
+    write_val(_ctx, at(base, "engine_rpm"), vs.engine_rpm);
+    put_vec(_ctx, at(base, "position"), vs.body.position);
+    put_quat(_ctx, at(base, "rotation"), vs.body.rotation);
+    put_vec(_ctx, at(base, "velocity"), vs.body.linear_velocity);
+    put_vec(_ctx, at(base, "angular_velocity"), vs.body.angular_velocity);
+    put_vec(_ctx, at(base, "aero_force"), vs.aero_force);
+    put_vec(_ctx, at(base, "air_velocity"), vs.air_velocity);
+    for (std::size_t i = 0; i < vs.wheels.size(); ++i) {
+      const wheel_state &w = vs.wheels[i];
+      const std::string wb = at(base, "wheels." + std::to_string(i));
+      write_val(_ctx, at(wb, "steer"), w.steer);
+      write_val(_ctx, at(wb, "angular_velocity"), w.angular_velocity);
+      write_val(_ctx, at(wb, "suspension_length"), w.suspension_length);
+      write_val(_ctx, at(wb, "contact"), w.contact);
+      put_vec(_ctx, at(wb, "contact_point"), w.contact_point);
+      write_val(_ctx, at(wb, "load"), w.load);
+      write_val(_ctx, at(wb, "longitudinal_slip"), w.longitudinal_slip);
+      write_val(_ctx, at(wb, "lateral_slip"), w.lateral_slip);
+      write_val(_ctx, at(wb, "friction"), w.friction);
+      write_val(_ctx, at(wb, "rolling_resistance"), w.rolling_resistance);
+      write_val(_ctx, at(wb, "medium_depth"), w.medium_depth);
+      write_val(_ctx, at(wb, "sinkage"), w.sinkage);
+      write_val(_ctx, at(wb, "rut"), w.rut);
+      write_val(_ctx, at(wb, "medium_resistance"), w.medium_resistance);
+    }
+    ++it;
+  }
+  for (auto it = _fields.begin(); it != _fields.end();) {
+    const field_snapshot *f = find_id(s.fields, it->second.id);
+    if (!f) {
+      it = _fields.erase(it);
+      continue;
+    }
+    const std::string base = key("fields." + it->first);
+    write_val(_ctx, at(base, "kind"), std::string(kind_name(f->desc.kind)));
+    write_val(_ctx, at(base, "ruts.cells"), static_cast<std::uint64_t>(f->rut_cells));
+    write_val(_ctx, at(base, "ruts.deepest"), f->rut_deepest);
+    ++it;
+  }
 }
 
 material_id world_binding::material(const std::string &name) const {

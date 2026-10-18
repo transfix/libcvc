@@ -241,9 +241,34 @@ void field_set::set(world_backend &be, field_id id, const field &f) {
   auto it = _fields.find(id.value);
   need(it != _fields.end(), "unknown or removed field id " + std::to_string(id.value));
   compiled_field c = compile(f);
+  const rut_map &old = it->second.ruts;
+  if (!c.ruts.depth.empty() && c.ruts.x0 == old.x0 && c.ruts.y0 == old.y0 &&
+      c.ruts.cell == old.cell && c.ruts.cols == old.cols && c.ruts.rows == old.rows) {
+    c.ruts.depth = std::move(it->second.ruts.depth);
+    c.rut_cells = it->second.rut_cells;
+    c.rut_deepest = it->second.rut_deepest;
+  }
   wake_in(be, it->second.scalar);
   wake_in(be, c.scalar);
   it->second = std::move(c);
+}
+
+field field_set::get(field_id id) const {
+  auto it = _fields.find(id.value);
+  need(it != _fields.end(), "unknown or removed field id " + std::to_string(id.value));
+  return it->second.desc;
+}
+
+void field_set::snapshot(std::vector<field_snapshot> &out) const {
+  out.reserve(out.size() + _fields.size());
+  for (const auto &fe : _fields) {
+    field_snapshot s;
+    s.id.value = fe.first;
+    s.desc = fe.second.desc;
+    s.rut_cells = fe.second.rut_cells;
+    s.rut_deepest = fe.second.rut_deepest;
+    out.push_back(std::move(s));
+  }
 }
 
 void field_set::remove(field_id id) {
@@ -339,7 +364,8 @@ void field_set::press(std::uint32_t field, double x, double y, double dx, double
   auto it = _fields.find(field);
   if (it == _fields.end() || it->second.ruts.depth.empty() || !(depth > 0.0))
     return;
-  rut_map &m = it->second.ruts;
+  compiled_field &cf = it->second;
+  rut_map &m = cf.ruts;
   const double half_l = 0.5 * length, half_w = 0.5 * width;
   // The rectangle's box in cells, then each cell whose centre lies inside it.
   const double reach = std::sqrt(half_l * half_l + half_w * half_w) + m.cell;
@@ -355,7 +381,12 @@ void field_set::press(std::uint32_t field, double x, double y, double dx, double
       if (std::fabs(across) > half_w || along > (behind ? 0.0 : half_l) || along < -half_l)
         continue;
       float &cell = m.depth[static_cast<std::size_t>(r) * m.cols + c];
-      cell = std::max(cell, d);
+      if (!(d > cell))
+        continue;
+      if (!(cell > 0.0f))
+        ++cf.rut_cells;
+      cell = d;
+      cf.rut_deepest = std::max(cf.rut_deepest, static_cast<double>(d));
     }
 }
 
@@ -406,6 +437,13 @@ void field_set::restore_ruts(const std::string &in, std::size_t &pos) {
       throw cvc::physics_error("restore: this world's rutted media differ from the state's");
     std::memcpy(d.data(), in.data() + pos, d.size() * sizeof(float));
     pos += d.size() * sizeof(float);
+    fe.second.rut_cells = 0;
+    fe.second.rut_deepest = 0.0;
+    for (const float z : d)
+      if (z > 0.0f) {
+        ++fe.second.rut_cells;
+        fe.second.rut_deepest = std::max(fe.second.rut_deepest, static_cast<double>(z));
+      }
   }
 }
 

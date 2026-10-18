@@ -183,6 +183,34 @@ struct world::impl {
   std::optional<cvc::clock_follower> follower;
   detail::field_set fields;
   detail::vehicle_set vehicles;
+  // Every body, for snapshot(): what it was added as, and a static body's state, which
+  // only set_state, restore and rebase change.
+  struct body_info {
+    motion_type motion = motion_type::dynamic;
+    material_id material = 0;
+    std::uint64_t user_data = 0;
+    body_state fixed;
+  };
+  std::map<std::uint32_t, body_info> bodies;
+
+  void note_body(body_id id, motion_type motion, material_id material, std::uint64_t user) {
+    body_info b;
+    b.motion = motion;
+    b.material = material;
+    b.user_data = user;
+    if (motion == motion_type::static_)
+      b.fixed = be->state(id);
+    bodies[id.value] = b;
+  }
+
+  void reread_static() {
+    for (auto &e : bodies)
+      if (e.second.motion == motion_type::static_) {
+        body_id id;
+        id.value = e.first;
+        e.second.fixed = be->state(id);
+      }
+  }
 
   material_id add_material(const material &m) {
     validate(m);
@@ -516,7 +544,9 @@ body_id world::add_body(const body_desc &d) {
     const body_id id = _impl->be->add_body(d, shape);
     try {
       _impl->fields.body_added(*_impl->be, id, d);
+      _impl->note_body(id, d.motion, d.material, d.user_data);
     } catch (...) {
+      _impl->fields.body_removed(id);
       _impl->be->remove_body(id);
       throw;
     }
@@ -531,6 +561,7 @@ void world::remove_body(body_id id) {
                              " is a vehicle's chassis; remove the vehicle");
   guarded([&] { _impl->be->remove_body(id); });
   _impl->fields.body_removed(id);
+  _impl->bodies.erase(id.value);
 }
 
 bool world::contains(body_id id) const {
@@ -569,7 +600,12 @@ void world::set_state(body_id id, const body_state &s) {
       !finite(s.angular_velocity) || !unit_length(s.rotation))
     throw cvc::physics_error("set_state: finite values and a unit rotation are required");
   std::lock_guard<std::mutex> lock(_impl->mutex);
-  guarded([&] { _impl->be->set_state(id, s); });
+  guarded([&] {
+    _impl->be->set_state(id, s);
+    const auto it = _impl->bodies.find(id.value);
+    if (it != _impl->bodies.end() && it->second.motion == motion_type::static_)
+      it->second.fixed = _impl->be->state(id);
+  });
 }
 
 void world::add_force(body_id id, const vec3 &f) {
@@ -603,6 +639,11 @@ void world::set_field(field_id id, const field &f) {
   guarded([&] { _impl->fields.set(*_impl->be, id, f); });
 }
 
+field world::get_field(field_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->fields.get(id); });
+}
+
 void world::remove_field(field_id id) {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   _impl->fields.remove(id);
@@ -622,13 +663,20 @@ vehicle_id world::add_vehicle(const vehicle_desc &d, const vec3 &position, const
   if (!finite(position) || !finite(rotation) || !unit_length(rotation))
     throw cvc::physics_error("add_vehicle: a finite position and a unit rotation are required");
   std::lock_guard<std::mutex> lock(_impl->mutex);
-  return guarded(
-      [&] { return _impl->vehicles.add(*_impl->be, _impl->fields, d, position, rotation); });
+  return guarded([&] {
+    const vehicle_id id = _impl->vehicles.add(*_impl->be, _impl->fields, d, position, rotation);
+    _impl->note_body(_impl->vehicles.chassis(id), motion_type::dynamic, 0, 0);
+    return id;
+  });
 }
 
 void world::remove_vehicle(vehicle_id id) {
   std::lock_guard<std::mutex> lock(_impl->mutex);
-  guarded([&] { _impl->vehicles.remove(*_impl->be, _impl->fields, id); });
+  guarded([&] {
+    const body_id chassis = _impl->vehicles.chassis(id);
+    _impl->vehicles.remove(*_impl->be, _impl->fields, id);
+    _impl->bodies.erase(chassis.value);
+  });
 }
 
 std::size_t world::vehicle_count() const {
@@ -649,6 +697,16 @@ void world::set_controls(vehicle_id id, const vehicle_controls &c) {
 physics::vehicle_state world::vehicle_state(vehicle_id id) const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   return guarded([&] { return _impl->vehicles.state(*_impl->be, id); });
+}
+
+vehicle_desc world::get_vehicle(vehicle_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->vehicles.desc(id);
+}
+
+void world::set_vehicle(vehicle_id id, const vehicle_desc &d) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  guarded([&] { _impl->vehicles.tune(*_impl->be, id, d); });
 }
 
 field_load world::field_load_on(body_id id) const {
@@ -758,12 +816,40 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   _impl->cfg.origin = origin;
   _impl->tick = h.tick;
   _impl->contacts.clear();
+  guarded([&] { _impl->reread_static(); });
 }
 
 std::uint64_t world::state_hash() const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   const std::vector<std::uint8_t> s = _impl->save();
   return fnv1a(s.data(), s.size());
+}
+
+world_snapshot world::snapshot() const {
+  world_snapshot out;
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  out.tick = _impl->tick;
+  out.time = static_cast<double>(_impl->tick) * _impl->cfg.fixed_dt;
+  out.config = _impl->cfg;
+  out.report = _impl->last;
+  out.materials = _impl->materials;
+  out.contacts = _impl->contacts;
+  guarded([&] {
+    out.bodies.reserve(_impl->bodies.size());
+    for (const auto &e : _impl->bodies) {
+      body_snapshot b;
+      b.id.value = e.first;
+      b.motion = e.second.motion;
+      b.material = e.second.material;
+      b.user_data = e.second.user_data;
+      b.state = e.second.motion == motion_type::static_ ? e.second.fixed : _impl->be->state(b.id);
+      b.fields = _impl->fields.load(b.id);
+      out.bodies.push_back(b);
+    }
+    _impl->fields.snapshot(out.fields);
+    _impl->vehicles.snapshot(*_impl->be, out.vehicles);
+  });
+  return out;
 }
 
 vec3 world::origin() const {
@@ -775,7 +861,10 @@ void world::rebase(const vec3 &new_origin) {
   if (!finite(new_origin))
     throw cvc::physics_error("rebase: the origin must be finite");
   std::lock_guard<std::mutex> lock(_impl->mutex);
-  guarded([&] { _impl->be->rebase(new_origin); });
+  guarded([&] {
+    _impl->be->rebase(new_origin);
+    _impl->reread_static();
+  });
   _impl->cfg.origin = new_origin;
 }
 

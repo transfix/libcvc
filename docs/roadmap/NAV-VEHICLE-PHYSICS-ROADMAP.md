@@ -162,5 +162,16 @@ P4 adds three things to measure and contain the drift:
   - The wheels probe the ground with a ray of their own (`medium_tester` in the Jolt backend), which also finds the ground under a medium.
   - A medium answers a wheel's load over 0.1 s: without that lag, sinkage computed from the last step's raw load made a vehicle bounce on the snow.
   - **Hills** (follow-up): the driver holds a vehicle with no command on the full brake below 0.3 m/s. On a 15% grade (μ = 0.9) it drifts 0.0000 m in 10 s, and the hand brake alone 0.6 mm. Released in neutral it rolls 5.652 m in 3 s against the model's g (sin θ − C_rr cos θ) 5.630 m. A hill start reaches 4.66 m/s uphill in 6 s and rolls back at most 4 mm. Any change of input wakes a sleeping vehicle; before that, a released vehicle stayed asleep on the grade.
+  - **The whole state, in real time** (follow-up):
+    - `world::snapshot()` copies every body, field, vehicle (description and state, wheels
+      included) and contact at one tick, under one lock: 0.18 ms for 1001 moving bodies
+      against a 2.1 ms step.
+    - `world_binding` publishes it as `physics.snapshot` (data) every `snapshot_every` steps.
+    - Named bodies, vehicles and fields get keys of their own: telemetry written from that
+      snapshot; vehicle commands, pedals and tuning (`world::set_vehicle`) read from the tree;
+      field drag, damping and traction knobs.
+    - `set_field` keeps a medium's ruts.
+    - The binding no longer took a material's own keys (`friction`, ...) for four more
+      materials on every pull. That cost about 0.45 ms a pull.
   - **Ruts** (follow-up): a medium with `ruts = true` keeps a rut map that the wheels press their contact patches into. A Humvee in 0.4 m of snow leaves tracks 0.0945 m deep (it sinks 0.0952 m) and 0.30 m wide (tire 0.31 m), with nothing between them. A second Humvee in those tracks sinks to the same depth and meets 0 N of compaction resistance, against 2690 N for the leader's front axle; the leader's rear axle, in its own front wheels' ruts, meets 97 N. The rut maps are saved, hashed and replayed.
 - **P3–P8** are not started.

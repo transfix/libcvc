@@ -160,6 +160,9 @@ public:
   virtual void read_vehicle(std::uint32_t handle, vehicle_readback &out) const {
     (void)handle, (void)out;
   }
+  // The engine's share of world::set_vehicle: the powertrain, and each wheel's brakes,
+  // suspension spring and anti-roll bar, from `d` (checked by the facade).
+  virtual void tune_vehicle(std::uint32_t handle, const vehicle_desc &d) { (void)handle, (void)d; }
   // The media the wheels sink into, and how deep the deepest is: a wheel looks that much
   // further for the ground under one.
   virtual void set_medium_probe(medium_probe probe) { (void)probe; }

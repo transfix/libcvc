@@ -45,7 +45,9 @@ struct compiled_field {
   field_grid scalar;
   bool moving = false;
   field_grid velocity[3];
-  rut_map ruts; // a medium with desc.ruts: what wheels have pressed into it
+  rut_map ruts;              // a medium with desc.ruts: what wheels have pressed into it
+  std::size_t rut_cells = 0; // cells with a rut
+  double rut_deepest = 0.0;  // m
 };
 
 // A dynamic body as the fields see it: its sample cells and what its drag area
@@ -68,7 +70,9 @@ class field_set {
 public:
   // Throw cvc::physics_error for a field world::add_field refuses.
   field_id add(world_backend &be, const field &f);
+  // Keeps the ruts when the new field lays them on the same grid.
   void set(world_backend &be, field_id id, const field &f);
+  field get(field_id id) const;
   void remove(field_id id);
   std::size_t size() const { return _fields.size(); }
 
@@ -104,6 +108,8 @@ public:
   double rut_at(std::uint32_t field, double x, double y) const;
   rut_map ruts(field_id id) const;
   bool has_ruts() const;
+  // Every field, for world::snapshot.
+  void snapshot(std::vector<field_snapshot> &out) const;
   // The rut maps' depths, for world::save / restore (the same fields, in id order).
   void save_ruts(std::string &out) const;
   void restore_ruts(const std::string &in, std::size_t &pos);

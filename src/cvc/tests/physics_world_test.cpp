@@ -19,6 +19,7 @@
 //   (5) save at tick n, restore, re-run: the same state hash.
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
@@ -677,6 +678,10 @@ TEST(PhysicsBinding, MaterialsAreDeclaredInTheTree) {
   set_key(ctx, "phys.materials.ice.nav_material", "4");
   b.pull();
   const material_id ice = b.material("ice");
+  // A material's own keys are not materials: default and ice, and no more, however many pulls.
+  b.pull();
+  EXPECT_EQ(w.material_count(), 2u);
+  EXPECT_THROW(b.material("friction"), cvc::physics_error);
   EXPECT_FLOAT_EQ(w.get_material(ice).friction, 0.1f);
   EXPECT_EQ(w.get_material(ice).nav_material, 4);
   EXPECT_EQ(key_value(ctx, "phys.materials.ice.restitution"), "0"); // seeded
@@ -721,6 +726,102 @@ TEST(PhysicsBinding, JoltWorldFallsUnderTheTreesGravity) {
   std::snprintf(expect, sizeof(expect), "%016llx", static_cast<unsigned long long>(w.state_hash()));
   EXPECT_EQ(h, std::string(expect));
   EXPECT_NE(key_value(ctx, "physics.version").find("Jolt"), std::string::npos);
+}
+
+// push() publishes the whole world as one snapshot, and writes the named bodies' keys from it.
+TEST(PhysicsBinding, PushPublishesTheWorldAndItsNamedBodies) {
+  REQUIRE_JOLT();
+  cvc::app ctx;
+  world w(jolt_config());
+  world_binding b(ctx, w);
+  w.add_body({box{{50.0, 50.0, 0.5}}, motion_type::static_, {0.0, 0.0, -0.5}});
+  const body_id ball = w.add_body({sphere{0.2}, motion_type::dynamic, {0.0, 0.0, 2.0}});
+  EXPECT_EQ(world_binding::snapshot_from_state(ctx), nullptr);
+  b.publish_body("ball", ball);
+  EXPECT_THROW(b.publish_body("a.b", ball), cvc::physics_error);
+  EXPECT_THROW(b.publish_body("", ball), cvc::physics_error);
+  body_id nobody;
+  nobody.value = 12345;
+  EXPECT_THROW(b.publish_body("ghost", nobody), cvc::physics_error);
+  for (int i = 0; i < 30; ++i)
+    b.step();
+  const auto s = world_binding::snapshot_from_state(ctx);
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(s, b.last_snapshot());
+  EXPECT_EQ(s->tick, w.tick());
+  ASSERT_EQ(s->bodies.size(), 2u);
+  EXPECT_EQ(s->bodies[0].motion, motion_type::static_);
+  const body_state now = w.state(ball);
+  EXPECT_EQ(s->bodies[1].state.position.z, now.position.z);
+  // The keys hold that tick's values to the last digit.
+  EXPECT_EQ(std::stod(key_value(ctx, "physics.bodies.ball.position.z")), now.position.z);
+  EXPECT_EQ(std::stod(key_value(ctx, "physics.bodies.ball.velocity.z")), now.linear_velocity.z);
+  EXPECT_EQ(key_value(ctx, "physics.bodies.ball.motion"), "dynamic");
+  EXPECT_EQ(key_value(ctx, "physics.bodies.ball.active"), "1");
+  EXPECT_EQ(key_value(ctx, "physics.bodies.ball.id"), std::to_string(ball.value));
+  // snapshot_every = 0: no new snapshot, while the named keys keep up.
+  set_key(ctx, "physics.snapshot_every", "0");
+  for (int i = 0; i < 5; ++i)
+    b.step();
+  EXPECT_EQ(world_binding::snapshot_from_state(ctx)->tick, s->tick);
+  EXPECT_EQ(std::stod(key_value(ctx, "physics.bodies.ball.position.z")), w.state(ball).position.z);
+  // Every 4 steps: from tick 35, at 36 and 40.
+  set_key(ctx, "physics.snapshot_every", "4");
+  for (int i = 0; i < 6; ++i)
+    b.step();
+  EXPECT_EQ(world_binding::snapshot_from_state(ctx)->tick, 40u);
+  // A body the world no longer has stops being published.
+  w.remove_body(ball);
+  for (int i = 0; i < 4; ++i) // to tick 44, the next snapshot
+    EXPECT_NO_THROW(b.step());
+  EXPECT_EQ(b.last_snapshot()->tick, 44u);
+  EXPECT_EQ(b.last_snapshot()->bodies.size(), 1u);
+}
+
+// What publishing costs, each part timed right after a step: a snapshot is one pass over the
+// moving bodies. The bodies never sleep here, so every step does the same work.
+TEST(PhysicsBinding, ASnapshotOfAThousandBodiesIsCheap) {
+  REQUIRE_JOLT();
+  cvc::app ctx;
+  world w(jolt_config());
+  w.add_body({box{{50.0, 50.0, 0.5}}, motion_type::static_, {0.0, 0.0, -0.5}});
+  for (int i = 0; i < 1000; ++i) {
+    body_desc d{sphere{0.1},
+                motion_type::dynamic,
+                {-15.0 + 1.0 * (i % 32), -15.0 + 1.0 * (i / 32), 0.1 + 0.01 * (i % 7)}};
+    d.allow_sleeping = false;
+    w.add_body(d);
+  }
+  world_binding b(ctx, w);
+  b.step(); // seeds the keys
+  using clock = std::chrono::steady_clock;
+  const auto us = [](clock::time_point a, clock::time_point z) {
+    return std::chrono::duration<double, std::micro>(z - a).count();
+  };
+  const int n = 200;
+  double step_us = 0.0, snap_us = 0.0, push_us = 0.0, keys_us = 0.0;
+  std::size_t bodies = 0;
+  for (int i = 0; i < n; ++i) {
+    const clock::time_point t0 = clock::now();
+    w.step();
+    const clock::time_point t1 = clock::now();
+    bodies += w.snapshot().bodies.size();
+    const clock::time_point t2 = clock::now();
+    cvc::state::instance(ctx)("physics.snapshot_every").value(std::string(i % 2 ? "1" : "0"));
+    b.pull();
+    const clock::time_point t3 = clock::now();
+    b.push();
+    const clock::time_point t4 = clock::now();
+    step_us += us(t0, t1);
+    snap_us += us(t1, t2);
+    (i % 2 ? push_us : keys_us) += us(t3, t4);
+  }
+  EXPECT_EQ(bodies, static_cast<std::size_t>(n) * 1001);
+  std::printf(
+      "  1001 moving bodies: a step %.0f us; snapshot() %.0f us; push() %.0f us without the "
+      "snapshot, %.0f us publishing it\n",
+      step_us / n, snap_us / n, keys_us / (n / 2), push_us / (n / 2));
+  EXPECT_LT(snap_us / n, 20000.0);
 }
 
 TEST(PhysicsJolt, WorldsComeAndGoWithoutAProcessWideSetup) {

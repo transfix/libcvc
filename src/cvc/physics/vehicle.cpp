@@ -156,7 +156,12 @@ bool finite(const vec3 &v) {
   return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-void validate(const vehicle_desc &d) {
+// Throws cvc::physics_error, prefixed with `op`, for a description add_vehicle refuses.
+void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
+  const auto need = [op](bool ok, const std::string &what) {
+    if (!ok)
+      throw cvc::physics_error(std::string(op) + ": " + what);
+  };
   need(positive(d.half_extents.x) && positive(d.half_extents.y) && positive(d.half_extents.z),
        "the chassis's half extents must be finite and > 0");
   need(finite(d.center_of_mass), "the centre of mass must be finite");
@@ -198,6 +203,65 @@ void validate(const vehicle_desc &d) {
   need(positive(d.tire_peak_slip) && positive(d.tire_peak_slip_angle) && d.tire_sliding > 0.0 &&
            d.tire_sliding <= 1.0,
        "the tire needs peak slips > 0 and 0 < tire_sliding <= 1");
+}
+
+// The first value of `b` that differs from `a` among those fixed when a vehicle is added
+// (world::set_vehicle), or an empty string.
+std::string fixed_change(const vehicle_desc &a, const vehicle_desc &b) {
+  const auto same = [](const vec3 &p, const vec3 &q) {
+    return p.x == q.x && p.y == q.y && p.z == q.z;
+  };
+  if (!same(a.half_extents, b.half_extents))
+    return "half_extents";
+  if (!same(a.center_of_mass, b.center_of_mass))
+    return "center_of_mass";
+  if (a.mass != b.mass)
+    return "mass";
+  if (a.axles.size() != b.axles.size())
+    return "the number of axles";
+  for (std::size_t i = 0; i < a.axles.size(); ++i) {
+    const axle_desc &p = a.axles[i], &q = b.axles[i];
+    const std::string at = "axles[" + std::to_string(i) + "].";
+    if (p.x != q.x)
+      return at + "x";
+    if (p.half_track != q.half_track)
+      return at + "half_track";
+    if (p.z != q.z)
+      return at + "z";
+    if (p.wheel_radius != q.wheel_radius)
+      return at + "wheel_radius";
+    if (p.wheel_width != q.wheel_width)
+      return at + "wheel_width";
+    if (p.wheel_inertia != q.wheel_inertia)
+      return at + "wheel_inertia";
+    if (p.wheel_angular_damping != q.wheel_angular_damping)
+      return at + "wheel_angular_damping";
+    if (p.steered != q.steered)
+      return at + "steered";
+    if (p.driven != q.driven)
+      return at + "driven";
+    if (p.suspension_min != q.suspension_min)
+      return at + "suspension_min";
+    if (p.suspension_max != q.suspension_max)
+      return at + "suspension_max";
+    if ((p.anti_roll_stiffness > 0.0) != (q.anti_roll_stiffness > 0.0))
+      return at + "anti_roll_stiffness to or from 0 (whether the axle has a bar)";
+  }
+  if (a.engine_inertia != b.engine_inertia)
+    return "engine_inertia";
+  if (a.gear_ratios != b.gear_ratios)
+    return "gear_ratios";
+  if (a.reverse_ratio != b.reverse_ratio)
+    return "reverse_ratio";
+  if (a.differential_ratio != b.differential_ratio)
+    return "differential_ratio";
+  if (a.tire_peak_slip != b.tire_peak_slip)
+    return "tire_peak_slip";
+  if (a.tire_peak_slip_angle != b.tire_peak_slip_angle)
+    return "tire_peak_slip_angle";
+  if (a.tire_sliding != b.tire_sliding)
+    return "tire_sliding";
+  return std::string();
 }
 
 // Half the chord of a wheel of `radius` sunk `z`: half its contact patch's length.
@@ -302,6 +366,16 @@ bool vehicle_set::is_chassis(body_id id) const {
     if (e.second.chassis == id)
       return true;
   return false;
+}
+
+void vehicle_set::tune(world_backend &be, vehicle_id id, const vehicle_desc &d) {
+  rt &v = at(id);
+  validate(d, "set_vehicle");
+  const std::string fixed = fixed_change(v.desc, d);
+  if (!fixed.empty())
+    throw cvc::physics_error("set_vehicle: " + fixed + " is fixed when the vehicle is added");
+  be.tune_vehicle(v.handle, d);
+  v.desc = d;
 }
 
 void vehicle_set::drive(vehicle_id id, const drive_command &c) {
@@ -509,6 +583,17 @@ vehicle_state vehicle_set::state(const world_backend &be, vehicle_id id) const {
     out.wheels.push_back(ws);
   }
   return out;
+}
+
+void vehicle_set::snapshot(const world_backend &be, std::vector<vehicle_snapshot> &out) const {
+  out.reserve(out.size() + _v.size());
+  for (const auto &e : _v) {
+    vehicle_snapshot s;
+    s.id.value = e.first;
+    s.desc = e.second.desc;
+    s.state = state(be, s.id);
+    out.push_back(std::move(s));
+  }
 }
 
 void vehicle_set::save(std::string &out) const {

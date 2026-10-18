@@ -25,7 +25,9 @@
 //   auto cfg = cvc::physics::world_binding::config_from_state(app);   // seeds defaults
 //   cvc::physics::world w(cfg);
 //   cvc::physics::world_binding bind(app, w);
+//   bind.publish_vehicle("truck", truck);                               // its keys, below
 //   ... per frame: bind.follow(app.world_clock());                    // pull, step, push
+//   ... any thread: auto s = world_binding::snapshot_from_state(app);  // the whole world
 //
 // Keys, relative to the prefix. A key that is unset is seeded with the world's
 // value (the knob idiom: whatever set it first, a scene or a script, wins). An
@@ -55,12 +57,48 @@
 //     hash_every                           int     push() publishes state_hash every N
 //                                                  steps; 0 = never (it digests the whole
 //                                                  state, so it is off by default)
+//     snapshot_every                       int     push() publishes the snapshot every N
+//                                                  steps (1); 0 = never
 //
 //   written by push():
 //     tick, time, step_ms, bodies, active_bodies, contact_events, saturated
 //     state_hash               string  16 hex digits (see hash_every)
 //     version                  string  the backend and its build options
 //     restart_required         bool    a build-time key differs from the running world
+//     snapshot                 data    std::shared_ptr<const world_snapshot> in the
+//                                      node's data(): every body, field, vehicle and
+//                                      contact at one tick (snapshot_from_state reads it)
+//
+//   named actors (publish_body, publish_vehicle, publish_field, publish): every push()
+//   writes their telemetry from that one snapshot, so the keys of a push agree on a tick.
+//     bodies.<name>.id, motion             the body id; static | kinematic | dynamic
+//     bodies.<name>.position.{x,y,z}, rotation.{w,x,y,z}, velocity.{x,y,z},
+//       angular_velocity.{x,y,z}, active, field_force.{x,y,z}, immersed_volume
+//     vehicles.<name>.chassis, speed, steer, steer_command, throttle, brake,
+//       hand_brake, gear, engine_rpm, position.*, rotation.*, velocity.*,
+//       angular_velocity.*, aero_force.{x,y,z}, air_velocity.{x,y,z}
+//     vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact,
+//       contact_point.{x,y,z}, load, longitudinal_slip, lateral_slip, friction,
+//       rolling_resistance, medium_depth, sinkage, rut, medium_resistance}
+//     fields.<name>.kind, ruts.cells, ruts.deepest
+//   and read by every pull():
+//     vehicles.<name>.command.{steer, accel, reverse}     a change drives it
+//                                                         (world::drive)
+//     vehicles.<name>.controls.{steer, throttle, brake, hand_brake, reverse, neutral}
+//                                                         a change sets its pedals
+//                                                         (world::set_controls)
+//     vehicles.<name>.tuning.{max_steer, max_steer_rate, max_accel, max_decel,
+//       drag_coefficient, frontal_area, air_density, rolling_resistance,
+//       engine_max_torque, engine_min_rpm, engine_max_rpm, shift_up_rpm, shift_down_rpm}
+//     vehicles.<name>.tuning.axles.<i>.{max_brake_torque, max_hand_brake_torque,
+//       suspension_frequency, suspension_damping, anti_roll_stiffness}
+//                                                         world::set_vehicle
+//     fields.<name>.{drag_coefficient, damping, traction} world::set_field
+//   Commands act on a change only, so a program may drive the same vehicle through
+//   the world between changes. Knobs follow the material idiom: seeded with the
+//   world's values, applied when the tree's value changes, an invalid one ignored.
+//   An actor the world no longer has stops being published; its keys keep their
+//   last values.
 
 #ifndef __CVC_PHYSICS_WORLD_BINDING_H__
 #define __CVC_PHYSICS_WORLD_BINDING_H__
@@ -68,8 +106,10 @@
 #include <cstdint>
 #include <cvc/physics/world.h>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace cvc {
 
@@ -77,6 +117,8 @@ class app;
 class world_clock;
 
 namespace physics {
+
+struct world_bodies;
 
 class world_binding {
 public:
@@ -99,6 +141,28 @@ public:
   // Throws cvc::physics_error for a name the tree does not declare.
   material_id material(const std::string &name) const;
 
+  // Publish a body, a vehicle or a field under <prefix>.bodies.<name>, .vehicles.<name>
+  // or .fields.<name> (the keys above). Publishing a name again rebinds it. Throws
+  // cvc::physics_error for an empty name or one with a '.', and for an id the world
+  // does not hold.
+  void publish_body(const std::string &name, body_id id);
+  void publish_vehicle(const std::string &name, vehicle_id id);
+  void publish_field(const std::string &name, field_id id);
+  // Every body and field add_world_geometry added, under their item and volume names
+  // (a '.' in one becomes '_').
+  void publish(const world_bodies &added);
+  // Stop publishing a name; its keys keep their last values.
+  void unpublish_body(const std::string &name);
+  void unpublish_vehicle(const std::string &name);
+  void unpublish_field(const std::string &name);
+
+  // The snapshot published under <prefix>.snapshot, from any thread; null before the
+  // first.
+  static std::shared_ptr<const world_snapshot>
+  snapshot_from_state(cvc::app &ctx, const std::string &prefix = "physics");
+  // The last snapshot this binding published; null before the first.
+  std::shared_ptr<const world_snapshot> last_snapshot() const;
+
   // The absolute state path of a key, e.g. key("gravity.z") = "physics.gravity.z".
   std::string key(const std::string &name) const;
 
@@ -111,10 +175,24 @@ private:
     physics::material applied;
   };
 
+  // The command and control keys as last seen, and the knobs as last applied.
+  struct vehicle_slot {
+    vehicle_id id;
+    std::vector<std::string> command, controls;
+    vehicle_desc tuned;
+  };
+  struct field_slot {
+    field_id id;
+    double tuned[3] = {0.0, 0.0, 0.0}; // drag_coefficient, damping, traction
+  };
+
   void seed();
   void pull_locked();
   void push_locked();
   void pull_materials();
+  void pull_vehicle(const std::string &name, vehicle_slot &v);
+  void pull_field(const std::string &name, field_slot &f);
+  void push_named(const world_snapshot &s);
 
   mutable std::mutex _mutex;
   cvc::app &_ctx;
@@ -123,9 +201,14 @@ private:
   bool _seeded = false;
   int _publish_every = 1;
   int _hash_every = 0;
+  int _snapshot_every = 1;
+  std::shared_ptr<const world_snapshot> _snapshot;
   bool _restart_required = false;
   step_report _last;
   std::map<std::string, material_slot> _materials;
+  std::map<std::string, body_id> _bodies;
+  std::map<std::string, vehicle_slot> _vehicles;
+  std::map<std::string, field_slot> _fields;
 };
 
 } // namespace physics
