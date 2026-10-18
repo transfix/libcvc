@@ -762,6 +762,9 @@ The parts:
   bind its settings, and `nav_sim_world_tick` counts its ticks.
   `nav_sim_world_create` takes `""` for the built-in policy (`coef_mlp::default_biased`), and
   an optional `map_id` / `n_planes` that puts agents in their own belief planes.
+- **The terrain planes.** `nav_terrain_build(heights, cell_w, config)` is `terrain_build`: the
+  slope, the grade cost, the infeasible cells and the limit, as numpy arrays. It is the C++
+  reference a Python twin of the planes is checked against.
 - **Key metadata.** `state_comment`, `state_property` and `state_property_keys` read what a
   key says it is.
 - **Lifetimes.** A `nav_plant` keeps its world alive, a `physics_binding` its app and world, and

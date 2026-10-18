@@ -40,6 +40,7 @@
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_binding.h>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1045,6 +1046,53 @@ PyObject *nav_sim_world_clear_terrain(PyObject *handle) {
   sim_world_from(handle)->clear_terrain();
   Py_RETURN_NONE;
 }
+// The terrain planes (cvc/nav/terrain.h's terrain_build) for heights (rows, cols) in metres,
+// row 0 at min y, on cells cell_w metres square, under a config dict (terrain_config_of's form;
+// missing keys keep the defaults): a dict of slope ((2, rows, cols) float32: dz/dx, then dz/dy),
+// grade_cost ((rows, cols) float32, 1 at the vehicle's limit), infeasible ((rows, cols) uint8)
+// and limit (the steepest feasible slope's tangent). The C++ reference a Python twin of the
+// planes (GRL-SNAM's grl_snam.terrain) is checked against.
+PyObject *nav_terrain_build(PyObject *heights, double cell_w, PyObject *config = nullptr) {
+  PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(heights, NPY_FLOAT, 2, 2, NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_FORCECAST));
+  if (!a) {
+    PyErr_Clear();
+    throw std::invalid_argument("nav_terrain_build: heights is a (rows, cols) array");
+  }
+  const int rows = static_cast<int>(PyArray_DIM(a, 0)), cols = static_cast<int>(PyArray_DIM(a, 1));
+  cvc::nav::terrain_planes t;
+  try {
+    t = cvc::nav::terrain_build(static_cast<const float *>(PyArray_DATA(a)), rows, cols, cell_w,
+                                pycvc_physics::terrain_config_of(config));
+  } catch (...) {
+    Py_DECREF(a);
+    throw;
+  }
+  Py_DECREF(a);
+  npy_intp d3[3] = {2, rows, cols}, d2[2] = {rows, cols};
+  PyObject *slope = PyArray_SimpleNew(3, d3, NPY_FLOAT);
+  PyObject *cost = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *inf = PyArray_SimpleNew(2, d2, NPY_UINT8);
+  if (!slope || !cost || !inf) {
+    Py_XDECREF(slope);
+    Py_XDECREF(cost);
+    Py_XDECREF(inf);
+    throw std::runtime_error("nav_terrain_build: out of memory");
+  }
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(slope)), t.slope.data(),
+              t.slope.size() * sizeof(float));
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(cost)), t.grade_cost.data(),
+              t.grade_cost.size() * sizeof(float));
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(inf)), t.infeasible.data(),
+              t.infeasible.size());
+  PyObject *d = PyDict_New();
+  pycvc_physics::put(d, "slope", slope);
+  pycvc_physics::put(d, "grade_cost", cost);
+  pycvc_physics::put(d, "infeasible", inf);
+  pycvc_physics::put(d, "limit", PyFloat_FromDouble(t.limit));
+  return d;
+}
+
 // The terrain's config as a dict, or None without one.
 PyObject *nav_sim_world_terrain_settings(PyObject *handle) {
   cvc::nav::sim_world *sw = sim_world_from(handle);

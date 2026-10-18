@@ -277,6 +277,27 @@ def test_private_belief_planes():
                   "a plane id past n_planes")
 
 
+def test_the_terrain_planes():
+    """nav_terrain_build is terrain_build: the planes a Python twin is checked against."""
+    x = np.arange(41, dtype=np.float64) - 20.0
+    z = (0.3 * x)[None, :].repeat(41, axis=0) + 0.01 * (x ** 2)[:, None]  # a tilted bowl
+    t = pycvc.nav_terrain_build(z, 1.0, {"max_grade": 0.5, "tip_ratio": 0.0})
+    check(t["slope"].shape == (2, 41, 41) and t["slope"].dtype == np.float32, "slope planes")
+    gy, gx = np.gradient(z.astype(np.float32))
+    check(np.array_equal(t["slope"][0], gx) and np.array_equal(t["slope"][1], gy),
+          "the slope is np.gradient of the float32 heights, bit for bit")
+    tan = np.sqrt(gx.astype(np.float64) ** 2 + gy.astype(np.float64) ** 2)
+    sin_lim = 0.5 / np.sqrt(1.25)
+    cost = np.minimum(1.0, tan / np.sqrt(1.0 + tan * tan) / sin_lim).astype(np.float32)
+    check(np.array_equal(t["grade_cost"], cost), "the grade cost, bit for bit")
+    check(np.array_equal(t["infeasible"], (tan > 0.5).astype(np.uint8)), "the infeasible cells")
+    check(t["limit"] == 0.5, "the limit")
+    tip = pycvc.nav_terrain_build(z, 1.0, {"max_grade": 0.5, "tip_ratio": 0.5, "tip_margin": 0.8})
+    check(tip["limit"] == 0.4 and tip["infeasible"].sum() > t["infeasible"].sum(),
+          "a tip ratio lowers the limit")
+    expect_raises(lambda: pycvc.nav_terrain_build(z, 0.0), "cell_w 0")
+
+
 def test_settings_in_the_tree():
     sim = make_sim()
     w = pycvc.physics_world()
@@ -345,7 +366,7 @@ def test_terrain():
 def main():
     for t in (test_golden_and_reference, test_the_same_numbers_three_ways, test_save_restore,
               test_plant_selection, test_private_belief_planes, test_settings_in_the_tree,
-              test_terrain):
+              test_terrain, test_the_terrain_planes):
         t()
         print("ok  " + t.__name__)
     print("test_pycvc_physics: %d checks passed" % checks)
