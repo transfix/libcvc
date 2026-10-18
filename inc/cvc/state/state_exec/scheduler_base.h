@@ -86,6 +86,8 @@ struct process_info {
   double elapsed_time;
   uint64_t current_memory;
   uint64_t peak_memory;
+  uint64_t heap_memory = 0;       // measured heap share (heap.h); max_memory covers it too
+  uint64_t heap_measurements = 0; // measurements taken so far
   uint64_t max_memory;
   double max_time;
   uint64_t message_count;

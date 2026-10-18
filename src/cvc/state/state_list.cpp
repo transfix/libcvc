@@ -21,10 +21,11 @@ void copy_node(state &dst, state &src) {
 // kept, never dropped, as pop_back() keeps the element it clears: callers may hold references
 // into an element and observers may be connected to its nodes.
 //
-// This used to be dst.ptree(src.ptree()). ptree() keys each node by its full path from the root
-// and ptree(pt) applies those keys relative to dst, so that wrote src's subtree under
-// dst.<src's full path> and left dst's own nodes as they were. data() was not copied either:
-// the isData<boost::any>() check before it is false for any data that is not itself a boost::any.
+// This used to be dst.ptree(src.ptree()). ptree() then keyed each node by its full path from the
+// root and ptree(pt) applies keys relative to dst, so that wrote src's subtree under
+// dst.<src's full path>. Even with relative keys it would leave the nodes only dst has as they
+// were, and copy no data(): the isData<boost::any>() check before it was false for any data that
+// is not itself a boost::any.
 void copy_element(state &dst, state &src) {
   copy_node(dst, src);
   const std::size_t src_skip = src.fullName().size() + 1; // children() names are full names

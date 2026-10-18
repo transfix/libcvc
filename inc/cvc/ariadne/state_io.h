@@ -14,10 +14,10 @@
 // state://, register_http_uri_handler for http(s)://).
 //
 // SEMANTICS mirror cvc::state::save/restore EXACTLY (these just re-route the bytes): the JSON keys
-// are ABSOLUTE state paths (each node's fullName), and restore applies them RELATIVE to the target
-// node. So restore into the SAME position the data was saved from — typically the app root
-// (cvc::state::instance(app)) for both — to reconstruct the original layout; restoring into a
-// different node re-roots the saved absolute paths beneath it.
+// are state paths RELATIVE to the saved node, and restore applies them relative to the target
+// node. So restoring into the node the data was saved from reconstructs it, and restoring into a
+// different node copies the saved subtree there. A document of the app root is keyed by full
+// names, as is one written by an older version for any node (restore those into the root).
 
 #include <string>
 

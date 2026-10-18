@@ -15,8 +15,10 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
+#include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -304,6 +306,119 @@ TEST_F(DataStepsEvaluator, SnapshotMidWorkRunsTheCallAgain) {
   EXPECT_GT(back.stats.steps(step_kind::data), 0u);
 }
 
+// ---- jobs that call functions -----------------------------------------------------
+
+// A job asks for a call and the evaluator makes it: a native function in the data step, a DSL
+// function as frames above the call waiting on the job, so its body runs as the program's own
+// evaluation steps.
+TEST_F(DataStepsEvaluator, ALambdaAJobCallsRunsAsFramesAboveTheCall) {
+  evaluator_state st = ev.create_state(
+      parse("(+ 1 (length (collections.map (collections.range 40) (lambda (x) (* x 2)))))"));
+  st.data_step_nodes = 4;
+  st.stats.start();
+  bool saw_call = false;
+  while (!ev.step(st)) {
+    // While the lambda runs its frames are on top; once it returns (stack back at base) the
+    // next step hands its value to the job.
+    if (st.data_work && st.data_work->calling && st.stack.size() > st.data_work->base) {
+      saw_call = true;
+      EXPECT_EQ(st.stack[st.data_work->base - 1].phase, eval_phase::apply); // the waiting call
+    }
+  }
+  EXPECT_TRUE(saw_call);
+  EXPECT_EQ(std::get<int64_t>(st.result.v), 41);
+  EXPECT_GE(st.stats.steps(step_kind::data), 40u);
+}
+
+TEST_F(DataStepsEvaluator, SnapshotWhileAJobsLambdaRunsRunsTheCallAgain) {
+  cvc::app ctx;
+  evaluator_state st = ev.create_state(
+      parse("(+ 1 (length (collections.map (collections.range 40) (lambda (x) (* x 2)))))"));
+  st.data_step_nodes = 4;
+  st.stats.start();
+  while (!(st.data_work && st.data_work->calling && st.stack.size() > st.data_work->base &&
+           st.stats.steps(step_kind::data) >= 10))
+    ASSERT_FALSE(ev.step(st));
+  const std::size_t base = st.data_work->base;
+  const std::size_t args = st.data_work->frame_args;
+  ASSERT_GT(st.stack.size(), base);
+
+  auto &node = cvc::state::instance(ctx)("snapshot");
+  encode_evaluator_state(node, st);
+  evaluator_state back = decode_evaluator_state(node);
+  EXPECT_EQ(back.data_work, nullptr);
+  EXPECT_EQ(back.stack.size(), base);                // the lambda's frames are left out...
+  EXPECT_EQ(back.stack.back().results.size(), args); // ...and the waiting call keeps its args
+  // Native functions are not serialized: give each decoded scope chain the builtins and the
+  // stdlib again.
+  const auto patch = [&](environment_ptr e) {
+    for (; e && e->outer && !e->outer->frozen; e = e->outer) {
+    }
+    if (!e || e->outer)
+      return; // no scope, or patched already
+    for (auto &[name, val] : env->bindings)
+      e->set(name, val);
+    e->outer = stdlib_registry::shared_scope();
+  };
+  patch(back.global_env);
+  for (auto &f : back.stack) {
+    patch(f.env);
+    for (auto &v : f.results)
+      if (auto *c = std::get_if<closure_ptr>(&v.v))
+        patch((*c)->env_snapshot);
+  }
+  ev.run(back); // the map runs again from its first element
+  ASSERT_TRUE(back.done);
+  EXPECT_EQ(std::get<int64_t>(back.result.v), 41);
+  ev.run(st);
+  EXPECT_EQ(std::get<int64_t>(st.result.v), 41);
+}
+
+// A native function a job calls may leave deep-data work of its own (str of a value bigger than
+// the slice): its result is that call's value, not the whole job's. Before jobs made their calls
+// through the evaluator, (collections.map (list a b) str) came back as one string.
+TEST_F(DataStepsEvaluator, ANativeFunctionsOwnWorkIsItsCallsValue) {
+  const std::string expected =
+      "(\"" + to_string(nested_list(1000)) + "\" \"" + to_string(nested_list(1000)) + "\")";
+  for (const char *script :
+       {"(collections.map (list a b) str)", "(collections.filter (list a b) (lambda (x) (= x b)))",
+        "(collections.reduce (list a b) (lambda (acc x) (cons (str x) acc)) "
+        "(list))"}) {
+    SCOPED_TRACE(script);
+    evaluator_state whole = state(script, 0);
+    step_to_done(ev, whole);
+    evaluator_state sliced = state(script, 16);
+    step_to_done(ev, sliced);
+    EXPECT_EQ(to_string(sliced.result), to_string(whole.result));
+    EXPECT_GT(sliced.stats.steps(step_kind::data), 10u);
+  }
+  evaluator_state mapped = state("(collections.map (list a b) str)", 16);
+  step_to_done(ev, mapped);
+  ASSERT_TRUE(std::holds_alternative<list_ptr>(mapped.result.v));
+  EXPECT_EQ(std::get<list_ptr>(mapped.result.v)->size(), 2u);
+  EXPECT_EQ(to_string(mapped.result), expected);
+}
+
+TEST_F(DataStepsEvaluator, ALambdaAJobCallsIsGatedLikeTheProgram) {
+  // The special-form gate of a restricted evaluator (Ariadne's predicates) covers the body of a
+  // function a job calls, since that body runs on the same evaluator.
+  stackless_evaluator gated(env);
+  gated.restrict_special_forms(std::make_shared<const std::set<std::string>>(
+      std::set<std::string>{"lambda", "if", "quote"}));
+  for (std::size_t slice : {0u, 16u}) {
+    evaluator_state st =
+        gated.create_state(parse("(collections.map (list 1) (lambda (x) (defmacro m () 1)))"));
+    st.data_step_nodes = slice;
+    std::string err;
+    try {
+      gated.run(st);
+    } catch (const std::runtime_error &e) {
+      err = e.what();
+    }
+    EXPECT_NE(err.find("special form 'defmacro' is not permitted"), std::string::npos) << err;
+  }
+}
+
 // ---- the schedulers -------------------------------------------------------------
 
 class DataStepsScheduler : public ::testing::Test {
@@ -385,6 +500,19 @@ TEST_F(DataStepsScheduler, OtherProcessesRunBetweenSlices) {
   EXPECT_NE(sched.get_process_info(slow)->status, process_status::terminated);
   sched.run();
   EXPECT_TRUE(std::get<bool>(sched.get_result(slow)->v));
+}
+
+TEST_F(DataStepsScheduler, NoForkWhileAJobsFunctionRuns) {
+  // The job is not copied, so a child could not finish the call: fork refuses until it is done.
+  scheduler sched;
+  const int pid =
+      sched.execute(std::string("(collections.map (collections.range 50) (lambda (x) (* x 2)))"));
+  while (sched.get_process_info(pid)->data_steps < 5)
+    sched.step();
+  EXPECT_EQ(sched.fork(pid), -1);
+  sched.run();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::terminated);
+  EXPECT_EQ(sched.list_processes().size(), 1u);
 }
 
 TEST_F(DataStepsScheduler, SignalsWaitForDeepWork) {
