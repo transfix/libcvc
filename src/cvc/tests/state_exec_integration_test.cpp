@@ -5,6 +5,7 @@
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/exec_coordinator.h>
 #include <cvc/state/state_exec/intrinsics.h>
@@ -2332,6 +2333,76 @@ TEST_F(SchedulerSettingsTest, TwoSchedulersWithDifferentOverrides) {
   EXPECT_EQ(sched_fast.max_pending_messages, 100u);
   EXPECT_EQ(sched_heavy.max_pending_messages, 5000u);
 }
+
+// --- parser.* settings (docs/STATE_EXEC_GRAMMAR.md, "Parser settings") ---
+
+TEST_F(SchedulerSettingsTest, ParserSettingsResolveFromTree) {
+  auto &root = cvc::state::instance(app_ctx);
+  EXPECT_EQ(parse_options_from_state(root).max_depth, 256u); // nothing set: built-in default
+
+  root("state_exec.defaults.parser.max_depth").value("64");
+  EXPECT_EQ(parse_options_from_state(root).max_depth, 64u);
+  EXPECT_EQ(parse_options_from_state(root, "other").max_depth, 64u);
+
+  root("state_exec.schedulers.deep.parser.max_depth").value("1024");
+  EXPECT_EQ(parse_options_from_state(root, "deep").max_depth, 1024u);
+  EXPECT_EQ(parse_options_from_state(root).max_depth,
+            64u); // no id: the per-scheduler key is unused
+}
+
+TEST_F(SchedulerSettingsTest, BadParserSettingsAreSkipped) {
+  auto &root = cvc::state::instance(app_ctx);
+  for (const char *bad : {"", "abc", "0", "-5", "12x", "99999999999999999999999"}) {
+    root("state_exec.defaults.parser.max_depth").value(bad);
+    EXPECT_EQ(parse_options_from_state(root).max_depth, 256u) << "value: " << bad;
+  }
+  // A bad per-scheduler value falls through to the defaults key, not to the built-in default.
+  root("state_exec.defaults.parser.max_depth").value("32");
+  root("state_exec.schedulers.s.parser.max_depth").value("nope");
+  EXPECT_EQ(parse_options_from_state(root, "s").max_depth, 32u);
+}
+
+TEST_F(SchedulerSettingsTest, SchedulerParsesWithTreeDepthAndPublishesIt) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.parser.max_depth").value("8");
+  root("state_exec.schedulers.strict.parser.max_depth").value("3");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.set_id("strict");
+  EXPECT_EQ(sched.parser_settings().max_depth, 256u); // until load_settings()
+  sched.load_settings();
+  EXPECT_EQ(sched.parser_settings().max_depth, 3u);
+  EXPECT_EQ(root("state_exec.schedulers.strict.parser.max_depth").value(), "3");
+
+  EXPECT_NO_THROW(sched.execute(std::string("(+ 1 (+ 1 (+ 1 1)))")));                 // 3 levels
+  EXPECT_THROW(sched.execute(std::string("(+ 1 (+ 1 (+ 1 (+ 1 1))))")), parse_error); // 4
+}
+
+TEST_F(SchedulerSettingsTest, SchedulerWithoutIdUsesDefaultsKey) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.parser.max_depth").value("2");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  EXPECT_EQ(sched.parser_settings().max_depth, 2u);
+  EXPECT_THROW(sched.execute(std::string("(+ 1 (+ 1 (+ 1 1)))")), parse_error);
+}
+
+TEST_F(SchedulerSettingsTest, AsyncSchedulerReadsParserSettingsOnEachSubmit) {
+  auto &root = cvc::state::instance(app_ctx);
+  async_scheduler sched;
+  sched.set_watch_root(&root);
+  const std::string three_deep = "(+ 1 (+ 1 (+ 1 1)))";
+
+  EXPECT_NO_THROW(sched.execute(three_deep));
+  root("state_exec.defaults.parser.max_depth").value("2");
+  EXPECT_THROW(sched.execute(three_deep), parse_error);
+  root("state_exec.defaults.parser.max_depth").value("16");
+  EXPECT_NO_THROW(sched.execute(three_deep));
+}
+
 // ===========================================================================
 // §12 message-channel scoping — end-to-end through the scheduler + chroot
 // ===========================================================================

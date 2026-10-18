@@ -55,6 +55,8 @@ void scheduler::load_settings() {
 
   max_pending_messages = effective;
 
+  // --- parser.* (same resolution order; see parse_options_from_state) ---
+  parse_options_ = parse_options_from_state(*watch_root_, id_);
   // --- limits.max_alloc_bytes (same resolution order; see max_alloc_bytes_from_state) ---
   max_alloc_bytes_ = max_alloc_bytes_from_state(*watch_root_, id_);
 
@@ -62,6 +64,7 @@ void scheduler::load_settings() {
   if (!id_.empty()) {
     std::string base = std::string(sched_prefix) + "." + id_;
     (*watch_root_)(base + ".max_pending_messages").value(std::to_string(max_pending_messages));
+    (*watch_root_)(base + ".parser.max_depth").value(std::to_string(parse_options_.max_depth));
     (*watch_root_)(base + ".limits.max_alloc_bytes").value(std::to_string(max_alloc_bytes_));
     (*watch_root_)(base + ".policy")
         .value(policy_ == scheduling_policy::round_robin ? "round_robin"
@@ -107,7 +110,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
-  proc.state = evaluator_.create_state(script, opts.env);
+  proc.state = evaluator_.create_state(script, opts.env, parse_options_);
   proc.state.stats.start();
   processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
   return pid;

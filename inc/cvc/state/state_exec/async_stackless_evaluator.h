@@ -36,7 +36,8 @@ public:
 
   /// Create a fresh evaluator_state (delegates to inner evaluator).
   evaluator_state create_state(const value_t &expr, environment_ptr env = nullptr);
-  evaluator_state create_state(const std::string &script, environment_ptr env = nullptr);
+  evaluator_state create_state(const std::string &script, environment_ptr env = nullptr,
+                               const parse_options &popts = {});
 
   /// Single step as a coroutine — yields after the step.
   task<bool> step(evaluator_state &state);

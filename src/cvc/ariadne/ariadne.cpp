@@ -392,6 +392,7 @@ public:
     proc_->pid = 1;
     proc_->status = se::process_status::ready;
     cvc::state &root = cvc::state::instance(app);
+    tree_ = &root;
     ctx_.sched = &sched_;
     ctx_.tracker = &tracker_;
     ctx_.proc = proc_;
@@ -604,7 +605,7 @@ private:
     if (it != compiled_.end())
       return it->second ? &*it->second : nullptr;
     try {
-      se::value_t v = se::parse(src);
+      se::value_t v = se::parse(src, se::parse_options_from_state(*tree_)); // parser.* settings
       auto ins = compiled_.emplace(src, std::move(v));
       return &*ins.first->second;
     } catch (const se::parse_error &) {
@@ -619,7 +620,8 @@ private:
   static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
   se::time_budget frame_{kFrameBudgetSeconds}; // the current frame's predicate evals' time
-  std::string root_path_; // §12: the scope the ctx_ is currently chrooted to (set_root_path)
+  std::string root_path_;      // §12: the scope the ctx_ is currently chrooted to (set_root_path)
+  cvc::state *tree_ = nullptr; // the app's state tree, for state_exec.defaults.parser.*
   se::scheduler sched_;
   se::memory_tracker tracker_;
   std::shared_ptr<se::process> proc_;

@@ -39,8 +39,9 @@ evaluator_state stackless_evaluator::create_state(const value_t &expr, environme
   return st;
 }
 
-evaluator_state stackless_evaluator::create_state(const std::string &script, environment_ptr env) {
-  auto exprs = parse_all(script);
+evaluator_state stackless_evaluator::create_state(const std::string &script, environment_ptr env,
+                                                  const parse_options &popts) {
+  auto exprs = parse_all(script, popts);
   if (exprs.empty()) {
     evaluator_state st;
     st.done = true;
