@@ -420,6 +420,7 @@ TEST(PhysicsVehicle, TheSameDriveTwiceAndAReplayGiveTheSameHash) {
     field snow;
     snow.kind = field_kind::medium;
     snow.volume = uniform(5.0e5, {4, -20, 0.0}, {40, 20, 0.3});
+    snow.ruts = true; // the rut maps are state too
     w.add_field(snow);
     return w.add_vehicle(vehicle_desc::humvee(), {0, 0, 1.2});
   };
@@ -487,9 +488,8 @@ struct hill {
     g.material = m;
     w.add_body(g);
     const vec3 up{-std::sin(theta), 0.0, std::cos(theta)};
-    v = w.add_vehicle(vehicle_desc::humvee(), {x * std::cos(theta) + 1.2 * up.x, 0.0,
-                                               x * std::sin(theta) + 1.2 * up.z},
-                      q);
+    v = w.add_vehicle(vehicle_desc::humvee(),
+                      {x * std::cos(theta) + 1.2 * up.x, 0.0, x * std::sin(theta) + 1.2 * up.z}, q);
   }
   // Distance along the slope (uphill +) of the chassis from the origin.
   double along() const {
@@ -578,4 +578,95 @@ TEST(PhysicsVehicle, AHillStartDrivesUphill) {
   EXPECT_GT(s.speed, 1.0);
   EXPECT_GT(h.along() - x0, 3.0);
   EXPECT_GT(worst, -0.3);
+}
+
+// --- ruts --------------------------------------------------------------------------------------
+
+namespace {
+
+// Rutted snow, 0.4 m deep, over a long strip, and a world to drive in it.
+field rutted_snow() {
+  field snow;
+  snow.kind = field_kind::medium;
+  snow.volume = uniform(1.0e6, {-300, -20, 0.0}, {300, 20, 0.4});
+  snow.ruts = true;
+  snow.rut_cell = 0.05;
+  return snow;
+}
+
+// Drive `v` at about 3 m/s for `steps`.
+void cruise(world &w, const std::vector<vehicle_id> &vs, int steps) {
+  for (int i = 0; i < steps; ++i) {
+    for (const vehicle_id v : vs)
+      w.drive(v, {0.0, speed_of(w, v) < 3.0 ? 1.0 : 0.0});
+    w.step();
+  }
+}
+
+} // namespace
+
+// A vehicle leaves its ruts behind it: along both wheel tracks, as deep as the wheels sank and as
+// wide as the tires, and nothing between them.
+TEST(PhysicsVehicle, RutsStayBehindAVehicle) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  const field_id snow = w.add_field(rutted_snow());
+  const vehicle_id v = w.add_vehicle(vehicle_desc::humvee(), {-250, 0, 1.6});
+  w.drive(v, {});
+  w.step(300);
+  cruise(w, {v}, 1200);
+  const double z = w.vehicle_state(v).wheels[0].sinkage;
+  const rut_map ruts = w.field_ruts(snow);
+  ASSERT_GT(ruts.cols, 0);
+  // Sampled over 10 m the vehicle drove through, behind where it is now.
+  const double x_now = w.vehicle_state(v).body.position.x;
+  double mean = 0.0;
+  int n = 0;
+  for (double x = x_now - 20.0; x < x_now - 10.0; x += 0.5)
+    for (const double y : {0.91, -0.91}) {
+      mean += ruts.at(x, y);
+      ++n;
+      EXPECT_EQ(ruts.at(x, 0.0), 0.0f) << "between the tracks";
+      EXPECT_EQ(ruts.at(x, y + (y > 0 ? 0.3 : -0.3)), 0.0f) << "outside the track";
+    }
+  mean /= n;
+  // A track's width: the cells across it with a rut.
+  int across = 0;
+  for (double y = 0.5; y < 1.4; y += ruts.cell)
+    across += ruts.at(x_now - 15.0, y) > 0.0f;
+  std::printf("  rut %.4f m deep (the wheels sink %.4f m), %.2f m wide (tire %.2f m), x now %.1f\n",
+              mean, z, across * ruts.cell, vehicle_desc::humvee().axles[0].wheel_width, x_now);
+  EXPECT_NEAR(mean, z, 0.10 * z);
+  EXPECT_NEAR(across * ruts.cell, vehicle_desc::humvee().axles[0].wheel_width, 2.5 * ruts.cell);
+}
+
+// A second vehicle in the first one's ruts sinks no deeper and is barely held back: the snow
+// there is compacted already. Its rear wheels do the same in its own front wheels' ruts.
+TEST(PhysicsVehicle, ASecondPassInTheRutsSinksNoFurtherAndRollsEasier) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  w.add_field(rutted_snow());
+  const vehicle_id lead = w.add_vehicle(vehicle_desc::humvee(), {-250, 0, 1.6});
+  const vehicle_id follow = w.add_vehicle(vehicle_desc::humvee(), {-265, 0, 1.6});
+  w.drive(lead, {});
+  w.drive(follow, {});
+  w.step(300);
+  cruise(w, {lead, follow}, 1500);
+  const vehicle_state a = w.vehicle_state(lead), b = w.vehicle_state(follow);
+  ASSERT_LT(b.body.position.x, a.body.position.x - 8.0);
+  ASSERT_GT(b.body.position.x, -240.0) << "the follower is on the leader's ruts";
+  const double lead_front = a.wheels[0].medium_resistance + a.wheels[1].medium_resistance;
+  const double follow_front = b.wheels[0].medium_resistance + b.wheels[1].medium_resistance;
+  const double lead_rear = a.wheels[2].medium_resistance + a.wheels[3].medium_resistance;
+  std::printf("  compaction resistance: leader front %.0f N, rear %.0f N; follower front %.0f N\n",
+              lead_front, lead_rear, follow_front);
+  std::printf("  sinkage: leader front %.4f m, follower front %.4f m (rut found %.4f m)\n",
+              a.wheels[0].sinkage, b.wheels[0].sinkage, b.wheels[0].rut);
+  EXPECT_GT(lead_front, 1000.0);
+  EXPECT_LT(follow_front, 0.10 * lead_front);
+  EXPECT_LT(lead_rear, 0.10 * lead_front); // in its own front wheels' ruts
+  EXPECT_NEAR(b.wheels[0].sinkage, a.wheels[0].sinkage, 0.05 * a.wheels[0].sinkage);
+  EXPECT_NEAR(b.wheels[0].rut, a.wheels[0].sinkage, 0.10 * a.wheels[0].sinkage);
 }

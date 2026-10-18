@@ -542,7 +542,8 @@ struct shape_builder {
 // read by the friction combine and the readback.
 struct wheel_medium_state {
   bool active = false;
-  double depth = 0.0, sinkage = 0.0, modulus = 0.0, traction = 0.0;
+  double depth = 0.0, sinkage = 0.0, modulus = 0.0, traction = 0.0, rut = 0.0;
+  std::uint32_t field = 0xffffffffu;
 };
 
 // One vehicle's runtime beside Jolt's constraint. Held by pointer, so the collision tester
@@ -635,8 +636,10 @@ public:
                    _origin->y + static_cast<double>(contact.GetY()),
                    _origin->z + static_cast<double>(contact.GetZ())};
       if ((*_probe)(p, {up.GetX(), up.GetY(), up.GetZ()}, m) && m.depth > 0.0) {
-        const double z = std::min(m.depth, bekker_sinkage(_v->loads[wheel], _v->width[wheel],
-                                                          _v->diameter[wheel], m.modulus));
+        // At least as deep as the rut it finds (field::ruts): pressed snow stays pressed.
+        const double z =
+            std::min(m.depth, std::max(m.rut, bekker_sinkage(_v->loads[wheel], _v->width[wheel],
+                                                             _v->diameter[wheel], m.modulus)));
         const double rise = m.depth - z;
         distance -= rise;
         contact += JPH::RVec3(up) * static_cast<JPH::Real>(rise);
@@ -646,6 +649,8 @@ public:
         s.sinkage = z;
         s.modulus = m.modulus;
         s.traction = m.traction;
+        s.rut = m.rut;
+        s.field = m.field;
       }
     }
     const double travel = distance - radius;
@@ -1140,6 +1145,7 @@ public:
       ws = wheel_state{};
       o.longitudinal = vec3{};
       o.medium_modulus = 0.0;
+      o.medium_field = 0xffffffffu;
       ws.steer = w->GetSteerAngle();
       ws.angular_velocity = w->GetAngularVelocity();
       ws.rotation = w->GetRotationAngle();
@@ -1161,6 +1167,8 @@ public:
         ws.medium_depth = m.depth;
         ws.sinkage = m.sinkage;
         o.medium_modulus = m.modulus;
+        o.medium_field = m.field;
+        ws.rut = m.rut;
       }
     }
   }

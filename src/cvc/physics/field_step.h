@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <map>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -44,6 +45,7 @@ struct compiled_field {
   field_grid scalar;
   bool moving = false;
   field_grid velocity[3];
+  rut_map ruts; // a medium with desc.ruts: what wheels have pressed into it
 };
 
 // A dynamic body as the fields see it: its sample cells and what its drag area
@@ -56,8 +58,8 @@ struct field_body {
   double cell_volume = 0.0, volume = 0.0, mass = 0.0;
   vec3 center_of_mass; // body-local
   outline shape = outline::other;
-  double radius = 0.0; // sphere
-  vec3 half;           // box
+  double radius = 0.0;  // sphere
+  vec3 half;            // box
   bool vehicle = false; // a vehicle's chassis: no flow drag (vehicle.h's aero is its drag)
   field_load load;      // the last step's
 };
@@ -91,6 +93,20 @@ public:
   bool medium_under(const vec3 &p, wheel_medium &out) const;
   // The height of the tallest medium field (0 with none).
   double medium_reach() const;
+
+  // Ruts (field::ruts). Press a wheel's footprint into the medium `field`: the
+  // rectangle `length` along the unit direction (dx, dy) by `width` across, centred on
+  // (x, y), keeping at each cell the deeper of the rut and `depth`. With `behind`, only
+  // the half behind the centre (a rolling wheel leaves its rut behind it).
+  void press(std::uint32_t field, double x, double y, double dx, double dy, double length,
+             double width, double depth, bool behind);
+  // The rut at (x, y) in `field`; 0 without ruts there.
+  double rut_at(std::uint32_t field, double x, double y) const;
+  rut_map ruts(field_id id) const;
+  bool has_ruts() const;
+  // The rut maps' depths, for world::save / restore (the same fields, in id order).
+  void save_ruts(std::string &out) const;
+  void restore_ruts(const std::string &in, std::size_t &pos);
 
 private:
   void wake_in(world_backend &be, const field_grid &box);

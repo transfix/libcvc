@@ -215,6 +215,8 @@ public:
   // What the fields did to `id` in the last step: zero for a body no field
   // touched, and for a static, kinematic or sleeping body.
   field_load field_load_on(body_id id) const;
+  // The ruts a medium with field::ruts keeps; empty for one without.
+  rut_map field_ruts(field_id id) const;
 
   // --- vehicles (vehicle.h) ----------------------------------------------------
 

@@ -200,6 +200,11 @@ void validate(const vehicle_desc &d) {
        "the tire needs peak slips > 0 and 0 < tire_sliding <= 1");
 }
 
+// Half the chord of a wheel of `radius` sunk `z`: half its contact patch's length.
+double contact_half_length(double radius, double z) {
+  return std::sqrt(std::max(0.0, 2.0 * radius * z - z * z));
+}
+
 // How fast a medium answers a wheel's load (s).
 constexpr double kMediumTime = 0.1;
 
@@ -426,7 +431,15 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
       v.rolling[w] = crr * rw.state.load;
       const axle_desc &a = d.axles[w / 2];
       const double z = rw.state.sinkage;
-      v.medium[w] = 0.5 * a.wheel_width * rw.medium_modulus * z * z;
+      // Only snow compacted deeper than the rut ahead of the tire resists (field::ruts):
+      // b k (z^2 - rut^2) / 2, the work of pressing it from the rut down to z.
+      double ahead = 0.0;
+      if (z > 0.0 && rw.medium_field != 0xffffffffu) {
+        const double half = contact_half_length(a.wheel_radius, z);
+        const vec3 lead = rw.state.contact_point + rw.longitudinal * (v_long >= 0.0 ? half : -half);
+        ahead = std::min(z, fields.rut_at(rw.medium_field, lead.x, lead.y));
+      }
+      v.medium[w] = 0.5 * a.wheel_width * rw.medium_modulus * (z * z - ahead * ahead);
       const vec3 f = rw.longitudinal * (-(v.rolling[w] + v.medium[w]) * sign);
       force = force + f;
       torque = torque + cross(arm, f);
@@ -436,9 +449,41 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
   }
 }
 
-void vehicle_set::post_step(world_backend &be, const world_config &) {
-  for (auto &entry : _v)
-    be.read_vehicle(entry.second.handle, entry.second.readback);
+void vehicle_set::post_step(world_backend &be, field_set &fields, const world_config &) {
+  const bool ruts = fields.has_ruts();
+  for (auto &entry : _v) {
+    rt &v = entry.second;
+    be.read_vehicle(v.handle, v.readback);
+    if (!ruts)
+      continue;
+    // Each wheel in a rutted medium presses its footprint into it: the half behind it as
+    // it rolls (its rut), all of it standing still.
+    const body_state s = be.state(v.chassis);
+    const vec3 com = s.position + rotate(s.rotation, v.desc.center_of_mass);
+    for (std::size_t w = 0; w < v.readback.wheels.size(); ++w) {
+      const vehicle_readback::wheel &rw = v.readback.wheels[w];
+      const double z = rw.state.sinkage;
+      if (!rw.state.contact || !(z > 0.0) || rw.medium_field == 0xffffffffu)
+        continue;
+      const axle_desc &a = v.desc.axles[w / 2];
+      const vec3 arm = rw.state.contact_point - com;
+      const double v_long =
+          dot(s.linear_velocity + cross(s.angular_velocity, arm), rw.longitudinal);
+      double dx = rw.longitudinal.x, dy = rw.longitudinal.y;
+      const double n = std::sqrt(dx * dx + dy * dy);
+      if (!(n > 0.0))
+        continue;
+      dx /= n;
+      dy /= n;
+      if (v_long < 0.0) {
+        dx = -dx;
+        dy = -dy;
+      }
+      fields.press(rw.medium_field, rw.state.contact_point.x, rw.state.contact_point.y, dx, dy,
+                   2.0 * contact_half_length(a.wheel_radius, z), a.wheel_width, z,
+                   std::fabs(v_long) > 0.05);
+    }
+  }
 }
 
 vehicle_state vehicle_set::state(const world_backend &be, vehicle_id id) const {

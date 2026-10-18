@@ -168,7 +168,10 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
 - **The driver model.** `drive` turns `a_cmd` into throttle or brake, never both: a
   feed-forward on `max_accel` / `max_decel`, corrected by the measured acceleration.
   - The transmission shifts on its own; `reverse` backs up.
-  - A vehicle moving the wrong way brakes first, and one at rest with no command holds.
+  - A vehicle moving the wrong way brakes first.
+  - One with no command (|a_cmd| at most 0.05) and slower than 0.3 m/s holds on the full
+    brake, so it stands on a grade its tires can hold; released (`neutral`, no brake) it
+    rolls down at g (sin θ − C_rr cos θ). A change of input wakes a sleeping vehicle.
   - `set_controls` takes pedals directly (and `neutral`).
 - **Tires.** Slip curves peak at 1.0 times the μ of what the tire touches: the material of the
   terrain cell or mesh face under it, the table every plant reads.
@@ -183,6 +186,15 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     snow lands on the snow.
   - It is held back by the compaction resistance b k z² / 2.
   - Its tires get the medium's `traction`, if it has one.
+- **Ruts.** A medium with `ruts = true` keeps a rut map, `rut_cell` metres a cell (default
+  0.05; at most 16M cells over the field's bounds).
+  - Each wheel presses its contact patch (2√(2rz − z²) long, the tire's width across) to its
+    sinkage: the half behind the axle as it rolls, all of it standing still.
+  - A wheel sinks at least as deep as the rut it finds, and only snow below the rut ahead of
+    it resists: b k (z² − rut²) / 2. A second vehicle in the tracks, or a rear wheel in its
+    front wheel's, sinks no further and rolls almost free.
+  - `world::field_ruts(id)` copies the map; `wheel_state::rut` is the rut a wheel found.
+  - The maps are state: `save()` carries them and `state_hash()` covers them.
 - **Save and restore** carry the actuators and the driver's memory, so a replay reproduces a
   drive (`physics_vehicle_test`).
 

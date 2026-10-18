@@ -150,6 +150,7 @@ std::uint64_t fnv1a(const void *data, size_t n, std::uint64_t h = 14695981039346
 constexpr char kMagic[8] = {'C', 'V', 'C', 'P', 'H', 'Y', 'S', '1'};
 constexpr std::uint32_t kFormat = 1;
 constexpr char kVehicleMagic[8] = {'C', 'V', 'C', 'V', 'E', 'H', 'S', '1'};
+constexpr char kRutMagic[8] = {'C', 'V', 'C', 'R', 'U', 'T', 'S', '1'};
 
 struct state_header {
   char magic[8];
@@ -201,7 +202,7 @@ struct world::impl {
       fields.apply(*be, cfg);
       vehicles.pre_step(*be, fields, cfg, materials);
       be->step(contacts, r);
-      vehicles.post_step(*be, cfg);
+      vehicles.post_step(*be, fields, cfg);
     });
     const auto t1 = std::chrono::steady_clock::now();
     std::sort(contacts.begin(), contacts.end(), [](const contact_event &a, const contact_event &b) {
@@ -244,6 +245,11 @@ struct world::impl {
     if (vehicles.size() > 0) {
       trailer.assign(kVehicleMagic, sizeof(kVehicleMagic));
       vehicles.save(trailer);
+    }
+    // Then the ruts of rutted media (field::ruts): world state like the bodies'.
+    if (fields.has_ruts()) {
+      trailer.append(kRutMagic, sizeof(kRutMagic));
+      fields.save_ruts(trailer);
     }
     std::vector<std::uint8_t> out(sizeof(h) + engine.size() + trailer.size());
     std::memcpy(out.data(), &h, sizeof(h));
@@ -607,6 +613,11 @@ std::size_t world::field_count() const {
   return _impl->fields.size();
 }
 
+rut_map world::field_ruts(field_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->fields.ruts(id); });
+}
+
 vehicle_id world::add_vehicle(const vehicle_desc &d, const vec3 &position, const quat &rotation) {
   if (!finite(position) || !finite(rotation) || !unit_length(rotation))
     throw cvc::physics_error("add_vehicle: a finite position and a unit rotation are required");
@@ -716,23 +727,34 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   const std::string engine(reinterpret_cast<const char *>(state.data()) + sizeof(h),
                            static_cast<size_t>(h.engine_bytes));
   const vec3 origin{h.origin[0], h.origin[1], h.origin[2]};
-  // After the engine's bytes: the vehicles' trailer, exactly when the world has vehicles.
+  // After the engine's bytes: the vehicles' section exactly when the world has vehicles, then
+  // the ruts' exactly when it has rutted media.
   const std::string rest(reinterpret_cast<const char *>(state.data()) + sizeof(h) +
                              static_cast<size_t>(h.engine_bytes),
                          state.size() - sizeof(h) - static_cast<size_t>(h.engine_bytes));
-  if (_impl->vehicles.size() == 0
-          ? !rest.empty()
-          : rest.size() < sizeof(kVehicleMagic) ||
-                std::memcmp(rest.data(), kVehicleMagic, sizeof(kVehicleMagic)) != 0)
+  const auto section = [&](std::size_t at, const char(&magic)[8]) {
+    return rest.size() >= at + sizeof(magic) &&
+           std::memcmp(rest.data() + at, magic, sizeof(magic)) == 0;
+  };
+  const bool want_vehicles = _impl->vehicles.size() > 0;
+  const bool want_ruts = _impl->fields.has_ruts();
+  if (want_vehicles != section(0, kVehicleMagic) || (!want_vehicles && !want_ruts && !rest.empty()))
     throw cvc::physics_error("restore: this world does not hold the vehicles the state was "
                              "saved with");
   guarded([&] { _impl->be->restore_engine(engine, origin); });
-  if (!rest.empty()) {
-    std::size_t pos = sizeof(kVehicleMagic);
+  std::size_t pos = 0;
+  if (want_vehicles) {
+    pos = sizeof(kVehicleMagic);
     _impl->vehicles.restore(rest, pos);
-    if (pos != rest.size())
-      throw cvc::physics_error("restore: the vehicle state's length does not match");
   }
+  if (want_ruts) {
+    if (!section(pos, kRutMagic))
+      throw cvc::physics_error("restore: this world's rutted media differ from the state's");
+    pos += sizeof(kRutMagic);
+    _impl->fields.restore_ruts(rest, pos);
+  }
+  if (pos != rest.size())
+    throw cvc::physics_error("restore: the state's length does not match its sections");
   _impl->cfg.origin = origin;
   _impl->tick = h.tick;
   _impl->contacts.clear();

@@ -73,6 +73,7 @@ struct vehicle_readback {
     wheel_state state;           // the engine's view; the facade fills in the resistances
     vec3 longitudinal;           // the tire's forward direction on the ground (world, unit)
     double medium_modulus = 0.0; // k of the medium under it, N/m^3 (0: none)
+    std::uint32_t medium_field = 0xffffffffu; // which medium field
   };
   std::vector<wheel> wheels;
 };
@@ -83,6 +84,8 @@ struct wheel_medium {
   double depth = 0.0;
   double modulus = 0.0;
   double traction = 0.0;
+  double rut = 0.0;                  // m already pressed down there (field::ruts)
+  std::uint32_t field = 0xffffffffu; // the medium field's id
 };
 // Asked during the step, possibly on worker threads: it must only read.
 using medium_probe = std::function<bool(const vec3 &contact, const vec3 &up, wheel_medium &out)>;

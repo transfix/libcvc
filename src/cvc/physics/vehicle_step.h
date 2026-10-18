@@ -47,7 +47,8 @@ public:
 
   void pre_step(world_backend &be, const field_set &fields, const world_config &cfg,
                 const std::vector<material> &materials);
-  void post_step(world_backend &be, const world_config &cfg);
+  // After it: read the vehicles back, and press their ruts into rutted media.
+  void post_step(world_backend &be, field_set &fields, const world_config &cfg);
   vehicle_state state(const world_backend &be, vehicle_id id) const;
 
   // The facade's vehicle state (actuators, driver memory, the last readback), for
