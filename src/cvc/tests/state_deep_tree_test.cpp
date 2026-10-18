@@ -19,6 +19,7 @@
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_distributed_admin.h>
+#include <cvc/state/state_json.h>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -484,6 +485,176 @@ TEST_F(StateDeepTree, ResetSignalsWithoutTheAncestorsLocks) {
   EXPECT_EQ(at_destroy, "");
   c1.disconnect();
   c2.disconnect();
+}
+
+// ---- the JSON writer and reader (state_json.h) -----------------------------------
+
+namespace {
+// What json() used to return: boost's writer over ptree().
+std::string boost_json(cvc::state &node) {
+  std::stringstream ss;
+  boost::property_tree::write_json(ss, node.ptree());
+  return ss.str();
+}
+
+// What json(j) used to do: boost's parser, then ptree(pt).
+void boost_load(cvc::state &node, const std::string &doc) {
+  std::stringstream ss(doc);
+  boost::property_tree::ptree pt;
+  boost::property_tree::read_json(ss, pt);
+  node.ptree(pt);
+}
+
+// Every value under `node`, as (path, value) pairs in pre-order: what a load left behind.
+std::vector<std::pair<std::string, std::string>> tree_values(cvc::state &node) {
+  std::vector<std::pair<std::string, std::string>> out{{"", node.value()}};
+  for (const std::string &name : node.children()) {
+    const std::string rel = name.substr(node.fullName().size() + 1);
+    out.emplace_back(rel, node.findDescendant(rel)->value());
+  }
+  return out;
+}
+} // namespace
+
+TEST_F(StateDeepTree, JsonIsWhatWriteJsonWrites) {
+  // Every byte but '.' in a key and a value, a valued node, an empty childless one and one with
+  // only children: the writer escapes and lays out the document exactly as write_json() does.
+  cvc::state &top = root("bytes");
+  top.value("top \"/\\ value");
+  for (int c = 1; c < 256; ++c) {
+    if (c == '.')
+      continue;
+    const std::string ch(1, static_cast<char>(c));
+    top("k" + ch + "x").value("v" + ch + "w");
+  }
+  top("empty");
+  top("only.children").value("x");
+  top("utf8").value("\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80");
+  EXPECT_EQ(top.json(), boost_json(top));
+  EXPECT_EQ(root("bytes.only").json(), boost_json(root("bytes.only")));
+  EXPECT_EQ(root.json(), boost_json(root));
+  cvc::app empty_app;
+  EXPECT_EQ(cvc::state::instance(empty_app)("none").json(), "{\n}\n");
+
+  // A slice at a time, the same text.
+  cvc::state_json_writer w(top);
+  int calls = 1;
+  while (!w.step(1))
+    ++calls;
+  EXPECT_EQ(w.text(), top.json());
+  EXPECT_GT(calls, 250);
+}
+
+TEST_F(StateDeepTree, JsonLoadsWhatReadJsonLoads) {
+  const std::vector<std::string> docs{
+      R"({"a": "1", "b.c": "2", "": "self"})",
+      R"({"j": "1", "j.b": {"j.b.c": {"j.b.c": "3"}, "j.b.e": {"j.b.e": "5"}}, "j.d": ""})",
+      R"({"n": 1.50, "m": -0, "e": 1e5, "E": 2E-3, "x": -12.5e+3, "t": true, "f": false, "z": null})",
+      R"({"arr": ["x", "y", {"in": "z"}], "deep": [[["w"]]], "empty": [], "o": {}})",
+      "  {\"esc\": \"\\u00e9\\ud83d\\ude00\\/\\\"\\\\\\b\\f\\n\\r\\t\", \"k\\u0041\": \"v\"}\r\n ",
+      "\xEF\xBB\xBF{\"bom\": \"1\"}",
+      "{}",
+      "\"top\"",
+      "[]",
+      "[\"own\"]",
+      R"({"empty": "", "dup": "1", "dup": "2"})",
+      "{\n\t\"a\" :\n\"b\" ,\"c\":{\"d\":\"e\"}}",
+      "{\"utf8\": \"\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80\"}",
+  };
+  for (const std::string &doc : docs) {
+    SCOPED_TRACE(doc);
+    cvc::app a, b;
+    cvc::state &na = cvc::state::instance(a)("t");
+    cvc::state &nb = cvc::state::instance(b)("t");
+    na.json(doc);
+    boost_load(nb, doc);
+    EXPECT_EQ(tree_values(na), tree_values(nb));
+
+    // A value at a time, the same tree.
+    cvc::app c;
+    cvc::state &nc = cvc::state::instance(c)("t");
+    cvc::state_json_reader r(nc, doc);
+    while (!r.step(1)) {
+    }
+    EXPECT_EQ(tree_values(nc), tree_values(nb));
+  }
+}
+
+TEST_F(StateDeepTree, AMalformedDocumentFailsAsReadJsonDoesAndSetsNothing) {
+  // Each starts with a good entry, which must not be set: the document is checked first.
+  const std::vector<std::string> bad{
+      R"({"ok": "1", "a": })",
+      R"({"ok": "1", "a" "b"})",
+      R"({"ok": "1", "a": "b",})",
+      R"({"ok": "1", "a": [1,]})",
+      "{\"ok\": \"1\", \"a\": \"\x01\"}",
+      R"({"ok": "1", "a": "\uD800"})",
+      R"({"ok": "1", "a": "\uDC00"})",
+      R"({"ok": "1", "a": "\uD800A"})",
+      R"({"ok": "1", "a": tru})",
+      R"({"ok": "1", "a": -})",
+      R"({"ok": "1", "a": 01})",
+      R"({"ok": "1", "a": 1.})",
+      R"({"ok": "1", "a": 1e})",
+      R"({"ok": "1", "a": "unterminated)",
+      R"({"ok": "1"} x)",
+      R"({"ok": "1", "a": "\q"})",
+      "{\"ok\": \"1\", \"a\": \"\xC3\"}",
+      "{\"ok\": \"1\", \"a\": \"\x80\"}",
+      "{\"ok\": \"1\",\n\"a\":\n}",
+      "",
+      "{\"ok\": \"1\"",
+  };
+  using boost::property_tree::json_parser::json_parser_error;
+  for (const std::string &doc : bad) {
+    SCOPED_TRACE(doc);
+    std::string want, got;
+    unsigned long want_line = 0, got_line = 0;
+    try {
+      std::stringstream ss(doc);
+      boost::property_tree::ptree pt;
+      boost::property_tree::read_json(ss, pt);
+      ADD_FAILURE() << "read_json accepted it";
+    } catch (const json_parser_error &e) {
+      want = e.message();
+      want_line = e.line();
+    }
+    cvc::state &node = root("bad");
+    try {
+      node.json(doc);
+      ADD_FAILURE() << "json(j) accepted it";
+    } catch (const json_parser_error &e) {
+      got = e.message();
+      got_line = e.line();
+    }
+    EXPECT_EQ(got, want);
+    EXPECT_EQ(got_line, want_line);
+    EXPECT_EQ(node.findDescendant("ok"), nullptr);
+  }
+}
+
+TEST_F(StateDeepTree, ADeeplyNestedDocumentLoads) {
+  // read_json() recursed once per nesting level, and so did destroying the ptree it built. The
+  // reader keeps its containers on the heap.
+  const std::size_t n = depth();
+  std::string objects, arrays;
+  objects.reserve(8 * n + 8);
+  arrays.reserve(2 * n + 8);
+  for (std::size_t i = 0; i < n; ++i) {
+    objects += "{\"k\": ";
+    arrays += '[';
+  }
+  objects += "\"v\"";
+  arrays += "\"w\"";
+  objects.append(n, '}');
+  arrays.append(n, ']');
+  cvc::state &node = root("nested");
+  on_small_stack([&] {
+    node.json(objects);
+    node.json(arrays);
+  });
+  EXPECT_EQ(root("nested.k").value(), "v");
+  EXPECT_EQ(node.value(), "w"); // an array's values have no key: the node itself
 }
 
 TEST_F(StateDeepTree, WriteBench) {
