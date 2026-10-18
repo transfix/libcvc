@@ -71,6 +71,8 @@ The audit (2026-10-17) found 97 public items in the 20 headers. Counted individu
 | | `parse_error` (line, col) | `pycvc.parse_error` | wrapped (PR 1) |
 | | `script_reader` | `pycvc.script_reader` | wrapped (PR 1). `forms()`, `source()` and `options()` return copies |
 | | `parser` (`read`, `parse_expr`) | none | exception: it holds a `string_view` of its input, which Python can't keep alive. `script_reader` owns its source and gives the same slice-by-slice reading |
+| data_job.h (#658) | `data_options`, `data_options_from_state(state&, id, base)` | `pycvc.data_options`, `pycvc.data_options_from_state(State, …)` | wrapped (#658) |
+| | the data jobs (`data_job`, `make_*_job`, `run_data_job`, ...) | | PR 4 |
 | types.h | `symbol` | `pycvc.symbol` | wrapped (PR 1) |
 | | `value_t` | native types, or `pycvc.value` | wrapped (PR 1), see the table above |
 | | `to_string`, `values_equal` | `pycvc.to_string`, `pycvc.values_equal` | wrapped (PR 1) |
@@ -80,11 +82,12 @@ The audit (2026-10-17) found 97 public items in the 20 headers. Counted individu
 | | `time_budget`, `eval_deadline_guard`, `eval_deadline_expired`, `thread_cpu_seconds` | none | exception: thread-local evaluator internals |
 | state_value_codec.h | `encode_value`, `decode_value` | `pycvc.encode_value(State, v)`, `pycvc.decode_value(State)` | wrapped (PR 1) |
 | | `encode_environment`/`decode_environment`, `encode_evaluator_state`/`decode_evaluator_state` | | PR 3, with the environment and evaluator types |
-| scheduler_base.h | `execute_options`, `process_info`, `scheduler_stats` | `pycvc.execute_options`, `pycvc.process_info`, `pycvc.scheduler_stats` | wrapped (PR 2). `on_complete` is a Python callable, `signal_handlers` a dict, the `uint64_t` fields Python ints |
+| scheduler_base.h | `execute_options`, `process_info`, `scheduler_stats` | `pycvc.execute_options`, `pycvc.process_info`, `pycvc.scheduler_stats` | wrapped (PR 2). `on_complete` is a Python callable, `signal_handlers` a dict, the `uint64_t` fields Python ints. `process_info` includes #658's steps and times by kind (`read_steps`, `eval_steps`, `data_steps`, `data_nodes`, `read_time`, `eval_time`, `data_time`) |
+| | `fill_budget_usage` (#658) | none | exception: how the schedulers fill `process_info`, from the evaluator's stats |
 | | `scheduling_policy` | `pycvc.scheduling_policy` | wrapped (PR 2), an `IntEnum` |
 | | `scheduler_base` | none | exception: the abstract interface the intrinsics use; Python has the two concrete classes |
-| scheduler.h | `scheduler` (about 45 members) | `pycvc.scheduler` | wrapped (PR 2). `run`/`step` release the GIL. `execute(str)` is the script overload, so a string can't be passed as a `value_t` expression (write it as the script `"\"text\""`). `id()`, `parser_settings()` return copies. Not wrapped: `mem_tracker()` (see memory_tracker.h), and `current_process()` / `queue_watch_event()`, which take the `process` struct (PR 3) |
-| async_scheduler.h | `async_scheduler` (about 55 members) | `pycvc.async_scheduler` | wrapped (PR 2), with the same notes as `scheduler`; `sync_run`/`sync_step` release the GIL, and `parser_defaults()` returns a copy. Coroutine `step()`/`run()` are an exception: Python gets `sync_step()`/`sync_run()` |
+| scheduler.h | `scheduler` (about 45 members) | `pycvc.scheduler` | wrapped (PR 2). `run`/`step` release the GIL. `execute(str)` is the script overload, so a string can't be passed as a `value_t` expression (write it as the script `"\"text\""`). `id()`, `parser_settings()` and `data_settings()` (#658) return copies. Not wrapped: `mem_tracker()` (see memory_tracker.h), and `current_process()` / `queue_watch_event()`, which take the `process` struct (PR 3) |
+| async_scheduler.h | `async_scheduler` (about 55 members) | `pycvc.async_scheduler` | wrapped (PR 2), with the same notes as `scheduler`; `sync_run`/`sync_step` release the GIL, and `parser_defaults()` returns a copy. #658's `set_data_defaults`/`data_defaults`/`data_settings`/`host_data_defaults` sit beside the parser ones. Coroutine `step()`/`run()` are an exception: Python gets `sync_step()`/`sync_run()` |
 | process.h | `process_status`, `to_string(process_status)`, `parse_process_status` | `pycvc.process_status` (an `IntEnum`), `pycvc.to_string`, `pycvc.parse_process_status` | wrapped (PR 2) |
 | | `process` (about 35 fields), `make_process` | | PR 3, with `evaluator_state`, which a process holds |
 | builtins.h | `builtins::make_default_environment`, `builtins::register_fn` | `pycvc.builtins.make_default_environment()`, `pycvc.builtins.register_fn(env, name, fn)` | wrapped (PR 2). `fn` is a Python callable, or a `pycvc.value` holding a native fn |

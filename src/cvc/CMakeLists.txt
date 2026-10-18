@@ -87,6 +87,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/async_evaluator.h
   ../../inc/cvc/state/state_exec/async_stackless_evaluator.h
   ../../inc/cvc/state/state_exec/state_value_codec.h
+  ../../inc/cvc/state/state_exec/data_job.h
   ../../inc/cvc/state/state_exec/process.h
   ../../inc/cvc/state/state_exec/memory_tracker.h
   ../../inc/cvc/state/state_exec/scheduler_base.h
@@ -209,6 +210,7 @@ set(SOURCE_FILES
   state/state_exec/async_evaluator.cpp
   state/state_exec/async_stackless_evaluator.cpp
   state/state_exec/state_value_codec.cpp
+  state/state_exec/data_job.cpp
   state/state_exec/process.cpp
   state/state_exec/memory_tracker.cpp
   state/state_exec/scheduler.cpp

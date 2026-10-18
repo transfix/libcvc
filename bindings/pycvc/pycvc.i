@@ -1208,6 +1208,12 @@ struct pycvc_py_conversion {
 // PYCVC_DEFAULT_EXCEPTION at its end.
 %include "pycvc_lod.i"
 
+// ── The world's one representation: height_field, world_geometry, city bundles ─
+// The same terrain, buildings and surface table the renderer, the physics world
+// and the navigator read in C++ (WORLD-GEOMETRY-ROADMAP.md, G4b). After geometry
+// (height_field derives from it) and pycvc_nav.i (land cover is cvc::nav's).
+%include "pycvc_world.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -1442,10 +1448,13 @@ class AsyncStateObserver(state_observer):
 // cvc::state&, Python passes a State (State.instance(app) is the root). Only
 // the declarations below are visible to SWIG; the parity doc lists what is
 // wrapped, what comes next, and what is deliberately not wrapped (the
-// coroutine API, the string_view-based parser class, ...).
+// coroutine API, the string_view-based parser class, ...). The deep-data
+// settings (data_options, data_options_from_state, "Deep data on the
+// executor") are wrapped the same way as the parser settings.
 %{
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
@@ -2141,9 +2150,15 @@ struct parse_options {
   size_t max_depth;   // lists and quotes that may nest (default 256)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
 };
+struct data_options {
+  size_t step_nodes; // 0: deep-data work in the step that needs it; N: N nodes per step
+};
 parse_options parse_options_from_state(cvc::state &root,
                                        const std::string &scheduler_id = std::string(),
                                        const parse_options &base = parse_options());
+data_options data_options_from_state(cvc::state &root,
+                                      const std::string &scheduler_id = std::string(),
+                                      const data_options &base = data_options());
 value_t parse(const std::string &input, const parse_options &opts = parse_options());
 std::vector<value_t> parse_all(const std::string &input,
                                const parse_options &opts = parse_options());
@@ -2282,6 +2297,14 @@ struct process_info {
   unsigned long long message_bytes;
   unsigned long long max_message_bytes;
   int parent_pid;
+  // The budget by kind of step (#658): reading the script, evaluating, deep-data work.
+  unsigned long long read_steps;
+  unsigned long long eval_steps;
+  unsigned long long data_steps;
+  unsigned long long data_nodes;
+  double read_time;
+  double eval_time;
+  double data_time;
 };
 %extend process_info {
   %pythoncode %{
@@ -2378,6 +2401,7 @@ public:
   std::string id() const;
   void load_settings();
   parse_options parser_settings() const;
+  data_options data_settings() const;
   static constexpr const char *settings_root = "state_exec";
   static constexpr const char *defaults_prefix = "state_exec.defaults";
   static constexpr const char *sched_prefix = "state_exec.schedulers";
@@ -2405,6 +2429,10 @@ public:
   void set_parser_defaults(const parse_options &defaults);
   parse_options parser_defaults() const;
   static parse_options host_parser_defaults();
+  void set_data_defaults(const data_options &defaults);
+  data_options data_defaults() const;
+  data_options data_settings() const;
+  static data_options host_data_defaults();
 };
 PYCVC_STATE_EXEC_SCHEDULER_EXTEND(async_scheduler)
 }

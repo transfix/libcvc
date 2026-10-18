@@ -28,7 +28,9 @@ def terrain_mesh(
 
     Returns ``(vertices_flat, triangles_flat)``: ``vertices_flat`` is
     ``[x,y,z, ...]`` row-major over the grid (z is the height), and
-    ``triangles_flat`` is ``[i,j,k, ...]`` (two triangles per grid cell).
+    ``triangles_flat`` is ``[i,j,k, ...]`` (two triangles per grid cell, split
+    south-west to north-east: the split ``cvc::height_field`` and the physics
+    engine use, so a surface drawn from this mesh is the one bodies rest on).
     """
     rows = len(heights)
     cols = len(heights[0]) if rows else 0
@@ -49,8 +51,8 @@ def terrain_mesh(
     for r in range(rows - 1):
         for c in range(cols - 1):
             v = r * cols + c
-            tris += [v, v + 1, v + cols]
-            tris += [v + 1, v + cols + 1, v + cols]
+            tris += [v, v + 1, v + cols + 1]
+            tris += [v, v + cols + 1, v + cols]
     return verts, tris
 
 
@@ -156,21 +158,53 @@ class Lab:
         bounds: Bounds2D,
         color: Color | None = None,
     ):
-        """Add a terrain surface from a heightmap over an XY box.
+        """Add a terrain surface from a heightmap over an XY box (``heights[r][c]``,
+        row 0 at ``min_y``), named ``"terrain"``.
 
-        The surface carries planar UVs (u along +x, v along +y) so it can be
-        draped with a raster via :meth:`set_texture` (e.g. a river from a
-        watermask) without a separate overlay mesh z-fighting the ground.
+        It becomes a ``pycvc.height_field`` and is drawn by
+        :meth:`add_height_field`, so the surface is the one the physics world and
+        ``field.height(x, y)`` see. The surface carries planar UVs (u along +x, v
+        along +y) so it can be draped with a raster via :meth:`set_texture` (e.g. a
+        river from a watermask) without a separate overlay mesh z-fighting the
+        ground.
         """
-        verts, tris = terrain_mesh(heights, bounds)
         rows = len(heights)
         cols = len(heights[0]) if rows else 0
+        if rows < 2 or cols < 2:
+            raise ValueError("add_terrain needs a grid of at least 2x2")
+        min_x, min_y, max_x, max_y = bounds
+        field = self._pycvc.height_field(
+            rows,
+            cols,
+            min_x,
+            min_y,
+            (max_x - min_x) / (cols - 1),
+            (max_y - min_y) / (rows - 1),
+            [float(h) for row in heights for h in row],
+        )
+        return self.add_height_field("terrain", field, color=color)
+
+    def add_height_field(self, name: str, field, color: Color | None = None):
+        """Add a ``pycvc.height_field`` (e.g. ``pycvc.load_city_bundle(dir).terrain()``)
+        as a surface: the field's own mesh, each cell split south-west to
+        north-east, the triangles the physics world collides with and
+        ``field.height(x, y)`` samples. Holes (NaN samples) have no triangles.
+
+        The surface carries planar UVs (u along +x, v along +y over the field's
+        extent) for :meth:`set_texture`.
+        """
+        g = field.mesh()
+        min_x, min_y, max_x, max_y = field.bounds2d()
+        su = 1.0 / (max_x - min_x)
+        sv = 1.0 / (max_y - min_y)
         uvs: list[float] = []
-        for r in range(rows):
-            v = r / (rows - 1) if rows > 1 else 0.0
-            for c in range(cols):
-                uvs += [c / (cols - 1) if cols > 1 else 0.0, v]
-        return self.add_mesh("terrain", verts, tris, color=color, uvs=uvs)
+        for x, y, _z in g.vertices():
+            uvs += [(float(x) - min_x) * su, (float(y) - min_y) * sv]
+        g.set_uvs(uvs)
+        self._scene.addGraphics(name, g)
+        if color is not None:
+            self.recolor(name, color)  # single-color material (faithful; see recolor)
+        return self
 
     # -- agents & paths ------------------------------------------------------
 

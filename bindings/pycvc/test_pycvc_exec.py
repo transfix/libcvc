@@ -129,6 +129,63 @@ def test_set_parser_defaults_changes_how_exec_parses():
     assert ex.run("(+ 1 (+ 2 3))") == "6"
 
 
+# ── state_exec deep-data settings (docs/STATE_EXEC_GRAMMAR.md, "Deep data on
+# the executor"), under the C++ names ────────────────────────────────────
+
+
+def test_data_options_is_the_cpp_struct():
+    o = pycvc.data_options()
+    assert o.step_nodes == 0  # C++ default: deep-data work runs whole
+    o.step_nodes = 64
+    assert o.step_nodes == 64
+
+
+def test_exec_starts_from_the_host_data_defaults():
+    # The same defaults as the app's exec scheduler:
+    # async_scheduler::host_data_defaults().
+    host = pycvc.async_scheduler.host_data_defaults()
+    assert host.step_nodes == 1024
+    ex = pycvc.Exec(pycvc.make_app())
+    assert ex.data_defaults().step_nodes == host.step_nodes
+
+
+def test_data_options_from_state_resolves_like_cpp():
+    # The real C++ function: it takes the tree root, a State, as in C++.
+    app = pycvc.make_app()
+    root = pycvc.State.instance(app)
+    assert pycvc.data_options_from_state(root).step_nodes == 0
+    ex = pycvc.Exec(app)
+    assert pycvc.data_options_from_state(root, "", ex.data_defaults()).step_nodes == 1024
+    root.child("state_exec.defaults.data.step_nodes").value("16")
+    root.child("state_exec.schedulers.s1.data.step_nodes").value("8")
+    assert pycvc.data_options_from_state(root).step_nodes == 16
+    assert pycvc.data_options_from_state(root, "s1").step_nodes == 8
+    root.child("state_exec.defaults.data.step_nodes").value("lots")  # bad: skipped
+    assert pycvc.data_options_from_state(root).step_nodes == 0
+    o = pycvc.data_options()
+    o.step_nodes = 0
+    ex.set_data_defaults(o)
+    assert ex.data_defaults().step_nodes == 0
+
+
+def test_deep_data_gives_the_same_results_however_it_is_sliced():
+    # Compare and print values nested 3000 deep: whole in one step, 1024 nodes a step (the host
+    # default) or 4 nodes a step.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    prog = (
+        "(begin (set a 1) (set b 1) (set i 0)"
+        " (while (< i 3000) (begin (set a (list a)) (set b (list b)) (set i (+ i 1))))"
+        " (list (= a b) (length (str a))))"
+    )
+    sliced = ex.run(prog)
+    pycvc.state_set(app, "state_exec.defaults.data.step_nodes", "0")
+    whole = ex.run(prog)
+    pycvc.state_set(app, "state_exec.defaults.data.step_nodes", "4")
+    assert ex.run(prog) == whole == sliced
+    assert whole.startswith("(#t ")
+
+
 # ── DSL <-> state <-> Python round trips (one shared app) ───────────────
 
 

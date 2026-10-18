@@ -389,6 +389,26 @@ def test_scheduler_settings_come_from_the_tree():
     assert pycvc.scheduler.sched_prefix == "state_exec.schedulers"
 
 
+def test_data_settings_and_the_budget_by_kind():
+    # #658's deep-data settings sit beside the parser settings, and process_info splits a
+    # process's steps and time by kind.
+    a = pycvc.async_scheduler()
+    assert a.data_defaults().step_nodes == 0  # a bare async_scheduler does deep data in place
+    assert pycvc.async_scheduler.host_data_defaults().step_nodes == 1024
+    d = pycvc.data_options()
+    d.step_nodes = 7
+    a.set_data_defaults(d)
+    assert a.data_defaults().step_nodes == 7
+    assert a.data_settings().step_nodes == 7  # no watch root: the defaults
+    assert pycvc.scheduler().data_settings().step_nodes == 0
+    for sched, run, _ in _schedulers():
+        pid = sched.execute("(+ 1 2)")
+        run()
+        info = sched.get_process_info(pid)
+        assert info.eval_steps > 0 and info.read_steps == 0 and info.data_steps == 0
+        assert info.eval_time >= 0.0 and info.data_nodes == 0
+
+
 # ── async_scheduler's own calls ─────────────────────────────────────────
 
 
