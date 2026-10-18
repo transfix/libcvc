@@ -9,11 +9,11 @@
 */
 
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
-#include <cvc/ariadne/room_intrinsics.h>
-#include <cvc/core/app.h>                    // app.root()
-#include <cvc/state/state.h>                 // cvc::state, SEPARATOR, findDescendant, expireAt
-#include <cvc/state/state_cluster_shard.h>   // default_for / local_node_id (the trust-all pid)
-#include <cvc/state/state_exec/builtins.h>   // register_fn
+#include <cvc/ariadne/conference/room_intrinsics.h>
+#include <cvc/core/app.h>                  // app.root()
+#include <cvc/state/state.h>               // cvc::state, SEPARATOR, findDescendant, children, value
+#include <cvc/state/state_cluster_shard.h> // default_for / local_node_id (the trust-all pid)
+#include <cvc/state/state_exec/builtins.h> // register_fn
 #include <cvc/state/state_exec/intrinsics.h> // intrinsics_context, document_scope
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict, make_list
 #include <initializer_list>
@@ -29,6 +29,7 @@ namespace se = cvc::state_exec;
 
 namespace cvc {
 namespace ariadne {
+namespace conference {
 
 namespace {
 
@@ -281,5 +282,6 @@ void register_room_intrinsics(cvc::app &app) {
   });
 }
 
+} // namespace conference
 } // namespace ariadne
 } // namespace cvc
