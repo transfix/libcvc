@@ -562,7 +562,18 @@ register_intrinsics(env, &ictx);
 ;; Store/retrieve binary data objects
 (state-data-set "myapp.blob" some-value)
 (state-data-get "myapp.blob")
+
+;; A subtree's values as JSON, and back: the document cvc::state::json() writes, keyed by paths
+;; relative to the node ("" for the node itself). Both run as sliced data steps.
+(state-json "myapp.config")   ;; => "{\n    \"timeout\": \"30\"\n}\n"
+(state-from-json "myapp.copy" (state-json "myapp.config"))
 ```
+
+`state-json` returns nil for a missing node and reads through a transparent link, as
+`state-get` does. `state-from-json` writes through a writable transparent link, as `state-set`
+does. It sets every non-empty string, number, `true`, `false` and `null` at its key, and returns
+nil. It checks the whole document before it sets anything, so a malformed document changes
+nothing. Its errors name the line, as in `state-from-json: line 3: expected ':'`.
 
 ### State Expiry
 
@@ -1447,8 +1458,16 @@ process with it as the exit error; the sync scheduler's `run()` throws it:
 
 These functions do their work as a data job (`data_job.h`; "Deep data on the executor" in
 `docs/STATE_EXEC_GRAMMAR.md`): `string.split`, `string.join`, `string.replace`,
-`string.encode`, `bytes.slice`, `bytes.concat`, `bytes.decode` and every `collections.*`
-function.
+`string.encode`, `bytes.slice`, `bytes.concat`, `bytes.decode`, every `collections.*`
+function, and the intrinsics `state-json` and `state-from-json`.
+
+`state-json` and `state-from-json` run `cvc::state`'s own writer and reader
+(`cvc/state/state_json.h`), the code behind `json()`, `json(j)`, `save()` and `restore()`, so
+they produce and accept the same documents. The writer's unit is a node visited. The reader's
+is a value scanned, and it scans each value twice: once to check the document, once to set it.
+Both also count one unit per 256 bytes. The writer holds the nodes it has yet to visit, so a
+node another process removes between slices is still written, as it was when its parent was
+read. The document is held to the allocation limit as it grows.
 
 - **Slices.** A slice is `data.step_nodes` nodes: one per element visited, and one per 256
   bytes (`kDataNodeBytes`) scanned or copied. With `data.step_nodes` = N the call does one

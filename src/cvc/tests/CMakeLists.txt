@@ -100,6 +100,7 @@ add_executable(world_clock_test world_clock_test.cpp)
 add_executable(world_units_test world_units_test.cpp)
 add_executable(physics_world_test physics_world_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
+add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
@@ -246,6 +247,7 @@ set(TEST_TARGETS
   world_units_test
   physics_world_test
   physics_field_test
+  physics_vehicle_test
   physics_pose_tracker_test
   geometry_height_field_test
   world_geometry_test
@@ -1470,6 +1472,13 @@ target_link_libraries(physics_world_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_vehicle_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_field_test
   PRIVATE
     cvc
@@ -1730,6 +1739,7 @@ target_compile_features(world_clock_test PRIVATE cxx_std_17)
 target_compile_features(world_units_test PRIVATE cxx_std_17)
 target_compile_features(physics_world_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
+target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
@@ -2158,6 +2168,7 @@ cvc_discover_tests(world_clock_test)
 cvc_discover_tests(world_units_test)
 cvc_discover_tests(physics_world_test)
 cvc_discover_tests(physics_field_test)
+cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)

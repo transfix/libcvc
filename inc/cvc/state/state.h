@@ -485,6 +485,12 @@ public:
   void ptree(const boost::property_tree::ptree &);
 
   // returns a json version of the property map
+  //
+  // The document is written and read by state_json_writer / state_json_reader
+  // (cvc/state/state_json.h), whose walks state_exec's state-json and state-from-json run a
+  // slice per scheduler step. The text is what write_json(ptree()) writes, and the reader keeps
+  // read_json()'s grammar, but its container stack is on the heap, so a deeply nested document
+  // costs no native stack. A malformed document sets nothing.
   std::string json();
 
   // sets this property tree based on a json
@@ -859,6 +865,8 @@ protected:
   static state_ptr instancePtr(app &ctx);
 
 private:
+  friend class state_subtree_cursor; // snapshots a node's value and children under its lock
+
   state(const state &);
 };
 

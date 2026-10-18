@@ -192,9 +192,10 @@ bounding box and trilinear sampling. G6 makes the same volumes physics media
   - **Sleep.** Sleeping bodies are skipped; `add_field` and `set_field` wake the bodies in the box.
 - **Values are read at add/set**, into the field's own sampler. A gust or a rising river is a
   `set_field` with new volumes between steps.
-- **Next.** The vehicle (P2) reads the medium under each wheel (sinkage, rolling resistance) and
-  the flow around the body, and the energy ledger (P3) books the work each field does. A medium that
-  keeps ruts needs mutable medium state, which is later work.
+- **The vehicle (P2, done)** reads the medium under each wheel (its sinkage, the compacted
+  surface it rides on, the compaction resistance and the traction) and the flow around the
+  chassis (`vehicle.h`). Next, the energy ledger (P3) books the work each field does. A medium
+  that keeps ruts needs mutable medium state, which is later work.
 
 ## Phases
 
@@ -206,7 +207,7 @@ bounding box and trilinear sampling. G6 makes the same volumes physics media
 | **G3b** | The city demos (`nav_city_swarm`, `nav_city_drive`) draw and collide with `load_city_bundle`'s `world_geometry` | The buildings stand on the ground on screen; no demo flips rows or lifts buildings |
 | **G4a** | `nav::rasterize` (occupancy, height, surface, rho, hard and mu planes from `world_geometry`) and `nav::mesh_footprint` (the demos' `occupancy_from_model`, moved into the library unchanged); land cover as surfaces (`nav::land_cover_provider` over `segment_scene_material`); `nav::palette_ids` for physics materials' `nav_material`; `world::read_terrain_extent`, so `material_raster` and `nav_finale` drop their own `terrain.json` parsers; `navdemo::Terrain` becomes a view of the shared `height_field`; `gl::add_world_geometry(parent)` | The footprint is the old occupancy bit for bit (`NavWorldPlanes.FootprintIsTheOldOccupancyBitForBit`); land cover reaches the Austin terrain's cells |
 | **G4b** | pycvc: `load_city_bundle`, `height_field` and `world_geometry` (`bindings/pycvc/pycvc_world.i`), so `pymod_gl/scenes.py`'s `terrain_grid` retires. Its sampler becomes `height_field.height` (the old one was bilinear), `Lab.add_height_field` draws the field's own mesh, and `Lab.add_terrain` and `terrain_mesh` split cells south-west to north-east (they split the other way, against physics) | Python reads the same terrain as C++: a bundle's north-first grid comes back row 0 at min y, `height(x, y)` is the triangle under the point, and on a real bundle the Python heights equal `terrain.json`'s flipped grid sample for sample (`test_pycvc_world_geometry`, `test_pycvc_gl_world_geometry`) |
-| **G5** | Ariadne `physics:` and `body:` specs; Ariadne height fields are `cvc::height_field` (and `TerrainHeights` reads them instead of guessing a grid from a vertex count) | A scene spec puts a crate on a height field and it lands where the renderer draws the ground |
+| **G5** | Ariadne `physics:` and `body:` specs (`docs/ARIADNE.md` §5.4): a `cvc::physics::world` in the `RealizedScene`, bodies at their nodes' realized world poses, stepped on the scene clock by `tick_scene` and drawn through `physics_scene_binding`; `box` and `sphere` primitives. Ariadne height fields are `cvc::height_field` (`RealizedScene::height_fields`), and `TerrainHeights` samples them (the triangle under the point) instead of guessing a grid from a vertex count and taking the nearest vertex | A scene spec puts a crate on a height field and it lands where the renderer draws the ground: measured on the drawn node's own triangles, the resting crate's centre sits 0.5 / cos(tilt) above them within 1.5 cm, its node drawn at its body's pose, and a ball nested under a group rests on the dome's peak (`cvcgl_ariadne_physics`) |
 | **G6** | Fields: `cvc::volume`s as physics media (above); `world_geometry` volumes drawn as `VolumeNode`s and pushed as fields | Slabs of 300, 500 and 800 kg/m³ settle at drafts of 0.3, 0.5 and 0.8 of their height within 2 mm (measured 0.1199 and 0.3202 m against 0.12 and 0.32); a 10 kg box sinks into k = 2·10⁴ N/m³ to m g/(k A) within 1 mm; a ball in a 10 m/s wind without gravity follows v = w − 1/(1/w + k t) within 1 %; a field added over a sleeping body wakes it; the same run twice gives the same hash (`physics_field_test`) |
 
 P6a's pose binding (`pose_tracker`, `physics_scene_binding`) moves dynamic bodies. This plan covers

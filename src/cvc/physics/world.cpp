@@ -10,6 +10,7 @@
 
 #include "backend_impl.h"
 #include "field_step.h"
+#include "vehicle_step.h"
 
 #include <algorithm>
 #include <chrono>
@@ -148,6 +149,7 @@ std::uint64_t fnv1a(const void *data, size_t n, std::uint64_t h = 14695981039346
 // save() layout: a fixed header, then the engine's bytes.
 constexpr char kMagic[8] = {'C', 'V', 'C', 'P', 'H', 'Y', 'S', '1'};
 constexpr std::uint32_t kFormat = 1;
+constexpr char kVehicleMagic[8] = {'C', 'V', 'C', 'V', 'E', 'H', 'S', '1'};
 
 struct state_header {
   char magic[8];
@@ -179,6 +181,7 @@ struct world::impl {
   step_report last;
   std::optional<cvc::clock_follower> follower;
   detail::field_set fields;
+  detail::vehicle_set vehicles;
 
   material_id add_material(const material &m) {
     validate(m);
@@ -196,7 +199,9 @@ struct world::impl {
     const auto t0 = std::chrono::steady_clock::now();
     guarded([&] {
       fields.apply(*be, cfg);
+      vehicles.pre_step(*be, fields, cfg, materials);
       be->step(contacts, r);
+      vehicles.post_step(*be, cfg);
     });
     const auto t1 = std::chrono::steady_clock::now();
     std::sort(contacts.begin(), contacts.end(), [](const contact_event &a, const contact_event &b) {
@@ -233,10 +238,19 @@ struct world::impl {
     h.bodies = be->body_count();
     h.materials = materials.size();
     h.engine_bytes = engine.size();
-    std::vector<std::uint8_t> out(sizeof(h) + engine.size());
+    // The facade's vehicle state (actuators, driver memory, the last wheels) follows the
+    // engine's bytes, only when there are vehicles, so a world without them saves as before.
+    std::string trailer;
+    if (vehicles.size() > 0) {
+      trailer.assign(kVehicleMagic, sizeof(kVehicleMagic));
+      vehicles.save(trailer);
+    }
+    std::vector<std::uint8_t> out(sizeof(h) + engine.size() + trailer.size());
     std::memcpy(out.data(), &h, sizeof(h));
     if (!engine.empty())
       std::memcpy(out.data() + sizeof(h), engine.data(), engine.size());
+    if (!trailer.empty())
+      std::memcpy(out.data() + sizeof(h) + engine.size(), trailer.data(), trailer.size());
     return out;
   }
 };
@@ -270,6 +284,11 @@ world::world(const world_config &cfg) : _impl(std::make_unique<impl>()) {
                                      " backend in this build cannot use worker threads "
                                      "(world_config::threads must be 0)");
   _impl->add_material(material{"default"});
+  // The media vehicles' wheels sink into: the fields' own sampler, read-only during a step.
+  _impl->be->set_medium_probe(
+      [fields = &_impl->fields](const vec3 &p, const vec3 &, detail::wheel_medium &out) {
+        return fields->medium_under(p, out);
+      });
 }
 
 world::~world() = default;
@@ -501,6 +520,9 @@ body_id world::add_body(const body_desc &d) {
 
 void world::remove_body(body_id id) {
   std::lock_guard<std::mutex> lock(_impl->mutex);
+  if (_impl->vehicles.is_chassis(id))
+    throw cvc::physics_error("remove_body: body " + std::to_string(id.value) +
+                             " is a vehicle's chassis; remove the vehicle");
   guarded([&] { _impl->be->remove_body(id); });
   _impl->fields.body_removed(id);
 }
@@ -585,6 +607,39 @@ std::size_t world::field_count() const {
   return _impl->fields.size();
 }
 
+vehicle_id world::add_vehicle(const vehicle_desc &d, const vec3 &position, const quat &rotation) {
+  if (!finite(position) || !finite(rotation) || !unit_length(rotation))
+    throw cvc::physics_error("add_vehicle: a finite position and a unit rotation are required");
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded(
+      [&] { return _impl->vehicles.add(*_impl->be, _impl->fields, d, position, rotation); });
+}
+
+void world::remove_vehicle(vehicle_id id) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  guarded([&] { _impl->vehicles.remove(*_impl->be, _impl->fields, id); });
+}
+
+std::size_t world::vehicle_count() const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->vehicles.size();
+}
+
+void world::drive(vehicle_id id, const drive_command &c) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  _impl->vehicles.drive(id, c);
+}
+
+void world::set_controls(vehicle_id id, const vehicle_controls &c) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  _impl->vehicles.set_controls(id, c);
+}
+
+physics::vehicle_state world::vehicle_state(vehicle_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->vehicles.state(*_impl->be, id); });
+}
+
 field_load world::field_load_on(body_id id) const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   return _impl->fields.load(id);
@@ -650,7 +705,7 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   std::memcpy(&h, state.data(), sizeof(h));
   if (std::memcmp(h.magic, kMagic, sizeof(kMagic)) != 0 || h.format != kFormat)
     throw cvc::physics_error("restore: not a cvc::physics state, or an unknown format");
-  if (h.engine_bytes != state.size() - sizeof(h))
+  if (h.engine_bytes > state.size() - sizeof(h))
     throw cvc::physics_error("restore: the state's length does not match its header");
   std::lock_guard<std::mutex> lock(_impl->mutex);
   if (h.backend != static_cast<std::uint32_t>(_impl->cfg.backend))
@@ -661,7 +716,23 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   const std::string engine(reinterpret_cast<const char *>(state.data()) + sizeof(h),
                            static_cast<size_t>(h.engine_bytes));
   const vec3 origin{h.origin[0], h.origin[1], h.origin[2]};
+  // After the engine's bytes: the vehicles' trailer, exactly when the world has vehicles.
+  const std::string rest(reinterpret_cast<const char *>(state.data()) + sizeof(h) +
+                             static_cast<size_t>(h.engine_bytes),
+                         state.size() - sizeof(h) - static_cast<size_t>(h.engine_bytes));
+  if (_impl->vehicles.size() == 0
+          ? !rest.empty()
+          : rest.size() < sizeof(kVehicleMagic) ||
+                std::memcmp(rest.data(), kVehicleMagic, sizeof(kVehicleMagic)) != 0)
+    throw cvc::physics_error("restore: this world does not hold the vehicles the state was "
+                             "saved with");
   guarded([&] { _impl->be->restore_engine(engine, origin); });
+  if (!rest.empty()) {
+    std::size_t pos = sizeof(kVehicleMagic);
+    _impl->vehicles.restore(rest, pos);
+    if (pos != rest.size())
+      throw cvc::physics_error("restore: the vehicle state's length does not match");
+  }
   _impl->cfg.origin = origin;
   _impl->tick = h.tick;
   _impl->contacts.clear();

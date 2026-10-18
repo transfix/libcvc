@@ -421,9 +421,10 @@ public:
         "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
         // bounded compound construction (by-reference; not the doubling materializers) + access
         "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
-        // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables)
-        "state-get", "state-exists", "state-children", "state-data-get", "state-root-path",
-        "state-has-expiry", "state-is-expired",
+        // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables;
+        // state-json writes its document as sliced data steps, under the allocation limit)
+        "state-get", "state-exists", "state-children", "state-data-get", "state-json",
+        "state-root-path", "state-has-expiry", "state-is-expired",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function

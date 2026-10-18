@@ -327,6 +327,58 @@ in `customs:` (`- node: mesh_lab` with `required: true`), and a host that checks
 (`verify_scene_customs`, as `ariadne_hello` does) refuses it up front on a build that
 lacks the type.
 
+**Primitives.** Besides `source: { plane: { size } }` and `source: { heightfield: {...} }`,
+a geometry node can draw `source: { box: { size: [x, y, z] } }` (or `{ box: <edge> }`), a
+box centred on the origin, and `source: { sphere: { radius } }` (or `{ sphere: <radius> }`).
+A heightfield is the world's own `cvc::height_field`: the node draws its mesh (each cell split
+south-west to north-east), a body on it collides with the same triangles, and a custom node
+standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
+each point.
+
+**Physics.** A scene-level `physics:` block declares a rigid-body world
+(`cvc::physics::world`), and a geometry node's `body:` gives it a body there:
+
+```yaml
+scene:
+  physics:                      # all optional; physics: {} takes the defaults
+    gravity: [0, 0, -9.80665]
+    fixed_dt: 0.0083333         # a whole number of the clock's quanta (1/120 s); 0 = one quantum
+    backend: auto               # auto (Jolt when built) | jolt | null (bodies placed, never moved)
+    materials: { ice: { friction: 0.05, restitution: 0.0 } }
+  nodes:
+    - node: terrain
+      source: { heightfield: { size: 20, resolution: 41, layers: [{ kind: dome, amplitude: 1, radius: 6 }] } }
+      body: static              # the motion alone; a heightfield is always static
+    - node: crate
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [2, -1.5, 4] }
+      body:
+        motion: dynamic         # dynamic (default) | kinematic | static
+        shape: auto             # auto | box | sphere | hull | mesh | terrain
+        mass: 10                # kg; 0 = density (default 1000 kg/m^3) x volume
+        material: ice
+        velocity: [0, 0, 0]     # world m/s at the start; angular_velocity in rad/s
+        linear_damping: 0.05    # and angular_damping
+```
+
+- **Shapes.** `shape: auto` collides with what the node draws:
+  - a heightfield as terrain;
+  - a box or sphere primitive as itself;
+  - a plane as a thin slab under it;
+  - any other mesh as its convex hull (moving), or itself (static).
+
+  `box` and `sphere` on another mesh fit its bounds, and the node's scale is baked into the shape.
+- **Placement.** Each body starts at its node's realized world pose (a nested node's included).
+- **Stepping.** `tick_scene` drives `app.world_clock()` as `clock: {}` would, then steps the world
+  by the quanta due. It draws each moving body's node at the body's pose, between the last two
+  steps, wherever the node sits in the hierarchy.
+- **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
+  Draw a ground you collide with unrotated and unscaled.
+- **Reading physics.** `RealizedScene::physics` is the world, `RealizedScene::body(id)` a node's
+  body, and `RealizedScene::height_fields` the heightfield nodes' fields.
+- **Problems** (an unknown material, a body on a group, a fixed_dt between quanta) warn and never
+  throw.
+
 **Volume from a mesh.** `source: { sdf: { mesh: <uri>, dim: N, algorithm: v1 | v2 | igl } }`
 computes an N³ signed distance field (negative inside) framed to the mesh, after the
 node's `fit:`. `algorithm` picks the `cvc::sdf` implementation: `v2` (the default), `v1`,

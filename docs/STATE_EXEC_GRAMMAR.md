@@ -226,8 +226,8 @@ then `state_exec.defaults.data.step_nodes`, then the scheduler's built-in defaul
 A node is an element visited: a list element or a dict entry walked, or an element freed. With
 `step_nodes` = N:
 
-- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print` and `state-data-get` hand their walk
-  to the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
+- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `state-data-get`, `state-json` and
+  `state-from-json` hand their walk to the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
   done, the call's frame waits and the following steps are **data steps** that each run N more
   nodes. The step that finishes it completes the call. A walk under N nodes finishes in the
   call's own step, so ordinary programs take no extra steps.
