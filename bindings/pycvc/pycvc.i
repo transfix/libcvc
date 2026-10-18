@@ -3460,6 +3460,11 @@ public:
   size_t nodes() const;
 };
 const size_t kDataNodeBytes = 256;
+// The native-call nesting limits (#682): a level is refused past kMaxNativeNesting, or when less
+// than kNativeStackReserve bytes of the thread's stack are left (128 KiB on Windows, 32 KiB
+// elsewhere). detail::native_nesting, the RAII level, isn't wrapped.
+const size_t kMaxNativeNesting = 256;
+const size_t kNativeStackReserve = 131072;
 bool is_compound(const value_t &v);
 std::unique_ptr<data_job> make_equal_job(value_t a, value_t b);
 std::unique_ptr<data_job> make_print_job(value_t v);
@@ -3533,15 +3538,37 @@ cvc::state_exec::value_t run_data_job_then(std::unique_ptr<cvc::state_exec::data
 
 cvc::state_exec::value_t call_function_kept(const cvc::state_exec::value_t &fn,
                                             const std::vector<cvc::state_exec::value_t> &args,
-                                            const std::string &who) {
-  return cvc::state_exec::call_function(fn, std::span<const cvc::state_exec::value_t>(args),
-                                        stable_who(who));
+                                            const std::string &who, PyObject *then = nullptr) {
+  const std::span<const cvc::state_exec::value_t> argv(args);
+  if (then == nullptr || then == Py_None)
+    return cvc::state_exec::call_function(fn, argv, stable_who(who));
+  // The overload with a continuation (#683): `then` runs on the call's value once the function
+  // has finished, however the evaluator ran it.
+  cvc::state_exec::native_fn after = python_native_fn("pycvc.call_function", "then", then);
+  return cvc::state_exec::call_function(
+      fn, argv, stable_who(who), [after](cvc::state_exec::value_t v) {
+        return after(std::span<const cvc::state_exec::value_t>(&v, 1));
+      });
+}
+
+// make_generator_job takes the generator as a pycvc.value (C++ takes its generator_ptr).
+std::unique_ptr<cvc::state_exec::data_job> make_generator_job_from(const cvc::state_exec::value_t &gen,
+                                                                   bool collect = false) {
+  const auto *g = std::get_if<cvc::state_exec::generator_ptr>(&gen.v);
+  if (g == nullptr || !*g)
+    throw std::invalid_argument("pycvc.make_generator_job: not a generator");
+  return cvc::state_exec::make_generator_job(*g, collect);
 }
 } // namespace pycvc
 %}
 %rename(make_concat_job) pycvc::make_concat_job_kept;
 %rename(run_data_job) pycvc::run_data_job_then;
 %rename(call_function) pycvc::call_function_kept;
+%rename(make_generator_job) pycvc::make_generator_job_from;
+// One wrapper each, defaults filled in, rather than an overload per default (a value list has no
+// overload typecheck).
+%feature("compactdefaultargs") pycvc::call_function_kept;
+%feature("compactdefaultargs") pycvc::make_generator_job_from;
 namespace pycvc {
 std::unique_ptr<cvc::state_exec::data_job>
 make_concat_job_kept(const std::vector<cvc::state_exec::value_t> &parts, const std::string &sep,
@@ -3550,7 +3577,9 @@ cvc::state_exec::value_t run_data_job_then(std::unique_ptr<cvc::state_exec::data
                                            PyObject *then = nullptr);
 cvc::state_exec::value_t call_function_kept(const cvc::state_exec::value_t &fn,
                                             const std::vector<cvc::state_exec::value_t> &args,
-                                            const std::string &who);
+                                            const std::string &who, PyObject *then = nullptr);
+std::unique_ptr<cvc::state_exec::data_job> make_generator_job_from(const cvc::state_exec::value_t &gen,
+                                                                   bool collect = false);
 }
 
 // register_intrinsics(env, ctx): the C++ call, except that every function it adds keeps ctx (and

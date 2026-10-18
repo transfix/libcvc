@@ -78,6 +78,34 @@ def test_a_python_function_calls_dsl_functions():
     assert "py-outside" in str(e)
 
 
+def test_call_function_with_a_continuation():
+    # The #683 overload: `then` gets the call's value once the function has run, however the
+    # evaluator ran it (a lambda runs as frames, so `then` comes after them).
+    def apply_then(fn, arg):
+        return pycvc.call_function(fn, [arg], "py-then", lambda v: v + 1)
+
+    env = _builtins()
+    pycvc.builtins.register_fn(env, "apply-then", apply_then)
+    s = pycvc.scheduler()
+    o = pycvc.execute_options()
+    o.env = env
+    pid = s.execute("(apply-then (lambda (x) (* x 2)) 20)", o)
+    assert s.run()[pid] == 41
+
+
+def test_generator_jobs_and_nesting_limits():
+    ev = pycvc.stackless_evaluator(_builtins())
+    gen = ev.evaluate_script(
+        "(generator (lambda () (begin (yield 1) (yield 2) (yield 3))))")
+    assert isinstance(gen, pycvc.value) and gen.type_name() == "generator"
+    assert pycvc.run_to_completion(pycvc.make_generator_job(gen)) == [1]  # the next value
+    assert pycvc.run_to_completion(pycvc.make_generator_job(gen, True)) == [2, 3]  # the rest
+    assert pycvc.run_to_completion(pycvc.make_generator_job(gen)) == []  # exhausted
+    _raises(RuntimeError, pycvc.make_generator_job, 5)
+    assert pycvc.kMaxNativeNesting == 256
+    assert pycvc.kNativeStackReserve in (128 << 10, 32 << 10)  # Windows, elsewhere
+
+
 # ── the heap ────────────────────────────────────────────────────────────
 
 
