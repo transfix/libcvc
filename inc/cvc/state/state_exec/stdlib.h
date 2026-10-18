@@ -2,9 +2,11 @@
  * @file stdlib.h
  * @brief Standard library modules for the state_exec DSL.
  *
- * Provides loadable modules (string, math, collections) containing
- * native utility functions.  Modules are registered via stdlib_registry
- * and imported into a DSL program's environment with (import "module").
+ * Provides modules (string, bytes, math, collections) of native utility functions, named
+ * with their module prefix (string.length, math.sqrt, ...). Every environment from
+ * builtins::make_default_environment() reaches all of them through one shared, frozen scope
+ * (stdlib_registry::shared_scope()), so a DSL program calls (string.length "café") without
+ * importing anything.
  */
 #ifndef CVC_STATE_EXEC_STDLIB_H
 #define CVC_STATE_EXEC_STDLIB_H
@@ -19,13 +21,21 @@ namespace cvc::state_exec {
 
 /// Registry for standard library modules.
 ///
-/// Modules are collections of named native functions that can be imported
-/// into a DSL environment via (require "module").  Built-in modules
-/// (string, math, collections) are registered at construction; downstream
-/// code can add custom modules via register_function().
+/// Modules are collections of named native functions. Built-in modules (string, bytes, math,
+/// collections) are registered at construction; downstream code can build its own registry
+/// and add modules via register_function(), then import_module() them into an environment.
 class stdlib_registry {
 public:
   stdlib_registry();
+
+  /// The built-in modules, built once on first use and shared read-only by every caller.
+  static const stdlib_registry &standard();
+
+  /// A frozen scope holding every function of standard(), built once on first use.
+  /// builtins::make_default_environment() links it as its outer scope, so the functions are
+  /// shared, never copied. A program's (set string.length ...) shadows the name in its own
+  /// scope; nothing writes the shared scope, so threads may read it concurrently.
+  static environment_ptr shared_scope();
 
   /// Register a native function into a module.
   void register_function(const std::string &module, const std::string &func_name, native_fn fn);

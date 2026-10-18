@@ -90,7 +90,8 @@ jobs:
         # and pulls no Emscripten SDL port (no -sUSE_SDL), so it does not clash with anything here.
         run: |
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk; do
+          # pegtl: cvc's build-only state_exec grammar engine (header-only).
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk pegtl; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \

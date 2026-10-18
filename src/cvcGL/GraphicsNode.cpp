@@ -179,6 +179,60 @@ void GraphicsNode::setPoseMatrix(const double matrix[16]) {
   {
     std::lock_guard<std::mutex> lock(m_poseMutex);
     std::copy(matrix, matrix + 16, m_parkedPose.begin());
+    m_parkedIsWorld = false;
+    m_parkedHasFrame = false;
+    m_parkedFrame.reset();
+    queueApply = !m_posePending.exchange(true, std::memory_order_acq_rel);
+  }
+  if (queueApply)
+    runOnMainThread([this]() { applyParkedPose(); }); // weak-guarded against node teardown
+}
+
+bool GraphicsNode::localFromWorldPose(const double pose[16],
+                                      const std::weak_ptr<const GraphicsNode> &frame, bool hasFrame,
+                                      double local[16]) const {
+  double world[16];
+  if (hasFrame) {
+    const std::shared_ptr<const GraphicsNode> f = frame.lock();
+    if (!f)
+      return false; // the frame is gone: there is no world to put the node in
+    vtkMatrix4x4::Multiply4x4(f->m_worldMatrix->GetData(), pose, world);
+  } else {
+    std::copy(pose, pose + 16, world);
+  }
+  if (!m_parent) {
+    std::copy(world, world + 16, local);
+    return true;
+  }
+  double inv[16];
+  vtkMatrix4x4::Invert(m_parent->m_worldMatrix->GetData(), inv);
+  vtkMatrix4x4::Multiply4x4(inv, world, local);
+  return true;
+}
+
+void GraphicsNode::setWorldPoseMatrix(const double pose[16],
+                                      const std::shared_ptr<const GraphicsNode> &frame) {
+  // Parked weakly, so a frame destroyed before the apply drops the pose rather
+  // than keeping the frame alive; hasFrame tells "no frame" from "frame gone".
+  const bool hasFrame = static_cast<bool>(frame);
+  SceneGraph *sg = getSceneGraph();
+  if (!sg || sg->onOwnerThread()) {
+    if (m_posePending.load(std::memory_order_acquire)) {
+      std::lock_guard<std::mutex> lock(m_poseMutex);
+      m_posePending.store(false, std::memory_order_relaxed);
+    }
+    double local[16];
+    if (localFromWorldPose(pose, frame, hasFrame, local))
+      applyPoseMatrix(local);
+    return;
+  }
+  bool queueApply = false;
+  {
+    std::lock_guard<std::mutex> lock(m_poseMutex);
+    std::copy(pose, pose + 16, m_parkedPose.begin());
+    m_parkedIsWorld = true;
+    m_parkedHasFrame = hasFrame;
+    m_parkedFrame = frame;
     queueApply = !m_posePending.exchange(true, std::memory_order_acq_rel);
   }
   if (queueApply)
@@ -187,14 +241,28 @@ void GraphicsNode::setPoseMatrix(const double matrix[16]) {
 
 void GraphicsNode::applyParkedPose() {
   double m[16];
+  bool world = false, hasFrame = false;
+  std::weak_ptr<const GraphicsNode> frame;
   {
     std::lock_guard<std::mutex> lock(m_poseMutex);
     if (!m_posePending.load(std::memory_order_relaxed))
       return; // an owner-thread call superseded it
     std::copy(m_parkedPose.begin(), m_parkedPose.end(), m);
+    world = m_parkedIsWorld;
+    hasFrame = m_parkedHasFrame;
+    frame = m_parkedFrame;
+    m_parkedFrame.reset();
     m_posePending.store(false, std::memory_order_relaxed);
   }
-  applyPoseMatrix(m);
+  if (!world) {
+    applyPoseMatrix(m);
+    return;
+  }
+  // A world pose is composed here, on the owner thread, against the hierarchy
+  // as it is now.
+  double local[16];
+  if (localFromWorldPose(m, frame, hasFrame, local))
+    applyPoseMatrix(local);
 }
 
 void GraphicsNode::applyPoseMatrix(const double matrix[16]) {

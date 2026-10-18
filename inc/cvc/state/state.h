@@ -232,20 +232,13 @@ public:
   const std::string &name() const { return _name; }
   const state *parent() const { return _parent; }
 
-  // return's the parent's fullName
-  std::string parentName() const {
-    std::string tmp;
-    return parent() ? (!parent()->name().empty() ? ((tmp = parent()->parentName()).empty()
-                                                        ? parent()->name()
-                                                        : tmp + SEPARATOR + parent()->name())
-                                                 : "")
-                    : "";
-  }
+  // The parent's full name: the names of the ancestors from just below the first one with an
+  // empty name (normally the root) down to the parent, joined with SEPARATOR; "" when there are
+  // none. Built in one pass over the _parent chain, not once per level.
+  std::string parentName() const;
 
-  std::string fullName() const {
-    std::string pn = parentName();
-    return pn.empty() ? name() : pn + SEPARATOR + name();
-  }
+  // This node's path from the root: parentName(), then its own name.
+  std::string fullName() const;
 
   boost::posix_time::ptime lastMod();
 
@@ -275,9 +268,6 @@ public:
   template <class T> state &value(const T &v) {
     std::string str_value = boost::lexical_cast<std::string>(v);
 
-    // Check if read-only before acquiring lock
-    std::string full_name = fullName();
-
     // Phase 8: writes through a writable transparent link route to the
     // resolved target, mirroring the string overload
     // (state::value(const std::string&, bool) in state.cpp). Routing to the
@@ -305,7 +295,7 @@ public:
           return *this;
         }
         throw read_only_error(boost::str(
-            boost::format("Cannot write through unresolvable transparent link: %1%") % full_name));
+            boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
       }
     }
 
@@ -315,7 +305,7 @@ public:
       // Check if this state is read-only
       if (_readOnly) {
         throw read_only_error(
-            boost::str(boost::format("Cannot modify read-only state: %1%") % full_name));
+            boost::str(boost::format("Cannot modify read-only state: %1%") % fullName()));
       }
 
       if (_value == str_value)
@@ -331,7 +321,7 @@ public:
 
     valueChanged();
     if (parent())
-      parent()->childChanged(name());
+      parent()->emitChildChanged(name());
     return *this;
   }
 
@@ -422,9 +412,23 @@ public:
   signal dataChanged;
 
   state &operator()(const std::string &childname = std::string());
+  // The full names of every node under this one (its descendants, in pre-order: each child, then
+  // its own descendants, children in name order), those matching `re` when it is not empty.
   std::vector<std::string> children(const std::string &re = std::string());
   size_t numChildren();
+
+  // Fired on a node when something under it changes, with that thing's path relative to the
+  // node. A change signals the changed node's parent and every ancestor above it, the root's
+  // slots first (emitChildChanged()). Emitting childChanged directly fires only that node's
+  // slots.
   map_change_signal childChanged;
+
+  // Fire childChanged for `childname` (a path relative to this node) on this node and on each
+  // ancestor, with the path relative to that ancestor: the root's slots first, this node's last.
+  // That is the order the old relay (each node's first childChanged slot re-firing its parent's)
+  // produced, but this is a loop, so a deep tree costs no stack per level, and a path is built
+  // only for a node that has slots.
+  void emitChildChanged(const std::string &childname) const;
   operator std::string() { return value(); }
 
   signal destroyed;
@@ -450,10 +454,13 @@ public:
 
   // Clear this node's value, data, comment and hidden flag.
   //
-  // resetChildren = true (the default) recurses, resetting the subtree in
-  // place and keeping every node.
+  // resetChildren = true (the default) resets the subtree in place and keeps
+  // every node: a node is cleared before the nodes under it and, with
+  // fireCallbacks, touched after them, a child's whole subtree before the next
+  // child's. A loop, not a call per level, and no lock is held while a touch
+  // signals.
   //
-  // resetChildren = false DESTROYS the children instead of recursing.
+  // resetChildren = false DESTROYS the children instead.
   // Beware: operator() returns state&, never the owning state_ptr, so the
   // parent's child map holds the only reference and dropping it deletes the
   // whole subtree. Any state& a caller still holds into that subtree
@@ -462,6 +469,12 @@ public:
   void reset(bool resetChildren = true, bool fireCallbacks = true);
 
   // converting to and from a boost property tree.  Useful for saving and restoring state.
+  //
+  // ptree() is one level: an entry per node of this subtree, keyed by its full name from the
+  // root, in pre-order (children in name order), holding its value, or "" for a node below this
+  // one with neither a value nor children. Values only, not data(). ptree(pt) sets each
+  // non-empty value at its key, relative to this node, at every nesting level, so it also loads
+  // the nested trees older versions wrote. json(), save() and restore() are the same as JSON.
   boost::property_tree::ptree ptree();
   operator boost::property_tree::ptree() { return ptree(); }
   void ptree(const boost::property_tree::ptree &);
@@ -475,6 +488,10 @@ public:
   void save(const std::string &filename);
   void restore(const std::string &filename);
 
+  // Call func with the full name of this node, then of each descendant whose full name matches
+  // `re` (all of them when it is empty), each once, in pre-order, children in name order. A
+  // visited node's traverseEnter fires before func sees it and its traverseExit after the nodes
+  // under it are visited. Descendants under a node that does not match are still visited.
   void traverse(traversal_unary_func func, const std::string &re = std::string());
   signal traverseEnter;
   signal traverseExit;
@@ -804,8 +821,6 @@ public:
 
 protected:
   state(app &ctx, const std::string &n = std::string(), const state *p = NULL);
-
-  void notifyParent(const std::string &childname);
 
   app &_ctx;
   boost::mutex _mutex;

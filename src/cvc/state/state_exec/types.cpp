@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/types.h>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <time.h>
 #include <unordered_set>
 #include <utility>
@@ -135,6 +137,106 @@ bool eval_deadline_expired() {
   return spent;
 }
 
+// -- releasing nested values -------------------------------------------------
+
+namespace {
+// The owners a release has yet to free: the first few in uninitialized inline slots, the rest
+// on the heap, so freeing an ordinary small value constructs and allocates nothing extra.
+class release_queue {
+public:
+  release_queue() = default;
+  release_queue(const release_queue &) = delete;
+  release_queue &operator=(const release_queue &) = delete;
+  ~release_queue() {
+    while (count_ > 0)
+      slot(--count_).~shared_ptr();
+  }
+
+  // Takes `owner`, unless out of memory: then it is left with the caller.
+  void push(std::shared_ptr<void> &owner) noexcept {
+    if (count_ < kInline) {
+      new (&slot(count_++)) std::shared_ptr<void>(std::move(owner));
+      return;
+    }
+    try {
+      heap_.push_back(std::move(owner));
+    } catch (...) {
+      // push_back left `owner` as it was.
+    }
+  }
+  bool pop(std::shared_ptr<void> &out) noexcept {
+    if (!heap_.empty()) {
+      out = std::move(heap_.back());
+      heap_.pop_back();
+      return true;
+    }
+    if (count_ == 0)
+      return false;
+    std::shared_ptr<void> &s = slot(--count_);
+    out = std::move(s);
+    s.~shared_ptr();
+    return true;
+  }
+
+private:
+  static constexpr std::size_t kInline = 8;
+  std::shared_ptr<void> &slot(std::size_t i) {
+    return *std::launder(reinterpret_cast<std::shared_ptr<void> *>(inline_) + i);
+  }
+  alignas(std::shared_ptr<void>) unsigned char inline_[kInline * sizeof(std::shared_ptr<void>)];
+  std::size_t count_ = 0;
+  std::vector<std::shared_ptr<void>> heap_;
+};
+
+// The queue of the release running on this thread, if one is: release_nested() called while it
+// frees something (from that thing's destructor) queues its owner there instead of freeing it
+// inline. A raw pointer to the running release's local queue, so no thread-exit destructor is
+// involved and nothing outlives the release.
+thread_local release_queue *t_release_queue = nullptr;
+} // namespace
+
+void detail::release_nested(std::shared_ptr<void> owner) noexcept {
+  if (release_queue *queue = t_release_queue) {
+    queue->push(owner); // out of memory: `owner` is still here, and freed here, recursively
+    return;
+  }
+  release_queue queue;
+  t_release_queue = &queue;
+  owner.reset();
+  for (std::shared_ptr<void> next; queue.pop(next);)
+    next.reset(); // a no-op unless this was the last owner
+  t_release_queue = nullptr;
+}
+
+// -- per-call allocation limit ----------------------------------------------
+
+namespace {
+thread_local eval_alloc_guard *t_alloc_innermost = nullptr;
+} // namespace
+
+eval_alloc_guard::eval_alloc_guard(std::optional<std::size_t> max_bytes)
+    : limit_(max_bytes), outer_(t_alloc_innermost) {
+  if (outer_ && outer_->limit_)
+    limit_ = limit_ ? std::min(*limit_, *outer_->limit_) : outer_->limit_;
+  t_alloc_innermost = this;
+}
+
+eval_alloc_guard::~eval_alloc_guard() { t_alloc_innermost = outer_; }
+
+std::optional<std::size_t> eval_alloc_limit() {
+  if (!t_alloc_innermost)
+    return kDefaultMaxAllocBytes;
+  return t_alloc_innermost->limit_;
+}
+
+void eval_alloc_check(std::size_t bytes, const char *who) {
+  const std::optional<std::size_t> limit = eval_alloc_limit();
+  if (limit && bytes > *limit)
+    throw std::runtime_error(std::string(who) + ": the result needs " + std::to_string(bytes) +
+                             " bytes, over the allocation limit of " + std::to_string(*limit) +
+                             " bytes (limits.max_alloc_bytes, or what is left of max_memory)");
+}
+
 // -- value_tag ---------------------------------------------------------------
 
 std::string value_tag::type_name() const {
@@ -175,38 +277,47 @@ std::string value_tag::type_name() const {
 
 // -- environment -------------------------------------------------------------
 
+environment::~environment() { detail::drop_owner(outer); }
+
 value_t *environment::lookup(const std::string &name) {
-  auto it = bindings.find(name);
-  if (it != bindings.end())
-    return &it->second;
-  if (outer)
-    return outer->lookup(name);
+  for (environment *e = this; e; e = e->outer.get()) {
+    auto it = e->bindings.find(name);
+    if (it != e->bindings.end())
+      return &it->second;
+  }
   return nullptr;
 }
 
 const value_t *environment::lookup(const std::string &name) const {
-  auto it = bindings.find(name);
-  if (it != bindings.end())
-    return &it->second;
-  if (outer)
-    return outer->lookup(name);
+  for (const environment *e = this; e; e = e->outer.get()) {
+    auto it = e->bindings.find(name);
+    if (it != e->bindings.end())
+      return &it->second;
+  }
   return nullptr;
 }
 
-void environment::set(const std::string &name, value_t val) { bindings[name] = std::move(val); }
+void environment::set(const std::string &name, value_t val) {
+  if (frozen)
+    throw std::logic_error("set: '" + name + "' in a frozen scope");
+  bindings[name] = std::move(val);
+}
 
 void environment::set_existing(const std::string &name, value_t val) {
-  auto it = bindings.find(name);
-  if (it != bindings.end()) {
-    it->second = std::move(val);
-    return;
+  if (frozen)
+    throw std::logic_error("set_existing: '" + name + "' in a frozen scope");
+  environment *outermost = this; // the outermost unfrozen scope walked so far
+  for (environment *e = this; e && !e->frozen; e = e->outer.get()) {
+    auto it = e->bindings.find(name);
+    if (it != e->bindings.end()) {
+      it->second = std::move(val);
+      return;
+    }
+    outermost = e;
   }
-  if (outer) {
-    outer->set_existing(name, std::move(val));
-    return;
-  }
-  // Not found anywhere — set in this scope
-  bindings[name] = std::move(val);
+  // Not bound in an unfrozen scope: bind it in the outermost one, which shadows a frozen
+  // scope's binding of the same name rather than writing into the shared scope.
+  outermost->bindings[name] = std::move(val);
 }
 
 environment_ptr environment::extend(environment_ptr parent) {
@@ -218,16 +329,26 @@ environment_ptr environment::extend(environment_ptr parent) {
 // -- to_string ---------------------------------------------------------------
 
 namespace {
-// Bounds for to_string: cap total OUTPUT length (a shared/wide structure would otherwise
-// expand exponentially) and recursion DEPTH (a deep or cyclic structure would otherwise
-// overflow the C++ stack). Past either, emit an ellipsis and stop — enough for debug /
-// coercion / error messages, and impossible to weaponise into a hang or OOM.
+// to_string caps total OUTPUT length (a shared/wide structure would otherwise expand
+// exponentially, a cyclic one forever); past it, it emits an ellipsis and stops -- enough for
+// debug / coercion / error messages, and impossible to weaponise into a hang or OOM. Depth
+// needs no cap of its own: the walk keeps its open lists and dicts on a heap stack, not the
+// native one, and each level opened costs output, so the length cap bounds that stack too.
 constexpr std::size_t kToStringMaxLen = std::size_t{1} << 16; // 64 KiB
-constexpr int kToStringMaxDepth = 1000;
+constexpr const char *kEllipsis = "\xE2\x80\xA6";             // U+2026 HORIZONTAL ELLIPSIS
 
-void to_string_impl(const value_t &val, std::string &out, int depth) {
-  if (out.size() >= kToStringMaxLen || depth > kToStringMaxDepth) {
-    out += "\xE2\x80\xA6"; // U+2026 HORIZONTAL ELLIPSIS
+// A list or dict to_string has opened and not yet closed.
+struct print_frame {
+  const std::vector<value_t> *list = nullptr;
+  const ordered_map *dict = nullptr;
+  std::size_t next = 0; // the next element to print
+};
+
+// Print `val`; a non-empty list or dict is only opened (its bracket printed and a frame pushed
+// for to_string's loop to print its elements and close it).
+void print_value(const value_t &val, std::string &out, std::vector<print_frame> &open) {
+  if (out.size() >= kToStringMaxLen) {
+    out += kEllipsis;
     return;
   }
   std::visit(
@@ -274,16 +395,7 @@ void to_string_impl(const value_t &val, std::string &out, int depth) {
             return;
           }
           out += '(';
-          for (std::size_t i = 0; i < arg->size(); ++i) {
-            if (i > 0)
-              out += ' ';
-            if (out.size() >= kToStringMaxLen) {
-              out += "\xE2\x80\xA6";
-              break;
-            }
-            to_string_impl((*arg)[i], out, depth + 1);
-          }
-          out += ')';
+          open.push_back({arg.get(), nullptr, 0});
         } else if constexpr (std::is_same_v<T, closure_ptr>)
           out += "<closure>";
         else if constexpr (std::is_same_v<T, dict_ptr>) {
@@ -292,19 +404,7 @@ void to_string_impl(const value_t &val, std::string &out, int depth) {
             return;
           }
           out += '{';
-          for (std::size_t i = 0; i < arg->size(); ++i) {
-            if (i > 0)
-              out += ", ";
-            if (out.size() >= kToStringMaxLen) {
-              out += "\xE2\x80\xA6";
-              break;
-            }
-            out += '"';
-            out += (*arg)[i].first;
-            out += "\": ";
-            to_string_impl((*arg)[i].second, out, depth + 1);
-          }
-          out += '}';
+          open.push_back({nullptr, arg.get(), 0});
         } else if constexpr (std::is_same_v<T, native_fn>)
           out += "<native_fn>";
         else if constexpr (std::is_same_v<T, data_object_ptr>)
@@ -320,7 +420,35 @@ void to_string_impl(const value_t &val, std::string &out, int depth) {
 
 std::string to_string(const value_t &val) {
   std::string out;
-  to_string_impl(val, out, 0);
+  std::vector<print_frame> open;
+  print_value(val, out, open);
+  while (!open.empty()) {
+    print_frame &f = open.back();
+    const std::size_t i = f.next++;
+    const bool is_list = f.list != nullptr;
+    if (i == (is_list ? f.list->size() : f.dict->size())) {
+      out += is_list ? ')' : '}';
+      open.pop_back();
+      continue;
+    }
+    if (i > 0)
+      out += is_list ? " " : ", ";
+    if (out.size() >= kToStringMaxLen) {
+      out += kEllipsis;
+      out += is_list ? ')' : '}';
+      open.pop_back();
+      continue;
+    }
+    if (is_list) {
+      print_value((*f.list)[i], out, open); // may push, invalidating f
+    } else {
+      const auto &[key, value] = (*f.dict)[i];
+      out += '"';
+      out += key;
+      out += "\": ";
+      print_value(value, out, open); // may push, invalidating f
+    }
+  }
   return out;
 }
 
@@ -333,19 +461,13 @@ struct ptr_pair_hash {
   }
 };
 using ptr_pair_set = std::unordered_set<std::pair<const void *, const void *>, ptr_pair_hash>;
+using value_pairs = std::vector<std::pair<const value_t *, const value_t *>>;
 
-constexpr int kValuesEqualMaxDepth = 1000; // guard the C++ stack on a deeply-nested compare
-
-// `seen` memoizes the (a,b) pointer-pairs already under comparison. Re-encountering a pair
-// (a shared node reached by two paths, or a cycle) returns true co-inductively: this bounds
-// work to the number of DISTINCT node-pairs (the physical size), never the exponential
-// logical unfolding of a shared DAG, and terminates on cyclic structures instead of
-// recursing forever. For finite acyclic values the result is identical to a naive compare.
-// A depth cap + deadline poll keep even a deeply-nested or huge NON-shared structure bounded
-// (memoization alone does not: distinct nodes are never re-encountered).
-bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen, int depth) {
-  if (depth > kValuesEqualMaxDepth || eval_deadline_expired())
-    throw std::runtime_error("values_equal: structure too deep or large to compare");
+// Whether a and b are equal as far as one level shows; the element pairs a list or dict pair
+// still needs compared are pushed onto `pending`. `seen` memoizes the container pairs already
+// under comparison: re-encountering one (a shared node reached by two paths, or a cycle)
+// counts as equal co-inductively.
+bool shallow_equal(const value_t &a, const value_t &b, ptr_pair_set &seen, value_pairs &pending) {
   if (a.v.index() != b.v.index())
     return false;
   return std::visit(
@@ -375,9 +497,8 @@ bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen, i
                             static_cast<const void *>(arg_b.get())})
                    .second)
             return true; // this pair is already being compared (shared/cyclic) -> equal
-          for (std::size_t i = 0; i < arg_a->size(); ++i)
-            if (!values_equal_impl((*arg_a)[i], (*arg_b)[i], seen, depth + 1))
-              return false;
+          for (std::size_t i = arg_a->size(); i-- > 0;)
+            pending.emplace_back(&(*arg_a)[i], &(*arg_b)[i]);
           return true;
         } else if constexpr (std::is_same_v<T, closure_ptr>)
           return arg_a == arg_b; // identity comparison
@@ -392,12 +513,11 @@ bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen, i
                             static_cast<const void *>(arg_b.get())})
                    .second)
             return true;
-          for (std::size_t i = 0; i < arg_a->size(); ++i) {
+          for (std::size_t i = 0; i < arg_a->size(); ++i)
             if ((*arg_a)[i].first != (*arg_b)[i].first)
               return false;
-            if (!values_equal_impl((*arg_a)[i].second, (*arg_b)[i].second, seen, depth + 1))
-              return false;
-          }
+          for (std::size_t i = arg_a->size(); i-- > 0;)
+            pending.emplace_back(&(*arg_a)[i].second, &(*arg_b)[i].second);
           return true;
         } else if constexpr (std::is_same_v<T, native_fn>)
           return false; // functions are never equal
@@ -414,9 +534,23 @@ bool values_equal_impl(const value_t &a, const value_t &b, ptr_pair_set &seen, i
 }
 } // namespace
 
+// The memo bounds work to the number of DISTINCT node-pairs (the physical size), never the
+// exponential logical unfolding of a shared DAG, and terminates on cyclic structures; for
+// finite acyclic values the result is identical to a naive compare. The pairs still to compare
+// wait on a heap stack, so depth costs no native stack. A deadline poll bounds a huge
+// NON-shared structure (memoization alone does not: distinct nodes are never re-encountered).
 bool values_equal(const value_t &a, const value_t &b) {
   ptr_pair_set seen;
-  return values_equal_impl(a, b, seen, 0);
+  value_pairs pending{{&a, &b}};
+  while (!pending.empty()) {
+    if (eval_deadline_expired())
+      throw std::runtime_error("values_equal: structure too large to compare");
+    const auto [x, y] = pending.back();
+    pending.pop_back();
+    if (!shallow_equal(*x, *y, seen, pending))
+      return false;
+  }
+  return true;
 }
 
 } // namespace cvc::state_exec

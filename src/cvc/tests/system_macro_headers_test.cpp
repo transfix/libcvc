@@ -63,6 +63,8 @@
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/nav_units.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/pose_tracker.h>
+#include <cvc/physics/world.h>
 #include <cvc/state/state.h>
 #include <cvc/utility/utility.h>
 #include <cvc/vis/visible_set.h>
