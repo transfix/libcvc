@@ -720,6 +720,14 @@ jobs:
             build_type: Release
             enable_grpc: true
             experimental: true
+          # Static-link gRPC probe: installs the static grpc closure (cvcpkg
+          # --link static, now published for macos) and links it into libcvc.
+          - name: libcvc-release-grpc-static
+            kind: libcvc
+            build_type: Release
+            enable_grpc: true
+            grpc_link: static
+            experimental: true
     name: package-macos / ${{ matrix.name }}
     # Heavy job: do not cancel in-progress runs (mirrors package-linux).
     concurrency:
