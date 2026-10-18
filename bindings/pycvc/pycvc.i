@@ -2166,10 +2166,12 @@ value_t decode_value(cvc::state &node);
 
 // ── environment and builtins ──
 // lookup() returns the bound value, or raises KeyError (C++ returns nullptr). bindings is the
-// scope's own map, read and written as a dict (a copy: change bindings with set()).
+// scope's own map, read and written as a dict (a copy: change bindings with set()). set() on a
+// frozen scope raises RuntimeError, as C++ throws std::logic_error.
 struct environment {
   std::unordered_map<std::string, value_t> bindings;
   std::shared_ptr<environment> outer;
+  bool frozen;
   void set(const std::string &name, value_t val);
   void set_existing(const std::string &name, value_t val);
   static std::shared_ptr<environment> extend(std::shared_ptr<environment> parent);

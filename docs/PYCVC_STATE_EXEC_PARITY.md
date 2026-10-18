@@ -75,7 +75,7 @@ The audit (2026-10-17) found 97 public items in the 20 headers. Counted individu
 | | `value_t` | native types, or `pycvc.value` | wrapped (PR 1), see the table above |
 | | `to_string`, `values_equal` | `pycvc.to_string`, `pycvc.values_equal` | wrapped (PR 1) |
 | | `make_list`, `make_dict`, `make_bytes`, `nil_value`, `true_value`, `false_value` | `list`, `dict`, `bytes`, `None`, `True`, `False` | exception: the native Python values are the equivalents |
-| | `environment` (`bindings`, `outer`, `lookup`, `set`, `set_existing`, `extend`) | `pycvc.environment` | wrapped (PR 2), shared like `environment_ptr`. `bindings` reads and writes as a dict (a copy); `lookup` raises `KeyError` where C++ returns nullptr |
+| | `environment` (`bindings`, `outer`, `frozen`, `lookup`, `set`, `set_existing`, `extend`) | `pycvc.environment` | wrapped (PR 2), shared like `environment_ptr`. `bindings` reads and writes as a dict (a copy); `lookup` raises `KeyError` where C++ returns nullptr; `set` on a frozen scope (#660) raises `RuntimeError` |
 | | `closure`, `data_object`, `generator` | `pycvc.value` (opaque) | wrapped as opaque handles; no member access |
 | | `time_budget`, `eval_deadline_guard`, `eval_deadline_expired`, `thread_cpu_seconds` | none | exception: thread-local evaluator internals |
 | state_value_codec.h | `encode_value`, `decode_value` | `pycvc.encode_value(State, v)`, `pycvc.decode_value(State)` | wrapped (PR 1) |

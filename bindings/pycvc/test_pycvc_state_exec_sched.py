@@ -70,9 +70,7 @@ def test_environment_is_the_scope_chain():
     assert child.bindings == {"y": [1, "two"]}  # this scope's own map
     child.set_existing("x", 5)  # the nearest scope that has it
     assert env.lookup("x") == 5 and "x" not in child.bindings
-    # Bound nowhere: the C++ sets it in the outermost scope (its header comment says this
-    # scope, but the recursion ends at the root).
-    child.set_existing("z", None)
+    child.set_existing("z", None)  # bound nowhere: the outermost unfrozen scope
     assert "z" not in child.bindings and env.bindings == {"x": 5, "z": None}
     # C++ returns nullptr for an unbound name; Python raises KeyError (None is nil).
     assert _raises(KeyError, child.lookup, "nope").args == ("nope",)
@@ -81,6 +79,18 @@ def test_environment_is_the_scope_chain():
     _raises(KeyError, child.lookup, "x")
     _raises(TypeError, setattr, env, "bindings", {1: 2})
     assert pycvc.environment.extend(None).outer is None
+
+
+def test_a_frozen_scope_is_read_only():
+    shared = pycvc.environment()
+    shared.set("k", 1)
+    assert not shared.frozen
+    shared.frozen = True
+    _raises(RuntimeError, shared.set, "k", 2)  # C++ throws std::logic_error
+    child = pycvc.environment.extend(shared)
+    assert child.lookup("k") == 1
+    child.set_existing("k", 3)  # never written into the frozen scope: shadowed here instead
+    assert child.bindings == {"k": 3} and shared.bindings == {"k": 1}
 
 
 def test_builtins_and_register_fn():
