@@ -36,6 +36,9 @@ value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
       std::exception_ptr ex;
       std::atomic<bool> done{false};
       std::thread worker([&] {
+        // A loop inside one native call (a generator body, a data job) never sees interrupt():
+        // the thread's evaluation deadline cuts it, so join() below does not wait on it.
+        eval_deadline_guard deadline_guard(timeout_sec);
         try {
           bg_result = eval_internal(expr, run_env);
         } catch (...) {

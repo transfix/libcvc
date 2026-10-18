@@ -23,17 +23,7 @@
 
 namespace cvc::state_exec {
 
-/// Exception thrown when evaluation is interrupted.
-class evaluation_interrupted : public std::runtime_error {
-public:
-  using std::runtime_error::runtime_error;
-};
-
-/// Exception thrown when evaluation times out.
-class evaluation_timeout : public std::runtime_error {
-public:
-  using std::runtime_error::runtime_error;
-};
+// evaluation_interrupted and evaluation_timeout are in types.h, next to the evaluation deadline.
 
 /// Exception used internally for (return ...) unwinding.
 class return_exception : public std::exception {

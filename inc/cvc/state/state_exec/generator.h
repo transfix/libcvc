@@ -67,8 +67,7 @@ inline std::optional<value_t> generator_next(generator &gen) {
   gen.state.yielded = false;
   detail::native_nesting level("generator"); // a nested evaluator
   while (!gen.state.done && !gen.state.yielded) {
-    if (eval_deadline_expired())
-      throw std::runtime_error("generator: evaluation exceeded time budget");
+    eval_deadline_check("generator");
     gen.evaluator.step(gen.state);
   }
 

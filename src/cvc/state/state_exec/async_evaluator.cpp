@@ -83,6 +83,9 @@ value_t async_evaluator::sync_evaluate(const value_t &expr, environment_ptr env,
     std::optional<std::chrono::steady_clock::time_point> prev;
     ~deadline_restore() { self->deadline_ = prev; }
   } restore{this, saved_deadline};
+  // The thread's evaluation deadline cuts a loop inside one native call, which never reaches
+  // check_interrupted_async (as stackless_evaluator::run arms it).
+  eval_deadline_guard deadline_guard(timeout_sec);
 
   auto t = evaluate(expr, env);
   // sync_wait drives the coroutine on both the trampoline (GCC/Clang) and the
