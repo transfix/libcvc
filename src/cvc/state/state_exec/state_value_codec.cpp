@@ -699,6 +699,15 @@ void encode_evaluator_state(cvc::state &node, const evaluator_state &es) {
     }
   }
 
+  // A script still being read (parser.step_tokens): keep its source and parser settings; the
+  // restored state reads it again from the start.
+  if (es.reading) {
+    auto &r = node("reading");
+    r("source").value(es.reading->source());
+    r("max_depth").value(std::to_string(es.reading->options().max_depth));
+    r("step_tokens").value(std::to_string(es.reading->options().step_tokens));
+  }
+
   // Stats snapshot
   node("step_count").value(std::to_string(es.stats.get_step_count()));
 }
@@ -745,6 +754,23 @@ evaluator_state decode_evaluator_state(cvc::state &node) {
       value_t body = decode_value(entry("body"));
       es.user_macros[name] = {std::move(params), std::move(body)};
     }
+  }
+
+  // A script still being read restarts its reading from the beginning.
+  if (has_child(node, "reading")) {
+    auto &r = node("reading");
+    parse_options opts;
+    const auto size_of = [&](const char *key, std::size_t fallback) {
+      const std::string v = r(key).value();
+      std::size_t n = fallback;
+      const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+      return ec == std::errc{} && end == v.data() + v.size() ? n : fallback;
+    };
+    opts.max_depth = size_of("max_depth", opts.max_depth);
+    opts.step_tokens = size_of("step_tokens", 1); // a reading state always has a positive slice
+    if (opts.step_tokens == 0)
+      opts.step_tokens = 1;
+    es.reading = std::make_shared<script_reader>(r("source").value(), opts);
   }
 
   return es;

@@ -46,13 +46,21 @@ struct parse_options {
   /// recursively (destroying a nested list, the snapshot codec, to_string), so this keeps parsed
   /// data within what they can handle. State-tree key: `parser.max_depth`.
   std::size_t max_depth = 256;
+
+  /// How a scheduler parses a submitted script. 0 parses all of it when it is submitted, so
+  /// execute() throws a parse_error. N > 0 parses it inside the new process, N tokens per
+  /// scheduler step, before evaluation starts. Those steps count against the process's max_steps
+  /// and max_time, and a syntax error then surfaces like a runtime error. State-tree key:
+  /// `parser.step_tokens`.
+  std::size_t step_tokens = 0;
 };
 
 /// Resolve parser settings from a state tree, per key: `state_exec.schedulers.<scheduler_id>.
 /// parser.<key>` (when scheduler_id is not empty), then `state_exec.defaults.parser.<key>`, then
-/// the parse_options default. A value that is missing, empty, not a positive integer or out of
-/// range is skipped.
-parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id = {});
+/// `base` (a host's built-in defaults; parse_options{} unless it has its own). A value that is
+/// missing, empty, malformed or out of range is skipped; max_depth must also be positive.
+parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id = {},
+                                       const parse_options &base = {});
 
 /// Parse a single S-expression from the input string.
 /// Returns the parsed value_t.
@@ -120,6 +128,31 @@ private:
   value_t parse_string();
   value_t parse_bytes_string(); // SE-3: b"..." byte-string literal (\xNN = a raw byte, no \u)
   value_t parse_number_or_symbol(char first);
+};
+
+/// Reads a whole script a slice at a time. A scheduler drives it from a process's steps when
+/// parse_options::step_tokens is set. It owns its copy of the source, which its parser views, so
+/// it can be neither copied nor moved; hold it by pointer.
+class script_reader {
+public:
+  script_reader(std::string source, const parse_options &opts);
+  script_reader(const script_reader &) = delete;
+  script_reader &operator=(const script_reader &) = delete;
+
+  /// Read up to `budget` more tokens. Returns true once the whole script has been read; forms()
+  /// then holds every top-level datum, as parse_all() would return them.
+  /// @throws parse_error on syntax errors.
+  bool step(std::size_t budget);
+
+  std::vector<value_t> &forms() { return _forms; }
+  const std::string &source() const { return _source; }
+  const parse_options &options() const { return _opts; }
+
+private:
+  std::string _source; // declared before _parser, which views it
+  parse_options _opts;
+  parser _parser;
+  std::vector<value_t> _forms;
 };
 
 } // namespace cvc::state_exec

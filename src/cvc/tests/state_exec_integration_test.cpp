@@ -2403,6 +2403,138 @@ TEST_F(SchedulerSettingsTest, AsyncSchedulerReadsParserSettingsOnEachSubmit) {
   EXPECT_NO_THROW(sched.execute(three_deep));
 }
 
+// --- parser.step_tokens: reading a script inside the process, a slice per step ---
+
+TEST_F(SchedulerSettingsTest, StepTokensResolveFromTreeAndAllowZero) {
+  auto &root = cvc::state::instance(app_ctx);
+  EXPECT_EQ(parse_options_from_state(root).step_tokens, 0u); // built-in: parse at submit
+  root("state_exec.defaults.parser.step_tokens").value("64");
+  EXPECT_EQ(parse_options_from_state(root).step_tokens, 64u);
+  root("state_exec.schedulers.eager.parser.step_tokens").value("0"); // 0 is a real setting here
+  EXPECT_EQ(parse_options_from_state(root, "eager").step_tokens, 0u);
+  root("state_exec.schedulers.eager.parser.step_tokens").value("-1"); // bad: falls through
+  EXPECT_EQ(parse_options_from_state(root, "eager").step_tokens, 64u);
+}
+
+TEST_F(SchedulerSettingsTest, SyncSchedulerEvaluatesAScriptReadInSlices) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.parser.step_tokens").value("2");
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.set_id("reader");
+  sched.load_settings();
+  EXPECT_EQ(sched.parser_settings().step_tokens, 2u);
+  EXPECT_EQ(root("state_exec.schedulers.reader.parser.step_tokens").value(), "2");
+
+  const int pid = sched.execute(std::string("(set a 40) (+ a 2)"));
+  auto results = sched.run();
+  EXPECT_EQ(std::get<int64_t>(results[pid].v), 42);
+}
+
+TEST_F(SchedulerSettingsTest, SyncSchedulerThrowsSyntaxErrorsFromRunWhenReadingInSlices) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.parser.step_tokens").value("2");
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  EXPECT_NO_THROW(sched.execute(std::string("(+ 1 2) (+ 3"))); // nothing is parsed yet
+  EXPECT_THROW(sched.run(), parse_error);                      // the process reads it
+}
+
+TEST_F(SchedulerSettingsTest, ReadingStepsCountAgainstMaxSteps) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.parser.step_tokens").value("1");
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  std::string big = "(list";
+  for (int i = 0; i < 100; ++i)
+    big += " " + std::to_string(i);
+  big += ")";
+  execute_options opts;
+  opts.max_steps = 5; // far fewer than the 103 tokens to read
+  const int pid = sched.execute(big, opts);
+  sched.run();
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info);
+  EXPECT_EQ(info->status, process_status::killed);
+  EXPECT_EQ(info->step_count, 5u);
+}
+
+TEST_F(SchedulerSettingsTest, SignalsWaitUntilTheScriptIsRead) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.parser.step_tokens").value("1");
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.load_settings();
+  execute_options opts;
+  opts.signal_handlers["SIGUSR1"] = make_list({value_t{symbol{"begin"}}, value_t{int64_t(7)}});
+  const int pid = sched.execute(std::string("(begin 1 2 (+ 40 2))"), opts);
+  sched.step(); // reading has begun
+  EXPECT_TRUE(sched.send_signal(pid, "SIGUSR1"));
+  auto results = sched.run();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::terminated);
+  EXPECT_EQ(std::get<int64_t>(results[pid].v), 42);
+}
+
+TEST_F(SchedulerSettingsTest, AsyncSchedulerKillsAProcessWhoseScriptDoesNotParse) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.parser.step_tokens").value("4");
+  async_scheduler sched;
+  sched.set_watch_root(&root);
+  int pid = -1;
+  ASSERT_NO_THROW(pid = sched.execute(std::string("(+ 1 2) (+ 3")));
+  sched.sync_run(1000, 1.0);
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+  const auto err = sched.get_exit_error(pid);
+  ASSERT_TRUE(err);
+  EXPECT_NE(err->find("unclosed parenthesis"), std::string::npos) << *err;
+}
+
+TEST_F(SchedulerSettingsTest, AsyncSchedulerParserDefaultsSitUnderTheTree) {
+  auto &root = cvc::state::instance(app_ctx);
+  async_scheduler sched;
+  sched.set_watch_root(&root);
+  EXPECT_EQ(sched.parser_defaults().step_tokens, 0u); // a plain async_scheduler parses at submit
+  EXPECT_THROW(sched.execute(std::string("(+ 1")), parse_error);
+
+  parse_options defaults;
+  defaults.step_tokens = 1024;
+  sched.set_parser_defaults(defaults);
+  int pid = -1;
+  ASSERT_NO_THROW(pid = sched.execute(std::string("(+ 1"))); // now read inside the process
+  sched.sync_run(1000, 1.0);
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+
+  root("state_exec.defaults.parser.step_tokens").value("0"); // the tree overrides the defaults
+  EXPECT_THROW(sched.execute(std::string("(+ 1")), parse_error);
+}
+
+TEST_F(SchedulerSettingsTest, AppExecSchedulerReadsScriptsInSteps) {
+  auto &sched = app_ctx.exec_scheduler();
+  EXPECT_EQ(async_scheduler::host_parser_defaults().step_tokens, 1024u);
+  EXPECT_EQ(sched.parser_defaults().step_tokens,
+            async_scheduler::host_parser_defaults().step_tokens); // shared with pycvc's Exec
+  EXPECT_EQ(sched.parser_defaults().max_depth, async_scheduler::host_parser_defaults().max_depth);
+  int pid = -1;
+  ASSERT_NO_THROW(pid = sched.execute(std::string("(+ 1 (+ 2")));
+  sched.sync_run(1000, 1.0);
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+  const auto err = sched.get_exit_error(pid);
+  ASSERT_TRUE(err);
+  EXPECT_NE(err->find("unclosed parenthesis"), std::string::npos) << *err;
+}
+
+TEST_F(SchedulerSettingsTest, AsyncSchedulerEvaluatesAScriptReadInSlices) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.parser.step_tokens").value("3");
+  async_scheduler sched;
+  sched.set_watch_root(&root);
+  const int pid = sched.execute(std::string("(set a 40) (+ a 2)"));
+  auto results = sched.sync_run(1000, 1.0);
+  EXPECT_EQ(std::get<int64_t>(results[pid].v), 42);
+}
+
 // ===========================================================================
 // §12 message-channel scoping — end-to-end through the scheduler + chroot
 // ===========================================================================

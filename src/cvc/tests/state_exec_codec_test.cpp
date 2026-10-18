@@ -291,6 +291,37 @@ TEST_F(EvaluatorStateCodecTest, CompletedState) {
   EXPECT_TRUE(restored.stack.empty());
 }
 
+TEST_F(EvaluatorStateCodecTest, StateStillReadingItsScript) {
+  // parser.step_tokens: a process snapshotted mid-read keeps its source and settings, and the
+  // restored state reads the script again and evaluates it.
+  parse_options popts;
+  popts.step_tokens = 2;
+  popts.max_depth = 64;
+  auto state = ev->create_state(std::string("(set x 20) (+ x 22)"), nullptr, popts);
+  ev->step(state); // part way through reading
+  ASSERT_TRUE(state.reading);
+
+  auto &node = ctx.root()("__es_reading__");
+  encode_evaluator_state(node, state);
+  auto restored = decode_evaluator_state(node);
+
+  ASSERT_TRUE(restored.reading);
+  EXPECT_EQ(restored.reading->source(), "(set x 20) (+ x 22)");
+  EXPECT_EQ(restored.reading->options().step_tokens, 2u);
+  EXPECT_EQ(restored.reading->options().max_depth, 64u);
+
+  // Native builtins aren't serialized; put them back on the restored environment's root, as
+  // PauseResumeProducesCorrectResult does. Nothing is on the frame stack yet.
+  ASSERT_TRUE(restored.global_env);
+  environment_ptr root_env = restored.global_env;
+  while (root_env->outer)
+    root_env = root_env->outer;
+  const auto builtins_env = builtins::make_default_environment(); // must outlive the loop
+  for (auto &[name, val] : builtins_env->bindings)
+    root_env->set(name, val);
+  EXPECT_EQ(std::get<int64_t>(ev->run(restored).v), 42);
+}
+
 TEST_F(EvaluatorStateCodecTest, PausedState) {
   // Run a program partially (10 steps of a loop)
   auto state =

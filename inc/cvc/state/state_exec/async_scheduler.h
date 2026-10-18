@@ -163,6 +163,25 @@ public:
 
   void set_watch_root(cvc::state *root) override { watch_root_ = root; }
 
+  /// This scheduler's built-in parser settings: what a submitted script is parsed with when the
+  /// watch root's `state_exec.defaults.parser.*` keys don't say otherwise. parse_options{} (parse
+  /// at submit) unless the host sets it.
+  void set_parser_defaults(const parse_options &defaults) { parser_defaults_ = defaults; }
+  const parse_options &parser_defaults() const { return parser_defaults_; }
+
+  /// The parser defaults libcvc's own hosts give their async schedulers, so a script behaves the
+  /// same in each: app::exec_scheduler() (Ariadne) and pycvc's Exec. Scripts are read inside
+  /// their process, 1024 tokens per step (docs/STATE_EXEC_GRAMMAR.md, "Reading inside the
+  /// scheduler"). Every script the repo carries fits in one slice (the largest is 159 tokens;
+  /// .ari scripts are at most 24), so a normal action pays one extra step of its 5000. A slice
+  /// costs about 80 us at the parser's measured ~80 ns per token, so a pathologically large
+  /// script is spread over steps instead of stalling a drain.
+  static parse_options host_parser_defaults() {
+    parse_options defaults;
+    defaults.step_tokens = 1024;
+    return defaults;
+  }
+
 private:
   scheduling_policy policy_;
   int next_pid_ = 1;
@@ -180,6 +199,7 @@ private:
   async_stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
+  parse_options parser_defaults_;
 
   std::unordered_map<int, process_ptr> processes_;
 

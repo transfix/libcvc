@@ -416,3 +416,43 @@ TEST_F(StacklessEvaluatorTest, DeadlineIsNotSpentWhileTheThreadDoesNotRun) {
   auto st = napper.create_state(parse("(nap)"));
   EXPECT_EQ(std::get<int64_t>(napper.run(st, std::nullopt, /*timeout_sec=*/0.02).v), 7);
 }
+
+// ─── Reading inside the steps (parse_options::step_tokens) ─────────────────
+
+TEST_F(StacklessEvaluatorTest, SlicedReadingEvaluatesLikeParsingUpFront) {
+  const std::string script = "(defun sq (x) (* x x)) (set a (sq 7)) (+ a 1)";
+  auto eager = ev->create_state(script);
+  ASSERT_FALSE(eager.reading);
+  const value_t expected = ev->run(eager);
+
+  parse_options popts;
+  popts.step_tokens = 3;
+  auto sliced = ev->create_state(script, nullptr, popts);
+  ASSERT_TRUE(sliced.reading); // nothing parsed yet
+  EXPECT_TRUE(sliced.stack.empty());
+  const value_t got = ev->run(sliced);
+  EXPECT_TRUE(sliced.done);
+  EXPECT_FALSE(sliced.reading);
+  EXPECT_EQ(to_string(got), to_string(expected));
+  EXPECT_EQ(std::get<int64_t>(got.v), 50);
+  // The reading steps are steps: 25 tokens at 3 per step take 9 (the ninth reads the last token,
+  // finds the end of the script and sets up evaluation).
+  EXPECT_EQ(sliced.stats.get_step_count(), eager.stats.get_step_count() + 9);
+}
+
+TEST_F(StacklessEvaluatorTest, SlicedReadingThrowsSyntaxErrorsFromStep) {
+  parse_options popts;
+  popts.step_tokens = 2;
+  evaluator_state st;
+  ASSERT_NO_THROW(st = ev->create_state(std::string("(+ 1 2) (+ 3"), nullptr, popts));
+  EXPECT_THROW(ev->run(st), parse_error);
+}
+
+TEST_F(StacklessEvaluatorTest, SlicedReadingOfAnEmptyScriptFinishesWithNil) {
+  parse_options popts;
+  popts.step_tokens = 4;
+  auto st = ev->create_state(std::string("  ; nothing here\n"), nullptr, popts);
+  EXPECT_TRUE(ev->step(st));
+  EXPECT_TRUE(st.done);
+  EXPECT_TRUE(st.result.is_nil());
+}

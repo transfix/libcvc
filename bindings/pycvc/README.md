@@ -184,3 +184,28 @@ Every widget reads/writes `cvc::state`, so the same value is drivable from a
 script, a config file or a replicated peer. Raw custom-widget ImGui (free-form
 windows) is a separate, deferred design (a curated subset compiled inside cvcGL).
 Contract test: `test_pycvc_gl_imgui.py`.
+
+## state_exec DSL (`Exec`) and parser settings
+
+`pycvc.Exec(app)` runs state_exec programs over the app's state tree. The parser
+settings are the C++ surface, under the C++ names (see
+`docs/STATE_EXEC_GRAMMAR.md`, "Parser settings"):
+
+```python
+import pycvc
+app = pycvc.make_app()
+ex = pycvc.Exec(app)
+ex.run("(+ 1 2)")                                     # "3"
+
+pycvc.parse_options()                                 # max_depth 256, step_tokens 0
+pycvc.async_scheduler.host_parser_defaults()          # step_tokens 1024
+ex.parser_defaults()                                  # == host_parser_defaults()
+pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "64")  # tree overrides
+root = pycvc.State.instance(app)                      # the tree root, as in C++
+pycvc.parse_options_from_state(root, "", ex.parser_defaults())      # what Exec uses
+```
+
+`Exec` starts from the same defaults as the app's exec scheduler (Ariadne), and
+the same `state_exec.defaults.parser.*` keys override both. A syntax error
+raises a `RuntimeError` with the parse error's message. Contract test:
+`test_pycvc_exec.py`.

@@ -148,12 +148,13 @@ this order:
 2. `state_exec.defaults.parser.<key>`, for everything on that tree;
 3. the built-in default.
 
-A value that is missing, empty, not a positive integer or out of range is skipped, and the next
-one in the order applies.
+A value that is missing, empty, not a non-negative integer or out of range is skipped, and the
+next one in the order applies. `max_depth` must also be positive.
 
 | Key | Meaning | Default |
 |---|---|---|
 | `max_depth` | how many lists and quotes may nest | 256 |
+| `step_tokens` | 0: a scheduler parses a submitted script all at once, when it is submitted. N: it parses the script inside the new process, N tokens per step (see [Reading inside the scheduler](#reading-inside-the-scheduler)) | 0; **1024** for the app's exec scheduler and pycvc's `Exec` |
 
 Who reads them:
 
@@ -161,12 +162,51 @@ Who reads them:
   the effective values under `state_exec.schedulers.<id>.parser.*` and uses them for every
   script submitted to it afterwards.
 - **`async_scheduler`** has no settings loader. It reads `state_exec.defaults.parser.*` from its
-  watch root each time a script is submitted.
+  watch root each time a script is submitted. Keys that aren't set fall back to the scheduler's
+  own defaults (`set_parser_defaults()`), which are the built-in ones unless the host changes
+  them.
+  - **libcvc's own hosts all use `async_scheduler::host_parser_defaults()`** (`step_tokens` =
+    1024), so a script behaves the same in each:
+    - the app's exec scheduler (`app::exec_scheduler()`, which runs Ariadne's actions and
+      residents);
+    - pycvc's `Exec`, on its private scheduler. That scheduler watches the same app tree, so the
+      same keys override both.
+  - **Why 1024:** every script in the corpus fits in one slice (the largest is 159 tokens, and
+    `.ari` scripts are at most 24). So a normal action pays one extra step out of its 5000. A
+    slice costs about 80 µs at the parser's measured ~80 ns per token, so a pathologically large
+    script is spread over steps and frames instead of stalling a drain.
+  - pycvc's `Exec.run()` raises a `RuntimeError` carrying the parse error either way: from the
+    killed process's exit error, or straight from `execute()` when the tree sets
+    `step_tokens` = 0.
 - **Ariadne** reads `state_exec.defaults.parser.*` from the app's tree when it compiles a
   predicate.
 - **Code without a state tree** (a standalone evaluator, the `.ari` channel lint) uses the
   built-in defaults, or passes `parse_options` to `parse()` and `parse_all()` explicitly.
   `parse_options_from_state()` does the resolution above for any host that has a tree.
+
+### Reading inside the scheduler
+
+The parser is stackless and resumable. Its whole state is an input position plus a heap stack
+of open lists and quotes, and `parser::read(out, budget)` stops after `budget` tokens. So a
+scheduler can parse a script the same way it evaluates one: a slice per step. With
+`parser.step_tokens` = N:
+
+- **Submitting.** `execute(script)` returns at once. The new process starts in a reading phase.
+  Each of its scheduler steps reads N more tokens (parens, quotes, atoms, strings). The step
+  after the last token sets up evaluation, exactly as parsing at submit would have, and
+  evaluation steps follow.
+- **Budgets.** Reading steps are process steps. They count against `max_steps` and `max_time`,
+  and they interleave with other processes. A huge script costs its own process's budget instead
+  of stalling the scheduler before the process exists.
+- **Errors.** A syntax error surfaces where a runtime error would. The async scheduler kills the
+  process, with the parse error as its exit error. The sync scheduler throws it from `step()` or
+  `run()`. With step_tokens = 0, `execute()` throws it, as before. Ariadne reports a killed
+  action or resident with its exit error ("ari: on: action program did not complete: …",
+  "ari: resident [...] stopped: …").
+- **Signals and watch events** wait until the script is read, because their handlers run on the
+  evaluation stack.
+- **Snapshots.** A process snapshotted while reading stores its source and parser settings. After
+  a restore it reads the script again from the start.
 
 ## Data
 

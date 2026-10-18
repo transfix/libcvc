@@ -27,29 +27,37 @@ std::vector<value_t> parse_all(const std::string &input, const parse_options &op
   return results;
 }
 
-// A positive integer setting at `path`, or nullopt when it is missing, empty, malformed, zero or
-// out of range (so the caller falls through to the next place in the resolution order).
-static std::optional<std::size_t> read_positive_setting(cvc::state &root, const std::string &path) {
+// A non-negative integer setting at `path` (positive unless `allow_zero`), or nullopt when it is
+// missing, empty, malformed or out of range, so the caller falls through to the next place in
+// the resolution order.
+static std::optional<std::size_t> read_size_setting(cvc::state &root, const std::string &path,
+                                                    bool allow_zero) {
   cvc::state *node = root.findDescendant(path);
   if (!node)
     return std::nullopt;
   const std::string v = node->value();
   std::size_t n = 0;
   const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
-  if (ec != std::errc{} || end != v.data() + v.size() || n == 0)
+  if (ec != std::errc{} || end != v.data() + v.size() || v.empty() || (n == 0 && !allow_zero))
     return std::nullopt;
   return n;
 }
 
-parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id) {
-  parse_options opts;
-  const std::string key = ".parser.max_depth";
-  if (auto v = read_positive_setting(root, std::string(scheduler::defaults_prefix) + key))
-    opts.max_depth = *v;
-  if (!scheduler_id.empty())
-    if (auto v = read_positive_setting(root, std::string(scheduler::sched_prefix) + "." +
-                                                 scheduler_id + key))
-      opts.max_depth = *v;
+parse_options parse_options_from_state(cvc::state &root, const std::string &scheduler_id,
+                                       const parse_options &base) {
+  parse_options opts = base;
+  const auto resolve = [&](const char *key, bool allow_zero, std::size_t &out) {
+    const std::string suffix = std::string(".parser.") + key;
+    if (auto v =
+            read_size_setting(root, std::string(scheduler::defaults_prefix) + suffix, allow_zero))
+      out = *v;
+    if (!scheduler_id.empty())
+      if (auto v = read_size_setting(
+              root, std::string(scheduler::sched_prefix) + "." + scheduler_id + suffix, allow_zero))
+        out = *v;
+  };
+  resolve("max_depth", /*allow_zero=*/false, opts.max_depth);
+  resolve("step_tokens", /*allow_zero=*/true, opts.step_tokens); // 0 = parse at submit
   return opts;
 }
 
@@ -182,6 +190,26 @@ parser::read_status parser::read(value_t &out, std::size_t &budget) {
     _frames.back().elements.push_back(std::move(datum));
   }
   return read_status::more;
+}
+
+// -- script_reader -------------------------------------------------------------
+
+script_reader::script_reader(std::string source, const parse_options &opts)
+    : _source(std::move(source)), _opts(opts), _parser(_source, opts) {}
+
+bool script_reader::step(std::size_t budget) {
+  for (;;) {
+    value_t form;
+    switch (_parser.read(form, budget)) {
+    case parser::read_status::datum:
+      _forms.push_back(std::move(form));
+      break;
+    case parser::read_status::end:
+      return true;
+    case parser::read_status::more:
+      return false;
+    }
+  }
 }
 
 value_t parser::parse_string() {
