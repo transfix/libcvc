@@ -125,6 +125,7 @@ if(CVC_ENABLE_GRPC)
   add_executable(state_stream_transport_grpc_test state_stream_transport_grpc_test.cpp)
   add_executable(stream_bridge_test stream_bridge_test.cpp)
   add_executable(stream_relay_test stream_relay_test.cpp)
+  add_executable(room_media_test room_media_test.cpp)
 endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
@@ -1662,6 +1663,17 @@ if(TARGET stream_relay_test)
   list(APPEND TEST_TARGETS stream_relay_test)
 endif()
 
+if(TARGET room_media_test)
+  target_link_libraries(room_media_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(room_media_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS room_media_test)
+endif()
+
 # Set C++ standard to match the library
 target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
@@ -2261,6 +2273,9 @@ if(TARGET stream_bridge_test)
 endif()
 if(TARGET stream_relay_test)
   cvc_discover_tests(stream_relay_test)
+endif()
+if(TARGET room_media_test)
+  cvc_discover_tests(room_media_test)
 endif()
 # procedural_geometry_test uses plain main(), not gtest, so register it with
 # a direct add_test() and record it for the registration guard below.
