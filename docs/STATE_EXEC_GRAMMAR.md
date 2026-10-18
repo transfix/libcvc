@@ -208,6 +208,64 @@ scheduler can parse a script the same way it evaluates one: a slice per step. Wi
 - **Snapshots.** A process snapshotted while reading stores its source and parser settings. After
   a restore it reads the script again from the start.
 
+### Deep data on the executor
+
+Walking a nested value no longer recurses on the native stack: freeing, printing (`to_string`),
+comparing (`values_equal`), copying (`state-data-get`), macro expansion and the snapshot codec
+keep their work on the heap. That work is still proportional to the value's size, so a scheduler
+can run it the way it reads a script: a slice per step, counted against the process's budget.
+
+The setting is `data.step_nodes`, resolved like the parser's (`state_exec.schedulers.<id>.data.step_nodes`,
+then `state_exec.defaults.data.step_nodes`, then the scheduler's built-in default;
+`data_options_from_state()`):
+
+| Key | Meaning | Default |
+|---|---|---|
+| `step_nodes` | 0: deep-data work runs whole, inside the step that needs it. N: a step does at most N nodes of it; the rest runs N per step in the steps after | 0; **1024** for the app's exec scheduler and pycvc's `Exec` |
+
+A node is an element visited: a list element or a dict entry walked, or an element freed. With
+`step_nodes` = N:
+
+- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print` and `state-data-get` hand their walk
+  to the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
+  done, the call's frame waits and the following steps are **data steps** that each run N more
+  nodes. The step that finishes it completes the call. A walk under N nodes finishes in the
+  call's own step, so ordinary programs take no extra steps.
+- **Macro expansion** works the same way, before the expansion is evaluated.
+- **Freeing.** Last owners dropped during a step (a list, dict, closure, generator or scope)
+  go to the process's release backlog instead of being freed on the spot. The step frees up to
+  what is left of its N nodes at its end. If more is left, the next steps are data steps that
+  only free, and evaluation resumes once the backlog is empty.
+- **Budgets.** Data steps are process steps. They count against `max_steps` and `max_time`, and
+  other processes run between them.
+- **Signals and watch events** wait while a walk is pending, because the walk's call frame is
+  on top of the evaluation stack.
+- **Snapshots** keep `step_nodes` but not a walk in flight: after a restore, the waiting call
+  or macro expansion runs again.
+- **Values changed between slices.** A walk holds the lists and dicts it walks by owning
+  pointer and reads them by index, checking bounds at every node. A change between two slices
+  (by another process) changes the answer, never memory safety.
+
+Other deep walks run whole inside one step, as before, but count their nodes. These are
+`collections.*` helpers and string coercion for `state-set`.
+
+Measured per node (MSVC Release, `state_exec_bench_test` `DataWalkThroughput`): ~45 ns to free,
+~70 ns to print, ~250 ns to compare and ~380 ns to copy. So a 1024-node slice costs 0.05-0.4 ms.
+
+### Budget by kind
+
+Each process's steps are split by what they were spent on (`step_kind`):
+
+- **read**: reading the script (`parser.step_tokens`);
+- **data**: deep-data steps (`data.step_nodes`);
+- **eval**: evaluating code.
+
+`process_info` carries `read_steps`, `eval_steps`, `data_steps` (they add up to `step_count`),
+`data_nodes` (deep-data nodes, whichever steps did them), and `read_time`, `eval_time`,
+`data_time`. The times are the seconds of the steps a scheduler ran, charged to each step's kind.
+`inspect` reports them for any pid, and `(budget-usage)` reports them, with `steps`, for the
+running process.
+
 ## Data
 
 | Production | Value (`value_t` alternative) |

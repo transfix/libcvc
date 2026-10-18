@@ -203,9 +203,16 @@ ex.parser_defaults()                                  # == host_parser_defaults(
 pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "64")  # tree overrides
 root = pycvc.State.instance(app)                      # the tree root, as in C++
 pycvc.parse_options_from_state(root, "", ex.parser_defaults())      # what Exec uses
+
+# Deep-data settings ("Deep data on the executor"), the same way
+pycvc.data_options()                                  # step_nodes 0
+pycvc.async_scheduler.host_data_defaults()            # step_nodes 1024
+ex.data_defaults()                                    # == host_data_defaults()
+pycvc.data_options_from_state(root, "", ex.data_defaults())         # what Exec uses
 ```
 
 `Exec` starts from the same defaults as the app's exec scheduler (Ariadne), and
-the same `state_exec.defaults.parser.*` keys override both. A syntax error
+the same `state_exec.defaults.parser.*` and `state_exec.defaults.data.*` keys
+override both. A syntax error
 raises a `RuntimeError` with the parse error's message. Contract test:
 `test_pycvc_exec.py`.

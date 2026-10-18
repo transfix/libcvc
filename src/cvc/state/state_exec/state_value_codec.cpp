@@ -708,6 +708,11 @@ void encode_evaluator_state(cvc::state &node, const evaluator_state &es) {
     r("step_tokens").value(std::to_string(es.reading->options().step_tokens));
   }
 
+  // Deep-data slicing (data.step_nodes). Work in flight is not kept: after a restore the waiting
+  // native call or macro expansion runs again.
+  if (es.data_step_nodes > 0)
+    node("data_step_nodes").value(std::to_string(es.data_step_nodes));
+
   // Stats snapshot
   node("step_count").value(std::to_string(es.stats.get_step_count()));
 }
@@ -754,6 +759,14 @@ evaluator_state decode_evaluator_state(cvc::state &node) {
       value_t body = decode_value(entry("body"));
       es.user_macros[name] = {std::move(params), std::move(body)};
     }
+  }
+
+  if (has_child(node, "data_step_nodes")) {
+    const std::string v = node("data_step_nodes").value();
+    std::size_t n = 0;
+    const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+    if (ec == std::errc{} && end == v.data() + v.size())
+      es.data_step_nodes = n;
   }
 
   // A script still being read restarts its reading from the beginning.

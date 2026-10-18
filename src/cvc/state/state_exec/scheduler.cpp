@@ -55,8 +55,9 @@ void scheduler::load_settings() {
 
   max_pending_messages = effective;
 
-  // --- parser.* (same resolution order; see parse_options_from_state) ---
+  // --- parser.* and data.* (same resolution order; see parse_options_from_state) ---
   parse_options_ = parse_options_from_state(*watch_root_, id_);
+  data_options_ = data_options_from_state(*watch_root_, id_);
   // --- limits.max_alloc_bytes (same resolution order; see max_alloc_bytes_from_state) ---
   max_alloc_bytes_ = max_alloc_bytes_from_state(*watch_root_, id_);
 
@@ -66,6 +67,7 @@ void scheduler::load_settings() {
     (*watch_root_)(base + ".max_pending_messages").value(std::to_string(max_pending_messages));
     (*watch_root_)(base + ".parser.max_depth").value(std::to_string(parse_options_.max_depth));
     (*watch_root_)(base + ".parser.step_tokens").value(std::to_string(parse_options_.step_tokens));
+    (*watch_root_)(base + ".data.step_nodes").value(std::to_string(data_options_.step_nodes));
     (*watch_root_)(base + ".limits.max_alloc_bytes").value(std::to_string(max_alloc_bytes_));
     (*watch_root_)(base + ".policy")
         .value(policy_ == scheduling_policy::round_robin ? "round_robin"
@@ -112,6 +114,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
   proc.state = evaluator_.create_state(script, opts.env, parse_options_);
+  proc.state.data_step_nodes = data_options_.step_nodes;
   proc.state.stats.start();
   processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
   return pid;
@@ -138,6 +141,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
   proc.state = evaluator_.create_state(expr, opts.env);
+  proc.state.data_step_nodes = data_options_.step_nodes;
   proc.state.stats.start();
   processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
   return pid;
@@ -215,9 +219,11 @@ void scheduler::execute_process_step(process &proc) {
   } reset_guard{current_pid_, current_proc_};
 
   // A process still reading its script (parser.step_tokens) takes signals and watch events once
-  // the script is read: their handlers run on the evaluation stack, which doesn't exist yet.
-  const bool can_interrupt =
-      !proc.in_signal_handler && !proc.in_watch_handler && !proc.state.reading;
+  // the script is read: their handlers run on the evaluation stack, which doesn't exist yet. One
+  // in the middle of deep-data work (data.step_nodes) takes them once that is done: the work's
+  // call frame waits on top of the stack.
+  const bool can_interrupt = !proc.in_signal_handler && !proc.in_watch_handler &&
+                             !proc.state.reading && !proc.state.data_work;
 
   // 1. Handle pending signals first
   if (!proc.pending_signals.empty() && can_interrupt) {
@@ -254,9 +260,11 @@ void scheduler::execute_process_step(process &proc) {
   const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
   bool done = evaluator_.step(proc.state);
 
-  // 4. Accumulate running time
+  // 4. Accumulate running time, and charge it to what the step was spent on
   auto now = std::chrono::steady_clock::now();
-  proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  const double step_seconds = std::chrono::duration<double>(now - proc.last_run_start).count();
+  proc.accumulated_time += step_seconds;
+  proc.state.stats.add_step_time(step_seconds);
   if (charge_cpu)
     proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
 
@@ -723,6 +731,7 @@ int scheduler::fork(int pid) {
   child->state.done = parent.state.done;
   child->state.stack = parent.state.stack; // Copy stack
   child->state.user_macros = parent.state.user_macros;
+  child->state.data_step_nodes = parent.state.data_step_nodes;
   // Create fresh env as a copy of parent's bindings
   auto child_env = std::make_shared<environment>();
   if (parent.state.global_env) {
@@ -806,6 +815,7 @@ process_info scheduler::make_info(const process &proc) const {
   info.uid = proc.uid;
   info.gid = proc.gid;
   info.step_count = proc.step_count();
+  fill_budget_usage(info, proc.state.stats);
   info.elapsed_time = proc.elapsed_time();
   info.current_memory = mem_tracker_.current_bytes(proc.pid);
   info.peak_memory = mem_tracker_.peak_bytes(proc.pid);

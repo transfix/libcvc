@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
@@ -183,6 +184,50 @@ TEST_F(ExecBenchTest, ValueDropThroughput) {
   }
   t1 = hrclock::now();
   report("eval_nest_list_2000", M, std::chrono::duration_cast<ns>(t1 - t0));
+}
+
+TEST_F(ExecBenchTest, DataWalkThroughput) {
+  if (!bench_enabled()) {
+    SUCCEED();
+    return;
+  }
+
+  // Deep-data work per node, the unit of data.step_nodes: compare, print, copy, free. The value
+  // nests lists and dicts 20000 levels, each level holding a string and a number too.
+  constexpr int64_t kLevels = 20000;
+  const auto build = [] {
+    value_t v = value_t{int64_t{0}};
+    for (int64_t i = 0; i < kLevels; ++i)
+      v = i % 2 ? make_dict({{"i", value_t{i}}, {"v", std::move(v)}})
+                : make_list({value_t{std::string("s")}, std::move(v), value_t{1.5}});
+    return v;
+  };
+  const value_t a = build(), b = build();
+  const auto per_node = [](const char *name, data_job &job) {
+    auto t0 = hrclock::now();
+    job.step(0);
+    auto t1 = hrclock::now();
+    report(name, static_cast<int64_t>(job.nodes()), std::chrono::duration_cast<ns>(t1 - t0));
+  };
+  auto eq = make_equal_job(a, b);
+  per_node("data_equal_per_node", *eq);
+  auto print = make_print_job(a);
+  per_node("data_print_per_node", *print);
+  auto copy = make_copy_job(a);
+  per_node("data_copy_per_node", *copy);
+
+  // Freeing, through a release backlog drained whole.
+  value_t doomed = build();
+  detail::release_backlog backlog;
+  {
+    detail::backlog_scope route(&backlog);
+    doomed = value_t{};
+  }
+  auto t0 = hrclock::now();
+  const std::size_t freed = backlog.drain(0);
+  auto t1 = hrclock::now();
+  report("data_free_per_node", static_cast<int64_t>(freed),
+         std::chrono::duration_cast<ns>(t1 - t0));
 }
 
 TEST_F(ExecBenchTest, SchedulerThroughput) {

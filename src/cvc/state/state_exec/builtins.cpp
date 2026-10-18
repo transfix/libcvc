@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <cmath>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: (length "...") counts codepoints for a string
@@ -275,12 +277,17 @@ value_t builtin_ge(std::span<const value_t> args) {
 
 value_t builtin_eq(std::span<const value_t> args) {
   expect_exact(args, 2, "=");
-  return value_t{values_equal(args[0], args[1])};
+  if (!is_compound(args[0]) || !is_compound(args[1]))
+    return value_t{values_equal(args[0], args[1])};
+  return run_data_job(make_equal_job(args[0], args[1]));
 }
 
 value_t builtin_ne(std::span<const value_t> args) {
   expect_exact(args, 2, "!=");
-  return value_t{!values_equal(args[0], args[1])};
+  if (!is_compound(args[0]) || !is_compound(args[1]))
+    return value_t{!values_equal(args[0], args[1])};
+  return run_data_job(make_equal_job(args[0], args[1]),
+                      [](value_t equal) { return value_t{!std::get<bool>(equal.v)}; });
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +295,8 @@ value_t builtin_ne(std::span<const value_t> args) {
 // ---------------------------------------------------------------------------
 
 value_t builtin_str_concat(std::span<const value_t> args) {
+  if (std::any_of(args.begin(), args.end(), is_compound))
+    return run_data_job(make_concat_job({args.begin(), args.end()}, "", "str-concat"));
   // The same string may be passed many times, so the result can outgrow every argument: check
   // each part against the allocation limit before appending it.
   std::string result;
@@ -308,6 +317,8 @@ value_t builtin_str_concat(std::span<const value_t> args) {
 
 value_t builtin_str(std::span<const value_t> args) {
   expect_exact(args, 1, "str");
+  if (is_compound(args[0]))
+    return run_data_job(make_print_job(args[0]));
   return value_t{to_string(args[0])};
 }
 
@@ -634,6 +645,18 @@ value_t builtin_type_of(std::span<const value_t> args) {
 // ---------------------------------------------------------------------------
 
 value_t builtin_print(std::span<const value_t> args) {
+  if (std::any_of(args.begin(), args.end(), is_compound)) {
+    // The line goes out once all of it is printed. A string prints quoted here, as to_string
+    // prints it, so it goes in already printed.
+    std::vector<value_t> parts;
+    parts.reserve(args.size());
+    for (auto &a : args)
+      parts.push_back(std::holds_alternative<std::string>(a.v) ? value_t{to_string(a)} : a);
+    return run_data_job(make_concat_job(std::move(parts), " ", "print"), [](value_t line) {
+      std::cout << std::get<std::string>(line.v) << '\n';
+      return nil_value;
+    });
+  }
   for (size_t i = 0; i < args.size(); ++i) {
     if (i > 0)
       std::cout << ' ';

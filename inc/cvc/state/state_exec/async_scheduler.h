@@ -182,6 +182,30 @@ public:
     return defaults;
   }
 
+  /// This scheduler's built-in deep-data settings: what a submitted process runs with when the
+  /// watch root's `state_exec.defaults.data.*` keys don't say otherwise. data_options{} (no
+  /// slicing) unless the host sets it.
+  void set_data_defaults(const data_options &defaults) { data_defaults_ = defaults; }
+  const data_options &data_defaults() const { return data_defaults_; }
+
+  /// The deep-data settings a process submitted now gets: the watch root's keys over
+  /// data_defaults(). Read on every submit, like the parser settings.
+  data_options data_settings() const {
+    return watch_root_ ? data_options_from_state(*watch_root_, {}, data_defaults_) : data_defaults_;
+  }
+
+  /// The deep-data defaults libcvc's own hosts give their async schedulers (app::exec_scheduler()
+  /// and pycvc's Exec), next to host_parser_defaults(): deep-data work runs 1024 nodes per step
+  /// (docs/STATE_EXEC_GRAMMAR.md, "Deep data on the executor"). At the measured ~45 ns a node
+  /// to free, ~70 to print, ~250 to compare and ~380 to copy, a slice costs 0.05-0.4 ms, so a huge
+  /// value is spread over steps instead of stalling a drain, while the data of a normal program
+  /// (far under 1024 nodes a step) costs it no extra steps.
+  static data_options host_data_defaults() {
+    data_options defaults;
+    defaults.step_nodes = 1024;
+    return defaults;
+  }
+
 private:
   scheduling_policy policy_;
   int next_pid_ = 1;
@@ -200,6 +224,7 @@ private:
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
   parse_options parser_defaults_;
+  data_options data_defaults_;
 
   std::unordered_map<int, process_ptr> processes_;
 

@@ -379,9 +379,11 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecIm
   app->computePool();
   impl_->sched.set_watch_root(impl_->root);
   // The same state_exec defaults as the app's exec scheduler, so a program behaves the same from
-  // Python as from Ariadne: scripts are read inside the process (host_parser_defaults), and the
-  // app tree's state_exec.defaults.parser.* keys override them for both.
+  // Python as from Ariadne: scripts are read inside the process (host_parser_defaults) and deep
+  // data is handled a slice per step (host_data_defaults), and the app tree's
+  // state_exec.defaults.parser.* / data.* keys override them for both.
   impl_->sched.set_parser_defaults(async_scheduler::host_parser_defaults());
+  impl_->sched.set_data_defaults(async_scheduler::host_data_defaults());
 
   impl_->host_proc = make_process();
   impl_->host_proc->pid = 0;
@@ -654,6 +656,12 @@ cvc::state_exec::parse_options Exec::parser_defaults() const {
 
 void Exec::set_parser_defaults(const cvc::state_exec::parse_options &defaults) {
   impl_->sched.set_parser_defaults(defaults);
+}
+
+cvc::state_exec::data_options Exec::data_defaults() const { return impl_->sched.data_defaults(); }
+
+void Exec::set_data_defaults(const cvc::state_exec::data_options &defaults) {
+  impl_->sched.set_data_defaults(defaults);
 }
 
 } // namespace pycvc
