@@ -470,11 +470,16 @@ public:
 
   // converting to and from a boost property tree.  Useful for saving and restoring state.
   //
-  // ptree() is one level: an entry per node of this subtree, keyed by its full name from the
-  // root, in pre-order (children in name order), holding its value, or "" for a node below this
-  // one with neither a value nor children. Values only, not data(). ptree(pt) sets each
-  // non-empty value at its key, relative to this node, at every nesting level, so it also loads
-  // the nested trees older versions wrote. json(), save() and restore() are the same as JSON.
+  // Paths are relative to this node both ways, as for operator(). ptree() is one level: an
+  // entry per node of this subtree, keyed by its path relative to this node ("" for this node
+  // itself), in pre-order (children in name order), holding its value, or "" for a node below
+  // this one with neither a value nor children. Values only, not data(). ptree(pt) sets each
+  // non-empty value at its key relative to this node, at every nesting level. So
+  // n.ptree(n.ptree()) gives n its subtree back, and m.ptree(n.ptree()) copies n's values under
+  // m. For the root, relative paths are full names, so a document of the root reads the same as
+  // before, and ptree(pt) still loads the nested trees older versions wrote. Older versions keyed
+  // a subtree's document by full names: load such a document into the root. json(), save() and
+  // restore() are the same as JSON.
   boost::property_tree::ptree ptree();
   operator boost::property_tree::ptree() { return ptree(); }
   void ptree(const boost::property_tree::ptree &);
