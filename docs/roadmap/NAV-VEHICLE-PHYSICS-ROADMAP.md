@@ -105,6 +105,30 @@ How the physics channels enter training:
 - **Measured plant state (H4)** trains only from states recorded in Jolt runs, or acts as a fixed
   modulator. It is never trained on zeros and then deployed on live values.
 
+### Obstacle distance in training: the SDF, not discs (proposed)
+
+The deployed drive and `coef_train` read obstacle distance from the SDF (`sdf_sample`,
+`field_stack`, the `CoefMLP` features). The material stack does not: `coef_energy_net` puts one
+coefficient on each obstacle disc, over `obs_feats` = [cx, cy, R_eff, W, goal_x − cx,
+goal_y − cy]. `integrate_surrogate_material`, `integrate_bicycle_material` and L_multi integrate
+against those discs, and the governor uses the nearest one.
+
+Discs fit round things and fit buildings badly:
+
+- A long wall or an L-shaped block becomes either one disc of its circumradius, which fills free
+  space, or a row of discs, whose gaps overstate the clearance.
+- Either way the clearance the policy trains on is not the clearance it drives on.
+
+Proposal:
+
+- Static geometry reaches training through the SDF, interpolated C¹ (bicubic, or the exact
+  polygon distance). A bilinear SDF's gradient jumps at cell edges, which the adjoint feels.
+- Discs or capsules stay for dynamic obstacles (other agents), where one coefficient per obstacle
+  is natural.
+
+This changes the material model and needs retraining (GRL-SNAM), so it belongs with P8a/P8b. Not
+scheduled.
+
 ## Drift between the kinematic and Jolt plants
 
 There will be drift, and it is bounded. The navigator reads the vehicle's state back every tick, so

@@ -15,6 +15,7 @@
 #include <cvc/state/state_transport_ipc.h>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <map>
 #include <string>
 #include <thread>
 
@@ -84,6 +85,21 @@ TEST_F(StateSnapshotProtocolTest, SnapshotWithPrefixFilter) {
   EXPECT_TRUE(found_foo);
   EXPECT_FALSE(found_bar);
 
+  shard.detach();
+}
+
+TEST_F(StateSnapshotProtocolTest, SnapshotListsEachNodeOnce) {
+  // The snapshot walks the subtree with state::traverse(), which visits each node once. It used
+  // to visit a node once per ancestor in the walk, so a.b.c was listed (and encoded) twice.
+  cvc::app ctx;
+  cvc::state_cluster_shard shard(ctx, "clust", "node_A");
+  shard.attach();
+  cvc::state::instance(ctx)("a.b.c").value(std::string("deep"));
+  cvc::state::instance(ctx)("a.d").value(std::string("x"));
+  std::map<std::string, int> seen;
+  for (const auto &e : shard.snapshot("a"))
+    ++seen[e.path];
+  EXPECT_EQ(seen, (std::map<std::string, int>{{"a", 1}, {"a.b", 1}, {"a.b.c", 1}, {"a.d", 1}}));
   shard.detach();
 }
 

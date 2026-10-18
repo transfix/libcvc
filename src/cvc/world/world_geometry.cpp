@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/volume/volume.h>
 #include <cvc/world/world_geometry.h>
 #include <set>
 #include <stdexcept>
@@ -26,7 +27,7 @@ world_geometry::world_geometry(const surface_registry &surfaces) : _surfaces(&su
 void world_geometry::add(geometry_item item) {
   if (item.name.empty())
     throw std::invalid_argument("world_geometry::add: an item needs a name");
-  if (find(item.name))
+  if (find(item.name) || find_volume(item.name))
     throw std::invalid_argument("world_geometry::add: an item called '" + item.name +
                                 "' already exists");
   if (!item.geometry)
@@ -61,6 +62,24 @@ const geometry_item *world_geometry::find(const std::string &name) const {
   for (const geometry_item &i : _items)
     if (i.name == name)
       return &i;
+  return nullptr;
+}
+
+void world_geometry::add_volume(volume_item item) {
+  if (item.name.empty())
+    throw std::invalid_argument("world_geometry::add_volume: a volume needs a name");
+  if (find(item.name) || find_volume(item.name))
+    throw std::invalid_argument("world_geometry::add_volume: an item called '" + item.name +
+                                "' already exists");
+  if (!item.field.volume)
+    throw std::invalid_argument("world_geometry::add_volume: '" + item.name + "' has no volume");
+  _volumes.push_back(std::move(item));
+}
+
+const volume_item *world_geometry::find_volume(const std::string &name) const {
+  for (const volume_item &v : _volumes)
+    if (v.name == name)
+      return &v;
   return nullptr;
 }
 
@@ -105,6 +124,16 @@ world_bounds world_geometry::bounds() const {
       } else {
         grow(x, y, z);
       }
+    }
+  }
+  for (const volume_item &v : _volumes) {
+    const cvc::bounding_box &box = v.field.volume->boundingBox();
+    if (b.empty()) {
+      b.min = {{box.minx, box.miny, box.minz}};
+      b.max = {{box.maxx, box.maxy, box.maxz}};
+    } else {
+      grow(box.minx, box.miny, box.minz);
+      grow(box.maxx, box.maxy, box.maxz);
     }
   }
   return b;

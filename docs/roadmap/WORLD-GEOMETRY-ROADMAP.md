@@ -152,36 +152,49 @@ render-origin offset that keeps city-scale coordinates out of float precision.
 
 ### Fields (G6): volumes as physics media
 
-`cvc::volume` is already the scene's voxel object (`VolumeNode` draws it). It is a scalar grid with
-a bounding box and trilinear `interpolate()`. G6 makes the same volumes physics media:
+`cvc::volume` is already the scene's voxel object (`VolumeNode` draws it): a scalar grid with a
+bounding box and trilinear sampling. G6 makes the same volumes physics media
+(`inc/cvc/physics/field.h`, `src/cvc/physics/field_step.{h,cpp}`):
 
-- **Field items in `world_geometry`**, beside the surface items:
-  - a name;
-  - a `std::shared_ptr<const cvc::volume>`, placed by its bounding box in world coordinates (plus
-    an optional rigid placement, like a mesh's);
-  - a kind and its parameters.
+- **`physics::field`**: a kind, a `std::shared_ptr<const cvc::volume>` placed by its bounding box
+  in world metres, optional velocity (three volumes, one per world axis, each on its own grid),
+  a drag coefficient and a damping. The field acts inside its volume's box only.
+  `world::add_field` / `set_field` / `remove_field`; `world::field_load_on(body)` reports the last
+  step's force, torque and immersed volume.
+- **Kinds** (the volume's values mean):
+  - **fluid** (density, kg/m³): buoyancy −ρ g V and quadratic drag ½ ρ C_d A |u| u;
+  - **medium** (bearing modulus k, N/m³): support k V upward, a Winkler foundation, so a flat
+    footprint A sunk d carries k A d (Bekker's n = 1, elastic: no ruts yet);
+  - **flow** (density): drag only.
 
-  A vector field (wind) is three co-registered volumes, checked for equal dimensions and bounds.
-  The renderer draws the same objects, so what a viewer sees is what a body feels.
-- **Kinds:**
-  - **fluid**: density, plus optional velocity, for buoyancy and drag (a water body, a river's
-    current);
-  - **deformable medium**: depth or density, plus bearing strength, for sinkage and rolling
-    resistance (snow over terrain, mud, sand);
-  - **flow**: air velocity, for aerodynamic drag on a body's velocity relative to the air.
-- **Where the physics happens.** Jolt knows contacts, not fields, so the facade runs a **field
-  step** before each engine step. For each dynamic body overlapping a field's bounds, it samples
-  the field at points on the body's shape (box corners and centre, sphere samples), in double
-  precision, bodies in sorted order, and applies the forces through the next step:
-  - buoyancy ρ g V_submerged at the centre of buoyancy;
-  - drag ½ ρ C_d A |v_rel| v_rel;
-  - a Bekker-style pressure–sinkage resistance in a medium.
-
-  The fixed order and double-precision sampling keep `state_hash` reproducible across platforms.
-- **The vehicle (P2).** Its tire model reads the medium under each wheel (sinkage, rolling
-  resistance) and the flow around the body. The energy ledger (P3) books the work each field does.
-- **Time-varying fields** (gusts, a rising river) are new volumes swapped in between steps:
-  copy-on-write, so readers never see half an update.
+  Every kind also takes a linear damping c V u. For a medium it is the resistance to sinking in;
+  for water it stands for wave-making, without which a floating body bobs for a long time (the
+  first slab trial still bobbed ±3 cm after 16 s on drag alone).
+- **`world_geometry` volumes.** `volume_item {name, field, roles}` beside the surface items, one
+  name space for both. `physics::add_world_geometry` adds a field per collide volume;
+  `gl::add_world_geometry` adds a `VolumeNode` per render volume, sharing the volume's voxels. What a
+  viewer sees is what a body feels.
+- **The field step.** Jolt knows contacts, not fields, so the facade runs a field step before each
+  engine step:
+  - **Sample cells.** When a dynamic body is added, its interior is cut into sample cells, about 8
+    along its longest side. Spheres and boxes are cut analytically. A convex hull's cells come from
+    the engine (`world_backend::shape_interior`, Jolt's `CollidePoint`), with its volume and
+    centre of mass.
+  - **Clipping and sampling.** Each step, each awake body's cells are clipped to each field's box,
+    and the immersed fraction is sampled at its centre. The clip is exact for an upright box, so a
+    surface at the volume's top edge gives Archimedes' force exactly.
+  - **One load per body.** The forces sum to one force and one torque per body
+    (`add_field_load`, Jolt's `AddForceAndTorque` without waking).
+  - **Stable drag.** Drag and damping are scaled by (1 − e⁻ˣ)/x, where x is the body's drag rate
+    times dt, so a light body never overshoots the stuff's velocity.
+  - **Reproducible.** Double precision, ascending field and body ids: `state_hash` stays a function
+    of the inputs.
+  - **Sleep.** Sleeping bodies are skipped; `add_field` and `set_field` wake the bodies in the box.
+- **Values are read at add/set**, into the field's own sampler. A gust or a rising river is a
+  `set_field` with new volumes between steps.
+- **Next.** The vehicle (P2) reads the medium under each wheel (sinkage, rolling resistance) and
+  the flow around the body, and the energy ledger (P3) books the work each field does. A medium that
+  keeps ruts needs mutable medium state, which is later work.
 
 ## Phases
 
@@ -194,7 +207,7 @@ a bounding box and trilinear `interpolate()`. G6 makes the same volumes physics 
 | **G4a** | `nav::rasterize` (occupancy, height, surface, rho, hard and mu planes from `world_geometry`) and `nav::mesh_footprint` (the demos' `occupancy_from_model`, moved into the library unchanged); land cover as surfaces (`nav::land_cover_provider` over `segment_scene_material`); `nav::palette_ids` for physics materials' `nav_material`; `world::read_terrain_extent`, so `material_raster` and `nav_finale` drop their own `terrain.json` parsers; `navdemo::Terrain` becomes a view of the shared `height_field`; `gl::add_world_geometry(parent)` | The footprint is the old occupancy bit for bit (`NavWorldPlanes.FootprintIsTheOldOccupancyBitForBit`); land cover reaches the Austin terrain's cells |
 | **G4b** | pycvc: `load_city_bundle`, `height_field` and `world_geometry`, so `pymod_gl/scenes.py`'s `terrain_grid` retires | Python reads the same terrain as C++ |
 | **G5** | Ariadne `physics:` and `body:` specs; Ariadne height fields are `cvc::height_field` (and `TerrainHeights` reads them instead of guessing a grid from a vertex count) | A scene spec puts a crate on a height field and it lands where the renderer draws the ground |
-| **G6** | Fields: `cvc::volume`s as physics media (below) | A box floats at the waterline its density predicts; a vehicle sinks into a snow field to the depth its load predicts; a body in a wind field drifts at the drag-balance speed |
+| **G6** | Fields: `cvc::volume`s as physics media (above); `world_geometry` volumes drawn as `VolumeNode`s and pushed as fields | Slabs of 300, 500 and 800 kg/m³ settle at drafts of 0.3, 0.5 and 0.8 of their height within 2 mm (measured 0.1199 and 0.3202 m against 0.12 and 0.32); a 10 kg box sinks into k = 2·10⁴ N/m³ to m g/(k A) within 1 mm; a ball in a 10 m/s wind without gravity follows v = w − 1/(1/w + k t) within 1 %; a field added over a sleeping body wakes it; the same run twice gives the same hash (`physics_field_test`) |
 
 P6a's pose binding (`pose_tracker`, `physics_scene_binding`) moves dynamic bodies. This plan covers
 everything static. A dynamic body's visual and collision geometry can be one `cvc::geometry` too,
