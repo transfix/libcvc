@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
@@ -86,57 +87,6 @@ std::string coerce_state_string(const value_t &v) {
   if (v.is_nil())
     return std::string();
   return to_string(v); // list/dict/symbol/closure — readable fallback
-}
-
-// Clone a value's compound structure (list/dict) so the caller gets a PRIVATE copy that does
-// not alias node-resident storage. Bounded and cycle-safe, mirroring values_equal / to_string
-// (it is the third structural walker and must not be the weak link): it MEMOIZES on the source
-// node pointer, so a shared-pointer DAG is copied in PHYSICAL time (the copy preserves the same
-// sharing, disjoint from the stored original) and a cycle terminates; it keeps the elements
-// still to copy on a heap stack, so any depth copies without native recursion; and it polls
-// the evaluation deadline so a huge payload aborts at the time budget instead of running to
-// completion in one native step.
-value_t deep_copy(const value_t &v) {
-  std::unordered_map<const void *, value_t> memo;
-  value_t result;
-  // (source, destination) pairs: each destination is a slot of a copy already allocated at its
-  // final size, so it stays put while the copy fills in.
-  std::vector<std::pair<const value_t *, value_t *>> pending{{&v, &result}};
-  while (!pending.empty()) {
-    if (eval_deadline_expired())
-      throw std::runtime_error("state-data-get: evaluation exceeded time budget");
-    auto [src, dst] = pending.back();
-    pending.pop_back();
-    if (auto *l = std::get_if<list_ptr>(&src->v); l && *l) {
-      auto found = memo.find(static_cast<const void *>(l->get()));
-      if (found != memo.end()) {
-        *dst = found->second; // shared node / cycle already copied -> reuse (bounds the walk)
-        continue;
-      }
-      auto out = std::make_shared<std::vector<value_t>>((*l)->size());
-      *dst = value_t{out};
-      memo.emplace(static_cast<const void *>(l->get()), *dst); // register BEFORE descending
-      for (std::size_t i = (*l)->size(); i-- > 0;)
-        pending.emplace_back(&(**l)[i], &(*out)[i]);
-    } else if (auto *dp = std::get_if<dict_ptr>(&src->v); dp && *dp) {
-      auto found = memo.find(static_cast<const void *>(dp->get()));
-      if (found != memo.end()) {
-        *dst = found->second;
-        continue;
-      }
-      auto out = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-      out->reserve((*dp)->size());
-      for (const auto &kv : **dp)
-        out->emplace_back(kv.first, value_t{});
-      *dst = value_t{out};
-      memo.emplace(static_cast<const void *>(dp->get()), *dst);
-      for (std::size_t i = (*dp)->size(); i-- > 0;)
-        pending.emplace_back(&(**dp)[i].second, &(*out)[i].second);
-    } else {
-      *dst = *src; // scalar / symbol / null (opaque callables are refused at state-data-set)
-    }
-  }
-  return result;
 }
 
 void require_root(const intrinsics_context *ctx, const char *name) {
@@ -249,7 +199,7 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   // place via append/set-nth, defeating the read-only contract). Genuine host data (any
   // other C++ type parked on the node) still comes back as a data_object.
   if (auto *v = boost::any_cast<value_t>(&d))
-    return deep_copy(*v);
+    return run_data_job(make_copy_job(*v));
   // A RAW std::string blob on the data channel reads back as the DSL `bytes` type (opaque octets),
   // NOT an opaque data_object. That raw representation is what state-data-set stores for a `bytes`
   // value, what the `?data` URI channel writes (uri_state.cpp), and what the §13.9 HTTP cache parks
@@ -461,6 +411,18 @@ value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
   return make_list(std::move(result));
 }
 
+// The budget-by-kind fields of `info`, as dict entries.
+static void append_budget_usage(std::vector<std::pair<std::string, value_t>> &entries,
+                                const process_info &info) {
+  entries.emplace_back("read_steps", value_t(static_cast<int64_t>(info.read_steps)));
+  entries.emplace_back("eval_steps", value_t(static_cast<int64_t>(info.eval_steps)));
+  entries.emplace_back("data_steps", value_t(static_cast<int64_t>(info.data_steps)));
+  entries.emplace_back("data_nodes", value_t(static_cast<int64_t>(info.data_nodes)));
+  entries.emplace_back("read_time", value_t(info.read_time));
+  entries.emplace_back("eval_time", value_t(info.eval_time));
+  entries.emplace_back("data_time", value_t(info.data_time));
+}
+
 value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "inspect");
   require_sched(ctx, "inspect");
@@ -483,6 +445,7 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   entries.emplace_back("uid", value_t(info->uid));
   entries.emplace_back("gid", value_t(info->gid));
   entries.emplace_back("steps", value_t(static_cast<int64_t>(info->step_count)));
+  append_budget_usage(entries, *info);
   entries.emplace_back("elapsed_time", value_t(info->elapsed_time));
   entries.emplace_back("memory", value_t(static_cast<int64_t>(info->current_memory)));
   entries.emplace_back("peak_memory", value_t(static_cast<int64_t>(info->peak_memory)));
@@ -554,6 +517,25 @@ value_t intrinsic_message_bytes_limit(intrinsics_context *ctx, std::span<const v
   if (!ctx->proc)
     return value_t(int64_t(0));
   return value_t(static_cast<int64_t>(ctx->proc->max_message_bytes));
+}
+
+// What the current process's budget went on: steps, seconds and deep-data nodes by kind (read,
+// eval, data), plus the total steps -- the same fields inspect reports for any pid.
+value_t intrinsic_budget_usage(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "budget-usage");
+  // The running process, as self-pid finds it: the scheduler's current one, else the context's.
+  process_info info{};
+  if (ctx->sched && ctx->sched->current_pid() >= 0) {
+    if (auto running = ctx->sched->get_process_info(ctx->sched->current_pid()))
+      info = *running;
+  } else if (ctx->proc) {
+    info.step_count = ctx->proc->step_count();
+    fill_budget_usage(info, ctx->proc->state.stats);
+  }
+  std::vector<std::pair<std::string, value_t>> entries;
+  entries.emplace_back("steps", value_t(static_cast<int64_t>(info.step_count)));
+  append_budget_usage(entries, info);
+  return make_dict(std::move(entries));
 }
 
 value_t intrinsic_step_count(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -872,6 +854,7 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("message-bytes", intrinsic_message_bytes);
   reg("message-bytes-limit", intrinsic_message_bytes_limit);
   reg("step-count", intrinsic_step_count);
+  reg("budget-usage", intrinsic_budget_usage);
 
   // System identity
   reg("cluster-id", intrinsic_cluster_id);

@@ -1208,6 +1208,12 @@ struct pycvc_py_conversion {
 // PYCVC_DEFAULT_EXCEPTION at its end.
 %include "pycvc_lod.i"
 
+// ── The world's one representation: height_field, world_geometry, city bundles ─
+// The same terrain, buildings and surface table the renderer, the physics world
+// and the navigator read in C++ (WORLD-GEOMETRY-ROADMAP.md, G4b). After geometry
+// (height_field derives from it) and pycvc_nav.i (land cover is cvc::nav's).
+%include "pycvc_world.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -1442,10 +1448,13 @@ class AsyncStateObserver(state_observer):
 // cvc::state&, Python passes a State (State.instance(app) is the root). Only
 // the declarations below are visible to SWIG; the parity doc lists what is
 // wrapped, what comes next, and what is deliberately not wrapped (the
-// coroutine API, the string_view-based parser class, ...).
+// coroutine API, the string_view-based parser class, ...). The deep-data
+// settings (data_options, data_options_from_state, "Deep data on the
+// executor") are wrapped the same way as the parser settings.
 %{
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
@@ -2370,12 +2379,15 @@ process_status = _pycvc.process_status
 scheduling_policy = _pycvc.scheduling_policy
 %}
 
-// eval_phase, and resource_policy::mode (pycvc.resource_policy.mode, set on the class below).
+// eval_phase, step_kind, and resource_policy::mode (pycvc.resource_policy.mode, set on the class
+// below).
 %{
 static PyObject *pycvc_enum_eval_phase = nullptr;
+static PyObject *pycvc_enum_step_kind = nullptr;
 static PyObject *pycvc_enum_resource_policy_mode = nullptr;
 %}
 PYCVC_STATE_EXEC_ENUM(cvc::state_exec::eval_phase, pycvc_enum_eval_phase, "eval_phase")
+PYCVC_STATE_EXEC_ENUM(cvc::state_exec::step_kind, pycvc_enum_step_kind, "step_kind")
 PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resource_policy_mode,
                       "resource_policy.mode")
 %init %{
@@ -2403,6 +2415,13 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resourc
          {"break_unwind", static_cast<int>(eval_phase::break_unwind)}});
     if (pycvc_enum_eval_phase != NULL)
       PyDict_SetItemString(d, "eval_phase", pycvc_enum_eval_phase);
+    using cvc::state_exec::step_kind;
+    pycvc_enum_step_kind =
+        pycvc_make_int_enum("step_kind", {{"eval", static_cast<int>(step_kind::eval)},
+                                          {"read", static_cast<int>(step_kind::read)},
+                                          {"data", static_cast<int>(step_kind::data)}});
+    if (pycvc_enum_step_kind != NULL)
+      PyDict_SetItemString(d, "step_kind", pycvc_enum_step_kind);
     using rp_mode = cvc::state_exec::resource_policy::mode;
     pycvc_enum_resource_policy_mode =
         pycvc_make_int_enum("mode", {{"strict", static_cast<int>(rp_mode::strict)},
@@ -2414,6 +2433,7 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resourc
 %}
 %pythoncode %{
 eval_phase = _pycvc.eval_phase
+step_kind = _pycvc.step_kind
 %}
 
 // ── parse_error: pycvc.parse_error, a RuntimeError with .line and .col ──
@@ -2633,9 +2653,15 @@ struct parse_options {
   size_t max_depth;   // lists and quotes that may nest (default 256)
   size_t step_tokens; // 0: parse at submit; N: read N tokens per process step
 };
+struct data_options {
+  size_t step_nodes; // 0: deep-data work in the step that needs it; N: N nodes per step
+};
 parse_options parse_options_from_state(cvc::state &root,
                                        const std::string &scheduler_id = std::string(),
                                        const parse_options &base = parse_options());
+data_options data_options_from_state(cvc::state &root,
+                                      const std::string &scheduler_id = std::string(),
+                                      const data_options &base = data_options());
 value_t parse(const std::string &input, const parse_options &opts = parse_options());
 std::vector<value_t> parse_all(const std::string &input,
                                const parse_options &opts = parse_options());
@@ -2711,13 +2737,22 @@ std::string percent_decode(const std::string &s);
 // states hand out references, which keep their owner alive in Python. evaluation_interrupted and
 // evaluation_timeout are pycvc exceptions (RuntimeError subclasses). The evaluators release the
 // GIL while they evaluate, so another thread can interrupt(), pause() or resume() them.
+// step_kind (#658) is an IntEnum: the steps and time are counted by kind.
+enum class step_kind;
 class evaluation_stats {
 public:
   evaluation_stats();
   void start();
   void mark_complete();
   void increment_step();
+  void increment_step(step_kind kind);
   unsigned long long get_step_count() const;
+  unsigned long long steps(step_kind kind) const;
+  step_kind last_step_kind() const;
+  void add_data_nodes(unsigned long long nodes);
+  unsigned long long data_nodes() const;
+  void add_step_time(double seconds);
+  double step_time(step_kind kind) const;
   bool is_complete() const;
   double elapsed_seconds() const;
 };
@@ -2774,6 +2809,7 @@ struct evaluator_state {
   evaluator::macro_map user_macros;
   bool yielded;
   std::shared_ptr<script_reader> reading;
+  size_t data_step_nodes;
 };
 %extend evaluator_state {
   evaluation_stats *_stats() { return &$self->stats; }
@@ -2893,6 +2929,14 @@ struct process_info {
   unsigned long long message_bytes;
   unsigned long long max_message_bytes;
   int parent_pid;
+  // The budget by kind of step (#658): reading the script, evaluating, deep-data work.
+  unsigned long long read_steps;
+  unsigned long long eval_steps;
+  unsigned long long data_steps;
+  unsigned long long data_nodes;
+  double read_time;
+  double eval_time;
+  double data_time;
 };
 %extend process_info {
   %pythoncode %{
@@ -3084,6 +3128,7 @@ public:
   std::string id() const;
   void load_settings();
   parse_options parser_settings() const;
+  data_options data_settings() const;
   unsigned long long max_alloc_bytes() const;
   static constexpr const char *settings_root = "state_exec";
   static constexpr const char *defaults_prefix = "state_exec.defaults";
@@ -3114,6 +3159,10 @@ public:
   void set_parser_defaults(const parse_options &defaults);
   parse_options parser_defaults() const;
   static parse_options host_parser_defaults();
+  void set_data_defaults(const data_options &defaults);
+  data_options data_defaults() const;
+  data_options data_settings() const;
+  static data_options host_data_defaults();
 };
 PYCVC_STATE_EXEC_SCHEDULER_EXTEND(async_scheduler)
 

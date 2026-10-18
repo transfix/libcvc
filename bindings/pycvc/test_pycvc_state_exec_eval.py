@@ -106,6 +106,26 @@ def test_stats_is_a_reference_that_keeps_its_owner():
     assert own.get_step_count() == 1 and own.is_complete()
 
 
+def test_stats_by_kind_of_step():
+    # #658 counts steps and time by kind: reading the script, evaluating, deep-data work.
+    kind = pycvc.step_kind
+    assert [k.name for k in kind] == ["eval", "read", "data"]
+    s = pycvc.evaluation_stats()
+    s.increment_step(kind.read)
+    s.increment_step(kind.read)
+    s.increment_step()  # eval, as in C++
+    assert (s.steps(kind.read), s.steps(kind.eval), s.get_step_count()) == (2, 1, 3)
+    assert s.last_step_kind() is kind.eval
+    s.add_step_time(0.25)  # charged to the last step's kind
+    s.add_data_nodes(5)
+    assert s.step_time(kind.eval) == 0.25 and s.step_time(kind.read) == 0.0
+    assert s.data_nodes() == 5
+    ev = pycvc.stackless_evaluator(_builtins())
+    st = ev.create_state("(+ 1 2)")
+    ev.run(st)
+    assert st.stats.steps(kind.eval) > 0 and st.data_step_nodes == 0
+
+
 def test_user_macros():
     ev = pycvc.evaluator(_builtins())
     assert ev.evaluate_script("(begin (defmacro double-it (x) (* x 2)) (double-it 21))") == 42

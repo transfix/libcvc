@@ -281,7 +281,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_nav_train:test_pycvc_nav_train.py
              pycvc_integration:test_pycvc_integration.py
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
-             pycvc_lod:test_pycvc_lod.py)
+             pycvc_lod:test_pycvc_lod.py
+             pycvc_world_geometry:test_pycvc_world_geometry.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
@@ -455,6 +456,12 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_world
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_world.py)
   set_tests_properties(pycvc_gl_world PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # The Lab draws a pycvc.height_field's own mesh; scenes.py loads bundles through
+  # the C++ loader (WORLD-GEOMETRY-ROADMAP.md, G4b). Headless.
+  add_test(NAME pycvc_gl_world_geometry
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_world_geometry.py)
+  set_tests_properties(pycvc_gl_world_geometry PROPERTIES ENVIRONMENT
     "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   # Dear ImGui overlay + state-bound ui panels: binding presence + an offscreen
   # overlay round-trip (self-skips without offscreen GL).

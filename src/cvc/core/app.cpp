@@ -1025,6 +1025,9 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
     // Read submitted scripts inside their processes, like pycvc's Exec (see host_parser_defaults
     // for why 1024 tokens a step). state_exec.defaults.parser.* on this tree overrides it.
     _execScheduler->set_parser_defaults(cvc::state_exec::async_scheduler::host_parser_defaults());
+    // Deep-data work a slice per step too (host_data_defaults); state_exec.defaults.data.*
+    // overrides it.
+    _execScheduler->set_data_defaults(cvc::state_exec::async_scheduler::host_data_defaults());
   }
   return *_execScheduler;
 }

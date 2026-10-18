@@ -42,9 +42,10 @@ private:
 /// state tree under `parser.*`; parse_options_from_state() reads them from there.
 struct parse_options {
   /// How many lists and quotes may nest (`'x` reads as `(quote x)`, one level); deeper input is
-  /// a parse_error. The parser itself is stackless, but code downstream still walks values
-  /// recursively (destroying a nested list, the snapshot codec, to_string), so this keeps parsed
-  /// data within what they can handle. State-tree key: `parser.max_depth`.
+  /// a parse_error. The parser is stackless, and so are freeing, printing, comparing, copying,
+  /// macro-expanding and snapshotting a value; what still walks values recursively (the Ariadne
+  /// loader's channel lint, which stops at 256 levels, and pycvc's value conversion) is what this
+  /// keeps parsed data within. State-tree key: `parser.max_depth`.
   std::size_t max_depth = 256;
 
   /// How a scheduler parses a submitted script. 0 parses all of it when it is submitted, so
