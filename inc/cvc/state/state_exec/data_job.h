@@ -143,26 +143,43 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
 /// throws. `who` names the caller in errors.
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who);
 
+/// As call_function, with `then` applied to the call's value: for a native function that has
+/// more to do after the call, such as a class constructor returning the new instance once init
+/// has run. The call is a one-call job either way (run_data_job), so `then` runs after the
+/// function finishes, however the evaluator ran it. `who` must outlive the call (a literal).
+value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who,
+                      std::function<value_t(value_t)> then);
+
 /// How native calls may nest on one thread's native stack. A level is a native function calling
 /// another function itself (apply, send, a class constructor running init, an inherited init
-/// running its superclass's, a job's call made where the job runs) or running a nested evaluator
-/// (a class method, a generator advancing). The evaluator applying a native function is not a
-/// level. A self-containing argument list, a class whose init is its own constructor, or a long
-/// enough chain of such calls asks for unbounded nesting, so a level is refused (it throws) past
-/// kMaxNativeNesting levels, or when less than kNativeStackReserve bytes of the thread's native
-/// stack are left (where the platform says where its stack ends). Levels cost from about 0.5 KiB
-/// (apply) to over 10 KiB (a class method's nested evaluator) in a release build.
+/// running its superclass's, a job's call made where the job runs) or stepping a generator's own
+/// evaluator. The evaluator applying a native function is not a level, and neither is a DSL
+/// function or class method: those run as evaluator frames, on the heap. A self-containing
+/// argument list, a class whose init is its own constructor, or a long enough chain of such calls
+/// asks for unbounded nesting, so a level is refused (it throws) past kMaxNativeNesting levels, or
+/// when less than kNativeStackReserve bytes of the thread's native stack are left (where the
+/// platform says where its stack ends). Levels cost from about 0.5 KiB (apply) to a few KiB (a
+/// generator's evaluator) in a release build.
 constexpr std::size_t kMaxNativeNesting = 256;
 
 /// The native stack a level leaves for the error it may throw. MSVC runs a catch block before
 /// unwinding the frames above it, so on Windows whatever catches the error (a scheduler killing
-/// the process, say) runs at the depth it was thrown from and needs this room; elsewhere a throw
-/// unwinds first and needs little.
+/// the process, say) runs at the depth it was thrown from and needs this room: a throw with 32 KiB
+/// left crashed in a test, 64 KiB did not, and this doubles that for heavier catch blocks.
+/// Elsewhere a throw unwinds first and needs little.
 #ifdef _WIN32
 constexpr std::size_t kNativeStackReserve = 128 * 1024;
 #else
 constexpr std::size_t kNativeStackReserve = 32 * 1024;
 #endif
+
+/// Advance `gen` as a job: each step of a DSL generator's own evaluator (or each value of a
+/// native one) is a node, so a generator body runs a slice per step of the process advancing
+/// it, counted against its budget, instead of to its next yield inside one step. The result is
+/// a one-element list holding the value yielded, or an empty list once the generator is
+/// exhausted. With `collect`, the job runs the generator to exhaustion and its result is the
+/// list of everything it yielded.
+std::unique_ptr<data_job> make_generator_job(generator_ptr gen, bool collect = false);
 
 /// Count `nodes` units of deep-data work done in the current evaluator step (a walk run to
 /// completion counts itself; the release backlog counts what it frees).

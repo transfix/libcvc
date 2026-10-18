@@ -270,15 +270,25 @@ decode.
 ### Native call nesting
 
 Some native functions call other functions themselves: `apply`, `send`, a class constructor
-running `init`, an inherited `init` running its superclass's. Some run a nested evaluator: a class
-method, a generator advancing. Each of these nests on the native stack, so a value or class that
-refers to itself could ask for unbounded nesting: `(apply apply L)` with `L` containing itself, or
-a class whose `init` is its own constructor. A level is refused with an error ("native calls nested
-too deeply") past 256 levels (`kMaxNativeNesting`), or when less of the thread's native stack is
-left than `kNativeStackReserve`: 128 KiB on Windows, where a catch block runs before the frames
-above it unwind, and 32 KiB elsewhere. Levels cost from about 0.5 KiB (`apply`) to over 10 KiB (a
-class method) in a release build. DSL functions calling DSL functions are not levels: they are
-evaluator frames on the heap.
+running `init`, an inherited `init` running its superclass's. A generator advancing steps an
+evaluator of its own. Each of these nests on the native stack, so a value or class that refers to
+itself could ask for unbounded nesting: `(apply apply L)` with `L` containing itself, or a class
+whose `init` is its own constructor. A level is refused with an error ("native calls nested too
+deeply") past 256 levels (`kMaxNativeNesting`), or when less of the thread's native stack is left
+than `kNativeStackReserve`: 128 KiB on Windows, where a catch block runs before the frames above
+it unwind, and 32 KiB elsewhere. Levels cost from about 0.5 KiB (`apply`) to a few KiB (a
+generator) in a release build.
+
+DSL functions are not levels, and neither are class methods. A method is a closure in its class's
+dict, taking `self` first. `send`, `super` and a constructor's `init` call it through the
+evaluator (`call_function`), so its body runs as frames of the calling process: on the heap, a
+step at a time, against the process's budget.
+
+**Generators.** A DSL generator's body runs on an evaluator of its own, but `next`, `collect` and
+`for` advance it as a job (`make_generator_job`). Each step of its body, or each value of a native
+generator like `range`, is a deep-data node. So with `data.step_nodes` = N, the body runs N
+steps per process step, in data steps, against `max_steps` and `max_time`. A generator's own
+deep-data work slices the same way.
 
 ### Budget by kind
 

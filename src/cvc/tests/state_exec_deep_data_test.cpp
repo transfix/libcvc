@@ -420,12 +420,13 @@ TEST_F(StateExecDeepDataCodec, BadSpillReferenceThrows) {
 // an inherited init running its superclass's) or runs a nested evaluator (a class method, a
 // generator) nests on the native stack. detail::native_nesting refuses a level past
 // kMaxNativeNesting levels or with less than kNativeStackReserve bytes of stack left, so a value or
-// class that refers to itself throws instead of overflowing. The runaway cases run on a 64 KiB
-// stack (wasm's default) and must throw, not crash; the legitimate ones run on 1 MiB, where the
-// heaviest levels (a class method's evaluator, over 10 KiB each) still fit.
+// class that refers to itself throws instead of overflowing. The runaway cases run on a stack only
+// 64 KiB bigger than the reserve, where the stack runs out first, and must throw, not crash; the
+// legitimate ones run on 1 MiB.
 
-constexpr std::size_t kWasmStackKiB = 64;
+constexpr std::size_t kSmallStackKiB = kNativeStackReserve / 1024 + 64;
 constexpr std::size_t kThreadStackKiB = 1024;
+constexpr std::size_t kWasmStackKiB = 64; // wasm's default stack
 
 // Run `body` on a thread with a `kib` stack.
 void on_stack(std::size_t kib, const std::function<void()> &body) {
@@ -451,7 +452,7 @@ value_t run_script(const std::string &script) {
 
 // Run `script` on a `kib` stack, expecting the nesting limit's error; returns the levels it
 // reports. Afterwards no level is left counted.
-std::size_t expect_nesting_limit(const std::string &script, std::size_t kib = kWasmStackKiB) {
+std::size_t expect_nesting_limit(const std::string &script, std::size_t kib = kSmallStackKiB) {
   std::size_t levels = 0;
   on_stack(kib, [&] {
     try {
@@ -508,15 +509,16 @@ TEST(StateExecNativeNesting, InheritedInitUpALongChain) {
   expect_nesting_limit(class_chain(10000) + " (K))");
 }
 
-TEST(StateExecNativeNesting, MethodsCallingMethods) {
-  // Each call of `down` runs on a nested evaluator and sends `down` again: the heaviest level.
+TEST(StateExecNativeNesting, MethodsCallingMethodsAreFrames) {
+  // A method is a closure: send calls it through call_function, so its body runs as frames of
+  // the calling evaluator, on the heap, and methods calling methods do not nest natively.
   const std::string cls = "(begin (defclass C (down (self n) (if (= n 0) 0 (+ 1 (send self "
                           "\"down\" (- n 1)))))) (set o (C)) ";
-  on_stack(kThreadStackKiB, [&] {
-    value_t r = run_script(cls + "(send o \"down\" 20))");
-    EXPECT_EQ(std::get<int64_t>(r.v), 20);
+  on_stack(kSmallStackKiB, [&] {
+    value_t r = run_script(cls + "(send o \"down\" 10000))");
+    EXPECT_EQ(std::get<int64_t>(r.v), 10000);
+    EXPECT_EQ(detail::native_nesting::depth(), 0u);
   });
-  expect_nesting_limit(cls + "(send o \"down\" 100000))");
 }
 
 TEST(StateExecNativeNesting, GeneratorsOfGenerators) {

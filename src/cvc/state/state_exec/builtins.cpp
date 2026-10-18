@@ -715,8 +715,15 @@ value_t builtin_next(std::span<const value_t> args) {
   auto *gp = std::get_if<generator_ptr>(&args[0].v);
   if (!gp || !*gp)
     throw std::runtime_error("next: expected generator");
-  auto result = generator_next(**gp);
-  return result ? *result : nil_value;
+  if ((*gp)->native_step) { // range and friends: one cheap value
+    auto result = generator_next(**gp);
+    return result ? *result : nil_value;
+  }
+  // A DSL generator's body runs as a job, a slice per step when the process slices.
+  return run_data_job(make_generator_job(*gp), [](value_t got) {
+    const auto &l = *std::get<list_ptr>(got.v);
+    return l.empty() ? nil_value : l.front();
+  });
 }
 
 value_t builtin_is_generator(std::span<const value_t> args) {
@@ -778,17 +785,10 @@ value_t builtin_collect(std::span<const value_t> args) {
   auto *gp = std::get_if<generator_ptr>(&args[0].v);
   if (!gp || !*gp)
     throw std::runtime_error("collect: expected generator");
-  std::vector<value_t> result;
-  while (auto next = generator_next(**gp)) {
-    // Draining an unbounded/huge generator (e.g. (collect (range 0 1e11))) runs entirely
-    // inside this one native step; honour the evaluation deadline so it aborts at the time
-    // budget instead of hanging/OOMing (a no-op when no deadline is armed).
-    if (eval_deadline_expired())
-      throw std::runtime_error("collect: evaluation exceeded time budget");
-    eval_alloc_check(alloc_bytes(result.size() + 1, sizeof(value_t)), "collect");
-    result.push_back(std::move(*next));
-  }
-  return make_list(std::move(result));
+  // Draining a generator is a job: a value (or a step of a DSL generator's body) is a node, so
+  // a huge or unbounded one (e.g. (collect (range 0 1e11))) spreads over the process's steps,
+  // within its budget, and the allocation limit checks every value kept.
+  return run_data_job(make_generator_job(*gp, true));
 }
 
 // ---------------------------------------------------------------------------

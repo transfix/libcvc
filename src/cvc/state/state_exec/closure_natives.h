@@ -13,16 +13,8 @@ namespace cvc::state_exec::detail {
 
 // Each drops what it holds through drop_owner, as value_t does: a class dict holds these natives,
 // and they hold the next class dict up the chain, so plain shared_ptr destructors would free a
-// long superclass chain with a native stack frame per class.
-
-/// A defclass method: runs `method` (self first, then the call's arguments) on a fresh evaluator
-/// over `global_env`.
-struct class_method {
-  closure_ptr method;
-  environment_ptr global_env;
-  value_t operator()(std::span<const value_t> args) const;
-  ~class_method() { drop_owner(method); }
-};
+// long superclass chain with a native stack frame per class. (A class's own methods are plain
+// closures in its dict.)
 
 /// A defclass constructor: a new instance dict whose __class__ is `cls_dict`, passed to the
 /// class's init method if it has one.
