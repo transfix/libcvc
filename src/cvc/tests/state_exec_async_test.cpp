@@ -175,6 +175,23 @@ TEST_F(AsyncEvaluatorTest, While) {
             10);
 }
 
+// A loop body of several forms runs them all, in order (they used to be dropped after the first).
+TEST_F(AsyncEvaluatorTest, LoopBodiesRunEveryForm) {
+  EXPECT_EQ(eval_int("(begin (set i 0) (set sum 0) "
+                     "  (while (< i 5) (set sum (+ sum i)) (set i (+ i 1))) "
+                     "  sum)"),
+            10);
+  EXPECT_EQ(eval_int("(begin (set sum 0) (set n 0) "
+                     "  (for x (list 1 2 3 4) (set sum (+ sum x)) (set n (+ n 1))) "
+                     "  (+ (* 100 n) sum))"),
+            410);
+}
+
+TEST_F(AsyncEvaluatorTest, IfAndReturnRejectExtraArguments) {
+  EXPECT_THROW(eval("(if t 1 2 3)"), std::runtime_error);
+  EXPECT_THROW(eval("(begin (defun f () (return 1 2)) (f))"), std::runtime_error);
+}
+
 TEST_F(AsyncEvaluatorTest, For) {
   EXPECT_EQ(eval_int("(begin (set sum 0) "
                      "  (for x (list 1 2 3 4 5) (set sum (+ sum x))) "
@@ -332,6 +349,23 @@ TEST_F(AsyncStacklessTest, While) {
                      "  (while (< i 5) (begin (set sum (+ sum i)) (set i (+ i 1)))) "
                      "  sum)"),
             10);
+}
+
+// A loop body of several forms runs them all, in order (they used to be dropped after the first).
+TEST_F(AsyncStacklessTest, LoopBodiesRunEveryForm) {
+  EXPECT_EQ(eval_int("(begin (set i 0) (set sum 0) "
+                     "  (while (< i 5) (set sum (+ sum i)) (set i (+ i 1))) "
+                     "  sum)"),
+            10);
+  EXPECT_EQ(eval_int("(begin (set sum 0) (set n 0) "
+                     "  (for x (list 1 2 3 4) (set sum (+ sum x)) (set n (+ n 1))) "
+                     "  (+ (* 100 n) sum))"),
+            410);
+}
+
+TEST_F(AsyncStacklessTest, IfAndReturnRejectExtraArguments) {
+  EXPECT_THROW(eval("(if t 1 2 3)"), std::runtime_error);
+  EXPECT_THROW(eval("(begin (defun f () (return 1 2)) (f))"), std::runtime_error);
 }
 
 TEST_F(AsyncStacklessTest, For) {

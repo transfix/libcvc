@@ -90,6 +90,18 @@ bool stackless_evaluator::step_read(evaluator_state &state) {
 }
 
 namespace {
+// A loop's body: the form at args[first], or, when there are several, all of them in order as a
+// (begin ...). A single-form body stays as it is, so its frames are what they always were.
+value_t loop_body(const std::vector<value_t> &args, std::size_t first) {
+  if (args.size() == first + 1)
+    return args[first];
+  std::vector<value_t> forms;
+  forms.reserve(1 + args.size() - first);
+  forms.emplace_back(symbol{"begin"});
+  forms.insert(forms.end(), args.begin() + static_cast<std::ptrdiff_t>(first), args.end());
+  return make_list(std::move(forms));
+}
+
 // RAII: while alive, the native call a step applies may leave deep-data work behind
 // (run_data_job), in the step's data scope.
 struct native_call_scope {
@@ -497,8 +509,10 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
 
   // --- Special forms ---
   if (name == "if") {
-    if (args.size() < 2)
-      throw std::runtime_error("if: expected at least 2 args");
+    if (args.size() < 2 || args.size() > 3)
+      throw std::runtime_error("if: expected a condition, a then branch and an optional else "
+                               "branch, got " +
+                               std::to_string(args.size()) + " args");
     frame.phase = eval_phase::if_cond;
     frame.extra_vals = std::move(args);
     push_frame(state, frame.extra_vals[0], env);
@@ -517,21 +531,21 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "while") {
     if (args.size() < 2)
-      throw std::runtime_error("while: expected 2 args");
+      throw std::runtime_error("while: expected a condition and a body");
     frame.phase = eval_phase::while_cond;
-    frame.extra_vals = std::move(args); // [0]=cond, [1]=body
+    frame.extra_vals = {args[0], loop_body(args, 1)}; // [0]=cond, [1]=body
     push_frame(state, frame.extra_vals[0], env);
     return;
   }
   if (name == "for") {
     if (args.size() < 3)
-      throw std::runtime_error("for: expected 3 args");
+      throw std::runtime_error("for: expected a variable, a collection and a body");
     auto *var_sym = std::get_if<symbol>(&args[0].v);
     if (!var_sym)
       throw std::runtime_error("for: first arg must be symbol");
     frame.phase = eval_phase::for_body;
     frame.extra_strs = {var_sym->name};
-    frame.extra_vals = {args[2]};    // body expression
+    frame.extra_vals = {loop_body(args, 2)}; // body expression
     frame.extra_lists = {};          // will hold iterator
     frame.index = -1;                // -1 = still evaluating collection
     push_frame(state, args[1], env); // evaluate collection
@@ -581,20 +595,22 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     return;
   }
   if (name == "return") {
-    if (args.empty())
-      throw std::runtime_error("return: expected 1 arg");
+    if (args.size() != 1)
+      throw std::runtime_error("return: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::return_value;
     push_frame(state, args[0], env);
     return;
   }
   if (name == "yield") {
-    if (args.empty())
-      throw std::runtime_error("yield: expected 1 arg");
+    if (args.size() != 1)
+      throw std::runtime_error("yield: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::yield_value;
     push_frame(state, args[0], env);
     return;
   }
   if (name == "break") {
+    if (args.size() > 1)
+      throw std::runtime_error("break: expected at most 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::break_unwind;
     if (args.empty()) {
       // (break) — no value, use nil

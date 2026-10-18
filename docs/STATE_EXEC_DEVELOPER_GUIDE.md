@@ -104,10 +104,10 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 | `set` | `(set x 42)` | Bind a variable |
 | `defun` | `(defun name (params...) body...)` | Define a named function |
 | `lambda` | `(lambda (x y) (+ x y))` | Anonymous function |
-| `if` | `(if cond then [else])` | Conditional |
+| `if` | `(if cond then [else])` | Conditional; more than one else form is an error |
 | `begin` | `(begin e1 e2 ... en)` | Sequence; returns last value |
-| `while` | `(while cond body)` | Loop while condition is true |
-| `for` | `(for x collection body)` | Iterate over a list or generator |
+| `while` | `(while cond body...)` | Loop while condition is true; the body forms run in order, as a `begin`; the loop's value is nil (or `break`'s) |
+| `for` | `(for x collection body...)` | Iterate over a list or generator; the body forms run in order, as a `begin` |
 | `let` | `(let ((x 1) (y 2)) (+ x y))` | Local bindings |
 | `quote` | `(quote (1 2 3))` | Return expression unevaluated |
 | `return` | `(return expr)` | Early return from a function |
@@ -117,6 +117,11 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 | `eval` | `(eval expr)` | Evaluate a quoted expression |
 | `defclass` | `(defclass Name ...)` | OOP class definition |
 | `root` | `(root)` | Returns the root expression |
+
+Extra arguments are an error, not ignored: `(if c a b d)`, `(return a b)`, `(yield a b)` and
+`(break a b)` throw, naming the form. Until 2026-10 `while` and `for` ran only their first body
+form and `if` dropped forms after its else branch, silently; scripts that wrapped a loop body in
+`(begin ...)` behave exactly as before.
 | `super` | `(super self method args...)` | Call parent class method |
 
 ### Built-in Functions
