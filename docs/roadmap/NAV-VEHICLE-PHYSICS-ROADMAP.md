@@ -283,4 +283,13 @@ P4 adds three things to measure and contain the drift:
     - grl-snam-dbg `gen-episodes` / `eval` on Jolt, a `KinematicsRecord` schema bump and
       energy in the scorecards;
     - cvcdbg `--plant` / `--vehicle` / `--clock` and the HUD.
-- **P7–P8** are not started.
+- **P7 done.** A native trace gives the same `state_hash` at every step in wasm-mt under node.
+  - The trace is 1240 steps: the golden scene, a Humvee, and a RoboRacer in mud and by water
+    (`physics_replay_test`, CI job `physics-wasm`).
+  - The wasm-mt publish now installs `joltphysics` (the recipe already declared it), and fails if
+    the build loses Jolt.
+  - Getting there took two fixes. The first: Jolt's wheels hashed uninitialized contact fields
+    until they first landed. The second: libm's tan, atan, tanh, expm1, pow, sin, cos, atan2 and
+    asin, which differ by an ULP between libms, were replaced by `det_math.h` in everything that
+    feeds the hash.
+- **P8** is in progress (P8b's first item merged); P8a and P8c are not started.

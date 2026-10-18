@@ -146,6 +146,34 @@ The physics headers stay standard-library only by forward-declaring the two type
 - **Capabilities:** with `determinism::cross_platform`, the Jolt build must be cross-platform
   deterministic (it is, from 5.6.0+cvc.5); otherwise construction throws. 1 thread and N threads
   give the same hash (`physics_world_test`).
+- **Across platforms:** the same calls give the same `state_hash()` on every target, wasm
+  included, vehicles and fields too, not only the engine's bodies.
+  - `physics_replay_test` replays a checked-in trace, `src/cvc/tests/data/physics_replay_trace.json`,
+    and requires the hash after every step. The trace was recorded on Windows (MSVC, x86_64) and
+    has 1240 steps in three scenes:
+    - the golden scene;
+    - a Humvee through the driver model, across a rebase;
+    - a RoboRacer on raw pedals over two terrain materials, through mud that keeps ruts, past a
+      crate floating in water.
+  - It runs natively under ctest on every CI platform, and as wasm-mt under node in CI's
+    `physics-wasm` job.
+  - To build it for wasm without the test tree, configure with `CVC_BUILD_PHYSICS_REPLAY=ON`,
+    then run `node physics_replay_test.js <trace>`.
+  - After a change that is meant to move the physics, record the trace again with
+    `physics_replay_test --record <trace>`. A platform that disagrees with the trace has found a
+    determinism leak. Fix the leak; never record a trace per platform.
+- **What keeps it so:**
+  - Jolt's own cross-platform build.
+  - No libm in anything that feeds the hash. libm's transcendentals are not correctly rounded,
+    and MSVC's, glibc's, Apple's and musl's (emscripten) each miss in their own cases by an ULP.
+    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call
+    `src/cvc/physics/det_math.h`. It computes sin, cos, tan, atan, atan2, asin, tanh, expm1 and
+    cbrt from correctly rounded operations, to within a few ULP; `physics_det_math_test` pins
+    their bits.
+  - No FMA contraction in those sources (`-ffp-contract=off`, `/fp:precise`).
+  - Wheels whose contact fields start defined. Jolt leaves them uninitialized until a wheel first
+    lands, but saves them every step, so before this every vehicle hashed garbage for its first
+    steps, and two identical runs disagreed.
 - **Restoring:** `save()` returns the state as bytes. `restore()` takes them on a world holding the
   same bodies, created in the same order, with the same materials. A restored world continues
   exactly as the original did.
