@@ -50,6 +50,7 @@
 #include <vector>
 
 namespace cvc {
+class app;         // the state tree's owner (pull / publish)
 class thread_pool; // injected fork-join executor for step()
 namespace nav {
 
@@ -431,6 +432,35 @@ public:
   // Ticks each agent's footprint (the rear axle, or each body disc) touched an infeasible cell,
   // since set_terrain; [size()], or null without terrain.
   const int *infeasible_entries() const { return terrain_on_ ? ter_entries_.data() : nullptr; }
+
+  // ── the state tree ────────────────────────────────────────────────────────
+  // The world binds its own settings, as cvc::physics' world_binding and nav_plant do. Lengths,
+  // speeds and accelerations there are in nav's world frame (metres), not the normalized one
+  // (normalized = world x config.scale). The live settings, read by pull() and seeded with the
+  // world's values when unset (an invalid value is ignored):
+  //   <prefix>.nav.{range_m, n_rays, fov_rad, sense_every, freeze_sense, l_occ, l_free,
+  //     optimistic, p_thresh, band, ttl_s, reach_tol, sep_radius, sep_gain, min_gap,
+  //     min_gap_iters}   sensing, belief, arrival and the crowd (set_live_knobs' set)
+  //   <prefix>.nav.vehicle.{vmax, a_max, a_lat_max, wheelbase, delta_max, track_width,
+  //     k_steer, nsub, allow_reverse, rr, d_hat, body_rr, body_gain, mass, mu_lookahead,
+  //     mu_probes}   veh_params' scalars; a per-agent column (set_vehicle_kinematics,
+  //     set_vehicle_radii, set_vehicle_mass) overrides its scalar
+  //   <prefix>.nav.material.{lam_soft, lam_hard, lam_soft_scale, lam_hard_scale}   with a
+  //     material (set_material)
+  //   <prefix>.nav.terrain.{max_grade, tip_ratio, tip_margin, sigma, lam_grade, lam_grade_hard,
+  //     k_sharp, d_hat_m, block_infeasible, governors}   with a terrain; a change rebuilds its
+  //     planes (set_terrain_config)
+  // and what is fixed or measured, written by publish():
+  //   <prefix>.nav.settings.{rows, cols, min_x, min_y, max_x, max_y, cx, cy, scale, l_clamp, dt,
+  //     agents, planes, plant}
+  //   <prefix>.nav.{tick, terrain.active}, and with a terrain <prefix>.nav.terrain.{gravity,
+  //     limit, infeasible_cells}
+  // Every key says what it is (cvc/state/state_key_meta.h): a comment and the properties access,
+  // unit and, on a knob, a recommended min and max. Call both between steps, on the thread that
+  // steps the world. A plant's own knobs are its own (nav_plant::pull), and the episode's
+  // stats are nav_stats' (cvcGL's publish_nav_stats).
+  void pull(cvc::app &ctx, const std::string &prefix);
+  void publish(cvc::app &ctx, const std::string &prefix) const;
 
   // ── base nav_stats (opt-in internal collector, cvc/nav/nav_stats.h) ───────
   // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as

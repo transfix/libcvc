@@ -26,6 +26,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
   ../../inc/cvc/state/state.h
+  ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
   ../../inc/cvc/state/state_subscription_router.h
   ../../inc/cvc/state/state_sync_adapter.h
@@ -67,7 +68,6 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/physics/nav_plant.h
-  ../../inc/cvc/physics/nav_terrain_binding.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -209,6 +209,7 @@ set(SOURCE_FILES
   volume/spider_io.cpp
   state/state.cpp
   state/state_json.cpp
+  state/state_key_meta.cpp
   state/state_list.cpp
   state/state_eviction_store.cpp
   state/state_memory_manager.cpp
@@ -247,7 +248,6 @@ set(SOURCE_FILES
   physics/pose_tracker.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
-  physics/nav_terrain_binding.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -302,6 +302,7 @@ set(SOURCE_FILES
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
   nav/sim_world.cpp
+  nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   lod/select.cpp

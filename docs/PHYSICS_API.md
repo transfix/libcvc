@@ -23,7 +23,6 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 | `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
-| `cvc/physics/nav_terrain_binding.h` | A `sim_world`'s terrain (P5) in the state tree |
 
 The physics headers include only the standard library, except:
 
@@ -556,7 +555,6 @@ Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 uni
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/terrain.h>
 #include <cvc/physics/nav_plant.h>
-#include <cvc/physics/nav_terrain_binding.h>
 
 // heights: the sim grid's rows x cols in metres, row 0 at min_y
 cvc::nav::terrain_config tc = cvc::physics::nav_plant::terrain_config_of(desc); // its limits
@@ -627,18 +625,16 @@ cell (the rear axle, or each body disc). `nav_stats` carries the count as
 a terrain is set. `set_terrain_config(tc)` rebuilds the planes from the same heights, keeping
 the counts.
 
-**The state tree.** nav itself does not touch the state tree. Its terrain binds from the physics
-side, as the plant does:
+**The state tree.**
 
-- `pull_nav_terrain(ctx, prefix, sim)` reads the knobs:
-  - `<prefix>.nav_terrain.{max_grade, tip_ratio, tip_margin, sigma}`;
-  - `<prefix>.nav_terrain.{lam_grade, lam_grade_hard, k_sharp, d_hat_m}`;
-  - `<prefix>.nav_terrain.{block_infeasible, governors}`.
+- `sim_world::pull` (below, "sim_world's settings in the state tree") reads the terrain's knobs:
+  - `<prefix>.nav.terrain.{max_grade, tip_ratio, tip_margin, sigma}`;
+  - `<prefix>.nav.terrain.{lam_grade, lam_grade_hard, k_sharp, d_hat_m}`;
+  - `<prefix>.nav.terrain.{block_infeasible, governors}`.
 
   They are seeded with the world's values. A change rebuilds the planes, and an invalid value
   is ignored.
-- `publish_nav_terrain(ctx, prefix, sim)` writes `<prefix>.nav_terrain.{active, gravity, limit,
-  infeasible_cells}`.
+- `sim_world::publish` writes `<prefix>.nav.terrain.{active, gravity, limit, infeasible_cells}`.
 - `nav_plant::pull` reads `<prefix>.nav_plant.modulation.{tire_onset, tire_gain, tip_onset,
   tip_gain}`.
 - `nav_plant::publish` adds each vehicle's `nav.{tire_use, load_transfer, pitch_rad, roll_rad}`.
@@ -670,6 +666,48 @@ Also measured:
 
 Open: GRL-SNAM's Python twin of H1 and H5, a coefficient net retrained on the slope feature (H3),
 and H3 in the CUDA drive.
+
+### sim_world's settings in the state tree
+
+A `sim_world` binds its own settings, as `world_binding` and `nav_plant` do:
+
+```cpp
+sim.pull(app, "scene");    // between steps: the tree's knobs into the world
+sim.step();
+sim.publish(app, "scene"); // the fixed settings and the tick
+```
+
+Lengths, speeds and accelerations in the tree are in nav's world frame (metres), not the
+normalized one (normalized = world × `config.scale`). So `nav.vehicle.vmax` is in m/s whatever
+metric the net was trained in.
+
+`pull()` reads these knobs. Each is seeded with the world's value when unset, applied when it
+changes, and ignored when invalid:
+
+- `<prefix>.nav.{range_m, n_rays, fov_rad, sense_every, freeze_sense, l_occ, l_free, optimistic,
+  p_thresh, band, ttl_s, reach_tol, sep_radius, sep_gain, min_gap, min_gap_iters}`: sensing,
+  belief, arrival and the crowd (`set_live_knobs`' set);
+- `<prefix>.nav.vehicle.{vmax, a_max, a_lat_max, wheelbase, delta_max, track_width, k_steer,
+  nsub, allow_reverse, rr, d_hat, body_rr, body_gain, mass, mu_lookahead, mu_probes}`:
+  `veh_params`' scalars. A per-agent column (`set_vehicle_kinematics` and the like) overrides
+  its scalar;
+- `<prefix>.nav.material.{lam_soft, lam_hard, lam_soft_scale, lam_hard_scale}`, once a material
+  is set;
+- `<prefix>.nav.terrain.*`, once a terrain is set (above).
+
+`publish()` writes:
+
+- `<prefix>.nav.settings.{rows, cols, min_x, min_y, max_x, max_y, cx, cy, scale, l_clamp, dt,
+  agents, planes, plant}`, fixed when the world is built;
+- `<prefix>.nav.tick`;
+- `<prefix>.nav.terrain.active`, and with a terrain its telemetry.
+
+A plant's knobs stay the plant's (`nav_plant.*`), and the episode's stats stay nav_stats'.
+
+Every key says what it is in `cvc/state/state_key_meta.h`'s form, the one `world_binding` and
+`nav_plant` use: a comment, `access` (build, knob, command or telemetry), `unit` and, on a knob,
+a recommended `min` and `max`. `describe_state_keys(ctx, base, table)` describes a table of keys
+for any binding.
 
 ## Static world geometry: `add_world_geometry`
 

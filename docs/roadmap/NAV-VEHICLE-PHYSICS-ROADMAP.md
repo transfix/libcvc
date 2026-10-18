@@ -259,8 +259,13 @@ P4 adds three things to measure and contain the drift:
     - over a 12 m hill, 7826 kJ/km against 15403 for a path 1.44 × as long;
     - 0 ticks on a 1.2 ridge;
     - round a 30 m circle on μ 0.7, mean tire use 0.79 against 1.36 with the modulator.
-  - The terrain and modulation knobs, the per-vehicle measured state and the infeasible-slope
-    counts are in the state tree (`nav_terrain.*`, `nav_plant.modulation.*`, `nav_stats`).
+  - The state tree:
+    - `sim_world` binds its own settings (`sim_world::pull` / `publish`) under `nav.*`: sensing,
+      belief, the crowd, the vehicle's scalars in metres, the material weights and the terrain.
+    - `nav_plant` binds the modulation knobs (`nav_plant.modulation.*`) and each vehicle's measured
+      state.
+    - `nav_stats` counts entries onto infeasible slope.
+    - Key metadata is one shared form, `cvc/state/state_key_meta.h`.
   - Open: GRL-SNAM's Python twin of H1/H5; a net retrained on the slope feature; H3 in the CUDA
     drive.
 - **P6–P8** are not started.

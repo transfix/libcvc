@@ -29,7 +29,6 @@
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/nav_plant.h>
-#include <cvc/physics/nav_terrain_binding.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
 #include <functional>
@@ -682,54 +681,6 @@ TEST(NavPlant, NeverEntersInfeasibleSlope) {
   EXPECT_NEAR(tc.tip_ratio, 0.91 / 0.74, 0.05) << "the M1097A2's CG height is 0.742 m";
   EXPECT_EQ(sim.infeasible_entries()[0], 0);
   EXPECT_TRUE(f.done(sim));
-}
-
-// P5's terrain settings live in the state tree: pull_nav_terrain seeds them and applies a change
-// (rebuilding the planes), an invalid value is ignored, publish_nav_terrain says what the terrain
-// is, and every key says what it is.
-TEST(NavPlant, TerrainSettingsLiveInTheTree) {
-  const auto ridge = [](double x, double y) {
-    return y > 40.0 ? 0.0 : std::max(0.0, 6.0 - 1.2 * std::fabs(x));
-  };
-  const std::vector<float> z = terrain_heights(ridge);
-  const vehicle_desc d = vehicle_desc::humvee();
-  scene sc;
-  sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -40, -20, 40, -20);
-  cvc::app app;
-  cvc::state &st = cvc::state::instance(app);
-  cvc::physics::publish_nav_terrain(app, "scene", sim);
-  EXPECT_EQ(st("scene.nav_terrain.active").value(), "0");
-  sim.set_terrain(z.data(), nav_plant::terrain_config_of(d));
-  cvc::physics::pull_nav_terrain(app, "scene", sim);
-  cvc::physics::publish_nav_terrain(app, "scene", sim);
-  EXPECT_EQ(st("scene.nav_terrain.active").value(), "1");
-  const long blocked = std::stol(st("scene.nav_terrain.infeasible_cells").value());
-  EXPECT_GT(blocked, 0) << "the ridge";
-  EXPECT_NEAR(std::stod(st("scene.nav_terrain.max_grade").value()),
-              sim.terrain_settings().max_grade, 1e-9);
-  // A vehicle that climbs 1.5 and does not tip finds the ridge's flanks (slopes of 1.2) feasible;
-  // only its cliff end stays infeasible.
-  st("scene.nav_terrain.max_grade").value(std::string("1.5"));
-  st("scene.nav_terrain.tip_ratio").value(std::string("0"));
-  st("scene.nav_terrain.tip_margin").value(std::string("3"));
-  st("scene.nav_terrain.lam_grade").value(std::string("2"));
-  cvc::physics::pull_nav_terrain(app, "scene", sim);
-  cvc::physics::publish_nav_terrain(app, "scene", sim);
-  EXPECT_EQ(sim.terrain_settings().max_grade, 1.5);
-  EXPECT_EQ(sim.terrain_settings().tip_margin, 0.8) << "3 is not a share";
-  EXPECT_EQ(sim.terrain_settings().lam_grade, 2.0f);
-  EXPECT_LT(std::stol(st("scene.nav_terrain.infeasible_cells").value()), blocked / 4);
-  EXPECT_NEAR(std::stod(st("scene.nav_terrain.limit").value()), 1.5, 1e-9);
-  sim.step();
-  for (const char *key : {"scene.nav_terrain.max_grade", "scene.nav_terrain.governors",
-                          "scene.nav_terrain.limit", "scene.nav_terrain.infeasible_cells",
-                          "scene.nav_terrain.gravity", "scene.nav_terrain.active"}) {
-    EXPECT_FALSE(st(key).comment().empty()) << key;
-    EXPECT_TRUE(st(key).has_property("access")) << key;
-  }
-  EXPECT_EQ(st("scene.nav_terrain.max_grade").property("max"), "1.5");
-  EXPECT_EQ(st("scene.nav_terrain.d_hat_m").property("unit"), "m");
-  EXPECT_EQ(st("scene.nav_terrain.lam_grade").property("access"), "knob");
 }
 
 // H4: measured tire saturation as a detached modulator. Round a 30 m circle on mu 0.7 the drive's

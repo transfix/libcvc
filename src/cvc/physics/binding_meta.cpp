@@ -289,12 +289,6 @@ const key_meta kField[] = {
     {"traction", "knob", "1", 0, 2, "A medium's own tire grip, mu; 0 = the ground's."},
 };
 
-std::string num(double v) {
-  char b[32];
-  std::snprintf(b, sizeof(b), "%.10g", v);
-  return b;
-}
-
 std::string join(const std::string &base, const char *key) {
   return base.empty() ? std::string(key) : base + "." + key;
 }
@@ -308,19 +302,7 @@ void describe_all(cvc::app &ctx, const std::string &base, const key_meta (&t)[K]
 } // namespace
 
 void describe(cvc::app &ctx, const std::string &path, const key_meta &m) {
-  try {
-    cvc::state &s = cvc::state::instance(ctx)(path);
-    s.comment(m.comment);
-    s.property("access", m.access);
-    if (m.unit)
-      s.property("unit", m.unit);
-    if (std::isfinite(m.min))
-      s.property("min", num(m.min));
-    if (std::isfinite(m.max))
-      s.property("max", num(m.max));
-  } catch (const std::exception &) {
-    // a read-only or unreachable node keeps its metadata
-  }
+  cvc::describe_state_key(ctx, path, m);
 }
 
 void describe_world(cvc::app &ctx, const std::string &base) { describe_all(ctx, base, kWorld); }
