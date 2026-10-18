@@ -38,6 +38,7 @@ enum capability : std::uint32_t {
   cap_determinism_same_binary = 1u << 6,    // same build, same inputs -> same state
   cap_determinism_cross_platform = 1u << 7, // ... on every platform the build targets
   cap_exact_save_restore = 1u << 8,         // restore + re-run reproduces the original run
+  cap_vehicles = 1u << 9,                   // wheeled vehicles (vehicle.h)
 };
 
 const char *backend_name(backend b);

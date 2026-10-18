@@ -51,6 +51,7 @@
 #include <cvc/physics/field.h>
 #include <cvc/physics/shape.h>
 #include <cvc/physics/types.h>
+#include <cvc/physics/vehicle.h>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -214,6 +215,24 @@ public:
   // What the fields did to `id` in the last step: zero for a body no field
   // touched, and for a static, kinematic or sleeping body.
   field_load field_load_on(body_id id) const;
+
+  // --- vehicles (vehicle.h) ----------------------------------------------------
+
+  // A wheeled vehicle with its chassis's origin at `position`. Throws cvc::physics_error for
+  // a description it refuses (no axles, a steered axle with nothing behind it, values that
+  // are not finite or out of range) and cvc::unsupported_exception on a backend without
+  // cap_vehicles. Its chassis is a body (vehicle_state::chassis): world::state reads it, and
+  // world::remove_body refuses it (remove the vehicle instead).
+  vehicle_id add_vehicle(const vehicle_desc &d, const vec3 &position, const quat &rotation = {});
+  void remove_vehicle(vehicle_id id);
+  std::size_t vehicle_count() const;
+  // From the next step on: the navigator's command, through the driver model...
+  void drive(vehicle_id id, const drive_command &c);
+  // ... or pedals of your own, past it. The steering goes through the actuator either way.
+  void set_controls(vehicle_id id, const vehicle_controls &c);
+  // The chassis, the actuator, the pedals the last step applied, the powertrain and every
+  // wheel, from the last step.
+  physics::vehicle_state vehicle_state(vehicle_id id) const;
 
   // --- time -----------------------------------------------------------------
 

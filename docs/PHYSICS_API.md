@@ -16,6 +16,8 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/body.h` | `body_desc`, `body_state` |
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
+| `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load` |
+| `cvc/physics/vehicle.h` | `vehicle_desc` (with `humvee()`, `roboracer()`), `drive_command`, `vehicle_controls`, `vehicle_state`, `wheel_state` |
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
 | `cvc/physics/pose_tracker.h` | `pose_tracker`, `pose`, `interpolate()`, `pose_matrix()`: the last two states, for a view |
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
@@ -136,6 +138,53 @@ running world from many threads without waiting, read the telemetry a `world_bin
 Jolt's process globals (allocator hooks, factory, type registry) exist while at least one Jolt
 world does. The first world sets them up and the last one tears them down. If the application set
 up Jolt itself, that setup is used and left in place. libcvc keeps no singleton of its own.
+
+## Vehicles
+
+```cpp
+#include <cvc/physics/world.h>
+
+cvc::physics::world w;                                   // Jolt (cap_vehicles)
+const auto car = w.add_vehicle(cvc::physics::vehicle_desc::humvee(), {0, 0, 1.2});
+w.drive(car, {0.2, 1.5});        // the navigator's command: steer 0.2 rad left, a_cmd 1.5 m/s^2
+w.step();
+const auto s = w.vehicle_state(car); // speed, steer, pedals, gear, rpm, aero, every wheel
+```
+
+A vehicle is a chassis body (a box with its centre of mass offset) on wheels that Jolt's vehicle
+model rolls over the world's bodies. The chassis frame is x forward, y left, z up.
+
+- **Wheels.** Each axle is a left and right wheel (wheel 2a is the left one of axle a).
+  - Each wheel hangs on its own suspension: a spring-damper given by frequency and damping
+    ratio, with travel from `suspension_min` to `suspension_max` and a hard stop.
+  - An optional anti-roll bar couples an axle's two wheels.
+  - `wheel_state` reads back each wheel's steer, spin, suspension length, contact, load, slip,
+    the μ it used, and what the medium did to it.
+- **Steering.** `drive` and `set_controls` name the bicycle angle at the centre of the front
+  axle.
+  - An actuator slews it toward the command at `max_steer_rate`, clamped to `max_steer`.
+  - Each steered wheel takes its Ackermann angle about the rear axle:
+    `cot(δ_out) − cot(δ_in) = track / wheelbase`.
+- **The driver model.** `drive` turns `a_cmd` into throttle or brake, never both: a
+  feed-forward on `max_accel` / `max_decel`, corrected by the measured acceleration.
+  - The transmission shifts on its own; `reverse` backs up.
+  - A vehicle moving the wrong way brakes first, and one at rest with no command holds.
+  - `set_controls` takes pedals directly (and `neutral`).
+- **Tires.** Slip curves peak at 1.0 times the μ of what the tire touches: the material of the
+  terrain cell or mesh face under it, the table every plant reads.
+- **Resistance**, applied to the chassis each step from the last step's wheels:
+  - aero, −½ ρ C_d A |u| u, with u relative to a flow field's wind where one covers the chassis
+    (a vehicle's chassis is not dragged by flow fields otherwise);
+  - rolling, C_rr times each wheel's load, with C_rr from the ground material's
+    `rolling_resistance` (the vehicle's own when the material has none).
+- **Snow, mud and sand.** In a medium field (`field.h`), a wheel sinks to the rigid-wheel Bekker
+  depth for its load: z = (3N / (2 b k √D))^(2/3), at most the medium's depth.
+  - It rides on the compacted surface, depth − z above the ground; a vehicle landing on deep
+    snow lands on the snow.
+  - It is held back by the compaction resistance b k z² / 2.
+  - Its tires get the medium's `traction`, if it has one.
+- **Save and restore** carry the actuators and the driver's memory, so a replay reproduces a
+  drive (`physics_vehicle_test`).
 
 ## Static world geometry: `add_world_geometry`
 
