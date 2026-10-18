@@ -48,6 +48,7 @@
 #include <cstdint>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/body.h>
+#include <cvc/physics/field.h>
 #include <cvc/physics/shape.h>
 #include <cvc/physics/types.h>
 #include <memory>
@@ -196,6 +197,23 @@ public:
   void add_impulse(body_id id, const vec3 &impulse);
   // Drive a kinematic body so it reaches this pose at the end of the next step.
   void move_kinematic(body_id id, const vec3 &position, const quat &rotation);
+
+  // --- fields (field.h) -----------------------------------------------------
+
+  // A region of water, snow or wind that pushes on the dynamic bodies inside it,
+  // from the next step on. Wakes the bodies in its box. Throws cvc::physics_error
+  // for a field without a volume, a volume without voxels or with a flat box,
+  // values that are not finite (or are negative), one or two velocity components,
+  // or coefficients that are not finite and >= 0.
+  field_id add_field(const field &f);
+  // New values for a field (a different volume, a stronger wind). Wakes the bodies
+  // in its old and new boxes.
+  void set_field(field_id id, const field &f);
+  void remove_field(field_id id);
+  std::size_t field_count() const;
+  // What the fields did to `id` in the last step: zero for a body no field
+  // touched, and for a static, kinematic or sleeping body.
+  field_load field_load_on(body_id id) const;
 
   // --- time -----------------------------------------------------------------
 

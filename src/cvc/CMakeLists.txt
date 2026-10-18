@@ -57,6 +57,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/unit_registry.h
   ../../inc/cvc/physics/types.h
   ../../inc/cvc/physics/shape.h
+  ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/body.h
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
@@ -226,6 +227,7 @@ set(SOURCE_FILES
   core/world_units.cpp
   core/unit_registry.cpp
   physics/world.cpp
+  physics/field_step.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
   physics/world_geometry.cpp

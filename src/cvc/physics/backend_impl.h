@@ -82,6 +82,22 @@ public:
   virtual void add_impulse(body_id id, const vec3 &j) = 0;
   virtual void move_kinematic(body_id id, const vec3 &p, const quat &q) = 0;
 
+  // For the field step (world.cpp), which runs before each step. The body's shape
+  // volume, its centre of mass and which of `points` lie inside it, all in the
+  // body's local frame about its origin. false if the backend cannot say; the
+  // fields then leave the body alone.
+  virtual bool shape_interior(body_id id, const std::vector<vec3> &points,
+                              std::vector<std::uint8_t> &inside, double &volume,
+                              vec3 &center_of_mass) const {
+    (void)id, (void)points, (void)inside, (void)volume, (void)center_of_mass;
+    return false;
+  }
+  // A force through the centre of mass and a torque, through the next step only.
+  // Never wakes a sleeping body.
+  virtual void add_field_load(body_id id, const vec3 &force, const vec3 &torque) = 0;
+  // Wake a sleeping dynamic body.
+  virtual void wake(body_id id) = 0;
+
   // One fixed_dt step. Appends this step's contact events (unsorted) to `out`.
   virtual void step(std::vector<contact_event> &out, step_report &report) = 0;
 
