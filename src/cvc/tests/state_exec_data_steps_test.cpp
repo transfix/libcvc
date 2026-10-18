@@ -572,3 +572,146 @@ TEST_F(DataStepsScheduler, BudgetUsageAndInspectReportTheKinds) {
   ASSERT_TRUE(info);
   EXPECT_GT(info->data_time, 0.0);
 }
+
+// ---- state-json / state-from-json ------------------------------------------------------
+//
+// cvc::state::json() and json(j) as data jobs: the same writer and reader (state_json.h), a
+// slice of data.step_nodes units per step.
+
+class DataStepsStateJson : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  cvc::state &root = cvc::state::instance(app_ctx);
+  async_scheduler sched;
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+
+  void SetUp() override {
+    root("state_exec.defaults.data.step_nodes").value("64");
+    sched.set_watch_root(&root);
+    ictx.sched = &sched;
+    ictx.root = &root;
+    ictx.tracker = &tracker;
+    register_intrinsics(env, &ictx);
+    // deep: a 1000-level chain with a value on every node; wide: 20000 children.
+    cvc::state *node = &root("deep");
+    node->value("0");
+    for (int i = 1; i <= 1000; ++i) {
+      node = &(*node)("n");
+      node->value(std::to_string(i));
+    }
+    cvc::state &wide = root("wide");
+    for (int i = 0; i < 20000; ++i)
+      wide("k" + std::to_string(i)).value("v" + std::to_string(i));
+  }
+
+  int submit(const std::string &script, execute_options opts = {}) {
+    opts.env = environment::extend(env);
+    return sched.execute(script, opts);
+  }
+
+  std::string error(int pid) const { return sched.get_exit_error(pid).value_or(""); }
+};
+
+TEST_F(DataStepsStateJson, StateJsonWritesWhatJsonWritesASliceAStep) {
+  for (const char *path : {"deep", "wide"}) {
+    SCOPED_TRACE(path);
+    const int pid = submit(std::string("(state-json \"") + path + "\")");
+    sched.sync_run();
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    ASSERT_EQ(info->status, process_status::terminated) << error(pid);
+    const std::string doc = root(path).json();
+    EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v), doc);
+    // A unit per node and per 256 bytes of text, 64 units a step (a slice overruns by at most its
+    // last node's bytes: deep's longest key is ~2 KB, 8 units).
+    const std::size_t units = root(path).children().size() + 1 + doc.size() / kDataNodeBytes;
+    EXPECT_GE(info->data_nodes, units);
+    EXPECT_GE(info->data_steps, units / (64 + 8) - 1);
+    EXPECT_GT(info->data_steps, 50u);
+  }
+  // A missing node is nil, like state-get.
+  const int missing = submit("(state-json \"no.such.node\")");
+  sched.sync_run();
+  EXPECT_TRUE(sched.get_result(missing)->is_nil());
+}
+
+TEST_F(DataStepsStateJson, StateFromJsonLoadsWhatJsonLoadsASliceAStep) {
+  const int pid = submit("(state-from-json \"copy\" (state-json \"wide\"))");
+  sched.sync_run();
+  const auto info = sched.get_process_info(pid);
+  ASSERT_EQ(info->status, process_status::terminated) << error(pid);
+  EXPECT_EQ(root("copy").json(), root("wide").json());
+  EXPECT_GT(info->data_steps, 200u);
+
+  // Keys are relative to the node, so a document goes back into the node it came from.
+  const std::string doc = root("deep").json();
+  root("saved").value(doc);
+  root("deep").reset(false); // its value and the whole chain
+  const int restore = submit("(state-from-json \"deep\" (state-get \"saved\"))");
+  sched.sync_run();
+  ASSERT_EQ(sched.get_process_info(restore)->status, process_status::terminated) << error(restore);
+  EXPECT_EQ(root("deep").json(), doc);
+}
+
+TEST_F(DataStepsStateJson, OtherProcessesRunBetweenSlices) {
+  root("state_exec.defaults.data.step_nodes").value("4");
+  const int slow = submit("(state-json \"wide\")");
+  while (sched.get_process_info(slow)->data_steps == 0)
+    sched.sync_step();
+  const int quick = submit("(begin 1 2 3)");
+  while (sched.get_process_info(quick)->status != process_status::terminated)
+    sched.sync_step();
+  EXPECT_NE(sched.get_process_info(slow)->status, process_status::terminated);
+  sched.sync_run();
+  EXPECT_EQ(std::get<std::string>(sched.get_result(slow)->v), root("wide").json());
+}
+
+TEST_F(DataStepsStateJson, TheWorkCountsAgainstMaxSteps) {
+  execute_options opts;
+  opts.max_steps = 20;
+  const int pid = submit("(state-json \"wide\")", opts);
+  sched.sync_run();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+}
+
+TEST_F(DataStepsStateJson, AMalformedDocumentSetsNothingThoughItsCheckSpansSteps) {
+  // Thousands of good entries, then an error: the first pass finds it before any is set.
+  std::string doc = "{";
+  for (int i = 0; i < 5000; ++i)
+    doc += "\"k" + std::to_string(i) + "\": \"v\", ";
+  doc += "\"bad\": }";
+  root("doc").value(doc);
+  const int pid = submit("(state-from-json \"target\" (state-get \"doc\"))");
+  sched.sync_run();
+  const auto info = sched.get_process_info(pid);
+  EXPECT_EQ(info->status, process_status::killed);
+  EXPECT_NE(error(pid).find("state-from-json: line 1: expected value"), std::string::npos)
+      << error(pid);
+  EXPECT_GT(info->data_steps, 10u);
+  EXPECT_EQ(root.findDescendant("target.k0"), nullptr);
+}
+
+TEST_F(DataStepsStateJson, TheDocumentIsHeldToTheAllocationLimit) {
+  root("state_exec.defaults.limits.max_alloc_bytes").value("4096");
+  const int pid = submit("(state-json \"wide\")");
+  sched.sync_run();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+  EXPECT_NE(error(pid).find("state-json"), std::string::npos) << error(pid);
+}
+
+TEST_F(DataStepsStateJson, NodesRemovedBetweenSlicesAreStillWritten) {
+  // The walk holds the children it has yet to visit, so dropping them from the tree mid-walk
+  // neither crashes it nor loses them: they are written as they were.
+  root("state_exec.defaults.data.step_nodes").value("16");
+  const std::string before = root("wide").json();
+  const int pid = submit("(state-json \"wide\")");
+  while (sched.get_process_info(pid)->data_steps < 3)
+    sched.sync_step();
+  root("wide").reset(false); // destroys the children the tree owned
+  sched.sync_run();
+  ASSERT_EQ(sched.get_process_info(pid)->status, process_status::terminated) << error(pid);
+  EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v), before);
+  EXPECT_EQ(root("wide").numChildren(), 0u);
+}

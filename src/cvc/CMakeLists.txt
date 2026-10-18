@@ -76,6 +76,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/utility/utility.h
   ../../inc/cvc/state/state_object.h
   ../../inc/cvc/state/state_list.h
+  ../../inc/cvc/state/state_json.h
   ../../inc/cvc/state/state_eviction_store.h
   ../../inc/cvc/state/state_memory_manager.h
   ../../inc/cvc/state/state_exec/types.h
@@ -200,6 +201,7 @@ set(SOURCE_FILES
   processing/smoothing.cpp
   volume/spider_io.cpp
   state/state.cpp
+  state/state_json.cpp
   state/state_list.cpp
   state/state_eviction_store.cpp
   state/state_memory_manager.cpp
