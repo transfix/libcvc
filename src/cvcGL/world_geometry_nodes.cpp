@@ -11,6 +11,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/world_geometry_nodes.h>
 #include <cvc/physics/pose_tracker.h>
 
@@ -84,6 +85,17 @@ add_world_geometry(SceneGraph &sg, const cvc::world::world_geometry &g, const st
       node->setPoseMatrix(m);
     }
     nodes.push_back(node);
+  }
+  for (const cvc::world::volume_item &v : g.volumes()) {
+    if (!v.has(cvc::world::role_render))
+      continue;
+    // VolumeNode keeps a copy that shares the volume's voxels; the volume is placed
+    // by its own bounding box, in world metres.
+    const cvc::volume &vol = *v.field.volume;
+    nodes.push_back(
+        parent ? std::static_pointer_cast<GraphicsNode>(
+                     parent->createChild<VolumeNode>(prefix + v.name, vol))
+               : std::static_pointer_cast<GraphicsNode>(sg.addGraphics(prefix + v.name, vol)));
   }
   return nodes;
 }

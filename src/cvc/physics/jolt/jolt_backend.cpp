@@ -40,6 +40,8 @@
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollidePointResult.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/PhysicsMaterial.h>
 #include <Jolt/Physics/Collision/RayCast.h>
@@ -695,6 +697,39 @@ public:
 
   void add_impulse(body_id id, const vec3 &j) override {
     _ps->GetBodyInterface().AddImpulse(alive(id), to_jolt(j));
+  }
+
+  bool shape_interior(body_id id, const std::vector<vec3> &points,
+                      std::vector<std::uint8_t> &inside, double &volume,
+                      vec3 &center_of_mass) const override {
+    JPH::BodyLockRead lock(_ps->GetBodyLockInterface(), checked(id));
+    if (!lock.Succeeded())
+      throw std::invalid_argument("unknown or removed body id " + std::to_string(id.value));
+    const JPH::Shape *shape = lock.GetBody().GetShape();
+    // Body-local coordinates are about the body's origin; CollidePoint wants them
+    // about the shape's centre of mass.
+    const JPH::Vec3 com = shape->GetCenterOfMass();
+    center_of_mass = from_jolt(com);
+    volume = shape->GetVolume();
+    inside.assign(points.size(), 0);
+    for (size_t i = 0; i < points.size(); ++i) {
+      JPH::AnyHitCollisionCollector<JPH::CollidePointCollector> hit;
+      shape->CollidePoint(to_jolt(points[i]) - com, JPH::SubShapeIDCreator(), hit);
+      inside[i] = hit.HadHit() ? 1 : 0;
+    }
+    return true;
+  }
+
+  void add_field_load(body_id id, const vec3 &f, const vec3 &t) override {
+    _ps->GetBodyInterface().AddForceAndTorque(alive(id), to_jolt(f), to_jolt(t),
+                                              JPH::EActivation::DontActivate);
+  }
+
+  void wake(body_id id) override {
+    const JPH::BodyID jid = alive(id);
+    JPH::BodyInterface &bi = _ps->GetBodyInterface();
+    if (bi.GetMotionType(jid) == JPH::EMotionType::Dynamic)
+      bi.ActivateBody(jid);
   }
 
   void move_kinematic(body_id id, const vec3 &p, const quat &q) override {

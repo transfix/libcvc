@@ -20,6 +20,13 @@ body_id world_bodies::find(const std::string &name) const {
   return body_id{};
 }
 
+field_id world_bodies::find_field(const std::string &name) const {
+  for (const auto &f : fields)
+    if (f.first == name)
+      return f.second;
+  return field_id{};
+}
+
 world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g, double max_error,
                                 const std::vector<int> &nav_materials) {
   world_bodies out;
@@ -57,6 +64,9 @@ world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g, d
     }
     out.bodies.emplace_back(item.name, w.add_body(d));
   }
+  for (const cvc::world::volume_item &v : g.volumes())
+    if (v.has(cvc::world::role_collide))
+      out.fields.emplace_back(v.name, w.add_field(v.field));
   return out;
 }
 

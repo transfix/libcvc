@@ -9,6 +9,7 @@
 */
 
 #include "backend_impl.h"
+#include "field_step.h"
 
 #include <algorithm>
 #include <chrono>
@@ -177,6 +178,7 @@ struct world::impl {
   std::vector<contact_event> contacts;
   step_report last;
   std::optional<cvc::clock_follower> follower;
+  detail::field_set fields;
 
   material_id add_material(const material &m) {
     validate(m);
@@ -192,7 +194,10 @@ struct world::impl {
     step_report r;
     contacts.clear();
     const auto t0 = std::chrono::steady_clock::now();
-    guarded([&] { be->step(contacts, r); });
+    guarded([&] {
+      fields.apply(*be, cfg);
+      be->step(contacts, r);
+    });
     const auto t1 = std::chrono::steady_clock::now();
     std::sort(contacts.begin(), contacts.end(), [](const contact_event &a, const contact_event &b) {
       return std::make_tuple(a.body_a.value, a.sub_shape_a, a.body_b.value, a.sub_shape_b,
@@ -482,12 +487,22 @@ body_id world::add_body(const body_desc &d) {
   if (d.material >= _impl->materials.size())
     throw cvc::physics_error("add_body: unknown material id " + std::to_string(d.material));
   const detail::engine_shape shape = std::visit(shape_prep{_impl->materials, d}, d.shape);
-  return guarded([&] { return _impl->be->add_body(d, shape); });
+  return guarded([&] {
+    const body_id id = _impl->be->add_body(d, shape);
+    try {
+      _impl->fields.body_added(*_impl->be, id, d);
+    } catch (...) {
+      _impl->be->remove_body(id);
+      throw;
+    }
+    return id;
+  });
 }
 
 void world::remove_body(body_id id) {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   guarded([&] { _impl->be->remove_body(id); });
+  _impl->fields.body_removed(id);
 }
 
 bool world::contains(body_id id) const {
@@ -548,6 +563,31 @@ void world::move_kinematic(body_id id, const vec3 &p, const quat &q) {
     throw cvc::physics_error("move_kinematic: a finite position and a unit rotation are required");
   std::lock_guard<std::mutex> lock(_impl->mutex);
   guarded([&] { _impl->be->move_kinematic(id, p, q); });
+}
+
+field_id world::add_field(const field &f) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->fields.add(*_impl->be, f); });
+}
+
+void world::set_field(field_id id, const field &f) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  guarded([&] { _impl->fields.set(*_impl->be, id, f); });
+}
+
+void world::remove_field(field_id id) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  _impl->fields.remove(id);
+}
+
+std::size_t world::field_count() const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->fields.size();
+}
+
+field_load world::field_load_on(body_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->fields.load(id);
 }
 
 step_report world::step() {

@@ -579,38 +579,84 @@ void state::touch() {
 // 03/30/2012 -- Joe R. -- Resetting comment.
 void state::reset(bool resetChildren, bool fireCallbacks) {
   boost::this_thread::interruption_point();
-  {
-    boost::mutex::scoped_lock lock(_mutex);
-    _value = std::string();
-    _valueTypeName = std::string();
-    _data = boost::any();
-    _comment = std::string();
-    _hidden = false;
-    _initialized = false;
-    if (resetChildren) {
-      BOOST_FOREACH (child_map::value_type val, _children)
-        val.second->reset(resetChildren, fireCallbacks);
-    } else {
-      // NOT "reset everything but the children" -- this DESTROYS them.
-      //
-      // Nothing else owns a child: operator() hands out state&, never the
-      // owning state_ptr, so dropping the map runs ~state over the whole
-      // subtree and invalidates every reference a caller still holds:
-      //
-      //   state &s = root("a.b");
-      //   root("a").reset(false);   // s dangles from here on
-      //
-      // A later operator()("a.b") therefore does not return the old node;
-      // it silently creates a fresh, uninitialized one. That is exactly
-      // what the reset(false) tests observe when they check initialized().
-      // Only tests call this today. A caller that genuinely wants
-      // detach-and-keep must be handed the state_ptrs rather than having
-      // them dropped here.
-      _children.clear();
+  // Clears a node's own fields. The caller holds its lock.
+  const auto clear = [](state &n) {
+    n._value = std::string();
+    n._valueTypeName = std::string();
+    n._data = boost::any();
+    n._comment = std::string();
+    n._hidden = false;
+    n._initialized = false;
+  };
+
+  if (!resetChildren) {
+    // NOT "reset everything but the children" -- this DESTROYS them.
+    //
+    // Nothing else owns a child: operator() hands out state&, never the
+    // owning state_ptr, so dropping the map runs ~state over the whole
+    // subtree and invalidates every reference a caller still holds:
+    //
+    //   state &s = root("a.b");
+    //   root("a").reset(false);   // s dangles from here on
+    //
+    // A later operator()("a.b") therefore does not return the old node;
+    // it silently creates a fresh, uninitialized one. That is exactly
+    // what the reset(false) tests observe when they check initialized().
+    // Only tests call this today. A caller that genuinely wants
+    // detach-and-keep must be handed the state_ptrs rather than having
+    // them dropped here.
+    //
+    // The map is taken out under the lock and dropped after it, so the subtree's destroyed()
+    // slots do not run under this node's lock.
+    child_map doomed;
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      clear(*this);
+      doomed.swap(_children);
     }
+    doomed.clear();
+    if (fireCallbacks)
+      touch();
+    return;
   }
-  if (fireCallbacks) {
-    touch();
+
+  // The subtree in place, in the order the recursion had: a node is cleared before the nodes
+  // under it and touched after them, a child's whole subtree before the next child's. With a heap
+  // stack of levels, not a call per level, and no lock held while signaling: each node is cleared
+  // and its children snapshotted under its own lock, released before going down. The recursion
+  // held every ancestor's lock while touching, so a slot that read an ancestor or looked its node
+  // up from the root (the sync adapter's do) deadlocked. Each level holds its node, so a touch's
+  // ancestors stay alive even if something drops them from the tree meanwhile.
+  struct level {
+    state *node;
+    state_ptr held; // null for this node: the caller holds it
+    std::vector<state_ptr> kids;
+    std::size_t next = 0;
+  };
+  const auto open = [&clear](state &n, state_ptr held) {
+    level l{&n, std::move(held), {}, 0};
+    boost::mutex::scoped_lock lock(n._mutex);
+    clear(n);
+    l.kids.reserve(n._children.size());
+    for (const child_map::value_type &kv : n._children)
+      if (kv.second)
+        l.kids.push_back(kv.second);
+    return l;
+  };
+  std::vector<level> stack;
+  stack.push_back(open(*this, state_ptr()));
+  while (!stack.empty()) {
+    level &l = stack.back();
+    if (l.next < l.kids.size()) {
+      state_ptr kid = std::move(l.kids[l.next++]);
+      boost::this_thread::interruption_point();
+      state &k = *kid;
+      stack.push_back(open(k, std::move(kid))); // invalidates `l`
+      continue;
+    }
+    if (fireCallbacks)
+      l.node->touch();
+    stack.pop_back();
   }
 }
 
@@ -627,21 +673,52 @@ boost::property_tree::ptree state::ptree() {
   property_tree::ptree pt;
 
   boost::this_thread::interruption_point();
-  _ctx.log(6, boost::str(boost::format("%s :: %s = %s\n") % BOOST_CURRENT_FUNCTION % fullName() %
-                         value()));
 
-  if (!value().empty())
-    pt.push_back(property_tree::ptree::value_type(fullName(), property_tree::ptree(value())));
-
-  {
-    boost::mutex::scoped_lock lock(_mutex);
-    BOOST_FOREACH (child_map::value_type val, _children) {
-      boost::this_thread::interruption_point();
-      property_tree::ptree child_pt = val.second->ptree();
-      pt.push_back(property_tree::ptree::value_type(val.second->fullName(), child_pt));
+  // One level: an entry per node, keyed by its full name, in pre-order (children in name order),
+  // holding the node's value -- or "" for a node other than this one with neither a value nor
+  // children. Those are exactly the leaves, in order, of the nested tree this used to build (each
+  // child's subtree under its full name, a node's value first), and the loader below reads both
+  // the same way. boost's ptree and its JSON writer and parser recurse once per nesting level, so
+  // with one level, building this, writing it as JSON, reading it back, copying and destroying it
+  // no longer recurse once per state level. A heap stack of levels; each node's value and
+  // children are snapshotted under its own lock, released before going down, and a child's full
+  // name is carried down as in children().
+  struct level {
+    std::vector<std::pair<state_ptr, std::string>> kids; // with their full names
+    std::size_t next = 0;
+  };
+  const char *const fn = BOOST_CURRENT_FUNCTION;
+  const auto open = [&pt, fn, this](state &n, const std::string &n_full, bool top) {
+    level l;
+    std::string v;
+    const std::string &base = n._name.empty() ? std::string() : n_full;
+    {
+      boost::mutex::scoped_lock lock(n._mutex);
+      v = n._value;
+      l.kids.reserve(n._children.size());
+      for (const child_map::value_type &kv : n._children)
+        if (kv.second)
+          l.kids.emplace_back(kv.second, base.empty() ? kv.first : base + SEPARATOR + kv.first);
     }
+    _ctx.log(6, boost::str(boost::format("%s :: %s = %s\n") % fn % n_full % v));
+    if (!v.empty())
+      pt.push_back(property_tree::ptree::value_type(n_full, property_tree::ptree(v)));
+    else if (!top && l.kids.empty())
+      pt.push_back(property_tree::ptree::value_type(n_full, property_tree::ptree()));
+    return l;
+  };
+  std::vector<level> stack;
+  stack.push_back(open(*this, fullName(), true));
+  while (!stack.empty()) {
+    level &l = stack.back();
+    if (l.next == l.kids.size()) {
+      stack.pop_back();
+      continue;
+    }
+    std::pair<state_ptr, std::string> kid = std::move(l.kids[l.next++]);
+    boost::this_thread::interruption_point();
+    stack.push_back(open(*kid.first, kid.second, false)); // invalidates `l`
   }
-
   return pt;
 }
 
@@ -655,20 +732,31 @@ boost::property_tree::ptree state::ptree() {
 // 03/16/2012 -- Joe R. -- Creation.
 namespace {
 // Deserialize helper. state::ptree() (the serializer above) keys every node by
-// its FULL dotted path from the root and NESTS the subtrees, so a node's value
-// and its descendants live one or more levels deep. The old loop here was NOT
-// recursive: it set only the top-level entries and dropped every nested child,
-// so json()/restore()/from_json round-trips silently lost the whole subtree
-// (only the shallowest nodes survived). Because every key is a full path from
-// the root, a single flat recursive walk restores the tree correctly: for each
-// entry that carries a scalar value, set it at its full-path key from `root`.
+// its FULL dotted path from the root. It writes one level now, but it used to
+// NEST the subtrees, so in documents written before, a node's value and its
+// descendants live one or more levels deep. An older loop here set only the
+// top-level entries and dropped every nested child, so json()/restore()/from_json
+// round-trips silently lost the whole subtree (only the shallowest nodes
+// survived). Because every key is a full path from the root, one walk over every
+// entry at every level restores either form: for each entry that carries a scalar
+// value, set it at its full-path key from `root`. Pre-order, with a heap stack of
+// positions rather than a call per nesting level.
 void apply_state_ptree(cvc::state &root, const boost::property_tree::ptree &pt) {
-  BOOST_FOREACH (const boost::property_tree::ptree::value_type &v, pt) {
+  using ptree = boost::property_tree::ptree;
+  std::vector<std::pair<ptree::const_iterator, ptree::const_iterator>> stack;
+  stack.emplace_back(pt.begin(), pt.end());
+  while (!stack.empty()) {
+    std::pair<ptree::const_iterator, ptree::const_iterator> &at = stack.back();
+    if (at.first == at.second) {
+      stack.pop_back();
+      continue;
+    }
+    const ptree::value_type &v = *at.first++;
     std::string own = v.second.get_value<std::string>();
     if (!own.empty())
       root(v.first).value(own);
     if (!v.second.empty())
-      apply_state_ptree(root, v.second);
+      stack.emplace_back(v.second.begin(), v.second.end()); // invalidates `at`
   }
 }
 } // namespace
@@ -728,12 +816,76 @@ void state::restore(const std::string &filename) {
 // 03/16/2012 -- Joe R. -- Creation.
 // 04/15/2012 -- Joe R. -- Triggering enter/exit signals.
 void state::traverse(traversal_unary_func func, const std::string &re) {
+  boost::this_thread::interruption_point();
+  boost::regex expression;
+  bool valid = true;
+  if (!re.empty()) {
+    try {
+      expression = boost::regex(re.c_str());
+    } catch (boost::bad_expression &) {
+      _ctx.log(
+          2, boost::str(boost::format("%s :: invalid regex '%s'\n") % BOOST_CURRENT_FUNCTION % re));
+      valid = false; // as children() does: nothing under this node matches
+    }
+  }
+
+  // Each node once, in pre-order (children in name order): this node, then each descendant whose
+  // full name matches `re` (every one when it is empty). A visit fires the node's traverseEnter,
+  // calls func with its full name, visits what is under it, then fires its traverseExit, so a
+  // visited node's enter/exit pair encloses those of the visited nodes below it. A node that
+  // does not match is not visited, but the nodes under it still are.
+  //
+  // This used to traverse() every descendant children() listed, each of which did the same, so
+  // a node was visited once for every ancestor in the walk (2^(d-1) times d levels down a
+  // chain), one native call per level. Now a heap stack of levels. A node's children are
+  // snapshotted under its own lock once func has seen it, as children() was called after func,
+  // and are held: the walk never finds a node again by name, which recreated one removed
+  // meanwhile, and each level keeps its node, so a visited node's ancestors outlive its visit.
+  struct level {
+    state *node;
+    state_ptr held;                                      // null for this node: the caller holds it
+    bool visited;                                        // fire traverseExit when the level closes
+    std::vector<std::pair<state_ptr, std::string>> kids; // with their full names
+    std::size_t next = 0;
+  };
+  const auto open = [](state &n, const std::string &n_full, state_ptr held, bool visited) {
+    level l{&n, std::move(held), visited, {}, 0};
+    const std::string &base = n._name.empty() ? std::string() : n_full;
+    boost::mutex::scoped_lock lock(n._mutex);
+    l.kids.reserve(n._children.size());
+    for (const child_map::value_type &kv : n._children)
+      if (kv.second)
+        l.kids.emplace_back(kv.second, base.empty() ? kv.first : base + SEPARATOR + kv.first);
+    return l;
+  };
+
+  const std::string full = fullName();
   traverseEnter();
-  func(fullName());
-  std::vector<std::string> ch = children(re);
-  BOOST_FOREACH (std::string c, ch)
-    instance(_ctx)(c).traverse(func, re);
-  traverseExit();
+  func(full);
+  if (!valid) {
+    traverseExit();
+    return;
+  }
+  std::vector<level> stack;
+  stack.push_back(open(*this, full, state_ptr(), true));
+  while (!stack.empty()) {
+    level &l = stack.back();
+    if (l.next == l.kids.size()) {
+      if (l.visited)
+        l.node->traverseExit();
+      stack.pop_back();
+      continue;
+    }
+    std::pair<state_ptr, std::string> kid = std::move(l.kids[l.next++]);
+    boost::this_thread::interruption_point();
+    state &k = *kid.first;
+    const bool visit = re.empty() || boost::regex_match(kid.second, expression);
+    if (visit) {
+      k.traverseEnter();
+      func(kid.second);
+    }
+    stack.push_back(open(k, kid.second, std::move(kid.first), visit)); // invalidates `l`
+  }
 }
 
 // -----------

@@ -6,7 +6,8 @@
 //   3. colours come from the surfaces: a terrain cell's albedo, a mesh's surface;
 //   4. a mesh's placement becomes the node's pose; a height field is never moved;
 //   5. under a frame node, the nodes are its children, so its transform moves the
-//      whole world (world = frame x placement).
+//      whole world (world = frame x placement);
+//   6. a render volume becomes a VolumeNode sharing the volume's voxels.
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
 #include <cmath>
@@ -16,7 +17,9 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/world_geometry_nodes.h>
+#include <cvc/volume/volume.h>
 #include <cvc/world/world_geometry.h>
 #include <memory>
 #include <vtkMatrix4x4.h>
@@ -138,6 +141,35 @@ void test_a_frame_node_carries_the_world() {
   CHECK(near(nodes[0]->getWorldTransform()->GetElement(0, 3), -1000.0));
 }
 
+void test_volumes_become_volume_nodes() {
+  std::printf("test_volumes_become_volume_nodes\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  world_geometry w;
+  w.add({"terrain", std::make_shared<cvc::height_field>(3, 3, 0.0, 0.0, 1.0, 1.0)});
+  auto water = std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                             cvc::bounding_box(-5, -5, -3, 5, 5, 0));
+  water->fill(1000.0);
+  cvc::physics::field lake;
+  lake.volume = water;
+  w.add_volume({"lake", lake});
+  volume_item wind{"wind", lake};
+  wind.roles = role_collide;
+  w.add_volume(wind);
+  const auto nodes = cvc::gl::add_world_geometry(sg, w, "city.");
+  sg.processEvents();
+  CHECK(nodes.size() == 2);
+  auto node = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("city.lake"));
+  CHECK(node != nullptr);
+  CHECK(sg.getGraphics("city.wind") == nullptr);
+  if (!node || !node->getVolume())
+    return;
+  // The node's volume shares the item's voxels.
+  CHECK(node->getVolume()->data_as_shared_array().get() == water->data_as_shared_array().get());
+  const cvc::bounding_box b = node->getVolume()->boundingBox();
+  CHECK(near(b.minz, -3.0) && near(b.maxx, 5.0));
+}
+
 } // namespace
 
 int main() {
@@ -145,6 +177,7 @@ int main() {
   test_nodes_share_the_items_arrays_and_take_surface_colours();
   test_placement_becomes_the_pose();
   test_a_frame_node_carries_the_world();
+  test_volumes_become_volume_nodes();
   if (g_failures) {
     std::printf("cvcgl_world_geometry_nodes: %d FAILURE(S)\n", g_failures);
     return 1;
