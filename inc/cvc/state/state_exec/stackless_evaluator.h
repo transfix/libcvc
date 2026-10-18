@@ -90,6 +90,11 @@ struct pending_data_work {
   std::shared_ptr<pending_data_work> outer;
   /// The result is the value of a call outer's job made, not the waiting frame's.
   bool feeds_outer = false;
+
+  /// Frees the chain of outer work a link at a time, not one native frame per link: a native
+  /// call that waits on one like it, with more to do after it (a class constructor whose init
+  /// constructs again), makes a chain as long as the process's steps allow.
+  ~pending_data_work();
 };
 
 /// Serializable evaluator state — the entire execution snapshot.

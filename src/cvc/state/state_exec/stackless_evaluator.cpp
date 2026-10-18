@@ -11,6 +11,13 @@
 
 namespace cvc::state_exec {
 
+pending_data_work::~pending_data_work() {
+  // Each link is unlinked from the next before it goes, so its own destructor has nothing to free.
+  std::shared_ptr<pending_data_work> next = std::move(outer);
+  while (next && next.use_count() == 1)
+    next = std::move(next->outer);
+}
+
 // ---------------------------------------------------------------------------
 // ctor
 // ---------------------------------------------------------------------------
@@ -181,8 +188,10 @@ environment_ptr bind_closure_args(const closure_ptr &cls, std::span<const value_
 } // namespace
 
 // Run a slice of the deep-data work a step left, making the calls its job needs: a native
-// function here, a DSL function as frames on the stack (the job resumes in the step after it
-// returns). Once the work is done, finish the native call or macro expansion that started it.
+// function here, at the evaluator's own level (a native call a native function made from deeper
+// than the step's own call waits for this), a DSL function as frames on the stack (the job
+// resumes in the step after it returns). Once the work is done, finish the native call or macro
+// expansion that started it.
 bool stackless_evaluator::step_data(evaluator_state &state) {
   state.stats.increment_step(step_kind::data);
   detail::data_step_scope *data = detail::data_step_scope::current();
@@ -225,8 +234,15 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
       value = (*fn)(call->args);
     }
     if (auto deferred = data ? data->take_deferred() : nullptr) {
-      // The function left deep-data work of its own: it runs first, and its result is the call's.
-      await_deferred(state, std::move(*deferred), work->base, work->frame_args, work, true);
+      // The function left deep-data work of its own (a call of its own, say): it runs first, and
+      // its result is the call's. A job that only forwards the call's value gives it its place.
+      if (job.forwards_call() && !work->then) {
+        state.data_work = work->outer;
+        await_deferred(state, std::move(*deferred), work->base, work->frame_args, work->outer,
+                       work->feeds_outer);
+      } else {
+        await_deferred(state, std::move(*deferred), work->base, work->frame_args, work, true);
+      }
       return false;
     }
     job.call_returned(std::move(value));
@@ -1327,10 +1343,19 @@ value_t detail::class_constructor::operator()(std::span<const value_t> init_args
     if (k == "init") {
       if (!is_callable(v))
         break;
+      // An inherited init is followed up the chain here, and with no class defining one there
+      // is nothing to run.
+      const value_t *method = &v;
+      if (const auto *fn = std::get_if<native_fn>(&v.v))
+        if (const auto *inherited = fn->target<class_inherited_method>();
+            inherited && inherited->name == "init")
+          method = inherited->resolve();
+      if (!method)
+        break;
       std::vector<value_t> a;
       a.push_back(inst_val);
       a.insert(a.end(), init_args.begin(), init_args.end());
-      const value_t init = v; // init may change the class dict under `v`
+      const value_t init = *method; // init may change the class dict under `method`
       // Whatever init returns, the call's value is the instance, once init has run.
       return call_function(init, a, "constructor", [inst_val](value_t) { return inst_val; });
     }
@@ -1338,16 +1363,31 @@ value_t detail::class_constructor::operator()(std::span<const value_t> init_args
   return inst_val;
 }
 
-value_t detail::class_inherited_method::operator()(std::span<const value_t> args) const {
-  if (super_cls) {
-    for (auto &[k, v] : *super_cls) {
+const value_t *detail::class_inherited_method::resolve() const {
+  const class_inherited_method *at = this;
+  for (int hop = 1;; ++hop) {
+    if (!at->super_cls)
+      return nullptr;
+    const value_t *found = nullptr;
+    for (auto &[k, v] : *at->super_cls)
       if (k == name) {
-        if (!is_callable(v))
-          break;
-        const value_t inherited = v; // it may change the class dict under `v`
-        return call_function(inherited, args, name == "init" ? "init" : "finalize");
+        found = &v;
+        break;
       }
-    }
+    if (!found || !is_callable(*found))
+      return nullptr;
+    const auto *fn = std::get_if<native_fn>(&found->v);
+    const auto *next = fn ? fn->target<class_inherited_method>() : nullptr;
+    if (!next || next->name != name || hop == kInheritedHops)
+      return found;
+    at = next;
+  }
+}
+
+value_t detail::class_inherited_method::operator()(std::span<const value_t> args) const {
+  if (const value_t *method = resolve()) {
+    const value_t inherited = *method; // it may change the class dict under `method`
+    return call_function(inherited, args, name == "init" ? "init" : "finalize");
   }
   if (name == "init")
     return args.empty() ? nil_value : args[0];

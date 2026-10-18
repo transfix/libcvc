@@ -1496,10 +1496,12 @@ read. The document is held to the allocation limit as it grows.
   the work runs whole in the call's step.
 - **Calls.** `collections.map`, `filter` and `reduce` hand each call of their function to the
   evaluator running the program, and so do the builtins `apply` and `send`. A native function
-  is called inside the data step. A DSL function runs as the process's own frames, so its
-  body's steps are eval steps. The job goes on in the data step after it returns, even with
-  `data.step_nodes` = 0. Another native function can do the same with
-  `call_function(fn, args, who)`.
+  is called right away when the native function the step applies asks for it, and by the
+  evaluator, in a data step, when a native function deeper than that asks (so native calls nest
+  at most one level; `docs/STATE_EXEC_GRAMMAR.md`, "Native call nesting"). A DSL function runs
+  as the process's own frames, so its body's steps are eval steps. The job goes on in the data
+  step after it returns, even with `data.step_nodes` = 0. Another native function can do the
+  same with `call_function(fn, args, who)`.
 - **Cost.** `collections.sort` is a stable merge sort, n log n nodes.
   `collections.unique` costs a node per comparison, and compares lists and dicts with a sliced
   equality walk. `collections.dict-merge` keeps a key index, so it is linear. Every job polls the

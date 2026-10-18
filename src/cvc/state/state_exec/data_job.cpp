@@ -501,6 +501,8 @@ public:
 
   value_t result() override { return std::move(result_); }
 
+  bool forwards_call() const override { return true; }
+
 private:
   value_t fn_;
   std::vector<value_t> args_;
@@ -728,8 +730,9 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
     return then ? then(std::move(r)) : r;
   }
   // One slice here (without slicing, all of it), making the native calls the job needs on the
-  // way. It waits for the evaluator when the slice runs out, for a DSL function, and for the work
-  // a native function it called left of its own.
+  // way if this is the step's own native call. It waits for the evaluator when the slice runs out,
+  // for a DSL function, for a native one called from deeper, and for the work a native function it
+  // called left of its own.
   const bool slicing = scope->step_nodes_ > 0;
   std::unique_ptr<detail::deferred_data_job> waits_on;
   for (;;) {
@@ -742,7 +745,7 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
     }
     const data_job::call_request *pending = job->pending_call();
     const native_fn *fn = pending ? std::get_if<native_fn>(&pending->fn->v) : nullptr;
-    if (!fn || (slicing && scope->nodes_ >= scope->step_nodes_))
+    if (!fn || !scope->calls_here())
       break;
     const data_job::call_request call = *job->take_call();
     value_t value;
@@ -764,13 +767,17 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
 
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who) {
   if (const auto *native = std::get_if<native_fn>(&fn.v)) {
-    detail::native_nesting level(who);
-    return (*native)(args);
+    // Here, unless an evaluator step can make the call at its own level instead.
+    const detail::data_step_scope *scope = t_scope;
+    if (!scope || !scope->may_defer_ || scope->deferred_ || scope->calls_here()) {
+      detail::native_nesting level(who);
+      return (*native)(args);
+    }
+  } else if (const auto *cls = std::get_if<closure_ptr>(&fn.v); !cls || !*cls) {
+    throw std::runtime_error(std::string(who) + ": not a function: " + fn.type_name());
   }
-  if (const auto *cls = std::get_if<closure_ptr>(&fn.v); cls && *cls)
-    return run_data_job(
-        std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who));
-  throw std::runtime_error(std::string(who) + ": not a function: " + fn.type_name());
+  return run_data_job(
+      std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who));
 }
 
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who,
@@ -811,7 +818,7 @@ std::size_t detail::native_nesting::depth() { return t_native_depth; }
 detail::data_step_scope::data_step_scope(std::size_t step_nodes, evaluation_stats &stats,
                                          release_backlog *backlog)
     : step_nodes_(step_nodes), stats_(stats), backlog_(step_nodes > 0 ? backlog : nullptr),
-      outer_(t_scope), routing_(backlog_) {
+      native_depth_(t_native_depth), outer_(t_scope), routing_(backlog_) {
   t_scope = this;
 }
 
@@ -819,6 +826,12 @@ detail::data_step_scope::~data_step_scope() { t_scope = outer_; }
 
 std::size_t detail::data_step_scope::remaining() const {
   return step_nodes_ > nodes_ ? step_nodes_ - nodes_ : 1;
+}
+
+bool detail::data_step_scope::calls_here() const {
+  // The evaluator applies a native function without a level of native nesting, so the depth is
+  // the step's own only inside that function.
+  return t_native_depth == native_depth_ && (step_nodes_ == 0 || nodes_ < step_nodes_);
 }
 
 void detail::data_step_scope::drain_backlog() {

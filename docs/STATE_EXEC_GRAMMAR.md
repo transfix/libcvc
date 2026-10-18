@@ -242,10 +242,12 @@ A node is an element visited: a list element or a dict entry walked, or an eleme
 - **Signals and watch events** wait while a walk is pending, because the walk's call frame is
   on top of the evaluation stack.
 - **Function calls.** A job can stop for a call of a function (`collections.map`, `filter`,
-  `reduce`, and `apply`/`send` through `call_function()`), and the evaluator makes it. A native function is called inside the data step. A
-  DSL function runs as frames above the waiting call, in eval steps; `return` and `break` in it
-  unwind no further than that call. The job goes on in the data step after the function
-  returns. Such a job waits on the evaluator even with `step_nodes` = 0.
+  `reduce`, and `apply`/`send` through `call_function()`), and the evaluator makes it. A native
+  function is called inside the step: by the native call the step applies, if the job is its own,
+  and otherwise by the evaluator in a data step (see "Native call nesting"). A DSL function runs
+  as frames above the waiting call, in eval steps; `return` and `break` in it unwind no further
+  than that call. The job goes on in the data step after the function returns. Such a job waits
+  on the evaluator even with `step_nodes` = 0.
 - **Snapshots** keep `step_nodes` but not a walk in flight: after a restore, the waiting call
   or macro expansion runs again. The frames of a DSL function it was calling are left out.
 - **Values changed between slices.** A walk holds the lists and dicts it walks by owning
@@ -270,14 +272,46 @@ decode.
 ### Native call nesting
 
 Some native functions call other functions themselves: `apply`, `send`, a class constructor
-running `init`, an inherited `init` running its superclass's. A generator advancing steps an
-evaluator of its own. Each of these nests on the native stack, so a value or class that refers to
-itself could ask for unbounded nesting: `(apply apply L)` with `L` containing itself, or a class
-whose `init` is its own constructor. A level is refused with an error ("native calls nested too
-deeply") past 256 levels (`kMaxNativeNesting`), or when less of the thread's native stack is left
-than `kNativeStackReserve`: 128 KiB on Windows, where a catch block runs before the frames above
-it unwind, and 32 KiB elsewhere. Levels cost from about 0.5 KiB (`apply`) to a few KiB (a
-generator) in a release build.
+running `init`, an inherited `init` running its superclass's, and the stdlib jobs
+(`collections.map` and friends). Inside a running program they nest at most one level on the
+native stack. The native function the evaluator applies may call a native function itself
+(`apply` calling `+`), but a native call asked for by that function, or from anywhere deeper, is
+the evaluator's: it makes the call at its own level, in a data step (`call_function`,
+`run_data_job`).
+
+- **Runaways are loops.** `(apply apply L)` with `L` containing itself, `send` re-sending through
+  itself, or a class whose `init` is its own constructor is a sequence of steps. `max_steps` and
+  `max_time` stop it as they stop `(while t nil)`, at the same step on every platform and stack
+  size.
+- **Long chains finish.** `apply` applied 10000 levels deep, or a chain of 10000 classes that
+  inherit `init`, runs on any stack.
+- **Inherited `init` and `finalize`** look up the chain of classes that inherit them too, 64
+  classes a call (`kInheritedHops`), to the first class that defines one, and call that. A
+  constructor does the same, and with no class defining `init` it calls nothing. A longer chain,
+  or one that loops, goes on as calls.
+- **Space.** A call whose value is its caller's, unchanged (`apply`, `send`, an inherited
+  `init`), hands its place to the call it makes, so a chain of them runs in constant space. A
+  call with more to do after its callee (a constructor returns the instance once `init` is done)
+  waits, a link of pending work per level, like a function that calls itself before doing
+  anything else. Pending work is not yet part of a process's measured heap (`max_memory`).
+- **Cost.** A call the evaluator makes costs about 300 ns more than one made directly (MSVC
+  Release, `state_exec_bench_test` `NativeCallThroughput`). The one direct level keeps `apply`
+  and `send` at their old cost, and only a native call two levels down pays it. Constructing a
+  class that inherits `init` costs less than it did, since the chain is looked up, not called.
+
+What still nests is a **level**:
+
+- the one call above, made by the step's own native call;
+- a generator advancing, which steps an evaluator of its own (generators of generators nest a
+  level apiece);
+- a native function calling another from C++ where no program is running: a host calling a
+  native function directly, or a job run to completion (`run_to_completion`).
+
+A level is refused with an error ("native calls nested too deeply") past 256 levels
+(`kMaxNativeNesting`), or when less of the thread's native stack is left than
+`kNativeStackReserve`: 128 KiB on Windows, where a catch block runs before the frames above it
+unwind, and 32 KiB elsewhere. Levels cost from about 0.5 KiB (`apply`) to a few KiB (a generator)
+in a release build.
 
 DSL functions are not levels, and neither are class methods. A method is a closure in its class's
 dict, taking `self` first. `send`, `super` and a constructor's `init` call it through the

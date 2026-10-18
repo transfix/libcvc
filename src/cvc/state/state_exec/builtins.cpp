@@ -129,7 +129,8 @@ value_t dispatch_method(const value_t &obj, const std::string &method,
     if (value_t *m = dict_find(*cls_dict, method)) {
       if (!std::holds_alternative<native_fn>(m->v) && !std::holds_alternative<closure_ptr>(m->v))
         throw std::runtime_error("send: method is not callable");
-      // Invoke: first arg is self. A closure runs as the program's own frames.
+      // Invoke: first arg is self. A closure runs as the program's own frames, and a native
+      // method nests no deeper than one level (call_function).
       std::vector<value_t> call_args;
       call_args.reserve(1 + args.size());
       call_args.push_back(obj);
@@ -628,7 +629,8 @@ value_t builtin_send(std::span<const value_t> args) {
 value_t builtin_apply(std::span<const value_t> args) {
   expect_exact(args, 2, "apply");
   auto &arg_list = as_list(args[1], "apply");
-  // A native function is called here; a closure runs as the program's own frames.
+  // A closure runs as the program's own frames; a native function is called here, unless this
+  // apply was itself called by a native function, when the evaluator calls it (call_function).
   return call_function(args[0], arg_list, "apply");
 }
 
