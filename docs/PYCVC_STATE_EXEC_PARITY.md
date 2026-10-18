@@ -29,7 +29,13 @@ approach agreed for closing the gap, and the plan.
    Conversion is strict:
    - an int outside 64 bits raises `OverflowError`;
    - a non-`str` dict key or any other Python type raises `TypeError`;
-   - a value nested deeper than 1000 levels, or one that contains itself, raises `ValueError`.
+   - a Python value that contains itself raises `ValueError`, since only the evaluator's own
+     containers are tracked for cycle collection.
+
+   It takes any depth: it walks with an explicit stack, not recursion (PR 4), as the parser and
+   the evaluator do. A list or dict shared within a value converts to one object, both ways, so
+   sharing survives the trip, and a DSL list that holds itself comes out as a Python list that
+   holds itself. (PR 1's converter recursed and stopped at 1000 levels.)
 
    Before this, symbols became plain strings, closures became the text `"<closure>"`, and any
    object became its `str()`. The old converter could also pass a null object into a list when a
@@ -73,7 +79,7 @@ approach agreed for closing the gap, and the plan.
 
 The audit (2026-10-17) found 97 public items in the 20 headers. Counted individually, with the 38
 `builtin_*` functions and the 7 `MIME_*` constants, it is 140. Items added to master since then
-are listed too. Status after PR 3:
+are listed too. Status after PR 4:
 
 | Header | Item | Python | Status |
 |---|---|---|---|
@@ -84,7 +90,8 @@ are listed too. Status after PR 3:
 | | `script_reader` | `pycvc.script_reader` | wrapped (PR 1). `forms()`, `source()` and `options()` return copies |
 | | `parser` (`read`, `parse_expr`) | none | exception: it holds a `string_view` of its input, which Python can't keep alive. `script_reader` owns its source and gives the same slice-by-slice reading |
 | data_job.h (#658) | `data_options`, `data_options_from_state(state&, id, base)` | `pycvc.data_options`, `pycvc.data_options_from_state(State, …)` | wrapped (#658) |
-| | the data jobs (`data_job`, `make_*_job`, `run_data_job`, ...) | | PR 4 |
+| | `data_job` (`step`, `result`, `nodes`), `make_equal_job`, `make_print_job`, `make_concat_job`, `make_copy_job`, `make_substitute_job`, `run_to_completion`, `run_data_job`, `call_function`, `is_compound`, `count_data_nodes`, `kDataNodeBytes` (#658, #665) | the same names under `pycvc.` | wrapped (PR 4). A factory hands Python an owned job, which `run_data_job` takes over. `who` (C++ keeps the pointer for its errors) is kept for good. `run_data_job`'s `then` is a Python callable. From a Python function a program calls, `run_data_job` and `call_function` work as for a C++ native: return what they return at once |
+| | the call protocol (`data_job::call_request`, `take_call`, `pending_call`, `call_returned`, `own_inputs`), `detail::deferred_data_job`, `detail::data_step_scope` | none | exception: for C++ job implementations and the evaluator's own bookkeeping; Python can't subclass a data job |
 | types.h | `symbol` | `pycvc.symbol` | wrapped (PR 1) |
 | | `value_t` | native types, or `pycvc.value` | wrapped (PR 1), see the table above |
 | | `to_string`, `values_equal` | `pycvc.to_string`, `pycvc.values_equal` | wrapped (PR 1) |
@@ -116,8 +123,11 @@ are listed too. Status after PR 3:
 | resource_policy.h | `resource_policy`, `process_limits`, `validate_limits` | `pycvc.resource_policy` (its `mode` is `pycvc.resource_policy.mode`, an `IntEnum`), `pycvc.process_limits`, `pycvc.validate_limits` | wrapped (PR 3) |
 | intrinsics.h | `register_intrinsics`, `intrinsics_context`, `apply_chroot`, `channel_policy`, `resolve_channel_key`, `make_future`, `future_channel_of` | the same names under `pycvc.` | wrapped (PR 3). See approach item 11 for the context's lifetime. `channel_policy.global` is `global_` (a Python keyword). The context's `tracker`, `document` and `watches` aren't wrapped: `memory_tracker` is internal, `document_scope`'s slots are C++ templates, and `watches` is the intrinsics' own registry |
 | | `document_scope`, `park_on_channel` | none | exception: Ariadne/runtime internals. `document_scope` is typed C++ template slots; `park_on_channel` takes raw process pointers and is valid only inside a running native function |
-| stdlib.h | `stdlib_registry` | | next (PR 4). #660 loads the stdlib modules into every environment, so DSL programs already reach them |
-| heap.h (#667) | the heap measurement, and the fields it adds to `process_info` and `process` | | PR 4, after #667 merges |
+| stdlib.h | `stdlib_registry` (`standard`, `shared_scope`, `register_function`, `list_functions`, `list_modules`, `import_module`, `lookup_qualified`) | `pycvc.stdlib_registry` | wrapped (PR 4). `standard()` returns a copy, so Python can't add to the shared registry; `register_function` takes a Python callable or a `pycvc.value` native; `lookup_qualified` raises `KeyError` where C++ returns nullptr |
+| heap.h (#667) | `heap_options`, `heap_options_from_state`, `measure_heap_share`, `make_heap_share_job`, `heap_remeasure_bytes`, `cycle_stats`, `collect_cycles`, `cycle_collection_due`, `note_process_exit`, `tracked_objects` | the same names under `pycvc.` | wrapped (PR 4). The collector is per thread: run it on the thread that ran the programs. `measure_heap_share` and `collect_cycles` release the GIL |
+| | `heap_after_step`, `track_captured_env`, `track_mutated` | none | exception: the schedulers' per-step accounting, and tracking that only means something for the evaluator's own containers (a value from Python is a fresh copy) |
+| | #667's fields: `process.heap_*`, `heap_measure_due`, `release_state`; `process_info.heap_memory`/`heap_measurements`; `evaluator_state.heap_measured`; `stackless_evaluator::global_env()`; `eval_alloc_note` | the same names | wrapped (PR 4). `heap_measured` is read-only (the result of a measurement in flight) |
+| | `eval_alloc_guard::allocated()` (#667) | none | exception: the guard isn't wrapped (see types.h) |
 | exec_coordinator.h | `exec_coordinator` and its result types | none | deferred: it needs the cluster shard, membership and message-bus objects, which pycvc doesn't wrap |
 | memory_tracker.h | `memory_tracker` | none | exception: per-node byte accounting, internal to the schedulers |
 | generator.h, task.h | `generator`, `generator_next`, `task<>` | none | exception: coroutine and evaluator internals; a generator crosses as a `pycvc.value` |
@@ -145,8 +155,7 @@ Each PR is stacked on the previous one and includes pytest checks against the C+
    built in Python can have the intrinsics `Exec.run` programs have; and master's
    `max_alloc_bytes` additions (#660). `bindings/pycvc/test_pycvc_state_exec_eval.py` repeats the
    C++ tests.
-4. **PR 4:** `stdlib_registry`, and the API the deep-data (#658) and heap (#667) work adds, once
-   those land.
+4. **PR 4 (this):** `stdlib_registry`, the deep-data jobs (#658, #665) and the heap (#667); and the value conversion without a depth limit (it walks with an explicit stack, as the parser and evaluator do, and keeps shared structure). `bindings/pycvc/test_pycvc_state_exec_data.py` covers them.
 
 Known gaps:
 - Invalid UTF-8 in a DSL string raises when it crosses to Python, but no Python test produces such

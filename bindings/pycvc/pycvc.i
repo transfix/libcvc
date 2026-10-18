@@ -1456,6 +1456,7 @@ class AsyncStateObserver(state_observer):
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
@@ -1464,6 +1465,7 @@ class AsyncStateObserver(state_observer):
 #include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
+#include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
 #include "pycvc_value.h"
 #include <algorithm>
@@ -1477,9 +1479,17 @@ class AsyncStateObserver(state_observer):
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
+
+// SWIG passes by-value arguments with SWIG_STD_MOVE, which is std::move only when __cplusplus says
+// C++11; MSVC reports 199711L without /Zc:__cplusplus, so there it copies, and a std::unique_ptr
+// (a data job given to run_data_job) can't be copied. Move, as on GCC and Clang, for the wrapper
+// functions, which come after this.
+#undef SWIG_STD_MOVE
+#define SWIG_STD_MOVE(OBJ) std::move(OBJ)
 
 namespace pycvc {
 // The evaluators' on_complete parameter type, under a name SWIG can match a typemap on.
@@ -1495,7 +1505,6 @@ using value_callback = std::function<void(const cvc::state_exec::value_t &)>;
 namespace pycvc {
 namespace {
 using cvc::state_exec::value_t;
-constexpr int kMaxValueDepth = 1000;
 
 swig_type_info *symbol_swig_type() {
   static swig_type_info *t = SWIG_TypeQuery("cvc::state_exec::symbol *");
@@ -1506,22 +1515,20 @@ swig_type_info *value_swig_type() {
   return t;
 }
 
-bool too_deep(int depth) {
-  if (depth <= kMaxValueDepth)
-    return false;
-  PyErr_SetString(PyExc_ValueError,
-                  "pycvc: value nests deeper than 1000 levels (or contains itself)");
-  return true;
-}
-
 PyObject *text_to_py(const std::string &s) {
   return PyUnicode_DecodeUTF8(s.data(), static_cast<Py_ssize_t>(s.size()), "strict");
 }
 
-PyObject *to_py(const value_t &v, int depth) {
+// The two directions walk a value with an explicit stack rather than recursing, so a value nested
+// any depth converts (a parsed script may nest 100000 deep). A list or dict shared within a value
+// converts once, to one object, so sharing survives the trip and a shared structure converts in
+// time proportional to its size: a DSL list that holds itself becomes a Python list that holds
+// itself. The other way, a Python value that holds itself raises ValueError, because only the
+// evaluator's own containers are tracked for cycle collection (heap.h).
+
+// Everything but a list or dict: a new reference, or nullptr with an error set.
+PyObject *leaf_to_py(const value_t &v) {
   using namespace cvc::state_exec;
-  if (too_deep(depth))
-    return nullptr;
   if (v.is_nil())
     Py_RETURN_NONE;
   if (const auto *b = std::get_if<bool>(&v.v))
@@ -1536,112 +1543,216 @@ PyObject *to_py(const value_t &v, int depth) {
     return PyBytes_FromStringAndSize(by->data.data(), static_cast<Py_ssize_t>(by->data.size()));
   if (const auto *sym = std::get_if<symbol>(&v.v))
     return SWIG_NewPointerObj(new symbol(*sym), symbol_swig_type(), SWIG_POINTER_OWN);
-  if (const auto *l = std::get_if<list_ptr>(&v.v)) {
-    const Py_ssize_t n = *l ? static_cast<Py_ssize_t>((*l)->size()) : 0;
-    PyObject *out = PyList_New(n);
-    if (out == nullptr)
-      return nullptr;
-    for (Py_ssize_t k = 0; k < n; ++k) {
-      PyObject *item = to_py((**l)[static_cast<size_t>(k)], depth + 1);
-      if (item == nullptr) {
-        Py_DECREF(out);
-        return nullptr;
-      }
-      PyList_SET_ITEM(out, k, item); // steals the new reference
-    }
-    return out;
-  }
-  if (const auto *dd = std::get_if<dict_ptr>(&v.v)) {
-    PyObject *out = PyDict_New();
-    if (out == nullptr)
-      return nullptr;
-    if (*dd) {
-      for (const auto &kv : **dd) {
-        PyObject *key = text_to_py(kv.first);
-        PyObject *val = key ? to_py(kv.second, depth + 1) : nullptr;
-        const int rc = val ? PyDict_SetItem(out, key, val) : -1;
-        Py_XDECREF(key);
-        Py_XDECREF(val);
-        if (rc < 0) {
-          Py_DECREF(out);
-          return nullptr;
-        }
-      }
-    }
-    return out;
-  }
   // closure / native_fn / data_object / generator: an opaque handle that converts back to the
   // same value, so Python can hold it and pass it into the DSL again.
   return SWIG_NewPointerObj(new value_t(v), value_swig_type(), SWIG_POINTER_OWN);
 }
 
-bool from_py(PyObject *o, value_t &out, int depth) {
+PyObject *to_py(const value_t &root) {
   using namespace cvc::state_exec;
-  if (too_deep(depth))
-    return false;
+  struct frame {
+    const value_t *v; // a list or dict
+    PyObject *out;    // its Python object, being filled
+    size_t next;      // the next element to convert
+    size_t size;      // the Python list's length
+  };
+  std::vector<frame> stack;
+  std::unordered_map<const void *, PyObject *> made; // container storage -> its Python object
+  // A new reference to `v` in Python. A list or dict not made yet is created empty and pushed to
+  // be filled; one already made (shared, or an enclosing one) is the same object.
+  auto convert = [&](const value_t &v) -> PyObject * {
+    const auto *l = std::get_if<list_ptr>(&v.v);
+    const auto *d = std::get_if<dict_ptr>(&v.v);
+    if (l == nullptr && d == nullptr)
+      return leaf_to_py(v);
+    const void *storage = l ? static_cast<const void *>(l->get()) : d->get();
+    if (storage == nullptr)
+      return l ? PyList_New(0) : PyDict_New();
+    if (const auto it = made.find(storage); it != made.end()) {
+      Py_INCREF(it->second);
+      return it->second;
+    }
+    const size_t size = l ? (*l)->size() : 0;
+    PyObject *out = l ? PyList_New(static_cast<Py_ssize_t>(size)) : PyDict_New();
+    if (out == nullptr)
+      return nullptr;
+    made.emplace(storage, out);
+    stack.push_back({&v, out, 0, size});
+    return out;
+  };
+  PyObject *result = convert(root);
+  if (result == nullptr)
+    return nullptr;
+  while (!stack.empty()) {
+    const size_t top = stack.size() - 1; // an index: convert() may grow the stack
+    const value_t &v = *stack[top].v;
+    PyObject *out = stack[top].out;
+    const size_t i = stack[top].next++;
+    if (const auto *l = std::get_if<list_ptr>(&v.v)) {
+      if (i == stack[top].size) {
+        stack.pop_back();
+        continue;
+      }
+      // The list can't change while the GIL is held, but a slot is filled with None rather than
+      // left empty should it be shorter than the Python list made for it.
+      PyObject *item = i < (*l)->size() ? convert((**l)[i]) : (Py_INCREF(Py_None), Py_None);
+      if (item == nullptr) {
+        Py_DECREF(result);
+        return nullptr;
+      }
+      PyList_SET_ITEM(out, static_cast<Py_ssize_t>(i), item); // steals the reference
+    } else {
+      const auto &entries = **std::get_if<dict_ptr>(&v.v);
+      if (i >= entries.size()) {
+        stack.pop_back();
+        continue;
+      }
+      PyObject *key = text_to_py(entries[i].first);
+      PyObject *val = key ? convert(entries[i].second) : nullptr;
+      const int rc = val ? PyDict_SetItem(out, key, val) : -1;
+      Py_XDECREF(key);
+      Py_XDECREF(val);
+      if (rc < 0) {
+        Py_DECREF(result);
+        return nullptr;
+      }
+    }
+  }
+  return result;
+}
+
+// 1: `o` converted into `out`; 0: `o` is a list, tuple or dict, which from_py walks; -1: an error
+// is set.
+int leaf_from_py(PyObject *o, value_t &out) {
+  using namespace cvc::state_exec;
   if (o == nullptr || o == Py_None) {
     out = value_t();
-    return true;
+    return 1;
   }
   if (PyBool_Check(o)) { // before int: bool is an int subclass
     out = value_t(o == Py_True);
-    return true;
+    return 1;
   }
   if (PyLong_Check(o)) {
     int overflow = 0;
     const long long x = PyLong_AsLongLongAndOverflow(o, &overflow);
     if (overflow != 0) {
       PyErr_SetString(PyExc_OverflowError, "pycvc: int does not fit in 64 bits");
-      return false;
+      return -1;
     }
     if (x == -1 && PyErr_Occurred())
-      return false;
+      return -1;
     out = value_t(static_cast<int64_t>(x));
-    return true;
+    return 1;
   }
   if (PyFloat_Check(o)) {
     const double d = PyFloat_AsDouble(o);
     if (d == -1.0 && PyErr_Occurred())
-      return false;
+      return -1;
     out = value_t(d);
-    return true;
+    return 1;
   }
   if (PyUnicode_Check(o)) {
     Py_ssize_t n = 0;
     const char *s = PyUnicode_AsUTF8AndSize(o, &n); // fails (and raises) on lone surrogates
     if (s == nullptr)
-      return false;
+      return -1;
     out = value_t(std::string(s, static_cast<size_t>(n)));
-    return true;
+    return 1;
   }
   if (PyBytes_Check(o)) {
     out = make_bytes(std::string(PyBytes_AS_STRING(o), static_cast<size_t>(PyBytes_GET_SIZE(o))));
-    return true;
+    return 1;
   }
   if (PyByteArray_Check(o)) {
     out = make_bytes(
         std::string(PyByteArray_AS_STRING(o), static_cast<size_t>(PyByteArray_GET_SIZE(o))));
-    return true;
+    return 1;
   }
-  if (PyList_Check(o) || PyTuple_Check(o)) {
-    const bool tup = PyTuple_Check(o);
-    const Py_ssize_t n = tup ? PyTuple_GET_SIZE(o) : PyList_GET_SIZE(o);
-    std::vector<value_t> elems;
-    elems.reserve(static_cast<size_t>(n));
-    for (Py_ssize_t k = 0; k < n; ++k) {
-      value_t e;
-      if (!from_py(tup ? PyTuple_GET_ITEM(o, k) : PyList_GET_ITEM(o, k), e, depth + 1))
-        return false;
-      elems.push_back(std::move(e));
+  if (PyList_Check(o) || PyTuple_Check(o) || PyDict_Check(o))
+    return 0;
+  void *p = nullptr;
+  if (SWIG_IsOK(SWIG_ConvertPtr(o, &p, symbol_swig_type(), 0)) && p != nullptr) {
+    out = value_t(*static_cast<symbol *>(p));
+    return 1;
+  }
+  if (SWIG_IsOK(SWIG_ConvertPtr(o, &p, value_swig_type(), 0)) && p != nullptr) {
+    out = *static_cast<value_t *>(p);
+    return 1;
+  }
+  PyErr_Clear(); // a failed proxy lookup above may leave an attribute error behind
+  PyErr_Format(PyExc_TypeError, "pycvc: cannot convert %.200s to a state_exec value",
+               Py_TYPE(o)->tp_name);
+  return -1;
+}
+
+bool from_py(PyObject *root, value_t &out) {
+  using namespace cvc::state_exec;
+  const int leaf = leaf_from_py(root, out);
+  if (leaf != 0)
+    return leaf > 0;
+  struct frame {
+    PyObject *o; // a list, tuple or dict
+    value_t v;   // its value, being filled (shares its storage with the value handed out)
+    Py_ssize_t pos;
+  };
+  std::vector<frame> stack;
+  std::unordered_map<PyObject *, value_t> made; // container -> its value
+  std::unordered_set<PyObject *> filling;       // containers on the stack: met again, a cycle
+  // References on every container made, so none goes while its value is in `made` (a lookup of a
+  // proxy can run Python code). Dropped when this returns.
+  struct holds {
+    std::vector<PyObject *> objects;
+    ~holds() {
+      for (PyObject *o : objects)
+        Py_DECREF(o);
     }
-    out = make_list(std::move(elems));
+  } held;
+  // `o`'s value: one already made is shared; otherwise an empty list or dict, pushed to be filled.
+  auto container = [&](PyObject *o, value_t &v) -> bool {
+    if (filling.count(o) != 0) {
+      PyErr_SetString(PyExc_ValueError, "pycvc: value contains itself");
+      return false;
+    }
+    if (const auto it = made.find(o); it != made.end()) {
+      v = it->second;
+      return true;
+    }
+    if (PyDict_Check(o)) {
+      v = make_dict();
+    } else {
+      v = make_list();
+      std::get<list_ptr>(v.v)->reserve(
+          static_cast<size_t>(PyTuple_Check(o) ? PyTuple_GET_SIZE(o) : PyList_GET_SIZE(o)));
+    }
+    Py_INCREF(o);
+    held.objects.push_back(o);
+    made.emplace(o, v);
+    filling.insert(o);
+    stack.push_back({o, v, 0});
     return true;
-  }
-  if (PyDict_Check(o)) {
-    std::vector<std::pair<std::string, value_t>> entries;
-    PyObject *k = nullptr, *v = nullptr;
-    Py_ssize_t pos = 0;
-    while (PyDict_Next(o, &pos, &k, &v)) {
+  };
+  // An element's value, into `v`.
+  auto element = [&](PyObject *item, value_t &v) -> bool {
+    Py_INCREF(item); // the container could drop it while a proxy lookup runs Python code
+    const int r = leaf_from_py(item, v);
+    const bool ok = r > 0 || (r == 0 && container(item, v));
+    Py_DECREF(item);
+    return ok;
+  };
+  if (!container(root, out))
+    return false;
+  while (!stack.empty()) {
+    const size_t top = stack.size() - 1; // an index: container() may grow the stack
+    PyObject *o = stack[top].o;
+    if (PyDict_Check(o)) {
+      PyObject *k = nullptr;
+      PyObject *item = nullptr;
+      if (!PyDict_Next(o, &stack[top].pos, &k, &item)) {
+        filling.erase(o);
+        stack.pop_back();
+        continue;
+      }
       if (!PyUnicode_Check(k)) {
         PyErr_Format(PyExc_TypeError, "pycvc: dict keys must be str, not %.200s",
                      Py_TYPE(k)->tp_name);
@@ -1651,38 +1762,38 @@ bool from_py(PyObject *o, value_t &out, int depth) {
       const char *ks = PyUnicode_AsUTF8AndSize(k, &n);
       if (ks == nullptr)
         return false;
+      std::string key(ks, static_cast<size_t>(n));
       value_t e;
-      if (!from_py(v, e, depth + 1))
+      if (!element(item, e))
         return false;
-      entries.emplace_back(std::string(ks, static_cast<size_t>(n)), std::move(e));
+      std::get<dict_ptr>(stack[top].v.v)->emplace_back(std::move(key), std::move(e));
+    } else {
+      const bool tup = PyTuple_Check(o);
+      const Py_ssize_t i = stack[top].pos;
+      if (i >= (tup ? PyTuple_GET_SIZE(o) : PyList_GET_SIZE(o))) {
+        filling.erase(o);
+        stack.pop_back();
+        continue;
+      }
+      stack[top].pos = i + 1;
+      value_t e;
+      if (!element(tup ? PyTuple_GET_ITEM(o, i) : PyList_GET_ITEM(o, i), e))
+        return false;
+      std::get<list_ptr>(stack[top].v.v)->push_back(std::move(e));
     }
-    out = make_dict(std::move(entries));
-    return true;
   }
-  void *p = nullptr;
-  if (SWIG_IsOK(SWIG_ConvertPtr(o, &p, symbol_swig_type(), 0)) && p != nullptr) {
-    out = value_t(*static_cast<symbol *>(p));
-    return true;
-  }
-  if (SWIG_IsOK(SWIG_ConvertPtr(o, &p, value_swig_type(), 0)) && p != nullptr) {
-    out = *static_cast<value_t *>(p);
-    return true;
-  }
-  PyErr_Clear(); // a failed proxy lookup above may leave an attribute error behind
-  PyErr_Format(PyExc_TypeError, "pycvc: cannot convert %.200s to a state_exec value",
-               Py_TYPE(o)->tp_name);
-  return false;
+  return true;
 }
 } // namespace
 
-PyObject *value_to_py(const cvc::state_exec::value_t &v) { return to_py(v, 0); }
+PyObject *value_to_py(const cvc::state_exec::value_t &v) { return to_py(v); }
 
 PyObject *values_to_py_tuple(std::span<const cvc::state_exec::value_t> values) {
   PyObject *t = PyTuple_New(static_cast<Py_ssize_t>(values.size()));
   if (t == nullptr)
     return nullptr;
   for (size_t i = 0; i < values.size(); ++i) {
-    PyObject *item = to_py(values[i], 0);
+    PyObject *item = to_py(values[i]);
     if (item == nullptr) {
       Py_DECREF(t);
       return nullptr;
@@ -1692,7 +1803,7 @@ PyObject *values_to_py_tuple(std::span<const cvc::state_exec::value_t> values) {
   return t;
 }
 
-bool py_to_value(PyObject *o, cvc::state_exec::value_t &out) { return from_py(o, out, 0); }
+bool py_to_value(PyObject *o, cvc::state_exec::value_t &out) { return from_py(o, out); }
 } // namespace pycvc
 %}
 
@@ -2262,6 +2373,37 @@ bool py_to_macro_map(PyObject *o, macro_map &out) {
 %typemap(typecheck, precedence=SWIG_TYPECHECK_POINTER) pycvc::value_callback
     "$1 = ($input == Py_None || PyCallable_Check($input)) ? 1 : 0;"
 
+// ── native functions from Python, and the names C++ keeps ──
+%{
+#include <mutex>
+namespace pycvc {
+namespace {
+// A native_fn from `fn`: the native function a pycvc.value holds, or a Python callable wrapped by
+// python_native_fn (which throws std::invalid_argument, prefixed with `who`, for anything else).
+cvc::state_exec::native_fn native_from_py(const std::string &who, const std::string &name,
+                                          PyObject *fn) {
+  void *p = nullptr;
+  if (SWIG_IsOK(SWIG_ConvertPtr(fn, &p, value_swig_type(), 0)) && p != nullptr) {
+    const auto &held = *static_cast<cvc::state_exec::value_t *>(p);
+    if (const auto *native = std::get_if<cvc::state_exec::native_fn>(&held.v))
+      return *native;
+  }
+  return python_native_fn(who, name, fn);
+}
+
+// A `who` that lives for good. C++ keeps the const char* a job or call is given (for its errors,
+// which can come after the call returns), where C++ passes a string literal; Python's string
+// would go. Bounded by the distinct names used.
+const char *stable_who(const std::string &who) {
+  static std::mutex mu;
+  static std::set<std::string> names; // node-based: c_str() stays put
+  std::lock_guard<std::mutex> lock(mu);
+  return names.insert(who).first->c_str();
+}
+} // namespace
+} // namespace pycvc
+%}
+
 // ── enums: pycvc.process_status and pycvc.scheduling_policy are enum.IntEnum classes ──
 // pycvc.process_status.killed is process_status::killed. An enum argument must be a member of its
 // IntEnum (strict, like values), which is also what lets to_string(process_status) and
@@ -2565,6 +2707,10 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::evaluate)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::evaluate_script)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::evaluator::evaluate)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::evaluator::evaluate_script)
+// And the long walks: a job run to completion, a heap measurement, a cycle collection.
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::run_to_completion)
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::measure_heap_share)
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
 
 // Shared as in C++ (environment_ptr, process_ptr, ...). Struct members that are maps, lists or
 // values read and write as Python values (copies).
@@ -2572,6 +2718,10 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::evaluator::evaluate_script)
 %shared_ptr(cvc::state_exec::script_reader)
 %shared_ptr(cvc::state_exec::process)
 %shared_ptr(cvc::state_exec::intrinsics_context)
+// A data job is owned (std::unique_ptr): Python owns one it is handed, and gives it up to
+// run_data_job.
+%include <std_unique_ptr.i>
+%unique_ptr(cvc::state_exec::data_job)
 %naturalvar cvc::state_exec::value_tag;
 %naturalvar cvc::state_exec::environment::bindings;
 %naturalvar cvc::state_exec::execute_options::signal_handlers;
@@ -2716,16 +2866,8 @@ public:
   static void register_fn(environment_ptr env, const std::string &name, PyObject *fn) {
     if (!env)
       throw std::invalid_argument("pycvc.builtins.register_fn: env is None");
-    cvc::state_exec::value_t held;
-    void *p = nullptr;
-    if (SWIG_IsOK(SWIG_ConvertPtr(fn, &p, pycvc::value_swig_type(), 0)) && p != nullptr)
-      held = *static_cast<cvc::state_exec::value_t *>(p);
-    if (const auto *native = std::get_if<cvc::state_exec::native_fn>(&held.v)) {
-      cvc::state_exec::builtins::register_fn(env, name, *native);
-      return;
-    }
     cvc::state_exec::builtins::register_fn(
-        env, name, pycvc::python_native_fn("pycvc.builtins.register_fn", name, fn));
+        env, name, pycvc::native_from_py("pycvc.builtins.register_fn", name, fn));
   }
 }
 
@@ -2813,8 +2955,18 @@ struct evaluator_state {
 };
 %extend evaluator_state {
   evaluation_stats *_stats() { return &$self->stats; }
+  // A heap measurement's result while evaluation waits to resume (#667), or None. Read-only: it
+  // belongs to the measurement in flight.
+  PyObject *_heap_measured() const {
+    if (!$self->heap_measured) {
+      Py_INCREF(Py_None);
+      return Py_None;
+    }
+    return PyLong_FromUnsignedLongLong(static_cast<unsigned long long>(*$self->heap_measured));
+  }
   %pythoncode %{
     stats = property(_stats)
+    heap_measured = property(_heap_measured)
   %}
 }
 
@@ -2850,6 +3002,7 @@ public:
   bool is_paused() const;
   void restrict_special_forms(std::shared_ptr<const std::set<std::string> > allowed);
   static const std::set<std::string> &all_special_forms();
+  environment_ptr global_env() const; // (#667)
 };
 
 // Snapshot codec for an environment chain and for a whole evaluator state.
@@ -2937,6 +3090,9 @@ struct process_info {
   double read_time;
   double eval_time;
   double data_time;
+  // The measured heap share (#667, heap.h), which max_memory covers too.
+  unsigned long long heap_memory;
+  unsigned long long heap_measurements;
 };
 %extend process_info {
   %pythoncode %{
@@ -2977,6 +3133,7 @@ const size_t kDefaultMaxAllocBytes = 16777216;
 std::optional<size_t> eval_alloc_limit();
 void eval_alloc_check(size_t bytes, const char *who);
 size_t alloc_bytes(size_t count, size_t each);
+void eval_alloc_note(size_t bytes); // (#667) report bytes allocated, for the heap's re-measures
 %pythonappend cvc::state_exec::process::_state %{
   val._pycvc_owner = self
 %}
@@ -3022,6 +3179,15 @@ struct process {
   unsigned long long message_count;
   unsigned long long message_bytes;
   int parent_pid;
+  // The heap share (#667, heap.h).
+  unsigned long long heap_bytes;
+  unsigned long long heap_alloc_bytes;
+  unsigned long long heap_steps;
+  unsigned long long heap_measurements;
+  size_t heap_check_steps;
+  bool heap_measuring;
+  bool heap_measure_due(unsigned long long state_bytes) const;
+  void release_state();
   double elapsed_time() const;
   bool charges_cpu_time() const;
   void charge_cpu_time(double seconds);
@@ -3246,7 +3412,137 @@ void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::str
 std::string resolve_channel_key(const std::string &root_path, const std::string &channel);
 value_t make_future(const std::string &channel);
 std::optional<std::string> future_channel_of(const value_t &v);
+
+// ── the heap (#667, heap.h) ──
+// A process's heap share, and the per-thread reference-cycle collector, which a Python driver can
+// run between scheduler runs on the thread that ran them. Not wrapped: heap_after_step (the
+// schedulers' own per-step accounting) and track_captured_env / track_mutated (a value from
+// Python is a fresh copy, so tracking it would mean nothing; the evaluator tracks its own).
+struct heap_options {
+  size_t check_steps;
+};
+heap_options heap_options_from_state(cvc::state &root,
+                                     const std::string &scheduler_id = std::string(),
+                                     const heap_options &base = heap_options());
+size_t measure_heap_share(const process &proc);
+size_t heap_remeasure_bytes(size_t last_measured);
+struct cycle_stats {
+  size_t candidates;
+  size_t examined;
+  size_t freed;
+};
+cycle_stats collect_cycles();
+bool cycle_collection_due();
+void note_process_exit();
+size_t tracked_objects();
+
+// ── deep-data jobs (#658, #665, data_job.h) ──
+// A job runs a slice at a time: step(nodes) until it says it's done, then result(). The factories
+// hand Python an owned job. From a Python function a program calls (it runs on the stepping
+// thread), run_data_job and call_function work as for a C++ native: return what they return at
+// once, and the evaluator finishes the call. Not wrapped: the call protocol for C++ job
+// implementations (call_request, take_call, pending_call, call_returned, own_inputs) and
+// detail::. make_concat_job, run_data_job and call_function are below, in pycvc's own wrappers.
+%nodefaultctor data_job;
+class data_job {
+public:
+  virtual ~data_job();
+  virtual bool step(size_t nodes) = 0;
+  virtual value_t result() = 0;
+  size_t nodes() const;
+};
+const size_t kDataNodeBytes = 256;
+bool is_compound(const value_t &v);
+std::unique_ptr<data_job> make_equal_job(value_t a, value_t b);
+std::unique_ptr<data_job> make_print_job(value_t v);
+std::unique_ptr<data_job> make_copy_job(value_t v);
+std::unique_ptr<data_job> make_substitute_job(value_t tmpl,
+                                              const std::unordered_map<std::string, value_t> &subst);
+std::unique_ptr<data_job> make_heap_share_job(const process &proc);
+value_t run_to_completion(data_job &job);
+void count_data_nodes(size_t nodes);
+
+// ── stdlib_registry (stdlib.h) ──
+// standard() returns a copy (C++ returns a const reference to the shared registry), so Python
+// can't add to the one every environment shares. register_function takes a Python callable or a
+// pycvc.value holding a native function, as builtins.register_fn does. lookup_qualified returns
+// the function as a pycvc.value, or raises KeyError where C++ returns nullptr.
+class stdlib_registry {
+public:
+  stdlib_registry();
+  static environment_ptr shared_scope();
+  std::vector<std::string> list_functions(const std::string &module) const;
+  std::vector<std::string> list_modules() const;
+};
+%extend stdlib_registry {
+  static cvc::state_exec::stdlib_registry standard() {
+    return cvc::state_exec::stdlib_registry::standard();
+  }
+  void register_function(const std::string &module, const std::string &func_name, PyObject *fn) {
+    $self->register_function(
+        module, func_name,
+        pycvc::native_from_py("pycvc.stdlib_registry.register_function", func_name, fn));
+  }
+  void import_module(const std::string &module, environment_ptr env,
+                     const std::vector<std::string> &specific_fns = std::vector<std::string>()) {
+    if (!env)
+      throw std::invalid_argument("pycvc.stdlib_registry.import_module: env is None");
+    $self->import_module(module, env, specific_fns);
+  }
+  value_t lookup_qualified(const std::string &qualified_name) const {
+    if (const cvc::state_exec::native_fn *fn = $self->lookup_qualified(qualified_name))
+      return cvc::state_exec::value_t(*fn);
+    throw pycvc::no_value{qualified_name};
+  }
 }
+}
+}
+
+// make_concat_job, run_data_job and call_function: the C++ calls, except that `who` is kept for
+// good (C++ holds the pointer for its errors), and run_data_job's `then` is a Python callable or
+// None.
+%{
+namespace pycvc {
+std::unique_ptr<cvc::state_exec::data_job>
+make_concat_job_kept(const std::vector<cvc::state_exec::value_t> &parts, const std::string &sep,
+                     const std::string &who) {
+  return cvc::state_exec::make_concat_job(parts, sep, stable_who(who));
+}
+
+cvc::state_exec::value_t run_data_job_then(std::unique_ptr<cvc::state_exec::data_job> job,
+                                           PyObject *then = nullptr) {
+  if (!job)
+    throw std::invalid_argument("pycvc.run_data_job: job is None");
+  std::function<cvc::state_exec::value_t(cvc::state_exec::value_t)> after;
+  if (then != nullptr && then != Py_None) {
+    cvc::state_exec::native_fn fn = python_native_fn("pycvc.run_data_job", "then", then);
+    after = [fn](cvc::state_exec::value_t v) {
+      return fn(std::span<const cvc::state_exec::value_t>(&v, 1));
+    };
+  }
+  return cvc::state_exec::run_data_job(std::move(job), std::move(after));
+}
+
+cvc::state_exec::value_t call_function_kept(const cvc::state_exec::value_t &fn,
+                                            const std::vector<cvc::state_exec::value_t> &args,
+                                            const std::string &who) {
+  return cvc::state_exec::call_function(fn, std::span<const cvc::state_exec::value_t>(args),
+                                        stable_who(who));
+}
+} // namespace pycvc
+%}
+%rename(make_concat_job) pycvc::make_concat_job_kept;
+%rename(run_data_job) pycvc::run_data_job_then;
+%rename(call_function) pycvc::call_function_kept;
+namespace pycvc {
+std::unique_ptr<cvc::state_exec::data_job>
+make_concat_job_kept(const std::vector<cvc::state_exec::value_t> &parts, const std::string &sep,
+                     const std::string &who);
+cvc::state_exec::value_t run_data_job_then(std::unique_ptr<cvc::state_exec::data_job> job,
+                                           PyObject *then = nullptr);
+cvc::state_exec::value_t call_function_kept(const cvc::state_exec::value_t &fn,
+                                            const std::vector<cvc::state_exec::value_t> &args,
+                                            const std::string &who);
 }
 
 // register_intrinsics(env, ctx): the C++ call, except that every function it adds keeps ctx (and

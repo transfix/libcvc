@@ -277,4 +277,5 @@ pycvc.register_intrinsics(env, ctx)         # each function keeps ctx alive
 ```
 
 Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,
-`test_pycvc_state_exec_sched.py`, `test_pycvc_state_exec_eval.py`.
+`test_pycvc_state_exec_sched.py`, `test_pycvc_state_exec_eval.py`,
+`test_pycvc_state_exec_data.py`.
