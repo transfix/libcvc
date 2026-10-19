@@ -143,9 +143,11 @@ void route_follower::apply() {
     if (last && gear > 0) {
       // The trained drive's leg: a carrot along the route, and the drive parks at its end.
       const double look = _o.lookahead > 0.0 ? _o.lookahead : 3.0 * step;
-      double cx = 0.0, cy = 0.0;
-      along(p, a.progress, e, look, cx, cy);
-      _sim.retarget(i, to_norm_x(cx), to_norm_y(cy));
+      const int ahead = std::max(1, static_cast<int>(std::lround(look / step)));
+      if (a.carrot < 0 || (a.carrot < e && 2 * (a.carrot - a.progress) <= ahead)) {
+        a.carrot = std::min(e, a.progress + ahead);
+        _sim.retarget(i, to_norm_x(p[a.carrot].x), to_norm_y(p[a.carrot].y));
+      }
       if (dist(x, y, p[e].x, p[e].y) <= tol)
         a.done = true;
       continue;

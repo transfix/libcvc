@@ -23,7 +23,8 @@
 //   - Its progress is the nearest pose of the current leg, ahead of where it last was.
 //   - A forward leg that runs to the route's end is the trained drive's: the agent is retargeted
 //     to a carrot `lookahead` along the route, so it keeps off walls and parks at the end as it
-//     always does.
+//     always does. The carrot moves on only once the agent is halfway to it, since a retarget
+//     resets the drive's carrot state.
 //   - A leg that ends at a cusp (backing up, or the forward leg of a multi-point turn) is driven
 //     geometrically: pure pursuit along the leg in its gear at `manoeuvre_speed`, slowing to stop
 //     at the cusp, through sim_world::override_command.
@@ -77,6 +78,7 @@ private:
     std::vector<route_pose> poses;
     std::vector<int> leg_end; // each leg's last pose index (a cusp, or the route's end)
     int leg = 0, progress = 0;
+    int carrot = -1; // the drive leg's carrot, a pose index; -1 = none yet
     bool done = false;
   };
   sim_world &_sim;
