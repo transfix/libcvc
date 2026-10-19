@@ -794,6 +794,20 @@ What differs from a real terminal:
 - Startup pauses for about half a second. FTXUI waits up to 500 ms for the terminal
   to answer its capability queries, and xterm.js can only answer once the loop yields.
 
+**With a 3D scene (cvcGL).** The terminal backends stay GL-free; cvcGL extends them.
+[`cvc::gl::ariadne::TerminalScene`](../inc/cvc/gl/ariadne/TerminalScene.h) is a `SceneAdapter`
+that realizes the document's `scene:` into an offscreen `SceneRenderer`, renders it every
+frame at the screen's half-block grid (two pixels per cell, supersampled), and hands the
+frame to the backend as its background (`FtxuiBackend::set_background`), so widgets, menus
+and windows draw over the scene the way ImGui draws over the GL canvas. Passed as
+`RunOptions::background_input`, its `handle_input` turns background drags into orbit,
+middle-drags into pan and the wheel into zoom. The host is
+[`ariadne_terminal`](../src/cvcGL/examples/ariadne_terminal.cpp), the terminal sibling of
+`ariadne_hello` (`ariadne_terminal doc.ari [--backend tvision]`, or `--snapshot --ansi` for
+one frame as text); [`terminal_scene.ari`](../src/cvcGL/examples/terminal_scene.ari) is a
+small example. No display is needed: VTK picks X, EGL or OSMesa at run time
+(`VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow` forces EGL).
+
 ### 9.3 From Python (a full app via `AriRuntime`)
 
 `AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the
@@ -935,9 +949,10 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
 - **OS signals reach `on_signal` only where a host routes them.** `ari` does (see §9.2);
   the ImGui host and `AriRuntime` route none yet, and an embedding host that skips the
   `RunOptions` hooks gets FTXUI's default for SIGTERM (restore the terminal, exit).
-- **The terminal backend has no scene renderer.** A `scene:` is dropped with a warning.
-  The §16.6 pixel mirror (offscreen GL → half-block cells) is the path to showing a real 3D
-  scene in a terminal.
+- **The libcvc terminal backends render no scene by themselves.** `ari` drops a `scene:`
+  with a warning; cvcGL's `TerminalScene` (§9.2) is what draws one, so a scene needs a cvcGL
+  build and a GL that works offscreen (X, EGL or OSMesa). Frames are half-blocks only: Sixel /
+  Kitty graphics are not used yet.
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
   loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and

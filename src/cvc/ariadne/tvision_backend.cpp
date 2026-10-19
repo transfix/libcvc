@@ -287,7 +287,9 @@ struct Host {
   }
 
   bool feed(const std::string &id, const TermEvent &e) {
-    const bool used = be.feed_window(rt, id, e);
+    bool used = be.feed_window(rt, id, e);
+    if (!used && id.empty() && opts.background_input && opts.background_input(e))
+      used = true; // e.g. cvcGL's TerminalScene steering its camera from the desktop
     if (!used && unhandled)
       unhandled(e);
     dirty = true;
@@ -352,8 +354,8 @@ struct Host {
       background = new ContentView(desk->getExtent(), *this, "");
       background->growMode = gfGrowHiX | gfGrowHiY;
       desk->insert(background);
-      if (desk->background)
-        background->putInFrontOf(desk->background->next);
+      if (desk->background) // just in front of tvision's own backdrop: behind every window
+        background->putInFrontOf(desk->background);
     } else if (!be.hosted_root() && background) {
       TObject::destroy(background);
       background = nullptr;
