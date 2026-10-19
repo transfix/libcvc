@@ -101,9 +101,15 @@ jobs:
           $env:PATH = (Join-Path $depsPath 'bin') + ';' + $env:PATH
           cmake --build build --config Release --target ariadne_conference ariadne-server --parallel
 
-      - name: Stage artifact (exes + first-party DLLs)
+      # Runnable bundle: the exes + EVERY runtime DLL (first-party cvc/cvcGL + all cvcpkg deps:
+      # SDL3, VTK, gRPC/protobuf/abseil, turbojpeg, Boost, ...) flat in one dir, so Windows'
+      # same-directory DLL search resolves them with no launcher. Fat (ships deps the conference
+      # may not touch, e.g. Qt6/HDF5/ImageMagick); a dumpbin-closure slim is a follow-up. Needs the
+      # VC++ 2015-2022 redistributable on the target (noted in the README).
+      - name: Stage runnable bundle (exes + all runtime DLLs)
         shell: pwsh
         run: |
+          $depsPath = '${{ steps.extradeps.outputs.prefix }}'
           $out = Join-Path $PWD 'ariadne-conference-windows'
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           foreach ($d in @('build\bin\Release', 'build\bin')) {
@@ -112,7 +118,28 @@ jobs:
               Copy-Item -Path (Join-Path $d '*.dll') -Destination $out -ErrorAction SilentlyContinue
             }
           }
-          Write-Host "staged:"; Get-ChildItem $out | Select-Object Name, Length | Format-Table -AutoSize
+          $depsBin = Join-Path $depsPath 'bin'
+          if (Test-Path $depsBin) {
+            Copy-Item -Path (Join-Path $depsBin '*.dll') -Destination $out -ErrorAction SilentlyContinue
+          }
+          @"
+Ariadne conference (Windows) — client + relay.
+
+Needs the Microsoft Visual C++ 2015-2022 Redistributable (x64) installed:
+  https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+Join a call (camera + mic; peers are discovered from the room roster):
+  ariadne_conference.exe --name YOU --camera --mic ^
+    --state-peer paladin.sublevels.net:7700 --media-server paladin.sublevels.net:7701
+(default room is "standup"; pass --room NAME to pick another. Omit --camera/--mic for synthetic A/V.)
+
+Run a relay yourself (headless, no GL needed):
+  ariadne-server.exe --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701
+"@ | Out-File -FilePath (Join-Path $out 'README.txt') -Encoding utf8
+          $n = (Get-ChildItem $out).Count
+          $mb = [math]::Round(((Get-ChildItem $out -Recurse | Measure-Object -Property Length -Sum).Sum)/1MB, 1)
+          Write-Host ("bundle: $n files, $mb MB")
+          Get-ChildItem $out | Where-Object { $_.Name -like '*.exe' -or $_.Name -eq 'README.txt' } | Select-Object Name, Length | Format-Table -AutoSize
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
