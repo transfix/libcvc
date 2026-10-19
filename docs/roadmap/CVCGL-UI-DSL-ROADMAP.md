@@ -4133,6 +4133,18 @@ When Ariadne moves into libcvc as `cvc::ariadne`, a pure-terminal backend render
 - **Optional second backend: tvision** — worth supporting purely for the **windowed-desktop feel**. It is the *only* candidate that natively delivers Ariadne's default `free` metaphor (movable/overlapping windows, pull-down menus, dialogs) and the closest terminal analog to the ImGui/VTK desktop, with `TApplication` owning the root exactly as VTK owns the GL context. **Clear two blockers first:** (1) legal sign-off on the Borland derivative-works cloud (MIT covers only magiblot's additions); (2) a hermetic ncursesw + terminfo recipe (the hermetic X11/GL recipes are the precedent). No wasm — native-only.
 - **Do NOT roadmap notcurses as the widget backend.** It is a low-level plane/blitter/multimedia canvas, not a retained widget toolkit — adopting it means reimplementing Ariadne's entire widget layer on `ncplane`s. Heaviest dep closure, the only non-MIT license, no wasm. Keep it shelved solely as a future option if a pure-terminal build ever needs inline Sixel/Kitty image or video — a job that overlaps what cvcGL/VTK already do.
 
+> **Status (2026-10-18): the FTXUI backend is interactive** (`cvc::ariadne::FtxuiBackend`, `ari run`). It is
+> immediate-mode over FTXUI's DOM (each leaf reflects its on-screen box; mouse events hit-test the last frame
+> drawn), so it realizes `free` after all: movable, z-ordered, closable windows placed from `pos:`/`size:` and
+> persisted to `tree.<id>.geometry` (`caps.windows = true`), plus menus, combo popups, text entry, sliders, and
+> half-block images. Authored px map to cells by a nominal 8 × 16 cell. The document-level `on_signal:` hook
+> receives the terminal's Ctrl-C as `SIGINT` and, through host hooks, OS-delivered signals (see `docs/ARIADNE.md`
+> §5.3). Grid seams drag (row splits persist to `tree.<id>.tracks`). `ari` ships as its own cvcpkg package.
+> **The tvision backend is built too** (`cvc::ariadne::TvisionBackend`, `ari run --backend tvision`): native tvision
+> chrome — movable / resizable / overlapping windows, pull-down menus, status line — around window contents laid out
+> by the FTXUI backend in its new *hosted* mode, so the two terminal backends share one widget engine. It sits behind
+> `CVC_ARIADNE_TVISION` as decided in row 5. The wasm / xterm.js build of the FTXUI backend is transfix/libcvc#710.
+
 **Net:** two backends earn a place — **FTXUI as the portable, hermetic, wasm-capable default**, and **tvision as the native desktop-metaphor option** behind a capability flag. notcurses stays off the roadmap. Design consequence for P0: the `Backend` interface must support both a framework that owns the loop (`owns_loop=true`, the framework calls `render()`) and a primitive renderer the core drives (`owns_loop=false`, like the ImGui path). That `owns_loop` + `root_rect()` seam is the one contract expensive to retrofit — lock it in P0 even though the terminal backend itself is deferred.
 
 ### 16.5 Open decisions (scope calls) + risk register
@@ -4162,7 +4174,7 @@ keeps the loader context-agnostic and is the cheapest moment to do it. What stil
 | 4 | Where does the **`cvc::state` read/seed/commit** logic live once lifted out of `ImGuiBinding.cpp`? | A **free-function set in `cvc::ariadne::detail`** the `Runtime` calls, returning `EditResult{changed,committed,value}`; the backend only reports the commit edge, the core owns write-back. **Audit every ui:: commit policy during the lift** (discrete-immediate vs deactivate-after-edit vs text-entry; `color_edit3` multi-field) so semantics don't silently change. | ⚑ (sharpest refactor risk) |
 | 5 | Pursue **tvision** at all? | **DECIDED: yes, in v1**, for the native windowed-desktop terminal feel (movable/overlapping windows, pull-down menus, dialogs) realizing Ariadne's default `free` metaphor, with `TApplication` owning the root as VTK owns the GL context. **Licensing accepted for now** — proceed; if the Borland derivative-works cloud becomes a real problem, **feature-flag it out** (`CVC_ARIADNE_TVISION` off; `.ari` docs unaffected). Legal sign-off worth getting before broad shipping but does not gate dev. Still needs a hermetic ncursesw+terminfo closure. FTXUI stays the portable/wasm default; tvision is the native-desktop option behind a capability flag. | ⚑→ set |
 | 6 | Add the **`shader://`** convenience scheme now? | **Defer.** Ship GLSL sourcing with inline / `file://` / `pkg://` / `state://`. The `state://` **live-hot-reload** path is the valuable one (edit GLSL in a text widget, reload on the commit boundary); `#include` expansion + shader cache (`shader://`) only if needed. | |
-| 7 | Does **reconcile + intent-drain survive a framework-owned loop**? | Designed for it (the `owns_loop` seam), but **prove it when the first `owns_loop=true` backend lands**: `drain()` must run intents off the walk on the host thread, mapped onto FTXUI/tvision idle/event hooks with no mid-walk mutation. Deferred with the backend. | |
+| 7 | Does **reconcile + intent-drain survive a framework-owned loop**? | **PROVEN with the interactive FTXUI backend** (2026-10-18): `FtxuiBackend::run` drives FTXUI through `ftxui::Loop::RunOnce`, feeds each input to a walk that only reports edits, and calls `AppRuntime::drain()` between iterations on the host thread, so intents never run mid-walk. tvision inherits the same shape. | ✓ |
 | — | **FTXUI C++ standard floor** | **RESOLVED — already satisfied.** libcvc floors at **C++20** already (`CMakeLists.txt` defaults `CMAKE_CXX_STANDARD` to 20 for `std::format` etc.; the earlier "core is C++17" note was wrong). FTXUI's C++20 requirement is met with no floor change. The floor is now made **firm**: a sub-20 override is raised to 20 with a warning. | ✓ |
 
 **Risk register (carried, not blocking the scope):**
@@ -4225,6 +4237,12 @@ realistic, not 60). EGL device selection matters on multi-GPU boxes, and CI need
 build for GPU-less runners. Colour fidelity drops per tier (Kitty ≫ Sixel ≫ half-block ≫ ASCII). This is a
 *presentation* of the ImGui/VTK backend, not a new backend — no `.ari` or backend-interface change; it slots
 in beside the native-window and wasm surfaces as a third way to present the same rendered frames.
+
+> **Status (2026-10-18): a scene in the terminal is built, as a cvcGL extension of the terminal backends.**
+> `cvc::gl::ariadne::TerminalScene` renders the document's SCENE offscreen (X / EGL / OSMesa) and the half-block
+> rasterizer (tier 3 below) draws it as the terminal backend's background, with the widgets drawn natively over it by
+> FTXUI or tvision, rather than mirroring the ImGui overlay's pixels. Background drags / the wheel steer the camera.
+> Host: `ariadne_terminal`; test: `cvcgl_terminal_scene`. Sixel / Kitty and the golden-image harness (1) remain.
 
 **Phasing.** (1) EGL offscreen + `frameRGB` **golden-image test harness** for the ImGui/VTK backend (v1.x —
 the testability win). (2) The half-block-ANSI rasterizer (a pure RGB→bytes function + tests — no GPU needed

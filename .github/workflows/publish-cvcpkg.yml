@@ -182,6 +182,7 @@ jobs:
       libcvc: ${{ steps.rev.outputs.libcvc }}
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
       cvcgl_examples: ${{ steps.rev.outputs.cvcgl_examples }}
+      ari: ${{ steps.rev.outputs.ari }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
       pycvc_cp311: ${{ steps.rev.outputs.pycvc_cp311 }}
@@ -222,6 +223,7 @@ jobs:
           emit libcvc         libcvc
           emit cvcgl          cvcgl
           emit cvcgl-examples cvcgl_examples
+          emit ari            ari
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
           emit pycvc-cp313    pycvc_cp313
@@ -832,6 +834,51 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping cvcgl-examples publish"
+          fi
+
+      - name: Build, pack & publish ari [Linux]
+        # The `ari` terminal runner (src/ari), packaged apart from the libcvc SDK the
+        # way cvc-cli is.  Like cvcgl-examples it runs the recipe's own build.sh
+        # against the libcvc just installed into $STAGE, so the published ari always
+        # matches the libcvc built from this tree (its FTXUI backend and .ari loader
+        # live in libcvc).  Linux only: the recipe's matrix is linux-only until
+        # libcvc's ftxui dependency is published for the other platforms.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/ari/build.sh
+          test -x stage-ari/bin/ari
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ari \
+            --from-prefix stage-ari \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ari \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ari publish"
           fi
 
       - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [Linux]

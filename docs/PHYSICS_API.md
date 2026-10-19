@@ -251,6 +251,9 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
   feed-forward on `max_accel` / `max_decel`, corrected by the measured acceleration.
   - The correction is proportional, plus an integral trim (2/s). The trim learns what the
     feed-forward gets wrong: a converter's launch, a grade, a load.
+  - `max_speed` (m/s, 0 for none) is the top speed it holds. The wanted acceleration eases off
+    to close the gap to it in 0.5 s. The presets carry their rated speeds: 24.6 m/s (55 mph) for
+    the Humvee and 10 m/s for the RoboRacer. Raw pedals are not held.
   - The trim restarts when the command turns from speeding up to slowing down, and holds
     while its pedal is saturated.
   - The transmission shifts on its own; `reverse` backs up.
@@ -305,7 +308,7 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
 - **Tuning a running vehicle.** `get_vehicle(id)` returns its description and `set_vehicle(id, d)`
   changes it from the next step on. These values may change:
   - the steering: `max_steer`, `max_steer_rate`;
-  - the driver: `max_accel`, `max_decel`;
+  - the driver: `max_accel`, `max_decel`, `max_speed`;
   - the resistance: `drag_coefficient`, `frontal_area`, `air_density`, `rolling_resistance`;
   - the powertrain: `engine_max_torque`, `engine_min_rpm`, `engine_max_rpm`, `shift_up_rpm`,
     `shift_down_rpm`, `shift_up_rpm_light`, `shift_down_rpm_light`, `engine_friction_curve`,
@@ -514,7 +517,8 @@ With a plant, every `sim_world::step()` does this:
   - `v_stop` allows for the distance the vehicle covers before it responds (`latency`) and
     plans with the deceleration it can make (`brake_margin x max_decel`); to keep under it
     the command may brake that hard;
-  - the creep floor never exceeds the stopping speed.
+  - the creep floor never exceeds the stopping speed;
+  - the envelope and the size are the vehicle's own too (below).
 - `nav_plant` maps the command to `world::drive`. The acceleration goes along the direction
   the agent is to move at the tick's end, with `reverse` when that is backwards.
 - It steps the world `dt / fixed_dt` times (or, with `step_world = false`, leaves the stepping
@@ -549,6 +553,35 @@ ignored. They are also `set_latency`, `set_brake_margin` and `set_drift_nsub`. T
 the latency and the braking from `limits()` every tick, so a change takes effect on the next
 one.
 
+**The vehicle's own plan** (`nav_plant_options::plan_with_vehicle`, on by default). The navigator
+plans with each vehicle's limits and size, not with its own `veh_params`, which the trained
+metric sizes for no vehicle in particular. At Austin's 0.05 per metre, nav's defaults mean a 3 m
+disc, 18 m/s and 30 m/s^2. `limits()` gives `sim_world`:
+
+- the acceleration, `accel_margin` (0.8) x `max_accel`;
+- the top speed, `max_speed`, but no more than nav's `vmax`: that is a speed limit as well
+  (`nav.vehicle.vmax` in the state tree), so it still caps a plant's agents;
+- the cornering limit, `lateral_g` (0.5) g, but at most `tip_margin` (0.8) of the static
+  stability factor (half the track over the centre of gravity's height) in g;
+- the body: half its width, and how far the chassis box and the wheels reach ahead of and behind
+  the rear axle.
+
+`sim_world` drives with them in place of `cfg.veh`'s `a_max`, `vmax` and `a_lat_max` and of
+`set_vehicle_kinematics`. It covers the body with `sim_world::kPlantDiscs` (4) footprint discs
+from tail to nose. The discs are inset 0.7 half-widths at the ends and are 1.3 half-widths wide,
+so they cover the corners; they act at `body_gain` 1/4. They replace nav's disc or footprint.
+`plant_plan_of(i)` reads them back.
+
+- On a Humvee: 2.0 m/s^2, 24.6 m/s (18 m/s under nav's Austin defaults), 0.5 g, and four discs
+  of 1.42 m from 0.0 to 3.3 m ahead of the rear axle.
+- `nav_plant_test`'s PlansWithTheVehiclesOwnEnvelope drives a sim_world sized with nav's defaults
+  through a hard turn. On the vehicle's plan it commands at most 2.0 m/s^2 and 0.50 g; on nav's
+  own numbers, 30 m/s^2 and 0.98 g.
+- The knobs are `<prefix>.nav_plant.plan.{with_vehicle, accel_margin, lateral_g, tip_margin}`,
+  and `set_plan_with_vehicle` and the rest.
+- The P4 gates below size nav by hand from the vehicle, at chosen corner caps, so they turn the
+  plan off to compare the plant against the same kinematic arm.
+
 Like the physics binding's, every one of these keys says what it is: a comment, `access`, `unit`
 and, on a knob, a recommended `min` and `max`. So do the `nav_stats` leaves that
 `publish_nav_stats` writes.
@@ -572,10 +605,51 @@ Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 uni
 | (1) Every nav golden and parity test unchanged | The kinematic arm is untouched without a plant; the nav suites pass as before |
 | (2) Below 0.3 g on flat dry ground, within 0.5 m of the kinematic trajectory over 200 ticks | A curving route, 79 m at up to 0.09 g: the Jolt path strays at most 0.03 m from the bicycle's. At a tick the two differ by up to 0.9 m along the path (the powertrain's response to an instant acceleration). Reported, not gated: a swerve round a block at 0.25 g strays 1.2 m, and a step change of goal 0.58 m, from the Humvee's 0.35 rad/s steering (0.73 and 0.46 m with an instant actuator) |
 | (3) At the limit the plants diverge, reported | A 1 g corner cap on mu 0.6: position rms 3 mm below 0.1 g, 0.1 m above 0.5 g, binned in the summary |
-| (4) Cost per Jolt vehicle | About 0.1 ms a Humvee a tick (six physics steps) with eight, against 60 ms of real time |
+| (4) Cost per Jolt vehicle | 0.57 ms a Humvee a tick (six physics steps, the energy ledger on) with eight among walls, against 60 ms of real time; 32 on open ground take 5.4 ms a tick, 3.2 ms on three Jolt worker threads (`physics_plant_host_test`) |
 | (5) The adapter residual at nsub = k | An instant steering actuator on mu 1.2: at most 7 mm, 0.009 rad and 0.1 m/s a tick |
 | (6) The drift published, binned by lateral g | Per vehicle and per bin, under `vehicles.<name>.nav.drift` and `nav_plant.drift`, with the plant's knobs and settings under `nav_plant` |
 | (7) The speed never above the latency-aware v_stop | Driving at a wall at up to 11.5 m/s: at most 0.04 m/s above it at a tick; no contact with the wall |
+
+## Choosing the plant: `plant_host`
+
+```cpp
+#include <cvc/physics/plant_host.h>
+
+cvc::physics::plant_host host;      // owns the physics world and the nav_plant
+host.use(sim, "humvee");            // sim's agents drive Humvees on Jolt
+host.use(sim, "humvee, roboracer"); // a list of presets, cycled over the agents
+host.use(sim, "kinematic");         // back to nav's bicycle
+host.pull(app, "demo", sim);        // or live, from the state tree
+```
+
+`plant_host` puts a `sim_world`'s agents on a plant by name. It builds a new world on each
+switch: a flat ground (`plant_host_options::ground_z`, `ground_mu`), or, after `set_geometry`, a
+`cvc::world`'s collide items (`add_world_geometry`). It owns the world and the `nav_plant`, which
+plans with its vehicles' own limits.
+
+- Without a Jolt backend a preset falls back to the kinematic bicycle: `driving()` says
+  "kinematic" and `fallback()` is true.
+- An unknown name throws and changes nothing.
+- `pull(ctx, prefix, sim)` reads the knob `<prefix>.nav_plant.vehicle`; a change switches the
+  plant. It writes `nav_plant.driving` (telemetry) and `nav_plant.available` (build), and on
+  vehicles runs the plant's own `pull`.
+- The host must outlive the sim_world's use of the plant. Call `use()` and `pull()` from the
+  thread that steps the sim.
+- `plant_host_options::world.threads` puts Jolt's job system on worker threads: cheaper, and the
+  same state hash (`physics_plant_host_test`).
+
+The cvcGL nav demos take `--plant` (`kinematic`, `humvee`, `roboracer`), and the restart panel
+has a plant control. They use three Jolt worker threads natively and none in the browser.
+
+- They still default to the bicycle. The navigator's A* routes and reactive drive assume its
+  tight turns. In the Austin finale a Humvee (a 6.7 m turning circle) on A* routes wedges in a
+  corner after act 2 replans it, upright and at full lock; 7 of its 8 Humvees end up wedged.
+- On a plant, `nav_finale` drives vehicle routes instead (`plan_vehicle_route` and
+  `route_follower`, docs/NAV_VEHICLE.md). Its Humvees then drive 5387 m in 900 frames, against
+  1903 m on A* routes, and none wedges.
+- `nav_material_demo` runs the bicycle and the Humvee side by side. The material layer keeps the
+  bicycle out of the lake (0 entries) but not the Humvee (65): it was tuned on the bicycle.
+- Training through the vehicle (P8) comes before the default changes.
 
 ## Terrain in the navigator's energy (P5)
 

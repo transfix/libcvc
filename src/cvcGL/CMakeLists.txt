@@ -780,6 +780,12 @@ add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
+# The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
+# terminal backend's background under the widgets, and a background drag turns the camera.
+add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
+target_link_libraries(cvcgl_terminal_scene PRIVATE cvcGL)
+add_test(NAME cvcgl_terminal_scene COMMAND cvcgl_terminal_scene)
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)

@@ -14,6 +14,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/image/image.h> // vehicle template's base-color texture
+#include <cvc/physics/plant_host.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -286,6 +287,17 @@ void plot_disc(unsigned char *dst, int dw, int dh, int cx, int cy, int rad, unsi
 // endpoints may be anywhere (routes to off-map targets just clip at the edge).
 void plot_line(unsigned char *dst, int dw, int dh, int x0, int y0, int x1, int y1, unsigned char r,
                unsigned char g, unsigned char b);
+
+// The plant a demo's vehicles drive on unless --plant names another (kinematic, humvee,
+// roboracer). nav's kinematic bicycle for now: on the Jolt plant a Humvee plans with its own
+// limits and size, but the navigator's routes and reactive drive still assume the bicycle's
+// tight turns, and in Austin's streets a Humvee (a 6.7 m turning circle) wedges in corners it
+// cannot turn out of. --plant humvee shows it.
+std::string default_plant();
+
+// The plant_host options the demos use: Jolt's job system on a few worker threads natively (a
+// result is the same on any number of them), single-threaded in the browser.
+cvc::physics::plant_host_options plant_options();
 
 } // namespace navdemo
 

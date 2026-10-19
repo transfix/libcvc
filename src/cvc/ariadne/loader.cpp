@@ -95,8 +95,8 @@ std::map<std::string, AriBlockParser> &block_registry() {
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
-         k == "on_key" || k == "on_pointer" || k == "units" || k == "import" || k == "channels" ||
-         k == "lint";
+         k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
+         k == "channels" || k == "lint";
 }
 } // namespace
 
@@ -2013,10 +2013,11 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   refs_from_script(r.on_tick_script, refs);
   refs_from_script(r.on_key_script, refs);
   refs_from_script(r.on_pointer_script, refs);
+  refs_from_script(r.on_signal_script, refs);
   refs_from_widget(r.root, refs);
   for (const std::string &ch : refs) {
     if (ch.find('#') != std::string::npos)
-      continue; // a '#'-runtime channel (tick/key/pointer) is never linted
+      continue; // a '#'-runtime channel (tick/key/pointer/signal) is never linted
     bool declared;
     std::string what;
     if (!ch.empty() && ch.front() == '/') {
@@ -2136,6 +2137,8 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
     // The host wires each to a Runtime setter: on_tick -> set_tick_program (per frame), on_key ->
     // set_key_program (per keyboard event), on_pointer -> set_pointer_program (per mouse event);
     // events arrive via Runtime::post_input from the host's input source (cvc::gl::SdlInput).
+    // on_signal -> set_signal_program (per signal: a terminal's Ctrl-C is SIGINT), fed by
+    // Runtime::post_signal.
     const YAML::Node tk = doc["on_tick"];
     if (tk && tk.IsScalar())
       r.on_tick_script = tk.Scalar();
@@ -2151,6 +2154,11 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       r.on_pointer_script = pt.Scalar();
     else if (pt && !pt.IsScalar())
       ctx.warn("ari: on_pointer: must be a scalar state_exec script string — ignored");
+    const YAML::Node sg = doc["on_signal"];
+    if (sg && sg.IsScalar())
+      r.on_signal_script = sg.Scalar();
+    else if (sg && !sg.IsScalar())
+      ctx.warn("ari: on_signal: must be a scalar state_exec script string — ignored");
   }
   // §12 channel lint (A): now that root + all scripts are populated, scan static msg-* refs
   // (only if the doc declared channels:). A strict violation fails the load (r.error set).

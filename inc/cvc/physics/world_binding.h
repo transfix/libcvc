@@ -115,7 +115,7 @@
 //     vehicles.<name>.controls.{steer, throttle, brake, hand_brake, reverse, neutral}
 //                                                         a change sets its pedals
 //                                                         (world::set_controls)
-//     vehicles.<name>.tuning.{max_steer, max_steer_rate, max_accel, max_decel,
+//     vehicles.<name>.tuning.{max_steer, max_steer_rate, max_accel, max_decel, max_speed,
 //       drag_coefficient, frontal_area, air_density, rolling_resistance,
 //       engine_max_torque, engine_min_rpm, engine_max_rpm, shift_up_rpm, shift_down_rpm,
 //       shift_up_rpm_light, shift_down_rpm_light, clutch_strength, converter_k,

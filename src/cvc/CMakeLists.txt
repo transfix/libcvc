@@ -66,6 +66,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/world_binding.h
   ../../inc/cvc/physics/snapshot_json.h
   ../../inc/cvc/physics/world_geometry.h
+  ../../inc/cvc/physics/plant_host.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/state/state_hash_partition.h
@@ -116,6 +117,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/nav/grid_nav.h
+  ../../inc/cvc/nav/vehicle_route.h
+  ../../inc/cvc/nav/route_follower.h
   ../../inc/cvc/nav/plant_types.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
@@ -246,6 +249,7 @@ set(SOURCE_FILES
   physics/world_binding.cpp
   physics/snapshot_json.cpp
   physics/world_geometry.cpp
+  physics/plant_host.cpp
   physics/pose_tracker.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
@@ -285,6 +289,8 @@ set(SOURCE_FILES
   volume/volume_ops.cpp
   volume/vtk_io.cpp
   nav/grid_nav.cpp
+  nav/vehicle_route.cpp
+  nav/route_follower.cpp
   nav/spatial.cpp
   nav/drive.cpp
   nav/material.cpp
@@ -1046,14 +1052,18 @@ if(CVC_ENABLE_ASSIMP)
     # recipe exports zlib via an imported target (tracked libcvc-deps follow-up).
     find_package(ZLIB QUIET)
     get_target_property(_cvc_assimp_ill assimp::assimp INTERFACE_LINK_LIBRARIES)
-    if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|zlib\\.|cvcpkg-builder")
-      # Match the stale zlib entry in BOTH forms: unix libz.so/.a AND windows
-      # zlib.lib (the earlier "libz\\." pattern missed the windows filename, so the
-      # absolute cvcpkg-builder path survived and cvc.dll failed to link).
+    # The stale zlib entry, in every form a published bundle has used: unix libz.so / libz.a,
+    # windows zlib.lib, and windows z.lib (zlib's own CMake names its import library z.lib; an
+    # assimp republished on the windows builder baked .../cvcpkg-prefix-assimp-*/lib/z.lib, which
+    # neither of the first two patterns matched, so the builder path survived and cvc.dll's link
+    # and the CUDA device link both failed on it).
+    # Each alternative runs to the end of its list entry, so a $<LINK_ONLY:...> wrapper goes too.
+    set(_cvc_stale_zlib "[^;]*(libz|zlib)\\.[^;]*|[^;]*[/\\\\]z\\.lib[^;]*")
+    if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|zlib\\.|[/\\\\]z\\.lib|cvcpkg-builder")
       if(TARGET ZLIB::ZLIB)
-        string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "ZLIB::ZLIB" _cvc_assimp_ill "${_cvc_assimp_ill}")
+        string(REGEX REPLACE "${_cvc_stale_zlib}" "ZLIB::ZLIB" _cvc_assimp_ill "${_cvc_assimp_ill}")
       else()
-        string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
+        string(REGEX REPLACE "${_cvc_stale_zlib}" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
       endif()
       set_target_properties(assimp::assimp PROPERTIES INTERFACE_LINK_LIBRARIES "${_cvc_assimp_ill}")
       message(STATUS "  (rewrote assimp's stale absolute zlib link to a relocatable target)")
@@ -1245,7 +1255,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/app_runtime.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1266,6 +1276,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h
+  ../../inc/cvc/ariadne/tvision_backend.h
 )
 
 # cvc::ariadne::stream — Layer-(b) real-time in-process frame transport (roadmap
@@ -1432,6 +1443,29 @@ if(TARGET ftxui::component)
   message(STATUS "Ariadne: FTXUI terminal backend ENABLED (ftxui)")
 else()
   message(STATUS "Ariadne: FTXUI not found - terminal backend compiles to a stub")
+endif()
+
+# Ariadne tvision terminal backend — OPTIONAL (roadmap §16.5 row 5), behind CVC_ARIADNE_TVISION:
+# the feature flag the roadmap keeps for tvision's Borland-derived licensing. tvision draws the
+# native desktop (movable windows, menus, status line) and the FTXUI backend lays the windows'
+# contents out, so it needs FTXUI too. tvision ships as a static, position-independent archive with
+# no CMake package (cvcpkg `tvision`, with `ncurses` for ncursesw + the terminfo database), so it is
+# found by path and linked into libcvc privately, as BUILD-only so no absolute path reaches the
+# exported targets. Shared builds only: a static libcvc would have to export the archive.
+option(CVC_ARIADNE_TVISION "Build the Ariadne tvision backend when tvision is found" ON)
+if(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND BUILD_SHARED_LIBS)
+  find_path(CVC_TVISION_INCLUDE_DIR tvision/tv.h)
+  find_library(CVC_TVISION_LIBRARY tvision)
+  find_library(CVC_NCURSESW_LIBRARY ncursesw)
+  if(CVC_TVISION_INCLUDE_DIR AND CVC_TVISION_LIBRARY AND CVC_NCURSESW_LIBRARY)
+    target_compile_definitions(cvc PRIVATE CVC_ARIADNE_TVISION)
+    target_include_directories(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_INCLUDE_DIR}>)
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_LIBRARY}>
+                                      $<BUILD_INTERFACE:${CVC_NCURSESW_LIBRARY}>)
+    message(STATUS "Ariadne: tvision terminal backend ENABLED (${CVC_TVISION_LIBRARY})")
+  else()
+    message(STATUS "Ariadne: tvision not found - tvision backend compiles to a stub")
+  endif()
 endif()
 
 # Ariadne .ari Layer-2 JSON-Schema validation — OPTIONAL (roadmap §15). When the

@@ -90,6 +90,10 @@ public:
   // --- input seam (document-level on_key/on_pointer residents) ---
   void post_key(bool down, const std::string &key, int mods = 0, bool repeat = false);
   void post_pointer(int kind, double x, double y, double dx, double dy, int button, int clicks);
+  // Route a signal to the document's on_signal: program. True = the document handles it; false =
+  // it declared none, so the host applies the default (for SIGINT: close). See
+  // Runtime::post_signal.
+  bool post_signal(const std::string &signal, const std::string &source = "host");
 
   // --- diagnostics / capabilities ---
   std::vector<std::string> take_warnings(); // reactive read-lane diagnostics from the last render

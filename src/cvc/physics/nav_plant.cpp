@@ -69,6 +69,17 @@ const detail::key_meta kPlantKeys[] = {
      "stopping governor takes the distance it covers off the distance to a wall."},
     {"brake_margin", "knob", "1", 0.3, 1,
      "The share of the vehicle's max_decel the stopping governor plans with."},
+    {"plan.with_vehicle", "knob", "", 0, 1,
+     "1: the navigator plans with each vehicle's own acceleration, top speed, cornering and size; "
+     "0: with its own (veh_params)."},
+    {"plan.accel_margin", "knob", "1", 0.3, 1,
+     "The share of the vehicle's max_accel the navigator plans with."},
+    {"plan.lateral_g", "knob", "g", 0.1, 1.2,
+     "The lateral acceleration the navigator corners at, in g; at most tip_margin of the "
+     "vehicle's static stability factor."},
+    {"plan.tip_margin", "knob", "1", 0.3, 1,
+     "The share of the vehicle's static stability factor (its rollover threshold, in g) the "
+     "navigator may corner at."},
     {"drift_nsub", "knob", "", 0, 64,
      "Substeps of the kinematic bicycle the drift is measured against; 0 = the physics steps a "
      "tick (doc 31 D14's nsub = k)."},
@@ -160,6 +171,9 @@ nav_plant::nav_plant(world &w, std::vector<vehicle_desc> descs, nav_plant_option
   for (std::size_t b = 1; b < _o.drift_bins_g.size(); ++b)
     if (!(_o.drift_bins_g[b] > _o.drift_bins_g[b - 1]))
       throw cvc::physics_error("nav_plant: drift_bins_g must ascend");
+  set_accel_margin(_o.accel_margin);
+  set_lateral_g(_o.lateral_g);
+  set_tip_margin(_o.tip_margin);
   _bins.assign(_o.drift_bins_g.size() + 1, bin_sums{});
 }
 
@@ -270,6 +284,53 @@ cvc::nav::terrain_config nav_plant::terrain_config_of(const vehicle_desc &d, dou
   return c;
 }
 
+cvc::nav::dyn_bike_si nav_plant::dyn_bike_si_of(const vehicle_desc &d, double mu,
+                                                double front_stiffness, double drive_lag,
+                                                double gravity) {
+  cvc::nav::dyn_bike_si si;
+  si.mass = d.mass;
+  si.yaw_inertia =
+      d.mass * (d.half_extents.x * d.half_extents.x + d.half_extents.y * d.half_extents.y) / 3.0;
+  // The axles: the frontmost steered one and the rearmost unsteered one; drive and brakes.
+  double front = 0.0, radius = 0.0, z = 0.0, travel = 0.0;
+  double brake_front = 0.0, brake_rear = 0.0;
+  bool have_front = false, front_driven = false, rear_driven = false;
+  const double rear = rear_axle_x(d);
+  for (const axle_desc &a : d.axles) {
+    radius = std::max(radius, a.wheel_radius);
+    z = std::min(z, a.z);
+    travel = std::max(travel, 0.5 * (a.suspension_min + a.suspension_max));
+    if (a.steered && (!have_front || a.x > front)) {
+      front = a.x;
+      have_front = true;
+    }
+    (a.steered ? brake_front : brake_rear) += a.max_brake_torque;
+    if (a.driven)
+      (a.steered ? front_driven : rear_driven) = true;
+  }
+  if (!have_front)
+    front = rear + d.wheelbase();
+  si.cg_to_front = std::max(1e-3, front - d.center_of_mass.x);
+  si.cg_to_rear = std::max(1e-3, d.center_of_mass.x - rear);
+  si.cg_height = std::max(0.0, -z + travel + radius + d.center_of_mass.z);
+  si.mu = mu;
+  // Pacejka: sin(C pi / 2) = tire_sliding, C in (1, 2); the peak at B alpha = tan(pi / (2 C)).
+  const double kPi = 3.14159265358979323846;
+  const double sliding = std::min(std::max(d.tire_sliding, 0.05), 0.999);
+  si.tire_C = 2.0 - 2.0 * std::asin(sliding) / kPi;
+  const double B = std::tan(kPi / (2.0 * si.tire_C)) / std::max(d.tire_peak_slip_angle, 1e-3);
+  si.tire_B_front = B * front_stiffness;
+  si.tire_B_rear = B;
+  si.front_drive = front_driven && rear_driven ? 0.5 : (front_driven ? 1.0 : 0.0);
+  si.front_brake = brake_front + brake_rear > 0.0 ? brake_front / (brake_front + brake_rear) : 0.5;
+  si.drag = 0.5 * d.air_density * d.drag_coefficient * d.frontal_area;
+  si.rolling_resistance = d.rolling_resistance;
+  si.steer_rate = d.max_steer_rate;
+  si.drive_lag = drive_lag;
+  si.gravity = gravity;
+  return si;
+}
+
 cvc::nav::plant_limits nav_plant::limits(int i) const {
   const agent &a = _agents.at(static_cast<std::size_t>(i));
   cvc::nav::plant_limits l;
@@ -279,6 +340,30 @@ cvc::nav::plant_limits nav_plant::limits(int i) const {
   l.a_brake = static_cast<float>(
       _units.to_normalized(_o.brake_margin * a.desc.max_decel, dim::acceleration, _frame));
   l.latency = static_cast<float>(_o.latency);
+  if (!_o.plan_with_vehicle)
+    return l;
+  const vehicle_desc &d = a.desc;
+  l.a_max = static_cast<float>(
+      _units.to_normalized(_o.accel_margin * d.max_accel, dim::acceleration, _frame));
+  if (d.max_speed > 0.0)
+    l.vmax = static_cast<float>(_units.to_normalized(d.max_speed, dim::velocity, _frame));
+  const vec3 gv = _w.config().gravity;
+  const double g = std::sqrt(gv.x * gv.x + gv.y * gv.y + gv.z * gv.z);
+  double a_lat = _o.lateral_g * g;
+  const double ssf = terrain_config_of(d, 0.9, g).tip_ratio;
+  if (ssf > 0.0)
+    a_lat = std::min(a_lat, _o.tip_margin * ssf * g);
+  l.a_lat = static_cast<float>(_units.to_normalized(a_lat, dim::acceleration, _frame));
+  // The body: the chassis box about the body origin, and the wheels where they stand out of it.
+  double ahead = d.half_extents.x, behind = -d.half_extents.x, half_width = d.half_extents.y;
+  for (const axle_desc &ax : d.axles) {
+    ahead = std::max(ahead, ax.x + ax.wheel_radius);
+    behind = std::min(behind, ax.x - ax.wheel_radius);
+    half_width = std::max(half_width, ax.half_track + 0.5 * ax.wheel_width);
+  }
+  l.half_width = static_cast<float>(_units.to_normalized(half_width, dim::length, _frame));
+  l.front = static_cast<float>(_units.to_normalized(ahead - a.rear_x, dim::length, _frame));
+  l.rear = static_cast<float>(_units.to_normalized(a.rear_x - behind, dim::length, _frame));
   return l;
 }
 
@@ -287,8 +372,12 @@ void nav_plant::command(int i, float steer, float accel) {
   const double a_si = _units.from_normalized(accel, dim::acceleration, _frame);
   const double speed = _units.from_normalized(state(i).speed, dim::velocity, _frame);
   // Forward or backward by where the agent is to be moving at the tick's end; the driver
-  // model takes the acceleration along that direction.
-  const bool reverse = speed + _dt * a_si < 0.0;
+  // model takes the acceleration along that direction. A vehicle at rest reads a few cm/s on its
+  // springs; that is rest, so a command to back up from it backs up (as nav's bicycle does from
+  // zero) rather than braking against the jitter forever.
+  constexpr double kRestSpeed = 0.1; // m/s
+  const double v0 = std::fabs(speed) < kRestSpeed ? 0.0 : speed;
+  const bool reverse = v0 + _dt * a_si < 0.0;
   drive_command c;
   c.steer = steer;
   c.accel = reverse ? -a_si : a_si;
@@ -374,6 +463,26 @@ void nav_plant::set_brake_margin(double share) {
   _o.brake_margin = share;
 }
 
+void nav_plant::set_plan_with_vehicle(bool on) { _o.plan_with_vehicle = on; }
+
+void nav_plant::set_accel_margin(double share) {
+  if (!(share > 0.0 && share <= 1.0))
+    throw cvc::physics_error("nav_plant: accel_margin must be in (0, 1]");
+  _o.accel_margin = share;
+}
+
+void nav_plant::set_lateral_g(double g) {
+  if (!(g > 0.0 && g <= 2.0))
+    throw cvc::physics_error("nav_plant: lateral_g must be in (0, 2]");
+  _o.lateral_g = g;
+}
+
+void nav_plant::set_tip_margin(double share) {
+  if (!(share > 0.0 && share <= 1.0))
+    throw cvc::physics_error("nav_plant: tip_margin must be in (0, 1]");
+  _o.tip_margin = share;
+}
+
 void nav_plant::set_drift_nsub(int n) {
   if (n < 0)
     throw cvc::physics_error("nav_plant: drift_nsub must be >= 0");
@@ -411,6 +520,13 @@ void nav_plant::pull(cvc::app &ctx, const std::string &prefix) {
   };
   read("latency", _o.latency, [&](double v) { set_latency(v); });
   read("brake_margin", _o.brake_margin, [&](double v) { set_brake_margin(v); });
+  read("plan.with_vehicle", _o.plan_with_vehicle ? 1.0 : 0.0, [&](double v) {
+    if (v == 0.0 || v == 1.0)
+      set_plan_with_vehicle(v == 1.0);
+  });
+  read("plan.accel_margin", _o.accel_margin, [&](double v) { set_accel_margin(v); });
+  read("plan.lateral_g", _o.lateral_g, [&](double v) { set_lateral_g(v); });
+  read("plan.tip_margin", _o.tip_margin, [&](double v) { set_tip_margin(v); });
   read("drift_nsub", static_cast<double>(_o.drift_nsub), [&](double v) {
     if (v == std::floor(v))
       set_drift_nsub(static_cast<int>(v));

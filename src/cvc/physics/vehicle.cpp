@@ -117,6 +117,7 @@ vehicle_desc vehicle_desc::humvee() {
   d.shift_down_rpm_light = 900.0;
   d.max_accel = 2.5;
   d.max_decel = 7.5;
+  d.max_speed = 24.6;           // [AMG] 55 mph (88 km/h)
   d.drag_coefficient = 0.7;     // [est] a box with an open bed; with 3.5 m^2, the 2.45 m^2 drag
   d.frontal_area = 3.5;         // area the Hummer H2's published 2.46 m^2 suggests
   d.rolling_resistance = 0.015; // [est] radial cross-country tires on a hard surface
@@ -180,6 +181,7 @@ vehicle_desc vehicle_desc::roboracer() {
   d.shift_down_rpm = 1.0;
   d.max_accel = 6.0;           // [lab] max_acceleration
   d.max_decel = 6.0;           // [lab] max_deceleration
+  d.max_speed = 10.0;          // [lab] erpm_speed_limit, as the motor's torque curve ends
   d.drag_coefficient = 0.5;    // [est]
   d.frontal_area = 0.035;      // [est] the body's 281 mm x ~125 mm
   d.rolling_resistance = 0.02; // [est] foam-insert rally tires on a lab floor
@@ -282,6 +284,7 @@ void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
   need(d.reverse_ratio < 0.0 && std::isfinite(d.reverse_ratio), "reverse_ratio must be < 0");
   need(positive(d.differential_ratio), "differential_ratio must be > 0");
   need(positive(d.max_accel) && positive(d.max_decel), "max_accel and max_decel must be > 0");
+  need(std::isfinite(d.max_speed) && d.max_speed >= 0.0, "max_speed must be finite and >= 0");
   need(d.drag_coefficient >= 0.0 && d.frontal_area >= 0.0 && d.air_density >= 0.0 &&
            d.rolling_resistance >= 0.0,
        "drag, area, air density and rolling resistance must be >= 0");
@@ -634,7 +637,12 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
       reverse = v.command.reverse;
       const double dir = reverse ? -1.0 : 1.0;
       const double along = dir * speed;    // speed along the commanded direction
-      const double want = v.command.accel; // a_cmd is already along it
+      double want = v.command.accel;       // a_cmd is already along it
+      // The governor: within 0.5 s of closing on max_speed, the wanted acceleration eases to
+      // close the rest of the gap in that time, and past it, slows back down.
+      constexpr double kSpeedTime = 0.5; // s
+      if (d.max_speed > 0.0)
+        want = std::min(want, (d.max_speed - along) / kSpeedTime);
       const double got = dir * a_meas;
       // One controller: the wanted acceleration, corrected by how far the measured one
       // misses it, is a throttle when positive and a brake when negative. So a_cmd = 0 keeps
