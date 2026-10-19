@@ -23,8 +23,11 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/nav_plant.h>
+#include <cvc/physics/vehicle.h>
 #include <gtest/gtest.h>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #ifdef CVC_ENABLE_CUDA
@@ -344,6 +347,163 @@ TEST(NavCoefTrainConvergence, BicycleTrainedPolicyDrives) {
   const double reach = reach_rate(tr.to_coef_mlp(), sc, 256, 400, 5);
   std::printf("[bike-reach] trained=%.1f%%\n", 100 * reach);
   EXPECT_GT(reach, 0.5) << "bicycle training was unstable / broke navigation";
+}
+
+// ── The dynamic rollout (P8b): the same controller driving the dynamic vehicle ──
+
+namespace {
+// The trainer's vehicle read as a RoboRacer: veh_L = 0.035 is its 0.324 m wheelbase.
+train_config dynamic_cfg(train_config c) {
+  c.rollout = cvc::nav::rollout_kind::dynamic;
+  c.dyn =
+      cvc::physics::nav_plant::dyn_bike_params_at(cvc::physics::vehicle_desc::roboracer(), c.veh_L);
+  return c;
+}
+} // namespace
+
+// Without a vehicle (or with one whose wheelbase is not the controller's) the dynamic
+// rollout refuses rather than integrating a unit-mass default.
+TEST(NavCoefTrain, DynamicNeedsAVehicle) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.rollout = cvc::nav::rollout_kind::dynamic;
+  coef_trainer tr(cfg, 1);
+  std::vector<float> o(2 * cfg.n), goal(2 * cfg.n), aux(2 * cfg.n, 0.0f);
+  sc.sample_starts_goals(cfg.n, 7, o.data(), goal.data());
+  EXPECT_THROW(tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, 2, nullptr),
+               std::invalid_argument);
+  cfg = dynamic_cfg(cfg);
+  cfg.dyn.lr *= 2.0f;
+  coef_trainer wrong(cfg, 1);
+  EXPECT_THROW(wrong.loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, 2, nullptr),
+               std::invalid_argument);
+}
+
+// The bicycle's gradcheck, through the dynamic vehicle: the window loss's gradient in the
+// CoefMLP's parameters against a central difference along it.
+TEST(NavCoefTrain, DynamicGradcheckMatchesFiniteDifference) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.n = 256;
+  cfg.window = 6;
+  cfg.horizon = 6;
+  cfg = dynamic_cfg(cfg);
+  coef_trainer tr(cfg, 1);
+  const int n = cfg.n, window = cfg.window, P = tr.num_params();
+  std::vector<float> o(2 * n), goal(2 * n), aux(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 7, o.data(), goal.data());
+  for (int i = 0; i < n; ++i)
+    aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+  std::vector<float> g;
+  const double L0 = tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, &g);
+  ASSERT_GT(L0, 0.0);
+  double gnorm = 0.0;
+  for (int i = 0; i < P; ++i)
+    gnorm += (double)g[i] * g[i];
+  gnorm = std::sqrt(gnorm);
+  ASSERT_GT(gnorm, 1e-6);
+  const std::vector<float> base = tr.params();
+  const float eps = 2e-3f;
+  std::vector<float> pp(P), pm(P);
+  for (int i = 0; i < P; ++i) {
+    const float u = (float)(g[i] / gnorm);
+    pp[i] = base[i] + eps * u;
+    pm[i] = base[i] - eps * u;
+  }
+  tr.set_params(pp);
+  const double Lp = tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, nullptr);
+  tr.set_params(pm);
+  const double Lm = tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, nullptr);
+  tr.set_params(base);
+  const double dd_fd = (Lp - Lm) / (2.0 * eps);
+  const double dir_rel = std::fabs(dd_fd - gnorm) / (std::fabs(dd_fd) + gnorm + 1e-9);
+  std::printf("[dyn-gradcheck] |g|=%.4f dir_rel=%.3e\n", gnorm, dir_rel);
+  EXPECT_LT(dir_rel, 5e-2) << "dynamic backward disagrees with finite differences";
+}
+
+// A window's continuation carries the dynamic vehicle's whole state: two windows of 3
+// steps, the second started from the first's (o, aux, x) outputs, end where one window of 6
+// does.
+TEST(NavCoefTrain, DynamicWindowsCarryTheWholeState) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = dynamic_cfg(small_cfg());
+  coef_trainer tr(cfg, 1);
+  const int n = cfg.n;
+  std::vector<float> o(2 * n), goal(2 * n), aux(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 7, o.data(), goal.data());
+  std::vector<float> o6(2 * n), a6(2 * n), x6(4 * n);
+  tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, 6, nullptr, o6.data(), a6.data(),
+                   nullptr, x6.data());
+  std::vector<float> o3(2 * n), a3(2 * n), x3(4 * n), o33(2 * n), a33(2 * n), x33(4 * n);
+  tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, 3, nullptr, o3.data(), a3.data(),
+                   nullptr, x3.data());
+  tr.loss_and_grad(sc, o3.data(), a3.data(), goal.data(), n, 3, nullptr, o33.data(), a33.data(),
+                   x3.data(), x33.data());
+  for (int i = 0; i < 2 * n; ++i) {
+    EXPECT_EQ(o33[i], o6[i]);
+    EXPECT_EQ(a33[i], a6[i]);
+  }
+  for (int i = 0; i < 4 * n; ++i)
+    EXPECT_EQ(x33[i], x6[i]);
+  double moved = 0.0;
+  for (int i = 0; i < 4 * n; ++i)
+    moved += std::fabs(x6[i]);
+  EXPECT_GT(moved, 0.0) << "the vehicle's further state never left zero";
+}
+
+// Training through the dynamic vehicle is stable (P8b gate 2): over 60 steps the loss over
+// the whole horizon on a fixed batch falls clearly at 2e-4 (DynamicTrainedPolicyDrives trains at
+// 5e-5, which keeps reach; at the bicycle's 1e-5 the dynamic rollout barely moves). (An lr sweep,
+// 150 steps on city_scene(96), horizon loss and bicycle-sim reach: dynamic 1e-5 1.4632 -> 1.4628
+// and 71.5%, 5e-5 -> 1.4585 and 71.9%, 2e-4 -> 1.3504 and 68.4%, 1e-3 -> 1.2420 and 10.5%; the
+// bicycle 1.3986 -> 1.3963, 1.3925, 1.3768, 1.2240 and 71.5, 70.3, 72.3, 13.3%.)
+TEST(NavCoefTrain, DynamicTrainingReducesLoss) {
+#if defined(__APPLE__)
+  GTEST_SKIP() << "nav short-run loss-decrease margin below arm64 macOS FP drift (as "
+                  "TrainingReducesLoss)";
+#endif
+  const training_scene sc = cvc::nav::city_scene(64);
+  train_config cfg;
+  cfg.n = 64;
+  cfg.hidden = 64;
+  cfg.horizon = 24;
+  cfg.window = 6;
+  cfg.steps = 60;
+  cfg.seed = 0;
+  cfg.lr = 2e-4f;
+  cfg = dynamic_cfg(cfg);
+  std::vector<float> o(2 * cfg.n), goal(2 * cfg.n), aux(2 * cfg.n, 0.0f);
+  sc.sample_starts_goals(cfg.n, 999, o.data(), goal.data());
+  for (int i = 0; i < cfg.n; ++i)
+    aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+  coef_trainer tr(cfg, 3);
+  const double before =
+      tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, cfg.horizon, nullptr);
+  tr.train(sc, /*verbose=*/false);
+  const double after =
+      tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, cfg.horizon, nullptr);
+  std::printf("[dyn-train] horizon loss before=%.4f after=%.4f\n", before, after);
+  EXPECT_TRUE(std::isfinite(after));
+  EXPECT_LT(after, before) << "training through the dynamic vehicle did not reduce the loss";
+}
+
+// A policy trained through the dynamic vehicle still drives the bicycle sim_world.
+TEST(NavCoefTrainConvergence, DynamicTrainedPolicyDrives) {
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg;
+  cfg.n = 128;
+  cfg.hidden = 64;
+  cfg.horizon = 28;
+  cfg.window = 7;
+  cfg.steps = 150;
+  cfg.seed = 0;
+  cfg.lr = 5e-5f;
+  cfg = dynamic_cfg(cfg);
+  coef_trainer tr(cfg, 1);
+  tr.train(sc, /*verbose=*/false);
+  const double reach = reach_rate(tr.to_coef_mlp(), sc, 256, 400, 5);
+  std::printf("[dyn-reach] trained=%.1f%%\n", 100 * reach);
+  EXPECT_GT(reach, 0.5) << "dynamic training was unstable / broke navigation";
 }
 
 TEST(NavCoefTrain, BakedPolicyRoundTripsThroughCvcnav) {

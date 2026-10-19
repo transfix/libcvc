@@ -299,7 +299,12 @@ P4 adds three things to measure and contain the drift:
     It passes its gates: gradient checks, the kinematic limit against `bike_step`, the skid
     modes and the stopping envelope. GRL-SNAM's torch twin matches its goldens to 1e-9
     (CVC-Lab/GRL-SNAM#121).
-  - Next: `rollout_kind::dynamic` in both trainers (P8b). P8c is not started.
+  - P8b, in progress:
+    - `coef_train`'s `rollout_kind::dynamic` (CPU): gradient-checked; training through it is
+      stable and lowers the loss (docs/NAV_TRAINING.md).
+    - Next: `material_train`'s dynamic integrator, then the gate on the Jolt plant (a policy
+      trained on the dynamic model beats the point-mass one over 20 or more paired seeds).
+  - P8c is not started.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle

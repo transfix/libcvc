@@ -47,7 +47,8 @@
 
 #include <cstdint>
 #include <cvc/nav/coef_mlp.h>
-#include <cvc/nav/drive.h> // field_stack
+#include <cvc/nav/detail/dyn_bike.h> // diff::dyn_bike_params
+#include <cvc/nav/drive.h>           // field_stack
 #include <vector>
 
 namespace cvc {
@@ -97,8 +98,13 @@ training_scene occupancy_scene(const std::uint8_t *occ, int rows, int cols, doub
 //   bicycle   — the FULL deployment kinematic-bicycle integrator, differentiated;
 //               closes the surrogate->deployment gap but has non-smooth governor
 //               branches. State is (o, th, sp).
-// Both share the SAME coef_feats -> CoefMLP -> loss; only the integrator differs.
-enum class rollout_kind { surrogate, bicycle };
+//   dynamic   — the bicycle's controller driving the dynamic single-track vehicle
+//               (dyn_bike_step, detail/dyn_bike.h; the vehicle-physics plan's P8b):
+//               tires and their grip, load transfer, actuator lag, so the policy
+//               learns what the vehicle can actually do. State is (o, th, vx) plus
+//               (vy, r, delta, a); train_config::dyn is the vehicle. CPU only for now.
+// All share the SAME coef_feats -> CoefMLP -> loss; only the integrator differs.
+enum class rollout_kind { surrogate, bicycle, dynamic };
 
 // Self-supervised training hyperparameters (mirror coef_train.py train()).
 struct train_config {
@@ -147,6 +153,12 @@ struct train_config {
   float veh_L = 0.035f, veh_delta_max = 0.6f, veh_a_max = 1.5f, veh_a_lat_max = 1.0f,
         veh_k_steer = 0.8f;
   bool veh_allow_reverse = true;
+  // The dynamic vehicle (rollout == dynamic), in the scene's normalized frame; the veh_*
+  // limits above stay the controller's. Its wheelbase lf + lr must be veh_L: the default
+  // is no vehicle, so a dynamic run without one throws. Build it from a spec sheet with
+  // cvc::physics::nav_plant::dyn_bike_params_at(desc, veh_L) (the trainer's defaults are
+  // a RoboRacer at about 0.108 normalized units per metre), or dyn_bike_params_of().
+  diff::dyn_bike_params dyn{};
 };
 
 // The trainable CoefMLP: its dense layers as flat params + Adam state. Distinct
@@ -171,10 +183,14 @@ public:
   // it (size num_params()). PURE — no Adam, params unchanged, inputs const. o/v
   // are the window's starting state ([n*2] normalized; v is zero at a batch
   // start). If `o_out`/`v_out` are non-null, the window-final (o, v) are written
-  // there (the detached continuation the next window starts from).
+  // there (the detached continuation the next window starts from). The dynamic
+  // rollout's further state, (vy, r, delta, a) per agent ([n*4]), comes in through
+  // `x` (null = zeros, as at a batch start) and goes out through `x_out`; the other
+  // rollouts ignore both.
   double loss_and_grad(const training_scene &scene, const float *o, const float *v,
                        const float *goal, int n, int window, std::vector<float> *grad,
-                       float *o_out = nullptr, float *v_out = nullptr) const;
+                       float *o_out = nullptr, float *v_out = nullptr, const float *x = nullptr,
+                       float *x_out = nullptr) const;
 
   const std::vector<float> &params() const { return p_; }
   void set_params(const std::vector<float> &p) { p_ = p; }

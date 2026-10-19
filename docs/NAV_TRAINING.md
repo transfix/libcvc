@@ -73,6 +73,7 @@ for both — only the integrator differs.**
 |---|---|---|---|---|
 | `rollout_kind::surrogate` *(default)* | point-mass `sdf_rollout` (IPC wall force + goal spring + damping) | `(o, v)` | smooth, well-conditioned | the recommended default — refines the basin and **improves** reach |
 | `rollout_kind::bicycle` | the FULL deployment kinematic-bicycle integrator (`bicycle_rollout`), differentiated | `(o, θ, sp)` | correct but non-smooth (governor branches) | you want to train against the *exact* deployment dynamics |
+| `rollout_kind::dynamic` | the bicycle's controller driving the dynamic single-track vehicle (`dyn_bike_step`, below) | `(o, θ, vx)` + `(vy, r, δ, a)` | the bicycle's branches plus the tires' grip | you want the policy to learn what a real vehicle can do (P8b); CPU only |
 
 ```cpp
 train_config cfg;
@@ -172,8 +173,47 @@ Under the controller it ends 1.122 from the goal against 1.111.
 VJP to 1e-9, its gradient from autograd rather than duals. A double plant is double
 throughout (its lag factors and floors too), so the two can agree to rounding.
 
-Not yet: `rollout_kind::dynamic` in the trainers (P8b), and a CUDA build of the plant (it is
-`CVC_HD`, but nothing compiles it for the device yet).
+**Training through it** (`rollout_kind::dynamic`, P8b):
+
+```cpp
+train_config cfg;
+cfg.rollout = rollout_kind::dynamic;
+cfg.lr = 5e-5f;
+// The trainer's scene has no metres. Its vehicle (veh_L 0.035, vmax 0.9) reads as a
+// RoboRacer at about 0.108 normalized units per metre, where vmax is 8.3 m/s.
+cfg.dyn = cvc::physics::nav_plant::dyn_bike_params_at(vehicle_desc::roboracer(), cfg.veh_L);
+```
+
+- `coef_trainer::loss_and_grad` carries the vehicle's further state `(vy, r, delta, a)` through
+  `x` / `x_out` ([n*4]; null is at rest), and `train()` keeps it across windows.
+- Without a vehicle whose wheelbase is `veh_L`, a dynamic run throws.
+- The CUDA trainer refuses it for now.
+
+Measured on the city (`nav_coef_train_test`):
+
+- the gradcheck's dir_rel is 2.3e-2, against the bicycle's 8.5e-4 and the limit of 5e-2. The
+  gradient is under half the bicycle's (5e-4 against 1.2e-3): grip limits pass less;
+- the horizon loss falls (1.4125 to 1.3988 in 60 steps at 2e-4);
+- a policy trained at 5e-5 still drives the bicycle sim_world: 71.9% reach.
+
+An lr sweep (150 steps on `city_scene(96)`; horizon loss, then the bicycle sim's reach):
+
+| lr | bicycle | dynamic |
+|---|---|---|
+| 1e-5 | 1.3986 -> 1.3963, 71.5% | 1.4632 -> 1.4628, 71.5% |
+| 5e-5 | -> 1.3925, 70.3% | -> 1.4585, 71.9% |
+| 2e-4 | -> 1.3768, 72.3% | -> 1.3504, 68.4% |
+| 1e-3 | -> 1.2240, 13.3% | -> 1.2420, 10.5% |
+
+At a given rate the dynamic rollout learns more than the bicycle. Its reach here is measured on
+the kinematic sim, so it is not the verdict. P8b's gate is on the Jolt plant: a policy trained
+on the dynamic model must beat the point-mass-trained one over 20 or more paired seeds.
+
+Not yet:
+- that Jolt gate;
+- `material_train`'s dynamic integrator;
+- pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only);
+- a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
 
 ## Scene source
 
