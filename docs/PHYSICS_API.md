@@ -640,14 +640,14 @@ plans with its vehicles' own limits.
 The cvcGL nav demos take `--plant` (`kinematic`, `humvee`, `roboracer`), and the restart panel
 has a plant control. They use three Jolt worker threads natively and none in the browser.
 
-- They still default to the bicycle. The navigator's routes and reactive drive assume its tight
-  turns. In the Austin finale a Humvee (a 6.7 m turning circle) drives its route at 10-11 m/s,
-  then wedges in a corner after act 2 replans it. That happens with the vehicle's plan off too,
-  so it is not the plan's doing; the vehicle is upright, on all four wheels, at full lock.
+- They default to Humvees on Jolt when the build has it (`nav_city_swarm`'s hundreds of agents
+  excepted). The navigator's routes and reactive drive still assume the bicycle's tight turns:
+  in the Austin finale a Humvee (a 6.7 m turning circle) drives its route at 10-11 m/s, then
+  wedges in a corner after act 2 replans it (with the vehicle's plan off too).
 - `nav_material_demo` runs the bicycle and the Humvee side by side. The material layer keeps the
   bicycle out of the lake (0 entries) but not the Humvee (65): it was tuned on the bicycle.
-- Training through the vehicle (P8) and routes that allow for its turning circle come before
-  the default changes.
+- Training through the vehicle (P8) and routes that allow for its turning circle are what
+  would get them through.
 
 ## Terrain in the navigator's energy (P5)
 
