@@ -23,6 +23,7 @@
 #include <cvc/ariadne/stream/audio_sources.h>
 #include <cvc/ariadne/stream/frame.h>
 #include <cvc/ariadne/stream/frame_pool.h>
+#include <cvc/ariadne/stream/muted_source.h>
 #include <cvc/ariadne/stream/producer_thread.h>
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
@@ -342,6 +343,51 @@ TEST(StreamChannel, PublishExternalKeepaliveReleasedWhenFrameDrops) {
   EXPECT_FALSE(released); // we hold the frame
   out.reset();
   EXPECT_TRUE(released); // last borrow dropped -> caller storage freed
+}
+
+// --------------------------------------------------------------------------
+// muted_source — the mic/cam on-off gate (stream-set-muted): drains the inner
+// source every tick but blanks the slab in place while the flag is set, so a
+// muted producer keeps publishing well-formed frames (silence / black).
+// --------------------------------------------------------------------------
+
+TEST(MutedSource, PassesThroughThenBlanksThenPassesAgain) {
+  std::atomic<bool> flag{false};
+  // test_source fills 16 bytes of 0xAB and never stops; muted_source must forward them verbatim
+  // while unmuted and zero them while muted (the flag is live, not latched).
+  muted_source m(std::make_unique<test_source>(/*bytes=*/16, /*limit=*/0), flag);
+  EXPECT_EQ(m.frame_bytes(), 16u); // sizing delegates to the inner source (so start_producer's fit
+                                   // check is unchanged by the wrap)
+
+  std::vector<std::uint8_t> buf(16, 0x00);
+  produced_frame pf = m.fill(buf.data(), buf.size());
+  EXPECT_EQ(pf.bytes, 16u);
+  EXPECT_FALSE(pf.stop);
+  EXPECT_TRUE(std::all_of(buf.begin(), buf.end(), [](std::uint8_t b) { return b == 0xAB; }))
+      << "unmuted: the inner source's bytes pass through untouched";
+
+  flag.store(true);
+  std::fill(buf.begin(), buf.end(), 0xAB); // dirty the slab so a blank is observable
+  pf = m.fill(buf.data(), buf.size());
+  EXPECT_EQ(pf.bytes, 16u) << "muted still delivers a full frame (the cadence is unchanged)";
+  EXPECT_FALSE(pf.stop);
+  EXPECT_TRUE(std::all_of(buf.begin(), buf.end(), [](std::uint8_t b) { return b == 0x00; }))
+      << "muted: the frame is blanked in place";
+
+  flag.store(false);
+  pf = m.fill(buf.data(), buf.size());
+  EXPECT_TRUE(std::all_of(buf.begin(), buf.end(), [](std::uint8_t b) { return b == 0xAB; }))
+      << "unmuted again: the gate is live per-frame, not a one-shot";
+}
+
+TEST(MutedSource, PropagatesStopFromInner) {
+  // A spent inner source (stop=true) must still end the producer loop through the gate, muted or not.
+  std::atomic<bool> flag{true};
+  muted_source m(std::make_unique<test_source>(/*bytes=*/8, /*limit=*/1), flag);
+  std::vector<std::uint8_t> buf(8, 0x00);
+  produced_frame pf = m.fill(buf.data(), buf.size());
+  EXPECT_EQ(pf.bytes, 8u);
+  EXPECT_TRUE(pf.stop) << "the inner source's stop is forwarded (source exhausted)";
 }
 
 // --------------------------------------------------------------------------

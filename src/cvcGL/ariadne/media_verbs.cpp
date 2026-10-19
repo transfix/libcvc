@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h>              // register_action_intrinsics
 #include <cvc/ariadne/stream/audio_sources.h> // tone_source / gain_source / mix_source (the pure graph)
+#include <cvc/ariadne/stream/muted_source.h> // muted_source (mic/cam on-off blanks frames at source)
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/synthetic_source.h>
 #include <cvc/ariadne/stream_intrinsics.h> // cvc::ariadne::document_stream (the doc stream table)
@@ -226,6 +227,10 @@ void register_media_intrinsics() {
                                                             static_cast<int>(h), used_hz);
           }
 
+          // Mute gate (stream-set-muted): blank the rgba8 frames while this stream is muted. Wrapped
+          // BEFORE the JPEG encoder so a muted frame is zeroed rgba that encodes to a black JPEG.
+          source = std::make_unique<sx::muted_source>(std::move(source), s->mute_flag());
+
           // Compress to JPEG when requested — the publisher side of conference video compression
           // (see jpeg_encode_source). The stream must be opened with codec "mjpeg" and a byte slab
           // >= the inner rgba8 size; the subscriber's stream_view decodes it.
@@ -313,6 +318,8 @@ void register_media_intrinsics() {
           // Chunk cadence: sample_rate / frames_per_chunk pulls per second (the natural audio
           // rate). The source's frame_bytes (frames*ch*4) MUST match the stream's open bytes, else
           // start_producer rejects it (the frames then never flow).
+          // Mute gate (stream-set-muted): blank the f32 chunks while muted = silence.
+          source = std::make_unique<sx::muted_source>(std::move(source), s->mute_flag());
           const double hz = static_cast<double>(rate) / static_cast<double>(frames);
           s->start_producer(std::move(source), hz);
           return se::make_dict({{"ok", se::value_t(true)},
@@ -364,6 +371,31 @@ void register_media_intrinsics() {
           return se::make_dict({{"ok", se::value_t(true)},
                                 {"token", se::value_t(token)},
                                 {"playing", se::value_t(playing)}});
+        });
+
+    // (stream-set-muted TOKEN BOOL) -> { ok token muted }. Mute/unmute a captured stream in place:
+    // the attached source is a muted_source bound to the stream's mute_flag(), so this just flips the
+    // atomic. A muted producer keeps publishing but its frames are blanked (silence for f32 audio, a
+    // black JPEG for mjpeg video) — peers stay subscribed and the cadence is unchanged. The UX
+    // mic/cam on-off toggles call this; unknown/closed tokens return { ok #f error }.
+    se::builtins::register_fn(
+        env, "stream-set-muted", [doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("stream-set-muted: no document scope (call from an action or resident lane)");
+          if (args.size() < 2)
+            return err("stream-set-muted: expects (stream-set-muted TOKEN BOOL)");
+          const std::string token = handle_token(args[0]);
+          if (token.empty())
+            return err("stream-set-muted: TOKEN (a stream handle dict or token string) is required");
+          sx::stream *s = cvc::ariadne::document_stream(doc, token);
+          if (!s)
+            return err("stream-set-muted: no open stream named '" + token +
+                       "' in this document — call (stream-open) first");
+          const bool m = as_bool(&args[1], false);
+          s->set_muted(m);
+          return se::make_dict({{"ok", se::value_t(true)},
+                                {"token", se::value_t(token)},
+                                {"muted", se::value_t(m)}});
         });
   });
 }

@@ -26,6 +26,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // register_room_intrinsics (room-join/roster/leave)
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/stream/muted_source.h> // --camera: mute gate for the host-owned camera stream
 #include <cvc/ariadne/stream/stream.h> // --camera: open the video stream sized to the device
 #include <cvc/ariadne/stream/stream_registry.h> // post-run verification: lookup the opened tokens
 #include <cvc/ariadne/stream_intrinsics.h> // register_stream_intrinsics (stream-open/info/close)
@@ -281,7 +282,13 @@ int main(int argc, char **argv) {
       sp.expected_subscribers = 3; // the stream_view widget (+ headroom); cf. ariadne_stream
       live_cam = sx::stream::open(app, sp);
       if (live_cam) {
-        auto enc = std::make_unique<cvc::gl::capture::jpeg_encode_source>(std::move(camo.source),
+        // Mute gate (UX cam toggle): the host camera is C++-owned (not in the document stream table,
+        // so the DSL stream-set-muted can't reach it) — wrap it in a muted_source bound to the
+        // stream's mute_flag(), then drive that flag from the render loop by polling the .ari's
+        // cam_on. Wrapped BEFORE the JPEG encoder so a muted frame is black rgba -> a black JPEG.
+        auto gated =
+            std::make_unique<sx::muted_source>(std::move(camo.source), live_cam->mute_flag());
+        auto enc = std::make_unique<cvc::gl::capture::jpeg_encode_source>(std::move(gated),
                                                                           camo.width, camo.height);
         live_cam->start_producer(std::move(enc), camo.fps > 0 ? camo.fps : 30.0);
         std::vector<std::string> ce;
@@ -325,6 +332,17 @@ int main(int argc, char **argv) {
     cam.update(dt);
     rt.drain(); // runs the on_tick program lane: (stream-open) + (stream-capture-*) +
                 // (stream-play-audio) + (when clustered) (room-join/-publish/-subscribe)
+    // UX cam toggle (host camera path): the .ari's button flips cam_on, but the host-owned camera
+    // stream is not in the document table, so the DSL stream-set-muted can't reach it — apply the
+    // mute here instead by polling cam_on (prefix-scoped like every DSL key). Default ON; muted only
+    // when cam_on is explicitly "0". Runs on the render/owner thread, same as set_muted expects.
+    if (live_cam) {
+      const std::string cop = sg.getStatePrefix().empty()
+                                  ? std::string("cam_on")
+                                  : sg.getStatePrefix() + cvc::state::SEPARATOR + "cam_on";
+      cvc::state *n = app.root().findDescendant(cop);
+      live_cam->set_muted(n && n->value() == "0");
+    }
 #if CVC_ENABLE_GRPC
     if (state_tp)
       state_tp->pump_all(); // publish this frame's room-tree writes to the peer
