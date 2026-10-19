@@ -273,6 +273,16 @@ struct FtxuiBackend::Impl {
     }
   };
 
+  // A draggable boundary between two grid tracks: `index` is the track after it (rows of a row
+  // split, or columns of a resizable table), `sizes` the GridSizes key, `box` its reflected box.
+  struct Seam {
+    std::string sizes;
+    int index = 0;
+    bool rows = true;
+    std::string win;
+    std::string box;
+  };
+
   // One emitted leaf, kept for the next event's focus walk and hit-test.
   struct Item {
     std::string id;
@@ -293,6 +303,7 @@ struct FtxuiBackend::Impl {
     std::string combo_popup;                                    // combo list drawn, if any
     int combo_n = 0;
     bool has_menubar = false;
+    std::vector<Seam> seams; // draggable grid seams, for the hit-test
   };
 
   struct Layer {
@@ -342,6 +353,21 @@ struct FtxuiBackend::Impl {
     cvc::image rgb;    // the published image as RGB8
     cvc::image scaled; // rgb resampled to the last drawn cell grid
   };
+  // A grid's track sizes in cells, kept across frames: `fixed` tracks hold `size` (seeded or
+  // dragged); the rest lay out naturally.
+  struct GridSizes {
+    std::vector<int> size;
+    std::vector<bool> fixed;
+    bool seeded = false;
+  };
+  struct SeamDrag {
+    bool active = false;
+    std::string sizes;
+    int index = 0;
+    bool rows = true;
+    int origin = 0;     // pointer row / column when the drag began
+    int a0 = 0, b0 = 0; // the two tracks' sizes then
+  };
 
   std::string focused;
   std::string hovered;
@@ -357,6 +383,8 @@ struct FtxuiBackend::Impl {
   std::map<std::string, double> inflight; // slider value while the mouse holds it
   std::map<std::string, int> color_chan;
   std::map<std::string, Win> windows;
+  std::map<std::string, GridSizes> grid_sizes;
+  SeamDrag seam_drag;
   long z_top = 0;
   std::unordered_map<std::string, fx::Box> boxes; // node-based: reflect() keeps references
   std::map<std::string, Picture> images;
@@ -618,7 +646,10 @@ struct FtxuiBackend::Impl {
     ptr_y = e.y;
     switch (e.mouse) {
     case TermEvent::Mouse::Move:
-      if (!drag_win.empty()) {
+      if (seam_drag.active) {
+        drag_seam(seam_drag.rows ? e.y : e.x);
+        consumed = true;
+      } else if (!drag_win.empty()) {
         Win &w = windows[drag_win];
         w.x = std::clamp(e.x - drag_dx, 0, std::max(0, term_w - 4));
         w.y = std::clamp(e.y - drag_dy, top_row(), std::max(top_row(), term_h - 2));
@@ -632,7 +663,10 @@ struct FtxuiBackend::Impl {
       }
       return;
     case TermEvent::Mouse::Release:
-      if (!drag_win.empty()) {
+      if (seam_drag.active) {
+        seam_drag.active = false;
+        consumed = true;
+      } else if (!drag_win.empty()) {
         drag_win.clear();
         consumed = true;
       } else if (!active.empty()) {
@@ -709,6 +743,13 @@ struct FtxuiBackend::Impl {
         return;
       }
     }
+    for (const Seam &sm : shown.seams) {
+      const auto b = boxes.find(sm.box);
+      if (sm.win == win && b != boxes.end() && inside(b->second, x, y)) {
+        begin_seam_drag(sm, sm.rows ? y : x);
+        return;
+      }
+    }
     if (const Item *it = item_at(x, y, win, "")) {
       press_id = it->id;
       active = it->id;
@@ -720,6 +761,41 @@ struct FtxuiBackend::Impl {
     } else {
       set_focus(""); // a click on empty space blurs (and so commits) the focused field
     }
+  }
+
+  // A seam drag resizes the two tracks either side of it, keeping their sum (each at least 1 cell).
+  // A track that was laying out naturally is fixed at its drawn size when the drag begins.
+  int drawn_size(const Seam &sm, int track) const {
+    const std::string key = (sm.rows ? "pane|" : "col|") + sm.sizes + "#" + std::to_string(track);
+    const auto b = boxes.find(key);
+    if (b == boxes.end())
+      return 1;
+    return std::max(1, sm.rows ? b->second.y_max - b->second.y_min + 1
+                               : b->second.x_max - b->second.x_min + 1);
+  }
+  void begin_seam_drag(const Seam &sm, int at) {
+    GridSizes &gs = grid_sizes[sm.sizes];
+    const std::size_t a = static_cast<std::size_t>(sm.index - 1),
+                      b = static_cast<std::size_t>(sm.index);
+    if (b >= gs.size.size())
+      return;
+    for (std::size_t t : {a, b})
+      if (!gs.fixed[t]) {
+        gs.size[t] = drawn_size(sm, static_cast<int>(t));
+        gs.fixed[t] = true;
+      }
+    seam_drag = SeamDrag{true, sm.sizes, sm.index, sm.rows, at, gs.size[a], gs.size[b]};
+  }
+  void drag_seam(int at) {
+    GridSizes &gs = grid_sizes[seam_drag.sizes];
+    const std::size_t a = static_cast<std::size_t>(seam_drag.index - 1),
+                      b = static_cast<std::size_t>(seam_drag.index);
+    if (b >= gs.size.size())
+      return;
+    const int total = seam_drag.a0 + seam_drag.b0;
+    const int na = std::clamp(seam_drag.a0 + (at - seam_drag.origin), 1, std::max(1, total - 1));
+    gs.size[a] = na;
+    gs.size[b] = std::max(1, total - na);
   }
 
   // Clear the per-event state after the walk that handled it.
@@ -1055,11 +1131,12 @@ void FtxuiBackend::seed_grid_tracks(const std::vector<float> &sizes) {
 
 std::vector<float> FtxuiBackend::grid_tracks() const { return m_->last_tracks; }
 
-bool FtxuiBackend::begin_grid(const Layout &layout, const char * /*id*/) {
+bool FtxuiBackend::begin_grid(const Layout &layout, const char *id) {
   Impl &m = *m_;
   Impl::Frame f;
   f.type = Impl::Frame::Type::Grid;
   f.layout = layout;
+  f.id = m.uid(std::string("grid|") + (id ? id : "")); // keys the grid's draggable sizes
   if (m.have_tracks)
     f.tracks = m.pending_tracks;
   m.have_tracks = false;
@@ -1073,6 +1150,8 @@ void FtxuiBackend::end_grid() {
   Impl &m = *m_;
   Impl::Frame f = m.pop();
   const Layout &L = f.layout;
+  const std::string &gid = f.id;
+  const std::string win = m.wins.empty() ? std::string() : m.wins.back();
   std::vector<fx::Element> cells;
   for (fx::Elements &c : f.cells)
     cells.push_back(c.empty() ? fx::emptyElement() : fx::vbox(std::move(c)));
@@ -1082,36 +1161,64 @@ void FtxuiBackend::end_grid() {
   const fx::Decorator frame = L.has_border_color
                                   ? fx::borderStyled(fx::ROUNDED, rgb_color(L.border_color))
                                   : fx::borderStyled(fx::ROUNDED);
+  // A seam the mouse can drag: tagged so route_mouse finds it, and drawn bold while held.
+  auto seam = [&](fx::Element e, const std::string &sizes, int index, bool rows,
+                  const std::string &box_key) {
+    m.walk.seams.push_back({sizes, index, rows, win, box_key});
+    const bool held =
+        m.seam_drag.active && m.seam_drag.sizes == sizes && m.seam_drag.index == index;
+    return e | tint | (held ? fx::bold : fx::nothing) | fx::reflect(m.boxes[box_key]);
+  };
 
   if (L.is_row_split()) {
-    // A row split is a vertical stack of framed panes (dragging the seams is not wired yet). A
-    // persisted size (seed_grid_tracks) wins over the authored row track.
-    fx::Elements panes;
+    // A row split: one framed stack of panes with a draggable seam between each pair. A pane's
+    // height comes, once, from the persisted size (seed_grid_tracks) or the authored px track; a
+    // pane with neither stretches until a drag fixes it. Sizes are content rows.
+    const std::string key = "rows|" + gid;
+    Impl::GridSizes &gs = m.grid_sizes[key];
+    if (gs.size.size() != cells.size()) {
+      gs.size.assign(cells.size(), 0);
+      gs.fixed.assign(cells.size(), false);
+      gs.seeded = false;
+    }
+    if (!gs.seeded) {
+      for (std::size_t i = 0; i < cells.size(); ++i) {
+        float px = 0.0f;
+        if (i < f.tracks.size() && f.tracks[i] > 0.0f)
+          px = f.tracks[i];
+        else if (i < L.row_heights.size() && L.row_heights[i].unit == Unit::Px)
+          px = L.row_heights[i].value;
+        if (px > 0.0f) {
+          gs.size[i] = std::max(1, m.px_to_rows(px));
+          gs.fixed[i] = true;
+        }
+      }
+      gs.seeded = true;
+    }
+    fx::Elements stack;
     m.last_tracks.clear();
     for (std::size_t i = 0; i < cells.size(); ++i) {
-      float px = 0.0f;
-      if (i < f.tracks.size() && f.tracks[i] > 0.0f)
-        px = f.tracks[i];
-      else if (i < L.row_heights.size() && L.row_heights[i].unit == Unit::Px)
-        px = L.row_heights[i].value;
-      fx::Element pane = cells[i] | frame;
-      if (px > 0.0f) {
-        const int rows = std::max(3, m.px_to_rows(px));
-        pane = pane | fx::size(fx::HEIGHT, fx::EQUAL, rows);
-        m.last_tracks.push_back(static_cast<float>(rows * m.opt.cell_px_h));
-      } else {
-        pane = pane | fx::flex;
-        m.last_tracks.push_back(0.0f);
-      }
-      panes.push_back(std::move(pane));
+      if (i > 0)
+        stack.push_back(seam(fx::separator(), key, static_cast<int>(i), true,
+                             "seam|" + key + "#" + std::to_string(i)));
+      const std::string pane_key = "pane|" + key + "#" + std::to_string(i);
+      fx::Element pane = cells[i] | fx::reflect(m.boxes[pane_key]);
+      pane = gs.fixed[i] ? pane | fx::yframe | fx::size(fx::HEIGHT, fx::EQUAL, gs.size[i])
+                         : pane | fx::yflex;
+      stack.push_back(std::move(pane));
+      const fx::Box &b = m.boxes[pane_key];
+      const int rows = gs.fixed[i] ? gs.size[i] : std::max(0, b.y_max - b.y_min + 1);
+      m.last_tracks.push_back(static_cast<float>(rows * m.opt.cell_px_h));
     }
-    m.add(panes.empty() ? fx::emptyElement() : fx::vbox(std::move(panes)));
+    m.add(stack.empty() ? fx::emptyElement() : fx::vbox(std::move(stack)) | frame);
     return;
   }
   m.last_tracks.clear();
 
   // A table: cells flow row-major into col_widths.size() columns (one per cell for a bare
   // horizontal layout, one column for a bare grid). px tracks fix a width, percent tracks stretch.
+  // A `resizable` table gets a draggable seam between columns (drawn as a blank column when the
+  // table shows no inner borders); a dragged column keeps its width.
   const int n = static_cast<int>(cells.size());
   int cols = static_cast<int>(L.col_widths.size());
   if (cols == 0)
@@ -1119,22 +1226,34 @@ void FtxuiBackend::end_grid() {
   const int rows = n == 0 ? 0 : (n + cols - 1) / cols;
   const bool inner = L.borders == BorderShow::Inner || L.borders == BorderShow::All;
   const bool outer = L.borders == BorderShow::Outer || L.borders == BorderShow::All;
+  const bool resizable = L.resizable && cols > 1;
+  const std::string key = "cols|" + gid;
+  Impl::GridSizes *cs = nullptr;
+  if (resizable) {
+    cs = &m.grid_sizes[key];
+    if (cs->size.size() != static_cast<std::size_t>(cols)) {
+      cs->size.assign(static_cast<std::size_t>(cols), 0);
+      cs->fixed.assign(static_cast<std::size_t>(cols), false);
+    }
+  }
   std::vector<fx::Elements> lines;
   for (int r = 0; r < rows; ++r) {
     if (inner && r > 0) {
-      fx::Elements seam;
+      fx::Elements rule;
       for (int c = 0; c < cols; ++c) {
         if (c > 0)
-          seam.push_back(fx::separator() | tint);
-        seam.push_back(fx::separator() | tint);
+          rule.push_back(fx::separator() | tint);
+        rule.push_back(fx::separator() | tint);
       }
-      lines.push_back(std::move(seam));
+      lines.push_back(std::move(rule));
     }
     fx::Elements line;
     for (int c = 0; c < cols; ++c) {
       const int i = r * cols + c;
       fx::Element cell = i < n ? cells[static_cast<std::size_t>(i)] : fx::emptyElement();
-      if (c < static_cast<int>(L.col_widths.size())) {
+      if (cs && cs->fixed[static_cast<std::size_t>(c)]) {
+        cell = cell | fx::size(fx::WIDTH, fx::EQUAL, cs->size[static_cast<std::size_t>(c)]);
+      } else if (c < static_cast<int>(L.col_widths.size())) {
         const Track &t = L.col_widths[static_cast<std::size_t>(c)];
         if (t.unit == Unit::Px)
           cell = cell | fx::size(fx::WIDTH, fx::EQUAL, std::max(1, m.px_to_cols(t.value)));
@@ -1145,8 +1264,15 @@ void FtxuiBackend::end_grid() {
           L.row_heights[static_cast<std::size_t>(r)].unit == Unit::Px)
         cell = cell | fx::size(fx::HEIGHT, fx::GREATER_THAN,
                                m.px_to_rows(L.row_heights[static_cast<std::size_t>(r)].value));
-      if (inner && c > 0)
-        line.push_back(fx::separator() | tint);
+      if (r == 0 && cs) // a column's drawn width, for the drag that fixes it
+        cell = cell | fx::reflect(m.boxes["col|" + key + "#" + std::to_string(c)]);
+      if (c > 0 && (inner || resizable)) {
+        fx::Element sep = inner ? fx::separator() : fx::separatorEmpty();
+        line.push_back(resizable
+                           ? seam(sep, key, c, false,
+                                  "seam|" + key + "#" + std::to_string(c) + "@" + std::to_string(r))
+                           : sep | tint);
+      }
       line.push_back(std::move(cell));
     }
     lines.push_back(std::move(line));
@@ -1755,10 +1881,12 @@ constexpr bool kCanSuspend = true;
 
 } // namespace
 
-void FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
-                            const std::function<bool()> &should_close,
-                            const std::function<void(const TermEvent &)> &unhandled) {
+FtxuiBackend::RunExit
+FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
+                       const std::function<bool()> &should_close,
+                       const std::function<void(const TermEvent &)> &unhandled) {
   Impl &m = *m_;
+  RunExit result;
   // Interrupt keys are signals: Ctrl-C is SIGINT, Ctrl-\ SIGQUIT. A document with an on_signal:
   // program gets them and decides; without one they leave the loop. Three Ctrl-Cs inside two
   // seconds always leave, so a handler that never quits can't trap the user.
@@ -1788,8 +1916,11 @@ void FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::func
   });
   fx::Component app = fx::CatchEvent(renderer, [&](fx::Event e) {
     if (e == fx::Event::CtrlC || e.input() == "\x1c") {
-      if (interrupt(e == fx::Event::CtrlC ? "SIGINT" : "SIGQUIT"))
+      const char *signal = e == fx::Event::CtrlC ? "SIGINT" : "SIGQUIT";
+      if (interrupt(signal)) {
+        result.signal = signal;
         screen.Exit();
+      }
       return true;
     }
     if (e == fx::Event::CtrlZ)
@@ -1801,31 +1932,44 @@ void FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::func
       unhandled(te);
     return true;
   });
-  fx::Loop loop(&screen, app);
+  fx::Loop loop(&screen, app); // sets the terminal up (and FTXUI's signal handlers)
+  if (opts.on_start)
+    opts.on_start();
   const auto period = std::chrono::milliseconds(1000 / std::max(1, opts.fps));
   while (!loop.HasQuitted()) {
     loop.RunOnce();
+    // OS signals the host collected: the document's on_signal: decides, else they end the loop.
+    if (opts.take_signal)
+      for (std::string sig = opts.take_signal(); !sig.empty(); sig = opts.take_signal())
+        if (!rt.post_signal(sig, "os") && result.signal.empty()) {
+          result = RunExit{sig, true};
+          screen.Exit();
+        }
     if (drain)
       drain(); // queued actions run here, off the walk (§7.2)
-    if (should_close && should_close()) {
+    if (should_close && should_close())
       screen.Exit();
-      loop.RunOnce();
+    if (loop.HasQuitted())
       break;
-    }
     screen.PostEvent(fx::Event::Custom); // redraw, so state changed off the UI shows
     wait_frame(period);
   }
+  if (!loop.HasQuitted())
+    loop.RunOnce(); // let a pending Exit() take effect before the terminal is restored
+  if (opts.on_stop)
+    opts.on_stop();
+  return result;
 }
 
-void FtxuiBackend::run(Runtime &rt) { run(rt, RunOptions{}); }
+FtxuiBackend::RunExit FtxuiBackend::run(Runtime &rt) { return run(rt, RunOptions{}); }
 
-void FtxuiBackend::run(Runtime &rt, const RunOptions &opts) {
-  run_loop(rt, opts, [&] { rt.drain(); }, nullptr, nullptr);
+FtxuiBackend::RunExit FtxuiBackend::run(Runtime &rt, const RunOptions &opts) {
+  return run_loop(rt, opts, [&] { rt.drain(); }, nullptr, nullptr);
 }
 
-void FtxuiBackend::run(AppRuntime &app) { run(app, RunOptions{}); }
+FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &app) { return run(app, RunOptions{}); }
 
-void FtxuiBackend::run(AppRuntime &app, const RunOptions &opts) {
+FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &app, const RunOptions &opts) {
   const int cw = m_->opt.cell_px_w, ch = m_->opt.cell_px_h;
   // What the UI didn't use goes to the document's on_key / on_pointer, keys with SDL's modifier
   // bits (shift 0x1, ctrl 0x40, alt 0x100) and a press + release pair (a terminal reports no
@@ -1858,7 +2002,7 @@ void FtxuiBackend::run(AppRuntime &app, const RunOptions &opts) {
       break;
     }
   };
-  run_loop(
+  return run_loop(
       app.runtime(), opts, [&] { app.drain(); }, [&] { return app.should_close(); }, unhandled);
 }
 
@@ -1927,13 +2071,16 @@ std::string FtxuiBackend::render_to_string(Runtime &, int, int, bool) {
   return "ari: libcvc was built without FTXUI (terminal backend unavailable)\n";
 }
 bool FtxuiBackend::feed(Runtime &, const TermEvent &) { return false; }
-void FtxuiBackend::run_loop(Runtime &, const RunOptions &, const std::function<void()> &,
-                            const std::function<bool()> &,
-                            const std::function<void(const TermEvent &)> &) {}
-void FtxuiBackend::run(Runtime &) {}
-void FtxuiBackend::run(Runtime &, const RunOptions &) {}
-void FtxuiBackend::run(AppRuntime &) {}
-void FtxuiBackend::run(AppRuntime &, const RunOptions &) {}
+FtxuiBackend::RunExit FtxuiBackend::run_loop(Runtime &, const RunOptions &,
+                                             const std::function<void()> &,
+                                             const std::function<bool()> &,
+                                             const std::function<void(const TermEvent &)> &) {
+  return {};
+}
+FtxuiBackend::RunExit FtxuiBackend::run(Runtime &) { return {}; }
+FtxuiBackend::RunExit FtxuiBackend::run(Runtime &, const RunOptions &) { return {}; }
+FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &) { return {}; }
+FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &, const RunOptions &) { return {}; }
 bool FtxuiBackend::available() { return false; }
 
 #endif

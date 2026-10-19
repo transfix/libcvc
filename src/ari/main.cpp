@@ -27,7 +27,9 @@
 //
 // run takes over the terminal until a "quit" action (a menu item with `on: quit`, or a program
 // calling (quit)) or Ctrl-C. A document with an on_signal: program gets Ctrl-C as SIGINT and
-// decides for itself; three Ctrl-Cs within two seconds always quit.
+// decides for itself; three Ctrl-Cs within two seconds always quit. Signals sent to the process
+// (SIGTERM, SIGHUP, SIGINT, SIGQUIT, SIGUSR1/2) reach on_signal: too, with source "os"; one the
+// document doesn't handle ends the run with exit status 128 + the signal number.
 // snapshot drains N frames (default 1) and prints the last one as text — for CI, logs, and docs.
 // check loads the document and prints its warnings; it exits non-zero when the load fails.
 
@@ -42,7 +44,61 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+#include <csignal>
+#endif
+
 namespace {
+
+#ifndef _WIN32
+// OS signals for the document's on_signal:. A handler only sets a flag (all it may safely do); the
+// loop polls them through RunOptions::take_signal. Process-wide state, so it lives here in the
+// host program rather than in libcvc.
+struct Trap {
+  int signo;
+  const char *name;
+};
+constexpr Trap kTraps[] = {{SIGTERM, "SIGTERM"}, {SIGHUP, "SIGHUP"},   {SIGINT, "SIGINT"},
+                           {SIGQUIT, "SIGQUIT"}, {SIGUSR1, "SIGUSR1"}, {SIGUSR2, "SIGUSR2"}};
+constexpr int kTrapCount = static_cast<int>(sizeof(kTraps) / sizeof(kTraps[0]));
+volatile std::sig_atomic_t g_raised[kTrapCount] = {};
+struct sigaction g_previous[kTrapCount];
+
+extern "C" void on_os_signal(int signo) {
+  for (int i = 0; i < kTrapCount; ++i)
+    if (kTraps[i].signo == signo)
+      g_raised[i] = 1;
+}
+
+void install_traps() {
+  struct sigaction sa {};
+  sa.sa_handler = on_os_signal;
+  sigemptyset(&sa.sa_mask);
+  for (int i = 0; i < kTrapCount; ++i)
+    sigaction(kTraps[i].signo, &sa, &g_previous[i]);
+}
+
+void restore_traps() {
+  for (int i = 0; i < kTrapCount; ++i)
+    sigaction(kTraps[i].signo, &g_previous[i], nullptr);
+}
+
+std::string take_trapped() {
+  for (int i = 0; i < kTrapCount; ++i)
+    if (g_raised[i]) {
+      g_raised[i] = 0;
+      return kTraps[i].name;
+    }
+  return {};
+}
+
+int signal_number(const std::string &name) {
+  for (const Trap &t : kTraps)
+    if (name == t.name)
+      return t.signo;
+  return 0;
+}
+#endif
 
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
@@ -61,7 +117,7 @@ int main(int argc, char **argv) {
 #ifdef CVC_ARIADNE_WASM_DOC
   // The browser build (ari.html over xterm.js) has no command line. Run the document baked into
   // MEMFS, with the embedded component library at /components so cvc://components/*.ari resolves
-  // (see the ari target in src/cvc/CMakeLists.txt).
+  // (see the EMSCRIPTEN block in src/ari/CMakeLists.txt).
   const char *baked[] = {"ari", "run", CVC_ARIADNE_WASM_DOC, "--component-path", "/"};
   if (argc < 2) {
     argc = static_cast<int>(sizeof baked / sizeof *baked);
@@ -158,9 +214,19 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  backend.run(rt, run);
+#ifndef _WIN32
+  run.on_start = install_traps;
+  run.on_stop = restore_traps;
+  run.take_signal = take_trapped;
+#endif
+  const cvc::ariadne::FtxuiBackend::RunExit how = backend.run(rt, run);
   // The fullscreen screen is gone; anything the read lane complained about is worth seeing now.
   for (const std::string &w : rt.take_warnings())
     std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
+#ifndef _WIN32
+  if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
+    return 128 + signal_number(how.signal);
+#endif
+  (void)how;
   return 0;
 }

@@ -4138,8 +4138,9 @@ When Ariadne moves into libcvc as `cvc::ariadne`, a pure-terminal backend render
 > drawn), so it realizes `free` after all: movable, z-ordered, closable windows placed from `pos:`/`size:` and
 > persisted to `tree.<id>.geometry` (`caps.windows = true`), plus menus, combo popups, text entry, sliders, and
 > half-block images. Authored px map to cells by a nominal 8 × 16 cell. The document-level `on_signal:` hook
-> receives the terminal's Ctrl-C as `SIGINT` (see `docs/ARIADNE.md` §5.3). Not yet: draggable row-split seams,
-> wasm/xterm.js packaging, OS-delivered signals.
+> receives the terminal's Ctrl-C as `SIGINT` and, through host hooks, OS-delivered signals (see `docs/ARIADNE.md`
+> §5.3). Grid seams drag (row splits persist to `tree.<id>.tracks`). `ari` ships as its own cvcpkg package. Not
+> yet: wasm/xterm.js packaging.
 
 **Net:** two backends earn a place — **FTXUI as the portable, hermetic, wasm-capable default**, and **tvision as the native desktop-metaphor option** behind a capability flag. notcurses stays off the roadmap. Design consequence for P0: the `Backend` interface must support both a framework that owns the loop (`owns_loop=true`, the framework calls `render()`) and a primitive renderer the core drives (`owns_loop=false`, like the ImGui path). That `owns_loop` + `root_rect()` seam is the one contract expensive to retrofit — lock it in P0 even though the terminal backend itself is deferred.
 
