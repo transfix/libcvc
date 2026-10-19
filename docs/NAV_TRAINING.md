@@ -374,6 +374,10 @@ diff::bike_step_bwd(F, ox, oy, th, sp, gx, gy, al, be, ga, v, g_ox1, g_oy1, g_th
   goal forces in the longitudinal command and, when it steers, the repulsive force in the steering
   bias. The behind branch's barrier term stays barrier-only.
 - **Null is unchanged:** a null `ext_in` is the controller as it was, bit for bit.
+- **A force computed in world units:** the drive frame is o = S (w - c). A caller that writes a
+  world-frame force into the drive frame unscaled, as cvcdbg's `comm_ext_sample` does, passes
+  F_drive = F_world. Its Jacobian still needs the chain rule: dF/do = (dF/dw) / S. Passing dF/dw
+  instead is off by a factor of S.
 - **The dynamic plant:** `bike_control`, `bike_control_bwd`, `dyn_bike_step` and
   `dyn_bike_step_bwd` take the same pair.
 
