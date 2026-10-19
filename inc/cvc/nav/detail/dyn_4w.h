@@ -165,6 +165,12 @@ CVC_HD inline void dyn4_wheel_state(const dyn4_params &p, const bike_veh &v, con
   }
 }
 
+// A front wheel's Ackermann angle, at body-frame y from the centreline, for the virtual centre
+// wheel's tan(delta): tan delta_i = L tan delta / (L - y tan delta). The rear wheels do not steer.
+template <class S> CVC_HD inline S dyn4_ackermann(S L, S y, S tan_delta) {
+  return s_atan(L * tan_delta / (L - y * tan_delta));
+}
+
 // One step of the plant; see the header comment.
 template <class S, class G>
 CVC_HD inline void dyn4_plant(const dyn4_params &p, const bike_veh &v, const G &ground,
@@ -194,14 +200,14 @@ CVC_HD inline void dyn4_plant(const dyn4_params &p, const bike_veh &v, const G &
   const S F_drive = m * a1;
   const S share = S(s_val(a1) >= s_val(zero) ? p.front_drive : p.front_brake);
   S Fx[4], Dy[4], dw[4], cdw[4], sdw[4];
-  // The Ackermann angles: tan delta_i = L tan delta / (L - y_i tan delta) at the front.
+  // The front wheels at their Ackermann angles.
   const S td = s_tan(delta1);
   for (int i = 0; i < 4; ++i) {
     const S axle_share = i < 2 ? share : one - share;
     const S cap = mu_i[i] * Fz[i];
     Fx[i] = dyn_sat(S(0.5) * F_drive * axle_share, cap);
     Dy[i] = dyn_lateral_cap(Fx[i], cap);
-    dw[i] = i < 2 ? s_atan(L * td / (L - yi[i] * td)) : zero;
+    dw[i] = i < 2 ? dyn4_ackermann(L, yi[i], td) : zero;
     cdw[i] = s_cos(dw[i]);
     sdw[i] = s_sin(dw[i]);
   }

@@ -14,15 +14,23 @@
 // roll and pitch inertia.
 
 #include <algorithm>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/dyn_4w.h>
 #include <cvc/nav/dyn_bike.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <random>
+#include <sstream>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace diff = cvc::nav::diff;
@@ -546,4 +554,228 @@ TEST(Dyn4, MatchesJoltsHumveeEnvelopes) {
               peak, dist);
   EXPECT_NEAR(peak, 6.85, 0.1 * 6.85);
   EXPECT_NEAR(dist, 25.90, 0.1 * 25.90);
+}
+
+// The P2 Ackermann gate, as Jolt's Humvee meets it (physics_vehicle_test): each front wheel takes
+// its Ackermann angle, cot(right) - cot(left) = track / wheelbase on a left turn. And the
+// vehicle turns on that geometry: slowly, held at delta, the rear axle's circle is the kinematic
+// L / tan(delta) to 1%, from the tires alone (the low-speed blend off).
+TEST(Dyn4, TheFrontWheelsFollowAckermann) {
+  const dyn4_params p = humvee4();
+  const double L = double(p.lf) + p.lr, tf = p.tf;
+  EXPECT_NEAR(L, 3.30, 1e-6);
+  EXPECT_NEAR(2.0 * tf, 1.82, 1e-6);
+  const auto cot = [](double a) { return std::cos(a) / std::sin(a); };
+  for (const double delta : {0.05, 0.2, 0.45, -0.3}) {
+    const double t = std::tan(delta);
+    const double left = diff::dyn4_ackermann(L, tf, t), right = diff::dyn4_ackermann(L, -tf, t);
+    EXPECT_NEAR(left, std::atan(L * t / (L - tf * t)), 1e-12);
+    EXPECT_NEAR(cot(right) - cot(left), 2.0 * tf / L, 1e-12) << delta;
+    EXPECT_GT(std::fabs(delta > 0 ? left : right), std::fabs(delta))
+        << "the inner wheel steers more";
+  }
+  dyn4_params tires = p;
+  tires.v_blend = 0.0f;
+  const bike_veh v = limits(p.lf + p.lr);
+  const diff::flat_ground ground;
+  for (const double delta : {0.15, 0.3, 0.45}) {
+    dyn4_state<double> s = rolling(3.0);
+    for (int t = 0; t < 400; ++t) {
+      dyn4_state<double> o;
+      const double a_cmd = 2.0 * (3.0 - s.vx) + p.drag * s.vx * s.vx / p.m + p.c_rr * p.g;
+      diff::dyn4_plant<double>(tires, v, ground, s, delta, a_cmd, o);
+      s = o;
+    }
+    const double rear_speed = std::hypot(s.vx, s.vy - p.lr * s.r);
+    const double R = rear_speed / s.r, want = L / std::tan(delta);
+    std::printf("  delta %.2f at %.1f m/s: the rear axle's circle %.3f m, L / tan(delta) %.3f m "
+                "(%+.2f%%)\n",
+                delta, s.vx, R, want, 100.0 * (R / want - 1.0));
+    EXPECT_NEAR(R, want, 0.01 * want);
+  }
+}
+
+namespace {
+
+// The golden's ground: the friction split along y = 0 (left mu_left, right mu_right, blended
+// over split_width) and a round bump, so the twin is held to the ground's gradients too.
+struct golden_ground {
+  double mu_left = 0.5, mu_right = 0.9, split_width = 0.3;
+  double A = 0.06, cx = 4.0, cy = 3.0, r = 0.8;
+  template <class S> void at(S wx, S wy, S &mu, S &height) const {
+    const S t = S(0.5) + S(0.5) * diff::s_tanh(wy / S(split_width));
+    mu = S(mu_right) + t * S(mu_left - mu_right);
+    const S dx = wx - S(cx), dy = wy - S(cy);
+    height = S(A) * diff::s_exp(-(dx * dx + dy * dy) / S(r * r));
+  }
+};
+
+} // namespace
+
+// The C++ side of the parity gate for GRL-SNAM's torch twin: the values it is held to. The plant,
+// in double, on fixed cases on golden_ground: the Humvee with its springs (and lags and the
+// low-speed blend), and again with rigid corners. Each case's next state and its VJP for a fixed
+// output gradient. CVC_DYN4_GOLDEN_WRITE=1 rewrites tests/data/dyn4_golden.json; otherwise this
+// build must reproduce it to 1e-9.
+TEST(Dyn4, Golden) {
+  namespace fs = std::filesystem;
+  const fs::path path = fs::path(__FILE__).parent_path() / "data" / "dyn4_golden.json";
+  dyn4_params sprung = humvee4();
+  sprung.tau_steer = 0.05f;
+  sprung.v_blend = 1.0f;
+  sprung.v_width = 0.3f;
+  dyn4_params rigid = sprung;
+  rigid.k_f = rigid.k_r = rigid.c_f = rigid.c_r = 0.0f;
+  const dyn4_params psets[2] = {sprung, rigid};
+  const golden_ground ground;
+  struct gcase {
+    int params;
+    double s[14], dcmd, acmd;
+    bool reverse;
+  };
+  // x, y, psi, vx, vy, r, z, zd, phi, phid, th, thd, delta, a
+  const gcase cases[] = {
+      {0, {0, 0, 0, 12, 0.1, 0.05, 0, 0, 0, 0, 0, 0, 0.02, 0.5}, 0.05, 1.0, false},
+      {0,
+       {1, -2, 0.3, 15, -0.6, 0.5, 0.01, -0.02, 0.02, 0.05, -0.01, 0.03, 0.2, 0},
+       0.25,
+       0.0,
+       false},
+      {0,
+       {-3, 4, -1.1, 14, 0.4, 0.2, -0.005, 0.01, -0.01, 0.0, 0.02, -0.05, 0.1, -4},
+       0.1,
+       -6.0,
+       false},
+      {0, {0.7, 3.5, 0.05, 8, 0.1, 0.1, 0, 0, 0, 0, 0, 0, 0.05, 0}, 0.1, 0.5, false},
+      {0, {-5, 0.1, 0.02, 18, 0, 0, 0, 0, 0, 0, 0.01, 0, 0, -3}, 0.0, -8.0, false},
+      {0, {0, 0, 0, 0.6, 0.02, 0.05, 0, 0, 0, 0, 0, 0, 0.3, 0.3}, 0.35, 0.5, false},
+      {0, {0.5, 0.5, 0.2, -2, 0.05, -0.1, 0, 0, 0.01, 0, 0, 0, 0.2, -0.5}, 0.25, -0.8, true},
+      {0, {2, 2, 2.5, 10, 2.5, 1.1, 0.02, 0.1, 0.04, -0.1, 0, 0.05, 0.4, 1}, 0.45, 2.0, false},
+      {0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0.1, 2.0, false},
+      {1, {1, -2, 0.3, 15, -0.6, 0.5, 0, 0, 0, 0, 0, 0, 0.2, 0}, 0.25, 0.0, false},
+      {1, {0.7, 3.5, 0.05, 8, 0.1, 0.1, 0, 0, 0, 0, 0, 0, 0.05, -2}, 0.1, -4.0, false},
+  };
+  const int n = dyn4_state<double>::size;
+  const double g_out[14] = {0.7,  -0.3, 1.1, 0.4,  -0.9, 0.25, 0.8,
+                            -0.2, 0.5,  0.3, -0.6, 0.15, 0.6,  -0.15};
+  // Every value this build computes, in the file's order: per case, next[14], g_state[14],
+  // g_delta_cmd, g_a_cmd.
+  std::vector<double> now;
+  std::ostringstream js;
+  const auto num = [](double x) {
+    char b[40];
+    std::snprintf(b, sizeof b, "%.17g", x);
+    return std::string(b);
+  };
+  const auto arr = [&](const double *v, int k) {
+    std::string out = "[";
+    for (int i = 0; i < k; ++i)
+      out += (i ? ", " : "") + num(v[i]);
+    return out + "]";
+  };
+  js << "{\n \"format\": \"cvc-dyn4-golden-1\",\n";
+  js << " \"order\": [\"x\", \"y\", \"psi\", \"vx\", \"vy\", \"r\", \"z\", \"zd\", \"phi\", "
+        "\"phid\", \"th\", \"thd\", \"delta\", \"a\"],\n";
+  js << " \"params\": [\n";
+  for (int k = 0; k < 2; ++k) {
+    const dyn4_params &p = psets[k];
+    const std::pair<const char *, float> params[] = {{"m", p.m},
+                                                     {"Iz", p.Iz},
+                                                     {"Ix", p.Ix},
+                                                     {"Iy", p.Iy},
+                                                     {"lf", p.lf},
+                                                     {"lr", p.lr},
+                                                     {"tf", p.tf},
+                                                     {"tr", p.tr},
+                                                     {"h", p.h},
+                                                     {"g", p.g},
+                                                     {"k_f", p.k_f},
+                                                     {"k_r", p.k_r},
+                                                     {"c_f", p.c_f},
+                                                     {"c_r", p.c_r},
+                                                     {"B_f", p.B_f},
+                                                     {"B_r", p.B_r},
+                                                     {"C", p.C},
+                                                     {"front_drive", p.front_drive},
+                                                     {"front_brake", p.front_brake},
+                                                     {"drag", p.drag},
+                                                     {"c_rr", p.c_rr},
+                                                     {"tau_steer", p.tau_steer},
+                                                     {"steer_rate", p.steer_rate},
+                                                     {"tau_drive", p.tau_drive},
+                                                     {"v_blend", p.v_blend},
+                                                     {"v_width", p.v_width},
+                                                     {"eps", p.eps},
+                                                     {"fz_min", p.fz_min}};
+    js << "  {";
+    bool first = true;
+    for (const auto &kv : params) {
+      js << (first ? "" : ", ") << "\"" << kv.first << "\": " << num(kv.second);
+      first = false;
+    }
+    js << ", \"iters\": " << p.iters << "}" << (k ? "" : ",") << "\n";
+  }
+  js << " ],\n \"ground\": {\"mu_left\": " << num(ground.mu_left)
+     << ", \"mu_right\": " << num(ground.mu_right)
+     << ", \"split_width\": " << num(ground.split_width) << ", \"A\": " << num(ground.A)
+     << ", \"cx\": " << num(ground.cx) << ", \"cy\": " << num(ground.cy)
+     << ", \"r\": " << num(ground.r) << "},\n";
+  js << " \"g_out\": " << arr(g_out, n) << ",\n \"cases\": [\n";
+  const std::size_t ncase = sizeof cases / sizeof cases[0];
+  for (std::size_t c = 0; c < ncase; ++c) {
+    const gcase &gc = cases[c];
+    const dyn4_params &p = psets[gc.params];
+    bike_veh lim = limits(p.lf + p.lr);
+    lim.allow_reverse = gc.reverse ? 1 : 0;
+    dyn4_state<double> s, o, go, gs;
+    for (int k = 0; k < n; ++k) {
+      s[k] = gc.s[k];
+      go[k] = g_out[k];
+    }
+    diff::dyn4_plant<double>(p, lim, ground, s, gc.dcmd, gc.acmd, o);
+    double g_dc = 0.0, g_ac = 0.0;
+    diff::dyn4_plant_vjp<double>(p, lim, ground, s, gc.dcmd, gc.acmd, go, gs, g_dc, g_ac);
+    double next[14], gstate[14];
+    for (int k = 0; k < n; ++k) {
+      next[k] = o[k];
+      gstate[k] = gs[k];
+      now.push_back(o[k]);
+    }
+    for (int k = 0; k < n; ++k)
+      now.push_back(gs[k]);
+    now.push_back(g_dc);
+    now.push_back(g_ac);
+    js << "  {\"params\": " << gc.params << ", \"state\": " << arr(gc.s, n)
+       << ", \"delta_cmd\": " << num(gc.dcmd) << ", \"a_cmd\": " << num(gc.acmd)
+       << ",\n   \"limits\": {\"L\": " << num(lim.L) << ", \"vmax\": " << num(lim.vmax)
+       << ", \"hdt\": " << num(lim.hdt) << ", \"allow_reverse\": " << lim.allow_reverse << "}"
+       << ",\n   \"next\": " << arr(next, n) << ",\n   \"g_state\": " << arr(gstate, n)
+       << ",\n   \"g_delta_cmd\": " << num(g_dc) << ", \"g_a_cmd\": " << num(g_ac) << "}"
+       << (c + 1 < ncase ? "," : "") << "\n";
+  }
+  js << " ]\n}\n";
+  for (const double x : now)
+    ASSERT_TRUE(std::isfinite(x));
+  const char *write = std::getenv("CVC_DYN4_GOLDEN_WRITE");
+  if (write && std::string(write) == "1") {
+    std::ofstream(path, std::ios::binary) << js.str();
+    std::printf("  wrote %s\n", path.string().c_str());
+    return;
+  }
+  boost::property_tree::ptree want;
+  ASSERT_NO_THROW(boost::property_tree::read_json(path.string(), want)) << path;
+  std::vector<double> golden;
+  for (const auto &c : want.get_child("cases")) {
+    for (const char *key : {"next", "g_state"})
+      for (const auto &v : c.second.get_child(key))
+        golden.push_back(v.second.get_value<double>());
+    golden.push_back(c.second.get<double>("g_delta_cmd"));
+    golden.push_back(c.second.get<double>("g_a_cmd"));
+  }
+  ASSERT_EQ(golden.size(), now.size());
+  for (std::size_t k = 0; k < now.size(); ++k)
+    EXPECT_LE(std::fabs(now[k] - golden[k]),
+              1e-9 * std::max(1.0, std::max(std::fabs(now[k]), std::fabs(golden[k]))))
+        << "value " << k << " (case " << k / (2 * n + 2) << "): golden " << golden[k] << ", now "
+        << now[k];
 }

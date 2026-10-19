@@ -411,6 +411,9 @@ force `a` behind their actuators.
 | Steady lateral acceleration, mu 0.4 / 0.9 | 0.97 / 0.95 mu g |
 | Stopping from 20 m/s, mu 0.4 / 0.9 | 47.2 / 21.5 m against v^2 / (2 mu g) = 51.0 / 22.7 m |
 | Against Jolt's Humvee (physics_vehicle_test's numbers) | skidpad 6.56 m/s^2 at mu 0.7 (Jolt 6.85); stopping 24.10 m from 20 m/s at mu 0.8 (Jolt 25.90) |
+| Ackermann, as Jolt's gate: cot(right) - cot(left) against track / wheelbase | exact (1e-12) for delta from -0.3 to 0.45 |
+| Held at delta at 3 m/s, the low-speed blend off: the rear axle's circle against L / tan(delta) | +0.10 / +0.17 / +0.32% at 0.15 / 0.30 / 0.45 rad |
+| Golden for the torch twin (`tests/data/dyn4_golden.json`; the sprung and rigid Humvee on a mu split with a bump): next state and VJP | reproduced to 1e-9 |
 
 A gradient check's starting positions should not be the scene's sampled starts. Those sit on
 occupancy-cell centres, which are the SDF field's grid nodes, where the bilinear field has a
@@ -419,7 +422,7 @@ controller check above went from 5e-2 to 6.2e-5.
 
 Not yet:
 - the external-force port on this plant (with transfix/libcvc#728);
-- a GRL-SNAM torch twin and its goldens;
+- the GRL-SNAM torch twin, held to the golden above;
 - the anti-roll bars, the unsprung masses and wheel spin.
 
 ## Scene source
