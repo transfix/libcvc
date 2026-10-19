@@ -68,7 +68,10 @@ public:
 
   // Direction for a Directional light, as a compass bearing and height angle
   // (state "azimuth"/"elevation"), matching SceneGraph::addDirectionalLight.
+  // This is the ONLY thing that aims a sun: its direction is in world space, and
+  // the node transform and the target do not apply to it.
   void setDirection(double azimuthDeg, double elevationDeg);
+  void direction(double &azimuthDeg, double &elevationDeg) const;
 
   void setColor(double r, double g, double b); // state "color_r/g/b"
   void color(double &r, double &g, double &b) const;
