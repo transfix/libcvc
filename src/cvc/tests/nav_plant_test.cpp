@@ -1026,7 +1026,8 @@ TEST(NavPlantConvergence, DynamicTrainedPolicyAgainstPointMassOnJolt) {
 // by reach on Jolt RoboRacers over validation seeds (200.., never the evaluation's) and ending
 // on the best, the untrained policy included; then the gate's comparison on the 20 held-out
 // seeds. P8B_SELECT_LR / _STEPS / _EVERY override the training, P8B_SELECT_VAL the number of
-// validation seeds (8: a 4-seed mean carries about 1.5 points of the plant's chaos alone).
+// validation seeds (32: a mean over k seeds carries about 3/sqrt(k) points of the plant's chaos
+// alone, and with 8 the best of 31 checkpoints was mostly luck).
 TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
   REQUIRE_JOLT();
   const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
@@ -1046,7 +1047,7 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
     base.steps = std::atoi(e);
   if (const char *e = std::getenv("P8B_SELECT_EVERY"))
     base.checkpoint_every = std::atoi(e);
-  int nval = 8;
+  int nval = 32;
   if (const char *e = std::getenv("P8B_SELECT_VAL"))
     nval = std::atoi(e);
   plant_reach_options val;

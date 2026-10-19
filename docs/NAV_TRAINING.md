@@ -61,7 +61,9 @@ so `train()` can end on the checkpoint that scores best on something closer to i
 #include <cvc/physics/nav_eval.h>
 
 cvc::physics::plant_reach_options val;     // reach on Jolt RoboRacers in the scene
-val.seeds = {200, 201, 202, 203, 204, 205, 206, 207};  // validation seeds, not the evaluation's
+val.seeds.clear();                         // validation seeds, not the evaluation's: 32 of them
+for (unsigned s = 200; s < 232; ++s)
+  val.seeds.push_back(s);
 cfg.checkpoint_every = 30;
 coef_trainer tr(cfg);
 tr.train(scene, false, [&](const coef_mlp &p, int step) {
@@ -81,7 +83,8 @@ tr.train(scene, false, [&](const coef_mlp &p, int step) {
   8 seeds score in about the time of one.
 - **But it is chaotic.** Changing the scale by 4e-9 (passing `0.035f` instead of `0.035`) moves a
   seed's reach by up to 0.1, a per-seed SD of about 0.03. A mean over k validation seeds carries
-  about 3/sqrt(k) points of that alone, so use 8 or more.
+  about 3/sqrt(k) points of that alone. Use 32 when selecting among many checkpoints: with 8,
+  the best of 31 was mostly luck.
 
 ## What gets trained
 
@@ -342,6 +345,37 @@ in parallel, each run took about 9 minutes, three at once.
 - **So the binding limit is the signal, not the step size.** The next levers act on it: many
   more validation seeds (32 cost about two rounds of the parallel evaluation), or Jolt reach as
   the training signal itself rather than only the selector.
+
+**32 validation seeds** (now the test's default; `P8B_SELECT_VAL`). A 32-seed score carries about
+half a point of the plant's chaos. The 2e-4 run took about 10 minutes, the 1e-4 run 17.
+
+| Peak lr, steps, every | Validation seeds | Point mass: step, held-out | Dynamic: step, held-out | Dynamic - point mass | Dynamic - seed (51.7%) |
+|---|---|---|---|---|---|
+| 2e-4, 300, 30 | 8 | 120, 50.1% | 60, 52.7% | +2.6 [+0.3, +4.7] | +1.0 [-1.2, +3.4] |
+| 2e-4, 300, 30 | 32 | 120, 50.1% | 60, 52.7% | +2.6 [+0.3, +4.7] | +1.0 [-1.2, +3.4] |
+| 1e-4, 300, 10 | 8 | 210, 51.1% | 160, 53.5% | +2.4 [+0.3, +4.4] | +1.9 [-0.8, +4.4] |
+| 1e-4, 300, 10 | 32 | 260, 52.0% | 130, 52.3% | +0.3 [-2.2, +3.0] | +0.6 [-1.3, +2.7] |
+
+The validation curves (32 seeds), from the untrained policy's 0.494:
+
+- **2e-4:** point mass flat to step 120 (0.508), then down to 0.33; dynamic up to 0.509 at
+  step 60, then down to about 0.42.
+- **1e-4:** point mass creeps up to 0.50-0.516 and holds; dynamic rises to 0.521 at step 130,
+  then falls to 0.485 by step 300.
+
+**Read it carefully.**
+
+- **Training's real effect is small.** With the noise down, the curves are smooth and rise only
+  1.4 to 2.7 points on validation at their best. Held out, that is +0.3 to +0.6 against the seed
+  at 1e-4.
+- **The 8-seed 1e-4 lead was mostly luck.** Its dynamic policy led the seed by +1.9; with 32
+  seeds the chosen checkpoint leads by +0.6.
+- **The dynamic-over-point-mass gap is about damage.** It holds at 2e-4 (+2.6), where training
+  hurts the point-mass policy more, and vanishes at 1e-4 (+0.3), where neither is hurt.
+- **So the training loss moves Jolt reach by about a point at most.** Selection stops it from
+  hurting, but cannot add what training does not find. The next lever is the signal: Jolt reach
+  as the training objective (for example a zeroth-order fine-tune of the selected policy on
+  `reach_on_plant`), or a loss closer to it.
 
 Not yet:
 - a trained policy that beats the seed on Jolt outside the CI;

@@ -329,9 +329,14 @@ P4 adds three things to measure and contain the drift:
         0.479), and the extra checkpoints mostly add selection noise.
       - The dynamic training beats the point-mass one in all four settings (+1.1 to +2.6),
         outside the CI in two.
-    - Next: a trained policy that beats the seed outside the CI. The step size is not the limit;
-      the signal is. Levers: many more validation seeds, or Jolt reach as the training signal
-      itself.
+    - 32 validation seeds (now the default): at 1e-4 every 10, the held-out leads shrink to
+      +0.6 [-1.3, +2.7] over the seed and +0.3 [-2.2, +3.0] over the point-mass policy; the
+      8-seed +1.9 was mostly selection luck. At 2e-4 every 30 the same checkpoints win.
+      Training's real effect on Jolt reach is about a point at most.
+    - Next: a trained policy that beats the seed outside the CI. Neither the step size nor the
+      selection noise is the limit; the training signal is. Lever: Jolt reach as the training
+      objective (a zeroth-order fine-tune of the selected policy on `reach_on_plant`), or a loss
+      closer to it.
   - P8c is not started.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
