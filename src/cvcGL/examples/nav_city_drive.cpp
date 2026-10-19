@@ -55,6 +55,7 @@
 #include <cvc/nav/coef_train.h> // city_scene
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/plant_host.h>
 #ifdef __EMSCRIPTEN__
 #include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
 #include <emscripten.h>
@@ -290,6 +291,7 @@ int main(int argc, char **argv) {
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
+  std::string plantName = navdemo::default_plant(); // what the vehicles drive on (--plant)
   bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false,
        lite = false, lod = false, noLod = false, buildingLod = false, noPip = false;
   int followInit = -1; // agent index to follow at start (-1 = free camera)
@@ -346,7 +348,10 @@ int main(int argc, char **argv) {
       "vehicle", po::value<std::string>(&vehicle),
       "vehicle model .glb per agent (default: <bundle>/../../shared/Humvee.glb; else a flat "
       "arrow)")("follow", po::value<int>(&followInit)->default_value(-1),
-                "agent index to CHASE from start with the cinematic Track camera (-1 = free)");
+                "agent index to CHASE from start with the cinematic Track camera (-1 = free)")(
+      "plant", po::value<std::string>(&plantName)->default_value(plantName),
+      "what the vehicles drive on: kinematic (nav's bicycle), or a vehicle preset on the Jolt "
+      "physics plant at its real size and limits (humvee, roboracer)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -1647,6 +1652,15 @@ int main(int argc, char **argv) {
   // persistent workers instead of spawning threads per call — and, sized to leave
   // the render thread a core, stop the sim from starving it.
   world.set_thread_pool(&app.computePool());
+  // The plant (--plant): each agent a physics vehicle that plans with its own limits and size.
+  // Declared before the sim thread, which is joined before the plant goes.
+  cvc::physics::plant_host plantHost(navdemo::plant_options());
+  try {
+    std::printf("nav_city_drive: driving %s\n", plantHost.use(world, plantName).c_str());
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "nav_city_drive: --plant: %s\n", e.what());
+    return 2;
+  }
   // World time is the app's world clock at the suite quantum (0.01 s). The frame loop is its one
   // driver, through a binding, so sim.speed / sim.paused / sim.mode / sim.step steer it from this
   // window, a remote panel or a script alike; the navigator follows it, one step every
@@ -1701,6 +1715,7 @@ int main(int argc, char **argv) {
   bool uiRestart = false, ui2D = ortho;
   int uiAgents = N;
   std::string uiBelief = belief;
+  std::string uiPlant = plantHost.vehicle();
   bool uiFog = fogOn, uiTrails = true, uiGoals = true, uiFlags = true;
   float uiTrailW = 1.5f;                              // live path (trail) line width
   bool uiSeparate = true;                             // inter-agent avoidance on/off (live)
@@ -1779,6 +1794,15 @@ int main(int argc, char **argv) {
       ImGui::SetTooltip(
           "Off = every belief plane equals the known map, so belief modes only recolour.");
     {
+      const char *plants[] = {"kinematic", "humvee", "roboracer"};
+      int pi = uiPlant == "roboracer" ? 2 : (uiPlant == "humvee" ? 1 : 0);
+      if (ImGui::Combo("plant", &pi, plants, 3))
+        uiPlant = plants[pi];
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("What the vehicles drive on: nav's kinematic bicycle, or a vehicle on "
+                          "the Jolt physics plant at its real size and limits.");
+    }
+    {
       // World seconds per wall second, written to sim.speed (the clock reads it next frame).
       float sp = static_cast<float>(clock.scale());
       if (ImGui::SliderFloat("world speed", &sp, 0.25f, 16.0f, "%.2fx",
@@ -1851,7 +1875,7 @@ int main(int argc, char **argv) {
     ImGui::Separator();
     if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
       uiRestart = true;
-    ImGui::TextDisabled("agents / belief / fog need a restart");
+    ImGui::TextDisabled("agents / belief / fog / plant need a restart");
     ImGui::End();
 
     // ---- Draggable minimap (PiP) + target dragging -------------------------
@@ -2141,6 +2165,11 @@ int main(int argc, char **argv) {
       fogOn = uiFog;
       *worldPtr = std::move(*newWorld);
       world.set_thread_pool(&app.computePool()); // move-assign cleared it; re-inject
+      try {
+        plantHost.use(world, uiPlant); // the fresh world's agents on the chosen plant
+      } catch (const std::exception &e) {
+        std::fprintf(stderr, "nav_city_drive: plant: %s\n", e.what());
+      }
       N = world.size();
       M = world.planes();
       assign_targets(world); // re-bin agents to the 16 targets + recolour by target
@@ -2214,8 +2243,8 @@ int main(int argc, char **argv) {
 #else
       navFollow.reset(clock.tick());
 #endif
-      std::printf("nav_city_drive: restarted (%d agents, belief=%s, fog=%s, seed=%u)\n", N,
-                  belief.c_str(), fogOn ? "on" : "off", simSeed);
+      std::printf("nav_city_drive: restarted (%d agents, belief=%s, fog=%s, seed=%u, plant=%s)\n",
+                  N, belief.c_str(), fogOn ? "on" : "off", simSeed, plantHost.driving().c_str());
     }
 #endif
 
@@ -2390,8 +2419,11 @@ int main(int argc, char **argv) {
       char st[200];
       std::snprintf(st, sizeof st,
                     "%d vehicles · %d convoys · belief %s (M=%d) · learned CoefMLP · fog %s · "
-                    "arrivals %ld/%d",
-                    N, kTargets, belief.c_str(), M, fogOn ? "on" : "off", arrived, N);
+                    "%s · arrivals %ld/%d",
+                    N, kTargets, belief.c_str(), M, fogOn ? "on" : "off",
+                    plantHost.driving() == "kinematic" ? "kinematic"
+                                                       : (plantHost.driving() + " on Jolt").c_str(),
+                    arrived, N);
       status.setText(st);
     }
 

@@ -61,6 +61,15 @@ struct plant_limits {
   float steer_rate = 0.0f; // rad/s: the actuator's slew limit
   float a_brake = 0.0f;    // normalized / s^2: the deceleration the vehicle can achieve
   float latency = 0.0f;    // s: from a command to the vehicle's response, beyond the tick
+  // The vehicle's own envelope, in place of veh_params' a_max, vmax and a_lat_max.
+  float a_max = 0.0f; // normalized / s^2: the acceleration the drive plans with
+  float vmax = 0.0f;  // normalized / s: the top speed
+  float a_lat = 0.0f; // normalized / s^2: the lateral acceleration it corners at
+  // The vehicle's size, in place of nav's footprint: half its width, and how far its body
+  // reaches ahead of and behind the rear axle (normalized). With a width, the drive covers the
+  // body with sim_world::kPlantDiscs footprint discs (veh_params' multi-disc footprint).
+  float half_width = 0.0f;
+  float front = 0.0f, rear = 0.0f;
 };
 
 // One agent's tick, compared against nav's kinematic bicycle (doc 31 D14's per-tick drift):

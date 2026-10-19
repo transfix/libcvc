@@ -69,6 +69,18 @@ struct nav_plant_options {
   int drift_nsub = 0;
   // How the measured tire use and load transfer modulate the drive (H4); off by default.
   cvc::nav::plant_modulation modulation;
+  // The navigator plans with each vehicle's own envelope and size (limits()):
+  //   - its acceleration, accel_margin x max_accel;
+  //   - its top speed, max_speed (nav's vmax for a vehicle without one);
+  //   - its cornering, lateral_g in g, but at most tip_margin of its static stability factor
+  //     (half its track over its centre of gravity's height) in g;
+  //   - its size: the chassis box and the wheels, from the rear axle.
+  // false: nav's own a_max, vmax, a_lat_max and footprint (the steering, braking and latency
+  // limits come from the vehicle either way).
+  bool plan_with_vehicle = true;
+  double accel_margin = 0.8;
+  double lateral_g = 0.5;
+  double tip_margin = 0.8;
 };
 
 class nav_plant final : public cvc::nav::vehicle_plant {
@@ -141,6 +153,10 @@ public:
   void set_latency(double s);          // >= 0
   void set_brake_margin(double share); // (0, 1]
   void set_drift_nsub(int n);          // >= 0
+  void set_plan_with_vehicle(bool on);
+  void set_accel_margin(double share); // (0, 1]
+  void set_lateral_g(double g);        // (0, 2]
+  void set_tip_margin(double share);   // (0, 1]
   // Onsets >= 0, gains >= 0.
   void set_modulation(const cvc::nav::plant_modulation &m);
 
@@ -148,6 +164,7 @@ public:
   // The live settings, read by pull() and seeded with the plant's values when unset (an
   // invalid value is ignored):
   //   <prefix>.nav_plant.{latency, brake_margin, drift_nsub}
+  //   <prefix>.nav_plant.plan.{with_vehicle, accel_margin, lateral_g, tip_margin}
   //   <prefix>.nav_plant.modulation.{tire_onset, tire_gain, tip_onset, tip_gain}
   // and the rest, which are fixed, written by publish():
   //   <prefix>.nav_plant.settings.{step_world, ground_z, spawn_height, metres_per_world_unit,

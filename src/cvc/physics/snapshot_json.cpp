@@ -317,6 +317,7 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("shift_down_rpm_light").number(d.shift_down_rpm_light);
   w.key("max_accel").number(d.max_accel);
   w.key("max_decel").number(d.max_decel);
+  w.key("max_speed").number(d.max_speed);
   w.key("drag_coefficient").number(d.drag_coefficient);
   w.key("frontal_area").number(d.frontal_area);
   w.key("air_density").number(d.air_density);

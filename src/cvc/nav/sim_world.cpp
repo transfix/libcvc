@@ -585,6 +585,20 @@ void sim_world::step(int num_threads) {
       pdrive.hard_scale = pl_hard_scale_.data();
     vplant.plant = &pdrive;
     vplant.L_col = pl_L_.data();
+    // Each vehicle's own envelope and size (plant_limits), where its plant gives them.
+    if (pl_has_a_max_)
+      vplant.a_max_col = pl_a_max_.data();
+    if (pl_has_vmax_)
+      vplant.vmax_col = pl_vmax_.data();
+    if (pl_has_a_lat_)
+      pdrive.a_lat = pl_a_lat_.data();
+    if (pl_fp_) {
+      vplant.n_body = kPlantDiscs;
+      vplant.body_offsets = nullptr;
+      vplant.body_offsets_col = pl_body_off_.data();
+      vplant.body_rr_col = pl_body_rr_.data();
+      vplant.body_gain = 1.0f / static_cast<float>(kPlantDiscs);
+    }
   }
   const veh_params &vv = own_veh ? vplant : cfg_.veh;
   if (mat_on_) {
@@ -629,7 +643,7 @@ void sim_world::step(int num_threads) {
     for (int i = 0; i < n_; ++i) {
       if (parked_[i]) {
         // Parked: brake to a stop within the tick, at most at a_max, then hold.
-        const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
+        const float a_max_i = pl_a_max_[i];
         const float sp0 = pl_start_[i].speed;
         pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_max_i), a_max_i);
       }
@@ -640,7 +654,7 @@ void sim_world::step(int num_threads) {
     for (int i = 0; i < n_; ++i) {
       const plant_state s1 = plant_->state(i);
       const plant_state &s0 = pl_start_[i];
-      const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+      const float vmax_i = pl_vmax_[i];
       const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
       const plant_state ref = kinematic_step(s0, pl_steer_cmd_[i], pl_accel_cmd_[i], pl_L_[i], dt,
                                              ref_nsub, sp_min, vmax_i);
@@ -741,7 +755,12 @@ void sim_world::step(int num_threads) {
     for (int i = 0; i < n_; ++i) {
       const float ox = o_[2 * i], oy = o_[2 * i + 1];
       bool hit = infeasible_at(ox, oy);
-      if (cfg_.veh.n_body > 0 && cfg_.veh.body_offsets)
+      if (plant_ && pl_fp_)
+        for (int b = 0; b < kPlantDiscs && !hit; ++b) {
+          const float off = pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i + b];
+          hit = infeasible_at(ox + off * std::cos(th_[i]), oy + off * std::sin(th_[i]));
+        }
+      else if (cfg_.veh.n_body > 0 && cfg_.veh.body_offsets)
         for (int b = 0; b < cfg_.veh.n_body && !hit; ++b) {
           const float off = cfg_.veh.body_offsets[b];
           hit = infeasible_at(ox + off * std::cos(th_[i]), oy + off * std::sin(th_[i]));
@@ -1020,21 +1039,38 @@ bool sim_world::infeasible_at(float onx, float ony) const {
 
 plant_kind sim_world::plant_type() const { return plant_ ? plant_->kind() : plant_kind::kinematic; }
 
+bool sim_world::plant_plan_of(int i, plant_plan &out) const {
+  if (!plant_ || i < 0 || i >= n_ || pl_a_max_.size() != static_cast<std::size_t>(n_))
+    return false;
+  out.a_max = pl_a_max_[i];
+  out.vmax = pl_vmax_[i];
+  out.a_lat = pl_a_lat_[i];
+  out.body_rr = pl_body_rr_[i];
+  for (int b = 0; b < kPlantDiscs; ++b)
+    out.body_offsets[b] = pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i + b];
+  out.footprint = pl_fp_;
+  return true;
+}
+
 void sim_world::set_plant(vehicle_plant *p) {
   plant_ = p;
   if (!p) {
     for (std::vector<float> *v : {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_,
-                                  &pl_L_, &pl_steer_cmd_, &pl_accel_cmd_, &pl_v_stop_})
+                                  &pl_L_, &pl_steer_cmd_, &pl_accel_cmd_, &pl_v_stop_, &pl_a_max_,
+                                  &pl_vmax_, &pl_a_lat_, &pl_body_rr_, &pl_body_off_})
       v->clear();
     pl_start_.clear();
     pl_drift_.clear();
     pl_max_steer_ = 0.0f;
+    pl_has_a_max_ = pl_has_vmax_ = pl_has_a_lat_ = pl_fp_ = false;
     return;
   }
   const std::size_t n = static_cast<std::size_t>(n_);
-  for (std::vector<float> *v : {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_, &pl_L_,
-                                &pl_steer_cmd_, &pl_accel_cmd_, &pl_v_stop_})
+  for (std::vector<float> *v :
+       {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_, &pl_L_, &pl_steer_cmd_,
+        &pl_accel_cmd_, &pl_v_stop_, &pl_a_max_, &pl_vmax_, &pl_a_lat_, &pl_body_rr_})
     v->assign(n, 0.0f);
+  pl_body_off_.assign(n * kPlantDiscs, 0.0f);
   pl_gamma_scale_.assign(n, 1.0f);
   pl_hard_scale_.assign(n, 1.0f);
   pl_start_.assign(n, plant_state{});
@@ -1054,6 +1090,7 @@ void sim_world::set_plant(vehicle_plant *p) {
 void sim_world::plant_read() {
   pl_mod_ = plant_->modulation();
   float max_steer = 0.0f;
+  pl_has_a_max_ = pl_has_vmax_ = pl_has_a_lat_ = pl_fp_ = false;
   for (int i = 0; i < n_; ++i) {
     const plant_state s = plant_->state(i);
     o_[2 * i] = s.x;
@@ -1068,6 +1105,33 @@ void sim_world::plant_read() {
     pl_latency_[i] = l.latency;
     pl_a_brake_[i] = l.a_brake;
     pl_steer_rate_[i] = l.steer_rate;
+    // The vehicle's own envelope, or nav's (cfg.veh, and its per-agent columns).
+    const float a_max_nav = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
+    const float vmax_nav = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+    pl_a_max_[i] = l.a_max > 0.0f ? l.a_max : a_max_nav;
+    pl_vmax_[i] = l.vmax > 0.0f ? l.vmax : vmax_nav;
+    pl_a_lat_[i] = l.a_lat > 0.0f ? l.a_lat : cfg_.veh.a_lat_max;
+    pl_has_a_max_ = pl_has_a_max_ || l.a_max > 0.0f;
+    pl_has_vmax_ = pl_has_vmax_ || l.vmax > 0.0f;
+    pl_has_a_lat_ = pl_has_a_lat_ || l.a_lat > 0.0f;
+    // Its size: kPlantDiscs discs from its tail to its nose, inset 0.7 half-widths at the ends
+    // and 1.3 half-widths wide, which cover the body's corners (wider where a long body spaces
+    // them out, so neighbours still overlap). A vehicle without one keeps nav's disc, as
+    // kPlantDiscs coincident discs at the rear axle.
+    float *off = &pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i];
+    if (l.half_width > 0.0f && l.front + l.rear > 0.0f) {
+      const float tail = -l.rear + 0.7f * l.half_width, nose = l.front - 0.7f * l.half_width;
+      const float span = std::max(0.0f, nose - tail);
+      const float step = span / static_cast<float>(kPlantDiscs - 1);
+      pl_body_rr_[i] = std::max(1.3f * l.half_width, 0.55f * step);
+      for (int b = 0; b < kPlantDiscs; ++b)
+        off[b] = nose > tail ? tail + step * static_cast<float>(b) : 0.5f * (l.front - l.rear);
+      pl_fp_ = true;
+    } else {
+      pl_body_rr_[i] = cfg_.veh.rr_col ? cfg_.veh.rr_col[i] : cfg_.veh.rr;
+      for (int b = 0; b < kPlantDiscs; ++b)
+        off[b] = 0.0f;
+    }
     pl_gamma_scale_[i] = 1.0f +
                          pl_mod_.tire_gain * std::max(0.0f, s.tire_use - pl_mod_.tire_onset) +
                          pl_mod_.tip_gain * std::max(0.0f, s.load_transfer - pl_mod_.tip_onset);
