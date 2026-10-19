@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/dyn_bike.h>
+#include <cvc/nav/ext_rollout.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <filesystem>
@@ -878,4 +879,267 @@ TEST(DiffExtForce, GradientsMatchFiniteDifferences) {
   EXPECT_LT(rel_f, 5e-2);
   EXPECT_LT(rel_d, 5e-2);
   EXPECT_LT(rel_o, 5e-2);
+}
+
+// ── The trajectory helper: bike_rollout_ext / bike_rollout_ext_bwd (ext_rollout.h) ──
+
+namespace {
+
+// F = A o + b + c, with J = A: a force that depends on where the agent is, plus an offset c
+// whose gradient is the sum of dL/dF_ext over the steps.
+struct affine_force {
+  float A[4] = {0.8f, -0.3f, 0.4f, 0.6f};
+  float b[2] = {0.1f, -0.2f};
+  float c[2] = {0.0f, 0.0f};
+};
+void affine_sample(void *user, int, float ox, float oy, float *f, float *J) {
+  const affine_force &a = *static_cast<const affine_force *>(user);
+  f[0] = a.A[0] * ox + a.A[1] * oy + a.b[0] + a.c[0];
+  f[1] = a.A[2] * ox + a.A[3] * oy + a.b[1] + a.c[1];
+  for (int k = 0; k < 4; ++k)
+    J[k] = a.A[k];
+}
+
+} // namespace
+
+// The recorded trajectory is bike_step's with the force sampled every `hold` steps and held, and
+// a null force is the plain rollout.
+TEST(DiffExtRollout, TrajectoryIsTheStepsAndTheirForces) {
+  const std::unique_ptr<city> c = make_city();
+  const int T = 20;
+  for (const ext_case &e : ext_cases(*c, 16)) {
+    for (const int hold : {1, 3}) {
+      affine_force af;
+      diff::bike_ext_fn fn;
+      fn.sample = affine_sample;
+      fn.user = &af;
+      fn.hold = hold;
+      diff::bike_tape tape;
+      diff::bike_rollout_ext(c->F, c->v, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, 0.6f, 1.8f, 0.9f, T,
+                             fn, tape);
+      ASSERT_EQ(tape.state.size(), static_cast<std::size_t>(4 * (T + 1)));
+      float s[4] = {e.ox, e.oy, e.th, e.sp};
+      diff::ext_in x;
+      for (int t = 0; t < T; ++t) {
+        if (t % hold == 0) {
+          float J[4];
+          float F[2];
+          affine_sample(&af, t, s[0], s[1], F, J);
+          x.fx = F[0];
+          x.fy = F[1];
+        }
+        float s1[4];
+        diff::bike_step(c->F, s[0], s[1], s[2], s[3], e.gx, e.gy, 0.6f, 1.8f, 0.9f, c->v, s1[0],
+                        s1[1], s1[2], s1[3], &x);
+        for (int k = 0; k < 4; ++k) {
+          EXPECT_EQ(tape.state[4 * (t + 1) + k], s1[k]);
+          s[k] = s1[k];
+        }
+        EXPECT_EQ(tape.sampled_at[t], t - t % hold);
+      }
+    }
+    // No force: the plain rollout.
+    diff::bike_ext_fn none;
+    diff::bike_tape tape;
+    diff::bike_rollout_ext(c->F, c->v, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, 0.6f, 1.8f, 0.9f, T,
+                           none, tape);
+    float s[4] = {e.ox, e.oy, e.th, e.sp};
+    for (int t = 0; t < T; ++t) {
+      float s1[4];
+      diff::bike_step(c->F, s[0], s[1], s[2], s[3], e.gx, e.gy, 0.6f, 1.8f, 0.9f, c->v, s1[0],
+                      s1[1], s1[2], s1[3]);
+      for (int k = 0; k < 4; ++k) {
+        EXPECT_EQ(tape.state[4 * (t + 1) + k], s1[k]);
+        s[k] = s1[k];
+      }
+    }
+  }
+}
+
+// The reverse against central differences over a 10-step trajectory with a position-dependent
+// force, sampled every step and held for 3: dL/d(initial state), dL/dF (through a constant offset
+// added to F at every step) and dL/dbeta at one step, with L = sum_t w_t . state_t.
+TEST(DiffExtRollout, ReverseMatchesFiniteDifferences) {
+  const std::unique_ptr<city> c = make_city();
+  const int T = 10, k_beta = 4;
+  const float eps = 1e-3f, ux = 0.6f, uy = 0.8f;
+  std::vector<float> w(static_cast<std::size_t>(4 * (T + 1)));
+  {
+    std::mt19937 rng(3);
+    std::uniform_real_distribution<float> u(-0.5f, 0.5f);
+    for (float &x : w)
+      x = u(rng);
+  }
+  for (const int hold : {1, 3}) {
+    double num[3] = {0, 0, 0}, den[3] = {0, 0, 0};
+    for (const ext_case &e : ext_cases(*c, 32)) {
+      // A goal 0.8 ahead: the goal spring stays inside the acceleration clamp, so beta has a
+      // gradient (a far goal saturates it), and 10 steps (at most 0.54) never pass the goal,
+      // whose behind branch would flip under the differences.
+      std::vector<float> goal(2 * T), coef(3 * T);
+      for (int t = 0; t < T; ++t) {
+        goal[2 * t] = e.ox + 0.8f * std::cos(e.th);
+        goal[2 * t + 1] = e.oy + 0.8f * std::sin(e.th);
+        coef[3 * t] = 0.6f;
+        coef[3 * t + 1] = 1.8f;
+        coef[3 * t + 2] = 0.9f;
+      }
+      const auto loss = [&](float ox, float oy, float cx, float cy, const std::vector<float> &cf) {
+        affine_force af;
+        af.c[0] = cx;
+        af.c[1] = cy;
+        diff::bike_ext_fn fn;
+        fn.sample = affine_sample;
+        fn.user = &af;
+        fn.hold = hold;
+        diff::bike_tape tape;
+        diff::bike_rollout_ext(c->F, c->v, ox, oy, e.th, e.sp, goal.data(), cf.data(), T, fn, tape);
+        double acc = 0.0;
+        for (std::size_t i = 0; i < w.size(); ++i)
+          acc += static_cast<double>(w[i]) * tape.state[i];
+        return acc;
+      };
+      affine_force af;
+      diff::bike_ext_fn fn;
+      fn.sample = affine_sample;
+      fn.user = &af;
+      fn.hold = hold;
+      diff::bike_tape tape;
+      diff::bike_rollout_ext(c->F, c->v, e.ox, e.oy, e.th, e.sp, goal.data(), coef.data(), T, fn,
+                             tape);
+      std::vector<float> g_fext(2 * T), g_coef(3 * T);
+      float g_init[4];
+      diff::bike_rollout_ext_bwd(c->F, c->v, tape, goal.data(), coef.data(), w.data(),
+                                 g_fext.data(), g_coef.data(), g_init);
+      // dL/d(initial position) along (ux, uy).
+      const double fd0 = (loss(e.ox + eps * ux, e.oy + eps * uy, 0, 0, coef) -
+                          loss(e.ox - eps * ux, e.oy - eps * uy, 0, 0, coef)) /
+                         (2.0 * eps);
+      num[0] += std::fabs(g_init[0] * ux + g_init[1] * uy - fd0);
+      den[0] += std::fabs(fd0);
+      // dL/dc: the sum of dL/dF_ext over the steps.
+      double gc = 0.0;
+      for (int t = 0; t < T; ++t)
+        gc += g_fext[2 * t] * ux + g_fext[2 * t + 1] * uy;
+      const double fdc = (loss(e.ox, e.oy, eps * ux, eps * uy, coef) -
+                          loss(e.ox, e.oy, -eps * ux, -eps * uy, coef)) /
+                         (2.0 * eps);
+      num[1] += std::fabs(gc - fdc);
+      den[1] += std::fabs(fdc);
+      // dL/dbeta at one step.
+      std::vector<float> cp = coef, cm = coef;
+      cp[3 * k_beta + 1] += eps;
+      cm[3 * k_beta + 1] -= eps;
+      const double fdb = (loss(e.ox, e.oy, 0, 0, cp) - loss(e.ox, e.oy, 0, 0, cm)) / (2.0 * eps);
+      num[2] += std::fabs(g_coef[3 * k_beta + 1] - fdb);
+      den[2] += std::fabs(fdb);
+    }
+    std::printf("  hold %d, %d steps: dL/dinit %.2e, dL/dF %.2e, dL/dbeta %.2e (relative to "
+                "central differences)\n",
+                hold, T, num[0] / den[0], num[1] / den[1], num[2] / den[2]);
+    for (int k = 0; k < 3; ++k) {
+      EXPECT_GT(den[k], 0.0) << "check " << k << " has no gradient to compare";
+      EXPECT_LT(num[k] / den[k], 5e-2) << "check " << k << ", hold " << hold;
+    }
+  }
+}
+
+// The dynamic twin, dyn_rollout_ext: its trajectory is dyn_bike_step's with the held force, and
+// its reverse matches central differences (dL/d initial position and dL/dF through an offset).
+TEST(DiffExtRollout, TheDynamicTwinMatchesItsStepsAndDifferences) {
+  const std::unique_ptr<city> c = make_city();
+  const dyn_bike_params p =
+      cvc::physics::nav_plant::dyn_bike_params_at(cvc::physics::vehicle_desc::roboracer(), c->v.L);
+  const int T = 10;
+  // 3e-4, not the kinematic checks' 1e-3: at 1e-3 two of the 32 held-force trajectories straddle
+  // a kink in the dynamic plant (a clamp or governor switch) and the difference jumps, while the
+  // reverse agrees with the 3e-4 difference on every agent.
+  const float eps = 3e-4f, ux = 0.6f, uy = 0.8f;
+  std::vector<dyn_state<float>> w(static_cast<std::size_t>(T + 1));
+  {
+    std::mt19937 rng(4);
+    std::uniform_real_distribution<float> u(-0.5f, 0.5f);
+    for (dyn_state<float> &x : w)
+      for (int k = 0; k < dyn_state<float>::size; ++k)
+        x[k] = u(rng);
+  }
+  for (const int hold : {1, 3}) {
+    double num[2] = {0, 0}, den[2] = {0, 0};
+    for (const ext_case &e : ext_cases(*c, 32)) {
+      std::vector<float> goal(2 * T), coef(3 * T);
+      for (int t = 0; t < T; ++t) {
+        goal[2 * t] = e.ox + 0.8f * std::cos(e.th);
+        goal[2 * t + 1] = e.oy + 0.8f * std::sin(e.th);
+        coef[3 * t] = 0.6f;
+        coef[3 * t + 1] = 1.8f;
+        coef[3 * t + 2] = 0.9f;
+      }
+      const auto run = [&](float ox, float oy, float cx, float cy, diff::dyn_tape &tape) {
+        affine_force af;
+        af.c[0] = cx;
+        af.c[1] = cy;
+        diff::bike_ext_fn fn;
+        fn.sample = affine_sample;
+        fn.user = &af;
+        fn.hold = hold;
+        dyn_state<float> s0{};
+        s0.x = ox;
+        s0.y = oy;
+        s0.psi = e.th;
+        s0.vx = e.sp;
+        diff::dyn_rollout_ext(c->F, c->v, p, s0, goal.data(), coef.data(), T, fn, tape);
+        double acc = 0.0;
+        for (int t = 0; t <= T; ++t)
+          for (int k = 0; k < dyn_state<float>::size; ++k)
+            acc += static_cast<double>(w[t][k]) * tape.state[t][k];
+        return acc;
+      };
+      diff::dyn_tape tape, tp, tm;
+      run(e.ox, e.oy, 0, 0, tape);
+      // The trajectory is the steps with the held force.
+      {
+        affine_force af;
+        dyn_state<float> s = tape.state[0];
+        diff::ext_in x;
+        for (int t = 0; t < T; ++t) {
+          if (t % hold == 0) {
+            float F[2], J[4];
+            affine_sample(&af, t, s.x, s.y, F, J);
+            x.fx = F[0];
+            x.fy = F[1];
+          }
+          dyn_state<float> s1;
+          diff::dyn_bike_step(c->F, s, goal[2 * t], goal[2 * t + 1], 0.6f, 1.8f, 0.9f, c->v, p,
+                              0.0f, s1, &x);
+          for (int k = 0; k < dyn_state<float>::size; ++k)
+            EXPECT_EQ(tape.state[t + 1][k], s1[k]);
+          s = s1;
+        }
+      }
+      std::vector<float> g_fext(2 * T);
+      dyn_state<float> g_init;
+      diff::dyn_rollout_ext_bwd(c->F, c->v, p, tape, goal.data(), coef.data(), w.data(),
+                                g_fext.data(), nullptr, &g_init);
+      const double fd0 = (run(e.ox + eps * ux, e.oy + eps * uy, 0, 0, tp) -
+                          run(e.ox - eps * ux, e.oy - eps * uy, 0, 0, tm)) /
+                         (2.0 * eps);
+      num[0] += std::fabs(g_init.x * ux + g_init.y * uy - fd0);
+      den[0] += std::fabs(fd0);
+      double gc = 0.0;
+      for (int t = 0; t < T; ++t)
+        gc += g_fext[2 * t] * ux + g_fext[2 * t + 1] * uy;
+      const double fdc =
+          (run(e.ox, e.oy, eps * ux, eps * uy, tp) - run(e.ox, e.oy, -eps * ux, -eps * uy, tm)) /
+          (2.0 * eps);
+      num[1] += std::fabs(gc - fdc);
+      den[1] += std::fabs(fdc);
+    }
+    std::printf("  dynamic, hold %d, %d steps: dL/dinit %.2e, dL/dF %.2e (relative to central "
+                "differences)\n",
+                hold, T, num[0] / den[0], num[1] / den[1]);
+    for (int k = 0; k < 2; ++k) {
+      EXPECT_GT(den[k], 0.0);
+      EXPECT_LT(num[k] / den[k], 5e-2) << "check " << k << ", hold " << hold;
+    }
+  }
 }
