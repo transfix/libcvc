@@ -293,7 +293,13 @@ P4 adds three things to measure and contain the drift:
     until they first landed. The second: libm's tan, atan, tanh, expm1, pow, sin, cos, atan2 and
     asin, which differ by an ULP between libms, were replaced by `det_math.h` in everything that
     feeds the hash.
-- **P8** is in progress (P8b's first item merged); P8a and P8c are not started.
+- **P8** is in progress.
+  - P8b's first item is merged.
+  - P8a, the dynamic vehicle, is done: `dyn_bike_step` and `bike_control` (docs/NAV_TRAINING.md).
+    It passes its gates: gradient checks, the kinematic limit against `bike_step`, the skid
+    modes and the stopping envelope. GRL-SNAM's torch twin matches its goldens to 1e-9
+    (CVC-Lab/GRL-SNAM#121).
+  - Next: `rollout_kind::dynamic` in both trainers (P8b). P8c is not started.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle
@@ -315,9 +321,14 @@ P4 adds three things to measure and contain the drift:
     turn a 6.7 m circle out of it. That happens with the plan off too.
   - `nav_material_demo` shows the same gap. The material layer keeps the bicycle out of the lake,
     but the Humvee enters it 65 times.
-  - Next, before the default flips:
-    - routes and the reactive drive that allow for the vehicle's turning circle (multi-point
-      turns);
-    - training through the vehicle (P8).
+  - Vehicle routes (R1-R3):
+    - `plan_vehicle_route`, a Hybrid A* over the vehicle's turning circle, body and reverse
+      gear, with multi-point turns;
+    - `route_follower` drives them: the trained drive on the last forward leg, pure pursuit
+      on manoeuvres;
+    - `nav_finale` uses them on a plant. Austin's 8 Humvees drive 5387 m in 900 frames (1903 m
+      on A* routes) and none wedges (7 of 8 did).
+  - Next, before the default flips: training through the vehicle (P8), and the material layer
+    on the vehicle.
   - Training stays differentiable: its surrogate's parameters should come from the
     `vehicle_desc` until P8a's `dyn_bike_step` exists.

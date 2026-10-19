@@ -544,6 +544,16 @@ void sim_world::step(int num_threads) {
 
   lap(accGate);
 
+  // override_command on the kinematic arm: the agents' start of tick, to integrate from after
+  // the drive has moved them its own way.
+  std::vector<plant_state> ov_start;
+  if (ov_any_ && !plant_) {
+    ov_start.resize(static_cast<std::size_t>(n_));
+    for (int i = 0; i < n_; ++i)
+      if (ov_on_[i])
+        ov_start[i] = {o_[2 * i], o_[2 * i + 1], th_[i], sp_[i]};
+  }
+
   // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
   // minclr_ is a member (not a discarded local) so min_clearance() can expose it.
   minclr_.resize(n_);
@@ -637,11 +647,38 @@ void sim_world::step(int num_threads) {
                vv, minclr_.data(), num_threads, pool_, telp);
   }
 
+  // ── override_command: the caller's command in place of the drive's, for this tick ──
+  if (ov_any_) {
+    for (int i = 0; i < n_; ++i) {
+      if (!ov_on_[i])
+        continue;
+      const float L = cfg_.veh.L_col ? cfg_.veh.L_col[i] : cfg_.veh.L;
+      float lock = cfg_.veh.delta_max;
+      if (plant_ && pl_max_steer_ > 0.0f)
+        lock = std::min(lock, pl_max_steer_);
+      const float steer = std::min(std::max(ov_steer_[i], -lock), lock);
+      if (plant_) {
+        pl_steer_cmd_[i] = steer;
+        pl_accel_cmd_[i] = ov_accel_[i];
+        parked_[i] = 0;
+      } else {
+        const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+        const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
+        const plant_state s = kinematic_step(ov_start[i], steer, ov_accel_[i], L, cfg_.veh.dt,
+                                             std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
+        o_[2 * i] = s.x;
+        o_[2 * i + 1] = s.y;
+        th_[i] = s.heading;
+        sp_[i] = s.speed;
+      }
+    }
+  }
+
   // ── THE PLANT: command, advance one tick, read back, and measure the drift ──
   if (plant_) {
     const float dt = cfg_.veh.dt;
     for (int i = 0; i < n_; ++i) {
-      if (parked_[i]) {
+      if (parked_[i] && !(ov_any_ && ov_on_[i])) {
         // Parked: brake to a stop within the tick, at most at a_max, then hold.
         const float a_max_i = pl_a_max_[i];
         const float sp0 = pl_start_[i].speed;
@@ -778,8 +815,12 @@ void sim_world::step(int num_threads) {
     const float dg = std::sqrt(dx * dx + dy * dy);
     const bool r = dg < cfg_.reach_tol;
     reached_[i] = r ? 1 : 0;
-    if (r && !parked_[i] && active_[i])
+    if (r && !parked_[i] && active_[i] && !(ov_any_ && ov_on_[i]))
       parked_[i] = 1;
+  }
+  if (ov_any_) {
+    std::fill(ov_on_.begin(), ov_on_.end(), 0);
+    ov_any_ = false;
   }
   ++gstep_;
 
@@ -1105,11 +1146,12 @@ void sim_world::plant_read() {
     pl_latency_[i] = l.latency;
     pl_a_brake_[i] = l.a_brake;
     pl_steer_rate_[i] = l.steer_rate;
-    // The vehicle's own envelope, or nav's (cfg.veh, and its per-agent columns).
+    // The vehicle's own envelope, or nav's (cfg.veh, and its per-agent columns). Nav's vmax is a
+    // speed limit too (`nav.vehicle.vmax`), so the top speed is the lower of the two.
     const float a_max_nav = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
     const float vmax_nav = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
     pl_a_max_[i] = l.a_max > 0.0f ? l.a_max : a_max_nav;
-    pl_vmax_[i] = l.vmax > 0.0f ? l.vmax : vmax_nav;
+    pl_vmax_[i] = l.vmax > 0.0f ? std::min(l.vmax, vmax_nav) : vmax_nav;
     pl_a_lat_[i] = l.a_lat > 0.0f ? l.a_lat : cfg_.veh.a_lat_max;
     pl_has_a_max_ = pl_has_a_max_ || l.a_max > 0.0f;
     pl_has_vmax_ = pl_has_vmax_ || l.vmax > 0.0f;
@@ -1302,6 +1344,30 @@ void sim_world::retarget(int i, float gx_n, float gy_n) {
   tracking_[i] = 1;
   reached_[i] = 0;
   parked_[i] = 0;
+}
+
+bool sim_world::set_pose(int i, float x_n, float y_n, float heading, float speed) {
+  if (i < 0 || i >= n_ || plant_)
+    return false;
+  o_[2 * i] = x_n;
+  o_[2 * i + 1] = y_n;
+  th_[i] = heading;
+  sp_[i] = speed;
+  return true;
+}
+
+void sim_world::override_command(int i, float steer, float accel) {
+  if (i < 0 || i >= n_)
+    return;
+  if (static_cast<int>(ov_on_.size()) != n_) {
+    ov_steer_.assign(n_, 0.0f);
+    ov_accel_.assign(n_, 0.0f);
+    ov_on_.assign(n_, 0);
+  }
+  ov_steer_[i] = steer;
+  ov_accel_[i] = accel;
+  ov_on_[i] = 1;
+  ov_any_ = true;
 }
 
 void sim_world::add_obstacle(int r0, int r1, int c0, int c1) {

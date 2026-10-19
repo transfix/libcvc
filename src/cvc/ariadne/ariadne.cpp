@@ -740,11 +740,14 @@ struct Runtime::Impl {
   std::string tick_script_;    // §7.1 on:tick body (woken every frame, coalesced)
   std::string key_script_;     // §4.6 document-level on_key body (keyboard events, via post_input)
   std::string pointer_script_; // §4.6 document-level on_pointer body (mouse events, via post_input)
-  std::unique_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_;
-  int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1;
+  std::string signal_script_;  // document-level on_signal body (signals, via post_signal)
+  std::unique_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_, signal_resident_;
+  int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1,
+      signal_resident_pid_ = -1;
   std::string tick_channel() const { return owner_ + "#tick"; }
   std::string key_channel() const { return owner_ + "#key"; }
   std::string pointer_channel() const { return owner_ + "#pointer"; }
+  std::string signal_channel() const { return owner_ + "#signal"; }
   // Submit ONE long-lived resident wrapping `body` on `channel`, storing its context/pid in the
   // slots (idempotent — no-op if body is empty or a resident is already running). The wrapper is
   // (while t (let ((event (msg-recv "<channel>"))) <body>)): msg-recv parks the process between
@@ -1541,6 +1544,7 @@ void Runtime::Impl::pump_and_sweep_actions() {
   report_killed_resident(tick_resident_pid_, tick_channel());
   report_killed_resident(key_resident_pid_, key_channel());
   report_killed_resident(pointer_resident_pid_, pointer_channel());
+  report_killed_resident(signal_resident_pid_, signal_channel());
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
@@ -1679,6 +1683,33 @@ void Runtime::set_pointer_program(std::string script) {
     m_->pointer_resident_pid_ = -1;
   }
   m_->pointer_script_ = std::move(script);
+}
+
+void Runtime::set_signal_program(std::string script) {
+  if (m_->signal_resident_pid_ >= 0) {
+    m_->app.exec_scheduler().kill(m_->signal_resident_pid_);
+    m_->signal_resident_.reset();
+    m_->signal_resident_pid_ = -1;
+  }
+  m_->signal_script_ = std::move(script);
+}
+
+bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
+
+bool Runtime::post_signal(const std::string &signal, const std::string &source) {
+  if (m_->signal_script_.empty())
+    return false; // no handler: the host applies the signal's default action
+  m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_,
+                      m_->signal_resident_pid_);
+  if (m_->signal_resident_pid_ < 0)
+    return false; // it failed to start (already warned): fall back to the default too
+  namespace se = cvc::state_exec;
+  std::vector<std::pair<std::string, se::value_t>> f;
+  f.emplace_back("kind", se::value_t(std::string("signal")));
+  f.emplace_back("signal", se::value_t(signal));
+  f.emplace_back("source", se::value_t(source));
+  m_->app.exec_scheduler().post_message(m_->signal_channel(), se::make_dict(std::move(f)));
+  return true;
 }
 
 void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<std::string> global,

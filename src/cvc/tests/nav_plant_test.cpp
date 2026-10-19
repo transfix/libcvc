@@ -27,7 +27,9 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_route.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
@@ -38,7 +40,11 @@
 #include <vector>
 
 using namespace cvc::physics;
+using cvc::nav::follower_options;
+using cvc::nav::plan_vehicle_route;
+using cvc::nav::route_vehicle;
 using cvc::nav::sim_world;
+using cvc::nav::vehicle_route;
 
 namespace {
 
@@ -295,9 +301,9 @@ TEST(NavPlant, PlansWithTheVehiclesOwnEnvelope) {
   std::printf("  footprint: %d discs of %.2f m at %.2f, %.2f, %.2f, %.2f m from the rear axle\n",
               sim_world::kPlantDiscs, on.body_rr / kS, on.body_offsets[0] / kS,
               on.body_offsets[1] / kS, on.body_offsets[2] / kS, on.body_offsets[3] / kS);
-  // The plan the drive used is the vehicle's.
+  // The plan the drive used is the vehicle's, but for a top speed capped at nav's 18 m/s.
   EXPECT_NEAR(on.a_max, 0.8 * d.max_accel * kS, 1e-6);
-  EXPECT_NEAR(on.vmax, 24.6 * kS, 1e-6);
+  EXPECT_NEAR(on.vmax, 18.0 * kS, 1e-6);
   EXPECT_NEAR(on.a_lat, 0.5 * kG * kS, 1e-6);
   EXPECT_TRUE(on.footprint);
   EXPECT_FALSE(off.footprint);
@@ -308,7 +314,7 @@ TEST(NavPlant, PlansWithTheVehiclesOwnEnvelope) {
   EXPECT_GE(on.body_rr, half_width * kS - 1e-6);
   // And it drove within the vehicle's envelope, where nav's numbers asked for more.
   EXPECT_LE(acc_on, 0.8 * d.max_accel + 1e-3);
-  EXPECT_LE(v_on, 24.6 + 0.5);
+  EXPECT_LE(v_on, 18.0 + 0.5);
   EXPECT_LE(g_on, 0.55);
   EXPECT_GT(acc_off, 2.0 * acc_on);
   EXPECT_GT(g_off, g_on + 0.2);
@@ -831,4 +837,72 @@ TEST(NavPlant, MeasuredSlipTightensTheDrive) {
   EXPECT_GT(worst[0], 0.7) << "the run worked the tires to their limit";
   EXPECT_LT(mean[1], mean[0]);
   EXPECT_LT(worst[1], worst[0]);
+}
+
+// P9 R2: the Humvee on the Jolt plant facing the end of an 8 m dead end (walls as static boxes),
+// its goal outside behind it. The trained drive alone has no way out: a U-turn needs a 13.4 m
+// circle. A vehicle route (plan_vehicle_route, with the plant's own footprint and turning radius)
+// followed by route_follower backs it out to the goal.
+TEST(NavPlant, AVehicleRouteBacksTheHumveeOutOfADeadEnd) {
+  REQUIRE_JOLT();
+  scene sc;
+  sc.wall(20, -100, 60, -5);   // south of the street (y -4..4)
+  sc.wall(20, 5, 60, 100);     // north of it
+  sc.wall(61, -100, 100, 100); // its end
+  const vehicle_desc d = vehicle_desc::humvee();
+  const auto run = [&](bool route, int &ticks, bool &reversed) {
+    sim_world sim = make_sim(nav_config(d, 8.0, 0.5), sc, 50, 0, 0, 0);
+    sim.set_pose(0, static_cast<float>(50 * kS), 0.0f, 0.0f); // facing the end, before the plant
+    world w(jolt_config());
+    sc.build(w, 0.9);
+    nav_plant plant(w, {d});
+    sim.set_plant(&plant);
+    reversed = false;
+    follower_options fo;
+    vehicle_route r;
+    if (route) {
+      const cvc::nav::plant_limits l = plant.limits(0);
+      sim_world::plant_plan pp;
+      EXPECT_TRUE(sim.plant_plan_of(0, pp));
+      route_vehicle v;
+      v.min_radius = l.wheelbase / kS / std::tan(l.max_steer);
+      v.disc_radius = pp.body_rr / kS;
+      for (const float off : pp.body_offsets)
+        v.disc_offsets.push_back(off / kS);
+      const pose p0 = pose_of(sim);
+      r = plan_vehicle_route(sc.occ.data(), scene::R, scene::C, scene::lo, scene::lo, scene::hi,
+                             scene::hi, v, {p0.x, p0.y, p0.heading, false}, 0.0, 0.0);
+      EXPECT_TRUE(r.reached);
+      std::printf("  the route: %.1f m, %.1f backing up, %d cusps (radius %.2f m, %zu discs of "
+                  "%.2f m)\n",
+                  r.length, r.reverse_length, r.cusps, v.min_radius, v.disc_offsets.size(),
+                  v.disc_radius);
+      fo.wheelbase = l.wheelbase / kS;
+      fo.max_steer = l.max_steer;
+    }
+    cvc::nav::route_follower follow(sim, fo);
+    if (route)
+      follow.set(0, r);
+    for (ticks = 0; ticks < 1500; ++ticks) {
+      if (route) {
+        follow.apply();
+        reversed = reversed || follow.reversing(0);
+      }
+      sim.step();
+      const pose p = pose_of(sim);
+      if (std::hypot(p.x, p.y) < 5.0)
+        break;
+    }
+    const pose p = pose_of(sim);
+    return std::hypot(p.x, p.y);
+  };
+  int t_alone = 0, t_route = 0;
+  bool rev_alone = false, rev_route = false;
+  const double alone = run(false, t_alone, rev_alone);
+  const double routed = run(true, t_route, rev_route);
+  std::printf("  the drive alone: %.1f m from the goal after %d ticks; on the route: %.1f m after "
+              "%d ticks (%.1f s)\n",
+              alone, t_alone, routed, t_route, t_route * 0.06);
+  EXPECT_TRUE(rev_route) << "it backed up";
+  EXPECT_LT(routed, 5.0) << "the route took it out to its goal";
 }

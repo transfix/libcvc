@@ -54,7 +54,9 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/grid_nav.h> // astar / simplify / inflate
+#include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_route.h>
 #include <cvc/physics/plant_host.h>
 #include <filesystem>
 #include <fstream>
@@ -764,6 +766,61 @@ int main(int argc, char **argv) {
         plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1], gx, gy, standoffCells);
   }
 
+  // On a vehicle plant, routes the vehicle can drive replace the A* spine: its turning circle,
+  // its body and its reverse gear (plan_vehicle_route), followed with route_follower (P9 R3). A
+  // vehicle that stops short of its route's end for a few seconds is replanned from where it is.
+  const bool vehicleRoutes = plantHost.plant() != nullptr;
+  cvc::nav::route_vehicle rv;
+  cvc::nav::follower_options fo;
+  if (vehicleRoutes) {
+    const cvc::nav::plant_limits l = plantHost.plant()->limits(0);
+    cvc::nav::sim_world::plant_plan pp;
+    world.plant_plan_of(0, pp);
+    rv.min_radius = l.wheelbase / sc / std::tan(l.max_steer);
+    rv.disc_radius = pp.body_rr / sc;
+    for (const float off : pp.body_offsets)
+      rv.disc_offsets.push_back(off / sc);
+    fo.wheelbase = l.wheelbase / sc;
+    fo.max_steer = l.max_steer;
+  }
+  cvc::nav::route_follower follower(world, fo);
+  std::vector<double> routeGoal(2 * static_cast<std::size_t>(N), 0.0);
+  std::vector<long> stillSince(N, -1);
+  long vehicleReplans = 0;
+  double planMs = 0.0;
+  const auto planVehicle = [&](int i, double gx, double gy) {
+    cvc::nav::route_options ro;
+    ro.max_expansions = 120000; // bounded; an unreached route still leads the right way
+    const auto t0 = std::chrono::steady_clock::now();
+    const cvc::nav::vehicle_route r = cvc::nav::plan_vehicle_route(
+        occ.data(), ny, nx, bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y, rv,
+        {pos[2 * i], pos[2 * i + 1], head[i], false}, gx, gy, ro);
+    planMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    follower.set(i, r);
+    routeGoal[2 * i] = gx;
+    routeGoal[2 * i + 1] = gy;
+    stillSince[i] = -1;
+    Route spine; // the spine shows the vehicle's route
+    for (const cvc::nav::route_pose &p : r.poses)
+      spine.wp.push_back({p.x, p.y});
+    routes[i] = spine;
+    curWp[i] = 0;
+    return r;
+  };
+  if (vehicleRoutes) {
+    int reached = 0, cusps = 0;
+    for (int i = 0; i < N; ++i) {
+      const cvc::nav::vehicle_route r =
+          planVehicle(i, goal[2 * i] / sc + cfg.cx, goal[2 * i + 1] / sc + cfg.cy);
+      reached += r.reached;
+      cusps += r.cusps;
+    }
+    std::printf("nav_finale: vehicle routes (turning radius %.1f m, %zu discs of %.2f m): %d of %d "
+                "reach their goals, %d cusps, %.0f ms\n",
+                rv.min_radius, rv.disc_offsets.size(), rv.disc_radius, reached, N, cusps, planMs);
+  }
+
   while (!view.windowClosed()) {
     double t, dt;
     if (capturing) {
@@ -856,8 +913,19 @@ int main(int argc, char **argv) {
       if (navSteps >= nextReplan) {
         nextReplan = navSteps + replanSteps;
         for (int i = 0; i < N; ++i) {
-          routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1],
-                                 tgt[2 * (i % NT)], tgt[2 * (i % NT) + 1], standoffCells);
+          const double tx = tgt[2 * (i % NT)], ty = tgt[2 * (i % NT) + 1];
+          if (vehicleRoutes) {
+            // A vehicle route only when the target has moved off it or the route is done: a
+            // Hybrid A* per vehicle every replan would cost the frame.
+            if (follower.done(i) || !follower.following(i) ||
+                std::hypot(tx - routeGoal[2 * i], ty - routeGoal[2 * i + 1]) > 0.08 * span) {
+              planVehicle(i, tx, ty);
+              ++vehicleReplans;
+            }
+            continue;
+          }
+          routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1], tx, ty,
+                                 standoffCells);
           curWp[i] = static_cast<std::size_t>(-1); // force a retarget onto the new route
         }
       }
@@ -866,7 +934,7 @@ int main(int argc, char **argv) {
     // Follow the route: aim each vehicle at its current waypoint, advancing on arrival.
     // Retarget ONLY when the waypoint changes — retargeting every frame resets the
     // carrot FSM's escape/tracking state and the vehicle never gets moving.
-    for (int i = 0; i < N; ++i) {
+    for (int i = 0; i < N && !vehicleRoutes; ++i) {
       Route &rt = routes[i];
       const double arr = 0.03 * span;
       while (rt.idx + 1 < rt.wp.size()) {
@@ -885,10 +953,37 @@ int main(int argc, char **argv) {
     }
 
     for (std::uint64_t s = navFollow.take(clock); s > 0; --s) { // the steps that fell due
+      if (vehicleRoutes)
+        follower.apply();
       world.step();
       ++navSteps;
     }
     world.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());
+    if (vehicleRoutes) // a vehicle still for 4 s short of its route's end is replanned from there
+      for (int i = 0; i < N; ++i) {
+        // Moving, or parked where it was going: fine. A route the planner could not finish
+        // (it ends short of the goal) counts as still, and is replanned like a wedged one.
+        const double toGoal =
+            std::hypot(pos[2 * i] - routeGoal[2 * i], pos[2 * i + 1] - routeGoal[2 * i + 1]);
+        if (std::fabs(spd[i]) > 0.3f || toGoal < 2.0 * cfg.reach_tol / sc) {
+          stillSince[i] = -1;
+          continue;
+        }
+        if (stillSince[i] < 0)
+          stillSince[i] = navSteps;
+        else if (navSteps - stillSince[i] > 66) {
+          planVehicle(i, routeGoal[2 * i], routeGoal[2 * i + 1]);
+          ++vehicleReplans;
+        }
+      }
+    if (std::getenv("NAV_DBG") && frame % 20 == 0 && vehicleRoutes) {
+      int finished = 0;
+      for (int i = 0; i < N; ++i)
+        finished += follower.done(i) ? 1 : 0;
+      std::printf("[routes] f%ld v0 leg %d/%d%s, %d finished, %ld replans, %.0f ms planning\n",
+                  frame, follower.leg(0) + 1, follower.legs(0),
+                  follower.reversing(0) ? " backing up" : "", finished, vehicleReplans, planMs);
+    }
     if (std::getenv("NAV_DBG") && frame % 20 == 0)
       std::printf("[dbg] f%ld act2=%d a0=(%.0f,%.0f)->wp%zu/%zu a4=(%.0f,%.0f) spd0=%.3f\n", frame,
                   static_cast<int>(act2now), pos[0], pos[1], routes[0].idx, routes[0].wp.size(),

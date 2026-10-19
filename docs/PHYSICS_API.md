@@ -559,7 +559,8 @@ metric sizes for no vehicle in particular. At Austin's 0.05 per metre, nav's def
 disc, 18 m/s and 30 m/s^2. `limits()` gives `sim_world`:
 
 - the acceleration, `accel_margin` (0.8) x `max_accel`;
-- the top speed, `max_speed` (nav's `vmax` for a vehicle without one);
+- the top speed, `max_speed`, but no more than nav's `vmax`: that is a speed limit as well
+  (`nav.vehicle.vmax` in the state tree), so it still caps a plant's agents;
 - the cornering limit, `lateral_g` (0.5) g, but at most `tip_margin` (0.8) of the static
   stability factor (half the track over the centre of gravity's height) in g;
 - the body: half its width, and how far the chassis box and the wheels reach ahead of and behind
@@ -571,8 +572,8 @@ from tail to nose. The discs are inset 0.7 half-widths at the ends and are 1.3 h
 so they cover the corners; they act at `body_gain` 1/4. They replace nav's disc or footprint.
 `plant_plan_of(i)` reads them back.
 
-- On a Humvee: 2.0 m/s^2, 24.6 m/s, 0.5 g, and four discs of 1.42 m from 0.0 to 3.3 m ahead of
-  the rear axle.
+- On a Humvee: 2.0 m/s^2, 24.6 m/s (18 m/s under nav's Austin defaults), 0.5 g, and four discs
+  of 1.42 m from 0.0 to 3.3 m ahead of the rear axle.
 - `nav_plant_test`'s PlansWithTheVehiclesOwnEnvelope drives a sim_world sized with nav's defaults
   through a hard turn. On the vehicle's plan it commands at most 2.0 m/s^2 and 0.50 g; on nav's
   own numbers, 30 m/s^2 and 0.98 g.
@@ -641,13 +642,15 @@ The cvcGL nav demos take `--plant` (`kinematic`, `humvee`, `roboracer`), and the
 has a plant control. They use three Jolt worker threads natively and none in the browser.
 
 - They default to Humvees on Jolt when the build has it (`nav_city_swarm`'s hundreds of agents
-  excepted). The navigator's routes and reactive drive still assume the bicycle's tight turns:
-  in the Austin finale a Humvee (a 6.7 m turning circle) drives its route at 10-11 m/s, then
-  wedges in a corner after act 2 replans it (with the vehicle's plan off too).
+  excepted). The navigator's A* routes and reactive drive still assume the bicycle's tight turns.
+  In the Austin finale a Humvee (a 6.7 m turning circle) on A* routes wedges in a corner after
+  act 2 replans it, upright and at full lock; 7 of its 8 Humvees end up wedged.
+- On a plant, `nav_finale` drives vehicle routes instead (`plan_vehicle_route` and
+  `route_follower`, docs/NAV_VEHICLE.md). Its Humvees then drive 5387 m in 900 frames, against
+  1903 m on A* routes, and none wedges.
 - `nav_material_demo` runs the bicycle and the Humvee side by side. The material layer keeps the
   bicycle out of the lake (0 entries) but not the Humvee (65): it was tuned on the bicycle.
-- Training through the vehicle (P8) and routes that allow for its turning circle are what
-  would get them through.
+- Training through the vehicle (P8) is what would get the reactive drive through on its own.
 
 ## Terrain in the navigator's energy (P5)
 

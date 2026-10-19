@@ -141,6 +141,19 @@ emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
 
 cmake --build "${BUILD_DIR}" --target wasm-demos -j "$(nproc)"
 
+# ari, the Ariadne terminal backend in an xterm.js page (src/ari/web/ari.html), joins the
+# gallery when the deps prefix has FTXUI for wasm:
+#   cvcpkg install ftxui --platform wasm --arch wasm32 --link static --prefix <deps>
+# Without it the target builds the stub that only says FTXUI is missing, so it is left out. It is
+# a single-threaded page, so only the default (non-pthread) gallery gets it.
+if [[ "${PTHREAD}" == "ON" ]]; then
+    echo "build-wasm-demo: --pthread gallery; the ari page is single-threaded, leaving it out"
+elif [ -f "${CVC_WASM_DEPS}/lib/cmake/ftxui/ftxui-config.cmake" ]; then
+    cmake --build "${BUILD_DIR}" --target ari -j "$(nproc)"
+else
+    echo "build-wasm-demo: ftxui not in ${CVC_WASM_DEPS}; the gallery has no ari page"
+fi
+
 # Turn the built bin/ into a servable gallery: build-pages.py discovers every
 # <demo>.js/.wasm pair, generates each demo's host page from templates/demo.html.in
 # and the index of cards from templates/gallery.html.in (real thumbnails from

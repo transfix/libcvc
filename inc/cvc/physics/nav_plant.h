@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <cvc/core/world_units.h>
+#include <cvc/nav/dyn_bike.h>
 #include <cvc/nav/terrain.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/world.h>
@@ -71,7 +72,7 @@ struct nav_plant_options {
   cvc::nav::plant_modulation modulation;
   // The navigator plans with each vehicle's own envelope and size (limits()):
   //   - its acceleration, accel_margin x max_accel;
-  //   - its top speed, max_speed (nav's vmax for a vehicle without one);
+  //   - its top speed, max_speed, but no more than nav's vmax (a speed limit);
   //   - its cornering, lateral_g in g, but at most tip_margin of its static stability factor
   //     (half its track over its centre of gravity's height) in g;
   //   - its size: the chassis box and the wheels, from the rear axle.
@@ -114,6 +115,22 @@ public:
   // centre of gravity's height above the ground.
   static cvc::nav::terrain_config terrain_config_of(const vehicle_desc &d, double mu = 0.9,
                                                     double gravity = 9.80665);
+
+  // A vehicle's dynamic single-track parameters (nav/dyn_bike.h, P8a), in SI, from its spec
+  // sheet, so both plants read one vehicle_desc:
+  //   - mass; yaw inertia of the chassis box, m (hx^2 + hy^2) / 3;
+  //   - the centre of gravity's distances to the front (steered) and rear axles, and its height
+  //     as terrain_config_of has it;
+  //   - Pacejka B and C from the tires' peak slip angle and sliding fraction: sin(C pi / 2) is
+  //     tire_sliding, and the force peaks at tire_peak_slip_angle. vehicle_desc has one tire,
+  //     so `front_stiffness` scales the front's B: a road vehicle's understeer comes from the
+  //     front's load sensitivity and steering compliance, which the single track leaves out;
+  //   - the drive split from which axles are driven, the brake split from the axles' brake
+  //     torques; drag 1/2 rho C_d A and the rolling resistance;
+  //   - the steering's rate; `drive_lag` for the force (nav_plant_options::latency's default).
+  static cvc::nav::dyn_bike_si dyn_bike_si_of(const vehicle_desc &d, double mu = 0.9,
+                                              double front_stiffness = 0.85, double drive_lag = 0.1,
+                                              double gravity = 9.80665);
 
   // ── the vehicles ──
   int size() const { return static_cast<int>(_agents.size()); }
