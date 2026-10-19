@@ -275,23 +275,27 @@ depends:
     # at the CMake level (find_package(yaml-cpp CONFIG); absent -> the loader
     # compiles a stub), but declared here so the packaged libcvc's build has the
     # headers (real parser, CVC_ARIADNE_HAVE_YAML) and the bundle ships
-    # libyaml-cpp.so. Plain CMake C++ lib, published for every platform libcvc
-    # builds, so unscoped.
+    # libyaml-cpp.so. wasm-mt too: publish-cvcgl-wasm.yml installs it, so the
+    # static wasm-mt libcvc has the real loader and names yaml-cpp among the
+    # packages its cvcConfig.cmake finds for a consumer (cy-pca/cvcpkg#387
+    # published the threaded bundle).
     - name: yaml-cpp
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, wasm-mt]
     # The other Ariadne optional deps (cvc::ariadne in libcvc core): nlohmann-json
     # + json-schema-validator power the .ari Layer-2 JSON-Schema validation (§15);
     # ftxui is the terminal backend (§16.4). All OPTIONAL at the CMake level
     # (find_package; absent -> stubs), declared here so the packaged libcvc's build
-    # compiles the real paths and ships the libs. SCOPED to linux for now: these
-    # three are published for linux-x86_64 only (cy-pca/cvcpkg #111); publish the
+    # compiles the real paths and ships the libs. SCOPED: these three were
+    # published for linux-x86_64 only (cy-pca/cvcpkg #111); publish the
     # macos/windows/BSD variants and drop the `platforms:` scoping once they land.
+    # ftxui also has wasm/wasm-mt bundles (cy-pca/cvcpkg#378), and the wasm-mt
+    # libcvc links it (publish-cvcgl-wasm.yml), so it is declared there too.
     - name: nlohmann-json
       platforms: [linux]
     - name: json-schema-validator
       platforms: [linux]
     - name: ftxui
-      platforms: [linux]
+      platforms: [linux, wasm-mt]
     - name: levmar
       platforms: [linux, macos, windows]
     - name: libiimod
