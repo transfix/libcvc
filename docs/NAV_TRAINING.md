@@ -19,6 +19,7 @@ deploys on and dropped straight into the swarm.
 - [What gets trained](#what-gets-trained)
 - [The rollout switch: surrogate vs bicycle](#the-rollout-switch-surrogate-vs-bicycle)
 - [The dynamic vehicle: `dyn_bike_step` (P8a)](#the-dynamic-vehicle-dyn_bike_step-p8a)
+- [An external force in the differentiable rollout](#an-external-force-in-the-differentiable-rollout)
 - [The four-wheel vehicle: `dyn4_plant` (P8d)](#the-four-wheel-vehicle-dyn4_plant-p8d)
 - [Scene source](#scene-source)
 - [CPU vs CUDA (device-resident)](#cpu-vs-cuda-device-resident)
@@ -349,6 +350,71 @@ Not yet:
 - pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
   turns on only the bicycle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
+
+## An external force in the differentiable rollout
+
+The deployed drive takes a per-agent force through `ext_force` (`drive_step_ext`,
+`bicycle_rollout_ext`). The differentiable rollout takes the same force, so a trainer can learn
+whatever produces it through the real controller and vehicle. cvcdbg's comm-network trainer, whose
+communication force steers the agents, is the first user.
+
+**One step** (`diff::ext_in`, `detail/diff_rollout.h`):
+
+```cpp
+diff::ext_in e;
+e.fx = fx; e.fy = fy;       // F_ext at this step's pose, normalized drive frame
+e.dfx_dox = ...;            // optional J = dF_ext/do: the reverse adds J^T dL/dF into dL/do
+e.steer = 1;                // it also steers, like ext_force::steer
+diff::bike_step(F, ox, oy, th, sp, gx, gy, al, be, ga, v, ox1, oy1, th1, sp1, &e);
+float g_fext[2];
+diff::bike_step_bwd(F, ox, oy, th, sp, gx, gy, al, be, ga, v, g_ox1, g_oy1, g_th1, g_sp1,
+                    gox, goy, gth, gsp, gal, gbe, gga, &e, g_fext);
+```
+
+- **Where it enters:** exactly where `rollout_impl` adds `ext_force`. It joins the barrier and
+  goal forces in the longitudinal command and, when it steers, the repulsive force in the steering
+  bias. The behind branch's barrier term stays barrier-only.
+- **Null is unchanged:** a null `ext_in` is the controller as it was, bit for bit.
+- **A force computed in world units:** the drive frame is o = S (w - c). A caller that writes a
+  world-frame force into the drive frame unscaled, as cvcdbg's `comm_ext_sample` does, passes
+  F_drive = F_world. Its Jacobian still needs the chain rule: dF/do = (dF/dw) / S. Passing dF/dw
+  instead is off by a factor of S.
+- **The dynamic plant:** `bike_control`, `bike_control_bwd`, `dyn_bike_step` and
+  `dyn_bike_step_bwd` take the same pair.
+
+**A trajectory** (`diff::bike_rollout_ext` / `bike_rollout_ext_bwd`, `inc/cvc/nav/ext_rollout.h`;
+the dynamic twin is `dyn_rollout_ext`):
+
+- **Per-step inputs:** the goal and the coefficients may change at every step (the carrot, and
+  coef_mlp's per-tick output). They are exogenous: recorded, with no derivative through the pose.
+- **The force:** a callback gives F and J at a pose. It is sampled every `hold` steps and held
+  between, as a harness that computes it once per frame does. `hold = 1` is the deployed drive's
+  per-substep force.
+- **The tape:** every step's state, and the force and J it used.
+- **The reverse:** it takes dL/dstate at every step and returns dL/dF_ext at every step, dL/dcoef
+  (optional) and dL/d(initial state). A hold window's dL/dF goes through J at the step where F was
+  sampled.
+- **Scope:** host only, one agent per call, independent agents for threads.
+
+Measured (`nav_dyn_bike_test`, `DiffExtForce` and `DiffExtRollout`):
+
+| Check | Result |
+|---|---|
+| One step against the deployed `bicycle_rollout_ext` (64 agents, with and without steering) | identical (worst 0.0) |
+| A zero force against no force, forward and backward | identical |
+| dL/dF_ext against central differences, one step | 9.4e-4 kinematic, 5.7e-5 dynamic; 1.6e-2 through a position-dependent force |
+| A 10-step kinematic trajectory, hold 1 / 3: dL/d(initial state), dL/dF, dL/dbeta | 1.8e-3 / 1.7e-3, 3.6e-3 / 4.8e-3, 1.6e-2 / 9.7e-3 |
+| The same on the dynamic twin: dL/d(initial state), dL/dF | 1.5e-2 / 1.4e-2, 1.1e-3 / 8.3e-4 |
+
+**The torch twin** is GRL-SNAM's `grl_snam/ext_rollout.py` (CVC-Lab/GRL-SNAM#122): batched,
+float64 or float32, CPU or CUDA, with autograd as the reverse.
+- **Its fixture:** `DiffExtRollout.Golden` writes `tests/data/ext_rollout_golden.json`, six agents'
+  12-step trajectories and reverse gradients, which the twin replays.
+- **Agreement:**
+  - In float64, its autograd matches this float reverse to 1.9e-7 (dL/dF_ext), 4.3e-9 (dL/dcoef)
+    and 1.6e-7 (dL/d(initial state)).
+  - The trajectories agree to 1.6e-7.
+  - So the finite-difference figures above are the differences' own error, not an adjoint gap.
 
 ## The four-wheel vehicle: `dyn4_plant` (P8d)
 
