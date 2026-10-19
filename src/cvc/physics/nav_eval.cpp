@@ -10,21 +10,27 @@
 
 // See nav_eval.h.
 
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/nav_eval.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
+#include <exception>
 #include <stdexcept>
+#include <thread>
 
 namespace cvc {
 namespace physics {
 
 namespace {
 
-// One seed: the fraction of `o.agents` that reached their goals in `o.ticks`.
+// One seed: the fraction of `o.agents` that reached their goals in `o.ticks`. `step_threads`
+// is sim_world::step's (its per-agent kernels give the same result on any count).
 double reach_once(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &sc,
-                  const vehicle_desc &d, double mpw, const plant_reach_options &o, unsigned seed) {
+                  const vehicle_desc &d, double mpw, const plant_reach_options &o, unsigned seed,
+                  int step_threads) {
   cvc::nav::sim_world::config cfg;
   cfg.rows = sc.rows;
   cfg.cols = sc.cols;
@@ -79,7 +85,7 @@ double reach_once(const cvc::nav::coef_mlp &policy, const cvc::nav::training_sce
   nav_plant plant(phys, {d}, po);
   w.set_plant(&plant);
   for (int t = 0; t < o.ticks; ++t)
-    w.step(0);
+    w.step(step_threads);
   std::vector<std::uint8_t> reached(static_cast<std::size_t>(o.agents));
   w.snapshot(nullptr, nullptr, nullptr, nullptr, reached.data());
   w.set_plant(nullptr);
@@ -102,16 +108,41 @@ double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training
                                 "ticks and at least one seed");
   const double s_per_m = wheelbase / d.wheelbase();
   const double mpw = scene.scale / s_per_m; // metres per world unit
-  if (per_seed)
-    per_seed->clear();
-  double sum = 0.0;
-  for (const unsigned seed : o.seeds) {
-    const double r = reach_once(policy, scene, d, mpw, o, seed);
-    sum += r;
-    if (per_seed)
-      per_seed->push_back(r);
+  const int n = static_cast<int>(o.seeds.size());
+  const int hw = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+  const int workers = std::min(n, o.threads > 0 ? o.threads : hw);
+  std::vector<double> r(static_cast<std::size_t>(n));
+  if (workers <= 1) {
+    for (int k = 0; k < n; ++k)
+      r[k] = reach_once(policy, scene, d, mpw, o, o.seeds[k], 0);
+  } else {
+    // Each worker takes the next seed. A seed's world, sim_world and plant are its own, and its
+    // agents step on the worker's thread.
+    std::atomic<int> next{0};
+    std::vector<std::exception_ptr> errors(static_cast<std::size_t>(workers));
+    std::vector<std::thread> pool;
+    for (int t = 0; t < workers; ++t)
+      pool.emplace_back([&, t] {
+        try {
+          for (int k = next++; k < n; k = next++)
+            r[k] = reach_once(policy, scene, d, mpw, o, o.seeds[k], 1);
+        } catch (...) {
+          errors[t] = std::current_exception();
+          next = n; // the others stop after their current seed
+        }
+      });
+    for (std::thread &th : pool)
+      th.join();
+    for (const std::exception_ptr &e : errors)
+      if (e)
+        std::rethrow_exception(e);
   }
-  return sum / static_cast<double>(o.seeds.size());
+  if (per_seed)
+    *per_seed = r;
+  double sum = 0.0;
+  for (const double x : r)
+    sum += x;
+  return sum / static_cast<double>(n);
 }
 
 } // namespace physics

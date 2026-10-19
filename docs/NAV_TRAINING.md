@@ -75,8 +75,10 @@ tr.train(scene, false, [&](const coef_mlp &p, int step) {
   keep the earlier.
 - **`reach_on_plant`** (`cvc/physics/nav_eval.h`, needs Jolt): the fraction of `agents` vehicles
   that reach their goals in `ticks`, averaged over seeds. The scene's blocks become static boxes,
-  read at the vehicle's scale (`wheelbase` normalized units = its wheelbase). The world is
-  single-threaded and deterministic, so a score repeats exactly.
+  read at the vehicle's scale (`wheelbase` normalized units = its wheelbase). Each seed's world
+  is single-threaded and deterministic, so a score repeats exactly. Seeds run in parallel
+  (`plant_reach_options::threads`, 0 = the hardware's threads) with the same per-seed results:
+  8 seeds score in about the time of one.
 - **But it is chaotic.** Changing the scale by 4e-9 (passing `0.035f` instead of `0.035`) moves a
   seed's reach by up to 0.1, a per-seed SD of about 0.03. A mean over k validation seeds carries
   about 3/sqrt(k) points of that alone, so use 8 or more.
@@ -313,6 +315,33 @@ The validation curves (8 seeds), from the untrained policy's 0.479:
 - **The useful window is early.** The dynamic training's gains come in the first 60 steps at
   this rate. Smaller steps with denser checkpoints, a larger validation set, or a loss closer to
   reach are the next levers.
+
+**Lower rates, denser checkpoints.** The same test, 8 validation seeds, 31 checkpoints per
+training (`P8B_SELECT_LR`, `_STEPS`, `_EVERY`). `lr` is the peak: `train_config::cosine_lr`
+(on by default) anneals it to `lr_min` over the run, so a shorter run anneals faster. With seeds
+in parallel, each run took about 9 minutes, three at once.
+
+| Peak lr, steps, every | Point mass: step, held-out | Dynamic: step, held-out | Dynamic - point mass | Dynamic - seed (51.7%) |
+|---|---|---|---|---|
+| 2e-4, 300, 30 (above) | 120, 50.1% | 60, 52.7% | +2.6 [+0.3, +4.7] | +1.0 [-1.2, +3.4] |
+| 1e-4, 300, 10 | 210, 51.1% | 160, 53.5% | +2.4 [+0.3, +4.4] | +1.9 [-0.8, +4.4] |
+| 5e-5, 600, 20 | 440, 48.9% | 380, 50.5% | +1.7 [-1.2, +4.5] | -1.1 [-4.0, +1.6] |
+| 2e-4, 150, 5 | 70, 50.5% | 70, 51.7% | +1.1 [-0.8, +3.0] | +0.0 [-1.9, +2.1] |
+
+- **No setting beats the seed outside the CI.** The best, 1e-4 every 10 steps, leads it by
+  +1.9 [-0.8, +4.4].
+- **At the lower rates the validation curves are flat.** Every checkpoint at 1e-4 and 5e-5
+  scores between 0.445 and 0.523 against the untrained 0.479: no climb to sample more finely.
+  At those rates the training loss barely moves Jolt reach either way.
+- **Denser checkpoints raise the winner's curse.** The selected checkpoints score 3.4 to 4.4
+  points above the untrained policy on validation. The best of 31 draws with 1 to 1.5 points of
+  noise gives 2 to 3 points of that by itself. Held out, the selected policies land between
+  -2.8 and +1.9 points from the seed.
+- **The dynamic training still comes out ahead.** It beats the point-mass training in all four
+  settings (+1.1 to +2.6), outside the CI in two.
+- **So the binding limit is the signal, not the step size.** The next levers act on it: many
+  more validation seeds (32 cost about two rounds of the parallel evaluation), or Jolt reach as
+  the training signal itself rather than only the selector.
 
 Not yet:
 - a trained policy that beats the seed on Jolt outside the CI;

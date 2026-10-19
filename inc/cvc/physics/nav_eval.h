@@ -21,7 +21,7 @@
 // metre. A physics world gets the scene's ground and its occupied cells as static boxes, one per
 // row run; a sim_world of the scene's numbers (rr, d_hat, dt, vmax) drives `agents` vehicles
 // through a nav_plant from scattered starts to goals for `ticks`, once per seed. The result is
-// the mean fraction that reached their goals; `per_seed` gets each seed's.
+// the mean fraction that reached their goals; `per_seed` gets each seed's, in `seeds` order.
 //
 // It plans with the scene's numbers by default (plan_with_vehicle false), as both the policy
 // and its training did. Needs a physics backend with vehicles (Jolt); throws otherwise.
@@ -48,6 +48,9 @@ struct plant_reach_options {
   bool plan_with_vehicle = false;
   float reach_tol = 0.15f; // normalized
   int nsub = 6;            // the kinematic reference's substeps a tick (D14)
+  // Seeds run in parallel, each in its own world and sim_world: 0 = as many at once as the
+  // hardware has threads, 1 = one at a time. A seed's result is the same either way.
+  int threads = 0;
 };
 
 double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &scene,

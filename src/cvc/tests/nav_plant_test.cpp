@@ -940,7 +940,8 @@ void paired_ci(const std::vector<double> &diff, double &lo, double &hi) {
 
 // reach_on_plant is a fitness train() selects on, so it must be repeatable: the same policy,
 // scene and seeds give the same per-seed reach (the world is single-threaded and runs in
-// cross-platform determinism mode). It also refuses what it cannot score.
+// cross-platform determinism mode), one seed at a time or all at once. It also refuses what it
+// cannot score.
 TEST(NavPlant, ReachOnPlantIsRepeatable) {
   REQUIRE_JOLT();
   const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
@@ -949,16 +950,22 @@ TEST(NavPlant, ReachOnPlantIsRepeatable) {
   plant_reach_options o;
   o.agents = 16;
   o.ticks = 150;
-  o.seeds = {100u, 101u};
-  std::vector<double> a, b;
+  o.seeds = {100u, 101u, 102u};
+  o.threads = 1;
+  std::vector<double> a, b, c;
   const double ma = reach_on_plant(p, sc, rr, kCityL, o, &a);
   const double mb = reach_on_plant(p, sc, rr, kCityL, o, &b);
-  ASSERT_EQ(a.size(), 2u);
+  o.threads = 0;
+  const double mc = reach_on_plant(p, sc, rr, kCityL, o, &c);
+  ASSERT_EQ(a.size(), 3u);
   EXPECT_EQ(a, b);
+  EXPECT_EQ(a, c) << "seeds in parallel should score what they score one at a time";
   EXPECT_EQ(ma, mb);
-  EXPECT_DOUBLE_EQ(ma, 0.5 * (a[0] + a[1]));
-  std::printf("  reach_on_plant, %d agents x %d ticks: seed 100 %.3f, seed 101 %.3f (twice)\n",
-              o.agents, o.ticks, a[0], a[1]);
+  EXPECT_EQ(ma, mc);
+  EXPECT_DOUBLE_EQ(ma, (a[0] + a[1] + a[2]) / 3.0);
+  std::printf("  reach_on_plant, %d agents x %d ticks: seeds 100-102 %.3f %.3f %.3f (twice one "
+              "at a time, once in parallel)\n",
+              o.agents, o.ticks, a[0], a[1], a[2]);
   o.seeds.clear();
   EXPECT_THROW(reach_on_plant(p, sc, rr, kCityL, o), std::invalid_argument);
 }
