@@ -136,6 +136,29 @@ void test_own_thread_write_still_applies_inline() {
   std::printf("  ok: an own-thread write to an unattached node still applies inline\n");
 }
 
+// removeGraphics() detaches the node, and a host may keep it. It then belongs to
+// the thread that removed it; another thread's writes wait for that thread.
+void test_a_removed_node_keeps_off_thread_writes_off_the_writer() {
+  cvc::app app;
+  SceneGraph sg(app);
+  sg.publisher().stop();
+
+  auto lamp = sg.addLight("kept");
+  lamp->setIntensity(1.0);
+  sg.processEvents();
+  sg.removeGraphics("kept"); // `lamp` keeps it alive
+  assert(!lamp->getSceneGraph() && "removal detaches the node from its scene");
+
+  const std::string path = lamp->getState("intensity").fullName();
+  offThread([&] { cvc::state::instance(app)(path).value(3.0); });
+  sg.processEvents(); // nothing for the scene to run: the node is not in it
+  assert(lamp->intensity() == 1.0 && "a removed node must not apply state on the writer's thread");
+
+  cvc::state::instance(app)(lamp->getState("color_r").fullName()).value(0.5);
+  assert(lamp->intensity() == 3.0 && "the thread that removed it applies it");
+  std::printf("  ok: a removed node keeps off-thread writes off the writer's thread\n");
+}
+
 // A node that outlives its scene (a script holding it) has no scene again, and
 // belongs to the thread that attached it. Another thread's writes wait for it.
 void test_a_node_outliving_its_scene_keeps_off_thread_writes_off_the_writer() {
@@ -167,6 +190,7 @@ int main() {
   test_a_stale_flush_does_not_run_on_the_flusher();
   test_the_home_thread_drains_in_order();
   test_own_thread_write_still_applies_inline();
+  test_a_removed_node_keeps_off_thread_writes_off_the_writer();
   test_a_node_outliving_its_scene_keeps_off_thread_writes_off_the_writer();
   std::printf("cvcGL unattached node threading: OK\n");
   return 0;
