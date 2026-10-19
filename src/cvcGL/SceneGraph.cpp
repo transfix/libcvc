@@ -21,6 +21,7 @@
 #include <limits>
 #include <unordered_map>
 #include <vtkActor.h>
+#include <vtkCamera.h>
 #include <vtkCameraPass.h>
 #include <vtkDataObject.h>
 #include <vtkGPUVolumeRayCastMapper.h>
@@ -1284,6 +1285,18 @@ vtkStandardNewMacro(StridedShadowBaker);
 // hands its opaque sequence every visible prop; this one passes on only those
 // GraphicsNode::propCastsShadow() accepts, so a non-caster is left out of the
 // maps rather than frozen into them at its last-baked pose.
+//
+// It also squares the light's camera. The baker makes the light's camera the
+// active one and runs this pass to fill the map, so the projection is the one
+// vtkOpenGLCamera::GetKeyMatrices builds, at the RENDERER's aspect
+// (ren->GetTiledAspectRatio()). vtkShadowMapPass then looks the map up through
+// the same camera at aspect 1 (GetProjectionTransformObject(1, -1, 1)). In a
+// view that is not square the two disagree: every receiver reads the depth of a
+// point stretched sideways from it by the window's aspect, often one nearer the
+// light, so a lit surface shadows itself (under a sun, a ball dark but for a
+// rim and wedges across a box's lit faces; spots the same). The tests' square
+// windows hid it. Pinned at aspect 1, the bake matches the lookup at any window
+// shape, and a resize leaves the maps valid.
 class ShadowCasterFilterPass : public vtkRenderPass {
 public:
   static ShadowCasterFilterPass *New();
@@ -1295,6 +1308,10 @@ public:
     this->NumberOfRenderedProps = 0;
     if (!this->Delegate || !s)
       return;
+    if (vtkCamera *light = s->GetRenderer()->GetActiveCamera()) {
+      light->SetUseExplicitAspectRatio(true); // vtkSetMacro: no MTime bump once set
+      light->SetExplicitAspectRatio(1.0);
+    }
     m_props.clear();
     vtkProp **all = s->GetPropArray();
     for (int i = 0; i < s->GetPropArrayCount(); ++i)
