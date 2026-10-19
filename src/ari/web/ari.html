@@ -143,9 +143,7 @@
 </script>
 <script>
   // Start the program only once the terminal has its real size. xterm.css and the font must be in
-  // before fit can measure a cell, and the backend clamps window positions to the size of the
-  // frame it draws, so a first frame against a half-laid-out page would pile every window at
-  // the origin for good.
+  // before fit can measure a cell; otherwise the first frames are drawn at a bogus size.
   //
   // Both files are fetched revalidated (cache: 'no-cache'), so a redeploy never pairs a cached
   // ari.js with a new ari.wasm. The wasm goes to the runtime directly (Module.wasmBinary) and the

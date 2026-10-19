@@ -338,7 +338,8 @@ struct FtxuiBackend::Impl {
   // ---- across frames ---------------------------------------------------------------------------
 
   struct Win {
-    int x = 0, y = 0; // top-left cell
+    int x = 0, y = 0;   // top-left cell, as placed (by the document, the persisted geometry, a drag)
+    int sx = 0, sy = 0; // where it is drawn this frame: x / y kept on the current screen
     int w = 0, h = 0; // outer size in cells when `sized`
     bool sized = false;
     bool placed = false;
@@ -651,8 +652,8 @@ struct FtxuiBackend::Impl {
         consumed = true;
       } else if (!drag_win.empty()) {
         Win &w = windows[drag_win];
-        w.x = std::clamp(e.x - drag_dx, 0, std::max(0, term_w - 4));
-        w.y = std::clamp(e.y - drag_dy, top_row(), std::max(top_row(), term_h - 2));
+        w.x = w.sx = std::clamp(e.x - drag_dx, 0, std::max(0, term_w - 4));
+        w.y = w.sy = std::clamp(e.y - drag_dy, top_row(), std::max(top_row(), term_h - 2));
         consumed = true;
       } else if (!active.empty()) {
         moved = true;
@@ -738,8 +739,8 @@ struct FtxuiBackend::Impl {
       if (y == boxes["win|" + win].y_min) { // the title bar: start a move
         const Win &w = windows[win];
         drag_win = win;
-        drag_dx = x - w.x;
-        drag_dy = y - w.y;
+        drag_dx = x - w.sx;
+        drag_dy = y - w.sy;
         return;
       }
     }
@@ -1037,8 +1038,11 @@ bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &s
   }
   if (fresh)
     w.z = ++m.z_top;
-  w.x = std::clamp(w.x, 0, std::max(0, m.term_w - 4));
-  w.y = std::clamp(w.y, m.top_row(), std::max(m.top_row(), m.term_h - 2));
+  // Keep it on screen where it is DRAWN, never by moving where it is placed: a frame drawn on a
+  // momentarily tiny screen (a terminal or browser page before its first resize) must not pile
+  // every window into the corner for good.
+  w.sx = std::clamp(w.x, 0, std::max(0, m.term_w - 4));
+  w.sy = std::clamp(w.y, m.top_row(), std::max(m.top_row(), m.term_h - 2));
   if (p_open && m.close_win == wid) {
     *p_open = false;
     m.close_win.clear();
@@ -1111,7 +1115,7 @@ void FtxuiBackend::end_window() {
       el = el | fx::size(fx::HEIGHT, fx::LESS_THAN, m.extent_rows(f.size.max_h));
   }
   el = el | fx::reflect(m.boxes["win|" + f.id]) | fx::clear_under;
-  m.layers.push_back({w.z, place(isolated(std::move(el)), w.x, w.y)});
+  m.layers.push_back({w.z, place(isolated(std::move(el)), w.sx, w.sy)});
   m.walk.windows.push_back(f.id);
 }
 

@@ -396,6 +396,21 @@ TEST(AriadneFtxui, PersistedGeometrySeedsTheWindow) {
   EXPECT_EQ(by, y + 10 - 1) << "the persisted size (10 rows) was applied\n" << s;
 }
 
+TEST(AriadneFtxui, ATinyFrameDoesNotMoveWindowsForGood) {
+  REQUIRE_FTXUI();
+  Widget w = window("Beta", {text("b")});
+  w.has_pos = true;
+  w.pos_x = 400; // 50 columns
+  w.pos_y = 160; // 10 rows
+  Term t(group({w}));
+  t.screen = t.be.render_to_string(t.rt, 12, 4); // e.g. a page before its first resize
+  t.draw();                                      // back at 80 x 24
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "\xe2\x95\xad Beta", x, y)) << t.screen;
+  EXPECT_EQ(x, 50);
+  EXPECT_EQ(y, 10);
+}
+
 TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   REQUIRE_FTXUI();
   Widget w = window("Win", {text("body")});
