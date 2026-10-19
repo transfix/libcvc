@@ -829,6 +829,31 @@ Both key off `lint.channels`:
 
 ## 9. Running a document
 
+Three runtimes run a document. They share their general flags
+([`host_cli.h`](../inc/cvc/ariadne/host_cli.h)) and the rule that everything after the
+document path is the document's (§5.6):
+
+| Runtime | Links | Runs a document | Source |
+|---|---|---|---|
+| `ari` | libcvc only (FTXUI, optionally tvision) | in the terminal; a `scene:` is dropped | [`src/ari`](../src/ari/main.cpp) |
+| `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
+| `arisrv` | libcvc + gRPC | headless, as a server (the conference relay) | the conference work (`ariadne-server` until it lands) |
+
+```
+arigl run      [--terminal] [flags] doc.ari [document args...]
+arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
+arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
+arigl check    [flags] doc.ari
+```
+
+`arigl` registers cvcGL's bundles before it loads a document
+([`bundles.h`](../inc/cvc/gl/ariadne/bundles.h)): its node types and shader presets, the
+stream and media verbs, and in a window the ImGui `stream_view` widget. In both modes it
+routes OS signals to `on_signal:` and exits 128 + N for one the document does not handle.
+A snapshot runs on a fixed clock, so its frames are reproducible. The cvcGL examples
+(`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
+`arigl` is meant to replace them once it does everything they do.
+
 ### 9.1 Native (C++)
 
 The reference host is
@@ -942,11 +967,11 @@ with Kitty or Sixel graphics), and hands the frame to the backend as its backgro
 ImGui draws over the GL canvas. With pixel graphics a drag maps cells to the frame's own
 pixels, so a map pan keeps the grabbed point under the pointer. Passed as
 `RunOptions::background_input`, its `handle_input` turns background drags into orbit,
-middle-drags into pan and the wheel into zoom. The host is
-[`ariadne_terminal`](../src/cvcGL/examples/ariadne_terminal.cpp), the terminal sibling of
-`ariadne_hello` (`ariadne_terminal doc.ari [--backend tvision]`, or `--snapshot --ansi` for
-one frame as text); [`terminal_scene.ari`](../src/cvcGL/examples/terminal_scene.ari) is a
-small example. No display is needed: VTK picks X, EGL or OSMesa at run time
+middle-drags into pan and the wheel into zoom. `arigl --terminal` is the host
+(`arigl run --terminal [--backend tvision] doc.ari`, or `arigl snapshot --terminal --ansi`
+for one frame as text), as is the older example
+[`ariadne_terminal`](../src/cvcGL/examples/ariadne_terminal.cpp);
+[`terminal_scene.ari`](../src/cvcGL/examples/terminal_scene.ari) is a small example. No display is needed: VTK picks X, EGL or OSMesa at run time
 (`VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow` forces EGL).
 
 ### 9.3 From Python (a full app via `AriRuntime`)
@@ -1087,14 +1112,19 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   translates VTK interactor events into those calls, so stock-loop key/pointer residents
   do not fire until a host feeds them
   ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)).
-- **OS signals reach `on_signal` only where a host routes them.** `ari` does (see §9.2);
-  the ImGui host and `AriRuntime` route none yet, and an embedding host that skips the
+- **OS signals reach `on_signal` only where a host routes them.** `ari` and `arigl` do, in
+  both of `arigl`'s modes (§9). `AriRuntime::post_signal` is the seam for other GL hosts;
+  the `ariadne_hello` example routes none, and an embedding host that skips the
   `RunOptions` hooks gets FTXUI's default for SIGTERM (restore the terminal, exit).
 - **The libcvc terminal backends render no scene by themselves.** `ari` drops a `scene:`
-  with a warning; cvcGL's `TerminalScene` (§9.2) is what draws one, so a scene needs a cvcGL
-  build and a GL that works offscreen (X, EGL or OSMesa). On a Kitty terminal a scene that
-  keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one every
-  frame, so a remote session is better off with half-blocks (`--graphics color`).
+  with a warning; cvcGL's `TerminalScene` (§9.2, `arigl --terminal`) is what draws one, so a
+  scene needs a cvcGL build and a GL that works offscreen (X, EGL or OSMesa). On a Kitty terminal a
+  scene that keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one
+  every frame, so a remote session is better off with half-blocks (`--graphics color`).
+- **An auto-sized ImGui window draws as a collapsed stub.** A window with `pos:` but no
+  `size:` (or neither) shows only its title-bar stub in the ImGui backend, in `ariadne_hello`
+  and `arigl` alike (`hello.ari`'s Controls, `terminal_tour.ari`'s Status and Layout); give it
+  a `size:` until that is fixed. The terminal backends size such windows correctly.
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
   loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and

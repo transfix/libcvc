@@ -210,6 +210,9 @@ option(CVC_BUILD_CLI "Build the cvc command-line executable" ON)
 # `ari` (src/ari) runs a .ari document in the terminal through the FTXUI backend. Like the CLI it
 # ships as its own cvcpkg package (cvcpkg/recipes/ari); the libcvc recipe builds with it OFF.
 option(CVC_BUILD_ARI "Build the ari terminal runner for Ariadne documents" ON)
+# `arigl` (src/arigl) is the GL runtime: a .ari document in a real window, or in the terminal with
+# its scene rendered behind the widgets. It needs cvcGL, so it builds only with CVC_BUILD_CVCGL.
+option(CVC_BUILD_ARIGL "Build the arigl GL runtime for Ariadne documents (needs CVC_BUILD_CVCGL)" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
 option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
 
@@ -389,6 +392,9 @@ add_subdirectory(src)
 option(CVC_BUILD_CVCGL "Build the cvcGL scene-graph library in-tree (no pycvc needed)" OFF)
 if(CVC_BUILD_CVCGL AND NOT TARGET cvcGL)
   add_subdirectory(src/cvcGL)
+endif()
+if(CVC_BUILD_CVCGL AND CVC_BUILD_ARIGL AND TARGET cvcGL)
+  add_subdirectory(src/arigl)
 endif()
 
 # ************* pycvc Python bindings (opt-in) *************
