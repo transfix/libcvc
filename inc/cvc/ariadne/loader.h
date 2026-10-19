@@ -36,6 +36,7 @@
 // its P0 subset.
 
 #include <cstdint>
+#include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/widget.h>
@@ -126,6 +127,11 @@ struct LoadResult {
   std::string on_key_script;
   std::string on_pointer_script;
   std::string on_signal_script;
+  // The document's `args:` block (doc_args.h): what it accepts on the command line after its path.
+  // `has_args_block` records presence; without the block the runtime checks nothing and the
+  // document reads its raw argv. Only the outermost document's block counts.
+  std::vector<ArgSpec> args;
+  bool has_args_block = false;
   // Custom top-level blocks (register_ari_block), keyed by block name — whatever the
   // registered parser stored. Empty unless a document uses a registered custom block.
   std::vector<std::pair<std::string, Value>> extras;
