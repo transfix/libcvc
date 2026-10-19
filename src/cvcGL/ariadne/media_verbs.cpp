@@ -17,9 +17,9 @@
 #include <cvc/gl/ariadne/media_verbs.h>
 #include <cvc/gl/playback/audio_output.h> // audio_output_spec (the owning player's sink spec)
 #include <cvc/gl/playback/audio_stream_player.h> // the C++ core behind (stream-play-audio)
-#include <cvc/state/state_exec/builtins.h>   // register_fn, environment
-#include <cvc/state/state_exec/intrinsics.h> // intrinsics_context, document_scope
-#include <cvc/state/state_exec/types.h>      // value_t, make_dict, dict_ptr
+#include <cvc/state/state_exec/builtins.h>       // register_fn, environment
+#include <cvc/state/state_exec/intrinsics.h>     // intrinsics_context, document_scope
+#include <cvc/state/state_exec/types.h>          // value_t, make_dict, dict_ptr
 #include <memory>
 #include <span>
 #include <string>
@@ -28,8 +28,9 @@
 #include <vector>
 
 #ifdef CVC_ENABLE_SDL
-#include <cvc/gl/capture/audio_source.h>  // open_audio_capture (SDL3; the mic device path)
-#include <cvc/gl/capture/camera_source.h> // open_camera (SDL3; the camera device path)
+#include <cvc/gl/capture/audio_source.h>       // open_audio_capture (SDL3; the mic device path)
+#include <cvc/gl/capture/camera_source.h>      // open_camera (SDL3; the camera device path)
+#include <cvc/gl/capture/jpeg_encode_source.h> // jpeg (codec "mjpeg") video compression
 #endif
 
 namespace se = cvc::state_exec;
@@ -184,13 +185,15 @@ void register_media_intrinsics() {
           // w/h, cadence hz, and an explicit synthetic:#t override (used by headless tests).
           long device = -1, w = 640, h = 480;
           double hz = 30.0;
-          bool synthetic = false;
+          bool synthetic = false, jpeg = false;
           if (args.size() >= 2) {
             device = as_int(dict_get(args[1], "device"), -1);
             w = as_int(dict_get(args[1], "w"), 640);
             h = as_int(dict_get(args[1], "h"), 480);
             hz = as_num(dict_get(args[1], "hz"), 30.0);
             synthetic = as_bool(dict_get(args[1], "synthetic"), false);
+            jpeg =
+                as_bool(dict_get(args[1], "jpeg"), false); // encode to JPEG (stream codec "mjpeg")
           }
           if (w <= 0 || h <= 0)
             return err("stream-capture-camera: 'w' and 'h' must be positive");
@@ -222,6 +225,13 @@ void register_media_intrinsics() {
             source = std::make_unique<sx::synthetic_source>(static_cast<int>(w),
                                                             static_cast<int>(h), used_hz);
           }
+
+          // Compress to JPEG when requested — the publisher side of conference video compression
+          // (see jpeg_encode_source). The stream must be opened with codec "mjpeg" and a byte slab
+          // >= the inner rgba8 size; the subscriber's stream_view decodes it.
+          if (jpeg)
+            source = std::make_unique<cvc::gl::capture::jpeg_encode_source>(
+                std::move(source), static_cast<int>(w), static_cast<int>(h));
 
           // Attach + start the producer thread on this (owner) thread. start_producer replaces any
           // existing producer (old stopped+joined first) and is a no-op if the source is unsized or

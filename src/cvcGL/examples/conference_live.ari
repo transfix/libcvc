@@ -67,11 +67,13 @@ on_tick: |
         ; device resolution needed to size the stream) and sets cam_token, so skip the synthetic one.
         (if (= (state-get "cam_live") "1") #f
           (begin
-            (set cam (stream-open (dict "id" "camera" "codec" "rgba8" "w" 640 "h" 480
+            ; "mjpeg": the synthetic feed is JPEG-compressed too (stride sizes the byte slab), so a
+            ; camera-less peer is also network-friendly; the subscriber's stream_view decodes it.
+            (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 640 "h" 480 "stride" 2560
                                         "expected_subscribers" 3)))
             (state-set "cam_token" (get-attr cam "token"))
             (stream-capture-camera (get-attr cam "token")
-              (dict "synthetic" #t "w" 640 "h" 480 "hz" 30))
+              (dict "synthetic" #t "w" 640 "h" 480 "hz" 30 "jpeg" #t))
             (room-publish (state-get "conf.room")
               (dict "kind" "camera" "token" (get-attr cam "token")))))
         ; my mic — a 440 Hz tone (subscriber_depth >= 8 so a remote player can attach on pull).
