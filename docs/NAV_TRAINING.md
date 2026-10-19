@@ -167,10 +167,13 @@ So the same commands drive a body braked 60% in front up to 1.7 apart over the r
 Under the controller it ends 1.122 from the goal against 1.111.
 
 `DynBike.Golden` pins the plant's values (`tests/data/dyn_bike_golden.json`; rewrite with
-`CVC_DYN_BIKE_GOLDEN_WRITE=1`) for GRL-SNAM's torch twin, the parity gate.
+`CVC_DYN_BIKE_GOLDEN_WRITE=1`). That is the parity gate: GRL-SNAM's torch twin,
+`grl_snam.dyn_bike.dyn_plant` (CVC-Lab/GRL-SNAM#121), reproduces every case's next state and
+VJP to 1e-9, its gradient from autograd rather than duals. A double plant is double
+throughout (its lag factors and floors too), so the two can agree to rounding.
 
-Not yet: `rollout_kind::dynamic` in the trainers (P8b), the torch twin, and a CUDA build of the
-plant (it is `CVC_HD`, but nothing compiles it for the device yet).
+Not yet: `rollout_kind::dynamic` in the trainers (P8b), and a CUDA build of the plant (it is
+`CVC_HD`, but nothing compiles it for the device yet).
 
 ## Scene source
 
