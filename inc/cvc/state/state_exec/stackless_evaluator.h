@@ -16,8 +16,10 @@
 #include <condition_variable>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/parser.h> // parse_options
 #include <cvc/state/state_exec/types.h>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -50,6 +52,11 @@ enum class eval_phase {
   defclass_methods,
   yield_value,  // Generator: evaluate yield expression then pause
   break_unwind, // Loop break: evaluate optional value then unwind to loop
+  // try (docs/STATE_EXEC_EXCEPTIONS.md): the body, a catch handler, or the finally cleanup runs
+  try_body,
+  try_handler,
+  try_finally,
+  raise_value, // (raise e): evaluate e then raise it
 };
 
 /// A single evaluation frame on the explicit stack.
@@ -64,6 +71,8 @@ struct eval_frame {
   std::vector<std::string> extra_strs;
   std::vector<std::vector<value_t>> extra_lists;
   environment_ptr extra_env;
+  /// The frame evaluates a DSL function's body: a `return` inside it unwinds no further.
+  bool function_body = false;
 };
 
 /// Deep-data work a step left unfinished (data_options::step_nodes, or a job waiting on a call):
@@ -125,6 +134,13 @@ struct evaluator_state {
   /// A heap measurement's result in bytes, once its data steps finish; the scheduler that started
   /// it takes it from here. Not serialized.
   std::optional<uint64_t> heap_measured;
+  /// The exception no `try` caught (docs/STATE_EXEC_EXCEPTIONS.md): the state is done, and
+  /// step() throws it again. Not serialized.
+  std::optional<value_t> uncaught;
+  /// The last exception made from a C++ exception, and that exception: an uncaught exception
+  /// that is this one is thrown as the original, so C++ callers see the type they always did.
+  value_t converted;
+  std::exception_ptr converted_original;
 };
 
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
@@ -154,8 +170,16 @@ public:
   evaluator_state create_state(const std::string &script, environment_ptr env = nullptr,
                                const parse_options &popts = {});
 
-  /// Execute one evaluation step.  Returns true when done.
+  /// Execute one evaluation step.  Returns true when done. An exception the program doesn't
+  /// catch is thrown: the C++ exception it was made from, if any, else a dsl_exception. The
+  /// state is then done, and stepping it again throws it again.
   bool step(evaluator_state &state);
+
+  /// Raise `exc` (an exception instance, docs/STATE_EXEC_EXCEPTIONS.md) in `state` at the frame
+  /// it is evaluating, as if that frame had raised it: the nearest `try` handles it. If none
+  /// does, the state is done with it uncaught, and the next step() throws it. Throws
+  /// std::invalid_argument for a value that isn't an exception.
+  void raise(evaluator_state &state, value_t exc);
 
   /// Run until done or limits reached.  Returns result or nil if not done.
   value_t run(evaluator_state &state, std::optional<uint64_t> max_steps = std::nullopt,
@@ -227,6 +251,13 @@ private:
   void step_super_args(evaluator_state &state, eval_frame &frame);
   void step_yield_value(evaluator_state &state, eval_frame &frame);
   void step_break_unwind(evaluator_state &state, eval_frame &frame);
+  void step_try_done(evaluator_state &state, eval_frame &frame); // the body or a handler finished
+  void step_try_finally(evaluator_state &state, eval_frame &frame);
+  void step_raise_value(evaluator_state &state, eval_frame &frame);
+
+  // Exceptions (docs/STATE_EXEC_EXCEPTIONS.md)
+  // The step that raised `e` (the top frame's) failed: raise its exception from that frame.
+  void fail_step(evaluator_state &state, const std::exception &e);
 
   // Helpers
   // A for loop over a DSL generator: push the call that advances it as a job.

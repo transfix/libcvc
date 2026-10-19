@@ -290,6 +290,30 @@ void scheduler::execute_process_step(process &proc) {
             .count();
     kill_process(proc, "time_limit_exceeded");
     return;
+  } catch (const std::exception &e) {
+    // A signal or watch handler's uncaught exception is raised in the program where the handler
+    // interrupted it (docs/STATE_EXEC_EXCEPTIONS.md 2.4), for the program's own try to catch.
+    bool caught_in_program = false;
+    if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.uncaught) {
+      value_t exc = std::move(*proc.state.uncaught);
+      proc.state.uncaught.reset();
+      restore_from_signal(proc);
+      evaluator_.raise(proc.state, std::move(exc));
+      caught_in_program = !proc.state.uncaught;
+    }
+    if (!caught_in_program) {
+      // An error the program didn't catch ends it, killed with the message as on the async
+      // scheduler (a state left with it would only throw it again), and reaches run()'s caller
+      // as it always has.
+      if (proc.state.uncaught) {
+        proc.accumulated_time +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
+                .count();
+        kill_process(proc, e.what());
+      }
+      throw;
+    }
+    done = proc.state.done;
   }
 
   // 4. Accumulate running time, and charge it to what the step was spent on

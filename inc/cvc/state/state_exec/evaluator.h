@@ -14,6 +14,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cvc/state/state_exec/types.h>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -186,7 +187,9 @@ public:
   macro_map &user_macros() { return user_macros_; }
 
 private:
+  // Evaluate `expr`, keeping it on the trail meanwhile (an exception's traceback).
   value_t eval_internal(const value_t &expr, environment_ptr env);
+  value_t eval_form(const value_t &expr, environment_ptr env);
   void check_interrupted();
 
   // Special form handlers
@@ -205,6 +208,18 @@ private:
   value_t do_defmacro(const std::vector<value_t> &args, environment_ptr env);
   value_t do_eval(const std::vector<value_t> &args, environment_ptr env);
   value_t do_root();
+  value_t do_try(const std::vector<value_t> &args, environment_ptr env);
+  value_t do_raise(const std::vector<value_t> &args, environment_ptr env);
+
+  // Exceptions (docs/STATE_EXEC_EXCEPTIONS.md). Where one is raised is recorded once, by a
+  // raise or by the first trail guard unwinding passes (record_raise_point), and the exception
+  // made from it when a try catches it (caught): no level catches and rethrows on the way.
+  void record_raise_point() noexcept;
+  // Fill in where `exc` was raised (the recorded point): its traceback, the exception being
+  // handled there as its cause, and the function that failed. What it has already is kept.
+  void annotate(value_t &exc);
+  // The exception a C++ exception a try caught is, annotated; nullopt for a kill.
+  std::optional<value_t> caught(const std::exception &e);
 
   // Helpers
   value_t apply_closure(const closure_ptr &cls, const std::vector<value_t> &args);
@@ -214,6 +229,23 @@ private:
   value_t root_expr_;
   macro_map user_macros_;
   evaluation_stats stats_;
+
+  // The expressions being evaluated, innermost last: an exception's traceback.
+  std::vector<const value_t *> trail_;
+  // Counts evaluations: the first trail guard an exception unwinds records the raise point.
+  uint64_t generation_ = 0;
+  // The last raise point: the innermost trail (kTracebackFrames of it) and the exception being
+  // handled there.
+  std::vector<value_t> raise_trail_;
+  value_t raise_handled_;
+  uint64_t raise_generation_ = ~uint64_t{0};
+  // The exceptions being handled, innermost last: by a catch handler (true), or by a finally on
+  // their way out (false).
+  std::vector<std::pair<value_t, bool>> handling_;
+  // The last exception made from a C++ exception, and that exception: evaluate() throws it as
+  // the original when nothing caught it.
+  value_t converted_;
+  std::exception_ptr converted_original_;
 
   std::atomic<bool> interrupted_{false};
   std::atomic<bool> paused_{false};

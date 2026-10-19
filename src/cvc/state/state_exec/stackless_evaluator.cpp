@@ -8,6 +8,7 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <iterator>
 #include <set>
+#include <stdexcept>
 
 namespace cvc::state_exec {
 
@@ -27,8 +28,8 @@ stackless_evaluator::stackless_evaluator(environment_ptr global_env)
 
 const std::set<std::string> &stackless_evaluator::all_special_forms() {
   static const std::set<std::string> forms = {
-      "if",    "begin", "while", "for",      "set",  "quote", "lambda", "return",  "yield",
-      "break", "let",   "defun", "defmacro", "eval", "root",  "super",  "defclass"};
+      "if",  "begin", "while",    "for",  "set",  "quote", "lambda",   "return", "yield", "break",
+      "let", "defun", "defmacro", "eval", "root", "super", "defclass", "try",    "raise"};
   return forms;
 }
 
@@ -169,17 +170,195 @@ std::size_t unwind_floor(const evaluator_state &state) {
   return work && work->calling ? work->base : 0;
 }
 
+// -- exceptions (docs/STATE_EXEC_EXCEPTIONS.md) -------------------------------------------------
+
+// A try frame (phases try_body, try_handler, try_finally) keeps
+//   extra_vals  = {the body, the cleanup (nil without a finally), the exception a handler handles
+//                  or what leaves through the finally},
+//   extra_strs  = {what that is: "" before either, "handling", or the way out the finally holds:
+//                  "value", "raise", "return" or "break"},
+//   extra_lists = {the catch clauses}.
+enum try_slot : std::size_t { try_body_slot, try_cleanup_slot, try_payload_slot };
+
+bool has_finally(const eval_frame &f) {
+  return std::holds_alternative<list_ptr>(f.extra_vals[try_cleanup_slot].v);
+}
+
+// `forms` as one expression: (begin forms...), or the form itself when there is one.
+value_t body_of(std::span<const value_t> forms) {
+  if (forms.size() == 1)
+    return forms[0];
+  std::vector<value_t> exprs;
+  exprs.reserve(1 + forms.size());
+  exprs.emplace_back(symbol{"begin"});
+  exprs.insert(exprs.end(), forms.begin(), forms.end());
+  return make_list(std::move(exprs));
+}
+
+// The traceback of an exception raised at the top frame: the expression of each frame, innermost
+// last.
+value_t traceback_of(const evaluator_state &state) {
+  const std::size_t n = state.stack.size();
+  std::vector<value_t> lines;
+  for (std::size_t i = n > kTracebackFrames ? n - kTracebackFrames : 0; i < n; ++i)
+    lines.emplace_back(traceback_line(state.stack[i].expr));
+  return make_list(std::move(lines));
+}
+
+// The exception being handled where the top frame is: a catch handler's, or (in_finally) one a
+// finally is running for on its way out.
+const value_t *handled_exception(const evaluator_state &state, bool in_finally) {
+  for (auto it = state.stack.rbegin(); it != state.stack.rend(); ++it)
+    if (it->phase == eval_phase::try_handler ||
+        (in_finally && it->phase == eval_phase::try_finally && it->extra_strs[0] == "raise"))
+      return &it->extra_vals[try_payload_slot];
+  return nullptr;
+}
+
+// Record where an exception raised at the top frame was raised: its traceback, the exception
+// being handled there as its cause, and the function that failed, for one from C++. What a
+// re-raised exception already has is kept.
+void annotate(const evaluator_state &state, value_t &exc) {
+  if (const value_t *tb = field(exc, "traceback"); !tb || tb->is_nil())
+    set_field(exc, "traceback", traceback_of(state));
+  if (const value_t *cause = field(exc, "cause"); !cause || cause->is_nil())
+    if (const value_t *handled = handled_exception(state, true);
+        handled && !in_cause_chain(*handled, exc))
+      set_field(exc, "cause", *handled);
+  const value_t *origin = field(exc, "origin");
+  if (!origin) {
+    set_field(exc, "origin", value_t(std::string("dsl")));
+    return;
+  }
+  const auto *from = std::get_if<std::string>(&origin->v);
+  if (!from || *from == "dsl" || field(exc, "function") || state.stack.empty())
+    return;
+  const eval_frame &top = state.stack.back();
+  const auto *lp = std::get_if<list_ptr>(&top.expr.v);
+  if (top.phase != eval_phase::apply || !lp || !*lp || (*lp)->empty())
+    return;
+  if (const auto *head = std::get_if<symbol>(&(**lp)[0].v))
+    set_field(exc, "function", value_t(head->name));
+}
+
+// Throw the exception a state left uncaught: the C++ exception it was made from, if it was one,
+// else a dsl_exception carrying it.
+[[noreturn]] void rethrow_uncaught(const evaluator_state &state) {
+  const value_t &exc = *state.uncaught;
+  if (state.converted_original && same_exception(state.converted, exc))
+    std::rethrow_exception(state.converted_original);
+  throw dsl_exception(exc);
+}
+
+// Drop the deep-data work whose waiting frame unwinding popped: its native call raised.
+void drop_orphaned_work(evaluator_state &state) {
+  while (state.data_work && state.data_work->base > state.stack.size()) {
+    std::shared_ptr<pending_data_work> outer = state.data_work->outer;
+    state.data_work = std::move(outer);
+  }
+}
+
+// Leave a try frame through its finally: run the cleanup, holding the way out ("value", "raise",
+// "return" or "break") and its value until the cleanup is done.
+void start_finally(evaluator_state &state, eval_frame &frame, const char *way, value_t payload) {
+  frame.phase = eval_phase::try_finally;
+  frame.extra_strs[0] = way;
+  frame.extra_vals[try_payload_slot] = std::move(payload);
+  frame.results.clear();
+  value_t cleanup = frame.extra_vals[try_cleanup_slot];
+  environment_ptr env = frame.env;
+  state.stack.push_back({.expr = std::move(cleanup), .env = std::move(env)}); // last: moves frame
+}
+
+// Unwind `exc` from the top frame to the nearest try that handles it: a try running its body
+// tries its catches, and one with a finally runs it on the way out. With none, the state is
+// done, the exception uncaught.
+void unwind_exception(evaluator_state &state, value_t exc) {
+  for (;;) {
+    drop_orphaned_work(state);
+    if (state.stack.empty()) {
+      state.result = nil_value;
+      state.done = true;
+      state.uncaught = std::move(exc);
+      return;
+    }
+    eval_frame &top = state.stack.back();
+    if (top.phase == eval_phase::try_body) {
+      try {
+        for (const value_t &clause : top.extra_lists[0]) {
+          std::string var;
+          if (!catch_matches(top.env, clause, exc, var))
+            continue;
+          value_t handler = body_of(catch_handler(clause));
+          top.phase = eval_phase::try_handler;
+          top.extra_strs[0] = "handling";
+          top.extra_vals[try_payload_slot] = exc;
+          top.results.clear();
+          environment_ptr scope = environment::extend(top.env);
+          if (!var.empty())
+            scope->set(var, std::move(exc));
+          state.stack.push_back({.expr = std::move(handler), .env = std::move(scope)}); // last
+          return;
+        }
+      } catch (const std::exception &e) {
+        // A catch naming no class: its NameError replaces the exception.
+        if (is_uncatchable(e))
+          throw;
+        value_t replaced = exception_from(e);
+        set_field(replaced, "cause", exc);
+        annotate(state, replaced);
+        exc = std::move(replaced);
+      }
+    }
+    if ((top.phase == eval_phase::try_body || top.phase == eval_phase::try_handler) &&
+        has_finally(top)) {
+      start_finally(state, top, "raise", std::move(exc));
+      return;
+    }
+    state.stack.pop_back();
+  }
+}
+
+// Unwind a `return` (to the caller of the function it is in) or a `break` (out of the innermost
+// loop) with `value` from the top frame, but not out of a DSL function a deep-data job called:
+// there the value is the function's. A try with a finally on the way runs it first, and the
+// unwinding goes on from that try once the cleanup is done.
+void unwind_jump(evaluator_state &state, bool is_return, value_t value) {
+  const std::size_t floor = unwind_floor(state);
+  while (state.stack.size() > floor) {
+    eval_frame &top = state.stack.back();
+    if ((top.phase == eval_phase::try_body || top.phase == eval_phase::try_handler) &&
+        has_finally(top)) {
+      start_finally(state, top, is_return ? "return" : "break", std::move(value));
+      return;
+    }
+    const bool out = is_return ? top.function_body || top.phase == eval_phase::apply
+                               : top.phase == eval_phase::while_cond ||
+                                     top.phase == eval_phase::while_body ||
+                                     top.phase == eval_phase::for_body;
+    state.stack.pop_back();
+    if (out)
+      break;
+  }
+  if (!state.stack.empty()) {
+    state.stack.back().results.push_back(std::move(value));
+  } else {
+    state.result = std::move(value);
+    state.done = true;
+  }
+}
+
 // A scope for a call of `cls` with `args`: its parameters bound, extending the closure's own.
 environment_ptr bind_closure_args(const closure_ptr &cls, std::span<const value_t> args) {
   auto local = environment::extend(cls->env_snapshot);
   if (cls->variadic) {
     if (cls->params.empty())
-      throw std::runtime_error("closure: variadic but no param name");
+      throw dsl_error("TypeError", "closure: variadic but no param name");
     local->set(cls->params.back().name, make_list(std::vector<value_t>(args.begin(), args.end())));
   } else {
     if (args.size() != cls->params.size())
-      throw std::runtime_error("closure: expected " + std::to_string(cls->params.size()) +
-                               " args, got " + std::to_string(args.size()));
+      throw dsl_error("TypeError", "closure: expected " + std::to_string(cls->params.size()) +
+                                       " args, got " + std::to_string(args.size()));
     for (size_t i = 0; i < cls->params.size(); ++i)
       local->set(cls->params[i].name, args[i]);
   }
@@ -226,8 +405,8 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
     }
     auto *fn = std::get_if<native_fn>(&call->fn->v);
     if (!fn)
-      throw std::runtime_error(std::string(call->who) +
-                               ": not a function: " + call->fn->type_name());
+      throw dsl_error("TypeError",
+                      std::string(call->who) + ": not a function: " + call->fn->type_name());
     value_t value;
     {
       native_call_scope scope(data);
@@ -292,30 +471,47 @@ void stackless_evaluator::begin_expansion(evaluator_state &state, value_t expans
 
 bool stackless_evaluator::step(evaluator_state &state) {
   check_interrupted();
+  if (state.uncaught)
+    rethrow_uncaught(state);
   if (state.data_step_nodes > 0 && !state.backlog)
     state.backlog = std::make_shared<detail::release_backlog>();
   // Held here so the backlog outlives this step's scope even if the step replaces the state.
   const std::shared_ptr<detail::release_backlog> backlog = state.backlog;
   detail::data_step_scope data(state.data_step_nodes, state.stats, backlog.get());
   bool done;
-  if (state.reading) {
-    done = step_read(state);
-  } else if (state.data_work && !calling_out(state)) {
-    done = step_data(state);
-  } else if (backlog && !backlog->empty()) {
-    // A step that only frees what earlier steps dropped.
-    state.stats.increment_step(step_kind::data);
-    data.drain_backlog();
-    return false;
-  } else if (state.done || state.stack.empty()) {
-    state.done = true;
-    return true;
-  } else {
-    state.stats.increment_step();
-    step_frame(state);
+  try {
+    if (state.reading) {
+      done = step_read(state);
+    } else if (state.data_work && !calling_out(state)) {
+      done = step_data(state);
+    } else if (backlog && !backlog->empty()) {
+      // A step that only frees what earlier steps dropped.
+      state.stats.increment_step(step_kind::data);
+      data.drain_backlog();
+      return false;
+    } else if (state.done || state.stack.empty()) {
+      state.done = true;
+      return true;
+    } else {
+      state.stats.increment_step();
+      step_frame(state);
+      done = state.done;
+    }
+  } catch (const std::exception &e) {
+    // The program's error, raised in it for a try to catch (docs/STATE_EXEC_EXCEPTIONS.md). Not
+    // while the script is still being read, a kill, or a failed heap measurement (the
+    // scheduler's own work): those leave the state as it is.
+    if (state.reading || is_uncatchable(e) ||
+        (state.data_work && state.data_work->what == pending_data_work::kind::heap_measure))
+      throw;
+    data.take_deferred(); // work the failed call left goes with it
+    fail_step(state, e);
     done = state.done;
   }
   data.drain_backlog();
+  // An exception nothing caught, raised this step or let go by a finally that ran to its end.
+  if (state.uncaught)
+    rethrow_uncaught(state);
   // Done only once what it dropped is freed too: the steps that free the rest come first.
   return done && !(backlog && !backlog->empty());
 }
@@ -377,7 +573,37 @@ void stackless_evaluator::step_frame(evaluator_state &state) {
   case eval_phase::break_unwind:
     step_break_unwind(state, frame);
     break;
+  case eval_phase::try_body:
+  case eval_phase::try_handler:
+    step_try_done(state, frame);
+    break;
+  case eval_phase::try_finally:
+    step_try_finally(state, frame);
+    break;
+  case eval_phase::raise_value:
+    step_raise_value(state, frame);
+    break;
   }
+}
+
+void stackless_evaluator::fail_step(evaluator_state &state, const std::exception &e) {
+  value_t exc = exception_from(e);
+  const auto *thrown = dynamic_cast<const dsl_exception *>(&e);
+  if (std::exception_ptr original = thrown ? thrown->original() : std::current_exception()) {
+    state.converted = exc;
+    state.converted_original = std::move(original);
+  }
+  annotate(state, exc);
+  if (!state.stack.empty())
+    state.stack.pop_back(); // the frame that raised it
+  unwind_exception(state, std::move(exc));
+}
+
+void stackless_evaluator::raise(evaluator_state &state, value_t exc) {
+  if (!is_exception(exc))
+    throw std::invalid_argument("raise: not an exception: " + exc.type_name());
+  annotate(state, exc);
+  unwind_exception(state, std::move(exc));
 }
 
 value_t stackless_evaluator::run(evaluator_state &state, std::optional<uint64_t> max_steps,
@@ -488,7 +714,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     }
     auto *val = env->lookup(sym->name);
     if (!val)
-      throw std::runtime_error("undefined symbol: " + sym->name);
+      throw dsl_error("NameError", "undefined symbol: " + sym->name);
     pop_frame(state, *val);
     return;
   }
@@ -512,7 +738,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
 
   auto *head = std::get_if<symbol>(&elems[0].v);
   if (!head)
-    throw std::runtime_error("invalid expression head: " + to_string(elems[0]));
+    throw dsl_error("TypeError", "invalid expression head: " + to_string(elems[0]));
 
   const auto &name = head->name;
   std::vector<value_t> args(elems.begin() + 1, elems.end());
@@ -521,14 +747,14 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   // If this evaluator is restricted, a special form NOT on the allowlist is refused. A
   // non-special-form head falls through to normal application (the environment governs it).
   if (allowed_forms_ && all_special_forms().count(name) && !allowed_forms_->count(name))
-    throw std::runtime_error("special form '" + name + "' is not permitted in this context");
+    throw dsl_error("RuntimeError", "special form '" + name + "' is not permitted in this context");
 
   // --- Special forms ---
   if (name == "if") {
     if (args.size() < 2 || args.size() > 3)
-      throw std::runtime_error("if: expected a condition, a then branch and an optional else "
-                               "branch, got " +
-                               std::to_string(args.size()) + " args");
+      throw dsl_error("TypeError", "if: expected a condition, a then branch and an optional else "
+                                   "branch, got " +
+                                       std::to_string(args.size()) + " args");
     frame.phase = eval_phase::if_cond;
     frame.extra_vals = std::move(args);
     push_frame(state, frame.extra_vals[0], env);
@@ -547,7 +773,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "while") {
     if (args.size() < 2)
-      throw std::runtime_error("while: expected a condition and a body");
+      throw dsl_error("TypeError", "while: expected a condition and a body");
     frame.phase = eval_phase::while_cond;
     frame.extra_vals = {args[0], loop_body(args, 1)}; // [0]=cond, [1]=body
     push_frame(state, frame.extra_vals[0], env);
@@ -555,10 +781,10 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "for") {
     if (args.size() < 3)
-      throw std::runtime_error("for: expected a variable, a collection and a body");
+      throw dsl_error("TypeError", "for: expected a variable, a collection and a body");
     auto *var_sym = std::get_if<symbol>(&args[0].v);
     if (!var_sym)
-      throw std::runtime_error("for: first arg must be symbol");
+      throw dsl_error("TypeError", "for: first arg must be symbol");
     frame.phase = eval_phase::for_body;
     frame.extra_strs = {var_sym->name};
     frame.extra_vals = {loop_body(args, 2)}; // body expression
@@ -569,10 +795,10 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "set") {
     if (args.size() != 2)
-      throw std::runtime_error("set: expected 2 args");
+      throw dsl_error("TypeError", "set: expected 2 args");
     auto *var_sym = std::get_if<symbol>(&args[0].v);
     if (!var_sym)
-      throw std::runtime_error("set: first arg must be symbol");
+      throw dsl_error("TypeError", "set: first arg must be symbol");
     frame.phase = eval_phase::set_value;
     frame.extra_strs = {var_sym->name};
     push_frame(state, args[1], env);
@@ -580,20 +806,20 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "quote") {
     if (args.size() != 1)
-      throw std::runtime_error("quote: expected 1 arg");
+      throw dsl_error("TypeError", "quote: expected 1 arg");
     pop_frame(state, args[0]);
     return;
   }
   if (name == "lambda") {
     if (args.size() < 2)
-      throw std::runtime_error("lambda: expected at least 2 args");
+      throw dsl_error("TypeError", "lambda: expected at least 2 args");
     std::vector<symbol> params;
     bool variadic = false;
     if (auto *pl = std::get_if<list_ptr>(&args[0].v); pl && *pl) {
       for (auto &p : **pl) {
         auto *ps = std::get_if<symbol>(&p.v);
         if (!ps)
-          throw std::runtime_error("lambda: param must be symbol");
+          throw dsl_error("TypeError", "lambda: param must be symbol");
         if (ps->name == "&rest") {
           variadic = true;
           continue;
@@ -612,21 +838,22 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "return") {
     if (args.size() != 1)
-      throw std::runtime_error("return: expected 1 arg, got " + std::to_string(args.size()));
+      throw dsl_error("TypeError", "return: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::return_value;
     push_frame(state, args[0], env);
     return;
   }
   if (name == "yield") {
     if (args.size() != 1)
-      throw std::runtime_error("yield: expected 1 arg, got " + std::to_string(args.size()));
+      throw dsl_error("TypeError", "yield: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::yield_value;
     push_frame(state, args[0], env);
     return;
   }
   if (name == "break") {
     if (args.size() > 1)
-      throw std::runtime_error("break: expected at most 1 arg, got " + std::to_string(args.size()));
+      throw dsl_error("TypeError",
+                      "break: expected at most 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::break_unwind;
     if (args.empty()) {
       // (break) — no value, use nil
@@ -641,10 +868,10 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "let") {
     if (args.size() < 2)
-      throw std::runtime_error("let: expected at least 2 args");
+      throw dsl_error("TypeError", "let: expected at least 2 args");
     auto *bindings_lp = std::get_if<list_ptr>(&args[0].v);
     if (!bindings_lp)
-      throw std::runtime_error("let: first arg must be binding list");
+      throw dsl_error("TypeError", "let: first arg must be binding list");
     auto local = environment::extend(env);
     frame.phase = eval_phase::let_bindings;
     frame.extra_vals = std::vector<value_t>(args.begin(), args.end()); // [0]=bindings, [1..]=body
@@ -654,7 +881,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
       auto &first_binding = (**bindings_lp)[0];
       auto *bp = std::get_if<list_ptr>(&first_binding.v);
       if (!bp || (*bp)->size() != 2)
-        throw std::runtime_error("let: each binding must be (name value)");
+        throw dsl_error("TypeError", "let: each binding must be (name value)");
       push_frame(state, (**bp)[1], local);
     } else {
       // No bindings, go to body
@@ -671,10 +898,10 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "defun") {
     if (args.size() < 3)
-      throw std::runtime_error("defun: expected at least 3 args");
+      throw dsl_error("TypeError", "defun: expected at least 3 args");
     auto *name_sym = std::get_if<symbol>(&args[0].v);
     if (!name_sym)
-      throw std::runtime_error("defun: first arg must be symbol");
+      throw dsl_error("TypeError", "defun: first arg must be symbol");
     // Build closure directly
     std::vector<symbol> params;
     bool variadic = false;
@@ -682,7 +909,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
       for (auto &p : **pl) {
         auto *ps = std::get_if<symbol>(&p.v);
         if (!ps)
-          throw std::runtime_error("defun: param must be symbol");
+          throw dsl_error("TypeError", "defun: param must be symbol");
         if (ps->name == "&rest") {
           variadic = true;
           continue;
@@ -702,16 +929,16 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "defmacro") {
     if (args.size() < 3)
-      throw std::runtime_error("defmacro: expected at least 3 args");
+      throw dsl_error("TypeError", "defmacro: expected at least 3 args");
     auto *name_sym = std::get_if<symbol>(&args[0].v);
     if (!name_sym)
-      throw std::runtime_error("defmacro: first arg must be symbol");
+      throw dsl_error("TypeError", "defmacro: first arg must be symbol");
     std::vector<symbol> params;
     if (auto *pl = std::get_if<list_ptr>(&args[1].v); pl && *pl) {
       for (auto &p : **pl) {
         auto *ps = std::get_if<symbol>(&p.v);
         if (!ps)
-          throw std::runtime_error("defmacro: param must be symbol");
+          throw dsl_error("TypeError", "defmacro: param must be symbol");
         params.push_back(*ps);
       }
     }
@@ -726,7 +953,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "eval") {
     if (args.size() != 1)
-      throw std::runtime_error("eval: expected 1 arg");
+      throw dsl_error("TypeError", "eval: expected 1 arg");
     frame.phase = eval_phase::eval_inner;
     push_frame(state, args[0], env);
     return;
@@ -737,7 +964,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "super") {
     if (args.size() < 2)
-      throw std::runtime_error("super: expected at least 2 args");
+      throw dsl_error("TypeError", "super: expected at least 2 args");
     auto *method_sym = std::get_if<symbol>(&args[1].v);
     frame.phase = eval_phase::super_args;
     frame.extra_strs = {method_sym ? method_sym->name : ""};
@@ -748,6 +975,31 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   if (name == "defclass") {
     handle_defclass(state, frame, args);
+    return;
+  }
+  if (name == "try") {
+    // (try body... (catch (Type var) handler...)... (finally cleanup...))
+    try_form form = parse_try(args);
+    frame.phase = eval_phase::try_body;
+    frame.extra_vals = {body_of(form.body), std::move(form.cleanup), nil_value};
+    frame.extra_strs = {""};
+    frame.extra_lists = {std::move(form.catches)};
+    push_frame(state, frame.extra_vals[try_body_slot], env);
+    return;
+  }
+  if (name == "raise") {
+    if (args.size() > 1)
+      throw dsl_error("TypeError",
+                      "raise: expected at most 1 arg, got " + std::to_string(args.size()));
+    if (args.empty()) {
+      // (raise) in a catch handler re-raises the exception it handles.
+      const value_t *handled = handled_exception(state, false);
+      if (!handled)
+        throw dsl_error("RuntimeError", "raise: no exception is being handled");
+      throw dsl_exception(*handled);
+    }
+    frame.phase = eval_phase::raise_value;
+    push_frame(state, args[0], env);
     return;
   }
 
@@ -775,7 +1027,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   // Built-in or user function
   auto *func_val = env->lookup(name);
   if (!func_val)
-    throw std::runtime_error("unknown function or special form: " + name);
+    throw dsl_error("NameError", "unknown function or special form: " + name);
 
   frame.phase = eval_phase::eval_args;
   frame.extra_vals = std::move(args);
@@ -810,11 +1062,11 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
   // Determine the function
   auto *head_sym = std::get_if<symbol>(&(*std::get<list_ptr>(frame.expr.v))[0].v);
   if (!head_sym)
-    throw std::runtime_error("apply: no function head");
+    throw dsl_error("TypeError", "apply: no function head");
 
   auto *func_val = frame.env->lookup(head_sym->name);
   if (!func_val)
-    throw std::runtime_error("apply: undefined function: " + head_sym->name);
+    throw dsl_error("NameError", "apply: undefined function: " + head_sym->name);
 
   if (auto *fn = std::get_if<native_fn>(&func_val->v)) {
     apply_native(state, frame, *fn, evaled);
@@ -824,7 +1076,7 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
     call_closure(state, frame, *cp, evaled);
     return;
   }
-  throw std::runtime_error("apply: not callable: " + head_sym->name);
+  throw dsl_error("TypeError", "apply: not callable: " + head_sym->name);
 }
 
 void stackless_evaluator::apply_native(evaluator_state &state, eval_frame &frame,
@@ -937,7 +1189,7 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
     } else {
       auto *lp = std::get_if<list_ptr>(&collection.v);
       if (!lp)
-        throw std::runtime_error("for: collection must be a list or generator");
+        throw dsl_error("TypeError", "for: collection must be a list or generator");
       frame.extra_lists = {std::vector<value_t>((*lp)->begin(), (*lp)->end())};
       frame.index = 0;
       frame.results.clear();
@@ -1051,24 +1303,8 @@ void stackless_evaluator::step_let_body(evaluator_state &state, eval_frame &fram
 // ---------------------------------------------------------------------------
 
 void stackless_evaluator::step_return_value(evaluator_state &state, eval_frame &frame) {
-  auto val = frame.results.back();
-  state.stack.pop_back();
-  // Unwind to function boundary; a DSL function a deep-data job called returns to the job.
-  const std::size_t floor = unwind_floor(state);
-  while (state.stack.size() > floor) {
-    auto &top = state.stack.back();
-    if (top.phase == eval_phase::apply) {
-      state.stack.pop_back();
-      break;
-    }
-    state.stack.pop_back();
-  }
-  if (!state.stack.empty()) {
-    state.stack.back().results.push_back(val);
-  } else {
-    state.result = val;
-    state.done = true;
-  }
+  // Unwind to the function's caller; a DSL function a deep-data job called returns to the job.
+  unwind_jump(state, true, frame.results.back());
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,26 +1323,41 @@ void stackless_evaluator::step_yield_value(evaluator_state &state, eval_frame &f
 // ---------------------------------------------------------------------------
 
 void stackless_evaluator::step_break_unwind(evaluator_state &state, eval_frame &frame) {
-  auto val = frame.results.back();
-  state.stack.pop_back(); // Remove the break frame
-  // Unwind to loop boundary, but not out of a DSL function a deep-data job called: there the
-  // value is the function's.
-  const std::size_t floor = unwind_floor(state);
-  while (state.stack.size() > floor) {
-    auto &top = state.stack.back();
-    if (top.phase == eval_phase::while_cond || top.phase == eval_phase::while_body ||
-        top.phase == eval_phase::for_body) {
-      state.stack.pop_back(); // Remove the loop frame
-      break;
-    }
-    state.stack.pop_back();
-  }
-  if (!state.stack.empty()) {
-    state.stack.back().results.push_back(val);
-  } else {
-    state.result = val;
-    state.done = true;
-  }
+  // Unwind out of the innermost loop, but not out of a DSL function a deep-data job called:
+  // there the value is the function's.
+  unwind_jump(state, false, frame.results.back());
+}
+
+// ---------------------------------------------------------------------------
+// step: try / raise
+// ---------------------------------------------------------------------------
+
+void stackless_evaluator::step_try_done(evaluator_state &state, eval_frame &frame) {
+  // The body or a handler finished: its value is the try's, once the finally has run.
+  value_t value = std::move(frame.results.back());
+  if (has_finally(frame))
+    start_finally(state, frame, "value", std::move(value));
+  else
+    pop_frame(state, std::move(value));
+}
+
+void stackless_evaluator::step_try_finally(evaluator_state &state, eval_frame &frame) {
+  // The cleanup finished (its value is dropped): leave the way the try was leaving.
+  const std::string way = frame.extra_strs[0];
+  value_t payload = std::move(frame.extra_vals[try_payload_slot]);
+  if (way == "raise")
+    unwind_exception(state, std::move(payload)); // from this try, past its catches
+  else if (way == "return" || way == "break")
+    unwind_jump(state, way == "return", std::move(payload));
+  else
+    pop_frame(state, std::move(payload));
+}
+
+void stackless_evaluator::step_raise_value(evaluator_state & /*state*/, eval_frame &frame) {
+  const value_t &exc = frame.results.back();
+  if (!is_exception(exc))
+    throw dsl_error("TypeError", "raise: expected an exception, got " + exc.type_name());
+  throw dsl_exception(exc);
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,9 +1365,12 @@ void stackless_evaluator::step_break_unwind(evaluator_state &state, eval_frame &
 // ---------------------------------------------------------------------------
 
 void stackless_evaluator::step_eval_inner(evaluator_state &state, eval_frame &frame) {
-  auto code = frame.results.back();
+  value_t code = frame.results.back();
+  environment_ptr env = frame.env;
+  const bool body = frame.function_body; // an (eval ...) that is a function's body stays it
   state.stack.pop_back();
-  push_frame(state, code, frame.env);
+  push_frame(state, std::move(code), std::move(env));
+  state.stack.back().function_body = body;
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,7 +1395,7 @@ void stackless_evaluator::step_super_args(evaluator_state &state, eval_frame &fr
         break;
       }
     if (!cls_val)
-      throw std::runtime_error("super: no __class__");
+      throw dsl_error("TypeError", "super: no __class__");
     auto &cls_dict = *std::get<dict_ptr>(cls_val->v);
     value_t *super_val = nullptr;
     for (auto &[k, v] : cls_dict)
@@ -1150,7 +1404,7 @@ void stackless_evaluator::step_super_args(evaluator_state &state, eval_frame &fr
         break;
       }
     if (!super_val)
-      throw std::runtime_error("super: no __super__");
+      throw dsl_error("TypeError", "super: no __super__");
 
     auto *search = &(*std::get<dict_ptr>(super_val->v));
     while (search) {
@@ -1185,7 +1439,7 @@ void stackless_evaluator::step_super_args(evaluator_state &state, eval_frame &fr
         break;
       search = &(*std::get<dict_ptr>(sp->v));
     }
-    throw std::runtime_error("super: method '" + method_name + "' not found");
+    throw dsl_error("KeyError", "super: method '" + method_name + "' not found");
   }
 }
 
@@ -1213,6 +1467,7 @@ void stackless_evaluator::push_closure_body(evaluator_state &state, const closur
     begin_exprs.insert(begin_exprs.end(), cls->body.begin(), cls->body.end());
     push_frame(state, make_list(std::move(begin_exprs)), local);
   }
+  state.stack.back().function_body = true; // a `return` in it returns from here
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,10 +1477,10 @@ void stackless_evaluator::push_closure_body(evaluator_state &state, const closur
 void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &frame,
                                           const std::vector<value_t> &args) {
   if (args.empty())
-    throw std::runtime_error("defclass: expected at least a name");
+    throw dsl_error("TypeError", "defclass: expected at least a name");
   auto *name_sym = std::get_if<symbol>(&args[0].v);
   if (!name_sym)
-    throw std::runtime_error("defclass: first arg must be symbol");
+    throw dsl_error("TypeError", "defclass: first arg must be symbol");
   const std::string &cls_name = name_sym->name;
   auto &env = frame.env;
 
@@ -1256,6 +1511,7 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
   }
 
   auto cls_dict = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
+  cls_dict->emplace_back("__name__", value_t{cls_name});
   if (super_cls_dict)
     cls_dict->emplace_back("__super__", value_t{super_cls_dict});
 
@@ -1301,7 +1557,7 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
       for (auto &p : **pl) {
         auto *ps = std::get_if<symbol>(&p.v);
         if (!ps)
-          throw std::runtime_error("defclass: param must be symbol");
+          throw dsl_error("TypeError", "defclass: param must be symbol");
         if (ps->name == "&rest") {
           variadic = true;
           continue;

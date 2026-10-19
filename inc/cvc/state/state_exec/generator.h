@@ -68,7 +68,13 @@ inline std::optional<value_t> generator_next(generator &gen) {
   detail::native_nesting level("generator"); // a nested evaluator
   while (!gen.state.done && !gen.state.yielded) {
     eval_deadline_check("generator");
-    gen.evaluator.step(gen.state);
+    try {
+      gen.evaluator.step(gen.state);
+    } catch (...) {
+      if (gen.state.uncaught) // the body raised: the generator is over
+        gen.exhausted = true;
+      throw;
+    }
   }
 
   // If the body yielded a value, return it even if the evaluator

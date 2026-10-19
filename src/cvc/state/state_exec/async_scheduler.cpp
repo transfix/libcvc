@@ -216,20 +216,33 @@ void async_scheduler::execute_process_step(process &proc) {
   try {
     done = evaluator_.step(proc.state).sync_wait();
   } catch (const std::exception &e) {
-    // A runtime error thrown by a step — a throwing intrinsic (e.g. a channel-policy refusal) or a
-    // bad-arg builtin — must NOT propagate out of the pump: it would escape sync_run() and crash
-    // the host's per-frame drain loop. Mark the process killed with the reason (mirroring the sync
-    // scheduler's runtime-error handling); a caller sweep reports a killed process fail-safe. This
-    // is the async lane's analogue of the sync evaluator's re-throw-to-caller, made drain-safe.
-    proc.accumulated_time +=
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
-            .count();
-    // The step's deadline (max_time, or the per-step cap) cutting a long loop inside the step is
-    // the process running out of time, reported as check_limits() reports it between steps.
-    const bool out_of_time =
-        dynamic_cast<const evaluation_timeout *>(&e) != nullptr && step_deadline.expired();
-    kill_process(proc, out_of_time ? "time_limit_exceeded" : e.what());
-    return;
+    // A signal or watch handler's uncaught exception is raised in the program where the handler
+    // interrupted it (docs/STATE_EXEC_EXCEPTIONS.md 2.4), for the program's own try to catch.
+    bool raised_in_program = false;
+    if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.uncaught) {
+      value_t exc = std::move(*proc.state.uncaught);
+      proc.state.uncaught.reset();
+      restore_from_signal(proc);
+      evaluator_.raise(proc.state, std::move(exc));
+      raised_in_program = !proc.state.uncaught;
+    }
+    if (!raised_in_program) {
+      // A runtime error thrown by a step — a throwing intrinsic (e.g. a channel-policy refusal)
+      // or a bad-arg builtin — must NOT propagate out of the pump: it would escape sync_run() and
+      // crash the host's per-frame drain loop. Mark the process killed with the reason
+      // (mirroring the sync scheduler's runtime-error handling); a caller sweep reports a killed
+      // process fail-safe. This is the async lane's analogue of the sync evaluator's
+      // re-throw-to-caller, made drain-safe.
+      proc.accumulated_time +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
+              .count();
+      // The step's deadline (max_time, or the per-step cap) cutting a long loop inside the step
+      // is the process running out of time, reported as check_limits() reports it between steps.
+      const bool out_of_time =
+          dynamic_cast<const evaluation_timeout *>(&e) != nullptr && step_deadline.expired();
+      kill_process(proc, out_of_time ? "time_limit_exceeded" : e.what());
+      return;
+    }
   }
 
   auto now = std::chrono::steady_clock::now();
