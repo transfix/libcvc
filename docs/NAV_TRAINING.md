@@ -405,7 +405,15 @@ Measured (`nav_dyn_bike_test`, `DiffExtForce` and `DiffExtRollout`):
 | A 10-step kinematic trajectory, hold 1 / 3: dL/d(initial state), dL/dF, dL/dbeta | 1.8e-3 / 1.7e-3, 3.6e-3 / 4.8e-3, 1.6e-2 / 9.7e-3 |
 | The same on the dynamic twin: dL/d(initial state), dL/dF | 1.5e-2 / 1.4e-2, 1.1e-3 / 8.3e-4 |
 
-Not yet: the GRL-SNAM torch twin (batched, float64, run on CUDA, parity with this at 1e-9).
+**The torch twin** is GRL-SNAM's `grl_snam/ext_rollout.py` (CVC-Lab/GRL-SNAM#122): batched,
+float64 or float32, CPU or CUDA, with autograd as the reverse.
+- **Its fixture:** `DiffExtRollout.Golden` writes `tests/data/ext_rollout_golden.json`, six agents'
+  12-step trajectories and reverse gradients, which the twin replays.
+- **Agreement:**
+  - In float64, its autograd matches this float reverse to 1.9e-7 (dL/dF_ext), 4.3e-9 (dL/dcoef)
+    and 1.6e-7 (dL/d(initial state)).
+  - The trajectories agree to 1.6e-7.
+  - So the finite-difference figures above are the differences' own error, not an adjoint gap.
 
 ## Scene source
 
