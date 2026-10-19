@@ -33,6 +33,7 @@
 #include <cvc/physics/vehicle.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <random>
@@ -672,16 +673,22 @@ namespace {
 struct ext_case {
   float ox, oy, th, sp, gx, gy, fx, fy;
 };
+//
+// The starts are jittered off the scene's sampled cell centres, which are the SDF's grid
+// nodes: the bilinear field has a kink there, which a central difference straddles.
+// CVC_EXT_CASE_SEED replaces the seeds (the scene's starts too), for sweeping the checks over
+// other draws, as another standard library's would be.
 std::vector<ext_case> ext_cases(const city &c, int n) {
+  const char *seed = std::getenv("CVC_EXT_CASE_SEED");
   std::vector<float> o(2 * n), g(2 * n);
-  c.sc.sample_starts_goals(n, 5, o.data(), g.data());
-  std::mt19937 rng(9);
+  c.sc.sample_starts_goals(n, seed ? 100 + std::atoi(seed) : 5, o.data(), g.data());
+  std::mt19937 rng(seed ? static_cast<unsigned>(std::atoi(seed)) : 9u);
   std::uniform_real_distribution<float> u(-1.0f, 1.0f);
   std::vector<ext_case> r;
   for (int i = 0; i < n; ++i) {
     ext_case e;
-    e.ox = o[2 * i];
-    e.oy = o[2 * i + 1];
+    e.ox = o[2 * i] + 0.04f * u(rng);
+    e.oy = o[2 * i + 1] + 0.04f * u(rng);
     e.gx = g[2 * i];
     e.gy = g[2 * i + 1];
     e.th = std::atan2(e.gy - e.oy, e.gx - e.ox) + 0.3f * static_cast<float>(i % 5 - 2);
@@ -691,6 +698,45 @@ std::vector<ext_case> ext_cases(const city &c, int n) {
     r.push_back(e);
   }
   return r;
+}
+
+// One finite-difference check summed over cases, given each case's loss as a function of the
+// offset t along the checked direction. A case is skipped and counted, not compared, when its
+// difference does not measure the slope:
+//   - a jump: the forward and backward one-sided differences disagree (by more than 20% of the
+//     larger and an absolute 1e-3), as where the step straddles one of the controller's
+//     switches (a clamp, a governor, the behind branch);
+//   - unresolved: the central differences at eps and eps / 2 disagree by more than 5% of the
+//     larger and 1e-3, as where the slope is sharply peaked within the step (near a steep
+//     barrier: 24.9 at 1e-3, 31.4 at 3e-4 and 31.3 at 1e-4, against the reverse's 31.2).
+// Which cases do either depends on the scene's draws, which differ by standard library
+// (sample_starts_goals' uniform_int_distribution): libc++'s draws failed the old unfiltered sums
+// (dL/dF 0.38 on macOS) while MSVC's and libstdc++'s passed.
+struct fd_sum {
+  double num = 0.0, den = 0.0;
+  int used = 0, kinked = 0;
+  void add(double an, const std::function<double(double)> &f, double eps) {
+    const double l0 = f(0.0), lp = f(eps), lm = f(-eps), lp2 = f(0.5 * eps), lm2 = f(-0.5 * eps);
+    const double fwd = (lp - l0) / eps, bwd = (l0 - lm) / eps;
+    const double c1 = 0.5 * (fwd + bwd), c2 = (lp2 - lm2) / eps;
+    const auto big = [](double a, double b) { return std::max(std::fabs(a), std::fabs(b)); };
+    if (std::fabs(fwd - bwd) > 0.2 * big(fwd, bwd) + 1e-3 ||
+        std::fabs(c1 - c2) > 0.05 * big(c1, c2) + 1e-3) {
+      ++kinked;
+      return;
+    }
+    num += std::fabs(an - c1);
+    den += std::fabs(c1);
+    ++used;
+  }
+  double rel() const { return den > 0.0 ? num / den : 0.0; }
+};
+
+// rel < tol over the cases used, with at most a quarter skipped.
+void expect_fd(const fd_sum &f, double tol, const std::string &what) {
+  EXPECT_GT(f.den, 0.0) << what << ": no gradient to compare";
+  EXPECT_LT(f.rel(), tol) << what;
+  EXPECT_LE(f.kinked, (f.used + f.kinked) / 4) << what << ": too many cases on a switch";
 }
 
 // ext_force::sample for the deployed drive: agent i gets its case's constant force.
@@ -803,7 +849,7 @@ TEST(DiffExtForce, GradientsMatchFiniteDifferences) {
     fx = A[0] * ox + A[1] * oy + b[0];
     fy = A[2] * ox + A[3] * oy + b[1];
   };
-  double num_f = 0.0, den_f = 0.0, num_o = 0.0, den_o = 0.0;
+  fd_sum sf, so;
   for (const ext_case &e : ext_cases(*c, 48)) {
     diff::ext_in x;
     x.fx = e.fx;
@@ -811,11 +857,10 @@ TEST(DiffExtForce, GradientsMatchFiniteDifferences) {
     float g[7], gf[2];
     diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, w[0], w[1],
                         w[2], w[3], g[0], g[1], g[2], g[3], g[4], g[5], g[6], &x, gf);
-    const double fd = (loss(e, e.fx + eps * ux, e.fy + eps * uy, e.ox, e.oy) -
-                       loss(e, e.fx - eps * ux, e.fy - eps * uy, e.ox, e.oy)) /
-                      (2.0 * eps);
-    num_f += std::fabs(gf[0] * ux + gf[1] * uy - fd);
-    den_f += std::fabs(fd);
+    sf.add(
+        gf[0] * ux + gf[1] * uy,
+        [&](double t) { return loss(e, e.fx + (float)t * ux, e.fy + (float)t * uy, e.ox, e.oy); },
+        eps);
     // A force that depends on the position: its Jacobian joins the position gradient.
     diff::ext_in xj;
     F(e.ox, e.oy, xj.fx, xj.fy);
@@ -830,12 +875,10 @@ TEST(DiffExtForce, GradientsMatchFiniteDifferences) {
       F(ox, oy, fx, fy);
       return loss(e, fx, fy, ox, oy);
     };
-    const double fdo =
-        (lo(e.ox + eps * ux, e.oy + eps * uy) - lo(e.ox - eps * ux, e.oy - eps * uy)) / (2.0 * eps);
-    num_o += std::fabs(g[0] * ux + g[1] * uy - fdo);
-    den_o += std::fabs(fdo);
+    so.add(
+        g[0] * ux + g[1] * uy,
+        [&](double t) { return lo(e.ox + (float)t * ux, e.oy + (float)t * uy); }, eps);
   }
-  const double rel_f = num_f / den_f, rel_o = num_o / den_o;
 
   // The dynamic step: dL/dF_ext against central differences.
   const dyn_bike_params p =
@@ -843,7 +886,7 @@ TEST(DiffExtForce, GradientsMatchFiniteDifferences) {
   dyn_state<float> wd{};
   for (int k = 0; k < dyn_state<float>::size; ++k)
     wd[k] = 0.1f * static_cast<float>(k + 1) * (k % 2 ? -1.0f : 1.0f);
-  double num_d = 0.0, den_d = 0.0;
+  fd_sum sd;
   for (const ext_case &e : ext_cases(*c, 48)) {
     dyn_state<float> s{};
     s.x = e.ox;
@@ -868,18 +911,16 @@ TEST(DiffExtForce, GradientsMatchFiniteDifferences) {
     float gal = 0, gbe = 0, gga = 0, gf[2];
     diff::dyn_bike_step_bwd(c->F, s, e.gx, e.gy, al, be, ga, c->v, p, 0.0f, wd, gs, gal, gbe, gga,
                             &x, gf);
-    const double fd =
-        (dl(e.fx + eps * ux, e.fy + eps * uy) - dl(e.fx - eps * ux, e.fy - eps * uy)) / (2.0 * eps);
-    num_d += std::fabs(gf[0] * ux + gf[1] * uy - fd);
-    den_d += std::fabs(fd);
+    sd.add(
+        gf[0] * ux + gf[1] * uy,
+        [&](double t) { return dl(e.fx + (float)t * ux, e.fy + (float)t * uy); }, eps);
   }
-  const double rel_d = num_d / den_d;
   std::printf("  dL/dF_ext vs central differences: kinematic %.2e, dynamic %.2e; through a "
-              "position-dependent force %.2e\n",
-              rel_f, rel_d, rel_o);
-  EXPECT_LT(rel_f, 5e-2);
-  EXPECT_LT(rel_d, 5e-2);
-  EXPECT_LT(rel_o, 5e-2);
+              "position-dependent force %.2e (cases on a switch: %d, %d, %d)\n",
+              sf.rel(), sd.rel(), so.rel(), sf.kinked, sd.kinked, so.kinked);
+  expect_fd(sf, 5e-2, "kinematic dL/dF_ext");
+  expect_fd(sd, 5e-2, "dynamic dL/dF_ext");
+  expect_fd(so, 5e-2, "through a position-dependent force");
 }
 
 // ── The trajectory helper: bike_rollout_ext / bike_rollout_ext_bwd (ext_rollout.h) ──
@@ -972,7 +1013,7 @@ TEST(DiffExtRollout, ReverseMatchesFiniteDifferences) {
       x = u(rng);
   }
   for (const int hold : {1, 3}) {
-    double num[3] = {0, 0, 0}, den[3] = {0, 0, 0};
+    fd_sum chk[3];
     for (const ext_case &e : ext_cases(*c, 32)) {
       // A goal 0.8 ahead: the goal spring stays inside the acceleration clamp, so beta has a
       // gradient (a far goal saturates it), and 10 steps (at most 0.54) never pass the goal,
@@ -1013,35 +1054,32 @@ TEST(DiffExtRollout, ReverseMatchesFiniteDifferences) {
       diff::bike_rollout_ext_bwd(c->F, c->v, tape, goal.data(), coef.data(), w.data(),
                                  g_fext.data(), g_coef.data(), g_init);
       // dL/d(initial position) along (ux, uy).
-      const double fd0 = (loss(e.ox + eps * ux, e.oy + eps * uy, 0, 0, coef) -
-                          loss(e.ox - eps * ux, e.oy - eps * uy, 0, 0, coef)) /
-                         (2.0 * eps);
-      num[0] += std::fabs(g_init[0] * ux + g_init[1] * uy - fd0);
-      den[0] += std::fabs(fd0);
+      chk[0].add(
+          g_init[0] * ux + g_init[1] * uy,
+          [&](double t) { return loss(e.ox + (float)t * ux, e.oy + (float)t * uy, 0, 0, coef); },
+          eps);
       // dL/dc: the sum of dL/dF_ext over the steps.
       double gc = 0.0;
       for (int t = 0; t < T; ++t)
         gc += g_fext[2 * t] * ux + g_fext[2 * t + 1] * uy;
-      const double fdc = (loss(e.ox, e.oy, eps * ux, eps * uy, coef) -
-                          loss(e.ox, e.oy, -eps * ux, -eps * uy, coef)) /
-                         (2.0 * eps);
-      num[1] += std::fabs(gc - fdc);
-      den[1] += std::fabs(fdc);
+      chk[1].add(
+          gc, [&](double t) { return loss(e.ox, e.oy, (float)t * ux, (float)t * uy, coef); }, eps);
       // dL/dbeta at one step.
-      std::vector<float> cp = coef, cm = coef;
-      cp[3 * k_beta + 1] += eps;
-      cm[3 * k_beta + 1] -= eps;
-      const double fdb = (loss(e.ox, e.oy, 0, 0, cp) - loss(e.ox, e.oy, 0, 0, cm)) / (2.0 * eps);
-      num[2] += std::fabs(g_coef[3 * k_beta + 1] - fdb);
-      den[2] += std::fabs(fdb);
+      chk[2].add(
+          g_coef[3 * k_beta + 1],
+          [&](double t) {
+            std::vector<float> cf = coef;
+            cf[3 * k_beta + 1] += (float)t;
+            return loss(e.ox, e.oy, 0, 0, cf);
+          },
+          1e-2); // beta's effect at one step is small: at 1e-3, float noise is a fair share
     }
     std::printf("  hold %d, %d steps: dL/dinit %.2e, dL/dF %.2e, dL/dbeta %.2e (relative to "
-                "central differences)\n",
-                hold, T, num[0] / den[0], num[1] / den[1], num[2] / den[2]);
-    for (int k = 0; k < 3; ++k) {
-      EXPECT_GT(den[k], 0.0) << "check " << k << " has no gradient to compare";
-      EXPECT_LT(num[k] / den[k], 5e-2) << "check " << k << ", hold " << hold;
-    }
+                "central differences; cases on a switch %d, %d, %d)\n",
+                hold, T, chk[0].rel(), chk[1].rel(), chk[2].rel(), chk[0].kinked, chk[1].kinked,
+                chk[2].kinked);
+    for (int k = 0; k < 3; ++k)
+      expect_fd(chk[k], 5e-2, "check " + std::to_string(k) + ", hold " + std::to_string(hold));
   }
 }
 
@@ -1065,7 +1103,7 @@ TEST(DiffExtRollout, TheDynamicTwinMatchesItsStepsAndDifferences) {
         x[k] = u(rng);
   }
   for (const int hold : {1, 3}) {
-    double num[2] = {0, 0}, den[2] = {0, 0};
+    fd_sum chk[2];
     for (const ext_case &e : ext_cases(*c, 32)) {
       std::vector<float> goal(2 * T), coef(3 * T);
       for (int t = 0; t < T; ++t) {
@@ -1121,27 +1159,21 @@ TEST(DiffExtRollout, TheDynamicTwinMatchesItsStepsAndDifferences) {
       dyn_state<float> g_init;
       diff::dyn_rollout_ext_bwd(c->F, c->v, p, tape, goal.data(), coef.data(), w.data(),
                                 g_fext.data(), nullptr, &g_init);
-      const double fd0 = (run(e.ox + eps * ux, e.oy + eps * uy, 0, 0, tp) -
-                          run(e.ox - eps * ux, e.oy - eps * uy, 0, 0, tm)) /
-                         (2.0 * eps);
-      num[0] += std::fabs(g_init.x * ux + g_init.y * uy - fd0);
-      den[0] += std::fabs(fd0);
+      chk[0].add(
+          g_init.x * ux + g_init.y * uy,
+          [&](double t) { return run(e.ox + (float)t * ux, e.oy + (float)t * uy, 0, 0, tp); }, eps);
       double gc = 0.0;
       for (int t = 0; t < T; ++t)
         gc += g_fext[2 * t] * ux + g_fext[2 * t + 1] * uy;
-      const double fdc =
-          (run(e.ox, e.oy, eps * ux, eps * uy, tp) - run(e.ox, e.oy, -eps * ux, -eps * uy, tm)) /
-          (2.0 * eps);
-      num[1] += std::fabs(gc - fdc);
-      den[1] += std::fabs(fdc);
+      chk[1].add(
+          gc, [&](double t) { return run(e.ox, e.oy, (float)t * ux, (float)t * uy, tp); }, eps);
     }
     std::printf("  dynamic, hold %d, %d steps: dL/dinit %.2e, dL/dF %.2e (relative to central "
-                "differences)\n",
-                hold, T, num[0] / den[0], num[1] / den[1]);
-    for (int k = 0; k < 2; ++k) {
-      EXPECT_GT(den[k], 0.0);
-      EXPECT_LT(num[k] / den[k], 5e-2) << "check " << k << ", hold " << hold;
-    }
+                "differences; cases on a switch %d, %d)\n",
+                hold, T, chk[0].rel(), chk[1].rel(), chk[0].kinked, chk[1].kinked);
+    for (int k = 0; k < 2; ++k)
+      expect_fd(chk[k], 5e-2,
+                "dynamic check " + std::to_string(k) + ", hold " + std::to_string(hold));
   }
 }
 

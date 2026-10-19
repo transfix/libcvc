@@ -401,9 +401,17 @@ Measured (`nav_dyn_bike_test`, `DiffExtForce` and `DiffExtRollout`):
 |---|---|
 | One step against the deployed `bicycle_rollout_ext` (64 agents, with and without steering) | identical (worst 0.0) |
 | A zero force against no force, forward and backward | identical |
-| dL/dF_ext against central differences, one step | 9.4e-4 kinematic, 5.7e-5 dynamic; 1.6e-2 through a position-dependent force |
-| A 10-step kinematic trajectory, hold 1 / 3: dL/d(initial state), dL/dF, dL/dbeta | 1.8e-3 / 1.7e-3, 3.6e-3 / 4.8e-3, 1.6e-2 / 9.7e-3 |
-| The same on the dynamic twin: dL/d(initial state), dL/dF | 1.5e-2 / 1.4e-2, 1.1e-3 / 8.3e-4 |
+| dL/dF_ext against central differences, one step | 5.0e-4 kinematic, 1.6e-4 dynamic; 1.3e-3 through a position-dependent force |
+| A 10-step kinematic trajectory, hold 1 / 3: dL/d(initial state), dL/dF, dL/dbeta | 2.9e-4 / 3.0e-4, 2.3e-3 / 1.9e-3, 8.3e-4 / 1.3e-3 |
+| The same on the dynamic twin: dL/d(initial state), dL/dF | 6.8e-4 / 6.2e-4, 9.5e-4 / 1.0e-3 |
+
+The finite differences are taken where they measure a slope. The starts are jittered off the
+SDF's grid nodes. A case whose forward and backward differences disagree, which straddles a
+controller switch, or whose central differences at eps and eps / 2 disagree, where the slope
+is sharply peaked within the step, is skipped and counted, at most a quarter of them. Which cases
+those are depends on the scene's draws, which differ by standard library. macOS's libc++ failed
+the earlier unfiltered sums (dL/dF 0.38). Swept over 100 other draws (`CVC_EXT_CASE_SEED`),
+none fails.
 
 **The torch twin** is GRL-SNAM's `grl_snam/ext_rollout.py` (CVC-Lab/GRL-SNAM#122): batched,
 float64 or float32, CPU or CUDA, with autograd as the reverse.
