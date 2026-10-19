@@ -659,3 +659,223 @@ TEST(DynBike, Golden) {
               1e-9 * std::max(1.0, std::max(std::fabs(now[k]), std::fabs(golden[k]))))
         << "value " << k << " (case " << k / 18 << "): golden " << golden[k] << ", now " << now[k];
 }
+
+// ── The external-force port: the deployed drive's ext_force in the differentiable rollout (for
+// cvcdbg's comm-network trainer) ──
+
+namespace {
+
+// Agents in the city: the scene's starts and goals, headings near the goal direction, speeds
+// spread over the range, and a force per agent.
+struct ext_case {
+  float ox, oy, th, sp, gx, gy, fx, fy;
+};
+std::vector<ext_case> ext_cases(const city &c, int n) {
+  std::vector<float> o(2 * n), g(2 * n);
+  c.sc.sample_starts_goals(n, 5, o.data(), g.data());
+  std::mt19937 rng(9);
+  std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+  std::vector<ext_case> r;
+  for (int i = 0; i < n; ++i) {
+    ext_case e;
+    e.ox = o[2 * i];
+    e.oy = o[2 * i + 1];
+    e.gx = g[2 * i];
+    e.gy = g[2 * i + 1];
+    e.th = std::atan2(e.gy - e.oy, e.gx - e.ox) + 0.3f * static_cast<float>(i % 5 - 2);
+    e.sp = c.v.vmax * static_cast<float>(i % 7) / 7.0f;
+    e.fx = u(rng);
+    e.fy = u(rng);
+    r.push_back(e);
+  }
+  return r;
+}
+
+// ext_force::sample for the deployed drive: agent i gets its case's constant force.
+void constant_sample(void *user, int i, int, float, float, float *fx, float *fy) {
+  const std::vector<ext_case> &cs = *static_cast<const std::vector<ext_case> *>(user);
+  *fx = cs[i].fx;
+  *fy = cs[i].fy;
+}
+
+} // namespace
+
+// A zero force through the port is the controller without it, forward and backward.
+TEST(DiffExtForce, AZeroForceIsTheControllerWithoutIt) {
+  const std::unique_ptr<city> c = make_city();
+  const float al = 0.6f, be = 1.8f, ga = 0.9f;
+  for (const ext_case &e : ext_cases(*c, 32)) {
+    diff::ext_in zero;
+    float a1[4], b1[4];
+    diff::bike_step(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, a1[0], a1[1], a1[2],
+                    a1[3]);
+    diff::bike_step(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, b1[0], b1[1], b1[2],
+                    b1[3], &zero);
+    for (int k = 0; k < 4; ++k)
+      EXPECT_EQ(a1[k], b1[k]);
+    float g0[7], g1[7], gf[2];
+    diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, 0.3f, -0.2f,
+                        0.5f, 0.7f, g0[0], g0[1], g0[2], g0[3], g0[4], g0[5], g0[6]);
+    diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, 0.3f, -0.2f,
+                        0.5f, 0.7f, g1[0], g1[1], g1[2], g1[3], g1[4], g1[5], g1[6], &zero, gf);
+    for (int k = 0; k < 7; ++k)
+      EXPECT_EQ(g0[k], g1[k]);
+  }
+}
+
+// One step through the port matches one tick of the deployed bicycle_rollout_ext (nsub 1) with
+// the same per-agent force, with and without the force in the steering.
+TEST(DiffExtForce, MatchesTheDeployedDrive) {
+  const std::unique_ptr<city> c = make_city();
+  const float al = 0.6f, be = 1.8f, ga = 0.9f;
+  const std::vector<ext_case> cs = ext_cases(*c, 64);
+  const int n = static_cast<int>(cs.size());
+  cvc::nav::veh_params vp;
+  vp.rr = c->v.rr;
+  vp.d_hat = c->v.d_hat;
+  vp.dt = c->v.hdt;
+  vp.vmax = c->v.vmax;
+  vp.L = c->v.L;
+  vp.delta_max = c->v.delta_max;
+  vp.a_max = c->v.a_max;
+  vp.a_lat_max = c->v.a_lat_max;
+  vp.k_steer = c->v.k_steer;
+  vp.nsub = 1;
+  vp.allow_reverse = c->v.allow_reverse != 0;
+  for (const bool steer : {true, false}) {
+    std::vector<float> o(2 * n), th(n), sp(n), goal(2 * n), A(n, al), B(n, be), G(n, ga);
+    for (int i = 0; i < n; ++i) {
+      o[2 * i] = cs[i].ox;
+      o[2 * i + 1] = cs[i].oy;
+      th[i] = cs[i].th;
+      sp[i] = cs[i].sp;
+      goal[2 * i] = cs[i].gx;
+      goal[2 * i + 1] = cs[i].gy;
+    }
+    cvc::nav::ext_force ext;
+    ext.sample = constant_sample;
+    ext.user = const_cast<std::vector<ext_case> *>(&cs);
+    ext.steer = steer;
+    std::vector<float> minclr(n);
+    cvc::nav::bicycle_rollout_ext(c->fs, o.data(), th.data(), sp.data(), goal.data(), A.data(),
+                                  B.data(), G.data(), n, nullptr, vp, ext, minclr.data(), 1);
+    double worst = 0.0;
+    for (int i = 0; i < n; ++i) {
+      diff::ext_in e;
+      e.fx = cs[i].fx;
+      e.fy = cs[i].fy;
+      e.steer = steer ? 1 : 0;
+      float x1, y1, t1, s1;
+      diff::bike_step(c->F, cs[i].ox, cs[i].oy, cs[i].th, cs[i].sp, cs[i].gx, cs[i].gy, al, be, ga,
+                      c->v, x1, y1, t1, s1, &e);
+      worst = std::max({worst, static_cast<double>(std::fabs(x1 - o[2 * i])),
+                        static_cast<double>(std::fabs(y1 - o[2 * i + 1])),
+                        static_cast<double>(std::fabs(t1 - th[i])),
+                        static_cast<double>(std::fabs(s1 - sp[i]))});
+    }
+    std::printf("  one step with F_ext (steer %d) against the deployed drive: worst %.2e\n",
+                steer ? 1 : 0, worst);
+    EXPECT_LT(worst, 1e-5);
+  }
+}
+
+// dL/dF_ext against central differences on the kinematic step and on the dynamic one, and the
+// position Jacobian chained into the position gradient for a force that depends on where the
+// agent is (F = A o + b).
+TEST(DiffExtForce, GradientsMatchFiniteDifferences) {
+  const std::unique_ptr<city> c = make_city();
+  const float al = 0.6f, be = 1.8f, ga = 0.9f, eps = 1e-3f;
+  const float w[4] = {0.7f, -0.4f, 0.3f, 0.5f}; // L = w . (x1, y1, th1, sp1)
+  const float ux = 0.6f, uy = 0.8f;             // the direction of each check
+  const auto loss = [&](const ext_case &e, float fx, float fy, float ox, float oy) {
+    diff::ext_in x;
+    x.fx = fx;
+    x.fy = fy;
+    float s1[4];
+    diff::bike_step(c->F, ox, oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, s1[0], s1[1], s1[2],
+                    s1[3], &x);
+    return static_cast<double>(w[0] * s1[0] + w[1] * s1[1] + w[2] * s1[2] + w[3] * s1[3]);
+  };
+  const float A[4] = {0.8f, -0.3f, 0.4f, 0.6f}, b[2] = {0.1f, -0.2f};
+  const auto F = [&](float ox, float oy, float &fx, float &fy) {
+    fx = A[0] * ox + A[1] * oy + b[0];
+    fy = A[2] * ox + A[3] * oy + b[1];
+  };
+  double num_f = 0.0, den_f = 0.0, num_o = 0.0, den_o = 0.0;
+  for (const ext_case &e : ext_cases(*c, 48)) {
+    diff::ext_in x;
+    x.fx = e.fx;
+    x.fy = e.fy;
+    float g[7], gf[2];
+    diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, w[0], w[1],
+                        w[2], w[3], g[0], g[1], g[2], g[3], g[4], g[5], g[6], &x, gf);
+    const double fd = (loss(e, e.fx + eps * ux, e.fy + eps * uy, e.ox, e.oy) -
+                       loss(e, e.fx - eps * ux, e.fy - eps * uy, e.ox, e.oy)) /
+                      (2.0 * eps);
+    num_f += std::fabs(gf[0] * ux + gf[1] * uy - fd);
+    den_f += std::fabs(fd);
+    // A force that depends on the position: its Jacobian joins the position gradient.
+    diff::ext_in xj;
+    F(e.ox, e.oy, xj.fx, xj.fy);
+    xj.dfx_dox = A[0];
+    xj.dfx_doy = A[1];
+    xj.dfy_dox = A[2];
+    xj.dfy_doy = A[3];
+    diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, w[0], w[1],
+                        w[2], w[3], g[0], g[1], g[2], g[3], g[4], g[5], g[6], &xj, gf);
+    const auto lo = [&](float ox, float oy) {
+      float fx, fy;
+      F(ox, oy, fx, fy);
+      return loss(e, fx, fy, ox, oy);
+    };
+    const double fdo =
+        (lo(e.ox + eps * ux, e.oy + eps * uy) - lo(e.ox - eps * ux, e.oy - eps * uy)) / (2.0 * eps);
+    num_o += std::fabs(g[0] * ux + g[1] * uy - fdo);
+    den_o += std::fabs(fdo);
+  }
+  const double rel_f = num_f / den_f, rel_o = num_o / den_o;
+
+  // The dynamic step: dL/dF_ext against central differences.
+  const dyn_bike_params p =
+      cvc::physics::nav_plant::dyn_bike_params_at(cvc::physics::vehicle_desc::roboracer(), c->v.L);
+  dyn_state<float> wd{};
+  for (int k = 0; k < dyn_state<float>::size; ++k)
+    wd[k] = 0.1f * static_cast<float>(k + 1) * (k % 2 ? -1.0f : 1.0f);
+  double num_d = 0.0, den_d = 0.0;
+  for (const ext_case &e : ext_cases(*c, 48)) {
+    dyn_state<float> s{};
+    s.x = e.ox;
+    s.y = e.oy;
+    s.psi = e.th;
+    s.vx = e.sp;
+    const auto dl = [&](float fx, float fy) {
+      diff::ext_in x;
+      x.fx = fx;
+      x.fy = fy;
+      dyn_state<float> o;
+      diff::dyn_bike_step(c->F, s, e.gx, e.gy, al, be, ga, c->v, p, 0.0f, o, &x);
+      double acc = 0.0;
+      for (int k = 0; k < dyn_state<float>::size; ++k)
+        acc += static_cast<double>(wd[k]) * o[k];
+      return acc;
+    };
+    diff::ext_in x;
+    x.fx = e.fx;
+    x.fy = e.fy;
+    dyn_state<float> gs{};
+    float gal = 0, gbe = 0, gga = 0, gf[2];
+    diff::dyn_bike_step_bwd(c->F, s, e.gx, e.gy, al, be, ga, c->v, p, 0.0f, wd, gs, gal, gbe, gga,
+                            &x, gf);
+    const double fd =
+        (dl(e.fx + eps * ux, e.fy + eps * uy) - dl(e.fx - eps * ux, e.fy - eps * uy)) / (2.0 * eps);
+    num_d += std::fabs(gf[0] * ux + gf[1] * uy - fd);
+    den_d += std::fabs(fd);
+  }
+  const double rel_d = num_d / den_d;
+  std::printf("  dL/dF_ext vs central differences: kinematic %.2e, dynamic %.2e; through a "
+              "position-dependent force %.2e\n",
+              rel_f, rel_d, rel_o);
+  EXPECT_LT(rel_f, 5e-2);
+  EXPECT_LT(rel_d, 5e-2);
+  EXPECT_LT(rel_o, 5e-2);
+}
