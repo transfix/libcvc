@@ -148,13 +148,14 @@ public:
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
 
   // Wait until at least `target` MUTATION frames have been received
-  // (HELLO frames are not counted) or `timeout` elapses. Used by
-  // tests to bridge the asynchronous receive path. Returns the
-  // current total_received_mutations() value.
+  // and dispatched to the local shards (HELLO frames are not counted)
+  // or `timeout` elapses. Used by tests to bridge the asynchronous
+  // receive path: once it returns, the mutations are applied. Returns
+  // the current total_received_mutations() value.
   std::uint64_t wait_for_received(std::uint64_t target, std::chrono::milliseconds timeout);
 
   // Wait until at least `target` OOB MESSAGE frames have been
-  // received or `timeout` elapses.
+  // received and dispatched, or `timeout` elapses.
   std::uint64_t wait_for_received_messages(std::uint64_t target, std::chrono::milliseconds timeout);
 
   // Test hook: called from reader threads when a MUTATION is
