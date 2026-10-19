@@ -31,10 +31,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/nav/coef_energy_net.h>
 #include <cvc/nav/material_train.h>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -256,4 +260,164 @@ TEST(NavMaterialTrain, FullChainGradcheckBicycleWithAnExternalForce) {
   cfg.bicycle.a_lat_max = 1.5f;
   cfg.bicycle.vmax = 1.5f;
   full_chain_gradcheck(cfg, "bicycle + ext", true);
+}
+
+// The loss's terms (material_loss_parts) add up to the loss both entry points return.
+TEST(NavMaterialTrain, TheLossPartsAddUpToTheLoss) {
+  std::mt19937 rng(2024);
+  const int P = 16;
+  const coef_energy_net m = cvc_test::build_test_model(rng, P);
+  const Batch batch = make_batch(rng, /*B=*/16, /*N=*/3, P, /*Hp=*/13, /*Wp=*/13);
+  const material_batch mb = batch.view();
+  const material_loss_config cfg;
+  cvc::nav::material_loss_parts pg, pl;
+  coef_energy_net::param_grads grads = m.zero_grads();
+  float eta = 0.0f;
+  const double L = material_loss_and_grad(m, mb, cfg, grads, &eta, false, &pg);
+  const double l = material_loss(m, mb, cfg, eta, false, &pl);
+  const auto sum = [&](const cvc::nav::material_loss_parts &q) {
+    return 0.3 * cfg.w_traj * q.traj + 0.3 * cfg.w_vel * q.vel + cfg.w_fric * q.fric +
+           cfg.w_clear * q.clear + q.nav + cfg.w_lreg * q.lreg + cfg.w_multi * q.multi;
+  };
+  EXPECT_EQ(pg.L, L);
+  EXPECT_NEAR(sum(pg), L, 1e-12 * std::fabs(L));
+  EXPECT_EQ(pl.L, l);
+  EXPECT_NEAR(sum(pl), l, 1e-12 * std::fabs(l));
+  EXPECT_NEAR(pg.eta, eta, 1e-6 * std::fabs(pg.eta));
+}
+
+// The native trainer's golden for GRL-SNAM's torch material trainer (the DBG session's twin of
+// this loss, held to it): with CVC_MATERIAL_TRAIN_GOLDEN_DIR set, writes into that directory
+//   material_train_golden.json: the config, the batch (the 17 arrays), an external force (two
+//     force patches per agent, the odd agents switching at step 1), the parameter index, and
+//     each step's loss, CVaR eta and terms over 3 Adam steps plus the loss after them;
+//   material_train_golden_w0.cvcnm / _w3.cvcnm: the weights before and after the 3 steps;
+//   material_train_golden_grad0.f32: step 0's weight gradients, little-endian float32,
+//     concatenated in the index's order.
+// Not committed: the blobs are 2.5 MB. Without the variable this only runs the trainer.
+TEST(NavMaterialTrain, TorchTrainerGolden) {
+  std::mt19937 rng(2024);
+  const int P = 16;
+  coef_energy_net m = cvc_test::build_test_model(rng, P);
+  const Batch batch = make_batch(rng, /*B=*/16, /*N=*/3, P, /*Hp=*/13, /*Wp=*/13);
+  material_batch mb = batch.view();
+  const int B = batch.B, Hp = batch.Hp, Wp = batch.Wp, K = 2;
+  int steps = 0;
+  for (int h : batch.H)
+    steps = std::max(steps, h);
+  std::vector<float> fpatch(static_cast<std::size_t>(B) * K * 2 * Hp * Wp);
+  std::vector<int> fsched(static_cast<std::size_t>(B) * steps);
+  for (int i = 0; i < B; ++i) {
+    for (int k = 0; k < K; ++k)
+      for (int r = 0; r < Hp; ++r)
+        for (int c = 0; c < Wp; ++c) {
+          const float x = (float)c / (Wp - 1), y = (float)r / (Hp - 1), ph = 0.7f * k + 0.3f * i;
+          const std::size_t base = ((std::size_t)i * K + k) * 2 * Hp * Wp + (std::size_t)r * Wp + c;
+          fpatch[base] = 0.3f * std::sin(5.0f * x + 2.0f * y + ph);
+          fpatch[base + (std::size_t)Hp * Wp] = 0.3f * std::cos(3.0f * x - 4.0f * y + ph);
+        }
+    for (int s = 0; s < steps; ++s)
+      fsched[(std::size_t)i * steps + s] = (s >= 1 && i % 2 == 1) ? 1 : 0;
+  }
+  cvc::nav::material_ext ext;
+  ext.patch = fpatch.data();
+  ext.K = K;
+  ext.patch_of_step = fsched.data();
+  ext.steps = steps;
+  mb.ext = &ext;
+
+  const material_loss_config cfg; // the defaults: surrogate, w_multi 0.5, the legacy start
+  const float lr = 1e-3f, grad_clip = 5.0f;
+  const char *dir = std::getenv("CVC_MATERIAL_TRAIN_GOLDEN_DIR");
+  namespace fs = std::filesystem;
+  if (dir)
+    m.save((fs::path(dir) / "material_train_golden_w0.cvcnm").string());
+  cvc::nav::material_adam opt(m, grad_clip);
+  std::vector<cvc::nav::material_loss_parts> parts(4);
+  coef_energy_net::param_grads g0;
+  for (int t = 0; t < 4; ++t) {
+    coef_energy_net::param_grads grads = m.zero_grads();
+    float eta = 0.0f;
+    material_loss_and_grad(m, mb, cfg, grads, &eta, false, &parts[t]);
+    ASSERT_TRUE(std::isfinite(parts[t].L));
+    if (t == 0)
+      g0 = grads;
+    if (t < 3)
+      opt.step(m, grads, lr);
+  }
+  std::printf("[material-train-golden] loss %.6f -> %.6f over 3 steps (eta %.4f)\n", parts[0].L,
+              parts[3].L, parts[0].eta);
+  EXPECT_LT(parts[3].L, parts[0].L);
+  if (!dir)
+    return;
+  m.save((fs::path(dir) / "material_train_golden_w3.cvcnm").string());
+  const auto num = [](double x) {
+    char buf[40];
+    std::snprintf(buf, sizeof buf, "%.17g", x);
+    return std::string(buf);
+  };
+  const auto arr = [&](const auto &v) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < v.size(); ++i)
+      out += (i ? ", " : "") + num((double)v[i]);
+    return out + "]";
+  };
+  std::ofstream bin((fs::path(dir) / "material_train_golden_grad0.f32").string(), std::ios::binary);
+  std::ostringstream js;
+  js << "{\n \"format\": \"cvc-material-train-golden-1\",\n";
+  js << " \"config\": {\"integrator\": \"surrogate\", \"w_traj\": " << num(cfg.w_traj)
+     << ", \"w_vel\": " << num(cfg.w_vel) << ", \"w_fric\": " << num(cfg.w_fric)
+     << ", \"w_clear\": " << num(cfg.w_clear) << ", \"w_lreg\": " << num(cfg.w_lreg)
+     << ", \"w_goal\": " << num(cfg.w_goal) << ", \"w_len\": " << num(cfg.w_len)
+     << ", \"w_risk\": " << num(cfg.w_risk) << ", \"w_hard\": " << num(cfg.w_hard)
+     << ", \"cvar_alpha\": " << num(cfg.cvar_alpha) << ", \"w_multi\": " << num(cfg.w_multi)
+     << ", \"lam_soft_max\": " << num(cfg.lam_soft_max)
+     << ", \"lam_hard_max\": " << num(cfg.lam_hard_max)
+     << ", \"margin_factor\": " << num(cfg.rollout.margin_factor)
+     << ", \"mass\": " << num(cfg.rollout.mass) << ", \"d_hat_sdf\": " << num(cfg.rollout.d_hat_sdf)
+     << ", \"k_sharp\": " << num(cfg.rollout.k_sharp) << ", \"tau\": " << num(cfg.multi.tau)
+     << ", \"ms_h\": " << cfg.multi.ms_h << ", \"ms_dt_mult\": " << num(cfg.multi.ms_dt_mult)
+     << ", \"ms_count\": " << cfg.multi.ms_count << ", \"frac_lo\": " << num(cfg.multi.frac_lo)
+     << ", \"frac_hi\": " << num(cfg.multi.frac_hi)
+     << ", \"semi_implicit\": " << (cfg.multi.semi_implicit ? 1 : 0)
+     << ", \"grad_clip\": " << num(grad_clip) << ", \"lr\": " << num(lr) << "},\n";
+  js << " \"batch\": {\"B\": " << B << ", \"N\": " << batch.N << ", \"P\": " << batch.P
+     << ", \"Hp\": " << Hp << ", \"Wp\": " << Wp << ",\n  \"obs_feats\": " << arr(batch.obs_feats)
+     << ",\n  \"obs_mask\": " << arr(batch.obs_mask)
+     << ",\n  \"goal_feats\": " << arr(batch.goal_feats)
+     << ",\n  \"risk_patch\": " << arr(batch.risk_patch) << ",\n  \"o0\": " << arr(batch.o0)
+     << ",\n  \"v0\": " << arr(batch.v0) << ",\n  \"goal\": " << arr(batch.goal)
+     << ",\n  \"C\": " << arr(batch.C) << ",\n  \"R\": " << arr(batch.R)
+     << ",\n  \"rollout_patch\": " << arr(batch.rollout_patch) << ",\n  \"rr\": " << arr(batch.rr)
+     << ",\n  \"d_hat\": " << arr(batch.d_hat) << ",\n  \"dt\": " << arr(batch.dt)
+     << ",\n  \"H\": " << arr(batch.H) << ",\n  \"o_tgt\": " << arr(batch.o_tgt)
+     << ",\n  \"v_tgt\": " << arr(batch.v_tgt) << ",\n  \"gamma_o\": " << arr(batch.gamma_o)
+     << "},\n";
+  js << " \"ext\": {\"K\": " << K << ", \"steps\": " << steps
+     << ", \"steer\": 1, \"patch\": " << arr(fpatch) << ",\n  \"patch_of_step\": " << arr(fsched)
+     << "},\n";
+  js << " \"params\": [\n";
+  long offset = 0;
+  const std::vector<std::string> names = m.param_names();
+  for (std::size_t k = 0; k < names.size(); ++k) {
+    const std::vector<float> &g = g0.at(names[k]);
+    bin.write(reinterpret_cast<const char *>(g.data()),
+              (std::streamsize)(g.size() * sizeof(float)));
+    js << "  {\"name\": \"" << names[k] << "\", \"offset\": " << offset
+       << ", \"count\": " << g.size() << "}" << (k + 1 < names.size() ? "," : "") << "\n";
+    offset += (long)g.size();
+  }
+  js << " ],\n \"steps\": [\n";
+  for (int t = 0; t < 4; ++t) {
+    const cvc::nav::material_loss_parts &q = parts[t];
+    js << "  {\"step\": " << t << ", \"L\": " << num(q.L) << ", \"eta\": " << num(q.eta)
+       << ", \"traj\": " << num(q.traj) << ", \"vel\": " << num(q.vel)
+       << ", \"fric\": " << num(q.fric) << ", \"clear\": " << num(q.clear)
+       << ", \"nav\": " << num(q.nav) << ", \"lreg\": " << num(q.lreg)
+       << ", \"multi\": " << num(q.multi) << "}" << (t < 3 ? "," : "") << "\n";
+  }
+  js << " ]\n}\n";
+  std::ofstream((fs::path(dir) / "material_train_golden.json").string(), std::ios::binary)
+      << js.str();
+  std::printf("  wrote the golden to %s (%ld gradient values)\n", dir, offset);
 }

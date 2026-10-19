@@ -80,7 +80,7 @@ void bicycle_start(const material_batch &b, std::vector<float> &th, std::vector<
 // (NaN => compute from J) fixes the detached CVaR quantile.
 double compute_loss(const coef_energy_net &model, const material_batch &b,
                     const material_loss_config &cfg, float frozen_eta, fwd_cache *cache,
-                    bool use_cuda) {
+                    bool use_cuda, material_loss_parts *parts = nullptr) {
   const int B = b.B, N = b.N, P = b.P;
   (void)use_cuda;
 
@@ -213,6 +213,18 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
                                   b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, nullptr,
                                   nullptr, nullptr, cfg.num_threads);
     L += (double)cfg.w_multi * L_multi;
+    if (parts)
+      parts->multi = L_multi;
+  }
+  if (parts) {
+    parts->L = L;
+    parts->traj = L_traj;
+    parts->vel = L_vel;
+    parts->fric = L_fric;
+    parts->clear = L_clear;
+    parts->nav = L_nav;
+    parts->lreg = L_lreg;
+    parts->eta = eta;
   }
 
   if (cache) {
@@ -243,18 +255,23 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
 } // namespace
 
 double material_loss(const coef_energy_net &model, const material_batch &b,
-                     const material_loss_config &cfg, float frozen_eta, bool use_cuda) {
-  return compute_loss(model, b, cfg, frozen_eta, nullptr, use_cuda);
+                     const material_loss_config &cfg, float frozen_eta, bool use_cuda,
+                     material_loss_parts *parts) {
+  if (parts)
+    *parts = material_loss_parts{};
+  return compute_loss(model, b, cfg, frozen_eta, nullptr, use_cuda, parts);
 }
 
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
-                              float *eta_out, bool use_cuda) {
+                              float *eta_out, bool use_cuda, material_loss_parts *parts) {
   const int B = b.B, N = b.N, P = b.P;
   (void)use_cuda;
   fwd_cache c;
+  if (parts)
+    *parts = material_loss_parts{};
   const double L =
-      compute_loss(model, b, cfg, std::numeric_limits<float>::quiet_NaN(), &c, use_cuda);
+      compute_loss(model, b, cfg, std::numeric_limits<float>::quiet_NaN(), &c, use_cuda, parts);
   if (eta_out)
     *eta_out = (float)c.eta;
 

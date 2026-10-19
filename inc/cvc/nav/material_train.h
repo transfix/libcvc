@@ -120,6 +120,15 @@ struct material_loss_config {
   int num_threads = 0;
 };
 
+// The loss's terms, as material_loss and material_loss_and_grad add them: L = 0.3 w_traj
+// traj + 0.3 w_vel vel + w_fric fric + w_clear clear + nav + w_lreg lreg + w_multi multi
+// (each unweighted here), and the CVaR quantile eta that nav used. For a twin trainer's
+// parity (GRL-SNAM's torch trainer) and for logging.
+struct material_loss_parts {
+  double L = 0.0, traj = 0.0, vel = 0.0, fric = 0.0, clear = 0.0, nav = 0.0, lreg = 0.0,
+         multi = 0.0, eta = 0.0;
+};
+
 // Forward-only loss. `frozen_eta` fixes the CVaR quantile (a NaN means "compute
 // it from J") — the gradcheck passes the base-point eta so the finite-difference
 // sees the SAME detached quantile the analytic gradient used. This is the
@@ -128,7 +137,8 @@ struct material_loss_config {
 // rollout forward through their device twins on the same terms as
 // material_loss_and_grad below.
 double material_loss(const coef_energy_net &model, const material_batch &b,
-                     const material_loss_config &cfg, float frozen_eta, bool use_cuda = false);
+                     const material_loss_config &cfg, float frozen_eta, bool use_cuda = false,
+                     material_loss_parts *parts = nullptr);
 
 // Loss + weight gradients (ADDED into `grads`; zero it first for a fresh
 // gradient). Returns the scalar loss and, via `eta_out` (optional), the CVaR
@@ -147,7 +157,8 @@ double material_loss(const coef_energy_net &model, const material_batch &b,
 // geom_rollout.cu), as does the loss/seed-grad glue.
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
-                              float *eta_out = nullptr, bool use_cuda = false);
+                              float *eta_out = nullptr, bool use_cuda = false,
+                              material_loss_parts *parts = nullptr);
 
 // Cosine-annealed learning rate (torch CosineAnnealingLR): anneals lr0 -> eta_min
 // over t_max steps; lr(t) = eta_min + (lr0-eta_min)*0.5*(1+cos(pi*t/t_max)).
