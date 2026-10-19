@@ -170,6 +170,15 @@ public:
   void set_image(const std::string &name, const cvc::image &img);
   void clear_image(const std::string &name);
 
+  // Draw the published image `name` behind everything, stretched over the whole screen: the
+  // terminal counterpart of the GL canvas the ImGui backend draws over. Widgets, menus and windows
+  // draw on top of it. "" (the default) draws none. In hosted mode it is the background body
+  // (window id ""). cvcGL's TerminalScene shows a 3D scene rendered offscreen this way.
+  void set_background(const std::string &image_name);
+  // The screen size in cells, as of the last frame drawn (or set_screen_size).
+  int screen_width() const;
+  int screen_height() const;
+
   // ---- headless (no TTY) ----
 
   // Render the current tree at `width` x `height` cells (height 0 = fit the content) and return it
@@ -244,6 +253,12 @@ public:
     std::function<void()> on_start;
     std::function<void()> on_stop;
     std::function<std::string()> take_signal;
+
+    // Input no widget used — a click or drag on the background, the wheel, a key nothing took — is
+    // offered here before the document's on_key / on_pointer; return true to take it. Pointer
+    // coordinates are screen cells (on the tvision desktop, the desktop's). cvcGL's TerminalScene
+    // turns background drags and the wheel into camera moves with it.
+    std::function<bool(const TermEvent &)> background_input;
   };
 
   // Why run() returned.

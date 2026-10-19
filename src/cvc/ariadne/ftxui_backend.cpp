@@ -399,7 +399,9 @@ struct FtxuiBackend::Impl {
   std::map<std::string, fx::Elements> win_popups; // hosted: popups by owning window, this walk
   std::map<std::string, int> body_h;              // hosted: each body's last rendered height
   std::string host_window;                        // hosted: the window the current input is for
-  long walks = 0; // walks finished (hosted menus join from the second)
+  long walks = 0;               // walks finished (hosted menus join from the second)
+  std::string background;       // the published image drawn behind everything ("" = none)
+  cvc::image background_scaled; // that image resampled to the screen's cells
   long z_top = 0;
   std::unordered_map<std::string, fx::Box> boxes; // node-based: reflect() keeps references
   std::map<std::string, Picture> images;
@@ -780,6 +782,8 @@ struct FtxuiBackend::Impl {
         set_focus(it->id);
     } else {
       set_focus(""); // a click on empty space blurs (and so commits) the focused field
+      if (win.empty())
+        consumed = false; // the background's: RunOptions::background_input, then the document
     }
   }
 
@@ -832,10 +836,24 @@ struct FtxuiBackend::Impl {
 
   // ---- composing the frame ---------------------------------------------------------------------
 
+  // The backdrop (set_background) as a screen-filling half-block image, or nullptr.
+  fx::Element backdrop() {
+    const auto it = images.find(background);
+    if (background.empty() || it == images.end() || it->second.rgb.empty())
+      return nullptr;
+    const int cols = std::max(1, term_w), rows = std::max(1, term_h);
+    if (background_scaled.width() != cols || background_scaled.height() != 2 * rows)
+      background_scaled = it->second.rgb.resized(cols, 2 * rows, cvc::image::resize_filter::box);
+    return std::make_shared<HalfBlockImage>(background_scaled, cols, rows, opt.image_color);
+  }
+
   void compose() {
     fx::Elements base = stack.empty() ? fx::Elements{} : std::move(stack.front().items);
+    fx::Element backdrop_el = backdrop();
     if (opt.hosted) {
       root = base.empty() ? fx::emptyElement() : fx::vbox(std::move(base));
+      if (backdrop_el)
+        root = fx::dbox({backdrop_el, root});
       walk.bodies[""] = Walk::Body{"", false, root, std::move(win_popups[""])};
       return;
     }
@@ -843,7 +861,10 @@ struct FtxuiBackend::Impl {
     if (menubar)
       column.push_back(menubar);
     column.push_back(base.empty() ? fx::emptyElement() : fx::vbox(std::move(base)));
-    fx::Elements screen{fx::vbox(std::move(column))};
+    fx::Elements screen;
+    if (backdrop_el)
+      screen.push_back(backdrop_el); // under everything; widgets draw over it
+    screen.push_back(fx::vbox(std::move(column)));
     std::stable_sort(layers.begin(), layers.end(),
                      [](const Layer &a, const Layer &b) { return a.z < b.z; });
     for (Layer &l : layers)
@@ -1759,9 +1780,19 @@ void FtxuiBackend::set_image(const std::string &name, const cvc::image &img) {
   p.rgb = img.empty() ? cvc::image()
                       : img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
   p.scaled = cvc::image();
+  if (name == m_->background)
+    m_->background_scaled = cvc::image(); // a new frame for the backdrop: resample it next draw
 }
 
 void FtxuiBackend::clear_image(const std::string &name) { m_->images.erase(name); }
+
+void FtxuiBackend::set_background(const std::string &image_name) {
+  m_->background = image_name;
+  m_->background_scaled = cvc::image();
+}
+
+int FtxuiBackend::screen_width() const { return m_->term_w; }
+int FtxuiBackend::screen_height() const { return m_->term_h; }
 
 bool FtxuiBackend::draw_image(const char *name, float width) {
   Impl &m = *m_;
@@ -1869,6 +1900,8 @@ std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const {
 std::vector<FtxuiBackend::HostedMenu> FtxuiBackend::hosted_menus() const { return m_->last.menus; }
 
 bool FtxuiBackend::hosted_root() const {
+  if (!m_->background.empty())
+    return true;
   for (const Impl::Item &it : m_->last.items)
     if (it.win.empty() && it.menu.empty())
       return true;
@@ -2123,7 +2156,7 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
     TermEvent te;
     if (!translate(e, te))
       return false;
-    if (!feed(rt, te) && unhandled)
+    if (!feed(rt, te) && !(opts.background_input && opts.background_input(te)) && unhandled)
       unhandled(te);
     return true;
   });
@@ -2263,6 +2296,9 @@ bool FtxuiBackend::draw_image(const char *, float) { return false; }
 ColorEdit FtxuiBackend::color(const char *, const float[3]) { return {}; }
 void FtxuiBackend::set_image(const std::string &, const cvc::image &) {}
 void FtxuiBackend::clear_image(const std::string &) {}
+void FtxuiBackend::set_background(const std::string &) {}
+int FtxuiBackend::screen_width() const { return 0; }
+int FtxuiBackend::screen_height() const { return 0; }
 std::string FtxuiBackend::render_to_string(Runtime &, int, int, bool) {
   return "ari: libcvc was built without FTXUI (terminal backend unavailable)\n";
 }

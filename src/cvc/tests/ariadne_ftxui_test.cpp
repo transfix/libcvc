@@ -781,6 +781,46 @@ TEST(AriadneFtxui, ImageRampOnAMonochromeTerminal) {
   EXPECT_TRUE(t.shows("@")) << "white maps to the dense end of the ramp\n" << t.screen;
 }
 
+TEST(AriadneFtxui, BackgroundImageFillsTheScreenUnderTheWidgets) {
+  REQUIRE_FTXUI();
+  const unsigned char px[] = {200, 20, 20, 20, 20, 200, 20, 200, 20, 200, 200, 20};
+  cvc::image img(2, 2, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px);
+  FtxuiBackend::Options o;
+  o.image_color = FtxuiBackend::Options::ImageColor::Color;
+  Term t(group({text("hello")}), o);
+  t.be.set_image("scene", img);
+  t.be.set_background("scene");
+  t.width = 20;
+  t.height = 4;
+  t.draw();
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "hello", x, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  ASSERT_TRUE(find_cell(t.screen, "\xe2\x96\x80", x, y)) << t.screen; // "▀"
+  int n = 0; // every cell but the five "hello" ones is the backdrop
+  for (std::size_t i = 0; (i = t.screen.find("\xe2\x96\x80", i)) != std::string::npos; i += 3)
+    ++n;
+  EXPECT_EQ(n, 20 * 4 - 5) << t.screen;
+  EXPECT_EQ(t.be.screen_width(), 20);
+  EXPECT_EQ(t.be.screen_height(), 4);
+  // A new frame published under the same name shows on the next draw (the backdrop resamples).
+  const std::string before = t.be.render_to_string(t.rt, 20, 4, /*ansi=*/true);
+  const unsigned char px2[] = {0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255};
+  t.be.set_image("scene",
+                 cvc::image(2, 2, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px2));
+  EXPECT_NE(t.be.render_to_string(t.rt, 20, 4, /*ansi=*/true), before);
+}
+
+TEST(AriadneFtxui, AClickOnTheBackgroundIsLeftForTheHost) {
+  REQUIRE_FTXUI();
+  Term t(group({checkbox("A", "a")}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "[ ] A", x, y));
+  EXPECT_FALSE(t.mouse(TermEvent::Mouse::Press, 40, 10)) << "empty background: not the UI's";
+  EXPECT_FALSE(t.mouse(TermEvent::Mouse::Release, 40, 10));
+  EXPECT_TRUE(t.mouse(TermEvent::Mouse::Press, x, y)) << "a widget's";
+}
+
 TEST(AriadneFtxui, EmptyRuntimeRendersSafely) {
   REQUIRE_FTXUI();
   cvc::app app;

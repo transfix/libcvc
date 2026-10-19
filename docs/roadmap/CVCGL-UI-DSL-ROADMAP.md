@@ -4238,6 +4238,12 @@ build for GPU-less runners. Colour fidelity drops per tier (Kitty ≫ Sixel ≫ 
 *presentation* of the ImGui/VTK backend, not a new backend — no `.ari` or backend-interface change; it slots
 in beside the native-window and wasm surfaces as a third way to present the same rendered frames.
 
+> **Status (2026-10-18): a scene in the terminal is built, as a cvcGL extension of the terminal backends.**
+> `cvc::gl::ariadne::TerminalScene` renders the document's SCENE offscreen (X / EGL / OSMesa) and the half-block
+> rasterizer (tier 3 below) draws it as the terminal backend's background, with the widgets drawn natively over it by
+> FTXUI or tvision, rather than mirroring the ImGui overlay's pixels. Background drags / the wheel steer the camera.
+> Host: `ariadne_terminal`; test: `cvcgl_terminal_scene`. Sixel / Kitty and the golden-image harness (1) remain.
+
 **Phasing.** (1) EGL offscreen + `frameRGB` **golden-image test harness** for the ImGui/VTK backend (v1.x —
 the testability win). (2) The half-block-ANSI rasterizer (a pure RGB→bytes function + tests — no GPU needed
 to test *it*). (3) Sixel, then Kitty. (4) Interactive input + the `cvcgl --terminal` product mode.
