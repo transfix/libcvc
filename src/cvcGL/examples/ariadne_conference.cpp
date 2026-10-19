@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h> // gethostname (default --name to the host name)
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // register_room_intrinsics (room-join/roster/leave)
 #include <cvc/ariadne/loader.h>
@@ -103,12 +104,12 @@ int main(int argc, char **argv) {
       height = std::atoi(next("768"));
     else if (!std::strcmp(a, "--component-path"))
       componentPaths.push_back(next(""));
-    else if (!std::strcmp(a, "--node-id"))
-      nodeId = next("");
+    else if (!std::strcmp(a, "--node-id") || !std::strcmp(a, "--name"))
+      nodeId = next(""); // this participant's display name + cluster id (unique per participant)
     else if (!std::strcmp(a, "--room"))
       roomId = next("standup");
     else if (!std::strcmp(a, "--peer-id"))
-      peerId = next("");
+      peerId = next(""); // deprecated/ignored: N-party discovers all peers from the room roster
     else if (!std::strcmp(a, "--state-listen"))
       stateListen = next("");
     else if (!std::strcmp(a, "--state-peer"))
@@ -119,6 +120,13 @@ int main(int argc, char **argv) {
       mediaServer = next("");
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
+  }
+  // Joining a room (a peer to dial or a state addr to serve) with no explicit --name defaults the
+  // display name to this host's name — so a friend just runs with --state-peer/--media-server and
+  // is discovered by everyone else through the replicated roster (no --peer-id needed).
+  if (nodeId.empty() && (!statePeer.empty() || !stateListen.empty())) {
+    char hn[256] = {0};
+    nodeId = (gethostname(hn, sizeof(hn) - 1) == 0 && hn[0]) ? std::string(hn) : std::string("guest");
   }
   const bool clustered = !nodeId.empty();
   cvc::ariadne::register_cvc_uri_handler(componentPaths);
@@ -184,10 +192,24 @@ int main(int argc, char **argv) {
     shard->install_as_default(); // room-join/-publish derive the pid from the default shard's node
                                  // id
     state_tp->register_shard(shard.get());
-    if (!statePeer.empty() &&
-        !state_tp->connect_to_peer(statePeer, std::chrono::milliseconds(4000)))
-      std::printf("[ariadne_conference] WARN: could not dial state peer %s (still serving)\n",
-                  statePeer.c_str());
+    if (!statePeer.empty()) {
+      if (state_tp->connect_to_peer(statePeer, std::chrono::milliseconds(4000))) {
+        // Bootstrap the CURRENT room tree from the server. The journal backfill on connect carries
+        // only new mutations, so a late joiner would miss participants who joined before it — a
+        // snapshot carries the whole tree (every participant + stream descriptor), ingested into
+        // our shard, so the roster and the tiles converge for the 3rd, 4th, ... person to join.
+        state_tp->request_snapshot(
+            "conf", "",
+            [&shard](const std::vector<cvc::state_transport::snapshot_entry> &entries, bool) {
+              if (shard)
+                for (const auto &e : entries)
+                  shard->ingest_snapshot_entry(e);
+            });
+      } else {
+        std::printf("[ariadne_conference] WARN: could not dial state peer %s (still serving)\n",
+                    statePeer.c_str());
+      }
+    }
     // Media plane: a gRPC stream bridge. room-publish serve_port()s on it; room-subscribe pulls a
     // peer's stream from the endpoint the peer advertised in the room tree.
     media_tp = std::make_unique<cvc::stream_transport_grpc>();
@@ -200,14 +222,11 @@ int main(int argc, char **argv) {
     std::vector<std::string> ce;
     ari::run_init(app, sg.getStatePrefix(),
                   "(state-set \"conf.room\" \"" + roomId + "\") (state-set \"conf.self\" \"" +
-                      nodeId + "\") (state-set \"conf.peer\" \"" + peerId + "\")" +
-                      (useMic ? " (state-set \"mic_live\" \"1\")" : ""),
+                      nodeId + "\")" + (useMic ? " (state-set \"mic_live\" \"1\")" : ""),
                   &ce);
-    std::printf(
-        "[ariadne_conference] clustered: node='%s' room='%s' peer='%s' | state=%s dial=%s | "
-        "media=%s\n",
-        nodeId.c_str(), roomId.c_str(), peerId.c_str(), state_tp->listen_address().c_str(),
-        statePeer.empty() ? "(none)" : statePeer.c_str(), media_endpoint.c_str());
+    std::printf("[ariadne_conference] clustered: node='%s' room='%s' | state=%s dial=%s | media=%s\n",
+                nodeId.c_str(), roomId.c_str(), state_tp->listen_address().c_str(),
+                statePeer.empty() ? "(none)" : statePeer.c_str(), media_endpoint.c_str());
   }
 #else
   if (clustered)
@@ -364,23 +383,26 @@ int main(int argc, char **argv) {
   if (shard)
     shard->detach();
   if (clustered) {
-    // Report what converged: the replicated roster, and whether the peer's streams were pulled.
+    // Report what converged: the replicated roster, and how many OTHER participants' cameras this
+    // node pulled (N-party — every non-self participant should have a subscribed camera proxy).
     std::printf("[ariadne_conference] roster:");
     for (const ari::conference::room_participant &p : ari::conference::room_roster(app, roomId))
       std::printf(" %s(%s)", p.pid.c_str(), p.name.c_str());
     std::printf("\n");
     auto &reg = sx::stream_registry::for_app(app);
-    int pulled = 0;
-    for (const char *k : {"camera", "audio"}) {
-      const std::string tok = peerId + ".streams." + k;
-      const bool live = reg.lookup(tok) != nullptr;
-      std::printf("[ariadne_conference] peer %s %s\n", tok.c_str(),
+    int peers = 0, subscribed = 0;
+    for (const ari::conference::room_participant &p : ari::conference::room_roster(app, roomId)) {
+      if (p.pid == nodeId)
+        continue;
+      ++peers;
+      const bool live = reg.lookup(p.pid + ".streams.camera") != nullptr;
+      std::printf("[ariadne_conference] peer %s camera %s\n", p.pid.c_str(),
                   live ? "SUBSCRIBED" : "(not yet)");
-      pulled += live ? 1 : 0;
+      subscribed += live ? 1 : 0;
     }
-    std::printf("[ariadne_conference] node '%s': %d/2 peer streams subscribed\n", nodeId.c_str(),
-                pulled);
-    return pulled == 2 ? 0 : 3;
+    std::printf("[ariadne_conference] node '%s': subscribed %d/%d peers\n", nodeId.c_str(),
+                subscribed, peers);
+    return (peers > 0 && subscribed == peers) ? 0 : 3;
   }
 #endif
 
