@@ -94,7 +94,39 @@ The plan, in order:
      modes, and the stopping envelope.
 3. **P8b, the rest:** `rollout_kind::dynamic` in both trainers. Gate: on the Jolt plant, a policy
    trained on the dynamic model beats the point-mass one over paired seeds.
-4. **P8c:** a differentiable power model and energy in the loss, calibrated to the P3 ledger.
+4. **The external-force port:** the differentiable rollout takes a per-agent force, as the
+   deployed `drive_step_ext` does, for cvcdbg's comm-network trainer, which replaces its
+   point-mass surrogate with this rollout (agreed with the DBG session, 2026-10-19).
+   - `bike_control` sums an optional F_ext (drive frame) into the force accumulator and, when
+     `steer`, into the steering bias, exactly like `ext_force`. Off is byte-identical.
+   - `bike_control_bwd` returns dL/dF_ext. Two forms: a per-step value with the caller's 2x2
+     dF_ext/d(o), and a per-substep callback with a callback VJP.
+   - A trajectory helper records each step's state; its reverse takes dL/dstate_t at every step.
+     Coefficient gradients are optional.
+   - The same port on the dynamic plant's path; a torch twin in GRL-SNAM.
+5. **P8d: a two-track (four-wheel) dynamic plant** with its adjoint, beside `dyn_plant` (Joe,
+   2026-10-19: "add the four-wheel plant to the roadmap, you build it"). It is full Ackermann for
+   the trainers and for cvcdbg.
+   - Wheels: four contact points from the body's pose and the vehicle's geometry, Ackermann
+     angles on the front pair from the controller's δ_cmd, and the drive and brake split per
+     wheel.
+   - The ground per wheel: μ from the material grip field and the terrain height sampled under
+     each wheel.
+   - Suspension: a spring-damper corner per wheel feeding that tire's normal load, with the
+     body's heave, roll and pitch. This replaces P8a's quasi-static longitudinal transfer.
+   - Tires: Pacejka per tire within a combined-slip friction ellipse. The stiff lateral solve
+     reuses P8a's per-tire secant linearization.
+   - Inputs and adjoint: the same (δ_cmd, a_cmd), so `bike_control` and its adjoint are reused,
+     plus the external-force port. The VJP is on forward-mode duals, like `dyn_plant`.
+   - Parameters from `vehicle_desc`: track, wheel positions, suspension rates and the centre of
+     gravity's height, as `dyn_bike_si_of` does for P8a.
+   - Gates: a gradient check; the single-track limit (zero track, rigid corners) against
+     `dyn_plant`; steady load transfer against the quasi-static formula; μ-split braking yaws
+     toward the high-μ side; a bump under one wheel moves its load; the P2 envelopes (skidpad,
+     stopping, Ackermann) against Jolt's wheeled vehicle; goldens for a GRL-SNAM torch twin.
+   - CPU first. CUDA comes later, as for `dyn_plant`.
+6. **P8c:** a differentiable power model and energy in the loss, calibrated to the P3 ledger
+   (after P8d, Joe 2026-10-19).
 
 How the physics channels enter training:
 
@@ -337,7 +369,16 @@ P4 adds three things to measure and contain the drift:
       selection noise is the limit; the training signal is. Lever: Jolt reach as the training
       objective (a zeroth-order fine-tune of the selected policy on `reach_on_plant`), or a loss
       closer to it.
-  - P8c is not started.
+    - Zeroth-order fine-tuning on Jolt reach (`cvc::physics::es_finetune_on_plant`):
+      - ES over every weight, and over the basin alone, found nothing. The trained policy sits
+        near a local top, and ES steps move reach less than the plant's chaos.
+      - A grid over the constant basin did: (alpha, beta, gamma) = (1, 9, 4) reaches 55.4% held
+        out against the seed's 51.7%, +3.8 [+1.9, +5.7]. It is one grid step from a cliff where
+        a goal spring too strong for the damping collapses reach to about 20%.
+      - So the policy's leverage on Jolt is mostly its basin. A learned, state-dependent policy
+        that beats the seed is still open.
+  - Next, in order (Joe 2026-10-19): the external-force port (started), P8d (the four-wheel
+    plant), then P8c.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle

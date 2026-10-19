@@ -20,6 +20,7 @@
 //  7. in the Jolt arm the speed never exceeds the latency-aware stopping speed.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +32,7 @@
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_route.h>
+#include <cvc/physics/nav_es.h>
 #include <cvc/physics/nav_eval.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
@@ -1093,4 +1095,262 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
               nval, base.lr, base.steps, base.checkpoint_every, 100 * ma, 100 * mb, 100 * mc,
               100 * (mb - ma), 100 * lo1, 100 * hi1, 100 * (mb - mc), 100 * lo2, 100 * hi2);
   EXPECT_TRUE(std::isfinite(mb));
+}
+
+// The zeroth-order fine-tune's mechanics, small and quick: a batch of policies scores what each
+// scores alone; the trace has the start and every update; the result is never below the start
+// on validation; and a rerun repeats it exactly.
+TEST(NavPlant, EsFinetuneOnPlantMechanics) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  cvc::nav::train_config cfg;
+  cfg.hidden = 16;
+  const cvc::nav::coef_mlp p = cvc::nav::coef_trainer(cfg, 1).to_coef_mlp();
+  const cvc::nav::coef_mlp q = cvc::nav::coef_trainer(cfg, 2).to_coef_mlp();
+  plant_reach_options few;
+  few.agents = 8;
+  few.ticks = 80;
+  few.seeds = {200u, 201u};
+  std::vector<std::vector<double>> per;
+  const std::vector<double> both = reach_on_plant({p, q}, sc, rr, kCityL, few, &per);
+  std::vector<double> pa, qa;
+  EXPECT_EQ(both[0], reach_on_plant(p, sc, rr, kCityL, few, &pa));
+  EXPECT_EQ(both[1], reach_on_plant(q, sc, rr, kCityL, few, &qa));
+  EXPECT_EQ(per[0], pa);
+  EXPECT_EQ(per[1], qa);
+
+  es_options o;
+  o.iterations = 2;
+  o.pairs = 2;
+  o.train_seeds = 1;
+  o.validate_every = 1;
+  o.reach = few;
+  const es_result a = es_finetune_on_plant(p, sc, rr, kCityL, o);
+  ASSERT_EQ(a.trace.size(), 3u);
+  EXPECT_EQ(a.trace[0].iteration, 0);
+  EXPECT_TRUE(std::isnan(a.trace[0].population_mean));
+  EXPECT_DOUBLE_EQ(a.trace[0].validation, 0.5 * (pa[0] + pa[1]));
+  EXPECT_GE(a.best_validation, a.trace[0].validation);
+  for (int i = 1; i <= 2; ++i) {
+    EXPECT_EQ(a.trace[i].iteration, i);
+    EXPECT_TRUE(std::isfinite(a.trace[i].population_mean));
+    EXPECT_TRUE(std::isfinite(a.trace[i].validation));
+  }
+  const es_result b = es_finetune_on_plant(p, sc, rr, kCityL, o);
+  EXPECT_EQ(b.best_iteration, a.best_iteration);
+  EXPECT_EQ(b.best.export_flat().data, a.best.export_flat().data);
+  std::printf("  ES mechanics: validation %.3f -> %.3f -> %.3f, best at %d\n",
+              a.trace[0].validation, a.trace[1].validation, a.trace[2].validation,
+              a.best_iteration);
+}
+
+// The zeroth-order fine-tune on Jolt reach (P8b): the dynamic-trained policy at its selected
+// checkpoint (1e-4, 300 steps, step 130 of the 32-seed selection) climbs reach_on_plant itself
+// by antithetic ES, validated on 32 seeds (200..231), then faces the gate's 20 held-out seeds
+// against its start and the seed. P8B_ES_ITERS / _PAIRS / _SIGMA / _LR / _TRAIN_SEEDS / _TAIL
+// override es_options; P8B_ES_START=seed starts from coef_mlp::default_biased() instead (use it
+// with P8B_ES_TAIL=3, the basin).
+TEST(NavPlantConvergence, EsFinetuneOnJoltReach) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  cvc::nav::train_config dc;
+  dc.n = 128;
+  dc.hidden = 64;
+  dc.horizon = 28;
+  dc.window = 7;
+  dc.steps = 300;
+  dc.seed = 0;
+  dc.lr = 1e-4f;
+  dc.checkpoint_every = 10;
+  dc.rollout = cvc::nav::rollout_kind::dynamic;
+  dc.dyn = nav_plant::dyn_bike_params_at(rr, dc.veh_L);
+  cvc::nav::coef_trainer dy(dc, 1);
+  const char *which = std::getenv("P8B_ES_START");
+  const bool from_seed = which && std::string(which) == "seed";
+  cvc::nav::coef_mlp start = cvc::nav::coef_mlp::default_biased();
+  if (!from_seed) {
+    // Its selected checkpoint without re-scoring every one on Jolt: a fitness that peaks there.
+    dy.train(sc, false,
+             [](const cvc::nav::coef_mlp &, int step) { return step == 130 ? 1.0 : 0.0; });
+    start = dy.to_coef_mlp();
+  }
+
+  es_options o;
+  o.reach.seeds.clear();
+  for (unsigned s = 200; s < 232; ++s)
+    o.reach.seeds.push_back(s);
+  if (const char *e = std::getenv("P8B_ES_ITERS"))
+    o.iterations = std::atoi(e);
+  if (const char *e = std::getenv("P8B_ES_PAIRS"))
+    o.pairs = std::atoi(e);
+  if (const char *e = std::getenv("P8B_ES_SIGMA"))
+    o.sigma = static_cast<float>(std::atof(e));
+  if (const char *e = std::getenv("P8B_ES_LR"))
+    o.lr = static_cast<float>(std::atof(e));
+  if (const char *e = std::getenv("P8B_ES_TRAIN_SEEDS"))
+    o.train_seeds = std::atoi(e);
+  if (const char *e = std::getenv("P8B_ES_TAIL"))
+    o.tail = std::atoi(e);
+  double rms = 0.0;
+  for (const float x : start.export_flat().data)
+    rms += static_cast<double>(x) * x;
+  rms = std::sqrt(rms / static_cast<double>(start.export_flat().data.size()));
+  std::printf("  ES from %s (weight RMS %.4f): %d iterations of %d pairs, sigma %.3f, lr %.4f, "
+              "%d training seeds, tail %d\n",
+              from_seed ? "the seed" : "the dynamic policy at step 130", rms, o.iterations, o.pairs,
+              o.sigma, o.lr, o.train_seeds, o.tail);
+  const es_result r = es_finetune_on_plant(start, sc, rr, kCityL, o, [](const es_iteration &t) {
+    std::printf("    iteration %3d: population %.3f, validation %s\n", t.iteration,
+                t.population_mean,
+                std::isnan(t.validation) ? "-" : std::to_string(t.validation).substr(0, 5).c_str());
+    std::fflush(stdout);
+  });
+
+  const plant_reach_options eval; // the gate's 20 held-out seeds
+  std::vector<double> a, b, c;
+  const double ma = reach_on_plant(start, sc, rr, kCityL, eval, &a);
+  const double mb = reach_on_plant(r.best, sc, rr, kCityL, eval, &b);
+  const double mc = reach_on_plant(cvc::nav::coef_mlp::default_biased(), sc, rr, kCityL, eval, &c);
+  std::vector<double> d_start(a.size()), d_seed(a.size());
+  for (std::size_t s = 0; s < a.size(); ++s) {
+    d_start[s] = b[s] - a[s];
+    d_seed[s] = b[s] - c[s];
+  }
+  double lo1, hi1, lo2, hi2;
+  paired_ci(d_start, lo1, hi1);
+  paired_ci(d_seed, lo2, hi2);
+  std::printf("  ES best at iteration %d (validation %.3f from %.3f); held-out reach: %.1f%% "
+              "tuned, %.1f%% its start, %.1f%% the seed; tuned - start %+.1f [%+.1f, %+.1f], "
+              "tuned - seed %+.1f [%+.1f, %+.1f]\n",
+              r.best_iteration, r.best_validation, r.trace[0].validation, 100 * mb, 100 * ma,
+              100 * mc, 100 * (mb - ma), 100 * lo1, 100 * hi1, 100 * (mb - mc), 100 * lo2,
+              100 * hi2);
+  EXPECT_GE(r.best_validation, r.trace[0].validation);
+}
+
+// How much the policy moves Jolt reach at all (P8b's ES diagnosis): on the 32 validation seeds,
+// the seed's constant coefficients halved and doubled one at a time, the dynamic-trained policy
+// at its selected checkpoint, and random perturbations of it at three sizes.
+TEST(NavPlantConvergence, CoefficientLeverageOnJoltReach) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  plant_reach_options val;
+  val.seeds.clear();
+  for (unsigned s = 200; s < 232; ++s)
+    val.seeds.push_back(s);
+  // A constant-coefficient policy: zero weights, the basin (alpha, beta, gamma) as its bias.
+  const auto basin = [](float al, float be, float ga) {
+    const std::vector<int> rows = {64, 64, 3}, cols = {5, 64, 64};
+    std::vector<std::vector<float>> w(3), b(3);
+    for (int L = 0; L < 3; ++L) {
+      w[L].assign(static_cast<std::size_t>(rows[L] * cols[L]), 0.0f);
+      b[L].assign(static_cast<std::size_t>(rows[L]), 0.0f);
+    }
+    return cvc::nav::coef_mlp::from_layers(5, 3, rows, cols, {1, 1, 0}, w, b, {al, be, ga});
+  };
+  std::vector<std::string> names;
+  std::vector<cvc::nav::coef_mlp> pols;
+  const auto add = [&](const std::string &name, const cvc::nav::coef_mlp &p) {
+    names.push_back(name);
+    pols.push_back(p);
+  };
+  add("seed (1, 3, 4)", basin(1, 3, 4));
+  add("alpha x0.5", basin(0.5f, 3, 4));
+  add("alpha x2", basin(2, 3, 4));
+  add("beta x0.5", basin(1, 1.5f, 4));
+  add("beta x2", basin(1, 6, 4));
+  add("gamma x0.5", basin(1, 3, 2));
+  add("gamma x2", basin(1, 3, 8));
+  cvc::nav::train_config dc;
+  dc.n = 128;
+  dc.hidden = 64;
+  dc.horizon = 28;
+  dc.window = 7;
+  dc.steps = 300;
+  dc.seed = 0;
+  dc.lr = 1e-4f;
+  dc.checkpoint_every = 10;
+  dc.rollout = cvc::nav::rollout_kind::dynamic;
+  dc.dyn = nav_plant::dyn_bike_params_at(rr, dc.veh_L);
+  cvc::nav::coef_trainer dy(dc, 1);
+  dy.train(sc, false, [](const cvc::nav::coef_mlp &, int step) { return step == 130 ? 1.0 : 0.0; });
+  const cvc::nav::coef_mlp start = dy.to_coef_mlp();
+  add("dynamic-trained, step 130", start);
+  const std::vector<float> theta = start.export_flat().data;
+  std::mt19937 rng(7);
+  for (const float sigma : {0.02f, 0.05f, 0.1f})
+    for (int k = 0; k < 2; ++k) {
+      std::vector<float> w = theta;
+      for (float &x : w) {
+        // Box-Muller on raw mt19937 output, as nav_es does.
+        const double u1 = (static_cast<double>(rng()) + 0.5) / 4294967296.0,
+                     u2 = (static_cast<double>(rng()) + 0.5) / 4294967296.0;
+        x += sigma *
+             static_cast<float>(std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2));
+      }
+      add("  + sigma " + std::to_string(sigma).substr(0, 4) + " #" + std::to_string(k + 1),
+          start.with_flat_weights(w));
+    }
+  const std::vector<double> m = reach_on_plant(pols, sc, rr, kCityL, val);
+  std::printf("  reach on the 32 validation seeds (about 0.5 points of chaos each):\n");
+  for (std::size_t i = 0; i < pols.size(); ++i)
+    std::printf("    %-28s %.1f%%\n", names[i].c_str(), 100 * m[i]);
+  EXPECT_EQ(m.size(), pols.size());
+}
+
+// A zeroth-order search over the coefficient basin alone (P8b): constant (alpha, beta, gamma)
+// policies on a grid, scored on the 32 validation seeds; the top three then face the gate's 20
+// held-out seeds against the seed's (1, 3, 4).
+TEST(NavPlantConvergence, BasinGridOnJoltReach) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  plant_reach_options val;
+  val.seeds.clear();
+  for (unsigned s = 200; s < 232; ++s)
+    val.seeds.push_back(s);
+  const auto basin = [](float al, float be, float ga) {
+    const std::vector<int> rows = {64, 64, 3}, cols = {5, 64, 64};
+    std::vector<std::vector<float>> w(3), b(3);
+    for (int L = 0; L < 3; ++L) {
+      w[L].assign(static_cast<std::size_t>(rows[L] * cols[L]), 0.0f);
+      b[L].assign(static_cast<std::size_t>(rows[L]), 0.0f);
+    }
+    return cvc::nav::coef_mlp::from_layers(5, 3, rows, cols, {1, 1, 0}, w, b, {al, be, ga});
+  };
+  std::vector<std::array<float, 3>> grid;
+  for (const float be : {3.0f, 4.5f, 6.0f, 9.0f})
+    for (const float ga : {2.0f, 3.0f, 4.0f})
+      grid.push_back({1.0f, be, ga});
+  std::vector<cvc::nav::coef_mlp> pols;
+  for (const std::array<float, 3> &g : grid)
+    pols.push_back(basin(g[0], g[1], g[2]));
+  const std::vector<double> m = reach_on_plant(pols, sc, rr, kCityL, val);
+  std::vector<std::size_t> order(grid.size());
+  for (std::size_t i = 0; i < order.size(); ++i)
+    order[i] = i;
+  std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return m[a] > m[b]; });
+  std::printf("  basin grid on the 32 validation seeds (alpha 1):\n");
+  for (const std::size_t i : order)
+    std::printf("    beta %.1f gamma %.1f: %.1f%%\n", grid[i][1], grid[i][2], 100 * m[i]);
+  const plant_reach_options eval; // the gate's 20 held-out seeds
+  std::vector<double> c;
+  const double mc = reach_on_plant(basin(1, 3, 4), sc, rr, kCityL, eval, &c);
+  for (int k = 0; k < 3; ++k) {
+    const std::size_t i = order[k];
+    std::vector<double> b;
+    const double mb = reach_on_plant(pols[i], sc, rr, kCityL, eval, &b);
+    std::vector<double> d(b.size());
+    for (std::size_t s = 0; s < b.size(); ++s)
+      d[s] = b[s] - c[s];
+    double lo, hi;
+    paired_ci(d, lo, hi);
+    std::printf("  held out: beta %.1f gamma %.1f reaches %.1f%% against the seed's %.1f%%: %+.1f "
+                "[%+.1f, %+.1f]\n",
+                grid[i][1], grid[i][2], 100 * mb, 100 * mc, 100 * (mb - mc), 100 * lo, 100 * hi);
+  }
+  EXPECT_EQ(m.size(), grid.size());
 }

@@ -100,6 +100,18 @@ double reach_once(const cvc::nav::coef_mlp &policy, const cvc::nav::training_sce
 double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &scene,
                       const vehicle_desc &d, double wheelbase, const plant_reach_options &o,
                       std::vector<double> *per_seed) {
+  std::vector<std::vector<double>> per;
+  const std::vector<double> m = reach_on_plant(std::vector<cvc::nav::coef_mlp>{policy}, scene, d,
+                                               wheelbase, o, per_seed ? &per : nullptr);
+  if (per_seed)
+    *per_seed = per[0];
+  return m[0];
+}
+
+std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
+                                   const cvc::nav::training_scene &scene, const vehicle_desc &d,
+                                   double wheelbase, const plant_reach_options &o,
+                                   std::vector<std::vector<double>> *per_seed) {
   if (!backend_available(backend::jolt))
     throw std::runtime_error("cvc::physics::reach_on_plant: this libcvc was built without Jolt");
   if (!(wheelbase > 0.0) || !(d.wheelbase() > 0.0) || o.agents <= 0 || o.ticks <= 0 ||
@@ -108,15 +120,19 @@ double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training
                                 "ticks and at least one seed");
   const double s_per_m = wheelbase / d.wheelbase();
   const double mpw = scene.scale / s_per_m; // metres per world unit
-  const int n = static_cast<int>(o.seeds.size());
+  const int ns = static_cast<int>(o.seeds.size());
+  const int n = static_cast<int>(policies.size()) * ns; // one run per (policy, seed)
   const int hw = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
   const int workers = std::min(n, o.threads > 0 ? o.threads : hw);
   std::vector<double> r(static_cast<std::size_t>(n));
+  const auto run = [&](int k, int step_threads) {
+    r[k] = reach_once(policies[k / ns], scene, d, mpw, o, o.seeds[k % ns], step_threads);
+  };
   if (workers <= 1) {
     for (int k = 0; k < n; ++k)
-      r[k] = reach_once(policy, scene, d, mpw, o, o.seeds[k], 0);
+      run(k, 0);
   } else {
-    // Each worker takes the next seed. A seed's world, sim_world and plant are its own, and its
+    // Each worker takes the next run. A run's world, sim_world and plant are its own, and its
     // agents step on the worker's thread.
     std::atomic<int> next{0};
     std::vector<std::exception_ptr> errors(static_cast<std::size_t>(workers));
@@ -125,7 +141,7 @@ double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training
       pool.emplace_back([&, t] {
         try {
           for (int k = next++; k < n; k = next++)
-            r[k] = reach_once(policy, scene, d, mpw, o, o.seeds[k], 1);
+            run(k, 1);
         } catch (...) {
           errors[t] = std::current_exception();
           next = n; // the others stop after their current seed
@@ -137,12 +153,18 @@ double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training
       if (e)
         std::rethrow_exception(e);
   }
+  std::vector<double> mean(policies.size(), 0.0);
   if (per_seed)
-    *per_seed = r;
-  double sum = 0.0;
-  for (const double x : r)
-    sum += x;
-  return sum / static_cast<double>(n);
+    per_seed->assign(policies.size(), std::vector<double>());
+  for (std::size_t p = 0; p < policies.size(); ++p) {
+    for (int s = 0; s < ns; ++s)
+      mean[p] += r[p * ns + s];
+    mean[p] /= ns;
+    if (per_seed)
+      (*per_seed)[p].assign(r.begin() + static_cast<long>(p * ns),
+                            r.begin() + static_cast<long>((p + 1) * ns));
+  }
+  return mean;
 }
 
 } // namespace physics

@@ -377,8 +377,60 @@ The validation curves (32 seeds), from the untrained policy's 0.494:
   as the training objective (for example a zeroth-order fine-tune of the selected policy on
   `reach_on_plant`), or a loss closer to it.
 
+**Zeroth-order fine-tuning on Jolt reach** (`cvc::physics::es_finetune_on_plant`,
+`inc/cvc/physics/nav_es.h`):
+
+- **The method.** Antithetic evolution strategies over the policy's flat weights
+  (`coef_mlp::export_flat` / `with_flat_weights`).
+  - Each iteration scores `pairs` perturbations either way on fresh city seeds, shared by the
+    whole population.
+  - Centred ranks weight the directions into a gradient estimate, which Adam follows.
+  - The centre is validated on `reach.seeds`, and the best is kept, the start included.
+  - `tail = 3` searches only the output layer's bias, which shifts the coefficient basin.
+- **The tests.** `NavPlantConvergence.EsFinetuneOnJoltReach` (`P8B_ES_*` override it), with
+  `CoefficientLeverageOnJoltReach` and `BasinGridOnJoltReach` alongside.
+
+How much the policy moves Jolt reach (32 validation seeds; `CoefficientLeverageOnJoltReach`):
+
+| Policy | Reach |
+|---|---|
+| the seed's constant (alpha, beta, gamma) = (1, 3, 4) | 50.2% |
+| alpha x0.5 / x2 | 46.0% / 49.7% |
+| beta x0.5 / x2 | 47.1% / 52.0% |
+| gamma x0.5 / x2 | 51.3% / 47.5% |
+| the dynamic-trained policy at its selected checkpoint | 52.1% |
+| it + random weight noise, sigma 0.02 / 0.05 / 0.1 | 50.7-50.8% / 51.4% / 48.2-51.1% |
+
+- **The basin has the leverage, about ±4 points.** Every random weight perturbation of the
+  trained policy costs 0.7 to 4 points: it sits near a local top.
+- **ES over all 4,739 weights** (40 iterations x 16 pairs, sigma 0.02, 4 seeds each) never
+  beat its start on validation; held out it stays at 52.3%.
+- **ES over the basin** (`tail = 3`, 30 x 8 pairs, sigma 0.2, 8 seeds each): from the trained
+  policy, again no gain. From the seed, +1.0 on validation but -0.1 [-2.3, +2.1] held out. Its
+  steps (about 6% in beta) move reach less than the plant's chaos.
+
+**A grid over the basin does what ES could not** (`BasinGridOnJoltReach`): constant policies
+with alpha 1, beta in {3, 4.5, 6, 9} and gamma in {2, 3, 4}, on the 32 validation seeds; the
+top three then on the 20 held-out seeds against the seed.
+
+| Basin | Validation | Held out | Against the seed (51.7%) |
+|---|---|---|---|
+| beta 9, gamma 4 | 52.1% | 55.4% | +3.8 [+1.9, +5.7] |
+| beta 6, gamma 4 | 52.0% | 52.7% | +1.0 [-1.0, +2.9] |
+| beta 4.5, gamma 2 | 51.4% | 54.2% | +2.5 [+0.3, +4.7] |
+
+- **The first policy that beats the seed on Jolt outside the CI.** It is the seed's own form with
+  a three-times stronger goal spring: (1, 9, 4).
+- **It sits on a cliff's edge.** A goal spring too strong for the damping collapses reach to
+  about 20%: beta 9 with gamma 3, beta 6 with gamma 2, and beta 9 with gamma 2 all did. The
+  winner is one grid step from it.
+- **So the coefficient policy's leverage on Jolt is mostly its basin.** The seed's basin was
+  tuned on the kinematic sim. The learned, state-dependent part adds little on this vehicle and
+  this city.
+
 Not yet:
-- a trained policy that beats the seed on Jolt outside the CI;
+- a learned, state-dependent policy that beats the seed on Jolt outside the CI (a tuned
+  constant basin does, above);
 - pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
   turns on only the bicycle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
