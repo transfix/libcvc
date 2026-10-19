@@ -29,6 +29,9 @@
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_stream_transport_grpc.h>
 #include <cvc/state/state_transport_grpc.h>
+#if CVC_ENABLE_WS
+#include <cvc/state/state_transport_ws.h> // browser (wasm) clients join over WebSocket, bridged to gRPC
+#endif
 #include <set>
 #include <string>
 #include <thread>
@@ -41,6 +44,9 @@ void on_signal(int) { g_stop.store(true); }
 int main(int argc, char **argv) {
   std::string room = "standup", nodeId = "server";
   std::string stateListen = "0.0.0.0:7700", mediaListen = "0.0.0.0:7701";
+#if CVC_ENABLE_WS
+  std::string wsListen = "0.0.0.0:7702"; // WebSocket control plane for browser (wasm) clients
+#endif
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -52,6 +58,10 @@ int main(int argc, char **argv) {
       stateListen = next(stateListen.c_str());
     else if (!std::strcmp(a, "--media-listen"))
       mediaListen = next(mediaListen.c_str());
+#if CVC_ENABLE_WS
+    else if (!std::strcmp(a, "--ws-listen"))
+      wsListen = next(wsListen.c_str());
+#endif
   }
 
   cvc::app app;
@@ -66,6 +76,20 @@ int main(int argc, char **argv) {
   shard.install_as_default();
   state_tp.register_shard(&shard);
 
+#if CVC_ENABLE_WS
+  // WebSocket control plane + the WS<->gRPC bridge, so BROWSER (wasm) clients join the SAME room as
+  // native gRPC clients: each backend relays within itself, and the bridge carries a frame received
+  // on one onto the other's connections (same shard, so both back-fill new peers). Live roster /
+  // stream-descriptor mutations cross both ways now; request_snapshot over WS for a late joiner's
+  // full bootstrap is Phase 2 (a browser joining a populated room sees peers that join AFTER it).
+  cvc::state_transport_ws ws_tp;
+  ws_tp.start(wsListen, nodeId, "conf");
+  ws_tp.set_relay(true);
+  ws_tp.register_shard(&shard);
+  state_tp.set_bridge(&ws_tp);
+  ws_tp.set_bridge(&state_tp);
+#endif
+
   // Media plane: a stream_relay. Constructed BEFORE media_tp.start() (it installs the frame
   // router).
   cvc::stream_transport_grpc media_tp;
@@ -77,6 +101,10 @@ int main(int argc, char **argv) {
   std::printf("[ariadne-server] relay up | room='%s' node='%s' | state=%s | media=%s\n",
               room.c_str(), nodeId.c_str(), state_tp.listen_address().c_str(),
               media_tp.listen_address().c_str());
+#if CVC_ENABLE_WS
+  std::printf("[ariadne-server] websocket (browser) clients: ws=%s (bridged to the gRPC room)\n",
+              ws_tp.listen_address().c_str());
+#endif
   std::fflush(stdout);
 
   std::set<std::string> relayed;
@@ -103,6 +131,14 @@ int main(int argc, char **argv) {
               relay.stream_count(), static_cast<unsigned long long>(relay.frames_forwarded()));
   relay.stop();
   media_tp.stop();
+#if CVC_ENABLE_WS
+  // Drop the bridge cross-pointers before stopping, so an in-flight inbound frame cannot forward
+  // onto a transport that is being torn down.
+  state_tp.set_bridge(nullptr);
+  ws_tp.set_bridge(nullptr);
+  ws_tp.unregister_shard(&shard);
+  ws_tp.stop();
+#endif
   state_tp.unregister_shard(&shard);
   state_tp.stop();
   shard.detach();

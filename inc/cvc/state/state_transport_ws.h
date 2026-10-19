@@ -152,6 +152,12 @@ public:
   void admit_connection(const std::shared_ptr<connection> &conn);
   void unregister_connection(connection *conn);
   void increment_recv_frames() noexcept { _recv_frames.fetch_add(1, std::memory_order_relaxed); }
+  // Parse one inbound Frame (serialized protobuf bytes) off `c` and dispatch it (Hello / Mutation /
+  // Message). Shared by the native reader loop and the wasm onmessage callback.
+  void deliver_inbound(connection *c, const void *data, std::size_t len);
+  // (wasm) Once the browser socket's onopen fires it can send, so push Hello + the backfill — the
+  // deferred second half of admit_connection for a connection that cannot send until it is open.
+  void on_connection_open(connection *c);
 
 private:
   void send_hello_locked(connection &c);

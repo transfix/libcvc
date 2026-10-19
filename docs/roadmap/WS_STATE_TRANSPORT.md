@@ -14,15 +14,28 @@
   (synchronous, one reader thread per connection), the full `state_transport` interface
   (register/publish/pump/flush) + `publish_message`, star-topology `set_relay()`, and
   backfill-on-connect. Hello / Mutation / Message frames over WS binary; chunk / snapshot / heartbeat
-  are Phase 2 (base-class defaults for now). The emscripten (browser) client is scaffolded
-  (`#ifdef __EMSCRIPTEN__`) and filled in with the wasm build (Phase 2).
+  are Phase 2 (base-class defaults for now).
+- ✅ **Emscripten (browser) client implemented** — under `#ifdef __EMSCRIPTEN__` the connection wraps
+  a browser WebSocket (`emscripten/websocket.h`): `connect_to_peer()` opens it and registers
+  open/message/close/error callbacks (no reader thread — onmessage drives `deliver_inbound()`), Hello
+  + backfill go out in `on_connection_open()` once the socket can send, and `write_locked()` uses
+  `emscripten_websocket_send_binary`. Compiles clean under `emcc` (the native reader and the browser
+  callback share one `deliver_inbound()`). The full browser round-trip needs the wasm conference
+  build + a reachable relay (next).
+- ✅ **WS↔gRPC bridge** — `state_transport::set_bridge(peer)` (base class): a frame received on one
+  backend is, after its own relay, published on the bridged peer so it fans out to the peer's
+  connections. `publish()`/`publish_message()` do not re-enter `on_inbound`, so no loop forms, and
+  the receiver's dedup makes the redundant shard apply a no-op. This is how a browser (WS) and a
+  native (gRPC) client share one room.
 - ✅ `CVC_ENABLE_WS` CMake option — generates the proto **messages** independently of
   `CVC_ENABLE_GRPC` (a messages-only `protoc --cpp_out` when gRPC is off; the combined gRPC gen when
   on, so both-on does not double-generate), links `protobuf::libprotobuf`, rides SetupBoost's
   `Boost::system`/`Boost::thread`.
-- ✅ `state_transport_ws_test` — 5 tests green (local build, grpc-on): start/stop, connect-fails,
-  live mutation server→client, late-joiner backfill, and **relay bridges two pure clients** (the
-  conference topology — clients that dial with no local acceptor, as a wasm peer will).
+- ✅ `state_transport_ws_test` — **6 tests green** (local, grpc-on): start/stop, connect-fails, live
+  mutation server→client, late-joiner backfill, **relay bridges two pure clients** (the conference
+  topology), and **`BridgeWsAndGrpcClientsShareARoom`** — a native WS client and a native gRPC client
+  reach each other through one bridged relay (the browser↔native interop proof). The first five also
+  pass grpc-off (0 `grpc::` symbols in that `libcvc.so`).
 
 **Teardown note (learned):** a synchronous Beast `accept()`/`read()` already blocked in a thread is
 NOT interrupted by closing the socket from another thread. `stop()` therefore `shutdown()`s each
@@ -51,7 +64,15 @@ wake the blocked `accept()`, then joins.
 5. **Test** `state_transport_ws_test` (mirror `state_transport_grpc_test`): two transports (server + client) over `ws://127.0.0.1:0`, register a shard each, publish + `pump_all`, `wait_for_received`, assert the mutation crossed byte-for-byte; a second case with the server in `relay()` mode bridging two clients.
 
 ## Phase 2 (after the native MVP is green)
+- ✅ **The WS↔gRPC relay bridge** — done as `state_transport::set_bridge(peer)` (base class) + the
+  `on_inbound_*` forward in both back ends; proven by `BridgeWsAndGrpcClientsShareARoom`. The relay
+  server (`arisrv`) still needs to be wired to actually create both a `state_transport_grpc` and a
+  `state_transport_ws` over the same shards and call `set_bridge` both ways + `start` both acceptors
+  (a ~dozen lines in `ariadne_server_main.cpp`; today it starts only the gRPC acceptor). (Cleanest
+  long-term remains a transport-neutral `connection` interface so one relay holds mixed connections.)
+- **Wasm conference build.** Compile the conference client to wasm (grpc OFF, WS ON) with the
+  emscripten client (link `-lwebsocket.js`); the browser dials `wss://` the relay → the
+  cyberpcangel.com MVP. This is the remaining end-to-end step and the only one not yet exercised.
 - `request_snapshot` over WS (the conference late-joiner bootstrap) + `fetch_chunk` (blob data plane) + heartbeat.
 - `wss://` (TLS) + bearer-token auth (mirror `state_transport_grpc`'s `tls_config`/`auth_config`).
-- **The WS↔gRPC relay bridge.** The conference relay (`arisrv`) runs a `state_transport_grpc` AND a `state_transport_ws` over the SAME shards; a small bridge forwards frames between the two connection sets so WS and gRPC clients share the room. (Cleanest long-term: a transport-neutral `connection` interface both back ends implement, so one relay holds mixed connections and `relay()` fans out across all.)
-- wasm build: compile the WS transport with the emscripten client, wire it into the conference wasm build (grpc OFF, WS ON) → the cyberpcangel.com MVP.
+- Cleanup: extract the Frame codec (duplicated verbatim from `state_transport_grpc.cpp`) into a shared TU.

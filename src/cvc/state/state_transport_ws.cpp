@@ -32,6 +32,10 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
+#else
+#include <cstdint>
+#include <cstring>
+#include <emscripten/websocket.h>
 #endif
 
 namespace cvc {
@@ -245,12 +249,24 @@ public:
     return true;
   }
 #else
-  // Browser WebSocket handle (EMSCRIPTEN_WEBSOCKET_T). Wired up with the wasm build (Phase 2); for
-  // now the client path is scaffolded and write is a no-op so the native-independent logic
-  // compiles.
-  int em_socket = -1;
-  bool can_write() const { return em_socket >= 0; }
-  bool write_locked(const pb::Frame &) { return false; }
+  // Browser WebSocket: the handle, a back-pointer to the owning transport (for the C callbacks),
+  // and an `open` flag — the browser cannot send until onopen has fired. There is no reader thread;
+  // the onmessage callback drives deliver_inbound().
+  EMSCRIPTEN_WEBSOCKET_T em_socket = -1;
+  state_transport_ws *owner = nullptr;
+  bool open = false;
+
+  bool can_write() const { return em_socket >= 0 && open; }
+
+  bool write_locked(const pb::Frame &f) {
+    if (!alive.load() || em_socket < 0 || !open)
+      return false;
+    std::string bytes;
+    if (!f.SerializeToString(&bytes))
+      return false;
+    return emscripten_websocket_send_binary(em_socket, const_cast<char *>(bytes.data()),
+                                            static_cast<uint32_t>(bytes.size())) >= 0;
+  }
 #endif
 
   bool write(const pb::Frame &f) {
@@ -425,24 +441,8 @@ void state_transport_ws::read_loop(std::shared_ptr<connection> conn) {
     conn->ws->read(buffer, ec);
     if (ec)
       break; // peer closed, or socket closed by stop()
-    increment_recv_frames();
     std::string bytes = beast::buffers_to_string(buffer.data());
-    pb::Frame in;
-    if (!in.ParseFromString(bytes))
-      continue;
-    // Dispatch (MVP: Hello / Mutation / Message; chunk / snapshot / heartbeat are Phase 2).
-    if (in.has_hello()) {
-      conn->remote_node_id = in.hello().node_id();
-      conn->remote_cluster_id = in.hello().cluster_id();
-    } else if (in.has_mutation()) {
-      on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
-      _recv_mutations.fetch_add(1, std::memory_order_relaxed);
-      { std::lock_guard<std::mutex> lk(_recv_mu); }
-      _recv_cv.notify_all();
-    } else if (in.has_message()) {
-      on_inbound_message(decode_message(in.message()), conn.get());
-      _recv_messages.fetch_add(1, std::memory_order_relaxed);
-    }
+    deliver_inbound(conn.get(), bytes.data(), bytes.size());
   }
   conn->alive.store(false);
 }
@@ -494,21 +494,86 @@ void state_transport_ws::stop() {
   _impl->acceptor.reset();
 }
 
-#else // __EMSCRIPTEN__ — browser client scaffold; the real emscripten WebSocket client is Phase 2.
+#else // __EMSCRIPTEN__ — the browser WebSocket client.
+
+namespace {
+// The browser fires these on the event loop; userData is the connection* (kept alive by _conns),
+// which carries a back-pointer to its owning transport. A browser is a client only, so there is no
+// accept path and no reader thread — onmessage is the reader.
+bool em_ws_on_open(int, const EmscriptenWebSocketOpenEvent *, void *ud) {
+  auto *c = static_cast<state_transport_ws::connection *>(ud);
+  c->owner->on_connection_open(c);
+  return true;
+}
+bool em_ws_on_message(int, const EmscriptenWebSocketMessageEvent *e, void *ud) {
+  auto *c = static_cast<state_transport_ws::connection *>(ud);
+  if (!e->isText) // frames are binary protobuf
+    c->owner->deliver_inbound(c, e->data, e->numBytes);
+  return true;
+}
+bool em_ws_on_close(int, const EmscriptenWebSocketCloseEvent *, void *ud) {
+  auto *c = static_cast<state_transport_ws::connection *>(ud);
+  c->open = false;
+  c->alive.store(false);
+  return true;
+}
+bool em_ws_on_error(int, const EmscriptenWebSocketErrorEvent *, void *ud) {
+  auto *c = static_cast<state_transport_ws::connection *>(ud);
+  c->alive.store(false);
+  return true;
+}
+} // namespace
 
 void state_transport_ws::start(const std::string &, const std::string &, const std::string &) {
-  throw std::runtime_error(
-      "state_transport_ws::start: a server acceptor is not supported under wasm");
+  throw std::runtime_error("state_transport_ws::start: a server acceptor is not supported under "
+                           "wasm (browser = client)");
 }
 
-bool state_transport_ws::connect_to_peer(const std::string &, std::chrono::milliseconds) {
-  // Phase 2: open an emscripten WebSocket, register open/message callbacks that feed
-  // dispatch_frame, send Hello, and resolve once EMSCRIPTEN_WEBSOCKET_ONOPEN fires.
-  return false;
-}
-
-void state_transport_ws::read_loop(std::shared_ptr<connection>) {}
 void state_transport_ws::accept_loop() {}
+void state_transport_ws::read_loop(std::shared_ptr<connection>) {}
+
+bool state_transport_ws::connect_to_peer(const std::string &url,
+                                         std::chrono::milliseconds timeout) {
+  (void)timeout; // the browser cannot block for the handshake; onopen drives the rest
+  if (!emscripten_websocket_is_supported())
+    return false;
+
+  EmscriptenWebSocketCreateAttributes attrs;
+  emscripten_websocket_init_create_attributes(&attrs);
+  attrs.url = url.c_str();
+  attrs.createOnMainThread = true;
+  EMSCRIPTEN_WEBSOCKET_T sock = emscripten_websocket_new(&attrs);
+  if (sock < 0)
+    return false;
+
+  auto conn = std::make_shared<connection>();
+  conn->em_socket = sock;
+  conn->owner = this;
+  // Register now so the connection is visible; Hello + backfill are deferred to on_connection_open
+  // (the socket cannot send until it is open). userData is conn.get(), kept alive by _conns.
+  register_connection(conn);
+  _running.store(true);
+  emscripten_websocket_set_onopen_callback(sock, conn.get(), em_ws_on_open);
+  emscripten_websocket_set_onmessage_callback(sock, conn.get(), em_ws_on_message);
+  emscripten_websocket_set_onclose_callback(sock, conn.get(), em_ws_on_close);
+  emscripten_websocket_set_onerror_callback(sock, conn.get(), em_ws_on_error);
+  return true; // initiated; "connected" is when onopen fires (connection_count counts open sockets)
+}
+
+// Deferred second half of admit_connection for a browser socket: once onopen fires the socket can
+// send, so mark it open and push Hello + the backfill under its write lock.
+void state_transport_ws::on_connection_open(connection *c) {
+  std::vector<state_cluster_shard *> shards;
+  if (_backfill_on_connect.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+  std::lock_guard<std::mutex> wlk(c->write_mu);
+  c->open = true;
+  send_hello_locked(*c);
+  if (!shards.empty())
+    send_backfill_locked(*c, shards);
+}
 
 void state_transport_ws::stop() {
   if (!_running.exchange(false))
@@ -519,14 +584,43 @@ void state_transport_ws::stop() {
     conns = _conns;
     _conns.clear();
   }
-  for (auto &c : conns)
+  for (auto &c : conns) {
     c->alive.store(false);
+    c->open = false;
+    if (c->em_socket >= 0) {
+      emscripten_websocket_close(c->em_socket, 1000, "bye");
+      emscripten_websocket_delete(c->em_socket);
+      c->em_socket = -1;
+    }
+  }
 }
 
 #endif // __EMSCRIPTEN__
 
 std::string state_transport_ws::listen_address() const {
   return _impl ? _impl->listen_addr_resolved : std::string();
+}
+
+// Parse one inbound Frame (serialized protobuf bytes) and dispatch it. Shared by the native reader
+// loop and the browser onmessage callback. MVP handles Hello / Mutation / Message; chunk / snapshot
+// / heartbeat are Phase 2 (the base-class defaults cover their request paths).
+void state_transport_ws::deliver_inbound(connection *c, const void *data, std::size_t len) {
+  increment_recv_frames();
+  pb::Frame in;
+  if (!in.ParseFromArray(data, static_cast<int>(len)))
+    return;
+  if (in.has_hello()) {
+    c->remote_node_id = in.hello().node_id();
+    c->remote_cluster_id = in.hello().cluster_id();
+  } else if (in.has_mutation()) {
+    on_inbound_mutation(decode_mutation(in.mutation()), c);
+    _recv_mutations.fetch_add(1, std::memory_order_relaxed);
+    { std::lock_guard<std::mutex> lk(_recv_mu); }
+    _recv_cv.notify_all();
+  } else if (in.has_message()) {
+    on_inbound_message(decode_message(in.message()), c);
+    _recv_messages.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 void state_transport_ws::register_shard(state_cluster_shard *shard) {
@@ -737,6 +831,9 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
+  // Bridge to a sibling transport (the relay's other backend) so its connections get this mutation.
+  if (_bridge)
+    _bridge->publish(m);
 }
 
 void state_transport_ws::on_inbound_message(const state_message &m, connection *origin) {
@@ -771,6 +868,9 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
+  // Bridge to a sibling transport (the relay's other backend) so its connections get this message.
+  if (_bridge)
+    _bridge->publish_message(m);
 }
 
 void state_transport_ws::register_connection(std::shared_ptr<connection> conn) {

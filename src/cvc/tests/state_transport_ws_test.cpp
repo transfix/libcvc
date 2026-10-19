@@ -18,6 +18,9 @@
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport.h>
 #include <cvc/state/state_transport_ws.h>
+#if defined(CVC_ENABLE_GRPC)
+#include <cvc/state/state_transport_grpc.h>
+#endif
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
@@ -167,3 +170,70 @@ TEST(StateTransportWsTest, RelayBridgesTwoClients) {
   tB.stop();
   S.stop();
 }
+
+#if defined(CVC_ENABLE_GRPC)
+// The WS<->gRPC bridge (the wasm-interop payoff): a relay runs a gRPC acceptor AND a WebSocket
+// acceptor over the SAME shard, bridged both ways. A native WS client and a native gRPC client each
+// reach the other — exactly what a browser (WS) client and a native (gRPC) client will do in one
+// room, which is the whole point of carrying the identical Frame wire on both transports.
+TEST(StateTransportWsTest, BridgeWsAndGrpcClientsShareARoom) {
+  cvc::app aRelay, aWs, aGrpc;
+
+  // Relay: both backends over one shared shard, each relaying, bridged to each other.
+  cvc::state_transport_grpc G;
+  cvc::state_transport_ws W;
+  G.start("127.0.0.1:0", "relay", "C");
+  W.start("127.0.0.1:0", "relay", "C");
+  G.set_relay(true);
+  W.set_relay(true);
+  G.set_bridge(&W);
+  W.set_bridge(&G);
+  cvc::state_cluster_shard sR(aRelay, "C", "relay");
+  sR.attach();
+  G.register_shard(&sR);
+  W.register_shard(&sR);
+
+  // A WebSocket client (dials with no local acceptor — the browser topology).
+  cvc::state_transport_ws wc;
+  cvc::state_cluster_shard sWs(aWs, "C", "wsclient");
+  sWs.attach();
+  wc.register_shard(&sWs);
+  ASSERT_TRUE(wc.connect_to_peer(ws(W.listen_address()), std::chrono::milliseconds(2000)));
+
+  // A gRPC client.
+  cvc::state_transport_grpc gc;
+  gc.start("127.0.0.1:0", "grpcclient", "C");
+  cvc::state_cluster_shard sGrpc(aGrpc, "C", "grpcclient");
+  sGrpc.attach();
+  gc.register_shard(&sGrpc);
+  ASSERT_TRUE(gc.connect_to_peer(G.listen_address(), std::chrono::milliseconds(2000)));
+
+  ASSERT_TRUE(wait_until([&] { return G.connection_count() >= 1 && W.connection_count() >= 1; },
+                         std::chrono::milliseconds(2000)));
+
+  // WS client writes -> reaches the gRPC client through the bridge.
+  cvc::state::instance(aWs)("bridge.ws.k").value(std::string("seed"));
+  cvc::state::instance(aWs)("bridge.ws.k").value(std::string("from-ws"));
+  wc.pump_all();
+  wc.flush();
+  EXPECT_TRUE(
+      wait_until([&] { return cvc::state::instance(aGrpc)("bridge.ws.k").value() == "from-ws"; },
+                 std::chrono::milliseconds(3000)));
+  EXPECT_EQ(cvc::state::instance(aGrpc)("bridge.ws.k").value(), "from-ws");
+
+  // gRPC client writes -> reaches the WS client through the bridge.
+  cvc::state::instance(aGrpc)("bridge.grpc.k").value(std::string("seed"));
+  cvc::state::instance(aGrpc)("bridge.grpc.k").value(std::string("from-grpc"));
+  gc.pump_all();
+  gc.flush();
+  EXPECT_TRUE(
+      wait_until([&] { return cvc::state::instance(aWs)("bridge.grpc.k").value() == "from-grpc"; },
+                 std::chrono::milliseconds(3000)));
+  EXPECT_EQ(cvc::state::instance(aWs)("bridge.grpc.k").value(), "from-grpc");
+
+  wc.stop();
+  gc.stop();
+  W.stop();
+  G.stop();
+}
+#endif // CVC_ENABLE_GRPC

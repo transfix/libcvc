@@ -754,6 +754,10 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connecti
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
+  // Bridge to a sibling transport (e.g. the relay's WebSocket side) so its connections get this
+  // mutation — the WS<->gRPC bridge that puts browser (wasm) and native clients in one room.
+  if (_bridge)
+    _bridge->publish(m);
 }
 
 void state_transport_grpc::on_inbound_message(const state_message &m, connection *origin) {
@@ -789,6 +793,9 @@ void state_transport_grpc::on_inbound_message(const state_message &m, connection
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
+  // Bridge to a sibling transport (the relay's WebSocket side) so its connections get this message.
+  if (_bridge)
+    _bridge->publish_message(m);
 }
 
 void state_transport_grpc::register_connection(std::shared_ptr<connection> conn) {
