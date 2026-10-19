@@ -293,6 +293,13 @@ void stream_transport_grpc::start(const std::string &listen_addr) {
   int bound_port = 0;
   builder.SetMaxReceiveMessageSize(kStreamMaxMessageBytes);
   builder.SetMaxSendMessageSize(kStreamMaxMessageBytes);
+  // High-BDP (long-fat-network) tuning — see open_channel() for the rationale. The media egress
+  // (relay serve_port -> subscriber) writes from this server, so the window matters here too.
+  builder.AddChannelArgument("grpc.http2.bdp_probe", 1);
+  builder.AddChannelArgument("grpc.http2.lookahead_bytes", 16 * 1024 * 1024);
+  builder.AddChannelArgument("grpc.http2.max_frame_size", 1 * 1024 * 1024);
+  builder.AddChannelArgument("grpc.keepalive_permit_without_calls", 1);
+  builder.AddChannelArgument("grpc.http2.min_recv_ping_interval_without_data_ms", 5000);
   std::shared_ptr<grpc::ServerCredentials> server_creds;
   if (_tls_set && !_tls.server_cert_pem.empty() && !_tls.server_key_pem.empty()) {
     grpc::SslServerCredentialsOptions opts(
@@ -341,6 +348,17 @@ stream_transport_grpc::open_channel(const std::string &target, std::chrono::mill
   grpc::ChannelArguments args;
   args.SetMaxReceiveMessageSize(kStreamMaxMessageBytes);
   args.SetMaxSendMessageSize(kStreamMaxMessageBytes);
+  // High-BDP (long-fat-network) tuning. Media rides a SYNC bidi stream, so a Write blocks when the
+  // HTTP/2 flow-control window is exhausted; on a high-RTT internet path the small default window
+  // refills only once per round-trip, so throughput collapses to a few fps regardless of frame
+  // size. A large per-stream lookahead window (+ BDP probing to keep it sized, + keepalive so it
+  // does not collapse on brief idles) lets many frames be in flight and keeps the pipe full.
+  args.SetInt("grpc.http2.bdp_probe", 1);
+  args.SetInt("grpc.http2.lookahead_bytes", 16 * 1024 * 1024);
+  args.SetInt("grpc.http2.max_frame_size", 1 * 1024 * 1024);
+  args.SetInt("grpc.keepalive_time_ms", 15000);
+  args.SetInt("grpc.keepalive_timeout_ms", 5000);
+  args.SetInt("grpc.keepalive_permit_without_calls", 1);
   std::shared_ptr<grpc::ChannelCredentials> chan_creds;
   if (_tls_set && !_tls.root_ca_pem.empty()) {
     grpc::SslCredentialsOptions opts;
