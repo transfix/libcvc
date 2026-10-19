@@ -652,6 +652,7 @@ jobs:
             -DDISABLE_CGAL=OFF \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
+            -DCVC_ENABLE_WS=$grpc \
             -DCVC_ENABLE_GRPC=$grpc
 
       - name: Build

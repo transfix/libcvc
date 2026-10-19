@@ -1,0 +1,169 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+*/
+
+// Mirrors state_transport_grpc_test for the WebSocket backend: two transports over ws://127.0.0.1:0
+// replicate a room tree, a late joiner converges via backfill, and a relay bridges two pure clients
+// (the browser topology — clients that dial without a local acceptor, as a wasm peer will).
+
+#include <chrono>
+#include <cvc/core/app.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_transport.h>
+#include <cvc/state/state_transport_ws.h>
+#include <gtest/gtest.h>
+#include <string>
+#include <thread>
+
+namespace {
+
+bool wait_connected(cvc::state_transport_ws &a, cvc::state_transport_ws &b,
+                    std::chrono::milliseconds to) {
+  auto deadline = std::chrono::steady_clock::now() + to;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (a.connection_count() >= 1 && b.connection_count() >= 1)
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+// Spin until `pred` holds or timeout. Receive-side assertions need this rather than
+// wait_for_received(): that counter is bumped when a frame is decoded, a moment before
+// on_inbound_mutation has ingested it into the tree/replica.
+template <typename Pred> bool wait_until(Pred pred, std::chrono::milliseconds to) {
+  auto deadline = std::chrono::steady_clock::now() + to;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return pred();
+}
+
+std::string ws(const std::string &hostport) { return "ws://" + hostport; }
+
+} // namespace
+
+TEST(StateTransportWsTest, StartStopBindsEphemeralPort) {
+  cvc::state_transport_ws t;
+  ASSERT_NO_THROW(t.start("127.0.0.1:0", "A", "C"));
+  EXPECT_FALSE(t.listen_address().empty());
+  EXPECT_NE(t.listen_address(), "127.0.0.1:0");
+  t.stop();
+}
+
+TEST(StateTransportWsTest, ConnectFailsWhenPeerMissing) {
+  cvc::state_transport_ws t;
+  // A pure client needs no prior start(); dialing an unbound port must fail fast.
+  EXPECT_FALSE(t.connect_to_peer(ws("127.0.0.1:1"), std::chrono::milliseconds(300)));
+  t.stop();
+}
+
+// A server, B client. B dials A, then A writes — the mutation crosses live over the one WS stream.
+TEST(StateTransportWsTest, LiveMutationCrossesServerToClient) {
+  cvc::app aA, aB;
+  cvc::state_transport_ws tA, tB;
+  tA.start("127.0.0.1:0", "A", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  ASSERT_TRUE(tB.connect_to_peer(ws(tA.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  cvc::state::instance(aA)("live.k").value(std::string("seed"));
+  cvc::state::instance(aA)("live.k").value(std::string("v1"));
+  EXPECT_GT(tA.pump_all(), 0u);
+  tA.flush();
+
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("live.k").value() == "v1"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_EQ(cvc::state::instance(aB)("live.k").value(), "v1");
+
+  tA.stop();
+  tB.stop();
+}
+
+// A writes and pumps with nobody connected (the cursor advances regardless). B joins afterward and
+// must still converge — backfill-on-connect replays A's journaled local mutations to the new peer.
+TEST(StateTransportWsTest, LateJoinerReceivesWritesMadeBeforeItConnected) {
+  cvc::app aA, aB;
+  cvc::state_transport_ws tA, tB;
+  tA.start("127.0.0.1:0", "A", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state::instance(aA)("late.k").value(std::string("seed"));
+  cvc::state::instance(aA)("late.k").value(std::string("v1"));
+
+  ASSERT_EQ(tA.connection_count(), 0u);
+  EXPECT_GT(tA.pump_all(), 0u);
+  tA.flush();
+
+  // B dials A only now; the backfill goes out from A's server-side accept path. A never writes
+  // again.
+  ASSERT_TRUE(tB.connect_to_peer(ws(tA.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("late.k").value() == "v1"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_EQ(cvc::state::instance(aB)("late.k").value(), "v1");
+  EXPECT_GT(tA.total_backfilled(), 0u);
+
+  tA.stop();
+  tB.stop();
+}
+
+// The conference topology: a relay server S bridges two PURE clients (neither calls start(), as a
+// browser peer cannot). A's mutation reaches B only because S re-sends it to every other
+// connection.
+TEST(StateTransportWsTest, RelayBridgesTwoClients) {
+  cvc::app aA, aB;
+  cvc::state_transport_ws S, tA, tB;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true); // without this a leaf frame would die at the server
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  ASSERT_TRUE(tA.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  // Both clients must be on S before A writes, or the relayed frame has nowhere to land (S holds no
+  // journal of its own to backfill B with).
+  ASSERT_TRUE(
+      wait_until([&] { return S.connection_count() >= 2; }, std::chrono::milliseconds(2000)));
+
+  cvc::state::instance(aA)("relay.k").value(std::string("seed"));
+  cvc::state::instance(aA)("relay.k").value(std::string("hello"));
+  EXPECT_GT(tA.pump_all(), 0u);
+  tA.flush();
+
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("relay.k").value() == "hello"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_EQ(cvc::state::instance(aB)("relay.k").value(), "hello");
+
+  tA.stop();
+  tB.stop();
+  S.stop();
+}

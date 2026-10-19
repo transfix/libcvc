@@ -156,8 +156,11 @@ public:
 private:
   void send_hello_locked(connection &c);
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
-  // Serialize a mutation/message to a Frame and write it on `c`; returns bytes.
-  // (Defined in the impl TU — it owns the proto + Beast write.)
+
+  // Server accept loop (native) and the per-connection reader loop, both run on their own threads.
+  // Defined in the impl TU (it owns the proto parse + the Beast read/write); no-op under wasm.
+  void accept_loop();
+  void read_loop(std::shared_ptr<connection> conn);
 
   struct impl;
   std::unique_ptr<impl> _impl;

@@ -10,7 +10,24 @@
 
 ## Status
 - ✅ `inc/cvc/state/state_transport_ws.h` — the full API + design (this header).
-- ⏭️ `src/cvc/state/state_transport_ws.cpp` — the implementation (steps below).
+- ✅ `src/cvc/state/state_transport_ws.cpp` — **native MVP implemented and green.** Boost.Beast
+  (synchronous, one reader thread per connection), the full `state_transport` interface
+  (register/publish/pump/flush) + `publish_message`, star-topology `set_relay()`, and
+  backfill-on-connect. Hello / Mutation / Message frames over WS binary; chunk / snapshot / heartbeat
+  are Phase 2 (base-class defaults for now). The emscripten (browser) client is scaffolded
+  (`#ifdef __EMSCRIPTEN__`) and filled in with the wasm build (Phase 2).
+- ✅ `CVC_ENABLE_WS` CMake option — generates the proto **messages** independently of
+  `CVC_ENABLE_GRPC` (a messages-only `protoc --cpp_out` when gRPC is off; the combined gRPC gen when
+  on, so both-on does not double-generate), links `protobuf::libprotobuf`, rides SetupBoost's
+  `Boost::system`/`Boost::thread`.
+- ✅ `state_transport_ws_test` — 5 tests green (local build, grpc-on): start/stop, connect-fails,
+  live mutation server→client, late-joiner backfill, and **relay bridges two pure clients** (the
+  conference topology — clients that dial with no local acceptor, as a wasm peer will).
+
+**Teardown note (learned):** a synchronous Beast `accept()`/`read()` already blocked in a thread is
+NOT interrupted by closing the socket from another thread. `stop()` therefore `shutdown()`s each
+connection socket (which wakes a blocked `recv()`) and makes a throwaway loopback self-connect to
+wake the blocked `accept()`, then joins.
 
 ## Implementation steps
 

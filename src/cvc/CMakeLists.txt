@@ -76,6 +76,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_transport_inproc.h
   ../../inc/cvc/state/state_transport_ipc.h
   ../../inc/cvc/state/state_transport_grpc.h
+  ../../inc/cvc/state/state_transport_ws.h
   ../../inc/cvc/state/state_stream_transport_grpc.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
@@ -505,6 +506,10 @@ option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" O
 option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
 option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
+# WebSocket-based state_transport (browser/wasm interop). Needs only the generated Frame MESSAGES
+# (protobuf) + Boost.Beast (native) — independent of CVC_ENABLE_GRPC. OFF by default so a build with
+# no protobuf in its deps is unaffected; the wasm/conference builds turn it ON.
+option(CVC_ENABLE_WS "Enable WebSocket-based state_transport (wasm interop)" OFF)
 # XMLRPC support
 if(CVC_USING_XMLRPC)
   list(APPEND CVC_LINK_LIBS xmlrpc)
@@ -1174,31 +1179,15 @@ if(CVC_ENABLE_FFTW AND NOT _cvc_fft_provider STREQUAL "fftw")
                   "CVC_FFT_PROVIDER=${_cvc_fft_provider}.")
 endif()
 
-# gRPC-backed state transport (Phase 3e). Generates protobuf and
-# gRPC C++ stubs from libcvc/proto/state_transport.proto and links
-# the cvc target against gRPC::grpc++ + protobuf::libprotobuf.
-if(CVC_ENABLE_GRPC)
+# State-transport protobuf wire. Two transports share the generated Frame MESSAGES from
+# libcvc/proto/state_transport.proto: the gRPC transport (CVC_ENABLE_GRPC) also needs the SERVICE
+# stubs; the WebSocket transport (CVC_ENABLE_WS, wasm interop) needs only the messages. Generate the
+# messages once — the gRPC path emits them alongside the service in one protoc call, the WS-only path
+# emits just the messages — so enabling both does not double-generate.
+if(CVC_ENABLE_GRPC OR CVC_ENABLE_WS)
   find_package(Protobuf CONFIG QUIET)
   if(NOT Protobuf_FOUND)
     find_package(Protobuf REQUIRED)
-  endif()
-  find_package(gRPC CONFIG REQUIRED)
-
-  # Locate grpc_cpp_plugin executable.
-  if(TARGET gRPC::grpc_cpp_plugin)
-    set(_grpc_cpp_plugin_target gRPC::grpc_cpp_plugin)
-    get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
-      IMPORTED_LOCATION_RELEASE)
-    if(NOT _grpc_cpp_plugin_path)
-      get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
-        IMPORTED_LOCATION)
-    endif()
-  endif()
-  if(NOT _grpc_cpp_plugin_path)
-    find_program(_grpc_cpp_plugin_path grpc_cpp_plugin)
-    if(NOT _grpc_cpp_plugin_path)
-      message(FATAL_ERROR "CVC_ENABLE_GRPC: grpc_cpp_plugin not found")
-    endif()
   endif()
 
   # Locate protoc.
@@ -1206,6 +1195,11 @@ if(CVC_ENABLE_GRPC)
     set(_protoc_target protobuf::protoc)
   else()
     find_program(_protoc_path protoc REQUIRED)
+  endif()
+  if(_protoc_target)
+    set(_protoc_cmd $<TARGET_FILE:${_protoc_target}>)
+  else()
+    set(_protoc_cmd "${_protoc_path}")
   endif()
 
   set(_proto_src "${CMAKE_SOURCE_DIR}/proto/state_transport.proto")
@@ -1216,34 +1210,67 @@ if(CVC_ENABLE_GRPC)
   set(_proto_grpc_cc "${_proto_out_dir}/state_transport.grpc.pb.cc")
   set(_proto_grpc_h  "${_proto_out_dir}/state_transport.grpc.pb.h")
 
-  if(_protoc_target)
-    set(_protoc_cmd $<TARGET_FILE:${_protoc_target}>)
+  if(CVC_ENABLE_GRPC)
+    find_package(gRPC CONFIG REQUIRED)
+
+    # Locate grpc_cpp_plugin executable.
+    if(TARGET gRPC::grpc_cpp_plugin)
+      set(_grpc_cpp_plugin_target gRPC::grpc_cpp_plugin)
+      get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
+        IMPORTED_LOCATION_RELEASE)
+      if(NOT _grpc_cpp_plugin_path)
+        get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
+          IMPORTED_LOCATION)
+      endif()
+    endif()
+    if(NOT _grpc_cpp_plugin_path)
+      find_program(_grpc_cpp_plugin_path grpc_cpp_plugin)
+      if(NOT _grpc_cpp_plugin_path)
+        message(FATAL_ERROR "CVC_ENABLE_GRPC: grpc_cpp_plugin not found")
+      endif()
+    endif()
+
+    # Messages + gRPC service in one protoc call.
+    add_custom_command(
+      OUTPUT ${_proto_pb_cc} ${_proto_pb_h} ${_proto_grpc_cc} ${_proto_grpc_h}
+      COMMAND ${_protoc_cmd}
+        --proto_path=${CMAKE_SOURCE_DIR}/proto
+        --cpp_out=${_proto_out_dir}
+        --grpc_out=${_proto_out_dir}
+        --plugin=protoc-gen-grpc=${_grpc_cpp_plugin_path}
+        ${_proto_src}
+      DEPENDS ${_proto_src}
+      COMMENT "Generating protobuf/gRPC C++ stubs for state_transport.proto"
+      VERBATIM
+    )
+
+    list(APPEND SOURCE_FILES
+      state/state_transport_grpc.cpp
+      state/state_stream_transport_grpc.cpp
+      ariadne/stream/stream_bridge.cpp
+      ariadne/stream/stream_relay.cpp
+      ariadne/conference/room_media_intrinsics.cpp
+      ${_proto_pb_cc}
+      ${_proto_grpc_cc}
+    )
   else()
-    set(_protoc_cmd "${_protoc_path}")
+    # WebSocket-only: generate just the message classes (no gRPC plugin).
+    add_custom_command(
+      OUTPUT ${_proto_pb_cc} ${_proto_pb_h}
+      COMMAND ${_protoc_cmd}
+        --proto_path=${CMAKE_SOURCE_DIR}/proto
+        --cpp_out=${_proto_out_dir}
+        ${_proto_src}
+      DEPENDS ${_proto_src}
+      COMMENT "Generating protobuf C++ message classes for state_transport.proto (WS transport)"
+      VERBATIM
+    )
+    list(APPEND SOURCE_FILES ${_proto_pb_cc})
   endif()
 
-  add_custom_command(
-    OUTPUT ${_proto_pb_cc} ${_proto_pb_h} ${_proto_grpc_cc} ${_proto_grpc_h}
-    COMMAND ${_protoc_cmd}
-      --proto_path=${CMAKE_SOURCE_DIR}/proto
-      --cpp_out=${_proto_out_dir}
-      --grpc_out=${_proto_out_dir}
-      --plugin=protoc-gen-grpc=${_grpc_cpp_plugin_path}
-      ${_proto_src}
-    DEPENDS ${_proto_src}
-    COMMENT "Generating protobuf/gRPC C++ stubs for state_transport.proto"
-    VERBATIM
-  )
-
-  list(APPEND SOURCE_FILES
-    state/state_transport_grpc.cpp
-    state/state_stream_transport_grpc.cpp
-    ariadne/stream/stream_bridge.cpp
-    ariadne/stream/stream_relay.cpp
-    ariadne/conference/room_media_intrinsics.cpp
-    ${_proto_pb_cc}
-    ${_proto_grpc_cc}
-  )
+  if(CVC_ENABLE_WS)
+    list(APPEND SOURCE_FILES state/state_transport_ws.cpp)
+  endif()
 endif()
 
 # cvc::net — the synchronous HTTP client facade (roadmap §13.x). One HttpClient interface
@@ -1567,11 +1594,21 @@ endif()
 if(CVC_ENABLE_SDF)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_SDF)
 endif()
+if(CVC_ENABLE_GRPC OR CVC_ENABLE_WS)
+  # Both transports compile the generated Frame messages: share the generated-header include dir and
+  # the protobuf runtime link. Boost.Beast (the native WS) is header-only and rides SetupBoost's
+  # Boost::system/Boost::thread, already linked PUBLIC on cvc.
+  target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  target_link_libraries(cvc PRIVATE protobuf::libprotobuf)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES Protobuf)
+endif()
 if(CVC_ENABLE_GRPC)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
-  target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-  target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
-  list(APPEND CVC_PRIVATE_LINK_PACKAGES Protobuf gRPC)
+  target_link_libraries(cvc PRIVATE gRPC::grpc++)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES gRPC)
+endif()
+if(CVC_ENABLE_WS)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_WS)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)
