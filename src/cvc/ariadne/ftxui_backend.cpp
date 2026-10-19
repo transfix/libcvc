@@ -304,6 +304,16 @@ struct FtxuiBackend::Impl {
     int combo_n = 0;
     bool has_menubar = false;
     std::vector<Seam> seams; // draggable grid seams, for the hit-test
+    // Hosted chrome (Options::hosted): each window's body ("" = outside every window) and the menu
+    // bar's model, for the host to draw.
+    struct Body {
+      std::string title;
+      bool closable = false;
+      fx::Element body;
+      fx::Elements popups;
+    };
+    std::map<std::string, Body> bodies;
+    std::vector<FtxuiBackend::HostedMenu> menus;
   };
 
   struct Layer {
@@ -386,6 +396,10 @@ struct FtxuiBackend::Impl {
   std::map<std::string, Win> windows;
   std::map<std::string, GridSizes> grid_sizes;
   SeamDrag seam_drag;
+  std::map<std::string, fx::Elements> win_popups; // hosted: popups by owning window, this walk
+  std::map<std::string, int> body_h;              // hosted: each body's last rendered height
+  std::string host_window;                        // hosted: the window the current input is for
+  long walks = 0; // walks finished (hosted menus join from the second)
   long z_top = 0;
   std::unordered_map<std::string, fx::Box> boxes; // node-based: reflect() keeps references
   std::map<std::string, Picture> images;
@@ -421,7 +435,7 @@ struct FtxuiBackend::Impl {
       return static_cast<int>(std::lround(term_h * e.value / 100.0f));
     return 0;
   }
-  int top_row() const { return (walk.has_menubar || last.has_menubar) ? 1 : 0; }
+  int top_row() const { return !opt.hosted && (walk.has_menubar || last.has_menubar) ? 1 : 0; }
 
   Frame &top() { return stack.back(); }
   void add(fx::Element e) {
@@ -512,7 +526,12 @@ struct FtxuiBackend::Impl {
   }
 
   void focus_step(int dir) {
-    const std::vector<std::string> &order = last.focus_order;
+    std::vector<std::string> scoped; // hosted: focus moves stay inside the window input is for
+    if (opt.hosted)
+      for (const std::string &id : last.focus_order)
+        if (const Item *it = find_item(last, id); it && it->win == host_window)
+          scoped.push_back(id);
+    const std::vector<std::string> &order = opt.hosted ? scoped : last.focus_order;
     if (order.empty())
       return;
     const int n = static_cast<int>(order.size());
@@ -659,7 +678,7 @@ struct FtxuiBackend::Impl {
         moved = true;
         consumed = true;
       } else {
-        const Item *it = item_at(e.x, e.y, window_at(e.x, e.y), "");
+        const Item *it = item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), "");
         hovered = it ? it->id : "";
       }
       return;
@@ -729,8 +748,8 @@ struct FtxuiBackend::Impl {
         open_menu_at(t);
         return;
       }
-    const std::string win = window_at(x, y);
-    if (!win.empty()) {
+    const std::string win = opt.hosted ? host_window : window_at(x, y);
+    if (!win.empty() && !opt.hosted) { // a hosted window's chrome is the host's
       raise(win);
       if (shown.closable.count(win) && on_title("winx|" + win)) {
         close_win = win;
@@ -815,6 +834,11 @@ struct FtxuiBackend::Impl {
 
   void compose() {
     fx::Elements base = stack.empty() ? fx::Elements{} : std::move(stack.front().items);
+    if (opt.hosted) {
+      root = base.empty() ? fx::emptyElement() : fx::vbox(std::move(base));
+      walk.bodies[""] = Walk::Body{"", false, root, std::move(win_popups[""])};
+      return;
+    }
     fx::Elements column;
     if (menubar)
       column.push_back(menubar);
@@ -884,6 +908,7 @@ void FtxuiBackend::begin_frame() {
   m.walk = Impl::Walk{};
   m.layers.clear();
   m.popups.clear();
+  m.win_popups.clear();
   m.menubar = nullptr;
   m.tooltip.clear();
   m.last_item.clear();
@@ -902,6 +927,7 @@ void FtxuiBackend::end_frame() {
   }
   m.compose();
   m.settle();
+  ++m.walks;
 }
 
 // ---- menus
@@ -909,6 +935,13 @@ void FtxuiBackend::end_frame() {
 
 bool FtxuiBackend::begin_main_menu_bar() {
   Impl &m = *m_;
+  // Hosted menus are "open" to every walk (so the host can show and activate their items), which
+  // would run a menu toggle before the widgets after the bar — and the core seeds a bound key with
+  // the first default it meets, so a toggle for a window's tree.<id>.open would seed it closed
+  // before the window could seed it open. A menu otherwise first runs when the user opens it, after
+  // the first frame; hosted menus join the walk from the second frame to keep that order.
+  if (m.opt.hosted && m.walks == 0)
+    return false;
   Impl::Frame f;
   f.type = Impl::Frame::Type::Menubar;
   m.stack.push_back(std::move(f));
@@ -919,12 +952,26 @@ bool FtxuiBackend::begin_main_menu_bar() {
 void FtxuiBackend::end_main_menu_bar() {
   Impl &m = *m_;
   Impl::Frame f = m.pop();
+  if (m.opt.hosted)
+    return; // the host draws the bar from hosted_menus()
   f.items.push_back(fx::filler() | fx::inverted);
   m.menubar = fx::hbox(std::move(f.items));
 }
 
 bool FtxuiBackend::begin_menu(const char *label) {
   Impl &m = *m_;
+  if (m.top().type == Impl::Frame::Type::Menubar && m.opt.hosted) {
+    // Hosted: every menu is "open" to the walk, so its items are emitted (and so can be activated)
+    // and recorded into the model; nothing is drawn.
+    const std::string mid = std::string("menu|") + label;
+    m.walk.menus.push_back(HostedMenu{label, {}});
+    Impl::Frame f;
+    f.type = Impl::Frame::Type::Menu;
+    f.id = mid;
+    m.stack.push_back(std::move(f));
+    m.cur_menu = mid;
+    return true;
+  }
   if (m.top().type == Impl::Frame::Type::Menubar) {
     const std::string mid = std::string("menu|") + label;
     m.walk.menu_titles.push_back(mid);
@@ -953,6 +1000,10 @@ bool FtxuiBackend::begin_menu(const char *label) {
 void FtxuiBackend::end_menu() {
   Impl &m = *m_;
   Impl::Frame f = m.pop();
+  if (f.type == Impl::Frame::Type::Menu && m.opt.hosted) {
+    m.cur_menu.clear();
+    return;
+  }
   if (f.type == Impl::Frame::Type::Menu) {
     m.cur_menu.clear();
     fx::Element dd = (f.items.empty() ? fx::text(" (empty) ") : fx::vbox(std::move(f.items))) |
@@ -975,6 +1026,8 @@ bool FtxuiBackend::menu_item_action(const char *label) {
   m.leaf(id, true, el);
   if (hit && !m.cur_menu.empty())
     m.menu_close_req = true;
+  if (m.opt.hosted && !m.cur_menu.empty() && !m.walk.menus.empty())
+    m.walk.menus.back().items.push_back(HostedMenuItem{id, label, false, false, false});
   return hit;
 }
 
@@ -993,6 +1046,8 @@ BoolEdit FtxuiBackend::menu_item_toggle(const char *label, bool current) {
   if (m.has_focus(id))
     el = el | fx::inverted;
   m.leaf(id, true, el);
+  if (m.opt.hosted && !m.cur_menu.empty() && !m.walk.menus.empty())
+    m.walk.menus.back().items.push_back(HostedMenuItem{id, label, true, e.value, false});
   return e;
 }
 
@@ -1081,6 +1136,14 @@ void FtxuiBackend::end_window() {
   Impl &m = *m_;
   Impl::Frame f = m.pop();
   m.wins.pop_back();
+  if (m.opt.hosted) { // keep the body for the host's window; the frame is the host's
+    m.walk.bodies[f.id] =
+        Impl::Walk::Body{f.title, f.p_open != nullptr,
+                         f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items)),
+                         std::move(m.win_popups[f.id])};
+    m.walk.windows.push_back(f.id);
+    return;
+  }
   const Impl::Win &w = m.windows[f.id];
   // The window holding focus (or, failing that, the topmost) draws a heavy frame.
   bool holds_focus = false;
@@ -1351,7 +1414,12 @@ void FtxuiBackend::text_value_colored(const char *label, const std::string &valu
            text_block(std::string(label) + ": " + value) | fx::color(rgb_color(rgb)));
 }
 
-void FtxuiBackend::separator() { m_->add(fx::separator()); }
+void FtxuiBackend::separator() {
+  Impl &m = *m_;
+  if (m.opt.hosted && !m.cur_menu.empty() && !m.walk.menus.empty())
+    m.walk.menus.back().items.push_back(HostedMenuItem{"", "", false, false, true});
+  m.add(fx::separator());
+}
 
 bool FtxuiBackend::button(const char *label) {
   Impl &m = *m_;
@@ -1544,11 +1612,16 @@ IndexEdit FtxuiBackend::combo(const char *label, int current_index,
       rows.push_back(row | fx::reflect(m.boxes["combo|" + id + "#" + std::to_string(i)]));
     }
     const fx::Box &anchor = m.boxes[id];
+    // Hosted: the list belongs to the combo's window and is laid out in that window's cells.
+    const std::string win = m.wins.empty() ? std::string() : m.wins.back();
+    const auto bh = m.body_h.find(win);
+    const int room = m.opt.hosted && bh != m.body_h.end() ? bh->second : m.term_h;
     int y = anchor.y_max + 1;
-    if (y + n + 2 > m.term_h)
+    if (y + n + 2 > room)
       y = std::max(0, anchor.y_min - n - 2); // no room below: open upward
-    m.popups.push_back(
-        place(isolated(fx::vbox(std::move(rows)) | fx::border | fx::clear_under), anchor.x_min, y));
+    fx::Element list =
+        place(isolated(fx::vbox(std::move(rows)) | fx::border | fx::clear_under), anchor.x_min, y);
+    (m.opt.hosted ? m.win_popups[win] : m.popups).push_back(std::move(list));
     m.walk.combo_popup = id;
     m.walk.combo_n = n;
   }
@@ -1753,6 +1826,124 @@ bool FtxuiBackend::feed(Runtime &rt, const TermEvent &ev) {
   const bool used = m.consumed;
   m.end_event();
   return used;
+}
+
+// ---- hosted chrome
+// -------------------------------------------------------------------------------
+
+namespace {
+
+std::string sgr(const fx::Color &c, bool background) {
+  return c == fx::Color(fx::Color::Default) ? std::string() : c.Print(background);
+}
+
+} // namespace
+
+std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const {
+  const Impl &m = *m_;
+  std::vector<HostedWindow> out;
+  for (const std::string &id : m.last.windows) {
+    const auto b = m.last.bodies.find(id);
+    if (b == m.last.bodies.end())
+      continue;
+    HostedWindow hw;
+    hw.id = id;
+    hw.title = b->second.title;
+    hw.closable = b->second.closable;
+    if (const auto w = m.windows.find(id); w != m.windows.end()) {
+      hw.x = w->second.x;
+      hw.y = w->second.y;
+      hw.w = w->second.w;
+      hw.h = w->second.h;
+    }
+    if (b->second.body) {
+      b->second.body->ComputeRequirement();
+      hw.content_w = b->second.body->requirement().min_x;
+      hw.content_h = b->second.body->requirement().min_y;
+    }
+    out.push_back(std::move(hw));
+  }
+  return out;
+}
+
+std::vector<FtxuiBackend::HostedMenu> FtxuiBackend::hosted_menus() const { return m_->last.menus; }
+
+bool FtxuiBackend::hosted_root() const {
+  for (const Impl::Item &it : m_->last.items)
+    if (it.win.empty() && it.menu.empty())
+      return true;
+  return false;
+}
+
+std::string FtxuiBackend::tooltip() const { return m_->tooltip; }
+
+TermRows FtxuiBackend::render_window(const std::string &id, int width, int height) {
+  Impl &m = *m_;
+  TermRows rows;
+  const auto b = m.last.bodies.find(id);
+  if (b == m.last.bodies.end() || width <= 0 || height <= 0)
+    return rows;
+  m.body_h[id] = height;
+  fx::Elements stack{b->second.body ? b->second.body | fx::yframe : fx::emptyElement()};
+  for (const fx::Element &p : b->second.popups)
+    stack.push_back(p);
+  fx::Element el = fx::dbox(std::move(stack));
+  fx::Screen screen(width, height);
+  fx::Render(screen, el);
+  m.shown = m.last; // this window's boxes now hold its layout, in its own cells
+  rows.resize(static_cast<std::size_t>(height));
+  for (int y = 0; y < height; ++y) {
+    std::vector<TermCell> &row = rows[static_cast<std::size_t>(y)];
+    row.resize(static_cast<std::size_t>(width));
+    for (int x = 0; x < width; ++x) {
+      const fx::Cell &c = screen.CellAt(x, y);
+      TermCell &t = row[static_cast<std::size_t>(x)];
+      t.ch = c.character;
+      t.fg = sgr(c.foreground_color, false);
+      t.bg = sgr(c.background_color, true);
+      t.bold = c.bold;
+      t.dim = c.dim;
+      t.italic = c.italic;
+      t.underlined = c.underlined;
+      t.inverted = c.inverted;
+    }
+  }
+  return rows;
+}
+
+bool FtxuiBackend::feed_window(Runtime &rt, const std::string &id, const TermEvent &ev) {
+  m_->host_window = id;
+  return feed(rt, ev);
+}
+
+void FtxuiBackend::activate_menu_item(Runtime &rt, const std::string &item_id) {
+  Impl &m = *m_;
+  m.ev_live = false;
+  m.consumed = false;
+  m.press_id = item_id; // the walk's activated() takes it as a press
+  rt.render();
+  m.end_event();
+}
+
+void FtxuiBackend::close_window(Runtime &rt, const std::string &id) {
+  Impl &m = *m_;
+  m.close_win = id;
+  rt.render();
+  m.end_event();
+}
+
+void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h) {
+  Impl::Win &win = m_->windows[id];
+  win.x = x;
+  win.y = y;
+  win.w = w;
+  win.h = h;
+  win.placed = win.seeded = win.sized = true;
+}
+
+void FtxuiBackend::set_screen_size(int width, int height) {
+  m_->term_w = std::max(1, width);
+  m_->term_h = std::max(1, height);
 }
 
 // ---- the interactive loop
@@ -1973,41 +2164,42 @@ FtxuiBackend::RunExit FtxuiBackend::run(Runtime &rt, const RunOptions &opts) {
 
 FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &app) { return run(app, RunOptions{}); }
 
-FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &app, const RunOptions &opts) {
+void FtxuiBackend::forward_to_document(AppRuntime &app, const TermEvent &e) const {
   const int cw = m_->opt.cell_px_w, ch = m_->opt.cell_px_h;
-  // What the UI didn't use goes to the document's on_key / on_pointer, keys with SDL's modifier
-  // bits (shift 0x1, ctrl 0x40, alt 0x100) and a press + release pair (a terminal reports no
-  // key-up).
-  auto unhandled = [&app, cw, ch](const TermEvent &e) {
-    if (e.kind != TermEvent::Kind::Mouse) {
-      if (e.key.empty())
-        return;
-      const int mods = (e.shift ? 0x1 : 0) | (e.ctrl ? 0x40 : 0) | (e.alt ? 0x100 : 0);
-      app.post_key(true, e.key, mods);
-      app.post_key(false, e.key, mods);
+  // Keys carry SDL's modifier bits (shift 0x1, ctrl 0x40, alt 0x100) and go as a press + release
+  // pair (a terminal reports no key-up).
+  if (e.kind != TermEvent::Kind::Mouse) {
+    if (e.key.empty())
       return;
-    }
-    const double x = e.x * cw + cw / 2.0, y = e.y * ch + ch / 2.0;
-    switch (e.mouse) {
-    case TermEvent::Mouse::Press:
-      app.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonDown), x, y, 0, 0, e.button,
-                       1);
-      break;
-    case TermEvent::Mouse::Release:
-      app.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonUp), x, y, 0, 0, e.button, 1);
-      break;
-    case TermEvent::Mouse::Move:
-      app.post_pointer(static_cast<int>(InputEvent::Kind::MouseMove), x, y, 0, 0, e.button, 0);
-      break;
-    case TermEvent::Mouse::WheelUp:
-    case TermEvent::Mouse::WheelDown:
-      app.post_pointer(static_cast<int>(InputEvent::Kind::MouseWheel), x, y, 0,
-                       e.mouse == TermEvent::Mouse::WheelUp ? 1.0 : -1.0, 0, 0);
-      break;
-    }
-  };
+    const int mods = (e.shift ? 0x1 : 0) | (e.ctrl ? 0x40 : 0) | (e.alt ? 0x100 : 0);
+    app.post_key(true, e.key, mods);
+    app.post_key(false, e.key, mods);
+    return;
+  }
+  const double x = e.x * cw + cw / 2.0, y = e.y * ch + ch / 2.0;
+  switch (e.mouse) {
+  case TermEvent::Mouse::Press:
+    app.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonDown), x, y, 0, 0, e.button, 1);
+    break;
+  case TermEvent::Mouse::Release:
+    app.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonUp), x, y, 0, 0, e.button, 1);
+    break;
+  case TermEvent::Mouse::Move:
+    app.post_pointer(static_cast<int>(InputEvent::Kind::MouseMove), x, y, 0, 0, e.button, 0);
+    break;
+  case TermEvent::Mouse::WheelUp:
+  case TermEvent::Mouse::WheelDown:
+    app.post_pointer(static_cast<int>(InputEvent::Kind::MouseWheel), x, y, 0,
+                     e.mouse == TermEvent::Mouse::WheelUp ? 1.0 : -1.0, 0, 0);
+    break;
+  }
+}
+
+FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &app, const RunOptions &opts) {
+  // What the UI didn't use goes to the document's on_key / on_pointer.
   return run_loop(
-      app.runtime(), opts, [&] { app.drain(); }, [&] { return app.should_close(); }, unhandled);
+      app.runtime(), opts, [&] { app.drain(); }, [&] { return app.should_close(); },
+      [&](const TermEvent &e) { forward_to_document(app, e); });
 }
 
 bool FtxuiBackend::available() { return true; }
@@ -2075,6 +2267,16 @@ std::string FtxuiBackend::render_to_string(Runtime &, int, int, bool) {
   return "ari: libcvc was built without FTXUI (terminal backend unavailable)\n";
 }
 bool FtxuiBackend::feed(Runtime &, const TermEvent &) { return false; }
+std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const { return {}; }
+std::vector<FtxuiBackend::HostedMenu> FtxuiBackend::hosted_menus() const { return {}; }
+bool FtxuiBackend::hosted_root() const { return false; }
+std::string FtxuiBackend::tooltip() const { return {}; }
+TermRows FtxuiBackend::render_window(const std::string &, int, int) { return {}; }
+bool FtxuiBackend::feed_window(Runtime &, const std::string &, const TermEvent &) { return false; }
+void FtxuiBackend::activate_menu_item(Runtime &, const std::string &) {}
+void FtxuiBackend::close_window(Runtime &, const std::string &) {}
+void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int) {}
+void FtxuiBackend::set_screen_size(int, int) {}
 FtxuiBackend::RunExit FtxuiBackend::run_loop(Runtime &, const RunOptions &,
                                              const std::function<void()> &,
                                              const std::function<bool()> &,
@@ -2085,6 +2287,7 @@ FtxuiBackend::RunExit FtxuiBackend::run(Runtime &) { return {}; }
 FtxuiBackend::RunExit FtxuiBackend::run(Runtime &, const RunOptions &) { return {}; }
 FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &) { return {}; }
 FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &, const RunOptions &) { return {}; }
+void FtxuiBackend::forward_to_document(AppRuntime &, const TermEvent &) const {}
 bool FtxuiBackend::available() { return false; }
 
 #endif
