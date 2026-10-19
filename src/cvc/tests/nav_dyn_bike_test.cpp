@@ -23,6 +23,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/nav/coef_train.h>
@@ -1142,4 +1143,168 @@ TEST(DiffExtRollout, TheDynamicTwinMatchesItsStepsAndDifferences) {
       EXPECT_LT(num[k] / den[k], 5e-2) << "check " << k << ", hold " << hold;
     }
   }
+}
+
+// The torch twin's gate (GRL-SNAM): bike_rollout_ext and its reverse on fixed cases, with the
+// field they sample, written to tests/data/ext_rollout_golden.json. Six agents, 12 steps each,
+// per-step goals and coefficients, an affine force per agent (F = A o + b, J = A) held for 1 or
+// 3 steps, one agent whose force does not steer; the loss is L = sum_t w_t . state_t. The torch
+// twin replays it in float64 and checks this float reverse against autograd.
+// CVC_EXT_ROLLOUT_GOLDEN_WRITE=1 rewrites the file; otherwise this build must reproduce it (the
+// controller is float and uses libm, so to 1e-4, not bit for bit across platforms).
+TEST(DiffExtRollout, Golden) {
+  namespace fs = std::filesystem;
+  const fs::path path = fs::path(__FILE__).parent_path() / "data" / "ext_rollout_golden.json";
+  const int R = 32, C = 32, T = 12;
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(R * C), 0);
+  for (int r = 13; r <= 18; ++r)
+    for (int c = 12; c <= 19; ++c)
+      occ[static_cast<std::size_t>(r * C + c)] = 1;
+  const cvc::nav::training_scene sc =
+      cvc::nav::occupancy_scene(occ.data(), R, C, -100.0, -100.0, 100.0, 100.0, 0.05);
+  const cvc::nav::field_stack fst = sc.field();
+  diff::field F;
+  F.data = fst.data;
+  F.H = fst.H;
+  F.W = fst.W;
+  F.S = static_cast<float>(fst.S);
+  F.cx = static_cast<float>(fst.cx);
+  F.cy = static_cast<float>(fst.cy);
+  F.mnx = static_cast<float>(fst.mnx);
+  F.mny = static_cast<float>(fst.mny);
+  F.mxx = static_cast<float>(fst.mxx);
+  F.mxy = static_cast<float>(fst.mxy);
+  const cvc::nav::train_config tc;
+  bike_veh v{};
+  v.rr = sc.rr;
+  v.d_hat = sc.d_hat;
+  v.vmax = sc.vmax;
+  v.L = tc.veh_L;
+  v.delta_max = tc.veh_delta_max;
+  v.a_max = tc.veh_a_max;
+  v.a_lat_max = tc.veh_a_lat_max;
+  v.k_steer = tc.veh_k_steer;
+  v.hdt = sc.dt;
+  v.allow_reverse = tc.veh_allow_reverse ? 1 : 0;
+
+  struct gcase {
+    float s0[4], g0[2], A[4], b[2];
+    int hold, steer;
+  };
+  const gcase cases[] = {
+      {{-2.5f, -0.5f, 0.0f, 0.3f}, {2.5f, 0.3f}, {0.2f, -0.1f, 0.05f, 0.15f}, {0.1f, 0.2f}, 1, 1},
+      {{-2.4f, 0.6f, 0.2f, 0.6f}, {2.4f, -0.4f}, {-0.3f, 0.2f, 0.1f, -0.2f}, {0.0f, -0.3f}, 3, 1},
+      {{1.8f, -2.2f, 1.4f, 0.1f}, {-0.5f, 2.6f}, {0.4f, 0.0f, 0.0f, 0.4f}, {-0.2f, 0.1f}, 1, 1},
+      {{0.0f, 2.0f, -1.6f, 0.8f}, {0.3f, -2.5f}, {0.1f, 0.3f, -0.3f, 0.1f}, {0.3f, 0.0f}, 3, 1},
+      {{-1.5f, 1.4f, -0.4f, 0.5f}, {1.6f, 0.9f}, {0.25f, 0.1f, -0.1f, 0.25f}, {-0.1f, -0.1f}, 1, 1},
+      {{2.2f, 0.4f, 3.0f, 0.4f}, {-2.6f, -0.2f}, {0.15f, -0.2f, 0.2f, 0.15f}, {0.2f, 0.1f}, 3, 0},
+  };
+  // The loss weights, the same rule in the file and in the twin.
+  std::vector<float> w(static_cast<std::size_t>(4 * (T + 1)));
+  for (int t = 0; t <= T; ++t)
+    for (int k = 0; k < 4; ++k)
+      w[4 * t + k] = 0.1f * static_cast<float>((3 * t + k) % 7 - 3);
+
+  struct ctx {
+    float A[4], b[2];
+  };
+  const auto sample = [](void *user, int, float ox, float oy, float *f, float *J) {
+    const ctx &c = *static_cast<const ctx *>(user);
+    f[0] = c.A[0] * ox + c.A[1] * oy + c.b[0];
+    f[1] = c.A[2] * ox + c.A[3] * oy + c.b[1];
+    for (int k = 0; k < 4; ++k)
+      J[k] = c.A[k];
+  };
+  const auto num = [](double x) {
+    char b[40];
+    std::snprintf(b, sizeof b, "%.9g", x);
+    return std::string(b);
+  };
+  const auto arr = [&](const float *x, std::size_t n) {
+    std::string out = "[";
+    for (std::size_t k = 0; k < n; ++k)
+      out += (k ? ", " : "") + num(x[k]);
+    return out + "]";
+  };
+  std::vector<double> now;
+  std::ostringstream js;
+  js << "{\n \"format\": \"cvc-ext-rollout-golden-1\",\n";
+  js << " \"note\": \"diff::bike_rollout_ext (float) on fixed cases; L = sum_t w[t] . "
+        "(ox, oy, th, sp)_t\",\n";
+  const std::size_t HW = static_cast<std::size_t>(fst.H) * fst.W;
+  js << " \"field\": {\"H\": " << fst.H << ", \"W\": " << fst.W << ", \"bounds\": [" << num(fst.mnx)
+     << ", " << num(fst.mny) << ", " << num(fst.mxx) << ", " << num(fst.mxy) << "], \"center\": ["
+     << num(fst.cx) << ", " << num(fst.cy) << "], \"scale\": " << num(fst.S)
+     << ",\n  \"phi\": " << arr(fst.data, HW) << ",\n  \"nx\": " << arr(fst.data + HW, HW)
+     << ",\n  \"ny\": " << arr(fst.data + 2 * HW, HW) << "},\n";
+  js << " \"veh\": {\"rr\": " << num(v.rr) << ", \"d_hat\": " << num(v.d_hat)
+     << ", \"vmax\": " << num(v.vmax) << ", \"L\": " << num(v.L)
+     << ", \"delta_max\": " << num(v.delta_max) << ", \"a_max\": " << num(v.a_max)
+     << ", \"a_lat_max\": " << num(v.a_lat_max) << ", \"k_steer\": " << num(v.k_steer)
+     << ", \"hdt\": " << num(v.hdt) << ", \"allow_reverse\": " << v.allow_reverse << "},\n";
+  js << " \"T\": " << T << ",\n \"w\": " << arr(w.data(), w.size()) << ",\n \"cases\": [\n";
+  for (std::size_t ci = 0; ci < sizeof cases / sizeof cases[0]; ++ci) {
+    const gcase &gc = cases[ci];
+    std::vector<float> goal(2 * T), coef(3 * T);
+    for (int t = 0; t < T; ++t) {
+      goal[2 * t] = gc.g0[0] + 0.01f * static_cast<float>(t);
+      goal[2 * t + 1] = gc.g0[1] - 0.005f * static_cast<float>(t);
+      coef[3 * t] = 0.6f + 0.01f * static_cast<float>(t);
+      coef[3 * t + 1] = 1.8f - 0.02f * static_cast<float>(t);
+      coef[3 * t + 2] = 0.9f + 0.005f * static_cast<float>(t);
+    }
+    ctx cx;
+    for (int k = 0; k < 4; ++k)
+      cx.A[k] = gc.A[k];
+    cx.b[0] = gc.b[0];
+    cx.b[1] = gc.b[1];
+    diff::bike_ext_fn fn;
+    fn.sample = sample;
+    fn.user = &cx;
+    fn.hold = gc.hold;
+    fn.steer = gc.steer;
+    diff::bike_tape tape;
+    diff::bike_rollout_ext(F, v, gc.s0[0], gc.s0[1], gc.s0[2], gc.s0[3], goal.data(), coef.data(),
+                           T, fn, tape);
+    std::vector<float> g_fext(2 * T), g_coef(3 * T);
+    float g_init[4];
+    diff::bike_rollout_ext_bwd(F, v, tape, goal.data(), coef.data(), w.data(), g_fext.data(),
+                               g_coef.data(), g_init);
+    for (const float x : tape.state)
+      now.push_back(x);
+    for (const float x : g_fext)
+      now.push_back(x);
+    for (const float x : g_coef)
+      now.push_back(x);
+    for (const float x : g_init)
+      now.push_back(x);
+    js << "  {\"state0\": " << arr(gc.s0, 4) << ", \"A\": " << arr(gc.A, 4)
+       << ", \"b\": " << arr(gc.b, 2) << ", \"hold\": " << gc.hold << ", \"steer\": " << gc.steer
+       << ",\n   \"goals\": " << arr(goal.data(), goal.size())
+       << ",\n   \"coefs\": " << arr(coef.data(), coef.size())
+       << ",\n   \"states\": " << arr(tape.state.data(), tape.state.size())
+       << ",\n   \"g_fext\": " << arr(g_fext.data(), g_fext.size())
+       << ",\n   \"g_coef\": " << arr(g_coef.data(), g_coef.size())
+       << ",\n   \"g_init\": " << arr(g_init, 4) << "}"
+       << (ci + 1 < sizeof cases / sizeof cases[0] ? "," : "") << "\n";
+  }
+  js << " ]\n}\n";
+  const char *write = std::getenv("CVC_EXT_ROLLOUT_GOLDEN_WRITE");
+  if (write && std::string(write) == "1") {
+    std::ofstream(path, std::ios::binary) << js.str();
+    std::printf("  wrote %s\n", path.string().c_str());
+    return;
+  }
+  boost::property_tree::ptree want;
+  ASSERT_NO_THROW(boost::property_tree::read_json(path.string(), want)) << path;
+  std::vector<double> golden;
+  for (const auto &c : want.get_child("cases"))
+    for (const char *key : {"states", "g_fext", "g_coef", "g_init"})
+      for (const auto &x : c.second.get_child(key))
+        golden.push_back(x.second.get_value<double>());
+  ASSERT_EQ(golden.size(), now.size());
+  for (std::size_t k = 0; k < now.size(); ++k)
+    EXPECT_LE(std::fabs(now[k] - golden[k]),
+              1e-4 * std::max(1.0, std::max(std::fabs(now[k]), std::fabs(golden[k]))))
+        << "value " << k << ": golden " << golden[k] << ", now " << now[k];
 }
