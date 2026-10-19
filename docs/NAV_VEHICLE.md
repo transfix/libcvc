@@ -185,3 +185,47 @@ It ships when pycvc is next republished — which also needs the usual
 
 CUDA parity is measured on one device (sm_86) and is **not** a CI gate: CI has
 no GPU, so `CudaMatchesCpuWithEveryRefinement` skips there.
+
+## Routes a vehicle can drive: `plan_vehicle_route`
+
+`inc/cvc/nav/vehicle_route.h`. `grid_nav::astar` plans for a point that turns on the spot. A
+vehicle has a turning circle, a body and a reverse gear: a Humvee needs a 6.7 m circle and is
+4.8 m long. In a street narrower than that circle it cannot follow an 8-connected path round a
+corner, and it cannot turn back the way it came. The physics plant's Humvees wedge in exactly
+those places (the vehicle-physics roadmap, P9).
+
+`plan_vehicle_route` searches over the rear axle's pose (Hybrid A*):
+
+- **The moves.** Each move is an arc of `step` at a curvature of -1, -0.5, 0, 0.5 or 1 times
+  `1 / min_radius`, forward or backing up. The default step is 1.5 cells, but at most
+  0.6 x `min_radius`. The closed set is keyed at step / 1.5 whatever the grid, so a coarse grid
+  still turns in arcs it can resolve: Austin's 7.8 m cells are larger than a Humvee.
+- **The footprint.** The footprint discs (`sim_world::plant_plan_of` gives a plant vehicle's) must
+  keep `margin` from the walls. The walls' distance comes from the grid's exact distance
+  transform, sampled between cells.
+- **The cost.** The length driven; backing up costs `reverse_cost` (2) as much, and a change of
+  direction `cusp_cost` (4 steps) more. A little is added for steering, for changing the steer,
+  and for coming nearer a wall than `comfort`.
+- **The heuristic.** The free-space distance to the goal, weighted by `heuristic_weight` (1.5): the
+  route is at most that many times dearer than the cheapest, for far fewer expansions.
+
+A dead end, or a corner too tight to take forward, comes back as a multi-point turn: the poses
+between cusps are marked `reverse`. A vehicle that starts wedged, already inside its margin or
+touching a wall, may stay as close as it is for its first few moves, so the route can lead it
+out. A goal it cannot reach is reported, and the route ends at the nearest pose it found.
+
+Measured (`nav_vehicle_route_test`, the Humvee on 1 m cells):
+
+| Case | Route |
+|---|---|
+| Open ground, goal 70 m ahead | Straight, 70 m |
+| An 8 m dead end, facing its end, goal behind | Backs out (42 m, all backing up); nav's bicycle turns round in the street (45.4 m, 1.2 m of it a backing nudge) |
+| A right angle between 9 m streets | Forward, 106.5 m, 93 expansions |
+| Wedged, the nose 0.4 m into the end wall | The first move backs away; clear of the walls after it |
+| A 384 m city of 40 m blocks and 12 m streets | 648 m in 740 expansions and 8 ms (exact, heuristic x1: 636 m in 168,000 expansions and 0.63 s) |
+
+Every route turns no tighter than the vehicle can, and keeps its body clear of the walls.
+
+Next (P9 R2, R3): following a route with reverse segments in `sim_world` (a command override
+for backing up and stopping at cusps), then the cvcGL finale and cvcdbg plan their vehicles'
+routes with it and replan a vehicle that wedges.
