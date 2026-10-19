@@ -728,8 +728,8 @@ TEST(AriadneTvision, IsTheHostedFtxuiBackend) {
   Runtime rt(app, "");
   rt.set_backend(&be);
   EXPECT_EQ(be.capabilities().windows, TvisionBackend::available());
-  // Without FTXUI (macOS / Windows builds today) the backend is an inert stub whose capabilities
-  // are all false, so the rest only holds where FTXUI is built in.
+  // Without FTXUI (a libcvc built without the ftxui dep) the backend is an inert stub whose
+  // capabilities are all false, so the rest only holds where FTXUI is built in.
   if (!FtxuiBackend::available())
     GTEST_SKIP() << "libcvc built without FTXUI";
   EXPECT_TRUE(be.capabilities().owns_loop);
