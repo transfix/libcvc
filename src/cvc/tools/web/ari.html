@@ -1,0 +1,153 @@
+<!doctype html>
+<!--
+  ari.html — run an Ariadne (.ari) document in the browser: the ari runner built for wasm
+  (FTXUI's Emscripten screen) behind an xterm.js terminal. The build copies this page next to
+  ari.js / ari.wasm (src/cvc/CMakeLists.txt, the ari target, which fills in the document name);
+  serve that directory over http.
+
+  The wiring is the module's stdio, which is all FTXUI's Emscripten screen talks to:
+    stdin  <- every byte xterm.js produces: keys, and SGR mouse reports once FTXUI turns them on
+    stdout -> xterm.js. FTXUI ends each frame with a NUL (Emscripten has no flush hook), so bytes
+              are buffered and written to the terminal per frame.
+    resize -> _ftxui_on_resize(cols, rows), FTXUI's hook for the terminal size.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ari terminal</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
+      integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP"
+      crossorigin="anonymous">
+<style>
+  :root { --bg: #0f1115; --fg: #c9ced6; --dim: #7d8590; --accent: #d4a373; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg);
+               font: 13px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+           padding: 6px 12px; border-bottom: 1px solid #1f242c; }
+  header b { color: var(--accent); font-weight: 600; }
+  header .hint { color: var(--dim); }
+  header #status { margin-left: auto; color: var(--dim); }
+  header button { font: inherit; color: var(--fg); background: #1f242c; border: 1px solid #2d333b;
+                  border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+  #term { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
+</style>
+</head>
+<body>
+<header>
+  <span><b>ari</b> @ARI_WASM_DOC_NAME@</span>
+  <span class="hint">Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits</span>
+  <span id="status">loading…</span>
+</header>
+<div id="term"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"
+        integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"
+        integrity="sha384-iF+jqbuti4XlB64clWgFWYEscb+UnSRv3VgVikGYZu+otNFnSHr7y7NcKfBnGizn"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.js"
+        integrity="sha384-AkzdQDeATxpW8V7I2EPcwg17qAoLQMjEFHb//1QaAAIyIlbDAHGKno5+huH7RKxq"
+        crossorigin="anonymous"></script>
+<script>
+  const statusEl = document.getElementById('status');
+  const setStatus = (text) => { statusEl.textContent = text; };
+
+  const term = new Terminal({
+    fontFamily: '"DejaVu Sans Mono", Menlo, Consolas, "Liberation Mono", monospace',
+    fontSize: 14,
+    scrollback: 0,
+    macOptionIsMeta: true,
+    theme: { background: '#0f1115' },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  const termEl = document.getElementById('term');
+  term.open(termEl);
+  // The WebGL renderer draws box-drawing glyphs itself (seamless window borders) and keeps up
+  // with full-screen redraws; without WebGL xterm.js stays on its DOM renderer.
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch (e) {
+    console.warn('ari: WebGL renderer unavailable, using the DOM renderer:', e);
+  }
+  term.focus();
+
+  // stdin: what xterm.js produces, as bytes (UTF-8 for text; onBinary carries raw bytes, e.g.
+  // X10 mouse reports past column 95).
+  const stdin = [];
+  const utf8 = new TextEncoder();
+  term.onData((s) => { for (const b of utf8.encode(s)) stdin.push(b); });
+  term.onBinary((s) => { for (let i = 0; i < s.length; ++i) stdin.push(s.charCodeAt(i) & 0xff); });
+
+  // stdout: one terminal write per FTXUI frame (it ends each frame with a NUL).
+  let frame = [];
+  const flush = () => {
+    if (frame.length) {
+      term.write(new Uint8Array(frame));
+      frame = [];
+    }
+  };
+  let errLine = [];
+
+  let started = false;
+  const resize = () => {
+    const dims = fit.proposeDimensions();
+    if (!dims || !dims.cols || !dims.rows) return; // hidden or not laid out
+    if (dims.cols !== term.cols || dims.rows !== term.rows) term.resize(dims.cols, dims.rows);
+    if (started) Module._ftxui_on_resize(term.cols, term.rows);
+  };
+
+  var Module = {
+    arguments: [], // ari runs the document baked into the build
+    stdin: () => (stdin.length ? stdin.shift() : null),
+    stdout: (c) => { if (c === 0) flush(); else frame.push(c); },
+    stderr: (c) => {
+      if (c === 10) {
+        console.warn(new TextDecoder().decode(new Uint8Array(errLine)));
+        errLine = [];
+      } else {
+        errLine.push(c);
+      }
+    },
+    onRuntimeInitialized() {
+      // Runs before main: FTXUI sizes its fullscreen screen from this.
+      started = true;
+      resize();
+      new ResizeObserver(resize).observe(termEl);
+      setStatus('running');
+    },
+    onExit(code) {
+      flush();
+      term.write('\r\n\x1b[2m[ari exited with status ' + code + ']\x1b[0m\r\n');
+      statusEl.innerHTML = '';
+      const again = document.createElement('button');
+      again.textContent = 'run again';
+      again.onclick = () => location.reload();
+      statusEl.append('exited ', again);
+    },
+    onAbort(what) {
+      flush();
+      setStatus('aborted: ' + what);
+    },
+  };
+</script>
+<script>
+  // Start the program only once the terminal has its real size. xterm.css and the font must be in
+  // before fit can measure a cell, and the backend clamps window positions to the size of the
+  // frame it draws, so a first frame against a half-laid-out page would pile every window at
+  // the origin for good.
+  window.addEventListener('load', () => document.fonts.ready.then(() => {
+    fit.fit();
+    const script = document.createElement('script');
+    script.src = 'ari.js';
+    script.onerror = () => setStatus('could not load ari.js');
+    document.body.append(script);
+  }));
+</script>
+</body>
+</html>

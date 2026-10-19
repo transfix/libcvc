@@ -53,6 +53,9 @@
 #include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
 #include <ftxui/screen/terminal.hpp>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h> // emscripten_sleep: the run loop yields to the browser (Asyncify)
+#endif
 #endif
 
 namespace cvc {
@@ -1769,8 +1772,13 @@ void FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::func
         screen.Exit();
       return true;
     }
-    if (e == fx::Event::CtrlZ)
+    if (e == fx::Event::CtrlZ) {
+#ifdef __EMSCRIPTEN__
+      return true; // a browser terminal has no job control to suspend to
+#else
       return false; // FTXUI's own suspend
+#endif
+    }
     TermEvent te;
     if (!translate(e, te))
       return false;
@@ -1790,7 +1798,15 @@ void FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::func
       break;
     }
     screen.PostEvent(fx::Event::Custom); // redraw, so state changed off the UI shows
+#ifdef __EMSCRIPTEN__
+    // In the browser this loop runs on the page's main thread, so the wait has to hand control
+    // back to the event loop — that is when xterm.js delivers input and paints. emscripten_sleep
+    // does under Asyncify (link the executable with -sASYNCIFY); sleep_for would spin and freeze
+    // the page.
+    emscripten_sleep(static_cast<unsigned>(period.count()));
+#else
     std::this_thread::sleep_for(period);
+#endif
   }
 }
 
