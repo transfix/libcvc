@@ -93,7 +93,10 @@ jobs:
           # pegtl: cvc's build-only state_exec grammar engine (header-only). joltphysics: the
           # cvc::physics backend (cross-platform deterministic, so a wasm run replays a native
           # one); without it CVC_WITH_JOLT turns OFF and the bundle has the null backend only.
-          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk pegtl joltphysics; do
+          # yaml-cpp + ftxui: Ariadne's .ari loader and terminal backend. Both are optional at
+          # configure time and compile to stubs without them, which is what every wasm-mt libcvc
+          # before this shipped (no .ari loading at all).
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk pegtl joltphysics yaml-cpp ftxui; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
@@ -116,7 +119,11 @@ jobs:
             -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=ON -DCVC_ENABLE_FFTW=OFF \
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=ON \
             -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=ON \
-            -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON
+            -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
+            -DCVC_BUILD_ARI=OFF
+          # CVC_BUILD_ARI=OFF: this SDK bundle is the libraries; the `ari` runner is not built
+          # here (only cvc + cvcGL are), and with the option on, cmake --install fails on its
+          # missing bin/ari.js. The browser `ari` page ships with the gh-pages gallery instead.
           cmake --build build-wasm --target cvc cvcGL -j"$(nproc)"
           cmake --install build-wasm
           test -f "$INST/lib/libcvc.a" && test -f "$INST/lib/libcvcGL.a" \
@@ -126,6 +133,12 @@ jobs:
           # ship cvc::physics without its engine.
           grep -qE "IN ITEMS .*\bJolt\b" "$INST/lib/cmake/cvc/cvcConfig.cmake" \
             || { echo "::error::libcvc wasm built WITHOUT Jolt (find_package(Jolt) failed despite joltphysics in \$WASM_DEPS)"; exit 1; }
+          # Same for Ariadne: the real .ari loader (yaml-cpp) and terminal backend (ftxui), not the
+          # stubs a configure that misses them silently compiles.
+          for pkg in yaml-cpp ftxui; do
+            grep -qE "IN ITEMS .*\b${pkg}\b" "$INST/lib/cmake/cvc/cvcConfig.cmake" \
+              || { echo "::error::libcvc wasm built WITHOUT ${pkg} (find_package failed despite it in \$WASM_DEPS); its Ariadne part is a stub"; exit 1; }
+          done
           grep -q CVC_ENABLE_IMGUI "$INST/lib/cmake/cvcGL/cvcGLTargets.cmake" \
             || echo "::warning::cvcGL wasm built WITHOUT imgui (overlay will be inert)"
           # sdl3 is now in $WASM_DEPS, so cvcGL MUST link SDL3::SDL3 (CVC_ENABLE_SDL) — its config
@@ -196,11 +209,15 @@ jobs:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
         run: |
           EX_INST="${{ github.workspace }}/wasm-examples-inst"
-          # The nav demos preload these into MEMFS (declared any-platform data deps).
+          # The nav demos preload these into MEMFS (declared any-platform data deps). They are
+          # published as platform `any`, link `shared`, and the scene and vehicle bundles as arch
+          # x86_64 rather than noarch, so the tuple has to say so: `--platform wasm-mt` matches no
+          # bundle ("no bundles found ... for this platform tuple"), which is how this step failed
+          # in the 2026-10-19 dry run. The noarch weights resolve under the same flags.
           for p in scene-austin-south-small grl-snam-weights vehicle-humvee; do
             echo "=== install data: $p ==="
-            cvcpkg install "$p" --platform wasm-mt --prefix "$WASM_DEPS" \
-              --no-fallback-to-source 2>&1 | tail -2 \
+            cvcpkg install "$p" --platform any --arch x86_64 --config release --link shared \
+              --prefix "$WASM_DEPS" --no-fallback-to-source 2>&1 | tail -2 \
               || { echo "::error::failed to install data package $p"; exit 1; }
           done
           # The trained weights + Austin scene are ESSENTIAL: without them

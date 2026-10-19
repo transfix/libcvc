@@ -148,11 +148,20 @@ build:
 
 package:
   files:
-    - bin/lsystem_forest
-    - bin/nav_city_swarm
-    - bin/nav_city_drive
-    - bin/nav_fog_ghost
-    - bin/nav_finale
+    # The native demo programs. The wasm-mt column ships the gallery under
+    # share/cvcgl-examples/web/ and no bin/ at all, so these are platforms-scoped
+    # like the CLIs below. As bare strings, the strict-glob check refused the
+    # wasm-mt pack ("declares 6 entries that match nothing"; dry run 39217076353).
+    - glob: bin/lsystem_forest
+      platforms: [linux, windows]
+    - glob: bin/nav_city_swarm
+      platforms: [linux, windows]
+    - glob: bin/nav_city_drive
+      platforms: [linux, windows]
+    - glob: bin/nav_fog_ghost
+      platforms: [linux, windows]
+    - glob: bin/nav_finale
+      platforms: [linux, windows]
     # Headless pure-C++ nav CLIs: native-only targets (if(NOT EMSCRIPTEN) in
     # src/cvcGL/examples/CMakeLists.txt) — the wasm column never builds them,
     # so the entries are platforms-scoped; bare strings would fail the
@@ -163,7 +172,9 @@ package:
       platforms: [linux, windows]
     - glob: bin/nav_material_demo
       platforms: [linux, windows]
-    - bin/cvcgl-examples-web
+    # The native launcher for the web gallery; the wasm-mt bundle is the gallery itself.
+    - glob: bin/cvcgl-examples-web
+      platforms: [linux, windows]
     - share/cvcgl-examples/
 
 abi:
