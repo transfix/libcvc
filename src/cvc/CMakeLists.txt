@@ -118,6 +118,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/nav/grid_nav.h
   ../../inc/cvc/nav/vehicle_route.h
+  ../../inc/cvc/nav/route_follower.h
   ../../inc/cvc/nav/plant_types.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
@@ -289,6 +290,7 @@ set(SOURCE_FILES
   volume/vtk_io.cpp
   nav/grid_nav.cpp
   nav/vehicle_route.cpp
+  nav/route_follower.cpp
   nav/spatial.cpp
   nav/drive.cpp
   nav/material.cpp
