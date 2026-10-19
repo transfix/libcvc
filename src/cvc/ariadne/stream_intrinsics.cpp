@@ -205,6 +205,23 @@ void register_stream_intrinsics(cvc::app &app) {
             p.format.channels = static_cast<int>(chn);
             p.format.bytes =
                 cvc::ariadne::stream::audio_f32_bytes(static_cast<int>(fpc), static_cast<int>(chn));
+          } else if (codec == "mjpeg" || codec == "jpeg") {
+            // Compressed video (conference network compression): variable-size JPEG frames, so no
+            // fixed channels/stride. w/h are the DECODED resolution (the subscriber's stream_view
+            // decodes with the JPEG header). The byte slab is explicit "bytes" or a generous w*h —
+            // a JPEG never exceeds the raw size at sane quality; a frame that would is dropped.
+            const long w = get_int(dict_get(d, "w"), 0);
+            const long h = get_int(dict_get(d, "h"), 0);
+            if (w <= 0 || h <= 0 || w > kMaxDim || h > kMaxDim)
+              return err("stream-open: 'w' and 'h' are required and must be in [1, 65536]");
+            p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
+            p.format.codec = codec;
+            p.format.w = static_cast<int>(w);
+            p.format.h = static_cast<int>(h);
+            p.format.stride = static_cast<int>(w * 4); // informational (decoded geometry)
+            const long bytes = get_int(dict_get(d, "bytes"), 0);
+            p.format.bytes = bytes > 0 ? static_cast<std::size_t>(bytes)
+                                       : static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
           } else {
             const int ch = codec_channels(codec);
             if (ch == 0)

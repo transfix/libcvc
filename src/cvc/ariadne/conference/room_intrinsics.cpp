@@ -248,12 +248,18 @@ void register_room_intrinsics(cvc::app &app) {
                                 if (!tbl)
                                   return err("room-roster: internal: room-table slot unavailable");
                                 if (args.empty())
-                                  return err("room-roster: missing room handle");
+                                  return err("room-roster: missing room handle or room-id");
+                                // Accept a (room-join) handle OR a bare room-id string, so an
+                                // N-party .ari can iterate with (room-roster (state-get
+                                // "conf.room")).
                                 room_handle *rh = tbl->find(handle_token(args[0]));
-                                if (!rh)
-                                  return err("room-roster: unknown room handle (room-join first)");
+                                const std::string room_id =
+                                    rh ? rh->room_id : handle_token(args[0]);
+                                if (room_id.empty())
+                                  return err(
+                                      "room-roster: ROOM must be a room-join handle or room-id");
                                 std::vector<se::value_t> list;
-                                for (const room_participant &p : room_roster(app, rh->room_id))
+                                for (const room_participant &p : room_roster(app, room_id))
                                   list.push_back(se::make_dict({
                                       {"pid", se::value_t(p.pid)},
                                       {"name", se::value_t(p.name)},

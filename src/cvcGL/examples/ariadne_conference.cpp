@@ -22,9 +22,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#ifndef _WIN32
+#include <unistd.h> // gethostname (default --name to the host name; Windows reads COMPUTERNAME)
+#endif
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // register_room_intrinsics (room-join/roster/leave)
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/stream/muted_source.h> // --camera: mute gate for the host-owned camera stream
 #include <cvc/ariadne/stream/stream.h> // --camera: open the video stream sized to the device
 #include <cvc/ariadne/stream/stream_registry.h> // post-run verification: lookup the opened tokens
 #include <cvc/ariadne/stream_intrinsics.h> // register_stream_intrinsics (stream-open/info/close)
@@ -48,6 +52,7 @@
 
 #if CVC_ENABLE_SDL
 #include <cvc/gl/capture/camera_source.h> // --camera: a real SDL3 camera as the self-view source
+#include <cvc/gl/capture/jpeg_encode_source.h> // compress camera video to JPEG for the network
 #endif
 
 #if CVC_ENABLE_GRPC
@@ -70,7 +75,7 @@ namespace sx = cvc::ariadne::stream;
 
 int main(int argc, char **argv) {
   std::string docPath, png;
-  bool offscreen = false, useCamera = false;
+  bool offscreen = false, useCamera = false, useMic = false;
   long frames = 0;
   int width = 1024, height = 768;
   std::vector<std::string> componentPaths;
@@ -81,6 +86,7 @@ int main(int argc, char **argv) {
   // .ari whose streams to subscribe to. Without --node-id the host is the single-node demo.
   std::string nodeId, roomId = "standup", peerId;
   std::string stateListen, statePeer, mediaListen = "127.0.0.1:0";
+  std::string mediaServer; // --media-server <addr>: SFU mode — push/pull media through this relay
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -91,6 +97,8 @@ int main(int argc, char **argv) {
       offscreen = true;
     } else if (!std::strcmp(a, "--camera"))
       useCamera = true;
+    else if (!std::strcmp(a, "--mic"))
+      useMic = true;
     else if (!std::strcmp(a, "--frames"))
       frames = std::atol(next("0"));
     else if (!std::strcmp(a, "--width"))
@@ -99,20 +107,37 @@ int main(int argc, char **argv) {
       height = std::atoi(next("768"));
     else if (!std::strcmp(a, "--component-path"))
       componentPaths.push_back(next(""));
-    else if (!std::strcmp(a, "--node-id"))
-      nodeId = next("");
+    else if (!std::strcmp(a, "--node-id") || !std::strcmp(a, "--name"))
+      nodeId = next(""); // this participant's display name + cluster id (unique per participant)
     else if (!std::strcmp(a, "--room"))
       roomId = next("standup");
     else if (!std::strcmp(a, "--peer-id"))
-      peerId = next("");
+      peerId = next(""); // deprecated/ignored: N-party discovers all peers from the room roster
     else if (!std::strcmp(a, "--state-listen"))
       stateListen = next("");
     else if (!std::strcmp(a, "--state-peer"))
       statePeer = next("");
     else if (!std::strcmp(a, "--media-listen"))
       mediaListen = next("127.0.0.1:0");
+    else if (!std::strcmp(a, "--media-server"))
+      mediaServer = next("");
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
+  }
+  // Joining a room (a peer to dial or a state addr to serve) with no explicit --name defaults the
+  // display name to this host's name — so a friend just runs with --state-peer/--media-server and
+  // is discovered by everyone else through the replicated roster (no --peer-id needed).
+  if (nodeId.empty() && (!statePeer.empty() || !stateListen.empty())) {
+#ifdef _WIN32
+    // COMPUTERNAME is reliably set on Windows (unlike POSIX $HOSTNAME); avoids pulling in
+    // <windows.h> (and its macro collisions) just for GetComputerName.
+    const char *hn = std::getenv("COMPUTERNAME");
+    nodeId = (hn && hn[0]) ? std::string(hn) : std::string("guest");
+#else
+    char hn[256] = {0};
+    nodeId =
+        (gethostname(hn, sizeof(hn) - 1) == 0 && hn[0]) ? std::string(hn) : std::string("guest");
+#endif
   }
   const bool clustered = !nodeId.empty();
   cvc::ariadne::register_cvc_uri_handler(componentPaths);
@@ -162,6 +187,8 @@ int main(int argc, char **argv) {
   std::unique_ptr<cvc::state_cluster_shard> shard;
   std::unique_ptr<cvc::stream_transport_grpc> media_tp;
   std::unique_ptr<sx::stream_bridge> bridge;
+  std::string media_endpoint; // this node's media-bridge address (advertised in the room tree)
+  bool cam_published = false; // live camera is published once, after the .ari joins the room
   if (clustered) {
     if (stateListen.empty()) {
       std::printf("[ariadne_conference] FATAL: --node-id needs --state-listen <addr>\n");
@@ -176,27 +203,41 @@ int main(int argc, char **argv) {
     shard->install_as_default(); // room-join/-publish derive the pid from the default shard's node
                                  // id
     state_tp->register_shard(shard.get());
-    if (!statePeer.empty() &&
-        !state_tp->connect_to_peer(statePeer, std::chrono::milliseconds(4000)))
-      std::printf("[ariadne_conference] WARN: could not dial state peer %s (still serving)\n",
-                  statePeer.c_str());
+    if (!statePeer.empty()) {
+      if (state_tp->connect_to_peer(statePeer, std::chrono::milliseconds(4000))) {
+        // Bootstrap the CURRENT room tree from the server. The journal backfill on connect carries
+        // only new mutations, so a late joiner would miss participants who joined before it — a
+        // snapshot carries the whole tree (every participant + stream descriptor), ingested into
+        // our shard, so the roster and the tiles converge for the 3rd, 4th, ... person to join.
+        state_tp->request_snapshot(
+            "conf", "",
+            [&shard](const std::vector<cvc::state_transport::snapshot_entry> &entries, bool) {
+              if (shard)
+                for (const auto &e : entries)
+                  shard->ingest_snapshot_entry(e);
+            });
+      } else {
+        std::printf("[ariadne_conference] WARN: could not dial state peer %s (still serving)\n",
+                    statePeer.c_str());
+      }
+    }
     // Media plane: a gRPC stream bridge. room-publish serve_port()s on it; room-subscribe pulls a
     // peer's stream from the endpoint the peer advertised in the room tree.
     media_tp = std::make_unique<cvc::stream_transport_grpc>();
     bridge = std::make_unique<sx::stream_bridge>(app, *media_tp);
     media_tp->start(mediaListen);
-    const std::string media_endpoint = media_tp->listen_address();
-    ari::conference::register_room_media_intrinsics(app, *bridge, media_endpoint);
+    media_endpoint = media_tp->listen_address();
+    // SFU when --media-server is set (push/pull media through the relay); mesh otherwise.
+    ari::conference::register_room_media_intrinsics(app, *bridge, media_endpoint, mediaServer);
     // Tell the demo .ari who it is (scoped to this document's prefix = nodeId).
     std::vector<std::string> ce;
     ari::run_init(app, sg.getStatePrefix(),
                   "(state-set \"conf.room\" \"" + roomId + "\") (state-set \"conf.self\" \"" +
-                      nodeId + "\") (state-set \"conf.peer\" \"" + peerId + "\")",
+                      nodeId + "\")" + (useMic ? " (state-set \"mic_live\" \"1\")" : ""),
                   &ce);
     std::printf(
-        "[ariadne_conference] clustered: node='%s' room='%s' peer='%s' | state=%s dial=%s | "
-        "media=%s\n",
-        nodeId.c_str(), roomId.c_str(), peerId.c_str(), state_tp->listen_address().c_str(),
+        "[ariadne_conference] clustered: node='%s' room='%s' | state=%s dial=%s | media=%s\n",
+        nodeId.c_str(), roomId.c_str(), state_tp->listen_address().c_str(),
         statePeer.empty() ? "(none)" : statePeer.c_str(), media_endpoint.c_str());
   }
 #else
@@ -235,18 +276,32 @@ int main(int argc, char **argv) {
     cvc::gl::capture::camera_open camo = cvc::gl::capture::open_camera(0);
     if (camo.source) {
       sx::stream_params sp;
-      sp.id = "selfcam";
-      sp.root_path =
-          sg.getStatePrefix(); // same scope the DSL opens under -> conference.streams.selfcam
+      // Clustered: the "camera" kind (token <node>.streams.camera) the peer subscribes to and the
+      // host publishes below. Single-node: "selfcam", the id conference_media.ari binds its widget
+      // to. Same scope the DSL opens under (the document prefix = node id when clustered).
+      sp.id = clustered ? "camera" : "selfcam";
+      sp.root_path = sg.getStatePrefix();
+      // Compress camera video to JPEG ("mjpeg") so it fits a real internet uplink: raw rgba8 is
+      // ~1.9 MB/frame (unusable over home broadband), JPEG is ~10-50x smaller. The byte slab is
+      // sized for the worst-case JPEG; the stream_view decodes on the subscriber.
       sp.format.kind = sx::frame_kind::video_raw;
-      sp.format.codec = "rgba8";
+      sp.format.codec = "mjpeg";
       sp.format.w = camo.width;
       sp.format.h = camo.height;
-      sp.format.stride = camo.width * 4;
+      sp.format.stride = camo.width * 4; // decoded geometry (informational for mjpeg)
+      sp.format.bytes = cvc::gl::capture::jpeg_stream_slab(camo.width, camo.height);
       sp.expected_subscribers = 3; // the stream_view widget (+ headroom); cf. ariadne_stream
       live_cam = sx::stream::open(app, sp);
       if (live_cam) {
-        live_cam->start_producer(std::move(camo.source), camo.fps > 0 ? camo.fps : 30.0);
+        // Mute gate (UX cam toggle): the host camera is C++-owned (not in the document stream
+        // table, so the DSL stream-set-muted can't reach it) — wrap it in a muted_source bound to
+        // the stream's mute_flag(), then drive that flag from the render loop by polling the .ari's
+        // cam_on. Wrapped BEFORE the JPEG encoder so a muted frame is black rgba -> a black JPEG.
+        auto gated =
+            std::make_unique<sx::muted_source>(std::move(camo.source), live_cam->mute_flag());
+        auto enc = std::make_unique<cvc::gl::capture::jpeg_encode_source>(std::move(gated),
+                                                                          camo.width, camo.height);
+        live_cam->start_producer(std::move(enc), camo.fps > 0 ? camo.fps : 30.0);
         std::vector<std::string> ce;
         ari::run_init(app, sg.getStatePrefix(),
                       "(state-set \"cam_live\" \"1\") (state-set \"cam_token\" \"" +
@@ -288,9 +343,35 @@ int main(int argc, char **argv) {
     cam.update(dt);
     rt.drain(); // runs the on_tick program lane: (stream-open) + (stream-capture-*) +
                 // (stream-play-audio) + (when clustered) (room-join/-publish/-subscribe)
+    // UX cam toggle (host camera path): the .ari's button flips cam_on, but the host-owned camera
+    // stream is not in the document table, so the DSL stream-set-muted can't reach it — apply the
+    // mute here instead by polling cam_on (prefix-scoped like every DSL key). Default ON; muted
+    // only when cam_on is explicitly "0". Runs on the render/owner thread, same as set_muted
+    // expects.
+    if (live_cam) {
+      const std::string cop = sg.getStatePrefix().empty()
+                                  ? std::string("cam_on")
+                                  : sg.getStatePrefix() + cvc::state::SEPARATOR + "cam_on";
+      cvc::state *n = app.root().findDescendant(cop);
+      live_cam->set_muted(n && n->value() == "0");
+    }
 #if CVC_ENABLE_GRPC
     if (state_tp)
       state_tp->pump_all(); // publish this frame's room-tree writes to the peer
+    // Publish the live camera ONCE, after the .ari's first tick has joined the room (room_publish
+    // needs our participant subtree to exist). The host owns the camera stream — it alone knows the
+    // device resolution needed to size it — so it publishes here rather than from the DSL; the .ari
+    // skips its synthetic camera when cam_live is set.
+    if (live_cam && clustered && bridge && !cam_published) {
+      for (const ari::conference::room_participant &p : ari::conference::room_roster(app, roomId))
+        if (p.pid == nodeId) {
+          ari::conference::room_publish(app, *bridge, media_endpoint, roomId, nodeId, "camera",
+                                        *live_cam, mediaServer);
+          cam_published = true;
+          std::printf("[ariadne_conference] published live camera (%s/camera)\n", nodeId.c_str());
+          break;
+        }
+    }
 #endif
     ari::sync_scene_visibility(app, realized.visibility);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), capturing ? dt : -1.0);
@@ -332,22 +413,26 @@ int main(int argc, char **argv) {
   if (shard)
     shard->detach();
   if (clustered) {
-    // Report what converged: the replicated roster, and whether the peer's streams were pulled.
+    // Report what converged: the replicated roster, and how many OTHER participants' cameras this
+    // node pulled (N-party — every non-self participant should have a subscribed camera proxy).
     std::printf("[ariadne_conference] roster:");
     for (const ari::conference::room_participant &p : ari::conference::room_roster(app, roomId))
       std::printf(" %s(%s)", p.pid.c_str(), p.name.c_str());
     std::printf("\n");
     auto &reg = sx::stream_registry::for_app(app);
-    int pulled = 0;
-    for (const char *k : {"camera", "audio"}) {
-      const std::string tok = peerId + ".streams." + k;
-      const bool live = reg.lookup(tok) != nullptr;
-      std::printf("[ariadne_conference] peer %s %s\n", tok.c_str(), live ? "SUBSCRIBED" : "(not yet)");
-      pulled += live ? 1 : 0;
+    int peers = 0, subscribed = 0;
+    for (const ari::conference::room_participant &p : ari::conference::room_roster(app, roomId)) {
+      if (p.pid == nodeId)
+        continue;
+      ++peers;
+      const bool live = reg.lookup(p.pid + ".streams.camera") != nullptr;
+      std::printf("[ariadne_conference] peer %s camera %s\n", p.pid.c_str(),
+                  live ? "SUBSCRIBED" : "(not yet)");
+      subscribed += live ? 1 : 0;
     }
-    std::printf("[ariadne_conference] node '%s': %d/2 peer streams subscribed\n", nodeId.c_str(),
-                pulled);
-    return pulled == 2 ? 0 : 3;
+    std::printf("[ariadne_conference] node '%s': subscribed %d/%d peers\n", nodeId.c_str(),
+                subscribed, peers);
+    return (peers > 0 && subscribed == peers) ? 0 : 3;
   }
 #endif
 

@@ -2161,6 +2161,14 @@ if(CVC_BUILD_LSYS_TOOLS)
   endif()
 endif()
 
+# ariadne-server: the headless Ariadne conference RELAY (room-state relay + media SFU). Core cvc +
+# gRPC only (no cvcGL/VTK/GL), so it runs on a plain headless VM. Needs CVC_ENABLE_GRPC.
+if(CVC_ENABLE_GRPC)
+  add_executable(ariadne-server ${CMAKE_CURRENT_SOURCE_DIR}/tools/ariadne_server_main.cpp)
+  target_link_libraries(ariadne-server PRIVATE cvc)
+  target_compile_features(ariadne-server PRIVATE cxx_std_17)
+endif()
+
 # Windows-specific batch file
 if(WIN32)
   file(TO_NATIVE_PATH "${Boost_LIBRARY_DIRS}" BOOST_LOCATION)
