@@ -2135,6 +2135,39 @@ if(CVC_BUILD_ARI)
   add_executable(ari ${CMAKE_CURRENT_SOURCE_DIR}/tools/ari_main.cpp)
   target_link_libraries(ari PRIVATE cvc)
   install(TARGETS ari RUNTIME DESTINATION bin)
+  if(EMSCRIPTEN)
+    # The browser build: ari.js/ari.wasm plus ari.html, an xterm.js page wired to the module's
+    # stdin/stdout, which is all FTXUI's Emscripten screen talks to. A page has no argv, so one
+    # document is baked in as the default (CVC_ARI_WASM_DOC) with the shared component library
+    # embedded in MEMFS at /components — the same shape as the cvcGL ariadne_hello demos.
+    # FTXUI's run loop yields to the browser with emscripten_sleep, hence -sASYNCIFY (which
+    # cvc::net's fetch backend needs as well, with -sFETCH). Single-threaded: it runs on the
+    # page's main thread and needs no COOP/COEP headers. EXIT_RUNTIME so a document that quits
+    # reaches the page's onExit.
+    set(CVC_ARI_WASM_DOC "${CMAKE_CURRENT_SOURCE_DIR}/ariadne/examples/terminal_tour.ari"
+        CACHE FILEPATH "The .ari document the ari browser build runs")
+    get_filename_component(_ari_doc_name "${CVC_ARI_WASM_DOC}" NAME)
+    target_compile_definitions(ari PRIVATE CVC_ARIADNE_WASM_DOC="/${_ari_doc_name}")
+    target_link_options(ari PRIVATE
+      "--embed-file=${CVC_ARI_WASM_DOC}@/${_ari_doc_name}"
+      "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components@/components"
+      -sASYNCIFY=1
+      -sASYNCIFY_STACK_SIZE=131072
+      -sALLOW_MEMORY_GROWTH=1
+      -sSTACK_SIZE=2097152
+      -sFETCH=1
+      -sEXIT_RUNTIME=1
+      # The page reports the xterm.js size through FTXUI's resize hook.
+      -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
+    set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS "${CVC_ARI_WASM_DOC}")
+    # The page goes next to ari.js, with the document name filled in by a plain replace:
+    # configure_file(@ONLY) would also eat the "@xterm/xterm@" in its CDN URLs.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools/web/ari.html")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/tools/web/ari.html" _ari_html)
+    string(REPLACE "@ARI_WASM_DOC_NAME@" "${_ari_doc_name}" _ari_html "${_ari_html}")
+    file(GENERATE OUTPUT "$<TARGET_FILE_DIR:ari>/ari.html" CONTENT "${_ari_html}")
+  endif()
 endif()
 
 # Windows-specific batch file

@@ -58,6 +58,16 @@ int usage(int code) {
 } // namespace
 
 int main(int argc, char **argv) {
+#ifdef CVC_ARIADNE_WASM_DOC
+  // The browser build (ari.html over xterm.js) has no command line. Run the document baked into
+  // MEMFS, with the embedded component library at /components so cvc://components/*.ari resolves
+  // (see the ari target in src/cvc/CMakeLists.txt).
+  const char *baked[] = {"ari", "run", CVC_ARIADNE_WASM_DOC, "--component-path", "/"};
+  if (argc < 2) {
+    argc = static_cast<int>(sizeof baked / sizeof *baked);
+    argv = const_cast<char **>(baked);
+  }
+#endif
   if (argc < 2)
     return usage(2);
   const std::string cmd = argv[1];

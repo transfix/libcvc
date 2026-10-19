@@ -314,6 +314,115 @@ jobs:
           # 77 (no cross-platform-deterministic Jolt) fails here too: the job exists to compare.
           "$node" build-wasm/bin/physics_replay_test.js src/cvc/tests/data/physics_replay_trace.json
 
+  # ari in the browser (roadmap §16.4): the FTXUI terminal backend built for single-threaded wasm,
+  # the target the gh-pages gallery serves (no COOP/COEP there). Builds the `ari` web target
+  # (ari.js/ari.wasm + the xterm.js page, terminal_tour.ari baked in), then runs the same module
+  # headless under node: `ari snapshot` must render the tour, which proves the wasm build has the
+  # .ari loader (yaml-cpp) and the real backend (ftxui), not the stubs. The page is uploaded as an
+  # artifact to try by hand (serve the directory over http and open ari.html). Only when Ariadne,
+  # the runner or this file changed.
+  ari-wasm:
+    name: ari terminal backend (wasm, node)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-ari-wasm
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did Ariadne change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvc/ariadne inc/cvc/ariadne src/cvc/tools \
+                   CMakeLists.txt src/cvc/CMakeLists.txt CMake cvcpkg/recipes/libcvc \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "ariadne changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the wasm deps (boost, pegtl, yaml-cpp, ftxui, the compression libraries)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd boost pegtl yaml-cpp ftxui; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build the ari web target (wasm, single-threaded)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # shellcheck disable=SC1091
+          source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          emcmake cmake -G Ninja -S . -B build-wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_CLI=OFF \
+            -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=OFF \
+            | tee configure.log
+          grep -q "Ariadne: .ari YAML loader ENABLED" configure.log \
+            || { echo "::error::the wasm configure did not find yaml-cpp (the .ari loader is a stub)"; exit 1; }
+          grep -q "Ariadne: FTXUI terminal backend ENABLED" configure.log \
+            || { echo "::error::the wasm configure did not find ftxui (the terminal backend is a stub)"; exit 1; }
+          cmake --build build-wasm --target ari -j"$(nproc)"
+          ls -la build-wasm/bin/ari.html build-wasm/bin/ari.js build-wasm/bin/ari.wasm
+
+      - name: Render the baked tour under node
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" build-wasm/bin/ari.js snapshot /terminal_tour.ari --width 100 --height 24 \
+            | tee snapshot.txt
+          for want in "Controls" "Status" "Layout" "agents: 64" "Belief: < shared >"; do
+            grep -qF "$want" snapshot.txt \
+              || { echo "::error::the wasm ari snapshot is missing '$want'"; exit 1; }
+          done
+
+      - name: Upload the ari web page
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ari-web
+          path: |
+            build-wasm/bin/ari.html
+            build-wasm/bin/ari.js
+            build-wasm/bin/ari.wasm
+
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
   # Mirrors release.yml's linux job exactly, but injects -<sha> into

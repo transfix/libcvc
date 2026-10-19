@@ -746,6 +746,28 @@ backend.run(rt);  // owns the terminal; drains every iteration; returns on quit 
 [`terminal_tour.ari`](../src/cvc/ariadne/examples/terminal_tour.ari) exercises every
 widget kind the backend draws.
 
+**In the browser.** An Emscripten build of libcvc with `ftxui` and `yaml-cpp` in its wasm
+deps prefix (`cvcpkg install ftxui yaml-cpp --platform wasm --arch wasm32 --link static`)
+builds `ari` as `bin/ari.js` + `ari.wasm` + `ari.html`. The page puts an xterm.js terminal
+on the module's stdin/stdout, which is all FTXUI's Emscripten screen uses. Serve `bin/`
+over plain http and open `ari.html`; it is single-threaded and needs no COOP/COEP. A page
+has no argv, so the build bakes in one document, `CVC_ARI_WASM_DOC` (default
+`terminal_tour.ari`), with the component library at `/components`. The same `ari.js`
+runs headless under node: `node ari.js snapshot /terminal_tour.ari`. CI's `ari-wasm`
+job does exactly that.
+
+What differs from a real terminal:
+
+- The loop yields with `emscripten_sleep`, so the build links `-sASYNCIFY`. A hidden
+  tab throttles timers, which slows redraws and `on_tick`.
+- Ctrl-C reaches the document's `on_signal:` as SIGINT, as in a terminal. Only keys
+  the browser lets a page see get through: Ctrl-W / Ctrl-T / Ctrl-N belong to the
+  browser. Ctrl-Z is ignored, because a page has no job control.
+- Quitting (`on: quit`, `(quit)`, or Ctrl-C with no handler) ends the program, and
+  the page offers to run it again.
+- Startup pauses for about half a second. FTXUI waits up to 500 ms for the terminal
+  to answer its capability queries, and xterm.js can only answer once the loop yields.
+
 ### 9.3 From Python (a full app via `AriRuntime`)
 
 `AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the

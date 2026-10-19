@@ -53,6 +53,9 @@
 #include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
 #include <ftxui/screen/terminal.hpp>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h> // emscripten_sleep: the run loop yields to the browser (Asyncify)
+#endif
 #endif
 
 namespace cvc {
@@ -1730,6 +1733,26 @@ bool translate(fx::Event e, TermEvent &out) {
   return false;
 }
 
+// Wait out the rest of a frame. In the browser the loop runs on the page's main thread, so the wait
+// has to hand control back to the event loop — that is when xterm.js delivers input and paints.
+// emscripten_sleep does under Asyncify (link the executable with -sASYNCIFY); sleep_for would spin
+// and freeze the page.
+void wait_frame(std::chrono::milliseconds period) {
+#ifdef __EMSCRIPTEN__
+  emscripten_sleep(static_cast<unsigned>(period.count()));
+#else
+  std::this_thread::sleep_for(period);
+#endif
+}
+
+// Whether Ctrl-Z suspends (FTXUI's own SIGTSTP handling). A browser page has no job control to
+// suspend to, so there the key is swallowed.
+#ifdef __EMSCRIPTEN__
+constexpr bool kCanSuspend = false;
+#else
+constexpr bool kCanSuspend = true;
+#endif
+
 } // namespace
 
 void FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
@@ -1770,7 +1793,7 @@ void FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::func
       return true;
     }
     if (e == fx::Event::CtrlZ)
-      return false; // FTXUI's own suspend
+      return !kCanSuspend; // FTXUI's own suspend, where there is one
     TermEvent te;
     if (!translate(e, te))
       return false;
@@ -1790,7 +1813,7 @@ void FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::func
       break;
     }
     screen.PostEvent(fx::Event::Custom); // redraw, so state changed off the UI shows
-    std::this_thread::sleep_for(period);
+    wait_frame(period);
   }
 }
 
