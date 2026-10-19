@@ -311,8 +311,19 @@ P4 adds three things to measure and contain the drift:
         [-1.8, +2.8]).
       - So the dynamic model makes training hurt less on the real vehicle; it does not yet make it
         help.
-    - Next: close the gap between the training loss and deployment reach (for example, checkpoints
-      selected on Jolt reach) so that a trained policy beats the seed.
+    - Checkpoint selection on Jolt reach (`coef_trainer::train(scene, verbose, fitness)`,
+      `cvc::physics::reach_on_plant`):
+      - Each training ends on its checkpoint with the best reach on 8 validation seeds, the
+        untrained policy included.
+      - Held out, the dynamic-trained policy reaches 52.7% and the point-mass-trained one 50.1%:
+        +2.6 points, CI [+0.3, +4.7]. The seed reaches 51.7%.
+      - So both now stay near the seed, and the gate's wording holds there.
+      - The dynamic one leads the seed by +1.0, CI [-1.2, +3.4], so not significantly.
+      - Jolt reach is deterministic but chaotic: a 4e-9 change of scale moves a seed's reach by up
+        to 0.1, so validation needs 8 or more seeds.
+    - Next: a trained policy that beats the seed outside the CI. Levers: smaller steps with denser
+      checkpoints (the dynamic training's gains come in its first 60 steps at 2e-4), more
+      validation seeds, or a loss closer to reach.
   - P8c is not started.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**

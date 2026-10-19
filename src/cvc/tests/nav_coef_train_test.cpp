@@ -688,3 +688,44 @@ TEST(NavCoefTrain, CudaTrainedPolicyDrives) {
   EXPECT_GT(reach, 0.9 * basin) << "CUDA training degraded the policy";
 }
 #endif
+
+// Checkpoint selection (P8b): with a fitness, train() scores the untrained policy and every
+// checkpoint_every steps, and ends on the best-scoring parameters.
+TEST(NavCoefTrain, CheckpointSelectionEndsOnTheBestScore) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 20;
+  cfg.horizon = 8;
+  cfg.window = 4;
+  cfg.lr = 1e-3f; // move the parameters enough that checkpoints differ
+  cfg.checkpoint_every = 5;
+  const float feat[5] = {0.3f, 3.0f, 0.7f, 0.71f, 0.0f};
+  std::vector<std::vector<float>> seen; // each checkpoint's coefficients on `feat`
+  const auto peak_at_10 = [&](const cvc::nav::coef_mlp &policy, int step) {
+    std::vector<float> c(3);
+    policy.forward(feat, 1, c.data());
+    seen.push_back(c);
+    return -std::fabs(static_cast<double>(step - 10));
+  };
+  coef_trainer tr(cfg, 1);
+  tr.train(sc, false, peak_at_10);
+  ASSERT_EQ(tr.checkpoints().size(), 5u); // steps 0, 5, 10, 15, 20
+  EXPECT_EQ(tr.checkpoints()[2].step, 10);
+  EXPECT_EQ(tr.selected_step(), 10);
+  float now[3];
+  tr.coeffs(feat, 1, now);
+  for (int k = 0; k < 3; ++k)
+    EXPECT_FLOAT_EQ(now[k], seen[2][k]) << "train() did not end on the selected checkpoint";
+  EXPECT_NE(seen[2], seen[4]) << "the checkpoints should differ";
+
+  // A score that only falls keeps the untrained policy.
+  coef_trainer kept(cfg, 1);
+  float before[3];
+  kept.coeffs(feat, 1, before);
+  kept.train(sc, false, [](const cvc::nav::coef_mlp &, int step) { return -step; });
+  EXPECT_EQ(kept.selected_step(), 0);
+  float after[3];
+  kept.coeffs(feat, 1, after);
+  for (int k = 0; k < 3; ++k)
+    EXPECT_FLOAT_EQ(after[k], before[k]);
+}

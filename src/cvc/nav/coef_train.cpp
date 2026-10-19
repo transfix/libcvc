@@ -622,7 +622,8 @@ void coef_trainer::adam_step(const std::vector<float> &grad) {
   }
 }
 
-void coef_trainer::train(const training_scene &scene, bool verbose) {
+void coef_trainer::train(const training_scene &scene, bool verbose,
+                         const checkpoint_fitness &fitness) {
   const int n = cfg_.n, horizon = cfg_.horizon, window = cfg_.window;
   const bool bike = cfg_.rollout == rollout_kind::bicycle;
   const bool dyn = cfg_.rollout == rollout_kind::dynamic;
@@ -634,6 +635,25 @@ void coef_trainer::train(const training_scene &scene, bool verbose) {
   std::vector<float> o(2 * n), goal(2 * n), aux(2 * n), o2(2 * n), a2(2 * n);
   std::vector<float> x(dyn ? 4 * n : 0), x2(dyn ? 4 * n : 0); // dynamic: (vy, r, delta, a)
   std::vector<float> grad;
+  // Checkpoint selection: score the untrained policy, then every `every` steps.
+  checkpoints_.clear();
+  selected_step_ = -1;
+  const int every = cfg_.checkpoint_every > 0 ? cfg_.checkpoint_every : 25;
+  std::vector<float> best;
+  double best_fit = 0.0;
+  const auto score = [&](int step) {
+    const double f = fitness(to_coef_mlp(), step);
+    checkpoints_.push_back({step, f});
+    if (verbose)
+      std::printf("  checkpoint at step %4d: fitness %.4f\n", step, f);
+    if (best.empty() || f > best_fit) {
+      best = p_;
+      best_fit = f;
+      selected_step_ = step;
+    }
+  };
+  if (fitness)
+    score(0);
   for (int step = 0; step < cfg_.steps; ++step) {
     scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data());
     // Initial aux: surrogate v=0; bicycle and dynamic (th aimed at the goal, sp=0), the
@@ -660,7 +680,11 @@ void coef_trainer::train(const training_scene &scene, bool verbose) {
     }
     if (verbose && (step % 50 == 0 || step == cfg_.steps - 1))
       std::printf("  step %4d: window_loss %.4f\n", step, last);
+    if (fitness && ((step + 1) % every == 0 || step == cfg_.steps - 1))
+      score(step + 1);
   }
+  if (fitness)
+    p_ = best; // end on the best checkpoint
 }
 
 coef_mlp coef_trainer::to_coef_mlp() const {

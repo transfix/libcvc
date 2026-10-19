@@ -54,6 +54,33 @@ The `nav_train_demo` example (in `src/cvcGL/examples/`, built with
 `-DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON`) does exactly
 this end to end and picks the CUDA path automatically when available.
 
+**Selecting checkpoints on the physics plant.** The training loss only approximates deployment,
+so `train()` can end on the checkpoint that scores best on something closer to it:
+
+```cpp
+#include <cvc/physics/nav_eval.h>
+
+cvc::physics::plant_reach_options val;     // reach on Jolt RoboRacers in the scene
+val.seeds = {200, 201, 202, 203, 204, 205, 206, 207};  // validation seeds, not the evaluation's
+cfg.checkpoint_every = 30;
+coef_trainer tr(cfg);
+tr.train(scene, false, [&](const coef_mlp &p, int step) {
+  return cvc::physics::reach_on_plant(p, scene, cvc::physics::vehicle_desc::roboracer(), 0.035, val);
+});
+// tr.checkpoints(): {step, fitness} for step 0 (untrained) and every 30; tr.selected_step()
+```
+
+- **When it scores.** The untrained policy (step 0), every `checkpoint_every` steps and after the
+  last. `train()` ends on the best, so it never ends below where it started by that score; ties
+  keep the earlier.
+- **`reach_on_plant`** (`cvc/physics/nav_eval.h`, needs Jolt): the fraction of `agents` vehicles
+  that reach their goals in `ticks`, averaged over seeds. The scene's blocks become static boxes,
+  read at the vehicle's scale (`wheelbase` normalized units = its wheelbase). The world is
+  single-threaded and deterministic, so a score repeats exactly.
+- **But it is chaotic.** Changing the scale by 4e-9 (passing `0.035f` instead of `0.035`) moves a
+  seed's reach by up to 0.1, a per-seed SD of about 0.03. A mean over k validation seeds carries
+  about 3/sqrt(k) points of that alone, so use 8 or more.
+
 ## What gets trained
 
 The policy is `coef_mlp`: a `5 → hidden → hidden → 3` SiLU MLP whose output is
@@ -252,12 +279,43 @@ a heavy run; `P8B_GATE_LR` and `P8B_GATE_STEPS` override its training):
   dynamic model makes training hurt less; it does not make the policy better than the seed.
 - **At the stable 5e-5 there is no difference.** Neither policy moves far from the seed.
 - **What is left.** The training loss (distance to the goal after a window, plus a clearance
-  margin) is not the deployment reach, which the carrot FSM shapes. A policy that beats the seed
-  on Jolt needs that gap closed, for example by selecting checkpoints on Jolt reach (doc 31's
-  recorded-fitness seam).
+  margin) is not the deployment reach, which the carrot FSM shapes. The next step selects
+  checkpoints on Jolt reach (doc 31's recorded-fitness seam).
+
+**Checkpoints selected on Jolt reach** (`NavPlantConvergence.CheckpointSelectionOnJoltReach`, a
+heavy run; `P8B_SELECT_LR`, `_STEPS`, `_EVERY` and `_VAL` override it):
+
+- **The setup.** The same two trainings at lr 2e-4 for 300 steps. Each scores its untrained
+  policy and every 30th step by `reach_on_plant` on validation seeds (200 on, never the
+  evaluation's), and ends on the best (above).
+- **The evaluation.** The selected policies and the seed on the gate's 20 held-out seeds.
+
+| Validation | Point-mass: selected step, held-out reach | Dynamic: selected step, held-out reach | The seed | Dynamic - point mass, 95% CI | Dynamic - seed, 95% CI |
+|---|---|---|---|---|---|
+| 4 seeds (scale `0.035f`) | 120, 49.4% | 30, 53.1% | 51.9% | +3.8 [+0.9, +6.7] | +1.3 [-0.6, +3.3] |
+| 8 seeds (scale `0.035`) | 120, 50.1% | 60, 52.7% | 51.7% | +2.6 [+0.3, +4.7] | +1.0 [-1.2, +3.4] |
+
+The validation curves (8 seeds), from the untrained policy's 0.479:
+
+- **Point mass:** about flat to step 120 (0.500), then down steadily to 0.33.
+- **Dynamic:** up to step 60 (0.505), down to 0.39 by step 120, and back to 0.45 by step 300.
+
+**Read it carefully.**
+
+- **Selection removes the damage.** Both selected policies stay within 2.5 points of the seed.
+  Without selection, at this rate they ended at 35% and 44%.
+- **The gate's wording holds, now near the seed.** The dynamic-trained policy beats the
+  point-mass-trained one outside the CI both times, by 2.6 to 3.8 points.
+- **No trained policy beats the seed yet.** The dynamic one leads it by 1.0 to 1.3 points, but
+  the CI includes 0.
+- **Expect shrinkage.** The best of 11 noisy validation scores overstates its policy: the 8-seed
+  gains of +2.1 and +2.6 points over the untrained policy became -1.6 and +1.0 held out.
+- **The useful window is early.** The dynamic training's gains come in the first 60 steps at
+  this rate. Smaller steps with denser checkpoints, a larger validation set, or a loss closer to
+  reach are the next levers.
 
 Not yet:
-- a trained policy that beats the seed on Jolt;
+- a trained policy that beats the seed on Jolt outside the CI;
 - pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
   turns on only the bicycle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).

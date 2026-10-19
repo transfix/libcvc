@@ -31,6 +31,7 @@
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_route.h>
+#include <cvc/physics/nav_eval.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
@@ -914,74 +915,53 @@ TEST(NavPlant, AVehicleRouteBacksTheHumveeOutOfADeadEnd) {
 
 namespace {
 
-// The trainer's city read as a RoboRacer's: veh_L 0.035 normalized is its 0.324 m wheelbase, so
-// S is about 0.108 per metre and a world unit (0.05 normalized) is about 0.46 m. Buildings are
-// 1.5 m static boxes, one per row run of occupied cells.
-double city_reach_on_jolt(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &sc,
-                          int n, int ticks, unsigned seed) {
-  const vehicle_desc d = vehicle_desc::roboracer();
-  const double s_per_m = 0.035 / d.wheelbase();
-  const double mpw = sc.scale / s_per_m; // metres per world unit
-  sim_world::config cfg;
-  cfg.rows = sc.rows;
-  cfg.cols = sc.cols;
-  cfg.min_x = sc.min_x;
-  cfg.min_y = sc.min_y;
-  cfg.max_x = sc.max_x;
-  cfg.max_y = sc.max_y;
-  cfg.scale = sc.scale;
-  cfg.veh.rr = sc.rr;
-  cfg.veh.d_hat = sc.d_hat;
-  cfg.veh.dt = sc.dt;
-  cfg.veh.vmax = sc.vmax;
-  cfg.veh.nsub = 6;
-  cfg.reach_tol = 0.15f;
-  cfg.freeze_sense = true;
-  sim_world w = sim_world::from_occupancy(cfg, sc.occ.data(), policy, n, seed);
+// The city's RoboRacer wheelbase in normalized units (train_config::veh_L's 0.035) as an exact
+// double: the scale S = kCityL / 0.324 per metre. reach_on_plant is chaotic in it; passing the
+// float veh_L instead (4e-9 relative) moves single seeds' reach by up to 0.1.
+constexpr double kCityL = 0.035;
 
-  world phys(jolt_config());
-  const material_id m = phys.add_material({"ground", 0.9f, 0.0f, 0.015f});
-  body_desc g;
-  g.shape = box{{(sc.max_x - sc.min_x) * mpw, (sc.max_y - sc.min_y) * mpw, 0.5}};
-  g.motion = motion_type::static_;
-  g.position = {0.0, 0.0, -0.5};
-  g.material = m;
-  phys.add_body(g);
-  const double dx = (sc.max_x - sc.min_x) / (sc.cols - 1),
-               dy = (sc.max_y - sc.min_y) / (sc.rows - 1);
-  for (int r = 0; r < sc.rows; ++r)
-    for (int c = 0; c < sc.cols;) {
-      if (!sc.occ[static_cast<std::size_t>(r) * sc.cols + c]) {
-        ++c;
-        continue;
-      }
-      int e = c;
-      while (e + 1 < sc.cols && sc.occ[static_cast<std::size_t>(r) * sc.cols + e + 1])
-        ++e;
-      body_desc b;
-      b.shape = box{{0.5 * (e - c + 1) * dx * mpw, 0.5 * dy * mpw, 0.75}};
-      b.motion = motion_type::static_;
-      b.position = {(sc.min_x + 0.5 * (c + e) * dx) * mpw, (sc.min_y + r * dy) * mpw, 0.75};
-      b.material = m;
-      phys.add_body(b);
-      c = e + 1;
-    }
-  nav_plant_options o = nav_sized(); // nav plans with the scene's numbers, as both were trained
-  o.metres_per_world_unit = mpw;
-  nav_plant plant(phys, {d}, o);
-  w.set_plant(&plant);
-  for (int t = 0; t < ticks; ++t)
-    w.step(0);
-  std::vector<std::uint8_t> reached(n);
-  w.snapshot(nullptr, nullptr, nullptr, nullptr, reached.data());
-  int k = 0;
-  for (int i = 0; i < n; ++i)
-    k += reached[i];
-  w.set_plant(nullptr);
-  return static_cast<double>(k) / n;
+// The paired-bootstrap 95% CI of the mean of `diff`.
+void paired_ci(const std::vector<double> &diff, double &lo, double &hi) {
+  std::mt19937 rng(0);
+  std::uniform_int_distribution<int> pick(0, static_cast<int>(diff.size()) - 1);
+  std::vector<double> boot(2000);
+  for (double &x : boot) {
+    double sum = 0.0;
+    for (std::size_t i = 0; i < diff.size(); ++i)
+      sum += diff[static_cast<std::size_t>(pick(rng))];
+    x = sum / static_cast<double>(diff.size());
+  }
+  std::sort(boot.begin(), boot.end());
+  lo = boot[static_cast<std::size_t>(0.025 * boot.size())];
+  hi = boot[static_cast<std::size_t>(0.975 * boot.size()) - 1];
 }
 
 } // namespace
+
+// reach_on_plant is a fitness train() selects on, so it must be repeatable: the same policy,
+// scene and seeds give the same per-seed reach (the world is single-threaded and runs in
+// cross-platform determinism mode). It also refuses what it cannot score.
+TEST(NavPlant, ReachOnPlantIsRepeatable) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  const cvc::nav::coef_mlp p = cvc::nav::coef_mlp::default_biased();
+  plant_reach_options o;
+  o.agents = 16;
+  o.ticks = 150;
+  o.seeds = {100u, 101u};
+  std::vector<double> a, b;
+  const double ma = reach_on_plant(p, sc, rr, kCityL, o, &a);
+  const double mb = reach_on_plant(p, sc, rr, kCityL, o, &b);
+  ASSERT_EQ(a.size(), 2u);
+  EXPECT_EQ(a, b);
+  EXPECT_EQ(ma, mb);
+  EXPECT_DOUBLE_EQ(ma, 0.5 * (a[0] + a[1]));
+  std::printf("  reach_on_plant, %d agents x %d ticks: seed 100 %.3f, seed 101 %.3f (twice)\n",
+              o.agents, o.ticks, a[0], a[1]);
+  o.seeds.clear();
+  EXPECT_THROW(reach_on_plant(p, sc, rr, kCityL, o), std::invalid_argument);
+}
 
 // The gate (the vehicle-physics plan's P8b): over >= 20 paired seeds on the Jolt plant, a policy
 // trained through the dynamic vehicle should beat the one trained on the point-mass surrogate,
@@ -1013,32 +993,17 @@ TEST(NavPlantConvergence, DynamicTrainedPolicyAgainstPointMassOnJolt) {
   const cvc::nav::coef_mlp p_pm = pm.to_coef_mlp(), p_dy = dy.to_coef_mlp(),
                            p_seed = cvc::nav::coef_mlp::default_biased();
 
-  const int seeds = 20, n = 48, ticks = 400;
-  std::vector<double> a(seeds), b(seeds), c(seeds), diff(seeds);
-  double ma = 0.0, mb = 0.0, mc = 0.0;
-  for (int s = 0; s < seeds; ++s) {
-    const unsigned seed = 100u + static_cast<unsigned>(s);
-    a[s] = city_reach_on_jolt(p_pm, sc, n, ticks, seed);
-    b[s] = city_reach_on_jolt(p_dy, sc, n, ticks, seed);
-    c[s] = city_reach_on_jolt(p_seed, sc, n, ticks, seed);
+  const plant_reach_options eval; // 20 seeds (100..119) x 48 agents x 400 ticks
+  const int seeds = static_cast<int>(eval.seeds.size()), n = eval.agents, ticks = eval.ticks;
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  std::vector<double> a, b, c, diff(seeds);
+  const double ma = reach_on_plant(p_pm, sc, rr, kCityL, eval, &a);
+  const double mb = reach_on_plant(p_dy, sc, rr, kCityL, eval, &b);
+  const double mc = reach_on_plant(p_seed, sc, rr, kCityL, eval, &c);
+  for (int s = 0; s < seeds; ++s)
     diff[s] = b[s] - a[s];
-    ma += a[s] / seeds;
-    mb += b[s] / seeds;
-    mc += c[s] / seeds;
-  }
-  // Paired bootstrap of the mean difference.
-  std::mt19937 rng(0);
-  std::uniform_int_distribution<int> pick(0, seeds - 1);
-  std::vector<double> boot(2000);
-  for (double &x : boot) {
-    double sum = 0.0;
-    for (int i = 0; i < seeds; ++i)
-      sum += diff[pick(rng)];
-    x = sum / seeds;
-  }
-  std::sort(boot.begin(), boot.end());
-  const double lo = boot[static_cast<std::size_t>(0.025 * boot.size())],
-               hi = boot[static_cast<std::size_t>(0.975 * boot.size()) - 1];
+  double lo, hi;
+  paired_ci(diff, lo, hi);
   std::printf("  P8b gate (lr %.0e, %d steps) on Jolt RoboRacers (city, %d seeds x %d agents, %d "
               "ticks): reach %.1f%% "
               "point-mass-trained, %.1f%% dynamic-trained, %.1f%% the untrained seed; dynamic - "
@@ -1048,4 +1013,76 @@ TEST(NavPlantConvergence, DynamicTrainedPolicyAgainstPointMassOnJolt) {
   for (int s = 0; s < seeds; ++s)
     std::printf("    seed %d: %.3f %.3f %.3f\n", 100 + s, a[s], b[s], c[s]);
   EXPECT_TRUE(std::isfinite(lo) && std::isfinite(hi));
+}
+
+// Checkpoint selection on Jolt reach (P8b): the same two trainings, each scoring its checkpoints
+// by reach on Jolt RoboRacers over validation seeds (200.., never the evaluation's) and ending
+// on the best, the untrained policy included; then the gate's comparison on the 20 held-out
+// seeds. P8B_SELECT_LR / _STEPS / _EVERY override the training, P8B_SELECT_VAL the number of
+// validation seeds (8: a 4-seed mean carries about 1.5 points of the plant's chaos alone).
+TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  cvc::nav::train_config base;
+  base.n = 128;
+  base.hidden = 64;
+  base.horizon = 28;
+  base.window = 7;
+  base.steps = 300;
+  base.seed = 0;
+  base.lr = 2e-4f;
+  base.checkpoint_every = 30;
+  if (const char *e = std::getenv("P8B_SELECT_LR"))
+    base.lr = static_cast<float>(std::atof(e));
+  if (const char *e = std::getenv("P8B_SELECT_STEPS"))
+    base.steps = std::atoi(e);
+  if (const char *e = std::getenv("P8B_SELECT_EVERY"))
+    base.checkpoint_every = std::atoi(e);
+  int nval = 8;
+  if (const char *e = std::getenv("P8B_SELECT_VAL"))
+    nval = std::atoi(e);
+  plant_reach_options val;
+  val.seeds.clear();
+  for (int k = 0; k < nval; ++k)
+    val.seeds.push_back(200u + static_cast<unsigned>(k));
+  const auto jolt_reach = [&](const cvc::nav::coef_mlp &policy, int) {
+    return reach_on_plant(policy, sc, rr, kCityL, val);
+  };
+  cvc::nav::coef_trainer pm(base, 1);
+  pm.train(sc, false, jolt_reach);
+  cvc::nav::train_config dc = base;
+  dc.rollout = cvc::nav::rollout_kind::dynamic;
+  dc.dyn = nav_plant::dyn_bike_params_at(rr, dc.veh_L);
+  cvc::nav::coef_trainer dy(dc, 1);
+  dy.train(sc, false, jolt_reach);
+  const auto trace = [](const char *name, const cvc::nav::coef_trainer &t) {
+    std::printf("  %s checkpoints (validation reach):", name);
+    for (const cvc::nav::coef_trainer::checkpoint_score &k : t.checkpoints())
+      std::printf(" %d:%.3f", k.step, k.fitness);
+    std::printf("; selected step %d\n", t.selected_step());
+  };
+  trace("point-mass", pm);
+  trace("dynamic   ", dy);
+
+  const plant_reach_options eval; // the gate's 20 held-out seeds
+  std::vector<double> a, b, c;
+  const double ma = reach_on_plant(pm.to_coef_mlp(), sc, rr, kCityL, eval, &a);
+  const double mb = reach_on_plant(dy.to_coef_mlp(), sc, rr, kCityL, eval, &b);
+  const double mc = reach_on_plant(cvc::nav::coef_mlp::default_biased(), sc, rr, kCityL, eval, &c);
+  std::vector<double> d_pm(a.size()), d_seed(a.size());
+  for (std::size_t s = 0; s < a.size(); ++s) {
+    d_pm[s] = b[s] - a[s];
+    d_seed[s] = b[s] - c[s];
+  }
+  double lo1, hi1, lo2, hi2;
+  paired_ci(d_pm, lo1, hi1);
+  paired_ci(d_seed, lo2, hi2);
+  std::printf("  selected on Jolt reach over %d validation seeds (lr %.0e, %d steps, every %d), "
+              "held-out reach: %.1f%% "
+              "point-mass-trained, %.1f%% dynamic-trained, %.1f%% the seed; dynamic - point "
+              "mass %+.1f [%+.1f, %+.1f], dynamic - seed %+.1f [%+.1f, %+.1f]\n",
+              nval, base.lr, base.steps, base.checkpoint_every, 100 * ma, 100 * mb, 100 * mc,
+              100 * (mb - ma), 100 * lo1, 100 * hi1, 100 * (mb - mc), 100 * lo2, 100 * hi2);
+  EXPECT_TRUE(std::isfinite(mb));
 }

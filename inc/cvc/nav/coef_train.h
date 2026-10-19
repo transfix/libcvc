@@ -49,6 +49,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/dyn_bike.h> // diff::dyn_bike_params
 #include <cvc/nav/drive.h>           // field_stack
+#include <functional>
 #include <vector>
 
 namespace cvc {
@@ -159,6 +160,10 @@ struct train_config {
   // cvc::physics::nav_plant::dyn_bike_params_at(desc, veh_L) (the trainer's defaults are
   // a RoboRacer at about 0.108 normalized units per metre), or dyn_bike_params_of().
   diff::dyn_bike_params dyn{};
+  // Checkpoint selection (P8b): with a fitness function passed to train(), the policy is
+  // scored before training and every `checkpoint_every` outer steps (and after the last), and
+  // train() ends on the best-scoring parameters. 0 = every 25 steps when a fitness is given.
+  int checkpoint_every = 0;
 };
 
 // The trainable CoefMLP: its dense layers as flat params + Adam state. Distinct
@@ -169,9 +174,24 @@ class coef_trainer {
 public:
   explicit coef_trainer(const train_config &cfg, unsigned init_seed = 0);
 
+  // Scores a checkpoint, higher is better: typically its reach on the physics plant
+  // (cvc::physics::reach_on_plant over validation seeds), the deployment number the training
+  // loss only approximates. `step` is the outer steps taken so far (0 = the untrained policy).
+  using checkpoint_fitness = std::function<double(const coef_mlp &policy, int step)>;
+  struct checkpoint_score {
+    int step;
+    double fitness;
+  };
+
   // Full self-supervised training over `scene` (mutates the params). `verbose`
-  // prints a periodic loss trace.
-  void train(const training_scene &scene, bool verbose = false);
+  // prints a periodic loss trace. With `fitness`, checkpoints are scored (see
+  // train_config::checkpoint_every) and training ends on the best one, the untrained policy
+  // included, so it never ends below where it started by that score; checkpoints() lists the
+  // scores and selected_step() the winner. Ties keep the earlier checkpoint.
+  void train(const training_scene &scene, bool verbose = false,
+             const checkpoint_fitness &fitness = checkpoint_fitness());
+  const std::vector<checkpoint_score> &checkpoints() const { return checkpoints_; }
+  int selected_step() const { return selected_step_; }
 
   // Bake the frozen inference policy: softplus(net + log(expm1(bias))), the same
   // topology and semantics a loaded .cvcnav has. Persist with its save().
@@ -211,6 +231,8 @@ private:
   std::vector<float> m_, u_; // Adam first/second moments (u_ = "v", renamed to avoid the vel v)
   long adam_t_ = 0;
   long adam_total_ = 0; // total adam steps this train() run, for the cosine LR anneal (0 = off)
+  std::vector<checkpoint_score> checkpoints_; // the last train()'s checkpoint scores
+  int selected_step_ = -1;                    // and the one it ended on (-1 = no selection)
   // Per-layer flat offsets into p_ (w then b), plus (rows, cols).
   int off_w_[3] = {0, 0, 0}, off_b_[3] = {0, 0, 0};
   int lrows_[3] = {0, 0, 0}, lcols_[3] = {0, 0, 0};
