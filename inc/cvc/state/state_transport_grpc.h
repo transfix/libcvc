@@ -153,6 +153,14 @@ public:
   void set_backfill_on_connect(bool enable) noexcept { _backfill_on_connect = enable; }
   bool backfill_on_connect() const noexcept { return _backfill_on_connect; }
 
+  // RELAY mode (star topology): when enabled, a mutation or message frame RECEIVED from one
+  // connection is also forwarded to every OTHER connection, so clients that only connect to this
+  // (server) node still see each other's room-tree writes. Off by default — a leaf node applies a
+  // received frame to its local shards and never re-sends it. Enable only on a relay/server; a
+  // forwarded frame keeps its origin_node_id, and the origin connection is skipped (no echo).
+  void set_relay(bool enable) noexcept { _relay.store(enable, std::memory_order_relaxed); }
+  bool relay() const noexcept { return _relay.load(std::memory_order_relaxed); }
+
   // state_transport interface.
   void register_shard(state_cluster_shard *shard) override;
   void unregister_shard(state_cluster_shard *shard) override;
@@ -192,8 +200,8 @@ public:
   const std::string &local_node_id() const noexcept { return _node_id; }
   const std::string &local_cluster_id() const noexcept { return _cluster_id; }
   const auth_config &auth() const noexcept { return _auth; }
-  void on_inbound_mutation(const state_mutation &m);
-  void on_inbound_message(const state_message &m);
+  void on_inbound_mutation(const state_mutation &m, connection *origin = nullptr);
+  void on_inbound_message(const state_message &m, connection *origin = nullptr);
   // Chunk fetch request/response dispatch (called from connection
   // reader threads when a ChunkRequest/ChunkResponse frame arrives).
   void on_inbound_chunk_request(connection *conn, const std::string &digest,
@@ -242,6 +250,7 @@ private:
   std::vector<std::shared_ptr<connection>> _conns;
 
   std::atomic<bool> _backfill_on_connect{true};
+  std::atomic<bool> _relay{false};
 
   std::atomic<std::uint64_t> _backfilled{0};
   std::atomic<std::uint64_t> _published{0};

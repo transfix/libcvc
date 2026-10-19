@@ -1069,3 +1069,44 @@ TEST(StateTransportGrpcReconnectTest, ConnectionCountTracking) {
 
   tA.stop();
 }
+
+// Star topology: a RELAY server R that two clients A and B each dial, but A and B do NOT dial each
+// other. With set_relay(true), a write on A reaches B THROUGH R — the foundation of a hosted,
+// NAT-friendly conference (clients only ever connect to the server).
+TEST(StateTransportGrpcTest, RelayForwardsBetweenStarClients) {
+  cvc::app aA, aB;
+  cvc::state_transport_grpc tR, tA, tB;
+  tR.start("127.0.0.1:0", "R", "C"); // the relay has no shard — it only forwards
+  tR.set_relay(true);
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  // A and B each dial ONLY the relay (never each other).
+  ASSERT_TRUE(tA.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+
+  // A writes (set twice: first-set-on-fresh-child is not observed) and pumps -> A -> R -> B.
+  cvc::state::instance(aA)("k").value(std::string("init"));
+  cvc::state::instance(aA)("k").value(std::string("v1"));
+  EXPECT_GT(tA.pump_all(), 0u);
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (cvc::state::instance(aB)("k").value() != "v1" &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_EQ(cvc::state::instance(aB)("k").value(), "v1")
+      << "the relay should forward A's write to B even though they never connected directly";
+
+  tA.stop();
+  tB.stop();
+  tR.stop();
+  sA.detach();
+  sB.detach();
+}

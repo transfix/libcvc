@@ -268,10 +268,10 @@ public:
         conn->remote_node_id = in.hello().node_id();
         conn->remote_cluster_id = in.hello().cluster_id();
       } else if (in.has_mutation()) {
-        _owner->on_inbound_mutation(decode_mutation(in.mutation()));
+        _owner->on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         _owner->increment_recv_mutations();
       } else if (in.has_message()) {
-        _owner->on_inbound_message(decode_message(in.message()));
+        _owner->on_inbound_message(decode_message(in.message()), conn.get());
         _owner->increment_recv_messages();
       } else if (in.has_chunk_request()) {
         _owner->on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
@@ -463,10 +463,10 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
         conn->remote_node_id = in.hello().node_id();
         conn->remote_cluster_id = in.hello().cluster_id();
       } else if (in.has_mutation()) {
-        on_inbound_mutation(decode_mutation(in.mutation()));
+        on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         increment_recv_mutations();
       } else if (in.has_message()) {
-        on_inbound_message(decode_message(in.message()));
+        on_inbound_message(decode_message(in.message()), conn.get());
         increment_recv_messages();
       } else if (in.has_chunk_request()) {
         on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
@@ -716,7 +716,7 @@ state_transport_grpc::publish_message(const state_message &m) {
   return stats;
 }
 
-void state_transport_grpc::on_inbound_mutation(const state_mutation &m) {
+void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connection *origin) {
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -736,9 +736,27 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m) {
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
   }
+  // Relay (star topology): re-send this mutation to every OTHER connection so clients that only
+  // reach this server still converge with each other. The origin connection is skipped (no echo);
+  // origin_node_id is preserved so duplicate suppression / vector clocks still work end-to-end.
+  if (_relay.load(std::memory_order_relaxed)) {
+    pb::Frame frame;
+    encode_mutation(m, frame.mutable_mutation());
+    std::vector<std::shared_ptr<connection>> conns;
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      conns = _conns;
+    }
+    for (auto &c : conns) {
+      if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
+        continue;
+      if (c->write(frame))
+        _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 }
 
-void state_transport_grpc::on_inbound_message(const state_message &m) {
+void state_transport_grpc::on_inbound_message(const state_message &m, connection *origin) {
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -755,6 +773,22 @@ void state_transport_grpc::on_inbound_message(const state_message &m) {
   }
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
+  // Relay (star topology): forward the message to every OTHER connection (see on_inbound_mutation).
+  if (_relay.load(std::memory_order_relaxed)) {
+    pb::Frame frame;
+    encode_message(m, frame.mutable_message());
+    std::vector<std::shared_ptr<connection>> conns;
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      conns = _conns;
+    }
+    for (auto &c : conns) {
+      if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
+        continue;
+      if (c->write(frame))
+        _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 }
 
 void state_transport_grpc::register_connection(std::shared_ptr<connection> conn) {
