@@ -196,8 +196,10 @@ those places (the vehicle-physics roadmap, P9).
 
 `plan_vehicle_route` searches over the rear axle's pose (Hybrid A*):
 
-- **The moves.** Each move is an arc of `step` (1.5 cells) at a curvature of -1, -0.5, 0, 0.5 or
-  1 times `1 / min_radius`, forward or backing up.
+- **The moves.** Each move is an arc of `step` at a curvature of -1, -0.5, 0, 0.5 or 1 times
+  `1 / min_radius`, forward or backing up. The default step is 1.5 cells, but at most
+  0.6 x `min_radius`. The closed set is keyed at step / 1.5 whatever the grid, so a coarse grid
+  still turns in arcs it can resolve: Austin's 7.8 m cells are larger than a Humvee.
 - **The footprint.** The footprint discs (`sim_world::plant_plan_of` gives a plant vehicle's) must
   keep `margin` from the walls. The walls' distance comes from the grid's exact distance
   transform, sampled between cells.
@@ -217,7 +219,7 @@ Measured (`nav_vehicle_route_test`, the Humvee on 1 m cells):
 | Case | Route |
 |---|---|
 | Open ground, goal 70 m ahead | Straight, 70 m |
-| An 8 m dead end, facing its end, goal behind | Backs out (42 m, all backing up); nav's bicycle turns round in the street (46.5 m forward) |
+| An 8 m dead end, facing its end, goal behind | Backs out (42 m, all backing up); nav's bicycle turns round in the street (45.4 m, 1.2 m of it a backing nudge) |
 | A right angle between 9 m streets | Forward, 106.5 m, 93 expansions |
 | Wedged, the nose 0.4 m into the end wall | The first move backs away; clear of the walls after it |
 | A 384 m city of 40 m blocks and 12 m streets | 648 m in 740 expansions and 8 ms (exact, heuristic x1: 636 m in 168,000 expansions and 0.63 s) |

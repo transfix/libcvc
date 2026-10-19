@@ -60,7 +60,7 @@ struct route_vehicle {
 };
 
 struct route_options {
-  double step = 0.0;           // arc length of a move; 0 = 1.5 cells
+  double step = 0.0; // arc length of a move; 0 = 1.5 cells, at most 0.6 x min_radius
   int headings = 72;           // heading bins in the search's closed set (5 degrees)
   double goal_tolerance = 0.0; // how near the rear axle must come to the goal; 0 = 2 cells
   double margin = 0.0;         // world units the discs keep from walls beyond their radius

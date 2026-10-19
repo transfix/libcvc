@@ -161,7 +161,18 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
   if (!occ || rows < 2 || cols < 2)
     return out;
   const distance_field f(occ, rows, cols, min_x, min_y, max_x, max_y);
-  const double step = o.step > 0.0 ? o.step : 1.5 * f.cell;
+  // A move: 1.5 cells, but no more than 0.6 of the turning radius, so a coarse grid (a cell
+  // larger than the vehicle) still turns in arcs it can resolve.
+  double step = o.step;
+  if (!(step > 0.0)) {
+    step = 1.5 * f.cell;
+    if (v.min_radius > 0.0)
+      step = std::min(step, 0.6 * v.min_radius);
+  }
+  // The closed set's resolution: a move leaves its cell, whatever the grid's size.
+  const double kres = step / 1.5;
+  const std::uint64_t kcols =
+      static_cast<std::uint64_t>(std::ceil((cols - 1) * f.dx / kres)) + 2;
   const double tol = o.goal_tolerance > 0.0 ? o.goal_tolerance : 2.0 * f.cell;
   const double radius = std::max(v.min_radius, 0.5 * step); // "any" turn: tight, not singular
   const double cusp = v.cusp_cost > 0.0 ? v.cusp_cost : 4.0 * step;
@@ -198,10 +209,11 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
   std::vector<node> nodes;
   nodes.push_back({start.x, start.y, start.heading, 0.0, -1, 0, 0.0, 0});
   const auto key = [&](double x, double y, double th) -> std::uint64_t {
-    int r = 0, c = 0;
-    const int i = f.cell_of(x, y, r, c);
+    const double kx = std::max(0.0, std::floor((x - min_x) / kres + 0.5));
+    const double ky = std::max(0.0, std::floor((y - min_y) / kres + 0.5));
     const int b = static_cast<int>(wrap(th) / (2.0 * kPi) * headings) % headings;
-    return static_cast<std::uint64_t>(i < 0 ? 0 : i) * static_cast<std::uint64_t>(headings) +
+    return (static_cast<std::uint64_t>(ky) * kcols + static_cast<std::uint64_t>(kx)) *
+               static_cast<std::uint64_t>(headings) +
            static_cast<std::uint64_t>(b);
   };
   std::unordered_map<std::uint64_t, double> best;
