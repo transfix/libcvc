@@ -179,6 +179,62 @@ learned-lam reroute) — is pinned by `nav_material_deploy_test`.
 > domain-specific logic stays in that layer, never in this core (as with the
 > domain-neutral base statistics and their extension seam — see `NAV_STATS.md`).
 
+### Training with the external force
+
+The fused deploy path drives the material policy *and* an external force together.
+Training has to see the same thing, or the material heads learn a world without the
+force they will face. `material_ext` (`material.h`) puts that force in every material
+training rollout:
+
+- the surrogate (`integrate_surrogate_material`);
+- the bicycle (`integrate_bicycle_material`);
+- the dynamic vehicle (`integrate_dynamic_material`);
+- their VJPs;
+- the trainer, through `material_batch::ext`.
+
+**How the force joins** is how `drive_step_material_ext` adds `ext_force`:
+- It is added last to the bicycle's and the dynamic vehicle's force sum,
+  `F = F_bar + F_goal + F_mat + F_ext`.
+- With `steer` on, it is also added to their steering bias,
+  `(F_rep + F_mat + F_ext) . left`.
+- The surrogate is a point mass: the force joins its `ftot`, and `steer` has nothing to act on.
+- The bicycle divides its force by `mass` and the deployed drive does not, so the two agree at
+  `mass = 1`, the default.
+- A null channel is the rollout without one, bit for bit. The adds are conditional, as in the
+  deployed drive.
+
+**Sources** (exactly one):
+- **A force patch per agent:** `K` two-channel patches (`fx`, `fy`) on the rollout patch's
+  grid, centred on the start and sampled bilinearly at the current position.
+  - A schedule, `patch_of_step`, can switch patches per step, for example jammers switching
+    on and off.
+  - J = dF/do is the patch's own gradient.
+  - This is the form for a force that depends only on the agent's own position (radios and
+    jammers fixed in the scene). It is an array, so it reaches pycvc.
+- **Per-step values** `F`, with an optional `J`.
+- **A C++ callback** `(user, b, s, ox, oy, F, J)`, sampled every `hold` steps and held between,
+  as the diff rollout's `bike_ext_fn`.
+
+**The VJPs** chain `J^T dL/dF_ext` into the position adjoint. A held window's sum goes in at the
+step it was sampled. Given `g_fext`, they also return dL/dF_ext per step. `L_multi`'s geometry
+rollouts leave the force out, as they leave out the material forces. With a force, the surrogate
+trains on the CPU: there is no device twin of the channel yet.
+
+Pinned by `nav_material_ext_test` and the `...WithAnExternalForce` cases of
+`nav_material_train_test`:
+
+| check | measured |
+|---|---|
+| Null or zero force | the rollout without one, bit for bit, forward and reverse, all three integrators |
+| Coefficient gradient through a scheduled force patch | worst relative 2.2e-3 / 1.1e-2 / 1.7e-2 (surrogate / bicycle / dynamic) |
+| Coefficient gradient through a callback held for 2 steps | 9.2e-4 / 1.6e-2 (surrogate / bicycle) |
+| dL/dF_ext per step against central differences | 2.6e-4 / 2.5e-5 / 3.0e-5 |
+| A callback giving the patch's own values and J | the patch, bit for bit |
+| The full loss-to-weights gradient with the force | directional 2.2e-4 (surrogate), 7.0e-4 (bicycle) |
+
+`tests/data/material_ext_golden.json` (`NavMaterialExt.Golden`) holds GRL-SNAM's torch twins to
+the three integrators with the force on: the inputs, outputs, coefficient gradients and dL/dF_ext.
+
 ### Choosing constants
 
 The defaults are the GRL-SNAM sim-frame values, validated behaviorally there
@@ -257,6 +313,16 @@ base seed. `ms_semi_implicit` selects GRL-SNAM's integrator (velocity first);
 the default explicit order is the material fork's, which `train_material.py`
 imports. These are trailing args on an existing symbol, so an older pycvc rejects
 them with a `TypeError` rather than through a capability flag.
+
+The external force in training (`material_ext`) is optional trailing arguments on
+`nav_integrate_surrogate_material`, `nav_integrate_bicycle_material`, its `_vjp`, and the trainer's
+`_step` and `_loss`:
+- `ext_patch` (B,K,2,Hp,Wp) f32 with `ext_patch_of_step` (B,steps) i32;
+- or `ext_F` (B,steps,2) f32 with `ext_J` (B,steps,4) f32;
+- and `ext_steer`.
+
+The bicycle VJP returns `g_fext` (B,steps,2) as a sixth value with `want_g_fext=1`. An older pycvc
+rejects these arguments with a `TypeError`. They are checked in the binding, with the GIL held.
 
 Binding gotcha, earned the hard way: a C++ exception thrown while the GIL is
 released (`Py_BEGIN_ALLOW_THREADS`) leaves the GIL unrestored and segfaults —

@@ -147,13 +147,14 @@ public:
   void set_thread_pool(cvc::thread_pool *pool) { pool_ = pool; }
 
   // Inject a generic external per-agent force into the drive. When set
-  // (ext.sample != nullptr) step() routes the (non-material) drive through
-  // drive_step_ext, summing this force into the SAME accumulator as F_rep/F_goal
-  // (and the steering bias when ext.steer) — the sanctioned ext_force port
-  // (drive.h). The core stays physics-agnostic: a downstream consumer (with its
-  // own domain-specific force) supplies the callback + its state via ext.user,
-  // which must outlive stepping. A null sample (the default) is byte-identical to
-  // the plain drive. No effect on the material path (drive_step_material).
+  // (ext.sample != nullptr) step() routes the drive through drive_step_ext, summing
+  // this force into the SAME accumulator as F_rep/F_goal (and the steering bias when
+  // ext.steer) — the sanctioned ext_force port (drive.h). With a material stack also
+  // set, step() fuses the two through drive_step_material_ext: the ext force joins the
+  // material drive's accumulator and steering bias the same way. The core stays
+  // physics-agnostic: a downstream consumer (with its own domain-specific force)
+  // supplies the callback + its state via ext.user, which must outlive stepping. A
+  // null sample (the default) is byte-identical to the plain drive.
   void set_ext_force(const ext_force &ext) { ext_ = ext; }
   void clear_ext_force() { ext_ = ext_force{}; }
 

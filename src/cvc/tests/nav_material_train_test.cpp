@@ -49,12 +49,30 @@ namespace {
 using cvc_test::Batch;
 using cvc_test::make_batch;
 
-void full_chain_gradcheck(const material_loss_config &cfg, const char *tag) {
+// with_ext puts an external force in every rollout the loss scores (material_batch::ext): a
+// smooth force patch per agent, about 0.3, so the weights' gradient also runs through its J.
+void full_chain_gradcheck(const material_loss_config &cfg, const char *tag, bool with_ext = false) {
   std::mt19937 rng(2024);
   const int P = 16;
   coef_energy_net m = cvc_test::build_test_model(rng, P);
   const Batch batch = make_batch(rng, /*B=*/16, /*N=*/3, P, /*Hp=*/13, /*Wp=*/13);
-  const material_batch mb = batch.view();
+  material_batch mb = batch.view();
+  std::vector<float> fpatch;
+  cvc::nav::material_ext ext;
+  if (with_ext) {
+    const int Hp = batch.Hp, Wp = batch.Wp;
+    fpatch.assign(static_cast<std::size_t>(batch.B) * 2 * Hp * Wp, 0.0f);
+    for (int i = 0; i < batch.B; ++i)
+      for (int r = 0; r < Hp; ++r)
+        for (int c = 0; c < Wp; ++c) {
+          const float x = (float)c / (Wp - 1), y = (float)r / (Hp - 1), ph = 0.3f * i;
+          const std::size_t base = (std::size_t)i * 2 * Hp * Wp + (std::size_t)r * Wp + c;
+          fpatch[base] = 0.3f * std::sin(5.0f * x + 2.0f * y + ph);
+          fpatch[base + (std::size_t)Hp * Wp] = 0.3f * std::cos(3.0f * x - 4.0f * y + ph);
+        }
+    ext.patch = fpatch.data();
+    mb.ext = &ext;
+  }
 
   // analytic gradient (fresh CVaR eta, returned for the FD to freeze)
   coef_energy_net::param_grads grads = m.zero_grads();
@@ -222,4 +240,20 @@ TEST(NavMaterialTrain, FullChainGradcheckDynamic) {
   d.v_blend = 0.1f;
   d.v_width = 0.03f;
   full_chain_gradcheck(cfg, "dynamic");
+}
+
+// The same chains with an external force in the rollouts (material_batch::ext, a force patch per
+// agent): the material heads train in the presence of the force they face at deploy.
+TEST(NavMaterialTrain, FullChainGradcheckWithAnExternalForce) {
+  full_chain_gradcheck(material_loss_config{}, "surrogate + ext", true);
+}
+
+TEST(NavMaterialTrain, FullChainGradcheckBicycleWithAnExternalForce) {
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::bicycle;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+  full_chain_gradcheck(cfg, "bicycle + ext", true);
 }

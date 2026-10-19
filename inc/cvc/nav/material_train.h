@@ -84,6 +84,11 @@ struct material_batch {
   // from v0: the speed is |v0|, the heading v0's direction (toward the goal when
   // v0 is zero). The surrogate ignores them.
   const float *th0 = nullptr, *sp0 = nullptr;
+  // An external force in the rollout every term scores (material_ext, material.h:
+  // cvcdbg's RF/comm force, as the deployed drive_step_material_ext adds it). L_multi's
+  // geometry rollouts leave it out, as they leave out the material forces. With it, the
+  // surrogate rollout and its VJP run on the CPU (no device twin of the channel yet).
+  const material_ext *ext = nullptr;
 };
 
 // The rollout the material loss is taken through.
