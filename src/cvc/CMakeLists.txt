@@ -1437,6 +1437,18 @@ endif()
 # terminal library — it pulls in NO VTK/GL/ImGui, so the core stays graphics-free.
 find_package(ftxui CONFIG QUIET)
 if(TARGET ftxui::component)
+  # FTXUI's MSVC export puts /utf-8 in each target's INTERFACE_COMPILE_OPTIONS. cvc inherits it for
+  # every source, its CUDA ones too, and nvcc reads a bare /utf-8 as a second input file ("A single
+  # input file is required for a non-link phase"). Scope FTXUI's options to C++, like -openmp:llvm
+  # below.
+  foreach(_ftxui_target ftxui::screen ftxui::dom ftxui::component)
+    get_target_property(_ftxui_opts ${_ftxui_target} INTERFACE_COMPILE_OPTIONS)
+    if(_ftxui_opts)
+      list(TRANSFORM _ftxui_opts PREPEND "$<$<COMPILE_LANGUAGE:CXX>:")
+      list(TRANSFORM _ftxui_opts APPEND ">")
+      set_property(TARGET ${_ftxui_target} PROPERTY INTERFACE_COMPILE_OPTIONS ${_ftxui_opts})
+    endif()
+  endforeach()
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_FTXUI)
   target_link_libraries(cvc PRIVATE ftxui::component ftxui::dom ftxui::screen)
   list(APPEND CVC_PRIVATE_LINK_PACKAGES ftxui)
