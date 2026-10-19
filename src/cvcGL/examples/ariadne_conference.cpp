@@ -22,7 +22,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h> // gethostname (default --name to the host name)
+#ifndef _WIN32
+#include <unistd.h> // gethostname (default --name to the host name; Windows reads COMPUTERNAME)
+#endif
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // register_room_intrinsics (room-join/roster/leave)
 #include <cvc/ariadne/loader.h>
@@ -126,8 +128,15 @@ int main(int argc, char **argv) {
   // display name to this host's name — so a friend just runs with --state-peer/--media-server and
   // is discovered by everyone else through the replicated roster (no --peer-id needed).
   if (nodeId.empty() && (!statePeer.empty() || !stateListen.empty())) {
+#ifdef _WIN32
+    // COMPUTERNAME is reliably set on Windows (unlike POSIX $HOSTNAME); avoids pulling in <windows.h>
+    // (and its macro collisions) just for GetComputerName.
+    const char *hn = std::getenv("COMPUTERNAME");
+    nodeId = (hn && hn[0]) ? std::string(hn) : std::string("guest");
+#else
     char hn[256] = {0};
     nodeId = (gethostname(hn, sizeof(hn) - 1) == 0 && hn[0]) ? std::string(hn) : std::string("guest");
+#endif
   }
   const bool clustered = !nodeId.empty();
   cvc::ariadne::register_cvc_uri_handler(componentPaths);
