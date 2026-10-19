@@ -27,6 +27,15 @@ add_executable(ariadne_stream ariadne_stream.cpp)
 target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
 
+# ariadne_conference — the conference host bundle (roadmap §8): ariadne_hello + the five stream/
+# media registrations (stream-open/info/close, gl-bind-stream, capture-camera/-audio, play-audio,
+# type: stream, type: stream_view). It opens NOTHING in C++; conference_media.ari drives the whole
+# capture → stream → render/play pipeline from the DSL program lane. Synthetic video + a 440 Hz tone
+# by default (headless-verifiable); real devices with a CVC_ENABLE_SDL build.
+add_executable(ariadne_conference ariadne_conference.cpp)
+target_link_libraries(ariadne_conference PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_conference MODULES ${VTK_LIBRARIES})
+
 # lsystem_forest is now a PURE .ari demo (lsystem_forest.ari): the island/trees/sea/sky are the
 # cvcGL L-system node types (forest_trees/wave_sea/cloud_sky) + the shader presets (terrain_bump/
 # bark), all registered by register_cvcgl_extensions(). So it needs no bespoke host — run it with
