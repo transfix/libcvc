@@ -99,14 +99,20 @@ std::string room_id_of(const se::value_t &v) {
 
 bool room_publish(cvc::app &app, sx::stream_bridge &bridge, const std::string &local_endpoint,
                   const std::string &room_id, const std::string &pid, const std::string &kind,
-                  sx::stream &local) {
+                  sx::stream &local, const std::string &relay_endpoint) {
   if (room_id.empty() || pid.empty() || kind.empty())
     return false;
-  // Make the stream pullable on this host's bridge, then advertise how to reach + rebuild it.
-  bridge.serve_port(local);
+  const bool sfu = !relay_endpoint.empty();
+  // SFU: push the stream to the relay (the server fans it out to subscribers), and advertise the
+  // RELAY as the source so subscribers pull the relayed copy through the server (NAT-safe). MESH:
+  // publish on our own bridge for peers to pull directly, advertising our own endpoint.
+  if (sfu)
+    bridge.serve(local, relay_endpoint);
+  else
+    bridge.serve_port(local);
   const std::string base = stream_desc_path(room_id, pid, kind);
   const sx::format_desc &f = local.format();
-  set_replicated(app, field(base, "endpoint"), local_endpoint);
+  set_replicated(app, field(base, "endpoint"), sfu ? relay_endpoint : local_endpoint);
   set_replicated(app, field(base, "token"), local.token());
   set_replicated(app, field(base, "id"), local.id());
   set_replicated(app, field(base, "scope"), local.scope());
@@ -160,73 +166,76 @@ std::unique_ptr<sx::stream> room_subscribe(cvc::app &app, sx::stream_bridge &bri
 }
 
 void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
-                                    const std::string &local_endpoint) {
-  register_action_intrinsics([&app, &bridge, local_endpoint](std::shared_ptr<se::environment> env,
-                                                             se::intrinsics_context &ictx) {
-    se::document_scope *doc = ictx.document;
+                                    const std::string &local_endpoint,
+                                    const std::string &relay_endpoint) {
+  register_action_intrinsics(
+      [&app, &bridge, local_endpoint, relay_endpoint](std::shared_ptr<se::environment> env,
+                                                      se::intrinsics_context &ictx) {
+        se::document_scope *doc = ictx.document;
 
-    // (room-publish ROOM {kind token}) -> { ok kind token }.
-    se::builtins::register_fn(
-        env, "room-publish",
-        [&app, &bridge, local_endpoint, doc](std::span<const se::value_t> args) -> se::value_t {
-          if (!doc)
-            return err("room-publish: no document scope");
-          if (args.size() < 2)
-            return err("room-publish: (room-publish ROOM {kind token})");
-          const std::string room_id = room_id_of(args[0]);
-          if (room_id.empty())
-            return err("room-publish: ROOM must be a room-join handle or a room-id");
-          // The publisher is always THIS node, so derive the pid from the cluster shard (as
-          // room-join does), not from the handle — publish works with a bare room-id too.
-          std::string pid = "local";
-          if (auto *shard = cvc::state_cluster_shard::default_for(app))
-            if (!shard->local_node_id().empty())
-              pid = shard->local_node_id();
-          const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&args[1].v);
-          if (!dp || !*dp)
-            return err("room-publish: second argument must be a { kind token } dict");
-          const std::string kind = get_str(dict_get(**dp, "kind"));
-          const std::string token = get_str(dict_get(**dp, "token"));
-          if (kind.empty() || token.empty())
-            return err("room-publish: 'kind' and 'token' are required");
-          sx::stream *local = document_stream(doc, token);
-          if (!local)
-            return err("room-publish: no open stream for that token (stream-open it first)");
-          room_publish(app, bridge, local_endpoint, room_id, pid, kind, *local);
-          return se::make_dict({
-              {"ok", se::value_t(true)},
-              {"kind", se::value_t(kind)},
-              {"token", se::value_t(token)},
-          });
-        });
+        // (room-publish ROOM {kind token}) -> { ok kind token }.
+        se::builtins::register_fn(
+            env, "room-publish",
+            [&app, &bridge, local_endpoint, relay_endpoint,
+             doc](std::span<const se::value_t> args) -> se::value_t {
+              if (!doc)
+                return err("room-publish: no document scope");
+              if (args.size() < 2)
+                return err("room-publish: (room-publish ROOM {kind token})");
+              const std::string room_id = room_id_of(args[0]);
+              if (room_id.empty())
+                return err("room-publish: ROOM must be a room-join handle or a room-id");
+              // The publisher is always THIS node, so derive the pid from the cluster shard (as
+              // room-join does), not from the handle — publish works with a bare room-id too.
+              std::string pid = "local";
+              if (auto *shard = cvc::state_cluster_shard::default_for(app))
+                if (!shard->local_node_id().empty())
+                  pid = shard->local_node_id();
+              const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&args[1].v);
+              if (!dp || !*dp)
+                return err("room-publish: second argument must be a { kind token } dict");
+              const std::string kind = get_str(dict_get(**dp, "kind"));
+              const std::string token = get_str(dict_get(**dp, "token"));
+              if (kind.empty() || token.empty())
+                return err("room-publish: 'kind' and 'token' are required");
+              sx::stream *local = document_stream(doc, token);
+              if (!local)
+                return err("room-publish: no open stream for that token (stream-open it first)");
+              room_publish(app, bridge, local_endpoint, room_id, pid, kind, *local, relay_endpoint);
+              return se::make_dict({
+                  {"ok", se::value_t(true)},
+                  {"kind", se::value_t(kind)},
+                  {"token", se::value_t(token)},
+              });
+            });
 
-    // (room-subscribe ROOM PID KIND) -> { ok token pid kind }.
-    se::builtins::register_fn(
-        env, "room-subscribe",
-        [&app, &bridge, doc](std::span<const se::value_t> args) -> se::value_t {
-          if (!doc)
-            return err("room-subscribe: no document scope");
-          if (args.size() < 3)
-            return err("room-subscribe: (room-subscribe ROOM PID KIND)");
-          const std::string room_id = room_id_of(args[0]);
-          const std::string target_pid = get_str(&args[1]);
-          const std::string kind = get_str(&args[2]);
-          if (room_id.empty() || target_pid.empty() || kind.empty())
-            return err("room-subscribe: ROOM handle, PID and KIND are required");
-          std::unique_ptr<sx::stream> proxy =
-              room_subscribe(app, bridge, room_id, target_pid, kind);
-          if (!proxy)
-            return err("room-subscribe: no such published stream (or the pull failed)");
-          // Hand the proxy to the document so stream-play-audio / a stream_view can consume it.
-          const std::string token = own_document_stream(doc, std::move(proxy));
-          return se::make_dict({
-              {"ok", se::value_t(true)},
-              {"token", se::value_t(token)},
-              {"pid", se::value_t(target_pid)},
-              {"kind", se::value_t(kind)},
-          });
-        });
-  });
+        // (room-subscribe ROOM PID KIND) -> { ok token pid kind }.
+        se::builtins::register_fn(
+            env, "room-subscribe",
+            [&app, &bridge, doc](std::span<const se::value_t> args) -> se::value_t {
+              if (!doc)
+                return err("room-subscribe: no document scope");
+              if (args.size() < 3)
+                return err("room-subscribe: (room-subscribe ROOM PID KIND)");
+              const std::string room_id = room_id_of(args[0]);
+              const std::string target_pid = get_str(&args[1]);
+              const std::string kind = get_str(&args[2]);
+              if (room_id.empty() || target_pid.empty() || kind.empty())
+                return err("room-subscribe: ROOM handle, PID and KIND are required");
+              std::unique_ptr<sx::stream> proxy =
+                  room_subscribe(app, bridge, room_id, target_pid, kind);
+              if (!proxy)
+                return err("room-subscribe: no such published stream (or the pull failed)");
+              // Hand the proxy to the document so stream-play-audio / a stream_view can consume it.
+              const std::string token = own_document_stream(doc, std::move(proxy));
+              return se::make_dict({
+                  {"ok", se::value_t(true)},
+                  {"token", se::value_t(token)},
+                  {"pid", se::value_t(target_pid)},
+                  {"kind", se::value_t(kind)},
+              });
+            });
+      });
 }
 
 } // namespace conference
