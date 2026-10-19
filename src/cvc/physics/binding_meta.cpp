@@ -217,6 +217,8 @@ const key_meta kVehicle[] = {
      "The driver model's full-throttle acceleration, its feed-forward scale."},
     {"tuning.max_decel", "knob", "m/s^2", 0.1, 15,
      "The driver model's full-brake deceleration, its feed-forward scale."},
+    {"tuning.max_speed", "knob", "m/s", 0, 100,
+     "The top speed the driver model holds, 0 for none (24.6 a Humvee, 10 a RoboRacer)."},
     {"tuning.drag_coefficient", "knob", "1", 0, 2, "The aerodynamic drag coefficient, C_d."},
     {"tuning.frontal_area", "knob", "m^2", 0, 20, "The frontal area the drag acts on, A."},
     {"tuning.air_density", "knob", "kg/m^3", 0, 1.5,

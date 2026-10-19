@@ -440,7 +440,7 @@ struct vehicle_desc {
   double shift_up_rpm, shift_down_rpm;
   double clutch_strength, converter_k, converter_stall, converter_coupling;
   double driveline_efficiency;
-  double max_accel, max_decel;
+  double max_accel, max_decel, max_speed;
   double drag_coefficient, frontal_area, air_density, rolling_resistance;
   double tire_peak_slip, tire_peak_slip_angle, tire_sliding;
   bool energy_ledger;

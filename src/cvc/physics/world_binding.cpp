@@ -255,6 +255,7 @@ const std::pair<const char *, double vehicle_desc::*> kVehicleKnobs[] = {
     {"max_steer_rate", &vehicle_desc::max_steer_rate},
     {"max_accel", &vehicle_desc::max_accel},
     {"max_decel", &vehicle_desc::max_decel},
+    {"max_speed", &vehicle_desc::max_speed},
     {"drag_coefficient", &vehicle_desc::drag_coefficient},
     {"frontal_area", &vehicle_desc::frontal_area},
     {"air_density", &vehicle_desc::air_density},

@@ -65,6 +65,7 @@ app world_clock        fixed_dt = 0.01 s (100 Hz)
 | **P6a — The scene binding** (started) | `world::states`, `pose_tracker` (the last two states, interpolated at the clock's fraction), cvcGL `physics_scene_binding` (nodes and merged-mesh groups); then the city bundle loader in the library (one source for the scene's and the world's static geometry) and Ariadne `physics:` / `body:` specs | A bound node's transform is exactly the interpolated pose; off-thread presents reach the owner thread; removed bodies and destroyed nodes unbind; one writer per actor |
 | **P7 — wasm-mt replay** | The libcvc recipe declares Jolt for wasm-mt; a native trace replayed under node | The same `state_hash` native and in wasm |
 | **P8 — The differentiable vehicle** | See below | See below |
+| **P9 — The plant by default** | The plant plans with each vehicle's own limits and size; a `plant_host` picks the plant by name, in code or the state tree; the demos and cvcdbg drive Humvees on Jolt by default | A sim_world sized with nav's defaults drives within the vehicle's envelope (done); the demos' Humvees reach their goals in Austin, which waits on vehicle-aware routes and P8 |
 
 The Jolt `wasm-mt` column is published (`joltphysics` 5.6.0+cvc.5). Jolt's own smoke test already
 reproduces the native state hash under node, with a thread pool, bit for bit.
@@ -293,3 +294,30 @@ P4 adds three things to measure and contain the drift:
     asin, which differ by an ULP between libms, were replaced by `det_math.h` in everything that
     feeds the hash.
 - **P8** is in progress (P8b's first item merged); P8a and P8c are not started.
+- **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
+  and physics?").**
+  - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle
+    or a point mass, sized at the trained metric's numbers: at Austin's 0.05 per metre, a 3 m
+    disc, 18 m/s and 30 m/s^2.
+  - In libcvc:
+    - `vehicle_desc::max_speed`, which the driver model holds (Humvee 24.6 m/s, RoboRacer
+      10 m/s);
+    - `nav_plant` gives `sim_world` each vehicle's acceleration, top speed, cornering limit and
+      body (`plan_with_vehicle`, on by default);
+    - `plant_host` chooses the plant by name;
+    - `nav_plant` backs up from rest when nav asks, rather than braking against its springs'
+      jitter;
+    - the drive sends a plant only what its own integration would apply (`allow_reverse`,
+      `vmax`);
+    - the cvcGL nav demos take `--plant`.
+  - **The demos' default stays the bicycle, for now.** The Austin finale's Humvees drive their
+    routes, then wedge in a corner after act 2 replans them: upright, at full lock, unable to
+    turn a 6.7 m circle out of it. That happens with the plan off too.
+  - `nav_material_demo` shows the same gap. The material layer keeps the bicycle out of the lake,
+    but the Humvee enters it 65 times.
+  - Next, before the default flips:
+    - routes and the reactive drive that allow for the vehicle's turning circle (multi-point
+      turns);
+    - training through the vehicle (P8).
+  - Training stays differentiable: its surrogate's parameters should come from the
+    `vehicle_desc` until P8a's `dyn_bike_step` exists.

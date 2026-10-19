@@ -324,7 +324,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
   // carry different kinematics; a null column reproduces v.vmax / v.a_max / v.L, so the
   // homogeneous path stays bit-identical (t == 0 => delta_max unchanged, same as before).
   const float a_lat_max = v.a_lat_max, k_steer = v.k_steer;
-  const bool has_fp = v.n_body > 0 && v.body_offsets != nullptr;
+  const bool has_fp = v.n_body > 0 && (v.body_offsets != nullptr || v.body_offsets_col != nullptr);
   const bool has_grip = v.grip != nullptr && v.grip->data != nullptr;
 
   drive_parallel_for(pool, n, num_threads, [&](int i) {
@@ -346,6 +346,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     const float vmax = v.vmax_col ? v.vmax_col[i] : v.vmax;
     const float a_max = v.a_max_col ? v.a_max_col[i] : v.a_max;
     const float L = v.L_col ? v.L_col[i] : v.L;
+    // A plant's own cornering limit; without one, the shared a_lat_max (the same float).
+    const float a_lat_i = (pd && pd->a_lat && pd->a_lat[i] > 0.0f) ? pd->a_lat[i] : a_lat_max;
     float dmax = locked_delta_max(L, v.delta_max, v.track_width);
     if (pd && pd->max_steer > 0.0f && pd->max_steer < dmax)
       dmax = pd->max_steer; // the plant's steering lock
@@ -357,7 +359,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       return std::min(std::max(d, now - reach), now + reach);
     };
     const float sp_min = v.allow_reverse ? -0.25f * vmax : 0.0f;
-    const float v_creep_cap = 0.5f * std::sqrt(a_lat_max * L / tan_dmax);
+    const float v_creep_cap = 0.5f * std::sqrt(a_lat_i * L / tan_dmax);
     float minclr = 9.9f;
     // Telemetry temporaries — write-only, never read by the drive math, so a null `tel` path is
     // byte-identical. They hold the LAST substep's value at loop exit (mu/mrisk/ext default to the
@@ -395,7 +397,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         Fbar_x = 0.0f;
         Fbar_y = 0.0f;
         for (int b = 0; b < v.n_body; ++b) {
-          const float off = v.body_offsets[b];
+          const float off =
+              v.body_offsets_col ? v.body_offsets_col[i * v.n_body + b] : v.body_offsets[b];
           float bphi, bnx, bny;
           sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
           const float bd = bphi - body_rr_i;
@@ -419,12 +422,12 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       // Friction-limited actuator envelope. BOTH limits are grip-limited, so
       // both scale with mu together — that coupling is what makes ice read as
       // ice. No grip => the constants pass through untouched, not `* 1.0f`.
-      float a_max_e = a_max, a_lat_e = a_lat_max, creep_cap = v_creep_cap;
+      float a_max_e = a_max, a_lat_e = a_lat_i, creep_cap = v_creep_cap;
       if (has_grip) {
         const int gplane = (map_id && v.grip->M > 1) ? map_id[i] : 0;
         const float mu = sample_grip(*v.grip, gplane, ox, oy);
         a_max_e = a_max * mu;
-        a_lat_e = a_lat_max * mu;
+        a_lat_e = a_lat_i * mu;
         creep_cap = 0.5f * std::sqrt(a_lat_e * (L / tan_dmax));
         tel_mu = mu;
       }
@@ -639,7 +642,9 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         tel_steer = delta;
         tel_curv = std::fabs(std::tan(delta)) / L;
         pd->steer_cmd[i] = delta;
-        pd->accel_cmd[i] = a_long;
+        // The acceleration the integration would apply: within [sp_min, vmax] at the tick's end,
+        // so a vehicle never backs up where nav would not (allow_reverse) or speeds past vmax.
+        pd->accel_cmd[i] = (sp_next - spi) / hdt;
         pd->v_stop[i] = std::min(vmax, v_stop_dir); // the stopping speed the command respects
         break;
       }

@@ -42,6 +42,7 @@
 #include <cvc/image/image.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/plant_host.h>
 #include <cvc/state/state.h>
 #ifdef __EMSCRIPTEN__
 #include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
@@ -146,6 +147,7 @@ int main(int argc, char **argv) {
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0, speed = 0.5;
   std::string capture = "orbit", out = "frames", png, viewMode = "map", scenario = "ghost";
+  std::string plantName = navdemo::default_plant(); // what the vehicles drive on (--plant)
   double sensorRange = 35.0;
   bool offscreen = false, no_shadows = false, ortho = false;
 
@@ -174,7 +176,10 @@ int main(int argc, char **argv) {
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"))("png",
-                                                                    po::value<std::string>(&png));
+                                                                    po::value<std::string>(&png))(
+      "plant", po::value<std::string>(&plantName)->default_value(plantName),
+      "what the vehicles drive on: kinematic (nav's bicycle), or a vehicle preset on the Jolt "
+      "physics plant at its real size and limits (humvee, roboracer)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -220,6 +225,8 @@ int main(int argc, char **argv) {
   // rebuilds the world IN PLACE — same process, same window, same GL context.
   std::unique_ptr<cvc::nav::sim_world> worldPtr;
   int NA = 1;
+  // The plant (--plant): every rebuilt world's vehicles go on it.
+  cvc::physics::plant_host plantHost(navdemo::plant_options());
 
   // TWO limited-belief scenarios, all the same machinery, different lies:
   //
@@ -301,8 +308,15 @@ int main(int argc, char **argv) {
     worldPtr = std::make_unique<cvc::nav::sim_world>(cfg, truth.data(), prior.data(),
                                                      cvc::nav::coef_mlp::default_biased(), o.data(),
                                                      goal.data(), color.data(), NA);
+    plantHost.use(*worldPtr, plantName);
   };
-  build_world(scenario, sensorRange);
+  try {
+    build_world(scenario, sensorRange);
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "nav_fog_ghost: --plant: %s\n", e.what());
+    return 2;
+  }
+  std::printf("nav_fog_ghost: driving %s\n", plantHost.driving().c_str());
 
   // 2. Scene.
   cvc::app app;
@@ -620,6 +634,9 @@ int main(int argc, char **argv) {
     ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("Belief controls");
     ImGui::Text("scenario: %s", uiScenario.c_str());
+    ImGui::Text("plant: %s", plantHost.driving() == "kinematic"
+                                 ? "kinematic bicycle"
+                                 : (plantHost.driving() + " on Jolt").c_str());
     ImGui::Text("world t %.1fs | %s", worldPtr->tick() * cfg.veh.dt,
                 rch[0] ? "ARRIVED" : "en route");
     ImGui::Separator();

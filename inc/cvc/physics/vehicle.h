@@ -173,6 +173,10 @@ struct vehicle_desc {
   // at full brake it plans with (m/s^2). The measured response corrects them.
   double max_accel = 3.0;
   double max_decel = 7.0;
+  // The top speed the driver model holds (m/s; 0 = none): a governed or rated top speed. Asked
+  // to go faster, drive() eases off as the speed nears it. Raw pedals (set_controls) are not
+  // held. A navigator on this vehicle plans with it too (nav_plant::limits).
+  double max_speed = 0.0;
 
   // Resistance.
   double drag_coefficient = 0.6;     // C_d
