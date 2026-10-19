@@ -122,20 +122,20 @@ jobs:
           if (Test-Path $depsBin) {
             Copy-Item -Path (Join-Path $depsBin '*.dll') -Destination $out -ErrorAction SilentlyContinue
           }
-          @"
-Ariadne conference (Windows) — client + relay.
-
-Needs the Microsoft Visual C++ 2015-2022 Redistributable (x64) installed:
-  https://aka.ms/vs/17/release/vc_redist.x64.exe
-
-Join a call (camera + mic; peers are discovered from the room roster):
-  ariadne_conference.exe --name YOU --camera --mic ^
-    --state-peer paladin.sublevels.net:7700 --media-server paladin.sublevels.net:7701
-(default room is "standup"; pass --room NAME to pick another. Omit --camera/--mic for synthetic A/V.)
-
-Run a relay yourself (headless, no GL needed):
-  ariadne-server.exe --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701
-"@ | Out-File -FilePath (Join-Path $out 'README.txt') -Encoding utf8
+          $readme = @(
+            'Ariadne conference (Windows) - client + relay.',
+            '',
+            'Needs the Microsoft Visual C++ 2015-2022 Redistributable (x64):',
+            '  https://aka.ms/vs/17/release/vc_redist.x64.exe',
+            '',
+            'Join a call (camera + mic; peers are discovered from the room roster):',
+            '  ariadne_conference.exe --name YOU --camera --mic --state-peer paladin.sublevels.net:7700 --media-server paladin.sublevels.net:7701',
+            '(default room is "standup"; pass --room NAME to change; omit --camera/--mic for synthetic A/V.)',
+            '',
+            'Run a relay yourself (headless, no GL needed):',
+            '  ariadne-server.exe --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701'
+          )
+          Set-Content -Path (Join-Path $out 'README.txt') -Value $readme -Encoding utf8
           $n = (Get-ChildItem $out).Count
           $mb = [math]::Round(((Get-ChildItem $out -Recurse | Measure-Object -Property Length -Sum).Sum)/1MB, 1)
           Write-Host ("bundle: $n files, $mb MB")
