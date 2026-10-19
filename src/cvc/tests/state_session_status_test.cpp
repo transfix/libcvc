@@ -47,10 +47,17 @@ TEST_F(StateSessionStatusTest, StatusReportsRunning) {
 
 TEST_F(StateSessionStatusTest, StatusReportsPumpCycles) {
   auto session = make_session();
-  // Wait for at least one pump cycle.
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  // Wait for at least one pump cycle. Poll with a generous deadline instead of
+  // a fixed sleep: under ctest -j load the pump thread may not get scheduled
+  // within a short window (windows-2022 read pump_cycles == 0 after 50ms).
+  // The common case still leaves after the first few milliseconds.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   auto s = session->status();
-  EXPECT_GT(s.pump_cycles, 0u);
+  while (s.pump_cycles == 0 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    s = session->status();
+  }
+  EXPECT_GT(s.pump_cycles, 0u) << "pump thread completed no cycle within 5s";
   session->stop();
 }
 
