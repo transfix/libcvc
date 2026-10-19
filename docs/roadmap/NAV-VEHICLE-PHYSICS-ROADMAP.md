@@ -320,7 +320,7 @@ P4 adds three things to measure and contain the drift:
       gear, with multi-point turns;
     - `route_follower` drives them: the trained drive on the last forward leg, pure pursuit
       on manoeuvres;
-    - `nav_finale` uses them on a plant. Austin's 8 Humvees drive 5387 m in 900 frames (2035 m
+    - `nav_finale` uses them on a plant. Austin's 8 Humvees drive 5387 m in 900 frames (1903 m
       on A* routes) and none wedges (7 of 8 did).
   - Next, before the default flips: training through the vehicle (P8), and the material layer
     on the vehicle.

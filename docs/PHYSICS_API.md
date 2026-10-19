@@ -646,7 +646,7 @@ has a plant control. They use three Jolt worker threads natively and none in the
   corner after act 2 replans it, upright and at full lock; 7 of its 8 Humvees end up wedged.
 - On a plant, `nav_finale` drives vehicle routes instead (`plan_vehicle_route` and
   `route_follower`, docs/NAV_VEHICLE.md). Its Humvees then drive 5387 m in 900 frames, against
-  2035 m on A* routes, and none wedges.
+  1903 m on A* routes, and none wedges.
 - `nav_material_demo` runs the bicycle and the Humvee side by side. The material layer keeps the
   bicycle out of the lake (0 entries) but not the Humvee (65): it was tuned on the bicycle.
 - Training through the vehicle (P8) comes before the default changes.

@@ -279,7 +279,7 @@ Measured on Austin, 900 frames with 8 vehicles (`--plant`, the scene's own targe
 | | Driven | Vehicles under 50 m in the last 300 frames |
 |---|---|---|
 | Kinematic arm, A* spines | 7949 m | 2 of 8 |
-| Humvee, A* spines | 2035 m | 7 of 8: wedged in corners at full lock |
+| Humvee, A* spines | 1903 m | 7 of 8: wedged in corners at full lock |
 | Humvee, vehicle routes | 5387 m | 0 of 8 |
 
 The 8 routes take 220-460 ms to plan at the start, and about 4.5 s over the run.
