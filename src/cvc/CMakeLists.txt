@@ -69,6 +69,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/plant_host.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/physics/nav_plant.h
+  ../../inc/cvc/physics/nav_eval.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -253,6 +254,7 @@ set(SOURCE_FILES
   physics/pose_tracker.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
+  physics/nav_eval.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp

@@ -331,6 +331,17 @@ cvc::nav::dyn_bike_si nav_plant::dyn_bike_si_of(const vehicle_desc &d, double mu
   return si;
 }
 
+cvc::nav::diff::dyn_bike_params nav_plant::dyn_bike_params_at(const vehicle_desc &d,
+                                                              double wheelbase, double mu) {
+  const cvc::nav::dyn_bike_si si = dyn_bike_si_of(d, mu);
+  cvc::world_units::normalized_frame f;
+  f.scale = wheelbase / (si.cg_to_front + si.cg_to_rear);
+  cvc::nav::diff::dyn_bike_params p = cvc::nav::dyn_bike_params_of(si, f);
+  // Exactly the controller's wheelbase: the float conversion of each half need not sum to it.
+  p.lr = static_cast<float>(wheelbase) - p.lf;
+  return p;
+}
+
 cvc::nav::plant_limits nav_plant::limits(int i) const {
   const agent &a = _agents.at(static_cast<std::size_t>(i));
   cvc::nav::plant_limits l;
