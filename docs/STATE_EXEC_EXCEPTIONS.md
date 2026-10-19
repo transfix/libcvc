@@ -409,10 +409,19 @@ limits what that process can make the app do for it.
   chunks it runs for the kernel (a thread-local), and each chunk adds its thread's CPU time.
 - **Steps:** the CPU time converted at `limits.async_steps_per_cpu_ms` steps per CPU
   millisecond, at least one step per call.
-  - It's resolved like the other limits: `state_exec.schedulers.<id>.limits.*`, then
-    `state_exec.defaults.limits.*`, and per process through `execute_options`.
-  - The default is 1000, about one step per CPU microsecond. That is provisional: P3 measures
-    what a stackless step costs and sets the default from it.
+  - The rate is a state-tree setting, read live: the host reads it at every charge, so a
+    change applies to the next charge, including calls already running, with no
+    `load_settings()` or resubmission. The first of these that is set wins:
+    1. the process's own override, `execute_options::async_steps_per_cpu_ms` (unset by
+       default);
+    2. `state_exec.schedulers.<id>.limits.async_steps_per_cpu_ms`;
+    3. `state_exec.defaults.limits.async_steps_per_cpu_ms`;
+    4. the built-in default, 1000 (about one step per CPU microsecond). That is provisional:
+       P3 measures what a stackless step costs and sets the default from it.
+  - The value is a non-negative decimal number; a fraction is allowed, `0.5` being a step every
+    2 CPU ms. A node that isn't one falls through to the next level.
+  - The scheduler publishes the effective value under its own subtree, as it does its other
+    settings.
   - `0` converts no CPU time to steps; each call still counts its one step.
   - The steps are a new `step_kind::async`: they count in `step_count`, and so against
     `max_steps`, next to the eval, read and data steps.
@@ -621,6 +630,8 @@ them into gtest and pytest cases with these IDs.
 | AS-24 | two futures in flight from one process, 100 ms each | `async_time` about 0.2 s, though about 0.1 s passed |
 | AS-25 | a kernel that never checks `cancelled()`, past `max_time` | the process is killed when its run time reaches the limit; the late result is dropped |
 | AS-26 | the AS-18 kernel inline (sync scheduler) | the same charges as AS-18, not the step's capped charge |
+| AS-27 | two 50 ms kernels in a row; between them `state_exec.defaults.limits.async_steps_per_cpu_ms` is set to `0`, with no `load_settings()` | the first call is charged about 50,000 steps and the second one |
+| AS-28 | the rate set to 10 in `state_exec.defaults.limits` and to 100 in `state_exec.schedulers.<id>.limits` | a 50 ms kernel is charged about 5,000 steps (the scheduler's node wins); with `execute_options::async_steps_per_cpu_ms` 1, about 50 |
 
 ## 7. Settled questions
 
