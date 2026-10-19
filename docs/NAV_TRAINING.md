@@ -18,6 +18,7 @@ deploys on and dropped straight into the swarm.
 - [Quick start](#quick-start)
 - [What gets trained](#what-gets-trained)
 - [The rollout switch: surrogate vs bicycle](#the-rollout-switch-surrogate-vs-bicycle)
+- [The dynamic vehicle: `dyn_bike_step` (P8a)](#the-dynamic-vehicle-dyn_bike_step-p8a)
 - [Scene source](#scene-source)
 - [CPU vs CUDA (device-resident)](#cpu-vs-cuda-device-resident)
 - [Exporting weights](#exporting-weights)
@@ -93,6 +94,83 @@ wrapper — so on the city scene the bicycle *holds* the tuned basin rather than
 beating it. Both are gradient-correct (see [gradcheck](#correctness-the-gradcheck));
 prefer the surrogate unless you specifically need the deployment integrator in the
 loop.
+
+## The dynamic vehicle: `dyn_bike_step` (P8a)
+
+`inc/cvc/nav/detail/dyn_bike.h` is a differentiable dynamic single-track vehicle beside
+`bike_step` (the vehicle-physics plan's P8a; P8b adds it to the trainers as a third rollout).
+`bike_step` is now `bike_control` (the trained controller with every governor, emitting
+`(delta_cmd, a_cmd)`) followed by `bike_plant` (the kinematic integration). Its outputs are bit
+for bit what they were. `dyn_bike_step` runs the same `bike_control` into `diff::dyn_plant`:
+
+- **State:** the rear axle's `(x, y)` and heading, the body velocity `(vx, vy)` at the centre of
+  gravity and the yaw rate `r`, plus the road-wheel steering angle and the drive and brake force
+  per unit mass behind their actuators.
+- **Actuators:** first-order lags, exact for the step, with the steering's slew limited smoothly
+  (`R tanh(d / R)`).
+- **Tires:** Pacejka lateral forces `D sin(C atan(B alpha))`. Each axle's drive or brake force
+  saturates smoothly at `mu Fz`, and the cornering peak `D` is the friction ellipse's remainder,
+  longitudinal force first.
+- **Loads:** quasi-static longitudinal load transfer from the actuator's force.
+- **Longitudinal:** drive, drag, rolling resistance and grade (the grade is an input, so H2
+  trains).
+- **Low speed:** below `v_blend`, a sigmoid blends `(vy, r)` to the kinematic bicycle's.
+- **Left out on purpose:** wheel spin, suspension and lateral load transfer.
+
+Numerically:
+
+- `(vy, r)` advance by implicit Euler, solved with three Newton-like steps. Each tire is
+  linearized as its secant through its own root in lateral velocity, `-F / (w - w0)`, which is
+  positive at any slip and speed. So stiff tires are stable at nav's 0.06 s step, and a sliding
+  tire never pushes its slip past zero, even at a crawl at full lock.
+- The speed is predicted from the longitudinal forces, then corrected with the lateral forces
+  the implicit step applied. In the stiff limit those are constraint forces, which "slip times
+  stiffness" would get badly wrong.
+- The plant is written once over a scalar type. Its adjoint, `dyn_plant_vjp`, runs it on
+  forward-mode duals (doc 19's suggestion), and `dyn_bike_step_bwd` hands the commands'
+  gradients to `bike_control_bwd`. Everything is `CVC_HD`.
+
+Parameters are SI and come from the spec sheet: `cvc::nav::dyn_bike_si`, converted by length
+exponent with `dyn_bike_params_of(si, frame)`. `cvc::physics::nav_plant::dyn_bike_si_of(desc)`
+derives them from a `vehicle_desc`, so both plants read one vehicle:
+
+- mass, and a yaw inertia from the chassis box;
+- the axles relative to the centre of gravity;
+- Pacejka B and C from the tire's peak slip angle and sliding fraction;
+- the drive and brake splits, drag and rolling resistance;
+- the steering's rate.
+
+`front_stiffness` (0.85) scales the front's B. It stands in for the load sensitivity and steering
+compliance that give a road vehicle its understeer, which a single track has no other way to
+show.
+
+Gates (`nav_dyn_bike_test`; the Humvee from its `vehicle_desc`, in metres):
+
+| Gate | Result |
+|---|---|
+| Plant gradient vs central differences (double, 6 regimes from cruise to past the peak, backing up and creeping) | worst relative error 6e-6 |
+| Whole step through the controller, 6-step rollout, float (the bicycle's gradcheck) | dir_rel 6e-4 (limit 5e-2) |
+| Kinematic limit: `bike_step`'s own commands through the plant over 200 ticks, with stiff tires, no lag, mu g = 40 against the controller's 1.5, the mass at the rear axle and the drive and brakes there | within 0.011 of its path (0.07 rr); 0.017 apart under the controller, ending as far from the goal (1.110 against 1.111) |
+| Understeer that grows with lateral g (15 m/s, steady turns) | 0.0003 rad at 0.07 g to 0.0029 rad at 0.53 g, growing faster toward the limit |
+| Oversteer when braking in a turn (0.4 g, then 0.4 g of braking) | the path tightens 6%, 0.0176 to 0.0187 /m |
+| Steady lateral acceleration never above mu g | 0.97 mu g at mu 0.4, 0.95 mu g at mu 0.9 |
+| Stopping distance within 10% of v^2 / (2 mu g) | -4% to -6% at mu 0.5 and 0.9, from 10 and 20 m/s |
+
+The kinematic limit is exact only for the vehicle the kinematic bicycle assumes. A real body
+differs physically from `bike_step`'s `v' = a`:
+
+- it puts kinetic energy into yaw and sideways motion as it turns;
+- a steered front wheel's brake force acts along the wheel, slowing the body by about
+  `F / cos(delta)` in a turn.
+
+So the same commands drive a body braked 60% in front up to 1.7 apart over the route, open loop.
+Under the controller it ends 1.122 from the goal against 1.111.
+
+`DynBike.Golden` pins the plant's values (`tests/data/dyn_bike_golden.json`; rewrite with
+`CVC_DYN_BIKE_GOLDEN_WRITE=1`) for GRL-SNAM's torch twin, the parity gate.
+
+Not yet: `rollout_kind::dynamic` in the trainers (P8b), the torch twin, and a CUDA build of the
+plant (it is `CVC_HD`, but nothing compiles it for the device yet).
 
 ## Scene source
 
