@@ -34,6 +34,7 @@ add_executable(state_distributed_bench_test state_distributed_bench_test.cpp)
 add_executable(state_message_test state_message_test.cpp)
 add_executable(state_bounded_queue_test state_bounded_queue_test.cpp)
 add_executable(state_transport_inproc_test state_transport_inproc_test.cpp)
+add_executable(room_intrinsics_test room_intrinsics_test.cpp)
 # state_transport_ipc is POSIX-only (UDS + poll); skip on Windows.
 if(NOT WIN32)
   add_executable(state_transport_ipc_test state_transport_ipc_test.cpp)
@@ -137,6 +138,7 @@ if(CVC_ENABLE_GRPC)
   add_executable(state_stream_transport_grpc_test state_stream_transport_grpc_test.cpp)
   add_executable(stream_bridge_test stream_bridge_test.cpp)
   add_executable(stream_relay_test stream_relay_test.cpp)
+  add_executable(room_media_test room_media_test.cpp)
 endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
@@ -241,6 +243,7 @@ set(TEST_TARGETS
   state_message_test
   state_bounded_queue_test
   state_transport_inproc_test
+  room_intrinsics_test
   state_blob_transport_integration_test
   state_distributed_delegation_integration_test
   state_link_test
@@ -1097,6 +1100,13 @@ target_link_libraries(state_transport_inproc_test
     GTest::gtest_main
 )
 
+target_link_libraries(room_intrinsics_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 if(NOT WIN32)
   target_link_libraries(state_transport_ipc_test
     PRIVATE
@@ -1674,6 +1684,17 @@ if(TARGET stream_relay_test)
   list(APPEND TEST_TARGETS stream_relay_test)
 endif()
 
+if(TARGET room_media_test)
+  target_link_libraries(room_media_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(room_media_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS room_media_test)
+endif()
+
 # Set C++ standard to match the library
 target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
@@ -1741,6 +1762,7 @@ target_compile_features(state_distributed_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_message_test PRIVATE cxx_std_17)
 target_compile_features(state_bounded_queue_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_inproc_test PRIVATE cxx_std_17)
+target_compile_features(room_intrinsics_test PRIVATE cxx_std_17)
 if(NOT WIN32)
   target_compile_features(state_transport_ipc_test PRIVATE cxx_std_17)
   target_compile_features(state_reconnect_resilience_test PRIVATE cxx_std_17)
@@ -2165,6 +2187,7 @@ cvc_discover_tests(state_distributed_bench_test)
 cvc_discover_tests(state_message_test)
 cvc_discover_tests(state_bounded_queue_test)
 cvc_discover_tests(state_transport_inproc_test)
+cvc_discover_tests(room_intrinsics_test)
 if(NOT WIN32)
   # Same fork()+IPC timing profile as state_exec_multiprocess_test and
   # state_multiprocess_ipc_test, both of which #121 moved off the parallel
@@ -2273,6 +2296,9 @@ if(TARGET stream_bridge_test)
 endif()
 if(TARGET stream_relay_test)
   cvc_discover_tests(stream_relay_test)
+endif()
+if(TARGET room_media_test)
+  cvc_discover_tests(room_media_test)
 endif()
 # procedural_geometry_test uses plain main(), not gtest, so register it with
 # a direct add_test() and record it for the registration guard below.
