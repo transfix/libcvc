@@ -7,9 +7,17 @@ name: ariadne-conference-windows
 # libcvc-release-grpc is green). It mirrors ci.yml's package-windows dep provisioning (cvcpkg is the
 # sole third-party source: Boost/HDF5/VTK/SDL3/imgui/libjpeg-turbo + grpc/protobuf), then builds just
 # the two conference targets (not every example) and uploads them. Manual trigger — run it with
-#   gh workflow run ariadne-conference-windows.yml --ref <branch>
+#   gh workflow run ariadne-conference-windows.yml --ref <branch>   (once this lands on the default
+# branch; until then it is driven by the scoped push trigger below — editing this file or the two
+# conference entry-point sources on the feature branch kicks off a build).
 on:
   workflow_dispatch:
+  push:
+    branches: [feat/ariadne-conference-server]
+    paths:
+      - '.github/workflows/ariadne-conference-windows.yml'
+      - 'src/cvcGL/examples/ariadne_conference.cpp'
+      - 'src/cvc/tools/ariadne_server_main.cpp'
 
 jobs:
   conference-windows:
