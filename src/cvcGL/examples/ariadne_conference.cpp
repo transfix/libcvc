@@ -81,6 +81,7 @@ int main(int argc, char **argv) {
   // .ari whose streams to subscribe to. Without --node-id the host is the single-node demo.
   std::string nodeId, roomId = "standup", peerId;
   std::string stateListen, statePeer, mediaListen = "127.0.0.1:0";
+  std::string mediaServer; // --media-server <addr>: SFU mode — push/pull media through this relay
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -111,6 +112,8 @@ int main(int argc, char **argv) {
       statePeer = next("");
     else if (!std::strcmp(a, "--media-listen"))
       mediaListen = next("127.0.0.1:0");
+    else if (!std::strcmp(a, "--media-server"))
+      mediaServer = next("");
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
   }
@@ -186,7 +189,8 @@ int main(int argc, char **argv) {
     bridge = std::make_unique<sx::stream_bridge>(app, *media_tp);
     media_tp->start(mediaListen);
     const std::string media_endpoint = media_tp->listen_address();
-    ari::conference::register_room_media_intrinsics(app, *bridge, media_endpoint);
+    // SFU when --media-server is set (push/pull media through the relay); mesh otherwise.
+    ari::conference::register_room_media_intrinsics(app, *bridge, media_endpoint, mediaServer);
     // Tell the demo .ari who it is (scoped to this document's prefix = nodeId).
     std::vector<std::string> ce;
     ari::run_init(app, sg.getStatePrefix(),
@@ -342,7 +346,8 @@ int main(int argc, char **argv) {
     for (const char *k : {"camera", "audio"}) {
       const std::string tok = peerId + ".streams." + k;
       const bool live = reg.lookup(tok) != nullptr;
-      std::printf("[ariadne_conference] peer %s %s\n", tok.c_str(), live ? "SUBSCRIBED" : "(not yet)");
+      std::printf("[ariadne_conference] peer %s %s\n", tok.c_str(),
+                  live ? "SUBSCRIBED" : "(not yet)");
       pulled += live ? 1 : 0;
     }
     std::printf("[ariadne_conference] node '%s': %d/2 peer streams subscribed\n", nodeId.c_str(),

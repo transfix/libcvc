@@ -38,6 +38,7 @@
 // closes it).
 
 #include <memory>
+#include <set>
 #include <string>
 
 namespace cvc {
@@ -47,6 +48,7 @@ namespace ariadne {
 namespace stream {
 class stream;
 class stream_bridge;
+class stream_relay;
 } // namespace stream
 
 namespace conference {
@@ -82,6 +84,14 @@ bool room_publish(cvc::app &app, cvc::ariadne::stream::stream_bridge &bridge,
 std::unique_ptr<cvc::ariadne::stream::stream>
 room_subscribe(cvc::app &app, cvc::ariadne::stream::stream_bridge &bridge,
                const std::string &room_id, const std::string &target_pid, const std::string &kind);
+
+// Relay-server tick: scan ROOM's published stream descriptors and, for each one not yet in RELAYED,
+// open an SFU relay for it on RELAY (ingest the publisher's pushed frames, fan out to subscribers)
+// and record its "<pid>/<kind>" key in RELAYED. Call this each tick from the relay server's loop;
+// it is idempotent (RELAYED guards re-relaying, and stream_relay::relay itself is idempotent per
+// id).
+void room_relay_tick(cvc::app &app, const std::string &room_id,
+                     cvc::ariadne::stream::stream_relay &relay, std::set<std::string> &relayed);
 
 } // namespace conference
 } // namespace ariadne

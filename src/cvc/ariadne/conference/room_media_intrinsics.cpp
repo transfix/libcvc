@@ -18,7 +18,8 @@
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // this
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_bridge.h>
-#include <cvc/ariadne/stream_intrinsics.h> // document_stream / own_document_stream
+#include <cvc/ariadne/stream/stream_relay.h> // room_relay_tick (SFU server-side fan-out)
+#include <cvc/ariadne/stream_intrinsics.h>   // document_stream / own_document_stream
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h> // default_for / local_node_id (the publisher's pid)
@@ -26,6 +27,7 @@
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/types.h>
 #include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <utility>
@@ -64,6 +66,25 @@ std::string read_str(cvc::app &app, const std::string &path) {
 int read_int(cvc::app &app, const std::string &path) {
   const std::string s = read_str(app, path);
   return s.empty() ? 0 : std::atoi(s.c_str());
+}
+
+// Rebuild the stream_params a proxy/relay opens from a published descriptor at <base>: the same
+// (scope, id, format) so the opened stream's token matches the publisher's (what the pull/relay
+// routes on). The caller sets subscriber_depth (8 for a player; the relay leaves the default).
+sx::stream_params read_descriptor_params(cvc::app &app, const std::string &base) {
+  sx::stream_params p;
+  p.id = read_str(app, field(base, "id"));
+  p.root_path = read_str(app, field(base, "scope"));
+  p.format.codec = read_str(app, field(base, "codec"));
+  p.format.kind = static_cast<sx::frame_kind>(read_int(app, field(base, "fkind")));
+  p.format.w = read_int(app, field(base, "w"));
+  p.format.h = read_int(app, field(base, "h"));
+  p.format.stride = read_int(app, field(base, "stride"));
+  p.format.sample_rate = read_int(app, field(base, "rate"));
+  p.format.channels = read_int(app, field(base, "ch"));
+  const std::string b = read_str(app, field(base, "bytes"));
+  p.format.bytes = b.empty() ? 0u : static_cast<std::size_t>(std::strtoull(b.c_str(), nullptr, 10));
+  return p;
 }
 
 // ── small value_t helpers (same shapes as room_intrinsics / stream_intrinsics) ──
@@ -125,6 +146,14 @@ bool room_publish(cvc::app &app, sx::stream_bridge &bridge, const std::string &l
   set_replicated(app, field(base, "ch"), std::to_string(f.channels));
   set_replicated(app, field(base, "bytes"),
                  std::to_string(static_cast<unsigned long long>(f.bytes)));
+  // Readiness: a subscriber pulls only once the SERVING side is actually up. In mesh the publisher
+  // serves immediately (serve_port above), so announce ready now. In SFU the RELAY serves, so the
+  // publisher does NOT mark ready here — room_relay_tick does, once the relay has wired ingest +
+  // egress. That closes the race where the descriptor (hence the relay endpoint) is visible a few
+  // hundred ms before the relay has registered the stream, so an early pull would find no egress
+  // and silently fall back to a dead sink (pull_from succeeds on the open send alone).
+  if (!sfu)
+    set_replicated(app, field(base, "ready"), "1");
   return true;
 }
 
@@ -134,27 +163,17 @@ std::unique_ptr<sx::stream> room_subscribe(cvc::app &app, sx::stream_bridge &bri
   const std::string base = stream_desc_path(room_id, target_pid, kind);
   const std::string endpoint = read_str(app, field(base, "endpoint"));
   const std::string id = read_str(app, field(base, "id"));
-  if (endpoint.empty() || id.empty())
-    return nullptr; // not published (yet), or not replicated here
+  // "ready" flips to "1" only when the serving side is up: the publisher itself in mesh, or the
+  // relay (once ingest + egress are wired) in SFU. Gating the pull on it closes the SFU race where
+  // the relay endpoint is visible a few hundred ms before the relay has registered the stream, so
+  // an early pull would hit no egress, fall back to a sink, and never deliver a frame.
+  if (endpoint.empty() || id.empty() || read_str(app, field(base, "ready")) != "1")
+    return nullptr; // not published, not replicated here yet, or the serving side isn't ready
 
-  // Rebuild the publisher's format so the proxy's pool is sized identically, and open the proxy
-  // under the SAME (scope, id) so its token matches the publisher's — that is what pull routes on.
-  sx::stream_params p;
-  p.id = id;
-  p.root_path = read_str(app, field(base, "scope"));
+  // Rebuild the publisher's (scope, id, format) so the proxy's token matches it (what pull routes
+  // on).
+  sx::stream_params p = read_descriptor_params(app, base);
   p.subscriber_depth = 8; // room for a downstream ring subscription (player / widget)
-  p.format.codec = read_str(app, field(base, "codec"));
-  p.format.kind = static_cast<sx::frame_kind>(read_int(app, field(base, "fkind")));
-  p.format.w = read_int(app, field(base, "w"));
-  p.format.h = read_int(app, field(base, "h"));
-  p.format.stride = read_int(app, field(base, "stride"));
-  p.format.sample_rate = read_int(app, field(base, "rate"));
-  p.format.channels = read_int(app, field(base, "ch"));
-  {
-    const std::string b = read_str(app, field(base, "bytes"));
-    p.format.bytes =
-        b.empty() ? 0u : static_cast<std::size_t>(std::strtoull(b.c_str(), nullptr, 10));
-  }
   std::unique_ptr<sx::stream> proxy = sx::stream::open(app, p);
   if (!proxy)
     return nullptr; // unsized/duplicate
@@ -163,6 +182,45 @@ std::unique_ptr<sx::stream> room_subscribe(cvc::app &app, sx::stream_bridge &bri
     return nullptr;
   }
   return proxy;
+}
+
+void room_relay_tick(cvc::app &app, const std::string &room_id, sx::stream_relay &relay,
+                     std::set<std::string> &relayed) {
+  // For each PRESENT participant, scan its advertised streams and open an SFU relay for any we are
+  // not relaying yet. relay() ingests the publisher's pushed frames (receive_into on the stream's
+  // token) and serve_port()s them for subscribers to pull — both over the server's own transport.
+  for (const room_participant &part : room_roster(app, room_id)) {
+    const std::string streams_path =
+        room_participant_path(room_id, part.pid) + cvc::state::SEPARATOR + "streams";
+    cvc::state *streams = app.root().findDescendant(streams_path);
+    if (!streams)
+      continue;
+    const std::string sprefix = streams_path + cvc::state::SEPARATOR;
+    for (const std::string &sfull : streams->children()) {
+      if (sfull.rfind(sprefix, 0) != 0)
+        continue;
+      const std::string kind = sfull.substr(sprefix.size());
+      if (kind.find(cvc::state::SEPARATOR) != std::string::npos)
+        continue; // an immediate child (the kind), not a deeper descriptor field
+      const std::string key = part.pid + "/" + kind;
+      if (relayed.count(key))
+        continue;
+      sx::stream_params p = read_descriptor_params(app, sfull); // base path == the descriptor node
+      if (p.id.empty() || p.format.frame_bytes() == 0)
+        continue;             // not fully published / replicated here yet — retry next tick
+      p.subscriber_depth = 8; // room for each subscriber's server-push ring
+      p.expected_subscribers = 4;
+      if (!relay.relay(p).empty()) {
+        relayed.insert(key);
+        // The relay now ingests this publisher's frames AND serves them to subscribers. Announce
+        // readiness on the (replicated) descriptor so a subscriber — which pulls the RELAY, not the
+        // publisher — starts pulling only now, never in the window before this tick wired the
+        // stream (a pull then would silently attach to a dead sink). The server pump_all()s each
+        // loop.
+        set_replicated(app, field(sfull, "ready"), "1");
+      }
+    }
+  }
 }
 
 void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
