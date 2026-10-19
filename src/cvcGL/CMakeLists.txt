@@ -85,6 +85,18 @@ target_include_directories(cvcGL PUBLIC
 )
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 
+# libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
+# stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
+# compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
+find_package(libjpeg-turbo CONFIG QUIET)
+if(libjpeg-turbo_FOUND)
+  target_link_libraries(cvcGL PRIVATE libjpeg-turbo::turbojpeg)
+  target_compile_definitions(cvcGL PRIVATE CVC_HAVE_TURBOJPEG=1)
+  message(STATUS "cvcGL: libjpeg-turbo found -- conference video (mjpeg) enabled")
+else()
+  message(STATUS "cvcGL: libjpeg-turbo NOT found -- mjpeg video disabled (no-op codec)")
+endif()
+
 # LowMemoryPolyDataMapper carries a replica of VTK 9.5.0's private low-memory
 # cell-type agents, valid only against an UNPATCHED 9.5.0 (the contract is in
 # inc/cvc/gl/LowMemoryPolyDataMapper.h). The version number cannot tell a

@@ -48,6 +48,7 @@
 
 #if CVC_ENABLE_SDL
 #include <cvc/gl/capture/camera_source.h> // --camera: a real SDL3 camera as the self-view source
+#include <cvc/gl/capture/jpeg_encode_source.h> // compress camera video to JPEG for the network
 #endif
 
 #if CVC_ENABLE_GRPC
@@ -249,15 +250,21 @@ int main(int argc, char **argv) {
       // to. Same scope the DSL opens under (the document prefix = node id when clustered).
       sp.id = clustered ? "camera" : "selfcam";
       sp.root_path = sg.getStatePrefix();
+      // Compress camera video to JPEG ("mjpeg") so it fits a real internet uplink: raw rgba8 is
+      // ~1.9 MB/frame (unusable over home broadband), JPEG is ~10-50x smaller. The byte slab is
+      // sized for the worst-case JPEG; the stream_view decodes on the subscriber.
       sp.format.kind = sx::frame_kind::video_raw;
-      sp.format.codec = "rgba8";
+      sp.format.codec = "mjpeg";
       sp.format.w = camo.width;
       sp.format.h = camo.height;
-      sp.format.stride = camo.width * 4;
+      sp.format.stride = camo.width * 4; // decoded geometry (informational for mjpeg)
+      sp.format.bytes = cvc::gl::capture::jpeg_stream_slab(camo.width, camo.height);
       sp.expected_subscribers = 3; // the stream_view widget (+ headroom); cf. ariadne_stream
       live_cam = sx::stream::open(app, sp);
       if (live_cam) {
-        live_cam->start_producer(std::move(camo.source), camo.fps > 0 ? camo.fps : 30.0);
+        auto enc = std::make_unique<cvc::gl::capture::jpeg_encode_source>(std::move(camo.source),
+                                                                          camo.width, camo.height);
+        live_cam->start_producer(std::move(enc), camo.fps > 0 ? camo.fps : 30.0);
         std::vector<std::string> ce;
         ari::run_init(app, sg.getStatePrefix(),
                       "(state-set \"cam_live\" \"1\") (state-set \"cam_token\" \"" +
