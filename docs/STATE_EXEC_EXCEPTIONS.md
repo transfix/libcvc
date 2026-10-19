@@ -1,7 +1,9 @@
 # state_exec: exceptions and long-running native calls
 
-Status: P0 specification (2026-10-18). The decisions below are the recommended defaults, agreed
-before this was written; section 7 records how the five questions P0 left open were settled.
+Status: P0 specification (2026-10-18); P1 is merged (#706). The decisions below are the
+recommended defaults, agreed before this was written. Section 7 records how the five questions
+P0 left open were settled, and one decision added since: async calls are charged to the process
+(2026-10-19).
 Tracked in the `state-exec-exceptions` workstream.
 
 Two related pieces of the state_exec DSL:
@@ -198,7 +200,8 @@ rules apply on the way:
 
 A process ended by its host or its budget is killed. It is not raised to:
 
-- `max_steps`, `max_time`, `max_step_time`, `max_memory`, the message limits;
+- `max_steps`, `max_time`, `max_step_time`, `max_memory`, the message limits, including what
+  the process's async calls are charged against them (3.8);
 - `kill()`, `kill_owner()`, `SIGKILL`;
 - `interrupt()` and an `evaluate()` timeout.
 
@@ -312,7 +315,7 @@ The callable runs on an executor thread and takes the GIL for its call, as now.
 ### 3.3 Calling
 
 - **Transparent:** `(name args...)` parks the calling process and resumes with the value. It
-  works at any depth, including as the whole program (3.8 removes the top-level restriction),
+  works at any depth, including as the whole program (3.9 removes the top-level restriction),
   inside a `try`, and inside a function a native function called.
 - **Futures:** `(name-async args...)` starts the work and returns a future at once.
   - `(await f)` parks until it finishes, then returns its value or raises its exception.
@@ -371,7 +374,8 @@ Other places a kernel can run:
 
 `async_call::cancelled()` turns true when:
 
-- the process is killed or reaped;
+- the process is killed or reaped, including by running out of `max_time` or `max_steps` while
+  the call runs (3.8);
 - the call times out;
 - its owner group is reaped (`kill_owner`);
 - the host is torn down.
@@ -390,17 +394,84 @@ every in-flight kernel and waits for them before the scheduler goes, as `Exec` d
 - **The kernel must not touch:** the state tree, the evaluator, or any DSL value. A debug build
   asserts it. Its result is a fresh value.
 
-### 3.8 Budgets and frames
+### 3.8 Budgets
 
-- Time a process spends parked isn't charged to `max_time`, and a kernel's CPU time isn't
-  charged to the process. The executor is the host's.
-- The call's frame stays on the stack in a new `await_call` phase, holding the reply channel,
-  instead of returning a nil placeholder for delivery to write into the enclosing frame.
-  Delivery completes the frame, with the value or by raising. That makes a top-level call
-  parkable, gives the exception a precise site, and lets a snapshot record a pending call (a
-  restored process whose call can't resume raises `RuntimeError`).
+An async call is charged to the process that made it, as if the process had done the kernel's
+work itself. A call can't be a way around a process's budget: a host that limits a process
+limits what that process can make the app do for it.
 
-### 3.9 Progress
+**What a call is charged.**
+- **Run time:** the kernel's wall time, from when it starts on its executor thread to when it
+  returns or throws. Time waiting in the pool's queue for a thread isn't charged: that's the
+  host's congestion, as a descheduled step's stall is.
+- **CPU time:** the CPU seconds of the kernel's thread, plus the work it fans out through
+  `computePool().parallel_for`. The compute pool carries the call's charge account into the
+  chunks it runs for the kernel (a thread-local), and each chunk adds its thread's CPU time.
+- **Steps:** the CPU time converted at `limits.async_steps_per_cpu_ms` steps per CPU
+  millisecond, at least one step per call.
+  - It's resolved like the other limits: `state_exec.schedulers.<id>.limits.*`, then
+    `state_exec.defaults.limits.*`, and per process through `execute_options`.
+  - The default is 1000, about one step per CPU microsecond. That is provisional: P3 measures
+    what a stackless step costs and sets the default from it.
+  - `0` converts no CPU time to steps; each call still counts its one step.
+  - The steps are a new `step_kind::async`: they count in `step_count`, and so against
+    `max_steps`, next to the eval, read and data steps.
+
+**How it meets each budget.**
+- **`max_time`:** it is charged like a time budget, as now: running time for the first half,
+  then CPU time for the second.
+  - A call's run time adds to the first half (`accumulated_time`), and its CPU time to the
+    second (`cpu_time_charged`). A call that crosses the halfway point charges the part of its
+    run time past it as the same fraction of its CPU time.
+  - A call's CPU time is charged in full. The per-step cap (`max_time / 32`) keeps a stalled
+    step from running a process out of time, and CPU time doesn't count a stall.
+- **`max_steps`:** its steps, as above.
+- **`max_step_time`** doesn't apply. It protects the host's drain from a step that never ends,
+  and an async call doesn't hold a step. A kernel's own limit is its `timeout` option.
+- **Several calls in flight** (futures): each is charged its own run time, CPU time and steps,
+  so a process can be charged more run time than the wall clock shows. It used that many
+  threads' worth.
+- **Inline** (no executor: the sync scheduler, a bare evaluator): the kernel is charged as an
+  async call, its full CPU time and steps, and not as part of its step's capped charge.
+
+**When it's charged, and what happens at the limit.**
+- **While the call runs**, the host charges as it goes:
+  - it advances the call's run time on the scheduler's clock;
+  - `async_call::cancelled()` doubles as a meter: each call to it, on the kernel's thread,
+    records the thread's CPU time so far;
+  - fan-out chunks add their CPU time as they finish.
+- **At a limit:** when the charges reach `max_time` or `max_steps`, the process is killed with
+  `time_limit_exceeded` or `max_steps_exceeded`, as for a step. It's a kill (2.5): no handler or
+  `finally` runs. The kernel sees `cancelled()`, and its result is dropped when it arrives.
+- **A kernel that never checks `cancelled()`** is still stopped by its run time, which the host
+  measures without it. Its CPU time is known when it ends, and is charged then.
+- **When the call finishes**, the rest is charged before the process resumes, so a call that
+  used up the budget kills the process instead of resuming it.
+
+**Reporting.** `process_info` gains:
+- `async_calls`: calls made;
+- `async_time`: their run time;
+- `async_cpu_time`: their CPU time;
+- `async_steps`: the steps charged for them.
+
+`elapsed_time` includes the run time.
+
+Time a process spends parked for other reasons (`sleep`, `msg-recv`, awaiting a frame) is still
+not charged.
+
+### 3.9 The call's frame
+
+The call's frame stays on the stack in a new `await_call` phase, holding the reply channel,
+instead of returning a nil placeholder for delivery to write into the enclosing frame. Delivery
+completes the frame, with the value or by raising.
+
+That:
+- makes a top-level call parkable;
+- gives an exception a precise site;
+- lets a snapshot record a pending call. A restored process whose call can't resume raises
+  `RuntimeError`.
+
+### 3.10 Progress
 
 `async_call::post(value)` sends a progress value to the channel `<name>.progress` under the
 process's root, which the program reads with `msg-recv` or a resident watches. Nothing waits on
@@ -413,7 +484,7 @@ it; a full queue drops progress values first.
 | P0 | This spec and the test list (section 6) | merged |
 | P1 | The forms (`raise`, `error`, `try`/`catch`/`finally`, `isinstance`), `__name__` on classes, the built-in classes, the evaluator's and builtins' errors thrown with their class, C++ exception mapping, `cause`/`origin`/`traceback`, all of 2.4 in the stackless evaluator, the same in the recursive evaluator, codec support | EX and UN cases pass in both evaluators |
 | P2 | Leaving the program: `failed`, `exit_exception`, `dsl_exception`, both schedulers, Ariadne reporting; `PythonError` from registered Python functions, pycvc `dsl_error` and `dsl_class`, the round trip | CX and PY cases pass |
-| P3 | Async: `async_host`, `register_async_fn` (C++ and pycvc), the `await_call` frame, futures with timeouts and `await-all`, errors as exceptions, executors (the background pool with priorities, lanes, inline), cancellation, progress, `Exec` and Ariadne moved onto it | AS cases pass |
+| P3 | Async: `async_host`, `register_async_fn` (C++ and pycvc), the `await_call` frame, futures with timeouts and `await-all`, errors as exceptions, executors (the background pool with priorities, lanes, inline), cancellation, progress, charging calls to the process's budgets (3.8), `Exec` and Ariadne moved onto it | AS cases pass |
 | P4 | pycvc parity for the new API, `docs/STATE_EXEC_DEVELOPER_GUIDE.md` and `ARIADNE.md` | the parity doc lists every new item |
 
 ## 5. Compatibility
@@ -541,10 +612,20 @@ them into gtest and pytest cases with these IDs.
 | AS-15 | a snapshot of a process parked in a call, restored | raises `RuntimeError` at the call (the call can't resume) |
 | AS-16 | `Exec.register_async_fn` raising | raises at the call site, no `__async_error__` dict (the compatibility change) |
 | AS-17 | an async function called from Ariadne's reactive lane | not reachable (action seam only); if called, `RuntimeError` |
+| AS-18 | a 200 ms CPU-bound kernel | `async_calls` 1, `async_time` and `async_cpu_time` about 0.2 s, `async_steps` about 200,000 at the default rate; `elapsed_time` includes the 0.2 s |
+| AS-19 | `max_time` 0.1 s, a 1 s CPU-bound kernel that checks `cancelled()`, the call inside a `try` | `killed`, `time_limit_exceeded`, well before 1 s; the catch didn't run; the kernel sees `cancelled()` |
+| AS-20 | `max_steps` 1000, a 50 ms CPU-bound kernel | `killed`, `max_steps_exceeded`; with `limits.async_steps_per_cpu_ms` 0, it finishes |
+| AS-21 | a kernel that sleeps 200 ms (blocking, almost no CPU) | `async_time` about 0.2 s, charged to `max_time`; `async_cpu_time` near 0; a step or a few |
+| AS-22 | a kernel fanning out over 4 compute workers, about 100 ms each | `async_cpu_time` at least 0.3 s, more than its run time |
+| AS-23 | a background pool of one thread; a call waits 200 ms for it behind another process's call | its process's `async_time` is its own kernel's run time; the wait isn't charged |
+| AS-24 | two futures in flight from one process, 100 ms each | `async_time` about 0.2 s, though about 0.1 s passed |
+| AS-25 | a kernel that never checks `cancelled()`, past `max_time` | the process is killed when its run time reaches the limit; the late result is dropped |
+| AS-26 | the AS-18 kernel inline (sync scheduler) | the same charges as AS-18, not the step's capped charge |
 
 ## 7. Settled questions
 
-P0 opened with five open questions. They are settled as follows (2026-10-18):
+P0 opened with five open questions. They were settled on 2026-10-18 (1 to 5), and one decision
+was added on 2026-10-19 (6):
 
 1. **`failed` is a new `process_status`** (2.6).
    - Alternative: `killed` with an exception attached.
@@ -576,3 +657,10 @@ P0 opened with five open questions. They are settled as follows (2026-10-18):
    - Why: the error reported is then the same however the timing falls, which keeps programs
      and their tests deterministic, and no work is left running unseen.
    - A program that wants to stop early awaits the futures one by one.
+6. **An async call is charged to the process that made it** (3.8; settled 2026-10-19). Its
+   kernel's run time and CPU time count against `max_time`, and its CPU time, converted to
+   steps, counts against `max_steps`.
+   - This replaces the first draft, under which the executor's time was the host's and charged
+     to no process.
+   - Why: a call can't be a way around a process's budget. The kernel does work the program
+     asked for, in a process the host bounded.
