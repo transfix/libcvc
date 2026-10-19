@@ -107,13 +107,19 @@ def main() -> int:
         data = args.bin / (demo + ".data")
         if data.is_file():
             shutil.copy2(data, ddir / (demo + ".data"))
-        (ddir / "index.html").write_text(render(
-            demo_tpl,
-            DEMO=demo,
-            DESC=info.get("desc", "a cvcGL WebAssembly example"),
-            WASM_MB=wasm_mb,
-            ASSET_V=asset_v,
-        ))
+        # A target that builds its own host page next to its binaries (<demo>.html, e.g. ari's
+        # xterm.js terminal, which has no canvas) keeps it; the rest get the canvas template.
+        own_page = args.bin / (demo + ".html")
+        if own_page.is_file():
+            shutil.copy2(own_page, ddir / "index.html")
+        else:
+            (ddir / "index.html").write_text(render(
+                demo_tpl,
+                DEMO=demo,
+                DESC=info.get("desc", "a cvcGL WebAssembly example"),
+                WASM_MB=wasm_mb,
+                ASSET_V=asset_v,
+            ))
 
         # gallery card
         thumb = info.get("thumb")

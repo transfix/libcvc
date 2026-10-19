@@ -29,6 +29,7 @@
   header b { color: var(--accent); font-weight: 600; }
   header .hint { color: var(--dim); }
   header #status { margin-left: auto; color: var(--dim); }
+  header a { color: var(--accent); }
   header button { font: inherit; color: var(--fg); background: #1f242c; border: 1px solid #2d333b;
                   border-radius: 4px; padding: 1px 8px; cursor: pointer; }
   #term { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
@@ -38,6 +39,7 @@
 <header>
   <span><b>ari</b> @ARI_WASM_DOC_NAME@</span>
   <span class="hint">Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits</span>
+  <a id="gallery" href="../" hidden>all examples</a>
   <span id="status">loading…</span>
 </header>
 <div id="term"></div>
@@ -53,6 +55,9 @@
         crossorigin="anonymous"></script>
 <script>
   const statusEl = document.getElementById('status');
+  // In the wasm demo gallery this page is <demo>/index.html (build-pages.py), so link back to it.
+  // Served on its own it is ari.html, with no gallery above it.
+  if (location.pathname.endsWith('/')) document.getElementById('gallery').hidden = false;
   const setStatus = (text) => { statusEl.textContent = text; };
 
   const term = new Terminal({
@@ -141,13 +146,28 @@
   // before fit can measure a cell, and the backend clamps window positions to the size of the
   // frame it draws, so a first frame against a half-laid-out page would pile every window at
   // the origin for good.
-  window.addEventListener('load', () => document.fonts.ready.then(() => {
+  //
+  // Both files are fetched revalidated (cache: 'no-cache'), so a redeploy never pairs a cached
+  // ari.js with a new ari.wasm. The wasm goes to the runtime directly (Module.wasmBinary) and the
+  // glue runs inline; nothing else is fetched (the document is embedded in the wasm).
+  const start = async () => {
     fit.fit();
-    const script = document.createElement('script');
-    script.src = 'ari.js';
-    script.onerror = () => setStatus('could not load ari.js');
-    document.body.append(script);
-  }));
+    const get = async (name) => {
+      const r = await fetch(name, {cache: 'no-cache'});
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + name);
+      return r;
+    };
+    try {
+      setStatus('loading ari.wasm…');
+      Module.wasmBinary = new Uint8Array(await (await get('ari.wasm')).arrayBuffer());
+      const script = document.createElement('script');
+      script.textContent = await (await get('ari.js')).text();
+      document.body.append(script);
+    } catch (e) {
+      setStatus('load failed: ' + ((e && e.message) || e));
+    }
+  };
+  window.addEventListener('load', () => document.fonts.ready.then(start));
 </script>
 </body>
 </html>

@@ -10,6 +10,7 @@
     "volren_bunny_ari",
     "volslice_bunny",
     "volslice_bunny_ari",
+    "ari",
     "nav_city_swarm",
     "nav_city_drive",
     "nav_fog_ghost",
@@ -87,6 +88,13 @@
       "blurb":
           "The slice-based bunny, rebuilt in the Ariadne UI DSL: scene, transfer function, lighting and the slice control panel declared in one .ari document, driven by the generic host — no demo-specific C++. The volume is the signed distance field of the embedded Stanford mesh (source: { sdf: { mesh } }), and the controls are reusable .ari components.",
       "thumb": "img/volslice_bunny_ari.jpg"
+    },
+    "ari": {
+      "title": "ari — Ariadne in a terminal",
+      "desc": "an Ariadne (.ari) document in a terminal, in the browser",
+      "blurb":
+          "The Ariadne UI DSL's terminal backend (FTXUI) in the browser, behind an xterm.js terminal. It runs terminal_tour.ari, a document that renders unchanged through the ImGui backend, as a text UI. Tab and the arrow keys move between widgets, and the mouse clicks and drags sliders, window title bars and menus. F10 opens the menu bar. Ctrl-C goes to the document's on_signal handler, which asks once and quits on the second press. Single-threaded WebAssembly, so it needs no special headers.",
+      "thumb": "img/ari.jpg"
     }
   }
 }
