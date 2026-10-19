@@ -239,6 +239,7 @@ set(SOURCE_FILES
   core/world_units.cpp
   core/unit_registry.cpp
   physics/world.cpp
+  physics/det_math.cpp
   physics/field_step.cpp
   physics/vehicle.cpp
   physics/null_backend.cpp
@@ -433,14 +434,18 @@ else()
 endif()
 
 # cvc::physics is deterministic by contract: a run's state_hash must reproduce on
-# every target when the backend is cross-platform deterministic. No FMA
-# contraction in the facade and the null backend, as for nav and world above; the
-# Jolt backend TU gets the same flag on its own target (below).
+# every target when the backend is cross-platform deterministic (physics_replay_test
+# replays one trace natively and in wasm). No FMA contraction in the facade, the
+# step's vehicle and field code, the libm-free math they call (det_math.h) and the
+# null backend, as for nav and world above; the Jolt backend TUs get the same flag
+# on their own target (below).
+set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
+    physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp)
 if(NOT MSVC)
-  set_source_files_properties(physics/world.cpp physics/null_backend.cpp physics/nav_plant.cpp
+  set_source_files_properties(${_cvc_physics_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(physics/world.cpp physics/null_backend.cpp physics/nav_plant.cpp
+  set_source_files_properties(${_cvc_physics_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -2126,7 +2131,28 @@ if(WIN32)
   )
 endif()
 
+# physics_replay_test, the native <-> wasm replay gate (the vehicle-physics plan's P7): replays
+# tests/data/physics_replay_trace.json and requires every step's state_hash. A plain main()
+# (googletest has no wasm build), so a wasm build can have it without the test tree:
+# CVC_BUILD_PHYSICS_REPLAY builds it with CVC_BUILD_TESTS off, and node runs it
+# (`node physics_replay_test.js <trace>`, ci.yml's physics-wasm job).
+option(CVC_BUILD_PHYSICS_REPLAY "Build physics_replay_test even with CVC_BUILD_TESTS off (the wasm replay gate)" OFF)
+set(CVC_PHYSICS_REPLAY_TRACE "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/physics_replay_trace.json")
+function(cvc_setup_physics_replay target)
+  target_link_libraries(${target} PRIVATE cvc)
+  target_compile_features(${target} PRIVATE cxx_std_17)
+  if(EMSCRIPTEN)
+    # node reads the trace from the host's file system, and the process exits with main's
+    # status. main runs on a pthread, so the cvc::app's workers can start while it waits.
+    target_link_options(${target} PRIVATE -sNODERAWFS=1 -sEXIT_RUNTIME=1
+      -sALLOW_MEMORY_GROWTH=1 -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb)
+  endif()
+endfunction()
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
   add_subdirectory(tests)
+elseif(CVC_BUILD_PHYSICS_REPLAY)
+  add_executable(physics_replay_test tests/physics_replay.cpp)
+  cvc_setup_physics_replay(physics_replay_test)
 endif()

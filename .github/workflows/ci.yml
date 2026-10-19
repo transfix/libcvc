@@ -218,6 +218,102 @@ jobs:
         if: steps.paths.outputs.run == 'true'
         run: src/cvcGL/wasm/run-js-tests.sh
 
+  # ─────────────── cvc::physics: a native trace replayed in wasm (P7) ───────────────
+  #
+  # physics_replay_test replays src/cvc/tests/data/physics_replay_trace.json, recorded natively,
+  # and requires the state_hash after every step: the recipe jobs run it natively (ctest), and
+  # this one builds a minimal wasm-mt libcvc (no cvcGL, no codecs) on the catalog's Jolt and runs
+  # it under the emsdk's node. Only when physics, what it builds on, or this file changed: the
+  # emsdk is a big download.
+  physics-wasm:
+    name: physics replay (wasm-mt, node)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-physics-wasm
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did physics change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvc/physics inc/cvc/physics \
+                   src/cvc/tests/physics_replay.cpp src/cvc/tests/data/physics_replay_trace.json \
+                   src/cvc/geometry/height_field.cpp inc/cvc/geometry/height_field.h \
+                   src/cvc/volume inc/cvc/volume CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   cvcpkg/recipes/libcvc .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "physics changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the wasm-mt deps (boost, pegtl, Jolt, the compression libraries)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd boost pegtl joltphysics; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (wasm-mt, physics only) and physics_replay_test
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # shellcheck disable=SC1091
+          source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          emcmake cmake -G Ninja -S . -B build-wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_PHYSICS_REPLAY=ON \
+            -DCVC_BUILD_CLI=OFF -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
+            -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF -DCVC_BUILD_LSYS_TOOLS=OFF \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
+            | tee configure.log
+          grep -q "cvc::physics Jolt backend ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find Jolt"; exit 1; }
+          cmake --build build-wasm --target physics_replay_test -j"$(nproc)"
+
+      - name: Replay the native trace under node
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" --version
+          # 77 (no cross-platform-deterministic Jolt) fails here too: the job exists to compare.
+          "$node" build-wasm/bin/physics_replay_test.js src/cvc/tests/data/physics_replay_trace.json
+
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
   # Mirrors release.yml's linux job exactly, but injects -<sha> into

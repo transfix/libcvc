@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "det_math.h"
 #include "vehicle_step.h"
 
 #include <algorithm>
@@ -388,7 +389,7 @@ double contact_half_length(double radius, double z) {
 constexpr double kMediumTime = 0.1;
 
 // A force smoothly signed by the velocity it resists: full at |v| >> 0.1 m/s, zero at rest.
-double rolling_sign(double v) { return std::tanh(v / 0.1); }
+double rolling_sign(double v) { return det::tanh(v / 0.1); }
 
 template <class T> void put(std::string &out, const T &v) {
   out.append(reinterpret_cast<const char *>(&v), sizeof(T));
@@ -602,7 +603,7 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
         rear = a.x;
         have_rear = true;
       }
-    const double t = std::tan(v.steer);
+    const double t = det::tan(v.steer);
     const double relax = std::min(1.0, dt / kMediumTime);
     std::vector<double> steer(2 * d.axles.size(), 0.0), load(2 * d.axles.size(), 0.0);
     for (std::size_t ai = 0; ai < d.axles.size(); ++ai) {
@@ -611,7 +612,7 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
         const std::size_t w = 2 * ai + side;
         const double y = side == 0 ? a.half_track : -a.half_track;
         if (a.steered && L > 0.0)
-          steer[w] = std::atan((a.x - rear) * t / (L - y * t));
+          steer[w] = det::atan((a.x - rear) * t / (L - y * t));
         // The medium answers the load over kMediumTime: a wheel touching down settles into
         // its rut as the load builds, rather than drumming on it.
         const wheel_state &ws = v.readback.wheels[w].state;

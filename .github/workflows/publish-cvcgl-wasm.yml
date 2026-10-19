@@ -90,8 +90,10 @@ jobs:
         # and pulls no Emscripten SDL port (no -sUSE_SDL), so it does not clash with anything here.
         run: |
           mkdir -p "$WASM_DEPS"
-          # pegtl: cvc's build-only state_exec grammar engine (header-only).
-          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk pegtl; do
+          # pegtl: cvc's build-only state_exec grammar engine (header-only). joltphysics: the
+          # cvc::physics backend (cross-platform deterministic, so a wasm run replays a native
+          # one); without it CVC_WITH_JOLT turns OFF and the bundle has the null backend only.
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk pegtl joltphysics; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
@@ -119,6 +121,11 @@ jobs:
           cmake --install build-wasm
           test -f "$INST/lib/libcvc.a" && test -f "$INST/lib/libcvcGL.a" \
             || { echo "::error::wasm build produced no libcvc.a/libcvcGL.a"; exit 1; }
+          # A static cvc names Jolt among the packages its config finds for a consumer
+          # (CVC_PRIVATE_LINK_PACKAGES); missing, find_package(Jolt) failed and the bundle would
+          # ship cvc::physics without its engine.
+          grep -qE "IN ITEMS .*\bJolt\b" "$INST/lib/cmake/cvc/cvcConfig.cmake" \
+            || { echo "::error::libcvc wasm built WITHOUT Jolt (find_package(Jolt) failed despite joltphysics in \$WASM_DEPS)"; exit 1; }
           grep -q CVC_ENABLE_IMGUI "$INST/lib/cmake/cvcGL/cvcGLTargets.cmake" \
             || echo "::warning::cvcGL wasm built WITHOUT imgui (overlay will be inert)"
           # sdl3 is now in $WASM_DEPS, so cvcGL MUST link SDL3::SDL3 (CVC_ENABLE_SDL) — its config

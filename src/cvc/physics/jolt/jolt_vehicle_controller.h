@@ -25,8 +25,9 @@
 // JPH::WheeledVehicleController and its settings are in libJolt, built without RTTI, so their
 // typeinfo exists nowhere, and a vtable emitted with RTTI on would reference it. The same rules
 // hold: jolt_vehicle_controller.cpp must not throw, catch or call anything inline that can
-// throw, so it holds only the constructors, the destructors and ConstructController. The other
-// members are in jolt_vehicle_energy.cpp, built with RTTI.
+// throw, so it holds only the constructors, the destructors and the two factories
+// (ConstructController, ConstructWheel). The other members are in jolt_vehicle_energy.cpp,
+// built with RTTI.
 
 #ifndef CVC_PHYSICS_JOLT_VEHICLE_CONTROLLER_H
 #define CVC_PHYSICS_JOLT_VEHICLE_CONTROLLER_H
@@ -101,6 +102,18 @@ struct energy_tally {
   }
 };
 
+// A Jolt wheel whose contact fields start defined. JPH::Wheel leaves its contact position,
+// normal, lateral direction and suspension length uninitialized until the wheel first touches
+// the ground, but JPH::VehicleConstraint::SaveState writes them every step. A vehicle with a
+// wheel that had not touched down yet (every vehicle, for its first steps) therefore put
+// whatever the heap held into world::save() and state_hash(), and two identical runs hashed
+// differently until all its wheels landed (physics_replay_test found it).
+class defined_wheel final : public JPH::WheelWV {
+public:
+  explicit defined_wheel(const JPH::WheelSettingsWV &s);
+  ~defined_wheel() override; // jolt_vehicle_controller.cpp
+};
+
 class ackermann_controller final : public JPH::WheeledVehicleController {
 public:
   ackermann_controller(const JPH::WheeledVehicleControllerSettings &s, JPH::VehicleConstraint &c);
@@ -119,6 +132,7 @@ public:
   std::vector<double> anti_roll;
 
 protected:
+  JPH::Wheel *ConstructWheel(const JPH::WheelSettings &s) const override; // a defined_wheel
   void PreCollide(float dt, JPH::PhysicsSystem &ps) override;
   void PostCollide(float dt, JPH::PhysicsSystem &ps) override;
   bool SolveLongitudinalAndLateralConstraints(float dt) override;

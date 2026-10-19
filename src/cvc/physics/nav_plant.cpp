@@ -9,6 +9,7 @@
 */
 
 #include "binding_meta.h"
+#include "det_math.h"
 
 #include <algorithm>
 #include <chrono>
@@ -189,12 +190,12 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
     const cvc::world_units::xyz p =
         _units.normalized_point_to_si(start[i].x, start[i].y, 0.0, frame);
     const double yaw = start[i].heading;
-    const double c = std::cos(yaw), s = std::sin(yaw);
+    const double c = det::cos(yaw), s = det::sin(yaw);
     const double h = _o.spawn_height >= 0.0 ? _o.spawn_height : resting_height(a.desc);
     const vec3 origin{p.x - c * a.rear_x, p.y - s * a.rear_x, _o.ground_z + h};
     quat q;
-    q.w = std::cos(0.5 * yaw);
-    q.z = std::sin(0.5 * yaw);
+    q.w = det::cos(0.5 * yaw);
+    q.z = det::sin(0.5 * yaw);
     a.vehicle = _w.add_vehicle(a.desc, origin, q);
     const physics::vehicle_state vs = _w.vehicle_state(a.vehicle);
     a.chassis = vs.chassis;
@@ -218,13 +219,13 @@ cvc::nav::plant_state nav_plant::state(int i) const {
   const cvc::world_units::xyz n = _units.si_point_to_normalized(rear.x, rear.y, 0.0, _frame);
   s.x = static_cast<float>(n.x);
   s.y = static_cast<float>(n.y);
-  s.heading = static_cast<float>(std::atan2(fwd.y, fwd.x));
+  s.heading = static_cast<float>(det::atan2(fwd.y, fwd.x));
   s.speed = static_cast<float>(_units.to_normalized(dot(v_rear, fwd), dim::velocity, _frame));
   s.steer = static_cast<float>(vs.steer);
   // Measured, for the drive's modulators (H4).
   const vec3 left = rotate(b.rotation, {0.0, 1.0, 0.0});
-  s.pitch = static_cast<float>(std::asin(std::max(-1.0, std::min(1.0, fwd.z))));
-  s.roll = static_cast<float>(std::asin(std::max(-1.0, std::min(1.0, left.z))));
+  s.pitch = static_cast<float>(det::asin(std::max(-1.0, std::min(1.0, fwd.z))));
+  s.roll = static_cast<float>(det::asin(std::max(-1.0, std::min(1.0, left.z))));
   double use = 0.0, l_load = 0.0, r_load = 0.0;
   const double ks = std::max(1e-6, a.desc.tire_peak_slip);
   const double as = std::max(1e-6, a.desc.tire_peak_slip_angle);
