@@ -80,6 +80,14 @@ struct TermEvent {
   static TermEvent mouse_event(Mouse m, int x, int y, int button = 1);
 };
 
+// One rendered terminal cell, toolkit-neutral — what render_window hands a host to draw.
+struct TermCell {
+  std::string ch;     // the glyph (UTF-8); "" for the cell a wide glyph spills into
+  std::string fg, bg; // SGR colour parameters, "" for the default: "31", "38;5;21", "48;2;0;0;255"
+  bool bold = false, dim = false, italic = false, underlined = false, inverted = false;
+};
+using TermRows = std::vector<std::vector<TermCell>>;
+
 class FtxuiBackend : public Backend {
 public:
   struct Options {
@@ -91,6 +99,9 @@ public:
     // half-blocks.
     enum class ImageColor { Auto, Mono, Color };
     ImageColor image_color = ImageColor::Auto;
+    // Hosted chrome: draw no window frames and no menu bar, for a host that supplies its own (see
+    // "hosted chrome" below).
+    bool hosted = false;
   };
 
   FtxuiBackend();
@@ -159,6 +170,15 @@ public:
   void set_image(const std::string &name, const cvc::image &img);
   void clear_image(const std::string &name);
 
+  // Draw the published image `name` behind everything, stretched over the whole screen: the
+  // terminal counterpart of the GL canvas the ImGui backend draws over. Widgets, menus and windows
+  // draw on top of it. "" (the default) draws none. In hosted mode it is the background body
+  // (window id ""). cvcGL's TerminalScene shows a 3D scene rendered offscreen this way.
+  void set_background(const std::string &image_name);
+  // The screen size in cells, as of the last frame drawn (or set_screen_size).
+  int screen_width() const;
+  int screen_height() const;
+
   // ---- headless (no TTY) ----
 
   // Render the current tree at `width` x `height` cells (height 0 = fit the content) and return it
@@ -171,6 +191,49 @@ public:
   // drawn) and run a walk so the widget it lands on reports its edit to the core. Returns whether
   // the UI used the event; an unused key is what a host forwards to the document's on_key.
   bool feed(Runtime &rt, const TermEvent &ev);
+
+  // ---- hosted chrome ----
+  // With Options::hosted this backend draws no window frames and no menu bar. It keeps each
+  // window's body for a host that supplies its own chrome — cvc::ariadne::TvisionBackend, with
+  // native movable windows and menus — to render into its window, exposes the menu bar as a model
+  // whose items the host activates, and takes input per window in window-local cells. Widgets
+  // outside every window form the body of the window id "" (the host's background).
+
+  struct HostedWindow {
+    std::string id, title;
+    bool closable = false;
+    int x = 0, y = 0; // placement from the authored pos / persisted geometry (cells)
+    int w = 0, h = 0; // outer size when authored / persisted / host-set, else 0
+    int content_w = 0, content_h = 0; // the body's natural size (cells)
+  };
+  struct HostedMenuItem {
+    std::string id, label;
+    bool toggle = false, checked = false, separator = false;
+  };
+  struct HostedMenu {
+    std::string label;
+    std::vector<HostedMenuItem> items;
+  };
+
+  std::vector<HostedWindow> hosted_windows() const; // the windows the last walk drew, in order
+  std::vector<HostedMenu> hosted_menus() const;     // the menu bar the last walk drew
+  bool hosted_root() const;                         // whether body "" has any widgets
+  std::string tooltip() const;                      // the focused / hovered widget's tooltip
+
+  // Lay out window `id`'s body (from the last walk) into width x height cells. Mouse events fed
+  // for that window hit-test against this layout.
+  TermRows render_window(const std::string &id, int width, int height);
+  // feed() for one window: mouse coordinates are local to that window's body, and Tab / arrow
+  // focus moves stay inside it.
+  bool feed_window(Runtime &rt, const std::string &id, const TermEvent &ev);
+  // The host's chrome acted: a menu item was chosen, a window's close box was hit. Each runs a
+  // walk, so the widget reports it to the core.
+  void activate_menu_item(Runtime &rt, const std::string &item_id);
+  void close_window(Runtime &rt, const std::string &id);
+  // The host's current bounds for window `id` (cells), reported back as its geometry (§11.4).
+  void set_window_geometry(const std::string &id, int x, int y, int w, int h);
+  // The host's screen size in cells, which percent sizes resolve against.
+  void set_screen_size(int width, int height);
 
   // ---- interactive (owns the terminal) ----
 
@@ -190,6 +253,12 @@ public:
     std::function<void()> on_start;
     std::function<void()> on_stop;
     std::function<std::string()> take_signal;
+
+    // Input no widget used — a click or drag on the background, the wheel, a key nothing took — is
+    // offered here before the document's on_key / on_pointer; return true to take it. Pointer
+    // coordinates are screen cells (on the tvision desktop, the desktop's). cvcGL's TerminalScene
+    // turns background drags and the wheel into camera moves with it.
+    std::function<bool(const TermEvent &)> background_input;
   };
 
   // Why run() returned.
@@ -215,6 +284,12 @@ public:
 
   // Whether this build was compiled with FTXUI.
   static bool available();
+
+protected:
+  // Hand an event the UI did not use to the document's on_key / on_pointer, the way
+  // run(AppRuntime&) does: keys as a press + release pair with SDL's modifier bits, pointer events
+  // at the cell's centre in px.
+  void forward_to_document(AppRuntime &app, const TermEvent &e) const;
 
 private:
   struct Impl;

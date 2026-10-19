@@ -8,6 +8,7 @@
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <cvc/state/state.h>
@@ -565,6 +566,182 @@ TEST(AriadneFtxui, ResizableTableWithoutBordersStillHasAGrabbableSeam) {
   EXPECT_EQ(bx, ax + 8) << t.screen;
 }
 
+// ---- hosted chrome (the mode the tvision backend drives) ----
+
+namespace {
+
+std::string row_text(const TermRows &rows, std::size_t y) {
+  std::string out;
+  if (y < rows.size())
+    for (const TermCell &c : rows[y])
+      out += c.ch.empty() ? std::string(" ") : c.ch;
+  return out;
+}
+
+bool rows_show(const TermRows &rows, const std::string &s) {
+  for (std::size_t y = 0; y < rows.size(); ++y)
+    if (row_text(rows, y).find(s) != std::string::npos)
+      return true;
+  return false;
+}
+
+FtxuiBackend::Options hosted_opts() {
+  FtxuiBackend::Options o;
+  o.hosted = true;
+  return o;
+}
+
+} // namespace
+
+TEST(AriadneFtxuiHosted, KeepsWindowBodiesAndAMenuModel) {
+  REQUIRE_FTXUI();
+  Widget w = window("Win", {checkbox("A", "a"), checkbox("B", "b")});
+  w.id = "w";
+  w.closable = true;
+  Term t(group({menubar({menu("File", {menu_toggle("Wire", "wire"), separator(),
+                                       menu_action("Quit", "quit")})}),
+                text("background"), w}),
+         hosted_opts());
+  EXPECT_FALSE(t.shows("File")) << "no menu bar is drawn\n" << t.screen;
+  EXPECT_FALSE(t.shows("Win")) << "no window frame is drawn\n" << t.screen;
+  EXPECT_TRUE(t.shows("background")) << "the root body still renders\n" << t.screen;
+  EXPECT_TRUE(t.be.hosted_root());
+  EXPECT_TRUE(t.be.hosted_menus().empty()) << "menus join the walk from the second frame";
+  t.draw();
+
+  const auto wins = t.be.hosted_windows();
+  ASSERT_EQ(wins.size(), 1u);
+  EXPECT_EQ(wins[0].id, "w");
+  EXPECT_EQ(wins[0].title, "Win");
+  EXPECT_TRUE(wins[0].closable);
+  EXPECT_GE(wins[0].content_w, 5); // "[ ] A"
+  EXPECT_EQ(wins[0].content_h, 2);
+
+  const auto menus = t.be.hosted_menus();
+  ASSERT_EQ(menus.size(), 1u);
+  EXPECT_EQ(menus[0].label, "File");
+  ASSERT_EQ(menus[0].items.size(), 3u);
+  EXPECT_TRUE(menus[0].items[0].toggle);
+  EXPECT_FALSE(menus[0].items[0].checked);
+  EXPECT_TRUE(menus[0].items[1].separator);
+  EXPECT_EQ(menus[0].items[2].label, "Quit");
+
+  const TermRows rows = t.be.render_window("w", 20, 4);
+  ASSERT_EQ(rows.size(), 4u);
+  EXPECT_EQ(row_text(rows, 0).substr(0, 5), "[ ] A");
+  EXPECT_EQ(row_text(rows, 1).substr(0, 5), "[ ] B");
+}
+
+TEST(AriadneFtxuiHosted, AMenuToggleDoesNotSeedAWindowClosed) {
+  REQUIRE_FTXUI();
+  // A "Status window" toggle bound to the window's own open key, as terminal_tour.ari has: the
+  // window must still start open.
+  Widget w = window("Status", {text("body")});
+  w.id = "status";
+  w.closable = true;
+  Term t(group({menubar({menu("File", {menu_toggle("Status window", "tree.status.open")})}), w}),
+         hosted_opts());
+  t.draw();
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.status.open"), "1");
+  ASSERT_EQ(t.be.hosted_windows().size(), 1u);
+  ASSERT_EQ(t.be.hosted_menus().size(), 1u);
+  EXPECT_TRUE(t.be.hosted_menus()[0].items[0].checked);
+}
+
+TEST(AriadneFtxuiHosted, InputGoesToTheWindowItIsFedFor) {
+  REQUIRE_FTXUI();
+  Widget a = window("A", {checkbox("One", "one")});
+  Widget b = window("B", {checkbox("Two", "two")});
+  Term t(group({a, b}), hosted_opts());
+  t.be.render_window("A", 20, 3);
+  t.be.render_window("B", 20, 3);
+  EXPECT_TRUE(t.be.feed_window(t.rt, "B", TermEvent::key_event("Tab")));
+  EXPECT_TRUE(t.be.feed_window(t.rt, "B", TermEvent::text_event(" ")));
+  EXPECT_EQ(val(t.app, "two"), "1") << "Tab stayed inside window B";
+  EXPECT_EQ(val(t.app, "one"), "0");
+  // A click in window A's own cells.
+  t.draw();
+  t.be.render_window("A", 20, 3);
+  t.be.feed_window(t.rt, "A", TermEvent::mouse_event(TermEvent::Mouse::Press, 1, 0));
+  t.be.feed_window(t.rt, "A", TermEvent::mouse_event(TermEvent::Mouse::Release, 1, 0));
+  EXPECT_EQ(val(t.app, "one"), "1");
+}
+
+TEST(AriadneFtxuiHosted, MenuItemsActivateThroughTheModel) {
+  REQUIRE_FTXUI();
+  Term t(
+      group({menubar({menu("File", {menu_toggle("Wire", "wire"), menu_action("Quit", "quit")})})}),
+      hosted_opts());
+  int quit = 0;
+  t.rt.on("quit", [&] { ++quit; });
+  t.draw();
+  auto menus = t.be.hosted_menus();
+  ASSERT_EQ(menus.size(), 1u);
+  ASSERT_EQ(menus[0].items.size(), 2u);
+  t.be.activate_menu_item(t.rt, menus[0].items[0].id);
+  EXPECT_EQ(val(t.app, "wire"), "1");
+  t.draw();
+  menus = t.be.hosted_menus();
+  EXPECT_TRUE(menus[0].items[0].checked) << "the model follows the state";
+  t.be.activate_menu_item(t.rt, menus[0].items[1].id);
+  t.rt.drain();
+  EXPECT_EQ(quit, 1);
+}
+
+TEST(AriadneFtxuiHosted, TheHostClosesAndPlacesWindows) {
+  REQUIRE_FTXUI();
+  Widget w = window("Win", {text("body")});
+  w.id = "w";
+  w.closable = true;
+  Term t(group({w}), hosted_opts());
+  t.be.set_window_geometry("w", 10, 3, 30, 8);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.w.geometry"), "80,48,240,128") << "host bounds persist in px";
+  t.be.close_window(t.rt, "w");
+  EXPECT_EQ(val(t.app, "tree.w.open"), "0");
+  t.draw();
+  EXPECT_TRUE(t.be.hosted_windows().empty());
+}
+
+TEST(AriadneFtxuiHosted, ComboListOpensInsideItsWindow) {
+  REQUIRE_FTXUI();
+  Widget w = window("Win", {combo("Mode", "mode", {"alpha", "beta"})});
+  Term t(group({w}), hosted_opts());
+  t.be.render_window("Win", 24, 6);
+  t.be.feed_window(t.rt, "Win", TermEvent::key_event("Tab"));
+  t.be.feed_window(t.rt, "Win", TermEvent::key_event("Return"));
+  t.draw();
+  const TermRows rows = t.be.render_window("Win", 24, 6);
+  EXPECT_TRUE(rows_show(rows, " beta ")) << row_text(rows, 1) << "\n" << row_text(rows, 2);
+  t.be.feed_window(t.rt, "Win", TermEvent::key_event("Down"));
+  t.be.feed_window(t.rt, "Win", TermEvent::key_event("Return"));
+  EXPECT_EQ(val(t.app, "mode"), "beta");
+}
+
+// The tvision backend is an FtxuiBackend in hosted mode: it draws no frames of its own, it
+// reports native windows / menus when it was built with tvision, and its window bodies come from
+// the shared layout. (Its desktop needs a real terminal; tmux covers that by hand.)
+TEST(AriadneTvision, IsTheHostedFtxuiBackend) {
+  cvc::app app;
+  TvisionBackend be;
+  Runtime rt(app, "");
+  rt.set_backend(&be);
+  EXPECT_EQ(be.capabilities().windows, TvisionBackend::available());
+  // Without FTXUI (macOS / Windows builds today) the backend is an inert stub whose capabilities
+  // are all false, so the rest only holds where FTXUI is built in.
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "libcvc built without FTXUI";
+  EXPECT_TRUE(be.capabilities().owns_loop);
+  Widget w = window("Win", {checkbox("A", "a")});
+  rt.set_root(group({w}));
+  const std::string s = be.render_to_string(rt, 40, 10);
+  EXPECT_EQ(s.find("Win"), std::string::npos) << "hosted: tvision draws the frame\n" << s;
+  ASSERT_EQ(be.hosted_windows().size(), 1u);
+  const TermRows rows = be.render_window("Win", 20, 3);
+  EXPECT_EQ(row_text(rows, 0).substr(0, 5), "[ ] A");
+}
+
 TEST(AriadneFtxui, ColorEditsAChannel) {
   REQUIRE_FTXUI();
   Term t(group({color_widget("Tint", "tint", "0.5,0.5,0.5")}));
@@ -602,6 +779,46 @@ TEST(AriadneFtxui, ImageRampOnAMonochromeTerminal) {
   t.be.set_image("map", img);
   t.draw();
   EXPECT_TRUE(t.shows("@")) << "white maps to the dense end of the ramp\n" << t.screen;
+}
+
+TEST(AriadneFtxui, BackgroundImageFillsTheScreenUnderTheWidgets) {
+  REQUIRE_FTXUI();
+  const unsigned char px[] = {200, 20, 20, 20, 20, 200, 20, 200, 20, 200, 200, 20};
+  cvc::image img(2, 2, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px);
+  FtxuiBackend::Options o;
+  o.image_color = FtxuiBackend::Options::ImageColor::Color;
+  Term t(group({text("hello")}), o);
+  t.be.set_image("scene", img);
+  t.be.set_background("scene");
+  t.width = 20;
+  t.height = 4;
+  t.draw();
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "hello", x, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  ASSERT_TRUE(find_cell(t.screen, "\xe2\x96\x80", x, y)) << t.screen; // "▀"
+  int n = 0; // every cell but the five "hello" ones is the backdrop
+  for (std::size_t i = 0; (i = t.screen.find("\xe2\x96\x80", i)) != std::string::npos; i += 3)
+    ++n;
+  EXPECT_EQ(n, 20 * 4 - 5) << t.screen;
+  EXPECT_EQ(t.be.screen_width(), 20);
+  EXPECT_EQ(t.be.screen_height(), 4);
+  // A new frame published under the same name shows on the next draw (the backdrop resamples).
+  const std::string before = t.be.render_to_string(t.rt, 20, 4, /*ansi=*/true);
+  const unsigned char px2[] = {0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255};
+  t.be.set_image("scene",
+                 cvc::image(2, 2, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px2));
+  EXPECT_NE(t.be.render_to_string(t.rt, 20, 4, /*ansi=*/true), before);
+}
+
+TEST(AriadneFtxui, AClickOnTheBackgroundIsLeftForTheHost) {
+  REQUIRE_FTXUI();
+  Term t(group({checkbox("A", "a")}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "[ ] A", x, y));
+  EXPECT_FALSE(t.mouse(TermEvent::Mouse::Press, 40, 10)) << "empty background: not the UI's";
+  EXPECT_FALSE(t.mouse(TermEvent::Mouse::Release, 40, 10));
+  EXPECT_TRUE(t.mouse(TermEvent::Mouse::Press, x, y)) << "a widget's";
 }
 
 TEST(AriadneFtxui, EmptyRuntimeRendersSafely) {

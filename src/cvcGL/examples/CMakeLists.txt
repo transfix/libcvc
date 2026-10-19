@@ -19,6 +19,13 @@ add_executable(ariadne_hello ariadne_hello.cpp)
 target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 
+# ariadne_terminal — the same documents in a TERMINAL: widgets through libcvc's terminal backends
+# (FTXUI, or tvision with --backend tvision) and the scene rendered offscreen by cvcGL's
+# TerminalScene, drawn behind them as half-block cells (roadmap §16.6). No window or display.
+add_executable(ariadne_terminal ariadne_terminal.cpp)
+target_link_libraries(ariadne_terminal PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_terminal MODULES ${VTK_LIBRARIES})
+
 # ariadne_stream — the Phase-3 streaming "holy grail": one live video stream shown both as the main
 # scene (a `type: stream` quad filling the viewport) AND in a draggable ImGui `type: stream_view`
 # widget window, wired from stream.ari. Synthetic test pattern by default (headless-verifiable),

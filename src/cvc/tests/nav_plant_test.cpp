@@ -26,16 +26,19 @@
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_route.h>
+#include <cvc/physics/nav_eval.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -905,4 +908,188 @@ TEST(NavPlant, AVehicleRouteBacksTheHumveeOutOfADeadEnd) {
               alone, t_alone, routed, t_route, t_route * 0.06);
   EXPECT_TRUE(rev_route) << "it backed up";
   EXPECT_LT(routed, 5.0) << "the route took it out to its goal";
+}
+
+// ── P8b's gate: a policy trained on the dynamic vehicle against one trained on the point mass,
+// both driving Jolt RoboRacers ──
+
+namespace {
+
+// The city's RoboRacer wheelbase in normalized units (train_config::veh_L's 0.035) as an exact
+// double: the scale S = kCityL / 0.324 per metre. reach_on_plant is chaotic in it; passing the
+// float veh_L instead (4e-9 relative) moves single seeds' reach by up to 0.1.
+constexpr double kCityL = 0.035;
+
+// The paired-bootstrap 95% CI of the mean of `diff`.
+void paired_ci(const std::vector<double> &diff, double &lo, double &hi) {
+  std::mt19937 rng(0);
+  std::uniform_int_distribution<int> pick(0, static_cast<int>(diff.size()) - 1);
+  std::vector<double> boot(2000);
+  for (double &x : boot) {
+    double sum = 0.0;
+    for (std::size_t i = 0; i < diff.size(); ++i)
+      sum += diff[static_cast<std::size_t>(pick(rng))];
+    x = sum / static_cast<double>(diff.size());
+  }
+  std::sort(boot.begin(), boot.end());
+  lo = boot[static_cast<std::size_t>(0.025 * boot.size())];
+  hi = boot[static_cast<std::size_t>(0.975 * boot.size()) - 1];
+}
+
+} // namespace
+
+// reach_on_plant is a fitness train() selects on, so it must be repeatable: the same policy,
+// scene and seeds give the same per-seed reach (the world is single-threaded and runs in
+// cross-platform determinism mode), one seed at a time or all at once. It also refuses what it
+// cannot score.
+TEST(NavPlant, ReachOnPlantIsRepeatable) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  const cvc::nav::coef_mlp p = cvc::nav::coef_mlp::default_biased();
+  plant_reach_options o;
+  o.agents = 16;
+  o.ticks = 150;
+  o.seeds = {100u, 101u, 102u};
+  o.threads = 1;
+  std::vector<double> a, b, c;
+  const double ma = reach_on_plant(p, sc, rr, kCityL, o, &a);
+  const double mb = reach_on_plant(p, sc, rr, kCityL, o, &b);
+  o.threads = 0;
+  const double mc = reach_on_plant(p, sc, rr, kCityL, o, &c);
+  ASSERT_EQ(a.size(), 3u);
+  EXPECT_EQ(a, b);
+  EXPECT_EQ(a, c) << "seeds in parallel should score what they score one at a time";
+  EXPECT_EQ(ma, mb);
+  EXPECT_EQ(ma, mc);
+  EXPECT_DOUBLE_EQ(ma, (a[0] + a[1] + a[2]) / 3.0);
+  std::printf("  reach_on_plant, %d agents x %d ticks: seeds 100-102 %.3f %.3f %.3f (twice one "
+              "at a time, once in parallel)\n",
+              o.agents, o.ticks, a[0], a[1], a[2]);
+  o.seeds.clear();
+  EXPECT_THROW(reach_on_plant(p, sc, rr, kCityL, o), std::invalid_argument);
+}
+
+// The gate (the vehicle-physics plan's P8b): over >= 20 paired seeds on the Jolt plant, a policy
+// trained through the dynamic vehicle should beat the one trained on the point-mass surrogate,
+// with a 95% bootstrap CI. This reports the comparison; it is a heavy run (the "Convergence"
+// suites run where CI runs those).
+TEST(NavPlantConvergence, DynamicTrainedPolicyAgainstPointMassOnJolt) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  cvc::nav::train_config base;
+  base.n = 128;
+  base.hidden = 64;
+  base.horizon = 28;
+  base.window = 7;
+  base.steps = 150;
+  base.seed = 0;
+  base.lr = 5e-5f;
+  // Experiments: P8B_GATE_LR and P8B_GATE_STEPS override both policies' training.
+  if (const char *e = std::getenv("P8B_GATE_LR"))
+    base.lr = static_cast<float>(std::atof(e));
+  if (const char *e = std::getenv("P8B_GATE_STEPS"))
+    base.steps = std::atoi(e);
+  cvc::nav::coef_trainer pm(base, 1);
+  pm.train(sc);
+  cvc::nav::train_config dc = base;
+  dc.rollout = cvc::nav::rollout_kind::dynamic;
+  dc.dyn = nav_plant::dyn_bike_params_at(vehicle_desc::roboracer(), dc.veh_L);
+  cvc::nav::coef_trainer dy(dc, 1);
+  dy.train(sc);
+  const cvc::nav::coef_mlp p_pm = pm.to_coef_mlp(), p_dy = dy.to_coef_mlp(),
+                           p_seed = cvc::nav::coef_mlp::default_biased();
+
+  const plant_reach_options eval; // 20 seeds (100..119) x 48 agents x 400 ticks
+  const int seeds = static_cast<int>(eval.seeds.size()), n = eval.agents, ticks = eval.ticks;
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  std::vector<double> a, b, c, diff(seeds);
+  const double ma = reach_on_plant(p_pm, sc, rr, kCityL, eval, &a);
+  const double mb = reach_on_plant(p_dy, sc, rr, kCityL, eval, &b);
+  const double mc = reach_on_plant(p_seed, sc, rr, kCityL, eval, &c);
+  for (int s = 0; s < seeds; ++s)
+    diff[s] = b[s] - a[s];
+  double lo, hi;
+  paired_ci(diff, lo, hi);
+  std::printf("  P8b gate (lr %.0e, %d steps) on Jolt RoboRacers (city, %d seeds x %d agents, %d "
+              "ticks): reach %.1f%% "
+              "point-mass-trained, %.1f%% dynamic-trained, %.1f%% the untrained seed; dynamic - "
+              "point mass = %+.1f points, 95%% CI [%+.1f, %+.1f]\n",
+              base.lr, base.steps, seeds, n, ticks, 100 * ma, 100 * mb, 100 * mc, 100 * (mb - ma),
+              100 * lo, 100 * hi);
+  for (int s = 0; s < seeds; ++s)
+    std::printf("    seed %d: %.3f %.3f %.3f\n", 100 + s, a[s], b[s], c[s]);
+  EXPECT_TRUE(std::isfinite(lo) && std::isfinite(hi));
+}
+
+// Checkpoint selection on Jolt reach (P8b): the same two trainings, each scoring its checkpoints
+// by reach on Jolt RoboRacers over validation seeds (200.., never the evaluation's) and ending
+// on the best, the untrained policy included; then the gate's comparison on the 20 held-out
+// seeds. P8B_SELECT_LR / _STEPS / _EVERY override the training, P8B_SELECT_VAL the number of
+// validation seeds (8: a 4-seed mean carries about 1.5 points of the plant's chaos alone).
+TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  cvc::nav::train_config base;
+  base.n = 128;
+  base.hidden = 64;
+  base.horizon = 28;
+  base.window = 7;
+  base.steps = 300;
+  base.seed = 0;
+  base.lr = 2e-4f;
+  base.checkpoint_every = 30;
+  if (const char *e = std::getenv("P8B_SELECT_LR"))
+    base.lr = static_cast<float>(std::atof(e));
+  if (const char *e = std::getenv("P8B_SELECT_STEPS"))
+    base.steps = std::atoi(e);
+  if (const char *e = std::getenv("P8B_SELECT_EVERY"))
+    base.checkpoint_every = std::atoi(e);
+  int nval = 8;
+  if (const char *e = std::getenv("P8B_SELECT_VAL"))
+    nval = std::atoi(e);
+  plant_reach_options val;
+  val.seeds.clear();
+  for (int k = 0; k < nval; ++k)
+    val.seeds.push_back(200u + static_cast<unsigned>(k));
+  const auto jolt_reach = [&](const cvc::nav::coef_mlp &policy, int) {
+    return reach_on_plant(policy, sc, rr, kCityL, val);
+  };
+  cvc::nav::coef_trainer pm(base, 1);
+  pm.train(sc, false, jolt_reach);
+  cvc::nav::train_config dc = base;
+  dc.rollout = cvc::nav::rollout_kind::dynamic;
+  dc.dyn = nav_plant::dyn_bike_params_at(rr, dc.veh_L);
+  cvc::nav::coef_trainer dy(dc, 1);
+  dy.train(sc, false, jolt_reach);
+  const auto trace = [](const char *name, const cvc::nav::coef_trainer &t) {
+    std::printf("  %s checkpoints (validation reach):", name);
+    for (const cvc::nav::coef_trainer::checkpoint_score &k : t.checkpoints())
+      std::printf(" %d:%.3f", k.step, k.fitness);
+    std::printf("; selected step %d\n", t.selected_step());
+  };
+  trace("point-mass", pm);
+  trace("dynamic   ", dy);
+
+  const plant_reach_options eval; // the gate's 20 held-out seeds
+  std::vector<double> a, b, c;
+  const double ma = reach_on_plant(pm.to_coef_mlp(), sc, rr, kCityL, eval, &a);
+  const double mb = reach_on_plant(dy.to_coef_mlp(), sc, rr, kCityL, eval, &b);
+  const double mc = reach_on_plant(cvc::nav::coef_mlp::default_biased(), sc, rr, kCityL, eval, &c);
+  std::vector<double> d_pm(a.size()), d_seed(a.size());
+  for (std::size_t s = 0; s < a.size(); ++s) {
+    d_pm[s] = b[s] - a[s];
+    d_seed[s] = b[s] - c[s];
+  }
+  double lo1, hi1, lo2, hi2;
+  paired_ci(d_pm, lo1, hi1);
+  paired_ci(d_seed, lo2, hi2);
+  std::printf("  selected on Jolt reach over %d validation seeds (lr %.0e, %d steps, every %d), "
+              "held-out reach: %.1f%% "
+              "point-mass-trained, %.1f%% dynamic-trained, %.1f%% the seed; dynamic - point "
+              "mass %+.1f [%+.1f, %+.1f], dynamic - seed %+.1f [%+.1f, %+.1f]\n",
+              nval, base.lr, base.steps, base.checkpoint_every, 100 * ma, 100 * mb, 100 * mc,
+              100 * (mb - ma), 100 * lo1, 100 * hi1, 100 * (mb - mc), 100 * lo2, 100 * hi2);
+  EXPECT_TRUE(std::isfinite(mb));
 }

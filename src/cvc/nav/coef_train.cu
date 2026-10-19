@@ -354,6 +354,10 @@ double loss_and_grad_cuda(const training_scene &scene, const train_config &cfg,
                           float *o_out, float *v_out) {
   if (!train_cuda_available())
     throw std::runtime_error("cvc::nav::loss_and_grad_cuda: no CUDA device");
+  if (cfg.rollout == rollout_kind::dynamic)
+    throw std::runtime_error(
+        "cvc::nav::loss_and_grad_cuda: the dynamic rollout is CPU-only for now "
+        "(coef_trainer)");
   const field_stack fs = scene.field();
   const int h = cfg.hidden;
   if (h > kMaxH)
@@ -435,6 +439,10 @@ double loss_and_grad_cuda(const training_scene &scene, const train_config &cfg,
 coef_mlp train_coef_mlp_cuda(const training_scene &scene, const train_config &cfg, bool verbose) {
   if (!train_cuda_available())
     throw std::runtime_error("cvc::nav::train_coef_mlp_cuda: no CUDA device");
+  if (cfg.rollout == rollout_kind::dynamic)
+    throw std::runtime_error(
+        "cvc::nav::train_coef_mlp_cuda: the dynamic rollout is CPU-only for now "
+        "(coef_trainer)");
   const int h = cfg.hidden;
   if (h > kMaxH)
     throw std::runtime_error("cvc::nav::train_coef_mlp_cuda: hidden > 64 unsupported");

@@ -1,0 +1,47 @@
+# terminal_scene.ari — a 3D scene in a terminal (roadmap §16.6).
+#
+#   ariadne_terminal terminal_scene.ari                    # FTXUI
+#   ariadne_terminal terminal_scene.ari --backend tvision  # tvision desktop
+#   ariadne_terminal terminal_scene.ari --snapshot --ansi  # one frame, as text
+#
+# The scene is rendered offscreen by cvcGL and drawn behind the widgets as half-block cells. Drag
+# the background to orbit, middle-drag to pan, wheel to zoom. The same document runs on the GL
+# viewer too (ariadne_hello terminal_scene.ari).
+
+meta:
+  name: Terminal scene
+  min_libcvc: 3.4.0
+
+init: |
+  (state-set "demo.show_mesh" "1")
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Scene
+    id: scene_controls
+    pos: [16, 32]
+    children:
+      - text: "drag the background to orbit"
+      - checkbox: Show mesh
+        bind: demo.show_mesh
+        def: true
+
+scene:
+  nodes:
+    - node: bunny
+      type: geometry
+      source: { file: stanford.bunny }
+      material: { color: [0.80, 0.55, 0.35] }
+      visible: demo.show_mesh
+  lights:
+    - light: sun
+      kind: directional
+      azimuth: 135
+      elevation: 55
+      color: [1.0, 0.96, 0.9]
+      intensity: 1.0
