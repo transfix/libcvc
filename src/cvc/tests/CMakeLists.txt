@@ -111,6 +111,7 @@ add_executable(physics_parity_test physics_parity_test.cpp)
 add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CMakeLists.txt
 cvc_setup_physics_replay(physics_replay_test)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
+add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 # det_math is internal to libcvc, so its test compiles it in, with the same no-contraction flag.
 add_executable(physics_det_math_test physics_det_math_test.cpp
   ${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp)
@@ -279,6 +280,7 @@ set(TEST_TARGETS
   physics_replay_test
   physics_pose_tracker_test
   physics_det_math_test
+  physics_plant_host_test
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
@@ -1571,6 +1573,13 @@ target_link_libraries(physics_det_math_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_plant_host_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_pose_tracker_test
   PRIVATE
     cvc
@@ -1844,6 +1853,7 @@ target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_det_math_test PRIVATE cxx_std_17)
+target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
@@ -2281,6 +2291,7 @@ cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(physics_parity_test)
 cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_det_math_test)
+cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)

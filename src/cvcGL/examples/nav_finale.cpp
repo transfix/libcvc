@@ -55,6 +55,7 @@
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/grid_nav.h> // astar / simplify / inflate
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/plant_host.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -170,6 +171,7 @@ Route plan_route(const std::vector<std::uint8_t> &planOcc, int rows, int cols,
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
   std::string bundle, vehicle, capture = "fly", out = "frames", png, viewMode = "3d";
+  std::string plantName = navdemo::default_plant(); // what the vehicles drive on (--plant)
   int width = 1280, height = 720, nx = 384;
   long frames = 0;
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
@@ -202,7 +204,10 @@ int main(int argc, char **argv) {
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"))("png",
-                                                                    po::value<std::string>(&png));
+                                                                    po::value<std::string>(&png))(
+      "plant", po::value<std::string>(&plantName)->default_value(plantName),
+      "what the vehicles drive on: kinematic (nav's bicycle), or a vehicle preset on the Jolt "
+      "physics plant at its real size and limits (humvee, roboracer)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -386,6 +391,14 @@ int main(int argc, char **argv) {
     map_id[i] = i; // private belief per vehicle
   cvc::nav::sim_world world(cfg, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(),
                             o.data(), goal.data(), color.data(), N, map_id.data(), N);
+  // The plant (--plant): each vehicle a physics vehicle that plans with its own limits and size.
+  cvc::physics::plant_host plantHost(navdemo::plant_options());
+  try {
+    std::printf("nav_finale: driving %s\n", plantHost.use(world, plantName).c_str());
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "nav_finale: --plant: %s\n", e.what());
+    return 2;
+  }
 
   // 3. Scene.
   cvc::app app;
@@ -582,9 +595,13 @@ int main(int argc, char **argv) {
   {
     char st[220];
     std::snprintf(st, sizeof st,
-                  "%d vehicles · %s · global A* spine + learned CoefMLP local drive · known map", N,
+                  "%d vehicles · %s · global A* spine + learned CoefMLP local drive · known map · "
+                  "%s",
+                  N,
                   usedBundle ? "real Austin (runtime bundle)"
-                             : "synthetic city — pass --bundle for real Austin");
+                             : "synthetic city — pass --bundle for real Austin",
+                  plantHost.driving() == "kinematic" ? "kinematic bicycle"
+                                                     : (plantHost.driving() + " on Jolt").c_str());
     status.setText(st);
   }
 

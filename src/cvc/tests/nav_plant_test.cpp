@@ -142,6 +142,15 @@ sim_world::config nav_config(const vehicle_desc &d, double vmax_mps, double a_la
   return c;
 }
 
+// The gates below size nav by hand from the vehicle (nav_config), and the plant plans with that
+// too, as the kinematic arm does: the plant's own plan (nav_plant_options::plan_with_vehicle) is
+// PlansWithTheVehiclesOwnEnvelope's.
+nav_plant_options nav_sized() {
+  nav_plant_options o;
+  o.plan_with_vehicle = false;
+  return o;
+}
+
 sim_world make_sim(const sim_world::config &c, const scene &s, double sx, double sy, double gx,
                    double gy) {
   const float o[2] = {static_cast<float>(sx * kS), static_cast<float>(sy * kS)};
@@ -210,6 +219,101 @@ TEST(NavPlant, ReadsTheVehicleBackInNavsFrame) {
   EXPECT_NEAR(l.a_brake, 0.8 * d.max_decel * kS, 1e-6);
 }
 
+// The plant's own plan (nav_plant_options::plan_with_vehicle, on by default). Its limits are the
+// vehicle's: 0.8 of its max_accel, its rated top speed, 0.5 g of cornering (under 0.8 of its
+// static stability factor), and its body from the rear axle. A sim_world sized for no vehicle in
+// particular (the trained metric's defaults: 18 m/s, 30 m/s^2, a 2 g corner cap, a 3 m disc)
+// then drives a Humvee within the Humvee's envelope through a hard turn; planned with nav's own
+// numbers, the same drive commands several times the Humvee's acceleration and corners harder.
+TEST(NavPlant, PlansWithTheVehiclesOwnEnvelope) {
+  REQUIRE_JOLT();
+  const vehicle_desc d = vehicle_desc::humvee();
+  double ahead = d.half_extents.x, behind = -d.half_extents.x, half_width = d.half_extents.y,
+         rear = 0.0;
+  for (const axle_desc &a : d.axles) {
+    ahead = std::max(ahead, a.x + a.wheel_radius);
+    behind = std::min(behind, a.x - a.wheel_radius);
+    half_width = std::max(half_width, a.half_track + 0.5 * a.wheel_width);
+    if (!a.steered)
+      rear = std::min(rear, a.x);
+  }
+  {
+    scene sc;
+    world w(jolt_config());
+    sc.build(w, 0.9);
+    nav_plant plant(w, {d});
+    cvc::world_units::normalized_frame f;
+    f.scale = kS;
+    cvc::nav::plant_state start;
+    plant.attach(1, &start, f, 0.06);
+    const cvc::nav::plant_limits l = plant.limits(0);
+    EXPECT_NEAR(l.a_max, 0.8 * d.max_accel * kS, 1e-6);
+    EXPECT_NEAR(l.vmax, 24.6 * kS, 1e-6);
+    EXPECT_NEAR(l.a_lat, 0.5 * kG * kS, 1e-6);
+    EXPECT_NEAR(l.half_width, half_width * kS, 1e-6);
+    EXPECT_NEAR(l.front, (ahead - rear) * kS, 1e-6);
+    EXPECT_NEAR(l.rear, (rear - behind) * kS, 1e-6);
+  }
+  const auto drive = [&](bool plan, double &peak_accel, double &peak_g, double &peak_speed,
+                         sim_world::plant_plan &pp) {
+    scene sc;
+    sim_world::config c = nav_config(d, 18.0, 2.0);
+    c.veh.n_body = 0;
+    c.veh.body_offsets = nullptr;
+    c.veh.body_rr = 0.0f;
+    c.veh.body_gain = 1.0f;
+    c.veh.rr = 0.15f;
+    c.veh.a_max = 1.5f;
+    c.veh.L = 0.035f;
+    sim_world sim = make_sim(c, sc, -60, -20, 60, 20);
+    world w(jolt_config());
+    sc.build(w, 0.9);
+    nav_plant_options o;
+    o.plan_with_vehicle = plan;
+    nav_plant plant(w, {d}, o);
+    sim.set_plant(&plant);
+    peak_accel = peak_g = peak_speed = 0.0;
+    for (int t = 0; t < 260; ++t) {
+      if (t == 120) // a hard turn at speed: the goal jumps to the left
+        sim.retarget(0, static_cast<float>(10 * kS), static_cast<float>(80 * kS));
+      sim.step();
+      if (t < 20)
+        continue; // settling
+      peak_accel = std::max(peak_accel, static_cast<double>(sim.plant_accel_command()[0]) / kS);
+      peak_g = std::max(peak_g, plant.last_drift(0).lateral_g);
+      peak_speed = std::max(peak_speed, std::fabs(static_cast<double>(pose_of(sim).speed)));
+    }
+    EXPECT_TRUE(sim.plant_plan_of(0, pp));
+  };
+  double acc_on, g_on, v_on, acc_off, g_off, v_off;
+  sim_world::plant_plan on, off;
+  drive(true, acc_on, g_on, v_on, on);
+  drive(false, acc_off, g_off, v_off, off);
+  std::printf("  the vehicle's plan: commands up to %.2f m/s^2, %.3f g, %.2f m/s; nav's: %.2f "
+              "m/s^2, %.3f g, %.2f m/s\n",
+              acc_on, g_on, v_on, acc_off, g_off, v_off);
+  std::printf("  footprint: %d discs of %.2f m at %.2f, %.2f, %.2f, %.2f m from the rear axle\n",
+              sim_world::kPlantDiscs, on.body_rr / kS, on.body_offsets[0] / kS,
+              on.body_offsets[1] / kS, on.body_offsets[2] / kS, on.body_offsets[3] / kS);
+  // The plan the drive used is the vehicle's, but for a top speed capped at nav's 18 m/s.
+  EXPECT_NEAR(on.a_max, 0.8 * d.max_accel * kS, 1e-6);
+  EXPECT_NEAR(on.vmax, 18.0 * kS, 1e-6);
+  EXPECT_NEAR(on.a_lat, 0.5 * kG * kS, 1e-6);
+  EXPECT_TRUE(on.footprint);
+  EXPECT_FALSE(off.footprint);
+  EXPECT_NEAR(off.a_max, 1.5, 1e-6) << "nav's own, without the vehicle's plan";
+  // The body is covered: the discs reach the tail and the nose, at least half a width wide.
+  EXPECT_LE(on.body_offsets[0] - on.body_rr, (behind - rear) * kS + 1e-6);
+  EXPECT_GE(on.body_offsets[sim_world::kPlantDiscs - 1] + on.body_rr, (ahead - rear) * kS - 1e-6);
+  EXPECT_GE(on.body_rr, half_width * kS - 1e-6);
+  // And it drove within the vehicle's envelope, where nav's numbers asked for more.
+  EXPECT_LE(acc_on, 0.8 * d.max_accel + 1e-3);
+  EXPECT_LE(v_on, 18.0 + 0.5);
+  EXPECT_LE(g_on, 0.55);
+  EXPECT_GT(acc_off, 2.0 * acc_on);
+  EXPECT_GT(g_off, g_on + 0.2);
+}
+
 // Gate 5: Jolt set up to behave almost kinematically (an instant steering actuator, grippy flat
 // ground) leaves a near-zero per-tick residual against the kinematic bicycle at nsub = k = 6.
 TEST(NavPlant, TheAdapterResidualIsNearZero) {
@@ -220,7 +324,7 @@ TEST(NavPlant, TheAdapterResidualIsNearZero) {
   sim_world sim = make_sim(nav_config(d, 6.0, 0.15), sc, -60, -20, 60, 20);
   world w(jolt_config());
   sc.build(w, 1.2);
-  nav_plant plant(w, {d});
+  nav_plant plant(w, {d}, nav_sized());
   sim.set_plant(&plant);
   float worst_pos = 0, worst_head = 0, worst_speed = 0;
   for (int t = 0; t < 200; ++t) {
@@ -270,7 +374,7 @@ TEST_P(NavPlantTrack, TracksTheKinematicTrajectoryBelow0p3g) {
   sim_world jolt = make_sim(cfg, sc, -60, -20, 60, 20);
   world w(jolt_config());
   sc.build(w, 0.9);
-  nav_plant plant(w, {d});
+  nav_plant plant(w, {d}, nav_sized());
   jolt.set_plant(&plant);
   double worst = 0.0, worst_along = 0.0, worst_across = 0.0, peak_g = 0.0, path = 0.0;
   pose last = pose_of(jolt);
@@ -350,7 +454,7 @@ TEST(NavPlant, DivergesAtTheLimitAndReportsIt) {
   sim_world sim = make_sim(nav_config(d, 14.0, 1.0), sc, -80, -60, 80, -60);
   world w(jolt_config());
   sc.build(w, 0.6);
-  nav_plant plant(w, {d});
+  nav_plant plant(w, {d}, nav_sized());
   sim.set_plant(&plant);
   for (int t = 0; t < 300; ++t) {
     if (t == 150)
@@ -390,7 +494,7 @@ TEST(NavPlant, MeasuresTheCostPerVehicle) {
                 cvc::nav::coef_mlp::default_biased(), o.data(), g.data(), col.data(), n);
   world w(jolt_config());
   sc.build(w, 0.9);
-  nav_plant plant(w, {d});
+  nav_plant plant(w, {d}, nav_sized());
   sim.set_plant(&plant);
   for (int t = 0; t < 200; ++t)
     sim.step();
@@ -417,7 +521,7 @@ TEST(NavPlant, PublishesTheDriftBinnedByLateralG) {
   sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -60, -20, 60, 20);
   world w(jolt_config());
   sc.build(w, 0.9);
-  nav_plant plant(w, {d});
+  nav_plant plant(w, {d}, nav_sized());
   sim.set_plant(&plant);
   for (int t = 0; t < 120; ++t)
     sim.step();
@@ -483,7 +587,7 @@ TEST(NavPlant, NeverExceedsTheLatencyAwareStoppingSpeed) {
   sim_world sim = make_sim(nav_config(d, 12.0, 0.25), sc, -60, 0, 60, 0);
   world w(jolt_config());
   sc.build(w, 0.9);
-  nav_plant plant(w, {d});
+  nav_plant plant(w, {d}, nav_sized());
   sim.set_plant(&plant);
   sim.begin_nav_stats();
   double worst = -1e9, closest = 1e9, fastest = 0.0;
@@ -514,7 +618,7 @@ TEST(NavPlant, NavStatsCarriesThePlantsEnergy) {
   sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -60, -20, 60, 20);
   world w(jolt_config());
   sc.build(w, 0.9);
-  nav_plant plant(w, {d});
+  nav_plant plant(w, {d}, nav_sized());
   sim.set_plant(&plant);
   kin.begin_nav_stats();
   sim.begin_nav_stats();
@@ -614,7 +718,7 @@ TEST(NavPlant, EnergyPerKmDropsOnAHillyRoute) {
     sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -70, 0, 70, 0);
     world w(jolt_config());
     hilly_ground(w, z, 0.9);
-    nav_plant plant(w, {d});
+    nav_plant plant(w, {d}, nav_sized());
     sim.set_plant(&plant);
     cvc::nav::terrain_config tc = nav_plant::terrain_config_of(d);
     tc.lam_grade = physics ? 2.0f : 0.0f;
@@ -661,7 +765,7 @@ TEST(NavPlant, NeverEntersInfeasibleSlope) {
   sim_world sim = make_sim(nav_config(d, 8.0, 0.25), sc, -40, -20, 40, -20);
   world w(jolt_config());
   hilly_ground(w, z, 0.9);
-  nav_plant plant(w, {d});
+  nav_plant plant(w, {d}, nav_sized());
   sim.set_plant(&plant);
   const cvc::nav::terrain_config tc = nav_plant::terrain_config_of(d);
   sim.set_terrain(z.data(), tc);
@@ -696,7 +800,7 @@ TEST(NavPlant, MeasuredSlipTightensTheDrive) {
     sim_world sim = make_sim(nav_config(d, 16.0, 0.9), sc, cx, cy - radius, cx + radius, cy);
     world w(jolt_config());
     sc.build(w, 0.7);
-    nav_plant plant(w, {d});
+    nav_plant plant(w, {d}, nav_sized());
     cvc::nav::plant_modulation m;
     m.tire_gain = k == 0 ? 0.0f : 3.0f;
     plant.set_modulation(m);

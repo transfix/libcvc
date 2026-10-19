@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <thread>
 #include <vtkCamera.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
@@ -766,5 +767,16 @@ void plot_line(unsigned char *dst, int dw, int dh, int x0, int y0, int x1, int y
 }
 
 // 4-connected dilation of a rows*cols (ny*nx) occupancy `it` times.
+
+std::string default_plant() { return "kinematic"; }
+
+cvc::physics::plant_host_options plant_options() {
+  cvc::physics::plant_host_options o;
+#ifndef __EMSCRIPTEN__
+  const unsigned hw = std::thread::hardware_concurrency();
+  o.world.threads = hw > 2 ? static_cast<int>(std::min(3u, hw - 2)) : 0;
+#endif
+  return o;
+}
 
 } // namespace navdemo

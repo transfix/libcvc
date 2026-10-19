@@ -17,6 +17,11 @@
 // nav_material_demo_{off,on}.ppm — terrain shading with every trajectory
 // drawn over it — so the detours are visible with zero dependencies.
 //
+// With Jolt in the build it runs the lanes twice more on Humvees (cvc/physics/plant_host.h), at
+// their real size and limits, beside nav's kinematic bicycle; the first argument runs one plant
+// alone (kinematic, humvee, roboracer). The material layer was tuned on the bicycle, and on the
+// Humvee it does not yet keep the lanes out of the lake (it prints how far it misses).
+//
 // Build (standalone, against an installed libcvc):
 //   g++ -std=c++17 nav_material_demo.cpp -o nav_material_demo \
 //       -I$PREFIX/include -L$PREFIX/lib -lcvc && ./nav_material_demo
@@ -31,6 +36,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/plant_host.h>
 #include <string>
 #include <vector>
 
@@ -57,7 +63,7 @@ struct run_stats {
 };
 
 run_stats run(const std::vector<std::uint8_t> &occ, const std::vector<float> &risk,
-              const std::vector<std::uint8_t> &hard, bool with_material) {
+              const std::vector<std::uint8_t> &hard, bool with_material, const std::string &plant) {
   sim_world::config cfg;
   cfg.rows = GRID;
   cfg.cols = GRID;
@@ -93,6 +99,9 @@ run_stats run(const std::vector<std::uint8_t> &occ, const std::vector<float> &ri
     mc.gate.horizon_cells = 12;
     world.set_material(risk.data(), hard.data(), mc);
   }
+
+  cvc::physics::plant_host host; // what the vehicles drive on
+  host.use(world, plant);
 
   run_stats st;
   st.traces.assign(N_AGENTS, {});
@@ -186,7 +195,10 @@ void write_ppm(const std::string &path, const std::vector<std::uint8_t> &occ,
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  const std::string plant = argc > 1                                ? argv[1]
+                            : cvc::physics::plant_host::available() ? "humvee"
+                                                                    : "kinematic";
   // 1. Geometry: just the border walls — everything else is SEMANTICS.
   std::vector<std::uint8_t> occ(static_cast<std::size_t>(GRID) * GRID, 0);
   for (int r = 0; r < GRID; ++r)
@@ -218,17 +230,54 @@ int main() {
   blob(9.0, 30.0, 13.0, 0.9f, false);    // mud over the y=-5..15 lanes
   blob(-30.0, 5.0, 15.0, 1.0f, true);    // water lake over the y=-45..-25 lanes
 
-  const run_stats off = run(occ, risk, hard, false);
-  const run_stats on = run(occ, risk, hard, true);
+  // Each plant's lane, material off then on.
+  std::vector<std::string> plants = {plant};
+  if (argc <= 1 && plant != "kinematic")
+    plants.insert(plants.begin(), "kinematic"); // the bicycle the material layer was tuned on
+  std::vector<run_stats> off(plants.size()), on(plants.size());
+  try {
+    for (std::size_t k = 0; k < plants.size(); ++k) {
+      off[k] = run(occ, risk, hard, false, plants[k]);
+      on[k] = run(occ, risk, hard, true, plants[k]);
+    }
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "nav_material_demo: %s\n", e.what());
+    return 2;
+  }
 
-  std::puts("                      material OFF   material ON");
-  std::printf("agents reached        %6d/%d      %6d/%d\n", off.reached, N_AGENTS, on.reached,
-              N_AGENTS);
-  std::printf("mud exposure (sum r~) %10.1f    %10.1f\n", off.mud_exposure, on.mud_exposure);
-  std::printf("hazard-cell entries   %10d    %10d\n", off.hazard_entries, on.hazard_entries);
+  std::printf("%-22s", "");
+  for (const std::string &p : plants)
+    std::printf("  %-20s", p.c_str());
+  std::printf("\n%-22s", "material");
+  for (std::size_t k = 0; k < plants.size(); ++k)
+    std::printf("  %8s  %8s  ", "OFF", "ON");
+  std::printf("\n%-22s", "agents reached");
+  for (std::size_t k = 0; k < plants.size(); ++k)
+    std::printf("  %5d/%-2d  %5d/%-2d  ", off[k].reached, N_AGENTS, on[k].reached, N_AGENTS);
+  std::printf("\n%-22s", "mud exposure (sum r~)");
+  for (std::size_t k = 0; k < plants.size(); ++k)
+    std::printf("  %8.1f  %8.1f  ", off[k].mud_exposure, on[k].mud_exposure);
+  std::printf("\n%-22s", "hazard-cell entries");
+  for (std::size_t k = 0; k < plants.size(); ++k)
+    std::printf("  %8d  %8d  ", off[k].hazard_entries, on[k].hazard_entries);
+  std::printf("\n");
 
-  write_ppm("nav_material_demo_off.ppm", occ, risk, hard, off);
-  write_ppm("nav_material_demo_on.ppm", occ, risk, hard, on);
-  std::puts("done — pure C++, zero torch/Python. Compare the two .ppm renders.");
-  return on.hazard_entries == 0 ? 0 : 1;
+  for (std::size_t k = 0; k < plants.size(); ++k) {
+    const std::string tag = plants[k] == "kinematic" ? "" : "_" + plants[k];
+    write_ppm("nav_material_demo" + tag + "_off.ppm", occ, risk, hard, off[k]);
+    write_ppm("nav_material_demo" + tag + "_on.ppm", occ, risk, hard, on[k]);
+  }
+  // The material field was tuned on nav's instant-response bicycle. On a physics vehicle, which
+  // turns at its own rate and corners within its grip, it does not yet keep the lanes out of the
+  // lake: that waits on training through the vehicle (docs/roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md,
+  // P8).
+  for (std::size_t k = 0; k < plants.size(); ++k)
+    if (plants[k] != "kinematic" && on[k].hazard_entries > 0)
+      std::printf("note: on %s the material-aware drive still enters the hazard (%d entries); "
+                  "it was tuned on the kinematic bicycle and awaits training through the "
+                  "vehicle\n",
+                  plants[k].c_str(), on[k].hazard_entries);
+  std::puts("done — pure C++, zero torch/Python. Compare the .ppm renders.");
+  // The material layer's contract, on the first plant run: no hazard entries with it on.
+  return on[0].hazard_entries == 0 ? 0 : 1;
 }

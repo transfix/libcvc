@@ -389,6 +389,11 @@ public:
   //     a_cmd, held through the tick, with the plant-aware governors (the plant's wheelbase,
   //     steering lock and rate, latency and achievable braking, from plant_limits). A parked
   //     agent is commanded to brake at a_max;
+  //   - plans with each vehicle's own envelope and size where plant_limits gives them: its
+  //     a_max, vmax and cornering a_lat in place of cfg.veh's (and of set_vehicle_kinematics'),
+  //     and its body as kPlantDiscs footprint discs from its tail to its nose, inset 0.7
+  //     half-widths at the ends and 1.3 half-widths wide (so they cover its corners), at
+  //     body_gain 1 / kPlantDiscs, in place of nav's disc or footprint;
   //   - advances the plant one tick and reads every agent back again;
   //   - measures each agent's drift: the kinematic bicycle (the plant's
   //     reference_substeps()) from the tick's start state with the same command, against the
@@ -397,6 +402,18 @@ public:
   // nav_stats then carries the plant's energy and building contacts when it tracks them.
   void set_plant(vehicle_plant *p);
   vehicle_plant *plant() const { return plant_; }
+  // The footprint discs a plant's vehicle is covered with (plant_limits' size).
+  static constexpr int kPlantDiscs = 4;
+  // Agent i's planning limits as the drive uses them on the plant (normalized): its a_max, vmax
+  // and cornering limit, its footprint discs' radius and kPlantDiscs offsets from the rear
+  // axle. False without a plant; a limit the plant leaves at zero reads back as nav's own.
+  struct plant_plan {
+    float a_max = 0.0f, vmax = 0.0f, a_lat = 0.0f;
+    float body_rr = 0.0f;
+    float body_offsets[kPlantDiscs] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool footprint = false; // the vehicles' own size, not nav's
+  };
+  bool plant_plan_of(int i, plant_plan &out) const;
   plant_kind plant_type() const;
   // The last tick's plant-arm commands, the stopping speed each respected (normalized), and
   // each agent's drift, [size()]; null without a plant or before the first step().
@@ -553,6 +570,10 @@ private:
   vehicle_plant *plant_ = nullptr;
   std::vector<float> pl_latency_, pl_a_brake_, pl_steer_now_, pl_steer_rate_, pl_L_;
   float pl_max_steer_ = 0.0f;
+  // [n] the vehicles' own envelope, nav's where a plant gives none; [n], [n * kPlantDiscs] their
+  // footprint discs. The flags: whether any agent's plant gave that limit.
+  std::vector<float> pl_a_max_, pl_vmax_, pl_a_lat_, pl_body_rr_, pl_body_off_;
+  bool pl_has_a_max_ = false, pl_has_vmax_ = false, pl_has_a_lat_ = false, pl_fp_ = false;
   std::vector<float> pl_steer_cmd_, pl_accel_cmd_, pl_v_stop_; // [n], the last tick's
   std::vector<plant_state> pl_start_;                          // [n], the tick's start
   std::vector<drift_sample> pl_drift_;                         // [n], the last tick's
