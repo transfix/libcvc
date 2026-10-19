@@ -106,6 +106,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)
   rt_.set_key_program(lr.on_key_script);
   rt_.set_pointer_program(lr.on_pointer_script);
+  rt_.set_signal_program(lr.on_signal_script);
   if (lr.has_channels_block) {
     std::vector<std::string> declared, global;
     for (const ChannelDecl &c : lr.channels) {
@@ -173,6 +174,10 @@ void AppRuntime::post_pointer(int kind, double x, double y, double dx, double dy
   e.button = button;
   e.clicks = clicks;
   rt_.post_input(e);
+}
+
+bool AppRuntime::post_signal(const std::string &signal, const std::string &source) {
+  return rt_.post_signal(signal, source);
 }
 
 // ── diagnostics ─────────────────────────────────────────────────────────────────────────────────

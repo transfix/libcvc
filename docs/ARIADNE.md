@@ -141,7 +141,7 @@ A quick action completes within that drain. An action that `await`s, `sleep`s, o
 
 ### 2.3 Resident handlers
 
-`on_tick` / `on_key` / `on_pointer` each become **one** long-lived, owner-tagged
+`on_tick` / `on_key` / `on_pointer` / `on_signal` each become **one** long-lived, owner-tagged
 process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) body))`
 (`ensure_resident`, [`ariadne.cpp:1458`](../src/cvc/ariadne/ariadne.cpp)):
 
@@ -149,6 +149,9 @@ process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) bo
   backlog).
 - **key / pointer** are woken per event; the event is delivered as a dict you read with
   `(get-attr event "key")`, `(get-attr event "x")`, etc.
+- **signal** is woken per signal the host routes through `Runtime::post_signal`, with
+  `event` = `{kind: "signal", signal: "SIGINT", source: "terminal"}`. Signal names are
+  POSIX: a terminal's Ctrl-C is `SIGINT`, Ctrl-\ is `SIGQUIT`.
 
 Residents have no total budget (they run for the life of the document), but each *step*
 is wall-capped at `kResidentStepSeconds = 0.05`
@@ -213,10 +216,32 @@ Two backends ship:
   Its `install()` sets the VTK view's overlay draw callback to call `Runtime::render()`
   — that single line is the entire coupling between Ariadne and VTK's render pass, and
   it lives in the backend, not the core.
-- **FTXUI / terminal backend**
+- **`cvc::ariadne::FtxuiBackend`**
   ([`inc/cvc/ariadne/ftxui_backend.h`](../inc/cvc/ariadne/ftxui_backend.h)) — the
-  `owns_loop = true` counterpart that draws the same tree in a terminal. Present as the
-  secondary backend.
+  `owns_loop = true` counterpart that draws the same tree in a terminal, through FTXUI
+  (optional: without FTXUI it is an inert stub and `available()` is false). It is
+  immediate-mode over FTXUI's DOM, like ImGui: every walk rebuilds the Element tree, each
+  leaf records its on-screen box, and the backend keeps only the interaction state (focus,
+  pressed item, open menu or combo, in-progress text and slider edits, window placement).
+  So the whole tree is interactive:
+  - **keyboard** — Tab / Shift-Tab (or Up / Down) move focus; Enter / Space activate;
+    Left / Right step a slider or cycle a combo; text fields edit in place; Esc reverts an
+    edit or closes a popup; F10 opens the menu bar.
+  - **mouse** — click to focus or activate, drag a slider, drag a window by its title
+    bar, click `[x]` to close it, click a menu title to open it.
+  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
+    `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4).
+  - **graphics** — `draw_image` paints a raster published with `set_image` as half-block
+    cells (two pixels per cell, 24-bit colour; a luminance ramp on a colourless terminal).
+
+  Commit edges match the ImGui backend: discrete widgets commit on the edit, a
+  mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
+  commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
+  size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
+  persisted under one backend holds under the other. What a terminal cannot do it
+  degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
+  warning), row-split seams are fixed-size. `render_to_string` + `feed(TermEvent)` drive
+  it headless (that is how `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
 
 Because the core is backend-neutral, the same document renders through either backend;
 capability gaps (e.g. no `color`) drive graceful widget substitution rather than errors.
@@ -232,7 +257,7 @@ An `.ari` file is a YAML document. `load_file` / `load_string` parse it via `loa
 - a `Widget root` (a Group) — the retained tree;
 - a parsed `Scene`, `Meta`, `customs`, and `channels` + `lint` config;
 - and **verbatim-captured** script strings: `init_script`, `on_tick_script`,
-  `on_key_script`, `on_pointer_script`.
+  `on_key_script`, `on_pointer_script`, `on_signal_script`.
 
 **The loader is state-free.** It captures structure and script *text*; it never touches
 `cvc::state` and never runs the DSL. The host runs the scripts (§9). This separation is
@@ -245,7 +270,7 @@ The built-in top-level keys (`is_builtin_block`,
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs
-init  on_tick  on_key  on_pointer  units  import  channels  lint
+init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint
 ```
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -273,14 +298,27 @@ meta:
 
 ### 5.3 `init:` and the resident handlers
 
-`init`, `on_tick`, `on_key`, and `on_pointer` are scalar `state_exec` strings the loader
-only *captures*. The host wires them:
+`init`, `on_tick`, `on_key`, `on_pointer`, and `on_signal` are scalar `state_exec` strings
+the loader only *captures*. The host wires them:
 
 - **`init_script`** runs **once** at load time, at the document prefix, via `run_init`.
   Because it runs first, an `init:` seed such as `(state-set "demo.n" 3)` wins over a
   widget's `def:` default for the same key.
 - **`on_tick` / `on_key` / `on_pointer`** become the resident processes of §2.3, fed
   events through `Runtime::post_input`.
+- **`on_signal`** becomes the signal resident (§2.3), fed through `Runtime::post_signal`.
+  Declaring it **takes the signal over**, like a POSIX handler: `post_signal` returns true
+  and the host skips the default action, so the program decides what an interrupt means.
+  With no `on_signal`, Ctrl-C closes the app. The terminal loop also force-quits on three
+  Ctrl-Cs within two seconds, so a handler that never quits cannot trap the user.
+
+  ```yaml
+  on_signal: |
+    (if (= (state-get "app.quit_armed") "1")
+        (quit)                                   # a host verb: `ari` registers it
+        (begin (state-set "app.quit_armed" "1")
+               (state-set "app.status" "Ctrl-C again to quit")))
+  ```
 
 A small, complete document (mirroring `nav_compute.ari`). A widget is a map whose
 **first key is its type** and whose value is its label (`slider_int: "N"`), with the
@@ -680,7 +718,35 @@ if (lr.has_channels_block)
 //   view.render()  (fires rt.render() via the overlay callback)
 ```
 
-### 9.2 From Python (a full app via `AriRuntime`)
+### 9.2 In a terminal (`ari`, `FtxuiBackend`)
+
+`ari` ([`src/cvc/tools/ari_main.cpp`](../src/cvc/tools/ari_main.cpp)) runs a document in
+the terminal with no GL, VTK, or ImGui:
+
+```
+ari run      doc.ari [--prefix P] [--fps N] [--no-mouse] [--component-path DIR]...
+ari snapshot doc.ari [--width W] [--height H] [--frames N] [--ansi]   # print a frame
+ari check    doc.ari                                                  # load + warnings
+```
+
+It is a thin host over `AppRuntime` with no `SceneAdapter`; it routes `on: quit` and a
+`(quit)` verb to `request_close()`. Embedding the same thing:
+
+```cpp
+cvc::ariadne::FtxuiBackend backend;          // outlives the AppRuntime
+cvc::ariadne::AppRuntime rt(app, prefix);    // no SceneAdapter: a scene: is dropped
+rt.set_backend(backend);
+rt.on("quit", [&] { rt.request_close(); });
+rt.load(path);
+backend.run(rt);  // owns the terminal; drains every iteration; returns on quit / Ctrl-C
+```
+
+`run()` forwards keys and pointer events the UI did not use to the document's
+`on_key` / `on_pointer`, so document-level input works here today.
+[`terminal_tour.ari`](../src/cvc/ariadne/examples/terminal_tour.ari) exercises every
+widget kind the backend draws.
+
+### 9.3 From Python (a full app via `AriRuntime`)
 
 `AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the
 above into one object, exposed through the `pycvc_gl` bindings. Python never sees SDL or
@@ -708,7 +774,7 @@ provider onto the app-wide scheduler, so the verbs are reachable from the docume
 action lane. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
-### 9.3 From Python (DSL only, via `pycvc.Exec`)
+### 9.4 From Python (DSL only, via `pycvc.Exec`)
 
 If you only need to run `state_exec` programs against an app's tree (no widgets, no
 scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_exec.h))
@@ -818,6 +884,15 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   translates VTK interactor events into those calls, so stock-loop key/pointer residents
   do not fire until a host feeds them
   ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)).
+- **Only interrupt keys reach `on_signal`.** The terminal loop routes Ctrl-C / Ctrl-\ as
+  `SIGINT` / `SIGQUIT`; a signal the OS delivers (`kill -TERM`, a closed terminal's
+  `SIGHUP`) still takes FTXUI's default (restore the terminal, exit), and the ImGui host
+  routes none. A process-wide handler is the host application's to install — it would call
+  `post_signal` — never a static inside the library.
+- **The terminal backend has no scene renderer and no draggable split seams.** A
+  `scene:` is dropped with a warning; row-split panes keep their authored / persisted
+  sizes. The §16.6 pixel mirror (EGL → half-block / Sixel / Kitty) is the path to showing a
+  real 3D scene in a terminal.
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
   loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
