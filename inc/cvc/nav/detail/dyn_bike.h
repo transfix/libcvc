@@ -202,7 +202,7 @@ template <class S> CVC_HD inline S dyn_sat(S F, S cap) {
 // friction ellipse with the longitudinal force first, sqrt(cap^2 - (1 - e^2) Fx^2), so a locked
 // or spinning axle keeps e = 5% of its grip sideways and the root stays smooth.
 template <class S> CVC_HD inline S dyn_lateral_cap(S Fx, S cap) {
-  return s_sqrt(cap * cap - S(0.9975f) * Fx * Fx);
+  return s_sqrt(cap * cap - S(0.9975) * Fx * Fx);
 }
 
 template <class S> CVC_HD inline S dyn_clamp(S x, S lo, S hi) {
@@ -239,15 +239,16 @@ CVC_HD inline void dyn_plant(const dyn_bike_params &p, const bike_veh &v, const 
   const S m = S(p.m), Iz = S(p.Iz), lf = S(p.lf), lr = S(p.lr), h = S(p.h), g = S(p.g);
   const S mu = S(p.mu), Cp = S(p.C), L = lf + lr;
 
-  // 1. Actuators.
-  const S k_steer = S(p.tau_steer > 0.0f ? 1.0f - expf(-v.hdt / p.tau_steer) : 1.0f);
+  // 1. Actuators. (Computed in S, so a double plant is double throughout and a twin can match it
+  // to rounding.)
+  const S k_steer = p.tau_steer > 0.0f ? one - s_exp(-hdt / S(p.tau_steer)) : one;
   S step = (delta_cmd - s.delta) * k_steer;
   if (p.steer_rate > 0.0f) {
-    const S R = S(p.steer_rate * v.hdt);
+    const S R = S(p.steer_rate) * hdt;
     step = R * s_tanh(step / R);
   }
   const S delta1 = s.delta + step;
-  const S k_drive = S(p.tau_drive > 0.0f ? 1.0f - expf(-v.hdt / p.tau_drive) : 1.0f);
+  const S k_drive = p.tau_drive > 0.0f ? one - s_exp(-hdt / S(p.tau_drive)) : one;
   const S a1 = s.a + (a_cmd - s.a) * k_drive;
 
   // 2. Loads.
@@ -302,8 +303,8 @@ CVC_HD inline void dyn_plant(const dyn_bike_params &p, const bike_veh &v, const 
     const S J22 = (-Sf * lf * lf - Sr * lr * lr) / Iz;
     const S A11 = one - hdt * J11, A12 = -hdt * J12, A21 = -hdt * J21, A22 = one - hdt * J22;
     S det = A11 * A22 - A12 * A21;
-    if (s_val(det) < s_val(S(0.05f)))
-      det = S(0.05f);
+    if (s_val(det) < s_val(S(0.05)))
+      det = S(0.05);
     const S b1 = s.vy + hdt * f_vy - vy1, b2 = s.r + hdt * f_r - r1;
     const S dvy = (A22 * b1 - A12 * b2) / det, dr = (A11 * b2 - A21 * b1) / det;
     vy1 = vy1 + dvy;

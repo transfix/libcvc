@@ -587,7 +587,7 @@ TEST(DynBike, Golden) {
     js << (first ? "" : ", ") << "\"" << kv.first << "\": " << num(kv.second);
     first = false;
   }
-  js << "},\n \"g_out\": " << arr(g_out, 8) << ",\n \"cases\": [\n";
+  js << ", \"iters\": " << p.iters << "},\n \"g_out\": " << arr(g_out, 8) << ",\n \"cases\": [\n";
   for (std::size_t c = 0; c < sizeof cases / sizeof cases[0]; ++c) {
     const gcase &gc = cases[c];
     const bike_veh lim = plant_limits(p, gc.reverse);
