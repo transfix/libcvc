@@ -652,7 +652,20 @@ jobs:
             -DDISABLE_CGAL=OFF \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
-            -DCVC_ENABLE_GRPC=$grpc
+            -DCVC_ENABLE_GRPC=$grpc \
+            | tee configure.log
+
+      # The terminal backends are optional at configure time: without ftxui / tvision the
+      # backends compile to stubs and the AriadneFtxui / AriadneTvision tests SKIP instead of
+      # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
+      # ftxui there. Make a missing backend a failure.
+      - name: Assert the Ariadne terminal backends are configured
+        shell: bash
+        run: |
+          for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
+            grep -qF "$want" configure.log \
+              || { echo "::error::the configure did not print '$want': the Ariadne terminal tests would only skip"; exit 1; }
+          done
 
       - name: Build
         run: cmake --build build --parallel
@@ -1101,7 +1114,20 @@ jobs:
             -DDISABLE_CGAL=OFF \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
-            -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }}
+            -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} \
+            | tee configure.log
+
+      # The terminal backends are optional at configure time: without ftxui / tvision the
+      # backends compile to stubs and the AriadneFtxui / AriadneTvision tests SKIP instead of
+      # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
+      # ftxui there. Make a missing backend a failure.
+      - name: Assert the Ariadne terminal backends are configured
+        shell: bash
+        run: |
+          for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
+            grep -qF "$want" configure.log \
+              || { echo "::error::the configure did not print '$want': the Ariadne terminal tests would only skip"; exit 1; }
+          done
 
       - name: Build
         run: cmake --build build --parallel
@@ -1358,7 +1384,20 @@ jobs:
             -DDISABLE_CGAL=OFF `
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
-            -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }}
+            -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} `
+            | Tee-Object -FilePath configure.log
+
+      # The terminal backends are optional at configure time: without ftxui / tvision the
+      # backends compile to stubs and the AriadneFtxui / AriadneTvision tests SKIP instead of
+      # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
+      # ftxui there. Make a missing backend a failure.
+      - name: Assert the Ariadne terminal backends are configured
+        shell: bash
+        run: |
+          for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
+            grep -qF "$want" configure.log \
+              || { echo "::error::the configure did not print '$want': the Ariadne terminal tests would only skip"; exit 1; }
+          done
 
       - name: Build
         shell: pwsh
