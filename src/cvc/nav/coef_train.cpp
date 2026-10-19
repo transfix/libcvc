@@ -34,15 +34,44 @@
 #include <cstdio>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/detail/diff_rollout.h>
+#include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/grid_nav.h>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace cvc {
 namespace nav {
 
 namespace {
+// A dynamic-rollout state from the trainer's (o, aux) and its four further components.
+diff::dyn_state<float> dyn_state_of(float ox, float oy, float psi, float vx, const float *ext) {
+  diff::dyn_state<float> s;
+  s.x = ox;
+  s.y = oy;
+  s.psi = psi;
+  s.vx = vx;
+  s.vy = ext[0];
+  s.r = ext[1];
+  s.delta = ext[2];
+  s.a = ext[3];
+  return s;
+}
+
+// rollout == dynamic needs a vehicle whose wheelbase is the controller's.
+void validate_dynamic(const train_config &c) {
+  const diff::dyn_bike_params &p = c.dyn;
+  const float wb = p.lf + p.lr;
+  if (!(p.m > 0.0f && p.Iz > 0.0f && p.g > 0.0f && p.mu > 0.0f && p.lf > 0.0f && p.lr > 0.0f) ||
+      !(std::fabs(wb - c.veh_L) <= 1e-3f * c.veh_L))
+    throw std::invalid_argument(
+        "cvc::nav::coef_trainer: rollout_kind::dynamic needs train_config::dyn, a vehicle whose "
+        "wheelbase lf + lr is veh_L (" +
+        std::to_string(c.veh_L) + "; got " + std::to_string(wb) +
+        "): cvc::physics::nav_plant::dyn_bike_params_at(desc, veh_L)");
+}
+
 diff::field to_diff_field(const field_stack &fs) {
   diff::field F;
   F.data = fs.data;
@@ -268,10 +297,14 @@ void coef_trainer::coeffs(const float *feat, int n, float *out) const {
 
 double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_in,
                                    const float *v_in, const float *goal, int n, int window,
-                                   std::vector<float> *grad, float *o_out, float *v_out) const {
+                                   std::vector<float> *grad, float *o_out, float *v_out,
+                                   const float *x_in, float *x_out) const {
   const diff::field F = to_diff_field(scene.field());
   const int h = hidden_;
   const bool bike = cfg_.rollout == rollout_kind::bicycle;
+  const bool dyn = cfg_.rollout == rollout_kind::dynamic;
+  if (dyn)
+    validate_dynamic(cfg_);
   const float rr = scene.rr, d_hat = scene.d_hat, vmax = scene.vmax, hdt = scene.dt;
   diff::bike_veh bv;
   bv.rr = rr;
@@ -296,6 +329,7 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
     std::vector<float> z0, a0, z1, a1;
     float raw[3], coef[3];
     float ox, oy, auxx, auxy; // o_t, aux_t
+    float ext[4];             // the dynamic rollout's (vy, r, delta, a)_t
   };
   std::vector<Step> st(window);
   for (int L = 0; L < window; ++L) {
@@ -323,6 +357,10 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
   for (int ag = 0; ag < n; ++ag) {
     float ox = o_in[2 * ag], oy = o_in[2 * ag + 1];
     float ax = v_in[2 * ag], ay = v_in[2 * ag + 1]; // aux (v, or th/sp)
+    float ext[4] = {0.0f, 0.0f, 0.0f, 0.0f};        // dynamic: (vy, r, delta, a)
+    if (dyn && x_in)
+      for (int k = 0; k < 4; ++k)
+        ext[k] = x_in[4 * ag + k];
     const float gx = goal[2 * ag], gy = goal[2 * ag + 1];
 
     // ── forward window ──
@@ -332,6 +370,8 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       S.oy = oy;
       S.auxx = ax;
       S.auxy = ay;
+      for (int k = 0; k < 4; ++k)
+        S.ext[k] = ext[k];
       S.cf = diff::sample_fwd(F, ox, oy);
       S.dx = gx - ox;
       S.dy = gy - oy;
@@ -371,7 +411,19 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
 
       float ox1, oy1, ax1, ay1;
-      if (bike)
+      if (dyn) {
+        diff::dyn_state<float> s1;
+        diff::dyn_bike_step(F, dyn_state_of(ox, oy, ax, ay, ext), gx, gy, al, be, ga, bv, cfg_.dyn,
+                            0.0f, s1);
+        ox1 = s1.x;
+        oy1 = s1.y;
+        ax1 = s1.psi;
+        ay1 = s1.vx;
+        ext[0] = s1.vy;
+        ext[1] = s1.r;
+        ext[2] = s1.delta;
+        ext[3] = s1.a;
+      } else if (bike)
         diff::bike_step(F, ox, oy, ax, ay, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
       else
         diff::surr_step(F, ox, oy, ax, ay, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, ax1,
@@ -402,11 +454,15 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       v_out[2 * ag] = ax;
       v_out[2 * ag + 1] = ay;
     }
+    if (dyn && x_out)
+      for (int k = 0; k < 4; ++k)
+        x_out[4 * ag + k] = ext[k];
     if (!grad)
       continue;
 
     // ── backward window ──
     float go_x = 0.0f, go_y = 0.0f, gaux_x = 0.0f, gaux_y = 0.0f; // grad on (o1, aux1)
+    float gext[4] = {0.0f, 0.0f, 0.0f, 0.0f};                     // dynamic: on ext1
     if (Lgoal > 1e-9f) {
       go_x = static_cast<float>(inv_n) * fdx / (Lgoal * region_n);
       go_y = static_cast<float>(inv_n) * fdy / (Lgoal * region_n);
@@ -418,7 +474,13 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       // collision term at o_{t+1} = the recomputable step output; but we stored
       // only inputs, so recompute o_{t+1} via the step for its sample.
       float ox1, oy1, ax1, ay1;
-      if (bike)
+      if (dyn) {
+        diff::dyn_state<float> s1;
+        diff::dyn_bike_step(F, dyn_state_of(S.ox, S.oy, S.auxx, S.auxy, S.ext), gx, gy, al, be, ga,
+                            bv, cfg_.dyn, 0.0f, s1);
+        ox1 = s1.x;
+        oy1 = s1.y;
+      } else if (bike)
         diff::bike_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
       else
         diff::surr_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt,
@@ -436,7 +498,21 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
 
       // rollout backward: grad on (o1, aux1) -> grad on (o_t, aux_t) + (al,be,ga)
       float gox, goy, gauxx, gauxy, g_al, g_be, g_ga;
-      if (bike)
+      if (dyn) {
+        const float gn[4] = {go_x, go_y, gaux_x, gaux_y};
+        diff::dyn_state<float> gs;
+        diff::dyn_bike_step_bwd(
+            F, dyn_state_of(S.ox, S.oy, S.auxx, S.auxy, S.ext), gx, gy, al, be, ga, bv, cfg_.dyn,
+            0.0f, dyn_state_of(gn[0], gn[1], gn[2], gn[3], gext), gs, g_al, g_be, g_ga);
+        gox = gs.x;
+        goy = gs.y;
+        gauxx = gs.psi;
+        gauxy = gs.vx;
+        gext[0] = gs.vy;
+        gext[1] = gs.r;
+        gext[2] = gs.delta;
+        gext[3] = gs.a;
+      } else if (bike)
         diff::bike_step_bwd(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, go_x, go_y,
                             gaux_x, gaux_y, gox, goy, gauxx, gauxy, g_al, g_be, g_ga);
       else
@@ -546,19 +622,45 @@ void coef_trainer::adam_step(const std::vector<float> &grad) {
   }
 }
 
-void coef_trainer::train(const training_scene &scene, bool verbose) {
+void coef_trainer::train(const training_scene &scene, bool verbose,
+                         const checkpoint_fitness &fitness) {
   const int n = cfg_.n, horizon = cfg_.horizon, window = cfg_.window;
   const bool bike = cfg_.rollout == rollout_kind::bicycle;
+  const bool dyn = cfg_.rollout == rollout_kind::dynamic;
+  if (dyn)
+    validate_dynamic(cfg_);
   // Total adam steps = outer steps * windows-per-horizon, so the cosine anneal spans the run.
   const int nwin = (horizon + window - 1) / window;
   adam_total_ = static_cast<long>(cfg_.steps) * nwin;
   std::vector<float> o(2 * n), goal(2 * n), aux(2 * n), o2(2 * n), a2(2 * n);
+  std::vector<float> x(dyn ? 4 * n : 0), x2(dyn ? 4 * n : 0); // dynamic: (vy, r, delta, a)
   std::vector<float> grad;
+  // Checkpoint selection: score the untrained policy, then every `every` steps.
+  checkpoints_.clear();
+  selected_step_ = -1;
+  const int every = cfg_.checkpoint_every > 0 ? cfg_.checkpoint_every : 25;
+  std::vector<float> best;
+  double best_fit = 0.0;
+  const auto score = [&](int step) {
+    const double f = fitness(to_coef_mlp(), step);
+    checkpoints_.push_back({step, f});
+    if (verbose)
+      std::printf("  checkpoint at step %4d: fitness %.4f\n", step, f);
+    if (best.empty() || f > best_fit) {
+      best = p_;
+      best_fit = f;
+      selected_step_ = step;
+    }
+  };
+  if (fitness)
+    score(0);
   for (int step = 0; step < cfg_.steps; ++step) {
     scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data());
-    // Initial aux: surrogate v=0; bicycle (th aimed at the goal, sp=0).
+    // Initial aux: surrogate v=0; bicycle and dynamic (th aimed at the goal, sp=0), the
+    // dynamic vehicle at rest with its wheel straight.
+    std::fill(x.begin(), x.end(), 0.0f);
     for (int i = 0; i < n; ++i) {
-      if (bike) {
+      if (bike || dyn) {
         aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
         aux[2 * i + 1] = 0.0f;
       } else {
@@ -570,14 +672,19 @@ void coef_trainer::train(const training_scene &scene, bool verbose) {
     for (int w0 = 0; w0 < horizon; w0 += window) {
       const int wl = std::min(window, horizon - w0);
       last = loss_and_grad(scene, o.data(), aux.data(), goal.data(), n, wl, &grad, o2.data(),
-                           a2.data());
+                           a2.data(), dyn ? x.data() : nullptr, dyn ? x2.data() : nullptr);
       adam_step(grad);
       o.swap(o2);
       aux.swap(a2);
+      x.swap(x2);
     }
     if (verbose && (step % 50 == 0 || step == cfg_.steps - 1))
       std::printf("  step %4d: window_loss %.4f\n", step, last);
+    if (fitness && ((step + 1) % every == 0 || step == cfg_.steps - 1))
+      score(step + 1);
   }
+  if (fitness)
+    p_ = best; // end on the best checkpoint
 }
 
 coef_mlp coef_trainer::to_coef_mlp() const {

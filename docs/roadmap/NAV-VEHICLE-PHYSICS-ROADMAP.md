@@ -299,7 +299,40 @@ P4 adds three things to measure and contain the drift:
     It passes its gates: gradient checks, the kinematic limit against `bike_step`, the skid
     modes and the stopping envelope. GRL-SNAM's torch twin matches its goldens to 1e-9
     (CVC-Lab/GRL-SNAM#121).
-  - Next: `rollout_kind::dynamic` in both trainers (P8b). P8c is not started.
+  - P8b, in progress:
+    - `coef_train`'s `rollout_kind::dynamic` (CPU): gradient-checked; training through it is
+      stable and lowers the loss (docs/NAV_TRAINING.md).
+    - `material_train`'s `material_integrator::dynamic` (`integrate_dynamic_material`): its
+      rollout VJP, `L_multi` and the full loss-to-weights chain are gradient-checked.
+    - The gate on the Jolt plant, over 20 paired seeds of RoboRacers in the city:
+      - Trained alike at lr 2e-4 for 300 steps, the dynamic-trained policy reaches 44.0% and the
+        point-mass-trained one 35.0%: +9.0 points, 95% CI [+6.7, +11.4].
+      - But both fall below the untrained seed's 51.7%. At the stable 5e-5 they tie (+0.4, CI
+        [-1.8, +2.8]).
+      - So the dynamic model makes training hurt less on the real vehicle; it does not yet make it
+        help.
+    - Checkpoint selection on Jolt reach (`coef_trainer::train(scene, verbose, fitness)`,
+      `cvc::physics::reach_on_plant`):
+      - Each training ends on its checkpoint with the best reach on 8 validation seeds, the
+        untrained policy included.
+      - Held out, the dynamic-trained policy reaches 52.7% and the point-mass-trained one 50.1%:
+        +2.6 points, CI [+0.3, +4.7]. The seed reaches 51.7%.
+      - So both now stay near the seed, and the gate's wording holds there.
+      - The dynamic one leads the seed by +1.0, CI [-1.2, +3.4], so not significantly.
+      - Jolt reach is deterministic but chaotic: a 4e-9 change of scale moves a seed's reach by up
+        to 0.1, so validation needs 8 or more seeds.
+    - Lower peak rates with denser checkpoints (1e-4 every 10 steps, 5e-5 every 20, and 2e-4
+      every 5; 31 checkpoints each, seeds now scored in parallel):
+      - The best, 1e-4 every 10, leads the seed by +1.9 [-0.8, +4.4]. No setting beats it
+        outside the CI.
+      - At the lower rates validation reach stays flat (0.445 to 0.523 against the untrained
+        0.479), and the extra checkpoints mostly add selection noise.
+      - The dynamic training beats the point-mass one in all four settings (+1.1 to +2.6),
+        outside the CI in two.
+    - Next: a trained policy that beats the seed outside the CI. The step size is not the limit;
+      the signal is. Levers: many more validation seeds, or Jolt reach as the training signal
+      itself.
+  - P8c is not started.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle

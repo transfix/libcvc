@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cvc/state/state_exec/exceptions.h> // dsl_error: a refused allocation is MemoryError
 #include <cvc/state/state_exec/types.h>
 #include <new>
 #include <stdexcept>
@@ -274,9 +275,10 @@ std::optional<std::size_t> eval_alloc_limit() {
 void eval_alloc_check(std::size_t bytes, const char *who) {
   const std::optional<std::size_t> limit = eval_alloc_limit();
   if (limit && bytes > *limit)
-    throw std::runtime_error(std::string(who) + ": the result needs " + std::to_string(bytes) +
-                             " bytes, over the allocation limit of " + std::to_string(*limit) +
-                             " bytes (limits.max_alloc_bytes, or what is left of max_memory)");
+    throw dsl_error("MemoryError",
+                    std::string(who) + ": the result needs " + std::to_string(bytes) +
+                        " bytes, over the allocation limit of " + std::to_string(*limit) +
+                        " bytes (limits.max_alloc_bytes, or what is left of max_memory)");
   eval_alloc_note(bytes);
 }
 

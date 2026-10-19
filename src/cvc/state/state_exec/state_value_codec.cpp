@@ -735,6 +735,18 @@ std::string phase_to_string(eval_phase p) {
     return "super_args";
   case eval_phase::defclass_methods:
     return "defclass_methods";
+  case eval_phase::yield_value:
+    return "yield_value";
+  case eval_phase::break_unwind:
+    return "break_unwind";
+  case eval_phase::try_body:
+    return "try_body";
+  case eval_phase::try_handler:
+    return "try_handler";
+  case eval_phase::try_finally:
+    return "try_finally";
+  case eval_phase::raise_value:
+    return "raise_value";
   }
   return "init";
 }
@@ -770,6 +782,18 @@ eval_phase string_to_phase(const std::string &s) {
     return eval_phase::super_args;
   if (s == "defclass_methods")
     return eval_phase::defclass_methods;
+  if (s == "yield_value")
+    return eval_phase::yield_value;
+  if (s == "break_unwind")
+    return eval_phase::break_unwind;
+  if (s == "try_body")
+    return eval_phase::try_body;
+  if (s == "try_handler")
+    return eval_phase::try_handler;
+  if (s == "try_finally")
+    return eval_phase::try_finally;
+  if (s == "raise_value")
+    return eval_phase::raise_value;
   return eval_phase::init;
 }
 
@@ -819,6 +843,9 @@ void encode_frame(cvc::state &node, const eval_frame &f) {
   // extra_env
   if (f.extra_env)
     encode_environment(node("extra_env"), f.extra_env);
+
+  if (f.function_body)
+    node("function_body").value("1");
 }
 
 eval_frame decode_frame(cvc::state &node) {
@@ -848,6 +875,8 @@ eval_frame decode_frame(cvc::state &node) {
 
   if (has_child(node, "extra_env"))
     f.extra_env = decode_environment(node("extra_env"));
+
+  f.function_body = has_child(node, "function_body");
 
   return f;
 }

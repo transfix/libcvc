@@ -110,8 +110,10 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 | `for` | `(for x collection body...)` | Iterate over a list or generator; the body forms run in order, as a `begin` |
 | `let` | `(let ((x 1) (y 2)) (+ x y))` | Local bindings |
 | `quote` | `(quote (1 2 3))` | Return expression unevaluated |
-| `return` | `(return expr)` | Early return from a function |
+| `return` | `(return expr)` | Early return from the function it is in |
 | `break` | `(break)` or `(break expr)` | Exit nearest `while`/`for` loop |
+| `try` | `(try body... (catch (Type e) handler...)... (finally cleanup...))` | Catch exceptions; see [Exceptions](#exceptions) |
+| `raise` | `(raise exc)` or `(raise)` | Raise an exception; bare, re-raise the one a handler handles |
 | `yield` | `(yield expr)` | Produce a value from a generator |
 | `defmacro` | `(defmacro name (params) template)` | Macro definition |
 | `eval` | `(eval expr)` | Evaluate a quoted expression |
@@ -327,6 +329,61 @@ sum  ;; => 30  (10 + 10 + 10)
 
 `break` unwinds through `begin`, `let`, `if`, and any other intermediate
 forms — it always targets the nearest loop boundary.
+
+### Exceptions
+
+The full design is in [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md). An exception is an
+instance of `Exception` or a class derived from it. `raise` raises one, `error` raises a
+`RuntimeError`, and `try` catches them:
+
+```lisp
+(defclass VolumeError RuntimeError
+  (init (self message volume)
+    (super self init message)          ;; Exception's init sets message and data
+    (set-attr self "volume" volume)
+    self))
+
+(try (raise (VolumeError "unreadable" "v1"))
+  (catch (VolumeError e) (get-attr e "volume"))   ;; => "v1"
+  (catch (e) (get-attr e "message"))              ;; any other exception
+  (finally (print "done")))                       ;; however the try is left
+```
+
+- Catch clauses are tried in order; a clause matches an instance of its class or of a class
+  derived from it. `(catch (Type) ...)` binds no variable, and `(catch (e) ...)` catches
+  anything. A lone symbol is a class when it names one, otherwise the variable.
+- The handler's variable is bound in a scope of its own: `set` in a handler binds there, so
+  record effects in a list or dict (`append`, `set-attr`) when they should outlive it.
+- `finally` runs when the body or a handler finishes, when an exception leaves the try, and when
+  a `return` or `break` passes through. An exception, `return` or `break` in the cleanup replaces
+  what was leaving.
+- `(error message [data])` is `(raise (RuntimeError message data))`. `(isinstance x Class)`
+  works for any class.
+
+Every exception has `message`, `data`, `cause` (the exception being handled when it was raised),
+`origin` (`"dsl"`, `"builtin"` or `"native"`) and `traceback` (the expressions being evaluated,
+innermost last, at most 64). One from a native function also has `function`, and a C++ exception
+of no mapped type is a `NativeError` with `native_type`.
+
+The evaluator's and the builtins' errors are exceptions of these classes, so a program catches
+them too: `NameError` (an undefined symbol), `TypeError` (a wrong type, a wrong number of
+arguments, a malformed special form, calling a non-function), `ValueError`, `KeyError`,
+`IndexError`, `ArithmeticError` (division by zero), `MemoryError` (a call over the allocation
+limit), `ParseError`. A program can't catch a kill: a step, time or memory limit, `kill`, or an
+evaluator's timeout or `interrupt()` ends it with no handler or `finally` run.
+
+A signal or watch handler's uncaught exception is raised in the program where the handler
+interrupted it, so the program's own `try` can catch it.
+
+**From C++.** A native function throws `cvc::state_exec::dsl_error(class_name, message)` to raise
+a built-in class (`#include <cvc/state/state_exec/exceptions.h>`), or `dsl_exception(value)` to
+raise an exception value it made with `make_exception`. Other C++ exceptions are mapped:
+`std::invalid_argument` to `ValueError`, `std::out_of_range` to `IndexError`, `std::bad_alloc` to
+`MemoryError`, `parse_error` to `ParseError`, a plain `std::runtime_error` to `RuntimeError`, and
+anything else to `NativeError`. An exception nothing catches reaches the C++ caller as the C++
+exception it was made from, unchanged, or as a `dsl_exception` (whose `class_chain()` names its
+classes) when the program raised it. `stackless_evaluator::raise(state, exc)` raises an exception
+in a state where it is evaluating.
 
 ---
 

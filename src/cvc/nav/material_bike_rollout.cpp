@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/detail/material_rollout.h>
 #include <cvc/nav/detail/parallel.h>
 #include <cvc/nav/material.h>
@@ -323,29 +324,48 @@ state step_fwd(const agent &a, const state &st, rec &r, float &dmin_out, int &jm
 // and the per-step seeds of arc length and cumulative risk. Out: the adjoints of the
 // step inputs, in place; coefficient grads are ADDED into gal (per disc) and the
 // scalar accumulators. A frozen step (past H) is the identity.
+//
+// kin_plant false is the controller alone, for another plant (the dynamic vehicle): the
+// kinematic update's reverse is skipped, the plant's gradients on the commands come in
+// as (g_dc, g_ac) on (delta4, a3), and the arc-length seed is the caller's (r.disp is
+// then the other plant's step). The kinematic default adds 0 to a3's adjoint, so its
+// sums are unchanged.
 void step_bwd(const agent &a, const state &st, const rec &r, float garc, float gcum, float &aox,
               float &aoy, float &ath, float &asp, float *gal, float &gbe, float &gga, float &gls,
-              float &glh) {
+              float &glh, bool kin_plant = true, float g_dc = 0.0f, float g_ac = 0.0f) {
   if (!r.active)
     return;
   const float ox = st.ox, oy = st.oy, spi = st.sp;
   const float ch = r.ch, sh = r.sh;
 
-  // arc += disp, cum += risk * disp, disp = |o1 - o|.
-  const float g_disp = garc + gcum * r.risk;
-  const float Ao1x = aox + g_disp * r.ux, Ao1y = aoy + g_disp * r.uy;
-  float Aox = -g_disp * r.ux, Aoy = -g_disp * r.uy;
-  const float Arisk = gcum * r.disp;
+  float Aox, Aoy, Asp1, Ath, Adelta4;
+  float Arisk;
+  if (kin_plant) {
+    // arc += disp, cum += risk * disp, disp = |o1 - o|.
+    const float g_disp = garc + gcum * r.risk;
+    const float Ao1x = aox + g_disp * r.ux, Ao1y = aoy + g_disp * r.uy;
+    Aox = -g_disp * r.ux;
+    Aoy = -g_disp * r.uy;
+    Arisk = gcum * r.disp;
 
-  // o1 = o + hdt * sp1 * (cos th1, sin th1)
-  Aox += Ao1x;
-  Aoy += Ao1y;
-  float Asp1 = asp + a.hdt * (Ao1x * r.c1 + Ao1y * r.s1);
-  const float Ath1 = ath + a.hdt * r.sp1 * (-Ao1x * r.s1 + Ao1y * r.c1);
-  // th1 = th + hdt * (sp1 / L) * tan(delta4)
-  float Ath = Ath1;
-  Asp1 += Ath1 * a.hdt * r.tan4 / a.L;
-  const float Adelta4 = Ath1 * a.hdt * (r.sp1 / a.L) * (1.0f + r.tan4 * r.tan4);
+    // o1 = o + hdt * sp1 * (cos th1, sin th1)
+    Aox += Ao1x;
+    Aoy += Ao1y;
+    Asp1 = asp + a.hdt * (Ao1x * r.c1 + Ao1y * r.s1);
+    const float Ath1 = ath + a.hdt * r.sp1 * (-Ao1x * r.s1 + Ao1y * r.c1);
+    // th1 = th + hdt * (sp1 / L) * tan(delta4)
+    Ath = Ath1;
+    Asp1 += Ath1 * a.hdt * r.tan4 / a.L;
+    Adelta4 = Ath1 * a.hdt * (r.sp1 / a.L) * (1.0f + r.tan4 * r.tan4);
+  } else {
+    // The controller alone: cum's risk factor is its own; the rest is the plant's.
+    Aox = 0.0f;
+    Aoy = 0.0f;
+    Arisk = gcum * r.disp;
+    Asp1 = 0.0f;
+    Ath = 0.0f;
+    Adelta4 = g_dc;
+  }
   // delta4 = clamp(delta3, -d_cap, d_cap)
   const float Adelta3 = r.d4_side == 0 ? Adelta4 : 0.0f;
   const float Adcap = r.d4_side > 0 ? Adelta4 : (r.d4_side < 0 ? -Adelta4 : 0.0f);
@@ -356,7 +376,7 @@ void step_bwd(const agent &a, const state &st, const rec &r, float garc, float g
   // sp1 = clamp(sp + hdt * a3, sp_min, vmax)
   const float Apre = r.sp_side == 0 ? Asp1 : 0.0f;
   float Asp = Apre;
-  const float Aa3 = Apre * a.hdt;
+  const float Aa3 = Apre * a.hdt + g_ac;
   // a3 = clamp(a2, -a_max, a_max)
   const float Aa2 = r.a2_side == 0 ? Aa3 : 0.0f;
   // a2 = min(a1c, lim), lim = (v_lim - sp) / hdt
@@ -544,6 +564,65 @@ void step_bwd(const agent &a, const state &st, const rec &r, float garc, float g
   aoy = Aoy;
   ath = Ath;
   asp = Asp;
+}
+
+// The dynamic vehicle's limits from an agent's (bike_veh as dyn_plant reads it).
+diff::bike_veh dyn_limits(const agent &a) {
+  diff::bike_veh v{};
+  v.L = a.L;
+  v.vmax = a.vmax;
+  v.delta_max = a.dmax;
+  v.hdt = a.hdt;
+  v.allow_reverse = a.allow_reverse ? 1 : 0;
+  return v;
+}
+
+// One step of the material controller driving the dynamic vehicle. The controller is
+// step_fwd's (its kinematic update is computed and discarded); r.disp, ux and uy are
+// replaced by the dynamic step's.
+diff::dyn_state<float> step_fwd_dyn(const agent &a, const diff::dyn_bike_params &dyn,
+                                    const diff::dyn_state<float> &ds, rec &r, float &dmin,
+                                    int &jmin) {
+  const state st{ds.x, ds.y, ds.psi, ds.vx};
+  step_fwd(a, st, r, dmin, jmin);
+  if (!r.active)
+    return ds; // past H: frozen (step_fwd zeroed disp)
+  diff::dyn_state<float> n;
+  diff::dyn_plant<float>(dyn, dyn_limits(a), ds, r.delta4, r.a3, 0.0f, n);
+  const float sdx = n.x - ds.x, sdy = n.y - ds.y;
+  r.disp = std::sqrt(sdx * sdx + sdy * sdy);
+  r.ux = r.disp > 0.0f ? sdx / r.disp : 0.0f;
+  r.uy = r.disp > 0.0f ? sdy / r.disp : 0.0f;
+  return n;
+}
+
+// Reverse of step_fwd_dyn: g (the adjoint of the step's output state) becomes the
+// adjoint of its input state, in place; coefficient grads are ADDED as in step_bwd.
+void step_bwd_dyn(const agent &a, const diff::dyn_bike_params &dyn,
+                  const diff::dyn_state<float> &ds, const rec &r, float garc, float gcum,
+                  diff::dyn_state<float> &g, float *gal, float &gbe, float &gga, float &gls,
+                  float &glh) {
+  if (!r.active)
+    return;
+  // arc += disp, cum += risk * disp, disp = |o1 - o|: the displacement's share.
+  const float g_disp = garc + gcum * r.risk;
+  diff::dyn_state<float> g_out = g;
+  g_out.x += g_disp * r.ux;
+  g_out.y += g_disp * r.uy;
+  diff::dyn_state<float> g_in;
+  float g_dc, g_ac;
+  diff::dyn_plant_vjp<float>(dyn, dyn_limits(a), ds, r.delta4, r.a3, 0.0f, g_out, g_in, g_dc, g_ac);
+  g_in.x -= g_disp * r.ux;
+  g_in.y -= g_disp * r.uy;
+  // The controller, fed the plant's command gradients.
+  float cox = 0.0f, coy = 0.0f, cth = 0.0f, csp = 0.0f;
+  const state st{ds.x, ds.y, ds.psi, ds.vx};
+  step_bwd(a, st, r, garc, gcum, cox, coy, cth, csp, gal, gbe, gga, gls, glh, false, g_dc, g_ac);
+  g_in.x += cox;
+  g_in.y += coy;
+  g_in.psi += cth;
+  g_in.vx += csp;
+  g = g_in;
 }
 
 agent make_agent(int b, const float *o0, const float *goal, const float *C, const float *R,
@@ -774,6 +853,234 @@ double multi_start_penalty_bicycle(const float *alphas, const float *beta, const
         rr_k.data(), dh_k.data(), dt_k.data(), H_k.data(), KB, N, 2, 2, sp, v, nullptr, nullptr,
         nullptr, g_clr.data(), nullptr, nullptr, s_al.data(), s_be.data(), s_ga.data(), s_ls.data(),
         s_lh.data(), num_threads);
+    for (int k = 0; k < K; ++k)
+      for (int b = 0; b < B; ++b) {
+        const int i = k * B + b;
+        if (g_alphas)
+          for (int j = 0; j < N; ++j)
+            g_alphas[b * N + j] += s_al[static_cast<size_t>(i) * N + j];
+        if (g_beta)
+          g_beta[b] += s_be[i];
+        if (g_gamma)
+          g_gamma[b] += s_ga[i];
+      }
+  }
+  return L;
+}
+
+namespace {
+// The dynamic vehicle must be the controller's: its wheelbase is v.L.
+void validate_dyn(const bicycle_material_params &v, const diff::dyn_bike_params &d) {
+  validate(v);
+  const float wb = d.lf + d.lr;
+  if (!(d.m > 0.0f && d.Iz > 0.0f && d.g > 0.0f && d.mu > 0.0f && d.lf > 0.0f && d.lr > 0.0f) ||
+      !(std::fabs(wb - v.L) <= 1e-3f * v.L))
+    throw std::invalid_argument("integrate_dynamic_material: the vehicle (dyn_bike_params) needs "
+                                "positive mass, inertia, gravity, friction and axle distances, "
+                                "and lf + lr equal to the controller's wheelbase L");
+}
+
+diff::dyn_state<float> dyn_state_at(const float *o, const float *th, const float *vx,
+                                    const float *x, int b) {
+  diff::dyn_state<float> s;
+  s.x = o[2 * b];
+  s.y = o[2 * b + 1];
+  s.psi = th[b];
+  s.vx = vx[b];
+  s.vy = x ? x[4 * b] : 0.0f;
+  s.r = x ? x[4 * b + 1] : 0.0f;
+  s.delta = x ? x[4 * b + 2] : 0.0f;
+  s.a = x ? x[4 * b + 3] : 0.0f;
+  return s;
+}
+} // namespace
+
+void integrate_dynamic_material(float *o, float *th, float *vx, float *x, const float *goal,
+                                const float *C, const float *R, const std::uint8_t *mask,
+                                const float *alphas, const float *beta, const float *gamma,
+                                const float *lam_soft, const float *lam_hard,
+                                const float *rollout_patch, const float *rr, const float *d_hat,
+                                const float *dt, const int *H, int B, int N, int Hp, int Wp,
+                                const surrogate_material_params &p,
+                                const bicycle_material_params &v, const diff::dyn_bike_params &dyn,
+                                float *min_clear, float *cum_risk, float *hard_count,
+                                float *arc_length, int num_threads) {
+  validate_dyn(v, dyn);
+  const int max_H = max_horizon(H, B);
+  const std::vector<float> o0(o, o + 2 * B); // the patch is centred on the start
+  detail::parallel_for(B, num_threads, [&](int b) {
+    const agent a = make_agent(b, o0.data(), goal, C, R, mask, alphas, beta, gamma, lam_soft,
+                               lam_hard, rollout_patch, rr, d_hat, dt, N, Hp, Wp, p, v);
+    diff::dyn_state<float> st = dyn_state_at(o, th, vx, x, b);
+    float minclr = std::numeric_limits<float>::infinity();
+    float cum = 0.0f, hard = 0.0f, arc = 0.0f;
+    for (int s = 0; s < max_H; ++s) {
+      rec r;
+      r.active = s < H[b];
+      float dmin;
+      int jmin;
+      const diff::dyn_state<float> next = step_fwd_dyn(a, dyn, st, r, dmin, jmin);
+      if (dmin < minclr)
+        minclr = dmin;
+      const float active = r.active ? 1.0f : 0.0f;
+      arc += active * r.disp;
+      cum += active * r.risk * r.disp;
+      hard += active * (r.sdf < 1.0f ? 1.0f : 0.0f);
+      st = next;
+    }
+    o[2 * b] = st.x;
+    o[2 * b + 1] = st.y;
+    th[b] = st.psi;
+    vx[b] = st.vx;
+    if (x) {
+      x[4 * b] = st.vy;
+      x[4 * b + 1] = st.r;
+      x[4 * b + 2] = st.delta;
+      x[4 * b + 3] = st.a;
+    }
+    min_clear[b] = minclr;
+    cum_risk[b] = cum;
+    hard_count[b] = hard;
+    arc_length[b] = arc;
+  });
+}
+
+void integrate_dynamic_material_vjp(
+    const float *o0, const float *th0, const float *vx0, const float *x0, const float *goal,
+    const float *C, const float *R, const std::uint8_t *mask, const float *alphas,
+    const float *beta, const float *gamma, const float *lam_soft, const float *lam_hard,
+    const float *rollout_patch, const float *rr, const float *d_hat, const float *dt, const int *H,
+    int B, int N, int Hp, int Wp, const surrogate_material_params &p,
+    const bicycle_material_params &v, const diff::dyn_bike_params &dyn, const float *g_oT,
+    const float *g_thT, const float *g_vxT, const float *g_xT, const float *g_min_clear,
+    const float *g_cum_risk, const float *g_arc_length, float *g_alphas, float *g_beta,
+    float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads) {
+  validate_dyn(v, dyn);
+  const int max_H = max_horizon(H, B);
+  detail::parallel_for(B, num_threads, [&](int b) {
+    const agent a = make_agent(b, o0, goal, C, R, mask, alphas, beta, gamma, lam_soft, lam_hard,
+                               rollout_patch, rr, d_hat, dt, N, Hp, Wp, p, v);
+    std::vector<diff::dyn_state<float>> S(static_cast<size_t>(max_H) + 1);
+    S[0] = dyn_state_at(o0, th0, vx0, x0, b);
+    float minclr = std::numeric_limits<float>::infinity();
+    int s_star = -1;
+    for (int s = 0; s < max_H; ++s) {
+      rec r;
+      r.active = s < H[b];
+      float dmin;
+      int jmin;
+      S[s + 1] = step_fwd_dyn(a, dyn, S[s], r, dmin, jmin);
+      if (dmin < minclr) {
+        minclr = dmin;
+        s_star = jmin >= 0 ? s : -1;
+      }
+    }
+
+    diff::dyn_state<float> g{};
+    if (g_oT) {
+      g.x = g_oT[2 * b];
+      g.y = g_oT[2 * b + 1];
+    }
+    if (g_thT)
+      g.psi = g_thT[b];
+    if (g_vxT)
+      g.vx = g_vxT[b];
+    if (g_xT) {
+      g.vy = g_xT[4 * b];
+      g.r = g_xT[4 * b + 1];
+      g.delta = g_xT[4 * b + 2];
+      g.a = g_xT[4 * b + 3];
+    }
+    const float gmin = g_min_clear ? g_min_clear[b] : 0.0f;
+    const float gcum = g_cum_risk ? g_cum_risk[b] : 0.0f;
+    const float garc = g_arc_length ? g_arc_length[b] : 0.0f;
+    float gbe = 0.0f, gga = 0.0f, gls = 0.0f, glh = 0.0f;
+    float *gal = g_alphas + static_cast<long>(b) * N;
+    for (int s = max_H - 1; s >= 0; --s) {
+      rec r;
+      r.active = s < H[b];
+      float dmin;
+      int jmin;
+      step_fwd_dyn(a, dyn, S[s], r, dmin, jmin); // rebuild the step record
+      step_bwd_dyn(a, dyn, S[s], r, garc, gcum, g, gal, gbe, gga, gls, glh);
+      if (s == s_star) { // min_clear = d of the nearest disc at o_s
+        g.x += gmin * r.ngx;
+        g.y += gmin * r.ngy;
+      }
+    }
+    g_beta[b] += gbe;
+    g_gamma[b] += gga;
+    g_lam_soft[b] += gls;
+    g_lam_hard[b] += glh;
+  });
+}
+
+double multi_start_penalty_dynamic(const float *alphas, const float *beta, const float *gamma,
+                                   const float *o0, const float *th0, const float *vx0,
+                                   const float *goal, const float *C, const float *R,
+                                   const std::uint8_t *mask, const float *rr, const float *d_hat,
+                                   const float *dt, int B, int N, const multi_start_params &p,
+                                   const surrogate_material_params &sp,
+                                   const bicycle_material_params &v,
+                                   const diff::dyn_bike_params &dyn, float *g_alphas, float *g_beta,
+                                   float *g_gamma, int num_threads) {
+  std::vector<float> o_ms;
+  const int K = multi_start_origins(p, o0, C, R, mask, rr, B, N, o_ms);
+  if (K == 0)
+    return 0.0;
+  const int KB = K * B;
+  // As multi_start_penalty_bicycle: K*B short rollouts as one batch, the material forces
+  // off (a 2x2 zero patch), each vehicle at rest in its further state.
+  auto tile = [&](const float *xs, int per) {
+    std::vector<float> t(static_cast<size_t>(KB) * per);
+    for (int k = 0; k < K; ++k)
+      std::copy(xs, xs + static_cast<size_t>(B) * per,
+                t.begin() + static_cast<size_t>(k) * B * per);
+    return t;
+  };
+  const std::vector<float> goal_k = tile(goal, 2), C_k = tile(C, 2 * N), R_k = tile(R, N),
+                           al_k = tile(alphas, N), be_k = tile(beta, 1), ga_k = tile(gamma, 1),
+                           rr_k = tile(rr, 1), dh_k = tile(d_hat, 1), th_k = tile(th0, 1),
+                           vx_k = tile(vx0, 1);
+  std::vector<std::uint8_t> mask_k(static_cast<size_t>(KB) * N);
+  for (int k = 0; k < K; ++k)
+    std::copy(mask, mask + static_cast<size_t>(B) * N,
+              mask_k.begin() + static_cast<size_t>(k) * B * N);
+  std::vector<float> dt_k(KB);
+  for (int i = 0; i < KB; ++i)
+    dt_k[i] = p.ms_dt_mult * dt[i % B];
+  const std::vector<int> H_k(KB, p.ms_h);
+  const std::vector<float> zeros(KB, 0.0f), patch(static_cast<size_t>(KB) * 6 * 2 * 2, 0.0f),
+      x_k(static_cast<size_t>(KB) * 4, 0.0f);
+
+  std::vector<float> o_run(o_ms), th_run(th_k), vx_run(vx_k), x_run(x_k), min_clear(KB), cum(KB),
+      hard(KB), arc(KB);
+  integrate_dynamic_material(
+      o_run.data(), th_run.data(), vx_run.data(), x_run.data(), goal_k.data(), C_k.data(),
+      R_k.data(), mask_k.data(), al_k.data(), be_k.data(), ga_k.data(), zeros.data(), zeros.data(),
+      patch.data(), rr_k.data(), dh_k.data(), dt_k.data(), H_k.data(), KB, N, 2, 2, sp, v, dyn,
+      min_clear.data(), cum.data(), hard.data(), arc.data(), num_threads);
+  double L = 0.0;
+  for (int i = 0; i < KB; ++i) {
+    const float xx = -min_clear[i] / p.tau;
+    L += (xx > 20.0f) ? xx : std::log1p(std::exp(xx)); // softplus(-clr/tau)
+  }
+  L /= (double)KB;
+
+  if (g_alphas || g_beta || g_gamma) {
+    std::vector<float> g_clr(KB);
+    for (int i = 0; i < KB; ++i) {
+      const float s = 1.0f / (1.0f + std::exp(-(-min_clear[i] / p.tau))); // sigmoid(-clr/tau)
+      g_clr[i] = -s / (p.tau * (float)KB);                                // d L / d clr
+    }
+    std::vector<float> s_al(static_cast<size_t>(KB) * N, 0.0f), s_be(KB, 0.0f), s_ga(KB, 0.0f),
+        s_ls(KB, 0.0f), s_lh(KB, 0.0f);
+    integrate_dynamic_material_vjp(
+        o_ms.data(), th_k.data(), vx_k.data(), x_k.data(), goal_k.data(), C_k.data(), R_k.data(),
+        mask_k.data(), al_k.data(), be_k.data(), ga_k.data(), zeros.data(), zeros.data(),
+        patch.data(), rr_k.data(), dh_k.data(), dt_k.data(), H_k.data(), KB, N, 2, 2, sp, v, dyn,
+        nullptr, nullptr, nullptr, nullptr, g_clr.data(), nullptr, nullptr, s_al.data(),
+        s_be.data(), s_ga.data(), s_ls.data(), s_lh.data(), num_threads);
     for (int k = 0; k < K; ++k)
       for (int b = 0; b < B; ++b) {
         const int i = k * B + b;

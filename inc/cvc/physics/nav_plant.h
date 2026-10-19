@@ -132,6 +132,14 @@ public:
                                               double front_stiffness = 0.85, double drive_lag = 0.1,
                                               double gravity = 9.80665);
 
+  // The same vehicle in a normalized frame where its wheelbase is `wheelbase`: S =
+  // wheelbase / d.wheelbase(). This is how a trainer whose scene has no metres
+  // (coef_train's city, veh_L = 0.035) gets a physical vehicle for rollout_kind::dynamic:
+  // dyn_bike_params_at(vehicle_desc::roboracer(), 0.035) reads the scene at about 0.108
+  // normalized units per metre, where vmax 0.9 is 8.3 m/s.
+  static cvc::nav::diff::dyn_bike_params dyn_bike_params_at(const vehicle_desc &d, double wheelbase,
+                                                            double mu = 0.9);
+
   // ── the vehicles ──
   int size() const { return static_cast<int>(_agents.size()); }
   vehicle_id vehicle(int i) const { return _agents.at(i).vehicle; }
