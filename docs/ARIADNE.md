@@ -26,6 +26,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 9. [Running a document](#9-running-a-document)
 10. [Async and networking](#10-async-and-networking)
 11. [Caveats — what is not yet wired](#11-caveats--what-is-not-yet-wired)
+12. [Golden-image tests](#12-golden-image-tests)
 
 ---
 
@@ -958,6 +959,83 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).
+
+---
+
+## 12. Golden-image tests
+
+`cvcgl_ari_golden` ([`cvcgl_ari_golden.cpp`](../src/cvcGL/test/cvcgl_ari_golden.cpp)) checks
+what the ImGui/VTK backend actually draws (roadmap §16.6, phase 1). Every `.ari` in
+[`src/cvcGL/test/golden/`](../src/cvcGL/test/golden/) is loaded through `AriRuntime`, rendered
+offscreen at 960 x 720 with the overlay visible, and its frame is compared with the PNG of the
+same name. The comparison code is
+[`golden_util.h`](../src/cvcGL/test/golden_util.h), for reuse by other render tests.
+
+A capture is made repeatable by:
+
+- the UI font pinned to `golden/fonts/LiberationSans-Regular.ttf` (OFL; never a system font);
+- UI scale 1, touch mode off, the show/hide button hidden, panels open;
+- ImGui's frame delta pinned (`ImGuiOverlay::setFixedDeltaTime`);
+- at least 4 frames at a fixed dt before the capture.
+
+The test then renders one more frame and requires it to be identical, so a UI that is still
+changing fails as unsettled rather than as a flaky mismatch.
+
+**Comparing.** A pixel mismatches when a channel differs by more than 40. A document passes
+while at most 0.002% of its pixels (13) mismatch. The goldens are made under Mesa llvmpipe, the
+rasterizer of the Linux CI job (Xvfb + cvcpkg's `mesa`). These limits were measured:
+
+- another Mesa version's llvmpipe and an NVIDIA GPU leave no pixel beyond 40;
+- one step of a slider's value (64 to 65) leaves 144 pixels beyond 40, so it fails;
+- a window moved down by one pixel leaves 12,167, so it fails.
+
+A rasterizer that needs its own pictures gets platform goldens, `<name>.<variant>.png`. They are
+used instead of `<name>.png` when present. The variant comes from `CVC_GOLDEN_VARIANT`, and
+defaults to `macos` on Apple. Each comparison prints its largest channel difference and how many
+pixels differ by more than 0 / 8 / 24 / 40, so a CI log shows a platform's spread even when it
+passes.
+
+**On a failure** the test writes `<name>.actual.png` and `<name>.diff.png` to
+`build/src/cvcGL/ari_golden/`. In the diff, mismatches are red (brighter = larger), differences
+within the tolerance are dark blue, and the golden is a dim grey underneath. The log line gives
+the count, the fraction and the bounding box of the mismatches. CI prints every document's
+numbers in its "Ariadne golden-image numbers" step, pass or fail. When a job fails, CI uploads
+that directory as the `ari-golden-<OS>-<lane>` artifact.
+
+**Adding a test.**
+
+1. Add `src/cvcGL/test/golden/<name>.ari`. Declare `meta.min_libcvc`. Fix every value with
+   `init:`, place every window with `pos:`, and give each one a `size:` (see the gaps below).
+   The test requires a document to load without warnings.
+2. If the picture needs input, such as an open menu or a tooltip, add a pointer script for
+   `<name>` to `kCases` in the test: a move, press or release before a given frame, in ImGui
+   pixels from the top left.
+3. Write the golden under llvmpipe and look at it:
+
+   ```bash
+   CVC_UPDATE_GOLDEN=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe DISPLAY=:99 \
+     build/bin/cvcgl_ari_golden src/cvcGL/test/golden build/src/cvcGL/ari_golden <name>
+   ```
+
+   Run it under cvcpkg's `xvfb` and `mesa`, as CI does (`cvcpkg install xvfb mesa --prefix P`,
+   start `P/bin/Xvfb :99`, and put `P/lib` on `LD_LIBRARY_PATH` if VTK's libglvnd is not in
+   `P`). Writing `<name>.png` from any other renderer is refused. With `CVC_GOLDEN_VARIANT` set,
+   the run writes that platform's golden instead.
+4. Commit the `.ari` and the `.png` together. After a deliberate rendering change, regenerate
+   the affected goldens the same way, and review the new pictures in the PR.
+
+Without a GL that rasterises, or where ImGui's GL backend cannot start on VTK's context (VTK's
+EGL fallback with no X display), the test skips. With `CVC_REQUIRE_RENDER=1`, as in the Linux
+CI job, it fails instead.
+
+**Gaps the goldens step around (2026-10-19):**
+
+- A window with no `size:` stays at ImGui's 32 px minimum. §11.4 persists its size before
+  ImGui has fitted it and seeds that size back, which cancels the auto-fit.
+- A declared directional `light:` leaves the realized scene unlit, so `scene.ari` uses the
+  fallback headlight.
+- `layout: {kind: horizontal}` is ignored on a window body, and the embedded schema rejects the
+  `size: {hint, min, max}` map and `"50%"` strings that the loader accepts.
 
 ---
 

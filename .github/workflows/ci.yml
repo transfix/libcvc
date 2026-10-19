@@ -797,6 +797,31 @@ jobs:
                   -E "${STRESS_REGEX}"
           fi
 
+      # cvcgl_ari_golden prints each document's renderer and how far its frame
+      # is from the golden (docs/ARIADNE.md section 12). --output-on-failure
+      # hides that on a pass, so print it from LastTest.log on every run: it is
+      # how a platform's drift shows before it fails. On a failure the test
+      # wrote <name>.actual.png + <name>.diff.png; keep them, so a mismatch can
+      # be looked at (or become a platform golden) without that machine.
+      - name: Ariadne golden-image numbers
+        if: always() && matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^"cvcgl_ari_golden" start time:/ { run = 1; print "-- attempt " ++n }
+               run && /^(== |  [0-9]+ frames at |  \[(PASS|FAIL)\] [a-z_]+: matches|  skipped:|Test (Passed|Failed))/
+               /^"cvcgl_ari_golden" end time:/ { run = 0 }' "$log"
+
+      - name: Upload Ariadne golden-image diffs
+        if: failure() && matrix.kind == 'libcvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ari-golden-${{ runner.os }}-${{ matrix.name }}
+          path: build/src/cvcGL/ari_golden/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Generate coverage report
         if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
         run: |
@@ -1192,6 +1217,31 @@ jobs:
                run && /^Test (Passed|Failed)/ { print "   " $0 }
                /^"cvcgl_shadow_casters" end time:/ { run = 0; d = 0 }' "$log"
 
+      # cvcgl_ari_golden prints each document's renderer and how far its frame
+      # is from the golden (docs/ARIADNE.md section 12). --output-on-failure
+      # hides that on a pass, so print it from LastTest.log on every run: it is
+      # how a platform's drift shows before it fails. On a failure the test
+      # wrote <name>.actual.png + <name>.diff.png; keep them, so a mismatch can
+      # be looked at (or become a platform golden) without that machine.
+      - name: Ariadne golden-image numbers
+        if: always() && matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^"cvcgl_ari_golden" start time:/ { run = 1; print "-- attempt " ++n }
+               run && /^(== |  [0-9]+ frames at |  \[(PASS|FAIL)\] [a-z_]+: matches|  skipped:|Test (Passed|Failed))/
+               /^"cvcgl_ari_golden" end time:/ { run = 0 }' "$log"
+
+      - name: Upload Ariadne golden-image diffs
+        if: failure() && matrix.kind == 'libcvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ari-golden-${{ runner.os }}-${{ matrix.name }}
+          path: build/src/cvcGL/ari_golden/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Pack libcvc zip
         if: matrix.kind == 'libcvc'
         working-directory: build
@@ -1526,6 +1576,31 @@ jobs:
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `
                   -E "$stressRegex"
           }
+
+      # The same as the Linux and macOS steps: cvcgl_ari_golden's per-document
+      # numbers from LastTest.log on every run, and its actual/diff PNGs on a
+      # failure (docs/ARIADNE.md section 12).
+      - name: Ariadne golden-image numbers
+        if: always() && matrix.kind == 'libcvc'
+        shell: pwsh
+        run: |
+          $log = 'build/Testing/Temporary/LastTest.log'
+          if (-not (Test-Path $log)) { Write-Host "no $log"; exit 0 }
+          $run = $false
+          foreach ($line in Get-Content $log) {
+            if ($line -match '^"cvcgl_ari_golden" start time:') { $run = $true; Write-Host '-- attempt' }
+            elseif ($line -match '^"cvcgl_ari_golden" end time:') { $run = $false }
+            elseif ($run -and $line -match '^(== |  [0-9]+ frames at |  \[(PASS|FAIL)\] [a-z_]+: matches|  skipped:|Test (Passed|Failed))') { Write-Host $line }
+          }
+
+      - name: Upload Ariadne golden-image diffs
+        if: failure() && matrix.kind == 'libcvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ari-golden-${{ runner.os }}-${{ matrix.name }}
+          path: build/src/cvcGL/ari_golden/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Pack libcvc zip
         if: matrix.kind == 'libcvc'

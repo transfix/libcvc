@@ -1,0 +1,41 @@
+# menus.ari — golden: the main menu bar, with its first menu opened. cvcgl_ari_golden clicks
+# "File" (its pointer script for this document), so the capture shows the dropdown: a checked and
+# an unchecked state-bound item, a separator, and an action item.
+
+meta:
+  name: golden menus
+  min_libcvc: 3.6.0
+
+init: |
+  (state-set "menus.autosave" "1")
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Autosave
+        bind: menus.autosave
+      - menu_item: Verbose log
+        bind: menus.verbose
+      - separator
+      - menu_item: Reset view
+        on: (state-set "menus.log" "reset")
+      - menu_item: Quit
+        on: quit
+  - menu: View
+    items:
+      - menu_item: Wireframe
+        bind: menus.wire
+  - menu: Help
+    items:
+      - menu_item: About
+        on: (state-set "menus.log" "about")
+
+windows:
+  - window: Under the menu
+    id: under
+    pos: [24, 120]
+    size: [360, 120]
+    children:
+      - text: "The open File menu draws over this window."
+      - text: "autosave"
+        bind: menus.autosave

@@ -57,6 +57,12 @@ const void *g_uiFontMem = nullptr;
 int g_uiFontMemLen = 0;
 bool g_uiFontMemCompressed = false;
 
+// Set once ImGui's OpenGL backend has failed to initialise on a current context. Process-wide on
+// purpose: it mirrors the state of imgui's GL loader, which is itself process-global, and after
+// one failure the next Init (from this overlay or any later one) gets past the loader and crashes
+// on a null GL_VERSION string.
+bool g_glBackendFailed = false;
+
 bool file_readable(const char *path) {
   if (!path || !*path)
     return false;
@@ -324,21 +330,34 @@ struct ImGuiOverlay::Impl {
   bool applyingState = false;           // re-entry guard
   bool frameOpen = false;
   double lastTime = 0.0;
+  float fixedDt = 0.0f; // > 0: io.DeltaTime pinned (setFixedDeltaTime), else the wall clock
 
   // ---- render hooks -------------------------------------------------------
   // The GL backend can only be initialized once a context is CURRENT, which VTK
   // does not guarantee until it starts rendering — so it is done lazily on the
   // first StartEvent (in the ctor it fails with "Failed to initialize OpenGL
   // loader"), and the overlay stays inert until then.
+  //
+  // A failure with the context current is final and is not retried, by this
+  // overlay or any other (g_glBackendFailed). On a context imgui's own GL
+  // loader cannot reach (VTK's EGL fallback when there is no X display; the
+  // loader resolves through GLX) the first Init fails, and a second one gets
+  // past the loader and crashes on a null GL_VERSION string. The overlay then
+  // stays off and enabled() reports false.
   bool ensureBackend() {
     if (glReady)
       return true;
-    if (!window)
+    if (g_glBackendFailed || !window)
       return false;
     window->MakeCurrent();
     if (!window->IsCurrent())
       return false;
     glReady = ImGui_ImplOpenGL3_Init();
+    if (!glReady) {
+      g_glBackendFailed = true;
+      std::fprintf(stderr, "cvcGL: ImGui's OpenGL backend could not initialise on this GL "
+                           "context; the UI overlay is off\n");
+    }
     return glReady;
   }
 
@@ -355,6 +374,8 @@ struct ImGuiOverlay::Impl {
     io.DeltaTime = (lastTime > 0.0) ? static_cast<float>(now - lastTime) : (1.0f / 60.0f);
     if (io.DeltaTime <= 0.0f)
       io.DeltaTime = 1.0f / 60.0f;
+    if (fixedDt > 0.0f)
+      io.DeltaTime = fixedDt;
     lastTime = now;
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
@@ -714,6 +735,11 @@ void ImGuiOverlay::setTouchMode(bool on) {
 }
 bool ImGuiOverlay::touchMode() const { return m_impl->touchMode; }
 
+void ImGuiOverlay::setFixedDeltaTime(float seconds) {
+  m_impl->fixedDt = seconds > 0.0f ? seconds : 0.0f;
+}
+float ImGuiOverlay::fixedDeltaTime() const { return m_impl->fixedDt; }
+
 void ImGuiOverlay::setToggleButtonEnabled(bool on) {
   m_impl->showToggle = on;
   m_impl->syncSettings();
@@ -730,7 +756,7 @@ void ImGuiOverlay::setVisible(bool on) {
   m_impl->syncSettings();
 }
 bool ImGuiOverlay::visible() const { return m_impl->visible; }
-bool ImGuiOverlay::enabled() const { return m_impl->ready; }
+bool ImGuiOverlay::enabled() const { return m_impl->ready && !g_glBackendFailed; }
 bool ImGuiOverlay::wantsMouse() const {
   return m_impl->ready && m_impl->visible && ImGui::GetIO().WantCaptureMouse;
 }
@@ -776,6 +802,8 @@ void ImGuiOverlay::setUiScale(float) {}
 float ImGuiOverlay::uiScale() const { return 1.0f; }
 void ImGuiOverlay::setTouchMode(bool) {}
 bool ImGuiOverlay::touchMode() const { return false; }
+void ImGuiOverlay::setFixedDeltaTime(float) {}
+float ImGuiOverlay::fixedDeltaTime() const { return 0.0f; }
 void ImGuiOverlay::setToggleButtonEnabled(bool) {}
 bool ImGuiOverlay::toggleButtonEnabled() const { return false; }
 void ImGuiOverlay::setPanelsOpen(bool) {}
