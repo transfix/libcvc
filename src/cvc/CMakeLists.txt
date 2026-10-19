@@ -2124,6 +2124,15 @@ if(CVC_BUILD_LSYS_TOOLS)
   endif()
 endif()
 
+# `ari` — run a .ari document in the terminal through the FTXUI backend (roadmap §16.4). GL-free;
+# links only cvc::cvc. Without FTXUI or yaml-cpp it still builds and says what is missing.
+option(CVC_BUILD_ARI "Build the ari terminal runner for Ariadne documents" ON)
+if(CVC_BUILD_ARI)
+  add_executable(ari ${CMAKE_CURRENT_SOURCE_DIR}/tools/ari_main.cpp)
+  target_link_libraries(ari PRIVATE cvc)
+  install(TARGETS ari RUNTIME DESTINATION bin)
+endif()
+
 # Windows-specific batch file
 if(WIN32)
   file(TO_NATIVE_PATH "${Boost_LIBRARY_DIRS}" BOOST_LOCATION)

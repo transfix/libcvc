@@ -2255,12 +2255,28 @@ on_key: |
   (state-set "demo.key" "1")
 on_pointer: |
   (state-set "demo.ptr" "1")
+on_signal: |
+  (state-set "demo.sig" (get-attr event "signal"))
 windows: [ { window: W, children: [] } ]
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(r.on_tick_script.find("demo.frame"), std::string::npos);
   EXPECT_NE(r.on_key_script.find("demo.key"), std::string::npos);
   EXPECT_NE(r.on_pointer_script.find("demo.ptr"), std::string::npos);
+  EXPECT_NE(r.on_signal_script.find("demo.sig"), std::string::npos);
+}
+
+// on_signal: must be a scalar script, like the other document-level handlers.
+TEST(AriadneInit, OnSignalMustBeAScript) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+on_signal: { SIGINT: quit }
+windows: [ { window: W, children: [] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.on_signal_script.empty());
+  EXPECT_TRUE(has_warning(r, "on_signal: must be a scalar"));
 }
 
 // §4.6 widget-level on_click is captured onto the Widget (any kind), read by the walk.
