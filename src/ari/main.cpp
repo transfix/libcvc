@@ -49,6 +49,11 @@
 #ifndef _WIN32
 #include <csignal>
 #endif
+#ifdef __linux__
+#include <climits>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -240,7 +245,6 @@ int main(int argc, char **argv) {
 #endif
   cvc::ariadne::FtxuiBackend::RunExit how;
   if (tvision) {
-    // TvisionBackend::run points ncurses at the prefix's terminfo database itself.
     how = static_cast<cvc::ariadne::TvisionBackend &>(*backend).run(rt, run);
   } else {
     how = backend->run(rt, run);
