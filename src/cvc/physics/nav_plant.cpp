@@ -342,6 +342,52 @@ cvc::nav::diff::dyn_bike_params nav_plant::dyn_bike_params_at(const vehicle_desc
   return p;
 }
 
+cvc::nav::dyn4_si nav_plant::dyn4_si_of(const vehicle_desc &d, double front_stiffness,
+                                        double drive_lag, double gravity) {
+  cvc::nav::dyn4_si si;
+  si.single = dyn_bike_si_of(d, 0.9, front_stiffness, drive_lag, gravity);
+  const double hx = d.half_extents.x, hy = d.half_extents.y, hz = d.half_extents.z;
+  si.roll_inertia = d.mass * (hy * hy + hz * hz) / 3.0;
+  si.pitch_inertia = d.mass * (hx * hx + hz * hz) / 3.0;
+  // The corners' static loads: half of each axle's share of m g.
+  const double lf = si.single.cg_to_front, lr = si.single.cg_to_rear, L = lf + lr;
+  const double m_front = 0.5 * d.mass * lr / L, m_rear = 0.5 * d.mass * lf / L;
+  const double kPi = 3.14159265358979323846;
+  bool have_front = false, have_rear = false;
+  double front_x = 0.0, rear_x = 0.0;
+  for (const axle_desc &a : d.axles) {
+    const bool front = a.steered;
+    if (front ? (have_front && a.x <= front_x) : (have_rear && a.x >= rear_x))
+      continue; // the frontmost steered axle and the rearmost unsteered one, as dyn_bike_si_of
+    const double mc = front ? m_front : m_rear;
+    const double w = 2.0 * kPi * a.suspension_frequency;
+    const double k = mc * w * w, c = 2.0 * a.suspension_damping * std::sqrt(k * mc);
+    if (front) {
+      have_front = true;
+      front_x = a.x;
+      si.half_track_front = a.half_track;
+      si.spring_front = k;
+      si.damper_front = c;
+    } else {
+      have_rear = true;
+      rear_x = a.x;
+      si.half_track_rear = a.half_track;
+      si.spring_rear = k;
+      si.damper_rear = c;
+    }
+  }
+  return si;
+}
+
+cvc::nav::diff::dyn4_params nav_plant::dyn4_params_at(const vehicle_desc &d, double wheelbase) {
+  const cvc::nav::dyn4_si si = dyn4_si_of(d);
+  cvc::world_units::normalized_frame f;
+  f.scale = wheelbase / (si.single.cg_to_front + si.single.cg_to_rear);
+  cvc::nav::diff::dyn4_params p = cvc::nav::dyn4_params_of(si, f);
+  p.lr = static_cast<float>(wheelbase) - p.lf; // exactly the controller's wheelbase
+  return p;
+}
+
 cvc::nav::plant_limits nav_plant::limits(int i) const {
   const agent &a = _agents.at(static_cast<std::size_t>(i));
   cvc::nav::plant_limits l;

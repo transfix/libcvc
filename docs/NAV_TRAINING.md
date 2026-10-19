@@ -19,6 +19,7 @@ deploys on and dropped straight into the swarm.
 - [What gets trained](#what-gets-trained)
 - [The rollout switch: surrogate vs bicycle](#the-rollout-switch-surrogate-vs-bicycle)
 - [The dynamic vehicle: `dyn_bike_step` (P8a)](#the-dynamic-vehicle-dyn_bike_step-p8a)
+- [The four-wheel vehicle: `dyn4_plant` (P8d)](#the-four-wheel-vehicle-dyn4_plant-p8d)
 - [Scene source](#scene-source)
 - [CPU vs CUDA (device-resident)](#cpu-vs-cuda-device-resident)
 - [Exporting weights](#exporting-weights)
@@ -348,6 +349,78 @@ Not yet:
 - pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
   turns on only the bicycle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
+
+## The four-wheel vehicle: `dyn4_plant` (P8d)
+
+`diff::dyn4_plant` (`inc/cvc/nav/detail/dyn_4w.h`) is P8a's single-track vehicle on its four
+contact patches. `bike_control` commands it as it commands `dyn_plant`, so a policy, or cvcdbg's
+comm-network trainer, trains through per-wheel grip, the terrain under each wheel, and the load
+each corner carries.
+
+```cpp
+#include <cvc/nav/dyn_4w.h>
+cvc::nav::diff::dyn4_params p = cvc::physics::nav_plant::dyn4_params_at(vehicle_desc::roboracer(), cfg.veh_L);
+my_ground ground;   // at(wx, wy, mu, height) at a world point, templated on the scalar
+cvc::nav::diff::dyn4_bike_step(F, s, gx, gy, al, be, ga, v, p, ground, s1);
+cvc::nav::diff::dyn4_bike_step_bwd(F, s, gx, gy, al, be, ga, v, p, ground, g_s1, g_s, gal, gbe, gga);
+```
+
+**State** (14 values): P8a's `(x, y, psi, vx, vy, r)`; the body's heave `z`, roll `phi` and pitch
+`th` from its rest height on flat ground, with their rates; and the steering `delta` and drive
+force `a` behind their actuators.
+
+**One step**:
+
+- **Wheels.** Front left, front right, rear left and rear right sit at (lf, ±tf) and (-lr, ±tr)
+  from the centre of gravity. The front pair takes Ackermann angles for the virtual centre wheel:
+  tan delta_i = L tan delta / (L - y_i tan delta).
+- **Ground.** Each wheel reads its friction and terrain height from the ground sampler at its
+  world position. The plant is templated on the sampler, so the terrain's gradient flows through
+  the dual numbers too.
+- **Loads.** Each corner's spring-damper, F = Fz0 + k (height - corner height) - c (corner rate),
+  is that tire's load, floored by a softplus so a tire pushes but never pulls.
+- **Tires.** Each wheel's drive or brake share saturates at mu_i Fz_i, and Pacejka gives the
+  lateral force within the friction ellipse's remainder. (vy, r) advance by implicit Euler, each
+  tire linearized by its secant through its root (P8a's solve, four tires).
+- **Body.** (z, phi, th) advance by implicit Euler on the corners' springs and dampers, driven by
+  the ground and the tire forces' moments about the centre of gravity.
+- **The rest is P8a's:** the speed prediction and correction, the low-speed blend and the pose.
+- **Adjoint.** As P8a: the plant is written over a scalar type, and `dyn4_plant_vjp` runs it on
+  forward-mode duals.
+
+**Parameters** from the spec sheet: `nav_plant::dyn4_si_of(vehicle_desc)`.
+- P8a's numbers, plus each axle's half track.
+- The chassis box's roll and pitch inertias.
+- Each corner's spring and damper, from its axle's suspension frequency and damping ratio at the
+  corner's static load.
+- `dyn4_params_of` converts them by length exponent.
+- `dyn4_params_at(desc, wheelbase)` gives the trainer's normalized vehicle, as P8a does.
+
+**Gates** (`nav_dyn_4w_test`, the Humvee from its vehicle_desc unless noted):
+
+| Gate | Result |
+|---|---|
+| At rest on flat ground, 200 steps | stays put; the loads sum to m g |
+| Single-track limit (zero track, rigid corners) against P8a's `dyn_plant`: steer, throttle, then brake from 15 m/s | positions within 0.053 m over 95 m; velocities within 0.003 m/s |
+| A steady turn: the roll moment the springs carry against h x the lateral force | -5082 against -5082 N m; the outside wheels loaded |
+| Steady braking at 3 m/s^2: the front axle against the quasi-static m (g lr - a h) / L | 15820 against 15820 N |
+| Braking with the left wheels on mu 0.3 and the right on 0.9 | yaws toward the high-mu side (-0.16 rad in 1.8 s) |
+| An 8 cm bump under the left wheels | front left peaks at 1.37 x its static load, front right 1.11 x |
+| The plant's VJP against central differences (double; cruise, corner, braking in a turn, crawl, a bump) | worst relative 3.7e-9 |
+| One step under the controller (a RoboRacer in the trainer's city, float) | directional relative error 6.2e-5 |
+| Steady lateral acceleration, mu 0.4 / 0.9 | 0.97 / 0.95 mu g |
+| Stopping from 20 m/s, mu 0.4 / 0.9 | 47.2 / 21.5 m against v^2 / (2 mu g) = 51.0 / 22.7 m |
+| Against Jolt's Humvee (physics_vehicle_test's numbers) | skidpad 6.56 m/s^2 at mu 0.7 (Jolt 6.85); stopping 24.10 m from 20 m/s at mu 0.8 (Jolt 25.90) |
+
+A gradient check's starting positions should not be the scene's sampled starts. Those sit on
+occupancy-cell centres, which are the SDF field's grid nodes, where the bilinear field has a
+kink: a central difference there averages two cells' slopes. Jittered off the nodes, the
+controller check above went from 5e-2 to 6.2e-5.
+
+Not yet:
+- the external-force port on this plant (with transfix/libcvc#728);
+- a GRL-SNAM torch twin and its goldens;
+- the anti-roll bars, the unsprung masses and wheel spin.
 
 ## Scene source
 

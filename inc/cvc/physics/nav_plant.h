@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <cvc/core/world_units.h>
+#include <cvc/nav/dyn_4w.h>
 #include <cvc/nav/dyn_bike.h>
 #include <cvc/nav/terrain.h>
 #include <cvc/nav/vehicle_plant.h>
@@ -139,6 +140,17 @@ public:
   // normalized units per metre, where vmax 0.9 is 8.3 m/s.
   static cvc::nav::diff::dyn_bike_params dyn_bike_params_at(const vehicle_desc &d, double wheelbase,
                                                             double mu = 0.9);
+
+  // The same vehicle on four wheels (nav/dyn_4w.h, P8d): dyn_bike_si_of's numbers, plus
+  //   - the half tracks of the front (steered) and rear axles;
+  //   - the chassis box's roll and pitch inertias, m (hy^2 + hz^2) / 3 and m (hx^2 + hz^2) / 3;
+  //   - each corner's spring from its axle's suspension frequency f and the corner's static
+  //     load m_c (k = m_c (2 pi f)^2), and its damper from the damping ratio z (c = 2 z
+  //     sqrt(k m_c)). The anti-roll bars are left out.
+  static cvc::nav::dyn4_si dyn4_si_of(const vehicle_desc &d, double front_stiffness = 0.85,
+                                      double drive_lag = 0.1, double gravity = 9.80665);
+  // dyn4_si_of in a normalized frame where its wheelbase is `wheelbase`, as dyn_bike_params_at.
+  static cvc::nav::diff::dyn4_params dyn4_params_at(const vehicle_desc &d, double wheelbase);
 
   // ── the vehicles ──
   int size() const { return static_cast<int>(_agents.size()); }
