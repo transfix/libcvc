@@ -207,7 +207,7 @@ these to decide widget substitution. `owns_loop` distinguishes a **host-pumped**
 backend (the app runs the loop and calls in per frame) from a **framework-owned** one
 (the backend runs its own loop).
 
-Two backends ship:
+Three backends ship:
 
 - **`cvc::gl::ImGuiBackend`**
   ([`inc/cvc/gl/ariadne/ImGuiBackend.h`](../inc/cvc/gl/ariadne/ImGuiBackend.h)) — ImGui
@@ -244,8 +244,20 @@ Two backends ship:
   degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
   warning). `render_to_string` + `feed(TermEvent)` drive it headless (that is how
   `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
+- **`cvc::ariadne::TvisionBackend`**
+  ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
+  native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
+  and draws the chrome itself: movable, resizable, overlapping windows with close and
+  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10, F6, Alt-X,
+  Ctrl-F5). The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
+  `FtxuiBackend` in hosted mode (`Options::hosted`), which lays each window body out
+  offscreen for tvision to draw and takes that window's input in its own cells. So both
+  terminal backends share one widget engine, focus and commit rule, and the hosted mode
+  is open to any host with its own chrome. Built behind `CVC_ARIADNE_TVISION` (the flag
+  the roadmap keeps for tvision's Borland-derived licensing) when tvision, ncursesw and
+  FTXUI are found; `ari run --backend tvision` runs it.
 
-Because the core is backend-neutral, the same document renders through either backend;
+Because the core is backend-neutral, the same document renders through any backend;
 capability gaps (e.g. no `color`) drive graceful widget substitution rather than errors.
 
 ---
@@ -729,7 +741,7 @@ if (lr.has_channels_block)
 the terminal with no GL, VTK, or ImGui:
 
 ```
-ari run      doc.ari [--prefix P] [--fps N] [--no-mouse] [--component-path DIR]...
+ari run      doc.ari [--backend ftxui|tvision] [--prefix P] [--fps N] [--no-mouse] [--component-path DIR]...
 ari snapshot doc.ari [--width W] [--height H] [--frames N] [--ansi]   # print a frame
 ari check    doc.ari                                                  # load + warnings
 ```

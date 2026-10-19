@@ -39,13 +39,20 @@
 #include <cstring>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
 #include <exception>
+#include <memory>
 #include <string>
 #include <vector>
 
 #ifndef _WIN32
 #include <csignal>
+#endif
+#ifdef __linux__
+#include <climits>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -100,11 +107,31 @@ int signal_number(const std::string &name) {
 }
 #endif
 
+// tvision reads the terminal's description through ncurses. A cvcpkg prefix ships its own terminfo
+// database (share/terminfo), so point ncurses at it, ahead of the system's, unless the user already
+// chose. The trailing ':' keeps ncurses' built-in search after it.
+void use_bundled_terminfo() {
+#ifdef __linux__
+  if (std::getenv("TERMINFO_DIRS"))
+    return;
+  char exe[PATH_MAX];
+  const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+  if (n <= 0)
+    return;
+  exe[n] = '\0';
+  std::string dir(exe);
+  dir = dir.substr(0, dir.find_last_of('/')) + "/../share/terminfo";
+  struct stat st;
+  if (stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+    setenv("TERMINFO_DIRS", (dir + ":").c_str(), 0);
+#endif
+}
+
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage:\n"
-               "  ari run      <doc.ari> [--prefix P] [--fps N] [--no-mouse] "
-               "[--component-path DIR]...\n"
+               "  ari run      <doc.ari> [--backend ftxui|tvision] [--prefix P] [--fps N] "
+               "[--no-mouse] [--component-path DIR]...\n"
                "  ari snapshot <doc.ari> [--prefix P] [--width W] [--height H] [--frames N] "
                "[--ansi]\n"
                "  ari check    <doc.ari> [--prefix P]\n");
@@ -139,6 +166,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> componentPaths;
   int width = 100, height = 0, frames = 1;
   bool ansi = false;
+  bool tvision = false; // run on the tvision desktop instead of the FTXUI screen
   cvc::ariadne::FtxuiBackend::RunOptions run;
   for (int i = 2; i < argc; ++i) {
     const char *a = argv[i];
@@ -165,7 +193,14 @@ int main(int argc, char **argv) {
       run.mouse = false;
     else if (!std::strcmp(a, "--ansi"))
       ansi = true;
-    else if (a[0] != '-' && doc.empty())
+    else if (!std::strcmp(a, "--backend")) {
+      const std::string b = next();
+      if (b != "ftxui" && b != "tvision") {
+        std::fprintf(stderr, "ari: --backend is ftxui or tvision, not '%s'\n", b.c_str());
+        return 2;
+      }
+      tvision = b == "tvision";
+    } else if (a[0] != '-' && doc.empty())
       doc = a;
     else {
       std::fprintf(stderr, "ari: unexpected argument '%s'\n", a);
@@ -182,11 +217,20 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: libcvc was built without FTXUI (no terminal backend)\n");
     return 1;
   }
+  tvision = tvision && cmd == "run"; // snapshot / check always lay out with FTXUI
+  if (tvision && !cvc::ariadne::TvisionBackend::available()) {
+    std::fprintf(stderr, "ari: libcvc was built without tvision (try --backend ftxui)\n");
+    return 1;
+  }
 
   cvc::app app;
-  cvc::ariadne::FtxuiBackend backend; // declared before the AppRuntime, so it outlives it
+  // Declared before the AppRuntime, so it outlives it. A TvisionBackend is an FtxuiBackend in
+  // hosted mode; its run() is its own (see below).
+  std::unique_ptr<cvc::ariadne::FtxuiBackend> backend =
+      tvision ? std::make_unique<cvc::ariadne::TvisionBackend>()
+              : std::make_unique<cvc::ariadne::FtxuiBackend>();
   cvc::ariadne::AppRuntime rt(app, prefix);
-  rt.set_backend(backend);
+  rt.set_backend(*backend);
   for (const std::string &d : componentPaths)
     rt.add_component_path(d);
   rt.on("quit", [&] { rt.request_close(); });
@@ -208,7 +252,7 @@ int main(int argc, char **argv) {
     std::string frame;
     for (int f = 0; f < std::max(1, frames); ++f) {
       rt.drain();
-      frame = backend.render_to_string(rt.runtime(), std::max(10, width), height, ansi);
+      frame = backend->render_to_string(rt.runtime(), std::max(10, width), height, ansi);
     }
     std::fputs(frame.c_str(), stdout);
     return 0;
@@ -219,7 +263,13 @@ int main(int argc, char **argv) {
   run.on_stop = restore_traps;
   run.take_signal = take_trapped;
 #endif
-  const cvc::ariadne::FtxuiBackend::RunExit how = backend.run(rt, run);
+  cvc::ariadne::FtxuiBackend::RunExit how;
+  if (tvision) {
+    use_bundled_terminfo();
+    how = static_cast<cvc::ariadne::TvisionBackend &>(*backend).run(rt, run);
+  } else {
+    how = backend->run(rt, run);
+  }
   // The fullscreen screen is gone; anything the read lane complained about is worth seeing now.
   for (const std::string &w : rt.take_warnings())
     std::fprintf(stderr, "ari: warning: %s\n", w.c_str());

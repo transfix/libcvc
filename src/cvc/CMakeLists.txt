@@ -1255,7 +1255,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/app_runtime.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1276,6 +1276,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h
+  ../../inc/cvc/ariadne/tvision_backend.h
 )
 
 # cvc::ariadne::stream — Layer-(b) real-time in-process frame transport (roadmap
@@ -1442,6 +1443,29 @@ if(TARGET ftxui::component)
   message(STATUS "Ariadne: FTXUI terminal backend ENABLED (ftxui)")
 else()
   message(STATUS "Ariadne: FTXUI not found - terminal backend compiles to a stub")
+endif()
+
+# Ariadne tvision terminal backend — OPTIONAL (roadmap §16.5 row 5), behind CVC_ARIADNE_TVISION:
+# the feature flag the roadmap keeps for tvision's Borland-derived licensing. tvision draws the
+# native desktop (movable windows, menus, status line) and the FTXUI backend lays the windows'
+# contents out, so it needs FTXUI too. tvision ships as a static, position-independent archive with
+# no CMake package (cvcpkg `tvision`, with `ncurses` for ncursesw + the terminfo database), so it is
+# found by path and linked into libcvc privately, as BUILD-only so no absolute path reaches the
+# exported targets. Shared builds only: a static libcvc would have to export the archive.
+option(CVC_ARIADNE_TVISION "Build the Ariadne tvision backend when tvision is found" ON)
+if(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND BUILD_SHARED_LIBS)
+  find_path(CVC_TVISION_INCLUDE_DIR tvision/tv.h)
+  find_library(CVC_TVISION_LIBRARY tvision)
+  find_library(CVC_NCURSESW_LIBRARY ncursesw)
+  if(CVC_TVISION_INCLUDE_DIR AND CVC_TVISION_LIBRARY AND CVC_NCURSESW_LIBRARY)
+    target_compile_definitions(cvc PRIVATE CVC_ARIADNE_TVISION)
+    target_include_directories(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_INCLUDE_DIR}>)
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_LIBRARY}>
+                                      $<BUILD_INTERFACE:${CVC_NCURSESW_LIBRARY}>)
+    message(STATUS "Ariadne: tvision terminal backend ENABLED (${CVC_TVISION_LIBRARY})")
+  else()
+    message(STATUS "Ariadne: tvision not found - tvision backend compiles to a stub")
+  endif()
 endif()
 
 # Ariadne .ari Layer-2 JSON-Schema validation — OPTIONAL (roadmap §15). When the
