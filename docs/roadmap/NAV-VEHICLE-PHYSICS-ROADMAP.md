@@ -293,7 +293,13 @@ P4 adds three things to measure and contain the drift:
     until they first landed. The second: libm's tan, atan, tanh, expm1, pow, sin, cos, atan2 and
     asin, which differ by an ULP between libms, were replaced by `det_math.h` in everything that
     feeds the hash.
-- **P8** is in progress (P8b's first item merged); P8a and P8c are not started.
+- **P8** is in progress.
+  - P8b's first item is merged.
+  - P8a, the dynamic vehicle, is done: `dyn_bike_step` and `bike_control` (docs/NAV_TRAINING.md).
+    It passes its gates: gradient checks, the kinematic limit against `bike_step`, the skid
+    modes and the stopping envelope. GRL-SNAM's torch twin matches its goldens to 1e-9
+    (CVC-Lab/GRL-SNAM#121).
+  - Next: `rollout_kind::dynamic` in both trainers (P8b). P8c is not started.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle

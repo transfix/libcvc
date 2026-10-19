@@ -284,6 +284,53 @@ cvc::nav::terrain_config nav_plant::terrain_config_of(const vehicle_desc &d, dou
   return c;
 }
 
+cvc::nav::dyn_bike_si nav_plant::dyn_bike_si_of(const vehicle_desc &d, double mu,
+                                                double front_stiffness, double drive_lag,
+                                                double gravity) {
+  cvc::nav::dyn_bike_si si;
+  si.mass = d.mass;
+  si.yaw_inertia =
+      d.mass * (d.half_extents.x * d.half_extents.x + d.half_extents.y * d.half_extents.y) / 3.0;
+  // The axles: the frontmost steered one and the rearmost unsteered one; drive and brakes.
+  double front = 0.0, radius = 0.0, z = 0.0, travel = 0.0;
+  double brake_front = 0.0, brake_rear = 0.0;
+  bool have_front = false, front_driven = false, rear_driven = false;
+  const double rear = rear_axle_x(d);
+  for (const axle_desc &a : d.axles) {
+    radius = std::max(radius, a.wheel_radius);
+    z = std::min(z, a.z);
+    travel = std::max(travel, 0.5 * (a.suspension_min + a.suspension_max));
+    if (a.steered && (!have_front || a.x > front)) {
+      front = a.x;
+      have_front = true;
+    }
+    (a.steered ? brake_front : brake_rear) += a.max_brake_torque;
+    if (a.driven)
+      (a.steered ? front_driven : rear_driven) = true;
+  }
+  if (!have_front)
+    front = rear + d.wheelbase();
+  si.cg_to_front = std::max(1e-3, front - d.center_of_mass.x);
+  si.cg_to_rear = std::max(1e-3, d.center_of_mass.x - rear);
+  si.cg_height = std::max(0.0, -z + travel + radius + d.center_of_mass.z);
+  si.mu = mu;
+  // Pacejka: sin(C pi / 2) = tire_sliding, C in (1, 2); the peak at B alpha = tan(pi / (2 C)).
+  const double kPi = 3.14159265358979323846;
+  const double sliding = std::min(std::max(d.tire_sliding, 0.05), 0.999);
+  si.tire_C = 2.0 - 2.0 * std::asin(sliding) / kPi;
+  const double B = std::tan(kPi / (2.0 * si.tire_C)) / std::max(d.tire_peak_slip_angle, 1e-3);
+  si.tire_B_front = B * front_stiffness;
+  si.tire_B_rear = B;
+  si.front_drive = front_driven && rear_driven ? 0.5 : (front_driven ? 1.0 : 0.0);
+  si.front_brake = brake_front + brake_rear > 0.0 ? brake_front / (brake_front + brake_rear) : 0.5;
+  si.drag = 0.5 * d.air_density * d.drag_coefficient * d.frontal_area;
+  si.rolling_resistance = d.rolling_resistance;
+  si.steer_rate = d.max_steer_rate;
+  si.drive_lag = drive_lag;
+  si.gravity = gravity;
+  return si;
+}
+
 cvc::nav::plant_limits nav_plant::limits(int i) const {
   const agent &a = _agents.at(static_cast<std::size_t>(i));
   cvc::nav::plant_limits l;

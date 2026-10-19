@@ -105,6 +105,7 @@ add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
+add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
@@ -275,6 +276,7 @@ set(TEST_TARGETS
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
+  nav_dyn_bike_test
   nav_terrain_test
   nav_binding_test
   physics_parity_test
@@ -1541,6 +1543,13 @@ target_link_libraries(nav_plant_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_dyn_bike_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_terrain_test
   PRIVATE
     cvc
@@ -1857,6 +1866,7 @@ target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
@@ -2296,6 +2306,7 @@ cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
+cvc_discover_tests(nav_dyn_bike_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(physics_parity_test)
