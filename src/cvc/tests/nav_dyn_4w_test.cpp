@@ -84,8 +84,8 @@ struct bump_ground {
 
 template <class G>
 std::vector<dyn4_state<double>> drive4(const dyn4_params &p, const bike_veh &v, const G &ground,
-                                       dyn4_state<double> s, int n,
-                                       double (*dcmd)(int), double (*acmd)(int)) {
+                                       dyn4_state<double> s, int n, double (*dcmd)(int),
+                                       double (*acmd)(int)) {
   std::vector<dyn4_state<double>> out{s};
   for (int t = 0; t < n; ++t) {
     dyn4_state<double> o;

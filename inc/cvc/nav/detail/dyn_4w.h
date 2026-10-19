@@ -30,7 +30,8 @@
 // One step of hdt, given (delta_cmd, a_cmd) and a ground sampler G (G.at(wx, wy, mu, height) at a
 // world point; the plant is templated on it, so its height's gradient flows through the duals):
 //   1. Actuators, as P8a.
-//   2. Loads. Each corner's spring-damper: F_i = Fz0_i + k_i (height_i - c_i . q) - c_i' (c_i . qd),
+//   2. Loads. Each corner's spring-damper: F_i = Fz0_i + k_i (height_i - c_i . q) - c_i' (c_i .
+//   qd),
 //      Fz0_i the static share of m g, floored smoothly at zero (softplus of width fz_min m g): a
 //      tire pushes, never pulls. From the current vertical state, so load transfer lags the tire
 //      forces by one step.
@@ -115,9 +116,7 @@ CVC_HD inline float dyn4_rigid_k(float m_corner, float hdt) {
 
 CVC_HD inline float s_log(float x) { return logf(x); }
 CVC_HD inline double s_log(double x) { return log(x); }
-template <class T> CVC_HD inline dual<T> s_log(dual<T> a) {
-  return dual<T>(s_log(a.v), a.d / a.v);
-}
+template <class T> CVC_HD inline dual<T> s_log(dual<T> a) { return dual<T>(s_log(a.v), a.d / a.v); }
 
 // A smooth floor at zero, softplus at width e: e log(1 + exp(F / e)). Above 30 e it is F (the
 // rest is below 1e-13 e), so a tire under a normal load carries exactly its spring's force.
