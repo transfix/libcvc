@@ -1024,9 +1024,11 @@ that directory as the `ari-golden-<OS>-<lane>` artifact.
 4. Commit the `.ari` and the `.png` together. After a deliberate rendering change, regenerate
    the affected goldens the same way, and review the new pictures in the PR.
 
-Without a GL that rasterises, or where ImGui's GL backend cannot start on VTK's context (VTK's
-EGL fallback with no X display), the test skips. With `CVC_REQUIRE_RENDER=1`, as in the Linux
-CI job, it fails instead.
+The test skips in a build without ImGui (`CVC_ENABLE_IMGUI`) or the YAML loader, without a GL
+that rasterises, or where ImGui's GL backend cannot start on VTK's context (VTK's EGL fallback
+with no X display). With `CVC_REQUIRE_RENDER=1`, as in the Linux CI job, each of those fails
+instead. CI installs `imgui` from cvcpkg for this; before that, every CI build of cvcGL had the
+ImGui overlay compiled as inert stubs.
 
 **Gaps the goldens step around (2026-10-19):**
 

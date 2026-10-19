@@ -595,6 +595,10 @@ jobs:
           # (linux-x86_64 is what these are published for so far — #111.)
           cvcpkg install yaml-cpp nlohmann-json json-schema-validator ftxui tvision \
             --prefix "$prefix" --config release --link shared
+          # imgui: cvcGL's ImGuiOverlay and the Ariadne ImGui backend. Without it both
+          # compile to inert stubs and cvcgl_ari_golden (the backend's golden images,
+          # docs/ARIADNE.md section 12) has nothing to render.
+          cvcpkg install imgui --prefix "$prefix" --config release --link shared
 
       - name: Configure
         run: |
@@ -1096,6 +1100,10 @@ jobs:
             prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           cvcpkg install vtk --prefix "$prefix" --config release --link shared
+          # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
+          # .ari loader): without them cvcgl_ari_golden has nothing to render
+          # (docs/ARIADNE.md section 12). See the Linux job's VTK step.
+          cvcpkg install imgui yaml-cpp --prefix "$prefix" --config release --link shared
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg
@@ -1365,6 +1373,11 @@ jobs:
           }
           cvcpkg install vtk --prefix "$prefix" --config release --link shared
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install vtk failed ($LASTEXITCODE)" }
+          # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
+          # .ari loader): without them cvcgl_ari_golden has nothing to render
+          # (docs/ARIADNE.md section 12).
+          cvcpkg install imgui yaml-cpp --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui yaml-cpp failed ($LASTEXITCODE)" }
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg (Windows)

@@ -257,15 +257,21 @@ int main(int argc, char **argv) {
   const fs::path goldenDir = argv[1], outDir = argv[2];
   std::vector<std::string> only(argv + 3, argv + argc);
   cvcgl_test::disableSwapThrottle();
+  // A build with nothing to render skips, except where CVC_REQUIRE_RENDER says this job renders:
+  // there a missing ImGui or YAML loader is a failure, never a quiet pass.
+  auto skip = [](const std::string &why) {
+    if (cvcgl_golden::envFlag("CVC_REQUIRE_RENDER"))
+      check(false, "CVC_REQUIRE_RENDER is set, but " + why);
+    else
+      std::printf("  skipped: %s\n", why.c_str());
+    return cvcgl_test::finish("cvcgl_ari_golden");
+  };
 
 #ifndef CVC_ENABLE_IMGUI
-  std::printf("  skipped: cvcGL was built without CVC_ENABLE_IMGUI (no ImGui backend to render)\n");
-  return cvcgl_test::finish("cvcgl_ari_golden");
+  return skip("cvcGL was built without CVC_ENABLE_IMGUI (no ImGui backend to render)");
 #else
-  if (!cvc::gl::ariadne::AriRuntime::have_yaml()) {
-    std::printf("  skipped: libcvc was built without the .ari YAML loader\n");
-    return cvcgl_test::finish("cvcgl_ari_golden");
-  }
+  if (!cvc::gl::ariadne::AriRuntime::have_yaml())
+    return skip("libcvc was built without the .ari YAML loader");
   const fs::path font = goldenDir / "fonts" / "LiberationSans-Regular.ttf";
   if (!check(fs::exists(font), "the pinned UI font is present", font.string()))
     return cvcgl_test::finish("cvcgl_ari_golden");
@@ -291,15 +297,9 @@ int main(int argc, char **argv) {
   for (const fs::path &doc : docs) {
     if (!only.empty() && std::find(only.begin(), only.end(), doc.stem().string()) == only.end())
       continue;
-    if (!runDocument(doc, goldenDir, outDir, update)) {
-      const char *why = "the ImGui overlay could not initialise its OpenGL backend on this context "
-                        "(e.g. VTK's EGL fallback with no X display)";
-      if (cvcgl_golden::envFlag("CVC_REQUIRE_RENDER"))
-        check(false, std::string("CVC_REQUIRE_RENDER is set, but ") + why);
-      else
-        std::printf("  skipped: %s\n", why);
-      break;
-    }
+    if (!runDocument(doc, goldenDir, outDir, update))
+      return skip("the ImGui overlay could not initialise its OpenGL backend on this context "
+                  "(e.g. VTK's EGL fallback with no X display)");
   }
   return cvcgl_test::finish("cvcgl_ari_golden");
 #endif
