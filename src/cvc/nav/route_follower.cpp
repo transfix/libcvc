@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cvc/nav/grid_nav.h>
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
 
@@ -113,6 +114,43 @@ void route_follower::apply() {
   const double max_steer = _o.max_steer > 0.0 ? _o.max_steer : cfg.veh.delta_max;
   const auto to_norm_x = [&](double x) { return static_cast<float>((x - cfg.cx) * scale); };
   const auto to_norm_y = [&](double y) { return static_cast<float>((y - cfg.cy) * scale); };
+  // Line of sight on the sim's own map (its belief plane 0), between world points.
+  const std::uint8_t *occ = _sim.belief_occ(0);
+  const double cdx = (cfg.max_x - cfg.min_x) / std::max(1, cfg.cols - 1),
+               cdy = (cfg.max_y - cfg.min_y) / std::max(1, cfg.rows - 1);
+  const auto cell = [&](double v, double lo, double d, int n) {
+    return std::min(std::max(static_cast<int>(std::lround((v - lo) / d)), 0), n - 1);
+  };
+  const auto visible = [&](double ax, double ay, double bx, double by) {
+    if (!occ)
+      return true;
+    return line_of_sight(occ, cfg.rows, cfg.cols, cell(ay, cfg.min_y, cdy, cfg.rows),
+                         cell(ax, cfg.min_x, cdx, cfg.cols), cell(by, cfg.min_y, cdy, cfg.rows),
+                         cell(bx, cfg.min_x, cdx, cfg.cols));
+  };
+
+  // Pure pursuit about the rear axle along poses [k, e] in a gear, slowing to stop at e.
+  const auto pursue = [&](int i, double x, double y, double th, double v, const agent &a, int k,
+                          int e, int gear, double speed) {
+    const std::vector<route_pose> &p = a.poses;
+    const double step = std::max(1e-6, dist(p[0].x, p[0].y, p[1].x, p[1].y));
+    const double look = std::max(wheelbase, 1.5 * step);
+    double tx = 0.0, ty = 0.0;
+    along(p, k, e, look, tx, ty);
+    const double phi = th + (gear < 0 ? kPi : 0.0); // the direction of travel
+    const double dx = tx - x, dy = ty - y;
+    const double lx = std::cos(phi) * dx + std::sin(phi) * dy;
+    const double ly = -std::sin(phi) * dx + std::cos(phi) * dy;
+    const double kappa = 2.0 * ly / std::max(lx * lx + ly * ly, 1e-9);
+    double steer = std::atan(kappa * wheelbase);
+    if (gear < 0)
+      steer = -steer; // backing up, a left steer swings the travel direction right
+    steer = std::min(std::max(steer, -max_steer), max_steer);
+    const double to_end = remaining(p, k, e) + (k == e ? dist(x, y, p[e].x, p[e].y) : 0.0);
+    const double v_want = gear * std::min(speed, std::sqrt(2.0 * _o.accel * std::max(0.0, to_end)));
+    const double acc = std::min(std::max((v_want - v) / dt, -_o.accel), _o.accel);
+    _sim.override_command(i, static_cast<float>(steer), static_cast<float>(acc * scale));
+  };
 
   for (int i = 0; i < n && i < static_cast<int>(_agents.size()); ++i) {
     agent &a = _agents[static_cast<std::size_t>(i)];
@@ -142,20 +180,38 @@ void route_follower::apply() {
 
     if (last && gear > 0) {
       // The trained drive's leg: a carrot along the route, and the drive parks at its end.
-      const double look = _o.lookahead > 0.0 ? _o.lookahead : 3.0 * step;
+      // The carrot sits beyond the drive's reach_tol (or it parks at once), and the leg is done
+      // where the drive parks.
+      const double reach = cfg.reach_tol / scale;
+      const double look = std::max(_o.lookahead > 0.0 ? _o.lookahead : 3.0 * step, 2.0 * reach);
       const int ahead = std::max(1, static_cast<int>(std::lround(look / step)));
-      if (a.carrot < 0 || (a.carrot < e && 2 * (a.carrot - a.progress) <= ahead)) {
-        a.carrot = std::min(e, a.progress + ahead);
-        _sim.retarget(i, to_norm_x(p[a.carrot].x), to_norm_y(p[a.carrot].y));
-      }
-      if (dist(x, y, p[e].x, p[e].y) <= tol)
+      if (dist(x, y, p[e].x, p[e].y) <= std::max(tol, reach)) {
         a.done = true;
+        continue;
+      }
+      // The farthest pose within the lookahead the agent can see: the drive heads straight
+      // for its carrot, so one behind a corner would stall it against the building.
+      if (a.carrot < 0 || (a.carrot < e && 2 * (a.carrot - a.progress) <= ahead) ||
+          !visible(x, y, p[a.carrot].x, p[a.carrot].y)) {
+        int c = std::min(e, a.progress + ahead);
+        while (c > a.progress + 1 && !visible(x, y, p[c].x, p[c].y))
+          --c;
+        if (c < e && dist(x, y, p[c].x, p[c].y) < 2.0 * reach) {
+          // It cannot see past the drive's reach (a tight corner, a wall alongside): the drive
+          // would park at so near a carrot. Take this stretch of the route geometrically.
+          a.carrot = -1;
+          pursue(i, x, y, th, v, a, a.progress, e, 1, _o.pursuit_speed);
+          continue;
+        }
+        if (c != a.carrot) {
+          a.carrot = c;
+          _sim.retarget(i, to_norm_x(p[c].x), to_norm_y(p[c].y));
+        }
+      }
       continue;
     }
 
     // A manoeuvre leg, driven geometrically to its end.
-    const double to_end =
-        remaining(p, a.progress, e) + (a.progress == e ? dist(x, y, p[e].x, p[e].y) : 0.0);
     const bool at_end = dist(x, y, p[e].x, p[e].y) <= tol;
     if (at_end) {
       // Stop here, then take the next leg (or, at the route's end, hand the agent to the drive).
@@ -172,23 +228,7 @@ void route_follower::apply() {
       }
       continue;
     }
-    // Pure pursuit in the leg's gear, about the rear axle.
-    const double look = std::max(wheelbase, 1.5 * step);
-    double tx = 0.0, ty = 0.0;
-    along(p, a.progress, e, look, tx, ty);
-    const double phi = th + (gear < 0 ? kPi : 0.0); // the direction of travel
-    const double dx = tx - x, dy = ty - y;
-    const double lx = std::cos(phi) * dx + std::sin(phi) * dy;
-    const double ly = -std::sin(phi) * dx + std::cos(phi) * dy;
-    const double kappa = 2.0 * ly / std::max(lx * lx + ly * ly, 1e-9);
-    double steer = std::atan(kappa * wheelbase);
-    if (gear < 0)
-      steer = -steer; // backing up, a left steer swings the travel direction right
-    steer = std::min(std::max(steer, -max_steer), max_steer);
-    const double v_want =
-        gear * std::min(_o.manoeuvre_speed, std::sqrt(2.0 * _o.accel * std::max(0.0, to_end)));
-    const double acc = std::min(std::max((v_want - v) / dt, -_o.accel), _o.accel);
-    _sim.override_command(i, static_cast<float>(steer), static_cast<float>(acc * scale));
+    pursue(i, x, y, th, v, a, a.progress, e, gear, _o.manoeuvre_speed);
   }
 }
 

@@ -232,7 +232,14 @@ Every route turns no tighter than the vehicle can, and keeps its body clear of t
 legs at its cusps, and each leg is driven in one gear. Call `apply()` before each `step()`:
 
 - **The last forward leg** belongs to the trained drive. The agent is retargeted to a carrot
-  `lookahead` along the route, so it keeps off walls and parks at the end as it always has.
+  `lookahead` along the route, so it keeps off walls and parks at the end as it always has:
+  - The carrot is at least twice the sim's `reach_tol` ahead; nearer, the drive parks at it.
+  - It is the farthest pose within the lookahead the agent can see on the sim's map. The drive
+    heads straight for its carrot, so one behind a corner stalls it against the building.
+  - It moves on only once the agent is halfway to it, since a retarget resets the drive's
+    carrot state.
+  - Where the agent cannot see past the drive's reach (a tight corner, a wall alongside), that
+    stretch is driven geometrically, as below, at `pursuit_speed` (5 m/s).
 - **A leg that ends at a cusp** is driven geometrically: backing up, or the forward leg of a
   multi-point turn. It uses pure pursuit about the rear axle, in the leg's gear, at
   `manoeuvre_speed` (1.5 m/s). It slows so it stops at the cusp, then takes the next leg.
@@ -254,5 +261,27 @@ Measured, a Humvee facing the end of an 8 m dead end with its goal behind it out
 | Jolt plant (`nav_plant_test`), the plant's own footprint and 6.71 m radius | 55 m from the goal after 90 s | Backs out 48 m to the goal in 31 s |
 | Kinematic arm, to a goal round the corner (heuristic x1) | — | Backs out 22.5 m, stops at the cusp, then the drive takes it forward to the goal |
 
-Next (P9 R3): the cvcGL finale and cvcdbg plan their vehicles' routes with it, and replan a
-vehicle that wedges.
+### Vehicle routes in the finale (P9 R3)
+
+On a vehicle plant (`--plant humvee`), `nav_finale` replaces its A* spines with vehicle routes:
+
+- The routes use the plant's turning circle and body (`plant_limits`, `plant_plan_of`), and
+  `route_follower` drives them. The spine drawn is the vehicle's route.
+- Act 2 replans a vehicle when its target has moved off its route (8% of the scene) or its
+  route is done. A Hybrid A* for every vehicle at every replan would cost the frame.
+- A vehicle still for 4 s short of its goal is replanned from where it is.
+- `NAV_DBG=1` prints the follower's state every 20 frames.
+
+The kinematic arm keeps its A* spines and waypoint retargeting.
+
+Measured on Austin, 900 frames with 8 vehicles (`--plant`, the scene's own targets):
+
+| | Driven | Vehicles under 50 m in the last 300 frames |
+|---|---|---|
+| Kinematic arm, A* spines | 7949 m | 2 of 8 |
+| Humvee, A* spines | 2035 m | 7 of 8: wedged in corners at full lock |
+| Humvee, vehicle routes | 5387 m | 0 of 8 |
+
+The 8 routes take 220-460 ms to plan at the start, and about 4.5 s over the run.
+
+Next: cvcdbg plans its vehicles' routes the same way, once a libcvc release has them.
