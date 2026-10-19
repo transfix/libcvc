@@ -209,11 +209,15 @@ jobs:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
         run: |
           EX_INST="${{ github.workspace }}/wasm-examples-inst"
-          # The nav demos preload these into MEMFS (declared any-platform data deps).
+          # The nav demos preload these into MEMFS (declared any-platform data deps). They are
+          # published as platform `any`, link `shared`, and the scene and vehicle bundles as arch
+          # x86_64 rather than noarch, so the tuple has to say so: `--platform wasm-mt` matches no
+          # bundle ("no bundles found ... for this platform tuple"), which is how this step failed
+          # in the 2026-10-19 dry run. The noarch weights resolve under the same flags.
           for p in scene-austin-south-small grl-snam-weights vehicle-humvee; do
             echo "=== install data: $p ==="
-            cvcpkg install "$p" --platform wasm-mt --prefix "$WASM_DEPS" \
-              --no-fallback-to-source 2>&1 | tail -2 \
+            cvcpkg install "$p" --platform any --arch x86_64 --config release --link shared \
+              --prefix "$WASM_DEPS" --no-fallback-to-source 2>&1 | tail -2 \
               || { echo "::error::failed to install data package $p"; exit 1; }
           done
           # The trained weights + Austin scene are ESSENTIAL: without them
