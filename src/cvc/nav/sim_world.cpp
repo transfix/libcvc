@@ -1105,11 +1105,12 @@ void sim_world::plant_read() {
     pl_latency_[i] = l.latency;
     pl_a_brake_[i] = l.a_brake;
     pl_steer_rate_[i] = l.steer_rate;
-    // The vehicle's own envelope, or nav's (cfg.veh, and its per-agent columns).
+    // The vehicle's own envelope, or nav's (cfg.veh, and its per-agent columns). Nav's vmax is a
+    // speed limit too (`nav.vehicle.vmax`), so the top speed is the lower of the two.
     const float a_max_nav = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
     const float vmax_nav = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
     pl_a_max_[i] = l.a_max > 0.0f ? l.a_max : a_max_nav;
-    pl_vmax_[i] = l.vmax > 0.0f ? l.vmax : vmax_nav;
+    pl_vmax_[i] = l.vmax > 0.0f ? std::min(l.vmax, vmax_nav) : vmax_nav;
     pl_a_lat_[i] = l.a_lat > 0.0f ? l.a_lat : cfg_.veh.a_lat_max;
     pl_has_a_max_ = pl_has_a_max_ || l.a_max > 0.0f;
     pl_has_vmax_ = pl_has_vmax_ || l.vmax > 0.0f;

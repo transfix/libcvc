@@ -71,7 +71,7 @@ struct nav_plant_options {
   cvc::nav::plant_modulation modulation;
   // The navigator plans with each vehicle's own envelope and size (limits()):
   //   - its acceleration, accel_margin x max_accel;
-  //   - its top speed, max_speed (nav's vmax for a vehicle without one);
+  //   - its top speed, max_speed, but no more than nav's vmax (a speed limit);
   //   - its cornering, lateral_g in g, but at most tip_margin of its static stability factor
   //     (half its track over its centre of gravity's height) in g;
   //   - its size: the chassis box and the wheels, from the rear axle.

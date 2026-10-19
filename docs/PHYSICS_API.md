@@ -559,7 +559,8 @@ metric sizes for no vehicle in particular. At Austin's 0.05 per metre, nav's def
 disc, 18 m/s and 30 m/s^2. `limits()` gives `sim_world`:
 
 - the acceleration, `accel_margin` (0.8) x `max_accel`;
-- the top speed, `max_speed` (nav's `vmax` for a vehicle without one);
+- the top speed, `max_speed`, but no more than nav's `vmax`: that is a speed limit as well
+  (`nav.vehicle.vmax` in the state tree), so it still caps a plant's agents;
 - the cornering limit, `lateral_g` (0.5) g, but at most `tip_margin` (0.8) of the static
   stability factor (half the track over the centre of gravity's height) in g;
 - the body: half its width, and how far the chassis box and the wheels reach ahead of and behind
@@ -571,8 +572,8 @@ from tail to nose. The discs are inset 0.7 half-widths at the ends and are 1.3 h
 so they cover the corners; they act at `body_gain` 1/4. They replace nav's disc or footprint.
 `plant_plan_of(i)` reads them back.
 
-- On a Humvee: 2.0 m/s^2, 24.6 m/s, 0.5 g, and four discs of 1.42 m from 0.0 to 3.3 m ahead of
-  the rear axle.
+- On a Humvee: 2.0 m/s^2, 24.6 m/s (18 m/s under nav's Austin defaults), 0.5 g, and four discs
+  of 1.42 m from 0.0 to 3.3 m ahead of the rear axle.
 - `nav_plant_test`'s PlansWithTheVehiclesOwnEnvelope drives a sim_world sized with nav's defaults
   through a hard turn. On the vehicle's plan it commands at most 2.0 m/s^2 and 0.50 g; on nav's
   own numbers, 30 m/s^2 and 0.98 g.

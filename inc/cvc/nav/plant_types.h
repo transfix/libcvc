@@ -63,7 +63,7 @@ struct plant_limits {
   float latency = 0.0f;    // s: from a command to the vehicle's response, beyond the tick
   // The vehicle's own envelope, in place of veh_params' a_max, vmax and a_lat_max.
   float a_max = 0.0f; // normalized / s^2: the acceleration the drive plans with
-  float vmax = 0.0f;  // normalized / s: the top speed
+  float vmax = 0.0f;  // normalized / s: the top speed (sim_world caps it at veh_params' vmax)
   float a_lat = 0.0f; // normalized / s^2: the lateral acceleration it corners at
   // The vehicle's size, in place of nav's footprint: half its width, and how far its body
   // reaches ahead of and behind the rear axle (normalized). With a width, the drive covers the

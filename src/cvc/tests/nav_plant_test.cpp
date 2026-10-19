@@ -295,9 +295,9 @@ TEST(NavPlant, PlansWithTheVehiclesOwnEnvelope) {
   std::printf("  footprint: %d discs of %.2f m at %.2f, %.2f, %.2f, %.2f m from the rear axle\n",
               sim_world::kPlantDiscs, on.body_rr / kS, on.body_offsets[0] / kS,
               on.body_offsets[1] / kS, on.body_offsets[2] / kS, on.body_offsets[3] / kS);
-  // The plan the drive used is the vehicle's.
+  // The plan the drive used is the vehicle's, but for a top speed capped at nav's 18 m/s.
   EXPECT_NEAR(on.a_max, 0.8 * d.max_accel * kS, 1e-6);
-  EXPECT_NEAR(on.vmax, 24.6 * kS, 1e-6);
+  EXPECT_NEAR(on.vmax, 18.0 * kS, 1e-6);
   EXPECT_NEAR(on.a_lat, 0.5 * kG * kS, 1e-6);
   EXPECT_TRUE(on.footprint);
   EXPECT_FALSE(off.footprint);
@@ -308,7 +308,7 @@ TEST(NavPlant, PlansWithTheVehiclesOwnEnvelope) {
   EXPECT_GE(on.body_rr, half_width * kS - 1e-6);
   // And it drove within the vehicle's envelope, where nav's numbers asked for more.
   EXPECT_LE(acc_on, 0.8 * d.max_accel + 1e-3);
-  EXPECT_LE(v_on, 24.6 + 0.5);
+  EXPECT_LE(v_on, 18.0 + 0.5);
   EXPECT_LE(g_on, 0.55);
   EXPECT_GT(acc_off, 2.0 * acc_on);
   EXPECT_GT(g_off, g_on + 0.2);
