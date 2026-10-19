@@ -526,6 +526,13 @@ add_executable(cvcgl_light_state_thread test/cvcgl_light_state_thread.cpp)
 target_link_libraries(cvcgl_light_state_thread PRIVATE cvcGL)
 add_test(NAME cvcgl_light_state_thread COMMAND cvcgl_light_state_thread)
 
+# A node with no scene must not run its handlers on another thread: the
+# publisher's worker can flush a stale pose into a node that addGraphicsChild()
+# has constructed but not yet attached.
+add_executable(cvcgl_unattached_node_thread test/cvcgl_unattached_node_thread.cpp)
+target_link_libraries(cvcgl_unattached_node_thread PRIVATE cvcGL)
+add_test(NAME cvcgl_unattached_node_thread COMMAND cvcgl_unattached_node_thread)
+
 # A node's own pose, published and flushed back from off the owner thread, must
 # not rewind it. Guards the echo check in GraphicsNode::handleStateChanged.
 add_executable(cvcgl_pose_echo test/cvcgl_pose_echo.cpp)
@@ -1024,7 +1031,8 @@ get_property(_cvcgl_gl_tests DIRECTORY PROPERTY TESTS)
 list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
-  cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo cvcgl_physics_scene_binding
+  cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
+  cvcgl_physics_scene_binding
   cvcgl_world_geometry_nodes cvcgl_ariadne_physics
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
