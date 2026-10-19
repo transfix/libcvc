@@ -50,6 +50,15 @@
 #include <cvc/gl/capture/camera_source.h> // --camera: a real SDL3 camera as the self-view source
 #endif
 
+#if CVC_ENABLE_GRPC
+#include <chrono>
+#include <cvc/ariadne/conference/room_media_intrinsics.h> // register_room_media_intrinsics
+#include <cvc/ariadne/stream/stream_bridge.h>             // the media bridge
+#include <cvc/state/state_cluster_shard.h>                // the room-tree cluster shard
+#include <cvc/state/state_stream_transport_grpc.h>        // stream_transport_grpc (media plane)
+#include <cvc/state/state_transport_grpc.h>               // state_transport_grpc (room-tree plane)
+#endif
+
 using cvc::gl::CameraController;
 using cvc::gl::ImGuiBackend;
 using cvc::gl::ImGuiOverlay;
@@ -65,6 +74,13 @@ int main(int argc, char **argv) {
   long frames = 0;
   int width = 1024, height = 768;
   std::vector<std::string> componentPaths;
+  // Clustering (live multi-instance conference, roadmap §4b/§7). Giving --node-id turns on the
+  // cross-process room cluster: this instance serves its room-tree state at --state-listen and (if
+  // --state-peer is given) dials that peer; media rides a gRPC bridge at --media-listen (ephemeral
+  // is fine — the resolved address is advertised through the room tree). --peer-id tells the demo
+  // .ari whose streams to subscribe to. Without --node-id the host is the single-node demo.
+  std::string nodeId, roomId = "standup", peerId;
+  std::string stateListen, statePeer, mediaListen = "127.0.0.1:0";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -83,9 +99,22 @@ int main(int argc, char **argv) {
       height = std::atoi(next("768"));
     else if (!std::strcmp(a, "--component-path"))
       componentPaths.push_back(next(""));
+    else if (!std::strcmp(a, "--node-id"))
+      nodeId = next("");
+    else if (!std::strcmp(a, "--room"))
+      roomId = next("standup");
+    else if (!std::strcmp(a, "--peer-id"))
+      peerId = next("");
+    else if (!std::strcmp(a, "--state-listen"))
+      stateListen = next("");
+    else if (!std::strcmp(a, "--state-peer"))
+      statePeer = next("");
+    else if (!std::strcmp(a, "--media-listen"))
+      mediaListen = next("127.0.0.1:0");
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
   }
+  const bool clustered = !nodeId.empty();
   cvc::ariadne::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen || !png.empty();
   if (capturing && frames <= 0)
@@ -97,7 +126,10 @@ int main(int argc, char **argv) {
   }
 
   cvc::app app;
-  SceneGraph sg(app, "conference");
+  // When clustered, scope this instance's document (and thus its self-stream tokens
+  // <scope>.streams.<id>) by the node id, so two participants that both open a stream called
+  // "camera" get DISTINCT tokens and a subscriber's proxy never collides with its own stream.
+  SceneGraph sg(app, clustered ? nodeId : std::string("conference"));
   SceneRenderer view(sg, width, height, offscreen, "main");
   view.setBackground(0.06, 0.07, 0.09);
   CameraController cam(view);
@@ -122,6 +154,56 @@ int main(int argc, char **argv) {
   cvc::gl::ariadne::register_media_intrinsics(); // (stream-capture-camera / -audio / play-audio)
   cvc::gl::ariadne::register_stream_node_type(); // type: stream (video-on-quad scene node)
   cvc::gl::ariadne::register_stream_view_widget(backend, app); // type: stream_view (ImGui window)
+
+  // ── Clustering (§4b/§7): join a cross-process room cluster so two instances can see/hear each
+  // other. Owned at main scope so they outlive the documents; explicitly stopped at teardown. ──
+#if CVC_ENABLE_GRPC
+  std::unique_ptr<cvc::state_transport_grpc> state_tp;
+  std::unique_ptr<cvc::state_cluster_shard> shard;
+  std::unique_ptr<cvc::stream_transport_grpc> media_tp;
+  std::unique_ptr<sx::stream_bridge> bridge;
+  if (clustered) {
+    if (stateListen.empty()) {
+      std::printf("[ariadne_conference] FATAL: --node-id needs --state-listen <addr>\n");
+      return 1;
+    }
+    // Room-tree (state) plane: serve this node's shard + optionally dial a peer. One bidirectional
+    // stream carries replication both ways, and backfill-on-connect converges a late joiner.
+    state_tp = std::make_unique<cvc::state_transport_grpc>();
+    state_tp->start(stateListen, nodeId, "conf");
+    shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", nodeId);
+    shard->attach();
+    shard->install_as_default(); // room-join/-publish derive the pid from the default shard's node
+                                 // id
+    state_tp->register_shard(shard.get());
+    if (!statePeer.empty() &&
+        !state_tp->connect_to_peer(statePeer, std::chrono::milliseconds(4000)))
+      std::printf("[ariadne_conference] WARN: could not dial state peer %s (still serving)\n",
+                  statePeer.c_str());
+    // Media plane: a gRPC stream bridge. room-publish serve_port()s on it; room-subscribe pulls a
+    // peer's stream from the endpoint the peer advertised in the room tree.
+    media_tp = std::make_unique<cvc::stream_transport_grpc>();
+    bridge = std::make_unique<sx::stream_bridge>(app, *media_tp);
+    media_tp->start(mediaListen);
+    const std::string media_endpoint = media_tp->listen_address();
+    ari::conference::register_room_media_intrinsics(app, *bridge, media_endpoint);
+    // Tell the demo .ari who it is (scoped to this document's prefix = nodeId).
+    std::vector<std::string> ce;
+    ari::run_init(app, sg.getStatePrefix(),
+                  "(state-set \"conf.room\" \"" + roomId + "\") (state-set \"conf.self\" \"" +
+                      nodeId + "\") (state-set \"conf.peer\" \"" + peerId + "\")",
+                  &ce);
+    std::printf(
+        "[ariadne_conference] clustered: node='%s' room='%s' peer='%s' | state=%s dial=%s | "
+        "media=%s\n",
+        nodeId.c_str(), roomId.c_str(), peerId.c_str(), state_tp->listen_address().c_str(),
+        statePeer.empty() ? "(none)" : statePeer.c_str(), media_endpoint.c_str());
+  }
+#else
+  if (clustered)
+    std::printf(
+        "[ariadne_conference] --node-id needs a CVC_ENABLE_GRPC build; running single-node.\n");
+#endif
 
   // Load the document, realize its scene. NOTE: no stream is opened here — the .ari opens and
   // captures from its on_tick program lane (stream-open needs the document scope, which the init:
@@ -205,7 +287,11 @@ int main(int argc, char **argv) {
     touch.update();
     cam.update(dt);
     rt.drain(); // runs the on_tick program lane: (stream-open) + (stream-capture-*) +
-                // (stream-play-audio)
+                // (stream-play-audio) + (when clustered) (room-join/-publish/-subscribe)
+#if CVC_ENABLE_GRPC
+    if (state_tp)
+      state_tp->pump_all(); // publish this frame's room-tree writes to the peer
+#endif
     ari::sync_scene_visibility(app, realized.visibility);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), capturing ? dt : -1.0);
   };
@@ -228,9 +314,45 @@ int main(int argc, char **argv) {
     }
   }
 
-  // ── Verify the DSL opened the streams (the host opened none) ──
-  // The media verbs register channels in the app registry; the reactive stream_view reads the same.
-  // The DSL opens streams under <document-root>.streams.<id>; this host's document root is the
+  if (live_cam)
+    live_cam->close(); // join the camera producer before teardown (render-thread contract)
+
+#if CVC_ENABLE_GRPC
+  // Stop the media pullers + transports BEFORE the Runtime tears down (it closes the pulled
+  // proxies), so no puller feeds a proxy as it closes; then the room-tree cluster.
+  if (bridge)
+    bridge->stop();
+  if (media_tp)
+    media_tp->stop();
+  if (state_tp) {
+    if (shard)
+      state_tp->unregister_shard(shard.get());
+    state_tp->stop();
+  }
+  if (shard)
+    shard->detach();
+  if (clustered) {
+    // Report what converged: the replicated roster, and whether the peer's streams were pulled.
+    std::printf("[ariadne_conference] roster:");
+    for (const ari::conference::room_participant &p : ari::conference::room_roster(app, roomId))
+      std::printf(" %s(%s)", p.pid.c_str(), p.name.c_str());
+    std::printf("\n");
+    auto &reg = sx::stream_registry::for_app(app);
+    int pulled = 0;
+    for (const char *k : {"camera", "audio"}) {
+      const std::string tok = peerId + ".streams." + k;
+      const bool live = reg.lookup(tok) != nullptr;
+      std::printf("[ariadne_conference] peer %s %s\n", tok.c_str(), live ? "SUBSCRIBED" : "(not yet)");
+      pulled += live ? 1 : 0;
+    }
+    std::printf("[ariadne_conference] node '%s': %d/2 peer streams subscribed\n", nodeId.c_str(),
+                pulled);
+    return pulled == 2 ? 0 : 3;
+  }
+#endif
+
+  // ── Verify the single-node demo opened its two streams (the host opened none) ──
+  // The DSL opens streams under <document-root>.streams.<id>; the single-node document root is the
   // SceneGraph state prefix ("conference"), so the tokens are conference.streams.<id>.
   auto &reg = sx::stream_registry::for_app(app);
   int opened = 0;
@@ -240,7 +362,5 @@ int main(int argc, char **argv) {
     opened += live ? 1 : 0;
   }
   std::printf("[ariadne_conference] %d/2 streams opened from the .ari program lane\n", opened);
-  if (live_cam)
-    live_cam->close(); // join the camera producer before teardown (render-thread contract)
   return opened == 2 ? 0 : 2;
 }
