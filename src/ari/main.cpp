@@ -49,11 +49,6 @@
 #ifndef _WIN32
 #include <csignal>
 #endif
-#ifdef __linux__
-#include <climits>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 namespace {
 
@@ -106,26 +101,6 @@ int signal_number(const std::string &name) {
   return 0;
 }
 #endif
-
-// tvision reads the terminal's description through ncurses. A cvcpkg prefix ships its own terminfo
-// database (share/terminfo), so point ncurses at it, ahead of the system's, unless the user already
-// chose. The trailing ':' keeps ncurses' built-in search after it.
-void use_bundled_terminfo() {
-#ifdef __linux__
-  if (std::getenv("TERMINFO_DIRS"))
-    return;
-  char exe[PATH_MAX];
-  const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-  if (n <= 0)
-    return;
-  exe[n] = '\0';
-  std::string dir(exe);
-  dir = dir.substr(0, dir.find_last_of('/')) + "/../share/terminfo";
-  struct stat st;
-  if (stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
-    setenv("TERMINFO_DIRS", (dir + ":").c_str(), 0);
-#endif
-}
 
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
@@ -265,7 +240,7 @@ int main(int argc, char **argv) {
 #endif
   cvc::ariadne::FtxuiBackend::RunExit how;
   if (tvision) {
-    use_bundled_terminfo();
+    // TvisionBackend::run points ncurses at the prefix's terminfo database itself.
     how = static_cast<cvc::ariadne::TvisionBackend &>(*backend).run(rt, run);
   } else {
     how = backend->run(rt, run);
