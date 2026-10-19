@@ -48,8 +48,9 @@ public:
   produced_frame fill(std::uint8_t *buf, std::size_t cap) override {
     if (!inner_)
       return {};
-    // Always drain the inner source first (keep a device / its clock live across a mute), then blank
-    // the slab in place when muted so peers keep receiving well-formed frames (silence / black).
+    // Always drain the inner source first (keep a device / its clock live across a mute), then
+    // blank the slab in place when muted so peers keep receiving well-formed frames (silence /
+    // black).
     produced_frame pf = inner_->fill(buf, cap);
     if (pf.bytes > 0 && muted_.load(std::memory_order_acquire))
       std::memset(buf, 0, pf.bytes);

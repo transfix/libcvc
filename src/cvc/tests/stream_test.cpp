@@ -381,7 +381,8 @@ TEST(MutedSource, PassesThroughThenBlanksThenPassesAgain) {
 }
 
 TEST(MutedSource, PropagatesStopFromInner) {
-  // A spent inner source (stop=true) must still end the producer loop through the gate, muted or not.
+  // A spent inner source (stop=true) must still end the producer loop through the gate, muted or
+  // not.
   std::atomic<bool> flag{true};
   muted_source m(std::make_unique<test_source>(/*bytes=*/8, /*limit=*/1), flag);
   std::vector<std::uint8_t> buf(8, 0x00);

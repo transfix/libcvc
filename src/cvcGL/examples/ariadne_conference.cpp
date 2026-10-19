@@ -129,13 +129,14 @@ int main(int argc, char **argv) {
   // is discovered by everyone else through the replicated roster (no --peer-id needed).
   if (nodeId.empty() && (!statePeer.empty() || !stateListen.empty())) {
 #ifdef _WIN32
-    // COMPUTERNAME is reliably set on Windows (unlike POSIX $HOSTNAME); avoids pulling in <windows.h>
-    // (and its macro collisions) just for GetComputerName.
+    // COMPUTERNAME is reliably set on Windows (unlike POSIX $HOSTNAME); avoids pulling in
+    // <windows.h> (and its macro collisions) just for GetComputerName.
     const char *hn = std::getenv("COMPUTERNAME");
     nodeId = (hn && hn[0]) ? std::string(hn) : std::string("guest");
 #else
     char hn[256] = {0};
-    nodeId = (gethostname(hn, sizeof(hn) - 1) == 0 && hn[0]) ? std::string(hn) : std::string("guest");
+    nodeId =
+        (gethostname(hn, sizeof(hn) - 1) == 0 && hn[0]) ? std::string(hn) : std::string("guest");
 #endif
   }
   const bool clustered = !nodeId.empty();
@@ -234,9 +235,10 @@ int main(int argc, char **argv) {
                   "(state-set \"conf.room\" \"" + roomId + "\") (state-set \"conf.self\" \"" +
                       nodeId + "\")" + (useMic ? " (state-set \"mic_live\" \"1\")" : ""),
                   &ce);
-    std::printf("[ariadne_conference] clustered: node='%s' room='%s' | state=%s dial=%s | media=%s\n",
-                nodeId.c_str(), roomId.c_str(), state_tp->listen_address().c_str(),
-                statePeer.empty() ? "(none)" : statePeer.c_str(), media_endpoint.c_str());
+    std::printf(
+        "[ariadne_conference] clustered: node='%s' room='%s' | state=%s dial=%s | media=%s\n",
+        nodeId.c_str(), roomId.c_str(), state_tp->listen_address().c_str(),
+        statePeer.empty() ? "(none)" : statePeer.c_str(), media_endpoint.c_str());
   }
 #else
   if (clustered)
@@ -291,9 +293,9 @@ int main(int argc, char **argv) {
       sp.expected_subscribers = 3; // the stream_view widget (+ headroom); cf. ariadne_stream
       live_cam = sx::stream::open(app, sp);
       if (live_cam) {
-        // Mute gate (UX cam toggle): the host camera is C++-owned (not in the document stream table,
-        // so the DSL stream-set-muted can't reach it) — wrap it in a muted_source bound to the
-        // stream's mute_flag(), then drive that flag from the render loop by polling the .ari's
+        // Mute gate (UX cam toggle): the host camera is C++-owned (not in the document stream
+        // table, so the DSL stream-set-muted can't reach it) — wrap it in a muted_source bound to
+        // the stream's mute_flag(), then drive that flag from the render loop by polling the .ari's
         // cam_on. Wrapped BEFORE the JPEG encoder so a muted frame is black rgba -> a black JPEG.
         auto gated =
             std::make_unique<sx::muted_source>(std::move(camo.source), live_cam->mute_flag());
@@ -343,8 +345,9 @@ int main(int argc, char **argv) {
                 // (stream-play-audio) + (when clustered) (room-join/-publish/-subscribe)
     // UX cam toggle (host camera path): the .ari's button flips cam_on, but the host-owned camera
     // stream is not in the document table, so the DSL stream-set-muted can't reach it — apply the
-    // mute here instead by polling cam_on (prefix-scoped like every DSL key). Default ON; muted only
-    // when cam_on is explicitly "0". Runs on the render/owner thread, same as set_muted expects.
+    // mute here instead by polling cam_on (prefix-scoped like every DSL key). Default ON; muted
+    // only when cam_on is explicitly "0". Runs on the render/owner thread, same as set_muted
+    // expects.
     if (live_cam) {
       const std::string cop = sg.getStatePrefix().empty()
                                   ? std::string("cam_on")

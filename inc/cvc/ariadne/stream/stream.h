@@ -154,9 +154,9 @@ private:
   // spurious "closed"/final-seq onto a live stream's channel.
   bool live_ = false;
   std::atomic<bool> closed_{false};
-  // Mute flag (set_muted/muted/mute_flag). A muted_source wrapping the attached source reads this on
-  // the producer thread and blanks each frame while set; declared before source_ so it outlives the
-  // source that references it (source_ destructs first).
+  // Mute flag (set_muted/muted/mute_flag). A muted_source wrapping the attached source reads this
+  // on the producer thread and blanks each frame while set; declared before source_ so it outlives
+  // the source that references it (source_ destructs first).
   std::atomic<bool> muted_{false};
   // An optional attached producer and its source (Phase 3). Declared LAST so they destruct FIRST:
   // ~producer_thread stops+joins the worker before source_/channel_/pool_ (which its tick captures)

@@ -230,8 +230,9 @@ void register_media_intrinsics() {
                                                             static_cast<int>(h), used_hz);
           }
 
-          // Mute gate (stream-set-muted): blank the rgba8 frames while this stream is muted. Wrapped
-          // BEFORE the JPEG encoder so a muted frame is zeroed rgba that encodes to a black JPEG.
+          // Mute gate (stream-set-muted): blank the rgba8 frames while this stream is muted.
+          // Wrapped BEFORE the JPEG encoder so a muted frame is zeroed rgba that encodes to a black
+          // JPEG.
           source = std::make_unique<sx::muted_source>(std::move(source), s->mute_flag());
 
           // Compress to JPEG when requested — the publisher side of conference video compression
@@ -377,19 +378,21 @@ void register_media_intrinsics() {
         });
 
     // (stream-set-muted TOKEN BOOL) -> { ok token muted }. Mute/unmute a captured stream in place:
-    // the attached source is a muted_source bound to the stream's mute_flag(), so this just flips the
-    // atomic. A muted producer keeps publishing but its frames are blanked (silence for f32 audio, a
-    // black JPEG for mjpeg video) — peers stay subscribed and the cadence is unchanged. The UX
-    // mic/cam on-off toggles call this; unknown/closed tokens return { ok #f error }.
+    // the attached source is a muted_source bound to the stream's mute_flag(), so this just flips
+    // the atomic. A muted producer keeps publishing but its frames are blanked (silence for f32
+    // audio, a black JPEG for mjpeg video) — peers stay subscribed and the cadence is unchanged.
+    // The UX mic/cam on-off toggles call this; unknown/closed tokens return { ok #f error }.
     se::builtins::register_fn(
         env, "stream-set-muted", [doc](std::span<const se::value_t> args) -> se::value_t {
           if (!doc)
-            return err("stream-set-muted: no document scope (call from an action or resident lane)");
+            return err(
+                "stream-set-muted: no document scope (call from an action or resident lane)");
           if (args.size() < 2)
             return err("stream-set-muted: expects (stream-set-muted TOKEN BOOL)");
           const std::string token = handle_token(args[0]);
           if (token.empty())
-            return err("stream-set-muted: TOKEN (a stream handle dict or token string) is required");
+            return err(
+                "stream-set-muted: TOKEN (a stream handle dict or token string) is required");
           sx::stream *s = cvc::ariadne::document_stream(doc, token);
           if (!s)
             return err("stream-set-muted: no open stream named '" + token +
