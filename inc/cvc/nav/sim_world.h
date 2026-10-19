@@ -295,6 +295,17 @@ public:
   // (the fog path). Under freeze_sense == true (the static-map deployment path)
   // it is inert — rebuild the field from a fresh occupancy to change a static map.
   void retarget(int i, float gx_n, float gy_n);
+  // Agent i's command for the next step() only, in place of the drive's: the bicycle angle
+  // (rad, + left) and the acceleration along the heading (normalized / s^2; from rest a
+  // negative one backs up, as the bicycle's speed may fall to -0.25 vmax with allow_reverse).
+  // On the kinematic arm the agent integrates the bicycle with it (nsub substeps, the steer
+  // within the lock, the speed within [sp_min, vmax]); on a plant it is the plant's command. For
+  // a route_follower backing a vehicle up, or stopping it at a cusp. A parked agent takes it too.
+  void override_command(int i, float steer, float accel);
+  // Put agent i at (x, y) (normalized) with a heading (rad) and a speed (normalized / s), on the
+  // kinematic arm. A plant owns its vehicles' poses, so with one this does nothing and returns
+  // false.
+  bool set_pose(int i, float x_n, float y_n, float heading, float speed = 0.0f);
   void add_obstacle(int r0, int r1, int c0, int c1);
 
   // Live-tune the optional inter-agent separation (config.sep_radius/sep_gain);
@@ -573,6 +584,10 @@ private:
   // [n] the vehicles' own envelope, nav's where a plant gives none; [n], [n * kPlantDiscs] their
   // footprint discs. The flags: whether any agent's plant gave that limit.
   std::vector<float> pl_a_max_, pl_vmax_, pl_a_lat_, pl_body_rr_, pl_body_off_;
+  // override_command, [n], for the next step only
+  std::vector<float> ov_steer_, ov_accel_;
+  std::vector<std::uint8_t> ov_on_;
+  bool ov_any_ = false;
   bool pl_has_a_max_ = false, pl_has_vmax_ = false, pl_has_a_lat_ = false, pl_fp_ = false;
   std::vector<float> pl_steer_cmd_, pl_accel_cmd_, pl_v_stop_; // [n], the last tick's
   std::vector<plant_state> pl_start_;                          // [n], the tick's start
