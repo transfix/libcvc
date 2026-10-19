@@ -56,9 +56,11 @@ jobs:
       - name: Install build tools (cvcpkg)
         uses: ./.github/actions/cvcpkg-build-tools
 
-      # VTK (cvcGL) + gRPC/protobuf (the cross-node transport the conference needs) into the same
-      # prefix, so one CMAKE_PREFIX_PATH covers everything and one bin\ holds every runtime DLL.
-      - name: Install VTK + gRPC (cvcpkg)
+      # VTK (cvcGL) + gRPC/protobuf (the cross-node transport the conference needs) + SDL3 (real
+      # camera/mic capture + the input seam — without it cvcGL sets CVC_ENABLE_SDL off and the client
+      # is synthetic-A/V only) into the same prefix, so one CMAKE_PREFIX_PATH covers everything and
+      # one bin\ holds every runtime DLL.
+      - name: Install VTK + gRPC + SDL3 (cvcpkg)
         id: extradeps
         shell: pwsh
         run: |
@@ -70,6 +72,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install vtk failed ($LASTEXITCODE)" }
           cvcpkg install grpc protobuf --prefix "$prefix" --config release --link shared
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install grpc/protobuf failed ($LASTEXITCODE)" }
+          cvcpkg install sdl3 --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install sdl3 failed ($LASTEXITCODE)" }
           "prefix=$prefix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Configure (cvcGL + gRPC + examples)
