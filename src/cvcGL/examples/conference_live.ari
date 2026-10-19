@@ -63,20 +63,27 @@ on_tick: |
       (begin
         (state-set "joined" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
-        ; my camera — id "camera", scoped by this node's document prefix -> a token unique per node.
-        (set cam (stream-open (dict "id" "camera" "codec" "rgba8" "w" 640 "h" 480
-                                    "expected_subscribers" 3)))
-        (state-set "cam_token" (get-attr cam "token"))
-        (stream-capture-camera (get-attr cam "token")
-          (dict "synthetic" #t "w" 640 "h" 480 "hz" 30))
-        (room-publish (state-get "conf.room")
-          (dict "kind" "camera" "token" (get-attr cam "token")))
+        ; my camera. When cam_live the HOST publishes the REAL device camera (it alone knows the
+        ; device resolution needed to size the stream) and sets cam_token, so skip the synthetic one.
+        (if (= (state-get "cam_live") "1") #f
+          (begin
+            (set cam (stream-open (dict "id" "camera" "codec" "rgba8" "w" 640 "h" 480
+                                        "expected_subscribers" 3)))
+            (state-set "cam_token" (get-attr cam "token"))
+            (stream-capture-camera (get-attr cam "token")
+              (dict "synthetic" #t "w" 640 "h" 480 "hz" 30))
+            (room-publish (state-get "conf.room")
+              (dict "kind" "camera" "token" (get-attr cam "token")))))
         ; my mic — a 440 Hz tone (subscriber_depth >= 8 so a remote player can attach on pull).
         (set mic (stream-open (dict "id" "audio" "codec" "f32" "rate" 48000 "ch" 1
                                     "frames_per_chunk" 1024 "subscriber_depth" 8
                                     "expected_subscribers" 2)))
-        (stream-capture-audio (get-attr mic "token")
-          (dict "rate" 48000 "ch" 1 "frames" 1024 "tone" (dict "hz" 440)))
+        ; my mic — the REAL recording device when mic_live, else a hardware-free 440 Hz tone.
+        (if (= (state-get "mic_live") "1")
+          (stream-capture-audio (get-attr mic "token")
+            (dict "rate" 48000 "ch" 1 "frames" 1024 "device" 0))
+          (stream-capture-audio (get-attr mic "token")
+            (dict "rate" 48000 "ch" 1 "frames" 1024 "tone" (dict "hz" 440))))
         (room-publish (state-get "conf.room")
           (dict "kind" "audio" "token" (get-attr mic "token")))))
     ; ── phase 2: subscribe to the peer's camera + audio, retried each tick until it has published ──

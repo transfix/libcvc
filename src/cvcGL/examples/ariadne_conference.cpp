@@ -70,7 +70,7 @@ namespace sx = cvc::ariadne::stream;
 
 int main(int argc, char **argv) {
   std::string docPath, png;
-  bool offscreen = false, useCamera = false;
+  bool offscreen = false, useCamera = false, useMic = false;
   long frames = 0;
   int width = 1024, height = 768;
   std::vector<std::string> componentPaths;
@@ -92,6 +92,8 @@ int main(int argc, char **argv) {
       offscreen = true;
     } else if (!std::strcmp(a, "--camera"))
       useCamera = true;
+    else if (!std::strcmp(a, "--mic"))
+      useMic = true;
     else if (!std::strcmp(a, "--frames"))
       frames = std::atol(next("0"));
     else if (!std::strcmp(a, "--width"))
@@ -165,6 +167,8 @@ int main(int argc, char **argv) {
   std::unique_ptr<cvc::state_cluster_shard> shard;
   std::unique_ptr<cvc::stream_transport_grpc> media_tp;
   std::unique_ptr<sx::stream_bridge> bridge;
+  std::string media_endpoint; // this node's media-bridge address (advertised in the room tree)
+  bool cam_published = false; // live camera is published once, after the .ari joins the room
   if (clustered) {
     if (stateListen.empty()) {
       std::printf("[ariadne_conference] FATAL: --node-id needs --state-listen <addr>\n");
@@ -188,14 +192,15 @@ int main(int argc, char **argv) {
     media_tp = std::make_unique<cvc::stream_transport_grpc>();
     bridge = std::make_unique<sx::stream_bridge>(app, *media_tp);
     media_tp->start(mediaListen);
-    const std::string media_endpoint = media_tp->listen_address();
+    media_endpoint = media_tp->listen_address();
     // SFU when --media-server is set (push/pull media through the relay); mesh otherwise.
     ari::conference::register_room_media_intrinsics(app, *bridge, media_endpoint, mediaServer);
     // Tell the demo .ari who it is (scoped to this document's prefix = nodeId).
     std::vector<std::string> ce;
     ari::run_init(app, sg.getStatePrefix(),
                   "(state-set \"conf.room\" \"" + roomId + "\") (state-set \"conf.self\" \"" +
-                      nodeId + "\") (state-set \"conf.peer\" \"" + peerId + "\")",
+                      nodeId + "\") (state-set \"conf.peer\" \"" + peerId + "\")" +
+                      (useMic ? " (state-set \"mic_live\" \"1\")" : ""),
                   &ce);
     std::printf(
         "[ariadne_conference] clustered: node='%s' room='%s' peer='%s' | state=%s dial=%s | "
@@ -239,9 +244,11 @@ int main(int argc, char **argv) {
     cvc::gl::capture::camera_open camo = cvc::gl::capture::open_camera(0);
     if (camo.source) {
       sx::stream_params sp;
-      sp.id = "selfcam";
-      sp.root_path =
-          sg.getStatePrefix(); // same scope the DSL opens under -> conference.streams.selfcam
+      // Clustered: the "camera" kind (token <node>.streams.camera) the peer subscribes to and the
+      // host publishes below. Single-node: "selfcam", the id conference_media.ari binds its widget
+      // to. Same scope the DSL opens under (the document prefix = node id when clustered).
+      sp.id = clustered ? "camera" : "selfcam";
+      sp.root_path = sg.getStatePrefix();
       sp.format.kind = sx::frame_kind::video_raw;
       sp.format.codec = "rgba8";
       sp.format.w = camo.width;
@@ -295,6 +302,20 @@ int main(int argc, char **argv) {
 #if CVC_ENABLE_GRPC
     if (state_tp)
       state_tp->pump_all(); // publish this frame's room-tree writes to the peer
+    // Publish the live camera ONCE, after the .ari's first tick has joined the room (room_publish
+    // needs our participant subtree to exist). The host owns the camera stream — it alone knows the
+    // device resolution needed to size it — so it publishes here rather than from the DSL; the .ari
+    // skips its synthetic camera when cam_live is set.
+    if (live_cam && clustered && bridge && !cam_published) {
+      for (const ari::conference::room_participant &p : ari::conference::room_roster(app, roomId))
+        if (p.pid == nodeId) {
+          ari::conference::room_publish(app, *bridge, media_endpoint, roomId, nodeId, "camera",
+                                        *live_cam, mediaServer);
+          cam_published = true;
+          std::printf("[ariadne_conference] published live camera (%s/camera)\n", nodeId.c_str());
+          break;
+        }
+    }
 #endif
     ari::sync_scene_visibility(app, realized.visibility);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), capturing ? dt : -1.0);
