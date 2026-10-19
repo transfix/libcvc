@@ -26,6 +26,7 @@
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
@@ -36,6 +37,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -905,4 +907,145 @@ TEST(NavPlant, AVehicleRouteBacksTheHumveeOutOfADeadEnd) {
               alone, t_alone, routed, t_route, t_route * 0.06);
   EXPECT_TRUE(rev_route) << "it backed up";
   EXPECT_LT(routed, 5.0) << "the route took it out to its goal";
+}
+
+// ── P8b's gate: a policy trained on the dynamic vehicle against one trained on the point mass,
+// both driving Jolt RoboRacers ──
+
+namespace {
+
+// The trainer's city read as a RoboRacer's: veh_L 0.035 normalized is its 0.324 m wheelbase, so
+// S is about 0.108 per metre and a world unit (0.05 normalized) is about 0.46 m. Buildings are
+// 1.5 m static boxes, one per row run of occupied cells.
+double city_reach_on_jolt(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &sc,
+                          int n, int ticks, unsigned seed) {
+  const vehicle_desc d = vehicle_desc::roboracer();
+  const double s_per_m = 0.035 / d.wheelbase();
+  const double mpw = sc.scale / s_per_m; // metres per world unit
+  sim_world::config cfg;
+  cfg.rows = sc.rows;
+  cfg.cols = sc.cols;
+  cfg.min_x = sc.min_x;
+  cfg.min_y = sc.min_y;
+  cfg.max_x = sc.max_x;
+  cfg.max_y = sc.max_y;
+  cfg.scale = sc.scale;
+  cfg.veh.rr = sc.rr;
+  cfg.veh.d_hat = sc.d_hat;
+  cfg.veh.dt = sc.dt;
+  cfg.veh.vmax = sc.vmax;
+  cfg.veh.nsub = 6;
+  cfg.reach_tol = 0.15f;
+  cfg.freeze_sense = true;
+  sim_world w = sim_world::from_occupancy(cfg, sc.occ.data(), policy, n, seed);
+
+  world phys(jolt_config());
+  const material_id m = phys.add_material({"ground", 0.9f, 0.0f, 0.015f});
+  body_desc g;
+  g.shape = box{{(sc.max_x - sc.min_x) * mpw, (sc.max_y - sc.min_y) * mpw, 0.5}};
+  g.motion = motion_type::static_;
+  g.position = {0.0, 0.0, -0.5};
+  g.material = m;
+  phys.add_body(g);
+  const double dx = (sc.max_x - sc.min_x) / (sc.cols - 1),
+               dy = (sc.max_y - sc.min_y) / (sc.rows - 1);
+  for (int r = 0; r < sc.rows; ++r)
+    for (int c = 0; c < sc.cols;) {
+      if (!sc.occ[static_cast<std::size_t>(r) * sc.cols + c]) {
+        ++c;
+        continue;
+      }
+      int e = c;
+      while (e + 1 < sc.cols && sc.occ[static_cast<std::size_t>(r) * sc.cols + e + 1])
+        ++e;
+      body_desc b;
+      b.shape = box{{0.5 * (e - c + 1) * dx * mpw, 0.5 * dy * mpw, 0.75}};
+      b.motion = motion_type::static_;
+      b.position = {(sc.min_x + 0.5 * (c + e) * dx) * mpw, (sc.min_y + r * dy) * mpw, 0.75};
+      b.material = m;
+      phys.add_body(b);
+      c = e + 1;
+    }
+  nav_plant_options o = nav_sized(); // nav plans with the scene's numbers, as both were trained
+  o.metres_per_world_unit = mpw;
+  nav_plant plant(phys, {d}, o);
+  w.set_plant(&plant);
+  for (int t = 0; t < ticks; ++t)
+    w.step(0);
+  std::vector<std::uint8_t> reached(n);
+  w.snapshot(nullptr, nullptr, nullptr, nullptr, reached.data());
+  int k = 0;
+  for (int i = 0; i < n; ++i)
+    k += reached[i];
+  w.set_plant(nullptr);
+  return static_cast<double>(k) / n;
+}
+
+} // namespace
+
+// The gate (the vehicle-physics plan's P8b): over >= 20 paired seeds on the Jolt plant, a policy
+// trained through the dynamic vehicle should beat the one trained on the point-mass surrogate,
+// with a 95% bootstrap CI. This reports the comparison; it is a heavy run (the "Convergence"
+// suites run where CI runs those).
+TEST(NavPlantConvergence, DynamicTrainedPolicyAgainstPointMassOnJolt) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  cvc::nav::train_config base;
+  base.n = 128;
+  base.hidden = 64;
+  base.horizon = 28;
+  base.window = 7;
+  base.steps = 150;
+  base.seed = 0;
+  base.lr = 5e-5f;
+  // Experiments: P8B_GATE_LR and P8B_GATE_STEPS override both policies' training.
+  if (const char *e = std::getenv("P8B_GATE_LR"))
+    base.lr = static_cast<float>(std::atof(e));
+  if (const char *e = std::getenv("P8B_GATE_STEPS"))
+    base.steps = std::atoi(e);
+  cvc::nav::coef_trainer pm(base, 1);
+  pm.train(sc);
+  cvc::nav::train_config dc = base;
+  dc.rollout = cvc::nav::rollout_kind::dynamic;
+  dc.dyn = nav_plant::dyn_bike_params_at(vehicle_desc::roboracer(), dc.veh_L);
+  cvc::nav::coef_trainer dy(dc, 1);
+  dy.train(sc);
+  const cvc::nav::coef_mlp p_pm = pm.to_coef_mlp(), p_dy = dy.to_coef_mlp(),
+                           p_seed = cvc::nav::coef_mlp::default_biased();
+
+  const int seeds = 20, n = 48, ticks = 400;
+  std::vector<double> a(seeds), b(seeds), c(seeds), diff(seeds);
+  double ma = 0.0, mb = 0.0, mc = 0.0;
+  for (int s = 0; s < seeds; ++s) {
+    const unsigned seed = 100u + static_cast<unsigned>(s);
+    a[s] = city_reach_on_jolt(p_pm, sc, n, ticks, seed);
+    b[s] = city_reach_on_jolt(p_dy, sc, n, ticks, seed);
+    c[s] = city_reach_on_jolt(p_seed, sc, n, ticks, seed);
+    diff[s] = b[s] - a[s];
+    ma += a[s] / seeds;
+    mb += b[s] / seeds;
+    mc += c[s] / seeds;
+  }
+  // Paired bootstrap of the mean difference.
+  std::mt19937 rng(0);
+  std::uniform_int_distribution<int> pick(0, seeds - 1);
+  std::vector<double> boot(2000);
+  for (double &x : boot) {
+    double sum = 0.0;
+    for (int i = 0; i < seeds; ++i)
+      sum += diff[pick(rng)];
+    x = sum / seeds;
+  }
+  std::sort(boot.begin(), boot.end());
+  const double lo = boot[static_cast<std::size_t>(0.025 * boot.size())],
+               hi = boot[static_cast<std::size_t>(0.975 * boot.size()) - 1];
+  std::printf("  P8b gate (lr %.0e, %d steps) on Jolt RoboRacers (city, %d seeds x %d agents, %d "
+              "ticks): reach %.1f%% "
+              "point-mass-trained, %.1f%% dynamic-trained, %.1f%% the untrained seed; dynamic - "
+              "point mass = %+.1f points, 95%% CI [%+.1f, %+.1f]\n",
+              base.lr, base.steps, seeds, n, ticks, 100 * ma, 100 * mb, 100 * mc, 100 * (mb - ma),
+              100 * lo, 100 * hi);
+  for (int s = 0; s < seeds; ++s)
+    std::printf("    seed %d: %.3f %.3f %.3f\n", 100 + s, a[s], b[s], c[s]);
+  EXPECT_TRUE(std::isfinite(lo) && std::isfinite(hi));
 }

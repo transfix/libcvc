@@ -230,8 +230,34 @@ Measured (`nav_material_bike_rollout_test`, `nav_material_train_test`):
 - The full loss-to-weights chain: dir_rel 7.0e-4 over 64 weights, the same as on the bicycle.
 - It is thread-deterministic, and the controller drives the dynamic vehicle to its goals.
 
+**P8b's gate, on the Jolt plant** (`NavPlantConvergence.DynamicTrainedPolicyAgainstPointMassOnJolt`,
+a heavy run; `P8B_GATE_LR` and `P8B_GATE_STEPS` override its training):
+
+- **The comparison.** Two policies trained alike on the city, one on the point-mass surrogate and
+  one on the dynamic vehicle (a RoboRacer at about 0.108 per metre).
+- **The run.** Each drives Jolt RoboRacers through the same city, its blocks as 1.5 m static
+  boxes. That is 20 paired seeds of 48 agents for 400 ticks.
+- **The statistic.** The mean per-seed reach difference, with a paired-bootstrap 95% CI.
+
+| Training | Point-mass-trained reach | Dynamic-trained reach | Dynamic - point mass, 95% CI | The untrained seed |
+|---|---|---|---|---|
+| lr 5e-5, 150 steps | 50.6% | 51.0% | +0.4 [-1.8, +2.8] | 51.7% |
+| lr 2e-4, 300 steps | 35.0% | 44.0% | +9.0 [+6.7, +11.4] | 51.7% |
+
+**Read it carefully.**
+
+- **At 2e-4 the gate's wording is met.** Trained alike, the dynamic-trained policy beats the
+  point-mass-trained one on the real vehicle, outside the CI.
+- **But training that hard hurts both.** Each falls below the hand-tuned seed it refines. The
+  dynamic model makes training hurt less; it does not make the policy better than the seed.
+- **At the stable 5e-5 there is no difference.** Neither policy moves far from the seed.
+- **What is left.** The training loss (distance to the goal after a window, plus a clearance
+  margin) is not the deployment reach, which the carrot FSM shapes. A policy that beats the seed
+  on Jolt needs that gap closed, for example by selecting checkpoints on Jolt reach (doc 31's
+  recorded-fitness seam).
+
 Not yet:
-- that Jolt gate;
+- a trained policy that beats the seed on Jolt;
 - pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
   turns on only the bicycle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).

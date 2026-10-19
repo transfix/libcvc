@@ -304,8 +304,15 @@ P4 adds three things to measure and contain the drift:
       stable and lowers the loss (docs/NAV_TRAINING.md).
     - `material_train`'s `material_integrator::dynamic` (`integrate_dynamic_material`): its
       rollout VJP, `L_multi` and the full loss-to-weights chain are gradient-checked.
-    - Next: the gate on the Jolt plant (a policy
-      trained on the dynamic model beats the point-mass one over 20 or more paired seeds).
+    - The gate on the Jolt plant, over 20 paired seeds of RoboRacers in the city:
+      - Trained alike at lr 2e-4 for 300 steps, the dynamic-trained policy reaches 44.0% and the
+        point-mass-trained one 35.0%: +9.0 points, 95% CI [+6.7, +11.4].
+      - But both fall below the untrained seed's 51.7%. At the stable 5e-5 they tie (+0.4, CI
+        [-1.8, +2.8]).
+      - So the dynamic model makes training hurt less on the real vehicle; it does not yet make it
+        help.
+    - Next: close the gap between the training loss and deployment reach (for example, checkpoints
+      selected on Jolt reach) so that a trained policy beats the seed.
   - P8c is not started.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
