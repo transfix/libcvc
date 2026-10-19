@@ -238,10 +238,12 @@ Two backends ship:
   mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
   commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
   size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
-  persisted under one backend holds under the other. What a terminal cannot do it
+  persisted under one backend holds under the other. Grid seams drag: a row split's
+  panes and a `resizable` table's columns resize with the mouse, and a row split
+  persists its pane sizes to `tree.<id>.tracks` (§11.4). What a terminal cannot do it
   degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
-  warning), row-split seams are fixed-size. `render_to_string` + `feed(TermEvent)` drive
-  it headless (that is how `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
+  warning). `render_to_string` + `feed(TermEvent)` drive it headless (that is how
+  `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
 
 Because the core is backend-neutral, the same document renders through either backend;
 capability gaps (e.g. no `color`) drive graceful widget substitution rather than errors.
@@ -310,7 +312,10 @@ the loader only *captures*. The host wires them:
   Declaring it **takes the signal over**, like a POSIX handler: `post_signal` returns true
   and the host skips the default action, so the program decides what an interrupt means.
   With no `on_signal`, Ctrl-C closes the app. The terminal loop also force-quits on three
-  Ctrl-Cs within two seconds, so a handler that never quits cannot trap the user.
+  Ctrl-Cs within two seconds, so a handler that never quits cannot trap the user. Signals
+  sent to the process reach it too (`source: "os"`) when the host collects them —
+  `FtxuiBackend::RunOptions` has the hooks, and `ari` wires SIGTERM, SIGHUP, SIGINT,
+  SIGQUIT and SIGUSR1/2 to them.
 
   ```yaml
   on_signal: |
@@ -720,7 +725,7 @@ if (lr.has_channels_block)
 
 ### 9.2 In a terminal (`ari`, `FtxuiBackend`)
 
-`ari` ([`src/cvc/tools/ari_main.cpp`](../src/cvc/tools/ari_main.cpp)) runs a document in
+`ari` ([`src/ari/main.cpp`](../src/ari/main.cpp)) runs a document in
 the terminal with no GL, VTK, or ImGui:
 
 ```
@@ -729,8 +734,11 @@ ari snapshot doc.ari [--width W] [--height H] [--frames N] [--ansi]   # print a 
 ari check    doc.ari                                                  # load + warnings
 ```
 
-It is a thin host over `AppRuntime` with no `SceneAdapter`; it routes `on: quit` and a
-`(quit)` verb to `request_close()`. Embedding the same thing:
+`ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
+[`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
+like `cvc-cli`. It is a thin host over `AppRuntime` with no `SceneAdapter`; it routes
+`on: quit` and a `(quit)` verb to `request_close()`, and an OS signal the document does not
+handle ends it with exit status 128 + the signal number. Embedding the same thing:
 
 ```cpp
 cvc::ariadne::FtxuiBackend backend;          // outlives the AppRuntime
@@ -740,6 +748,12 @@ rt.on("quit", [&] { rt.request_close(); });
 rt.load(path);
 backend.run(rt);  // owns the terminal; drains every iteration; returns on quit / Ctrl-C
 ```
+
+To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
+FTXUI has installed its own), restore them in `on_stop`, and return pending signal names
+from `take_signal`; [`src/ari/main.cpp`](../src/ari/main.cpp) does exactly this with
+`sigaction`. The handlers are process-wide, which is why they belong to the host and not to
+libcvc.
 
 `run()` forwards keys and pointer events the UI did not use to the document's
 `on_key` / `on_pointer`, so document-level input works here today.
@@ -906,15 +920,12 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   translates VTK interactor events into those calls, so stock-loop key/pointer residents
   do not fire until a host feeds them
   ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)).
-- **Only interrupt keys reach `on_signal`.** The terminal loop routes Ctrl-C / Ctrl-\ as
-  `SIGINT` / `SIGQUIT`; a signal the OS delivers (`kill -TERM`, a closed terminal's
-  `SIGHUP`) still takes FTXUI's default (restore the terminal, exit), and the ImGui host
-  routes none. A process-wide handler is the host application's to install — it would call
-  `post_signal` — never a static inside the library.
-- **The terminal backend has no scene renderer and no draggable split seams.** A
-  `scene:` is dropped with a warning; row-split panes keep their authored / persisted
-  sizes. The §16.6 pixel mirror (EGL → half-block / Sixel / Kitty) is the path to showing a
-  real 3D scene in a terminal.
+- **OS signals reach `on_signal` only where a host routes them.** `ari` does (see §9.2);
+  the ImGui host and `AriRuntime` route none yet, and an embedding host that skips the
+  `RunOptions` hooks gets FTXUI's default for SIGTERM (restore the terminal, exit).
+- **The terminal backend has no scene renderer.** A `scene:` is dropped with a warning.
+  The §16.6 pixel mirror (offscreen GL → half-block cells) is the path to showing a real 3D
+  scene in a terminal.
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
   loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and

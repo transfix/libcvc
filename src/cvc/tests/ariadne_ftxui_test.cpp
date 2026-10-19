@@ -396,6 +396,21 @@ TEST(AriadneFtxui, PersistedGeometrySeedsTheWindow) {
   EXPECT_EQ(by, y + 10 - 1) << "the persisted size (10 rows) was applied\n" << s;
 }
 
+TEST(AriadneFtxui, ATinyFrameDoesNotMoveWindowsForGood) {
+  REQUIRE_FTXUI();
+  Widget w = window("Beta", {text("b")});
+  w.has_pos = true;
+  w.pos_x = 400; // 50 columns
+  w.pos_y = 160; // 10 rows
+  Term t(group({w}));
+  t.screen = t.be.render_to_string(t.rt, 12, 4); // e.g. a page before its first resize
+  t.draw();                                      // back at 80 x 24
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "\xe2\x95\xad Beta", x, y)) << t.screen;
+  EXPECT_EQ(x, 50);
+  EXPECT_EQ(y, 10);
+}
+
 TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   REQUIRE_FTXUI();
   Widget w = window("Win", {text("body")});
@@ -463,6 +478,91 @@ TEST(AriadneFtxui, GridLaysCellsIntoColumns) {
   ASSERT_TRUE(find_cell(t.screen, "a2", x2, y2));
   EXPECT_EQ(x2, x1);
   EXPECT_EQ(y2, y1 + 2) << "the next row, under a seam\n" << t.screen;
+}
+
+TEST(AriadneFtxui, RowSplitSeamDragResizesPanesAndPersists) {
+  REQUIRE_FTXUI();
+  Widget g = group({text("top"), text("bottom")});
+  g.id = "split";
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.row_heights = {Track{Unit::Px, 80.0f}, Track{Unit::Px, 80.0f}}; // 5 rows each
+  g.layout.resizable = true;
+  Term t(group({g}));
+  int x = 0, top = 0, bx = 0, bottom = 0;
+  ASSERT_TRUE(find_cell(t.screen, "top", x, top)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "bottom", bx, bottom)) << t.screen;
+  EXPECT_EQ(bottom, top + 6) << "5 rows, then the seam\n" << t.screen;
+  EXPECT_EQ(val(t.app, "tree.split.tracks"), "80,80");
+  const int seam = top + 5;
+  t.mouse(TermEvent::Mouse::Press, x, seam);
+  t.mouse(TermEvent::Mouse::Move, x, seam + 2);
+  t.mouse(TermEvent::Mouse::Release, x, seam + 2);
+  t.draw();
+  ASSERT_TRUE(find_cell(t.screen, "bottom", bx, bottom)) << t.screen;
+  EXPECT_EQ(bottom, top + 8) << t.screen;
+  EXPECT_EQ(val(t.app, "tree.split.tracks"), "112,48") << "7 and 3 rows, persisted in px";
+}
+
+TEST(AriadneFtxui, PersistedTracksSeedTheSplit) {
+  REQUIRE_FTXUI();
+  cvc::app app;
+  FtxuiBackend be;
+  Runtime rt(app, "");
+  rt.set_backend(&be);
+  cvc::state::instance(app)("tree.split.tracks").value("32,128"); // 2 rows, 8 rows
+  Widget g = group({text("top"), text("bottom")});
+  g.id = "split";
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.row_heights = {Track{Unit::Px, 80.0f}, Track{Unit::Px, 80.0f}};
+  g.layout.resizable = true;
+  rt.set_root(group({g}));
+  const std::string s = be.render_to_string(rt, 40, 20);
+  int x = 0, top = 0, bottom = 0;
+  ASSERT_TRUE(find_cell(s, "top", x, top)) << s;
+  ASSERT_TRUE(find_cell(s, "bottom", x, bottom)) << s;
+  EXPECT_EQ(bottom, top + 3) << s;
+}
+
+TEST(AriadneFtxui, ResizableTableColumnSeamDrags) {
+  REQUIRE_FTXUI();
+  Widget g = group({text("a1"), text("b1"), text("a2"), text("b2")});
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.col_widths = {Track{Unit::Px, 80.0f}, Track{Unit::Px, 80.0f}};
+  g.layout.borders = BorderShow::Inner;
+  g.layout.resizable = true;
+  Term t(group({g}));
+  int ax = 0, ay = 0, bx = 0, by = 0;
+  ASSERT_TRUE(find_cell(t.screen, "a1", ax, ay)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "b1", bx, by)) << t.screen;
+  ASSERT_EQ(bx, ax + 11) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, bx - 1, by); // the seam left of column 2
+  t.mouse(TermEvent::Mouse::Move, bx + 3, by);
+  t.mouse(TermEvent::Mouse::Release, bx + 3, by);
+  t.draw();
+  int nbx = 0, nby = 0;
+  ASSERT_TRUE(find_cell(t.screen, "b1", nbx, nby)) << t.screen;
+  EXPECT_EQ(nbx, bx + 4) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "b2", nbx, nby));
+  EXPECT_EQ(nbx, bx + 4) << "every row follows the column\n" << t.screen;
+}
+
+TEST(AriadneFtxui, ResizableTableWithoutBordersStillHasAGrabbableSeam) {
+  REQUIRE_FTXUI();
+  Widget g = group({text("a1"), text("b1")});
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.col_widths = {Track{Unit::Px, 80.0f}, Track{}};
+  g.layout.resizable = true;
+  Term t(group({g}));
+  int ax = 0, ay = 0, bx = 0, by = 0;
+  ASSERT_TRUE(find_cell(t.screen, "a1", ax, ay)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "b1", bx, by)) << t.screen;
+  ASSERT_EQ(bx, ax + 11) << "a blank one-cell seam\n" << t.screen;
+  t.mouse(TermEvent::Mouse::Press, bx - 1, by);
+  t.mouse(TermEvent::Mouse::Move, bx - 4, by);
+  t.mouse(TermEvent::Mouse::Release, bx - 4, by);
+  t.draw();
+  ASSERT_TRUE(find_cell(t.screen, "b1", bx, by)) << t.screen;
+  EXPECT_EQ(bx, ax + 8) << t.screen;
 }
 
 TEST(AriadneFtxui, ColorEditsAChannel) {

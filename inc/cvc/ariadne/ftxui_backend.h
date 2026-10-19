@@ -178,6 +178,24 @@ public:
     int fps = 20;      // redraw rate while idle, so state changed off the UI (on_tick, async verbs,
                        // replicated peers) shows up; input redraws immediately regardless
     bool mouse = true; // enable mouse reporting
+
+    // OS signals (SIGTERM, SIGHUP, a SIGINT from `kill`, ...). Signal handlers are process-wide,
+    // so they are the host application's to own; the loop only offers the seams. `on_start` runs
+    // once the terminal is set up, after FTXUI has installed its own handlers, so a handler the
+    // host installs there takes precedence; `on_stop` runs before the terminal is restored — put
+    // the previous handlers back there. `take_signal` is polled every iteration and returns the
+    // name of one pending signal ("SIGTERM") or "" for none; each goes to the document's
+    // on_signal: (source "os") and, when the document has no handler, ends the loop. See
+    // src/ari/main.cpp for a host that wires these to sigaction.
+    std::function<void()> on_start;
+    std::function<void()> on_stop;
+    std::function<std::string()> take_signal;
+  };
+
+  // Why run() returned.
+  struct RunExit {
+    std::string signal;   // the signal that ended the loop, or "" (a quit action / should_close)
+    bool from_os = false; // it came from take_signal rather than an interrupt key
   };
 
   // Run FTXUI's event loop fullscreen on the terminal: each input is fed, each iteration drains
@@ -185,15 +203,15 @@ public:
   // they go to the document's on_signal: program when it has one (Runtime::post_signal), and
   // otherwise end the loop; three Ctrl-Cs within two seconds always end it. Returns when the loop
   // ends. A no-op in a build without FTXUI.
-  void run(Runtime &rt);
-  void run(Runtime &rt, const RunOptions &opts);
+  RunExit run(Runtime &rt);
+  RunExit run(Runtime &rt, const RunOptions &opts);
 
   // The same loop over a full application: drains `app` (actions, scheduler slice, on_tick) every
   // iteration, forwards keys and pointer events the UI did not use to the document's on_key /
   // on_pointer, and returns once app.should_close() (e.g. a "quit" action) or on an interrupt the
   // document does not handle.
-  void run(AppRuntime &app);
-  void run(AppRuntime &app, const RunOptions &opts);
+  RunExit run(AppRuntime &app);
+  RunExit run(AppRuntime &app, const RunOptions &opts);
 
   // Whether this build was compiled with FTXUI.
   static bool available();
@@ -201,9 +219,9 @@ public:
 private:
   struct Impl;
   std::unique_ptr<Impl> m_;
-  void run_loop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
-                const std::function<bool()> &should_close,
-                const std::function<void(const TermEvent &)> &unhandled);
+  RunExit run_loop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
+                   const std::function<bool()> &should_close,
+                   const std::function<void(const TermEvent &)> &unhandled);
 };
 
 } // namespace ariadne
