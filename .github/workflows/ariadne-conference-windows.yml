@@ -14,10 +14,25 @@ on:
   workflow_dispatch:
   push:
     branches: [feat/ariadne-conference-server]
+    # The conference source surface: cvcGL + the ariadne stream/conference layer + the server tool +
+    # the state transports (the future wasm WebSocket transport). Core cvc already builds on Windows
+    # in ci.yml's package-windows, so a change there is lower-risk and does not re-trigger this.
     paths:
       - '.github/workflows/ariadne-conference-windows.yml'
-      - 'src/cvcGL/examples/ariadne_conference.cpp'
+      - 'src/cvcGL/**'
+      - 'inc/cvc/gl/**'
+      - 'src/cvc/ariadne/**'
+      - 'inc/cvc/ariadne/**'
       - 'src/cvc/tools/ariadne_server_main.cpp'
+      - 'src/cvc/state/state_transport**'
+      - 'src/cvc/state/state_stream_transport**'
+      - 'inc/cvc/state/state_transport**'
+      - 'inc/cvc/state/state_stream_transport**'
+
+# While iterating, a newer push cancels the running build (each is ~25 min).
+concurrency:
+  group: conf-windows-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   conference-windows:

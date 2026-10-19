@@ -28,10 +28,13 @@
 #include <utility>
 #include <vector>
 
-#ifdef CVC_ENABLE_SDL
-#include <cvc/gl/capture/audio_source.h>       // open_audio_capture (SDL3; the mic device path)
-#include <cvc/gl/capture/camera_source.h>      // open_camera (SDL3; the camera device path)
+// jpeg_encode_source is turbojpeg-based, NOT SDL — the synthetic (hardware-free) camera path
+// compresses with it too, so it must be visible without CVC_ENABLE_SDL (e.g. the no-SDL Windows
+// build). Only the actual SDL device sources below are guarded.
 #include <cvc/gl/capture/jpeg_encode_source.h> // jpeg (codec "mjpeg") video compression
+#ifdef CVC_ENABLE_SDL
+#include <cvc/gl/capture/audio_source.h>  // open_audio_capture (SDL3; the mic device path)
+#include <cvc/gl/capture/camera_source.h> // open_camera (SDL3; the camera device path)
 #endif
 
 namespace se = cvc::state_exec;
