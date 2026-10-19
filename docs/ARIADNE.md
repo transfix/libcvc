@@ -242,8 +242,9 @@ Three backends ship:
   commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
   size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
   persisted under one backend holds under the other. Grid seams drag: a row split's
-  panes and a `resizable` table's columns resize with the mouse, and a row split
-  persists its pane sizes to `tree.<id>.tracks` (§11.4). What a terminal cannot do it
+  panes and a `resizable` table's columns resize with the mouse; a row split persists
+  its pane sizes to `tree.<id>.tracks` and a resizable table its column widths to
+  `tree.<id>.columns` (§11.4; *Grid sizes* in §7.1). What a terminal cannot do it
   degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
   warning). `render_to_string` + `feed(TermEvent)` drive it headless (that is how
   `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
@@ -659,6 +660,21 @@ Every relative reference in a document is resolved by `resolve_bind(prefix, bind
 
 Widgets and scene binds use the same rule, which is why a widget `bind:` and a scene
 `visible:` on the same relative path co-resolve to one key.
+
+**Grid sizes (§11.4).** A grid the user can resize keeps its sizes under its id, the way a
+window keeps `tree.<id>.geometry`: a row split's pane heights in `tree.<id>.tracks`, a
+resizable table's column widths in `tree.<id>.columns`. Both are comma-separated px, one
+entry per track. The walk seeds the backend from the key before the grid opens (each
+backend applies it once, so a live drag wins) and writes back what the backend reports after
+it closes; the write is skipped when nothing changed. A `0` entry means "not set": that
+track keeps its authored size. The backends differ in what they report:
+
+- The FTXUI backend reports a track it holds at a size (authored px, seeded, or dragged) and
+  `0` for one it lays out naturally, so a stretch pane or column is never pinned at the size
+  one frame happened to give it. Seeding fixes a track at the persisted width.
+- The ImGui backend reports every pane height and every column's drawn width
+  (`WidthGiven`). Seeding gives a fixed column its width and a stretch column its weight,
+  so stretch columns keep their persisted proportions at another table width.
 
 ### 7.2 Two prefix conventions
 

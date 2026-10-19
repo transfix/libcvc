@@ -432,6 +432,14 @@ state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for 
 > the core owns the `cvc::state` round-trip. MockBackend-driven gtests in `ariadne_runtime_test`.
 > **Still deferred:** `state_exec` track expressions, thicker-than-1px custom-drawlist borders, mixing
 > resizable rows *and* columns in one grid, and *cross-run* durable persistence (decision #4).
+>
+> **✅ Increment 4 (table columns, 2026-10-19).** A resizable table persists its column widths to
+> `tree.<id>.columns` through the same seam (`seed_grid_columns` / `grid_columns`), in px for every
+> column; `0` = not set. ImGui seeds a stretch column's weight from its persisted px (proportions survive
+> another table width) and reads widths back through `imgui_internal` (`Columns[i].WidthGiven`); FTXUI
+> fixes a seeded column and reports only the tracks it holds at a size, which also fixed a row split's
+> first walk persisting a natural pane as 16 px. Tests: `ariadne_runtime_test`, `ariadne_ftxui_test`,
+> `cvcgl_imgui_table_columns`.
 
 Four related sizing knobs — all realized on the same table engine (§3.0.3a) whose flags this build ships
 (`IMGUI_HAS_TABLE`, confirmed).

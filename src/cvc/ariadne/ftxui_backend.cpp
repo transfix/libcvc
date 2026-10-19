@@ -428,6 +428,7 @@ struct FtxuiBackend::Impl {
     std::vector<fx::Elements> cells; // Grid: one list per cell
     Layout layout;                   // Grid
     std::vector<float> tracks;       // Grid: seeded row-split sizes (px)
+    std::vector<float> columns;      // Grid: seeded table column widths (px)
     std::string id;                  // Window / Menu
     std::string title;               // Window
     Size size;                       // Window: the authored size spec (min / max)
@@ -513,6 +514,9 @@ struct FtxuiBackend::Impl {
   std::vector<float> pending_tracks;
   bool have_tracks = false;
   std::vector<float> last_tracks;
+  std::vector<float> pending_columns;
+  bool have_columns = false;
+  std::vector<float> last_columns;
   int term_w = 80, term_h = 24;
 
   // ---- across frames ---------------------------------------------------------------------------
@@ -1349,6 +1353,7 @@ void FtxuiBackend::begin_frame() {
   m.last_item.clear();
   m.have_geom = false;
   m.have_tracks = false;
+  m.have_columns = false;
   m.gfx_walk.clear();
 }
 
@@ -1636,6 +1641,13 @@ void FtxuiBackend::seed_grid_tracks(const std::vector<float> &sizes) {
 
 std::vector<float> FtxuiBackend::grid_tracks() const { return m_->last_tracks; }
 
+void FtxuiBackend::seed_grid_columns(const std::vector<float> &widths) {
+  m_->pending_columns = widths;
+  m_->have_columns = true;
+}
+
+std::vector<float> FtxuiBackend::grid_columns() const { return m_->last_columns; }
+
 bool FtxuiBackend::begin_grid(const Layout &layout, const char *id) {
   Impl &m = *m_;
   Impl::Frame f;
@@ -1644,7 +1656,9 @@ bool FtxuiBackend::begin_grid(const Layout &layout, const char *id) {
   f.id = m.uid(std::string("grid|") + (id ? id : "")); // keys the grid's draggable sizes
   if (m.have_tracks)
     f.tracks = m.pending_tracks;
-  m.have_tracks = false;
+  if (m.have_columns)
+    f.columns = m.pending_columns;
+  m.have_tracks = m.have_columns = false;
   m.stack.push_back(std::move(f));
   return true;
 }
@@ -1673,6 +1687,15 @@ void FtxuiBackend::end_grid() {
     const bool held =
         m.seam_drag.active && m.seam_drag.sizes == sizes && m.seam_drag.index == index;
     return e | tint | (held ? fx::bold : fx::nothing) | fx::reflect(m.boxes[box_key]);
+  };
+  // What a grid reports for persistence (grid_tracks / grid_columns): a track's size in px when it
+  // is fixed (authored, seeded or dragged), else 0, "not set". A track laid out naturally has no
+  // size until FTXUI lays this frame out, and persisting the last frame's size would pin it there
+  // on the next load (a first walk would even persist the 1 cell of a box never laid out).
+  m.last_columns.clear();
+  auto report = [](std::vector<float> &out) {
+    if (std::all_of(out.begin(), out.end(), [](float v) { return v <= 0.0f; }))
+      out.clear(); // nothing set: nothing to persist
   };
 
   if (L.is_row_split()) {
@@ -1711,10 +1734,10 @@ void FtxuiBackend::end_grid() {
       pane = gs.fixed[i] ? pane | fx::yframe | fx::size(fx::HEIGHT, fx::EQUAL, gs.size[i])
                          : pane | fx::yflex;
       stack.push_back(std::move(pane));
-      const fx::Box &b = m.boxes[pane_key];
-      const int rows = gs.fixed[i] ? gs.size[i] : std::max(0, b.y_max - b.y_min + 1);
-      m.last_tracks.push_back(static_cast<float>(rows * m.opt.cell_px_h));
+      m.last_tracks.push_back(gs.fixed[i] ? static_cast<float>(gs.size[i] * m.opt.cell_px_h)
+                                          : 0.0f);
     }
+    report(m.last_tracks);
     m.add(stack.empty() ? fx::emptyElement() : fx::vbox(std::move(stack)) | frame);
     return;
   }
@@ -1739,7 +1762,26 @@ void FtxuiBackend::end_grid() {
     if (cs->size.size() != static_cast<std::size_t>(cols)) {
       cs->size.assign(static_cast<std::size_t>(cols), 0);
       cs->fixed.assign(static_cast<std::size_t>(cols), false);
+      cs->seeded = false;
     }
+    if (!cs->seeded) { // the persisted widths (seed_grid_columns) fix their columns, once
+      for (std::size_t c = 0; c < cs->size.size() && c < f.columns.size(); ++c)
+        if (f.columns[c] > 0.0f) {
+          cs->size[c] = std::max(1, m.px_to_cols(f.columns[c]));
+          cs->fixed[c] = true;
+        }
+      cs->seeded = true;
+    }
+    for (int c = 0; c < cols; ++c) {
+      const std::size_t k = static_cast<std::size_t>(c);
+      float px = 0.0f;
+      if (cs->fixed[k])
+        px = static_cast<float>(cs->size[k] * m.opt.cell_px_w);
+      else if (k < L.col_widths.size() && L.col_widths[k].unit == Unit::Px)
+        px = L.col_widths[k].value; // authored: as written, so a reload never drifts it
+      m.last_columns.push_back(px);
+    }
+    report(m.last_columns);
   }
   std::vector<fx::Elements> lines;
   for (int r = 0; r < rows; ++r) {
@@ -2770,6 +2812,8 @@ void FtxuiBackend::grid_next_cell() {}
 void FtxuiBackend::end_grid() {}
 void FtxuiBackend::seed_grid_tracks(const std::vector<float> &) {}
 std::vector<float> FtxuiBackend::grid_tracks() const { return {}; }
+void FtxuiBackend::seed_grid_columns(const std::vector<float> &) {}
+std::vector<float> FtxuiBackend::grid_columns() const { return {}; }
 void FtxuiBackend::begin_disabled() {}
 void FtxuiBackend::end_disabled() {}
 void FtxuiBackend::set_tooltip(const char *) {}

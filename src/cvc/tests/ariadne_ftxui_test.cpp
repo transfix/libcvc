@@ -524,6 +524,44 @@ TEST(AriadneFtxui, PersistedTracksSeedTheSplit) {
   EXPECT_EQ(bottom, top + 3) << s;
 }
 
+TEST(AriadneFtxui, ANaturalPaneIsNotPinnedByTheFirstWalk) {
+  REQUIRE_FTXUI();
+  // A row split whose second pane has no authored height lays out naturally. The first walk runs
+  // before FTXUI has laid anything out, so measuring that pane then read a box never laid out (one
+  // cell, 16 px) and persisted it, and the next load pinned the pane at one row.
+  auto make = [] {
+    Widget g = group({text("top"), text("one\ntwo\nthree")});
+    g.id = "split";
+    g.layout.kind = LayoutKind::Grid;
+    g.layout.row_heights = {Track{Unit::Px, 80.0f}, Track{}};
+    g.layout.resizable = true;
+    return g;
+  };
+  Term t(group({make()}));
+  EXPECT_EQ(val(t.app, "tree.split.tracks"), "80,0") << "the natural pane is not set";
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.split.tracks"), "80,0") << "nor once it has been laid out";
+
+  // A reload from what was persisted keeps the pane natural: all three lines show.
+  cvc::app app;
+  FtxuiBackend be;
+  Runtime rt(app, "");
+  rt.set_backend(&be);
+  cvc::state::instance(app)("tree.split.tracks").value(val(t.app, "tree.split.tracks"));
+  rt.set_root(group({make()}));
+  const std::string s = be.render_to_string(rt, 40, 20);
+  EXPECT_NE(s.find("three"), std::string::npos) << s;
+
+  // Dragging the seam fixes both panes, and both persist.
+  int x = 0, top = 0;
+  ASSERT_TRUE(find_cell(t.screen, "top", x, top)) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, x, top + 5);
+  t.mouse(TermEvent::Mouse::Move, x, top + 4);
+  t.mouse(TermEvent::Mouse::Release, x, top + 4);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.split.tracks"), "64,64") << "4 rows and the 3-row pane plus 1";
+}
+
 TEST(AriadneFtxui, ResizableTableColumnSeamDrags) {
   REQUIRE_FTXUI();
   Widget g = group({text("a1"), text("b1"), text("a2"), text("b2")});
@@ -545,6 +583,49 @@ TEST(AriadneFtxui, ResizableTableColumnSeamDrags) {
   EXPECT_EQ(nbx, bx + 4) << t.screen;
   ASSERT_TRUE(find_cell(t.screen, "b2", nbx, nby));
   EXPECT_EQ(nbx, bx + 4) << "every row follows the column\n" << t.screen;
+}
+
+TEST(AriadneFtxui, DraggedTableColumnsPersistAndSeedTheNextLoad) {
+  REQUIRE_FTXUI();
+  auto make = [] {
+    Widget g = group({text("a1"), text("b1"), text("c1"), text("a2"), text("b2"), text("c2")});
+    g.id = "tbl";
+    g.layout.kind = LayoutKind::Grid;
+    g.layout.col_widths = {Track{Unit::Px, 80.0f}, Track{Unit::Px, 80.0f},
+                           Track{Unit::Percent, 50.0f}};
+    g.layout.borders = BorderShow::Inner;
+    g.layout.resizable = true;
+    return g;
+  };
+  Term t(group({make()}));
+  EXPECT_EQ(val(t.app, "tree.tbl.columns"), "80,80,0")
+      << "authored px as written; the stretch column is not set";
+  int ax = 0, ay = 0, bx = 0, by = 0;
+  ASSERT_TRUE(find_cell(t.screen, "a1", ax, ay)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "b1", bx, by)) << t.screen;
+  ASSERT_EQ(bx, ax + 11) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, bx - 1, by); // the seam: 4 cells from column 2 to column 1
+  t.mouse(TermEvent::Mouse::Move, bx + 3, by);
+  t.mouse(TermEvent::Mouse::Release, bx + 3, by);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.tbl.columns"), "112,48,0") << "14 and 6 cells, in px";
+
+  // A new load seeds the widths from state: column 2 starts 14 cells (and the seam) in, column 3
+  // 6 cells after that.
+  cvc::app app;
+  FtxuiBackend be;
+  Runtime rt(app, "");
+  rt.set_backend(&be);
+  cvc::state::instance(app)("tree.tbl.columns").value("112,48,0");
+  rt.set_root(group({make()}));
+  const std::string s = be.render_to_string(rt, 80, 10);
+  int cx = 0, cy = 0;
+  ASSERT_TRUE(find_cell(s, "a1", ax, ay)) << s;
+  ASSERT_TRUE(find_cell(s, "b1", bx, by)) << s;
+  ASSERT_TRUE(find_cell(s, "c1", cx, cy)) << s;
+  EXPECT_EQ(bx, ax + 15) << s;
+  EXPECT_EQ(cx, bx + 7) << s;
+  EXPECT_EQ(val(app, "tree.tbl.columns"), "112,48,0") << "and reports them back unchanged";
 }
 
 TEST(AriadneFtxui, ResizableTableWithoutBordersStillHasAGrabbableSeam) {

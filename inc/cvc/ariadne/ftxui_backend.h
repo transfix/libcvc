@@ -145,6 +145,8 @@ public:
   void end_grid() override;
   void seed_grid_tracks(const std::vector<float> &sizes) override;
   std::vector<float> grid_tracks() const override;
+  void seed_grid_columns(const std::vector<float> &widths) override;
+  std::vector<float> grid_columns() const override;
 
   void begin_disabled() override;
   void end_disabled() override;
