@@ -171,8 +171,7 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
   }
   // The closed set's resolution: a move leaves its cell, whatever the grid's size.
   const double kres = step / 1.5;
-  const std::uint64_t kcols =
-      static_cast<std::uint64_t>(std::ceil((cols - 1) * f.dx / kres)) + 2;
+  const std::uint64_t kcols = static_cast<std::uint64_t>(std::ceil((cols - 1) * f.dx / kres)) + 2;
   const double tol = o.goal_tolerance > 0.0 ? o.goal_tolerance : 2.0 * f.cell;
   const double radius = std::max(v.min_radius, 0.5 * step); // "any" turn: tight, not singular
   const double cusp = v.cusp_cost > 0.0 ? v.cusp_cost : 4.0 * step;
