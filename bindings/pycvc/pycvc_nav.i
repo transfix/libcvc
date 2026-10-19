@@ -114,6 +114,11 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
 // Internal numpy->material_batch marshaller (non-copyable, and its bind() takes 18
 // raw PyObject*). Reached only through the nav_material_trainer_* functions.
 %ignore pycvc::MaterialBatchArgs;
+// The same for the bicycle rollout entry points (nav_integrate_bicycle_material*)
+// and their output helpers.
+%ignore pycvc::BikeRolloutArgs;
+%ignore pycvc::pycvc_new_f32;
+%ignore pycvc::pycvc_f32;
 
 %inline %{
   namespace pycvc {
@@ -902,6 +907,9 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   static void sim_world_capsule_dtor(PyObject *cap) {
     auto *sw = static_cast<cvc::nav::sim_world *>(PyCapsule_GetPointer(cap, kSimWorldCapsule));
     delete sw;
+    // The plant set on it (pycvc_physics.i's nav_sim_world_set_plant), released after the
+    // world that borrowed it.
+    Py_XDECREF(static_cast<PyObject *>(PyCapsule_GetContext(cap)));
   }
 
   static cvc::nav::sim_world *sim_world_from(PyObject *cap) {
@@ -922,7 +930,10 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
                                  double k_steer, int nsub, int allow_reverse, double reach_tol,
                                  int sense_every, int freeze_sense, double l_occ, double l_free,
                                  double l_clamp, int optimistic, double p_thresh, double band,
-                                 double ttl_s) {
+                                 double ttl_s, PyObject *map_id = nullptr, int n_planes = 1) {
+    // map_id (optional, (N,) ints each in [0, n_planes)) puts each agent in its own belief
+    // plane: one per agent is the fog-of-war twin, one per group a clustered fleet. Omitted:
+    // one shared plane.
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -947,7 +958,11 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
         PyArray_DIM(pr, 1) != cols || PyArray_DIM(ga, 0) != N || PyArray_DIM(ca, 0) != N)
       fail("pycvc.nav_sim_world_create: truth/prior (rows,cols), on/goal/color (N,.) mismatch");
 
-    cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(weights_path); // throws on bad/stale
+    // An empty path: the built-in default policy (coef_mlp::default_biased), as the C++ tests
+    // and from_occupancy use.
+    cvc::nav::coef_mlp model = (weights_path && *weights_path)
+                                   ? cvc::nav::coef_mlp::load(weights_path) // throws on bad/stale
+                                   : cvc::nav::coef_mlp::default_biased();
 
     cvc::nav::sim_world::config cfg;
     cfg.rows = rows;
@@ -984,12 +999,36 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     cfg.band = band;
     cfg.ttl_s = ttl_s;
 
+    const int *mid = nullptr;
+    if (map_id && map_id != Py_None) {
+      PyArrayObject *ma = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(map_id, NPY_INT32, 1, 1, NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_FORCECAST));
+      if (!ma) {
+        PyErr_Clear();
+        fail("pycvc.nav_sim_world_create: map_id is an (N,) array of plane ids");
+      }
+      hold.push_back(ma);
+      if (PyArray_DIM(ma, 0) != N || n_planes < 1)
+        fail("pycvc.nav_sim_world_create: map_id must hold N ids, and n_planes be >= 1");
+      mid = static_cast<const int *>(PyArray_DATA(ma));
+      for (int i = 0; i < N; ++i)
+        if (mid[i] < 0 || mid[i] >= n_planes)
+          fail("pycvc.nav_sim_world_create: a map_id is outside [0, n_planes)");
+    }
+
     cvc::nav::sim_world *sw = nullptr;
-    sw = new cvc::nav::sim_world(cfg, static_cast<const std::uint8_t *>(PyArray_DATA(tr)),
-                                 static_cast<const std::uint8_t *>(PyArray_DATA(pr)),
-                                 std::move(model), static_cast<const float *>(PyArray_DATA(oa)),
-                                 static_cast<const float *>(PyArray_DATA(ga)),
-                                 static_cast<const float *>(PyArray_DATA(ca)), N);
+    try {
+      sw = new cvc::nav::sim_world(cfg, static_cast<const std::uint8_t *>(PyArray_DATA(tr)),
+                                   static_cast<const std::uint8_t *>(PyArray_DATA(pr)),
+                                   std::move(model), static_cast<const float *>(PyArray_DATA(oa)),
+                                   static_cast<const float *>(PyArray_DATA(ga)),
+                                   static_cast<const float *>(PyArray_DATA(ca)), N, mid,
+                                   mid ? n_planes : 1);
+    } catch (...) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw;
+    }
     for (PyArrayObject *h : hold)
       Py_DECREF(h);
     return PyCapsule_New(sw, kSimWorldCapsule, sim_world_capsule_dtor);
@@ -1227,6 +1266,33 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     PyCapsule_SetContext(cap, world_handle); // keep the world alive under us
     Py_INCREF(world_handle);
     return cap;
+  }
+
+  // Follow a shared clock (usually app.world_clock()): one navigator step every
+  // veh.dt / clock.fixed_dt quanta, run as the caller's driver advances the clock
+  // (pycvc.world_clock_binding.drive). The thread borrows the clock: the caller
+  // keeps it (and the app that owns it) alive while the thread exists.
+  PyObject *nav_sim_thread_create_on_clock(PyObject *world_handle, cvc::world_clock &clock) {
+    cvc::nav::sim_world *sw = sim_world_from(world_handle); // validates the handle
+    auto *st = new cvc::nav::sim_thread(*sw, clock); // throws if veh.dt is not whole quanta
+    PyObject *cap = PyCapsule_New(st, kSimThreadCapsule, sim_thread_capsule_dtor);
+    if (!cap) {
+      delete st;
+      throw std::runtime_error("pycvc.nav_sim_thread_create_on_clock: capsule alloc failed");
+    }
+    PyCapsule_SetContext(cap, world_handle); // keep the world alive under us
+    Py_INCREF(world_handle);
+    return cap;
+  }
+
+  // Block (GIL released) until the worker has run and published every step due
+  // up to the clock's current tick, or timeout_s passes; True if caught up. A
+  // capture calls it after driving the clock and before reading.
+  PyObject *nav_sim_thread_wait_caught_up(PyObject *cap, double timeout_s) {
+    cvc::nav::sim_thread *st = sim_thread_from(cap);
+    bool ok = false;
+    Py_BEGIN_ALLOW_THREADS ok = st->wait_caught_up(timeout_s);
+    Py_END_ALLOW_THREADS return PyBool_FromLong(ok ? 1 : 0);
   }
 
   PyObject *nav_sim_thread_start(PyObject *cap) {
@@ -2388,6 +2454,204 @@ PyObject *nav_integrate_surrogate_material(
   return tup;
 }
 
+// The material rollout on the kinematic bicycle (cvc::nav::integrate_bicycle_material,
+// P8b) and its VJP: the arrays the surrogate takes, with the start heading th0 (B,)
+// and signed speed sp0 (B,) in place of v0, plus the vehicle limits. Shared argument
+// handling for the two entry points below; every check runs before the GIL is
+// released.
+struct BikeRolloutArgs {
+  std::vector<PyArrayObject *> hold;
+  int B = 0, N = 0, Hp = 0, Wp = 0;
+  const float *o0, *th0, *sp0, *goal, *C, *R, *alphas, *beta, *gamma, *lam_soft, *lam_hard,
+      *patch, *rr, *d_hat, *dt;
+  const std::uint8_t *mask;
+  const int *H;
+  cvc::nav::surrogate_material_params p;
+  cvc::nav::bicycle_material_params v;
+
+  BikeRolloutArgs() = default;
+  BikeRolloutArgs(const BikeRolloutArgs &) = delete;
+  BikeRolloutArgs &operator=(const BikeRolloutArgs &) = delete;
+  ~BikeRolloutArgs() {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+  }
+
+  PyArrayObject *take(const char *who, PyObject *o, int typ, int nd) {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      throw std::invalid_argument(std::string("pycvc.") + who +
+                                  ": an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  }
+
+  void bind(const char *who, PyObject *o0_, PyObject *th0_, PyObject *sp0_, PyObject *goal_,
+            PyObject *C_, PyObject *R_, PyObject *mask_, PyObject *alphas_, PyObject *beta_,
+            PyObject *gamma_, PyObject *lam_soft_, PyObject *lam_hard_, PyObject *patch_,
+            PyObject *rr_, PyObject *d_hat_, PyObject *dt_, PyObject *H_, double margin_factor,
+            double mass, double d_hat_sdf, double k_sharp, double L, double delta_max,
+            double a_max, double a_lat_max, double k_steer, double vmax, int allow_reverse) {
+    PyArrayObject *o0a = take(who, o0_, NPY_FLOAT, 2), *tha = take(who, th0_, NPY_FLOAT, 1),
+                  *spa = take(who, sp0_, NPY_FLOAT, 1), *ga = take(who, goal_, NPY_FLOAT, 2),
+                  *Ca = take(who, C_, NPY_FLOAT, 3), *Ra = take(who, R_, NPY_FLOAT, 2),
+                  *ma = take(who, mask_, NPY_UINT8, 2), *aa = take(who, alphas_, NPY_FLOAT, 2),
+                  *ba = take(who, beta_, NPY_FLOAT, 1), *gma = take(who, gamma_, NPY_FLOAT, 1),
+                  *lsa = take(who, lam_soft_, NPY_FLOAT, 1),
+                  *lha = take(who, lam_hard_, NPY_FLOAT, 1),
+                  *pa = take(who, patch_, NPY_FLOAT, 4), *rra = take(who, rr_, NPY_FLOAT, 1),
+                  *dha = take(who, d_hat_, NPY_FLOAT, 1), *dta = take(who, dt_, NPY_FLOAT, 1),
+                  *Ha = take(who, H_, NPY_INT32, 1);
+    B = static_cast<int>(PyArray_DIM(o0a, 0));
+    N = static_cast<int>(PyArray_DIM(Ca, 1));
+    Hp = static_cast<int>(PyArray_DIM(pa, 2));
+    Wp = static_cast<int>(PyArray_DIM(pa, 3));
+    if (PyArray_DIM(o0a, 1) != 2 || PyArray_DIM(tha, 0) != B || PyArray_DIM(spa, 0) != B ||
+        PyArray_DIM(ga, 0) != B || PyArray_DIM(Ca, 0) != B || PyArray_DIM(Ca, 2) != 2 ||
+        PyArray_DIM(Ra, 0) != B || PyArray_DIM(Ra, 1) != N || PyArray_DIM(ma, 0) != B ||
+        PyArray_DIM(ma, 1) != N || PyArray_DIM(aa, 0) != B || PyArray_DIM(aa, 1) != N ||
+        PyArray_DIM(ba, 0) != B || PyArray_DIM(gma, 0) != B || PyArray_DIM(lsa, 0) != B ||
+        PyArray_DIM(lha, 0) != B || PyArray_DIM(pa, 0) != B || PyArray_DIM(pa, 1) != 6 ||
+        PyArray_DIM(rra, 0) != B || PyArray_DIM(dha, 0) != B || PyArray_DIM(dta, 0) != B ||
+        PyArray_DIM(Ha, 0) != B)
+      throw std::invalid_argument(std::string("pycvc.") + who + ": shape mismatch");
+    auto F = [](PyArrayObject *a) { return static_cast<const float *>(PyArray_DATA(a)); };
+    o0 = F(o0a);
+    th0 = F(tha);
+    sp0 = F(spa);
+    goal = F(ga);
+    C = F(Ca);
+    R = F(Ra);
+    mask = static_cast<const std::uint8_t *>(PyArray_DATA(ma));
+    alphas = F(aa);
+    beta = F(ba);
+    gamma = F(gma);
+    lam_soft = F(lsa);
+    lam_hard = F(lha);
+    patch = F(pa);
+    rr = F(rra);
+    d_hat = F(dha);
+    dt = F(dta);
+    H = static_cast<const int *>(PyArray_DATA(Ha));
+    p.margin_factor = static_cast<float>(margin_factor);
+    p.mass = static_cast<float>(mass);
+    p.d_hat_sdf = static_cast<float>(d_hat_sdf);
+    p.k_sharp = static_cast<float>(k_sharp);
+    v.L = static_cast<float>(L);
+    v.delta_max = static_cast<float>(delta_max);
+    v.a_max = static_cast<float>(a_max);
+    v.a_lat_max = static_cast<float>(a_lat_max);
+    v.k_steer = static_cast<float>(k_steer);
+    v.vmax = static_cast<float>(vmax);
+    v.allow_reverse = allow_reverse != 0;
+    cvc::nav::validate(v);
+  }
+};
+
+static PyObject *pycvc_new_f32(int nd, npy_intp *dims) {
+  PyObject *o = PyArray_SimpleNew(nd, dims, NPY_FLOAT);
+  if (!o)
+    throw std::runtime_error("pycvc: output alloc failed");
+  return o;
+}
+
+static float *pycvc_f32(PyObject *o) {
+  return static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(o)));
+}
+
+// Returns fresh (oT (B,2), thT (B,), spT (B,), min_clear, cum_risk, hard_count,
+// arc_length (B,)) f32. GIL released.
+PyObject *nav_integrate_bicycle_material(
+    PyObject *o0, PyObject *th0, PyObject *sp0, PyObject *goal, PyObject *C, PyObject *R,
+    PyObject *mask, PyObject *alphas, PyObject *beta, PyObject *gamma, PyObject *lam_soft,
+    PyObject *lam_hard, PyObject *rollout_patch, PyObject *rr, PyObject *d_hat, PyObject *dt,
+    PyObject *H, double margin_factor, double mass, double d_hat_sdf, double k_sharp, double L,
+    double delta_max, double a_max, double a_lat_max, double k_steer, double vmax,
+    int allow_reverse, int num_threads = 0) {
+  BikeRolloutArgs a;
+  a.bind("nav_integrate_bicycle_material", o0, th0, sp0, goal, C, R, mask, alphas, beta, gamma,
+         lam_soft, lam_hard, rollout_patch, rr, d_hat, dt, H, margin_factor, mass, d_hat_sdf,
+         k_sharp, L, delta_max, a_max, a_lat_max, k_steer, vmax, allow_reverse);
+  npy_intp d2[2] = {a.B, 2}, d1 = a.B;
+  PyObject *out[7] = {nullptr};
+  try {
+    out[0] = pycvc_new_f32(2, d2);
+    for (int k = 1; k < 7; ++k)
+      out[k] = pycvc_new_f32(1, &d1);
+  } catch (...) {
+    for (PyObject *o : out)
+      Py_XDECREF(o);
+    throw;
+  }
+  std::memcpy(pycvc_f32(out[0]), a.o0, sizeof(float) * 2 * a.B);
+  std::memcpy(pycvc_f32(out[1]), a.th0, sizeof(float) * a.B);
+  std::memcpy(pycvc_f32(out[2]), a.sp0, sizeof(float) * a.B);
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::integrate_bicycle_material(
+      pycvc_f32(out[0]), pycvc_f32(out[1]), pycvc_f32(out[2]), a.goal, a.C, a.R, a.mask, a.alphas,
+      a.beta, a.gamma, a.lam_soft, a.lam_hard, a.patch, a.rr, a.d_hat, a.dt, a.H, a.B, a.N, a.Hp,
+      a.Wp, a.p, a.v, pycvc_f32(out[3]), pycvc_f32(out[4]), pycvc_f32(out[5]), pycvc_f32(out[6]),
+      num_threads);
+  Py_END_ALLOW_THREADS
+  PyObject *tup = PyTuple_Pack(7, out[0], out[1], out[2], out[3], out[4], out[5], out[6]);
+  for (PyObject *o : out)
+    Py_DECREF(o);
+  return tup;
+}
+
+// The VJP: upstream grads g_oT (B,2), g_thT, g_spT, g_min_clear, g_cum_risk,
+// g_arc_length (B,) -> fresh (g_alphas (B,N), g_beta, g_gamma, g_lam_soft,
+// g_lam_hard (B,)) f32. GIL released.
+PyObject *nav_integrate_bicycle_material_vjp(
+    PyObject *o0, PyObject *th0, PyObject *sp0, PyObject *goal, PyObject *C, PyObject *R,
+    PyObject *mask, PyObject *alphas, PyObject *beta, PyObject *gamma, PyObject *lam_soft,
+    PyObject *lam_hard, PyObject *rollout_patch, PyObject *rr, PyObject *d_hat, PyObject *dt,
+    PyObject *H, double margin_factor, double mass, double d_hat_sdf, double k_sharp, double L,
+    double delta_max, double a_max, double a_lat_max, double k_steer, double vmax,
+    int allow_reverse, PyObject *g_oT, PyObject *g_thT, PyObject *g_spT, PyObject *g_min_clear,
+    PyObject *g_cum_risk, PyObject *g_arc_length, int num_threads = 0) {
+  const char *who = "nav_integrate_bicycle_material_vjp";
+  BikeRolloutArgs a;
+  a.bind(who, o0, th0, sp0, goal, C, R, mask, alphas, beta, gamma, lam_soft, lam_hard,
+         rollout_patch, rr, d_hat, dt, H, margin_factor, mass, d_hat_sdf, k_sharp, L, delta_max,
+         a_max, a_lat_max, k_steer, vmax, allow_reverse);
+  PyArrayObject *go = a.take(who, g_oT, NPY_FLOAT, 2), *gth = a.take(who, g_thT, NPY_FLOAT, 1),
+                *gsp = a.take(who, g_spT, NPY_FLOAT, 1), *gm = a.take(who, g_min_clear, NPY_FLOAT, 1),
+                *gc = a.take(who, g_cum_risk, NPY_FLOAT, 1),
+                *gar = a.take(who, g_arc_length, NPY_FLOAT, 1);
+  if (PyArray_DIM(go, 0) != a.B || PyArray_DIM(go, 1) != 2 || PyArray_DIM(gth, 0) != a.B ||
+      PyArray_DIM(gsp, 0) != a.B || PyArray_DIM(gm, 0) != a.B || PyArray_DIM(gc, 0) != a.B ||
+      PyArray_DIM(gar, 0) != a.B)
+    throw std::invalid_argument(std::string("pycvc.") + who + ": upstream grad shape mismatch");
+  npy_intp dal[2] = {a.B, a.N}, d1 = a.B;
+  PyObject *out[5] = {nullptr};
+  try {
+    out[0] = pycvc_new_f32(2, dal);
+    for (int k = 1; k < 5; ++k)
+      out[k] = pycvc_new_f32(1, &d1);
+  } catch (...) {
+    for (PyObject *o : out)
+      Py_XDECREF(o);
+    throw;
+  }
+  std::memset(pycvc_f32(out[0]), 0, sizeof(float) * a.B * a.N);
+  for (int k = 1; k < 5; ++k)
+    std::memset(pycvc_f32(out[k]), 0, sizeof(float) * a.B);
+  auto F = [](PyArrayObject *x) { return static_cast<const float *>(PyArray_DATA(x)); };
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::integrate_bicycle_material_vjp(
+      a.o0, a.th0, a.sp0, a.goal, a.C, a.R, a.mask, a.alphas, a.beta, a.gamma, a.lam_soft,
+      a.lam_hard, a.patch, a.rr, a.d_hat, a.dt, a.H, a.B, a.N, a.Hp, a.Wp, a.p, a.v, F(go), F(gth),
+      F(gsp), F(gm), F(gc), F(gar), pycvc_f32(out[0]), pycvc_f32(out[1]), pycvc_f32(out[2]),
+      pycvc_f32(out[3]), pycvc_f32(out[4]), num_threads);
+  Py_END_ALLOW_THREADS
+  PyObject *tup = PyTuple_Pack(5, out[0], out[1], out[2], out[3], out[4]);
+  for (PyObject *o : out)
+    Py_DECREF(o);
+  return tup;
+}
+
 // ── torch-free material trainer (coef_energy_net + Adam, held server-side) ────
 // A stateful handle: create from a .cvcnm checkpoint (the initial/warm-start
 // weights matnet_export.py writes), drive it with numpy batches, save the
@@ -2525,7 +2789,21 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
                                       double lam_hard_max = 10.0, double margin_factor = 0.5,
                                       double mass = 1.0, double d_hat_sdf = 3.0,
                                       double k_sharp = 5.0, double tau = 0.05, int ms_h = 3,
-                                      double ms_dt_mult = 4.0, int use_cuda = 0) {
+                                      double ms_dt_mult = 4.0, int use_cuda = 0,
+                                      int ms_count = 1, double frac_lo = 0.9,
+                                      double frac_hi = 0.9, unsigned long long seed = 0,
+                                      int ms_semi_implicit = 0) {
+  // L_multi start sampling (multi_start_params): the defaults are the legacy single
+  // start. Validated here, before any step releases the GIL — a throw from inside
+  // the GIL-free step would leave it unrestored. Only the low 32 bits of `seed`
+  // matter, as for torch.Generator.manual_seed.
+  cvc::nav::multi_start_params ms;
+  ms.ms_count = ms_count;
+  ms.frac_lo = frac_lo;
+  ms.frac_hi = frac_hi;
+  ms.seed = static_cast<std::uint32_t>(seed);
+  ms.semi_implicit = ms_semi_implicit != 0;
+  cvc::nav::multi_start_fracs(ms, 0, nullptr); // range check only (B = 0 draws nothing)
   cvc::nav::coef_energy_net model = cvc::nav::coef_energy_net::load(cvcnm_path); // throws on bad
   auto *t = new MaterialTrainer(std::move(model), static_cast<float>(grad_clip));
   t->use_cuda = use_cuda != 0;
@@ -2550,6 +2828,11 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
   c.multi.tau = (float)tau;
   c.multi.ms_h = ms_h;
   c.multi.ms_dt_mult = (float)ms_dt_mult;
+  c.multi.ms_count = ms.ms_count;
+  c.multi.frac_lo = ms.frac_lo;
+  c.multi.frac_hi = ms.frac_hi;
+  c.multi.seed = ms.seed;
+  c.multi.semi_implicit = ms.semi_implicit;
   return PyCapsule_New(t, kMaterialTrainerCapsule, material_trainer_capsule_dtor);
 }
 
@@ -2572,6 +2855,11 @@ PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObj
   // would make one threaded call change the default for every later step.
   cvc::nav::material_loss_config cfg = t->cfg;
   cfg.num_threads = num_threads;
+  // Fresh multi-start draws each step: this handle's step k samples with seed + k
+  // (mod 2^32), so a run is reproducible from (seed, step). A resumed run
+  // continues the stream by creating its handle with seed + steps_done. (A
+  // degenerate frac range draws nothing, so the seed is moot.)
+  cfg.multi.seed = t->cfg.multi.seed + static_cast<std::uint32_t>(t->opt.steps());
 
   double L = 0.0;
   float eta = 0.0f;
@@ -2587,7 +2875,9 @@ PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObj
 // Forward-only loss over a batch — the VALIDATION entry point. Scores a held-out
 // split without running the backward or touching the optimizer, so the weights and
 // the Adam moments are unchanged. `frozen_eta` pins the detached CVaR quantile
-// (pass NaN, the default, to compute it from this batch's own costs).
+// (pass NaN, the default, to compute it from this batch's own costs). The
+// multi-start draw uses the handle's base seed, not the step's, so the same
+// weights score the same batch identically at every point in a run.
 PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObject *obs_mask,
                                     PyObject *goal_feats, PyObject *risk_patch, PyObject *o0,
                                     PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,
@@ -2617,6 +2907,39 @@ PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObj
 // quantile the analytic gradient did). 0.0 before the first step.
 PyObject *nav_material_trainer_last_eta(PyObject *handle) {
   return PyFloat_FromDouble(static_cast<double>(material_trainer_from(handle)->last_eta));
+}
+
+// Take the loss through the deployed kinematic bicycle instead of the point-mass
+// surrogate (material_integrator::bicycle, P8b), with these vehicle limits in the
+// batch's length units; enabled = 0 goes back to the surrogate. The bicycle starts
+// each agent at speed |v0| heading along v0 (toward the goal when v0 is zero). It
+// runs on the CPU even when the handle asked for CUDA (no device twin yet).
+// Validated here, before any step releases the GIL.
+PyObject *nav_material_trainer_set_bicycle(PyObject *handle, int enabled, double L = 0.035,
+                                           double delta_max = 0.6, double a_max = 1.5,
+                                           double a_lat_max = 1.0, double k_steer = 0.8,
+                                           double vmax = 0.9, int allow_reverse = 1) {
+  MaterialTrainer *t = material_trainer_from(handle);
+  cvc::nav::bicycle_material_params v;
+  v.L = (float)L;
+  v.delta_max = (float)delta_max;
+  v.a_max = (float)a_max;
+  v.a_lat_max = (float)a_lat_max;
+  v.k_steer = (float)k_steer;
+  v.vmax = (float)vmax;
+  v.allow_reverse = allow_reverse != 0;
+  cvc::nav::validate(v); // throws std::invalid_argument
+  t->cfg.integrator = enabled ? cvc::nav::material_integrator::bicycle
+                              : cvc::nav::material_integrator::surrogate;
+  t->cfg.bicycle = v;
+  Py_RETURN_NONE;
+}
+
+// "surrogate" or "bicycle": the rollout this handle's loss is taken through.
+PyObject *nav_material_trainer_integrator(PyObject *handle) {
+  const bool bike =
+      material_trainer_from(handle)->cfg.integrator == cvc::nav::material_integrator::bicycle;
+  return PyUnicode_FromString(bike ? "bicycle" : "surrogate");
 }
 
 PyObject *nav_material_trainer_cuda_active(PyObject *handle) {

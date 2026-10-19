@@ -144,6 +144,10 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
   session->_hydrator = std::make_unique<state_data_hydrator>(
       *session->_blob_store, session->_shard->codecs(), &state_compression_registry::shared());
   session->_hydrator->set_transport(session->_transport.get());
+  // Give the shard's sync adapter the receive-side resolver for blob-ref data() payloads. The
+  // hydrator shares this shard's blob store and codec registry, so an inbound set_data whose
+  // payload was offloaded on the sender is fetched, decoded, and installed on the local node.
+  session->_shard->set_data_hydrator(session->_hydrator.get());
 
   // 10. Attach shard (start observing state changes).
   session->_shard->attach();
@@ -154,17 +158,12 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
     session->_transport->request_snapshot(
         config.cluster_id, config.root_path,
         [&session](const std::vector<state_transport::snapshot_entry> &entries, bool /*final*/) {
-          for (const auto &e : entries) {
-            state_mutation m;
-            m.cluster_id = session->_config.cluster_id;
-            m.origin_node_id = e.origin_node_id;
-            m.sequence = e.sequence;
-            m.path = e.path;
-            m.op = state_mutation_op::set_value;
-            m.string_value = e.string_value;
-            m.type_name = e.type_name;
-            session->_shard->ingest_remote(m);
-          }
+          // Reconstruct each node's value + metadata + data() from the snapshot. See
+          // state_cluster_shard::ingest_snapshot_entry — a dedup-safe bootstrap that applies
+          // directly through the adapter (previously this emitted only set_value, dropping data()
+          // and metadata and sharing one ("",0) key that the seen-set would dedup away).
+          for (const auto &e : entries)
+            session->_shard->ingest_snapshot_entry(e);
         });
   }
 

@@ -23,15 +23,25 @@
 #include <cvc/ariadne/bind.h>     // SceneVisibilityBinding
 #include <cvc/ariadne/loader.h>   // LoadResult / CustomRequirement (verify_scene_customs)
 #include <cvc/ariadne/scene.h>    // SceneClock (RealizedScene holds the resolved clock by value)
-#include <cvc/gl/StageLighting.h> // RealizedScene owns any StageLighting rigs
+#include <cvc/core/types.h>       // cvc::sdf_algorithm (sdf_volume_from_mesh)
+#include <cvc/core/world_clock.h> // tick_scene returns the frame's world_clock::step_result
+#include <cvc/core/world_clock_binding.h> // RealizedScene drives the clock through a binding
+#include <cvc/gl/StageLighting.h>         // RealizedScene owns any StageLighting rigs
+#include <cvc/gl/physics_scene_binding.h> // RealizedScene draws its bodies through one
+#include <cvc/physics/world.h>            // RealizedScene owns the scene's physics world
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cvc {
 class app;
-}
+class geometry;
+class height_field;
+class volume;
+} // namespace cvc
 
 class vtkRenderer;
 
@@ -73,19 +83,48 @@ struct RealizedScene {
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
 
   // §9 time. When the scene declared a `clock:` block, tick_scene drives the app's authoritative
-  // cvc::world_clock (app.world_clock()) from these bindings each frame — read sim.speed/sim.paused
-  // (or whatever keys the clock names), set scale/mode, advance by the wall delta, publish the live
-  // world seconds — so a custom_tick can read ONE coherent app.world_clock().t() for the frame and
-  // the reusable sim_transport widget controls it with no host C++. `app` is the owning app (set by
-  // realize_scene); the timestamp/primed pair measures real elapsed between ticks when the caller
-  // does not inject a fixed dt. RealizedScene is MOVED, never copied, so the plain members are
-  // safe; they reset on a scene reload (one dt≈0 frame — app.world_clock() itself persists across
-  // reloads).
+  // cvc::world_clock (app.world_clock()) through a cvc::world_clock_binding each frame: it reads
+  // sim.speed / sim.paused / sim.mode / sim.lockstep_steps / sim.step (or whatever keys the clock
+  // names), advances by the wall delta, and publishes the world time. So a custom_tick reads ONE
+  // coherent app.world_clock().t() for the frame, and the reusable sim_transport widget controls
+  // it, lockstep and single-step included, with no host C++. `app` is the owning app (set by
+  // realize_scene); the binding is made on the first tick; the timestamp/primed pair measures real
+  // elapsed between ticks when the caller does not inject a fixed dt. RealizedScene is MOVED,
+  // never copied; these members reset on a scene reload (one dt≈0 frame — app.world_clock() itself
+  // persists across reloads).
   cvc::ariadne::SceneClock clock; // resolved clock declaration; clock.present gates the drive
   cvc::app *app = nullptr;        // owning app (world_clock() + state) — set by realize_scene
+  std::unique_ptr<cvc::world_clock_binding> clock_binding; // made by the first tick_scene
   std::chrono::steady_clock::time_point clock_last{}; // last tick_scene time (real-elapsed lane)
   bool clock_primed = false;                          // false until the first tick seeds clock_last
+
+  // The heightfield nodes' own cvc::height_field, by node id: the grid the node draws, the terrain
+  // its body collides with, and what a custom node standing on it (forest_trees, wave_sea,
+  // cloud_sky: their `ground:`) samples. The node's GeometryNode holds a plain copy of the mesh.
+  std::map<std::string, std::shared_ptr<const cvc::height_field>> height_fields;
+
+  // The scene's physics world (`physics:`, or the nodes' `body:`s), null without one. Its bodies
+  // are placed at their nodes' realized world poses; tick_scene steps it on app.world_clock()
+  // and draws the moving bodies through `physics_binding` (declared after the world, so it goes
+  // first). `bodies` maps node ids to their bodies.
+  std::unique_ptr<cvc::physics::world> physics;
+  std::unique_ptr<cvc::gl::physics_scene_binding> physics_binding;
+  std::vector<std::pair<std::string, cvc::physics::body_id>> bodies;
+  // The body of node `id`, or an invalid id.
+  cvc::physics::body_id body(const std::string &id) const {
+    for (const auto &b : bodies)
+      if (b.first == id)
+        return b.second;
+    return cvc::physics::body_id{};
+  }
 };
+
+// The binding keys for a scene clock. The scene names speed, paused, time and tick one by one
+// (empty = that lane is off); the binding's other keys (mode, lockstep_steps, step, fixed_dt,
+// realized_speed, dropped) sit beside them, under the parent of the first named key that keeps its
+// standard leaf: clk.sim.speed gives clk.sim.mode, clk.sim.step, ... With no such key those lanes
+// are off too.
+cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock);
 
 // Per-frame servicing for realized volren/volslice nodes (§9): each such node needs
 // a tick() every frame or it renders nothing, and multiple volslice nodes need a
@@ -97,13 +136,20 @@ struct RealizedScene {
 //
 // §9 time: when the realized scene declared a `clock:` block, tick_scene ALSO drives the app's
 // authoritative cvc::world_clock here (before the node tickers), so animations read one coherent
-// world time and the sim_transport widget's pause/speed take effect. `wall_dt` is the wall-clock
-// delta to advance by: pass a fixed value (e.g. 1.0/fps) for a DETERMINISTIC offscreen capture;
-// leave it negative (the default) and tick_scene measures real elapsed since the last call — which
-// keeps animation at real-time speed even when the browser renders well under the frame cap (a
-// fixed per-frame dt would make a slow frame rate crawl, the very bug the wall-clock ticks fixed).
-// Scenes without a `clock:` block ignore wall_dt and never touch app.world_clock().
-void tick_scene(RealizedScene &realized, vtkRenderer *renderer, double wall_dt = -1.0);
+// world time and the sim_transport widget's pause/speed/mode/step take effect. `wall_dt` is the
+// wall-clock delta to advance by: pass a fixed value (e.g. 1.0/fps) for a DETERMINISTIC offscreen
+// capture; leave it negative (the default) and tick_scene measures real elapsed since the last
+// call — which keeps animation at real-time speed even when the browser renders well under the
+// frame cap (a fixed per-frame dt would make a slow frame rate crawl, the very bug the wall-clock
+// ticks fixed). Returns the quanta this frame ran (steps, first_tick, alpha), so a host can step
+// its own followers by them. Scenes without a `clock:` block ignore wall_dt, never touch
+// app.world_clock(), and return an empty result.
+//
+// A physics scene (`physics:`, or any node `body:`) drives the clock as if it declared `clock: {}`,
+// then steps its world by the quanta due and poses the moving bodies' nodes between the last two
+// states (physics_scene_binding::follow + present).
+cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
+                                         double wall_dt = -1.0);
 
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME
 // cvc::state prefix the widget Runtime was constructed with (typically
@@ -139,6 +185,36 @@ void register_scene_node_type(const std::string &type, NodeRealizer realizer);
 
 // Whether a custom scene node `type` has a registered realizer (test/introspection).
 bool has_scene_node_type(const std::string &type);
+
+// --- the built-in source readers, for custom realizers -----------------------
+//
+// A custom node type that shows a mesh or a volume reads its `source:` exactly like the built-in
+// geometry / volren nodes do, so a document can swap `type: geometry` for a custom type without
+// changing anything else. Render/owner thread (they may read files and compute an SDF).
+
+// `fit:` — stand a mesh on the ground: optionally rotate a Y-up mesh to Z-up, centre it in XY, sit
+// its base on z = 0 and scale its tallest extent to `height`. Returns a fresh geometry (points,
+// normals, colours, tris).
+cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height);
+
+// The mesh a node's `source:` declares — a heightfield (its cvc::height_field's mesh), a plane, box
+// or sphere primitive, or a file / URI — with its `fit:` applied. Warns (naming the node) and
+// returns false when there is no usable source.
+bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &node, cvc::geometry &geom,
+                        std::vector<std::string> *warnings);
+
+// A dim³ signed distance field of the mesh at `mesh_uri` (fit applied first when `apply_fit`),
+// framed to the mesh extents padded 10% and cubic. Negative inside. Throws on a build without
+// CVC_ENABLE_SDF or on an unreadable mesh.
+cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
+                                 bool apply_fit, bool fit_up_y, float fit_height,
+                                 cvc::sdf_algorithm algorithm = cvc::SDF_V2);
+
+// The volume a node's `source:` declares: `{ file }`, or `{ sdf: { mesh, dim, algorithm } }`
+// (algorithm v1 | v2 | igl; igl falls back to v2 with a warning when cvc::mesh_ops_available() is
+// false). Throws on failure.
+cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &node,
+                             std::vector<std::string> *warnings);
 
 // --- extensibility: named GLSL shader presets (the DSL `shader: { preset: <name> }`) ---------
 //

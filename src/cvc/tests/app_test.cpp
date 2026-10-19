@@ -14,12 +14,15 @@
 #include <chrono> // compute_async: bounded wait for the completion callback
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
+#include <cvc/state/state.h>
 #include <filesystem>
 #include <future> // compute_async: deterministic wait on on_done via a promise
 #include <gtest/gtest.h>
 #include <memory> // compute_async: shared accumulator captured by fn + on_done
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc;
@@ -1857,3 +1860,175 @@ TEST_F(AppTest, WorldBasesAreNotGlobalSingletons) {
 }
 
 // Main function is provided by gtest_main library
+
+// ===========================
+// world_clock_binding — one clock, controlled and published on the state tree
+// ===========================
+
+namespace {
+std::string key_value(app &ctx, const std::string &path) {
+  return cvc::state::instance(ctx)(path).value();
+}
+void set_key(app &ctx, const std::string &path, const std::string &v) {
+  cvc::state::instance(ctx)(path).value(v);
+}
+} // namespace
+
+TEST_F(AppTest, ClockBindingSeedsControlsAndPublishesTime) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  const auto r = b.drive(0.05); // 6 quanta at 120 Hz
+  EXPECT_EQ(r.steps, 6);
+  EXPECT_EQ(key_value(ctx, "simtest.speed"), "1");
+  EXPECT_EQ(key_value(ctx, "simtest.paused"), "0");
+  EXPECT_EQ(key_value(ctx, "simtest.mode"), "live");
+  EXPECT_EQ(key_value(ctx, "simtest.lockstep_steps"), "1");
+  EXPECT_EQ(key_value(ctx, "simtest.step"), "0");
+  EXPECT_EQ(key_value(ctx, "simtest.tick"), "6");
+  EXPECT_DOUBLE_EQ(std::stod(key_value(ctx, "simtest.time")), c.t());
+  EXPECT_DOUBLE_EQ(std::stod(key_value(ctx, "simtest.fixed_dt")), c.fixed_dt());
+}
+
+TEST_F(AppTest, ClockBindingSpeedPauseAndModeComeFromTheTree) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  b.drive(0.0);
+
+  set_key(ctx, "simtest.speed", "2");
+  EXPECT_EQ(b.drive(0.025).steps, 6) << "25 ms of wall at 2x is 6 quanta at 120 Hz";
+  EXPECT_DOUBLE_EQ(c.scale(), 2.0);
+
+  set_key(ctx, "simtest.paused", "true"); // state_exec's spelling of a bool
+  EXPECT_EQ(b.drive(0.05).steps, 0);
+  EXPECT_EQ(c.current_mode(), cvc::world_clock::mode::paused);
+
+  set_key(ctx, "simtest.paused", "0");
+  set_key(ctx, "simtest.mode", "lockstep");
+  set_key(ctx, "simtest.lockstep_steps", "3");
+  EXPECT_EQ(b.drive(10.0).steps, 3) << "lockstep ignores the wall";
+  EXPECT_EQ(c.current_mode(), cvc::world_clock::mode::lockstep);
+
+  set_key(ctx, "simtest.paused", "1");
+  EXPECT_EQ(b.drive(10.0).steps, 0) << "paused wins over lockstep";
+
+  set_key(ctx, "simtest.mode", "no-such-mode");
+  set_key(ctx, "simtest.paused", "0");
+  EXPECT_EQ(b.drive(0.0).steps, 3) << "an unknown mode is ignored, not thrown";
+}
+
+TEST_F(AppTest, ClockBindingStepRequestsRunOneQuantumEach) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  set_key(ctx, "simtest.mode", "stepping");
+  b.drive(0.0);
+  const std::uint64_t t0 = c.tick();
+  EXPECT_EQ(b.drive(1.0).steps, 0) << "stepping ignores the wall";
+
+  set_key(ctx, "simtest.step", "2");
+  const auto r = b.drive(1.0);
+  EXPECT_EQ(r.steps, 2);
+  EXPECT_EQ(r.first_tick, t0);
+  EXPECT_EQ(c.tick(), t0 + 2);
+
+  set_key(ctx, "simtest.step", "0"); // a counter reset requests nothing
+  EXPECT_EQ(b.drive(1.0).steps, 0);
+  EXPECT_EQ(b.pending_steps(), 0u);
+}
+
+TEST_F(AppTest, ClockBindingDoesNotReplayRequestsMadeBeforeItExisted) {
+  set_key(ctx, "simtest.step", "40");
+  set_key(ctx, "simtest.mode", "stepping");
+  cvc::world_clock_binding b(ctx, ctx.world_clock(), "simtest");
+  EXPECT_EQ(b.drive(0.0).steps, 0);
+}
+
+TEST_F(AppTest, ClockBindingSharesAriadnesTransportKeys) {
+  // A default binding speaks sim.speed / sim.paused / sim.time, the keys Ariadne's
+  // sim_transport.ari binds, so a scene's Speed slider steers any simulation
+  // driven through a binding.
+  cvc::world_clock_binding b(ctx, ctx.world_clock());
+  EXPECT_EQ(b.key("speed"), "sim.speed");
+  set_key(ctx, "sim.speed", "0.5");
+  EXPECT_EQ(b.drive(0.1).steps, 6);
+  EXPECT_EQ(key_value(ctx, "sim.tick"), "6");
+}
+
+TEST_F(AppTest, ClockBindingTakesExplicitKeysAndSkipsEmptyOnes) {
+  // A scene's `clock:` block names its keys one by one; a lane with no key is
+  // neither seeded, read nor written.
+  cvc::world_clock_keys k;
+  k.speed = "scn.rate";
+  k.time = "scn.now";
+  k.step = "scn.step";
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, k);
+  EXPECT_EQ(b.key("speed"), "scn.rate");
+  EXPECT_EQ(b.key("paused"), "");
+  EXPECT_EQ(b.drive(0.05).steps, 6);
+  EXPECT_EQ(key_value(ctx, "scn.rate"), "1");
+  EXPECT_DOUBLE_EQ(std::stod(key_value(ctx, "scn.now")), c.t());
+  const std::vector<std::string> scn = cvc::state::instance(ctx)("scn").children();
+  EXPECT_EQ(scn.size(), 3u) << "only the three named keys exist under scn";
+
+  set_key(ctx, "scn.rate", "2");
+  EXPECT_EQ(b.drive(0.025).steps, 6);
+  set_key(ctx, "scn.step", "1");
+  EXPECT_EQ(b.drive(0.0).steps, 1) << "a step request through an explicit key";
+}
+
+TEST_F(AppTest, ClockBindingRunsStepsAHostVerbRequests) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  set_key(ctx, "simtest.paused", "1");
+  b.drive(0.0);
+  const std::uint64_t t0 = c.tick();
+  b.request_steps(2);
+  EXPECT_EQ(b.pending_steps(), 2u);
+  EXPECT_EQ(b.drive(1.0).steps, 2) << "a step request runs while paused";
+  EXPECT_EQ(c.tick(), t0 + 2);
+  EXPECT_EQ(b.drive(1.0).steps, 0);
+}
+
+// Step requests from several threads while another thread drives: none is lost
+// or run twice (the binding's own counters are behind its lock).
+TEST_F(AppTest, ClockBindingTakesStepRequestsFromAnyThread) {
+  cvc::world_clock &c = ctx.world_clock();
+  cvc::world_clock_binding b(ctx, c, "simtest");
+  set_key(ctx, "simtest.paused", "1");
+  b.drive(0.0);
+  const std::uint64_t t0 = c.tick();
+  constexpr int kThreads = 4, kEach = 250;
+  std::atomic<bool> done{false};
+  std::uint64_t driven = 0;
+  std::thread driver([&] {
+    while (!done)
+      driven += static_cast<std::uint64_t>(b.drive(0.0).steps);
+  });
+  std::vector<std::thread> requesters;
+  for (int t = 0; t < kThreads; ++t)
+    requesters.emplace_back([&] {
+      for (int i = 0; i < kEach; ++i) {
+        b.request_steps(1);
+        (void)b.pending_steps();
+      }
+    });
+  for (std::thread &t : requesters)
+    t.join();
+  done = true;
+  driver.join();
+  driven += static_cast<std::uint64_t>(b.drive(0.0).steps); // whatever arrived last
+  EXPECT_EQ(driven, static_cast<std::uint64_t>(kThreads * kEach));
+  EXPECT_EQ(c.tick(), t0 + kThreads * kEach);
+  EXPECT_EQ(b.pending_steps(), 0u);
+}
+
+TEST_F(AppTest, ClockKeysUnderAPrefixMatchThePrefixConstructor) {
+  const cvc::world_clock_keys k = cvc::world_clock_keys::under("a.sim");
+  EXPECT_EQ(k.speed, "a.sim.speed");
+  EXPECT_EQ(k.lockstep_steps, "a.sim.lockstep_steps");
+  EXPECT_EQ(k.dropped, "a.sim.dropped");
+  EXPECT_EQ(cvc::world_clock_keys::under("").time, "time");
+  cvc::world_clock_binding b(ctx, ctx.world_clock(), "a.sim");
+  EXPECT_EQ(b.keys().realized_speed, "a.sim.realized_speed");
+  EXPECT_EQ(b.key("custom"), "a.sim.custom");
+}

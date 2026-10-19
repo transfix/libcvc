@@ -20,9 +20,11 @@
 #include <atomic>
 #include <cmath>
 #include <cvc/core/exception.h>
+#include <cvc/core/unit_registry.h>
 #include <cvc/core/world_units.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -376,4 +378,242 @@ TEST(WorldUnitsTest, ConcurrentReadsAndWritesDoNotCrashOrCorrupt) {
   for (auto &t : threads)
     t.join();
   SUCCEED();
+}
+
+// --- the unit registry -------------------------------------------------------
+
+TEST(UnitRegistryTest, BuiltInsCoverEveryWorldUnitsDimension) {
+  cvc::unit_registry r;
+  const world_units si;
+  const world_units imp(world_units::config{sys::imperial, 1.0});
+  for (int i = 0; i <= static_cast<int>(dim::energy_per_length); ++i) {
+    const dim d = static_cast<dim>(i);
+    const std::string name = world_units::dimension_name(d);
+    ASSERT_TRUE(r.has_dimension(name)) << name;
+    EXPECT_TRUE(r.has_unit(si.display_unit(d))) << name;
+    EXPECT_TRUE(r.has_unit(imp.display_unit(d))) << name;
+    EXPECT_EQ(r.dimension_of(si.display_unit(d)), name);
+    EXPECT_EQ(r.dimension_of(imp.display_unit(d)), name);
+  }
+}
+
+TEST(UnitRegistryTest, ExactCustomaryAnchors) {
+  cvc::unit_registry r;
+  EXPECT_EQ(r.to_si(1.0, "nmi"), 1852.0);
+  EXPECT_EQ(r.to_si(1.0, "kWh"), 3.6e6);
+  EXPECT_EQ(r.to_si(1.0, "mAh"), 3.6);
+  EXPECT_NEAR(r.to_si(1.0, "in"), kFoot / 12.0, 1e-18);
+  EXPECT_NEAR(r.to_si(1.0, "hp"), 745.69987158227022, 1e-9);
+  EXPECT_NEAR(r.to_si(1.0, "psi"), 6894.757293168361, 1e-9);
+  EXPECT_NEAR(r.to_si(1.0, "gal"), 0.003785411784, 1e-18);
+  EXPECT_NEAR(r.to_si(1.0, "kn"), 1852.0 / 3600.0, 1e-15);
+  EXPECT_NEAR(r.convert(60.0, "mph", "km/h"), 96.56064, 1e-9);
+  EXPECT_NEAR(r.convert(1.0, "rpm", "deg/s"), 6.0, 1e-12);
+  EXPECT_NEAR(r.convert(100.0, "Wh/km", "Wh/mi"), 160.9344, 1e-9);
+  EXPECT_NEAR(r.convert(1.0, "acre", "ft^2"), 43560.0, 1e-6);
+}
+
+TEST(UnitRegistryTest, TemperatureIsAffineAndRoundTrips) {
+  cvc::unit_registry r;
+  EXPECT_NEAR(r.to_si(0.0, "degC"), 273.15, 1e-12);
+  EXPECT_NEAR(r.to_si(32.0, "degF"), 273.15, 1e-12);
+  EXPECT_NEAR(r.convert(100.0, "degC", "degF"), 212.0, 1e-9);
+  EXPECT_NEAR(r.convert(-40.0, "degF", "degC"), -40.0, 1e-9);
+  EXPECT_NEAR(r.from_si(r.to_si(98.6, "degF"), "degF"), 98.6, 1e-12);
+  EXPECT_EQ(r.unit("degF").kind, cvc::unit_registry::unit_kind::affine);
+}
+
+TEST(UnitRegistryTest, FunctionUnitDbmRoundTrips) {
+  cvc::unit_registry r;
+  EXPECT_NEAR(r.to_si(30.0, "dBm"), 1.0, 1e-12);   // 30 dBm = 1 W
+  EXPECT_NEAR(r.to_si(0.0, "dBm"), 1.0e-3, 1e-15); // 0 dBm = 1 mW
+  EXPECT_NEAR(r.convert(20.0, "dBm", "W"), 0.1, 1e-12);
+  EXPECT_NEAR(r.from_si(0.5, "dBm"), 26.98970004336019, 1e-9);
+  EXPECT_EQ(r.unit("dBm").kind, cvc::unit_registry::unit_kind::function);
+}
+
+TEST(UnitRegistryTest, CustomDimensionsAndUnitsDropIn) {
+  // A specialised use case: a data link rated in bits per second, an old length
+  // unit, and a nonlinear unit, none of which the built-ins know.
+  cvc::unit_registry r;
+  r.add_dimension("data_rate", "bit/s");
+  r.add_linear("Mbit/s", "data_rate", 1.0e6, "megabit per second");
+  r.add_linear("furlong", "length", 201.168, "furlong");
+  r.add_function(
+      "log10m", "length", [](double v) { return std::pow(10.0, v); },
+      [](double m) { return std::log10(m); }, "log10 of metres");
+  EXPECT_EQ(r.dimension_of("Mbit/s"), "data_rate");
+  EXPECT_EQ(r.convert(54.0, "Mbit/s", "bit/s"), 54.0e6);
+  EXPECT_NEAR(r.convert(1.0, "furlong", "ft"), 660.0, 1e-9);
+  EXPECT_NEAR(r.convert(3.0, "log10m", "km"), 1.0, 1e-12);
+  EXPECT_EQ(r.units("data_rate"), (std::vector<std::string>{"Mbit/s", "bit/s"}));
+}
+
+TEST(UnitRegistryTest, RejectsBadDefinitionsAndCrossDimensionConversions) {
+  cvc::unit_registry r;
+  EXPECT_THROW(r.add_linear("ft", "length", 0.3048), cvc::unit_error); // duplicate symbol
+  EXPECT_THROW(r.add_linear("x", "nosuchdim", 1.0), cvc::unit_error);
+  EXPECT_THROW(r.add_linear("zero", "length", 0.0), cvc::unit_error);
+  EXPECT_THROW(r.add_linear("nan", "length", std::nan("")), cvc::unit_error);
+  EXPECT_THROW(r.add_affine("bad", "temperature", 1.0, std::numeric_limits<double>::infinity()),
+               cvc::unit_error);
+  EXPECT_THROW(r.add_function("f", "length", nullptr, nullptr), cvc::unit_error);
+  EXPECT_THROW(r.add_dimension("length", "ft", 1), cvc::unit_error); // clashing re-declare
+  EXPECT_NO_THROW(r.add_dimension("length", "m", 1));                // identical: a no-op
+  EXPECT_THROW(r.convert(1.0, "ft", "kg"), cvc::unit_error);
+  EXPECT_THROW(r.to_si(1.0, "furlongs"), cvc::unit_error);
+  EXPECT_THROW(r.units("nosuchdim"), cvc::unit_error);
+}
+
+TEST(UnitRegistryTest, EmptyRegistryHoldsNothingAndCopiesAreIndependent) {
+  cvc::unit_registry e = cvc::unit_registry::empty();
+  EXPECT_TRUE(e.dimensions().empty());
+  EXPECT_FALSE(e.has_unit("m"));
+  cvc::unit_registry a;
+  cvc::unit_registry b(a);
+  b.add_linear("furlong", "length", 201.168);
+  EXPECT_TRUE(b.has_unit("furlong"));
+  EXPECT_FALSE(a.has_unit("furlong"));
+  a = b;
+  EXPECT_TRUE(a.has_unit("furlong"));
+}
+
+// --- world_units on the registry ----------------------------------------------
+
+TEST(WorldUnitsTest, DisplayOverridePicksAUnitPerDimension) {
+  world_units u;
+  u.set_display_unit(dim::velocity, "kn");
+  EXPECT_EQ(u.unit_symbol(dim::velocity), "kn");
+  EXPECT_NEAR(u.to_display(1852.0 / 3600.0, dim::velocity), 1.0, 1e-12);
+  EXPECT_NEAR(u.from_display(1.0, dim::velocity), 1852.0 / 3600.0, 1e-15);
+  u.set_display_unit(dim::length, "nmi");
+  const auto m = u.format(3704.0, dim::length); // an override turns off km promotion
+  EXPECT_EQ(m.unit, "nmi");
+  EXPECT_NEAR(m.value, 2.0, 1e-12);
+  const auto c = u.world_point_to_real(1852.0, 0.0, 0.0);
+  EXPECT_EQ(c.unit, "nmi");
+  EXPECT_NEAR(c.x, 1.0, 1e-12);
+  EXPECT_THROW(u.set_display_unit(dim::velocity, "kg"), cvc::unit_error);
+  u.clear_display_unit(dim::length);
+  EXPECT_EQ(u.format(3704.0, dim::length).unit, "km");
+}
+
+TEST(WorldUnitsTest, NewDimensionsHaveRegimeDefaults) {
+  world_units u;
+  EXPECT_EQ(u.unit_symbol(dim::temperature), "degC");
+  EXPECT_NEAR(u.to_display(273.15, dim::temperature), 0.0, 1e-12);
+  EXPECT_EQ(u.unit_symbol(dim::energy_per_length), "Wh/km");
+  EXPECT_NEAR(u.to_display(3.6, dim::energy_per_length), 1.0, 1e-12); // 3.6 J/m = 1 Wh/km
+  u.set_regime(sys::imperial);
+  EXPECT_EQ(u.unit_symbol(dim::temperature), "degF");
+  EXPECT_NEAR(u.to_display(373.15, dim::temperature), 212.0, 1e-9);
+  EXPECT_EQ(u.unit_symbol(dim::power), "hp");
+  EXPECT_EQ(u.unit_symbol(dim::pressure), "psi");
+  EXPECT_EQ(u.unit_symbol(dim::frequency), "Hz");
+}
+
+TEST(WorldUnitsTest, CustomDimensionWorksByName) {
+  world_units u;
+  u.registry().add_dimension("data_rate", "bit/s");
+  u.registry().add_linear("Mbit/s", "data_rate", 1.0e6);
+  EXPECT_EQ(u.unit_symbol("data_rate"), "bit/s"); // a custom dimension defaults to SI
+  u.set_display_unit("data_rate", "Mbit/s");
+  EXPECT_EQ(u.format(2.5e6, "data_rate").unit, "Mbit/s");
+  EXPECT_DOUBLE_EQ(u.format(2.5e6, "data_rate").value, 2.5);
+  EXPECT_DOUBLE_EQ(u.from_display(2.5, "data_rate"), 2.5e6);
+  EXPECT_THROW(u.unit_symbol("nosuchdim"), cvc::unit_error);
+  // Each world_units owns its registry: another instance has no data_rate.
+  const world_units other;
+  EXPECT_FALSE(other.registry().has_dimension("data_rate"));
+}
+
+// --- SI <-> nav's normalized frame --------------------------------------------
+
+TEST(WorldUnitsTest, NormalizedFrameScalesByLengthExponent) {
+  const world_units u;
+  world_units::normalized_frame f;
+  f.scale = 0.05; // 0.05 normalized units per world metre
+  // velocity (e = 1): 2 m/s -> 0.1 normalized/s and back
+  EXPECT_DOUBLE_EQ(u.to_normalized(2.0, dim::velocity, f), 2.0 * 0.05);
+  EXPECT_DOUBLE_EQ(u.from_normalized(0.1, dim::velocity, f), 0.1 / 0.05);
+  // curvature (e = -1): 1/R in 1/m -> per normalized unit
+  EXPECT_DOUBLE_EQ(u.to_normalized(0.5, dim::curvature, f), 0.5 / 0.05);
+  EXPECT_DOUBLE_EQ(u.to_normalized(0.5, "curvature", f), 0.5 / 0.05);
+  // area (e = 2)
+  EXPECT_NEAR(u.to_normalized(100.0, dim::area, f), 100.0 * 0.05 * 0.05, 1e-15);
+  // time, angle and mass pass through bit for bit
+  EXPECT_EQ(u.to_normalized(0.06, dim::time, f), 0.06);
+  EXPECT_EQ(u.to_normalized(0.4, dim::angle, f), 0.4);
+  EXPECT_EQ(u.from_normalized(1.5, dim::mass, f), 1.5);
+}
+
+TEST(WorldUnitsTest, NormalizedFrameAppliesMetresPerWorldUnitFirst) {
+  // A world authored in kilometres: 1 world unit = 1000 m.
+  const world_units u(world_units::config{sys::si, 1000.0});
+  world_units::normalized_frame f;
+  f.scale = 2.0; // 2 normalized units per world unit (per km)
+  // 500 m = 0.5 world = 1.0 normalized
+  EXPECT_DOUBLE_EQ(u.to_normalized(500.0, dim::length, f), 1.0);
+  EXPECT_DOUBLE_EQ(u.from_normalized(1.0, dim::length, f), 500.0);
+  // 4 m/s^2 = 0.004 world/s^2 = 0.008 normalized/s^2
+  EXPECT_DOUBLE_EQ(u.to_normalized(4.0, dim::acceleration, f), 0.008);
+  // 0.002 1/m = 2 1/world = 1 1/normalized
+  EXPECT_DOUBLE_EQ(u.to_normalized(0.002, dim::curvature, f), 1.0);
+}
+
+TEST(WorldUnitsTest, NormalizedPointMatchesNavSnapshotArithmetic) {
+  // nav's snapshot maps a normalized position back as o / S + centre; at one
+  // metre per world unit the SI point is exactly that.
+  const world_units u;
+  world_units::normalized_frame f;
+  f.scale = 0.02;
+  f.cx = 37.5;
+  f.cy = -12.0;
+  const double ox = 0.3125, oy = -0.75;
+  const auto m = u.normalized_point_to_si(ox, oy, 0.0, f);
+  EXPECT_EQ(m.x, ox / 0.02 + 37.5);
+  EXPECT_EQ(m.y, oy / 0.02 + -12.0);
+  const auto n = u.si_point_to_normalized(m.x, m.y, 0.0, f);
+  EXPECT_NEAR(n.x, ox, 1e-15);
+  EXPECT_NEAR(n.y, oy, 1e-15);
+}
+
+TEST(WorldUnitsTest, NormalizedFrameRejectsBadScaleOrCentre) {
+  const world_units u;
+  world_units::normalized_frame f;
+  f.scale = 0.0;
+  EXPECT_THROW(u.to_normalized(1.0, dim::length, f), cvc::unit_error);
+  f.scale = -1.0;
+  EXPECT_THROW(u.from_normalized(1.0, dim::velocity, f), cvc::unit_error);
+  f.scale = 1.0;
+  f.cx = std::nan("");
+  EXPECT_THROW(u.si_point_to_normalized(0.0, 0.0, 0.0, f), cvc::unit_error);
+  f.cx = 0.0;
+  EXPECT_THROW(u.to_normalized(1.0, "nosuchdim", f), cvc::unit_error);
+}
+
+TEST(WorldUnitsTest, CustomUnitsRegisterAndConvertConcurrently) {
+  world_units u;
+  std::atomic<bool> go{false};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < 6; ++i) {
+    threads.emplace_back([&u, &go, i]() {
+      while (!go.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      for (int k = 0; k < 200; ++k) {
+        if (i % 2 == 0) {
+          u.registry().add_linear("u" + std::to_string(i) + "_" + std::to_string(k), "length",
+                                  1.0 + k);
+        } else {
+          EXPECT_NEAR(u.convert(1.0, "mi", "ft"), 5280.0, 1e-9);
+          EXPECT_EQ(u.to_display(1.0, dim::velocity), 1.0);
+        }
+      }
+    });
+  }
+  go.store(true, std::memory_order_release);
+  for (auto &t : threads)
+    t.join();
+  EXPECT_TRUE(u.registry().has_unit("u4_199"));
+  EXPECT_EQ(u.registry().units("length").size(), 9u + 600u);
 }

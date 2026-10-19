@@ -5,6 +5,53 @@
 
 namespace cvc {
 
+namespace {
+
+// One node's value and data(). data() is copied (and so signaled) only when either side has some.
+void copy_node(state &dst, state &src) {
+  dst.value(src.value());
+  boost::any d = src.data();
+  if (!d.empty() || !dst.data().empty())
+    dst.data(d);
+}
+
+// Make `dst` hold what `src` holds, subtree and all, when an element moves to the next or the
+// previous index: src's value and data, and those of each node under it, are written at the same
+// path under dst, and the nodes under dst that src lacks are reset (with signals). Nodes are
+// kept, never dropped, as pop_back() keeps the element it clears: callers may hold references
+// into an element and observers may be connected to its nodes.
+//
+// This used to be dst.ptree(src.ptree()). ptree() then keyed each node by its full path from the
+// root and ptree(pt) applies keys relative to dst, so that wrote src's subtree under
+// dst.<src's full path>. Even with relative keys it would leave the nodes only dst has as they
+// were, and copy no data(): the isData<boost::any>() check before it was false for any data that
+// is not itself a boost::any.
+void copy_element(state &dst, state &src) {
+  copy_node(dst, src);
+  const std::size_t src_skip = src.fullName().size() + 1; // children() names are full names
+  for (const std::string &full : src.children()) {
+    const std::string rel = full.substr(src_skip);
+    if (state *s = src.findDescendant(rel))
+      copy_node(dst(rel), *s);
+  }
+  // children() lists in pre-order, so the descendants of a node src lacks follow it; src lacks
+  // them too, and resetting the node reset them.
+  const std::size_t dst_skip = dst.fullName().size() + 1;
+  std::string cleared; // the last reset node's path and a separator
+  for (const std::string &full : dst.children()) {
+    const std::string rel = full.substr(dst_skip);
+    if (!cleared.empty() && rel.compare(0, cleared.size(), cleared) == 0)
+      continue;
+    if (src.findDescendant(rel))
+      continue;
+    if (state *d = dst.findDescendant(rel))
+      d->reset(true, true);
+    cleared = rel + state::SEPARATOR;
+  }
+}
+
+} // namespace
+
 state_list::state_list(state &node, std::size_t pad_width) : _node(node), _pad_width(pad_width) {
   // Ensure the __len__ node exists with a default of 0 if absent.
   auto &len_node = _node(len_key);
@@ -60,16 +107,8 @@ void state_list::erase(std::size_t index) {
     throw std::out_of_range("state_list::erase: index out of range");
 
   // Shift children [index+1, n) down by one.
-  for (std::size_t i = index; i + 1 < n; ++i) {
-    auto &dst = _node(index_key(i));
-    auto &src = _node(index_key(i + 1));
-    // Copy value and data from src to dst.
-    dst.value(src.value());
-    if (src.isData<boost::any>())
-      dst.data(src.data());
-    // Copy the ptree representation for any child subtree.
-    dst.ptree(src.ptree());
-  }
+  for (std::size_t i = index; i + 1 < n; ++i)
+    copy_element(_node(index_key(i)), _node(index_key(i + 1)));
 
   // Remove the last (now-duplicated) element.
   _node(index_key(n - 1)).reset(true, false);
@@ -82,14 +121,8 @@ state &state_list::insert(std::size_t index) {
     throw std::out_of_range("state_list::insert: index out of range");
 
   // Shift children [index, n) up by one, starting from the end.
-  for (std::size_t i = n; i > index; --i) {
-    auto &dst = _node(index_key(i));
-    auto &src = _node(index_key(i - 1));
-    dst.value(src.value());
-    if (src.isData<boost::any>())
-      dst.data(src.data());
-    dst.ptree(src.ptree());
-  }
+  for (std::size_t i = n; i > index; --i)
+    copy_element(_node(index_key(i)), _node(index_key(i - 1)));
 
   // Initialize the new element.
   auto &inserted = _node(index_key(index));

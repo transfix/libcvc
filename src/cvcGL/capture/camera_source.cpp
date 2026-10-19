@@ -20,6 +20,7 @@
 #include <SDL3/SDL_surface.h>
 #include <SDL3/SDL_timer.h> // SDL_Delay
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #endif
 
@@ -103,7 +104,52 @@ camera_open open_camera(int device_index) {
     const SDL_CameraID id = ids[device_index];
     const char *nm = SDL_GetCameraName(id);
     std::string name = nm ? nm : std::string();
-    SDL_Camera *cam = SDL_OpenCamera(id, nullptr); // let SDL pick the device's native format
+
+    // Webcams usually DEFAULT to MJPG (compressed): SDL then hands fill() the raw JPEG bytes in an
+    // SDL_PIXELFORMAT_MJPG surface, and SDL_ConvertSurface does NOT decode JPEG — it reinterprets
+    // the compressed bytes as pixels (garbage: vertical stripes). SDL also has no built-in camera
+    // MJPG decoder here. So enumerate the device's formats and REQUEST an uncompressed one; SDL
+    // then delivers raw YUY2/RGB frames that convert cleanly to rgba8. Pick the uncompressed format
+    // with the best smoothness×resolution, capping fps at 30 so we don't trade away a lot of
+    // resolution for >30 fps. If the device is compressed-ONLY (no uncompressed format), fall back
+    // to SDL's default (nullptr) — the frames will be unusable, but the open still succeeds (a rare
+    // device).
+    SDL_CameraSpec chosen{};
+    bool have_spec = false;
+    {
+      int fc = 0;
+      SDL_CameraSpec **fmts = SDL_GetCameraSupportedFormats(id, &fc);
+      double best = -1.0;
+      for (int i = 0; fmts && i < fc; ++i) {
+        const SDL_CameraSpec &s = *fmts[i];
+        if (s.format == SDL_PIXELFORMAT_MJPG || s.format == SDL_PIXELFORMAT_UNKNOWN)
+          continue; // compressed/unknown: SDL_ConvertSurface cannot decode it to rgba8
+        const double fps =
+            (s.framerate_denominator > 0)
+                ? static_cast<double>(s.framerate_numerator) / s.framerate_denominator
+                : 0.0;
+        const double score = (fps > 30.0 ? 30.0 : fps) * static_cast<double>(s.width) *
+                             static_cast<double>(s.height);
+        if (score > best) {
+          best = score;
+          chosen = s;
+          have_spec = true;
+        }
+      }
+      if (fmts)
+        SDL_free(fmts);
+      if (have_spec)
+        std::fprintf(stderr, "[camera] requesting %s %dx%d @ %.3g fps (uncompressed)\n",
+                     SDL_GetPixelFormatName(chosen.format), chosen.width, chosen.height,
+                     chosen.framerate_denominator > 0
+                         ? static_cast<double>(chosen.framerate_numerator) /
+                               chosen.framerate_denominator
+                         : 0.0);
+      else
+        std::fprintf(stderr, "[camera] no uncompressed format available; using device default "
+                             "(frames may be undecodable)\n");
+    }
+    SDL_Camera *cam = SDL_OpenCamera(id, have_spec ? &chosen : nullptr);
     if (cam) {
       // SDL delivers camera access asynchronously: the device is unusable (and GetCameraFormat
       // reports nothing) until it is APPROVED, which arrives through the event system. Pump events

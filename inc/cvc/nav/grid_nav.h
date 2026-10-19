@@ -148,6 +148,19 @@ std::vector<double> clearance_cost(const std::uint8_t *occ, int rows, int cols, 
 std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
                        int goal_r, int goal_c, const double *cost = nullptr);
 
+// The energy of climbing in the route (P5 H5, doc 31 D9): each move costs, besides its length,
+// per_metre x its rise (metres; a move downhill costs nothing more, since brakes do not give
+// the energy back). With per_metre = climb_weight(c_rr, cell_w) a metre of climb costs what
+// rolling 1 / c_rr metres on the flat does, so the route weighs the energy at the wheels; scale
+// it to trade energy against distance. The heuristic stays admissible.
+struct climb_cost {
+  const float *height = nullptr; // rows x cols, metres; null = none
+  double per_metre = 0.0;        // grid steps per metre of rise
+};
+inline double climb_weight(double c_rr, double cell_w) { return 1.0 / (c_rr * cell_w); }
+std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
+                       int goal_r, int goal_c, const double *cost, const climb_cost &climb);
+
 // String-pull (planner.simplify): keep only the corners needed to preserve
 // line of sight. `path` is flattened [r0, c0, r1, c1, ...] of length 2*n;
 // returns the simplified path flattened the same way. Paths shorter than three
@@ -168,6 +181,7 @@ struct astar_query {
   int start_r, start_c;
   int goal_r, goal_c;
   const double *cost; // optional per-cell surcharge (rows*cols) or nullptr
+  climb_cost climb{}; // optional climbing energy (P5 H5)
 };
 
 // Run `queries` in parallel across `num_threads` workers (<=0 => hardware

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cvc/state/state_exec/types.h>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -23,17 +24,7 @@
 
 namespace cvc::state_exec {
 
-/// Exception thrown when evaluation is interrupted.
-class evaluation_interrupted : public std::runtime_error {
-public:
-  using std::runtime_error::runtime_error;
-};
-
-/// Exception thrown when evaluation times out.
-class evaluation_timeout : public std::runtime_error {
-public:
-  using std::runtime_error::runtime_error;
-};
+// evaluation_interrupted and evaluation_timeout are in types.h, next to the evaluation deadline.
 
 /// Exception used internally for (return ...) unwinding.
 class return_exception : public std::exception {
@@ -43,18 +34,26 @@ public:
   const char *what() const noexcept override { return "return"; }
 };
 
+/// What a step was spent on: evaluating code, reading the script a slice at a time
+/// (parser.step_tokens), or deep-data work a slice at a time (data.step_nodes: comparing,
+/// printing, copying or expanding a nested value, or freeing one).
+enum class step_kind { eval = 0, read = 1, data = 2 };
+
 /// Thread-safe evaluation statistics.
 struct evaluation_stats {
   evaluation_stats() = default;
   // Move-only: transfer ownership of internals
   evaluation_stats(evaluation_stats &&o) noexcept
-      : start_time(o.start_time), end_time(o.end_time),
-        step_count(o.step_count.load(std::memory_order_relaxed)), complete(o.complete) {}
+      : start_time(o.start_time), end_time(o.end_time), complete(o.complete),
+        last_kind(o.last_kind) {
+    copy_counts(o);
+  }
   evaluation_stats &operator=(evaluation_stats &&o) noexcept {
     start_time = o.start_time;
     end_time = o.end_time;
-    step_count.store(o.step_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
     complete = o.complete;
+    last_kind = o.last_kind;
+    copy_counts(o);
     return *this;
   }
   evaluation_stats(const evaluation_stats &) = delete;
@@ -64,6 +63,11 @@ struct evaluation_stats {
     std::lock_guard lk(mu);
     start_time = std::chrono::steady_clock::now();
     step_count.store(0, std::memory_order_relaxed);
+    for (std::size_t k = 0; k < kKinds; ++k) {
+      kind_steps[k].store(0, std::memory_order_relaxed);
+      kind_ns[k].store(0, std::memory_order_relaxed);
+    }
+    data_node_count.store(0, std::memory_order_relaxed);
     complete = false;
   }
   void mark_complete() {
@@ -71,8 +75,42 @@ struct evaluation_stats {
     end_time = std::chrono::steady_clock::now();
     complete = true;
   }
-  void increment_step() { step_count.fetch_add(1, std::memory_order_relaxed); }
+  /// Count a step, as spent on `kind`.
+  void increment_step(step_kind kind = step_kind::eval) {
+    step_count.fetch_add(1, std::memory_order_relaxed);
+    if (kind != step_kind::eval) // eval steps are the rest, so the common step costs no more
+      kind_steps[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
+    last_kind = kind;
+  }
   uint64_t get_step_count() const { return step_count.load(std::memory_order_relaxed); }
+  /// Steps spent on `kind`.
+  uint64_t steps(step_kind kind) const {
+    if (kind != step_kind::eval)
+      return kind_steps[static_cast<std::size_t>(kind)].load(std::memory_order_relaxed);
+    const uint64_t other = steps(step_kind::read) + steps(step_kind::data);
+    const uint64_t all = get_step_count();
+    return all > other ? all - other : 0;
+  }
+  /// The kind of the last step counted.
+  step_kind last_step_kind() const { return last_kind; }
+
+  /// Count nodes of deep-data work (elements walked, owners freed), in whatever step did it.
+  void add_data_nodes(uint64_t nodes) {
+    data_node_count.fetch_add(nodes, std::memory_order_relaxed);
+  }
+  uint64_t data_nodes() const { return data_node_count.load(std::memory_order_relaxed); }
+
+  /// A scheduler that times its steps charges each step's seconds here, to the step's kind.
+  void add_step_time(double seconds) {
+    if (seconds > 0.0)
+      kind_ns[static_cast<std::size_t>(last_kind)].fetch_add(static_cast<uint64_t>(seconds * 1e9),
+                                                             std::memory_order_relaxed);
+  }
+  /// Seconds of scheduler-timed steps spent on `kind`.
+  double step_time(step_kind kind) const {
+    return 1e-9 * static_cast<double>(
+                      kind_ns[static_cast<std::size_t>(kind)].load(std::memory_order_relaxed));
+  }
   bool is_complete() const {
     std::lock_guard lk(mu);
     return complete;
@@ -84,11 +122,27 @@ struct evaluation_stats {
   }
 
 private:
+  static constexpr std::size_t kKinds = 3;
+  void copy_counts(const evaluation_stats &o) {
+    step_count.store(o.step_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    for (std::size_t k = 0; k < kKinds; ++k) {
+      kind_steps[k].store(o.kind_steps[k].load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+      kind_ns[k].store(o.kind_ns[k].load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    data_node_count.store(o.data_node_count.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+  }
+
   mutable std::mutex mu;
   std::chrono::steady_clock::time_point start_time{};
   std::chrono::steady_clock::time_point end_time{};
   std::atomic<uint64_t> step_count{0};
+  std::atomic<uint64_t> kind_steps[kKinds] = {};
+  std::atomic<uint64_t> kind_ns[kKinds] = {};
+  std::atomic<uint64_t> data_node_count{0};
   bool complete{false};
+  step_kind last_kind = step_kind::eval;
 };
 
 /// Synchronous recursive evaluator (Tier 2 — local contexts only).
@@ -133,7 +187,9 @@ public:
   macro_map &user_macros() { return user_macros_; }
 
 private:
+  // Evaluate `expr`, keeping it on the trail meanwhile (an exception's traceback).
   value_t eval_internal(const value_t &expr, environment_ptr env);
+  value_t eval_form(const value_t &expr, environment_ptr env);
   void check_interrupted();
 
   // Special form handlers
@@ -152,6 +208,18 @@ private:
   value_t do_defmacro(const std::vector<value_t> &args, environment_ptr env);
   value_t do_eval(const std::vector<value_t> &args, environment_ptr env);
   value_t do_root();
+  value_t do_try(const std::vector<value_t> &args, environment_ptr env);
+  value_t do_raise(const std::vector<value_t> &args, environment_ptr env);
+
+  // Exceptions (docs/STATE_EXEC_EXCEPTIONS.md). Where one is raised is recorded once, by a
+  // raise or by the first trail guard unwinding passes (record_raise_point), and the exception
+  // made from it when a try catches it (caught): no level catches and rethrows on the way.
+  void record_raise_point() noexcept;
+  // Fill in where `exc` was raised (the recorded point): its traceback, the exception being
+  // handled there as its cause, and the function that failed. What it has already is kept.
+  void annotate(value_t &exc);
+  // The exception a C++ exception a try caught is, annotated; nullopt for a kill.
+  std::optional<value_t> caught(const std::exception &e);
 
   // Helpers
   value_t apply_closure(const closure_ptr &cls, const std::vector<value_t> &args);
@@ -161,6 +229,23 @@ private:
   value_t root_expr_;
   macro_map user_macros_;
   evaluation_stats stats_;
+
+  // The expressions being evaluated, innermost last: an exception's traceback.
+  std::vector<const value_t *> trail_;
+  // Counts evaluations: the first trail guard an exception unwinds records the raise point.
+  uint64_t generation_ = 0;
+  // The last raise point: the innermost trail (kTracebackFrames of it) and the exception being
+  // handled there.
+  std::vector<value_t> raise_trail_;
+  value_t raise_handled_;
+  uint64_t raise_generation_ = ~uint64_t{0};
+  // The exceptions being handled, innermost last: by a catch handler (true), or by a finally on
+  // their way out (false).
+  std::vector<std::pair<value_t, bool>> handling_;
+  // The last exception made from a C++ exception, and that exception: evaluate() throws it as
+  // the original when nothing caught it.
+  value_t converted_;
+  std::exception_ptr converted_original_;
 
   std::atomic<bool> interrupted_{false};
   std::atomic<bool> paused_{false};

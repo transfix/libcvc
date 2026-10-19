@@ -14,13 +14,18 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/parser.h> // parse_options
 #include <cvc/state/state_exec/types.h>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -47,6 +52,11 @@ enum class eval_phase {
   defclass_methods,
   yield_value,  // Generator: evaluate yield expression then pause
   break_unwind, // Loop break: evaluate optional value then unwind to loop
+  // try (docs/STATE_EXEC_EXCEPTIONS.md): the body, a catch handler, or the finally cleanup runs
+  try_body,
+  try_handler,
+  try_finally,
+  raise_value, // (raise e): evaluate e then raise it
 };
 
 /// A single evaluation frame on the explicit stack.
@@ -61,6 +71,39 @@ struct eval_frame {
   std::vector<std::string> extra_strs;
   std::vector<std::vector<value_t>> extra_lists;
   environment_ptr extra_env;
+  /// The frame evaluates a DSL function's body: a `return` inside it unwinds no further.
+  bool function_body = false;
+};
+
+/// Deep-data work a step left unfinished (data_options::step_nodes, or a job waiting on a call):
+/// a native call's job (its frame waits in the apply phase), the expansion of a macro call (its
+/// frame waits to be re-initialized with it), or a measurement of the process's heap that its
+/// scheduler started between two steps (heap.h; its result goes to
+/// evaluator_state::heap_measured, and evaluation resumes where it was).
+struct pending_data_work {
+  enum class kind { native_call, macro_expansion, heap_measure };
+  std::unique_ptr<data_job> job;
+  std::function<value_t(value_t)> then; // native_call: turns the job's result into the call's
+  kind what = kind::native_call;
+  /// The stack size when the work began. The frame waiting on it is stack[base - 1]; a DSL
+  /// function the job calls runs in the frames above it.
+  std::size_t base = 0;
+  /// How many values the waiting frame held then: the call's arguments, which a restore runs
+  /// the call with again.
+  std::size_t frame_args = 0;
+  /// Set while a DSL function the job called runs; its value arrives on the waiting frame, and
+  /// `return`/`break` in it unwind no further than that frame.
+  bool calling = false;
+  /// The work this work runs inside of, if any: the job of a call that was waiting on a DSL
+  /// function when this work began, or (feeds_outer) the job whose native call left this work.
+  std::shared_ptr<pending_data_work> outer;
+  /// The result is the value of a call outer's job made, not the waiting frame's.
+  bool feeds_outer = false;
+
+  /// Frees the chain of outer work a link at a time, not one native frame per link: a native
+  /// call that waits on one like it, with more to do after it (a class constructor whose init
+  /// constructs again), makes a chain as long as the process's steps allow.
+  ~pending_data_work();
 };
 
 /// Serializable evaluator state — the entire execution snapshot.
@@ -73,7 +116,36 @@ struct evaluator_state {
   evaluator::macro_map user_macros;
   evaluation_stats stats;
   bool yielded = false; // Set by (yield val) — signals generator_next to stop
+  /// Set while the script is still being read, a slice per step (parse_options::step_tokens);
+  /// step() reads instead of evaluating until the whole script is read.
+  std::shared_ptr<script_reader> reading;
+  /// How many nodes of deep-data work a step may do (data_options::step_nodes; a scheduler sets
+  /// it). 0 does all of it in the step that needs it.
+  std::size_t data_step_nodes = 0;
+  /// Set while deep-data work runs a slice per step; step() runs it instead of evaluating until
+  /// it is done (except while a DSL function it called runs), then completes what started it.
+  /// The innermost work; pending_data_work::outer chains the rest. Not serialized: after a
+  /// restore the call or macro expansion waiting on the outermost work simply runs again.
+  std::shared_ptr<pending_data_work> data_work;
+  /// Last owners this state's steps dropped and have not freed yet (data_step_nodes > 0); each
+  /// step frees them with what is left of its slice, and steps that only free them follow
+  /// while any are left.
+  std::shared_ptr<detail::release_backlog> backlog;
+  /// A heap measurement's result in bytes, once its data steps finish; the scheduler that started
+  /// it takes it from here. Not serialized.
+  std::optional<uint64_t> heap_measured;
+  /// The exception no `try` caught (docs/STATE_EXEC_EXCEPTIONS.md): the state is done, and
+  /// step() throws it again. Not serialized.
+  std::optional<value_t> uncaught;
+  /// The last exception made from a C++ exception, and that exception: an uncaught exception
+  /// that is this one is thrown as the original, so C++ callers see the type they always did.
+  value_t converted;
+  std::exception_ptr converted_original;
 };
+
+/// Whether a frame of `st` waits on deep-data work: any work but a heap measurement, which waits
+/// on no frame. A process cannot fork while one does (the child could not finish the call).
+bool waits_on_data_work(const evaluator_state &st);
 
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
 ///
@@ -89,14 +161,29 @@ class stackless_evaluator {
 public:
   explicit stackless_evaluator(environment_ptr global_env);
 
+  /// The global environment new states extend (the cycle collector walks it from a generator).
+  const environment_ptr &global_env() const { return global_env_; }
+
   /// Create a fresh evaluator_state from a parsed expression.
   evaluator_state create_state(const value_t &expr, environment_ptr env = nullptr);
 
-  /// Create a fresh evaluator_state from a script string.
-  evaluator_state create_state(const std::string &script, environment_ptr env = nullptr);
+  /// Create a fresh evaluator_state from a script string, parsed with `popts` (a scheduler passes
+  /// the parser settings it resolved from the state tree). With popts.step_tokens > 0 nothing is
+  /// parsed yet: the state reads the script popts.step_tokens tokens per step() first, and a
+  /// syntax error is thrown from step() rather than from here.
+  evaluator_state create_state(const std::string &script, environment_ptr env = nullptr,
+                               const parse_options &popts = {});
 
-  /// Execute one evaluation step.  Returns true when done.
+  /// Execute one evaluation step.  Returns true when done. An exception the program doesn't
+  /// catch is thrown: the C++ exception it was made from, if any, else a dsl_exception. The
+  /// state is then done, and stepping it again throws it again.
   bool step(evaluator_state &state);
+
+  /// Raise `exc` (an exception instance, docs/STATE_EXEC_EXCEPTIONS.md) in `state` at the frame
+  /// it is evaluating, as if that frame had raised it: the nearest `try` handles it. If none
+  /// does, the state is done with it uncaught, and the next step() throws it. Throws
+  /// std::invalid_argument for a value that isn't an exception.
+  void raise(evaluator_state &state, value_t exc);
 
   /// Run until done or limits reached.  Returns result or nil if not done.
   value_t run(evaluator_state &state, std::optional<uint64_t> max_steps = std::nullopt,
@@ -134,6 +221,18 @@ public:
 private:
   void check_interrupted();
 
+  // A state that evaluates `forms` as a script: done when empty, the form itself when one, a
+  // (begin ...) of them otherwise.
+  evaluator_state create_program_state(std::vector<value_t> forms, environment_ptr env);
+  // One step of a state that is still reading its script (evaluator_state::reading).
+  bool step_read(evaluator_state &state);
+  // One step of deep-data work left unfinished (evaluator_state::data_work).
+  bool step_data(evaluator_state &state);
+  // Re-initialize the top frame to evaluate a macro call's expansion.
+  void begin_expansion(evaluator_state &state, value_t expansion);
+  // One evaluation step of the top frame.
+  void step_frame(evaluator_state &state);
+
   // Frame management
   void pop_frame(evaluator_state &state, value_t result);
   void push_frame(evaluator_state &state, value_t expr, environment_ptr env);
@@ -156,12 +255,26 @@ private:
   void step_super_args(evaluator_state &state, eval_frame &frame);
   void step_yield_value(evaluator_state &state, eval_frame &frame);
   void step_break_unwind(evaluator_state &state, eval_frame &frame);
+  void step_try_done(evaluator_state &state, eval_frame &frame); // the body or a handler finished
+  void step_try_finally(evaluator_state &state, eval_frame &frame);
+  void step_raise_value(evaluator_state &state, eval_frame &frame);
+
+  // Exceptions (docs/STATE_EXEC_EXCEPTIONS.md)
+  // The step that raised `e` (the top frame's) failed: raise its exception from that frame.
+  void fail_step(evaluator_state &state, const std::exception &e);
 
   // Helpers
+  // A for loop over a DSL generator: push the call that advances it as a job.
+  void advance_generator(evaluator_state &state, eval_frame &frame);
+  // Apply native `fn` to `args` as the top frame's call: its value pops the frame, or, if it
+  // left deep-data work (a job, or a DSL function to call), the frame waits for that.
+  void apply_native(evaluator_state &state, eval_frame &frame, const native_fn &fn,
+                    std::span<const value_t> args);
   void call_closure(evaluator_state &state, eval_frame &frame, const closure_ptr &cls,
                     const std::vector<value_t> &args);
+  // Push the frame that evaluates `cls`'s body in `local` (its parameters already bound).
+  void push_closure_body(evaluator_state &state, const closure_ptr &cls, environment_ptr local);
   void handle_defclass(evaluator_state &state, eval_frame &frame, const std::vector<value_t> &args);
-  value_t substitute(const value_t &tmpl, const std::unordered_map<std::string, value_t> &subst);
 
   environment_ptr global_env_;
   std::shared_ptr<const std::set<std::string>>

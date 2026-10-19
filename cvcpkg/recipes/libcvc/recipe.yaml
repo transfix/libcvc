@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "3.5.0"
+  upstream_version: "3.6.0"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -166,6 +166,27 @@ source:
 patches: []
 
 depends:
+  # Build-only: GoogleTest for the test suite (CVC_BUILD_TESTS=ON). Listed so
+  # `cvcpkg install-deps cvcpkg/recipes/libcvc` (ci-recipe.yml, and the
+  # fetch-libcvc-deps action behind ci.yml's package-* jobs) puts the catalog's
+  # googletest in the deps prefix, where CMake/SetupGTest.cmake finds it with
+  # find_package(GTest CONFIG) instead of downloading GoogleTest at configure
+  # time. As a build dep it is never baked into the bundle's required_deps, and
+  # no test is installed, so none of it ships. A dep cannot be gated on
+  # CVC_BUILD_TESTS, so test-less builds fetch the ~1 MB bundle too. Scoped to
+  # the platforms this recipe builds (googletest has no wasm build). The catalog
+  # has no linux/arm64 or macos/x86_64 googletest yet; those experimental publish
+  # lanes' install-deps already fail on other missing packages.
+  build:
+    - name: googletest
+      platforms: [linux, macos, windows]
+    # taocpp/PEGTL 3.x (header-only, MIT), the grammar engine of the state_exec
+    # s-expression reader. Build-only: cvc links it as
+    # $<BUILD_INTERFACE:taocpp::pegtl>, and no installed header includes it
+    # (src/cvc/CMakeLists.txt checks). So it is never baked into required_deps,
+    # and consumers of the bundle do not install it. Unscoped: state_exec builds
+    # on every platform, wasm included, and find_package(pegtl) is REQUIRED.
+    - name: pegtl
   # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
   # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:
@@ -254,23 +275,27 @@ depends:
     # at the CMake level (find_package(yaml-cpp CONFIG); absent -> the loader
     # compiles a stub), but declared here so the packaged libcvc's build has the
     # headers (real parser, CVC_ARIADNE_HAVE_YAML) and the bundle ships
-    # libyaml-cpp.so. Plain CMake C++ lib, published for every platform libcvc
-    # builds, so unscoped.
+    # libyaml-cpp.so. wasm-mt too: publish-cvcgl-wasm.yml installs it, so the
+    # static wasm-mt libcvc has the real loader and names yaml-cpp among the
+    # packages its cvcConfig.cmake finds for a consumer (cy-pca/cvcpkg#387
+    # published the threaded bundle).
     - name: yaml-cpp
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, wasm-mt]
     # The other Ariadne optional deps (cvc::ariadne in libcvc core): nlohmann-json
     # + json-schema-validator power the .ari Layer-2 JSON-Schema validation (§15);
     # ftxui is the terminal backend (§16.4). All OPTIONAL at the CMake level
     # (find_package; absent -> stubs), declared here so the packaged libcvc's build
-    # compiles the real paths and ships the libs. SCOPED to linux for now: these
-    # three are published for linux-x86_64 only (cy-pca/cvcpkg #111); publish the
+    # compiles the real paths and ships the libs. SCOPED: these three were
+    # published for linux-x86_64 only (cy-pca/cvcpkg #111); publish the
     # macos/windows/BSD variants and drop the `platforms:` scoping once they land.
+    # ftxui also has wasm/wasm-mt bundles (cy-pca/cvcpkg#378), and the wasm-mt
+    # libcvc links it (publish-cvcgl-wasm.yml), so it is declared there too.
     - name: nlohmann-json
       platforms: [linux]
     - name: json-schema-validator
       platforms: [linux]
     - name: ftxui
-      platforms: [linux]
+      platforms: [linux, wasm-mt]
     - name: levmar
       platforms: [linux, macos, windows]
     - name: libiimod
@@ -289,6 +314,14 @@ depends:
     # (assimp 6.0.5+cvc.2) — this is what lets read_model parse buildings.glb, i.e.
     # nav_finale / nav_city_swarm --bundle load a real Austin city on Windows.
     - name: assimp
+      platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
+    # Jolt Physics, the cvc::physics backend (src/cvc/physics/jolt). Without it
+    # find_package(Jolt CONFIG) misses, CVC_WITH_JOLT turns OFF and libcvc builds
+    # with the null backend only. Linked PRIVATE into the cvc target: a shared
+    # libcvc absorbs it, a static (wasm-mt) libcvc names it in cvcConfig.cmake.
+    # joltphysics 5.6.0+cvc.5 is cross-platform deterministic and published for
+    # these platforms (macOS: arm64 only so far, like the rest of this list).
+    - name: joltphysics
       platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
     # Scoped for the same reason as assimp above, but the other way round:
     # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
@@ -309,6 +342,17 @@ depends:
     # falls back to `find_dependency(LAPACK)` — which resolves to Accelerate.
     - name: openblas
       platforms: [linux, freebsd, openbsd, netbsd, windows]
+    # libcurl, for cvc::net's HTTP backend (Ariadne's http(s):// URIs): the
+    # find_package(CURL) in src/cvc/CMakeLists.txt, without which http(s)://
+    # compiles to a stub. Nothing declared it on Linux, so the Linux bundle and
+    # SDK always shipped the stub ("cvc::net: no HTTP backend" in release.yml's
+    # linux configure), and ci.yml only tested the backend against a libcurl
+    # that apt -dev packages happened to pull in. Windows already got curl
+    # through cmake's closure; declared here so it no longer depends on that.
+    # Not macOS: libcvc links the system libcurl there, which is part of the OS.
+    # curl's own closure is openssl (declared below) and zlib.
+    - name: curl
+      platforms: [linux, windows]
     # The gRPC/xmlrpc network state-transport stack (CVC_USING_XMLRPC + CVC_ENABLE_GRPC).
     # Scoped to the platforms this recipe actually BUILDS the transport on (the build matrix
     # below: linux/macos/windows). The wasm-mt bundle (built separately by publish-cvcgl-wasm.yml,
@@ -328,6 +372,24 @@ depends:
     - name: grpc
       platforms: [linux, macos, windows]
     - name: pthreads4w
+      platforms: [windows]
+    # LLVM's OpenMP runtime (libomp), redistributable.
+    #  - macOS: AppleClang ships no OpenMP runtime, so without this bundle
+    #    find_package(OpenMP) fails ("Could NOT find OpenMP_CXX"), the top-level
+    #    CMakeLists.txt turns CVC_ENABLE_OPENMP OFF, and the voxels / filtering /
+    #    smoothing loops build serially. With lib/libomp.dylib and include/omp.h
+    #    on CMAKE_PREFIX_PATH, FindOpenMP uses them with '-Xclang -fopenmp'. The
+    #    dylib's install name is @rpath/libomp.dylib, so it ships in the SDK and
+    #    loads beside libcvc like every other bundle.
+    #  - Windows: MSVC builds of cvc use -openmp:llvm, and cvc links this instead
+    #    of MSVC's libomp140, which Microsoft does not allow redistributing
+    #    (src/cvc/CMakeLists.txt).
+    # Not Linux: GCC finds its own libgomp, and no Linux lane builds with clang.
+    - name: openmp
+      platforms: [macos, windows]
+    # libmcfgthread-2.dll: cvcpkg's native Windows mpfr is built by MinGW gcc and
+    # needs it for thread-local state. cvc does not link it directly.
+    - name: mingw-w64-runtime
       platforms: [windows]
   host_tools:
     - cmake
@@ -354,13 +416,20 @@ package:
     # lib/libxmlrpc.a — it does not match lib/libcvc*/lib/cvc*, so it must be
     # listed explicitly or downstream links to cvc::xmlrpc fail with a missing
     # archive.
-    - lib/libxmlrpc*
+    #
+    # Native platforms only: the wasm-mt build (publish-cvcgl-wasm.yml) leaves
+    # CVC_USING_XMLRPC OFF, so it has no xmlrpc archive, and cvcpkg's strict
+    # package.files check refused the v3.6.0 wasm-mt bundle for declaring one
+    # ("2 entries that match nothing in the staged tree").
+    - glob: lib/libxmlrpc*
+      platforms: [linux, macos, windows, freebsd, netbsd]
     # ...and the MSVC spelling. add_library(xmlrpc STATIC) yields libxmlrpc.a on
     # Unix but xmlrpc.lib on MSVC, which matches neither lib/libcvc* nor
     # lib/cvc* nor the glob above -- the same reason lib/cvc* sits beside
     # lib/libcvc* here. Without it the Windows bundle exports cvc::xmlrpc while
     # shipping no archive for it.
-    - lib/xmlrpc*
+    - glob: lib/xmlrpc*
+      platforms: [linux, macos, windows, freebsd, netbsd]
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/

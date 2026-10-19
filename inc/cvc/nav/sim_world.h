@@ -43,11 +43,14 @@
 #include <cvc/nav/drive.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/nav_stats.h>
+#include <cvc/nav/plant_types.h>
+#include <cvc/nav/terrain.h>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace cvc {
+class app;         // the state tree's owner (pull / publish)
 class thread_pool; // injected fork-join executor for step()
 namespace nav {
 
@@ -292,6 +295,17 @@ public:
   // (the fog path). Under freeze_sense == true (the static-map deployment path)
   // it is inert — rebuild the field from a fresh occupancy to change a static map.
   void retarget(int i, float gx_n, float gy_n);
+  // Agent i's command for the next step() only, in place of the drive's: the bicycle angle
+  // (rad, + left) and the acceleration along the heading (normalized / s^2; from rest a
+  // negative one backs up, as the bicycle's speed may fall to -0.25 vmax with allow_reverse).
+  // On the kinematic arm the agent integrates the bicycle with it (nsub substeps, the steer
+  // within the lock, the speed within [sp_min, vmax]); on a plant it is the plant's command. For
+  // a route_follower backing a vehicle up, or stopping it at a cusp. A parked agent takes it too.
+  void override_command(int i, float steer, float accel);
+  // Put agent i at (x, y) (normalized) with a heading (rad) and a speed (normalized / s), on the
+  // kinematic arm. A plant owns its vehicles' poses, so with one this does nothing and returns
+  // false.
+  bool set_pose(int i, float x_n, float y_n, float heading, float speed = 0.0f);
   void add_obstacle(int r0, int r1, int c0, int c1);
 
   // Live-tune the optional inter-agent separation (config.sep_radius/sep_gain);
@@ -377,6 +391,105 @@ public:
   // while material is set.
   const std::uint8_t *material_gate_active() const { return mat_gate_active_.data(); }
 
+  // ── the plant (P4, cvc/nav/vehicle_plant.h) ────────────────────────────────
+  // Borrowed, and it must outlive its use; null (the default) = the fused kinematic bicycle,
+  // byte-identical. set_plant attaches the plant at the agents' current poses, at rest. With a
+  // plant, every step():
+  //   - reads each agent back from it at the tick's start (o, th, sp);
+  //   - drives with the plant arm (veh_params::plant): the controller's command, delta_cmd and
+  //     a_cmd, held through the tick, with the plant-aware governors (the plant's wheelbase,
+  //     steering lock and rate, latency and achievable braking, from plant_limits). A parked
+  //     agent is commanded to brake at a_max;
+  //   - plans with each vehicle's own envelope and size where plant_limits gives them: its
+  //     a_max, vmax and cornering a_lat in place of cfg.veh's (and of set_vehicle_kinematics'),
+  //     and its body as kPlantDiscs footprint discs from its tail to its nose, inset 0.7
+  //     half-widths at the ends and 1.3 half-widths wide (so they cover its corners), at
+  //     body_gain 1 / kPlantDiscs, in place of nav's disc or footprint;
+  //   - advances the plant one tick and reads every agent back again;
+  //   - measures each agent's drift: the kinematic bicycle (the plant's
+  //     reference_substeps()) from the tick's start state with the same command, against the
+  //     plant (report_drift);
+  //   - skips the hard de-overlap (min_gap): the plant's bodies collide instead.
+  // nav_stats then carries the plant's energy and building contacts when it tracks them.
+  void set_plant(vehicle_plant *p);
+  vehicle_plant *plant() const { return plant_; }
+  // The footprint discs a plant's vehicle is covered with (plant_limits' size).
+  static constexpr int kPlantDiscs = 4;
+  // Agent i's planning limits as the drive uses them on the plant (normalized): its a_max, vmax
+  // and cornering limit, its footprint discs' radius and kPlantDiscs offsets from the rear
+  // axle. False without a plant; a limit the plant leaves at zero reads back as nav's own.
+  struct plant_plan {
+    float a_max = 0.0f, vmax = 0.0f, a_lat = 0.0f;
+    float body_rr = 0.0f;
+    float body_offsets[kPlantDiscs] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool footprint = false; // the vehicles' own size, not nav's
+  };
+  bool plant_plan_of(int i, plant_plan &out) const;
+  plant_kind plant_type() const;
+  // The last tick's plant-arm commands, the stopping speed each respected (normalized), and
+  // each agent's drift, [size()]; null without a plant or before the first step().
+  const float *plant_steer_command() const { return ptr(pl_steer_cmd_); }
+  const float *plant_accel_command() const { return ptr(pl_accel_cmd_); }
+  const float *plant_stop_speed() const { return ptr(pl_v_stop_); }
+  const drift_sample *plant_drift() const {
+    return plant_ && gstep_ > 0 && !pl_drift_.empty() ? pl_drift_.data() : nullptr;
+  }
+
+  // How measured plant state modulates the drive (H4, plant_types.h): the plant's
+  // vehicle_plant::modulation(), as of the last tick; off without a plant.
+  const plant_modulation &current_plant_modulation() const { return pl_mod_; }
+
+  // ── terrain (P5, cvc/nav/terrain.h) ───────────────────────────────────────
+  // `height_m` is the sim grid's rows x cols (row 0 at min_y), copied in. Builds the slope, the
+  // grade cost and the infeasible cells; then, per the config:
+  //   - infeasible cells plan as obstacles: they join every belief plane's occupancy, so the
+  //     SDF's barrier and the governors keep the agents out (block_infeasible);
+  //   - the governors take gravity along the path (governors, H2);
+  //   - the grade cost's soft force and a material-style barrier join the drive (lam_grade,
+  //     lam_grade_hard, H1).
+  // Default off: without terrain every tick is byte-identical. The tree's terrain does not move.
+  void set_terrain(const float *height_m, const terrain_config &tc);
+  // A new config for the terrain set last (no-op without one): rebuilds its planes from the same
+  // heights and keeps the entry counts. Cells it newly makes infeasible join the occupancy at
+  // once; cells it frees leave it at the next recomposite (a frozen map keeps them).
+  void set_terrain_config(const terrain_config &tc);
+  void clear_terrain();
+  bool has_terrain() const { return terrain_on_; }
+  const terrain_planes &terrain() const { return ter_; }
+  const terrain_config &terrain_settings() const { return ter_cfg_; }
+  // Ticks each agent's footprint (the rear axle, or each body disc) touched an infeasible cell,
+  // since set_terrain; [size()], or null without terrain.
+  const int *infeasible_entries() const { return terrain_on_ ? ter_entries_.data() : nullptr; }
+
+  // ── the state tree ────────────────────────────────────────────────────────
+  // The world binds its own settings, as cvc::physics' world_binding and nav_plant do. Lengths,
+  // speeds and accelerations there are in nav's world frame (metres), not the normalized one
+  // (normalized = world x config.scale). The live settings, read by pull() and seeded with the
+  // world's values when unset (an invalid value is ignored):
+  //   <prefix>.nav.{range_m, n_rays, fov_rad, sense_every, freeze_sense, l_occ, l_free,
+  //     optimistic, p_thresh, band, ttl_s, reach_tol, sep_radius, sep_gain, min_gap,
+  //     min_gap_iters}   sensing, belief, arrival and the crowd (set_live_knobs' set)
+  //   <prefix>.nav.vehicle.{vmax, a_max, a_lat_max, wheelbase, delta_max, track_width,
+  //     k_steer, nsub, allow_reverse, rr, d_hat, body_rr, body_gain, mass, mu_lookahead,
+  //     mu_probes}   veh_params' scalars; a per-agent column (set_vehicle_kinematics,
+  //     set_vehicle_radii, set_vehicle_mass) overrides its scalar
+  //   <prefix>.nav.material.{lam_soft, lam_hard, lam_soft_scale, lam_hard_scale}   with a
+  //     material (set_material)
+  //   <prefix>.nav.terrain.{max_grade, tip_ratio, tip_margin, sigma, lam_grade, lam_grade_hard,
+  //     k_sharp, d_hat_m, block_infeasible, governors}   with a terrain; a change rebuilds its
+  //     planes (set_terrain_config)
+  // and what is fixed or measured, written by publish():
+  //   <prefix>.nav.settings.{rows, cols, min_x, min_y, max_x, max_y, cx, cy, scale, l_clamp, dt,
+  //     agents, planes, plant}
+  //   <prefix>.nav.{tick, terrain.active}, and with a terrain <prefix>.nav.terrain.{gravity,
+  //     limit, infeasible_cells}
+  // Every key says what it is (cvc/state/state_key_meta.h): a comment and the properties access,
+  // unit and, on a knob, a recommended min and max. Call both between steps, on the thread that
+  // steps the world. A plant's own knobs are its own (nav_plant::pull), and the episode's
+  // stats are nav_stats' (cvcGL's publish_nav_stats).
+  void pull(cvc::app &ctx, const std::string &prefix);
+  void publish(cvc::app &ctx, const std::string &prefix) const;
+
   // ── base nav_stats (opt-in internal collector, cvc/nav/nav_stats.h) ───────
   // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as
   // the episode start (so call this BEFORE the first step()) and goals_world() as
@@ -418,8 +531,8 @@ private:
   std::vector<std::uint8_t> lastvis_, everseen_;
   std::vector<std::int32_t> version_;        // [M]
   std::vector<std::int32_t> raster_version_; // [M]
-  std::vector<double> dyn_stamp_;     // [M*rows*cols], -inf where unmarked
-  std::vector<std::uint8_t> occ_;     // [M*rows*cols] current planning rasters
+  std::vector<double> dyn_stamp_;            // [M*rows*cols], -inf where unmarked
+  std::vector<std::uint8_t> occ_;            // [M*rows*cols] current planning rasters
 
   // M SDF fields [M,3,H,W] (plane m at m*3*rows*cols).
   std::vector<float> field_;
@@ -463,6 +576,43 @@ private:
   std::vector<float> mat_lam_soft_, mat_lam_hard_; // [n] per-tick columns
   std::vector<std::uint8_t> mat_gate_active_;      // [n]
   double mat_hard_margin_m_ = 0.0;
+
+  // the plant (set_plant; inert while plant_ is null)
+  vehicle_plant *plant_ = nullptr;
+  std::vector<float> pl_latency_, pl_a_brake_, pl_steer_now_, pl_steer_rate_, pl_L_;
+  float pl_max_steer_ = 0.0f;
+  // [n] the vehicles' own envelope, nav's where a plant gives none; [n], [n * kPlantDiscs] their
+  // footprint discs. The flags: whether any agent's plant gave that limit.
+  std::vector<float> pl_a_max_, pl_vmax_, pl_a_lat_, pl_body_rr_, pl_body_off_;
+  // override_command, [n], for the next step only
+  std::vector<float> ov_steer_, ov_accel_;
+  std::vector<std::uint8_t> ov_on_;
+  bool ov_any_ = false;
+  bool pl_has_a_max_ = false, pl_has_vmax_ = false, pl_has_a_lat_ = false, pl_fp_ = false;
+  std::vector<float> pl_steer_cmd_, pl_accel_cmd_, pl_v_stop_; // [n], the last tick's
+  std::vector<plant_state> pl_start_;                          // [n], the tick's start
+  std::vector<drift_sample> pl_drift_;                         // [n], the last tick's
+  std::vector<double> st_energy_;                              // [n], nav_stats feed
+  std::vector<int> st_contacts_;                               // [n], nav_stats feed
+  const float *ptr(const std::vector<float> &v) const {
+    return plant_ && gstep_ > 0 && !v.empty() ? v.data() : nullptr;
+  }
+  plant_modulation pl_mod_;
+  std::vector<float> pl_gamma_scale_, pl_hard_scale_; // [n], H4
+  void plant_read(); // the plant's state and limits into o_, th_, sp_ and the pl_ columns
+
+  // terrain (set_terrain; inert while terrain_on_ is false)
+  bool terrain_on_ = false;
+  terrain_config ter_cfg_;
+  std::vector<float> ter_height_; // the heights set_terrain was given, for set_terrain_config
+  terrain_planes ter_;
+  std::vector<float> ter_stack_; // [1,6,H,W] the grade cost's material planes
+  material_stack ter_view_{};
+  terrain_drive ter_drive_;
+  friction_field ter_slope_; // the slope planes, as a two-plane field
+  std::vector<int> ter_entries_;
+  std::vector<int> st_entries_; // [n], this tick's, for nav_stats
+  bool infeasible_at(float onx, float ony) const;
 
   field_stack field_view() const;
   material_stack material_view() const;

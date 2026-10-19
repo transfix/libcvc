@@ -51,6 +51,15 @@ struct IndexEdit {
   bool committed = false;
   int index = -1;
 };
+// A single-line text edit (Kind::InputText; Kind::InputInt reuses it, the core coercing to/from an
+// int). `value` is the field's current text; `changed` = it differs from the value in state this
+// frame; `committed` = the user finished the edit (pressed Enter or the field lost focus) — the
+// core's write edge, mirroring the sliders' commit-on-release.
+struct StringEdit {
+  bool changed = false;
+  bool committed = false;
+  std::string value;
+};
 // The result of a backend-drawn CUSTOM widget (a novel primitive the compositional
 // path can't express — §16.1b). `handled` is the backend's signal that it actually
 // drew this custom_type (false = it doesn't know it, so the core shows a placeholder).
@@ -244,6 +253,13 @@ public:
                                    double hi, const char *fmt) = 0;
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
+  // A single-line text field bound to a string state key (Kind::InputText; Kind::InputInt reuses it
+  // with the core coercing to/from an int). `key` is the stable per-widget id (the resolved state
+  // path), like the sliders, so the backend can hold the in-progress text across frames; `current`
+  // is the value in state at frame start. Returns {changed, committed, value}, where committed is
+  // the write edge (Enter or focus-leave). A backend with no text entry still implements it — a
+  // terminal renders the field read-only and reports no edit.
+  virtual StringEdit input_text(const char *label, const char *key, const std::string &current) = 0;
 
   // Draw a host-published image named `name` at display `width` px (height from the image's
   // aspect). A read-only viewer of a buffer the host set via a backend-specific publish API (e.g.

@@ -70,6 +70,14 @@ so "m/s" is only honest by assertion.
 
 **Bind nav's tick to `world_clock`:**
 
+> **Update (2026-10-14, [`WORLD-CLOCK-SYNC-ROADMAP.md`](WORLD-CLOCK-SYNC-ROADMAP.md)):**
+> - **The binding.** One nav step is a whole number **k** of `world_clock` quanta, k = `veh.dt / fixed_dt`
+>   (`cvc::ticks_per_step`). `nav::sim_thread` follows a shared clock that way.
+> - **The quantum.** Simulation hosts use 0.01 s (k = 6 at the trained 0.06 s), so a physics world and
+>   other controllers share the clock.
+> - **The special case.** k = 1, which the bullets below describe, is the case `fixed_dt == veh.dt`.
+> - **Unchanged.** The trained dt still flows into the choice of quantum, never the reverse.
+
 - One nav step is **one `world_clock` quantum**; `veh_params.dt` is sourced from
   `world_clock::fixed_dt()` at config construction, so "one tick = `fixed_dt`
   real seconds" is explicit and authoritative rather than conventional.
@@ -147,6 +155,17 @@ normalized kernel math:
 ## Phased plan
 
 Each phase is independently shippable and needs **zero kernel edits**.
+
+> **Update (2026-10-15): the conversion primitives Phases 1–2 build on have landed** in `world_units`
+> ([`WORLD_UNITS_API.md`](../WORLD_UNITS_API.md#si--the-normalized-frame-cvcnav)).
+> - **Quantities.** `world_units::to_normalized` / `from_normalized` convert any dimension by its length
+>   exponent: velocity × S / mpwu, curvature × mpwu / S, time, angle and mass unchanged.
+> - **Points.** `si_point_to_normalized` / `normalized_point_to_si` apply the centre in the snapshot's
+>   order (`o / S + center`).
+> - **The frame.** `cvc::nav::frame_of(sim_world::config)` (`inc/cvc/nav/nav_units.h`) names S and the
+>   centre for a world.
+> - **Still open.** Phases 0–3 themselves: `veh_params_from_si`, `snapshot_si` and the demo helper are
+>   still to be written on top of these, and no kernel calls them.
 
 - **Phase 0 — Document, assert, verify (zero risk).** Annotate every nav field
   with its frame + `world_units::dimension`; document the three scales, the

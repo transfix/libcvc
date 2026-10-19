@@ -629,7 +629,7 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   // even if they were used. Refuse it rather than mislead: the CPU material drive
   // (drive_step_material) is the only path that applies these heads. GPU material parity is a TODO
   // (device material sampler + two-head sigmoid scaling + soft/hard force terms).
-  if (model.has_risk() || model.has_lam() || model.lam_sigmoid())
+  if (model.has_risk() || model.has_slope() || model.has_lam() || model.lam_sigmoid())
     throw std::runtime_error(
         "cvc::nav::drive_step_cuda: this coef_mlp carries learned terrain-risk/lam heads "
         "(has_risk/has_lam/lam_sigmoid) that the GPU drive does not apply — it would run "

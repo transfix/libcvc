@@ -176,7 +176,95 @@ def test_forward_only_loss_does_not_train():
         print("  forward-only loss + step(lr=0) leave the weights unmoved: OK")
 
 
+# nav_material_trainer_create's positional defaults up to use_cuda (grad_clip .. use_cuda), so a
+# test can append the multi-start sampling args (ms_count, frac_lo, frac_hi, seed, ms_semi_implicit).
+_CREATE_DEFAULTS = (5.0, 1.0, 0.5, 0.1, 5e-3, 0.01, 2.0, 0.01, 1.0, 5.0, 0.95, 0.5, 5.0, 10.0, 0.5, 1.0,
+                    3.0, 5.0, 0.05, 3, 4.0, 0)
+
+
+def test_sampled_multi_start_args():
+    """The L_multi start-sampling args (GRL-SNAM #113): the degenerate default is the legacy single
+    start, a sampled range changes the loss, validation scores the base seed, and step k draws with
+    seed + k."""
+    with tempfile.TemporaryDirectory() as d:
+        init = os.path.join(d, "init.cvcnm")
+        _write_random_cvcnm(init, patch_size=16, seed=5)
+        args = _packed(_synthetic_batch(seed=13))
+
+        def create(ms_count, frac_lo, frac_hi, seed, semi=0):
+            return pycvc.nav_material_trainer_create(init, *_CREATE_DEFAULTS, ms_count, frac_lo, frac_hi,
+                                                     seed, semi)
+
+        def loss(h):
+            return pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+
+        legacy = loss(pycvc.nav_material_trainer_create(init))
+        # A degenerate range draws nothing: any ms_count/seed is the legacy single start, exactly.
+        assert loss(create(10, 0.9, 0.9, 123)) == legacy, "degenerate range moved the loss"
+        sampled = create(4, 0.8, 0.98, 5)
+        assert loss(sampled) != legacy, "sampled starts did not reach the loss"
+        assert loss(sampled) == loss(sampled), "validation loss is not deterministic"
+        assert loss(create(4, 0.8, 0.98, 5, 1)) != loss(sampled), "semi-implicit flag ignored"
+
+        # step k samples with seed + k: at lr=0 the weights never move, so handle(seed=5)'s second
+        # step scores what handle(seed=6) scores at its base seed. (step vs loss: same value, but
+        # compared to a tolerance, as test_forward_only_loss_does_not_train does.)
+        def close(x, y):
+            return abs(x - y) / (abs(y) + 1e-6) < 1e-6
+
+        a = create(4, 0.8, 0.98, 5)
+        a0 = pycvc.nav_material_trainer_step(a, *args, 0.0, 0)
+        a1 = pycvc.nav_material_trainer_step(a, *args, 0.0, 0)
+        assert close(a0, loss(sampled)), "step 0 did not draw with the base seed"
+        assert not close(a1, a0), "the draw did not advance between steps"
+        assert close(a1, loss(create(4, 0.8, 0.98, 6))), "step 1 did not draw with seed + 1"
+
+        try:
+            create(4, 0.98, 0.8, 0)
+        except Exception:  # a bad frac range is rejected at create, before any GIL-free step
+            pass
+        else:
+            raise AssertionError("an inverted frac range was accepted")
+        print(f"  multi-start sampling: legacy {legacy:.6f}, sampled {loss(sampled):.6f}, per-step seed OK")
+
+
+def test_bicycle_integrator():
+    """P8b: the loss taken through the kinematic bicycle instead of the point mass."""
+    if not hasattr(pycvc, "nav_material_trainer_set_bicycle"):
+        print("  (no nav_material_trainer_set_bicycle -- skipping the bicycle integrator)")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        init = os.path.join(d, "init.cvcnm")
+        _write_random_cvcnm(init, patch_size=16, seed=7)
+        h = pycvc.nav_material_trainer_create(init)
+        args = _packed(_synthetic_batch())
+        assert pycvc.nav_material_trainer_integrator(h) == "surrogate"
+        point_mass = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        # Vehicle limits for the synthetic batch's scale (positions within a few units).
+        pycvc.nav_material_trainer_set_bicycle(h, 1, 0.3, 0.6, 2.0, 1.5, 0.8, 1.5, 1)
+        assert pycvc.nav_material_trainer_integrator(h) == "bicycle"
+        bike = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        assert np.isfinite(bike) and bike != point_mass, "the bicycle did not change the loss"
+        l0 = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0)
+        last = l0
+        for _ in range(20):
+            last = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0)
+        assert np.isfinite(last) and last < l0, f"bicycle training did not descend ({l0} -> {last})"
+        try:
+            pycvc.nav_material_trainer_set_bicycle(h, 1, 0.0)  # a zero wheelbase is refused
+        except Exception:
+            pass
+        else:
+            raise AssertionError("a zero wheelbase was accepted")
+        pycvc.nav_material_trainer_set_bicycle(h, 0)
+        assert pycvc.nav_material_trainer_integrator(h) == "surrogate"
+        print(f"  bicycle integrator: point-mass loss {point_mass:.4f}, bicycle {bike:.4f}, "
+              f"20 steps {l0:.4f} -> {last:.4f}")
+
+
 if __name__ == "__main__":
     test_trainer_reduces_loss_and_round_trips()
     test_forward_only_loss_does_not_train()
+    test_sampled_multi_start_args()
+    test_bicycle_integrator()
     print("pycvc nav material-trainer integration: OK")

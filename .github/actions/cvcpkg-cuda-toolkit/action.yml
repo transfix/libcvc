@@ -1,0 +1,94 @@
+name: 'CUDA toolkit from cvcpkg'
+description: |
+  Installs the NVIDIA CUDA toolkit (nvcc, cudart, CCCL) with cvcpkg's
+  `cuda-toolkit` recipe into a prefix of its own, and exports it to the rest
+  of the job:
+    CUDAToolkit_ROOT, CUDA_PATH  the toolkit root, <prefix>/cuda
+    CUDACXX                      its nvcc
+  CMake's CUDA language reads CUDACXX (Ninja; the Visual Studio generator
+  ignores it) and FindCUDAToolkit reads CUDAToolkit_ROOT. A Visual Studio
+  generator also needs `-T cuda=<root>`, which makes CMake take the MSBuild
+  integration from the toolkit's extras\ instead of from Visual Studio.
+
+  The recipe is `redistributable: false`: NVIDIA's EULA does not let anyone
+  republish the toolkit, so cvcpkg.org never hosts it. `cvcpkg install`
+  downloads NVIDIA's official redist archives onto the runner, checks each
+  against the sha256 pinned in the recipe, and lays them out -- the same
+  model as NVIDIA's network installer, which this replaces
+  (Jimver/cuda-toolkit). The version is whatever the recipe pins (12.5.1).
+
+  A prefix of its own, never the deps prefix: the release SDKs are staged
+  from the deps prefix, and they must not carry the toolkit either.
+
+outputs:
+  root:
+    description: 'The toolkit root (<prefix>/cuda), with forward slashes.'
+    value: ${{ steps.install.outputs.root }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check for the cvcpkg CLI
+      id: probe
+      shell: bash
+      run: |
+        if command -v cvcpkg >/dev/null 2>&1; then
+          echo "have=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "have=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # The recipe always, the CLI only when no earlier step installed one
+    # (fetch-libcvc-deps and cvcpkg-build-tools install it from the same
+    # master). A cvcpkg pip-installed from a sparse checkout carries no
+    # recipes/, so the recipe is passed with --recipes-dir.
+    - name: Check out cvcpkg
+      uses: actions/checkout@v5
+      with:
+        repository: cy-pca/cvcpkg
+        ref: master
+        path: _cvcpkg-cuda
+        sparse-checkout: |
+          src
+          pyproject.toml
+          README.md
+          packaging
+          pep517-backend
+          recipes/_common
+          recipes/cuda-toolkit
+        sparse-checkout-cone-mode: false
+
+    - name: Set up Python for cvcpkg
+      if: steps.probe.outputs.have != 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install the cvcpkg CLI
+      if: steps.probe.outputs.have != 'true'
+      shell: bash
+      run: pip install ./_cvcpkg-cuda
+
+    - name: cvcpkg install cuda-toolkit
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        prefix="$RUNNER_TEMP/cvcpkg-cuda"
+        recipes="$GITHUB_WORKSPACE/_cvcpkg-cuda/recipes"
+        nvcc=nvcc
+        if [ "$RUNNER_OS" = Windows ]; then
+          prefix=$(cygpath -m "$prefix")
+          recipes=$(cygpath -m "$recipes")
+          nvcc=nvcc.exe
+        fi
+        rm -rf "$prefix"
+        cvcpkg install cuda-toolkit --recipes-dir "$recipes" --no-default-recipes --prefix "$prefix"
+        root="$prefix/cuda"
+        "$root/bin/$nvcc" --version
+        {
+          echo "CUDAToolkit_ROOT=$root"
+          echo "CUDA_PATH=$root"
+          echo "CUDACXX=$root/bin/$nvcc"
+        } >> "$GITHUB_ENV"
+        echo "root=$root" >> "$GITHUB_OUTPUT"

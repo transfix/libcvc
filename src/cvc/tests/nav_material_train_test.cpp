@@ -19,8 +19,11 @@
 // analytic gradient used (otherwise the recomputed-quantile term the source
 // never differentiates would corrupt the check near the tail threshold).
 //
-// L_multi is out of scope here (a separate geometry rollout — see
-// material_train.h); this gates the material-path loss.
+// The default config's w_multi = 0.5 puts L_multi (the separate geometry
+// rollout, material_train.h) inside the finite-differenced loss too. The sampled
+// variants turn on GRL-SNAM #113's random starts at a FIXED seed: both the loss
+// and its gradient then score the same draw, so the FD stays a deterministic
+// function of the weights.
 
 #include "coef_energy_test_model.h"
 #include "material_batch_fixture.h"
@@ -46,13 +49,12 @@ namespace {
 using cvc_test::Batch;
 using cvc_test::make_batch;
 
-TEST(NavMaterialTrain, FullChainGradcheck) {
+void full_chain_gradcheck(const material_loss_config &cfg, const char *tag) {
   std::mt19937 rng(2024);
   const int P = 16;
   coef_energy_net m = cvc_test::build_test_model(rng, P);
   const Batch batch = make_batch(rng, /*B=*/16, /*N=*/3, P, /*Hp=*/13, /*Wp=*/13);
   const material_batch mb = batch.view();
-  material_loss_config cfg; // train_material.py defaults
 
   // analytic gradient (fresh CVaR eta, returned for the FD to freeze)
   coef_energy_net::param_grads grads = m.zero_grads();
@@ -123,12 +125,101 @@ TEST(NavMaterialTrain, FullChainGradcheck) {
     }
   }
 
-  std::printf("[material-train-e2e] L=%.4f |g|=%.3f dir_rel=%.3e checked=%d worst_rel=%.3e (%s)\n",
-              L0, gnorm, dir_rel, checked, worst, worst_nm.c_str());
+  std::printf(
+      "[material-train-e2e %s] L=%.4f |g|=%.3f dir_rel=%.3e checked=%d worst_rel=%.3e (%s)\n", tag,
+      L0, gnorm, dir_rel, checked, worst, worst_nm.c_str());
   EXPECT_LT(dir_rel, 2e-2) << "full loss->weights gradient fails the directional FD check";
   EXPECT_LT(worst, 5e-2) << "a weight gradient disagrees with finite differences (" << worst_nm
                          << ")";
   EXPECT_GE(checked, 30);
 }
 
+material_loss_config sampled_multi(bool semi_implicit) {
+  material_loss_config cfg;
+  cfg.multi.ms_count = 4;
+  cfg.multi.frac_lo = 0.8;
+  cfg.multi.frac_hi = 0.98;
+  cfg.multi.seed = 5;
+  cfg.multi.semi_implicit = semi_implicit;
+  return cfg;
+}
+
+TEST(NavMaterialTrain, FullChainGradcheck) {
+  full_chain_gradcheck(material_loss_config{}, "legacy"); // train_material.py defaults
+}
+
+TEST(NavMaterialTrain, FullChainGradcheckSampledMultiStart) {
+  full_chain_gradcheck(sampled_multi(false), "sampled explicit");
+}
+
+TEST(NavMaterialTrain, FullChainGradcheckSampledSemiImplicitMultiStart) {
+  full_chain_gradcheck(sampled_multi(true), "sampled semi");
+}
+
+// The sampled starts reach the trainer's loss: same weights and batch, a
+// different L_multi (hence L) than the legacy single start and than another
+// seed, while the loss and the gradient entry points agree on the value.
+TEST(NavMaterialTrain, SampledMultiStartReachesTheLoss) {
+  std::mt19937 rng(2024);
+  const int P = 16;
+  const coef_energy_net m = cvc_test::build_test_model(rng, P);
+  const Batch batch = make_batch(rng, /*B=*/16, /*N=*/3, P, /*Hp=*/13, /*Wp=*/13);
+  const material_batch mb = batch.view();
+  const material_loss_config legacy, s5 = sampled_multi(false);
+  material_loss_config s6 = s5;
+  s6.multi.seed = 6;
+  coef_energy_net::param_grads grads = m.zero_grads();
+  float eta = 0.0f;
+  const double L5 = material_loss_and_grad(m, mb, s5, grads, &eta);
+  const double l5 = material_loss(m, mb, s5, eta), l_legacy = material_loss(m, mb, legacy, eta),
+               l6 = material_loss(m, mb, s6, eta);
+  // The two entry points differ by the float-rounded CVaR quantile alone
+  // (~1e-9 relative); a different draw moves L by orders of magnitude more.
+  const double tol = 1e-7 * std::fabs(l5);
+  std::printf("[material-train-ms] L5=%.12f l5=%.12f legacy=%.12f seed6=%.12f\n", L5, l5, l_legacy,
+              l6);
+  EXPECT_NEAR(L5, l5, tol) << "loss and grad scored different draws";
+  EXPECT_GT(std::fabs(l5 - l_legacy), 100.0 * tol) << "sampling did not reach the loss";
+  EXPECT_GT(std::fabs(l5 - l6), 100.0 * tol) << "the seed did not change the draw";
+}
+
 } // namespace
+
+// The full loss -> weights gradient with the loss taken through the kinematic
+// bicycle (P8b) instead of the point-mass surrogate. Vehicle limits sized for the
+// fixture's scale (positions within a few units, dt = 0.1).
+TEST(NavMaterialTrain, FullChainGradcheckBicycle) {
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::bicycle;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+  full_chain_gradcheck(cfg, "bicycle");
+}
+
+// The same chain through the dynamic vehicle (P8b): the bicycle's controller and limits,
+// a unit-mass vehicle of its wheelbase with grip (mu g 8.8) above them.
+TEST(NavMaterialTrain, FullChainGradcheckDynamic) {
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::dynamic;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+  cvc::nav::diff::dyn_bike_params &d = cfg.dynamic;
+  d.m = 1.0f;
+  d.lf = d.lr = 0.15f;
+  d.Iz = d.m * d.lf * d.lr;
+  d.h = 0.05f;
+  d.g = 9.81f;
+  d.mu = 0.9f;
+  d.B_f = 10.0f;
+  d.B_r = 12.0f;
+  d.tau_steer = 0.05f;
+  d.tau_drive = 0.05f;
+  d.eps = 0.05f;
+  d.v_blend = 0.1f;
+  d.v_width = 0.03f;
+  full_chain_gradcheck(cfg, "dynamic");
+}

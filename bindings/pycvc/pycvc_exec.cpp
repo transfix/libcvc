@@ -6,6 +6,8 @@
 
 #include "pycvc_exec.h"
 
+#include "pycvc_value.h" // the shared value_t <-> Python conversion
+
 #include <chrono>
 #include <condition_variable>
 #include <cvc/core/app.h>
@@ -29,101 +31,6 @@ namespace pycvc {
 
 namespace {
 using namespace cvc::state_exec;
-
-// ── value_t <-> Python marshaling ───────────────────────────────────────
-// Convert a DSL value to a NEW Python reference. Scalars + list/dict cross;
-// opaque DSL types (symbol/closure/native_fn/data/generator) degrade to their
-// printed form so a Python fn still receives something sensible.
-PyObject *value_to_py(const value_t &v) {
-  if (v.is_nil())
-    Py_RETURN_NONE;
-  if (const auto *b = std::get_if<bool>(&v.v))
-    return PyBool_FromLong(*b);
-  if (const auto *i = std::get_if<int64_t>(&v.v))
-    return PyLong_FromLongLong(static_cast<long long>(*i));
-  if (const auto *d = std::get_if<double>(&v.v))
-    return PyFloat_FromDouble(*d);
-  if (const auto *s = std::get_if<std::string>(&v.v))
-    return PyUnicode_FromStringAndSize(s->data(), static_cast<Py_ssize_t>(s->size()));
-  if (const auto *by = std::get_if<bytes_value>(&v.v))
-    return PyBytes_FromStringAndSize(by->data.data(), static_cast<Py_ssize_t>(by->data.size()));
-  if (const auto *l = std::get_if<list_ptr>(&v.v)) {
-    const auto &vec = **l;
-    PyObject *out = PyList_New(static_cast<Py_ssize_t>(vec.size()));
-    for (Py_ssize_t k = 0; k < static_cast<Py_ssize_t>(vec.size()); ++k)
-      PyList_SET_ITEM(out, k, value_to_py(vec[k])); // steals the new ref
-    return out;
-  }
-  if (const auto *dd = std::get_if<dict_ptr>(&v.v)) {
-    const auto &pairs = **dd;
-    PyObject *out = PyDict_New();
-    for (const auto &kv : pairs) {
-      PyObject *pv = value_to_py(kv.second);
-      PyDict_SetItemString(out, kv.first.c_str(), pv);
-      Py_DECREF(pv);
-    }
-    return out;
-  }
-  // Fallback: the DSL's printed form.
-  std::string s = to_string(v);
-  return PyUnicode_FromStringAndSize(s.data(), static_cast<Py_ssize_t>(s.size()));
-}
-
-// Convert a Python object (borrowed) to a DSL value. bool BEFORE int (bool is a
-// subclass of int in Python). dict order is preserved.
-value_t py_to_value(PyObject *o) {
-  if (o == nullptr || o == Py_None)
-    return value_t(std::monostate{});
-  if (PyBool_Check(o))
-    return value_t(o == Py_True);
-  if (PyLong_Check(o))
-    return value_t(static_cast<int64_t>(PyLong_AsLongLong(o)));
-  if (PyFloat_Check(o))
-    return value_t(PyFloat_AsDouble(o));
-  if (PyUnicode_Check(o)) {
-    Py_ssize_t n = 0;
-    const char *s = PyUnicode_AsUTF8AndSize(o, &n);
-    return value_t(std::string(s ? s : "", s ? static_cast<size_t>(n) : 0));
-  }
-  // Python `bytes` -> a first-class binary value (bytes_value), the counterpart
-  // of the text `str` path above. Lets a Python DSL fn receive/return a raw
-  // binary msg-send/msg-recv payload without lossy UTF-8 coercion.
-  if (PyBytes_Check(o)) {
-    char *buf = nullptr;
-    Py_ssize_t n = 0;
-    PyBytes_AsStringAndSize(o, &buf, &n);
-    return make_bytes(std::string(buf ? buf : "", buf ? static_cast<size_t>(n) : 0));
-  }
-  if (PyList_Check(o) || PyTuple_Check(o)) {
-    bool tup = PyTuple_Check(o);
-    Py_ssize_t n = tup ? PyTuple_Size(o) : PyList_Size(o);
-    std::vector<value_t> elems;
-    elems.reserve(static_cast<size_t>(n));
-    for (Py_ssize_t k = 0; k < n; ++k)
-      elems.push_back(py_to_value(tup ? PyTuple_GetItem(o, k) : PyList_GetItem(o, k)));
-    return value_t(std::make_shared<std::vector<value_t>>(std::move(elems)));
-  }
-  if (PyDict_Check(o)) {
-    auto pairs = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-    PyObject *k = nullptr, *v = nullptr;
-    Py_ssize_t pos = 0;
-    while (PyDict_Next(o, &pos, &k, &v)) {
-      PyObject *ks = PyObject_Str(k);
-      Py_ssize_t n = 0;
-      const char *s = ks ? PyUnicode_AsUTF8AndSize(ks, &n) : "";
-      pairs->emplace_back(std::string(s ? s : "", s ? static_cast<size_t>(n) : 0), py_to_value(v));
-      Py_XDECREF(ks);
-    }
-    return value_t(dict_ptr(std::move(pairs)));
-  }
-  // Anything else: its str().
-  PyObject *s = PyObject_Str(o);
-  Py_ssize_t n = 0;
-  const char *cs = s ? PyUnicode_AsUTF8AndSize(s, &n) : "";
-  value_t out(std::string(cs ? cs : "", cs ? static_cast<size_t>(n) : 0));
-  Py_XDECREF(s);
-  return out;
-}
 
 std::string fetch_py_error() {
   if (!PyErr_Occurred())
@@ -185,33 +92,30 @@ std::shared_ptr<PyObject> own_callable(PyObject *callable) {
 // async fn): PyGILState_Ensure creates/binds a thread state and blocks until the
 // GIL is free, so the only rule is that whoever is idle-waiting for this worker
 // must have released the GIL (run()'s pump does). Contains a Python exception as
-// a C++ error carrying the message.
+// a C++ error carrying the message, prefixed with `what`. With `want_result`
+// false the return value is ignored (an on_complete callback) and nil returned.
 value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const value_t> args,
-                    const std::string &name) {
+                    const std::string &what, bool want_result = true) {
   PyGILState_STATE gil = PyGILState_Ensure();
-  PyObject *pyargs = PyTuple_New(static_cast<Py_ssize_t>(args.size()));
-  for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(args.size()); ++i)
-    PyTuple_SET_ITEM(pyargs, i, value_to_py(args[i])); // steals the new ref
-  PyObject *res = PyObject_CallObject(holder.get(), pyargs);
-  Py_DECREF(pyargs);
+  PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) if an arg can't convert
+  PyObject *res = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
+  Py_XDECREF(pyargs);
   if (res == nullptr) {
     std::string msg = fetch_py_error();
     PyGILState_Release(gil);
-    throw std::runtime_error("python DSL fn '" + name + "': " + msg);
+    throw std::runtime_error(what + ": " + msg);
   }
-  value_t out = py_to_value(res);
+  value_t out;
+  // strict: e.g. a set or non-str dict key fails
+  const bool converted = !want_result || py_to_value(res, out);
   Py_DECREF(res);
+  if (!converted) {
+    std::string msg = fetch_py_error();
+    PyGILState_Release(gil);
+    throw std::runtime_error(what + " returned an unconvertible value: " + msg);
+  }
   PyGILState_Release(gil);
   return out;
-}
-
-// Wrap a Python callable as a SYNCHRONOUS DSL native_fn: it runs inline on the
-// scheduler thread (GIL held by run()).
-native_fn make_python_native_fn(const std::string &name, PyObject *callable) {
-  std::shared_ptr<PyObject> holder = own_callable(callable);
-  return [name, holder](std::span<const value_t> args) -> value_t {
-    return call_python(holder, args, name);
-  };
 }
 
 std::string render_result(const value_t &v) {
@@ -287,7 +191,10 @@ void drive_coros(PyObject *loop, std::vector<std::pair<PyObject *, std::string>>
     } else if (exc == Py_None) {
       Py_DECREF(exc);
       PyObject *res = PyObject_CallMethod(task, "result", nullptr);
-      payload = res ? py_to_value(res) : async_error_dict("python coro: " + fetch_py_error());
+      value_t converted;
+      payload = res && py_to_value(res, converted)
+                    ? converted
+                    : async_error_dict("python coro: " + fetch_py_error());
       Py_XDECREF(res);
     } else {
       PyObject *s = PyObject_Str(exc);
@@ -345,6 +252,34 @@ struct EndGuard {
 };
 } // namespace
 
+// A SYNCHRONOUS DSL native_fn: it runs inline on the thread stepping the scheduler (Exec::run's,
+// or the caller of a wrapped scheduler's run/step, which release the GIL; call_python retakes it).
+native_fn python_native_fn(const std::string &who, const std::string &name, PyObject *callable) {
+  if (callable == nullptr || !PyCallable_Check(callable))
+    throw std::invalid_argument(who + ": '" + name + "' is not callable");
+  if (is_coroutine_function(callable))
+    throw std::invalid_argument(who + ": '" + name +
+                                "' is an async def — use Exec.register_async_coro");
+  std::shared_ptr<PyObject> holder = own_callable(callable);
+  const std::string what = "python DSL fn '" + name + "'";
+  return [what, holder](std::span<const value_t> args) -> value_t {
+    return call_python(holder, args, what);
+  };
+}
+
+void python_on_complete::operator()(value_t result) const {
+  call_python(callable, std::span<const value_t>(&result, 1), "python on_complete",
+              /*want_result=*/false);
+}
+
+python_on_complete make_python_on_complete(PyObject *callable) {
+  if (callable == nullptr || !PyCallable_Check(callable))
+    throw std::invalid_argument("pycvc: on_complete is not callable");
+  return python_on_complete{own_callable(callable)};
+}
+
+std::shared_ptr<PyObject> python_ref(PyObject *o) { return own_callable(o); }
+
 // Owns everything an evaluation needs. The intrinsics capture &ictx (a raw
 // pointer), so ictx must outlive any run — holding it here (Exec-lifetime)
 // satisfies that. Mirrors the C++ tests' make_exec_env().
@@ -378,6 +313,12 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecIm
   // only the scheduler is private.
   app->computePool();
   impl_->sched.set_watch_root(impl_->root);
+  // The same state_exec defaults as the app's exec scheduler, so a program behaves the same from
+  // Python as from Ariadne: scripts are read inside the process (host_parser_defaults) and deep
+  // data is handled a slice per step (host_data_defaults), and the app tree's
+  // state_exec.defaults.parser.* / data.* keys override them for both.
+  impl_->sched.set_parser_defaults(async_scheduler::host_parser_defaults());
+  impl_->sched.set_data_defaults(async_scheduler::host_data_defaults());
 
   impl_->host_proc = make_process();
   impl_->host_proc->pid = 0;
@@ -420,12 +361,8 @@ Exec::~Exec() {
 }
 
 void Exec::register_fn(const std::string &name, PyObject *callable) {
-  if (callable == nullptr || !PyCallable_Check(callable))
-    throw std::invalid_argument("pycvc.Exec.register_fn: '" + name + "' is not callable");
-  if (is_coroutine_function(callable))
-    throw std::invalid_argument("pycvc.Exec.register_fn: '" + name +
-                                "' is an async def — use register_async_coro");
-  builtins::register_fn(impl_->env, name, make_python_native_fn(name, callable));
+  builtins::register_fn(impl_->env, name,
+                        python_native_fn("pycvc.Exec.register_fn", name, callable));
 }
 
 void Exec::register_async_fn(const std::string &name, PyObject *callable) {
@@ -458,7 +395,7 @@ void Exec::register_async_fn(const std::string &name, PyObject *callable) {
             [holder, argv, name, inflight]() -> value_t {
               EndGuard guard{
                   inflight}; // --in-flight when this body returns/throws, before the post
-              return call_python(holder, *argv, name);
+              return call_python(holder, *argv, "python DSL fn '" + name + "'");
             },
             [name](const std::string &e) -> value_t {
               return async_error_dict("python async fn '" + name + "': " + e);
@@ -497,11 +434,9 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
         const std::string done = resolve_channel_key(root, chan);
         // The verb runs during sync_run (GIL released by the pump) — re-acquire it to touch Python.
         PyGILState_STATE gil = PyGILState_Ensure();
-        PyObject *pyargs = PyTuple_New(static_cast<Py_ssize_t>(args.size()));
-        for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(args.size()); ++i)
-          PyTuple_SET_ITEM(pyargs, i, value_to_py(args[i]));
-        PyObject *coro = PyObject_CallObject(holder.get(), pyargs);
-        Py_DECREF(pyargs);
+        PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) on an unconvertible arg
+        PyObject *coro = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
+        Py_XDECREF(pyargs);
         PyObject *task = nullptr;
         if (coro != nullptr) {
           task = PyObject_CallMethod(impl->loop, "create_task", "O", coro);
@@ -554,7 +489,10 @@ std::string Exec::run(const std::string &src) {
   execute_options opts;
   opts.name = "pycvc";
   opts.env = impl_->env;
-  const int pid = sched.execute(src, opts); // may throw on parse error (nothing to clean up yet)
+  // A syntax error is read inside the process (parser.step_tokens) and surfaces below as the
+  // killed process's exit error; with step_tokens = 0 on the tree, execute() throws it here
+  // instead (nothing to clean up yet). Either way run() raises with the parse error's message.
+  const int pid = sched.execute(src, opts);
 
   // Drive the private scheduler to completion. A purely synchronous program finishes in the first
   // slice; a program that parks (await / an async fn) yields, and the pump waits for a compute-pool
@@ -568,6 +506,7 @@ std::string Exec::run(const std::string &src) {
   auto idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
   std::optional<value_t> result;
   std::optional<std::string> error; // set -> throw AFTER the pool is quiesced
+  bool killed = false;              // the scheduler killed the process (error has its exit error)
   try {
     while (true) {
       sched.drain_ingress(); // deliver any worker post_message FIRST, so a parked receiver readies
@@ -599,6 +538,7 @@ std::string Exec::run(const std::string &src) {
         error = (ex && !ex->empty())
                     ? *ex
                     : ("pycvc.Exec.run: program killed (pid " + std::to_string(pid) + ")");
+        killed = true;
         break;
       }
       // Fast-path only on OUR OWN pid's runnability — has_runnable() scans siblings too, so gating
@@ -633,6 +573,12 @@ std::string Exec::run(const std::string &src) {
   // to Python, so a worker can never post to / be destroyed against a torn-down scheduler.
   inflight.wait_idle();
   sched.reap(pid); // drop the finished/killed process from the private scheduler (no leak)
+  if (killed) {
+    // A script read inside its process (parser.step_tokens) reports a syntax error only as the
+    // exit error's text. Re-parse it, so a syntax error raises pycvc.parse_error with its position
+    // either way, as it does when the script is parsed at submit.
+    (void)parse_all(src, parse_options_from_state(*impl_->root, {}, sched.parser_defaults()));
+  }
   if (error)
     throw std::runtime_error(*error);
   if (!result.has_value())
@@ -640,5 +586,21 @@ std::string Exec::run(const std::string &src) {
                              std::to_string(pid) + ")");
   return render_result(*result);
 }
+
+cvc::state_exec::parse_options Exec::parser_defaults() const {
+  return impl_->sched.parser_defaults();
+}
+
+void Exec::set_parser_defaults(const cvc::state_exec::parse_options &defaults) {
+  impl_->sched.set_parser_defaults(defaults);
+}
+
+cvc::state_exec::data_options Exec::data_defaults() const { return impl_->sched.data_defaults(); }
+
+void Exec::set_data_defaults(const cvc::state_exec::data_options &defaults) {
+  impl_->sched.set_data_defaults(defaults);
+}
+
+cvc::state_exec::async_scheduler &Exec::scheduler() { return impl_->sched; }
 
 } // namespace pycvc

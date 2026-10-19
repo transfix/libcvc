@@ -25,6 +25,7 @@
 #include <cvc/state/state_replica.h>
 #include <cvc/state/state_subscription_router.h>
 #include <cvc/state/state_sync_adapter.h>
+#include <cvc/state/state_transport.h>
 #include <cvc/state/state_write_policy.h>
 #include <memory>
 #include <mutex>
@@ -35,7 +36,7 @@
 namespace cvc {
 
 class app;
-class state_transport;
+class state_data_hydrator;
 
 // ----------------
 // cvc::state_cluster_shard
@@ -110,6 +111,12 @@ public:
   state_blob_store *blob_store() const noexcept;
   void set_max_inline_payload_bytes(std::uint32_t bytes) noexcept;
   std::uint32_t max_inline_payload_bytes() const noexcept;
+
+  // Hydrator used by the sync adapter to resolve inbound blob-ref data() payloads (the receive
+  // side of the large-payload offload performed by drain_local()). Not owned; forwarded to the
+  // adapter. Typically the owning session's hydrator, which shares this shard's blob store and
+  // codec registry. Set before attach().
+  void set_data_hydrator(state_data_hydrator *hydrator) noexcept;
 
   // When true and the partition map is non-empty, ingest_remote()
   // rejects mutations whose path hashes to a different node_id.
@@ -292,19 +299,20 @@ public:
     return _ctr_remote_filtered_out.load();
   }
 
-  // Snapshot: walk the local state tree under `path_prefix` and
-  // return a vector of entries suitable for initial-sync.
-  struct snapshot_entry {
-    std::string path;
-    std::string string_value;
-    std::string comment;
-    bool hidden = false;
-    bool read_only = false;
-    std::string type_name;
-    std::string origin_node_id;
-    std::uint64_t sequence = 0;
-  };
+  // Snapshot: walk the local state tree under `path_prefix` and return a vector of entries suitable
+  // for initial-sync. Aliased to the transport's entry type so the shard producer and the transport
+  // wire share ONE definition (including the PR4 data() payload), with no field-by-field
+  // conversion.
+  using snapshot_entry = state_transport::snapshot_entry;
   std::vector<snapshot_entry> snapshot(const std::string &path_prefix = std::string()) const;
+
+  // Apply one snapshot entry to the local tree as an initial-sync bootstrap: reconstructs value,
+  // metadata (comment/hidden/readOnly) and data() (inline or hydrated from a blob_ref). Applies
+  // directly through the sync adapter (echo-suppressed), BYPASSING ingest_remote's seen-set /
+  // conflict gate — a snapshot is a bulk initial load keyed per-path, and its entries carry no
+  // meaningful (origin, sequence) to dedup on. Used by the join path; safe to call before any live
+  // traffic for the path has been ingested.
+  void ingest_snapshot_entry(const snapshot_entry &e);
 
   // -------- Phase 8 slice 2: cluster-agnostic message routing --------
   //

@@ -122,11 +122,18 @@ A fire-once handler is *submitted* (`submit_action`,
 plus host intrinsics, its writes chrooted to the action's mount prefix (§7), under
 per-activation caps ([`ariadne.cpp:1382`](../src/cvc/ariadne/ariadne.cpp)):
 
-| bound | constant | value |
-|-------|----------|-------|
+| bound | source | value |
+|-------|--------|-------|
 | step cap | `kActionMaxSteps` | `5000` |
 | wall-time cap | `kActionMaxSeconds` | `0.1 s` |
-| write budget | `kActionMaxBytes` | `256 KiB` |
+| memory budget | tree setting `ariadne.limits.action_max_memory` | `4 MiB` by default; `0` = no limit |
+
+The memory budget is read on every submission. It covers the action's state-tree writes and its
+measured share of the values it holds (developer guide §7), and it bounds each native call's
+allocations: state_exec's per-step allocation limit takes what is left of `max_memory`
+(developer guide §11, "Allocation limit"). A finished action's process is reaped from the app
+scheduler when the drain sweeps it, and what it left in reference cycles (a function it defined,
+say) is freed by the cycle collector.
 
 A quick action completes within that drain. An action that `await`s, `sleep`s, or
 `msg-recv`s **parks** and resumes on a later frame — this is what makes the async arc
@@ -134,7 +141,7 @@ A quick action completes within that drain. An action that `await`s, `sleep`s, o
 
 ### 2.3 Resident handlers
 
-`on_tick` / `on_key` / `on_pointer` each become **one** long-lived, owner-tagged
+`on_tick` / `on_key` / `on_pointer` / `on_signal` each become **one** long-lived, owner-tagged
 process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) body))`
 (`ensure_resident`, [`ariadne.cpp:1458`](../src/cvc/ariadne/ariadne.cpp)):
 
@@ -142,6 +149,9 @@ process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) bo
   backlog).
 - **key / pointer** are woken per event; the event is delivered as a dict you read with
   `(get-attr event "key")`, `(get-attr event "x")`, etc.
+- **signal** is woken per signal the host routes through `Runtime::post_signal`, with
+  `event` = `{kind: "signal", signal: "SIGINT", source: "terminal"}`. Signal names are
+  POSIX: a terminal's Ctrl-C is `SIGINT`, Ctrl-\ is `SIGQUIT`.
 
 Residents have no total budget (they run for the life of the document), but each *step*
 is wall-capped at `kResidentStepSeconds = 0.05`
@@ -197,7 +207,7 @@ these to decide widget substitution. `owns_loop` distinguishes a **host-pumped**
 backend (the app runs the loop and calls in per frame) from a **framework-owned** one
 (the backend runs its own loop).
 
-Two backends ship:
+Three backends ship:
 
 - **`cvc::gl::ImGuiBackend`**
   ([`inc/cvc/gl/ariadne/ImGuiBackend.h`](../inc/cvc/gl/ariadne/ImGuiBackend.h)) — ImGui
@@ -206,12 +216,48 @@ Two backends ship:
   Its `install()` sets the VTK view's overlay draw callback to call `Runtime::render()`
   — that single line is the entire coupling between Ariadne and VTK's render pass, and
   it lives in the backend, not the core.
-- **FTXUI / terminal backend**
+- **`cvc::ariadne::FtxuiBackend`**
   ([`inc/cvc/ariadne/ftxui_backend.h`](../inc/cvc/ariadne/ftxui_backend.h)) — the
-  `owns_loop = true` counterpart that draws the same tree in a terminal. Present as the
-  secondary backend.
+  `owns_loop = true` counterpart that draws the same tree in a terminal, through FTXUI
+  (optional: without FTXUI it is an inert stub and `available()` is false). It is
+  immediate-mode over FTXUI's DOM, like ImGui: every walk rebuilds the Element tree, each
+  leaf records its on-screen box, and the backend keeps only the interaction state (focus,
+  pressed item, open menu or combo, in-progress text and slider edits, window placement).
+  So the whole tree is interactive:
+  - **keyboard** — Tab / Shift-Tab (or Up / Down) move focus; Enter / Space activate;
+    Left / Right step a slider or cycle a combo; text fields edit in place; Esc reverts an
+    edit or closes a popup; F10 opens the menu bar.
+  - **mouse** — click to focus or activate, drag a slider, drag a window by its title
+    bar, click `[x]` to close it, click a menu title to open it.
+  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
+    `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4).
+  - **graphics** — `draw_image` paints a raster published with `set_image` as half-block
+    cells (two pixels per cell, 24-bit colour; a luminance ramp on a colourless terminal).
 
-Because the core is backend-neutral, the same document renders through either backend;
+  Commit edges match the ImGui backend: discrete widgets commit on the edit, a
+  mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
+  commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
+  size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
+  persisted under one backend holds under the other. Grid seams drag: a row split's
+  panes and a `resizable` table's columns resize with the mouse, and a row split
+  persists its pane sizes to `tree.<id>.tracks` (§11.4). What a terminal cannot do it
+  degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
+  warning). `render_to_string` + `feed(TermEvent)` drive it headless (that is how
+  `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
+- **`cvc::ariadne::TvisionBackend`**
+  ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
+  native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
+  and draws the chrome itself: movable, resizable, overlapping windows with close and
+  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10, F6, Alt-X,
+  Ctrl-F5). The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
+  `FtxuiBackend` in hosted mode (`Options::hosted`), which lays each window body out
+  offscreen for tvision to draw and takes that window's input in its own cells. So both
+  terminal backends share one widget engine, focus and commit rule, and the hosted mode
+  is open to any host with its own chrome. Built behind `CVC_ARIADNE_TVISION` (the flag
+  the roadmap keeps for tvision's Borland-derived licensing) when tvision, ncursesw and
+  FTXUI are found; `ari run --backend tvision` runs it.
+
+Because the core is backend-neutral, the same document renders through any backend;
 capability gaps (e.g. no `color`) drive graceful widget substitution rather than errors.
 
 ---
@@ -225,7 +271,7 @@ An `.ari` file is a YAML document. `load_file` / `load_string` parse it via `loa
 - a `Widget root` (a Group) — the retained tree;
 - a parsed `Scene`, `Meta`, `customs`, and `channels` + `lint` config;
 - and **verbatim-captured** script strings: `init_script`, `on_tick_script`,
-  `on_key_script`, `on_pointer_script`.
+  `on_key_script`, `on_pointer_script`, `on_signal_script`.
 
 **The loader is state-free.** It captures structure and script *text*; it never touches
 `cvc::state` and never runs the DSL. The host runs the scripts (§9). This separation is
@@ -238,7 +284,7 @@ The built-in top-level keys (`is_builtin_block`,
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs
-init  on_tick  on_key  on_pointer  units  import  channels  lint
+init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint
 ```
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -266,30 +312,206 @@ meta:
 
 ### 5.3 `init:` and the resident handlers
 
-`init`, `on_tick`, `on_key`, and `on_pointer` are scalar `state_exec` strings the loader
-only *captures*. The host wires them:
+`init`, `on_tick`, `on_key`, `on_pointer`, and `on_signal` are scalar `state_exec` strings
+the loader only *captures*. The host wires them:
 
 - **`init_script`** runs **once** at load time, at the document prefix, via `run_init`.
   Because it runs first, an `init:` seed such as `(state-set "demo.n" 3)` wins over a
   widget's `def:` default for the same key.
 - **`on_tick` / `on_key` / `on_pointer`** become the resident processes of §2.3, fed
   events through `Runtime::post_input`.
+- **`on_signal`** becomes the signal resident (§2.3), fed through `Runtime::post_signal`.
+  Declaring it **takes the signal over**, like a POSIX handler: `post_signal` returns true
+  and the host skips the default action, so the program decides what an interrupt means.
+  With no `on_signal`, Ctrl-C closes the app. The terminal loop also force-quits on three
+  Ctrl-Cs within two seconds, so a handler that never quits cannot trap the user. Signals
+  sent to the process reach it too (`source: "os"`) when the host collects them —
+  `FtxuiBackend::RunOptions` has the hooks, and `ari` wires SIGTERM, SIGHUP, SIGINT,
+  SIGQUIT and SIGUSR1/2 to them.
 
-A small, complete document (mirroring `nav_compute.ari`):
+  ```yaml
+  on_signal: |
+    (if (= (state-get "app.quit_armed") "1")
+        (quit)                                   # a host verb: `ari` registers it
+        (begin (state-set "app.quit_armed" "1")
+               (state-set "app.status" "Ctrl-C again to quit")))
+  ```
+
+A small, complete document (mirroring `nav_compute.ari`). A widget is a map whose
+**first key is its type** and whose value is its label (`slider_int: "N"`), with the
+widget's fields as sibling keys; copy the shipped components (§6.5) for the exact keys
+each type takes:
 
 ```yaml
-meta: { name: hello, version: 0.1.0 }
+meta: { name: hello, version: 0.1.0, min_libcvc: 3.4.0 }
 menubar:
-  - { label: File, items: [ { label: Quit, on: "(quit)" } ] }
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit                          # a bare name: a host Runtime::on handler
 windows:
-  - title: Controls
+  - window: Controls
+    id: controls
     children:
-      - { slider: { label: "N", bind: "demo.n", min: 1, max: 100 } }
-      - { text: { text: "(str \"N = \" (state-get \"demo.n\"))" } }   # computed, read lane
-      - { button: { label: "Bump", on: "(state-set \"demo.n\" (+ (state-get \"demo.n\") 1))" } }
-init: "(state-set \"demo.n\" 10)"
-on_tick: "(state-set \"demo.frames\" (+ (state-get \"demo.frames\") 1))"
+      - slider_int: "N"
+        bind: demo.n
+        lo: 1
+        hi: 100
+      - text: "N x 2"                     # renders "N x 2: <value>"
+        bind: (* 2 (int (state-get "demo.n")))   # a computed bind, read lane
+      - button: Bump
+        on: (state-set "demo.n" (+ (int (state-get "demo.n")) 1))   # a program, action lane
+init: (begin (state-set "demo.n" 10) (state-set "demo.frames" 0))
+on_tick: (state-set "demo.frames" (+ (int (state-get "demo.frames")) 1))
 ```
+
+### 5.4 `scene:` sources and custom node types
+
+A `scene:` node's `type:` is a built-in (`geometry`, `volume`, `volren`, `volslice`,
+`group`) or a custom type a host registered with `register_scene_node_type`
+([`scene_realize.h`](../inc/cvc/gl/ariadne/scene_realize.h)). cvcGL bundles its custom
+types behind one call, `register_cvcgl_extensions`
+([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
+`AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`, and — on a
+libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
+does not know land in the node's `props`, which a custom realizer reads; most realizers
+**seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
+`mesh_lab` / `fe_lab`), so a document's prop is the starting value a bound component then
+edits live. A document that cannot run without a custom type says so
+in `customs:` (`- node: mesh_lab` with `required: true`), and a host that checks
+(`verify_scene_customs`, as `ariadne_hello` does) refuses it up front on a build that
+lacks the type.
+
+**Primitives.** Besides `source: { plane: { size } }` and `source: { heightfield: {...} }`,
+a geometry node can draw `source: { box: { size: [x, y, z] } }` (or `{ box: <edge> }`), a
+box centred on the origin, and `source: { sphere: { radius } }` (or `{ sphere: <radius> }`).
+A heightfield is the world's own `cvc::height_field`: the node draws its mesh (each cell split
+south-west to north-east), a body on it collides with the same triangles, and a custom node
+standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
+each point.
+
+**Physics.** A scene-level `physics:` block declares a rigid-body world
+(`cvc::physics::world`), and a geometry node's `body:` gives it a body there:
+
+```yaml
+scene:
+  physics:                      # all optional; physics: {} takes the defaults
+    gravity: [0, 0, -9.80665]
+    fixed_dt: 0.0083333         # a whole number of the clock's quanta (1/120 s); 0 = one quantum
+    backend: auto               # auto (Jolt when built) | jolt | null (bodies placed, never moved)
+    materials: { ice: { friction: 0.05, restitution: 0.0 } }
+  nodes:
+    - node: terrain
+      source: { heightfield: { size: 20, resolution: 41, layers: [{ kind: dome, amplitude: 1, radius: 6 }] } }
+      body: static              # the motion alone; a heightfield is always static
+    - node: crate
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [2, -1.5, 4] }
+      body:
+        motion: dynamic         # dynamic (default) | kinematic | static
+        shape: auto             # auto | box | sphere | hull | mesh | terrain
+        mass: 10                # kg; 0 = density (default 1000 kg/m^3) x volume
+        material: ice
+        velocity: [0, 0, 0]     # world m/s at the start; angular_velocity in rad/s
+        linear_damping: 0.05    # and angular_damping
+```
+
+- **Shapes.** `shape: auto` collides with what the node draws:
+  - a heightfield as terrain;
+  - a box or sphere primitive as itself;
+  - a plane as a thin slab under it;
+  - any other mesh as its convex hull (moving), or itself (static).
+
+  `box` and `sphere` on another mesh fit its bounds, and the node's scale is baked into the shape.
+- **Placement.** Each body starts at its node's realized world pose (a nested node's included).
+- **Stepping.** `tick_scene` drives `app.world_clock()` as `clock: {}` would, then steps the world
+  by the quanta due. It draws each moving body's node at the body's pose, between the last two
+  steps, wherever the node sits in the hierarchy.
+- **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
+  Draw a ground you collide with unrotated and unscaled.
+- **Reading physics.** `RealizedScene::physics` is the world, `RealizedScene::body(id)` a node's
+  body, and `RealizedScene::height_fields` the heightfield nodes' fields.
+- **Problems** (an unknown material, a body on a group, a fixed_dt between quanta) warn and never
+  throw.
+
+**Volume from a mesh.** `source: { sdf: { mesh: <uri>, dim: N, algorithm: v1 | v2 | igl } }`
+computes an N³ signed distance field (negative inside) framed to the mesh, after the
+node's `fit:`. `algorithm` picks the `cvc::sdf` implementation: `v2` (the default), `v1`,
+or `igl` (exact AABB distance signed by the fast winding number, robust to holes); `igl`
+needs a `CVC_ENABLE_LIBIGL` build and falls back to `v2` with a warning without one.
+
+**`type: mesh_lab`** ([`mesh_nodes.h`](../inc/cvc/gl/ariadne/mesh_nodes.h)) reads its
+`source:`/`fit:`/`material:` like a `geometry` node and processes the mesh with
+`cvc::mesh_ops`. Its keys live under the node's own state, `<node>.mesh_ops.*`:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset` (§5.5) | — |
+| `busy`, `status`, `stats.vertices`, `stats.faces` | published | — |
+| `smooth.method` | `cotan` (implicit) / `uniform` / `taubin` | `smooth_method` |
+| `smooth.iterations`, `smooth.lambda`, `smooth.fix_boundary` | `cvc::smooth_params` | `smooth_iterations`, `smooth_lambda`, `fix_boundary` |
+| `decimate.target_faces` | triangle target for `cvc::simplify` | `target_faces` |
+| `repair.weld`, `repair.remove_degenerate`, `repair.remove_unreferenced`, `repair.orient` | `cvc::repair_params` | `weld`, `remove_degenerate`, `remove_unreferenced`, `orient` |
+| `color.mode` | `none`, `mean`, `gaussian`, `k1`, `k2`, `geodesic` — followed live | `color_mode` |
+| `color.colormap` | `viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray` | `colormap` |
+| `geodesic.source` | source vertex for `geodesic` (clamped to #V-1) | `geodesic_source` |
+| `color.min`, `color.max` | the colour range used (2-98% percentiles for curvature) | — |
+
+`curvature` switches a non-curvature `color.mode` to `mean` (or recomputes the one shown).
+A geodesic solver is cached per mesh version, so moving the source is two
+back-substitutions.
+
+**`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`),
+tet-meshes it with the in-tree LBIE mesher (`cvc::tetrahedralize`, `CVC_ENABLE_MESHER`),
+and solves linear (P1) finite-element problems with `cvc::fem`. The node itself shows the
+field on the tet boundary surface; its child `<id>_slice` shows it on an axis-aligned cut.
+Keys under `<node>.fe.*`:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `request` | `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so) | `auto_mesh: true` seeds `mesh` |
+| `busy`, `status`, `progress` (0-100), `stats.tets`, `stats.vertices`, `field.min`, `field.max` | published | — |
+| `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
+| `mesh.isovalue` | the bounding level, in the volume's units | `isovalue` |
+| `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density) | `inside` (default `below` for an `sdf` source, else `above`) |
+| `mesh.improve`, `mesh.improve_iterations` | `cvc::improvement_method` (0-5) and its passes | `improve`, `improve_iterations` |
+| `problem` | `poisson` (-Δu = f, u = 0 on the boundary) or `heat` (hot floor) | `problem` |
+| `poisson.f` | the constant source | `poisson_f` |
+| `heat.kappa`, `heat.dt`, `heat.steps` | backward-Euler heat; κ is relative: the diffusivity used is κ·extent² | `heat_kappa`, `heat_dt`, `heat_steps` |
+| `view.colormap`, `view.show_surface`, `view.show_slice` | display | `colormap`, `show_surface`, `show_slice` |
+| `view.slice_axis`, `view.slice_offset` | 0/1/2 and -1..1 across the mesh bounds | `slice_axis`, `slice_offset` |
+| `view.surface_opacity` | the boundary's opacity while a slice shows | `surface_opacity` |
+
+The heat problem holds the boundary vertices in the lowest 5% of the height at 1 and
+insulates the rest; the body starts at 0. `auto_solve: true` solves after every mesh,
+unless a request written during the mesh job is already waiting: that request runs instead
+(a waiting re-mesh auto-solves in its turn).
+Until the first mesh the node shows the volume's bounds as lines.
+
+Both node types run their kernels on one `cvc::async_lane` per node — off the render
+thread, or deferred onto it in a single-threaded wasm build — and apply results in their
+per-frame tick. A job captures only its own hand-off struct, never the node's runtime
+(which owns the lane), and teardown cancels it; tearing a scene down still waits for a
+running tet-mesh or Poisson solve to finish.
+
+### 5.5 Commands as a request key
+
+A component cannot call a C++ object, but it can write a key the object reads. A
+long-running command is therefore a **request key** the node owns: the button's `on:`
+program writes the operation's name, and the node's tick consumes it (writes `""` back),
+runs it, and publishes `busy` and `status`:
+
+```yaml
+- button: Smooth
+  on: (state-set "graphics.root.children.mesh.mesh_ops.request" "smooth")
+  disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+```
+
+A request written while a job runs waits in the key until the job finishes (the latest
+write wins), so a click is never lost and two jobs never overlap. Parameters stay
+ordinary live keys the job copies when it starts. The FTXUI backend draws such a panel
+read-only: its buttons do not fire yet
+([`ftxui_backend.cpp`](../src/cvc/ariadne/ftxui_backend.cpp)), and it has no scene.
 
 ---
 
@@ -354,6 +576,27 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
 
 The `canonical` field is the identity used for cycle-guarding and for resolving
 relative bases in nested composition.
+
+### 6.5 The shipped component library
+
+`src/cvc/ariadne/components/*.ari` (installed to `<prefix>/share/libcvc/ariadne/components`
+and embedded in the wasm demos) are reusable windows a document imports by `cvc://` and
+includes. Each binds state keys a C++ object owns, so it needs no host code;
+[`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) catalogs them:
+
+| component | drives |
+|---|---|
+| `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, the main camera |
+| `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image |
+| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node named `bunny_volume` |
+| `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
+| `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
+| `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+
+Components that address one node use a fixed node id; copy the file and change the id to
+drive another node. `src/cvcGL/examples/mesh_lab.ari` uses the last two. Run it from the
+repository root, where both paths resolve:
+`ariadne_hello src/cvcGL/examples/mesh_lab.ari --component-path src/cvc/ariadne`.
 
 ---
 
@@ -492,7 +735,80 @@ if (lr.has_channels_block)
 //   view.render()  (fires rt.render() via the overlay callback)
 ```
 
-### 9.2 From Python (a full app via `AriRuntime`)
+### 9.2 In a terminal (`ari`, `FtxuiBackend`)
+
+`ari` ([`src/ari/main.cpp`](../src/ari/main.cpp)) runs a document in
+the terminal with no GL, VTK, or ImGui:
+
+```
+ari run      doc.ari [--backend ftxui|tvision] [--prefix P] [--fps N] [--no-mouse] [--component-path DIR]...
+ari snapshot doc.ari [--width W] [--height H] [--frames N] [--ansi]   # print a frame
+ari check    doc.ari                                                  # load + warnings
+```
+
+`ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
+[`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
+like `cvc-cli`. It is a thin host over `AppRuntime` with no `SceneAdapter`; it routes
+`on: quit` and a `(quit)` verb to `request_close()`, and an OS signal the document does not
+handle ends it with exit status 128 + the signal number. Embedding the same thing:
+
+```cpp
+cvc::ariadne::FtxuiBackend backend;          // outlives the AppRuntime
+cvc::ariadne::AppRuntime rt(app, prefix);    // no SceneAdapter: a scene: is dropped
+rt.set_backend(backend);
+rt.on("quit", [&] { rt.request_close(); });
+rt.load(path);
+backend.run(rt);  // owns the terminal; drains every iteration; returns on quit / Ctrl-C
+```
+
+To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
+FTXUI has installed its own), restore them in `on_stop`, and return pending signal names
+from `take_signal`; [`src/ari/main.cpp`](../src/ari/main.cpp) does exactly this with
+`sigaction`. The handlers are process-wide, which is why they belong to the host and not to
+libcvc.
+
+`run()` forwards keys and pointer events the UI did not use to the document's
+`on_key` / `on_pointer`, so document-level input works here today.
+[`terminal_tour.ari`](../src/cvc/ariadne/examples/terminal_tour.ari) exercises every
+widget kind the backend draws.
+
+**In the browser.** An Emscripten build of libcvc with `ftxui` and `yaml-cpp` in its wasm
+deps prefix (`cvcpkg install ftxui yaml-cpp --platform wasm --arch wasm32 --link static`)
+builds `ari` as `bin/ari.js` + `ari.wasm` + `ari.html`. The page puts an xterm.js terminal
+on the module's stdin/stdout, which is all FTXUI's Emscripten screen uses. Serve `bin/`
+over plain http and open `ari.html`; it is single-threaded and needs no COOP/COEP. A page
+has no argv, so the build bakes in one document, `CVC_ARI_WASM_DOC` (default
+`terminal_tour.ari`), with the component library at `/components`. The same `ari.js`
+runs headless under node: `node ari.js snapshot /terminal_tour.ari`. CI's `ari-wasm`
+job does exactly that.
+
+What differs from a real terminal:
+
+- The loop yields with `emscripten_sleep`, so the build links `-sASYNCIFY`. A hidden
+  tab throttles timers, which slows redraws and `on_tick`.
+- Ctrl-C reaches the document's `on_signal:` as SIGINT, as in a terminal. Only keys
+  the browser lets a page see get through: Ctrl-W / Ctrl-T / Ctrl-N belong to the
+  browser. Ctrl-Z is ignored, because a page has no job control.
+- Quitting (`on: quit`, `(quit)`, or Ctrl-C with no handler) ends the program, and
+  the page offers to run it again.
+- Startup pauses for about half a second. FTXUI waits up to 500 ms for the terminal
+  to answer its capability queries, and xterm.js can only answer once the loop yields.
+
+**With a 3D scene (cvcGL).** The terminal backends stay GL-free; cvcGL extends them.
+[`cvc::gl::ariadne::TerminalScene`](../inc/cvc/gl/ariadne/TerminalScene.h) is a `SceneAdapter`
+that realizes the document's `scene:` into an offscreen `SceneRenderer`, renders it every
+frame at the screen's half-block grid (two pixels per cell, supersampled), and hands the
+frame to the backend as its background (`FtxuiBackend::set_background`), so widgets, menus
+and windows draw over the scene the way ImGui draws over the GL canvas. Passed as
+`RunOptions::background_input`, its `handle_input` turns background drags into orbit,
+middle-drags into pan and the wheel into zoom. The host is
+[`ariadne_terminal`](../src/cvcGL/examples/ariadne_terminal.cpp), the terminal sibling of
+`ariadne_hello` (`ariadne_terminal doc.ari [--backend tvision]`, or `--snapshot --ansi` for
+one frame as text); [`terminal_scene.ari`](../src/cvcGL/examples/terminal_scene.ari) is a
+small example. No display is needed: VTK picks X, EGL or OSMesa at run time
+(`VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow` forces EGL).
+
+### 9.3 From Python (a full app via `AriRuntime`)
 
 `AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the
 above into one object, exposed through the `pycvc_gl` bindings. Python never sees SDL or
@@ -520,7 +836,7 @@ provider onto the app-wide scheduler, so the verbs are reachable from the docume
 action lane. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
-### 9.3 From Python (DSL only, via `pycvc.Exec`)
+### 9.4 From Python (DSL only, via `pycvc.Exec`)
 
 If you only need to run `state_exec` programs against an app's tree (no widgets, no
 scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_exec.h))
@@ -630,6 +946,13 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   translates VTK interactor events into those calls, so stock-loop key/pointer residents
   do not fire until a host feeds them
   ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)).
+- **OS signals reach `on_signal` only where a host routes them.** `ari` does (see §9.2);
+  the ImGui host and `AriRuntime` route none yet, and an embedding host that skips the
+  `RunOptions` hooks gets FTXUI's default for SIGTERM (restore the terminal, exit).
+- **The libcvc terminal backends render no scene by themselves.** `ari` drops a `scene:`
+  with a warning; cvcGL's `TerminalScene` (§9.2) is what draws one, so a scene needs a cvcGL
+  build and a GL that works offscreen (X, EGL or OSMesa). Frames are half-blocks only: Sixel /
+  Kitty graphics are not used yet.
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
   loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and

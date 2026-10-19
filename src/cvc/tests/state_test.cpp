@@ -25,6 +25,7 @@
 #include <cvc/volume/voxels.h>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -331,6 +332,34 @@ TEST_F(StateTestFixture, ChildrenWithRegex) {
 // ===========================
 // State Metadata Tests
 // ===========================
+
+// Properties: named metadata strings beside the comment, such as a recommended range.
+TEST_F(StateTestFixture, PropertiesSetGetRemoveAndReset) {
+  cvc::state &k = cvc::state::instance(ctx)("test.props.max_steer");
+  std::vector<std::string> fired;
+  k.propertyChanged.connect([&](const std::string &key) { fired.push_back(key); });
+  k.property("min", "0.05").property("max", "0.8").property("unit", "rad");
+  EXPECT_EQ(k.property("min"), "0.05");
+  EXPECT_EQ(k.property("max"), "0.8");
+  EXPECT_TRUE(k.has_property("unit"));
+  EXPECT_FALSE(k.has_property("step"));
+  EXPECT_EQ(k.property("step"), "");
+  EXPECT_EQ(k.property_keys(), (std::vector<std::string>{"max", "min", "unit"}));
+  EXPECT_EQ(fired, (std::vector<std::string>{"min", "max", "unit"}));
+  // The same value again changes nothing; "" removes the key.
+  k.property("min", "0.05");
+  EXPECT_EQ(fired.size(), 3u);
+  k.property("unit", "");
+  EXPECT_FALSE(k.has_property("unit"));
+  EXPECT_EQ(fired.back(), "unit");
+  // Metadata does not set the node.
+  EXPECT_FALSE(k.initialized());
+  EXPECT_EQ(k.value(), "");
+  // reset() clears them.
+  k.reset();
+  EXPECT_TRUE(k.property_keys().empty());
+  cvc::state::instance(ctx)("test").reset();
+}
 
 TEST_F(StateTestFixture, CommentSetAndGet) {
   std::string comment = "This is a test comment";
@@ -3905,6 +3934,12 @@ TEST_F(StateTestFixture, ValueWithCallback) {
   cvc::state::instance(ctx)("test.future").reset();
 }
 
+// A wait that is expected to SUCCEED gets a generous timeout. It returns as soon as the write
+// lands, so the margin costs nothing on a quiet machine, while a loaded CI runner cannot turn a
+// pass into a timeout: a writer thread that sleeps 50 ms took over 200 ms to write on a
+// windows-2022 runner. Waits expected to time out stay short; nothing writes their keys.
+static const boost::chrono::milliseconds kSucceedWait(5000);
+
 TEST_F(StateTestFixture, WaitForValue) {
   // Test blocking wait for value
 
@@ -3940,8 +3975,7 @@ TEST_F(StateTestFixture, WaitForValueWithTimeout) {
     cvc::state::instance(ctx)("test.future.timeout2").value(999);
   });
 
-  int val = cvc::state::instance(ctx)("test.future.timeout2")
-                .wait_for_value<int>(boost::chrono::milliseconds(200));
+  int val = cvc::state::instance(ctx)("test.future.timeout2").wait_for_value<int>(kSucceedWait);
   EXPECT_EQ(val, 999);
 
   writer.join();
@@ -3949,15 +3983,20 @@ TEST_F(StateTestFixture, WaitForValueWithTimeout) {
 }
 
 TEST_F(StateTestFixture, ValueFutureGet) {
-  // Test state_future blocking get
-  boost::thread writer([this]() {
-    boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  // Test state_future blocking get. A state_future sees only writes made after it connects, so
+  // it is created first, and the writer waits for a go signal instead of a sleep. With a sleep, a
+  // future created late on a slow runner missed the write and get() blocked forever.
+  auto future = cvc::state::instance(ctx)("test.future.get").value_future<std::string>();
+
+  std::promise<void> go;
+  std::shared_future<void> started = go.get_future().share();
+  boost::thread writer([this, started]() {
+    started.wait();
     cvc::state::instance(ctx)("test.future.get").value("future_value");
   });
 
-  auto future = cvc::state::instance(ctx)("test.future.get").value_future<std::string>();
-
   EXPECT_FALSE(future.is_ready());
+  go.set_value();
 
   std::string val = future.get();
 
@@ -4006,7 +4045,7 @@ TEST_F(StateTestFixture, ValueFutureGetFor) {
   });
 
   // Should succeed with longer timeout
-  double val = future.get_for(boost::chrono::milliseconds(200));
+  double val = future.get_for(kSucceedWait);
   EXPECT_DOUBLE_EQ(val, 3.14159);
 
   writer.join();
@@ -4074,7 +4113,7 @@ TEST_F(StateTestFixture, WaitForDataWithTimeout) {
   });
 
   std::string val = cvc::state::instance(ctx)("test.future.datatimeout2")
-                        .wait_for_data<std::string>(boost::chrono::milliseconds(200));
+                        .wait_for_data<std::string>(kSucceedWait);
   EXPECT_EQ(val, "success");
 
   writer.join();
@@ -4086,12 +4125,16 @@ TEST_F(StateTestFixture, MultipleFuturesOnSameState) {
   const int num_futures = 5;
   std::vector<boost::thread> threads;
   std::atomic<int> success_count(0);
+  // Every thread connects its future before the write: a state_future sees only later writes,
+  // and a fixed sleep let a thread that started late miss the value and time out.
+  boost::barrier connected(num_futures + 1);
 
   for (int i = 0; i < num_futures; ++i) {
-    threads.emplace_back([&success_count, this]() {
+    threads.emplace_back([&success_count, &connected, this]() {
       try {
         auto future = cvc::state::instance(ctx)("test.future.multiple").value_future<int>();
-        int val = future.get_for(boost::chrono::milliseconds(500));
+        connected.wait();
+        int val = future.get_for(kSucceedWait);
         if (val == 888) {
           success_count++;
         }
@@ -4101,8 +4144,7 @@ TEST_F(StateTestFixture, MultipleFuturesOnSameState) {
     });
   }
 
-  // Give threads time to set up futures
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  connected.wait(); // all futures exist
 
   // Set value - all futures should be notified
   cvc::state::instance(ctx)("test.future.multiple").value(888);
@@ -4125,8 +4167,7 @@ TEST_F(StateTestFixture, FutureProducerConsumerPattern) {
   boost::thread consumer([this, &consumed, num_items]() {
     for (int i = 0; i < num_items; ++i) {
       std::string key = "test.future.queue.item" + boost::lexical_cast<std::string>(i);
-      int val =
-          cvc::state::instance(ctx)(key).wait_for_value<int>(boost::chrono::milliseconds(1000));
+      int val = cvc::state::instance(ctx)(key).wait_for_value<int>(kSucceedWait);
       EXPECT_EQ(val, i * 10);
       consumed++;
     }

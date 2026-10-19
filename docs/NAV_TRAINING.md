@@ -18,6 +18,7 @@ deploys on and dropped straight into the swarm.
 - [Quick start](#quick-start)
 - [What gets trained](#what-gets-trained)
 - [The rollout switch: surrogate vs bicycle](#the-rollout-switch-surrogate-vs-bicycle)
+- [The dynamic vehicle: `dyn_bike_step` (P8a)](#the-dynamic-vehicle-dyn_bike_step-p8a)
 - [Scene source](#scene-source)
 - [CPU vs CUDA (device-resident)](#cpu-vs-cuda-device-resident)
 - [Exporting weights](#exporting-weights)
@@ -53,6 +54,35 @@ The `nav_train_demo` example (in `src/cvcGL/examples/`, built with
 `-DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON`) does exactly
 this end to end and picks the CUDA path automatically when available.
 
+**Selecting checkpoints on the physics plant.** The training loss only approximates deployment,
+so `train()` can end on the checkpoint that scores best on something closer to it:
+
+```cpp
+#include <cvc/physics/nav_eval.h>
+
+cvc::physics::plant_reach_options val;     // reach on Jolt RoboRacers in the scene
+val.seeds = {200, 201, 202, 203, 204, 205, 206, 207};  // validation seeds, not the evaluation's
+cfg.checkpoint_every = 30;
+coef_trainer tr(cfg);
+tr.train(scene, false, [&](const coef_mlp &p, int step) {
+  return cvc::physics::reach_on_plant(p, scene, cvc::physics::vehicle_desc::roboracer(), 0.035, val);
+});
+// tr.checkpoints(): {step, fitness} for step 0 (untrained) and every 30; tr.selected_step()
+```
+
+- **When it scores.** The untrained policy (step 0), every `checkpoint_every` steps and after the
+  last. `train()` ends on the best, so it never ends below where it started by that score; ties
+  keep the earlier.
+- **`reach_on_plant`** (`cvc/physics/nav_eval.h`, needs Jolt): the fraction of `agents` vehicles
+  that reach their goals in `ticks`, averaged over seeds. The scene's blocks become static boxes,
+  read at the vehicle's scale (`wheelbase` normalized units = its wheelbase). Each seed's world
+  is single-threaded and deterministic, so a score repeats exactly. Seeds run in parallel
+  (`plant_reach_options::threads`, 0 = the hardware's threads) with the same per-seed results:
+  8 seeds score in about the time of one.
+- **But it is chaotic.** Changing the scale by 4e-9 (passing `0.035f` instead of `0.035`) moves a
+  seed's reach by up to 0.1, a per-seed SD of about 0.03. A mean over k validation seeds carries
+  about 3/sqrt(k) points of that alone, so use 8 or more.
+
 ## What gets trained
 
 The policy is `coef_mlp`: a `5 → hidden → hidden → 3` SiLU MLP whose output is
@@ -72,6 +102,7 @@ for both — only the integrator differs.**
 |---|---|---|---|---|
 | `rollout_kind::surrogate` *(default)* | point-mass `sdf_rollout` (IPC wall force + goal spring + damping) | `(o, v)` | smooth, well-conditioned | the recommended default — refines the basin and **improves** reach |
 | `rollout_kind::bicycle` | the FULL deployment kinematic-bicycle integrator (`bicycle_rollout`), differentiated | `(o, θ, sp)` | correct but non-smooth (governor branches) | you want to train against the *exact* deployment dynamics |
+| `rollout_kind::dynamic` | the bicycle's controller driving the dynamic single-track vehicle (`dyn_bike_step`, below) | `(o, θ, vx)` + `(vy, r, δ, a)` | the bicycle's branches plus the tires' grip | you want the policy to learn what a real vehicle can do (P8b); CPU only |
 
 ```cpp
 train_config cfg;
@@ -93,6 +124,230 @@ wrapper — so on the city scene the bicycle *holds* the tuned basin rather than
 beating it. Both are gradient-correct (see [gradcheck](#correctness-the-gradcheck));
 prefer the surrogate unless you specifically need the deployment integrator in the
 loop.
+
+## The dynamic vehicle: `dyn_bike_step` (P8a)
+
+`inc/cvc/nav/detail/dyn_bike.h` is a differentiable dynamic single-track vehicle beside
+`bike_step` (the vehicle-physics plan's P8a; P8b adds it to the trainers as a third rollout).
+`bike_step` is now `bike_control` (the trained controller with every governor, emitting
+`(delta_cmd, a_cmd)`) followed by `bike_plant` (the kinematic integration). Its outputs are bit
+for bit what they were. `dyn_bike_step` runs the same `bike_control` into `diff::dyn_plant`:
+
+- **State:** the rear axle's `(x, y)` and heading, the body velocity `(vx, vy)` at the centre of
+  gravity and the yaw rate `r`, plus the road-wheel steering angle and the drive and brake force
+  per unit mass behind their actuators.
+- **Actuators:** first-order lags, exact for the step, with the steering's slew limited smoothly
+  (`R tanh(d / R)`).
+- **Tires:** Pacejka lateral forces `D sin(C atan(B alpha))`. Each axle's drive or brake force
+  saturates smoothly at `mu Fz`, and the cornering peak `D` is the friction ellipse's remainder,
+  longitudinal force first.
+- **Loads:** quasi-static longitudinal load transfer from the actuator's force.
+- **Longitudinal:** drive, drag, rolling resistance and grade (the grade is an input, so H2
+  trains).
+- **Low speed:** below `v_blend`, a sigmoid blends `(vy, r)` to the kinematic bicycle's.
+- **Left out on purpose:** wheel spin, suspension and lateral load transfer.
+
+Numerically:
+
+- `(vy, r)` advance by implicit Euler, solved with three Newton-like steps. Each tire is
+  linearized as its secant through its own root in lateral velocity, `-F / (w - w0)`, which is
+  positive at any slip and speed. So stiff tires are stable at nav's 0.06 s step, and a sliding
+  tire never pushes its slip past zero, even at a crawl at full lock.
+- The speed is predicted from the longitudinal forces, then corrected with the lateral forces
+  the implicit step applied. In the stiff limit those are constraint forces, which "slip times
+  stiffness" would get badly wrong.
+- The plant is written once over a scalar type. Its adjoint, `dyn_plant_vjp`, runs it on
+  forward-mode duals (doc 19's suggestion), and `dyn_bike_step_bwd` hands the commands'
+  gradients to `bike_control_bwd`. Everything is `CVC_HD`.
+
+Parameters are SI and come from the spec sheet: `cvc::nav::dyn_bike_si`, converted by length
+exponent with `dyn_bike_params_of(si, frame)`. `cvc::physics::nav_plant::dyn_bike_si_of(desc)`
+derives them from a `vehicle_desc`, so both plants read one vehicle:
+
+- mass, and a yaw inertia from the chassis box;
+- the axles relative to the centre of gravity;
+- Pacejka B and C from the tire's peak slip angle and sliding fraction;
+- the drive and brake splits, drag and rolling resistance;
+- the steering's rate.
+
+`front_stiffness` (0.85) scales the front's B. It stands in for the load sensitivity and steering
+compliance that give a road vehicle its understeer, which a single track has no other way to
+show.
+
+Gates (`nav_dyn_bike_test`; the Humvee from its `vehicle_desc`, in metres):
+
+| Gate | Result |
+|---|---|
+| Plant gradient vs central differences (double, 6 regimes from cruise to past the peak, backing up and creeping) | worst relative error 6e-6 |
+| Whole step through the controller, 6-step rollout, float (the bicycle's gradcheck) | dir_rel 6e-4 (limit 5e-2) |
+| Kinematic limit: `bike_step`'s own commands through the plant over 200 ticks, with stiff tires, no lag, mu g = 40 against the controller's 1.5, the mass at the rear axle and the drive and brakes there | within 0.011 of its path (0.07 rr; at most 0.015 over 40 sets of routes, gated at 0.2 rr). Under the controller the median agent stays within 0.0003 and ends within 0.11% as far from the goal (gated at 0.1 rr and 2%). The controller amplifies small differences along some routes, so the worst agent is reported, not gated: 0 to 11 of 32 agents part by more than 0.2 rr, depending on the routes, which differ by standard library |
+| Understeer that grows with lateral g (15 m/s, steady turns) | 0.0003 rad at 0.07 g to 0.0029 rad at 0.53 g, growing faster toward the limit |
+| Oversteer when braking in a turn (0.4 g, then 0.4 g of braking) | the path tightens 6%, 0.0176 to 0.0187 /m |
+| Steady lateral acceleration never above mu g | 0.97 mu g at mu 0.4, 0.95 mu g at mu 0.9 |
+| Stopping distance within 10% of v^2 / (2 mu g) | -4% to -6% at mu 0.5 and 0.9, from 10 and 20 m/s |
+
+The kinematic limit is exact only for the vehicle the kinematic bicycle assumes. A real body
+differs physically from `bike_step`'s `v' = a`:
+
+- it puts kinetic energy into yaw and sideways motion as it turns;
+- a steered front wheel's brake force acts along the wheel, slowing the body by about
+  `F / cos(delta)` in a turn.
+
+So the same commands drive a body braked 60% in front up to 1.7 apart over the route, open loop.
+Under the controller it ends 1.122 from the goal against 1.111.
+
+`DynBike.Golden` pins the plant's values (`tests/data/dyn_bike_golden.json`; rewrite with
+`CVC_DYN_BIKE_GOLDEN_WRITE=1`). That is the parity gate: GRL-SNAM's torch twin,
+`grl_snam.dyn_bike.dyn_plant` (CVC-Lab/GRL-SNAM#121), reproduces every case's next state and
+VJP to 1e-9, its gradient from autograd rather than duals. A double plant is double
+throughout (its lag factors and floors too), so the two can agree to rounding.
+
+**Training through it** (`rollout_kind::dynamic`, P8b):
+
+```cpp
+train_config cfg;
+cfg.rollout = rollout_kind::dynamic;
+cfg.lr = 5e-5f;
+// The trainer's scene has no metres. Its vehicle (veh_L 0.035, vmax 0.9) reads as a
+// RoboRacer at about 0.108 normalized units per metre, where vmax is 8.3 m/s.
+cfg.dyn = cvc::physics::nav_plant::dyn_bike_params_at(vehicle_desc::roboracer(), cfg.veh_L);
+```
+
+- `coef_trainer::loss_and_grad` carries the vehicle's further state `(vy, r, delta, a)` through
+  `x` / `x_out` ([n*4]; null is at rest), and `train()` keeps it across windows.
+- Without a vehicle whose wheelbase is `veh_L`, a dynamic run throws.
+- The CUDA trainer refuses it for now.
+
+Measured on the city (`nav_coef_train_test`):
+
+- the gradcheck's dir_rel is 2.3e-2, against the bicycle's 8.5e-4 and the limit of 5e-2. The
+  gradient is under half the bicycle's (5e-4 against 1.2e-3): grip limits pass less;
+- the horizon loss falls (1.4125 to 1.3988 in 60 steps at 2e-4);
+- a policy trained at 5e-5 still drives the bicycle sim_world: 71.9% reach.
+
+An lr sweep (150 steps on `city_scene(96)`; horizon loss, then the bicycle sim's reach):
+
+| lr | bicycle | dynamic |
+|---|---|---|
+| 1e-5 | 1.3986 -> 1.3963, 71.5% | 1.4632 -> 1.4628, 71.5% |
+| 5e-5 | -> 1.3925, 70.3% | -> 1.4585, 71.9% |
+| 2e-4 | -> 1.3768, 72.3% | -> 1.3504, 68.4% |
+| 1e-3 | -> 1.2240, 13.3% | -> 1.2420, 10.5% |
+
+At a given rate the dynamic rollout learns more than the bicycle. Its reach here is measured on
+the kinematic sim, so it is not the verdict. P8b's gate is on the Jolt plant: a policy trained
+on the dynamic model must beat the point-mass-trained one over 20 or more paired seeds.
+
+**The material trainer too**: `material_loss_config::integrator = material_integrator::dynamic`.
+
+- `material_loss_config::dynamic` is the vehicle; `bicycle` stays the controller's limits.
+- `integrate_dynamic_material` (`material.h`) drives the same pieces into `dyn_plant` in place of
+  the kinematic update: the force law with its material forces, pure pursuit, the governors and
+  `d_cap`. Arc length and cumulative risk follow the dynamic path.
+- Its VJP joins the plant's dual-number VJP to the bicycle's hand-written controller reverse. The
+  reverse's new controller-only mode adds `0` in the kinematic case, so the bicycle's sums are
+  unchanged.
+- `L_vel` compares the rear axle's world velocity.
+- `L_multi` runs on the dynamic vehicle too (`multi_start_penalty_dynamic`).
+
+Measured (`nav_material_bike_rollout_test`, `nav_material_train_test`):
+
+- The rollout's VJP checks against finite differences on 40 coefficients: worst 1.5e-2 short,
+  4.0e-2 without reverse. The directional check is 3e-6 at a step of 1e-3; at 2e-3 the step
+  crosses a controller branch, as the bicycle's does.
+- `L_multi` on the dynamic vehicle: worst 4.8e-4.
+- The full loss-to-weights chain: dir_rel 7.0e-4 over 64 weights, the same as on the bicycle.
+- It is thread-deterministic, and the controller drives the dynamic vehicle to its goals.
+
+**P8b's gate, on the Jolt plant** (`NavPlantConvergence.DynamicTrainedPolicyAgainstPointMassOnJolt`,
+a heavy run; `P8B_GATE_LR` and `P8B_GATE_STEPS` override its training):
+
+- **The comparison.** Two policies trained alike on the city, one on the point-mass surrogate and
+  one on the dynamic vehicle (a RoboRacer at about 0.108 per metre).
+- **The run.** Each drives Jolt RoboRacers through the same city, its blocks as 1.5 m static
+  boxes. That is 20 paired seeds of 48 agents for 400 ticks.
+- **The statistic.** The mean per-seed reach difference, with a paired-bootstrap 95% CI.
+
+| Training | Point-mass-trained reach | Dynamic-trained reach | Dynamic - point mass, 95% CI | The untrained seed |
+|---|---|---|---|---|
+| lr 5e-5, 150 steps | 50.6% | 51.0% | +0.4 [-1.8, +2.8] | 51.7% |
+| lr 2e-4, 300 steps | 35.0% | 44.0% | +9.0 [+6.7, +11.4] | 51.7% |
+
+**Read it carefully.**
+
+- **At 2e-4 the gate's wording is met.** Trained alike, the dynamic-trained policy beats the
+  point-mass-trained one on the real vehicle, outside the CI.
+- **But training that hard hurts both.** Each falls below the hand-tuned seed it refines. The
+  dynamic model makes training hurt less; it does not make the policy better than the seed.
+- **At the stable 5e-5 there is no difference.** Neither policy moves far from the seed.
+- **What is left.** The training loss (distance to the goal after a window, plus a clearance
+  margin) is not the deployment reach, which the carrot FSM shapes. The next step selects
+  checkpoints on Jolt reach (doc 31's recorded-fitness seam).
+
+**Checkpoints selected on Jolt reach** (`NavPlantConvergence.CheckpointSelectionOnJoltReach`, a
+heavy run; `P8B_SELECT_LR`, `_STEPS`, `_EVERY` and `_VAL` override it):
+
+- **The setup.** The same two trainings at lr 2e-4 for 300 steps. Each scores its untrained
+  policy and every 30th step by `reach_on_plant` on validation seeds (200 on, never the
+  evaluation's), and ends on the best (above).
+- **The evaluation.** The selected policies and the seed on the gate's 20 held-out seeds.
+
+| Validation | Point-mass: selected step, held-out reach | Dynamic: selected step, held-out reach | The seed | Dynamic - point mass, 95% CI | Dynamic - seed, 95% CI |
+|---|---|---|---|---|---|
+| 4 seeds (scale `0.035f`) | 120, 49.4% | 30, 53.1% | 51.9% | +3.8 [+0.9, +6.7] | +1.3 [-0.6, +3.3] |
+| 8 seeds (scale `0.035`) | 120, 50.1% | 60, 52.7% | 51.7% | +2.6 [+0.3, +4.7] | +1.0 [-1.2, +3.4] |
+
+The validation curves (8 seeds), from the untrained policy's 0.479:
+
+- **Point mass:** about flat to step 120 (0.500), then down steadily to 0.33.
+- **Dynamic:** up to step 60 (0.505), down to 0.39 by step 120, and back to 0.45 by step 300.
+
+**Read it carefully.**
+
+- **Selection removes the damage.** Both selected policies stay within 2.5 points of the seed.
+  Without selection, at this rate they ended at 35% and 44%.
+- **The gate's wording holds, now near the seed.** The dynamic-trained policy beats the
+  point-mass-trained one outside the CI both times, by 2.6 to 3.8 points.
+- **No trained policy beats the seed yet.** The dynamic one leads it by 1.0 to 1.3 points, but
+  the CI includes 0.
+- **Expect shrinkage.** The best of 11 noisy validation scores overstates its policy: the 8-seed
+  gains of +2.1 and +2.6 points over the untrained policy became -1.6 and +1.0 held out.
+- **The useful window is early.** The dynamic training's gains come in the first 60 steps at
+  this rate. Smaller steps with denser checkpoints, a larger validation set, or a loss closer to
+  reach are the next levers.
+
+**Lower rates, denser checkpoints.** The same test, 8 validation seeds, 31 checkpoints per
+training (`P8B_SELECT_LR`, `_STEPS`, `_EVERY`). `lr` is the peak: `train_config::cosine_lr`
+(on by default) anneals it to `lr_min` over the run, so a shorter run anneals faster. With seeds
+in parallel, each run took about 9 minutes, three at once.
+
+| Peak lr, steps, every | Point mass: step, held-out | Dynamic: step, held-out | Dynamic - point mass | Dynamic - seed (51.7%) |
+|---|---|---|---|---|
+| 2e-4, 300, 30 (above) | 120, 50.1% | 60, 52.7% | +2.6 [+0.3, +4.7] | +1.0 [-1.2, +3.4] |
+| 1e-4, 300, 10 | 210, 51.1% | 160, 53.5% | +2.4 [+0.3, +4.4] | +1.9 [-0.8, +4.4] |
+| 5e-5, 600, 20 | 440, 48.9% | 380, 50.5% | +1.7 [-1.2, +4.5] | -1.1 [-4.0, +1.6] |
+| 2e-4, 150, 5 | 70, 50.5% | 70, 51.7% | +1.1 [-0.8, +3.0] | +0.0 [-1.9, +2.1] |
+
+- **No setting beats the seed outside the CI.** The best, 1e-4 every 10 steps, leads it by
+  +1.9 [-0.8, +4.4].
+- **At the lower rates the validation curves are flat.** Every checkpoint at 1e-4 and 5e-5
+  scores between 0.445 and 0.523 against the untrained 0.479: no climb to sample more finely.
+  At those rates the training loss barely moves Jolt reach either way.
+- **Denser checkpoints raise the winner's curse.** The selected checkpoints score 3.4 to 4.4
+  points above the untrained policy on validation. The best of 31 draws with 1 to 1.5 points of
+  noise gives 2 to 3 points of that by itself. Held out, the selected policies land between
+  -2.8 and +1.9 points from the seed.
+- **The dynamic training still comes out ahead.** It beats the point-mass training in all four
+  settings (+1.1 to +2.6), outside the CI in two.
+- **So the binding limit is the signal, not the step size.** The next levers act on it: many
+  more validation seeds (32 cost about two rounds of the parallel evaluation), or Jolt reach as
+  the training signal itself rather than only the selector.
+
+Not yet:
+- a trained policy that beats the seed on Jolt outside the CI;
+- pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
+  turns on only the bicycle);
+- a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
 
 ## Scene source
 

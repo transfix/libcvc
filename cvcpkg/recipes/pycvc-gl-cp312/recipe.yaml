@@ -5,7 +5,7 @@ recipe:
   # column recipe. Same sources as pycvc-gl-cp311, built against python312 +
   # numpy-cp312 + vtk-python-cp312. New catalog name — revision starts at 1.
   name: pycvc-gl-cp312
-  upstream_version: "3.5.0"
+  upstream_version: "3.6.0"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts revisions OF
   # an upstream version, so a version bump restarts it. Supersedes the 3.2.4
   # +cvc.2 family republish (material-aware nav). The scene module source is
@@ -71,6 +71,9 @@ depends:
     - name: zstd
       platforms: [wasm, wasm-mt]
     - name: zlib
+      platforms: [wasm, wasm-mt]
+    # cvc's build-only PEGTL (the state_exec grammar engine).
+    - name: pegtl
       platforms: [wasm, wasm-mt]
   runtime:
     # pycvc-cp312 supplies the core `import pycvc` module this scene module bridges

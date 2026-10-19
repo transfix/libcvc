@@ -250,9 +250,13 @@ struct bike_veh {
   int allow_reverse;
 };
 
-CVC_HD inline void bike_step(const field &f, float ox, float oy, float thi, float spi, float gx,
-                             float gy, float al, float be, float ga, const bike_veh &v, float &ox1,
-                             float &oy1, float &thi1, float &spi1) {
+// The controller half of bike_step: the steering and acceleration it commands, (delta_cmd,
+// a_cmd), with every governor applied. The lateral-acceleration cap on the steering reads the
+// speed the kinematic plant would reach, spi + hdt * a_cmd clamped to [sp_min, vmax]; a dynamic
+// plant (dyn_bike.h) takes the same commands.
+CVC_HD inline void bike_control(const field &f, float ox, float oy, float thi, float spi, float gx,
+                                float gy, float al, float be, float ga, const bike_veh &v,
+                                float &delta_cmd, float &a_cmd) {
   const float rr = v.rr, d_hat = v.d_hat, vmax = v.vmax, L = v.L, dmax = v.delta_max;
   const float a_max = v.a_max, a_lat_max = v.a_lat_max, k_steer = v.k_steer, hdt = v.hdt;
   const float tan_dmax = tanf(dmax);
@@ -322,26 +326,47 @@ CVC_HD inline void bike_step(const field &f, float ox, float oy, float thi, floa
   a_long = fminf(fmaxf(a_long, -a_max), a_max);
   a_long = fminf(a_long, (v_lim - spi) / hdt);
   a_long = fminf(fmaxf(a_long, -a_max), a_max);
-  spi1 = fminf(fmaxf(spi + hdt * a_long, sp_min), vmax);
-  float sp2 = spi1 * spi1;
+  const float sp_pred = fminf(fmaxf(spi + hdt * a_long, sp_min), vmax);
+  float sp2 = sp_pred * sp_pred;
   if (sp2 < 1e-9f)
     sp2 = 1e-9f;
   const float d_cap = atanf(a_lat_max * L / sp2);
-  delta = fminf(fmaxf(delta, -d_cap), d_cap);
-  thi1 = thi + hdt * (spi1 / L) * tanf(delta);
-  ox1 = ox + hdt * spi1 * cosf(thi1);
-  oy1 = oy + hdt * spi1 * sinf(thi1);
+  delta_cmd = fminf(fmaxf(delta, -d_cap), d_cap);
+  a_cmd = a_long;
+}
+
+// The kinematic plant half of bike_step: the commands integrated about the rear axle.
+CVC_HD inline void bike_plant(float ox, float oy, float thi, float spi, float delta_cmd,
+                              float a_cmd, const bike_veh &v, float &ox1, float &oy1, float &thi1,
+                              float &spi1) {
+  const float sp_min = v.allow_reverse ? -0.25f * v.vmax : 0.0f;
+  spi1 = fminf(fmaxf(spi + v.hdt * a_cmd, sp_min), v.vmax);
+  thi1 = thi + v.hdt * (spi1 / v.L) * tanf(delta_cmd);
+  ox1 = ox + v.hdt * spi1 * cosf(thi1);
+  oy1 = oy + v.hdt * spi1 * sinf(thi1);
+}
+
+CVC_HD inline void bike_step(const field &f, float ox, float oy, float thi, float spi, float gx,
+                             float gy, float al, float be, float ga, const bike_veh &v, float &ox1,
+                             float &oy1, float &thi1, float &spi1) {
+  float delta_cmd, a_cmd;
+  bike_control(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, delta_cmd, a_cmd);
+  bike_plant(ox, oy, thi, spi, delta_cmd, a_cmd, v, ox1, oy1, thi1, spi1);
 }
 
 // Backward of bike_step: recompute the forward (capturing intermediates + which
 // branch/clamp each conditional took), then one strict reverse pass. Grad flows
 // through the branch that was TAKEN (its selection is measure-zero); a finite-
 // difference gradcheck at interior points validates it.
-CVC_HD inline void bike_step_bwd(const field &f, float ox, float oy, float thi, float spi, float gx,
+//
+// g_delta_cmd and g_a_cmd are gradients on bike_control's commands from a plant other than the
+// kinematic one (bike_control_bwd passes them with zero gradients on the kinematic outputs);
+// bike_step_bwd passes zeros, which leaves its sums bit for bit as they were.
+CVC_HD inline void bike_bwd_impl(const field &f, float ox, float oy, float thi, float spi, float gx,
                                  float gy, float al, float be, float ga, const bike_veh &v,
-                                 float go1x, float go1y, float gth1, float gsp1, float &gox,
-                                 float &goy, float &gth, float &gsp, float &gal, float &gbe,
-                                 float &gga) {
+                                 float go1x, float go1y, float gth1, float gsp1, float g_delta_cmd,
+                                 float g_a_cmd, float &gox, float &goy, float &gth, float &gsp,
+                                 float &gal, float &gbe, float &gga) {
   const float rr = v.rr, d_hat = v.d_hat, vmax = v.vmax, L = v.L, dmax = v.delta_max;
   const float a_max = v.a_max, a_lat_max = v.a_lat_max, k_steer = v.k_steer, hdt = v.hdt;
   const float tan_dmax = tanf(dmax);
@@ -454,11 +479,11 @@ CVC_HD inline void bike_step_bwd(const field &f, float ox, float oy, float thi, 
   float g_ch = 0.0f, g_sh = 0.0f, g_nx = 0.0f, g_ny = 0.0f, g_phi = 0.0f, g_d = 0.0f, g_ipc = 0.0f;
   float g_Fbar_x = 0.0f, g_Fbar_y = 0.0f;
   float g_spi1 = gsp1; // spi1 is an output: seed its grad (was dropped -> the bug)
-  float g_delta4 = 0.0f, g_delta3 = 0.0f, g_delta2 = 0.0f, g_delta0 = 0.0f;
+  float g_delta4 = g_delta_cmd, g_delta3 = 0.0f, g_delta2 = 0.0f, g_delta0 = 0.0f;
   float g_v_corner = 0.0f, g_v_lim0 = 0.0f, g_v_lim1 = 0.0f, g_v_stop = 0.0f, g_ds = 0.0f;
   float g_appr = 0.0f, g_kappa = 0.0f, g_targ = 0.0f, g_Lde = 0.0f, g_sin_a = 0.0f, g_ang = 0.0f;
   float g_tgx = 0.0f, g_tgy = 0.0f, g_Ld = 0.0f, g_aL0 = 0.0f, g_aL1 = 0.0f, g_aL_bh = 0.0f;
-  float g_aL_st = 0.0f, g_aL_ns = 0.0f, g_aLc = 0.0f, g_aLd = 0.0f, g_aLe = 0.0f, g_sp2 = 0.0f;
+  float g_aL_st = 0.0f, g_aL_ns = 0.0f, g_aLc = 0.0f, g_aLd = 0.0f, g_aLe = g_a_cmd, g_sp2 = 0.0f;
   float g_Fx = 0.0f, g_Fy = 0.0f, g_Fgoal_x = 0.0f, g_Fgoal_y = 0.0f, g_Frep_x = 0.0f,
         g_Frep_y = 0.0f, g_ipc_rep = 0.0f, g_v_creep = 0.0f, g_fbh = 0.0f;
 
@@ -665,6 +690,25 @@ CVC_HD inline void bike_step_bwd(const field &f, float ox, float oy, float thi, 
   goy += sdoy;
 
   gal += g_al;
+}
+
+CVC_HD inline void bike_step_bwd(const field &f, float ox, float oy, float thi, float spi, float gx,
+                                 float gy, float al, float be, float ga, const bike_veh &v,
+                                 float go1x, float go1y, float gth1, float gsp1, float &gox,
+                                 float &goy, float &gth, float &gsp, float &gal, float &gbe,
+                                 float &gga) {
+  bike_bwd_impl(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, go1x, go1y, gth1, gsp1, 0.0f, 0.0f, gox,
+                goy, gth, gsp, gal, gbe, gga);
+}
+
+// Backward of bike_control: gradients on (delta_cmd, a_cmd) -> on the state and (al, be, ga).
+CVC_HD inline void bike_control_bwd(const field &f, float ox, float oy, float thi, float spi,
+                                    float gx, float gy, float al, float be, float ga,
+                                    const bike_veh &v, float g_delta_cmd, float g_a_cmd, float &gox,
+                                    float &goy, float &gth, float &gsp, float &gal, float &gbe,
+                                    float &gga) {
+  bike_bwd_impl(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, 0.0f, 0.0f, 0.0f, 0.0f, g_delta_cmd,
+                g_a_cmd, gox, goy, gth, gsp, gal, gbe, gga);
 }
 
 } // namespace diff

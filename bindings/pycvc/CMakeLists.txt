@@ -219,6 +219,10 @@ if(NOT _pycvc_sitedir_rc EQUAL 0 OR _PYCVC_SITEDIR STREQUAL "" OR _PYCVC_SITEDIR
   endif()
 endif()
 message(STATUS "pycvc: installing python modules to \${CMAKE_INSTALL_PREFIX}/${_PYCVC_SITEDIR}")
+# The installed extension modules find libcvc, VTK and the rest of the prefix's
+# lib/ through a RUNPATH relative to their site-packages directory, so `import
+# pycvc` works without LD_LIBRARY_PATH (CMake/CvcInstallRpath.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 # libcvc.so must be on the loader path for the tests; the dual-mode cvc target's
 # output dir works both in-tree (built target) and standalone (imported target).
 set(_PYCVC_TEST_LIBPATH "$<TARGET_FILE_DIR:${_PYCVC_CVC_TARGET}>")
@@ -248,6 +252,7 @@ if(CVC_BUILD_PYCVC_CORE)
     SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
   )
+  cvc_set_install_rpath(pycvc "${_PYCVC_SITEDIR}")
   # LIBRARY covers the shared (native) module; ARCHIVE the static wasm archive.
   install(TARGETS pycvc
     LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc
@@ -266,6 +271,10 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec:test_pycvc_exec.py
              pycvc_exec_async:test_pycvc_exec_async.py
              pycvc_exec_coro:test_pycvc_exec_coro.py
+             pycvc_state_exec:test_pycvc_state_exec.py
+             pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
+             pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
+             pycvc_state_exec_data:test_pycvc_state_exec_data.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
@@ -273,7 +282,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_nav_train:test_pycvc_nav_train.py
              pycvc_integration:test_pycvc_integration.py
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
-             pycvc_lod:test_pycvc_lod.py)
+             pycvc_lod:test_pycvc_lod.py
+             pycvc_world_geometry:test_pycvc_world_geometry.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
@@ -282,6 +292,17 @@ if(CVC_BUILD_PYCVC_CORE)
     set_tests_properties(${_name} PROPERTIES ENVIRONMENT
       "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
   endforeach()
+  # The physics world, its vehicles and the navigator's plant (NAV-VEHICLE-PHYSICS-ROADMAP.md,
+  # P6). With the tests built, physics_parity_test is the C++ reference Python must match bit
+  # for bit; without it the test checks the cross-platform golden hash alone.
+  set(_pycvc_physics_env
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  if(TARGET physics_parity_test)
+    list(APPEND _pycvc_physics_env "CVC_PHYSICS_PARITY_EXE=$<TARGET_FILE:physics_parity_test>")
+  endif()
+  add_test(NAME pycvc_physics
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_physics.py)
+  set_tests_properties(pycvc_physics PROPERTIES ENVIRONMENT "${_pycvc_physics_env}")
 endif() # CVC_BUILD_PYCVC_CORE
 
 # ── pycvc_gl — direct wrap of the cvcGL scene graph (scriptable; needs VTK) ──
@@ -384,6 +405,7 @@ if(CVC_BUILD_PYCVC_GL)
   # consumer gets BOTH the bindings (pycvc_gl.SceneGraph) and the reusable scene
   # utilities (pycvc_gl.camera.ChaseCamera, pycvc_gl.vehicle.VehiclePose,
   # pycvc_gl.lab.Lab, pycvc_gl.scenes.*) from one import, with no external package.
+  cvc_set_install_rpath(pycvc_gl "${_PYCVC_SITEDIR}/pycvc_gl")
   install(TARGETS pycvc_gl
     LIBRARY DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl
     ARCHIVE DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl)
@@ -447,6 +469,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_world
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_world.py)
   set_tests_properties(pycvc_gl_world PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # The Lab draws a pycvc.height_field's own mesh; scenes.py loads bundles through
+  # the C++ loader (WORLD-GEOMETRY-ROADMAP.md, G4b). Headless.
+  add_test(NAME pycvc_gl_world_geometry
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_world_geometry.py)
+  set_tests_properties(pycvc_gl_world_geometry PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # Dear ImGui overlay + state-bound ui panels: binding presence + an offscreen
   # overlay round-trip (self-skips without offscreen GL).
   add_test(NAME pycvc_gl_imgui

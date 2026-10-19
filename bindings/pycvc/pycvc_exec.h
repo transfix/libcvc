@@ -7,12 +7,17 @@
 // registered here becomes callable from DSL source like any builtin.
 #pragma once
 
+#include <cvc/state/state_exec/data_job.h> // data_options
+#include <cvc/state/state_exec/parser.h>   // parse_options
 #include <memory>
 #include <string>
 
 namespace cvc {
 class app;
+namespace state_exec {
+class async_scheduler;
 }
+} // namespace cvc
 
 // Forward-declare PyObject so this SWIG-visible header needs no <Python.h>.
 struct _object;
@@ -85,6 +90,23 @@ public:
   // register*) concurrently on the same Exec; use a separate Exec per thread
   // (each owns its own scheduler, so they do not interfere).
   std::string run(const std::string &src);
+
+  // The parser settings this Exec's scheduler parses programs with when the app tree's
+  // state_exec.defaults.parser.* keys don't say otherwise; the same calls as
+  // async_scheduler::parser_defaults() / set_parser_defaults(). They start as
+  // async_scheduler::host_parser_defaults(), as the app's exec scheduler's do.
+  cvc::state_exec::parse_options parser_defaults() const;
+  void set_parser_defaults(const cvc::state_exec::parse_options &defaults);
+
+  // The deep-data settings, likewise: async_scheduler::data_defaults() / set_data_defaults(),
+  // starting as async_scheduler::host_data_defaults().
+  cvc::state_exec::data_options data_defaults() const;
+  void set_data_defaults(const cvc::state_exec::data_options &defaults);
+
+  // This Exec's private scheduler, the one run() drives. A program submitted to it directly
+  // (scheduler().execute(...)) runs alongside run()'s programs, and run() steps it too. In Python
+  // the returned scheduler keeps this Exec alive.
+  cvc::state_exec::async_scheduler &scheduler();
 
 private:
   struct ExecImpl;

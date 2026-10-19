@@ -185,3 +185,103 @@ It ships when pycvc is next republished — which also needs the usual
 
 CUDA parity is measured on one device (sm_86) and is **not** a CI gate: CI has
 no GPU, so `CudaMatchesCpuWithEveryRefinement` skips there.
+
+## Routes a vehicle can drive: `plan_vehicle_route`
+
+`inc/cvc/nav/vehicle_route.h`. `grid_nav::astar` plans for a point that turns on the spot. A
+vehicle has a turning circle, a body and a reverse gear: a Humvee needs a 6.7 m circle and is
+4.8 m long. In a street narrower than that circle it cannot follow an 8-connected path round a
+corner, and it cannot turn back the way it came. The physics plant's Humvees wedge in exactly
+those places (the vehicle-physics roadmap, P9).
+
+`plan_vehicle_route` searches over the rear axle's pose (Hybrid A*):
+
+- **The moves.** Each move is an arc of `step` at a curvature of -1, -0.5, 0, 0.5 or 1 times
+  `1 / min_radius`, forward or backing up. The default step is 1.5 cells, but at most
+  0.6 x `min_radius`. The closed set is keyed at step / 1.5 whatever the grid, so a coarse grid
+  still turns in arcs it can resolve: Austin's 7.8 m cells are larger than a Humvee.
+- **The footprint.** The footprint discs (`sim_world::plant_plan_of` gives a plant vehicle's) must
+  keep `margin` from the walls. The walls' distance comes from the grid's exact distance
+  transform, sampled between cells.
+- **The cost.** The length driven; backing up costs `reverse_cost` (2) as much, and a change of
+  direction `cusp_cost` (4 steps) more. A little is added for steering, for changing the steer,
+  and for coming nearer a wall than `comfort`.
+- **The heuristic.** The free-space distance to the goal, weighted by `heuristic_weight` (1.5): the
+  route is at most that many times dearer than the cheapest, for far fewer expansions.
+
+A dead end, or a corner too tight to take forward, comes back as a multi-point turn: the poses
+between cusps are marked `reverse`. A vehicle that starts wedged, already inside its margin or
+touching a wall, may stay as close as it is for its first few moves, so the route can lead it
+out. A goal it cannot reach is reported, and the route ends at the nearest pose it found.
+
+Measured (`nav_vehicle_route_test`, the Humvee on 1 m cells):
+
+| Case | Route |
+|---|---|
+| Open ground, goal 70 m ahead | Straight, 70 m |
+| An 8 m dead end, facing its end, goal behind | Backs out (42 m, all backing up); nav's bicycle turns round in the street (45.4 m, 1.2 m of it a backing nudge) |
+| A right angle between 9 m streets | Forward, 106.5 m, 93 expansions |
+| Wedged, the nose 0.4 m into the end wall | The first move backs away; clear of the walls after it |
+| A 384 m city of 40 m blocks and 12 m streets | 648 m in 740 expansions and 8 ms (exact, heuristic x1: 636 m in 168,000 expansions and 0.63 s) |
+
+Every route turns no tighter than the vehicle can, and keeps its body clear of the walls.
+
+### Following a route: `route_follower` (P9 R2)
+
+`inc/cvc/nav/route_follower.h` drives a sim_world's agents along their routes. A route splits into
+legs at its cusps, and each leg is driven in one gear. Call `apply()` before each `step()`:
+
+- **The last forward leg** belongs to the trained drive. The agent is retargeted to a carrot
+  `lookahead` along the route, so it keeps off walls and parks at the end as it always has:
+  - The carrot is at least twice the sim's `reach_tol` ahead; nearer, the drive parks at it.
+  - It is the farthest pose within the lookahead the agent can see on the sim's map. The drive
+    heads straight for its carrot, so one behind a corner stalls it against the building.
+  - It moves on only once the agent is halfway to it, since a retarget resets the drive's
+    carrot state.
+  - Where the agent cannot see past the drive's reach (a tight corner, a wall alongside), that
+    stretch is driven geometrically, as below, at `pursuit_speed` (5 m/s).
+- **A leg that ends at a cusp** is driven geometrically: backing up, or the forward leg of a
+  multi-point turn. It uses pure pursuit about the rear axle, in the leg's gear, at
+  `manoeuvre_speed` (1.5 m/s). It slows so it stops at the cusp, then takes the next leg.
+- **A route that ends backing up** stops at its end, and the agent is retargeted there.
+
+It commands through `sim_world::override_command(i, steer, accel)`, which replaces the drive's
+command for one step:
+
+- on the kinematic arm, the bicycle is integrated with it;
+- on a plant, it becomes the plant's command.
+
+`sim_world::set_pose` places an agent on the kinematic arm. A plant owns its vehicles' poses.
+
+Measured, a Humvee facing the end of an 8 m dead end with its goal behind it outside:
+
+| | The trained drive alone | On a vehicle route |
+|---|---|---|
+| Kinematic arm (`nav_route_follower_test`) | Wedged at the end wall, 53 m from the goal after 90 s | Backs out 42 m to the goal in 29 s, never nearer a wall than 3.1 m |
+| Jolt plant (`nav_plant_test`), the plant's own footprint and 6.71 m radius | 55 m from the goal after 90 s | Backs out 48 m to the goal in 31 s |
+| Kinematic arm, to a goal round the corner (heuristic x1) | — | Backs out 22.5 m, stops at the cusp, then the drive takes it forward to the goal |
+
+### Vehicle routes in the finale (P9 R3)
+
+On a vehicle plant (`--plant humvee`), `nav_finale` replaces its A* spines with vehicle routes:
+
+- The routes use the plant's turning circle and body (`plant_limits`, `plant_plan_of`), and
+  `route_follower` drives them. The spine drawn is the vehicle's route.
+- Act 2 replans a vehicle when its target has moved off its route (8% of the scene) or its
+  route is done. A Hybrid A* for every vehicle at every replan would cost the frame.
+- A vehicle still for 4 s short of its goal is replanned from where it is.
+- `NAV_DBG=1` prints the follower's state every 20 frames.
+
+The kinematic arm keeps its A* spines and waypoint retargeting.
+
+Measured on Austin, 900 frames with 8 vehicles (`--plant`, the scene's own targets):
+
+| | Driven | Vehicles under 50 m in the last 300 frames |
+|---|---|---|
+| Kinematic arm, A* spines | 7949 m | 2 of 8 |
+| Humvee, A* spines | 1903 m | 7 of 8: wedged in corners at full lock |
+| Humvee, vehicle routes | 5387 m | 0 of 8 |
+
+The 8 routes take 220-460 ms to plan at the start, and about 4.5 s over the run.
+
+Next: cvcdbg plans its vehicles' routes the same way, once a libcvc release has them.

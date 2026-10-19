@@ -30,6 +30,9 @@
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_NAV_BUNDLE)
 #include <cvc/core/app.h>
+#include <cvc/core/clock_follower.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -54,6 +57,7 @@
 #include <cvc/nav/coef_train.h> // city_scene
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/plant_host.h>
 #ifdef __EMSCRIPTEN__
 #include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
 #include <emscripten.h>
@@ -289,6 +293,10 @@ int main(int argc, char **argv) {
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
+  // What the vehicles drive on (--plant). nav's bicycle by default here: hundreds of physics
+  // vehicles do not keep up with the clock (32 Humvees cost about 5 ms a tick on one core, 3 ms
+  // on three of Jolt's workers; nav_city_drive's 60 drive on them by default).
+  std::string plantName = "kinematic";
   bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false,
        lite = false, lod = false, noLod = false, buildingLod = false, noPip = false;
   int followInit = -1; // agent index to follow at start (-1 = free camera)
@@ -326,7 +334,9 @@ int main(int argc, char **argv) {
                                                          po::value<long>(&frames)->default_value(0),
                                                          "stop after N frames (0 = until closed)")(
       "fps", po::value<double>(&fps)->default_value(30.0),
-      "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0), "sim tick rate")(
+      "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0),
+                            "initial world speed, in navigator steps per wall second "
+                            "(speed = hz x veh.dt; sim.speed changes it live)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
       "none (interactive window) | orbit | fly | follow (chase --follow N)")(
       "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
@@ -343,7 +353,10 @@ int main(int argc, char **argv) {
       "vehicle", po::value<std::string>(&vehicle),
       "vehicle model .glb per agent (default: <bundle>/../../shared/Humvee.glb; else a flat "
       "arrow)")("follow", po::value<int>(&followInit)->default_value(-1),
-                "agent index to CHASE from start with the cinematic Track camera (-1 = free)");
+                "agent index to CHASE from start with the cinematic Track camera (-1 = free)")(
+      "plant", po::value<std::string>(&plantName)->default_value(plantName),
+      "what the vehicles drive on: kinematic (nav's bicycle), or a vehicle preset on the Jolt "
+      "physics plant at its real size and limits (humvee, roboracer; best with fewer agents)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -449,10 +462,11 @@ int main(int argc, char **argv) {
       std::printf("nav_city_swarm: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris%s\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
                   (unsigned long long)cityMesh.num_tris(),
-                  terrain.empty() ? ""
-                                  : (std::string(" (terrain ") + std::to_string(terrain.rows) +
-                                     "x" + std::to_string(terrain.cols) + ")")
-                                        .c_str());
+                  terrain.empty()
+                      ? ""
+                      : (std::string(" (terrain ") + std::to_string(terrain.field->rows()) + "x" +
+                         std::to_string(terrain.field->cols()) + ")")
+                            .c_str());
     } else {
       std::printf("nav_city_swarm: bundle '%s' incomplete; using the synthetic city\n",
                   bundle.c_str());
@@ -691,15 +705,13 @@ int main(int argc, char **argv) {
   // from altitude for free.
   std::shared_ptr<GeometryNode> fullBuildings, farBuildings;
   if (haveMesh) {
-    // Real building geometry from buildings.glb (true heights + shapes). glb bakes
-    // bases at z=0, so lift every vertex by terrain.sample() to sit them on the
-    // ground; and when we have the satellite, tint each vertex by the aerial photo
-    // at its footprint so the city reads as real Austin instead of a flat grey
-    // block model. One sample per vertex, once at load.
+    // Real building geometry from buildings.glb (true heights + shapes). The bundle
+    // already stands every building on the terrain (its base is at terrain height;
+    // measured on austin_south, cvc::world::load_city_bundle), so it is NOT lifted.
+    // When we have the satellite, tint each vertex by the aerial photo at its
+    // footprint so the city reads as real Austin instead of a flat grey block
+    // model. One sample per vertex, once at load.
     auto &pts = cityMesh.points();
-    if (!terrain.empty())
-      for (auto &p : pts)
-        p[2] += terrain.sample(p[0], p[1]);
     if (haveSat) {
       auto &cols = cityMesh.colors();
       cols.resize(pts.size());
@@ -723,8 +735,8 @@ int main(int argc, char **argv) {
 
     // Far-LOD twin: cluster the ~1M-tri mesh down to a coarse skyline for distant
     // views, re-tinted from the satellite (exact, not the clustering's averaged
-    // scalars) so it never reverts to the grey block model. cityMesh is already
-    // terrain-lifted here, so the far mesh sits on the ground too. Hidden until the
+    // scalars) so it never reverts to the grey block model. cityMesh already stands
+    // on the terrain, so the far mesh sits on the ground too. Hidden until the
     // loop raises the camera. Opt-in (--building-lod): the full mesh is GPU-cheap
     // and looks better, so the default demo keeps it.
     if (buildingLod) {
@@ -830,7 +842,7 @@ int main(int argc, char **argv) {
   std::vector<int> bwVertCell;      // per-vertex cell index (exact, set on emit)
   std::vector<unsigned char> bwRgb; // per-vertex colour scratch
   std::vector<unsigned char> cellRgb(static_cast<std::size_t>(3) * rows * cols, 0);
-  long bwLastCells = -1; // re-mesh trigger
+  long bwLastCells = -1;                                    // re-mesh trigger
   const double kBeliefWallH = std::min(40.0, 0.013 * span); // sensed-wall height, capped at 40 m
 
   // Per-cell cycling colour into cellRgb (only discovered wall cells; others untouched).
@@ -1649,8 +1661,38 @@ int main(int argc, char **argv) {
   // persistent workers instead of spawning threads per call — and, sized to leave
   // the render thread a core, stop the sim from starving it.
   world.set_thread_pool(&app.computePool());
+  // The plant (--plant). Declared before the sim thread, which is joined before the plant goes.
+  cvc::physics::plant_host plantHost(navdemo::plant_options());
+  try {
+    std::printf("nav_city_swarm: driving %s\n", plantHost.use(world, plantName).c_str());
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "nav_city_swarm: --plant: %s\n", e.what());
+    return 2;
+  }
+  // World time is the app's world clock at the suite quantum (0.01 s). The frame loop is its one
+  // driver, through a binding, so sim.speed / sim.paused / sim.mode / sim.step steer it from this
+  // window, a remote panel or a script alike; the navigator follows it, one step every
+  // veh.dt / fixed_dt quanta. The initial speed keeps the old pace: --hz navigator steps per wall
+  // second, i.e. hz * veh.dt world seconds per second (60 Hz at 0.06 s is 3.6x real time).
+  cvc::world_clock &clock = app.world_clock();
+  const std::uint64_t navQuanta = cvc::ticks_per_step(cfg.veh.dt, 0.01);
+  {
+    cvc::world_clock::config cc;
+    cc.fixed_dt = 0.01;
+    cc.scale = hz * cfg.veh.dt;
+    cc.max_steps_per_advance = 8 * static_cast<int>(navQuanta); // a stall drops past 8 steps
+    cc.cap_scales_with_rate = true;
+    clock.configure(cc);
+  }
+  cvc::world_clock_binding simKeys(app, clock);
+  const double speed0 = clock.scale(); // the initial speed: presentation rates are set against it
+  const long kSenseRepaint = 15;       // navigator steps between fog / belief-wall repaints
+  long lastSenseRepaint = -kSenseRepaint;
+  std::printf("nav_city_swarm: world speed %.2fx real time (--hz %.0f x veh.dt %.3f s); "
+              "sim.speed changes it\n",
+              clock.scale(), hz, static_cast<double>(cfg.veh.dt));
 #if CVC_NAV_DEMO_SIM_WORKER
-  auto sim = std::make_unique<cvc::nav::sim_thread>(world, hz);
+  auto sim = std::make_unique<cvc::nav::sim_thread>(world, clock);
   sim->start();
 #else
   // Non-threaded browser build: no worker available, because a wasm thread needs
@@ -1660,10 +1702,9 @@ int main(int argc, char **argv) {
   // the same call sim_thread makes. Build with -DCVC_WASM_PTHREADS=ON, and serve
   // the page cross-origin isolated, to get the worker branch above instead.
   std::vector<float> emPos(static_cast<std::size_t>(N) * 2), emHead(N);
-  bool simPausedEm = false;
   std::vector<int> emMd(N);
   std::vector<std::uint8_t> emRch(N);
-  (void)hz;
+  cvc::clock_follower navFollow = cvc::clock_follower::for_step(clock, cfg.veh.dt);
 #endif
 
   std::vector<unsigned char> rgbBuf; // agent state-restyle scratch
@@ -1679,11 +1720,11 @@ int main(int argc, char **argv) {
   cvc::gl::TouchGestures touch(view, cam);
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing);
-  bool uiPaused = false, uiStep = false, uiRestart = false, ui2D = ortho;
+  bool uiRestart = false, ui2D = ortho;
   int uiAgents = N;
   std::string uiBelief = belief;
+  std::string uiPlant = plantHost.vehicle();
   bool uiFog = fogOn, uiTrails = true, uiGoals = true, uiFlags = true;
-  double uiHz = hz;
   float uiTrailW = 1.5f;                              // live path (trail) line width
   bool uiSeparate = true;                             // inter-agent avoidance on/off (live)
   float uiSepGain = 1.5f * static_cast<float>(ts.rr); // avoidance strength (live)
@@ -1697,9 +1738,13 @@ int main(int argc, char **argv) {
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Sim")) {
-        ImGui::MenuItem("Paused", "Space", &uiPaused);
-        if (ImGui::MenuItem("Step one frame", nullptr, false, uiPaused))
-          uiStep = true;
+        // Pause and Step are the clock's controls (sim.paused, a step request), so they act
+        // on world time itself: Step runs exactly one navigator step and stays paused.
+        bool paused = clock.current_mode() == cvc::world_clock::mode::paused;
+        if (ImGui::MenuItem("Paused", "Space", &paused))
+          cvc::state::instance(app)(simKeys.key("paused")).value(paused ? 1 : 0);
+        if (ImGui::MenuItem("Step one navigator step", nullptr, false, paused))
+          simKeys.request_steps(navQuanta);
         ImGui::Separator();
         if (ImGui::MenuItem("Restart"))
           uiRestart = true;
@@ -1757,9 +1802,21 @@ int main(int argc, char **argv) {
       ImGui::SetTooltip(
           "Off = every belief plane equals the known map, so belief modes only recolour.");
     {
-      float hzf = static_cast<float>(uiHz);
-      if (ImGui::SliderFloat("sim Hz", &hzf, 10.0f, 240.0f, "%.0f"))
-        uiHz = hzf;
+      const char *plants[] = {"kinematic", "humvee", "roboracer"};
+      int pi = uiPlant == "roboracer" ? 2 : (uiPlant == "humvee" ? 1 : 0);
+      if (ImGui::Combo("plant", &pi, plants, 3))
+        uiPlant = plants[pi];
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("What the vehicles drive on: nav's kinematic bicycle, or a vehicle on "
+                          "the Jolt physics plant at its real size and limits (fewer agents keep "
+                          "up with the clock).");
+    }
+    {
+      // World seconds per wall second, written to sim.speed (the clock reads it next frame).
+      float sp = static_cast<float>(clock.scale());
+      if (ImGui::SliderFloat("world speed", &sp, 0.25f, 16.0f, "%.2fx",
+                             ImGuiSliderFlags_Logarithmic))
+        cvc::state::instance(app)(simKeys.key("speed")).value(static_cast<double>(sp));
     }
     // ---- Display (all live, no restart) -------------------------------------
     ImGui::Separator();
@@ -1827,7 +1884,7 @@ int main(int argc, char **argv) {
     ImGui::Separator();
     if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
       uiRestart = true;
-    ImGui::TextDisabled("agents / belief / fog need a restart");
+    ImGui::TextDisabled("agents / belief / fog / plant need a restart");
     ImGui::End();
 
     // ---- Draggable minimap (PiP) + target dragging -------------------------
@@ -2116,6 +2173,11 @@ int main(int argc, char **argv) {
       fogOn = uiFog;
       *worldPtr = std::move(*newWorld);
       world.set_thread_pool(&app.computePool()); // move-assign cleared it; re-inject
+      try {
+        plantHost.use(world, uiPlant); // the fresh world's agents on the chosen plant
+      } catch (const std::exception &e) {
+        std::fprintf(stderr, "nav_city_swarm: plant: %s\n", e.what());
+      }
       N = world.size();
       M = world.planes();
       assign_targets(world); // re-bin agents to the 16 targets + recolour by target
@@ -2182,20 +2244,25 @@ int main(int argc, char **argv) {
       }
       arrived = 0;
       frame = 0;
+      clock.reset(); // the fresh world starts at t = 0, and so does world time
 #if CVC_NAV_DEMO_SIM_WORKER
-      sim = std::make_unique<cvc::nav::sim_thread>(world, uiHz);
+      sim = std::make_unique<cvc::nav::sim_thread>(world, clock);
       sim->start();
-#endif
-      std::printf("nav_city_swarm: restarted (%d agents, belief=%s, fog=%s, seed=%u)\n", N,
-                  belief.c_str(), fogOn ? "on" : "off", simSeed);
-    }
-#if CVC_NAV_DEMO_SIM_WORKER
-    if (sim)
-      sim->set_paused(uiPaused && !uiStep);
 #else
-    simPausedEm = uiPaused && !uiStep; // browser build steps the world inline
+      navFollow.reset(clock.tick());
 #endif
-    uiStep = false;
+      std::printf("nav_city_swarm: restarted (%d agents, belief=%s, fog=%s, seed=%u, plant=%s)\n",
+                  N, belief.c_str(), fogOn ? "on" : "off", simSeed, plantHost.driving().c_str());
+    }
+#endif
+
+    // The one drive of world time this frame (a capture passes its fixed 1/fps). The worker
+    // follows on its own thread; a capture waits for it, so every frame shows exactly the steps
+    // its quanta hold and a rerun reproduces it.
+    simKeys.drive(dt);
+#if CVC_NAV_DEMO_SIM_WORKER
+    if (capturing && sim && !sim->wait_caught_up(10.0))
+      std::fprintf(stderr, "nav_city_swarm: the sim worker fell 10 s behind the capture\n");
 #endif
 
     // Trails: append a ring-buffer segment per agent that moved (every 3rd frame,
@@ -2228,22 +2295,35 @@ int main(int argc, char **argv) {
       trailNode->updateVertices(trailXyz);
     };
 
-    // Fleet fog coverage repaint (sense cadence, not per frame). Skipped when the
-    // ground is the satellite photo — the fog belief still shows in the minimap.
-    if (fogOn && !haveSat && groundNode && frame % 15 == 0) {
+    // Sense-cadence work runs on navigator steps, not render frames: the fog coverage
+    // repaint and the belief-wall rebuild come every kSenseRepaint steps (the old 15
+    // frames at the default pace), so a pause stops them and a capture repaints at the
+    // same world time on every run.
+#if CVC_NAV_DEMO_SIM_WORKER
+    const long navTicks = sim ? sim->ticks() : 0;
+#else
+    const long navTicks = static_cast<long>(world.tick());
+#endif
+    const bool senseRepaint =
+        navTicks < lastSenseRepaint || navTicks - lastSenseRepaint >= kSenseRepaint;
+    if (senseRepaint)
+      lastSenseRepaint = navTicks;
+
+    // Fleet fog coverage repaint. Skipped when the ground is the satellite photo — the
+    // fog belief still shows in the minimap.
+    if (fogOn && !haveSat && groundNode && senseRepaint) {
       fill_fleet_fog(fogTex.data(), world, rows, cols);
       groundNode->texture_modified();
     }
 
     // Belief-wall reveal: grow the mesh as coverage grows (sense cadence), and animate the
-    // swarm-colour cycle every few frames. Phase advances each frame (a full sweep ≈ 5 s at
-    // 60 fps); overlapped walls cycle through each seeing swarm's colour with a pulse.
+    // swarm-colour cycle every few frames. The phase follows world time (a full sweep is
+    // 5 s at the initial speed), so it pauses with the sim; overlapped walls cycle through
+    // each seeing swarm's colour with a pulse.
     if (beliefWallsOn) {
-      if (frame % 15 == 0)
+      if (senseRepaint)
         rebuild_belief_walls();
-      beliefPhase += 1.0 / 300.0;
-      if (beliefPhase >= 1.0)
-        beliefPhase -= 1.0;
+      beliefPhase = std::fmod(clock.t() / (5.0 * speed0), 1.0);
       if (beliefNode && frame % 3 == 0)
         recolor_belief_walls(beliefPhase);
     }
@@ -2324,7 +2404,8 @@ int main(int argc, char **argv) {
       }
     }
 #else
-    if (!simPausedEm)
+    // No worker: run the navigator steps that fell due on this thread.
+    for (std::uint64_t s = navFollow.take(clock); s > 0; --s)
       world.step(0);
     world.snapshot(emPos.data(), emHead.data(), nullptr, emMd.data(), emRch.data());
     {
@@ -2345,8 +2426,12 @@ int main(int argc, char **argv) {
     if (frame % 15 == 0) { // HUD status line (throttled)
       char st[200];
       std::snprintf(st, sizeof st,
-                    "%d agents · belief %s (M=%d) · learned CoefMLP · fog %s · arrivals %ld/%d", N,
-                    belief.c_str(), M, fogOn ? "on" : "off", arrived, N);
+                    "%d agents · belief %s (M=%d) · learned CoefMLP · fog %s · %s · arrivals "
+                    "%ld/%d",
+                    N, belief.c_str(), M, fogOn ? "on" : "off",
+                    plantHost.driving() == "kinematic" ? "kinematic"
+                                                       : (plantHost.driving() + " on Jolt").c_str(),
+                    arrived, N);
       status.setText(st);
     }
 

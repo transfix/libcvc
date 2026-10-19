@@ -1,0 +1,1366 @@
+# Expected parses of scripts.txt, in the grammar_dump format of
+# state_exec_grammar_dump.h. Written by state_exec_corpus_test with
+# CVC_UPDATE_GOLDENS=1; do not edit by hand.
+@@@ script bindings/pycvc/demo.ari:init
+(state-set "demo.agents" "128")
+(state-set "demo.speed" "1.0")
+(state-set "demo.wire" "false")
+@@@ script bindings/pycvc/demo.ari:windows[0].children[5].bind
+(if (> (int (state-get "demo.agents")) 256) "many" "few")
+@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[9].on
+(state-set "graphics.root.children.domain.fe.request" "mesh")
+@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[9].disabled_when
+(= (state-get "graphics.root.children.domain.fe.busy") "1")
+@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[13].visible_when
+(= (state-get "graphics.root.children.domain.fe.problem") "poisson")
+@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[14].visible_when
+(= (state-get "graphics.root.children.domain.fe.problem") "heat")
+@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[17].on
+(state-set "graphics.root.children.domain.fe.request" "solve")
+@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[17].disabled_when
+(or (= (state-get "graphics.root.children.domain.fe.busy") "1") (= (state-get "graphics.root.children.domain.fe.stats.tets") "0"))
+@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[18].on
+(state-set "graphics.root.children.domain.fe.request" "stop")
+@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[18].enabled_when
+(= (state-get "graphics.root.children.domain.fe.stoppable") "1")
+@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[10].on
+(state-set "graphics.root.children.mesh.mesh_ops.request" "smooth")
+@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[10].disabled_when
+(= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[14].on
+(state-set "graphics.root.children.mesh.mesh_ops.request" "decimate")
+@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[21].on
+(state-set "graphics.root.children.mesh.mesh_ops.request" "repair")
+@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[22].on
+(state-set "graphics.root.children.mesh.mesh_ops.request" "orient")
+@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[23].on
+(state-set "graphics.root.children.mesh.mesh_ops.request" "reset")
+@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[28].visible_when
+(= (state-get "graphics.root.children.mesh.mesh_ops.color.mode") "geodesic")
+@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[29].on
+(state-set "graphics.root.children.mesh.mesh_ops.request" "curvature")
+@@@ script src/cvc/ariadne/components/sim_transport.ari:units.sim_transport.children[3].enabled_when
+(= (state-get "sim.paused") "1")
+@@@ script src/cvcGL/examples/bunny_shadow.ari:init
+(state-set "show_bunny" "true")
+@@@ script src/cvcGL/examples/bunny_shadow.ari:windows[3].children[3].on
+(begin (state-set "lighting.key_intensity" "1.9") (state-set "lighting.key_azimuth" "-38") (state-set "lighting.key_elevation" "52") (state-set "lighting.key_cone" "34"))
+@@@ script src/cvcGL/examples/hello.ari:init
+(state-set "demo.agents" "256")
+@@@ script src/cvcGL/examples/hello.ari:windows[0].children[3].visible_when
+(> (int (state-get "demo.agents")) 256)
+@@@ script src/cvcGL/examples/hello.ari:windows[0].children[4].bind
+(if (> (int (state-get "demo.agents")) 256) "heavy" "ok")
+@@@ script src/cvcGL/examples/nav_compute.ari:init
+(begin (state-set "nav.status" "idle") (state-set "nav.result" "-"))
+@@@ script src/cvcGL/examples/nav_compute.ari:windows[0].children[3].on
+(begin (state-set "nav.status" "running") (nav-step-async) (state-set "nav.result" (msg-recv "nav.done")) (state-set "nav.status" "done"))
+@@@ script src/cvcGL/examples/nav_convoy.ari:init
+(begin (state-set "show.agents" "1") (state-set "show.grid" "1") (state-set "sim.paused" "0") (state-set "sim.speed" "1.0"))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:134
+(int 3.7)
+(int "123")
+(int #t)
+(float 5)
+(float "3.14")
+(float #t)
+(is-int 42)
+(is-int 3.14)
+(is-float 3.14)
+(is-float 42)
+(is-string "hi")
+(is-string 42)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:158
+(begin (defun fact (n) (if (<= n 1) 1 (* n (fact (- n 1))))) (fact 10))
+(begin (set result (list)) (for x (list 1 2 3 4 5) (set result (append result (list (* x x))))) result)
+(state-set "shared.counter" "0")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:190
+(set g (generator (lambda () (yield 1) (yield 2) (yield 3))))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:200
+(range 5)
+(range 2 8)
+(range 0 10 3)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:208
+(set g (range 3))
+(next g)
+(next g)
+(next g)
+(next g)
+(gen-done? g)
+(for x (range 5) (print x))
+(collect (range 5))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:231
+(set evens (generator (lambda () (for x (range 10) (if (= (% x 2) 0) (yield x) nil)))))
+(collect evens)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:241
+(set squares (generator (lambda () (for x (range 5) (yield (* x x))))))
+(collect squares)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:250
+(set taken (list))
+(for x (range 1000) (if (>= (length taken) 4) (break nil) (append taken x)))
+taken
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:261
+(set running-sum (generator (lambda () (let ((total 0)) (for x (range 1 6) (begin (set total (+ total x)) (yield total)))))))
+(collect running-sum)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:273
+(set counter (generator (lambda () (let ((n 0)) (while (< n 1000) (begin (yield n) (set n (+ n 1))))))))
+(for x counter (if (= x 5) (break x) nil))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:288
+(while t (break))
+(while t (break 42))
+(for x (list 10 20 30 40) (if (> x 25) (break x) nil))
+(set sum 0)
+(for i (list 1 2 3) (for j (list 10 20 30) (if (= j 20) (break nil) (set sum (+ sum j)))))
+sum
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:448
+(set child-pid (spawn "(begin (state-set \"child.done\" \"yes\") 42)" "child-worker"))
+(set cpid (fork))
+(self-pid)
+(self-uid)
+(ps)
+(inspect 2)
+(pause 2)
+(resume 2)
+(kill 2)
+(memory-usage)
+(memory-limit)
+(time-elapsed)
+(time-limit)
+(step-count)
+(message-count)
+(message-limit)
+(cluster-id)
+(node-id)
+(scheduler-stats)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:531
+(state-set "myapp.config.timeout" "30")
+(state-get "myapp.config.timeout")
+(state-exists "myapp.config.timeout")
+(state-children "myapp.config")
+(state-delete "myapp.old-data")
+(state-data-set "myapp.blob" some-value)
+(state-data-get "myapp.blob")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:554
+(state-expire "myapp.session.abc" 60)
+(state-expire-at "myapp.session.abc" "2026-01-01T00:00:00Z")
+(state-has-expiry "myapp.session.abc")
+(state-is-expired "myapp.session.abc")
+(state-clear-expiry "myapp.session.abc")
+(state-sweep-expired "myapp.session")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:582
+(msg-send "myapp.events.updates" "hello from process 1")
+(msg-send "myapp.events.data" "{\"key\": \"value\"}" "application/json")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:595
+(begin (set i 0) (while (< i 10) (begin (state-set (str-concat "queue.item." (str i)) (str (* i i))) (msg-send "queue.notify" (str i)) (set i (+ i 1)))) "producer-done")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:607
+(begin (set count 0) (while (< count 10) (if (state-exists (str-concat "queue.item." (str count))) (begin (set val (state-get (str-concat "queue.item." (str count)))) (state-set (str-concat "consumed." (str count)) val) (set count (+ count 1))) nil)) count)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:705
+(set msg (msg-recv "events.data"))
+(get-attr msg "payload")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:723
+(if (> (msg-pending "events.data") 0) (set msg (msg-recv "events.data")) (print "no messages yet"))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:735
+(sleep 0.5)
+(while #t (begin (if (> (msg-pending "work.queue") 0) (begin (set job (msg-recv "work.queue")) (process-job job)) (sleep 0.1))))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:756
+(begin (set results (list)) (set done nil) (while (not done) (begin (set m (msg-recv "tasks.input")) (set payload (get-attr m "payload")) (if (= payload "stop") (set done #t) (set results (append results (list payload)))))) results)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1183
+(begin (set my-pid (self-pid)) (state-set (str-concat "__migrate_request." (str my-pid)) "target-node-B") my-pid)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1308
+(string.split "a,b,c" ",")
+(string.join (list "a" "b" "c") ",")
+(string.replace "hello" "l" "r")
+(string.trim "  hello  ")
+(string.upper "hello")
+(string.lower "HELLO")
+(string.starts-with "hello" "he")
+(string.ends-with "hello" "lo")
+(string.contains "hello" "ell")
+(string.substring "hello" 1 3)
+(string.char-at "hello" 0)
+(string.length "hello")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1325
+(math.sqrt 16)
+(math.abs -5)
+(math.floor 3.7)
+(math.ceil 3.2)
+(math.round 3.5)
+(math.pow 2 10)
+(math.log 2.718)
+(math.sin 0)
+(math.cos 0)
+(math.min 3 7 1 5)
+(math.max 3 7 1 5)
+(math.clamp 15 0 10)
+(math.pi)
+(math.e)
+(math.random)
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1345
+(collections.map (lambda (x) (* x x)) (list 1 2 3))
+(collections.filter (lambda (x) (> x 2)) (list 1 2 3 4))
+(collections.reduce (lambda (a b) (+ a b)) (list 1 2 3) 0)
+(collections.zip (list 1 2) (list "a" "b"))
+(collections.flatten (list (list 1 2) (list 3 4)))
+(collections.sort (list 3 1 2))
+(collections.reverse (list 1 2 3))
+(collections.range 1 5)
+(collections.unique (list 1 2 2 3 3))
+(collections.dict-keys (dict "a" 1 "b" 2))
+(collections.dict-values (dict "a" 1 "b" 2))
+(collections.dict-merge (dict "a" 1) (dict "b" 2))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1445
+(set i 0)
+(while (< i 5) (let ((i (+ i 1))) (print i)))
+(set i 0)
+(while (< i 5) (begin (print i) (set i (+ i 1))))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1466
+(state-set "counter" (str 42))
+(set raw (state-get "counter"))
+(set n (int raw))
+(if (> n 40) "big" "small")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1478
+(set g (range 3))
+(collect g)
+(collect g)
+(defun make-range () (range 3))
+(collect (make-range))
+(collect (make-range))
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1496
+(msg-recv "work.queue")
+@@@ script docs/STATE_EXEC_DEVELOPER_GUIDE.md:1526
+(set done nil)
+(for i (range 10) (if done nil (for j (range 10) (if (= j 3) (begin (set done #t) (break nil)) nil))))
+@@@ script docs/STREAMING.md:107
+(set cam (stream-open (dict "id" "cam0" "codec" "rgba8" "w" 1280 "h" 720)))
+(get-attr cam "ok")
+(get-attr cam "token")
+(get-attr cam "seq_channel")
+(stream-info cam)
+(stream-close cam)
+@@@ script docs/STREAMING.md:162
+(gl-bind-stream "screen" (get-attr cam "token"))
+@@@ script docs/STREAMING.md:499
+(set cam (stream-open (dict "id" "cam0" "codec" "rgba8" "w" 1280 "h" 720)))
+(stream-capture-camera (get-attr cam "token") 0)
+(gl-bind-stream "screen" (get-attr cam "token"))
+@@@ script docs/roadmap/ARIADNE_CONFERENCE_ROADMAP.md:97
+(set room (room-join "conf.example.org:7000" "standup" (dict "name" "Joe")))
+(set cam (stream-open (dict "id" "self/cam" "codec" "rgba8" "w" 1280 "h" 720)))
+(stream-capture-camera (get-attr cam "token") 0)
+(room-publish room (dict "kind" "camera" "token" (get-attr cam "token")))
+(set mic (stream-open (dict "id" "self/mic" "codec" "f32" "rate" 48000 "ch" 1)))
+(stream-capture-audio (get-attr mic "token") (dict "device" 0))
+(room-publish room (dict "kind" "audio" "token" (get-attr mic "token")))
+@@@ script docs/roadmap/CVCGL-UI-DSL-ROADMAP.md:4452
+(state-set "demo.n" 256)
+(window "Controls" (slider-int "Agents" :bind "demo.n" :lo 1 :hi 512) (combo "Belief" :bind "demo.belief" :options (list "shared" "grouped" "private")) (button "Reset" :on "reset"))
+(scene (geometry-node "mesh" :source "file://blocks.off" :visible-when (= (state-get "demo.show") "1")))
+@@@ script docs/roadmap/DSL-GEOMETRY-VOLUME-ROADMAP.md:91
+(vol-read "mydata" "/path/to/brain.rawiv")
+(set dims (vol-dims "mydata"))
+(set bbox (vol-bbox "mydata"))
+(vol-normalize "mydata" "normalized")
+(vol-scale "normalized" 2.0 "scaled")
+(iso "scaled" 0.5 "surface" (dict "method" "fastcontouring"))
+(sdf "surface" "sdf-vol" (dict "dim" (list 128 128 128)))
+(tet "sdf-vol" 0.0 "tet-mesh")
+(vol-write "sdf-vol" "/path/to/output.rawiv")
+(geom-write "tet-mesh" "/path/to/output.off")
+@@@ script docs/roadmap/DSL-GEOMETRY-VOLUME-ROADMAP.md:288
+(iso "brain-vol" 128.0 "brain-surf" (dict "method" "fastcontouring" "improve" #t "compute-normals" #t))
+(sdf "brain-surf" "brain-sdf" (dict "dim" (list 256 256 256) "flip-normals" nil))
+@@@ script docs/roadmap/DSL-GEOMETRY-VOLUME-ROADMAP.md:307
+(defun process-brain (input-file output-dir) (begin (vol-read "raw" input-file) (print (str "Loaded: " (vol-dims "raw"))) (vol-normalize "raw" "norm") (vol-clip "norm" 0.1 0.9 "clipped") (iso "clipped" 0.5 "surface" (dict "method" "fastcontouring" "improve" #t "compute-normals" #t)) (print (str "Surface: " (geom-num-tris "surface") " tris")) (tet "clipped" 0.5 "tet-mesh" (dict "improve" #t)) (print (str "Tet mesh: " (geom-num-tets "tet-mesh") " tets")) (geom-write "surface" (str output-dir "/brain-surface.off")) (geom-write "tet-mesh" (str output-dir "/brain-tet.off")) (dict "tris" (geom-num-tris "surface") "tets" (geom-num-tets "tet-mesh"))))
+(process-brain "/data/brain.rawiv" "/output")
+@@@ script docs/roadmap/DSL-GEOMETRY-VOLUME-ROADMAP.md:343
+(defun process-all (file-list output-dir) (for f file-list (begin (print (str "Processing: " f)) (process-brain f output-dir))))
+@@@ script docs/roadmap/DSL-GEOMETRY-VOLUME-ROADMAP.md:353
+(defun distribute-pipeline (files) (for f files (begin (state-set (str "jobs." f ".status") "pending") (state-set (str "jobs." f ".input") f) (msg-send "work-queue" f))))
+(defun worker () (while #t (set job (msg-recv "work-queue")) (state-set (str "jobs." job ".status") "running") (process-brain (state-get (str "jobs." job ".input")) "/output") (state-set (str "jobs." job ".status") "done")))
+@@@ script docs/roadmap/STATE_BINARY_STREAMING.md:220
+(define s (stream-open |{:kind| "video_raw" :codec "rgba8" :w 1920 :h 1080 |}|))
+(stream-info s)
+(gl-bind-stream node s)
+(msg-recv "stream.evt")
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1101
+(state-set "sensors.cache.temperature" (read-sensor))
+(state-expire "sensors.cache.temperature" 60)
+(if (state-is-expired "sensors.cache.temperature") (begin (state-sweep-expired "sensors.cache") (refresh-cache)) (state-get "sensors.cache.temperature"))
+(state-expire-at "jobs.batch-42" "2025-06-15T00:00:00Z")
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1355
+(let ((pid (fork))) (if (= pid 0) (begin (state-set "results.child" (compute))) (begin (state-set "results.parent" (str "spawned child " pid)))))
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1383
+(let ((pid (fork))) (if (= pid -1) (print "fork failed: resource limit") |...|))
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1470
+(require "string")
+(split "hello world" " ")
+(stdlib.string.split "hello world" " ")
+(require "math" (quote (sqrt abs floor ceil)))
+(sqrt 144)
+(stdlib-modules)
+(stdlib-list "string")
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1709
+(require "geometry")
+(distance 0 0 3 4)
+(require "util")
+(repeatedly 5 (lambda (i) (print i)))
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1763
+(let ((mesh (state-data-get "/scene/model/geometry"))) (if (data? mesh) (begin (print (data-type mesh)) (state-data-set "/output/result" mesh))))
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1776
+(state-data-set "/scene/model/transformed" transformed-mesh)
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1781
+(data-type mesh)
+(data? mesh)
+(data? 42)
+(state-data-type "/path")
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1853
+(state-set "/scene/camera/x" 10)
+(state-set "/scene/camera/y" 20)
+(state-set "/scene/camera/z" 30)
+(state-batch (state-set "/scene/camera/x" 10) (state-set "/scene/camera/y" 20) (state-set "/scene/camera/z" 30))
+@@@ script docs/roadmap/STATE_EXEC_PORTING_PLAN.md:1876
+(state-lock "/scene/camera" (let ((x (state-get "/scene/camera/x")) (y (state-get "/scene/camera/y"))) (state-set "/scene/camera/distance" (sqrt (+ (* x x) (* y y))))))
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1093
+(+ 1 2 3)
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1099
+(* 7 6)
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1105
+(let ((x 10)) (+ x 5))
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1111
+(let ((f (lambda (x y) (+ x y)))) (f 3 4))
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1120
+(+ 100 200 300)
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1206
+(let ((square (lambda (x) (* x x)))) (square 9))
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1211
+(car (list 10 20 30))
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1216
+(if (> 5 3) 99 0)
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1221
+(let ((a 10) (b 20)) (+ a b))
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1228
+(begin 1 2 3 4 5 6 7 8 9 10)
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1238
+(let ((pi 3.14159) (r 5)) (* pi r r))
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1881
+(no children)
+@@@ script src/cvc-cli/cvc_cli_test.cpp:1891
+(+ 1 (+ 2 (+ 3 (+ 4 (+ 5 6)))))
+@@@ script src/cvc-cli/main.cpp:1554
+(no children)
+@@@ script src/cvc/ariadne/ariadne.cpp:1256
+(no image)
+@@@ script src/cvc/ariadne/ftxui_backend.cpp:89
+(empty)
+@@@ script src/cvc/tests/ariadne_loader_test.cpp:535
+(state-set "paused" "true")
+@@@ script src/cvc/tests/ariadne_loader_test.cpp:2256
+(> (int (state-get "n")) 5)
+@@@ script src/cvc/tests/ariadne_loader_test.cpp:2276
+(state-exists "ready")
+@@@ script src/cvc/tests/ariadne_loader_test.cpp:2277
+(state-exists "busy")
+@@@ script src/cvc/tests/ariadne_loader_test.cpp:2301
+(list "p" "q")
+@@@ script src/cvc/tests/ariadne_loader_test.cpp:2402
+(state-exists "show")
+@@@ script src/cvc/tests/ariadne_loader_test.cpp:3688
+(int (state-get "n"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:80
+(closable)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:356
+(state-set "paused" (if (= (state-get "paused") "true") "false" "true"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:376
+(begin (state-set "agents" "64") (state-set "speed" "1.0"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:400
+(begin (msg-recv "async.done") (state-set "async.result" "resumed"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:428
+(state-set "async.value" (msg-recv "vchan"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:486
+(begin (nav-step-async) (state-set "nav.result" (msg-recv "nav.done")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:511
+(state-set "tick.flag" "1")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:547
+(begin (state-set "input.last_key" (get-attr event "key")) (state-set "input.kind" (get-attr event "kind")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:565
+(state-set "input.last_key" (get-attr event "key"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:583
+(begin (state-set "ptr.kind" (get-attr event "kind")) (state-set "ptr.btn" (get-attr event "button")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:606
+(state-set "widget.clicked" "yes")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:728
+(begin (state-set "ev.btn" (get-attr event "button")) (state-set "ev.has_x" (if (>= (get-attr event "x") 0) "yes" "no")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:780
+(host-bump)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:959
+(state-set "agents" "128")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:960
+(no error)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1033
+(while #t (+ 1 1))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1077
+(state-set "n" "10")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1121
+(= (state-get "show") "1")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1150
+(int 2)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1351
+(state-exists "never")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1384
+(state-set "x" 1)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1399
+(state-set "mode" "on")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1401
+(= (state-get "mode") "on")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1414
+(while #t 1)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1431
+(msg-recv "x")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1431
+(await 1)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1470
+(state-set "flag" "0")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1472
+(state-get "flag")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1474
+(state-get "never_set")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1490
+(foobar 1 2)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1541
+(is-string (str-concat "a" "b"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1543
+(is-list (append (list 1) (list 2)))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1545
+(apply and (list #t))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1547
+(begin (print "x") #t)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1565
+(= (quote (1 2 3)) (quote (1 2 3)))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1567
+(= (quote (1 2)) (quote (9 9)))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1569
+(let ((xs (list 1 2 3))) (> (length xs) 2))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1587
+(begin (defclass B (init (self) (while 1 1))) (B))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1589
+(eval (quote #t))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1591
+(begin (defmacro m () #t) #t)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1606
+(begin (set d (list 0 0)) (set i 0) (while (< i 30) (begin (set d (list d d)) (set i (+ i 1)))) (state-data-set "bomb" d))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1614
+(is-null (state-data-get "bomb"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1626
+(state-set "n" "3")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1647
+(state-set "lock" "1")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1649
+(state-exists "lock")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1686
+(state-set "n" "7")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1688
+(+ (int (state-get "n")) 1)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1689
+(state-get "n")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1775
+(list "shared" "grouped" "private")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1799
+(state-set "hint" "dynamic")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1803
+(state-get "hint")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1847
+(state-set "n" "2")
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1912
+(* 1e+19 1e+19)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1928
+(begin (defun f () #t) (f))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:1930
+(f)
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2287
+(begin (set r (msg-recv (http-get-async "http://ex/x"))) (state-set "r.status" (get-attr r "status")) (state-set "r.ok" (get-attr r "ok")) (state-set "r.error" (get-attr r "error")) (state-data-set "r.body" (get-attr r "body")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2325
+(begin (set r (msg-recv (http-get-async "http://ex/down"))) (state-set "r.ok" (get-attr r "ok")) (state-set "r.error" (get-attr r "error")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2353
+(state-set "r.status" (get-attr (msg-recv (http-get-async "http://ex/slow")) "status"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2383
+(begin (set r (http-get "http://ex/x")) (state-set "r.status" (get-attr r "status")) (state-data-set "r.body" (get-attr r "body")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2414
+(state-set "r.status" (get-attr (await (http-get-async "http://ex/x")) "status"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2449
+(begin (set r (fetch "mem://x")) (state-set "r.ok" (get-attr r "ok")) (state-data-set "r.body" (get-attr r "body")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2481
+(state-data-set "r.body" (get-attr (await (fetch-async "mem://y")) "body"))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2519
+(begin (set r (http-request "POST" "http://ex/api" (dict "headers" (dict "Authorization" "Bearer tok-123") "form" (dict "grip" 1 "risk" 2)))) (state-set "r.status" (get-attr r "status")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2560
+(begin (set r (http-get "http://ex/x" (dict "query" (dict "q" "hello world" "n" 2)))) (state-set "r.status" (get-attr r "status")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2592
+(begin (set r (http-request "PUT" "http://ex/raw" (dict "body" "raw-payload"))) (state-set "r.status" (get-attr r "status")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2625
+(begin (set g (await (http-get-async "http://ex/src"))) (set r (await (http-request-async "PUT" "http://ex/dst" (dict "body" (get-attr g "body") "headers" (dict "Authorization" "Bearer tok"))))) (state-set "r.status" (get-attr r "status")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2688
+(begin (state-set "r.t" (str (pool-double 21))) (state-set "r.a" (str (await (pool-double-async 10)))))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2754
+(begin (set h (stream-open (dict "id" "cam0" "w" 4 "h" 2))) (state-set "t.ok" (get-attr h "ok")) (state-set "t.token" (get-attr h "token")) (state-set "t.seq" (get-attr h "seq_channel")) (state-set "t.live" (get-attr (stream-info h) "live")) (state-set "t.closed" (get-attr (stream-close h) "ok")) (state-set "t.live2" (get-attr (stream-info h) "live")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2785
+(begin (set h (stream-open (dict "id" "cam0" "w" 4 "h" 2))) (state-set "t.token" (get-attr h "token")) (state-set "t.seq" (get-attr h "seq_channel")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2814
+(begin (set h (stream-open (dict "id" "cam0" "w" 4 "h" 2))) (state-set "t.ok" (get-attr h "ok")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2843
+(begin (set a (stream-open (dict "id" "c0" "w" 4 "h" 2 "expected_subscribers" -1))) (state-set "t.a" (get-attr a "ok")) (set b (stream-open (dict "id" "c1" "w" 999999 "h" 2))) (state-set "t.b" (get-attr b "ok")))
+@@@ script src/cvc/tests/ariadne_runtime_test.cpp:2869
+(begin (set h (stream-open (dict "id" "cam0" "w" 4 "h" 2))) (state-set "t.ok" (get-attr h "ok")) (state-set "t.err" (get-attr h "error")))
+@@@ script src/cvc/tests/async_lane_test.cpp:498
+(+ (lane-double 21) (await (lane-double-async 10)))
+@@@ script src/cvc/tests/async_lane_test.cpp:525
+(while t (apply-built (msg-recv "app#built.tracks")))
+@@@ script src/cvc/tests/async_lane_test.cpp:526
+(while t (apply-plain (msg-recv "built")))
+@@@ script src/cvc/tests/async_lane_test.cpp:621
+(while t (begin (tick) (await 0)))
+@@@ script src/cvc/tests/async_lane_test.cpp:652
+(while t (sleep (msg-recv (sim-launch))))
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:125
+(begin (set big "") (set i 0) (while (< i 100) (begin (set big (str-concat big "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789")) (set i (+ i 1)))) (state-set "data.large_string" big) (length big))
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:151
+(begin (state-data-set "data.typed_obj" (list 1 2 3 4 5)) (set obj (state-data-get "data.typed_obj")) (is-null obj))
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:168
+(begin (set i 0) (while (< i 50) (begin (state-set "data.counter" (str i)) (set i (+ i 1)))) (state-get "data.counter"))
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:803
+(begin (state-set "queue.item.0" "apple") (state-set "queue.item.1" "banana") (state-set "queue.item.2" "cherry") (state-set "queue.count" "3") (msg-send "queue.ready" "items-available") "producer-done")
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:813
+(begin (set result (list)) (set i 0) (while (< i 3) (begin (set key (str-concat "queue.item." (str i))) (set val (state-get key)) (if (!= val nil) (set i (+ i 1)) nil))) (state-set "consumed.total" (str i)) i)
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:843
+(begin (state-set "partial.0" (str (+ 1 2 3))) "map-0-done")
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:849
+(begin (state-set "partial.1" (str (+ 4 5 6))) "map-1-done")
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:855
+(begin (state-set "partial.2" (str (+ 7 8 9))) "map-2-done")
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:861
+(begin (set s0 (state-get "partial.0")) (set s1 (state-get "partial.1")) (set s2 (state-get "partial.2")) (state-set "result.total" (str (+ (if (= s0 nil) 0 6) (if (= s1 nil) 0 15) (if (= s2 nil) 0 24)))) 45)
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:928
+(begin (spawn "(* 10 10)" "w0") (spawn "(* 20 20)" "w1") (spawn "(* 30 30)" "w2") 3)
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:947
+(begin (set total 0) (set i 0) (while (< i 5) (begin (set total (+ total (* i i))) (state-set "progress.current" (str i)) (state-set "progress.total" (str total)) (set i (+ i 1)))) total)
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:977
+(begin (state-set "document.header.title" "My Report") (state-set "document.header.author" "Alice") (state-set "document.header.date" "2026-05-24") (msg-send "document.events" "header-complete") "header-done")
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:986
+(begin (state-set "document.body.section1" "Introduction text...") (state-set "document.body.section2" "Methods text...") (state-set "document.body.section3" "Results text...") (msg-send "document.events" "body-complete") "body-done")
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:1013
+(begin (defun fib (n) (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2))))) (set result (fib 12)) (state-set "computation.fib12.result" (str result)) (state-set "computation.fib12.status" "complete") (msg-send "computation.notifications" "fib12-done") result)
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:1094
+(begin (while #t 1))
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:1099
+(+ 1 2)
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:1110
+(+ 3 4)
+@@@ script src/cvc/tests/state_exec_advanced_integration_test.cpp:1111
+(+ 5 6)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:138
+(- 10 3)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:140
+(* 4 5)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:144
+(/ 10 4)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:147
+(+ (* 2 3) (- 10 4))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:152
+(< 1 2)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:153
+(< 2 1)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:157
+(= 5 5)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:158
+(= 5 6)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:163
+(if t 1 2)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:165
+(if nil 1 2)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:167
+(begin 1 2 3)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:169
+(begin (set x 42) x)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:172
+(begin (set i 0) (set sum 0) (while (< i 5) (begin (set sum (+ sum i)) (set i (+ i 1)))) sum)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:179
+(begin (set sum 0) (for x (list 1 2 3 4 5) (set sum (+ sum x))) sum)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:188
+(begin (set sq (lambda (x) (* x x))) (sq 5))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:192
+(begin (set make-adder (lambda (n) (lambda (x) (+ x n)))) (set add5 (make-adder 5)) (add5 10))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:200
+(begin (defun fact (n) (if (< n 2) 1 (* n (fact (- n 1))))) (fact 10))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:209
+(let ((x 10) (y 20)) (+ x y))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:214
+(begin (set f (lambda () (begin (return 42) 99))) (f))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:220
+(quote (1 2 3))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:229
+(begin (defmacro double-it (x) (* x 2)) (double-it 21))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:237
+(eval (quote (+ 1 2)))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:242
+(str-concat "hello" " " "world")
+@@@ script src/cvc/tests/state_exec_async_test.cpp:248
+(car (list 1 2 3))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:249
+(car (cdr (list 1 2 3)))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:252
+(length (list 1 2 3 4 5))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:257
+(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 15))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:268
+(await (+ 1 2))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:275
+(+ 10 20)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:395
+(+ 10 20 30)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:449
+(begin (set i 0) (set s 0) (while (< i 5) (begin (set s (+ s i)) (set i (+ i 1)))) s)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:469
+(begin (set x 10) (set y 20) (+ x y))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:470
+(begin (defun fact (n) (if (< n 2) 1 (* n (fact (- n 1))))) (fact 10))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:471
+(begin (set sum 0) (for x (list 1 2 3 4 5) (set sum (+ sum x))) sum)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:472
+(let ((a 5) (b 10)) (* a b))
+@@@ script src/cvc/tests/state_exec_async_test.cpp:498
+(+ 40 2)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:509
+(begin 1 2 3 4 5)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:537
+(begin 1 2 3 4 5 6 7 8)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:570
+(nap)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:645
+(begin (set r (await 42)) r)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:670
+(begin (set s 0) (set i 0) (while (< i 200) (begin (set s (+ s i)) (set i (+ i 1)))) s)
+@@@ script src/cvc/tests/state_exec_async_test.cpp:738
+(+ 2 3)
+@@@ script src/cvc/tests/state_exec_bench_test.cpp:67
+(begin (defun fib (n) (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 20))
+@@@ script src/cvc/tests/state_exec_bench_test.cpp:90
+(begin (set sum 0) (set i 0) (while (< i 1000) (begin (set sum (+ sum i)) (set i (+ i 1)))) sum)
+@@@ script src/cvc/tests/state_exec_bench_test.cpp:116
+(begin (defun fib (n) (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 15))
+@@@ script src/cvc/tests/state_exec_bench_test.cpp:141
+(begin (set x 0) (set i 0) (while (< i 100) (begin (set x (+ x i)) (set i (+ i 1)))) x)
+@@@ script src/cvc/tests/state_exec_bench_test.cpp:179
+(begin (set lst (list)) (set i 0) (while (< i 500) (begin (set lst (append lst (list i))) (set i (+ i 1)))) lst)
+@@@ script src/cvc/tests/state_exec_bench_test.cpp:253
+(begin (defun even? (n) (if (= n 0) #t (odd? (- n 1)))) (defun odd? (n) (if (= n 0) nil (even? (- n 1)))) (even? 200))
+@@@ script src/cvc/tests/state_exec_codec_test.cpp:297
+(begin (set sum 0) (set i 0) (while (< i 100) (begin (set sum (+ sum i)) (set i (+ i 1)))) sum)
+@@@ script src/cvc/tests/state_exec_codec_test.cpp:320
+(+ 1 2 3 4 5 6 7 8 9 10)
+@@@ script src/cvc/tests/state_exec_codec_test.cpp:427
+(/ 10 3)
+@@@ script src/cvc/tests/state_exec_codec_test.cpp:495
+(let ((x 10)) (let ((y 20)) (+ x y)))
+@@@ script src/cvc/tests/state_exec_codec_test.cpp:527
+(cdr (list 1 2 3))
+@@@ script src/cvc/tests/state_exec_codec_test.cpp:530
+(length (list 1 2 3 4))
+@@@ script src/cvc/tests/state_exec_codec_test.cpp:535
+(begin (set d (dict)) (set-attr d "key" 42) (get-attr d "key"))
+@@@ script src/cvc/tests/state_exec_codec_test.cpp:544
+(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 10))
+@@@ script src/cvc/tests/state_exec_coordinator_test.cpp:469
+(begin (+ 1 2) (+ 3 4) (+ 5 6))
+@@@ script src/cvc/tests/state_exec_coordinator_test.cpp:653
+(begin (+ 1 2) (+ 3 4))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:41
+(- 10 3 2)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:43
+(* 3 4)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:47
+(% 10 3)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:49
+(+ (* 3 4) (- 10 5))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:59
+(= 42 42)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:60
+(= 1 2)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:69
+(if nil 1)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:73
+(begin)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:78
+(quote (+ 1 2))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:90
+(begin (set sum 0) (for x (list 1 2 3 4) (set sum (+ sum x))) sum)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:99
+(begin (set add1 (lambda (x) (+ x 1))) (add1 10))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:114
+(begin (set sum-all (lambda (&rest args) (apply + args))) (sum-all 1 2 3))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:123
+(begin (defun double (x) (* x 2)) (double 21))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:130
+(begin (defun fact (n) (if (<= n 1) 1 (* n (fact (- n 1))))) (fact 5))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:149
+(begin (defun early (x) (if (< x 0) (return -1) x)) (early -5))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:172
+(root)
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:188
+(car (cdr (list 10 20 30)))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:189
+(car (cons 5 (list 10 20)))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:192
+(length (list 1 2 3))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:197
+(begin (set obj (dict "x" 10 "y" 20)) (set-attr obj "x" 99) (get-attr obj "x"))
+@@@ script src/cvc/tests/state_exec_evaluator_test.cpp:215
+(begin (defun fib (n) (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 10))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:49
+(begin (set m (lambda (self) 99)) (set superd (dict "m" m)) (set clsd (dict "__super__" superd)) (set obj (dict "__class__" clsd)) (super obj m))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:57
+(begin (set superd (dict "mk" list)) (set clsd (dict "__super__" superd)) (set obj (dict "__class__" clsd)) (length (super obj mk 4 5)))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:64
+(begin (set m (lambda (self a) (+ a 90))) (set superd (dict "m" m)) (set clsd (dict "__super__" superd)) (set obj (dict "__class__" clsd)) (super obj m 9))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:72
+(begin (set superd2 (dict "mk" list)) (set superd1 (dict "__super__" superd2)) (set clsd (dict "__super__" superd1)) (set obj (dict "__class__" clsd)) (length (super obj mk 1)))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:79
+(begin (set superd (dict "m" 5)) (set clsd (dict "__super__" superd)) (set obj (dict "__class__" clsd)) (super obj m))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:101
+(while t 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:120
+(+ 2 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:145
+(set a 1)
+(set b 2)
+(+ a b)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:150
+(1 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:151
+(no-such-fn 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:152
+(begin (set v 7) (v 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:153
+(if t)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:154
+(while t)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:155
+(for x (list 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:156
+(for 1 (list 1) 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:157
+(for x 5 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:158
+(set a)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:159
+(set 1 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:160
+(quote 1 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:161
+(lambda (x))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:162
+(lambda (1) 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:163
+(lambda 5 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:164
+(let ((a 1)))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:165
+(let 5 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:166
+(let ((a)) 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:167
+(let ((1 2)) 3)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:168
+(defun f (x))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:169
+(defun 5 (x) 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:170
+(defmacro m (x))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:171
+(defmacro 5 (x) 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:172
+(defmacro m (1) 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:173
+(eval)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:174
+(super 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:175
+(defclass)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:176
+(defclass 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:180
+(begin (defun f () (begin (return) 9)) (f))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:184
+(begin (set f (lambda (x) x)) (f 1 2))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:185
+(begin (set f (lambda (&rest) 1)) (f 5))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:189
+(begin (set f (lambda () 42)) (f))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:192
+(lambda nil 42)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:196
+(begin (defun f () (return 5)) (+ (f) 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:200
+(begin (defmacro pick (a b) b) (pick 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:204
+(begin (defmacro m2 (x) (set y x) (+ y 1)) (m2 5))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:208
+(get-attr d "name")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:209
+(send d "speak")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:210
+(send d "add" 1 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:211
+(send d "finalize")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:215
+(begin (defclass Empty) (Empty 42))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:220
+(begin (defclass P1 (m (self) 7)) (defclass C1 (P1) (n (self) 8)) (send (C1) "n"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:226
+(super d speak)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:227
+(super d "speak")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:228
+(super d add 3 4)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:237
+(super (dict "k" 1) m)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:238
+(super (Animal "a") speak)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:239
+(super d fly)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:243
+(begin (defclass KX (m (self) 7) 5 (5 1)) (send (KX) "m"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:249
+(begin (set Q (lambda (x) x)) (defclass CQ Q (n (self) 4)) (send (CQ) "n"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:252
+(begin (set Q2 (lambda (x) x)) (defclass CR (Q2) (n (self) 5)) (send (CR) "n"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:286
+(set a 4)
+(set b 5)
+(+ a b)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:295
+(begin (set i 0) (while (< i 20) (set i (+ i 1))) i)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:346
+(return)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:347
+(yield)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:353
+(defun f (1) 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:365
+(begin (set v 7) (v))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:369
+(begin (set f (lambda (&rest xs) (length xs))) (f 1 2 3))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:378
+(begin (set f (lambda (x) (set y (* x 2)) (+ y 1))) (f 4))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:381
+(let () 42)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:384
+(begin (defun f (&rest xs) (length xs)) (f 1 2))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:392
+(for x (range 0) x)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:414
+(begin (defclass P2 (who (self) "parent")) (defclass C2 (P2)) (send (C2) "who"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:421
+(begin (defclass V (m (self &rest more) (length more))) (send (V) "m" 1 2))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:424
+(begin (defclass M (m (self) (set y 4) (+ y 2))) (send (M) "m"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:428
+(begin (defclass K (m (self) 7) (5 1)) (send (K) "m"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:441
+(defclass B (m (self 5) 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:473
+(-)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:474
+(*)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:475
+(/)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:476
+(- 2.5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:477
+(- 5.5 1 0.5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:478
+(/ 4)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:479
+(+ 0.5 (list 1 2))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:480
+(+ (list 1.5) 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:481
+(* (list 2 3))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:482
+(* 2.0 (list 3 4))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:483
+(% 7.5 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:487
+(% 1 0)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:488
+(% 1.0 0.0)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:489
+(/ 1 0)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:490
+(< nil 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:491
+(car)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:492
+(send 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:496
+(int (list 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:497
+(float (list 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:498
+(str-concat "a" 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:502
+(car (list))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:503
+(length (cdr (list)))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:504
+(car 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:505
+(nth (list 1) 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:506
+(nth (list 1) "x")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:507
+(set-nth (list 1) 5 0)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:508
+(del-nth (list 1) 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:509
+(begin (set l (list 1 2 3)) (del-nth l 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:510
+(length (dict "a" 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:511
+(length t)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:515
+(slice (list 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:516
+(length (slice (list 1 2 3) -1 2))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:517
+(length (slice (list 1 2) 0 -1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:518
+(length (slice (list 1 2) 5 6))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:519
+(length (slice (list 1 2) 0 9))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:520
+(length (slice (list 1 2) 1 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:521
+(length (slice (list 1 2 3) 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:525
+(dict "a")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:526
+(get-attr (dict 1 "x") "1")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:527
+(get-attr (dict) "k")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:528
+(get-attr 5 "k")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:529
+(get-attr (dict) 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:530
+(del-attr (dict) "k")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:531
+(begin (set d (dict "k" 3)) (del-attr d "k"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:535
+(send (dict "a" 1) "m")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:536
+(begin (set o (dict "__class__" (dict "m" (lambda (s) 1)))) (send o "m"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:539
+(begin (set o (dict "__class__" (dict "m" 5))) (send o "m"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:541
+(begin (set o (dict "__class__" (dict "x" 1))) (send o "m"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:546
+(begin (set superd (dict "mk" list)) (set clsd (dict "x" 1 "__super__" superd)) (set obj (dict "__class__" clsd)) (length (send obj "mk" 4 5)))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:555
+(apply 5 (list 1))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:556
+(append 5 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:559
+(print 1 "a" 2.5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:562
+(generator 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:563
+(next 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:564
+(gen-done? 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:565
+(collect 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:566
+(range 1 2 3 4)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:567
+(range "a")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:568
+(range "a" 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:569
+(range 1 "b")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:570
+(range 1 5 "c")
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:571
+(range 1 5 0)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:576
+(collect (generator (lambda () (begin (yield 1) (yield 2)))))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:585
+(and)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:586
+(and 1 nil 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:587
+(and 1 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:588
+(or nil nil)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:589
+(or nil 7)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:590
+(not nil)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:629
+(set c 1)
+(+ c 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:756
+(+ 1 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:770
+(* 2 3)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:771
+(* 2 4)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:772
+(* 2 5)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:781
+(begin (set i 0) (while (< i 50) (set i (+ i 1))) i)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:795
+(begin (set i 0) (while (< i 40) (set i (+ i 1))))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:808
+(set-attr box "sig" __signal__)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:809
+(begin (set i 0) (while (< i 6) (set i (+ i 1))) (get-attr box "sig"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:820
+(begin (set i 0) (while (< i 4) (set i (+ i 1))) i)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:857
+(begin (set i 0) (while (< i 6) (set i (+ i 1))) (get-attr box "path"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:863
+(set-attr box "path" p)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:878
+(begin (set i 0) (while (< i 6) (set i (+ i 1))) (get-attr box "n"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:883
+(set-attr box "n" 1)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:883
+(set-attr box "n" 2)
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:927
+(begin (set i 0) (while (< i 8) (set i (+ i 1))) (get-attr box "path"))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:954
+(begin (set i 0) (while (< i 100) (set i (+ i 1))))
+@@@ script src/cvc/tests/state_exec_gaps_test.cpp:987
+(+ 20 22)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:95
+(spawn "42" "child")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:152
+(self-uid)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:650
+(begin (state-set "mailbox.test" "ready") (msg-send "mailbox.test" "hello-world"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:664
+(begin (msg-send "test.path" "msg1") (msg-send "test.path" "msg2") (msg-send "test.path" "msg3") (message-count))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:687
+(begin (msg-send "test" "1") (msg-send "test" "2") (msg-send "test" "3") (msg-send "test" "4"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:706
+(begin (msg-send "test" "hello world!!") (msg-send "test" "this exceeds the byte cap") "done")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:725
+(begin (state-set "shared.item.0" "100") (state-set "shared.item.1" "200") (state-set "shared.item.2" "300") (state-set "shared.count" "3") "done")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:737
+(begin (state-get "shared.count"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:758
+(begin (state-set "parent.uid" (self-uid)) (set child-pid (spawn "(+ 1 2)" "child-worker")) child-pid)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:774
+(begin (set result (msg-send "events.log" "{\"level\":\"info\"}" "application/json")) (get-attr result "status"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:802
+(begin (msg-send "console.stdout" "Hello from DSL!") (msg-send "console.stdout" "Computing...") (set result (* 6 7)) (msg-send "console.stdout" (str-concat "Result: " (str result))) (msg-send "console.stderr" "Warning: example only") result)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:832
+(begin (set before (msg-pending "q.test")) (msg-send "q.test" "a") (msg-send "q.test" "b") (set after (msg-pending "q.test")) (list before after))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:855
+(begin (msg-send "drain.test" "first") (msg-send "drain.test" "second") (msg-send "drain.test" "third") "sent")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:873
+(begin (set m1 (msg-recv "drain.test")) (set m2 (msg-recv "drain.test")) (set m3 (msg-recv "drain.test")) (list (get-attr m1 "status") (get-attr m2 "status") (get-attr m3 "status")))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:959
+(+ 100 200)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1028
+(begin (defun fib (n) (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 10))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1036
+(begin (defun fact (n) (if (<= n 1) 1 (* n (fact (- n 1))))) (fact 8))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1056
+(begin (set procs (ps)) (length procs))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1071
+(begin (set info (inspect (self-pid))) (get-attr info "pid"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1085
+(begin (set i 0) (set sum 0) (while (< i 10) (begin (set sum (+ sum i)) (set i (+ i 1)))) sum)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1101
+(begin (set total 0) (for x (list 10 20 30 40) (set total (+ total x))) total)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1114
+(begin (set double (lambda (x) (* x 2))) (double 21))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1125
+(let ((x 10) (y 20)) (+ x y))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1135
+(begin (set d (dict "name" "alice" "age" 30)) (get-attr d "name"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1157
+(begin (set stats (scheduler-stats)) (get-attr stats "total"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1212
+(begin (state-set "data.x" "42") (state-get "data.x"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1353
+(begin (set wid (state-watch "events.x" (lambda (p v) nil))) (state-unwatch wid))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1367
+(begin (state-watch "trigger.value" (lambda (path val) (state-set "got-event" "yes"))) (state-set "trigger.value" "hello") (set tries 0) (while (and (not (state-exists "got-event")) (< tries 100)) (set tries (+ tries 1))) (state-get "got-event"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1388
+(begin (state-watch "notify.path" (lambda (path val) (state-set "received-path" path))) (state-set "notify.path" "data") (set tries 0) (while (and (not (state-exists "received-path")) (< tries 100)) (set tries (+ tries 1))) (state-get "received-path"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1417
+(begin (state-set "consumer.log" "") (state-watch "queue.item" (lambda (path val) (state-set "consumer.log" (str-concat (state-get "consumer.log") (state-get path) ",")))) (state-set "queue.item" "apple") (state-set "queue.item" "banana") (state-set "queue.item" "cherry") (set tries 0) (while (and (not (= (state-get "consumer.log") "apple,banana,cherry,")) (< tries 300)) (set tries (+ tries 1))) (state-get "consumer.log"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1451
+(begin (state-set "stats.ticks" "") (state-watch "sensor.reading" (lambda (path val) (state-set "stats.ticks" (str-concat (state-get "stats.ticks") "|")))) (state-set "sensor.reading" "72") (state-set "sensor.reading" "73") (state-set "sensor.reading" "71") (state-set "sensor.reading" "74") (state-set "sensor.reading" "70") (set tries 0) (while (and (not (= (state-get "stats.ticks") "|||||")) (< tries 500)) (set tries (+ tries 1))) (state-get "stats.ticks"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1487
+(begin (state-watch "pipeline.input" (lambda (path val) (state-set "pipeline.stage1" (str-concat "processed:" (state-get path))))) (state-watch "pipeline.stage1" (lambda (path val) (state-set "pipeline.stage2" (str-concat "[" (state-get path) "]")))) (state-set "pipeline.input" "hello") (set tries 0) (while (and (not (state-exists "pipeline.stage2")) (< tries 500)) (set tries (+ tries 1))) (state-get "pipeline.stage2"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1525
+(begin (state-set "sampler.log" "") (set wid (state-watch "data.stream" (lambda (path val) (begin (set current-val (state-get path)) (set current-log (state-get "sampler.log")) (state-set "sampler.log" (str-concat current-log current-val ",")) (set updated (state-get "sampler.log")) (if (= updated (str-concat current-val ",")) nil (state-unwatch wid)))))) (state-set "data.stream" "alpha") (state-set "data.stream" "beta") (state-set "data.stream" "gamma") (state-set "data.stream" "delta") (set tries 0) (while (and (= (state-get "sampler.log") "") (< tries 300)) (set tries (+ tries 1))) (set tries 0) (while (< tries 100) (set tries (+ tries 1))) (state-get "sampler.log"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1577
+(begin (state-watch "jobs.request" (lambda (path val) (state-set "jobs.result" (str-concat "DONE:" (state-get path))))) (set i 0) (while (< i 500) (set i (+ i 1))) "worker-done")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1590
+(begin (state-set "jobs.request" "task-42") (set tries 0) (while (and (not (state-exists "jobs.result")) (< tries 500)) (set tries (+ tries 1))) (state-get "jobs.result"))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1650
+(begin (let ((i 0)) (while (< i 5) (begin (state-set (str-concat "queue.item." (str i)) (str (* i i))) (set i (+ i 1))))) (state-set "queue.count" "5") "produce-done")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1664
+(begin (set tries 0) (while (and (not (state-exists "queue.count")) (< tries 1000)) (set tries (+ tries 1))) (let ((total 0)) (for i (range 5) (set total (+ total 1))) total))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1691
+(begin (for i (range 10) (state-set (str-concat "batch." (str i)) (str (* i 10)))) (state-set "batch.done" "true") 10)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1703
+(begin (set tries 0) (while (and (not (state-exists "batch.done")) (< tries 2000)) (set tries (+ tries 1))) (let ((sum 0)) (for i (range 10) (set sum (+ sum (* i 10)))) sum))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1731
+(begin (for i (range 1 6) (state-set (str-concat "sq." (str i)) (str (* i i)))) (state-set "sq.ready" "5") "squares-done")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1743
+(begin (set tries 0) (while (and (not (state-exists "sq.ready")) (< tries 2000)) (set tries (+ tries 1))) (let ((g (generator (lambda () (for i (range 1 6) (let ((val (state-get (str-concat "sq." (str i))))) (yield (* 2 1))))))) (count 0)) (for x g (set count (+ count 1))) count))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1797
+(begin (for p (range 4) (let ((key (str-concat "data.producer." (str-concat (str p) ".done")))) (set tries 0) (while (and (not (state-exists key)) (< tries 5000)) (set tries (+ tries 1))))) (let ((total 0)) (for i (range 12) (set total (+ total 1))) total))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1828
+(begin (let ((squares (generator (lambda () (for i (range 1 8) (yield (* i i))))))) (let ((total 0)) (for v squares (set total (+ total v))) total)))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1851
+(begin (let ((src (generator (lambda () (yield 10) (yield 20) (yield 30)))) (doubled (generator (lambda () (for x src (yield (* x 2))))))) (collect doubled)))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1894
+(begin (set tries 0) (while (and (not (state-exists "status.2")) (< tries 5000)) (set tries (+ tries 1))) (let ((results (list))) (for i (range 3) (let ((val (state-get (str-concat "status." (str i))))) (append results val))) (length results)))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1921
+(begin (let ((evens (generator (lambda () (for i (range 0 10) (if (= (% i 2) 0) (yield i))))))) (collect evens)))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1946
+(begin (let ((counter (generator (lambda () (let ((n 0)) (while (< n 1000) (begin (yield n) (set n (+ n 1)))))))) (taken (list))) (for x counter (if (>= (length taken) 4) (break nil) (append taken x))) taken))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:1976
+(begin (let ((keys (generator (lambda () (yield "name") (yield "age") (yield "role")))) (vals (generator (lambda () (yield "alice") (yield "30") (yield "engineer")))) (pairs (list))) (let ((k (next keys)) (v (next vals))) (while (not (is-null k)) (begin (append pairs (str-concat k "=" v)) (set k (next keys)) (set v (next vals))))) pairs))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2021
+(begin (set tries 0) (while (and (not (state-exists "worker.2.result")) (< tries 5000)) (set tries (+ tries 1))) (let ((total 0)) (for i (range 3) (set total (+ total 1))) total))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2041
+(begin (let ((running-sum (generator (lambda () (let ((acc 0)) (for x (list 10 20 30 40 50) (begin (set acc (+ acc x)) (yield acc)))))))) (collect running-sum)))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2073
+(begin (set received (list)) (set count 0) (while (< count 9) (begin (set msg (msg-recv "work.queue")) (append received (get-attr msg "status")) (set count (+ count 1)))) (set ones (generator (lambda () (for item received (yield 1))))) (length (collect ones)))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2117
+(begin (set payloads (list)) (set n 0) (while (< n 8) (begin (set msg (msg-recv "data.in")) (append payloads (get-attr msg "status")) (set n (+ n 1)))) (set doubler (generator (lambda () (for p payloads (yield (str-concat p p)))))) (length (collect doubler)))
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2161
+(begin (set msg (msg-recv "ch")) 42)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2170
+(begin (msg-send "ch" "hello") 99)
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2376
+(msg-send "sig" "hi")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2382
+(msg-pending "sig")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2400
+(msg-recv "sig")
+@@@ script src/cvc/tests/state_exec_integration_test.cpp:2409
+(msg-send "raw.chan" "x")
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1526
+(self-pid)
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1536
+(cluster-id)
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1541
+(state-set "dsl.key" "dsl-value")
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1542
+(state-get "dsl.key")
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1547
+(state-set "dsl.exists" "yes")
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1548
+(state-exists "dsl.exists")
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1553
+(memory-limit)
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1558
+(spawn "(+ 1 2)")
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1585
+(string.upper "hello")
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1590
+(math.sqrt 25)
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1595
+(math.pi)
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1600
+(string.length "hello world")
+@@@ script src/cvc/tests/state_exec_intrinsics_test.cpp:1605
+(collections.range 3)
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:188
+(begin (set v1 (state-get "shared.x")) (set v2 (state-get "shared.y")) (set v3 (state-get "shared.z")) (str-concat v1 ":" v2 ":" v3))
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:231
+(begin (state-set "shared.x" "10") (state-set "shared.y" "20") (state-set "shared.z" "30") "written")
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:325
+(begin (set m (msg-recv "oob.chan")) (get-attr m "payload"))
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:394
+(begin (msg-send "oob.chan" "hello-from-A") "sent")
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:489
+(begin (set reader (generator (lambda () (for i (range 5) (yield (state-get (str-concat "items.v" (str i)))))))) (set count 0) (set concat "") (for val reader (begin (set count (+ count 1)) (set concat (str-concat concat val ":")))) (state-set "result.consumer" (str-concat (str count) "|" concat)) count)
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:553
+(begin (set val-gen (generator (lambda () (for i (range 5) (yield (str-concat "v" (str i))))))) (for val val-gen (begin (set idx (str-concat "items." val)) (state-set idx val))) (state-set "items.ready" "true") "produced")
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:655
+(begin (set count 0) (for p (range 3) (for i (range 3) (begin (set key (str-concat "producer." (str p) ".item." (str i))) (if (state-exists key) (set count (+ count 1)) 0)))) count)
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:807
+(begin (set result "") (set i 0) (while (< i 4) (begin (set m (msg-recv "pipe.data")) (set result (str-concat result (get-attr m "payload") ",")) (set i (+ i 1)))) (state-set "pipeline.result" result) result)
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:892
+(begin (set payload-gen (generator (lambda () (for tag (list "aa" "bb" "cc" "dd") (yield tag))))) (for payload payload-gen (msg-send "pipe.data" payload)) "all-sent")
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:988
+(begin (state-set "grpc.x" "alpha") (state-set "grpc.y" "beta") "written")
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:1012
+(begin (str-concat (state-get "grpc.x") ":" (state-get "grpc.y")))
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:1064
+(begin (set m (msg-recv "grpc.chan")) (get-attr m "payload"))
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:1086
+(begin (msg-send "grpc.chan" "hello-grpc") "sent")
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:1147
+(begin (set squares (generator (lambda () (for i (range 5) (yield (* i i)))))) (let ((i 0)) (for sq squares (begin (state-set (str-concat "data.v" (str i)) (str sq)) (set i (+ i 1))))) (state-set "data.ready" "true") "produced")
+@@@ script src/cvc/tests/state_exec_multiprocess_test.cpp:1179
+(begin (set reader (generator (lambda () (for i (range 5) (yield (int (state-get (str-concat "data.v" (str i))))))))) (set sum 0) (for val reader (set sum (+ sum val))) sum)
+@@@ script src/cvc/tests/state_exec_parser_test.cpp:83
+(if (> x 0) "pos" "neg")
+@@@ script src/cvc/tests/state_exec_parser_test.cpp:97
+(a (b (c (d))))
+@@@ script src/cvc/tests/state_exec_parser_test.cpp:143
+(+ 1 2)
+@@@ script src/cvc/tests/state_exec_parser_test.cpp:152
+(defun f (x) x)
+(f 42)
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:177
+(- 100 50)
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:280
+(begin 4 5 6)
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:806
+(begin (defun fib (n) (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 8))
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:813
+(begin (defun fact (n) (if (<= n 1) 1 (* n (fact (- n 1))))) (fact 6))
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:826
+(begin (let ((sum 0)) (for i (list 1 2 3 4 5) (set sum (+ sum i))) sum))
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:838
+(begin (let ((i 0) (sum 0)) (while (< i 10) (begin (set sum (+ sum i)) (set i (+ i 1)))) sum))
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:852
+(begin (let ((double (lambda (x) (* x 2)))) (double 21)))
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:1112
+(if #t 42 99)
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:1113
+(let ((x 10)) (* x x))
+@@@ script src/cvc/tests/state_exec_scheduler_test.cpp:1113
+(length "hello")
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:157
+(begin (set i 0) (while (< i 1000) (set i (+ i 1))) i)
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:220
+(let ((g (generator (lambda () (yield 10) (yield 20) (yield 30))))) (list (next g) (next g) (next g)))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:236
+(let ((g (generator (lambda () (yield 1))))) (list (next g) (next g)))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:248
+(let ((g (generator (lambda () (yield (* 2 3)) (yield (+ 10 5)))))) (+ (next g) (next g)))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:259
+(let ((r (range 0 5))) (+ (next r) (next r) (next r)))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:267
+(collect (range 5))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:274
+(let ((total 0)) (for x (range 1 6) (set total (+ total x))) total)
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:284
+(let ((accum (list))) (for x (generator (lambda () (yield "a") (yield "b") (yield "c"))) (append accum x)) (length accum))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:298
+(collect (generator (lambda () (let ((i 0)) (while (< i 4) (begin (yield i) (set i (+ i 1))))))))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:316
+(while t (break))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:322
+(while t (break 42))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:326
+(begin (set i 0) (while t (if (= i 5) (break i) (set i (+ i 1)))))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:335
+(for x (list 1 2 3 4 5) (if (= x 3) (break x) nil))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:342
+(for x (range 1000) (if (= x 5) (break x) nil))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:349
+(begin (set sum 0) (for i (list 1 2 3) (for j (list 10 20 30) (if (= j 20) (break nil) (set sum (+ sum j))))) sum)
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:360
+(begin (set i 0) (while t (begin (set i (+ i 1)) (if (= i 3) (break i) nil))))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:370
+(for x (list 1 2 3 4 5) (let ((doubled (* x 2))) (if (> doubled 6) (break doubled) nil)))
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:382
+(if #t 1 2)
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:383
+(begin 1 2)
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:384
+(quote 1)
+@@@ script src/cvc/tests/state_exec_stackless_evaluator_test.cpp:385
+(defclass C (init (self) 1))
+@@@ script src/cvc/tests/state_exec_types_test.cpp:72
+(1 2 3)
+@@@ script src/cvc/tests/state_exec_types_test.cpp:83
+(1 ("a" "b"))
+@@@ script src/cvcGL/test/cvcgl_media_audio.cpp:50
+(if (= (state-get "cap.done") "1") nil (begin (stream-capture-audio (get-attr (stream-open (dict "id" "mic" "codec" "f32" "rate" 48000 "ch" 1 "frames_per_chunk" 256)) "token") (dict "rate" 48000 "ch" 1 "frames" 256 "mix" (list (dict "tone" (dict "hz" 440)) (dict "tone" (dict "hz" 660))))) (state-set "cap.done" "1")))
+@@@ script src/cvcGL/test/cvcgl_media_capture.cpp:52
+(if (= (state-get "cap.done") "1") nil (begin (stream-capture-camera (get-attr (stream-open (dict "id" "cam" "w" 64 "h" 48)) "token") (dict "synthetic" #t "w" 64 "h" 48 "hz" 240)) (state-set "cap.done" "1")))
+@@@ script src/cvcGL/test/cvcgl_media_play.cpp:52
+(if (= (state-get "play.done") "1") nil (begin (stream-open (dict "id" "mic" "codec" "f32" "rate" 48000 "ch" 1 "frames_per_chunk" 256 "subscriber_depth" 8)) (stream-capture-audio "streams.mic" (dict "rate" 48000 "ch" 1 "frames" 256 "tone" (dict "hz" 440))) (stream-play-audio "streams.mic") (state-set "play.done" "1")))
+@@@ script src/cvcGL/test/cvcgl_stream_bind.cpp:63
+(begin (set h (gl-bind-stream "screen" "streams.cam0")) (state-set "ok" (get-attr h "ok")) (state-set "node" (get-attr h "node")) (state-set "token" (get-attr h "token")) (state-set "done" "1"))
+@@@ script src/cvcGL/test/cvcgl_stream_bind.cpp:81
+(begin (set h (gl-bind-stream "screen" (dict "token" "demo.streams.cam0"))) (state-set "ok" (get-attr h "ok")) (state-set "done" "1"))
+@@@ script src/cvcGL/test/cvcgl_stream_bind.cpp:96
+(begin (set h (gl-bind-stream "ghost" "streams.cam0")) (state-set "ok" (get-attr h "ok")) (state-set "err" (get-attr h "error")) (state-set "done" "1"))
+@@@ script src/cvcGL/test/cvcgl_stream_bind.cpp:109
+(begin (set h (gl-bind-stream "screen" "streams.cam0")) (state-set "ok" (get-attr h "ok")) (state-set "err" (get-attr h "error")) (state-set "done" "1"))
+@@@ script src/cvcGL/test/cvcgl_stream_bind.cpp:123
+(begin (set h (gl-bind-stream "screen")) (state-set "ok" (get-attr h "ok")) (state-set "err" (get-attr h "error")) (state-set "done" "1"))
+@@@ script bindings/pycvc/test_pycvc_exec.py:49
+(state-set "dsl.out" "wrote-from-dsl")
+@@@ script bindings/pycvc/test_pycvc_exec.py:123
+(capture #t)
+@@@ script bindings/pycvc/test_pycvc_exec.py:147
+(capture (make-bytes))
+@@@ script bindings/pycvc/test_pycvc_exec.py:21
+(* 6 7)
+@@@ script bindings/pycvc/test_pycvc_exec.py:22
+(begin (set x 5) x)
+@@@ script bindings/pycvc/test_pycvc_exec.py:23
+(str-concat "ab" "cd")
+@@@ script bindings/pycvc/test_pycvc_exec.py:25
+(> 1 2)
+@@@ script bindings/pycvc/test_pycvc_exec.py:47
+(state-get "shared.x")
+@@@ script bindings/pycvc/test_pycvc_exec.py:64
+(py-double 21)
+@@@ script bindings/pycvc/test_pycvc_exec.py:65
+(py-add 40 2)
+@@@ script bindings/pycvc/test_pycvc_exec.py:66
+(py-greet "cvc")
+@@@ script bindings/pycvc/test_pycvc_exec.py:68
+(+ 1 (py-double 20))
+@@@ script bindings/pycvc/test_pycvc_exec.py:81
+(stash "py.k" "py.v")
+@@@ script bindings/pycvc/test_pycvc_exec.py:86
+(fetch "py.k")
+@@@ script bindings/pycvc/test_pycvc_exec.py:98
+(boom)
+@@@ script bindings/pycvc/test_pycvc_exec.py:119
+(capture 5)
+@@@ script bindings/pycvc/test_pycvc_exec.py:121
+(capture "text")
+@@@ script bindings/pycvc/test_pycvc_exec_async.py:29
+(begin (adouble 21))
+@@@ script bindings/pycvc/test_pycvc_exec_async.py:62
+(begin (slow 7))
+@@@ script bindings/pycvc/test_pycvc_exec_async.py:78
+(begin (get-attr (boom 1) "__async_error__"))
+@@@ script bindings/pycvc/test_pycvc_exec_async.py:91
+(begin (inc (triple 4)))
+@@@ script bindings/pycvc/test_pycvc_exec_async.py:110
+(begin (spawn "(while t 1)") (state-set "r" (str (slow 7))) (state-get "r"))
+@@@ script bindings/pycvc/test_pycvc_exec_async.py:82
+(begin (idn 5))
+@@@ script bindings/pycvc/test_pycvc_exec_coro.py:58
+(begin (spawn "(while t 1)") (state-set "r" (str (acount 6))) (state-get "r"))
+@@@ script bindings/pycvc/test_pycvc_exec_coro.py:25
+(begin (adbl 21))
+@@@ script bindings/pycvc/test_pycvc_exec_coro.py:40
+(begin (acount 10))
+@@@ script bindings/pycvc/test_pycvc_exec_coro.py:96
+(begin (plus10 (inc (triple 4))))
+@@@ script bindings/pycvc/test_pycvc_exec_coro.py:128
+(begin (reenter 1))
+@@@ script bindings/pycvc/test_pycvc_integration.py:60
+(state-set "dsl.done" "yes")
+@@@ script bindings/pycvc/test_pycvc_integration.py:58
+(+ 0 (verts))

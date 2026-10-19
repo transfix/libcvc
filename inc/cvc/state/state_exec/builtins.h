@@ -105,6 +105,12 @@ value_t builtin_apply(std::span<const value_t> args);
 value_t builtin_is_null(std::span<const value_t> args);
 value_t builtin_is_list(std::span<const value_t> args);
 value_t builtin_type_of(std::span<const value_t> args);
+value_t builtin_isinstance(std::span<const value_t> args); // (isinstance x Class)
+/// @}
+
+/// @name Exceptions (docs/STATE_EXEC_EXCEPTIONS.md)
+/// @{
+value_t builtin_error(std::span<const value_t> args); // (error message [data]): a RuntimeError
 /// @}
 
 /// @name I/O

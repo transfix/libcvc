@@ -22,6 +22,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
 #include <cvc/state/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
+#include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <filesystem>
@@ -185,6 +186,13 @@ struct MockBackend : Backend {
     rec(std::string("combo:") + l + "=" + std::to_string(idx));
     return combo_ret;
   }
+  StringEdit string_ret{};     // programmable return for the next input_text()
+  std::string last_input_text; // the `current` text the core handed input_text() (read side)
+  StringEdit input_text(const char *l, const char *, const std::string &current) override {
+    last_input_text = current;
+    rec(std::string("input_text:") + l + "=" + current);
+    return string_ret;
+  }
   ColorEdit color_ret{};           // programmable return for the next color()
   float last_color[3] = {0, 0, 0}; // the rgb the core handed color() (read side)
   ColorEdit color(const char *l, const float rgb[3]) override {
@@ -278,6 +286,62 @@ TEST(AriadneRuntime, ActionsDrainOffTheWalk) {
   EXPECT_EQ(fired, 1); // runs on drain
   rt.drain();
   EXPECT_EQ(fired, 1); // queue cleared — no double-fire
+}
+
+// Phase 0a: Kind::InputText dispatch — the core hands the backend the current text (read lane),
+// writes the committed value to the bound key, and fires the optional `on` AFTER the write (so a
+// send-on-enter handler sees the new value), queued off the walk like a Button's on.
+TEST(AriadneRuntime, InputTextCommitsValueAndFiresOn) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int sent = 0;
+  rt.on("send", [&] { ++sent; });
+  rt.set_root(group({input_text("Message", "chat.draft", "send")}));
+
+  // No committed edit -> no write, no fire; the (empty, seeded) current text reaches the backend.
+  mb.string_ret = {};
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(mb.last_input_text, "");
+  EXPECT_EQ(sent, 0);
+
+  // A committed edit writes the value and queues the on: (which runs on drain, not inside render).
+  mb.string_ret = {true, true, std::string("hello")};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("chat.draft").value(), "hello");
+  EXPECT_EQ(sent, 0);
+  rt.drain();
+  EXPECT_EQ(sent, 1);
+}
+
+// Phase 0a: Kind::InputInt reuses the text primitive — the core seeds + stringifies the int on the
+// read lane, and on commit parses it back (fail-safe: garbage keeps the current value) and clamps
+// to [lo, hi].
+TEST(AriadneRuntime, InputIntCoercesClampsAndIsFailSafe) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({input_int("Port", "net.port", 1, 65535, 8080)}));
+
+  mb.string_ret = {};
+  rt.render();
+  EXPECT_EQ(mb.last_input_text, "8080"); // read lane: def seeded, int -> text
+  EXPECT_EQ(cvc::state::instance(app)("net.port").value(), "8080"); // seeded into the key
+
+  mb.string_ret = {true, true, std::string("443")}; // in range
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("net.port").value(), "443");
+
+  mb.string_ret = {true, true, std::string("70000")}; // over range -> clamp to hi
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("net.port").value(), "65535");
+
+  mb.string_ret = {true, true, std::string("abc")}; // non-numeric -> keep current
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("net.port").value(), "65535");
 }
 
 // §4/§7 action lane: an `on:` that is a state_exec PROGRAM (starts with '(', like a computed
@@ -457,6 +521,27 @@ TEST(AriadneResident, TickProgramRunsOncePerDrain) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
+// The app's exec scheduler reads a submitted script inside its process (parser.step_tokens), so a
+// resident whose body doesn't parse is killed by the syntax error once it is read, and the sweep
+// reports it with the parse error rather than letting it vanish.
+TEST(AriadneResident, ResidentWithASyntaxErrorIsReported) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program("(state-set \"tick.flag\" \"1\""); // unclosed
+  rt.render();
+  rt.drain();
+  rt.drain();
+  const std::vector<std::string> warns = rt.take_reactive_warnings();
+  bool reported = false;
+  for (const std::string &w : warns)
+    reported = reported || (w.find("stopped") != std::string::npos &&
+                            w.find("unclosed parenthesis") != std::string::npos);
+  EXPECT_TRUE(reported) << "warnings: " << ::testing::PrintToString(warns);
+  EXPECT_NE(cvc::state::instance(app)("tick.flag").value(), "1"); // the body never ran
+}
+
 // set_tick_program("") clears the resident: after clearing, a drain no longer re-fires the body.
 TEST(AriadneResident, ClearingTickProgramStopsIt) {
   cvc::app app;
@@ -528,6 +613,35 @@ TEST(AriadneInput, PointerProgramReceivesMouseEvent) {
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("ptr.kind").value(), "mouse_button_down");
   EXPECT_EQ(cvc::state::instance(app)("ptr.btn").value(), "1");
+}
+
+// on_signal: a signal the host routes through post_signal wakes the document's signal resident with
+// {kind, signal, source}. With no program set, post_signal says so (false) and the host applies the
+// default; with one, it returns true and the program runs in the next drain, never before.
+TEST(AriadneInput, SignalProgramReceivesPostedSignal) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  EXPECT_FALSE(rt.has_signal_program());
+  EXPECT_FALSE(rt.post_signal("SIGINT", "terminal")); // nobody handles it: the host's default
+  rt.set_signal_program("(begin (state-set \"sig.name\" (get-attr event \"signal\")) "
+                        "(state-set \"sig.kind\" (get-attr event \"kind\")) "
+                        "(state-set \"sig.source\" (get-attr event \"source\")))");
+  EXPECT_TRUE(rt.has_signal_program());
+  EXPECT_TRUE(rt.post_signal("SIGINT", "terminal"));
+  EXPECT_NE(cvc::state::instance(app)("sig.name").value(), "SIGINT"); // not run yet
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("sig.name").value(), "SIGINT");
+  EXPECT_EQ(cvc::state::instance(app)("sig.kind").value(), "signal");
+  EXPECT_EQ(cvc::state::instance(app)("sig.source").value(), "terminal");
+  // Every signal arrives (no coalescing), each its own activation.
+  EXPECT_TRUE(rt.post_signal("SIGQUIT"));
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("sig.name").value(), "SIGQUIT");
+  EXPECT_EQ(cvc::state::instance(app)("sig.source").value(), "host");
+  rt.set_signal_program(""); // clearing it hands signals back to the host
+  EXPECT_FALSE(rt.post_signal("SIGINT"));
 }
 
 // §4.6 widget-level on_click: any widget can carry an on_click program; the walk enqueues it when
@@ -1510,6 +1624,283 @@ TEST(AriadneReactive, CompoundsAndAllowedFormsNowWork) {
   EXPECT_FALSE(mb.saw("text_line:ne"));
   EXPECT_TRUE(mb.saw("text_line:lst"));
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The stdlib is in every program lane's environment, and a predicate gets its pure, bounded
+// subset (a scalar, or a result no bigger than its argument).
+TEST(AriadneStdlib, PredicateGetsThePureBoundedSubset) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"name\" \"caf\xC3\xA9\")", nullptr));
+  Widget len = text("len");
+  len.visible_when = "(= (string.length (state-get \"name\")) 4)"; // codepoints -> shown
+  Widget up = text("up");
+  up.visible_when = "(string.starts-with (string.upper (state-get \"name\")) \"CAF\")";
+  Widget math = text("math");
+  math.visible_when = "(= (math.floor (math.sqrt 17)) 4)";
+  Widget bytes = text("bytes");
+  bytes.visible_when = "(= (bytes.byte-at b\"\\x01\\xff\" 1) 255)";
+  rt.set_root(group({len, up, math, bytes}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:len"));
+  EXPECT_TRUE(mb.saw("text_line:up"));
+  EXPECT_TRUE(mb.saw("text_line:math"));
+  EXPECT_TRUE(mb.saw("text_line:bytes"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The materializers run in a predicate as sliced data steps, and collections.map/filter/reduce
+// take a lambda there; math.random stays out (a predicate must be deterministic).
+TEST(AriadneStdlib, PredicateRunsTheMaterializersButNotRandom) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "", "(state-set \"csv\" \"b,a,c,a\")", nullptr));
+  const std::vector<std::pair<const char *, const char *>> shown = {
+      {"split", "(= (length (string.split (state-get \"csv\") \",\")) 4)"},
+      {"join", "(= (string.join (collections.sort (string.split (state-get \"csv\") \",\")) \"\") "
+               "\"aabc\")"},
+      {"replace", "(= (string.replace (state-get \"csv\") \",\" \"\") \"baca\")"},
+      {"bytes", "(= (bytes.decode (bytes.concat (bytes.slice (string.encode \"xab\") 1) "
+                "(string.encode \"!\"))) \"ab!\")"},
+      {"map", "(= (collections.map (list 1 2 3) (lambda (x) (* x x))) (list 1 4 9))"},
+      {"filter", "(= (length (collections.filter (collections.range 10) (lambda (x) (> x 6)))) 3)"},
+      {"reduce", "(= (collections.reduce (collections.range 5) (lambda (a x) (+ a x)) 0) 10)"},
+      {"unique", "(= (collections.unique (string.split (state-get \"csv\") \",\")) "
+                 "(list \"b\" \"a\" \"c\"))"},
+      {"dicts", "(= (collections.dict-keys (collections.dict-merge (dict \"a\" 1) (dict \"b\" 2))) "
+                "(list \"a\" \"b\"))"},
+      {"shape", "(= (collections.flatten (collections.zip (list 1 2) (collections.reverse (list 3 "
+                "4)))) (list 1 4 2 3))"}};
+  std::vector<Widget> widgets;
+  for (const auto &[name, pred] : shown) {
+    widgets.push_back(text(name));
+    widgets.back().visible_when = pred;
+  }
+  Widget rnd = text("rnd");
+  rnd.visible_when = "(< (math.random) 2)"; // unbound -> fail-safe hidden
+  widgets.push_back(rnd);
+  rt.set_root(group(widgets));
+  rt.render();
+  for (const auto &[name, pred] : shown)
+    EXPECT_TRUE(mb.saw(std::string("text_line:") + name)) << pred;
+  EXPECT_FALSE(mb.saw("text_line:rnd"));
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_EQ(warns.size(), 1u) << (warns.empty() ? "" : warns[0]);
+  EXPECT_NE(warns[0].find("math.random"), std::string::npos) << warns[0];
+}
+
+// A predicate's deep-data work runs a slice per step, so its step and time caps cut a huge
+// materializer instead of the frame waiting for it. data.step_nodes comes from the app tree.
+TEST(AriadneStdlib, PredicateMaterializerIsCutByTheEvalBudget) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("state_exec.defaults.data.step_nodes").value("1");
+  Widget big = text("big");
+  big.visible_when = "(> (length (collections.range 120000)) 0)"; // > 100000 one-node steps
+  rt.set_root(group({big}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:big"));
+  auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  // Cut by the step cap or the time cap, whichever comes first. The time cap reads the same
+  // whether it expires between steps or the job's own deadline poll sees it first, as on a slow
+  // Debug build: both throw evaluation_timeout.
+  EXPECT_NE(warns[0].find("exceeded the eval budget"), std::string::npos) << warns[0];
+
+  // A 0 here still slices, at the host's 1024 nodes a step, and an ordinary call finishes. It is
+  // kept small so it fits the 5 ms time cap in a Debug build on a loaded CI runner.
+  cvc::state::instance(app)("state_exec.defaults.data.step_nodes").value("0");
+  Widget fits = text("fits");
+  fits.visible_when = "(= (length (collections.range 1000)) 1000)";
+  rt.set_root(group({fits}));
+  MockBackend mb2;
+  rt.set_backend(&mb2);
+  rt.render();
+  EXPECT_TRUE(mb2.saw("text_line:fits"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// A lambda a predicate passes to collections.map runs on the predicate's own evaluator: the
+// special-form gate, the reduced environment and the caps all hold inside it.
+TEST(AriadneStdlib, PredicateLambdasStayInsideThePredicateRules) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget macro = text("macro");
+  macro.visible_when = "(collections.map (list 1) (lambda (x) (defmacro m () 1)))";
+  rt.set_root(group({macro}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:macro"));
+  auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("not permitted"), std::string::npos) << warns[0];
+
+  Widget write = text("write");
+  write.visible_when = "(collections.map (list 1) (lambda (x) (state-set \"leak\" \"1\")))";
+  rt.set_root(group({write}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:write"));
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
+  EXPECT_NE(cvc::state::instance(app)("leak").value(), "1");
+
+  Widget spin = text("spin");
+  spin.visible_when = "(collections.map (list 1) (lambda (x) (while t 1)))";
+  rt.set_root(group({spin}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:spin"));
+  warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("exceeded the eval budget"), std::string::npos) << warns[0];
+}
+
+TEST(AriadneStdlib, ActionLaneCallsLambdasThroughMapAndApply) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (state-set \"out\" (string.join (collections.map "
+                                  "(string.split \"a b c\" \" \") (lambda (w) (string.upper w))) "
+                                  "\"-\")) (state-set \"sum\" (apply (lambda (a b) (+ a b)) "
+                                  "(list 2 3))))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.out").value(), "A-B-C");
+  EXPECT_EQ(cvc::state::instance(app)("ui.sum").value(), "5");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneStdlib, InitAndActionLanesReachTheWholeStdlib) {
+  cvc::app app;
+  std::vector<std::string> errs;
+  ASSERT_TRUE(run_init(app, "ui",
+                       "(state-set \"words\" (string.join (collections.reverse "
+                       "(string.split \"a b c\" \" \")) \",\"))",
+                       &errs))
+      << (errs.empty() ? std::string("(no error)") : errs[0]);
+  EXPECT_EQ(cvc::state::instance(app)("ui.words").value(), "c,b,a");
+
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(state-set \"shout\" (string.upper (state-get \"words\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.shout").value(), "C,B,A");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneStdlib, ActionHitsTheAllocationLimitAndIsReported) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The app's exec scheduler reads limits.max_alloc_bytes on every submission.
+  cvc::state::instance(app)("state_exec.defaults.limits.max_alloc_bytes").value("1024");
+  rt.set_root(group({button("Big", "(state-set \"n\" (length (collections.range 1000)))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_FALSE(cvc::state::instance(app)("n").value() == "1000"); // killed before the write
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+
+  // A limit that fits lets the same action finish.
+  cvc::state::instance(app)("state_exec.defaults.limits.max_alloc_bytes").value("1048576");
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "1000");
+}
+
+// An action's memory budget is the tree setting ariadne.limits.action_max_memory (default
+// 4 MiB, 0 = none), read on every submission; it also bounds each native call's allocations.
+TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &root = cvc::state::instance(app);
+  // 10000 elements are well over the old fixed 256 KiB and well under 4 MiB.
+  rt.set_root(group({button("Big", "(state-set \"n\" (length (collections.range 10000)))")}));
+  const auto click = [&] {
+    root("n").value(std::string("-"));
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+    return root("n").value();
+  };
+  EXPECT_EQ(click(), "10000"); // the 4 MiB default
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+
+  root("ariadne.limits.action_max_memory").value(std::string("65536"));
+  EXPECT_EQ(click(), "-"); // over the budget: killed before the write
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+
+  root("ariadne.limits.action_max_memory").value(std::string("0")); // no limit
+  EXPECT_EQ(click(), "10000");
+  root("ariadne.limits.action_max_memory").value(std::string("lots")); // unparsable: default
+  EXPECT_EQ(click(), "10000");
+}
+
+// A finished action's process is reaped from the app scheduler, and a function it defined (bound
+// in the scope it captured: a reference cycle) is freed by the cycle collector.
+TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (defun helper (x) x) (state-set \"n\" (helper 7)))")}));
+  cvc::state_exec::collect_cycles(); // earlier tests' leftovers
+  const std::size_t before = cvc::state_exec::tracked_objects();
+  for (int i = 0; i < 20; ++i) {
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "7");
+  EXPECT_EQ(app.exec_scheduler().process_count(), 0); // every finished action was reaped
+  cvc::state_exec::collect_cycles();
+  EXPECT_LE(cvc::state_exec::tracked_objects(), before); // the 20 action scopes are gone
+}
+
+// An action's live values count against its memory budget, not only its state-tree writes.
+TEST(AriadneHeap, AnActionsLiveValuesCountAgainstItsBudget) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &root = cvc::state::instance(app);
+  rt.set_root(group({button("Keep", "(begin (set keep (list)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(append keep (collections.range 1000)) "
+                                    "(state-set \"n\" \"kept\"))")}));
+  const auto click = [&] {
+    root("n").value(std::string("-"));
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+    return root("n").value();
+  };
+  EXPECT_EQ(click(), "kept"); // well under the 4 MiB default
+  root("ariadne.limits.action_max_memory").value(std::string("200000"));
+  EXPECT_EQ(click(), "-"); // 6000 live elements are over 200 KB: killed before the write
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());
 }
 
 TEST(AriadneReactive, DeniedSpecialFormsAreRejectedNotRun) {

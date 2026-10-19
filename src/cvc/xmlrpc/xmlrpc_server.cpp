@@ -142,9 +142,14 @@ private:
                           "Get a list of root's children using a PERL regular expression.");
   XMLRPC_METHOD_PROTOTYPE(cvcstate_get_num_children,
                           "Returns the number of children of the requested cvcstate object.");
+  // Both key a document by paths relative to the object they name (as state::json() and
+  // state::json(j) do): set_json on the path get_json read restores it, another path copies it.
   XMLRPC_METHOD_PROTOTYPE(cvcstate_get_json,
-                          "Get a json representation of the requested cvcstate object.");
-  XMLRPC_METHOD_PROTOTYPE(cvcstate_set_json, "Set a cvcstate object from a json representation.");
+                          "Get a json representation of the requested cvcstate object, keyed by "
+                          "paths relative to it.");
+  XMLRPC_METHOD_PROTOTYPE(cvcstate_set_json,
+                          "Set values from a json representation, its keys relative to the "
+                          "requested cvcstate object.");
   XMLRPC_METHOD_PROTOTYPE(cvcstate_get_lastmod, "Returns a state's last modified time.");
   XMLRPC_METHOD_PROTOTYPE(cvcstate_touch,
                           "Touches the state, triggering listeners as if it was written to.");

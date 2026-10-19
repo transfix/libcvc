@@ -41,6 +41,12 @@ CMAKE_ARGS=(
   # Setting the CGAL option (not Boost_USE_STATIC_LIBS, which CGAL overwrites as
   # a normal variable) asks for the variant the toolchain actually ships.
   -DCGAL_Boost_USE_STATIC_LIBS=OFF
+  # Installed examples get RUNPATH $ORIGIN/../lib only. Every runtime dep is
+  # installed into the same prefix as the bundle, and the link directories would
+  # be this build's prefixes, which cvcpkg's pack-time relocation gate rejects
+  # when publish-cvcpkg.yml packs the result with --from-prefix
+  # (src/cvcGL/examples/CMakeLists.txt).
+  -DCVCGL_EXAMPLES_RPATH_USE_LINK_PATH=OFF
 )
 
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
@@ -70,8 +76,8 @@ if [[ "${CVC_PLATFORM:-}" == "linux" ]]; then
 fi
 
 # Build every example (lsystem_forest + the three nav demos) and install just the
-# cvcgl-examples component: the bin/ executables, $ORIGIN-rpath'd by
-# examples/CMakeLists.txt (NOT the cvcGL SDK, which shares this build tree).
+# cvcgl-examples component: the bin/ executables, RUNPATH $ORIGIN/../lib only
+# (examples/CMakeLists.txt; NOT the cvcGL SDK, which shares this build tree).
 cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
 
 # ABI guard: the demos link the SHARED libcvc from the deps prefix but were

@@ -36,6 +36,156 @@ def test_parse_error_raises():
         raise AssertionError("a parse error must raise")
 
 
+def _run_error(ex, src):
+    """run(src) must raise; return the message."""
+    try:
+        ex.run(src)
+    except Exception as e:  # noqa: BLE001 - pycvc surfaces C++ errors as RuntimeError
+        return str(e)
+    raise AssertionError(f"{src!r} must raise")
+
+
+def test_parse_error_names_the_problem():
+    # Exec uses the same state_exec defaults as the app's exec scheduler: the script
+    # is read inside its process, so a syntax error comes back as the process's exit
+    # error. run() raises with the parse error's own message, as it did when the
+    # script was parsed at submit.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    assert "unclosed parenthesis" in _run_error(ex, "(begin (set x")
+
+
+def test_parser_settings_come_from_the_app_tree():
+    # Exec's scheduler watches the app's state tree, so state_exec.defaults.parser.*
+    # configures it exactly as it configures the app's exec scheduler
+    # (docs/STATE_EXEC_GRAMMAR.md).
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    deep = "(+ 1 (+ 2 (+ 3 (+ 4 5))))"  # four levels of nesting
+    assert ex.run(deep) == "15"
+
+    pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "3")
+    assert "nesting deeper than 3" in _run_error(ex, deep)
+    assert ex.run("(+ 1 (+ 2 3))") == "6"  # three levels still parse
+
+    # Parsing at submit (step_tokens 0) gives the same results and the same errors.
+    pycvc.state_set(app, "state_exec.defaults.parser.step_tokens", "0")
+    assert "nesting deeper than 3" in _run_error(ex, deep)
+    assert "unclosed parenthesis" in _run_error(ex, "(begin (set x")
+    assert ex.run("(+ 1 (+ 2 3))") == "6"
+
+    pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "256")
+    assert ex.run(deep) == "15"
+
+
+# ── state_exec parser settings: the C++ surface, under the C++ names ────
+
+
+def test_parse_options_is_the_cpp_struct():
+    o = pycvc.parse_options()
+    assert (o.max_depth, o.step_tokens) == (100000, 0)  # C++ defaults
+    o.max_depth = 32
+    o.step_tokens = 8
+    assert (o.max_depth, o.step_tokens) == (32, 8)
+
+
+def test_exec_starts_from_the_host_parser_defaults():
+    # The same defaults as the app's exec scheduler:
+    # async_scheduler::host_parser_defaults().
+    host = pycvc.async_scheduler.host_parser_defaults()
+    assert (host.max_depth, host.step_tokens) == (100000, 1024)
+    ex = pycvc.Exec(pycvc.make_app())
+    d = ex.parser_defaults()
+    assert (d.max_depth, d.step_tokens) == (host.max_depth, host.step_tokens)
+
+
+def test_parse_options_from_state_resolves_like_cpp():
+    # The real C++ function: it takes the tree root, a State, as in C++.
+    app = pycvc.make_app()
+    root = pycvc.State.instance(app)
+    # Nothing set: the C++ default.
+    assert pycvc.parse_options_from_state(root).step_tokens == 0
+    # What Exec reads with: its own defaults under the tree.
+    ex = pycvc.Exec(app)
+    effective = pycvc.parse_options_from_state(root, "", ex.parser_defaults())
+    assert effective.step_tokens == 1024
+
+    root.child("state_exec.defaults.parser.max_depth").value("40")
+    root.child("state_exec.schedulers.s1.parser.max_depth").value("50")
+    assert pycvc.parse_options_from_state(root).max_depth == 40
+    assert pycvc.parse_options_from_state(root, "s1").max_depth == 50
+    root.child("state_exec.defaults.parser.max_depth").value("nope")  # bad: skipped
+    assert pycvc.parse_options_from_state(root).max_depth == 100000
+
+
+def test_set_parser_defaults_changes_how_exec_parses():
+    ex = pycvc.Exec(pycvc.make_app())
+    o = pycvc.parse_options()
+    o.max_depth = 2
+    ex.set_parser_defaults(o)
+    assert ex.parser_defaults().max_depth == 2
+    assert ex.parser_defaults().step_tokens == 0
+    assert "nesting deeper than 2" in _run_error(ex, "(+ 1 (+ 2 (+ 3 4)))")
+    assert ex.run("(+ 1 (+ 2 3))") == "6"
+
+
+# ── state_exec deep-data settings (docs/STATE_EXEC_GRAMMAR.md, "Deep data on
+# the executor"), under the C++ names ────────────────────────────────────
+
+
+def test_data_options_is_the_cpp_struct():
+    o = pycvc.data_options()
+    assert o.step_nodes == 0  # C++ default: deep-data work runs whole
+    o.step_nodes = 64
+    assert o.step_nodes == 64
+
+
+def test_exec_starts_from_the_host_data_defaults():
+    # The same defaults as the app's exec scheduler:
+    # async_scheduler::host_data_defaults().
+    host = pycvc.async_scheduler.host_data_defaults()
+    assert host.step_nodes == 1024
+    ex = pycvc.Exec(pycvc.make_app())
+    assert ex.data_defaults().step_nodes == host.step_nodes
+
+
+def test_data_options_from_state_resolves_like_cpp():
+    # The real C++ function: it takes the tree root, a State, as in C++.
+    app = pycvc.make_app()
+    root = pycvc.State.instance(app)
+    assert pycvc.data_options_from_state(root).step_nodes == 0
+    ex = pycvc.Exec(app)
+    assert pycvc.data_options_from_state(root, "", ex.data_defaults()).step_nodes == 1024
+    root.child("state_exec.defaults.data.step_nodes").value("16")
+    root.child("state_exec.schedulers.s1.data.step_nodes").value("8")
+    assert pycvc.data_options_from_state(root).step_nodes == 16
+    assert pycvc.data_options_from_state(root, "s1").step_nodes == 8
+    root.child("state_exec.defaults.data.step_nodes").value("lots")  # bad: skipped
+    assert pycvc.data_options_from_state(root).step_nodes == 0
+    o = pycvc.data_options()
+    o.step_nodes = 0
+    ex.set_data_defaults(o)
+    assert ex.data_defaults().step_nodes == 0
+
+
+def test_deep_data_gives_the_same_results_however_it_is_sliced():
+    # Compare and print values nested 3000 deep: whole in one step, 1024 nodes a step (the host
+    # default) or 4 nodes a step.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    prog = (
+        "(begin (set a 1) (set b 1) (set i 0)"
+        " (while (< i 3000) (begin (set a (list a)) (set b (list b)) (set i (+ i 1))))"
+        " (list (= a b) (length (str a))))"
+    )
+    sliced = ex.run(prog)
+    pycvc.state_set(app, "state_exec.defaults.data.step_nodes", "0")
+    whole = ex.run(prog)
+    pycvc.state_set(app, "state_exec.defaults.data.step_nodes", "4")
+    assert ex.run(prog) == whole == sliced
+    assert whole.startswith("(#t ")
+
+
 # ── DSL <-> state <-> Python round trips (one shared app) ───────────────
 
 
@@ -147,6 +297,107 @@ def test_bytes_marshaling_round_trip():
     ex.run("(capture (make-bytes))")
     assert seen["type"] == "bytes", seen["type"]
     assert seen["val"] == blob, seen["val"]
+
+
+# ── the stdlib modules (string, bytes, math, collections) ───────────────
+
+
+def test_stdlib_modules_are_always_loaded():
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    assert ex.run('(string.length "café")') == "4"  # codepoints, not bytes
+    assert ex.run('(string.upper "go")') == "GO"
+    assert ex.run('(bytes.length (string.encode "café"))') == "5"
+    assert ex.run("(math.floor 3.7)") == "3"
+    assert ex.run("(collections.reduce (list 1 2 3) + 0)") == "6"
+    # A program's own binding shadows a stdlib name without touching other programs.
+    assert ex.run("(begin (set string.length 7) string.length)") == "7"
+    assert pycvc.Exec(app).run('(string.length "ab")') == "2"
+
+
+def test_stdlib_allocation_limit_comes_from_the_app_tree():
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+
+    def run_error(src):
+        try:
+            ex.run(src)
+        except Exception as e:  # noqa: BLE001 - any surfaced DSL error
+            return str(e)
+        return ""
+
+    # The 16 MiB default stops a huge one-call allocation.
+    assert "allocation limit" in run_error("(collections.range 1000000000)")
+    # limits.max_alloc_bytes on the app tree is read on every run.
+    pycvc.state_set(app, "state_exec.defaults.limits.max_alloc_bytes", "1024")
+    assert "collections.range" in run_error("(collections.range 1000)")
+    pycvc.state_set(app, "state_exec.defaults.limits.max_alloc_bytes", "1048576")
+    assert ex.run("(length (collections.range 1000))") == "1000"
+
+
+def test_stdlib_collections_take_dsl_and_python_functions():
+    # map/filter/reduce call a lambda as the program's own steps, and a registered Python
+    # function like any native one. The list comes first, then the function.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    assert ex.run("(collections.map (list 1 2 3) (lambda (x) (* x x)))") == "(1 4 9)"
+    assert ex.run("(collections.filter (collections.range 10) (lambda (x) (= (% x 3) 0)))") == (
+        "(0 3 6 9)"
+    )
+    assert ex.run("(collections.reduce (list 1 2 3 4) (lambda (acc x) (+ acc (* x x))) 0)") == "30"
+    ex.register_fn("twice", lambda x: x * 2)
+    assert ex.run("(collections.map (list 1 2) twice)") == "(2 4)"
+    # The builtins that call a function, apply and send, take a DSL function too.
+    assert ex.run("(apply (lambda (a b) (* a b)) (list 6 7))") == "42"
+    assert ex.run("(apply twice (list 21))") == "42"
+    assert (
+        ex.run(
+            '(begin (set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))'
+            ' (send o "inc" 41))'
+        )
+        == "42"
+    )
+
+
+def test_stdlib_materializers_run_as_data_steps():
+    # Exec slices deep-data work 1024 nodes a step (the host default): a big join and split
+    # spread over data steps, and the answer is the same however the work is sliced.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    prog = (
+        '(begin (set parts (string.split (string.join (collections.map (collections.range 20000)'
+        ' str) ",") ","))'
+        " (list (length parts) (nth parts 12345) (get-attr (budget-usage) \"data_steps\")))"
+    )
+
+    def data_steps(step_nodes=None):
+        if step_nodes is not None:
+            pycvc.state_set(app, "state_exec.defaults.data.step_nodes", str(step_nodes))
+        out = ex.run(prog)
+        assert out.startswith('(20000 "12345" '), out
+        return int(out.rsplit(" ", 1)[1].rstrip(")"))
+
+    host = data_steps()
+    assert host > 100  # map, join and split, a slice a step
+    assert data_steps(16) > host
+    assert data_steps(0) < 10  # whole, in the steps that need it
+
+
+# ── reference cycles ────────────────────────────────────────────────────
+
+
+def test_exec_functions_survive_cycle_collection():
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    ex.run("(defun twice (x) (* 2 x))")
+    # Each iteration leaks a let scope (a closure bound in the scope it captured). That many make
+    # the scheduler collect cycles between steps, and Exec's own environment, held by Exec, must
+    # come through intact.
+    ex.run(
+        "(begin (set i 0) (while (< i 1000) (begin (let ((h nil)) (set h (lambda () h))) "
+        "(set i (+ i 1)))) i)"
+    )
+    assert ex.run("(twice 21)") == "42"
 
 
 if __name__ == "__main__":

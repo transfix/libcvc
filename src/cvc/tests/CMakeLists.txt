@@ -8,6 +8,8 @@ add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
+add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
+add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
@@ -33,6 +35,7 @@ add_executable(state_distributed_bench_test state_distributed_bench_test.cpp)
 add_executable(state_message_test state_message_test.cpp)
 add_executable(state_bounded_queue_test state_bounded_queue_test.cpp)
 add_executable(state_transport_inproc_test state_transport_inproc_test.cpp)
+add_executable(room_intrinsics_test room_intrinsics_test.cpp)
 # state_transport_ipc is POSIX-only (UDS + poll); skip on Windows.
 if(NOT WIN32)
   add_executable(state_transport_ipc_test state_transport_ipc_test.cpp)
@@ -54,6 +57,7 @@ add_executable(state_sync_adapter_link_forwarding_test state_sync_adapter_link_f
 add_executable(state_cross_cluster_link_test state_cross_cluster_link_test.cpp)
 add_executable(state_link_bench_test state_link_bench_test.cpp)
 add_executable(state_list_test state_list_test.cpp)
+add_executable(state_deep_tree_test state_deep_tree_test.cpp)
 if(CVC_STATE_MEMORY_MANAGER)
   add_executable(state_memory_manager_test state_memory_manager_test.cpp)
 endif()
@@ -64,6 +68,11 @@ add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
 add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
 add_executable(state_exec_codec_test state_exec_codec_test.cpp)
 add_executable(state_exec_unicode_test state_exec_unicode_test.cpp)
+add_executable(state_exec_stdlib_test state_exec_stdlib_test.cpp)
+add_executable(state_exec_heap_test state_exec_heap_test.cpp)
+add_executable(state_exec_grammar_test state_exec_grammar_test.cpp)
+add_executable(state_exec_corpus_test state_exec_corpus_test.cpp)
+add_executable(state_exec_pegtl_test state_exec_pegtl_test.cpp)
 add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
@@ -73,6 +82,9 @@ add_executable(state_exec_bench_test state_exec_bench_test.cpp)
 add_executable(state_exec_integration_test state_exec_integration_test.cpp)
 add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
 add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
+add_executable(state_exec_exceptions_test state_exec_exceptions_test.cpp)
+add_executable(state_exec_deep_data_test state_exec_deep_data_test.cpp)
+add_executable(state_exec_data_steps_test state_exec_data_steps_test.cpp)
 if(NOT WIN32)
   add_executable(state_exec_multiprocess_test state_exec_multiprocess_test.cpp)
 endif()
@@ -89,6 +101,36 @@ add_executable(state_hash_partition_test state_hash_partition_test.cpp)
 add_executable(state_hybrid_time_test state_hybrid_time_test.cpp)
 add_executable(world_clock_test world_clock_test.cpp)
 add_executable(world_units_test world_units_test.cpp)
+add_executable(physics_world_test physics_world_test.cpp)
+add_executable(physics_field_test physics_field_test.cpp)
+add_executable(physics_vehicle_test physics_vehicle_test.cpp)
+add_executable(physics_energy_test physics_energy_test.cpp)
+add_executable(nav_plant_test nav_plant_test.cpp)
+add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
+add_executable(nav_terrain_test nav_terrain_test.cpp)
+add_executable(nav_binding_test nav_binding_test.cpp)
+add_executable(physics_parity_test physics_parity_test.cpp)
+add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CMakeLists.txt
+cvc_setup_physics_replay(physics_replay_test)
+add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
+add_executable(physics_plant_host_test physics_plant_host_test.cpp)
+# det_math is internal to libcvc, so its test compiles it in, with the same no-contraction flag.
+add_executable(physics_det_math_test physics_det_math_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp)
+target_include_directories(physics_det_math_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cvc/physics)
+if(NOT MSVC)
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+add_executable(geometry_height_field_test geometry_height_field_test.cpp)
+add_executable(world_geometry_test world_geometry_test.cpp)
+add_executable(nav_world_planes_test nav_world_planes_test.cpp)
+add_executable(nav_vehicle_route_test nav_vehicle_route_test.cpp)
+add_executable(nav_route_follower_test nav_route_follower_test.cpp)
+add_executable(system_macro_headers_test system_macro_headers_test.cpp)
 add_executable(state_brick_frustum_test state_brick_frustum_test.cpp)
 add_executable(state_conflict_ring_test state_conflict_ring_test.cpp)
 add_executable(state_zstd_round_trip_test state_zstd_round_trip_test.cpp)
@@ -99,6 +141,10 @@ if(NOT WIN32)
 endif()
 if(CVC_ENABLE_GRPC)
   add_executable(state_transport_grpc_test state_transport_grpc_test.cpp)
+  add_executable(state_stream_transport_grpc_test state_stream_transport_grpc_test.cpp)
+  add_executable(stream_bridge_test stream_bridge_test.cpp)
+  add_executable(stream_relay_test stream_relay_test.cpp)
+  add_executable(room_media_test room_media_test.cpp)
 endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
@@ -129,6 +175,7 @@ add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
+add_executable(nav_material_bike_rollout_test nav_material_bike_rollout_test.cpp)
 add_executable(nav_coef_energy_grad_test nav_coef_energy_grad_test.cpp)
 add_executable(nav_material_rollout_cuda_test nav_material_rollout_cuda_test.cpp)
 add_executable(nav_coef_energy_cuda_test nav_coef_energy_cuda_test.cpp)
@@ -176,6 +223,8 @@ set(TEST_TARGETS
   ariadne_loader_test
   ariadne_runtime_test
   ariadne_bind_test
+  ariadne_ftxui_test
+  x11_macro_headers_test
   net_http_client_test
   uri_http_cache_test
   state_test
@@ -201,6 +250,7 @@ set(TEST_TARGETS
   state_message_test
   state_bounded_queue_test
   state_transport_inproc_test
+  room_intrinsics_test
   state_blob_transport_integration_test
   state_distributed_delegation_integration_test
   state_link_test
@@ -217,11 +267,31 @@ set(TEST_TARGETS
   state_cross_cluster_link_test
   state_link_bench_test
   state_list_test
+  state_deep_tree_test
   state_delta_codec_test
   state_volume_codec_test
   state_brick_manifest_test
   world_clock_test
   world_units_test
+  physics_world_test
+  physics_field_test
+  physics_vehicle_test
+  physics_energy_test
+  nav_plant_test
+  nav_dyn_bike_test
+  nav_terrain_test
+  nav_binding_test
+  physics_parity_test
+  physics_replay_test
+  physics_pose_tracker_test
+  physics_det_math_test
+  physics_plant_host_test
+  geometry_height_field_test
+  world_geometry_test
+  nav_world_planes_test
+  nav_vehicle_route_test
+  nav_route_follower_test
+  system_macro_headers_test
   state_data_hydrator_test
   state_node_telemetry_test
   state_telemetry_aggregator_test
@@ -254,6 +324,7 @@ set(TEST_TARGETS
   nav_material_raster_test
   nav_coef_energy_test
   nav_material_rollout_grad_test
+  nav_material_bike_rollout_test
   nav_coef_energy_grad_test
   nav_material_train_test
   nav_material_optim_test
@@ -319,6 +390,11 @@ list(APPEND TEST_TARGETS
   state_exec_stackless_evaluator_test
   state_exec_codec_test
   state_exec_unicode_test
+  state_exec_stdlib_test
+  state_exec_heap_test
+  state_exec_grammar_test
+  state_exec_corpus_test
+  state_exec_pegtl_test
   state_exec_async_test
   async_lane_test
   state_exec_scheduler_test
@@ -328,6 +404,9 @@ list(APPEND TEST_TARGETS
   state_exec_integration_test
   state_exec_advanced_integration_test
   state_exec_gaps_test
+  state_exec_exceptions_test
+  state_exec_deep_data_test
+  state_exec_data_steps_test
 )
 if(NOT WIN32)
   list(APPEND TEST_TARGETS state_exec_multiprocess_test)
@@ -371,6 +450,16 @@ if(CVC_ENABLE_MESHER)
   list(APPEND TEST_TARGETS fastcontouring_math_test)
 else()
   message(STATUS "Mesher disabled; skipping algorithm_test")
+endif()
+
+# mesh_ops/fem (libigl). Without CVC_ENABLE_LIBIGL every entry point just throws
+# mesh_ops_unavailable, so there is nothing to test.
+if(CVC_ENABLE_LIBIGL)
+  add_executable(mesh_ops_test mesh_ops_test.cpp)
+  add_executable(fem_test fem_test.cpp)
+  list(APPEND TEST_TARGETS mesh_ops_test fem_test)
+else()
+  message(STATUS "libigl disabled; skipping mesh_ops_test and fem_test")
 endif()
 
 # mtxlib (SDF V2's self-contained vector/matrix library) and the other
@@ -421,6 +510,13 @@ target_link_libraries(ariadne_runtime_test
     GTest::gtest_main
 )
 
+target_link_libraries(ariadne_ftxui_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(net_http_client_test
   PRIVATE
     cvc
@@ -436,6 +532,13 @@ target_link_libraries(uri_http_cache_test
 )
 
 target_link_libraries(ariadne_bind_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(x11_macro_headers_test
   PRIVATE
     cvc
     GTest::gtest
@@ -591,6 +694,17 @@ if(TARGET mtxlib_test)
   target_compile_features(mtxlib_test PRIVATE cxx_std_17)
 endif()
 
+foreach(_igl_test mesh_ops_test fem_test)
+  if(TARGET ${_igl_test})
+    target_link_libraries(${_igl_test}
+      PRIVATE
+        cvc
+        GTest::gtest
+        GTest::gtest_main
+    )
+  endif()
+endforeach()
+
 target_link_libraries(volume_io_extra_test
   PRIVATE
     cvc
@@ -606,6 +720,13 @@ if(TARGET state_exec_gaps_test)
       GTest::gtest_main
   )
 endif()
+
+target_link_libraries(state_exec_exceptions_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(procedural_geometry_test
   PRIVATE
@@ -718,6 +839,13 @@ target_link_libraries(nav_coef_energy_test
 )
 
 target_link_libraries(nav_material_rollout_grad_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_material_bike_rollout_test
   PRIVATE
     cvc
     GTest::gtest
@@ -998,6 +1126,13 @@ target_link_libraries(state_transport_inproc_test
     GTest::gtest_main
 )
 
+target_link_libraries(room_intrinsics_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 if(NOT WIN32)
   target_link_libraries(state_transport_ipc_test
     PRIVATE
@@ -1167,6 +1302,20 @@ target_link_libraries(state_exec_types_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_deep_data_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_exec_data_steps_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_builtins_test
   PRIVATE
     cvc
@@ -1197,6 +1346,39 @@ target_link_libraries(state_exec_codec_test
 target_link_libraries(state_exec_unicode_test
   PRIVATE
     cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_exec_stdlib_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_exec_heap_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_exec_grammar_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_exec_corpus_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+# PEGTL is cvc's build-only dependency (not in cvc's exported interface), so the
+# check links it directly; taocpp::pegtl comes from src/cvc/CMakeLists.txt.
+target_link_libraries(state_exec_pegtl_test
+  PRIVATE
+    taocpp::pegtl
     GTest::gtest
     GTest::gtest_main
 )
@@ -1281,6 +1463,13 @@ target_link_libraries(state_list_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_deep_tree_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_delta_codec_test
   PRIVATE
     cvc
@@ -1331,6 +1520,131 @@ target_link_libraries(world_clock_test
 )
 
 target_link_libraries(world_units_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_world_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_vehicle_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_energy_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_dyn_bike_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_terrain_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_binding_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_parity_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_field_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_det_math_test
+  PRIVATE
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_plant_host_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_pose_tracker_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(geometry_height_field_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(world_geometry_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_route_follower_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_vehicle_route_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_world_planes_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(system_macro_headers_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1391,6 +1705,50 @@ if(TARGET state_transport_grpc_test)
   list(APPEND TEST_TARGETS state_transport_grpc_test)
 endif()
 
+if(TARGET state_stream_transport_grpc_test)
+  target_link_libraries(state_stream_transport_grpc_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(state_stream_transport_grpc_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS state_stream_transport_grpc_test)
+endif()
+
+if(TARGET stream_bridge_test)
+  target_link_libraries(stream_bridge_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(stream_bridge_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS stream_bridge_test)
+endif()
+
+if(TARGET stream_relay_test)
+  target_link_libraries(stream_relay_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(stream_relay_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS stream_relay_test)
+endif()
+
+if(TARGET room_media_test)
+  target_link_libraries(room_media_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(room_media_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS room_media_test)
+endif()
+
 # Set C++ standard to match the library
 target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
@@ -1412,6 +1770,7 @@ target_compile_features(nav_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
+target_compile_features(nav_material_bike_rollout_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_cuda_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_cuda_test PRIVATE cxx_std_17)
@@ -1457,6 +1816,7 @@ target_compile_features(state_distributed_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_message_test PRIVATE cxx_std_17)
 target_compile_features(state_bounded_queue_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_inproc_test PRIVATE cxx_std_17)
+target_compile_features(room_intrinsics_test PRIVATE cxx_std_17)
 if(NOT WIN32)
   target_compile_features(state_transport_ipc_test PRIVATE cxx_std_17)
   target_compile_features(state_reconnect_resilience_test PRIVATE cxx_std_17)
@@ -1478,11 +1838,19 @@ target_compile_features(state_cross_cluster_link_test PRIVATE cxx_std_17)
 target_compile_features(state_link_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_deep_data_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_exceptions_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_data_steps_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_unicode_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_stdlib_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_heap_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_grammar_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_corpus_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_pegtl_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
 target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
@@ -1498,6 +1866,7 @@ if(CVC_STATE_MEMORY_MANAGER)
   target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
 endif()
 target_compile_features(state_list_test PRIVATE cxx_std_17)
+target_compile_features(state_deep_tree_test PRIVATE cxx_std_17)
 target_compile_features(state_delta_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_volume_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_brick_manifest_test PRIVATE cxx_std_17)
@@ -1511,6 +1880,24 @@ target_compile_features(state_hash_partition_test PRIVATE cxx_std_17)
 target_compile_features(state_hybrid_time_test PRIVATE cxx_std_17)
 target_compile_features(world_clock_test PRIVATE cxx_std_17)
 target_compile_features(world_units_test PRIVATE cxx_std_17)
+target_compile_features(physics_world_test PRIVATE cxx_std_17)
+target_compile_features(physics_field_test PRIVATE cxx_std_17)
+target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
+target_compile_features(physics_energy_test PRIVATE cxx_std_17)
+target_compile_features(nav_plant_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
+target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
+target_compile_features(nav_binding_test PRIVATE cxx_std_17)
+target_compile_features(physics_parity_test PRIVATE cxx_std_17)
+target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
+target_compile_features(physics_det_math_test PRIVATE cxx_std_17)
+target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
+target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
+target_compile_features(world_geometry_test PRIVATE cxx_std_17)
+target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
+target_compile_features(nav_vehicle_route_test PRIVATE cxx_std_17)
+target_compile_features(nav_route_follower_test PRIVATE cxx_std_17)
+target_compile_features(system_macro_headers_test PRIVATE cxx_std_20)
 target_compile_features(state_brick_frustum_test PRIVATE cxx_std_17)
 target_compile_features(state_conflict_ring_test PRIVATE cxx_std_17)
 target_compile_features(state_zstd_round_trip_test PRIVATE cxx_std_17)
@@ -1646,7 +2033,9 @@ cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_runtime_test)
+cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_bind_test)
+cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)
@@ -1684,6 +2073,7 @@ cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
 cvc_discover_tests(nav_material_rollout_grad_test)
+cvc_discover_tests(nav_material_bike_rollout_test)
 cvc_discover_tests(nav_coef_energy_grad_test)
 cvc_discover_tests(nav_material_rollout_cuda_test)
 cvc_discover_tests(nav_coef_energy_cuda_test)
@@ -1717,6 +2107,116 @@ endif()
 if(TARGET mtxlib_test)
   cvc_discover_tests(mtxlib_test)
 endif()
+if(TARGET mesh_ops_test)
+  cvc_discover_tests(mesh_ops_test)
+endif()
+if(TARGET fem_test)
+  cvc_discover_tests(fem_test)
+endif()
+
+# cvc_igl packaging (see the libigl block in ../CMakeLists.txt). A CMake script,
+# not an executable, so it runs on the build host for every target, wasm too.
+#  - The igl TUs reach cvc by cvc's ACTUAL type: a STATIC helper inside a shared
+#    cvc, an OBJECT helper whose objects are members of a static libcvc.a. (A
+#    BUILD_SHARED_LIBS test sent the static wasm cvc down the shared path, which
+#    would install a libcvc.a whose mesh_ops.o / fem.o reference igl_detail::
+#    symbols that no installed file defines.)
+#  - Neither cvc_igl nor igl::/Eigen3:: targets leak into cvcTargets.cmake.
+#  - cvc_igl's parallel_for backend equals igl::core's (adding
+#    IGL_PARALLEL_FOR_FORCE_SERIAL only to cvc_igl is an ODR violation in any
+#    static link that also uses igl::core), except that single-threaded wasm
+#    must run serially.
+if(CVC_ENABLE_LIBIGL AND TARGET cvc_igl)
+  get_target_property(_cvc_igl_cvc_type cvc TYPE)
+  get_target_property(_cvc_igl_helper_type cvc_igl TYPE)
+  get_target_property(_cvc_igl_cvc_bindir cvc BINARY_DIR)
+  get_target_property(_cvc_igl_defs cvc_igl COMPILE_DEFINITIONS)
+  get_target_property(_cvc_igl_core_defs igl::core INTERFACE_COMPILE_DEFINITIONS)
+  set(_cvc_igl_serial_private OFF)
+  set(_cvc_igl_serial_core OFF)
+  set(_cvc_igl_serial_required OFF)
+  if(_cvc_igl_defs AND "IGL_PARALLEL_FOR_FORCE_SERIAL" IN_LIST _cvc_igl_defs)
+    set(_cvc_igl_serial_private ON)
+  endif()
+  if(_cvc_igl_core_defs AND "IGL_PARALLEL_FOR_FORCE_SERIAL" IN_LIST _cvc_igl_core_defs)
+    set(_cvc_igl_serial_core ON)
+  endif()
+  if(EMSCRIPTEN AND NOT _cvc_igl_pthreads)
+    set(_cvc_igl_serial_required ON)
+  endif()
+  set(_cvc_igl_check "${CMAKE_CURRENT_BINARY_DIR}/cvc_igl_packaging_check.cmake")
+  file(WRITE "${_cvc_igl_check}" [=[
+# Generated by src/cvc/tests/CMakeLists.txt for the cvc_igl_packaging test.
+set(_fail "")
+if(CVC_TYPE STREQUAL "SHARED_LIBRARY")
+  if(NOT HELPER_TYPE STREQUAL "STATIC_LIBRARY")
+    string(APPEND _fail "shared cvc: cvc_igl must be a private STATIC archive, is ${HELPER_TYPE}\n")
+  endif()
+elseif(CVC_TYPE STREQUAL "STATIC_LIBRARY")
+  if(NOT HELPER_TYPE STREQUAL "OBJECT_LIBRARY")
+    string(APPEND _fail "static cvc: cvc_igl must be an OBJECT library, is ${HELPER_TYPE}\n")
+  endif()
+  if(AR_IS_LIB_EXE)
+    set(_list "${AR}" /nologo /list "${CVC_FILE}")
+  else()
+    set(_list "${AR}" t "${CVC_FILE}")
+  endif()
+  execute_process(COMMAND ${_list} RESULT_VARIABLE _rc OUTPUT_VARIABLE _members
+                  ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    string(APPEND _fail "cannot list the members of ${CVC_FILE}: ${_err}\n")
+  else()
+    foreach(_tu igl_surface igl_locator igl_tet igl_fem)
+      if(NOT _members MATCHES "${_tu}\\.cpp\\.o")
+        string(APPEND _fail "${CVC_FILE} has no ${_tu} object: the installed archive "
+                            "would leave igl_detail:: undefined\n")
+      endif()
+    endforeach()
+  endif()
+else()
+  string(APPEND _fail "unexpected cvc target type ${CVC_TYPE}\n")
+endif()
+
+file(GLOB_RECURSE _exports "${EXPORT_DIR}/cvcTargets*.cmake")
+foreach(_f IN LISTS _exports)
+  file(READ "${_f}" _txt)
+  if(_txt MATCHES "cvc_igl|igl::|Eigen3::")
+    string(APPEND _fail "${_f} names cvc_igl, igl:: or Eigen3:: (none is installed or "
+                        "required downstream)\n")
+  endif()
+endforeach()
+
+if(SERIAL_REQUIRED)
+  if(NOT SERIAL_PRIVATE AND NOT SERIAL_CORE)
+    string(APPEND _fail "single-threaded wasm: libigl's thread pool cannot start, but neither "
+                        "cvc_igl nor igl::core defines IGL_PARALLEL_FOR_FORCE_SERIAL\n")
+  endif()
+elseif(SERIAL_PRIVATE AND NOT SERIAL_CORE)
+  string(APPEND _fail "cvc_igl defines IGL_PARALLEL_FOR_FORCE_SERIAL but igl::core does not: "
+                      "igl::parallel_for would get two bodies in one static link (ODR)\n")
+endif()
+
+if(_fail)
+  message(FATAL_ERROR "cvc_igl packaging:\n${_fail}")
+endif()
+message(STATUS "cvc_igl packaging OK: cvc ${CVC_TYPE}, cvc_igl ${HELPER_TYPE}, serial "
+               "(cvc_igl/igl::core/required) "
+               "${SERIAL_PRIVATE}/${SERIAL_CORE}/${SERIAL_REQUIRED}")
+]=])
+  add_test(NAME cvc_igl_packaging
+    COMMAND ${CMAKE_COMMAND}
+      -DCVC_TYPE=${_cvc_igl_cvc_type}
+      -DHELPER_TYPE=${_cvc_igl_helper_type}
+      "-DCVC_FILE=$<TARGET_FILE:cvc>"
+      "-DAR=${CMAKE_AR}"
+      "-DAR_IS_LIB_EXE=${MSVC}"
+      "-DEXPORT_DIR=${_cvc_igl_cvc_bindir}/CMakeFiles/Export"
+      -DSERIAL_PRIVATE=${_cvc_igl_serial_private}
+      -DSERIAL_CORE=${_cvc_igl_serial_core}
+      -DSERIAL_REQUIRED=${_cvc_igl_serial_required}
+      -P "${_cvc_igl_check}")
+endif()
+
 if(TARGET hdf5_volume_test)
   cvc_discover_tests(hdf5_volume_test)
 endif()
@@ -1726,6 +2226,7 @@ endif()
 if(TARGET state_exec_gaps_test)
   cvc_discover_tests(state_exec_gaps_test)
 endif()
+cvc_discover_tests(state_exec_exceptions_test)
 cvc_discover_tests(state_change_journal_test)
 cvc_discover_tests(state_subscription_router_test)
 cvc_discover_tests(state_sync_adapter_test)
@@ -1747,6 +2248,7 @@ cvc_discover_tests(state_distributed_bench_test)
 cvc_discover_tests(state_message_test)
 cvc_discover_tests(state_bounded_queue_test)
 cvc_discover_tests(state_transport_inproc_test)
+cvc_discover_tests(room_intrinsics_test)
 if(NOT WIN32)
   # Same fork()+IPC timing profile as state_exec_multiprocess_test and
   # state_multiprocess_ipc_test, both of which #121 moved off the parallel
@@ -1774,11 +2276,18 @@ cvc_discover_tests(state_cross_cluster_link_test)
 cvc_discover_tests(state_link_bench_test)
 cvc_discover_tests(state_exec_parser_test)
 cvc_discover_tests(state_exec_types_test)
+cvc_discover_tests(state_exec_deep_data_test)
+cvc_discover_tests(state_exec_data_steps_test)
 cvc_discover_tests(state_exec_builtins_test)
 cvc_discover_tests(state_exec_evaluator_test)
 cvc_discover_tests(state_exec_stackless_evaluator_test)
 cvc_discover_tests(state_exec_codec_test)
 cvc_discover_tests(state_exec_unicode_test)
+cvc_discover_tests(state_exec_stdlib_test)
+cvc_discover_tests(state_exec_heap_test)
+cvc_discover_tests(state_exec_grammar_test)
+cvc_discover_tests(state_exec_corpus_test)
+cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
@@ -1799,6 +2308,7 @@ if(CVC_STATE_MEMORY_MANAGER)
   cvc_discover_tests(state_memory_manager_test)
 endif()
 cvc_discover_tests(state_list_test)
+cvc_discover_tests(state_deep_tree_test)
 cvc_discover_tests(state_delta_codec_test)
 cvc_discover_tests(state_volume_codec_test)
 cvc_discover_tests(state_brick_manifest_test)
@@ -1812,6 +2322,24 @@ cvc_discover_tests(state_hash_partition_test)
 cvc_discover_tests(state_hybrid_time_test)
 cvc_discover_tests(world_clock_test)
 cvc_discover_tests(world_units_test)
+cvc_discover_tests(physics_world_test)
+cvc_discover_tests(physics_field_test)
+cvc_discover_tests(physics_vehicle_test)
+cvc_discover_tests(physics_energy_test)
+cvc_discover_tests(nav_plant_test)
+cvc_discover_tests(nav_dyn_bike_test)
+cvc_discover_tests(nav_terrain_test)
+cvc_discover_tests(nav_binding_test)
+cvc_discover_tests(physics_parity_test)
+cvc_discover_tests(physics_pose_tracker_test)
+cvc_discover_tests(physics_det_math_test)
+cvc_discover_tests(physics_plant_host_test)
+cvc_discover_tests(geometry_height_field_test)
+cvc_discover_tests(world_geometry_test)
+cvc_discover_tests(nav_world_planes_test)
+cvc_discover_tests(nav_vehicle_route_test)
+cvc_discover_tests(nav_route_follower_test)
+cvc_discover_tests(system_macro_headers_test)
 cvc_discover_tests(state_brick_frustum_test)
 cvc_discover_tests(state_conflict_ring_test)
 cvc_discover_tests(state_zstd_round_trip_test)
@@ -1825,10 +2353,27 @@ endif()
 if(TARGET state_transport_grpc_test)
   cvc_discover_tests(state_transport_grpc_test)
 endif()
+if(TARGET state_stream_transport_grpc_test)
+  cvc_discover_tests(state_stream_transport_grpc_test)
+endif()
+if(TARGET stream_bridge_test)
+  cvc_discover_tests(stream_bridge_test)
+endif()
+if(TARGET stream_relay_test)
+  cvc_discover_tests(stream_relay_test)
+endif()
+if(TARGET room_media_test)
+  cvc_discover_tests(room_media_test)
+endif()
 # procedural_geometry_test uses plain main(), not gtest, so register it with
 # a direct add_test() and record it for the registration guard below.
 add_test(NAME procedural_geometry_test COMMAND procedural_geometry_test)
 set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS procedural_geometry_test)
+# physics_replay_test (plain main()): the checked-in trace, step by step; 77 is its skip when
+# the build has no cross-platform-deterministic Jolt.
+add_test(NAME physics_replay_test COMMAND physics_replay_test ${CVC_PHYSICS_REPLAY_TRACE})
+set_tests_properties(physics_replay_test PROPERTIES SKIP_RETURN_CODE 77)
+set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS physics_replay_test)
 if(TARGET hdf5_test)
   cvc_discover_tests(hdf5_test)
 endif()

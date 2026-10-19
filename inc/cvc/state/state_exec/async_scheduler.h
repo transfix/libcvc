@@ -163,6 +163,49 @@ public:
 
   void set_watch_root(cvc::state *root) override { watch_root_ = root; }
 
+  /// This scheduler's built-in parser settings: what a submitted script is parsed with when the
+  /// watch root's `state_exec.defaults.parser.*` keys don't say otherwise. parse_options{} (parse
+  /// at submit) unless the host sets it.
+  void set_parser_defaults(const parse_options &defaults) { parser_defaults_ = defaults; }
+  const parse_options &parser_defaults() const { return parser_defaults_; }
+
+  /// The parser defaults libcvc's own hosts give their async schedulers, so a script behaves the
+  /// same in each: app::exec_scheduler() (Ariadne) and pycvc's Exec. Scripts are read inside
+  /// their process, 1024 tokens per step (docs/STATE_EXEC_GRAMMAR.md, "Reading inside the
+  /// scheduler"). Every script the repo carries fits in one slice (the largest is 159 tokens;
+  /// .ari scripts are at most 24), so a normal action pays one extra step of its 5000. A slice
+  /// costs about 80 us at the parser's measured ~80 ns per token, so a pathologically large
+  /// script is spread over steps instead of stalling a drain.
+  static parse_options host_parser_defaults() {
+    parse_options defaults;
+    defaults.step_tokens = 1024;
+    return defaults;
+  }
+
+  /// This scheduler's built-in deep-data settings: what a submitted process runs with when the
+  /// watch root's `state_exec.defaults.data.*` keys don't say otherwise. data_options{} (no
+  /// slicing) unless the host sets it.
+  void set_data_defaults(const data_options &defaults) { data_defaults_ = defaults; }
+  const data_options &data_defaults() const { return data_defaults_; }
+
+  /// The deep-data settings a process submitted now gets: the watch root's keys over
+  /// data_defaults(). Read on every submit, like the parser settings.
+  data_options data_settings() const {
+    return watch_root_ ? data_options_from_state(*watch_root_, {}, data_defaults_) : data_defaults_;
+  }
+
+  /// The deep-data defaults libcvc's own hosts give their async schedulers (app::exec_scheduler()
+  /// and pycvc's Exec), next to host_parser_defaults(): deep-data work runs 1024 nodes per step
+  /// (docs/STATE_EXEC_GRAMMAR.md, "Deep data on the executor"). At the measured ~45 ns a node
+  /// to free, ~70 to print, ~250 to compare and ~380 to copy, a slice costs 0.05-0.4 ms, so a huge
+  /// value is spread over steps instead of stalling a drain, while the data of a normal program
+  /// (far under 1024 nodes a step) costs it no extra steps.
+  static data_options host_data_defaults() {
+    data_options defaults;
+    defaults.step_nodes = 1024;
+    return defaults;
+  }
+
 private:
   scheduling_policy policy_;
   int next_pid_ = 1;
@@ -172,6 +215,7 @@ private:
   uint64_t total_steps_ = 0;
 
   int current_pid_ = -1;
+  uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   process_ptr current_proc_;
 
   // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12): a coroutine
@@ -180,6 +224,8 @@ private:
   async_stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
+  parse_options parser_defaults_;
+  data_options data_defaults_;
 
   std::unordered_map<int, process_ptr> processes_;
 
@@ -201,6 +247,9 @@ private:
   void check_limits(process &proc);
   void terminate_process(process &proc, value_t result);
   void kill_process(process &proc, const std::string &reason);
+  /// After a process ended: note it for the cycle collector and, unless it is the one stepping
+  /// now, release its evaluation state (process::release_state).
+  void release_if_idle(process &proc);
   process_info make_info(const process &proc) const;
 };
 

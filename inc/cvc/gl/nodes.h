@@ -167,10 +167,11 @@ private:
   std::uint32_t m_mask = 0xFFFFFFFFu;
 };
 
-// Inventor's SoSwitch: traverse one child, or none (-1), or all (-3).
+// Inventor's SoSwitch: traverse one child, or none (Off, -1), or all (All, -3). `Off`, not
+// `None`: X11 <X11/X.h> defines `None` as a macro.
 class Switch : public Group {
 public:
-  static constexpr int None = -1;
+  static constexpr int Off = -1;
   static constexpr int All = -3;
 
   using Group::Group;

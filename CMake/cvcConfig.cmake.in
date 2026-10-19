@@ -115,10 +115,9 @@ if(@CVC_ENABLE_IMAGEMAGICK@)
   # Append the ImageMagick codec delegate closure to the MagickCore target.
   # MagickCore.pc does not list the delegates (they are separate cvcpkg bundles), so a
   # STATIC ImageMagick needs them appended explicitly — the same set
-  # src/cvc/CMakeLists.txt links PRIVATE at build time. Harmless for a SHARED
-  # ImageMagick (its .so already resolves them; the linker dedups). find_library
-  # honours CMAKE_FIND_ROOT_PATH so this works under emcmake, and each missing delegate
-  # is silently skipped. freetype is omitted on purpose (VTK ships vtkfreetype with the
+  # src/cvc/CMakeLists.txt links PRIVATE at build time. find_library honours
+  # CMAKE_FIND_ROOT_PATH so this works under emcmake, and each missing delegate is
+  # silently skipped. freetype is omitted on purpose (VTK ships vtkfreetype with the
   # same symbols -> wasm-ld duplicate-symbol).
   #
   # Gate on the TARGET existing, NOT on _cvc_im_synth: the STOCK FindImageMagick tier
@@ -126,10 +125,21 @@ if(@CVC_ENABLE_IMAGEMAGICK@)
   # find_library, and it wins on a wasm consumer (it finds the static libs in the prefix
   # without pkg-config). Gating on _cvc_im_synth skipped the append for that stock target,
   # so a wasm consumer's link failed with undefined BZ2_*/lzma_*/xml* symbols — which is
-  # what kept a downstream wasm app from linking even after the export was made relocatable. Any
-  # MagickCore that reaches here is either a static one that NEEDS the closure or a shared
-  # one for which the append is a harmless dedup, so run it whenever the target exists.
-  if(TARGET ImageMagick::MagickCore)
+  # what kept a downstream wasm app from linking even after the export was made relocatable.
+  #
+  # But only for a STATIC MagickCore (wasm, or a libMagickCore*.a). A shared one resolves
+  # its own delegates, and the find_library calls below search the whole host, not just
+  # this package's prefix: on a macOS consumer they pulled Homebrew's libbrotlidec onto
+  # the link line and made the program load it at run time (release.yml's sdk-smoke
+  # caught that).
+  set(_cvc_im_static FALSE)
+  foreach(_cvc_im_lib IN LISTS ImageMagick_MagickCore_LIBRARY _CVC_IM_CORE_LINK_LIBRARIES
+                               _CVC_IM_CORE_LIB)
+    if(_cvc_im_lib MATCHES "MagickCore[^/]*\\.a$")
+      set(_cvc_im_static TRUE)
+    endif()
+  endforeach()
+  if(TARGET ImageMagick::MagickCore AND (EMSCRIPTEN OR _cvc_im_static))
     foreach(_cvc_del bz2 jpeg png16 webp webpmux webpdemux webpdecoder sharpyuv
                      tiff xml2 lzma Lerc brotlidec brotlicommon z)
       find_library(_CVC_DEL_${_cvc_del} NAMES ${_cvc_del})
@@ -155,19 +165,21 @@ if(@CVC_ENABLE_ASSIMP@)
   find_dependency(assimp)
   # The cvcpkg assimp bundle's exported target bakes an ABSOLUTE build-sandbox
   # zlib path into assimp::assimp's INTERFACE_LINK_LIBRARIES (libz.so/.a on unix,
-  # zlib.lib on windows), so a consumer's link fails on a path that does not exist
-  # on this machine. Rewrite it to the relocatable ZLIB::ZLIB here so EVERY
-  # consumer (cvcGL, the examples, pycvc-gl, ...) links — this mirrors the same
-  # rewrite in libcvc's own build. Remove once the assimp recipe exports zlib as
-  # an imported target (libcvc-deps follow-up).
+  # zlib.lib or $<LINK_ONLY:.../z.lib> on windows), so a consumer's link fails on a
+  # path that does not exist on this machine. Rewrite it to the relocatable
+  # ZLIB::ZLIB here so EVERY consumer (cvcGL, the examples, pycvc-gl, ...) links —
+  # this mirrors the same rewrite in libcvc's own build (src/cvc/CMakeLists.txt; keep
+  # the two patterns in step). Remove once the assimp recipe exports zlib as an
+  # imported target (libcvc-deps follow-up).
   find_package(ZLIB QUIET)
   get_target_property(_cvc_assimp_ill assimp::assimp INTERFACE_LINK_LIBRARIES)
-  if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|zlib\\.|cvcpkg-builder")
+  # Each alternative runs to the end of its list entry, so a $<LINK_ONLY:...> wrapper goes too.
+  set(_cvc_stale_zlib "[^;]*(libz|zlib)\\.[^;]*|[^;]*[/\\\\]z\\.lib[^;]*")
+  if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|zlib\\.|[/\\\\]z\\.lib|cvcpkg-builder")
     if(TARGET ZLIB::ZLIB)
-      string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "ZLIB::ZLIB" _cvc_assimp_ill
-                           "${_cvc_assimp_ill}")
+      string(REGEX REPLACE "${_cvc_stale_zlib}" "ZLIB::ZLIB" _cvc_assimp_ill "${_cvc_assimp_ill}")
     else()
-      string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
+      string(REGEX REPLACE "${_cvc_stale_zlib}" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
     endif()
     set_target_properties(assimp::assimp PROPERTIES INTERFACE_LINK_LIBRARIES "${_cvc_assimp_ill}")
   endif()
@@ -183,8 +195,28 @@ endif()
 # Gated on OpenMP_CXX_FOUND (the actual build outcome), not the request flag: if
 # OpenMP was requested but not found, cvc::cvc carries no OpenMP::OpenMP_CXX, and
 # a consumer on a no-OpenMP toolchain must NOT be forced to find it.
+# On macOS (AppleClang, no OpenMP runtime of its own) FindOpenMP resolves the
+# target to lib/libomp.dylib + include/omp.h from cvcpkg's `openmp` bundle, which
+# the SDK archive and a cvcpkg prefix both carry next to libcvc, so the prefix on
+# CMAKE_PREFIX_PATH is all a consumer needs.
 if(@OpenMP_CXX_FOUND@)
   find_dependency(OpenMP)
+endif()
+
+# MSVC builds link LLVM's libomp from cvcpkg's `openmp` bundle instead of MSVC's
+# non-redistributable libomp140 (see src/cvc/CMakeLists.txt). A STATIC cvc exports
+# that as $<LINK_ONLY:LLVMOpenMP::omp>, so recreate the target from this package's
+# own lib/libomp-llvm.lib, with the same /NODEFAULTLIB so the consumer's link never
+# binds MSVC's libomp.lib either. Harmless for a SHARED cvc, whose export does not
+# name it.
+if(@CVC_USES_LLVM_OPENMP@ AND NOT TARGET LLVMOpenMP::omp)
+  find_library(_CVC_LLVM_LIBOMP NAMES libomp-llvm HINTS "${PACKAGE_PREFIX_DIR}/lib")
+  if(_CVC_LLVM_LIBOMP)
+    add_library(LLVMOpenMP::omp INTERFACE IMPORTED)
+    set_target_properties(LLVMOpenMP::omp PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${_CVC_LLVM_LIBOMP}"
+      INTERFACE_LINK_OPTIONS "/NODEFAULTLIB:libomp.lib;/NODEFAULTLIB:libompd.lib")
+  endif()
 endif()
 
 if(@CVC_ENABLE_FFTW@)
@@ -245,6 +277,16 @@ if(@ZSTD_FOUND@)
     endif()
   endif()
 endif()
+
+# A STATIC cvc also exports its PRIVATE imported-target links, wrapped in
+# $<LINK_ONLY:...>: yaml-cpp::yaml-cpp, ftxui::*, nlohmann_json_schema_validator::
+# validator, CURL::libcurl (and gRPC/protobuf when built in). A consumer that cannot
+# resolve them stops at generate time with "links to target yaml-cpp::yaml-cpp but
+# the target was not found". The list is whatever src/cvc/CMakeLists.txt actually
+# linked, and it is empty for a SHARED cvc, which absorbed these libraries.
+foreach(_cvc_pkg IN ITEMS @CVC_PRIVATE_LINK_PACKAGES@)
+  find_dependency(${_cvc_pkg})
+endforeach()
 
 include("${CMAKE_CURRENT_LIST_DIR}/cvcTargets.cmake")
 

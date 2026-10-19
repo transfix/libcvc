@@ -32,6 +32,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
@@ -1394,6 +1396,12 @@ int main(int argc, char **argv) {
   // a gentle sway and it roughly halves the wind's per-frame cost; the sea's stride
   // also bounds how often its (not-free) transfer function is rebuilt for the glint.
   const int WIND_STRIDE = 2, SEA_STRIDE = 4, CLOUD_STRIDE = 8, SHADOW_STRIDE = 16;
+  // Every animated layer (tree wind, the sea, the cloud and its shadow) runs on the app's
+  // world clock, driven once per frame through a binding: one speed and one pause for the
+  // whole scene (sim.speed / sim.paused, the keys Ariadne's sim_transport binds), and a
+  // capture's fixed 1/fps makes the frames reproducible.
+  cvc::world_clock &clock = app.world_clock();
+  cvc::world_clock_binding clockDrive(app, clock);
   while (!view.windowClosed()) {
     double t, dt;
     if (capturing) { // fixed synthetic clock -> real-time playback of the animation
@@ -1406,13 +1414,15 @@ int main(int argc, char **argv) {
     }
     view.processUIEvents();
     touch.update(); // apply any pinch/two-finger gesture from this frame
+    clockDrive.drive(dt);
+    const double wt = clock.t(); // world time: every animated layer below reads it
     // Wind: re-pose every tree into the two MERGED forest buffers, then upload each
     // ONCE (not per tree). Interactive playback re-poses every other frame — a gentle
     // sway is imperceptibly stepped at that cadence and it roughly halves the wind's
     // cost; a capture re-poses every frame so nothing stutters.
     if (capturing || frame % WIND_STRIDE == 0) {
       for (Tree &tr : forest)
-        reposeTree(tr, t, woodBuf, needleBuf, uiWind);
+        reposeTree(tr, wt, woodBuf, needleBuf, uiWind);
       woodNode->updateVertices(woodBuf);
       if (needleNode)
         needleNode->updateVertices(needleBuf);
@@ -1426,14 +1436,14 @@ int main(int argc, char **argv) {
     const bool cloudDue = capturing || frame % CLOUD_STRIDE == 1;
     const bool shadowDue = capturing || frame % SHADOW_STRIDE == 3;
     if (seaDue) { // travelling wave
-      seaNode->updateScalars(seaField(t));
+      seaNode->updateScalars(seaField(wt));
       std::vector<double> col, op;
-      seaTransfer(col, op, t);
+      seaTransfer(col, op, wt);
       seaNode->setTransferFunction(col, op);
     }
     if (cloudDue || shadowDue) {
-      double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
-      double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
+      double shift = wt * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
+      double morph = wt / CLOUD_MORPH_S * CLOUD_MAPS;
       std::vector<float> skyF = sky.field(shift, morph);
       if (cloudDue)
         skyNode->updateScalars(skyF); // sky drift + morph

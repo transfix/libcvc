@@ -6,6 +6,7 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/state/state_list.h>
 #include <gtest/gtest.h>
 
 using namespace cvc::state_exec;
@@ -262,6 +263,138 @@ TEST_F(EnvironmentCodecTest, NativeFnBindingsSkipped) {
   EXPECT_EQ(result->lookup("my-builtin"), nullptr);
 }
 
+// The builtins a decoded scope chain lost (native functions are not written), put back in its
+// outermost scope.
+static void restore_builtins(const environment_ptr &env) {
+  environment_ptr outermost = env;
+  while (outermost && outermost->outer)
+    outermost = outermost->outer;
+  const environment_ptr defaults = builtins::make_default_environment();
+  for (auto &[name, val] : defaults->bindings)
+    if (!outermost->bindings.count(name))
+      outermost->bindings[name] = val;
+}
+
+TEST_F(EnvironmentCodecTest, AFunctionItsOwnScopeBinds) {
+  // `defun` binds the function in the scope it captures: encoding used to recurse through the
+  // two forever. Each scope is now written once and referred to.
+  stackless_evaluator ev(builtins::make_default_environment());
+  value_t fact =
+      ev.evaluate(parse("(begin (defun fact (n) (if (< n 2) 1 (* n (fact (- n 1))))) fact)"));
+  auto &node = ctx.root()("__env_test_self__");
+  encode_value(node, fact);
+  value_t back = decode_value(node);
+
+  ASSERT_TRUE(std::holds_alternative<closure_ptr>(back.v));
+  const closure_ptr &f = std::get<closure_ptr>(back.v);
+  ASSERT_TRUE(f->env_snapshot);
+  value_t *bound = f->env_snapshot->lookup("fact");
+  ASSERT_TRUE(bound);
+  ASSERT_TRUE(std::holds_alternative<closure_ptr>(bound->v));
+  EXPECT_EQ(std::get<closure_ptr>(bound->v)->env_snapshot, f->env_snapshot); // the same scope
+
+  restore_builtins(f->env_snapshot);
+  auto global = builtins::make_default_environment();
+  stackless_evaluator run(global);
+  auto env = environment::extend(global);
+  env->set("g", back);
+  EXPECT_EQ(std::get<int64_t>(run.evaluate(parse("(g 5)"), env).v), 120);
+  f->env_snapshot->bindings.clear(); // break the scope -> closure -> scope cycle
+}
+
+TEST_F(EnvironmentCodecTest, ClosuresThatShareAScopeStillShareIt) {
+  auto outer = std::make_shared<environment>();
+  outer->set("base", value_t{100});
+  auto scope = environment::extend(outer);
+  scope->set("n", value_t{1});
+  auto make = [&](const char *body) {
+    auto c = std::make_shared<closure>();
+    c->body = {parse(body)};
+    c->env_snapshot = scope;
+    return value_t{c};
+  };
+  value_t pair = make_list({make("(+ n base)"), make("(set n (+ n 1))")});
+
+  auto &node = ctx.root()("__env_test_shared__");
+  encode_value(node, pair);
+  EXPECT_EQ(cvc::state_list(node("__envs__")).size(), 2u); // scope and outer, once each
+
+  value_t back = decode_value(node);
+  const auto &l = *std::get<list_ptr>(back.v);
+  ASSERT_EQ(l.size(), 2u);
+  const environment_ptr &a = std::get<closure_ptr>(l[0].v)->env_snapshot;
+  const environment_ptr &b = std::get<closure_ptr>(l[1].v)->env_snapshot;
+  ASSERT_TRUE(a);
+  EXPECT_EQ(a, b);
+  ASSERT_TRUE(a->outer);
+  EXPECT_EQ(std::get<int64_t>(a->lookup("base")->v), 100);
+}
+
+TEST_F(EnvironmentCodecTest, OlderSnapshotsStillDecode) {
+  // The layout written before scopes got their own table: the chain inside the closure (an
+  // env_chain, innermost scope first), and each body expression a walk of its own, with its
+  // own __spill__ table.
+  auto &node = ctx.root()("__env_test_older__");
+  auto set_type = [](cvc::state &n, const char *t) { n("__type__").value(std::string(t)); };
+  set_type(node, "closure");
+  cvc::state_list(node("__params__")).push_back().value(std::string("x"));
+  node("__variadic__").value(std::string("0"));
+  cvc::state_list body(node("__body__"));
+  cvc::state &expr0 = body.push_back();
+  set_type(expr0, "symbol");
+  expr0.value(std::string("x"));
+  cvc::state &expr1 = body.push_back(); // spilled into its own table
+  set_type(expr1, "spill_ref");
+  expr1.value(std::string("0"));
+  cvc::state &spilled = cvc::state_list(expr1("__spill__")).push_back();
+  set_type(spilled, "list");
+  (void)cvc::state_list(spilled("__elems__"));
+  cvc::state &env = node("__env__");
+  set_type(env, "env_chain");
+  cvc::state_list scopes(env("__scopes__"));
+  for (auto [key, val] : {std::pair<const char *, int>{"y", 5}, {"z", 6}}) {
+    cvc::state &entry = cvc::state_list(scopes.push_back()("__bindings__")).push_back();
+    entry("__key__").value(std::string(key));
+    set_type(entry("__val__"), "int");
+    entry("__val__").value(std::to_string(val));
+  }
+
+  value_t back = decode_value(node);
+  ASSERT_TRUE(std::holds_alternative<closure_ptr>(back.v));
+  const closure &c = *std::get<closure_ptr>(back.v);
+  ASSERT_EQ(c.params.size(), 1u);
+  EXPECT_EQ(c.params[0].name, "x");
+  ASSERT_EQ(c.body.size(), 2u);
+  EXPECT_EQ(std::get<symbol>(c.body[0].v).name, "x");
+  EXPECT_TRUE(std::get<list_ptr>(c.body[1].v)->empty());
+  ASSERT_TRUE(c.env_snapshot);
+  EXPECT_EQ(std::get<int64_t>(c.env_snapshot->lookup("y")->v), 5);
+  EXPECT_EQ(std::get<int64_t>(c.env_snapshot->lookup("z")->v), 6); // from the outer scope
+}
+
+TEST_F(EnvironmentCodecTest, BadScopeReferencesThrow) {
+  auto outer = std::make_shared<environment>();
+  outer->set("a", value_t{1});
+  auto scope = environment::extend(outer);
+  auto c = std::make_shared<closure>();
+  c->env_snapshot = scope;
+
+  auto &node = ctx.root()("__env_test_bad__");
+  encode_value(node, value_t{c});
+  cvc::state &ref = node("__env__");
+  ASSERT_EQ(ref("__type__").value(), "env_ref");
+  ref.value(std::string("7")); // past the table
+  EXPECT_THROW(decode_value(node), std::runtime_error);
+  ref.value(std::string("0"));
+  EXPECT_NO_THROW(decode_value(node));
+
+  // Entry 1 (the outer scope) made to enclose entry 0 again: lookups would loop forever.
+  cvc::state &outer_ref = cvc::state_list(node("__envs__")).at(1)("__outer__");
+  outer_ref("__type__").value(std::string("env_ref"));
+  outer_ref.value(std::string("0"));
+  EXPECT_THROW(decode_value(node), std::runtime_error);
+}
+
 // ===========================================================================
 // Evaluator-state round-trip tests
 // ===========================================================================
@@ -289,6 +422,37 @@ TEST_F(EvaluatorStateCodecTest, CompletedState) {
   EXPECT_TRUE(restored.done);
   EXPECT_EQ(std::get<int64_t>(restored.result.v), 3);
   EXPECT_TRUE(restored.stack.empty());
+}
+
+TEST_F(EvaluatorStateCodecTest, StateStillReadingItsScript) {
+  // parser.step_tokens: a process snapshotted mid-read keeps its source and settings, and the
+  // restored state reads the script again and evaluates it.
+  parse_options popts;
+  popts.step_tokens = 2;
+  popts.max_depth = 64;
+  auto state = ev->create_state(std::string("(set x 20) (+ x 22)"), nullptr, popts);
+  ev->step(state); // part way through reading
+  ASSERT_TRUE(state.reading);
+
+  auto &node = ctx.root()("__es_reading__");
+  encode_evaluator_state(node, state);
+  auto restored = decode_evaluator_state(node);
+
+  ASSERT_TRUE(restored.reading);
+  EXPECT_EQ(restored.reading->source(), "(set x 20) (+ x 22)");
+  EXPECT_EQ(restored.reading->options().step_tokens, 2u);
+  EXPECT_EQ(restored.reading->options().max_depth, 64u);
+
+  // Native builtins aren't serialized; put them back on the restored environment's root, as
+  // PauseResumeProducesCorrectResult does. Nothing is on the frame stack yet.
+  ASSERT_TRUE(restored.global_env);
+  environment_ptr root_env = restored.global_env;
+  while (root_env->outer)
+    root_env = root_env->outer;
+  const auto builtins_env = builtins::make_default_environment(); // must outlive the loop
+  for (auto &[name, val] : builtins_env->bindings)
+    root_env->set(name, val);
+  EXPECT_EQ(std::get<int64_t>(ev->run(restored).v), 42);
 }
 
 TEST_F(EvaluatorStateCodecTest, PausedState) {

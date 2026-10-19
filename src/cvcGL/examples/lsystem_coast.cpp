@@ -46,6 +46,7 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
@@ -1399,11 +1400,17 @@ int main(int argc, char **argv) {
     ocean->setDiffuse(0.5);
   }
 
-  // A world clock drives the ocean by WORLD time (correct wave speed at any frame
-  // rate; honours coast.clock.scale/.paused; deterministic under a fixed-frame
-  // capture). The trees/clouds keep the demo's own animation clock `t`; the sea's
-  // scale/pause knobs default to 1.0/off, so by default it stays in step with them.
-  cvc::world_clock clock;
+  // The app's world clock drives EVERY animated layer by world time (the sea's FFT, the
+  // tree wind, the cloud drift and its ground shadow): correct speed at any frame rate,
+  // one pause and one speed for all of them, deterministic under a fixed-frame capture.
+  // The frame loop drives it through a binding whose keys are this demo's own knobs
+  // (coast.clock.scale / .paused, publishing coast.clock.t), plus mode / step / tick /
+  // ... beside them under coast.clock.
+  cvc::world_clock &clock = app.world_clock();
+  cvc::world_clock_keys clockKeys = cvc::world_clock_keys::under("coast.clock");
+  clockKeys.speed = "coast.clock.scale";
+  clockKeys.time = "coast.clock.t";
+  cvc::world_clock_binding clockDrive(app, clock, clockKeys);
   double lastWind = knob("coast.water.wind_speed", 9.0),
          lastFetch = knob("coast.water.fetch", 120000.0),
          lastDepth = knob("coast.water.depth", 1000.0),
@@ -1600,13 +1607,17 @@ int main(int argc, char **argv) {
     }
     view.processUIEvents();
     touch.update(); // apply any pinch/two-finger gesture from this frame
+    // World time for this frame: the one drive of the app clock (a capture passes its
+    // fixed 1/fps). Every animated layer below reads `wt`.
+    clockDrive.drive(dt);
+    const double wt = clock.t();
     // Wind: re-pose every tree into the two MERGED forest buffers, then upload each
     // ONCE (not per tree). Interactive playback re-poses every other frame — a gentle
     // sway is imperceptibly stepped at that cadence and it roughly halves the wind's
     // cost; a capture re-poses every frame so nothing stutters.
     if (capturing || frame % WIND_STRIDE == 0) {
       for (Tree &tr : forest)
-        reposeTree(tr, t, woodBuf, needleBuf, uiWind);
+        reposeTree(tr, wt, woodBuf, needleBuf, uiWind);
       woodNode->updateVertices(woodBuf);
       if (needleNode)
         needleNode->updateVertices(needleBuf);
@@ -1619,15 +1630,9 @@ int main(int argc, char **argv) {
     const bool cloudDue = capturing || frame % CLOUD_STRIDE == 1;
     const bool shadowDue = capturing || frame % SHADOW_STRIDE == 3;
 
-    // Ocean: advance the world clock and evolve the FFT cascades on the GPU (no
-    // readback), then push the live uniforms — the mesh shader displaces + shades
-    // straight from the bound displacement textures.
-    clock.set_scale(knob("coast.clock.scale", 1.0));
-    clock.set_mode(knob("coast.clock.paused", 0.0) > 0.5 ? cvc::world_clock::mode::paused
-                                                         : cvc::world_clock::mode::live);
-    clock.advance(dt);
-    const double wt = clock.t();
-    cvc::state::instance(app)("coast.clock.t").value(wt);
+    // Ocean: evolve the FFT cascades to world time on the GPU (no readback), then push
+    // the live uniforms — the mesh shader displaces + shades straight from the bound
+    // displacement textures.
     if (oceanReady) {
       // Rebuild the spectrum only when a spectrum knob actually changes (not free).
       const double wind = knob("coast.water.wind_speed", 9.0),
@@ -1670,8 +1675,8 @@ int main(int argc, char **argv) {
       ocean->setShaderUniformf("uTime", static_cast<float>(wt));
     }
     if (cloudDue || shadowDue) {
-      double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
-      double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
+      double shift = wt * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
+      double morph = wt / CLOUD_MORPH_S * CLOUD_MAPS;
       std::vector<float> skyF = sky.field(shift, morph);
       if (cloudDue)
         skyNode->updateScalars(skyF); // sky drift + morph

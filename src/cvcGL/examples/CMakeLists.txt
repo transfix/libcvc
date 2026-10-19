@@ -19,6 +19,13 @@ add_executable(ariadne_hello ariadne_hello.cpp)
 target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 
+# ariadne_terminal — the same documents in a TERMINAL: widgets through libcvc's terminal backends
+# (FTXUI, or tvision with --backend tvision) and the scene rendered offscreen by cvcGL's
+# TerminalScene, drawn behind them as half-block cells (roadmap §16.6). No window or display.
+add_executable(ariadne_terminal ariadne_terminal.cpp)
+target_link_libraries(ariadne_terminal PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_terminal MODULES ${VTK_LIBRARIES})
+
 # ariadne_stream — the Phase-3 streaming "holy grail": one live video stream shown both as the main
 # scene (a `type: stream` quad filling the viewport) AND in a draggable ImGui `type: stream_view`
 # widget window, wired from stream.ari. Synthetic test pattern by default (headless-verifiable),
@@ -26,6 +33,15 @@ vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 add_executable(ariadne_stream ariadne_stream.cpp)
 target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
+
+# ariadne_conference — the conference host bundle (roadmap §8): ariadne_hello + the five stream/
+# media registrations (stream-open/info/close, gl-bind-stream, capture-camera/-audio, play-audio,
+# type: stream, type: stream_view). It opens NOTHING in C++; conference_media.ari drives the whole
+# capture → stream → render/play pipeline from the DSL program lane. Synthetic video + a 440 Hz tone
+# by default (headless-verifiable); real devices with a CVC_ENABLE_SDL build.
+add_executable(ariadne_conference ariadne_conference.cpp)
+target_link_libraries(ariadne_conference PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_conference MODULES ${VTK_LIBRARIES})
 
 # lsystem_forest is now a PURE .ari demo (lsystem_forest.ari): the island/trees/sea/sky are the
 # cvcGL L-system node types (forest_trees/wave_sea/cloud_sky) + the shader presets (terrain_bump/
@@ -179,9 +195,11 @@ if(EMSCRIPTEN)
   # If CVC_WASM_BUNDLE is empty (the default), the demo falls back to the
   # synthetic city.
   set(_nav_swarm_bundle_flags "")
+  set(_city_bundle_flag "") # just the Austin scene dir @ /bundle — shared by terrain_lab
   if(CVC_WASM_BUNDLE AND EXISTS "${CVC_WASM_BUNDLE}")
     message(STATUS "cvcGL nav_city_swarm wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
     list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
+    set(_city_bundle_flag "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
     get_filename_component(_parent "${CVC_WASM_BUNDLE}" DIRECTORY)
     if(_parent AND EXISTS "${_parent}/shared/Humvee.glb")
       message(STATUS "cvcGL nav_city_swarm wasm: preloading shared vehicle from ${_parent}/shared")
@@ -225,6 +243,11 @@ if(EMSCRIPTEN)
     if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
       target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
     endif()
+    # terrain_lab draws the Austin building shapes from the same bundle (mounted at /bundle), and
+    # falls back to box massing when it is not preloaded.
+    if(_city_bundle_flag AND ("${_wt}" STREQUAL "terrain_lab"))
+      target_link_options(${_wt} PRIVATE ${_city_bundle_flag})
+    endif()
     # The browser-side speedups: state shim (--pre-js) + mimalloc on wasm-mt.
     cvcgl_wasm_app(${_wt})
   endforeach()
@@ -241,11 +264,22 @@ if(EMSCRIPTEN)
 endif()
 
 # Install rules so the cvcgl-examples recipe packages the example binaries with no
-# hand-staging. $ORIGIN/../lib lets them find libcvcGL / libcvc / VTK / Boost in the
-# same cvcpkg prefix with NO LD_LIBRARY_PATH; INSTALL_RPATH_USE_LINK_PATH adds the
-# deps-prefix link dirs too, which cvcpkg's rewrite-install-paths relocates to
-# $ORIGIN-relative. cvcgl-examples is its own install COMPONENT so the recipe can
-# `cmake --install --component cvcgl-examples` and get only the bins (not the cvcGL SDK).
+# hand-staging. $ORIGIN/../lib lets them find libcvc / VTK / Boost / imgui in the
+# same cvcpkg prefix with NO LD_LIBRARY_PATH. cvcgl-examples is its own install
+# COMPONENT so the recipe can `cmake --install --component cvcgl-examples` and get
+# only the bins (not the cvcGL SDK).
+#
+# INSTALL_RPATH_USE_LINK_PATH also writes every link directory into the installed
+# RUNPATH, which is what a local `cmake --install` wants: the installed examples then
+# still find deps that live in other prefixes. A packaged bundle must not have it.
+# There every dependency is installed into the same prefix, so $ORIGIN/../lib is
+# complete, and the link directories are the build machine's prefixes. When
+# publish-cvcpkg.yml builds through build.sh and packs with --from-prefix, cvcpkg
+# never learns those prefixes and cannot rewrite them; its pack-time gate rejects
+# the bundle ("RUNPATH .../stage/lib (a temporary or CI-workspace directory)"). So
+# the recipe's build.sh turns this OFF.
+option(CVCGL_EXAMPLES_RPATH_USE_LINK_PATH
+       "Add the link directories to the installed examples' RUNPATH (OFF for packaging)" ON)
 set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
 # The three headless nav CLIs exist only in native builds (the wasm column has
 # no CLIs in the gallery), so they join the install list conditionally.
@@ -254,7 +288,7 @@ if(NOT EMSCRIPTEN)
 endif()
 set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"
-  INSTALL_RPATH_USE_LINK_PATH ON)
+  INSTALL_RPATH_USE_LINK_PATH ${CVCGL_EXAMPLES_RPATH_USE_LINK_PATH})
 install(TARGETS ${_cvcgl_example_bins}
         RUNTIME DESTINATION bin COMPONENT cvcgl-examples)
 # The bins carry third-party code whose notices a binary redistribution must

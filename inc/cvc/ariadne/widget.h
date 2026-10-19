@@ -37,6 +37,8 @@ enum class Kind {
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
   Combo,          // bound enum-as-text state
+  InputText,      // bound string state (a single-line text field)
+  InputInt,       // bound int state (a single-line numeric field)
   Color,          // bound "r,g,b" state (an RGB picker; §G7)
   Image,          // a host-published image viewer (a live raster); src / bound name
   Button,         // a fire-once button -> raises `on` event
@@ -80,7 +82,9 @@ struct Track {
 };
 
 enum class LayoutKind { Vertical, Horizontal, Grid };
-enum class BorderShow { None, Inner, Outer, All };
+// `Off`, not `None`: X11 <X11/X.h> defines `None` as a macro, which would break this
+// declaration in any translation unit that includes an X11 header first.
+enum class BorderShow { Off, Inner, Outer, All };
 
 // A container's layout (§3.0.2 / §3.0.3b). `col_widths` sizes the tracks of a
 // Grid/Horizontal layout; `resizable` lets the user drag the column seams (native
@@ -90,12 +94,12 @@ struct Layout {
   std::vector<Track> col_widths;  // Grid/Horizontal column tracks
   std::vector<Track> row_heights; // Grid row tracks (§3.0.3b increment 2)
   bool resizable = false;
-  BorderShow borders = BorderShow::None;
+  BorderShow borders = BorderShow::Off;
   bool has_border_color = false;
   float border_color[4] = {0.3f, 0.3f, 0.35f, 1.0f};
   bool is_set() const {
     return kind != LayoutKind::Vertical || !col_widths.empty() || !row_heights.empty() ||
-           resizable || borders != BorderShow::None;
+           resizable || borders != BorderShow::Off;
   }
   // A resizable grid with sized rows is realized as a vertical split-pane stack
   // with draggable seams (§3.0.3b: "rows are a manual splitter"); anything else
@@ -379,6 +383,36 @@ inline Widget combo(std::string label, std::string bind, std::vector<std::string
   w.bind = std::move(bind);
   w.options = std::move(options);
   w.sdef = std::move(def);
+  return w;
+}
+
+// A single-line text field bound to a string state key (chat input, display name, room id). `on`
+// (optional) is an event raised when the edit commits (Enter / focus-leave) — e.g. send-on-enter
+// for a chat box. `def` seeds the key when it is unset.
+inline Widget input_text(std::string label, std::string bind, std::string on = std::string(),
+                         std::string def = std::string()) {
+  Widget w;
+  w.kind = Kind::InputText;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.on = std::move(on);
+  w.sdef = std::move(def);
+  return w;
+}
+
+// A single-line numeric field bound to an int state key. Reuses the text primitive; the core parses
+// the field to an int on commit (fail-safe: a non-numeric entry keeps the current value) and clamps
+// to [lo, hi] when they differ (lo == hi = no clamp). `def` seeds the key when it is unset.
+inline Widget input_int(std::string label, std::string bind, int lo = 0, int hi = 0, int def = 0,
+                        std::string on = std::string()) {
+  Widget w;
+  w.kind = Kind::InputInt;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.ilo = lo;
+  w.ihi = hi;
+  w.idef = def;
+  w.on = std::move(on);
   return w;
 }
 

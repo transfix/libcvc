@@ -54,6 +54,8 @@ pb::MutationOp encode_op(state_mutation_op op) {
     return pb::MUTATION_OP_DELEGATE_SUBTREE;
   case state_mutation_op::revoke_delegation:
     return pb::MUTATION_OP_REVOKE_DELEGATION;
+  case state_mutation_op::set_property:
+    return pb::MUTATION_OP_SET_PROPERTY;
   }
   return pb::MUTATION_OP_UNSPECIFIED;
 }
@@ -80,8 +82,51 @@ state_mutation_op decode_op(pb::MutationOp op) {
     return state_mutation_op::delegate_subtree;
   case pb::MUTATION_OP_REVOKE_DELEGATION:
     return state_mutation_op::revoke_delegation;
+  case pb::MUTATION_OP_SET_PROPERTY:
+    return state_mutation_op::set_property;
   default:
     return state_mutation_op::set_value;
+  }
+}
+
+// Shared state_payload <-> pb::Payload mapping, used by both Mutation framing
+// and the snapshot entry's data() payload.
+void set_pb_payload(pb::Payload *p, const state_payload &pl) {
+  switch (pl.kind) {
+  case state_payload_kind::none:
+    p->set_none(true);
+    break;
+  case state_payload_kind::inline_bytes:
+    p->set_inline_bytes(std::string(pl.inline_bytes.begin(), pl.inline_bytes.end()));
+    break;
+  case state_payload_kind::blob: {
+    auto *b = p->mutable_blob();
+    b->set_digest(pl.blob.digest);
+    b->set_size_bytes(pl.blob.size_bytes);
+    b->set_codec(pl.blob.codec);
+    break;
+  }
+  }
+}
+
+void read_pb_payload(const pb::Payload &p, state_payload &pl) {
+  switch (p.kind_case()) {
+  case pb::Payload::kInlineBytes: {
+    const std::string &s = p.inline_bytes();
+    pl.kind = state_payload_kind::inline_bytes;
+    pl.inline_bytes.assign(s.begin(), s.end());
+    break;
+  }
+  case pb::Payload::kBlob:
+    pl.kind = state_payload_kind::blob;
+    pl.blob.digest = p.blob().digest();
+    pl.blob.size_bytes = p.blob().size_bytes();
+    pl.blob.codec = p.blob().codec();
+    break;
+  case pb::Payload::kNone:
+  case pb::Payload::KIND_NOT_SET:
+    pl.kind = state_payload_kind::none;
+    break;
   }
 }
 
@@ -98,22 +143,7 @@ void encode_mutation(const state_mutation &m, pb::Mutation *out) {
   out->set_latest_value_only(m.latest_value_only);
   out->set_hlc_time(m.hlc_time);
 
-  pb::Payload *p = out->mutable_payload();
-  switch (m.payload.kind) {
-  case state_payload_kind::none:
-    p->set_none(true);
-    break;
-  case state_payload_kind::inline_bytes:
-    p->set_inline_bytes(std::string(m.payload.inline_bytes.begin(), m.payload.inline_bytes.end()));
-    break;
-  case state_payload_kind::blob: {
-    auto *b = p->mutable_blob();
-    b->set_digest(m.payload.blob.digest);
-    b->set_size_bytes(m.payload.blob.size_bytes);
-    b->set_codec(m.payload.blob.codec);
-    break;
-  }
-  }
+  set_pb_payload(out->mutable_payload(), m.payload);
 }
 
 state_mutation decode_mutation(const pb::Mutation &in) {
@@ -129,29 +159,8 @@ state_mutation decode_mutation(const pb::Mutation &in) {
   m.string_value = in.string_value();
   m.latest_value_only = in.latest_value_only();
   m.hlc_time = in.hlc_time();
-  if (in.has_payload()) {
-    const auto &p = in.payload();
-    switch (p.kind_case()) {
-    case pb::Payload::kNone:
-      m.payload.kind = state_payload_kind::none;
-      break;
-    case pb::Payload::kInlineBytes: {
-      const std::string &s = p.inline_bytes();
-      m.payload.kind = state_payload_kind::inline_bytes;
-      m.payload.inline_bytes.assign(s.begin(), s.end());
-      break;
-    }
-    case pb::Payload::kBlob:
-      m.payload.kind = state_payload_kind::blob;
-      m.payload.blob.digest = p.blob().digest();
-      m.payload.blob.size_bytes = p.blob().size_bytes();
-      m.payload.blob.codec = p.blob().codec();
-      break;
-    case pb::Payload::KIND_NOT_SET:
-      m.payload.kind = state_payload_kind::none;
-      break;
-    }
-  }
+  if (in.has_payload())
+    read_pb_payload(in.payload(), m.payload);
   return m;
 }
 
@@ -287,9 +296,14 @@ public:
           se.comment = e.comment();
           se.hidden = e.hidden();
           se.read_only = e.read_only();
+          for (const auto &p : e.properties())
+            se.properties[p.first] = p.second;
           se.type_name = e.type_name();
           se.origin_node_id = e.origin_node_id();
           se.sequence = e.sequence();
+          se.data_type_name = e.data_type_name();
+          if (e.has_data_payload())
+            read_pb_payload(e.data_payload(), se.data_payload);
           entries.push_back(std::move(se));
         }
         _owner->on_inbound_snapshot_response(sr.request_id(), entries, sr.final());
@@ -477,9 +491,14 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
           se.comment = e.comment();
           se.hidden = e.hidden();
           se.read_only = e.read_only();
+          for (const auto &p : e.properties())
+            se.properties[p.first] = p.second;
           se.type_name = e.type_name();
           se.origin_node_id = e.origin_node_id();
           se.sequence = e.sequence();
+          se.data_type_name = e.data_type_name();
+          if (e.has_data_payload())
+            read_pb_payload(e.data_payload(), se.data_payload);
           entries.push_back(std::move(se));
         }
         on_inbound_snapshot_response(sr.request_id(), entries, sr.final());
@@ -958,9 +977,12 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
       te.comment = std::move(se.comment);
       te.hidden = se.hidden;
       te.read_only = se.read_only;
+      te.properties = std::move(se.properties);
       te.type_name = std::move(se.type_name);
       te.origin_node_id = std::move(se.origin_node_id);
       te.sequence = se.sequence;
+      te.data_type_name = std::move(se.data_type_name);
+      te.data_payload = std::move(se.data_payload);
       all.push_back(std::move(te));
     }
   }
@@ -977,9 +999,14 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
     pe->set_comment(e.comment);
     pe->set_hidden(e.hidden);
     pe->set_read_only(e.read_only);
+    for (const auto &p : e.properties)
+      (*pe->mutable_properties())[p.first] = p.second;
     pe->set_type_name(e.type_name);
     pe->set_origin_node_id(e.origin_node_id);
     pe->set_sequence(e.sequence);
+    pe->set_data_type_name(e.data_type_name);
+    if (e.data_payload.kind != state_payload_kind::none)
+      set_pb_payload(pe->mutable_data_payload(), e.data_payload);
   }
 
   if (conn && conn->alive.load() && conn->can_write()) {

@@ -31,7 +31,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/core/text.h> // display-width-aware column padding (§17.3)
+#include <cvc/core/text.h>        // display-width-aware column padding (§17.3)
+#include <cvc/core/world_clock.h> // the sea and cloud animate on the app's world clock
+#include <cvc/core/world_clock_binding.h>
+#include <cvc/core/world_units.h> // realistic world dimensions (metres/km) — §space units
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
@@ -53,15 +56,24 @@
 #include <emscripten.h>
 #endif
 #include <cvc/lsys/derive.h>
+#include <cvc/lsys/forest.h> // the preserved demo tree generators (grow_pine / grow_branchy)
 #include <cvc/lsys/grammar.h>
 #include <cvc/lsys/interp.h>
 #include <cvc/lsys/recipes.h>
+#include <cvc/lsys/rng.h> // hashed per-tree draws (uni/irand/cell_id)
+#include <cvc/model/model.h>
+#include <cvc/model/model_file_io.h> // read the Austin building bundle (glb)
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
+#include <cvc/world/building_archetypes.h>
 #include <cvc/world/grid.h>
 #include <cvc/world/heightfield.h>
 #include <cvc/world/raster.h>
+#include <cvc/world/road_mesh.h>
+#include <cvc/world/road_raster.h>
+#include <cvc/world/roads.h>
 #include <cvc/world/scatter.h>
+#include <cvc/world/sites.h>
 #include <cvc/world/surface.h>
 #include <deque>
 #include <filesystem>
@@ -113,7 +125,17 @@ Vec3d rotZ(Vec3d p, double c, double s) { return {p.x * c - p.y * s, p.x * s + p
 // ── the world scale + shared state the sea/sky/sun read ──────────────────────
 // world_model owns the heightfield; a pointer to the live one lets the water/shadow
 // code sample the same terrain the mesh was built from, across regenerations.
-double gHalf = 600.0;   // world spans [-gHalf, gHalf]^2 (metres)
+double gHalf = 600.0; // world spans [-gHalf, gHalf]^2 (metres) — set live from the size knob
+// The world's unit scale: one world unit == one metre. Realistic, centred-on-origin coordinates;
+// used to label spans in the natural regime (metres, promoting to km past 1000 m).
+cvc::world_units gUnits{cvc::world_units::config{cvc::world_units::system::si, 1.0}};
+// Render tessellation of the terrain MESH (cells = 2*gHalf/(gTerrainN-1)); scaled with the world
+// size in rebuild() so a big terrain stays detailed (and stresses the mesh/LOD path), capped.
+int gTerrainN = 289;
+// Resolution of the material / height / asphalt RASTER + the texture source. DECOUPLED from and
+// capped well below gTerrainN, so a huge terrain mesh does not make the per-cell raster work (which
+// includes an O(cells * road-segments) asphalt stamp) blow up.
+int gRasterN = 289;
 double gSeaLevel = 0.0; // water surface / shoreline height
 const world::heightfield *gHF = nullptr;
 
@@ -122,15 +144,18 @@ double terrainH(double x, double y) { return gHF ? gHF->sample(x, y) : 0.0; }
 // ── generation parameters (the ImGui panel edits these) ──────────────────────
 struct GenParams {
   std::uint64_t seed = 7;
+  // World half-extent in METRES — the terrain spans 2*half_m per side. A first-class knob so the
+  // lab can build very large terrains (to stress the mesh/LOD path) or tight city blocks.
+  double half_m = 600.0;
   int trees = 500;
   int rocks = 90;
   int buildings = 110;
   int tree_gen = 5;
-  double amp_m = 44.0;
+  double amp_m = 90.0;
   // Water SURFACE height. The heightfield floor sits at 0, so terrain rises in
   // [0, amp]; anything below this line floods — valleys become streams/ponds and
-  // the low rim becomes coast. Default ~a third of the relief, so water reads.
-  double water_level_m = 13.0;
+  // the low rim becomes coast. Raised by default so the water sections read clearly.
+  double water_level_m = 34.0;
   int preset = 0; // 0 standard, 1 forest, 2 urban, 3 sparse, 4 island
   int ontology = 0;
 };
@@ -168,14 +193,11 @@ world::world_params toWorldParams(const GenParams &gp) {
     wp.hf.shelf_m = -std::max(6.0, gp.water_level_m + 4.0);
   }
   world::scatter_params &s = wp.sc;
-  // The default L-system set for Terrain Lab: favour the full-crowned oak, a good
-  // share of conical pine, then shrubs and a few slender birches — a mix that reads
-  // as varied woodland rather than a field of poles. Rocks are boulder clusters;
-  // buildings split concrete offices and brick houses (concrete/brick materials).
-  s.trees = {{"oak_sympodial", 0.46},
-             {"pine_monopodial", 0.30},
-             {"shrub_bush", 0.16},
-             {"birch_slender", 0.08}};
+  // Trees use the two PRESERVED demo generators, not the generic parametric recipes: "native_pine"
+  // (the conical string-grammar conifer) and "native_branchy" (the recursive broadleaf splitter) —
+  // the exact look from lsystem_forest. These are RESERVED recipe names dispatched in buildProps()
+  // straight to cvc::lsys::grow_pine / grow_branchy, bypassing derive()/interpret(). An even mix.
+  s.trees = {{"native_pine", 0.5}, {"native_branchy", 0.5}};
   s.rocks = {{"boulder_cluster", 1.0}};
   s.buildings = {{"office_block", 0.5}, {"brick_house", 0.5}};
   s.tree_count = gp.trees;
@@ -224,7 +246,7 @@ void presetFill(GenParams &gp) {
 }
 
 // ── raster -> terrain mesh ───────────────────────────────────────────────────
-constexpr int TERRAIN_N = 289; // render grid resolution (cell = 2*gHalf/(N-1))
+// (terrain render resolution is now the runtime gTerrainN above, scaled with the world size)
 
 // Colour for one raster cell under the current colour mode.
 cvc::geometry::color_t cellColor(const world::raster_out &ro, const world::surface_registry &reg,
@@ -249,32 +271,77 @@ cvc::geometry::color_t cellColor(const world::raster_out &ro, const world::surfa
   return {sc.albedo[0], sc.albedo[1], sc.albedo[2]};
 }
 
-// Build the terrain mesh straight from the raster: a vertex per cell, coloured by
-// the current colour mode, real heights. Row 0 == min_y (grid_spec convention).
-// The terrain mesh: real heights + UVs (world -> [0,1]) so the surface colour comes
-// from a baked texture (materials + dirt + roads + plazas), not per-vertex colour.
-cvc::geometry buildTerrain(cvc::app &app, const world::raster_out &ro, const world::grid_spec &g) {
+// Build the terrain mesh by sampling the height field at NxN over [-half,half]^2, with UVs (world
+// -> [0,1]) so the surface colour comes from the baked texture. The mesh resolution N (gTerrainN)
+// is DECOUPLED from the raster/texture-source grid, so a large, high-poly terrain (the LOD stress
+// mesh) does not blow up the per-cell raster work (material / asphalt stamp / texture paint).
+cvc::geometry buildTerrainMesh(cvc::app &app, int N, double half) {
   cvc::geometry geo(app);
   auto &pts = geo.points();
   auto &uvs = geo.uvs();
-  pts.reserve(ro.klass.size());
-  uvs.reserve(ro.klass.size());
-  for (int r = 0; r < g.rows; ++r)
-    for (int c = 0; c < g.cols; ++c) {
-      std::size_t i = std::size_t(r) * g.cols + c;
-      pts.push_back({g.world_x(c), g.world_y(r), double(ro.height[i])});
-      uvs.push_back({double(c) / (g.cols - 1), double(r) / (g.rows - 1)});
+  pts.reserve(std::size_t(N) * N);
+  uvs.reserve(std::size_t(N) * N);
+  const double span = 2.0 * half, step = span / (N - 1);
+  for (int r = 0; r < N; ++r)
+    for (int c = 0; c < N; ++c) {
+      const double x = -half + c * step, y = -half + r * step;
+      pts.push_back({x, y, terrainH(x, y)});
+      uvs.push_back({double(c) / (N - 1), double(r) / (N - 1)});
     }
   auto &tris = geo.tris();
-  tris.reserve(std::size_t(g.rows - 1) * (g.cols - 1) * 2);
-  for (int r = 0; r < g.rows - 1; ++r)
-    for (int c = 0; c < g.cols - 1; ++c) {
-      idx_t v = idx_t(r) * g.cols + c;
-      idx_t vr = v + 1, vd = v + g.cols, vrd = vd + 1;
+  tris.reserve(std::size_t(N - 1) * (N - 1) * 2);
+  for (int r = 0; r < N - 1; ++r)
+    for (int c = 0; c < N - 1; ++c) {
+      idx_t v = idx_t(r) * N + c;
+      idx_t vr = v + 1, vd = v + N, vrd = vd + 1;
       tris.push_back({v, vr, vd});
       tris.push_back({vr, vrd, vd});
     }
   return geo;
+}
+
+// Procedural fragment bump map for the ground (verbatim GLSL from lsystem_forest / the Python demo:
+// fBm value-noise height, normal perturbed by its surface gradient — Mikkelsen's tangent-free
+// method). Adds fine surface relief in the lighting without more triangles. Needs world-space
+// vertexMC, hence disableCoordinateShiftScale.
+#ifdef __EMSCRIPTEN__
+#define CVC_FS_NORMAL "normalizedNormalVCVSOutput"
+#else
+#define CVC_FS_NORMAL "normalVCVSOutput"
+#endif
+const char *GROUND_GLSL =
+    "float ghash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+    "float gnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  float a=ghash(i), b=ghash(i+vec2(1.,0.)), c=ghash(i+vec2(0.,1.)), d=ghash(i+vec2(1.,1.));\n"
+    "  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);\n"
+    "}\n"
+    "float groundH(vec3 p){\n"
+    "  vec2 q = p.xy * 0.35;\n"
+    "  float f = 0.0, a = 0.5, fr = 1.0;\n"
+    "  for (int i = 0; i < 5; i++){ f += a*gnoise(q*fr); a *= 0.5; fr *= 2.03; }\n"
+    "  return f;\n"
+    "}\n";
+
+void addTerrainBump(GeometryNode &node) {
+  node.disableCoordinateShiftScale(); // vertexMC in the shader becomes world xy
+  node.addVertexShaderReplacement("//VTK::Normal::Dec", "//VTK::Normal::Dec\nout vec3 gCoord;");
+  node.addVertexShaderReplacement("//VTK::PositionVC::Impl",
+                                  "//VTK::PositionVC::Impl\n  gCoord = vertexMC.xyz;");
+  node.addFragmentShaderReplacement(
+      "//VTK::Normal::Dec", std::string("//VTK::Normal::Dec\nin vec3 gCoord;\n") + GROUND_GLSL);
+  node.addFragmentShaderReplacement("//VTK::Normal::Impl",
+                                    "//VTK::Normal::Impl\n"
+                                    "  {\n"
+                                    "    float h = groundH(gCoord);\n"
+                                    "    vec3 sS = dFdx(vertexVC.xyz);\n"
+                                    "    vec3 sT = dFdy(vertexVC.xyz);\n"
+                                    "    vec3 vn = " CVC_FS_NORMAL ";\n"
+                                    "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+                                    "    float det = dot(sS, R1);\n"
+                                    "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+                                    "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.4*sg);\n"
+                                    "  }\n");
 }
 
 // ── prop tessellation (L-system structure -> merged geometry) ────────────────
@@ -420,8 +487,35 @@ private:
 // Tessellate every placed prop into two merged meshes: solid (trunks/branches +
 // rock/building boxes, per-vertex material colour) and foliage (leaf quads).
 // Render the scattered TREES and ROCKS (buildings are handled by buildBuildings).
+// The two PRESERVED demo tree generators, invoked by reserved recipe name — the exact look from
+// lsystem_forest, not the generic parametric recipes. grow_pine fills the solid (trunk/branches)
+// AND a needle (LINES) mesh; grow_branchy fills only the solid. Per-tree size / maturity / length
+// jitter mirror grow_forest() so the shapes match, keyed by a STABLE cell id from the tree's
+// position (insertion-stable, deterministic). Returns false for any non-reserved recipe.
+bool growNativeTree(const std::string &recipe, const world::placed_prop &pp, std::uint64_t seed,
+                    cvc::geometry &solid, cvc::geometry &needle) {
+  using namespace cvc::lsys;
+  static const int MATURITY[7] = {1, 2, 2, 3, 3, 3, 4};
+  const std::uint64_t el =
+      cell_id(std::int32_t(std::lround(pp.x)), std::int32_t(std::lround(pp.y)));
+  if (recipe == "native_pine") {
+    const double size = (0.55 + 0.4 * uni(seed, stream::size, el, 0)) * 1.35 * pp.scale;
+    const int maturity = MATURITY[irand(seed, stream::maturity, el, 0, 0, 6)];
+    grow_pine(solid, needle, pp.x, pp.y, pp.z, size, maturity);
+    return true;
+  }
+  if (recipe == "native_branchy") {
+    const double lenJitter = uni(seed, stream::size, el, 1, 0.8, 1.25);
+    const std::uint64_t treeSeed = detail::splitmix(seed ^ path_id(el, 0xB2A4u));
+    grow_branchy(solid, treeSeed, pp.x, pp.y, pp.z, 6.0 * pp.scale * lenJitter, 0.7 * pp.scale, 4,
+                 3);
+    return true;
+  }
+  return false;
+}
+
 void buildProps(cvc::app &app, const world::world_model &wm, const world::surface_registry &reg,
-                PropLib &lib, cvc::geometry &solid, cvc::geometry &foliage) {
+                PropLib &lib, cvc::geometry &solid, cvc::geometry &foliage, cvc::geometry &needle) {
   const bool dbg = std::getenv("CVC_TL_DEBUG") != nullptr;
   const double kStem = 1.7, kLeaf = 2.2;
   std::set<std::string> buildingRecipes;
@@ -432,6 +526,11 @@ void buildProps(cvc::app &app, const world::world_model &wm, const world::surfac
   std::size_t i = 0;
   for (const world::placed_prop &pp : props) {
     if (buildingRecipes.count(pp.recipe)) { // buildings have their own massing generator
+      ++i;
+      continue;
+    }
+    if (growNativeTree(pp.recipe, pp, wm.params().seed, solid,
+                       needle)) { // native_pine / native_branchy
       ++i;
       continue;
     }
@@ -584,6 +683,113 @@ void buildBuildings(cvc::app &app, const world::world_model &wm, const world::su
   }
 }
 
+// ── procedural city (roads-first) ────────────────────────────────────────────
+// The newer path: generate a real street network (cvc::world::roads — a tensor-field grid that
+// bends to follow the terrain), lay out building lots along both sides of every street
+// (cvc::world::sites), and stamp REAL building shapes from the published Austin city bundle
+// (buildings.glb, the nav demos' scene) into those lots. Roads are drawn as an extruded 3D surface
+// and burned into the surface raster as asphalt. This reverses the old scatter->buildings->roads
+// order (buildings now follow the roads, not the other way round). If the Austin bundle is absent
+// the lab falls back to the box-massing buildings below, so it still runs without the assets.
+
+// The Austin building archetype library, loaded once. Discovery: $CVC_NAV_BUNDLE (a buildings.glb
+// file, or a directory / scene dir containing one), else a buildings.glb beside the working dir.
+const world::building_library &cityLibrary() {
+  static const world::building_library lib = [] {
+    std::vector<std::string> paths;
+    if (const char *env = std::getenv("CVC_NAV_BUNDLE"); env && *env) {
+      const std::string e(env);
+      paths = {e, e + "/buildings.glb", e + "/austin_south/buildings.glb"};
+    }
+    paths.push_back("/bundle/buildings.glb"); // emscripten --preload-file mount (wasm)
+    paths.push_back("buildings.glb");
+    for (const std::string &p : paths) {
+      world::building_library L = world::load_building_library(p);
+      if (!L.empty()) {
+        std::fprintf(stderr, "terrain_lab: %zu building archetypes from %s\n", L.size(), p.c_str());
+        return L;
+      }
+    }
+    std::fprintf(stderr,
+                 "terrain_lab: no Austin building bundle (set CVC_NAV_BUNDLE) — box massing\n");
+    return world::building_library{};
+  }();
+  return lib;
+}
+
+// Road-generation parameters scaled to the lab's world size (gHalf). Low branch_chance so the
+// streets run between junctions (real blocks a building can sit on) rather than a dense crosshatch.
+world::road_params cityRoadParams(std::uint64_t seed) {
+  world::road_params rp;
+  rp.half = gHalf;
+  rp.seed = seed;
+  // Moderate branching + roomy blocks = a readable street grid (not the dense crosshatch the
+  // default branch_chance makes, but enough roads to form a town). Short segment steps so each road
+  // ribbon hugs the terrain instead of a long flat quad poking through it.
+  rp.branch_chance = 0.14;
+  rp.terrain_weight = 0.35; // bend toward contours, but keep a readable grid
+  rp.block_size = std::max(110.0, gHalf * 0.20);
+  rp.local_block = std::max(48.0, gHalf * 0.08);
+  rp.segment_len = std::max(6.0, gHalf * 0.012);
+  rp.core_radius = gHalf * 0.6;
+  rp.arterial_width = 8.0; // thin carriageways
+  rp.local_width = 4.5;
+  return rp;
+}
+
+// Drop road segments that run below the water line (level-set at `waterLevel` on the heightfield)
+// so streets stay on dry land; endpoints left at the shore are fine. Rewrites the network in place.
+void pruneUnderwaterRoads(world::road_network &net, double waterLevel) {
+  std::vector<world::road_segment> keep;
+  keep.reserve(net.segments.size());
+  for (const world::road_segment &s : net.segments) {
+    if (s.a < 0 || s.b < 0 || s.a >= int(net.nodes.size()) || s.b >= int(net.nodes.size()))
+      continue;
+    const double mx = 0.5 * (net.nodes[s.a].x + net.nodes[s.b].x);
+    const double my = 0.5 * (net.nodes[s.a].y + net.nodes[s.b].y);
+    if (terrainH(mx, my) > waterLevel + 0.5)
+      keep.push_back(s);
+  }
+  net.segments.swap(keep);
+}
+
+// Stamp the Austin archetypes along the roads into `out` (concrete-grey, lit). Lots whose footprint
+// centre falls below the water line are dropped (same level-set boundary as the roads). Returns the
+// number of buildings placed (0 when the library is empty — caller then uses box massing).
+std::size_t buildCityBuildings(const world::road_network &net, std::uint64_t seed,
+                               double waterLevel, cvc::geometry &out) {
+  const world::building_library &lib = cityLibrary();
+  if (lib.empty())
+    return 0;
+  world::site_params sp;
+  sp.seed = seed;
+  sp.frontage = 10.0; // tight lots -> dense frontage (more buildings per street)
+  sp.spacing = 2.0;
+  sp.lot_depth = 18.0;
+  sp.setback = 4.0;
+  sp.junction_clear = 8.0;
+  std::vector<world::lot> lots = world::layout_lots(net, sp);
+  // Valid-placement level set: keep only lots on dry land, above the water surface.
+  lots.erase(
+      std::remove_if(lots.begin(), lots.end(),
+                     [&](const world::lot &L) { return terrainH(L.x, L.y) <= waterLevel + 1.0; }),
+      lots.end());
+  world::fit_params fp;
+  fp.seed = seed;
+  const std::vector<world::building_instance> inst =
+      world::fit_buildings(lib, lots, fp, [](double x, double y) { return terrainH(x, y); });
+  cvc::geometry b = world::stamp_buildings(lib, inst);
+  if (b.const_points().empty())
+    return 0;
+  if (b.const_normals().size() != b.const_points().size())
+    b.compute_normals();
+  // The Austin meshes carry no material colour; give them a uniform concrete tone so the per-vertex
+  // "props" shading path renders them.
+  b.colors().assign(b.const_points().size(), cvc::geometry::color_t{{0.64, 0.62, 0.59}});
+  out.merge(b);
+  return inst.size();
+}
+
 // ── streets + terrain texture: roads and plazas are BAKED INTO the terrain's
 // texture (not draped quads, which z-fight and shimmer). The mesh carries UVs; the
 // texture holds the final surface colour — per-cell material (+ dirt/grass variance
@@ -662,7 +868,7 @@ double gfbm2(double x, double y) {
 // Bake the terrain surface into an RGB texture (TEX x TEX). Row 0 == min_y (v=0),
 // matching the mesh UVs. In material mode grass is broken up with dirt / dry-grass
 // patches and the roads + plazas are painted on top; QA colour modes stay raw.
-constexpr int TEX = 1280;
+constexpr int TEX = 2048; // high-res terrain surface texture (material + roads + shoreline)
 std::vector<unsigned char> paintTerrain(int mode, const world::raster_out &ro,
                                         const world::grid_spec &g,
                                         const world::surface_registry &reg,
@@ -1104,6 +1310,7 @@ int main(int argc, char **argv) {
 
   GenParams gp;
   gp.seed = seed;
+  gp.half_m = half; // the --half CLI value seeds the live world-size knob
   for (int i = 0; i < 5; ++i)
     if (preset == kPresetNames[i])
       gp.preset = i;
@@ -1123,7 +1330,7 @@ int main(int argc, char **argv) {
   world::grid_spec grid;
   world::raster_out ro;
   auto rasterize = [&]() {
-    grid.rows = grid.cols = TERRAIN_N;
+    grid.rows = grid.cols = gRasterN;
     grid.min_x = grid.min_y = -gHalf;
     grid.max_x = grid.max_y = gHalf;
     world::raster(wm, grid, ro);
@@ -1142,12 +1349,33 @@ int main(int argc, char **argv) {
   };
 
   auto rebuild = [&](bool reframe) {
+    // The world size is a live knob. Derive gHalf and every size-dependent extent from it, and
+    // scale the render tessellation so a big terrain stays detailed (cell ~ fixed metres, capped) —
+    // this is the mesh the LOD path is stress-tested on. Must precede toWorldParams (which reads
+    // gHalf).
+    gHalf = std::max(50.0, gp.half_m);
+    gSeaN = std::max(80, std::min(320, int(std::lround(2.0 * gHalf / 8.0))));
+    gSkyHalf = gHalf * 1.06;
+    const double kCellM = 5.0; // target terrain cell size in metres
+    gTerrainN = std::max(129, std::min(2049, int(std::lround(2.0 * gHalf / kCellM)) + 1));
+    gRasterN = std::min(gTerrainN, 385); // raster stays moderate regardless of mesh size
     world::world_params wp = toWorldParams(gp);
     reg = &world::surface_registry::variant(wp.ontology);
     gSeaLevel = gp.water_level_m;
+    auto _tp = std::chrono::steady_clock::now();
+    const bool _prof = std::getenv("CVC_TL_PROF") != nullptr;
+    auto lap = [&](const char *name) {
+      auto n = std::chrono::steady_clock::now();
+      if (_prof)
+        std::fprintf(stderr, "  [prof] %-16s %7.0f ms\n", name,
+                     std::chrono::duration<double, std::milli>(n - _tp).count());
+      _tp = n;
+    };
     wm = world::world_model::generate(wp);
     gHF = &wm.hf();
+    lap("generate");
     rasterize();
+    lap("rasterize");
     // sea vertical extent from the actual relief
     float hmin = 1e30f, hmax = -1e30f;
     for (float h : ro.height) {
@@ -1160,12 +1388,37 @@ int main(int argc, char **argv) {
     gSkyTop = gSkyBase + gHalf * 0.30 + 80.0;
 
     lib.build(wp);
-    cvc::geometry terrain = buildTerrain(app, ro, grid);
-    cvc::geometry solid(app), foliage(app);
+    cvc::geometry terrain = buildTerrainMesh(app, gTerrainN, gHalf);
+    lap("terrain-mesh");
+    cvc::geometry solid(app), foliage(app), needle(app);
     gAprons.clear();
-    buildProps(app, wm, *reg, lib, solid, foliage);         // trees + rocks
-    buildBuildings(app, wm, *reg, gp.seed, solid, gAprons); // solid, non-overlapping edifices
-    gStreets = computeStreets(gAprons, wm.hf(), gSeaLevel); // baked into the terrain texture
+    buildProps(app, wm, *reg, lib, solid, foliage,
+               needle); // trees (native pine needles -> needle) + rocks
+    lap("props");
+
+    // Buildings + streets. With the Austin bundle present: roads FIRST (a terrain-following street
+    // network), then real building shapes stamped along the road-side lots, then asphalt burned
+    // into the surface raster + an extruded 3D road surface. Without the bundle: the original
+    // behaviour — scatter-placed box buildings and texture-baked streets connecting their plazas.
+    const auto road_h = [](double x, double y) { return terrainH(x, y); };
+    cvc::geometry roadGeom(app);
+    if (!cityLibrary().empty()) {
+      world::road_network net = world::generate_roads(cityRoadParams(gp.seed), road_h);
+      pruneUnderwaterRoads(net, gSeaLevel); // level-set boundary: streets stay on dry land
+      lap("roads-gen");
+      buildCityBuildings(net, gp.seed, gSeaLevel, solid);
+      lap("buildings");
+      world::rasterize_roads(net, grid, *reg, ro, 1.0);
+      lap("asphalt-raster");
+      world::road_mesh_params rmp;
+      rmp.lift = 0.35; // sit clearly above the terrain mesh so the ribbons don't z-fight it
+      roadGeom = world::extrude_roads(net, rmp, road_h);
+      lap("road-mesh");
+      gStreets.clear(); // the extruded 3D road surface replaces the texture-baked streets
+    } else {
+      buildBuildings(app, wm, *reg, gp.seed, solid, gAprons);
+      gStreets = computeStreets(gAprons, wm.hf(), gSeaLevel);
+    }
 
     if (sg.hasGraphics("terrain"))
       std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"))->setGeometry(terrain);
@@ -1175,6 +1428,8 @@ int main(int argc, char **argv) {
       t->setColor(1.0, 1.0, 1.0);
       t->setAmbient(0.5);
       t->setDiffuse(0.95);
+      addTerrainBump(
+          *t); // fragment bump map: fine surface relief in the lighting (from lsystem_forest)
     }
     applyTexture(); // material + dirt + roads + plazas, per the colour mode
 
@@ -1186,6 +1441,19 @@ int main(int argc, char **argv) {
       p->setAmbient(0.45);
       p->setDiffuse(0.85);
     }
+
+    // The extruded 3D road surface (ribbons + junction pads), draped on the terrain.
+    if (roadGeom.points().size()) {
+      if (sg.hasGraphics("roads"))
+        std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("roads"))->setGeometry(roadGeom);
+      else {
+        auto rd = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("roads", roadGeom));
+        rd->setUseSingleColor(false);
+        rd->setAmbient(0.5);
+        rd->setDiffuse(0.7);
+      }
+    } else if (sg.hasGraphics("roads"))
+      sg.removeGraphics("roads");
     if (foliage.points().size()) {
       if (sg.hasGraphics("foliage"))
         std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("foliage"))->setGeometry(foliage);
@@ -1197,6 +1465,21 @@ int main(int argc, char **argv) {
       }
     } else if (sg.hasGraphics("foliage"))
       sg.removeGraphics("foliage");
+
+    // Pine needles: a LINES mesh (the native_pine conifer foliage), rendered as dark-green lines.
+    if (needle.points().size()) {
+      if (sg.hasGraphics("needles"))
+        std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("needles"))->setGeometry(needle);
+      else {
+        auto nd = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("needles", needle));
+        nd->setRenderMode(cvc::gl::GeometryRenderMode::LINES);
+        nd->setUseSingleColor(true);
+        nd->setColor(0.12, 0.34, 0.14);
+        nd->setAmbient(0.55);
+        nd->setDiffuse(0.75);
+      }
+    } else if (sg.hasGraphics("needles"))
+      sg.removeGraphics("needles");
 
     // water volume
     if (sg.hasGraphics("water"))
@@ -1287,15 +1570,26 @@ int main(int argc, char **argv) {
       wantRegen = true;
     }
     ImGui::Combo("ontology", &gp.ontology, kOntologyNames, IM_ARRAYSIZE(kOntologyNames));
+    { // world size: a first-class knob (metres of half-extent). Logarithmic feel via a wide range
+      // so the lab spans tight blocks up to very large terrains for the LOD stress test.
+      float hm = float(gp.half_m);
+      if (ImGui::SliderFloat("world half m", &hm, 150.0f, 10000.0f, "%.0f",
+                             ImGuiSliderFlags_Logarithmic))
+        gp.half_m = hm;
+      const cvc::world_units::measurement span =
+          gUnits.format(2.0 * gp.half_m, cvc::world_units::dimension::length);
+      ImGui::Text("   span %.2f %s  |  terrain %dx%d", span.value, span.unit.c_str(), gTerrainN,
+                  gTerrainN);
+    }
     ImGui::SliderInt("trees", &gp.trees, 0, 3000);
     ImGui::SliderInt("rocks", &gp.rocks, 0, 600);
     ImGui::SliderInt("buildings", &gp.buildings, 0, 600);
     ImGui::SliderInt("tree gens", &gp.tree_gen, 2, 8);
-    { // amp / sea sliders (double -> float bridge)
+    { // amp / sea sliders (double -> float bridge). Ranges widened for large, dramatic relief.
       float amp = float(gp.amp_m), sea = float(gp.water_level_m);
-      if (ImGui::SliderFloat("relief amp m", &amp, 2.0f, 80.0f))
+      if (ImGui::SliderFloat("relief amp m", &amp, 2.0f, 400.0f))
         gp.amp_m = amp;
-      if (ImGui::SliderFloat("water level m", &sea, 0.0f, 40.0f))
+      if (ImGui::SliderFloat("water level m", &sea, 0.0f, 200.0f))
         gp.water_level_m = sea;
     }
     if (ImGui::Button("Regenerate"))
@@ -1374,9 +1668,14 @@ int main(int argc, char **argv) {
   sg.setDiagnosticChromeVisible(false);
   sg.processEvents();
 
-  std::printf("terrain_lab: %s, world %.0f m, %s. Tab=orbit/fly, WASD+mouse=fly.\n",
-              offscreen ? "offscreen" : "onscreen", 2 * gHalf,
-              shadows ? "shadows on" : "no shadows");
+  {
+    const cvc::world_units::measurement span =
+        gUnits.format(2.0 * gHalf, cvc::world_units::dimension::length);
+    std::printf(
+        "terrain_lab: %s, world %.2f %s (1 world unit = 1 m), %s. Tab=orbit/fly, WASD+mouse=fly.\n",
+        offscreen ? "offscreen" : "onscreen", span.value, span.unit.c_str(),
+        shadows ? "shadows on" : "no shadows");
+  }
 
   const std::vector<Vec3d> flyEye = {{-gHalf * 1.5, -gHalf * 1.3, gHalf * 0.4},
                                      {-gHalf * 0.6, gHalf * 0.2, gHalf * 0.35},
@@ -1414,6 +1713,11 @@ int main(int argc, char **argv) {
   long frame = 0;
   int n = 0;
   const int SEA_STRIDE = 4, CLOUD_STRIDE = 8;
+  // The sea and the cloud run on the app's world clock, driven once per frame through a
+  // binding (sim.speed / sim.paused, ...): one speed and pause for both, and a capture's
+  // fixed 1/fps makes the frames reproducible.
+  cvc::world_clock &clock = app.world_clock();
+  cvc::world_clock_binding clockDrive(app, clock);
   while (!view.windowClosed()) {
     double t, dt;
     if (capturing) {
@@ -1426,6 +1730,8 @@ int main(int argc, char **argv) {
     }
     view.processUIEvents();
     touch.update();
+    clockDrive.drive(dt);
+    const double wt = clock.t(); // world time for the sea and the cloud
     if (wantRegen) {
       wantRegen = false;
       rebuild(false);
@@ -1434,14 +1740,14 @@ int main(int argc, char **argv) {
     const bool cloudDue = capturing || frame % CLOUD_STRIDE == 1;
     if (seaDue && sg.hasGraphics("water")) {
       auto w = std::dynamic_pointer_cast<VolumeNode>(sg.getGraphics("water"));
-      w->updateScalars(seaField(t));
+      w->updateScalars(seaField(wt));
       std::vector<double> col, op;
-      seaTransfer(col, op, t);
+      seaTransfer(col, op, wt);
       w->setTransferFunction(col, op);
     }
     if (cloudDue) {
-      double shift = t * (gHalf * 0.010) * SKY_N / (2.0 * gSkyHalf);
-      double morph = t / 60.0 * CLOUD_MAPS;
+      double shift = wt * (gHalf * 0.010) * SKY_N / (2.0 * gSkyHalf);
+      double morph = wt / 60.0 * CLOUD_MAPS;
       skyNode->updateScalars(sky.field(shift, morph));
     }
     if (capture == Capture::Fly) {

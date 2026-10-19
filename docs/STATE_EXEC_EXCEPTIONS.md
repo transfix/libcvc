@@ -1,0 +1,578 @@
+# state_exec: exceptions and long-running native calls
+
+Status: P0 specification (2026-10-18). The decisions below are the recommended defaults, agreed
+before this was written; section 7 records how the five questions P0 left open were settled.
+Tracked in the `state-exec-exceptions` workstream.
+
+Two related pieces of the state_exec DSL:
+
+1. **Exceptions.** A program can raise an exception, define its own exception classes by
+   deriving from the built-in ones, and catch them by class. Errors from native C++ functions,
+   Python functions and asynchronous work arrive as exceptions too, with their origin, so the
+   program can handle them. An exception that isn't caught leaves the program as a typed value
+   that C++, Python and Ariadne can inspect and catch by class.
+2. **Long-running native calls.** A native function (C++ or Python) that does slow work, such as
+   a volume filter, a mesh build or a network request, runs on a host thread pool. The call
+   site waits the way a `msg-recv` waits: the calling process parks, every other process keeps
+   running, and the call resumes with the function's value or raises its error.
+
+Async failures should arrive as exceptions, so exceptions come first.
+
+## 1. What exists today
+
+**Errors.**
+- The DSL has no `raise`, `try`, `catch` or `finally`, and no builtin that raises.
+- Every failure is a C++ exception that unwinds the whole process:
+  - the async scheduler kills the process and keeps the message as `exit_error`, a string;
+  - the sync scheduler throws it out of `run()` and leaves the process `running`;
+  - `pycvc.Exec.run` raises `RuntimeError(message)`; only a syntax error has a type of its own,
+    `pycvc.parse_error`;
+  - Ariadne logs the message.
+- Type information is lost at every boundary. A Python exception in a registered function
+  becomes the text `python DSL fn 'f': division by zero`, without the Python type. A C++
+  `std::out_of_range` becomes its `what()`.
+- Asynchronous work reports failure as a value, `{"__async_error__": message}`, which the
+  program has to check by hand.
+
+**Classes.**
+- `(defclass Name [Parent] (method (self args...) body...)...)` binds `Name` to a constructor
+  and keeps the class dict at `Name.__cls_dict__`. The class dict has the methods, the
+  inherited `init` and `finalize`, and `__super__` (the parent's dict) for single inheritance.
+- An instance is a dict whose `__class__` is the class dict.
+- Methods are closures taking `self`, called with `send`; `super` calls the parent's.
+- A class dict doesn't record the class's name, and there's no `isinstance`.
+
+**Long-running calls.** `cvc/core/async_task.h` has the substrate:
+- `launch_pool_task`, `park_on_pool_task` and `future_pool_task` run a kernel on the app's
+  compute pool and post its value to a reply channel the calling process is parked on;
+- `cvc/core/async_lane.h` does the same on a dedicated thread;
+- futures, with `await` and `msg-recv` on them;
+- pycvc's `Exec.register_async_fn` and Ariadne's `http-*-async` verbs are built on it.
+
+What it lacks:
+- **Registration:** there's no one-line way to make a C++ function async; every host writes
+  the plumbing.
+- **Where it parks:** only `async_scheduler` can park. A call that is the whole program can't,
+  because the park returns a nil placeholder that delivery writes into the enclosing frame.
+- **Errors** come back as the `__async_error__` dict.
+- **No cancellation or timeout:** killing a parked process doesn't cancel its kernel, which
+  runs to completion while its result is dropped, and a call can't have a timeout.
+- **Executors:** a kernel runs on the app's background task pool (`compute_async` starts it
+  there), with no choice of priority or lane through the common helpers.
+
+## 2. Exceptions
+
+### 2.1 The forms
+
+**`(raise exc)`** raises `exc`, which must be an exception (an instance of `Exception` or a
+class derived from it). Anything else raises `TypeError`. `(raise)` with no argument, inside a
+`catch` handler, re-raises the exception being handled; elsewhere it raises `RuntimeError`.
+
+**`(error message [data])`** is `(raise (RuntimeError message data))`.
+
+**`try`:**
+
+```lisp
+(try
+  body...
+  (catch (Type var) handler...)   ; zero or more, tried in order
+  (catch (Other) handler...)      ; var is optional
+  (catch (var) handler...)        ; no type: catches any Exception
+  (finally cleanup...))           ; optional, last
+```
+
+- `body...` runs as a `begin`. If it finishes, the `try`'s value is the body's.
+- If it raises, the catch clauses are tried in order. A clause matches when the exception is an
+  instance of `Type` or of a class derived from it. The first match runs its handler, with
+  `var` bound to the exception in a new scope, and the `try`'s value is the handler's.
+- With no match, the exception keeps unwinding.
+- `Type` is looked up when a catch is tried, not when the `try` starts. An undefined `Type` is
+  an error raised at that point (`NameError`), which replaces the exception being matched.
+- In `(catch (X) ...)` the lone symbol is a class when `X` names one where the `try` is, and
+  otherwise the variable of a catch-all.
+- The handler's scope is its own: a `set` in it binds there, as in a `let` body.
+- At least one `catch` or a `finally` is required.
+
+`finally`'s `cleanup...` runs whenever control leaves the `try`:
+
+- when the body or a handler finishes;
+- when an exception leaves the `try`, whether no clause matched or a handler raised;
+- when a `return` or `break` unwinds through it.
+
+Its value is discarded. If `cleanup` itself raises, or runs `return` or `break`, that replaces
+whatever was leaving the `try` (Python's rule). `finally` doesn't run when the process is killed
+(2.5).
+
+**`(isinstance x Type)`** is `#t` when `x` is an instance of `Type` or of a class derived from
+it. It works for any class, not only exceptions.
+
+### 2.2 Exception values
+
+An exception is an ordinary instance, a dict whose `__class__` is its class dict, with these
+fields:
+
+| Field | Meaning |
+|---|---|
+| `message` | a string |
+| `data` | any value the raiser attached (nil by default) |
+| `cause` | the exception being handled when this one was raised (nil otherwise), set automatically |
+| `origin` | where it came from: `"dsl"`, `"builtin"`, `"native"`, `"python"` or `"async"` |
+| `traceback` | a list of strings, innermost last: the expression of each frame being evaluated at the raise (a call's starts with the function's name), up to 64, each at most 120 characters |
+
+Origin-specific fields:
+- `native_type`: the C++ exception's type, demangled, for `origin` `native`;
+- `python_type`: the Python exception's qualified class name, for `origin` `python`;
+- `function`: the name of the native or async function that failed.
+
+`(Exception message [data])` constructs one; so do the derived classes. A user class derives
+from any of them and can add fields and methods in its `init`:
+
+```lisp
+(defclass VolumeError RuntimeError
+  (init (self message volume)
+    (super self "init" message)
+    (set-attr self "volume" volume)
+    self))
+
+(try (load-volume path)
+  (catch (VolumeError e) (log (get-attr e "volume")))
+  (catch (PythonError e) (log (get-attr e "python_type"))))
+```
+
+`defclass` adds `__name__`, the class's name, to every class dict, so an exception's class can
+be named in messages and across boundaries.
+
+### 2.3 The built-in classes
+
+All are bound in every default environment.
+
+| Class | Parent | Raised by |
+|---|---|---|
+| `Exception` | | the root; `catch` without a type catches it |
+| `RuntimeError` | `Exception` | `error`; a native failure with no better class |
+| `TypeError` | `Exception` | a value of the wrong type; calling a non-function; the wrong number of arguments; a special form used with the wrong shape |
+| `ValueError` | `Exception` | a well-typed but invalid value (`(int "abc")`), `std::invalid_argument` |
+| `NameError` | `Exception` | an undefined symbol |
+| `KeyError` | `Exception` | a missing dict key or attribute, where the operation requires one |
+| `IndexError` | `Exception` | an index out of range, `std::out_of_range` |
+| `ArithmeticError` | `Exception` | division by zero, overflow |
+| `MemoryError` | `Exception` | a native call refused by the per-call allocation limit (`eval_alloc_check`) |
+| `ParseError` | `Exception` | `eval` or `parse` of bad source; adds `line` and `col` |
+| `TimeoutError` | `Exception` | an async call or `await` that ran past its timeout |
+| `NativeError` | `RuntimeError` | a C++ exception of any other type; `native_type` names it |
+| `PythonError` | `RuntimeError` | a Python exception from a registered Python function; `python_type` names it |
+
+Mapping a C++ exception thrown by a native function:
+- `cvc::state_exec::dsl_exception` carries a class already;
+- `std::invalid_argument`, `std::out_of_range` and `std::bad_alloc` become `ValueError`,
+  `IndexError` and `MemoryError`;
+- `cvc::state_exec::parse_error` becomes `ParseError`;
+- everything else becomes `NativeError`.
+
+The evaluator's and the builtins' own errors (an undefined symbol, a wrong argument count, a
+type mismatch, an index or key error, division by zero) are thrown with their class (P1 changes
+the throw sites). Their messages stay as they are.
+
+### 2.4 Where an exception is caught
+
+A raise unwinds the process's frame stack to the nearest `try` frame. That frame runs its
+catches and `finally`, and if it doesn't handle the exception, the unwinding goes on. These
+rules apply on the way:
+
+- **Function calls:** a `try` in a caller catches what a callee raises. A `return` unwinding
+  through a `try` with a `finally` runs it.
+- **Native boundaries (`call_function`):** a DSL function that a native function (or a
+  deep-data job) calls runs as frames above the native call. An exception it doesn't catch
+  leaves the native call too: the job is abandoned and the native call raises the exception
+  at its own call site, as if it had thrown it. A `try` below the native call catches it.
+- **Generators:** an exception raised in a generator body ends the generator and raises at the
+  `next`, `for` or job that advanced it.
+- **Signal and watch handlers** run as if called at the point they interrupted. An exception a
+  handler doesn't catch is raised in the interrupted program at that point, so the program's
+  own `try` can catch it.
+- **`eval` and macro expansion:** an exception raised while expanding or evaluating propagates
+  like any other. `eval` of unparsable source raises `ParseError`.
+- **Kills don't unwind** (2.5): no handler or `finally` runs.
+
+### 2.5 What can't be caught
+
+A process ended by its host or its budget is killed. It is not raised to:
+
+- `max_steps`, `max_time`, `max_step_time`, `max_memory`, the message limits;
+- `kill()`, `kill_owner()`, `SIGKILL`;
+- `interrupt()` and an `evaluate()` timeout.
+
+Nothing in the program runs after a kill, and its status is `killed` with `exit_error` naming
+the reason, as today. A program must not be able to catch its own budget or its host's
+decision to stop it. The per-call allocation limit is different: it refuses one call, so it is
+the catchable `MemoryError`.
+
+### 2.6 Leaving the program
+
+An exception no `try` catches ends the process, with a new status, **`failed`**. `killed` stays
+for 2.5. The process keeps:
+
+- `exit_exception`: the exception value;
+- `exit_error`: `"Class: message"`, as now for anything that ends a process.
+
+What each host sees:
+
+- **C++:**
+  - `process_info` gains `exit_exception`, and `get_exit_exception(pid)` returns it;
+  - a new `cvc::state_exec::dsl_exception` (derived from `std::runtime_error`, `what()` is
+    `"Class: message"`) carries the value and its class chain;
+  - `stackless_evaluator::run`/`evaluate` and `evaluator::evaluate` throw it to their caller;
+  - both schedulers end the process `failed`, and neither throws for a program's exception.
+    Behaviour change: the sync scheduler's `run()`/`step()` used to throw and leave the process
+    `running`.
+- **Python (pycvc):**
+  - `pycvc.dsl_error` (a `RuntimeError` subclass) is raised by `Exec.run`, the evaluators'
+    `evaluate`/`run`/`step`, and `get_exit_exception`'s raise helper;
+  - it has `.value` (the exception), `.dsl_class` (its class name), `.dsl_classes` (the chain,
+    most derived first), `.origin` and `.traceback`;
+  - `pycvc.dsl_class("Name")` returns the Python class for a DSL class name;
+  - a raised exception's Python type derives from the class for every name in its chain, so
+    `except pycvc.dsl_class("ValueError")` catches a DSL `(defclass MyError ValueError)`;
+  - a `PythonError` that crosses back to Python unhandled re-raises the original Python
+    exception, with the `pycvc.dsl_error` as its `__cause__`. That lets Python code catch its
+    own exception types through a DSL program.
+- **Ariadne:** a failed action or resident is reported with its class, message and traceback.
+
+### 2.7 Snapshots
+
+A `try` frame and an exception value encode like any frame or value (`state_value_codec`).
+The new frame phases are added by name, so older snapshots still decode. A process snapshotted
+mid-unwind resumes the unwinding.
+
+### 2.8 The recursive evaluator
+
+`evaluator` (the reference evaluator) implements the same forms with C++ exceptions
+(`dsl_exception` for a raise), so the two evaluators agree on every case in section 6 that
+uses only forms it has. It records where an exception was raised in the first frame the
+exception unwinds, rather than catching and rethrowing at each level: on MSVC a rethrow from a
+handler runs on top of the throwing frame's stack, so that grew the stack with every level.
+
+### 2.9 `return`
+
+P1 also makes `return` leave only the function it is in on the stackless evaluator, as on the
+recursive one. Before, `(+ (f) 1)` with `f` returning 5 was 5 there: the unwinding didn't stop
+at the function's body and took the pending `+` with it. A function's body frame is marked
+(`eval_frame::function_body`, kept in snapshots), and a `return` unwinds to it.
+
+## 3. Long-running native calls
+
+### 3.1 The model
+
+An **async function** is a native function whose work runs on a host executor (a thread
+pool), not in the evaluator step that called it:
+
+1. **Before the work:** the call marshals its arguments on the scheduler's thread.
+2. **While it runs:** the kernel runs on an executor thread. The calling process parks, and the
+   scheduler goes on stepping every other process.
+3. **After:** the kernel's value, or its exception, is posted back through the scheduler's
+   thread-safe ingress. The process resumes at the call site with the value, or the exception
+   raises there.
+
+From the program's side, `(volume-blur v 3)` is an ordinary call that takes a while.
+
+### 3.2 Registering
+
+C++ (sketch; the names are settled in P3):
+
+```cpp
+// The kernel gets a handle to check for cancellation and post progress; it returns the value
+// or throws.
+using async_kernel = std::function<value_t(async_call &call)>;
+// Runs on the scheduler thread with the call's arguments; returns the kernel to run.
+using async_marshal = std::function<async_kernel(std::span<const value_t> args)>;
+
+struct async_options {
+  executor where = executor::background;     // the app's background task pool, or a named lane
+  thread_priority priority = PRIORITY_NORMAL; // its place in the background pool's queue
+  std::optional<double> timeout;             // seconds; past it the call raises TimeoutError
+  bool future_variant = true;                // also register "<name>-async", which returns a future
+};
+
+void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
+                       async_marshal marshal, async_options opts = {});
+```
+
+`async_host` is what a host provides:
+- the executors;
+- the scheduler that drives the processes;
+- in-flight tracking, so teardown waits for running kernels.
+
+`app` builds one for its exec scheduler (Ariadne), and pycvc's `Exec` builds one for its
+private scheduler.
+
+Python: `pycvc.builtins.register_async_fn(env, host, name, callable, executor="compute",
+timeout=None)`, with `Exec.async_host()`. `Exec.register_async_fn` keeps working, built on this.
+The callable runs on an executor thread and takes the GIL for its call, as now.
+
+### 3.3 Calling
+
+- **Transparent:** `(name args...)` parks the calling process and resumes with the value. It
+  works at any depth, including as the whole program (3.8 removes the top-level restriction),
+  inside a `try`, and inside a function a native function called.
+- **Futures:** `(name-async args...)` starts the work and returns a future at once.
+  - `(await f)` parks until it finishes, then returns its value or raises its exception.
+  - `(await f seconds)` raises `TimeoutError` if it hasn't finished by then; the work goes on,
+    and the future can be awaited again.
+  - `(await-all (list f1 f2 ...))` waits for every one and returns their values in order. If any
+    failed, it raises the first failure in list order once all have finished.
+  - A future that is never awaited still finishes; its result is dropped.
+- **Where it can't park:** a context that forbids parking raises `RuntimeError` naming the
+  function. Ariadne's reactive and render lane is one; registering through the action seam
+  only, as today, keeps async functions out of it.
+
+### 3.4 Errors
+
+A kernel that throws resumes the call by raising. The exception is mapped as in 2.3, with
+`origin` `"async"` and `function` set:
+
+- a C++ exception maps by its type;
+- a Python exception becomes `PythonError` (keeping the Python exception);
+- a timeout raises `TimeoutError`.
+
+The `{"__async_error__": ...}` value is gone: P3 removes it from `Exec`, and the Ariadne
+documentation is updated. A function whose result describes a failure, such as an HTTP reply
+with `ok: #f`, still returns that as a value; only a thrown error is an exception.
+
+### 3.5 Where the work runs
+
+The app has two pools, and an async kernel uses the first:
+
+- **The background task pool** (`app::startThreadPooled`, which `compute_async` uses today):
+  - a queue of whole tasks, with priorities, bounded to `setThreadPoolSize` threads (the core
+    count by default);
+  - every async kernel runs here, CPU-bound or blocking (`executor::background`, the default);
+  - a blocking request holds one of its threads while it waits, and nothing else.
+- **The fork-join compute pool** (`app::computePool()`):
+  - render, simulation and nav fan-outs share it through `parallel_for`;
+  - a CPU-heavy kernel fans out through it the same way (a volume filter splitting its
+    slabs), so a kernel's parallelism comes from the same workers as everyone else's;
+  - a kernel never runs on its workers as a whole task, so a slow kernel can't stall a frame's
+    `parallel_for`.
+
+So blocking I/O doesn't get a pool of its own:
+- the compute pool never sees it;
+- in the background pool it only takes a thread out of the rotation.
+
+The cost is that enough slow requests in flight at once can delay other async kernels until a
+thread frees. If that shows up in practice, the fix is a cap on how many blocking kernels run at
+once, in the same pool (a registration option), or a larger pool. A second pool isn't needed.
+
+Other places a kernel can run:
+- **A named `async_lane`:** for work that must stay on one thread.
+- **No executor** (the sync scheduler, a bare evaluator, a unit test's inline executor): the
+  kernel runs inline in the step. The value or exception is the same, and the step blocks.
+
+### 3.6 Cancellation and lifetime
+
+`async_call::cancelled()` turns true when:
+
+- the process is killed or reaped;
+- the call times out;
+- its owner group is reaped (`kill_owner`);
+- the host is torn down.
+
+A kernel checks it at convenient points and may stop early by throwing. A cancelled call's
+result is dropped. Host teardown (an `Exec`, an Ariadne document, the app's scheduler) cancels
+every in-flight kernel and waits for them before the scheduler goes, as `Exec` does today.
+
+### 3.7 Data crossing threads
+
+- **Arguments:** the marshal step copies what the kernel needs. DSL lists and dicts are copied,
+  because the kernel must never touch a value the program can still change. A large copy runs
+  as a deep-data job, so it counts against the process's budget like other deep-data work.
+- **Large data:** a volume or mesh crosses as a `data_object` holding a `shared_ptr` the kernel
+  treats as read-only. A kernel that modifies data works on its own copy.
+- **The kernel must not touch:** the state tree, the evaluator, or any DSL value. A debug build
+  asserts it. Its result is a fresh value.
+
+### 3.8 Budgets and frames
+
+- Time a process spends parked isn't charged to `max_time`, and a kernel's CPU time isn't
+  charged to the process. The executor is the host's.
+- The call's frame stays on the stack in a new `await_call` phase, holding the reply channel,
+  instead of returning a nil placeholder for delivery to write into the enclosing frame.
+  Delivery completes the frame, with the value or by raising. That makes a top-level call
+  parkable, gives the exception a precise site, and lets a snapshot record a pending call (a
+  restored process whose call can't resume raises `RuntimeError`).
+
+### 3.9 Progress
+
+`async_call::post(value)` sends a progress value to the channel `<name>.progress` under the
+process's root, which the program reads with `msg-recv` or a resident watches. Nothing waits on
+it; a full queue drops progress values first.
+
+## 4. Phases
+
+| Phase | Content | Done when |
+|---|---|---|
+| P0 | This spec and the test list (section 6) | merged |
+| P1 | The forms (`raise`, `error`, `try`/`catch`/`finally`, `isinstance`), `__name__` on classes, the built-in classes, the evaluator's and builtins' errors thrown with their class, C++ exception mapping, `cause`/`origin`/`traceback`, all of 2.4 in the stackless evaluator, the same in the recursive evaluator, codec support | EX and UN cases pass in both evaluators |
+| P2 | Leaving the program: `failed`, `exit_exception`, `dsl_exception`, both schedulers, Ariadne reporting; `PythonError` from registered Python functions, pycvc `dsl_error` and `dsl_class`, the round trip | CX and PY cases pass |
+| P3 | Async: `async_host`, `register_async_fn` (C++ and pycvc), the `await_call` frame, futures with timeouts and `await-all`, errors as exceptions, executors (the background pool with priorities, lanes, inline), cancellation, progress, `Exec` and Ariadne moved onto it | AS cases pass |
+| P4 | pycvc parity for the new API, `docs/STATE_EXEC_DEVELOPER_GUIDE.md` and `ARIADNE.md` | the parity doc lists every new item |
+
+## 5. Compatibility
+
+These are the behaviour changes, each covered by a case in section 6:
+
+1. The sync scheduler no longer throws a program's error out of `run()`/`step()`. The process
+   ends `failed` with `exit_exception`. Code that relied on the throw reads `get_exit_exception`
+   or `process_info`.
+2. A limit or an interrupt is a kill, not an exception, on both schedulers. A C++ test that
+   expects `run()` to throw for a time limit is updated.
+3. The `{"__async_error__": ...}` dict is replaced by a raise at the call site.
+4. A process that fails ends `failed`, not `killed`. Hosts that check `killed` to mean "ended
+   badly" check both.
+5. `process_status` gains `failed`. The pycvc `IntEnum` and Ariadne's reporting follow.
+
+P1 already changes two things on the way:
+- On the sync scheduler, a process whose error nothing caught is killed, with the message as its
+  `exit_error`, as on the async scheduler; `run()` still throws the error. Before, the process
+  stayed `running`, and the next `run()` stepped it again.
+- On the stackless evaluator, `return` leaves only the function it is in (2.9).
+
+## 6. The test list
+
+Each case runs in both evaluators and on both schedulers unless it says otherwise. P1 to P3 turn
+them into gtest and pytest cases with these IDs.
+
+### 6.1 Raising and catching (EX)
+
+| ID | Program | Result |
+|---|---|---|
+| EX-1 | `(try (error "boom") (catch (e) (get-attr e "message")))` | `"boom"` |
+| EX-2 | `(try (raise (ValueError "v")) (catch (TypeError e) 1) (catch (ValueError e) 2))` | `2` |
+| EX-3 | `(begin (defclass MyError ValueError) (try (raise (MyError "m")) (catch (ValueError e) (get-attr (get-attr e "__class__") "__name__"))))` | `"MyError"` |
+| EX-4 | `(try (raise (ValueError "v")) (catch (TypeError e) 1))` | uncaught `ValueError` |
+| EX-5 | `(try 7 (catch (e) 1))` | `7` (no raise: the body's value) |
+| EX-6 | `(begin (set log (list)) (try (error "x") (catch (e) (append log "c")) (finally (append log "f"))) log)` | `("c" "f")` (`append` adds to the list in place) |
+| EX-7 | `(begin (set n 0) (try (try (error "in") (finally (set n 1))) (catch (e) n)))` | `1` (inner finally ran before the outer catch) |
+| EX-8 | `(try (try (error "a") (catch (e) (raise))) (catch (e) (get-attr e "message")))` | `"a"` (bare raise re-raises) |
+| EX-9 | `(try (try (error "a") (catch (e) (error "b"))) (catch (e) (get-attr (get-attr e "cause") "message")))` | `"a"` (cause chained) |
+| EX-10 | `(try (error "a") (finally (error "b")))` | uncaught `RuntimeError "b"` (finally replaces) |
+| EX-11 | `(begin (set box (dict "g" 0)) (defun f () (try (return 1) (finally (set-attr box "g" 2)))) (list (f) (get-attr box "g")))` | `(1 2)` (return runs finally; a `set` in `f` would bind in `f`'s scope) |
+| EX-12 | `(begin (set g 0) (while #t (try (break 5) (finally (set g 9)))) g)` | `9` (not on the recursive evaluator, which has no `break`) |
+| EX-13 | `(raise 5)` | uncaught `TypeError` |
+| EX-14 | `(try (raise (Exception "m" (dict "k" 1))) (catch (e) (get-attr (get-attr e "data") "k")))` | `1` |
+| EX-15 | `(isinstance (ValueError "v") Exception)`, `(isinstance 5 Exception)` | `#t`, `#f` |
+| EX-16 | `(try (error "x") (catch (NoSuchClass e) 1))` | uncaught `NameError` (an undefined catch type replaces the exception) |
+| EX-17 | `(try (error "x"))` | uncaught `TypeError` at the form: a `try` needs a `catch` or `finally` |
+| EX-18 | `(raise)` outside a handler | uncaught `RuntimeError` |
+| EX-19 | A `try` whose handler binds `e`, after the `try` | `e` is unbound (the handler's scope) |
+| EX-20 | `(try (error "x") (catch (e) (get-attr e "traceback")))` | a list of strings, innermost last, at most 64 |
+
+### 6.2 Errors from the evaluator, builtins and natives (UN)
+
+| ID | Program | Caught as | Checks |
+|---|---|---|---|
+| UN-1 | `undefined-name` | `NameError` | `origin` `"builtin"` |
+| UN-2 | `(begin (set f (lambda (x) x)) (f))`; `((lambda (x) x))` | `TypeError` | the arity message as today; a list in the head position is an invalid head |
+| UN-3 | `(5 1)` | `TypeError` | not callable |
+| UN-4 | `(int "abc")` | `ValueError` | |
+| UN-5 | `(nth (list 1) 5)` | `IndexError` | |
+| UN-6 | `(/ 1 0)` | `ArithmeticError` | |
+| UN-7 | `(eval "(+ 1")` | `ParseError` | `line`, `col` |
+| UN-8 | a C++ native throwing `std::invalid_argument` | `ValueError` | `origin` `"native"`, `function` |
+| UN-9 | a C++ native throwing a custom `std::exception` subclass | `NativeError` | `native_type` names it |
+| UN-10 | `(collections.range 1000000000)` | `MemoryError` | the allocation limit, catchable |
+| UN-11 | a lambda, called through `apply`, that raises | caught by a `try` around the `apply` | the native boundary (2.4); not on the recursive evaluator, whose natives can't call a lambda |
+| UN-12 | the same through `collections.map` with deep-data slicing on | caught; the job abandoned | |
+| UN-13 | a generator body that raises, advanced by `next` | caught at the `next`; the generator then finished | |
+| UN-14 | a method raising inside `send`, and inside `super` | caught by the caller | |
+| UN-15 | a signal handler raising | caught by the program's `try` around the interrupted point | |
+| UN-16 | a macro expansion that raises | caught | |
+
+### 6.3 Not catchable (KL)
+
+| ID | Situation | Result |
+|---|---|---|
+| KL-1 | `(try (while #t 1) (catch (e) 1))` with `max_steps` 100 | `killed`, `exit_error` names the limit, the catch didn't run |
+| KL-2 | the same with `max_time` | `killed` |
+| KL-3 | `kill(pid)` while inside a `try` with a `finally` | `killed`; the finally didn't run |
+| KL-4 | `max_memory` exceeded inside a `try` | `killed` |
+| KL-5 | `evaluate(..., timeout)` and `interrupt()` on a bare evaluator | `evaluation_timeout` / `evaluation_interrupted` to the C++ caller; no DSL handler runs |
+
+### 6.4 Leaving the program (CX)
+
+| ID | Situation | Result |
+|---|---|---|
+| CX-1 | uncaught `ValueError` on the async scheduler | status `failed`, `get_exit_exception` is the value, `exit_error` is `"ValueError: ..."` |
+| CX-2 | the same on the sync scheduler | `run()` returns; the same status and values (the compatibility change) |
+| CX-3 | uncaught on a bare `stackless_evaluator::evaluate` | throws `dsl_exception` with the value and the class chain |
+| CX-4 | a user class `MyError` derived from `ValueError` | the chain is `MyError, ValueError, Exception` |
+| CX-5 | snapshot taken inside a `try`, restored, then the body raises | caught by the restored `try` |
+| CX-6 | Ariadne action raising | warning names the class and message |
+| CX-7 | `failed` vs `killed` in `get_stats()` and `list_processes()` | counted apart |
+
+### 6.5 Python (PY)
+
+| ID | Situation | Result |
+|---|---|---|
+| PY-1 | a registered Python function raising `ZeroDivisionError`, caught in the DSL | `PythonError`, `python_type` `"ZeroDivisionError"`, `origin` `"python"` |
+| PY-2 | the same, uncaught, through `Exec.run` | the original `ZeroDivisionError` re-raised in Python, `__cause__` a `pycvc.dsl_error` |
+| PY-3 | a Python exception class defined by the caller, raised in a registered function, uncaught | `except` on that class catches it from `Exec.run` |
+| PY-4 | DSL `(raise (MyError "m"))` with `MyError` derived from `ValueError`, through `Exec.run` | `except pycvc.dsl_class("ValueError")` catches it; `.dsl_class` is `"MyError"` |
+| PY-5 | `pycvc.dsl_error` fields | `.value`, `.dsl_classes`, `.origin`, `.traceback` |
+| PY-6 | an exception raised in a Python `on_complete` | unchanged: raised from the step, as today |
+
+### 6.6 Async calls (AS)
+
+| ID | Situation | Result |
+|---|---|---|
+| AS-1 | `(slow-op 2)` registered with a 50 ms kernel, two processes | both finish; the other process steps while one is parked |
+| AS-2 | the call as the whole program | parks and returns the value (no top-level restriction) |
+| AS-3 | a kernel throwing `std::invalid_argument`, call inside a `try` | caught as `ValueError`, `origin` `"async"`, `function` set |
+| AS-4 | a Python async function raising | `PythonError`, `python_type` set |
+| AS-5 | `(await (slow-op-async 2))` | the value |
+| AS-6 | `(await (slow-op-async 2) 0.01)` on a 200 ms kernel | `TimeoutError`; awaiting again later returns the value |
+| AS-7 | `(await-all (list (a-async) (b-async)))`, b failing | raises b's exception after both finish |
+| AS-8 | registration timeout 0.05 s on a 1 s kernel | `TimeoutError` at the call site; the kernel sees `cancelled()` |
+| AS-9 | the process killed while parked | `killed`; the kernel sees `cancelled()`; its result is dropped |
+| AS-10 | host teardown with a kernel in flight | teardown waits; no use after free (run under the sanitizers) |
+| AS-11 | a kernel blocked on a sleep while another thread runs `computePool().parallel_for` | the fan-out isn't delayed (kernels never occupy compute workers) |
+| AS-12 | on the sync scheduler and a bare evaluator | the kernel runs inline; the same value and exceptions |
+| AS-13 | progress posted by the kernel | `msg-recv` on `<name>.progress` receives it |
+| AS-14 | a list argument changed by the program after the call starts | the kernel saw the copy |
+| AS-15 | a snapshot of a process parked in a call, restored | raises `RuntimeError` at the call (the call can't resume) |
+| AS-16 | `Exec.register_async_fn` raising | raises at the call site, no `__async_error__` dict (the compatibility change) |
+| AS-17 | an async function called from Ariadne's reactive lane | not reachable (action seam only); if called, `RuntimeError` |
+
+## 7. Settled questions
+
+P0 opened with five open questions. They are settled as follows (2026-10-18):
+
+1. **`failed` is a new `process_status`** (2.6).
+   - Alternative: `killed` with an exception attached.
+   - Why: an error in the program and a stop by the host or a budget are different outcomes.
+     A host restarts or reports the first and accepts the second, and `get_stats` and
+     `list_processes` should count them apart. One enum value is cheaper than every host
+     checking whether `exit_exception` is set.
+2. **A signal handler's uncaught exception is raised in the interrupted program** (2.4), at
+   the point it was interrupted, as Python does with signals.
+   - Alternative: end the process.
+   - Why: a handler runs as if called at that point, so its errors belong there. It lets a
+     program turn a signal into a catchable exception (an interrupt it cleans up after) instead
+     of losing the process. Watch handlers follow the same rule.
+3. **The sync scheduler no longer throws a program's error out of `run()`/`step()`** (5.1).
+   The process ends `failed` with `exit_exception`, as on the async scheduler.
+   - Why: today it throws and leaves the process `running`, so the next `run()` throws again.
+     The two schedulers should agree.
+   - C++ that wants an exception can call `evaluate`, which throws `dsl_exception`, or read
+     `get_exit_exception`.
+4. **There's no separate I/O pool** (3.5).
+   - Async kernels run on the app's background task pool, which is already separate from the
+     fork-join compute pool frames use, bounded, and prioritized.
+   - A blocking request only takes a background thread out of the rotation; the compute pool
+     never sees it.
+   - If slow requests are found to starve other kernels, a cap on concurrent blocking kernels
+     in that pool comes first.
+5. **`await-all` waits for every future, then raises the first failure in list order** (3.3).
+   It doesn't cancel the rest or raise at the first failure in time.
+   - Why: the error reported is then the same however the timing falls, which keeps programs
+     and their tests deterministic, and no work is left running unseen.
+   - A program that wants to stop early awaits the futures one by one.

@@ -139,6 +139,43 @@ private:
   const unsigned char *_end;
 };
 
+// Shared (de)serialization for a state_payload — used by both mutation framing and the snapshot
+// response, so the data() payload crosses identically on either path.
+void put_payload(std::vector<unsigned char> &out, const state_payload &p) {
+  put_u8(out, static_cast<std::uint8_t>(p.kind));
+  switch (p.kind) {
+  case state_payload_kind::none:
+    break;
+  case state_payload_kind::inline_bytes:
+    put_bytes(out, p.inline_bytes);
+    break;
+  case state_payload_kind::blob:
+    put_string(out, p.blob.digest);
+    put_u64(out, p.blob.size_bytes);
+    put_string(out, p.blob.codec);
+    break;
+  }
+}
+
+bool read_payload(reader &r, state_payload &p) {
+  p.kind = static_cast<state_payload_kind>(r.u8());
+  switch (p.kind) {
+  case state_payload_kind::none:
+    break;
+  case state_payload_kind::inline_bytes:
+    p.inline_bytes = r.bytes();
+    break;
+  case state_payload_kind::blob:
+    p.blob.digest = r.str();
+    p.blob.size_bytes = r.u64();
+    p.blob.codec = r.str();
+    break;
+  default:
+    return false;
+  }
+  return true;
+}
+
 std::vector<unsigned char> encode_mutation(const state_mutation &m) {
   std::vector<unsigned char> out;
   out.reserve(256);
@@ -151,19 +188,7 @@ std::vector<unsigned char> encode_mutation(const state_mutation &m) {
   put_u8(out, static_cast<std::uint8_t>(m.op));
   put_string(out, m.type_name);
   put_string(out, m.string_value);
-  put_u8(out, static_cast<std::uint8_t>(m.payload.kind));
-  switch (m.payload.kind) {
-  case state_payload_kind::none:
-    break;
-  case state_payload_kind::inline_bytes:
-    put_bytes(out, m.payload.inline_bytes);
-    break;
-  case state_payload_kind::blob:
-    put_string(out, m.payload.blob.digest);
-    put_u64(out, m.payload.blob.size_bytes);
-    put_string(out, m.payload.blob.codec);
-    break;
-  }
+  put_payload(out, m.payload);
   put_u8(out, m.latest_value_only ? 1 : 0);
   put_u64(out, m.hlc_time);
   return out;
@@ -181,22 +206,8 @@ bool decode_mutation(const std::vector<unsigned char> &bytes, state_mutation &ou
   out.op = static_cast<state_mutation_op>(op);
   out.type_name = r.str();
   out.string_value = r.str();
-  std::uint8_t kind = r.u8();
-  out.payload.kind = static_cast<state_payload_kind>(kind);
-  switch (out.payload.kind) {
-  case state_payload_kind::none:
-    break;
-  case state_payload_kind::inline_bytes:
-    out.payload.inline_bytes = r.bytes();
-    break;
-  case state_payload_kind::blob:
-    out.payload.blob.digest = r.str();
-    out.payload.blob.size_bytes = r.u64();
-    out.payload.blob.codec = r.str();
-    break;
-  default:
+  if (!read_payload(r, out.payload))
     return false;
-  }
   out.latest_value_only = r.u8() != 0;
   // hlc_time was added later; tolerate its absence for backward compat.
   if (r.ok() && r.remaining() >= 8)
@@ -647,6 +658,9 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       std::uint32_t entry_count = 0;
       std::size_t count_offset = rsp.size();
       put_u32(rsp, 0); // placeholder
+      // Entries' properties go in a trailer after the entries, so a reader that predates them
+      // stops before it and a newer one reads it only when it is there.
+      std::vector<std::pair<std::uint32_t, std::map<std::string, std::string>>> props;
 
       {
         std::lock_guard<std::mutex> slk(_shards_mu);
@@ -654,7 +668,9 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
           if (shard->cluster_id() != cid)
             continue;
           auto snap = shard->snapshot(prefix);
-          for (const auto &e : snap) {
+          for (auto &e : snap) {
+            if (!e.properties.empty())
+              props.emplace_back(entry_count, std::move(e.properties));
             put_string(rsp, e.path);
             put_string(rsp, e.string_value);
             put_string(rsp, e.comment);
@@ -663,6 +679,8 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
             put_string(rsp, e.type_name);
             put_string(rsp, e.origin_node_id);
             put_u64(rsp, e.sequence);
+            put_string(rsp, e.data_type_name);
+            put_payload(rsp, e.data_payload);
             ++entry_count;
           }
         }
@@ -670,6 +688,15 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       // Patch entry count.
       for (int i = 0; i < 4; ++i)
         rsp[count_offset + i] = static_cast<unsigned char>((entry_count >> (8 * i)) & 0xFF);
+      put_u32(rsp, static_cast<std::uint32_t>(props.size()));
+      for (const auto &ep : props) {
+        put_u32(rsp, ep.first);
+        put_u32(rsp, static_cast<std::uint32_t>(ep.second.size()));
+        for (const auto &kv : ep.second) {
+          put_string(rsp, kv.first);
+          put_string(rsp, kv.second);
+        }
+      }
 
       std::lock_guard<std::mutex> wlk(conn->write_mu);
       write_frame_locked(*conn, kMsgSnapRsp, rsp);
@@ -691,7 +718,22 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
         e.type_name = br.str();
         e.origin_node_id = br.str();
         e.sequence = br.u64();
+        e.data_type_name = br.str();
+        read_payload(br, e.data_payload);
         entries.push_back(std::move(e));
+      }
+      if (br.ok() && br.remaining() >= 4) { // the properties trailer (absent from older peers)
+        const std::uint32_t with = br.u32();
+        for (std::uint32_t k = 0; k < with && br.ok(); ++k) {
+          const std::uint32_t index = br.u32();
+          const std::uint32_t n = br.u32();
+          for (std::uint32_t j = 0; j < n && br.ok(); ++j) {
+            std::string key = br.str();
+            std::string value = br.str();
+            if (index < entries.size())
+              entries[index].properties[key] = std::move(value);
+          }
+        }
       }
       {
         std::lock_guard<std::mutex> lk(_snap_waiters_mu);

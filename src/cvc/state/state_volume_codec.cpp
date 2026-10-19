@@ -177,6 +177,7 @@ boost::any decode_volume(const std::vector<unsigned char> &bytes) {
 // ---- geometry codec ----
 
 constexpr unsigned char GEO_MAGIC[4] = {'C', 'V', 'G', '1'};
+constexpr unsigned char GEO_FACE_MATERIALS_TAG[4] = {'F', 'M', '0', '1'};
 
 std::vector<unsigned char> encode_geometry(const boost::any &val) {
   const geometry &geo = boost::any_cast<const geometry &>(val);
@@ -254,6 +255,18 @@ std::vector<unsigned char> encode_geometry(const boost::any &val) {
   for (const auto &l : lin) {
     write_u64(out, l[0]);
     write_u64(out, l[1]);
+  }
+
+  // Optional trailer: per-face surface materials. Readers that predate it stop
+  // after the lines and never see it, so the codec id stays v1.
+  if (geo.has_face_materials()) {
+    const auto &fm = geo.const_face_materials();
+    out.insert(out.end(), GEO_FACE_MATERIALS_TAG, GEO_FACE_MATERIALS_TAG + 4);
+    write_u64(out, fm.size());
+    for (const auto m : fm) {
+      out.push_back(static_cast<unsigned char>(m & 0xff));
+      out.push_back(static_cast<unsigned char>(m >> 8));
+    }
   }
 
   return out;
@@ -340,6 +353,17 @@ boost::any decode_geometry(const std::vector<unsigned char> &bytes) {
   for (std::uint64_t i = 0; i < nl; ++i) {
     if (!read_u64(p, end, lin[i][0]) || !read_u64(p, end, lin[i][1]))
       throw std::runtime_error("decode_geometry: truncated lines");
+  }
+
+  if (end - p >= 4 && std::memcmp(p, GEO_FACE_MATERIALS_TAG, 4) == 0) {
+    p += 4;
+    std::uint64_t nf;
+    if (!read_u64(p, end, nf) || nf != nt + nq || static_cast<std::uint64_t>(end - p) < 2 * nf)
+      throw std::runtime_error("decode_geometry: bad face materials");
+    auto &fm = geo.face_materials();
+    fm.resize(nf);
+    for (std::uint64_t i = 0; i < nf; ++i, p += 2)
+      fm[i] = static_cast<geometry::face_material_t>(p[0] | (p[1] << 8));
   }
 
   return boost::any(geo);

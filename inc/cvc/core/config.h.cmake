@@ -19,7 +19,10 @@
 #define CVC_VERSION_PATCH @PROJECT_VERSION_PATCH@
 #define CVC_VERSION_STRING "@PROJECT_VERSION@"
 
+// Guarded: libigl's igl::core target puts -DNOMINMAX on the command line too.
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 
 #ifdef __WINDOWS__
 #include <WinSock2.h>

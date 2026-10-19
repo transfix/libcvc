@@ -24,6 +24,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/core/app.h>
+#include <cvc/core/clock_follower.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -39,6 +42,8 @@
 #include <cvc/image/image.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/plant_host.h>
+#include <cvc/state/state.h>
 #ifdef __EMSCRIPTEN__
 #include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
 #include <emscripten.h>
@@ -142,6 +147,7 @@ int main(int argc, char **argv) {
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0, speed = 0.5;
   std::string capture = "orbit", out = "frames", png, viewMode = "map", scenario = "ghost";
+  std::string plantName = navdemo::default_plant(); // what the vehicles drive on (--plant)
   double sensorRange = 35.0;
   bool offscreen = false, no_shadows = false, ortho = false;
 
@@ -170,7 +176,10 @@ int main(int argc, char **argv) {
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"))("png",
-                                                                    po::value<std::string>(&png));
+                                                                    po::value<std::string>(&png))(
+      "plant", po::value<std::string>(&plantName)->default_value(plantName),
+      "what the vehicles drive on: kinematic (nav's bicycle), or a vehicle preset on the Jolt "
+      "physics plant at its real size and limits (humvee, roboracer)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -216,17 +225,16 @@ int main(int argc, char **argv) {
   // rebuilds the world IN PLACE — same process, same window, same GL context.
   std::unique_ptr<cvc::nav::sim_world> worldPtr;
   int NA = 1;
+  // The plant (--plant): every rebuilt world's vehicles go on it.
+  cvc::physics::plant_host plantHost(navdemo::plant_options());
 
-  // THREE limited-belief scenarios, all the same machinery, different lies:
+  // TWO limited-belief scenarios, all the same machinery, different lies:
   //
   //   ghost   — the map claims a wall that reality lacks. The agent detours
   //             around nothing, senses the space is clear, and drives through.
-  //   dynamic — the map is RIGHT at first, then the world CHANGES: a blockage
-  //             appears mid-run (stamped into the live planning surface with
-  //             sim_world::add_obstacle) and the agent must notice and re-route.
-  //   traffic — the ghost lie, but with other vehicles crossing the same space,
-  //             so belief-vs-truth plays out against moving obstacles.
-  //
+  //   dynamic — the map is right but not the whole story: a second vehicle (the
+  //             crosser) drives down through the hero's corridor mid-run, and the
+  //             hero must sense it and loop around.
   // The lie always lives in the BELIEF (prior_occ), never in `truth` — collision
   // is always scored against truth, which is what keeps the demo honest.
   const std::size_t wall_lo = static_cast<std::size_t>(R) / 4;
@@ -300,8 +308,15 @@ int main(int argc, char **argv) {
     worldPtr = std::make_unique<cvc::nav::sim_world>(cfg, truth.data(), prior.data(),
                                                      cvc::nav::coef_mlp::default_biased(), o.data(),
                                                      goal.data(), color.data(), NA);
+    plantHost.use(*worldPtr, plantName);
   };
-  build_world(scenario, sensorRange);
+  try {
+    build_world(scenario, sensorRange);
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "nav_fog_ghost: --plant: %s\n", e.what());
+    return 2;
+  }
+  std::printf("nav_fog_ghost: driving %s\n", plantHost.driving().c_str());
 
   // 2. Scene.
   cvc::app app;
@@ -546,7 +561,7 @@ int main(int argc, char **argv) {
 
   std::printf("nav_fog_ghost: scenario=%s, %d vehicle%s, %dx%d belief, %s\n", scenario.c_str(), NA,
               NA == 1 ? "" : "s", R, C,
-              scenario == "dynamic" ? "honest map that changes mid-run"
+              scenario == "dynamic" ? "honest map, a vehicle crossing the hero's path"
                                     : "phantom wall in the prior");
 
   // 3. Run the sim on the render thread (single agent — cheap) so field_data() and
@@ -619,6 +634,9 @@ int main(int argc, char **argv) {
     ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("Belief controls");
     ImGui::Text("scenario: %s", uiScenario.c_str());
+    ImGui::Text("plant: %s", plantHost.driving() == "kinematic"
+                                 ? "kinematic bicycle"
+                                 : (plantHost.driving() + " on Jolt").c_str());
     ImGui::Text("world t %.1fs | %s", worldPtr->tick() * cfg.veh.dt,
                 rch[0] ? "ARRIVED" : "en route");
     ImGui::Separator();
@@ -632,12 +650,25 @@ int main(int argc, char **argv) {
     }
     if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
       uiRestart = true;
-    ImGui::TextDisabled("scenario / range / traffic need a restart");
+    ImGui::TextDisabled("scenario / range need a restart");
     ImGui::End();
   });
 #endif
 
-  navdemo::SimPacer pacer;
+  // World time is the app's world clock at the suite quantum (0.01 s), driven once per frame
+  // through a binding, so sim.speed / sim.paused / sim.mode / sim.step (the keys Ariadne's
+  // sim_transport binds) steer it from a remote panel or a script too. The navigator follows it,
+  // one step every veh.dt / fixed_dt = 6 quanta; the stall cap is 8 navigator steps per frame.
+  cvc::world_clock &clock = app.world_clock();
+  {
+    cvc::world_clock::config cc;
+    cc.fixed_dt = 0.01;
+    cc.scale = speed;
+    cc.max_steps_per_advance = 8 * static_cast<int>(cvc::ticks_per_step(cfg.veh.dt, cc.fixed_dt));
+    clock.configure(cc);
+  }
+  cvc::world_clock_binding simKeys(app, clock);
+  cvc::clock_follower nav = cvc::clock_follower::for_step(clock, cfg.veh.dt);
   std::vector<float> cwv(2 * NA, 0.0f); // live carrots (world); [0] = hero
   double ghostGoneT = -1.0;             // world time the last phantom cell cleared
 
@@ -690,7 +721,8 @@ int main(int argc, char **argv) {
       trailNode->updateVertices(trailXyz);
     ghostGoneT = -1.0;
     reached_note = false;
-    pacer = navdemo::SimPacer{};
+    clock.reset(); // the fresh world starts at t = 0, and so does world time
+    nav.reset(clock.tick());
     replan(sx, sy); // plan the belief route over the fresh world's belief plane
     std::printf("nav_fog_ghost: restarted — scenario=%s, %d vehicle%s, range %.0fm\n", scen.c_str(),
                 NA, NA == 1 ? "" : "s", range);
@@ -713,7 +745,10 @@ int main(int argc, char **argv) {
 
 #ifdef CVC_ENABLE_IMGUI
     // ---- apply UI actions ---------------------------------------------------
-    speed = uiSpeed; // world pace: live
+    if (uiSpeed != speed) { // the slider moved: steer the clock through its key
+      speed = uiSpeed;
+      cvc::state::instance(app)(simKeys.key("speed")).value(speed);
+    }
     caption.setVisible(uiCaptions);
     if (ui2D != ortho) { // 2-D map <-> 3-D perspective, live
       ortho = ui2D;
@@ -742,11 +777,12 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    // World time runs at `speed` x real time on ANY display rate (fixed-dt
-    // accumulator); a capture uses the same pacer with a synthetic 1/fps wall
-    // clock, so captured world pacing matches the live window deterministically.
-    const int nticks = pacer.ticks(dt, cfg.veh.dt, speed);
-    for (int s = 0; s < nticks; ++s)
+    // World time runs at sim.speed x real time on ANY display rate; a capture drives
+    // the clock with a synthetic 1/fps wall delta, so captured world pacing matches
+    // the live window and reproduces exactly. The navigator runs the steps that fell
+    // due.
+    simKeys.drive(dt);
+    for (std::uint64_t s = nav.take(clock); s > 0; --s)
       worldPtr->step();
 
     worldPtr->snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());
@@ -821,15 +857,10 @@ int main(int argc, char **argv) {
 
     const double worldT = worldPtr->tick() * cfg.veh.dt;
 
-    // `dynamic`: the world CHANGES under the agent. A few seconds in, a blockage is
-    // stamped across the corridor ahead of it (sim_world::add_obstacle writes the
-    // live dynamic layer, which is composited into the planning surface on the
-    // next SENSE tick — so the agent only "knows" once it senses, exactly like a
-    // real discovery). The stale-map lie and this are the two halves of limited
-    // belief: believing something that isn't there, and not yet knowing
-    // something that is.
-    // (dynamic scenario now shows a real CROSSING vehicle, not a static blob;
-    //  the hero senses it via inter-agent avoidance and loops around.)
+    // `dynamic` needs nothing per frame: the crosser is a real second agent set up with
+    // the world (scenario setup above), and the hero only "knows" about it once a SENSE
+    // tick sees it. With `ghost` that makes the two halves of limited belief: believing
+    // something that isn't there, and not yet knowing something that is.
 
     // Repaint the fog/belief ground only when a sense tick actually happened —
     // per-frame smoothing of belief would be a lie (and wasted work).

@@ -10,7 +10,29 @@
 #   cmake -S src/cvcGL -B build \
 #     -DCMAKE_PREFIX_PATH="<cvcpkg-prefix>;<installed-libcvc-sdk>"
 cmake_minimum_required(VERSION 3.16)
-project(cvcGL VERSION 3.0 LANGUAGES CXX)
+
+# cvcGL ships in lockstep with libcvc, so its version IS libcvc's: in-tree it reads the
+# enclosing project(libcvc VERSION ...); standalone (the cvcgl recipe builds -S src/cvcGL
+# from the same source tree) it parses that line out of the top-level CMakeLists.txt,
+# the same single source of truth the cvc package and the recipe-version CI gate use.
+# This used to be hardcoded 3.0, so every bundle's cvcGLConfigVersion.cmake reported
+# 3.0 and a consumer's find_package(cvcGL 3.5) rejected a 3.5 cvcGL. SOVERSION stays 3,
+# so the runtime name (libcvcGL.so.3) is unchanged; only the file suffix and the
+# exported package version move -- as for libcvc itself (src/cvc/CMakeLists.txt).
+if(DEFINED libcvc_VERSION)
+  set(_cvcgl_version "${libcvc_VERSION}")
+else()
+  file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../../CMakeLists.txt" _cvcgl_version
+       REGEX "^[ \t]*VERSION[ \t]+[0-9]+\\.[0-9]+\\.[0-9]+" LIMIT_COUNT 1)
+  string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" _cvcgl_version "${_cvcgl_version}")
+endif()
+if(NOT _cvcgl_version)
+  message(FATAL_ERROR "cvcGL: cannot determine the libcvc version (no project(libcvc VERSION "
+                      "...) in scope and none parsed from ${CMAKE_CURRENT_SOURCE_DIR}/../../"
+                      "CMakeLists.txt)")
+endif()
+project(cvcGL VERSION ${_cvcgl_version} LANGUAGES CXX)
+message(STATUS "cvcGL version: ${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -291,6 +313,12 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/wasm/cvcGLWasm.cmake")
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+# A shared libcvcGL finds libcvc, VTK, imgui and SDL3 beside it in lib/ through
+# its own RUNPATH ($ORIGIN, or @loader_path on macOS): CMake/CvcInstallRpath.cmake.
+# No effect on the static archive.
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
+cvc_set_install_rpath(cvcGL lib)
+
 install(TARGETS cvcGL EXPORT cvcGLTargets
   ARCHIVE DESTINATION lib   # static libcvcGL.a
   LIBRARY DESTINATION lib   # shared libcvcGL.so
@@ -396,6 +424,23 @@ add_executable(cvcgl_update_normals test/cvcgl_update_normals.cpp)
 target_link_libraries(cvcgl_update_normals PRIVATE cvcGL)
 add_test(NAME cvcgl_update_normals COMMAND cvcgl_update_normals)
 
+# GeometryNode scalar-field colouring (setScalarField, the color_by / colormap /
+# scalar_min / scalar_max state keys): the uchar colours equal
+# cvc::colormap_rgb, survive use_single_color and render-mode rebuilds, change
+# in place for a range/colormap change, and a size mismatch no-ops. Headless
+# except a last section that reads a rendered colour back (skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1).
+add_executable(cvcgl_scalar_field test/cvcgl_scalar_field.cpp)
+target_link_libraries(cvcgl_scalar_field PRIVATE cvcGL)
+add_test(NAME cvcgl_scalar_field COMMAND cvcgl_scalar_field)
+
+# GeometryNode TETS mode: the tets' boundary surface (12 n^2 outward triangles on
+# an n^3 tet cube, every point kept so per-vertex fields line up) when libcvc has
+# libigl, the tet edges otherwise or for tets it rejects. Headless.
+add_executable(cvcgl_tet_surface test/cvcgl_tet_surface.cpp)
+target_link_libraries(cvcgl_tet_surface PRIVATE cvcGL)
+add_test(NAME cvcgl_tet_surface COMMAND cvcgl_tet_surface)
+
 # Guards the "solid opaque block" volume bug: a stale cached min/max after an
 # in-place voxel edit, and a degenerate range collapsing the transfer function.
 add_executable(cvcgl_volume_range test/cvcgl_volume_range.cpp)
@@ -408,6 +453,12 @@ add_test(NAME cvcgl_volume_range COMMAND cvcgl_volume_range)
 add_executable(cvcgl_traversal test/cvcgl_traversal.cpp)
 target_link_libraries(cvcgl_traversal PRIVATE cvcGL)
 add_test(NAME cvcgl_traversal COMMAND cvcgl_traversal)
+
+# X11 <X11/X.h> macros (None, Success, ...) vs the cvc/gl headers, in the order VTK's X11
+# render window produces (VTK first, then X11, then cvc/gl). Compile-time check; headless.
+add_executable(cvcgl_x11_macros test/cvcgl_x11_macros.cpp)
+target_link_libraries(cvcgl_x11_macros PRIVATE cvcGL)
+add_test(NAME cvcgl_x11_macros COMMAND cvcgl_x11_macros)
 
 # The world grid must enclose the geometry actually in the scene. It was sized
 # only from GraphicsNode::transformChanged, so it tracked geometry that MOVED
@@ -478,6 +529,17 @@ add_executable(cvcgl_pose_matrix test/cvcgl_pose_matrix.cpp)
 target_link_libraries(cvcgl_pose_matrix PRIVATE cvcGL)
 add_test(NAME cvcgl_pose_matrix COMMAND cvcgl_pose_matrix)
 
+# physics_scene_binding: a cvc::physics world's bodies drawn between its last two
+# states (setPoseMatrix per node, a pose sink per merged-mesh group). Headless.
+add_executable(cvcgl_physics_scene_binding test/cvcgl_physics_scene_binding.cpp)
+target_link_libraries(cvcgl_physics_scene_binding PRIVATE cvcGL)
+add_test(NAME cvcgl_physics_scene_binding COMMAND cvcgl_physics_scene_binding)
+
+# add_world_geometry: the world's geometry as nodes, sharing the items' arrays. Headless.
+add_executable(cvcgl_world_geometry_nodes test/cvcgl_world_geometry_nodes.cpp)
+target_link_libraries(cvcgl_world_geometry_nodes PRIVATE cvcGL)
+add_test(NAME cvcgl_world_geometry_nodes COMMAND cvcgl_world_geometry_nodes)
+
 # A node can outlive the scene that made it (removeGraphics hands it back; a
 # Python proxy or a viewer keeps holding it). Guards the raw back-pointers that
 # used to dangle in that window -- SceneGraph* (a pose write locked the freed
@@ -537,6 +599,32 @@ add_executable(cvcgl_audio_output test/cvcgl_audio_output.cpp)
 target_link_libraries(cvcgl_audio_output PRIVATE cvcGL)
 add_test(NAME cvcgl_audio_output COMMAND cvcgl_audio_output)
 
+# Phase-0 (conference): cvc::gl::playback::audio_stream_player auto-pumps an f32 PCM stream into an
+# audio_output sink on its own thread. Hardware-free via a FakeSink (no SDL / no device needed).
+add_executable(cvcgl_audio_player test/cvcgl_audio_player.cpp)
+target_link_libraries(cvcgl_audio_player PRIVATE cvcGL)
+add_test(NAME cvcgl_audio_player COMMAND cvcgl_audio_player)
+
+# Conference roadmap §4a media verb: (stream-capture-camera) attaches a producer to an open stream.
+# Driven hardware-free through the Ariadne Runtime with a synthetic source (no camera, no GL), so it
+# runs on CI; the SDL device path is compiled in (CVC_ENABLE_SDL) but not exercised here.
+add_executable(cvcgl_media_capture test/cvcgl_media_capture.cpp)
+target_link_libraries(cvcgl_media_capture PRIVATE cvcGL)
+add_test(NAME cvcgl_media_capture COMMAND cvcgl_media_capture)
+
+# §4a audio: (stream-open) extended for f32 audio streams + the (stream-capture-audio) verb with its
+# composable tone/gain/mix graph. Headless (no SDL device, no GL) via a mix of synthetic tones.
+add_executable(cvcgl_media_audio test/cvcgl_media_audio.cpp)
+target_link_libraries(cvcgl_media_audio PRIVATE cvcGL)
+add_test(NAME cvcgl_media_audio COMMAND cvcgl_media_audio)
+
+# §4a playback: (stream-play-audio) wires an audio_stream_player (#634) onto an open f32 stream.
+# Headless (no SDL device): the player plays nothing but still drains the stream — asserted as a
+# live subscriber on the channel. The play()-to-a-sink mechanics are covered by cvcgl_audio_player.
+add_executable(cvcgl_media_play test/cvcgl_media_play.cpp)
+target_link_libraries(cvcgl_media_play PRIVATE cvcGL)
+add_test(NAME cvcgl_media_play COMMAND cvcgl_media_play)
+
 # Phase-3 Ariadne stream WIDGET: cvc::gl::ariadne stream_view — its render-thread stream->image
 # pull step (next_stream_frame_image), exercised hardware-free with synthetic_source (no GL/ImGui).
 add_executable(cvcgl_stream_view test/cvcgl_stream_view.cpp)
@@ -575,6 +663,17 @@ add_test(NAME cvcgl_frame_yield COMMAND cvcgl_frame_yield)
 add_executable(cvcgl_volren_node test/cvcgl_volren_node.cpp)
 target_link_libraries(cvcgl_volren_node PRIVATE cvcGL)
 add_test(NAME cvcgl_volren_node COMMAND cvcgl_volren_node)
+# cvcgl_volren_node ray-marches a volume through the fragment shader -- the one
+# genuinely heavy cvcGL render test. Under software GL (llvmpipe, the CI render
+# path) it is ~31s in Release, but on the Debug+coverage lane it blew past the
+# 300s PR ctest budget: the build is unoptimized AND gcov-instrumented, and it
+# is starved for CPU because --parallel packs several llvmpipe renders at once
+# and llvmpipe IS the CPU. RUN_SERIAL hands it the whole box (so it lands near a
+# clean ~10x of Release instead of the contention-inflated >300s), and the
+# explicit TIMEOUT overrides the lane's --timeout 300 with generous headroom.
+# Every other cvcgl_* test finishes under 14s even in Debug -- this is the only
+# outlier, so scope the override to it rather than loosening the lane budget.
+set_tests_properties(cvcgl_volren_node PROPERTIES TIMEOUT 1200 RUN_SERIAL TRUE)
 
 add_executable(cvcgl_volslice_node test/cvcgl_volslice_node.cpp)
 target_link_libraries(cvcgl_volslice_node PRIVATE cvcGL)
@@ -621,6 +720,15 @@ add_executable(cvcgl_camera_idle test/cvcgl_camera_idle.cpp)
 target_link_libraries(cvcgl_camera_idle PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 
+# CameraController Map mode holds the map pose: frameMap + update() keep the eye
+# straight above the framed point (update() used to re-apply the ORBIT pose),
+# pans/zooms move the map pose, Orbit<->Map/Fly switches keep each mode's pose,
+# and the state tree round-trips "mode" = 3 and "map.*". Bare vtkCamera; the
+# resize re-fit section skips when the renderer reports no size.
+add_executable(cvcgl_camera_map test/cvcgl_camera_map.cpp)
+target_link_libraries(cvcgl_camera_map PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_map COMMAND cvcgl_camera_map)
+
 # Numeric parity: the push-fed Track controller reproduces pymod_gl/camera.py's
 # ChaseCamera (the two-stage EMA follow) to floating point, so the C++ and Python
 # chase cameras genuinely "work the same". Headless (getPose reads trackEye/Focal
@@ -659,6 +767,18 @@ add_test(NAME cvcgl_light_node COMMAND cvcgl_light_node)
 add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
+
+# The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
+# terminal backend's background under the widgets, and a background drag turns the camera.
+add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
+target_link_libraries(cvcgl_terminal_scene PRIVATE cvcGL)
+add_test(NAME cvcgl_terminal_scene COMMAND cvcgl_terminal_scene)
+
+# Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
+# heightfield node draws the ground. Headless; the dynamics need Jolt.
+add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
+target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
 
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
@@ -890,13 +1010,14 @@ endif()
 # locked unless it is listed here as headless.
 get_property(_cvcgl_gl_tests DIRECTORY PROPERTY TESTS)
 list(REMOVE_ITEM _cvcgl_gl_tests
-  cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal
+  cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
-  cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo
+  cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo cvcgl_physics_scene_binding
+  cvcgl_world_geometry_nodes cvcgl_ariadne_physics
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
-  cvcgl_streaming_races cvcgl_sdl_input
+  cvcgl_streaming_races cvcgl_sdl_input cvcgl_tet_surface
   cvcgl_webgl_state_shadow cvcgl_glsync
   # Stream channel/widget binding + SDL peripheral I/O: no GL context (the
   # device paths are skipped without CVC_TEST_AUDIO/CAMERA), so they need no

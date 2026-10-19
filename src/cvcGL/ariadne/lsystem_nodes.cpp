@@ -33,6 +33,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
@@ -69,19 +70,28 @@ inline double read_key(cvc::app &app, const std::string &path, double def) {
   return ari::read_or<double>(app, path, def);
 }
 
-// Sample a realized heightfield GeometryNode: make_heightfield lays out a regular row-major res×res
-// grid, so a nearest-cell lookup gives the ground height (and band colour) at (x, y). Ported from
-// the demo so the forest plants on the island's actual relief.
+// The ground a node stands on (its `ground:` prop): a heightfield node's own cvc::height_field
+// (RealizedScene::height_fields), so the forest, the sea floor and the cloud shadow sit on the
+// triangles the renderer draws and a body rests on. For any other grid-shaped mesh (res x res
+// row-major, as a loaded grid may be), the nearest vertex of the grid its vertex count implies.
+// Sampled in the ground node's own coordinates, before its transform.
 struct TerrainHeights {
-  const cvc::geometry *geom = nullptr;
-  int res = 0;
+  std::shared_ptr<const cvc::height_field> field;
+  cvc::geometry mesh; // the ground node's mesh (a copy sharing its arrays): colours, the fallback
+  int res = 0;        // the fallback grid's size (0: none)
   double minx = 0, miny = 0, step = 1;
-  bool ok() const { return geom && res > 1; }
-  void build(const cvc::geometry *g) {
-    geom = g;
-    if (!g || g->const_points().empty())
+  bool ok() const { return field || res > 1; }
+  void build(SceneGraph &sg, const RealizedScene &out, const std::string &ground) {
+    auto gnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground));
+    if (!gnode || !gnode->getGeometry())
       return;
-    const std::size_t n = g->const_points().size();
+    mesh = *gnode->getGeometry();
+    const auto it = out.height_fields.find(ground);
+    if (it != out.height_fields.end()) {
+      field = it->second;
+      return;
+    }
+    const std::size_t n = mesh.const_points().size();
     res = static_cast<int>(std::lround(std::sqrt(double(n))));
     if (res < 2 || std::size_t(res) * res != n) {
       res = 0;
@@ -89,7 +99,7 @@ struct TerrainHeights {
     }
     double maxx = -1e30, maxy = -1e30;
     minx = miny = 1e30;
-    for (const auto &p : g->const_points()) {
+    for (const auto &p : mesh.const_points()) {
       minx = std::min(minx, p[0]);
       maxx = std::max(maxx, p[0]);
       miny = std::min(miny, p[1]);
@@ -97,20 +107,41 @@ struct TerrainHeights {
     }
     step = (maxx - minx) / (res - 1);
   }
-  std::size_t index(double x, double y) const {
+  // The vertex nearest (x, y), or -1.
+  std::int64_t vertex(double x, double y) const {
+    if (field) {
+      const int c = std::max(
+          0, std::min(field->cols() - 1, int(std::lround((x - field->x0()) / field->dx()))));
+      const int r = std::max(
+          0, std::min(field->rows() - 1, int(std::lround((y - field->y0()) / field->dy()))));
+      return field->vertex_of(r, c);
+    }
+    if (res < 2)
+      return -1;
     const int i = std::max(0, std::min(res - 1, int(std::lround((x - minx) / step))));
     const int j = std::max(0, std::min(res - 1, int(std::lround((y - miny) / step))));
-    return std::size_t(j) * res + i;
+    return std::int64_t(j) * res + i;
   }
-  double at(double x, double y) const { return ok() ? geom->const_points()[index(x, y)][2] : 0.0; }
-  // The terrain's per-vertex band colour at (x,y) (nearest grid vertex), or white if the mesh has
-  // no colours — so the cloud-shadow texture can carry albedo×shadow and keep the ground coloured.
+  // The ground height at (x, y), clamped to the grid at its edges; 0 without a ground.
+  double at(double x, double y) const {
+    if (field) {
+      x = std::max(field->x0(), std::min(field->max_x(), x));
+      y = std::max(field->y0(), std::min(field->max_y(), y));
+      const double h = field->height(x, y);
+      return std::isnan(h) ? 0.0 : h;
+    }
+    const std::int64_t v = vertex(x, y);
+    return v < 0 ? 0.0 : mesh.const_points()[std::size_t(v)][2];
+  }
+  // The ground's per-vertex band colour at (x,y) (the nearest vertex), or white if the mesh has
+  // no colours, so the cloud-shadow texture can carry albedo x shadow and keep the ground coloured.
   void color_at(double x, double y, double &r, double &g, double &b) const {
-    if (!ok() || geom->const_colors().size() != geom->const_points().size()) {
+    const std::int64_t v = vertex(x, y);
+    if (v < 0 || mesh.const_colors().size() != mesh.const_points().size()) {
       r = g = b = 1.0;
       return;
     }
-    const auto &c = geom->const_colors()[index(x, y)];
+    const auto &c = mesh.const_colors()[std::size_t(v)];
     r = c[0];
     g = c[1];
     b = c[2];
@@ -210,8 +241,7 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
 
   const std::string ground = n.props.str("ground").empty() ? "terrain" : n.props.str("ground");
   auto heights = std::make_shared<TerrainHeights>();
-  if (auto gnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground)))
-    heights->build(gnode->getGeometry());
+  heights->build(sg, out, ground);
   if (!heights->ok())
     warn("ground node '" + ground + "' is not a realized heightfield — planting on a flat plane");
   rt->height_at = [heights](double x, double y) { return heights->ok() ? heights->at(x, y) : 0.0; };
@@ -328,8 +358,7 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
 
   // Terrain height at each sea-grid column (constant), sampled from the realized heightfield.
   TerrainHeights heights;
-  if (auto gnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground)))
-    heights.build(gnode->getGeometry());
+  heights.build(sg, out, ground);
   auto terr = std::make_shared<std::vector<float>>(static_cast<std::size_t>(sp->n) * sp->n);
   for (int j = 0; j < sp->n; ++j)
     for (int i = 0; i < sp->n; ++i) {
@@ -479,7 +508,8 @@ struct Vec3 {
   double x, y, z;
 };
 Vec3 sunDir(double azDeg, double elDeg) {
-  const double az = azDeg * M_PI / 180.0, el = elDeg * M_PI / 180.0;
+  constexpr double kPi = 3.14159265358979323846; // not M_PI: MSVC needs _USE_MATH_DEFINES for it
+  const double az = azDeg * kPi / 180.0, el = elDeg * kPi / 180.0;
   return {std::cos(el) * std::sin(az), -std::cos(el) * std::cos(az), std::sin(el)};
 }
 float sampleSky(const std::vector<float> &field, double wx, double wy, double wz, double skyHalf) {
@@ -574,10 +604,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   // Always wire the terrain (if any) so the shadow can be toggled live; the tick decides per frame.
   auto terr = std::make_shared<TerrainHeights>();
   std::weak_ptr<GeometryNode> wterrain;
-  if (auto tnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground))) {
-    terr->build(tnode->getGeometry());
+  terr->build(sg, out, ground);
+  if (auto tnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground)))
     wterrain = tnode;
-  }
   auto rgb = std::make_shared<std::vector<unsigned char>>();
   auto lastShadow = std::make_shared<int>(-1); // force the first bake; tracks on/off transitions
 

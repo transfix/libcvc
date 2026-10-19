@@ -12,20 +12,24 @@ Python package that imports `pycvc`.
 
 ## Status
 
-- **v0 (this): `Geometry`** — build meshes/polylines incrementally or in
-  bulk, set per-vertex colors, compute normals, and read/write files
-  (`.off`, CVC-raw, …) via libcvc's `geometry_file_io`.
-- Planned: `Volume` (cvc::volume + SDF), `State` (cvc::state tree), and
-  numpy fast-paths; then a `vr3` module (exposed by VolumeRover3's embedded
-  interpreter) that turns a `pycvc.Geometry` into a live scene node.
+pycvc covers geometry and volumes (with numpy views), the state tree (`State`),
+images, models, world units and clocks, LOD, state_exec (below), and, in the
+`pycvc_gl` module, cvcGL scenes, Ariadne and Dear ImGui HUDs. Each area has a
+contract test (`test_pycvc_*.py`).
 
 ## Design
 
-`pycvc_geometry.h` is a SWIG-safe facade: it *forward-declares*
-`cvc::geometry` behind a `shared_ptr`, so SWIG only ever parses
-`std::string`/`std::vector`/primitive signatures — never libcvc's heavy
-headers. Only the `.cpp` includes libcvc. C++ host apps reach the wrapped
-`cvc::geometry` via `native()` (which is `%ignore`d on the Python side).
+pycvc wraps the **real** libcvc types under their C++ names; there is no
+parallel facade layer (`pycvc.i`). `pycvc.volume` is a `cvc::volume`, `pycvc.State`
+is a `cvc::state`, `pycvc.parse` is `cvc::state_exec::parse`. The libcvc headers
+are `%include`d and curated with `%ignore` for members that can't cross. A thin
+`%extend` layer adds Python conveniences such as numpy views.
+
+Every constructor or operation that needs an app takes it explicitly
+(`pycvc.volume(app)`, `pycvc.State.instance(app)`). There is no module-global
+"current app". Where C++ takes a `cvc::state&`, Python passes a `pycvc.State`.
+The goal is for the Python API to match the C++ API. For state_exec the audit
+and plan are in `docs/PYCVC_STATE_EXEC_PARITY.md`.
 
 ## Build
 
@@ -127,6 +131,21 @@ The `cvc::state`-driven viewer/scene controllers are wrapped too, mirroring
 Contract tests: `test_pycvc_world_units.py`, `test_pycvc_gl_world.py`, and the
 `extents_metres` case in `test_pycvc_model.py`.
 
+## Physics: the world, vehicles and the navigator's plant
+
+`pycvc_physics.i` wraps `cvc::physics`. `physics_world` gives bodies, materials, vehicles,
+`step`, `state_hash`, `save` / `restore` and `snapshot_json`. `vehicle_desc` has the
+`humvee()` and `roboracer()` presets, and `physics_binding` is the world's state-tree
+binding. `nav_plant` makes a world's vehicles a sim_world's plant
+(`nav_sim_world_set_plant(sim, plant)`; `None` selects nav's bicycle). Terrain and the
+sim_world's settings are reached through `nav_sim_world_set_terrain` and
+`nav_sim_world_pull` / `publish`. `state_comment` / `state_property` read what a key says it
+is.
+
+Python reads the same values as C++: `test_pycvc_physics.py` rebuilds the cross-platform golden
+scene and `physics_parity_test`'s scenarios through pycvc, and requires C++'s state hashes and
+values bit for bit. See `docs/PHYSICS_API.md`, "Python: pycvc".
+
 ## Level of detail (cvc::simplify + cvc::lod)
 
 The whole LOD family is wrapped directly (`pycvc_lod.i`, `LodGraphicsNode` in
@@ -184,3 +203,94 @@ Every widget reads/writes `cvc::state`, so the same value is drivable from a
 script, a config file or a replicated peer. Raw custom-widget ImGui (free-form
 windows) is a separate, deferred design (a curated subset compiled inside cvcGL).
 Contract test: `test_pycvc_gl_imgui.py`.
+
+## state_exec DSL (`Exec`) and parser settings
+
+`pycvc.Exec(app)` runs state_exec programs over the app's state tree. The parser
+settings are the C++ surface, under the C++ names (see
+`docs/STATE_EXEC_GRAMMAR.md`, "Parser settings"):
+
+```python
+import pycvc
+app = pycvc.make_app()
+ex = pycvc.Exec(app)
+ex.run("(+ 1 2)")                                     # "3"
+
+pycvc.parse_options()                                 # max_depth 100000, step_tokens 0
+pycvc.async_scheduler.host_parser_defaults()          # step_tokens 1024
+ex.parser_defaults()                                  # == host_parser_defaults()
+pycvc.state_set(app, "state_exec.defaults.parser.max_depth", "64")  # tree overrides
+root = pycvc.State.instance(app)                      # the tree root, as in C++
+pycvc.parse_options_from_state(root, "", ex.parser_defaults())      # what Exec uses
+
+# Deep-data settings ("Deep data on the executor"), the same way
+pycvc.data_options()                                  # step_nodes 0
+pycvc.async_scheduler.host_data_defaults()            # step_nodes 1024
+ex.data_defaults()                                    # == host_data_defaults()
+pycvc.data_options_from_state(root, "", ex.data_defaults())         # what Exec uses
+```
+
+`Exec` starts from the same defaults as the app's exec scheduler (Ariadne), and
+the same `state_exec.defaults.parser.*` and `state_exec.defaults.data.*` keys
+override both. A syntax error raises `pycvc.parse_error`, a `RuntimeError` with
+`.line` and `.col`.
+
+The rest of state_exec is the C++ API under the C++ names
+(`docs/PYCVC_STATE_EXEC_PARITY.md` lists what is wrapped and what comes next):
+
+```python
+from pycvc import symbol
+pycvc.parse("(f 'x \"s\")")      # [symbol('f'), [symbol('quote'), symbol('x')], 's']
+pycvc.parse_all("1 2")           # [1, 2]
+pycvc.to_string([symbol("a"), 1])                  # '(a 1)'
+pycvc.encode_value(root.child("snap"), {"k": [1, 2]})
+pycvc.decode_value(root.child("snap"))             # {'k': [1, 2]}
+```
+
+Values convert to native Python types, with `pycvc.symbol` for symbols and
+`pycvc.value` as an opaque handle for closures and other non-data values. Such
+a handle converts back to the same value when passed into the DSL. Conversion
+is strict: non-`str` dict keys, ints outside 64 bits and unsupported types
+raise.
+
+The schedulers are the real classes too, with environments, builtins and the
+process types:
+
+```python
+from pycvc import process_status, scheduling_policy
+env = pycvc.builtins.make_default_environment()
+pycvc.builtins.register_fn(env, "greet", lambda n: "hi " + n)  # a Python callable
+opts = pycvc.execute_options()
+opts.env = env
+opts.on_complete = print                    # called with the result
+sched = pycvc.scheduler(scheduling_policy.round_robin)  # or pycvc.async_scheduler()
+pid = sched.execute('(greet "ann")', opts)
+sched.run()                                 # {pid: 'hi ann'}; releases the GIL
+sched.get_process_info(pid).status          # process_status.terminated
+ex.scheduler().list_processes()             # Exec's own async_scheduler
+```
+
+The enums are `enum.IntEnum` classes, and an enum argument must be one of their
+members. Where C++ returns an empty `std::optional` or a null pointer, Python gets
+`None`, except for a value: `get_result`, `pop_pending_message` and
+`environment.lookup` raise `KeyError` instead, because `None` is the nil value.
+
+The evaluators, their state, and the intrinsics are wrapped the same way:
+
+```python
+ev = pycvc.stackless_evaluator(pycvc.builtins.make_default_environment())
+st = ev.create_state("(begin (set x 1) (+ x 41))")
+while not ev.step(st):                      # releases the GIL; ev.interrupt() from
+    pass                                    # another thread raises evaluation_interrupted
+st.result, st.stats.get_step_count()        # 42, the step count
+pycvc.encode_evaluator_state(root.child("snap"), st)     # snapshot, decode_... to restore
+
+ctx = pycvc.intrinsics_context()            # state-get, msg-send, spawn, ... over a tree
+ctx.sched, ctx.root = sched, root
+env = pycvc.builtins.make_default_environment()
+pycvc.register_intrinsics(env, ctx)         # each function keeps ctx alive
+```
+
+Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,
+`test_pycvc_state_exec_sched.py`, `test_pycvc_state_exec_eval.py`,
+`test_pycvc_state_exec_data.py`.

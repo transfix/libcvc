@@ -11,8 +11,11 @@
 // map_id[i]=i gives per-vehicle belief planes, but with no sensing they stay identical
 // copies of the known map (structure for future fog, behaviourally inert here). The city
 // occupancy is rasterized in C++ straight from the bundle's buildings.glb
-// (occupancy_from_model, the C++ building_occupancy). A 2-D picture-in-picture minimap in
+// (cvc::nav::mesh_footprint, the C++ building_occupancy). A 2-D picture-in-picture minimap in
 // the corner shows every agent's position and the line to the target it is chasing.
+// The ground is the bundle's terrain, the cvc::height_field the buildings were placed on
+// (the satellite aerial draped over it), and the vehicles, routes, staging line and targets
+// ride on its heights, so nothing floats over or sinks into the city.
 //
 // The bundle (terrain.json + buildings.glb) is passed at runtime and never vendored:
 //   nav_finale --bundle /path/to/scenes/austin_south --capture fly --offscreen \
@@ -30,6 +33,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/core/clock_follower.h>
+#include <cvc/core/world_clock.h>
+#include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -39,6 +45,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/state/state.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -47,7 +54,10 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/grid_nav.h> // astar / simplify / inflate
+#include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_route.h>
+#include <cvc/physics/plant_host.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -65,27 +75,6 @@ using cvc::gl::SceneRenderer;
 
 namespace {
 const double PI = std::acos(-1.0);
-
-// Scan terrain.json for the world bounds (min_x/min_y/max_x/max_y). Tiny targeted
-// parse — we only need the 4 numbers, not the height grid.
-bool read_bounds(const std::string &path, navdemo::Bounds &b) {
-  std::ifstream f(path);
-  if (!f)
-    return false;
-  const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  auto num = [&](const char *key, double &v) -> bool {
-    const auto k = s.find(key);
-    if (k == std::string::npos)
-      return false;
-    const auto colon = s.find(':', k);
-    if (colon == std::string::npos)
-      return false;
-    v = std::atof(s.c_str() + colon + 1);
-    return true;
-  };
-  return num("\"min_x\"", b.min_x) && num("\"min_y\"", b.min_y) && num("\"max_x\"", b.max_x) &&
-         num("\"max_y\"", b.max_y);
-}
 
 // Load a raw uint8 .npy (Python's cached occupancy) for IoU validation; returns
 // empty on any mismatch. Assumes '|u1' C-order, square.
@@ -184,6 +173,7 @@ Route plan_route(const std::vector<std::uint8_t> &planOcc, int rows, int cols,
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
   std::string bundle, vehicle, capture = "fly", out = "frames", png, viewMode = "3d";
+  std::string plantName = navdemo::default_plant(); // what the vehicles drive on (--plant)
   int width = 1280, height = 720, nx = 384;
   long frames = 0;
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
@@ -202,7 +192,9 @@ int main(int argc, char **argv) {
       "no-minimap", po::bool_switch(&no_minimap),
       "hide the 2-D PiP minimap")("frames", po::value<long>(&frames)->default_value(0))(
       "fps", po::value<double>(&fps)->default_value(30.0))(
-      "hz", po::value<double>(&hz)->default_value(60.0))(
+      "hz", po::value<double>(&hz)->default_value(60.0),
+      "initial world speed, in navigator steps per second of capture time "
+      "(speed = hz x veh.dt; sim.speed changes it live)")(
       "view", po::value<std::string>(&viewMode)->default_value("3d"),
       "3d (perspective, default) | map (fixed top-down ortho — the honest 2-D answer)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
@@ -214,7 +206,10 @@ int main(int argc, char **argv) {
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"))("png",
-                                                                    po::value<std::string>(&png));
+                                                                    po::value<std::string>(&png))(
+      "plant", po::value<std::string>(&plantName)->default_value(plantName),
+      "what the vehicles drive on: kinematic (nav's bicycle), or a vehicle preset on the Jolt "
+      "physics plant at its real size and limits (humvee, roboracer)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -257,16 +252,18 @@ int main(int argc, char **argv) {
   int ny = nx;
   std::vector<std::uint8_t> occ;
   cvc::geometry cityMesh;
+  navdemo::Terrain terrain; // the bundle's height field (empty for the synthetic city)
   bool haveMesh = false;
   bool usedBundle = false;
 
   if (!bundle.empty()) {
-    const std::string tj = bundle + "/terrain.json", glb = bundle + "/buildings.glb";
-    if (read_bounds(tj, bounds) && std::filesystem::exists(glb)) {
+    // The library's one reader of city bundles: bounds from terrain.json, the
+    // buildings as one mesh, and their footprints on the nx*ny grid.
+    std::vector<std::uint8_t> bocc;
+    if (navdemo::load_city_bundle(bundle, nx, ny, bounds, bocc, &cityMesh, &terrain) &&
+        !bocc.empty()) {
       std::printf("nav_finale: loading bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
-      cvc::model m = cvc::read_model(glb);
-      cityMesh = m.merged();
       haveMesh = cityMesh.num_tris() > 0;
       {
         const auto &p = cityMesh.points();
@@ -276,14 +273,14 @@ int main(int argc, char **argv) {
             lo[k] = std::min(lo[k], v[k]);
             hi[k] = std::max(hi[k], v[k]);
           }
-        std::printf("nav_finale: buildings.glb -> %llu meshes, %llu tris, bbox "
+        std::printf("nav_finale: buildings -> %llu tris, bbox "
                     "x[%.0f,%.0f] y[%.0f,%.0f] z[%.0f,%.0f]\n",
-                    (unsigned long long)m.num_meshes(), (unsigned long long)cityMesh.num_tris(),
-                    lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+                    (unsigned long long)cityMesh.num_tris(), lo[0], hi[0], lo[1], hi[1], lo[2],
+                    hi[2]);
       }
       // Raw building footprints for the sim (the reactive d_hat gives clearance); the
       // A* planOcc below adds a light inflation of its own.
-      occ = navdemo::occupancy_from_model(cityMesh, bounds, nx, ny, /*inflate=*/0);
+      occ = std::move(bocc);
       usedBundle = true;
       // Validate against Python's cached occupancy if present (IoU).
       char npy[1024];
@@ -318,6 +315,24 @@ int main(int argc, char **argv) {
   }
   navdemo::add_border(occ.data(), ny, nx);
   const double span = std::max(bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y);
+  // The ground height at (x, y): the terrain the buildings stand on (0 for the synthetic city).
+  // Everything drawn over the ground rides on it.
+  const auto ground = [&](double x, double y) {
+    return terrain.empty() ? 0.0 : terrain.sample(x, y);
+  };
+  double zlo = 0.0, zhi = 0.0; // the terrain's height range, for framing the camera
+  if (!terrain.empty()) {
+    zlo = 1e30;
+    zhi = -1e30;
+    for (const float z : terrain.field->heights())
+      if (!std::isnan(z)) {
+        zlo = std::min(zlo, static_cast<double>(z));
+        zhi = std::max(zhi, static_cast<double>(z));
+      }
+    std::printf("nav_finale: terrain %dx%d, heights %.1f..%.1f m\n", terrain.field->rows(),
+                terrain.field->cols(), zlo, zhi);
+  }
+  const double zmid = 0.5 * (zlo + zhi);
 
   // 2. Eight vehicles. Act 1: enter from the west edge (spread in y), rendezvous on
   //    an eastern staging line. Act 2: pursue 4 moving targets (2 chasers each).
@@ -378,6 +393,14 @@ int main(int argc, char **argv) {
     map_id[i] = i; // private belief per vehicle
   cvc::nav::sim_world world(cfg, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(),
                             o.data(), goal.data(), color.data(), N, map_id.data(), N);
+  // The plant (--plant): each vehicle a physics vehicle that plans with its own limits and size.
+  cvc::physics::plant_host plantHost(navdemo::plant_options());
+  try {
+    std::printf("nav_finale: driving %s\n", plantHost.use(world, plantName).c_str());
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "nav_finale: --plant: %s\n", e.what());
+    return 2;
+  }
 
   // 3. Scene.
   cvc::app app;
@@ -399,10 +422,13 @@ int main(int argc, char **argv) {
                                                /*vary=*/0.45));
   }
   const double ground_rgb[3] = {0.18, 0.21, 0.25};
+  // The terrain's own mesh (its UVs map [min,max] -> [0,1] like the flat quad's), or a flat
+  // quad for the synthetic city.
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
-  // Drape the bundle's real satellite aerial over the ground (the ground_quad's UVs
-  // map [min,max] -> [0,1]; setTexture handles the top-left/bottom-left V flip).
+      sg.addGraphics("ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
+                                               : navdemo::terrain_mesh(terrain, ground_rgb)));
+  // Drape the bundle's real satellite aerial over the ground (setTexture handles the
+  // top-left/bottom-left V flip).
   cvc::image sat;
   bool haveSat = false;
   if (usedBundle) {
@@ -472,7 +498,7 @@ int main(int argc, char **argv) {
       node->setLabelText(lb);
       node->setShowLabel(true);
       node->setVisible(false); // targets exist only in Act 2
-      node->setPosition(cfg.cx, cfg.cy, tgtHover);
+      node->setPosition(cfg.cx, cfg.cy, ground(cfg.cx, cfg.cy) + tgtHover);
     }
     targetNodes[k] = node;
   }
@@ -520,18 +546,23 @@ int main(int argc, char **argv) {
 
   // The Act-1 STAGING LINE, drawn: a glowing north-south line at the rendezvous
   // x — the previously invisible thing eight vehicles were converging on.
+  // Draped: many short segments, each end 3 m above the terrain, so the line follows the
+  // ground instead of cutting through a hill.
   const double stage_rgb[3] = {0.95, 0.88, 0.45};
-  auto stagingNode = make_lines_node("staging", 1, stage_rgb, 4.0, 3.0);
+  const int STAGE_SEGS = 48;
+  auto stagingNode = make_lines_node("staging", STAGE_SEGS, stage_rgb, 4.0, 3.0);
   if (stagingNode) {
-    std::vector<double> sx(12, 0.0);
-    sx[0] = stageX;
-    sx[1] = bounds.min_y + 0.15 * (bounds.max_y - bounds.min_y);
-    sx[2] = 3.0;
-    sx[3] = stageX;
-    sx[4] = bounds.max_y - 0.15 * (bounds.max_y - bounds.min_y);
-    sx[5] = 3.0;
-    // one segment -> 2 points; buffer is [3*2] but assign(12) covers reuse
-    sx.resize(6);
+    const double y0 = bounds.min_y + 0.15 * (bounds.max_y - bounds.min_y);
+    const double y1 = bounds.max_y - 0.15 * (bounds.max_y - bounds.min_y);
+    std::vector<double> sx(static_cast<std::size_t>(6) * STAGE_SEGS);
+    for (int k = 0; k < STAGE_SEGS; ++k)
+      for (int e = 0; e < 2; ++e) {
+        const double y = y0 + (y1 - y0) * (k + e) / STAGE_SEGS;
+        const std::size_t b = static_cast<std::size_t>(6) * k + 3 * e;
+        sx[b] = stageX;
+        sx[b + 1] = y;
+        sx[b + 2] = ground(stageX, y) + 3.0;
+      }
     stagingNode->updateVertices(sx);
   }
 
@@ -566,14 +597,18 @@ int main(int argc, char **argv) {
   {
     char st[220];
     std::snprintf(st, sizeof st,
-                  "%d vehicles · %s · global A* spine + learned CoefMLP local drive · known map", N,
+                  "%d vehicles · %s · global A* spine + learned CoefMLP local drive · known map · "
+                  "%s",
+                  N,
                   usedBundle ? "real Austin (runtime bundle)"
-                             : "synthetic city — pass --bundle for real Austin");
+                             : "synthetic city — pass --bundle for real Austin",
+                  plantHost.driving() == "kinematic" ? "kinematic bicycle"
+                                                     : (plantHost.driving() + " on Jolt").c_str());
     status.setText(st);
   }
 
   CameraController cam(view);
-  cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 0.05 * span);
+  cam.frameBounds(bounds.min_x, bounds.min_y, zlo, bounds.max_x, bounds.max_y, zhi + 0.05 * span);
   cam.setMouseSensitivity(mouseSens); // --mouse-sensitivity / state settings.mouse_sensitivity
   if (moveSpeed > 0.0)
     cam.setMoveSpeed(moveSpeed);
@@ -616,8 +651,33 @@ int main(int argc, char **argv) {
   // 4. Run: sim on the render thread (only 8 agents). Act split at 45% of the run.
   const long total = frames > 0 ? frames : 600;
   const long act2 = static_cast<long>(0.45 * total);
-  const int sub = std::max(1, static_cast<int>(hz / std::max(1.0, fps)));
+  // World time is the app's world clock at the suite quantum (0.01 s), driven once per frame
+  // through a binding (sim.speed / sim.paused / sim.mode / sim.step); the navigator follows it,
+  // one step every veh.dt / fixed_dt quanta. The initial speed keeps the old pace, --hz steps per
+  // second of capture time (60 Hz at 0.06 s is 3.6x), which is the same hz / fps steps per
+  // captured frame as before.
+  cvc::world_clock &clock = app.world_clock();
+  {
+    cvc::world_clock::config cc;
+    cc.fixed_dt = 0.01;
+    cc.scale = hz * cfg.veh.dt;
+    cc.max_steps_per_advance = 8 * static_cast<int>(cvc::ticks_per_step(cfg.veh.dt, cc.fixed_dt));
+    cc.cap_scales_with_rate = true;
+    clock.configure(cc);
+  }
+  cvc::world_clock_binding simKeys(app, clock);
+  cvc::clock_follower navFollow = cvc::clock_follower::for_step(clock, cfg.veh.dt);
+  // The two acts are scripted in world time: Act 2 opens at the world time a capture reaches at
+  // 45% of its frames, the targets orbit at 0.25 rad per wall second at the initial speed, and
+  // the pursuers replan every 30 navigator steps.
+  const double speed0 = clock.scale();
+  const double act2T = static_cast<double>(act2) / fps * speed0;
+  const double tgtOmega = 0.25 / speed0;
+  const long replanSteps = 30;
+  double actT0 = 0.0; // world time the arc (re)started
+  long navSteps = 0, nextReplan = 0;
   std::vector<float> pos(2 * N), head(N), spd(N);
+  std::vector<double> zoff(N, 0.0); // the ground height under each vehicle
   std::vector<int> md(N);
   std::vector<std::uint8_t> rch(N);
   std::vector<float> tgt(2 * NT); // current target world positions (Act 2)
@@ -630,7 +690,7 @@ int main(int argc, char **argv) {
   cvc::gl::TouchGestures touch(view, cam);
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing);
-  bool uiPaused = false, ui2D = false, uiSpines = true, uiMinimap = minimap, uiCards = true;
+  bool ui2D = false, uiSpines = true, uiMinimap = minimap, uiCards = true;
   bool uiForceAct2 = false, uiRestartActs = false;
   bool uiScene = false; // the library's ScenePanel window
 #ifdef CVC_ENABLE_IMGUI
@@ -641,7 +701,11 @@ int main(int argc, char **argv) {
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Sim")) {
-        ImGui::MenuItem("Paused", nullptr, &uiPaused);
+        // Pause is the clock's control (sim.paused): world time, the vehicles and the
+        // targets all stop together.
+        bool paused = clock.current_mode() == cvc::world_clock::mode::paused;
+        if (ImGui::MenuItem("Paused", nullptr, &paused))
+          cvc::state::instance(app)(simKeys.key("paused")).value(paused ? 1 : 0);
         if (ImGui::MenuItem("Jump to Act 2 (pursuit)"))
           uiForceAct2 = true;
         if (ImGui::MenuItem("Replay from Act 1"))
@@ -702,6 +766,61 @@ int main(int argc, char **argv) {
         plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1], gx, gy, standoffCells);
   }
 
+  // On a vehicle plant, routes the vehicle can drive replace the A* spine: its turning circle,
+  // its body and its reverse gear (plan_vehicle_route), followed with route_follower (P9 R3). A
+  // vehicle that stops short of its route's end for a few seconds is replanned from where it is.
+  const bool vehicleRoutes = plantHost.plant() != nullptr;
+  cvc::nav::route_vehicle rv;
+  cvc::nav::follower_options fo;
+  if (vehicleRoutes) {
+    const cvc::nav::plant_limits l = plantHost.plant()->limits(0);
+    cvc::nav::sim_world::plant_plan pp;
+    world.plant_plan_of(0, pp);
+    rv.min_radius = l.wheelbase / sc / std::tan(l.max_steer);
+    rv.disc_radius = pp.body_rr / sc;
+    for (const float off : pp.body_offsets)
+      rv.disc_offsets.push_back(off / sc);
+    fo.wheelbase = l.wheelbase / sc;
+    fo.max_steer = l.max_steer;
+  }
+  cvc::nav::route_follower follower(world, fo);
+  std::vector<double> routeGoal(2 * static_cast<std::size_t>(N), 0.0);
+  std::vector<long> stillSince(N, -1);
+  long vehicleReplans = 0;
+  double planMs = 0.0;
+  const auto planVehicle = [&](int i, double gx, double gy) {
+    cvc::nav::route_options ro;
+    ro.max_expansions = 120000; // bounded; an unreached route still leads the right way
+    const auto t0 = std::chrono::steady_clock::now();
+    const cvc::nav::vehicle_route r = cvc::nav::plan_vehicle_route(
+        occ.data(), ny, nx, bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y, rv,
+        {pos[2 * i], pos[2 * i + 1], head[i], false}, gx, gy, ro);
+    planMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    follower.set(i, r);
+    routeGoal[2 * i] = gx;
+    routeGoal[2 * i + 1] = gy;
+    stillSince[i] = -1;
+    Route spine; // the spine shows the vehicle's route
+    for (const cvc::nav::route_pose &p : r.poses)
+      spine.wp.push_back({p.x, p.y});
+    routes[i] = spine;
+    curWp[i] = 0;
+    return r;
+  };
+  if (vehicleRoutes) {
+    int reached = 0, cusps = 0;
+    for (int i = 0; i < N; ++i) {
+      const cvc::nav::vehicle_route r =
+          planVehicle(i, goal[2 * i] / sc + cfg.cx, goal[2 * i + 1] / sc + cfg.cy);
+      reached += r.reached;
+      cusps += r.cusps;
+    }
+    std::printf("nav_finale: vehicle routes (turning radius %.1f m, %zu discs of %.2f m): %d of %d "
+                "reach their goals, %d cusps, %.0f ms\n",
+                rv.min_radius, rv.disc_offsets.size(), rv.disc_radius, reached, N, cusps, planMs);
+  }
+
   while (!view.windowClosed()) {
     double t, dt;
     if (capturing) {
@@ -715,11 +834,12 @@ int main(int argc, char **argv) {
 #ifdef CVC_ENABLE_IMGUI
     if (uiForceAct2) { // jump straight to the pursuit act
       uiForceAct2 = false;
-      if (frame < act2)
-        frame = act2;
+      if (clock.t() - actT0 < act2T)
+        actT0 = clock.t() - act2T;
     }
     if (uiRestartActs) { // replay the two-act arc from the top
       uiRestartActs = false;
+      actT0 = clock.t();
       frame = 0;
       targetsShown = false;
       for (auto &n : targetNodes)
@@ -739,25 +859,23 @@ int main(int argc, char **argv) {
         navdemo::set_ortho_topdown(view, bounds, 10.0, &cam);
       else {
         cam.setMode(CameraController::Mode::Orbit);
-        cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 0.05 * span);
+        cam.frameBounds(bounds.min_x, bounds.min_y, zlo, bounds.max_x, bounds.max_y,
+                        zhi + 0.05 * span);
       }
     }
     actCard.setVisible(uiCards);
     minimap = uiMinimap;
-    if (uiPaused) {
-      view.processUIEvents();
-      touch.update(); // apply any pinch/two-finger gesture from this frame
-      view.render();
-      continue;
-    }
 #endif
-    act2now = frame >= act2;
+    // The one drive of world time this frame (a capture passes its fixed 1/fps).
+    simKeys.drive(dt);
+    const double worldT = clock.t() - actT0; // world seconds into the two-act arc
+    act2now = worldT >= act2T;
 
     // Act 2: 4 targets orbit the map centre; each pair of vehicles chases one, with
     // its A* route replanned to the moving target periodically.
     if (act2now) {
       for (int k = 0; k < NT; ++k) {
-        const double a = 2 * PI * k / NT + 0.25 * (t - act2 / fps);
+        const double a = 2 * PI * k / NT + tgtOmega * (worldT - act2T);
         const double rad = 0.30 * span;
         tgt[2 * k] = static_cast<float>(cfg.cx + rad * std::cos(a));
         tgt[2 * k + 1] = static_cast<float>(cfg.cy + rad * std::sin(a));
@@ -772,35 +890,51 @@ int main(int argc, char **argv) {
           engageNode->setVisible(true);
         actFlipT = t;
         targetsShown = true;
+        nextReplan = navSteps; // the pursuers plan onto their targets at once
       }
       for (int k = 0; k < NT; ++k)
         if (targetNodes[k])
-          targetNodes[k]->setPosition(tgt[2 * k], tgt[2 * k + 1], tgtHover);
+          targetNodes[k]->setPosition(tgt[2 * k], tgt[2 * k + 1],
+                                      ground(tgt[2 * k], tgt[2 * k + 1]) + tgtHover);
       if (engageNode) { // pursuer -> target, streamed
         for (int i = 0; i < N; ++i) {
           const double wx = pos[2 * i], wy = pos[2 * i + 1]; // snapshot pos IS world
           const std::size_t b6 = static_cast<std::size_t>(6) * i;
+          const double tx = tgt[2 * (i % NT)], ty = tgt[2 * (i % NT) + 1];
           engageXyz[b6] = wx;
           engageXyz[b6 + 1] = wy;
-          engageXyz[b6 + 2] = 6.0;
-          engageXyz[b6 + 3] = tgt[2 * (i % NT)];
-          engageXyz[b6 + 4] = tgt[2 * (i % NT) + 1];
-          engageXyz[b6 + 5] = tgtHover * 0.8;
+          engageXyz[b6 + 2] = ground(wx, wy) + 6.0;
+          engageXyz[b6 + 3] = tx;
+          engageXyz[b6 + 4] = ty;
+          engageXyz[b6 + 5] = ground(tx, ty) + tgtHover * 0.8;
         }
         engageNode->updateVertices(engageXyz);
       }
-      if ((frame - act2) % 15 == 0)
+      if (navSteps >= nextReplan) {
+        nextReplan = navSteps + replanSteps;
         for (int i = 0; i < N; ++i) {
-          routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1],
-                                 tgt[2 * (i % NT)], tgt[2 * (i % NT) + 1], standoffCells);
+          const double tx = tgt[2 * (i % NT)], ty = tgt[2 * (i % NT) + 1];
+          if (vehicleRoutes) {
+            // A vehicle route only when the target has moved off it or the route is done: a
+            // Hybrid A* per vehicle every replan would cost the frame.
+            if (follower.done(i) || !follower.following(i) ||
+                std::hypot(tx - routeGoal[2 * i], ty - routeGoal[2 * i + 1]) > 0.08 * span) {
+              planVehicle(i, tx, ty);
+              ++vehicleReplans;
+            }
+            continue;
+          }
+          routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1], tx, ty,
+                                 standoffCells);
           curWp[i] = static_cast<std::size_t>(-1); // force a retarget onto the new route
         }
+      }
     }
 
     // Follow the route: aim each vehicle at its current waypoint, advancing on arrival.
     // Retarget ONLY when the waypoint changes — retargeting every frame resets the
     // carrot FSM's escape/tracking state and the vehicle never gets moving.
-    for (int i = 0; i < N; ++i) {
+    for (int i = 0; i < N && !vehicleRoutes; ++i) {
       Route &rt = routes[i];
       const double arr = 0.03 * span;
       while (rt.idx + 1 < rt.wp.size()) {
@@ -818,14 +952,45 @@ int main(int argc, char **argv) {
       }
     }
 
-    for (int s = 0; s < sub; ++s)
+    for (std::uint64_t s = navFollow.take(clock); s > 0; --s) { // the steps that fell due
+      if (vehicleRoutes)
+        follower.apply();
       world.step();
+      ++navSteps;
+    }
     world.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());
+    if (vehicleRoutes) // a vehicle still for 4 s short of its route's end is replanned from there
+      for (int i = 0; i < N; ++i) {
+        // Moving, or parked where it was going: fine. A route the planner could not finish
+        // (it ends short of the goal) counts as still, and is replanned like a wedged one.
+        const double toGoal =
+            std::hypot(pos[2 * i] - routeGoal[2 * i], pos[2 * i + 1] - routeGoal[2 * i + 1]);
+        if (std::fabs(spd[i]) > 0.3f || toGoal < 2.0 * cfg.reach_tol / sc) {
+          stillSince[i] = -1;
+          continue;
+        }
+        if (stillSince[i] < 0)
+          stillSince[i] = navSteps;
+        else if (navSteps - stillSince[i] > 66) {
+          planVehicle(i, routeGoal[2 * i], routeGoal[2 * i + 1]);
+          ++vehicleReplans;
+        }
+      }
+    if (std::getenv("NAV_DBG") && frame % 20 == 0 && vehicleRoutes) {
+      int finished = 0;
+      for (int i = 0; i < N; ++i)
+        finished += follower.done(i) ? 1 : 0;
+      std::printf("[routes] f%ld v0 leg %d/%d%s, %d finished, %ld replans, %.0f ms planning\n",
+                  frame, follower.leg(0) + 1, follower.legs(0),
+                  follower.reversing(0) ? " backing up" : "", finished, vehicleReplans, planMs);
+    }
     if (std::getenv("NAV_DBG") && frame % 20 == 0)
       std::printf("[dbg] f%ld act2=%d a0=(%.0f,%.0f)->wp%zu/%zu a4=(%.0f,%.0f) spd0=%.3f\n", frame,
                   static_cast<int>(act2now), pos[0], pos[1], routes[0].idx, routes[0].wp.size(),
                   pos[8], pos[9], spd[0]);
-    const auto &xyz = glyphs.pack(pos.data(), head.data());
+    for (int i = 0; i < N; ++i) // each vehicle on the ground under it
+      zoff[i] = ground(pos[2 * i], pos[2 * i + 1]);
+    const auto &xyz = glyphs.pack_z(pos.data(), head.data(), zoff.data());
     if (agentNode)
       agentNode->updateVertices(xyz);
 
@@ -841,10 +1006,10 @@ int main(int argc, char **argv) {
           const std::size_t b6 = 6 * sseg;
           X[b6] = ax;
           X[b6 + 1] = ay;
-          X[b6 + 2] = 3.0;
+          X[b6 + 2] = ground(ax, ay) + 3.0;
           X[b6 + 3] = rt.wp[w][0];
           X[b6 + 4] = rt.wp[w][1];
-          X[b6 + 5] = 3.0;
+          X[b6 + 5] = ground(rt.wp[w][0], rt.wp[w][1]) + 3.0;
           ax = rt.wp[w][0];
           ay = rt.wp[w][1];
         }
@@ -852,7 +1017,7 @@ int main(int argc, char **argv) {
           const std::size_t b6 = 6 * sseg;
           X[b6] = X[b6 + 3] = ax;
           X[b6 + 1] = X[b6 + 4] = ay;
-          X[b6 + 2] = X[b6 + 5] = 3.0;
+          X[b6 + 2] = X[b6 + 5] = ground(ax, ay) + 3.0;
         }
         spineNodes[i]->updateVertices(X);
       }
@@ -868,7 +1033,7 @@ int main(int argc, char **argv) {
     if (capturing) {
       // Scripted capture camera: a slow high fly that drifts across the map.
       const double az = 0.4 + 0.25 * std::sin(0.12 * t);
-      navdemo::orbit_camera(bounds, 0.05 * span, az, 42.0 * PI / 180.0, 1.9, eye, focal);
+      navdemo::orbit_camera(bounds, zmid + 0.05 * span, az, 42.0 * PI / 180.0, 1.9, eye, focal);
       view.setCamera(eye[0], eye[1], eye[2], focal[0], focal[1], focal[2], 0, 0, 1, 30);
     } else {
       // Interactive: the CameraController owns the camera (Tab orbit/fly, WASD +
@@ -937,6 +1102,7 @@ int main(int argc, char **argv) {
       cvc::write_image(frameImg, path);
     } else {
       view.processUIEvents();
+      touch.update(); // apply any pinch/two-finger gesture from this frame
       view.render();
     }
 

@@ -15,6 +15,7 @@
 #include <cvc/gl/SceneGraph.h>    // scene().computeGraphicsBounds()/appContext()/prefix
 #include <cvc/gl/SceneRenderer.h> // view.render()/processUIEvents()/renderer()/windowClosed()
 #include <cvc/gl/ariadne/AriRuntime.h>
+#include <cvc/gl/ariadne/extensions.h>             // register_cvcgl_extensions
 #include <cvc/gl/ariadne/scene_realize.h>          // realize_scene / RealizedScene / tick_scene
 #include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
 #include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / register_gl_stream_intrinsics
@@ -138,6 +139,10 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   // declared before app_rt_, so the Runtime it points at is destroyed first.
   app_rt_.set_backend(backend_);
   backend_.install(app_rt_.runtime(), *overlay_);
+
+  // cvcGL's custom scene node types and shader presets (forest_trees, mesh_lab, ...), so a
+  // Python-hosted document realizes the same node types ariadne_hello does. Idempotent.
+  register_cvcgl_extensions(app_);
 
   // (gl-bind-stream): register the process-global verb, and publish THIS document's GL sink (the
   // adapter) into its Runtime's document_scope so the verb routes here via ictx.document — no

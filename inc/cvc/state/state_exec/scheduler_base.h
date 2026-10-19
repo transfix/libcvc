@@ -53,8 +53,8 @@ struct execute_options {
   std::string root_path; // Chroot: confine to subtree (empty = full tree)
   std::string owner;     // Owner-scope tag (Ariadne document/Runtime); "" = unowned
   uint64_t max_steps = 0;
-  double max_time = 0.0;      // TOTAL wall-clock run-time seconds
-  double max_step_time = 0.0; // §13.8 per-STEP wall-clock cap (fresh each step); 0 = unlimited
+  double max_time = 0.0;      // TOTAL run-time seconds (a time_budget: see process::time_left)
+  double max_step_time = 0.0; // §13.8 per-STEP time cap (fresh each step); 0 = unlimited
   uint64_t max_memory = 0;
   uint64_t max_messages = 0;
   uint64_t max_message_bytes = 0;
@@ -72,9 +72,22 @@ struct process_info {
   std::string uid;
   std::string gid;
   uint64_t step_count;
+  // What the steps were spent on (step_kind): reading the script a slice at a time
+  // (parser.step_tokens), deep-data work a slice at a time (data.step_nodes), evaluating the
+  // rest. data_nodes counts the deep-data work in nodes, whichever steps did it; the times are
+  // seconds of scheduler-timed steps.
+  uint64_t read_steps = 0;
+  uint64_t eval_steps = 0;
+  uint64_t data_steps = 0;
+  uint64_t data_nodes = 0;
+  double read_time = 0.0;
+  double eval_time = 0.0;
+  double data_time = 0.0;
   double elapsed_time;
   uint64_t current_memory;
   uint64_t peak_memory;
+  uint64_t heap_memory = 0;       // measured heap share (heap.h); max_memory covers it too
+  uint64_t heap_measurements = 0; // measurements taken so far
   uint64_t max_memory;
   double max_time;
   uint64_t message_count;
@@ -83,6 +96,17 @@ struct process_info {
   uint64_t max_message_bytes;
   int parent_pid;
 };
+
+/// Fill `info`'s budget-by-kind fields from a process's evaluation stats.
+inline void fill_budget_usage(process_info &info, const evaluation_stats &stats) {
+  info.read_steps = stats.steps(step_kind::read);
+  info.eval_steps = stats.steps(step_kind::eval);
+  info.data_steps = stats.steps(step_kind::data);
+  info.data_nodes = stats.data_nodes();
+  info.read_time = stats.step_time(step_kind::read);
+  info.eval_time = stats.step_time(step_kind::eval);
+  info.data_time = stats.step_time(step_kind::data);
+}
 
 /// Aggregate scheduler statistics.
 struct scheduler_stats {

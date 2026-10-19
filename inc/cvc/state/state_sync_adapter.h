@@ -20,6 +20,7 @@
 #include <boost/signals2/connection.hpp>
 #include <cvc/core/namespace.h>
 #include <cvc/state/state_change_journal.h>
+#include <cvc/state/state_codec_registry.h>
 #include <cvc/state/state_subscription_router.h>
 #include <functional>
 #include <memory>
@@ -32,6 +33,7 @@ namespace cvc {
 
 class app;
 class state;
+class state_data_hydrator;
 
 // ----------------
 // cvc::state_sync_adapter
@@ -101,6 +103,17 @@ public:
   void set_on_local_mutation(on_local_mutation_func cb);
   void set_on_remote_applied(on_remote_applied_func cb);
 
+  // The codec registry used to (de)serialize node data() payloads for replication. Not owned;
+  // typically the owning shard's registry. When null, data() changes are not replicated (value()
+  // and child structure still are). Set before attach().
+  void set_codec_registry(const state_codec_registry *codecs) noexcept { _codecs = codecs; }
+
+  // The hydrator used to resolve blob-ref data() payloads that were offloaded to the blob store
+  // because they exceeded the inline threshold. Not owned; typically the owning session's hydrator.
+  // When null, a set_data mutation carrying a blob_ref is skipped (value()/structure still flow).
+  // Set before attach(). An inline set_data payload never consults the hydrator.
+  void set_data_hydrator(state_data_hydrator *hydrator) noexcept { _hydrator = hydrator; }
+
   // Apply a mutation received from a remote peer. Marks the calling
   // thread as "applying remote" for the duration so that the
   // resulting state signal does NOT loop back into the journal.
@@ -143,10 +156,32 @@ private:
   struct connection_set {
     boost::signals2::connection value_changed;
     boost::signals2::connection child_changed;
+    boost::signals2::connection data_changed;
+    boost::signals2::connection comment_changed;
+    boost::signals2::connection hidden_changed;
+    boost::signals2::connection read_only_changed;
+    boost::signals2::connection property_changed;
+
+    void disconnect_all() {
+      value_changed.disconnect();
+      child_changed.disconnect();
+      data_changed.disconnect();
+      comment_changed.disconnect();
+      hidden_changed.disconnect();
+      read_only_changed.disconnect();
+      property_changed.disconnect();
+    }
   };
 
   // Attach observers to `s` whose full path is `full_path`.
   void attach_node(state &s, const std::string &full_path);
+
+  // Connect all per-node change signals (value/data/comment/hidden/readOnly/child) for `node`,
+  // whose full dotted path is `full_path`, and return the resulting connection set. Does not touch
+  // _connections; the caller emplaces the result. Each slot re-resolves the node by path (never
+  // captures `node`), early-returns while applying a remote mutation, and journals + dispatches the
+  // corresponding mutation.
+  connection_set connect_node(state &node, const std::string &full_path);
 
   // Compose a full dot-path for a given child of `parent_full_path`.
   static std::string join_path(const std::string &parent_full_path, const std::string &child);
@@ -164,6 +199,10 @@ private:
 
   state_change_journal _journal;
   state_subscription_router _router;
+  const state_codec_registry *_codecs =
+      nullptr; // not owned; data() replication codecs (may be null)
+  state_data_hydrator *_hydrator =
+      nullptr; // not owned; resolves blob-ref data() payloads (may be null)
 
   mutable std::mutex _mutex;
   bool _attached;

@@ -55,7 +55,9 @@
 #define CVC_NAV_MATERIAL_H
 
 #include <cstdint>
+#include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/drive.h>
+#include <cvc/nav/geom_rollout.h>
 #include <vector>
 
 namespace cvc {
@@ -275,6 +277,131 @@ void integrate_surrogate_material_vjp(
     const surrogate_material_params &p, const float *g_oT, const float *g_vT,
     const float *g_min_clear, const float *g_cum_risk, const float *g_arc_length, float *g_alphas,
     float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0);
+
+// ── the material rollout on the kinematic bicycle ────────────────────────────
+// The same force law as integrate_surrogate_material, driven through the deployed
+// kinematic bicycle instead of a point mass. The force law is the per-obstacle IPC
+// barriers on the discs (C, R), the goal spring, damping, and the soft/hard material
+// forces from the 6-channel patch. The bicycle is drive.cpp's controller and
+// integrator, one substep per step:
+//   - the longitudinal command is a = (F . heading - gamma * sp) / mass, clamped;
+//   - pure pursuit toward the goal, plus a steering bias k_steer * tanh((F_rep + F_mat) . left);
+//   - the corner, stop, creep and reverse governors;
+//   - the d_cap steering limit and the kinematic update.
+// The governor's clearance and normal are the nearest disc's: the role the SDF
+// sample plays in the deployed drive. Training through it removes the point-mass
+// gap between training and deployment (P8b).
+//
+// State per agent: position o (B,2), heading th (B) and signed speed sp (B), updated
+// IN PLACE (start -> end). Lengths are in the batch's units (the vehicle params
+// below included); dt[b] is the step. Like the surrogate, the loop runs to max(H)
+// with a per-agent active gate, and min_clear is ungated. A step past H[b] leaves the
+// state frozen.
+struct bicycle_material_params {
+  float L = 0.035f;       // wheelbase
+  float delta_max = 0.6f; // steering lock, rad
+  float a_max = 1.5f;     // longitudinal acceleration limit
+  float a_lat_max = 1.0f; // lateral acceleration limit (corner governor, d_cap)
+  float k_steer = 0.8f;   // steering-bias gain
+  float vmax = 0.9f;      // speed limit
+  bool allow_reverse = true;
+};
+
+// Throws std::invalid_argument unless L, a_max, a_lat_max and vmax are finite and
+// > 0, delta_max is in (0, pi/2) and k_steer is finite and >= 0. Both bicycle
+// rollouts call it first.
+void validate(const bicycle_material_params &v);
+
+void integrate_bicycle_material(float *o, float *th, float *sp, const float *goal, const float *C,
+                                const float *R, const std::uint8_t *mask, const float *alphas,
+                                const float *beta, const float *gamma, const float *lam_soft,
+                                const float *lam_hard, const float *rollout_patch, const float *rr,
+                                const float *d_hat, const float *dt, const int *H, int B, int N,
+                                int Hp, int Wp, const surrogate_material_params &p,
+                                const bicycle_material_params &v, float *min_clear, float *cum_risk,
+                                float *hard_count, float *arc_length, int num_threads = 0);
+
+// VJP of integrate_bicycle_material: upstream grads on the differentiable outputs
+// (oT, thT, spT, min_clear, cum_risk, arc_length; any may be null) -> grads w.r.t.
+// the learned coefficients (alphas, beta, gamma, lam_soft, lam_hard), ADDED into the
+// g_* buffers. The start state, goal, discs and patch are data. Grad flows through
+// the branch and clamp each step TOOK, as autograd treats min/max/where. Validated by
+// finite differences (nav_material_bike_rollout_test).
+void integrate_bicycle_material_vjp(
+    const float *o0, const float *th0, const float *sp0, const float *goal, const float *C,
+    const float *R, const std::uint8_t *mask, const float *alphas, const float *beta,
+    const float *gamma, const float *lam_soft, const float *lam_hard, const float *rollout_patch,
+    const float *rr, const float *d_hat, const float *dt, const int *H, int B, int N, int Hp,
+    int Wp, const surrogate_material_params &p, const bicycle_material_params &v, const float *g_oT,
+    const float *g_thT, const float *g_spT, const float *g_min_clear, const float *g_cum_risk,
+    const float *g_arc_length, float *g_alphas, float *g_beta, float *g_gamma, float *g_lam_soft,
+    float *g_lam_hard, int num_threads = 0);
+
+// L_multi on the bicycle: multi_start_penalty (geom_rollout.h) with its short rollouts
+// driven through integrate_bicycle_material instead of a point mass.
+//   - Same starts (multi_start_origins), each agent keeping its heading th0 and speed sp0.
+//   - Same score: mean softplus(-min_clear / tau) over ms_h steps of ms_dt_mult * dt.
+//   - Geometry only, as the original: the material forces are off.
+// Returns the penalty and ADDS its grads w.r.t. alphas, beta and gamma into whichever
+// g_* are non-null.
+double multi_start_penalty_bicycle(const float *alphas, const float *beta, const float *gamma,
+                                   const float *o0, const float *th0, const float *sp0,
+                                   const float *goal, const float *C, const float *R,
+                                   const std::uint8_t *mask, const float *rr, const float *d_hat,
+                                   const float *dt, int B, int N, const multi_start_params &p,
+                                   const surrogate_material_params &sp,
+                                   const bicycle_material_params &v, float *g_alphas, float *g_beta,
+                                   float *g_gamma, int num_threads = 0);
+
+// ── the material rollout on the dynamic vehicle (P8b) ─────────────────────────
+// integrate_bicycle_material's controller (the same force law, pure pursuit, governors
+// and d_cap), its commands (delta, a) driving the dynamic single-track vehicle
+// (diff::dyn_plant, detail/dyn_bike.h) in place of the kinematic update: tires, grip,
+// load transfer and actuator lag, so the material policy learns what the vehicle can do.
+//
+// State per agent: the rear axle o (B,2), heading th (B), longitudinal speed vx (B), and
+// x (B,4) = (vy, r, delta, a), all IN PLACE (start -> end). `dyn` is the vehicle in the
+// batch's length units; its wheelbase lf + lr must be v.L. Arc length and cumulative risk
+// follow the dynamic path. Like the bicycle, the loop runs to max(H) with a per-agent
+// active gate. CPU only.
+void integrate_dynamic_material(float *o, float *th, float *vx, float *x, const float *goal,
+                                const float *C, const float *R, const std::uint8_t *mask,
+                                const float *alphas, const float *beta, const float *gamma,
+                                const float *lam_soft, const float *lam_hard,
+                                const float *rollout_patch, const float *rr, const float *d_hat,
+                                const float *dt, const int *H, int B, int N, int Hp, int Wp,
+                                const surrogate_material_params &p,
+                                const bicycle_material_params &v, const diff::dyn_bike_params &dyn,
+                                float *min_clear, float *cum_risk, float *hard_count,
+                                float *arc_length, int num_threads = 0);
+
+// VJP of integrate_dynamic_material: upstream grads on (oT, thT, vxT, xT, min_clear,
+// cum_risk, arc_length; any may be null) -> grads w.r.t. the learned coefficients, ADDED
+// into the g_* buffers. The plant's part comes from its forward-mode duals
+// (diff::dyn_plant_vjp), the controller's from the bicycle's hand-written reverse.
+void integrate_dynamic_material_vjp(
+    const float *o0, const float *th0, const float *vx0, const float *x0, const float *goal,
+    const float *C, const float *R, const std::uint8_t *mask, const float *alphas,
+    const float *beta, const float *gamma, const float *lam_soft, const float *lam_hard,
+    const float *rollout_patch, const float *rr, const float *d_hat, const float *dt, const int *H,
+    int B, int N, int Hp, int Wp, const surrogate_material_params &p,
+    const bicycle_material_params &v, const diff::dyn_bike_params &dyn, const float *g_oT,
+    const float *g_thT, const float *g_vxT, const float *g_xT, const float *g_min_clear,
+    const float *g_cum_risk, const float *g_arc_length, float *g_alphas, float *g_beta,
+    float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0);
+
+// L_multi on the dynamic vehicle: multi_start_penalty_bicycle with its short rollouts
+// through integrate_dynamic_material, each from rest in its x (zeros) and the agent's
+// heading th0 and speed vx0.
+double multi_start_penalty_dynamic(const float *alphas, const float *beta, const float *gamma,
+                                   const float *o0, const float *th0, const float *vx0,
+                                   const float *goal, const float *C, const float *R,
+                                   const std::uint8_t *mask, const float *rr, const float *d_hat,
+                                   const float *dt, int B, int N, const multi_start_params &p,
+                                   const surrogate_material_params &sp,
+                                   const bicycle_material_params &v,
+                                   const diff::dyn_bike_params &dyn, float *g_alphas, float *g_beta,
+                                   float *g_gamma, int num_threads = 0);
 
 // ── CUDA twins (defined in material_rollout.cu; CVC_ENABLE_CUDA only) ─────────
 // The GPU transcription of the two rollout functions above: one thread per

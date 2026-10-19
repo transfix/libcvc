@@ -74,8 +74,11 @@ static inline bool ends_with(const std::string &haystack, const std::string &nee
 //        in the .cpp file but the mac was complaining
 const uint64 VM_VERSION = 0x00010206;
 
-template <class T> const T &MIN(const T &a, const T &b) { return std::min(a, b); }
-template <class T> const T &MAX(const T &a, const T &b) { return std::max(a, b); }
+// The names are parenthesized so a function-like MIN(a,b)/MAX(a,b) macro (glibc and
+// macOS <sys/param.h>, GLib) cannot expand the declarations when such a header is
+// included first.
+template <class T> const T &(MIN)(const T &a, const T &b) { return std::min(a, b); }
+template <class T> const T &(MAX)(const T &a, const T &b) { return std::max(a, b); }
 
 // trilinear interpolation function
 static inline double getTriVal(double val[8], double x, double y, double z, double resX,

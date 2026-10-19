@@ -21,8 +21,12 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/dimension.h
   ../../inc/cvc/volume/voxels.h
   ../../inc/cvc/geometry/geometry.h
+  ../../inc/cvc/geometry/height_field.h
   ../../inc/cvc/geometry/simplify.h
+  ../../inc/cvc/geometry/mesh_ops.h
+  ../../inc/cvc/geometry/fem.h
   ../../inc/cvc/state/state.h
+  ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
   ../../inc/cvc/state/state_subscription_router.h
   ../../inc/cvc/state/state_sync_adapter.h
@@ -51,17 +55,34 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
   ../../inc/cvc/core/world_units.h
+  ../../inc/cvc/core/unit_registry.h
+  ../../inc/cvc/physics/types.h
+  ../../inc/cvc/physics/shape.h
+  ../../inc/cvc/physics/field.h
+  ../../inc/cvc/physics/vehicle.h
+  ../../inc/cvc/physics/body.h
+  ../../inc/cvc/physics/backend.h
+  ../../inc/cvc/physics/world.h
+  ../../inc/cvc/physics/world_binding.h
+  ../../inc/cvc/physics/snapshot_json.h
+  ../../inc/cvc/physics/world_geometry.h
+  ../../inc/cvc/physics/plant_host.h
+  ../../inc/cvc/physics/pose_tracker.h
+  ../../inc/cvc/physics/nav_plant.h
+  ../../inc/cvc/physics/nav_eval.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
   ../../inc/cvc/state/state_transport_inproc.h
   ../../inc/cvc/state/state_transport_ipc.h
   ../../inc/cvc/state/state_transport_grpc.h
+  ../../inc/cvc/state/state_stream_transport_grpc.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
   ../../inc/cvc/state/state_object.h
   ../../inc/cvc/state/state_list.h
+  ../../inc/cvc/state/state_json.h
   ../../inc/cvc/state/state_eviction_store.h
   ../../inc/cvc/state/state_memory_manager.h
   ../../inc/cvc/state/state_exec/types.h
@@ -73,6 +94,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/async_evaluator.h
   ../../inc/cvc/state/state_exec/async_stackless_evaluator.h
   ../../inc/cvc/state/state_exec/state_value_codec.h
+  ../../inc/cvc/state/state_exec/data_job.h
+  ../../inc/cvc/state/state_exec/heap.h
   ../../inc/cvc/state/state_exec/process.h
   ../../inc/cvc/state/state_exec/memory_tracker.h
   ../../inc/cvc/state/state_exec/scheduler_base.h
@@ -95,6 +118,11 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/nav/grid_nav.h
+  ../../inc/cvc/nav/vehicle_route.h
+  ../../inc/cvc/nav/route_follower.h
+  ../../inc/cvc/nav/plant_types.h
+  ../../inc/cvc/nav/terrain.h
+  ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/lod/select.h
   ../../inc/cvc/lod/pyramid.h
   ../../inc/cvc/lod/tiles.h
@@ -136,6 +164,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/lsys/cloud.h
   ../../inc/cvc/lsys/water.h
   ../../inc/cvc/world/surface.h
+  ../../inc/cvc/world/world_geometry.h
+  ../../inc/cvc/world/city_bundle.h
   ../../inc/cvc/world/grid.h
   ../../inc/cvc/world/heightfield.h
   ../../inc/cvc/world/scatter.h
@@ -163,7 +193,10 @@ set(SOURCE_FILES
   volume/cvcraw_io.cpp
   processing/gdtv_filter.cpp
   geometry/geometry.cpp
+  geometry/height_field.cpp
   geometry/simplify.cpp
+  geometry/mesh_ops.cpp
+  geometry/fem.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
@@ -179,17 +212,25 @@ set(SOURCE_FILES
   processing/smoothing.cpp
   volume/spider_io.cpp
   state/state.cpp
+  state/state_json.cpp
+  state/state_key_meta.cpp
   state/state_list.cpp
   state/state_eviction_store.cpp
   state/state_memory_manager.cpp
   state/state_exec/types.cpp
   state/state_exec/parser.cpp
   state/state_exec/builtins.cpp
+  state/state_exec/exceptions.cpp
   state/state_exec/evaluator.cpp
   state/state_exec/stackless_evaluator.cpp
   state/state_exec/async_evaluator.cpp
   state/state_exec/async_stackless_evaluator.cpp
   state/state_exec/state_value_codec.cpp
+  state/state_exec/data_job.cpp
+  state/state_exec/native_stack.cpp
+  state/state_exec/native_stack.h
+  state/state_exec/heap.cpp
+  state/state_exec/closure_natives.h
   state/state_exec/process.cpp
   state/state_exec/memory_tracker.cpp
   state/state_exec/scheduler.cpp
@@ -199,7 +240,22 @@ set(SOURCE_FILES
   state/state_exec/stdlib.cpp
   state/state_exec/exec_coordinator.cpp
   core/world_clock.cpp
+  core/world_clock_binding.cpp
   core/world_units.cpp
+  core/unit_registry.cpp
+  physics/world.cpp
+  physics/det_math.cpp
+  physics/field_step.cpp
+  physics/vehicle.cpp
+  physics/null_backend.cpp
+  physics/world_binding.cpp
+  physics/snapshot_json.cpp
+  physics/world_geometry.cpp
+  physics/plant_host.cpp
+  physics/pose_tracker.cpp
+  physics/binding_meta.cpp
+  physics/nav_plant.cpp
+  physics/nav_eval.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -236,20 +292,27 @@ set(SOURCE_FILES
   volume/volume_ops.cpp
   volume/vtk_io.cpp
   nav/grid_nav.cpp
+  nav/vehicle_route.cpp
+  nav/route_follower.cpp
   nav/spatial.cpp
   nav/drive.cpp
   nav/material.cpp
+  nav/terrain.cpp
   nav/material_raster.cpp
+  nav/world_planes.cpp
+  nav/land_cover.cpp
   nav/coef_energy_net.cpp
   nav/coef_energy_net_backward.cpp
   nav/coef_energy_net_io.cpp
   nav/material_rollout.cpp
+  nav/material_bike_rollout.cpp
   nav/material_train.cpp
   nav/geom_rollout.cpp
   nav/coef_mlp.cpp
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
   nav/sim_world.cpp
+  nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   lod/select.cpp
@@ -278,6 +341,8 @@ set(SOURCE_FILES
   lsys/cloud.cpp
   lsys/water.cpp
   world/surface.cpp
+  world/world_geometry.cpp
+  world/city_bundle.cpp
   world/heightfield.cpp
   world/scatter.cpp
   world/roads.cpp
@@ -303,6 +368,19 @@ foreach(_wsrc ${_cvc_world_srcs})
   if(_wtext MATCHES "#[ \t]*include[ \t]*[<\"]cvc/nav/")
     message(FATAL_ERROR "cvc::world must not depend on cvc::nav (found a cvc/nav include in ${_wsrc}); "
                         "the material seam is a file format, not an ABI (roadmap §14.4).")
+  endif()
+endforeach()
+
+# cvc::nav must not depend on cvc::physics (the nav vehicle physics roadmap, P4): nav knows only
+# its vehicle_plant interface, and the physics plant (cvc/physics/nav_plant.h) depends on it, not
+# the other way round. Both are in this one library, so the seam is enforced on the sources.
+file(GLOB _cvc_nav_srcs "${CMAKE_CURRENT_SOURCE_DIR}/nav/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/nav/*.h"
+                        "${PROJECT_SOURCE_DIR}/inc/cvc/nav/*.h" "${PROJECT_SOURCE_DIR}/inc/cvc/nav/detail/*.h")
+foreach(_nsrc ${_cvc_nav_srcs})
+  file(READ "${_nsrc}" _ntext)
+  if(_ntext MATCHES "#[ \t]*include[ \t]*[<\"]cvc/physics/")
+    message(FATAL_ERROR "cvc::nav must not depend on cvc::physics (found a cvc/physics include in ${_nsrc}); "
+                        "nav reaches a physics plant through cvc/nav/vehicle_plant.h only.")
   endif()
 endforeach()
 
@@ -335,10 +413,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -361,6 +439,22 @@ if(NOT MSVC)
 else()
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
                               world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
+# cvc::physics is deterministic by contract: a run's state_hash must reproduce on
+# every target when the backend is cross-platform deterministic (physics_replay_test
+# replays one trace natively and in wasm). No FMA contraction in the facade, the
+# step's vehicle and field code, the libm-free math they call (det_math.h) and the
+# null backend, as for nav and world above; the Jolt backend TUs get the same flag
+# on their own target (below).
+set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
+    physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_physics_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_physics_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -408,6 +502,8 @@ option(CVC_GEOMETRY_ENABLE_BUNNY "Enable built-in bunny geometry test tri mesh" 
 option(CVC_GEOMETRY_CORRECT_INDEX_START "Adjust indices if they start from 1 rather than 0" OFF)
 option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
+option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
+option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # XMLRPC support
 if(CVC_USING_XMLRPC)
@@ -959,14 +1055,18 @@ if(CVC_ENABLE_ASSIMP)
     # recipe exports zlib via an imported target (tracked libcvc-deps follow-up).
     find_package(ZLIB QUIET)
     get_target_property(_cvc_assimp_ill assimp::assimp INTERFACE_LINK_LIBRARIES)
-    if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|zlib\\.|cvcpkg-builder")
-      # Match the stale zlib entry in BOTH forms: unix libz.so/.a AND windows
-      # zlib.lib (the earlier "libz\\." pattern missed the windows filename, so the
-      # absolute cvcpkg-builder path survived and cvc.dll failed to link).
+    # The stale zlib entry, in every form a published bundle has used: unix libz.so / libz.a,
+    # windows zlib.lib, and windows z.lib (zlib's own CMake names its import library z.lib; an
+    # assimp republished on the windows builder baked .../cvcpkg-prefix-assimp-*/lib/z.lib, which
+    # neither of the first two patterns matched, so the builder path survived and cvc.dll's link
+    # and the CUDA device link both failed on it).
+    # Each alternative runs to the end of its list entry, so a $<LINK_ONLY:...> wrapper goes too.
+    set(_cvc_stale_zlib "[^;]*(libz|zlib)\\.[^;]*|[^;]*[/\\\\]z\\.lib[^;]*")
+    if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|zlib\\.|[/\\\\]z\\.lib|cvcpkg-builder")
       if(TARGET ZLIB::ZLIB)
-        string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "ZLIB::ZLIB" _cvc_assimp_ill "${_cvc_assimp_ill}")
+        string(REGEX REPLACE "${_cvc_stale_zlib}" "ZLIB::ZLIB" _cvc_assimp_ill "${_cvc_assimp_ill}")
       else()
-        string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
+        string(REGEX REPLACE "${_cvc_stale_zlib}" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
       endif()
       set_target_properties(assimp::assimp PROPERTIES INTERFACE_LINK_LIBRARIES "${_cvc_assimp_ill}")
       message(STATUS "  (rewrote assimp's stale absolute zlib link to a relocatable target)")
@@ -1137,6 +1237,10 @@ if(CVC_ENABLE_GRPC)
 
   list(APPEND SOURCE_FILES
     state/state_transport_grpc.cpp
+    state/state_stream_transport_grpc.cpp
+    ariadne/stream/stream_bridge.cpp
+    ariadne/stream/stream_relay.cpp
+    ariadne/conference/room_media_intrinsics.cpp
     ${_proto_pb_cc}
     ${_proto_grpc_cc}
   )
@@ -1154,7 +1258,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/app_runtime.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1169,10 +1273,13 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
   ../../inc/cvc/ariadne/stream_intrinsics.h
+  ../../inc/cvc/ariadne/conference/room_intrinsics.h
+  ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
   ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h
+  ../../inc/cvc/ariadne/tvision_backend.h
 )
 
 # cvc::ariadne::stream — Layer-(b) real-time in-process frame transport (roadmap
@@ -1182,23 +1289,90 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/frame.h
+  ../../inc/cvc/ariadne/stream/stream_codec.h
   ../../inc/cvc/ariadne/stream/frame_pool.h
   ../../inc/cvc/ariadne/stream/stream_channel.h
   ../../inc/cvc/ariadne/stream/stream_registry.h
   ../../inc/cvc/ariadne/stream/producer_thread.h
   ../../inc/cvc/ariadne/stream/stream.h
+  ../../inc/cvc/ariadne/stream/stream_bridge.h
+  ../../inc/cvc/ariadne/stream/stream_relay.h
   ../../inc/cvc/ariadne/stream/to_image.h
   ../../inc/cvc/ariadne/stream/frame_source.h
   ../../inc/cvc/ariadne/stream/synthetic_source.h
   ../../inc/cvc/ariadne/stream/audio_sources.h
 )
 
+# libigl + Eigen (header-only; only libigl's MPL-2.0 core module) behind
+# mesh_ops.h / fem.h. Option, find, and switch off when missing (as for Assimp):
+# mesh_ops.cpp / fem.cpp always compile and then throw mesh_ops_unavailable.
+#
+# CMAKE_FIND_PACKAGE_PREFER_CONFIG is required, not cosmetic: CGAL's config
+# (found above) prepends its modules dir, whose FindEigen3.cmake cannot parse
+# Eigen 5's version, and libigl-config.cmake does find_dependency(Eigen3
+# REQUIRED) -- a fatal configure error even under QUIET. No version is asked
+# of Eigen3 either: Eigen 5's version file rejects any 3.x request.
+if(CVC_ENABLE_LIBIGL)
+  set(_cvc_prefer_config "${CMAKE_FIND_PACKAGE_PREFER_CONFIG}")
+  set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)
+  find_package(Eigen3 CONFIG QUIET)
+  find_package(libigl CONFIG QUIET)
+  set(CMAKE_FIND_PACKAGE_PREFER_CONFIG "${_cvc_prefer_config}")
+  if(TARGET Eigen3::Eigen AND TARGET igl::core)
+    message(STATUS "libigl ${libigl_VERSION} + Eigen ${Eigen3_VERSION} found - mesh_ops/fem ENABLED")
+  else()
+    message(STATUS "libigl/Eigen not found - mesh_ops/fem compile to stubs (CVC_ENABLE_LIBIGL OFF)")
+    set(CVC_ENABLE_LIBIGL OFF)
+  endif()
+endif()
+
+# Jolt Physics behind cvc::physics (docs/roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md).
+# Found as a CMake package; without it the facade builds with the null backend
+# only, and a world asking for Jolt throws cvc::unsupported_exception.
+if(CVC_WITH_JOLT)
+  find_package(Jolt CONFIG QUIET)
+  if(TARGET Jolt::Jolt)
+    message(STATUS "Jolt ${Jolt_VERSION} found - cvc::physics Jolt backend ENABLED")
+  else()
+    message(STATUS "Jolt not found - cvc::physics has the null backend only (CVC_WITH_JOLT OFF)")
+    set(CVC_WITH_JOLT OFF)
+  endif()
+endif()
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
+
+# Packages behind cvc's PRIVATE imported-target links. A STATIC cvc exports those
+# links as $<LINK_ONLY:yaml-cpp::yaml-cpp> etc., so cvcConfig.cmake.in has to
+# find_dependency() each of them for the consumer; a SHARED cvc absorbs them and
+# the list is dropped before the config is generated. Append the package name
+# wherever such a link is added below.
+set(CVC_PRIVATE_LINK_PACKAGES "")
+
+# taocpp/PEGTL 3.x (header-only, MIT): the grammar engine for the state_exec
+# s-expression reader. Its rules go in the private
+# src/cvc/state/state_exec/grammar.h, so PEGTL is needed only to compile cvc.
+# Linked as $<BUILD_INTERFACE:...>, it adds an include path to cvc's own build
+# and nothing to the exported target, SHARED or STATIC: it is not in
+# CVC_PRIVATE_LINK_PACKAGES, and consumers never need PEGTL. "3.2" also refuses
+# PEGTL 4 (its version file is SameMajorVersion), whose API differs.
+find_package(pegtl 3.2 CONFIG REQUIRED)
+target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:taocpp::pegtl>)
+# That only holds while no installed header includes PEGTL, so check it here.
+file(GLOB_RECURSE _cvc_installed_headers "${PROJECT_SOURCE_DIR}/inc/*")
+foreach(_cvc_h IN LISTS _cvc_installed_headers)
+  file(STRINGS "${_cvc_h}" _cvc_pegtl_include REGEX "^[ \t]*#[ \t]*include[ \t]*[<\"]tao/pegtl")
+  if(_cvc_pegtl_include)
+    message(FATAL_ERROR
+      "${_cvc_h} includes PEGTL, but inc/ is installed and PEGTL is a build-only "
+      "dependency of libcvc. Keep PEGTL in private headers under src/ "
+      "(src/cvc/state/state_exec/grammar.h).")
+  endif()
+endforeach()
 
 # Ariadne .ari YAML loader — OPTIONAL. yaml-cpp is a light, header+lib dependency;
 # when present, ariadne/loader.cpp compiles the real parser (CVC_ARIADNE_HAVE_YAML);
@@ -1212,6 +1386,7 @@ if(TARGET yaml-cpp::yaml-cpp OR TARGET yaml-cpp)
   endif()
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_YAML)
   target_link_libraries(cvc PRIVATE ${_cvc_yamlcpp})
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES yaml-cpp)
   message(STATUS "Ariadne: .ari YAML loader ENABLED (yaml-cpp)")
 else()
   message(STATUS "Ariadne: yaml-cpp not found - .ari loader compiles to a stub")
@@ -1247,6 +1422,7 @@ else()
     target_compile_definitions(cvc PRIVATE CVC_NET_HAVE_CURL CVC_ARIADNE_HAVE_HTTP)
     if(TARGET CURL::libcurl)
       target_link_libraries(cvc PRIVATE CURL::libcurl)
+      list(APPEND CVC_PRIVATE_LINK_PACKAGES CURL)
     else()
       target_include_directories(cvc PRIVATE ${CURL_INCLUDE_DIRS})
       target_link_libraries(cvc PRIVATE ${CURL_LIBRARIES})
@@ -1266,9 +1442,33 @@ find_package(ftxui CONFIG QUIET)
 if(TARGET ftxui::component)
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_FTXUI)
   target_link_libraries(cvc PRIVATE ftxui::component ftxui::dom ftxui::screen)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES ftxui)
   message(STATUS "Ariadne: FTXUI terminal backend ENABLED (ftxui)")
 else()
   message(STATUS "Ariadne: FTXUI not found - terminal backend compiles to a stub")
+endif()
+
+# Ariadne tvision terminal backend — OPTIONAL (roadmap §16.5 row 5), behind CVC_ARIADNE_TVISION:
+# the feature flag the roadmap keeps for tvision's Borland-derived licensing. tvision draws the
+# native desktop (movable windows, menus, status line) and the FTXUI backend lays the windows'
+# contents out, so it needs FTXUI too. tvision ships as a static, position-independent archive with
+# no CMake package (cvcpkg `tvision`, with `ncurses` for ncursesw + the terminfo database), so it is
+# found by path and linked into libcvc privately, as BUILD-only so no absolute path reaches the
+# exported targets. Shared builds only: a static libcvc would have to export the archive.
+option(CVC_ARIADNE_TVISION "Build the Ariadne tvision backend when tvision is found" ON)
+if(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND BUILD_SHARED_LIBS)
+  find_path(CVC_TVISION_INCLUDE_DIR tvision/tv.h)
+  find_library(CVC_TVISION_LIBRARY tvision)
+  find_library(CVC_NCURSESW_LIBRARY ncursesw)
+  if(CVC_TVISION_INCLUDE_DIR AND CVC_TVISION_LIBRARY AND CVC_NCURSESW_LIBRARY)
+    target_compile_definitions(cvc PRIVATE CVC_ARIADNE_TVISION)
+    target_include_directories(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_INCLUDE_DIR}>)
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_LIBRARY}>
+                                      $<BUILD_INTERFACE:${CVC_NCURSESW_LIBRARY}>)
+    message(STATUS "Ariadne: tvision terminal backend ENABLED (${CVC_TVISION_LIBRARY})")
+  else()
+    message(STATUS "Ariadne: tvision not found - tvision backend compiles to a stub")
+  endif()
 endif()
 
 # Ariadne .ari Layer-2 JSON-Schema validation — OPTIONAL (roadmap §15). When the
@@ -1281,6 +1481,7 @@ find_package(nlohmann_json_schema_validator CONFIG QUIET)
 if(TARGET nlohmann_json_schema_validator::validator)
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_JSONSCHEMA)
   target_link_libraries(cvc PRIVATE nlohmann_json_schema_validator::validator)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES nlohmann_json_schema_validator)
   message(STATUS "Ariadne: .ari Layer-2 JSON-Schema validation ENABLED (json-schema-validator)")
 else()
   message(STATUS "Ariadne: json-schema-validator not found - Layer-2 validation off")
@@ -1370,9 +1571,162 @@ if(CVC_ENABLE_GRPC)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
   target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES Protobuf gRPC)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)
+endif()
+
+# libigl/Eigen. The TUs in geometry/igl/ include no cvc header and implement only
+# internal igl_detail:: functions; every public cvc:: body is in mesh_ops.cpp /
+# fem.cpp, which are cvc's own objects and so are exported like the rest.
+#
+# The TUs always compile as their own target, cvc_igl: PIC, hidden visibility,
+# PRIVATE igl::core + Eigen3::Eigen, and only the directory-scope defaults (C++
+# standard, MSVC runtime, add_compile_definitions) -- never cvc's target include
+# directories or definitions. It is neither installed nor exported. How its code
+# reaches cvc follows cvc's ACTUAL type, not BUILD_SHARED_LIBS: that option
+# defaults ON, no wasm configure turns it off, and Emscripten (no shared-library
+# support) silently makes add_library(cvc ...) STATIC anyway.
+#  - SHARED cvc: cvc_igl is a private STATIC archive linked into the DLL/.so.
+#    WINDOWS_EXPORT_ALL_SYMBOLS scans only cvc's own objects, so the Eigen/libigl
+#    template instantiations stay out of cvc.dll's export table (~34,900 of its
+#    65,535 slots are already taken), and hidden visibility keeps them out of
+#    libcvc.so's dynamic symbols.
+#  - STATIC cvc (wasm, or BUILD_SHARED_LIBS=OFF): an archive cannot carry another
+#    archive, and a BUILD_INTERFACE link to the unexported cvc_igl would ship a
+#    libcvc.a whose mesh_ops.o / fem.o reference igl_detail:: symbols that no
+#    installed file defines. cvc_igl is an OBJECT library instead, and its
+#    objects go into libcvc.a itself.
+# Both packages are header-only, so neither reaches cvcTargets.cmake. The
+# cvc_igl_packaging test (tests/CMakeLists.txt) checks both shapes.
+set(_cvc_igl_pthreads OFF)
+if(CVC_ENABLE_LIBIGL)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_LIBIGL)
+  get_target_property(_cvc_type cvc TYPE)
+  if(_cvc_type STREQUAL "SHARED_LIBRARY")
+    set(_cvc_igl_kind STATIC)
+  else()
+    set(_cvc_igl_kind OBJECT)
+  endif()
+  add_library(cvc_igl ${_cvc_igl_kind}
+    geometry/igl/igl_surface.cpp
+    geometry/igl/igl_locator.cpp
+    geometry/igl/igl_tet.cpp
+    geometry/igl/igl_fem.cpp
+  )
+  set_target_properties(cvc_igl PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  target_link_libraries(cvc_igl PRIVATE igl::core Eigen3::Eigen)
+  # Inert in Eigen 5.x (only its CHANGELOG still names it). It does NOT keep the
+  # Apache-2.0 BFloat16.h out: Eigen/Core always includes it.
+  target_compile_definitions(cvc_igl PRIVATE EIGEN_MPL2_ONLY)
+  if(MSVC)
+    target_compile_options(cvc_igl PRIVATE /bigobj)
+  endif()
+
+  # libigl's parallel_for backend must be the one igl::core hands every other
+  # consumer. parallel_for.h compiles a different body for the same inline
+  # template under IGL_PARALLEL_FOR_FORCE_SERIAL, and the lambdas inside libigl's
+  # templates mangle identically across TUs, so a define added only here is an
+  # ODR violation in any static link that also uses igl::core: the linker keeps
+  # one copy by link order, serializing the app's loops or pooling cvc's.
+  #  - Single-threaded wasm (no -pthread) cannot start std::thread workers, so
+  #    force SERIAL. The cvcpkg wasm libigl bundle's igl::core already exports
+  #    the define, so this agrees with it.
+  #  - wasm-mt (-pthread) keeps igl::core's backend: POOL, as the cvcpkg wasm-mt
+  #    libigl bundle is built. That pool starts igl::default_num_threads()
+  #    workers (ENV.IGL_NUM_THREADS, else navigator.hardwareConcurrency) on the
+  #    first parallel loop, and a pthread beyond the pre-spawned
+  #    -sPTHREAD_POOL_SIZE pool cannot start until the browser main thread
+  #    yields, which a blocked parallel_for never does. So a wasm-mt app must not
+  #    run mesh_ops / fem / SDF_IGL on the browser main thread with more igl
+  #    workers than its pthread pool: run them on a cvc::async_lane (as the
+  #    Ariadne mesh_lab/fe_lab nodes do), or link with -sPTHREAD_POOL_SIZE >= the
+  #    igl worker count and cap that count with IGL_NUM_THREADS.
+  # CVC_WASM_PTHREADS (top-level option) adds -pthread; a configure may carry it
+  # in CMAKE_CXX_FLAGS instead (cvcpkg's env-wasm.sh does under
+  # CVC_WASM_THREADS=1). This mirrors src/cvcGL's CVCGL_WASM_PTHREADS check.
+  if(EMSCRIPTEN)
+    get_directory_property(_cvc_igl_dir_copts COMPILE_OPTIONS)
+    if(CVC_WASM_PTHREADS
+       OR "${_cvc_igl_dir_copts};${CMAKE_CXX_FLAGS}" MATCHES "(^|[; ])-pthread($|[; ])")
+      set(_cvc_igl_pthreads ON)
+    else()
+      target_compile_definitions(cvc_igl PRIVATE IGL_PARALLEL_FOR_FORCE_SERIAL)
+    endif()
+  endif()
+
+  if(_cvc_igl_kind STREQUAL "STATIC")
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_igl>)
+  else()
+    target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_igl>)
+  endif()
+endif()
+
+# Jolt behind cvc::physics, in the same shape as cvc_igl above and for the same
+# reasons. physics/jolt/jolt_backend.cpp is its own target, cvc_physics_jolt, with
+# Jolt::Jolt linked PRIVATE. Jolt's JPH_* compile definitions (determinism, the
+# debug renderer, the DLL import macro) therefore reach that one TU only: never
+# cvc's other sources, and never a consumer. No public header names Jolt, and
+# CVC_WITH_JOLT is a PRIVATE definition; a program asks available_backends() at
+# run time. Hidden visibility keeps the JPH template instantiations out of
+# cvc.dll's export table and libcvc.so's dynamic symbols.
+#  - SHARED cvc: cvc_physics_jolt is a private STATIC archive linked into cvc, and
+#    Jolt is a link dependency of cvc alone.
+#  - STATIC cvc (wasm, or BUILD_SHARED_LIBS=OFF): an OBJECT library whose objects
+#    go into libcvc.a. A consumer then links libJolt too, so Jolt joins
+#    CVC_PRIVATE_LINK_PACKAGES and cvcConfig.cmake finds it.
+# The TU sees only the std-only cvc/physics headers (and backend_impl.h). It gets
+# the deterministic modules' floating-point flag, so the facade's double <-> float
+# conversions round alike on every target.
+if(CVC_WITH_JOLT)
+  target_compile_definitions(cvc PRIVATE CVC_WITH_JOLT)
+  get_target_property(_cvc_type cvc TYPE)
+  if(_cvc_type STREQUAL "SHARED_LIBRARY")
+    set(_cvc_jolt_kind STATIC)
+  else()
+    set(_cvc_jolt_kind OBJECT)
+  endif()
+  add_library(cvc_physics_jolt ${_cvc_jolt_kind} physics/jolt/jolt_backend.cpp
+    physics/jolt/jolt_material.cpp physics/jolt/jolt_vehicle_controller.cpp
+    physics/jolt/jolt_vehicle_energy.cpp)
+  set_target_properties(cvc_physics_jolt PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  target_include_directories(cvc_physics_jolt PRIVATE ${PROJECT_SOURCE_DIR}/inc)
+  target_compile_definitions(cvc_physics_jolt PRIVATE CVC_WITH_JOLT)
+  target_compile_features(cvc_physics_jolt PRIVATE cxx_std_17)
+  target_link_libraries(cvc_physics_jolt PRIVATE Jolt::Jolt)
+  # Jolt is built without RTTI, and the key functions of JPH::PhysicsMaterial and
+  # JPH::WheeledVehicleController(Settings) are in libJolt, so their typeinfo exists
+  # nowhere. cvc_material and the Ackermann controller subclass them; their vtables
+  # are emitted in jolt_material.cpp and jolt_vehicle_controller.cpp, the files built
+  # with -fno-rtti, so nothing references the missing typeinfo ("undefined reference
+  # to typeinfo for JPH::PhysicsMaterial" otherwise). Only those, and only the vtable owners
+  # in them (the controller's other members are in jolt_vehicle_energy.cpp, with RTTI): a
+  # no-RTTI file that throws std exceptions, or calls anything inline that can, emits weak
+  # copies of their typeinfo, which on macOS bind every reference in libcvc.dylib and break
+  # exception and boost::any matching across the library boundary (see jolt_material.h).
+  # Jolt's other bases here have only inline virtuals, so their typeinfo is emitted where it
+  # is used. MSVC emits its RTTI records in the referencing file and needs neither switch.
+  if(MSVC)
+    target_compile_options(cvc_physics_jolt PRIVATE /fp:precise)
+  else()
+    target_compile_options(cvc_physics_jolt PRIVATE -ffp-contract=off)
+    set_source_files_properties(physics/jolt/jolt_material.cpp
+      physics/jolt/jolt_vehicle_controller.cpp PROPERTIES COMPILE_OPTIONS -fno-rtti)
+  endif()
+  if(_cvc_jolt_kind STREQUAL "STATIC")
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_physics_jolt>)
+  else()
+    target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_physics_jolt>)
+    target_link_libraries(cvc PRIVATE $<LINK_ONLY:Jolt::Jolt>)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES Jolt)
+  endif()
 endif()
 
 # Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes
@@ -1391,6 +1745,7 @@ if(CVC_ENABLE_CUDA)
   SetupCUDA(cvc)
 endif()
 
+set(CVC_USES_LLVM_OPENMP FALSE) # cvcConfig.cmake.in: recreate LLVMOpenMP::omp
 if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_link_libraries(cvc PUBLIC OpenMP::OpenMP_CXX)
   target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
@@ -1402,6 +1757,33 @@ if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   # walks cvc's INTERFACE_COMPILE_OPTIONS for .cu sources.
   if(MSVC)
     target_compile_options(cvc PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-openmp:llvm>)
+    # -openmp:llvm objects ask for MSVC's import library libomp.lib (libompd.lib
+    # under /MDd) through /DEFAULTLIB, which binds libomp140.<arch>.dll, a DLL
+    # Microsoft does not allow redistributing. Link LLVM's own libomp from
+    # cvcpkg's `openmp` bundle instead: libomp-llvm.lib by full path (the bundle
+    # ships it under that name because libomp.lib is also MSVC's file on every
+    # LIB path), plus /NODEFAULTLIB for MSVC's pair. cvc.dll then imports
+    # libomp.dll, which the SDK ships from the same bundle. The imported target is
+    # build-local; a STATIC cvc exports it as $<LINK_ONLY:LLVMOpenMP::omp> and
+    # cvcConfig.cmake.in recreates it in the consumer.
+    find_library(CVC_LLVM_LIBOMP_LIBRARY NAMES libomp-llvm)
+    if(CVC_LLVM_LIBOMP_LIBRARY)
+      if(NOT TARGET LLVMOpenMP::omp)
+        add_library(LLVMOpenMP::omp INTERFACE IMPORTED)
+        set_target_properties(LLVMOpenMP::omp PROPERTIES
+          INTERFACE_LINK_LIBRARIES "${CVC_LLVM_LIBOMP_LIBRARY}"
+          INTERFACE_LINK_OPTIONS "/NODEFAULTLIB:libomp.lib;/NODEFAULTLIB:libompd.lib")
+      endif()
+      target_link_libraries(cvc PRIVATE LLVMOpenMP::omp)
+      set(CVC_USES_LLVM_OPENMP TRUE)
+    else()
+      # Still builds (e.g. a from-source build with its own deps), but the result
+      # needs Visual Studio's libomp140 at run time; release.yml's closure check
+      # rejects such an SDK.
+      message(WARNING "libomp-llvm.lib (cvcpkg's openmp bundle) not found: cvc will "
+                      "import MSVC's non-redistributable libomp140. Add `openmp` to the "
+                      "prefix to link LLVM's redistributable libomp instead.")
+    endif()
   endif()
 endif()
 
@@ -1501,13 +1883,24 @@ if(CVC_ENABLE_IMAGEMAGICK)
       if(PkgConfig_FOUND)
         pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_pcmod})
         if(${_im_var}_FOUND)
-          # PRIVATE (like PkgConfig::ZSTD below): these are ImageMagick codec
-          # delegates baked into the shared cvc.dll — implementation only. Linking
-          # them PUBLIC leaked the build-local PkgConfig::_im_dep_* imported targets
-          # into the exported cvcTargets.cmake, where downstream find_package(cvc)
-          # fails ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
-          # never recreates them.
-          target_link_libraries(cvc PRIVATE PkgConfig::${_im_var})
+          # Never let the build-local PkgConfig::_im_dep_* imported targets reach
+          # the exported cvcTargets.cmake: downstream find_package(cvc) fails
+          # ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
+          # never recreates them. Linking them PUBLIC did that; so does PRIVATE
+          # for a STATIC cvc, which exports private links as $<LINK_ONLY:...>
+          # (release.yml's Windows -static smoke leg). Hang them off the
+          # synthesised ImageMagick::MagickCore instead, exactly like the
+          # find_library fallback below: it is an imported target, so it is
+          # build-local, cvc's export names only ImageMagick::MagickCore, and
+          # cvcConfig.cmake.in rebuilds that (plus its own delegate closure)
+          # for the consumer. The target is missing only in the last-ditch case
+          # above (no MagickCore library found); keep the plain PRIVATE link there.
+          if(TARGET ImageMagick::MagickCore)
+            set_property(TARGET ImageMagick::MagickCore APPEND PROPERTY
+              INTERFACE_LINK_LIBRARIES PkgConfig::${_im_var})
+          else()
+            target_link_libraries(cvc PRIVATE PkgConfig::${_im_var})
+          endif()
           set(_pc_found TRUE)
         endif()
       endif()
@@ -1642,6 +2035,10 @@ target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+# Installed libcvc finds its dependencies beside it in lib/ (CMake/CvcInstallRpath.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
+cvc_set_install_rpath(cvc "${CMAKE_INSTALL_LIBDIR}")
+
 install(TARGETS cvc
   EXPORT cvcTargets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT libcvc
@@ -1655,6 +2052,13 @@ install(EXPORT cvcTargets
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cvc
   COMPONENT libcvc
 )
+
+get_target_property(_cvc_type cvc TYPE)
+message(STATUS "libcvc: cvc is a ${_cvc_type} (BUILD_SHARED_LIBS=${BUILD_SHARED_LIBS})")
+if(NOT _cvc_type STREQUAL "STATIC_LIBRARY")
+  set(CVC_PRIVATE_LINK_PACKAGES "")
+endif()
+list(REMOVE_DUPLICATES CVC_PRIVATE_LINK_PACKAGES)
 
 configure_package_config_file(
   "${PROJECT_SOURCE_DIR}/CMake/cvcConfig.cmake.in"
@@ -1767,7 +2171,28 @@ if(WIN32)
   )
 endif()
 
+# physics_replay_test, the native <-> wasm replay gate (the vehicle-physics plan's P7): replays
+# tests/data/physics_replay_trace.json and requires every step's state_hash. A plain main()
+# (googletest has no wasm build), so a wasm build can have it without the test tree:
+# CVC_BUILD_PHYSICS_REPLAY builds it with CVC_BUILD_TESTS off, and node runs it
+# (`node physics_replay_test.js <trace>`, ci.yml's physics-wasm job).
+option(CVC_BUILD_PHYSICS_REPLAY "Build physics_replay_test even with CVC_BUILD_TESTS off (the wasm replay gate)" OFF)
+set(CVC_PHYSICS_REPLAY_TRACE "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/physics_replay_trace.json")
+function(cvc_setup_physics_replay target)
+  target_link_libraries(${target} PRIVATE cvc)
+  target_compile_features(${target} PRIVATE cxx_std_17)
+  if(EMSCRIPTEN)
+    # node reads the trace from the host's file system, and the process exits with main's
+    # status. main runs on a pthread, so the cvc::app's workers can start while it waits.
+    target_link_options(${target} PRIVATE -sNODERAWFS=1 -sEXIT_RUNTIME=1
+      -sALLOW_MEMORY_GROWTH=1 -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb)
+  endif()
+endfunction()
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
   add_subdirectory(tests)
+elseif(CVC_BUILD_PHYSICS_REPLAY)
+  add_executable(physics_replay_test tests/physics_replay.cpp)
+  cvc_setup_physics_replay(physics_replay_test)
 endif()

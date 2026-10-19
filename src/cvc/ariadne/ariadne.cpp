@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cvc/ariadne/ariadne.h>
@@ -260,6 +261,23 @@ void clear_action_intrinsics() {
 }
 
 namespace {
+// §7.4 an action's memory budget: the tree setting ariadne.limits.action_max_memory (bytes;
+// 0 = no limit), read on every submission so a host can tune it live. It also bounds each
+// native call's allocations in the action (state_exec's per-step allocation limit takes what
+// is left of max_memory). A missing or unparsable value keeps the 4 MiB default.
+uint64_t action_max_memory(cvc::state &root) {
+  constexpr uint64_t kDefault = uint64_t{4} << 20;
+  cvc::state *node = root.findDescendant("ariadne.limits.action_max_memory");
+  if (!node)
+    return kDefault;
+  const std::string v = node->value();
+  uint64_t bytes = 0;
+  const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), bytes);
+  return !v.empty() && ec == std::errc() && end == v.data() + v.size() ? bytes : kDefault;
+}
+} // namespace
+
+namespace {
 // Run `script` as a FULL-ENV state_exec program chrooted to `prefix`, bounded by (max_steps,
 // max_seconds, max_bytes). Returns "" on a clean, normal finish, else a human diagnostic (no
 // leading "ari:" — the caller frames it). Used by the load-time `init:` lane (run_init) and a
@@ -357,8 +375,10 @@ namespace se = cvc::state_exec;
 // true/false/nil literals are parser/evaluator-intrinsic, so an empty base still runs them.
 //
 // Each distinct expression is parsed ONCE and cached. Every eval is bounded three ways:
-// a per-eval step cap, a per-eval wall-time cap, and a per-FRAME aggregate wall-time
-// budget (so many reactive widgets cannot together stall a frame). It never throws out.
+// a per-eval step cap, a per-eval time cap, and a per-FRAME aggregate time budget (so many
+// reactive widgets cannot together stall a frame). The time caps are se::time_budgets, which
+// time the thread spends not running cannot use up: a predicate that does next to no work
+// never fails, however loaded the machine. It never throws out.
 //
 // state-get keys are prefix-relative (the context is chroot'd to the document prefix),
 // so `(state-get "demo.n")` reads the SAME key a widget `bind: demo.n` resolves to.
@@ -372,6 +392,7 @@ public:
     proc_->pid = 1;
     proc_->status = se::process_status::ready;
     cvc::state &root = cvc::state::instance(app);
+    tree_ = &root;
     ctx_.sched = &sched_;
     ctx_.tracker = &tracker_;
     ctx_.proc = proc_;
@@ -400,9 +421,25 @@ public:
         "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
         // bounded compound construction (by-reference; not the doubling materializers) + access
         "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
-        // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables)
-        "state-get", "state-exists", "state-children", "state-data-get", "state-root-path",
-        "state-has-expiry", "state-is-expired"};
+        // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables;
+        // state-json writes its document as sliced data steps, under the allocation limit)
+        "state-get", "state-exists", "state-children", "state-data-get", "state-json",
+        "state-root-path", "state-has-expiry", "state-is-expired",
+        // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
+        // argument), and the materializers, which do their work as sliced data steps (each
+        // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
+        // collections.map/filter/reduce call runs as this evaluator's own frames, so the
+        // special-form gate and the caps cover it too. math.random stays out because a
+        // predicate must be deterministic.
+        "string.length", "string.byte-length", "string.char-at", "string.substring", "string.upper",
+        "string.lower", "string.trim", "string.starts-with", "string.ends-with", "string.contains",
+        "string.split", "string.join", "string.replace", "string.encode", "bytes.length",
+        "bytes.byte-at", "bytes.slice", "bytes.concat", "bytes.decode", "math.sqrt", "math.abs",
+        "math.floor", "math.ceil", "math.round", "math.pow", "math.log", "math.sin", "math.cos",
+        "math.tan", "math.min", "math.max", "math.clamp", "math.pi", "math.e", "collections.map",
+        "collections.filter", "collections.reduce", "collections.zip", "collections.flatten",
+        "collections.sort", "collections.reverse", "collections.range", "collections.unique",
+        "collections.dict-keys", "collections.dict-values", "collections.dict-merge"};
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
@@ -415,13 +452,17 @@ public:
             std::set<std::string>{"if", "begin", "let", "while", "for", "lambda", "defun", "set",
                                   "return", "quote", "yield", "break"});
     ev_->restrict_special_forms(kAllowedForms);
+    resolve_data_settings();
   }
 
   // Reset the per-FRAME aggregate budget — call once at the top of each render frame,
   // before the walk. Once the frame's cumulative predicate-eval time is spent, the
   // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
   // one-time warning, so N reactive widgets cannot together stall the frame.
-  void begin_frame() { frame_spent_ = 0.0; }
+  void begin_frame() {
+    frame_ = se::time_budget(kFrameBudgetSeconds);
+    resolve_data_settings();
+  }
 
   // §12: re-chroot the read-lane to `path` so a mounted fragment's predicates read state
   // relative to its own sub-prefix, exactly as its widget binds resolve there. The evaluator,
@@ -530,19 +571,24 @@ private:
     const se::value_t *expr = compile(src);
     if (!expr)
       return {{}, "ari: reactive expr parse error in \"" + src + "\""};
-    const double remaining = kFrameBudgetSeconds - frame_spent_;
+    const double remaining = frame_.remaining();
     if (remaining <= 0.0)
       return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted"};
+    struct charge_frame { // charges the eval, and its steps, to the frame however run() ends
+      se::time_budget &frame;
+      const se::evaluator_state &st;
+      ~charge_frame() { frame.stop(st.stats.get_step_count()); }
+    };
     try {
       se::evaluator_state st = ev_->create_state(*expr);
-      const auto t0 = std::chrono::steady_clock::now();
+      st.data_step_nodes = data_step_nodes_;
+      frame_.start();
+      const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
-      frame_spent_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       if (!st.done) // step cap: run() returns nil with done==false
         return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (step cap)"};
       return {std::move(r), std::string()};
     } catch (const se::evaluation_timeout &) {
-      frame_spent_ += std::min(kMaxSeconds, remaining); // run() threw before the post-run charge
       return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (time cap)"};
     } catch (const se::evaluation_interrupted &) {
       return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (interrupted)"};
@@ -571,7 +617,7 @@ private:
     if (it != compiled_.end())
       return it->second ? &*it->second : nullptr;
     try {
-      se::value_t v = se::parse(src);
+      se::value_t v = se::parse(src, se::parse_options_from_state(*tree_)); // parser.* settings
       auto ins = compiled_.emplace(src, std::move(v));
       return &*ins.first->second;
     } catch (const se::parse_error &) {
@@ -580,13 +626,25 @@ private:
     }
   }
 
+  // The deep-data slice (data.step_nodes) every eval runs with: the tree's state_exec.defaults
+  // over the host default. The caps are checked only between steps, so a predicate always
+  // slices: a 0 there (no slicing) gets the host default here.
+  void resolve_data_settings() {
+    const se::data_options host = se::async_scheduler::host_data_defaults();
+    data_step_nodes_ = se::data_options_from_state(*tree_, {}, host).step_nodes;
+    if (data_step_nodes_ == 0)
+      data_step_nodes_ = host.step_nodes;
+  }
+
   static constexpr uint64_t kMaxSteps = 100'000;       // per-eval step cap (a predicate is tiny)
-  static constexpr double kMaxSeconds = 0.005;         // per-eval wall-time cap (5 ms)
+  static constexpr double kMaxSeconds = 0.005;         // per-eval time cap (5 ms)
   static constexpr double kFrameBudgetSeconds = 0.010; // aggregate across all predicates/frame
   static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
-  double frame_spent_ = 0.0; // wall-time spent on predicate evals in the current frame
-  std::string root_path_;    // §12: the scope the ctx_ is currently chrooted to (set_root_path)
+  std::size_t data_step_nodes_ = 0;            // see resolve_data_settings()
+  se::time_budget frame_{kFrameBudgetSeconds}; // the current frame's predicate evals' time
+  std::string root_path_;      // §12: the scope the ctx_ is currently chrooted to (set_root_path)
+  cvc::state *tree_ = nullptr; // the app's state tree, for state_exec.defaults.parser.*
   se::scheduler sched_;
   se::memory_tracker tracker_;
   std::shared_ptr<se::process> proc_;
@@ -682,11 +740,14 @@ struct Runtime::Impl {
   std::string tick_script_;    // §7.1 on:tick body (woken every frame, coalesced)
   std::string key_script_;     // §4.6 document-level on_key body (keyboard events, via post_input)
   std::string pointer_script_; // §4.6 document-level on_pointer body (mouse events, via post_input)
-  std::unique_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_;
-  int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1;
+  std::string signal_script_;  // document-level on_signal body (signals, via post_signal)
+  std::unique_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_, signal_resident_;
+  int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1,
+      signal_resident_pid_ = -1;
   std::string tick_channel() const { return owner_ + "#tick"; }
   std::string key_channel() const { return owner_ + "#key"; }
   std::string pointer_channel() const { return owner_ + "#pointer"; }
+  std::string signal_channel() const { return owner_ + "#signal"; }
   // Submit ONE long-lived resident wrapping `body` on `channel`, storing its context/pid in the
   // slots (idempotent — no-op if body is empty or a resident is already running). The wrapper is
   // (while t (let ((event (msg-recv "<channel>"))) <body>)): msg-recv parks the process between
@@ -1189,6 +1250,41 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::InputText: {
+    const std::string path = resolve(w.bind);
+    const std::string cur = read_or_seed<std::string>(app, path, w.sdef);
+    const StringEdit e = b.input_text(label, path.c_str(), cur);
+    if (e.committed) {
+      write<std::string>(app, path, e.value);
+      if (!w.on.empty()) // send-on-commit (e.g. a chat box's Enter) — fire AFTER the write so the
+        enqueue(w.on);   // handler sees the committed value in state
+    }
+    break;
+  }
+
+  case Kind::InputInt: {
+    const std::string path = resolve(w.bind);
+    const int cur = read_or_seed<int>(app, path, w.idef);
+    const StringEdit e = b.input_text(label, path.c_str(), std::to_string(cur));
+    if (e.committed) {
+      int next = cur; // fail-safe: a non-numeric entry keeps the current value
+      try {
+        next = std::stoi(e.value);
+      } catch (const std::exception &) {
+      }
+      if (w.ilo != w.ihi) { // clamp only when a real range was authored
+        if (next < w.ilo)
+          next = w.ilo;
+        if (next > w.ihi)
+          next = w.ihi;
+      }
+      write<int>(app, path, next);
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
+    break;
+  }
+
   case Kind::Color: {
     const std::string path = resolve(w.bind);
     const std::string dflt = w.sdef.empty() ? std::string("1,1,1") : w.sdef;
@@ -1350,11 +1446,11 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   const std::string &action_prefix = action.prefix;
   const std::string &script = action.event;
   // §7.4 per-activation caps (same as the old synchronous action lane): the STEP cap is the
-  // deterministic guard on an action's real work; wall-time is a generous anti-hang backstop;
-  // memory the §7.4 cap. Full env, writes chrooted to the action's mount prefix.
+  // deterministic guard on an action's real work; time (a se::time_budget, which time the
+  // thread spends descheduled cannot use up) is a generous anti-hang backstop; memory the §7.4
+  // cap. Full env, writes chrooted to the action's mount prefix.
   static constexpr uint64_t kActionMaxSteps = 5000;
   static constexpr double kActionMaxSeconds = 0.1;
-  static constexpr uint64_t kActionMaxBytes = 262144;
   try {
     auto &sched = app.exec_scheduler();
     used_scheduler_ = true;
@@ -1362,6 +1458,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     ac->proc = se::make_process(); // placeholder for ictx.proc; the RUNNING process is the
     ac->proc->status = se::process_status::ready; // scheduler's own, reached via current_process()
     cvc::state &root = cvc::state::instance(app);
+    const uint64_t max_bytes = action_max_memory(root);
     ac->ictx.sched = &sched;
     ac->ictx.tracker = &ac->tracker;
     ac->ictx.proc = ac->proc;
@@ -1390,7 +1487,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
     opts.max_steps = kActionMaxSteps;
     opts.max_time = kActionMaxSeconds;
-    opts.max_memory = kActionMaxBytes;
+    opts.max_memory = max_bytes;
     const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
     live_actions_[pid] = std::move(ac);          // keep the context alive until the process ends
   } catch (const std::exception &e) {
@@ -1410,8 +1507,10 @@ void Runtime::Impl::pump_and_sweep_actions() {
   sched.wake_awaiting();
   // Pump a bounded slice: a quick (non-suspending) action completes within THIS drain (so a
   // fire-then-check interaction still sees its effect immediately), while an action that parks
-  // on await/sleep/msg-recv yields and resumes on a later frame. Global step + wall-time
-  // backstops bound the pump; per-process step caps kill runaways.
+  // on await/sleep/msg-recv yields and resumes on a later frame. Global step + time backstops
+  // bound the pump -- se::time_budgets, so on a loaded machine, where the OS deschedules this
+  // thread, a quick action still completes within this drain; per-process step caps kill
+  // runaways.
   static constexpr uint64_t kPumpMaxSteps = 200000;
   static constexpr double kPumpMaxSeconds = 0.1;
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
@@ -1419,14 +1518,33 @@ void Runtime::Impl::pump_and_sweep_actions() {
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     auto info = sched.get_process_info(it->first);
     if (!info || info->status == se::process_status::terminated) {
+      sched.reap(it->first);        // nothing reads a finished action's result: free its process
       it = live_actions_.erase(it); // normal completion (or already reaped from the process map)
     } else if (info->status == se::process_status::killed) {
-      warn_once("ari: on: action program did not complete (a runtime error or resource limit)");
+      // The exit error says why: a syntax error (scripts are read inside the process), a runtime
+      // error or a resource limit.
+      warn_once("ari: on: action program did not complete: " +
+                sched.get_exit_error(it->first).value_or("killed"));
+      sched.reap(it->first);
       it = live_actions_.erase(it);
     } else {
       ++it; // ready/running/waiting — still in flight (e.g. suspended on await/msg-recv/sleep)
     }
   }
+  // A resident never finishes on its own, so one that was killed (a syntax error in its body,
+  // read inside the process; a runtime error; its per-step cap) is reported, once per reason.
+  const auto report_killed_resident = [&](int pid, const std::string &channel) {
+    if (pid < 0)
+      return;
+    auto info = sched.get_process_info(pid);
+    if (info && info->status == se::process_status::killed)
+      warn_once("ari: resident [" + channel +
+                "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
+  };
+  report_killed_resident(tick_resident_pid_, tick_channel());
+  report_killed_resident(key_resident_pid_, key_channel());
+  report_killed_resident(pointer_resident_pid_, pointer_channel());
+  report_killed_resident(signal_resident_pid_, signal_channel());
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
@@ -1464,7 +1582,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
     opts.max_steps = 0;  // unlimited total — a resident loops forever (see above)
     opts.max_time = 0.0; // unlimited TOTAL run-time; the per-STEP cap below is the hang backstop
-    // §13.8 resident per-STEP wall-clock cap: a resident has no total budget, so give it a per-step
+    // §13.8 resident per-STEP time cap: a resident has no total budget, so give it a per-step
     // deadline (fresh each step) so a single step that loops in-place (a runaway native builtin)
     // can't HANG the host's per-frame drain — it is aborted + the resident killed. A healthy
     // on:tick/on_key body is far under this, and a per-node DSL loop is bounded by the pump's own
@@ -1565,6 +1683,33 @@ void Runtime::set_pointer_program(std::string script) {
     m_->pointer_resident_pid_ = -1;
   }
   m_->pointer_script_ = std::move(script);
+}
+
+void Runtime::set_signal_program(std::string script) {
+  if (m_->signal_resident_pid_ >= 0) {
+    m_->app.exec_scheduler().kill(m_->signal_resident_pid_);
+    m_->signal_resident_.reset();
+    m_->signal_resident_pid_ = -1;
+  }
+  m_->signal_script_ = std::move(script);
+}
+
+bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
+
+bool Runtime::post_signal(const std::string &signal, const std::string &source) {
+  if (m_->signal_script_.empty())
+    return false; // no handler: the host applies the signal's default action
+  m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_,
+                      m_->signal_resident_pid_);
+  if (m_->signal_resident_pid_ < 0)
+    return false; // it failed to start (already warned): fall back to the default too
+  namespace se = cvc::state_exec;
+  std::vector<std::pair<std::string, se::value_t>> f;
+  f.emplace_back("kind", se::value_t(std::string("signal")));
+  f.emplace_back("signal", se::value_t(signal));
+  f.emplace_back("source", se::value_t(source));
+  m_->app.exec_scheduler().post_message(m_->signal_channel(), se::make_dict(std::move(f)));
+  return true;
 }
 
 void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<std::string> global,

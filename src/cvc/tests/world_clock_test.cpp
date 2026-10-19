@@ -15,10 +15,13 @@
 // stall, alpha leaving [0,1), and a paused clock releasing a burst on resume.
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cvc/core/clock_follower.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
+#include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <thread>
@@ -459,4 +462,279 @@ TEST(WorldClockTest, ConcurrentReadersDoNotTearOrCrash) {
   stop.store(true);
   reader.join();
   EXPECT_GT(c.tick(), 0u);
+}
+
+// ── lockstep, batch, configure, realized speed ─────────────────────────────
+
+TEST(WorldClockTest, LockstepRunsExactlyTheConfiguredQuantaWhateverTheWallSays) {
+  world_clock::config cfg;
+  cfg.lockstep_steps = 3;
+  world_clock c(cfg);
+  c.set_mode(world_clock::mode::lockstep);
+  for (double wall : {0.0, 0.001, 0.5, 10.0, -1.0}) {
+    const auto r = c.advance(wall);
+    EXPECT_EQ(r.steps, 3) << "wall " << wall;
+    EXPECT_EQ(r.dropped_steps, 0u);
+    EXPECT_DOUBLE_EQ(r.alpha, 0.0) << "lockstep presents whole states";
+  }
+  EXPECT_EQ(c.tick(), 15u);
+  c.set_lockstep_steps(0); // clamped
+  EXPECT_EQ(c.lockstep_steps(), 1);
+  EXPECT_EQ(c.advance(0.2).steps, 1);
+}
+
+TEST(WorldClockTest, EnteringLockstepDropsTheBankSoAlphaIsNotStale) {
+  world_clock c;
+  c.advance(0.5 * k120); // bank half a quantum
+  EXPECT_GT(c.pending_seconds(), 0.0);
+  c.set_mode(world_clock::mode::lockstep);
+  EXPECT_DOUBLE_EQ(c.pending_seconds(), 0.0);
+  EXPECT_DOUBLE_EQ(c.advance(0.016).alpha, 0.0);
+}
+
+TEST(WorldClockTest, RejectsAZeroLockstepCount) {
+  world_clock::config cfg;
+  cfg.lockstep_steps = 0;
+  EXPECT_THROW(world_clock c(cfg), cvc::unsupported_exception);
+}
+
+TEST(WorldClockTest, AdvanceTicksRunsExactlyNInAnyModeWithNoCap) {
+  world_clock c; // cap 8
+  for (auto m : {world_clock::mode::live, world_clock::mode::paused, world_clock::mode::stepping,
+                 world_clock::mode::replay, world_clock::mode::lockstep}) {
+    c.reset();
+    c.set_mode(m);
+    const auto r = c.advance_ticks(1000);
+    EXPECT_EQ(r.steps, 1000);
+    EXPECT_EQ(r.first_tick, 0u);
+    EXPECT_EQ(c.tick(), 1000u);
+    EXPECT_EQ(c.total_dropped(), 0u);
+  }
+  EXPECT_EQ(c.advance_ticks(0).steps, 0);
+  EXPECT_EQ(c.advance_ticks(-5).steps, 0);
+}
+
+TEST(WorldClockTest, FirstTickNamesTheQuantaEachCallRan) {
+  world_clock c;
+  std::uint64_t expect = 0;
+  for (double d : {0.02, 0.0, 0.05, 0.004, 0.1}) {
+    const auto r = c.advance(d);
+    EXPECT_EQ(r.first_tick, expect);
+    expect += static_cast<std::uint64_t>(r.steps);
+    EXPECT_EQ(c.tick(), expect);
+  }
+  const auto s = c.step_once();
+  EXPECT_EQ(s.first_tick, expect);
+  EXPECT_EQ(s.steps, 1);
+}
+
+TEST(WorldClockTest, ConfigureReplacesTheQuantumAndRestartsTime) {
+  world_clock c;
+  c.set_mode(world_clock::mode::stepping);
+  c.advance_ticks(50);
+  world_clock::config cfg;
+  cfg.fixed_dt = 0.015;
+  cfg.lockstep_steps = 2;
+  c.configure(cfg);
+  EXPECT_EQ(c.tick(), 0u);
+  EXPECT_DOUBLE_EQ(c.fixed_dt(), 0.015);
+  EXPECT_EQ(c.lockstep_steps(), 2);
+  EXPECT_EQ(c.current_mode(), world_clock::mode::stepping) << "configure keeps the mode";
+  cfg.fixed_dt = 0.0;
+  EXPECT_THROW(c.configure(cfg), cvc::unsupported_exception);
+  EXPECT_DOUBLE_EQ(c.fixed_dt(), 0.015) << "a rejected config changes nothing";
+}
+
+TEST(WorldClockTest, RealizedScaleReportsWhatRanNotWhatWasAsked) {
+  world_clock::config cfg;
+  cfg.fixed_dt = 0.01;
+  cfg.scale = 2.0;
+  cfg.max_steps_per_advance = 1000;
+  world_clock c(cfg);
+  EXPECT_DOUBLE_EQ(c.realized_scale(), 0.0) << "nothing measured yet";
+  for (int i = 0; i < 100; ++i) // 1 s of wall at 2x, nothing dropped
+    c.advance(0.01);
+  EXPECT_NEAR(c.realized_scale(), 2.0, 0.05);
+
+  // The same request against a cap too small to honour it: the run falls behind,
+  // and the measurement says so instead of claiming 2x.
+  world_clock::config tight = cfg;
+  tight.max_steps_per_advance = 1;
+  world_clock d(tight);
+  for (int i = 0; i < 100; ++i)
+    d.advance(0.01); // demands 2 quanta per frame, runs 1
+  EXPECT_NEAR(d.realized_scale(), 1.0, 0.05);
+  EXPECT_GT(d.total_dropped(), 0u);
+}
+
+TEST(WorldClockTest, ACapThatScalesWithRateKeepsTwoTimesAtTwoTimes) {
+  world_clock::config cfg;
+  cfg.fixed_dt = 0.015;
+  cfg.max_steps_per_advance = 8;
+  cfg.scale = 2.0;
+  world_clock fixed_cap(cfg);
+  cfg.cap_scales_with_rate = true;
+  world_clock scaled_cap(cfg);
+  // A 70 ms frame at 2x demands 9.33 quanta: over a fixed cap of 8, within 16.
+  for (int i = 0; i < 30; ++i) {
+    fixed_cap.advance(0.07);
+    scaled_cap.advance(0.07);
+  }
+  EXPECT_GT(fixed_cap.total_dropped(), 0u);
+  EXPECT_EQ(scaled_cap.total_dropped(), 0u);
+  EXPECT_TRUE(scaled_cap.cap_scales_with_rate());
+}
+
+TEST(WorldClockTest, RealizedScaleRestartsOnReset) {
+  world_clock c;
+  for (int i = 0; i < 100; ++i)
+    c.advance(0.01);
+  EXPECT_GT(c.realized_scale(), 0.0);
+  c.reset();
+  EXPECT_DOUBLE_EQ(c.realized_scale(), 0.0);
+}
+
+// ── following one clock at several rates ───────────────────────────────────
+
+TEST(ClockFollowerTest, TicksPerStepAcceptsWholeMultiplesOnly) {
+  EXPECT_EQ(cvc::ticks_per_step(0.06, 0.015), 4u);
+  EXPECT_EQ(cvc::ticks_per_step(static_cast<double>(0.06f), 0.015), 4u) << "a float32 trained dt";
+  EXPECT_EQ(cvc::ticks_per_step(0.06, 0.06), 1u);
+  EXPECT_THROW(cvc::ticks_per_step(0.06, 1.0 / 120.0), cvc::unsupported_exception) << "7.2 quanta";
+  EXPECT_THROW(cvc::ticks_per_step(0.01, 0.015), cvc::unsupported_exception) << "under one quantum";
+  EXPECT_THROW(cvc::ticks_per_step(0.0, 0.015), cvc::unsupported_exception);
+  EXPECT_THROW(cvc::ticks_per_step(0.06, -1.0), cvc::unsupported_exception);
+}
+
+TEST(ClockFollowerTest, StepsDueCountsTheTicksOfThePhase) {
+  // Ticks 1..8 with period 4: due at 4 and 8.
+  EXPECT_EQ(cvc::steps_due(0, 8, 4), 2u);
+  EXPECT_EQ(cvc::steps_due(0, 3, 4), 0u);
+  EXPECT_EQ(cvc::steps_due(3, 1, 4), 1u);    // tick 4
+  EXPECT_EQ(cvc::steps_due(4, 3, 4), 0u);    // ticks 5..7
+  EXPECT_EQ(cvc::steps_due(0, 8, 4, 1), 2u); // ticks 1 and 5
+  EXPECT_EQ(cvc::steps_due(1, 4, 4, 1), 1u); // ticks 2..5 -> 5
+  EXPECT_EQ(cvc::steps_due(0, 10, 1), 10u);
+  EXPECT_EQ(cvc::steps_due(0, 10, 0), 0u);
+  // Brute force agrees on a sweep.
+  for (std::uint64_t first = 0; first < 20; ++first)
+    for (std::uint64_t n = 0; n < 20; ++n)
+      for (std::uint64_t p = 1; p < 7; ++p)
+        for (std::uint64_t ph = 0; ph < 9; ++ph) {
+          std::uint64_t brute = 0;
+          for (std::uint64_t t = first + 1; t <= first + n; ++t)
+            brute += (t % p == ph % p) ? 1 : 0;
+          ASSERT_EQ(cvc::steps_due(first, n, p, ph), brute)
+              << first << " " << n << " " << p << " " << ph;
+        }
+}
+
+TEST(ClockFollowerTest, FollowersAtDifferentRatesShareOneClock) {
+  world_clock::config cfg;
+  cfg.fixed_dt = 0.015;
+  world_clock c(cfg);
+  cvc::clock_follower physics = cvc::clock_follower::for_step(c, 0.015);
+  cvc::clock_follower nav = cvc::clock_follower::for_step(c, 0.06);
+  std::uint64_t physics_steps = 0, nav_steps = 0;
+  const std::vector<double> frames = {0.016, 0.033, 0.0, 0.051, 0.017, 0.2, 0.004};
+  for (int rep = 0; rep < 50; ++rep)
+    for (double f : frames) {
+      c.advance(f);
+      physics_steps += physics.take(c);
+      nav_steps += nav.take(c);
+    }
+  EXPECT_EQ(physics_steps, c.tick());
+  EXPECT_EQ(nav_steps, c.tick() / 4);
+  EXPECT_TRUE(nav.due_at(8));
+  EXPECT_FALSE(nav.due_at(9));
+}
+
+TEST(ClockFollowerTest, AClockThatGoesBackwardsReanchorsTheFollower) {
+  world_clock c;
+  cvc::clock_follower f(2);
+  c.advance_ticks(10);
+  EXPECT_EQ(f.take(c), 5u);
+  c.reset();
+  EXPECT_EQ(f.take(c), 0u);
+  EXPECT_EQ(f.last_tick(), 0u);
+  c.advance_ticks(4);
+  EXPECT_EQ(f.take(c), 2u);
+}
+
+// The contract every simulation relies on: the pacing mode decides when quanta
+// run, never which quanta run. A follower's trajectory is the same whether the
+// clock runs live at any speed, frame by frame, in batch or one step at a time.
+TEST(ClockFollowerTest, TheTrajectoryIsTheSameUnderEveryPacingMode) {
+  constexpr std::uint64_t kTicks = 400;
+  auto simulate = [](const std::function<void(world_clock &)> &drive_one_frame) {
+    world_clock::config cfg;
+    cfg.fixed_dt = 0.015;
+    cfg.max_steps_per_advance = 1000;
+    world_clock c(cfg);
+    cvc::clock_follower nav = cvc::clock_follower::for_step(c, 0.06);
+    // A toy integrator whose state depends on every step and its order.
+    double x = 1.0;
+    std::vector<double> trace;
+    while (c.tick() < kTicks) {
+      drive_one_frame(c);
+      for (std::uint64_t n = nav.take(c); n > 0; --n) {
+        x = x * 1.0001 + 0.5 * std::sin(x);
+        trace.push_back(x);
+      }
+    }
+    return trace;
+  };
+  const auto live = simulate([](world_clock &c) { c.advance(0.0167); });
+  const auto fast = simulate([](world_clock &c) {
+    c.set_scale(2.0);
+    c.advance(0.0167);
+  });
+  const auto slow = simulate([](world_clock &c) {
+    c.set_scale(0.5);
+    c.advance(0.033);
+  });
+  const auto lock = simulate([](world_clock &c) {
+    c.set_mode(world_clock::mode::lockstep);
+    c.advance(0.0);
+  });
+  const auto batch = simulate([](world_clock &c) { c.advance_ticks(37); });
+  const auto step = simulate([](world_clock &c) {
+    c.set_mode(world_clock::mode::stepping);
+    c.advance(0.02);
+    c.step_once();
+  });
+  // Every run stops at the first frame boundary at or past kTicks; compare the
+  // kTicks / 4 navigator steps they all reach.
+  const std::size_t n = kTicks / 4;
+  ASSERT_GE(live.size(), n);
+  for (const auto *t : {&fast, &slow, &lock, &batch, &step}) {
+    ASSERT_GE(t->size(), n);
+    for (std::size_t i = 0; i < n; ++i)
+      ASSERT_EQ((*t)[i], live[i]) << "step " << i;
+  }
+}
+
+TEST(ClockFollowerTest, AlphaIsTheFractionIntoTheFollowersOwnStep) {
+  cvc::clock_follower nav(4);
+  EXPECT_DOUBLE_EQ(nav.alpha(8, 0.0), 0.0);  // a step just ran
+  EXPECT_DOUBLE_EQ(nav.alpha(10, 0.0), 0.5); // two of four quanta in
+  EXPECT_DOUBLE_EQ(nav.alpha(10, 0.5), 0.625);
+  EXPECT_LT(nav.alpha(11, 0.999999), 1.0);
+  cvc::clock_follower shifted(4, 1);
+  EXPECT_DOUBLE_EQ(shifted.alpha(9, 0.0), 0.0);
+  EXPECT_DOUBLE_EQ(shifted.alpha(8, 0.0), 0.75);
+}
+
+TEST(WorldClockTest, WaitForTickChangeWakesOnAdvanceAndTimesOut) {
+  world_clock c;
+  EXPECT_EQ(c.wait_for_tick_change(0, 0.01), 0u) << "nothing moved: timed out";
+  std::thread driver([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    c.advance_ticks(3);
+  });
+  EXPECT_EQ(c.wait_for_tick_change(0, 5.0), 3u);
+  driver.join();
+  EXPECT_EQ(c.wait_for_tick_change(3, 0.0), 3u) << "a zero timeout does not wait";
+  c.reset();
+  EXPECT_EQ(c.wait_for_tick_change(3, 0.01), 0u) << "a reset is a change too";
 }

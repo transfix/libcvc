@@ -11,6 +11,7 @@
 #define CVC_STATE_EXEC_SCHEDULER_H
 
 #include <chrono>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler_base.h>
@@ -180,16 +181,38 @@ public:
   /// After resolution, effective values are published back to the
   /// per-scheduler subtree so they are visible in the state tree.
   /// Requires set_watch_root() and (for per-scheduler) set_id() first.
+  ///
+  /// Settings: `max_pending_messages`, the parser's `parser.*`
+  /// (parse_options_from_state) and the deep-data `data.*`
+  /// (data_options_from_state), which apply to every process submitted
+  /// afterwards.
   void load_settings();
+
+  /// The parser settings execute() parses scripts with (defaults until
+  /// load_settings() runs).
+  const parse_options &parser_settings() const { return parse_options_; }
+
+  /// The deep-data settings execute() gives processes (defaults until
+  /// load_settings() runs).
+  const data_options &data_settings() const { return data_options_; }
 
   /// Well-known state tree paths for scheduler configuration.
   static constexpr const char *settings_root = "state_exec";
   static constexpr const char *defaults_prefix = "state_exec.defaults";
   static constexpr const char *sched_prefix = "state_exec.schedulers";
 
+  /// The effective limits.max_alloc_bytes (kDefaultMaxAllocBytes until load_settings() reads
+  /// the tree); each process submitted afterwards takes it as its max_alloc_bytes.
+  uint64_t max_alloc_bytes() const { return max_alloc_bytes_; }
+
 private:
   std::string id_;
+  uint64_t max_alloc_bytes_ = kDefaultMaxAllocBytes;
   scheduling_policy policy_;
+  parse_options parse_options_;
+  data_options data_options_;
+  heap_options heap_options_;
+  uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   int next_pid_ = 1;
   int rr_index_ = 0;
   bool running_ = false;
@@ -237,9 +260,21 @@ private:
   /// Mark a process as killed with an error.
   void kill_process(process &proc, const std::string &reason);
 
+  /// After a process ended: note it for the cycle collector and, unless it is the one stepping
+  /// now, release its evaluation state (process::release_state).
+  void release_if_idle(process &proc);
+
   /// Build process_info from a process.
   process_info make_info(const process &proc) const;
 };
+
+/// limits.max_alloc_bytes from the state tree under `root`:
+/// `state_exec.schedulers.<scheduler_id>.limits.max_alloc_bytes` (when scheduler_id is not
+/// empty), then `state_exec.defaults.limits.max_alloc_bytes`, then `base`. A missing or
+/// unparsable value is skipped. 0 means no limit of its own; the process's max_memory still
+/// bounds each allocation.
+uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &scheduler_id,
+                                    uint64_t base = kDefaultMaxAllocBytes);
 
 } // namespace cvc::state_exec
 

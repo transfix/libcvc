@@ -22,6 +22,7 @@ enum MutationOp {
   MUTATION_OP_DELETE_SUBTREE = 8;
   MUTATION_OP_DELEGATE_SUBTREE = 9;
   MUTATION_OP_REVOKE_DELEGATION = 10;
+  MUTATION_OP_SET_PROPERTY = 11; // Mutation.type_name is the key, string_value the value
 }
 
 message BlobRef {
@@ -103,6 +104,13 @@ message SnapshotEntry {
   string type_name = 6;
   string origin_node_id = 7;
   uint64 sequence = 8;
+  // data() payload (Phase 10 follow-up): the node's data() encoded via the codec
+  // registry, so a gRPC late-joiner reconstructs data() + metadata, not just
+  // value(). Empty data_type_name = the node has no replicable data(). Mirrors
+  // the in-process snapshot_entry the shard already produces (PR4).
+  string data_type_name = 9;
+  Payload data_payload = 10;
+  map<string, string> properties = 11; // state::properties()
 }
 
 // Snapshot response: sent in response to SnapshotRequest.
@@ -140,3 +148,30 @@ message Frame {
 // frame each side sends is a Hello so the remote can record the
 // peer's node_id / cluster_id for diagnostics.
 service StateTransport { rpc Channel(stream Frame) returns (stream Frame); }
+
+// ───────────────────────── Data plane (Phase 10, PR7) ─────────────────────────
+// The control plane above replicates the /streams/<id> DESCRIPTOR so peers can
+// discover a stream. The actual frame bytes travel here, on a DEDICATED service
+// served from its own port/listener (not a second service on the StateTransport
+// server) so high-bandwidth frame traffic cannot head-of-line-block control
+// traffic. Frame semantics (cvc::ariadne::stream::frame) live a layer above;
+// this envelope is transport-level bytes + routing/timing.
+message StreamFrame {
+  string stream_id = 1;   // the /streams/<id> token this channel/frame serves
+  int64 seq = 2;          // monotonic per stream (producer-assigned)
+  double pts_seconds = 3; // producer presentation timestamp
+  uint32 flags = 4;       // bit0 = keyframe, bit1 = open handshake (names the stream)
+  bytes payload = 5;      // this message's bytes: a whole frame, or one chunk of one (PR8)
+  // PR8 chunking: a frame larger than the stream-tuned chunk size is split into
+  // chunk_count StreamFrames, chunk_index 0..chunk_count-1, all sharing the same
+  // (stream_id, seq, pts_seconds, flags). The receiver reassembles by
+  // (stream_id, seq) in index order; a gap or a new seq drops the incomplete
+  // frame. chunk_count 0 or 1 is an unchunked whole frame.
+  uint32 chunk_index = 6;
+  uint32 chunk_count = 7;
+}
+
+// One bidirectional stream-channel per consumer↔producer pair. Both sides may
+// write (e.g. the consumer sends backpressure/keyframe-request frames); PR7
+// ships the skeleton that round-trips frames.
+service StreamTransport { rpc StreamChannel(stream StreamFrame) returns (stream StreamFrame); }

@@ -14,7 +14,10 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_chunked_blob.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_compression_registry.h>
+#include <cvc/state/state_data_hydrator.h>
 #include <cvc/state/state_transport.h>
 #include <cvc/state/state_volume_codec.h>
 #include <mutex>
@@ -26,6 +29,11 @@
 namespace cvc {
 
 namespace {
+
+// Chunk size used when a large data() payload is offloaded to the blob store as a chunked-blob
+// manifest. Fixed so the content-addressed manifest digest is deterministic for a given payload
+// (a prerequisite for the snapshot/live digest agreement planned in the snapshot work).
+constexpr std::uint32_t kDataBlobChunkBytes = 64u * 1024u;
 
 // Wire format for op=delegate_subtree / revoke_delegation:
 //   path         = path_prefix
@@ -90,6 +98,7 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
   _codecs = std::make_unique<state_codec_registry>();
   _codecs->register_builtin_codecs();
   register_volume_geometry_codecs(*_codecs);
+  _adapter->set_codec_registry(_codecs.get()); // so node data() payloads replicate
   _message_bus = std::make_unique<state_message_bus>();
   _write_policy = std::make_unique<state_write_policy>();
 }
@@ -367,14 +376,28 @@ std::vector<state_mutation> state_cluster_shard::collect_local(std::uint64_t aft
     // causal ordering via their own hybrid_clock::update().
     if (m.hlc_time == 0)
       m.hlc_time = _clock.now().packed();
-    // Offload large values to the blob store when a threshold is set.
-    if (_blob_store && _max_inline_payload_bytes > 0 && m.op == state_mutation_op::set_value &&
-        m.payload.kind == state_payload_kind::none &&
-        m.string_value.size() > _max_inline_payload_bytes) {
-      std::vector<unsigned char> bytes(m.string_value.begin(), m.string_value.end());
-      state_blob_ref ref = _blob_store->put(bytes, m.type_name);
-      m.string_value.clear();
-      m.payload = state_payload::blob_ref(ref);
+    // Offload large payloads to the blob store when a threshold is set.
+    if (_blob_store && _max_inline_payload_bytes > 0) {
+      if (m.op == state_mutation_op::set_value && m.payload.kind == state_payload_kind::none &&
+          m.string_value.size() > _max_inline_payload_bytes) {
+        // Legacy value offload: a single plain blob keyed by content digest. (No receive-side
+        // resolver is wired for this path yet; see the data() path below for the hydrator form.)
+        std::vector<unsigned char> bytes(m.string_value.begin(), m.string_value.end());
+        state_blob_ref ref = _blob_store->put(bytes, m.type_name);
+        m.string_value.clear();
+        m.payload = state_payload::blob_ref(ref);
+      } else if (m.op == state_mutation_op::set_data &&
+                 m.payload.kind == state_payload_kind::inline_bytes &&
+                 m.payload.inline_bytes.size() > _max_inline_payload_bytes) {
+        // data() offload: write the codec-encoded payload as a chunked-blob manifest so the peer's
+        // state_data_hydrator (state_chunked_blob_reader) can load/fetch and reassemble it. The
+        // type_name stays on the mutation for the hydrator's codec lookup; only the inline bytes
+        // are replaced by the manifest's blob_ref.
+        state_chunked_blob_writer writer(*_blob_store, kDataBlobChunkBytes,
+                                         &state_compression_registry::shared());
+        state_blob_ref ref = writer.put(m.payload.inline_bytes);
+        m.payload = state_payload::blob_ref(ref);
+      }
     }
     out.push_back(std::move(m));
     if (max_count != 0 && out.size() >= max_count)
@@ -557,6 +580,10 @@ void state_cluster_shard::set_blob_store(state_blob_store *store) noexcept {
 
 state_blob_store *state_cluster_shard::blob_store() const noexcept { return _blob_store; }
 
+void state_cluster_shard::set_data_hydrator(state_data_hydrator *hydrator) noexcept {
+  _adapter->set_data_hydrator(hydrator);
+}
+
 void state_cluster_shard::set_max_inline_payload_bytes(std::uint32_t bytes) noexcept {
   _max_inline_payload_bytes = bytes;
 }
@@ -673,9 +700,80 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
     e.comment = node.comment();
     e.hidden = node.hidden();
     e.read_only = node.readOnly();
+    e.properties = node.properties();
+    // data() payload: encode via the codec registry and offload large payloads to a chunked-blob
+    // manifest, exactly as the live set_data path (adapter encode + collect_local offload), so a
+    // joiner decodes/hydrates identically and the content-addressed blob digest matches byte-for-
+    // byte. No codec / encode failure → data() is simply omitted (value + metadata still ship).
+    const std::string dtn = node.dataTypeName();
+    if (!dtn.empty() && _codecs && _codecs->has(dtn)) {
+      try {
+        std::vector<unsigned char> bytes = _codecs->encode(dtn, node.data());
+        e.data_type_name = dtn;
+        if (_blob_store && _max_inline_payload_bytes > 0 &&
+            bytes.size() > _max_inline_payload_bytes) {
+          state_chunked_blob_writer writer(*_blob_store, kDataBlobChunkBytes,
+                                           &state_compression_registry::shared());
+          e.data_payload = state_payload::blob_ref(writer.put(bytes));
+        } else {
+          e.data_payload = state_payload::inline_data(bytes);
+        }
+      } catch (const std::exception &) {
+        e.data_type_name.clear();
+        e.data_payload = state_payload{};
+      }
+    }
     result.push_back(std::move(e));
   });
   return result;
+}
+
+void state_cluster_shard::ingest_snapshot_entry(const snapshot_entry &e) {
+  // Apply directly through the adapter. apply_remote() runs under the adapter's
+  // thread_suppression_guard (so these do not re-enter the journal) and already resolves inline
+  // AND blob-ref set_data (the latter via the data hydrator). We deliberately bypass ingest_remote:
+  // snapshot entries share no meaningful (origin, sequence), so the seen-set would drop all but the
+  // first; a bootstrap is idempotent per path, applied before live traffic.
+  const auto apply_scalar = [&](state_mutation_op op, const std::string &sv) {
+    state_mutation m;
+    m.cluster_id = _cluster_id;
+    m.path = e.path;
+    m.op = op;
+    m.string_value = sv;
+    _adapter->apply_remote(m);
+  };
+
+  // value() always (also creates the node on the joiner, matching the source even when empty).
+  apply_scalar(state_mutation_op::set_value, e.string_value);
+
+  // Metadata: apply only the non-default flags (a fresh joiner's nodes start at the defaults).
+  if (!e.comment.empty())
+    apply_scalar(state_mutation_op::set_comment, e.comment);
+  if (e.hidden)
+    apply_scalar(state_mutation_op::set_hidden, "1");
+  if (e.read_only)
+    apply_scalar(state_mutation_op::set_read_only, "1");
+  for (const auto &p : e.properties) {
+    state_mutation m;
+    m.cluster_id = _cluster_id;
+    m.path = e.path;
+    m.op = state_mutation_op::set_property;
+    m.type_name = p.first;
+    m.string_value = p.second;
+    _adapter->apply_remote(m);
+  }
+
+  // data(): inline decodes immediately; a blob_ref is fetched + decoded + installed by the
+  // hydrator.
+  if (!e.data_type_name.empty() && e.data_payload.kind != state_payload_kind::none) {
+    state_mutation m;
+    m.cluster_id = _cluster_id;
+    m.path = e.path;
+    m.op = state_mutation_op::set_data;
+    m.type_name = e.data_type_name;
+    m.payload = e.data_payload;
+    _adapter->apply_remote(m);
+  }
 }
 
 } // namespace cvc

@@ -458,7 +458,7 @@ UriResult do_fetch_and_store(cvc::state &root, const std::string &key, const Uri
 // hit returns before this is called). This per-key serialization is the ONLY write coordination the
 // cache needs — the entry write itself is a single atomic node op (see the CONCURRENCY note).
 UriResult fetch_and_cache(cvc::state &root, const std::string &key, const Uri &u,
-                          const EntrySnapshot &stale, const pt::ptime &now) {
+                          const pt::ptime &now) {
   std::shared_ptr<Inflight> mine;
   {
     std::unique_lock<std::mutex> lk(flight_mutex());
@@ -474,7 +474,16 @@ UriResult fetch_and_cache(cvc::state &root, const std::string &key, const Uri &u
 
   UriResult result;
   try {
-    result = do_fetch_and_store(root, key, u, stale, now);
+    // Re-read the entry now that we lead. The caller's snapshot predates the flight lock, so a
+    // leader that stored and left between that read and our lock is invisible to it; its store
+    // happened before its erase, so this read sees it. Fresh: serve it, no second transfer.
+    // Otherwise this snapshot, not the caller's, drives the fetch: newer validators, and an entry
+    // evicted meanwhile (no-store, an invalidating store) must not make a conditional GET.
+    const EntrySnapshot snap = read_entry(root(kCacheRoot), key);
+    if (snap.present && snapshot_fresh(snap, now))
+      result = {true, snap.body, snap.effective_url, std::string()};
+    else
+      result = do_fetch_and_store(root, key, u, snap, now);
   } catch (const std::exception &e) {
     result = {false, std::string(), std::string(),
               "ari: http fetch of '" + u.raw + "' failed: " + e.what()};
@@ -520,7 +529,7 @@ UriResult cached_http_fetch(cvc::state &root, const Uri &u, const std::string & 
     return {true, snap.body, snap.effective_url, std::string()}; // FRESH: no network
 
   // stale (conditional GET) or miss (unconditional) — coalesced.
-  return fetch_and_cache(root, key, u, snap, now);
+  return fetch_and_cache(root, key, u, now);
 }
 
 StoreResult invalidating_store(cvc::state &root, const Uri &u, const std::string &content,

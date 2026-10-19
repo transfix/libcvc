@@ -75,6 +75,8 @@ public:
                                          double lo, double hi, const char *fmt) override;
   cvc::ariadne::IndexEdit combo(const char *label, int current_index,
                                 const std::vector<std::string> &options) override;
+  cvc::ariadne::StringEdit input_text(const char *label, const char *key,
+                                      const std::string &current) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
 
   // Novel-primitive custom widgets (§16.1b): a host registers a raw-ImGui draw fn for
@@ -149,6 +151,10 @@ private:
     bool dirty = true;    // needs (re-)upload
   };
   std::unordered_map<std::string, PublishedImage> m_images;
+
+  // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
+  // active and holds the edit while one is — the string counterpart of cache_int/cache_float.
+  std::unordered_map<std::string, std::string> m_textEdits;
 };
 
 } // namespace gl

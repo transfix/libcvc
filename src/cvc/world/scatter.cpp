@@ -172,6 +172,11 @@ struct recipe_cache {
     auto it = local.find(name);
     if (it != local.end())
       return it->second;
+    // A species may be a RESERVED name a consumer renders itself (e.g. a demo's native tree
+    // generator) rather than a derivable L-system recipe. Such a name has no recipe footprint —
+    // yield none instead of throwing, so scatter still places and positions it.
+    if (!cvc::lsys::has_recipe(name))
+      return local.emplace(name, std::vector<footprint>{}).first->second;
     cvc::lsys::ruleset rs = cvc::lsys::load_recipe(name);
     cvc::lsys::derive_options o;
     o.generations = gen;

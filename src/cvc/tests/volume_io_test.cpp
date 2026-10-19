@@ -114,6 +114,31 @@ TEST_F(VolumeIOTest, RawivRoundTrip) {
   expect_volume_equal(out, in);
 }
 
+// writeVolumeFile must close (and so flush) the file. It once left it open: the last scanline
+// sat unflushed in the stdio buffer, so a read in the same process saw zeros there, and Windows
+// kept the file locked until exit. Check every voxel, the far corner included, and that the file
+// can be removed straight after the read. (expect_volume_equal skips the far corner; the missing
+// close may be the "boundary-plane quantization" its comment describes.)
+TEST_F(VolumeIOTest, RawivWriteFlushesEveryVoxelAndClosesTheFile) {
+  volume out = make_test_volume(ctx, 5, 4, 3);
+  std::string p = path("closed.rawiv");
+  ASSERT_NO_THROW(out.write(p));
+
+  volume in(ctx);
+  ASSERT_NO_THROW(in.read(p));
+  ASSERT_EQ(in.XDim(), out.XDim());
+  ASSERT_EQ(in.YDim(), out.YDim());
+  ASSERT_EQ(in.ZDim(), out.ZDim());
+  for (uint64_t k = 0; k < out.ZDim(); ++k)
+    for (uint64_t j = 0; j < out.YDim(); ++j)
+      for (uint64_t i = 0; i < out.XDim(); ++i)
+        EXPECT_DOUBLE_EQ(in(i, j, k), out(i, j, k))
+            << "voxel (" << i << "," << j << "," << k << ")";
+
+  std::error_code ec;
+  EXPECT_TRUE(std::filesystem::remove(p, ec)) << "file still open? " << ec.message();
+}
+
 TEST_F(VolumeIOTest, RawivFileInfo) {
   volume out = make_test_volume(ctx, 4, 6, 8);
   std::string p = path("info.rawiv");

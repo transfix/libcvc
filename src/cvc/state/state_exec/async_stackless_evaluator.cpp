@@ -28,8 +28,9 @@ evaluator_state async_stackless_evaluator::create_state(const value_t &expr, env
 }
 
 evaluator_state async_stackless_evaluator::create_state(const std::string &script,
-                                                        environment_ptr env) {
-  return inner_.create_state(script, env);
+                                                        environment_ptr env,
+                                                        const parse_options &popts) {
+  return inner_.create_state(script, env, popts);
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +89,10 @@ value_t async_stackless_evaluator::sync_evaluate(const value_t &expr, environmen
                                                  std::optional<double> timeout_sec,
                                                  std::function<void(const value_t &)> on_complete) {
   auto st = create_state(expr, env);
+  // The thread's evaluation deadline cuts a loop inside one native call, which run() only
+  // checks between steps (as stackless_evaluator::run arms it). Armed here, not in the
+  // coroutine, so the guards on this thread are still released in order.
+  eval_deadline_guard deadline_guard(timeout_sec);
   auto t = run(st, std::nullopt, timeout_sec, std::move(on_complete));
   return t.sync_wait();
 }
@@ -97,6 +102,7 @@ async_stackless_evaluator::sync_evaluate_script(const std::string &script, envir
                                                 std::optional<double> timeout_sec,
                                                 std::function<void(const value_t &)> on_complete) {
   auto st = create_state(script, env);
+  eval_deadline_guard deadline_guard(timeout_sec); // see sync_evaluate
   auto t = run(st, std::nullopt, timeout_sec, std::move(on_complete));
   return t.sync_wait();
 }

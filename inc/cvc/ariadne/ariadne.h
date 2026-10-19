@@ -88,6 +88,20 @@ public:
   void set_key_program(std::string script);
   void set_pointer_program(std::string script);
 
+  // Document-level signal handler — a state_exec PROGRAM run per signal the host routes here (the
+  // .ari on_signal: block; pass LoadResult::on_signal_script). Like on_key it is ONE resident,
+  // woken with `event` bound to {kind: "signal", signal: <name>, source: <who raised it>}; names
+  // follow POSIX ("SIGINT" for a terminal's Ctrl-C, "SIGQUIT" for Ctrl-\, "SIGTERM", "SIGHUP").
+  // Declaring it takes the signal over, like a POSIX handler: the host skips the default action
+  // (exit) and the program decides — e.g. calls the host's quit verb, or asks first. "" clears it.
+  void set_signal_program(std::string script);
+  bool has_signal_program() const;
+  // Deliver `signal` to the on_signal program. Returns true when a program will handle it, false
+  // when none is set (the host then applies the default). `source` says where it came from (e.g.
+  // "terminal" for a Ctrl-C keypress, "os" for a delivered signal). Thread-safe like post_input;
+  // the program runs in the next drain().
+  bool post_signal(const std::string &signal, const std::string &source = "host");
+
   // §12 channel enforcement (runtime backstop): install the document's channel policy so a program
   // `on:`/resident that sends or receives on an UNDECLARED channel is refused at run time — the
   // completeness layer for DYNAMIC channel names the load-time lint (loader) can't see. `declared`

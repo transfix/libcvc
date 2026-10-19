@@ -39,6 +39,13 @@
 
 #if defined(_WIN32)
 #include <process.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #define CVC_GETPID() _getpid()
 #define CVC_POPEN(cmd, mode) _popen(cmd, mode)
 #define CVC_PCLOSE(fp) _pclose(fp)
@@ -50,8 +57,40 @@
 #define CVC_POPEN(cmd, mode) popen(cmd, mode)
 #define CVC_PCLOSE(fp) pclose(fp)
 #endif
+#if defined(__APPLE__)
+#include <cstdint>
+#include <mach-o/dyld.h>
+#endif
 
 namespace fs = std::filesystem;
+
+namespace {
+// This test binary's own path (cvc-cli is built beside it), or empty when it cannot be found.
+// /proc/self/exe exists only on Linux; elsewhere fs::canonical threw from SetUp().
+fs::path self_exe() {
+#if defined(_WIN32)
+  std::wstring buf(32768, L'\0');
+  const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+  if (n == 0 || n >= buf.size())
+    return {};
+  buf.resize(n);
+  return fs::path(buf);
+#elif defined(__APPLE__)
+  std::uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::string buf(size, '\0');
+  if (_NSGetExecutablePath(buf.data(), &size) != 0)
+    return {};
+  std::error_code ec;
+  fs::path p = fs::canonical(buf.c_str(), ec);
+  return ec ? fs::path() : p;
+#else
+  std::error_code ec;
+  fs::path p = fs::canonical("/proc/self/exe", ec);
+  return ec ? fs::path() : p;
+#endif
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -208,10 +247,13 @@ protected:
     if (env && fs::exists(env)) {
       cvc_bin = env;
     } else {
-      fs::path self = fs::canonical("/proc/self/exe");
-      fs::path dir = self.parent_path();
-      if (fs::exists(dir / "cvc"))
-        cvc_bin = (dir / "cvc").string();
+#if defined(_WIN32)
+      const fs::path bin = self_exe().parent_path() / "cvc.exe";
+#else
+      const fs::path bin = self_exe().parent_path() / "cvc";
+#endif
+      if (!bin.parent_path().empty() && fs::exists(bin))
+        cvc_bin = bin.string();
       else
         GTEST_SKIP() << "cvc binary not found; set CVC_CLI_BINARY env var";
     }

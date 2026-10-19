@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/state_io.h>  // §13.10 save_state / restore_state
@@ -15,7 +16,7 @@
 #include <cvc/ariadne/uri_http.h>  // §13.6 http:// handler
 #include <cvc/ariadne/uri_state.h> // §13.3 state:// handler
 #include <cvc/ariadne/widget.h>
-#include <cvc/core/app.h>   // cvc::app (state:// handler tests build a state tree)
+#include <cvc/core/app.h>    // cvc::app (state:// handler tests build a state tree)
 #include <cvc/state/state.h> // cvc::state
 #include <filesystem>
 #include <fstream>
@@ -245,6 +246,38 @@ struct SchemeGuard {
   ~SchemeGuard() { unregister_uri_handler(scheme); }
 };
 
+// Set (or, with nullptr, unset) an environment variable for a scope and restore the caller's value
+// after it, even on an ASSERT. register_cvc_uri_handler snapshots CVC_ARIADNE_PATH when it is
+// called, so a guard around that call is enough to make a test's cvc:// search path hermetic.
+class ScopedEnv {
+public:
+  ScopedEnv(const char *name, const char *value) : name_(name) {
+    if (const char *old = std::getenv(name)) {
+      had_ = true;
+      old_ = old;
+    }
+    put(value);
+  }
+  ~ScopedEnv() { put(had_ ? old_.c_str() : nullptr); }
+  ScopedEnv(const ScopedEnv &) = delete;
+  ScopedEnv &operator=(const ScopedEnv &) = delete;
+
+private:
+  void put(const char *value) {
+#ifdef _WIN32
+    _putenv_s(name_.c_str(), value ? value : ""); // "" removes it on Windows
+#else
+    if (value)
+      setenv(name_.c_str(), value, 1);
+    else
+      unsetenv(name_.c_str());
+#endif
+  }
+  std::string name_;
+  bool had_ = false;
+  std::string old_;
+};
+
 // Snapshot + restore the process-global file byte caps, so a test that lowers a cap cannot leak
 // it into later tests (which store/resolve real files at the default cap).
 struct CapGuard {
@@ -353,6 +386,53 @@ windows:
   const Widget *bt = find(r.root, Kind::Button);
   ASSERT_NE(bt, nullptr);
   EXPECT_EQ(bt->on, "go");
+}
+
+// Phase 0a: input_text / input_int parse — both the shorthand `input_text:` key and the generic
+// `type: input_text` form — carrying bind, the optional `on` (send-on-commit), `def`, and the int
+// range lo/hi. These are the conference app's chat / display-name / room-id fields.
+TEST(AriadneLoader, InputTextAndInputInt) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: Chat
+    children:
+      - input_text: Message
+        bind: chat.draft
+        on: send
+        def: "hi"
+      - input_int: Port
+        bind: net.port
+        lo: 1
+        hi: 65535
+        def: 8080
+      - type: input_text
+        label: Room
+        bind: room.name
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::InputText), 2);
+  EXPECT_EQ(count(r.root, Kind::InputInt), 1);
+
+  const Widget *msg = find(r.root, Kind::InputText, "Message");
+  ASSERT_NE(msg, nullptr);
+  EXPECT_EQ(msg->bind, "chat.draft");
+  EXPECT_EQ(msg->on, "send"); // fires on commit (Enter / focus-leave)
+  EXPECT_EQ(msg->sdef, "hi");
+
+  const Widget *port = find(r.root, Kind::InputInt);
+  ASSERT_NE(port, nullptr);
+  EXPECT_EQ(port->bind, "net.port");
+  EXPECT_EQ(port->ilo, 1);
+  EXPECT_EQ(port->ihi, 65535);
+  EXPECT_EQ(port->idef, 8080);
+
+  const Widget *room = find(r.root, Kind::InputText, "Room");
+  ASSERT_NE(room, nullptr);
+  EXPECT_EQ(room->bind, "room.name");
+  EXPECT_TRUE(room->on.empty()); // on: is optional for input_text (no warning, unlike button)
 }
 
 // §12/§3.0.3b: a window `include:` site may override the instantiated unit's geometry (pos/size/
@@ -939,6 +1019,40 @@ scene:
   EXPECT_FLOAT_EQ(v->fit_height, 100.0f);
   ASSERT_TRUE(v->has_volren);
   ASSERT_EQ(v->volren.isosurfaces.size(), 1u);
+  EXPECT_EQ(v->sdf_algorithm, "v2"); // the default
+}
+
+// source: { sdf: { ..., algorithm: v1|v2|igl } } picks the cvc::sdf implementation; the loader
+// keeps it lower-cased and leaves validation (and the igl -> v2 fallback) to the realizer.
+TEST(AriadneScene, VolumeSdfAlgorithm) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: a
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 16, algorithm: IGL } }
+    - node: b
+      type: volslice
+      source: { sdf: { mesh: stanford.bunny, algorithm: v1 } }
+    - node: c
+      type: fe_lab
+      source: { sdf: { mesh: stanford.bunny } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *a = find_scene_node(r.scene.nodes, "a");
+  const SceneNode *b = find_scene_node(r.scene.nodes, "b");
+  const SceneNode *c = find_scene_node(r.scene.nodes, "c");
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(a->sdf_algorithm, "igl");
+  EXPECT_EQ(a->sdf_dim, 16);
+  EXPECT_EQ(b->sdf_algorithm, "v1");
+  EXPECT_EQ(c->sdf_algorithm, "v2");
+  EXPECT_EQ(c->source_sdf_mesh, "stanford.bunny"); // a custom node type reads the same source
+  EXPECT_FALSE(c->props.has("source"));            // ... which the built-in parser consumed
 }
 
 // material: { texture: <uri> } — an image sampled through the mesh UVs.
@@ -1178,6 +1292,120 @@ scene:
   ASSERT_EQ(t->heightfield.colors.size(), 2u);
   EXPECT_FLOAT_EQ(t->heightfield.colors[0].max_height, 2.0f);
   EXPECT_FLOAT_EQ(t->heightfield.colors[1].color[1], 0.50f);
+}
+
+// physics: and body: (WORLD-GEOMETRY-ROADMAP.md, G5) — the scene's rigid-body world and each node's
+// body, plus the box and sphere primitives a crate or a ball is drawn with. Values are lower-cased;
+// the realizer checks them. `body:` never lands in props.
+TEST(AriadneScene, PhysicsAndBodies) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics:
+    gravity: [0, 0, -3.7]
+    fixed_dt: 0.02
+    backend: Jolt
+    materials:
+      ice: { friction: 0.05, restitution: 0.1 }
+      rubber: { friction: 1.2 }
+  nodes:
+    - node: ground
+      source: { heightfield: { size: 10, resolution: 11 } }
+      body: static
+    - node: crate
+      source: { box: { size: [1, 2, 0.5] } }
+      body:
+        mass: 12
+        material: ice
+        velocity: [1, 0, 0]
+        linear_damping: 0.2
+    - node: ball
+      source: { sphere: 0.25 }
+      body: { motion: Kinematic, shape: SPHERE, density: 300 }
+    - node: deco
+      source: { box: 2 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const ScenePhysics &ph = r.scene.physics;
+  ASSERT_TRUE(ph.present);
+  EXPECT_DOUBLE_EQ(ph.gravity[2], -3.7);
+  EXPECT_DOUBLE_EQ(ph.fixed_dt, 0.02);
+  EXPECT_EQ(ph.backend, "jolt");
+  ASSERT_EQ(ph.materials.size(), 2u);
+  EXPECT_EQ(ph.materials[0].name, "ice");
+  EXPECT_DOUBLE_EQ(ph.materials[0].friction, 0.05);
+  EXPECT_DOUBLE_EQ(ph.materials[0].restitution, 0.1);
+  EXPECT_DOUBLE_EQ(ph.materials[1].friction, 1.2);
+  EXPECT_DOUBLE_EQ(ph.materials[1].restitution, 0.0);
+
+  const SceneNode *ground = find_scene_node(r.scene.nodes, "ground");
+  ASSERT_NE(ground, nullptr);
+  EXPECT_TRUE(ground->body.present);
+  EXPECT_EQ(ground->body.motion, "static");
+  EXPECT_EQ(ground->body.shape, "auto");
+
+  const SceneNode *crate = find_scene_node(r.scene.nodes, "crate");
+  ASSERT_NE(crate, nullptr);
+  EXPECT_EQ(crate->source_primitive, "box");
+  EXPECT_FLOAT_EQ(crate->box_size[1], 2.0f);
+  EXPECT_FLOAT_EQ(crate->box_size[2], 0.5f);
+  EXPECT_TRUE(crate->body.present);
+  EXPECT_TRUE(crate->body.motion.empty()); // the realizer picks: dynamic for a mesh
+  EXPECT_DOUBLE_EQ(crate->body.mass, 12.0);
+  EXPECT_EQ(crate->body.material, "ice");
+  EXPECT_DOUBLE_EQ(crate->body.velocity[0], 1.0);
+  EXPECT_TRUE(crate->body.has_linear_damping);
+  EXPECT_DOUBLE_EQ(crate->body.linear_damping, 0.2);
+  EXPECT_FALSE(crate->body.has_angular_damping);
+  for (const auto &kv : crate->props.entries)
+    EXPECT_NE(kv.first, "body") << "body: is a built-in key";
+
+  const SceneNode *ball = find_scene_node(r.scene.nodes, "ball");
+  ASSERT_NE(ball, nullptr);
+  EXPECT_EQ(ball->source_primitive, "sphere");
+  EXPECT_FLOAT_EQ(ball->sphere_radius, 0.25f);
+  EXPECT_EQ(ball->body.motion, "kinematic");
+  EXPECT_EQ(ball->body.shape, "sphere");
+  EXPECT_DOUBLE_EQ(ball->body.density, 300.0);
+
+  const SceneNode *deco = find_scene_node(r.scene.nodes, "deco");
+  ASSERT_NE(deco, nullptr);
+  EXPECT_FLOAT_EQ(deco->box_size[0], 2.0f);
+  EXPECT_FLOAT_EQ(deco->box_size[2], 2.0f);
+  EXPECT_FALSE(deco->body.present);
+}
+
+// `physics: {}` alone declares a world with the defaults (and makes the scene non-empty);
+// `physics: false` declares none.
+TEST(AriadneScene, PhysicsDefaultsAndOff) {
+  SKIP_WITHOUT_YAML();
+  LoadResult on = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+)");
+  ASSERT_TRUE(on.ok) << on.error;
+  EXPECT_TRUE(on.scene.physics.present);
+  EXPECT_TRUE(on.scene.any());
+  EXPECT_DOUBLE_EQ(on.scene.physics.gravity[2], -9.80665);
+  EXPECT_DOUBLE_EQ(on.scene.physics.fixed_dt, 0.0); // one clock quantum
+  EXPECT_EQ(on.scene.physics.backend, "auto");
+  LoadResult off = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: false
+)");
+  ASSERT_TRUE(off.ok) << off.error;
+  EXPECT_FALSE(off.scene.physics.present);
+  // `backend: null` is YAML's null literal: it still names the null backend (so does `none`).
+  for (const char *b : {"null", "none", "Null"}) {
+    LoadResult nb = load_string(std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  physics: "
+                                            "{ backend: ") +
+                                b + " }\n");
+    ASSERT_TRUE(nb.ok) << nb.error;
+    EXPECT_EQ(nb.scene.physics.backend, "null") << b;
+  }
 }
 
 // §9 time: a `clock:` block declares the scene's simulation clock. A bare `clock: {}` registers the
@@ -2027,12 +2255,28 @@ on_key: |
   (state-set "demo.key" "1")
 on_pointer: |
   (state-set "demo.ptr" "1")
+on_signal: |
+  (state-set "demo.sig" (get-attr event "signal"))
 windows: [ { window: W, children: [] } ]
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(r.on_tick_script.find("demo.frame"), std::string::npos);
   EXPECT_NE(r.on_key_script.find("demo.key"), std::string::npos);
   EXPECT_NE(r.on_pointer_script.find("demo.ptr"), std::string::npos);
+  EXPECT_NE(r.on_signal_script.find("demo.sig"), std::string::npos);
+}
+
+// on_signal: must be a scalar script, like the other document-level handlers.
+TEST(AriadneInit, OnSignalMustBeAScript) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+on_signal: { SIGINT: quit }
+windows: [ { window: W, children: [] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.on_signal_script.empty());
+  EXPECT_TRUE(has_warning(r, "on_signal: must be a scalar"));
 }
 
 // §4.6 widget-level on_click is captured onto the Widget (any kind), read by the walk.
@@ -2448,7 +2692,10 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
     std::ofstream o(comps / "panel.ari");
     o << "units:\n  panel:\n    window: P\n    children:\n      - text: FromComponent\n";
   }
-  register_cvc_uri_handler({root.string()});
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // only `root`, whatever the shell has set
+    register_cvc_uri_handler({root.string()});
+  }
   SchemeGuard g{"cvc"};
   LoadResult r = load_string("import: cvc://components/panel.ari\nwindows:\n  - include: panel\n");
   ASSERT_TRUE(r.ok) << r.error;
@@ -2458,6 +2705,70 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
   EXPECT_NE(find(r.root, Kind::Text, "FromComponent"), nullptr);
   std::error_code ec;
   fs::remove_all(root, ec);
+}
+
+// Every SHIPPED component (src/cvc/ariadne/components/*.ari, found from this file's location) is
+// imported through cvc:// and included the way a document does: it must expand to a window whose
+// widgets all parse and bind, and INDEX.ari must catalog it. A component's unit is named after
+// its file. The cvc:// search path is the SOURCE tree only: CVC_ARIADNE_PATH (searched first)
+// would otherwise serve, say, a stale installed copy of each component -- the test plants such a
+// decoy library on it to prove the source file is the one validated.
+TEST(AriadneComponents, ShippedComponentsLoadClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  const fs::path comps = ariadne_dir / "components";
+  if (!fs::is_directory(comps))
+    GTEST_SKIP() << "component sources not found at " << comps.string();
+  std::ifstream idx(comps / "INDEX.ari", std::ios::binary);
+  ASSERT_TRUE(idx.good()) << "INDEX.ari is missing";
+  const std::string index((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
+
+  // A dev shell pointing CVC_ARIADNE_PATH at another component library (an installed
+  // share/libcvc/ariadne): its copy of every shipped file is broken.
+  const fs::path decoy = fs::temp_directory_path() / "ariadne_shipped_components_decoy";
+  fs::create_directories(decoy / "components");
+  for (const fs::directory_entry &e : fs::directory_iterator(comps)) {
+    if (!e.is_regular_file())
+      continue;
+    std::ofstream o(decoy / "components" / e.path().filename(), std::ios::binary);
+    o << "units:\n  not_the_source: { text: Decoy }\n";
+  }
+  {
+    ScopedEnv dev_shell("CVC_ARIADNE_PATH", decoy.string().c_str());
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // the source tree only
+    register_cvc_uri_handler({ariadne_dir.string()});
+  }
+  SchemeGuard g{"cvc"};
+  int checked = 0;
+  for (const fs::directory_entry &e : fs::directory_iterator(comps)) {
+    const std::string file = e.path().filename().string();
+    if (!e.is_regular_file() || e.path().extension() != ".ari" || file == "INDEX.ari")
+      continue;
+    const std::string unit = e.path().stem().string();
+    SCOPED_TRACE(file);
+    const UriResult src = resolve("cvc://components/" + file);
+    std::error_code eq_ec;
+    EXPECT_TRUE(src.ok && fs::equivalent(fs::path(src.canonical), e.path(), eq_ec))
+        << "cvc://components/" << file << " resolved to '" << src.canonical
+        << "', not the source file " << e.path().string();
+    LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + file +
+                               "\nwindows:\n  - include: " + unit + "\n");
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_NE(find(r.root, Kind::Window), nullptr) << "unit '" << unit << "' is not a window";
+    for (const std::string &w : r.warnings) {
+      EXPECT_EQ(w.find("unrecognized widget key"), std::string::npos) << w;
+      EXPECT_EQ(w.find("has no bind"), std::string::npos) << w;
+      EXPECT_EQ(w.find("unknown unit"), std::string::npos) << w;
+      EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
+      EXPECT_EQ(w.find("parse error"), std::string::npos) << w;
+    }
+    EXPECT_NE(index.find("file: " + file), std::string::npos) << "INDEX.ari does not list " << file;
+    ++checked;
+  }
+  EXPECT_GE(checked, 13); // the 13 components shipped with mesh_tools / fe_controls
+  std::error_code ec;
+  fs::remove_all(decoy, ec);
 }
 
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
@@ -2960,12 +3271,12 @@ TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
   root("doc.n").value(std::string("42"));
   const std::string path = (fs::temp_directory_path() / "ariadne_state_io.json").string();
   std::string err;
-  ASSERT_TRUE(save_state(root("doc"), path, &err)) << err; // serializes keys "doc.title"/"doc.n"
-  // Restore into a FRESH app's ROOT — the absolute paths reconstruct there (nested children survive
-  // the round-trip, exercising the #430 ptree deserialize fix).
+  ASSERT_TRUE(save_state(root("doc"), path, &err)) << err; // serializes keys "title"/"n"
+  // Restore into the same node of a FRESH app — the relative paths reconstruct there (nested
+  // children survive the round-trip, exercising the #430 ptree deserialize fix).
   cvc::app app2;
   cvc::state &root2 = cvc::state::instance(app2);
-  ASSERT_TRUE(restore_state(root2, path, &err)) << err;
+  ASSERT_TRUE(restore_state(root2("doc"), path, &err)) << err;
   EXPECT_EQ(root2("doc.title").value(), "Hello");
   EXPECT_EQ(root2("doc.n").value(), "42");
   std::error_code ec;
@@ -2982,9 +3293,12 @@ TEST(AriadneStateIo, SaveRestoreRoundTripsViaStateScheme) {
   // Snapshot the cfg subtree onto a state node (its JSON text lives on backup's value channel).
   ASSERT_TRUE(save_state(root("cfg"), "state://backup?value", &err)) << err;
   root("cfg.color").value(std::string("green")); // mutate after the snapshot
-  // Restore into the app root reverts cfg.color — a full round-trip through state:// store+resolve.
-  ASSERT_TRUE(restore_state(root, "state://backup?value", &err)) << err;
+  // Restore into cfg reverts cfg.color — a full round-trip through state:// store+resolve.
+  ASSERT_TRUE(restore_state(root("cfg"), "state://backup?value", &err)) << err;
   EXPECT_EQ(root("cfg.color").value(), "red");
+  // Restoring into another node copies the saved subtree there.
+  ASSERT_TRUE(restore_state(root("cfg_copy"), "state://backup?value", &err)) << err;
+  EXPECT_EQ(root("cfg_copy.color").value(), "red");
 }
 
 TEST(AriadneModularity, ImportUnitsFromAnotherFile) {
@@ -3673,6 +3987,23 @@ windows:
 )");
   EXPECT_FALSE(r.ok); // strict (default): the undeclared "other.chan" fails the load
   EXPECT_NE(r.error.find("other.chan"), std::string::npos);
+}
+
+TEST(AriadneChannelLint, SeesChannelsNestedAnyDepth) {
+  // The lint walks a script on a heap stack, so a reference 1000 levels down is still checked
+  // (it used to stop at 256).
+  SKIP_WITHOUT_YAML();
+  const int n = 1000;
+  std::string on;
+  for (int i = 0; i < n; ++i)
+    on += "(begin ";
+  on += "(msg-send \"deep.chan\" \"x\")";
+  on += std::string(n, ')');
+  LoadResult r = load_string("channels:\n  - nav.done\nwindows:\n  - window: W\n    children:\n"
+                             "      - button: Go\n        on: '" +
+                             on + "'\n");
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("deep.chan"), std::string::npos) << r.error;
 }
 
 TEST(AriadneChannelLint, DeclaredChannelPasses) {

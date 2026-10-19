@@ -182,6 +182,7 @@ jobs:
       libcvc: ${{ steps.rev.outputs.libcvc }}
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
       cvcgl_examples: ${{ steps.rev.outputs.cvcgl_examples }}
+      ari: ${{ steps.rev.outputs.ari }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
       pycvc_cp311: ${{ steps.rev.outputs.pycvc_cp311 }}
@@ -222,6 +223,7 @@ jobs:
           emit libcvc         libcvc
           emit cvcgl          cvcgl
           emit cvcgl-examples cvcgl_examples
+          emit ari            ari
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
           emit pycvc-cp313    pycvc_cp313
@@ -350,17 +352,30 @@ jobs:
           # same root cause as ci.yml's package-windows failures after the
           # image flip). Revisit when the v180 toolset stabilizes.
           - { os: windows-2022,     platform: windows, arch: x86_64 }
-        # No windows-debug exclusion any more. It used to be unsound because
-        # the catalog had no windows-debug dep bundles, so a Debug libcvc
-        # would have linked Release MSVC deps — a debug/release CRT mismatch
-        # producing a broken artifact. The gap was measured across libcvc's
-        # 34 runtime deps and closed by publishing the ten that were missing:
-        # gmp, mpfr, gsl, tiff, libiimod, assimp, levmar, grpc, cgal and
-        # imagemagick. (fontconfig is scoped linux/macos, so it never
-        # applied.) A windows-debug libcvc bundle is what lets downstream
-        # consumers run a Debug matrix lane at all — transfix/F2Dock builds
-        # Debug and Release on all three platforms and now takes libcvc from
-        # the catalog rather than compiling it.
+        exclude:
+          # Windows debug is unsound to publish: the catalog has windows-debug
+          # bundles for only 15 of libcvc's 34 windows deps (no boost, cgal,
+          # gmp, hdf5, libiimod, yaml-cpp, ... as of catalog rev 5186), so a
+          # Debug libcvc links Release MSVC deps — a debug/release CRT
+          # mismatch producing a broken artifact.
+          #
+          # f37762a3 (2026-09-03) dropped this exclusion on the premise that
+          # the missing windows-debug deps were being published. They never
+          # landed, and the Fetch step below asked for Release deps anyway,
+          # so libcvc 3.3.0+cvc.4 through 3.5.0+cvc.2 went out as
+          # windows/x86_64/debug bundles built that way. 3.5.0+cvc.2's cvc.dll
+          # imports MSVCP140D.dll and ucrtbased.dll yet links
+          # boost_filesystem.dll, hdf5.dll and yaml-cpp.dll built against
+          # MSVCP140.dll — passing std::string across that boundary (e.g.
+          # YAML::Load) is undefined behaviour.
+          #
+          # Restore the row only once `cvcpkg install-deps
+          # cvcpkg/recipes/libcvc --platform windows --config debug` resolves
+          # cleanly. The Fetch step already asks for debug deps on this row,
+          # so re-enabling it early fails loudly at Configure instead of
+          # shipping the mismatch again.
+          - config: debug
+            target: { os: windows-2022, platform: windows, arch: x86_64 }
         include:
           # Extra pycvc-column jobs (linux x86_64, release only): each builds
           # libcvc + cvcgl locally to link against, then packs+publishes ONLY
@@ -406,12 +421,13 @@ jobs:
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
-          # Always fetch RELEASE deps — the catalog's debug coverage is
-          # partial (e.g. no libiimod/hdf5 debug-linux bundles), and a Debug
-          # libcvc links the Release, ABI-stable shared deps perfectly on
-          # Linux/macOS (you debug libcvc's own code, not its dependencies).
-          # This is why Windows debug is excluded above (CRT mismatch).
-          build_type: Release
+          # RELEASE deps on Linux/macOS, even for a debug row — the catalog's
+          # debug coverage is partial, and a Debug libcvc links the Release,
+          # ABI-stable shared deps perfectly there (you debug libcvc's own
+          # code, not its dependencies). Windows debug needs DEBUG deps (CRT
+          # mismatch otherwise); that row is excluded above until they exist,
+          # and asking for them here keeps it honest if it is re-enabled.
+          build_type: ${{ (matrix.config == 'debug' && matrix.target.platform == 'windows') && 'Debug' || 'Release' }}
           link: shared
 
       # cy-pca/cvcpkg#105 moved httpx -- which `cvcpkg publish` needs -- behind
@@ -698,32 +714,53 @@ jobs:
           # the imgui note above). Own prefix, joined only here.
           SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           cvcpkg install sdl3 --prefix "$SDL3"
-          cmake -S src/cvcGL -B build-cvcgl -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-cvcgl" \
-            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS"
-          cmake --build build-cvcgl --parallel
-          cmake --install build-cvcgl
+          # Two link variants. --link shared is libcvcGL.so.3 (one in-process copy
+          # for every consumer, the build pycvc-gl links below); --link static is
+          # the libcvcGL.a archive. Each is its own build and stage: cvcGL's type
+          # follows BUILD_SHARED_LIBS. Every column builds the shared one (pycvc-gl
+          # links it); only the packing job builds the static one.
+          build_cvcgl() {  # build_cvcgl <build-dir> <stage-dir> <ON|OFF>
+            cmake -S src/cvcGL -B "$1" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS="$3" \
+              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/$2" \
+              -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS"
+            cmake --build "$1" --parallel
+            cmake --install "$1"
+          }
+          build_cvcgl build-cvcgl stage-cvcgl ON
           if [ "$PACK_CVCGL" != "1" ]; then
             echo "pyver ${{ matrix.pyver }} column job: cvcgl built for linking only (packed/published by the 311 job)"
             exit 0
           fi
+          build_cvcgl build-cvcgl-static stage-cvcgl-static OFF
+          # The variants have to differ in what they carry, or the link label is a lie.
+          ls stage-cvcgl/lib/libcvcGL.so.* >/dev/null
+          ls stage-cvcgl-static/lib/libcvcGL.a >/dev/null
+          if ls stage-cvcgl-static/lib/libcvcGL.so* >/dev/null 2>&1; then
+            echo "::error::the static cvcgl stage carries a shared libcvcGL"; exit 1
+          fi
           mkdir -p dist
-          cvcpkg pack cvcpkg/recipes/cvcgl \
-            --from-prefix stage-cvcgl \
-            --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local \
-            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} \
-            --output-dir dist
+          for link in shared static; do
+            stage=stage-cvcgl; [ "$link" = static ] && stage=stage-cvcgl-static
+            cvcpkg pack cvcpkg/recipes/cvcgl \
+              --from-prefix "$stage" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link "$link" --local \
+              --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} \
+              --output-dir dist
+          done
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
             fi
-            cvcpkg publish cvcgl \
-              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
-              --platform "${{ matrix.target.platform }}" \
-              --config release --link shared --output-dir dist \
-              --token "$CVCPKG_TOKEN"
+            for link in shared static; do
+              cvcpkg publish cvcgl \
+                --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+                --platform "${{ matrix.target.platform }}" \
+                --config release --link "$link" --output-dir dist \
+                --token "$CVCPKG_TOKEN"
+            done
           else
             echo "dry-run: skipping cvcgl publish"
           fi
@@ -797,6 +834,51 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping cvcgl-examples publish"
+          fi
+
+      - name: Build, pack & publish ari [Linux]
+        # The `ari` terminal runner (src/ari), packaged apart from the libcvc SDK the
+        # way cvc-cli is.  Like cvcgl-examples it runs the recipe's own build.sh
+        # against the libcvc just installed into $STAGE, so the published ari always
+        # matches the libcvc built from this tree (its FTXUI backend and .ari loader
+        # live in libcvc).  Linux only: the recipe's matrix is linux-only until
+        # libcvc's ftxui dependency is published for the other platforms.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/ari/build.sh
+          test -x stage-ari/bin/ari
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ari \
+            --from-prefix stage-ari \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ari \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ari publish"
           fi
 
       - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [Linux]
@@ -943,26 +1025,49 @@ jobs:
           # SDL3::SDL3 link + find_dependency(SDL3) are relocatable (see Linux note).
           $sdl3 = "$env:GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           cvcpkg install sdl3 --prefix "$sdl3" --config release --link shared
-          cmake -B build-cvcgl -S src/cvcGL `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_CONFIGURATION_TYPES=Release `
-            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-cvcgl" `
-            -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath"
-          cmake --build build-cvcgl --config Release
-          cmake --install build-cvcgl --config Release
+          # Two link variants, as on Linux: --link shared is cvcGL.dll (+ its
+          # cvcGL.lib import library; WINDOWS_EXPORT_ALL_SYMBOLS gives it an export
+          # table), --link static the cvcGL.lib archive. cvcGL's type follows
+          # BUILD_SHARED_LIBS, so each variant is its own build and stage.
+          $variants = @(
+            @{ link = 'shared'; build = 'build-cvcgl';        stageDir = 'stage-cvcgl';        bsl = 'ON'  },
+            @{ link = 'static'; build = 'build-cvcgl-static'; stageDir = 'stage-cvcgl-static'; bsl = 'OFF' }
+          )
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          cvcpkg pack cvcpkg/recipes/cvcgl `
-            --from-prefix stage-cvcgl `
-            --platform windows --config release --link shared --local `
-            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} `
-            --output-dir dist
+          foreach ($v in $variants) {
+            cmake -B $v.build -S src/cvcGL `
+              -DCMAKE_BUILD_TYPE=Release `
+              -DCMAKE_CONFIGURATION_TYPES=Release `
+              -DBUILD_SHARED_LIBS="$($v.bsl)" `
+              -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/$($v.stageDir)" `
+              -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath"
+            if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) configure failed" }
+            cmake --build $v.build --config Release
+            if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) build failed" }
+            cmake --install $v.build --config Release
+            if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) install failed" }
+          }
+          # The variants have to differ in what they carry, or the link label is a lie.
+          if (-not (Test-Path "stage-cvcgl/bin/cvcGL.dll")) { throw 'shared cvcgl stage has no bin/cvcGL.dll' }
+          if (Test-Path "stage-cvcgl-static/bin/cvcGL.dll") { throw 'static cvcgl stage carries cvcGL.dll' }
+          foreach ($v in $variants) {
+            cvcpkg pack cvcpkg/recipes/cvcgl `
+              --from-prefix $v.stageDir `
+              --platform windows --config release --link $v.link --local `
+              --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} `
+              --output-dir dist
+            if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) pack failed" }
+          }
           $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
           if ($doPublish) {
             if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
-            cvcpkg publish cvcgl `
-              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
-              --platform windows --config release --link shared --output-dir dist `
-              --token "$env:CVCPKG_TOKEN"
+            foreach ($v in $variants) {
+              cvcpkg publish cvcgl `
+                --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+                --platform windows --config release --link $v.link --output-dir dist `
+                --token "$env:CVCPKG_TOKEN"
+              if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) publish failed" }
+            }
           } else {
             Write-Host 'dry-run: skipping cvcgl publish'
           }

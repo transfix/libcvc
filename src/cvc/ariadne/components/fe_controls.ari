@@ -1,0 +1,125 @@
+# fe_controls.ari — a REUSABLE Ariadne component: finite elements on a `type: fe_lab` node.
+# The node holds a volume (source: { sdf: … } or { file: … }). "Tet-mesh" builds a tetrahedral
+# mesh of it with the in-tree LBIE mesher (cvc::tetrahedralize); "Solve" runs a linear (P1) FEM
+# Poisson or heat problem on that mesh (cvc::fem, libigl assembly); the field is shown on the tet
+# boundary surface and on a movable axis-aligned cut, coloured by a colormap. Binds the fe.* keys
+# the cvcGL fe_lab realizer owns (state at "<scene>.graphics.root.children.domain.fe.*"). Commands
+# go through fe.request: the realizer consumes it and runs the job off the render thread; Stop
+# interrupts a heat solve at its next step, and is enabled only while one runs (fe.stoppable):
+# tet meshing and a Poisson solve cannot be interrupted. Needs a libcvc built with
+# CVC_ENABLE_LIBIGL (and CVC_ENABLE_MESHER for tet meshing).
+#
+#   Poisson: -lap u = f inside, u = 0 on the whole boundary.
+#   Heat:    u_t = k lap u from u = 0, the bottom 5% of the boundary held at 1 (a hot floor), the
+#            rest insulated. The diffusivity is relative to the domain (k x extent^2 per unit time),
+#            so k = 1 spreads heat across the body in about one time unit at any model scale.
+#
+# Convention: it binds an fe_lab node named `domain`; copy + rename the node id for another.
+#
+# Use it:
+#     import: cvc://components/fe_controls.ari
+#     windows:
+#       - include: fe_controls
+#     scene:
+#       nodes:
+#         - node: domain
+#           type: fe_lab
+#           source: { sdf: { mesh: stanford.bunny, dim: 32 } }
+
+units:
+  fe_controls:
+    window: Finite elements
+    id: fe_controls
+    children:
+      - text: "status"
+        bind: graphics.root.children.domain.fe.status
+      - text: "tets"
+        bind: graphics.root.children.domain.fe.stats.tets
+      - text: "progress %"
+        bind: graphics.root.children.domain.fe.progress
+      - separator
+      - text: "1. Tet-mesh the volume (LBIE)"
+      - slider_float: Isovalue
+        bind: graphics.root.children.domain.fe.mesh.isovalue
+        lo: -10.0
+        hi: 10.0
+        fmt: "%.2f"
+        tooltip: "the surface that bounds the mesh, in the volume's units (0 = the surface of an SDF)"
+      - combo: Inside is
+        bind: graphics.root.children.domain.fe.mesh.inside
+        options: [Below the isovalue (SDF), Above the isovalue (density)]
+        values: [below, above]
+      - combo: Improve
+        bind: graphics.root.children.domain.fe.mesh.improve
+        options: [None, Geometric flow, Edge contraction, Joe-Liu, Minimal volume]
+        values: [0, 1, 2, 3, 4] # cvc::improvement_method
+      - slider_int: Improve iterations
+        bind: graphics.root.children.domain.fe.mesh.improve_iterations
+        lo: 0
+        hi: 20
+      - button: Tet-mesh
+        on: (state-set "graphics.root.children.domain.fe.request" "mesh")
+        disabled_when: (= (state-get "graphics.root.children.domain.fe.busy") "1")
+      - separator
+      - text: "2. Solve"
+      - combo: Problem
+        bind: graphics.root.children.domain.fe.problem
+        options: [Poisson (-lap u = f; u = 0 on the boundary), Heat (hot floor)]
+        values: [poisson, heat]
+      - slider_float: Source f
+        bind: graphics.root.children.domain.fe.poisson.f
+        lo: 0.0
+        hi: 10.0
+        fmt: "%.2f"
+        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "poisson")
+      - slider_float: Diffusivity
+        bind: graphics.root.children.domain.fe.heat.kappa
+        lo: 0.01
+        hi: 10.0
+        fmt: "%.2f"
+        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "heat")
+      - slider_float: Time step
+        bind: graphics.root.children.domain.fe.heat.dt
+        lo: 0.0001
+        hi: 0.1
+        fmt: "%.4f"
+        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "heat")
+      - slider_int: Steps
+        bind: graphics.root.children.domain.fe.heat.steps
+        lo: 1
+        hi: 500
+        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "heat")
+      - button: Solve
+        on: (state-set "graphics.root.children.domain.fe.request" "solve")
+        disabled_when: (or (= (state-get "graphics.root.children.domain.fe.busy") "1") (= (state-get "graphics.root.children.domain.fe.stats.tets") "0"))
+      - button: Stop
+        on: (state-set "graphics.root.children.domain.fe.request" "stop")
+        enabled_when: (= (state-get "graphics.root.children.domain.fe.stoppable") "1")
+        tooltip: "interrupts a running heat solve; tet meshing and a Poisson solve run to the end"
+      - separator
+      - text: "3. Show the field"
+      - combo: Colormap
+        bind: graphics.root.children.domain.fe.view.colormap
+        options: [viridis, magma, plasma, inferno, turbo, jet, parula, gray]
+      - checkbox: Boundary surface
+        bind: graphics.root.children.domain.fe.view.show_surface
+      - checkbox: Slice
+        bind: graphics.root.children.domain.fe.view.show_slice
+      - slider_float: Surface opacity (with a slice)
+        bind: graphics.root.children.domain.fe.view.surface_opacity
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+      - combo: Slice axis
+        bind: graphics.root.children.domain.fe.view.slice_axis
+        options: [X, Y, Z]
+        values: [0, 1, 2]
+      - slider_float: Slice offset
+        bind: graphics.root.children.domain.fe.view.slice_offset # -1..1 across the mesh bounds
+        lo: -1.0
+        hi: 1.0
+        fmt: "%.2f"
+      - text: "field min"
+        bind: graphics.root.children.domain.fe.field.min
+      - text: "field max"
+        bind: graphics.root.children.domain.fe.field.max

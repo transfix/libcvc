@@ -175,6 +175,23 @@ TEST_F(AsyncEvaluatorTest, While) {
             10);
 }
 
+// A loop body of several forms runs them all, in order (they used to be dropped after the first).
+TEST_F(AsyncEvaluatorTest, LoopBodiesRunEveryForm) {
+  EXPECT_EQ(eval_int("(begin (set i 0) (set sum 0) "
+                     "  (while (< i 5) (set sum (+ sum i)) (set i (+ i 1))) "
+                     "  sum)"),
+            10);
+  EXPECT_EQ(eval_int("(begin (set sum 0) (set n 0) "
+                     "  (for x (list 1 2 3 4) (set sum (+ sum x)) (set n (+ n 1))) "
+                     "  (+ (* 100 n) sum))"),
+            410);
+}
+
+TEST_F(AsyncEvaluatorTest, IfAndReturnRejectExtraArguments) {
+  EXPECT_THROW(eval("(if t 1 2 3)"), std::runtime_error);
+  EXPECT_THROW(eval("(begin (defun f () (return 1 2)) (f))"), std::runtime_error);
+}
+
 TEST_F(AsyncEvaluatorTest, For) {
   EXPECT_EQ(eval_int("(begin (set sum 0) "
                      "  (for x (list 1 2 3 4 5) (set sum (+ sum x))) "
@@ -332,6 +349,23 @@ TEST_F(AsyncStacklessTest, While) {
                      "  (while (< i 5) (begin (set sum (+ sum i)) (set i (+ i 1)))) "
                      "  sum)"),
             10);
+}
+
+// A loop body of several forms runs them all, in order (they used to be dropped after the first).
+TEST_F(AsyncStacklessTest, LoopBodiesRunEveryForm) {
+  EXPECT_EQ(eval_int("(begin (set i 0) (set sum 0) "
+                     "  (while (< i 5) (set sum (+ sum i)) (set i (+ i 1))) "
+                     "  sum)"),
+            10);
+  EXPECT_EQ(eval_int("(begin (set sum 0) (set n 0) "
+                     "  (for x (list 1 2 3 4) (set sum (+ sum x)) (set n (+ n 1))) "
+                     "  (+ (* 100 n) sum))"),
+            410);
+}
+
+TEST_F(AsyncStacklessTest, IfAndReturnRejectExtraArguments) {
+  EXPECT_THROW(eval("(if t 1 2 3)"), std::runtime_error);
+  EXPECT_THROW(eval("(begin (defun f () (return 1 2)) (f))"), std::runtime_error);
 }
 
 TEST_F(AsyncStacklessTest, For) {
@@ -548,6 +582,29 @@ TEST(AsyncSchedulerTest, SleepSetsWaitingThenWakesAfterDeadline) {
     sched.sync_step();
   ASSERT_TRUE(sched.get_process_info(pid).has_value());
   EXPECT_EQ(sched.get_process_info(pid)->status, process_status::terminated);
+}
+
+// A process's max_time and a run's max_time are time_budgets: time the thread does not run --
+// descheduled on a loaded machine, as a native step that sleeps stands in for here -- cannot
+// spend their second halves. The Ariadne action lane caps both at 0.1 s and relies on that to
+// finish a quick action within its drain: a process whose thread waited 150 ms is neither
+// killed nor left for a later run. ((nap) is called in the program's last step, so nothing
+// runs after the wait. A program that runs past its limit is still killed:
+// AsyncSchedGapsTest.TimeLimitKillsProcess.)
+TEST(AsyncSchedulerTest, TimeLimitsAreNotSpentWhileTheThreadDoesNotRun) {
+  async_scheduler sched;
+  auto env = builtins::make_default_environment();
+  builtins::register_fn(env, "nap", [](std::span<const value_t>) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    return value_t(int64_t{7});
+  });
+  execute_options opts;
+  opts.env = env;
+  opts.max_time = 0.1;
+  const int pid = sched.execute(std::string("(nap)"), opts);
+  auto results = sched.sync_run(200000, 0.1);
+  ASSERT_TRUE(results.count(pid)) << "killed: " << sched.get_exit_error(pid).value_or("no");
+  EXPECT_EQ(std::get<int64_t>(results[pid].v), 7);
 }
 
 class AsyncSchedulerIntrinsicsTest : public ::testing::Test {

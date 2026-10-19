@@ -12,7 +12,7 @@ endif()
 
 # First declare project with C and CXX to initialize CMake properly
 project(libcvc
-  VERSION 3.5.0
+  VERSION 3.6.0
   DESCRIPTION "Computational Visualization Center library from VolumeRover package"
   LANGUAGES C CXX
 )
@@ -207,6 +207,9 @@ option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
 # with the libcvc SDK bundle. The libcvc recipe builds with CVC_BUILD_CLI=OFF;
 # a plain in-tree build still builds it by default.
 option(CVC_BUILD_CLI "Build the cvc command-line executable" ON)
+# `ari` (src/ari) runs a .ari document in the terminal through the FTXUI backend. Like the CLI it
+# ships as its own cvcpkg package (cvcpkg/recipes/ari); the libcvc recipe builds with it OFF.
+option(CVC_BUILD_ARI "Build the ari terminal runner for Ariadne documents" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
 option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
 
@@ -225,11 +228,23 @@ endif()
 
 # Setup OpenMP if enabled
 if(CVC_ENABLE_OPENMP)
+  # AppleClang has no OpenMP runtime of its own. FindOpenMP then looks for a
+  # libomp and omp.h on CMAKE_PREFIX_PATH (or OpenMP_ROOT), which cvcpkg's
+  # `openmp` bundle provides; the libcvc recipe lists it for macOS.
   find_package(OpenMP)
   if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP support enabled")
     message(STATUS "OpenMP version: ${OpenMP_CXX_VERSION}")
     message(STATUS "OpenMP flags: ${OpenMP_CXX_FLAGS}")
+    if(OpenMP_CXX_LIBRARIES)
+      message(STATUS "OpenMP libraries: ${OpenMP_CXX_LIBRARIES}")
+    endif()
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    message(WARNING "OpenMP not found - disabling OpenMP support. AppleClang ships "
+                    "no OpenMP runtime: put cvcpkg's `openmp` bundle (lib/libomp.dylib, "
+                    "include/omp.h) on CMAKE_PREFIX_PATH, or set OpenMP_ROOT, to build "
+                    "libcvc's parallel loops.")
+    set(CVC_ENABLE_OPENMP OFF)
   else()
     message(STATUS "OpenMP not found - disabling OpenMP support")
     set(CVC_ENABLE_OPENMP OFF)
@@ -338,7 +353,9 @@ if(CVC_ENABLE_COVERAGE)
       )
       
     else()
-      message(WARNING "lcov or genhtml not found. Install with: sudo apt-get install lcov")
+      message(WARNING "lcov or genhtml not found. Install cvcpkg's lcov "
+                      "(cvcpkg install lcov --prefix <dir>) and put <dir>/bin on PATH, "
+                      "or pass -DLCOV_PATH=<dir>/bin/lcov -DGENHTML_PATH=<dir>/bin/genhtml")
       message(WARNING "Coverage target will not be available")
     endif()
   else()
@@ -349,21 +366,14 @@ endif()
 # Enable testing with Google Test
 if(CVC_BUILD_TESTS)
   enable_testing()
-  
-  # Fetch Google Test
-  include(FetchContent)
-  FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.14.0
-  )
-  
-  # For Windows: Prevent overriding the parent project's compiler/linker settings
-  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-  
-  # Make Google Test available
-  FetchContent_MakeAvailable(googletest)
-  
+
+  # GTest::gtest / GTest::gtest_main: an installed GoogleTest package when
+  # CMAKE_PREFIX_PATH has one (the cvcpkg catalog's googletest, which
+  # `cvcpkg install-deps cvcpkg/recipes/libcvc` installs), else the same release
+  # built from source via FetchContent. See CMake/SetupGTest.cmake.
+  include(SetupGTest)
+  cvc_setup_gtest()
+
   message(STATUS "Google Test enabled - tests will be built")
 endif()
 
@@ -397,11 +407,14 @@ install(FILES README.md USAGE.md LICENSE THIRD_PARTY_NOTICES.md
 # ************* CPack configuration *************
 include(GNUInstallDirs)
 
-# Ship Microsoft's MSVC CRT redist AND the LLVM OpenMP runtime
-# (libomp140.x86_64.dll) alongside our binaries. Without
-# CMAKE_INSTALL_OPENMP_LIBRARIES the OpenMP DLL is not bundled and
-# cvc.dll / cvc.exe fail to launch on a vanilla Windows machine
-# with "libomp140.x86_64.dll was not found".
+# Ship Microsoft's MSVC CRT redist alongside our binaries, plus the classic
+# OpenMP runtime (vcomp140.dll) via CMAKE_INSTALL_OPENMP_LIBRARIES; consumers
+# that compile their own code with MSVC's /openmp load vcomp140.
+#
+# cvc itself is compiled with -openmp:llvm and links LLVM's redistributable
+# libomp.dll from cvcpkg's `openmp` bundle (src/cvc/CMakeLists.txt), never MSVC's
+# libomp140.<arch>.dll, which Microsoft does not allow redistributing. The SDK
+# ships libomp.dll from that bundle, not from here.
 set(CMAKE_INSTALL_OPENMP_LIBRARIES TRUE)
 # InstallRequiredSystemLibraries installs into bin/ by default, which
 # is what we want next to cvc.exe / cvc.dll.

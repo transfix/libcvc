@@ -158,6 +158,74 @@ def test_alpha_is_a_presentation_fraction():
     print("  ok: alpha stays in [0,1) and tracks the fraction into the next quantum")
 
 
+def test_lockstep_batch_and_configure():
+    c = pycvc.world_clock(0.01, 1.0, 8, 3)
+    c.set_mode_name("lockstep")
+    assert c.mode_name() == "lockstep"
+    r = c.advance(10.0)
+    assert r.steps == 3 and r.first_tick == 0, (r.steps, r.first_tick)
+    r = c.advance_ticks(100)  # batch: no cap, any mode
+    assert r.steps == 100 and r.first_tick == 3
+    assert c.tick() == 103
+    c.set_config(0.015)  # a new quantum restarts time
+    assert c.tick() == 0 and abs(c.fixed_dt() - 0.015) < 1e-15
+    assert c.mode_name() == "lockstep", "set_config keeps the mode"
+    print("  ok: lockstep, advance_ticks and set_config")
+
+
+def test_realized_scale():
+    c = pycvc.world_clock(0.01, 2.0, 1000)
+    for _ in range(100):
+        c.advance(0.01)
+    assert abs(c.realized_scale() - 2.0) < 0.05, c.realized_scale()
+    print("  ok: realized_scale reports the speed achieved")
+
+
+def test_followers():
+    assert pycvc.ticks_per_step(0.06, 0.01) == 6
+    try:
+        pycvc.ticks_per_step(0.06, 1.0 / 120.0)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("7.2 quanta per step should raise")
+    c = pycvc.world_clock(0.01)
+    nav = pycvc.clock_follower.for_step(c, 0.06)
+    c.advance_ticks(25)
+    assert nav.take(c) == 4  # ticks 6, 12, 18, 24
+    assert nav.take(c) == 0
+    assert abs(nav.alpha(c.tick(), 0.0) - 1.0 / 6.0) < 1e-12
+    print("  ok: ticks_per_step / clock_follower")
+
+
+def test_binding():
+    app = pycvc.App()
+    clock = app.world_clock()
+    b = pycvc.world_clock_binding(app, clock, "simpy")
+    b.drive(0.0)
+    pycvc.state_set(app, "simpy.mode", "stepping")
+    pycvc.state_set(app, "simpy.step", "3")
+    r = b.drive(1.0)
+    assert r.steps == 3, r.steps
+    assert pycvc.state_get(app, "simpy.tick") == "3"
+    print("  ok: world_clock_binding drives the clock from sim.* keys")
+
+
+def test_binding_explicit_keys():
+    app = pycvc.App()
+    keys = pycvc.world_clock_keys()
+    keys.speed = "scn.rate"
+    keys.time = "scn.now"
+    b = pycvc.world_clock_binding(app, app.world_clock(), keys)
+    assert b.key("paused") == ""
+    pycvc.state_set(app, "scn.rate", "2")
+    r = b.drive(0.025)
+    assert r.steps == 6, r.steps
+    assert float(pycvc.state_get(app, "scn.now")) == app.world_clock().t()
+    assert pycvc.world_clock_keys.under("x").step == "x.step"
+    print("  ok: world_clock_binding takes explicit keys")
+
+
 if __name__ == "__main__":
     test_defaults()
     test_scalar_ctor_and_validation()
@@ -169,4 +237,9 @@ if __name__ == "__main__":
     test_modes()
     test_pending_and_reset()
     test_alpha_is_a_presentation_fraction()
+    test_lockstep_batch_and_configure()
+    test_realized_scale()
+    test_followers()
+    test_binding()
+    test_binding_explicit_keys()
     print("pycvc world_clock tests: OK")

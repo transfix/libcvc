@@ -37,6 +37,8 @@ std::string to_string(state_mutation_op op) {
     return "set_hidden";
   case state_mutation_op::set_read_only:
     return "set_read_only";
+  case state_mutation_op::set_property:
+    return "set_property";
   case state_mutation_op::touch:
     return "touch";
   case state_mutation_op::reset_node:

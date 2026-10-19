@@ -4,10 +4,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cvc/state/state_exec/async_evaluator.h>
 #include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/async_stackless_evaluator.h>
+#include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/stackless_evaluator.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
@@ -153,15 +158,18 @@ TEST_F(SchedulerTest, SingleProcessSimple) {
   EXPECT_EQ(std::get<int64_t>(val.v), 42);
 }
 
-TEST_F(SchedulerTest, DeadlineBoundsUncappedNestedMethodStep) {
-  // A defclass constructor runs its init method body on a FRESH nested evaluator; a looping
-  // body lives inside ONE scheduler step, which the between-steps max_time check cannot see.
-  // The scheduler arms the cooperative per-thread deadline for each step (from the process's
-  // remaining budget), so the nested loop aborts at the budget instead of hanging the run.
+TEST_F(SchedulerTest, TimeBudgetStopsALoopingInitMethod) {
+  // A defclass constructor's init is a closure run as frames of the calling process, so a
+  // looping body is the process's own steps: the scheduler's max_time check kills it, as any
+  // loop, instead of the body spinning inside one step on an evaluator of its own.
   execute_options opts;
   opts.max_time = 0.05; // 50 ms process budget
-  sched.execute(std::string("(begin (defclass B (init (self) (while 1 1))) (B))"), opts);
-  EXPECT_THROW(sched.run(), std::exception); // bounded abort (~50ms), not a hang
+  const int pid =
+      sched.execute(std::string("(begin (defclass B (init (self) (while 1 1))) (B))"), opts);
+  sched.run(); // bounded (~50 ms), not a hang
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info);
+  EXPECT_EQ(info->status, process_status::killed);
 }
 
 TEST_F(SchedulerTest, SingleProcessArithmetic) {
@@ -1129,4 +1137,87 @@ TEST_F(CrossSchedulerTest, MultipleProgramsSameResults) {
     auto &av = async_results[async_pids[i]];
     EXPECT_TRUE(values_equal(sv, av)) << "Mismatch on script: " << scripts[i];
   }
+}
+
+// ===========================================================================
+// A time budget cut inside one step: an unsliced job, a generator body or a stdlib call polls
+// the step's deadline and throws evaluation_timeout, reported as the process's time limit.
+// ===========================================================================
+
+// A generator whose body never yields: (next g) loops inside one step until a deadline cuts it.
+constexpr const char *kNeverYields = "(next (generator (lambda () (while t 1))))";
+
+TEST(StepDeadlineTest, ACheckThrowsEvaluationTimeoutNamingTheCall) {
+  EXPECT_NO_THROW(eval_deadline_check("collections.range")); // no deadline armed
+  eval_deadline_guard spent(0.0);
+  EXPECT_TRUE(spent.expired());
+  try {
+    eval_deadline_check("collections.range");
+    FAIL() << "no evaluation_timeout";
+  } catch (const evaluation_timeout &e) {
+    EXPECT_STREQ(e.what(), "collections.range: evaluation exceeded timeout");
+  }
+}
+
+TEST(StepDeadlineTest, EveryEvaluatorCutsALoopInsideAStepAsATimeout) {
+  // Each evaluator's timeout arms the thread's deadline, so the generator's own poll cuts the
+  // loop where the evaluator's between-steps check cannot.
+  const auto cut = [](auto &&evaluate) -> std::string {
+    try {
+      evaluate();
+    } catch (const evaluation_timeout &e) {
+      return e.what();
+    }
+    return "no evaluation_timeout";
+  };
+  auto env = builtins::make_default_environment();
+  stackless_evaluator stackless(env);
+  evaluator tree(env);
+  async_evaluator async_tree(env);
+  async_stackless_evaluator async_stackless(env);
+  for (const std::string &what :
+       {cut([&] { stackless.evaluate_script(kNeverYields, nullptr, 0.05); }),
+        cut([&] { tree.evaluate_script(kNeverYields, nullptr, 0.05); }),
+        cut([&] { async_tree.sync_evaluate_script(kNeverYields, nullptr, 0.05); }),
+        cut([&] { async_stackless.sync_evaluate_script(kNeverYields, nullptr, 0.05); })})
+    EXPECT_NE(what.find("evaluation exceeded timeout"), std::string::npos) << what;
+}
+
+TEST(StepDeadlineTest, TheSyncSchedulerKillsAProcessCutInsideAStep) {
+  scheduler sched;
+  execute_options opts;
+  opts.max_time = 0.05;
+  const int pid = sched.execute(std::string(kNeverYields), opts);
+  EXPECT_NO_THROW(sched.run()); // was a runtime_error out of run()
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+}
+
+TEST(StepDeadlineTest, TheSyncSchedulerLeavesADeadlineArmedOutsideItToItsCaller) {
+  scheduler sched;
+  const int pid = sched.execute(std::string(kNeverYields)); // no max_time of its own
+  eval_deadline_guard outer(0.05);
+  EXPECT_THROW(sched.run(), evaluation_timeout);
+  EXPECT_NE(sched.get_process_info(pid)->status, process_status::killed);
+}
+
+TEST(StepDeadlineTest, TheAsyncSchedulerReportsATimeLimitWhereverItRanOut) {
+  async_scheduler sched;
+  execute_options in_step;
+  in_step.max_time = 0.05;
+  const int cut = sched.execute(std::string(kNeverYields), in_step);
+  execute_options between_steps;
+  between_steps.max_time = 0.05;
+  const int looped = sched.execute(std::string("(while t 1)"), between_steps);
+  execute_options per_step; // a resident: no total budget, a per-step cap
+  per_step.max_step_time = 0.05;
+  const int resident = sched.execute(std::string(kNeverYields), per_step);
+  sched.sync_run();
+  for (const int pid : {cut, looped, resident}) {
+    EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed) << pid;
+    EXPECT_EQ(sched.get_exit_error(pid).value_or(""), "time_limit_exceeded") << pid;
+  }
+  // Any other error is still reported by its message.
+  const int failed = sched.execute(std::string("(/ 1 0)"));
+  sched.sync_run();
+  EXPECT_NE(sched.get_exit_error(failed).value_or(""), "time_limit_exceeded");
 }

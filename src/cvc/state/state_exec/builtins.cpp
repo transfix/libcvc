@@ -1,6 +1,11 @@
+#include <algorithm>
 #include <cmath>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/generator.h>
+#include <cvc/state/state_exec/heap.h>
+#include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: (length "...") counts codepoints for a string
 #include <iostream>
 #include <sstream>
@@ -20,11 +25,19 @@ double as_double(const value_t &v) {
     return static_cast<double>(*i);
   if (auto *d = std::get_if<double>(&v.v))
     return *d;
-  throw std::runtime_error("expected number, got " + v.type_name());
+  throw dsl_error("TypeError", "expected number, got " + v.type_name());
 }
 
 /// True when the value is an integer.
 bool is_int(const value_t &v) { return std::holds_alternative<int64_t>(v.v); }
+
+/// True when the value can hold other values, so storing it in a container in place may close a
+/// reference cycle (heap.h): the cycle collector then tracks that container.
+bool can_close_cycle(const value_t &v) {
+  return std::holds_alternative<list_ptr>(v.v) || std::holds_alternative<dict_ptr>(v.v) ||
+         std::holds_alternative<closure_ptr>(v.v) || std::holds_alternative<generator_ptr>(v.v) ||
+         std::holds_alternative<native_fn>(v.v);
+}
 
 /// True when every arg in [first, last) is integral (recurses into lists).
 bool all_int(std::span<const value_t> args) {
@@ -42,26 +55,26 @@ bool all_int(std::span<const value_t> args) {
 
 void expect_min(std::span<const value_t> args, size_t n, const char *name) {
   if (args.size() < n)
-    throw std::runtime_error(std::string(name) + ": expected at least " + std::to_string(n) +
-                             " argument(s), got " + std::to_string(args.size()));
+    throw dsl_error("TypeError", std::string(name) + ": expected at least " + std::to_string(n) +
+                                     " argument(s), got " + std::to_string(args.size()));
 }
 
 void expect_exact(std::span<const value_t> args, size_t n, const char *name) {
   if (args.size() != n)
-    throw std::runtime_error(std::string(name) + ": expected " + std::to_string(n) +
-                             " argument(s), got " + std::to_string(args.size()));
+    throw dsl_error("TypeError", std::string(name) + ": expected " + std::to_string(n) +
+                                     " argument(s), got " + std::to_string(args.size()));
 }
 
 const std::vector<value_t> &as_list(const value_t &v, const char *name) {
   if (auto *p = std::get_if<list_ptr>(&v.v))
     return **p;
-  throw std::runtime_error(std::string(name) + ": expected list, got " + v.type_name());
+  throw dsl_error("TypeError", std::string(name) + ": expected list, got " + v.type_name());
 }
 
 std::vector<value_t> &as_list_mut(const value_t &v, const char *name) {
   if (auto *p = std::get_if<list_ptr>(&v.v))
     return **p;
-  throw std::runtime_error(std::string(name) + ": expected list, got " + v.type_name());
+  throw dsl_error("TypeError", std::string(name) + ": expected list, got " + v.type_name());
 }
 
 using dict_type = std::vector<std::pair<std::string, value_t>>;
@@ -69,7 +82,7 @@ using dict_type = std::vector<std::pair<std::string, value_t>>;
 dict_type &as_dict_mut(const value_t &v, const char *name) {
   if (auto *p = std::get_if<dict_ptr>(&v.v))
     return **p;
-  throw std::runtime_error(std::string(name) + ": expected dict, got " + v.type_name());
+  throw dsl_error("TypeError", std::string(name) + ": expected dict, got " + v.type_name());
 }
 
 const dict_type &as_dict(const value_t &v, const char *name) { return as_dict_mut(v, name); }
@@ -77,13 +90,13 @@ const dict_type &as_dict(const value_t &v, const char *name) { return as_dict_mu
 const std::string &as_string(const value_t &v, const char *name) {
   if (auto *s = std::get_if<std::string>(&v.v))
     return *s;
-  throw std::runtime_error(std::string(name) + ": expected string, got " + v.type_name());
+  throw dsl_error("TypeError", std::string(name) + ": expected string, got " + v.type_name());
 }
 
 int64_t as_int(const value_t &v, const char *name) {
   if (auto *i = std::get_if<int64_t>(&v.v))
     return *i;
-  throw std::runtime_error(std::string(name) + ": expected integer, got " + v.type_name());
+  throw dsl_error("TypeError", std::string(name) + ": expected integer, got " + v.type_name());
 }
 
 /// Find an entry in a dict by key; returns nullptr if not found.
@@ -101,7 +114,7 @@ value_t dispatch_method(const value_t &obj, const std::string &method,
   // find __class__
   value_t *cls_val = dict_find(obj_dict, "__class__");
   if (!cls_val)
-    throw std::runtime_error("send: object has no __class__");
+    throw dsl_error("TypeError", "send: object has no __class__");
 
   auto *cls_dict = &as_dict_mut(*cls_val, "send");
 
@@ -109,24 +122,22 @@ value_t dispatch_method(const value_t &obj, const std::string &method,
     // skip to __super__
     value_t *sp = dict_find(*cls_dict, "__super__");
     if (!sp)
-      throw std::runtime_error("send: no super class");
+      throw dsl_error("TypeError", "send: no super class");
     cls_dict = &as_dict_mut(*sp, "send");
   }
 
   while (cls_dict) {
     if (value_t *m = dict_find(*cls_dict, method)) {
-      // Invoke: first arg is self
-      if (auto *fn = std::get_if<native_fn>(&m->v)) {
-        std::vector<value_t> call_args;
-        call_args.reserve(1 + args.size());
-        call_args.push_back(obj);
-        call_args.insert(call_args.end(), args.begin(), args.end());
-        return (*fn)(call_args);
-      }
-      if (auto *c = std::get_if<closure_ptr>(&m->v))
-        throw std::runtime_error("send: closure method dispatch requires evaluator "
-                                 "(use evaluator-level send)");
-      throw std::runtime_error("send: method is not callable");
+      if (!std::holds_alternative<native_fn>(m->v) && !std::holds_alternative<closure_ptr>(m->v))
+        throw dsl_error("TypeError", "send: method is not callable");
+      // Invoke: first arg is self. A closure runs as the program's own frames, and a native
+      // method nests no deeper than one level (call_function).
+      std::vector<value_t> call_args;
+      call_args.reserve(1 + args.size());
+      call_args.push_back(obj);
+      call_args.insert(call_args.end(), args.begin(), args.end());
+      const value_t fn = *m; // the dict may change while a closure runs
+      return call_function(fn, call_args, "send");
     }
     // walk __super__
     value_t *sp = dict_find(*cls_dict, "__super__");
@@ -134,7 +145,7 @@ value_t dispatch_method(const value_t &obj, const std::string &method,
       break;
     cls_dict = &as_dict_mut(*sp, "send");
   }
-  throw std::runtime_error("send: method '" + method + "' not found");
+  throw dsl_error("KeyError", "send: method '" + method + "' not found");
 }
 
 } // anonymous namespace
@@ -228,7 +239,7 @@ value_t builtin_div(std::span<const value_t> args) {
   for (size_t i = 1; i < args.size(); ++i) {
     double d = as_double(args[i]);
     if (d == 0.0)
-      throw std::runtime_error("/: division by zero");
+      throw dsl_error("ArithmeticError", "/: division by zero");
     r /= d;
   }
   return value_t{r};
@@ -239,12 +250,12 @@ value_t builtin_mod(std::span<const value_t> args) {
   if (all_int(args)) {
     int64_t b = std::get<int64_t>(args[1].v);
     if (b == 0)
-      throw std::runtime_error("%: division by zero");
+      throw dsl_error("ArithmeticError", "%: division by zero");
     return value_t{std::get<int64_t>(args[0].v) % b};
   }
   double b = as_double(args[1]);
   if (b == 0.0)
-    throw std::runtime_error("%: division by zero");
+    throw dsl_error("ArithmeticError", "%: division by zero");
   return value_t{std::fmod(as_double(args[0]), b)};
 }
 
@@ -274,12 +285,17 @@ value_t builtin_ge(std::span<const value_t> args) {
 
 value_t builtin_eq(std::span<const value_t> args) {
   expect_exact(args, 2, "=");
-  return value_t{values_equal(args[0], args[1])};
+  if (!is_compound(args[0]) || !is_compound(args[1]))
+    return value_t{values_equal(args[0], args[1])};
+  return run_data_job(make_equal_job(args[0], args[1]));
 }
 
 value_t builtin_ne(std::span<const value_t> args) {
   expect_exact(args, 2, "!=");
-  return value_t{!values_equal(args[0], args[1])};
+  if (!is_compound(args[0]) || !is_compound(args[1]))
+    return value_t{!values_equal(args[0], args[1])};
+  return run_data_job(make_equal_job(args[0], args[1]),
+                      [](value_t equal) { return value_t{!std::get<bool>(equal.v)}; });
 }
 
 // ---------------------------------------------------------------------------
@@ -287,18 +303,30 @@ value_t builtin_ne(std::span<const value_t> args) {
 // ---------------------------------------------------------------------------
 
 value_t builtin_str_concat(std::span<const value_t> args) {
+  if (std::any_of(args.begin(), args.end(), is_compound))
+    return run_data_job(make_concat_job({args.begin(), args.end()}, "", "str-concat"));
+  // The same string may be passed many times, so the result can outgrow every argument: check
+  // each part against the allocation limit before appending it.
   std::string result;
+  const auto add = [&result](const std::string &part) {
+    eval_alloc_check(result.size() > SIZE_MAX - part.size() ? SIZE_MAX
+                                                            : result.size() + part.size(),
+                     "str-concat");
+    result += part;
+  };
   for (auto &a : args) {
     if (auto *s = std::get_if<std::string>(&a.v))
-      result += *s; // raw string, no quoting
+      add(*s); // raw string, no quoting
     else
-      result += to_string(a);
+      add(to_string(a));
   }
   return value_t{std::move(result)};
 }
 
 value_t builtin_str(std::span<const value_t> args) {
   expect_exact(args, 1, "str");
+  if (is_compound(args[0]))
+    return run_data_job(make_print_job(args[0]));
   return value_t{to_string(args[0])};
 }
 
@@ -372,10 +400,10 @@ value_t builtin_int(std::span<const value_t> args) {
     try {
       return value_t{static_cast<int64_t>(std::stoll(*s))};
     } catch (...) {
-      throw std::runtime_error("int: cannot convert string \"" + *s + "\" to integer");
+      throw dsl_error("ValueError", "int: cannot convert string \"" + *s + "\" to integer");
     }
   }
-  throw std::runtime_error("int: cannot convert " + a.type_name() + " to integer");
+  throw dsl_error("TypeError", "int: cannot convert " + a.type_name() + " to integer");
 }
 
 value_t builtin_float(std::span<const value_t> args) {
@@ -391,10 +419,10 @@ value_t builtin_float(std::span<const value_t> args) {
     try {
       return value_t{std::stod(*s)};
     } catch (...) {
-      throw std::runtime_error("float: cannot convert string \"" + *s + "\" to float");
+      throw dsl_error("ValueError", "float: cannot convert string \"" + *s + "\" to float");
     }
   }
-  throw std::runtime_error("float: cannot convert " + a.type_name() + " to float");
+  throw dsl_error("TypeError", "float: cannot convert " + a.type_name() + " to float");
 }
 
 value_t builtin_is_int(std::span<const value_t> args) {
@@ -429,7 +457,7 @@ value_t builtin_car(std::span<const value_t> args) {
   expect_exact(args, 1, "car");
   auto &lst = as_list(args[0], "car");
   if (lst.empty())
-    throw std::runtime_error("car: empty list");
+    throw dsl_error("IndexError", "car: empty list");
   return lst.front();
 }
 
@@ -444,6 +472,7 @@ value_t builtin_cdr(std::span<const value_t> args) {
 value_t builtin_cons(std::span<const value_t> args) {
   expect_exact(args, 2, "cons");
   auto &lst = as_list(args[1], "cons");
+  eval_alloc_note(alloc_bytes(lst.size() + 1, sizeof(value_t))); // a copy: heap accounting
   std::vector<value_t> result;
   result.reserve(1 + lst.size());
   result.push_back(args[0]);
@@ -456,7 +485,7 @@ value_t builtin_nth(std::span<const value_t> args) {
   auto &lst = as_list(args[0], "nth");
   int64_t idx = as_int(args[1], "nth");
   if (idx < 0 || static_cast<size_t>(idx) >= lst.size())
-    throw std::runtime_error("nth: index out of range");
+    throw dsl_error("IndexError", "nth: index out of range");
   return lst[static_cast<size_t>(idx)];
 }
 
@@ -465,8 +494,10 @@ value_t builtin_set_nth(std::span<const value_t> args) {
   auto &lst = as_list_mut(args[0], "set-nth");
   int64_t idx = as_int(args[1], "set-nth");
   if (idx < 0 || static_cast<size_t>(idx) >= lst.size())
-    throw std::runtime_error("set-nth: index out of range");
+    throw dsl_error("IndexError", "set-nth: index out of range");
   lst[static_cast<size_t>(idx)] = args[2];
+  if (can_close_cycle(args[2]))
+    track_mutated(std::get<list_ptr>(args[0].v));
   return args[2];
 }
 
@@ -478,19 +509,21 @@ value_t builtin_length(std::span<const value_t> args) {
     return value_t{static_cast<int64_t>(utf8::count(*s))}; // SE-1 (A6): codepoints, not bytes
   if (auto *dp = std::get_if<dict_ptr>(&args[0].v))
     return value_t{static_cast<int64_t>((*dp)->size())};
-  throw std::runtime_error("length: expected list, string, or dict");
+  throw dsl_error("TypeError", "length: expected list, string, or dict");
 }
 
 value_t builtin_append(std::span<const value_t> args) {
   expect_exact(args, 2, "append");
   auto &lst = as_list_mut(args[0], "append");
   lst.push_back(args[1]);
+  if (can_close_cycle(args[1]))
+    track_mutated(std::get<list_ptr>(args[0].v));
   return args[0];
 }
 
 value_t builtin_slice(std::span<const value_t> args) {
   if (args.size() < 2 || args.size() > 3)
-    throw std::runtime_error("slice: expected 2 or 3 arguments");
+    throw dsl_error("TypeError", "slice: expected 2 or 3 arguments");
   auto &lst = as_list(args[0], "slice");
   int64_t start = as_int(args[1], "slice");
   int64_t end = (args.size() == 3) ? as_int(args[2], "slice") : static_cast<int64_t>(lst.size());
@@ -504,6 +537,7 @@ value_t builtin_slice(std::span<const value_t> args) {
     end = static_cast<int64_t>(lst.size());
   if (start >= end)
     return make_list();
+  eval_alloc_note(alloc_bytes(static_cast<size_t>(end - start), sizeof(value_t))); // a copy
   return make_list(std::vector<value_t>(lst.begin() + start, lst.begin() + end));
 }
 
@@ -512,7 +546,7 @@ value_t builtin_del_nth(std::span<const value_t> args) {
   auto &lst = as_list_mut(args[0], "del-nth");
   int64_t idx = as_int(args[1], "del-nth");
   if (idx < 0 || static_cast<size_t>(idx) >= lst.size())
-    throw std::runtime_error("del-nth: index out of range");
+    throw dsl_error("IndexError", "del-nth: index out of range");
   value_t removed = lst[static_cast<size_t>(idx)];
   lst.erase(lst.begin() + idx);
   return removed;
@@ -524,7 +558,7 @@ value_t builtin_del_nth(std::span<const value_t> args) {
 
 value_t builtin_dict(std::span<const value_t> args) {
   if (args.size() % 2 != 0)
-    throw std::runtime_error("dict: expected even number of arguments");
+    throw dsl_error("TypeError", "dict: expected even number of arguments");
   std::vector<std::pair<std::string, value_t>> entries;
   entries.reserve(args.size() / 2);
   for (size_t i = 0; i < args.size(); i += 2) {
@@ -545,13 +579,15 @@ value_t builtin_get_attr(std::span<const value_t> args) {
   for (auto &[k, v] : d)
     if (k == key)
       return v;
-  throw std::runtime_error("get-attr: key '" + key + "' not found");
+  throw dsl_error("KeyError", "get-attr: key '" + key + "' not found");
 }
 
 value_t builtin_set_attr(std::span<const value_t> args) {
   expect_exact(args, 3, "set-attr");
   auto &d = as_dict_mut(args[0], "set-attr");
   const std::string &key = as_string(args[1], "set-attr");
+  if (can_close_cycle(args[2]))
+    track_mutated(std::get<dict_ptr>(args[0].v));
   for (auto &[k, v] : d) {
     if (k == key) {
       v = args[2];
@@ -573,7 +609,7 @@ value_t builtin_del_attr(std::span<const value_t> args) {
       return removed;
     }
   }
-  throw std::runtime_error("del-attr: key '" + key + "' not found");
+  throw dsl_error("KeyError", "del-attr: key '" + key + "' not found");
 }
 
 // ---------------------------------------------------------------------------
@@ -593,12 +629,10 @@ value_t builtin_send(std::span<const value_t> args) {
 
 value_t builtin_apply(std::span<const value_t> args) {
   expect_exact(args, 2, "apply");
-  auto *fn = std::get_if<native_fn>(&args[0].v);
-  if (!fn)
-    throw std::runtime_error("apply: first argument must be callable (native_fn); "
-                             "closure dispatch requires evaluator");
   auto &arg_list = as_list(args[1], "apply");
-  return (*fn)(arg_list);
+  // A closure runs as the program's own frames; a native function is called here, unless this
+  // apply was itself called by a native function, when the evaluator calls it (call_function).
+  return call_function(args[0], arg_list, "apply");
 }
 
 // ---------------------------------------------------------------------------
@@ -620,11 +654,50 @@ value_t builtin_type_of(std::span<const value_t> args) {
   return value_t{args[0].type_name()};
 }
 
+value_t builtin_isinstance(std::span<const value_t> args) {
+  expect_exact(args, 2, "isinstance");
+  // The class is its constructor (what `Name` is bound to), or its class dict.
+  dict_ptr cls = class_of_constructor(args[1]);
+  if (!cls)
+    if (const auto *d = std::get_if<dict_ptr>(&args[1].v); d && field(args[1], "__name__"))
+      cls = *d;
+  if (!cls)
+    throw dsl_error("TypeError", "isinstance: not a class: " + args[1].type_name());
+  return value_t{is_instance(args[0], cls)};
+}
+
+// ---------------------------------------------------------------------------
+// Exceptions
+// ---------------------------------------------------------------------------
+
+value_t builtin_error(std::span<const value_t> args) {
+  if (args.empty() || args.size() > 2)
+    throw dsl_error("TypeError", "error: expected a message and optional data, got " +
+                                     std::to_string(args.size()) + " args");
+  const std::string message = std::holds_alternative<std::string>(args[0].v)
+                                  ? std::get<std::string>(args[0].v)
+                                  : to_string(args[0]);
+  throw dsl_exception(make_exception(exception_class("RuntimeError"), message,
+                                     args.size() > 1 ? args[1] : nil_value, "dsl"));
+}
+
 // ---------------------------------------------------------------------------
 // I/O
 // ---------------------------------------------------------------------------
 
 value_t builtin_print(std::span<const value_t> args) {
+  if (std::any_of(args.begin(), args.end(), is_compound)) {
+    // The line goes out once all of it is printed. A string prints quoted here, as to_string
+    // prints it, so it goes in already printed.
+    std::vector<value_t> parts;
+    parts.reserve(args.size());
+    for (auto &a : args)
+      parts.push_back(std::holds_alternative<std::string>(a.v) ? value_t{to_string(a)} : a);
+    return run_data_job(make_concat_job(std::move(parts), " ", "print"), [](value_t line) {
+      std::cout << std::get<std::string>(line.v) << '\n';
+      return nil_value;
+    });
+  }
   for (size_t i = 0; i < args.size(); ++i) {
     if (i > 0)
       std::cout << ' ';
@@ -642,7 +715,7 @@ value_t builtin_generator(std::span<const value_t> args) {
   expect_exact(args, 1, "generator");
   auto *cp = std::get_if<closure_ptr>(&args[0].v);
   if (!cp || !*cp)
-    throw std::runtime_error("generator: expected closure");
+    throw dsl_error("TypeError", "generator: expected closure");
   auto &cls = **cp;
 
   auto gen = std::make_shared<generator>(cls.env_snapshot ? cls.env_snapshot
@@ -662,6 +735,7 @@ value_t builtin_generator(std::span<const value_t> args) {
   }
   gen->state = gen->evaluator.create_state(body_expr, env);
   gen->state.stats.start();
+  track_captured_env(env); // bound back where the closure can reach, it is a cycle
 
   return value_t{std::move(gen)};
 }
@@ -670,9 +744,16 @@ value_t builtin_next(std::span<const value_t> args) {
   expect_exact(args, 1, "next");
   auto *gp = std::get_if<generator_ptr>(&args[0].v);
   if (!gp || !*gp)
-    throw std::runtime_error("next: expected generator");
-  auto result = generator_next(**gp);
-  return result ? *result : nil_value;
+    throw dsl_error("TypeError", "next: expected generator");
+  if ((*gp)->native_step) { // range and friends: one cheap value
+    auto result = generator_next(**gp);
+    return result ? *result : nil_value;
+  }
+  // A DSL generator's body runs as a job, a slice per step when the process slices.
+  return run_data_job(make_generator_job(*gp), [](value_t got) {
+    const auto &l = *std::get<list_ptr>(got.v);
+    return l.empty() ? nil_value : l.front();
+  });
 }
 
 value_t builtin_is_generator(std::span<const value_t> args) {
@@ -684,36 +765,36 @@ value_t builtin_gen_done(std::span<const value_t> args) {
   expect_exact(args, 1, "gen-done?");
   auto *gp = std::get_if<generator_ptr>(&args[0].v);
   if (!gp || !*gp)
-    throw std::runtime_error("gen-done?: expected generator");
+    throw dsl_error("TypeError", "gen-done?: expected generator");
   return value_t{(*gp)->exhausted};
 }
 
 value_t builtin_range(std::span<const value_t> args) {
   if (args.size() < 1 || args.size() > 3)
-    throw std::runtime_error("range: expected 1-3 arguments (end) or (start end [step])");
+    throw dsl_error("TypeError", "range: expected 1-3 arguments (end) or (start end [step])");
 
   int64_t start = 0, end = 0, step = 1;
   if (args.size() == 1) {
     if (auto *i = std::get_if<int64_t>(&args[0].v))
       end = *i;
     else
-      throw std::runtime_error("range: expected integer argument");
+      throw dsl_error("TypeError", "range: expected integer argument");
   } else {
     if (auto *i = std::get_if<int64_t>(&args[0].v))
       start = *i;
     else
-      throw std::runtime_error("range: expected integer start");
+      throw dsl_error("TypeError", "range: expected integer start");
     if (auto *i = std::get_if<int64_t>(&args[1].v))
       end = *i;
     else
-      throw std::runtime_error("range: expected integer end");
+      throw dsl_error("TypeError", "range: expected integer end");
     if (args.size() == 3) {
       if (auto *i = std::get_if<int64_t>(&args[2].v))
         step = *i;
       else
-        throw std::runtime_error("range: expected integer step");
+        throw dsl_error("TypeError", "range: expected integer step");
       if (step == 0)
-        throw std::runtime_error("range: step must be non-zero");
+        throw dsl_error("ValueError", "range: step must be non-zero");
     }
   }
 
@@ -733,17 +814,11 @@ value_t builtin_collect(std::span<const value_t> args) {
   expect_exact(args, 1, "collect");
   auto *gp = std::get_if<generator_ptr>(&args[0].v);
   if (!gp || !*gp)
-    throw std::runtime_error("collect: expected generator");
-  std::vector<value_t> result;
-  while (auto next = generator_next(**gp)) {
-    // Draining an unbounded/huge generator (e.g. (collect (range 0 1e11))) runs entirely
-    // inside this one native step; honour the evaluation deadline so it aborts at the time
-    // budget instead of hanging/OOMing (a no-op when no deadline is armed).
-    if (eval_deadline_expired())
-      throw std::runtime_error("collect: evaluation exceeded time budget");
-    result.push_back(std::move(*next));
-  }
-  return make_list(std::move(result));
+    throw dsl_error("TypeError", "collect: expected generator");
+  // Draining a generator is a job: a value (or a step of a DSL generator's body) is a node, so
+  // a huge or unbounded one (e.g. (collect (range 0 1e11))) spreads over the process's steps,
+  // within its budget, and the allocation limit checks every value kept.
+  return run_data_job(make_generator_job(*gp, true));
 }
 
 // ---------------------------------------------------------------------------
@@ -779,6 +854,9 @@ void builtins::register_fn(environment_ptr env, const std::string &name, native_
 
 environment_ptr builtins::make_default_environment() {
   auto env = std::make_shared<environment>();
+  // The stdlib modules (string.*, bytes.*, math.*, collections.*) are reached through the
+  // shared, frozen stdlib scope rather than copied into every environment.
+  env->outer = stdlib_registry::shared_scope();
 
   // Arithmetic
   register_fn(env, "+", builtin_add);
@@ -835,6 +913,11 @@ environment_ptr builtins::make_default_environment() {
   register_fn(env, "is-null", builtin_is_null);
   register_fn(env, "is-list", builtin_is_list);
   register_fn(env, "type-of", builtin_type_of);
+  register_fn(env, "isinstance", builtin_isinstance);
+
+  // Exceptions: the built-in classes, and (error message [data])
+  register_exception_classes(env);
+  register_fn(env, "error", builtin_error);
 
   // Generators
   register_fn(env, "generator", builtin_generator);

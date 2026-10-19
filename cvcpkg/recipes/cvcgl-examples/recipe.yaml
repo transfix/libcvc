@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl-examples
-  upstream_version: "3.5.0"
+  upstream_version: "3.6.0"
   # Bumped 1 -> 2: the GRL-SNAM nav demos (nav_city_swarm / nav_fog_ghost /
   # nav_finale) are now built and packaged alongside lsystem_forest (libcvc #203).
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
@@ -93,6 +93,10 @@ depends:
       platforms: [wasm-mt]
     - name: zlib
       platforms: [wasm-mt]
+    # The wasm build compiles cvc from this tree, so it needs cvc's build-only
+    # PEGTL (the state_exec grammar engine) too.
+    - name: pegtl
+      platforms: [wasm-mt]
     # cgal is intentionally NOT a dependency: build-wasm.sh passes
     # -DDISABLE_CGAL=ON so it is never linked, and there is no wasm-mt cgal
     # bundle on the catalog anyway.
@@ -144,11 +148,20 @@ build:
 
 package:
   files:
-    - bin/lsystem_forest
-    - bin/nav_city_swarm
-    - bin/nav_city_drive
-    - bin/nav_fog_ghost
-    - bin/nav_finale
+    # The native demo programs. The wasm-mt column ships the gallery under
+    # share/cvcgl-examples/web/ and no bin/ at all, so these are platforms-scoped
+    # like the CLIs below. As bare strings, the strict-glob check refused the
+    # wasm-mt pack ("declares 6 entries that match nothing"; dry run 39217076353).
+    - glob: bin/lsystem_forest
+      platforms: [linux, windows]
+    - glob: bin/nav_city_swarm
+      platforms: [linux, windows]
+    - glob: bin/nav_city_drive
+      platforms: [linux, windows]
+    - glob: bin/nav_fog_ghost
+      platforms: [linux, windows]
+    - glob: bin/nav_finale
+      platforms: [linux, windows]
     # Headless pure-C++ nav CLIs: native-only targets (if(NOT EMSCRIPTEN) in
     # src/cvcGL/examples/CMakeLists.txt) — the wasm column never builds them,
     # so the entries are platforms-scoped; bare strings would fail the
@@ -159,7 +172,9 @@ package:
       platforms: [linux, windows]
     - glob: bin/nav_material_demo
       platforms: [linux, windows]
-    - bin/cvcgl-examples-web
+    # The native launcher for the web gallery; the wasm-mt bundle is the gallery itself.
+    - glob: bin/cvcgl-examples-web
+      platforms: [linux, windows]
     - share/cvcgl-examples/
 
 abi:

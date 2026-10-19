@@ -35,7 +35,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -760,6 +759,8 @@ TEST(GeometrySimplify, ProgressiveMatchesIndependentRuns) {
       EXPECT_EQ(0, std::memcmp(&res[k].world_error, &rk.world_error, sizeof(double)));
       EXPECT_EQ(res[k].hit_error_limit, rk.hit_error_limit);
       EXPECT_EQ(res[k].seam_vertices, rk.seam_vertices);
+      EXPECT_EQ(res[k].weld_steps, rk.weld_steps);
+      EXPECT_EQ(res[k].measure_steps, rk.measure_steps);
       any_limited = any_limited || rk.hit_error_limit;
     }
     EXPECT_EQ(any_limited, budget >= 0.0) << "the budget must actually bind part-way";
@@ -789,6 +790,8 @@ TEST(GeometrySimplify, ProgressivePoolMatchesSerial) {
       EXPECT_TRUE(bitwise_equal(serial[k].const_normals(), pooled[k].const_normals()));
       EXPECT_EQ(0, std::memcmp(&rs[k].world_error, &rp[k].world_error, sizeof(double)));
       EXPECT_EQ(rs[k].seam_vertices, rp[k].seam_vertices);
+      EXPECT_EQ(rs[k].weld_steps, rp[k].weld_steps);
+      EXPECT_EQ(rs[k].measure_steps, rp[k].measure_steps);
     }
     EXPECT_GT(rs.back().world_error, 0.0);
   }
@@ -1068,6 +1071,7 @@ TEST(GeometrySimplify, NearCoincidentPileOfMixedScalesWelds) {
   EXPECT_GT(rs.weld_pairs_held, 4u * 1024u);
   EXPECT_LE(rs.weld_pairs_held, 4u * 1024u + 2200u);
   EXPECT_EQ(rp.weld_pairs_held, rs.weld_pairs_held);
+  EXPECT_EQ(rp.weld_steps, rs.weld_steps);
   EXPECT_TRUE(bitwise_equal(serial.const_points(), pooled.const_points()));
   EXPECT_TRUE(bitwise_equal(serial.const_tris(), pooled.const_tris()));
   EXPECT_EQ(0, std::memcmp(&rs.world_error, &rp.world_error, sizeof(double)));
@@ -2131,9 +2135,11 @@ TEST(GeometrySimplify, NeverRemovesTheLastTriangle) {
 }
 
 // The Hausdorff queries run over a bounding-volume hierarchy, so a ground quad
-// 10 km wide under 5 cm detail (triangle areas ~10^11 apart) costs about what
-// the detail alone does. (A uniform grid sized from the mean triangle area piles
-// the detail into a few cells and goes quadratic: ~100x slower here.)
+// 10 km wide under 5 cm detail (triangle areas ~10^11 apart) costs the
+// measurement a small multiple of what the detail alone does: ~2x its steps.
+// (A uniform grid sized from the mean triangle area piles the detail into a few
+// cells and goes quadratic: ~100x slower here.) Work, not time, so that machine
+// load cannot fail it.
 TEST(GeometrySimplify, MeasureCostIgnoresTriangleSizeSpread) {
   cvc::app ctx;
   geometry detail = make_grid(ctx, 80, 6.0);
@@ -2153,70 +2159,65 @@ TEST(GeometrySimplify, MeasureCostIgnoresTriangleSizeSpread) {
   scene.tris().push_back({o, o + 2, o + 3});
   cvc::simplify_params p;
   p.target_ratio = 0.3;
-  auto timed = [&](const geometry &g, cvc::simplify_result &r) {
-    const auto t0 = std::chrono::steady_clock::now();
-    cvc::simplify(g, p, &r);
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  };
   cvc::simplify_result ra, rb;
-  const double ta = timed(detail, ra), tb = timed(scene, rb);
+  cvc::simplify(detail, p, &ra);
+  cvc::simplify(scene, p, &rb);
   EXPECT_GT(ra.world_error, 0.0);
   EXPECT_GT(rb.world_error, 0.0);
-  EXPECT_LT(tb, 10.0 * ta + 0.5) << "detail alone " << ta << " s, under the ground quad " << tb
-                                 << " s";
+  EXPECT_LT(rb.measure_steps, 4 * ra.measure_steps)
+      << "detail alone " << ra.measure_steps << " steps, under the ground quad "
+      << rb.measure_steps;
 }
 
 namespace {
 
-// Best of three simplify() runs with seam welding on, and with it off,
-// interleaved so a change in machine load hits both alike.
-std::pair<double, double> weld_on_off_seconds(const geometry &g, cvc::simplify_result &on,
-                                              double seam_epsilon = -1.0) {
-  double t[2] = {1e9, 1e9};
-  for (int rep = 0; rep < 3; ++rep)
-    for (int weld = 1; weld >= 0; --weld) {
-      cvc::simplify_params p;
-      p.target_ratio = 0.5;
-      p.weld_seams = weld != 0;
-      p.seam_epsilon = seam_epsilon;
-      cvc::simplify_result r;
-      const auto t0 = std::chrono::steady_clock::now();
-      cvc::simplify(g, p, &r);
-      t[weld] = std::min(
-          t[weld], std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-      if (weld)
-        on = r;
-    }
-  return std::make_pair(t[1], t[0]);
+// simplify() with seam welding on, at `seam_epsilon`: its result.
+cvc::simplify_result welded(const geometry &g, double seam_epsilon = -1.0) {
+  cvc::simplify_params p;
+  p.target_ratio = 0.5;
+  p.seam_epsilon = seam_epsilon;
+  cvc::simplify_result r;
+  cvc::simplify(g, p, &r);
+  return r;
+}
+
+// One tree depth of seam-search work for every position of `g`: n log2 n. The
+// weld tests below bound the search's work (simplify_result::weld_steps), not
+// its time, so that machine load cannot fail them.
+double one_depth_per_position(const geometry &g) {
+  const double n = double(g.num_points());
+  return n * std::log2(n);
 }
 
 } // namespace
 
 // The weld finds bit-identical positions by sorting, so a pile of 21000 triangle
-// corners on one point costs what the same mesh costs unwelded. (Testing every
-// pair in a shared hash cell made it ~25x slower.) The pile's triangles weld
-// into points and leave the result.
+// corners on one point is one position, which the near-coincidence search
+// passes over (its edges have no length to give it a tolerance): the search
+// does exactly the work it does for the same mesh without the pile. (Testing
+// every pair in a shared hash cell made it ~25x slower.) The pile's triangles
+// weld into points and leave the result.
 TEST(GeometrySimplify, WeldCostIgnoresAPileOfCoincidentCorners) {
   cvc::app ctx;
   geometry g = make_grid(ctx, 100, 0.5);
+  const cvc::simplify_result without = welded(g);
   for (int i = 0; i < 7000; ++i) {
     const std::uint64_t o = g.points().size();
     for (int c = 0; c < 3; ++c)
       g.points().push_back({50.0, 50.0, 3.0});
     g.tris().push_back({o, o + 1, o + 2});
   }
-  cvc::simplify_result on;
-  const std::pair<double, double> t = weld_on_off_seconds(g, on);
+  const cvc::simplify_result on = welded(g);
   EXPECT_EQ(on.seam_vertices, 21000u);
-  EXPECT_LT(t.first, 3.0 * t.second + 0.1)
-      << "welded " << t.first << " s, unwelded " << t.second << " s";
+  EXPECT_EQ(on.weld_steps, without.weld_steps);
 }
 
 // A 1 mm-tessellated part inside a 3 km scene, whose scene-wide tolerance
-// (1e-6 of the extent, ~4.5 mm) spans many of the part's vertices, costs what
-// the scene costs unwelded: the part's vertices search only within 1e-3 of
-// their own edges, and the search skips subtrees of a vertex's own component.
-// (A cell scan compared every pair of the part: ~4x.)
+// (1e-6 of the extent, ~4.5 mm) spans many of the part's vertices, costs the
+// seam search under one tree depth of work per position (~0.5): the part's
+// vertices search only within 1e-3 of their own edges, and the search skips
+// subtrees of a vertex's own component. (A cell scan compared every pair of the
+// part: ~4x the time of the scene unwelded.)
 TEST(GeometrySimplify, WeldCostIgnoresFineDetailInALargeScene) {
   cvc::app ctx;
   geometry g = make_grid(ctx, 160, 5.0);
@@ -2230,27 +2231,26 @@ TEST(GeometrySimplify, WeldCostIgnoresFineDetailInALargeScene) {
     g.points().push_back({1000.0 + 1e-3 * q[0], 1000.0 + 1e-3 * q[1], 50.0 + 1e-3 * q[2]});
   for (const auto &t : part.const_tris())
     g.tris().push_back({t[0] + o, t[1] + o, t[2] + o});
-  cvc::simplify_result on;
-  const std::pair<double, double> t = weld_on_off_seconds(g, on);
+  const cvc::simplify_result on = welded(g);
   EXPECT_EQ(on.seam_vertices, 0u);
-  EXPECT_LT(t.first, 2.5 * t.second + 0.1)
-      << "welded " << t.first << " s, unwelded " << t.second << " s";
+  EXPECT_LT(double(on.weld_steps), one_depth_per_position(g)) << on.weld_steps << " steps";
   // An explicit 5 cm tolerance, for every vertex, reaches thousands of the
   // part's vertices from each of them, but the search skips subtrees of a
-  // vertex's own component: it still finds nothing to weld, at no extra cost.
-  const std::pair<double, double> te = weld_on_off_seconds(g, on, 0.05);
-  EXPECT_EQ(on.seam_vertices, 0u);
-  EXPECT_LT(te.first, 2.5 * te.second + 0.1)
-      << "welded " << te.first << " s, unwelded " << te.second << " s";
+  // vertex's own component: it still finds nothing to weld, in about one tree
+  // depth of work per position (~0.9). (Without the skip: ~100x the steps.)
+  const cvc::simplify_result te = welded(g, 0.05);
+  EXPECT_EQ(te.seam_vertices, 0u);
+  EXPECT_LT(double(te.weld_steps), 2.0 * one_depth_per_position(g)) << te.weld_steps << " steps";
 }
 
 // Near-coincident parts: 7000 copies of a unit triangle, each corner jittered
 // by up to 1e-5 -- distinct positions, every copy its own part -- weld into
 // one triangle, and so do 7000 tiny triangles jittered about one point under
-// an explicit tolerance. Neither costs much more than the mesh unwelded: the
-// search joins each cluster of mutually close positions once instead of
-// pairing them all, and keeps only a spanning set of the pairs it finds.
-// (Storing every pair took O(k^2) time and memory: ~8x and 2.3 GB at 8000.)
+// an explicit tolerance. Neither costs the search more than a few tree depths
+// of work per position (~8 and ~3): it joins each cluster of mutually close
+// positions once instead of pairing them all (which takes ~30x and ~200x the
+// steps), and keeps only a spanning set of the pairs it finds. (Storing every
+// pair took O(k^2) time and memory: ~8x and 2.3 GB at 8000.)
 TEST(GeometrySimplify, WeldCostIgnoresAJitteredPile) {
   cvc::app ctx;
   std::mt19937_64 rng(7);
@@ -2266,12 +2266,10 @@ TEST(GeometrySimplify, WeldCostIgnoresAJitteredPile) {
       }
       g.tris().push_back({o, o + 1, o + 2});
     }
-    cvc::simplify_result on;
-    const std::pair<double, double> t = weld_on_off_seconds(g, on, tiny ? 1e-4 : -1.0);
+    const cvc::simplify_result on = welded(g, tiny ? 1e-4 : -1.0);
     SCOPED_TRACE(testing::Message() << (tiny ? "tiny, explicit tolerance" : "unit, default"));
     EXPECT_EQ(on.seam_vertices, 21000u);
-    EXPECT_LT(t.first, 3.0 * t.second + 0.1)
-        << "welded " << t.first << " s, unwelded " << t.second << " s";
+    EXPECT_LT(double(on.weld_steps), 16.0 * one_depth_per_position(g)) << on.weld_steps << " steps";
   }
 }
 

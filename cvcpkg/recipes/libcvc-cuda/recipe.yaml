@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-cuda
-  upstream_version: "3.5.0"
+  upstream_version: "3.6.0"
   # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
   # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
   # Dropping the binary changes bundle contents, and +cvc.1 was already published
@@ -46,6 +46,11 @@ source:
 patches: []
 
 depends:
+  # Build-only, as in the CPU libcvc (see that recipe): PEGTL, the header-only
+  # grammar engine of the state_exec reader, is never part of cvc's exported
+  # interface.
+  build:
+    - name: pegtl
   # libcvc-cuda is a pure C++ SDK (GPU build) — no Python. The pycvc bindings
   # are a separate recipe that depends on the libcvc SDK.
   runtime:

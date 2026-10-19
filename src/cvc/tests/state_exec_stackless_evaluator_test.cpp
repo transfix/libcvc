@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/parser.h>
@@ -6,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <set>
+#include <thread>
 
 using namespace cvc::state_exec;
 
@@ -371,6 +373,73 @@ TEST_F(StacklessEvaluatorTest, BreakInsideLet) {
             8); // x=4, doubled=8, break returns 8
 }
 
+// -- loop bodies of several forms, and extra arguments -------------------------
+//
+// A while or for body of several forms runs them all, in order, as a begin. Before, only the first
+// ran and the rest were dropped without a word: a counter bumped in the second form never moved.
+
+TEST_F(StacklessEvaluatorTest, WhileRunsEveryBodyForm) {
+  EXPECT_EQ(eval_int("(begin (set i 0) (set sum 0) "
+                     "  (while (< i 5) (set sum (+ sum i)) (set i (+ i 1))) "
+                     "  sum)"),
+            10);
+}
+
+TEST_F(StacklessEvaluatorTest, ForRunsEveryBodyForm) {
+  EXPECT_EQ(eval_int("(begin (set sum 0) (set n 0) "
+                     "  (for x (list 1 2 3 4) (set sum (+ sum x)) (set n (+ n 1))) "
+                     "  (+ (* 100 n) sum))"),
+            410);
+}
+
+TEST_F(StacklessEvaluatorTest, ForOverAGeneratorRunsEveryBodyForm) {
+  EXPECT_EQ(eval_int("(begin (set sum 0) (set n 0) "
+                     "  (for x (range 4) (set sum (+ sum x)) (set n (+ n 1))) "
+                     "  (+ (* 100 n) sum))"),
+            406);
+}
+
+TEST_F(StacklessEvaluatorTest, BreakInAMultiFormBodyEndsTheLoop) {
+  // The forms after the break don't run on the iteration that breaks.
+  EXPECT_EQ(eval_int("(begin (set i 0) (set after 0) "
+                     "  (set r (while t (set i (+ i 1)) (if (= i 3) (break (* 10 i)) nil) "
+                     "    (set after (+ after 1)))) "
+                     "  (+ r after))"),
+            32); // r = 30; `after` counted iterations 1 and 2
+}
+
+TEST_F(StacklessEvaluatorTest, ALoopIsStillNil) {
+  EXPECT_TRUE(eval("(begin (set i 0) (while (< i 2) (set i (+ i 1)) i))").is_nil());
+  EXPECT_TRUE(eval("(for x (list 1 2) x x)").is_nil());
+}
+
+TEST_F(StacklessEvaluatorTest, SpecialFormsRejectExtraArguments) {
+  // These used to drop the extra arguments silently.
+  const std::pair<const char *, const char *> cases[] = {
+      {"(if t 1 2 3)", "if:"},
+      {"(begin (defun f () (return 1 2)) (f))", "return:"},
+      {"(collect (generator (lambda () (yield 1 2))))", "yield:"},
+      {"(while t (break 1 2))", "break:"},
+  };
+  for (const auto &[script, form] : cases) {
+    try {
+      eval(script);
+      ADD_FAILURE() << script << " should throw";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(form), std::string::npos) << script << ": " << e.what();
+    }
+  }
+}
+
+TEST_F(StacklessEvaluatorTest, MultiFormLoopUnderRestrictedForms) {
+  // The Ariadne predicate lane allows while, set and begin; a multi-form body works there.
+  ev->restrict_special_forms(std::make_shared<const std::set<std::string>>(
+      std::set<std::string>{"begin", "while", "set", "if"}));
+  EXPECT_EQ(eval_int("(begin (set i 0) (set j 0) (while (< i 3) (set i (+ i 1)) (set j (+ j 2))) "
+                     "  j)"),
+            6);
+}
+
 // -- special-form gating -----------------------------------------------------
 
 TEST_F(StacklessEvaluatorTest, RestrictSpecialFormsDeniesUnlistedForms) {
@@ -398,4 +467,59 @@ TEST_F(StacklessEvaluatorTest, DeadlineAbortsUncappedNestedMethodEval) {
   // at the time budget instead of hanging inside a single outer step.
   auto st = ev->create_state(parse("(begin (defclass B (init (self) (while 1 1))) (B))"));
   EXPECT_THROW(ev->run(st, std::nullopt, /*timeout_sec=*/0.05), evaluation_timeout);
+}
+
+TEST_F(StacklessEvaluatorTest, DeadlineIsNotSpentWhileTheThreadDoesNotRun) {
+  // The deadline is a time_budget: time the thread does not run -- descheduled on a loaded
+  // machine, as a native step that sleeps stands in for here -- cannot spend its second half,
+  // so an evaluation that does next to no work completes however long it waits. (One that
+  // runs past the budget still aborts: DeadlineAbortsUncappedNestedMethodEval.)
+  auto env = builtins::make_default_environment();
+  builtins::register_fn(env, "nap", [](std::span<const value_t>) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    return value_t(int64_t{7});
+  });
+  stackless_evaluator napper(env);
+  auto st = napper.create_state(parse("(nap)"));
+  EXPECT_EQ(std::get<int64_t>(napper.run(st, std::nullopt, /*timeout_sec=*/0.02).v), 7);
+}
+
+// ─── Reading inside the steps (parse_options::step_tokens) ─────────────────
+
+TEST_F(StacklessEvaluatorTest, SlicedReadingEvaluatesLikeParsingUpFront) {
+  const std::string script = "(defun sq (x) (* x x)) (set a (sq 7)) (+ a 1)";
+  auto eager = ev->create_state(script);
+  ASSERT_FALSE(eager.reading);
+  const value_t expected = ev->run(eager);
+
+  parse_options popts;
+  popts.step_tokens = 3;
+  auto sliced = ev->create_state(script, nullptr, popts);
+  ASSERT_TRUE(sliced.reading); // nothing parsed yet
+  EXPECT_TRUE(sliced.stack.empty());
+  const value_t got = ev->run(sliced);
+  EXPECT_TRUE(sliced.done);
+  EXPECT_FALSE(sliced.reading);
+  EXPECT_EQ(to_string(got), to_string(expected));
+  EXPECT_EQ(std::get<int64_t>(got.v), 50);
+  // The reading steps are steps: 25 tokens at 3 per step take 9 (the ninth reads the last token,
+  // finds the end of the script and sets up evaluation).
+  EXPECT_EQ(sliced.stats.get_step_count(), eager.stats.get_step_count() + 9);
+}
+
+TEST_F(StacklessEvaluatorTest, SlicedReadingThrowsSyntaxErrorsFromStep) {
+  parse_options popts;
+  popts.step_tokens = 2;
+  evaluator_state st;
+  ASSERT_NO_THROW(st = ev->create_state(std::string("(+ 1 2) (+ 3"), nullptr, popts));
+  EXPECT_THROW(ev->run(st), parse_error);
+}
+
+TEST_F(StacklessEvaluatorTest, SlicedReadingOfAnEmptyScriptFinishesWithNil) {
+  parse_options popts;
+  popts.step_tokens = 4;
+  auto st = ev->create_state(std::string("  ; nothing here\n"), nullptr, popts);
+  EXPECT_TRUE(ev->step(st));
+  EXPECT_TRUE(st.done);
+  EXPECT_TRUE(st.result.is_nil());
 }

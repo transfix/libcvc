@@ -35,7 +35,9 @@
 #include <cvc/core/thread_pool.h>
 #include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/nav_units.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_plant.h>
 #include <limits>
 #include <new>
 #include <random>
@@ -44,6 +46,19 @@
 
 namespace cvc {
 namespace nav {
+
+namespace {
+
+// An angle into (-pi, pi].
+float wrap_angle(float a) {
+  constexpr float kPi = 3.14159265358979f;
+  a = std::fmod(a + kPi, 2.0f * kPi);
+  if (a <= 0.0f)
+    a += 2.0f * kPi;
+  return a - kPi;
+}
+
+} // namespace
 
 sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::uint8_t *prior_occ,
                      coef_mlp model, const float *o, const float *goal, const float *color, int n,
@@ -293,6 +308,10 @@ void sim_world::step(int num_threads) {
     tphase = n;
   };
 
+  // ── THE PLANT (P4): each agent where the plant has it at the tick's start ──
+  if (plant_)
+    plant_read();
+
   if (!cfg_.freeze_sense && (gstep_ % cfg_.sense_every == 0)) {
     // ── SENSE (each agent into its own plane map_id[i]) ──
     std::vector<double> pos(2 * n_), head(n_), rng(n_), fov(n_);
@@ -366,6 +385,9 @@ void sim_world::step(int num_threads) {
         std::vector<std::uint8_t> occ2(hw);
         composite_occupancy(logodds_.data() + off, rows_, cols_, pol, cfg_.p_thresh, cfg_.band,
                             dyn_stamp_.data() + off, t_now, cfg_.ttl_s, occ2.data());
+        if (terrain_on_ && ter_cfg_.block_infeasible) // infeasible slope plans as an obstacle
+          for (long k = 0; k < hw; ++k)
+            occ2[k] = static_cast<std::uint8_t>(occ2[k] | ter_.infeasible[k]);
         if (!std::equal(occ2.begin(), occ2.end(), occ_.begin() + off)) {
           std::copy(occ2.begin(), occ2.end(), occ_.begin() + off);
           changed[m] = 1; // occ_ plane m is written (even if the rebuild below throws)
@@ -522,6 +544,16 @@ void sim_world::step(int num_threads) {
 
   lap(accGate);
 
+  // override_command on the kinematic arm: the agents' start of tick, to integrate from after
+  // the drive has moved them its own way.
+  std::vector<plant_state> ov_start;
+  if (ov_any_ && !plant_) {
+    ov_start.resize(static_cast<std::size_t>(n_));
+    for (int i = 0; i < n_; ++i)
+      if (ov_on_[i])
+        ov_start[i] = {o_[2 * i], o_[2 * i + 1], th_[i], sp_[i]};
+  }
+
   // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
   // minclr_ is a member (not a discarded local) so min_clearance() can expose it.
   minclr_.resize(n_);
@@ -534,6 +566,51 @@ void sim_world::step(int num_threads) {
       tel_.assign(n_, {});
     telp = tel_.data();
   }
+  // The plant arm: the same controller, writing its command for the plant instead of
+  // integrating (veh_params::plant). Without a plant the drive reads cfg_.veh itself.
+  veh_params vplant;
+  plant_drive pdrive;
+  const bool own_veh = plant_ != nullptr || terrain_on_;
+  if (own_veh)
+    vplant = cfg_.veh;
+  if (terrain_on_) {
+    if (ter_cfg_.governors) {
+      vplant.slope = &ter_slope_;
+      vplant.gravity = static_cast<float>(ter_cfg_.gravity * cfg_.scale);
+    }
+    vplant.terrain = &ter_drive_; // the forces apply only with a weight; the slope feature reads it
+  }
+  if (plant_) {
+    pdrive.latency = pl_latency_.data();
+    pdrive.a_brake = pl_a_brake_.data();
+    pdrive.steer_now = pl_steer_now_.data();
+    pdrive.steer_rate = pl_steer_rate_.data();
+    pdrive.max_steer = pl_max_steer_;
+    pdrive.steer_cmd = pl_steer_cmd_.data();
+    pdrive.accel_cmd = pl_accel_cmd_.data();
+    pdrive.v_stop = pl_v_stop_.data();
+    if (pl_mod_.tire_gain > 0.0f || pl_mod_.tip_gain > 0.0f)
+      pdrive.gamma_scale = pl_gamma_scale_.data();
+    if (pl_mod_.tip_gain > 0.0f)
+      pdrive.hard_scale = pl_hard_scale_.data();
+    vplant.plant = &pdrive;
+    vplant.L_col = pl_L_.data();
+    // Each vehicle's own envelope and size (plant_limits), where its plant gives them.
+    if (pl_has_a_max_)
+      vplant.a_max_col = pl_a_max_.data();
+    if (pl_has_vmax_)
+      vplant.vmax_col = pl_vmax_.data();
+    if (pl_has_a_lat_)
+      pdrive.a_lat = pl_a_lat_.data();
+    if (pl_fp_) {
+      vplant.n_body = kPlantDiscs;
+      vplant.body_offsets = nullptr;
+      vplant.body_offsets_col = pl_body_off_.data();
+      vplant.body_rr_col = pl_body_rr_.data();
+      vplant.body_gain = 1.0f / static_cast<float>(kPlantDiscs);
+    }
+  }
+  const veh_params &vv = own_veh ? vplant : cfg_.veh;
   if (mat_on_) {
     const material_stack ms = material_view();
     material_drive md;
@@ -554,21 +631,85 @@ void sim_world::step(int num_threads) {
       // silently overriding ext. drive_step_material_ext == drive_step_material with the ext force
       // also summed into the accumulator + steering bias.
       drive_step_material_ext(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                              map_id_.data(), cfg_.veh, md, ext_, minclr_.data(), num_threads,
-                              telp);
+                              map_id_.data(), vv, md, ext_, minclr_.data(), num_threads, telp);
     } else {
       drive_step_material(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                          map_id_.data(), cfg_.veh, md, minclr_.data(), num_threads, telp);
+                          map_id_.data(), vv, md, minclr_.data(), num_threads, telp);
     }
   } else if (ext_.sample) {
     // External force channel (e.g. a downstream layer's own force) summed into the
     // drive via the sanctioned ext_force port. Byte-identical to drive_step when
     // ext_.sample is null (so this branch is only taken when a force is set).
     drive_step_ext(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
-                   map_id_.data(), cfg_.veh, ext_, minclr_.data(), num_threads, telp);
+                   map_id_.data(), vv, ext_, minclr_.data(), num_threads, telp);
   } else {
     drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
-               cfg_.veh, minclr_.data(), num_threads, pool_, telp);
+               vv, minclr_.data(), num_threads, pool_, telp);
+  }
+
+  // ── override_command: the caller's command in place of the drive's, for this tick ──
+  if (ov_any_) {
+    for (int i = 0; i < n_; ++i) {
+      if (!ov_on_[i])
+        continue;
+      const float L = cfg_.veh.L_col ? cfg_.veh.L_col[i] : cfg_.veh.L;
+      float lock = cfg_.veh.delta_max;
+      if (plant_ && pl_max_steer_ > 0.0f)
+        lock = std::min(lock, pl_max_steer_);
+      const float steer = std::min(std::max(ov_steer_[i], -lock), lock);
+      if (plant_) {
+        pl_steer_cmd_[i] = steer;
+        pl_accel_cmd_[i] = ov_accel_[i];
+        parked_[i] = 0;
+      } else {
+        const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+        const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
+        const plant_state s = kinematic_step(ov_start[i], steer, ov_accel_[i], L, cfg_.veh.dt,
+                                             std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
+        o_[2 * i] = s.x;
+        o_[2 * i + 1] = s.y;
+        th_[i] = s.heading;
+        sp_[i] = s.speed;
+      }
+    }
+  }
+
+  // ── THE PLANT: command, advance one tick, read back, and measure the drift ──
+  if (plant_) {
+    const float dt = cfg_.veh.dt;
+    for (int i = 0; i < n_; ++i) {
+      if (parked_[i] && !(ov_any_ && ov_on_[i])) {
+        // Parked: brake to a stop within the tick, at most at a_max, then hold.
+        const float a_max_i = pl_a_max_[i];
+        const float sp0 = pl_start_[i].speed;
+        pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_max_i), a_max_i);
+      }
+      plant_->command(i, pl_steer_cmd_[i], pl_accel_cmd_[i]);
+    }
+    plant_->advance();
+    const int ref_nsub = std::max(1, plant_->reference_substeps());
+    for (int i = 0; i < n_; ++i) {
+      const plant_state s1 = plant_->state(i);
+      const plant_state &s0 = pl_start_[i];
+      const float vmax_i = pl_vmax_[i];
+      const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
+      const plant_state ref = kinematic_step(s0, pl_steer_cmd_[i], pl_accel_cmd_[i], pl_L_[i], dt,
+                                             ref_nsub, sp_min, vmax_i);
+      const float th1 = s0.heading + wrap_angle(s1.heading - s0.heading);
+      drift_sample d;
+      d.position = std::hypot(s1.x - ref.x, s1.y - ref.y);
+      d.heading = wrap_angle(th1 - ref.heading);
+      d.speed = s1.speed - ref.speed;
+      d.a_lateral = std::fabs(ref.speed * ref.speed * std::tan(pl_steer_cmd_[i]) / pl_L_[i]);
+      d.stop_speed = pl_v_stop_[i];
+      pl_drift_[i] = d;
+      plant_->report_drift(i, d);
+      o_[2 * i] = s1.x;
+      o_[2 * i + 1] = s1.y;
+      th_[i] = th1;
+      sp_[i] = s1.speed;
+      pl_steer_now_[i] = s1.steer;
+    }
   }
 
   lap(accDrive);
@@ -580,7 +721,7 @@ void sim_world::step(int num_threads) {
   // active agents whose centres are within min_gap apart to exactly min_gap. It is pairwise and
   // self-excluding; a push that would land an agent in a truth-occupied cell is skipped, so a
   // vehicle is never shoved into a building. A few sweeps converge a short column.
-  if (cfg_.min_gap > 0.0f && n_ > 1) {
+  if (!plant_ && cfg_.min_gap > 0.0f && n_ > 1) { // a plant's bodies collide instead
     const double mind = cfg_.min_gap, mind2 = mind * mind;
     const double invsx = (cfg_.max_x > cfg_.min_x) ? (cols_ - 1) / (cfg_.max_x - cfg_.min_x) : 0.0;
     const double invsy = (cfg_.max_y > cfg_.min_y) ? (rows_ - 1) / (cfg_.max_y - cfg_.min_y) : 0.0;
@@ -645,14 +786,41 @@ void sim_world::step(int num_threads) {
     }
   }
 
+  // ── TERRAIN: the ticks a footprint touched an infeasible cell ──
+  if (terrain_on_) {
+    st_entries_.assign(n_, 0);
+    for (int i = 0; i < n_; ++i) {
+      const float ox = o_[2 * i], oy = o_[2 * i + 1];
+      bool hit = infeasible_at(ox, oy);
+      if (plant_ && pl_fp_)
+        for (int b = 0; b < kPlantDiscs && !hit; ++b) {
+          const float off = pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i + b];
+          hit = infeasible_at(ox + off * std::cos(th_[i]), oy + off * std::sin(th_[i]));
+        }
+      else if (cfg_.veh.n_body > 0 && cfg_.veh.body_offsets)
+        for (int b = 0; b < cfg_.veh.n_body && !hit; ++b) {
+          const float off = cfg_.veh.body_offsets[b];
+          hit = infeasible_at(ox + off * std::cos(th_[i]), oy + off * std::sin(th_[i]));
+        }
+      if (hit) {
+        ++ter_entries_[i];
+        st_entries_[i] = 1;
+      }
+    }
+  }
+
   // ── METRICS + REACHED/PARK (single-goal) ──
   for (int i = 0; i < n_; ++i) {
     const float dx = goal_[2 * i] - o_[2 * i], dy = goal_[2 * i + 1] - o_[2 * i + 1];
     const float dg = std::sqrt(dx * dx + dy * dy);
     const bool r = dg < cfg_.reach_tol;
     reached_[i] = r ? 1 : 0;
-    if (r && !parked_[i] && active_[i])
+    if (r && !parked_[i] && active_[i] && !(ov_any_ && ov_on_[i]))
       parked_[i] = 1;
+  }
+  if (ov_any_) {
+    std::fill(ov_on_.begin(), ov_on_.end(), 0);
+    ov_any_ = false;
   }
   ++gstep_;
 
@@ -667,6 +835,21 @@ void sim_world::step(int num_threads) {
     min_clearance_world(st_clr_.data()); // world metres, 1e29 sentinel preserved
     for (int i = 0; i < n_; ++i)
       st_clr_d_[i] = static_cast<double>(st_clr_[i]);
+    // Terrain feeds its infeasible-slope entries.
+    st_smp_.slope_entries = terrain_on_ ? st_entries_.data() : nullptr;
+    // A plant that measures energy feeds it (and its static contacts) to the collector.
+    st_smp_.energy_step_J = nullptr;
+    st_smp_.static_contacts = nullptr;
+    if (plant_ && plant_->tracks_energy()) {
+      st_energy_.resize(n_);
+      st_contacts_.resize(n_);
+      for (int i = 0; i < n_; ++i) {
+        st_energy_[i] = plant_->energy_step(i);
+        st_contacts_[i] = plant_->static_contacts_step(i);
+      }
+      st_smp_.energy_step_J = st_energy_.data();
+      st_smp_.static_contacts = st_contacts_.data();
+    }
     stats_->step(st_pos_.data(), st_head_.data(), st_spd_.data(), st_mode_.data(),
                  st_reached_.data(), st_smp_);
   }
@@ -818,6 +1001,188 @@ void sim_world::set_capture_drive_telemetry(bool on) {
     tel_.assign(n_, {}); // size to the current agent count; step() keeps it in sync
   else
     tel_.clear(); // drop the buffer so drive_telemetry_data() returns null and step() passes null
+}
+
+void sim_world::set_terrain(const float *height_m, const terrain_config &tc) {
+  const long hw = static_cast<long>(rows_) * cols_;
+  const double cell_w = (cfg_.max_x - cfg_.min_x) / std::max(1, cols_ - 1);
+  if (height_m != ter_height_.data())
+    ter_height_.assign(height_m, height_m + hw);
+  ter_ = terrain_build(height_m, rows_, cols_, cell_w, tc);
+  ter_cfg_ = tc;
+  // The grade cost's material planes: its gradient pushes toward gentler ground, and the
+  // infeasible cells are the hard plane.
+  const material_planes mp = material_build(ter_.grade_cost.data(), ter_.infeasible.data(), rows_,
+                                            cols_, cell_w, cfg_.scale, tc.sigma);
+  ter_stack_ = mp.stacked();
+  ter_view_ =
+      material_stack{ter_stack_.data(), 1,          rows_,   cols_,   cfg_.min_x, cfg_.min_y,
+                     cfg_.max_x,        cfg_.max_y, cfg_.cx, cfg_.cy, cfg_.scale};
+  ter_drive_.stack = &ter_view_;
+  ter_drive_.lam_soft = tc.lam_grade;
+  ter_drive_.lam_hard = tc.lam_grade_hard;
+  ter_drive_.k_sharp = tc.k_sharp;
+  ter_drive_.d_hat_m = tc.d_hat_m;
+  ter_slope_.data = ter_.slope.data();
+  ter_slope_.M = 2;
+  ter_slope_.H = rows_;
+  ter_slope_.W = cols_;
+  ter_slope_.mnx = cfg_.min_x;
+  ter_slope_.mny = cfg_.min_y;
+  ter_slope_.mxx = cfg_.max_x;
+  ter_slope_.mxy = cfg_.max_y;
+  ter_slope_.cx = cfg_.cx;
+  ter_slope_.cy = cfg_.cy;
+  ter_slope_.S = cfg_.scale;
+  ter_entries_.assign(n_, 0);
+  st_entries_.assign(n_, 0);
+  terrain_on_ = true;
+  // Infeasible slope plans as an obstacle in every belief plane, now and on each recomposite.
+  if (tc.block_infeasible) {
+    for (int m = 0; m < M_; ++m)
+      for (long k = 0; k < hw; ++k)
+        occ_[static_cast<long>(m) * hw + k] =
+            static_cast<std::uint8_t>(occ_[static_cast<long>(m) * hw + k] | ter_.infeasible[k]);
+    rebuild_all_fields();
+    for (int m = 0; m < M_; ++m)
+      ++raster_version_[m];
+  }
+}
+
+void sim_world::set_terrain_config(const terrain_config &tc) {
+  if (!terrain_on_)
+    return;
+  const std::vector<int> entries = ter_entries_;
+  set_terrain(ter_height_.data(), tc);
+  ter_entries_ = entries;
+}
+
+void sim_world::clear_terrain() {
+  terrain_on_ = false;
+  ter_ = terrain_planes{};
+  ter_height_.clear();
+  ter_stack_.clear();
+  ter_entries_.clear();
+  st_entries_.clear();
+  // The occupancy recomposites from the belief on the next sense tick; a frozen map keeps the
+  // blocked cells until the world is rebuilt.
+}
+
+bool sim_world::infeasible_at(float onx, float ony) const {
+  const double wx = onx / cfg_.scale + cfg_.cx, wy = ony / cfg_.scale + cfg_.cy;
+  const double sx = (cols_ - 1) / (cfg_.max_x - cfg_.min_x),
+               sy = (rows_ - 1) / (cfg_.max_y - cfg_.min_y);
+  const long c = std::lround((wx - cfg_.min_x) * sx), r = std::lround((wy - cfg_.min_y) * sy);
+  if (r < 0 || c < 0 || r >= rows_ || c >= cols_)
+    return false;
+  return ter_.infeasible[static_cast<std::size_t>(r * cols_ + c)] != 0;
+}
+
+plant_kind sim_world::plant_type() const { return plant_ ? plant_->kind() : plant_kind::kinematic; }
+
+bool sim_world::plant_plan_of(int i, plant_plan &out) const {
+  if (!plant_ || i < 0 || i >= n_ || pl_a_max_.size() != static_cast<std::size_t>(n_))
+    return false;
+  out.a_max = pl_a_max_[i];
+  out.vmax = pl_vmax_[i];
+  out.a_lat = pl_a_lat_[i];
+  out.body_rr = pl_body_rr_[i];
+  for (int b = 0; b < kPlantDiscs; ++b)
+    out.body_offsets[b] = pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i + b];
+  out.footprint = pl_fp_;
+  return true;
+}
+
+void sim_world::set_plant(vehicle_plant *p) {
+  plant_ = p;
+  if (!p) {
+    for (std::vector<float> *v : {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_,
+                                  &pl_L_, &pl_steer_cmd_, &pl_accel_cmd_, &pl_v_stop_, &pl_a_max_,
+                                  &pl_vmax_, &pl_a_lat_, &pl_body_rr_, &pl_body_off_})
+      v->clear();
+    pl_start_.clear();
+    pl_drift_.clear();
+    pl_max_steer_ = 0.0f;
+    pl_has_a_max_ = pl_has_vmax_ = pl_has_a_lat_ = pl_fp_ = false;
+    return;
+  }
+  const std::size_t n = static_cast<std::size_t>(n_);
+  for (std::vector<float> *v :
+       {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_, &pl_L_, &pl_steer_cmd_,
+        &pl_accel_cmd_, &pl_v_stop_, &pl_a_max_, &pl_vmax_, &pl_a_lat_, &pl_body_rr_})
+    v->assign(n, 0.0f);
+  pl_body_off_.assign(n * kPlantDiscs, 0.0f);
+  pl_gamma_scale_.assign(n, 1.0f);
+  pl_hard_scale_.assign(n, 1.0f);
+  pl_start_.assign(n, plant_state{});
+  pl_drift_.assign(n, drift_sample{});
+  // The plant takes the agents where they are, at rest.
+  std::vector<plant_state> start(n);
+  for (int i = 0; i < n_; ++i) {
+    start[i].x = o_[2 * i];
+    start[i].y = o_[2 * i + 1];
+    start[i].heading = th_[i];
+    sp_[i] = 0.0f;
+  }
+  p->attach(n_, start.data(), frame_of(cfg_), cfg_.veh.dt);
+  plant_read();
+}
+
+void sim_world::plant_read() {
+  pl_mod_ = plant_->modulation();
+  float max_steer = 0.0f;
+  pl_has_a_max_ = pl_has_vmax_ = pl_has_a_lat_ = pl_fp_ = false;
+  for (int i = 0; i < n_; ++i) {
+    const plant_state s = plant_->state(i);
+    o_[2 * i] = s.x;
+    o_[2 * i + 1] = s.y;
+    th_[i] = th_[i] + wrap_angle(s.heading - th_[i]); // nav's heading stays continuous
+    sp_[i] = s.speed;
+    pl_steer_now_[i] = s.steer;
+    pl_start_[i] = s;
+    pl_start_[i].heading = th_[i];
+    const plant_limits l = plant_->limits(i);
+    pl_L_[i] = l.wheelbase > 0.0f ? l.wheelbase : (cfg_.veh.L_col ? cfg_.veh.L_col[i] : cfg_.veh.L);
+    pl_latency_[i] = l.latency;
+    pl_a_brake_[i] = l.a_brake;
+    pl_steer_rate_[i] = l.steer_rate;
+    // The vehicle's own envelope, or nav's (cfg.veh, and its per-agent columns). Nav's vmax is a
+    // speed limit too (`nav.vehicle.vmax`), so the top speed is the lower of the two.
+    const float a_max_nav = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
+    const float vmax_nav = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+    pl_a_max_[i] = l.a_max > 0.0f ? l.a_max : a_max_nav;
+    pl_vmax_[i] = l.vmax > 0.0f ? std::min(l.vmax, vmax_nav) : vmax_nav;
+    pl_a_lat_[i] = l.a_lat > 0.0f ? l.a_lat : cfg_.veh.a_lat_max;
+    pl_has_a_max_ = pl_has_a_max_ || l.a_max > 0.0f;
+    pl_has_vmax_ = pl_has_vmax_ || l.vmax > 0.0f;
+    pl_has_a_lat_ = pl_has_a_lat_ || l.a_lat > 0.0f;
+    // Its size: kPlantDiscs discs from its tail to its nose, inset 0.7 half-widths at the ends
+    // and 1.3 half-widths wide, which cover the body's corners (wider where a long body spaces
+    // them out, so neighbours still overlap). A vehicle without one keeps nav's disc, as
+    // kPlantDiscs coincident discs at the rear axle.
+    float *off = &pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i];
+    if (l.half_width > 0.0f && l.front + l.rear > 0.0f) {
+      const float tail = -l.rear + 0.7f * l.half_width, nose = l.front - 0.7f * l.half_width;
+      const float span = std::max(0.0f, nose - tail);
+      const float step = span / static_cast<float>(kPlantDiscs - 1);
+      pl_body_rr_[i] = std::max(1.3f * l.half_width, 0.55f * step);
+      for (int b = 0; b < kPlantDiscs; ++b)
+        off[b] = nose > tail ? tail + step * static_cast<float>(b) : 0.5f * (l.front - l.rear);
+      pl_fp_ = true;
+    } else {
+      pl_body_rr_[i] = cfg_.veh.rr_col ? cfg_.veh.rr_col[i] : cfg_.veh.rr;
+      for (int b = 0; b < kPlantDiscs; ++b)
+        off[b] = 0.0f;
+    }
+    pl_gamma_scale_[i] = 1.0f +
+                         pl_mod_.tire_gain * std::max(0.0f, s.tire_use - pl_mod_.tire_onset) +
+                         pl_mod_.tip_gain * std::max(0.0f, s.load_transfer - pl_mod_.tip_onset);
+    pl_hard_scale_[i] =
+        1.0f + pl_mod_.tip_gain * std::max(0.0f, s.load_transfer - pl_mod_.tip_onset);
+    if (l.max_steer > 0.0f && (max_steer == 0.0f || l.max_steer < max_steer))
+      max_steer = l.max_steer;
+  }
+  pl_max_steer_ = max_steer;
 }
 
 void sim_world::begin_nav_stats(const nav_stats_params &p, const budget_policy &b,
@@ -979,6 +1344,30 @@ void sim_world::retarget(int i, float gx_n, float gy_n) {
   tracking_[i] = 1;
   reached_[i] = 0;
   parked_[i] = 0;
+}
+
+bool sim_world::set_pose(int i, float x_n, float y_n, float heading, float speed) {
+  if (i < 0 || i >= n_ || plant_)
+    return false;
+  o_[2 * i] = x_n;
+  o_[2 * i + 1] = y_n;
+  th_[i] = heading;
+  sp_[i] = speed;
+  return true;
+}
+
+void sim_world::override_command(int i, float steer, float accel) {
+  if (i < 0 || i >= n_)
+    return;
+  if (static_cast<int>(ov_on_.size()) != n_) {
+    ov_steer_.assign(n_, 0.0f);
+    ov_accel_.assign(n_, 0.0f);
+    ov_on_.assign(n_, 0);
+  }
+  ov_steer_[i] = steer;
+  ov_accel_[i] = accel;
+  ov_on_[i] = 1;
+  ov_any_ = true;
 }
 
 void sim_world::add_obstacle(int r0, int r1, int c0, int c1) {

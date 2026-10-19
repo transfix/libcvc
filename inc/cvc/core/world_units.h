@@ -12,6 +12,9 @@
 #define __CVC_WORLD_UNITS_H__
 
 #include <cvc/core/namespace.h>
+#include <cvc/core/unit_registry.h>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -71,8 +74,26 @@ namespace cvc {
 // examples use to drive world_clock. That binding lives in the application, not
 // here.
 //
+// A fifth frame belongs to cvc::nav (and any solver that conditions its numbers
+// the same way):
+//
+//   normalized - nav's dimensionless frame, normalized = (world - centre) * S,
+//     where all kernel math, learned coefficients and .cvcnav weights live.
+//     Lengths, velocities and accelerations scale by S (time stays seconds),
+//     curvature by 1/S, area by S^2; angles pass through. A normalized_frame
+//     carries S and the centre, and to_normalized()/from_normalized() run the
+//     whole chain SI <-> world (metres_per_world_unit) <-> normalized (S) by each
+//     dimension's length exponent. These are boundary conversions: nav kernels
+//     never call them, so the trained numbers are untouched.
+//
+// Every conversion goes through a cvc::unit_registry (unit_registry.h): the
+// built-in SI/imperial table plus any unit or dimension an application adds
+// (knots, dBm, a lab's own unit, ...). The regime picks a default display unit
+// per dimension; set_display_unit() overrides it per dimension (show velocity in
+// knots, volume in litres) without changing what is stored.
+//
 // Thread-safe: every accessor and mutator takes an internal lock, then does the
-// pure arithmetic outside it.
+// pure arithmetic outside it. The registry has its own lock.
 //
 class world_units {
 public:
@@ -97,6 +118,39 @@ public:
     angle,        // radian       <-> degree (degrees in BOTH regimes: the
                   //   near-universal display convention; radian is the
                   //   canonical/compute unit)
+    // Added with the unit registry for the physics tier and its
+    // energy ledger. Appended, so the members above keep their values.
+    power,             // watt          <-> horsepower
+    pressure,          // pascal        <-> psi
+    temperature,       // kelvin; shown as degC <-> degF
+    area,              // square metre  <-> square foot
+    volume,            // cubic metre   <-> cubic foot
+    angular_velocity,  // rad/s; shown as deg/s in both regimes
+    curvature,         // 1/metre       <-> 1/foot
+    frequency,         // hertz in both regimes
+    electric_current,  // ampere in both regimes
+    voltage,           // volt in both regimes
+    electric_charge,   // coulomb in both regimes
+    density,           // kg/m^3        <-> lb/ft^3
+    torque,            // newton-metre  <-> pound-force foot
+    energy_per_length, // J/m; shown as Wh/km <-> Wh/mi (a vehicle's consumption)
+  };
+
+  // The registry name of a dimension ("length", "energy_per_length", ...).
+  static const char *dimension_name(dimension d);
+
+  // nav's normalized frame: normalized = (world - centre) * scale. `scale` is S,
+  // normalized units per WORLD unit (cvc::nav sim_world::config::scale); the
+  // centre is in world units (config::cx, cy). Must have a finite scale > 0 and
+  // a finite centre (validate() throws cvc::unit_error otherwise).
+  struct normalized_frame {
+    double scale = 1.0;
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    void validate() const;
+  };
+
+  struct xyz {
+    double x = 0.0, y = 0.0, z = 0.0;
   };
 
   struct config {
@@ -144,7 +198,7 @@ public:
   // of the active regime expects, in that regime's BASE unit (metre/foot,
   // kilogram/pound, second, m/s / mph, ...), and back. No magnitude-based
   // promotion happens here; use format() for that.
-  double to_display(double si_value, dimension d) const;
+  double to_display(double canonical_value, dimension d) const;
   double from_display(double display_value, dimension d) const;
 
   // The base unit label for a dimension in the active regime, e.g. "m"/"ft",
@@ -160,7 +214,7 @@ public:
     double value = 0.0;
     std::string unit;
   };
-  measurement format(double si_value, dimension d) const;
+  measurement format(double canonical_value, dimension d) const;
 
   // --- coordinate mapping ------------------------------------------------
 
@@ -178,9 +232,76 @@ public:
   };
   coordinate world_point_to_real(double wx, double wy, double wz) const;
 
+  // --- the unit registry ---------------------------------------------------
+
+  // The table this object converts through: the built-ins plus whatever the
+  // application adds. Each world_units owns its own copy, so a unit one app
+  // registers does not appear in another. The registry is thread-safe on its own.
+  unit_registry &registry();
+  const unit_registry &registry() const;
+
+  // Convenience pass-throughs to registry(): a value in a named unit to SI and
+  // back, and between two units of one dimension (throws cvc::unit_error across
+  // dimensions or for an unknown unit).
+  double to_si(double value, const std::string &symbol) const;
+  double from_si(double canonical, const std::string &symbol) const;
+  double convert(double value, const std::string &from_symbol, const std::string &to_symbol) const;
+
+  // --- display units per dimension -----------------------------------------
+
+  // Show a dimension in a specific unit instead of the regime's default, e.g.
+  // velocity in "kn", volume in "L", electric_charge in "mAh". The unit must
+  // belong to the dimension (throws cvc::unit_error otherwise). A length override
+  // also turns off the km/mile promotion in format() and world_point_to_real().
+  void set_display_unit(dimension d, const std::string &symbol);
+  void set_display_unit(const std::string &dimension, const std::string &symbol);
+  void clear_display_unit(dimension d);
+  void clear_display_unit(const std::string &dimension);
+  // The unit a dimension is shown in now: the override, else the regime default
+  // (a custom dimension defaults to its SI unit).
+  std::string display_unit(dimension d) const;
+  std::string display_unit(const std::string &dimension) const;
+
+  // The display conversions above, for any registered dimension by name,
+  // including ones the application added.
+  double to_display(double canonical_value, const std::string &dimension) const;
+  double from_display(double display_value, const std::string &dimension) const;
+  std::string unit_symbol(const std::string &dimension) const;
+  measurement format(double canonical_value, const std::string &dimension) const;
+
+  // --- SI <-> nav's normalized frame ---------------------------------------
+
+  // A canonical-SI quantity of the given dimension into the normalized frame,
+  // and back: SI -> world by metres_per_world_unit^e, world -> normalized by
+  // S^e, where e is the dimension's length exponent (velocity 1, curvature -1,
+  // area 2; time, angle and mass 0, which pass through unchanged). Throws
+  // cvc::unit_error for an invalid frame or an unknown dimension.
+  double to_normalized(double canonical_value, dimension d, const normalized_frame &f) const;
+  double from_normalized(double normalized_value, dimension d, const normalized_frame &f) const;
+  double to_normalized(double canonical_value, const std::string &dimension,
+                       const normalized_frame &f) const;
+  double from_normalized(double normalized_value, const std::string &dimension,
+                         const normalized_frame &f) const;
+
+  // A position in canonical metres into the normalized frame, and back:
+  // n = (m / metres_per_world_unit - centre) * S, m = (n / S + centre) *
+  // metres_per_world_unit. The order matches cvc::nav's own snapshot (n/S +
+  // centre), so at metres_per_world_unit 1 it reproduces that arithmetic in
+  // double precision.
+  xyz si_point_to_normalized(double x_m, double y_m, double z_m, const normalized_frame &f) const;
+  xyz normalized_point_to_si(double nx, double ny, double nz, const normalized_frame &f) const;
+
 private:
+  std::string effective_display_unit(const std::string &dimension, system regime) const;
+  double scale_to_normalized(double canonical_value, int length_exponent,
+                             const normalized_frame &f) const;
+  double scale_from_normalized(double normalized_value, int length_exponent,
+                               const normalized_frame &f) const;
+
   mutable std::mutex _mutex;
   config _cfg;
+  std::map<std::string, std::string> _display_overrides; // dimension name -> unit symbol
+  std::shared_ptr<unit_registry> _registry;
 };
 
 // ---------------------------------------------------------------------------
@@ -209,6 +330,16 @@ inline constexpr double radians_per_degree = pi / 180.0;
 
 // Length promotion thresholds (in metres), fixed conventions.
 inline constexpr double metres_per_kilometre = 1000.0; // exact
+
+// Further exact definitions, used by the built-in unit table (unit_registry.h).
+inline constexpr double metres_per_nautical_mile = 1852.0; // exact (international)
+inline constexpr double watts_per_horsepower =
+    550.0 * joules_per_foot_pound; // exact: mechanical hp = 550 ft-lbf/s = 745.69987... W
+inline constexpr double pascals_per_psi =
+    newtons_per_pound_force / ((metres_per_foot / 12.0) * (metres_per_foot / 12.0)); // exact
+inline constexpr double joules_per_btu = 1055.05585262;        // exact (International Table BTU)
+inline constexpr double square_metres_per_acre = 4046.8564224; // exact (43560 ft^2)
+inline constexpr double cubic_metres_per_us_gallon = 0.003785411784; // exact (231 in^3)
 
 } // namespace units
 

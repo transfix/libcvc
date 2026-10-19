@@ -1,13 +1,16 @@
 #include <algorithm> // §12 enforce_channel_policy: std::find over the declared/global channel lists
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/property_tree/json_parser/error.hpp>
 #include <chrono>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_json.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -88,57 +91,6 @@ std::string coerce_state_string(const value_t &v) {
   return to_string(v); // list/dict/symbol/closure — readable fallback
 }
 
-// Clone a value's compound structure (list/dict) so the caller gets a PRIVATE copy that does
-// not alias node-resident storage. Bounded and cycle-safe, mirroring values_equal / to_string
-// (it is the third structural walker and must not be the weak link): it MEMOIZES on the source
-// node pointer, so a shared-pointer DAG is copied in PHYSICAL time (the copy preserves the same
-// sharing, disjoint from the stored original) and a cycle terminates; it caps recursion depth
-// (stack safety on a deeply-nested value); and it polls the evaluation deadline so a huge
-// payload aborts at the time budget instead of running to completion in one native step.
-constexpr int kDeepCopyMaxDepth = 1000;
-
-value_t deep_copy_impl(const value_t &v, std::unordered_map<const void *, value_t> &memo,
-                       int depth) {
-  if (eval_deadline_expired())
-    throw std::runtime_error("state-data-get: evaluation exceeded time budget");
-  if (depth > kDeepCopyMaxDepth)
-    throw std::runtime_error("state-data-get: value nested too deeply to copy");
-  if (auto *l = std::get_if<list_ptr>(&v.v)) {
-    if (!*l)
-      return v;
-    auto found = memo.find(static_cast<const void *>(l->get()));
-    if (found != memo.end())
-      return found->second; // shared node / cycle already copied -> reuse (bounds the walk)
-    auto out = std::make_shared<std::vector<value_t>>();
-    value_t result{out};
-    memo.emplace(static_cast<const void *>(l->get()), result); // register BEFORE recursing
-    out->reserve((*l)->size());
-    for (const auto &e : **l)
-      out->push_back(deep_copy_impl(e, memo, depth + 1));
-    return result;
-  }
-  if (auto *dp = std::get_if<dict_ptr>(&v.v)) {
-    if (!*dp)
-      return v;
-    auto found = memo.find(static_cast<const void *>(dp->get()));
-    if (found != memo.end())
-      return found->second;
-    auto out = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-    value_t result{out};
-    memo.emplace(static_cast<const void *>(dp->get()), result);
-    out->reserve((*dp)->size());
-    for (const auto &kv : **dp)
-      out->emplace_back(kv.first, deep_copy_impl(kv.second, memo, depth + 1));
-    return result;
-  }
-  return v; // scalar / symbol (opaque callables are refused at state-data-set)
-}
-
-value_t deep_copy(const value_t &v) {
-  std::unordered_map<const void *, value_t> memo;
-  return deep_copy_impl(v, memo, 0);
-}
-
 void require_root(const intrinsics_context *ctx, const char *name) {
   if (!ctx->root)
     throw std::runtime_error(std::string(name) + ": no state root bound");
@@ -191,9 +143,17 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
   // Coerce the value to a string (state stores string-typed scalars) rather than
   // requiring the caller to pre-stringify — (state-set "n" 10) now stores "10". A
   // structured value should use state-data-set (the typed data() channel).
-  const std::string val = coerce_state_string(args[1]);
+  if (is_compound(args[1])) {
+    // A list or dict prints as a walk, a slice per step when the process slices deep data
+    // ("Deep data on the executor"); the node is written once the whole string is ready.
+    cvc::state *root = ctx->root;
+    return run_data_job(make_print_job(args[1]), [root, path = path](value_t printed) {
+      (*root)(path).value(std::get<std::string>(printed.v));
+      return nil_value;
+    });
+  }
   // operator() creates child nodes as needed
-  (*ctx->root)(path).value(val);
+  (*ctx->root)(path).value(coerce_state_string(args[1]));
   return nil_value;
 }
 
@@ -249,7 +209,7 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   // place via append/set-nth, defeating the read-only contract). Genuine host data (any
   // other C++ type parked on the node) still comes back as a data_object.
   if (auto *v = boost::any_cast<value_t>(&d))
-    return deep_copy(*v);
+    return run_data_job(make_copy_job(*v));
   // A RAW std::string blob on the data channel reads back as the DSL `bytes` type (opaque octets),
   // NOT an opaque data_object. That raw representation is what state-data-set stores for a `bytes`
   // value, what the `?data` URI channel writes (uri_state.cpp), and what the §13.9 HTTP cache parks
@@ -287,6 +247,116 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   else
     (*ctx->root)(path).data(boost::any(args[1]));
   return nil_value;
+}
+
+// ---------------------------------------------------------------------------
+// A subtree as JSON, a slice at a time
+// ---------------------------------------------------------------------------
+//
+// state-json and state-from-json are cvc::state::json() and json(j) run as data jobs: the walk
+// over the subtree (state_json_writer) and the scan of the document (state_json_reader) do
+// data.step_nodes units per scheduler step, counted against max_steps and max_time, and other
+// processes run between the slices. Same code as cvc::state's, so the same document. A unit is
+// a node visited or a value scanned, and one per 256 bytes (kDataNodeBytes) written or scanned.
+
+namespace {
+
+// A writable transparent link routes a write to its target, as state-set's value() does.
+cvc::state *write_through_link(cvc::state *node) {
+  if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent &&
+      node->linkWritable()) {
+    const cvc::state::link_resolution lr = node->resolveLink();
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
+      return lr.target;
+  }
+  return node;
+}
+
+// The writer holds the nodes it has yet to visit by owning pointer: a node another process
+// removes between slices is still written, as it was when its parent was snapshotted. A slice
+// ends when its units are spent, a long value counting for its bytes. The text is held to the
+// allocation limit as it grows.
+class state_json_job final : public data_job {
+public:
+  explicit state_json_job(cvc::state &node) : writer_(node) {}
+
+  bool step(std::size_t budget) override {
+    const std::size_t start = nodes_;
+    const std::optional<std::size_t> limit = eval_alloc_limit();
+    bool done = false;
+    while (!done && (budget == 0 || nodes_ - start < budget)) {
+      done = writer_.step(budget == 0 ? 0 : 1);
+      const std::size_t size = writer_.text().size();
+      nodes_ = writer_.nodes() + size / kDataNodeBytes;
+      if (limit && size > *limit)
+        eval_alloc_check(size, "state-json"); // throws
+    }
+    eval_alloc_note(writer_.text().size() - noted_);
+    noted_ = writer_.text().size();
+    return done;
+  }
+
+  value_t result() override { return value_t(writer_.take()); }
+
+private:
+  cvc::state_json_writer writer_;
+  std::size_t noted_ = 0; // text bytes reported to heap accounting so far
+};
+
+// The reader checks the whole document before it sets anything, so a malformed one changes
+// nothing even when the check spans many steps. A slice ends when its units are spent, a long
+// string counting for its bytes.
+class state_from_json_job final : public data_job {
+public:
+  state_from_json_job(cvc::state &node, std::string_view doc) : reader_(node, doc) {}
+
+  bool step(std::size_t budget) override {
+    const std::size_t start = nodes_;
+    bool done = false;
+    try {
+      while (!done && (budget == 0 || nodes_ - start < budget)) {
+        done = reader_.step(budget == 0 ? 0 : 1);
+        nodes_ = reader_.values() + reader_.bytes() / kDataNodeBytes;
+      }
+    } catch (const boost::property_tree::json_parser::json_parser_error &e) {
+      throw std::runtime_error("state-from-json: line " + std::to_string(e.line()) + ": " +
+                               e.message());
+    }
+    return done;
+  }
+
+  value_t result() override { return nil_value; }
+
+  // The document was the call's argument: keep a copy once the job outlives the call.
+  void own_inputs() override {
+    doc_ = std::string(reader_.doc());
+    reader_.rebind(doc_);
+  }
+
+private:
+  std::string doc_;
+  cvc::state_json_reader reader_;
+};
+
+} // namespace
+
+value_t intrinsic_state_json(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-json");
+  require_root(ctx, "state-json");
+  auto &path = as_string(args[0], "state-json");
+  cvc::state *node = ctx->root->findDescendant(path);
+  if (!node)
+    return nil_value;
+  return run_data_job(std::make_unique<state_json_job>(*read_through_link(node)));
+}
+
+value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-from-json");
+  require_root(ctx, "state-from-json");
+  auto &path = as_string(args[0], "state-from-json");
+  auto &doc = as_string(args[1], "state-from-json");
+  cvc::state *node = write_through_link(&(*ctx->root)(path));
+  return run_data_job(std::make_unique<state_from_json_job>(*node, doc));
 }
 
 value_t intrinsic_state_root_path(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -461,6 +531,18 @@ value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
   return make_list(std::move(result));
 }
 
+// The budget-by-kind fields of `info`, as dict entries.
+static void append_budget_usage(std::vector<std::pair<std::string, value_t>> &entries,
+                                const process_info &info) {
+  entries.emplace_back("read_steps", value_t(static_cast<int64_t>(info.read_steps)));
+  entries.emplace_back("eval_steps", value_t(static_cast<int64_t>(info.eval_steps)));
+  entries.emplace_back("data_steps", value_t(static_cast<int64_t>(info.data_steps)));
+  entries.emplace_back("data_nodes", value_t(static_cast<int64_t>(info.data_nodes)));
+  entries.emplace_back("read_time", value_t(info.read_time));
+  entries.emplace_back("eval_time", value_t(info.eval_time));
+  entries.emplace_back("data_time", value_t(info.data_time));
+}
+
 value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "inspect");
   require_sched(ctx, "inspect");
@@ -483,8 +565,10 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   entries.emplace_back("uid", value_t(info->uid));
   entries.emplace_back("gid", value_t(info->gid));
   entries.emplace_back("steps", value_t(static_cast<int64_t>(info->step_count)));
+  append_budget_usage(entries, *info);
   entries.emplace_back("elapsed_time", value_t(info->elapsed_time));
   entries.emplace_back("memory", value_t(static_cast<int64_t>(info->current_memory)));
+  entries.emplace_back("heap_memory", value_t(static_cast<int64_t>(info->heap_memory)));
   entries.emplace_back("peak_memory", value_t(static_cast<int64_t>(info->peak_memory)));
   entries.emplace_back("max_memory", value_t(static_cast<int64_t>(info->max_memory)));
   entries.emplace_back("max_time", value_t(info->max_time));
@@ -554,6 +638,25 @@ value_t intrinsic_message_bytes_limit(intrinsics_context *ctx, std::span<const v
   if (!ctx->proc)
     return value_t(int64_t(0));
   return value_t(static_cast<int64_t>(ctx->proc->max_message_bytes));
+}
+
+// What the current process's budget went on: steps, seconds and deep-data nodes by kind (read,
+// eval, data), plus the total steps -- the same fields inspect reports for any pid.
+value_t intrinsic_budget_usage(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "budget-usage");
+  // The running process, as self-pid finds it: the scheduler's current one, else the context's.
+  process_info info{};
+  if (ctx->sched && ctx->sched->current_pid() >= 0) {
+    if (auto running = ctx->sched->get_process_info(ctx->sched->current_pid()))
+      info = *running;
+  } else if (ctx->proc) {
+    info.step_count = ctx->proc->step_count();
+    fill_budget_usage(info, ctx->proc->state.stats);
+  }
+  std::vector<std::pair<std::string, value_t>> entries;
+  entries.emplace_back("steps", value_t(static_cast<int64_t>(info.step_count)));
+  append_budget_usage(entries, info);
+  return make_dict(std::move(entries));
 }
 
 value_t intrinsic_step_count(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -845,6 +948,8 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("state-delete", intrinsic_state_delete);
   reg("state-data-get", intrinsic_state_data_get);
   reg("state-data-set", intrinsic_state_data_set);
+  reg("state-json", intrinsic_state_json);
+  reg("state-from-json", intrinsic_state_from_json);
   reg("state-root-path", intrinsic_state_root_path);
   reg("state-watch", intrinsic_state_watch);
   reg("state-unwatch", intrinsic_state_unwatch);
@@ -872,6 +977,7 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("message-bytes", intrinsic_message_bytes);
   reg("message-bytes-limit", intrinsic_message_bytes_limit);
   reg("step-count", intrinsic_step_count);
+  reg("budget-usage", intrinsic_budget_usage);
 
   // System identity
   reg("cluster-id", intrinsic_cluster_id);
