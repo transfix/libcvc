@@ -22,15 +22,22 @@
 // terminal has no scene renderer); its widgets, menus, windows, state and programs all run.
 //
 //   ari run      <doc.ari> [--prefix P] [--fps N] [--no-mouse] [--component-path DIR]...
+//                          [--graphics MODE] [--image NAME=FILE]...
 //   ari snapshot <doc.ari> [--prefix P] [--width W] [--height H] [--frames N] [--ansi]
+//                          [--graphics MODE] [--image NAME=FILE]... [--cell-size WxH]
 //   ari check    <doc.ari> [--prefix P]
 //
+// --graphics picks how images draw: auto (the default: Kitty, else Sixel, where the terminal has
+// them, else half-blocks), kitty, sixel, color (half-blocks) or mono. --image publishes the
+// picture in FILE under NAME, for the document's `image:` widgets with `src: NAME`.
 // run takes over the terminal until a "quit" action (a menu item with `on: quit`, or a program
 // calling (quit)) or Ctrl-C. A document with an on_signal: program gets Ctrl-C as SIGINT and
 // decides for itself; three Ctrl-Cs within two seconds always quit. Signals sent to the process
 // (SIGTERM, SIGHUP, SIGINT, SIGQUIT, SIGUSR1/2) reach on_signal: too, with source "os"; one the
 // document doesn't handle ends the run with exit status 128 + the signal number.
 // snapshot drains N frames (default 1) and prints the last one as text — for CI, logs, and docs.
+// With --ansi and --graphics kitty or sixel it also prints the images, after clearing the screen,
+// at the terminal's cell size in pixels (or --cell-size, where the terminal can't be asked).
 // check loads the document and prints its warnings; it exits non-zero when the load fails.
 
 #include <algorithm>
@@ -41,9 +48,11 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
+#include <cvc/image/image.h>
 #include <exception>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef _WIN32
@@ -127,6 +136,24 @@ void use_bundled_terminfo() {
 #endif
 }
 
+// --graphics MODE -> how images draw.
+bool parse_graphics(const std::string &s, cvc::ariadne::FtxuiBackend::Options::ImageColor &out) {
+  using Mode = cvc::ariadne::FtxuiBackend::Options::ImageColor;
+  if (s == "auto")
+    out = Mode::Auto;
+  else if (s == "kitty")
+    out = Mode::Kitty;
+  else if (s == "sixel")
+    out = Mode::Sixel;
+  else if (s == "color")
+    out = Mode::Color;
+  else if (s == "mono")
+    out = Mode::Mono;
+  else
+    return false;
+  return true;
+}
+
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage:\n"
@@ -134,7 +161,9 @@ int usage(int code) {
                "[--no-mouse] [--component-path DIR]...\n"
                "  ari snapshot <doc.ari> [--prefix P] [--width W] [--height H] [--frames N] "
                "[--ansi]\n"
-               "  ari check    <doc.ari> [--prefix P]\n");
+               "  ari check    <doc.ari> [--prefix P]\n"
+               "run / snapshot also take [--graphics auto|kitty|sixel|color|mono] "
+               "[--image NAME=FILE]...; snapshot [--cell-size WxH]\n");
   return code;
 }
 
@@ -168,6 +197,9 @@ int main(int argc, char **argv) {
   bool ansi = false;
   bool tvision = false; // run on the tvision desktop instead of the FTXUI screen
   cvc::ariadne::FtxuiBackend::RunOptions run;
+  cvc::ariadne::FtxuiBackend::Options look;
+  std::vector<std::pair<std::string, std::string>> images; // --image NAME=FILE
+  int cell_w = 0, cell_h = 0;                              // --cell-size WxH
   for (int i = 2; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&]() -> const char * {
@@ -193,7 +225,28 @@ int main(int argc, char **argv) {
       run.mouse = false;
     else if (!std::strcmp(a, "--ansi"))
       ansi = true;
-    else if (!std::strcmp(a, "--backend")) {
+    else if (!std::strcmp(a, "--graphics")) {
+      const std::string g = next();
+      if (!parse_graphics(g, look.image_color)) {
+        std::fprintf(stderr, "ari: --graphics is auto, kitty, sixel, color or mono, not '%s'\n",
+                     g.c_str());
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--image")) {
+      const std::string spec = next();
+      const std::size_t eq = spec.find('=');
+      if (eq == std::string::npos || eq == 0 || eq + 1 == spec.size()) {
+        std::fprintf(stderr, "ari: --image is NAME=FILE, not '%s'\n", spec.c_str());
+        return 2;
+      }
+      images.emplace_back(spec.substr(0, eq), spec.substr(eq + 1));
+    } else if (!std::strcmp(a, "--cell-size")) {
+      const char *v = next();
+      if (std::sscanf(v, "%dx%d", &cell_w, &cell_h) != 2 || cell_w <= 0 || cell_h <= 0) {
+        std::fprintf(stderr, "ari: --cell-size is WxH in pixels, not '%s'\n", v);
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--backend")) {
       const std::string b = next();
       if (b != "ftxui" && b != "tvision") {
         std::fprintf(stderr, "ari: --backend is ftxui or tvision, not '%s'\n", b.c_str());
@@ -227,8 +280,16 @@ int main(int argc, char **argv) {
   // Declared before the AppRuntime, so it outlives it. A TvisionBackend is an FtxuiBackend in
   // hosted mode; its run() is its own (see below).
   std::unique_ptr<cvc::ariadne::FtxuiBackend> backend =
-      tvision ? std::make_unique<cvc::ariadne::TvisionBackend>()
-              : std::make_unique<cvc::ariadne::FtxuiBackend>();
+      tvision ? std::make_unique<cvc::ariadne::TvisionBackend>(look)
+              : std::make_unique<cvc::ariadne::FtxuiBackend>(look);
+  for (const auto &[name, file] : images) {
+    try {
+      backend->set_image(name, cvc::image::load(file));
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "ari: --image %s: %s\n", file.c_str(), e.what());
+      return 1;
+    }
+  }
   cvc::ariadne::AppRuntime rt(app, prefix);
   rt.set_backend(*backend);
   for (const std::string &d : componentPaths)
@@ -249,10 +310,26 @@ int main(int argc, char **argv) {
     return 0;
 
   if (cmd == "snapshot") {
+    using Mode = cvc::ariadne::FtxuiBackend::Options::ImageColor;
+    const bool pixels =
+        ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel);
+    if (pixels) { // the cell size the images are drawn at: the terminal's, or --cell-size
+      cvc::ariadne::TermGraphics g = cvc::ariadne::gfx::probe_terminal();
+      if (cell_w > 0) {
+        g.cell_w = cell_w;
+        g.cell_h = cell_h;
+      }
+      backend->set_terminal_graphics(g);
+    }
     std::string frame;
     for (int f = 0; f < std::max(1, frames); ++f) {
       rt.drain();
       frame = backend->render_to_string(rt.runtime(), std::max(10, width), height, ansi);
+    }
+    if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
+      const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
+      frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
+              std::to_string(rows + 1) + ";1H";
     }
     std::fputs(frame.c_str(), stdout);
     return 0;

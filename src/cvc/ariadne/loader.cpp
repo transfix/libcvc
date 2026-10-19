@@ -159,7 +159,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "options": {"type": "array", "items": {"type": "string"}},
         "default": {"type": "string"},
         "pos": {"type": "array", "items": {"type": "number"}},
-        "size": {"type": "array", "items": {"type": "number"}},
+        "size": {"type": ["array", "number"], "items": {"type": "number"}},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
         "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
       }

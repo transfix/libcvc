@@ -4243,6 +4243,15 @@ in beside the native-window and wasm surfaces as a third way to present the same
 > rasterizer (tier 3 below) draws it as the terminal backend's background, with the widgets drawn natively over it by
 > FTXUI or tvision, rather than mirroring the ImGui overlay's pixels. Background drags / the wheel steer the camera.
 > Host: `ariadne_terminal`; test: `cvcgl_terminal_scene`. Sixel / Kitty and the golden-image harness (1) remain.
+>
+> **Status (2026-10-19): Kitty and Sixel are built (phasing step 3).** `FtxuiBackend` probes the terminal before FTXUI
+> takes it (kitty query, `CSI 16 t`, DA1; `TIOCGWINSZ` for the cell's pixels) and `Options::image_color` `Auto` picks
+> Kitty, else Sixel, else half-blocks. Kitty images are sent once, out of band, and shown through Unicode placeholder
+> cells, so windows hide them cell-exactly and FTXUI's full repaint redraws them; Sixel bitmaps are re-sent after each
+> draw, clipped to the cells nothing covers. Both serve `draw_image` and the background, so `TerminalScene` renders at
+> the cells' real pixels. The encoders are pure functions (`term_graphics.h`, `ariadne_term_graphics_test`). Remaining:
+> tmux passthrough, Windows / wasm detection (`Auto` stays half-blocks there), and the tvision desktop, which keeps
+> half-blocks because tvision owns the output.
 
 **Phasing.** (1) EGL offscreen + `frameRGB` **golden-image test harness** for the ImGui/VTK backend (v1.x —
 the testability win). (2) The half-block-ANSI rasterizer (a pure RGB→bytes function + tests — no GPU needed

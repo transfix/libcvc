@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cvc/ariadne/bind.h> // sync_scene_visibility
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
@@ -30,6 +31,10 @@ struct TerminalScene::Impl {
   // A drag in progress: which button, and where the pointer was (cells).
   int drag_button = 0;
   int last_x = 0, last_y = 0;
+  // Pixels of the rendered frame per cell, for turning a drag in cells into the camera's pixels.
+  // Half-blocks keep the backend's nominal 8 x 16 cell (the feel of a GUI drag); pixel graphics use
+  // the frame's own, so a map pan keeps the grabbed point under the pointer.
+  double px_per_col = 8.0, px_per_row = 16.0;
 
   Impl(cvc::app &app, ari::FtxuiBackend &be, int ss, const std::string &prefix)
       : backend(be), supersample(std::max(1, ss)), scene(app, prefix),
@@ -72,11 +77,25 @@ void TerminalScene::tick() {
   m_->last_tick = now;
   tick_scene(m_->realized, m_->view.renderer(), dt);
   m_->camera.update(dt);
-  // The terminal's half-block grid: a cell is one pixel wide and two tall (square pixels on a 1:2
-  // cell), times the supersample factor the backend's box filter folds back down.
-  const int ss = m_->supersample;
-  const int w = std::max(2, m_->backend.screen_width() * ss);
-  const int h = std::max(2, m_->backend.screen_height() * 2 * ss);
+  // The size the backend draws the screen from (FtxuiBackend::image_raster). Half-blocks: a cell is
+  // one pixel wide and two tall (square pixels on a 1:2 cell), times the supersample factor the
+  // backend's box filter folds back down. Kitty / Sixel: the cells' real pixels (Kitty capped at
+  // the backend's max_image_pixels), so no supersampling.
+  using Mode = ari::FtxuiBackend::Options::ImageColor;
+  const Mode mode = m_->backend.image_mode();
+  const bool pixels = mode == Mode::Kitty || mode == Mode::Sixel;
+  const int cols = std::max(1, m_->backend.screen_width());
+  const int rows = std::max(1, m_->backend.screen_height());
+  int w = 0, h = 0;
+  m_->backend.image_raster(cols, rows, w, h);
+  if (!pixels) {
+    w *= m_->supersample;
+    h *= m_->supersample;
+  }
+  w = std::max(2, w);
+  h = std::max(2, h);
+  m_->px_per_col = pixels ? double(w) / cols : 8.0;
+  m_->px_per_row = pixels ? double(h) / rows : 16.0;
   if (m_->view.frameWidth() != w || m_->view.frameHeight() != h)
     m_->view.resize(w, h);
   std::vector<unsigned char> rgb = m_->view.frameRGB(); // renders; rows bottom-up
@@ -91,7 +110,6 @@ void TerminalScene::tick() {
 bool TerminalScene::handle_input(const ari::TermEvent &e) {
   if (!m_->have_scene || e.kind != ari::TermEvent::Kind::Mouse)
     return false;
-  constexpr int kCellPxW = 8, kCellPxH = 16; // the backend's nominal cell, for mouseLook's pixels
   switch (e.mouse) {
   case ari::TermEvent::Mouse::Press:
     if (e.button != 1 && e.button != 2)
@@ -106,7 +124,8 @@ bool TerminalScene::handle_input(const ari::TermEvent &e) {
   case ari::TermEvent::Mouse::Move:
     if (!m_->drag_button)
       return false;
-    m_->camera.mouseLook((e.x - m_->last_x) * kCellPxW, (e.y - m_->last_y) * kCellPxH);
+    m_->camera.mouseLook(static_cast<int>(std::lround((e.x - m_->last_x) * m_->px_per_col)),
+                         static_cast<int>(std::lround((e.y - m_->last_y) * m_->px_per_row)));
     m_->last_x = e.x;
     m_->last_y = e.y;
     return true;
