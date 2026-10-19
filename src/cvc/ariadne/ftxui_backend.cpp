@@ -338,9 +338,9 @@ struct FtxuiBackend::Impl {
   // ---- across frames ---------------------------------------------------------------------------
 
   struct Win {
-    int x = 0, y = 0;   // top-left cell, as placed (by the document, the persisted geometry, a drag)
+    int x = 0, y = 0; // top-left cell, as placed (by the document, the persisted geometry, a drag)
     int sx = 0, sy = 0; // where it is drawn this frame: x / y kept on the current screen
-    int w = 0, h = 0; // outer size in cells when `sized`
+    int w = 0, h = 0;   // outer size in cells when `sized`
     bool sized = false;
     bool placed = false;
     bool seeded = false;
