@@ -301,7 +301,7 @@ public:
   vehicle_desc get_vehicle(vehicle_id id) const;
   // Tune a running vehicle, from the next step on. These may change:
   //   steering         max_steer, max_steer_rate
-  //   the driver       max_accel, max_decel
+  //   the driver       max_accel, max_decel, max_speed
   //   resistance       drag_coefficient, frontal_area, air_density, rolling_resistance
   //   the powertrain   engine_max_torque, engine_min_rpm, engine_max_rpm, shift_up_rpm,
   //                    shift_down_rpm, shift_up_rpm_light, shift_down_rpm_light,

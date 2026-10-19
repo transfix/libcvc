@@ -527,7 +527,16 @@ def test_long_calls_release_the_gil():
     _assert_releases_gil("partition_parts", lambda: pycvc.partition_parts(parts, 50.0))
     dense = _terrain(320)  # 204800 triangles
     _assert_releases_gil("content_hash", lambda: pycvc.content_hash(dense))
-    img = pycvc.image(1536, 1024, pycvc.image.RGBA, pycvc.image.u8)
+    # Sized to this machine: a fast runner built a fixed 1536 x 1024 in 17 ms, under the 20 ms the
+    # check needs. Double the side until one untimed build takes 0.15 s (at most 4096 x 6144).
+    side = 1024
+    while True:
+        img = pycvc.image(side * 3 // 2, side, pycvc.image.RGBA, pycvc.image.u8)
+        t = time.perf_counter()
+        pycvc.build_image_pyramid(img)
+        if time.perf_counter() - t >= 0.15 or side >= 4096:
+            break
+        side *= 2
     _assert_releases_gil("build_image_pyramid", lambda: pycvc.build_image_pyramid(img))
 
 

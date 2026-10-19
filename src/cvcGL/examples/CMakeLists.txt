@@ -19,6 +19,13 @@ add_executable(ariadne_hello ariadne_hello.cpp)
 target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 
+# ariadne_terminal — the same documents in a TERMINAL: widgets through libcvc's terminal backends
+# (FTXUI, or tvision with --backend tvision) and the scene rendered offscreen by cvcGL's
+# TerminalScene, drawn behind them as half-block cells (roadmap §16.6). No window or display.
+add_executable(ariadne_terminal ariadne_terminal.cpp)
+target_link_libraries(ariadne_terminal PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_terminal MODULES ${VTK_LIBRARIES})
+
 # ariadne_stream — the Phase-3 streaming "holy grail": one live video stream shown both as the main
 # scene (a `type: stream` quad filling the viewport) AND in a draggable ImGui `type: stream_view`
 # widget window, wired from stream.ari. Synthetic test pattern by default (headless-verifiable),
@@ -26,6 +33,15 @@ vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 add_executable(ariadne_stream ariadne_stream.cpp)
 target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
+
+# ariadne_conference — the conference host bundle (roadmap §8): ariadne_hello + the five stream/
+# media registrations (stream-open/info/close, gl-bind-stream, capture-camera/-audio, play-audio,
+# type: stream, type: stream_view). It opens NOTHING in C++; conference_media.ari drives the whole
+# capture → stream → render/play pipeline from the DSL program lane. Synthetic video + a 440 Hz tone
+# by default (headless-verifiable); real devices with a CVC_ENABLE_SDL build.
+add_executable(ariadne_conference ariadne_conference.cpp)
+target_link_libraries(ariadne_conference PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_conference MODULES ${VTK_LIBRARIES})
 
 # lsystem_forest is now a PURE .ari demo (lsystem_forest.ari): the island/trees/sea/sky are the
 # cvcGL L-system node types (forest_trees/wave_sea/cloud_sky) + the shader presets (terrain_bump/

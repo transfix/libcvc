@@ -19,6 +19,13 @@ pending_data_work::~pending_data_work() {
     next = std::move(next->outer);
 }
 
+bool waits_on_data_work(const evaluator_state &st) {
+  for (const pending_data_work *w = st.data_work.get(); w; w = w->outer.get())
+    if (w->what != pending_data_work::kind::heap_measure)
+      return true;
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // ctor
 // ---------------------------------------------------------------------------

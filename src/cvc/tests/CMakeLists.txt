@@ -8,6 +8,7 @@ add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
+add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
@@ -34,6 +35,7 @@ add_executable(state_distributed_bench_test state_distributed_bench_test.cpp)
 add_executable(state_message_test state_message_test.cpp)
 add_executable(state_bounded_queue_test state_bounded_queue_test.cpp)
 add_executable(state_transport_inproc_test state_transport_inproc_test.cpp)
+add_executable(room_intrinsics_test room_intrinsics_test.cpp)
 # state_transport_ipc is POSIX-only (UDS + poll); skip on Windows.
 if(NOT WIN32)
   add_executable(state_transport_ipc_test state_transport_ipc_test.cpp)
@@ -104,13 +106,30 @@ add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
+add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
+add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CMakeLists.txt
+cvc_setup_physics_replay(physics_replay_test)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
+add_executable(physics_plant_host_test physics_plant_host_test.cpp)
+# det_math is internal to libcvc, so its test compiles it in, with the same no-contraction flag.
+add_executable(physics_det_math_test physics_det_math_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp)
+target_include_directories(physics_det_math_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cvc/physics)
+if(NOT MSVC)
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
 add_executable(nav_world_planes_test nav_world_planes_test.cpp)
+add_executable(nav_vehicle_route_test nav_vehicle_route_test.cpp)
+add_executable(nav_route_follower_test nav_route_follower_test.cpp)
 add_executable(system_macro_headers_test system_macro_headers_test.cpp)
 add_executable(state_brick_frustum_test state_brick_frustum_test.cpp)
 add_executable(state_conflict_ring_test state_conflict_ring_test.cpp)
@@ -125,6 +144,7 @@ if(CVC_ENABLE_GRPC)
   add_executable(state_stream_transport_grpc_test state_stream_transport_grpc_test.cpp)
   add_executable(stream_bridge_test stream_bridge_test.cpp)
   add_executable(stream_relay_test stream_relay_test.cpp)
+  add_executable(room_media_test room_media_test.cpp)
 endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
@@ -203,6 +223,7 @@ set(TEST_TARGETS
   ariadne_loader_test
   ariadne_runtime_test
   ariadne_bind_test
+  ariadne_ftxui_test
   x11_macro_headers_test
   net_http_client_test
   uri_http_cache_test
@@ -229,6 +250,7 @@ set(TEST_TARGETS
   state_message_test
   state_bounded_queue_test
   state_transport_inproc_test
+  room_intrinsics_test
   state_blob_transport_integration_test
   state_distributed_delegation_integration_test
   state_link_test
@@ -256,13 +278,19 @@ set(TEST_TARGETS
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
+  nav_dyn_bike_test
   nav_terrain_test
   nav_binding_test
   physics_parity_test
+  physics_replay_test
   physics_pose_tracker_test
+  physics_det_math_test
+  physics_plant_host_test
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
+  nav_vehicle_route_test
+  nav_route_follower_test
   system_macro_headers_test
   state_data_hydrator_test
   state_node_telemetry_test
@@ -476,6 +504,13 @@ target_link_libraries(ariadne_loader_test
 )
 
 target_link_libraries(ariadne_runtime_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_ftxui_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1091,6 +1126,13 @@ target_link_libraries(state_transport_inproc_test
     GTest::gtest_main
 )
 
+target_link_libraries(room_intrinsics_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 if(NOT WIN32)
   target_link_libraries(state_transport_ipc_test
     PRIVATE
@@ -1512,6 +1554,13 @@ target_link_libraries(nav_plant_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_dyn_bike_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_terrain_test
   PRIVATE
     cvc
@@ -1540,6 +1589,19 @@ target_link_libraries(physics_field_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_det_math_test
+  PRIVATE
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_plant_host_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_pose_tracker_test
   PRIVATE
     cvc
@@ -1555,6 +1617,20 @@ target_link_libraries(geometry_height_field_test
 )
 
 target_link_libraries(world_geometry_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_route_follower_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_vehicle_route_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1662,6 +1738,17 @@ if(TARGET stream_relay_test)
   list(APPEND TEST_TARGETS stream_relay_test)
 endif()
 
+if(TARGET room_media_test)
+  target_link_libraries(room_media_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(room_media_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS room_media_test)
+endif()
+
 # Set C++ standard to match the library
 target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
@@ -1729,6 +1816,7 @@ target_compile_features(state_distributed_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_message_test PRIVATE cxx_std_17)
 target_compile_features(state_bounded_queue_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_inproc_test PRIVATE cxx_std_17)
+target_compile_features(room_intrinsics_test PRIVATE cxx_std_17)
 if(NOT WIN32)
   target_compile_features(state_transport_ipc_test PRIVATE cxx_std_17)
   target_compile_features(state_reconnect_resilience_test PRIVATE cxx_std_17)
@@ -1797,13 +1885,18 @@ target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
+target_compile_features(physics_det_math_test PRIVATE cxx_std_17)
+target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
+target_compile_features(nav_vehicle_route_test PRIVATE cxx_std_17)
+target_compile_features(nav_route_follower_test PRIVATE cxx_std_17)
 target_compile_features(system_macro_headers_test PRIVATE cxx_std_20)
 target_compile_features(state_brick_frustum_test PRIVATE cxx_std_17)
 target_compile_features(state_conflict_ring_test PRIVATE cxx_std_17)
@@ -1940,6 +2033,7 @@ cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_runtime_test)
+cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
@@ -2154,6 +2248,7 @@ cvc_discover_tests(state_distributed_bench_test)
 cvc_discover_tests(state_message_test)
 cvc_discover_tests(state_bounded_queue_test)
 cvc_discover_tests(state_transport_inproc_test)
+cvc_discover_tests(room_intrinsics_test)
 if(NOT WIN32)
   # Same fork()+IPC timing profile as state_exec_multiprocess_test and
   # state_multiprocess_ipc_test, both of which #121 moved off the parallel
@@ -2232,13 +2327,18 @@ cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
+cvc_discover_tests(nav_dyn_bike_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(physics_parity_test)
 cvc_discover_tests(physics_pose_tracker_test)
+cvc_discover_tests(physics_det_math_test)
+cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)
+cvc_discover_tests(nav_vehicle_route_test)
+cvc_discover_tests(nav_route_follower_test)
 cvc_discover_tests(system_macro_headers_test)
 cvc_discover_tests(state_brick_frustum_test)
 cvc_discover_tests(state_conflict_ring_test)
@@ -2262,10 +2362,18 @@ endif()
 if(TARGET stream_relay_test)
   cvc_discover_tests(stream_relay_test)
 endif()
+if(TARGET room_media_test)
+  cvc_discover_tests(room_media_test)
+endif()
 # procedural_geometry_test uses plain main(), not gtest, so register it with
 # a direct add_test() and record it for the registration guard below.
 add_test(NAME procedural_geometry_test COMMAND procedural_geometry_test)
 set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS procedural_geometry_test)
+# physics_replay_test (plain main()): the checked-in trace, step by step; 77 is its skip when
+# the build has no cross-platform-deterministic Jolt.
+add_test(NAME physics_replay_test COMMAND physics_replay_test ${CVC_PHYSICS_REPLAY_TRACE})
+set_tests_properties(physics_replay_test PROPERTIES SKIP_RETURN_CODE 77)
+set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS physics_replay_test)
 if(TARGET hdf5_test)
   cvc_discover_tests(hdf5_test)
 endif()

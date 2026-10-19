@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cvc/ariadne/ariadne.h>              // register_action_intrinsics
 #include <cvc/ariadne/stream/audio_sources.h> // audio_f32_bytes (size an audio_pcm frame)
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
@@ -290,6 +290,21 @@ void register_stream_intrinsics(cvc::app &app) {
 stream::stream *document_stream(se::document_scope *doc, const std::string &token) {
   stream_table *tbl = doc_streams(doc);
   return tbl ? tbl->find(token) : nullptr;
+}
+
+// Hand an already-open stream to the document's owning table (see the header). Mirrors what
+// (stream-open) does after stream::open, so the stream is torn down with the document and reachable
+// by the other (stream-*) / media verbs by its token.
+std::string own_document_stream(se::document_scope *doc,
+                                std::unique_ptr<cvc::ariadne::stream::stream> s) {
+  if (!s)
+    return std::string();
+  stream_table *tbl = doc_streams(doc);
+  if (!tbl)
+    return std::string(); // s is destroyed here
+  const std::string token = s->token();
+  tbl->own(std::move(s));
+  return token;
 }
 
 } // namespace ariadne

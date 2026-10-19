@@ -293,7 +293,8 @@ the evaluator's: it makes the call at its own level, in a data step (`call_funct
   `init`), hands its place to the call it makes, so a chain of them runs in constant space. A
   call with more to do after its callee (a constructor returns the instance once `init` is done)
   waits, a link of pending work per level, like a function that calls itself before doing
-  anything else. Pending work is not yet part of a process's measured heap (`max_memory`).
+  anything else. Pending work and what its jobs hold count toward the process's measured heap,
+  so `max_memory` stops such a chain too.
 - **Cost.** A call the evaluator makes costs about 300 ns more than one made directly (MSVC
   Release, `state_exec_bench_test` `NativeCallThroughput`). The one direct level keeps `apply`
   and `send` at their old cost, and only a native call two levels down pays it. Constructing a

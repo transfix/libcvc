@@ -207,6 +207,9 @@ option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
 # with the libcvc SDK bundle. The libcvc recipe builds with CVC_BUILD_CLI=OFF;
 # a plain in-tree build still builds it by default.
 option(CVC_BUILD_CLI "Build the cvc command-line executable" ON)
+# `ari` (src/ari) runs a .ari document in the terminal through the FTXUI backend. Like the CLI it
+# ships as its own cvcpkg package (cvcpkg/recipes/ari); the libcvc recipe builds with it OFF.
+option(CVC_BUILD_ARI "Build the ari terminal runner for Ariadne documents" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
 option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
 

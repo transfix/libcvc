@@ -65,6 +65,7 @@ app world_clock        fixed_dt = 0.01 s (100 Hz)
 | **P6a — The scene binding** (started) | `world::states`, `pose_tracker` (the last two states, interpolated at the clock's fraction), cvcGL `physics_scene_binding` (nodes and merged-mesh groups); then the city bundle loader in the library (one source for the scene's and the world's static geometry) and Ariadne `physics:` / `body:` specs | A bound node's transform is exactly the interpolated pose; off-thread presents reach the owner thread; removed bodies and destroyed nodes unbind; one writer per actor |
 | **P7 — wasm-mt replay** | The libcvc recipe declares Jolt for wasm-mt; a native trace replayed under node | The same `state_hash` native and in wasm |
 | **P8 — The differentiable vehicle** | See below | See below |
+| **P9 — The plant by default** | The plant plans with each vehicle's own limits and size; a `plant_host` picks the plant by name, in code or the state tree; the demos and cvcdbg drive Humvees on Jolt by default | A sim_world sized with nav's defaults drives within the vehicle's envelope (done); the demos' Humvees reach their goals in Austin, which waits on vehicle-aware routes and P8 |
 
 The Jolt `wasm-mt` column is published (`joltphysics` 5.6.0+cvc.5). Jolt's own smoke test already
 reproduces the native state hash under node, with a thread pool, bit for bit.
@@ -283,4 +284,51 @@ P4 adds three things to measure and contain the drift:
     - grl-snam-dbg `gen-episodes` / `eval` on Jolt, a `KinematicsRecord` schema bump and
       energy in the scorecards;
     - cvcdbg `--plant` / `--vehicle` / `--clock` and the HUD.
-- **P7–P8** are not started.
+- **P7 done.** A native trace gives the same `state_hash` at every step in wasm-mt under node.
+  - The trace is 1240 steps: the golden scene, a Humvee, and a RoboRacer in mud and by water
+    (`physics_replay_test`, CI job `physics-wasm`).
+  - The wasm-mt publish now installs `joltphysics` (the recipe already declared it), and fails if
+    the build loses Jolt.
+  - Getting there took two fixes. The first: Jolt's wheels hashed uninitialized contact fields
+    until they first landed. The second: libm's tan, atan, tanh, expm1, pow, sin, cos, atan2 and
+    asin, which differ by an ULP between libms, were replaced by `det_math.h` in everything that
+    feeds the hash.
+- **P8** is in progress.
+  - P8b's first item is merged.
+  - P8a, the dynamic vehicle, is done: `dyn_bike_step` and `bike_control` (docs/NAV_TRAINING.md).
+    It passes its gates: gradient checks, the kinematic limit against `bike_step`, the skid
+    modes and the stopping envelope. GRL-SNAM's torch twin matches its goldens to 1e-9
+    (CVC-Lab/GRL-SNAM#121).
+  - Next: `rollout_kind::dynamic` in both trainers (P8b). P8c is not started.
+- **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
+  and physics?").**
+  - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle
+    or a point mass, sized at the trained metric's numbers: at Austin's 0.05 per metre, a 3 m
+    disc, 18 m/s and 30 m/s^2.
+  - In libcvc:
+    - `vehicle_desc::max_speed`, which the driver model holds (Humvee 24.6 m/s, RoboRacer
+      10 m/s);
+    - `nav_plant` gives `sim_world` each vehicle's acceleration, top speed, cornering limit and
+      body (`plan_with_vehicle`, on by default);
+    - `plant_host` chooses the plant by name;
+    - `nav_plant` backs up from rest when nav asks, rather than braking against its springs'
+      jitter;
+    - the drive sends a plant only what its own integration would apply (`allow_reverse`,
+      `vmax`);
+    - the cvcGL nav demos take `--plant`.
+  - **The demos' default stays the bicycle, for now.** The Austin finale's Humvees drive their
+    routes, then wedge in a corner after act 2 replans them: upright, at full lock, unable to
+    turn a 6.7 m circle out of it. That happens with the plan off too.
+  - `nav_material_demo` shows the same gap. The material layer keeps the bicycle out of the lake,
+    but the Humvee enters it 65 times.
+  - Vehicle routes (R1-R3):
+    - `plan_vehicle_route`, a Hybrid A* over the vehicle's turning circle, body and reverse
+      gear, with multi-point turns;
+    - `route_follower` drives them: the trained drive on the last forward leg, pure pursuit
+      on manoeuvres;
+    - `nav_finale` uses them on a plant. Austin's 8 Humvees drive 5387 m in 900 frames (1903 m
+      on A* routes) and none wedges (7 of 8 did).
+  - Next, before the default flips: training through the vehicle (P8), and the material layer
+    on the vehicle.
+  - Training stays differentiable: its surrogate's parameters should come from the
+    `vehicle_desc` until P8a's `dyn_bike_step` exists.

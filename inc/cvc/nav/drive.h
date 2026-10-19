@@ -141,6 +141,9 @@ struct plant_drive {
   const float *steer_now = nullptr;  // rad
   const float *steer_rate = nullptr; // rad/s
   float max_steer = 0.0f;            // rad; 0 = the drive's delta_max alone
+  // Each vehicle's cornering limit (normalized / s^2), [n], in place of veh_params::a_lat_max;
+  // null keeps it.
+  const float *a_lat = nullptr;
   // Measured plant state as detached modulators (doc 31 D9 H4), [n], either may be null: the
   // agent's gamma (its speed damping) and its hard barriers' weight are multiplied by these,
   // so the drive slows near tire saturation and keeps further from hazards near tipping.
@@ -217,6 +220,10 @@ struct veh_params {
   // to the scalar (a tracked follow-up).
   const float *rr_col = nullptr;      // [n], overrides rr for the single-disc footprint
   const float *body_rr_col = nullptr; // [n], overrides body_rr for the multi-disc footprint
+  // [n * n_body], agent i's disc offsets at [i * n_body, (i + 1) * n_body), in place of the
+  // shared body_offsets: each vehicle's own length (a plant's, sim_world::kPlantDiscs). The CPU
+  // drive only; the CUDA entry points do not read it.
+  const float *body_offsets_col = nullptr;
 
   // MASS (kg). The kinematic bicycle has no dynamics, so the drive itself does NOT read
   // mass; it is carried for the downstream fuel model (fuel = f(accel, mass, material))

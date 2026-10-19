@@ -454,3 +454,92 @@ TEST(HeapBudgetTest, AProcessForksDuringAMeasurement) {
   EXPECT_GT(sched.get_process_info(pid)->heap_measurements, 0u);
   EXPECT_EQ(std::get<int64_t>(sched.get_result(pid)->v), 400);
 }
+
+// A measurement due in the middle of a call in flight (here collections.map calling a DSL
+// function) runs on top of it, waiting on no frame, and the call goes on after it. The process
+// cannot fork meanwhile: a frame still waits on the call.
+TEST(HeapBudgetTest, AMeasurementRunsOnTopOfACallInFlight) {
+  cvc::app app;
+  auto env = builtins::make_default_environment();
+  env->set("keep", value_t{int_list(200)});
+  stackless_evaluator ev(env);
+  process p;
+  p.max_memory = std::size_t{64} << 20;
+  p.state = ev.create_state(parse("(length (collections.map keep (lambda (x) (+ x 1))))"));
+  p.state.global_env = env;
+  p.state.data_step_nodes = 8;
+  p.state.stats.start();
+  while (!(p.state.data_work && p.state.data_work->calling))
+    ASSERT_FALSE(ev.step(p.state));
+  const std::shared_ptr<pending_data_work> call = p.state.data_work;
+  const std::size_t frames = p.state.stack.size();
+  heap_after_step(p, std::size_t{1} << 20, 0); // allocations call for a measurement
+  ASSERT_TRUE(p.state.data_work);
+  ASSERT_EQ(p.state.data_work->what, pending_data_work::kind::heap_measure);
+  EXPECT_EQ(p.state.data_work->outer, call);
+  EXPECT_EQ(p.state.data_work->base, frames);
+  EXPECT_TRUE(waits_on_data_work(p.state));
+  while (!p.state.heap_measured) {
+    ASSERT_FALSE(ev.step(p.state));
+    ASSERT_EQ(p.state.stack.size(), frames); // nothing else runs meanwhile
+  }
+  EXPECT_EQ(p.state.data_work, call);
+  heap_after_step(p, 0, 0);
+  EXPECT_GT(p.heap_bytes, 0u);
+  EXPECT_FALSE(p.heap_measuring);
+  while (!ev.step(p.state)) {
+  }
+  EXPECT_EQ(std::get<int64_t>(p.state.result.v), 200);
+}
+
+// --- work that never finishes is still held to max_memory ------------------------------------
+//
+// A call the evaluator makes can wait on another like it for as long as the budget lasts: a class
+// whose init is its own constructor, or a closure init that constructs again. A measurement counts
+// that work, with what its jobs hold (each waiting call's function and arguments), so max_memory
+// stops the process; max_steps is only a backstop here.
+
+const char *const kSelfInit = "(begin (defclass P) (set-attr P.__cls_dict__ \"init\" P) (P))";
+const char *const kInitConstructs = "(begin (defclass P (init (self) (P))) (P))";
+
+TEST(HeapBudgetTest, TheWorkAProcessWaitsOnCounts) {
+  // After a hundred steps of kSelfInit, ~180 constructions wait, the k-th on a call with k
+  // arguments: some 16000 values held by jobs alone.
+  stackless_evaluator ev(builtins::make_default_environment());
+  process p;
+  p.state = ev.create_state(parse(kSelfInit));
+  for (int i = 0; i < 100; ++i)
+    ASSERT_FALSE(ev.step(p.state));
+  EXPECT_GT(measure_heap_share(p), 10000 * sizeof(value_t));
+}
+
+TEST(HeapBudgetTest, ACallChainThatNeverEndsRunsOutOfMemory) {
+  // kSelfInit's arguments grow quadratically: 2 MiB within a few hundred steps.
+  for (const char *script : {kSelfInit, kInitConstructs}) {
+    SCOPED_TRACE(script);
+    const uint64_t backstop = script == kSelfInit ? 1000 : 1000000;
+    {
+      async_scheduler sched;
+      execute_options opts;
+      opts.max_memory = std::size_t{2} << 20;
+      opts.max_steps = backstop;
+      const int pid = sched.execute(std::string(script), opts);
+      sched.sync_run();
+      EXPECT_EQ(sched.get_exit_error(pid).value_or(""), "memory_limit_exceeded");
+      EXPECT_GT(sched.get_process_info(pid)->heap_measurements, 0u);
+    }
+    {
+      scheduler sched;
+      execute_options opts;
+      opts.max_memory = std::size_t{2} << 20;
+      opts.max_steps = backstop;
+      const int pid = sched.execute(std::string(script), opts);
+      sched.run();
+      const auto info = sched.get_process_info(pid);
+      ASSERT_TRUE(info);
+      EXPECT_EQ(info->status, process_status::killed);
+      EXPECT_LT(info->step_count, backstop); // memory, not the step budget
+      EXPECT_GE(info->heap_memory, opts.max_memory);
+    }
+  }
+}

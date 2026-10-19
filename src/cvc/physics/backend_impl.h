@@ -19,6 +19,8 @@
 #ifndef __CVC_PHYSICS_BACKEND_IMPL_H__
 #define __CVC_PHYSICS_BACKEND_IMPL_H__
 
+#include "det_math.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cvc/physics/vehicle.h>
@@ -114,7 +116,7 @@ using medium_probe = std::function<bool(const vec3 &contact, const vec3 &up, whe
 inline double bekker_sinkage(double load, double width, double diameter, double modulus) {
   if (!(load > 0.0) || !(width > 0.0) || !(diameter > 0.0) || !(modulus > 0.0))
     return 0.0;
-  return std::pow(3.0 * load / (2.0 * width * modulus * std::sqrt(diameter)), 2.0 / 3.0);
+  return det::pow_two_thirds(3.0 * load / (2.0 * width * modulus * std::sqrt(diameter)));
 }
 
 class world_backend {

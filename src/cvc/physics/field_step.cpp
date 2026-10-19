@@ -10,6 +10,8 @@
 
 #include "field_step.h"
 
+#include "det_math.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -186,7 +188,7 @@ double area_across(const field_body &fb, const vec3 &d) {
     break;
   }
   // The sphere of the same volume.
-  const double r = std::cbrt(3.0 * fb.volume / (4.0 * kPi));
+  const double r = det::cbrt(3.0 * fb.volume / (4.0 * kPi));
   return kPi * r * r;
 }
 
@@ -602,7 +604,7 @@ void field_set::apply(world_backend &be, const world_config &cfg) {
     // Drag integrated implicitly in its own rate: a step never carries the body
     // past the stuff's velocity, however light the body or dense the fluid.
     const double x = rate * cfg.fixed_dt / fb.mass;
-    const double k = x > 1e-9 ? -std::expm1(-x) / x : 1.0;
+    const double k = x > 1e-9 ? -det::expm1(-x) / x : 1.0;
     field_load load;
     load.force = push_f + drag_f * k;
     load.torque = push_t + drag_t * k;

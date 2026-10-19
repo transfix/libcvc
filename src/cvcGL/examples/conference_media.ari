@@ -1,0 +1,75 @@
+# conference_media.ari — the conference app's MEDIA layer, driven entirely from the DSL.
+#
+# This is the local precursor to the multi-party room (roadmap §4a → §4b): one document that, with
+# NO host-side C++ opening anything, captures a camera and a mic and plays them back — proving the
+# whole capture → stream → render/play pipeline runs from the .ari program lane. The room verbs
+# (§4b) will publish these same tokens into a room; here they stay local.
+#
+# Runs HEADLESS by default: a synthetic moving test pattern for video and a 440 Hz tone for audio
+# (so it needs no camera/mic/speakers and verifies in CI). With a CVC_ENABLE_SDL build, run the host
+# with --camera and it opens your real webcam for the self-view (it alone knows the device's
+# resolution); the audio stays the 440 Hz tone here.
+#
+#   ariadne_conference conference_media.ari                               # synthetic, navigable window
+#   ariadne_conference conference_media.ari --camera                      # real webcam self-view (SDL)
+#   ariadne_conference conference_media.ari --offscreen --png conf.png    # one captured frame
+
+meta:
+  name: Ariadne conference — media
+  author: cvc
+  min_libcvc: 3.4.0
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: My camera
+    id: self
+    pos: [40, 40]
+    size: [540, 600]
+    children:
+      - text: "My camera + mic, captured and played from the .ari program lane:"
+      # Reactive status: flips once the on_tick guard has opened the streams.
+      - text: "status"
+        bind: (if (= (state-get "started") "1") (if (= (state-get "cam_live") "1") "● LIVE — real camera + 440 Hz tone" "● LIVE — synthetic video + 440 Hz tone") "starting…")
+      - separator
+      # The live camera, routed to a reactive stream_view widget. It shows a static placeholder
+      # until the stream named by this token goes live, then the frames — and it re-resolves the
+      # token each frame, so it picks up the stream the on_tick lane opens AFTER this realizes.
+      # Bound to the token the on_tick lane stores in state once the camera opens (the token is
+      # <doc-root>.streams.<id>, not knowable statically here). The widget re-resolves each frame,
+      # so it draws nothing until the stream goes live, then shows the frames.
+      - type: stream_view
+        bind: cam_token
+        size: 480
+
+# on_tick (§4): the program lane. stream-open needs the document scope (it fails on the load-time
+# init: lane), so the pipeline is opened here, ONCE, guarded by a state flag. After this runs, the
+# stream_view above binds `streams.selfcam` and the speaker player drains `streams.selfmic`.
+on_tick: |
+  (if (= (state-get "started") "1") #f
+    (begin
+      (state-set "started" "1")
+      ; ── video: unless the host opened a REAL camera (ariadne_conference --camera sets cam_live=1
+      ; + cam_token, since only C++ knows the device's resolution), open a 640x480 rgba8 stream + a
+      ; synthetic producer (headless) and stash its token. The stream_view widget binds cam_token
+      ; either way — the host's camera token, or this synthetic one. expected_subscribers covers the
+      ; widget (+ headroom); synthetic w/h MUST match the open w/h or start_producer rejects frames.
+      (if (= (state-get "cam_live") "1") #f
+        (begin
+          (set cam (stream-open (dict "id" "selfcam" "codec" "rgba8" "w" 640 "h" 480
+                                      "expected_subscribers" 3)))
+          (state-set "cam_token" (get-attr cam "token"))
+          (stream-capture-camera (get-attr cam "token")
+            (dict "synthetic" #t "w" 640 "h" 480 "hz" 30))))
+      ; ── audio: open an f32 48kHz mono stream (subscriber_depth >= 8 so the player attaches),
+      ; attach a 440 Hz tone producer (headless), then play it to the speakers ──
+      (set mic (stream-open (dict "id" "selfmic" "codec" "f32" "rate" 48000 "ch" 1
+                                  "frames_per_chunk" 1024 "subscriber_depth" 8
+                                  "expected_subscribers" 2)))
+      (stream-capture-audio (get-attr mic "token")
+        (dict "rate" 48000 "ch" 1 "frames" 1024 "tone" (dict "hz" 440)))
+      (stream-play-audio (get-attr mic "token"))))

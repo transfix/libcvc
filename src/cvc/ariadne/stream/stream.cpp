@@ -65,6 +65,7 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
 
   std::unique_ptr<stream> s(new stream(ctx, p.id));
   s->scope_ = p.root_path;
+  s->format_ = p.format;
   // §4.1 scoping. The registry key / descriptor path is the canonical
   // <root_path>.streams.<id>. The seq/evt event channels are scoped through the
   // SAME chroot resolver a (msg-recv ...) in this document uses, computed ONCE

@@ -615,6 +615,35 @@ TEST(AriadneInput, PointerProgramReceivesMouseEvent) {
   EXPECT_EQ(cvc::state::instance(app)("ptr.btn").value(), "1");
 }
 
+// on_signal: a signal the host routes through post_signal wakes the document's signal resident with
+// {kind, signal, source}. With no program set, post_signal says so (false) and the host applies the
+// default; with one, it returns true and the program runs in the next drain, never before.
+TEST(AriadneInput, SignalProgramReceivesPostedSignal) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  EXPECT_FALSE(rt.has_signal_program());
+  EXPECT_FALSE(rt.post_signal("SIGINT", "terminal")); // nobody handles it: the host's default
+  rt.set_signal_program("(begin (state-set \"sig.name\" (get-attr event \"signal\")) "
+                        "(state-set \"sig.kind\" (get-attr event \"kind\")) "
+                        "(state-set \"sig.source\" (get-attr event \"source\")))");
+  EXPECT_TRUE(rt.has_signal_program());
+  EXPECT_TRUE(rt.post_signal("SIGINT", "terminal"));
+  EXPECT_NE(cvc::state::instance(app)("sig.name").value(), "SIGINT"); // not run yet
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("sig.name").value(), "SIGINT");
+  EXPECT_EQ(cvc::state::instance(app)("sig.kind").value(), "signal");
+  EXPECT_EQ(cvc::state::instance(app)("sig.source").value(), "terminal");
+  // Every signal arrives (no coalescing), each its own activation.
+  EXPECT_TRUE(rt.post_signal("SIGQUIT"));
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("sig.name").value(), "SIGQUIT");
+  EXPECT_EQ(cvc::state::instance(app)("sig.source").value(), "host");
+  rt.set_signal_program(""); // clearing it hands signals back to the host
+  EXPECT_FALSE(rt.post_signal("SIGINT"));
+}
+
 // §4.6 widget-level on_click: any widget can carry an on_click program; the walk enqueues it when
 // the backend reports the item was clicked (Backend::item_clicked -> ImGui::IsItemClicked natively
 // and on wasm). Fired like a Button's on: (queued in render(), run in drain()) — NOT the SDL
