@@ -379,11 +379,11 @@ diff::bike_step_bwd(F, ox, oy, th, sp, gx, gy, al, be, ga, v, g_ox1, g_oy1, g_th
   world-frame force into the drive frame unscaled, as cvcdbg's `comm_ext_sample` does, passes
   F_drive = F_world. Its Jacobian still needs the chain rule: dF/do = (dF/dw) / S. Passing dF/dw
   instead is off by a factor of S.
-- **The dynamic plant:** `bike_control`, `bike_control_bwd`, `dyn_bike_step` and
-  `dyn_bike_step_bwd` take the same pair.
+- **The dynamic plants:** `bike_control`, `bike_control_bwd`, `dyn_bike_step`,
+  `dyn_bike_step_bwd`, `dyn4_bike_step` and `dyn4_bike_step_bwd` take the same pair.
 
 **A trajectory** (`diff::bike_rollout_ext` / `bike_rollout_ext_bwd`, `inc/cvc/nav/ext_rollout.h`;
-the dynamic twin is `dyn_rollout_ext`):
+the dynamic twins are `dyn_rollout_ext` and, on four wheels and a ground, `dyn4_rollout_ext`):
 
 - **Per-step inputs:** the goal and the coefficients may change at every step (the carrot, and
   coef_mlp's per-tick output). They are exogenous: recorded, with no derivative through the pose.
@@ -486,9 +486,23 @@ occupancy-cell centres, which are the SDF field's grid nodes, where the bilinear
 kink: a central difference there averages two cells' slopes. Jittered off the nodes, the
 controller check above went from 5e-2 to 6.2e-5.
 
+**The external force on four wheels.** `dyn4_bike_step` and `dyn4_bike_step_bwd` take the
+`ext_in` pair, and `dyn4_rollout_ext` / `dyn4_rollout_ext_bwd` (`ext_rollout.h`) are the trajectory
+and its reverse, on one loop with `dyn_rollout_ext`. Measured (`nav_dyn_4w_test`, `Dyn4Ext`):
+
+- A zero or null force is the step without one, forward and backward, and a rollout without a
+  force is the plain steps, bit for bit.
+- Over 10 steps on rolling ground (a swell of 0.03 L at a 4 L wavelength, grip from 0.65 to 0.95),
+  32 RoboRacers in the city, an affine force: the reverse against central differences is 1.7e-3
+  (initial position), 4.1e-3 (F) and 3.7e-3 (beta) sampled every step; 9.5e-4, 4.4e-3 and 7.4e-3
+  held for 3.
+- The position's difference is 3e-4, as for the single-track twin. At 1e-3, which is 3% of the
+  RoboRacer's 0.035 length in the city's frame, two trajectories straddle a switch in the
+  controller. One reads -55 against the reverse's -0.50 there, and -0.506 at 3e-4.
+
 Not yet:
-- the external-force port on this plant (with transfix/libcvc#728);
-- the GRL-SNAM torch twin, held to the golden above;
+- the GRL-SNAM torch twin's external-force rollout on four wheels (the plant's twin is
+  CVC-Lab/GRL-SNAM#123);
 - the anti-roll bars, the unsprung masses and wheel spin.
 
 ## Scene source

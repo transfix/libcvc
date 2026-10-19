@@ -22,11 +22,13 @@
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/dyn_4w.h>
 #include <cvc/nav/dyn_bike.h>
+#include <cvc/nav/ext_rollout.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -778,4 +780,270 @@ TEST(Dyn4, Golden) {
               1e-9 * std::max(1.0, std::max(std::fabs(now[k]), std::fabs(golden[k]))))
         << "value " << k << " (case " << k / (2 * n + 2) << "): golden " << golden[k] << ", now "
         << now[k];
+}
+
+// ── The external-force port on the four-wheel vehicle: dyn4_bike_step's ext_in and
+// dyn4_rollout_ext (ext_rollout.h), for cvcdbg's comm-network trainer ──
+
+namespace {
+
+// The trainer's city and a RoboRacer on four wheels (nav_plant::dyn4_params_at, the city's veh_L).
+struct city4 {
+  cvc::nav::training_scene sc;
+  cvc::nav::field_stack fs;
+  diff::field F;
+  bike_veh v;
+  dyn4_params p;
+};
+std::unique_ptr<city4> make_city4() {
+  std::unique_ptr<city4> c(new city4{cvc::nav::city_scene(48), {}, {}, {}, {}});
+  c->fs = c->sc.field();
+  diff::field &F = c->F;
+  F.data = c->fs.data;
+  F.H = c->fs.H;
+  F.W = c->fs.W;
+  F.S = static_cast<float>(c->fs.S);
+  F.cx = static_cast<float>(c->fs.cx);
+  F.cy = static_cast<float>(c->fs.cy);
+  F.mnx = static_cast<float>(c->fs.mnx);
+  F.mny = static_cast<float>(c->fs.mny);
+  F.mxx = static_cast<float>(c->fs.mxx);
+  F.mxy = static_cast<float>(c->fs.mxy);
+  const cvc::nav::train_config tc;
+  bike_veh &v = c->v;
+  v.rr = c->sc.rr;
+  v.d_hat = c->sc.d_hat;
+  v.vmax = c->sc.vmax;
+  v.L = tc.veh_L;
+  v.delta_max = tc.veh_delta_max;
+  v.a_max = tc.veh_a_max;
+  v.a_lat_max = tc.veh_a_lat_max;
+  v.k_steer = tc.veh_k_steer;
+  v.hdt = c->sc.dt;
+  v.allow_reverse = tc.veh_allow_reverse ? 1 : 0;
+  c->p = cvc::physics::nav_plant::dyn4_params_at(cvc::physics::vehicle_desc::roboracer(), tc.veh_L);
+  return c;
+}
+
+// Rolling ground at the vehicle's scale: a swell of amplitude 0.03 L and wavelength 4 L, and
+// grip that varies between 0.65 and 0.95, smooth everywhere, so a trajectory's gradient runs
+// through the ground under every wheel.
+struct swell_ground {
+  double A = 0.0, k = 1.0;
+  template <class S> void at(S wx, S wy, S &mu, S &height) const {
+    height = S(A) * diff::s_sin(S(k) * wx) * diff::s_cos(S(k) * wy);
+    mu = S(0.8) + S(0.15) * diff::s_sin(S(k) * (wx + wy));
+  }
+};
+swell_ground swell(float L) {
+  swell_ground g;
+  g.A = 0.03 * L;
+  g.k = 2.0 * 3.14159265358979323846 / (4.0 * L);
+  return g;
+}
+
+// Agents from the scene's starts toward their goals: jittered off the SDF's grid nodes (see
+// StepGradcheckThroughTheController), headings near the goal's, speeds spread over the range.
+std::vector<dyn4_state<float>> starts4(const city4 &c, int n, std::vector<float> &goal) {
+  std::vector<float> o(2 * n), g(2 * n);
+  c.sc.sample_starts_goals(n, 5, o.data(), g.data());
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+  std::vector<dyn4_state<float>> r(static_cast<std::size_t>(n));
+  goal.assign(2 * n, 0.0f);
+  for (int i = 0; i < n; ++i) {
+    dyn4_state<float> s{};
+    s.x = o[2 * i] + 0.04f * u(rng);
+    s.y = o[2 * i + 1] + 0.04f * u(rng);
+    s.psi = std::atan2(g[2 * i + 1] - s.y, g[2 * i] - s.x) + 0.3f * static_cast<float>(i % 5 - 2);
+    s.vx = c.v.vmax * static_cast<float>(i % 7) / 7.0f;
+    // A goal 0.8 ahead: inside the acceleration clamp, and never passed in 10 steps (the
+    // DiffExtRollout checks' reasons).
+    goal[2 * i] = s.x + 0.8f * std::cos(s.psi);
+    goal[2 * i + 1] = s.y + 0.8f * std::sin(s.psi);
+    r[i] = s;
+  }
+  return r;
+}
+
+// F = A o + b + c, with J = A (ext_rollout's affine check force).
+struct affine4 {
+  float A[4] = {0.8f, -0.3f, 0.4f, 0.6f};
+  float b[2] = {0.1f, -0.2f};
+  float c[2] = {0.0f, 0.0f};
+};
+void affine4_sample(void *user, int, float ox, float oy, float *f, float *J) {
+  const affine4 &a = *static_cast<const affine4 *>(user);
+  f[0] = a.A[0] * ox + a.A[1] * oy + a.b[0] + a.c[0];
+  f[1] = a.A[2] * ox + a.A[3] * oy + a.b[1] + a.c[1];
+  for (int k = 0; k < 4; ++k)
+    J[k] = a.A[k];
+}
+
+} // namespace
+
+// A zero force is the step without one, forward and backward, and a rollout with no force is the
+// plain steps, bit for bit.
+TEST(Dyn4Ext, AZeroOrNullForceIsTheStepWithoutOne) {
+  const std::unique_ptr<city4> c = make_city4();
+  const swell_ground ground = swell(c->v.L);
+  std::vector<float> goal;
+  const std::vector<dyn4_state<float>> s0 = starts4(*c, 32, goal);
+  const float al = 0.6f, be = 1.8f, ga = 0.9f;
+  dyn4_state<float> w;
+  for (int k = 0; k < dyn4_state<float>::size; ++k)
+    w[k] = 0.1f * static_cast<float>(k % 5) - 0.2f;
+  for (std::size_t i = 0; i < s0.size(); ++i) {
+    const diff::ext_in zero;
+    dyn4_state<float> a1, b1;
+    diff::dyn4_bike_step(c->F, s0[i], goal[2 * i], goal[2 * i + 1], al, be, ga, c->v, c->p, ground,
+                         a1);
+    diff::dyn4_bike_step(c->F, s0[i], goal[2 * i], goal[2 * i + 1], al, be, ga, c->v, c->p, ground,
+                         b1, &zero);
+    for (int k = 0; k < dyn4_state<float>::size; ++k)
+      EXPECT_EQ(a1[k], b1[k]);
+    dyn4_state<float> g0{}, g1{};
+    float c0[3], c1[3], gf[2];
+    diff::dyn4_bike_step_bwd(c->F, s0[i], goal[2 * i], goal[2 * i + 1], al, be, ga, c->v, c->p,
+                             ground, w, g0, c0[0], c0[1], c0[2]);
+    diff::dyn4_bike_step_bwd(c->F, s0[i], goal[2 * i], goal[2 * i + 1], al, be, ga, c->v, c->p,
+                             ground, w, g1, c1[0], c1[1], c1[2], &zero, gf);
+    for (int k = 0; k < dyn4_state<float>::size; ++k)
+      EXPECT_EQ(g0[k], g1[k]);
+    for (int k = 0; k < 3; ++k)
+      EXPECT_EQ(c0[k], c1[k]);
+
+    const int T = 12;
+    std::vector<float> gl(2 * T), coef(3 * T);
+    for (int t = 0; t < T; ++t) {
+      gl[2 * t] = goal[2 * i];
+      gl[2 * t + 1] = goal[2 * i + 1];
+      coef[3 * t] = al;
+      coef[3 * t + 1] = be;
+      coef[3 * t + 2] = ga;
+    }
+    diff::dyn4_tape tape;
+    diff::dyn4_rollout_ext(c->F, c->v, c->p, ground, s0[i], gl.data(), coef.data(), T,
+                           diff::bike_ext_fn{}, tape);
+    ASSERT_EQ(tape.state.size(), static_cast<std::size_t>(T + 1));
+    EXPECT_FALSE(tape.has_ext);
+    dyn4_state<float> s = s0[i];
+    for (int t = 0; t < T; ++t) {
+      dyn4_state<float> o;
+      diff::dyn4_bike_step(c->F, s, gl[2 * t], gl[2 * t + 1], al, be, ga, c->v, c->p, ground, o);
+      for (int k = 0; k < dyn4_state<float>::size; ++k)
+        EXPECT_EQ(tape.state[t + 1][k], o[k]);
+      s = o;
+    }
+  }
+}
+
+// dyn4_rollout_ext's trajectory is dyn4_bike_step's with the force sampled every `hold` steps and
+// held, and its reverse matches central differences over 10 steps on the rolling ground: dL/d
+// (initial position), dL/dF (through an offset added to F at every step) and dL/dbeta at one
+// step, with L = sum_t w_t . state_t. The position's difference is 3e-4, 1% of the RoboRacer's
+// length in the city's frame, as for the dynamic twin (DiffExtRollout): at 1e-3, two of the 32
+// trajectories straddle a switch in the controller and the difference jumps (one reads -55 against
+// the reverse's -0.50, and -0.506 at 3e-4). F's and beta's stay at 1e-3, above float's rounding.
+TEST(Dyn4Ext, TheRolloutIsItsStepsAndItsReverseMatchesDifferences) {
+  const std::unique_ptr<city4> c = make_city4();
+  const swell_ground ground = swell(c->v.L);
+  std::vector<float> goal0;
+  const std::vector<dyn4_state<float>> s0 = starts4(*c, 32, goal0);
+  const int T = 10, k_beta = 4, n = dyn4_state<float>::size;
+  const float eps = 1e-3f, eps_o = 3e-4f, ux = 0.6f, uy = 0.8f;
+  std::vector<dyn4_state<float>> w(static_cast<std::size_t>(T + 1));
+  {
+    std::mt19937 rng(4);
+    std::uniform_real_distribution<float> u(-0.5f, 0.5f);
+    for (dyn4_state<float> &x : w)
+      for (int k = 0; k < n; ++k)
+        x[k] = u(rng);
+  }
+  for (const int hold : {1, 3}) {
+    double num[3] = {0, 0, 0}, den[3] = {0, 0, 0};
+    for (std::size_t i = 0; i < s0.size(); ++i) {
+      std::vector<float> goal(2 * T), coef(3 * T);
+      for (int t = 0; t < T; ++t) {
+        goal[2 * t] = goal0[2 * i];
+        goal[2 * t + 1] = goal0[2 * i + 1];
+        coef[3 * t] = 0.6f;
+        coef[3 * t + 1] = 1.8f;
+        coef[3 * t + 2] = 0.9f;
+      }
+      const auto run = [&](float dx, float dy, float cx, float cy, const std::vector<float> &cf,
+                           diff::dyn4_tape &tape) {
+        affine4 af;
+        af.c[0] = cx;
+        af.c[1] = cy;
+        diff::bike_ext_fn fn;
+        fn.sample = affine4_sample;
+        fn.user = &af;
+        fn.hold = hold;
+        dyn4_state<float> s = s0[i];
+        s.x += dx;
+        s.y += dy;
+        diff::dyn4_rollout_ext(c->F, c->v, c->p, ground, s, goal.data(), cf.data(), T, fn, tape);
+        double acc = 0.0;
+        for (int t = 0; t <= T; ++t)
+          for (int k = 0; k < n; ++k)
+            acc += static_cast<double>(w[t][k]) * tape.state[t][k];
+        return acc;
+      };
+      diff::dyn4_tape tape, tp, tm;
+      run(0, 0, 0, 0, coef, tape);
+      ASSERT_TRUE(tape.has_ext);
+      // The trajectory is the steps with the held force.
+      {
+        affine4 af;
+        dyn4_state<float> s = tape.state[0];
+        diff::ext_in x;
+        for (int t = 0; t < T; ++t) {
+          if (t % hold == 0) {
+            float F[2], J[4];
+            affine4_sample(&af, t, s.x, s.y, F, J);
+            x.fx = F[0];
+            x.fy = F[1];
+          }
+          dyn4_state<float> s1;
+          diff::dyn4_bike_step(c->F, s, goal[2 * t], goal[2 * t + 1], 0.6f, 1.8f, 0.9f, c->v, c->p,
+                               ground, s1, &x);
+          for (int k = 0; k < n; ++k)
+            EXPECT_EQ(tape.state[t + 1][k], s1[k]);
+          EXPECT_EQ(tape.sampled_at[t], t - t % hold);
+          s = s1;
+        }
+      }
+      std::vector<float> g_fext(2 * T), g_coef(3 * T);
+      dyn4_state<float> g_init;
+      diff::dyn4_rollout_ext_bwd(c->F, c->v, c->p, ground, tape, goal.data(), coef.data(), w.data(),
+                                 g_fext.data(), g_coef.data(), &g_init);
+      const double fd0 = (run(eps_o * ux, eps_o * uy, 0, 0, coef, tp) -
+                          run(-eps_o * ux, -eps_o * uy, 0, 0, coef, tm)) /
+                         (2.0 * eps_o);
+      num[0] += std::fabs(g_init.x * ux + g_init.y * uy - fd0);
+      den[0] += std::fabs(fd0);
+      double gc = 0.0;
+      for (int t = 0; t < T; ++t)
+        gc += g_fext[2 * t] * ux + g_fext[2 * t + 1] * uy;
+      const double fdc =
+          (run(0, 0, eps * ux, eps * uy, coef, tp) - run(0, 0, -eps * ux, -eps * uy, coef, tm)) /
+          (2.0 * eps);
+      num[1] += std::fabs(gc - fdc);
+      den[1] += std::fabs(fdc);
+      std::vector<float> cp = coef, cm = coef;
+      cp[3 * k_beta + 1] += eps;
+      cm[3 * k_beta + 1] -= eps;
+      const double fdb = (run(0, 0, 0, 0, cp, tp) - run(0, 0, 0, 0, cm, tm)) / (2.0 * eps);
+      num[2] += std::fabs(g_coef[3 * k_beta + 1] - fdb);
+      den[2] += std::fabs(fdb);
+    }
+    std::printf("  four wheels, hold %d, %d steps: dL/dinit %.2e, dL/dF %.2e, dL/dbeta %.2e "
+                "(relative to central differences)\n",
+                hold, T, num[0] / den[0], num[1] / den[1], num[2] / den[2]);
+    for (int k = 0; k < 3; ++k) {
+      EXPECT_GT(den[k], 0.0) << "check " << k << " has no gradient to compare";
+      EXPECT_LT(num[k] / den[k], 5e-2) << "check " << k << ", hold " << hold;
+    }
+  }
 }

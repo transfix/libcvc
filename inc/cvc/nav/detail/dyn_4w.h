@@ -373,29 +373,31 @@ CVC_HD inline void dyn4_plant_vjp(const dyn4_params &p, const bike_veh &v, const
 }
 
 // One step under the trained controller, and its backward: bike_control's commands from the
-// rear axle's pose and the speed vx.
+// rear axle's pose and the speed vx. An external force (ext_in, diff_rollout.h) enters the
+// controller as it does for bike_step and dyn_bike_step; null is the step without one.
 template <class G>
 CVC_HD inline void dyn4_bike_step(const field &f, const dyn4_state<float> &s, float gx, float gy,
                                   float al, float be, float ga, const bike_veh &v,
-                                  const dyn4_params &p, const G &ground, dyn4_state<float> &o) {
+                                  const dyn4_params &p, const G &ground, dyn4_state<float> &o,
+                                  const ext_in *ext = nullptr) {
   float delta_cmd, a_cmd;
-  bike_control(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, delta_cmd, a_cmd);
+  bike_control(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, delta_cmd, a_cmd, ext);
   dyn4_plant<float>(p, v, ground, s, delta_cmd, a_cmd, o);
 }
 
 template <class G>
-CVC_HD inline void dyn4_bike_step_bwd(const field &f, const dyn4_state<float> &s, float gx,
-                                      float gy, float al, float be, float ga, const bike_veh &v,
-                                      const dyn4_params &p, const G &ground,
-                                      const dyn4_state<float> &g_o, dyn4_state<float> &g_s,
-                                      float &gal, float &gbe, float &gga) {
+CVC_HD inline void
+dyn4_bike_step_bwd(const field &f, const dyn4_state<float> &s, float gx, float gy, float al,
+                   float be, float ga, const bike_veh &v, const dyn4_params &p, const G &ground,
+                   const dyn4_state<float> &g_o, dyn4_state<float> &g_s, float &gal, float &gbe,
+                   float &gga, const ext_in *ext = nullptr, float *g_fext = nullptr) {
   float delta_cmd, a_cmd;
-  bike_control(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, delta_cmd, a_cmd);
+  bike_control(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, delta_cmd, a_cmd, ext);
   float g_dc, g_ac;
   dyn4_plant_vjp<float>(p, v, ground, s, delta_cmd, a_cmd, g_o, g_s, g_dc, g_ac);
   float gox, goy, gth, gsp;
   bike_control_bwd(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, g_dc, g_ac, gox, goy, gth, gsp,
-                   gal, gbe, gga);
+                   gal, gbe, gga, ext, g_fext);
   g_s.x += gox;
   g_s.y += goy;
   g_s.psi += gth;

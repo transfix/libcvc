@@ -32,13 +32,17 @@
 //   hold > 1, a window's dL/dF_ext is summed and goes through J at the step where F was sampled.
 // - A null `sample` is the rollout without a force, bit for bit (the ext_in pointer is null).
 // - Host only (std::vector). One agent per call: batch on threads; agents are independent.
+// - dyn_rollout_ext and dyn4_rollout_ext are the same for the dynamic vehicles (dyn_bike_step,
+//   dyn4_bike_step), their state the plant's.
 
 #ifndef __CVC_NAV_EXT_ROLLOUT_H__
 #define __CVC_NAV_EXT_ROLLOUT_H__
 
 #include <cvc/nav/detail/diff_rollout.h>
+#include <cvc/nav/detail/dyn_4w.h>
 #include <cvc/nav/detail/dyn_bike.h>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -172,23 +176,31 @@ inline void bike_rollout_ext_bwd(const field &f, const bike_veh &v, const bike_t
       g_init[k] = a[k];
 }
 
-// The dynamic vehicle's twin (dyn_bike_step: the same controller into dyn_plant): the state is
-// dyn_state (x, y, psi, vx, vy, r, delta, a), and the force works the same way.
-struct dyn_tape {
+// The dynamic vehicles' twins: dyn_bike_step (P8a's single track, dyn_bike.h) and dyn4_bike_step
+// (P8d's four wheels, dyn_4w.h), the same controller into their plants. The state is the
+// plant's (dyn_state, dyn4_state) and the force works the same way. One tape and one loop serve
+// both (plant_tape, detail::plant_rollout_ext).
+template <class State> struct plant_tape {
   int T = 0;
   bool has_ext = false;
   int steer = 1;
-  std::vector<dyn_state<float>> state; // [T+1]
-  std::vector<float> fext;             // [T*2]
-  std::vector<float> jac;              // [T*4]
-  std::vector<int> sampled_at;         // [T]
+  std::vector<State> state;    // [T+1]
+  std::vector<float> fext;     // [T*2]
+  std::vector<float> jac;      // [T*4]
+  std::vector<int> sampled_at; // [T]
 };
+typedef plant_tape<dyn_state<float>> dyn_tape;
+typedef plant_tape<dyn4_state<float>> dyn4_tape;
 
-inline void dyn_rollout_ext(const field &f, const bike_veh &v, const dyn_bike_params &p,
-                            const dyn_state<float> &s0, const float *goal, const float *coef, int T,
-                            const bike_ext_fn &ext, dyn_tape &tape, float grade = 0.0f) {
+namespace detail {
+
+// The forward: step(t, state_t, ext or null, state_{t+1}) drives the plant.
+template <class State, class Step>
+inline void plant_rollout_ext(const char *who, const State &s0, int T, const bike_ext_fn &ext,
+                              plant_tape<State> &tape, const Step &step) {
   if (T < 0 || ext.hold < 1)
-    throw std::invalid_argument("cvc::nav::diff::dyn_rollout_ext: needs T >= 0 and hold >= 1");
+    throw std::invalid_argument(std::string("cvc::nav::diff::") + who +
+                                ": needs T >= 0 and hold >= 1");
   tape.T = T;
   tape.has_ext = ext.sample != nullptr;
   tape.steer = ext.steer;
@@ -200,7 +212,7 @@ inline void dyn_rollout_ext(const field &f, const bike_veh &v, const dyn_bike_pa
   e.steer = ext.steer;
   int at = 0;
   for (int t = 0; t < T; ++t) {
-    const dyn_state<float> &st = tape.state[t];
+    const State &st = tape.state[t];
     if (ext.sample && t % ext.hold == 0) {
       float F[2] = {0.0f, 0.0f}, J[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       ext.sample(ext.user, t, st.x, st.y, F, J);
@@ -213,29 +225,28 @@ inline void dyn_rollout_ext(const field &f, const bike_veh &v, const dyn_bike_pa
     tape.fext[2 * t] = e.fx;
     tape.fext[2 * t + 1] = e.fy;
     tape.sampled_at[t] = at;
-    dyn_bike_step(f, st, goal[2 * t], goal[2 * t + 1], coef[3 * t], coef[3 * t + 1],
-                  coef[3 * t + 2], v, p, grade, tape.state[t + 1], ext.sample ? &e : nullptr);
+    step(t, st, ext.sample ? &e : nullptr, tape.state[t + 1]);
   }
 }
 
-// g_state[T+1] in; g_fext[T*2], g_coef[T*3] and g_init out, each optional (null).
-inline void dyn_rollout_ext_bwd(const field &f, const bike_veh &v, const dyn_bike_params &p,
-                                const dyn_tape &tape, const float *goal, const float *coef,
-                                const dyn_state<float> *g_state, float *g_fext, float *g_coef,
-                                dyn_state<float> *g_init, float grade = 0.0f) {
+// The reverse: step_bwd(t, state_t, dL/dstate_{t+1}, ext or null, dL/dstate_t, gal, gbe, gga,
+// dL/dF_ext or null) is the step's backward.
+template <class State, class StepBwd>
+inline void plant_rollout_ext_bwd(const plant_tape<State> &tape, const State *g_state,
+                                  float *g_fext, float *g_coef, State *g_init,
+                                  const StepBwd &step_bwd) {
   const int T = tape.T;
-  dyn_state<float> a = g_state[T];
+  State a = g_state[T];
   float win[2] = {0.0f, 0.0f};
   for (int t = T - 1; t >= 0; --t) {
     ext_in e;
     e.fx = tape.fext[2 * t];
     e.fy = tape.fext[2 * t + 1];
     e.steer = tape.steer;
-    dyn_state<float> gs{};
+    State gs{};
     float gal = 0.0f, gbe = 0.0f, gga = 0.0f, gf[2] = {0.0f, 0.0f};
-    dyn_bike_step_bwd(f, tape.state[t], goal[2 * t], goal[2 * t + 1], coef[3 * t], coef[3 * t + 1],
-                      coef[3 * t + 2], v, p, grade, a, gs, gal, gbe, gga,
-                      tape.has_ext ? &e : nullptr, tape.has_ext ? gf : nullptr);
+    step_bwd(t, tape.state[t], a, tape.has_ext ? &e : nullptr, gs, gal, gbe, gga,
+             tape.has_ext ? gf : nullptr);
     if (g_fext) {
       g_fext[2 * t] = gf[0];
       g_fext[2 * t + 1] = gf[1];
@@ -255,11 +266,66 @@ inline void dyn_rollout_ext_bwd(const field &f, const bike_veh &v, const dyn_bik
         win[0] = win[1] = 0.0f;
       }
     }
-    for (int k = 0; k < dyn_state<float>::size; ++k)
+    for (int k = 0; k < State::size; ++k)
       a[k] = g_state[t][k] + gs[k];
   }
   if (g_init)
     *g_init = a;
+}
+
+} // namespace detail
+
+inline void dyn_rollout_ext(const field &f, const bike_veh &v, const dyn_bike_params &p,
+                            const dyn_state<float> &s0, const float *goal, const float *coef, int T,
+                            const bike_ext_fn &ext, dyn_tape &tape, float grade = 0.0f) {
+  detail::plant_rollout_ext(
+      "dyn_rollout_ext", s0, T, ext, tape,
+      [&](int t, const dyn_state<float> &st, const ext_in *e, dyn_state<float> &o) {
+        dyn_bike_step(f, st, goal[2 * t], goal[2 * t + 1], coef[3 * t], coef[3 * t + 1],
+                      coef[3 * t + 2], v, p, grade, o, e);
+      });
+}
+
+// g_state[T+1] in; g_fext[T*2], g_coef[T*3] and g_init out, each optional (null).
+inline void dyn_rollout_ext_bwd(const field &f, const bike_veh &v, const dyn_bike_params &p,
+                                const dyn_tape &tape, const float *goal, const float *coef,
+                                const dyn_state<float> *g_state, float *g_fext, float *g_coef,
+                                dyn_state<float> *g_init, float grade = 0.0f) {
+  detail::plant_rollout_ext_bwd(
+      tape, g_state, g_fext, g_coef, g_init,
+      [&](int t, const dyn_state<float> &st, const dyn_state<float> &g_o, const ext_in *e,
+          dyn_state<float> &gs, float &gal, float &gbe, float &gga, float *gf) {
+        dyn_bike_step_bwd(f, st, goal[2 * t], goal[2 * t + 1], coef[3 * t], coef[3 * t + 1],
+                          coef[3 * t + 2], v, p, grade, g_o, gs, gal, gbe, gga, e, gf);
+      });
+}
+
+// The four-wheel vehicle's, on the ground G its plant samples (dyn_4w.h).
+template <class G>
+inline void dyn4_rollout_ext(const field &f, const bike_veh &v, const dyn4_params &p,
+                             const G &ground, const dyn4_state<float> &s0, const float *goal,
+                             const float *coef, int T, const bike_ext_fn &ext, dyn4_tape &tape) {
+  detail::plant_rollout_ext(
+      "dyn4_rollout_ext", s0, T, ext, tape,
+      [&](int t, const dyn4_state<float> &st, const ext_in *e, dyn4_state<float> &o) {
+        dyn4_bike_step(f, st, goal[2 * t], goal[2 * t + 1], coef[3 * t], coef[3 * t + 1],
+                       coef[3 * t + 2], v, p, ground, o, e);
+      });
+}
+
+// g_state[T+1] in; g_fext[T*2], g_coef[T*3] and g_init out, each optional (null).
+template <class G>
+inline void dyn4_rollout_ext_bwd(const field &f, const bike_veh &v, const dyn4_params &p,
+                                 const G &ground, const dyn4_tape &tape, const float *goal,
+                                 const float *coef, const dyn4_state<float> *g_state, float *g_fext,
+                                 float *g_coef, dyn4_state<float> *g_init) {
+  detail::plant_rollout_ext_bwd(
+      tape, g_state, g_fext, g_coef, g_init,
+      [&](int t, const dyn4_state<float> &st, const dyn4_state<float> &g_o, const ext_in *e,
+          dyn4_state<float> &gs, float &gal, float &gbe, float &gga, float *gf) {
+        dyn4_bike_step_bwd(f, st, goal[2 * t], goal[2 * t + 1], coef[3 * t], coef[3 * t + 1],
+                           coef[3 * t + 2], v, p, ground, g_o, gs, gal, gbe, gga, e, gf);
+      });
 }
 
 } // namespace diff
