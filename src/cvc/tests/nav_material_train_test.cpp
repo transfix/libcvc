@@ -197,3 +197,29 @@ TEST(NavMaterialTrain, FullChainGradcheckBicycle) {
   cfg.bicycle.vmax = 1.5f;
   full_chain_gradcheck(cfg, "bicycle");
 }
+
+// The same chain through the dynamic vehicle (P8b): the bicycle's controller and limits,
+// a unit-mass vehicle of its wheelbase with grip (mu g 8.8) above them.
+TEST(NavMaterialTrain, FullChainGradcheckDynamic) {
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::dynamic;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+  cvc::nav::diff::dyn_bike_params &d = cfg.dynamic;
+  d.m = 1.0f;
+  d.lf = d.lr = 0.15f;
+  d.Iz = d.m * d.lf * d.lr;
+  d.h = 0.05f;
+  d.g = 9.81f;
+  d.mu = 0.9f;
+  d.B_f = 10.0f;
+  d.B_r = 12.0f;
+  d.tau_steer = 0.05f;
+  d.tau_drive = 0.05f;
+  d.eps = 0.05f;
+  d.v_blend = 0.1f;
+  d.v_width = 0.03f;
+  full_chain_gradcheck(cfg, "dynamic");
+}

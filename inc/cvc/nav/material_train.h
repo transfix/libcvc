@@ -90,6 +90,7 @@ struct material_batch {
 enum class material_integrator {
   surrogate, // the point-mass surrogate (integrate_surrogate_material), the reference trainer's
   bicycle,   // the deployed kinematic bicycle (integrate_bicycle_material), P8b
+  dynamic,   // the bicycle's controller on the dynamic vehicle (integrate_dynamic_material), P8b
 };
 
 struct material_loss_config {
@@ -105,6 +106,11 @@ struct material_loss_config {
   // yet).
   material_integrator integrator = material_integrator::surrogate;
   bicycle_material_params bicycle; // vehicle limits, in the batch's length units
+  // integrator == dynamic: the vehicle, in the batch's length units, its wheelbase
+  // bicycle.L (cvc::physics::nav_plant::dyn_bike_params_at(desc, bicycle.L)); `bicycle`
+  // stays the controller's limits. The vehicle starts at rest in its further state, and
+  // the vT L_vel compares is the rear axle's world velocity.
+  diff::dyn_bike_params dynamic{};
   multi_start_params multi; // ms_h/ms_dt_mult/tau + start sampling (margin/mass synced)
   int num_threads = 0;
 };

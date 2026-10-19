@@ -209,10 +209,31 @@ At a given rate the dynamic rollout learns more than the bicycle. Its reach here
 the kinematic sim, so it is not the verdict. P8b's gate is on the Jolt plant: a policy trained
 on the dynamic model must beat the point-mass-trained one over 20 or more paired seeds.
 
+**The material trainer too**: `material_loss_config::integrator = material_integrator::dynamic`.
+
+- `material_loss_config::dynamic` is the vehicle; `bicycle` stays the controller's limits.
+- `integrate_dynamic_material` (`material.h`) drives the same pieces into `dyn_plant` in place of
+  the kinematic update: the force law with its material forces, pure pursuit, the governors and
+  `d_cap`. Arc length and cumulative risk follow the dynamic path.
+- Its VJP joins the plant's dual-number VJP to the bicycle's hand-written controller reverse. The
+  reverse's new controller-only mode adds `0` in the kinematic case, so the bicycle's sums are
+  unchanged.
+- `L_vel` compares the rear axle's world velocity.
+- `L_multi` runs on the dynamic vehicle too (`multi_start_penalty_dynamic`).
+
+Measured (`nav_material_bike_rollout_test`, `nav_material_train_test`):
+
+- The rollout's VJP checks against finite differences on 40 coefficients: worst 1.5e-2 short,
+  4.0e-2 without reverse. The directional check is 3e-6 at a step of 1e-3; at 2e-3 the step
+  crosses a controller branch, as the bicycle's does.
+- `L_multi` on the dynamic vehicle: worst 4.8e-4.
+- The full loss-to-weights chain: dir_rel 7.0e-4 over 64 weights, the same as on the bicycle.
+- It is thread-deterministic, and the controller drives the dynamic vehicle to its goals.
+
 Not yet:
 - that Jolt gate;
-- `material_train`'s dynamic integrator;
-- pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only);
+- pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
+  turns on only the bicycle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
 
 ## Scene source
