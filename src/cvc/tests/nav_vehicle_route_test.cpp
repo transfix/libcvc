@@ -178,7 +178,7 @@ TEST(VehicleRoute, ReportsAGoalItCannotReach) {
   EXPECT_EQ(r.poses.front().x, 20.0);
 }
 
-// A city of 40 m blocks and 12 m streets, 384 x 384 cells of 1 m: the route is found in
+// A city of 40 m blocks and 12 m streets, 384 x 384 cells of 1 m: the weighted route is found in
 // interactive time.
 TEST(VehicleRoute, PlansAcrossACity) {
   ground g(383, 383);
@@ -197,10 +197,13 @@ TEST(VehicleRoute, PlansAcrossACity) {
     std::printf("  across the city, heuristic x%.1f: %.0f m, %d cusps, %d expansions, %.1f ms\n", w,
                 r.length, r.cusps, r.expansions, ms);
     expect_drivable(g, humvee(), r, 1.5);
-    if (w == 1.0)
+    if (w == 1.0) {
       exact_length = r.length;
-    else
+    } else {
       EXPECT_LE(r.length, w * exact_length + 1e-9) << "weighted A*'s bound";
-    EXPECT_LT(ms, 5000.0);
+      // The weighted search is what makes it interactive. Gated on expansions, not time: the
+      // exact search takes 0.6 s in a Release build and 6 s in a Debug one.
+      EXPECT_LT(r.expansions, 5000);
+    }
   }
 }
