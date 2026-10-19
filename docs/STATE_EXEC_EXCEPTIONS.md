@@ -426,6 +426,23 @@ limits what that process can make the app do for it.
   - The steps are a new `step_kind::async`: they count in `step_count`, and so against
     `max_steps`, next to the eval, read and data steps.
 
+**Measuring it.**
+- **The thread CPU clock:** CPU time comes from `thread_cpu_seconds()`.
+  - On Linux and macOS it reads `CLOCK_THREAD_CPUTIME_ID`.
+  - On Windows it falls back to the steady clock today, so it reads wall time. A kernel that
+    sleeps would then be charged its sleep as CPU time, and its steps.
+  - P3 gives it a Windows implementation:
+    - `QueryThreadCycleTime` for the thread's cycles, converted to seconds at the cycle
+      counter's rate, measured once at startup;
+    - `GetThreadTimes` (100 ns units, updated at the clock tick, about 15.6 ms) where the cycle
+      counter can't be used.
+  - That also corrects the CPU half of `max_time` for ordinary steps on Windows, which charges
+    wall time today (section 5).
+- **Python kernels:** the time a Python kernel waits to take the GIL isn't charged as run time.
+  - It's the host's congestion, like time in the queue.
+  - The host times the acquire and takes the wait off the call's run time.
+  - CPU time needs no adjustment: a thread waiting for the GIL uses none.
+
 **How it meets each budget.**
 - **`max_time`:** it is charged like a time budget, as now: running time for the first half,
   then CPU time for the second.
@@ -435,6 +452,19 @@ limits what that process can make the app do for it.
   - A call's CPU time is charged in full. The per-step cap (`max_time / 32`) keeps a stalled
     step from running a process out of time, and CPU time doesn't count a stall.
 - **`max_steps`:** its steps, as above.
+- **`max_memory`:** the kernel runs under the process's allocation limit.
+  - The host arms an `eval_alloc_guard` on the executor thread with the limit the calling step
+    had: `max_alloc_bytes`, tightened to what is left of `max_memory`. The compute pool carries
+    it into the kernel's fan-out chunks, as it carries the charge account.
+  - An allocation the kernel reports through `eval_alloc_check`, or through the natives it
+    uses, is refused past that limit. The call then raises `MemoryError` at its call site. That
+    is a per-call refusal, which a program can catch (2.5), as for a step.
+  - What the kernel reports allocating is added to the process's `heap_alloc_bytes`, so its
+    next heap measurement comes due sooner. The measurement counts the result once it's back.
+  - An allocation the kernel doesn't report (a plain `std::vector`) isn't seen.
+    `register_async_fn`'s documentation tells kernel authors to report large allocations with
+    `eval_alloc_check`.
+  - A `data_object` passed in (3.7) is shared, not copied, so it isn't charged again.
 - **`max_step_time`** doesn't apply. It protects the host's drain from a step that never ends,
   and an async call doesn't hold a step. A kernel's own limit is its `timeout` option.
 - **Several calls in flight** (futures): each is charged its own run time, CPU time and steps,
@@ -464,6 +494,11 @@ limits what that process can make the app do for it.
 - `async_steps`: the steps charged for them.
 
 `elapsed_time` includes the run time.
+
+**Snapshots.** The counters are saved and restored with the process, along with
+`accumulated_time` and `cpu_time_charged`.
+- A call in flight at a snapshot keeps what the host had charged it so far.
+- After the restore, the call can't resume (3.9), so nothing more is charged for it.
 
 Time a process spends parked for other reasons (`sleep`, `msg-recv`, awaiting a frame) is still
 not charged.
@@ -509,6 +544,14 @@ These are the behaviour changes, each covered by a case in section 6:
 4. A process that fails ends `failed`, not `killed`. Hosts that check `killed` to mean "ended
    badly" check both.
 5. `process_status` gains `failed`. The pycvc `IntEnum` and Ariadne's reporting follow.
+6. **Async calls are charged to the process (3.8).** Today a parked process uses none of its
+   budget.
+   - A process whose calls block, such as a resident making slow HTTP requests, now uses
+     `max_time` while it waits for them.
+   - A process whose calls compute now uses `max_time` and `max_steps` for the work.
+   - Hosts that set `max_time` or `max_steps` on such processes may need larger budgets.
+7. **On Windows, the CPU half of `max_time` charges real CPU time** (3.8, the thread CPU clock),
+   not wall time. A step that was descheduled is no longer charged for the stall there.
 
 P1 already changes two things on the way:
 - On the sync scheduler, a process whose error nothing caught is killed, with the message as its
@@ -632,6 +675,11 @@ them into gtest and pytest cases with these IDs.
 | AS-26 | the AS-18 kernel inline (sync scheduler) | the same charges as AS-18, not the step's capped charge |
 | AS-27 | two 50 ms kernels in a row; between them `state_exec.defaults.limits.async_steps_per_cpu_ms` is set to `0`, with no `load_settings()` | the first call is charged about 50,000 steps and the second one |
 | AS-28 | the rate set to 10 in `state_exec.defaults.limits` and to 100 in `state_exec.schedulers.<id>.limits` | a 50 ms kernel is charged about 5,000 steps (the scheduler's node wins); with `execute_options::async_steps_per_cpu_ms` 1, about 50 |
+| AS-29 | AS-21's sleeping kernel, on Windows | `async_cpu_time` near 0 and a step or a few, as on Linux and macOS (the thread CPU clock) |
+| AS-30 | `max_memory` 1 MiB, a kernel that reports allocating 4 MiB through `eval_alloc_check`, the call inside a `try` | `MemoryError` at the call site, caught; `heap_alloc_bytes` grew by what the kernel reported before the refusal |
+| AS-31 | a kernel fanning out whose chunk reports an allocation past the limit | the same `MemoryError` (the guard reaches the chunks) |
+| AS-32 | a Python kernel that waits 200 ms for the GIL, held by another thread, then runs 50 ms | `async_time` about 0.05 s; the wait isn't charged |
+| AS-33 | a process snapshotted after a 100 ms call, then restored | `async_calls`, `async_time`, `async_cpu_time` and `async_steps` are as before the snapshot |
 
 ## 7. Settled questions
 
@@ -675,3 +723,8 @@ was added on 2026-10-19 (6):
      to no process.
    - Why: a call can't be a way around a process's budget. The kernel does work the program
      asked for, in a process the host bounded.
+   - Also settled the same day:
+     - the process's allocation limit follows a kernel onto its threads (`max_memory`);
+     - a Python kernel's wait for the GIL isn't charged;
+     - the charges survive a snapshot;
+     - Windows gets a real thread CPU clock.
