@@ -88,6 +88,9 @@ class derived from it). Anything else raises `TypeError`. `(raise)` with no argu
 - With no match, the exception keeps unwinding.
 - `Type` is looked up when a catch is tried, not when the `try` starts. An undefined `Type` is
   an error raised at that point (`NameError`), which replaces the exception being matched.
+- In `(catch (X) ...)` the lone symbol is a class when `X` names one where the `try` is, and
+  otherwise the variable of a catch-all.
+- The handler's scope is its own: a `set` in it binds there, as in a `let` body.
 - At least one `catch` or a `finally` is required.
 
 `finally`'s `cleanup...` runs whenever control leaves the `try`:
@@ -114,7 +117,7 @@ fields:
 | `data` | any value the raiser attached (nil by default) |
 | `cause` | the exception being handled when this one was raised (nil otherwise), set automatically |
 | `origin` | where it came from: `"dsl"`, `"builtin"`, `"native"`, `"python"` or `"async"` |
-| `traceback` | a list of strings, innermost last: the expression of each frame being evaluated at the raise, up to 64, function names marked |
+| `traceback` | a list of strings, innermost last: the expression of each frame being evaluated at the raise (a call's starts with the function's name), up to 64, each at most 120 characters |
 
 Origin-specific fields:
 - `native_type`: the C++ exception's type, demangled, for `origin` `native`;
@@ -244,7 +247,17 @@ mid-unwind resumes the unwinding.
 ### 2.8 The recursive evaluator
 
 `evaluator` (the reference evaluator) implements the same forms with C++ exceptions
-(`dsl_exception` for a raise), so the two evaluators agree on every case in section 6.
+(`dsl_exception` for a raise), so the two evaluators agree on every case in section 6 that
+uses only forms it has. It records where an exception was raised in the first frame the
+exception unwinds, rather than catching and rethrowing at each level: on MSVC a rethrow from a
+handler runs on top of the throwing frame's stack, so that grew the stack with every level.
+
+### 2.9 `return`
+
+P1 also makes `return` leave only the function it is in on the stackless evaluator, as on the
+recursive one. Before, `(+ (f) 1)` with `f` returning 5 was 5 there: the unwinding didn't stop
+at the function's body and took the pending `+` with it. A function's body frame is marked
+(`eval_frame::function_body`, kept in snapshots), and a `return` unwinds to it.
 
 ## 3. Long-running native calls
 
@@ -417,6 +430,12 @@ These are the behaviour changes, each covered by a case in section 6:
    badly" check both.
 5. `process_status` gains `failed`. The pycvc `IntEnum` and Ariadne's reporting follow.
 
+P1 already changes two things on the way:
+- On the sync scheduler, a process whose error nothing caught is killed, with the message as its
+  `exit_error`, as on the async scheduler; `run()` still throws the error. Before, the process
+  stayed `running`, and the next `run()` stepped it again.
+- On the stackless evaluator, `return` leaves only the function it is in (2.9).
+
 ## 6. The test list
 
 Each case runs in both evaluators and on both schedulers unless it says otherwise. P1 to P3 turn
@@ -431,13 +450,13 @@ them into gtest and pytest cases with these IDs.
 | EX-3 | `(begin (defclass MyError ValueError) (try (raise (MyError "m")) (catch (ValueError e) (get-attr (get-attr e "__class__") "__name__"))))` | `"MyError"` |
 | EX-4 | `(try (raise (ValueError "v")) (catch (TypeError e) 1))` | uncaught `ValueError` |
 | EX-5 | `(try 7 (catch (e) 1))` | `7` (no raise: the body's value) |
-| EX-6 | `(begin (set log (list)) (try (error "x") (catch (e) (set log (append log (list "c")))) (finally (set log (append log (list "f"))))) log)` | `("c" "f")` |
+| EX-6 | `(begin (set log (list)) (try (error "x") (catch (e) (append log "c")) (finally (append log "f"))) log)` | `("c" "f")` (`append` adds to the list in place) |
 | EX-7 | `(begin (set n 0) (try (try (error "in") (finally (set n 1))) (catch (e) n)))` | `1` (inner finally ran before the outer catch) |
 | EX-8 | `(try (try (error "a") (catch (e) (raise))) (catch (e) (get-attr e "message")))` | `"a"` (bare raise re-raises) |
 | EX-9 | `(try (try (error "a") (catch (e) (error "b"))) (catch (e) (get-attr (get-attr e "cause") "message")))` | `"a"` (cause chained) |
 | EX-10 | `(try (error "a") (finally (error "b")))` | uncaught `RuntimeError "b"` (finally replaces) |
-| EX-11 | `(begin (set g 0) (defun f () (try (return 1) (finally (set g 2)))) (list (f) g))` | `(1 2)` (return runs finally) |
-| EX-12 | `(begin (set g 0) (while #t (try (break 5) (finally (set g 9)))) g)` | `9` |
+| EX-11 | `(begin (set box (dict "g" 0)) (defun f () (try (return 1) (finally (set-attr box "g" 2)))) (list (f) (get-attr box "g")))` | `(1 2)` (return runs finally; a `set` in `f` would bind in `f`'s scope) |
+| EX-12 | `(begin (set g 0) (while #t (try (break 5) (finally (set g 9)))) g)` | `9` (not on the recursive evaluator, which has no `break`) |
 | EX-13 | `(raise 5)` | uncaught `TypeError` |
 | EX-14 | `(try (raise (Exception "m" (dict "k" 1))) (catch (e) (get-attr (get-attr e "data") "k")))` | `1` |
 | EX-15 | `(isinstance (ValueError "v") Exception)`, `(isinstance 5 Exception)` | `#t`, `#f` |
@@ -452,7 +471,7 @@ them into gtest and pytest cases with these IDs.
 | ID | Program | Caught as | Checks |
 |---|---|---|---|
 | UN-1 | `undefined-name` | `NameError` | `origin` `"builtin"` |
-| UN-2 | `((lambda (x) x))` | `TypeError` | the arity message as today |
+| UN-2 | `(begin (set f (lambda (x) x)) (f))`; `((lambda (x) x))` | `TypeError` | the arity message as today; a list in the head position is an invalid head |
 | UN-3 | `(5 1)` | `TypeError` | not callable |
 | UN-4 | `(int "abc")` | `ValueError` | |
 | UN-5 | `(nth (list 1) 5)` | `IndexError` | |
@@ -461,7 +480,7 @@ them into gtest and pytest cases with these IDs.
 | UN-8 | a C++ native throwing `std::invalid_argument` | `ValueError` | `origin` `"native"`, `function` |
 | UN-9 | a C++ native throwing a custom `std::exception` subclass | `NativeError` | `native_type` names it |
 | UN-10 | `(collections.range 1000000000)` | `MemoryError` | the allocation limit, catchable |
-| UN-11 | a lambda, called through `apply`, that raises | caught by a `try` around the `apply` | the native boundary (2.4) |
+| UN-11 | a lambda, called through `apply`, that raises | caught by a `try` around the `apply` | the native boundary (2.4); not on the recursive evaluator, whose natives can't call a lambda |
 | UN-12 | the same through `collections.map` with deep-data slicing on | caught; the job abandoned | |
 | UN-13 | a generator body that raises, advanced by `next` | caught at the `next`; the generator then finished | |
 | UN-14 | a method raising inside `send`, and inside `super` | caught by the caller | |

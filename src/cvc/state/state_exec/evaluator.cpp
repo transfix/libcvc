@@ -1,8 +1,12 @@
+#include "closure_natives.h" // detail::class_constructor
+
 #include <atomic>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/stackless_evaluator.h> // all_special_forms
 #include <thread>
 
 namespace cvc::state_exec {
@@ -71,6 +75,17 @@ value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
     if (on_complete)
       on_complete(result);
     return result;
+  } catch (const dsl_exception &e) {
+    // Nothing caught it: an exception made from a C++ exception is thrown as that exception, a
+    // raised one with where it was raised.
+    stats_.mark_complete();
+    if (e.original())
+      std::rethrow_exception(e.original());
+    if (converted_original_ && same_exception(e.value(), converted_))
+      std::rethrow_exception(converted_original_);
+    value_t exc = e.value();
+    annotate(exc);
+    throw;
   } catch (...) {
     stats_.mark_complete();
     throw;
@@ -122,6 +137,77 @@ void evaluator::check_interrupted() {
 // ---------------------------------------------------------------------------
 
 value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
+  ++generation_;
+  trail_.push_back(&expr);
+  // Pops the trail on the way out. The first one an exception unwinds records where it was
+  // raised, while the trail still has it.
+  struct trail_guard {
+    evaluator &ev;
+    const int unwinding = std::uncaught_exceptions();
+    ~trail_guard() {
+      if (std::uncaught_exceptions() > unwinding && ev.raise_generation_ != ev.generation_)
+        ev.record_raise_point();
+      ev.trail_.pop_back();
+    }
+  } guard{*this};
+  return eval_form(expr, std::move(env));
+}
+
+void evaluator::record_raise_point() noexcept {
+  try {
+    const std::size_t n = trail_.size();
+    raise_trail_.clear();
+    for (std::size_t i = n > kTracebackFrames ? n - kTracebackFrames : 0; i < n; ++i)
+      raise_trail_.push_back(*trail_[i]);
+    raise_handled_ = handling_.empty() ? nil_value : handling_.back().first;
+    raise_generation_ = generation_;
+  } catch (...) { // out of memory: the traceback is what is left of it
+  }
+}
+
+std::optional<value_t> evaluator::caught(const std::exception &e) {
+  if (is_uncatchable(e))
+    return std::nullopt;
+  value_t exc;
+  if (const auto *d = dynamic_cast<const dsl_exception *>(&e)) {
+    exc = d->value();
+  } else {
+    exc = exception_from(e);
+    converted_ = exc;
+    converted_original_ = std::current_exception();
+  }
+  annotate(exc);
+  return exc;
+}
+
+void evaluator::annotate(value_t &exc) {
+  if (const value_t *tb = field(exc, "traceback"); !tb || tb->is_nil()) {
+    std::vector<value_t> lines;
+    lines.reserve(raise_trail_.size());
+    for (const value_t &expr : raise_trail_)
+      lines.emplace_back(traceback_line(expr));
+    set_field(exc, "traceback", make_list(std::move(lines)));
+  }
+  if (const value_t *cause = field(exc, "cause"); !cause || cause->is_nil())
+    if (!raise_handled_.is_nil() && !in_cause_chain(raise_handled_, exc))
+      set_field(exc, "cause", raise_handled_);
+  const value_t *origin = field(exc, "origin");
+  if (!origin) {
+    set_field(exc, "origin", value_t(std::string("dsl")));
+    return;
+  }
+  const auto *from = std::get_if<std::string>(&origin->v);
+  if (!from || *from == "dsl" || field(exc, "function") || raise_trail_.empty())
+    return;
+  const auto *lp = std::get_if<list_ptr>(&raise_trail_.back().v);
+  if (!lp || !*lp || (*lp)->empty())
+    return;
+  if (const auto *head = std::get_if<symbol>(&(**lp)[0].v);
+      head && !stackless_evaluator::all_special_forms().count(head->name))
+    set_field(exc, "function", value_t(head->name));
+}
+
+value_t evaluator::eval_form(const value_t &expr, environment_ptr env) {
   check_interrupted();
   stats_.increment_step();
 
@@ -133,7 +219,7 @@ value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
       return true_value;
     if (auto *val = env->lookup(sym->name))
       return *val;
-    throw std::runtime_error("undefined symbol: " + sym->name);
+    throw dsl_error("NameError", "undefined symbol: " + sym->name);
   }
 
   // Non-list atom (number, string, bool, etc.)
@@ -150,7 +236,7 @@ value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
   // Head must be a symbol for function/special-form dispatch
   auto *head = std::get_if<symbol>(&elems[0].v);
   if (!head)
-    throw std::runtime_error("invalid expression head: " + to_string(elems[0]));
+    throw dsl_error("TypeError", "invalid expression head: " + to_string(elems[0]));
 
   const auto &name = head->name;
   std::vector<value_t> args(elems.begin() + 1, elems.end());
@@ -186,6 +272,10 @@ value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
     return do_eval(args, env);
   if (name == "root")
     return do_root();
+  if (name == "try")
+    return do_try(args, env);
+  if (name == "raise")
+    return do_raise(args, env);
 
   // --- User macros ---
   if (auto it = user_macros_.find(name); it != user_macros_.end()) {
@@ -199,7 +289,7 @@ value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
   // --- Function call (built-in or user-defined) ---
   auto *func_val = env->lookup(name);
   if (!func_val)
-    throw std::runtime_error("unknown function: " + name);
+    throw dsl_error("NameError", "unknown function: " + name);
 
   // Evaluate arguments
   std::vector<value_t> evaled;
@@ -215,7 +305,7 @@ value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
   if (auto *cp = std::get_if<closure_ptr>(&func_val->v))
     return apply_closure(*cp, evaled);
 
-  throw std::runtime_error("not callable: " + name);
+  throw dsl_error("TypeError", "not callable: " + name);
 }
 
 // ---------------------------------------------------------------------------
@@ -225,9 +315,9 @@ value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
 value_t evaluator::do_if(const std::vector<value_t> &args, environment_ptr env) {
   check_interrupted();
   if (args.size() < 2 || args.size() > 3)
-    throw std::runtime_error("if: expected a condition, a then branch and an optional else "
-                             "branch, got " +
-                             std::to_string(args.size()) + " arguments");
+    throw dsl_error("TypeError", "if: expected a condition, a then branch and an optional else "
+                                 "branch, got " +
+                                     std::to_string(args.size()) + " arguments");
   if (eval_internal(args[0], env).is_truthy())
     return eval_internal(args[1], env);
   if (args.size() > 2)
@@ -248,7 +338,7 @@ value_t evaluator::do_begin(const std::vector<value_t> &args, environment_ptr en
 
 value_t evaluator::do_while(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 2)
-    throw std::runtime_error("while: expected a condition and a body");
+    throw dsl_error("TypeError", "while: expected a condition and a body");
   while (eval_internal(args[0], env).is_truthy()) {
     check_interrupted();
     for (std::size_t i = 1; i < args.size(); ++i) // several body forms run in order
@@ -259,14 +349,14 @@ value_t evaluator::do_while(const std::vector<value_t> &args, environment_ptr en
 
 value_t evaluator::do_for(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 3)
-    throw std::runtime_error("for: expected a variable, a collection and a body");
+    throw dsl_error("TypeError", "for: expected a variable, a collection and a body");
   auto *var_sym = std::get_if<symbol>(&args[0].v);
   if (!var_sym)
-    throw std::runtime_error("for: first arg must be symbol");
+    throw dsl_error("TypeError", "for: first arg must be symbol");
   auto collection = eval_internal(args[1], env);
   auto *lp = std::get_if<list_ptr>(&collection.v);
   if (!lp)
-    throw std::runtime_error("for: second arg must evaluate to list");
+    throw dsl_error("TypeError", "for: second arg must evaluate to list");
   for (auto &item : **lp) {
     check_interrupted();
     env->set(var_sym->name, item);
@@ -278,10 +368,10 @@ value_t evaluator::do_for(const std::vector<value_t> &args, environment_ptr env)
 
 value_t evaluator::do_set(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() != 2)
-    throw std::runtime_error("set: expected 2 arguments");
+    throw dsl_error("TypeError", "set: expected 2 arguments");
   auto *sym = std::get_if<symbol>(&args[0].v);
   if (!sym)
-    throw std::runtime_error("set: first arg must be symbol");
+    throw dsl_error("TypeError", "set: first arg must be symbol");
   auto val = eval_internal(args[1], env);
   env->set(sym->name, val);
   return val;
@@ -289,13 +379,13 @@ value_t evaluator::do_set(const std::vector<value_t> &args, environment_ptr env)
 
 value_t evaluator::do_quote(const std::vector<value_t> &args) {
   if (args.size() != 1)
-    throw std::runtime_error("quote: expected 1 argument");
+    throw dsl_error("TypeError", "quote: expected 1 argument");
   return args[0];
 }
 
 value_t evaluator::do_lambda(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 2)
-    throw std::runtime_error("lambda: expected at least 2 arguments");
+    throw dsl_error("TypeError", "lambda: expected at least 2 arguments");
   // Parse parameter list
   std::vector<symbol> params;
   bool variadic = false;
@@ -304,7 +394,7 @@ value_t evaluator::do_lambda(const std::vector<value_t> &args, environment_ptr e
     for (auto &p : **params_val) {
       auto *ps = std::get_if<symbol>(&p.v);
       if (!ps)
-        throw std::runtime_error("lambda: param must be symbol");
+        throw dsl_error("TypeError", "lambda: param must be symbol");
       if (ps->name == "&rest") {
         variadic = true;
         continue;
@@ -315,7 +405,7 @@ value_t evaluator::do_lambda(const std::vector<value_t> &args, environment_ptr e
     // empty params
   } else if (!std::holds_alternative<list_ptr>(args[0].v)) {
     // single-symbol shorthand - not standard but handle gracefully
-    throw std::runtime_error("lambda: params must be a list");
+    throw dsl_error("TypeError", "lambda: params must be a list");
   }
 
   std::vector<value_t> body(args.begin() + 1, args.end());
@@ -329,8 +419,8 @@ value_t evaluator::do_lambda(const std::vector<value_t> &args, environment_ptr e
 
 value_t evaluator::do_return(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() > 1)
-    throw std::runtime_error("return: expected at most 1 argument, got " +
-                             std::to_string(args.size()));
+    throw dsl_error("TypeError",
+                    "return: expected at most 1 argument, got " + std::to_string(args.size()));
   if (args.empty())
     throw return_exception(nil_value);
   throw return_exception(eval_internal(args[0], env));
@@ -338,19 +428,19 @@ value_t evaluator::do_return(const std::vector<value_t> &args, environment_ptr e
 
 value_t evaluator::do_let(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 2)
-    throw std::runtime_error("let: expected at least 2 arguments");
+    throw dsl_error("TypeError", "let: expected at least 2 arguments");
   auto local = environment::extend(env);
   // First arg: list of (name value) pairs
   auto *bindings = std::get_if<list_ptr>(&args[0].v);
   if (!bindings)
-    throw std::runtime_error("let: first arg must be binding list");
+    throw dsl_error("TypeError", "let: first arg must be binding list");
   for (auto &b : **bindings) {
     auto *bp = std::get_if<list_ptr>(&b.v);
     if (!bp || (*bp)->size() != 2)
-      throw std::runtime_error("let: each binding must be (name value)");
+      throw dsl_error("TypeError", "let: each binding must be (name value)");
     auto *sym = std::get_if<symbol>(&(**bp)[0].v);
     if (!sym)
-      throw std::runtime_error("let: binding name must be symbol");
+      throw dsl_error("TypeError", "let: binding name must be symbol");
     local->set(sym->name, eval_internal((**bp)[1], local));
   }
   // Evaluate body expressions
@@ -360,7 +450,7 @@ value_t evaluator::do_let(const std::vector<value_t> &args, environment_ptr env)
 
 value_t evaluator::do_super(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 2)
-    throw std::runtime_error("super: expected at least 2 arguments");
+    throw dsl_error("TypeError", "super: expected at least 2 arguments");
   auto self_val = eval_internal(args[0], env);
   auto *method_sym = std::get_if<symbol>(&args[1].v);
   std::string method_name;
@@ -386,7 +476,7 @@ value_t evaluator::do_super(const std::vector<value_t> &args, environment_ptr en
       break;
     }
   if (!cls_val)
-    throw std::runtime_error("super: no __class__");
+    throw dsl_error("TypeError", "super: no __class__");
   auto &cls_dict = *std::get<dict_ptr>(cls_val->v);
   value_t *super_val = nullptr;
   for (auto &[k, v] : cls_dict)
@@ -395,7 +485,7 @@ value_t evaluator::do_super(const std::vector<value_t> &args, environment_ptr en
       break;
     }
   if (!super_val)
-    throw std::runtime_error("super: no __super__");
+    throw dsl_error("TypeError", "super: no __super__");
   auto *super_dict = &(*std::get<dict_ptr>(super_val->v));
 
   // Walk chain looking for method
@@ -417,7 +507,7 @@ value_t evaluator::do_super(const std::vector<value_t> &args, environment_ptr en
             fn_args.push_back(eval_internal(args[i], env));
           return apply_closure(*cp, fn_args);
         }
-        throw std::runtime_error("super: method not callable");
+        throw dsl_error("TypeError", "super: method not callable");
       }
     }
     // Walk __super__
@@ -431,15 +521,15 @@ value_t evaluator::do_super(const std::vector<value_t> &args, environment_ptr en
       break;
     super_dict = &(*std::get<dict_ptr>(sp->v));
   }
-  throw std::runtime_error("super: method '" + method_name + "' not found");
+  throw dsl_error("KeyError", "super: method '" + method_name + "' not found");
 }
 
 value_t evaluator::do_defun(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 3)
-    throw std::runtime_error("defun: expected at least 3 arguments");
+    throw dsl_error("TypeError", "defun: expected at least 3 arguments");
   auto *name_sym = std::get_if<symbol>(&args[0].v);
   if (!name_sym)
-    throw std::runtime_error("defun: first arg must be symbol");
+    throw dsl_error("TypeError", "defun: first arg must be symbol");
 
   // Build (lambda (params...) body...)
   std::vector<value_t> lambda_args(args.begin() + 1, args.end());
@@ -450,10 +540,10 @@ value_t evaluator::do_defun(const std::vector<value_t> &args, environment_ptr en
 
 value_t evaluator::do_defclass(const std::vector<value_t> &args, environment_ptr env) {
   if (args.empty())
-    throw std::runtime_error("defclass: expected at least a name");
+    throw dsl_error("TypeError", "defclass: expected at least a name");
   auto *name_sym = std::get_if<symbol>(&args[0].v);
   if (!name_sym)
-    throw std::runtime_error("defclass: first arg must be symbol");
+    throw dsl_error("TypeError", "defclass: first arg must be symbol");
   const std::string &name = name_sym->name;
 
   size_t methods_start = 1;
@@ -508,6 +598,7 @@ value_t evaluator::do_defclass(const std::vector<value_t> &args, environment_ptr
 
   // Create class dict
   auto cls_dict = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
+  cls_dict->emplace_back("__name__", value_t{name});
   if (super_cls_dict)
     cls_dict->emplace_back("__super__", value_t{super_cls_dict});
 
@@ -591,27 +682,10 @@ value_t evaluator::do_defclass(const std::vector<value_t> &args, environment_ptr
     cls_dict->emplace_back(method_name_sym->name, value_t{std::move(wrapper)});
   }
 
-  // Create constructor
+  // Create constructor: the stackless evaluator's, so isinstance and catch find the class. Its
+  // init is a native here (the wrapper above), which it calls directly.
   auto cls_dict_val = value_t{cls_dict};
-  evaluator *ev = this;
-  native_fn constructor = [ev, cls_dict,
-                           cls_dict_val](std::span<const value_t> init_args) -> value_t {
-    auto inst = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-    inst->emplace_back("__class__", cls_dict_val);
-    value_t inst_val{inst};
-    // Call init
-    for (auto &[k, v] : *cls_dict) {
-      if (k == "init") {
-        std::vector<value_t> a;
-        a.push_back(inst_val);
-        a.insert(a.end(), init_args.begin(), init_args.end());
-        if (auto *fn = std::get_if<native_fn>(&v.v))
-          (*fn)(a);
-        break;
-      }
-    }
-    return inst_val;
-  };
+  native_fn constructor{detail::class_constructor{cls_dict}};
 
   // Store cls_dict in env so inheritance works
   auto ctor_env = environment::extend(env);
@@ -629,10 +703,10 @@ value_t evaluator::do_defclass(const std::vector<value_t> &args, environment_ptr
 
 value_t evaluator::do_defmacro(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() < 3)
-    throw std::runtime_error("defmacro: expected at least 3 arguments");
+    throw dsl_error("TypeError", "defmacro: expected at least 3 arguments");
   auto *name_sym = std::get_if<symbol>(&args[0].v);
   if (!name_sym)
-    throw std::runtime_error("defmacro: name must be symbol");
+    throw dsl_error("TypeError", "defmacro: name must be symbol");
 
   std::vector<symbol> params;
   auto *params_val = std::get_if<list_ptr>(&args[1].v);
@@ -640,7 +714,7 @@ value_t evaluator::do_defmacro(const std::vector<value_t> &args, environment_ptr
     for (auto &p : **params_val) {
       auto *ps = std::get_if<symbol>(&p.v);
       if (!ps)
-        throw std::runtime_error("defmacro: param must be symbol");
+        throw dsl_error("TypeError", "defmacro: param must be symbol");
       params.push_back(*ps);
     }
   }
@@ -657,12 +731,116 @@ value_t evaluator::do_defmacro(const std::vector<value_t> &args, environment_ptr
 
 value_t evaluator::do_eval(const std::vector<value_t> &args, environment_ptr env) {
   if (args.size() != 1)
-    throw std::runtime_error("eval: expected 1 argument");
+    throw dsl_error("TypeError", "eval: expected 1 argument");
   auto code = eval_internal(args[0], env);
   return eval_internal(code, env);
 }
 
 value_t evaluator::do_root() { return root_expr_; }
+
+namespace {
+// While alive, `exc` is being handled: in a catch handler, or by a finally on its way out.
+struct handling_scope {
+  handling_scope(std::vector<std::pair<value_t, bool>> &handling, value_t exc, bool in_handler)
+      : handling(handling) {
+    handling.emplace_back(std::move(exc), in_handler);
+  }
+  ~handling_scope() { handling.pop_back(); }
+  handling_scope(const handling_scope &) = delete;
+  handling_scope &operator=(const handling_scope &) = delete;
+  std::vector<std::pair<value_t, bool>> &handling;
+};
+} // namespace
+
+value_t evaluator::do_try(const std::vector<value_t> &args, environment_ptr env) {
+  // (try body... (catch (Type var) handler...)... (finally cleanup...)). Handlers and the cleanup
+  // run after the catch that stopped the exception has finished, so the stack is unwound first.
+  const try_form form = parse_try(args);
+  value_t result;
+  std::exception_ptr leaving; // an exception or a return leaving the try, after the finally
+  value_t raised;             // the exception leaving, handled while the finally runs
+  try {
+    result = do_begin(form.body, env);
+  } catch (const return_exception &) {
+    leaving = std::current_exception();
+  } catch (const std::exception &e) {
+    std::optional<value_t> exc = caught(e);
+    if (!exc)
+      throw; // a kill: no catch or finally runs
+    raised = std::move(*exc);
+    leaving = std::make_exception_ptr(dsl_exception(raised));
+  }
+  if (!raised.is_nil()) {
+    const value_t exc = raised;
+    for (const value_t &clause : form.catches) {
+      std::string var;
+      bool matched = false;
+      try {
+        matched = catch_matches(env, clause, exc, var);
+      } catch (const dsl_error &bad) {
+        // A catch naming no class: its NameError replaces the exception.
+        value_t replaced = exception_from(bad);
+        set_field(replaced, "cause", exc);
+        record_raise_point();
+        annotate(replaced);
+        raised = replaced;
+        leaving = std::make_exception_ptr(dsl_exception(std::move(replaced)));
+        break;
+      }
+      if (!matched)
+        continue;
+      try {
+        auto scope = environment::extend(env);
+        if (!var.empty())
+          scope->set(var, exc);
+        handling_scope handling(handling_, exc, true);
+        const auto handler = catch_handler(clause);
+        result = do_begin(std::vector<value_t>(handler.begin(), handler.end()), scope);
+        leaving = nullptr;
+        raised = nil_value;
+      } catch (const return_exception &) {
+        leaving = std::current_exception();
+        raised = nil_value;
+      } catch (const std::exception &e) {
+        std::optional<value_t> again = caught(e);
+        if (!again)
+          throw;
+        raised = std::move(*again);
+        leaving = std::make_exception_ptr(dsl_exception(raised));
+      }
+      break;
+    }
+  }
+  if (!form.cleanup.is_nil()) {
+    // The cleanup runs however the try is left; an exception or a return in it replaces that.
+    std::optional<handling_scope> handling;
+    if (!raised.is_nil())
+      handling.emplace(handling_, raised, false);
+    eval_internal(form.cleanup, env);
+  }
+  if (leaving)
+    std::rethrow_exception(leaving);
+  return result;
+}
+
+value_t evaluator::do_raise(const std::vector<value_t> &args, environment_ptr env) {
+  if (args.size() > 1)
+    throw dsl_error("TypeError",
+                    "raise: expected at most 1 arg, got " + std::to_string(args.size()));
+  if (args.empty()) {
+    // (raise) in a catch handler re-raises the exception it handles.
+    for (auto it = handling_.rbegin(); it != handling_.rend(); ++it)
+      if (it->second)
+        throw dsl_exception(it->first);
+    throw dsl_error("RuntimeError", "raise: no exception is being handled");
+  }
+  value_t exc = eval_internal(args[0], env);
+  if (!is_exception(exc))
+    throw dsl_error("TypeError", "raise: expected an exception, got " + exc.type_name());
+  record_raise_point();
+  annotate(exc);
+  throw dsl_exception(std::move(exc));
+}
 
 // ---------------------------------------------------------------------------
 // closure application
@@ -672,12 +850,12 @@ value_t evaluator::apply_closure(const closure_ptr &cls, const std::vector<value
   auto local = environment::extend(cls->env_snapshot);
   if (cls->variadic) {
     if (cls->params.empty())
-      throw std::runtime_error("closure: variadic but no param name");
+      throw dsl_error("TypeError", "closure: variadic but no param name");
     local->set(cls->params.back().name, make_list(std::vector<value_t>(args.begin(), args.end())));
   } else {
     if (args.size() != cls->params.size())
-      throw std::runtime_error("closure: expected " + std::to_string(cls->params.size()) +
-                               " args, got " + std::to_string(args.size()));
+      throw dsl_error("TypeError", "closure: expected " + std::to_string(cls->params.size()) +
+                                       " args, got " + std::to_string(args.size()));
     for (size_t i = 0; i < cls->params.size(); ++i)
       local->set(cls->params[i].name, args[i]);
   }

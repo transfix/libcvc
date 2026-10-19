@@ -220,6 +220,7 @@ set(SOURCE_FILES
   state/state_exec/types.cpp
   state/state_exec/parser.cpp
   state/state_exec/builtins.cpp
+  state/state_exec/exceptions.cpp
   state/state_exec/evaluator.cpp
   state/state_exec/stackless_evaluator.cpp
   state/state_exec/async_evaluator.cpp

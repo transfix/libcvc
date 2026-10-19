@@ -2562,7 +2562,11 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resourc
          {"super_args", static_cast<int>(eval_phase::super_args)},
          {"defclass_methods", static_cast<int>(eval_phase::defclass_methods)},
          {"yield_value", static_cast<int>(eval_phase::yield_value)},
-         {"break_unwind", static_cast<int>(eval_phase::break_unwind)}});
+         {"break_unwind", static_cast<int>(eval_phase::break_unwind)},
+         {"try_body", static_cast<int>(eval_phase::try_body)},
+         {"try_handler", static_cast<int>(eval_phase::try_handler)},
+         {"try_finally", static_cast<int>(eval_phase::try_finally)},
+         {"raise_value", static_cast<int>(eval_phase::raise_value)}});
     if (pycvc_enum_eval_phase != NULL)
       PyDict_SetItemString(d, "eval_phase", pycvc_enum_eval_phase);
     using cvc::state_exec::step_kind;
@@ -2919,6 +2923,7 @@ struct eval_frame {
   std::vector<std::string> extra_strs;
   std::vector<std::vector<value_t> > extra_lists;
   environment_ptr extra_env;
+  bool function_body;
 };
 
 // The recursive evaluator. user_macros() returns a copy of the macro map: a dict of name ->
