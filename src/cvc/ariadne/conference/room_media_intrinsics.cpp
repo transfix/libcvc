@@ -21,6 +21,7 @@
 #include <cvc/ariadne/stream_intrinsics.h> // document_stream / own_document_stream
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h> // default_for / local_node_id (the publisher's pid)
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/types.h>
@@ -82,11 +83,15 @@ std::string get_str(const se::value_t *v, const std::string &def = std::string()
 se::value_t err(const std::string &msg) {
   return se::make_dict({{"ok", se::value_t(false)}, {"error", se::value_t(msg)}});
 }
-// A field of the (room-join) handle dict (e.g. "room", "pid").
-std::string handle_field(const se::value_t &v, const std::string &key) {
+// The room id from a (room-join) handle dict (its "room" field) OR a bare room-id string — so a
+// .ari can pass (state-get "...") directly, without persisting the handle dict across program-lane
+// ticks.
+std::string room_id_of(const se::value_t &v) {
+  if (const std::string *s = std::get_if<std::string>(&v.v))
+    return *s;
   if (const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&v.v))
     if (*dp)
-      return get_str(dict_get(**dp, key));
+      return get_str(dict_get(**dp, "room"));
   return std::string();
 }
 
@@ -168,10 +173,15 @@ void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
             return err("room-publish: no document scope");
           if (args.size() < 2)
             return err("room-publish: (room-publish ROOM {kind token})");
-          const std::string room_id = handle_field(args[0], "room");
-          const std::string pid = handle_field(args[0], "pid");
-          if (room_id.empty() || pid.empty())
-            return err("room-publish: ROOM must be a (room-join) handle");
+          const std::string room_id = room_id_of(args[0]);
+          if (room_id.empty())
+            return err("room-publish: ROOM must be a room-join handle or a room-id");
+          // The publisher is always THIS node, so derive the pid from the cluster shard (as
+          // room-join does), not from the handle — publish works with a bare room-id too.
+          std::string pid = "local";
+          if (auto *shard = cvc::state_cluster_shard::default_for(app))
+            if (!shard->local_node_id().empty())
+              pid = shard->local_node_id();
           const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&args[1].v);
           if (!dp || !*dp)
             return err("room-publish: second argument must be a { kind token } dict");
@@ -198,7 +208,7 @@ void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
             return err("room-subscribe: no document scope");
           if (args.size() < 3)
             return err("room-subscribe: (room-subscribe ROOM PID KIND)");
-          const std::string room_id = handle_field(args[0], "room");
+          const std::string room_id = room_id_of(args[0]);
           const std::string target_pid = get_str(&args[1]);
           const std::string kind = get_str(&args[2]);
           if (room_id.empty() || target_pid.empty() || kind.empty())
