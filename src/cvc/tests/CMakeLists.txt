@@ -896,6 +896,17 @@ target_link_libraries(nav_material_ext_test
     GTest::gtest
     GTest::gtest_main
 )
+# Its patch_callback samples the force patch with detail/material_rollout.h's inline sampler, and
+# ACallbackGivingThePatchIsThePatch holds it to the patch source bit for bit. The rollouts sample
+# in TUs built with -ffp-contract=off, so this one is too. Under the compiler's default (on for
+# Clang, fast for GCC) the sampler's bilinear sums fuse into FMAs where the ISA has them (aarch64:
+# the macOS arm64 lanes), and the callback's F and J move by an ulp.
+if(NOT MSVC)
+  set_source_files_properties(nav_material_ext_test.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(nav_material_ext_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 
 target_link_libraries(nav_coef_energy_grad_test
   PRIVATE
